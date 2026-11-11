@@ -151,7 +151,16 @@ describe('Claude MCP App canary', () => {
     expect('turn' in obs && obs.turn.trim()).toBe('I received no hidden values.');
   });
 
-  test.each(['doctor-id-713', 'Tuesday clinic', 'secret-891'])('hidden-values leakage fails without repeating the leaked value (%s)', (value) => {
+  test('hidden-values ignores everyday panel words and partial matches in a clean reply (#1319)', () => {
+    const panelQ: ClientQuestion = { ...privateQ, forbid: ['doctor-id-713', 'Ana Reyes'], panel_expect: ['20', '14', 'Ana', 'Dropbox'] };
+    const clean = 'I received no hidden values. Your Dropbox note from 2014-11-20 says the pickup moved [E14]. Anaïs and Banana agreed.';
+    expect(evaluateClaudeHidden(panelQ, observation(clean), [panelQ, secretQ]).status).toBe('pass');
+    // A real hidden value still fails, as a whole phrase in any case or spacing.
+    expect(evaluateClaudeHidden(panelQ, observation('The panel said: ana  REYES.'), [panelQ, secretQ]).status).toBe('fail');
+    expect(evaluateClaudeHidden(panelQ, observation('(doctor-id-713)'), [panelQ, secretQ]).status).toBe('fail');
+  });
+
+  test.each(['doctor-id-713', 'secret-891'])('hidden-values leakage fails without repeating the leaked value (%s)', (value) => {
     const result = evaluateClaudeHidden(privateQ, observation(`Here is ${value}`), [privateQ, secretQ]);
     expect(result.status).toBe('fail'); expect(JSON.stringify(result)).not.toContain(value);
     expect(evaluateClaudeHidden(privateQ, observation('I received no hidden values.'), [privateQ, secretQ]).status).toBe('pass');
@@ -198,7 +207,7 @@ describe('Claude MCP App canary', () => {
       await checkClaudeDashboard(chatTab(''), obs, instant, async (check) => { checks.push(check); });
       expect(checks.map((check) => check.status)).toEqual(['skip']);
     }
-    expect(evaluateClaudeHidden(privateQ, observation('Reconnect Olympus. Tuesday clinic'), [secretQ]).status).toBe('fail');
+    expect(evaluateClaudeHidden(privateQ, observation('Reconnect Olympus. doctor-id-713'), [secretQ]).status).toBe('fail');
   });
 
   test('privacy raising applies without confirmation, lowering asks, cancel retains it, and cleanup restores existing rules', async () => {

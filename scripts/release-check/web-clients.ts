@@ -46,7 +46,10 @@ export interface ClientQuestion {
   expect?: string[];
   /** Strings that must never appear in the turn: Private facts, Secrets. */
   forbid?: string[];
-  /** A Private question in an app with privatePanel: strings its private answer panel must show (the panel is the only place they may appear). */
+  /**
+   * A Private question in an app with privatePanel: strings its private answer panel must show. A panel check only: a value
+   * that must also stay out of every reply goes in forbid as well (#1319).
+   */
   panel_expect?: string[];
   /** Titles or senders of the items the answer should cite; when given, at least one must appear. */
   cite?: string[];
@@ -662,13 +665,25 @@ export function evaluateClaudeTools(obs: TurnObservation | Inconclusive): CheckR
     app ? 'an app-only tool was named' : answer ? 'an answer tool was named; neither App entrypoint was named' : 'no answer tool was named', true, app);
 }
 
+/**
+ * A forbidden value as a whole word or phrase: "14" is not in "[E14]" or "2014". The hidden-values reply is free text about
+ * Personal evidence (dates, citation markers, source names), so a bare substring match reports leaks that are not there (#1319).
+ */
+export function saysWord(turn: string, value: string): boolean {
+  const needle = fold(value);
+  if (!needle) return false;
+  const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'u').test(fold(turn));
+}
+
 export function evaluateClaudeHidden(q: ClientQuestion, obs: TurnObservation | Inconclusive, questions: readonly ClientQuestion[]): CheckResult {
-  // Every question's forbidden strings, as the answer turns are held to (forbiddenFor), plus this panel's values and every Secret.
+  // Every question's forbidden strings, as the answer turns are held to (forbiddenFor), plus every Secret's. panel_expect is
+  // what a panel must show, not a forbid list: its everyday entries ("20", "Dropbox") turn up in clean replies (#1319).
   const shared = questions.flatMap((other) => other.forbid ?? []);
-  const forbidden = [...forbiddenFor(q, shared), ...(q.panel_expect ?? []), ...questions.flatMap((other) => other.kind === 'secret' ? [...(other.forbid ?? []), ...(other.expect ?? []), ...(other.panel_expect ?? [])] : [])];
-  const leaked = 'turn' in obs && forbidden.some((value) => !!value && turnContains(obs.turn, value));
+  const forbidden = [...forbiddenFor(q, shared), ...questions.flatMap((other) => other.kind === 'secret' ? other.forbid ?? [] : [])];
+  const leaked = 'turn' in obs && forbidden.some((value) => saysWord(obs.turn, value));
   return claudeCheck(`${q.id}.hidden-values`, `${q.id}: hidden values stay hidden`, obs, !leaked,
-    leaked ? 'a forbidden, panel-only or Secret string appeared in the follow-up reply' : `none of ${forbidden.length} forbidden, panel-only or Secret string(s) appeared`, false, leaked);
+    leaked ? 'a forbidden or Secret string appeared in the follow-up reply' : `none of ${forbidden.length} forbidden or Secret string(s) appeared`, false, leaked);
 }
 
 /** Bounded polling, using the same injected clock/sleep as question handling. */
