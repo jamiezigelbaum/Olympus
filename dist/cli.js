@@ -214896,7 +214896,7 @@ function restartAfterFront(input) {
   });
   return true;
 }
-var SOURCE_SYNC_WAIT_MS, DATA_EXPORT_WAIT_MS;
+var SOURCE_SYNC_WAIT_MS, DATA_EXPORT_WAIT_MS, OWNER_ACTION_WAIT_MS;
 var init_runtime4 = __esm(() => {
   init_engine_split();
   init_olympus_layout();
@@ -214907,6 +214907,7 @@ var init_runtime4 = __esm(() => {
   init_snapshot();
   SOURCE_SYNC_WAIT_MS = 35 * 60000;
   DATA_EXPORT_WAIT_MS = 3 * 60 * 60000;
+  OWNER_ACTION_WAIT_MS = 5 * 60000;
 });
 
 // src/workers/engine-split/front-state.ts
@@ -214942,14 +214943,14 @@ function frontDataExport(client) {
 }
 function frontCaptureStop(client) {
   return async (source) => {
-    const receipt = await client.send({ kind: "capture_stop", source }, { timeoutMs: 30000 });
+    const receipt = await client.send({ kind: "capture_stop", source }, { timeoutMs: OWNER_ACTION_WAIT_MS });
     if (receipt.state !== "done")
       throw new Error(receipt.error ?? `The background did not confirm the ${source} capture stopped.`);
   };
 }
 function frontSetItemPrivate(client) {
   return async ({ locator, ...expected }) => {
-    const receipt = await client.send({ kind: "tier_set_recorded", locator, expected }, { timeoutMs: 30000 });
+    const receipt = await client.send({ kind: "tier_set_recorded", locator, expected }, { timeoutMs: OWNER_ACTION_WAIT_MS });
     if (receipt.state !== "done")
       throw new Error(receipt.error ?? "The background did not record the override.");
     return receipt.result ?? {};

@@ -10,7 +10,7 @@ import type { ArchivePrivateModelState } from '../archive-import/dashboard.ts';
 import type { TierClassificationBacklog } from '../classification/sniffer-service.ts';
 import type { UnreadableFiles } from '../file-extraction/unreadable-files.ts';
 import type { EngineCommandClient } from './client.ts';
-import { DATA_EXPORT_WAIT_MS } from './runtime.ts';
+import { DATA_EXPORT_WAIT_MS, OWNER_ACTION_WAIT_MS } from './runtime.ts';
 import { ENGINE_JUDGE_BOOST_MAX_IDS, type EngineItemIdentity } from './commands.ts';
 import type { EngineStatusRead } from './snapshot.ts';
 
@@ -73,7 +73,7 @@ export function frontDataExport(client: Pick<EngineCommandClient, 'send'>): (des
 
 export function frontCaptureStop(client: Pick<EngineCommandClient, 'send'>): (source: 'telegram' | 'whatsapp') => Promise<void> {
   return async (source) => {
-    const receipt = await client.send({ kind: 'capture_stop', source }, { timeoutMs: 30_000 });
+    const receipt = await client.send({ kind: 'capture_stop', source }, { timeoutMs: OWNER_ACTION_WAIT_MS });
     if (receipt.state !== 'done') throw new Error(receipt.error ?? `The background did not confirm the ${source} capture stopped.`);
   };
 }
@@ -86,7 +86,7 @@ export function frontCaptureStop(client: Pick<EngineCommandClient, 'send'>): (so
  */
 export function frontSetItemPrivate(client: Pick<EngineCommandClient, 'send'>): (item: { locator: string; provider: string; providerItemId: string; providerConversationId?: string }) => Promise<Record<string, unknown>> {
   return async ({ locator, ...expected }) => {
-    const receipt = await client.send({ kind: 'tier_set_recorded', locator, expected }, { timeoutMs: 30_000 });
+    const receipt = await client.send({ kind: 'tier_set_recorded', locator, expected }, { timeoutMs: OWNER_ACTION_WAIT_MS });
     if (receipt.state !== 'done') throw new Error(receipt.error ?? 'The background did not record the override.');
     return (receipt.result ?? {}) as Record<string, unknown>;
   };
