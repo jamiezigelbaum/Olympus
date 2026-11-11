@@ -32,7 +32,7 @@ import type { EvidenceReranker } from '../src/core/evidence-reranker.ts';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { analystPromptBytes, createAnalyst, type AnalystModel } from '../src/core/analyst.ts';
+import { analystEvidenceFormat, analystPromptBytes, createAnalyst, type AnalystEvidenceFormat, type AnalystModel } from '../src/core/analyst.ts';
 import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { createDelphiAnalystModel } from '../src/core/analyst-delphi.ts';
 import {
@@ -230,7 +230,7 @@ async function main(): Promise<void> {
       analystModelIds.push(completion.modelId);
       return completion;
     },
-  }, { auditSuspiciousDrafts: true });
+  }, { auditSuspiciousDrafts: true, evidenceFormat: analystProvider === 'local' ? 'compact' : 'full' });
   // Optional multi-query retrieval expansion over the same local Delphi lane:
   // useful for recall experiments, but disabled by default because it adds a
   // model call before every question and made the real eval too slow as a gate.
@@ -249,9 +249,9 @@ async function main(): Promise<void> {
     analyst,
     analystPromptByteBudget,
     (pack) => detailsByPack.get(pack)?.candidateCorpusIds,
-    (pack, seats, sent, analyzeOptions) => {
+    (pack, seats, sent, analyzeOptions, evidenceFormat) => {
       analystSeatsByPack.set(pack, seats);
-      promptLayoutByPack.set(pack, evalPromptLayout(sent, analyzeOptions));
+      promptLayoutByPack.set(pack, evalPromptLayout(sent, analyzeOptions, evidenceFormat));
     },
     (pack) => detailsByPack.get(pack)?.recencySeats,
   );
@@ -1142,22 +1142,27 @@ export function failIncompleteRetrieval<R extends EvalReport>(
  * format. Byte counts only, never text.
  */
 export interface EvalPromptLayout {
+  /** The format the prompt was sent in; the other counts measure that format. */
+  evidenceFormat: AnalystEvidenceFormat;
   promptBytes: number;
   fixedBytes: number;
   seats: Array<{ headerBytes: number; passageBytes: number }>;
+  fullPromptBytes: number;
   compactPromptBytes: number;
 }
 
-export function evalPromptLayout(sent: EvidencePack, options: AnalystOptions): EvalPromptLayout {
-  const bytes = (candidates: EvidencePack['candidates']) => analystPromptBytes({ ...sent, candidates }, options);
+export function evalPromptLayout(sent: EvidencePack, options: AnalystOptions, evidenceFormat: AnalystEvidenceFormat = 'full'): EvalPromptLayout {
+  const bytes = (candidates: EvidencePack['candidates']) => analystPromptBytes({ ...sent, candidates }, options, evidenceFormat);
   const fixedBytes = bytes([]);
   return {
-    promptBytes: analystPromptBytes(sent, options),
+    evidenceFormat,
+    promptBytes: analystPromptBytes(sent, options, evidenceFormat),
     fixedBytes,
     seats: sent.candidates.map((candidate) => {
       const header = bytes([{ ...candidate, chunks: [] }]);
       return { headerBytes: header - fixedBytes, passageBytes: bytes([candidate]) - header };
     }),
+    fullPromptBytes: analystPromptBytes(sent, options),
     compactPromptBytes: analystPromptBytes(sent, options, 'compact'),
   };
 }
@@ -1171,7 +1176,7 @@ export function promptFittedEvalAnalyst(
   analyst: Analyst,
   promptByteBudget: number | undefined,
   candidateCorpusIds: (pack: EvidencePack) => readonly string[] | undefined,
-  onSeats: (pack: EvidencePack, seats: number[], sent: EvidencePack, analyzeOptions: AnalystOptions) => void,
+  onSeats: (pack: EvidencePack, seats: number[], sent: EvidencePack, analyzeOptions: AnalystOptions, evidenceFormat: AnalystEvidenceFormat) => void,
   recencySeats: (pack: EvidencePack) => number | undefined = () => undefined,
 ): Analyst {
   return {
@@ -1185,9 +1190,10 @@ export function promptFittedEvalAnalyst(
           new Map(pack.candidates.map((candidate, index) => [candidate, corpusIds[index] ?? ''] as const)),
           analyzeOptions,
           recencySeats(pack),
+          analystEvidenceFormat(analyst),
         );
       onSeats(pack, sent.candidates.map((candidate) =>
-        pack.candidates.findIndex((original) => original.provenance === candidate.provenance) + 1), sent, analyzeOptions ?? {});
+        pack.candidates.findIndex((original) => original.provenance === candidate.provenance) + 1), sent, analyzeOptions ?? {}, analystEvidenceFormat(analyst));
       return analyst.analyze(sent, analyzeOptions);
     },
   };

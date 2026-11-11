@@ -19,6 +19,7 @@ import {
   analystSchemaGapChars,
   createAnalyst,
   runWithAnalystAbortSignal,
+  withEvidenceFormatOf,
   type AnalystEvidenceFormat,
   type AnalystModel,
   type AnalystModelCompletion,
@@ -406,7 +407,7 @@ function maxTokensForChars(chars: number | undefined): number {
  * (a policy refusal, a bad answer, a timeout) surfaces unchanged.
  */
 export function withBuiltInFallback(primary: Analyst, builtIn: Analyst): Analyst {
-  return {
+  return withEvidenceFormatOf({
     async analyze(pack, options) {
       try {
         return await primary.analyze(pack, options);
@@ -415,7 +416,7 @@ export function withBuiltInFallback(primary: Analyst, builtIn: Analyst): Analyst
         return builtIn.analyze(pack, options);
       }
     },
-  };
+  }, primary, builtIn);
 }
 
 function isLocalServiceDown(error: unknown): boolean {

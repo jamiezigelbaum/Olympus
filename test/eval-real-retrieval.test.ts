@@ -7,11 +7,12 @@
 // Synthetic data only: fixture stores in a temp folder, a scripted model.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { analystPromptBytes, createAnalyst, type AnalystModel } from '../src/core/analyst.ts';
+import { analystPromptBytes, createAnalyst, type AnalystModel, type AnalystModelRequest } from '../src/core/analyst.ts';
 import type { AnalystResult, EvidencePack } from '../src/core/contracts.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { DROPBOX_TIER_CORPUS_IDS } from '../src/workers/dropbox-files/connector-store.ts';
-import type { AnalystReleaseOutcome } from '../src/workers/source-index/analyst-answer.ts';
+import { DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, fitPackToPromptBytes, type AnalystReleaseOutcome } from '../src/workers/source-index/analyst-answer.ts';
+import { analystPromptFixture } from './helpers/analyst-prompt-fixture.ts';
 import {
   buildEvalPack,
   createEvalDropboxLanes,
@@ -448,6 +449,24 @@ describe('Analyst repeats on a frozen pack', () => {
 });
 
 describe('the real eval matches what Ask sends a local Analyst (rerun 20)', () => {
+  test('the fitted local eval sends byte-identical main and audit prompts to the product local fit', async () => {
+    const { pack, corpusIds } = analystPromptFixture();
+    const calls: AnalystModelRequest[][] = [[], []];
+    const analysts = calls.map((requests) => createAnalyst({ complete: async (request) => {
+      requests.push(request);
+      return { modelId: 'fixture', text: JSON.stringify({ answer: 'Survey recorded [1].', citations: [{ evidence: 1, claim: 'Survey recorded.' }], unanswered: [], sufficient: true }) };
+    } }, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' }));
+    const fitted = fitPackToPromptBytes(pack, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES,
+      new Map(pack.candidates.map((candidate, index) => [candidate, corpusIds[index]!])), { localOnly: true }, 2, 'compact');
+    await analysts[0]!.analyze(fitted, { localOnly: true });
+    const kept: number[][] = [];
+    await promptFittedEvalAnalyst(analysts[1]!, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, () => corpusIds,
+      (_pack, seats) => kept.push(seats), () => 2).analyze(pack, { localOnly: true });
+    expect(calls[1]).toEqual(calls[0]);
+    expect(kept[0]).toEqual(fitted.candidates.map((candidate) => pack.candidates.findIndex((original) => original.provenance === candidate.provenance) + 1));
+    expect(calls[1]![0]!.prompt.split('\n').at(-1)).toStartWith('Coverage — searched:');
+  });
+
   test('the pack is fitted to the local prompt budget, and the seats sent are recorded', async () => {
     const { stores, ledger } = await twoTierWorld();
     const lanes = createEvalDropboxLanes({ stores, ...(ledger ? { ledger } : {}), scope: { accountScope: 'personal' } });

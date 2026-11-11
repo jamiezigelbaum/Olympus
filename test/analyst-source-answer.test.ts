@@ -1859,7 +1859,7 @@ describe('analyst-backed source_answer handler', () => {
     expect(leakedText(result)).not.toContain('Nightingale');
   });
 
-  test('strict mode holds when only the audit prompt carries a Private item\'s extraction gap', async () => {
+  test('strict mode holds when compact Coverage and the audit carry a Private item\'s extraction gap', async () => {
     const { analyst, requests } = echoingAnalyst({ evidenceFormat: 'compact', auditSuspiciousDrafts: true }, 'audit');
     const result = await createAnalystSourceIndexAnswerHandler({
       analyst,
@@ -1869,7 +1869,8 @@ describe('analyst-backed source_answer handler', () => {
     }).answer({ question: 'Latest labs?', include_secure_local: true });
 
     expect(requests).toHaveLength(2);
-    expect(requests[0]!.prompt).not.toContain('Nightingale');
+    expect(requests[0]!.prompt).toContain(`${PRIVATE_TITLE_ID}.pdf`);
+    expect(requests[0]!.prompt).not.toContain('SECURE-RAW-CHUNK-TEXT');
     expect(requests[1]!.prompt).toContain(`${PRIVATE_TITLE_ID}.pdf`);
     expectStrictHold(result);
     expect(leakedText(result)).not.toContain('Nightingale');
@@ -1900,7 +1901,7 @@ describe('analyst-backed source_answer handler', () => {
     expect(defaultResult.opsec.release_decision.reasons).toContain('secure_local_context_uncited_derivative_allowed');
   });
 
-  test('strict mode holds when the compact prompt (no audit) rendered no Private material at all', async () => {
+  test('strict mode holds when compact Coverage (no audit) carries only a Private item\'s extraction gap', async () => {
     const { analyst, requests } = echoingAnalyst({ evidenceFormat: 'compact' });
     const result = await createAnalystSourceIndexAnswerHandler({
       analyst,
@@ -1910,9 +1911,9 @@ describe('analyst-backed source_answer handler', () => {
     }).answer({ question: 'Latest labs?', include_secure_local: true });
 
     expect(requests).toHaveLength(1);
-    expect(requests[0]!.prompt).not.toContain('Nightingale');
+    expect(requests[0]!.prompt).toContain(`${PRIVATE_TITLE_ID}.pdf`);
     expect(requests[0]!.prompt).not.toContain('SECURE-RAW-CHUNK-TEXT');
-    // Deliberate over-withholding: the build met Private material.
+    // The gap's Private metadata is still held by the release membrane.
     expectStrictHold(result);
   });
 

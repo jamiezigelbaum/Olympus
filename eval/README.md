@@ -186,7 +186,10 @@ local Dropbox index and a reachable Argus lane:
    of the prompt the Analyst was sent went. It holds the text every prompt
    carries (system rules, question, coverage), each sent seat's header (name,
    trust, provenance and citation labels) and its passages, and what the same
-   seats would cost in the compact evidence format. These are byte counts only.
+   seats would cost in each evidence format (`fullPromptBytes`,
+   `compactPromptBytes`). `evidenceFormat` names the format the prompt was
+   sent in, which follows the Analyst: a local run sends the compact format, as
+   Ask's local leg does. These are byte counts only.
    The value-token flag counts an answer token as held by a cited seat when
    it is in that seat's text, facts, tables or citation fields, including the
    date of a citation timestamp, each segment of its locator path and a file
