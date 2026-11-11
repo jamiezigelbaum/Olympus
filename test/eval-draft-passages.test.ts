@@ -82,3 +82,32 @@ test('a draft set written over an existing readable file is private afterwards',
   expect(statSync(output).mode & 0o777).toBe(0o600);
   expect(readdirSync(dir)).toEqual(['questions.json']);
 });
+test('each proposed negative is checked against its own top passages, and one the model can answer is dropped', async () => {
+  const opened = await world();
+  const checked: string[] = [];
+  const server = Bun.serve({ port: 0, hostname: '127.0.0.1', async fetch(request) {
+    const body = await request.json() as { messages: { content: string }[] };
+    const prompt = body.messages.at(-1)!.content;
+    let result: unknown;
+    if (prompt.includes('NEGATIVE CHECK')) {
+      checked.push(prompt);
+      // Number 0 is "answerable"; number 1 gets an unreadable reply, which also drops it.
+      if (prompt.includes('number 1?')) return Response.json({ choices: [{ message: { content: 'not json' } }] });
+      result = { answerable: prompt.includes('number 0?') };
+    } else if (prompt.includes('UNANSWERABLE')) result = { questions: Array.from({ length: 6 }, (_, i) => `Where are the nonexistent orchid records number ${i}?`) };
+    else result = { question: 'What amount should be paid for that boatyard bill?', quote: 'The Kestrel invoice total is forty seven dollars payable Tuesday' };
+    return Response.json({ choices: [{ message: { content: JSON.stringify(result) } }] });
+  } });
+  try {
+    const passagesFor: string[] = [];
+    const result = await draftPassageQuestions({ opened, count: 4, seed: 'fixture', model: localDraftModel({ baseUrl: `http://127.0.0.1:${server.port}/v1`, model: 'synthetic' }),
+      negativePassages: async question => { passagesFor.push(question); return ['A synthetic retrieved passage about the garden fence.']; } });
+    expect(passagesFor).toHaveLength(6);
+    expect(checked).toHaveLength(6);
+    expect(checked.every(prompt => prompt.includes('A synthetic retrieved passage'))).toBe(true);
+    const negatives = result.dataset.questions.filter(q => q.shape === 'coverage_negative');
+    expect(negatives).toHaveLength(4);
+    expect(negatives.every(q => !q.question.includes('number 0?') && !q.question.includes('number 1?'))).toBe(true);
+    expect(result.counts).toMatchObject({ unanswerable: 6, negativesKept: 4, negativesDropped: 2, negativesUnchecked: 0 });
+  } finally { server.stop(true); opened.close(); }
+});

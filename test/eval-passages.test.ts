@@ -38,7 +38,8 @@ test('sealed mode runs only sealed questions and omits all per-question rows', a
   expect(receipt.summary.overall.answerable).toBe(1);
 });
 test('keep rule requires two more passage hits and limits losses per shape and family', async () => {
-  const base = await runPassageEval({ dataset, maxResults: 5, storeCounts: counts, gitSha: 'abc', buildPack: async () => detail() });
+  // Without rows (as in a sealed receipt) the verdict reads the summaries.
+  const { questions: _rows, ...base } = await runPassageEval({ dataset, maxResults: 5, storeCounts: counts, gitSha: 'abc', buildPack: async () => detail() });
   const next = structuredClone(base);
   next.summary.overall.passage.hitsAtK['5']! += 2;
   expect(comparePassageReceipts(next, base).kept).toBe(true);
@@ -75,4 +76,31 @@ test('fits the pack in the compact format the local Analyst is sent', async () =
   expect(budget).toBeDefined();
   const receipt = await runPassageEval({ dataset, maxResults: 5, promptBytes: budget!, storeCounts: counts, gitSha: 'abc', buildPack: async () => many });
   expect(receipt.questions![0]!.passage.firstHitRank).toBe(1);
+});
+test('a degraded question is recorded by store and lane, left out of recall, and the run goes on', async () => {
+  const cut = (): EvidencePackBuildDetail => ({ ...detail(), degradations: [{ laneName: 'internal.fixture.file:connector_store_vector', reason: 'semantic_lane_skipped', detail: 'Confidential degradation detail', occurrences: 1 }] } as unknown as EvidencePackBuildDetail);
+  const late = (): EvidencePackBuildDetail => ({ ...detail(), corpusTimings: [{ corpusId: 'internal.fixture.file', elapsedMs: 9, outcome: 'timeout' }] } as unknown as EvidencePackBuildDetail);
+  for (const broken of [cut, late]) {
+    const receipt = await runPassageEval({ dataset, maxResults: 5, storeCounts: counts, gitSha: 'abc', buildPack: async q => q.id === 'q1' ? broken() : detail() });
+    expect(receipt.summary.overall.degraded).toBe(1);
+    expect(receipt.summary.overall.questions).toBe(1);
+    expect(receipt.summary.overall.answerable).toBe(0);
+    const row = receipt.questions!.find(q => q.questionId === 'q1')!;
+    expect(row.degraded!.length).toBeGreaterThan(0);
+    expect(row.degraded![0]!.corpusId).toBe('internal.fixture.file');
+    expect(JSON.stringify(receipt)).not.toContain('Confidential degradation detail');
+  }
+});
+test('compare scores the questions both runs completed and says how many were left out', async () => {
+  const base = await runPassageEval({ dataset, maxResults: 5, storeCounts: counts, gitSha: 'abc', buildPack: async () => detail() });
+  const cut = { ...detail(), degradations: [{ laneName: 'internal.fixture.file:connector_store_vector', reason: 'semantic_lane_skipped', occurrences: 1 }] } as unknown as EvidencePackBuildDetail;
+  const current = await runPassageEval({ dataset, maxResults: 5, storeCounts: counts, gitSha: 'abc', buildPack: async q => q.id === 'q1' ? cut : detail() });
+  const verdict = comparePassageReceipts(current, base);
+  expect(verdict.leftOut).toBe(1);
+  expect(verdict.gained).toBe(0);
+  // Sealed receipts carry no per-question rows, so the two runs must have left out the same questions.
+  const sealedBase = await runPassageEval({ dataset, split: 'sealed', maxResults: 5, storeCounts: counts, gitSha: 'abc', buildPack: async () => detail() });
+  const sealedCut = await runPassageEval({ dataset, split: 'sealed', maxResults: 5, storeCounts: counts, gitSha: 'abc', buildPack: async () => cut });
+  expect(() => comparePassageReceipts(sealedCut, sealedBase)).toThrow('degraded');
+  expect(comparePassageReceipts(sealedBase, sealedBase).leftOut).toBe(0);
 });

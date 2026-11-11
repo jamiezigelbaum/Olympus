@@ -345,7 +345,7 @@ therefore graded for gap honesty. The unchanged-or-lower read budget applies
 to the historical off-topic negatives. Keep historical questions, stores and
 model output local; only aggregate replay counts belong in the PR.
 
-## Passage retrieval eval (schema 2)
+## Passage retrieval eval (question set version 2, receipt schema 3)
 
 `eval:passages` scores retrieval without constructing an Analyst or a query
 planner. The answer eval above remains the release gate. Work on a complete
@@ -393,6 +393,11 @@ not an assertion that a synthesis question has all its evidence. The matcher
 rejoins line-break hyphenation, and requires an ordered subsequence covering
 80% of the quote in a window of `n + max(4, ceil(n/2))` passage words.
 
+A question whose search was cut short (a lane degraded or a store timed out)
+is not scored as a miss. The receipt records it as degraded, with the store,
+lane and reason code. Each summary's `degraded` count says how many were left
+out of its figures, and `degradedIds` lists them. The run goes on.
+
 Receipts contain ranks, hit counts, recall, MRR, negative seat counts, store row
 counts, timings, rule and git SHA. They contain no questions, quotes, titles,
 answers or passages. Summaries group by shape, expected source family and tier;
@@ -400,8 +405,11 @@ negatives without a source use `unknown`. Sealed receipts contain summaries
 only, with no question rows. `--compare /path/to/baseline.json` prints the keep
 verdict: at least two more passage hits at pack size overall, with no shape or
 family losing more than one. Comparison requires the same split, question-id
-set, matcher version and pack size. Inspect skipped-store counts before
-comparing runs.
+set, matcher version and pack size. Open receipts are rescored on the
+questions neither run left out as degraded, and `leftOut` says how many were
+dropped. Sealed receipts carry no rows, so two sealed runs compare only when
+they left out the same questions. Inspect skipped-store counts before comparing
+runs.
 
 On **Sparta**, draft a private set through the local OpenAI-compatible model:
 
@@ -420,6 +428,12 @@ unheld items with served text. Half the requests ask for a paraphrase with no
 quote content words. Invalid quotes and paraphrases are discarded; rare-word
 FTS phrase candidates are checked with the same passage rule for alternates.
 One third of the resulting questions are deterministically sealed. The private
-output file contains the drafts; stdout contains counts only. Review the drafts
-and verify the 5–10 proposed negative questions are actually unanswerable before
-using the set. Do not tune on sealed questions.
+output file contains the drafts; stdout contains counts only.
+
+No one reads the drafts, because their text stays on Sparta. A local check
+replaces that review for the 5–10 proposed negative questions. Each negative is
+run through the same retrieval, and the same local model is asked whether any of
+the top five passages answers it. A negative it can answer, or whose reply can't
+be read, is dropped. `negativesKept` and `negativesDropped` give the counts.
+Negatives count only toward negative seat counts, never toward a pass or a
+fail. Do not tune on sealed questions.
