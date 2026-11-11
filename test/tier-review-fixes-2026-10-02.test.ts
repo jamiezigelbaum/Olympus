@@ -146,7 +146,7 @@ async function freshInstall(options: {
     ...(isPublicTierRetired(policy) ? { retirePublic: true } : {}),
     ownerContext: () => ownerWords,
   });
-  const secure = new LocalConnectorStore({ dbPath: join(root, 'dropbox-secure.sqlite'), corpusId: SECURE_CORPUS, family: 'file', trustDomain: 'secure_local' });
+  const secure = new LocalConnectorStore({ dbPath: resolvedStorePath('dropbox.files', 'secure_local', env), corpusId: SECURE_CORPUS, family: 'file', trustDomain: 'secure_local' });
   closers.push(() => secure.close());
   const secrets = new SecretLocationsIndex({ dbPath: join(root, 'secrets.sqlite') });
   closers.push(() => secrets.close());
@@ -875,7 +875,7 @@ describe('10. olympus_search is not an answer on the private pool', () => {
 
 describe('12. a per-item owner override applies to an item already stored (no file change)', () => {
   const bank = identity('id:bank');
-  const storePaths = () => [join(root, 'dropbox-secure.sqlite'), resolvedStorePath('dropbox.files', 'internal', env)];
+  const storePaths = () => [resolvedStorePath('dropbox.files', 'secure_local', env), resolvedStorePath('dropbox.files', 'internal', env)];
   const currentCopies = (install: Install, id: ReturnType<typeof identity>) =>
     install.lane.ledger.copies(id).filter((copy) => copy.state === 'current').map((copy) => copy.corpusId);
   /** How many evidence items the search returns for one title (a duplicate across stores would be two). */
@@ -968,7 +968,7 @@ describe('12. a per-item owner override applies to an item already stored (no fi
 describe('12b. owner overrides under interleaving (review of PR #255)', () => {
   const bank = identity('id:bank');
   const bankItem = { ...bank, family: 'file' as const, localItemId: 'personal:id:bank' };
-  const storePaths = () => [join(root, 'dropbox-secure.sqlite'), resolvedStorePath('dropbox.files', 'internal', env)];
+  const storePaths = () => [resolvedStorePath('dropbox.files', 'secure_local', env), resolvedStorePath('dropbox.files', 'internal', env)];
   const currentCopies = (ledger: TierLedger, id: Parameters<TierLedger['copies']>[0]) =>
     ledger.copies(id).filter((copy) => copy.state === 'current').map((copy) => copy.corpusId);
 
@@ -1065,7 +1065,7 @@ describe('12b. owner overrides under interleaving (review of PR #255)', () => {
 
 describe('12c. owner overrides under interleaving, round 2 (review of PR #255)', () => {
   const bank = identity('id:bank');
-  const storePaths = () => [join(root, 'dropbox-secure.sqlite'), resolvedStorePath('dropbox.files', 'internal', env)];
+  const storePaths = () => [resolvedStorePath('dropbox.files', 'secure_local', env), resolvedStorePath('dropbox.files', 'internal', env)];
   const currentCopies = (ledger: TierLedger, id: Parameters<TierLedger['copies']>[0]) =>
     ledger.copies(id).filter((copy) => copy.state === 'current').map((copy) => copy.corpusId).sort();
   const verdicts = (tier: string, category: string, confidence: number) =>

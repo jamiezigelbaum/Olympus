@@ -288,7 +288,8 @@ describe('the set ledger governs every handle, and its loss fails closed', () =>
     for (const suffix of ['', '-wal', '-shm']) rmSync(`${ledgerPath}${suffix}`, { force: true });
     expect(existsSync(ledgerPath)).toBe(false);
 
-    const standalone = openLegStore(paths, 'internal', null);
+    expect(() => openLegStore(paths, 'internal', null)).toThrow(/privacy ledger.*missing/);
+    const standalone = new LocalConnectorStore({ dbPath: paths.internal, corpusId: CORPORA.internal, family: 'file', trustDomain: 'internal', readOnly: true });
     try {
       expect(standalone.searchItems('compost', 5)).toEqual([]);
       expect(() => standalone.status()).toThrow(TierLedgerUnavailableError);
@@ -296,9 +297,10 @@ describe('the set ledger governs every handle, and its loss fails closed', () =>
       standalone.close();
     }
     // A fresh ledger in its place is a different ledger: the set refuses.
-    const reopened = fixture(dir);
-    await expect(reopened.set.sync(fixtureConnector(() => [GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT }))
-      .rejects.toThrow(TierLedgerUnavailableError);
+    const replacement = new TierLedger({ dbPath: ledgerPath });
+    try {
+      expect(() => openLegStore(paths, 'internal', replacement)).toThrow(/privacy ledger.*missing/);
+    } finally { replacement.close(); }
   });
 });
 
