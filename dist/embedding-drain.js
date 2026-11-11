@@ -18058,6 +18058,74 @@ var init_control_path_headroom = __esm(() => {
 // src/core/source-index/lane-busy.ts
 var SOURCE_INDEX_LANE_BUSY_CODE = "source_index_lane_busy";
 
+// src/workers/source-index/answer-latency-trace.ts
+import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+function beginSourceAnswerPoolRead() {
+  const query = currentSourceAnswerTrace()?.activeQuery;
+  const corpusId = laneStorage.getStore();
+  if (!query || corpusId === undefined)
+    return;
+  return ({ queueWaitMs, runMs, outcome }) => {
+    let reads = query.poolByCorpus.get(corpusId);
+    if (!reads) {
+      reads = {
+        reads: 0,
+        queue_wait_ms: 0,
+        queue_wait_max_ms: 0,
+        run_ms: 0,
+        run_max_ms: 0,
+        refused: 0,
+        dropped_queued: 0,
+        past_deadline_running: 0,
+        errors: 0
+      };
+      query.poolByCorpus.set(corpusId, reads);
+    }
+    const wait = nonNegativeMs(queueWaitMs);
+    const ran = nonNegativeMs(runMs);
+    reads.reads += 1;
+    reads.queue_wait_ms += wait;
+    reads.queue_wait_max_ms = Math.max(reads.queue_wait_max_ms, wait);
+    reads.run_ms += ran;
+    reads.run_max_ms = Math.max(reads.run_max_ms, ran);
+    if (outcome === "refused")
+      reads.refused += 1;
+    else if (outcome === "dropped_queued")
+      reads.dropped_queued += 1;
+    else if (outcome === "past_deadline_running")
+      reads.past_deadline_running += 1;
+    else if (outcome === "error")
+      reads.errors += 1;
+  };
+}
+function currentSourceAnswerTrace() {
+  return storage2.getStore();
+}
+function nonNegativeMs(value) {
+  return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+}
+var storage2, laneStorage, CONTENT_FREE_ERROR_CLASSES;
+var init_answer_latency_trace = __esm(() => {
+  storage2 = new AsyncLocalStorage3;
+  laneStorage = new AsyncLocalStorage3;
+  CONTENT_FREE_ERROR_CLASSES = new Set([
+    "AbortError",
+    "AnalystUnavailable",
+    "AnalystCircuitOpen",
+    "EmailSourceWorkerError",
+    "Error",
+    "LocalTrustProviderMismatch",
+    "OperationError",
+    "RangeError",
+    "SourceModelPolicyDeniedError",
+    "SecureEvidencePolicySkip",
+    "SecureAnalystPoolE2EEGateError",
+    "SyntaxError",
+    "TrustedAnalystTimeoutError",
+    "TypeError"
+  ]);
+});
+
 // src/workers/connector-store/off-thread-reads.ts
 function live() {
   return threads.filter((reader) => !reader.retired);
@@ -18208,11 +18276,13 @@ function serveSnapshotWaiters() {
 function readOnPool(dbPath, read, options = {}) {
   const deadlineAtMs = options.deadlineAtMs ?? clock2.now() + OFF_THREAD_READ_TIMEOUT_MS;
   const waiting = queues.get(dbPath) ?? [];
+  const report = beginSourceAnswerPoolRead();
   if (waiting.length >= READ_POOL_QUEUE_PER_STORE || clock2.now() >= deadlineAtMs) {
+    report?.({ queueWaitMs: 0, runMs: 0, outcome: "refused" });
     return Promise.reject(new OffThreadReadBusyError);
   }
   return new Promise((resolve7, reject) => {
-    const job = { store: dbPath, read, deadlineAtMs, resolve: resolve7, reject, timer: undefined };
+    const job = { store: dbPath, read, deadlineAtMs, resolve: resolve7, reject, timer: undefined, enqueuedAtMs: clock2.now(), report };
     job.timer = clock2.setTimeout(() => missedDeadline(job), deadlineAtMs - clock2.now());
     waiting.push(job);
     if (!queues.has(dbPath)) {
@@ -18249,6 +18319,24 @@ function settle(job, outcome) {
     return;
   job.settled = true;
   clock2.clearTimeout(job.timer);
+  if (job.report) {
+    const now = clock2.now();
+    const sentAtMs = job.sentAtMs;
+    let ended;
+    if ("rows" in outcome)
+      ended = "rows";
+    else if (sentAtMs === undefined)
+      ended = "dropped_queued";
+    else if (outcome.error instanceof OffThreadReadBusyError)
+      ended = "past_deadline_running";
+    else
+      ended = "error";
+    job.report({
+      queueWaitMs: (sentAtMs ?? now) - job.enqueuedAtMs,
+      runMs: sentAtMs === undefined ? 0 : now - sentAtMs,
+      outcome: ended
+    });
+  }
   if ("rows" in outcome)
     job.resolve(outcome.rows);
   else
@@ -18298,6 +18386,7 @@ function dispatch() {
     if (!job)
       return;
     job.thread = reader;
+    job.sentAtMs = clock2.now();
     reader.job = job;
     observer?.(job.store, job.read);
     send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, undefined).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => settle(job, { error: reader.retired ? new OffThreadReadBusyError : error })).finally(() => {
@@ -18361,6 +18450,7 @@ self.onmessage = (event) => {
 };
 `, threads, nextId2 = 1, queues, turns, snapshotWaiters, releases;
 var init_off_thread_reads = __esm(() => {
+  init_answer_latency_trace();
   OffThreadReadBusyError = class OffThreadReadBusyError extends Error {
     code = SOURCE_INDEX_LANE_BUSY_CODE;
     constructor() {
@@ -19648,7 +19738,7 @@ var init_embedding_identity = __esm(() => {
 
 // src/workers/source-index/embeddings.ts
 import { Buffer as Buffer2 } from "node:buffer";
-import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
 import { createHash as createHash10 } from "node:crypto";
 import { lookup as lookup2 } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
@@ -20420,7 +20510,7 @@ var init_embeddings = __esm(() => {
   init_model_transport();
   init_zkapi_consult_settings();
   init_embedding_identity();
-  priorityQueryEmbedding = new AsyncLocalStorage3;
+  priorityQueryEmbedding = new AsyncLocalStorage4;
   SourceEmbeddingInputsFailedError = class SourceEmbeddingInputsFailedError extends Error {
     failedIndexes;
     reason;
@@ -40729,9 +40819,9 @@ var init_connector_store = __esm(() => {
   init_filter_capabilities();
 });
 // src/workers/answer-activity.ts
-import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
 function runWithLocalInferenceGuard(guard, work) {
-  localInferenceGuards ??= new AsyncLocalStorage4;
+  localInferenceGuards ??= new AsyncLocalStorage5;
   return localInferenceGuards.run([...localInferenceGuards?.getStore() ?? [], guard], work);
 }
 var localInferenceGuards, DEFAULT_ANSWER_LEASE_MS;
@@ -40752,7 +40842,7 @@ var init_evidence_versions = __esm(() => {
 });
 
 // src/core/analyst.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
 var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", ANALYST_SYSTEM, ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, promptEncoder, STOP_WORDS2, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
 var init_analyst = __esm(() => {
   init_opsec();
@@ -40761,7 +40851,7 @@ var init_analyst = __esm(() => {
   init_types();
   init_operation_error();
   init_evidence_versions();
-  analystAbortSignalStorage = new AsyncLocalStorage5;
+  analystAbortSignalStorage = new AsyncLocalStorage6;
   ANALYST_SYSTEM = [
     "You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.",
     "Rules:",
@@ -41024,29 +41114,6 @@ var init_evidence_reranker = () => {};
 // src/core/parent-label.ts
 var init_parent_label = __esm(() => {
   init_types();
-});
-
-// src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
-var storage2, CONTENT_FREE_ERROR_CLASSES;
-var init_answer_latency_trace = __esm(() => {
-  storage2 = new AsyncLocalStorage6;
-  CONTENT_FREE_ERROR_CLASSES = new Set([
-    "AbortError",
-    "AnalystUnavailable",
-    "AnalystCircuitOpen",
-    "EmailSourceWorkerError",
-    "Error",
-    "LocalTrustProviderMismatch",
-    "OperationError",
-    "RangeError",
-    "SourceModelPolicyDeniedError",
-    "SecureEvidencePolicySkip",
-    "SecureAnalystPoolE2EEGateError",
-    "SyntaxError",
-    "TrustedAnalystTimeoutError",
-    "TypeError"
-  ]);
 });
 
 // src/core/source-index/router.ts

@@ -42,6 +42,7 @@
 // runs on, so terminating a query's thread never cuts a snapshot short.
 
 import { SOURCE_INDEX_LANE_BUSY_CODE } from '../../core/source-index/lane-busy.ts';
+import { beginSourceAnswerPoolRead, type SourceAnswerPoolReadOutcome } from '../source-index/answer-latency-trace.ts';
 
 /** One query: its SQL, bound values, and whether one row or all are wanted. */
 export interface StoreRead {
@@ -184,6 +185,11 @@ interface PoolJob {
   timer: unknown;
   thread?: ReaderThread;
   settled?: boolean;
+  // For the Ask trace (#1305): when the query was asked for and sent, and
+  // how to report its end (undefined outside a traced Ask lane).
+  enqueuedAtMs: number;
+  sentAtMs?: number;
+  report?: ((report: { queueWaitMs: number; runMs: number; outcome: SourceAnswerPoolReadOutcome }) => void) | undefined;
 }
 
 // Every thread the pool started that has not stopped, retired ones included.
@@ -379,11 +385,13 @@ function serveSnapshotWaiters(): void {
 export function readOnPool(dbPath: string, read: StoreRead, options: { deadlineAtMs?: number } = {}): Promise<unknown> {
   const deadlineAtMs = options.deadlineAtMs ?? clock.now() + OFF_THREAD_READ_TIMEOUT_MS;
   const waiting = queues.get(dbPath) ?? [];
+  const report = beginSourceAnswerPoolRead();
   if (waiting.length >= READ_POOL_QUEUE_PER_STORE || clock.now() >= deadlineAtMs) {
+    report?.({ queueWaitMs: 0, runMs: 0, outcome: 'refused' });
     return Promise.reject(new OffThreadReadBusyError());
   }
   return new Promise((resolve, reject) => {
-    const job: PoolJob = { store: dbPath, read, deadlineAtMs, resolve, reject, timer: undefined };
+    const job: PoolJob = { store: dbPath, read, deadlineAtMs, resolve, reject, timer: undefined, enqueuedAtMs: clock.now(), report };
     job.timer = clock.setTimeout(() => missedDeadline(job), deadlineAtMs - clock.now());
     waiting.push(job);
     if (!queues.has(dbPath)) {
@@ -437,6 +445,20 @@ function settle(job: PoolJob, outcome: { rows: unknown } | { error: Error }): vo
   if (job.settled) return;
   job.settled = true;
   clock.clearTimeout(job.timer);
+  if (job.report) {
+    const now = clock.now();
+    const sentAtMs = job.sentAtMs;
+    let ended: SourceAnswerPoolReadOutcome;
+    if ('rows' in outcome) ended = 'rows';
+    else if (sentAtMs === undefined) ended = 'dropped_queued';
+    else if (outcome.error instanceof OffThreadReadBusyError) ended = 'past_deadline_running';
+    else ended = 'error';
+    job.report({
+      queueWaitMs: (sentAtMs ?? now) - job.enqueuedAtMs,
+      runMs: sentAtMs === undefined ? 0 : now - sentAtMs,
+      outcome: ended,
+    });
+  }
   if ('rows' in outcome) job.resolve(outcome.rows);
   else job.reject(outcome.error);
 }
@@ -485,6 +507,7 @@ function dispatch(): void {
     const job = nextJob();
     if (!job) return;
     job.thread = reader;
+    job.sentAtMs = clock.now();
     reader.job = job;
     observer?.(job.store, job.read);
     send(reader, { op: 'query', path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, undefined)

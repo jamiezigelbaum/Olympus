@@ -24,6 +24,7 @@ import type {
   SourceAnswerTraceAnalystLeg,
   SourceAnswerTraceOutcome,
   SourceAnswerTraceRetrievalAttempt,
+  SourceAnswerTracePoolReads,
   SourceAnswerTraceRouteStep,
   SourceAnswerTraceSnapshot,
 } from './answer-latency-trace.ts';
@@ -398,8 +399,24 @@ function copyRetrievalAttempt(
           : {}),
         outcome: timing.outcome,
         ...(timing.error_class ? { error_class: timing.error_class } : {}),
+        ...(timing.pool ? { pool: copyPoolReads(timing.pool) } : {}),
       })),
     })),
+  };
+}
+
+function copyPoolReads(pool: SourceAnswerTracePoolReads): SourceAnswerTracePoolReads {
+  const count = (value: number) => Math.max(0, Math.floor(value));
+  return {
+    reads: count(pool.reads),
+    queue_wait_ms: nonNegativeMs(pool.queue_wait_ms),
+    queue_wait_max_ms: nonNegativeMs(pool.queue_wait_max_ms),
+    run_ms: nonNegativeMs(pool.run_ms),
+    run_max_ms: nonNegativeMs(pool.run_max_ms),
+    refused: count(pool.refused),
+    dropped_queued: count(pool.dropped_queued),
+    past_deadline_running: count(pool.past_deadline_running),
+    errors: count(pool.errors),
   };
 }
 
