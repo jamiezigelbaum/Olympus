@@ -40910,7 +40910,7 @@ var init_local_index = __esm(() => {
         if (this.peopleVisibilityMarker() === marker)
           return this.peopleObservationsFromRows(step.value);
       }
-      throw new Error("people read: the store's visibility changed during every attempt");
+      return this.peopleObservations();
     }
     *peopleObservationSteps(tierHidden) {
       return yield this.peopleObservationRead([...tierHidden.hidden, ...tierHidden.held]);

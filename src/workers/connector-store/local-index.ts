@@ -2933,7 +2933,7 @@ export interface ConnectorStoreOwnedSearchFacetRefreshSummary {
   refreshedLocalItemIds: string[];
 }
 
-/** Off-thread people reads taken before a store whose visibility keeps moving is left for the next refresh. */
+/** Off-thread people reads tried before a store whose visibility keeps moving is read on this thread. */
 const PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3;
 
 /** A people read's row: one sender in one conversation at one tier. */
@@ -6246,8 +6246,10 @@ export class LocalConnectorStore {
    * the pool's read, and an item written and held in that gap would name its
    * sender: the read counts only when the store's visibility marker did not
    * move across it, and is taken again otherwise. A store that keeps moving
-   * fails this read (its senders drop out until the next refresh), never
-   * serving a held name.
+   * (a judging backlog moves the ledger's cursor on every verdict) is read on
+   * this thread after that, with no gap between the set and the read: an
+   * index-only scan now, so about a second on a large store, not the minute
+   * this read once took (#1305).
    */
   async peopleObservationsOffThread(): Promise<PeopleSenderObservation[]> {
     if (!offThreadReadsSupported(this.dbPath)) return this.peopleObservations();
@@ -6259,7 +6261,7 @@ export class LocalConnectorStore {
       while (!step.done) step = steps.next(await readOnPool(this.dbPath, step.value));
       if (this.peopleVisibilityMarker() === marker) return this.peopleObservationsFromRows(step.value);
     }
-    throw new Error('people read: the store\'s visibility changed during every attempt');
+    return this.peopleObservations();
   }
 
   private *peopleObservationSteps(tierHidden: { hidden: readonly number[]; held: readonly number[] }): Generator<StoreRead, PeopleObservationRow[], unknown> {

@@ -205,6 +205,42 @@ describe('people observations off the main thread (#1305)', () => {
     expect(after.sort(bySenderKey)).toEqual(oracle(store).sort(bySenderKey));
   }, 60_000);
 
+  test('a store whose visibility moves during every pool read is read on this thread, held items still left out', async () => {
+    const { fixture, store } = await senderFixture();
+    const db = storeDb(store);
+    const ledgerDb = (fixture.ledger as unknown as { db: Database }).db;
+    const visible = (store as unknown as { tierHiddenItemPks(): { hidden: number[]; held: number[] } }).tierHiddenItemPks();
+    const excluded = new Set([...visible.hidden, ...visible.held]);
+    const candidates = db.query(`SELECT item_pk, provider_item_id FROM items WHERE tombstoned = 0 ORDER BY item_pk`).all() as Array<{ item_pk: number; provider_item_id: string }>;
+    const target = candidates.find((row) => !excluded.has(row.item_pk))!;
+    db.query(`UPDATE items SET sender_id = 'zed@example.com', sender_label = 'Zed Marlow' WHERE item_pk = ?`).run(target.item_pk);
+
+    // A judging backlog: every pool read sees the ledger move (held, released, held again).
+    let pooled = 0;
+    setReadPoolObserverForTests(() => {
+      pooled += 1;
+      ledgerDb.query(`UPDATE tier_copies SET embed_hold = 1 - embed_hold WHERE provider_item_id = ? AND copy_state = 'current'`).run(target.provider_item_id);
+    });
+    const here: string[] = [];
+    const original = db.query.bind(db);
+    db.query = ((sql: string) => {
+      if (/FROM items/.test(sql) && /GROUP BY/.test(sql)) here.push(sql);
+      return original(sql);
+    }) as typeof db.query;
+    let observed: PeopleSenderObservation[];
+    try {
+      observed = await store.peopleObservationsOffThread();
+    } finally {
+      db.query = original;
+    }
+    expect(pooled).toBe(3);
+    expect(here).toHaveLength(1);
+    // Held after the third move: named by no one, and every other sender is back.
+    expect(observed.some((o) => o.senderId === 'zed@example.com')).toBe(false);
+    expect(observed.length).toBeGreaterThan(0);
+    expect(observed.sort(bySenderKey)).toEqual(oracle(store).sort(bySenderKey));
+  }, 60_000);
+
   test('the people query reads a covering index', async () => {
     const { store } = await senderFixture();
     const db = storeDb(store);
