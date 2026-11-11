@@ -58,6 +58,7 @@ import { CHATGPT_TOOLS } from '../src/workers/chatgpt/mcp-surface.ts';
 import { DASHBOARD_CHATGPT_VOCABULARY } from '../src/workers/dashboard/vocabulary.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { createInProcessOperationContext, createRemoteMcpHandler } from '../src/workers/remote-mcp.ts';
+import { waitFor } from './helpers/test-clock.ts';
 import { CLAUDE_CLIENT_ID } from '../src/workers/remote-oauth/pinned-clients.ts';
 import { parseRemotePublicBaseUrl, remoteMcpResource, type RemotePublicUrls } from '../src/core/remote-public-url.ts';
 
@@ -982,12 +983,12 @@ describe('a handed-off answer starts its private panel job only for its own conn
       expect(stolen._meta).toEqual({ [PRIVATE_ANSWER_META_KEY]: { v: 1, count: 0, state: 'none' } });
 
       release();
-      await Bun.sleep(50);
-      const answered = await claude.callTool({ name: 'source_answer_result', arguments: { job_id: jobId } }) as Record<string, unknown>;
-      expect((answered.structuredContent as { status: string }).status).toBe('answered');
+      const answered = await waitFor(async () => {
+        const result = await claude.callTool({ name: 'source_answer_result', arguments: { job_id: jobId } }) as Record<string, unknown>;
+        return (result.structuredContent as { status?: string }).status === 'answered' ? result : undefined;
+      }, { description: 'the handed-off answer finishes' });
       expect((answered._meta as Record<string, unknown>)[PRIVATE_ANSWER_META_KEY]).toMatchObject({ v: 1, count: 2, state: 'ready' });
       // Nothing private in what Claude receives, however it is collected.
-      await Bun.sleep(50);
       expect(JSON.stringify([handed, stolen, answered]).match(SENTINEL_PATTERN)?.[0]).toBeUndefined();
       // A ChatGPT connection's pending result keeps the id in structuredContent only.
       const chatgpt = await other.callTool({ name: 'source_answer', arguments: { question: 'When does the lease end?' } }) as Record<string, unknown>;
