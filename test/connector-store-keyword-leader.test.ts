@@ -15,7 +15,7 @@ import { describe, expect, test } from 'bun:test';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import type { FusedRankedCandidate } from '../src/core/source-index/retrieval.ts';
 import { RESERVED_LEADER_MIN_CONCEPT_SHARE, withReservedLeaderSeats } from '../src/core/source-index/retrieval.ts';
-import { seatNameLeader, withLaneLeadersSeated } from '../src/workers/connector-store/local-index.ts';
+import { rankedCandidates, seatNameLeader, STORE_LEADER_LATEST_SEAT, withLaneLeadersSeated } from '../src/workers/connector-store/local-index.ts';
 import {
   LocalConnectorStore,
   createConnectorStoreCorpusAdapter,
@@ -189,6 +189,43 @@ describe('a store\'s keyword leader keeps a place in its hybrid result', () => {
       expect(hybrid[0]).toStartWith('lantern-note-');
       expect(hybrid).toContain('estimate');
     }, [ESTIMATE, LANTERN, ...LANTERN_NOTES]);
+  });
+});
+
+// A store's order does not depend on how many results were asked for: for
+// any two cuts, the smaller result is the head of the larger. Before, the
+// leaders' place came from the cut, so at 24 results they sat behind every
+// vetted note (store rank 8 to 10) and a local Analyst's fitted pack never
+// read them (rerun 22, 24-seat pass, 2026-11-11).
+describe('a store\'s order is the same at every budget', () => {
+  type Row = { sourceItem: { localItemId: string } };
+  const candidate = (id: string, lanes: Record<string, number>): FusedRankedCandidate<Row> => ({
+    id: id as never, item: { sourceItem: { localItemId: id } }, score: 0, laneRanks: new Map(Object.entries(lanes)),
+  });
+  // Nine vetted vector notes, then a whole-question match fusion placed last,
+  // then the keyword leader (a readable partial match) and a names-only file.
+  const notes = Array.from({ length: 9 }, (_, index) => candidate(`v${index}`, { vector: index + 1, keyword: index + 3 }));
+  const whole = candidate('whole', { vector: 10, keyword: 2 });
+  const leader = candidate('leader', { keyword: 1 });
+  const named = candidate('named', { keyword: 12 });
+  const fused = [...notes, whole, leader, named];
+  const vetted = new Set(notes.map((c) => c.item.sourceItem.localItemId));
+  const order = (cut: number) => rankedCandidates(
+    fused as never,
+    cut,
+    (c) => vetted.has(c.item.sourceItem.localItemId) || c.item.sourceItem.localItemId === 'whole',
+    (c) => c.item.sourceItem.localItemId !== 'named',
+    { nameLeaderItemId: 'named', matchesWholeQuestion: (c) => c.item.sourceItem.localItemId === 'whole' },
+  ).map((c) => c.item.sourceItem.localItemId);
+
+  test('the smaller cut is the head of the larger', () => {
+    const full = order(24);
+    for (let cut = 3; cut <= 24; cut += 1) expect(order(cut)).toEqual(full.slice(0, cut));
+  });
+
+  test('the leaders hold seats 2 and 3 at the latest, after the store\'s own first', () => {
+    expect(STORE_LEADER_LATEST_SEAT).toBe(1);
+    expect(order(24).slice(0, 3)).toEqual(['v0', 'leader', 'named']);
   });
 });
 
