@@ -94,14 +94,17 @@ describe('hidden-children set in turns', () => {
   });
 });
 
-describe('a search never builds the hidden set (#1305)', () => {
-  test('asking whether the vector lane can run starts no hidden-set build', async () => {
+describe('a search never refreshes the hidden set (#1305)', () => {
+  test('asking whether the vector lane can run reuses an old hidden set and starts no rebuild', async () => {
     const { store } = await storeWithChildren(3, 1);
-    let builds = 0;
     const target = store as any;
+    await store.prepareStatusCounts();
+    expect(target.tierHiddenCountsMemo).toBeDefined();
+    target.tierHiddenCountsMemo = { ...target.tierHiddenCountsMemo, at: 0 };
+    let builds = 0;
     const original = target.refreshTierHiddenCountsInTurns.bind(store);
     target.refreshTierHiddenCountsInTurns = () => { builds += 1; return original(); };
-    target.tierHiddenItemPks = () => { builds += 1; throw new Error('a search built the hidden set'); };
+    target.tierLedgerHiddenItemPks = () => { builds += 1; throw new Error('a search built the hidden set'); };
     store.vectorLaneServable('any-model');
     store.vectorLaneServable('any-model');
     expect(builds).toBe(0);

@@ -12542,22 +12542,29 @@ export class LocalConnectorStore {
    * every lane missed its deadline. This only decides whether the lane runs:
    * what the lane returns is still filtered by the current tier ledger.
    *
-   * A rebind is checked on every ask (one row). Otherwise the lane runs when
-   * any live chunk has a current vector, hidden or not: the lane's rows are
-   * still filtered by the current tier ledger, so a hidden vector can switch
-   * the lane on but never be returned. A search never builds or refreshes
-   * the hidden-copy set: on Sparta (2026-11-11, #1305) the refresh an Ask
+   * A rebind is checked on every ask (one row). Otherwise a `true` is kept
+   * for SEARCH_VECTOR_LANE_MEMO_MS, and the answer is computed from the
+   * hidden set the status and embedding paths keep, however old: a search
+   * never refreshes it. On Sparta (2026-11-11, #1305) the refresh an Ask
    * started judged every parent of the large Telegram stores, 43 s of
-   * request-thread SQL inside one Ask. The status and embedding paths keep
-   * the set. A `true` is kept for SEARCH_VECTOR_LANE_MEMO_MS; a `false` is
-   * never kept, so a store's first vectors switch the lane on at the next
-   * search.
+   * request-thread SQL inside one Ask. A stale set only delays the lane's
+   * switching on or off; its rows are filtered by the current tier ledger.
+   * A `false` is never kept, so a store's first vectors switch the lane on
+   * at the next search.
    */
   vectorLaneServable(modelId: string): boolean {
     if (this.embeddingCurrencyRebuildPending(modelId)) return false;
     const memo = this.vectorLaneMemo?.get(modelId);
     if (memo !== undefined && Date.now() - memo < SEARCH_VECTOR_LANE_MEMO_MS) return true;
-    const servable = this.anyCurrentEmbedding(modelId);
+    // No hidden set built yet (the first search after a start): building it
+    // here held Sparta's thread for most of a 75-86 s freeze (2026-11-10).
+    // Build it in turns for the next search, and answer this one from the
+    // vectors alone, hidden or not.
+    if (!this.tierHiddenCountsMemo) {
+      void this.refreshTierHiddenCountsInTurns();
+      return this.anyCurrentEmbedding(modelId);
+    }
+    const servable = this.hasEmbeddings(modelId, { countsMaxAgeMs: Number.POSITIVE_INFINITY });
     if (servable) (this.vectorLaneMemo ??= new Map()).set(modelId, Date.now());
     else this.vectorLaneMemo?.delete(modelId);
     return servable;

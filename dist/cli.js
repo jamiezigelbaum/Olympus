@@ -44626,7 +44626,11 @@ var init_local_index = __esm(() => {
       const memo = this.vectorLaneMemo?.get(modelId);
       if (memo !== undefined && Date.now() - memo < SEARCH_VECTOR_LANE_MEMO_MS)
         return true;
-      const servable = this.anyCurrentEmbedding(modelId);
+      if (!this.tierHiddenCountsMemo) {
+        this.refreshTierHiddenCountsInTurns();
+        return this.anyCurrentEmbedding(modelId);
+      }
+      const servable = this.hasEmbeddings(modelId, { countsMaxAgeMs: Number.POSITIVE_INFINITY });
       if (servable)
         (this.vectorLaneMemo ??= new Map).set(modelId, Date.now());
       else
