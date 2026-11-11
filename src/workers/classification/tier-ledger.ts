@@ -43,7 +43,7 @@ import {
 import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledger-path.ts';
 
 export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
-export const TIER_LEDGER_SCHEMA_VERSION = 12;
+export const TIER_LEDGER_SCHEMA_VERSION = 13;
 
 /** A scrub's start: the revision it took and the item's generation then. */
 export interface SecretScrubMark {
@@ -5339,12 +5339,34 @@ function tierLedgerMigrations(): SqliteMigration[] {
       },
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 12,
       name: 'pending_move_metadata',
       up(db) {
         // Completed obligations remain recorded as empty acknowledgements.
         // Never rescan that growing history to find the few pending notes.
         db.exec(`CREATE INDEX IF NOT EXISTS tier_ledger_pending_meta ON tier_ledger_meta (key) WHERE value <> '';`);
+      },
+    },
+    {
+      // #1316: a row recorded Personal-first still waits for its verdict with
+      // its text in its stores. Hold those copies in the upgrade itself, as a
+      // held copy is (no search or embedding outside the local private lane),
+      // so no backlog the bounded settle pass has not reached yet can be
+      // embedded or searched. The settle pass then moves the text up; a
+      // Personal verdict clears the hold.
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: 'hold_personal_first_copies',
+      up(db) {
+        db.query(`
+          UPDATE tier_copies SET embed_hold = 1
+          WHERE copy_state = 'current' AND embed_hold = 0 AND EXISTS (
+            SELECT 1 FROM tier_items t
+            WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
+              AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
+              AND t.routed = 1 AND t.content_pending = 1
+              AND EXISTS (SELECT 1 FROM json_each(t.reasons_json) r WHERE r.value = ?)
+          )
+        `).run(PERSONAL_FIRST_REASON);
       },
     },
   ];

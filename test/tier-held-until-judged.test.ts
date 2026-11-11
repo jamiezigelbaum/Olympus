@@ -25,7 +25,7 @@ import {
   type TierSniffer,
   type TierSnifferRequest,
 } from '../src/workers/classification/tier-classifier.ts';
-import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
+import { TIER_LEDGER_SQLITE_STORE_ID, TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import type { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { applyOwnerOverrides } from '../src/workers/connector-store/tier-override-settle.ts';
@@ -317,6 +317,59 @@ test('a row recorded Personal-first before #1316 leaves Personal search and embe
   expect(f.ledger.heldItemCount(corpora)).toBe(1);
   // Settled once: the next pass finds nothing.
   expect(settlePersonalFirstItems({ set: f.set })).toEqual({ checked: 0, settled: 0, movesQueued: 0 });
+});
+
+test('the upgrade holds every Personal-first row at once, before the bounded settle reaches it', async () => {
+  const f = lane({ sniffer: JUDGED_PERSONAL_SNIFFER });
+  await f.set.sync(fixtureConnector(() => [
+    { id: 'first', name: 'Orchard picnic list', text: `${ORDINARY} ${BODY_MARKER}` },
+    { id: 'second', name: 'Orchard shopping list', text: 'Quietsecondmarker for the bananas.' },
+  ]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  // What a 1.4 install recorded: open questions, text left in Personal, ledger at schema 12.
+  const ledgerPath = tieredStoreSetLedgerPath(f.paths.secure_local);
+  const db = new Database(ledgerPath);
+  for (const row of db.query('SELECT provider_item_id, reasons_json FROM tier_items').all() as Array<{ provider_item_id: string; reasons_json: string }>) {
+    const reasons = [...(JSON.parse(row.reasons_json) as string[]).filter((reason) => !reason.startsWith('content:sniffer:')), PERSONAL_FIRST_REASON];
+    db.query("UPDATE tier_items SET content_pending = 1, state = 'pending', reasons_json = ? WHERE provider_item_id = ?").run(JSON.stringify(reasons), row.provider_item_id);
+  }
+  db.query("UPDATE schema_version SET version = 12 WHERE store_id = ?").run(TIER_LEDGER_SQLITE_STORE_ID);
+  db.close();
+  const personal = new Database(f.paths.internal);
+  personal.exec('DELETE FROM chunk_embeddings');
+  personal.close();
+  expect(f.stores.internal.searchItems('Quietsecondmarker', 10)).toHaveLength(1);
+
+  // Opening the upgraded ledger holds both rows' copies.
+  new TierLedger({ dbPath: ledgerPath }).close();
+  for (const id of ['first', 'second']) {
+    expect(f.ledger.copies(identityOf(id))).toContainEqual(expect.objectContaining({ trustDomain: 'internal', state: 'current', embedHold: true }));
+  }
+  // The settle reaches one of them; the other is held all the same.
+  expect(settlePersonalFirstItems({ set: f.set, limit: 1 })).toMatchObject({ checked: 1, settled: 1 });
+  // The settled one has left Personal; the other's text is never embedded
+  // outside Private (its answers are withheld by the release check, above).
+  expect(f.stores.internal.searchItems(BODY_MARKER, 10)).toEqual([]);
+  f.cloud.inputs.length = 0;
+  await f.stores.internal.embedChunks({ provider: f.cloud });
+  expect(f.cloud.inputs.some((input) => input.includes(BODY_MARKER) || input.includes('Quietsecondmarker') || input.includes('bananas'))).toBe(false);
+  expect(f.ledger.heldItemCount([CORPORA.internal, CORPORA.secure_local])).toBe(2);
+});
+
+test('an edit of a cleared Personal item is held with its new text, and the old text is not what moves', async () => {
+  const f = lane({ sniffer: JUDGED_PERSONAL_SNIFFER });
+  await syncOne(f, { id: 'edited', name: 'Orchard picnic list', text: `${ORDINARY} Quietoldmarker`, version: 'v1' });
+  expect(f.stores.internal.searchItems('Quietoldmarker', 10).map((row) => row.sourceItem.providerItemId)).toEqual(['edited']);
+  // A live connector with no archive hold brings new text; the judge has not answered.
+  await syncOne(f, { id: 'edited', name: 'Orchard picnic list', text: `${ORDINARY} Quietnewmarker`, version: 'v2' }, f.setWith({ sniffer: waiting }));
+  const identity = identityOf('edited');
+  const record = f.ledger.getCurrent(identity)!;
+  expect(record).toMatchObject({ contentPending: true });
+  if (record.state === 'moving') {
+    await moveTieredItem({ set: f.set, identity, target: { metadataTier: record.targetMetadataTier!, contentTier: record.targetContentTier! } });
+  }
+  expect(f.stores.secure_local.localContent(localId('edited'))?.chunks.join(' ')).toContain('Quietnewmarker');
+  expect(f.stores.internal.searchItems('Quietoldmarker', 10)).toEqual([]);
+  expect(f.stores.internal.searchItems('Quietnewmarker', 10)).toEqual([]);
 });
 
 test('a Personal verdict moves the content down; a Private verdict keeps it in Private', async () => {

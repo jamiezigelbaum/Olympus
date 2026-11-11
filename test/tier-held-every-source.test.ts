@@ -272,10 +272,10 @@ test('a judged item that is renamed or moved is judged again, even with the same
   name = 'Medical records 2026';
   await sync();
   expect(queue.counts().questions).toBe(1);
-  // Its text is held again while it is re-asked: the Personal copy goes back into Private first.
-  expect(f.ledger.getCurrent(identityOf('note'))).toMatchObject({ state: 'moving', contentPending: true });
-  await settleMove(f, 'note');
+  // Its text is held again while it is re-asked: this listing writes it into Private and withdraws the Personal copy.
+  expect(f.ledger.getCurrent(identityOf('note'))).toMatchObject({ state: 'pending', contentPending: true, storedTrustDomain: 'secure_local' });
   expect(f.stores.internal!.searchItems('doctor', 10)).toEqual([]);
+  expect(f.stores.secure_local!.searchItems('doctor', 10).map((hit) => hit.sourceItem.providerItemId)).toEqual(['note']);
   await pass();
   expect(calls).toBe(2);
 });
