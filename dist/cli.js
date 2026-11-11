@@ -218118,7 +218118,13 @@ async function callChatGptTool(name, args, ctx, options, signal, detachedContext
     if (reason)
       return record8(withPrivateAnswerOutcome(answerToolResult(withheldSourceAnswer(reason), { pendingPrivacyItems: ctx.pendingPrivacyItems?.() })), true);
   }
-  return record8(PANEL_TOOL_NAMES2.has(name) ? withPrivateAnswerOutcome(result) : result);
+  return record8(withVisibleJobId(PANEL_TOOL_NAMES2.has(name) ? withPrivateAnswerOutcome(result) : result, options.appClient));
+}
+function withVisibleJobId(result, client) {
+  const structured = result.structuredContent;
+  if (client?.host !== "claude" || structured?.status !== "working" || typeof structured.job_id !== "string")
+    return result;
+  return { ...result, content: [...result.content, { type: "text", text: `job_id: ${structured.job_id}` }] };
 }
 function recordChatGptRequest(name, args, ctx, result, capture, withheldAfter) {
   if (result.isError)
