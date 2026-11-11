@@ -30,7 +30,7 @@
  * guard's regex-literal heuristic reads a one-line block comment as a regex.
  */
 
-import { sharedDataPath } from '../../core/olympus-layout.ts';
+import { olympusDataRoot, pathResolvesWithin, sharedDataPath } from '../../core/olympus-layout.ts';
 import { existsSync } from 'node:fs';
 import { Database } from 'bun:sqlite';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
@@ -89,6 +89,27 @@ export function registerExtractionJobsDbPath(dbPath: string): () => void {
  */
 export function extractionJobsDbPaths(env: Record<string, string | undefined> = process.env): string[] {
   return [...new Set([defaultFileExtractionJobsDbPath(env), ...openLedgerPaths.keys()])];
+}
+
+/**
+ * The job ledgers a tier-ledger write visits: the default and open ones, plus
+ * each recorded path (a ledger's `known_job_ledgers`, a Secret's debt or
+ * retirement) that this process has open or that lies inside this install's
+ * data root. A copied install keeps the original's recorded paths, and
+ * following one would write the original's job ledger (#1414); those come
+ * back as `outside`, never visited.
+ */
+export function jobLedgerPathsToVisit(
+  recorded: readonly string[],
+  env: Record<string, string | undefined> = process.env,
+): { visit: string[]; outside: string[] } {
+  const root = olympusDataRoot(env);
+  const inside = (path: string) => path === ':memory:' || openLedgerPaths.has(path) || pathResolvesWithin(root, path);
+  const unique = [...new Set(recorded)];
+  return {
+    visit: [...new Set([...extractionJobsDbPaths(env), ...unique.filter(inside)])],
+    outside: unique.filter((path) => !inside(path)),
+  };
 }
 
 /**
