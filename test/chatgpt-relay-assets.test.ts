@@ -14,6 +14,7 @@ import { PRIVATE_ANSWER_RESOURCE } from '../src/workers/chatgpt/private-answer-r
 import { PRIVATE_QUESTION_RESOURCE } from '../src/workers/chatgpt/private-question-resource.ts';
 import { DASHBOARD_RESOURCE } from '../src/workers/chatgpt/dashboard-resource.ts';
 import { CHATGPT_TOOLS as ENGINE_TOOLS, readChatGptResource } from '../src/workers/chatgpt/mcp-surface.ts';
+import { withOlympusSearchWords } from '../src/mcp/server-instructions.ts';
 
 describe('relay ChatGPT assets', () => {
   test('the committed generated files match the source (run bun run build when this fails)', () => {
@@ -48,8 +49,8 @@ describe('relay ChatGPT assets', () => {
   });
 
   test('offline, every non-ChatGPT credential gets exactly the engine\'s remote tool list (never a ChatGPT-only tool)', () => {
-    // The worker's /mcp list with its evidence search on: the search tool, then the remote operations.
-    expect(REMOTE_TOOLS).toEqual(JSON.parse(JSON.stringify([REMOTE_SEARCH_TOOL, ...listMcpTools(defaultConfig(), 'remote')])));
+    // The worker's /mcp list with its evidence search on: the search tool, then the remote operations, each led by Olympus's search words.
+    expect(REMOTE_TOOLS).toEqual(JSON.parse(JSON.stringify([REMOTE_SEARCH_TOOL, ...listMcpTools(defaultConfig(), 'remote')].map(withOlympusSearchWords))));
     const names = REMOTE_TOOLS.map((tool) => tool.name);
     expect(names[0]).toBe('olympus_search');
     expect(names).toContain('source_answer');
