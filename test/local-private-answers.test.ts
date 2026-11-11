@@ -15,6 +15,9 @@
 // - The Needs you count reaches only the computer's control session, never
 //   the Gateway bearer or ChatGPT, and ChatGPT's dashboard text is unchanged.
 
+import { Database } from 'bun:sqlite';
+import * as poolReads from '../src/workers/connector-store/off-thread-reads.ts';
+import type { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { searchPrivateEvidence, probePrivateMatch, type AnalystAnswerLanes } from '../src/workers/source-index/analyst-answer.ts';
 import { ownerLocalMint, ownerUnlockKey } from './helpers/owner-local-mint.ts';
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
@@ -354,8 +357,9 @@ async function localFixture(options: {
     ...(options.secrets ? { secretLocations: (query: string) => options.secrets!(query) } : {}),
   });
   const stub = stubBuiltInModel(options.answer ?? ANSWER_JSON, options.duringSynthesis ? () => options.duringSynthesis!(fixture) : undefined);
+  const releaseCheck = createReleaseTierCheck(() => [{ ledger: fixture.ledger, corpusIds: new Set(fixture.set.openStores().map(store => store.corpusId)) }], () => 'approval');
   const path = createLocalAnswerPath({
-    releaseCheck: createReleaseTierCheck(() => [{ ledger: fixture.ledger, corpusIds: new Set(fixture.set.openStores().map(store => store.corpusId)) }], () => 'approval'),
+    releaseCheck,
     lanes,
     model: options.model ?? stub.model,
     available: () => true,
@@ -363,7 +367,7 @@ async function localFixture(options: {
     sourceName: (corpusId) => SOURCE_NAMES[corpusId],
     ...(options.limits ? { limits: options.limits } : {}),
   });
-  return { fixture, builtIn, stub, lanes, answer: path.answer, eligible: path.eligible };
+  return { fixture, builtIn, stub, lanes, releaseCheck, answer: path.answer, eligible: path.eligible };
 }
 
 function waitingStore(): WaitingQuestionStore {
@@ -1889,13 +1893,30 @@ test('REVIEW R2 re-ask by the agent erases an answered, read row', () => {
   expect(after.result?.answer).toBe('Tuesday');
 });
 
-test('REVIEW R4 transient ledger read failure destroys a stored answer on read', async () => {
+// Both release paths share these steps. Fail the selected read, not a sync
+// convenience method that the pool no longer calls.
+function failLedgerStateRead(ledger: TierLedger, table: 'tier_items' | 'tier_copies') {
+  const original = ledger.itemStatesSteps.bind(ledger);
+  const failure = spyOn(ledger, 'itemStatesSteps').mockImplementation(function* (identities) {
+    const steps = original(identities);
+    let step = steps.next();
+    while (!step.done) {
+      if (step.value.sql.includes(`FROM ${table}`)) throw new Error('SQLITE_BUSY (simulated)');
+      step = steps.next(yield step.value);
+    }
+    return step.value;
+  });
+  cleanups.push(() => failure.mockRestore());
+  return failure;
+}
+
+test.each(['sync', 'pool'] as const)('REVIEW R4 transient ledger read failure destroys a stored answer on read (%s)', async path => {
   const c = await offerCase(undefined);
+  if (path === 'sync') delete c.local.releaseCheck.inputsOffThread;
   const gen0 = c.store.get(c.ref.id)!.generation;
-  const original = c.local.fixture.ledger.itemStatesForMany.bind(c.local.fixture.ledger);
-  c.local.fixture.ledger.itemStatesForMany = () => { throw new Error('SQLITE_BUSY (simulated)'); };
+  const failure = failLedgerStateRead(c.local.fixture.ledger, 'tier_items');
   const read = await c.controller.handle({ action: 'read', id: c.ref.id }, 'owner');
-  c.local.fixture.ledger.itemStatesForMany = original;
+  failure.mockRestore();
   const row = c.store.get(c.ref.id)!;
   expect(read.body).toEqual({ ok: true, status: 'check_unavailable' });
   expect(row.result).toBeDefined();
@@ -1903,21 +1924,63 @@ test('REVIEW R4 transient ledger read failure destroys a stored answer on read',
   expect((await c.controller.handle({ action: 'read', id: c.ref.id }, 'owner')).body.status).toBe('answered');
 });
 
-test('REVIEW R5 transient failure during auto-answer stores a permanent not_found', async () => {
+test.each(['sync', 'pool'] as const)('REVIEW R5 transient failure during auto-answer stores a permanent not_found (%s)', async path => {
   const spec: FixtureSpec = { id: 'offer', name: 'offer.txt', text: 'The synthetic offer price is 620000.' };
   const local = await localFixture({ specs: [spec], privateIds: ['offer'], answer: OFFER_A, keywordOnly: true });
+  if (path === 'sync') delete local.releaseCheck.inputsOffThread;
   const store = waitingStore();
   const ref = store.record(store.ticket('conn-agent'), { question: 'What is the synthetic offer price?', surface: 'remote', state: 'waiting' })!;
   const controller = createLocalPrivateAnswers({ answer: local.answer, eligible: local.eligible, store: () => store });
   cleanups.push(() => controller.close());
-  const original = local.fixture.ledger.itemStatesForMany.bind(local.fixture.ledger);
-  local.fixture.ledger.itemStatesForMany = () => { throw new Error('SQLITE_BUSY (simulated)'); };
+  const failure = failLedgerStateRead(local.fixture.ledger, 'tier_items');
   await controller.tick();
-  local.fixture.ledger.itemStatesForMany = original;
+  failure.mockRestore();
   const first = store.get(ref.id)!;
   await controller.tick();
   expect(first.result).toBeUndefined();
   expect(first.attempts).toBe(1);
+});
+
+test('a real SQLITE_BUSY on the pool withholds a stored answer without changing its generation', async () => {
+  const c = await offerCase(undefined);
+  const ledgerPath = c.local.fixture.ledger.dbPath;
+  const before = c.store.get(c.ref.id)!;
+  expect(before.result?.status).toBe('answered');
+  const ledgerDb = (c.local.fixture.ledger as unknown as { db: Database }).db;
+  // Snapshot connections have closed after the answer. Rollback journal mode
+  // lets another connection's exclusive write lock block the worker's read.
+  ledgerDb.exec('PRAGMA journal_mode = DELETE');
+  const db = new Database(ledgerPath);
+  const snapshot = poolReads.withOffThreadSnapshot;
+  let locked = false;
+  let poolFailure: unknown;
+  const failure = spyOn(poolReads, 'withOffThreadSnapshot').mockImplementation((path, work) => snapshot(path, async read => {
+    if (path !== ledgerPath) return work(read);
+    await read({ sql: 'PRAGMA busy_timeout = 0', params: [], mode: 'get' });
+    db.exec('BEGIN EXCLUSIVE');
+    locked = true;
+    return work(async query => {
+      try { return await read(query); }
+      catch (error) { poolFailure = error; throw error; }
+    });
+  }));
+  try {
+    const read = await c.controller.handle({ action: 'read', id: c.ref.id }, 'owner');
+    expect(poolFailure).toBeInstanceOf(Error);
+    expect((poolFailure as Error).message).toMatch(/locked|busy/i);
+    expect(read.body).toEqual({ ok: true, status: 'check_unavailable' });
+    expect(c.store.get(c.ref.id)?.result).toEqual(before.result);
+    expect(c.store.get(c.ref.id)?.generation).toBe(before.generation);
+  } finally {
+    failure.mockRestore();
+    if (locked) db.exec('ROLLBACK');
+    db.close();
+    ledgerDb.exec('PRAGMA journal_mode = WAL');
+  }
+  const recovered = await c.controller.handle({ action: 'read', id: c.ref.id }, 'owner');
+  expect(recovered.body.status).toBe('answered');
+  expect(recovered.body.answer).toBe(before.result?.answer);
+  expect(c.store.get(c.ref.id)?.generation).toBe(before.generation);
 });
 
 // Anonymous replies share the local-only store, never its remote status surface.
@@ -2042,12 +2105,12 @@ test('re-ask retains answered rows and restarts not-found rows', () => {
   expect(store.get(ref.id)?.result?.answer).toBe('Tuesday');
 });
 
-test('a brief copiesForMany failure hides a stored answer, then shows it again', async () => {
+test.each(['sync', 'pool'] as const)('a brief copiesForMany failure hides a stored answer, then shows it again (%s)', async path => {
   const c = await offerCase(undefined);
-  const original = c.local.fixture.ledger.copiesForMany.bind(c.local.fixture.ledger);
-  c.local.fixture.ledger.copiesForMany = () => { throw new Error('SQLITE_BUSY (simulated)'); };
+  if (path === 'sync') delete c.local.releaseCheck.inputsOffThread;
+  const failure = failLedgerStateRead(c.local.fixture.ledger, 'tier_copies');
   const read = await c.controller.handle({ action: 'read', id: c.ref.id }, 'owner');
-  c.local.fixture.ledger.copiesForMany = original;
+  failure.mockRestore();
   expect(read.body.status).toBe('check_unavailable');
   expect(c.store.get(c.ref.id)?.generation).toBe(c.ref.generation);
   expect((await c.controller.handle({ action: 'read', id: c.ref.id }, 'owner')).body.status).toBe('answered');

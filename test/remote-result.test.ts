@@ -914,6 +914,30 @@ describe('over the wire', () => {
     }
   });
 
+  test.each(['sync', 'pool'] as const)('MCP and OpenAPI withhold equally when the %s release read fails', async path => {
+    let syncReads = 0;
+    let poolReads = 0;
+    releaseCheck = {
+      inputs: inputs => {
+        syncReads++;
+        if (path === 'sync') throw new Error('SQLITE_BUSY');
+        return inputs.map(() => ({ tier: 'public_or_personal', gone: false }));
+      },
+      ...(path === 'pool' ? { inputsOffThread: async () => { poolReads++; throw new Error('SQLITE_BUSY'); } } : {}),
+      secureDerivativeDefault: () => 'allow',
+    };
+    answer = async () => answered([input('garden')], leakyAnswer([leakyEvidence('garden')], 'POOL_RELEASE_SENTINEL'));
+    const { token } = store.create('Muse');
+    const viaRest = JSON.parse((await rest(token, 'source_answer', { question: 'q' })).text);
+    const viaMcp = JSON.parse((await mcp(token, 'source_answer', { question: 'q' })).text);
+    const withheld = { kind: 'source_answer', status: 'withheld', answer: REMOTE_ANSWER_UNVERIFIED, citations: [] };
+    expect(viaRest).toEqual(withheld);
+    expect(viaMcp).toEqual(withheld);
+    expect(JSON.stringify([viaRest, viaMcp])).not.toContain('POOL_RELEASE_SENTINEL');
+    expect(path === 'pool' ? poolReads : syncReads).toBeGreaterThan(0);
+    if (path === 'pool') expect(syncReads).toBe(0);
+  });
+
   test('every source_answer_result family over the wire, on both paths', async () => {
     releaseCheck = fixedCheck('public_or_personal');
     const { token } = store.create('Muse');
@@ -1263,6 +1287,21 @@ describe('local and ChatGPT answer release boundaries', () => {
         const withheld = await call();
         expect(withheld).not.toContain('compost');
         expect(withheld).toContain('Olympus withheld this answer');
+      }
+      for (const path of ['sync', 'pool'] as const) {
+        let checked = false;
+        releaseCheck = {
+          inputs: inputs => {
+            if (path === 'sync') { checked = true; throw new Error('SQLITE_BUSY'); }
+            return inputs.map(() => ({ tier: 'public_or_personal', gone: false }));
+          },
+          ...(path === 'pool' ? { inputsOffThread: async () => { checked = true; throw new Error('SQLITE_BUSY'); } } : {}),
+          secureDerivativeDefault: () => 'allow',
+        };
+        const withheld = await call();
+        expect(checked).toBe(true);
+        expect(withheld).not.toContain('compost');
+        expect(withheld).toContain('could not be verified');
       }
     } finally {
       server.stop(true);

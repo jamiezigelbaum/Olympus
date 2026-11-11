@@ -11,6 +11,7 @@ import { buildSourceIndexCorpusRegistry, defineSourceIndexCorpus } from '../src/
 import { routeSourceIndexSearch } from '../src/core/source-index/router.ts';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { createConnectorStoreCorpusAdapter, defineConnectorCorpus, type ConnectorStoreKeywordFtsOptions, type ConnectorStoreSearchFilters } from '../src/workers/connector-store/local-index.ts';
+import type { VisibilityRead } from '../src/workers/connector-store/child-visibility.ts';
 import { OffThreadReadBusyError, setReadPoolClockForTests, setReadPoolObserverForTests } from '../src/workers/connector-store/off-thread-reads.ts';
 import { FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, openTierFixture, tempDir, type FixtureSpec, type TierFixture } from './helpers/tier-fixtures.ts';
 
@@ -251,7 +252,7 @@ describe('connector store keyword search on the read pool', () => {
   });
 });
 
-/** Runs the search's reads on the store's own connection, calling `between` before each one. */
+/** Drives SQL and visibility effects synchronously; `between` runs before each search SQL read. */
 function driveByHand(
   store: object,
   query: string,
@@ -260,14 +261,24 @@ function driveByHand(
 ): ReturnType<NonNullable<TierFixture['stores']['internal']>['searchItemsDetailed']> {
   const inner = store as unknown as {
     db: Database;
-    searchItemsSteps(...args: unknown[]): Generator<{ sql: string; params: unknown[]; mode: 'get' | 'all' }, ReturnType<NonNullable<TierFixture['stores']['internal']>['searchItemsDetailed']>, unknown>;
+    searchItemsSteps(...args: unknown[]): Generator<VisibilityRead | { sql: string; params: unknown[]; mode: 'get' | 'all' }, ReturnType<NonNullable<TierFixture['stores']['internal']>['searchItemsDetailed']>, unknown>;
   };
   const steps = inner.searchItemsSteps(query, 20, undefined, undefined, options);
   let step = steps.next();
   while (!step.done) {
-    between(step.value);
-    const statement = inner.db.query(step.value.sql);
-    step = steps.next(step.value.mode === 'all' ? statement.all(...(step.value.params as never[])) : statement.get(...(step.value.params as never[])));
+    let rows: unknown;
+    try {
+      if ('here' in step.value) rows = step.value.here();
+      else {
+        between(step.value);
+        const statement = inner.db.query(step.value.sql);
+        rows = step.value.mode === 'all' ? statement.all(...(step.value.params as never[])) : statement.get(...(step.value.params as never[]));
+      }
+    } catch (error) {
+      step = steps.throw(error);
+      continue;
+    }
+    step = steps.next(rows);
   }
   return step.value;
 }
