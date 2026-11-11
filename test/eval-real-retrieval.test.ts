@@ -290,6 +290,13 @@ describe('Analyst repeats on a frozen pack', () => {
     expect(result.answer).toBe('answer 1');
     expect(seen).toEqual([pack, pack, pack]);
     expect(repeats.map((extra) => extra.map((r) => r.answer))).toEqual([['answer 2', 'answer 3']]);
+    // A repeat that fails is counted; the graded first answer still stands.
+    let calls = 0;
+    const flaky = { analyze: async () => { calls += 1; if (calls === 2) throw new Error('provider down'); return { answer: `answer ${calls}`, citations: [], unanswered: [] } as unknown as AnalystResult; } };
+    const failures: number[] = [];
+    const graded = await repeatedEvalAnalyst(flaky, 2, (_pack, extra, failed) => failures.push(extra.length, failed)).analyze(pack, {} as never);
+    expect(graded.answer).toBe('answer 1');
+    expect(failures).toEqual([1, 1]);
     // No extra runs: the Analyst itself, untouched.
     expect(repeatedEvalAnalyst(inner, 0, () => {})).toBe(inner);
   });

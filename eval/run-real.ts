@@ -244,7 +244,7 @@ async function main(): Promise<void> {
     (pack) => detailsByPack.get(pack)?.candidateCorpusIds,
     (pack, seats) => analystSeatsByPack.set(pack, seats),
   );
-  const repeatsByPack = new WeakMap<object, AnalystResult[]>();
+  const repeatsByPack = new WeakMap<object, { results: AnalystResult[]; failures: number }>();
   const repeatThisQuestion = analystRepeatQuestions.length === 0 || analystRepeatQuestions.includes(dataset.questions[0]!.id);
   // How many prompts and model ids the graded (first) answer recorded.
   let firstAnswer: { prompts: number; modelIds: number } | undefined;
@@ -257,8 +257,8 @@ async function main(): Promise<void> {
       },
     },
     repeatThisQuestion ? analystRepeats - 1 : 0,
-    (pack, results) => {
-      repeatsByPack.set(pack, results);
+    (pack, results, failures) => {
+      repeatsByPack.set(pack, { results, failures });
       // The audit's prompt and model fields describe the graded answer only.
       analystPrompts.splice(firstAnswer?.prompts ?? 0);
       analystModelIds.splice(firstAnswer?.modelIds ?? 0);
@@ -303,7 +303,10 @@ async function main(): Promise<void> {
         answerStage: {
           ...evalAnswerStageAudit(question, pack, rawResultsByPack.get(pack), result, analystPrompts, analystModelIds, analystSeatsByPack.get(pack)),
           ...(repeatsByPack.has(pack)
-            ? { answerRepeats: repeatsByPack.get(pack)!.map((repeat) => evalAnswerRepeat(question, pack, repeat)) }
+            ? {
+              answerRepeats: repeatsByPack.get(pack)!.results.map((repeat) => evalAnswerRepeat(question, pack, repeat)),
+              ...(repeatsByPack.get(pack)!.failures > 0 ? { answerRepeatFailures: repeatsByPack.get(pack)!.failures } : {}),
+            }
             : {}),
         },
       });
@@ -729,6 +732,8 @@ export interface EvalAnswerStageAudit {
    * by shape and flags only. The graded answer is the first one.
    */
   answerRepeats?: EvalAnswerRepeat[];
+  /** Repeats whose Analyst call failed: diagnostics only, never the grade. */
+  answerRepeatFailures?: number;
   /**
    * The Analyst's own answer, by its structure: every expected value in it,
    * some, or none (with no citation: it said it found nothing; with
@@ -773,20 +778,28 @@ export function evalAnswerRepeat(
 /**
  * The Analyst, run extraRuns more times on the same pack after its first
  * answer, so a run can tell a steady misreading from a coin flip on one
- * frozen pack. The first answer is the one graded and released.
+ * frozen pack. The first answer is the one graded and released; a repeat
+ * that fails is counted, never allowed to fail the question.
  */
 export function repeatedEvalAnalyst(
   analyst: Analyst,
   extraRuns: number,
-  onRepeats: (pack: EvidencePack, results: AnalystResult[]) => void,
+  onRepeats: (pack: EvidencePack, results: AnalystResult[], failures: number) => void,
 ): Analyst {
   if (extraRuns <= 0) return analyst;
   return {
     async analyze(pack, analyzeOptions) {
       const first = await analyst.analyze(pack, analyzeOptions);
       const extra: AnalystResult[] = [];
-      for (let run = 0; run < extraRuns; run += 1) extra.push(await analyst.analyze(pack, analyzeOptions));
-      onRepeats(pack, extra);
+      let failures = 0;
+      for (let run = 0; run < extraRuns; run += 1) {
+        try {
+          extra.push(await analyst.analyze(pack, analyzeOptions));
+        } catch {
+          failures += 1;
+        }
+      }
+      onRepeats(pack, extra, failures);
       return first;
     },
   };
