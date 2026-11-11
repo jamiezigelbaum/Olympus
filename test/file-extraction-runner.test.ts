@@ -584,6 +584,20 @@ describe('extraction runner: one refused bucket never fails a plan pass', () => 
     } finally { record.mockRestore(); jobs.close(); }
   });
 
+  test('what the source passed over reaches the plan result', async () => {
+    const jobs = jobStore();
+    try {
+      const runner = runnerFor({
+        jobs,
+        extractors: [fakeExtractor()],
+        corpus: { source: fakeSource({ async listCandidates() {
+          return { candidates: [ref(1)], done: true, skipped: { outside_scope: 2 } };
+        } }) },
+      });
+      expect((await runner.plan({ ...LANE, limit: 10 })).candidatesSkipped).toEqual({ outside_scope: 2 });
+    } finally { jobs.close(); }
+  });
+
   test('a refused image is not recorded even when no reader accepts it', async () => {
     const jobs = jobStore();
     const record = spyOn(jobs, 'recordUnroutable');

@@ -357,6 +357,8 @@ export interface ExtractionPlanResult {
    * store to land in.
    */
   jobsSkippedImageNotPrivate?: number;
+  // Rows the source passed over before they became candidates, by reason (ExtractionCandidatePage.skipped).
+  candidatesSkipped?: Readonly<Record<string, number>>;
   extractorKinds: readonly string[];
   nextCursor?: string;
   done: boolean;
@@ -826,6 +828,7 @@ export function createFileExtractionRunner(
         jobsRefused,
         ...(refused.size > 0 ? { jobsRefusedByReason: Object.fromEntries(refused) } : {}),
         ...(jobsSkippedImageNotPrivate > 0 ? { jobsSkippedImageNotPrivate } : {}),
+        ...(page.skipped && Object.keys(page.skipped).length > 0 ? { candidatesSkipped: { ...page.skipped } } : {}),
         extractorKinds: [...new Set([...byKind.values()].map((bucket) => bucket.kind))],
         ...(page.nextCursor !== undefined ? { nextCursor: page.nextCursor } : {}),
         done: page.done,

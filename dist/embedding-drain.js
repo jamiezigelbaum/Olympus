@@ -43036,6 +43036,15 @@ var init_spool = __esm(() => {
   EXTRACTION_SPOOL_STALE_MS = 24 * 60 * 60 * 1000;
 });
 
+// src/workers/file-extraction/types.ts
+var EXTRACTION_CANDIDATE_SKIP;
+var init_types2 = __esm(() => {
+  EXTRACTION_CANDIDATE_SKIP = {
+    excludedByOwner: "excluded_by_owner",
+    outsideScope: "outside_scope"
+  };
+});
+
 // src/workers/dropbox-files/extraction-source.ts
 import { readFile as readFile4, realpath, stat as stat3 } from "node:fs/promises";
 import { relative as relative6, resolve as resolve10, sep as sep6 } from "node:path";
@@ -43084,15 +43093,23 @@ class DropboxExtractionSource {
       readerOptions.accountScope = sharedAccount;
     const page = await this.candidates.extractionCandidates(readerOptions);
     const candidates = [];
+    let outsideScope = 0;
     for (const row of page.candidates) {
       const ref = this.refFromRow(row, scopes);
       if (ref)
         candidates.push(ref);
+      else
+        outsideScope += 1;
     }
+    const skipped = {
+      ...page.skippedByDisposition ? { [EXTRACTION_CANDIDATE_SKIP.excludedByOwner]: page.skippedByDisposition } : {},
+      ...outsideScope > 0 ? { [EXTRACTION_CANDIDATE_SKIP.outsideScope]: outsideScope } : {}
+    };
     return {
       candidates,
       ...page.nextCursor !== undefined ? { nextCursor: page.nextCursor } : {},
-      done: page.done
+      done: page.done,
+      ...Object.keys(skipped).length > 0 ? { skipped } : {}
     };
   }
   async fetch(ref, options) {
@@ -43394,6 +43411,7 @@ var init_extraction_source = __esm(() => {
   init_provider_client();
   init_http_timeout();
   init_file_extraction_source();
+  init_types2();
 });
 
 // src/workers/google-connectors/drive-extraction-source.ts
@@ -61915,7 +61933,7 @@ var init_v4 = __esm(() => {
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/types.js
 var LATEST_PROTOCOL_VERSION = "2025-11-25", SUPPORTED_PROTOCOL_VERSIONS, RELATED_TASK_META_KEY = "io.modelcontextprotocol/related-task", JSONRPC_VERSION = "2.0", AssertObjectSchema, ProgressTokenSchema, CursorSchema, TaskCreationParamsSchema, TaskMetadataSchema, RelatedTaskMetadataSchema, RequestMetaSchema, BaseRequestParamsSchema, TaskAugmentedRequestParamsSchema, isTaskAugmentedRequestParams = (value) => TaskAugmentedRequestParamsSchema.safeParse(value).success, RequestSchema, NotificationsParamsSchema, NotificationSchema, ResultSchema, RequestIdSchema, JSONRPCRequestSchema, isJSONRPCRequest = (value) => JSONRPCRequestSchema.safeParse(value).success, JSONRPCNotificationSchema, isJSONRPCNotification = (value) => JSONRPCNotificationSchema.safeParse(value).success, JSONRPCResultResponseSchema, isJSONRPCResultResponse = (value) => JSONRPCResultResponseSchema.safeParse(value).success, ErrorCode, JSONRPCErrorResponseSchema, isJSONRPCErrorResponse = (value) => JSONRPCErrorResponseSchema.safeParse(value).success, JSONRPCMessageSchema, JSONRPCResponseSchema, EmptyResultSchema, CancelledNotificationParamsSchema, CancelledNotificationSchema, IconSchema, IconsSchema, BaseMetadataSchema, ImplementationSchema, FormElicitationCapabilitySchema, ElicitationCapabilitySchema, ClientTasksCapabilitySchema, ServerTasksCapabilitySchema, ClientCapabilitiesSchema, InitializeRequestParamsSchema, InitializeRequestSchema, ServerCapabilitiesSchema, InitializeResultSchema, InitializedNotificationSchema, isInitializedNotification = (value) => InitializedNotificationSchema.safeParse(value).success, PingRequestSchema, ProgressSchema, ProgressNotificationParamsSchema, ProgressNotificationSchema, PaginatedRequestParamsSchema, PaginatedRequestSchema, PaginatedResultSchema, TaskStatusSchema, TaskSchema, CreateTaskResultSchema, TaskStatusNotificationParamsSchema, TaskStatusNotificationSchema, GetTaskRequestSchema, GetTaskResultSchema, GetTaskPayloadRequestSchema, GetTaskPayloadResultSchema, ListTasksRequestSchema, ListTasksResultSchema, CancelTaskRequestSchema, CancelTaskResultSchema, ResourceContentsSchema, TextResourceContentsSchema, Base64Schema, BlobResourceContentsSchema, RoleSchema, AnnotationsSchema, ResourceSchema, ResourceTemplateSchema, ListResourcesRequestSchema, ListResourcesResultSchema, ListResourceTemplatesRequestSchema, ListResourceTemplatesResultSchema, ResourceRequestParamsSchema, ReadResourceRequestParamsSchema, ReadResourceRequestSchema, ReadResourceResultSchema, ResourceListChangedNotificationSchema, SubscribeRequestParamsSchema, SubscribeRequestSchema, UnsubscribeRequestParamsSchema, UnsubscribeRequestSchema, ResourceUpdatedNotificationParamsSchema, ResourceUpdatedNotificationSchema, PromptArgumentSchema, PromptSchema, ListPromptsRequestSchema, ListPromptsResultSchema, GetPromptRequestParamsSchema, GetPromptRequestSchema, TextContentSchema, ImageContentSchema, AudioContentSchema, ToolUseContentSchema, EmbeddedResourceSchema, ResourceLinkSchema, ContentBlockSchema, PromptMessageSchema, GetPromptResultSchema, PromptListChangedNotificationSchema, ToolAnnotationsSchema, ToolExecutionSchema, ToolSchema, ListToolsRequestSchema, ListToolsResultSchema, CallToolResultSchema, CompatibilityCallToolResultSchema, CallToolRequestParamsSchema, CallToolRequestSchema, ToolListChangedNotificationSchema, ListChangedOptionsBaseSchema, LoggingLevelSchema, SetLevelRequestParamsSchema, SetLevelRequestSchema, LoggingMessageNotificationParamsSchema, LoggingMessageNotificationSchema, ModelHintSchema, ModelPreferencesSchema, ToolChoiceSchema, ToolResultContentSchema, SamplingContentSchema, SamplingMessageContentBlockSchema, SamplingMessageSchema, CreateMessageRequestParamsSchema, CreateMessageRequestSchema, CreateMessageResultSchema, CreateMessageResultWithToolsSchema, BooleanSchemaSchema, StringSchemaSchema, NumberSchemaSchema, UntitledSingleSelectEnumSchemaSchema, TitledSingleSelectEnumSchemaSchema, LegacyTitledEnumSchemaSchema, SingleSelectEnumSchemaSchema, UntitledMultiSelectEnumSchemaSchema, TitledMultiSelectEnumSchemaSchema, MultiSelectEnumSchemaSchema, EnumSchemaSchema, PrimitiveSchemaDefinitionSchema, ElicitRequestFormParamsSchema, ElicitRequestURLParamsSchema, ElicitRequestParamsSchema, ElicitRequestSchema, ElicitationCompleteNotificationParamsSchema, ElicitationCompleteNotificationSchema, ElicitResultSchema, ResourceTemplateReferenceSchema, PromptReferenceSchema, CompleteRequestParamsSchema, CompleteRequestSchema, CompleteResultSchema, RootSchema, ListRootsRequestSchema, ListRootsResultSchema, RootsListChangedNotificationSchema, ClientRequestSchema, ClientNotificationSchema, ClientResultSchema, ServerRequestSchema, ServerNotificationSchema, ServerResultSchema, McpError, UrlElicitationRequiredError;
-var init_types2 = __esm(() => {
+var init_types3 = __esm(() => {
   init_v4();
   SUPPORTED_PROTOCOL_VERSIONS = [LATEST_PROTOCOL_VERSION, "2025-06-18", "2025-03-26", "2024-11-05", "2024-10-07"];
   AssertObjectSchema = custom((v) => v !== null && (typeof v === "object" || typeof v === "function"));
@@ -63537,7 +63555,7 @@ async function registerClient(authorizationServerUrl, { metadata, clientMetadata
 var UnauthorizedError, AUTHORIZATION_CODE_RESPONSE_TYPE = "code", AUTHORIZATION_CODE_CHALLENGE_METHOD = "S256";
 var init_auth2 = __esm(() => {
   init_index_node();
-  init_types2();
+  init_types3();
   init_auth();
   init_auth();
   init_errors4();
@@ -64738,7 +64756,7 @@ function mergeCapabilities(base, additional) {
 var DEFAULT_REQUEST_TIMEOUT_MSEC = 60000;
 var init_protocol = __esm(() => {
   init_zod_compat();
-  init_types2();
+  init_types3();
   init_zod_json_schema_compat();
 });
 
@@ -71323,7 +71341,7 @@ class ExperimentalClientTasks {
   }
 }
 var init_client = __esm(() => {
-  init_types2();
+  init_types3();
 });
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/experimental/tasks/helpers.js
@@ -71406,7 +71424,7 @@ function getSupportedElicitationModes(capabilities) {
 var Client;
 var init_client2 = __esm(() => {
   init_protocol();
-  init_types2();
+  init_types3();
   init_ajv_provider();
   init_zod_compat();
   init_client();
@@ -72394,7 +72412,7 @@ class StreamableHTTPClientTransport {
 }
 var DEFAULT_STREAMABLE_HTTP_RECONNECTION_OPTIONS, StreamableHTTPError;
 var init_streamableHttp = __esm(() => {
-  init_types2();
+  init_types3();
   init_auth2();
   init_stream();
   DEFAULT_STREAMABLE_HTTP_RECONNECTION_OPTIONS = {

@@ -23284,6 +23284,15 @@ var init_spool = __esm(() => {
   EXTRACTION_SPOOL_STALE_MS = 24 * 60 * 60 * 1000;
 });
 
+// src/workers/file-extraction/types.ts
+var EXTRACTION_CANDIDATE_SKIP;
+var init_types2 = __esm(() => {
+  EXTRACTION_CANDIDATE_SKIP = {
+    excludedByOwner: "excluded_by_owner",
+    outsideScope: "outside_scope"
+  };
+});
+
 // src/workers/dropbox-files/extraction-source.ts
 import { readFile as readFile3, realpath, stat as stat3 } from "node:fs/promises";
 import { relative as relative5, resolve as resolve10, sep as sep6 } from "node:path";
@@ -23332,15 +23341,23 @@ class DropboxExtractionSource {
       readerOptions.accountScope = sharedAccount;
     const page2 = await this.candidates.extractionCandidates(readerOptions);
     const candidates = [];
+    let outsideScope = 0;
     for (const row of page2.candidates) {
       const ref = this.refFromRow(row, scopes);
       if (ref)
         candidates.push(ref);
+      else
+        outsideScope += 1;
     }
+    const skipped = {
+      ...page2.skippedByDisposition ? { [EXTRACTION_CANDIDATE_SKIP.excludedByOwner]: page2.skippedByDisposition } : {},
+      ...outsideScope > 0 ? { [EXTRACTION_CANDIDATE_SKIP.outsideScope]: outsideScope } : {}
+    };
     return {
       candidates,
       ...page2.nextCursor !== undefined ? { nextCursor: page2.nextCursor } : {},
-      done: page2.done
+      done: page2.done,
+      ...Object.keys(skipped).length > 0 ? { skipped } : {}
     };
   }
   async fetch(ref, options) {
@@ -23642,6 +23659,7 @@ var init_extraction_source = __esm(() => {
   init_provider_client();
   init_http_timeout();
   init_file_extraction_source();
+  init_types2();
 });
 
 // src/workers/google-connectors/drive-extraction-source.ts

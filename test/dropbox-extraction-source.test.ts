@@ -244,6 +244,21 @@ describe('Dropbox extraction source: candidate enumeration', () => {
     const page = await source.listCandidates({ limit: 10 });
     expect(page.candidates).toHaveLength(1);
     expect(page.candidates[0]?.providerItemId).toBe('id:keep');
+    // Said, not silent: the receipts count what the lane passed over.
+    expect(page.skipped).toEqual({ outside_scope: 1 });
+  });
+
+  test('rows the owner excluded are counted on the page they were passed over', async () => {
+    const source = makeSource({
+      candidates: candidateReader({
+        candidates: [row({ localItemId: `${ACCOUNT}:id:keep`, locatorUri: '/2 Areas/Health/keep.pdf' })],
+        done: true,
+        skippedByDisposition: 3,
+      }),
+    });
+    const page = await source.listCandidates({ limit: 10 });
+    expect(page.candidates).toHaveLength(1);
+    expect(page.skipped).toEqual({ excluded_by_owner: 3 });
   });
 
   test('an item with no locator at all is not a candidate', async () => {
