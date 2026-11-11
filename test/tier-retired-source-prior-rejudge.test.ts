@@ -7,7 +7,7 @@ import { afterEach, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { join } from 'node:path';
 import type { SourceConnector } from '../src/core/contracts.ts';
-import { NAMES_INPUT_REASON_PREFIX, TIER_CLASSIFIER_VERSION, type TierSniffer, type OwnerTierRule } from '../src/workers/classification/tier-classifier.ts';
+import { classifyItemTiers, TIER_CLASSIFIER_VERSION, type TierSniffer, type OwnerTierRule } from '../src/workers/classification/tier-classifier.ts';
 import { rejudgeRoutedItems } from '../src/workers/connector-store/tier-rejudge.ts';
 import { TieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
 import { CachedTierSniffer } from '../src/workers/classification/sniffer.ts';
@@ -140,10 +140,12 @@ test('an owner re-check still drops a retired source prior on a row with no name
   await f.set.sync(restingPrivate(fixtureConnector(() => [{ id: 'chat', name: 'Tiago', text: 'See you at the café at seven.' }]), basis),
     { fetchContent: true, placement: FIXTURE_PLACEMENT });
   const identity = identityOf('chat');
-  const before = f.ledger.getCurrent(identity)!;
+  expect(f.ledger.getCurrent(identity)!.reasons).toContain(`metadata:prior:${basis}`);
   // A legacy row: written before names-input receipts existed.
-  f.ledger.recordRoutedPlacement(identity, { ...before, reasons: before.reasons.filter(reason => !reason.startsWith(NAMES_INPUT_REASON_PREFIX)) },
-    f.set.placementFor(before));
+  const fresh = classifyItemTiers({ signals: { title: 'Tiago', path: '/Files/Tiago' }, text: 'See you at the café at seven.' });
+  const legacy = { ...fresh, metadataTier: 'secure' as const, contentTier: 'secure' as const,
+    reasons: [`metadata:prior:${basis}`, 'metadata:sniffer:old-build:ordinary'] };
+  f.ledger.recordRoutedPlacement(identity, legacy, f.set.placementFor(legacy));
   expect(f.ledger.requestRecheck({ conversationKey: '' }).items).toBeGreaterThan(0);
   expect(rejudgeRoutedItems({ set: f.set, autoMoves: true }).report).toMatchObject({ failed: 0 });
   const after = f.ledger.getCurrent(identity)!;
