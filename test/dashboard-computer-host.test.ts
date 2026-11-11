@@ -951,6 +951,31 @@ describe('the host page renderer', () => {
     expect(html).toContain('"archives":"archive.imports"');
   });
 
+  test('an open link followed while the dashboard is open loads the page again, so its landing is read (nightly archive rows)', () => {
+    const html = renderComputerHostPage({ panelHtml: '<p></p>', origin: ORIGIN });
+    const start = html.indexOf('<script>') + '<script>'.length;
+    const script = html.slice(start, html.indexOf('</script>', start));
+    const win = new Window({ url: `${ORIGIN}/dashboard`, settings: { disableIframePageLoading: true } });
+    windows.push(win);
+    win.document.write(html.slice(0, start - '<script>'.length) + html.slice(html.indexOf('</script>', start) + '</script>'.length));
+    const listeners: Record<string, Array<() => void>> = {};
+    let reloads = 0;
+    const location = { hash: '', pathname: '/dashboard', search: '', href: `${ORIGIN}/dashboard`, origin: ORIGIN, reload: () => { reloads += 1; } };
+    const fakeWindow = {
+      setInterval: () => 0,
+      location,
+      history: { replaceState: () => undefined },
+      open: () => null,
+      addEventListener: (type: string, listener: () => void) => { (listeners[type] ??= []).push(listener); },
+    };
+    new Function('window', 'document', 'fetch', 'navigator', script)(fakeWindow, win.document, async () => Response.json({}), win.navigator);
+    const hashchange = (hash: string) => { location.hash = hash; for (const listener of listeners.hashchange ?? []) listener(); };
+    hashchange('#somewhere-else');
+    expect(reloads).toBe(0);
+    hashchange('#olympus-open=sources');
+    expect(reloads).toBe(1);
+  });
+
   test('its policy frames nothing else and is framed by nothing', () => {
     expect(COMPUTER_HOST_PAGE_CSP).toContain("frame-ancestors 'none'");
     expect(COMPUTER_HOST_PAGE_CSP).toContain("default-src 'none'");

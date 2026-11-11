@@ -317,8 +317,13 @@ function hostProgram(input: {
     }
     return result;
   }
+  // An open link followed while this page is already open changes only the
+  // fragment, which loads nothing; its landing is read at load, so load again.
   if (typeof window.addEventListener === 'function') {
-    window.addEventListener('hashchange', () => { if (window.location.hash === input.setupAgent.fragment) openSetupAgent(); });
+    window.addEventListener('hashchange', () => {
+      if (window.location.hash === input.setupAgent.fragment) openSetupAgent();
+      else if (window.location.hash.indexOf(input.openFragment) === 0) window.location.reload();
+    });
   }
   if (typeof document.addEventListener === 'function') document.addEventListener('click', (event) => {
     const target = event.target as Element | null;
