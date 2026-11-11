@@ -76316,6 +76316,7 @@ function promptBudgetedAnalyst(analyst, promptBytes, candidateCorpus, recencySea
 function fitPackToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats = 0) {
   if (analystPromptBytes(pack, analyzeOptions) <= maxPromptBytes)
     return pack;
+  const termGroups = sourceIndexFtsTermGroups(pack.question);
   const headSeats = RESERVED_HEAD_SEATS + recencySeats;
   const order = [
     ...pack.candidates.slice(0, headSeats),
@@ -76332,7 +76333,7 @@ function fitPackToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOpti
     for (let attempt = 0;attempt < 6; attempt += 1) {
       if (share < MIN_FITTED_BYTES_PER_CANDIDATE && keep > 1)
         break;
-      const fitted = restatePack(pack, base.map((candidate) => ({ ...candidate, chunks: clipChunksToUtf8Bytes(candidate.chunks, Math.max(0, share)) })), candidateCorpus);
+      const fitted = restatePack(pack, base.map((candidate) => ({ ...candidate, chunks: clipQuestionChunksToUtf8Bytes(candidate.chunks, Math.max(0, share), termGroups) })), candidateCorpus);
       const bytes = analystPromptBytes(fitted, analyzeOptions);
       if (bytes <= maxPromptBytes)
         return fitted;
@@ -76341,6 +76342,19 @@ function fitPackToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOpti
     }
   }
   return fallback ?? restatePack(pack, order.slice(0, 1).map((candidate) => ({ ...candidate, chunks: [] })), candidateCorpus);
+}
+function clipQuestionChunksToUtf8Bytes(chunks, maxBytes, termGroups) {
+  if (maxBytes <= 0 || !chunks.some((chunk) => sourceIndexChunkTermScore(chunk, termGroups) > 0)) {
+    return clipChunksToUtf8Bytes(chunks, maxBytes);
+  }
+  const windows = boundedSourceIndexChunks(chunks, maxBytes, termGroups).chunks.map((chunk) => {
+    const first = chunk.charCodeAt(0);
+    const last = chunk.charCodeAt(chunk.length - 1);
+    const start = first >= 56320 && first <= 57343 ? 1 : 0;
+    const end = last >= 55296 && last <= 56319 ? chunk.length - 1 : chunk.length;
+    return chunk.slice(start, end);
+  });
+  return clipChunksToUtf8Bytes(windows, maxBytes);
 }
 function roundRobinCandidates(candidates, candidateCorpus) {
   const byCorpus = new Map;
@@ -77780,6 +77794,8 @@ async function readPrivateEvidenceItem(input) {
 var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES = 13500, CLOUD_ANALYST_PROMPT_BYTES, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 20000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 600000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 120000, DEFAULT_SELF_HEAL_MAX_MS = 20000, MIN_FITTED_BYTES_PER_CANDIDATE = 600, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS, RELEASED_EXCERPT_MAX_CHARS = 1500, PRIVATE_EVIDENCE_MAX_RESULTS = 12, PRIVATE_DEPTH_MAX_PASSAGES = 24, PRIVATE_EVIDENCE_BYTE_BUDGET = 20000, PRIVATE_NEIGHBOURS_MAX = 4;
 var init_analyst_answer = __esm(() => {
   init_embeddings();
+  init_chunk_selection();
+  init_fts();
   init_answer_activity();
   init_analyst();
   init_analyst_openclaw_infer();

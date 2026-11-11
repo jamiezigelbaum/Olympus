@@ -21248,6 +21248,8 @@ var DEFAULT_SECURE_ANALYST_POOL_FAILURE_THRESHOLD = 2, DEFAULT_SECURE_ANALYST_PO
 var CLOUD_ANALYST_PROMPT_BYTES;
 var init_analyst_answer = __esm(() => {
   init_embeddings();
+  init_chunk_selection();
+  init_fts();
   init_answer_activity();
   init_analyst();
   init_analyst_openclaw_infer();
