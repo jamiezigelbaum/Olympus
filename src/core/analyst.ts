@@ -399,7 +399,9 @@ export function createAnalyst(model: AnalystModel, createOptions: CreateAnalystO
       if (createOptions.auditSuspiciousDrafts === true && shouldAuditPack(pack)) {
         const auditCompletion = await model.complete({
           system: ANALYST_AUDIT_SYSTEM,
-          prompt: buildAnalystAuditPrompt(pack, parsed, localOnly),
+          prompt: compact
+            ? compactAuditPrompt(pack, parsed, promptEncoder.encode(`${request.system}\n\n${request.prompt}`).length)
+            : buildAnalystAuditPrompt(pack, parsed, localOnly),
           localOnly,
           maxOutputChars: auditMaxOutputChars,
           ...(createOptions.boundedResponseSchema ? { responseSchema: analystResponseSchema(auditMaxOutputChars) } : {}),
@@ -531,7 +533,12 @@ function buildCompactAnalystPrompt(pack: EvidencePack): string {
   return [`Question: ${pack.question}`, '', 'Evidence:', blocks.join('\n\n'), ...(versions.some(Boolean) ? ['', VERSION_INSTRUCTION] : []), '', formatCoverage(pack)].join('\n');
 }
 
-function formatCompactCandidate(candidate: EvidenceCandidate, number: number, versionNote?: string): string {
+function formatCompactCandidate(
+  candidate: EvidenceCandidate,
+  number: number,
+  versionNote?: string,
+  passages: readonly string[] = candidate.chunks,
+): string {
   const citation = candidate.provenance.citation;
   const item = candidate.provenance.sourceItem;
   const title = compactSourceText(
@@ -564,7 +571,7 @@ function formatCompactCandidate(candidate: EvidenceCandidate, number: number, ve
   }
   const factClaims = (candidate.facts ?? []).map((fact) => fact.claim.trim()).filter(Boolean);
   if (factClaims.length > 0) lines.push(`extracted facts: ${factClaims.join(' | ')}`);
-  const chunks = candidate.chunks.map(compactSourceText).filter(Boolean);
+  const chunks = passages.map(compactSourceText).filter(Boolean);
   if (chunks.length > 0) lines.push(`source_data: ${JSON.stringify(chunks)}`);
   const tables = (candidate.tables ?? []).map(formatTable);
   if (tables.length > 0) lines.push(`tables: ${JSON.stringify(tables)}`);
@@ -578,14 +585,39 @@ function compactLocator(uri: string | undefined, title: string): string | undefi
   return uri;
 }
 
+/**
+ * A compact Analyst's audit prompt. Its pack was fitted to a byte budget for
+ * the compact main call, so the audit renders each candidate as that call
+ * did (compact header, the audit's bounded passages) and is held to the main
+ * call's size: the draft and the audit rules take their room from the
+ * passages, shrunk evenly until the whole audit call fits.
+ */
+function compactAuditPrompt(pack: EvidencePack, draft: ParsedModelOutput | null, maxBytes: number): string {
+  let chars = AUDIT_CHARS_PER_CANDIDATE;
+  let prompt = buildAnalystAuditPrompt(pack, draft, false, chars);
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const bytes = promptEncoder.encode(`${ANALYST_AUDIT_SYSTEM}\n\n${prompt}`).length;
+    if (bytes <= maxBytes) break;
+    const passageBytes = promptEncoder.encode(prompt).length - promptEncoder.encode(buildAnalystAuditPrompt(pack, draft, false, 0)).length;
+    if (passageBytes <= 0) break;
+    chars = Math.max(0, Math.floor(chars * Math.max(0, passageBytes - (bytes - maxBytes)) / passageBytes) - 1);
+    prompt = buildAnalystAuditPrompt(pack, draft, false, chars);
+  }
+  return prompt;
+}
+
 function buildAnalystAuditPrompt(
   pack: EvidencePack,
   draft: ParsedModelOutput | null,
   includeLocalPrivateProvenance: boolean,
+  compactChars?: number,
 ): string {
   const versions = candidateVersionNotes(pack);
-  const blocks = pack.candidates.map((candidate, index) =>
-    formatAuditCandidate(candidate, index + 1, includeLocalPrivateProvenance, pack.question, versions[index]));
+  // compactChars: render candidates as the compact main call does, with that
+  // many audit passage characters each (compactAuditPrompt).
+  const blocks = pack.candidates.map((candidate, index) => compactChars !== undefined
+    ? formatCompactCandidate(candidate, index + 1, versions[index], compactChars > 0 ? auditChunks(candidate, pack.question, compactChars) : [])
+    : formatAuditCandidate(candidate, index + 1, includeLocalPrivateProvenance, pack.question, versions[index]));
   return [
     `Question: ${pack.question}`,
     '',
@@ -693,18 +725,22 @@ function formatAuditCandidate(
   if (factClaims.length > 0) lines.push(`extracted facts: ${factClaims.join(' | ')}`);
   const tables = (candidate.tables ?? []).map(formatTable);
   if (tables.length > 0) lines.push(`tables: ${JSON.stringify(tables)}`);
-  // The audit is deliberately bounded, but a prefix slice silently discards
-  // later chunks even when they carry another requested value. Reuse the
-  // shared source-neutral selector so the same budget is distributed across
-  // distinct query-relevant chunks and clipped around their densest term
-  // windows. This changes no EvidencePack or Analyst contract.
-  const auditChunks = boundedSourceIndexChunks(
-    candidate.chunks,
-    AUDIT_CHARS_PER_CANDIDATE,
-    sourceIndexChunkQueryTerms(question),
-  ).chunks.map(compactSourceText).filter(Boolean);
-  if (auditChunks.length > 0) lines.push(`source_data: ${JSON.stringify(auditChunks)}`);
+  const passages = auditChunks(candidate, question).map(compactSourceText).filter(Boolean);
+  if (passages.length > 0) lines.push(`source_data: ${JSON.stringify(passages)}`);
   return lines.join('\n');
+}
+
+// The audit is deliberately bounded, but a prefix slice silently discards
+// later chunks even when they carry another requested value. Reuse the
+// shared source-neutral selector so the same budget is distributed across
+// distinct query-relevant chunks and clipped around their densest term
+// windows. This changes no EvidencePack or Analyst contract.
+function auditChunks(candidate: EvidenceCandidate, question: string, maxChars = AUDIT_CHARS_PER_CANDIDATE): string[] {
+  return boundedSourceIndexChunks(
+    candidate.chunks,
+    maxChars,
+    sourceIndexChunkQueryTerms(question),
+  ).chunks;
 }
 
 function shouldAuditPack(pack: EvidencePack): boolean {

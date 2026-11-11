@@ -73381,7 +73381,9 @@ function createAnalyst(model, createOptions = {}) {
       if (createOptions.auditSuspiciousDrafts === true && shouldAuditPack(pack)) {
         const auditCompletion = await model.complete({
           system: ANALYST_AUDIT_SYSTEM,
-          prompt: buildAnalystAuditPrompt(pack, parsed, localOnly),
+          prompt: compact ? compactAuditPrompt(pack, parsed, promptEncoder.encode(`${request.system}
+
+${request.prompt}`).length) : buildAnalystAuditPrompt(pack, parsed, localOnly),
           localOnly,
           maxOutputChars: auditMaxOutputChars,
           ...createOptions.boundedResponseSchema ? { responseSchema: analystResponseSchema(auditMaxOutputChars) } : {},
@@ -73466,7 +73468,7 @@ function buildCompactAnalystPrompt(pack) {
 `), ...versions.some(Boolean) ? ["", VERSION_INSTRUCTION] : [], "", formatCoverage(pack)].join(`
 `);
 }
-function formatCompactCandidate(candidate, number, versionNote) {
+function formatCompactCandidate(candidate, number, versionNote, passages = candidate.chunks) {
   const citation = candidate.provenance.citation;
   const item = candidate.provenance.sourceItem;
   const title = compactSourceText(citation?.title?.trim() || citation?.sourceLabel?.trim() || `${item.provider}/${item.family}:${item.providerItemId}`);
@@ -73505,7 +73507,7 @@ function formatCompactCandidate(candidate, number, versionNote) {
   const factClaims = (candidate.facts ?? []).map((fact) => fact.claim.trim()).filter(Boolean);
   if (factClaims.length > 0)
     lines.push(`extracted facts: ${factClaims.join(" | ")}`);
-  const chunks = candidate.chunks.map(compactSourceText).filter(Boolean);
+  const chunks = passages.map(compactSourceText).filter(Boolean);
   if (chunks.length > 0)
     lines.push(`source_data: ${JSON.stringify(chunks)}`);
   const tables = (candidate.tables ?? []).map(formatTable);
@@ -73521,9 +73523,26 @@ function compactLocator(uri, title) {
     return uri.slice(0, -(title.length + 1)) || undefined;
   return uri;
 }
-function buildAnalystAuditPrompt(pack, draft, includeLocalPrivateProvenance) {
+function compactAuditPrompt(pack, draft, maxBytes) {
+  let chars = AUDIT_CHARS_PER_CANDIDATE;
+  let prompt = buildAnalystAuditPrompt(pack, draft, false, chars);
+  for (let attempt = 0;attempt < 6; attempt += 1) {
+    const bytes = promptEncoder.encode(`${ANALYST_AUDIT_SYSTEM}
+
+${prompt}`).length;
+    if (bytes <= maxBytes)
+      break;
+    const passageBytes = promptEncoder.encode(prompt).length - promptEncoder.encode(buildAnalystAuditPrompt(pack, draft, false, 0)).length;
+    if (passageBytes <= 0)
+      break;
+    chars = Math.max(0, Math.floor(chars * Math.max(0, passageBytes - (bytes - maxBytes)) / passageBytes) - 1);
+    prompt = buildAnalystAuditPrompt(pack, draft, false, chars);
+  }
+  return prompt;
+}
+function buildAnalystAuditPrompt(pack, draft, includeLocalPrivateProvenance, compactChars) {
   const versions = candidateVersionNotes(pack);
-  const blocks = pack.candidates.map((candidate, index) => formatAuditCandidate(candidate, index + 1, includeLocalPrivateProvenance, pack.question, versions[index]));
+  const blocks = pack.candidates.map((candidate, index) => compactChars !== undefined ? formatCompactCandidate(candidate, index + 1, versions[index], compactChars > 0 ? auditChunks(candidate, pack.question, compactChars) : []) : formatAuditCandidate(candidate, index + 1, includeLocalPrivateProvenance, pack.question, versions[index]));
   return [
     `Question: ${pack.question}`,
     "",
@@ -73598,11 +73617,14 @@ function formatAuditCandidate(candidate, number, includeLocalPrivateProvenance, 
   const tables = (candidate.tables ?? []).map(formatTable);
   if (tables.length > 0)
     lines.push(`tables: ${JSON.stringify(tables)}`);
-  const auditChunks = boundedSourceIndexChunks(candidate.chunks, AUDIT_CHARS_PER_CANDIDATE, sourceIndexChunkQueryTerms(question)).chunks.map(compactSourceText).filter(Boolean);
-  if (auditChunks.length > 0)
-    lines.push(`source_data: ${JSON.stringify(auditChunks)}`);
+  const passages = auditChunks(candidate, question).map(compactSourceText).filter(Boolean);
+  if (passages.length > 0)
+    lines.push(`source_data: ${JSON.stringify(passages)}`);
   return lines.join(`
 `);
+}
+function auditChunks(candidate, question, maxChars = AUDIT_CHARS_PER_CANDIDATE) {
+  return boundedSourceIndexChunks(candidate.chunks, maxChars, sourceIndexChunkQueryTerms(question)).chunks;
 }
 function shouldAuditPack(pack) {
   return pack.candidates.some((candidate) => candidate.chunks.length > 0 || (candidate.facts?.length ?? 0) > 0 || (candidate.tables?.length ?? 0) > 0);
