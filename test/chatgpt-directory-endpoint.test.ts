@@ -338,7 +338,8 @@ describe('/openai/mcp serves the same surface, narrowed, as submitted', () => {
       expect(names(onDirectory)).toContain('olympus_delete_source_data');
       expect(names(onDirectory)).toEqual(names(onMcp).filter(isDirectoryTool));
       expect(onDirectory).toEqual(approved(names(onDirectory)));
-      expect(names(onMcp).includes('source_answer')).toBe(withModel);
+      // Ask stays listed without an answer model and explains setup when called (#1370).
+      expect(names(onMcp)).toContain('source_answer');
     }
   });
 
