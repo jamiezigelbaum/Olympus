@@ -29,9 +29,11 @@ import {
 import type { LocalConnectorStoreOptions } from '../src/workers/connector-store/local-index.ts';
 import {
   parseConnectorStoreMountsFromEnv,
+} from '../src/workers/engine/runtime/connector-mounts.ts';
+import {
   sourceIndexLaneAccountDecision,
   type SourceIndexLaneDecision,
-} from '../src/workers/engine/server.ts';
+} from '../src/workers/engine/runtime/source-lanes.ts';
 
 let dir: string;
 let env: Record<string, string>;

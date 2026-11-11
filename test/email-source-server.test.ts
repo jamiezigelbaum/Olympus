@@ -9,12 +9,20 @@ import {
   createCloudSourceIndexEmbeddingProviderFromEnv,
   createSourceIndexEmbeddingProviderFromEnv,
   createSourceIndexEmbeddingProviderFromSovereignty,
+} from '../src/workers/engine/runtime/embedding-providers.ts';
+import {
   parseConnectorStoreMountsFromEnv,
+} from '../src/workers/engine/runtime/connector-mounts.ts';
+import {
   parseOptionalTimeoutSeconds,
   parseOptionalTimeoutSecondsOrNone,
+} from '../src/workers/engine/runtime/environment.ts';
+import {
   resolveEmailSourceBindHostFromEnv,
-  sourceIndexLaneDecision,
 } from '../src/workers/engine/server.ts';
+import {
+  sourceIndexLaneDecision,
+} from '../src/workers/engine/runtime/source-lanes.ts';
 
 describe('canonical source-worker server configuration', () => {
   test('keeps the worker on loopback by default and honors the canonical host key', () => {

@@ -1,13 +1,13 @@
 import { createDashboardPeople } from '../email-source/dashboard-people.ts';
-import { LocalPeopleIndex, PeopleIndexRefresher, peopleIndexPath, type PeopleSenderIdentity } from '../../core/people-index.ts';
+import { PeopleIndexRefresher } from '../../core/people-index.ts';
 import { adoptExistingCloudApproval, carryCloudJudgeApproval, createJudgeSetup } from '../classification/judge-setup.ts';
 import { createOwnerTierItems, getOwnerTierItem } from '../classification/tier-owner-items.ts';
 import { createJudgeCheck } from '../classification/judge-check.ts';
 import { builtInRerankerFromEnv } from '../source-index/built-in-reranker.ts';
-import { JudgeSpending, withJudgeSpendingStop, judgeSpendingPath } from '../classification/judge-spending.ts';
+import { JudgeSpending, judgeSpendingPath } from '../classification/judge-spending.ts';
 import { JudgeObservations, SecondRoundConfirmed, SecondRoundSweep, judgeObservationsPath, judgeSecondRoundConfirmedPath, judgeSecondRoundStatePath, observedJudge, secondRoundJudge } from '../classification/judge-second-round.ts';
-import { DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS, JUDGE_PROMPT_CACHE_KEY, JUDGE_SAMPLING, JudgeRateLimitPacer } from '../classification/judge-pacing.ts';
-import { createDecisionSnifferModel, type SnifferModel } from '../classification/sniffer-decision.ts';
+import { DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS } from '../classification/judge-pacing.ts';
+import { type SnifferModel } from '../classification/sniffer-decision.ts';
 import { macComputerSetupView, saveMacComputerUseChoice } from '../../core/engine-service.ts';
 import { release, totalmem } from 'node:os';
 import { createPrivacyQuestionEngine } from '../classification/privacy-questions.ts';
@@ -18,7 +18,7 @@ import { privacyChoicePending } from '../../core/first-run-privacy.ts';
 import { LocalModelDiscovery, saveLocalAnswerModel } from '../../core/local-model-discovery.ts';
 import { saveFirstRunPrivacyChoice, savePrivateAnswerMode } from '../../core/first-run-privacy.ts';
 import { createSpoolChangeSubscription } from '../messaging-spool-wake.ts';
-import { hasFolderLayout, resolvedRawPath, resolvedStorePath, retiredPathSettings } from '../../core/source-placement.ts';
+import { resolvedStorePath, retiredPathSettings } from '../../core/source-placement.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_COPY as PRIVATE_ANSWERS_COPY } from '../dashboard/vocabulary.ts';
 import { anonymousInboxConnectionId, localInboxLabel, askWithAnonymousInbox } from '../email-source/local-private-answers.ts';
 import { installWorkerShutdownSignals } from '../../core/worker-shutdown.ts';
@@ -37,18 +37,10 @@ import { modelInstallFailedReason, modelInstallSpaceToFree } from '../../core/mo
 import { accountFromGoogleHandle } from '../google-connectors/classification.ts';
 import { olympusPackageRoot } from '../../core/package-root.ts';
 import {
-  MessagingCaptureSupervisor,
-  NativeMessagingCaptureOwnerError,
-  defaultMessagingCaptureGrantPath,
-  effectiveMessagingCaptureStatus,
-  readMessagingCaptureGrantFacts,
-  revokeMessagingCaptureGrant,
-  type MessagingCaptureLiveness,
   type MessagingCaptureStatus,
 } from '../../core/messaging-capture.ts';
 import { whatsappBridgePathForPackage } from '../../core/messaging-pairing.ts';
 import { unlinkHelper } from '../email-source/dashboard-messaging-service.ts';
-import { NATIVE_CAPTURE_OWNER_ENV_NAMES } from '../../core/native-worker-service.ts';
 import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } from '../../core/model-setup.ts';
 import { workerRestartsItself, type ModelKeyReloadRequest, type WorkerLaunch } from '../../core/model-key-reload.ts';
 import { connectGeminiApiKey, connectPublicApiKeySource } from '../../core/connect.ts';
@@ -57,7 +49,7 @@ import { remoteOpenInstructions, resolveServerMode, resolveAgentApprovalHost } f
 import { loadOrCreateDashboardSessionSecret } from '../../core/dashboard-session-secret.ts';
 import { execFile } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, isAbsolute, join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   createFileExtractionRuntime,
   createRefreshableFileExtractionRuntime,
@@ -69,7 +61,6 @@ import {
 import { createExtractionReadinessLedger } from '../file-extraction/readiness-ledger.ts';
 import { createUnreadableFiles, createUnreadableVerdict } from '../file-extraction/unreadable-files.ts';
 import { VeniceVlmClient } from '../file-extraction/extractors/venice-client.ts';
-import { OpenAICompatibleVlmClient } from '../file-extraction/extractors/openai-compatible-client.ts';
 import { parseOcrEnginePreference } from '../file-extraction/extractors/apple-vision-ocr.ts';
 import {
   EmailSourceWorkerError,
@@ -77,13 +68,7 @@ import {
   dashboardSourceSyncNotSupportedError,
   defineGmailSecureLocalCorpus,
   defineInternalEmailCorpus,
-  GMAIL_SECURE_LOCAL_CORPUS_ID,
-  INTERNAL_EMAIL_CORPUS_ID,
-  GogcliEmailConnector,
-  type EmailSourceConnector,
-  type ConnectorStoreChatPrincipal,
   type ConnectorStoreDeclaredPrincipal,
-  type GmailEmailCorpusId,
 } from './index.ts';
 import {
   createAnalystSourceIndexAnswerHandler,
@@ -93,22 +78,16 @@ import {
   probePrivateMatch,
   searchPrivateEvidence,
   searchReleasedEvidence,
-  type AnalystAnswerLanes,
-  type SecureLocalAnalystRouteStatus,
-  type SovereigntyAnalystRoutePlan,
-  type SovereigntyAnalystRouteStep,
 } from '../source-index/analyst-answer.ts';
 import { SecureAnalystPoolState, parseSecureAnalystPoolLastLegTimeoutMs } from '../source-index/analyst-pool.ts';
 import {
   createFileSourceAnswerLatencyLog,
   resolveSourceAnswerLatencyLogPath,
 } from '../source-index/answer-latency-log.ts';
-import type { EvidencePackBuildDetail } from '../../core/evidence-pack.ts';
 import type { SourceIndexAnswerRequest } from '../source-index/answer-types.ts';
 import {
   createSourceIndexStatusHandler,
   DASHBOARD_READINESS_LEDGER_MAX_AGE_MS,
-  resolveStatusRetrievalAvailability,
   type SourceIndexStatusRetrievalAvailability,
 } from '../source-index/status.ts';
 import {
@@ -127,47 +106,36 @@ import {
 import { runningBuiltInTranscriber, sharedBuiltInTranscriber, wireBuiltInTranscriptionAtBoot } from '../file-extraction/extractors/built-in-transcriber.ts';
 import {
   answerPrivately,
-  builtInAnalystEnabled,
   builtInPrivateModelStatus,
   BUILT_IN_ANALYST_MODEL_ENV,
-  createBuiltInAnalystModel,
-  resolveBuiltInReasoningModel,
   withBuiltInFallback,
-  type BuiltInAnalystModel,
 } from '../../core/analyst-built-in.ts';
 import { createDelphiAnalystModel } from '../../core/analyst-delphi.ts';
-import { createAnthropicAnalystModel } from '../../core/analyst-anthropic.ts';
 import { createOpenClawInferAnalystModel } from '../../core/analyst-openclaw-infer.ts';
 import {
-  approvedVeniceAnalystBaseUrl,
   createVeniceAnalystModel,
-  type VeniceThinkingMode,
 } from '../../core/analyst-venice.ts';
 import {
   createVenicePrivacyCategoryResolver,
   readVeniceTextCatalogModels,
-  type VeniceModelCatalogOptions,
 } from '../../core/venice-model-catalog.ts';
 import { builtInModelEnvValue, readModelChoices, resolveVeniceStrongest } from '../../core/model-choices.ts';
-import { CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT, readConsultSettings } from '../../core/consult-settings.ts';
+import { CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT } from '../../core/consult-settings.ts';
 import { createModelChoicesBackend, LOCAL_PROFILE_ID, VENICE_PROFILE_ID } from '../email-source/model-choices-backend.ts';
-import {
-  assertVeniceAnalystModelAllowed,
-  assertVeniceEmbeddingModelAllowed,
-} from '../../core/venice-models.ts';
-import { createOpenAICompatibleAnalystModel, type OpenAIReasoningEffort } from '../../core/analyst-openai.ts';
 import { createAnalystQueryPlanner } from '../../core/query-planner.ts';
-import { claudeAppEnabled, defaultConfig, loadConfig, loadWorkerConfig, parseLane, readOpenClawPluginRemote, parseModelProfile, parseOptionalBooleanEnv } from '../../core/config.ts';
+import {
+  claudeAppEnabled,
+  loadWorkerConfig,
+  parseLane,
+  readOpenClawPluginRemote,
+  parseModelProfile,
+  parseOptionalBooleanEnv,
+} from '../../core/config.ts';
 import { DelphiClient } from '../../core/delphi.ts';
 import {
   describeSovereigntyPolicy,
   isPublicTierRetired,
   isStandaloneEngineProcess,
-  loadSovereigntyEngine,
-  type SovereigntyEngine,
-  type LoadSovereigntyOptions,
-  type SovereigntyModelProfile,
-  type SovereigntyResolvedProfile,
   validateSovereigntyConfig,
 } from '../../core/sovereignty.ts';
 import { createSourceCorpusRegistry } from '../../core/source-corpus-registry.ts';
@@ -180,19 +148,15 @@ import {
   buildSourceIndexCorpusRegistry,
 } from '../../core/source-index/corpus.ts';
 import {
-  GOOGLE_DRIVE_DOCS_CORPUS_ID,
   GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
   GMAIL_SOURCE_ID,
   GOOGLE_DRIVE_SOURCE_ID,
   GMAIL_SECURE_CONNECTOR_CORPUS_ID,
-  GOOGLE_DRIVE_ENFORCEABLE_EXCLUSION_CRITERIA,
-  GOOGLE_DRIVE_INGESTION_EXCLUSION_SOURCE,
   GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
   GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
   GoogleDailyRequestBudget,
   GoogleGmailSourceConnector,
   createGmailConnectorStoreSyncHandler,
-  gmailCursorConnectorId,
   createGmailDailyRequestBudget,
   createGoogleDriveConnectorStoreSyncHandler,
   createGoogleDriveDailyRequestBudget,
@@ -204,39 +168,19 @@ import {
   type GoogleDriveConnectorStoreSyncHandler,
 } from '../google-connectors/index.ts';
 import {
-  READWISE_LIBRARY_CORPUS_ID,
   READWISE_SOURCE_ID,
-  ReadwiseDailyRequestBudget,
-  createReadwiseConnectorStore,
-  createReadwiseConnectorStoreSyncHandler,
-  createReadwiseDailyRequestBudget,
   defineReadwiseLibraryCorpus,
-  type ReadwiseConnectorStoreSyncHandler,
 } from '../readwise/index.ts';
 import {
-  LocalXBookmarksApiUsageStore,
-  LocalXBookmarksReconcileStateStore,
   X_BOOKMARKS_CORPUS_ID,
   X_BOOKMARKS_SOURCE_ID,
-  createXBookmarksConnectorStore,
-  createXBookmarksConnectorStoreSyncHandler,
-  createXBookmarksContentRecoveryHandler,
   defineXBookmarksCorpus,
-  type XBookmarksConnectorStoreSyncHandler,
-  type XBookmarksContentRecoveryHandler,
 } from '../x-bookmarks/index.ts';
 import {
-  DROPBOX_APPROVED_SCOPE_FILTER_CODEC,
-  DROPBOX_ENFORCEABLE_EXCLUSION_CRITERIA,
   DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
-  DROPBOX_INGESTION_EXCLUSION_SOURCE,
-  DROPBOX_FILES_CORPUS_ID,
   DROPBOX_FILES_SOURCE_ID,
-  createDropboxEvalShardExportHandler,
-  createDropboxSourceExportHandler,
   defineDropboxFilesCorpus,
   createDropboxConnectorStore,
-  dropboxIngestionExclusionMatcher,
 } from '../dropbox-files/index.ts';
 import { createDropboxProviderStoreSyncHandler } from '../dropbox-files/provider-store-sync.ts';
 import { createDropboxTierLane } from '../dropbox-files/tier-set.ts';
@@ -251,12 +195,9 @@ import {
 } from '../local-files/scope.ts';
 import {
   LOCAL_FILES_CORPUS_ID,
-  LOCAL_FILES_INGESTION_EXCLUSION_SOURCE,
-  LOCAL_FILES_ENFORCEABLE_EXCLUSION_CRITERIA,
   createLocalFilesConnectorStore,
   createLocalFilesTierLane,
   defineLocalFilesCorpus,
-  localFilesIngestionExclusionMatcher,
   localFilesWatchDir,
 } from '../local-files/store.ts';
 import { createLocalFilesOwnRootsCleanup, createLocalFilesOwnRootsRecovery } from '../local-files/own-roots-cleanup.ts';
@@ -278,8 +219,6 @@ import { createArchiveExtractionRuntime } from '../archive-import/extraction-run
 import { createArchiveImportsSchedulerSource } from '../archive-import/scheduler-source.ts';
 import type { ExtractorRegistryConfig } from '../file-extraction/types.ts';
 import { createLocalFilesSourceConnector } from '../local-files/connector.ts';
-import { LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC } from '../local-files/approved-scope-filter.ts';
-import { LOCAL_FILES_LOCATOR_RESULT_PROJECTOR_CODEC } from '../local-files/locator-result-projector.ts';
 import { createLocalFilesOpenTargets, localFilesOpenRoots } from '../local-files/open-target.ts';
 import { defaultExclusionContext, scopePathIsWithin } from '../local-files/paths.ts';
 import { defaultLocalFilesIngestionPolicy } from '../../core/source-ingestion-policy.ts';
@@ -289,14 +228,6 @@ import { localOpenArguments } from '../../core/local-open.ts';
 import { createConnectorFileExtractionSource } from '../file-extraction/connector-source.ts';
 import { createArchivePathResolver } from '../local-files/scope-browser.ts';
 import { tieredExtractionView } from '../connector-store/tiered-extraction.ts';
-import {
-  createSourceExclusionMatcherFromPrefixes,
-  sourceExclusionDescendantPrefixes,
-  type SourceExclusionCriterionKind,
-  type SourceExclusionMatcher,
-} from '../../core/source-ingestion-exclusions.ts';
-import type { SourceDispositionsSource } from '../source-dispositions.ts';
-import type { SourceDispositionItem } from '../../core/source-disposition-tree.ts';
 import {
   INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
   PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
@@ -311,13 +242,9 @@ import {
 } from '../telegram-messages/index.ts';
 import {
   STATUS_COUNTS_MAX_AGE_MS,
-  DEFAULT_SEMANTIC_RELEVANCE_BAR,
   type LocalConnectorStore,
-  connectorStoreFilterCapabilityRegistry,
   connectorStoreReadableNow,
   defineConnectorCorpus,
-  type ConnectorStoreConversationTitleCandidates,
-  type ConnectorStoreFilterCapabilityRegistry,
   type ConnectorStoreSearchFilters,
 } from '../connector-store/index.ts';
 import { canonicalConnectorStoreChatPrincipal } from '../connector-store/principal.ts';
@@ -358,59 +285,29 @@ import {
   openSecretLocations,
   recordAccountPlacement,
   recordProviderAccount,
-  replaceEmptyLegacyAccounts,
-  sourceAccountUnavailableReason,
-  storageAccountForCorpus,
   type StorageAccount,
-  type StoreFileOwner,
 } from '../../core/source-storage.ts';
 import { recordedProviderAccount } from '../../core/provider-account-history.ts';
-import { accountFolderMigrationEnabled, migrateAccountFolders, type AccountMigrationOptions, type AccountMigrationReport } from '../../core/source-account-migration.ts';
-import { messagingMoveFacts, repointMovedMessagingAccounts } from '../../core/messaging-account-move.ts';
 import { takeWorkerDataOwnerLock, type HeldDataOwnerLock } from '../../core/data-owner-lock.ts';
-import { deleteMarkedAccounts, exportOlympusData, lifecycleStoreFileOwner, type DeleteMarkedAccountsReport } from '../../data-lifecycle.ts';
+import { exportOlympusData, lifecycleStoreFileOwner } from '../../data-lifecycle.ts';
 import { TierLedger, TierLedgerSchemaError } from '../classification/tier-ledger.ts';
-import { assertStoreTierLedgerCanOpen } from '../classification/tier-set-binding.ts';
-import { CHAT_SCOPE_FILTER_CODEC } from '../chat/chat-scope-filter.ts';
-import { createEnvCredentialBroker } from '../credential-broker/index.ts';
+import { resolveSecretRefValueSync } from '../../core/secret-store.ts';
 import {
-  withSourceIndexHybridAvailability,
-} from '../../core/source-index/router.ts';
-import {
-  isSecureSensitivity,
-  SOURCE_FAMILIES,
-  SOURCE_TRUST_DOMAINS,
-  type SecureSensitivityInput,
-  type SourceFamily,
-  type SourceTrustDomain,
-} from '../../core/source-index/types.ts';
-import { createDefaultSecretStore, resolveSecretRefValueSync, type SecretStore } from '../../core/secret-store.ts';
-import {
-  credentialConfigFingerprint,
   WorkerBootSecretResolver,
-  type CredentialReadinessBinding,
 } from '../credential-degradation.ts';
 import {
-  DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL,
-  DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION,
-  DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL,
-  VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION,
   builtInEmbeddingOnly,
-  GeminiSourceEmbeddingProvider,
   isApprovedSecureSourceEmbeddingProvider,
-  OpenAICompatibleSourceEmbeddingProvider,
   type SourceEmbeddingProvider,
 } from '../source-index/embeddings.ts';
-import { canonicalEmbeddingDimension } from '../source-index/embedding-identity.ts';
 import {
   BuiltInSourceEmbeddingProvider,
   builtInEmbeddingDashboardState,
   loadedBuiltInEmbedding,
-  sharedBuiltInSourceEmbeddingProvider,
 } from '../source-index/built-in-embedding/provider.ts';
 import { readBuiltInEmbeddingStatus } from '../source-index/built-in-embedding/assets.ts';
 import { LocalWorkPacer, embedsOnThisComputer, systemIdlePowerProbe } from '../local-pacing.ts';
-import { BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL, builtInEmbeddingModel } from '../source-index/built-in-embedding/manifest.ts';
+import { builtInEmbeddingModel } from '../source-index/built-in-embedding/manifest.ts';
 import {
   createGmailConnectorStoreSchedulerSource,
   createGmailImportedHistorySchedulerSource,
@@ -457,19 +354,15 @@ import {
   TELEGRAM_MEDIA_EXTRACTION_PLAN_LIMIT,
   telegramMediaLanes,
 } from '../telegram-messages/media-extraction.ts';
-import { readArchiveInputMedia } from '../archive-import/input-media.ts';
-import { defaultSourceDashboardHistoryDbPath, type DashboardCaptureRuntime, type SourceDashboardViewModel } from '../source-dashboard.ts';
+import { defaultSourceDashboardHistoryDbPath, type SourceDashboardViewModel } from '../source-dashboard.ts';
 import type { DashboardPanelTools } from '../email-source/dashboard-panel-tools.ts';
 import { readEmbeddingRuntime } from '../dashboard/embedding-runtime.ts';
 import {
   SqliteSourceIngestionLedgerStore,
   buildSourceIngestionLedgerSnapshot,
 } from '../source-ingestion-ledger.ts';
-import type { Analyst } from '../../core/contracts.ts';
-import type { AnalystBackend } from '../source-index/answer-types.ts';
 import {
   handleRegistryPathFromEnv,
-  readConnectedHandleRegistry,
   type ConnectedCredentialHandle,
 } from '../credential-broker/connected-handles.ts';
 import {
@@ -481,12 +374,10 @@ import {
   fileSourceScopeDropboxPolicy,
   fileSourceScopeMetadataEnabled,
   fileSourceScopeMetadataFilters,
-  isMailSourceScopePolicyRef,
   rebindRestoredFileScope,
   scopeBoundEmbeddingProvider,
   scopeBoundSchedulerSource,
   gmailConnectorScopeFromApproval,
-  type FileSourceScopePolicyRef,
   type SourceScopePolicyRef,
 } from '../source-scope-runtime.ts';
 import {
@@ -498,14 +389,12 @@ import {
 import { fileSourceScopeAllowsContent, fileSourceScopeAllowsMetadata, fileSourceScopeIdForProvider } from '../../core/source-scope-approval.ts';
 import { createGmailMailScopeBrowser, createGmailPickerRequestBudget } from '../google-connectors/gmail-scope-browser.ts';
 import {
-  GMAIL_IMPORT_CONNECTOR_PREFIX,
   gmailArchiveTarget,
-  GMAIL_IMPORTED_FILTERS,
   gmailHoldsImportedHistory,
   gmailItemAccountScope,
 } from '../google-connectors/gmail-archive-target.ts';
 import { gmailHeaderMatch } from '../google-connectors/gmail-header-match.ts';
-import { planStoreEmbedding, type StoreEmbeddingScope } from '../connector-store/embedding-plan.ts';
+import { planStoreEmbedding } from '../connector-store/embedding-plan.ts';
 import {
   GMAIL_IMPORT_LABELS_COST,
   GMAIL_IMPORT_MAX_RETRIES,
@@ -526,11 +415,9 @@ import {
 } from '../google-connectors/gmail-attachment-extraction.ts';
 import { createLaneTieredStoreSet } from '../connector-store/tiered-store-set.ts';
 import {
-  SourceAccountChangedError,
   guardAccountBoundLanes,
   createSourceAccountGuard,
   runExclusiveForSource,
-  runGuarded,
   type SourceAccountGuard,
   type SourceAccountGuardOptions,
 } from '../source-account-guard.ts';
@@ -540,8 +427,6 @@ import { GoogleRequestBudgetError } from '../google-connectors/request-budget.ts
 import { defaultGmailRequestBudgetStatePath } from '../google-connectors/gmail.ts';
 import { MAIL_SCOPE_WINDOW_LABELS, defaultMailScopeSelection, mailScopeDraftView, mailScopeFromDraft } from '../../core/mail-source-scope.ts';
 import type { OlympusMailScopeDraft } from '../../control-ui-contract.ts';
-import { gmailDailyRequestBudgetFromEnv } from '../google-connectors/gmail.ts';
-import { defaultGmailLiveSyncConfig } from '../google-connectors/gmail-live-control.ts';
 import {
   createEvernoteNotebookScopeBrowser,
   createFileScopeBrowser,
@@ -549,22 +434,38 @@ import {
   unregisterFileScopeBrowserFactory,
   type SourceFolderScopeBrowser,
 } from '../source-scope-browser.ts';
-import { withoutUnpairedLaneHandles } from '../credential-broker/unpaired-sources.ts';
 import { configureInstalledTierClassification } from '../classification/installed-tier-classification.ts';
 import { type SnifferLane } from '../classification/sniffer-lane.ts';
 import { registerBuiltInPrivateModel, registeredBuiltInPrivateModel, resolveJudgeChoiceRuntime } from '../classification/built-in-sniffer.ts';
-import { createAnswerActivity, createLocalModelActivity, runBackgroundInference, runClassificationInference, localModelResourceKey, type LocalModelActivity } from '../answer-activity.ts';
+import {
+  createAnswerActivity,
+  createLocalModelActivity,
+  runBackgroundInference,
+  runClassificationInference,
+  localModelResourceKey,
+} from '../answer-activity.ts';
 import { privacyOwnerContext } from '../classification/privacy-profile.ts';
 import { TierSnifferService, tierSnifferServiceEnv } from '../classification/sniffer-service.ts';
 import { SNIFFER_MAX_CONCURRENT_CALLS, completeAfterSlot } from '../classification/sniffer-resolver.ts';
 import { approveClassifier, resolveClassificationLedgerPath, readClassificationLedger, isClassifierApproved } from '../classification-ledger.ts';
-import type { AnalystModel } from '../../core/analyst.ts';
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 import { ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
 import { ENGINE_BACKGROUND_INSTANCE_ENV, engineRoleFromEnv } from '../../core/engine-split.ts';
-import { forbidWritableStoreOpens, writableStoreOpensForbidden } from '../../core/store-write-guard.ts';
-import { createEngineFront, createEngineFrontRoutes, createFrontGate, OwnerBusyMarks, engineBackgroundSocketFromEnv, engineStatusSnapshotPath, startEngineBackgroundServer, restartAfterFront, startEngineBackgroundStatus, waitForEngineBackground, waitForProcessExit, type EngineFront } from '../engine-split/runtime.ts';
+import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
+import {
+  createEngineFront,
+  createEngineFrontRoutes,
+  createFrontGate,
+  OwnerBusyMarks,
+  engineBackgroundSocketFromEnv,
+  engineStatusSnapshotPath,
+  startEngineBackgroundServer,
+  restartAfterFront,
+  startEngineBackgroundStatus,
+  waitForEngineBackground,
+  type EngineFront,
+} from '../engine-split/runtime.ts';
 import { forwardedRecordId, forwardedRequestToRequest, responseToForwarded, tagForwardedRequest, type EngineForwardedRequest } from '../engine-split/commands.ts';
 import { frontCaptureRuntime, frontCaptureStop, frontDataExport, frontJudgeBoost, frontJudgeState, frontModelReload, frontSetItemPrivate, frontUnreadableFiles } from '../engine-split/front-state.ts';
 import { readEngineStatusSnapshot, type EngineManualSyncRun } from '../engine-split/snapshot.ts';
@@ -572,1839 +473,89 @@ import { engineRssRestartsFrom, startEngineRssRestart } from '../engine-split/rs
 import { createFrontScheduler } from '../engine-split/front-scheduler.ts';
 import { createFrontDashboardHistory, openWritableDashboardHistory } from '../engine-split/front-history.ts';
 import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
-
-/**
- * The least time between two scheduler status snapshots for the ingestion
- * ledger. A snapshot reads every store's counts; on a large library that is
- * seconds of the worker's thread, so at 30 s it was most of the thread's time
- * during an import (Sparta, 2026-11-03). The ledger is a record for doctor and
- * Castor, so two minutes stale is fine.
- */
-const SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS = 120_000;
 import { remoteAccessFromStatus, type DashboardAgentConnectionsBackend } from '../agent-connections.ts';
 import { applyPendingRestoreAtBoot, createBackupService, defaultBackupServicePaths } from '../backup-service.ts';
 import { createDashboardRemoteAccessControl, createGatewayRemoteAccessConfigWriter, createStandaloneRemoteAccessControl, createDashboardEngineRestart } from '../remote-access-control.ts';
-
-const DROPBOX_SOURCE_ANSWER_SELF_HEAL_RETRY_AFTER_MS = 5_000;
-const DROPBOX_SOURCE_ANSWER_SELF_HEAL_PRIORITY = 1_000_000;
-/** How long one live Gmail attachment reader (and the messages it fetched) serves before a fresh one is made. */
-const GMAIL_ATTACHMENT_READER_REUSE_MS = 5 * 60_000;
-
-type MessagingCaptureSource = 'telegram' | 'whatsapp';
-type WorkerMessagingCaptureSupervisor = Pick<MessagingCaptureSupervisor, 'reconcile' | 'stop'>
-  & Partial<Pick<MessagingCaptureSupervisor, 'liveness'>>;
-
-export function createWorkerMessagingCaptureOwnership(options: {
-  env?: Record<string, string | undefined>;
-  registryPath: string;
-  packageRoot: string;
-  createSupervisor?: (source: MessagingCaptureSource) => WorkerMessagingCaptureSupervisor;
-  revokeGrant?: (path: string) => void;
-  shouldResumeCapture?: () => boolean;
-  onResumeFailure?: (source: MessagingCaptureSource) => void;
-  /** A resume after a pause worked: a failure recorded earlier no longer holds (#687). */
-  onResumeSuccess?: (source: MessagingCaptureSource, status: MessagingCaptureStatus) => void;
-}): {
-  captures: Partial<Record<MessagingCaptureSource, WorkerMessagingCaptureSupervisor>>;
-  nativeOwners: Record<MessagingCaptureSource, boolean>;
-  stopForUnpair(source: MessagingCaptureSource): Promise<void>;
-  withMessagingCapturePaused<T>(source: MessagingCaptureSource, operation: () => Promise<T>): Promise<T>;
-} {
-  const env = options.env ?? process.env;
-  const nativeOwners = {
-    telegram: parseOptionalBooleanEnv(
-      env[NATIVE_CAPTURE_OWNER_ENV_NAMES.telegram],
-      NATIVE_CAPTURE_OWNER_ENV_NAMES.telegram,
-    ),
-    whatsapp: parseOptionalBooleanEnv(
-      env[NATIVE_CAPTURE_OWNER_ENV_NAMES.whatsapp],
-      NATIVE_CAPTURE_OWNER_ENV_NAMES.whatsapp,
-    ),
-  };
-  const createSupervisor = options.createSupervisor ?? ((source: MessagingCaptureSource) => (
-    source === 'telegram'
-      ? new MessagingCaptureSupervisor({ source, registryPath: options.registryPath, packageRoot: options.packageRoot })
-      : new MessagingCaptureSupervisor({
-          source,
-          registryPath: options.registryPath,
-          packageRoot: options.packageRoot,
-          whatsappBridgePath: whatsappBridgePathForPackage(options.packageRoot, { env }),
-        })
-  ));
-  const captures: Partial<Record<MessagingCaptureSource, WorkerMessagingCaptureSupervisor>> = {};
-  const rawCaptures: Partial<Record<MessagingCaptureSource, WorkerMessagingCaptureSupervisor>> = {};
-  const paused = { telegram: 0, whatsapp: 0 };
-  const queues: Record<MessagingCaptureSource, Promise<unknown>> = { telegram: Promise.resolve(), whatsapp: Promise.resolve() };
-  const serialized = <T>(source: MessagingCaptureSource, operation: () => Promise<T>): Promise<T> => {
-    const result = queues[source].then(operation);
-    queues[source] = result.catch(() => undefined);
-    return result;
-  };
-  for (const source of ['telegram', 'whatsapp'] as const) {
-    if (nativeOwners[source]) continue;
-    const capture = createSupervisor(source);
-    rawCaptures[source] = capture;
-    captures[source] = {
-      reconcile: async () => {
-        const stopped = (): MessagingCaptureStatus => ({ source, state: 'stopped' });
-        if (paused[source]) return stopped();
-        return serialized(source, async () => paused[source] ? stopped() : capture.reconcile());
-      },
-      stop: () => serialized(source, () => capture.stop()),
-      ...(capture.liveness ? { liveness: () => capture.liveness!() } : {}),
-    };
-  }
-  const revokeGrant = options.revokeGrant ?? revokeMessagingCaptureGrant;
-  return {
-    captures,
-    nativeOwners,
-    async stopForUnpair(source) {
-      if (nativeOwners[source]) throw new NativeMessagingCaptureOwnerError(source);
-      const capture = rawCaptures[source];
-      if (!capture) throw new Error(`Worker ${source} capture ownership is unavailable.`);
-      await serialized(source, async () => {
-        await capture.stop();
-        revokeGrant(defaultMessagingCaptureGrantPath(source, options.registryPath));
-      });
-    },
-    async withMessagingCapturePaused<T>(source: MessagingCaptureSource, operation: () => Promise<T>): Promise<T> {
-      if (nativeOwners[source]) throw new NativeMessagingCaptureOwnerError(source);
-      const capture = rawCaptures[source];
-      if (!capture) throw new Error(`Worker ${source} capture ownership is unavailable.`);
-      // Mark before waiting for the queue, so a timer cannot enqueue another restart.
-      paused[source] += 1;
-      return serialized(source, async () => {
-        let stopped = false;
-        try {
-          await capture.stop();
-          stopped = true;
-          return await operation();
-        } finally {
-          paused[source] -= 1;
-          if (stopped && !paused[source] && (options.shouldResumeCapture?.() ?? true)) {
-            let resumed: MessagingCaptureStatus | undefined;
-            try { resumed = await capture.reconcile(); }
-            catch { options.onResumeFailure?.(source); }
-            if (resumed) options.onResumeSuccess?.(source, resumed);
-          }
-        }
-      });
-    },
-  };
-}
-
-/**
- * One pass over the sources this worker runs capture for. Each source is
- * reconciled on its own: one that throws (no Python, a missing executable) is
- * recorded as a failure for the dashboard and does not stop the others, and a
- * failure clears when a later reconcile succeeds. No privacy policy stops
- * capture: each captured message is tiered by its own content, like any
- * other source's items.
- */
-export async function reconcileWorkerCaptures(input: {
-  captures: Partial<Record<MessagingCaptureSource, WorkerMessagingCaptureSupervisor>>;
-  statuses: Partial<Record<MessagingCaptureSource, MessagingCaptureStatus>>;
-  failures: Partial<Record<MessagingCaptureSource, true>>;
-  warn?: (message: string) => void;
-}): Promise<void> {
-  const warn = input.warn ?? ((message: string) => console.warn(message));
-  const entries = Object.entries(input.captures) as Array<[MessagingCaptureSource, WorkerMessagingCaptureSupervisor]>;
-  await Promise.all(entries.map(async ([source, capture]) => {
-    try {
-      input.statuses[source] = await capture.reconcile();
-      delete input.failures[source];
-    } catch {
-      // Not reconciled: the last status is no longer a fact about the helper.
-      input.failures[source] = true;
-      warn('An Olympus messaging capture process needs attention. Check pairing and its approved scope.');
-    }
-  }));
-}
-
-/**
- * The dashboard's view of live capture on this computer, by source id: the
- * supervisor's report (corrected by whether its helper is alive and whether
- * the last reconcile failed), what the grant approved as a count, and when it
- * was granted. Only for the sources this worker runs capture for (`sources`):
- * where the native service owns capture there is no supervisor here and no
- * claim is made. A source whose grant cannot be read is reported without it,
- * never as an error: this runs while the dashboard is being built.
- */
-export function workerCaptureRuntime(input: {
-  sources: readonly MessagingCaptureSource[];
-  statuses: Partial<Record<MessagingCaptureSource, MessagingCaptureStatus>>;
-  registryPath: string | undefined;
-  liveness?: Partial<Record<MessagingCaptureSource, MessagingCaptureLiveness | undefined>>;
-  failures?: Partial<Record<MessagingCaptureSource, boolean>>;
-}): Record<string, DashboardCaptureRuntime> {
-  const runtime: Record<string, DashboardCaptureRuntime> = {};
-  for (const source of input.sources) {
-    try {
-      const status = effectiveMessagingCaptureStatus({
-        status: input.statuses[source],
-        liveness: input.liveness?.[source],
-        reconcileFailed: input.failures?.[source] === true,
-      });
-      const facts = readMessagingCaptureGrantFacts(source, defaultMessagingCaptureGrantPath(source, input.registryPath));
-      if (!status && !facts.scope && !facts.pairedAt) continue;
-      runtime[source === 'telegram' ? 'telegram.messages' : 'whatsapp.personal.messages'] = {
-        ...(status ? { supervisor: { state: status.state, ...(status.reason ? { reason: status.reason } : {}) } } : {}),
-        ...(facts.scope ? { scope: facts.scope } : {}),
-        ...(facts.pairedAt ? { paired_at: facts.pairedAt } : {}),
-      };
-    } catch {
-      // One source's damaged record never takes the dashboard down with it.
-    }
-  }
-  return runtime;
-}
-
-/**
- * Per-item tier overrides of a chat lane written before identities carried
- * their conversation: re-homed at boot where the conversation is derivable,
- * otherwise kept (applying to nothing) and reported as orphaned. Counts only.
- */
-function reportRehomedChatOverrides(lane: string, result: { rehomed: number; orphaned: number }): void {
-  if (result.rehomed === 0 && result.orphaned === 0) return;
-  console.warn(
-    `[tier] ${lane}: ${result.rehomed} per-item override(s) re-homed under their conversation; `
-    + `${result.orphaned} orphaned (conversation not derivable; kept, applying to nothing, until reset).`,
-  );
-}
-
-export function registerConnectorStoreEmbeddingLane(options: {
-  store: LocalConnectorStore;
-  provider: SourceEmbeddingProvider;
-  /** Current Personal embedder: required before a Private store may embed pending judgments. */
-  personalProvider?: SourceEmbeddingProvider | undefined;
-  providers: Map<string, SourceEmbeddingProvider>;
-  retrievalAvailability: Record<string, SourceIndexStatusRetrievalAvailability>;
-}): void {
-  if (options.store.trustDomain === 'secure_local' && !isApprovedSecureSourceEmbeddingProvider(options.provider)) {
-    throw new Error('Connector store secure_local embeddings require a local/private or approved Venice embedding provider.');
-  }
-  options.store.usePersonalEmbeddingProvider(() => options.personalProvider);
-  options.providers.set(options.store.corpusId, options.provider);
-  options.retrievalAvailability[options.store.corpusId] = (_request, snapshot) => {
-    // A status snapshot may judge "is there a visible vector" against a
-    // hidden-copy set up to its counts age old; rebuilding that set on every
-    // dashboard poll held the worker 2-3 s per refresh on Sparta (2026-11-09).
-    // Search decides servability on its own path and never passes an age.
-    const servable = options.store.hasEmbeddings(options.provider.modelId, { countsMaxAgeMs: snapshot?.countsMaxAgeMs ?? 0 });
-    return {
-      servable,
-      ...(!servable ? { reason: 'no_current_embedding_artifacts' as const } : {}),
-      modelId: options.provider.modelId,
-      embeddingEpoch: options.provider.epochId,
-      backend: options.provider.backend,
-      provider: options.provider.provider,
-    };
-  };
-}
-
-export function createEmailSourceConnectorFromEnv(env: Record<string, string | undefined> = process.env): EmailSourceConnector | undefined {
-  return env.OLYMPUS_EMAIL_SOURCE_CONNECTOR === 'gogcli'
-    ? new GogcliEmailConnector({
-      ...(env.OLYMPUS_EMAIL_SOURCE_GOG_COMMAND
-        ? { command: env.OLYMPUS_EMAIL_SOURCE_GOG_COMMAND }
-        : {}),
-      ...(env.OLYMPUS_EMAIL_SOURCE_ACCOUNT
-        ? { account: env.OLYMPUS_EMAIL_SOURCE_ACCOUNT }
-        : {}),
-      // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-      ...(env.OLYMPUS_EMAIL_SOURCE_AUTH_MODE === 'service-account'
-        ? { authMode: 'service-account' as const }
-        : {}),
-      // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
-    })
-    : undefined;
-}
-
-function requireSourceEmbeddingDimension(options: {
-  env: Record<string, string | undefined>;
-  envKeys: readonly string[];
-  lane: string;
-  model: string;
-}): number {
-  const configuredKey = options.envKeys.find((key) => Boolean(options.env[key]?.trim()));
-  // Shipped models already have authoritative dimensions in the identity
-  // registry. Use those only when unset; an explicit invalid value must refuse.
-  if (options.envKeys.every((key) => options.env[key] === undefined)) {
-    const canonicalDimension = canonicalEmbeddingDimension(options.model);
-    if (canonicalDimension !== undefined) return canonicalDimension;
-  }
-  const envKey = configuredKey ?? options.envKeys[options.envKeys.length - 1]!;
-  const raw = options.env[envKey]?.trim();
-  const dimension = raw === undefined || raw.length === 0 ? Number.NaN : Number(raw);
-  if (Number.isSafeInteger(dimension) && dimension >= 1) return dimension;
-  throw new OperationError(
-    'config_error',
-    `Source embedding ${options.lane} model ${options.model} requires a positive safe-integer dimension from ${envKey}.`,
-    `Set ${envKey} to the model's authoritative output dimension before starting this lane.`,
-  );
-}
-
-function createVeniceSourceEmbeddingProvider(options: {
-  apiKey: string;
-  model: string;
-  baseUrl: string;
-  dimension?: number;
-  timeoutMs?: number;
-  epochId?: string;
-}): SourceEmbeddingProvider {
-  const baseUrl = approvedVeniceAnalystBaseUrl(options.baseUrl);
-  const resolvePrivacyCategory = createVenicePrivacyCategoryResolver({
-    apiKey: options.apiKey,
-    baseUrl,
-    catalog: { type: 'embedding' },
-  });
-  return new OpenAICompatibleSourceEmbeddingProvider({
-    provider: 'venice',
-    backend: 'cloud',
-    baseUrl,
-    model: options.model,
-    apiKeyProvider: () => options.apiKey,
-    dimension: options.dimension ?? DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION,
-    queryInstructionPrefix: VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION,
-    sendDimensions: true,
-    requireIndexedResponses: true,
-    requireDimension: true,
-    preflight: (signal) => assertVeniceEmbeddingModelAllowed(
-      options.model,
-      resolvePrivacyCategory,
-      signal,
-    ),
-    ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
-    ...(options.epochId ? { epochId: options.epochId } : {}),
-  });
-}
-
-export function createSourceIndexEmbeddingProviderFromEnv(
-  env: Record<string, string | undefined> = process.env,
-): SourceEmbeddingProvider | undefined {
-  const provider = env.OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER;
-  if (provider === undefined || provider.trim().length === 0) return undefined;
-  if (provider !== 'google-gemini' && provider !== 'local-openai-compatible' && provider !== 'venice' && provider !== 'built-in') {
-    throw new Error('OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER must be google-gemini, local-openai-compatible, venice, or built-in.');
-  }
-  if (provider === 'built-in') {
-    return sharedBuiltInSourceEmbeddingProvider({
-      modelId: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL?.trim() || BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL.modelId,
-      env,
-    });
-  }
-  const timeoutMs = parseOptionalTimeoutSeconds(
-    env.OLYMPUS_SOURCE_INDEX_EMBEDDING_TIMEOUT_SECONDS,
-    'OLYMPUS_SOURCE_INDEX_EMBEDDING_TIMEOUT_SECONDS',
-  );
-  const mediaFetchTimeoutMs = parseOptionalTimeoutSeconds(
-    env.OLYMPUS_SOURCE_INDEX_EMBEDDING_MEDIA_TIMEOUT_SECONDS,
-    'OLYMPUS_SOURCE_INDEX_EMBEDDING_MEDIA_TIMEOUT_SECONDS',
-  );
-  if (provider === 'local-openai-compatible') {
-    const baseUrl = env.OLYMPUS_SOURCE_INDEX_EMBEDDING_BASE_URL?.trim();
-    const model = env.OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL?.trim();
-    if (!baseUrl || !model) {
-      throw new Error('OLYMPUS_SOURCE_INDEX_EMBEDDING_BASE_URL and OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL are required for local-openai-compatible source embeddings.');
-    }
-    const outputDimensionality = requireSourceEmbeddingDimension({
-      env,
-      envKeys: ['OLYMPUS_SOURCE_INDEX_EMBEDDING_OUTPUT_DIMENSIONALITY'],
-      lane: 'source-index env lane',
-      model,
-    });
-    return new OpenAICompatibleSourceEmbeddingProvider({
-      baseUrl,
-      model,
-      dimension: outputDimensionality,
-      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-      ...(env.OLYMPUS_SOURCE_INDEX_EMBEDDING_EPOCH
-        ? { epochId: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_EPOCH }
-        : {}),
-    });
-  }
-  if (provider === 'venice') {
-    const apiKey = firstNonEmptyEnv(env, [
-      'OLYMPUS_SOURCE_INDEX_VENICE_API_KEY',
-      'VENICE_API_KEY',
-      'API_KEY_VENICE',
-      'Venice-API-Key',
-    ]);
-    if (!apiKey) {
-      throw new Error('OLYMPUS_SOURCE_INDEX_VENICE_API_KEY or VENICE_API_KEY is required for Venice source-index embeddings.');
-    }
-    const model = env.OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL?.trim() || DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL;
-    const outputDimensionality = requireSourceEmbeddingDimension({
-      env,
-      envKeys: ['OLYMPUS_SOURCE_INDEX_EMBEDDING_OUTPUT_DIMENSIONALITY'],
-      lane: 'Venice source-index env lane',
-      model,
-    });
-    return createVeniceSourceEmbeddingProvider({
-      apiKey,
-      model,
-      baseUrl: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_BASE_URL?.trim() || DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL,
-      dimension: outputDimensionality,
-      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-      ...(env.OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH
-        ? { epochId: env.OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH }
-        : {}),
-    });
-  }
-  const apiKey = firstNonEmptyEnv(env, ['OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY', 'GEMINI_API_KEY']);
-  if (!apiKey) {
-    throw new Error('OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY or GEMINI_API_KEY is required for Gemini source-index embeddings.');
-  }
-  const model = env.OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL?.trim() || 'gemini-embedding-2';
-  const outputDimensionality = requireSourceEmbeddingDimension({
-    env,
-    envKeys: ['OLYMPUS_SOURCE_INDEX_EMBEDDING_OUTPUT_DIMENSIONALITY'],
-    lane: 'source-index env lane',
-    model,
-  });
-  return new GeminiSourceEmbeddingProvider({
-    apiKey,
-    model,
-    ...(env.OLYMPUS_SOURCE_INDEX_EMBEDDING_BASE_URL
-      ? { baseUrl: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_BASE_URL }
-      : {}),
-    outputDimensionality,
-    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-    ...(mediaFetchTimeoutMs !== undefined ? { mediaFetchTimeoutMs } : {}),
-    // Cloud override only — the shared epoch var belongs to the local lane
-    // (see the sovereignty gemini branch below for the incident this guards).
-    ...(env.OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH
-      ? { epochId: env.OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH }
-      : {}),
-  });
-}
-
-/**
- * Whether a store is indexed for meaning at all: its corpus is served hybrid
- * with embedding not disabled (the full definition and the registry's both),
- * and its tier's retrieval policy does not keep it to keywords.
- */
-export function storeServedByMeaning(input: {
-  store: Pick<LocalConnectorStore, 'corpusId' | 'trustDomain'>;
-  sovereigntyEngine: SovereigntyEngine;
-  sourceCorpusRegistry: ReturnType<typeof createSourceCorpusRegistry>;
-  fullCorpusDefinitions: readonly import('../../core/source-index/corpus.ts').SourceIndexCorpusDefinition[];
-}): boolean {
-  const { store, sourceCorpusRegistry } = input;
-  // A tier store opened after boot has no full definition yet; the
-  // registry's declaration of the same corpus stands in for it.
-  const registered = sourceCorpusRegistry.definitions().find((entry) => entry.corpusId === store.corpusId);
-  const definition = input.fullCorpusDefinitions.find((entry) => entry.corpusId === store.corpusId) ?? registered;
-  const served = (entry: typeof definition) => entry === undefined
-    || (entry.activationMode !== 'lexical_only' && entry.embeddingPolicy !== 'disabled');
-  if (!definition || !served(definition) || !served(registered)) return false;
-  const domain = store.trustDomain === 'public_safe' || store.trustDomain === 'internal' || store.trustDomain === 'secure_local'
-    ? input.sovereigntyEngine.config.retrieval.trustDomains[store.trustDomain]?.activationMode
-    : undefined;
-  return domain !== 'lexical_only' && domain !== 'metadata_only';
-}
-
-/**
- * Whether any of these corpora would be indexed for meaning once its store
- * opens: served by meaning, with an identity for its tier. Shared with
- * startup-wiring tests.
- */
-export function sourceStoresCouldEmbed(input: Omit<Parameters<typeof storeServedByMeaning>[0], 'store'> & {
-  corpusIds: ReadonlySet<string>;
-  providerFor: (trustDomain: string) => SourceEmbeddingProvider | undefined;
-}): boolean {
-  return input.sourceCorpusRegistry.list().some((corpus) => input.corpusIds.has(corpus.corpusId)
-    && input.providerFor(corpus.trustDomain) !== undefined
-    && storeServedByMeaning({ ...input, store: corpus }));
-}
-
-/** Sources whose stores are read only under the owner's current scope approval. */
-const SCOPE_APPROVED_SOURCE_IDS: ReadonlySet<string> = new Set([
-  SCHEDULER_SOURCE_IDS.gmail, SCHEDULER_SOURCE_IDS.googleDrive, SCHEDULER_SOURCE_IDS.dropbox, SCHEDULER_SOURCE_IDS.localFiles,
-]);
-
-/**
- * What a store's embedding may read now, from the scope authority: the same
- * population the store's status counts as owed. Shared with startup-wiring tests.
- *   - Gmail with no current mail approval: only what its imports brought,
- *     which the owner approved one by one. Live approval governs live reads.
- *   - Gmail's Private store under an approval: the approval's observations
- *     and the imports'.
- *   - A file source's store: the approved folders' content scope.
- * Every scoped store's provider is bound to the approval, so a pass stops
- * the moment it changes. Other stores carry no scope.
- */
-export function storeEmbeddingScope(input: {
-  store: LocalConnectorStore;
-  sourceId: string;
-  scopeRef: SourceScopePolicyRef | undefined;
-  authority: FileSourceScopeAuthority | undefined;
-  readScope: (store: LocalConnectorStore) => { allowed: false } | {
-    allowed: true; contentAllowed: boolean; accountScope?: string; contentFilters?: ConnectorStoreSearchFilters;
-  };
-  gmailAccountScope?: string | undefined;
-  /** The account scope Gmail's imported mail is kept under. */
-  gmailImportAccountScope?: string | undefined;
-}): StoreEmbeddingScope {
-  const { store, sourceId, scopeRef: ref, authority } = input;
-  if (!SCOPE_APPROVED_SOURCE_IDS.has(sourceId)) return { allowed: true };
-  if (sourceId === SCHEDULER_SOURCE_IDS.gmail && (!ref || !authority)) {
-    if (!input.gmailImportAccountScope) return { allowed: false };
-    return { allowed: true, accountScope: input.gmailImportAccountScope, filters: GMAIL_IMPORTED_FILTERS };
-  }
-  if (!ref || !authority) return { allowed: false };
-  const bind = (provider: SourceEmbeddingProvider) => scopeBoundEmbeddingProvider(provider, authority, ref);
-  if (isMailSourceScopePolicyRef(ref)) {
-    // A superseded approval leaves only the queue; the next build carries the new one.
-    try {
-      authority.assertCurrentMail(ref);
-    } catch {
-      return { allowed: false };
-    }
-    if (store.trustDomain !== 'secure_local') return { allowed: true, bind };
-    const accountScope = input.gmailAccountScope?.trim() || 'personal';
-    return {
-      allowed: true,
-      bind,
-      accountScope,
-      filters: {
-        provider: 'gmail',
-        observedConnectorId: gmailCursorConnectorId(accountScope, { generation: ref.accountGeneration, revision: ref.revision }),
-        observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX,
-      },
-    };
-  }
-  const scope = input.readScope(store);
-  if (!scope.allowed || !scope.contentAllowed) return { allowed: false };
-  return {
-    allowed: true,
-    bind,
-    ...(scope.accountScope ? { accountScope: scope.accountScope } : {}),
-    ...(scope.contentFilters ? { filters: scope.contentFilters } : {}),
-  };
-}
-
-/** Worker startup policy loading; hosted paths stay read-only. */
-export function loadSourceWorkerSovereignty(
-  config: Pick<ReturnType<typeof loadConfig>, 'sovereignty'>,
-  env: Record<string, string | undefined>,
-): SovereigntyEngine {
-  const options: LoadSovereigntyOptions = {
-    env, migratePrivateMeaning: true,
-    ...(config.sovereignty?.policy ? { inlineConfig: config.sovereignty.policy } : {}),
-    ...(config.sovereignty?.configPath ? { configPath: config.sovereignty.configPath } : {}),
-  };
-  return loadSovereigntyEngine(options);
-}
-
-export function createSourceIndexEmbeddingProviderFromSovereignty(
-  engine: SovereigntyEngine,
-  trustDomain: Extract<SourceTrustDomain, 'public_safe' | 'internal' | 'secure_local'>,
-  env: Record<string, string | undefined> = process.env,
-  bootSecretResolver?: WorkerBootSecretResolver,
-): SourceEmbeddingProvider | undefined {
-  const resolved = engine.resolveEmbeddingProfile(trustDomain);
-  if (!resolved) return undefined;
-  const profile = resolved.profile;
-  if (profile.provider === 'built-in') {
-    // In-process: no endpoint, no credential, no timeout knob, and no epoch
-    // override (the shared epoch variables belong to the HTTP lanes).
-    return sharedBuiltInSourceEmbeddingProvider({ modelId: profile.model, env });
-  }
-  const timeoutMs = parseOptionalTimeoutSeconds(
-    env.OLYMPUS_SOURCE_INDEX_EMBEDDING_TIMEOUT_SECONDS,
-    'OLYMPUS_SOURCE_INDEX_EMBEDDING_TIMEOUT_SECONDS',
-  );
-  if (profile.provider === 'local-openai-compatible') {
-    if (!profile.baseUrl?.trim()) {
-      throw new Error(`Sovereignty embedding profile "${resolved.id}" requires baseUrl.`);
-    }
-    const apiKey = profile.secretRef
-      ? resolveSecretRefSync(
-        profile.secretRef,
-        env,
-        `Sovereignty embedding profile "${resolved.id}"`,
-        bootSecretOptions(bootSecretResolver, [resolved.id], ['embedding'], resolved),
-      )
-      : undefined;
-    if (profile.secretRef && !apiKey) return undefined;
-    const outputDimensionality = requireSourceEmbeddingDimension({
-      env,
-      envKeys: ['OLYMPUS_SOURCE_INDEX_EMBEDDING_OUTPUT_DIMENSIONALITY'],
-      lane: `sovereignty ${trustDomain} lane`,
-      model: profile.model,
-    });
-    return new OpenAICompatibleSourceEmbeddingProvider({
-      baseUrl: profile.baseUrl,
-      model: profile.model,
-      ...(apiKey ? { apiKeyProvider: () => apiKey } : {}),
-      dimension: outputDimensionality,
-      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-      ...(env.OLYMPUS_SOURCE_INDEX_EMBEDDING_EPOCH
-        ? { epochId: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_EPOCH }
-        : {}),
-    });
-  }
-  if (profile.provider === 'venice') {
-    const apiKey = resolveSecretRefSync(
-      profile.secretRef,
-      env,
-      `Sovereignty embedding profile "${resolved.id}"`,
-      bootSecretOptions(bootSecretResolver, [resolved.id], ['embedding']),
-    );
-    if (!apiKey) return undefined;
-    const outputDimensionality = requireSourceEmbeddingDimension({
-      env,
-      envKeys: ['OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_OUTPUT_DIMENSIONALITY'],
-      lane: `sovereignty ${trustDomain} Venice lane`,
-      model: profile.model,
-    });
-    return createVeniceSourceEmbeddingProvider({
-      apiKey,
-      model: profile.model,
-      baseUrl: profile.baseUrl ?? DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL,
-      dimension: outputDimensionality,
-      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-      ...(env.OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH
-        ? { epochId: env.OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH }
-        : {}),
-    });
-  }
-  if (profile.provider === 'google-gemini') {
-    const apiKey = resolveSecretRefSync(
-      profile.secretRef,
-      env,
-      `Sovereignty embedding profile "${resolved.id}"`,
-      bootSecretOptions(bootSecretResolver, [resolved.id], ['embedding'], resolved),
-    );
-    if (!apiKey) return undefined;
-    const outputDimensionality = requireSourceEmbeddingDimension({
-      env,
-      envKeys: ['OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_OUTPUT_DIMENSIONALITY'],
-      lane: `sovereignty ${trustDomain} lane`,
-      model: profile.model,
-    });
-    return new GeminiSourceEmbeddingProvider({
-      apiKey,
-      model: profile.model,
-      ...(profile.baseUrl ? { baseUrl: profile.baseUrl } : {}),
-      outputDimensionality,
-      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-      // The CLOUD lane's override only. Threading the shared
-      // OLYMPUS_SOURCE_INDEX_EMBEDDING_EPOCH here is what stamped the local
-      // qwen3 epoch onto five gemini write authorities (the private host, found
-      // 2026-08-24); the identity module now refuses it at construction, which
-      // took the worker down at boot on the first deploy of the gate. With no
-      // override the canonical gemini epoch is derived.
-      ...(env.OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH
-        ? { epochId: env.OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH }
-        : {}),
-    });
-  }
-  throw new Error(`Sovereignty embedding profile "${resolved.id}" provider ${profile.provider} is not an embedding provider.`);
-}
-
-export function createCloudSourceIndexEmbeddingProviderFromEnv(
-  env: Record<string, string | undefined> = process.env,
-  envPrefix?: string,
-): SourceEmbeddingProvider | undefined {
-  const apiKey = firstNonEmptyEnv(env, [
-    ...(envPrefix ? [`${envPrefix}_GEMINI_API_KEY`] : []),
-    'OLYMPUS_SOURCE_INDEX_CLOUD_GEMINI_API_KEY',
-    'OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY',
-    'GEMINI_API_KEY',
-  ]);
-  if (!apiKey) return undefined;
-
-  const model = firstNonEmptyEnv(env, [
-    ...(envPrefix ? [`${envPrefix}_EMBEDDING_MODEL`] : []),
-    'OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_MODEL',
-  ]) ?? 'gemini-embedding-2';
-  const outputDimensionality = requireSourceEmbeddingDimension({
-    env,
-    envKeys: [
-      ...(envPrefix ? [`${envPrefix}_EMBEDDING_OUTPUT_DIMENSIONALITY`] : []),
-      'OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_OUTPUT_DIMENSIONALITY',
-    ],
-    lane: envPrefix ? `per-lane cloud ${envPrefix}` : 'default cloud source-index lane',
-    model,
-  });
-  const timeoutMs = parseOptionalTimeoutSeconds(
-    firstNonEmptyEnv(env, [
-      ...(envPrefix ? [`${envPrefix}_EMBEDDING_TIMEOUT_SECONDS`] : []),
-      'OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_TIMEOUT_SECONDS',
-    ]),
-    envPrefix ? `${envPrefix}_EMBEDDING_TIMEOUT_SECONDS` : 'OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_TIMEOUT_SECONDS',
-  );
-  const mediaFetchTimeoutMs = parseOptionalTimeoutSeconds(
-    firstNonEmptyEnv(env, [
-      ...(envPrefix ? [`${envPrefix}_EMBEDDING_MEDIA_TIMEOUT_SECONDS`] : []),
-      'OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_MEDIA_TIMEOUT_SECONDS',
-    ]),
-    envPrefix ? `${envPrefix}_EMBEDDING_MEDIA_TIMEOUT_SECONDS` : 'OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_MEDIA_TIMEOUT_SECONDS',
-  );
-  const baseUrl = firstNonEmptyEnv(env, [
-    ...(envPrefix ? [`${envPrefix}_EMBEDDING_BASE_URL`] : []),
-    'OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_BASE_URL',
-  ]);
-  const epochId = firstNonEmptyEnv(env, [
-    ...(envPrefix ? [`${envPrefix}_EMBEDDING_EPOCH`] : []),
-    'OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH',
-  ]);
-
-  return new GeminiSourceEmbeddingProvider({
-    apiKey,
-    model,
-    ...(baseUrl ? { baseUrl } : {}),
-    outputDimensionality,
-    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-    ...(mediaFetchTimeoutMs !== undefined ? { mediaFetchTimeoutMs } : {}),
-    ...(epochId ? { epochId } : {}),
-  });
-}
-
-// Selects the Dropbox VLM transport. `openai` (default) keeps the historical
-// OpenAI-compatible `/v1/chat/completions` path so non-Ollama installs are
-// unchanged; `ollama` uses the native `/api/chat` client (native `images`
-// field, base URL `/v1`-normalized) which is the maintained path on the
-// inference appliance.
-
-/**
- * The file-storage sources the folder-disposition picker offers, and the ONLY
- * place in that feature that names a provider.
- *
- * This is the bootstrap adapter's job by the architecture rule: the picker, the
- * tree engine and the gate are all source-neutral, and each source arrives here
- * carrying its own exclusion key, its own declared enforceable criteria, and
- * its own stores. A new file source becomes editable in the picker by adding a
- * row here — no change to the engine, the page, or the routes.
- *
- * A source may span several stores. Drive is two trust bands over one corpus
- * family, and folding both into one tree is what makes the counts on the page
- * equal what the purge would report.
- */
-const INGESTION_DISPOSITION_SOURCES: ReadonlyArray<{
-  sourceId: string;
-  /** The source whose stores these are (`sourceId` is its exclusion key). */
-  account: StorageAccount;
-  label: string;
-  enforceable: readonly SourceExclusionCriterionKind[];
-  matcher: (env: Record<string, string | undefined>) => SourceExclusionMatcher;
-  stores: (env: Record<string, string | undefined>) => Array<{
-    dbPath: string;
-    corpusId: string;
-    trustDomain: SourceTrustDomain;
-  }>;
-}> = [
-  {
-    sourceId: DROPBOX_INGESTION_EXCLUSION_SOURCE,
-    account: { sourceId: DROPBOX_FILES_SOURCE_ID },
-    label: 'Dropbox',
-    enforceable: DROPBOX_ENFORCEABLE_EXCLUSION_CRITERIA,
-    matcher: (env) => dropboxIngestionExclusionMatcher(env),
-    stores: (env) => [{
-      dbPath: resolvedStorePath(DROPBOX_FILES_SOURCE_ID, 'secure_local', env),
-      corpusId: DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
-      trustDomain: 'secure_local',
-    }],
-  },
-  {
-    sourceId: LOCAL_FILES_INGESTION_EXCLUSION_SOURCE,
-    account: { sourceId: LOCAL_FILES_SOURCE_ID },
-    label: 'Files on this computer',
-    enforceable: LOCAL_FILES_ENFORCEABLE_EXCLUSION_CRITERIA,
-    matcher: (env) => localFilesIngestionExclusionMatcher(env),
-    stores: (env) => [{
-      dbPath: resolvedStorePath(LOCAL_FILES_SOURCE_ID, 'secure_local', env),
-      corpusId: LOCAL_FILES_CORPUS_ID,
-      trustDomain: 'secure_local',
-    }],
-  },
-  {
-    sourceId: GOOGLE_DRIVE_INGESTION_EXCLUSION_SOURCE,
-    account: { sourceId: GOOGLE_DRIVE_SOURCE_ID },
-    label: 'Google Drive',
-    enforceable: GOOGLE_DRIVE_ENFORCEABLE_EXCLUSION_CRITERIA,
-    matcher: (env) => googleDriveIngestionExclusionMatcher(env),
-    stores: (env) => [
-      {
-        dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, 'internal', env),
-        corpusId: GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
-        trustDomain: 'internal',
-      },
-      {
-        dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, 'secure_local', env),
-        corpusId: GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
-        trustDomain: 'secure_local',
-      },
-    ],
-  },
-];
-
-/**
- * Open the picker's inputs for one request, read-only, and hand back the way to
- * close them.
- *
- * Read-only opens throughout: this page must never be able to create a store
- * file as a side effect of being looked at, and it must never hold a writer's
- * lock. A store whose file does not exist is reported as absent rather than
- * created, exactly as the purge script does.
- *
- * A source whose gate REFUSES to compile is carried as an error rather than
- * thrown. That refusal means the owner has a rule naming a source that cannot
- * enforce it, and this page is the tool they would use to fix it.
- */
-type StoredExclusionDebt = ReturnType<LocalConnectorStore['exclusionDebtPresent']>;
-
-/**
- * Both debts across a source's stores, walked once however many of the two
- * numbers the caller ends up reading.
- *
- * The runtime hands the page two separate accessors, and the page calls both;
- * without the memo that is two full walks of every store per render, for one
- * decision per row that already answers both. The memo is scoped to a runtime
- * that is opened and closed inside a single request, so it can never serve a
- * count from an earlier render.
- */
-function storedExclusionDebtReader(handles: readonly LocalConnectorStore[]): () => StoredExclusionDebt {
-  let walked: StoredExclusionDebt | undefined;
-  return () => {
-    if (walked) return walked;
-    const total: StoredExclusionDebt = {
-      excluded: { items: 0, unevaluable: 0 },
-      metadataOnlyContent: { items: 0, unevaluable: 0 },
-    };
-    for (const handle of handles) {
-      const debt = handle.exclusionDebtPresent();
-      total.excluded.items += debt.excluded.items;
-      total.excluded.unevaluable += debt.excluded.unevaluable;
-      total.metadataOnlyContent.items += debt.metadataOnlyContent.items;
-      total.metadataOnlyContent.unevaluable += debt.metadataOnlyContent.unevaluable;
-    }
-    walked = total;
-    return total;
-  };
-}
-
-export function openIngestionDispositionsRuntime(
-  env: Record<string, string | undefined> = process.env,
-  options: {
-    /**
-     * Open each store only when its items or debt are first read. The
-     * dashboard reads the debt once per reuse window, yet opened (and
-     * schema-checked) every store on every poll: the longest freeze in
-     * Sparta's 2007d67 window, 9.7 s (2026-11-05). A store that then fails
-     * to open throws from the accessor instead of being carried as an error.
-     */
-    lazyStores?: boolean;
-  } = {},
-): { sources: SourceDispositionsSource[]; close: () => void } {
-  const opened: LocalConnectorStore[] = [];
-  const sources: SourceDispositionsSource[] = [];
-  for (const definition of INGESTION_DISPOSITION_SOURCES) {
-    let stores: ReturnType<typeof definition.stores> = [];
-    const handles: LocalConnectorStore[] = [];
-    const readDebt = storedExclusionDebtReader(handles);
-    try {
-      stores = definition.stores(env);
-      const matcher = definition.matcher(env);
-      const present = stores.filter((store) => existsSync(store.dbPath));
-      let openedAll = false;
-      const openStores = (): readonly LocalConnectorStore[] => {
-        if (openedAll) return handles;
-        for (const store of present) {
-          const handle = openConnectorStore(definition.account, {
-            dbPath: store.dbPath,
-            corpusId: store.corpusId,
-            family: 'file',
-            trustDomain: store.trustDomain,
-            exclusions: matcher,
-            readOnly: true,
-          }, env);
-          handles.push(handle);
-          opened.push(handle);
-        }
-        openedAll = true;
-        return handles;
-      };
-      if (options.lazyStores !== true) openStores();
-      sources.push({
-        source_id: definition.sourceId,
-        label: definition.label,
-        corpus_ids: stores.map((store) => store.corpusId),
-        enforceable: definition.enforceable,
-        matcher,
-        store_present: present.length > 0,
-        ...(present.length > 0
-          ? {
-            items: function* (): Generator<SourceDispositionItem> {
-              for (const handle of openStores()) yield* handle.itemLocatorCensus();
-            },
-            excludedItemsPresent: () => {
-              openStores();
-              return readDebt().excluded;
-            },
-            metadataOnlyContentPresent: () => {
-              openStores();
-              return readDebt().metadataOnlyContent;
-            },
-          }
-          : {}),
-      });
-    } catch (error) {
-      // A store that refuses to open is carried as data like a gate that
-      // refuses to compile — but the handles this source already opened would
-      // otherwise be orphaned, because the caller's `finally` only ever sees a
-      // runtime this function returned.
-      for (const handle of handles) {
-        const index = opened.indexOf(handle);
-        if (index >= 0) opened.splice(index, 1);
-        try {
-          handle.close();
-        } catch {
-          // Closing a handle we are already discarding cannot change the entry.
-        }
-      }
-      sources.push({
-        source_id: definition.sourceId,
-        label: definition.label,
-        corpus_ids: stores.map((store) => store.corpusId),
-        enforceable: definition.enforceable,
-        matcher: createSourceExclusionMatcherFromPrefixes([]),
-        store_present: false,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-  return {
-    sources,
-    close: () => {
-      for (const handle of opened.reverse()) {
-        try {
-          handle.close();
-        } catch {
-          // A close failure must not mask the response that already rendered.
-        }
-      }
-    },
-  };
-}
-
-export function parseOptionalTimeoutSeconds(value: string | undefined, name: string): number | undefined {
-  if (value === undefined || value.trim().length === 0) return undefined;
-  const seconds = Number(value);
-  if (!Number.isFinite(seconds) || seconds <= 0) {
-    throw new Error(`${name} must be a positive number of seconds.`);
-  }
-  return Math.round(seconds * 1000);
-}
-
-export function parseOptionalTimeoutSecondsOrNone(value: string | undefined, name: string): number | undefined {
-  if (value === undefined || value.trim().length === 0) return undefined;
-  const normalized = value.trim().toLowerCase();
-  if (normalized === 'none' || normalized === 'unbounded' || normalized === 'disabled') return 0;
-  return parseOptionalTimeoutSeconds(value, name);
-}
-
-export function trustedAnalystAssistTimeoutMs(input: {
-  explicitTrustedAnalystTimeoutMs: number | undefined;
-  veniceAnalystTimeoutMs: number | undefined;
-}): number | undefined {
-  if (input.explicitTrustedAnalystTimeoutMs !== undefined) return input.explicitTrustedAnalystTimeoutMs;
-  if (input.veniceAnalystTimeoutMs === undefined) return undefined;
-  return Math.min(input.veniceAnalystTimeoutMs + 5_000, 20_000);
-}
-
-async function createSovereigntyAnalystMap(input: {
-  engine: SovereigntyEngine;
-  olympusConfig: ReturnType<typeof loadConfig>;
-  env: Record<string, string | undefined>;
-  defaultLocal: Analyst;
-  veniceAnalystTimeoutMs: number | undefined;
-  veniceReasoningHeadroomTokens: number | undefined;
-  bootSecretResolver?: WorkerBootSecretResolver;
-  builtInAnalyst?: Analyst;
-  localModelActivity?: LocalModelActivity;
-}): Promise<Map<string, {
-  profile: SovereigntyResolvedProfile;
-  backend: AnalystBackend;
-  analyst: Analyst;
-}>> {
-  const map = new Map<string, {
-    profile: SovereigntyResolvedProfile;
-    backend: AnalystBackend;
-    analyst: Analyst;
-  }>();
-  const securePoolMemberIds = (() => {
-    try {
-      return new Set(
-        input.engine.resolveAnalystPool({ trustDomain: 'secure_local' })
-          .members.map((member) => member.id),
-      );
-    } catch {
-      return new Set<string>();
-    }
-  })();
-  for (const [id, profile] of Object.entries(input.engine.config.modelProfiles)) {
-    const resolved = { id, profile };
-    if (profile.purpose && profile.purpose !== 'analyst') continue;
-    const backend = analystBackendForSovereigntyProfile(profile);
-    if (!backend) continue;
-    if (profile.provider === 'venice' && securePoolMemberIds.has(id)) {
-      const apiKey = resolveSecretRefSync(
-        profile.secretRef,
-        input.env,
-        'Sovereignty Venice analyst profile',
-        bootSecretOptions(input.bootSecretResolver, [id], ['analyst'], resolved),
-      );
-      if (!apiKey) continue;
-      await validateSecureVeniceAnalystProfileAtConstruction({ profile, apiKey });
-    }
-    const analyst = input.engine.source === 'env_bridge' && id === 'local-source-answer'
-      ? input.defaultLocal
-      : createAnalystForSovereigntyProfile({
-          profile,
-          profileId: id,
-          ...(input.localModelActivity ? { localModelActivity: input.localModelActivity } : {}),
-          olympusConfig: input.olympusConfig,
-          env: input.env,
-          veniceAnalystTimeoutMs: input.veniceAnalystTimeoutMs,
-          veniceReasoningHeadroomTokens: input.veniceReasoningHeadroomTokens,
-          ...(input.bootSecretResolver ? { bootSecretResolver: input.bootSecretResolver } : {}),
-        });
-    if (!analyst) continue;
-    map.set(id, { profile: resolved, backend, analyst });
-  }
-  applyBuiltInPrivateAnalyst(map, securePoolMemberIds, input.builtInAnalyst);
-  return map;
-}
-
-/**
- * Each local Private-pool member falls back to the built-in model when its
- * configured service is not running, including when Venice is available.
- * A configured, running local service is used first.
- * Returns whether the built-in model was wired in.
- */
-export function applyBuiltInPrivateAnalyst(
-  map: Map<string, { profile: SovereigntyResolvedProfile; backend: AnalystBackend; analyst: Analyst }>,
-  securePoolMemberIds: ReadonlySet<string>,
-  builtInAnalyst: Analyst | undefined,
-): boolean {
-  if (!builtInAnalyst) return false;
-  const members = [...securePoolMemberIds].flatMap((id) => {
-    const entry = map.get(id);
-    return entry ? [[id, entry] as const] : [];
-  });
-  let wired = false;
-  for (const [id, entry] of members) {
-    if (entry.backend !== 'local') continue;
-    map.set(id, { ...entry, analyst: withBuiltInFallback(entry.analyst, builtInAnalyst) });
-    wired = true;
-  }
-  return wired;
-}
-
-/**
- * Whether the built-in model answers for this Private-pool analyst when its
- * server is down, as applyBuiltInPrivateAnalyst wires it: a local member of a
- * pool. Judged by install state, not by "prepared in this
- * process": boot re-verifies the model while the first readiness check runs,
- * and that check locked every source (#591).
- */
-export function builtInBacksPrivateAnalyst(
-  id: string,
-  state: ReturnType<BuiltInAnalystModel['status']>['state'] | undefined,
-  members: readonly { id: string; profile: SovereigntyModelProfile }[],
-  _availableIds?: ReadonlySet<string>,
-): boolean {
-  if (!state || state === 'failed') return false;
-  return members.some((member) => member.id === id && member.profile.provider === 'local-openai-compatible');
-}
-
-/** Whether this computer's configured local answer model answers /models within a few seconds. */
-async function probeLocalAnalystService(olympusConfig: ReturnType<typeof loadConfig>): Promise<boolean> {
-  try {
-    await new DelphiClient(olympusConfig).listModelsForProfile('source_answer', AbortSignal.timeout(3_000));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * The built-in analyst for this worker, or undefined when it is switched off,
- * unsupported here, or the machine has too little memory. Under the test
- * runner it is never created: a test must not fetch model weights.
- */
-function createWorkerBuiltInAnalystModel(env: Record<string, string | undefined>): BuiltInAnalystModel | undefined {
-  if (env.NODE_ENV === 'test' || !builtInAnalystEnabled(env)) return undefined;
-  if (!resolveBuiltInReasoningModel(env)) return undefined;
-  return createBuiltInAnalystModel({ env });
-}
-
-/**
- * Worker shutdown stops the built-in model's server process (SIGTERM, then
- * SIGKILL; bounded at about 10 s), so a clean shutdown never leaves it running
- * or holding the worker open. A failure is swallowed: shutdown goes on.
- */
-export function stopBuiltInModelOnShutdown(model: Pick<BuiltInAnalystModel, 'stop'> | undefined): void {
-  if (!model) return;
-  try {
-    void model.stop().catch(() => undefined);
-  } catch {
-    // Shutdown continues whatever the model does.
-  }
-}
-
-/**
- * The worker's one built-in private model, with `available()`: downloaded,
- * verified and prepared in this process, so a caller (the sniffer, the
- * private answer panel) never asks it while a first-time download runs. A
- * model already installed on disk is prepared at boot (a checksum pass, no
- * download); a fresh install is started by the answer pool when the local
- * model service is down.
- */
-const BUILT_IN_MODEL_RETRY_MS = 10 * 60_000;
-
-function createWorkerSharedBuiltInModel(
-  env: Record<string, string | undefined>,
-): { model: BuiltInAnalystModel; available: () => boolean; startIfIdle: () => void } | undefined {
-  const base = createWorkerBuiltInAnalystModel(env);
-  if (!base) return undefined;
-  let prepared = false;
-  const installedOnDisk = (): boolean => {
-    try {
-      const state = base.status().state;
-      return state === 'loading' || state === 'ready';
-    } catch {
-      return false;
-    }
-  };
-  const model: BuiltInAnalystModel = {
-    ...base,
-    async prepare() {
-      await base.prepare();
-      prepared = installedOnDisk();
-    },
-  };
-  // Any install this computer has started is re-checked at boot, whatever
-  // its status file says: a status file is one process's last word, not a
-  // fact about the disk. "verifying" or "downloading" left behind by a
-  // process that is gone (or a models directory copied mid-install) used to
-  // be trusted and stay there forever. prepare() re-verifies the pinned
-  // checksums, resumes or restarts a download, and ends ready or failed.
-  if (base.status().state !== 'not_started') void model.prepare();
-  // A fresh install's first download, started by the tier sniffer when it
-  // has items waiting for this model (prepare() is shared and deduplicated).
-  // A verified install (prepared in this process) whose server later failed
-  // to start is re-armed too, at most once per BUILT_IN_MODEL_RETRY_MS:
-  // otherwise `failed` would keep the sniffer and the private panel off this
-  // model until the engine restarts. A failed install is never re-run here.
-  let lastRetryMs = 0;
-  const startIfIdle = (): void => {
-    const status = base.status();
-    if (status.state === 'not_started') {
-      void model.prepare();
-      return;
-    }
-    if (prepared && status.state === 'failed' && status.failure?.reason === 'runtime_load_failed'
-      && Date.now() - lastRetryMs >= BUILT_IN_MODEL_RETRY_MS) {
-      lastRetryMs = Date.now();
-      void model.prepare();
-    }
-  };
-  return { model, available: () => prepared && installedOnDisk(), startIfIdle };
-}
-
-/**
- * Turn one resolved sovereignty pool into the route plan the answer path
- * dispatches over.
- *
- * A pool member whose secret does not resolve is deliberately absent from the
- * analyst map — `WorkerBootSecretResolver` records `worker_credential_degraded`
- * and keeps the worker serving, so one dead credential must not take the pool's
- * healthy members with it. Only a pool with nothing constructible refuses, and
- * it refuses as the typed `config_error` the answer path converts into a
- * metadata-only gap rather than a 500.
- */
-export function sovereigntyAnalystRoutePlan(input: {
-  trustDomain: SourceTrustDomain;
-  pool: {
-    members: readonly SovereigntyResolvedProfile[];
-    explicitOrder?: readonly SovereigntyResolvedProfile[];
-  };
-  analysts: ReadonlyMap<string, SovereigntyAnalystRouteStep>;
-}): SovereigntyAnalystRoutePlan {
-  const profiles = input.pool.explicitOrder ?? input.pool.members;
-  const steps = profiles.flatMap((profile) => {
-    const entry = input.analysts.get(profile.id);
-    return entry ? [entry] : [];
-  });
-  if (steps.length === 0) {
-    throw new OperationError(
-      'config_error',
-      `Sovereignty analyst route for ${input.trustDomain} is disabled: no configured analyst profile is constructible by this worker (${profiles.map((profile) => profile.id).join(', ')}).`,
-      'Restore the analyst credential for one of these profiles and restart the Olympus worker.',
-    );
-  }
-  return {
-    poolId: input.trustDomain,
-    trustDomain: input.trustDomain,
-    selection: input.pool.explicitOrder ? 'explicit_order' : 'health_latency',
-    steps,
-  };
-}
-
-/**
- * Standalone engines cannot run the presets' OpenClaw Personal analyst.
- * Resolve that legacy host lane through the owner's Private answer choice,
- * retaining its order and provider constraints. A keyword-only Private policy
- * still permits Personal answers on this computer's default local analyst.
- */
-export function workerSovereigntyAnalystRoutePlan(input: {
-  engine: SovereigntyEngine;
-  env: Record<string, string | undefined>;
-  trustDomain: SourceTrustDomain;
-  requestedProvider: 'default' | 'local' | 'cloud' | 'venice';
-  analysts: ReadonlyMap<string, SovereigntyAnalystRouteStep>;
-  defaultLocal: Analyst;
-}): SovereigntyAnalystRoutePlan {
-  const { engine, trustDomain, requestedProvider } = input;
-  const configured = engine.resolveAnalystPool({ trustDomain });
-  if (trustDomain !== 'secure_local' && isStandaloneEngineProcess(input.env)
-    && configured.members.some(member => member.profile.provider === 'openclaw-infer')) {
-    // A provider-specific request keeps the eligible, constructible
-    // non-OpenClaw members of the configured Personal route; only the
-    // unavailable OpenClaw lane is substituted. A default request follows the
-    // owner's Private answer choice, keeping its fallback order.
-    let requested: ReturnType<SovereigntyEngine['resolveAnalystPool']> | undefined;
-    if (requestedProvider !== 'default') {
-      try { requested = engine.resolveAnalystPool({ trustDomain, requestedProvider }); } catch { requested = undefined; }
-    }
-    const keep = (profile: SovereigntyResolvedProfile) => profile.profile.provider !== 'openclaw-infer' && input.analysts.has(profile.id);
-    if (requested && requested.members.some(keep)) {
-      return sovereigntyAnalystRoutePlan({ trustDomain, analysts: input.analysts, pool: {
-        members: requested.members.filter(keep),
-        ...(requested.explicitOrder ? { explicitOrder: requested.explicitOrder.filter(keep) } : {}),
-      } });
-    }
-    if (engine.config.routes.secure_local?.mode !== 'disabled') {
-      return sovereigntyAnalystRoutePlan({
-        trustDomain,
-        pool: engine.resolveAnalystPool({ trustDomain: 'secure_local', requestedProvider }),
-        analysts: input.analysts,
-      });
-    }
-    // Do not turn a provider-specific request into an unrequested local run.
-    if (requestedProvider === 'venice') throw new OperationError('config_error', 'No standalone Venice analyst route is configured.');
-    const profile: SovereigntyResolvedProfile = {
-      id: 'standalone-source-answer',
-      profile: { provider: 'built-in', trust: 'local', model: 'default', purpose: 'analyst' },
-    };
-    return { poolId: trustDomain, trustDomain, selection: 'explicit_order',
-      steps: [{ profile, backend: 'local', analyst: input.defaultLocal }] };
-  }
-  return sovereigntyAnalystRoutePlan({ trustDomain,
-    pool: engine.resolveAnalystPool({ trustDomain, requestedProvider }), analysts: input.analysts });
-}
-
-/**
- * Whether secure_local evidence has an approved, constructible private analyst
- * under the active sovereignty policy — the same resolution the answer path
- * dispatches through, asked before retrieval so the handler can decide whether
- * secure_local is searched by default. A disabled route (no-sensitive), a
- * metadata-only secure handling policy, a pool with no member matching the
- * requested provider, or a pool whose every credential failed to resolve all
- * answer "not approved"; any other failure is a real error.
- */
-export function secureLocalAnalystRouteStatus(input: {
-  engine: Pick<SovereigntyEngine, 'config' | 'resolveAnalystPool'>;
-  analysts: ReadonlyMap<string, SovereigntyAnalystRouteStep>;
-  requestedProvider: 'default' | 'local' | 'cloud' | 'venice';
-}): SecureLocalAnalystRouteStatus {
-  if (input.engine.config.retrieval.trustDomains.secure_local?.secureHandling === 'metadata_only_gap') {
-    return { approved: false, reason: 'secure_local_metadata_only_policy' };
-  }
-  try {
-    sovereigntyAnalystRoutePlan({
-      trustDomain: 'secure_local',
-      pool: input.engine.resolveAnalystPool({
-        trustDomain: 'secure_local',
-        requestedProvider: input.requestedProvider,
-      }),
-      analysts: input.analysts,
-    });
-    return { approved: true };
-  } catch (error) {
-    if (error instanceof OperationError && error.code === 'config_error') {
-      return { approved: false, reason: 'no_approved_private_analyst' };
-    }
-    throw error;
-  }
-}
-
-export async function validateSecureVeniceAnalystProfileAtConstruction(input: {
-  profile: SovereigntyModelProfile;
-  apiKey: string;
-  catalog?: VeniceModelCatalogOptions;
-}): Promise<void> {
-  const baseUrl = approvedVeniceAnalystBaseUrl(
-    input.profile.baseUrl ?? 'https://api.venice.ai/api/v1',
-  );
-  await assertVeniceAnalystModelAllowed(
-    input.profile.model ?? '',
-    true,
-    createVenicePrivacyCategoryResolver({
-      apiKey: input.apiKey,
-      baseUrl,
-      ...(input.catalog ? { catalog: input.catalog } : {}),
-    }),
-  );
-}
-
-function analystBackendForSovereigntyProfile(profile: SovereigntyModelProfile): AnalystBackend | undefined {
-  if (profile.provider === 'venice') return 'venice';
-  if (profile.trust === 'local') return 'local';
-  if (profile.trust === 'standard_cloud') return 'cloud';
-  if (profile.provider === 'openai-compatible') return 'cloud';
-  return undefined;
-}
-
-export function createAnalystForSovereigntyProfile(input: {
-  profile: SovereigntyModelProfile;
-  profileId?: string;
-  localModelActivity?: LocalModelActivity;
-  olympusConfig: ReturnType<typeof loadConfig>;
-  env: Record<string, string | undefined>;
-  veniceAnalystTimeoutMs: number | undefined;
-  veniceReasoningHeadroomTokens: number | undefined;
-}): Analyst;
-export function createAnalystForSovereigntyProfile(input: {
-  profile: SovereigntyModelProfile;
-  profileId?: string;
-  localModelActivity?: LocalModelActivity;
-  olympusConfig: ReturnType<typeof loadConfig>;
-  env: Record<string, string | undefined>;
-  veniceAnalystTimeoutMs: number | undefined;
-  veniceReasoningHeadroomTokens: number | undefined;
-  bootSecretResolver: WorkerBootSecretResolver;
-}): Analyst | undefined;
-export function createAnalystForSovereigntyProfile(input: {
-  profile: SovereigntyModelProfile;
-  profileId?: string;
-  localModelActivity?: LocalModelActivity;
-  olympusConfig: ReturnType<typeof loadConfig>;
-  env: Record<string, string | undefined>;
-  veniceAnalystTimeoutMs: number | undefined;
-  veniceReasoningHeadroomTokens: number | undefined;
-  bootSecretResolver?: WorkerBootSecretResolver;
-}): Analyst | undefined {
-  const { profile } = input;
-  const profileId = input.profileId ?? profile.model ?? profile.provider;
-  if (profile.provider === 'local-openai-compatible') {
-    if (!profile.baseUrl?.trim()) {
-      throw new Error('Local sovereignty analyst profiles require baseUrl.');
-    }
-    const apiKey = profile.secretRef
-      ? resolveSecretRefSync(
-        profile.secretRef,
-        input.env,
-        'Sovereignty local analyst profile',
-        bootSecretOptions(input.bootSecretResolver, [profileId], ['analyst'], { id: profileId, profile }),
-      )
-      : undefined;
-    if (profile.secretRef && !apiKey) return undefined;
-    const config = structuredClone(input.olympusConfig);
-    config.argus.modelProfiles.source_answer = {
-      ...config.argus.modelProfiles.source_answer,
-      baseUrl: profile.baseUrl,
-      model: profile.model,
-      ...(profile.secretRef ? { secretRef: profile.secretRef } : {}),
-      purpose: 'text_reasoning',
-    };
-    const model = createDelphiAnalystModel(new DelphiClient(config, undefined, {
-      resolveSecretRef: () => apiKey,
-    }), { profile: 'source_answer', preflightTimeoutMs: 0 });
-    return createAnalyst(input.localModelActivity
-      ? input.localModelActivity.track(localModelResourceKey(profile), model, { serialize: false }) : model,
-    { auditSuspiciousDrafts: true });
-  }
-  if (profile.provider === 'openclaw-infer') {
-    return createAnalyst(createOpenClawInferAnalystModel({
-      model: profile.model,
-      ...(input.env.OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_THINKING?.trim()
-        ? { thinking: input.env.OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_THINKING.trim() }
-        : { thinking: 'low' }),
-      ...(input.env.OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_COMMAND?.trim()
-        ? { command: input.env.OLYMPUS_SOURCE_INDEX_CLOUD_ANALYST_COMMAND.trim() }
-        : {}),
-    }));
-  }
-  if (profile.provider === 'venice') {
-    const apiKey = resolveSecretRefSync(
-      profile.secretRef,
-      input.env,
-      'Sovereignty Venice analyst profile',
-      bootSecretOptions(input.bootSecretResolver, [profileId], ['analyst'], { id: profileId, profile }),
-    );
-    if (!apiKey) return undefined;
-    // Construct the catalog-gated adapter once with the pool member. Every
-    // dispatch validates its configured model against the authoritative
-    // catalog before chat fetch, using the dispatch AbortSignal.
-    return createAnalyst(createVeniceAnalystModel({
-      apiKey,
-      model: profile.model,
-      ...(profile.baseUrl ? { baseUrl: profile.baseUrl } : {}),
-      ...(input.veniceAnalystTimeoutMs !== undefined ? { timeoutMs: input.veniceAnalystTimeoutMs } : {}),
-      ...(input.veniceReasoningHeadroomTokens !== undefined
-        ? { reasoningHeadroomTokens: input.veniceReasoningHeadroomTokens }
-        : {}),
-    }));
-  }
-  if (profile.provider === 'openai-compatible') {
-    const apiKey = resolveSecretRefSync(
-      profile.secretRef,
-      input.env,
-      'Sovereignty OpenAI-compatible analyst profile',
-      bootSecretOptions(input.bootSecretResolver, [profileId], ['analyst'], { id: profileId, profile }),
-    );
-    if (!apiKey) return undefined;
-    return {
-      async analyze(pack, options) {
-        return createAnalyst(createOpenAICompatibleAnalystModel({
-          apiKey,
-          model: profile.model,
-          ...(profile.baseUrl ? { baseUrl: profile.baseUrl } : {}),
-          providerLabel: 'Sovereignty cloud analyst',
-        })).analyze(pack, options);
-      },
-    };
-  }
-  if (profile.provider === 'anthropic') {
-    const apiKey = resolveSecretRefSync(
-      profile.secretRef,
-      input.env,
-      'Sovereignty Anthropic analyst profile',
-      bootSecretOptions(input.bootSecretResolver, [profileId], ['analyst'], { id: profileId, profile }),
-    );
-    if (!apiKey) return undefined;
-    return {
-      async analyze(pack, options) {
-        return createAnalyst(createAnthropicAnalystModel({
-          apiKey,
-          model: profile.model,
-          ...(profile.baseUrl ? { baseUrl: profile.baseUrl } : {}),
-        })).analyze(pack, options);
-      },
-    };
-  }
-  throw new Error(`Sovereignty analyst provider ${profile.provider} is not supported by this worker.`);
-}
-
-/**
- * The completion model behind the privacy-safe tier sniffer. Only the two
- * lanes the sniffer lane resolver admits are built here: a loopback local
- * model, or catalog-gated Venice Private (every dispatch re-checks the model's
- * privacy category). Short, cheap, no thinking: it answers one JSON verdict
- * per item.
- */
-function createTierSnifferModel(input: {
-  judgeFetch?: import('../../core/analyst-openai.ts').OpenAIAnalystFetch;
-  judgeStatus?: () => import('../classification/judge-spending.ts').JudgeSpendingStatus;
-  judgeOnStop?: () => void;
-  lane: SnifferLane;
-  /**
-   * The profile as configured under the lane's id. Credential readiness is
-   * recorded against it, so a judge Olympus derives from an answer profile
-   * (its own model, #1252) never replaces that profile's readiness evidence.
-   */
-  configuredProfile?: SovereigntyModelProfile | undefined;
-  olympusConfig: ReturnType<typeof loadConfig>;
-  env: Record<string, string | undefined>;
-  bootSecretResolver: WorkerBootSecretResolver;
-}): AnalystModel | undefined {
-  const { lane } = input;
-  const profile = lane.profile;
-  if (lane.kind === 'local' && profile.provider === 'local-openai-compatible') {
-    if (!profile.baseUrl?.trim()) return undefined;
-    const apiKey = profile.secretRef
-      ? resolveSecretRefSync(
-        profile.secretRef,
-        input.env,
-        'Tier sniffer local model profile',
-        bootSecretOptions(input.bootSecretResolver, [lane.profileId], ['classification'], { id: lane.profileId, profile }),
-      )
-      : undefined;
-    if (profile.secretRef && !apiKey) return undefined;
-    const config = structuredClone(input.olympusConfig);
-    config.argus.modelProfiles.source_answer = {
-      ...config.argus.modelProfiles.source_answer,
-      baseUrl: profile.baseUrl,
-      model: profile.model,
-      ...(profile.secretRef ? { secretRef: profile.secretRef } : {}),
-      purpose: 'text_reasoning',
-    };
-    return createDecisionSnifferModel(lane, createDelphiAnalystModel(new DelphiClient(config, undefined, { resolveSecretRef: () => apiKey }), {
-      profile: 'source_answer',
-      preflightTimeoutMs: 5_000,
-    }), { apiKey, log: (line) => console.warn(line) });
-  }
-  if (lane.kind === 'venice' && profile.provider === 'venice') {
-    const apiKey = resolveSecretRefSync(
-      profile.secretRef,
-      input.env,
-      'Tier sniffer Venice model profile',
-      bootSecretOptions(input.bootSecretResolver, [lane.profileId], ['classification'], { id: lane.profileId, profile: input.configuredProfile ?? profile }),
-    );
-    if (!apiKey) return undefined;
-    // Paced to the key's per-model request limit; a 429 waits and retries (#884).
-    const pacer = new JudgeRateLimitPacer();
-    const model = pacer.model(createVeniceAnalystModel({
-      apiKey,
-      model: profile.model,
-      ...(profile.baseUrl ? { baseUrl: profile.baseUrl } : {}),
-      fetchImpl: pacer.fetch(input.judgeFetch ?? ((url, init) => fetch(url, init))),
-      thinking: 'disabled',
-      reasoningEffort: 'low',
-      reasoningHeadroomTokens: 0,
-      timeoutMs: 60_000,
-      promptCacheKey: JUDGE_PROMPT_CACHE_KEY,
-      sampling: JUDGE_SAMPLING,
-    }));
-    return input.judgeStatus ? withJudgeSpendingStop(model, input.judgeStatus, input.judgeOnStop) : model;
-  }
-  return undefined;
-}
-
-export function analystRouteTrustDomain(pack: { candidates: readonly SecureSensitivityInput[] }, localOnly: boolean): SourceTrustDomain {
-  // Secure by domain or by tier selects the secure pool.
-  if (localOnly || pack.candidates.some((candidate) => isSecureSensitivity(candidate))) {
-    return 'secure_local';
-  }
-  // Public only when a Public candidate is actually in the pack. An empty pack
-  // (nothing matched, or every match was Private on a policy with no Private
-  // answer route) takes the Personal route: the Analyst answers it without a
-  // model call, and a policy with no Public tier (every shipped preset) has no
-  // public_safe route to resolve.
-  if (pack.candidates.some((candidate) => candidate.trustDomain === 'public_safe')
-    && !pack.candidates.some((candidate) => candidate.trustDomain === 'internal')) {
-    return 'public_safe';
-  }
-  return 'internal';
-}
-
-
-function parseRequiredTimeoutSeconds(value: string, name: string): number {
-  return parseOptionalTimeoutSeconds(value, name) ?? (() => {
-    throw new Error(`${name} must be a positive number of seconds.`);
-  })();
-}
-
-function parseVeniceReasoningEffort(value: string): OpenAIReasoningEffort {
-  const normalized = value.trim();
-  if ([
-    'none',
-    'minimal',
-    'low',
-    'medium',
-    'high',
-    'xhigh',
-    'max',
-  ].includes(normalized)) {
-    return normalized as OpenAIReasoningEffort;
-  }
-  throw new Error('OLYMPUS_SOURCE_INDEX_VENICE_ANALYST_REASONING_EFFORT must be one of none, minimal, low, medium, high, xhigh, max.');
-}
-
-function parseVeniceThinkingMode(value: string): VeniceThinkingMode {
-  const normalized = value.trim();
-  if (normalized === 'enabled' || normalized === 'on' || normalized === 'true') return 'enabled';
-  if (normalized === 'disabled' || normalized === 'off' || normalized === 'false') return 'disabled';
-  throw new Error('OLYMPUS_SOURCE_INDEX_VENICE_ANALYST_THINKING must be enabled or disabled.');
-}
-
-function parseOptionalTokenCount(value: string | undefined, name: string): number | undefined {
-  return parseOptionalPositiveInteger(value, name);
-}
-
-export function parseOptionalPositiveInteger(value: string | undefined, name: string): number | undefined {
-  if (value === undefined || value.trim().length === 0) return undefined;
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed <= 0) {
-    throw new Error(`${name} must be a positive integer.`);
-  }
-  return parsed;
-}
-
-export function parseOptionalNonNegativeInteger(value: string | undefined, name: string): number | undefined {
-  if (value === undefined || value.trim().length === 0) return undefined;
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 0) {
-    throw new Error(`${name} must be a non-negative integer.`);
-  }
-  return parsed;
-}
-
-export function sourceIndexSemanticRelevanceBarFromEnv(
-  env: Record<string, string | undefined>,
-): number {
-  const name = 'OLYMPUS_SOURCE_INDEX_SEMANTIC_RELEVANCE_BAR';
-  const value = env[name];
-  if (value === undefined) return DEFAULT_SEMANTIC_RELEVANCE_BAR;
-  const parsed = Number(value.trim());
-  if (!Number.isFinite(parsed) || parsed <= 0 || parsed >= 1) {
-    throw new Error(`${name} must be a finite number greater than 0 and less than 1.`);
-  }
-  return parsed;
-}
-
-export function parseSecureDerivativeDefault(value: string | undefined): 'allow' | 'approval' | undefined {
-  if (value === undefined || value.trim().length === 0) return undefined;
-  const normalized = value.trim().toLowerCase();
-  if (normalized === 'allow' || normalized === 'approval') return normalized;
-  throw new Error('OLYMPUS_SECURE_DERIVATIVE_DEFAULT must be allow or approval.');
-}
-
-export function sourceIndexTelegramAccountFromEnv(
-  env: Record<string, string | undefined>,
-): string | undefined {
-  return optionalEnv(env, 'OLYMPUS_SOURCE_INDEX_TELEGRAM_ACCOUNT');
-}
-
-export function sourceAnswerAccountForCorpus(
-  request: { account?: string; corpus_id?: string },
-  defaults: { sourceIndexAccount?: string | undefined; telegramMessagesAccount?: string | undefined },
-  corpusId?: string,
-): string | undefined {
-  const requested = request.account?.trim();
-  if (requested) return requested;
-  const effectiveCorpusId = corpusId ?? request.corpus_id;
-  if (effectiveCorpusId === INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID) {
-    return defaults.telegramMessagesAccount;
-  }
-  return defaults.sourceIndexAccount;
-}
-
-// The narrowing filters a connector-store corpus can honour on the answer
-// lane, resolved through the same codecs `/source/index/search` resolves them
-// with. Only the two `source_answer` wire fields are listed: folder filters and
-// locator release are search-only surfaces.
-const CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES = connectorStoreFilterCapabilityRegistry([
-  [{ family: 'chat' }, { chatScope: CHAT_SCOPE_FILTER_CODEC }],
-  [{ family: 'file', provider: 'dropbox' }, { approvedScope: DROPBOX_APPROVED_SCOPE_FILTER_CODEC }],
-  [{ family: 'file', provider: LOCAL_FILES_PROVIDER }, { approvedScope: LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC }],
-]);
-
-export interface ConnectorStoreAnswerScopeStore {
-  corpusId: string;
-  family: SourceFamily;
-  conversationTitleCandidates(
-    lookupTerms: readonly string[],
-    accountScope?: string,
-    provider?: string,
-  ): ConnectorStoreConversationTitleCandidates;
-}
-
-export type ConnectorStoreAnswerScope =
-  | Readonly<{ kind: 'search'; accountScope?: string; filters?: ConnectorStoreSearchFilters }>
-  | Readonly<{ kind: 'skip'; reason: string }>;
-
-/**
- * Resolve one connector-store corpus's share of a `source_answer` request into
- * the account scope and filters its adapter must carry.
- *
- * `chat_scope` and `approved_scope_key` are narrowing filters that
- * `/source/index/search` resolves through the capability codecs and refuses
- * (400 `unsupported_filter` / `invalid_request`) when it cannot honour them.
- * The answer lane fans out instead of refusing, so the same unhonourable state
- * skips the corpus — audited `no_adapter` — rather than searching it whole. A
- * corpus whose family has no codec for a filter is not scoped BY that filter
- * (chat scope does not narrow Dropbox), which is what the legacy per-source
- * adapters did and what the wire contract describes.
- */
-export function connectorStoreAnswerScope(input: {
-  store: ConnectorStoreAnswerScopeStore;
-  request: SourceIndexAnswerRequest;
-  principal?: ConnectorStoreDeclaredPrincipal;
-  capabilities?: ConnectorStoreFilterCapabilityRegistry;
-  /**
-   * The shared people index (#1076): a sender label that names a person also
-   * matches every sender linked to that person, on every source.
-   */
-  people?: { senderIdentitiesFor(query: string): PeopleSenderIdentity[] };
-}): ConnectorStoreAnswerScope {
-  const { store, principal, request } = input;
-  const capabilities = (input.capabilities ?? CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES).resolve({
-    family: store.family,
-    ...(principal ? { provider: principal.provider } : {}),
-  });
-  const requestedAccount = request.account?.trim() || undefined;
-  const approvedScopeKey = request.approved_scope_key?.trim() || undefined;
-  const chatScope = request.chat_scope?.trim() || undefined;
-  const conversationId = request.conversation_id?.trim() || undefined;
-
-  let accountScope: string | undefined;
-  let provider: string | undefined;
-  let locatorPathScope: string | undefined;
-  let scopedConversationId = conversationId;
-
-  if (approvedScopeKey && capabilities?.approvedScope) {
-    if (!principal) return { kind: 'skip', reason: 'approved_scope_key_no_principal' };
-    const resolution = capabilities.approvedScope.resolveLocatorPath(approvedScopeKey, principal);
-    if (resolution.kind !== 'path') return { kind: 'skip', reason: 'approved_scope_key_invalid' };
-    if (requestedAccount !== undefined && requestedAccount !== resolution.accountScope) {
-      return { kind: 'skip', reason: 'approved_scope_key_account_mismatch' };
-    }
-    accountScope = resolution.accountScope;
-    provider = principal.provider;
-    locatorPathScope = resolution.locatorPath;
-  }
-
-  if (chatScope && capabilities?.chatScope) {
-    if (!principal) return { kind: 'skip', reason: 'chat_scope_no_principal' };
-    if (requestedAccount !== undefined && requestedAccount !== principal.accountScope) {
-      return { kind: 'skip', reason: 'chat_scope_account_mismatch' };
-    }
-    const resolution = capabilities.chatScope.resolveConversationId(
-      chatScope,
-      (lookupTerms) => store.conversationTitleCandidates(
-        lookupTerms,
-        principal.accountScope,
-        principal.provider,
-      ),
-    );
-    if (resolution.kind === 'invalid') return { kind: 'skip', reason: 'chat_scope_invalid' };
-    if (resolution.kind === 'structured') {
-      if (resolution.provider !== undefined && resolution.provider !== principal.provider) {
-        return { kind: 'skip', reason: 'chat_scope_provider_mismatch' };
-      }
-      if (resolution.accountScope !== principal.accountScope) {
-        return { kind: 'skip', reason: 'chat_scope_account_mismatch' };
-      }
-    }
-    if (conversationId && (!resolution.resolved || resolution.conversationId !== conversationId)) {
-      return { kind: 'skip', reason: 'chat_scope_conversation_id_conflict' };
-    }
-    accountScope = principal.accountScope;
-    provider = principal.provider;
-    // An unresolved title keeps the codec's sentinel conversation id, which
-    // matches no row: an unresolvable scope narrows to nothing, never to all.
-    scopedConversationId = resolution.conversationId;
-  }
-
-  const senderId = request.sender_id?.trim() || undefined;
-  const senderLabel = request.sender_label?.trim() || undefined;
-  const authoredAfter = request.authored_after?.trim() || undefined;
-  const authoredBefore = request.authored_before?.trim() || undefined;
-  let senderIdentities: PeopleSenderIdentity[] = [];
-  if (senderLabel && !senderId && input.people) {
-    try {
-      senderIdentities = input.people.senderIdentitiesFor(senderLabel);
-    } catch {
-      senderIdentities = [];
-    }
-  }
-  const filters: ConnectorStoreSearchFilters = {
-    ...(provider ? { provider } : {}),
-    ...(locatorPathScope ? { locatorPathScope } : {}),
-    ...(scopedConversationId ? { conversationId: scopedConversationId } : {}),
-    ...(senderId ? { senderId } : {}),
-    ...(senderLabel ? { senderLabel } : {}),
-    ...(senderIdentities.length > 0 ? { senderIdentities } : {}),
-    ...(authoredAfter ? { authoredAfter } : {}),
-    ...(authoredBefore ? { authoredBefore } : {}),
-  };
-  return {
-    kind: 'search',
-    ...(accountScope ? { accountScope } : {}),
-    ...(Object.keys(filters).length > 0 ? { filters } : {}),
-  };
-}
-
-
-
-/** The analyst's own test for a candidate it matched but could not read. */
-
-
-
-
-const PEOPLE_INDEX_FIRST_REFRESH_MS = 60_000;
-/** How often the worker checks whether a sync or a tier visibility change needs a rebuild. */
-const PEOPLE_INDEX_CHECK_MS = 60_000;
-
-function openPeopleIndexOrUndefined(options: { readOnly?: boolean } = {}): LocalPeopleIndex | undefined {
-  const dbPath = peopleIndexPath(process.env);
-  // The engine split's front reads the index the background rebuilds, once it exists.
-  if (options.readOnly && !existsSync(dbPath)) return undefined;
-  try {
-    return new LocalPeopleIndex({ dbPath, ...(options.readOnly ? { readOnly: true } : {}) });
-  } catch (error) {
-    console.warn(`[olympus] people index unavailable: ${error instanceof Error ? error.message : String(error)}`);
-    return undefined;
-  }
-}
-
-export function accountFromDropboxCredentialHandle(value: string | undefined): string | undefined {
-  const handle = value?.trim();
-  if (!handle) return undefined;
-  const match = /^dropbox\.([a-z0-9_-]+)(?:\.|$)/i.exec(handle);
-  return match?.[1];
-}
-
-
-/**
- * The local VLM client for file extraction, from the
- * OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_* settings, or undefined when that lane is
- * off. The client refuses a model id with a reserved cloud-style tag.
- */
-export function createFileExtractionLocalVlmClientFromEnv(
-  env: Record<string, string | undefined>,
-): OpenAICompatibleVlmClient | undefined {
-  const fileExtractionLocalVlmEnabled = parseOptionalBooleanEnv(
-    env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_ENABLED,
-    'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_ENABLED',
-  );
-  const fileExtractionLocalVlmConfigured = [
-    'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_BASE_URL',
-    'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_MODEL',
-    'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_API_KEY',
-    'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS',
-    'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_MAX_PAGES',
-    'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_PAGE_RETRIES',
-    'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_PAGE_RETRY_DELAY_MS',
-  ].some((name) => Boolean(env[name]?.trim()));
-  if (fileExtractionLocalVlmConfigured && !fileExtractionLocalVlmEnabled) {
-    throw new Error(
-      'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_ENABLED=true is required when local VLM settings are present.',
-    );
-  }
-  return fileExtractionLocalVlmEnabled
-    ? new OpenAICompatibleVlmClient({
-        baseUrl: requiredFileExtractionEnv(
-          env,
-          'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_BASE_URL',
-        ),
-        model: requiredFileExtractionEnv(
-          env,
-          'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_MODEL',
-        ),
-        ...(env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_API_KEY?.trim()
-          ? { apiKey: env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_API_KEY.trim() }
-          : {}),
-        ...(parseOptionalTimeoutSecondsOrNone(
-          env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS,
-          'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS',
-        ) !== undefined
-          ? {
-              timeoutMs: parseOptionalTimeoutSecondsOrNone(
-                env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS,
-                'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_TIMEOUT_SECONDS',
-              )!,
-            }
-          : {}),
-      })
-    : undefined;
-}
+import {
+  deleteMarkedAccountsAtBoot,
+  replaceEmptyAccountsAtBoot,
+  moveAccountsAtBoot,
+  workerTierLedgerProblem,
+  reportRehomedChatOverrides,
+  openPeopleIndexOrUndefined,
+  PEOPLE_INDEX_FIRST_REFRESH_MS,
+  PEOPLE_INDEX_CHECK_MS,
+  lazySecretStore,
+  GMAIL_ATTACHMENT_READER_REUSE_MS,
+  SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS,
+} from './runtime/boot-storage.ts';
+import {
+  parsePort,
+  sourceIndexSemanticRelevanceBarFromEnv,
+  accountFromDropboxCredentialHandle,
+  parseOptionalTimeoutSecondsOrNone,
+  parseOptionalPositiveInteger,
+  requireFileExtractionVeniceApiKey,
+  requiredFileExtractionEnv,
+  createFileExtractionLocalVlmClientFromEnv,
+  sourceIndexTelegramAccountFromEnv,
+  parseOptionalNonNegativeInteger,
+  parseRequiredTimeoutSeconds,
+  parseOptionalTokenCount,
+  parseSecureDerivativeDefault,
+  requireVeniceApiKey,
+  parseVeniceReasoningEffort,
+  parseVeniceThinkingMode,
+} from './runtime/environment.ts';
+import {
+  loadSourceWorkerSovereignty,
+  createSourceIndexEmbeddingProviderFromSovereignty,
+  createSourceIndexEmbeddingProviderFromEnv,
+  createCloudSourceIndexEmbeddingProviderFromEnv,
+  registerConnectorStoreEmbeddingLane,
+  storeServedByMeaning,
+  storeEmbeddingScope,
+  sourceStoresCouldEmbed,
+} from './runtime/embedding-providers.ts';
+import { createWorkerSharedBuiltInModel, createTierSnifferModel, stopBuiltInModelOnShutdown } from './runtime/judging-models.ts';
+import {
+  createEmailSourceConnectorFromEnv,
+  createRefreshableReadwiseConnectorStoreRuntime,
+  createRefreshableXBookmarksConnectorStoreRuntime,
+  type XBookmarksConnectorStoreRuntime,
+  accountCheckedXBookmarksRuntime,
+} from './runtime/source-runtimes.ts';
+import {
+  readActiveConnectedHandles,
+  selectedSourceCredentialHandle,
+  sourceIndexLaneEnabled,
+  sourceIndexLaneAccountDecision,
+  sourceIndexLaneStorageDecision,
+  activeCredentialHandle,
+  sourceAccountMountable,
+  connectorStoreLaneHandle,
+  activeLaneHandles,
+  startApprovedSourceRun,
+  sourceIndexLaneStartupLog,
+} from './runtime/source-lanes.ts';
+import {
+  createWorkerMessagingCaptureOwnership,
+  type WorkerMessagingCaptureSupervisor,
+  reconcileWorkerCaptures,
+  workerCaptureRuntime,
+} from './runtime/messaging-capture.ts';
+import {
+  builtInBacksPrivateAnalyst,
+  probeLocalAnalystService,
+  trustedAnalystAssistTimeoutMs,
+  createSovereigntyAnalystMap,
+  analystRouteTrustDomain,
+  workerSovereigntyAnalystRoutePlan,
+  secureLocalAnalystRouteStatus,
+} from './runtime/private-analysts.ts';
+import { createConnectorStoreMountDiscovery, mergeConnectorStores, type ConnectorStoreMount } from './runtime/connector-mounts.ts';
+import { connectorStoreAnswerScope, googleFilePage } from './runtime/answer-scope.ts';
+import { openIngestionDispositionsRuntime } from './runtime/ingestion-dispositions.ts';
 
 /** How this process was launched; set only by startWorkerWithLaunch from the validated entry point. */
 let workerLaunch: WorkerLaunch = {};
@@ -2424,115 +575,6 @@ export async function startWorkerWithLaunch(launch: WorkerLaunch): Promise<void>
  * would close its connection and let go.
  */
 let dataOwnerLock: HeldDataOwnerLock | undefined;
-
-/**
- * Under the owner lock, first, before anything mounts or any capture starts
- * (docs/design/source-storage.md, "Delete"): removes each account a Delete
- * marked `deleting` (data-lifecycle.ts, `deleteMarkedAccounts`). An account
- * that cannot be removed stays marked, and closed, until a later boot; the
- * other accounts and the worker start as always.
- */
-export function deleteMarkedAccountsAtBoot(env: Record<string, string | undefined>): DeleteMarkedAccountsReport | undefined {
-  try {
-    const report = deleteMarkedAccounts({ env });
-    for (const { sourceId, removed } of report.deleted) console.log(`[storage] ${sourceId}'s data was deleted (${removed} files and folders).`);
-    for (const { sourceId, message } of report.failed) console.warn(`[storage] ${sourceId}'s data could not be deleted yet (${message}); it stays closed and the next start tries again.`);
-    return report;
-  } catch (error) {
-    console.warn(`[storage] Could not check which accounts are being deleted (${error instanceof Error ? error.message : 'unknown error'}); every account stays closed until the registry is repaired.`);
-    return undefined;
-  }
-}
-
-/**
- * Under the owner lock and before anything mounts (core/source-storage.ts,
- * `replaceEmptyLegacyAccounts`). A failure here changes nothing and does not
- * stop the worker: the accounts stay where the registry has them.
- */
-export function replaceEmptyAccountsAtBoot(env: Record<string, string | undefined>): string[] {
-  try {
-    const replaced = replaceEmptyLegacyAccounts(env);
-    for (const sourceId of replaced) console.log(`[storage] ${sourceId} holds nothing yet; its files will live in its account folder.`);
-    return replaced;
-  } catch (error) {
-    console.warn(`[storage] Could not check which empty accounts to place in folders (${error instanceof Error ? error.message : 'unknown error'}); they stay as recorded.`);
-    return [];
-  }
-}
-
-/** Schema refusal is a lane outage, not a process failure. Called before any tier store opens. */
-export function workerTierLedgerProblem(storePaths: readonly string[], readOnly = false): string | undefined {
-  try {
-    // A bound store is checked against the ledger that governs it, never a
-    // former per-leg ledger left beside it. An unbound or not-yet-created store
-    // is checked against the ledger beside it (the set ledger may exist before
-    // its secure store does).
-    for (const path of storePaths) assertStoreTierLedgerCanOpen(path, readOnly);
-    return undefined;
-  } catch (error) {
-    if (error instanceof TierLedgerSchemaError) return error.message;
-    throw error;
-  }
-}
-
-/**
- * Under the owner lock, after the empty accounts are placed and before
- * adoption is on and anything mounts (core/source-account-migration.ts): moves
- * each existing account's files into its folder unless
- * `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=0`, and finishes or undoes a move an earlier
- * boot left part way whatever the switch says. A registry that cannot be read
- * leaves every account where it is and the worker boots as it always did.
- */
-export function migrateAccountFoldersAtBoot(env: Record<string, string | undefined>, options: AccountMigrationOptions = {}): AccountMigrationReport | undefined {
-  if (!accountFolderMigrationEnabled(env)) {
-    console.log(`[storage] Moving accounts into their folders is off (OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=${env.OLYMPUS_MIGRATE_ACCOUNT_FOLDERS?.trim()}); a move already under way is still finished or undone.`);
-  }
-  try {
-    const report = migrateAccountFolders(env, options);
-    for (const sourceId of report.moved) console.log(`[storage] ${sourceId} moved into its account folder.`);
-    for (const { sourceId, reason } of report.movedBack) console.warn(`[storage] ${sourceId} could not be moved (${reason}); its files were put back where they were.`);
-    for (const { sourceId, reason } of report.skipped) console.log(`[storage] ${sourceId} stays where it is (${reason}).`);
-    for (const { sourceId, detail } of report.stuck) console.warn(`[storage] ${sourceId} is part way through a move and stays closed until a restart finishes it: ${detail}`);
-    for (const sourceId of report.deferred) console.log(`[storage] ${sourceId} will be moved at a later start; this one ran out of time.`);
-    for (const { sourceId, message } of report.errors) console.warn(`[storage] ${sourceId} was not moved (${message}).`);
-    return report;
-  } catch (error) {
-    console.warn(`[storage] Could not check which accounts to move into folders (${error instanceof Error ? error.message : 'unknown error'}); they stay as recorded.`);
-    return undefined;
-  }
-}
-
-/**
- * The boot's whole account-folder step for the messaging sources too
- * (core/messaging-account-move.ts): with the switch on, what each Telegram and
- * WhatsApp account's records outside the data folder say is gathered first, so
- * the pass can weigh them; after it, every record that still names the old
- * place of an account a move finished is rewritten (switch or no switch, like
- * a plan left part way). Before any capture child or service starts: the
- * worker's capture supervisors are made after this, and the Gateway-run
- * services wait for the worker's readiness.
- */
-export async function moveAccountsAtBoot(env: Record<string, string | undefined>, secretStore: SecretStore = lazySecretStore(env)): Promise<AccountMigrationReport | undefined> {
-  const messaging = accountFolderMigrationEnabled(env) ? await messagingMoveFacts(env, secretStore) : undefined;
-  const report = migrateAccountFoldersAtBoot(env, messaging ? { messaging } : {});
-  const repointed = await repointMovedMessagingAccounts(env, secretStore);
-  for (const record of repointed.rewritten) console.log(`[storage] ${record} now names the account folder.`);
-  for (const { sourceId, message } of repointed.errors) console.warn(`[storage] ${sourceId} still has a record that names its old place (${message}); the next start tries again.`);
-  return report;
-}
-
-/** The secret store, made only if a boot step reads it (most boots do not). */
-function lazySecretStore(env: Record<string, string | undefined>): SecretStore {
-  let store: SecretStore | undefined;
-  const real = (): SecretStore => (store ??= createDefaultSecretStore({ env }));
-  return {
-    get label() { return real().label; },
-    get: (key) => real().get(key),
-    set: (key, value) => real().set(key, value),
-    delete: (key) => real().delete(key),
-    list: () => real().list(),
-  };
-}
 
 export async function main(): Promise<void> {
   // First, before anything mounts or opens a store: this worker owns the data
@@ -8308,1110 +6350,6 @@ export function resolveEmailSourceBindHostFromEnv(env: Record<string, string | u
   return resolveWorkerBindHost(env, ['OLYMPUS_EMAIL_SOURCE_HOST']);
 }
 
-export function sourceIndexLaneEnabled(
-  env: Record<string, string | undefined>,
-  envName: string,
-  handlePresent: boolean,
-): boolean {
-  return sourceIndexLaneDecision(env, envName, handlePresent).enabled;
-}
-
-export function sourceIndexLaneStorageEnabled(
-  env: Record<string, string | undefined>,
-  envName: string,
-  sourceIndexReadEnabled: boolean,
-): boolean {
-  return sourceIndexLaneStorageDecision(env, envName, sourceIndexReadEnabled).enabled;
-}
-
-/**
- * The X legacy bookmarks index is retired (2026-07-28): reads are served by the
- * connector store, its vectors were imported there, and the database is deleted
- * on the host. This lane alone must not inherit the source-index read-surface
- * fallback every other lane uses, because opening the index recreates the file
- * that was just deleted — an absent env would silently resurrect an empty
- * legacy database. The mount now requires an explicit opt-in.
- */
-
-/**
- * Readwise now follows X onto the canonical connector store. The legacy index
- * remains available only for an explicit, one-time convergence operation; an
- * absent flag must not recreate or schedule it during normal product runtime.
- */
-
-
-export interface SourceIndexLaneDecision {
-  enabled: boolean;
-  envName: string;
-  decidedBy: string;
-}
-
-export function sourceIndexLaneDecision(
-  env: Record<string, string | undefined>,
-  envName: string,
-  handlePresent: boolean,
-): SourceIndexLaneDecision {
-  if (env[envName]?.trim()) {
-    return {
-      enabled: parseOptionalBooleanEnv(env[envName], envName),
-      envName,
-      decidedBy: envName,
-    };
-  }
-  return {
-    enabled: handlePresent,
-    envName,
-    decidedBy: handlePresent ? 'connected handle fallback' : 'no connected handle',
-  };
-}
-
-export function sourceIndexLaneStorageDecision(
-  env: Record<string, string | undefined>,
-  envName: string,
-  sourceIndexReadEnabled: boolean,
-): SourceIndexLaneDecision {
-  if (env[envName]?.trim()) {
-    return {
-      enabled: parseOptionalBooleanEnv(env[envName], envName),
-      envName,
-      decidedBy: envName,
-    };
-  }
-  return {
-    enabled: sourceIndexReadEnabled,
-    envName,
-    decidedBy: 'source-index read surface fallback',
-  };
-}
-
-/**
- * Whether an account's stores may be mounted at worker boot. One that may not
- * (its data being deleted or deleted, or an unreadable registry) is left
- * unmounted exactly like a lane that is switched off, with one line saying
- * so; every other source mounts as usual. The throw in `openConnectorStore`
- * is the backstop.
- */
-export function sourceAccountMountable(
-  account: StorageAccount,
-  env: Record<string, string | undefined> = process.env,
-  log: (line: string) => void = console.warn,
-): boolean {
-  const reason = sourceAccountUnavailableReason(account, env);
-  if (reason === undefined) return true;
-  log(`[storage] ${account.sourceId} is not mounted: ${reason.endsWith('.') ? reason.slice(0, -1) : reason}.`);
-  return false;
-}
-
-/** A lane's storage decision, switched off when its account may not be mounted. */
-export function sourceIndexLaneAccountDecision(
-  decision: SourceIndexLaneDecision,
-  account: StorageAccount,
-  env: Record<string, string | undefined> = process.env,
-  log: (line: string) => void = console.warn,
-): SourceIndexLaneDecision {
-  if (!decision.enabled || sourceAccountMountable(account, env, log)) return decision;
-  return { ...decision, enabled: false, decidedBy: 'the source registry' };
-}
-
-export function sourceIndexLaneStartupLog(label: string, decision: SourceIndexLaneDecision): string {
-  return `${label}: ${decision.enabled ? 'enabled' : 'disabled'} (decided by ${decision.decidedBy}).`;
-}
-
-export function activeCredentialHandle(
-  handles: readonly ConnectedCredentialHandle[],
-  match: {
-    provider: ConnectedCredentialHandle['provider'];
-    capability: string;
-  },
-): ConnectedCredentialHandle | undefined {
-  return handles.find((handle) =>
-    handle.provider === match.provider
-    && handle.allowedCapabilities.includes(match.capability)
-    && handle.backendState?.status !== 'reauth_required'
-  );
-}
-
-export type CredentialHandleSelectionReason =
-  | 'selected'
-  | 'none'
-  | 'ambiguous'
-  | 'pinned_missing';
-
-export interface CredentialHandleSelection {
-  handle?: ConnectedCredentialHandle;
-  reason: CredentialHandleSelectionReason;
-  /** Eligible handle names, so an ambiguous refusal can name what it saw. */
-  candidates: string[];
-}
-
-/**
- * Explicit, order-independent handle selection.
- *
- * `activeCredentialHandle` is a first-match `find`, and the registry is written
- * back sorted by handle name, so with two eligible handles the alphabetically
- * first one wins. That is how registering `gmail.business_ocu.delegated`
- * alongside `gmail.personal.delegated` silently rebound the Gmail lane from the
- * 73,212-message mailbox to the 25-message one: registration order, not
- * configuration, chose the mailbox.
- *
- * This selector never picks by order. Exactly one eligible handle is selected;
- * more than one is refused as ambiguous until an operator pins the one the lane
- * must read. A pin that names an unregistered handle is also refused rather
- * than falling back, because a silent fallback is the same defect wearing a
- * different hat.
- */
-export function selectCredentialHandle(
-  handles: readonly ConnectedCredentialHandle[],
-  match: {
-    provider: ConnectedCredentialHandle['provider'];
-    capability: string;
-    /** Operator pin naming the exact handle this lane must read. */
-    pinnedHandle?: string;
-  },
-): CredentialHandleSelection {
-  const eligible = handles.filter((handle) =>
-    handle.provider === match.provider
-    && handle.allowedCapabilities.includes(match.capability)
-    && handle.backendState?.status !== 'reauth_required'
-  );
-  const candidates = eligible.map((handle) => handle.handle);
-  const pinnedHandle = match.pinnedHandle?.trim();
-  if (pinnedHandle) {
-    const pinned = eligible.find((handle) => handle.handle === pinnedHandle);
-    return pinned
-      ? { handle: pinned, reason: 'selected', candidates }
-      : { reason: 'pinned_missing', candidates };
-  }
-  if (eligible.length === 0) return { reason: 'none', candidates };
-  if (eligible.length > 1) return { reason: 'ambiguous', candidates };
-  return { handle: eligible[0]!, reason: 'selected', candidates };
-}
-
-/**
- * The single gate a connector-store lane passes before it may construct: the
- * lane enable must be on AND exactly one handle must be selected.
- *
- * Both halves matter. The lane enable alone is not enough, because the sync
- * handler is built from stores that exist at boot regardless of credentials —
- * so an enabled lane with no handle would construct a source that cannot run,
- * and the activation gate reads presence as readiness.
- */
-export function connectorStoreLaneHandle(input: {
-  env: Record<string, string | undefined>;
-  laneEnvName: string;
-  pinEnvName: string;
-  provider: ConnectedCredentialHandle['provider'];
-  capability: string;
-  handles: readonly ConnectedCredentialHandle[];
-  warn?: (message: string) => void;
-}): ConnectedCredentialHandle | undefined {
-  const handle = selectedSourceCredentialHandle(input);
-  // Evaluated unconditionally so a malformed lane enable still fails the boot
-  // even when no eligible credential handle exists.
-  const laneEnabled = sourceIndexLaneEnabled(
-    input.env,
-    input.laneEnvName,
-    handle !== undefined,
-  );
-  return handle && laneEnabled ? handle : undefined;
-}
-
-/** Select a source credential independently from any storage-lane enable. */
-/**
- * Starts the first read after a scope approval without holding the approval's
- * response open for it. That read is a whole sync pass (minutes for a large
- * Dropbox), and awaiting it outlived the ChatGPT tool call: the picker saw the
- * save fail, saved again with the revision the first save had just replaced,
- * and got "The source scope changed" (owner live test, 2026-10-01). The
- * scheduler owns the run from here; its status and the dashboard report it.
- */
-export function startApprovedSourceRun(scheduler: { runSource: SourceScheduler['runSource'] }, sourceId: string): void {
-  void scheduler.runSource(sourceId, undefined, 'operator').catch(() => {
-    console.warn(`[source-scheduler] source=${sourceId} first run after scope approval failed; the next scheduled pass retries.`);
-  });
-}
-
-export function selectedSourceCredentialHandle(input: {
-  env: Record<string, string | undefined>;
-  pinEnvName: string;
-  provider: ConnectedCredentialHandle['provider'];
-  capability: string;
-  handles: readonly ConnectedCredentialHandle[];
-  warn?: (message: string) => void;
-}): ConnectedCredentialHandle | undefined {
-  const selection = selectCredentialHandle(input.handles, {
-    provider: input.provider,
-    capability: input.capability,
-    ...(input.env[input.pinEnvName]?.trim()
-      ? { pinnedHandle: input.env[input.pinEnvName]!.trim() }
-      : {}),
-  });
-  const warn = input.warn ?? ((message: string) => console.warn(message));
-  if (selection.reason === 'ambiguous') {
-    warn(
-      `${input.provider} lane refused to construct: ${selection.candidates.length} handles carry ${input.capability} `
-      + `(${selection.candidates.join(', ')}). Set ${input.pinEnvName} to the handle this lane must read.`,
-    );
-  }
-  if (selection.reason === 'pinned_missing') {
-    warn(
-      `${input.provider} lane refused to construct: ${input.pinEnvName} names a handle that is not registered with `
-      + `${input.capability} (registered: ${selection.candidates.join(', ') || 'none'}).`,
-    );
-  }
-  return selection.handle;
-}
-
-export interface XBookmarksConnectorStoreRuntime {
-  store: LocalConnectorStore;
-  /** The X user id every read of this runtime is addressed to. */
-  providerUserId: string;
-  sync: XBookmarksConnectorStoreSyncHandler;
-  contentRecovery: XBookmarksContentRecoveryHandler;
-}
-
-/**
- * The X runtime as the operator routes see it: Sync now and content recovery
- * pass the lane's account check first, as every scheduler task does. The
- * window diagnostic writes nothing to the stores and stays unchecked, so it
- * can still look at a source that is stopped.
- */
-export function accountCheckedXBookmarksRuntime(
-  runtime: XBookmarksConnectorStoreRuntime,
-  guard: SourceAccountGuard,
-): XBookmarksConnectorStoreRuntime {
-  const checked = <T>(run: () => Promise<T>): Promise<T> => runGuarded(guard, run).catch((error: unknown) => {
-    // Only the check throws this; a run's own errors pass through unchanged.
-    if (error instanceof SourceAccountChangedError) {
-      throw new EmailSourceWorkerError(409, error.code, error.message);
-    }
-    throw error;
-  });
-  const { sync, contentRecovery } = runtime;
-  return {
-    ...runtime,
-    sync: {
-      syncHead: (request) => checked(() => sync.syncHead(request)),
-      reconcile: (request) => checked(() => sync.reconcile(request)),
-      ...(sync.diagnoseWindow ? { diagnoseWindow: sync.diagnoseWindow.bind(sync) } : {}),
-      lastCompleteReconcileAt: () => sync.lastCompleteReconcileAt(),
-      completeReconcileWatermark: () => sync.completeReconcileWatermark(),
-      apiUsageStatus: () => sync.apiUsageStatus(),
-    },
-    contentRecovery: {
-      recover: (request) => checked(() => contentRecovery.recover(request)),
-    },
-  };
-}
-
-export interface RefreshableXBookmarksConnectorStoreRuntime {
-  store: LocalConnectorStore;
-  runtimeForHandle(handle: ConnectedCredentialHandle | undefined): XBookmarksConnectorStoreRuntime | undefined;
-}
-
-export interface ReadwiseConnectorStoreRuntime {
-  store: LocalConnectorStore;
-  sync: ReadwiseConnectorStoreSyncHandler;
-}
-
-export interface RefreshableReadwiseConnectorStoreRuntime {
-  store: LocalConnectorStore;
-  /** The handler for the current usable handle; undefined without one. */
-  syncForHandle(handle: ConnectedCredentialHandle | undefined): ReadwiseConnectorStoreSyncHandler | undefined;
-  /** Unconditional build, kept for the boot-bound compatibility constructor. */
-  syncFor(handle: ConnectedCredentialHandle | undefined): ReadwiseConnectorStoreSyncHandler;
-}
-
-export function createReadwiseConnectorStoreRuntime(options: {
-  enabled: boolean;
-  handle?: ConnectedCredentialHandle;
-  embeddingProvider?: SourceEmbeddingProvider;
-  account?: string;
-  dbPath?: string;
-  /** Test/owner injection; the runtime otherwise derives one durable counter. */
-  requestBudget?: ReadwiseDailyRequestBudget;
-  requestBudgetStatePath?: string;
-  env?: Record<string, string | undefined>;
-  /** The lane's per-tier stores over its store: every item is judged on its own. */
-  tierSetFor: (store: LocalConnectorStore) => TieredStoreSet;
-}): ReadwiseConnectorStoreRuntime | undefined {
-  if (!options.enabled || !options.embeddingProvider) return undefined;
-  const handle = options.handle;
-  if (handle && !readwiseHandleUsable(handle)) return undefined;
-  const lane = createRefreshableReadwiseConnectorStoreRuntime(options);
-  if (!lane) return undefined;
-  return { store: lane.store, sync: lane.syncFor(handle) };
-}
-
-/**
- * Keep the canonical Readwise store mounted independently of the API-key
- * grant, and bind the sync handler to whichever handle is current.
- *
- * The runtime used to be built once at boot from the handle registered then,
- * and the scheduler lane was enabled only while that boot handle was still
- * the current one, so a Readwise key connected after the worker started
- * logged `lane_disabled` on every pass until a restart (first install,
- * 2026-09-23). The scheduler now asks for the current handle's handler on
- * each registry refresh, as X does; the store and the durable day counter
- * stay singular across rebinds.
- */
-export function createRefreshableReadwiseConnectorStoreRuntime(options: {
-  enabled: boolean;
-  embeddingProvider?: SourceEmbeddingProvider;
-  account?: string;
-  dbPath?: string;
-  requestBudget?: ReadwiseDailyRequestBudget;
-  requestBudgetStatePath?: string;
-  env?: Record<string, string | undefined>;
-  /** The lane's per-tier stores over its store, built once (P1c). */
-  tierSetFor: (store: LocalConnectorStore) => TieredStoreSet;
-}): RefreshableReadwiseConnectorStoreRuntime | undefined {
-  const embeddingProvider = options.embeddingProvider;
-  if (!options.enabled || !embeddingProvider) return undefined;
-  const env = options.env ?? process.env;
-  // Exactly one day counter per runtime, durable across restart. Constructing
-  // it here (before the store) also keeps an invalid budget env from creating
-  // the store file at all.
-  const requestBudget = options.requestBudget
-    ?? createReadwiseDailyRequestBudget({
-      env,
-      ...(options.requestBudgetStatePath ? { statePath: options.requestBudgetStatePath } : {}),
-    });
-  const store = createReadwiseConnectorStore(
-    options.dbPath ?? resolvedStorePath(READWISE_SOURCE_ID, 'internal', env),
-    env,
-  );
-  const tierSet = options.tierSetFor(store);
-  const buildSync = (handle: ConnectedCredentialHandle | undefined): ReadwiseConnectorStoreSyncHandler =>
-    createReadwiseConnectorStoreSyncHandler({
-      store,
-      embeddingProvider,
-      tierSet,
-      account: options.account?.trim() || handle?.accountRole?.trim() || 'personal',
-      requestBudget,
-      ...(env.OLYMPUS_SOURCE_INDEX_READWISE_CREDENTIAL_HANDLE?.trim()
-        ? { credentialHandle: env.OLYMPUS_SOURCE_INDEX_READWISE_CREDENTIAL_HANDLE.trim() }
-        : handle?.handle
-          ? { credentialHandle: handle.handle }
-          : {}),
-      ...(env.OLYMPUS_SOURCE_INDEX_READWISE_API_V2_BASE_URL?.trim()
-        ? { apiV2BaseUrl: env.OLYMPUS_SOURCE_INDEX_READWISE_API_V2_BASE_URL.trim() }
-        : {}),
-      ...(env.OLYMPUS_SOURCE_INDEX_READWISE_READER_API_V3_BASE_URL?.trim()
-        ? { readerApiV3BaseUrl: env.OLYMPUS_SOURCE_INDEX_READWISE_READER_API_V3_BASE_URL.trim() }
-        : {}),
-      env,
-    });
-  let cachedKey: string | undefined;
-  let cachedSync: ReadwiseConnectorStoreSyncHandler | undefined;
-  return {
-    store,
-    syncFor: buildSync,
-    syncForHandle(handle) {
-      if (!handle || !readwiseHandleUsable(handle)) {
-        cachedKey = undefined;
-        cachedSync = undefined;
-        return undefined;
-      }
-      const key = [handle.handle, handle.accountRole ?? ''].join('\0');
-      if (cachedKey === key && cachedSync) return cachedSync;
-      cachedSync = buildSync(handle);
-      cachedKey = key;
-      return cachedSync;
-    },
-  };
-}
-
-function readwiseHandleUsable(handle: ConnectedCredentialHandle): boolean {
-  return handle.provider === 'readwise'
-    && handle.allowedCapabilities.includes('readwise.sync')
-    && handle.backendState?.status !== 'reauth_required';
-}
-
-export function createXBookmarksConnectorStoreRuntime(options: {
-  enabled: boolean;
-  handle?: ConnectedCredentialHandle;
-  embeddingProvider?: SourceEmbeddingProvider;
-  account?: string;
-  dbPath?: string;
-  usageStore?: LocalXBookmarksApiUsageStore;
-  env?: Record<string, string | undefined>;
-  /** The lane's per-tier stores over its store: every item is judged on its own. */
-  tierSetFor: (store: LocalConnectorStore) => TieredStoreSet;
-}): XBookmarksConnectorStoreRuntime | undefined {
-  if (!xBookmarksRuntimeBinding(options)) return undefined;
-  return createRefreshableXBookmarksConnectorStoreRuntime(options)?.runtimeForHandle(options.handle);
-}
-
-/**
- * Keep the canonical X store mounted independently of the OAuth grant while
- * binding every provider-reading capability to the current usable handle.
- * The scheduler calls runtimeForHandle on each registry refresh, so a renewed
- * grant can activate without a process restart and a removed/expired grant
- * produces no task. The cached runtime also preserves X's single-minter rule
- * across dashboard renders and adoption ticks.
- */
-export function createRefreshableXBookmarksConnectorStoreRuntime(options: {
-  enabled: boolean;
-  embeddingProvider?: SourceEmbeddingProvider;
-  account?: string;
-  dbPath?: string;
-  usageStore?: LocalXBookmarksApiUsageStore;
-  reconcileStateStore?: LocalXBookmarksReconcileStateStore;
-  env?: Record<string, string | undefined>;
-  /** The lane's per-tier stores over its store, built once (P1c). */
-  tierSetFor: (store: LocalConnectorStore) => TieredStoreSet;
-}): RefreshableXBookmarksConnectorStoreRuntime | undefined {
-  const embeddingProvider = options.embeddingProvider;
-  if (!options.enabled || !embeddingProvider) return undefined;
-  const env = options.env ?? process.env;
-  const store = createXBookmarksConnectorStore(
-    options.dbPath ?? resolvedStorePath(X_BOOKMARKS_SOURCE_ID, 'internal', env),
-    env,
-  );
-  const tierSet = options.tierSetFor(store);
-  let usageStore = options.usageStore;
-  let reconcileStateStore = options.reconcileStateStore;
-  let cachedKey: string | undefined;
-  let cachedRuntime: XBookmarksConnectorStoreRuntime | undefined;
-  return {
-    store,
-    runtimeForHandle(handle) {
-      const binding = xBookmarksRuntimeBinding({
-        enabled: options.enabled,
-        ...(handle ? { handle } : {}),
-        embeddingProvider,
-        ...(options.account ? { account: options.account } : {}),
-        env,
-      });
-      if (!binding) {
-        cachedKey = undefined;
-        cachedRuntime = undefined;
-        return undefined;
-      }
-      const key = [binding.handle.handle, binding.principalAccount, binding.providerUserId].join('\0');
-      if (cachedKey === key && cachedRuntime) return cachedRuntime;
-      usageStore ??= new LocalXBookmarksApiUsageStore();
-      reconcileStateStore ??= new LocalXBookmarksReconcileStateStore(
-        resolvedRawPath(X_BOOKMARKS_SOURCE_ID, 'x-reconcile.sqlite', env, { usageDbPath: usageStore.dbPath }),
-        env,
-      );
-      cachedRuntime = bindXBookmarksConnectorStoreRuntime({
-        ...binding,
-        store,
-        usageStore,
-        reconcileStateStore,
-        env,
-        tierSet,
-      });
-      cachedKey = key;
-      return cachedRuntime;
-    },
-  };
-}
-
-function xBookmarksRuntimeBinding(options: {
-  enabled: boolean;
-  handle?: ConnectedCredentialHandle;
-  embeddingProvider?: SourceEmbeddingProvider;
-  account?: string;
-  env?: Record<string, string | undefined>;
-}): {
-  handle: ConnectedCredentialHandle;
-  embeddingProvider: SourceEmbeddingProvider;
-  principalAccount: string;
-  providerUserId: string;
-} | undefined {
-  const handle = options.handle;
-  const env = options.env ?? process.env;
-  const providerUserId = env.OLYMPUS_SOURCE_INDEX_X_USER_ID?.trim()
-    || handle?.providerAccountId?.trim();
-  if (
-    !options.enabled
-    || !handle
-    || handle.provider !== 'x'
-    || !handle.allowedCapabilities.includes('x.bookmarks.sync')
-    || handle.backendState?.status === 'reauth_required'
-    || !options.embeddingProvider
-    || !providerUserId
-  ) return undefined;
-  return {
-    handle,
-    embeddingProvider: options.embeddingProvider,
-    principalAccount: options.account?.trim() || handle.accountRole?.trim() || 'personal',
-    providerUserId,
-  };
-}
-
-function bindXBookmarksConnectorStoreRuntime(options: {
-  handle: ConnectedCredentialHandle;
-  embeddingProvider: SourceEmbeddingProvider;
-  principalAccount: string;
-  providerUserId: string;
-  store: LocalConnectorStore;
-  usageStore: LocalXBookmarksApiUsageStore;
-  reconcileStateStore: LocalXBookmarksReconcileStateStore;
-  env: Record<string, string | undefined>;
-  tierSet: TieredStoreSet;
-}): XBookmarksConnectorStoreRuntime {
-  const env = options.env;
-  // One broker instance owns both scheduled acquisition and operator recovery.
-  // X rotates refresh tokens, so separate minters in separate processes can
-  // revoke the worker's live session; keeping both paths inside this runtime
-  // makes the single-minter rule structural.
-  const credentialBroker = createEnvCredentialBroker({ env });
-  const sync = createXBookmarksConnectorStoreSyncHandler({
-    store: options.store,
-    embeddingProvider: options.embeddingProvider,
-    tierSet: options.tierSet,
-    credentialHandle: options.handle.handle,
-    account: options.principalAccount,
-    userId: options.providerUserId,
-    credentialBroker,
-    ...(env.OLYMPUS_SOURCE_INDEX_X_API_BASE_URL?.trim()
-      ? { apiBaseUrl: env.OLYMPUS_SOURCE_INDEX_X_API_BASE_URL.trim() }
-      : {}),
-    usageStore: options.usageStore,
-    reconcileStateStore: options.reconcileStateStore,
-    env,
-  });
-  const contentRecovery = createXBookmarksContentRecoveryHandler({
-    store: options.store,
-    tierLedger: options.tierSet.ledger,
-    usageStore: options.usageStore,
-    reconcileStateStore: options.reconcileStateStore,
-    embeddingProvider: options.embeddingProvider,
-    credentialHandle: options.handle.handle,
-    credentialBroker,
-    account: options.principalAccount,
-    userId: options.providerUserId,
-    ...(env.OLYMPUS_SOURCE_INDEX_X_API_BASE_URL?.trim()
-      ? { apiBaseUrl: env.OLYMPUS_SOURCE_INDEX_X_API_BASE_URL.trim() }
-      : {}),
-    env,
-  });
-  return { store: options.store, providerUserId: options.providerUserId, sync, contentRecovery };
-}
-
-/**
- * The single gate every lane-building path passes through.
- *
- * Boot, the adoption tick and the dashboard's refresh callback all end up here,
- * including when a caller supplies its own handle list: one choke point is what
- * makes "a source the owner unpaired does not get a lane" true of every path
- * rather than of the one that happened to remember.
- */
-function activeLaneHandles(
-  handles: readonly ConnectedCredentialHandle[],
-  env: Record<string, string | undefined>,
-): ConnectedCredentialHandle[] {
-  const registryPath = handleRegistryPathFromEnv(env, true);
-  if (!registryPath) return [...handles];
-  try {
-    return withoutUnpairedLaneHandles(handles, registryPath);
-  } catch (error) {
-    console.warn(`Could not read the Olympus unpaired-source record: ${error instanceof Error ? error.message : String(error)}`);
-    return [...handles];
-  }
-}
-
-function readActiveConnectedHandles(env: Record<string, string | undefined>): ConnectedCredentialHandle[] {
-  const registryPath = handleRegistryPathFromEnv(env, true);
-  if (!registryPath) return [];
-  try {
-    // The registry alone is not the whole answer. A handle an Unpair could not
-    // remove is still in this file, and building its lane at boot would quietly
-    // undo the teardown; the unpaired record is what says so.
-    return activeLaneHandles(
-      readConnectedHandleRegistry(registryPath).handles
-        .filter((handle) => handle.backendState?.status !== 'reauth_required'),
-      env,
-    );
-  } catch (error) {
-    console.warn(`Could not read Olympus handle registry for source activation: ${error instanceof Error ? error.message : String(error)}`);
-    return [];
-  }
-}
-
-function parsePort(value: string): number {
-  const port = Number(value);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new Error('OLYMPUS_EMAIL_SOURCE_PORT must be an integer from 1 to 65535.');
-  }
-  return port;
-}
-
-function firstNonEmptyEnv(env: Record<string, string | undefined>, names: string[]): string | undefined {
-  for (const name of names) {
-    const value = optionalEnv(env, name);
-    if (value) return value;
-  }
-  return undefined;
-}
-
-function requireVeniceApiKey(env: Record<string, string | undefined>): string {
-  const apiKey = firstNonEmptyEnv(env, [
-    'OLYMPUS_SOURCE_INDEX_VENICE_API_KEY',
-    'VENICE_API_KEY',
-    'API_KEY_VENICE',
-    'Venice-API-Key',
-  ]);
-  if (!apiKey) {
-    throw new Error('Venice analyst requires OLYMPUS_SOURCE_INDEX_VENICE_API_KEY, VENICE_API_KEY, API_KEY_VENICE, or Venice-API-Key in the assistant runtime.');
-  }
-  return apiKey;
-}
-
-function requireFileExtractionVeniceApiKey(
-  env: Record<string, string | undefined>,
-): string {
-  const apiKey = firstNonEmptyEnv(env, [
-    'OLYMPUS_FILE_EXTRACTION_REMOTE_API_KEY',
-    'OLYMPUS_SOURCE_INDEX_VENICE_API_KEY',
-    'VENICE_API_KEY',
-    'API_KEY_VENICE',
-    'Venice-API-Key',
-  ]);
-  if (!apiKey) {
-    throw new Error(
-      'Remote file extraction requires OLYMPUS_FILE_EXTRACTION_REMOTE_API_KEY or an approved shared Venice API-key environment reference.',
-    );
-  }
-  return apiKey;
-}
-
-function requiredFileExtractionEnv(
-  env: Record<string, string | undefined>,
-  name: string,
-): string {
-  const value = env[name]?.trim();
-  if (!value) throw new Error(`${name} is required when remote file extraction is enabled.`);
-  return value;
-}
-
-async function resolveSecretRef(
-  secretRef: string | undefined,
-  env: Record<string, string | undefined>,
-  label: string,
-): Promise<string> {
-  return resolveSecretRefSync(secretRef, env, label) ?? (() => {
-    throw new Error(`${label} secretRef did not resolve.`);
-  })();
-}
-
-function resolveSecretRefSync(
-  secretRef: string | undefined,
-  env: Record<string, string | undefined>,
-  label: string,
-  options: {
-    bootSecretResolver?: WorkerBootSecretResolver;
-    affectedProfiles?: string[];
-    affectedCapabilities?: string[];
-    profileBindings?: CredentialReadinessBinding[];
-  } = {},
-): string | undefined {
-  const ref = secretRef?.trim();
-  if (!ref) {
-    if (options.bootSecretResolver) {
-      return options.bootSecretResolver.resolveSync(undefined, env, {
-        displayName: label,
-        ...(options.affectedProfiles ? { affectedProfiles: options.affectedProfiles } : {}),
-        ...(options.affectedCapabilities ? { affectedCapabilities: options.affectedCapabilities } : {}),
-        ...(options.profileBindings ? { profileBindings: options.profileBindings } : {}),
-      });
-    }
-    throw new Error(`${label} requires a secretRef; inline secrets are not allowed in sovereignty.json.`);
-  }
-  if (options.bootSecretResolver) {
-    return options.bootSecretResolver.resolveSync(ref, env, {
-      displayName: label,
-      ...(options.affectedProfiles ? { affectedProfiles: options.affectedProfiles } : {}),
-      ...(options.affectedCapabilities ? { affectedCapabilities: options.affectedCapabilities } : {}),
-      ...(options.profileBindings ? { profileBindings: options.profileBindings } : {}),
-    });
-  }
-  const value = resolveSecretRefValueSync(ref, { env });
-  if (!value) {
-    throw new Error(`${label} secretRef did not resolve.`);
-  }
-  return value;
-}
-
-function bootSecretOptions(
-  bootSecretResolver: WorkerBootSecretResolver | undefined,
-  affectedProfiles: string[],
-  affectedCapabilities: string[],
-  profile?: { id: string; profile: SovereigntyModelProfile },
-): {
-  bootSecretResolver?: WorkerBootSecretResolver;
-  affectedProfiles: string[];
-  affectedCapabilities: string[];
-  profileBindings?: CredentialReadinessBinding[];
-} {
-  return {
-    ...(bootSecretResolver ? { bootSecretResolver } : {}),
-    affectedProfiles,
-    affectedCapabilities,
-    ...(profile
-      ? {
-          profileBindings: [{
-            profileId: profile.id,
-            configFingerprint: credentialConfigFingerprint(profile.id, profile.profile),
-          }],
-        }
-      : {}),
-  };
-}
-
-
-function optionalEnv(env: Record<string, string | undefined>, name: string): string | undefined {
-  const value = env[name]?.trim();
-  return value || undefined;
-}
-
-
-
-
-export function commaSeparatedEnv(value: string | undefined): string[] {
-  return (value ?? '')
-    .split(/,|\|\|/)
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
 if (import.meta.main) {
   await main();
-}
-
-export interface ConnectorStoreMount {
-  store: LocalConnectorStore;
-  principal?: ConnectorStoreDeclaredPrincipal;
-  chatPrincipal?: ConnectorStoreChatPrincipal;
-}
-
-export interface ConnectorStoreMountParsingOptions {
-  /** A runtime read declaration waits for ingestion to create its store. */
-  existingOnly?: boolean;
-  reportFailure?: (message: string) => void;
-  collidingStores?: readonly LocalConnectorStore[];
-  /**
-   * The corpus registry's corpora: a declaration names no source, so its
-   * account is the source registered for its corpus (`storageAccountForCorpus`).
-   */
-  registeredCorpora?: ReadonlyArray<{ corpusId: string; sourceId: string }>;
-  /**
-   * The source each known store file belongs to (the data lifecycle's
-   * inventory), found by the file rather than the path's spelling. A
-   * declaration over another source's file opens under that source's account,
-   * so a lane withheld because its account is being deleted cannot be
-   * reopened under another corpus id or another spelling of its path.
-   */
-  storeOwner?: StoreFileOwner;
-}
-
-interface ValidatedConnectorStoreMountDeclaration {
-  /** Absent, or ignored, for a source whose stores the engine places (core/source-placement.ts `hasFolderLayout`). */
-  dbPath?: string;
-  corpusId: string;
-  family: Parameters<typeof defineConnectorCorpus>[0]['family'];
-  trustDomain: Parameters<typeof defineConnectorCorpus>[0]['trustDomain'];
-  principal?: ConnectorStoreDeclaredPrincipal;
-  chatPrincipal?: ConnectorStoreChatPrincipal;
-}
-
-export function parseConnectorStoreMountsFromEnv(
-  raw: string | undefined,
-  options: ConnectorStoreMountParsingOptions = {},
-): ConnectorStoreMount[] {
-  return mountConnectorStoreDeclarations(compileConnectorStoreMountDeclarations(raw, options), options);
-}
-
-/**
- * Compile fixed configuration once; only pending absent files need probes on
- * reads. A store whose file exists but fails to mount (an account mid-deletion,
- * say) is retried on a bounded backoff, so it is found without a roster change
- * or restart while repeated reads still skip the ownership scan. Each store's
- * failure is logged once until its message changes or it mounts.
- */
-export function createConnectorStoreMountDiscovery(raw: string | undefined, options: {
-  stores(): readonly LocalConnectorStore[];
-  registeredCorpora(): NonNullable<ConnectorStoreMountParsingOptions['registeredCorpora']>;
-  storeOwner(): StoreFileOwner;
-  reportFailure?(message: string): void;
-  now?(): number;
-}): () => ConnectorStoreMount[] {
-  // Local, not module-level: startup runs this factory while the module is
-  // paused at the entrypoint's top-level await, before later bindings exist.
-  const retryBaseMs = 5_000;
-  const retryMaxMs = 10 * 60_000;
-  const reported = new Map<string, string>();
-  const reportFailure = (message: string): void => {
-    const label = message.split(' skipped:')[0]!;
-    if (reported.get(label) === message) return;
-    reported.set(label, message);
-    (options.reportFailure ?? console.error)(message);
-  };
-  const now = options.now ?? Date.now;
-  const declarations = compileConnectorStoreMountDeclarations(raw, { reportFailure });
-  const registeredCorpora = options.registeredCorpora();
-  let previousStores: readonly LocalConnectorStore[] | undefined;
-  let pending: readonly ValidatedConnectorStoreMountDeclaration[] = declarations;
-  const failed = new Map<ValidatedConnectorStoreMountDeclaration, { attempts: number; retryAt: number }>();
-  return () => {
-    const stores = options.stores();
-    if (!previousStores || previousStores.length !== stores.length || stores.some((store, i) => store !== previousStores![i])) {
-      pending = declarations;
-      previousStores = [...stores];
-    }
-    const time = now();
-    const due = [...failed].filter(([declaration, failure]) => failure.retryAt <= time && !pending.includes(declaration));
-    const candidates = due.length ? [...pending, ...due.map(([declaration]) => declaration)] : pending;
-    if (!candidates.length) return [];
-    const byCorpus = new Map(stores.map(store => [store.corpusId, store]));
-    const ready: ValidatedConnectorStoreMountDeclaration[] = [];
-    const absent: ValidatedConnectorStoreMountDeclaration[] = [];
-    for (const declaration of candidates) {
-      const placed = hasFolderLayout(storageAccountForCorpus(declaration, registeredCorpora).sourceId);
-      if (byCorpus.has(declaration.corpusId) || (!placed && (!declaration.dbPath || existsSync(declaration.dbPath)))) ready.push(declaration);
-      else absent.push(declaration);
-    }
-    pending = absent;
-    if (!ready.length) return [];
-    const mounts = mountConnectorStoreDeclarations(ready, {
-      existingOnly: true, collidingStores: stores, registeredCorpora: options.registeredCorpora(),
-      storeOwner: options.storeOwner(), reportFailure,
-    });
-    const mounted = new Set(mounts.map(mount => mount.store.corpusId));
-    for (const declaration of ready) {
-      if (mounted.has(declaration.corpusId)) {
-        failed.delete(declaration);
-        reported.delete(`Connector-store mount ${declaration.corpusId}`);
-        continue;
-      }
-      const attempts = (failed.get(declaration)?.attempts ?? 0) + 1;
-      const delay = Math.min(retryBaseMs * 2 ** Math.min(attempts - 1, 30), retryMaxMs);
-      failed.set(declaration, { attempts, retryAt: time + delay });
-    }
-    return mounts;
-  };
-}
-
-function compileConnectorStoreMountDeclarations(
-  raw: string | undefined,
-  options: ConnectorStoreMountParsingOptions,
-): ValidatedConnectorStoreMountDeclaration[] {
-  const value = raw?.trim();
-  if (!value) return [];
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(value);
-  } catch {
-    throw new Error('OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON must be valid JSON.');
-  }
-  if (!Array.isArray(parsed)) {
-    throw new Error('OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON must be a JSON array.');
-  }
-
-  const reportFailure = options.reportFailure ?? ((message: string) => console.error(message));
-  const declarations: ValidatedConnectorStoreMountDeclaration[] = [];
-  // Validate every declaration before opening any SQLite store. A malformed
-  // later entry therefore cannot strand a handle opened for an earlier one.
-  for (const [index, entry] of parsed.entries()) {
-    const declaredCorpusIdValue = entry && typeof entry === 'object'
-      ? (entry as Record<string, unknown>).corpusId
-      : undefined;
-    const declaredCorpusId = typeof declaredCorpusIdValue === 'string'
-      ? declaredCorpusIdValue.trim()
-      : '';
-    try {
-      declarations.push(validateConnectorStoreMountDeclaration(entry));
-    } catch (error) {
-      const label = declaredCorpusId || `entry #${index + 1}`;
-      const detail = error instanceof Error ? error.message : String(error);
-      reportFailure(`Connector-store mount ${label} skipped: ${detail}`);
-    }
-  }
-
-  return declarations;
-}
-
-function mountConnectorStoreDeclarations(
-  declarations: readonly ValidatedConnectorStoreMountDeclaration[],
-  options: ConnectorStoreMountParsingOptions,
-): ConnectorStoreMount[] {
-  const reportFailure = options.reportFailure ?? ((message: string) => console.error(message));
-  const collidingStoresByCorpusId = new Map(
-    (options.collidingStores ?? []).map((store) => [store.corpusId, store]),
-  );
-  // The resource being fenced is the SQLite file, and corpusId is the field an
-  // operator varies when adding a mount. Keyed on corpusId alone, a new id over
-  // an existing dbPath skips the identity check entirely and opens a second
-  // handle that relabels the same rows with a different family/trustDomain.
-  const ownerCorpusIdByDbPath = new Map(
-    (options.collidingStores ?? []).map((store) => [store.dbPath, store.corpusId]),
-  );
-  const mounts: ConnectorStoreMount[] = [];
-  for (const declaration of declarations) {
-    try {
-      const collidingStore = collidingStoresByCorpusId.get(declaration.corpusId);
-      // A source whose stores the engine places names no path here (source
-      // storage step 6): its declaration only adds a principal to the store
-      // its lane opened, and a dbPath it carries is ignored.
-      if (hasFolderLayout(storageAccountForCorpus(declaration, options.registeredCorpora).sourceId)) {
-        if (!collidingStore) {
-          if (options.existingOnly) continue;
-          throw new Error('its source keeps its stores where Olympus places them; a declaration can only add a principal to the store its lane opened, and that lane is not open.');
-        }
-        const { dbPath: _ignored, ...placed } = declaration;
-        assertConnectorStoreMountIdentity(placed, collidingStore);
-        mounts.push({
-          store: collidingStore,
-          ...(declaration.principal ? { principal: declaration.principal } : {}),
-          ...(declaration.chatPrincipal ? { chatPrincipal: declaration.chatPrincipal } : {}),
-        });
-        continue;
-      }
-      if (!declaration.dbPath) throw new Error('Connector store entries require dbPath, corpusId, family, trustDomain.');
-      if (collidingStore) assertConnectorStoreMountIdentity(declaration, collidingStore);
-      if (options.existingOnly && !collidingStore && !existsSync(declaration.dbPath)) continue;
-      const pathOwnerCorpusId = ownerCorpusIdByDbPath.get(declaration.dbPath);
-      if (pathOwnerCorpusId !== undefined && pathOwnerCorpusId !== declaration.corpusId) {
-        throw new Error(
-          `dbPath ${JSON.stringify(declaration.dbPath)} is already mounted as corpus ${JSON.stringify(pathOwnerCorpusId)}.`,
-        );
-      }
-      // An account that may not be opened throws here, and the declaration
-      // is skipped and reported like any other that cannot mount.
-      const owner = options.storeOwner?.(declaration.dbPath);
-      const account = owner ? { sourceId: owner } : storageAccountForCorpus(declaration, options.registeredCorpora);
-      if (!collidingStore) assertStoreTierLedgerCanOpen(declaration.dbPath, writableStoreOpensForbidden());
-      const store = collidingStore ?? openConnectorStore(account, {
-        dbPath: declaration.dbPath,
-        corpusId: declaration.corpusId,
-        family: declaration.family,
-        trustDomain: declaration.trustDomain,
-      });
-      ownerCorpusIdByDbPath.set(declaration.dbPath, declaration.corpusId);
-      mounts.push({
-        store,
-        ...(declaration.principal ? { principal: declaration.principal } : {}),
-        ...(declaration.chatPrincipal ? { chatPrincipal: declaration.chatPrincipal } : {}),
-      });
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      reportFailure(`Connector-store mount ${declaration.corpusId} skipped: ${detail}`);
-    }
-  }
-  return mounts;
-}
-
-// Exact string equality on dbPath is deliberate (R49). Normalizing
-// (realpath/resolve) could silently ACCEPT a declaration for a different
-// file behind a symlink or `..` variant — the exact defect this reconcile
-// exists to prevent. A lexically divergent path to the same file fails
-// closed and loud: the declaration is skipped whole and its principal
-// never registers.
-function assertConnectorStoreMountIdentity(
-  declaration: ValidatedConnectorStoreMountDeclaration,
-  store: LocalConnectorStore,
-): void {
-  const mismatches = [
-    ...(declaration.dbPath === undefined || declaration.dbPath === store.dbPath
-      ? []
-      : [`dbPath ${JSON.stringify(declaration.dbPath)} does not match lane ${JSON.stringify(store.dbPath)}`]),
-    ...(declaration.family === store.family
-      ? []
-      : [`family ${JSON.stringify(declaration.family)} does not match lane ${JSON.stringify(store.family)}`]),
-    ...(declaration.trustDomain === store.trustDomain
-      ? []
-      : [`trustDomain ${JSON.stringify(declaration.trustDomain)} does not match lane ${JSON.stringify(store.trustDomain)}`]),
-  ];
-  if (mismatches.length > 0) {
-    throw new Error(`declaration conflicts with the lane store: ${mismatches.join('; ')}.`);
-  }
-}
-
-function validateConnectorStoreMountDeclaration(entry: unknown): ValidatedConnectorStoreMountDeclaration {
-  if (!entry || typeof entry !== 'object') {
-    throw new Error('Each connector store entry must be an object.');
-  }
-  const record = entry as Record<string, unknown>;
-  const dbPath = typeof record.dbPath === 'string' ? record.dbPath.trim() : '';
-  const corpusId = typeof record.corpusId === 'string' ? record.corpusId.trim() : '';
-  const family = typeof record.family === 'string' ? record.family.trim() : '';
-  const trustDomain = typeof record.trustDomain === 'string' ? record.trustDomain.trim() : '';
-  if (!corpusId || !family || !trustDomain) {
-    throw new Error('Connector store entries require dbPath, corpusId, family, trustDomain.');
-  }
-  if (dbPath && !isAbsolute(dbPath)) {
-    throw new Error('Connector store dbPath must be absolute.');
-  }
-  // Both enums are checked before the casts below. Every secure gate in this
-  // worker is exact equality against 'secure_local', so a typo'd domain does
-  // not degrade the mount — it silently leaves the secure band entirely.
-  if (!isDeclarableSourceFamily(family)) {
-    throw new Error(
-      `Connector store family must be one of: ${SOURCE_FAMILIES.join(', ')} (or an "x-" extension id).`,
-    );
-  }
-  if (!isDeclarableSourceTrustDomain(trustDomain)) {
-    throw new Error(
-      `Connector store trustDomain must be one of: ${SOURCE_TRUST_DOMAINS.join(', ')} (or an "x-" extension id).`,
-    );
-  }
-  const hasPrincipalProvider = Object.prototype.hasOwnProperty.call(record, 'principalProvider');
-  const hasPrincipalAccountScope = Object.prototype.hasOwnProperty.call(record, 'principalAccountScope');
-  if (hasPrincipalProvider !== hasPrincipalAccountScope) {
-    throw new Error('Connector store principal identity requires both principalProvider and principalAccountScope.');
-  }
-  let chatPrincipal: ConnectorStoreChatPrincipal | undefined;
-  let principal: ConnectorStoreDeclaredPrincipal | undefined;
-  if (hasPrincipalProvider && hasPrincipalAccountScope) {
-    principal = canonicalConnectorStoreChatPrincipal(
-      record.principalProvider,
-      record.principalAccountScope,
-    );
-    if (family === 'chat') chatPrincipal = principal;
-  }
-  return {
-    ...(dbPath ? { dbPath } : {}),
-    corpusId,
-    family: family as Parameters<typeof defineConnectorCorpus>[0]['family'],
-    trustDomain: trustDomain as Parameters<typeof defineConnectorCorpus>[0]['trustDomain'],
-    ...(principal ? { principal } : {}),
-    ...(chatPrincipal ? { chatPrincipal } : {}),
-  };
-}
-
-function isSourceIndexExtensionId(value: string): boolean {
-  return value.startsWith('x-') && value.length > 2;
-}
-
-function isDeclarableSourceFamily(value: string): boolean {
-  return (SOURCE_FAMILIES as readonly string[]).includes(value) || isSourceIndexExtensionId(value);
-}
-
-function isDeclarableSourceTrustDomain(value: string): boolean {
-  return (SOURCE_TRUST_DOMAINS as readonly string[]).includes(value) || isSourceIndexExtensionId(value);
-}
-
-function mergeConnectorStores(stores: readonly LocalConnectorStore[]): LocalConnectorStore[] {
-  const byCorpusId = new Map<string, LocalConnectorStore>();
-  for (const store of stores) {
-    if (!byCorpusId.has(store.corpusId)) {
-      byCorpusId.set(store.corpusId, store);
-    }
-  }
-  return [...byCorpusId.values()];
-}
-
-/** A Google Drive file's own page: https on drive.google.com or docs.google.com, nothing else. */
-function googleFilePage(locator: string): boolean {
-  try {
-    const url = new URL(locator);
-    return url.protocol === 'https:' && !url.username && !url.password && !url.port
-      && (url.hostname === 'drive.google.com' || url.hostname === 'docs.google.com');
-  } catch {
-    return false;
-  }
 }

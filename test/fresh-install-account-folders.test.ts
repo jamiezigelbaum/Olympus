@@ -21,7 +21,7 @@ import { FileSourceScopeAuthority } from '../src/workers/source-scope-runtime.ts
 import {
   createRefreshableReadwiseConnectorStoreRuntime,
   createXBookmarksConnectorStoreRuntime,
-} from '../src/workers/engine/server.ts';
+} from '../src/workers/engine/runtime/source-runtimes.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { defaultXBookmarksApiUsageDbPath } from '../src/workers/x-bookmarks/live-control.ts';
 import { LocalXBookmarksApiUsageStore } from '../src/workers/x-bookmarks/index.ts';

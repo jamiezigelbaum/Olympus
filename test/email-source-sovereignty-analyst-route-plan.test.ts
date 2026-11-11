@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { sovereigntyAnalystRoutePlan, workerSovereigntyAnalystRoutePlan } from '../src/workers/engine/server.ts';
+import { sovereigntyAnalystRoutePlan, workerSovereigntyAnalystRoutePlan } from '../src/workers/engine/runtime/private-analysts.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset, type SovereigntyResolvedProfile } from '../src/core/sovereignty.ts';
 import type { SovereigntyAnalystRouteStep } from '../src/workers/source-index/analyst-answer.ts';
 import { OperationError } from '../src/core/operation-error.ts';
