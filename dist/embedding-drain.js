@@ -73905,6 +73905,7 @@ var ARCHIVE_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
 var ARCHIVE_UPLOAD_MAX_CHUNK_BYTES = 64 * 1024 * 1024;
 var SPACE_CHECK_EVERY_BYTES = 16 * 1024 * 1024;
 var ARCHIVE_UPLOAD_IDLE_MS = 30 * 60000;
+var removing = new Set;
 
 // src/workers/dashboard/host-page.ts
 init_vocabulary();
@@ -78250,6 +78251,7 @@ init_requests();
 // src/workers/email-source/server.ts
 init_lane();
 init_store();
+init_olympus_layout();
 init_state();
 
 // src/workers/archive-import/extraction-runtime.ts

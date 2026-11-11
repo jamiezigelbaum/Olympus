@@ -215,6 +215,10 @@ export interface ArchiveImportDashboardOptions {
    */
   uploads?: ArchiveUploads;
   /**
+   * Only the front (or single worker) owns the upload sessions and may sweep staging.
+   */
+  ownsUploads?: boolean;
+  /**
    * Hands the scheduler the current archive tasks (its updateSources).
    */
   refreshScheduler: () => void;
@@ -432,7 +436,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
   // Staging copies nothing reads any more are deleted: an upload walked away from, an approval that imported nothing,
   // an import that was removed.
   const sweepStaging = (): void => {
-    if (closed) return;
+    if (closed || options.ownsUploads === false) return;
     try {
       uploads.sweep(stagingNeeded);
     } catch (error) {
@@ -749,6 +753,8 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
   const counts = (record: ArchiveImportRecord): { items: number; held: number } | undefined => {
     try {
       const lane = options.runtime.lane(record.family);
+      // The lane's own ledger: the writer's in a single worker, the
+      // read-only mount on the split's front, which sees each commit (WAL).
       const tally = lane.ledger.accountScopeCounts(record.provider, record.archive_id);
       return { items: tally.items, held: tally.awaitingJudgment };
     } catch {

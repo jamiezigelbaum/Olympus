@@ -171076,8 +171076,8 @@ var init_top_nav = __esm(() => {
 
 // src/workers/archive-import/staging.ts
 import { randomBytes as randomBytes30 } from "node:crypto";
-import { existsSync as existsSync102, mkdirSync as mkdirSync66, readdirSync as readdirSync29, realpathSync as realpathSync21, rmSync as rmSync43, statSync as statSync42, statfsSync as statfsSync4, utimesSync } from "node:fs";
-import { open as open5 } from "node:fs/promises";
+import { existsSync as existsSync102, mkdirSync as mkdirSync66, readdirSync as readdirSync29, realpathSync as realpathSync21, renameSync as renameSync24, rmSync as rmSync43, statSync as statSync42, statfsSync as statfsSync4, utimesSync } from "node:fs";
+import { open as open5, rm as rm11 } from "node:fs/promises";
 import { sep as sep22, join as join134, resolve as resolve28 } from "node:path";
 function sanitizeUploadPath(raw) {
   const bad = () => {
@@ -171101,6 +171101,14 @@ function sanitizeUploadPath(raw) {
       return bad();
   }
   return parts;
+}
+function removeInBackground(path) {
+  if (removing.has(path))
+    return;
+  removing.add(path);
+  rm11(path, { recursive: true, force: true }).catch(() => {
+    return;
+  }).finally(() => removing.delete(path));
 }
 function createArchiveUploads(options) {
   const freeBytes = options.freeBytes ?? ((path) => {
@@ -171407,6 +171415,10 @@ function createArchiveUploads(options) {
         return;
       }
       for (const name of names) {
+        if (name.startsWith(REMOVING_PREFIX)) {
+          removeInBackground(join134(root, name));
+          continue;
+        }
         if (!ID2.test(name))
           continue;
         const dir = join134(root, name);
@@ -171426,7 +171438,14 @@ function createArchiveUploads(options) {
         if (found)
           found.cancelled = true;
         sessions.delete(name);
-        rmSync43(dir, { recursive: true, force: true });
+        const aside = join134(root, `${REMOVING_PREFIX}${name}-${randomBytes30(4).toString("hex")}`);
+        try {
+          renameSync24(dir, aside);
+        } catch {
+          removeInBackground(dir);
+          continue;
+        }
+        removeInBackground(aside);
       }
     },
     close() {
@@ -171439,7 +171458,7 @@ function createArchiveUploads(options) {
     }
   };
 }
-var ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES, ARCHIVE_UPLOAD_CHUNK_BYTES, ARCHIVE_UPLOAD_MAX_CHUNK_BYTES, SPACE_CHECK_EVERY_BYTES, SPACE_POLL_MS = 2000, ARCHIVE_UPLOAD_IDLE_MS, MAX_DEPTH = 64, MAX_PATH_CHARS = 4096, MAX_NAME_BYTES = 255, ID2, ArchiveUploadError, ARCHIVE_UPLOAD_COPY;
+var ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES, ARCHIVE_UPLOAD_CHUNK_BYTES, ARCHIVE_UPLOAD_MAX_CHUNK_BYTES, SPACE_CHECK_EVERY_BYTES, SPACE_POLL_MS = 2000, ARCHIVE_UPLOAD_IDLE_MS, MAX_DEPTH = 64, MAX_PATH_CHARS = 4096, MAX_NAME_BYTES = 255, ID2, ArchiveUploadError, ARCHIVE_UPLOAD_COPY, ARCHIVE_STAGING_REMOVING_PREFIX = ".removing-", REMOVING_PREFIX, removing;
 var init_staging = __esm(() => {
   ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
   ARCHIVE_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
@@ -171468,6 +171487,8 @@ var init_staging = __esm(() => {
     unreadable: "Olympus could not read what was sent. Choose the folder again.",
     write_failed: "Olympus could not save the file on this computer. Check that its disk has room, then choose the folder again."
   };
+  REMOVING_PREFIX = ARCHIVE_STAGING_REMOVING_PREFIX;
+  removing = new Set;
 });
 
 // src/workers/dashboard/host-page.ts
@@ -203195,7 +203216,7 @@ function createArchiveImportDashboard(options) {
     }
   };
   const sweepStaging = () => {
-    if (closed)
+    if (closed || options.ownsUploads === false)
       return;
     try {
       uploads.sweep(stagingNeeded);
@@ -206309,7 +206330,7 @@ var init_judge_boost = __esm(() => {
 });
 
 // src/core/source-account-migration.ts
-import { linkSync as linkSync5, lstatSync as lstatSync54, mkdirSync as mkdirSync70, readdirSync as readdirSync35, realpathSync as realpathSync29, renameSync as renameSync24, rmdirSync as rmdirSync8, statSync as statSync46, unlinkSync as unlinkSync5 } from "node:fs";
+import { linkSync as linkSync5, lstatSync as lstatSync54, mkdirSync as mkdirSync70, readdirSync as readdirSync35, realpathSync as realpathSync29, renameSync as renameSync25, rmdirSync as rmdirSync8, statSync as statSync46, unlinkSync as unlinkSync5 } from "node:fs";
 import { basename as basename22, dirname as dirname110, isAbsolute as isAbsolute39, join as join147, relative as relative17, resolve as resolve31, sep as sep23 } from "node:path";
 function accountFolderMigrationEnabled(env = process.env) {
   const value2 = env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim().toLowerCase() ?? "";
@@ -206408,7 +206429,7 @@ function absPath(ctx, rel) {
 }
 function moveWithoutReplacing(from, to, kind) {
   if (kind === "dir") {
-    renameSync24(from, to);
+    renameSync25(from, to);
     syncFolder(dirname110(to));
     syncFolder(dirname110(from));
     return;
@@ -212080,25 +212101,6 @@ function frontUnreadableFiles(local, snapshot2) {
     recheck: (corpusId) => current2(snapshot2)?.snapshot.unreadable?.[corpusId]
   };
 }
-function frontArchiveViews(local, snapshot2, changedAt = () => {
-  return;
-}) {
-  const archive = () => {
-    const read = current2(snapshot2);
-    if (!read)
-      return;
-    const changed = changedAt();
-    if (changed !== undefined && Date.parse(read.snapshot.written_at) < changed)
-      return;
-    return read.snapshot.archive;
-  };
-  return {
-    view: () => archive()?.view ?? local.view(),
-    cardViews: () => archive()?.cards ?? local.cardViews(),
-    sourceImports: () => archive()?.source_imports ?? local.sourceImports(),
-    archiveSources: () => archive()?.sources ?? local.archiveSources()
-  };
-}
 function frontDataExport(client) {
   return async (destination) => {
     const receipt = await client.send({ kind: "export_data", destination }, { timeoutMs: DATA_EXPORT_WAIT_MS });
@@ -212276,6 +212278,7 @@ function createFrontScheduler(options) {
       }
     },
     updateSources() {
+      options.sourcesChanged?.();
       post2({ kind: "reload", target: "sources" }).catch(() => {
         return;
       });
@@ -236008,7 +236011,7 @@ async function main() {
     sourceLaneGeneration += 1;
     earlySourceStores.push(stores);
   };
-  const sourceHasStores = (sourceId) => ["internal", "secure_local", "public_safe"].some((domain) => {
+  const sourceHasStores = (sourceId) => accountStoreNames(sourceId).some((domain) => {
     const path = resolvedStorePath(sourceId, domain, process.env);
     return existsSync117(path) || existsSync117(tieredStoreSetLedgerPath(path)) || existsSync117(secretLocationsPathForStore(path));
   });
@@ -236646,19 +236649,12 @@ ${key2}`;
   const telegramSpoolChanges = createSpoolChangeSubscription(defaultTelegramCaptureSpoolDir(process.env));
   const whatsappSpoolChanges = createSpoolChangeSubscription(defaultWhatsAppSpoolDir(process.env));
   const telegramCaptureMaxItems = parseOptionalPositiveInteger(process.env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS, "OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS");
-  let frontLanesWaiting = false;
   const storeAt = (sourceId, domain) => resolvedStorePath(sourceId, domain, process.env);
-  const frontCanMount = (paths) => {
-    if (paths.every(connectorStoreReadableNow))
-      return true;
-    frontLanesWaiting = true;
-    return false;
-  };
+  const frontCanMount = (paths) => paths.every(connectorStoreReadableNow);
   const mountSourceLanes = (handles) => {
     if (sourceRuntimeClosed)
       return;
     const connected2 = (provider, capability) => activeCredentialHandle(handles, { provider, capability }) !== undefined;
-    frontLanesWaiting = false;
     const wanted = (sourceId, connectedNow, paths) => {
       if (!sourceHasStores(sourceId) && !connectedNow)
         return false;
@@ -238087,7 +238083,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   };
   const schedulerAssembly = schedulerSourcesForHandles(connectedHandles);
   const schedulerSources = schedulerAssembly.sources;
-  const sourceScheduler = engineFront ? createFrontScheduler({ client: engineFront.client, snapshot: () => engineFront.status() }) : olympusConfig.worker.scheduler.enabled ? createSourceSchedulerFromConfig({
+  const sourceScheduler = engineFront ? createFrontScheduler({ client: engineFront.client, snapshot: () => engineFront.status(), sourcesChanged: () => refreshFrontMounts() }) : olympusConfig.worker.scheduler.enabled ? createSourceSchedulerFromConfig({
     config: olympusConfig,
     sources: schedulerSources,
     ...!(sourceIndexStatus && sourceIngestionLedger) ? {
@@ -238107,13 +238103,30 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       }
     } : {}
   }) : undefined;
-  let archiveChangedAt;
+  const refreshFrontMounts = () => {
+    const reads = [
+      () => mountSourceLanes(activeLaneHandles(readActiveConnectedHandles(process.env), process.env)),
+      () => {
+        if (sourceAccountMountable({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }))
+          archiveImports.existingLanes();
+      },
+      openTierStoresThatExist
+    ];
+    for (const read of reads) {
+      try {
+        read();
+      } catch (error2) {
+        console.warn(`[olympus] the front could not open a source's stores yet: ${error2 instanceof Error ? error2.message : String(error2)}`);
+      }
+    }
+  };
   const archiveImportDashboard = createArchiveImportDashboard({
     runtime: archiveImports,
     resolver: createArchivePathResolver(),
+    ownsUploads: engineRole !== "background",
     refreshScheduler: () => {
       if (engineFront) {
-        archiveChangedAt = Date.now();
+        refreshFrontMounts();
         engineFront.client.post({ kind: "archive_changed" }).catch(() => {
           return;
         });
@@ -238122,7 +238135,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       sourceScheduler?.updateSources(schedulerSourcesForHandles(activeLaneHandles(readActiveConnectedHandles(process.env), process.env)).sources);
     },
     ...engineFront ? { checksElsewhere: () => {
-      archiveChangedAt = Date.now();
+      refreshFrontMounts();
       engineFront.client.post({ kind: "archive_changed" }).catch(() => {
         return;
       });
@@ -238132,7 +238145,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   });
   if (!engineFront)
     archiveImportDashboard.resume();
-  const archiveViews = engineFront ? frontArchiveViews(archiveImportDashboard, () => engineFront.status(), () => archiveChangedAt) : archiveImportDashboard;
+  const archiveViews = archiveImportDashboard;
   wireBuiltInTranscriptionAtBoot({
     env: process.env,
     engine: process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() ? undefined : sharedBuiltInTranscriber(process.env),
@@ -239703,15 +239716,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     localModelActivity.onBusy(snifferResource, () => relay.busy(snifferResource));
     localModelActivity.onIdle(snifferResource, () => relay.idle(snifferResource));
   }
-  const frontMountRetry = engineFront ? setInterval(() => {
-    try {
-      if (frontLanesWaiting)
-        mountSourceLanes(activeLaneHandles(readActiveConnectedHandles(process.env), process.env));
-      openTierStoresThatExist();
-    } catch (error2) {
-      console.warn(`[olympus] the front could not open a source's stores yet: ${error2 instanceof Error ? error2.message : String(error2)}`);
-    }
-  }, 2000) : undefined;
+  const frontMountRetry = engineFront ? setInterval(refreshFrontMounts, 2000) : undefined;
   frontMountRetry?.unref?.();
   if (engineFront) {
     const judge3 = frontJudgeState(() => engineFront.status());
@@ -239871,12 +239876,6 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
             return counted ? [[definition.corpusId, counted]] : [];
           }))
         } : {},
-        archive: {
-          view: archiveImportDashboard.view(),
-          cards: archiveImportDashboard.cardViews(),
-          source_imports: archiveImportDashboard.sourceImports(),
-          sources: archiveImportDashboard.archiveSources()
-        },
         manual_syncs: Object.fromEntries(manualSyncRuns),
         rss_restarts: rssRestart.restarts()
       })
@@ -240694,6 +240693,7 @@ var init_server5 = __esm(async () => {
   init_dashboard2();
   init_lane();
   init_store();
+  init_olympus_layout();
   init_state();
   init_extraction_runtime();
   init_scheduler_source2();
