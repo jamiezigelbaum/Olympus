@@ -97,7 +97,7 @@ function closeAll(): void {
   for (const close of closers.splice(0).reverse()) close();
 }
 
-const storePaths = () => [join(root, 'dropbox-secure.sqlite'), resolvedStorePath('dropbox.files', 'internal', env)];
+const storePaths = () => [resolvedStorePath('dropbox.files', 'secure_local', env), resolvedStorePath('dropbox.files', 'internal', env)];
 const ownerItems = () => createOwnerTierItems({ storePaths: storePaths() });
 const bankIdentity = { provider: 'dropbox', accountScope: 'personal', providerItemId: 'id:bank' };
 const gardenIdentity = { provider: 'dropbox', accountScope: 'personal', providerItemId: 'id:garden' };
@@ -121,7 +121,7 @@ async function start(options: { extract: boolean }) {
     ...(isPublicTierRetired(policy) ? { retirePublic: true } : {}),
     ownerContext: () => ownerWords,
   });
-  const secure = new LocalConnectorStore({ dbPath: join(root, 'dropbox-secure.sqlite'), corpusId: SECURE_CORPUS, family: 'file', trustDomain: 'secure_local' });
+  const secure = new LocalConnectorStore({ dbPath: resolvedStorePath('dropbox.files', 'secure_local', env), corpusId: SECURE_CORPUS, family: 'file', trustDomain: 'secure_local' });
   closers.push(() => secure.close());
   const secrets = new SecretLocationsIndex({ dbPath: join(root, 'secrets.sqlite') });
   closers.push(() => secrets.close());

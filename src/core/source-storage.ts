@@ -37,6 +37,7 @@ import { closeSqliteStore } from './sqlite-store.ts';
 import { writableStoreOpensForbidden } from './store-write-guard.ts';
 import { SecretLocationsIndex } from '../workers/classification/secret-locations.ts';
 import { TierSnifferStore } from '../workers/classification/sniffer-store.ts';
+import { assertStoreTierLedgerCanOpen } from '../workers/classification/tier-set-binding.ts';
 import { TierLedger, type TierLedgerOptions } from '../workers/classification/tier-ledger.ts';
 import { LocalConnectorStore, type LocalConnectorStoreOptions } from '../workers/connector-store/local-index.ts';
 import {
@@ -119,6 +120,7 @@ export function openConnectorStore(
   const slot = account.slot ?? DEFAULT_STORAGE_SLOT;
   let registry = readSourceRegistry(env);
   assertOpenable(registry, account.sourceId, slot);
+  if (!options.readOnly) assertStoreTierLedgerCanOpen(options.dbPath);
   if (adoptionEnabled && options.readOnly !== true) {
     const entry = findRegistryAccount(registry, account.sourceId, slot);
     if (!entry?.corpus_ids.includes(options.corpusId)) {
@@ -136,6 +138,8 @@ export function openConnectorStore(
 // before its stores.
 export function openTierLedger(account: StorageAccount, requested: TierLedgerOptions, env: LayoutEnv = process.env): TierLedger {
   const options = frontReadOnly(requested);
+  assertOpenable(readSourceRegistry(env), account.sourceId, account.slot ?? DEFAULT_STORAGE_SLOT);
+  TierLedger.assertSchemaCanOpen(options.dbPath, options.readOnly);
   placeSidecar(env, account, options.dbPath, options.readOnly);
   return new TierLedger(options);
 }
