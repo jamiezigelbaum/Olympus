@@ -77,6 +77,19 @@ describe('tier ledger copy isolation (#1398)', () => {
     expect(version(w.ledgerB)).toBe(TIER_LEDGER_SCHEMA_VERSION - 1);
   });
 
+  test('a bound Personal store\'s former per-leg ledger never holds the front back', async () => {
+    const w = await world();
+    // An upgraded install keeps the Personal store's old ledger beside it; the set ledger governs the store.
+    const former = tieredStoreSetLedgerPath(w.copyPaths.internal);
+    new TierLedger({ dbPath: former }).close();
+    version(former, TIER_LEDGER_SCHEMA_VERSION - 1);
+    expect(findTierSetLedger(w.copyPaths.internal, JSON.parse((new Database(w.copyPaths.internal, { readonly: true }).query(`SELECT cursor FROM sync_runs WHERE connector_id = 'tiered_store_set_binding'`).get() as { cursor: string }).cursor))).toBe(w.ledgerB);
+    expect(workerTierLedgerProblem(Object.values(w.copyPaths), true)).toBeUndefined();
+    // The set ledger itself still decides.
+    version(w.ledgerB, TIER_LEDGER_SCHEMA_VERSION - 1);
+    expect(workerTierLedgerProblem(Object.values(w.copyPaths), true)).toMatch(/writer must migrate/);
+  });
+
   test('a downgrade is nonfatal at the worker mount boundary and opens no writable tier data', async () => {
     const w = await world();
     version(w.ledgerB, TIER_LEDGER_SCHEMA_VERSION + 1);

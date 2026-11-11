@@ -235712,10 +235712,8 @@ function replaceEmptyAccountsAtBoot(env) {
 }
 function workerTierLedgerProblem(storePaths, readOnly = false) {
   try {
-    for (const path of storePaths) {
+    for (const path of storePaths)
       assertStoreTierLedgerCanOpen(path, readOnly);
-      TierLedger.assertSchemaCanOpen(tieredStoreSetLedgerPath(path), readOnly);
-    }
     return;
   } catch (error2) {
     if (error2 instanceof TierLedgerSchemaError)
@@ -237320,12 +237318,20 @@ ${key2}`;
     },
     onStoreOpened: (store) => registerTierLegStore(store, store.corpusId, store.trustDomain === "secure_local" ? tierSecureEmbeddingProvider ?? null : sourceIndexEmbeddingProvider ?? null)
   });
+  const mountArchiveLanes = () => {
+    try {
+      if (sourceAccountMountable({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }))
+        archiveImports.existingLanes();
+      tierLedgerProblems.delete(ARCHIVE_IMPORTS_SOURCE_ID2);
+    } catch (error2) {
+      if (error2 instanceof TierLedgerSchemaError)
+        tierLedgerProblems.set(ARCHIVE_IMPORTS_SOURCE_ID2, error2.message);
+      throw error2;
+    }
+  };
   try {
-    if (sourceAccountMountable({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }))
-      archiveImports.existingLanes();
+    mountArchiveLanes();
   } catch (error2) {
-    if (error2 instanceof TierLedgerSchemaError)
-      tierLedgerProblems.set(ARCHIVE_IMPORTS_SOURCE_ID2, error2.message);
     console.warn(`[archive-import] imported archives are not served this run: ${error2 instanceof Error ? error2.message : "error"}`);
   }
   const evernote = createEvernoteRuntime({
@@ -237359,7 +237365,7 @@ ${key2}`;
     if (sourceAccountMountable({ sourceId: EVERNOTE_SOURCE_ID }) && sourceTierLedgerReady(EVERNOTE_SOURCE_ID))
       evernote.existingLane();
   } catch (error2) {
-    console.warn(`[evernote] the Evernote stores are not served this run: ${error2 instanceof Error ? error2.name : "error"}`);
+    console.warn(`[evernote] the Evernote stores are not served this run: ${error2 instanceof Error ? error2.message : "error"}`);
   }
   const archiveExtraction = createArchiveExtractionRuntime({
     runtime: archiveImports,
@@ -238260,10 +238266,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const refreshFrontMounts = () => {
     const reads = [
       () => mountSourceLanes(activeLaneHandles(readActiveConnectedHandles(process.env), process.env)),
-      () => {
-        if (sourceAccountMountable({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }))
-          archiveImports.existingLanes();
-      },
+      mountArchiveLanes,
       openTierStoresThatExist
     ];
     for (const read of reads) {

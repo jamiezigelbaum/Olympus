@@ -2464,11 +2464,11 @@ export function replaceEmptyAccountsAtBoot(env: Record<string, string | undefine
 /** Schema refusal is a lane outage, not a process failure. Called before any tier store opens. */
 export function workerTierLedgerProblem(storePaths: readonly string[], readOnly = false): string | undefined {
   try {
-    for (const path of storePaths) {
-      assertStoreTierLedgerCanOpen(path, readOnly);
-      // The set ledger may exist before its secure store has ever been created.
-      TierLedger.assertSchemaCanOpen(tieredStoreSetLedgerPath(path), readOnly);
-    }
+    // A bound store is checked against the ledger that governs it, never a
+    // former per-leg ledger left beside it. An unbound or not-yet-created store
+    // is checked against the ledger beside it (the set ledger may exist before
+    // its secure store does).
+    for (const path of storePaths) assertStoreTierLedgerCanOpen(path, readOnly);
     return undefined;
   } catch (error) {
     if (error instanceof TierLedgerSchemaError) return error.message;
@@ -4604,10 +4604,20 @@ export async function main(): Promise<void> {
       store.trustDomain === 'secure_local' ? tierSecureEmbeddingProvider ?? null : sourceIndexEmbeddingProvider ?? null,
     ),
   });
+  // Startup and the split front's mount refresh both mount archives here, so a
+  // ledger problem is cleared once the background has migrated the ledger.
+  const mountArchiveLanes = (): void => {
+    try {
+      if (sourceAccountMountable({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID })) archiveImports.existingLanes();
+      tierLedgerProblems.delete(ARCHIVE_IMPORTS_SOURCE_ID);
+    } catch (error) {
+      if (error instanceof TierLedgerSchemaError) tierLedgerProblems.set(ARCHIVE_IMPORTS_SOURCE_ID, error.message);
+      throw error;
+    }
+  };
   try {
-    if (sourceAccountMountable({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID })) archiveImports.existingLanes();
+    mountArchiveLanes();
   } catch (error) {
-    if (error instanceof TierLedgerSchemaError) tierLedgerProblems.set(ARCHIVE_IMPORTS_SOURCE_ID, error.message);
     console.warn(`[archive-import] imported archives are not served this run: ${error instanceof Error ? error.message : 'error'}`);
   }
   // Evernote's account, read in passes over its MCP server (workers/evernote/):
@@ -4647,7 +4657,7 @@ export async function main(): Promise<void> {
   try {
     if (sourceAccountMountable({ sourceId: EVERNOTE_SOURCE_ID }) && sourceTierLedgerReady(EVERNOTE_SOURCE_ID)) evernote.existingLane();
   } catch (error) {
-    console.warn(`[evernote] the Evernote stores are not served this run: ${error instanceof Error ? error.name : 'error'}`);
+    console.warn(`[evernote] the Evernote stores are not served this run: ${error instanceof Error ? error.message : 'error'}`);
   }
   // Reading the child items an import listed by name (an attachment, a photo): the shared
   // extraction factory over the archive lanes' stores, built on first use and again when a
@@ -6026,7 +6036,7 @@ export async function main(): Promise<void> {
   const refreshFrontMounts = (): void => {
     const reads = [
       () => mountSourceLanes(activeLaneHandles(readActiveConnectedHandles(process.env), process.env)),
-      () => { if (sourceAccountMountable({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID })) archiveImports.existingLanes(); },
+      mountArchiveLanes,
       openTierStoresThatExist,
     ];
     for (const read of reads) {
