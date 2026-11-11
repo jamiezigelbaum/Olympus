@@ -651,7 +651,8 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
     const garden = identity('id:garden');
     const settled = install.lane.ledger.getCurrent(garden)!;
     expect(settled).toMatchObject({ state: 'current', contentTier: 'private' });
-    expect(install.lane.ledger.copies(garden).find((copy) => copy.corpusId === SECURE_CORPUS)).toMatchObject({ state: 'superseded' });
+    // The automatic lowering pruned the held Private copy (#1174).
+    expect(install.lane.ledger.copies(garden).find((copy) => copy.corpusId === SECURE_CORPUS)).toBeUndefined();
 
     // A re-judgment (a new classifier version) re-holds the text question:
     // a raise back to the store that kept its copy, hidden at once.
@@ -800,8 +801,11 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
       destination: [{ corpusId: SECURE_CORPUS, trustDomain: 'secure_local', layers: 'both' }],
       hideSource: true,
     });
-    // The Personal copy is gone, but the secure store still holds the item:
-    // the move fails, and the item is not absent, so it stays hidden and queued.
+    // The secure store still holds the item (the automatic lowering pruned
+    // its own copy, #1174, so put one back as a store left over would hold it),
+    // but the Personal copy is gone: the move fails, and the item is not
+    // absent, so it stays hidden and queued.
+    install.secure.importItemCopy(install.lane.internal.current()!.exportItemCopy(bank)!, { trustTier: 'S4', syncConnectorId: 'test' });
     install.lane.internal.current()!.tombstoneCopy(
       { ...bank, family: 'file', localItemId: 'personal:id:bank' },
       { connectorId: 'test' },

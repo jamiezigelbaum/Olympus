@@ -44,7 +44,7 @@ test('bounded sweep resumes its cursor, protects moved proposals, audits per cor
   const ctx = await fixture();
   const sweep = () => sweepAutomaticSupersededCopies(ctx.f.set, { limit: 1, embeddingLedger: ctx.embeddingLedger });
   expect(sweep()).toMatchObject({ checked: 1, purged: 1, complete: false });
-  expect(ctx.f.stores.secure_local!.copyContentState(identityOf('a'))?.chunks).toBe(0);
+  expect(ctx.f.stores.secure_local!.copyContentState(identityOf('a'))).toBeUndefined();
   expect(sweep()).toMatchObject({ checked: 1, purged: 0, complete: false });
   expect(ctx.f.ledger.copies(identityOf('b')).some(copy => copy.state === 'superseded')).toBe(true);
   expect(ctx.f.stores.secure_local!.copyContentState(identityOf('b'))?.chunks).toBe(1);
@@ -95,5 +95,25 @@ test('a hide-first move is left intact and revisited before the one-time sweep c
   expect(ctx.f.stores.internal!.copyContentState(identity)?.chunks).toBe(1);
   await moveTieredItem({ set: ctx.f.set, identity, decision: high });
   expect(sweepAutomaticSupersededCopies(ctx.f.set, { embeddingLedger: ctx.embeddingLedger }).complete).toBe(true);
-  expect(ctx.f.ledger.copies(identity).some(copy => copy.state === 'superseded')).toBe(false);
+  // A raise is not pruned: its names-only superseded row stays for re-home.
+  expect(ctx.f.ledger.copies(identity).filter(copy => copy.state === 'superseded').map(copy => copy.corpusId)).toEqual([CORPORA.internal]);
+});
+
+test('a superseded copy holding a newer source version than the destination is kept', async () => {
+  const ctx = await fixture();
+  const store = ctx.f.stores.secure_local!;
+  const original = store.copyContentState.bind(store);
+  const newer = spyOn(store, 'copyContentState').mockImplementation((identity) => {
+    const state = original(identity);
+    if (!state || identity.providerItemId !== identityOf('a').providerItemId) return state;
+    return { ...state, sourceVersion: 'later-edit', contentHash: 'later-edit', updatedAt: '2999-01-01T00:00:00.000Z' };
+  });
+  try {
+    expect(sweepAutomaticSupersededCopies(ctx.f.set, { limit: 1, embeddingLedger: ctx.embeddingLedger }))
+      .toMatchObject({ checked: 1, purged: 0, kept: 1, failed: 0 });
+  } finally { newer.mockRestore(); }
+  expect(ctx.f.ledger.copies(identityOf('a')).some(copy => copy.state === 'superseded')).toBe(true);
+  expect(store.copyContentState(identityOf('a'))?.chunks).toBe(1);
+  // The sweep moved on: the next item is pruned as usual.
+  expect(sweepAutomaticSupersededCopies(ctx.f.set, { limit: 1, embeddingLedger: ctx.embeddingLedger })).toMatchObject({ checked: 1 });
 });

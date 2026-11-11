@@ -38765,7 +38765,7 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
           raise,
           sources,
           destinations,
-          ...options.replaceOwnSupersededCopy ? { replaceOwnSupersededCopy: true } : {},
+          ...options.replaceOwnSupersededCopy && !raise ? { pruneSuperseded: true } : {},
           ...options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {},
           rehomeTagged,
           replacedSuperseded,
@@ -38800,7 +38800,7 @@ function queueMoveNote(options, receipt, result) {
     entry_id: entryId,
     recorded_at: new Date().toISOString(),
     kind: "note",
-    what: `Tier move of one item (${raise ? "raise" : "lateral or lower"}) from ${sources.map((copy) => copy.corpusId).join(", ")} ` + `to ${destinations.map((copy) => `${copy.corpusId} (${copy.layers})`).join(", ")}: ` + `${result.chunkCount} chunk(s) at the destination, ${destinations.reduce((sum, copy) => sum + copy.vectorsCopied, 0)} vector(s) copied with no provider call, ` + `${destinations.reduce((sum, copy) => sum + copy.chunksToEmbed, 0)} chunk(s) left for the destination's own embedding model. ` + `Superseded copies are ${receipt.replaceOwnSupersededCopy ? "pruned after the committed flip" : "hidden"}; lower content on raises is purged: ${result.supersededCorpora.join(", ") || "none"}.` + (Object.keys(replaced).length ? ` Replaced an older superseded copy of this item's own earlier move: ${Object.entries(replaced).map(([corpus, count]) => `${corpus} (${count} chunk(s) of older text)`).join(", ")}.` : ""),
+    what: `Tier move of one item (${raise ? "raise" : "lateral or lower"}) from ${sources.map((copy) => copy.corpusId).join(", ")} ` + `to ${destinations.map((copy) => `${copy.corpusId} (${copy.layers})`).join(", ")}: ` + `${result.chunkCount} chunk(s) at the destination, ${destinations.reduce((sum, copy) => sum + copy.vectorsCopied, 0)} vector(s) copied with no provider call, ` + `${destinations.reduce((sum, copy) => sum + copy.chunksToEmbed, 0)} chunk(s) left for the destination's own embedding model. ` + `Superseded copies are ${receipt.pruneSuperseded ? "pruned after the committed flip" : "hidden"}; lower content on raises is purged: ${result.supersededCorpora.join(", ") || "none"}.` + (Object.keys(replaced).length ? ` Replaced an older superseded copy of this item's own earlier move: ${Object.entries(replaced).map(([corpus, count]) => `${corpus} (${count} chunk(s) of older text)`).join(", ")}.` : ""),
     scope: {
       corpora: [...new Set([...sources.map((copy) => copy.corpusId), ...destinations.map((copy) => copy.corpusId)])],
       chunks: Object.fromEntries(destinations.map((copy) => [copy.corpusId, copy.chunksWritten + copy.chunksKept]))
@@ -38877,7 +38877,7 @@ function readVerifiedMove(ledger, identity) {
   const current2 = ledger.getCurrent(identity);
   if (!current2)
     throw new TierLedgerGenerationConflictError;
-  if (receipt.replaceOwnSupersededCopy && receipt.result && current2.generation >= receipt.result.generation)
+  if (receipt.pruneSuperseded && receipt.result && current2.generation >= receipt.result.generation)
     return receipt;
   if (receipt.generation < current2.generation || receipt.generation === current2.generation && current2.state !== "moving") {
     ledger.withGenerationFence(identity, current2.generation, () => {
@@ -38904,8 +38904,17 @@ function finishVerifiedMove(options, receipt) {
   timed(options.timings, "rereadMs", () => oweExtractionRereads(options.set.ledger, options.identity));
   return result;
 }
+function pruneSupersededStoreCopy(store, identity) {
+  const chunks = store.stripCopyContent(identity, { keepMetadata: false });
+  const row = store.exportItemCopy(identity)?.identity;
+  if (row) {
+    const { sourceVersion: _kept, ...withdrawn } = row;
+    store.tombstoneCopy(withdrawn, { connectorId: TIER_MOVE_CONNECTOR_ID });
+  }
+  return chunks;
+}
 function pruneAutomaticMove(options, receipt) {
-  if (!receipt.replaceOwnSupersededCopy)
+  if (!receipt.pruneSuperseded)
     return;
   const { set, identity } = options;
   const raw = set.ledger.readMeta(purgeReceiptKey(identity));
@@ -38927,7 +38936,7 @@ function pruneAutomaticMove(options, receipt) {
       if (!store)
         throw new Error("Superseded store unavailable; automatic prune remains pending.");
       store.bindTierSet(set.ledger);
-      timed(options.timings, "purgeMs", () => store.stripCopyContent(identity, { keepMetadata: false }));
+      timed(options.timings, "purgeMs", () => pruneSupersededStoreCopy(store, identity));
       set.ledger.removeSupersededCopy(identity, copy.corpusId);
     }
     options.afterPurge?.();
@@ -38996,7 +39005,7 @@ function flipVerifiedMove(options, receipt) {
       }
       if (receipt.raise && content)
         ledger.writeMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`, String(flipped.generation));
-      if (!receipt.replaceOwnSupersededCopy)
+      if (!receipt.pruneSuperseded)
         options.afterPurge?.();
       const result = {
         outcome: "moved",
@@ -39006,7 +39015,7 @@ function flipVerifiedMove(options, receipt) {
         supersededCorpora: ledger.copies(identity).filter((copy) => copy.state === "superseded" && copy.supersededByGeneration === flipped.generation).map((copy) => copy.corpusId),
         chunkCount: receipt.destinations.reduce((sum, copy) => sum + copy.chunksWritten + copy.chunksKept, 0)
       };
-      if (receipt.replaceOwnSupersededCopy) {
+      if (receipt.pruneSuperseded) {
         if (result.supersededCorpora.length)
           ledger.writeMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`, String(flipped.generation));
         ledger.writeMeta(purgeReceiptKey(identity), JSON.stringify({ ...receipt, result }));
@@ -39139,6 +39148,7 @@ var init_tier_auto_prune_sweep = __esm(() => {
   init_tier_ledger();
   init_embedding_ledger();
   init_tier_move();
+  init_tier_content_purge();
 });
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { spawn } from "node:child_process";

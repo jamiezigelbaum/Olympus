@@ -1,8 +1,9 @@
 // One-time upgrade cleanup for automatic moves made before source pruning.
 // Migration rollback copies and Secrets retirement keep their own policies.
-import { copyServingLayer, tierLedgerIdentityKey, type TierLedgerIdentity } from '../classification/tier-ledger.ts';
+import { copyServingLayer, tierLedgerIdentityKey, trustDomainRank, type TierLedgerIdentity } from '../classification/tier-ledger.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
-import { queueTierLedgerEntry, type TierMoveOptions } from './tier-move.ts';
+import { pruneSupersededStoreCopy, queueTierLedgerEntry, type TierMoveOptions } from './tier-move.ts';
+import { compareContentVersions } from './tier-content-purge.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
 const STATE = 'automatic-superseded-prune-v1';
@@ -26,10 +27,10 @@ interface State {
 export function sweepAutomaticSupersededCopies(set: TieredStoreSet, options: {
   limit?: number;
   embeddingLedger?: TierMoveOptions['embeddingLedger'];
-} = {}): { checked: number; purged: number; failed: number; complete: boolean } {
+} = {}): { checked: number; purged: number; kept: number; failed: number; complete: boolean } {
   const ledger = set.ledger;
   const state: State = JSON.parse(ledger.readMeta(STATE) || '{}');
-  const report = { checked: 0, purged: 0, failed: 0, complete: state.done === true };
+  const report = { checked: 0, purged: 0, kept: 0, failed: 0, complete: state.done === true };
   if (state.done) return report;
   state.embeddingLedger ??= state.pending?.embeddingLedger ?? options.embeddingLedger
     ?? { path: resolveEmbeddingLedgerPath(), approvedBy: 'system-automatic' };
@@ -48,7 +49,7 @@ export function sweepAutomaticSupersededCopies(set: TieredStoreSet, options: {
         store.bindTierSet(ledger);
         // The receipt's original count survives a death after this separate
         // store commit but before the ledger transaction below commits.
-        store.stripCopyContent(pending.identity, { keepMetadata: false });
+        pruneSupersededStoreCopy(store, pending.identity);
         ledger.removeSupersededCopy(pending.identity, copy.corpusId);
         const deleted = state.deleted ??= {};
         deleted[copy.corpusId] = (deleted[copy.corpusId] ?? 0) + target.chunks;
@@ -82,23 +83,39 @@ export function sweepAutomaticSupersededCopies(set: TieredStoreSet, options: {
         if (!now.routed || now.contentTier === 'secrets' || now.metadataTier === 'secrets'
           || ledger.hasMovedMigrationProposal(identity)) return;
         const copies = ledger.copies(identity);
-        const superseded = copies.filter(copy => copy.state === 'superseded');
-        if (!superseded.length) return;
+        if (!copies.some(copy => copy.state === 'superseded')) return;
         // A hide-first move can own superseded sources before its flip. Walk
         // again once the page sequence ends; never mark these items done yet.
         if (now.state === 'moving') { state.retry = true; return; }
         const content = copyServingLayer(copies.filter(copy => copy.state === 'current'), 'content');
+        // A names-only placement cannot prove a body reached a destination.
+        if (!content) return;
+        // Only copies a LOWERING left behind, in a store above the one that now
+        // serves the content. A raise keeps its names-only superseded row.
+        const superseded = copies.filter(copy => copy.state === 'superseded'
+          && trustDomainRank(copy.trustDomain) > trustDomainRank(content.trustDomain));
+        if (!superseded.length) return;
         const destination = content && set.store(content.trustDomain);
         const proof = destination?.copyContentState(identity);
         if (!proof || destination?.tierSetBinding()?.ledgerId !== ledger.ledgerId()) throw new Error('Current destination unavailable.');
+        let unproven = false;
         const targets = superseded.map(copy => {
           const store = set.store(copy.trustDomain);
           if (!store) throw new Error('Superseded store unavailable.');
           store.bindTierSet(ledger);
-          const chunks = store.copyContentState(identity)?.chunks ?? 0;
+          const held = store.copyContentState(identity);
+          const chunks = held?.chunks ?? 0;
           if (chunks && (!proof.chunks || !proof.currentText)) throw new Error('Current destination has no verified body.');
+          // A historical copy may hold a newer source version than the
+          // destination. Prune only what the destination is proven at least
+          // as fresh as; otherwise keep every copy of this item.
+          if (held && chunks) {
+            const order = compareContentVersions(proof, held);
+            if (order === undefined || order < 0) unproven = true;
+          }
           return { corpusId: copy.corpusId, chunks };
         });
+        if (unproven) { report.kept++; return; }
         state.pending = { identity, generation: record.generation, copies: targets,
           embeddingLedger: state.embeddingLedger! };
         // Commit the receipt and rollback refusal BEFORE any store is stripped.

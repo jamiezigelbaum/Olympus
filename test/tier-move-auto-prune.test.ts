@@ -37,7 +37,9 @@ for (const batch of [false, true]) test(`automatic lowering prunes text and copy
   const { f, identity, move } = await fixture();
   if (batch) expect(moveTieredItemsLowering([move])[0]).toHaveProperty('result');
   else await moveTieredItem(move);
-  expect(f.stores.secure_local!.copyContentState(identity)).toMatchObject({ chunks: 0, vectors: 0, versions: 0, names: false });
+  // Text, vectors and names are gone and the row is tombstoned: nothing serves it.
+  expect(f.stores.secure_local!.copyContentState(identity)).toBeUndefined();
+  expect(f.stores.secure_local!.exportItemCopy(identity)).toBeUndefined();
   const privateDb = new Database(f.paths.secure_local, { readonly: true });
   try {
     expect(privateDb.query('SELECT COUNT(*) AS n FROM connector_store_fts_rows WHERE chunk_pk IS NOT NULL').get()).toEqual({ n: 0 });
@@ -83,7 +85,7 @@ for (const recovery of ['maintenance', 'single', 'batch'] as const) for (const s
   } else if (recovery === 'batch') expect(moveTieredItemsLowering([move])[0]).toHaveProperty('result');
   else await moveTieredItem(move);
   expect(f.ledger.copies(identity).some(copy => copy.state === 'superseded')).toBe(false);
-  expect(f.stores.secure_local!.copyContentState(identity)?.chunks).toBe(0);
+  expect(f.stores.secure_local!.copyContentState(identity)).toBeUndefined();
   expect(f.ledger.readMeta(`tier-move-verified:${tierLedgerIdentityKey(identity)}`)).toBe('');
 });
 
@@ -96,7 +98,7 @@ test('a later decision cannot discard an automatic flip\'s pending prune receipt
   f.ledger.recordRoutedPlacement(identity, high, f.set.placementFor(high));
   expect(f.ledger.getCurrent(identity)).toMatchObject({ generation: flipped, state: 'moving' });
   expect(purgeLowerTierContent(f.set, { maintenance: true, embeddingLedger: move.embeddingLedger }).resumed).toBe(1);
-  expect(f.stores.secure_local!.copyContentState(identity)?.chunks).toBe(0);
+  expect(f.stores.secure_local!.copyContentState(identity)).toBeUndefined();
   expect(f.stores.internal!.copyContentState(identity)?.chunks).toBe(1);
   await moveTieredItem({ ...move, decision: high });
   expect(f.stores.secure_local!.localContent(localId('orchard'))?.chunks.join('')).toBe(body);

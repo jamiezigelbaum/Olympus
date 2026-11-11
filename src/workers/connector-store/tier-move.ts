@@ -133,8 +133,8 @@ export interface TierMoveOptions {
    * (the item's text changed meanwhile). Only the automatic moves set this,
    * and only while every embedding involved is the built-in local model, so
    * the older text's vectors it replaces cost nothing to make again. The
-   * replaced chunks are named in the move's embedding-ledger entry. These
-   * automatic moves also prune their superseded sources after the flip commits.
+   * replaced chunks are named in the move's embedding-ledger entry. Automatic
+   * lowerings also prune their superseded sources after the flip commits.
    * Without it such a destination refuses the move (an approved purge comes first).
    */
   replaceOwnSupersededCopy?: boolean;
@@ -535,7 +535,10 @@ function stageTieredMove(options: TierMoveOptions, repairSource?: TierCopy, lowe
         };
         const verified: VerifiedMove = {
           generation: record.generation, target, raise, sources, destinations,
-          ...(options.replaceOwnSupersededCopy ? { replaceOwnSupersededCopy: true } : {}),
+          // Only automatic LOWERINGS prune their superseded sources (#1174). A raise
+          // keeps its names-only superseded row: re-home and embedding hand-off
+          // find completed raises through it.
+          ...(options.replaceOwnSupersededCopy && !raise ? { pruneSuperseded: true } : {}),
           ...(options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {}),
           rehomeTagged, replacedSuperseded,
           placement: placement.copies, flipOptions,
@@ -579,7 +582,8 @@ interface VerifiedMove {
   embeddingLedger?: TierMoveOptions['embeddingLedger'];
   rehomeTagged?: boolean;
   replacedSuperseded?: Record<string, number>;
-  replaceOwnSupersededCopy?: boolean;
+  /** An automatic lowering: strip its superseded sources after the flip. */
+  pruneSuperseded?: boolean;
   /** Persisted in the same commit as an automatic move's flip. */
   result?: TierMoveResult;
 }
@@ -603,7 +607,7 @@ function queueMoveNote(options: VerifiedMoveOptions, receipt: VerifiedMove, resu
       + `to ${destinations.map(copy => `${copy.corpusId} (${copy.layers})`).join(', ')}: `
       + `${result.chunkCount} chunk(s) at the destination, ${destinations.reduce((sum, copy) => sum + copy.vectorsCopied, 0)} vector(s) copied with no provider call, `
       + `${destinations.reduce((sum, copy) => sum + copy.chunksToEmbed, 0)} chunk(s) left for the destination's own embedding model. `
-      + `Superseded copies are ${receipt.replaceOwnSupersededCopy ? 'pruned after the committed flip' : 'hidden'}; lower content on raises is purged: ${result.supersededCorpora.join(', ') || 'none'}.`
+      + `Superseded copies are ${receipt.pruneSuperseded ? 'pruned after the committed flip' : 'hidden'}; lower content on raises is purged: ${result.supersededCorpora.join(', ') || 'none'}.`
       + (Object.keys(replaced).length ? ` Replaced an older superseded copy of this item's own earlier move: ${Object.entries(replaced)
         .map(([corpus, count]) => `${corpus} (${count} chunk(s) of older text)`).join(', ')}.` : ''),
     scope: { corpora: [...new Set([...sources.map(copy => copy.corpusId), ...destinations.map(copy => copy.corpusId)])],
@@ -679,7 +683,7 @@ function readVerifiedMove(ledger: TierLedger, identity: TierLedgerIdentity): Ver
   if (!current) throw new TierLedgerGenerationConflictError();
   // Automatic lowerings commit the flip first, retaining this same receipt
   // until their superseded sources have been stripped. Never recopy on retry.
-  if (receipt.replaceOwnSupersededCopy && receipt.result
+  if (receipt.pruneSuperseded && receipt.result
     && current.generation >= receipt.result.generation) return receipt;
   if (receipt.generation < current.generation
     || (receipt.generation === current.generation && current.state !== 'moving')) {
@@ -716,9 +720,28 @@ function finishVerifiedMove(options: VerifiedMoveOptions, receipt: VerifiedMove)
   return result;
 }
 
+/**
+ * Remove a pruned superseded copy from its store: text, chunks, vectors and
+ * names go, then the row is tombstoned (as a withdrawal, with no version
+ * stamped), so no list, search or Secrets sweep finds a names-free stub of it.
+ * Safe to repeat. Returns the chunks removed.
+ */
+export function pruneSupersededStoreCopy(
+  store: NonNullable<ReturnType<TieredStoreSet['store']>>,
+  identity: TierLedgerIdentity,
+): number {
+  const chunks = store.stripCopyContent(identity, { keepMetadata: false });
+  const row = store.exportItemCopy(identity)?.identity;
+  if (row) {
+    const { sourceVersion: _kept, ...withdrawn } = row;
+    store.tombstoneCopy(withdrawn as SourceItemIdentity, { connectorId: TIER_MOVE_CONNECTOR_ID });
+  }
+  return chunks;
+}
+
 /** The flip is already durable. Keep the receipt until every store commits. */
 function pruneAutomaticMove(options: VerifiedMoveOptions, receipt: VerifiedMove): void {
-  if (!receipt.replaceOwnSupersededCopy) return;
+  if (!receipt.pruneSuperseded) return;
   const { set, identity } = options;
   const raw = set.ledger.readMeta(purgeReceiptKey(identity));
   if (!raw) return;
@@ -737,7 +760,7 @@ function pruneAutomaticMove(options: VerifiedMoveOptions, receipt: VerifiedMove)
       // A routed legacy source may predate the binding marker. Claim it just
       // as the copy phase claims destinations; a different binding refuses.
       store.bindTierSet(set.ledger);
-      timed(options.timings, 'purgeMs', () => store.stripCopyContent(identity, { keepMetadata: false }));
+      timed(options.timings, 'purgeMs', () => pruneSupersededStoreCopy(store, identity));
       set.ledger.removeSupersededCopy(identity, copy.corpusId);
     }
     options.afterPurge?.();
@@ -822,7 +845,7 @@ function flipVerifiedMove(options: VerifiedMoveOptions, receipt: VerifiedMove): 
         }
       }
       if (receipt.raise && content) ledger.writeMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`, String(flipped.generation));
-      if (!receipt.replaceOwnSupersededCopy) options.afterPurge?.();
+      if (!receipt.pruneSuperseded) options.afterPurge?.();
       const result: TierMoveResult = {
         outcome: 'moved', raise: receipt.raise, generation: flipped.generation,
         destinations: receipt.destinations,
@@ -830,7 +853,7 @@ function flipVerifiedMove(options: VerifiedMoveOptions, receipt: VerifiedMove): 
           && copy.supersededByGeneration === flipped.generation).map(copy => copy.corpusId),
         chunkCount: receipt.destinations.reduce((sum, copy) => sum + copy.chunksWritten + copy.chunksKept, 0),
       };
-      if (receipt.replaceOwnSupersededCopy) {
+      if (receipt.pruneSuperseded) {
         // Refuse rollback from the moment destruction is authorized, including
         // a death after the store commits but before the ledger cleanup does.
         if (result.supersededCorpora.length) ledger.writeMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`, String(flipped.generation));
