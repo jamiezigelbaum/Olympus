@@ -8,7 +8,7 @@
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import { createAnalyst, type AnalystModel } from '../src/core/analyst.ts';
-import type { AnalystResult } from '../src/core/contracts.ts';
+import type { AnalystResult, EvidencePack } from '../src/core/contracts.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { DROPBOX_TIER_CORPUS_IDS } from '../src/workers/dropbox-files/connector-store.ts';
 import type { AnalystReleaseOutcome } from '../src/workers/source-index/analyst-answer.ts';
@@ -21,6 +21,8 @@ import {
   evalRetrievalAudit,
   informationalEvalMaxResults,
   promptFittedEvalAnalyst,
+  expectedSeatOnlyAudit,
+  expectedSeatOnlyEvalAnalyst,
   repeatedEvalAnalyst,
   openEvalDropboxStores,
   prepareEvalEmbedding,
@@ -273,9 +275,83 @@ describe('the real eval report locates an expected item and value for a miss', (
       answerValueTokensUnmatchedShapes: ['9,999', '9999-99-99'],
     });
     expect(evalAnswerStageAudit(question, pack, inSeat, inSeat).answerValueTokensUnmatchedShapes).toEqual([]);
+    // A value the answer takes from the cited seat's citation line (its date,
+    // its file name inside a path) is in that seat, as the Analyst saw it.
+    const dated = {
+      ...pack,
+      candidates: [{
+        ...first,
+        provenance: {
+          ...first.provenance,
+          citation: { ...first.provenance.citation, authoredAt: '2026-03-01T09:30:00.000Z', uri: '/Boats/2026-03-01_kestrel-invoice.pdf' },
+        },
+      }, other],
+    } as typeof pack;
+    const fromCitation = {
+      answer: 'The 2026-03-01_kestrel-invoice.pdf of 2026-03-01 says 4182 dollars [1].',
+      citations: [{ provenance: dated.candidates[0]!.provenance, claim: 'total' }],
+      unanswered: [],
+    } as unknown as AnalystResult;
+    expect(evalAnswerStageAudit(question, dated, fromCitation, fromCitation)).toMatchObject({
+      answerValueTokens: 3, answerValueTokensInCitedSeats: 3, answerValueTokensUnmatchedShapes: [],
+    });
+    // Only the cited seat's citation counts: the same answer citing seat 2 is unmatched.
+    const otherSeat = { ...fromCitation, citations: [{ provenance: dated.candidates[1]!.provenance, claim: 'total' }] } as unknown as AnalystResult;
+    expect(evalAnswerStageAudit(question, dated, otherSeat, otherSeat).answerValueTokensInCitedSeats).toBe(0);
     // A citation naming nothing in the pack is counted, not seated.
     const stray = { ...citing(), citations: [{ provenance: { sourceItem: { localItemId: 'elsewhere' } }, claim: 'x' }] } as unknown as AnalystResult;
     expect(evalAnswerStageAudit(question, pack, stray, stray)).toMatchObject({ answerCitedSeats: [], answerCitationsOutsidePack: 1 });
+  });
+});
+
+describe('the Analyst on the expected seat alone', () => {
+  const candidate = (id: string) => ({
+    provenance: { sourceItem: { localItemId: `personal:${id}`, providerItemId: id } },
+    chunks: [`text ${id}`],
+  });
+  const pack = {
+    question: 'q',
+    candidates: [candidate('a'), candidate('b'), candidate('c')],
+    coverage: { searchedCorpora: [], skippedCorpora: [], extractionGaps: [] },
+    builtAt: 't',
+  } as never as EvidencePack;
+
+  test('after the graded answer, the Analyst answers a pack holding only the expected seats', async () => {
+    const seen: EvidencePack[] = [];
+    let call = 0;
+    const inner = { analyze: async (sent: EvidencePack) => { seen.push(sent); call += 1; return { answer: `answer ${call}`, citations: [], unanswered: [] } as unknown as AnalystResult; } };
+    const results: Array<[EvidencePack, AnalystResult | undefined]> = [];
+    const graded = await expectedSeatOnlyEvalAnalyst(inner, () => [2], (_pack, alone, result) => results.push([alone, result])).analyze(pack, {} as never);
+    expect(graded.answer).toBe('answer 1');
+    expect(seen[0]).toBe(pack);
+    expect(seen[1]!.candidates).toEqual([pack.candidates[1]!]);
+    expect(seen[1]!.question).toBe('q');
+    expect(results.map(([alone, result]) => [alone.candidates.length, result?.answer])).toEqual([[1, 'answer 2']]);
+  });
+
+  test('the report says which seats ran alone and how that answer came out, shape and flags only', () => {
+    const alone = { ...pack, candidates: [pack.candidates[1]!] } as EvidencePack;
+    const right = { answer: 'The total is 4182 dollars.', citations: [{ provenance: alone.candidates[0]!.provenance, claim: 'total' }], unanswered: [] } as unknown as AnalystResult;
+    const audit = expectedSeatOnlyAudit({ expectedAnswerContains: ['4182'] }, { seats: [2], alone, result: right });
+    expect(audit).toMatchObject({ seats: [2], answerShape: 'contains_all', answerCitedSeats: [1], valuesInAnswer: [true] });
+    expect(JSON.stringify(audit)).not.toContain('4182');
+    expect(expectedSeatOnlyAudit({ expectedAnswerContains: ['4182'] }, { seats: [2], alone, result: undefined })).toEqual({ seats: [2], failed: true });
+  });
+
+  test('no expected seat in the pack means no second call; a failed call is reported, never the grade', async () => {
+    let calls = 0;
+    const inner = { analyze: async () => { calls += 1; if (calls === 3) throw new Error('provider down'); return { answer: `answer ${calls}`, citations: [], unanswered: [] } as unknown as AnalystResult; } };
+    const none: unknown[] = [];
+    await expectedSeatOnlyEvalAnalyst(inner, () => [], () => none.push(1)).analyze(pack, {} as never);
+    expect(calls).toBe(1);
+    expect(none).toEqual([]);
+    const failed: Array<AnalystResult | undefined> = [];
+    const graded = await expectedSeatOnlyEvalAnalyst(inner, () => [1, 3], (_pack, alone, result) => {
+      expect(alone.candidates).toEqual([pack.candidates[0]!, pack.candidates[2]!]);
+      failed.push(result);
+    }).analyze(pack, {} as never);
+    expect(graded.answer).toBe('answer 2');
+    expect(failed).toEqual([undefined]);
   });
 });
 
