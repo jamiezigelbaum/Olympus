@@ -11,7 +11,7 @@ import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { FIXTURE_PLACEMENT, fixtureConnector, identityOf, openTierFixture, tempDir, type TierFixture } from './helpers/tier-fixtures.ts';
 
 // HIDDEN_CHILD_PARENT_SLICE in local-index.ts.
-const PARENTS_PER_STEP = 2_000;
+const PARENTS_PER_STEP = 500;
 
 let fixture: TierFixture | undefined;
 let cleanup: (() => void) | undefined;

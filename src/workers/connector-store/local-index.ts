@@ -1047,8 +1047,13 @@ export const EXTRACTION_CANDIDATE_MAX_EXAMINED = 2_000;
 /** Ledger lookups per step when the settled-unreadable list is built in turns. */
 const SETTLED_UNREADABLE_ITEMS_SLICE = 500;
 
-/** Parents judged per step when the hidden-children set is built in turns. */
-const HIDDEN_CHILD_PARENT_SLICE = 2_000;
+/**
+ * Parents judged per step when the hidden-children set is built in turns.
+ * Each parent is looked up in every store of its set and in the ledger, so a
+ * step of 2,000 held the request thread about 1 s during an Ask on a large
+ * install's copy (#1305); 500 keeps a step near a quarter of that.
+ */
+const HIDDEN_CHILD_PARENT_SLICE = 500;
 
 // The same steps with a turn before each one, so requests answer in between.
 async function runStepsInTurns<T>(steps: Generator<void, T>): Promise<T> {
