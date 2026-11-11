@@ -72,7 +72,16 @@ export function rtfToText(source: string, maxChars: number): RtfText {
   let pendingSkip = 0;
   // Set by `{\*` or a skipped destination word at the start of a group.
   let groupStart = false;
+  // Bytes above 0x7f wait for the end of their run, so a character written
+  // as two bytes is decoded whole. A run can be as long as the file, so it is
+  // decoded early once it holds more than the room left could take (no code
+  // page needs more than four bytes a character): what follows is past the
+  // bound either way.
   const hexBytes: number[] = [];
+  const pushByte = (byte: number): void => {
+    hexBytes.push(byte);
+    if (hexBytes.length >= (maxChars - length) * 4 + 4) flushHex();
+  };
   const flushHex = (): void => {
     if (hexBytes.length === 0) return;
     if (!state.skip) emit(decodeCodePage(Uint8Array.from(hexBytes), codePage));
@@ -110,7 +119,7 @@ export function rtfToText(source: string, maxChars: number): RtfText {
           continue;
         }
         const value = Number.parseInt(hex, 16);
-        if (Number.isFinite(value)) hexBytes.push(value);
+        if (Number.isFinite(value)) pushByte(value);
         groupStart = false;
         continue;
       }
@@ -188,7 +197,7 @@ export function rtfToText(source: string, maxChars: number): RtfText {
     // A byte above 0x7f written as itself is in the document's code page,
     // the same as one written as \'hh.
     if (char.charCodeAt(0) > 0x7f) {
-      hexBytes.push(char.charCodeAt(0));
+      pushByte(char.charCodeAt(0));
       continue;
     }
     flushHex();
@@ -229,5 +238,7 @@ function decodeCodePage(bytes: Uint8Array, codePage: number): string {
   }
   // A code page this reader cannot decode: plain ASCII stays, every other
   // byte becomes the replacement character, so no wrong letter is indexed.
-  return String.fromCharCode(...Array.from(bytes, (byte) => (byte < 0x80 ? byte : 0xfffd)));
+  let text = '';
+  for (const byte of bytes) text += byte < 0x80 ? String.fromCharCode(byte) : '\ufffd';
+  return text;
 }

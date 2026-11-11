@@ -640,6 +640,18 @@ Agenda:\tab budget \{draft\}\line next steps \u8212? done\par
     expect(result.status === 'indexed' ? result.text : '').toBe('\u3042 \u3042');
   });
 
+  test('a long run of raw bytes is read whole, and stops at the bound', async () => {
+    const pairs = Array.from({ length: 2048 }, () => [0x82, 0xa0]).flat();
+    const split = new Uint8Array([...textBytes(String.raw`{\rtf1\ansicpg932 `), 0xb1, ...pairs, ...textBytes('}')]);
+    const result = await createTextExtractor().extract(extractorInput({ bytes: split, mimeType: 'application/rtf' }));
+    expect(result.status === 'indexed' ? result.text : '').toBe(`\uff71${'\u3042'.repeat(2048)}`);
+
+    const long = new Uint8Array([...textBytes(String.raw`{\rtf1\ansicpg437 `), ...new Uint8Array(200_000).fill(0xe0), ...textBytes('}')]);
+    const bounded = await createTextExtractor({ maxBoundedTextChars: 100 }).extract(extractorInput({ bytes: long, mimeType: 'application/rtf' }));
+    expect(bounded.status === 'indexed' ? bounded.text : '').toBe('\ufffd'.repeat(100));
+    expect(bounded.status === 'indexed' ? bounded.warnings : []).toEqual(['bounded_text_truncated']);
+  });
+
   test('text cut at the bound says so, even when the bound falls on a line break', async () => {
     const result = await createTextExtractor({ maxBoundedTextChars: 5 }).extract(extractorInput({
       bytes: textBytes(String.raw`{\rtf1 abcde\par Important text}`),

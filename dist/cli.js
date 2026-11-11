@@ -93550,6 +93550,11 @@ function rtfToText(source, maxChars) {
   let pendingSkip = 0;
   let groupStart = false;
   const hexBytes = [];
+  const pushByte = (byte) => {
+    hexBytes.push(byte);
+    if (hexBytes.length >= (maxChars - length) * 4 + 4)
+      flushHex();
+  };
   const flushHex = () => {
     if (hexBytes.length === 0)
       return;
@@ -93590,7 +93595,7 @@ function rtfToText(source, maxChars) {
         }
         const value2 = Number.parseInt(hex, 16);
         if (Number.isFinite(value2))
-          hexBytes.push(value2);
+          pushByte(value2);
         groupStart = false;
         continue;
       }
@@ -93671,7 +93676,7 @@ function rtfToText(source, maxChars) {
       continue;
     }
     if (char.charCodeAt(0) > 127) {
-      hexBytes.push(char.charCodeAt(0));
+      pushByte(char.charCodeAt(0));
       continue;
     }
     flushHex();
@@ -93696,7 +93701,10 @@ function decodeCodePage(bytes, codePage) {
       return new TextDecoder(label).decode(bytes);
     } catch {}
   }
-  return String.fromCharCode(...Array.from(bytes, (byte) => byte < 128 ? byte : 65533));
+  let text3 = "";
+  for (const byte of bytes)
+    text3 += byte < 128 ? String.fromCharCode(byte) : "�";
+  return text3;
 }
 var RTF_MIME_TYPES, SKIPPED_DESTINATIONS, BREAKS, CODE_PAGE_LABELS;
 var init_rtf = __esm(() => {
