@@ -182,6 +182,11 @@ local Dropbox index and a reachable Argus lane:
    wrong in the full pack means the other seats distract it; wrong alone means
    it misreads that document as extracted. It follows
    `OLYMPUS_EVAL_ANALYST_REPEAT_QUESTIONS` when set.
+   Where a prompt fit clipped a seat holding an expected value, its
+   `packSeats` entry carries `clip`: the character offsets where each passage
+   starts, where each of the clip's anchor term groups occurs, and the windows
+   of it the first Analyst call was sent. Offsets only, never text, so a run
+   shows whether the value, the question's terms and the kept window line up.
    The value-token flag counts an answer token as held by a cited seat when
    it is in that seat's text, facts, tables or citation fields, including the
    date of a citation timestamp, each segment of its locator path and a file

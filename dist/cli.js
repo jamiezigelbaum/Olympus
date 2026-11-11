@@ -33462,7 +33462,7 @@ function sourceIndexChunkTermScore(text2, termGroups) {
   const normalized = text2.toLowerCase();
   return termGroups.reduce((score, group) => score + Math.max(0, ...group.map((term) => termOccurrences(normalized, term.toLowerCase()).length)), 0);
 }
-function boundedSourceIndexChunks(texts, maxChars, termGroups) {
+function boundedSourceIndexChunks(texts, maxChars, termGroups, options = {}) {
   const distinctTexts = [...new Set(texts.map((text2) => text2.trim()).filter(Boolean))];
   const chunks = [];
   let remaining = maxChars !== undefined && maxChars > 0 ? maxChars : Number.POSITIVE_INFINITY;
@@ -33472,7 +33472,7 @@ function boundedSourceIndexChunks(texts, maxChars, termGroups) {
       return { chunks, truncated: true };
     const text2 = distinctTexts[index];
     const fairShare = Number.isFinite(remaining) ? Math.max(1, Math.floor(remaining / (distinctTexts.length - index))) : undefined;
-    const snippet = sourceIndexChunkSnippet(text2, termGroups, fairShare);
+    const snippet = sourceIndexChunkSnippet(text2, termGroups, fairShare, options);
     if (!snippet)
       continue;
     const included = snippet.length > remaining ? snippet.slice(0, remaining) : snippet;
@@ -33483,14 +33483,27 @@ function boundedSourceIndexChunks(texts, maxChars, termGroups) {
   }
   return { chunks, truncated };
 }
-function sourceIndexChunkSnippet(text2, termGroups, maxChars) {
+function withoutNameTerms(termGroups, title) {
+  if (!title)
+    return termGroups;
+  const nameTokens = new Set(title.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? []);
+  if (nameTokens.size === 0)
+    return termGroups;
+  return termGroups.filter((group) => !group.some((term) => nameTokens.has(term.toLowerCase())));
+}
+function sourceIndexChunkSnippet(text2, termGroups, maxChars, options = {}) {
   if (maxChars === undefined || maxChars <= 0 || text2.length <= maxChars)
     return text2;
   const lower = text2.toLowerCase();
   const normalizedGroups = termGroups.map((group) => [...new Set(group.map((term) => term.toLowerCase()).filter(Boolean))]).filter((group) => group.length > 0);
-  const occurrences = normalizedGroups.flatMap((group) => group.flatMap((term) => termOccurrences(lower, term)));
+  const occurrencesByGroup = normalizedGroups.map((group) => group.flatMap((term) => termOccurrences(lower, term)));
+  const occurrences = occurrencesByGroup.flat();
   if (occurrences.length === 0)
     return text2.slice(0, maxChars);
+  if (options.followCluster) {
+    const start = clusterWindowStart(text2.length, occurrencesByGroup, maxChars);
+    return text2.slice(start, start + maxChars);
+  }
   const starts = [...new Set(occurrences.map((matchIndex) => {
     const lead = Math.min(Math.floor(maxChars / 4), matchIndex);
     return Math.min(Math.max(0, matchIndex - lead), Math.max(0, text2.length - maxChars));
@@ -33509,6 +33522,26 @@ function termOccurrences(text2, term) {
     start = index + term.length;
   }
   return indexes;
+}
+function clusterWindowStart(textLength, occurrencesByGroup, maxChars) {
+  const matches = occurrencesByGroup.flatMap((indexes, group) => indexes.map((index) => ({ index, group }))).sort((left, right) => left.index - right.index || left.group - right.group);
+  const reach = Math.floor(maxChars / 2);
+  let best = { index: matches[0].index, groups: 0, span: Number.POSITIVE_INFINITY };
+  for (let first = 0;first < matches.length; first += 1) {
+    const seen = new Set;
+    let span = 0;
+    for (let next = first;next < matches.length && matches[next].index - matches[first].index <= reach; next += 1) {
+      if (seen.has(matches[next].group))
+        continue;
+      seen.add(matches[next].group);
+      span = matches[next].index - matches[first].index;
+    }
+    if (seen.size > best.groups || seen.size === best.groups && span < best.span) {
+      best = { index: matches[first].index, groups: seen.size, span };
+    }
+  }
+  const lead = Math.min(Math.floor(maxChars / 8), best.index);
+  return Math.min(best.index - lead, Math.max(0, textLength - maxChars));
 }
 function chunkWindowScore(text2, termGroups) {
   let distinctGroups = 0;
@@ -37083,14 +37116,6 @@ function selectEvidencePassages(chunks, maxChars, focus, context2 = {}) {
     chunks: ordered.map(([, text2]) => text2),
     truncated: ordered.length < chunks.length || ordered.some(([index, text2]) => text2.length < chunks[index].length)
   };
-}
-function withoutNameTerms(termGroups, title) {
-  if (!title)
-    return termGroups;
-  const nameTokens = new Set(title.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? []);
-  if (nameTokens.size === 0)
-    return termGroups;
-  return termGroups.filter((group) => !group.some((term) => nameTokens.has(term.toLowerCase())));
 }
 function budgetChunks(chunks, maxChars) {
   if (maxChars === undefined || maxChars <= 0)
@@ -76436,6 +76461,8 @@ function promptBudgetedAnalyst(analyst, promptBytes, candidateCorpus, recencySea
 function fitPackToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats = 0) {
   if (analystPromptBytes(pack, analyzeOptions) <= maxPromptBytes)
     return pack;
+  const questionTerms = sourceIndexChunkQueryTerms(pack.question);
+  const anchorTerms = (candidate) => promptFitAnchorTerms(questionTerms, candidate.provenance.citation?.title);
   const headSeats = RESERVED_HEAD_SEATS + recencySeats;
   const order = [
     ...pack.candidates.slice(0, headSeats),
@@ -76452,7 +76479,7 @@ function fitPackToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOpti
     for (let attempt = 0;attempt < 6; attempt += 1) {
       if (share < MIN_FITTED_BYTES_PER_CANDIDATE && keep > 1)
         break;
-      const fitted = restatePack(pack, base.map((candidate) => ({ ...candidate, chunks: clipChunksToUtf8Bytes(candidate.chunks, Math.max(0, share)) })), candidateCorpus);
+      const fitted = restatePack(pack, base.map((candidate) => ({ ...candidate, chunks: clipQuestionChunksToUtf8Bytes(candidate.chunks, Math.max(0, share), anchorTerms(candidate)) })), candidateCorpus);
       const bytes = analystPromptBytes(fitted, analyzeOptions);
       if (bytes <= maxPromptBytes)
         return fitted;
@@ -76461,6 +76488,34 @@ function fitPackToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOpti
     }
   }
   return fallback ?? restatePack(pack, order.slice(0, 1).map((candidate) => ({ ...candidate, chunks: [] })), candidateCorpus);
+}
+function promptFitAnchorTerms(questionTerms, title) {
+  const unnamed = withoutNameTerms(questionTerms, title);
+  return unnamed.length > 0 ? unnamed : questionTerms;
+}
+function clipQuestionChunksToUtf8Bytes(chunks, maxBytes, termGroups) {
+  if (maxBytes <= 0 || !chunks.some((chunk) => sourceIndexChunkTermScore(chunk, termGroups) > 0)) {
+    return clipChunksToUtf8Bytes(chunks, maxBytes);
+  }
+  if (chunks.reduce((sum, chunk) => sum + utf8ByteLength(chunk), 0) <= maxBytes)
+    return [...chunks];
+  let windows = [];
+  let chars = maxBytes;
+  for (let attempt = 0;attempt < 6 && chars > 0; attempt += 1) {
+    windows = boundedSourceIndexChunks(chunks, chars, termGroups, { followCluster: true }).chunks.map(wholeCodePoints);
+    const bytes = windows.reduce((sum, window2) => sum + utf8ByteLength(window2), 0);
+    if (bytes <= maxBytes)
+      return windows;
+    chars = Math.floor(chars * maxBytes / bytes) - 1;
+  }
+  return clipChunksToUtf8Bytes(windows, maxBytes);
+}
+function wholeCodePoints(window2) {
+  const first = window2.charCodeAt(0);
+  const last = window2.charCodeAt(window2.length - 1);
+  const start = first >= 56320 && first <= 57343 ? 1 : 0;
+  const end = last >= 55296 && last <= 56319 ? window2.length - 1 : window2.length;
+  return window2.slice(start, end);
 }
 function roundRobinCandidates(candidates, candidateCorpus) {
   const byCorpus = new Map;
@@ -77900,6 +77955,7 @@ async function readPrivateEvidenceItem(input) {
 var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES = 13500, CLOUD_ANALYST_PROMPT_BYTES, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 20000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 600000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 120000, DEFAULT_SELF_HEAL_MAX_MS = 20000, MIN_FITTED_BYTES_PER_CANDIDATE = 600, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS, RELEASED_EXCERPT_MAX_CHARS = 1500, PRIVATE_EVIDENCE_MAX_RESULTS = 12, PRIVATE_DEPTH_MAX_PASSAGES = 24, PRIVATE_EVIDENCE_BYTE_BUDGET = 20000, PRIVATE_NEIGHBOURS_MAX = 4;
 var init_analyst_answer = __esm(() => {
   init_embeddings();
+  init_chunk_selection();
   init_answer_activity();
   init_analyst();
   init_analyst_openclaw_infer();

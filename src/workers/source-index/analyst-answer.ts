@@ -29,6 +29,7 @@ import { withPriorityQueryEmbedding } from './embeddings.ts';
 //   audits — never raw chunks, packets, or pack internals.
 
 import type { EvidenceReranker } from '../../core/evidence-reranker.ts';
+import { boundedSourceIndexChunks, sourceIndexChunkQueryTerms, sourceIndexChunkTermScore, withoutNameTerms } from '../../core/source-index/chunk-selection.ts';
 import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
 import { runWithLocalInferenceGuard } from '../answer-activity.ts';
 import type { Analyst, AnalystCitation, AnalystOptions, AnalystResult, EvidenceCandidate, EvidencePack } from '../../core/contracts.ts';
@@ -1043,6 +1044,8 @@ export function fitPackToPromptBytes(
   recencySeats = 0,
 ): EvidencePack {
   if (analystPromptBytes(pack, analyzeOptions) <= maxPromptBytes) return pack;
+  const questionTerms = sourceIndexChunkQueryTerms(pack.question);
+  const anchorTerms = (candidate: EvidenceCandidate) => promptFitAnchorTerms(questionTerms, candidate.provenance.citation?.title);
   // The first three seats go first: the router reserves seats 2 and 3 for
   // the strongest keyword and names-only leaders across stores (#1350), and
   // store turn alone would trim them whenever they share seat 1's store.
@@ -1068,7 +1071,7 @@ export function fitPackToPromptBytes(
       if (share < MIN_FITTED_BYTES_PER_CANDIDATE && keep > 1) break;
       const fitted = restatePack(
         pack,
-        base.map((candidate) => ({ ...candidate, chunks: clipChunksToUtf8Bytes(candidate.chunks, Math.max(0, share)) })),
+        base.map((candidate) => ({ ...candidate, chunks: clipQuestionChunksToUtf8Bytes(candidate.chunks, Math.max(0, share), anchorTerms(candidate)) })),
         candidateCorpus,
       );
       const bytes = analystPromptBytes(fitted, analyzeOptions);
@@ -1082,6 +1085,57 @@ export function fitPackToPromptBytes(
   // Nothing fits even one candidate's labels: send the smallest pack rather
   // than none, and let the transport's own ceiling report it.
   return fallback ?? restatePack(pack, order.slice(0, 1).map((candidate) => ({ ...candidate, chunks: [] })), candidateCorpus);
+}
+
+/**
+ * The terms a seat's clip anchors on: the pack excerpt's term set (the
+ * question's terms minus the seat's name terms), or every question term when
+ * the name carries them all. Exported for the eval's clip report.
+ */
+export function promptFitAnchorTerms(
+  questionTerms: ReadonlyArray<readonly string[]>,
+  title: string | null | undefined,
+): ReadonlyArray<readonly string[]> {
+  const unnamed = withoutNameTerms(questionTerms, title);
+  return unnamed.length > 0 ? unnamed : questionTerms;
+}
+
+function clipQuestionChunksToUtf8Bytes(
+  chunks: readonly string[],
+  maxBytes: number,
+  termGroups: ReadonlyArray<readonly string[]>,
+): string[] {
+  // Without a match, preserve the original head clip (including chunk order,
+  // duplicates and whitespace) rather than the selector's distinct snippets.
+  if (maxBytes <= 0 || !chunks.some((chunk) => sourceIndexChunkTermScore(chunk, termGroups) > 0)) {
+    return clipChunksToUtf8Bytes(chunks, maxBytes);
+  }
+  // Passages that already fit are kept as they are; only a seat that must be
+  // clipped has its windows chosen.
+  if (chunks.reduce((sum, chunk) => sum + utf8ByteLength(chunk), 0) <= maxBytes) return [...chunks];
+  // The selector budgets characters and shares them across passages. Start
+  // at the byte share and shrink by the observed bytes-per-character until
+  // every window fits, so multibyte text never lets an early window take a
+  // later one's room; the final cut only guards the last attempt.
+  let windows: string[] = [];
+  let chars = maxBytes;
+  for (let attempt = 0; attempt < 6 && chars > 0; attempt += 1) {
+    windows = boundedSourceIndexChunks(chunks, chars, termGroups, { followCluster: true }).chunks.map(wholeCodePoints);
+    const bytes = windows.reduce((sum, window) => sum + utf8ByteLength(window), 0);
+    if (bytes <= maxBytes) return windows;
+    chars = Math.floor(chars * maxBytes / bytes) - 1;
+  }
+  return clipChunksToUtf8Bytes(windows, maxBytes);
+}
+
+// The selector slices UTF-16 characters; drop a half surrogate pair at
+// either edge of a window.
+function wholeCodePoints(window: string): string {
+  const first = window.charCodeAt(0);
+  const last = window.charCodeAt(window.length - 1);
+  const start = first >= 0xDC00 && first <= 0xDFFF ? 1 : 0;
+  const end = last >= 0xD800 && last <= 0xDBFF ? window.length - 1 : window.length;
+  return window.slice(start, end);
 }
 
 function roundRobinCandidates(
