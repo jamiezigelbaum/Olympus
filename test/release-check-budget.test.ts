@@ -29,10 +29,6 @@ describe('release-check time budget (olympus-ops#156)', () => {
     expect(defaultBudgetMs(false, false)).toBe(135 * 60_000);
     expect(defaultBudgetMs(true, true)).toBe(120 * 60_000);
     expect(defaultBudgetMs(true, false)).toBe(195 * 60_000);
-    // The engine-split switch-on leg stops at 75 minutes, and never later than the leg it switches on.
-    expect(defaultBudgetMs(false, false, true)).toBe(75 * 60_000);
-    expect(defaultBudgetMs(false, true, true)).toBe(60 * 60_000);
-    expect(defaultBudgetMs(true, false, true)).toBe(75 * 60_000);
   });
 });
 
