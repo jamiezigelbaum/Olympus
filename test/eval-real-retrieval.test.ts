@@ -249,6 +249,9 @@ describe('the real eval report locates an expected item and value for a miss', (
     const inSeat = { ...citing(1), answer: 'The total is 4182 dollars, due in March.' } as unknown as AnalystResult;
     expect(evalAnswerStageAudit(question, pack, inSeat, inSeat)).toMatchObject({ answerValueTokens: 1, answerValueTokensInCitedSeats: 1 });
     expect(evalAnswerStageAudit(question, pack, citing(1), citing(1))).toMatchObject({ answerValueTokens: 1, answerValueTokensInCitedSeats: 0 });
+    // Whole tokens only: '41' is not supported by a seat that says '4182'.
+    const part = { ...citing(1), answer: 'The total is 41 dollars.' } as unknown as AnalystResult;
+    expect(evalAnswerStageAudit(question, pack, part, part)).toMatchObject({ answerValueTokens: 1, answerValueTokensInCitedSeats: 0 });
     // A citation naming nothing in the pack is counted, not seated.
     const stray = { ...citing(), citations: [{ provenance: { sourceItem: { localItemId: 'elsewhere' } }, claim: 'x' }] } as unknown as AnalystResult;
     expect(evalAnswerStageAudit(question, pack, stray, stray)).toMatchObject({ answerCitedSeats: [], answerCitationsOutsidePack: 1 });
