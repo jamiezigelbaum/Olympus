@@ -209,6 +209,16 @@ function packagePath(base: string, href: string): string {
   return path;
 }
 
+// A manifest may list remote assets that are never read; only a spine item must be inside the package.
+function manifestPath(base: string, href: string): string | undefined {
+  try {
+    return packagePath(base, href);
+  } catch (error) {
+    if (error instanceof OfficeDocumentUnreadableError && error.reason === 'unsupported') return undefined;
+    throw error;
+  }
+}
+
 export function readEpub(bytes: Uint8Array): PackageDocument {
   const read = packageReader(bytes);
   const container = parseMarkup(read('META-INF/container.xml', true)!);
@@ -216,13 +226,13 @@ export function readEpub(bytes: Uint8Array): PackageDocument {
   if (!rootfile) unreadable('damaged', 'EPUB package path is missing.');
   const opfPath = packagePath('', rootfile);
   const opf = parseMarkup(read(opfPath, true)!);
-  const items = new Map<string, { path: string; mime: string }>();
+  const items = new Map<string, { href: string; path?: string; mime: string }>();
   for (const item of nodes(opf, 'item')) {
     const { id, href } = item.attributes;
     if (!id || !href || items.has(id)) unreadable('damaged', 'EPUB manifest item is malformed.');
-    items.set(id, { path: packagePath(posix.dirname(opfPath), href), mime: item.attributes['media-type'] ?? '' });
+    items.set(id, { href, path: manifestPath(posix.dirname(opfPath), href), mime: item.attributes['media-type'] ?? '' });
   }
-  const itemsByPath = new Map([...items.values()].map((item) => [item.path, item]));
+  const itemsByPath = new Map([...items.values()].flatMap((item) => (item.path ? [[item.path, item] as const] : [])));
   const encryption = read('META-INF/encryption.xml');
   if (encryption) {
     for (const reference of nodes(parseMarkup(encryption), 'CipherReference')) {
@@ -241,7 +251,8 @@ export function readEpub(bytes: Uint8Array): PackageDocument {
     const item = items.get(reference.attributes.idref ?? '');
     if (!item) unreadable('damaged', 'EPUB spine item is missing.');
     if (!['application/xhtml+xml', 'text/html'].includes(item.mime)) unreadable('unsupported', 'EPUB spine item is not text.');
-    return { name: `Chapter ${index + 1}`, text: markupText(parseMarkup(read(item.path, true)!)) };
+    const path = item.path ?? packagePath(posix.dirname(opfPath), item.href);
+    return { name: `Chapter ${index + 1}`, text: markupText(parseMarkup(read(path, true)!)) };
   });
   return { sections };
 }

@@ -497,6 +497,14 @@ describe('OpenDocument and EPUB', () => {
     expect(output.text).toBe("First\nChapter two.\n\nè α 'text' é &constructor;");
   });
 
+  test('EPUB skips an unused remote manifest asset but not a remote chapter', async () => {
+    const parts = epubParts();
+    parts['OPS/book.opf'] = parts['OPS/book.opf']!.replace('</manifest>', '<item id="cover" href="https://example.com/cover.jpg" media-type="image/jpeg"/></manifest>');
+    expect((await extract(storedZipBytes(parts), EPUB_MIME_TYPE)).text).toBe('First\nChapter two.\n\nLast & 雪');
+    parts['OPS/book.opf'] = parts['OPS/book.opf']!.replace('chapters/a.xhtml', 'https://example.com/a.xhtml');
+    expect(await extract(storedZipBytes(parts), EPUB_MIME_TYPE)).toEqual({ status: 'failed_terminal', errorKind: 'office_document_unsupported' });
+  });
+
   test('EPUB bounds chapter text with a visible warning', async () => {
     const output = await extract(storedZipBytes(epubParts()), EPUB_MIME_TYPE, { maxBoundedTextChars: 5 });
     expect(output.text).toBe('First');

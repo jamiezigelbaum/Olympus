@@ -96637,6 +96637,15 @@ function packagePath(base, href) {
     unreadable("damaged", "Document part path leaves its package.");
   return path;
 }
+function manifestPath(base, href) {
+  try {
+    return packagePath(base, href);
+  } catch (error) {
+    if (error instanceof OfficeDocumentUnreadableError && error.reason === "unsupported")
+      return;
+    throw error;
+  }
+}
 function readEpub(bytes) {
   const read = packageReader(bytes);
   const container = parseMarkup(read("META-INF/container.xml", true));
@@ -96650,9 +96659,9 @@ function readEpub(bytes) {
     const { id, href } = item.attributes;
     if (!id || !href || items.has(id))
       unreadable("damaged", "EPUB manifest item is malformed.");
-    items.set(id, { path: packagePath(posix2.dirname(opfPath), href), mime: item.attributes["media-type"] ?? "" });
+    items.set(id, { href, path: manifestPath(posix2.dirname(opfPath), href), mime: item.attributes["media-type"] ?? "" });
   }
-  const itemsByPath = new Map([...items.values()].map((item) => [item.path, item]));
+  const itemsByPath = new Map([...items.values()].flatMap((item) => item.path ? [[item.path, item]] : []));
   const encryption = read("META-INF/encryption.xml");
   if (encryption) {
     for (const reference of nodes(parseMarkup(encryption), "CipherReference")) {
@@ -96677,7 +96686,8 @@ function readEpub(bytes) {
       unreadable("damaged", "EPUB spine item is missing.");
     if (!["application/xhtml+xml", "text/html"].includes(item.mime))
       unreadable("unsupported", "EPUB spine item is not text.");
-    return { name: `Chapter ${index + 1}`, text: markupText(parseMarkup(read(item.path, true))) };
+    const path = item.path ?? packagePath(posix2.dirname(opfPath), item.href);
+    return { name: `Chapter ${index + 1}`, text: markupText(parseMarkup(read(path, true))) };
   });
   return { sections };
 }
@@ -112552,8 +112562,8 @@ function exportReferencedMedia(refs, destination, durabilityBoundary, files, art
 }
 function verifyOlympusDataExport(options) {
   const destination = resolve21(requirePath(options.destination, "--input"));
-  const manifestPath = join101(destination, "manifest.json");
-  const parsed = JSON.parse(readFileSync56(manifestPath, "utf8"));
+  const manifestPath2 = join101(destination, "manifest.json");
+  const parsed = JSON.parse(readFileSync56(manifestPath2, "utf8"));
   if (parsed.kind !== "olympus_data_export" || parsed.version !== 2 && parsed.version !== 3 || !Array.isArray(parsed.artifacts)) {
     throw new OperationError("source_index_error", "Olympus data export manifest is unsupported or incomplete.");
   }
