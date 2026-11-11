@@ -30,6 +30,8 @@ export const SOURCE_RERANKER_MODEL_DIR_ENV = 'OLYMPUS_SOURCE_RERANKER_MODEL_DIR'
 export const SOURCE_RERANKER_POOL_ENV = 'OLYMPUS_SOURCE_RERANKER_POOL';
 export const SOURCE_RERANKER_THREADS_ENV = 'OLYMPUS_SOURCE_RERANKER_THREADS';
 export const SOURCE_RERANKER_RUNTIME_DIR_ENV = 'OLYMPUS_SOURCE_RERANKER_ONNX_RUNTIME_DIR';
+/** Tokens of each query and passage pair the model reads (default 512). A shorter window scores a bigger pool (#921). */
+export const SOURCE_RERANKER_MAX_TOKENS_ENV = 'OLYMPUS_SOURCE_RERANKER_MAX_TOKENS';
 
 /** Tokens per (query, passage) pair, including the model's special tokens. */
 const MAX_PAIR_TOKENS = 512;
@@ -138,6 +140,8 @@ export function builtInRerankerFromEnv(options: BuiltInRerankerFromEnvOptions = 
   const threads = positiveInteger(env[SOURCE_RERANKER_THREADS_ENV])
     ?? Math.max(1, Math.min(4, Math.floor(availableParallelism() / 2)));
   const poolSize = positiveInteger(env[SOURCE_RERANKER_POOL_ENV]);
+  const maxTokens = positiveInteger(env[SOURCE_RERANKER_MAX_TOKENS_ENV]);
+  const maxPairTokens = maxTokens === undefined ? undefined : Math.min(MAX_PAIR_TOKENS, Math.max(32, maxTokens));
   return createCrossEncoderReranker({
     id: `cross-encoder:${modelDir.split(/[\\/]/).filter(Boolean).pop() ?? 'model'}`,
     session: () => runtime.createSession(modelPath, { threads }),
@@ -145,6 +149,7 @@ export function builtInRerankerFromEnv(options: BuiltInRerankerFromEnvOptions = 
       ? new WordPieceTokenizer(readFileSync(vocabularyPath, 'utf8'))
       : new JsonPairTokenizer(readFileSync(tokenizerPath, 'utf8')),
     ...(poolSize !== undefined ? { poolSize } : {}),
+    ...(maxPairTokens !== undefined ? { maxPairTokens } : {}),
   });
 }
 

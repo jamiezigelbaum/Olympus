@@ -75010,7 +75010,7 @@ function rerankPoolSize(reranker, maxResults) {
   const pool = Number.isFinite(reranker.poolSize) ? Math.floor(reranker.poolSize) : DEFAULT_RERANK_POOL_SIZE;
   return Math.max(Math.floor(maxResults), Math.min(MAX_RERANK_POOL_SIZE, pool));
 }
-var RERANK_PASSAGE_CHARS = 2000, DEFAULT_RERANK_TIMEOUT_MS = 5000, DEFAULT_RERANK_POOL_SIZE = 30, MAX_RERANK_POOL_SIZE = 100, systemTimers;
+var RERANK_PASSAGE_CHARS = 2000, DEFAULT_RERANK_TIMEOUT_MS = 5000, DEFAULT_RERANK_POOL_SIZE = 30, MAX_RERANK_POOL_SIZE = 400, systemTimers;
 var init_evidence_reranker = __esm(() => {
   systemTimers = {
     now: () => Date.now(),
@@ -155148,18 +155148,21 @@ function builtInRerankerFromEnv(options = {}) {
   const runtime = options.runtime ?? onnxRuntimeFromDirectory(runtimeDir);
   const threads2 = positiveInteger7(env[SOURCE_RERANKER_THREADS_ENV]) ?? Math.max(1, Math.min(4, Math.floor(availableParallelism3() / 2)));
   const poolSize = positiveInteger7(env[SOURCE_RERANKER_POOL_ENV]);
+  const maxTokens = positiveInteger7(env[SOURCE_RERANKER_MAX_TOKENS_ENV]);
+  const maxPairTokens = maxTokens === undefined ? undefined : Math.min(MAX_PAIR_TOKENS, Math.max(32, maxTokens));
   return createCrossEncoderReranker({
     id: `cross-encoder:${modelDir.split(/[\\/]/).filter(Boolean).pop() ?? "model"}`,
     session: () => runtime.createSession(modelPath, { threads: threads2 }),
     tokenizer: existsSync97(vocabularyPath) ? new WordPieceTokenizer(readFileSync83(vocabularyPath, "utf8")) : new JsonPairTokenizer(readFileSync83(tokenizerPath, "utf8")),
-    ...poolSize !== undefined ? { poolSize } : {}
+    ...poolSize !== undefined ? { poolSize } : {},
+    ...maxPairTokens !== undefined ? { maxPairTokens } : {}
   });
 }
 function positiveInteger7(value2) {
   const parsed = Number(value2?.trim());
   return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
-var SOURCE_RERANKER_ENV = "OLYMPUS_SOURCE_RERANKER", SOURCE_RERANKER_MODEL_DIR_ENV = "OLYMPUS_SOURCE_RERANKER_MODEL_DIR", SOURCE_RERANKER_POOL_ENV = "OLYMPUS_SOURCE_RERANKER_POOL", SOURCE_RERANKER_THREADS_ENV = "OLYMPUS_SOURCE_RERANKER_THREADS", SOURCE_RERANKER_RUNTIME_DIR_ENV = "OLYMPUS_SOURCE_RERANKER_ONNX_RUNTIME_DIR", MAX_PAIR_TOKENS = 512, BATCH_SIZE = 8;
+var SOURCE_RERANKER_ENV = "OLYMPUS_SOURCE_RERANKER", SOURCE_RERANKER_MODEL_DIR_ENV = "OLYMPUS_SOURCE_RERANKER_MODEL_DIR", SOURCE_RERANKER_POOL_ENV = "OLYMPUS_SOURCE_RERANKER_POOL", SOURCE_RERANKER_THREADS_ENV = "OLYMPUS_SOURCE_RERANKER_THREADS", SOURCE_RERANKER_RUNTIME_DIR_ENV = "OLYMPUS_SOURCE_RERANKER_ONNX_RUNTIME_DIR", SOURCE_RERANKER_MAX_TOKENS_ENV = "OLYMPUS_SOURCE_RERANKER_MAX_TOKENS", MAX_PAIR_TOKENS = 512, BATCH_SIZE = 8;
 var init_built_in_reranker = __esm(() => {
   init_evidence_reranker();
   init_assets();
