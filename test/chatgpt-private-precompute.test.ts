@@ -394,7 +394,7 @@ describe('4. the panel reads a few relevant items', () => {
     const result = await panelModel.answerPrivately('April blood work?', hits, undefined, { evidence: (entry) => stats.push(entry) });
     expect(stats[0]!.used).toEqual([1]);
     expect(result.citations).toEqual([{ title: '2026-04-14 blood work.pdf', source: 'dropbox', date: '2026-04-23T18:00:00Z' }]);
-    expect(prompt!.prompt).toContain('[1] 2026-04-14 blood work.pdf\ndate: 2026-04-23 · source: dropbox · in: /Labs\nsource_data: ["ferritin 80"]');
+    expect(prompt!.prompt).toContain('[1] 2026-04-14 blood work.pdf\ndate: 2026-04-23T18:00:00Z · source: dropbox · in: /Labs\nsource_data: ["ferritin 80"]');
     expect(prompt!.prompt).not.toContain('other test');
     expect(prompt!.prompt).not.toContain('local_private_provenance');
     expect(prompt!.prompt).not.toContain('trust:');

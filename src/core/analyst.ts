@@ -538,8 +538,13 @@ function formatCompactCandidate(candidate: EvidenceCandidate, number: number, ve
     citation?.title?.trim() || citation?.sourceLabel?.trim() || `${item.provider}/${item.family}:${item.providerItemId}`,
   );
   const details: string[] = [];
-  const when = (citation?.authoredAt?.trim() || citation?.updatedAt?.trim())?.slice(0, 10);
+  // Whole timestamps, and the update time when it differs: "which is newest"
+  // and "when was it last changed" are answered from these.
+  const authored = citation?.authoredAt?.trim();
+  const updated = citation?.updatedAt?.trim();
+  const when = authored || updated;
   if (when) details.push(`date: ${when}`);
+  if (authored && updated && updated !== authored) details.push(`updated: ${updated}`);
   const source = citation?.sourceLabel?.trim();
   if (source && source !== title) details.push(`source: ${compactSourceText(source)}`);
   const place = compactLocator(citation?.uri?.trim(), title);

@@ -86,6 +86,17 @@ describe('Ask local compact evidence', () => {
     expect(bytes(`${main.system}\n\n${main.prompt}`)).toBeLessThanOrEqual(DEFAULT_LOCAL_ANALYST_PROMPT_BYTES);
   });
 
+  test('compact evidence keeps both citation timestamps whole, for metadata-only seats too', async () => {
+    const { pack } = analystPromptFixture();
+    pack.candidates = [{ ...pack.candidates[0]!, chunks: [] }];
+    const calls: AnalystModelRequest[] = [];
+    await createAnalyst({ complete: async (request) => { calls.push(request); return { text: completion, modelId: 'fixture' }; } },
+      { evidenceFormat: 'compact' }).analyze(pack, { localOnly: true });
+    const citation = pack.candidates[0]!.provenance.citation!;
+    expect(calls[0]!.prompt).toContain(citation.authoredAt!);
+    expect(calls[0]!.prompt).toContain(citation.updatedAt!);
+  });
+
   test('a fallback wrapper carries its analysts\' format only when they share it', () => {
     const model = { complete: async () => ({ text: completion, modelId: 'm' }) };
     const compact = createAnalyst(model, { evidenceFormat: 'compact' });

@@ -73471,9 +73471,13 @@ function formatCompactCandidate(candidate, number, versionNote) {
   const item = candidate.provenance.sourceItem;
   const title = compactSourceText(citation?.title?.trim() || citation?.sourceLabel?.trim() || `${item.provider}/${item.family}:${item.providerItemId}`);
   const details = [];
-  const when = (citation?.authoredAt?.trim() || citation?.updatedAt?.trim())?.slice(0, 10);
+  const authored = citation?.authoredAt?.trim();
+  const updated = citation?.updatedAt?.trim();
+  const when = authored || updated;
   if (when)
     details.push(`date: ${when}`);
+  if (authored && updated && updated !== authored)
+    details.push(`updated: ${updated}`);
   const source = citation?.sourceLabel?.trim();
   if (source && source !== title)
     details.push(`source: ${compactSourceText(source)}`);
