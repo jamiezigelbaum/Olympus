@@ -337,6 +337,10 @@ export interface RouteSourceIndexSearchOptions {
   // How long preparation may wait for a starting embedding model before the
   // lanes run (see DEFAULT_SEMANTIC_PREPARE_BUDGET_MS). Non-positive skips it.
   semanticPrepareBudgetMs?: number;
+  // When the whole search must end (epoch ms), preparation included: the lane
+  // timeout is cut to what is left once preparation is done, so a slow model
+  // wait cannot push a search past the Ask's budget.
+  searchDeadlineAtMs?: number;
   // The lane deadline's clock and timers. Tests pass a test clock; the default is the real one.
   laneClock?: LaneDeadlineClock;
 }
@@ -363,6 +367,13 @@ const REAL_LANE_CLOCK: LaneDeadlineClock = {
 // A model still not started by then leaves the semantic lane skipped, and the
 // EvidencePack's coverage says so.
 export const DEFAULT_SEMANTIC_PREPARE_BUDGET_MS = 15_000;
+
+// The lane timeout, cut to what is left before the search's own deadline (at least 1 ms).
+export function laneTimeoutWithinDeadline(laneTimeoutMs: number, deadlineAtMs: number | undefined, now = Date.now()): number {
+  if (deadlineAtMs === undefined || !Number.isFinite(deadlineAtMs)) return laneTimeoutMs;
+  const left = Math.max(1, deadlineAtMs - now);
+  return Number.isFinite(laneTimeoutMs) && laneTimeoutMs > 0 ? Math.min(laneTimeoutMs, left) : left;
+}
 
 // Default per-lane retrieval deadline (ms), and the whole-Ask search budget.
 //
@@ -516,7 +527,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
     prepareSemanticMaxMs = Math.max(prepareSemanticMaxMs, semanticMs);
   }));
   const lanesStartedAt = Date.now();
-  const laneTimeoutMs = resolveLaneTimeoutMs(options.laneTimeoutMs);
+  const laneTimeoutMs = laneTimeoutWithinDeadline(resolveLaneTimeoutMs(options.laneTimeoutMs), options.searchDeadlineAtMs);
   const laneOutcomes = await Promise.all(searchableCorpora.map(async (corpus) => {
     const adapter = options.adapters[corpus.corpusId]!;
     const cooperativeDeadlineAtMs = cooperativeLaneDeadlineAtMs(laneTimeoutMs);

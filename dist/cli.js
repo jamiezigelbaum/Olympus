@@ -76034,6 +76034,12 @@ var init_parent_label = __esm(() => {
 function applySourceIndexVisibilityGate(gate, hits) {
   return gate.offThread ? gate.offThread(hits) : Promise.resolve(gate(hits));
 }
+function laneTimeoutWithinDeadline(laneTimeoutMs, deadlineAtMs, now = Date.now()) {
+  if (deadlineAtMs === undefined || !Number.isFinite(deadlineAtMs))
+    return laneTimeoutMs;
+  const left = Math.max(1, deadlineAtMs - now);
+  return Number.isFinite(laneTimeoutMs) && laneTimeoutMs > 0 ? Math.min(laneTimeoutMs, left) : left;
+}
 async function routeSourceIndexSearch(options) {
   return withKeywordRequestScope(() => routePreparedSourceIndexSearch(options));
 }
@@ -76106,7 +76112,7 @@ async function routePreparedSourceIndexSearch(options) {
     prepareSemanticMaxMs = Math.max(prepareSemanticMaxMs, semanticMs);
   }));
   const lanesStartedAt = Date.now();
-  const laneTimeoutMs = resolveLaneTimeoutMs(options.laneTimeoutMs);
+  const laneTimeoutMs = laneTimeoutWithinDeadline(resolveLaneTimeoutMs(options.laneTimeoutMs), options.searchDeadlineAtMs);
   const laneOutcomes = await Promise.all(searchableCorpora.map(async (corpus) => {
     const adapter = options.adapters[corpus.corpusId];
     const cooperativeDeadlineAtMs = cooperativeLaneDeadlineAtMs(laneTimeoutMs);
@@ -76855,7 +76861,7 @@ async function runRoutedSearches(input, retrievalLimit = input.maxResults) {
   const literalQuery = literalSearchQuery(input);
   const pendingPlan = input.queryPlanner ? startQueryPlanner(input.queryPlanner, input.question) : undefined;
   const budget = searchBudget(input);
-  const literalRun = await runRoutedSearch(input, literalQuery, 1, retrievalLimit, budget.firstLaneTimeoutMs());
+  const literalRun = await runRoutedSearch(input, literalQuery, 1, retrievalLimit, budget.firstLaneTimeoutMs(), budget.deadlineAtMs);
   if (!pendingPlan)
     return literalRun;
   if (isStrongLiteralRun(literalRun, input.maxResults)) {
@@ -76876,7 +76882,7 @@ async function runRoutedSearches(input, retrievalLimit = input.maxResults) {
       recordSourceAnswerQueryPlannerDisposition("search_budget_spent");
       break;
     }
-    runs.push(await runRoutedSearch(input, query, runs.length + 1, retrievalLimit, laneTimeoutMs));
+    runs.push(await runRoutedSearch(input, query, runs.length + 1, retrievalLimit, laneTimeoutMs, budget.deadlineAtMs));
   }
   if (runs.length === 1)
     return literalRun;
@@ -76923,6 +76929,7 @@ function searchBudget(input) {
   const left = () => Math.max(1, total - (Date.now() - startedAt));
   const unbounded = !Number.isFinite(total) || total <= 0;
   return {
+    deadlineAtMs: unbounded ? undefined : startedAt + total,
     firstLaneTimeoutMs: () => unbounded ? lane : cut(left()),
     laneTimeoutMs() {
       if (unbounded)
@@ -76931,7 +76938,7 @@ function searchBudget(input) {
     }
   };
 }
-function runRoutedSearch(input, query, ordinal, maxResults, laneTimeoutMs) {
+function runRoutedSearch(input, query, ordinal, maxResults, laneTimeoutMs, searchDeadlineAtMs) {
   return observeSourceAnswerRoutedQuery(ordinal, () => routeSourceIndexSearch({
     registry: input.registry,
     adapters: input.adapters,
@@ -76943,6 +76950,7 @@ function runRoutedSearch(input, query, ordinal, maxResults, laneTimeoutMs) {
       ...questionHasTemporalIntent(input) ? { temporalIntent: true } : {}
     },
     laneTimeoutMs,
+    ...searchDeadlineAtMs !== undefined ? { searchDeadlineAtMs } : {},
     ...input.visibilityGate ? { visibilityGate: input.visibilityGate } : {}
   }));
 }
