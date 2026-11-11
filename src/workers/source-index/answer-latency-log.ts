@@ -272,6 +272,11 @@ export function buildSourceAnswerLatencyTraceRecord(input: {
             total_ms: nonNegativeMs(input.trace.mainThreadSql.total_ms),
             max_ms: nonNegativeMs(input.trace.mainThreadSql.max_ms),
             slow: input.trace.mainThreadSql.slow.map((entry) => ({ ms: nonNegativeMs(entry.ms), site: entry.site })),
+            by_site: (input.trace.mainThreadSql.by_site ?? []).map((entry) => ({
+              site: entry.site,
+              statements: Math.max(0, Math.floor(entry.statements)),
+              ms: nonNegativeMs(entry.ms),
+            })),
           },
         }
       : {}),
@@ -428,6 +433,8 @@ function copyPoolReads(pool: SourceAnswerTracePoolReads): SourceAnswerTracePoolR
     run_max_ms: nonNegativeMs(pool.run_max_ms),
     sql_ms: nonNegativeMs(pool.sql_ms ?? 0),
     sql_max_ms: nonNegativeMs(pool.sql_max_ms ?? 0),
+    snapshot_reads: count(pool.snapshot_reads ?? 0),
+    snapshot_sql_ms: nonNegativeMs(pool.snapshot_sql_ms ?? 0),
     refused: count(pool.refused),
     dropped_queued: count(pool.dropped_queued),
     past_deadline_running: count(pool.past_deadline_running),

@@ -262,6 +262,7 @@ if (command === 'seed') {
         total_ms: Math.round(traced.reduce((n, m) => n + m.total_ms, 0)),
         max_ms: Math.round(Math.max(0, ...traced.map(m => m.max_ms))),
         slow: traced.flatMap(m => m.slow).sort((a: any, b: any) => b.ms - a.ms).slice(0, 20),
+        by_site: traced.flatMap(m => m.by_site ?? []).sort((a: any, b: any) => b.ms - a.ms).slice(0, 10),
       };
       const bound = mainThreadSql === undefined ? undefined : {
         limit_ms: MAIN_THREAD_SQL_BOUND_MS, statement_limit_ms: MAIN_THREAD_SQL_STATEMENT_BOUND_MS,

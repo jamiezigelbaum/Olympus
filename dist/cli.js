@@ -25870,7 +25870,7 @@ function beginSourceAnswerPoolRead() {
   const corpusId = laneStorage.getStore();
   if (!query || corpusId === undefined)
     return;
-  return ({ queueWaitMs, runMs, sqlMs, outcome }) => {
+  return ({ queueWaitMs, runMs, sqlMs, outcome, snapshot }) => {
     let reads = query.poolByCorpus.get(corpusId);
     if (!reads) {
       reads = {
@@ -25881,6 +25881,8 @@ function beginSourceAnswerPoolRead() {
         run_max_ms: 0,
         sql_ms: 0,
         sql_max_ms: 0,
+        snapshot_reads: 0,
+        snapshot_sql_ms: 0,
         refused: 0,
         dropped_queued: 0,
         past_deadline_running: 0,
@@ -25898,6 +25900,10 @@ function beginSourceAnswerPoolRead() {
     const sql = unroundedMs(sqlMs);
     reads.sql_ms += sql;
     reads.sql_max_ms = Math.max(reads.sql_max_ms, sql);
+    if (snapshot) {
+      reads.snapshot_reads += 1;
+      reads.snapshot_sql_ms += sql;
+    }
     if (outcome === "refused")
       reads.refused += 1;
     else if (outcome === "dropped_queued")
@@ -25929,7 +25935,7 @@ function createSourceAnswerTrace(now = () => new Date) {
     selfHealRebuildMs: 0,
     recordBuildMs: 0,
     appendMs: 0,
-    mainThreadSql: { statements: 0, total_ms: 0, max_ms: 0, slow: [] }
+    mainThreadSql: { statements: 0, total_ms: 0, max_ms: 0, slow: [], by_site: [] }
   };
 }
 function runWithSourceAnswerTrace(trace, run) {
@@ -25950,9 +25956,19 @@ function recordSourceAnswerMainThreadSql(elapsedMs, site) {
   sql.statements += 1;
   sql.total_ms += ms;
   sql.max_ms = Math.max(sql.max_ms, ms);
+  if (ms < SITE_TALLY_MS)
+    return;
+  const where = site();
+  const tally = sql.by_site.find((entry) => entry.site === where);
+  if (tally) {
+    tally.statements += 1;
+    tally.ms += ms;
+  } else {
+    sql.by_site.push({ site: where, statements: 1, ms });
+  }
   if (ms < SLOW_MAIN_THREAD_SQL_MS)
     return;
-  sql.slow.push({ ms: nonNegativeMs(ms), site: site() });
+  sql.slow.push({ ms: nonNegativeMs(ms), site: where });
   if (sql.slow.length > SLOW_MAIN_THREAD_SQL_KEPT) {
     sql.slow.sort((left, right) => right.ms - left.ms);
     sql.slow.length = SLOW_MAIN_THREAD_SQL_KEPT;
@@ -26157,7 +26173,8 @@ function snapshotSourceAnswerTrace(trace) {
       statements: trace.mainThreadSql.statements,
       total_ms: nonNegativeMs(trace.mainThreadSql.total_ms),
       max_ms: nonNegativeMs(trace.mainThreadSql.max_ms),
-      slow: trace.mainThreadSql.slow.map((entry) => ({ ...entry }))
+      slow: trace.mainThreadSql.slow.map((entry) => ({ ...entry })),
+      by_site: [...trace.mainThreadSql.by_site].sort((left, right) => right.ms - left.ms).slice(0, SITE_TALLY_KEPT).map((entry) => ({ site: entry.site, statements: entry.statements, ms: nonNegativeMs(entry.ms) }))
     }
   };
 }
@@ -26197,7 +26214,7 @@ function unroundedMs(value) {
 function nonNegativeMs(value) {
   return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
 }
-var SLOW_MAIN_THREAD_SQL_MS = 250, SLOW_MAIN_THREAD_SQL_KEPT = 20, storage, laneStorage, CONTENT_FREE_ERROR_CLASSES;
+var SLOW_MAIN_THREAD_SQL_MS = 250, SLOW_MAIN_THREAD_SQL_KEPT = 20, SITE_TALLY_MS = 25, SITE_TALLY_KEPT = 10, storage, laneStorage, CONTENT_FREE_ERROR_CLASSES;
 var init_answer_latency_trace = __esm(() => {
   storage = new AsyncLocalStorage2;
   laneStorage = new AsyncLocalStorage2;
@@ -26583,6 +26600,8 @@ function storeKeywordLanguages(db) {
   if (cached2?.revision === revision)
     return cached2.languages;
   const maxRowid = db.query("SELECT max(rowid) AS n FROM chunks").get().n ?? 0;
+  if (maxRowid > SAMPLE_LIMIT && cached2 && Date.now() - cached2.sampledAtMs < PROFILE_REUSE_MS)
+    return cached2.languages;
   const live = `SELECT c.rowid AS pk, c.content_hash AS hash FROM chunks c
     JOIN items i ON i.item_pk = c.item_pk WHERE i.tombstoned = 0`;
   let rows;
@@ -26600,6 +26619,7 @@ function storeKeywordLanguages(db) {
   const signature = JSON.stringify(rows);
   if (cached2?.signature === signature) {
     cached2.revision = revision;
+    cached2.sampledAtMs = Date.now();
     return cached2.languages;
   }
   const detected = new Map;
@@ -26614,13 +26634,14 @@ function storeKeywordLanguages(db) {
       counts.set(language, (counts.get(language) ?? 0) + 1);
   }
   const languages = [...counts].filter(([, count]) => count / Math.max(1, rows.length) >= 0.05).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 6).map(([language]) => language).sort();
-  profiles.set(db, { revision, signature, languages, detected });
+  profiles.set(db, { revision, signature, languages, detected, sampledAtMs: Date.now() });
   return languages;
 }
-var profiles, SAMPLE_TARGET = 1024, SAMPLE_LIMIT = 2048;
+var profiles, SAMPLE_TARGET = 1024, SAMPLE_LIMIT = 2048, PROFILE_REUSE_MS;
 var init_keyword_languages = __esm(() => {
   init_franc_min();
   profiles = new WeakMap;
+  PROFILE_REUSE_MS = 10 * 60000;
 });
 
 // src/core/source-index/keyword-equivalents.json
@@ -29574,10 +29595,10 @@ async function withOffThreadSnapshot(dbPath, work) {
           const rows = await send(reader, { op: "read", snapshot, sql: query.sql, params: query.params, mode: query.mode }, undefined, (ms) => {
             sqlMs = ms;
           });
-          report?.({ queueWaitMs: 0, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "rows" });
+          report?.({ queueWaitMs: 0, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "rows", snapshot: true });
           return rows;
         } catch (error) {
-          report?.({ queueWaitMs: 0, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "error" });
+          report?.({ queueWaitMs: 0, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "error", snapshot: true });
           throw error;
         } finally {
           dispatch();
@@ -173266,7 +173287,12 @@ function buildSourceAnswerLatencyTraceRecord(input) {
         statements: Math.max(0, Math.floor(input.trace.mainThreadSql.statements)),
         total_ms: nonNegativeMs2(input.trace.mainThreadSql.total_ms),
         max_ms: nonNegativeMs2(input.trace.mainThreadSql.max_ms),
-        slow: input.trace.mainThreadSql.slow.map((entry) => ({ ms: nonNegativeMs2(entry.ms), site: entry.site }))
+        slow: input.trace.mainThreadSql.slow.map((entry) => ({ ms: nonNegativeMs2(entry.ms), site: entry.site })),
+        by_site: (input.trace.mainThreadSql.by_site ?? []).map((entry) => ({
+          site: entry.site,
+          statements: Math.max(0, Math.floor(entry.statements)),
+          ms: nonNegativeMs2(entry.ms)
+        }))
       }
     } : {},
     phase_ms: {
@@ -173395,6 +173421,8 @@ function copyPoolReads(pool) {
     run_max_ms: nonNegativeMs2(pool.run_max_ms),
     sql_ms: nonNegativeMs2(pool.sql_ms ?? 0),
     sql_max_ms: nonNegativeMs2(pool.sql_max_ms ?? 0),
+    snapshot_reads: count(pool.snapshot_reads ?? 0),
+    snapshot_sql_ms: nonNegativeMs2(pool.snapshot_sql_ms ?? 0),
     refused: count(pool.refused),
     dropped_queued: count(pool.dropped_queued),
     past_deadline_running: count(pool.past_deadline_running),

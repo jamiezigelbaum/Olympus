@@ -176,7 +176,7 @@ interface PoolJob {
   // how to report its end (undefined outside a traced Ask lane).
   enqueuedAtMs: number;
   sentAtMs?: number;
-  report?: ((report: { queueWaitMs: number; runMs: number; sqlMs: number; outcome: SourceAnswerPoolReadOutcome }) => void) | undefined;
+  report?: ReturnType<typeof beginSourceAnswerPoolRead>;
   // The statement's own time on the thread; runMs less this is the trip back
   // (row copy, and the wait for the request thread to take the reply).
   sqlMs?: number;
@@ -350,10 +350,10 @@ export async function withOffThreadSnapshot<T>(
           const rows = await send(reader, { op: 'read', snapshot, sql: query.sql, params: query.params, mode: query.mode }, undefined, (ms) => {
             sqlMs = ms;
           });
-          report?.({ queueWaitMs: 0, runMs: clock.now() - sentAtMs, sqlMs, outcome: 'rows' });
+          report?.({ queueWaitMs: 0, runMs: clock.now() - sentAtMs, sqlMs, outcome: 'rows', snapshot: true });
           return rows;
         } catch (error) {
-          report?.({ queueWaitMs: 0, runMs: clock.now() - sentAtMs, sqlMs, outcome: 'error' });
+          report?.({ queueWaitMs: 0, runMs: clock.now() - sentAtMs, sqlMs, outcome: 'error', snapshot: true });
           throw error;
         } finally {
           // A search waiting for this thread takes its turn before the next read.

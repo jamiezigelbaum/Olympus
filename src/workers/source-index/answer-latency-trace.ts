@@ -51,6 +51,10 @@ export interface SourceAnswerTracePoolReads {
   // run_ms is the trip back: the row copy and the wait for the request thread.
   sql_ms: number;
   sql_max_ms: number;
+  // The part of reads and sql_ms read inside one snapshot (the exact-vector
+  // scan's pages); the rest are single queries (keyword search, recency).
+  snapshot_reads: number;
+  snapshot_sql_ms: number;
   // Refused at once: the store's queue was full, or the deadline had passed.
   refused: number;
   // Still waiting for a thread at the deadline.
@@ -100,12 +104,18 @@ export interface SourceAnswerTraceMainThreadSql {
   total_ms: number;
   max_ms: number;
   slow: Array<{ ms: number; site: string }>;
+  // Statements of SITE_TALLY_MS or more, summed by call site, longest total
+  // first: where the time went when no one statement was slow.
+  by_site: Array<{ site: string; statements: number; ms: number }>;
 }
 
 /** A request-thread statement this long is named in the trace with its call site. */
 export const SLOW_MAIN_THREAD_SQL_MS = 250;
 // The slow list keeps the longest this many.
 const SLOW_MAIN_THREAD_SQL_KEPT = 20;
+// A statement this long is tallied by call site (one stack capture each).
+const SITE_TALLY_MS = 25;
+const SITE_TALLY_KEPT = 10;
 
 export interface SourceAnswerTraceSnapshot {
   correlationId: string;
@@ -168,12 +178,12 @@ export function runInSourceAnswerLane<T>(corpusId: string, run: () => T): T {
  * are captured now: the read ends in a pool callback outside their context.
  */
 export function beginSourceAnswerPoolRead():
-  | ((report: { queueWaitMs: number; runMs: number; sqlMs: number; outcome: SourceAnswerPoolReadOutcome }) => void)
+  | ((report: { queueWaitMs: number; runMs: number; sqlMs: number; outcome: SourceAnswerPoolReadOutcome; snapshot?: boolean }) => void)
   | undefined {
   const query = currentSourceAnswerTrace()?.activeQuery;
   const corpusId = laneStorage.getStore();
   if (!query || corpusId === undefined) return undefined;
-  return ({ queueWaitMs, runMs, sqlMs, outcome }) => {
+  return ({ queueWaitMs, runMs, sqlMs, outcome, snapshot }) => {
     let reads = query.poolByCorpus.get(corpusId);
     if (!reads) {
       reads = {
@@ -184,6 +194,8 @@ export function beginSourceAnswerPoolRead():
         run_max_ms: 0,
         sql_ms: 0,
         sql_max_ms: 0,
+        snapshot_reads: 0,
+        snapshot_sql_ms: 0,
         refused: 0,
         dropped_queued: 0,
         past_deadline_running: 0,
@@ -203,6 +215,10 @@ export function beginSourceAnswerPoolRead():
     const sql = unroundedMs(sqlMs);
     reads.sql_ms += sql;
     reads.sql_max_ms = Math.max(reads.sql_max_ms, sql);
+    if (snapshot) {
+      reads.snapshot_reads += 1;
+      reads.snapshot_sql_ms += sql;
+    }
     if (outcome === 'refused') reads.refused += 1;
     else if (outcome === 'dropped_queued') reads.dropped_queued += 1;
     else if (outcome === 'past_deadline_running') reads.past_deadline_running += 1;
@@ -247,7 +263,7 @@ export function createSourceAnswerTrace(now: () => Date = () => new Date()): Mut
     selfHealRebuildMs: 0,
     recordBuildMs: 0,
     appendMs: 0,
-    mainThreadSql: { statements: 0, total_ms: 0, max_ms: 0, slow: [] },
+    mainThreadSql: { statements: 0, total_ms: 0, max_ms: 0, slow: [], by_site: [] },
   };
 }
 
@@ -279,8 +295,17 @@ export function recordSourceAnswerMainThreadSql(elapsedMs: number, site: () => s
   sql.statements += 1;
   sql.total_ms += ms;
   sql.max_ms = Math.max(sql.max_ms, ms);
+  if (ms < SITE_TALLY_MS) return;
+  const where = site();
+  const tally = sql.by_site.find((entry) => entry.site === where);
+  if (tally) {
+    tally.statements += 1;
+    tally.ms += ms;
+  } else {
+    sql.by_site.push({ site: where, statements: 1, ms });
+  }
   if (ms < SLOW_MAIN_THREAD_SQL_MS) return;
-  sql.slow.push({ ms: nonNegativeMs(ms), site: site() });
+  sql.slow.push({ ms: nonNegativeMs(ms), site: where });
   if (sql.slow.length > SLOW_MAIN_THREAD_SQL_KEPT) {
     sql.slow.sort((left, right) => right.ms - left.ms);
     sql.slow.length = SLOW_MAIN_THREAD_SQL_KEPT;
@@ -511,6 +536,10 @@ export function snapshotSourceAnswerTrace(trace: MutableTrace): SourceAnswerTrac
       total_ms: nonNegativeMs(trace.mainThreadSql.total_ms),
       max_ms: nonNegativeMs(trace.mainThreadSql.max_ms),
       slow: trace.mainThreadSql.slow.map((entry) => ({ ...entry })),
+      by_site: [...trace.mainThreadSql.by_site]
+        .sort((left, right) => right.ms - left.ms)
+        .slice(0, SITE_TALLY_KEPT)
+        .map((entry) => ({ site: entry.site, statements: entry.statements, ms: nonNegativeMs(entry.ms) })),
     },
   };
 }

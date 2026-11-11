@@ -19229,9 +19229,10 @@ var init_job_names = __esm(() => {
 });
 
 // src/core/source-index/keyword-languages.ts
-var profiles;
+var profiles, PROFILE_REUSE_MS;
 var init_keyword_languages = __esm(() => {
   profiles = new WeakMap;
+  PROFILE_REUSE_MS = 10 * 60000;
 });
 
 // src/core/source-index/keyword-equivalents.json

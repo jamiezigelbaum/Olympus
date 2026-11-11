@@ -43,6 +43,8 @@ test('an Ask records its request-thread statements and names the slow one by cal
     expect(snapshot.mainThreadSql.slow).toHaveLength(1);
     expect(snapshot.mainThreadSql.slow[0]!.site).toContain('holdThread');
     expect(snapshot.mainThreadSql.slow[0]!.site).not.toContain('RECURSIVE');
+    expect(snapshot.mainThreadSql.by_site[0]).toMatchObject({ statements: 1 });
+    expect(snapshot.mainThreadSql.by_site[0]!.site).toContain('holdThread');
 
     const record = buildSourceAnswerLatencyTraceRecord({ trace: snapshot, outcome: 'success' });
     expect(record.main_thread_sql?.statements).toBe(2);

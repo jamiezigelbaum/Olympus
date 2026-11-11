@@ -214,3 +214,19 @@ test('bounded backup budget preserves single words before extra phrases', () => 
   expect(parsed.get('buyer')).toEqual(['comprador', 'adquirente']);
   expect([...parsed.values()].flat()).toHaveLength(8);
 });
+
+test("a large store's language profile is reused across writes for a while, not resampled before every Ask (#1305)", () => {
+  const db = new Database(':memory:');
+  db.exec('CREATE TABLE items(item_pk INTEGER PRIMARY KEY, tombstoned INTEGER); CREATE TABLE chunks(item_pk INTEGER, bounded_text TEXT, content_hash TEXT); INSERT INTO items VALUES(1,0)');
+  const spanish = 'La escritura pública se firmará ante el notario y los gastos correspondientes serán abonados por el comprador, conforme a las condiciones pactadas.';
+  const insert = db.query("INSERT INTO chunks VALUES(1, ?, ?)");
+  db.transaction(() => { for (let n = 0; n < 3000; n++) insert.run(spanish, `h${n}`); })();
+  expect(storeKeywordLanguages(db)).toEqual(['spa']);
+  let reads = 0;
+  const query = db.query.bind(db);
+  db.query = ((sql: string) => { if (sql.includes('rowid IN')) reads += 1; return query(sql); }) as typeof db.query;
+  insert.run(spanish, 'after');
+  expect(storeKeywordLanguages(db)).toEqual(['spa']);
+  expect(reads).toBe(0);
+  db.close();
+});

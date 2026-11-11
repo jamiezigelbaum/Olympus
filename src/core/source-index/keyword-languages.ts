@@ -3,10 +3,16 @@
 import type { Database } from 'bun:sqlite';
 import { franc } from 'franc-min';
 
-interface Profile { revision: string; signature: string; languages: readonly string[]; detected: Map<string, string> }
+interface Profile { revision: string; signature: string; languages: readonly string[]; detected: Map<string, string>; sampledAtMs: number }
 const profiles = new WeakMap<Database, Profile>();
 const SAMPLE_TARGET = 1024;
 const SAMPLE_LIMIT = 2048;
+// A large store's languages change slowly, but a store being written changes
+// its revision on every Ask. Within this long a large store's profile is
+// reused anyway: on a large install's copy the resample's random chunk reads
+// cost 0.4 s each, cold, on the request thread before an Ask's keyword search
+// (#1305). A small store is sampled whole, cheaply, and tracks every change.
+const PROFILE_REUSE_MS = 10 * 60_000;
 export function storeKeywordLanguages(db: Database): readonly string[] {
   const revision = JSON.stringify([db.query('PRAGMA data_version').get(), db.query('SELECT total_changes() AS n').get()]);
   const cached = profiles.get(db);
@@ -18,6 +24,7 @@ export function storeKeywordLanguages(db: Database): readonly string[] {
   // over a 700k-item store's chunks held that thread for about 36 s on
   // Sparta (#1305), again after every write the cache could not survive.
   const maxRowid = (db.query('SELECT max(rowid) AS n FROM chunks').get() as {n: number | null}).n ?? 0;
+  if (maxRowid > SAMPLE_LIMIT && cached && Date.now() - cached.sampledAtMs < PROFILE_REUSE_MS) return cached.languages;
   const live = `SELECT c.rowid AS pk, c.content_hash AS hash FROM chunks c
     JOIN items i ON i.item_pk = c.item_pk WHERE i.tombstoned = 0`;
   let rows: {pk: number; hash: string}[];
@@ -33,7 +40,7 @@ export function storeKeywordLanguages(db: Database): readonly string[] {
     }
   }
   const signature = JSON.stringify(rows);
-  if (cached?.signature === signature) { cached.revision = revision; return cached.languages; }
+  if (cached?.signature === signature) { cached.revision = revision; cached.sampledAtMs = Date.now(); return cached.languages; }
   const detected = new Map<string, string>();
   const counts = new Map<string, number>();
   const textFor = db.query('SELECT substr(bounded_text, 1, 1000) AS text FROM chunks WHERE rowid = ?');
@@ -45,6 +52,6 @@ export function storeKeywordLanguages(db: Database): readonly string[] {
   }
   const languages = [...counts].filter(([, count]) => count / Math.max(1, rows.length) >= 0.05)
     .sort((a,b) => b[1]-a[1] || a[0].localeCompare(b[0])).slice(0,6).map(([language])=>language).sort();
-  profiles.set(db, {revision,signature,languages,detected});
+  profiles.set(db, {revision,signature,languages,detected,sampledAtMs:Date.now()});
   return languages;
 }
