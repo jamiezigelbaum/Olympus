@@ -133,8 +133,10 @@ describe('the engine split with a source connected after boot', () => {
     const { env, front, mountedCorpora, mounts } = await startSplit({ OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_ENABLED: 'true' });
     const secure = resolvedStorePath(WHATSAPP_PERSONAL_SOURCE_ID, 'secure_local', env);
     const written = new LocalConnectorStore({ dbPath: secure, corpusId: WHATSAPP_LIVE_CORPUS_ID, family: 'chat', trustDomain: 'secure_local' });
-    // Two of the front's mount tries pass while the store stands alone.
-    await Bun.sleep(5_000);
+    // The front tries the lane every two seconds while the store stands alone, and fails each time on the missing
+    // ledger; a front that kept the store from the first try never tried again.
+    const tries = () => front.output().split("the front could not open a source's stores yet").length - 1;
+    await waitFor(() => tries() >= 2 || undefined, { timeoutMs: 20_000, intervalMs: 100 });
     expect(await mountedCorpora()).not.toContain(WHATSAPP_LIVE_CORPUS_ID);
 
     // The rest of the lane, as the background's mount creates it.
