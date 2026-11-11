@@ -66,6 +66,8 @@ describe('a round', () => {
       item(105, { judge_reason: null }),
       // Read by the judge but waiting for it to read the item again.
       item(106, { judge_reason: 'ordinary:0.01', decided_by: 'default', waiting_for_judge: true }),
+      item(107, { judge_reason: 'fail_safe:unread', not_read: { kind: 'by_choice' } }),
+      item(108, { judge_reason: 'fail_safe:unread', not_read: { kind: 'cannot_read', reason: 'password' } }),
     ];
     const { check } = fixture(items);
     const round = check.start();
@@ -80,7 +82,7 @@ describe('a round', () => {
     const leastSure = Array.from({ length: JUDGE_CHECK_ROUND_SIZE - JUDGE_CHECK_RANDOM_PICKS }, (_, index) => `oti_${index + 1}`);
     for (const id of leastSure) expect(ids.has(id)).toBe(true);
     expect([...ids].filter((id) => !leastSure.includes(id))).toHaveLength(JUDGE_CHECK_RANDOM_PICKS);
-    for (const id of ['oti_100', 'oti_101', 'oti_102', 'oti_103', 'oti_104', 'oti_105', 'oti_106']) expect(ids.has(id)).toBe(false);
+    for (const id of ['oti_100', 'oti_101', 'oti_102', 'oti_103', 'oti_104', 'oti_105', 'oti_106', 'oti_107', 'oti_108']) expect(ids.has(id)).toBe(false);
   });
 
   test('asks about a Personal verdict that left the label where it was, which keeps the default decider', () => {

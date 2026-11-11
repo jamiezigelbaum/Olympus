@@ -7,6 +7,9 @@
  * reach ChatGPT; paths never do, and only the card's own list is read.
  */
 import { afterEach, describe, expect, test } from 'bun:test';
+import { Glob } from 'bun';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { Window } from 'happy-dom';
 import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
 import { copyDashboardViewModel } from '../src/workers/chatgpt/response-builder.ts';
@@ -218,15 +221,17 @@ describe('the panel renders See why', () => {
     expect(why.querySelector('.why-note')!.textContent).toBe(DASHBOARD_UNREADABLE_NOTE);
   });
 
-  test('missing privacy material lists the items and says how to retry without claiming damage', () => {
+  test('the legacy reason code describes a Private hold without a missing check or retry instruction', () => {
     const win = mount(fresh({ unreadable: { count: 2, names: ['Welcome one', 'Welcome two'],
       reasons: [{ code: 'privacy_check_missing', count: 2 }] } }));
     const why = win.document.querySelector('details.why')!;
     expect(why.textContent).toContain('Welcome one');
     expect(why.textContent).toContain('Welcome two');
-    expect(why.textContent).toContain('Sync now');
+    expect(why.textContent).not.toContain('Sync now');
+    expect(why.textContent).toContain("kept Private because Olympus couldn't read them");
+    expect(why.textContent).not.toContain('privacy checks were missing');
     expect(why.textContent).not.toContain('damaged');
-    expect(why.textContent).not.toContain('does not retry');
+    expect(why.textContent).toContain(DASHBOARD_UNREADABLE_NOTE);
   });
 
   test('one file is singular; past the alarm share the note says it may be Olympus', () => {
@@ -296,4 +301,16 @@ describe('the panel renders See why', () => {
     expect(page).not.toContain('Taxes');
     expect(win.document.querySelectorAll('details.why ul:not(.files) li').length).toBe(1);
   });
+});
+
+
+test('retired privacy-check failure wording appears nowhere in src', () => {
+  const root = fileURLToPath(new URL('../src', import.meta.url));
+  const offending: string[] = [];
+  for (const path of new Glob('**/*.{ts,html,css}').scanSync({ cwd: root, absolute: true })) {
+    const text = readFileSync(path, 'utf8');
+    if (text.includes('privacy checks were missing') || text.includes('privacy check was missing')
+      || text.includes('kept Private before it was read')) offending.push(path);
+  }
+  expect(offending).toEqual([]);
 });
