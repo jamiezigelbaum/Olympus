@@ -742,6 +742,12 @@ export interface EvalAnswerStageAudit {
   /** Whether the answer cites a seat holding an expected evidence item; absent when the question names none. */
   expectedSeatCited?: boolean;
   /**
+   * Cited seats that hold no expected evidence item; absent when the question
+   * names none. Informational: an answer citing every seat still cites the
+   * expected one, and this shows the rest.
+   */
+  citedSeatsWithoutExpectedItem?: number;
+  /**
    * The answer's number-bearing tokens (dates, amounts, identifiers with a
    * digit), and how many of them occur in a seat the answer cites. Fewer in
    * the cited seats than in the answer means the answer states a value its
@@ -1045,7 +1051,12 @@ export function evalAnswerStageAudit(
     answerUnanswered: analystOwn.unanswered.length,
     answerCitedSeats: citedSeats,
     answerCitationsOutsidePack: citationSeats.filter((seat) => seat === 0).length,
-    ...(expectedIds.length > 0 ? { expectedSeatCited: expectedSeats.some((seat) => citedSeats.includes(seat)) } : {}),
+    ...(expectedIds.length > 0
+      ? {
+        expectedSeatCited: expectedSeats.some((seat) => citedSeats.includes(seat)),
+        citedSeatsWithoutExpectedItem: citedSeats.filter((seat) => !expectedSeats.includes(seat)).length,
+      }
+      : {}),
     answerValueTokens: valueTokens.length,
     answerValueTokensInCitedSeats: valueTokens.filter((token) => citedTokens.has(token)).length,
     answerValueTokensUnmatchedShapes: valueTokens.filter((token) => !citedTokens.has(token)).map(tokenShape),

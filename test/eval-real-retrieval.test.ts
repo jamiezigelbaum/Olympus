@@ -251,6 +251,11 @@ describe('the real eval report locates an expected item and value for a miss', (
     expect(evalAnswerStageAudit(question, pack, citing(2), citing(2))).toMatchObject({
       answerCitedSeats: [2], expectedSeatCited: false, expected: [{ valueSeatCited: false }],
     });
+    // How many cited seats hold no expected item: citing every seat still
+    // cites the expected one, and this count shows the rest.
+    expect(evalAnswerStageAudit(question, pack, citing(1), citing(1)).citedSeatsWithoutExpectedItem).toBe(0);
+    expect(evalAnswerStageAudit(question, pack, citing(1, 2), citing(1, 2))).toMatchObject({ expectedSeatCited: true, citedSeatsWithoutExpectedItem: 1 });
+    expect(evalAnswerStageAudit({ expectedAnswerContains: ['4182'] }, pack, citing(1, 2), citing(1, 2)).citedSeatsWithoutExpectedItem).toBeUndefined();
     // The flag for a misreading: is the answer's value in the seat it cites?
     const inSeat = { ...citing(1), answer: 'The total is 4182 dollars, due in March.' } as unknown as AnalystResult;
     expect(evalAnswerStageAudit(question, pack, inSeat, inSeat)).toMatchObject({ answerValueTokens: 1, answerValueTokensInCitedSeats: 1 });
