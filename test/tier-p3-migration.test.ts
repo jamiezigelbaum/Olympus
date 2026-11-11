@@ -801,6 +801,17 @@ describe('tier migration M2-M6', () => {
     const calls = context.cloud.inputs.length + context.local.inputs.length;
     const legacyBefore = snapshotStore(context.files.secure_local);
 
+    // The automatic-copy cleanup must leave a migration's rollback body intact.
+    const garden = write.lanes.flatMap(lane => lane.set.ledger.migrationProposals(plan.planId))
+      .find(proposal => proposal.identity.providerItemId === 'garden')!;
+    const fileLane = write.lanes.find(lane => lane.set.ledger.migrationProposals(plan.planId)
+      .some(proposal => proposal.identity.providerItemId === 'garden'))!;
+    expect(fileLane.set.ledger.hasMovedMigrationProposal(garden.identity)).toBe(true);
+    expect(fileLane.set.ledger.copies(garden.identity)).toContainEqual(expect.objectContaining({
+      corpusId: FILE_CORPORA.secure_local, state: 'superseded',
+    }));
+    expect(fileLane.set.store('secure_local')!.copyContentState(garden.identity)!.chunks).toBeGreaterThan(0);
+
     const rolled = await rollbackTierMigrationBatch({ batchId: run.batchId, lanes: write.lanes, paths: context.paths });
     expect(rolled).toMatchObject({ rolledBack: 2, secretsKept: 1 });
     expect(context.cloud.inputs.length + context.local.inputs.length).toBe(calls);

@@ -123,6 +123,7 @@ import {
 import { settleNamesOnlyItems } from './tier-names-only-settle.ts';
 import { settlePersonalFirstItems } from './tier-held-settle.ts';
 import { purgeLowerTierContent } from './tier-content-purge.ts';
+import { sweepAutomaticSupersededCopies } from './tier-auto-prune-sweep.ts';
 import { flushTierMoveNotes, type TierMoveOptions } from './tier-move.ts';
 
 export const LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60_000;
@@ -589,6 +590,9 @@ export class TieredStoreSet {
         log: (corpus, copies, chunks) => {
           if (chunks > 0) console.info(`[tier-content-purge] corpus=${corpus} copies=${copies} chunks=${chunks}`);
         },
+      });
+      sweepAutomaticSupersededCopies(this, {
+        ...(options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {}),
       });
       const pending = flushTierMoveNotes(this.ledger).catch(() => {
         // The flip's durable note obligation stays pending for maintenance.

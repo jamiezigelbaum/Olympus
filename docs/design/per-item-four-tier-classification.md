@@ -387,6 +387,8 @@ changes a corpus identity or starts a global re-embed.
 3. Pending items may embed only under the shared local identity above; vector search still waits for the final tier.
 4. Every tier move writes a ledger entry with a chunk count.
 
+Automatic steady-state moves prune their superseded source copies once the destination flip has committed: kept text, full-text content and vectors are stripped and the superseded ledger row is removed. The durable move receipt resumes interrupted pruning, and a purged generation refuses ledger-only rollback. Migration-plan copies retain their existing rollback lifetime until the owner-approved M6 purge (§4.6). A one-time bounded startup/maintenance sweep applies this rule to existing superseded copies only where the identity has no `moved` migration proposal, recording deleted chunks per corpus as embedding-ledger invalidations.
+
 ### 4.3 Epochs and parity
 
 - Epochs stay per store and per model. Parity becomes per tier automatically.

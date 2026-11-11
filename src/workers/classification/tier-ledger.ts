@@ -43,7 +43,7 @@ import {
 import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledger-path.ts';
 
 export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
-export const TIER_LEDGER_SCHEMA_VERSION = 13;
+export const TIER_LEDGER_SCHEMA_VERSION = 14;
 
 /** A scrub's start: the revision it took and the item's generation then. */
 export interface SecretScrubMark {
@@ -399,7 +399,7 @@ export class TierLedgerRaiseAbandonRefusedError extends Error {
 }
 
 /** A rollback never re-exposes a Secret: the ledger refuses to flip a Secrets row back. */
-/** Verified raises cannot restore a lower copy whose content was removed. */
+/** A purged move cannot restore a copy whose content was removed. */
 export class TierLedgerPurgedRollbackRefusedError extends Error {
   constructor() {
     super('already Private; its lower copy was removed');
@@ -3734,8 +3734,8 @@ export class TierLedger {
   }
 
   /**
-   * Forget ONE superseded copy row, after the caller tombstoned that store's
-   * copy (the owner-approved purge, design section 4.6 M6). A current or
+   * Forget ONE superseded copy row, after the caller tombstoned or stripped
+   * that store's copy (automatic pruning or design section 4.6 M6). A current or
    * staged copy is never removed here. Returns whether a row was removed.
    */
   removeSupersededCopy(identity: TierLedgerIdentity, corpusId: string): boolean {
@@ -3747,6 +3747,13 @@ export class TierLedger {
   }
 
   // ---- P3: migration proposals (design section 4.6) ---------------------------
+
+  /** Any still-moved migration protects this identity's rollback copies. */
+  hasMovedMigrationProposal(identity: TierLedgerIdentity): boolean {
+    return this.db.query(`SELECT 1 FROM tier_migration_proposals
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND status = 'moved' LIMIT 1`).get(...idParams(identity)) !== null;
+  }
 
   /**
    * Record a plan's proposals, replacing any earlier rows for the same plan
@@ -5400,7 +5407,7 @@ function tierLedgerMigrations(): SqliteMigration[] {
       // so no backlog the bounded settle pass has not reached yet can be
       // embedded or searched. The settle pass then moves the text up; a
       // Personal verdict clears the hold.
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 13,
       name: 'hold_personal_first_copies',
       up(db) {
         db.query(`
@@ -5413,6 +5420,16 @@ function tierLedgerMigrations(): SqliteMigration[] {
               AND EXISTS (SELECT 1 FROM json_each(t.reasons_json) r WHERE r.value = ?)
           )
         `).run(PERSONAL_FIRST_REASON);
+      },
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: 'moved_migration_identity',
+      up(db) {
+        // The bounded automatic-copy sweep probes by identity across plans.
+        db.exec(`CREATE INDEX IF NOT EXISTS tier_migration_moved_identity
+          ON tier_migration_proposals (provider, account_scope, conversation_key, provider_item_id)
+          WHERE status = 'moved';`);
       },
     },
   ];
