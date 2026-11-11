@@ -51,6 +51,12 @@ export const UNREADABLE_ITEMS_COUNT_KEY = 'extraction_items_unreadable';
 export const UNSUPPORTED_KIND_COUNT_KEY = 'extraction_items_unsupported_kind';
 
 /**
+ * In-scope pictures with no reader on this computer. These stay in the eligible
+ * denominator: Olympus is meant to read them and lacks a picture reader here.
+ */
+export const PICTURES_NOT_READ_HERE_COUNT_KEY = 'extraction_items_pictures_not_read_here';
+
+/**
  * Items this corpus holds text for: the per-item numerator of every
  * answer-ready ratio, published by whoever owns the readiness evidence.
  */

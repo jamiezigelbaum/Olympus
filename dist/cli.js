@@ -61428,7 +61428,7 @@ function clampPercent(percent) {
     return 0;
   return Math.max(0, Math.min(100, Math.round(percent * 10) / 10));
 }
-var METADATA_ONLY_EXPECTED_COUNT_KEY = "qa_metadata_only_expected", BLOCKED_BY_POLICY_COUNT_KEY = "qa_blocked_policy", OUT_OF_CONTENT_SCOPE_COUNT_KEY = "qa_out_of_content_scope", UNREADABLE_ITEMS_COUNT_KEY = "extraction_items_unreadable", UNSUPPORTED_KIND_COUNT_KEY = "extraction_items_unsupported_kind", ITEMS_WITH_TEXT_COUNT_KEY = "items_with_text", POLICY_NOT_READ_COUNT_KEYS, METADATA_ONLY_POLICY_COUNT_KEYS, ANSWER_READY_ELIGIBLE_COUNT_KEYS;
+var METADATA_ONLY_EXPECTED_COUNT_KEY = "qa_metadata_only_expected", BLOCKED_BY_POLICY_COUNT_KEY = "qa_blocked_policy", OUT_OF_CONTENT_SCOPE_COUNT_KEY = "qa_out_of_content_scope", UNREADABLE_ITEMS_COUNT_KEY = "extraction_items_unreadable", UNSUPPORTED_KIND_COUNT_KEY = "extraction_items_unsupported_kind", PICTURES_NOT_READ_HERE_COUNT_KEY = "extraction_items_pictures_not_read_here", ITEMS_WITH_TEXT_COUNT_KEY = "items_with_text", POLICY_NOT_READ_COUNT_KEYS, METADATA_ONLY_POLICY_COUNT_KEYS, ANSWER_READY_ELIGIBLE_COUNT_KEYS;
 var init_answer_ready_coverage = __esm(() => {
   POLICY_NOT_READ_COUNT_KEYS = [
     METADATA_ONLY_EXPECTED_COUNT_KEY,
@@ -61789,6 +61789,8 @@ function dashboardWorkingSummary(source) {
   const readPercent = clampPercent(read / inScope * 100);
   const unreadable = Math.max(0, Math.min(inScope - read, Math.trunc(source.coverage.unreadable_items ?? 0)));
   const unsupportedKind = Math.max(0, Math.min(inScope - read - unreadable, Math.trunc(source.coverage.unsupported_kind_items ?? 0)));
+  const pictures = Math.max(0, Math.min(inScope - read - unreadable - unsupportedKind, Math.trunc(source.coverage.pictures_not_read_here_items ?? 0)));
+  const waiting = inScope - read - unreadable - unsupportedKind - pictures;
   const backlog = source.embedding_backlog;
   const parityShort = backlog !== undefined && (backlog.missing_chunks > 0 || backlog.refresh_needed) && backlog.chunks > 0;
   const searchablePercent = parityShort ? clampPercent(backlog.embedded_chunks / backlog.chunks * 100) : undefined;
@@ -61797,9 +61799,11 @@ function dashboardWorkingSummary(source) {
     read_items: read,
     ...unreadable > 0 ? { unreadable_items: unreadable } : {},
     ...unsupportedKind > 0 ? { unsupported_kind_items: unsupportedKind } : {},
+    ...pictures > 0 ? { pictures_not_read_here_items: pictures } : {},
+    ...waiting > 0 ? { waiting_items: waiting } : {},
     read_percent: readPercent,
     ...searchablePercent !== undefined ? { searchable_percent: searchablePercent } : {},
-    fully_working: read + unreadable + unsupportedKind >= inScope && !parityShort
+    fully_working: read + unreadable + unsupportedKind + pictures >= inScope && !parityShort
   };
 }
 function dashboardCount(value) {
@@ -61814,12 +61818,14 @@ function freshLine(source, now) {
     return "answers questions directly";
   if (source.connection.action.kind === "archive_import")
     return source.connection.label;
+  const waiting = dashboardWaitingToReadPhrase(source);
   const unreadable = dashboardUnreadablePhrase(source);
   const unsupportedKind = dashboardUnsupportedKindPhrase(source);
+  const pictures = dashboardPicturesNotReadHerePhrase(source);
   const manual = dashboardManualSyncLine(source, now);
   const capture = dashboardCaptureClause(source);
   const pass = dashboardLivePassClause(source);
-  const tail = [pass, unreadable, unsupportedKind, capture].filter((part) => !!part).join(" · ");
+  const tail = [pass, waiting, unreadable, unsupportedKind, pictures, capture].filter((part) => !!part).join(" · ");
   if (manual)
     return tail ? `${manual} · ${tail}` : manual;
   const hours = source.freshness.hours;
@@ -61867,6 +61873,14 @@ function itemsPhrase(source, count, adjective = "") {
 function dashboardUnreadablePhrase(source) {
   const count = Math.max(0, Math.trunc(source.coverage.unreadable_items ?? 0));
   return count > 0 ? `${itemsPhrase(source, count)} can't be read` : undefined;
+}
+function dashboardWaitingToReadPhrase(source) {
+  const count = dashboardWorkingSummary(source)?.waiting_items;
+  return count ? `${itemsPhrase(source, count)} waiting to be read` : undefined;
+}
+function dashboardPicturesNotReadHerePhrase(source) {
+  const count = Math.max(0, Math.trunc(source.coverage.pictures_not_read_here_items ?? 0));
+  return count > 0 ? `${dashboardCount(count)} ${plural(count, "picture")} not read on this computer` : undefined;
 }
 function dashboardUnsupportedKindPhrase(source) {
   const count = Math.max(0, Math.trunc(source.coverage.unsupported_kind_items ?? 0));
@@ -62016,6 +62030,9 @@ function degradedInput(degraded) {
 }
 function unknownStatus(value) {
   return { status: DASHBOARD_UNKNOWN_STATUS, mappedUnknown: true, unknownValue: value };
+}
+function plural(count, word) {
+  return count === 1 ? word : `${word}s`;
 }
 function archivePickIntro(formats = ARCHIVE_FORMATS) {
   return `Drop a file or folder from this computer: ${formats.map((format) => format.chooseHint ?? format.label).join("; or ")}. Olympus keeps a copy in its own storage to read it until you remove the import, and never changes the original.`;
@@ -86086,7 +86103,7 @@ function quoted(value) {
   const words2 = text2(value);
   return words2 ? `"${words2.trim()}"` : undefined;
 }
-function plural(count, one) {
+function plural2(count, one) {
   return `${count} ${count === 1 ? one : `${one}s`}`;
 }
 function amountOf(message2) {
@@ -86243,7 +86260,7 @@ function telegramServiceContent(message2) {
     case "boost_apply": {
       const boosts = typeof message2.boosts === "number" ? message2.boosts : undefined;
       use("boosts");
-      sentence = `${who} boosted the chat${boosts !== undefined ? ` with ${plural(boosts, "boost")}` : ""}.`;
+      sentence = `${who} boosted the chat${boosts !== undefined ? ` with ${plural2(boosts, "boost")}` : ""}.`;
       break;
     }
     default: {
@@ -93997,10 +94014,18 @@ class LocalFileExtractionJobStore {
     }
     const unsupportedRefs = [...unsupportedByItem.values()];
     let unsupportedKindItems = 0;
+    let picturesNotReadHereItems = 0;
     for (let start = 0;start < unsupportedRefs.length; start += SCOPED_READINESS_CURRENT_SLICE) {
       const slice = unsupportedRefs.slice(start, start + SCOPED_READINESS_CURRENT_SLICE);
       const answers = options.currentItems ? options.currentItems(slice) : slice.map((ref) => options.currentItem?.(ref) ?? true);
-      unsupportedKindItems += slice.filter((_ref, index) => answers[index] === true).length;
+      for (let index = 0;index < slice.length; index += 1) {
+        if (answers[index] !== true)
+          continue;
+        if (slice[index].mimeType?.startsWith("image/"))
+          picturesNotReadHereItems += 1;
+        else
+          unsupportedKindItems += 1;
+      }
       yield;
     }
     const byItem = new Map;
@@ -94054,6 +94079,7 @@ class LocalFileExtractionJobStore {
       failedActionableJobs,
       unreadableItems,
       unsupportedKindItems,
+      picturesNotReadHereItems,
       retryableDueJobs: retryableDueRows.length,
       ...oldestActionableAt ? { oldestActionableAt } : {},
       ...newestTerminalProgressAt ? { newestTerminalProgressAt } : {}
@@ -94062,11 +94088,14 @@ class LocalFileExtractionJobStore {
   corpusReadiness(corpusId, now = new Date, options = {}) {
     const corpus = requireKeyPart(corpusId, "corpusId");
     const unsupported = unroutableItemsTableExists(this.db) ? this.db.query(`
-        SELECT COUNT(*) AS items FROM extraction_unroutable_items u
+        SELECT
+          SUM(CASE WHEN u.mime_type GLOB 'image/*' THEN 0 ELSE 1 END) AS items,
+          SUM(CASE WHEN u.mime_type GLOB 'image/*' THEN 1 ELSE 0 END) AS pictures
+        FROM extraction_unroutable_items u
         WHERE corpus_id = ? AND NOT EXISTS (SELECT 1 FROM extraction_jobs j
           WHERE j.corpus_id = u.corpus_id AND j.local_item_id = u.local_item_id
             AND j.source_version IS u.source_version)
-      `).get(corpus) : { items: 0 };
+      `).get(corpus) : { items: 0, pictures: 0 };
     const itemRetry = terminalRetryPathSql("x", options.terminalRetryPaths ?? []);
     const pendingRetry = terminalRetryPathSql("pending", options.terminalRetryPaths ?? []);
     const items = this.db.query(`
@@ -94176,7 +94205,8 @@ class LocalFileExtractionJobStore {
       failedTerminalJobs: jobCount("failed_terminal_jobs"),
       failedActionableJobs: jobCount("failed_actionable_jobs"),
       unreadableItems: unreadable.items.length,
-      unsupportedKindItems: unsupported.items,
+      unsupportedKindItems: count(unsupported.items),
+      picturesNotReadHereItems: count(unsupported.pictures),
       retryableDueJobs: jobCount("retryable_due_jobs"),
       ...typeof jobs?.oldest_actionable_at === "string" ? { oldestActionableAt: jobs.oldest_actionable_at } : {},
       ...typeof jobs?.newest_terminal_progress_at === "string" ? { newestTerminalProgressAt: jobs.newest_terminal_progress_at } : {}
@@ -105607,6 +105637,9 @@ function createSourceIndexStatusHandler(options = {}) {
         if (status.configured && readiness?.counts[UNSUPPORTED_KIND_COUNT_KEY] !== undefined) {
           status.counts[UNSUPPORTED_KIND_COUNT_KEY] = readiness.counts[UNSUPPORTED_KIND_COUNT_KEY];
         }
+        if (status.configured && readiness?.counts[PICTURES_NOT_READ_HERE_COUNT_KEY] !== undefined) {
+          status.counts[PICTURES_NOT_READ_HERE_COUNT_KEY] = readiness.counts[PICTURES_NOT_READ_HERE_COUNT_KEY];
+        }
         if (status.configured && request.include_readiness_ledger === true && options.unreadableCount) {
           const unreadable = options.unreadableCount(corpus.corpusId);
           if (unreadable !== undefined)
@@ -107182,6 +107215,10 @@ function aggregateCoverage(cards) {
     const value = card.coverage.unsupported_kind_items;
     return value === undefined ? sum2 : (sum2 ?? 0) + value;
   }, undefined);
+  const picturesNotReadHere = cards.reduce((sum2, card) => {
+    const value = card.coverage.pictures_not_read_here_items;
+    return value === undefined ? sum2 : (sum2 ?? 0) + value;
+  }, undefined);
   const required3 = cards.filter((card) => card.embedding_required !== false);
   const exempt = cards.filter((card) => card.embedding_required === false);
   const measuring = required3.filter((card) => card.coverage.embedded_files !== undefined);
@@ -107211,6 +107248,7 @@ function aggregateCoverage(cards) {
     ...cards.some((card) => card.coverage.settled_unreadable_items !== undefined) ? { settled_unreadable_items: cards.reduce((sum2, card) => sum2 + (card.coverage.settled_unreadable_items ?? 0), 0) } : {},
     ...unreadable !== undefined ? { unreadable_items: unreadable } : {},
     ...unsupportedKind !== undefined ? { unsupported_kind_items: unsupportedKind } : {},
+    ...picturesNotReadHere !== undefined ? { pictures_not_read_here_items: picturesNotReadHere } : {},
     ...cards.some((card) => card.coverage.stored_items !== undefined) ? { stored_items: cards.reduce((sum2, card) => sum2 + (card.coverage.stored_items ?? card.coverage.indexed_items), 0) } : {}
   });
 }
@@ -107903,6 +107941,7 @@ function coverageFromCounts(counts) {
   const eligibleItems = corpusAnswerReadyEligibleItems(counts, indexedItems);
   const unreadable = counts[UNREADABLE_ITEMS_COUNT_KEY];
   const unsupportedKind = counts[UNSUPPORTED_KIND_COUNT_KEY];
+  const picturesNotReadHere = counts[PICTURES_NOT_READ_HERE_COUNT_KEY];
   return {
     indexed_items: corpusOwnIndexedItems(counts, indexedItems),
     content_ready_items: contentReadyItems,
@@ -107914,6 +107953,7 @@ function coverageFromCounts(counts) {
     ...counts.settled_unreadable_items === undefined ? {} : { settled_unreadable_items: counts.settled_unreadable_items },
     ...unreadable !== undefined ? { unreadable_items: Math.max(0, Math.trunc(unreadable)) } : {},
     ...unsupportedKind !== undefined ? { unsupported_kind_items: Math.max(0, Math.trunc(unsupportedKind)) } : {},
+    ...picturesNotReadHere !== undefined ? { pictures_not_read_here_items: Math.max(0, Math.trunc(picturesNotReadHere)) } : {},
     ...counts.stored_items === undefined ? {} : { stored_items: counts.stored_items }
   };
 }
@@ -160146,6 +160186,7 @@ function readinessSnapshot(readiness) {
       extraction_jobs_failed_actionable: readiness.failedActionableJobs,
       [UNREADABLE_ITEMS_COUNT_KEY]: readiness.unreadableItems,
       [UNSUPPORTED_KIND_COUNT_KEY]: readiness.unsupportedKindItems,
+      [PICTURES_NOT_READ_HERE_COUNT_KEY]: readiness.picturesNotReadHereItems,
       extraction_jobs_retryable_due_actionable: readiness.retryableDueJobs
     },
     contentExtractionThroughput: {
@@ -162503,7 +162544,7 @@ function mountDashboardController(options) {
       const members = chats.filter((chat) => kind === "other" ? !known.has(chat.kind) : chat.kind === kind);
       const recent = members.some((chat) => chat.at);
       members.sort((a, b) => recent ? b.at.localeCompare(a.at) || a.title.localeCompare(b.title) : a.title.localeCompare(b.title));
-      const [label, plural2] = CHAT_KIND_LABELS[kind] ?? ["Other chosen chats", "chats"];
+      const [label, plural3] = CHAT_KIND_LABELS[kind] ?? ["Other chosen chats", "chats"];
       const group = make("div", "kindgroup");
       group.dataset.kindGroup = kind;
       const row = make("div", "kindrow");
@@ -162518,17 +162559,17 @@ function mountDashboardController(options) {
       title.append(name, note);
       open5.append(title, make("span", "kindchev", "›"));
       row.append(open5);
-      const toggle = kind === "other" ? undefined : switchInput("chatKind", kind, whole || kindsOn.has(kind), `All ${plural2}, including new ones`);
+      const toggle = kind === "other" ? undefined : switchInput("chatKind", kind, whole || kindsOn.has(kind), `All ${plural3}, including new ones`);
       if (toggle)
         row.append(toggle);
       const list = make("div", "kindlist");
       list.hidden = true;
       const search = make("input", "kindsearch");
       search.type = "search";
-      search.placeholder = `Search ${plural2}`;
-      search.setAttribute("aria-label", `Search ${plural2}`);
+      search.placeholder = `Search ${plural3}`;
+      search.setAttribute("aria-label", `Search ${plural3}`);
       search.dataset.kindSearch = "";
-      list.append(search, make("p", "kindcap", members.length ? recent ? "Most recent first" : "By name" : `No ${plural2} yet. New ones are read when this kind is on.`));
+      list.append(search, make("p", "kindcap", members.length ? recent ? "Most recent first" : "By name" : `No ${plural3} yet. New ones are read when this kind is on.`));
       const lines = make("fieldset", "kindlines");
       const boxes = [];
       for (const chat of members) {
@@ -162550,14 +162591,14 @@ function mountDashboardController(options) {
     }
     const refresh = () => {
       for (const group of groups) {
-        const [, plural2] = CHAT_KIND_LABELS[group.kind] ?? ["", "chats"];
+        const [, plural3] = CHAT_KIND_LABELS[group.kind] ?? ["", "chats"];
         const on = group.toggle?.checked === true;
         const chosen = group.boxes.filter((box) => box.checked).length;
         const lines = group.list.querySelector("fieldset");
         if (lines)
           lines.disabled = on;
         group.note.classList.toggle("partial", !on && chosen > 0);
-        group.note.textContent = on ? `All ${plural2}, including new ones` : !group.toggle ? `${chosen} chosen` : chosen > 0 ? `${chosen} of ${group.boxes.length} chosen · new ${plural2} are not read` : `Off · new ${plural2} are not read`;
+        group.note.textContent = on ? `All ${plural3}, including new ones` : !group.toggle ? `${chosen} chosen` : chosen > 0 ? `${chosen} of ${group.boxes.length} chosen · new ${plural3} are not read` : `Off · new ${plural3} are not read`;
       }
     };
     form.addEventListener("change", (event) => {
@@ -170264,7 +170305,7 @@ function chatgptPickerProgram(kit) {
   function lowerFirst2(value2) {
     return value2 ? value2.charAt(0).toLowerCase() + value2.slice(1) : value2;
   }
-  function plural2(words2, n) {
+  function plural3(words2, n) {
     return fill2(n === 1 ? words2.one : words2.many, { n: kit.count(n) });
   }
   function mailSummary() {
@@ -170272,9 +170313,9 @@ function chatgptPickerProgram(kit) {
     const skipped2 = draft.skipped_categories.length + draft.skipped_labels.length;
     return [
       fill2(Q.mailSummaryWindow, { window: lowerFirst2(Q.mailWindows[draft.window]) }),
-      plural2(Q.mailSummarySkipped, skipped2),
-      plural2(Q.mailSummaryPrivate, draft.always_private_senders.length),
-      plural2(Q.mailSummarySkipSenders, draft.skip_senders.length)
+      plural3(Q.mailSummarySkipped, skipped2),
+      plural3(Q.mailSummaryPrivate, draft.always_private_senders.length),
+      plural3(Q.mailSummarySkipSenders, draft.skip_senders.length)
     ].join(" · ");
   }
   function addSender(which, sender, focus) {
@@ -218440,6 +218481,7 @@ function scrubCard(definition, card) {
       ...finite(card.coverage.settled_unreadable_items) ? { settled_unreadable_items: count(card.coverage.settled_unreadable_items) } : {},
       ...finite(card.coverage.unreadable_items) ? { unreadable_items: count(card.coverage.unreadable_items) } : {},
       ...finite(card.coverage.unsupported_kind_items) ? { unsupported_kind_items: count(card.coverage.unsupported_kind_items) } : {},
+      ...finite(card.coverage.pictures_not_read_here_items) ? { pictures_not_read_here_items: count(card.coverage.pictures_not_read_here_items) } : {},
       ...finite(card.coverage.stored_items) ? { stored_items: count(card.coverage.stored_items) } : {}
     },
     ingestion_health: {
@@ -221672,7 +221714,7 @@ function searchToolResult(raw, options = {}) {
   const lines2 = [];
   if (evidence.length === 0) {
     if (!panelActive) {
-      lines2.push(options.noSourcesConnected ? NO_SOURCES_CONNECTED_TEXT : `Olympus found no Public or Personal evidence for this question in ${plural2(coverage.searchedSources, "searched source")}.`);
+      lines2.push(options.noSourcesConnected ? NO_SOURCES_CONNECTED_TEXT : `Olympus found no Public or Personal evidence for this question in ${plural3(coverage.searchedSources, "searched source")}.`);
     }
   } else {
     lines2.push(panelActive ? PANEL_SEARCH_INSTRUCTION : SEARCH_INSTRUCTION, "");
@@ -221703,7 +221745,7 @@ function terseCoverageLine(coverage) {
   ].filter(Boolean);
   return parts.length > 0 ? `Coverage, to mention only if the user asks why something is missing or the answer depends on it: ${parts.join(", ")}.` : undefined;
 }
-function plural2(count2, noun) {
+function plural3(count2, noun) {
   return `${count2} ${noun}${count2 === 1 ? "" : "s"}`;
 }
 function copyPrivateMatch(match) {
