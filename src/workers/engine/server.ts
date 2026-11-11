@@ -71,20 +71,22 @@ import { NO_EXTRACTION_JOB_OUTCOME, createUnreadableFiles, createUnreadableVerdi
 import { VeniceVlmClient } from '../file-extraction/extractors/venice-client.ts';
 import { OpenAICompatibleVlmClient } from '../file-extraction/extractors/openai-compatible-client.ts';
 import { parseOcrEnginePreference } from '../file-extraction/extractors/apple-vision-ocr.ts';
+import { EmailSourceWorkerError } from './http/worker-responses.ts';
+import { createEmailSourceWorker } from './index.ts';
+import { dashboardSourceSyncNotSupportedError } from './http/dashboard-source-requests.ts';
 import {
-  EmailSourceWorkerError,
-  createEmailSourceWorker,
-  dashboardSourceSyncNotSupportedError,
   defineGmailSecureLocalCorpus,
   defineInternalEmailCorpus,
   GMAIL_SECURE_LOCAL_CORPUS_ID,
   INTERNAL_EMAIL_CORPUS_ID,
-  GogcliEmailConnector,
-  type EmailSourceConnector,
-  type ConnectorStoreChatPrincipal,
-  type ConnectorStoreDeclaredPrincipal,
   type GmailEmailCorpusId,
-} from './index.ts';
+} from '../google-connectors/corpora.ts';
+import { GogcliEmailConnector } from '../email-source/gogcli.ts';
+import type { EmailSourceConnector } from '../email-source/email-connector.ts';
+import type {
+  ConnectorStoreChatPrincipal,
+  ConnectorStoreDeclaredPrincipal,
+} from './http/connector-store-search-request.ts';
 import {
   createAnalystSourceIndexAnswerHandler,
   readPrivateEvidenceItem,

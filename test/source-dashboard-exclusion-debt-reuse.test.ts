@@ -15,10 +15,8 @@ import {
   type SourceExclusionCriterion,
 } from '../src/core/source-ingestion-exclusions.ts';
 import { createSovereigntyEngine, buildEnvBridgeSovereigntyConfig } from '../src/core/sovereignty.ts';
-import {
-  DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS,
-  createEmailSourceWorker,
-} from '../src/workers/engine/index.ts';
+import { DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS } from '../src/workers/engine/http/dashboard-dispositions.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
 

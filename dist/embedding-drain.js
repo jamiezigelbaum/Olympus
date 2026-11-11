@@ -54652,9 +54652,6 @@ var init_app_release_agent = __esm(() => {
   init_remote_result();
 });
 
-// src/workers/remote-oauth/consent-page.ts
-var init_consent_page = () => {};
-
 // src/core/email-policy.ts
 var FORBIDDEN_RAW_RESPONSE_KEYS;
 var init_email_policy = __esm(() => {
@@ -54676,34 +54673,6 @@ var init_email_policy = __esm(() => {
     "embedding_vectors",
     "vector",
     "vectors"
-  ]);
-});
-
-// src/core/source-index/selected-item-safety.ts
-var FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS;
-var init_selected_item_safety = __esm(() => {
-  FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS = new Set([
-    "body",
-    "boundedtext",
-    "chunk",
-    "chunks",
-    "content",
-    "document",
-    "html",
-    "markdown",
-    "message",
-    "messages",
-    "packet",
-    "passage",
-    "raw",
-    "rawpacket",
-    "rawsource",
-    "rawtext",
-    "snippet",
-    "sourcepacket",
-    "sourcesnippet",
-    "sourcetext",
-    "text"
   ]);
 });
 // src/workers/chatgpt/dashboard-resource.ts
@@ -55132,6 +55101,37 @@ var init_mac_permissions = __esm(() => {
     unreadableLinux: 'Your user account is not allowed to open this folder. Check who may open it (for example with "ls -ld" on it) and change its permissions or choose another folder, then choose Try again.'
   };
 });
+
+// src/core/source-index/selected-item-safety.ts
+var FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS;
+var init_selected_item_safety = __esm(() => {
+  FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS = new Set([
+    "body",
+    "boundedtext",
+    "chunk",
+    "chunks",
+    "content",
+    "document",
+    "html",
+    "markdown",
+    "message",
+    "messages",
+    "packet",
+    "passage",
+    "raw",
+    "rawpacket",
+    "rawsource",
+    "rawtext",
+    "snippet",
+    "sourcepacket",
+    "sourcesnippet",
+    "sourcetext",
+    "text"
+  ]);
+});
+
+// src/workers/remote-oauth/consent-page.ts
+var init_consent_page = () => {};
 
 // src/core/consult-gate.ts
 function buildMonthNames() {
@@ -60563,29 +60563,29 @@ var init_to_json_schema = __esm(() => {
 
 // node_modules/zod/v4/core/json-schema-processors.js
 var formatMap, stringProcessor = (schema, ctx, _json, _params) => {
-  const json = _json;
-  json.type = "string";
+  const json2 = _json;
+  json2.type = "string";
   const { minimum, maximum, format, patterns, contentEncoding } = schema._zod.bag;
   if (typeof minimum === "number")
-    json.minLength = minimum;
+    json2.minLength = minimum;
   if (typeof maximum === "number")
-    json.maxLength = maximum;
+    json2.maxLength = maximum;
   if (format) {
-    json.format = formatMap[format] ?? format;
-    if (json.format === "")
-      delete json.format;
+    json2.format = formatMap[format] ?? format;
+    if (json2.format === "")
+      delete json2.format;
     if (format === "time") {
-      delete json.format;
+      delete json2.format;
     }
   }
   if (contentEncoding)
-    json.contentEncoding = contentEncoding;
+    json2.contentEncoding = contentEncoding;
   if (patterns && patterns.size > 0) {
     const regexes = [...patterns];
     if (regexes.length === 1)
-      json.pattern = regexes[0].source;
+      json2.pattern = regexes[0].source;
     else if (regexes.length > 1) {
-      json.allOf = [
+      json2.allOf = [
         ...regexes.map((regex) => ({
           ...ctx.target === "draft-07" || ctx.target === "draft-04" || ctx.target === "openapi-3.0" ? { type: "string" } : {},
           pattern: regex.source
@@ -60594,66 +60594,66 @@ var formatMap, stringProcessor = (schema, ctx, _json, _params) => {
     }
   }
 }, numberProcessor = (schema, ctx, _json, _params) => {
-  const json = _json;
+  const json2 = _json;
   const { minimum, maximum, format, multipleOf, exclusiveMaximum, exclusiveMinimum } = schema._zod.bag;
   if (typeof format === "string" && format.includes("int"))
-    json.type = "integer";
+    json2.type = "integer";
   else
-    json.type = "number";
+    json2.type = "number";
   const exMin = typeof exclusiveMinimum === "number" && exclusiveMinimum >= (minimum ?? Number.NEGATIVE_INFINITY);
   const exMax = typeof exclusiveMaximum === "number" && exclusiveMaximum <= (maximum ?? Number.POSITIVE_INFINITY);
   const legacy = ctx.target === "draft-04" || ctx.target === "openapi-3.0";
   if (exMin) {
     if (legacy) {
-      json.minimum = exclusiveMinimum;
-      json.exclusiveMinimum = true;
+      json2.minimum = exclusiveMinimum;
+      json2.exclusiveMinimum = true;
     } else {
-      json.exclusiveMinimum = exclusiveMinimum;
+      json2.exclusiveMinimum = exclusiveMinimum;
     }
   } else if (typeof minimum === "number") {
-    json.minimum = minimum;
+    json2.minimum = minimum;
   }
   if (exMax) {
     if (legacy) {
-      json.maximum = exclusiveMaximum;
-      json.exclusiveMaximum = true;
+      json2.maximum = exclusiveMaximum;
+      json2.exclusiveMaximum = true;
     } else {
-      json.exclusiveMaximum = exclusiveMaximum;
+      json2.exclusiveMaximum = exclusiveMaximum;
     }
   } else if (typeof maximum === "number") {
-    json.maximum = maximum;
+    json2.maximum = maximum;
   }
   if (typeof multipleOf === "number")
-    json.multipleOf = multipleOf;
-}, booleanProcessor = (_schema, _ctx, json, _params) => {
-  json.type = "boolean";
+    json2.multipleOf = multipleOf;
+}, booleanProcessor = (_schema, _ctx, json2, _params) => {
+  json2.type = "boolean";
 }, bigintProcessor = (_schema, ctx, _json, _params) => {
   if (ctx.unrepresentable === "throw") {
     throw new Error("BigInt cannot be represented in JSON Schema");
   }
-}, nullProcessor = (_schema, ctx, json, _params) => {
+}, nullProcessor = (_schema, ctx, json2, _params) => {
   if (ctx.target === "openapi-3.0") {
-    json.type = "string";
-    json.nullable = true;
-    json.enum = [null];
+    json2.type = "string";
+    json2.nullable = true;
+    json2.enum = [null];
   } else {
-    json.type = "null";
+    json2.type = "null";
   }
-}, neverProcessor = (_schema, _ctx, json, _params) => {
-  json.not = {};
+}, neverProcessor = (_schema, _ctx, json2, _params) => {
+  json2.not = {};
 }, anyProcessor = (_schema, _ctx, _json, _params) => {}, unknownProcessor = (_schema, _ctx, _json, _params) => {}, dateProcessor = (_schema, ctx, _json, _params) => {
   if (ctx.unrepresentable === "throw") {
     throw new Error("Date cannot be represented in JSON Schema");
   }
-}, enumProcessor = (schema, _ctx, json, _params) => {
+}, enumProcessor = (schema, _ctx, json2, _params) => {
   const def = schema._zod.def;
   const values = getEnumValues(def.entries);
   if (values.every((v) => typeof v === "number"))
-    json.type = "number";
+    json2.type = "number";
   if (values.every((v) => typeof v === "string"))
-    json.type = "string";
-  json.enum = values;
-}, literalProcessor = (schema, ctx, json, _params) => {
+    json2.type = "string";
+  json2.enum = values;
+}, literalProcessor = (schema, ctx, json2, _params) => {
   const def = schema._zod.def;
   const vals = [];
   for (const val of def.values) {
@@ -60673,22 +60673,22 @@ var formatMap, stringProcessor = (schema, ctx, _json, _params) => {
   }
   if (vals.length === 0) {} else if (vals.length === 1) {
     const val = vals[0];
-    json.type = val === null ? "null" : typeof val;
+    json2.type = val === null ? "null" : typeof val;
     if (ctx.target === "draft-04" || ctx.target === "openapi-3.0") {
-      json.enum = [val];
+      json2.enum = [val];
     } else {
-      json.const = val;
+      json2.const = val;
     }
   } else {
     if (vals.every((v) => typeof v === "number"))
-      json.type = "number";
+      json2.type = "number";
     if (vals.every((v) => typeof v === "string"))
-      json.type = "string";
+      json2.type = "string";
     if (vals.every((v) => typeof v === "boolean"))
-      json.type = "boolean";
+      json2.type = "boolean";
     if (vals.every((v) => v === null))
-      json.type = "null";
-    json.enum = vals;
+      json2.type = "null";
+    json2.enum = vals;
   }
 }, customProcessor = (_schema, ctx, _json, _params) => {
   if (ctx.unrepresentable === "throw") {
@@ -60699,26 +60699,26 @@ var formatMap, stringProcessor = (schema, ctx, _json, _params) => {
     throw new Error("Transforms cannot be represented in JSON Schema");
   }
 }, arrayProcessor = (schema, ctx, _json, params) => {
-  const json = _json;
+  const json2 = _json;
   const def = schema._zod.def;
   const { minimum, maximum } = schema._zod.bag;
   if (typeof minimum === "number")
-    json.minItems = minimum;
+    json2.minItems = minimum;
   if (typeof maximum === "number")
-    json.maxItems = maximum;
-  json.type = "array";
-  json.items = process2(def.element, ctx, {
+    json2.maxItems = maximum;
+  json2.type = "array";
+  json2.items = process2(def.element, ctx, {
     ...params,
     path: [...params.path, "items"]
   });
 }, objectProcessor = (schema, ctx, _json, params) => {
-  const json = _json;
+  const json2 = _json;
   const def = schema._zod.def;
-  json.type = "object";
-  json.properties = {};
+  json2.type = "object";
+  json2.properties = {};
   const shape = def.shape;
   for (const key2 in shape) {
-    json.properties[key2] = process2(shape[key2], ctx, {
+    json2.properties[key2] = process2(shape[key2], ctx, {
       ...params,
       path: [...params.path, "properties", key2]
     });
@@ -60733,20 +60733,20 @@ var formatMap, stringProcessor = (schema, ctx, _json, _params) => {
     }
   }));
   if (requiredKeys.size > 0) {
-    json.required = Array.from(requiredKeys);
+    json2.required = Array.from(requiredKeys);
   }
   if (def.catchall?._zod.def.type === "never") {
-    json.additionalProperties = false;
+    json2.additionalProperties = false;
   } else if (!def.catchall) {
     if (ctx.io === "output")
-      json.additionalProperties = false;
+      json2.additionalProperties = false;
   } else if (def.catchall) {
-    json.additionalProperties = process2(def.catchall, ctx, {
+    json2.additionalProperties = process2(def.catchall, ctx, {
       ...params,
       path: [...params.path, "additionalProperties"]
     });
   }
-}, unionProcessor = (schema, ctx, json, params) => {
+}, unionProcessor = (schema, ctx, json2, params) => {
   const def = schema._zod.def;
   const isExclusive = def.inclusive === false;
   const options = def.options.map((x2, i2) => process2(x2, ctx, {
@@ -60754,11 +60754,11 @@ var formatMap, stringProcessor = (schema, ctx, _json, _params) => {
     path: [...params.path, isExclusive ? "oneOf" : "anyOf", i2]
   }));
   if (isExclusive) {
-    json.oneOf = options;
+    json2.oneOf = options;
   } else {
-    json.anyOf = options;
+    json2.anyOf = options;
   }
-}, intersectionProcessor = (schema, ctx, json, params) => {
+}, intersectionProcessor = (schema, ctx, json2, params) => {
   const def = schema._zod.def;
   const a = process2(def.left, ctx, {
     ...params,
@@ -60773,11 +60773,11 @@ var formatMap, stringProcessor = (schema, ctx, _json, _params) => {
     ...isSimpleIntersection(a) ? a.allOf : [a],
     ...isSimpleIntersection(b) ? b.allOf : [b]
   ];
-  json.allOf = allOf;
+  json2.allOf = allOf;
 }, recordProcessor = (schema, ctx, _json, params) => {
-  const json = _json;
+  const json2 = _json;
   const def = schema._zod.def;
-  json.type = "object";
+  json2.type = "object";
   const keyType = def.keyType;
   const keyBag = keyType._zod.bag;
   const patterns = keyBag?.patterns;
@@ -60786,18 +60786,18 @@ var formatMap, stringProcessor = (schema, ctx, _json, _params) => {
       ...params,
       path: [...params.path, "patternProperties", "*"]
     });
-    json.patternProperties = {};
+    json2.patternProperties = {};
     for (const pattern of patterns) {
-      json.patternProperties[pattern.source] = valueSchema;
+      json2.patternProperties[pattern.source] = valueSchema;
     }
   } else {
     if (ctx.target === "draft-07" || ctx.target === "draft-2020-12") {
-      json.propertyNames = process2(def.keyType, ctx, {
+      json2.propertyNames = process2(def.keyType, ctx, {
         ...params,
         path: [...params.path, "propertyNames"]
       });
     }
-    json.additionalProperties = process2(def.valueType, ctx, {
+    json2.additionalProperties = process2(def.valueType, ctx, {
       ...params,
       path: [...params.path, "additionalProperties"]
     });
@@ -60806,38 +60806,38 @@ var formatMap, stringProcessor = (schema, ctx, _json, _params) => {
   if (keyValues) {
     const validKeyValues = [...keyValues].filter((v) => typeof v === "string" || typeof v === "number");
     if (validKeyValues.length > 0) {
-      json.required = validKeyValues;
+      json2.required = validKeyValues;
     }
   }
-}, nullableProcessor = (schema, ctx, json, params) => {
+}, nullableProcessor = (schema, ctx, json2, params) => {
   const def = schema._zod.def;
   const inner = process2(def.innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   if (ctx.target === "openapi-3.0") {
     seen.ref = def.innerType;
-    json.nullable = true;
+    json2.nullable = true;
   } else {
-    json.anyOf = [inner, { type: "null" }];
+    json2.anyOf = [inner, { type: "null" }];
   }
 }, nonoptionalProcessor = (schema, ctx, _json, params) => {
   const def = schema._zod.def;
   process2(def.innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   seen.ref = def.innerType;
-}, defaultProcessor = (schema, ctx, json, params) => {
+}, defaultProcessor = (schema, ctx, json2, params) => {
   const def = schema._zod.def;
   process2(def.innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   seen.ref = def.innerType;
-  json.default = JSON.parse(JSON.stringify(def.defaultValue));
-}, prefaultProcessor = (schema, ctx, json, params) => {
+  json2.default = JSON.parse(JSON.stringify(def.defaultValue));
+}, prefaultProcessor = (schema, ctx, json2, params) => {
   const def = schema._zod.def;
   process2(def.innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   seen.ref = def.innerType;
   if (ctx.io === "input")
-    json._prefault = JSON.parse(JSON.stringify(def.defaultValue));
-}, catchProcessor = (schema, ctx, json, params) => {
+    json2._prefault = JSON.parse(JSON.stringify(def.defaultValue));
+}, catchProcessor = (schema, ctx, json2, params) => {
   const def = schema._zod.def;
   process2(def.innerType, ctx, params);
   const seen = ctx.seen.get(schema);
@@ -60848,7 +60848,7 @@ var formatMap, stringProcessor = (schema, ctx, _json, _params) => {
   } catch {
     throw new Error("Dynamic catch values are not supported in JSON Schema");
   }
-  json.default = catchValue;
+  json2.default = catchValue;
 }, pipeProcessor = (schema, ctx, _json, params) => {
   const def = schema._zod.def;
   const inIsTransform = def.in._zod.traits.has("$ZodTransform");
@@ -60856,12 +60856,12 @@ var formatMap, stringProcessor = (schema, ctx, _json, _params) => {
   process2(innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   seen.ref = innerType;
-}, readonlyProcessor = (schema, ctx, json, params) => {
+}, readonlyProcessor = (schema, ctx, json2, params) => {
   const def = schema._zod.def;
   process2(def.innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   seen.ref = def.innerType;
-  json.readOnly = true;
+  json2.readOnly = true;
 }, optionalProcessor = (schema, ctx, _json, params) => {
   const def = schema._zod.def;
   process2(def.innerType, ctx, params);
@@ -61372,7 +61372,7 @@ var init_schemas2 = __esm(() => {
   _ZodString = /* @__PURE__ */ $constructor("_ZodString", (inst, def) => {
     $ZodString.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => stringProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => stringProcessor(inst, ctx, json2, params);
     const bag = inst._zod.bag;
     inst.format = bag.format ?? null;
     inst.minLength = bag.minimum ?? null;
@@ -61539,7 +61539,7 @@ var init_schemas2 = __esm(() => {
   ZodNumber = /* @__PURE__ */ $constructor("ZodNumber", (inst, def) => {
     $ZodNumber.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => numberProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => numberProcessor(inst, ctx, json2, params);
     _installLazyMethods(inst, "ZodNumber", {
       gt(value, params) {
         return this.check(_gt(value, params));
@@ -61601,12 +61601,12 @@ var init_schemas2 = __esm(() => {
   ZodBoolean = /* @__PURE__ */ $constructor("ZodBoolean", (inst, def) => {
     $ZodBoolean.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => booleanProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => booleanProcessor(inst, ctx, json2, params);
   });
   ZodBigInt = /* @__PURE__ */ $constructor("ZodBigInt", (inst, def) => {
     $ZodBigInt.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => bigintProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => bigintProcessor(inst, ctx, json2, params);
     inst.gte = (value, params) => inst.check(_gte(value, params));
     inst.min = (value, params) => inst.check(_gte(value, params));
     inst.gt = (value, params) => inst.check(_gt(value, params));
@@ -61628,27 +61628,27 @@ var init_schemas2 = __esm(() => {
   ZodNull = /* @__PURE__ */ $constructor("ZodNull", (inst, def) => {
     $ZodNull.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => nullProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => nullProcessor(inst, ctx, json2, params);
   });
   ZodAny = /* @__PURE__ */ $constructor("ZodAny", (inst, def) => {
     $ZodAny.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => anyProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => anyProcessor(inst, ctx, json2, params);
   });
   ZodUnknown = /* @__PURE__ */ $constructor("ZodUnknown", (inst, def) => {
     $ZodUnknown.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => unknownProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => unknownProcessor(inst, ctx, json2, params);
   });
   ZodNever = /* @__PURE__ */ $constructor("ZodNever", (inst, def) => {
     $ZodNever.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => neverProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => neverProcessor(inst, ctx, json2, params);
   });
   ZodDate = /* @__PURE__ */ $constructor("ZodDate", (inst, def) => {
     $ZodDate.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => dateProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => dateProcessor(inst, ctx, json2, params);
     inst.min = (value, params) => inst.check(_gte(value, params));
     inst.max = (value, params) => inst.check(_lte(value, params));
     const c = inst._zod.bag;
@@ -61658,7 +61658,7 @@ var init_schemas2 = __esm(() => {
   ZodArray = /* @__PURE__ */ $constructor("ZodArray", (inst, def) => {
     $ZodArray.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => arrayProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => arrayProcessor(inst, ctx, json2, params);
     inst.element = def.element;
     _installLazyMethods(inst, "ZodArray", {
       min(n, params) {
@@ -61681,7 +61681,7 @@ var init_schemas2 = __esm(() => {
   ZodObject = /* @__PURE__ */ $constructor("ZodObject", (inst, def) => {
     $ZodObjectJIT.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => objectProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => objectProcessor(inst, ctx, json2, params);
     exports_util.defineLazy(inst, "shape", () => {
       return def.shape;
     });
@@ -61730,7 +61730,7 @@ var init_schemas2 = __esm(() => {
   ZodUnion = /* @__PURE__ */ $constructor("ZodUnion", (inst, def) => {
     $ZodUnion.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => unionProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => unionProcessor(inst, ctx, json2, params);
     inst.options = def.options;
   });
   ZodDiscriminatedUnion = /* @__PURE__ */ $constructor("ZodDiscriminatedUnion", (inst, def) => {
@@ -61740,19 +61740,19 @@ var init_schemas2 = __esm(() => {
   ZodIntersection = /* @__PURE__ */ $constructor("ZodIntersection", (inst, def) => {
     $ZodIntersection.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => intersectionProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => intersectionProcessor(inst, ctx, json2, params);
   });
   ZodRecord = /* @__PURE__ */ $constructor("ZodRecord", (inst, def) => {
     $ZodRecord.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => recordProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => recordProcessor(inst, ctx, json2, params);
     inst.keyType = def.keyType;
     inst.valueType = def.valueType;
   });
   ZodEnum = /* @__PURE__ */ $constructor("ZodEnum", (inst, def) => {
     $ZodEnum.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => enumProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => enumProcessor(inst, ctx, json2, params);
     inst.enum = def.entries;
     inst.options = Object.values(def.entries);
     const keys = new Set(Object.keys(def.entries));
@@ -61790,7 +61790,7 @@ var init_schemas2 = __esm(() => {
   ZodLiteral = /* @__PURE__ */ $constructor("ZodLiteral", (inst, def) => {
     $ZodLiteral.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => literalProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => literalProcessor(inst, ctx, json2, params);
     inst.values = new Set(def.values);
     Object.defineProperty(inst, "value", {
       get() {
@@ -61804,7 +61804,7 @@ var init_schemas2 = __esm(() => {
   ZodTransform = /* @__PURE__ */ $constructor("ZodTransform", (inst, def) => {
     $ZodTransform.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => transformProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => transformProcessor(inst, ctx, json2, params);
     inst._zod.parse = (payload2, _ctx) => {
       if (_ctx.direction === "backward") {
         throw new $ZodEncodeError(inst.constructor.name);
@@ -61838,51 +61838,51 @@ var init_schemas2 = __esm(() => {
   ZodOptional = /* @__PURE__ */ $constructor("ZodOptional", (inst, def) => {
     $ZodOptional.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => optionalProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => optionalProcessor(inst, ctx, json2, params);
     inst.unwrap = () => inst._zod.def.innerType;
   });
   ZodExactOptional = /* @__PURE__ */ $constructor("ZodExactOptional", (inst, def) => {
     $ZodExactOptional.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => optionalProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => optionalProcessor(inst, ctx, json2, params);
     inst.unwrap = () => inst._zod.def.innerType;
   });
   ZodNullable = /* @__PURE__ */ $constructor("ZodNullable", (inst, def) => {
     $ZodNullable.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => nullableProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => nullableProcessor(inst, ctx, json2, params);
     inst.unwrap = () => inst._zod.def.innerType;
   });
   ZodDefault = /* @__PURE__ */ $constructor("ZodDefault", (inst, def) => {
     $ZodDefault.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => defaultProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => defaultProcessor(inst, ctx, json2, params);
     inst.unwrap = () => inst._zod.def.innerType;
     inst.removeDefault = inst.unwrap;
   });
   ZodPrefault = /* @__PURE__ */ $constructor("ZodPrefault", (inst, def) => {
     $ZodPrefault.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => prefaultProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => prefaultProcessor(inst, ctx, json2, params);
     inst.unwrap = () => inst._zod.def.innerType;
   });
   ZodNonOptional = /* @__PURE__ */ $constructor("ZodNonOptional", (inst, def) => {
     $ZodNonOptional.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => nonoptionalProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => nonoptionalProcessor(inst, ctx, json2, params);
     inst.unwrap = () => inst._zod.def.innerType;
   });
   ZodCatch = /* @__PURE__ */ $constructor("ZodCatch", (inst, def) => {
     $ZodCatch.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => catchProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => catchProcessor(inst, ctx, json2, params);
     inst.unwrap = () => inst._zod.def.innerType;
     inst.removeCatch = inst.unwrap;
   });
   ZodPipe = /* @__PURE__ */ $constructor("ZodPipe", (inst, def) => {
     $ZodPipe.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => pipeProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => pipeProcessor(inst, ctx, json2, params);
     inst.in = def.in;
     inst.out = def.out;
   });
@@ -61893,13 +61893,13 @@ var init_schemas2 = __esm(() => {
   ZodReadonly = /* @__PURE__ */ $constructor("ZodReadonly", (inst, def) => {
     $ZodReadonly.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => readonlyProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => readonlyProcessor(inst, ctx, json2, params);
     inst.unwrap = () => inst._zod.def.innerType;
   });
   ZodCustom = /* @__PURE__ */ $constructor("ZodCustom", (inst, def) => {
     $ZodCustom.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => customProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => customProcessor(inst, ctx, json2, params);
   });
 });
 
@@ -74572,15 +74572,11 @@ var COMPUTER_HOST_PAGE_CSP = [
   "frame-ancestors 'none'"
 ].join("; ");
 
-// src/workers/engine/index.ts
-init_source_failure();
-
 // src/workers/dashboard/models-on-computer.ts
 var LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]", "0.0.0.0"]);
 
 // src/workers/engine/index.ts
 init_google_own_app();
-init_sovereignty();
 init_first_run_privacy();
 
 // src/core/settings-proposal.ts
@@ -74613,42 +74609,21 @@ var SETTINGS_PROPOSAL_SCHEMA = {
   }
 };
 
-// src/workers/settings-proposal-holder.ts
-init_privacy_language();
-
 // src/workers/engine/index.ts
 init_privacy_language();
 init_source_scope_approval();
 init_app_release_agent();
 init_release_manifest();
 init_update_check();
-init_google_handle_compatibility();
-init_source_account_binding();
-init_source_registry();
-init_consent_page();
 init_analyst();
 init_types();
 init_file_lease();
 init_olympus_layout();
 init_email_policy();
-
-// src/core/google-pilot-client.ts
-var RETIRED_GOOGLE_PILOT_CLIENT_ID_SHA256 = new Set([
-  "de8b8602a0b5d721f22bc9e72a5b193d4cc99577e03db034ff328c8e739d3fee"
-]);
-
-// src/workers/engine/index.ts
-init_publisher_oauth_client();
 init_oauth_relay();
 init_connect();
 init_operation_error();
-init_operation_caller();
-init_store2();
 init_ingestion_throughput();
-init_secret_store();
-init_source_corpus_registry();
-init_selected_item_safety();
-init_venice_models();
 
 // src/workers/email-source/write-routes.ts
 init_cli_via_worker();
@@ -74697,77 +74672,16 @@ var WRITE_ROUTES = new Set(WORKER_WRITE_ROUTES.map((route) => `${route.method} $
 init_judge_check();
 init_unpaired_sources();
 init_pairing_session_paths();
-
-// src/core/messaging-account-move.ts
-init_atomic_file();
-init_messaging_capture_grant_file();
-init_olympus_layout();
-init_source_registry();
-init_unpaired_sources();
-
-// src/workers/engine/index.ts
 init_text();
 init_transcription();
 init_runner();
-
-// src/workers/source-index/answer-latency-log.ts
-init_olympus_layout();
-init_answer_latency_trace();
-var DEFAULT_SOURCE_ANSWER_LATENCY_MAX_BYTES = 32 * 1024 * 1024;
-
-// src/workers/engine/index.ts
 init_answer_latency_trace();
 init_status();
 init_readwise();
 init_x_bookmarks();
-
-// src/workers/local-files/approved-scope-filter.ts
-init_locator_path_scope_codec();
-var LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC = locatorPathApprovedScopeCodec("local files");
-
-// src/workers/local-files/locator-result-projector.ts
-init_scope();
-init_paths();
-import { pathToFileURL as pathToFileURL3 } from "node:url";
-var LOCAL_FILES_LOCATOR_RESULT_PROJECTOR_CODEC = Object.freeze({
-  create(input) {
-    return Object.freeze({
-      project(candidate2) {
-        if (input.principal.provider !== LOCAL_FILES_PROVIDER || candidate2.sourceItem.family !== "file" || candidate2.sourceItem.provider !== input.principal.provider || candidate2.sourceItem.accountScope !== input.principal.accountScope)
-          return;
-        const locator = locatorFromScopePath(candidate2.readLocatorUri());
-        return locator ? { locator } : undefined;
-      }
-    });
-  }
-});
-function locatorFromScopePath(value) {
-  if (!value?.startsWith("/"))
-    return;
-  let split;
-  try {
-    split = splitScopePath(value);
-  } catch {
-    return;
-  }
-  if (split.path === "/")
-    return;
-  const parent = split.path.slice(0, split.path.lastIndexOf("/")) || "/";
-  const locator = {
-    display_path: split.path,
-    parent_display_path: parent
-  };
-  if (!split.volumeId) {
-    locator.finder_url = pathToFileURL3(split.path).href;
-    locator.parent_finder_url = pathToFileURL3(parent).href;
-  }
-  return locator;
-}
-
-// src/workers/engine/index.ts
 init_dropbox_files();
-init_telegram_messages();
 init_embeddings();
+init_sovereignty();
 
 // src/workers/source-watch-runtime.ts
 init_source_watch();
@@ -74973,129 +74887,6 @@ init_source_ingestion_ledger();
 init_connected_handles();
 init_credential_broker();
 init_connector_store();
-
-// src/workers/chat/chat-scope-filter.ts
-init_principal();
-import { createHash as createHash28 } from "node:crypto";
-var STRUCTURED_CHAT_SCOPE_MARKER = ":chat:";
-var UNRESOLVED_CHAT_TITLE_CONVERSATION_ID_PREFIX = "__chat_title_unresolved__:";
-var CHAT_SCOPE_FILTER_CODEC = Object.freeze({
-  resolveConversationId(value, readTitleCandidates) {
-    const structured = parseStructuredChatScope(value);
-    if (structured) {
-      return {
-        kind: "structured",
-        conversationId: structured.conversationId,
-        ...structured.provider ? { provider: structured.provider } : {},
-        accountScope: structured.accountScope,
-        resolved: true
-      };
-    }
-    if (looksLikeStructuredChatScope(value)) {
-      return {
-        kind: "invalid",
-        conversationId: "",
-        resolved: false
-      };
-    }
-    const chatScope = value.trim();
-    const terms = conversationTitleTerms(chatScope);
-    if (terms.length === 0)
-      return unresolvedChatTitleResolution(chatScope);
-    const lookupTerms = terms.flatMap((term) => term === "4th" ? ["4th", "fourth"] : [term]);
-    const lookup3 = readTitleCandidates(lookupTerms);
-    if (lookup3.truncated)
-      return unresolvedChatTitleResolution(chatScope);
-    const rankedByConversation = new Map;
-    for (const candidate2 of lookup3.candidates) {
-      const score = conversationTitleMatchScore(candidate2.title, terms);
-      const exact = conversationTitleExactMatch(candidate2.title, terms);
-      if (!exact && (terms.length < 2 || score < Math.min(3, terms.length)))
-        continue;
-      const prior = rankedByConversation.get(candidate2.conversationId);
-      if (!prior || Number(exact) > Number(prior.exact) || exact === prior.exact && score > prior.score) {
-        rankedByConversation.set(candidate2.conversationId, {
-          conversationId: candidate2.conversationId,
-          exact,
-          score
-        });
-      }
-    }
-    const ranked = [...rankedByConversation.values()].sort((left, right) => {
-      if (left.exact !== right.exact)
-        return left.exact ? -1 : 1;
-      return right.score - left.score;
-    });
-    const best = ranked[0];
-    if (!best || ranked[1] && ranked[1].score === best.score) {
-      return unresolvedChatTitleResolution(chatScope);
-    }
-    return { kind: "title", conversationId: best.conversationId, resolved: true };
-  }
-});
-function parseStructuredChatScope(value) {
-  const parts = value.split(":");
-  if (parts.length !== 3 || parts[1] !== "chat")
-    return;
-  const accountScope = parts[0].trim();
-  const conversationId = parts[2].trim();
-  if (parts[0] !== accountScope || parts[2] !== conversationId || !isCanonicalConnectorStoreAccountScope(accountScope) || !conversationId) {
-    return;
-  }
-  const provider = accountScope.includes(".") ? accountScope.split(".", 1)[0] : undefined;
-  return {
-    ...provider ? { provider } : {},
-    accountScope,
-    conversationId
-  };
-}
-function looksLikeStructuredChatScope(value) {
-  return value.includes(STRUCTURED_CHAT_SCOPE_MARKER);
-}
-function unresolvedChatTitleResolution(value) {
-  return {
-    kind: "title",
-    conversationId: `${UNRESOLVED_CHAT_TITLE_CONVERSATION_ID_PREFIX}${safeDigest(value).slice(0, 24)}`,
-    resolved: false
-  };
-}
-function safeDigest(value) {
-  return createHash28("sha256").update(value).digest("hex");
-}
-function conversationTitleTerms(value) {
-  const seen = new Set;
-  const terms = [];
-  for (const token of value.toLowerCase().match(/[a-z0-9]+/g) ?? []) {
-    if (CHAT_TITLE_STOPWORDS.has(token) || token.length < 3)
-      continue;
-    const normalized = token === "fourth" ? "4th" : token;
-    if (seen.has(normalized))
-      continue;
-    seen.add(normalized);
-    terms.push(normalized);
-  }
-  return terms;
-}
-function conversationTitleMatchScore(title, terms) {
-  const titleTerms = new Set((title.toLowerCase().match(/[a-z0-9]+/g) ?? []).map((token) => token === "fourth" ? "4th" : token));
-  return terms.reduce((score, term) => score + Number(titleTerms.has(term)), 0);
-}
-function conversationTitleExactMatch(title, terms) {
-  const titleTerms = conversationTitleTerms(title);
-  return titleTerms.length === terms.length && titleTerms.every((term, index) => term === terms[index]);
-}
-var CHAT_TITLE_STOPWORDS = new Set([
-  "the",
-  "and",
-  "for",
-  "group",
-  "chat",
-  "named",
-  "conversation",
-  "telegram"
-]);
-
-// src/workers/engine/index.ts
 init_this_computer();
 init_data_lifecycle();
 init_cli_via_worker();
@@ -75278,7 +75069,7 @@ init_paths();
 
 // src/workers/local-files/volume-identity.ts
 init_paths();
-import { createHash as createHash29 } from "node:crypto";
+import { createHash as createHash28 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
 import { existsSync as existsSync30, lstatSync as lstatSync15, readFileSync as readFileSync25, readdirSync as readdirSync5, realpathSync as realpathSync8 } from "node:fs";
 import { homedir as homedir16 } from "node:os";
@@ -75488,7 +75279,7 @@ function labelFor2(mountPoint) {
   return mountPoint.slice(mountPoint.lastIndexOf("/") + 1) || mountPoint;
 }
 function shortHash(value) {
-  return createHash29("sha256").update(value).digest("hex").slice(0, 16);
+  return createHash28("sha256").update(value).digest("hex").slice(0, 16);
 }
 function normalizeNetworkSource(source) {
   return source.trim().toLowerCase().replace(/^\/\/[^@/]*@/, "//").replace(/\/+$/, "");
@@ -76029,8 +75820,200 @@ init_data_lifecycle();
 init_tier_cli();
 init_source_ingestion_ledger();
 
-// src/workers/engine/index.ts
-init_corpora();
+// src/workers/engine/http/worker-options.ts
+init_first_run_privacy();
+
+// src/workers/settings-proposal-holder.ts
+init_privacy_language();
+
+// src/workers/engine/http/worker-options.ts
+init_privacy_language();
+
+// src/workers/engine/http/connector-store-search-request.ts
+init_x_bookmarks();
+
+// src/workers/local-files/approved-scope-filter.ts
+init_locator_path_scope_codec();
+var LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC = locatorPathApprovedScopeCodec("local files");
+
+// src/workers/local-files/locator-result-projector.ts
+init_scope();
+init_paths();
+import { pathToFileURL as pathToFileURL3 } from "node:url";
+var LOCAL_FILES_LOCATOR_RESULT_PROJECTOR_CODEC = Object.freeze({
+  create(input) {
+    return Object.freeze({
+      project(candidate2) {
+        if (input.principal.provider !== LOCAL_FILES_PROVIDER || candidate2.sourceItem.family !== "file" || candidate2.sourceItem.provider !== input.principal.provider || candidate2.sourceItem.accountScope !== input.principal.accountScope)
+          return;
+        const locator = locatorFromScopePath(candidate2.readLocatorUri());
+        return locator ? { locator } : undefined;
+      }
+    });
+  }
+});
+function locatorFromScopePath(value) {
+  if (!value?.startsWith("/"))
+    return;
+  let split;
+  try {
+    split = splitScopePath(value);
+  } catch {
+    return;
+  }
+  if (split.path === "/")
+    return;
+  const parent = split.path.slice(0, split.path.lastIndexOf("/")) || "/";
+  const locator = {
+    display_path: split.path,
+    parent_display_path: parent
+  };
+  if (!split.volumeId) {
+    locator.finder_url = pathToFileURL3(split.path).href;
+    locator.parent_finder_url = pathToFileURL3(parent).href;
+  }
+  return locator;
+}
+
+// src/workers/engine/http/connector-store-search-request.ts
+init_dropbox_files();
+init_connector_store();
+
+// src/workers/chat/chat-scope-filter.ts
+init_principal();
+import { createHash as createHash29 } from "node:crypto";
+var STRUCTURED_CHAT_SCOPE_MARKER = ":chat:";
+var UNRESOLVED_CHAT_TITLE_CONVERSATION_ID_PREFIX = "__chat_title_unresolved__:";
+var CHAT_SCOPE_FILTER_CODEC = Object.freeze({
+  resolveConversationId(value, readTitleCandidates) {
+    const structured = parseStructuredChatScope(value);
+    if (structured) {
+      return {
+        kind: "structured",
+        conversationId: structured.conversationId,
+        ...structured.provider ? { provider: structured.provider } : {},
+        accountScope: structured.accountScope,
+        resolved: true
+      };
+    }
+    if (looksLikeStructuredChatScope(value)) {
+      return {
+        kind: "invalid",
+        conversationId: "",
+        resolved: false
+      };
+    }
+    const chatScope = value.trim();
+    const terms = conversationTitleTerms(chatScope);
+    if (terms.length === 0)
+      return unresolvedChatTitleResolution(chatScope);
+    const lookupTerms = terms.flatMap((term) => term === "4th" ? ["4th", "fourth"] : [term]);
+    const lookup3 = readTitleCandidates(lookupTerms);
+    if (lookup3.truncated)
+      return unresolvedChatTitleResolution(chatScope);
+    const rankedByConversation = new Map;
+    for (const candidate2 of lookup3.candidates) {
+      const score = conversationTitleMatchScore(candidate2.title, terms);
+      const exact = conversationTitleExactMatch(candidate2.title, terms);
+      if (!exact && (terms.length < 2 || score < Math.min(3, terms.length)))
+        continue;
+      const prior = rankedByConversation.get(candidate2.conversationId);
+      if (!prior || Number(exact) > Number(prior.exact) || exact === prior.exact && score > prior.score) {
+        rankedByConversation.set(candidate2.conversationId, {
+          conversationId: candidate2.conversationId,
+          exact,
+          score
+        });
+      }
+    }
+    const ranked = [...rankedByConversation.values()].sort((left, right) => {
+      if (left.exact !== right.exact)
+        return left.exact ? -1 : 1;
+      return right.score - left.score;
+    });
+    const best = ranked[0];
+    if (!best || ranked[1] && ranked[1].score === best.score) {
+      return unresolvedChatTitleResolution(chatScope);
+    }
+    return { kind: "title", conversationId: best.conversationId, resolved: true };
+  }
+});
+function parseStructuredChatScope(value) {
+  const parts = value.split(":");
+  if (parts.length !== 3 || parts[1] !== "chat")
+    return;
+  const accountScope = parts[0].trim();
+  const conversationId = parts[2].trim();
+  if (parts[0] !== accountScope || parts[2] !== conversationId || !isCanonicalConnectorStoreAccountScope(accountScope) || !conversationId) {
+    return;
+  }
+  const provider = accountScope.includes(".") ? accountScope.split(".", 1)[0] : undefined;
+  return {
+    ...provider ? { provider } : {},
+    accountScope,
+    conversationId
+  };
+}
+function looksLikeStructuredChatScope(value) {
+  return value.includes(STRUCTURED_CHAT_SCOPE_MARKER);
+}
+function unresolvedChatTitleResolution(value) {
+  return {
+    kind: "title",
+    conversationId: `${UNRESOLVED_CHAT_TITLE_CONVERSATION_ID_PREFIX}${safeDigest(value).slice(0, 24)}`,
+    resolved: false
+  };
+}
+function safeDigest(value) {
+  return createHash29("sha256").update(value).digest("hex");
+}
+function conversationTitleTerms(value) {
+  const seen = new Set;
+  const terms = [];
+  for (const token of value.toLowerCase().match(/[a-z0-9]+/g) ?? []) {
+    if (CHAT_TITLE_STOPWORDS.has(token) || token.length < 3)
+      continue;
+    const normalized = token === "fourth" ? "4th" : token;
+    if (seen.has(normalized))
+      continue;
+    seen.add(normalized);
+    terms.push(normalized);
+  }
+  return terms;
+}
+function conversationTitleMatchScore(title, terms) {
+  const titleTerms = new Set((title.toLowerCase().match(/[a-z0-9]+/g) ?? []).map((token) => token === "fourth" ? "4th" : token));
+  return terms.reduce((score, term) => score + Number(titleTerms.has(term)), 0);
+}
+function conversationTitleExactMatch(title, terms) {
+  const titleTerms = conversationTitleTerms(title);
+  return titleTerms.length === terms.length && titleTerms.every((term, index) => term === terms[index]);
+}
+var CHAT_TITLE_STOPWORDS = new Set([
+  "the",
+  "and",
+  "for",
+  "group",
+  "chat",
+  "named",
+  "conversation",
+  "telegram"
+]);
+
+// src/workers/engine/http/request-fields.ts
+init_operation_caller();
+init_source_corpus_registry();
+
+// src/workers/engine/http/source-index-requests.ts
+init_selected_item_safety();
+init_venice_models();
+init_readwise();
+init_x_bookmarks();
+init_dropbox_files();
+init_telegram_messages();
+init_connector_store();
+
+// src/workers/engine/http/connector-store-search-request.ts
 var CONNECTOR_STORE_FILTER_CAPABILITIES = connectorStoreFilterCapabilityRegistry([
   [{ family: "chat" }, { chatScope: CHAT_SCOPE_FILTER_CODEC }],
   [{ family: "x" }, { folder: X_BOOKMARKS_FOLDER_FILTER_CODEC }],
@@ -76043,6 +76026,13 @@ var CONNECTOR_STORE_FILTER_CAPABILITIES = connectorStoreFilterCapabilityRegistry
     resultProjector: LOCAL_FILES_LOCATOR_RESULT_PROJECTOR_CODEC
   }]
 ]);
+
+// src/workers/engine/http/dashboard-oauth-attempts.ts
+init_secret_store();
+init_http();
+
+// src/workers/engine/http/file-extraction.ts
+init_dropbox_files();
 var DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox";
 var FILE_EXTRACTION_ROUTE_ALIASES = new Map([
   ["/source/index/dropbox/content/extract", {
@@ -76077,7 +76067,70 @@ var FILE_EXTRACTION_ROUTE_ALIASES = new Map([
   }]
 ]);
 
+// src/workers/source-index/answer-latency-log.ts
+init_olympus_layout();
+init_answer_latency_trace();
+var DEFAULT_SOURCE_ANSWER_LATENCY_MAX_BYTES = 32 * 1024 * 1024;
+
+// src/workers/engine/http/source-answer-runtime.ts
+init_answer_latency_trace();
+init_source_failure();
+
+// src/workers/engine/http/dropbox-export-requests.ts
+init_dropbox_files();
+
+// src/workers/engine/http/dashboard-source-requests.ts
+init_source_scope_approval();
+init_store2();
+init_readwise();
+init_x_bookmarks();
+init_dropbox_files();
+init_telegram_messages();
+init_corpora();
+init_source_dashboard();
+
+// src/workers/engine/http/dashboard-connections.ts
+init_google_handle_compatibility();
+init_source_account_binding();
+init_source_registry();
+init_secret_store();
+init_source_dashboard();
+init_connected_handles();
+init_this_computer();
+
+// src/workers/engine/http/dashboard-oauth-pages.ts
+init_consent_page();
+init_connect();
+init_http();
+
+// src/workers/engine/http/dashboard-oauth-clients.ts
+init_google_own_app();
+// src/core/google-pilot-client.ts
+var RETIRED_GOOGLE_PILOT_CLIENT_ID_SHA256 = new Set([
+  "de8b8602a0b5d721f22bc9e72a5b193d4cc99577e03db034ff328c8e739d3fee"
+]);
+
+// src/workers/engine/http/dashboard-oauth-clients.ts
+init_publisher_oauth_client();
+init_oauth_relay();
+init_secret_store();
+
+// src/workers/engine/http/dashboard-pairing.ts
+init_unpaired_sources();
+init_pairing_session_paths();
+
+// src/core/messaging-account-move.ts
+init_atomic_file();
+init_messaging_capture_grant_file();
+init_olympus_layout();
+init_source_registry();
+init_unpaired_sources();
+
+// src/workers/engine/http/x-bookmarks-admin.ts
+init_x_bookmarks();
+
 // src/workers/engine/server.ts
+init_corpora();
 init_analyst_answer();
 init_status();
 init_http();
@@ -82524,13 +82577,13 @@ if (__require.main == __require.module) {
       console.error(error2.message);
       process.exit(1);
     }
-    const json = JSON.stringify(report, null, 2);
+    const json2 = JSON.stringify(report, null, 2);
     if (args.reportPath) {
       mkdirSync20(dirname43(args.reportPath), { recursive: true });
-      writeFileSync7(args.reportPath, `${json}
+      writeFileSync7(args.reportPath, `${json2}
 `);
     }
-    console.log(json);
+    console.log(json2);
     process.exit();
   }
   const options = optionsFromEnv(process.env);
@@ -82544,11 +82597,11 @@ if (__require.main == __require.module) {
     }
     publishNativeEmbeddingDrainReadiness(process.env);
     const report = await runSourceEmbeddingDrain(options);
-    const json = JSON.stringify(report, null, 2);
+    const json2 = JSON.stringify(report, null, 2);
     if (args.reportPath)
-      writeFileSync7(args.reportPath, `${json}
+      writeFileSync7(args.reportPath, `${json2}
 `);
-    console.log(json);
+    console.log(json2);
     if (process.env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_EXIT_ON_ATTENTION === "true" && report.status === "attention") {
       process.exitCode = 1;
     }

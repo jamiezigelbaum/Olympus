@@ -12,11 +12,8 @@ import {
   workerAuthTokenFromConfig,
   workerAuthTokenProvider,
 } from '../src/core/worker-auth.ts';
-import {
-  createEmailSourceWorker,
-  type EmailSourceConnector,
-  type EmailSourceHealth,
-} from '../src/workers/engine/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
+import type { EmailSourceConnector, EmailSourceHealth } from '../src/workers/email-source/email-connector.ts';
 import { resolveEmailSourceBindHostFromEnv } from '../src/workers/engine/server.ts';
 import { DASHBOARD_UNLOCK_HEADER } from '../src/core/dashboard-launch.ts';
 import {
