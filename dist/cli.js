@@ -81409,7 +81409,9 @@ function fileMimeTypeFromName(name) {
   if (dot2 <= 0 || dot2 === name.length - 1)
     return "application/octet-stream";
   const extension = name.slice(dot2 + 1).toLowerCase();
-  return MIME_BY_EXTENSION[extension] ?? (SOURCE_CODE_EXTENSIONS.has(extension) ? "text/plain" : "application/octet-stream");
+  if (Object.hasOwn(MIME_BY_EXTENSION, extension))
+    return MIME_BY_EXTENSION[extension];
+  return SOURCE_CODE_EXTENSIONS.has(extension) ? "text/plain" : "application/octet-stream";
 }
 function fileMimeTypeFromBytes(bytes) {
   const image = stillImageFormatFromBytes(bytes);
@@ -93517,6 +93519,255 @@ var init_bounded_text = __esm(() => {
   ]);
 });
 
+// src/workers/file-extraction/extractors/rtf.ts
+function hasRtfSignature(bytes) {
+  return bytes.length >= 5 && bytes[0] === 123 && bytes[1] === 92 && bytes[2] === 114 && bytes[3] === 116 && bytes[4] === 102;
+}
+function rtfToText(source, maxChars) {
+  const out = [];
+  let length = 0;
+  const emit = (text3) => {
+    if (length >= maxChars)
+      return;
+    const room = maxChars - length;
+    const piece = text3.length > room ? text3.slice(0, room) : text3;
+    out.push(piece);
+    length += piece.length;
+  };
+  let codePage = 1252;
+  const stack = [];
+  let state = { skip: false, unicodeSkip: 1 };
+  let pendingSkip = 0;
+  let groupStart = false;
+  const hexBytes = [];
+  const flushHex = () => {
+    if (hexBytes.length === 0)
+      return;
+    if (!state.skip)
+      emit(decodeCodePage(Uint8Array.from(hexBytes), codePage));
+    hexBytes.length = 0;
+  };
+  let index = 0;
+  while (index < source.length && length < maxChars) {
+    const char = source[index];
+    if (char === "{") {
+      flushHex();
+      stack.push(state);
+      state = { ...state };
+      groupStart = true;
+      pendingSkip = 0;
+      index += 1;
+      continue;
+    }
+    if (char === "}") {
+      flushHex();
+      state = stack.pop() ?? { skip: false, unicodeSkip: 1 };
+      groupStart = false;
+      pendingSkip = 0;
+      index += 1;
+      continue;
+    }
+    if (char === "\\") {
+      const next = source[index + 1];
+      if (next === undefined)
+        break;
+      if (next === "'") {
+        const hex = source.slice(index + 2, index + 4);
+        index += 4;
+        if (pendingSkip > 0) {
+          pendingSkip -= 1;
+          continue;
+        }
+        const value2 = Number.parseInt(hex, 16);
+        if (Number.isFinite(value2))
+          hexBytes.push(value2);
+        groupStart = false;
+        continue;
+      }
+      flushHex();
+      if (next === "*") {
+        if (groupStart)
+          state.skip = true;
+        index += 2;
+        continue;
+      }
+      if (!isLetter(next)) {
+        index += 2;
+        groupStart = false;
+        const symbol = next === "\\" || next === "{" || next === "}" ? next : next === "~" ? " " : next === "_" ? "-" : next === `
+` || next === "\r" ? `
+` : undefined;
+        if (symbol === undefined)
+          continue;
+        if (pendingSkip > 0) {
+          pendingSkip -= 1;
+          continue;
+        }
+        if (!state.skip)
+          emit(symbol);
+        continue;
+      }
+      let end = index + 1;
+      while (end < source.length && end - index <= 32 && isLetter(source[end]))
+        end += 1;
+      const word = source.slice(index + 1, end);
+      index = end;
+      let digitsEnd = source[index] === "-" ? index + 1 : index;
+      while (digitsEnd < source.length && digitsEnd - index < 11 && isDigit(source[digitsEnd]))
+        digitsEnd += 1;
+      const parameter = digitsEnd > index && isDigit(source[digitsEnd - 1]) ? source.slice(index, digitsEnd) : undefined;
+      if (parameter !== undefined)
+        index = digitsEnd;
+      if (source[index] === " ")
+        index += 1;
+      const value = parameter === undefined ? undefined : Number(parameter);
+      const atStart = groupStart;
+      groupStart = false;
+      if (atStart && SKIPPED_DESTINATIONS.has(word)) {
+        state.skip = true;
+        continue;
+      }
+      if (word === "ansicpg" && value !== undefined) {
+        codePage = value;
+        continue;
+      }
+      if (word === "uc" && value !== undefined) {
+        state.unicodeSkip = Math.max(0, value);
+        continue;
+      }
+      if (word === "u" && value !== undefined) {
+        if (!state.skip)
+          emit(String.fromCharCode(value < 0 ? value + 65536 : value));
+        pendingSkip = state.unicodeSkip;
+        continue;
+      }
+      if (word === "bin" && value !== undefined) {
+        index += Math.max(0, value);
+        continue;
+      }
+      if (!state.skip && BREAKS[word] !== undefined)
+        emit(BREAKS[word]);
+      continue;
+    }
+    if (char === "\r" || char === `
+`) {
+      index += 1;
+      continue;
+    }
+    flushHex();
+    groupStart = false;
+    index += 1;
+    if (pendingSkip > 0) {
+      pendingSkip -= 1;
+      continue;
+    }
+    if (!state.skip)
+      emit(char);
+  }
+  flushHex();
+  return out.join("");
+}
+function isLetter(char) {
+  const code = char.charCodeAt(0);
+  return code >= 65 && code <= 90 || code >= 97 && code <= 122;
+}
+function isDigit(char) {
+  const code = char.charCodeAt(0);
+  return code >= 48 && code <= 57;
+}
+function decodeCodePage(bytes, codePage) {
+  const label = CODE_PAGE_LABELS.get(codePage);
+  if (label) {
+    try {
+      return new TextDecoder(label).decode(bytes);
+    } catch {}
+  }
+  return String.fromCharCode(...Array.from(bytes, (byte) => byte < 128 ? byte : 65533));
+}
+var RTF_MIME_TYPES, SKIPPED_DESTINATIONS, BREAKS, CODE_PAGE_LABELS;
+var init_rtf = __esm(() => {
+  RTF_MIME_TYPES = new Set(["application/rtf", "text/rtf"]);
+  SKIPPED_DESTINATIONS = new Set([
+    "fonttbl",
+    "colortbl",
+    "stylesheet",
+    "info",
+    "pict",
+    "object",
+    "listtable",
+    "listoverridetable",
+    "rsidtbl",
+    "generator",
+    "themedata",
+    "colorschememapping",
+    "datastore",
+    "latentstyles",
+    "xmlnstbl",
+    "header",
+    "headerl",
+    "headerr",
+    "headerf",
+    "footer",
+    "footerl",
+    "footerr",
+    "footerf",
+    "filetbl",
+    "revtbl",
+    "mmathPr",
+    "pgdsctbl",
+    "fldinst"
+  ]);
+  BREAKS = {
+    par: `
+`,
+    line: `
+`,
+    sect: `
+`,
+    page: `
+`,
+    row: `
+`,
+    tab: "\t",
+    cell: "\t",
+    emdash: "—",
+    endash: "–",
+    bullet: "•",
+    lquote: "‘",
+    rquote: "’",
+    ldblquote: "“",
+    rdblquote: "”",
+    emspace: " ",
+    enspace: " ",
+    qmspace: " "
+  };
+  CODE_PAGE_LABELS = new Map([
+    [866, "ibm866"],
+    [874, "windows-874"],
+    [932, "shift_jis"],
+    [936, "gbk"],
+    [949, "euc-kr"],
+    [950, "big5"],
+    [1250, "windows-1250"],
+    [1251, "windows-1251"],
+    [1252, "windows-1252"],
+    [1253, "windows-1253"],
+    [1254, "windows-1254"],
+    [1255, "windows-1255"],
+    [1256, "windows-1256"],
+    [1257, "windows-1257"],
+    [1258, "windows-1258"],
+    [1e4, "macintosh"],
+    [10007, "x-mac-cyrillic"],
+    [20866, "koi8-r"],
+    [28591, "iso-8859-1"],
+    [28592, "iso-8859-2"],
+    [28595, "iso-8859-5"],
+    [54936, "gb18030"],
+    [65001, "utf-8"]
+  ]);
+});
+
 // src/workers/file-extraction/extractors/document-formats.ts
 import { Buffer as Buffer5 } from "node:buffer";
 import { inflateRawSync as inflateRawSync2, inflateSync } from "node:zlib";
@@ -94564,6 +94815,20 @@ function createTextExtractor(options = {}) {
           ]
         });
       }
+      if (mimeType && RTF_MIME_TYPES.has(mimeType)) {
+        if (!hasRtfSignature(bytes))
+          return { status: "skipped_unsupported" };
+        const plain = rtfToText(new TextDecoder("latin1").decode(bytes), maxBoundedTextChars + 1);
+        const bounded2 = boundText(normalizeExtractedText(plain), maxBoundedTextChars);
+        if (!bounded2.text)
+          return { status: "empty_output" };
+        return {
+          status: "indexed",
+          text: bounded2.text,
+          derivations: [buildDerivation({ artifact: "text", structural: { kind: "whole_file" }, bounded: bounded2 })],
+          ...bounded2.warnings.length > 0 ? { warnings: [...bounded2.warnings] } : {}
+        };
+      }
       if (!mimeType || !TEXT_MIME_TYPES.has(mimeType)) {
         return { status: "skipped_unsupported" };
       }
@@ -94627,7 +94892,7 @@ function textLaneAccepts(mimeType) {
   const normalized = normalizeMimeType2(mimeType);
   if (!normalized)
     return false;
-  return normalized === PDF_MIME_TYPE || normalized === DOCX_MIME_TYPE || normalized === XLSX_MIME_TYPE || normalized === PPTX_MIME_TYPE || IMAGE_MIME_TYPES.has(normalized) || TEXT_MIME_TYPES.has(normalized);
+  return normalized === PDF_MIME_TYPE || normalized === DOCX_MIME_TYPE || normalized === XLSX_MIME_TYPE || normalized === PPTX_MIME_TYPE || IMAGE_MIME_TYPES.has(normalized) || TEXT_MIME_TYPES.has(normalized) || RTF_MIME_TYPES.has(normalized);
 }
 function missingBytesFailure() {
   return { status: "failed_terminal", errorKind: "extractor_input_missing_bytes" };
@@ -95043,6 +95308,7 @@ function extractDelimitedText(input) {
 }
 var TEXT_EXTRACTOR_KIND = "local_text", TEXT_EXTRACTOR_VERSION = "2026-05-22", DEFAULT_PDF_TEXT_TIMEOUT_MS = 120000, TEMP_DIR_PREFIX3 = "olympus-extraction-pdf-text-", DOCUMENT_BODY_LABEL = "document body", IMAGE_MEDIA_DESCRIPTOR = "Photo", IMAGE_MEDIA_VERSION_SUFFIX = ".image-media-2026-10-07", IMAGE_OCR_VERSION_SUFFIX = ".image-ocr-2026-10-12", OCR_UNAVAILABLE_PDF_WARNING = "ocr_unavailable_pdf", OCR_UNAVAILABLE_IMAGE_WARNING = "ocr_unavailable_image", OCR_FAILED_IMAGE_WARNING = "ocr_failed_image";
 var init_text = __esm(() => {
+  init_rtf();
   init_bounded_text();
   init_command_runner();
   init_document_formats();
