@@ -22516,13 +22516,15 @@ function parseTierLedgerIdentity(raw) {
     return;
   try {
     const parsed = JSON.parse(raw);
-    if (typeof parsed.provider !== "string" || typeof parsed.accountScope !== "string" || typeof parsed.providerItemId !== "string")
+    const keys = ["provider", "accountScope", "providerItemId"];
+    if (!keys.every((key2) => typeof parsed[key2] === "string"))
       return;
+    const identity2 = parsed;
     return {
-      provider: parsed.provider,
-      accountScope: parsed.accountScope,
-      providerItemId: parsed.providerItemId,
-      ...typeof parsed.providerConversationId === "string" ? { providerConversationId: parsed.providerConversationId } : {}
+      provider: identity2.provider,
+      accountScope: identity2.accountScope,
+      providerItemId: identity2.providerItemId,
+      ...typeof identity2.providerConversationId === "string" ? { providerConversationId: identity2.providerConversationId } : {}
     };
   } catch {
     return;

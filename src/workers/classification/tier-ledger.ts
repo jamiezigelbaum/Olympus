@@ -200,12 +200,15 @@ export function parseTierLedgerIdentity(raw: string | undefined): TierLedgerIden
   if (!raw) return undefined;
   try {
     const parsed = JSON.parse(raw) as Partial<TierLedgerIdentity>;
-    if (typeof parsed.provider !== 'string' || typeof parsed.accountScope !== 'string' || typeof parsed.providerItemId !== 'string') return undefined;
+    // Every key field must be a string; their values are opaque here.
+    const keys = ['provider', 'accountScope', 'providerItemId'] as const;
+    if (!keys.every((key) => typeof parsed[key] === 'string')) return undefined;
+    const identity = parsed as TierLedgerIdentity;
     return {
-      provider: parsed.provider,
-      accountScope: parsed.accountScope,
-      providerItemId: parsed.providerItemId,
-      ...(typeof parsed.providerConversationId === 'string' ? { providerConversationId: parsed.providerConversationId } : {}),
+      provider: identity.provider,
+      accountScope: identity.accountScope,
+      providerItemId: identity.providerItemId,
+      ...(typeof identity.providerConversationId === 'string' ? { providerConversationId: identity.providerConversationId } : {}),
     };
   } catch {
     return undefined;
