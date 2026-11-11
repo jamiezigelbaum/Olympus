@@ -994,6 +994,14 @@ describe('extraction job store: janitor', () => {
 // for the same reason the queue does: the corpus id partitions it, and nothing
 // in it names a provider.
 describe('extraction job store: corpus readiness', () => {
+  test('a job for an older version does not hide the current version of an unsupported kind', () => {
+    const { store } = newStore();
+    enqueueOne(store, 'changed');
+    store.recordUnroutable([ref('changed', { sourceVersion: 'v2', mimeType: 'application/msword' })]);
+    expect(store.corpusReadiness(LANE.corpusId).unsupportedKindItems).toBe(1);
+    expect(store.scopedReadiness([LANE], { currentItem: (item) => item.sourceVersion === 'v2' }).unsupportedKindItems).toBe(1);
+  });
+
   test('upserts unsupported kinds per corpus and counts only items without jobs', () => {
     const { store, dbPath } = newStore();
     store.recordUnroutable([ref('unsupported'), ref('unsupported'), ref('supported')]);

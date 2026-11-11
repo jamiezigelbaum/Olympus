@@ -1689,7 +1689,8 @@ export class LocalFileExtractionJobStore {
       SELECT u.* FROM extraction_unroutable_items u
       WHERE corpus_id = ? AND provider = ? AND account_scope = ? AND approved_scope_key = ?
         AND NOT EXISTS (SELECT 1 FROM extraction_jobs j
-          WHERE j.corpus_id = u.corpus_id AND j.local_item_id = u.local_item_id)
+          WHERE j.corpus_id = u.corpus_id AND j.local_item_id = u.local_item_id
+            AND j.source_version IS u.source_version)
     `);
     const unsupportedByItem = new Map<string, ExtractionItemRef>();
     const byJobId = new Map<string, ExtractionJobSqlRow>();
@@ -1834,7 +1835,8 @@ export class LocalFileExtractionJobStore {
       ? this.db.query(`
         SELECT COUNT(*) AS items FROM extraction_unroutable_items u
         WHERE corpus_id = ? AND NOT EXISTS (SELECT 1 FROM extraction_jobs j
-          WHERE j.corpus_id = u.corpus_id AND j.local_item_id = u.local_item_id)
+          WHERE j.corpus_id = u.corpus_id AND j.local_item_id = u.local_item_id
+            AND j.source_version IS u.source_version)
       `).get(corpus) as { items: number }
       : { items: 0 };
     const itemRetry = terminalRetryPathSql('x', options.terminalRetryPaths ?? []);
