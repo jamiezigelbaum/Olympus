@@ -1929,7 +1929,7 @@ export function createAnalystForSovereigntyProfile(input: {
     }), { profile: 'source_answer', preflightTimeoutMs: 0 });
     return createAnalyst(input.localModelActivity
       ? input.localModelActivity.track(localModelResourceKey(profile), model, { serialize: false }) : model,
-    { auditSuspiciousDrafts: true });
+    { auditSuspiciousDrafts: true, evidenceFormat: 'compact' });
   }
   if (profile.provider === 'openclaw-infer') {
     return createAnalyst(createOpenClawInferAnalystModel({
@@ -5080,12 +5080,12 @@ export async function main(): Promise<void> {
         engine: sovereigntyEngine,
         olympusConfig,
         env: process.env,
-        defaultLocal: createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true }),
+        defaultLocal: createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' }),
         veniceAnalystTimeoutMs,
         veniceReasoningHeadroomTokens,
         bootSecretResolver,
         ...(builtInAnalystModel
-          ? { builtInAnalyst: createAnalyst(builtInAnalystModel, { auditSuspiciousDrafts: true }) }
+          ? { builtInAnalyst: createAnalyst(builtInAnalystModel, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' }) }
           : {}),
       });
       if (builtInAnalystModel) {
@@ -5097,7 +5097,7 @@ export async function main(): Promise<void> {
         });
       }
       const defaultLocalAnalyst = sovereigntyAnalysts.get('local-source-answer')?.analyst
-        ?? createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true });
+        ?? createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' });
       // Off unless the owner set OLYMPUS_SOURCE_RERANKER=built-in (issue #921).
       const sourceReranker = await prepareBuiltInRerankerFromEnv();
       return createAnalystSourceIndexAnswerHandler({
@@ -5124,7 +5124,7 @@ export async function main(): Promise<void> {
             requestedProvider,
             analysts: sovereigntyAnalysts,
             defaultLocal: builtInAnalystModel
-              ? withBuiltInFallback(defaultLocalAnalyst, createAnalyst(builtInAnalystModel, { auditSuspiciousDrafts: true }))
+              ? withBuiltInFallback(defaultLocalAnalyst, createAnalyst(builtInAnalystModel, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' }))
               : defaultLocalAnalyst,
           });
         },

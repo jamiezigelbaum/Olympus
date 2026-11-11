@@ -32,7 +32,7 @@ import type { EvidenceReranker } from '../../core/evidence-reranker.ts';
 import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
 import { runWithLocalInferenceGuard } from '../answer-activity.ts';
 import type { Analyst, AnalystCitation, AnalystOptions, AnalystResult, EvidenceCandidate, EvidencePack } from '../../core/contracts.ts';
-import { analystPromptBytes, currentAnalystAbortSignal, noEvidenceAnalystResult, runWithAnalystAbortSignal } from '../../core/analyst.ts';
+import { analystEvidenceFormat, analystPromptBytes, currentAnalystAbortSignal, noEvidenceAnalystResult, runWithAnalystAbortSignal, withPromptBudget, type AnalystEvidenceFormat } from '../../core/analyst.ts';
 import { OPENCLAW_DEFAULT_MODEL_LABEL, OPENCLAW_INFER_MAX_PROMPT_BYTES } from '../../core/analyst-openclaw-infer.ts';
 import {
   buildEvidencePackDetailed,
@@ -543,8 +543,8 @@ export function createAnalystSourceIndexAnswerHandler(
           },
         });
         return {
-          localLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(guarded(analyst), localPromptBytes, candidateCorpus, analysisDetail.recencySeats, 'local', seatOf),
-          cloudLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(guarded(analyst), CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus, analysisDetail.recencySeats, 'cloud', seatOf),
+          localLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(guarded(analyst), localPromptBytes, candidateCorpus, analysisDetail.recencySeats, 'local', seatOf, analystEvidenceFormat(analyst)),
+          cloudLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(guarded(analyst), CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus, analysisDetail.recencySeats, 'cloud', seatOf, analystEvidenceFormat(analyst)),
           trustedLeg: (analyst: Analyst): Analyst => guarded({ analyze: (dispatchPack, analyzeOptions) => {
             // Page asks use the same content-bearing candidates as the computer path.
             // Keep the full detail for the existing fail-closed release checks.
@@ -1011,15 +1011,16 @@ function promptBudgetedAnalyst(
   recencySeats: number | undefined,
   lane: 'local' | 'cloud',
   seatOf: ReadonlyMap<EvidenceCandidate['provenance'], number>,
+  evidenceFormat: AnalystEvidenceFormat,
 ): Analyst {
   return {
     analyze: (pack, analyzeOptions) => {
-      const fitted = fitPackToPromptBytes(pack, promptBytes, candidateCorpus, analyzeOptions, recencySeats);
+      const fitted = fitPackToPromptBytes(pack, promptBytes, candidateCorpus, analyzeOptions, recencySeats, evidenceFormat);
       recordSourceAnswerAnalystFit(lane, fitted.candidates.flatMap((candidate) => {
         const seat = seatOf.get(candidate.provenance);
         return seat === undefined ? [] : [seat];
       }));
-      return analyst.analyze(fitted, analyzeOptions);
+      return analyst.analyze(withPromptBudget(fitted, promptBytes), analyzeOptions);
     },
   };
 }
@@ -1034,6 +1035,8 @@ const MIN_FITTED_BYTES_PER_CANDIDATE = 600;
  * the pack's first three seats and any recency seats first, as seated, and
  * the rest round-robin across corpora, then clips passages; the measurement is
  * the real prompt, so labels and escaping are counted, not estimated.
+ * Compact retains the full fit's seats and spends the saved header bytes on
+ * their original passages; changing rendering must not widen the selection.
  */
 export function fitPackToPromptBytes(
   pack: EvidencePack,
@@ -1041,8 +1044,14 @@ export function fitPackToPromptBytes(
   candidateCorpus: ReadonlyMap<EvidenceCandidate, string>,
   analyzeOptions: AnalystOptions,
   recencySeats = 0,
+  evidenceFormat: AnalystEvidenceFormat = 'full',
 ): EvidencePack {
-  if (analystPromptBytes(pack, analyzeOptions) <= maxPromptBytes) return pack;
+  if (evidenceFormat === 'compact') {
+    const selected = fitPackToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats);
+    const kept = new Set(selected.candidates.map((candidate) => candidate.provenance));
+    pack = restatePack(pack, pack.candidates.filter((candidate) => kept.has(candidate.provenance)), candidateCorpus);
+  }
+  if (analystPromptBytes(pack, analyzeOptions, evidenceFormat) <= maxPromptBytes) return pack;
   // The first three seats go first: the router reserves seats 2 and 3 for
   // the strongest keyword and names-only leaders across stores (#1350), and
   // store turn alone would trim them whenever they share seat 1's store.
@@ -1061,6 +1070,7 @@ export function fitPackToPromptBytes(
     const overhead = analystPromptBytes(
       restatePack(pack, base.map((candidate) => ({ ...candidate, chunks: [] })), candidateCorpus),
       analyzeOptions,
+      evidenceFormat,
     );
     if (overhead >= maxPromptBytes) continue;
     let share = Math.floor((maxPromptBytes - overhead) / keep);
@@ -1071,7 +1081,7 @@ export function fitPackToPromptBytes(
         base.map((candidate) => ({ ...candidate, chunks: clipChunksToUtf8Bytes(candidate.chunks, Math.max(0, share)) })),
         candidateCorpus,
       );
-      const bytes = analystPromptBytes(fitted, analyzeOptions);
+      const bytes = analystPromptBytes(fitted, analyzeOptions, evidenceFormat);
       if (bytes <= maxPromptBytes) return fitted;
       fallback = fitted;
       // Escaping made the passages cost more than their raw bytes; shrink by
