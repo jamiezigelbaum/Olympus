@@ -21806,8 +21806,8 @@ class SecretLocationsIndex {
     return false;
   }
   search(query, scope, options = {}) {
-    const terms = secretLocationQueryTerms(query);
-    if (terms.length === 0)
+    const readings = secretLocationQueryReadings(query);
+    if (readings.length === 0)
       return [];
     const limit = Math.max(1, Math.min(options.limit ?? 10, 100));
     const rows = this.db.query(`
@@ -21821,9 +21821,14 @@ class SecretLocationsIndex {
       if (!secretLocationWithinScope(location, scope))
         continue;
       const words2 = secretLocationWords(location);
-      const score = terms.filter((term) => words2.has(term)).length;
-      if (score >= Math.min(3, terms.length))
-        scored.push({ location, score });
+      let best = 0;
+      for (const terms of readings) {
+        const score = terms.filter((term) => words2.has(term)).length;
+        if (score >= Math.min(3, terms.length))
+          best = Math.max(best, score);
+      }
+      if (best > 0)
+        scored.push({ location, score: best });
     }
     const identities = scored.map(({ location }) => ({
       provider: location.source,
@@ -21894,8 +21899,16 @@ function locatorWithin(locator, scopePath) {
   const root = scopePath.toLowerCase().replace(/\/+$/, "");
   return path === root || path.startsWith(`${root}/`);
 }
-function secretLocationQueryTerms(query) {
-  return [...new Set(sourceIndexTopicTokens(joinHyphenatedWords(query.replaceAll("_", " "))).filter((term) => term.length >= 2 && !STOP_WORDS.has(term)))];
+function secretLocationQueryReadings(query) {
+  const text2 = query.replaceAll("_", " ");
+  const joined = secretLocationQueryTerms(joinHyphenatedWords(text2));
+  const split = secretLocationQueryTerms(text2);
+  if (joined.length === 0 && split.length === 0)
+    return [];
+  return joined.join(" ") === split.join(" ") ? [joined] : [joined, split].filter((terms) => terms.length > 0);
+}
+function secretLocationQueryTerms(text2) {
+  return [...new Set(sourceIndexTopicTokens(text2).filter((term) => term.length >= 2 && !STOP_WORDS.has(term)))];
 }
 function joinHyphenatedWords(text2) {
   return text2.replace(/(?<=[\p{L}\p{N}])[-\u2010\u2011](?=[\p{L}\p{N}])/gu, "");
