@@ -621,6 +621,19 @@ function compactAuditPrompt(pack: EvidencePack, draft: ParsedModelOutput | null,
   return prompt;
 }
 
+const AUDIT_DRAFT_HEADING = 'Draft JSON:';
+const AUDIT_EVIDENCE_HEADING = 'Audit evidence:';
+
+/**
+ * A prompt as sent, without the audit's quote of the model's own draft: what
+ * the model was given as evidence and instructions only.
+ */
+export function analystPromptWithoutDraft(prompt: string): string {
+  const draft = prompt.indexOf(`\n${AUDIT_DRAFT_HEADING}\n`);
+  const evidence = prompt.indexOf(`\n${AUDIT_EVIDENCE_HEADING}\n`, draft + 1);
+  return draft < 0 || evidence < 0 ? prompt : prompt.slice(0, draft) + prompt.slice(evidence);
+}
+
 function buildAnalystAuditPrompt(
   pack: EvidencePack,
   draft: ParsedModelOutput | null,
@@ -636,7 +649,7 @@ function buildAnalystAuditPrompt(
   return [
     `Question: ${pack.question}`,
     '',
-    'Draft JSON:',
+    AUDIT_DRAFT_HEADING,
     JSON.stringify(draft ?? {
       answer: '',
       citations: [],
@@ -644,7 +657,7 @@ function buildAnalystAuditPrompt(
       sufficient: false,
     }),
     '',
-    'Audit evidence:',
+    AUDIT_EVIDENCE_HEADING,
     blocks.join('\n\n'),
     '',
     'Reconstruct the answer from every numbered candidate, account for every requested item, then replace the draft if it omitted, misstated, or failed to cite anything.',

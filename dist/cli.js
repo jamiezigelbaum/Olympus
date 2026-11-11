@@ -73624,7 +73624,7 @@ function buildAnalystAuditPrompt(pack, draft, includeLocalPrivateProvenance, com
   return [
     `Question: ${pack.question}`,
     "",
-    "Draft JSON:",
+    AUDIT_DRAFT_HEADING,
     JSON.stringify(draft ?? {
       answer: "",
       citations: [],
@@ -73632,7 +73632,7 @@ function buildAnalystAuditPrompt(pack, draft, includeLocalPrivateProvenance, com
       sufficient: false
     }),
     "",
-    "Audit evidence:",
+    AUDIT_EVIDENCE_HEADING,
     blocks.join(`
 
 `),
@@ -74152,7 +74152,7 @@ function coerceCitation(value) {
 function stripCodeFences2(text2) {
   return text2.replace(/```[a-zA-Z]*\n?/g, "").replace(/```/g, "").trim();
 }
-var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", VERSION_INSTRUCTION = 'Items with a "version group:" line have nearly the same text: likely versions of one document. If the question names a date, period or version, answer from that item. Otherwise answer from the newest version and say which version the value comes from by its date; where versions differ, also give the older value with its date.', ANALYST_SYSTEM, ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, AUDIT_CHARS_PER_CANDIDATE = 1200, FOLDED_ANSWER_SENTENCE_BUDGET = 5, PARALLEL_CLAIM_FRAME_OVERLAP = 0.5, ANALYST_SCHEMA_MAX_GAPS = 3, MAX_SCHEMA_CLAIM_CHARS = 80, NO_EVIDENCE_ANSWER = "I have no matching evidence for this question.", analystEvidenceFormats, packPromptBudgets, promptEncoder, ANALYST_EVIDENCE_SCAFFOLDING_LABELS, STOP_WORDS2, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
+var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", VERSION_INSTRUCTION = 'Items with a "version group:" line have nearly the same text: likely versions of one document. If the question names a date, period or version, answer from that item. Otherwise answer from the newest version and say which version the value comes from by its date; where versions differ, also give the older value with its date.', ANALYST_SYSTEM, ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, AUDIT_CHARS_PER_CANDIDATE = 1200, FOLDED_ANSWER_SENTENCE_BUDGET = 5, PARALLEL_CLAIM_FRAME_OVERLAP = 0.5, ANALYST_SCHEMA_MAX_GAPS = 3, MAX_SCHEMA_CLAIM_CHARS = 80, NO_EVIDENCE_ANSWER = "I have no matching evidence for this question.", analystEvidenceFormats, packPromptBudgets, promptEncoder, AUDIT_DRAFT_HEADING = "Draft JSON:", AUDIT_EVIDENCE_HEADING = "Audit evidence:", ANALYST_EVIDENCE_SCAFFOLDING_LABELS, STOP_WORDS2, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
 var init_analyst = __esm(() => {
   init_opsec();
   init_chunk_selection();
