@@ -73457,9 +73457,10 @@ function createAnalyst(model, createOptions = {}) {
       const completion = await model.complete(request);
       let parsed = parseAnalystModelOutput(completion.text);
       if (createOptions.auditSuspiciousDrafts === true && shouldAuditPack(pack)) {
+        const unseen = amountsMissingFrom(parsed?.answer ?? "", request.prompt);
         const auditCompletion = await model.complete({
           system: ANALYST_AUDIT_SYSTEM,
-          prompt: compact ? compactAuditPrompt(pack, parsed, packPromptBudgets.get(pack)) : buildAnalystAuditPrompt(pack, parsed, localOnly),
+          prompt: compact ? compactAuditPrompt(pack, parsed, packPromptBudgets.get(pack), unseen) : buildAnalystAuditPrompt(pack, parsed, localOnly, undefined, unseen),
           localOnly,
           maxOutputChars: auditMaxOutputChars,
           ...createOptions.boundedResponseSchema ? { responseSchema: analystResponseSchema(auditMaxOutputChars) } : {},
@@ -73592,9 +73593,9 @@ function formatCompactCandidate(candidate, number, versionNote, passages = candi
   return lines.join(`
 `);
 }
-function compactAuditPrompt(pack, draft, maxBytes) {
+function compactAuditPrompt(pack, draft, maxBytes, unseen = []) {
   let chars = AUDIT_CHARS_PER_CANDIDATE;
-  let prompt = buildAnalystAuditPrompt(pack, draft, false, chars);
+  let prompt = buildAnalystAuditPrompt(pack, draft, false, chars, unseen);
   if (maxBytes === undefined)
     return prompt;
   for (let attempt = 0;attempt < 6; attempt += 1) {
@@ -73603,15 +73604,33 @@ function compactAuditPrompt(pack, draft, maxBytes) {
 ${prompt}`).length;
     if (bytes <= maxBytes)
       break;
-    const passageBytes = promptEncoder.encode(prompt).length - promptEncoder.encode(buildAnalystAuditPrompt(pack, draft, false, 0)).length;
+    const passageBytes = promptEncoder.encode(prompt).length - promptEncoder.encode(buildAnalystAuditPrompt(pack, draft, false, 0, unseen)).length;
     if (passageBytes <= 0)
       break;
     chars = Math.max(0, Math.floor(chars * Math.max(0, passageBytes - (bytes - maxBytes)) / passageBytes) - 1);
-    prompt = buildAnalystAuditPrompt(pack, draft, false, chars);
+    prompt = buildAnalystAuditPrompt(pack, draft, false, chars, unseen);
   }
   return prompt;
 }
-function buildAnalystAuditPrompt(pack, draft, includeLocalPrivateProvenance, compactChars) {
+function amountDigits(amount) {
+  return amount.replace(/\D/gu, "").replace(/^0+(?=\d)/u, "").replace(/0+$/u, "");
+}
+function amountsMissingFrom(answer, evidence) {
+  const seen = new Set;
+  for (const pattern of [/\d+(?:[.,']\d+)*/gu, /\d+(?:[.,' ]\d+)*/gu]) {
+    for (const match of evidence.matchAll(pattern))
+      seen.add(amountDigits(match[0]));
+  }
+  const missing = [];
+  for (const match of answer.matchAll(AMOUNT_PATTERN)) {
+    const amount = match[0].trim();
+    const digits = amountDigits(amount);
+    if (digits && !seen.has(digits) && !missing.includes(amount))
+      missing.push(amount);
+  }
+  return missing;
+}
+function buildAnalystAuditPrompt(pack, draft, includeLocalPrivateProvenance, compactChars, unseen = []) {
   const versions = candidateVersionNotes(pack);
   const blocks = pack.candidates.map((candidate, index) => compactChars !== undefined ? formatCompactCandidate(candidate, index + 1, versions[index], compactChars > 0 ? auditChunks(candidate, pack.question, compactChars) : []) : formatAuditCandidate(candidate, index + 1, includeLocalPrivateProvenance, pack.question, versions[index]));
   return [
@@ -73631,6 +73650,7 @@ function buildAnalystAuditPrompt(pack, draft, includeLocalPrivateProvenance, com
 `),
     "",
     "Reconstruct the answer from every numbered candidate, account for every requested item, then replace the draft if it omitted, misstated, or failed to cite anything.",
+    ...unseen.length > 0 ? [`${AUDIT_UNSEEN_AMOUNTS} ${unseen.map((value) => JSON.stringify(value)).join(", ")}. Remove each from the answer unless the answer shows how it is computed from cited values.`] : [],
     ...versionInstruction(versions),
     formatCoverage(pack)
   ].join(`
@@ -74145,7 +74165,7 @@ function coerceCitation(value) {
 function stripCodeFences2(text2) {
   return text2.replace(/```[a-zA-Z]*\n?/g, "").replace(/```/g, "").trim();
 }
-var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", VERSION_INSTRUCTION = 'Items with a "version group:" line have nearly the same text: likely versions of one document. If the question names a date, period or version, answer from that item. Otherwise answer from the newest version and say which version the value comes from by its date; where versions differ, also give the older value with its date.', ANALYST_SYSTEM, ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, AUDIT_CHARS_PER_CANDIDATE = 1200, FOLDED_ANSWER_SENTENCE_BUDGET = 5, PARALLEL_CLAIM_FRAME_OVERLAP = 0.5, ANALYST_SCHEMA_MAX_GAPS = 3, MAX_SCHEMA_CLAIM_CHARS = 80, NO_EVIDENCE_ANSWER = "I have no matching evidence for this question.", analystEvidenceFormats, packPromptBudgets, promptEncoder, AUDIT_DRAFT_HEADING = "Draft JSON:", AUDIT_EVIDENCE_HEADING = "Audit evidence:", ANALYST_EVIDENCE_SCAFFOLDING_LABELS, STOP_WORDS2, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
+var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", VERSION_INSTRUCTION = 'Items with a "version group:" line have nearly the same text: likely versions of one document. If the question names a date, period or version, answer from that item. Otherwise answer from the newest version and say which version the value comes from by its date; where versions differ, also give the older value with its date.', ANALYST_SYSTEM, ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, AUDIT_CHARS_PER_CANDIDATE = 1200, FOLDED_ANSWER_SENTENCE_BUDGET = 5, PARALLEL_CLAIM_FRAME_OVERLAP = 0.5, ANALYST_SCHEMA_MAX_GAPS = 3, MAX_SCHEMA_CLAIM_CHARS = 80, NO_EVIDENCE_ANSWER = "I have no matching evidence for this question.", analystEvidenceFormats, packPromptBudgets, promptEncoder, AUDIT_DRAFT_HEADING = "Draft JSON:", AUDIT_UNSEEN_AMOUNTS = "Amounts in the draft that appear nowhere in the evidence:", AMOUNT_PATTERN, AUDIT_EVIDENCE_HEADING = "Audit evidence:", ANALYST_EVIDENCE_SCAFFOLDING_LABELS, STOP_WORDS2, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
 var init_analyst = __esm(() => {
   init_opsec();
   init_chunk_selection();
@@ -74223,6 +74243,7 @@ var init_analyst = __esm(() => {
   analystEvidenceFormats = new WeakMap;
   packPromptBudgets = new WeakMap;
   promptEncoder = new TextEncoder;
+  AMOUNT_PATTERN = /[€$£¥]\s?\d+(?:[.,']\d+)*|\d+(?:[.,']\d+)+/gu;
   ANALYST_EVIDENCE_SCAFFOLDING_LABELS = [
     "trust: public_safe/",
     "trust: internal/",

@@ -410,11 +410,15 @@ export function createAnalyst(model: AnalystModel, createOptions: CreateAnalystO
       let parsed = parseAnalystModelOutput(completion.text);
 
       if (createOptions.auditSuspiciousDrafts === true && shouldAuditPack(pack)) {
+        // Amounts the draft states that the evidence it was written from
+        // never shows: named to the audit, which keeps one only when the
+        // answer computes it from cited values.
+        const unseen = amountsMissingFrom(parsed?.answer ?? '', request.prompt);
         const auditCompletion = await model.complete({
           system: ANALYST_AUDIT_SYSTEM,
           prompt: compact
-            ? compactAuditPrompt(pack, parsed, packPromptBudgets.get(pack))
-            : buildAnalystAuditPrompt(pack, parsed, localOnly),
+            ? compactAuditPrompt(pack, parsed, packPromptBudgets.get(pack), unseen)
+            : buildAnalystAuditPrompt(pack, parsed, localOnly, undefined, unseen),
           localOnly,
           maxOutputChars: auditMaxOutputChars,
           ...(createOptions.boundedResponseSchema ? { responseSchema: analystResponseSchema(auditMaxOutputChars) } : {}),
@@ -601,22 +605,51 @@ function formatCompactCandidate(
  * take their room from the passages, shrunk evenly until the whole audit call
  * fits. A pack with no recorded budget keeps the audit's full passages.
  */
-function compactAuditPrompt(pack: EvidencePack, draft: ParsedModelOutput | null, maxBytes: number | undefined): string {
+function compactAuditPrompt(pack: EvidencePack, draft: ParsedModelOutput | null, maxBytes: number | undefined, unseen: readonly string[] = []): string {
   let chars = AUDIT_CHARS_PER_CANDIDATE;
-  let prompt = buildAnalystAuditPrompt(pack, draft, false, chars);
+  let prompt = buildAnalystAuditPrompt(pack, draft, false, chars, unseen);
   if (maxBytes === undefined) return prompt;
   for (let attempt = 0; attempt < 6; attempt += 1) {
     const bytes = promptEncoder.encode(`${ANALYST_AUDIT_SYSTEM}\n\n${prompt}`).length;
     if (bytes <= maxBytes) break;
-    const passageBytes = promptEncoder.encode(prompt).length - promptEncoder.encode(buildAnalystAuditPrompt(pack, draft, false, 0)).length;
+    const passageBytes = promptEncoder.encode(prompt).length - promptEncoder.encode(buildAnalystAuditPrompt(pack, draft, false, 0, unseen)).length;
     if (passageBytes <= 0) break;
     chars = Math.max(0, Math.floor(chars * Math.max(0, passageBytes - (bytes - maxBytes)) / passageBytes) - 1);
-    prompt = buildAnalystAuditPrompt(pack, draft, false, chars);
+    prompt = buildAnalystAuditPrompt(pack, draft, false, chars, unseen);
   }
   return prompt;
 }
 
 const AUDIT_DRAFT_HEADING = 'Draft JSON:';
+const AUDIT_UNSEEN_AMOUNTS = 'Amounts in the draft that appear nowhere in the evidence:';
+
+// An amount: digits with a grouping or decimal separator between them, or
+// next to a currency sign ("1,240.50", "12,5", "$312", "€ 80"). Plain counts,
+// seat markers and years are not amounts.
+const AMOUNT_PATTERN = /[€$£¥]\s?\d+(?:[.,']\d+)*|\d+(?:[.,']\d+)+/gu;
+
+// Separator style differs between a draft and its source ("1,240.50" against
+// "1.240,50"), so an amount is compared by its digits, without trailing zeros
+// ("12.50" and "12.5" are one amount).
+function amountDigits(amount: string): string {
+  return amount.replace(/\D/gu, '').replace(/^0+(?=\d)/u, '').replace(/0+$/u, '');
+}
+
+/** The draft's amounts whose digits the evidence text never shows as an amount or a number. */
+export function amountsMissingFrom(answer: string, evidence: string): string[] {
+  const seen = new Set<string>();
+  // Evidence numbers read both ways: a space can group thousands ("1 240,50").
+  for (const pattern of [/\d+(?:[.,']\d+)*/gu, /\d+(?:[.,' ]\d+)*/gu]) {
+    for (const match of evidence.matchAll(pattern)) seen.add(amountDigits(match[0]));
+  }
+  const missing: string[] = [];
+  for (const match of answer.matchAll(AMOUNT_PATTERN)) {
+    const amount = match[0].trim();
+    const digits = amountDigits(amount);
+    if (digits && !seen.has(digits) && !missing.includes(amount)) missing.push(amount);
+  }
+  return missing;
+}
 const AUDIT_EVIDENCE_HEADING = 'Audit evidence:';
 
 /**
@@ -634,6 +667,7 @@ function buildAnalystAuditPrompt(
   draft: ParsedModelOutput | null,
   includeLocalPrivateProvenance: boolean,
   compactChars?: number,
+  unseen: readonly string[] = [],
 ): string {
   const versions = candidateVersionNotes(pack);
   // compactChars: render candidates as the compact main call does, with that
@@ -656,6 +690,7 @@ function buildAnalystAuditPrompt(
     blocks.join('\n\n'),
     '',
     'Reconstruct the answer from every numbered candidate, account for every requested item, then replace the draft if it omitted, misstated, or failed to cite anything.',
+    ...(unseen.length > 0 ? [`${AUDIT_UNSEEN_AMOUNTS} ${unseen.map((value) => JSON.stringify(value)).join(', ')}. Remove each from the answer unless the answer shows how it is computed from cited values.`] : []),
     ...versionInstruction(versions),
     formatCoverage(pack),
   ].join('\n');
