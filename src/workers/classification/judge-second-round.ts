@@ -147,7 +147,9 @@ export function secondRoundJudge<T extends SnifferModel>(local: T, venice: Analy
   return { ...local, secondRound: counts, complete: async (request: SnifferModelRequest) => {
     const first = await local.complete(request) as SnifferModelCompletion;
     // Text questions only: an item held Private on its names alone never goes to Venice.
-    if (completionTier(first, localDecisionBar) !== 'held' || request.snifferItem?.pass !== 'content' || request.signal?.aborted) return first;
+    // A fail-safe hold (the built-in 4B's one-token check failed) is not a verdict to overturn.
+    if (completionTier(first, localDecisionBar) !== 'held' || first.decisionVerdict?.failSafe
+      || request.snifferItem?.pass !== 'content' || request.signal?.aborted) return first;
     const digest = SecondRoundConfirmed.digest(request);
     if (confirmed?.has(digest)) return first;
     counts.asked += 1;

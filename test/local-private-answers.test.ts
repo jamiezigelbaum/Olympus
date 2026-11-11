@@ -31,7 +31,13 @@ import { seedEngineSovereignty } from '../src/core/engine-service.ts';
 import { saveFirstRunPrivacyChoice } from '../src/core/first-run-privacy.ts';
 import { ModelSetupService } from '../src/core/model-setup.ts';
 import { loadConfig } from '../src/core/config.ts';
-import { builtInBacksPrivateAnalyst, createAnalystForSovereigntyProfile, loadSourceWorkerSovereignty } from '../src/workers/engine/server.ts';
+import {
+  builtInBacksPrivateAnalyst,
+  createAnalystForSovereigntyProfile,
+} from '../src/workers/engine/runtime/private-analysts.ts';
+import {
+  loadSourceWorkerSovereignty,
+} from '../src/workers/engine/runtime/embedding-providers.ts';
 import { WorkerBootSecretResolver } from '../src/workers/credential-degradation.ts';
 import type { AnalystModelRequest } from '../src/core/analyst.ts';
 import { createRemotePrivateParts } from '../src/core/remote-private-part.ts';

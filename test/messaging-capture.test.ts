@@ -24,7 +24,7 @@ import {
   createWorkerMessagingCaptureOwnership,
   reconcileWorkerCaptures,
   workerCaptureRuntime,
-} from '../src/workers/engine/server.ts';
+} from '../src/workers/engine/runtime/messaging-capture.ts';
 
 function secretStore(values: Record<string, string>): SecretStore {
   const stored = new Map(Object.entries(values));

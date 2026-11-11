@@ -6,6 +6,7 @@ import {
 import {
   rerankCandidates,
   rerankPoolSize,
+  MAX_RERANK_POOL_SIZE,
   type EvidenceReranker,
   type RerankTimers,
 } from '../src/core/evidence-reranker.ts';
@@ -97,7 +98,9 @@ describe('rerankCandidates', () => {
   test('the pool is never smaller than the cut and never above the ceiling', () => {
     expect(rerankPoolSize(overlapReranker(3), 5)).toBe(5);
     expect(rerankPoolSize(overlapReranker(30), 5)).toBe(30);
-    expect(rerankPoolSize(overlapReranker(10_000), 5)).toBe(100);
+    expect(rerankPoolSize(overlapReranker(250), 5)).toBe(250);
+    expect(MAX_RERANK_POOL_SIZE).toBe(400);
+    expect(rerankPoolSize(overlapReranker(10_000), 5)).toBe(400);
   });
 });
 

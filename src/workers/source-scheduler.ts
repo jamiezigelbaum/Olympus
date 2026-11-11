@@ -1683,6 +1683,7 @@ export function fileExtractionSchedulerTask(input: {
       let jobsExisting = 0;
       let jobsUnroutable = 0;
       let jobsRefused = 0;
+      const skipped: Record<string, number> = {};
       const extractorKinds = new Set<string>();
       for (let page = 0; page < maxPages; page += 1) {
         // A page can hold no candidate (a window of items already read), so
@@ -1700,6 +1701,7 @@ export function fileExtractionSchedulerTask(input: {
         jobsExisting += plan.jobsExisting;
         jobsUnroutable += plan.jobsUnroutable;
         jobsRefused += plan.jobsRefused;
+        for (const [reason, count] of Object.entries(plan.candidatesSkipped ?? {})) skipped[reason] = (skipped[reason] ?? 0) + count;
         for (const kind of plan.extractorKinds) extractorKinds.add(kind);
         if (plan.done) {
           done = true;
@@ -1741,6 +1743,9 @@ export function fileExtractionSchedulerTask(input: {
         jobs_existing: jobsExisting,
         jobs_unroutable: jobsUnroutable,
         jobs_refused: jobsRefused,
+        // Rows the source passed over before they became candidates, so an
+        // unread backlog is explained by the receipts alone (#1299).
+        ...Object.fromEntries(Object.entries(skipped).map(([reason, count]) => [`candidates_skipped_${reason}`, count])),
         jobs_processed: processedJobs,
         jobs_indexed: settled.indexed,
         jobs_metadata_only: settled.metadata_only,

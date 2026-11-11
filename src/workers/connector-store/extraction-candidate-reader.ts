@@ -33,6 +33,7 @@ export function connectorStoreExtractionCandidateReader(
           ...(candidate.sizeBytes !== undefined ? { sizeBytes: candidate.sizeBytes } : {}),
         })),
         ...(page.nextCursor !== undefined ? { nextCursor: page.nextCursor } : {}),
+        ...(page.skippedByDisposition ? { skippedByDisposition: page.skippedByDisposition } : {}),
         done: page.done,
       };
     },

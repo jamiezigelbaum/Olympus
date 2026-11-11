@@ -33,11 +33,8 @@ Five moves:
 4. **Steady tests**: a shared test clock and a check that refuses new
    real-clock sleeps (#1066), `verify:full` as one process (#1018), and
    release testing v3 (olympus-ops #138).
-5. **Subtract**: the embedding pre-filter stays only if one week of live
-   counts on the owner's install saves at least 15% of judge calls with zero
-   spot-check Private misses (measurement started 2026-11-10, counts on
-   #1025); otherwise it is removed with its follow-ups. The Google pilot
-   client is removed before about 2026-12-03 (#765). Engine startup moves out
+5. **Subtract**: 2026-11-11: embedding pre-filter removed; it could not save 15% of judge calls at zero owner-label Private misses (#1025).
+   The Google pilot client is removed before about 2026-12-03 (#765). Engine startup moves out
    of `email-source` (#1068), last.
 
 Seven lanes, each with a brief and a done-when: Engine (#1064), Findable fast
@@ -126,6 +123,14 @@ important Private item there. Three things came out of the measurement:
   runs, and no judge needs approving again; the 7 Nov rule that a prompt
   change alone re-judges nothing stands. Whether an approval should carry
   over at the next wording change is #1286, to be decided then.
+
+The built-in 4B also gains the union rule for 1.5 (lane 3, #890): full mode
+stays primary; only a Personal verdict at confidence 0.9 or above gets the
+native one-token check. P(Private) at least 0.5, or a failed check, holds the
+item Private. Other judges, including the local-server 4B's 0.15 bar, keep
+their behavior. This changes the built-in 4B judge identity, so the existing
+bounded background re-judge revisits its eligible old verdicts once, at the
+lowest queue priority. This is a judge-rule change, not a prompt-only change.
 
 No freeze date is set. 2026-11-10 16:00Z was the target for that day's push,
 not the scope freeze.
@@ -323,20 +328,6 @@ the Linux leg three times (#954), `verify:full`, and every dashboard page in
 light and dark at 390 and 1280. After the tag: site publish, the relay deploy,
 the ChatGPT listing re-pin and resubmission (#732), and the Grok reviewer
 engine upgrade.
-
-## Embedding Personal pre-filter (#939; implementation, 2026-11-07)
-
-Implement a source-neutral Personal-only first pass over each item's own stored
-EmbeddingGemma 2 vector, below p(Private) 0.002 (0.05 until the 2026-11-08
-owner-label gate). One install-local logistic model
-trains daily after 2,000 final judge labels per class; the 5% direct-judge audit
-stops all clearing and requeues provisional clearances above 2% Private in 200
-checks. Owner rules, Secrets and open names questions precede it. The engine
-setting defaults on once trained. Implementation details and recovery behavior
-live in `design/per-item-four-tier-classification.md`, "Embedding Personal
-pre-filter". No live rollout in this branch; synthetic checks do not establish
-queue throughput or a real-data miss rate. The owner's supplied offline and
-200-item held-queue results are inputs, with no real labels or weights committed.
 
 ## Private embedding choices and pending judgments (#937; owner, 2026-11-06)
 

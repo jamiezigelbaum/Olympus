@@ -203,7 +203,7 @@ function message(cause) {
 
 // src/core/olympus-layout.ts
 import { homedir as homedir3 } from "node:os";
-import { basename, dirname as dirname5, isAbsolute as isAbsolute4, join as join4, resolve as resolve3 } from "node:path";
+import { basename, dirname as dirname5, isAbsolute as isAbsolute4, join as join4, relative as relative3, resolve as resolve3, sep as sep3 } from "node:path";
 
 // src/core/openclaw-plugin-remote.ts
 import { readFileSync } from "node:fs";
@@ -1403,10 +1403,10 @@ function locateFile(root, name, depth = 0, prefix = "") {
     return;
   }
   if (entries.includes(name)) {
-    const relative3 = prefix ? `${prefix}/${name}` : name;
+    const relative4 = prefix ? `${prefix}/${name}` : name;
     try {
-      if (statSync2(join6(root, relative3)).isFile())
-        return relative3;
+      if (statSync2(join6(root, relative4)).isFile())
+        return relative4;
     } catch {}
   }
   if (depth >= 2)

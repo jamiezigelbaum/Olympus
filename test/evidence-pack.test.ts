@@ -56,6 +56,30 @@ function provider(blocks: Record<string, LocalContentBlock | undefined>): LocalC
 const allowAll: SourceIndexSearchContext = { allowedTrustDomains: ['internal', 'secure_local', 'public_safe'] };
 
 describe('buildEvidencePack', () => {
+  test('associates extraction gap indexes with candidates, leaving policy gaps unowned', async () => {
+    const detail = await buildEvidencePackDetailed({
+      question: 'project records', maxResults: 10, searchContext: allowAll, registry: registry(),
+      adapters: { [INTERNAL]: adapterReturning(['denied', 'truncated', 'unreadable', 'readable']), [SECURE]: adapterReturning(['no-provider']) },
+      contentProviders: { [INTERNAL]: { async fetchLocalContent(request) {
+        const id = request.provenance.sourceItem.providerItemId;
+        if (id === 'denied') throw new SourceModelPolicyDeniedError('blocked_sensitive');
+        return { sensitivity: buildSourceSensitivity({ trustTier: 'S2', trustDomain: 'internal' }),
+          chunks: id === 'unreadable' ? [] : ['Project record.'], truncated: id === 'truncated' };
+      } } },
+    });
+    const owners = detail.candidateExtractionGapIndexes;
+    expect(owners).toHaveLength(detail.pack.candidates.length);
+    for (const [index, candidate] of detail.pack.candidates.entries()) {
+      const id = candidate.provenance.sourceItem.providerItemId;
+      const indexes = owners![index]!;
+      expect(indexes).toHaveLength(id === 'readable' ? 0 : 1);
+      for (const gapIndex of indexes) expect(detail.pack.coverage.extractionGaps[gapIndex]).toStartWith(`${id} (`);
+    }
+    const owned = new Set(owners!.flat());
+    expect(detail.pack.coverage.extractionGaps.filter((_, index) => !owned.has(index)))
+      .toEqual([`${INTERNAL} excluded one candidate from model use under current source policy.`]);
+  });
+
   test('assembles candidates with fetched local content and trust tags', async () => {
     const pack = await buildEvidencePack({
       question: 'What was my LDL?',

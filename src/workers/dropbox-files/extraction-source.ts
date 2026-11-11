@@ -39,6 +39,7 @@ import {
   type ExtractionCandidateReaderOptions,
   type ExtractionCandidateRow,
 } from '../../core/file-extraction-source.ts';
+import { EXTRACTION_CANDIDATE_SKIP } from '../file-extraction/types.ts';
 import type {
   ExtractionCandidateListOptions,
   ExtractionCandidatePage,
@@ -207,14 +208,21 @@ export class DropboxExtractionSource implements FileExtractionSource {
 
     const page = await this.candidates.extractionCandidates(readerOptions);
     const candidates: ExtractionItemRef[] = [];
+    let outsideScope = 0;
     for (const row of page.candidates) {
       const ref = this.refFromRow(row, scopes);
       if (ref) candidates.push(ref);
+      else outsideScope += 1;
     }
+    const skipped: Record<string, number> = {
+      ...(page.skippedByDisposition ? { [EXTRACTION_CANDIDATE_SKIP.excludedByOwner]: page.skippedByDisposition } : {}),
+      ...(outsideScope > 0 ? { [EXTRACTION_CANDIDATE_SKIP.outsideScope]: outsideScope } : {}),
+    };
     return {
       candidates,
       ...(page.nextCursor !== undefined ? { nextCursor: page.nextCursor } : {}),
       done: page.done,
+      ...(Object.keys(skipped).length > 0 ? { skipped } : {}),
     };
   }
 

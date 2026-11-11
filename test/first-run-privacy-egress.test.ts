@@ -17,7 +17,13 @@ import { answerPrivately, type BuiltInAnalystModel } from '../src/core/analyst-b
 import type { AnalystModelRequest } from '../src/core/analyst.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
 import { openWaitingPrivateQuestionStore } from '../src/core/waiting-private-questions.ts';
-import { createSourceIndexEmbeddingProviderFromSovereignty, loadSourceWorkerSovereignty, createAnalystForSovereigntyProfile } from '../src/workers/engine/server.ts';
+import {
+  createSourceIndexEmbeddingProviderFromSovereignty,
+  loadSourceWorkerSovereignty,
+} from '../src/workers/engine/runtime/embedding-providers.ts';
+import {
+  createAnalystForSovereigntyProfile,
+} from '../src/workers/engine/runtime/private-analysts.ts';
 import { WorkerBootSecretResolver } from '../src/workers/credential-degradation.ts';
 import { loadConfig } from '../src/core/config.ts';
 import { createSourceAnswerLanes } from '../src/workers/email-source/source-answer-lanes.ts';

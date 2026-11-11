@@ -110,7 +110,21 @@ export interface ExtractionCandidatePage {
   candidates: readonly ExtractionItemRef[];
   nextCursor?: string;
   done: boolean;
+  /**
+   * Rows the source passed over on this page and why, keyed by one of the
+   * EXTRACTION_CANDIDATE_SKIP reasons. Present only when non-zero, so an
+   * unread backlog can be explained from the extract receipts alone.
+   */
+  skipped?: Readonly<Record<string, number>>;
 }
+
+// Why a source passed over a row before it became a candidate.
+export const EXTRACTION_CANDIDATE_SKIP = {
+  // The owner's exclusion rules say it is never read.
+  excludedByOwner: 'excluded_by_owner',
+  // Its path is under none of the folders the lane reads.
+  outsideScope: 'outside_scope',
+} as const;
 
 export interface ExtractionFetchOptions {
   /**

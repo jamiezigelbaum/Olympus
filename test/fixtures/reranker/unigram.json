@@ -1,0 +1,611 @@
+{
+  "version": "1.0",
+  "truncation": null,
+  "padding": null,
+  "added_tokens": [
+    {
+      "id": 0,
+      "content": "<s>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 1,
+      "content": "<pad>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 2,
+      "content": "</s>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 3,
+      "content": "<unk>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    }
+  ],
+  "normalizer": {
+    "type": "Sequence",
+    "normalizers": [
+      {
+        "type": "Precompiled",
+        "precompiled_charsmap": "AAQAAAAEAAAAAACAAgAAgAUAAIAGAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGEBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABllAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgQkCAIAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIslAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAChkQIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAALzwAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADMMAMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA4ogDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADvvAMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB4AMOpAABBAA=="
+      },
+      {
+        "type": "NFKC"
+      }
+    ]
+  },
+  "pre_tokenizer": {
+    "type": "Metaspace",
+    "replacement": "▁",
+    "prepend_scheme": "always",
+    "split": true
+  },
+  "post_processor": {
+    "type": "TemplateProcessing",
+    "single": [
+      {
+        "SpecialToken": {
+          "id": "<s>",
+          "type_id": 0
+        }
+      },
+      {
+        "Sequence": {
+          "id": "A",
+          "type_id": 0
+        }
+      },
+      {
+        "SpecialToken": {
+          "id": "</s>",
+          "type_id": 0
+        }
+      }
+    ],
+    "pair": [
+      {
+        "SpecialToken": {
+          "id": "<s>",
+          "type_id": 0
+        }
+      },
+      {
+        "Sequence": {
+          "id": "A",
+          "type_id": 0
+        }
+      },
+      {
+        "SpecialToken": {
+          "id": "</s>",
+          "type_id": 0
+        }
+      },
+      {
+        "SpecialToken": {
+          "id": "</s>",
+          "type_id": 0
+        }
+      },
+      {
+        "Sequence": {
+          "id": "B",
+          "type_id": 0
+        }
+      },
+      {
+        "SpecialToken": {
+          "id": "</s>",
+          "type_id": 0
+        }
+      }
+    ],
+    "special_tokens": {
+      "<s>": {
+        "id": "<s>",
+        "ids": [
+          0
+        ],
+        "tokens": [
+          "<s>"
+        ]
+      },
+      "</s>": {
+        "id": "</s>",
+        "ids": [
+          2
+        ],
+        "tokens": [
+          "</s>"
+        ]
+      }
+    }
+  },
+  "decoder": {
+    "type": "Metaspace",
+    "replacement": "▁",
+    "prepend_scheme": "always",
+    "split": true
+  },
+  "model": {
+    "type": "Unigram",
+    "unk_id": 3,
+    "vocab": [
+      [
+        "<s>",
+        0.0
+      ],
+      [
+        "<pad>",
+        0.0
+      ],
+      [
+        "</s>",
+        0.0
+      ],
+      [
+        "<unk>",
+        0.0
+      ],
+      [
+        "\u0001",
+        -8.0
+      ],
+      [
+        " ",
+        -8.0
+      ],
+      [
+        ",",
+        -8.0
+      ],
+      [
+        "-",
+        -8.0
+      ],
+      [
+        ".",
+        -8.0
+      ],
+      [
+        "?",
+        -8.0
+      ],
+      [
+        "A",
+        -8.0
+      ],
+      [
+        "C",
+        -8.0
+      ],
+      [
+        "D",
+        -8.0
+      ],
+      [
+        "K",
+        -8.0
+      ],
+      [
+        "R",
+        -8.0
+      ],
+      [
+        "T",
+        -8.0
+      ],
+      [
+        "W",
+        -8.0
+      ],
+      [
+        "X",
+        -8.0
+      ],
+      [
+        "a",
+        -8.0
+      ],
+      [
+        "b",
+        -8.0
+      ],
+      [
+        "c",
+        -8.0
+      ],
+      [
+        "d",
+        -8.0
+      ],
+      [
+        "e",
+        -8.0
+      ],
+      [
+        "f",
+        -8.0
+      ],
+      [
+        "g",
+        -8.0
+      ],
+      [
+        "h",
+        -8.0
+      ],
+      [
+        "i",
+        -8.0
+      ],
+      [
+        "j",
+        -8.0
+      ],
+      [
+        "k",
+        -8.0
+      ],
+      [
+        "l",
+        -8.0
+      ],
+      [
+        "m",
+        -8.0
+      ],
+      [
+        "n",
+        -8.0
+      ],
+      [
+        "o",
+        -8.0
+      ],
+      [
+        "p",
+        -8.0
+      ],
+      [
+        "r",
+        -8.0
+      ],
+      [
+        "s",
+        -8.0
+      ],
+      [
+        "t",
+        -8.0
+      ],
+      [
+        "u",
+        -8.0
+      ],
+      [
+        "v",
+        -8.0
+      ],
+      [
+        "w",
+        -8.0
+      ],
+      [
+        "x",
+        -8.0
+      ],
+      [
+        "z",
+        -8.0
+      ],
+      [
+        " ",
+        -8.0
+      ],
+      [
+        "à",
+        -8.0
+      ],
+      [
+        "ä",
+        -8.0
+      ],
+      [
+        "ç",
+        -8.0
+      ],
+      [
+        "é",
+        -8.0
+      ],
+      [
+        "ï",
+        -8.0
+      ],
+      [
+        "ü",
+        -8.0
+      ],
+      [
+        "́",
+        -8.0
+      ],
+      [
+        "Г",
+        -8.0
+      ],
+      [
+        "М",
+        -8.0
+      ],
+      [
+        "П",
+        -8.0
+      ],
+      [
+        "С",
+        -8.0
+      ],
+      [
+        "а",
+        -8.0
+      ],
+      [
+        "б",
+        -8.0
+      ],
+      [
+        "в",
+        -8.0
+      ],
+      [
+        "г",
+        -8.0
+      ],
+      [
+        "д",
+        -8.0
+      ],
+      [
+        "е",
+        -8.0
+      ],
+      [
+        "и",
+        -8.0
+      ],
+      [
+        "к",
+        -8.0
+      ],
+      [
+        "л",
+        -8.0
+      ],
+      [
+        "н",
+        -8.0
+      ],
+      [
+        "о",
+        -8.0
+      ],
+      [
+        "п",
+        -8.0
+      ],
+      [
+        "р",
+        -8.0
+      ],
+      [
+        "с",
+        -8.0
+      ],
+      [
+        "т",
+        -8.0
+      ],
+      [
+        "у",
+        -8.0
+      ],
+      [
+        "х",
+        -8.0
+      ],
+      [
+        "ч",
+        -8.0
+      ],
+      [
+        "я",
+        -8.0
+      ],
+      [
+        "ё",
+        -8.0
+      ],
+      [
+        "​",
+        -8.0
+      ],
+      [
+        "Å",
+        -8.0
+      ],
+      [
+        "①",
+        -8.0
+      ],
+      [
+        "▁",
+        -8.0
+      ],
+      [
+        "。",
+        -8.0
+      ],
+      [
+        "と",
+        -8.0
+      ],
+      [
+        "の",
+        -8.0
+      ],
+      [
+        "㍿",
+        -8.0
+      ],
+      [
+        "世",
+        -8.0
+      ],
+      [
+        "京",
+        -8.0
+      ],
+      [
+        "你",
+        -8.0
+      ],
+      [
+        "収",
+        -8.0
+      ],
+      [
+        "发",
+        -8.0
+      ],
+      [
+        "哪",
+        -8.0
+      ],
+      [
+        "在",
+        -8.0
+      ],
+      [
+        "好",
+        -8.0
+      ],
+      [
+        "書",
+        -8.0
+      ],
+      [
+        "東",
+        -8.0
+      ],
+      [
+        "求",
+        -8.0
+      ],
+      [
+        "界",
+        -8.0
+      ],
+      [
+        "票",
+        -8.0
+      ],
+      [
+        "請",
+        -8.0
+      ],
+      [
+        "都",
+        -8.0
+      ],
+      [
+        "里",
+        -8.0
+      ],
+      [
+        "領",
+        -8.0
+      ],
+      [
+        "ﬁ",
+        -8.0
+      ],
+      [
+        "？",
+        -8.0
+      ],
+      [
+        "Ａ",
+        -8.0
+      ],
+      [
+        "Ｂ",
+        -8.0
+      ],
+      [
+        "Ｃ",
+        -8.0
+      ],
+      [
+        "～",
+        -8.0
+      ],
+      [
+        "🦄",
+        -8.0
+      ],
+      [
+        "🫠",
+        -8.0
+      ],
+      [
+        "▁invoice",
+        -1.0
+      ],
+      [
+        "▁total",
+        -1.0
+      ],
+      [
+        "▁hello",
+        -1.0
+      ],
+      [
+        "▁world",
+        -1.0
+      ],
+      [
+        "▁café",
+        -1.0
+      ],
+      [
+        "▁東京",
+        -1.0
+      ],
+      [
+        "▁Москва",
+        -1.0
+      ]
+    ],
+    "byte_fallback": false
+  }
+}

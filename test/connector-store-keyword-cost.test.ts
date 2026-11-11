@@ -7,6 +7,7 @@
 // every search. These pin the cheaper shape with
 // synthetic data: the work done, not wall time.
 import { afterEach, expect, test } from 'bun:test';
+import { Database } from 'bun:sqlite';
 import { join } from 'node:path';
 import {
   LocalConnectorStore,
@@ -16,6 +17,9 @@ import {
 import { DROPBOX_TIER_CORPUS_IDS } from '../src/workers/dropbox-files/connector-store.ts';
 import { traceKeywordSearch } from '../eval/store-probe.ts';
 import { fixtureConnector, tempDir } from './helpers/tier-fixtures.ts';
+
+// The store's bm25 title weight (local-index.ts).
+const CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5;
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
@@ -112,12 +116,36 @@ test('a ranked page decided by the best matches never ranks the rest of the stor
   expect(rows.map((row) => row.sourceItem.providerItemId)).toEqual(['answer', ...Array.from({ length: 49 }, (_, n) => `note-${n}`)]);
 });
 
-test('ties at the bound fall back to ranking every match, with the same page', async () => {
-  const store = await openStoreWith(Array.from({ length: 600 }, (_, n) => ({ id: `same-${n}`, name: `same-${n}.txt`, text: 'kestrel boatyard note' })));
+// Ties at the bound used to rank every match in the store and read each
+// one's item: about 1 GB a query on a 700k-item store (2026-11-11). Every
+// row that ranks at or above the tied rank decides the page as well as the
+// full ranking does, so only those are read; a store's worse matches are not.
+test('ties at the bound read only the rows tied with it or better, with the full ranking\'s page', async () => {
+  const store = await openStoreWith([
+    { id: 'best', name: 'best.txt', text: 'kestrel kestrel kestrel' },
+    ...Array.from({ length: 600 }, (_, n) => ({ id: `same-${n}`, name: `same-${n}.txt`, text: 'kestrel boatyard note' })),
+    ...Array.from({ length: 300 }, (_, n) => ({ id: `worse-${n}`, name: `worse-${n}.txt`, text: `kestrel ${'word '.repeat(n + 5)}` })),
+  ]);
   const runs = traceKeywordSearch(store, 'kestrel', undefined, undefined).runs as TraceRun[];
   for (const run of runs) {
     expect(run.statements.ranked_match_page_bounded?.calls).toBe(1);
-    expect(run.statements.ranked_match_page?.calls).toBe(1);
+    expect(run.statements.ranked_match_page_tied?.calls).toBe(1);
+    expect(run.statements.ranked_match_page).toBeUndefined();
     expect(run.rows).toBe(50);
   }
+  // The full ranking's page, read straight from the store file (an oracle
+  // independent of the search code).
+  const oracle = new Database(store.dbPath, { readonly: true });
+  cleanups.push(() => oracle.close());
+  const expected = (oracle.query(`
+    SELECT i.provider_item_id AS id, MIN(connector_store_fts.rank) AS rank
+    FROM connector_store_fts JOIN items i ON i.item_pk = connector_store_fts.item_pk
+    WHERE connector_store_fts MATCH 'kestrel' AND connector_store_fts.rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'
+      AND i.tombstoned = 0
+    GROUP BY i.item_pk
+    ORDER BY rank ASC, COALESCE(i.updated_at, i.authored_at, i.indexed_at) DESC, i.item_pk ASC
+    LIMIT 50`).all() as Array<{ id: string }>).map((row) => row.id);
+  const rows = store.searchItemsDetailed('kestrel', 50, undefined, undefined, { prefix: false }).rows;
+  expect(expected[0]).toBe('best');
+  expect(rows.map((row) => row.sourceItem.providerItemId)).toEqual(expected);
 });

@@ -27,6 +27,7 @@ import {
   MAX_EXTRACTION_RETRY_BACKOFF_SECONDS,
   defaultFileExtractionJobsDbPath,
 } from '../src/workers/file-extraction/job-store.ts';
+import { forgetExtractionJobs } from '../src/workers/file-extraction/job-names.ts';
 import { createExtractionReadinessLedger } from '../src/workers/file-extraction/readiness-ledger.ts';
 import type { ExtractionItemRef, ExtractionTerminalStatus } from '../src/workers/file-extraction/types.ts';
 
@@ -127,6 +128,26 @@ describe('extraction job store: module identity', () => {
     })).toBe('/data/openclaw/olympus/file-extraction-jobs.sqlite');
   });
 
+  test('a queue an older build wrote gains the unroutable table on open, with no schema version', () => {
+    const { store, dbPath } = newStore();
+    const jobId = enqueueOne(store, 'existing');
+    store.close();
+    const db = new Database(dbPath);
+    try {
+      db.exec('DROP TABLE extraction_unroutable_items');
+    } finally { db.close(); }
+    // A read-only handle on such a store counts none rather than failing.
+    const reader = new LocalFileExtractionJobStore(dbPath, { readonly: true });
+    expect(reader.corpusReadiness(LANE.corpusId)).toMatchObject({ unsupportedKindItems: 0, queuedJobs: 1 });
+    expect(reader.scopedReadiness([LANE]).unsupportedKindItems).toBe(0);
+    reader.close();
+    const upgraded = new LocalFileExtractionJobStore(dbPath);
+    openStores.push(upgraded);
+    upgraded.recordUnroutable([ref('unsupported')]);
+    expect(upgraded.get(jobId)?.status).toBe('queued');
+    expect(upgraded.corpusReadiness(LANE.corpusId)).toMatchObject({ unsupportedKindItems: 1, queuedJobs: 1 });
+  });
+
   test('ported constants keep their production values', () => {
     expect(DEFAULT_EXTRACTION_LEASE_LIMIT).toBe(10);
     expect(DEFAULT_EXTRACTION_LEASE_SECONDS).toBe(900);
@@ -144,6 +165,7 @@ describe('extraction job store: module identity', () => {
     openStores.push(reader);
     expect(reader.counts(LANE).map((entry) => entry.jobs)).toEqual([1]);
     expect(() => reader.lease({ ...LANE, workerId: 'worker-1' })).toThrow(/read-only/);
+    expect(() => reader.recordUnroutable([ref('unsupported')])).toThrow(/read-only/);
     expect(() => reader.enqueue({
       refs: [ref('item-b')],
       extractorKind: KIND,
@@ -154,6 +176,52 @@ describe('extraction job store: module identity', () => {
 });
 
 describe('extraction job store: enqueue', () => {
+  test('terminal outcomes use the identity index, latest job warnings, the newest version, and read/active precedence', () => {
+    const { store, dbPath } = newStore();
+    const item = { provider: LANE.provider, accountScope: LANE.accountScope, providerItemId: 'outcome' };
+    expect(store.itemExtractionOutcome(item)).toBeUndefined();
+    const job = enqueueOne(store, 'outcome');
+    expect(store.itemExtractionOutcome(item)).toBeUndefined();
+    store.lease({ ...LANE, workerId: 'worker' });
+    store.record({ jobId: job, status: 'metadata_only', errorKind: 'extractor_empty_output',
+      derivations: [{ artifactKind: 'page', chars: 0, warnings: ['pdf_password_required'] }] });
+    expect(store.itemExtractionOutcome(item)).toEqual({ status: 'metadata_only', policyDecision: 'index_allowed',
+      lastErrorKind: 'extractor_empty_output', warnings: ['pdf_password_required'] });
+    expect(store.itemExtractionOutcome({ ...item, accountScope: 'other' })).toBeUndefined();
+    expect(store.itemExtractionOutcome({ ...item, provider: 'other' })).toBeUndefined();
+    const newer = enqueueOne(store, 'outcome', { version: 'v2' });
+    expect(store.itemExtractionOutcome(item)).toBeUndefined();
+    backdate(dbPath, newer, { status: 'failed_terminal', last_error_kind: 'pdf_damaged', updated_at: '2099-01-01T00:00:00Z' });
+    expect(store.itemExtractionOutcome(item)).toEqual({ status: 'failed_terminal', policyDecision: 'index_allowed', lastErrorKind: 'pdf_damaged', warnings: [] });
+    // A read of the same content wins over a newer extractor's failure...
+    backdate(dbPath, job, { status: 'indexed', last_error_kind: null });
+    expect(store.itemExtractionOutcome(item)?.status).toBe('indexed');
+    // ...but an older version's read never hides the current version's outcome.
+    backdate(dbPath, newer, { source_version: 'outcome-v2' });
+    expect(store.itemExtractionOutcome(item)).toEqual({ status: 'failed_terminal', policyDecision: 'index_allowed', lastErrorKind: 'pdf_damaged', warnings: [] });
+    backdate(dbPath, newer, { status: 'queued' });
+    expect(store.itemExtractionOutcome(item)).toBeUndefined();
+    backdate(dbPath, newer, { status: 'indexed', last_error_kind: null });
+    expect(store.itemExtractionOutcome(item)?.status).toBe('indexed');
+    expect(store.itemExtractionState(item)).toBe('settled');
+  });
+
+  test('an item inside a conversation never takes another conversation\'s outcome for the same provider item id', () => {
+    const { store, dbPath } = newStore();
+    const inChat = (chat: string) => ref('42#child:media', { localItemId: `${LANE.accountScope}:${chat}:42#child:media`, contentHash: `hash-${chat}` });
+    const result = store.enqueue({ refs: [inChat('chat-a'), inChat('chat-b')], extractorKind: KIND, extractorVersion: VERSION, policyDecision: 'index_allowed' });
+    const [a, b] = result.jobRefs.map(job => job.jobId);
+    backdate(dbPath, a!, { status: 'failed_terminal', last_error_kind: 'pdf_damaged' });
+    backdate(dbPath, b!, { status: 'indexed', updated_at: '2099-01-01T00:00:00Z' });
+    const item = (chat: string) => ({ provider: LANE.provider, accountScope: LANE.accountScope, providerItemId: '42#child:media',
+      providerConversationId: chat, localItemId: `${LANE.accountScope}:${chat}:42#child:media` });
+    expect(store.itemExtractionOutcome(item('chat-a'))?.status).toBe('failed_terminal');
+    expect(store.itemExtractionOutcome(item('chat-b'))?.status).toBe('indexed');
+    const none = { status: 'skipped_unsupported', warnings: [], policyDecision: 'index_allowed' } as const;
+    expect(store.itemExtractionOutcome(item('chat-c'), { whenNoJob: none })).toBe(none);
+    expect(store.itemExtractionOutcome(item('chat-c'))).toBeUndefined();
+  });
+
   test('an item text is owed until a job reads it or settles without it', () => {
     const { store, dbPath } = newStore();
     const item = { provider: LANE.provider, accountScope: LANE.accountScope, providerItemId: 'item-owed' };
@@ -972,6 +1040,112 @@ describe('extraction job store: janitor', () => {
 // for the same reason the queue does: the corpus id partitions it, and nothing
 // in it names a provider.
 describe('extraction job store: corpus readiness', () => {
+  test('a job for an older version does not hide the current version of an unsupported kind', () => {
+    const { store } = newStore();
+    enqueueOne(store, 'changed');
+    store.recordUnroutable([ref('changed', { sourceVersion: 'v2', mimeType: 'application/msword' })]);
+    expect(store.corpusReadiness(LANE.corpusId).unsupportedKindItems).toBe(1);
+    expect(store.scopedReadiness([LANE], { currentItem: (item) => item.sourceVersion === 'v2' }).unsupportedKindItems).toBe(1);
+  });
+
+  test('upserts unsupported kinds per corpus and counts only items without jobs', () => {
+    const { store, dbPath } = newStore();
+    store.recordUnroutable([ref('unsupported'), ref('unsupported'), ref('supported')]);
+    store.recordUnroutable([ref('unsupported', { mimeType: 'application/msword' })]);
+    expect(store.corpusReadiness(LANE.corpusId)).toMatchObject({ unsupportedKindItems: 2, queuedJobs: 0 });
+    expect(store.corpusReadiness('secure_local.files.other').unsupportedKindItems).toBe(0);
+    enqueueOne(store, 'supported');
+    const db = new Database(dbPath);
+    try {
+      expect(db.query('SELECT local_item_id, mime_type FROM extraction_unroutable_items').all()).toEqual([
+        { local_item_id: 'owner@example.com:unsupported', mime_type: 'application/msword' },
+      ]);
+      // A later constrained plan can see an existing job as unroutable.
+      store.recordUnroutable([ref('supported')]);
+      expect(store.corpusReadiness(LANE.corpusId).unsupportedKindItems).toBe(1);
+      expect(store.scopedReadiness([LANE]).unsupportedKindItems).toBe(1);
+    } finally { db.close(); }
+  });
+
+  test('scopes unsupported kinds to current lanes and current items on both predicate paths', async () => {
+    const { store } = newStore();
+    store.recordUnroutable([
+      ref('current'), ref('left-folder'),
+      ref('old-scope', { approvedScopeKey: 'old-scope' }),
+      ref('other-corpus', { corpusId: 'secure_local.files.other' }),
+    ]);
+    expect(store.corpusReadiness(LANE.corpusId).unsupportedKindItems).toBe(3);
+    expect(store.scopedReadiness([LANE, LANE]).unsupportedKindItems).toBe(2);
+    expect(store.scopedReadiness([LANE], {
+      currentItem: (ref) => ref.providerItemId === 'current',
+    }).unsupportedKindItems).toBe(1);
+    const seen: string[][] = [];
+    const readiness = await store.scopedReadinessInTurns([LANE], {
+      currentItem: () => { throw new Error('batched predicate takes precedence'); },
+      currentItems: (refs) => {
+        seen.push(refs.map((ref) => ref.providerItemId).sort());
+        return refs.map((ref) => ref.providerItemId === 'current');
+      },
+      turn: async () => {},
+    });
+    expect(seen).toEqual([['current', 'left-folder']]);
+    expect(readiness.unsupportedKindItems).toBe(1);
+  });
+
+  test('unsupported-kind currency checks yield between bounded slices', async () => {
+    const { store } = newStore();
+    store.recordUnroutable(Array.from({ length: 4_501 }, (_, index) => ref(`kind-${index}`)));
+    const batches: number[] = [];
+    let turns = 0;
+    const readiness = await store.scopedReadinessInTurns([LANE], {
+      currentItems: (refs) => {
+        batches.push(refs.length);
+        return refs.map(() => true);
+      },
+      turn: async () => { turns += 1; },
+    });
+    expect(batches).toEqual([2_000, 2_000, 501]);
+    expect(turns).toBeGreaterThanOrEqual(3);
+    expect(readiness.unsupportedKindItems).toBe(4_501);
+  });
+
+  test('invalidating a corpus removes its unsupported entries with its unfinished jobs', () => {
+    const { store } = newStore();
+    store.recordUnroutable([ref('unsupported'), ref('other', { corpusId: 'secure_local.files.other' })]);
+    enqueueOne(store, 'queued');
+    expect(store.invalidateUnsettledForCorpus(LANE.corpusId)).toBe(1);
+    expect(store.corpusReadiness(LANE.corpusId)).toMatchObject({ unsupportedKindItems: 0, queuedJobs: 0 });
+    expect(store.corpusReadiness('secure_local.files.other').unsupportedKindItems).toBe(1);
+  });
+
+  test('forgetting corpus or account rows removes unsupported items even without jobs', () => {
+    const { store, dbPath } = newStore();
+    store.recordUnroutable([ref('first'), ref('second', { accountScope: 'other-account' }),
+      ref('other', { corpusId: 'secure_local.files.other' })]);
+    expect(forgetExtractionJobs(dbPath, { corpusIds: [LANE.corpusId], accountScopes: [LANE.accountScope] }, { dryRun: true })).toBe(1);
+    expect(store.corpusReadiness(LANE.corpusId).unsupportedKindItems).toBe(2);
+    expect(forgetExtractionJobs(dbPath, { corpusIds: [LANE.corpusId], accountScopes: [LANE.accountScope] })).toBe(1);
+    expect(store.corpusReadiness(LANE.corpusId).unsupportedKindItems).toBe(1);
+    expect(forgetExtractionJobs(dbPath, { corpusIds: [LANE.corpusId] })).toBe(1);
+    expect(store.corpusReadiness(LANE.corpusId).unsupportedKindItems).toBe(0);
+    expect(store.corpusReadiness('secure_local.files.other').unsupportedKindItems).toBe(1);
+  });
+
+  test('the readiness ledger publishes unsupported kinds without turning them into policy exits', () => {
+    const { store } = newStore();
+    store.recordUnroutable([ref('unsupported')]);
+    const unscoped = createExtractionReadinessLedger(store).snapshotForCorpus(LANE.corpusId);
+    const scoped = createExtractionReadinessLedger(store, { lanesForCorpus: () => [LANE] }).snapshotForCorpus(LANE.corpusId);
+    for (const snapshot of [unscoped, scoped]) {
+      expect(snapshot?.counts).toMatchObject({
+        extraction_items_unsupported_kind: 1,
+        extraction_items_unreadable: 0,
+        qa_metadata_only_expected: 0,
+        qa_blocked_policy: 0,
+      });
+    }
+  });
+
   /** Enqueue one job, lease it and bring it to rest on `status`. */
   function settle(
     store: LocalFileExtractionJobStore,
@@ -1032,6 +1206,7 @@ describe('extraction job store: corpus readiness', () => {
       failedTerminalJobs: 0,
       failedActionableJobs: 0,
       unreadableItems: 0,
+      unsupportedKindItems: 0,
       retryableDueJobs: 0,
     });
   });
@@ -1072,7 +1247,10 @@ describe('extraction job store: corpus readiness', () => {
   test('a scoped snapshot taken in turns matches the one taken in one go, and gives the thread back between slices', async () => {
     const { store } = newStore();
     settle(store, 'damaged', 'failed_terminal');
-    for (let i = 0; i < 4_500; i += 1) enqueueOne(store, `item-${i}`);
+    store.enqueue({
+      refs: Array.from({ length: 4_500 }, (_, index) => ref(`item-${index}`)),
+      extractorKind: KIND, extractorVersion: VERSION,
+    });
     const checked: number[] = [];
     const currentItems = (refs: readonly unknown[]) => { checked.push(refs.length); return refs.map(() => true); };
     let turns = 0;
@@ -1123,6 +1301,7 @@ describe('extraction job store: corpus readiness', () => {
       extraction_jobs_failed: 1,
       extraction_jobs_failed_actionable: 0,
       extraction_items_unreadable: 1,
+      extraction_items_unsupported_kind: 0,
       extraction_jobs_retryable_due_actionable: 0,
     });
   });

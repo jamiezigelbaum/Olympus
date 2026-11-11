@@ -9,7 +9,7 @@ import { TierLedger, TIER_LEDGER_SCHEMA_VERSION, TIER_LEDGER_SQLITE_STORE_ID } f
 import { findTierSetLedger } from '../src/workers/classification/tier-set-binding.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
 import { tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
-import { workerTierLedgerProblem } from '../src/workers/engine/server.ts';
+import { workerTierLedgerProblem } from '../src/workers/engine/runtime/boot-storage.ts';
 import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, openTierFixture, storePaths, tempDir } from './helpers/tier-fixtures.ts';
 
 const cleanups: Array<() => void> = [];
