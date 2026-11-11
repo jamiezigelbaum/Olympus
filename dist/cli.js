@@ -36942,7 +36942,7 @@ function combineSearchText(parts) {
 function tierRowVisible(copies, corpusId, layer) {
   if (!copies || copies.length === 0)
     return true;
-  const here = copies.filter((copy) => copy.corpusId === corpusId && copy.state === "current");
+  const here = copies.filter((copy) => copy.corpusId === corpusId && copy.state === "current" && !(copy.embedHold && copy.layers !== "metadata" && copy.trustDomain !== "secure_local"));
   return copyServingLayer(here, layer) !== undefined;
 }
 function namesOnlyKeptCount(n) {

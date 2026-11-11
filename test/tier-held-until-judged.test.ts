@@ -346,9 +346,9 @@ test('the upgrade holds every Personal-first row at once, before the bounded set
   }
   // The settle reaches one of them; the other is held all the same.
   expect(settlePersonalFirstItems({ set: f.set, limit: 1 })).toMatchObject({ checked: 1, settled: 1 });
-  // The settled one has left Personal; the other's text is never embedded
-  // outside Private (its answers are withheld by the release check, above).
+  // Neither serves Personal search or embedding before its text moves.
   expect(f.stores.internal.searchItems(BODY_MARKER, 10)).toEqual([]);
+  expect(f.stores.internal.searchItems('Quietsecondmarker', 10)).toEqual([]);
   f.cloud.inputs.length = 0;
   await f.stores.internal.embedChunks({ provider: f.cloud });
   expect(f.cloud.inputs.some((input) => input.includes(BODY_MARKER) || input.includes('Quietsecondmarker') || input.includes('bananas'))).toBe(false);
