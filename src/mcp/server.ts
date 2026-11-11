@@ -27,6 +27,7 @@ import { SourceAnswerJobRegistry, sourceAnswerJobLimitsFromEnv, sourceAnswerJobO
 import type { OperationContext } from '../core/operations.ts';
 import { VERSION } from '../version.ts';
 import { listMcpTools } from './tools.ts';
+import { OLYMPUS_SERVER_INSTRUCTIONS } from './server-instructions.ts';
 
 type McpSurface = Extract<OperationSurface, 'mcp' | 'remote'>;
 
@@ -205,7 +206,7 @@ export function createOlympusMcpServer(
 ): Server {
   const server = new Server(
     { name: 'olympus', version: VERSION },
-    { capabilities: { tools: {} } },
+    { capabilities: { tools: {} }, ...(surface === 'remote' ? { instructions: OLYMPUS_SERVER_INSTRUCTIONS } : {}) },
   );
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const listed = listMcpTools(makeOperationContext().config, surface);

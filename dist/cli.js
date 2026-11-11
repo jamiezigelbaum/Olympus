@@ -150573,6 +150573,18 @@ var init_tools = __esm(() => {
   init_remote_result();
 });
 
+// src/mcp/server-instructions.ts
+var OLYMPUS_SERVER_INSTRUCTIONS;
+var init_server_instructions = __esm(() => {
+  OLYMPUS_SERVER_INSTRUCTIONS = [
+    "Olympus searches the user's own sources that it indexes privately on their computer (mail, files, notes, chats and saved reading).",
+    "Use it whenever the user asks about their own information: what someone wrote or sent, what a document says, when something happened,",
+    "what they decided, their plans, people, places and money. olympus_search returns the evidence; source_answer answers from their computer.",
+    `If Olympus's tools are not loaded in this chat, search your tools for "Olympus" before saying you cannot reach it.`,
+    "Do not use it for general knowledge."
+  ].join(" ");
+});
+
 // src/mcp/server.ts
 var exports_server = {};
 __export(exports_server, {
@@ -150673,7 +150685,7 @@ async function normalizedJsonRpcErrorResponse(response) {
   return new Response(JSON.stringify(normalized2), { status: response.status, statusText: response.statusText, headers });
 }
 function createOlympusMcpServer(surface, makeOperationContext, extension) {
-  const server = new Server({ name: "olympus", version: VERSION }, { capabilities: { tools: {} } });
+  const server = new Server({ name: "olympus", version: VERSION }, { capabilities: { tools: {} }, ...surface === "remote" ? { instructions: OLYMPUS_SERVER_INSTRUCTIONS } : {} });
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const listed = listMcpTools(makeOperationContext().config, surface);
     return { tools: extension ? extension.tools(listed) : listed };
@@ -150749,6 +150761,7 @@ var init_server4 = __esm(() => {
   init_source_answer_jobs();
   init_version();
   init_tools();
+  init_server_instructions();
   REMOTE_JSON_RPC_ERROR_TEXT = {
     [-32700]: "Parse error: the request was not valid JSON-RPC.",
     [-32600]: "Invalid request.",
@@ -218975,7 +218988,7 @@ function readChatGptResource(uri, client) {
   };
 }
 function createChatGptMcpServer(makeOperationContext, options, makeDetachedContext) {
-  const server = new Server({ name: "olympus", version: VERSION }, { capabilities: { tools: {}, resources: {} } });
+  const server = new Server({ name: "olympus", version: VERSION }, { capabilities: { tools: {}, resources: {} }, ...options.appClient?.host === "claude" ? { instructions: OLYMPUS_SERVER_INSTRUCTIONS } : {} });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listChatGptTools(makeOperationContext(), options) }));
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => callChatGptTool(request.params.name, request.params.arguments ?? {}, makeOperationContext(), options, extra.signal, makeDetachedContext));
   server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: CHATGPT_RESOURCES.map((resource) => ({ ...resource })) }));
@@ -219007,6 +219020,7 @@ var init_mcp_surface = __esm(() => {
   init_private_question_resource();
   init_response_builder();
   init_zkapi_copy();
+  init_server_instructions();
   READ_ONLY = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
   OAUTH2_REQUIRED2 = [{ type: "oauth2", scopes: [] }];
   OAUTH2_OPTIONAL = [{ type: "noauth" }, { type: "oauth2", scopes: [] }];

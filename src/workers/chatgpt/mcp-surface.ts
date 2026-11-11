@@ -61,6 +61,7 @@ import {
   type ChatGptToolResult,
 } from './response-builder.ts';
 import { CHATGPT_ZKAPI_TOOL_ACCOUNT_SENTENCE } from './zkapi-copy.ts';
+import { OLYMPUS_SERVER_INSTRUCTIONS } from '../../mcp/server-instructions.ts';
 
 export interface ChatGptSurfaceOptions {
   /** Host presentation only; absent preserves the ChatGPT wire format. */
@@ -1024,7 +1025,7 @@ export function createChatGptMcpServer(
 ): Server {
   const server = new Server(
     { name: 'olympus', version: VERSION },
-    { capabilities: { tools: {}, resources: {} } },
+    { capabilities: { tools: {}, resources: {} }, ...(options.appClient?.host === 'claude' ? { instructions: OLYMPUS_SERVER_INSTRUCTIONS } : {}) },
   );
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listChatGptTools(makeOperationContext(), options) }));
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) =>
