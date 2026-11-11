@@ -171256,6 +171256,8 @@ function hostProgram(input, bridge, mount) {
     window.addEventListener("hashchange", () => {
       if (window.location.hash === input.setupAgent.fragment)
         openSetupAgent();
+      else if (window.location.hash.indexOf(input.openFragment) === 0)
+        window.location.reload();
     });
   }
   if (typeof document.addEventListener === "function")
