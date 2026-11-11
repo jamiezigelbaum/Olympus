@@ -1053,3 +1053,17 @@ per-item hold (`holdContentUntilJudged`); see the change log.
   local embedding model that is still starting a bounded wait (15 s, within
   the 45 s source-answer hand-off) so the first question after idle keeps its
   vector lane. No frozen interface changed shape.
+- 2026-11-11 (no contract type version change; tier classifier stays
+  `2026-10-29.p8`; #1316, **draft until the owner decides**): **every source
+  holds an item's text until it is judged.** Personal-first
+  (`content:personal_first`, 2026-10-04) is retired. Read content whose
+  model question is open is held pending in Private, as an own record or an
+  archive import's already is, on every lane: `contentHeldForJudgment` is now
+  `contentPending`, one shared rule with no lane flag. Search outside Private
+  never returns it, and the release check rates it `private`, so only a
+  Private answer can read it before its verdict. A Personal verdict moves the
+  text down to Personal. A decision recorded Personal-first earlier is held
+  the same way: an answer read from it is Private at once, and its next
+  placement moves its text into Private. The classifier version is not
+  bumped, so nothing is asked again; with no model configured nothing is
+  asked, and ordinary content is still not held (unchanged).

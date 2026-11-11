@@ -247,13 +247,15 @@ export const PERSONAL_FIRST_REASON = 'content:personal_first';
 /**
  * Whether a decision's content waits, held Private, for its model question:
  * placement keeps the copy in Private and release treats it as Private, even
- * though the recorded content tier is the Personal default. Personal-first
- * content is the one open question that does not hold it.
+ * though the recorded content tier is the Personal default. Every open
+ * question holds it (#1316): a decision recorded Personal-first before that
+ * (`content:personal_first`) is held too, so an answer read from it is
+ * Private and its next placement moves its text into Private.
  */
 export function contentHeldForJudgment(
   decision: Pick<TierDecision, 'contentPending'> & { readonly reasons?: readonly string[] },
 ): boolean {
-  return decision.contentPending && decision.reasons?.includes(PERSONAL_FIRST_REASON) !== true;
+  return decision.contentPending;
 }
 /**
  * Recorded with the content reasons of every non-Secrets decision about an
@@ -1192,11 +1194,10 @@ function contentPass(args: {
       if (verdict.origin === 'rule' && verdict.rule) reasons.push(`content:rule:${verdict.rule}`);
     } else {
       pending = true;
-      // A held lane never releases content before its judgment, even where
-      // an owner rule settled the names and the body still raised a question.
-      if (verdict.queued === true && recordFlags.length === 0 && !metadata.pending && args.holdUntilJudged !== true) {
-        reasons.push(PERSONAL_FIRST_REASON);
-      }
+      // No text is used before its judgment, on any source (#1316): the
+      // content stays held Private while its question is open. Personal-first
+      // (content:personal_first) is retired; the reason is only read back
+      // from decisions recorded before.
       for (const flag of recordFlags) reasons.push(`content:own_record:${flag}`);
       for (const flag of detection.borderline) reasons.push(`content:borderline:${flag}`);
       reasons.push(`content:sniffer:${args.sniffer.id}:undecided`);

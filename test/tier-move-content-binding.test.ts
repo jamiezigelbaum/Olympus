@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
-import { classifyItemTiers, type TierSniffer } from '../src/workers/classification/tier-classifier.ts';
+import { PERSONAL_FIRST_REASON, classifyItemTiers, type TierSniffer } from '../src/workers/classification/tier-classifier.ts';
 import { moveTieredItem, TierMoveRefusedError } from '../src/workers/connector-store/tier-move.ts';
 import { TieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
 import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
@@ -81,21 +81,23 @@ test('a background Personal verdict releases the edited held body, never the pri
   expect(f.stores.internal!.localContent(localId('edited'))?.chunks.join('')).toBe(newBody);
 });
 
-test('a background Private verdict still hides first and moves upward even if stored content differs', async () => {
-  // This scenario starts Personal-first with a persisted background question.
-  const f = lane({ id: 'binding-test', judge: () => ({ verdict: 'undecided', queued: true }) });
+test('a row recorded Personal-first before #1316 is held at its next placement and moves up even if stored content differs', async () => {
+  // A row recorded so before #1316 retired Personal-first: its text sits in Personal while its question waits.
+  const f = lane();
   await f.sync(newBody);
   expect(f.stores.internal!.localContent(localId('edited'))?.chunks.join('')).toBe(newBody);
-  const applied = f.ledger.applySnifferVerdict(identity, {
-    pass: 'content', tier: 'secure', reason: 'content:sniffer:binding-test:private', modelId: 'binding-test',
-  }, { placementFor: d => f.set.placementFor(d) });
-  expect(applied?.outcome).toBe('queued_move');
+  const waiting = classifyItemTiers({ signals: { title: 'Notes' }, text: newBody },
+    { sniffer: { id: 'binding-test', judge: () => ({ verdict: 'undecided', queued: true }) } });
+  const recorded = { ...waiting, reasons: [...waiting.reasons, PERSONAL_FIRST_REASON] };
+  // Every open question now holds the text: the old reason is no exception, so its placement is a raise.
+  expect(f.ledger.recordRoutedPlacement(identity, recorded, f.set.placementFor(recorded)).outcome).toBe('queued_move');
   expect(f.stores.internal!.localContent(localId('edited'))?.chunks ?? []).toEqual([]);
-  // Simulate a different stored snapshot without changing the verdict.
+  // Simulate a different stored snapshot without changing the decision.
   const stored = f.stores.internal!.exportItemCopy(identity)!;
   f.stores.internal!.importItemCopy({ ...stored, chunks: stored.chunks.map(c => ({ ...c, boundedText: oldBody })) },
     { trustTier: 'S3', syncConnectorId: 'fixture-replay', layers: 'both' });
-  expect((await moveTieredItem({ set: f.set, identity, target: { metadataTier: 'private', contentTier: 'secure' } })).raise).toBe(true);
+  const row = f.ledger.getCurrent(identity)!;
+  expect((await moveTieredItem({ set: f.set, identity, target: { metadataTier: row.targetMetadataTier!, contentTier: row.targetContentTier! } })).raise).toBe(true);
   expect(f.stores.internal!.localContent(localId('edited'))?.chunks ?? []).toEqual([]);
   expect(f.stores.secure_local!.localContent(localId('edited'))?.chunks.join('')).toBe(oldBody);
 });

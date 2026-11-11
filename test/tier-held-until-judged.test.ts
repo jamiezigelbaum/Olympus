@@ -99,10 +99,10 @@ for (const [title, sniffer] of [['a model that has not answered yet', waiting], 
     expect(decision.reasons).toContain(HELD_UNTIL_JUDGED_REASON);
     expect(decision.reasons).not.toContain(PERSONAL_FIRST_REASON);
     expect(decision.reasons).toContain(`content:sniffer:${sniffer.id}:undecided`);
-    // The same item outside a held lane is usable at once.
+    // The same item outside a held lane is held too, without the lane's mark (#1316: no Personal-first).
     const live = classifyItemTiers({ signals: { title: 'Picnic list' }, text: ORDINARY }, { sniffer });
     expect(live.reasons).not.toContain(HELD_UNTIL_JUDGED_REASON);
-    if (sniffer === waiting) expect(live.reasons).toContain(PERSONAL_FIRST_REASON);
+    if (sniffer === waiting) expect(live.reasons).not.toContain(PERSONAL_FIRST_REASON);
     else expect(live.contentPending).toBe(false);
   });
 }
@@ -187,7 +187,7 @@ test('late text, unread and names-only decisions carry the hold the same way', (
   expect(late).toMatchObject({ contentPending: true });
   expect(late.reasons).toContain(HELD_UNTIL_JUDGED_REASON);
   expect(late.reasons).not.toContain(PERSONAL_FIRST_REASON);
-  expect(classifyContentTier({ ...base, text: ORDINARY }, { sniffer: waiting }).reasons).toContain(PERSONAL_FIRST_REASON);
+  expect(classifyContentTier({ ...base, text: ORDINARY }, { sniffer: waiting }).reasons).not.toContain(PERSONAL_FIRST_REASON);
   expect(classifyContentTier({ ...base, text: ORDINARY, holdUntilJudged: true }, { sniffer: waiting, override: { kind: 'tier', tier: 'private' } }).reasons)
     .toContain(HELD_UNTIL_JUDGED_REASON);
   const unread = classifyItemTiers({ signals: { title: 'Picnic list' }, holdUntilJudged: true }, { sniffer: waiting });
@@ -220,7 +220,7 @@ test('a store call site reads the hold back from the stored decision', () => {
   expect(decision.reasons).toContain(HELD_UNTIL_JUDGED_REASON);
   expect(decision.reasons).not.toContain(PERSONAL_FIRST_REASON);
   const other = fixtureItem({ id: 'other', name: 'Picnic list', text: ORDINARY });
-  expect(decideItemTiers(connector, other, ORDINARY, { sniffer: waiting }, ledger).reasons).toContain(PERSONAL_FIRST_REASON);
+  expect(decideItemTiers(connector, other, ORDINARY, { sniffer: waiting }, ledger).reasons).not.toContain(PERSONAL_FIRST_REASON);
 });
 
 // --- Placement in a lane -------------------------------------------------------
