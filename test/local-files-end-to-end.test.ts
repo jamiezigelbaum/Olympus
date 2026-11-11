@@ -12,7 +12,7 @@ import { defaultConfig } from '../src/core/config.ts';
 import { defaultLocalFilesIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
 import { connectThisComputerSource, disconnectThisComputerSource } from '../src/core/this-computer.ts';
 import { SOURCE_INGESTION_EXCLUSIONS_PATH_ENV } from '../src/core/source-ingestion-exclusions.ts';
-import { connectorStoreExtractionCandidateReader } from '../src/workers/email-source/file-extraction-runtime.ts';
+import { connectorStoreExtractionCandidateReader } from '../src/workers/engine/runtime/file-extraction-runtime.ts';
 import { createConnectorFileExtractionSource } from '../src/workers/file-extraction/connector-source.ts';
 import { LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
 import { buildExtractorRegistry } from '../src/workers/file-extraction/registry.ts';

@@ -58,11 +58,11 @@ import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { createReleaseTierCheck, createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT, DASHBOARD_SETTINGS_ZKAPI_ID, renderDashboardPrivateAnswersPage } from '../src/workers/dashboard/pages/private-answers.ts';
 import { DASHBOARD_COMPUTER_PANEL_COPY } from '../src/workers/dashboard/vocabulary.ts';
-import { createDashboardPanelTools, type DashboardPanelTools } from '../src/workers/email-source/dashboard-panel-tools.ts';
+import { createDashboardPanelTools, type DashboardPanelTools } from '../src/workers/engine/dashboard/dashboard-panel-tools.ts';
 import { DASHBOARD_TOOLS_CALL_PATH } from '../src/workers/dashboard/host-page.ts';
 import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
-import { createLocalAnswerPath, createLocalPrivateAnswers, type LocalPrivateAnswers } from '../src/workers/email-source/local-private-answers.ts';
-import { createSourceAnswerLanes } from '../src/workers/email-source/source-answer-lanes.ts';
+import { createLocalAnswerPath, createLocalPrivateAnswers, type LocalPrivateAnswers } from '../src/workers/engine/runtime/local-private-answers.ts';
+import { createSourceAnswerLanes } from '../src/workers/engine/runtime/source-answer-lanes.ts';
 import { DASHBOARD_LAUNCH_MINT_PATH, DASHBOARD_UNLOCK_HEADER, DASHBOARD_LAUNCH_REDEEM_PATH, DashboardLaunchTickets } from '../src/core/dashboard-launch.ts';
 import { DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER, DASHBOARD_PRIVATE_ANSWERS_PATH, withWorkerBearerAuth } from '../src/workers/http.ts';
 import { QWEN35_4B } from '../src/workers/source-index/built-in-reasoning/manifest.ts';
@@ -1927,7 +1927,7 @@ describe('anonymous answers in the local inbox', () => {
     const store = openWaitingPrivateQuestionStore(join(dir, 'state', 'waiting-private-questions.sqlite'));
     cleanups.push(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
     const local = createLocalPrivateAnswers({ store: () => store, connectionName: () => 'Grok Bot', eligible: async items => items.map(() => true), answer: async () => ({ status: 'failed' }) });
-    const { askWithAnonymousInbox } = await import('../src/workers/email-source/local-private-answers.ts');
+    const { askWithAnonymousInbox } = await import('../src/workers/engine/runtime/local-private-answers.ts');
     const result = { ok: true as const, sent: 'What are general tenant deposit rules?', reply: 'LOCAL_ONLY_ANONYMOUS_REPLY', route: 'anonymous', networkIdentity: 'not_verified' as const, level: 'standard' as const, cleanup: 'light_cleanup' as const, rewritten: true, remembered: false, model: 'outside/model' };
     return { store, local, result, askWithAnonymousInbox, ask: (run = async () => result) => askWithAnonymousInbox({ question: 'My identifying original question' }, { store: () => store, connectionId: 'grok', ask: run }) };
   }

@@ -5,7 +5,7 @@
 import { describe, expect, test } from 'bun:test';
 import { CLASSIFIER_APPROVE_TOOL_NAME, DASHBOARD_TOOL_NAME } from '../src/workers/chatgpt/dashboard-contract.ts';
 import { buildDashboardPreviewView } from '../scripts/dashboard-preview.ts';
-import { createDashboardPanelTools } from '../src/workers/email-source/dashboard-panel-tools.ts';
+import { createDashboardPanelTools } from '../src/workers/engine/dashboard/dashboard-panel-tools.ts';
 
 const ORIGIN = 'http://127.0.0.1:8010';
 

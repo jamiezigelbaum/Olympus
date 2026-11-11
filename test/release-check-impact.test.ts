@@ -62,7 +62,7 @@ describe('which legs a change reaches', () => {
     expect(reach.has('scripts/release-check/archive-live-seed-hooks.ts')).toBe(true);
     expect(planImpact(['scripts/release-check/archive-live-seed-hooks.ts'], reach).mode).toBe('full');
     expect(planImpact(['scripts/release-check/inbox.ts'], reach).mode).toBe('full');
-    expect(planImpact(['src/workers/email-source/local-private-answers.ts'], reach).run).toContain('suite');
+    expect(planImpact(['src/workers/engine/runtime/local-private-answers.ts'], reach).run).toContain('suite');
   });
 
   test('a dashboard change runs the screens, the archive leg that drives them, and everything their pictures depend on', () => {

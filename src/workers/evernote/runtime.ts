@@ -17,8 +17,8 @@ import type { SecretStore } from '../../core/secret-store.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
 import type { LocalConnectorStore } from '../connector-store/index.ts';
 import type { ConnectedCredentialHandle } from '../credential-broker/connected-handles.ts';
-import { createChildExtractionRuntime } from '../email-source/child-extraction-runtime.ts';
-import type { FileExtractionRuntime } from '../email-source/file-extraction-runtime.ts';
+import { createChildExtractionRuntime } from '../engine/runtime/child-extraction-runtime.ts';
+import type { FileExtractionRuntime } from '../engine/runtime/file-extraction-runtime.ts';
 import type { ExtractorRegistryConfig } from '../file-extraction/types.ts';
 import type { DashboardLivePass, DashboardLivePassErrorKind } from '../source-dashboard.ts';
 import {

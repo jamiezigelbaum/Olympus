@@ -1,7 +1,7 @@
 import { CONSENT_PAGE_STYLE } from '../../remote-oauth/consent-page.ts';
 import { createHash } from 'node:crypto';
 import { DROPBOX_MISSING_SCOPE_MESSAGE, safeOAuthErrorCode } from '../../../core/connect.ts';
-import type { DashboardPanelCallContext } from '../../email-source/dashboard-panel-tools.ts';
+import type { DashboardPanelCallContext } from '../dashboard/dashboard-panel-tools.ts';
 import { DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER, DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER } from '../../http.ts';
 import type { DashboardOAuthSource } from '../../source-dashboard.ts';
 import { dashboardGoogleOAuthSource } from './dashboard-oauth-clients.ts';

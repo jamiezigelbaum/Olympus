@@ -10,18 +10,18 @@
  * locator says they are. Only children are candidates; a message is read with
  * its listing, never here. Nothing here names a source.
  */
-import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
-import type { SourceConnector } from '../../core/contracts.ts';
-import type { ExtractionCandidateReader } from '../../core/file-extraction-source.ts';
-import { tierLedgerIdentityKey } from '../classification/tier-ledger.ts';
-import { hiddenByParentIdentity, itemVerdicts, type ChildProbe, type ChildVisibilityLane } from '../connector-store/child-visibility.ts';
-import { connectorStoreExtractionCandidateReader } from '../connector-store/extraction-candidate-reader.ts';
-import type { LocalConnectorStore } from '../connector-store/index.ts';
-import type { TieredExtractionView } from '../connector-store/tiered-extraction.ts';
-import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
+import { CHILD_ITEM_ID_SEPARATOR } from '../../../core/child-item-id.ts';
+import type { SourceConnector } from '../../../core/contracts.ts';
+import type { ExtractionCandidateReader } from '../../../core/file-extraction-source.ts';
+import { tierLedgerIdentityKey } from '../../classification/tier-ledger.ts';
+import { hiddenByParentIdentity, itemVerdicts, type ChildProbe, type ChildVisibilityLane } from '../../connector-store/child-visibility.ts';
+import { connectorStoreExtractionCandidateReader } from '../../connector-store/extraction-candidate-reader.ts';
+import type { LocalConnectorStore } from '../../connector-store/index.ts';
+import type { TieredExtractionView } from '../../connector-store/tiered-extraction.ts';
+import type { TieredStoreSet } from '../../connector-store/tiered-store-set.ts';
 import { createFileExtractionRuntime, type FileExtractionRuntime } from './file-extraction-runtime.ts';
-import { createConnectorFileExtractionSource, deferredBytesAnswerFor } from '../file-extraction/connector-source.ts';
-import type { ExtractorRegistryConfig } from '../file-extraction/types.ts';
+import { createConnectorFileExtractionSource, deferredBytesAnswerFor } from '../../file-extraction/connector-source.ts';
+import type { ExtractorRegistryConfig } from '../../file-extraction/types.ts';
 
 /**
  * Whether a child may still be read and landed: its own row is not gone (not

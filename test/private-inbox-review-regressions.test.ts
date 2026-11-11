@@ -14,7 +14,7 @@ import { createLocalModelActivity, runBackgroundInference } from '../src/workers
 import { createBuiltInPrivateAnswerModel } from '../src/workers/chatgpt/private-answer-model.ts';
 import { PrivateAnswerJobs } from '../src/workers/chatgpt/private-answer-jobs.ts';
 import { generatePanelKeyPair, openPrivateAnswer, type SealedPrivateAnswer } from '../src/workers/chatgpt/private-answer-crypto.ts';
-import { createLocalPrivateAnswers } from '../src/workers/email-source/local-private-answers.ts';
+import { createLocalPrivateAnswers } from '../src/workers/engine/runtime/local-private-answers.ts';
 import type { LocalAnswerResult } from '../src/workers/source-index/local-answer.ts';
 import { QWEN35_4B } from '../src/workers/source-index/built-in-reasoning/manifest.ts';
 

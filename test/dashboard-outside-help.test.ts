@@ -3,7 +3,7 @@ import { linuxZkapiConfinement } from '../src/core/zkapi-confinement-linux.ts';
 import { ownerLocalMint, ownerUnlockKey } from './helpers/owner-local-mint.ts';
 /**
  * The Outside help card (src/workers/dashboard/outside-help.ts,
- * pages/private-answers.ts) and its worker side (email-source/dashboard-consult.ts,
+ * pages/private-answers.ts) and its worker side (engine/dashboard/dashboard-consult.ts,
  * the writer's one caller): the page states and copy, the Mac-only boundary
  * (control session in, Gateway bearer out, nothing native), and the adapter's
  * rules over a temp HOME. Design docs/design/frontier-consult-lane.md §A.9,
@@ -36,7 +36,7 @@ import {
 import { DASHBOARD_OUTSIDE_HELP_TOOLS_COPY } from '../src/workers/dashboard/outside-help-tools.ts';
 import { renderDashboardPrivateAnswersPage } from '../src/workers/dashboard/pages/private-answers.ts';
 import { DASHBOARD_OUTSIDE_HELP_COPY as W } from '../src/workers/dashboard/vocabulary.ts';
-import { createDashboardConsultAdapter, DASHBOARD_ZKAPI_PROFILE_ID, type DashboardConsultBackend } from '../src/workers/email-source/dashboard-consult.ts';
+import { createDashboardConsultAdapter, DASHBOARD_ZKAPI_PROFILE_ID, type DashboardConsultBackend } from '../src/workers/engine/dashboard/dashboard-consult.ts';
 import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { DASHBOARD_CONSULT_CONTROL_PATHS, DASHBOARD_LOCAL_CONTROL_SESSION_PATH, withWorkerBearerAuth } from '../src/workers/http.ts';
 import { __sovereigntyFileTestHooks } from '../src/core/sovereignty.ts';

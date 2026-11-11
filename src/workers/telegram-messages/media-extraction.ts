@@ -22,8 +22,8 @@ import { FileExtractionSourceError } from '../../core/file-extraction-source.ts'
 import { copyArchiveInputMediaToFile, parseArchiveInputMedia, readArchiveInputMedia, type ArchiveInputMediaDeps } from '../archive-import/input-media.ts';
 import type { LocalConnectorStore } from '../connector-store/index.ts';
 import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
-import type { FileExtractionRuntime } from '../email-source/file-extraction-runtime.ts';
-import { createChildExtractionRuntime } from '../email-source/child-extraction-runtime.ts';
+import type { FileExtractionRuntime } from '../engine/runtime/file-extraction-runtime.ts';
+import { createChildExtractionRuntime } from '../engine/runtime/child-extraction-runtime.ts';
 import type { BoundedFetchConnector, FileFetchConnector } from '../file-extraction/connector-source.ts';
 import { discardExtractionSpoolFile, extractionSpoolFileName, makeExtractionSpoolOwnerDir } from '../file-extraction/spool.ts';
 import type { ExtractorRegistryConfig } from '../file-extraction/types.ts';
