@@ -74311,7 +74311,7 @@ function amountReadings(amount) {
 }
 function amountsMissingFrom(answer, evidence) {
   const seen = new Set;
-  for (const match of evidence.matchAll(/\d+(?:[.,']\d+| \d{3}(?!\d))*/gu)) {
+  for (const match of evidence.matchAll(/\d+(?:[ .,']\d{3}(?!\d))*(?:[.,']\d+)?/gu)) {
     for (const reading of amountReadings(match[0]))
       seen.add(reading);
     const chunks = match[0].split(" ");
@@ -74322,8 +74322,10 @@ function amountsMissingFrom(answer, evidence) {
     }
   }
   const missing = [];
-  for (const match of answer.matchAll(/[€$£¥]\s?\d+(?:[.,']\d+| \d{3}(?!\d))*|\d+(?:[.,']\d+| \d{3}(?!\d))*[.,']\d+(?:[.,']\d+| \d{3}(?!\d))*/gu)) {
+  for (const match of answer.matchAll(/([€$£¥]\s?)?\d+(?:[ .,']\d{3}(?!\d))*(?:[.,']\d+)?/gu)) {
     const amount = match[0].trim();
+    if (!match[1] && !/[.,']/u.test(amount))
+      continue;
     const readings = amountReadings(amount);
     if (readings.length > 0 && !readings.some((reading) => seen.has(reading)) && !missing.includes(amount))
       missing.push(amount);

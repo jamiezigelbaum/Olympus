@@ -81,3 +81,10 @@ test('a space-grouped amount in the draft is one value, and a space-grouped evid
   expect(amountsMissingFrom('Paid €1 240.50', 'Paid 240.50 EUR')).toEqual(['€1 240.50']);
   expect(amountsMissingFrom('Spent €2024', 'In 2024 100 items')).toEqual([]);
 });
+
+test('a count after a decimal amount is not grouped into it', async () => {
+  const { amountsMissingFrom } = await import('../src/core/analyst.ts');
+  expect(amountsMissingFrom('Paid €12.50', 'Paid €12.50 100 units shipped')).toEqual([]);
+  expect(amountsMissingFrom('Shipped 100 units', 'Paid €12.50 100 units shipped')).toEqual([]);
+  expect(amountsMissingFrom('Paid €12,500.75', 'Paid €12.50 100 units shipped')).toEqual(['€12,500.75']);
+});
