@@ -226,7 +226,7 @@ export function readEpub(bytes: Uint8Array): PackageDocument {
   if (!rootfile) unreadable('damaged', 'EPUB package path is missing.');
   const opfPath = packagePath('', rootfile);
   const opf = parseMarkup(read(opfPath, true)!);
-  const items = new Map<string, { href: string; path?: string; mime: string }>();
+  const items = new Map<string, { href: string; path: string | undefined; mime: string }>();
   for (const item of nodes(opf, 'item')) {
     const { id, href } = item.attributes;
     if (!id || !href || items.has(id)) unreadable('damaged', 'EPUB manifest item is malformed.');
