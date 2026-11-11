@@ -25888,14 +25888,14 @@ function beginSourceAnswerPoolRead() {
       };
       query.poolByCorpus.set(corpusId, reads);
     }
-    const wait = nonNegativeMs(queueWaitMs);
-    const ran = nonNegativeMs(runMs);
+    const wait = unroundedMs(queueWaitMs);
+    const ran = unroundedMs(runMs);
     reads.reads += 1;
     reads.queue_wait_ms += wait;
     reads.queue_wait_max_ms = Math.max(reads.queue_wait_max_ms, wait);
     reads.run_ms += ran;
     reads.run_max_ms = Math.max(reads.run_max_ms, ran);
-    const sql = nonNegativeMs(sqlMs);
+    const sql = unroundedMs(sqlMs);
     reads.sql_ms += sql;
     reads.sql_max_ms = Math.max(reads.sql_max_ms, sql);
     if (outcome === "refused")
@@ -25945,14 +25945,14 @@ function recordSourceAnswerMainThreadSql(elapsedMs, site) {
   const trace = currentSourceAnswerTrace();
   if (!trace)
     return;
-  const ms = nonNegativeMs(elapsedMs);
+  const ms = unroundedMs(elapsedMs);
   const sql = trace.mainThreadSql;
   sql.statements += 1;
   sql.total_ms += ms;
   sql.max_ms = Math.max(sql.max_ms, ms);
   if (ms < SLOW_MAIN_THREAD_SQL_MS)
     return;
-  sql.slow.push({ ms, site: site() });
+  sql.slow.push({ ms: nonNegativeMs(ms), site: site() });
   if (sql.slow.length > SLOW_MAIN_THREAD_SQL_KEPT) {
     sql.slow.sort((left, right) => right.ms - left.ms);
     sql.slow.length = SLOW_MAIN_THREAD_SQL_KEPT;
@@ -26153,7 +26153,12 @@ function snapshotSourceAnswerTrace(trace) {
     recordBuildMs: trace.recordBuildMs,
     appendMs: trace.appendMs,
     ...trace.releaseDecision ? { releaseDecision: trace.releaseDecision } : {},
-    mainThreadSql: { ...trace.mainThreadSql, slow: trace.mainThreadSql.slow.map((entry) => ({ ...entry })) }
+    mainThreadSql: {
+      statements: trace.mainThreadSql.statements,
+      total_ms: nonNegativeMs(trace.mainThreadSql.total_ms),
+      max_ms: nonNegativeMs(trace.mainThreadSql.max_ms),
+      slow: trace.mainThreadSql.slow.map((entry) => ({ ...entry }))
+    }
   };
 }
 function sourceAnswerTraceErrorClass(error) {
@@ -26185,6 +26190,9 @@ function errorClass(error) {
 function sanitizeErrorClass(value) {
   const normalized = value.replace(/[^A-Za-z0-9_]/g, "").slice(0, 64);
   return CONTENT_FREE_ERROR_CLASSES.has(normalized) ? normalized : "Error";
+}
+function unroundedMs(value) {
+  return Number.isFinite(value) ? Math.max(0, value) : 0;
 }
 function nonNegativeMs(value) {
   return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
