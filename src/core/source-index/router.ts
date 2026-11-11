@@ -18,6 +18,7 @@ import type {
 } from './corpus.ts';
 import {
   applyPerCorpusResultBudget,
+  withReservedLeaderSeats,
   assessSourceIndexRetrievalState,
   fuseRankedCandidateLanes,
   mergeRetrievalDegradations,
@@ -84,7 +85,18 @@ export interface SourceIndexSearchHit {
   // encounteredSecureLocal, and the evidence build uses it when no content
   // provider answers for the item. Search routes never return it.
   trustTier?: SourceTrustTier;
+  // Internal: the hit is one of its store's keyword leaders (the lane's
+  // rank-1 row, its best name match, or both), with its share of the
+  // question's concepts. The router keeps the best leaders across stores in
+  // the pack (withReservedLeaderSeats). Search routes never return it.
+  keywordLeader?: SourceIndexKeywordLeaderSignal;
   rawExposed: false;
+}
+
+export interface SourceIndexKeywordLeaderSignal {
+  kinds: ReadonlyArray<'keyword_first' | 'name'>;
+  // Concepts matched over the question's concept groups, 0 to 1.
+  conceptShare: number;
 }
 
 export interface SourceIndexInternalContent {
@@ -566,28 +578,31 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
   // one ordering available here that is neither adapter-scale-derived nor
   // spelling-derived, so it is what the tie-break falls back on.
   const laneOrder = new Map(lanes.map((lane, index) => [lane.name, index] as const));
-  const { hits: fused, degradations: budgetDegradations } = applyPerCorpusResultBudget(
-    fuseRankedCandidateLanes({
-      lanes,
-      getId: routedHitCandidateId,
-      // Fuse everything and let the per-corpus budget below make the cut. A
-      // slice at maxResults hands the entire cross-corpus decision to the
-      // tie-break, which is how one comparator could erase whole corpora.
-      limit: lanes.reduce((total, lane) => total + lane.items.length, 0),
-      // Scale-free, and load-bearing here in a way it is nowhere else. The
-      // candidate id is corpus-scoped, so no candidate is ever in two lanes and
-      // every candidate carries exactly one lane's 1/(k+rank): each rank tier is
-      // a full tie across corpora, and the tie-break IS the cross-corpus ranking
-      // function. Adapter `score` carries no scale contract — a negated bm25 rank
-      // in one corpus (~8), a sub-lane RRF sum in another (~0.016) — so comparing
-      // it ordered corpora by scoring convention, sinking a whole family below
-      // every bm25 hit in every tier. With maxResults 3 against the mounted
-      // corpora that cut the family out of the analyst's evidence entirely, with
-      // nothing in coverage to record the loss. Ordering the tie by corpus id
-      // instead only re-keyed the same loss to spelling: 'i' < 's', so every
-      // secure_local corpus lost to every internal one on every query forever.
-      tieBreaker: (left, right) => compareTiedRoutedCandidates(left, right, laneOrder),
-    }),
+  const fusedAll = fuseRankedCandidateLanes({
+    lanes,
+    getId: routedHitCandidateId,
+    // Fuse everything and let the per-corpus budget below make the cut. A
+    // slice at maxResults hands the entire cross-corpus decision to the
+    // tie-break, which is how one comparator could erase whole corpora.
+    limit: lanes.reduce((total, lane) => total + lane.items.length, 0),
+    // Scale-free, and load-bearing here in a way it is nowhere else. The
+    // candidate id is corpus-scoped, so no candidate is ever in two lanes and
+    // every candidate carries exactly one lane's 1/(k+rank): each rank tier is
+    // a full tie across corpora, and the tie-break IS the cross-corpus ranking
+    // function. Adapter `score` carries no scale contract — a negated bm25 rank
+    // in one corpus (~8), a sub-lane RRF sum in another (~0.016) — so comparing
+    // it ordered corpora by scoring convention, sinking a whole family below
+    // every bm25 hit in every tier. With maxResults 3 against the mounted
+    // corpora that cut the family out of the analyst's evidence entirely, with
+    // nothing in coverage to record the loss. Ordering the tie by corpus id
+    // instead only re-keyed the same loss to spelling: 'i' < 's', so every
+    // secure_local corpus lost to every internal one on every query forever.
+    tieBreaker: (left, right) => compareTiedRoutedCandidates(left, right, laneOrder),
+  });
+  const budgeted = applyPerCorpusResultBudget(fusedAll, request.maxResults);
+  const { hits: fused, degradations: budgetDegradations } = withReservedLeaderSeats(
+    budgeted,
+    fusedAll.map((candidate) => candidate.item),
     request.maxResults,
   );
 
