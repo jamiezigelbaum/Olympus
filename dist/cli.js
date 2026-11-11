@@ -26125,8 +26125,1194 @@ var init_tier_set_binding = __esm(() => {
   tierLedgerIsWithin = pathResolvesWithin;
 });
 
-// src/workers/source-index/answer-latency-trace.ts
+// src/core/local-model-policy.ts
+function isCloudForwardingModelId(modelId) {
+  const trimmed = modelId.trim().toLowerCase();
+  const lastSegment = trimmed.slice(trimmed.lastIndexOf("/") + 1);
+  const colon = lastSegment.lastIndexOf(":");
+  if (colon < 0)
+    return false;
+  const tag = lastSegment.slice(colon + 1);
+  return tag === "cloud" || tag.endsWith("-cloud");
+}
+function assertLocalModelIdNotCloudForwarding(label, modelId) {
+  if (!isCloudForwardingModelId(modelId))
+    return;
+  throw new OperationError("config_error", `${label} names model "${modelId.trim()}", whose tag is a reserved cloud-style tag, so it cannot serve as a local model.`, 'Ollama names its cloud models with a ":cloud" or "-cloud" tag and the local daemon forwards them off this machine, so local lanes refuse every model with such a tag, including a local custom model tagged that way. Choose a model that runs locally (rename a local custom tag), or configure the cloud model as a cloud profile.');
+}
+var init_local_model_policy = __esm(() => {
+  init_operation_error();
+});
+
+// src/workers/source-index/embedding-identity.ts
+function embeddingProviderFamily(providerKind) {
+  return declaredEmbeddingProviderFamily(providerKind) ?? { providerKind, epochProviderToken: providerKind, dimensionToken: "declared" };
+}
+function declaredEmbeddingProviderFamily(providerKind) {
+  return EMBEDDING_PROVIDER_FAMILIES.find((family) => family.providerKind === providerKind);
+}
+function buildEmbeddingEpoch(input) {
+  const family = embeddingProviderFamily(input.provider);
+  const dimension = family.dimensionToken === PROVIDER_REPORTED_DIMENSION_TOKEN ? PROVIDER_REPORTED_DIMENSION_TOKEN : declaredDimensionToken(input.dimension);
+  return `${input.backend}:${family.epochProviderToken}:${input.modelId}:${dimension}`;
+}
+function declaredDimensionToken(dimension) {
+  return dimension !== undefined && Number.isSafeInteger(dimension) && dimension >= 1 ? String(dimension) : PROVIDER_REPORTED_DIMENSION_TOKEN;
+}
+function canonicalIdentity(input) {
+  return { ...input, epochId: buildEmbeddingEpoch(input) };
+}
+function canonicalEmbeddingIdentityForModel(modelId) {
+  return CANONICAL_EMBEDDING_IDENTITIES.find((identity2) => identity2.modelId === modelId);
+}
+function canonicalEmbeddingDimension(modelId) {
+  return canonicalEmbeddingIdentityForModel(modelId)?.dimension;
+}
+function resolveEmbeddingEpoch(input) {
+  const derived = buildEmbeddingEpoch(input);
+  const override = input.epochOverride?.trim();
+  if (!override || override === derived)
+    return derived;
+  if (!declaredEmbeddingProviderFamily(input.provider))
+    return override;
+  const [overrideBackend, , overrideModelId] = override.split(":");
+  if ((overrideBackend === "local" || overrideBackend === "cloud") && overrideBackend !== input.backend) {
+    throw refusedEmbeddingEpoch(override, input, `it names the ${overrideBackend} backend`);
+  }
+  if (overrideModelId !== undefined && overrideModelId !== input.modelId && canonicalEmbeddingIdentityForModel(overrideModelId)) {
+    throw refusedEmbeddingEpoch(override, input, `it names the model ${overrideModelId}`);
+  }
+  const contaminated = contaminatedEmbeddingEpoch(input.modelId, override);
+  if (contaminated) {
+    throw refusedEmbeddingEpoch(override, input, `it is a known contaminated epoch (${contaminated.origin})`);
+  }
+  return override;
+}
+function refusedEmbeddingEpoch(override, input, because) {
+  return new OperationError("config_error", `Embedding epoch "${override}" cannot label ${input.backend} provider ${input.provider} ` + `model ${input.modelId}: ${because}.`, "An epoch names the vectors a specific provider minted. Configure a per-provider epoch " + "instead of sharing one variable across the local and cloud embedding lanes.");
+}
+function contaminatedEmbeddingEpoch(modelId, epochId) {
+  return KNOWN_CONTAMINATED_EMBEDDING_EPOCHS.find((entry) => entry.modelId === modelId && entry.epochId === epochId);
+}
+var PROVIDER_REPORTED_DIMENSION_TOKEN = "provider-reported", EMBEDDING_PROVIDER_FAMILIES, CANONICAL_EMBEDDING_IDENTITIES, KNOWN_CONTAMINATED_EMBEDDING_EPOCHS;
+var init_embedding_identity = __esm(() => {
+  init_operation_error();
+  EMBEDDING_PROVIDER_FAMILIES = [
+    {
+      providerKind: "local-openai-compatible",
+      epochProviderToken: "openai-compatible",
+      dimensionToken: "declared"
+    },
+    {
+      providerKind: "google-gemini",
+      epochProviderToken: "google-gemini",
+      dimensionToken: PROVIDER_REPORTED_DIMENSION_TOKEN
+    },
+    {
+      providerKind: "venice",
+      epochProviderToken: "venice",
+      dimensionToken: "declared"
+    },
+    {
+      providerKind: "built-in",
+      epochProviderToken: "built-in",
+      dimensionToken: "declared"
+    }
+  ];
+  CANONICAL_EMBEDDING_IDENTITIES = [
+    canonicalIdentity({
+      provider: "local-openai-compatible",
+      modelId: "secure-local-qwen3-embed",
+      backend: "local",
+      dimension: 2560
+    }),
+    canonicalIdentity({
+      provider: "google-gemini",
+      modelId: "gemini-embedding-2",
+      backend: "cloud",
+      dimension: 3072
+    }),
+    canonicalIdentity({
+      provider: "venice",
+      modelId: "text-embedding-qwen3-8b",
+      backend: "cloud",
+      dimension: 4096
+    }),
+    canonicalIdentity({
+      provider: "built-in",
+      modelId: "arctic-embed-m-v1.5-int8-e58a8f7",
+      backend: "local",
+      dimension: 768
+    }),
+    canonicalIdentity({
+      provider: "built-in",
+      modelId: "embeddinggemma-2-litert-24d962e",
+      backend: "local",
+      dimension: 768
+    })
+  ];
+  KNOWN_CONTAMINATED_EMBEDDING_EPOCHS = [
+    {
+      modelId: "secure-local-qwen3-embed",
+      epochId: "local:local-openai-compatible:secure-local-qwen3-embed:2560",
+      origin: "code default before the provider token was pinned (dimension configured)"
+    },
+    {
+      modelId: "secure-local-qwen3-embed",
+      epochId: "local:local-openai-compatible:secure-local-qwen3-embed:provider-reported",
+      origin: "code default before the provider token was pinned (dimension unconfigured)"
+    },
+    {
+      modelId: "gemini-embedding-2",
+      epochId: "local:openai-compatible:secure-local-qwen3-embed:2560",
+      origin: "provider-blind OLYMPUS_SOURCE_INDEX_EMBEDDING_EPOCH stamped onto a Gemini provider"
+    },
+    {
+      modelId: "gemini-embedding-2",
+      epochId: "local:local-openai-compatible:secure-local-qwen3-embed:provider-reported",
+      origin: "provider-blind local code-default epoch stamped onto a Gemini provider"
+    },
+    {
+      modelId: "gemini-embedding-2",
+      epochId: "cloud:google-gemini:gemini-embedding-2:3072",
+      origin: "derived Gemini epoch drift after output dimensionality became required (2026-08-17)"
+    }
+  ];
+});
+
+// src/workers/source-index/embeddings.ts
+import { Buffer as Buffer3 } from "node:buffer";
 import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
+import { createHash as createHash14 } from "node:crypto";
+import { lookup as lookup2 } from "node:dns/promises";
+import { request as httpsRequest } from "node:https";
+import { isIP as isIP2 } from "node:net";
+function withPriorityQueryEmbedding(run) {
+  return priorityQueryEmbedding.run(true, run);
+}
+function priorityQueryEmbeddingRequested() {
+  return priorityQueryEmbedding.getStore() === true;
+}
+function isApprovedSecureSourceEmbeddingProvider(provider) {
+  return provider.backend === "local" || provider.backend === "cloud" && provider.provider === "venice";
+}
+function builtInEmbeddingOnly(provider, loadedOnly) {
+  if (!provider || provider.backend !== "local")
+    return;
+  try {
+    return loadedOnly(provider);
+  } catch {
+    return;
+  }
+}
+function transientEmbeddingMessage(provider, reason, attempts, budgetMs) {
+  const tries = `${attempts} attempt${attempts === 1 ? "" : "s"}`;
+  if (reason === 429) {
+    return {
+      message: `${provider} source embedding endpoint refused the request with HTTP 429 (rate limit or quota) after ${tries}.`,
+      suggestion: "The provider is throttling this account or its quota may be exhausted. Check the provider quota and billing before retrying; the key and model are not implicated."
+    };
+  }
+  if (reason === "network") {
+    return {
+      message: `${provider} source embedding endpoint could not be reached (network error after ${tries}).`,
+      suggestion: "A connection or DNS failure, not a key or model problem. Retry the same request shortly; if it persists, check the Gateway host network."
+    };
+  }
+  if (reason === "timeout") {
+    return {
+      message: `${provider} source embedding endpoint did not answer within its ${budgetMs}ms budget (${tries}).`,
+      suggestion: "The provider was slow or unavailable, not misconfigured. Retry the same request shortly."
+    };
+  }
+  return {
+    message: `${provider} source embedding endpoint is temporarily unavailable (HTTP ${reason} after ${tries}).`,
+    suggestion: "This is a transient provider outage, not a key or model problem. Retry the same request in a few seconds."
+  };
+}
+async function awaitStartingQueryEmbedding(provider, query, budgetMs, timers) {
+  const clock2 = timers ?? REAL_QUERY_EMBEDDING_WAIT_TIMERS;
+  const text2 = query.trim();
+  if (!text2 || !Number.isFinite(budgetMs) || budgetMs <= 0)
+    return;
+  const deadline = clock2.now() + budgetMs;
+  const expiresIn = (ms) => {
+    let timer;
+    const done = new Promise((resolve10) => {
+      timer = clock2.setTimeout(() => resolve10("expired"), ms);
+    });
+    return { done, cancel: () => clock2.clearTimeout(timer) };
+  };
+  let retryMs = STARTING_MODEL_FIRST_RETRY_MS;
+  for (;; ) {
+    const remaining = deadline - clock2.now();
+    if (remaining <= 0)
+      return;
+    const attempt = provider.embed([{ text: text2 }], { taskType: "RETRIEVAL_QUERY" }).then(() => "done", (error) => error instanceof TransientSourceEmbeddingError && error.modelStarting ? "starting" : "done");
+    const expiry = expiresIn(remaining);
+    const outcome = await Promise.race([attempt, expiry.done]);
+    expiry.cancel();
+    if (outcome !== "starting")
+      return;
+    const pause = Math.min(retryMs, deadline - clock2.now());
+    if (pause <= 0)
+      return;
+    const wait = expiresIn(pause);
+    await wait.done;
+    retryMs = Math.min(retryMs * 2, STARTING_MODEL_MAX_RETRY_MS);
+  }
+}
+function abortableDelay(ms, signal) {
+  return new Promise((resolve10) => {
+    if (signal.aborted)
+      return resolve10();
+    const timer = setTimeout(done, ms);
+    function done() {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve10();
+    }
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
+function retryAfterMs(response, nowMs = Date.now()) {
+  const value = response.headers.get("retry-after")?.trim();
+  if (!value)
+    return;
+  if (/^\d+$/.test(value))
+    return Number(value) * 1000;
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? undefined : Math.max(0, at - nowMs);
+}
+async function discardBody2(response) {
+  await response.body?.cancel().catch(() => {
+    return;
+  });
+}
+async function fetchEmbeddingResponse(fetchImpl, provider, url, init, budget) {
+  const timedOut = (attempts) => new TransientSourceEmbeddingError(provider, "timeout", attempts, budget.budgetMs);
+  let attempt = 0;
+  for (;; ) {
+    let reason;
+    let waitMs;
+    try {
+      const response = await fetchModelEndpoint(fetchImpl, url, init);
+      attempt += 1;
+      if (response.ok || !TRANSIENT_EMBEDDING_STATUSES.has(response.status))
+        return response;
+      reason = response.status;
+      const backoffMs = TRANSIENT_EMBEDDING_RETRY_DELAYS_MS[attempt - 1];
+      const requestedMs = retryAfterMs(response);
+      await discardBody2(response);
+      if (backoffMs !== undefined) {
+        waitMs = requestedMs ?? backoffMs;
+        if (Date.now() + waitMs >= budget.deadlineAtMs)
+          waitMs = undefined;
+      }
+    } catch (error) {
+      if (error instanceof TransientSourceEmbeddingError)
+        throw error;
+      if (isZkapiDaemonEndpointRefusal(error))
+        throw error;
+      if (isModelEndpointRedirectError(error)) {
+        throw new OperationError("source_index_error", `${provider} source embedding endpoint answered with a redirect, which is refused.`, error.message);
+      }
+      if (init.signal.aborted)
+        throw timedOut(attempt + 1);
+      attempt += 1;
+      reason = "network";
+      waitMs = TRANSIENT_EMBEDDING_RETRY_DELAYS_MS[attempt - 1];
+    }
+    if (waitMs === undefined) {
+      throw new TransientSourceEmbeddingError(provider, reason, attempt, budget.budgetMs);
+    }
+    if (init.signal.aborted)
+      throw timedOut(attempt);
+    await abortableDelay(waitMs, init.signal);
+    if (init.signal.aborted)
+      throw timedOut(attempt);
+  }
+}
+
+class GeminiSourceEmbeddingProvider {
+  provider = "google-gemini";
+  modelId;
+  dimension;
+  configHash;
+  epochId;
+  backend = "cloud";
+  lastMediaPartsSkipped = 0;
+  mediaPartsSkipped = 0;
+  apiKey;
+  baseUrl;
+  timeoutMs;
+  fetchImpl;
+  outputDimensionality;
+  maxMediaPerInput;
+  maxMediaBytes;
+  mediaFetchTimeoutMs;
+  lookupIpAddresses;
+  mediaFetchImpl;
+  maxMediaRedirects;
+  constructor(options) {
+    const apiKey = options.apiKey.trim();
+    if (!apiKey) {
+      throw new OperationError("config_error", "Gemini source embedding API key must be configured.");
+    }
+    this.apiKey = apiKey;
+    this.modelId = normalizeGeminiModelId(options.model ?? DEFAULT_GEMINI_EMBEDDING_MODEL);
+    this.baseUrl = (options.baseUrl ?? DEFAULT_GEMINI_API_BASE_URL).replace(/\/+$/, "");
+    this.outputDimensionality = normalizeOutputDimensionality(options.outputDimensionality);
+    this.dimension = this.outputDimensionality ?? 0;
+    this.timeoutMs = options.timeoutMs ?? 30000;
+    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.maxMediaPerInput = normalizeMaxMediaPerInput(options.maxMediaPerInput);
+    this.maxMediaBytes = normalizeMaxMediaBytes(options.maxMediaBytes);
+    this.mediaFetchTimeoutMs = normalizeMediaFetchTimeoutMs(options.mediaFetchTimeoutMs);
+    this.lookupIpAddresses = options.lookupIpAddresses ?? defaultLookupIpAddresses;
+    this.mediaFetchImpl = options.mediaFetchImpl ?? defaultMediaFetch;
+    this.maxMediaRedirects = normalizeMaxMediaRedirects(options.maxMediaRedirects);
+    this.epochId = resolveEmbeddingEpoch({
+      provider: this.provider,
+      modelId: this.modelId,
+      dimension: this.outputDimensionality,
+      backend: this.backend,
+      ...options.epochId ? { epochOverride: options.epochId } : {}
+    });
+    this.configHash = hashString(JSON.stringify({
+      provider: this.provider,
+      model: this.modelId,
+      baseUrl: this.baseUrl,
+      outputDimensionality: this.outputDimensionality ?? "provider-reported",
+      maxMediaPerInput: this.maxMediaPerInput,
+      maxMediaBytes: this.maxMediaBytes,
+      mediaFetchTimeoutMs: this.mediaFetchTimeoutMs,
+      maxMediaRedirects: this.maxMediaRedirects,
+      backend: this.backend
+    }));
+  }
+  async embed(inputs, options) {
+    if (inputs.length === 0)
+      return [];
+    const controller = new AbortController;
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const budget = { deadlineAtMs: Date.now() + this.timeoutMs, budgetMs: this.timeoutMs };
+    try {
+      const modelPath = `models/${this.modelId}`;
+      let mediaPartsSkipped = 0;
+      const requests = await Promise.all(inputs.map(async (input) => {
+        const contentParts = await this.contentPartsForInput(input);
+        mediaPartsSkipped += contentParts.mediaPartsSkipped;
+        return {
+          model: modelPath,
+          content: {
+            parts: contentParts.parts
+          },
+          taskType: options.taskType,
+          ...options.taskType === "RETRIEVAL_DOCUMENT" && input.title ? { title: input.title } : {},
+          ...this.outputDimensionality !== undefined ? { outputDimensionality: this.outputDimensionality } : {}
+        };
+      }));
+      this.lastMediaPartsSkipped = mediaPartsSkipped;
+      this.mediaPartsSkipped += mediaPartsSkipped;
+      const response = await fetchEmbeddingResponse(this.fetchImpl, "Gemini", `${this.baseUrl}/${modelPath}:batchEmbedContents`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": this.apiKey
+        },
+        body: JSON.stringify({
+          requests
+        }),
+        signal: controller.signal
+      }, budget);
+      if (!response.ok) {
+        throw new OperationError("source_index_error", `Gemini source embedding endpoint returned HTTP ${response.status}.`, "Check the configured Gemini API key, model, and source-index embedding policy.");
+      }
+      const vectors = parseGeminiBatchEmbeddingResponse(await response.json());
+      if (vectors.length !== inputs.length) {
+        throw new OperationError("source_index_error", "Gemini source embedding endpoint returned the wrong number of embeddings.");
+      }
+      if (this.dimension === 0 && vectors[0]) {
+        this.dimension = vectors[0].length;
+      }
+      return vectors;
+    } catch (error) {
+      if (error instanceof OperationError)
+        throw error;
+      if (controller.signal.aborted)
+        throw new TransientSourceEmbeddingError("Gemini", "timeout", 1, this.timeoutMs);
+      throw new OperationError("source_index_error", "Gemini source embedding endpoint failed.", error instanceof Error ? error.message : "Check the configured cloud embedding provider.");
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  async contentPartsForInput(input) {
+    const parts = [{ text: input.text }];
+    const mediaInputs = input.media ?? [];
+    const media = mediaInputs.slice(0, this.maxMediaPerInput);
+    let mediaPartsSkipped = Math.max(0, mediaInputs.length - media.length);
+    for (const item of media) {
+      const part = await this.inlineMediaPart(item);
+      if (part) {
+        parts.push(part);
+      } else {
+        mediaPartsSkipped += 1;
+      }
+    }
+    return { parts, mediaPartsSkipped };
+  }
+  async inlineMediaPart(input) {
+    const url = parseSafeMediaUrl(input.url);
+    if (!url)
+      return;
+    const controller = new AbortController;
+    const timeout = setTimeout(() => controller.abort(), this.mediaFetchTimeoutMs);
+    try {
+      const response = await this.fetchPublicMedia(url, controller.signal);
+      if (!response)
+        return;
+      if (!response.ok)
+        return;
+      const contentLength = Number(response.headers.get("content-length") ?? 0);
+      if (contentLength > this.maxMediaBytes)
+        return;
+      const mimeType = normalizeImageMimeType(input.mimeType ?? response.headers.get("content-type"));
+      if (!mimeType)
+        return;
+      const bytes = await readCappedMediaBody(response, this.maxMediaBytes);
+      if (!bytes)
+        return;
+      if (bytes.byteLength === 0 || bytes.byteLength > this.maxMediaBytes)
+        return;
+      return {
+        inlineData: {
+          mimeType,
+          data: Buffer3.from(bytes).toString("base64")
+        }
+      };
+    } catch {
+      return;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  async fetchPublicMedia(initialUrl, signal) {
+    let url = initialUrl;
+    for (let redirects = 0;redirects <= this.maxMediaRedirects; redirects += 1) {
+      const validatedAddresses = await publicMediaFetchAddresses(url, this.lookupIpAddresses);
+      if (!validatedAddresses)
+        return;
+      const response = await this.mediaFetchImpl(url, {
+        validatedAddresses,
+        signal
+      });
+      if (!isRedirectStatus(response.status))
+        return response;
+      const location = response.headers.get("location");
+      if (!location)
+        return;
+      const nextUrl = parseSafeMediaUrl(location, url);
+      if (!nextUrl)
+        return;
+      url = nextUrl;
+    }
+    return;
+  }
+}
+
+class OpenAICompatibleSourceEmbeddingProvider {
+  provider;
+  modelId;
+  dimension;
+  configHash;
+  epochId;
+  backend;
+  baseUrl;
+  timeoutMs;
+  fetchImpl;
+  apiKeyProvider;
+  queryInstructionPrefix;
+  sendDimensions;
+  preflight;
+  requireIndexedResponses;
+  requireDimension;
+  constructor(options) {
+    this.provider = options.provider ?? "local-openai-compatible";
+    this.backend = options.backend ?? "local";
+    this.baseUrl = this.backend === "cloud" ? normalizeVeniceSourceEmbeddingBaseUrl(options.baseUrl) : normalizeLocalSourceEmbeddingBaseUrl(options.baseUrl);
+    this.modelId = options.model.trim();
+    if (!this.modelId) {
+      throw new OperationError("config_error", "Local source embedding model must be configured.");
+    }
+    if (this.backend === "local") {
+      assertLocalModelIdNotCloudForwarding("Local source embedding model", this.modelId);
+    }
+    this.dimension = options.dimension ?? 0;
+    this.timeoutMs = options.timeoutMs ?? 30000;
+    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.apiKeyProvider = options.apiKeyProvider;
+    this.queryInstructionPrefix = options.queryInstructionPrefix?.trim() || undefined;
+    this.sendDimensions = options.sendDimensions === true;
+    this.preflight = options.preflight;
+    this.requireIndexedResponses = options.requireIndexedResponses === true;
+    this.requireDimension = options.requireDimension === true;
+    this.epochId = resolveEmbeddingEpoch({
+      provider: this.provider,
+      modelId: this.modelId,
+      dimension: this.dimension,
+      backend: this.backend,
+      ...options.epochId ? { epochOverride: options.epochId } : {}
+    });
+    this.configHash = hashString(JSON.stringify({
+      provider: this.provider,
+      baseUrl: this.baseUrl,
+      model: this.modelId,
+      dimension: this.dimension || "provider-reported",
+      backend: this.backend,
+      ...this.queryInstructionPrefix ? { queryInstructionPrefix: this.queryInstructionPrefix } : {},
+      ...this.sendDimensions ? { sendDimensions: true } : {},
+      ...this.requireIndexedResponses ? { requireIndexedResponses: true } : {},
+      ...this.requireDimension ? { requireDimension: true } : {}
+    }));
+  }
+  async embed(inputs, options) {
+    if (inputs.length === 0)
+      return [];
+    const controller = new AbortController;
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const budget = { deadlineAtMs: Date.now() + this.timeoutMs, budgetMs: this.timeoutMs };
+    try {
+      await this.preflight?.(controller.signal);
+      const response = await fetchEmbeddingResponse(this.fetchImpl, this.provider, `${this.baseUrl}/embeddings`, {
+        method: "POST",
+        headers: this.requestHeaders(),
+        body: JSON.stringify({
+          model: this.modelId,
+          input: inputs.map((input) => this.formatInput(input, options.taskType)),
+          ...this.sendDimensions ? { dimensions: this.dimension } : {}
+        }),
+        signal: controller.signal
+      }, budget);
+      if (!response.ok) {
+        throw new OperationError("source_index_error", `${this.provider} source embedding endpoint returned HTTP ${response.status}.`, "Check the configured source-index embedding endpoint, model, and credential.");
+      }
+      const vectors = parseOpenAICompatibleEmbeddingResponse(await response.json(), this.requireIndexedResponses);
+      if (vectors.length !== inputs.length) {
+        throw new OperationError("source_index_error", `${this.provider} source embedding endpoint returned the wrong number of embeddings.`);
+      }
+      if (this.requireDimension && vectors.some((vector) => vector.length !== this.dimension)) {
+        throw new OperationError("source_index_error", `${this.provider} source embedding endpoint returned a vector with the wrong dimension.`, `Expected ${this.dimension} finite values for model ${this.modelId}.`);
+      }
+      if (this.dimension === 0 && vectors[0]) {
+        this.dimension = vectors[0].length;
+      }
+      return vectors;
+    } catch (error) {
+      if (error instanceof OperationError)
+        throw error;
+      if (controller.signal.aborted)
+        throw new TransientSourceEmbeddingError(this.provider, "timeout", 1, this.timeoutMs);
+      throw new OperationError("source_index_error", `${this.provider} source embedding endpoint failed.`, error instanceof Error ? error.message : "Check the configured source-index embedding endpoint.");
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  formatInput(input, taskType) {
+    const text2 = [
+      input.title ? `Title: ${input.title}` : undefined,
+      input.text
+    ].filter((part) => Boolean(part)).join(`
+`);
+    return taskType === "RETRIEVAL_QUERY" && this.queryInstructionPrefix ? `${this.queryInstructionPrefix}
+Query:${text2}` : text2;
+  }
+  requestHeaders() {
+    const headers = new Headers({ "Content-Type": "application/json" });
+    const apiKey = this.apiKeyProvider?.()?.trim();
+    if (apiKey)
+      headers.set("Authorization", `Bearer ${apiKey}`);
+    return headers;
+  }
+}
+function cosineSimilarity(left, right) {
+  const length = Math.min(left.length, right.length);
+  let dot = 0;
+  let leftNorm = 0;
+  let rightNorm = 0;
+  for (let index = 0;index < length; index += 1) {
+    const l = left[index] ?? 0;
+    const r = right[index] ?? 0;
+    dot += l * r;
+    leftNorm += l * l;
+    rightNorm += r * r;
+  }
+  if (leftNorm === 0 || rightNorm === 0)
+    return 0;
+  return dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm));
+}
+function encodeEmbedding(vector, expectedDimension) {
+  if (vector.length !== expectedDimension) {
+    throw new OperationError("source_index_error", `Embedding dimension mismatch: expected ${expectedDimension}, received ${vector.length}.`);
+  }
+  const floats = new Float32Array(vector.length);
+  vector.forEach((value, index) => {
+    floats[index] = Number.isFinite(value) ? value : 0;
+  });
+  return new Uint8Array(floats.buffer);
+}
+function decodeEmbedding(value) {
+  let bytes;
+  if (value instanceof Uint8Array) {
+    bytes = value;
+  } else if (value instanceof ArrayBuffer) {
+    bytes = new Uint8Array(value);
+  } else if (ArrayBuffer.isView(value)) {
+    bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  } else {
+    throw new OperationError("source_index_error", "Stored source embedding payload was not a BLOB.");
+  }
+  const usableBytes = bytes.byteLength - bytes.byteLength % 4;
+  if (bytes.byteOffset % 4 !== 0) {
+    return new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + usableBytes));
+  }
+  return new Float32Array(bytes.buffer, bytes.byteOffset, usableBytes / 4);
+}
+function parseGeminiBatchEmbeddingResponse(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new OperationError("source_index_error", "Gemini embedding response must be a JSON object.");
+  }
+  const embeddings = value.embeddings;
+  if (!Array.isArray(embeddings)) {
+    throw new OperationError("source_index_error", "Gemini embedding response must include embeddings array.");
+  }
+  return embeddings.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new OperationError("source_index_error", `Gemini embeddings.${index} must be an object.`);
+    }
+    const values = item.values;
+    if (!Array.isArray(values) || !values.every((entry) => typeof entry === "number" && Number.isFinite(entry))) {
+      throw new OperationError("source_index_error", `Gemini embeddings.${index}.values must be a number array.`);
+    }
+    return values;
+  });
+}
+function parseOpenAICompatibleEmbeddingResponse(value, requireIndices = false) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new OperationError("source_index_error", "Local source embedding response must be a JSON object.");
+  }
+  const data2 = value.data;
+  if (!Array.isArray(data2)) {
+    throw new OperationError("source_index_error", "Local source embedding response must include data array.");
+  }
+  return data2.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new OperationError("source_index_error", `Local source embedding data.${index} must be an object.`);
+    }
+    if (requireIndices && item.index !== index) {
+      throw new OperationError("source_index_error", `Venice source embedding data.${index}.index was missing or out of order.`);
+    }
+    const embedding = item.embedding;
+    if (!Array.isArray(embedding) || !embedding.every((entry) => typeof entry === "number" && Number.isFinite(entry))) {
+      throw new OperationError("source_index_error", `Local source embedding data.${index}.embedding must be a number array.`);
+    }
+    return embedding;
+  });
+}
+function normalizeMaxMediaPerInput(value) {
+  if (value === undefined || !Number.isFinite(value))
+    return DEFAULT_MAX_MEDIA_PER_INPUT;
+  return Math.max(0, Math.min(Math.floor(value), MAX_MEDIA_PER_INPUT_LIMIT));
+}
+function normalizeMaxMediaBytes(value) {
+  if (value === undefined || !Number.isFinite(value))
+    return DEFAULT_MAX_MEDIA_BYTES;
+  return Math.max(1, Math.floor(value));
+}
+function normalizeMediaFetchTimeoutMs(value) {
+  if (value === undefined || !Number.isFinite(value))
+    return DEFAULT_MEDIA_FETCH_TIMEOUT_MS;
+  return Math.max(100, Math.floor(value));
+}
+function normalizeMaxMediaRedirects(value) {
+  if (value === undefined || !Number.isFinite(value))
+    return DEFAULT_MAX_MEDIA_REDIRECTS;
+  return Math.max(0, Math.min(Math.floor(value), DEFAULT_MAX_MEDIA_REDIRECTS));
+}
+function normalizeImageMimeType(value) {
+  const mimeType = value?.split(";")[0]?.trim().toLowerCase();
+  if (!mimeType || !SUPPORTED_IMAGE_MIME_TYPES.has(mimeType))
+    return;
+  return mimeType;
+}
+function parseSafeMediaUrl(value, base) {
+  let url;
+  try {
+    url = base ? new URL(value, base) : new URL(value);
+  } catch {
+    return;
+  }
+  if (url.protocol !== "https:")
+    return;
+  return url;
+}
+function defaultMediaFetch(url, options) {
+  const address = options.validatedAddresses[0];
+  const family = address ? isIP2(address) : 0;
+  if (!address || !family || isPrivateOrReservedIp(address)) {
+    return Promise.resolve(new Response(null, { status: 403 }));
+  }
+  return new Promise((resolvePromise, rejectPromise) => {
+    const request = httpsRequest(url, {
+      method: "GET",
+      headers: MEDIA_FETCH_HEADERS,
+      lookup: (_hostname, _options, callback) => {
+        callback(null, address, family);
+      },
+      signal: options.signal
+    }, (message2) => {
+      resolvePromise(responseFromIncomingMessage(message2));
+    });
+    request.on("error", rejectPromise);
+    request.end();
+  });
+}
+function responseFromIncomingMessage(message2) {
+  const headers = new Headers;
+  for (const [name, value] of Object.entries(message2.headers)) {
+    if (Array.isArray(value)) {
+      for (const item of value)
+        headers.append(name, item);
+    } else if (value !== undefined) {
+      headers.set(name, String(value));
+    }
+  }
+  const status = message2.statusCode && message2.statusCode >= 100 && message2.statusCode <= 599 ? message2.statusCode : 502;
+  const body = status === 204 || status === 304 ? null : readableStreamFromIncomingMessage(message2);
+  return new Response(body, {
+    status,
+    headers,
+    ...message2.statusMessage ? { statusText: message2.statusMessage } : {}
+  });
+}
+async function readCappedMediaBody(response, maxBytes) {
+  if (!response.body) {
+    const bytes2 = new Uint8Array(await response.arrayBuffer());
+    return bytes2.byteLength > maxBytes ? undefined : bytes2;
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done)
+        break;
+      if (!value)
+        continue;
+      const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
+      total += chunk.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        return;
+      }
+      chunks.push(chunk);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+function readableStreamFromIncomingMessage(message2) {
+  return new ReadableStream({
+    start(controller) {
+      message2.on("data", (chunk) => {
+        if (typeof chunk === "string") {
+          controller.enqueue(new TextEncoder().encode(chunk));
+          return;
+        }
+        controller.enqueue(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
+      });
+      message2.on("end", () => controller.close());
+      message2.on("error", (error) => controller.error(error));
+    },
+    cancel() {
+      message2.destroy();
+    }
+  });
+}
+async function publicMediaFetchAddresses(url, lookupIpAddresses) {
+  const host = normalizedHostname(url);
+  if (host === "localhost" || host.endsWith(".local")) {
+    return;
+  }
+  if (isIP2(host))
+    return isPrivateOrReservedIp(host) ? undefined : [host];
+  let addresses;
+  try {
+    addresses = await lookupIpAddresses(host);
+  } catch {
+    return;
+  }
+  return addresses.length > 0 && addresses.every((address) => !isPrivateOrReservedIp(address)) ? addresses : undefined;
+}
+async function defaultLookupIpAddresses(hostname) {
+  const records = await lookup2(hostname, { all: true });
+  return records.map((record) => record.address);
+}
+function normalizedHostname(url) {
+  return url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+}
+function isRedirectStatus(status) {
+  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
+}
+function isPrivateOrReservedIp(address) {
+  const normalized = address.replace(/^\[|\]$/g, "").toLowerCase();
+  const version = isIP2(normalized);
+  if (version === 4)
+    return isPrivateOrReservedIpv4(normalized);
+  if (version !== 6)
+    return true;
+  const mapped = ipv4FromMappedIpv6(normalized);
+  if (mapped)
+    return isPrivateOrReservedIpv4(mapped);
+  const firstSegment = Number.parseInt(normalized.split(":")[0] || "0", 16);
+  return normalized === "::" || normalized === "::1" || normalized.startsWith("2001:db8:") || firstSegment >= 64512 && firstSegment <= 65023 || firstSegment >= 65152 && firstSegment <= 65215 || firstSegment >= 65280 && firstSegment <= 65535;
+}
+function isPrivateOrReservedIpv4(address) {
+  const parts = address.split(".").map((part) => Number.parseInt(part, 10));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255))
+    return true;
+  const [a = 0, b = 0] = parts;
+  return a === 0 || a === 10 || a === 127 || a === 100 && b >= 64 && b <= 127 || a === 169 && b === 254 || a === 172 && b >= 16 && b <= 31 || a === 192 && b === 0 || a === 192 && b === 168 || a === 198 && (b === 18 || b === 19) || a === 198 && b === 51 || a === 203 && b === 0 || a >= 224;
+}
+function ipv4FromMappedIpv6(address) {
+  const words2 = expandIpv6Words(address);
+  if (!words2 || words2.length !== 8)
+    return;
+  if (words2.slice(0, 5).some((word) => word !== 0) || words2[5] !== 65535) {
+    return;
+  }
+  const [high = 0, low = 0] = words2.slice(6);
+  return [
+    high >> 8 & 255,
+    high & 255,
+    low >> 8 & 255,
+    low & 255
+  ].join(".");
+}
+function expandIpv6Words(address) {
+  const normalized = replaceDottedIpv4Tail(address);
+  if (!normalized)
+    return;
+  const parts = normalized.split("::");
+  if (parts.length > 2)
+    return;
+  const left = ipv6WordsFromPart(parts[0] ?? "");
+  const right = parts.length === 2 ? ipv6WordsFromPart(parts[1] ?? "") : [];
+  if (!left || !right)
+    return;
+  if (parts.length === 1)
+    return left.length === 8 ? left : undefined;
+  const missing = 8 - left.length - right.length;
+  if (missing < 1)
+    return;
+  return [
+    ...left,
+    ...Array.from({ length: missing }, () => 0),
+    ...right
+  ];
+}
+function replaceDottedIpv4Tail(address) {
+  const dotted = /(?:^|:)(\d{1,3}(?:\.\d{1,3}){3})$/.exec(address)?.[1];
+  if (!dotted)
+    return address;
+  const parts = dotted.split(".").map((part) => Number.parseInt(part, 10));
+  if (parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255))
+    return;
+  const high = (parts[0] ?? 0) << 8 | (parts[1] ?? 0);
+  const low = (parts[2] ?? 0) << 8 | (parts[3] ?? 0);
+  return `${address.slice(0, -dotted.length)}${high.toString(16)}:${low.toString(16)}`;
+}
+function ipv6WordsFromPart(part) {
+  if (!part)
+    return [];
+  const words2 = part.split(":").map((segment) => {
+    if (!/^[0-9a-f]{1,4}$/i.test(segment))
+      return Number.NaN;
+    return Number.parseInt(segment, 16);
+  });
+  return words2.every((word) => Number.isInteger(word) && word >= 0 && word <= 65535) ? words2 : undefined;
+}
+function normalizeGeminiModelId(value) {
+  const trimmed = value.trim();
+  return trimmed.startsWith("models/") ? trimmed.slice("models/".length) : trimmed;
+}
+function normalizeLocalSourceEmbeddingBaseUrl(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new OperationError("config_error", "Local source embedding base URL must be a valid loopback HTTP(S) URL.");
+  }
+  const hostname = url.hostname.toLowerCase();
+  const localHost = hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]";
+  if (!localHost) {
+    throw new OperationError("config_error", "secure_local source embeddings must use a local/private loopback endpoint.", "Use a loopback endpoint such as http://127.0.0.1:8000/v1 behind the approved local runtime path.");
+  }
+  return value.replace(/\/+$/, "");
+}
+function normalizeVeniceSourceEmbeddingBaseUrl(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new OperationError("config_error", "Venice source embedding base URL must be a valid HTTPS URL.");
+  }
+  if (url.protocol !== "https:" || url.hostname.toLowerCase() !== "api.venice.ai" || url.port || url.username || url.password || url.search || url.hash || url.pathname.replace(/\/+$/, "") !== "/api/v1") {
+    throw new OperationError("config_error", "Venice source embeddings must use the approved Venice HTTPS endpoint.", "Use https://api.venice.ai/api/v1.");
+  }
+  return `${url.origin}/api/v1`;
+}
+function normalizeOutputDimensionality(value) {
+  if (value === undefined)
+    return;
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new OperationError("config_error", "Gemini embedding output dimensionality must be a positive integer.");
+  }
+  return value;
+}
+function hashString(value) {
+  return createHash14("sha256").update(value).digest("hex");
+}
+function memoizeQueryEmbeddings(provider) {
+  const queries = new Map;
+  const memoized = {
+    provider: provider.provider,
+    modelId: provider.modelId,
+    dimension: provider.dimension,
+    configHash: provider.configHash,
+    epochId: provider.epochId,
+    backend: provider.backend,
+    embed(inputs, options) {
+      if (options.taskType !== "RETRIEVAL_QUERY" || inputs.length !== 1)
+        return provider.embed(inputs, options);
+      const key2 = inputs[0].text;
+      const cached2 = queries.get(key2);
+      if (cached2)
+        return cached2;
+      const pending = provider.embed(inputs, options);
+      queries.set(key2, pending);
+      pending.catch(() => queries.delete(key2));
+      return pending;
+    },
+    ...provider.assertBindingCurrent ? { assertBindingCurrent: () => provider.assertBindingCurrent() } : {},
+    ...provider.imageSupport ? { imageSupport: () => provider.imageSupport() } : {},
+    ...mediaJudgeMethods(provider)
+  };
+  return memoized;
+}
+function mediaJudgeMethods(provider) {
+  return {
+    ...provider.embedWithImageVectors ? { embedWithImageVectors: (inputs) => provider.embedWithImageVectors(inputs) } : {},
+    ...provider.embedImageVectors ? { embedImageVectors: (images) => provider.embedImageVectors(images) } : {},
+    ...provider.embedPromptTexts ? { embedPromptTexts: (texts) => provider.embedPromptTexts(texts) } : {}
+  };
+}
+var priorityQueryEmbedding, SourceEmbeddingInputsFailedError, DEFAULT_GEMINI_EMBEDDING_MODEL = "gemini-embedding-2", DEFAULT_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta", DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL = "text-embedding-qwen3-8b", DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL = "https://api.venice.ai/api/v1", DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION = 4096, VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION = "Instruct: Given a web search query, retrieve relevant passages that answer the query", DEFAULT_MAX_MEDIA_PER_INPUT = 0, MAX_MEDIA_PER_INPUT_LIMIT = 6, DEFAULT_MAX_MEDIA_REDIRECTS = 3, DEFAULT_MAX_MEDIA_BYTES = 5000000, DEFAULT_MEDIA_FETCH_TIMEOUT_MS = 5000, SUPPORTED_IMAGE_MIME_TYPES, MEDIA_FETCH_HEADERS, TRANSIENT_EMBEDDING_STATUSES, TRANSIENT_EMBEDDING_RETRY_DELAYS_MS, TransientSourceEmbeddingError, REAL_QUERY_EMBEDDING_WAIT_TIMERS, STARTING_MODEL_FIRST_RETRY_MS = 250, STARTING_MODEL_MAX_RETRY_MS = 1000;
+var init_embeddings = __esm(() => {
+  init_operation_error();
+  init_local_model_policy();
+  init_model_transport();
+  init_zkapi_consult_settings();
+  init_embedding_identity();
+  priorityQueryEmbedding = new AsyncLocalStorage2;
+  SourceEmbeddingInputsFailedError = class SourceEmbeddingInputsFailedError extends Error {
+    failedIndexes;
+    reason;
+    disposition;
+    constructor(failedIndexes, reason, disposition = "failed") {
+      super(`${failedIndexes.length} embedding input(s) could not be embedded: ${reason}.`);
+      this.name = "SourceEmbeddingInputsFailedError";
+      this.failedIndexes = failedIndexes;
+      this.reason = reason;
+      this.disposition = disposition;
+    }
+  };
+  SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png"]);
+  MEDIA_FETCH_HEADERS = {
+    Accept: "image/png,image/jpeg,image/*;q=0.8,*/*;q=0.1",
+    "User-Agent": "Mozilla/5.0 (compatible; OlympusSourceIndex/0.1)"
+  };
+  TRANSIENT_EMBEDDING_STATUSES = new Set([429, 500, 502, 503, 504]);
+  TRANSIENT_EMBEDDING_RETRY_DELAYS_MS = [250, 1000];
+  TransientSourceEmbeddingError = class TransientSourceEmbeddingError extends OperationError {
+    reason;
+    modelStarting;
+    constructor(provider, reason, attempts, budgetMs = 0, options = {}) {
+      const { message: message2, suggestion } = transientEmbeddingMessage(provider, reason, attempts, budgetMs);
+      super("source_index_error", message2, suggestion);
+      this.name = "TransientSourceEmbeddingError";
+      this.reason = reason;
+      this.modelStarting = options.modelStarting === true;
+    }
+  };
+  REAL_QUERY_EMBEDDING_WAIT_TIMERS = {
+    now: () => Date.now(),
+    setTimeout: (callback, ms) => setTimeout(callback, ms),
+    clearTimeout: (timer) => clearTimeout(timer)
+  };
+});
+
+// src/workers/source-index/vector-digest.ts
+function encodeVectorDigest(vector) {
+  const size = Math.min(256, vector.length);
+  const bytes = new Uint8Array(size + 4);
+  let norm = 0;
+  let max = 0;
+  for (let i = 0;i < size; i++) {
+    const value = Number.isFinite(vector[i]) ? vector[i] : 0;
+    norm += value * value;
+    max = Math.max(max, Math.abs(value));
+  }
+  const scale = norm > 0 ? max / Math.sqrt(norm) / 127 : 0;
+  new DataView(bytes.buffer).setFloat32(0, scale, true);
+  const signed = new Int8Array(bytes.buffer, 4);
+  for (let i = 0;i < size; i++)
+    signed[i] = max > 0 ? Math.round((vector[i] || 0) / max * 127) : 0;
+  return bytes;
+}
+function scoreVectorDigest(query, document2) {
+  if (query.length !== document2.length || query.length < 4)
+    return -Infinity;
+  const q = new Int8Array(query.buffer, query.byteOffset + 4, query.length - 4);
+  const d = new Int8Array(document2.buffer, document2.byteOffset + 4, document2.length - 4);
+  let dot = 0;
+  for (let i = 0;i < q.length; i++)
+    dot += q[i] * d[i];
+  return dot * new DataView(query.buffer, query.byteOffset, 4).getFloat32(0, true) * new DataView(document2.buffer, document2.byteOffset, 4).getFloat32(0, true);
+}
+
+class VectorDigestHeap {
+  pks = [];
+  scores = [];
+  get length() {
+    return this.pks.length;
+  }
+  append(pk, score) {
+    this.pks.push(pk);
+    this.scores.push(score);
+  }
+  better(a, b) {
+    return this.scores[a] > this.scores[b] || this.scores[a] === this.scores[b] && this.pks[a] < this.pks[b];
+  }
+  swap(a, b) {
+    [this.pks[a], this.pks[b]] = [this.pks[b], this.pks[a]];
+    [this.scores[a], this.scores[b]] = [this.scores[b], this.scores[a]];
+  }
+  siftDown(index) {
+    while (2 * index + 1 < this.length) {
+      let child = 2 * index + 1;
+      if (child + 1 < this.length && this.better(child + 1, child))
+        child++;
+      if (!this.better(child, index))
+        return;
+      this.swap(index, child);
+      index = child;
+    }
+  }
+  pop() {
+    const pk = this.pks[0];
+    const last = this.length - 1;
+    this.swap(0, last);
+    this.pks.pop();
+    this.scores.pop();
+    if (this.length)
+      this.siftDown(0);
+    return pk;
+  }
+}
+
+// src/workers/connector-store/vector-digest.ts
+function createVectorDigestSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS chunk_vector_digest (
+      chunk_pk INTEGER PRIMARY KEY,
+      model_id TEXT NOT NULL,
+      item_pk INTEGER NOT NULL,
+      account_scope TEXT,
+      digest BLOB NOT NULL,
+      FOREIGN KEY(chunk_pk) REFERENCES chunks(chunk_pk) ON DELETE CASCADE
+    );
+    -- Per-model store metadata: physical rowid cursor resumes without the
+    -- random primary-key-index reads that made the old lane IO-bound.
+    CREATE TABLE IF NOT EXISTS chunk_vector_digest_meta (
+      model_id TEXT PRIMARY KEY, cursor_rowid INTEGER NOT NULL, completed INTEGER NOT NULL
+    );
+    CREATE TRIGGER IF NOT EXISTS connector_store_vector_digest_delete
+    AFTER DELETE ON chunk_embeddings BEGIN
+      DELETE FROM chunk_vector_digest WHERE chunk_pk = OLD.chunk_pk AND model_id = OLD.model_id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS connector_store_vector_digest_account
+    AFTER UPDATE OF account_scope ON items WHEN OLD.account_scope IS NOT NEW.account_scope BEGIN
+      UPDATE chunk_vector_digest SET account_scope = NEW.account_scope
+        WHERE chunk_pk IN (SELECT chunk_pk FROM chunks WHERE item_pk = NEW.item_pk);
+    END;
+  `);
+}
+function vectorDigestState(db, modelId) {
+  const row = db.query("SELECT cursor_rowid, completed FROM chunk_vector_digest_meta WHERE model_id = ?").get(modelId);
+  return { cursorRowid: row?.cursor_rowid ?? 0, completed: row?.completed === 1 };
+}
+function writeVectorDigest(db, chunkPk, modelId, itemPk, embedding) {
+  db.query(`UPDATE chunk_vector_digest_meta SET completed = 0, cursor_rowid = 0
+    WHERE model_id = (SELECT model_id FROM chunk_vector_digest WHERE chunk_pk = ? AND model_id <> ?)`).run(chunkPk, modelId);
+  db.query(`INSERT INTO chunk_vector_digest(chunk_pk, model_id, item_pk, account_scope, digest)
+    SELECT ?, ?, ?, account_scope, ? FROM items WHERE item_pk = ?
+    ON CONFLICT(chunk_pk) DO UPDATE SET model_id = excluded.model_id,
+      item_pk = excluded.item_pk, account_scope = excluded.account_scope, digest = excluded.digest`).run(chunkPk, modelId, itemPk, encodeVectorDigest(decodeEmbedding(embedding)), itemPk);
+  db.query(`INSERT OR IGNORE INTO chunk_vector_digest_meta(model_id, cursor_rowid, completed)
+    SELECT ?, 0, NOT EXISTS(
+      SELECT 1 FROM chunk_embeddings WHERE model_id = ? AND chunk_pk <> ? LIMIT 1
+    )`).run(modelId, modelId, chunkPk);
+}
+function backfillVectorDigests(db, modelId, maxRows = 128) {
+  if (!Number.isInteger(maxRows) || maxRows < 1 || maxRows > 256)
+    throw new Error("Vector digest slice must contain 1 to 256 rows.");
+  const timeout = db.query("PRAGMA busy_timeout").get().timeout;
+  db.exec("PRAGMA busy_timeout = 25");
+  try {
+    return db.transaction(() => {
+      const state = vectorDigestState(db, modelId);
+      if (state.completed)
+        return { ...state, scanned: 0 };
+      const rows = db.query(`SELECT rowid, chunk_pk, model_id, item_pk, embedding FROM chunk_embeddings
+        WHERE rowid > ? ORDER BY rowid LIMIT ?`).all(state.cursorRowid, maxRows);
+      for (const row of rows)
+        if (row.model_id === modelId)
+          writeVectorDigest(db, row.chunk_pk, modelId, row.item_pk, row.embedding);
+      const cursorRowid = rows.at(-1)?.rowid ?? state.cursorRowid;
+      const completed = rows.length < maxRows;
+      db.query(`INSERT INTO chunk_vector_digest_meta VALUES (?, ?, ?)
+        ON CONFLICT(model_id) DO UPDATE SET cursor_rowid = excluded.cursor_rowid, completed = excluded.completed`).run(modelId, cursorRowid, Number(completed));
+      return { cursorRowid, completed, scanned: rows.length };
+    })();
+  } finally {
+    db.exec(`PRAGMA busy_timeout = ${timeout}`);
+  }
+}
+var init_vector_digest = __esm(() => {
+  init_embeddings();
+});
+
+// src/workers/source-index/answer-latency-trace.ts
+import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
 import { randomUUID as randomUUID5 } from "node:crypto";
 function runInSourceAnswerLane(corpusId, run) {
   return laneStorage.run(corpusId, run);
@@ -26524,8 +27710,8 @@ function nonNegativeMs(value) {
 }
 var SLOW_MAIN_THREAD_SQL_MS = 250, SLOW_MAIN_THREAD_SQL_KEPT = 20, SITE_TALLY_MS = 25, SITE_TALLY_KEPT = 10, storage, laneStorage, CONTENT_FREE_ERROR_CLASSES;
 var init_answer_latency_trace = __esm(() => {
-  storage = new AsyncLocalStorage2;
-  laneStorage = new AsyncLocalStorage2;
+  storage = new AsyncLocalStorage3;
+  laneStorage = new AsyncLocalStorage3;
   CONTENT_FREE_ERROR_CLASSES = new Set([
     "AbortError",
     "AnalystUnavailable",
@@ -26601,7 +27787,7 @@ var init_main_thread_sql_trace = __esm(() => {
 });
 
 // src/workers/file-extraction/unreadable-files.ts
-import { createHash as createHash14, randomBytes as randomBytes7 } from "node:crypto";
+import { createHash as createHash15, randomBytes as randomBytes7 } from "node:crypto";
 function createUnreadableVerdict(input) {
   return (item) => {
     const located = input.locate(item.ref);
@@ -26689,7 +27875,7 @@ function createUnreadableFiles(options) {
     }
   }
   function placeOf(item) {
-    return { at: item.failedAt, id: createHash14("sha256").update(keyOf(item.ref)).digest("base64url").slice(0, 22) };
+    return { at: item.failedAt, id: createHash15("sha256").update(keyOf(item.ref)).digest("base64url").slice(0, 22) };
   }
   function cursorOf(item) {
     const place = placeOf(item);
@@ -27447,25 +28633,6 @@ var init_keyword_equivalents = __esm(() => {
       ]
     }
   };
-});
-
-// src/core/local-model-policy.ts
-function isCloudForwardingModelId(modelId) {
-  const trimmed = modelId.trim().toLowerCase();
-  const lastSegment = trimmed.slice(trimmed.lastIndexOf("/") + 1);
-  const colon = lastSegment.lastIndexOf(":");
-  if (colon < 0)
-    return false;
-  const tag = lastSegment.slice(colon + 1);
-  return tag === "cloud" || tag.endsWith("-cloud");
-}
-function assertLocalModelIdNotCloudForwarding(label, modelId) {
-  if (!isCloudForwardingModelId(modelId))
-    return;
-  throw new OperationError("config_error", `${label} names model "${modelId.trim()}", whose tag is a reserved cloud-style tag, so it cannot serve as a local model.`, 'Ollama names its cloud models with a ":cloud" or "-cloud" tag and the local daemon forwards them off this machine, so local lanes refuse every model with such a tag, including a local custom model tagged that way. Choose a model that runs locally (rename a local custom tag), or configure the cloud model as a cloud profile.');
-}
-var init_local_model_policy = __esm(() => {
-  init_operation_error();
 });
 
 // src/core/source-model-policy.ts
@@ -28899,7 +30066,7 @@ var init_delphi_scorer = __esm(() => {
 });
 
 // src/workers/classification/sniffer.ts
-import { createHash as createHash15 } from "node:crypto";
+import { createHash as createHash16 } from "node:crypto";
 function measuredSnifferDecisionBar(lane) {
   const id = lane.cacheModelId ?? lane.modelId;
   const served = lane.servedWeights;
@@ -28960,7 +30127,7 @@ function snifferReasonCode(verdict) {
 }
 function isSnifferUnionUpgrade(reasons, currentId) {
   return [QWEN35_4B.modelId, `${QWEN35_4B.modelId}:${QWEN35_4B.revision}:${QWEN35_4B.file.sha256}`].some((weights) => {
-    const digest2 = (value) => createHash15("sha256").update(value).digest("hex").slice(0, 16);
+    const digest2 = (value) => createHash16("sha256").update(value).digest("hex").slice(0, 16);
     return currentId.endsWith(`.m${digest2(`${weights}:${SNIFFER_UNION_VERSION}`)}`) && reasons.some((reason) => reason.includes(`.m${digest2(weights)}:`) || reason.endsWith(`.m${digest2(weights)}`));
   });
 }
@@ -29049,7 +30216,7 @@ function snifferCacheModelId(lane) {
 function snifferId(lane, promptVersion = SNIFFER_PROMPT_VERSION) {
   const bar = lane.snifferMode === "decision" ? snifferDecisionBar(lane) : SNIFFER_DECISION_PRIVATE_BAR;
   const judge = bar === SNIFFER_DECISION_PRIVATE_BAR ? snifferCacheModelId(lane) : `${snifferCacheModelId(lane)}:bar-${bar}`;
-  const model = createHash15("sha256").update(judge).digest("hex").slice(0, 16);
+  const model = createHash16("sha256").update(judge).digest("hex").slice(0, 16);
   return `${lane.kind}:${promptVersion}.m${model}`;
 }
 function buildSnifferBatchPrompt(pass, items, ownerContext) {
@@ -29072,7 +30239,7 @@ function snifferPromptVersions(ownerContext) {
   const context2 = boundedOwnerContext(ownerContext);
   if (!context2)
     return { approval: SNIFFER_PROMPT_VERSION, cache: SNIFFER_PROMPT_VERSION };
-  const digest2 = createHash15("sha256").update(context2).digest("hex").slice(0, 8);
+  const digest2 = createHash16("sha256").update(context2).digest("hex").slice(0, 8);
   return { approval: SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, cache: `${SNIFFER_OWNER_CONTEXT_PROMPT_VERSION}.o${digest2}` };
 }
 function parseSnifferBatchResponse(text2, expected) {
@@ -29355,8 +30522,8 @@ var init_sniffer = __esm(() => {
     required: ["verdicts"],
     additionalProperties: false
   };
-  SNIFFER_PROMPT_VERSION = `p-${createHash15("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
-  SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash15("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
+  SNIFFER_PROMPT_VERSION = `p-${createHash16("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
+  SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash16("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
   SNIFFER_CATEGORY_SYNONYMS = {
     insurance: "financial",
     money: "financial",
@@ -30700,9 +31867,9 @@ var init_directory_tools = __esm(() => {
 });
 
 // connect-relay/shared/mcp-app-client.ts
-import { createHash as createHash16 } from "node:crypto";
+import { createHash as createHash17 } from "node:crypto";
 function claudeAppDomain(connectorUrl) {
-  return `${createHash16("sha256").update(connectorUrl).digest("hex").slice(0, 32)}.claudemcpcontent.com`;
+  return `${createHash17("sha256").update(connectorUrl).digest("hex").slice(0, 32)}.claudemcpcontent.com`;
 }
 function appClientCopy(value, client) {
   if (!client)
@@ -31434,7 +32601,7 @@ var init_store_identity = __esm(() => {
 });
 
 // src/core/media-cache.ts
-import { createHash as createHash17, randomUUID as randomUUID7 } from "node:crypto";
+import { createHash as createHash18, randomUUID as randomUUID7 } from "node:crypto";
 import {
   chmodSync as chmodSync9,
   closeSync as closeSync13,
@@ -31494,7 +32661,7 @@ function mediaHolderName(holder) {
   }
 }
 function writeMediaCacheFile(dir, bytes, mimeType) {
-  const sha256 = createHash17("sha256").update(bytes).digest("hex");
+  const sha256 = createHash18("sha256").update(bytes).digest("hex");
   const path = join35(dir, `${sha256}${EXTENSIONS[mimeType] ?? ".bin"}`);
   ensureOwnerOnlyDir(dir);
   const stagingHolder = `staging:${randomUUID7()}`;
@@ -31680,7 +32847,7 @@ function refsDir(path) {
   return join35(dirname32(path), `${basename7(path)}.refs`);
 }
 function holderDigest(name) {
-  return createHash17("sha256").update(name).digest("hex").slice(0, 32);
+  return createHash18("sha256").update(name).digest("hex").slice(0, 32);
 }
 function holderName(holder) {
   const digest2 = holderDigest(mediaHolderName(holder));
@@ -31970,12 +33137,12 @@ var init_operation_caller = __esm(() => {
 });
 
 // connect-relay/shared/tokens.ts
-import { createHash as createHash18, randomBytes as randomBytes8 } from "node:crypto";
+import { createHash as createHash19, randomBytes as randomBytes8 } from "node:crypto";
 function credentialSurface(value) {
   return value === "chatgpt" || value === "claude-app" ? value : "remote";
 }
 function surfaceFingerprint(digest2) {
-  return createHash18("sha256").update(SURFACE_FINGERPRINT_DOMAIN, "utf8").update(digest2).digest("base64url");
+  return createHash19("sha256").update(SURFACE_FINGERPRINT_DOMAIN, "utf8").update(digest2).digest("base64url");
 }
 function mintCredential(kind, installId) {
   return `${PREFIX[kind]}.${installId}.${randomBytes8(32).toString("base64url")}`;
@@ -32076,7 +33243,7 @@ var init_pinned_clients = __esm(() => {
 });
 
 // src/core/remote-oauth-store.ts
-import { createHash as createHash19, randomBytes as randomBytes9, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
+import { createHash as createHash20, randomBytes as randomBytes9, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
 function isRemoteConnectionProvider(value) {
   return typeof value === "string" && OPERATION_CALLER_PROVIDERS.includes(value);
 }
@@ -32104,7 +33271,7 @@ function normalizePairingCode(input) {
   return compact;
 }
 function digest2(value) {
-  return createHash19("sha256").update(value, "utf8").digest();
+  return createHash20("sha256").update(value, "utf8").digest();
 }
 function randomPairingSymbols(length) {
   const limit = 256 - 256 % PAIRING_ALPHABET.length;
@@ -32409,7 +33576,7 @@ var init_remote_oauth_store = __esm(() => {
 });
 
 // src/core/app-release-capture.ts
-import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
 function privateQuestionKey(ref) {
   if (!ref || typeof ref !== "object")
     return;
@@ -32572,7 +33739,7 @@ function recordRemoteOperation(input) {
 }
 var storage2, TITLE_MAX = 300, ID_MAX = 512, PROVIDER_APP_NAMES, recorder, completionHook, COMPLETED_MAX = 512, completedPrivateAnswers, JOB_QUESTIONS_MAX = 256, JOB_QUESTION_TTL_MS, jobQuestions;
 var init_app_release_capture = __esm(() => {
-  storage2 = new AsyncLocalStorage3;
+  storage2 = new AsyncLocalStorage4;
   PROVIDER_APP_NAMES = {
     openai: "ChatGPT",
     anthropic: "Claude",
@@ -32601,7 +33768,7 @@ __export(exports_waiting_private_questions, {
   CHATGPT_INBOX_GRACE_MS: () => CHATGPT_INBOX_GRACE_MS
 });
 import { Database as Database6 } from "bun:sqlite";
-import { createHash as createHash20, randomBytes as randomBytes10 } from "node:crypto";
+import { createHash as createHash21, randomBytes as randomBytes10 } from "node:crypto";
 import { chmodSync as chmodSync10, existsSync as existsSync28, lstatSync as lstatSync16, mkdirSync as mkdirSync16 } from "node:fs";
 import { homedir as homedir18 } from "node:os";
 import { dirname as dirname33, isAbsolute as isAbsolute16, join as join36 } from "node:path";
@@ -32738,7 +33905,7 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
       if (utf8Length(selectors) > WAITING_QUESTION_LIMITS.selectorBytes)
         return;
       const detail = input.detail === "full" ? "full" : "summary";
-      const dedupeKey = createHash20("sha256").update(JSON.stringify([ticket.connectionId, ...input.path === "anonymous" || input.retainEachAsk ? [input.path ?? "private", randomBytes10(16).toString("hex")] : [], selectors, normalizeWaitingQuestion(question)])).digest("hex");
+      const dedupeKey = createHash21("sha256").update(JSON.stringify([ticket.connectionId, ...input.path === "anonymous" || input.retainEachAsk ? [input.path ?? "private", randomBytes10(16).toString("hex")] : [], selectors, normalizeWaitingQuestion(question)])).digest("hex");
       const at = now();
       let active = false;
       try {
@@ -33164,7 +34331,7 @@ __export(exports_remote_connections, {
   REMOTE_CONNECTIONS_SCHEMA_VERSION: () => REMOTE_CONNECTIONS_SCHEMA_VERSION
 });
 import { Database as Database7 } from "bun:sqlite";
-import { createHash as createHash21, randomBytes as randomBytes11, timingSafeEqual as timingSafeEqual4 } from "node:crypto";
+import { createHash as createHash22, randomBytes as randomBytes11, timingSafeEqual as timingSafeEqual4 } from "node:crypto";
 import { chmodSync as chmodSync11, existsSync as existsSync29, lstatSync as lstatSync17, mkdirSync as mkdirSync17 } from "node:fs";
 import { homedir as homedir19 } from "node:os";
 import { dirname as dirname34, isAbsolute as isAbsolute17 } from "node:path";
@@ -33196,7 +34363,7 @@ function isWellFormedRemoteConnectionToken(token) {
   return TOKEN_PATTERN2.test(token);
 }
 function hashRemoteConnectionToken(token) {
-  return createHash21("sha256").update(token, "utf8").digest();
+  return createHash22("sha256").update(token, "utf8").digest();
 }
 function openRemoteConnectionStore(dbPath = defaultRemoteConnectionsDbPath(), options = {}) {
   const now = options.now ?? (() => new Date);
@@ -34785,1032 +35952,6 @@ var init_reactions = __esm(() => {
   };
 });
 
-// src/workers/source-index/embedding-identity.ts
-function embeddingProviderFamily(providerKind) {
-  return declaredEmbeddingProviderFamily(providerKind) ?? { providerKind, epochProviderToken: providerKind, dimensionToken: "declared" };
-}
-function declaredEmbeddingProviderFamily(providerKind) {
-  return EMBEDDING_PROVIDER_FAMILIES.find((family) => family.providerKind === providerKind);
-}
-function buildEmbeddingEpoch(input) {
-  const family = embeddingProviderFamily(input.provider);
-  const dimension = family.dimensionToken === PROVIDER_REPORTED_DIMENSION_TOKEN ? PROVIDER_REPORTED_DIMENSION_TOKEN : declaredDimensionToken(input.dimension);
-  return `${input.backend}:${family.epochProviderToken}:${input.modelId}:${dimension}`;
-}
-function declaredDimensionToken(dimension) {
-  return dimension !== undefined && Number.isSafeInteger(dimension) && dimension >= 1 ? String(dimension) : PROVIDER_REPORTED_DIMENSION_TOKEN;
-}
-function canonicalIdentity(input) {
-  return { ...input, epochId: buildEmbeddingEpoch(input) };
-}
-function canonicalEmbeddingIdentityForModel(modelId) {
-  return CANONICAL_EMBEDDING_IDENTITIES.find((identity2) => identity2.modelId === modelId);
-}
-function canonicalEmbeddingDimension(modelId) {
-  return canonicalEmbeddingIdentityForModel(modelId)?.dimension;
-}
-function resolveEmbeddingEpoch(input) {
-  const derived = buildEmbeddingEpoch(input);
-  const override = input.epochOverride?.trim();
-  if (!override || override === derived)
-    return derived;
-  if (!declaredEmbeddingProviderFamily(input.provider))
-    return override;
-  const [overrideBackend, , overrideModelId] = override.split(":");
-  if ((overrideBackend === "local" || overrideBackend === "cloud") && overrideBackend !== input.backend) {
-    throw refusedEmbeddingEpoch(override, input, `it names the ${overrideBackend} backend`);
-  }
-  if (overrideModelId !== undefined && overrideModelId !== input.modelId && canonicalEmbeddingIdentityForModel(overrideModelId)) {
-    throw refusedEmbeddingEpoch(override, input, `it names the model ${overrideModelId}`);
-  }
-  const contaminated = contaminatedEmbeddingEpoch(input.modelId, override);
-  if (contaminated) {
-    throw refusedEmbeddingEpoch(override, input, `it is a known contaminated epoch (${contaminated.origin})`);
-  }
-  return override;
-}
-function refusedEmbeddingEpoch(override, input, because) {
-  return new OperationError("config_error", `Embedding epoch "${override}" cannot label ${input.backend} provider ${input.provider} ` + `model ${input.modelId}: ${because}.`, "An epoch names the vectors a specific provider minted. Configure a per-provider epoch " + "instead of sharing one variable across the local and cloud embedding lanes.");
-}
-function contaminatedEmbeddingEpoch(modelId, epochId) {
-  return KNOWN_CONTAMINATED_EMBEDDING_EPOCHS.find((entry) => entry.modelId === modelId && entry.epochId === epochId);
-}
-var PROVIDER_REPORTED_DIMENSION_TOKEN = "provider-reported", EMBEDDING_PROVIDER_FAMILIES, CANONICAL_EMBEDDING_IDENTITIES, KNOWN_CONTAMINATED_EMBEDDING_EPOCHS;
-var init_embedding_identity = __esm(() => {
-  init_operation_error();
-  EMBEDDING_PROVIDER_FAMILIES = [
-    {
-      providerKind: "local-openai-compatible",
-      epochProviderToken: "openai-compatible",
-      dimensionToken: "declared"
-    },
-    {
-      providerKind: "google-gemini",
-      epochProviderToken: "google-gemini",
-      dimensionToken: PROVIDER_REPORTED_DIMENSION_TOKEN
-    },
-    {
-      providerKind: "venice",
-      epochProviderToken: "venice",
-      dimensionToken: "declared"
-    },
-    {
-      providerKind: "built-in",
-      epochProviderToken: "built-in",
-      dimensionToken: "declared"
-    }
-  ];
-  CANONICAL_EMBEDDING_IDENTITIES = [
-    canonicalIdentity({
-      provider: "local-openai-compatible",
-      modelId: "secure-local-qwen3-embed",
-      backend: "local",
-      dimension: 2560
-    }),
-    canonicalIdentity({
-      provider: "google-gemini",
-      modelId: "gemini-embedding-2",
-      backend: "cloud",
-      dimension: 3072
-    }),
-    canonicalIdentity({
-      provider: "venice",
-      modelId: "text-embedding-qwen3-8b",
-      backend: "cloud",
-      dimension: 4096
-    }),
-    canonicalIdentity({
-      provider: "built-in",
-      modelId: "arctic-embed-m-v1.5-int8-e58a8f7",
-      backend: "local",
-      dimension: 768
-    }),
-    canonicalIdentity({
-      provider: "built-in",
-      modelId: "embeddinggemma-2-litert-24d962e",
-      backend: "local",
-      dimension: 768
-    })
-  ];
-  KNOWN_CONTAMINATED_EMBEDDING_EPOCHS = [
-    {
-      modelId: "secure-local-qwen3-embed",
-      epochId: "local:local-openai-compatible:secure-local-qwen3-embed:2560",
-      origin: "code default before the provider token was pinned (dimension configured)"
-    },
-    {
-      modelId: "secure-local-qwen3-embed",
-      epochId: "local:local-openai-compatible:secure-local-qwen3-embed:provider-reported",
-      origin: "code default before the provider token was pinned (dimension unconfigured)"
-    },
-    {
-      modelId: "gemini-embedding-2",
-      epochId: "local:openai-compatible:secure-local-qwen3-embed:2560",
-      origin: "provider-blind OLYMPUS_SOURCE_INDEX_EMBEDDING_EPOCH stamped onto a Gemini provider"
-    },
-    {
-      modelId: "gemini-embedding-2",
-      epochId: "local:local-openai-compatible:secure-local-qwen3-embed:provider-reported",
-      origin: "provider-blind local code-default epoch stamped onto a Gemini provider"
-    },
-    {
-      modelId: "gemini-embedding-2",
-      epochId: "cloud:google-gemini:gemini-embedding-2:3072",
-      origin: "derived Gemini epoch drift after output dimensionality became required (2026-08-17)"
-    }
-  ];
-});
-
-// src/workers/source-index/embeddings.ts
-import { Buffer as Buffer3 } from "node:buffer";
-import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
-import { createHash as createHash22 } from "node:crypto";
-import { lookup as lookup2 } from "node:dns/promises";
-import { request as httpsRequest } from "node:https";
-import { isIP as isIP2 } from "node:net";
-function withPriorityQueryEmbedding(run) {
-  return priorityQueryEmbedding.run(true, run);
-}
-function priorityQueryEmbeddingRequested() {
-  return priorityQueryEmbedding.getStore() === true;
-}
-function isApprovedSecureSourceEmbeddingProvider(provider) {
-  return provider.backend === "local" || provider.backend === "cloud" && provider.provider === "venice";
-}
-function builtInEmbeddingOnly(provider, loadedOnly) {
-  if (!provider || provider.backend !== "local")
-    return;
-  try {
-    return loadedOnly(provider);
-  } catch {
-    return;
-  }
-}
-function transientEmbeddingMessage(provider, reason, attempts, budgetMs) {
-  const tries = `${attempts} attempt${attempts === 1 ? "" : "s"}`;
-  if (reason === 429) {
-    return {
-      message: `${provider} source embedding endpoint refused the request with HTTP 429 (rate limit or quota) after ${tries}.`,
-      suggestion: "The provider is throttling this account or its quota may be exhausted. Check the provider quota and billing before retrying; the key and model are not implicated."
-    };
-  }
-  if (reason === "network") {
-    return {
-      message: `${provider} source embedding endpoint could not be reached (network error after ${tries}).`,
-      suggestion: "A connection or DNS failure, not a key or model problem. Retry the same request shortly; if it persists, check the Gateway host network."
-    };
-  }
-  if (reason === "timeout") {
-    return {
-      message: `${provider} source embedding endpoint did not answer within its ${budgetMs}ms budget (${tries}).`,
-      suggestion: "The provider was slow or unavailable, not misconfigured. Retry the same request shortly."
-    };
-  }
-  return {
-    message: `${provider} source embedding endpoint is temporarily unavailable (HTTP ${reason} after ${tries}).`,
-    suggestion: "This is a transient provider outage, not a key or model problem. Retry the same request in a few seconds."
-  };
-}
-async function awaitStartingQueryEmbedding(provider, query, budgetMs, timers) {
-  const clock3 = timers ?? REAL_QUERY_EMBEDDING_WAIT_TIMERS;
-  const text2 = query.trim();
-  if (!text2 || !Number.isFinite(budgetMs) || budgetMs <= 0)
-    return;
-  const deadline = clock3.now() + budgetMs;
-  const expiresIn = (ms) => {
-    let timer;
-    const done = new Promise((resolve13) => {
-      timer = clock3.setTimeout(() => resolve13("expired"), ms);
-    });
-    return { done, cancel: () => clock3.clearTimeout(timer) };
-  };
-  let retryMs = STARTING_MODEL_FIRST_RETRY_MS;
-  for (;; ) {
-    const remaining = deadline - clock3.now();
-    if (remaining <= 0)
-      return;
-    const attempt = provider.embed([{ text: text2 }], { taskType: "RETRIEVAL_QUERY" }).then(() => "done", (error) => error instanceof TransientSourceEmbeddingError && error.modelStarting ? "starting" : "done");
-    const expiry = expiresIn(remaining);
-    const outcome = await Promise.race([attempt, expiry.done]);
-    expiry.cancel();
-    if (outcome !== "starting")
-      return;
-    const pause = Math.min(retryMs, deadline - clock3.now());
-    if (pause <= 0)
-      return;
-    const wait = expiresIn(pause);
-    await wait.done;
-    retryMs = Math.min(retryMs * 2, STARTING_MODEL_MAX_RETRY_MS);
-  }
-}
-function abortableDelay(ms, signal) {
-  return new Promise((resolve13) => {
-    if (signal.aborted)
-      return resolve13();
-    const timer = setTimeout(done, ms);
-    function done() {
-      clearTimeout(timer);
-      signal.removeEventListener("abort", done);
-      resolve13();
-    }
-    signal.addEventListener("abort", done, { once: true });
-  });
-}
-function retryAfterMs(response, nowMs = Date.now()) {
-  const value = response.headers.get("retry-after")?.trim();
-  if (!value)
-    return;
-  if (/^\d+$/.test(value))
-    return Number(value) * 1000;
-  const at = Date.parse(value);
-  return Number.isNaN(at) ? undefined : Math.max(0, at - nowMs);
-}
-async function discardBody2(response) {
-  await response.body?.cancel().catch(() => {
-    return;
-  });
-}
-async function fetchEmbeddingResponse(fetchImpl, provider, url, init, budget) {
-  const timedOut = (attempts) => new TransientSourceEmbeddingError(provider, "timeout", attempts, budget.budgetMs);
-  let attempt = 0;
-  for (;; ) {
-    let reason;
-    let waitMs;
-    try {
-      const response = await fetchModelEndpoint(fetchImpl, url, init);
-      attempt += 1;
-      if (response.ok || !TRANSIENT_EMBEDDING_STATUSES.has(response.status))
-        return response;
-      reason = response.status;
-      const backoffMs = TRANSIENT_EMBEDDING_RETRY_DELAYS_MS[attempt - 1];
-      const requestedMs = retryAfterMs(response);
-      await discardBody2(response);
-      if (backoffMs !== undefined) {
-        waitMs = requestedMs ?? backoffMs;
-        if (Date.now() + waitMs >= budget.deadlineAtMs)
-          waitMs = undefined;
-      }
-    } catch (error) {
-      if (error instanceof TransientSourceEmbeddingError)
-        throw error;
-      if (isZkapiDaemonEndpointRefusal(error))
-        throw error;
-      if (isModelEndpointRedirectError(error)) {
-        throw new OperationError("source_index_error", `${provider} source embedding endpoint answered with a redirect, which is refused.`, error.message);
-      }
-      if (init.signal.aborted)
-        throw timedOut(attempt + 1);
-      attempt += 1;
-      reason = "network";
-      waitMs = TRANSIENT_EMBEDDING_RETRY_DELAYS_MS[attempt - 1];
-    }
-    if (waitMs === undefined) {
-      throw new TransientSourceEmbeddingError(provider, reason, attempt, budget.budgetMs);
-    }
-    if (init.signal.aborted)
-      throw timedOut(attempt);
-    await abortableDelay(waitMs, init.signal);
-    if (init.signal.aborted)
-      throw timedOut(attempt);
-  }
-}
-
-class GeminiSourceEmbeddingProvider {
-  provider = "google-gemini";
-  modelId;
-  dimension;
-  configHash;
-  epochId;
-  backend = "cloud";
-  lastMediaPartsSkipped = 0;
-  mediaPartsSkipped = 0;
-  apiKey;
-  baseUrl;
-  timeoutMs;
-  fetchImpl;
-  outputDimensionality;
-  maxMediaPerInput;
-  maxMediaBytes;
-  mediaFetchTimeoutMs;
-  lookupIpAddresses;
-  mediaFetchImpl;
-  maxMediaRedirects;
-  constructor(options) {
-    const apiKey = options.apiKey.trim();
-    if (!apiKey) {
-      throw new OperationError("config_error", "Gemini source embedding API key must be configured.");
-    }
-    this.apiKey = apiKey;
-    this.modelId = normalizeGeminiModelId(options.model ?? DEFAULT_GEMINI_EMBEDDING_MODEL);
-    this.baseUrl = (options.baseUrl ?? DEFAULT_GEMINI_API_BASE_URL).replace(/\/+$/, "");
-    this.outputDimensionality = normalizeOutputDimensionality(options.outputDimensionality);
-    this.dimension = this.outputDimensionality ?? 0;
-    this.timeoutMs = options.timeoutMs ?? 30000;
-    this.fetchImpl = options.fetchImpl ?? fetch;
-    this.maxMediaPerInput = normalizeMaxMediaPerInput(options.maxMediaPerInput);
-    this.maxMediaBytes = normalizeMaxMediaBytes(options.maxMediaBytes);
-    this.mediaFetchTimeoutMs = normalizeMediaFetchTimeoutMs(options.mediaFetchTimeoutMs);
-    this.lookupIpAddresses = options.lookupIpAddresses ?? defaultLookupIpAddresses;
-    this.mediaFetchImpl = options.mediaFetchImpl ?? defaultMediaFetch;
-    this.maxMediaRedirects = normalizeMaxMediaRedirects(options.maxMediaRedirects);
-    this.epochId = resolveEmbeddingEpoch({
-      provider: this.provider,
-      modelId: this.modelId,
-      dimension: this.outputDimensionality,
-      backend: this.backend,
-      ...options.epochId ? { epochOverride: options.epochId } : {}
-    });
-    this.configHash = hashString(JSON.stringify({
-      provider: this.provider,
-      model: this.modelId,
-      baseUrl: this.baseUrl,
-      outputDimensionality: this.outputDimensionality ?? "provider-reported",
-      maxMediaPerInput: this.maxMediaPerInput,
-      maxMediaBytes: this.maxMediaBytes,
-      mediaFetchTimeoutMs: this.mediaFetchTimeoutMs,
-      maxMediaRedirects: this.maxMediaRedirects,
-      backend: this.backend
-    }));
-  }
-  async embed(inputs, options) {
-    if (inputs.length === 0)
-      return [];
-    const controller = new AbortController;
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
-    const budget = { deadlineAtMs: Date.now() + this.timeoutMs, budgetMs: this.timeoutMs };
-    try {
-      const modelPath = `models/${this.modelId}`;
-      let mediaPartsSkipped = 0;
-      const requests = await Promise.all(inputs.map(async (input) => {
-        const contentParts = await this.contentPartsForInput(input);
-        mediaPartsSkipped += contentParts.mediaPartsSkipped;
-        return {
-          model: modelPath,
-          content: {
-            parts: contentParts.parts
-          },
-          taskType: options.taskType,
-          ...options.taskType === "RETRIEVAL_DOCUMENT" && input.title ? { title: input.title } : {},
-          ...this.outputDimensionality !== undefined ? { outputDimensionality: this.outputDimensionality } : {}
-        };
-      }));
-      this.lastMediaPartsSkipped = mediaPartsSkipped;
-      this.mediaPartsSkipped += mediaPartsSkipped;
-      const response = await fetchEmbeddingResponse(this.fetchImpl, "Gemini", `${this.baseUrl}/${modelPath}:batchEmbedContents`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-goog-api-key": this.apiKey
-        },
-        body: JSON.stringify({
-          requests
-        }),
-        signal: controller.signal
-      }, budget);
-      if (!response.ok) {
-        throw new OperationError("source_index_error", `Gemini source embedding endpoint returned HTTP ${response.status}.`, "Check the configured Gemini API key, model, and source-index embedding policy.");
-      }
-      const vectors = parseGeminiBatchEmbeddingResponse(await response.json());
-      if (vectors.length !== inputs.length) {
-        throw new OperationError("source_index_error", "Gemini source embedding endpoint returned the wrong number of embeddings.");
-      }
-      if (this.dimension === 0 && vectors[0]) {
-        this.dimension = vectors[0].length;
-      }
-      return vectors;
-    } catch (error) {
-      if (error instanceof OperationError)
-        throw error;
-      if (controller.signal.aborted)
-        throw new TransientSourceEmbeddingError("Gemini", "timeout", 1, this.timeoutMs);
-      throw new OperationError("source_index_error", "Gemini source embedding endpoint failed.", error instanceof Error ? error.message : "Check the configured cloud embedding provider.");
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-  async contentPartsForInput(input) {
-    const parts = [{ text: input.text }];
-    const mediaInputs = input.media ?? [];
-    const media = mediaInputs.slice(0, this.maxMediaPerInput);
-    let mediaPartsSkipped = Math.max(0, mediaInputs.length - media.length);
-    for (const item of media) {
-      const part = await this.inlineMediaPart(item);
-      if (part) {
-        parts.push(part);
-      } else {
-        mediaPartsSkipped += 1;
-      }
-    }
-    return { parts, mediaPartsSkipped };
-  }
-  async inlineMediaPart(input) {
-    const url = parseSafeMediaUrl(input.url);
-    if (!url)
-      return;
-    const controller = new AbortController;
-    const timeout = setTimeout(() => controller.abort(), this.mediaFetchTimeoutMs);
-    try {
-      const response = await this.fetchPublicMedia(url, controller.signal);
-      if (!response)
-        return;
-      if (!response.ok)
-        return;
-      const contentLength = Number(response.headers.get("content-length") ?? 0);
-      if (contentLength > this.maxMediaBytes)
-        return;
-      const mimeType = normalizeImageMimeType(input.mimeType ?? response.headers.get("content-type"));
-      if (!mimeType)
-        return;
-      const bytes = await readCappedMediaBody(response, this.maxMediaBytes);
-      if (!bytes)
-        return;
-      if (bytes.byteLength === 0 || bytes.byteLength > this.maxMediaBytes)
-        return;
-      return {
-        inlineData: {
-          mimeType,
-          data: Buffer3.from(bytes).toString("base64")
-        }
-      };
-    } catch {
-      return;
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-  async fetchPublicMedia(initialUrl, signal) {
-    let url = initialUrl;
-    for (let redirects = 0;redirects <= this.maxMediaRedirects; redirects += 1) {
-      const validatedAddresses = await publicMediaFetchAddresses(url, this.lookupIpAddresses);
-      if (!validatedAddresses)
-        return;
-      const response = await this.mediaFetchImpl(url, {
-        validatedAddresses,
-        signal
-      });
-      if (!isRedirectStatus(response.status))
-        return response;
-      const location = response.headers.get("location");
-      if (!location)
-        return;
-      const nextUrl = parseSafeMediaUrl(location, url);
-      if (!nextUrl)
-        return;
-      url = nextUrl;
-    }
-    return;
-  }
-}
-
-class OpenAICompatibleSourceEmbeddingProvider {
-  provider;
-  modelId;
-  dimension;
-  configHash;
-  epochId;
-  backend;
-  baseUrl;
-  timeoutMs;
-  fetchImpl;
-  apiKeyProvider;
-  queryInstructionPrefix;
-  sendDimensions;
-  preflight;
-  requireIndexedResponses;
-  requireDimension;
-  constructor(options) {
-    this.provider = options.provider ?? "local-openai-compatible";
-    this.backend = options.backend ?? "local";
-    this.baseUrl = this.backend === "cloud" ? normalizeVeniceSourceEmbeddingBaseUrl(options.baseUrl) : normalizeLocalSourceEmbeddingBaseUrl(options.baseUrl);
-    this.modelId = options.model.trim();
-    if (!this.modelId) {
-      throw new OperationError("config_error", "Local source embedding model must be configured.");
-    }
-    if (this.backend === "local") {
-      assertLocalModelIdNotCloudForwarding("Local source embedding model", this.modelId);
-    }
-    this.dimension = options.dimension ?? 0;
-    this.timeoutMs = options.timeoutMs ?? 30000;
-    this.fetchImpl = options.fetchImpl ?? fetch;
-    this.apiKeyProvider = options.apiKeyProvider;
-    this.queryInstructionPrefix = options.queryInstructionPrefix?.trim() || undefined;
-    this.sendDimensions = options.sendDimensions === true;
-    this.preflight = options.preflight;
-    this.requireIndexedResponses = options.requireIndexedResponses === true;
-    this.requireDimension = options.requireDimension === true;
-    this.epochId = resolveEmbeddingEpoch({
-      provider: this.provider,
-      modelId: this.modelId,
-      dimension: this.dimension,
-      backend: this.backend,
-      ...options.epochId ? { epochOverride: options.epochId } : {}
-    });
-    this.configHash = hashString(JSON.stringify({
-      provider: this.provider,
-      baseUrl: this.baseUrl,
-      model: this.modelId,
-      dimension: this.dimension || "provider-reported",
-      backend: this.backend,
-      ...this.queryInstructionPrefix ? { queryInstructionPrefix: this.queryInstructionPrefix } : {},
-      ...this.sendDimensions ? { sendDimensions: true } : {},
-      ...this.requireIndexedResponses ? { requireIndexedResponses: true } : {},
-      ...this.requireDimension ? { requireDimension: true } : {}
-    }));
-  }
-  async embed(inputs, options) {
-    if (inputs.length === 0)
-      return [];
-    const controller = new AbortController;
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
-    const budget = { deadlineAtMs: Date.now() + this.timeoutMs, budgetMs: this.timeoutMs };
-    try {
-      await this.preflight?.(controller.signal);
-      const response = await fetchEmbeddingResponse(this.fetchImpl, this.provider, `${this.baseUrl}/embeddings`, {
-        method: "POST",
-        headers: this.requestHeaders(),
-        body: JSON.stringify({
-          model: this.modelId,
-          input: inputs.map((input) => this.formatInput(input, options.taskType)),
-          ...this.sendDimensions ? { dimensions: this.dimension } : {}
-        }),
-        signal: controller.signal
-      }, budget);
-      if (!response.ok) {
-        throw new OperationError("source_index_error", `${this.provider} source embedding endpoint returned HTTP ${response.status}.`, "Check the configured source-index embedding endpoint, model, and credential.");
-      }
-      const vectors = parseOpenAICompatibleEmbeddingResponse(await response.json(), this.requireIndexedResponses);
-      if (vectors.length !== inputs.length) {
-        throw new OperationError("source_index_error", `${this.provider} source embedding endpoint returned the wrong number of embeddings.`);
-      }
-      if (this.requireDimension && vectors.some((vector) => vector.length !== this.dimension)) {
-        throw new OperationError("source_index_error", `${this.provider} source embedding endpoint returned a vector with the wrong dimension.`, `Expected ${this.dimension} finite values for model ${this.modelId}.`);
-      }
-      if (this.dimension === 0 && vectors[0]) {
-        this.dimension = vectors[0].length;
-      }
-      return vectors;
-    } catch (error) {
-      if (error instanceof OperationError)
-        throw error;
-      if (controller.signal.aborted)
-        throw new TransientSourceEmbeddingError(this.provider, "timeout", 1, this.timeoutMs);
-      throw new OperationError("source_index_error", `${this.provider} source embedding endpoint failed.`, error instanceof Error ? error.message : "Check the configured source-index embedding endpoint.");
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-  formatInput(input, taskType) {
-    const text2 = [
-      input.title ? `Title: ${input.title}` : undefined,
-      input.text
-    ].filter((part) => Boolean(part)).join(`
-`);
-    return taskType === "RETRIEVAL_QUERY" && this.queryInstructionPrefix ? `${this.queryInstructionPrefix}
-Query:${text2}` : text2;
-  }
-  requestHeaders() {
-    const headers = new Headers({ "Content-Type": "application/json" });
-    const apiKey = this.apiKeyProvider?.()?.trim();
-    if (apiKey)
-      headers.set("Authorization", `Bearer ${apiKey}`);
-    return headers;
-  }
-}
-function cosineSimilarity(left, right) {
-  const length = Math.min(left.length, right.length);
-  let dot = 0;
-  let leftNorm = 0;
-  let rightNorm = 0;
-  for (let index = 0;index < length; index += 1) {
-    const l = left[index] ?? 0;
-    const r = right[index] ?? 0;
-    dot += l * r;
-    leftNorm += l * l;
-    rightNorm += r * r;
-  }
-  if (leftNorm === 0 || rightNorm === 0)
-    return 0;
-  return dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm));
-}
-function encodeEmbedding(vector, expectedDimension) {
-  if (vector.length !== expectedDimension) {
-    throw new OperationError("source_index_error", `Embedding dimension mismatch: expected ${expectedDimension}, received ${vector.length}.`);
-  }
-  const floats = new Float32Array(vector.length);
-  vector.forEach((value, index) => {
-    floats[index] = Number.isFinite(value) ? value : 0;
-  });
-  return new Uint8Array(floats.buffer);
-}
-function decodeEmbedding(value) {
-  let bytes;
-  if (value instanceof Uint8Array) {
-    bytes = value;
-  } else if (value instanceof ArrayBuffer) {
-    bytes = new Uint8Array(value);
-  } else if (ArrayBuffer.isView(value)) {
-    bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-  } else {
-    throw new OperationError("source_index_error", "Stored source embedding payload was not a BLOB.");
-  }
-  const usableBytes = bytes.byteLength - bytes.byteLength % 4;
-  if (bytes.byteOffset % 4 !== 0) {
-    return new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + usableBytes));
-  }
-  return new Float32Array(bytes.buffer, bytes.byteOffset, usableBytes / 4);
-}
-function parseGeminiBatchEmbeddingResponse(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new OperationError("source_index_error", "Gemini embedding response must be a JSON object.");
-  }
-  const embeddings = value.embeddings;
-  if (!Array.isArray(embeddings)) {
-    throw new OperationError("source_index_error", "Gemini embedding response must include embeddings array.");
-  }
-  return embeddings.map((item, index) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) {
-      throw new OperationError("source_index_error", `Gemini embeddings.${index} must be an object.`);
-    }
-    const values = item.values;
-    if (!Array.isArray(values) || !values.every((entry) => typeof entry === "number" && Number.isFinite(entry))) {
-      throw new OperationError("source_index_error", `Gemini embeddings.${index}.values must be a number array.`);
-    }
-    return values;
-  });
-}
-function parseOpenAICompatibleEmbeddingResponse(value, requireIndices = false) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new OperationError("source_index_error", "Local source embedding response must be a JSON object.");
-  }
-  const data2 = value.data;
-  if (!Array.isArray(data2)) {
-    throw new OperationError("source_index_error", "Local source embedding response must include data array.");
-  }
-  return data2.map((item, index) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) {
-      throw new OperationError("source_index_error", `Local source embedding data.${index} must be an object.`);
-    }
-    if (requireIndices && item.index !== index) {
-      throw new OperationError("source_index_error", `Venice source embedding data.${index}.index was missing or out of order.`);
-    }
-    const embedding = item.embedding;
-    if (!Array.isArray(embedding) || !embedding.every((entry) => typeof entry === "number" && Number.isFinite(entry))) {
-      throw new OperationError("source_index_error", `Local source embedding data.${index}.embedding must be a number array.`);
-    }
-    return embedding;
-  });
-}
-function normalizeMaxMediaPerInput(value) {
-  if (value === undefined || !Number.isFinite(value))
-    return DEFAULT_MAX_MEDIA_PER_INPUT;
-  return Math.max(0, Math.min(Math.floor(value), MAX_MEDIA_PER_INPUT_LIMIT));
-}
-function normalizeMaxMediaBytes(value) {
-  if (value === undefined || !Number.isFinite(value))
-    return DEFAULT_MAX_MEDIA_BYTES;
-  return Math.max(1, Math.floor(value));
-}
-function normalizeMediaFetchTimeoutMs(value) {
-  if (value === undefined || !Number.isFinite(value))
-    return DEFAULT_MEDIA_FETCH_TIMEOUT_MS;
-  return Math.max(100, Math.floor(value));
-}
-function normalizeMaxMediaRedirects(value) {
-  if (value === undefined || !Number.isFinite(value))
-    return DEFAULT_MAX_MEDIA_REDIRECTS;
-  return Math.max(0, Math.min(Math.floor(value), DEFAULT_MAX_MEDIA_REDIRECTS));
-}
-function normalizeImageMimeType(value) {
-  const mimeType = value?.split(";")[0]?.trim().toLowerCase();
-  if (!mimeType || !SUPPORTED_IMAGE_MIME_TYPES.has(mimeType))
-    return;
-  return mimeType;
-}
-function parseSafeMediaUrl(value, base) {
-  let url;
-  try {
-    url = base ? new URL(value, base) : new URL(value);
-  } catch {
-    return;
-  }
-  if (url.protocol !== "https:")
-    return;
-  return url;
-}
-function defaultMediaFetch(url, options) {
-  const address = options.validatedAddresses[0];
-  const family = address ? isIP2(address) : 0;
-  if (!address || !family || isPrivateOrReservedIp(address)) {
-    return Promise.resolve(new Response(null, { status: 403 }));
-  }
-  return new Promise((resolvePromise, rejectPromise) => {
-    const request = httpsRequest(url, {
-      method: "GET",
-      headers: MEDIA_FETCH_HEADERS,
-      lookup: (_hostname, _options, callback) => {
-        callback(null, address, family);
-      },
-      signal: options.signal
-    }, (message2) => {
-      resolvePromise(responseFromIncomingMessage(message2));
-    });
-    request.on("error", rejectPromise);
-    request.end();
-  });
-}
-function responseFromIncomingMessage(message2) {
-  const headers = new Headers;
-  for (const [name, value] of Object.entries(message2.headers)) {
-    if (Array.isArray(value)) {
-      for (const item of value)
-        headers.append(name, item);
-    } else if (value !== undefined) {
-      headers.set(name, String(value));
-    }
-  }
-  const status = message2.statusCode && message2.statusCode >= 100 && message2.statusCode <= 599 ? message2.statusCode : 502;
-  const body = status === 204 || status === 304 ? null : readableStreamFromIncomingMessage(message2);
-  return new Response(body, {
-    status,
-    headers,
-    ...message2.statusMessage ? { statusText: message2.statusMessage } : {}
-  });
-}
-async function readCappedMediaBody(response, maxBytes) {
-  if (!response.body) {
-    const bytes2 = new Uint8Array(await response.arrayBuffer());
-    return bytes2.byteLength > maxBytes ? undefined : bytes2;
-  }
-  const reader = response.body.getReader();
-  const chunks = [];
-  let total = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done)
-        break;
-      if (!value)
-        continue;
-      const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
-      total += chunk.byteLength;
-      if (total > maxBytes) {
-        await reader.cancel();
-        return;
-      }
-      chunks.push(chunk);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  const bytes = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return bytes;
-}
-function readableStreamFromIncomingMessage(message2) {
-  return new ReadableStream({
-    start(controller) {
-      message2.on("data", (chunk) => {
-        if (typeof chunk === "string") {
-          controller.enqueue(new TextEncoder().encode(chunk));
-          return;
-        }
-        controller.enqueue(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
-      });
-      message2.on("end", () => controller.close());
-      message2.on("error", (error) => controller.error(error));
-    },
-    cancel() {
-      message2.destroy();
-    }
-  });
-}
-async function publicMediaFetchAddresses(url, lookupIpAddresses) {
-  const host = normalizedHostname(url);
-  if (host === "localhost" || host.endsWith(".local")) {
-    return;
-  }
-  if (isIP2(host))
-    return isPrivateOrReservedIp(host) ? undefined : [host];
-  let addresses;
-  try {
-    addresses = await lookupIpAddresses(host);
-  } catch {
-    return;
-  }
-  return addresses.length > 0 && addresses.every((address) => !isPrivateOrReservedIp(address)) ? addresses : undefined;
-}
-async function defaultLookupIpAddresses(hostname) {
-  const records = await lookup2(hostname, { all: true });
-  return records.map((record) => record.address);
-}
-function normalizedHostname(url) {
-  return url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-}
-function isRedirectStatus(status) {
-  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
-}
-function isPrivateOrReservedIp(address) {
-  const normalized = address.replace(/^\[|\]$/g, "").toLowerCase();
-  const version = isIP2(normalized);
-  if (version === 4)
-    return isPrivateOrReservedIpv4(normalized);
-  if (version !== 6)
-    return true;
-  const mapped = ipv4FromMappedIpv6(normalized);
-  if (mapped)
-    return isPrivateOrReservedIpv4(mapped);
-  const firstSegment = Number.parseInt(normalized.split(":")[0] || "0", 16);
-  return normalized === "::" || normalized === "::1" || normalized.startsWith("2001:db8:") || firstSegment >= 64512 && firstSegment <= 65023 || firstSegment >= 65152 && firstSegment <= 65215 || firstSegment >= 65280 && firstSegment <= 65535;
-}
-function isPrivateOrReservedIpv4(address) {
-  const parts = address.split(".").map((part) => Number.parseInt(part, 10));
-  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255))
-    return true;
-  const [a = 0, b = 0] = parts;
-  return a === 0 || a === 10 || a === 127 || a === 100 && b >= 64 && b <= 127 || a === 169 && b === 254 || a === 172 && b >= 16 && b <= 31 || a === 192 && b === 0 || a === 192 && b === 168 || a === 198 && (b === 18 || b === 19) || a === 198 && b === 51 || a === 203 && b === 0 || a >= 224;
-}
-function ipv4FromMappedIpv6(address) {
-  const words2 = expandIpv6Words(address);
-  if (!words2 || words2.length !== 8)
-    return;
-  if (words2.slice(0, 5).some((word) => word !== 0) || words2[5] !== 65535) {
-    return;
-  }
-  const [high = 0, low = 0] = words2.slice(6);
-  return [
-    high >> 8 & 255,
-    high & 255,
-    low >> 8 & 255,
-    low & 255
-  ].join(".");
-}
-function expandIpv6Words(address) {
-  const normalized = replaceDottedIpv4Tail(address);
-  if (!normalized)
-    return;
-  const parts = normalized.split("::");
-  if (parts.length > 2)
-    return;
-  const left = ipv6WordsFromPart(parts[0] ?? "");
-  const right = parts.length === 2 ? ipv6WordsFromPart(parts[1] ?? "") : [];
-  if (!left || !right)
-    return;
-  if (parts.length === 1)
-    return left.length === 8 ? left : undefined;
-  const missing = 8 - left.length - right.length;
-  if (missing < 1)
-    return;
-  return [
-    ...left,
-    ...Array.from({ length: missing }, () => 0),
-    ...right
-  ];
-}
-function replaceDottedIpv4Tail(address) {
-  const dotted = /(?:^|:)(\d{1,3}(?:\.\d{1,3}){3})$/.exec(address)?.[1];
-  if (!dotted)
-    return address;
-  const parts = dotted.split(".").map((part) => Number.parseInt(part, 10));
-  if (parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255))
-    return;
-  const high = (parts[0] ?? 0) << 8 | (parts[1] ?? 0);
-  const low = (parts[2] ?? 0) << 8 | (parts[3] ?? 0);
-  return `${address.slice(0, -dotted.length)}${high.toString(16)}:${low.toString(16)}`;
-}
-function ipv6WordsFromPart(part) {
-  if (!part)
-    return [];
-  const words2 = part.split(":").map((segment) => {
-    if (!/^[0-9a-f]{1,4}$/i.test(segment))
-      return Number.NaN;
-    return Number.parseInt(segment, 16);
-  });
-  return words2.every((word) => Number.isInteger(word) && word >= 0 && word <= 65535) ? words2 : undefined;
-}
-function normalizeGeminiModelId(value) {
-  const trimmed = value.trim();
-  return trimmed.startsWith("models/") ? trimmed.slice("models/".length) : trimmed;
-}
-function normalizeLocalSourceEmbeddingBaseUrl(value) {
-  let url;
-  try {
-    url = new URL(value);
-  } catch {
-    throw new OperationError("config_error", "Local source embedding base URL must be a valid loopback HTTP(S) URL.");
-  }
-  const hostname = url.hostname.toLowerCase();
-  const localHost = hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]";
-  if (!localHost) {
-    throw new OperationError("config_error", "secure_local source embeddings must use a local/private loopback endpoint.", "Use a loopback endpoint such as http://127.0.0.1:8000/v1 behind the approved local runtime path.");
-  }
-  return value.replace(/\/+$/, "");
-}
-function normalizeVeniceSourceEmbeddingBaseUrl(value) {
-  let url;
-  try {
-    url = new URL(value);
-  } catch {
-    throw new OperationError("config_error", "Venice source embedding base URL must be a valid HTTPS URL.");
-  }
-  if (url.protocol !== "https:" || url.hostname.toLowerCase() !== "api.venice.ai" || url.port || url.username || url.password || url.search || url.hash || url.pathname.replace(/\/+$/, "") !== "/api/v1") {
-    throw new OperationError("config_error", "Venice source embeddings must use the approved Venice HTTPS endpoint.", "Use https://api.venice.ai/api/v1.");
-  }
-  return `${url.origin}/api/v1`;
-}
-function normalizeOutputDimensionality(value) {
-  if (value === undefined)
-    return;
-  if (!Number.isInteger(value) || value <= 0) {
-    throw new OperationError("config_error", "Gemini embedding output dimensionality must be a positive integer.");
-  }
-  return value;
-}
-function hashString(value) {
-  return createHash22("sha256").update(value).digest("hex");
-}
-function memoizeQueryEmbeddings(provider) {
-  const queries = new Map;
-  const memoized = {
-    provider: provider.provider,
-    modelId: provider.modelId,
-    dimension: provider.dimension,
-    configHash: provider.configHash,
-    epochId: provider.epochId,
-    backend: provider.backend,
-    embed(inputs, options) {
-      if (options.taskType !== "RETRIEVAL_QUERY" || inputs.length !== 1)
-        return provider.embed(inputs, options);
-      const key2 = inputs[0].text;
-      const cached2 = queries.get(key2);
-      if (cached2)
-        return cached2;
-      const pending = provider.embed(inputs, options);
-      queries.set(key2, pending);
-      pending.catch(() => queries.delete(key2));
-      return pending;
-    },
-    ...provider.assertBindingCurrent ? { assertBindingCurrent: () => provider.assertBindingCurrent() } : {},
-    ...provider.imageSupport ? { imageSupport: () => provider.imageSupport() } : {},
-    ...mediaJudgeMethods(provider)
-  };
-  return memoized;
-}
-function mediaJudgeMethods(provider) {
-  return {
-    ...provider.embedWithImageVectors ? { embedWithImageVectors: (inputs) => provider.embedWithImageVectors(inputs) } : {},
-    ...provider.embedImageVectors ? { embedImageVectors: (images) => provider.embedImageVectors(images) } : {},
-    ...provider.embedPromptTexts ? { embedPromptTexts: (texts) => provider.embedPromptTexts(texts) } : {}
-  };
-}
-var priorityQueryEmbedding, SourceEmbeddingInputsFailedError, DEFAULT_GEMINI_EMBEDDING_MODEL = "gemini-embedding-2", DEFAULT_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta", DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL = "text-embedding-qwen3-8b", DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL = "https://api.venice.ai/api/v1", DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION = 4096, VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION = "Instruct: Given a web search query, retrieve relevant passages that answer the query", DEFAULT_MAX_MEDIA_PER_INPUT = 0, MAX_MEDIA_PER_INPUT_LIMIT = 6, DEFAULT_MAX_MEDIA_REDIRECTS = 3, DEFAULT_MAX_MEDIA_BYTES = 5000000, DEFAULT_MEDIA_FETCH_TIMEOUT_MS = 5000, SUPPORTED_IMAGE_MIME_TYPES, MEDIA_FETCH_HEADERS, TRANSIENT_EMBEDDING_STATUSES, TRANSIENT_EMBEDDING_RETRY_DELAYS_MS, TransientSourceEmbeddingError, REAL_QUERY_EMBEDDING_WAIT_TIMERS, STARTING_MODEL_FIRST_RETRY_MS = 250, STARTING_MODEL_MAX_RETRY_MS = 1000;
-var init_embeddings = __esm(() => {
-  init_operation_error();
-  init_local_model_policy();
-  init_model_transport();
-  init_zkapi_consult_settings();
-  init_embedding_identity();
-  priorityQueryEmbedding = new AsyncLocalStorage4;
-  SourceEmbeddingInputsFailedError = class SourceEmbeddingInputsFailedError extends Error {
-    failedIndexes;
-    reason;
-    disposition;
-    constructor(failedIndexes, reason, disposition = "failed") {
-      super(`${failedIndexes.length} embedding input(s) could not be embedded: ${reason}.`);
-      this.name = "SourceEmbeddingInputsFailedError";
-      this.failedIndexes = failedIndexes;
-      this.reason = reason;
-      this.disposition = disposition;
-    }
-  };
-  SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png"]);
-  MEDIA_FETCH_HEADERS = {
-    Accept: "image/png,image/jpeg,image/*;q=0.8,*/*;q=0.1",
-    "User-Agent": "Mozilla/5.0 (compatible; OlympusSourceIndex/0.1)"
-  };
-  TRANSIENT_EMBEDDING_STATUSES = new Set([429, 500, 502, 503, 504]);
-  TRANSIENT_EMBEDDING_RETRY_DELAYS_MS = [250, 1000];
-  TransientSourceEmbeddingError = class TransientSourceEmbeddingError extends OperationError {
-    reason;
-    modelStarting;
-    constructor(provider, reason, attempts, budgetMs = 0, options = {}) {
-      const { message: message2, suggestion } = transientEmbeddingMessage(provider, reason, attempts, budgetMs);
-      super("source_index_error", message2, suggestion);
-      this.name = "TransientSourceEmbeddingError";
-      this.reason = reason;
-      this.modelStarting = options.modelStarting === true;
-    }
-  };
-  REAL_QUERY_EMBEDDING_WAIT_TIMERS = {
-    now: () => Date.now(),
-    setTimeout: (callback, ms) => setTimeout(callback, ms),
-    clearTimeout: (timer) => clearTimeout(timer)
-  };
-});
-
 // src/workers/source-index/media-judge.ts
 function imageJudgmentSignal(judgment) {
   return {
@@ -36077,11 +36218,16 @@ function connectorStoreMigrations() {
       }
     },
     {
-      version: CONNECTOR_STORE_SQLITE_SCHEMA_VERSION,
+      version: 15,
       name: "connector_store_child_items",
       up(db) {
         addConnectorStoreChildItemColumns(db);
       }
+    },
+    {
+      version: 16,
+      name: "connector_store_vector_digest",
+      up: createVectorDigestSchema
     }
   ];
 }
@@ -36499,13 +36645,56 @@ function embeddingFailureKind(error) {
   const name = error instanceof Error ? error.name : "error";
   return /^[A-Za-z0-9_]{1,64}$/.test(name) ? name.toLowerCase() : "error";
 }
-async function scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, pageSize) {
+function connectorStoreCurrentEmbeddingRowsQuery(options, ordered, page2) {
+  const modelId = requireNonEmpty(options.modelId, "Connector store embedding model id");
+  const accountScope = normalizeOptionalAccountScope(options.accountScope);
+  const selectedFilters = connectorStoreFilterSql(options.filters);
+  return {
+    sql: `
+      SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding
+      ${CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER}
+        -- Unary + avoids the model index + repeated whole-model sort (#1242).
+        AND ${page2 ? "+emb.model_id" : "emb.model_id"} = ?
+        ${page2 ? "AND emb.chunk_pk > ?" : ""}
+        ${options.chunkPks ? "AND emb.chunk_pk IN (SELECT value FROM json_each(?))" : ""}
+        ${accountScope ? "AND i.account_scope = ?" : ""}
+        ${selectedFilters.sql}
+      ${page2 ? "ORDER BY emb.chunk_pk ASC LIMIT ?" : ordered ? "ORDER BY emb.item_pk ASC, emb.chunk_pk ASC" : ""}
+    `,
+    params: [
+      modelId,
+      ...page2 ? [page2.afterChunkPk] : [],
+      ...options.chunkPks ? [JSON.stringify(options.chunkPks)] : [],
+      ...accountScope ? [accountScope] : [],
+      ...selectedFilters.params,
+      ...page2 ? [Math.max(1, Math.floor(page2.limit))] : []
+    ]
+  };
+}
+function foldVectorScore(bestByItem, row, queryVector) {
+  const vector = decodeEmbedding(row.embedding);
+  if (vector.length !== queryVector.length)
+    return { mismatch: 1, qualified: 0 };
+  const score = cosineSimilarity(queryVector, vector);
+  const prior = bestByItem.get(row.item_pk);
+  let qualified = 0;
+  if (!prior || score > prior.bestCosine || score === prior.bestCosine && row.chunk_pk < prior.bestChunkPk) {
+    qualified = Number(score >= MIN_VECTOR_SCORE && (!prior || prior.bestCosine < MIN_VECTOR_SCORE));
+    bestByItem.set(row.item_pk, { bestCosine: score, bestChunkPk: row.chunk_pk, localItemId: row.local_item_id });
+  }
+  return { mismatch: 0, qualified };
+}
+async function scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, pageSize, resultLimit, visibility) {
   const authority = embeddingAuthorityRead(provider);
   const after = embeddingAuthorityFromRow(await read(authority), provider);
   if (after.skippedReason)
     return { skippedReason: after.skippedReason };
   if (after.token !== beforeToken)
     return { skippedReason: "embedding_authority_changed_during_query" };
+  const digestTable = await read({ mode: "get", sql: "SELECT 1 FROM sqlite_master WHERE name = 'chunk_vector_digest_meta'", params: [] });
+  const digestReady = digestTable && await read({ mode: "get", sql: "SELECT 1 FROM chunk_vector_digest_meta WHERE model_id = ? AND completed = 1", params: [pageOptions.modelId] });
+  if (digestReady)
+    return scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit, visibility);
   const bestByItem = new Map;
   let dimensionMismatches = 0;
   let afterChunkPk = 0;
@@ -36521,16 +36710,7 @@ async function scanVectorPages(read, provider, beforeToken, queryVector, pageOpt
       if ((index & 31) === 0 && connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
         return { skippedReason: "vector_scan_deadline_exceeded" };
       }
-      const documentVector = decodeEmbedding(row.embedding);
-      if (documentVector.length !== queryVector.length) {
-        dimensionMismatches += 1;
-        continue;
-      }
-      const score = cosineSimilarity(queryVector, documentVector);
-      const existing = bestByItem.get(row.item_pk);
-      if (existing === undefined || score > existing.bestCosine) {
-        bestByItem.set(row.item_pk, { bestCosine: score, bestChunkPk: row.chunk_pk, localItemId: row.local_item_id });
-      }
+      dimensionMismatches += foldVectorScore(bestByItem, row, queryVector).mismatch;
     }
     afterChunkPk = page2.at(-1).chunk_pk;
     if (page2.length < pageSize)
@@ -36540,8 +36720,82 @@ async function scanVectorPages(read, provider, beforeToken, queryVector, pageOpt
   }
   return { bestByItem, dimensionMismatches };
 }
-async function scanVectorPagesOnPool(dbPath, provider, beforeToken, queryVector, pageOptions, deadlineAtMs) {
-  const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE)).catch((error) => {
+async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, visibility) {
+  const heap = new VectorDigestHeap;
+  const query = encodeVectorDigest(queryVector);
+  let afterChunkPk = 0;
+  const expired = () => connectorStoreVectorDeadlineExpired(deadlineAtMs);
+  const cut = { skippedReason: "vector_scan_deadline_exceeded" };
+  while (true) {
+    if (expired())
+      return cut;
+    const page2 = connectorStoreVectorDigestPageQuery(options, afterChunkPk);
+    const rows = await read({ mode: "all", ...page2 });
+    for (let index = 0;index < rows.length; index++) {
+      if ((index & 31) === 0 && expired())
+        return cut;
+      const row = rows[index];
+      heap.append(row.chunk_pk, scoreVectorDigest(query, row.digest));
+    }
+    if (rows.length < 4096)
+      break;
+    afterChunkPk = rows.at(-1).chunk_pk;
+    await yieldConnectorStoreVectorScan();
+  }
+  for (let index = Math.floor(heap.length / 2) - 1;index >= 0; index--) {
+    heap.siftDown(index);
+    if ((index & 4095) === 0) {
+      if (expired())
+        return cut;
+      await yieldConnectorStoreVectorScan();
+    }
+  }
+  const bestByItem = new Map;
+  let dimensionMismatches = 0;
+  const batchSize = Math.max(400, 20 * limit);
+  let eligibleItems = 0;
+  while (heap.length > 0 && eligibleItems < limit) {
+    if (expired())
+      return cut;
+    const chunkPks = [];
+    while (heap.length > 0 && chunkPks.length < batchSize)
+      chunkPks.push(heap.pop());
+    const qualifiedPks = [];
+    let after = 0;
+    while (true) {
+      if (expired())
+        return cut;
+      const page2 = connectorStoreCurrentEmbeddingPageQuery({ ...options, chunkPks }, after);
+      const rows = await read({ mode: "all", ...page2 });
+      for (const [index, row] of rows.entries()) {
+        if ((index & 31) === 0 && expired())
+          return cut;
+        const folded = foldVectorScore(bestByItem, row, queryVector);
+        dimensionMismatches += folded.mismatch;
+        if (folded.qualified)
+          qualifiedPks.push(row.item_pk);
+      }
+      if (rows.length < CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE)
+        break;
+      after = rows.at(-1).chunk_pk;
+      await yieldConnectorStoreVectorScan();
+    }
+    eligibleItems += visibility ? visibility(qualifiedPks).size : qualifiedPks.length;
+    await yieldConnectorStoreVectorScan();
+  }
+  return expired() ? cut : { bestByItem, dimensionMismatches };
+}
+function connectorStoreVectorDigestPageQuery(options, afterChunkPk, limit = 4096) {
+  const account = normalizeOptionalAccountScope(options.accountScope);
+  return {
+    sql: `SELECT chunk_pk, digest FROM chunk_vector_digest
+      WHERE chunk_pk > ? AND model_id = ? ${account ? "AND account_scope = ?" : ""}
+      ORDER BY chunk_pk LIMIT ?`,
+    params: [afterChunkPk, options.modelId, ...account ? [account] : [], limit]
+  };
+}
+async function scanVectorPagesOnPool(dbPath, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit, visibility) {
+  const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit, visibility)).catch((error) => {
     if (error instanceof OffThreadReadBusyError)
       return { skippedReason: "vector_scan_store_busy" };
     throw error;
@@ -36562,34 +36816,7 @@ async function scanVectorPagesOnPool(dbPath, provider, beforeToken, queryVector,
   }
 }
 function connectorStoreCurrentEmbeddingPageQuery(options, afterChunkPk, limit = CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE) {
-  const modelId = requireNonEmpty(options.modelId, "Connector store embedding model id");
-  const accountScope = normalizeOptionalAccountScope(options.accountScope);
-  const selectedFilters = connectorStoreFilterSql(options.filters);
-  const pageLimit = Math.max(1, Math.floor(limit));
-  return {
-    sql: `
-    SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding
-    ${CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER}
-      -- The unary + keeps SQLite off the model_id index (#1242). With it, every
-      -- page read all of the model's rows and sorted them, blobs included, to
-      -- find the next 256: quadratic in the store's vector count, which ran a
-      -- 1.3 GB store past the 10 s lane deadline on every question. Walking the
-      -- primary key (chunk_pk, model_id) from afterChunkPk reads each row once.
-      AND +emb.model_id = ?
-      AND emb.chunk_pk > ?
-      ${accountScope ? "AND i.account_scope = ?" : ""}
-      ${selectedFilters.sql}
-    ORDER BY emb.chunk_pk ASC
-    LIMIT ?
-  `,
-    params: [
-      modelId,
-      afterChunkPk,
-      ...accountScope ? [accountScope] : [],
-      ...selectedFilters.params,
-      pageLimit
-    ]
-  };
+  return connectorStoreCurrentEmbeddingRowsQuery(options, false, { afterChunkPk, limit });
 }
 function embeddingAuthorityRead(provider) {
   return {
@@ -38844,10 +39071,12 @@ function validateCurrentConnectorStoreSchemaBeforeMigration(db) {
   if (version === 14) {
     validateConnectorStoreV12Schema(db, "v14", CONNECTOR_STORE_V13_CHUNK_COLUMNS);
   }
-  if (version === CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) {
+  if (version >= 15) {
     validateConnectorStoreV12Schema(db, "v15", CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
     assertIndexColumns(db, "idx_connector_store_items_parent", ["parent_local_item_id"], "v15");
   }
+  if (version === 16)
+    validateVectorDigestSchema(db);
 }
 function validateConnectorStoreVisibilitySchema(db, versionLabel) {
   assertExactTableColumns(db, "item_visibility_feed", ["seq", "provider", "account_scope", "conversation_key", "provider_item_id"], false, versionLabel);
@@ -38861,8 +39090,15 @@ function validateConnectorStoreV6Schema(db) {
   validateConnectorStoreSchemaShape(db, CONNECTOR_STORE_V5_ITEM_COLUMNS, true, "v6");
   validateConnectorStoreFtsOwnership(db, "v6");
 }
+function validateVectorDigestSchema(db) {
+  assertExactTableColumns(db, "chunk_vector_digest", ["chunk_pk", "model_id", "item_pk", "account_scope", "digest"], false, "v16");
+  assertExactTableColumns(db, "chunk_vector_digest_meta", ["model_id", "cursor_rowid", "completed"], false, "v16");
+  assertTriggerExists(db, "connector_store_vector_digest_delete", "v16");
+  assertTriggerExists(db, "connector_store_vector_digest_account", "v16");
+}
 function validateConnectorStoreSchema(db) {
   validateConnectorStoreV12Schema(db, "v15", CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
+  validateVectorDigestSchema(db);
   validateConnectorStoreForeignKeys(db);
   assertIndexColumns(db, "idx_connector_store_items_parent", ["parent_local_item_id"], "v15");
   assertExactTableColumns(db, "chunk_media_releases", ["media_sha256", "media_path"], false, "v13");
@@ -39370,7 +39606,7 @@ function fileIdentity(path) {
     return;
   }
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 500, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 16, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 500, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -39378,6 +39614,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
     AND emb.content_hash = c.embedding_input_hash
 `, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, VECTOR_SCAN_RESERVE_MIN_MS = 1000, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
+  init_vector_digest();
   init_main_thread_sql_trace();
   init_store_write_guard();
   init_unreadable_files();
@@ -39616,12 +39853,59 @@ var init_local_index = __esm(() => {
         this.itemTextVersionsPresent = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'item_text_versions'").get() !== null;
         const judgmentColumns = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'media_judgments'").get() !== null ? tableColumns(this.db, "media_judgments", false) : [];
         this.mediaJudgmentsPresent = CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS.every((column) => judgmentColumns.includes(column));
+        if (!this.readOnly)
+          this.scheduleVectorDigestBackfill();
       } catch (error) {
         closeSqliteStore(this.db, { checkpoint: !this.readOnly });
         throw error;
       }
     }
+    vectorDigestBackfillTimer;
+    vectorDigestBackfillModel;
+    scheduleVectorDigestBackfill(modelId, delayMs = 0) {
+      if (modelId)
+        this.vectorDigestBackfillModel = modelId;
+      if (this.readOnly || this.closedForPoolReads || this.vectorDigestBackfillTimer)
+        return;
+      this.vectorDigestBackfillTimer = setTimeout(() => {
+        this.vectorDigestBackfillTimer = undefined;
+        if (this.closedForPoolReads)
+          return;
+        const model = this.vectorDigestBackfillModel ?? this.db.query("SELECT model_id FROM chunk_embeddings ORDER BY rowid DESC LIMIT 1").get()?.model_id;
+        if (!model)
+          return;
+        this.vectorDigestBackfillModel = model;
+        try {
+          const state = this.backfillVectorDigest(model);
+          if (!state.completed)
+            this.scheduleVectorDigestBackfill();
+        } catch (error) {
+          if (/busy|locked/i.test(String(error))) {
+            this.scheduleVectorDigestBackfill(undefined, 250);
+            return;
+          }
+          console.warn("Connector store vector digest backfill failed; exact scan retained.");
+        }
+      }, delayMs);
+      this.vectorDigestBackfillTimer.unref?.();
+    }
+    backfillVectorDigest(modelId, maxRows = 128) {
+      if (this.readOnly)
+        throw new Error("Vector digest backfill requires a writable store.");
+      return backfillVectorDigests(this.db, modelId, maxRows);
+    }
+    async ensureVectorDigestReady(modelId, maxWindows = 8) {
+      let state = vectorDigestState(this.db, modelId);
+      for (let window2 = 0;!state.completed && window2 < maxWindows; window2++) {
+        await yieldConnectorSyncTurn();
+        if (this.closedForPoolReads)
+          return { completed: false };
+        state = this.backfillVectorDigest(modelId);
+      }
+      return state;
+    }
     close() {
+      clearTimeout(this.vectorDigestBackfillTimer);
       this.stopVisibilityPublisher();
       try {
         if (!this.readOnly)
@@ -41204,10 +41488,13 @@ var init_local_index = __esm(() => {
               continue;
             }
             write.run(target.chunk_pk, provider.modelId, itemPk, vector.contentHash, vector.embedding, now);
+            writeVectorDigest(this.db, target.chunk_pk, provider.modelId, itemPk, vector.embedding);
             vectorsCopied += 1;
           }
-          if (vectorsCopied > 0)
+          if (vectorsCopied > 0) {
             this.recordEmbeddingModel(provider, now);
+            this.scheduleVectorDigestBackfill(provider.modelId);
+          }
           return {
             chunksWritten,
             chunksKept,
@@ -45249,6 +45536,7 @@ var init_local_index = __esm(() => {
             const vector = vectors[index];
             if (!vector)
               throw new Error("Connector store embedding provider returned no vector for a chunk.");
+            const embedding = encodeEmbedding(vector, provider.dimension);
             const write = this.db.query(`
             INSERT INTO chunk_embeddings (chunk_pk, model_id, item_pk, content_hash, embedding, embedded_at)
             SELECT ?, ?, ?, ?, ?, ?
@@ -45266,9 +45554,11 @@ var init_local_index = __esm(() => {
               content_hash = excluded.content_hash,
               embedding = excluded.embedding,
               embedded_at = excluded.embedded_at
-          `).run(row.chunk_pk, provider.modelId, row.item_pk, row.content_hash, encodeEmbedding(vector, provider.dimension), now, row.chunk_pk, row.item_pk, row.content_hash);
+          `).run(row.chunk_pk, provider.modelId, row.item_pk, row.content_hash, embedding, now, row.chunk_pk, row.item_pk, row.content_hash);
             if (write.changes > 0) {
+              writeVectorDigest(this.db, row.chunk_pk, provider.modelId, row.item_pk, embedding);
               written += 1;
+              this.scheduleVectorDigestBackfill(provider.modelId);
               const judgment = judgedBatch?.get(row.chunk_pk);
               if (judgment && row.media_sha256 && !judgedThisPass.has(row.media_sha256)) {
                 judgedThisPass.add(row.media_sha256);
@@ -45640,7 +45930,7 @@ var init_local_index = __esm(() => {
         ...selectedAccount ? { accountScope: selectedAccount } : {},
         ...filters ? { filters } : {}
       };
-      const scanned = offThreadReadsSupported(this.dbPath) ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs);
+      const scanned = offThreadReadsSupported(this.dbPath) ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit, (pks) => this.visibleVectorItemPks(pks, selectedAccount, filters)) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit, (pks) => this.visibleVectorItemPks(pks, selectedAccount, filters));
       if ("skippedReason" in scanned)
         return { rows: [], skippedReason: scanned.skippedReason };
       const { bestByItem, dimensionMismatches } = scanned;
@@ -45671,7 +45961,7 @@ var init_local_index = __esm(() => {
         ...laneRows.length === 0 && dimensionMismatches > 0 ? { skippedReason: "embedding_stored_dimension_mismatch" } : {}
       };
     }
-    async scanVectorPagesInThread(provider, beforeToken, queryVector, pageOptions, deadlineAtMs) {
+    async scanVectorPagesInThread(provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit, visibility) {
       const scanDb = this.dbPath === ":memory:" ? this.db : new Database9(this.dbPath, { readonly: true, create: false, strict: true });
       const ownsScanDb = scanDb !== this.db;
       try {
@@ -45684,7 +45974,7 @@ var init_local_index = __esm(() => {
           const params = query.params;
           return query.mode === "all" ? statement.all(...params) : statement.get(...params);
         };
-        return await scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE);
+        return await scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE, resultLimit, visibility);
       } finally {
         try {
           scanDb.exec("ROLLBACK;");
@@ -46673,6 +46963,10 @@ var init_local_index = __esm(() => {
         ...parityParams,
         ...contentParams
       ], mode: "all" };
+      const digestPresent = Boolean(yield { sql: "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'chunk_vector_digest_meta'", params: [], mode: "get" });
+      const digestRows = digestPresent ? yield { sql: `SELECT model_id, cursor_rowid, completed, (SELECT MAX(rowid) FROM chunk_embeddings) AS last_rowid
+          FROM chunk_vector_digest_meta`, params: [], mode: "all" } : [];
+      const digestByModel = new Map(digestRows.map((row) => [row.model_id, row.completed === 1 ? 1 : row.last_rowid ? Math.min(0.999, row.cursor_rowid / row.last_rowid) : 0]));
       const tierStatus = tier.hidden.length > 0 || tier.held.length > 0 || tier.moving > 0 || tier.metadataLayer.length > 0 ? {
         pendingClassificationItems: new Set([...tier.held, ...unreadHolds.waitingPks]).size,
         supersededChunks: tier.hidden.length > 0 ? (yield { sql: `
@@ -46711,7 +47005,8 @@ var init_local_index = __esm(() => {
         embeddingByModel: byModel.map((row) => ({
           modelId: row.model_id,
           embeddedChunks: row.embedded_chunks,
-          itemsEmbedded: row.items_embedded
+          itemsEmbedded: row.items_embedded,
+          ...digestPresent ? { fastSearchReady: digestByModel.get(row.model_id) ?? 0 } : {}
         })),
         ...tierStatus ? { tier: tierStatus } : {},
         ...last ? { lastSyncRun: last } : {}
@@ -46789,6 +47084,10 @@ var init_local_index = __esm(() => {
     "chunks",
     "connector_store_fts",
     "chunk_embeddings",
+    "chunk_vector_digest",
+    "chunk_vector_digest_meta",
+    "connector_store_vector_digest_delete",
+    "connector_store_vector_digest_account",
     "embedding_models",
     "idx_connector_store_chunk_embeddings_item",
     "item_owners",

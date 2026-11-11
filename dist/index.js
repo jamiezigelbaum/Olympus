@@ -19325,6 +19325,101 @@ var init_tier_set_binding = __esm(() => {
   init_tier_ledger_path();
 });
 
+// src/workers/source-index/embedding-identity.ts
+function embeddingProviderFamily(providerKind) {
+  return declaredEmbeddingProviderFamily(providerKind) ?? { providerKind, epochProviderToken: providerKind, dimensionToken: "declared" };
+}
+function declaredEmbeddingProviderFamily(providerKind) {
+  return EMBEDDING_PROVIDER_FAMILIES.find((family) => family.providerKind === providerKind);
+}
+function buildEmbeddingEpoch(input) {
+  const family = embeddingProviderFamily(input.provider);
+  const dimension = family.dimensionToken === PROVIDER_REPORTED_DIMENSION_TOKEN ? PROVIDER_REPORTED_DIMENSION_TOKEN : declaredDimensionToken(input.dimension);
+  return `${input.backend}:${family.epochProviderToken}:${input.modelId}:${dimension}`;
+}
+function declaredDimensionToken(dimension) {
+  return dimension !== undefined && Number.isSafeInteger(dimension) && dimension >= 1 ? String(dimension) : PROVIDER_REPORTED_DIMENSION_TOKEN;
+}
+function canonicalIdentity(input) {
+  return { ...input, epochId: buildEmbeddingEpoch(input) };
+}
+var PROVIDER_REPORTED_DIMENSION_TOKEN = "provider-reported", EMBEDDING_PROVIDER_FAMILIES, CANONICAL_EMBEDDING_IDENTITIES;
+var init_embedding_identity = __esm(() => {
+  init_operation_error();
+  EMBEDDING_PROVIDER_FAMILIES = [
+    {
+      providerKind: "local-openai-compatible",
+      epochProviderToken: "openai-compatible",
+      dimensionToken: "declared"
+    },
+    {
+      providerKind: "google-gemini",
+      epochProviderToken: "google-gemini",
+      dimensionToken: PROVIDER_REPORTED_DIMENSION_TOKEN
+    },
+    {
+      providerKind: "venice",
+      epochProviderToken: "venice",
+      dimensionToken: "declared"
+    },
+    {
+      providerKind: "built-in",
+      epochProviderToken: "built-in",
+      dimensionToken: "declared"
+    }
+  ];
+  CANONICAL_EMBEDDING_IDENTITIES = [
+    canonicalIdentity({
+      provider: "local-openai-compatible",
+      modelId: "secure-local-qwen3-embed",
+      backend: "local",
+      dimension: 2560
+    }),
+    canonicalIdentity({
+      provider: "google-gemini",
+      modelId: "gemini-embedding-2",
+      backend: "cloud",
+      dimension: 3072
+    }),
+    canonicalIdentity({
+      provider: "venice",
+      modelId: "text-embedding-qwen3-8b",
+      backend: "cloud",
+      dimension: 4096
+    }),
+    canonicalIdentity({
+      provider: "built-in",
+      modelId: "arctic-embed-m-v1.5-int8-e58a8f7",
+      backend: "local",
+      dimension: 768
+    }),
+    canonicalIdentity({
+      provider: "built-in",
+      modelId: "embeddinggemma-2-litert-24d962e",
+      backend: "local",
+      dimension: 768
+    })
+  ];
+});
+
+// src/workers/source-index/embeddings.ts
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+var priorityQueryEmbedding, SUPPORTED_IMAGE_MIME_TYPES, TRANSIENT_EMBEDDING_STATUSES;
+var init_embeddings = __esm(() => {
+  init_operation_error();
+  init_local_model_policy();
+  init_model_transport();
+  init_zkapi_consult_settings();
+  init_embedding_identity();
+  priorityQueryEmbedding = new AsyncLocalStorage5;
+  SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png"]);
+  TRANSIENT_EMBEDDING_STATUSES = new Set([429, 500, 502, 503, 504]);
+});
+// src/workers/connector-store/vector-digest.ts
+var init_vector_digest = __esm(() => {
+  init_embeddings();
+});
+
 // src/workers/connector-store/main-thread-sql-trace.ts
 var init_main_thread_sql_trace = __esm(() => {
   init_answer_latency_trace();
@@ -19949,97 +20044,6 @@ var init_chunk_selection = __esm(() => {
 // src/core/source-index/reactions.ts
 var init_reactions = () => {};
 
-// src/workers/source-index/embedding-identity.ts
-function embeddingProviderFamily(providerKind) {
-  return declaredEmbeddingProviderFamily(providerKind) ?? { providerKind, epochProviderToken: providerKind, dimensionToken: "declared" };
-}
-function declaredEmbeddingProviderFamily(providerKind) {
-  return EMBEDDING_PROVIDER_FAMILIES.find((family) => family.providerKind === providerKind);
-}
-function buildEmbeddingEpoch(input) {
-  const family = embeddingProviderFamily(input.provider);
-  const dimension = family.dimensionToken === PROVIDER_REPORTED_DIMENSION_TOKEN ? PROVIDER_REPORTED_DIMENSION_TOKEN : declaredDimensionToken(input.dimension);
-  return `${input.backend}:${family.epochProviderToken}:${input.modelId}:${dimension}`;
-}
-function declaredDimensionToken(dimension) {
-  return dimension !== undefined && Number.isSafeInteger(dimension) && dimension >= 1 ? String(dimension) : PROVIDER_REPORTED_DIMENSION_TOKEN;
-}
-function canonicalIdentity(input) {
-  return { ...input, epochId: buildEmbeddingEpoch(input) };
-}
-var PROVIDER_REPORTED_DIMENSION_TOKEN = "provider-reported", EMBEDDING_PROVIDER_FAMILIES, CANONICAL_EMBEDDING_IDENTITIES;
-var init_embedding_identity = __esm(() => {
-  init_operation_error();
-  EMBEDDING_PROVIDER_FAMILIES = [
-    {
-      providerKind: "local-openai-compatible",
-      epochProviderToken: "openai-compatible",
-      dimensionToken: "declared"
-    },
-    {
-      providerKind: "google-gemini",
-      epochProviderToken: "google-gemini",
-      dimensionToken: PROVIDER_REPORTED_DIMENSION_TOKEN
-    },
-    {
-      providerKind: "venice",
-      epochProviderToken: "venice",
-      dimensionToken: "declared"
-    },
-    {
-      providerKind: "built-in",
-      epochProviderToken: "built-in",
-      dimensionToken: "declared"
-    }
-  ];
-  CANONICAL_EMBEDDING_IDENTITIES = [
-    canonicalIdentity({
-      provider: "local-openai-compatible",
-      modelId: "secure-local-qwen3-embed",
-      backend: "local",
-      dimension: 2560
-    }),
-    canonicalIdentity({
-      provider: "google-gemini",
-      modelId: "gemini-embedding-2",
-      backend: "cloud",
-      dimension: 3072
-    }),
-    canonicalIdentity({
-      provider: "venice",
-      modelId: "text-embedding-qwen3-8b",
-      backend: "cloud",
-      dimension: 4096
-    }),
-    canonicalIdentity({
-      provider: "built-in",
-      modelId: "arctic-embed-m-v1.5-int8-e58a8f7",
-      backend: "local",
-      dimension: 768
-    }),
-    canonicalIdentity({
-      provider: "built-in",
-      modelId: "embeddinggemma-2-litert-24d962e",
-      backend: "local",
-      dimension: 768
-    })
-  ];
-});
-
-// src/workers/source-index/embeddings.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
-var priorityQueryEmbedding, SUPPORTED_IMAGE_MIME_TYPES, TRANSIENT_EMBEDDING_STATUSES;
-var init_embeddings = __esm(() => {
-  init_operation_error();
-  init_local_model_policy();
-  init_model_transport();
-  init_zkapi_consult_settings();
-  init_embedding_identity();
-  priorityQueryEmbedding = new AsyncLocalStorage5;
-  SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png"]);
-  TRANSIENT_EMBEDDING_STATUSES = new Set([429, 500, 502, 503, 504]);
-});
-
 // src/workers/source-index/media-judge.ts
 var MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES, MEDIA_JUDGE_PROMPTS, MEDIA_JUDGE_THRESHOLDS, promptVectorCache;
 var init_media_judge = __esm(() => {
@@ -20086,6 +20090,7 @@ function connectorStoreContentPreference(vettedVectorItemIds) {
 }
 var CONCEPT_COUNT_MAX_AGE_MS, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, STATUS_COUNTS_MAX_AGE_MS, TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
 var init_local_index = __esm(() => {
+  init_vector_digest();
   init_main_thread_sql_trace();
   init_store_write_guard();
   init_unreadable_files();

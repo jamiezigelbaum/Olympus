@@ -1,3 +1,5 @@
+import { createVectorDigestSchema, writeVectorDigest, backfillVectorDigests, vectorDigestState } from './vector-digest.ts';
+import { encodeVectorDigest, scoreVectorDigest, VectorDigestHeap } from '../source-index/vector-digest.ts';
 import { iterateRows } from '../../core/sqlite-rows.ts';
 import { installMainThreadSqlTrace } from './main-thread-sql-trace.ts';
 import { assertWritableStoreOpenAllowed, writableStoreOpensForbidden } from '../../core/store-write-guard.ts';
@@ -317,7 +319,7 @@ export const CONTAINER_MIME_TYPES: readonly string[] = Object.freeze([
 const CONTAINER_MIME_TYPES_SQL = CONTAINER_MIME_TYPES.map((type) => `'${type}'`).join(', ');
 const VECTOR_BACKEND = 'exact_scan';
 const SQLITE_STORE_ID = 'connector-store';
-const CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15;
+const CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 16;
 /** The `sync_runs` connector id of a strip of picture content outside Private stores. */
 export const IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = 'olympus_image_content_private_only';
 /** A picture the image encoder fails on is retried after 1 h, 2 h, ... */
@@ -484,7 +486,7 @@ export function connectorStoreMigrations() {
       },
     },
     {
-      version: CONNECTOR_STORE_SQLITE_SCHEMA_VERSION,
+      version: 15,
       name: 'connector_store_child_items',
       up(db: Database) {
         // Additive and inert: nullable columns and a partial index. An
@@ -492,6 +494,11 @@ export function connectorStoreMigrations() {
         // rewritten (docs/design/child-items.md, "Storage").
         addConnectorStoreChildItemColumns(db);
       },
+    },
+    {
+      version: 16,
+      name: 'connector_store_vector_digest',
+      up: createVectorDigestSchema,
     },
   ];
 }
@@ -1686,7 +1693,17 @@ export interface ConnectorStoreStatus {
    * this; the per-item count exists only here, so it can never be read
    * without a model.
    */
-  embeddingByModel: Array<{ modelId: string; embeddedChunks: number; itemsEmbedded: number }>;
+  embeddingByModel: Array<{
+    modelId: string;
+    embeddedChunks: number;
+    itemsEmbedded: number;
+    /**
+     * Share of this model's vectors the fast first pass covers, 0 to 1 (#1444).
+     * Below 1 the background backfill is still running and search uses the
+     * exact scan. Absent on stores without the digest table.
+     */
+    fastSearchReady?: number;
+  }>;
   lastSyncRun?: ConnectorStoreSyncRun;
 }
 
@@ -2170,6 +2187,7 @@ interface ConnectorStoreCurrentEmbeddingRowsOptions {
   modelId: string;
   accountScope?: string;
   filters?: ConnectorStoreSearchFilters;
+  chunkPks?: readonly number[];
 }
 
 const CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
@@ -2194,7 +2212,8 @@ const CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
 function connectorStoreCurrentEmbeddingRowsQuery(
   options: ConnectorStoreCurrentEmbeddingRowsOptions,
   ordered: boolean,
-): { sql: string; params: string[] } {
+  page?: { afterChunkPk: number; limit: number },
+): { sql: string; params: Array<string | number> } {
   const modelId = requireNonEmpty(options.modelId, 'Connector store embedding model id');
   const accountScope = normalizeOptionalAccountScope(options.accountScope);
   const selectedFilters = connectorStoreFilterSql(options.filters);
@@ -2202,15 +2221,21 @@ function connectorStoreCurrentEmbeddingRowsQuery(
     sql: `
       SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding
       ${CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER}
-        AND emb.model_id = ?
+        -- Unary + avoids the model index + repeated whole-model sort (#1242).
+        AND ${page ? '+emb.model_id' : 'emb.model_id'} = ?
+        ${page ? 'AND emb.chunk_pk > ?' : ''}
+        ${options.chunkPks ? 'AND emb.chunk_pk IN (SELECT value FROM json_each(?))' : ''}
         ${accountScope ? 'AND i.account_scope = ?' : ''}
         ${selectedFilters.sql}
-      ${ordered ? 'ORDER BY emb.item_pk ASC, emb.chunk_pk ASC' : ''}
+      ${page ? 'ORDER BY emb.chunk_pk ASC LIMIT ?' : ordered ? 'ORDER BY emb.item_pk ASC, emb.chunk_pk ASC' : ''}
     `,
     params: [
       modelId,
+      ...(page ? [page.afterChunkPk] : []),
+      ...(options.chunkPks ? [JSON.stringify(options.chunkPks)] : []),
       ...(accountScope ? [accountScope] : []),
       ...selectedFilters.params,
+      ...(page ? [Math.max(1, Math.floor(page.limit))] : []),
     ],
   };
 }
@@ -2252,6 +2277,24 @@ type VectorScan =
   | { bestByItem: Map<number, { bestCosine: number; bestChunkPk: number; localItemId: string }>; dimensionMismatches: number }
   | { skippedReason: string };
 
+type VectorScoreRow = { item_pk: number; chunk_pk: number; local_item_id: string; embedding: unknown };
+type VectorVisibility = (itemPks: readonly number[]) => ReadonlySet<number>;
+type VectorWinners = Extract<VectorScan, { bestByItem: unknown }>['bestByItem'];
+
+/** Shared exact scoring preserves the winning chunk and deterministic ties. */
+function foldVectorScore(bestByItem: VectorWinners, row: VectorScoreRow, queryVector: readonly number[]): { mismatch: number; qualified: number } {
+  const vector = decodeEmbedding(row.embedding);
+  if (vector.length !== queryVector.length) return { mismatch: 1, qualified: 0 };
+  const score = cosineSimilarity(queryVector, vector);
+  const prior = bestByItem.get(row.item_pk);
+  let qualified = 0;
+  if (!prior || score > prior.bestCosine || (score === prior.bestCosine && row.chunk_pk < prior.bestChunkPk)) {
+    qualified = Number(score >= MIN_VECTOR_SCORE && (!prior || prior.bestCosine < MIN_VECTOR_SCORE));
+    bestByItem.set(row.item_pk, { bestCosine: score, bestChunkPk: row.chunk_pk, localItemId: row.local_item_id });
+  }
+  return { mismatch: 0, qualified };
+}
+
 /**
  * The exact-vector scan: re-checks the embedding authority, then walks the
  * model's current vectors in keyset pages, keeping each item's best chunk.
@@ -2270,11 +2313,17 @@ async function scanVectorPages(
   pageOptions: ConnectorStoreCurrentEmbeddingRowsOptions,
   deadlineAtMs: number | undefined,
   pageSize: number,
+  resultLimit: number,
+  visibility?: VectorVisibility,
 ): Promise<VectorScan> {
   const authority = embeddingAuthorityRead(provider);
   const after = embeddingAuthorityFromRow(await read(authority) as EmbeddingAuthorityRow | null, provider);
   if (after.skippedReason) return { skippedReason: after.skippedReason };
   if (after.token !== beforeToken) return { skippedReason: 'embedding_authority_changed_during_query' };
+  // Old/read-only schemas and incomplete backfills retain the exact scan.
+  const digestTable = await read({ mode: 'get', sql: "SELECT 1 FROM sqlite_master WHERE name = 'chunk_vector_digest_meta'", params: [] });
+  const digestReady = digestTable && await read({ mode: 'get', sql: 'SELECT 1 FROM chunk_vector_digest_meta WHERE model_id = ? AND completed = 1', params: [pageOptions.modelId] });
+  if (digestReady) return scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit, visibility);
   const bestByItem = new Map<number, { bestCosine: number; bestChunkPk: number; localItemId: string }>();
   let dimensionMismatches = 0;
   let afterChunkPk = 0;
@@ -2296,22 +2345,91 @@ async function scanVectorPages(
       if ((index & 31) === 0 && connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
         return { skippedReason: 'vector_scan_deadline_exceeded' };
       }
-      const documentVector = decodeEmbedding(row.embedding);
-      if (documentVector.length !== queryVector.length) {
-        dimensionMismatches += 1;
-        continue;
-      }
-      const score = cosineSimilarity(queryVector, documentVector);
-      const existing = bestByItem.get(row.item_pk);
-      if (existing === undefined || score > existing.bestCosine) {
-        bestByItem.set(row.item_pk, { bestCosine: score, bestChunkPk: row.chunk_pk, localItemId: row.local_item_id });
-      }
+      dimensionMismatches += foldVectorScore(bestByItem, row, queryVector).mismatch;
     }
     afterChunkPk = page.at(-1)!.chunk_pk;
     if (page.length < pageSize) break;
     if (pagesScanned++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0) await yieldConnectorStoreVectorScan();
   }
   return { bestByItem, dimensionMismatches };
+}
+
+/** Sequential compact pass, followed only by SQL-eligible full vectors. */
+export async function scanDigestPages(
+  read: (query: StoreRead) => Promise<unknown>,
+  queryVector: readonly number[],
+  options: ConnectorStoreCurrentEmbeddingRowsOptions,
+  deadlineAtMs: number | undefined,
+  limit: number,
+  visibility?: VectorVisibility,
+): Promise<VectorScan> {
+  const heap = new VectorDigestHeap();
+  const query = encodeVectorDigest(queryVector);
+  let afterChunkPk = 0;
+  const expired = () => connectorStoreVectorDeadlineExpired(deadlineAtMs);
+  const cut = { skippedReason: 'vector_scan_deadline_exceeded' };
+  while (true) {
+    if (expired()) return cut;
+    const page = connectorStoreVectorDigestPageQuery(options, afterChunkPk);
+    const rows = await read({ mode: 'all', ...page }) as Array<{ chunk_pk: number; digest: Uint8Array }>;
+    for (let index = 0; index < rows.length; index++) {
+      if ((index & 31) === 0 && expired()) return cut;
+      const row = rows[index]!;
+      heap.append(row.chunk_pk, scoreVectorDigest(query, row.digest));
+    }
+    if (rows.length < 4096) break;
+    afterChunkPk = rows.at(-1)!.chunk_pk;
+    await yieldConnectorStoreVectorScan();
+  }
+  // Heap construction is linear; extraction costs only O(K log N), and
+  // retains the next K without re-reading the digest when filters are narrow.
+  for (let index = Math.floor(heap.length / 2) - 1; index >= 0; index--) {
+    heap.siftDown(index);
+    if ((index & 4095) === 0) { if (expired()) return cut; await yieldConnectorStoreVectorScan(); }
+  }
+  const bestByItem: Extract<VectorScan, { bestByItem: unknown }>['bestByItem'] = new Map();
+  let dimensionMismatches = 0;
+  const batchSize = Math.max(400, 20 * limit);
+  let eligibleItems = 0;
+  while (heap.length > 0 && eligibleItems < limit) {
+    if (expired()) return cut;
+    const chunkPks: number[] = [];
+    while (heap.length > 0 && chunkPks.length < batchSize) chunkPks.push(heap.pop());
+    const qualifiedPks: number[] = [];
+    let after = 0;
+    while (true) {
+      if (expired()) return cut;
+      const page = connectorStoreCurrentEmbeddingPageQuery({ ...options, chunkPks }, after);
+      const rows = await read({ mode: 'all', ...page }) as Array<{ item_pk: number; chunk_pk: number; local_item_id: string; embedding: unknown }>;
+      for (const [index, row] of rows.entries()) {
+        if ((index & 31) === 0 && expired()) return cut;
+        const folded = foldVectorScore(bestByItem, row, queryVector);
+        dimensionMismatches += folded.mismatch;
+        if (folded.qualified) qualifiedPks.push(row.item_pk);
+      }
+      if (rows.length < CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE) break;
+      after = rows.at(-1)!.chunk_pk;
+      await yieldConnectorStoreVectorScan();
+    }
+    // Hidden items must not fill the candidate budget. The final live
+    // visibility/hydration step still rechecks winners after the last yield.
+    eligibleItems += visibility ? visibility(qualifiedPks).size : qualifiedPks.length;
+    await yieldConnectorStoreVectorScan();
+  }
+  return expired() ? cut : { bestByItem, dimensionMismatches };
+}
+
+/** INTEGER PRIMARY KEY is the rowid: no secondary index, joins, or blob sort. */
+export function connectorStoreVectorDigestPageQuery(
+  options: { modelId: string; accountScope?: string }, afterChunkPk: number, limit = 4096,
+): { sql: string; params: Array<string | number> } {
+  const account = normalizeOptionalAccountScope(options.accountScope);
+  return {
+    sql: `SELECT chunk_pk, digest FROM chunk_vector_digest
+      WHERE chunk_pk > ? AND model_id = ? ${account ? 'AND account_scope = ?' : ''}
+      ORDER BY chunk_pk LIMIT ?`,
+    params: [afterChunkPk, options.modelId, ...(account ? [account] : []), limit],
+  };
 }
 
 /**
@@ -2327,9 +2445,11 @@ async function scanVectorPagesOnPool(
   queryVector: readonly number[],
   pageOptions: ConnectorStoreCurrentEmbeddingRowsOptions,
   deadlineAtMs: number | undefined,
+  resultLimit: number,
+  visibility?: VectorVisibility,
 ): Promise<VectorScan> {
   const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(
-    read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE,
+    read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit, visibility,
   )).catch((error: unknown): VectorScan => {
     if (error instanceof OffThreadReadBusyError) return { skippedReason: 'vector_scan_store_busy' };
     throw error;
@@ -2358,34 +2478,7 @@ export function connectorStoreCurrentEmbeddingPageQuery(
   afterChunkPk: number,
   limit = CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE,
 ): { sql: string; params: Array<string | number> } {
-  const modelId = requireNonEmpty(options.modelId, 'Connector store embedding model id');
-  const accountScope = normalizeOptionalAccountScope(options.accountScope);
-  const selectedFilters = connectorStoreFilterSql(options.filters);
-  const pageLimit = Math.max(1, Math.floor(limit));
-  return {
-    sql: `
-    SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding
-    ${CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER}
-      -- The unary + keeps SQLite off the model_id index (#1242). With it, every
-      -- page read all of the model's rows and sorted them, blobs included, to
-      -- find the next 256: quadratic in the store's vector count, which ran a
-      -- 1.3 GB store past the 10 s lane deadline on every question. Walking the
-      -- primary key (chunk_pk, model_id) from afterChunkPk reads each row once.
-      AND +emb.model_id = ?
-      AND emb.chunk_pk > ?
-      ${accountScope ? 'AND i.account_scope = ?' : ''}
-      ${selectedFilters.sql}
-    ORDER BY emb.chunk_pk ASC
-    LIMIT ?
-  `,
-    params: [
-      modelId,
-      afterChunkPk,
-      ...(accountScope ? [accountScope] : []),
-      ...selectedFilters.params,
-      pageLimit,
-    ],
-  };
+  return connectorStoreCurrentEmbeddingRowsQuery(options, false, { afterChunkPk, limit });
 }
 
 type EmbeddingAuthorityRow = { status: string; cursor: string | null; audit_receipt_sha256: string | null };
@@ -3323,13 +3416,62 @@ export class LocalConnectorStore {
         "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'media_judgments'",
       ).get() !== null ? tableColumns(this.db, 'media_judgments', false) : [];
       this.mediaJudgmentsPresent = CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS.every((column) => judgmentColumns.includes(column));
+      if (!this.readOnly) this.scheduleVectorDigestBackfill();
     } catch (error) {
       closeSqliteStore(this.db, { checkpoint: !this.readOnly });
       throw error;
     }
   }
 
+  private vectorDigestBackfillTimer: ReturnType<typeof setTimeout> | undefined;
+  private vectorDigestBackfillModel: string | undefined;
+
+  /** One small physical window per turn, never a whole-store migration at open. */
+  private scheduleVectorDigestBackfill(modelId?: string, delayMs = 0): void {
+    if (modelId) this.vectorDigestBackfillModel = modelId;
+    if (this.readOnly || this.closedForPoolReads || this.vectorDigestBackfillTimer) return;
+    this.vectorDigestBackfillTimer = setTimeout(() => {
+      this.vectorDigestBackfillTimer = undefined;
+      if (this.closedForPoolReads) return;
+      // One digest slot per chunk: prefer the model most recently written,
+      // never oscillate between overlapping old and new models. This is one
+      // physical row read, including on a large legacy store with no metadata.
+      const model = this.vectorDigestBackfillModel ?? (this.db.query(
+        'SELECT model_id FROM chunk_embeddings ORDER BY rowid DESC LIMIT 1',
+      ).get() as { model_id: string } | null)?.model_id;
+      if (!model) return;
+      this.vectorDigestBackfillModel = model;
+      try {
+        const state = this.backfillVectorDigest(model);
+        if (!state.completed) this.scheduleVectorDigestBackfill();
+      } catch (error) {
+        if (/busy|locked/i.test(String(error))) { this.scheduleVectorDigestBackfill(undefined, 250); return; }
+        // A failed maintenance slice must not crash the worker. The receipt
+        // stays incomplete and search continues through the exact fallback.
+        console.warn('Connector store vector digest backfill failed; exact scan retained.');
+      }
+    }, delayMs);
+    this.vectorDigestBackfillTimer.unref?.();
+  }
+
+  /** Durable per-model store metadata and one bounded, resumable window. */
+  backfillVectorDigest(modelId: string, maxRows = 128): { cursorRowid: number; completed: boolean; scanned: number } {
+    if (this.readOnly) throw new Error('Vector digest backfill requires a writable store.');
+    return backfillVectorDigests(this.db, modelId, maxRows);
+  }
+
+  async ensureVectorDigestReady(modelId: string, maxWindows = 8): Promise<{ completed: boolean }> {
+    let state = vectorDigestState(this.db, modelId);
+    for (let window = 0; !state.completed && window < maxWindows; window++) {
+      await yieldConnectorSyncTurn();
+      if (this.closedForPoolReads) return { completed: false };
+      state = this.backfillVectorDigest(modelId);
+    }
+    return state;
+  }
+
   close(): void {
+    clearTimeout(this.vectorDigestBackfillTimer);
     this.stopVisibilityPublisher();
     try {
       if (!this.readOnly) this.releaseUnreferencedChunkMedia();
@@ -5614,9 +5756,10 @@ export class LocalConnectorStore {
             continue;
           }
           write.run(target.chunk_pk, provider.modelId, itemPk, vector.contentHash, vector.embedding, now);
+          writeVectorDigest(this.db, target.chunk_pk, provider.modelId, itemPk, vector.embedding);
           vectorsCopied += 1;
         }
-        if (vectorsCopied > 0) this.recordEmbeddingModel(provider, now);
+        if (vectorsCopied > 0) { this.recordEmbeddingModel(provider, now); this.scheduleVectorDigestBackfill(provider.modelId); }
         return {
           chunksWritten,
           chunksKept,
@@ -12101,6 +12244,7 @@ export class LocalConnectorStore {
           // takes the vector of the OLD text. Writing only where the captured
           // chunk still exists with the same embedding input turns both into a
           // counted skip. Mirrors the Dropbox lane's guarded write.
+          const embedding = encodeEmbedding(vector, provider.dimension);
           const write = this.db.query(`
             INSERT INTO chunk_embeddings (chunk_pk, model_id, item_pk, content_hash, embedding, embedded_at)
             SELECT ?, ?, ?, ?, ?, ?
@@ -12123,14 +12267,16 @@ export class LocalConnectorStore {
             provider.modelId,
             row.item_pk,
             row.content_hash,
-            encodeEmbedding(vector, provider.dimension),
+            embedding,
             now,
             row.chunk_pk,
             row.item_pk,
             row.content_hash,
           );
           if (write.changes > 0) {
+            writeVectorDigest(this.db, row.chunk_pk, provider.modelId, row.item_pk, embedding);
             written += 1;
+            this.scheduleVectorDigestBackfill(provider.modelId);
             const judgment = judgedBatch?.get(row.chunk_pk);
             // Unjudged: nothing for the tier set to change unless it replaces
             // another verdict (the upsert leaves that for the sweep).
@@ -12832,8 +12978,8 @@ export class LocalConnectorStore {
     // snapshot (#1305): run on the request thread they held it for tens of
     // seconds on a large store, and every other lane and request waited.
     const scanned = offThreadReadsSupported(this.dbPath)
-      ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs)
-      : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs);
+      ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit, (pks) => this.visibleVectorItemPks(pks, selectedAccount, filters))
+      : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit, (pks) => this.visibleVectorItemPks(pks, selectedAccount, filters));
     if ('skippedReason' in scanned) return { rows: [], skippedReason: scanned.skippedReason };
     const { bestByItem, dimensionMismatches } = scanned;
 
@@ -12896,6 +13042,8 @@ export class LocalConnectorStore {
     queryVector: readonly number[],
     pageOptions: ConnectorStoreCurrentEmbeddingRowsOptions,
     deadlineAtMs: number | undefined,
+    resultLimit: number,
+    visibility?: VectorVisibility,
   ): Promise<VectorScan> {
     const scanDb = this.dbPath === ':memory:'
       ? this.db
@@ -12911,7 +13059,7 @@ export class LocalConnectorStore {
         const params = query.params as Array<string | number | null>;
         return query.mode === 'all' ? statement.all(...params) : statement.get(...params);
       };
-      return await scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE);
+      return await scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE, resultLimit, visibility);
     } finally {
       try {
         scanDb.exec('ROLLBACK;');
@@ -14501,6 +14649,17 @@ export class LocalConnectorStore {
       ...parityParams,
       ...contentParams,
     ], mode: 'all' }) as Array<{ model_id: string; embedded_chunks: number; items_embedded: number }>;
+    // Fast-search readiness per model (#1444): the backfill cursor against the
+    // table's last rowid, both point reads. Older or read-only stores have no
+    // digest table and report nothing, which means the exact scan serves.
+    const digestPresent = Boolean(yield { sql: "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'chunk_vector_digest_meta'", params: [], mode: 'get' });
+    const digestRows = digestPresent
+      ? (yield { sql: `SELECT model_id, cursor_rowid, completed, (SELECT MAX(rowid) FROM chunk_embeddings) AS last_rowid
+          FROM chunk_vector_digest_meta`, params: [], mode: 'all' }) as Array<{ model_id: string; cursor_rowid: number; completed: number; last_rowid: number | null }>
+      : [];
+    const digestByModel = new Map(digestRows.map((row) => [row.model_id, row.completed === 1
+      ? 1
+      : row.last_rowid ? Math.min(0.999, row.cursor_rowid / row.last_rowid) : 0]));
     const tierStatus: ConnectorStoreTierStatus | undefined = tier.hidden.length > 0 || tier.held.length > 0
       || tier.moving > 0 || tier.metadataLayer.length > 0
       ? {
@@ -14552,6 +14711,7 @@ export class LocalConnectorStore {
         modelId: row.model_id,
         embeddedChunks: row.embedded_chunks,
         itemsEmbedded: row.items_embedded,
+        ...(digestPresent ? { fastSearchReady: digestByModel.get(row.model_id) ?? 0 } : {}),
       })),
       ...(tierStatus ? { tier: tierStatus } : {}),
       ...(last ? { lastSyncRun: last } : {}),
@@ -18268,6 +18428,10 @@ const CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS = [
   'chunks',
   'connector_store_fts',
   'chunk_embeddings',
+  'chunk_vector_digest',
+  'chunk_vector_digest_meta',
+  'connector_store_vector_digest_delete',
+  'connector_store_vector_digest_account',
   'embedding_models',
   'idx_connector_store_chunk_embeddings_item',
   'item_owners',
@@ -18413,10 +18577,11 @@ function validateCurrentConnectorStoreSchemaBeforeMigration(db: Database): void 
   if (version === 14) {
     validateConnectorStoreV12Schema(db, 'v14', CONNECTOR_STORE_V13_CHUNK_COLUMNS);
   }
-  if (version === CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) {
+  if (version >= 15) {
     validateConnectorStoreV12Schema(db, 'v15', CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
     assertIndexColumns(db, 'idx_connector_store_items_parent', ['parent_local_item_id'], 'v15');
   }
+  if (version === 16) validateVectorDigestSchema(db);
 }
 
 function validateConnectorStoreVisibilitySchema(db: Database, versionLabel: string): void {
@@ -18435,8 +18600,16 @@ function validateConnectorStoreV6Schema(db: Database): void {
   validateConnectorStoreFtsOwnership(db, 'v6');
 }
 
+function validateVectorDigestSchema(db: Database): void {
+  assertExactTableColumns(db, 'chunk_vector_digest', ['chunk_pk', 'model_id', 'item_pk', 'account_scope', 'digest'], false, 'v16');
+  assertExactTableColumns(db, 'chunk_vector_digest_meta', ['model_id', 'cursor_rowid', 'completed'], false, 'v16');
+  assertTriggerExists(db, 'connector_store_vector_digest_delete', 'v16');
+  assertTriggerExists(db, 'connector_store_vector_digest_account', 'v16');
+}
+
 function validateConnectorStoreSchema(db: Database): void {
   validateConnectorStoreV12Schema(db, 'v15', CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
+  validateVectorDigestSchema(db);
   validateConnectorStoreForeignKeys(db);
   assertIndexColumns(db, 'idx_connector_store_items_parent', ['parent_local_item_id'], 'v15');
   assertExactTableColumns(db, 'chunk_media_releases', ['media_sha256', 'media_path'], false, 'v13');
