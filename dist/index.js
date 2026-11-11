@@ -2551,7 +2551,7 @@ var init_pinned_download = __esm(() => {
 
 // src/core/olympus-layout.ts
 import { homedir as homedir5 } from "node:os";
-import { basename, dirname as dirname8, isAbsolute as isAbsolute6, join as join10, resolve as resolve3 } from "node:path";
+import { basename, dirname as dirname8, isAbsolute as isAbsolute6, join as join10, relative as relative3, resolve as resolve3, sep as sep3 } from "node:path";
 function layoutHome(env = process.env) {
   return env.HOME?.trim() || homedir5();
 }
@@ -8908,7 +8908,7 @@ var init_engine_maintenance = __esm(() => {
 });
 
 // src/core/worker-service.ts
-import { basename as basename4, dirname as dirname24, isAbsolute as isAbsolute17, join as join32, relative as relative3, sep as sep3 } from "node:path";
+import { basename as basename4, dirname as dirname24, isAbsolute as isAbsolute17, join as join32, relative as relative4, sep as sep4 } from "node:path";
 function workerServicePaths(platform2, homeDir, env = {}) {
   homeDir = validatedAbsolutePath(homeDir, "home directory");
   if (platform2 === "darwin") {
@@ -8966,7 +8966,7 @@ import {
   chmodSync as chmodSync5
 } from "node:fs";
 import { homedir as homedir12 } from "node:os";
-import { dirname as dirname25, isAbsolute as isAbsolute18, join as join33, posix, sep as sep4 } from "node:path";
+import { dirname as dirname25, isAbsolute as isAbsolute18, join as join33, posix, sep as sep5 } from "node:path";
 function zkapiAsset(url, sha256, bytes, extra = {}) {
   return {
     url,
@@ -9033,7 +9033,7 @@ function privatelyOwned(path, uid, kind) {
   }
 }
 function within(parent, child) {
-  return child.startsWith(parent.endsWith(sep4) ? parent : `${parent}${sep4}`);
+  return child.startsWith(parent.endsWith(sep5) ? parent : `${parent}${sep5}`);
 }
 function readManifest(path, uid) {
   try {
@@ -9087,7 +9087,7 @@ function managedToolExecutable(tool, host = {}) {
 }
 function trustedInside(realDir, path, uid, versionDir) {
   if (versionDir) {
-    const parts = path.slice(versionDir.length + 1).split(sep4);
+    const parts = path.slice(versionDir.length + 1).split(sep5);
     for (let index = 1;index <= parts.length; index += 1) {
       let stats;
       try {
@@ -20086,6 +20086,7 @@ var init_local_index = __esm(() => {
   init_operation_error();
   init_media_cache();
   init_still_image_readiness();
+  init_olympus_layout();
   init_still_image_formats();
   init_source_ingestion_policy();
   init_sqlite_migrations();
@@ -23305,7 +23306,7 @@ var init_spool = __esm(() => {
 
 // src/workers/dropbox-files/extraction-source.ts
 import { readFile as readFile3, realpath, stat as stat3 } from "node:fs/promises";
-import { relative as relative5, resolve as resolve10, sep as sep6 } from "node:path";
+import { relative as relative6, resolve as resolve10, sep as sep7 } from "node:path";
 
 class DropboxExtractionSource {
   id;
@@ -23448,8 +23449,8 @@ class DropboxExtractionSource {
     if (!rootRealPath)
       return;
     const candidatePath = resolve10(rootRealPath, relativePath);
-    const relativeToRoot = relative5(rootRealPath, candidatePath);
-    if (relativeToRoot.startsWith("..") || relativeToRoot === "" || relativeToRoot.includes(`..${sep6}`)) {
+    const relativeToRoot = relative6(rootRealPath, candidatePath);
+    if (relativeToRoot.startsWith("..") || relativeToRoot === "" || relativeToRoot.includes(`..${sep7}`)) {
       return;
     }
     return candidatePath;
@@ -31833,7 +31834,7 @@ init_linux_desktop_entry();
 import { spawnSync as spawnSync7 } from "node:child_process";
 import { chmodSync as chmodSync8, closeSync as closeSync7, constants as constants6, copyFileSync, existsSync as existsSync14, fstatSync as fstatSync2, fsyncSync as fsyncSync2, ftruncateSync, lstatSync as lstatSync14, linkSync as linkSync2, mkdirSync as mkdirSync15, openSync as openSync6, readFileSync as readFileSync31, readlinkSync as readlinkSync4, readdirSync as readdirSync7, realpathSync as realpathSync7, renameSync as renameSync6, rmSync as rmSync10, rmdirSync, statSync as statSync16, symlinkSync as symlinkSync2, writeFileSync as writeFileSync9 } from "node:fs";
 import { createRequire as createRequire4 } from "node:module";
-import { basename as basename6, dirname as dirname29, join as join38, relative as relative4, resolve as resolve9, sep as sep5 } from "node:path";
+import { basename as basename6, dirname as dirname29, join as join38, relative as relative5, resolve as resolve9, sep as sep6 } from "node:path";
 init_linux_engine_layout();
 init_atomic_file();
 init_linux_engine_layout();

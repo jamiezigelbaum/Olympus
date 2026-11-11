@@ -40,7 +40,7 @@ import { snifferMaterialCarriesSecret, snifferOwnMaterial } from '../classificat
 import { TierSnifferStore } from '../classification/sniffer-store.ts';
 import type { SecretScrubMark, TierCopy, TierLedger, TierLedgerIdentity } from '../classification/tier-ledger.ts';
 import { tierSnifferPathForLedger } from '../classification/tier-ledger-path.ts';
-import { clearExtractionJobNames, extractionJobsDbPaths, retireExtractionJobRedaction } from '../file-extraction/job-names.ts';
+import { clearExtractionJobNames, extractionJobsDbPaths, jobLedgerPathsToVisit, retireExtractionJobRedaction } from '../file-extraction/job-names.ts';
 import type { ConnectorStoreItemWriteClaim, ConnectorStoreOwnershipKind, LocalConnectorStore } from './local-index.ts';
 
 export type SecretsDisposition = 'tombstone_now' | 'hide_until_purge';
@@ -209,7 +209,9 @@ export function forgetSecretInSideStores(options: {
   } catch {
     // Read again at the next tick.
   }
-  const jobLedgers = [...new Set([...extractionJobsDbPaths(), ...known, ...owedBefore, ...(options.jobLedgerPaths ?? [])])];
+  // A recorded path outside this install (a copy's, #1414) is never visited,
+  // and never owed: it is the original install's ledger, not this one's.
+  const { visit: jobLedgers, outside } = jobLedgerPathsToVisit([...known, ...owedBefore, ...(options.jobLedgerPaths ?? [])]);
   for (const jobsPath of jobLedgers) {
     try {
       const cleared = clearExtractionJobNames(jobsPath, {
@@ -242,7 +244,7 @@ export function forgetSecretInSideStores(options: {
     if (result.failed > 0 || result.notDurable > 0 || options.confirmInWorker) {
       ledger.recordSecretSideStoreDebt(identity, owedJobLedgers, { onlyIfOwed: options.onlyWhileOwed === true });
     } else {
-      ledger.clearSecretSideStoreDebt(identity, jobLedgers);
+      ledger.clearSecretSideStoreDebt(identity, [...jobLedgers, ...outside]);
       if (mark) ledger.markSecretSideStoresCleared(identity, mark);
     }
   } catch {
@@ -359,7 +361,7 @@ export function retireSecretRedactions(ledger: TierLedger, options: { identity?:
       failed += 1;
     }
     if (!secret && failed === 0) {
-      for (const jobsPath of new Set([...extractionJobsDbPaths(), ...knownJobLedgers, ...retirement.jobLedgerPaths])) {
+      for (const jobsPath of jobLedgerPathsToVisit([...knownJobLedgers, ...retirement.jobLedgerPaths]).visit) {
         try {
           if (retireExtractionJobRedaction(jobsPath, item, claimant, stillSecret).stillSecret) secret = true;
         } catch {
