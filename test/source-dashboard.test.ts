@@ -38,10 +38,8 @@ import {
 import type { CredentialHealthReport } from '../src/workers/credential-health.ts';
 import type { SecretStore } from '../src/core/secret-store.ts';
 import type { OAuthFetch } from '../src/core/connect.ts';
-import {
-  createEmailSourceWorker,
-  dashboardSourceSyncNotSupportedError,
-} from '../src/workers/engine/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
+import { dashboardSourceSyncNotSupportedError } from '../src/workers/engine/http/dashboard-source-requests.ts';
 import { DASHBOARD_READINESS_LEDGER_MAX_AGE_MS } from '../src/workers/source-index/status.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';

@@ -1,7 +1,8 @@
 import { iterateRows } from '../../core/sqlite-rows.ts';
 import { assertWritableStoreOpenAllowed, writableStoreOpensForbidden } from '../../core/store-write-guard.ts';
 import type { PeopleCitationName, PeopleSenderIdentity, PeopleSenderObservation } from '../../core/people-index.ts';
-import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
+import { unreadHoldDisposition, type UnreadHoldDisposition } from '../file-extraction/unreadable-files.ts';
+import type { ItemExtractionOutcome, ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
 import { jobLedgerPathsToVisit, oweExtractionRereadAfterRevive } from '../file-extraction/job-names.ts';
 import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
 import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled, withKeywordExpansionDisabled } from '../../core/source-index/keyword-context.ts';
@@ -13840,10 +13841,10 @@ export class LocalConnectorStore {
     const key = JSON.stringify(scope ?? null);
     if (!this.settledUnreadableCountMemo?.has(key)) {
       try {
-        const count = (await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true }))).length;
+        const counts = this.unreadHoldCounts(await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
         const memos = this.settledUnreadableCountMemo ??= new Map();
         if (memos.size > 32) memos.clear();
-        memos.set(key, { at: Date.now(), count });
+        memos.set(key, { at: Date.now(), ...counts });
       } catch {
         // A closed or busy store: the status read counts it itself.
       }
@@ -13851,7 +13852,7 @@ export class LocalConnectorStore {
   }
 
   /** How many settled unreadable items the counts show, reused up to `maxAgeMs` per scope. */
-  private settledUnreadableCount(scope: ConnectorStoreStatusScope | undefined, maxAgeMs: number): number {
+  private settledUnreadableCount(scope: ConnectorStoreStatusScope | undefined, maxAgeMs: number): { count: number; waitingPks: number[]; policyPks: number[] } {
     const key = JSON.stringify(scope ?? null);
     const memos = this.settledUnreadableCountMemo ??= new Map();
     const memo = memos.get(key);
@@ -13859,12 +13860,12 @@ export class LocalConnectorStore {
       // As the hidden-copy set: an older count is served while a new one is
       // counted in turns (refreshTierHiddenCountsInTurns).
       if (Date.now() - memo.at >= maxAgeMs) this.refreshSettledUnreadableCountInTurns(key, scope);
-      return memo.count;
+      return memo;
     }
-    const count = runSteps(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true })).length;
+    const counts = this.unreadHoldCounts(runSteps(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
     if (memos.size > 32) memos.clear();
-    memos.set(key, { at: Date.now(), count });
-    return count;
+    memos.set(key, { at: Date.now(), ...counts });
+    return counts;
   }
 
   private settledUnreadableCountRefresh: Set<string> | undefined;
@@ -13875,10 +13876,10 @@ export class LocalConnectorStore {
     running.add(key);
     void (async () => {
       try {
-        const count = (await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true }))).length;
+        const counts = this.unreadHoldCounts(await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
         const memos = this.settledUnreadableCountMemo ??= new Map();
         if (memos.size > 32) memos.clear();
-        memos.set(key, { at: Date.now(), count });
+        memos.set(key, { at: Date.now(), ...counts });
       } catch {
         // A closed or busy store: the older count stands until the next ask.
       } finally {
@@ -13889,21 +13890,22 @@ export class LocalConnectorStore {
 
   // Made on first use: a class-field initializer is a load-time side effect
   // that pulls this module into the plugin bundle (plugin-bundle-no-bun-sqlite).
-  private settledUnreadableCountMemo: Map<string, { at: number; count: number }> | undefined;
+  private settledUnreadableCountMemo: Map<string, { at: number; count: number; waitingPks: number[]; policyPks: number[] }> | undefined;
 
-  private extractionEnded: ((identity: TierLedgerIdentity) => boolean) | undefined;
+  private extractionOutcome: ((identity: TierLedgerIdentity, localItemId: string) => ItemExtractionOutcome | undefined) | undefined;
 
-  /**
-   * Whether an item's extraction has ended (a job ran and none is owed). The
-   * worker sets it on file stores only. A file kept Private before its text
-   * was read is waiting, not unreadable, until then, so the count and the
-   * list leave it out (2026-11-04: 7,249 Dropbox files waiting for
-   * extraction read as "could not be read"). Without a probe every settled
-   * item counts.
-   */
-  setExtractionEndedProbe(probe: ((identity: TierLedgerIdentity) => boolean) | undefined): void {
-    this.extractionEnded = probe;
+  /** The job's terminal outcome; absent evidence leaves the hold waiting. */
+  setExtractionOutcomeProbe(probe: ((identity: TierLedgerIdentity, localItemId: string) => ItemExtractionOutcome | undefined) | undefined): void {
+    this.extractionOutcome = probe;
     this.settledUnreadableCountMemo = undefined;
+  }
+
+  private unreadHoldCounts(rows: Array<{ row: { item_pk: number }; disposition: UnreadHoldDisposition }>): { count: number; waitingPks: number[]; policyPks: number[] } {
+    return {
+      count: rows.filter(item => item.disposition.kind === 'cannot_read').length,
+      waitingPks: rows.filter(item => item.disposition.kind === 'waiting').map(item => item.row.item_pk),
+      policyPks: rows.filter(item => item.disposition.kind === 'by_choice').map(item => item.row.item_pk),
+    };
   }
 
   /**
@@ -13914,8 +13916,8 @@ export class LocalConnectorStore {
    */
   private *settledUnreadableRowsSteps(
     scope: ConnectorStoreStatusScope | undefined,
-    options: { withoutSecretsOverrides?: boolean } = {},
-  ): Generator<void, Array<{ identity: TierLedgerIdentity; row: { local_item_id: string; title: string | null; source_version: string | null } }>> {
+    options: { withoutSecretsOverrides?: boolean; includeUnsettled?: boolean } = {},
+  ): Generator<void, Array<{ identity: TierLedgerIdentity; row: { item_pk: number; local_item_id: string; title: string | null; source_version: string | null }; disposition: UnreadHoldDisposition }>> {
     if (scope?.itemsAllowed === false || scope?.contentAllowed === false) return [];
     const ledger = this.visibilityLedger();
     if (!ledger) return [];
@@ -13926,7 +13928,7 @@ export class LocalConnectorStore {
       : 'metadata_layer_settled_unreadable');
     const filters = connectorStoreFilterSql(scope?.contentFilters ?? scope?.itemFilters);
     const account = normalizeOptionalAccountScope(scope?.accountScope);
-    const ended = this.extractionEnded;
+    const outcome = this.extractionOutcome;
     const rows = yield* this.itemRowsForIdentitiesSteps(identities, (identity) => identity.providerConversationId ?? '', {
       // A child whose source said it has no bytes (media an export left out, a
       // chat file the capture did not keep) was never a file Olympus failed to
@@ -13937,8 +13939,17 @@ export class LocalConnectorStore {
       sql: `${this.childItemColumnsPresent ? 'AND COALESCE(i.bytes_available, 1) <> 0' : ''} ${account ? 'AND i.account_scope = ?' : ''} ${filters.sql}`,
       params: [...(account ? [account] : []), ...filters.params],
     });
-    return rows.map((row) => ({ identity: identities[row.idx]!, row }))
-      .filter(({ identity }) => !ended || ended(identity));
+    const matched: Array<{ identity: TierLedgerIdentity; row: typeof rows[number]; disposition: UnreadHoldDisposition }> = [];
+    for (let index = 0; index < rows.length; index += 1) {
+      // Outcome lookups are indexed, but a large hold population still needs
+      // a turn between slices, just like the store and ledger reads above.
+      if (index > 0 && index % SETTLED_UNREADABLE_ITEMS_SLICE === 0) yield;
+      const row = rows[index]!;
+      const identity = identities[row.idx]!;
+      const disposition = unreadHoldDisposition(outcome?.(identity, row.local_item_id));
+      if (options.includeUnsettled || disposition.kind === 'cannot_read') matched.push({ identity, row, disposition });
+    }
+    return matched;
   }
 
   /**
@@ -14002,7 +14013,8 @@ export class LocalConnectorStore {
     const out: ExtractionUnreadableItem[] = [];
     for (let index = 0; index < matched.length; index += 1) {
       if (index > 0 && index % SETTLED_UNREADABLE_ITEMS_SLICE === 0) yield;
-      const { identity, row } = matched[index]!;
+      const { identity, row, disposition } = matched[index]!;
+      if (disposition.kind !== 'cannot_read') continue;
       const override = ledger.getOverride(identity);
       if (override?.kind === 'tier' && override.tier === 'secrets') continue;
       const record = ledger.getCurrent(identity);
@@ -14011,8 +14023,7 @@ export class LocalConnectorStore {
         providerItemId: identity.providerItemId, localItemId: row.local_item_id,
         approvedScopeKey: `${identity.provider}.${identity.accountScope}`,
         ...(row.title ? { name: row.title } : {}), ...(row.source_version ? { sourceVersion: row.source_version } : {}) },
-        // Kept Private before its text was read: unreadable-files.ts UNREAD_PRIVACY_CHECK_MISSING_KIND.
-        failedAt: record.decidedAt, errorKind: 'privacy_check_missing' });
+        failedAt: record.decidedAt, errorKind: disposition.errorKind });
     }
     return out;
   }
@@ -14114,9 +14125,12 @@ export class LocalConnectorStore {
     // holds yet is still waiting to be read, so it counts here even though it
     // stays out of every text, chunk and parity count above: counting it as
     // names only reported a freshly chosen Full folder as already finished.
+    const unreadHolds = this.settledUnreadableCount(scope, options.countsMaxAgeMs ?? 0);
+    const policyHolds = new Set(unreadHolds.policyPks);
     const unread = new Set(tier.metadataLayerContentUnread);
     const keptNamesOnlyPks = tier.metadataLayer.filter((pk) => !unread.has(pk));
-    const fileNamesOnlyNotIn = keptNamesOnlyPks.length > 0
+    const fileNamesOnlyPks = [...new Set([...keptNamesOnlyPks, ...policyHolds])];
+    const fileNamesOnlyNotIn = fileNamesOnlyPks.length > 0
       ? 'AND i.item_pk NOT IN (SELECT value FROM json_each(?))'
       : '';
     const fileScopeWhere = `${scope?.contentAllowed === false ? 'AND 0' : ''}
@@ -14137,13 +14151,13 @@ export class LocalConnectorStore {
       ...(accountScope ? [accountScope] : []),
       ...contentFilters.params,
       ...jsonList(tier.hidden),
-      ...jsonList(keptNamesOnlyPks),
+      ...jsonList(fileNamesOnlyPks),
     ];
     // A scope that says only "older than this is names only" narrows no
     // population, so it must not switch on the file-scope counts below: those
     // belong to a store whose scope picks WHICH files to read.
-    const fileScoped = scope !== undefined && !(scope.contentNotBefore !== undefined
-      && Object.entries(scope).every(([key, value]) => key === 'contentNotBefore' || value === undefined));
+    const fileScoped = policyHolds.size > 0 || (scope !== undefined && !(scope.contentNotBefore !== undefined
+      && Object.entries(scope).every(([key, value]) => key === 'contentNotBefore' || value === undefined)));
     // Rows dated before the window that hold no text. julianday reads any ISO
     // form (Z, fractional seconds, offsets), and COALESCE keeps an unparseable
     // date a plain "not outside" instead of a NULL that NOT would swallow.
@@ -14299,7 +14313,7 @@ export class LocalConnectorStore {
     const tierStatus: ConnectorStoreTierStatus | undefined = tier.hidden.length > 0 || tier.held.length > 0
       || tier.moving > 0 || tier.metadataLayer.length > 0
       ? {
-          pendingClassificationItems: tier.held.length,
+          pendingClassificationItems: new Set([...tier.held, ...unreadHolds.waitingPks]).size,
           supersededChunks: tier.hidden.length > 0
             ? ((yield { sql: `
                 SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))
@@ -14311,7 +14325,7 @@ export class LocalConnectorStore {
             : 0),
         }
       : undefined;
-    const settledUnreadableItems = this.settledUnreadableCount(scope, options.countsMaxAgeMs ?? 0);
+    const settledUnreadableItems = unreadHolds.count;
     const last = this.lastSyncRun();
     return {
       corpusId: this.corpusId,

@@ -19,6 +19,8 @@ import {
   analystSchemaGapChars,
   createAnalyst,
   runWithAnalystAbortSignal,
+  withEvidenceFormatOf,
+  withPromptBudget,
   type AnalystEvidenceFormat,
   type AnalystModel,
   type AnalystModelCompletion,
@@ -406,7 +408,7 @@ function maxTokensForChars(chars: number | undefined): number {
  * (a policy refusal, a bad answer, a timeout) surfaces unchanged.
  */
 export function withBuiltInFallback(primary: Analyst, builtIn: Analyst): Analyst {
-  return {
+  return withEvidenceFormatOf({
     async analyze(pack, options) {
       try {
         return await primary.analyze(pack, options);
@@ -415,7 +417,7 @@ export function withBuiltInFallback(primary: Analyst, builtIn: Analyst): Analyst
         return builtIn.analyze(pack, options);
       }
     },
-  };
+  }, primary, builtIn);
 }
 
 function isLocalServiceDown(error: unknown): boolean {
@@ -512,12 +514,13 @@ export async function answerPrivately(
   options: AnswerPrivatelyOptions = {},
 ): Promise<PrivateAnswer> {
   const model = options.model ?? (sharedPanelModel ??= createBuiltInAnalystModel({ waitForInstall: true }));
-  const pack = fitPrivatePack(
+  const maxPromptBytes = options.maxPromptBytes ?? DEFAULT_PRIVATE_ANSWER_PROMPT_BYTES;
+  const pack = withPromptBudget(fitPrivatePack(
     privateEvidencePack(question, evidence),
-    options.maxPromptBytes ?? DEFAULT_PRIVATE_ANSWER_PROMPT_BYTES,
+    maxPromptBytes,
     options.evidenceFormat ?? 'full',
     options.maxAnswerChars ?? DEFAULT_ANALYST_MAX_OUTPUT_CHARS,
-  );
+  ), maxPromptBytes);
   // Whether the model called its own answer complete ("sufficient"): the
   // AnalystResult does not carry it, and the panel shows no gaps then.
   const verdict: { sufficient: boolean | undefined } = { sufficient: undefined };

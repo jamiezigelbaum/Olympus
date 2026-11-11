@@ -1636,7 +1636,7 @@ describe('Gmail and Google Drive with no Google Desktop client (Olympus 1.0 rele
     const importers = Array.from(new Bun.Glob('src/**/*.ts').scanSync({ cwd: join(import.meta.dir, '..') }))
       .filter((path) => readFileSync(join(import.meta.dir, '..', path), 'utf8').match(/from '[^']*google-pilot-client(?:\.ts)?'/) !== null)
       .sort();
-    expect(importers).toEqual(['src/workers/engine/index.ts']);
+    expect(importers).toEqual(['src/workers/engine/http/dashboard-oauth-clients.ts']);
   });
 });
 

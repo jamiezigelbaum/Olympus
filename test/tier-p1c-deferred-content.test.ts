@@ -10,12 +10,18 @@ import { Database } from 'bun:sqlite';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
+import { createAnalystSourceIndexAnswerHandler } from '../src/workers/source-index/analyst-answer.ts';
+import { createReleaseManifestSink, runWithReleaseManifestSink } from '../src/core/release-manifest.ts';
+import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
+import { createReleaseTierCheck } from '../src/workers/connector-store/tier-visibility.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import type { SourceTrustDomain } from '../src/core/source-index/types.ts';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
-import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { createOwnerTierItems } from '../src/workers/classification/tier-owner-items.ts';
+import { LocalFileExtractionJobStore, type ItemExtractionOutcome } from '../src/workers/file-extraction/job-store.ts';
+import { createConnectorStoreContentProvider, createConnectorStoreCorpusAdapter, defineConnectorCorpus, LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { tieredExtractionView } from '../src/workers/connector-store/tiered-extraction.ts';
 import {
   createTieredLaneSet,
@@ -419,6 +425,117 @@ describe('P1c: status counts a names copy awaiting its text as a file to read', 
 
 // These extra cases leave the original Full-folder regression above unchanged.
 describe('settled names copies', () => {
+  test('a Personal answer names a fail-safe unread item at its names tier; its text contributes nothing (#1287)', async () => {
+    const lane = openLane(workspace());
+    cleanups.unshift(() => lane.close());
+    await listAll(lane, [NEW[1]!]);
+    const identity = identityOf(NEW[1]!.id);
+    const decision = { ...classifyItemTiers({ signals: { title: NEW[1]!.name } }), state: 'current' as const,
+      decidedBy: 'sniffer' as const, snifferId: 'fixture', contentTier: 'secure' as const,
+      contentRead: false, contentPending: false, metadataPending: false,
+      reasons: ['metadata:default:personal', 'content:unread', 'content:sniffer:fixture:fail_safe:unread'] };
+    lane.ledger.recordRoutedPlacement(identity, decision, lane.set.placementFor(decision));
+    const before = lane.ledger.getCurrent(identity);
+    const store = lane.stores.internal!;
+    const releaseCheck = createReleaseTierCheck(() => [{ ledger: lane.ledger, corpusIds: new Set(Object.values(CORPORA)) }], () => 'approval');
+    const answer = 'You have a file named scan-0413.pdf.';
+    let readPack = false;
+    const handler = createAnalystSourceIndexAnswerHandler({
+      releaseCheck,
+      analyst: { async analyze(pack) {
+        readPack = true;
+        const candidate = pack.candidates.find(item => item.provenance.sourceItem.providerItemId === identity.providerItemId)!;
+        expect(candidate.provenance.citation?.title).toBe(NEW[1]!.name);
+        expect(candidate.chunks).toEqual([]);
+        expect(JSON.stringify(pack)).not.toContain(NEW[1]!.body);
+        return { answer, citations: [{ provenance: candidate.provenance, claim: answer }], unanswered: [] };
+      } },
+      lanes: () => ({
+        registry: buildSourceIndexCorpusRegistry([defineConnectorCorpus({ corpusId: store.corpusId, family: store.family, trustDomain: store.trustDomain })]),
+        adapters: { [store.corpusId]: createConnectorStoreCorpusAdapter({ store }) },
+        contentProviders: { [store.corpusId]: createConnectorStoreContentProvider({ store }) },
+      }),
+    });
+    const sink = createReleaseManifestSink();
+    const result = await runWithReleaseManifestSink(sink, () => handler.answer({ question: 'scan-0413' }));
+    expect(readPack).toBe(true);
+    expect(result.answer).toContain(answer);
+    expect(sink.manifests[0]?.inputs).toContainEqual(expect.objectContaining({ providerItemId: identity.providerItemId, layer: 'names', privateAtAnswer: false }));
+    const input = { corpusId: store.corpusId, ...identity, privateAtAnswer: false };
+    expect(releaseCheck.inputs([{ ...input, layer: 'names' }])[0]?.tier).toBe('public_or_personal');
+    expect(releaseCheck.inputs([input])[0]?.tier).toBe('private');
+    expect(lane.ledger.getCurrent(identity)).toEqual(before);
+  });
+
+  for (const reason of ['unread', 'missing_question']) {
+    for (const scenario of [
+      { name: 'no job, read owed', state: 'none', expected: 'waiting' },
+      { name: 'active read', state: 'active', expected: 'waiting' },
+      { name: 'scope denies content, no job', state: 'none', denied: true, expected: 'by_choice' },
+      { name: 'metadata-only policy job', state: 'settled', expected: 'by_choice',
+        outcome: { status: 'metadata_only', policyDecision: 'metadata_only', warnings: [] } },
+      { name: 'terminal password warning', state: 'settled', expected: 'cannot_read',
+        outcome: { status: 'metadata_only', policyDecision: 'index_allowed', lastErrorKind: 'extractor_empty_output', warnings: ['pdf_password_required'] } },
+      { name: 'terminal damaged file', state: 'settled', expected: 'cannot_read',
+        outcome: { status: 'failed_terminal', policyDecision: 'index_allowed', lastErrorKind: 'pdf_damaged', warnings: [] } },
+      { name: 'too large', state: 'settled', expected: 'cannot_read',
+        outcome: { status: 'skipped_too_large', policyDecision: 'index_allowed', warnings: [] } },
+      { name: 'unsupported', state: 'settled', expected: 'cannot_read',
+        outcome: { status: 'skipped_unsupported', policyDecision: 'index_allowed', warnings: [] } },
+      { name: 'no extractor', state: 'settled', expected: 'cannot_read',
+        outcome: { status: 'failed_terminal', policyDecision: 'index_allowed', lastErrorKind: 'extractor_kind_unknown', warnings: [] } },
+    ] as const) test(`${reason}: ${scenario.name} agrees across counts, problem list and Your items`, async () => {
+      const dir = workspace();
+      const lane = openLane(dir);
+      const jobs = new LocalFileExtractionJobStore(join(dir, 'jobs.sqlite'));
+      cleanups.unshift(() => { jobs.close(); lane.close(); });
+      await listAll(lane, [NEW[1]!]);
+      const identity = identityOf(NEW[1]!.id);
+      const decision = { ...classifyItemTiers({ signals: { title: NEW[1]!.name } }), state: 'current' as const,
+        decidedBy: 'sniffer' as const, snifferId: 'fixture', contentTier: 'secure' as const,
+        contentRead: false, contentPending: false, metadataPending: false,
+        reasons: ['metadata:default:personal', 'content:unread', `content:sniffer:fixture:fail_safe:${reason}`] };
+      lane.ledger.recordRoutedPlacement(identity, decision, lane.set.placementFor(decision));
+      const before = lane.ledger.getCurrent(identity);
+      const outcome: ItemExtractionOutcome | undefined = 'outcome' in scenario ? scenario.outcome : undefined;
+      if (scenario.state !== 'none') {
+        const ref = request(NEW[1]!.id, '').ref;
+        const job = jobs.enqueue({ refs: [ref], extractorKind: 'fixture_text', extractorVersion: 'v1', policyDecision: outcome?.policyDecision ?? 'index_allowed' }).jobRefs[0]!;
+        if (outcome) {
+          jobs.lease({ ...ref, workerId: 'fixture' });
+          jobs.record({ jobId: job.jobId, status: outcome.status, ...(outcome.lastErrorKind ? { errorKind: outcome.lastErrorKind } : {}),
+            derivations: [{ artifactKind: 'page', chars: 0, warnings: outcome.warnings }] });
+        }
+      }
+      expect(jobs.itemExtractionState(identity)).toBe(scenario.state);
+      const probe = () => jobs.itemExtractionOutcome(identity);
+      const store = lane.stores.internal!;
+      store.setExtractionOutcomeProbe(probe);
+      const denied = 'denied' in scenario && scenario.denied;
+      const scope = { contentAllowed: !denied };
+      await store.prepareStatusCounts(scope);
+      const status = store.status(scope, { countsMaxAgeMs: 60_000 });
+      const problem = scenario.expected === 'cannot_read';
+      expect(status.counts.settledUnreadableItems ?? 0).toBe(problem ? 1 : 0);
+      expect(status.tier?.pendingClassificationItems ?? 0).toBe(scenario.expected === 'waiting' ? 1 : 0);
+      expect(status.counts.scopeMetadataOnlyFiles).toBe(scenario.expected === 'by_choice' ? 1 : 0);
+      expect(status.counts.contentElsewhereItems ?? 0).toBe(0);
+      if (scenario.name === 'metadata-only policy job') expect(store.status().counts.scopeMetadataOnlyFiles).toBe(1);
+      const list = store.settledUnreadableItems(scope);
+      expect(list).toHaveLength(problem ? 1 : 0);
+      expect(await store.settledUnreadableItemsInTurns(scope)).toEqual(list);
+      if (problem) expect(list[0]?.errorKind).toBe(outcome?.warnings[0] ?? outcome?.lastErrorKind ?? outcome?.status);
+      const owner = createOwnerTierItems({ storePaths: Object.values(storePaths(dir)), extractionOutcome: probe, contentAllowed: () => !denied });
+      const item = owner.find({ query: NEW[1]!.name }).items[0]!;
+      expect(item).toMatchObject({ tier: 'Private', names_tier: 'Personal' });
+      expect(item.waiting_for_judge).toBe(scenario.expected === 'waiting' ? true : undefined);
+      expect(item.not_read?.kind).toBe(scenario.expected === 'waiting' ? undefined : scenario.expected);
+      if (scenario.name === 'terminal password warning') expect(item.not_read).toEqual({ kind: 'cannot_read', reason: 'password' });
+      expect(item.names_only).toBeUndefined();
+      expect(lane.ledger.getCurrent(identity)).toEqual(before);
+    });
+  }
+
   test('only current content elsewhere removes a names copy from the work population', async () => {
     const lane = openLane(workspace());
     cleanups.unshift(() => lane.close());
@@ -444,6 +561,7 @@ describe('settled names copies', () => {
       reasons: ['content:sniffer:fixture:fail_safe:missing_question'] };
     lane.ledger.recordRoutedPlacement(identity, decision, lane.set.placementFor(decision));
     const store = lane.stores.internal!;
+    store.setExtractionOutcomeProbe(() => ({ status: 'failed_terminal', lastErrorKind: 'pdf_damaged', warnings: [], policyDecision: 'index_allowed' }));
     expect(store.status().counts.settledUnreadableItems).toBe(1);
     expect(store.settledUnreadableItems().map(item => item.ref.name)).toEqual(['scan-0413.pdf']);
     expect(store.status({}).counts.fullIngestionFiles).toBe(1);
@@ -466,6 +584,7 @@ describe('settled names copies', () => {
       reasons: ['content:sniffer:fixture:fail_safe:missing_question'] };
     lane.ledger.recordRoutedPlacement(identity, decision, lane.set.placementFor(decision));
     const store = lane.stores.internal!;
+    store.setExtractionOutcomeProbe(() => ({ status: 'failed_terminal', lastErrorKind: 'pdf_damaged', warnings: [], policyDecision: 'index_allowed' }));
     expect(store.settledUnreadableItems()).toHaveLength(1);
     // The export left the media out: the source says there are no bytes.
     const db = new Database(store.dbPath);
@@ -488,12 +607,12 @@ describe('settled names copies', () => {
     const store = lane.stores.internal!;
     let ended = false;
     const asked: string[] = [];
-    store.setExtractionEndedProbe((item) => { asked.push(item.providerItemId); return ended; });
+    store.setExtractionOutcomeProbe((item) => { asked.push(item.providerItemId); return ended ? { status: 'failed_terminal', lastErrorKind: 'pdf_damaged', warnings: [], policyDecision: 'index_allowed' } : undefined; });
     expect(store.status().counts.settledUnreadableItems ?? 0).toBe(0);
     expect(store.settledUnreadableItems()).toEqual([]);
     expect(asked).toContain(identity.providerItemId);
     ended = true;
-    store.setExtractionEndedProbe((item) => { asked.push(item.providerItemId); return ended; });
+    store.setExtractionOutcomeProbe((item) => { asked.push(item.providerItemId); return ended ? { status: 'failed_terminal', lastErrorKind: 'pdf_damaged', warnings: [], policyDecision: 'index_allowed' } : undefined; });
     expect(store.status().counts.settledUnreadableItems).toBe(1);
     expect(store.settledUnreadableItems().map(item => item.ref.name)).toEqual(['scan-0413.pdf']);
   });
