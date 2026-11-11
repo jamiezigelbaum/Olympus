@@ -117,3 +117,34 @@ test('a superseded copy holding a newer source version than the destination is k
   // The sweep moved on: the next item is pruned as usual.
   expect(sweepAutomaticSupersededCopies(ctx.f.set, { limit: 1, embeddingLedger: ctx.embeddingLedger })).toMatchObject({ checked: 1 });
 });
+
+test('an item that keeps failing is stepped past after three passes, so the rest of the sweep finishes (#1412)', async () => {
+  const ctx = await fixture();
+  const sweep = () => sweepAutomaticSupersededCopies(ctx.f.set, { embeddingLedger: ctx.embeddingLedger });
+  const destination = ctx.f.stores.internal!;
+  const original = destination.copyContentState.bind(destination);
+  const broken = identityOf('a');
+  const unavailable = spyOn(destination, 'copyContentState').mockImplementation((identity, ...rest) =>
+    identity.providerItemId === broken.providerItemId ? undefined : original(identity, ...rest));
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    for (let pass = 0; pass < 3; pass++) expect(sweep()).toMatchObject({ failed: 1, purged: 0, complete: false });
+    // Stepped past: the next pass reaches the rest of the ledger.
+    expect(sweep()).toMatchObject({ failed: 0, purged: 1, complete: false });
+    expect(ctx.f.stores.secure_local!.copyContentState(identityOf('c'))).toBeUndefined();
+    // The stuck item is never treated as done while it still fails.
+    expect(sweep()).toMatchObject({ failed: 1, complete: false });
+    expect(ctx.f.stores.secure_local!.copyContentState(broken)?.chunks).toBe(1);
+    const lines = warn.mock.calls.map(call => String(call[0]));
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) {
+      // Ledger id, corpora, a count and an error name: never item identity or content.
+      expect(line).toMatch(/^\[tier-auto-prune\] ledger=[0-9a-f]+ corpora=\S+ failures=\d+ reason=\w+$/);
+    }
+  } finally { unavailable.mockRestore(); warn.mockRestore(); }
+  // Once the store is back, the walk finishes the item and completes.
+  let report = sweep();
+  for (let pass = 0; pass < 3 && !report.complete; pass++) report = sweep();
+  expect(report.complete).toBe(true);
+  expect(ctx.f.stores.secure_local!.copyContentState(broken)).toBeUndefined();
+});

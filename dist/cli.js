@@ -68732,11 +68732,14 @@ function sweepAutomaticSupersededCopies(set, options = {}) {
       }
       state.after = pending.identity;
       delete state.pending;
+      delete state.failing;
       save();
     });
   };
+  let attempt;
   try {
     if (state.pending) {
+      attempt = state.pending.identity;
       report.checked++;
       const current2 = ledger.getCurrent(state.pending.identity);
       if (!current2 || current2.generation !== state.pending.generation) {
@@ -68758,6 +68761,7 @@ function sweepAutomaticSupersededCopies(set, options = {}) {
         providerItemId: record.providerItemId,
         ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
       };
+      attempt = identity2;
       ledger.withGenerationFence(identity2, record.generation, () => {
         const now = ledger.getCurrent(identity2);
         if (!now.routed || now.contentTier === "secrets" || now.metadataTier === "secrets" || ledger.hasMovedMigrationProposal(identity2))
@@ -68813,6 +68817,7 @@ function sweepAutomaticSupersededCopies(set, options = {}) {
         finishPending();
       else {
         state.after = identity2;
+        delete state.failing;
         save();
       }
     }
@@ -68841,13 +68846,33 @@ function sweepAutomaticSupersededCopies(set, options = {}) {
         report.complete = true;
       }
     }
-  } catch {
+  } catch (error) {
     report.failed++;
     report.complete = false;
+    if (attempt)
+      stepPastRepeatedFailure(attempt, error);
   }
   return report;
+  function stepPastRepeatedFailure(identity2, error) {
+    try {
+      const key2 = tierLedgerIdentityKey(identity2);
+      const count = state.failing?.key === key2 ? state.failing.count + 1 : 1;
+      const corpora = state.pending?.copies.map((copy) => copy.corpusId).join(",") || "unknown";
+      const reason = error instanceof Error ? error.name : "unknown";
+      console.warn(`[tier-auto-prune] ledger=${ledger.ledgerId()} corpora=${corpora} failures=${count} reason=${reason}`);
+      if (count < MAX_ITEM_FAILURES) {
+        state.failing = { key: key2, count };
+      } else {
+        delete state.pending;
+        delete state.failing;
+        state.after = identity2;
+        state.retry = true;
+      }
+      save();
+    } catch {}
+  }
 }
-var STATE = "automatic-superseded-prune-v1", PAGE_SIZE = 200;
+var STATE = "automatic-superseded-prune-v1", PAGE_SIZE = 200, MAX_ITEM_FAILURES = 3;
 var init_tier_auto_prune_sweep = __esm(() => {
   init_tier_ledger();
   init_embedding_ledger();

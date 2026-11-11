@@ -8,6 +8,8 @@ import type { TieredStoreSet } from './tiered-store-set.ts';
 
 const STATE = 'automatic-superseded-prune-v1';
 const PAGE_SIZE = 200;
+/** Passes one item may fail before the sweep steps past it and walks again later (#1412). */
+const MAX_ITEM_FAILURES = 3;
 interface Pending {
   identity: TierLedgerIdentity;
   generation: number;
@@ -20,6 +22,8 @@ interface State {
   pending?: Pending;
   retry?: boolean;
   deleted?: Record<string, number>;
+  /** The item the last pass failed on, and how many passes in a row failed on it. */
+  failing?: { key: string; count: number };
   embeddingLedger?: NonNullable<TierMoveOptions['embeddingLedger']>;
 }
 
@@ -57,11 +61,14 @@ export function sweepAutomaticSupersededCopies(set: TieredStoreSet, options: {
       }
       state.after = pending.identity;
       delete state.pending;
+      delete state.failing;
       save();
     });
   };
+  let attempt: TierLedgerIdentity | undefined;
   try {
     if (state.pending) {
+      attempt = state.pending.identity;
       report.checked++;
       const current = ledger.getCurrent(state.pending.identity);
       if (!current || current.generation !== state.pending.generation) {
@@ -78,6 +85,7 @@ export function sweepAutomaticSupersededCopies(set: TieredStoreSet, options: {
       report.checked++;
       const identity: TierLedgerIdentity = { provider: record.provider, accountScope: record.accountScope,
         providerItemId: record.providerItemId, ...(record.conversationKey ? { providerConversationId: record.conversationKey } : {}) };
+      attempt = identity;
       ledger.withGenerationFence(identity, record.generation, () => {
         const now = ledger.getCurrent(identity)!;
         if (!now.routed || now.contentTier === 'secrets' || now.metadataTier === 'secrets'
@@ -123,7 +131,7 @@ export function sweepAutomaticSupersededCopies(set: TieredStoreSet, options: {
         save();
       });
       if (state.pending) finishPending();
-      else { state.after = identity; save(); }
+      else { state.after = identity; delete state.failing; save(); }
     }
     if (report.checked < limit) {
       if (state.retry) { delete state.after; delete state.retry; save(); }
@@ -147,10 +155,40 @@ export function sweepAutomaticSupersededCopies(set: TieredStoreSet, options: {
         report.complete = true;
       }
     }
-  } catch {
+  } catch (error) {
     // Cursor stays before the failed item; its original counts stay durable.
     report.failed++;
     report.complete = false;
+    if (attempt) stepPastRepeatedFailure(attempt, error);
   }
   return report;
+
+  // One item that keeps failing (a store that stays unavailable, a body that
+  // cannot be verified) must not hold the rest of the ledger behind it. After
+  // MAX_ITEM_FAILURES passes the cursor moves past it and the sweep walks the
+  // ledger again later, so the item is retried and the sweep is never marked
+  // done over it. The log names the ledger and corpora, never item content.
+  function stepPastRepeatedFailure(identity: TierLedgerIdentity, error: unknown): void {
+    try {
+      const key = tierLedgerIdentityKey(identity);
+      const count = state.failing?.key === key ? state.failing.count + 1 : 1;
+      const corpora = state.pending?.copies.map(copy => copy.corpusId).join(',') || 'unknown';
+      // The error's name only: a message from below could carry a path.
+      const reason = error instanceof Error ? error.name : 'unknown';
+      console.warn(`[tier-auto-prune] ledger=${ledger.ledgerId()} corpora=${corpora} failures=${count} reason=${reason}`);
+      if (count < MAX_ITEM_FAILURES) {
+        state.failing = { key, count };
+      } else {
+        // A pending receipt's tier-content-purged marker stays: some copies
+        // may already be stripped, so rollback stays refused for this item.
+        delete state.pending;
+        delete state.failing;
+        state.after = identity;
+        state.retry = true;
+      }
+      save();
+    } catch {
+      // The ledger itself is unavailable; the next pass starts from the same place.
+    }
+  }
 }
