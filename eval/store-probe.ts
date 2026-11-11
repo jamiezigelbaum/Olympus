@@ -189,6 +189,7 @@ export function probeStoreFile(input: {
 /** What one SQL statement of the keyword search is, by its shape (code, never data). */
 export function keywordStatementKind(sql: string): string {
   if (sql.includes('MIN(top.rank)')) return 'ranked_match_page_bounded';
+  if (sql.includes('MIN(tied.rank)')) return 'ranked_match_page_tied';
   if (sql.includes('MIN(connector_store_fts.rank)')) return 'ranked_match_page';
   if (/COUNT\(DISTINCT (?:r\.)?item_pk\)/.test(sql)) return 'concept_weight_count';
   if (sql.includes('connector_store_fts.item_pk IN (')

@@ -16,7 +16,7 @@ import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard
 import { computerOpenTargets } from '../src/workers/dashboard/host-page.ts';
 import { renderDashboardConnectPage } from '../src/workers/dashboard/pages/local.ts';
 import { dashboardSubLine } from '../src/workers/dashboard/vocabulary.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { EVERNOTE_HANDLE, startEvernoteSignIn } from '../src/workers/evernote/live-sync.ts';
 import { createEvernoteRuntime, evernoteDashboardPass, evernoteSchedulerFailure } from '../src/workers/evernote/runtime.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';

@@ -13,7 +13,7 @@ import { privacyBacklogCoverageNote, withCoverageNote } from '../src/core/privac
 import { recordReleaseManifest } from '../src/core/release-manifest.ts';
 import { handleMcpCallTool } from '../src/mcp/server.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import type { SourceIndexAnswerResult } from '../src/workers/source-index/answer-types.ts';
 import { scriptedSearchReleaseCheck } from './helpers/scripted-search-release.ts';
 

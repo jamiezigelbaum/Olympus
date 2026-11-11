@@ -14,7 +14,7 @@ import { ANSWER_PROFILE_IDS, answerProfile, applyModelChoice } from '../src/work
 import {
   createFileExtractionLocalVlmClientFromEnv,
   createSourceIndexEmbeddingProviderFromEnv,
-} from '../src/workers/email-source/server.ts';
+} from '../src/workers/engine/server.ts';
 
 const CLOUD_IDS = [
   'gpt-oss:120b-cloud',

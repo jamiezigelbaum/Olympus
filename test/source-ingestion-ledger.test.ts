@@ -632,7 +632,7 @@ describe('ledger corpus assignment', () => {
   test('every registry source id a ledger row declares exists in the registry', () => {
     // Guards the whatsapp_personal/whatsapp class of defect from the other
     // side: a mistyped declaration would own nothing and drop its corpora.
-    // The registry the worker builds (email-source/server.ts): the shipped
+    // The registry the worker builds (engine/server.ts): the shipped
     // roster plus the imported-archive stores, which join it at run time.
     const registry = createSourceCorpusRegistry(withArchiveImportCorpora());
     const registrySourceIds = new Set(registry.list().map((corpus) => corpus.sourceId));

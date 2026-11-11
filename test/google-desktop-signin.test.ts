@@ -20,7 +20,7 @@ import type { SourceIndexStatusResult } from '../src/workers/source-index/status
 import { DEFAULT_OAUTH_RELAY_URL } from '../src/core/oauth-relay.ts';
 import { googleDesktopClient, googleDesktopClientSecret, isGoogleDesktopClientId } from '../src/core/publisher-oauth-client.ts';
 import { PastedCallbackError, finishPastedOAuthCallback, parsePastedOAuthCallback } from '../src/core/oauth-callback-paste.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import { readConnectedHandleRegistry, type ConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
 import {

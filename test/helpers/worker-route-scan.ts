@@ -1,4 +1,4 @@
-// Reads the worker's dispatch (src/workers/email-source/index.ts) for the
+// Reads the worker's dispatch (src/workers/engine/index.ts) for the
 // engine split's route guard (#1224). It does not try to understand every way
 // a handler could be written: it knows the forms the worker uses and reports
 // any other use of `request.method` as unrecognised, so a new form fails the

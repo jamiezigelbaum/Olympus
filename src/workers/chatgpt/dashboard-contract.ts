@@ -696,7 +696,7 @@ export interface ComputerArchiveEntry {
   /** The folder it is in, home folder shown as ~. */
   where: string;
   status: 'importing' | 'imported' | 'stopped' | 'removing';
-  /** Items stored from it so far. */
+  /** Items stored from it so far; placeholders while countsPending or countsUnavailable. */
   items: number;
   /** Of those, judged by the private model (or by the rules) already. */
   judged: number;
@@ -704,10 +704,11 @@ export interface ComputerArchiveEntry {
   held: number;
   /**
    * Olympus could not read how many items it holds from this archive (its
-   * index could not be opened): the three numbers above are then 0 and
-   * mean nothing.
+   * index could not be opened): the three numbers above are placeholders.
    */
   countsUnavailable?: true;
+  /** The first tally is still running; hide all three numbers until it finishes. */
+  countsPending?: true;
   /** While importing: how much of its bytes are read, 0 to 99. */
   percent?: number;
   /** The earliest and latest item dates (YYYY-MM-DD). */

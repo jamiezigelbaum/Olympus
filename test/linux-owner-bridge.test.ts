@@ -178,7 +178,7 @@ test('real socket auth wrapper still requires CSRF after owner proof', async () 
   const handler = withRequestPeer(withWorkerBearerAuth(async () => new Response('private dashboard'), { authToken: 'test-worker', requireOwnerSocket: true }), true);
   const socketFetch = async (r: Request) => handler(r, { requestIP: () => null });
   const f = fixture(socketFetch);
-  // As the engine does (email-source/server.ts): the owner's proven page gets the bearer-opened control session too.
+  // As the engine does (engine/server.ts): the owner's proven page gets the bearer-opened control session too.
   // The page the bridge opens renders this session's CSRF token; its unlock sends it with the cookie (#1187).
   let pageCsrf = '';
   const bridge = new LinuxOwnerBridge({ ...f.options, establishDashboard: async () => {

@@ -78,7 +78,7 @@ export interface ChatGptSurfaceOptions {
    * A boolean is accepted (a match of unknown size counts as 1, with no
    * evidence to answer from).
    */
-  privateMatchProbe?: (question: string, ctx: OperationContext) => Promise<boolean | number | PrivateMatchProbeResult>;
+  privateMatchProbe?: (question: string, ctx: OperationContext, originalMatches?: readonly PrivateEvidenceItem[]) => Promise<boolean | number | PrivateMatchProbeResult>;
   /** How long a private match probe may take (default PROBE_TIMEOUT_MS). */
   privateMatchProbeTimeoutMs?: number;
   /** Where a probe that timed out or failed is noted (default: stderr). One counts-only line, no question. */
@@ -795,15 +795,16 @@ function privateCaller(ctx: OperationContext): string | undefined {
   return id ? `${ctx.caller?.surface ?? 'remote'}:${id}` : undefined;
 }
 
-/** The same Private search again, at claim time, so evidence is judged at its current tier. */
+/** Claim-time Private search, plus original matches now readable at a lower tier. */
 function privateRefresh(
   question: string,
   probe: NonNullable<ChatGptSurfaceOptions['privateMatchProbe']>,
   context: () => OperationContext,
   options: Pick<ChatGptSurfaceOptions, 'privateMatchProbeTimeoutMs' | 'privateMatchProbeLog'>,
 ): PrivateEvidenceRefresh {
-  return async () => {
-    const current = normalizeProbe(await probeWithinDeadline(probe, question, context(), options, 'refresh'));
+  return async (_signal, originalMatches) => {
+    const current = normalizeProbe(await probeWithinDeadline(
+      (query, ctx) => probe(query, ctx, originalMatches), question, context(), options, 'refresh'));
     return Object.assign([...current.evidence], current.secretMatch ? { secretMatch: true as const } : {});
   };
 }
@@ -823,7 +824,7 @@ function beginPrivateAnswer(pending: PendingPrivateMatch, options: ChatGptSurfac
       preserveWaiting: match.secretMatch === true,
       refresh,
       ...(match.secretMatch && match.evidence.length === 0 ? { secretMatch: async () => {
-        const current = await refresh(new AbortController().signal);
+        const current = await refresh(new AbortController().signal, []);
         return current.secretMatch === true;
       } } : {}),
       detail,

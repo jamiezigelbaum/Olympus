@@ -288,7 +288,7 @@ describe('the owner-busy signal across the split', () => {
     clock.set(clock.now() + 10 * 60_000 + 1);
     expect(marks.busy('built_in')).toBe(false);
     expect(() => parseEngineCommandEnvelope({ id: 'command-0095', command: { kind: 'owner_busy', resource: 'built_in' } })).toThrow('sequence number');
-    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    const server = readFileSync(join(import.meta.dir, '../src/workers/engine/server.ts'), 'utf8');
     expect(server).toMatch(/owner_busy: \(change\) => \{\s*if \(!remoteOwnerMarks\.apply\(change\)\)/);
     expect(server).toMatch(/owner_idle: \(change\) => \{\s*if \(!remoteOwnerMarks\.apply\(change\)\)/);
   });
@@ -364,7 +364,7 @@ describe('owner actions the background runs, forwarded from the front', () => {
     const failing = createEngineFrontRoutes({ client: { send: async () => ({ id: 'c', state: 'failed', instance_id: 'b', error: 'no' }) }, gate: createFrontGate(), restartFront: () => {}, afterAnswer: (kind) => order.push(`reread:${kind}`) });
     expect((await failing(new Request('http://127.0.0.1/dashboard/people', { method: 'POST', body: '{}' })))!.status).toBe(502);
     expect(order).toHaveLength(2);
-    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    const server = readFileSync(join(import.meta.dir, '../src/workers/engine/server.ts'), 'utf8');
     expect(server).toMatch(/afterAnswer: \(kind\) => \{ if \(kind === 'people'\) refreshPeople\(true\); \}/);
   });
 
@@ -558,9 +558,9 @@ describe('a forwarded create is idempotent across a background restart', () => {
     expect(store.listWatches(owner).items.map((watch) => watch.watchId)).toEqual([watchId]);
     store.close();
 
-    const index = readFileSync(join(import.meta.dir, '../src/workers/email-source/index.ts'), 'utf8');
+    const index = readFileSync(join(import.meta.dir, '../src/workers/engine/index.ts'), 'utf8');
     expect(index).toMatch(/const recordId = sourceWatch\.recordId\?\.\(request\);/);
-    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    const server = readFileSync(join(import.meta.dir, '../src/workers/engine/server.ts'), 'utf8');
     expect(server).toMatch(/recordId: forwardedRecordId,/);
     expect(server).toMatch(/source_watch: \(\{ request \}, \{ id \}\) => runForwarded\(request, id\)/);
   });
@@ -597,7 +597,7 @@ describe('a model change restarts both processes', () => {
     expect(unmanaged()).toBe(false);
     expect(() => parseEngineCommandEnvelope({ id: 'command-0080', command: { kind: 'reload', target: 'sources', frontPid: 4242 } })).toThrow('models reload');
     expect(parseEngineCommandEnvelope({ id: 'command-0081', command: { kind: 'reload', target: 'models', frontPid: 4242 } }).command).toEqual({ kind: 'reload', target: 'models', frontPid: 4242 });
-    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    const server = readFileSync(join(import.meta.dir, '../src/workers/engine/server.ts'), 'utf8');
     expect(server).toMatch(/const reloadModels = engineFront\s*\?\s*frontModelReload\(/);
     expect(server).toMatch(/if \(target === 'models'\) \{[\s\S]{0,500}?restartAfterFront\(\{ frontPid, markStopping: \(\) => commands\.markStopping\(\), restart: \(\) => requestModelReload\(\)/);
     expect(server).toMatch(/restartForDelete = [\s\S]{0,300}?restartAfterFront\(\{ frontPid, markStopping: \(\) => commands\.markStopping\(\), restart: \(\) => requestModelReload\(request\)/);
@@ -647,7 +647,7 @@ describe('matched-first judging across the split', () => {
     expect(sent.identities[0]).toEqual(item(0));
     // What the front sends is what the background accepts.
     expect(parseEngineCommandEnvelope({ id: 'command-0070', command: sent }).command).toEqual(sent);
-    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    const server = readFileSync(join(import.meta.dir, '../src/workers/engine/server.ts'), 'utf8');
     expect(server).toMatch(/const raiseJudgeBoosts = engineFront \? frontJudgeBoost\(engineFront\.client\)/);
     expect(server).toMatch(/judge_boost: \(\{ identities \}\) => \{\s*judgeBoosts\.raise\(identities\);/);
   });
@@ -655,7 +655,7 @@ describe('matched-first judging across the split', () => {
 
 describe('the private-answer queue has one consumer', () => {
   test('only the front (or the single worker) starts the queue and the unchecked retry', () => {
-    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    const server = readFileSync(join(import.meta.dir, '../src/workers/engine/server.ts'), 'utf8');
     expect(server).toMatch(/const frontOwnsPrivateAnswerQueue = engineRole !== 'background';/);
     const starts = server.match(/^.*localPrivateAnswers\.start\(\);.*$/gm) ?? [];
     expect(starts.length).toBeGreaterThan(0);
@@ -668,7 +668,7 @@ describe('the private-answer queue has one consumer', () => {
 
 describe('scheduled backups have one exporter', () => {
   test('the background does not run the backup tick beside the front', () => {
-    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    const server = readFileSync(join(import.meta.dir, '../src/workers/engine/server.ts'), 'utf8');
     const ticks = server.match(/^.*backupService\.tick\(\).*$/gm) ?? [];
     expect(ticks).toHaveLength(1);
     expect(ticks[0]).toContain("if (engineRole !== 'background') setInterval(");
@@ -701,7 +701,7 @@ describe('configured mounts are governed by their ledgers', () => {
       store.close();
     }
     bare.close();
-    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    const server = readFileSync(join(import.meta.dir, '../src/workers/engine/server.ts'), 'utf8');
     expect(server).toMatch(/for \(const store of configuredConnectorStores\) registerConfiguredTierStore\(store\);/);
     expect(server).toMatch(/adoptConfiguredPrincipal\(mount\);\s*registerConfiguredTierStore\(mount\.store\);/);
   });
@@ -726,7 +726,7 @@ describe('a configured store whose ledger appears later is governed then', () =>
     expect(check.inputs([input])[0]!.tier).toBe('public_or_personal');
     expect(pending.waiting()).toEqual([]);
     store.close();
-    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    const server = readFileSync(join(import.meta.dir, '../src/workers/engine/server.ts'), 'utf8');
     expect(server).toMatch(/const tierScopes = \(\): TierVisibilityScope\[\] => \(pendingGovernance\.retry\(\), tierLanes\)/);
     expect(server).toMatch(/const registerConfiguredTierStore = \(store: LocalConnectorStore\): void => pendingGovernance\.add\(store\);/);
   });
@@ -734,7 +734,7 @@ describe('a configured store whose ledger appears later is governed then', () =>
 
 describe('in-process callers go through the forwarding layer', () => {
   test('remote agents, the ChatGPT surface and the panel tools reach routes as the listener does', () => {
-    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    const server = readFileSync(join(import.meta.dir, '../src/workers/engine/server.ts'), 'utf8');
     // No in-process caller is handed the bare worker: privacy_item_set over MCP would hit the front's write guard.
     expect(server).not.toMatch(/workerFetch: worker\.fetch\b/);
     expect(server.match(/workerFetch: workerFetchInProcess,/g)?.length).toBe(3);
@@ -758,7 +758,7 @@ describe('Make Private from the front', () => {
     refuse = true;
     await expect(setPrivate({ locator: 'telegram:chat-1:m8', provider: 'telegram', providerItemId: 'm8' })).rejects.toThrow('no longer names');
     expect(() => parseEngineCommandEnvelope({ id: 'command-0060', command: { kind: 'tier_set_recorded', locator: 'x', expected: { provider: 'telegram' } } })).toThrow('recorded provider and item');
-    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    const server = readFileSync(join(import.meta.dir, '../src/workers/engine/server.ts'), 'utf8');
     expect(server).toMatch(/setItemPrivate: engineFront\s*\?\s*frontSetItemPrivate\(engineFront\.client\)/);
     expect(server).toMatch(/tier_set_recorded: async \(\{ locator, expected \}\) => \{[\s\S]{0,200}?runTierSetOnRecordedItem\(locator, 'private', expected\)/);
   });
@@ -797,7 +797,7 @@ describe('exports across the split (#1224)', () => {
   });
 
   test('scheduled and Back up now exports run in the background with the switch on, and as before with it off', () => {
-    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    const server = readFileSync(join(import.meta.dir, '../src/workers/engine/server.ts'), 'utf8');
     expect(server).toMatch(/exportInto: engineFront\s*\?\s*frontDataExport\(engineFront\.client\)\s*:\s*\(destination\) => exportOlympusData\(\{ destination \}\),/);
     expect(server).toMatch(/export_data: \(\{ destination \}\) => \{\s*exportOlympusData\(\{ destination \}\);/);
   });
@@ -818,7 +818,7 @@ describe('messaging capture across the split', () => {
     await expect(stop('whatsapp')).rejects.toThrow('helper did not exit');
     expect(() => parseEngineCommandEnvelope({ id: 'command-0050', command: { kind: 'capture_stop', source: 'signal' } })).toThrow('telegram or whatsapp');
     // The front's route wiring uses it: the front's own supervisors are empty.
-    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    const server = readFileSync(join(import.meta.dir, '../src/workers/engine/server.ts'), 'utf8');
     expect(server).toMatch(/const stopMessagingCapture = engineFront\s*\?\s*frontCaptureStop\(engineFront\.client\)/);
     expect(server).toMatch(/capture_stop: async \(\{ source \}\) => \{\s*await captureOwnership\.stopForUnpair\(source\);/);
   });
@@ -1020,7 +1020,7 @@ describe('state the front shows from the snapshot', () => {
     snapshot.setStale(false);
     snapshot.set(undefined);
     expect(captures()).toEqual(grantsOnly);
-    const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    const server = readFileSync(join(import.meta.dir, '../src/workers/engine/server.ts'), 'utf8');
     expect(server).toMatch(/captureRuntime: engineFront \? frontCaptureRuntime\(dashboardCaptureRuntime, \(\) => engineFront!\.status\(\)\) : dashboardCaptureRuntime,/);
   });
 

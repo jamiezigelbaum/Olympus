@@ -8,7 +8,7 @@ import { TierSnifferService } from '../src/workers/classification/sniffer-servic
 import { InstalledTierClassification } from '../src/workers/classification/installed-tier-classification.ts';
 import { tierLedgerPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { createOpenAICompatibleAnalystModel } from '../src/core/analyst-openai.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import { recordRequestPeer } from '../src/core/request-peer.ts';
 import { afterEach, expect, test } from 'bun:test';

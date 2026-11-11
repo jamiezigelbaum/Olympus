@@ -24,7 +24,7 @@ import {
   type RemoteConnectionStore,
 } from '../src/core/remote-connections.ts';
 import { runConnectionsCommand } from '../src/cli.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import {
   createInProcessOperationContext,

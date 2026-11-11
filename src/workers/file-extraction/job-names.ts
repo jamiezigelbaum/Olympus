@@ -293,6 +293,7 @@ export function forgetExtractionJobs(
       // Before the jobs it selects them by.
       ...(jobs ? [{ table: SECRET_RESTORED_REREADS_TABLE, where: `job_id IN (SELECT job_id FROM extraction_jobs WHERE ${jobs.where})`, params: jobs.params }] : []),
       ...filterFor('extraction_artifacts', [['corpus_id', scope.corpusIds]]),
+      ...filterFor('extraction_unroutable_items', [['corpus_id', scope.corpusIds]]),
       ...filterFor('extraction_jobs', [['corpus_id', scope.corpusIds]]),
       // The redactions go before their claims, which they are selected by.
       ...(claimants.length > 0 && claimsTableExists(db) ? [{
@@ -344,6 +345,7 @@ function forgetExtractionJobsOfAccountScopes(
       { table: 'extraction_artifacts', where: jobIds, params },
       { table: SECRET_ITEM_REDACTION_CLAIMS_TABLE, where: byAccount, params: accountScopes },
       { table: SECRET_ITEM_REDACTIONS_TABLE, where: byAccount, params: accountScopes },
+      { table: 'extraction_unroutable_items', where: ofScopes, params },
       { table: 'extraction_jobs', where: ofScopes, params },
     ], dryRun).reduce((sum, count) => sum + count, 0);
   } finally {

@@ -38,7 +38,7 @@ import { credentialInstallId, mintCredential } from '../connect-relay/shared/tok
 import { authorizationServerMetadata as relayAuthorizationServerMetadata, relayOrigin } from '../connect-relay/server/oauth-metadata.ts';
 import { pinnedClientForRedirect, registerPinnedClient } from '../connect-relay/server/client-registration.ts';
 import { bridgeAppName } from '../connect-relay/server/authorize-bridge.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { dashboardOwnerSessionCheck, withWorkerBearerAuth } from '../src/workers/http.ts';
 import {
   createInProcessOperationContext,

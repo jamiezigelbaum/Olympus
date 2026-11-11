@@ -48,7 +48,7 @@ line and one page, and loses a page.
 ## What exists today (verified on `ee65ec68`, 2026-10-12)
 
 - Only pinned ChatGPT client ids get the ChatGPT surface
-  (`src/workers/email-source/server.ts:5155`,
+  (`src/workers/engine/server.ts:5155`,
   `src/workers/remote-oauth/pinned-clients.ts`). `isChatGptGrant` treats any
   pinned client as ChatGPT (`pinned-clients.ts:42-43`).
 - Every other connection gets the `remote` list: `source_answer`,
@@ -238,14 +238,14 @@ Private search is Private-only (`analyst-answer.ts:2690-2704,2807-2808`),
 Personal retrieval may query the cloud (`:2551`), some Personal connector
 adapters embed queries remotely (`connector-store/local-index.ts:10535,11289`),
 and query planning uses the configured Delphi model
-(`email-source/server.ts:3276`).
+(`engine/server.ts:3276`).
 
 The local path:
 
 - query planning by the built-in model, or none;
 - embeddings by the built-in embedding model only;
 - retrieval over Private stores and the Personal stores mounted on this
-  computer (their scoped adapters, `email-source/server.ts:3405-3435`), with
+  computer (their scoped adapters, `engine/server.ts:3405-3435`), with
   local lexical search where vectors are incompatible
   (`connector-store/local-index.ts:10535-10544`); no remote connector query
   and no cloud fallback;

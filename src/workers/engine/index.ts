@@ -1,5 +1,5 @@
 import { JUDGE_CHOICES, type JudgeChoice } from '../classification/judge-spending.ts';
-import type { DashboardPeopleBackend } from './dashboard-people.ts';
+import type { DashboardPeopleBackend } from '../email-source/dashboard-people.ts';
 import { DASHBOARD_PEOPLE_PATH, type DashboardPeopleView } from '../dashboard/pages/people.ts';
 import { systemSupportReport, type SourceSupportState, type SystemSupportFacts } from '../dashboard/source-failure.ts';
 import { dashboardModelsOnComputer } from '../dashboard/models-on-computer.ts';
@@ -10,7 +10,7 @@ import { privateAnswerMode } from '../../core/first-run-privacy.ts';
 import { parseProposalFrom, parseSettingsProposalInput, SettingsProposalError } from '../../core/settings-proposal.ts';
 import { createSettingsProposalHolder, type SettingsProposalHolder } from '../settings-proposal-holder.ts';
 import { PRIVACY_PRESET_LABELS } from '../../core/privacy-language.ts';
-import { createDashboardMessagingService } from './dashboard-messaging-service.ts';
+import { createDashboardMessagingService } from '../email-source/dashboard-messaging-service.ts';
 import { isFileSourceScopeId } from '../../core/source-scope-approval.ts';
 import { agentAnswerReceipt, recordAgentAnswerReceipt, type AgentAnswerReceipt } from '../../core/app-release-agent.ts';
 import { privacyBacklogCoverageNote, withCoverageNote } from '../../core/privacy-backlog-coverage.ts';
@@ -63,7 +63,7 @@ import { canonicalSourceCorpusId, type SourceCorpusRegistry } from '../../core/s
 import { selectedItemContentFieldPath } from '../../core/source-index/selected-item-safety.ts';
 import { dropboxPolicyExcludedPathPrefixes, type SourceIngestionPolicy } from '../../core/source-ingestion-policy.ts';
 import { normalizeVeniceAnalystModelId } from '../../core/venice-models.ts';
-import { workerRouteAllowed } from './write-routes.ts';
+import { workerRouteAllowed } from '../email-source/write-routes.ts';
 import type { ArchiveImportAgent } from '../archive-import/agent.ts';
 import type { ArchiveImportDashboard } from '../archive-import/dashboard.ts';
 import type { OwnerItemChoice, OwnerTierItems } from '../classification/tier-owner-items.ts';
@@ -202,11 +202,11 @@ import {
 } from '../dashboard/index.ts';
 import { dashboardResourceHtml } from '../chatgpt/dashboard-resource.ts';
 import { DASHBOARD_TOOL_NAME } from '../chatgpt/dashboard-contract.ts';
-import type { DashboardPanelCallContext, DashboardPanelTools } from './dashboard-panel-tools.ts';
+import type { DashboardPanelCallContext, DashboardPanelTools } from '../email-source/dashboard-panel-tools.ts';
 import { dashboardManualSyncBusyLine, dashboardManualSyncPendingLine, dashboardManualSyncTooSoonLine, DASHBOARD_UPDATE_COPY } from '../dashboard/vocabulary.ts';
 import { sourceFailureKind, type SourceFailureKind } from '../dashboard/source-failure.ts';
-import type { DashboardConsultBackend } from './dashboard-consult.ts';
-import type { LocalPrivateAnswers } from './local-private-answers.ts';
+import type { DashboardConsultBackend } from '../email-source/dashboard-consult.ts';
+import type { LocalPrivateAnswers } from '../email-source/local-private-answers.ts';
 
 import type {
   OlympusFolderScopeBrowseResult,
@@ -633,7 +633,7 @@ export interface EmailSourceWorkerOptions {
       save: (choice: JudgeChoice, capDollars: number) => Promise<{ ok: true; status_message: string }>;
     };
     /** The model pickers on Privacy rules (model-choices-backend.ts). */
-    modelChoices?: import('./model-choices-backend.ts').ModelChoicesBackend;
+    modelChoices?: import('../email-source/model-choices-backend.ts').ModelChoicesBackend;
     /** Go easy on this computer (#922, local-pacing.ts): shown under the judge choice. */
     goEasy?: { on: () => boolean; save: (on: boolean) => { ok: true; status_message: string } };
     modelSetup?: () => ModelSetupView;
@@ -8521,7 +8521,7 @@ export {
   type CommandRunner,
   type GogcliAuthMode,
   type GogcliEmailConnectorOptions,
-} from './gogcli.ts';
+} from '../email-source/gogcli.ts';
 
 export {
   GMAIL_SECURE_LOCAL_CORPUS_ID,

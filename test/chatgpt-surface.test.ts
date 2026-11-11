@@ -28,7 +28,7 @@ import { PRIVATE_QUESTION_RESOURCE_VERSIONED_URI, privateQuestionResourceHtml } 
 import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
 import { CHATGPT_TOOLS } from '../src/workers/chatgpt/mcp-surface.ts';
 import { copyDashboardViewModel, PRIVATE_MATCH_PANEL_SETUP_NOTE } from '../src/workers/chatgpt/response-builder.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { createInProcessOperationContext, createRemoteMcpHandler } from '../src/workers/remote-mcp.ts';
 import type { DashboardSourceCard, SourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
 import type { SourceIndexAnswerResult } from '../src/workers/source-index/answer-types.ts';

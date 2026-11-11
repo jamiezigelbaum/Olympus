@@ -34,6 +34,7 @@ import {
   BLOCKED_BY_POLICY_COUNT_KEY,
   ITEMS_WITH_TEXT_COUNT_KEY,
   UNREADABLE_ITEMS_COUNT_KEY,
+  UNSUPPORTED_KIND_COUNT_KEY,
   aggregateAnswerReadyEligibleItems,
   answerReadyEligibleItems,
   answerReadyPercent,
@@ -989,6 +990,8 @@ export interface DashboardSourceCard {
      * needs-attention count. Absent when the corpus publishes no such count.
      */
     unreadable_items?: number;
+    // In-scope items whose kind Olympus has no reader for yet.
+    unsupported_kind_items?: number;
     settled_unreadable_items?: number;
   };
   /** File populations the user deliberately added to Olympus. Excluded files are omitted. */
@@ -3626,6 +3629,10 @@ function aggregateCoverage(cards: DashboardSourceCard[]): DashboardSourceCard['c
     const value = card.coverage.unreadable_items;
     return value === undefined ? sum : (sum ?? 0) + value;
   }, undefined);
+  const unsupportedKind = cards.reduce<number | undefined>((sum, card) => {
+    const value = card.coverage.unsupported_kind_items;
+    return value === undefined ? sum : (sum ?? 0) + value;
+  }, undefined);
   // The per-file embedding count is present on the card only when EVERY
   // corpus holding items measures it. A partial sum over the card's whole
   // in-scope population would print an exact percentage the unmeasured
@@ -3661,6 +3668,7 @@ function aggregateCoverage(cards: DashboardSourceCard[]): DashboardSourceCard['c
     ...(cards.some(card => card.coverage.settled_unreadable_items !== undefined)
       ? { settled_unreadable_items: cards.reduce((sum, card) => sum + (card.coverage.settled_unreadable_items ?? 0), 0) } : {}),
     ...(unreadable !== undefined ? { unreadable_items: unreadable } : {}),
+    ...(unsupportedKind !== undefined ? { unsupported_kind_items: unsupportedKind } : {}),
     ...(cards.some((card) => card.coverage.stored_items !== undefined)
       ? { stored_items: cards.reduce((sum, card) => sum + (card.coverage.stored_items ?? card.coverage.indexed_items), 0) } : {}),
   });
@@ -4952,6 +4960,7 @@ function coverageFromCounts(counts: Record<string, number>): DashboardSourceCard
   const notReadByPolicy = notReadByPolicyFromCounts(counts);
   const eligibleItems = corpusAnswerReadyEligibleItems(counts, indexedItems);
   const unreadable = counts[UNREADABLE_ITEMS_COUNT_KEY];
+  const unsupportedKind = counts[UNSUPPORTED_KIND_COUNT_KEY];
   return {
     indexed_items: corpusOwnIndexedItems(counts, indexedItems),
     content_ready_items: contentReadyItems,
@@ -4962,6 +4971,7 @@ function coverageFromCounts(counts: Record<string, number>): DashboardSourceCard
     ...(eligibleItems !== undefined ? { answer_ready_eligible_items: eligibleItems } : {}),
     ...(counts.settled_unreadable_items === undefined ? {} : { settled_unreadable_items: counts.settled_unreadable_items }),
     ...(unreadable !== undefined ? { unreadable_items: Math.max(0, Math.trunc(unreadable)) } : {}),
+    ...(unsupportedKind !== undefined ? { unsupported_kind_items: Math.max(0, Math.trunc(unsupportedKind)) } : {}),
     ...(counts.stored_items === undefined ? {} : { stored_items: counts.stored_items }),
   };
 }
