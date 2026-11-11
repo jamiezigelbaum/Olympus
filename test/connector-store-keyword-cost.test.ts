@@ -16,6 +16,8 @@ import {
 import { DROPBOX_TIER_CORPUS_IDS } from '../src/workers/dropbox-files/connector-store.ts';
 import { traceKeywordSearch } from '../eval/store-probe.ts';
 import { fixtureConnector, tempDir } from './helpers/tier-fixtures.ts';
+import { useConceptSqlVersion } from './helpers/keyword-concept-sql.ts';
+import type { Database, SQLQueryBindings } from 'bun:sqlite';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
@@ -120,4 +122,60 @@ test('ties at the bound fall back to ranking every match, with the same page', a
     expect(run.statements.ranked_match_page?.calls).toBe(1);
     expect(run.rows).toBe(50);
   }
+});
+
+// #1293: FTS5 rebuilds a prefix doclist merge for every constrained rowid.
+// Pin the access path rather than noisy wall-clock timing in the test suite.
+test('only entirely exact concept groups use candidate FTS rows; results equal main', async () => {
+  const store = await openStoreWith([
+    { id: 'answer', name: 'LOI.txt', text: 'loi invoice for the boatyard' },
+    { id: 'prefix', name: 'letters.txt', text: 'letter intent invoice for the garden' },
+    { id: 'nda', name: 'NDA.txt', text: 'nda disclosure agreement boatyard' },
+    ...ITEMS.slice(0, 16),
+  ].map((spec, n) => ({ ...spec, id: `${spec.id}-${n}` })));
+  const db = (store as unknown as { db: Database }).db;
+  const original = db.query.bind(db);
+  let prefixReads = 0, exactReads = 0, mixedReads = 0;
+  for (const question of ['inv boatyard', 'Letter of Intent loi invoice', 'Letter of Intent loi Non Disclosure Agreement nda']) {
+    for (const contentOnly of [false, true]) for (const filters of [undefined, { metadataOnlyLocatorPathScopes: ['/Files/LOI.txt'] }]) {
+      const options = { contentOnly };
+      const restore = useConceptSqlVersion(store, 'main');
+      const baseline = store.searchItemsDetailed(question, 50, undefined, filters, options);
+      restore();
+      const exactQueries: string[] = [];
+      db.query = ((sql: string) => {
+        if (!sql.includes('SELECT DISTINCT') || !sql.includes('i.local_item_id, i.source_version')) return original(sql);
+        const statement = db.prepare(sql);
+        const all = statement.all.bind(statement);
+        return Object.assign(statement, { all: (...params: SQLQueryBindings[]) => {
+          const query = params.find((value) => typeof value === 'string' && value.includes('"')) as string;
+          expect(query).toBeDefined();
+          if (query.includes('*')) {
+            prefixReads++;
+            if (/"loi"(?!\*)|"nda"(?!\*)/.test(query)) mixedReads++;
+            expect(sql).not.toContain('CROSS JOIN connector_store_fts');
+            expect(sql).not.toContain('FROM connector_store_fts_rows');
+          } else {
+            exactReads++;
+            exactQueries.push(query);
+            const plan = original(`EXPLAIN QUERY PLAN ${sql}`).all(...params) as Array<{ detail: string }>;
+            expect(plan[0]!.detail).toContain('idx_connector_store_fts_rows_item');
+            expect(sql).toContain('CROSS JOIN connector_store_fts');
+          }
+          return all(...params);
+        } });
+      }) as typeof db.query;
+      try {
+        const result = store.searchItemsDetailed(question, 50, undefined, filters, options);
+        expect(result.rows.length).toBeGreaterThan(0);
+        expect(result).toEqual(baseline);
+        // The ordinary group and the unique-literal exception must both use
+        // the bounded exact path. A mixed unique-literal group stays global.
+        if (question === 'Letter of Intent loi invoice') expect(exactQueries.filter(q => q === '"loi"').length).toBe(2);
+      } finally { db.query = original; }
+    }
+  }
+  expect(prefixReads).toBeGreaterThan(0);
+  expect(exactReads).toBeGreaterThan(0);
+  expect(mixedReads).toBeGreaterThan(0);
 });

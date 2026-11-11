@@ -73,6 +73,8 @@ const ALLOWED: Record<string, string> = {
   // and opens nothing else.
   'scripts/engine-split-bench.ts':
     'a disposable benchmark on a store set it builds itself in a temp directory (seed, then a copy per run); never opens a live store',
+  'scripts/keyword-concept-bench.ts':
+    'a synthetic-only #1293 benchmark creating its own stores and ledger under /tmp/olympus-1293-*; accepts no existing store path',
   'scripts/whatsapp-identity-backfill.ts':
     'an operator tool on the --db and --session-db its command line names; holds the owner lock for its run',
 };

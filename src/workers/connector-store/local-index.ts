@@ -13126,6 +13126,34 @@ export class LocalConnectorStore {
       if (minimumSignal && rows.length > 0) {
         const pks = rows.map((row) => row.item_pk);
         const placeholders = pks.map(() => '?').join(', ');
+        const conceptHits = (group: readonly string[]): StoreRead => {
+          const groupQuery = sourceIndexFtsGroupQuery(group, exact);
+          // FTS5 repeats a prefix's doclist merge for every constrained rowid
+          // (#1293). Only wholly exact groups can use the candidate-row path;
+          // one prefix in an OR is enough to require the store-wide match.
+          if (group.every(term => exact.has(term))) return {
+            mode: 'all', sql: `
+              SELECT DISTINCT candidate_rows.item_pk, i.local_item_id, i.source_version
+              FROM connector_store_fts_rows candidate_rows
+              CROSS JOIN connector_store_fts ON connector_store_fts.rowid = candidate_rows.fts_rowid
+              JOIN items i ON i.item_pk = candidate_rows.item_pk
+              WHERE candidate_rows.item_pk IN (${placeholders})
+                AND connector_store_fts.item_pk = candidate_rows.item_pk
+                AND connector_store_fts MATCH ?
+                ${selectedFtsScope.sql}
+            `, params: [...pks, groupQuery, ...selectedFtsScope.params],
+          };
+          return {
+            mode: 'all', sql: `
+              SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id, i.source_version
+              FROM connector_store_fts
+              JOIN items i ON i.item_pk = connector_store_fts.item_pk
+              WHERE connector_store_fts MATCH ?
+                AND connector_store_fts.item_pk IN (${placeholders})
+                ${selectedFtsScope.sql}
+            `, params: [groupQuery, ...pks, ...selectedFtsScope.params],
+          };
+        };
         // On the read pool each read is its own transaction, so a pk the FTS
         // read returned may name another item by the time a follow-up read
         // runs (ingestion writes in between), or the same item at a newer
@@ -13137,14 +13165,7 @@ export class LocalConnectorStore {
           return row !== undefined && row.local_item_id === hit.local_item_id && (row.source_version ?? null) === (hit.source_version ?? null);
         };
         for (const [groupIndex, group] of groups.entries()) {
-          const hits = ((yield { mode: 'all', sql: `
-            SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id, i.source_version
-            FROM connector_store_fts
-            JOIN items i ON i.item_pk = connector_store_fts.item_pk
-            WHERE connector_store_fts MATCH ?
-              AND connector_store_fts.item_pk IN (${placeholders})
-              ${selectedFtsScope.sql}
-          `, params: [sourceIndexFtsGroupQuery(group, exact), ...pks, ...selectedFtsScope.params] }) as Array<{ item_pk: number; local_item_id: string; source_version: string | null }>)
+          const hits = ((yield conceptHits(group)) as Array<{ item_pk: number; local_item_id: string; source_version: string | null }>)
             .filter(sameItem);
           for (const hit of hits) {
             matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
@@ -13162,12 +13183,7 @@ export class LocalConnectorStore {
         const uniqueTerms = weights && weights.population >= 10
           ? groups.flatMap((group, index) => weights.counts[index] === 1 ? group.filter(term => literalTopics.has(term)) : [])
           : [];
-        const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : ((yield { mode: 'all', sql: `
-          SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id, i.source_version
-          FROM connector_store_fts JOIN items i ON i.item_pk = connector_store_fts.item_pk
-          WHERE connector_store_fts MATCH ? AND connector_store_fts.item_pk IN (${placeholders})
-            ${selectedFtsScope.sql}
-        `, params: [sourceIndexFtsGroupQuery(uniqueTerms, exact), ...pks, ...selectedFtsScope.params] }) as Array<{ item_pk: number; local_item_id: string; source_version: string | null }>)
+        const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : ((yield conceptHits(uniqueTerms)) as Array<{ item_pk: number; local_item_id: string; source_version: string | null }>)
           .filter(sameItem)
           .map(row => row.item_pk));
         signalled = rows.filter((row) => {
