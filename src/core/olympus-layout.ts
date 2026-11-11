@@ -12,8 +12,9 @@
  * linux-engine-layout.ts: the dashboard's Unpair path and the CLI-side
  * lifecycle module both resolve through it.
  */
+import { existsSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { resolveLinuxEngineLayout, standaloneLinuxDataDir } from './linux-engine-layout.ts';
 
 export type LayoutEnv = Record<string, string | undefined>;
@@ -1245,4 +1246,21 @@ export function olympusUninstallRoots(env: LayoutEnv = process.env, platform: No
     join(home, '.cache', 'olympus'),
     join(home, 'Library', 'Logs', 'Olympus'),
   ])];
+}
+
+function canonicalPath(path: string): string {
+  if (existsSync(path)) return realpathSync(path);
+  const absolute = resolve(path);
+  const parent = dirname(absolute);
+  return parent === absolute ? absolute : join(canonicalPath(parent), basename(absolute));
+}
+
+/**
+ * Whether `path` is `directory` or inside it once symlinks are resolved. A
+ * copied install's stores and ledgers record the original's absolute paths;
+ * this is the fence that keeps a copy from following them back (#1398, #1414).
+ */
+export function pathResolvesWithin(directory: string, path: string): boolean {
+  const rel = relative(canonicalPath(directory), canonicalPath(path));
+  return rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
 }

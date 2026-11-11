@@ -58,7 +58,7 @@ import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard
 import type { SourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
 import { createChatGptSetupBackend } from '../src/workers/chatgpt/setup-backend.ts';
 import type { ChatGptSurfaceOptions } from '../src/workers/chatgpt/mcp-surface.ts';
-import { createDashboardPanelTools } from '../src/workers/email-source/dashboard-panel-tools.ts';
+import { createDashboardPanelTools } from '../src/workers/engine/dashboard/dashboard-panel-tools.ts';
 import { SetupBackendError } from '../src/workers/chatgpt/setup-tools.ts';
 import {
   createGatewayCallbackPeerHeader,
@@ -1636,7 +1636,7 @@ describe('Gmail and Google Drive with no Google Desktop client (Olympus 1.0 rele
     const importers = Array.from(new Bun.Glob('src/**/*.ts').scanSync({ cwd: join(import.meta.dir, '..') }))
       .filter((path) => readFileSync(join(import.meta.dir, '..', path), 'utf8').match(/from '[^']*google-pilot-client(?:\.ts)?'/) !== null)
       .sort();
-    expect(importers).toEqual(['src/workers/engine/index.ts']);
+    expect(importers).toEqual(['src/workers/engine/http/dashboard-oauth-clients.ts']);
   });
 });
 

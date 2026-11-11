@@ -186,12 +186,26 @@ local Dropbox index and a reachable Argus lane:
    of the prompt the Analyst was sent went. It holds the text every prompt
    carries (system rules, question, coverage), each sent seat's header (name,
    trust, provenance and citation labels) and its passages, and what the same
-   seats would cost in the compact evidence format. These are byte counts only.
+   seats would cost in each evidence format (`fullPromptBytes`,
+   `compactPromptBytes`). `evidenceFormat` names the format the prompt was
+   sent in, which follows the Analyst: a local run sends the compact format, as
+   Ask's local leg does. `coverageBytes` counts the UTF-8 bytes of the Coverage
+   line as sent, and `extractionGapCount` counts the extraction gaps in that
+   sent pack (corpus-level gaps and the kept seats' per-item gaps). These are
+   counts only; no gap text is recorded.
    The value-token flag counts an answer token as held by a cited seat when
    it is in that seat's text, facts, tables or citation fields, including the
    date of a citation timestamp, each segment of its locator path and a file
    name without its extension, since
    the Analyst sees those in the seat's citation line.
+   For each value token found in no cited seat,
+   `answerValueTokensUnmatchedSeats` lists the pack seats whose text holds it,
+   and `answerValueTokensUnmatchedInPrompt` says whether the prompt the model
+   was sent held it. A token in the prompt came from another seat. A token in
+   neither the prompt nor any seat was not read anywhere.
+   When the answer stage sent an audit call, `auditNamedAmounts` counts the
+   draft amounts its note named as in no seat (the amounts themselves are
+   never reported) and `auditPromptBytes` gives the audit prompt's size.
    The shared Analyst also caps model output at 1,600 characters by default so
    local eval questions fail or answer quickly instead of generating long JSON.
 

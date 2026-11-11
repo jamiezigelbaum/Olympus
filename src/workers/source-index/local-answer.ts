@@ -32,6 +32,7 @@
  * can reach the output: the items read and the other versions the answer's
  * version note names (the model's `used`).
  */
+import { semanticSearchTimedOut } from '../../core/source-index/partial-search.ts';
 import { buildEvidencePackDetailed, type LocalContentProvider, type SecretLocationNote } from '../../core/evidence-pack.ts';
 import { providerSourceLabel } from '../../core/remote-result.ts';
 import { secretLocationAnswer } from '../../core/secret-location-note.ts';
@@ -309,7 +310,7 @@ function secretWhere(location: SecretLocationNote): string {
 function cutShortCorpora(audits: readonly { laneName: string; skippedReason?: string }[]): { corpusId: string; reason: string }[] {
   const corpora = new Set<string>();
   for (const audit of audits) {
-    if (audit.skippedReason !== 'vector_scan_deadline_exceeded') continue;
+    if (!semanticSearchTimedOut(audit.skippedReason)) continue;
     const corpusId = audit.laneName.split(':')[0];
     if (corpusId) corpora.add(corpusId);
   }

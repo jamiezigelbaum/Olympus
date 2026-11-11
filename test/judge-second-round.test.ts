@@ -17,6 +17,7 @@ import { CachedTierSniffer, SNIFFER_DECISION_CATEGORY, snifferPromptVersions } f
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
 import { runSnifferPass } from '../src/workers/classification/sniffer-resolver.ts';
 import type { SnifferLane } from '../src/workers/classification/sniffer-lane.ts';
+import type { SnifferModel } from '../src/workers/classification/sniffer-decision.ts';
 import { TieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
@@ -394,4 +395,26 @@ test('a decision judge held Private at its own bar goes to Venice, and the obser
   const observed = observedJudge(local, observations, 0.15);
   for (let i = 0; i < OBSERVED_MIN_VERDICTS; i += 1) await observed.complete(request);
   expect(observations.observed().heldFraction).toBe(1);
+});
+
+test('a fail-safe hold from the built-in 4B union never goes to the Venice second round', async () => {
+  const sent: string[] = [];
+  const failedUnion: AnalystModel = { complete: async () => ({
+    text: verdict('personal'), modelId: 'built-in-4b',
+    decisionVerdict: { tier: 'private', category: 'union_decision', confidence: 0, failSafe: true },
+  }) as never };
+  const judge = secondRoundJudge(failedUnion as SnifferModel, veniceJudge(sent));
+  const request = { system: 's', prompt: 'p', snifferItem: { pass: 'content', material: 'm' } } as never;
+  const answer = await judge.complete(request) as { decisionVerdict?: { failSafe: boolean } };
+  expect(answer.decisionVerdict?.failSafe).toBe(true);
+  expect(sent).toEqual([]);
+  expect(judge.secondRound.asked).toBe(0);
+  // A union veto at P(Private) >= 0.5 is an ordinary local hold: Venice may still release it.
+  const vetoed: AnalystModel = { complete: async () => ({
+    text: verdict('personal'), modelId: 'built-in-4b',
+    decisionVerdict: { tier: 'private', category: 'union_decision', confidence: 0.6, failSafe: false },
+  }) as never };
+  const second = secondRoundJudge(vetoed as SnifferModel, veniceJudge(sent));
+  await second.complete(request);
+  expect(second.secondRound.asked).toBe(1);
 });

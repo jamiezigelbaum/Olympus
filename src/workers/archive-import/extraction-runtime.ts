@@ -23,7 +23,7 @@ import {
   createFileExtractionRuntime,
   fileExtractionCorporaRoster,
   type FileExtractionRuntime,
-} from '../email-source/file-extraction-runtime.ts';
+} from '../engine/runtime/file-extraction-runtime.ts';
 import type { ArchiveConnectorFactory } from '../../core/archive-formats.ts';
 import { archiveCorpusId } from './store.ts';
 import {

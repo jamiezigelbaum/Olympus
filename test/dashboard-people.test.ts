@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { LocalPeopleIndex } from '../src/core/people-index.ts';
 import { peopleFixture, seedPeople } from './helpers/people-fixture.ts';
 import { renderDashboardLocalPage, dashboardHtmlRoutePage } from '../src/workers/dashboard/index.ts';
-import { createDashboardPeople, dashboardPeopleView, PEOPLE_SUGGESTION_MIN_MESSAGES } from '../src/workers/email-source/dashboard-people.ts';
+import { createDashboardPeople, dashboardPeopleView, PEOPLE_SUGGESTION_MIN_MESSAGES } from '../src/workers/engine/dashboard/dashboard-people.ts';
 
 describe('People page (#1076)', () => {
   test('lists You, every person with why they were linked, and asks only about pairs worth asking', () => {

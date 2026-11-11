@@ -52,7 +52,7 @@ import { DASHBOARD_OUTSIDE_HELP_PATHS } from '../src/workers/dashboard/outside-h
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.ts';
 import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
-import { computerUnpairEntries, createDashboardPanelTools, type DashboardPanelTools } from '../src/workers/email-source/dashboard-panel-tools.ts';
+import { computerUnpairEntries, createDashboardPanelTools, type DashboardPanelTools } from '../src/workers/engine/dashboard/dashboard-panel-tools.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 
 const OPEN_BASE = 'https://olympusplugin.ai/open/';

@@ -1,12 +1,14 @@
 import { iterateRows } from '../../core/sqlite-rows.ts';
+import { installMainThreadSqlTrace } from './main-thread-sql-trace.ts';
 import { assertWritableStoreOpenAllowed, writableStoreOpensForbidden } from '../../core/store-write-guard.ts';
 import type { PeopleCitationName, PeopleSenderIdentity, PeopleSenderObservation } from '../../core/people-index.ts';
-import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
-import { extractionJobsDbPaths, oweExtractionRereadAfterRevive } from '../file-extraction/job-names.ts';
+import { unreadHoldDisposition, type UnreadHoldDisposition } from '../file-extraction/unreadable-files.ts';
+import type { ItemExtractionOutcome, ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
+import { jobLedgerPathsToVisit, oweExtractionRereadAfterRevive } from '../file-extraction/job-names.ts';
 import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
 import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled, withKeywordExpansionDisabled } from '../../core/source-index/keyword-context.ts';
-import { storeKeywordLanguages } from '../../core/source-index/keyword-languages.ts';
-import { expandSourceIndexKeywords, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
+import { lastKeywordLanguages, storeKeywordLanguages, storeKeywordLanguagesWith } from '../../core/source-index/keyword-languages.ts';
+import { expandSourceIndexKeywords, KEYWORD_PREPARE_WAIT_MS, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
 import { controlPathHeadroom, ingestionTurn, type ControlPathHeadroom } from '../control-path-headroom.ts';
 import { OffThreadReadBusyError, offThreadReadsSupported, readOnPool, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
 // The shared connector ingest spine: ONE generic local store that turns any
@@ -65,6 +67,7 @@ import {
   sweepMediaCache,
 } from '../../core/media-cache.ts';
 import { readyStillImageFormats } from '../../core/still-image-readiness.ts';
+import { olympusDataRoot, pathResolvesWithin } from '../../core/olympus-layout.ts';
 import type { StoreHolder } from '../../core/store-identity.ts';
 import {
   STILL_IMAGE_FORMATS,
@@ -678,6 +681,15 @@ function createConnectorStoreItemTextVersions(db: Database): void {
   `);
 }
 
+/** A recorded media path inside this install's media cache or data root. */
+function mediaPathInThisInstall(path: string): boolean {
+  try {
+    return pathResolvesWithin(mediaCacheDir(), path) || pathResolvesWithin(olympusDataRoot(), path);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Media a deleted chunk referenced, queued by a trigger so every path that
  * deletes chunks (a replace, a tombstone, a purge) is covered without each
@@ -1046,8 +1058,13 @@ export const EXTRACTION_CANDIDATE_MAX_EXAMINED = 2_000;
 /** Ledger lookups per step when the settled-unreadable list is built in turns. */
 const SETTLED_UNREADABLE_ITEMS_SLICE = 500;
 
-/** Parents judged per step when the hidden-children set is built in turns. */
-const HIDDEN_CHILD_PARENT_SLICE = 2_000;
+/**
+ * Parents judged per step when the hidden-children set is built in turns.
+ * Each parent is looked up in every store of its set and in the ledger, so a
+ * step of 2,000 held the request thread about 1 s during an Ask on a large
+ * install's copy (#1305); 500 keeps a step near a quarter of that.
+ */
+const HIDDEN_CHILD_PARENT_SLICE = 500;
 
 // The same steps with a turn before each one, so requests answer in between.
 async function runStepsInTurns<T>(steps: Generator<void, T>): Promise<T> {
@@ -1208,6 +1225,10 @@ export const TIER_MOVE_CONNECTOR_ID = 'olympus_tier_move';
  * its last sync saw the one item a tier move copied.
  */
 const NON_SYNC_RUN_CONNECTORS_SQL = `('connector_store_embedding_write_authority', '${TIER_SET_BINDING_CONNECTOR_ID}', '${TIER_MOVE_CONNECTOR_ID}', '${RESTORED_SCOPE_CONNECTOR_ID}')`;
+/** The newest real sync run; idx_sync_runs_last_sync serves it without a sort. */
+export const LAST_SYNC_RUN_SQL = `SELECT * FROM sync_runs
+  WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
+  ORDER BY started_at DESC, rowid DESC LIMIT 1`;
 
 export class ConnectorStoreLocatorIdentityIndexNotReadyError extends Error {
   constructor() {
@@ -2137,6 +2158,13 @@ export interface ConnectorStoreCurrentEmbeddingRow {
 }
 
 const CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256;
+// On the read pool every page is a round trip through the request thread, so
+// pages are larger there, but not so large that one page outlasts the lane:
+// the store's other reads wait for the page in flight, and a scan cut at its
+// deadline still finishes its page. 2,048-vector pages took up to 12 s each
+// on a busy large install's copy (#1305), so its keyword rows came back after
+// the lane's deadline; 512 vectors of 768 floats are about 1.5 MB.
+const CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512;
 
 interface ConnectorStoreCurrentEmbeddingRowsOptions {
   modelId: string;
@@ -2220,33 +2248,104 @@ export function* connectorStoreCurrentEmbeddingRowsIterator(
   }
 }
 
+type VectorScan =
+  | { bestByItem: Map<number, { bestCosine: number; bestChunkPk: number; localItemId: string }>; dimensionMismatches: number }
+  | { skippedReason: string };
+
 /**
- * Keyset-paged form used by interactive exact-vector retrieval.
+ * The exact-vector scan: re-checks the embedding authority, then walks the
+ * model's current vectors in keyset pages, keeping each item's best chunk.
  *
- * A page bounds both the synchronous SQLite call and resident vector bytes.
- * Ordering by the embedding primary-key prefix makes progress monotonic; a
- * caller can yield between pages so route deadlines and unrelated lanes keep
- * making progress without ever materialising the full corpus.
+ * `read` runs every query in ONE read snapshot, so the rows the scan walks
+ * are the rows the authority check approved. A page bounds both a statement
+ * and the resident vector bytes; ordering by the embedding primary-key prefix
+ * makes progress monotonic, and the scan yields between pages so route
+ * deadlines and unrelated lanes keep making progress.
  */
-function connectorStoreCurrentEmbeddingRowsPage(
-  db: Database,
-  options: ConnectorStoreCurrentEmbeddingRowsOptions,
-  afterChunkPk: number,
-  limit = CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE,
-): ConnectorStoreCurrentEmbeddingRow[] {
-  const { sql, params } = connectorStoreCurrentEmbeddingPageQuery(options, afterChunkPk, limit);
-  const rows = db.query(sql).all(...params) as Array<{
-    item_pk: number;
-    chunk_pk: number;
-    local_item_id: string;
-    embedding: unknown;
-  }>;
-  return rows.map((row) => ({
-    itemPk: row.item_pk,
-    chunkPk: row.chunk_pk,
-    localItemId: row.local_item_id,
-    embedding: row.embedding,
-  }));
+async function scanVectorPages(
+  read: (query: StoreRead) => Promise<unknown>,
+  provider: SourceEmbeddingProvider,
+  beforeToken: string,
+  queryVector: readonly number[],
+  pageOptions: ConnectorStoreCurrentEmbeddingRowsOptions,
+  deadlineAtMs: number | undefined,
+  pageSize: number,
+): Promise<VectorScan> {
+  const authority = embeddingAuthorityRead(provider);
+  const after = embeddingAuthorityFromRow(await read(authority) as EmbeddingAuthorityRow | null, provider);
+  if (after.skippedReason) return { skippedReason: after.skippedReason };
+  if (after.token !== beforeToken) return { skippedReason: 'embedding_authority_changed_during_query' };
+  const bestByItem = new Map<number, { bestCosine: number; bestChunkPk: number; localItemId: string }>();
+  let dimensionMismatches = 0;
+  let afterChunkPk = 0;
+  let pagesScanned = 0;
+  while (true) {
+    if (connectorStoreVectorDeadlineExpired(deadlineAtMs)) return { skippedReason: 'vector_scan_deadline_exceeded' };
+    const { sql, params } = connectorStoreCurrentEmbeddingPageQuery(pageOptions, afterChunkPk, pageSize);
+    const page = await read({ mode: 'all', sql, params }) as Array<{
+      item_pk: number;
+      chunk_pk: number;
+      local_item_id: string;
+      embedding: unknown;
+    }>;
+    if (page.length === 0) break;
+    // The winning CHUNK is kept, not just its score. A cosine is a
+    // chunk-level measurement, so the chunk that produced the item's best
+    // score is the only defensible semantic citation target.
+    for (const [index, row] of page.entries()) {
+      if ((index & 31) === 0 && connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
+        return { skippedReason: 'vector_scan_deadline_exceeded' };
+      }
+      const documentVector = decodeEmbedding(row.embedding);
+      if (documentVector.length !== queryVector.length) {
+        dimensionMismatches += 1;
+        continue;
+      }
+      const score = cosineSimilarity(queryVector, documentVector);
+      const existing = bestByItem.get(row.item_pk);
+      if (existing === undefined || score > existing.bestCosine) {
+        bestByItem.set(row.item_pk, { bestCosine: score, bestChunkPk: row.chunk_pk, localItemId: row.local_item_id });
+      }
+    }
+    afterChunkPk = page.at(-1)!.chunk_pk;
+    if (page.length < pageSize) break;
+    if (pagesScanned++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0) await yieldConnectorStoreVectorScan();
+  }
+  return { bestByItem, dimensionMismatches };
+}
+
+/**
+ * The scan on the store's read-pool thread, inside one pool snapshot. Waiting
+ * for that thread counts against the lane's deadline: a scan that cannot
+ * start in time reports the deadline, and if the thread frees later the
+ * snapshot opens and closes at once.
+ */
+async function scanVectorPagesOnPool(
+  dbPath: string,
+  provider: SourceEmbeddingProvider,
+  beforeToken: string,
+  queryVector: readonly number[],
+  pageOptions: ConnectorStoreCurrentEmbeddingRowsOptions,
+  deadlineAtMs: number | undefined,
+): Promise<VectorScan> {
+  const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(
+    read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE,
+  )).catch((error: unknown): VectorScan => {
+    if (error instanceof OffThreadReadBusyError) return { skippedReason: 'vector_scan_store_busy' };
+    throw error;
+  });
+  if (deadlineAtMs === undefined || !Number.isFinite(deadlineAtMs)) return scan;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<VectorScan>((resolve) => {
+    timer = setTimeout(() => resolve({ skippedReason: 'vector_scan_deadline_exceeded' }), Math.max(0, deadlineAtMs - Date.now()));
+  });
+  try {
+    return await Promise.race([scan, deadline]);
+  } finally {
+    clearTimeout(timer);
+    // A scan that lost the race still settles; its outcome has no reader.
+    scan.catch(() => undefined);
+  }
 }
 
 /**
@@ -2287,6 +2386,43 @@ export function connectorStoreCurrentEmbeddingPageQuery(
       pageLimit,
     ],
   };
+}
+
+type EmbeddingAuthorityRow = { status: string; cursor: string | null; audit_receipt_sha256: string | null };
+
+/** The read of a model's embedding write authority (see LocalConnectorStore.embeddingReadAuthority). */
+function embeddingAuthorityRead(provider: ConnectorStoreEmbeddingAuthorityIdentity): StoreRead {
+  return {
+    mode: 'get',
+    sql: `SELECT status, cursor, audit_receipt_sha256
+      FROM sync_runs
+      WHERE sync_run_id = ? AND connector_id = ?`,
+    params: [connectorStoreEmbeddingWriteAuthorityId(provider.modelId), 'connector_store_embedding_write_authority'],
+  };
+}
+
+function embeddingAuthorityFromRow(
+  row: EmbeddingAuthorityRow | null,
+  provider: ConnectorStoreEmbeddingAuthorityIdentity,
+): { token: string; skippedReason?: string } {
+  if (!row) return { token: 'no_embedding_write_authority' };
+  if (row.status !== 'running' || row.audit_receipt_sha256 !== hashString(row.cursor ?? '')) {
+    return { token: 'corrupt', skippedReason: 'embedding_authority_corrupt' };
+  }
+  let record: ConnectorStoreEmbeddingWriteAuthorityRecord;
+  try {
+    record = parseConnectorStoreEmbeddingWriteAuthority(row.cursor);
+  } catch {
+    return { token: 'unreadable', skippedReason: 'embedding_authority_unreadable' };
+  }
+  const token = row.audit_receipt_sha256 ?? '';
+  if (!connectorStoreEmbeddingWriteAuthorityMatches(record, provider)) {
+    return { token, skippedReason: 'embedding_authority_provider_mismatch' };
+  }
+  if (record.currencyRebuildPending) {
+    return { token, skippedReason: 'embedding_currency_rebuild_pending' };
+  }
+  return { token };
 }
 
 /**
@@ -3083,6 +3219,10 @@ export class LocalConnectorStore {
   private embeddingDeferral: string | undefined;
 
   constructor(options: LocalConnectorStoreOptions) {
+    // The Ask trace names slow synchronous statements on the request thread
+    // (#1305). Installed here, not at module load, so the Node plugin bundle
+    // can still drop this module (test/plugin-bundle-no-bun-sqlite.test.ts).
+    installMainThreadSqlTrace();
     this.visibilityOwner = randomUUID();
     this.visibilityNow = () => Date.now();
     this.visibilityPublishChunk = VISIBILITY_PUBLISH_CHUNK;
@@ -4532,6 +4672,24 @@ export class LocalConnectorStore {
       ...(sender ? { sender } : {}),
       ...(row.authored_at ? { authoredAt: row.authored_at } : {}),
     };
+  }
+
+  /** The names a stored-content re-judge reads, without exporting chunks or vectors. */
+  contentJudgmentNames(
+    identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+  ): { title?: string; path?: string; sender?: string } | undefined {
+    const row = this.db.query(`
+      SELECT title, locator_uri, sender_label FROM items
+      WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+        AND tombstoned = 0
+    `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId) as {
+      title: string | null; locator_uri: string | null; sender_label: string | null;
+    } | null;
+    if (!row) return undefined;
+    const title = row.title?.trim();
+    const path = row.locator_uri?.trim();
+    const sender = row.sender_label?.trim();
+    return { ...(title ? { title } : {}), ...(path ? { path } : {}), ...(sender ? { sender } : {}) };
   }
 
   // ---- Child items: who may be seen ------------------------------------------
@@ -8011,7 +8169,9 @@ export class LocalConnectorStore {
           .get(entry.media_sha256) as { present: number } | null;
         // The media cache refuses any path that is not its own `<sha256>.jpg`.
         if (!referenced) {
-          releaseMediaCacheFile(entry.media_path, entry.media_sha256, this.mediaHolder);
+          // A copied store keeps the original install's media paths; it gives
+          // up only a file in this install's own cache (#1414).
+          if (mediaPathInThisInstall(entry.media_path)) releaseMediaCacheFile(entry.media_path, entry.media_sha256, this.mediaHolder);
           // The judgment goes with the last chunk that carried the picture.
           if (this.mediaJudgmentsPresent) this.db.query('DELETE FROM media_judgments WHERE media_sha256 = ?').run(entry.media_sha256);
         }
@@ -9379,6 +9539,13 @@ export class LocalConnectorStore {
         error TEXT,
         audit_receipt_sha256 TEXT
       );
+      -- lastSyncRun's order, over real syncs only: every tier move and
+      -- binding also writes a run, and sorting hundreds of thousands of them
+      -- held the request thread for seconds on each status or people check
+      -- (#1305). The WHERE must stay identical to lastSyncRun's for SQLite
+      -- to use it.
+      CREATE INDEX IF NOT EXISTS idx_sync_runs_last_sync ON sync_runs(started_at)
+        WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL};
     `);
     createConversationScopedItemsTable(this.db, 'items', true);
     this.db.exec(`
@@ -10334,7 +10501,7 @@ export class LocalConnectorStore {
     } catch {
       // The default path and the ledgers this process has open are still visited.
     }
-    for (const jobsPath of new Set([...extractionJobsDbPaths(), ...known])) {
+    for (const jobsPath of jobLedgerPathsToVisit(known).visit) {
       try {
         oweExtractionRereadAfterRevive(jobsPath, item);
       } catch {
@@ -12479,9 +12646,13 @@ export class LocalConnectorStore {
    *
    * A rebind is checked on every ask (one row). Otherwise a `true` is kept
    * for SEARCH_VECTOR_LANE_MEMO_MS, and the answer is computed from the
-   * hidden set the status path keeps (rebuilt in turns, never on this ask
-   * after the first). A `false` is never kept, so a store's first vectors
-   * switch the lane on at the next search.
+   * hidden set the status and embedding paths keep, however old: a search
+   * never refreshes it. On Sparta (2026-11-11, #1305) the refresh an Ask
+   * started judged every parent of the large Telegram stores, 43 s of
+   * request-thread SQL inside one Ask. A stale set only delays the lane's
+   * switching on or off; its rows are filtered by the current tier ledger.
+   * A `false` is never kept, so a store's first vectors switch the lane on
+   * at the next search.
    */
   vectorLaneServable(modelId: string): boolean {
     if (this.embeddingCurrencyRebuildPending(modelId)) return false;
@@ -12490,14 +12661,12 @@ export class LocalConnectorStore {
     // No hidden set built yet (the first search after a start): building it
     // here held Sparta's thread for most of a 75-86 s freeze (2026-11-10).
     // Build it in turns for the next search, and answer this one from the
-    // vectors alone, hidden or not: the lane's rows are still filtered by the
-    // current tier ledger, so a hidden vector can switch the lane on but
-    // never be returned.
+    // vectors alone, hidden or not.
     if (!this.tierHiddenCountsMemo) {
       void this.refreshTierHiddenCountsInTurns();
       return this.anyCurrentEmbedding(modelId);
     }
-    const servable = this.hasEmbeddings(modelId, { countsMaxAgeMs: SEARCH_VECTOR_LANE_MEMO_MS });
+    const servable = this.hasEmbeddings(modelId, { countsMaxAgeMs: Number.POSITIVE_INFINITY });
     if (servable) (this.vectorLaneMemo ??= new Map()).set(modelId, Date.now());
     else this.vectorLaneMemo?.delete(modelId);
     return servable;
@@ -12634,9 +12803,9 @@ export class LocalConnectorStore {
   }
 
   /**
-   * The snapshot half of the vector lane. A dedicated read connection keeps
-   * one SQLite snapshot across cooperative page yields, so timers can run
-   * without letting a concurrent embedding rebind mix vector spaces.
+   * The snapshot half of the vector lane. The scan reads in one SQLite
+   * snapshot across its page yields, so a concurrent embedding rebind cannot
+   * mix vector spaces.
    */
   private async scoreVectorLaneSnapshot(input: {
     provider: SourceEmbeddingProvider;
@@ -12654,76 +12823,19 @@ export class LocalConnectorStore {
     }
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
     const selectedAccount = normalizeOptionalAccountScope(accountScope);
-    const scanDb = this.dbPath === ':memory:'
-      ? this.db
-      : new Database(this.dbPath, { readonly: true, create: false, strict: true });
-    const ownsScanDb = scanDb !== this.db;
-    const bestByItem = new Map<number, { bestCosine: number; bestChunkPk: number; localItemId: string }>();
-    let dimensionMismatches = 0;
-    let afterChunkPk = 0;
-    let pagesScanned = 0;
-
-    try {
-      if (ownsScanDb) {
-        scanDb.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;');
-      }
-      // A dedicated read connection lets this snapshot remain open while the
-      // scan yields to timers. The production store is file-backed; :memory:
-      // is retained only for isolated tests, where this connection cannot be
-      // reopened and no concurrent writer exists.
-      scanDb.exec('BEGIN DEFERRED TRANSACTION;');
-      const after = this.embeddingReadAuthority(provider, scanDb);
-      if (after.skippedReason) return { rows: [], skippedReason: after.skippedReason };
-      if (after.token !== input.beforeToken) {
-        return { rows: [], skippedReason: 'embedding_authority_changed_during_query' };
-      }
-
-      while (true) {
-        if (connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
-          return { rows: [], skippedReason: 'vector_scan_deadline_exceeded' };
-        }
-        const page = connectorStoreCurrentEmbeddingRowsPage(scanDb, {
-          modelId: provider.modelId,
-          ...(selectedAccount ? { accountScope: selectedAccount } : {}),
-          ...(filters ? { filters } : {}),
-        }, afterChunkPk);
-        if (page.length === 0) break;
-
-        // The winning CHUNK is kept, not just its score. A cosine is a
-        // chunk-level measurement, so the chunk that produced the item's best
-        // score is the only defensible semantic citation target.
-        for (const [index, row] of page.entries()) {
-          if ((index & 31) === 0 && connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
-            return { rows: [], skippedReason: 'vector_scan_deadline_exceeded' };
-          }
-          const documentVector = decodeEmbedding(row.embedding);
-          if (documentVector.length !== queryVector.length) {
-            dimensionMismatches += 1;
-            continue;
-          }
-          const score = cosineSimilarity(queryVector, documentVector);
-          const existing = bestByItem.get(row.itemPk);
-          if (existing === undefined || score > existing.bestCosine) {
-            bestByItem.set(row.itemPk, {
-              bestCosine: score,
-              bestChunkPk: row.chunkPk,
-              localItemId: row.localItemId,
-            });
-          }
-        }
-        afterChunkPk = page.at(-1)!.chunkPk;
-        if (page.length < CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE) break;
-        if (pagesScanned++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0) await yieldConnectorStoreVectorScan();
-      }
-    } finally {
-      try {
-        scanDb.exec('ROLLBACK;');
-      } catch {
-        // A read snapshot that never opened or was already closed has no state
-        // to recover. The original retrieval error, if any, remains primary.
-      }
-      if (ownsScanDb) closeSqliteStore(scanDb);
-    }
+    const pageOptions: ConnectorStoreCurrentEmbeddingRowsOptions = {
+      modelId: provider.modelId,
+      ...(selectedAccount ? { accountScope: selectedAccount } : {}),
+      ...(filters ? { filters } : {}),
+    };
+    // A file store's pages are read on its read-pool thread inside one
+    // snapshot (#1305): run on the request thread they held it for tens of
+    // seconds on a large store, and every other lane and request waited.
+    const scanned = offThreadReadsSupported(this.dbPath)
+      ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs)
+      : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs);
+    if ('skippedReason' in scanned) return { rows: [], skippedReason: scanned.skippedReason };
+    const { bestByItem, dimensionMismatches } = scanned;
 
     // Ties break on item_pk, explicitly.
     //
@@ -12774,6 +12886,44 @@ export class LocalConnectorStore {
   }
 
   /**
+   * The vector scan for a store the read pool does not serve (an in-memory
+   * test store, or a runtime without workers): a dedicated read connection
+   * keeps one snapshot across the scan's cooperative yields.
+   */
+  private async scanVectorPagesInThread(
+    provider: SourceEmbeddingProvider,
+    beforeToken: string,
+    queryVector: readonly number[],
+    pageOptions: ConnectorStoreCurrentEmbeddingRowsOptions,
+    deadlineAtMs: number | undefined,
+  ): Promise<VectorScan> {
+    const scanDb = this.dbPath === ':memory:'
+      ? this.db
+      : new Database(this.dbPath, { readonly: true, create: false, strict: true });
+    const ownsScanDb = scanDb !== this.db;
+    try {
+      if (ownsScanDb) {
+        scanDb.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;');
+      }
+      scanDb.exec('BEGIN DEFERRED TRANSACTION;');
+      const read = async (query: StoreRead): Promise<unknown> => {
+        const statement = scanDb.query(query.sql);
+        const params = query.params as Array<string | number | null>;
+        return query.mode === 'all' ? statement.all(...params) : statement.get(...params);
+      };
+      return await scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE);
+    } finally {
+      try {
+        scanDb.exec('ROLLBACK;');
+      } catch {
+        // A read snapshot that never opened or was already closed has no state
+        // to recover. The original retrieval error, if any, remains primary.
+      }
+      if (ownsScanDb) closeSqliteStore(scanDb);
+    }
+  }
+
+  /**
    * The read half of the embedding write fence: the authority row's receipt
    * digest, which covers the whole value identity (provider, backend,
    * dimension, epoch — configHash is recorded but carries no authority), the
@@ -12788,32 +12938,8 @@ export class LocalConnectorStore {
     provider: ConnectorStoreEmbeddingAuthorityIdentity,
     db: Database = this.db,
   ): { token: string; skippedReason?: string } {
-    const row = db.query(`
-      SELECT status, cursor, audit_receipt_sha256
-      FROM sync_runs
-      WHERE sync_run_id = ? AND connector_id = ?
-    `).get(
-      connectorStoreEmbeddingWriteAuthorityId(provider.modelId),
-      'connector_store_embedding_write_authority',
-    ) as { status: string; cursor: string | null; audit_receipt_sha256: string | null } | null;
-    if (!row) return { token: 'no_embedding_write_authority' };
-    if (row.status !== 'running' || row.audit_receipt_sha256 !== hashString(row.cursor ?? '')) {
-      return { token: 'corrupt', skippedReason: 'embedding_authority_corrupt' };
-    }
-    let record: ConnectorStoreEmbeddingWriteAuthorityRecord;
-    try {
-      record = parseConnectorStoreEmbeddingWriteAuthority(row.cursor);
-    } catch {
-      return { token: 'unreadable', skippedReason: 'embedding_authority_unreadable' };
-    }
-    const token = row.audit_receipt_sha256 ?? '';
-    if (!connectorStoreEmbeddingWriteAuthorityMatches(record, provider)) {
-      return { token, skippedReason: 'embedding_authority_provider_mismatch' };
-    }
-    if (record.currencyRebuildPending) {
-      return { token, skippedReason: 'embedding_currency_rebuild_pending' };
-    }
-    return { token };
+    const read = embeddingAuthorityRead(provider);
+    return embeddingAuthorityFromRow(db.query(read.sql).get(...(read.params as string[])) as EmbeddingAuthorityRow | null, provider);
   }
 
   // Embeddable chunk rows: every live (non-tombstoned) chunk plus the
@@ -12952,7 +13078,20 @@ export class LocalConnectorStore {
     });
   }
 
-  keywordLanguages(): readonly string[] { return storeKeywordLanguages(this.db); }
+  /**
+   * The languages this store's content is written in, for keyword
+   * translation. The sample is read on the read pool where it can be; a
+   * store whose pool is full answers from its last profile.
+   */
+  async keywordLanguages(): Promise<readonly string[]> {
+    if (!offThreadReadsSupported(this.dbPath)) return storeKeywordLanguages(this.db);
+    try {
+      return await storeKeywordLanguagesWith(this.db, (read) => readOnPool(this.dbPath, read));
+    } catch (error) {
+      if (error instanceof OffThreadReadBusyError || this.closedForPoolReads) return lastKeywordLanguages(this.db);
+      throw error;
+    }
+  }
 
   // --- Read surfaces ----------------------------------------------------------
 
@@ -13272,14 +13411,20 @@ export class LocalConnectorStore {
     const kept = selected.slice(0, limit);
     const located: ConnectorStoreSearchRow[] = [];
     const locatedRows: ItemRow[] = [];
-    for (const row of kept) {
+    // Every kept row's chunk is located in one read: on the read pool each
+    // read is a round trip through the request thread, and one per row made
+    // a 20-result search some fifty of them (#1305).
+    const chunks = ftsOptions.locate === false
+      ? new Map<number, ConnectorStoreChunkMatch | undefined>()
+      : yield* this.keywordChunkMatchesSteps(kept, spanTerms);
+    for (const [index, row] of kept.entries()) {
       const base = searchRowFromItemRow(row);
       if (ftsOptions.locate === false || row.chunk_pk === null || row.chunk_pk === undefined) {
         located.push(row.chunk_pk === null || row.chunk_pk === undefined || ftsOptions.locate !== false ? base : { ...base, contentMatched: true as const });
         locatedRows.push(row);
         continue;
       }
-      const chunk = yield* this.keywordChunkMatchSteps(row, row.chunk_pk, spanTerms);
+      const chunk = chunks.get(index);
       // The chunk no longer belongs to this item as it was read (on the read
       // pool, ingestion can replace an item's chunks between reads, and a
       // chunk pk can be reused by another item): the row is dropped, as if
@@ -13463,24 +13608,43 @@ export class LocalConnectorStore {
    * undefined and the caller drops the row. On one connection it is the
    * same locate as chunkMatchForChunkPk.
    */
-  private *keywordChunkMatchSteps(
-    item: Pick<ItemRow, 'item_pk' | 'local_item_id' | 'source_version'>,
-    chunkPk: number,
+  /**
+   * The matched chunk of each row that has one, by the row's index in `rows`:
+   * the chunk, while it still belongs to the item as it was read, with its
+   * offset in the item's text. A row whose chunk was replaced or reused since
+   * (ingestion can run between reads on the read pool) is left out.
+   */
+  private *keywordChunkMatchesSteps(
+    rows: ReadonlyArray<Pick<ItemRow, 'item_pk' | 'local_item_id' | 'source_version' | 'chunk_pk'>>,
     queryTerms: readonly string[],
-  ): Generator<StoreRead, ConnectorStoreChunkMatch | undefined, unknown> {
-    const rows = (yield {
+  ): Generator<StoreRead, Map<number, ConnectorStoreChunkMatch | undefined>, unknown> {
+    const wanted = [...rows.entries()].filter(([, row]) => row.chunk_pk !== null && row.chunk_pk !== undefined);
+    const matches = new Map<number, ConnectorStoreChunkMatch | undefined>();
+    if (wanted.length === 0) return matches;
+    const found = (yield {
       mode: 'all',
-      sql: `SELECT c.chunk_pk, c.chunk_index, c.content_hash, c.bounded_text
-        FROM chunks c JOIN items i ON i.item_pk = c.item_pk
-        WHERE c.item_pk = ? AND i.local_item_id = ? AND i.source_version IS ? AND i.tombstoned = 0
-          AND c.chunk_index <= (SELECT t.chunk_index FROM chunks t WHERE t.chunk_pk = ? AND t.item_pk = ?)
-        ORDER BY c.chunk_index`,
-      params: [item.item_pk, item.local_item_id, item.source_version ?? null, chunkPk, item.item_pk],
-    }) as Array<{ chunk_pk: number; chunk_index: number; content_hash: string; bounded_text: string }>;
-    const row = rows.at(-1);
-    if (!row || row.chunk_pk !== chunkPk) return undefined;
-    const itemOffset = rows.slice(0, -1).reduce((sum, prior) => sum + prior.bounded_text.length, 0);
-    return chunkMatchFromRows(chunkPk, row, itemOffset, 'keyword', queryTerms);
+      sql: `WITH want(ordinal, item_pk, local_item_id, source_version, chunk_pk) AS (VALUES ${wanted.map(() => '(?, ?, ?, ?, ?)').join(', ')})
+        SELECT w.ordinal, w.chunk_pk AS want_chunk_pk, c.chunk_pk, c.chunk_index, c.content_hash, c.bounded_text
+        FROM want w
+        JOIN items i ON i.item_pk = w.item_pk AND i.local_item_id = w.local_item_id AND i.source_version IS w.source_version AND i.tombstoned = 0
+        JOIN chunks c ON c.item_pk = w.item_pk
+          AND c.chunk_index <= (SELECT t.chunk_index FROM chunks t WHERE t.chunk_pk = w.chunk_pk AND t.item_pk = w.item_pk)
+        ORDER BY w.ordinal, c.chunk_index`,
+      params: wanted.flatMap(([index, row]) => [index, row.item_pk, row.local_item_id, row.source_version ?? null, row.chunk_pk]),
+    }) as Array<{ ordinal: number; want_chunk_pk: number; chunk_pk: number; chunk_index: number; content_hash: string; bounded_text: string }>;
+    const byOrdinal = new Map<number, typeof found>();
+    for (const row of found) {
+      const held = byOrdinal.get(row.ordinal);
+      if (held) held.push(row);
+      else byOrdinal.set(row.ordinal, [row]);
+    }
+    for (const [ordinal, chunks] of byOrdinal) {
+      const row = chunks.at(-1)!;
+      if (row.chunk_pk !== row.want_chunk_pk) continue;
+      const itemOffset = chunks.slice(0, -1).reduce((sum, prior) => sum + prior.bounded_text.length, 0);
+      matches.set(ordinal, chunkMatchFromRows(row.chunk_pk, row, itemOffset, 'keyword', queryTerms));
+    }
+    return matches;
   }
 
   // Recency lane: newest live items regardless of query match, same
@@ -13495,10 +13659,45 @@ export class LocalConnectorStore {
     accountScope?: string,
     filters?: ConnectorStoreSearchFilters,
   ): ConnectorStoreSearchRow[] {
+    const read = this.recentItemsRead(maxResults, accountScope, filters);
+    return this.visibleRecentRows(this.db.query(read.sql).all(...(read.params as Array<string | number>)) as ItemRow[]);
+  }
+
+  /**
+   * recentItems with its read on the store's read-pool thread (#1305): the
+   * newest-first order has no index, so on a large chat store the read sorts
+   * every item, seconds of the request thread. The lane is optional: a busy
+   * store gives no recency rows.
+   */
+  async recentItemsOffThread(
+    maxResults: number,
+    accountScope?: string,
+    filters?: ConnectorStoreSearchFilters,
+    deadlineAtMs?: number,
+  ): Promise<ConnectorStoreSearchRow[]> {
+    if (!offThreadReadsSupported(this.dbPath)) return this.recentItems(maxResults, accountScope, filters);
+    let rows: ItemRow[];
+    try {
+      rows = await readOnPool(this.dbPath, this.recentItemsRead(maxResults, accountScope, filters), deadlineAtMs !== undefined ? { deadlineAtMs } : {}) as ItemRow[];
+    } catch (error) {
+      if (error instanceof OffThreadReadBusyError) return [];
+      throw error;
+    }
+    if (this.closedForPoolReads) return [];
+    return this.visibleRecentRows(rows);
+  }
+
+  private recentItemsRead(
+    maxResults: number,
+    accountScope?: string,
+    filters?: ConnectorStoreSearchFilters,
+  ): StoreRead {
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
     const selectedAccount = normalizeOptionalAccountScope(accountScope);
     const selectedFilters = connectorStoreFilterSql(filters);
-    const rows = this.db.query(`
+    return {
+      mode: 'all',
+      sql: `
       SELECT
         i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
         i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
@@ -13513,11 +13712,16 @@ export class LocalConnectorStore {
         AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
       ORDER BY COALESCE(i.authored_at, i.updated_at, i.indexed_at) DESC, i.item_pk DESC
       LIMIT ?
-    `).all(
-      ...(selectedAccount ? [selectedAccount] : []),
-      ...selectedFilters.params,
-      limit,
-    ) as ItemRow[];
+    `,
+      params: [
+        ...(selectedAccount ? [selectedAccount] : []),
+        ...selectedFilters.params,
+        limit,
+      ],
+    };
+  }
+
+  private visibleRecentRows(rows: ItemRow[]): ConnectorStoreSearchRow[] {
     return this.tierVisibleRows(
       rows,
       (row) => ({
@@ -13828,10 +14032,10 @@ export class LocalConnectorStore {
     const key = JSON.stringify(scope ?? null);
     if (!this.settledUnreadableCountMemo?.has(key)) {
       try {
-        const count = (await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true }))).length;
+        const counts = this.unreadHoldCounts(await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
         const memos = this.settledUnreadableCountMemo ??= new Map();
         if (memos.size > 32) memos.clear();
-        memos.set(key, { at: Date.now(), count });
+        memos.set(key, { at: Date.now(), ...counts });
       } catch {
         // A closed or busy store: the status read counts it itself.
       }
@@ -13839,7 +14043,7 @@ export class LocalConnectorStore {
   }
 
   /** How many settled unreadable items the counts show, reused up to `maxAgeMs` per scope. */
-  private settledUnreadableCount(scope: ConnectorStoreStatusScope | undefined, maxAgeMs: number): number {
+  private settledUnreadableCount(scope: ConnectorStoreStatusScope | undefined, maxAgeMs: number): { count: number; waitingPks: number[]; policyPks: number[] } {
     const key = JSON.stringify(scope ?? null);
     const memos = this.settledUnreadableCountMemo ??= new Map();
     const memo = memos.get(key);
@@ -13847,12 +14051,12 @@ export class LocalConnectorStore {
       // As the hidden-copy set: an older count is served while a new one is
       // counted in turns (refreshTierHiddenCountsInTurns).
       if (Date.now() - memo.at >= maxAgeMs) this.refreshSettledUnreadableCountInTurns(key, scope);
-      return memo.count;
+      return memo;
     }
-    const count = runSteps(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true })).length;
+    const counts = this.unreadHoldCounts(runSteps(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
     if (memos.size > 32) memos.clear();
-    memos.set(key, { at: Date.now(), count });
-    return count;
+    memos.set(key, { at: Date.now(), ...counts });
+    return counts;
   }
 
   private settledUnreadableCountRefresh: Set<string> | undefined;
@@ -13863,10 +14067,10 @@ export class LocalConnectorStore {
     running.add(key);
     void (async () => {
       try {
-        const count = (await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true }))).length;
+        const counts = this.unreadHoldCounts(await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
         const memos = this.settledUnreadableCountMemo ??= new Map();
         if (memos.size > 32) memos.clear();
-        memos.set(key, { at: Date.now(), count });
+        memos.set(key, { at: Date.now(), ...counts });
       } catch {
         // A closed or busy store: the older count stands until the next ask.
       } finally {
@@ -13877,21 +14081,22 @@ export class LocalConnectorStore {
 
   // Made on first use: a class-field initializer is a load-time side effect
   // that pulls this module into the plugin bundle (plugin-bundle-no-bun-sqlite).
-  private settledUnreadableCountMemo: Map<string, { at: number; count: number }> | undefined;
+  private settledUnreadableCountMemo: Map<string, { at: number; count: number; waitingPks: number[]; policyPks: number[] }> | undefined;
 
-  private extractionEnded: ((identity: TierLedgerIdentity) => boolean) | undefined;
+  private extractionOutcome: ((identity: TierLedgerIdentity, localItemId: string) => ItemExtractionOutcome | undefined) | undefined;
 
-  /**
-   * Whether an item's extraction has ended (a job ran and none is owed). The
-   * worker sets it on file stores only. A file kept Private before its text
-   * was read is waiting, not unreadable, until then, so the count and the
-   * list leave it out (2026-11-04: 7,249 Dropbox files waiting for
-   * extraction read as "could not be read"). Without a probe every settled
-   * item counts.
-   */
-  setExtractionEndedProbe(probe: ((identity: TierLedgerIdentity) => boolean) | undefined): void {
-    this.extractionEnded = probe;
+  /** The job's terminal outcome; absent evidence leaves the hold waiting. */
+  setExtractionOutcomeProbe(probe: ((identity: TierLedgerIdentity, localItemId: string) => ItemExtractionOutcome | undefined) | undefined): void {
+    this.extractionOutcome = probe;
     this.settledUnreadableCountMemo = undefined;
+  }
+
+  private unreadHoldCounts(rows: Array<{ row: { item_pk: number }; disposition: UnreadHoldDisposition }>): { count: number; waitingPks: number[]; policyPks: number[] } {
+    return {
+      count: rows.filter(item => item.disposition.kind === 'cannot_read').length,
+      waitingPks: rows.filter(item => item.disposition.kind === 'waiting').map(item => item.row.item_pk),
+      policyPks: rows.filter(item => item.disposition.kind === 'by_choice').map(item => item.row.item_pk),
+    };
   }
 
   /**
@@ -13902,8 +14107,8 @@ export class LocalConnectorStore {
    */
   private *settledUnreadableRowsSteps(
     scope: ConnectorStoreStatusScope | undefined,
-    options: { withoutSecretsOverrides?: boolean } = {},
-  ): Generator<void, Array<{ identity: TierLedgerIdentity; row: { local_item_id: string; title: string | null; source_version: string | null } }>> {
+    options: { withoutSecretsOverrides?: boolean; includeUnsettled?: boolean } = {},
+  ): Generator<void, Array<{ identity: TierLedgerIdentity; row: { item_pk: number; local_item_id: string; title: string | null; source_version: string | null }; disposition: UnreadHoldDisposition }>> {
     if (scope?.itemsAllowed === false || scope?.contentAllowed === false) return [];
     const ledger = this.visibilityLedger();
     if (!ledger) return [];
@@ -13914,7 +14119,7 @@ export class LocalConnectorStore {
       : 'metadata_layer_settled_unreadable');
     const filters = connectorStoreFilterSql(scope?.contentFilters ?? scope?.itemFilters);
     const account = normalizeOptionalAccountScope(scope?.accountScope);
-    const ended = this.extractionEnded;
+    const outcome = this.extractionOutcome;
     const rows = yield* this.itemRowsForIdentitiesSteps(identities, (identity) => identity.providerConversationId ?? '', {
       // A child whose source said it has no bytes (media an export left out, a
       // chat file the capture did not keep) was never a file Olympus failed to
@@ -13925,8 +14130,17 @@ export class LocalConnectorStore {
       sql: `${this.childItemColumnsPresent ? 'AND COALESCE(i.bytes_available, 1) <> 0' : ''} ${account ? 'AND i.account_scope = ?' : ''} ${filters.sql}`,
       params: [...(account ? [account] : []), ...filters.params],
     });
-    return rows.map((row) => ({ identity: identities[row.idx]!, row }))
-      .filter(({ identity }) => !ended || ended(identity));
+    const matched: Array<{ identity: TierLedgerIdentity; row: typeof rows[number]; disposition: UnreadHoldDisposition }> = [];
+    for (let index = 0; index < rows.length; index += 1) {
+      // Outcome lookups are indexed, but a large hold population still needs
+      // a turn between slices, just like the store and ledger reads above.
+      if (index > 0 && index % SETTLED_UNREADABLE_ITEMS_SLICE === 0) yield;
+      const row = rows[index]!;
+      const identity = identities[row.idx]!;
+      const disposition = unreadHoldDisposition(outcome?.(identity, row.local_item_id));
+      if (options.includeUnsettled || disposition.kind === 'cannot_read') matched.push({ identity, row, disposition });
+    }
+    return matched;
   }
 
   /**
@@ -13990,7 +14204,8 @@ export class LocalConnectorStore {
     const out: ExtractionUnreadableItem[] = [];
     for (let index = 0; index < matched.length; index += 1) {
       if (index > 0 && index % SETTLED_UNREADABLE_ITEMS_SLICE === 0) yield;
-      const { identity, row } = matched[index]!;
+      const { identity, row, disposition } = matched[index]!;
+      if (disposition.kind !== 'cannot_read') continue;
       const override = ledger.getOverride(identity);
       if (override?.kind === 'tier' && override.tier === 'secrets') continue;
       const record = ledger.getCurrent(identity);
@@ -13999,8 +14214,7 @@ export class LocalConnectorStore {
         providerItemId: identity.providerItemId, localItemId: row.local_item_id,
         approvedScopeKey: `${identity.provider}.${identity.accountScope}`,
         ...(row.title ? { name: row.title } : {}), ...(row.source_version ? { sourceVersion: row.source_version } : {}) },
-        // Kept Private before its text was read: unreadable-files.ts UNREAD_PRIVACY_CHECK_MISSING_KIND.
-        failedAt: record.decidedAt, errorKind: 'privacy_check_missing' });
+        failedAt: record.decidedAt, errorKind: disposition.errorKind });
     }
     return out;
   }
@@ -14102,9 +14316,12 @@ export class LocalConnectorStore {
     // holds yet is still waiting to be read, so it counts here even though it
     // stays out of every text, chunk and parity count above: counting it as
     // names only reported a freshly chosen Full folder as already finished.
+    const unreadHolds = this.settledUnreadableCount(scope, options.countsMaxAgeMs ?? 0);
+    const policyHolds = new Set(unreadHolds.policyPks);
     const unread = new Set(tier.metadataLayerContentUnread);
     const keptNamesOnlyPks = tier.metadataLayer.filter((pk) => !unread.has(pk));
-    const fileNamesOnlyNotIn = keptNamesOnlyPks.length > 0
+    const fileNamesOnlyPks = [...new Set([...keptNamesOnlyPks, ...policyHolds])];
+    const fileNamesOnlyNotIn = fileNamesOnlyPks.length > 0
       ? 'AND i.item_pk NOT IN (SELECT value FROM json_each(?))'
       : '';
     const fileScopeWhere = `${scope?.contentAllowed === false ? 'AND 0' : ''}
@@ -14125,13 +14342,13 @@ export class LocalConnectorStore {
       ...(accountScope ? [accountScope] : []),
       ...contentFilters.params,
       ...jsonList(tier.hidden),
-      ...jsonList(keptNamesOnlyPks),
+      ...jsonList(fileNamesOnlyPks),
     ];
     // A scope that says only "older than this is names only" narrows no
     // population, so it must not switch on the file-scope counts below: those
     // belong to a store whose scope picks WHICH files to read.
-    const fileScoped = scope !== undefined && !(scope.contentNotBefore !== undefined
-      && Object.entries(scope).every(([key, value]) => key === 'contentNotBefore' || value === undefined));
+    const fileScoped = policyHolds.size > 0 || (scope !== undefined && !(scope.contentNotBefore !== undefined
+      && Object.entries(scope).every(([key, value]) => key === 'contentNotBefore' || value === undefined)));
     // Rows dated before the window that hold no text. julianday reads any ISO
     // form (Z, fractional seconds, offsets), and COALESCE keeps an unparseable
     // date a plain "not outside" instead of a NULL that NOT would swallow.
@@ -14287,7 +14504,7 @@ export class LocalConnectorStore {
     const tierStatus: ConnectorStoreTierStatus | undefined = tier.hidden.length > 0 || tier.held.length > 0
       || tier.moving > 0 || tier.metadataLayer.length > 0
       ? {
-          pendingClassificationItems: tier.held.length,
+          pendingClassificationItems: new Set([...tier.held, ...unreadHolds.waitingPks]).size,
           supersededChunks: tier.hidden.length > 0
             ? ((yield { sql: `
                 SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))
@@ -14299,7 +14516,7 @@ export class LocalConnectorStore {
             : 0),
         }
       : undefined;
-    const settledUnreadableItems = this.settledUnreadableCount(scope, options.countsMaxAgeMs ?? 0);
+    const settledUnreadableItems = unreadHolds.count;
     const last = this.lastSyncRun();
     return {
       corpusId: this.corpusId,
@@ -14352,11 +14569,7 @@ export class LocalConnectorStore {
     // random UUID, so tie-breaking on it picks a run at random (an
     // order-dependent flake in status().lastSyncRun). rowid is monotonic with
     // insertion, so it breaks the tie by true recency.
-    const last = this.db.query(
-      `SELECT * FROM sync_runs
-       WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
-       ORDER BY started_at DESC, rowid DESC LIMIT 1`,
-    ).get() as SyncRunRow | null;
+    const last = this.db.query(LAST_SYNC_RUN_SQL).get() as SyncRunRow | null;
     return last ? syncRunFromRow(last) : undefined;
   }
 
@@ -14653,7 +14866,7 @@ export function createConnectorStoreCorpusAdapter(
         await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, {}, request.deadlineAtMs),
         options.localKeywordFallback, {}, request.deadlineAtMs));
       const rows = keywordLane.rows;
-      const recencyRows = chatRecencyLaneRows(store, options.accountScope, filters);
+      const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters, request.deadlineAtMs);
       if (recencyRows.length === 0) {
         const hits = withKeywordLeaderSignals(rows.map((row) => connectorStoreHitFromRow(
           store,
@@ -14876,7 +15089,7 @@ export function createConnectorStoreCorpusAdapter(
     return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => metadataMatches(request), store);
   };
   expanded.selectedItemServable = (sourceItem) => store.selectedItemServable(sourceItem, options.accountScope, filters);
-  expanded.prepareKeywords = async (query) => { await expandSourceIndexKeywords(query, () => store.keywordLanguages(), store); };
+  expanded.prepareKeywords = async (query) => { await expandSourceIndexKeywords(query, () => store.keywordLanguages(), store, { waitMs: KEYWORD_PREPARE_WAIT_MS }); };
   expanded.hybridAvailability = adapter.hybridAvailability;
   expanded.semanticNeighbours = adapter.semanticNeighbours;
   // A local model that is still starting gets the router's preparation budget
@@ -14909,16 +15122,20 @@ const CHAT_RECENCY_WEIGHT = 0.25;
 // get pinned slots instead (2026-07-05 "Test 15" probe).
 const CHAT_RECENCY_PIN_COUNT = 2;
 
-function chatRecencyLaneRows(
+async function chatRecencyLaneRows(
   store: LocalConnectorStore,
   accountScope?: string,
   filters?: ConnectorStoreSearchFilters,
-): ConnectorStoreSearchRow[] {
+  deadlineAtMs?: number,
+): Promise<ConnectorStoreSearchRow[]> {
   if (store.family !== 'chat') return [];
   // Full lane depth regardless of maxResults: the lane feeds FUSION, not the
   // final cut. Capping it at maxResults=3 dropped a message that was only 4
-  // items deep minutes after it arrived (2026-07-05 probe).
-  return store.recentItems(CHAT_RECENCY_LANE_LIMIT, accountScope, filters);
+  // items deep minutes after it arrived (2026-07-05 probe). It reads last, so
+  // it keeps the lane's deadline: queued behind a busy store's vector pages
+  // without one, it held the whole lane past the router's cut and the keyword
+  // rows already read were dropped with it (#1305). Busy, it is left out.
+  return store.recentItemsOffThread(CHAT_RECENCY_LANE_LIMIT, accountScope, filters, deadlineAtMs);
 }
 
 function connectorStoreHitFromRow(
@@ -15040,7 +15257,7 @@ async function hybridConnectorStoreSearch(
       laneLimit,
       accountScope,
       filters,
-      request.deadlineAtMs,
+      vectorScanDeadline(request.deadlineAtMs, vectorStartedAt),
     );
     return { lane, elapsedMs: Date.now() - vectorStartedAt };
   })();
@@ -15087,7 +15304,7 @@ async function hybridConnectorStoreSearch(
   const bestCosine = scoredVectorRows.length > 0
     ? roundCosine(Math.max(...scoredVectorRows.map((row) => row.bestCosine)))
     : undefined;
-  const recencyRows = chatRecencyLaneRows(store, accountScope, filters);
+  const recencyRows = await chatRecencyLaneRows(store, accountScope, filters, request.deadlineAtMs);
   const contentBar = relevanceBar ?? CALIBRATED_CONTENT_PREFERENCE_BARS.get(provider.modelId);
   const vettedVectorItemIds = new Set(contentBar === undefined
     ? []
@@ -15208,6 +15425,20 @@ function roundCosine(value: number): number {
 
 function connectorStoreVectorDeadlineExpired(deadlineAtMs: number | undefined): boolean {
   return deadlineAtMs !== undefined && Number.isFinite(deadlineAtMs) && Date.now() >= deadlineAtMs;
+}
+
+/**
+ * The hybrid lane's vector scan stops a little before the lane's own
+ * deadline, so a store too big to scan in time still answers with its
+ * keyword rows and says its semantic lane was cut, instead of the whole lane
+ * timing out with nothing (#1305). It keeps a tenth of the time left, at
+ * least VECTOR_SCAN_RESERVE_MIN_MS, for fusion and the visibility recheck.
+ */
+const VECTOR_SCAN_RESERVE_MIN_MS = 1_000;
+export function vectorScanDeadline(laneDeadlineAtMs: number | undefined, nowMs: number): number | undefined {
+  if (laneDeadlineAtMs === undefined || !Number.isFinite(laneDeadlineAtMs)) return laneDeadlineAtMs;
+  const left = laneDeadlineAtMs - nowMs;
+  return laneDeadlineAtMs - Math.max(VECTOR_SCAN_RESERVE_MIN_MS, left / 10);
 }
 
 function yieldConnectorStoreVectorScan(): Promise<void> {

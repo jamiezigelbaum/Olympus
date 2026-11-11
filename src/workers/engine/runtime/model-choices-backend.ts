@@ -18,10 +18,10 @@ import {
   type DashboardModelChoices,
   type ModelChoiceList,
   type ModelChoiceProvider,
-} from '../../core/model-choices.ts';
-import { updateSovereigntyConfigFile, type SovereigntyConfig } from '../../core/sovereignty.ts';
-import { BUILT_IN_REASONING_MODELS } from '../source-index/built-in-reasoning/manifest.ts';
-import type { VenicePrivacyCategory } from '../../core/venice-models.ts';
+} from '../../../core/model-choices.ts';
+import { updateSovereigntyConfigFile, type SovereigntyConfig } from '../../../core/sovereignty.ts';
+import { BUILT_IN_REASONING_MODELS } from '../../source-index/built-in-reasoning/manifest.ts';
+import type { VenicePrivacyCategory } from '../../../core/venice-models.ts';
 
 export const VENICE_PROFILE_ID = 'venice-private';
 export const LOCAL_PROFILE_ID = 'local-source-answer';

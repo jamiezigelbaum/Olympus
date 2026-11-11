@@ -252,7 +252,7 @@ describe('image preparation in the shared text lane', () => {
 
   test('pictures are queued once more under an image-scoped version; other files keep theirs', () => {
     const plain = createTextExtractor();
-    expect(plain.versionFor).toBeUndefined();
+    expect(plain.versionFor?.('image/heic') ?? plain.version).toBe(plain.version);
     const extractor = createTextExtractor({ imagePreparation: createImagePreparation({ cacheDir: '/unused', commandRunner: fakeSips() }) });
     expect(extractor.versionFor!('image/heic')).toBe(`${extractor.version}${IMAGE_MEDIA_VERSION_SUFFIX}`);
     expect(extractor.versionFor!('application/pdf')).toBe(extractor.version);

@@ -12,9 +12,9 @@
 // Prefer co-located ledgers. A recorded path is usable only inside this
 // store's data root: a copy must never borrow its original install's ledger.
 
-import { existsSync, realpathSync } from 'node:fs';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
-import { accountSiblingStorePath } from '../../core/olympus-layout.ts';
+import { existsSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
+import { accountSiblingStorePath, pathResolvesWithin } from '../../core/olympus-layout.ts';
 import { readStoreBindingCursor, TierLedger } from './tier-ledger.ts';
 import { tierLedgerPathForStore } from './tier-ledger-path.ts';
 
@@ -25,17 +25,8 @@ export function tierStoreDataRoot(storeDbPath: string): string {
     ? dirname(dirname(dirname(dirname(folder)))) : folder;
 }
 
-function canonicalPath(path: string): string {
-  if (existsSync(path)) return realpathSync(path);
-  const absolute = resolve(path);
-  const parent = dirname(absolute);
-  return parent === absolute ? absolute : join(canonicalPath(parent), basename(absolute));
-}
-
-export function tierLedgerIsWithin(directory: string, ledgerPath: string): boolean {
-  const path = relative(canonicalPath(directory), canonicalPath(ledgerPath));
-  return path !== '..' && !path.startsWith(`..${sep}`) && !path.startsWith(sep);
-}
+/** A recorded ledger path is usable only inside this directory (symlinks resolved). */
+export const tierLedgerIsWithin = pathResolvesWithin;
 
 /** Read the binding without opening a store writable or running migrations. */
 export function readTierSetBinding(storeDbPath: string): TierSetBindingRecord | undefined {

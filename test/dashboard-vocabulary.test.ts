@@ -31,6 +31,8 @@ import {
   dashboardWorkingHeadline,
   dashboardWorkingSummary,
   dashboardUnsupportedKindPhrase,
+  dashboardPicturesNotReadHerePhrase,
+  dashboardWaitingToReadPhrase,
   dashboardHomeMeta,
   dashboardIsConnectedSource,
   dashboardIsFirstRun,
@@ -939,6 +941,82 @@ interface CardOverrides {
 }
 
 describe('dashboard working summary', () => {
+  test('names pictures with singular and plural words and no item names', () => {
+    expect(dashboardPicturesNotReadHerePhrase(card())).toBeUndefined();
+    expect(dashboardPicturesNotReadHerePhrase(card({ coverage: { pictures_not_read_here_items: -1 } }))).toBeUndefined();
+    expect(dashboardPicturesNotReadHerePhrase(card({ coverage: { pictures_not_read_here_items: 1 } })))
+      .toBe('1 picture not read on this computer');
+    expect(dashboardPicturesNotReadHerePhrase(card({ coverage: { pictures_not_read_here_items: 5 } })))
+      .toBe('5 pictures not read on this computer');
+  });
+
+  test('waiting is only the unread in-scope remainder after every accounted-for count', () => {
+    const source = card({ family: 'file', coverage: {
+      indexed_items: 360, answer_ready_eligible_items: 300, not_read_by_policy_items: 60,
+      content_ready_items: 181, unreadable_items: 2, unsupported_kind_items: 46, pictures_not_read_here_items: 5,
+    } });
+    expect(dashboardWorkingSummary(source)).toEqual({
+      in_scope_items: 300, read_items: 181, read_percent: 60.3, unreadable_items: 2,
+      unsupported_kind_items: 46, pictures_not_read_here_items: 5, waiting_items: 66, fully_working: false,
+    });
+    expect(dashboardWaitingToReadPhrase(source)).toBe('66 files waiting to be read');
+    expect(dashboardWaitingToReadPhrase(card({ family: 'file', coverage: { content_ready_items: 99 } })))
+      .toBe('1 file waiting to be read');
+    expect(dashboardWaitingToReadPhrase(card({ coverage: { content_ready_items: 98 } })))
+      .toBe('2 messages waiting to be read');
+    expect(dashboardWaitingToReadPhrase(card())).toBeUndefined();
+    expect(dashboardSubLine(source, { now: NOW }))
+      .toBe("synced 12m ago · 66 files waiting to be read · 2 files can't be read · 46 files of kinds Olympus can't read yet · 5 pictures not read on this computer");
+    expect(dashboardStatus({ source })).toBe('Fresh');
+    const noScope = card({ coverage: { indexed_items: 400, answer_ready_eligible_items: 0, content_ready_items: 0 } });
+    expect(dashboardWaitingToReadPhrase(noScope)).toBeUndefined();
+    expect(dashboardSubLine(noScope, { now: NOW })).toBe('synced 12m ago');
+  });
+
+  test('a finished headline names unreadable files, unsupported kinds and pictures', () => {
+    const summary = dashboardWorkingSummary(card({ family: 'file', coverage: {
+      indexed_items: 360, answer_ready_eligible_items: 300, content_ready_items: 247,
+      unreadable_items: 2, unsupported_kind_items: 46, pictures_not_read_here_items: 5,
+    } }))!;
+    expect(summary).toEqual({
+      in_scope_items: 300, read_items: 247, read_percent: 82.3, unreadable_items: 2,
+      unsupported_kind_items: 46, pictures_not_read_here_items: 5, fully_working: true,
+    });
+    expect(dashboardWorkingHeadline(summary))
+      .toBe("everything readable is working — 247 of 300 files · 2 can't be read · 46 of kinds Olympus can't read yet · 5 pictures not read on this computer");
+  });
+
+  test('pictures alone finish readable work while coverage stays unchanged', () => {
+    const source = card({ family: 'file', coverage: {
+      indexed_items: 120, not_read_by_policy_items: 20, content_ready_items: 95, pictures_not_read_here_items: 5,
+    } });
+    const summary = dashboardWorkingSummary(source)!;
+    expect(summary).toEqual({ in_scope_items: 100, read_items: 95, read_percent: 95,
+      pictures_not_read_here_items: 5, fully_working: true });
+    expect(dashboardWaitingToReadPhrase(source)).toBeUndefined();
+    expect(dashboardWorkingHeadline(summary))
+      .toBe('everything readable is working — 95 of 100 files · 5 pictures not read on this computer');
+    expect(dashboardWorkingHeadline(dashboardWorkingSummary(card({ coverage: {
+      indexed_items: 100, content_ready_items: 99, pictures_not_read_here_items: 1,
+    } }))!)).toBe('everything readable is working — 99 of 100 files · 1 picture not read on this computer');
+    expect(dashboardSubLine(source, { now: NOW })).toBe('synced 12m ago · 5 pictures not read on this computer');
+    expect(dashboardStatus({ source })).toBe('Fresh');
+    const withoutPictures = dashboardWorkingSummary(card({ family: 'file', coverage: {
+      indexed_items: 120, not_read_by_policy_items: 20, content_ready_items: 95,
+    } }))!;
+    expect(withoutPictures).toMatchObject({ in_scope_items: 100, read_percent: 95, waiting_items: 5, fully_working: false });
+  });
+
+  test('clamps pictures after unreadable and unsupported counts and honors parity', () => {
+    const summary = dashboardWorkingSummary(card({ coverage: {
+      indexed_items: 100, content_ready_items: 60, unreadable_items: 2,
+      unsupported_kind_items: 30, pictures_not_read_here_items: 500,
+    }, embedding_backlog: { chunks: 100, embedded_chunks: 20, missing_chunks: 80, refresh_needed: false } }))!;
+    expect(summary).toEqual({ in_scope_items: 100, read_items: 60, read_percent: 60,
+      unreadable_items: 2, unsupported_kind_items: 30, pictures_not_read_here_items: 8,
+      fully_working: false, searchable_percent: 20 });
+  });
+
   test('names unsupported kinds with singular and plural item words', () => {
     expect(dashboardUnsupportedKindPhrase(card({ family: 'file' }))).toBeUndefined();
     expect(dashboardUnsupportedKindPhrase(card({ family: 'file', coverage: { unsupported_kind_items: -3 } }))).toBeUndefined();
@@ -971,14 +1049,14 @@ describe('dashboard working summary', () => {
     expect(dashboardStatus({ source })).toBe('Fresh');
   });
 
-  test('ChatGPT keeps the unsupported-kind count when scrubbing coverage', () => {
-    const source = card({ coverage: { content_ready_items: 52, unreadable_items: 2, unsupported_kind_items: 46 } });
+  test('ChatGPT keeps unsupported-kind and picture counts when scrubbing coverage', () => {
+    const source = card({ coverage: { content_ready_items: 47, unreadable_items: 2, unsupported_kind_items: 46, pictures_not_read_here_items: 5 } });
     const definition = DASHBOARD_SUPPORTED_SOURCES.find((entry) => entry.source_id === 'gmail.email')!;
     const scrubbed = scrubCard(definition, source);
-    expect(scrubbed.coverage).toMatchObject({ indexed_items: 100, content_ready_items: 52,
-      unreadable_items: 2, unsupported_kind_items: 46 });
-    expect(dashboardWorkingSummary(scrubbed)).toMatchObject({ in_scope_items: 100, read_percent: 52,
-      unsupported_kind_items: 46, fully_working: true });
+    expect(scrubbed.coverage).toMatchObject({ indexed_items: 100, content_ready_items: 47,
+      unreadable_items: 2, unsupported_kind_items: 46, pictures_not_read_here_items: 5 });
+    expect(dashboardWorkingSummary(scrubbed)).toMatchObject({ in_scope_items: 100, read_percent: 47,
+      unsupported_kind_items: 46, pictures_not_read_here_items: 5, fully_working: true });
   });
 
   test('unsupported kinds alone can finish the headline while read coverage stays below 100', () => {

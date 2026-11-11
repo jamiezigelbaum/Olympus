@@ -13,6 +13,8 @@ import { waitFor } from './helpers/test-clock.ts';
 import { openSecretLocations } from '../src/core/source-storage.ts';
 import { secretLocationsPathForStore } from '../src/workers/classification/secret-locations.ts';
 import { WHATSAPP_LIVE_CORPUS_ID, WHATSAPP_PERSONAL_SOURCE_ID, createWhatsAppTierLane } from '../src/workers/whatsapp/store-sync.ts';
+import { createTelegramConnectorStores } from '../src/workers/telegram-messages/store-sync.ts';
+import { PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID } from '../src/workers/telegram-messages/corpus-adapter.ts';
 
 const SERVER = join(import.meta.dir, '..', 'src', 'workers', 'engine', 'server.ts');
 const REPO = join(import.meta.dir, '..');
@@ -41,7 +43,7 @@ function spawnWorker(env: Record<string, string>, role: 'background' | 'front'):
   return { output: () => output };
 }
 
-async function startSplit(extraEnv: Record<string, string> = {}) {
+async function startSplit(extraEnv: Record<string, string> = {}, beforeFront?: (env: Record<string, string>) => void) {
   const home = mkdtempSync(join('/tmp', 'oec-'));
   roots.push(home);
   mkdirSync(join(home, 'run'), { mode: 0o700 });
@@ -69,6 +71,7 @@ async function startSplit(extraEnv: Record<string, string> = {}) {
   };
   const background = spawnWorker(env, 'background');
   await waitFor(() => background.output().includes('engine background ready'), { timeoutMs: 60_000 });
+  beforeFront?.(env);
   const front = spawnWorker(env, 'front');
   await waitFor(() => front.output().includes('worker listening'), { timeoutMs: 60_000 });
 
@@ -147,6 +150,30 @@ describe('the engine split with a source connected after boot', () => {
     lane.ledger.close();
     secrets.close();
     written.close();
+  }, 180_000);
+
+  // A lane whose tier set the engine builds (Telegram, Gmail, Google Drive) waits the same way: release check run
+  // 43078655631 mounted Telegram's two stores before their ledger existed, with no tier lane over them, and its items
+  // had no menu, search or delete for the rest of the run.
+  test('the front mounts a two-store lane only once its ledger and index exist', async () => {
+    // The stores exist before the front starts, so its first mount meets the missing ledger: the front starts anyway.
+    let stores!: ReturnType<typeof createTelegramConnectorStores>;
+    const { env, front, mountedCorpora, mounts } = await startSplit(
+      { OLYMPUS_SOURCE_INDEX_TELEGRAM_CONNECTOR_STORES_ENABLED: 'true' },
+      (env) => { stores = createTelegramConnectorStores(env); },
+    );
+    const tries = () => front.output().split("the front could not open a source's stores yet").length - 1;
+    await waitFor(() => tries() >= 2 || undefined, { timeoutMs: 20_000, intervalMs: 100 });
+    expect(await mountedCorpora()).not.toContain(PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID);
+
+    const secrets = openSecretLocations({ sourceId: 'telegram.messages' }, { dbPath: secretLocationsPathForStore(stores.secureLocal.dbPath) }, env);
+    const ledger = stores.secureLocal.tierLedger();
+    expect(ledger).toBeDefined();
+    await mounts(PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID);
+    expect(front.output()).not.toContain('FrontStoreWriteError');
+    secrets.close();
+    stores.internal.close();
+    stores.secureLocal.close();
   }, 180_000);
 });
 

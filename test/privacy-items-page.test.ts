@@ -20,7 +20,7 @@ const URL_ITEMS = new URL('http://127.0.0.1:8010/dashboard?privacy-items');
 interface Item {
   item_id: string; source: string; family: string; title: string | null; sender: string | null; location: string | null;
   tier: string | null; names_tier: string | null; decided_by: string | null; owner_set: boolean; judge_reason: string | null;
-  decided_at: string | null; preview?: string | null; owner_choice?: string; waiting_for_judge?: true; names_only?: true;
+  decided_at: string | null; preview?: string | null; owner_choice?: string; waiting_for_judge?: true; names_only?: true; not_read?: { kind: 'by_choice' } | { kind: 'cannot_read'; reason: string };
 }
 
 const invoice = (): Item => ({
@@ -150,6 +150,17 @@ describe('finding an item', () => {
     expect(p.text('[data-pi-why]')).toBe('Waiting to be read. It stays Private until the judge reads it.');
     await p.click('[data-pi-item="oti_names"]');
     expect(p.text('[data-pi-why]')).toBe(C.namesOnly);
+  });
+
+  test('policy and failed reads are shown as holds, never judge verdicts', async () => {
+    const p = await page([
+      { ...invoice(), item_id: 'oti_choice', not_read: { kind: 'by_choice' }, judge_reason: 'fail_safe:unread' },
+      { ...invoice(), item_id: 'oti_failed', not_read: { kind: 'cannot_read', reason: 'password' }, judge_reason: 'fail_safe:unread' },
+    ]);
+    await p.click('[data-pi-item="oti_choice"]');
+    expect(p.text('[data-pi-why]')).toBe('Not read, by your choice.');
+    await p.click('[data-pi-item="oti_failed"]');
+    expect(p.text('[data-pi-why]')).toBe("Kept Private: Olympus couldn't read it (locked with a password).");
   });
 
   test('on a phone the item opens in place, under its row', async () => {

@@ -44,7 +44,7 @@ import {
   telegramCaptureCursorOffset,
 } from './capture-spool-connector.ts';
 import { telegramArchiveTarget } from './archive-target.ts';
-import type { FileExtractionRuntime } from '../email-source/file-extraction-runtime.ts';
+import type { FileExtractionRuntime } from '../engine/runtime/file-extraction-runtime.ts';
 import { createTelegramMediaExtractionRuntime } from './media-extraction.ts';
 import { telegramRecordBuilder } from './record-builder.ts';
 

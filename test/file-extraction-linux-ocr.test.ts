@@ -762,7 +762,7 @@ describe('rereading what OCR could not read', () => {
   test('a picture keeps one stable job identity: no per-capability version, so a flip cannot duplicate or strand it', async () => {
     const lane = setup(NOTHING_INSTALLED, 'image');
     try {
-      expect(lane.text.versionFor).toBeUndefined();
+      expect(lane.text.versionFor?.('image/png') ?? lane.text.version).toBe(lane.text.version);
       await lane.run();
       Object.assign(lane.machine.spec, { tesseract: 'ok', pdftoppm: 'ok' });
       await lane.afterInstallProbe();
@@ -964,6 +964,7 @@ describe('rereading what OCR could not read', () => {
         ocr: { capability: createOcrCapabilityProbe({ commandRunner: none.runner }), ...ocr },
       }).list().find((extractor) => extractor.kind === textKind)!;
       const linux = registryFor({ platform: 'linux' });
+      const plainPictureVersion = (extractor: ReturnType<typeof registryFor>) => (extractor.versionFor?.(PNG) ?? extractor.version) === extractor.version;
       // Fixed: the same whatever is installed, and only images move.
       expect(linux.versionFor!(PNG)).toBe(`${linux.version}${IMAGE_OCR_VERSION_SUFFIX}`);
       expect(linux.versionFor!(PDF)).toBe(linux.version);
@@ -976,9 +977,9 @@ describe('rereading what OCR could not read', () => {
       expect(jobs.enqueue({ refs: [ref], extractorKind: linux.kind, extractorVersion: linux.versionFor!(PNG), policyDecision: 'index_allowed' }).jobsQueued).toBe(1);
       expect(jobs.enqueue({ refs: [ref], extractorKind: linux.kind, extractorVersion: linux.versionFor!(PNG), policyDecision: 'index_allowed' }).jobsQueued).toBe(0);
       // Nothing is read again where Vision (or a preparation) already reads pictures, or when pinned.
-      expect(registryFor({ platform: 'darwin' }).versionFor).toBeUndefined();
-      expect(registryFor({ platform: 'darwin', engine: 'auto' }).versionFor).toBeUndefined();
-      expect(registryFor({ platform: 'linux', engine: 'tesseract' }).versionFor).toBeUndefined();
+      expect(plainPictureVersion(registryFor({ platform: 'darwin' }))).toBe(true);
+      expect(plainPictureVersion(registryFor({ platform: 'darwin', engine: 'auto' }))).toBe(true);
+      expect(plainPictureVersion(registryFor({ platform: 'linux', engine: 'tesseract' }))).toBe(true);
     } finally {
       jobs.close();
     }

@@ -15,10 +15,11 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { V0_4_PUBLIC_DASHBOARD_ROUTES } from '../src/core/public-surface.ts';
 import { ENGINE_FORWARDED_ROUTES, ENGINE_FRONT_ONLY_ROUTES } from '../src/workers/engine-split/commands.ts';
-import { WORKER_WRITE_ROUTES, workerRouteAllowed } from '../src/workers/email-source/write-routes.ts';
+import { WORKER_WRITE_ROUTES, workerRouteAllowed } from '../src/workers/engine/http/write-routes.ts';
 import { scanFileExtractionAliases, scanWorkerWriteRoutes } from './helpers/worker-route-scan.ts';
 
 const WORKER = readFileSync(join(import.meta.dir, '../src/workers/engine/index.ts'), 'utf8');
+const FILE_EXTRACTION = readFileSync(join(import.meta.dir, '../src/workers/engine/http/file-extraction.ts'), 'utf8');
 const READ_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 /** Every route the worker serves to a writing method: the public dashboard's and its /v1 routes. */
@@ -34,7 +35,7 @@ function registryDrift(source: string): { unregistered: string[]; unserved: stri
   const scan = scanWorkerWriteRoutes(source);
   const served = new Set([
     ...scan.writes,
-    ...scanFileExtractionAliases(source).map((path) => `POST ${path}`),
+    ...scanFileExtractionAliases(FILE_EXTRACTION).map((path) => `POST ${path}`),
   ]);
   const registered = new Set(WORKER_WRITE_ROUTES.map((route) => `${route.method} ${route.path}`));
   return {

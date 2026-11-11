@@ -11,7 +11,7 @@ import { buildSourceIndexCorpusRegistry, defineSourceIndexCorpus } from '../src/
 import { routeSourceIndexSearch } from '../src/core/source-index/router.ts';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { createConnectorStoreCorpusAdapter, defineConnectorCorpus, type ConnectorStoreKeywordFtsOptions, type ConnectorStoreSearchFilters } from '../src/workers/connector-store/local-index.ts';
-import { OffThreadReadBusyError, setReadPoolClockForTests } from '../src/workers/connector-store/off-thread-reads.ts';
+import { OffThreadReadBusyError, setReadPoolClockForTests, setReadPoolObserverForTests } from '../src/workers/connector-store/off-thread-reads.ts';
 import { FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, openTierFixture, tempDir, type FixtureSpec, type TierFixture } from './helpers/tier-fixtures.ts';
 
 const WORDS = ['orchard', 'invoice', 'lawyer', 'budget', 'harbour', 'lisbon', 'piano', 'dentist', 'mortgage', 'passport', 'museum', 'recipe'];
@@ -111,6 +111,20 @@ describe('connector store keyword search on the read pool', () => {
     // Only the tier filter keeps it out: its own words find nothing on either path.
     expect(internal.searchItemsDetailed('routed', 20).rows).toEqual([]);
     expect((await internal.searchItemsDetailedOffThread('routed', 20)).rows).toEqual([]);
+  });
+
+  test('locating the chunks of many rows is one read on the pool, not one per row (#1305)', async () => {
+    const internal = (await seeded()).stores.internal!;
+    const reads: string[] = [];
+    setReadPoolObserverForTests((_, read) => reads.push(read.sql));
+    try {
+      const pooled = await internal.searchItemsDetailedOffThread('orchard', 20);
+      const located = pooled.rows.filter((row) => row.chunk);
+      expect(located.length).toBeGreaterThan(1);
+      expect(reads.filter((sql) => /FROM chunks/.test(sql) && !/connector_store_fts/.test(sql))).toHaveLength(1);
+    } finally {
+      setReadPoolObserverForTests();
+    }
   });
 
   test('a small limit is filled and reported saturated the same way on both paths', async () => {

@@ -29,6 +29,8 @@ import {
 } from './tier-cli.ts';
 import { CONTENT_NAMES_ONLY_REASON, tierRank, type TierKey } from './tier-classifier.ts';
 import { isFailSafeMissingContentQuestion, tierLedgerIdentityKey, type TierLedgerIdentity, type TierLedgerRecord } from './tier-ledger.ts';
+import type { ItemExtractionOutcome } from '../file-extraction/job-store.ts';
+import { unreadHoldDisposition, type UnreadableFileReason } from '../file-extraction/unreadable-files.ts';
 import { tierDisplayName } from './tier-rules.ts';
 
 /** What the owner can choose for one item. `judge`: clear the owner's word and go back to the judge's verdict. */
@@ -70,6 +72,8 @@ export interface OwnerTierItem {
   judge_reason: string | null;
   /** The item is waiting for the judge to read it (again): its label is a holding label, not a verdict. */
   waiting_for_judge?: true;
+  /** Text held unread by policy, or after extraction ended without text. */
+  not_read?: { kind: 'by_choice' } | { kind: 'cannot_read'; reason: UnreadableFileReason };
   /**
    * Its text is never read, by the owner's choice (a names-only folder or
    * rule): it was judged on its names alone (`content:names_only`, #1295).
@@ -142,7 +146,12 @@ export interface OwnerTierItems {
   counts?(): OwnerTierItemCounts;
 }
 
-export function createOwnerTierItems(context: TierCliContext = {}): OwnerTierItems {
+export interface OwnerTierItemsContext extends TierCliContext {
+  extractionOutcome?(family: string | undefined, identity: TierLedgerIdentity, localItemId: string | undefined): ItemExtractionOutcome | undefined;
+  contentAllowed?(identity: TierLedgerIdentity, localItemId: string | undefined, locator: string | null): boolean;
+}
+
+export function createOwnerTierItems(context: OwnerTierItemsContext = {}): OwnerTierItems {
   return {
     find: (input) => findOwnerTierItems(input, context),
     set: (input) => setOwnerTierItem(input, context),
@@ -175,6 +184,7 @@ export function parseOwnerTierItemId(itemId: unknown): TierLedgerIdentity {
 // --- Find ----------------------------------------------------------------------
 
 interface StoredItemRow {
+  local_item_id?: string;
   provider: string;
   family: string;
   account_scope: string;
@@ -207,7 +217,7 @@ function namesAbovePersonal(state: ItemState): boolean {
     .some((tier) => tier !== null && tier !== undefined && tierRank(tier) > tierRank('private'));
 }
 
-export function findOwnerTierItems(input: OwnerTierItemFindInput, context: TierCliContext = {}): { items: OwnerTierItem[] } {
+export function findOwnerTierItems(input: OwnerTierItemFindInput, context: OwnerTierItemsContext = {}): { items: OwnerTierItem[] } {
   const limit = clampLimit(input.limit);
   const query = input.query?.trim() ?? '';
   if (query.length > OWNER_ITEM_QUERY_MAX) throw new OperationError('invalid_params', `query is at most ${OWNER_ITEM_QUERY_MAX} characters.`);
@@ -231,7 +241,7 @@ export function findOwnerTierItems(input: OwnerTierItemFindInput, context: TierC
     const state = readItemState(identity, context);
     if (state.secret) continue;
     if (input.personalNamesOnly && namesAbovePersonal(state)) continue;
-    const item = view(row, state);
+    const item = view(row, state, context);
     if (input.withPreview && !input.personalNamesOnly) item.preview = previewOf(identity, context);
     items.push(item);
   }
@@ -251,7 +261,7 @@ function likePattern(words: string): string {
 
 function selectColumns(columns: Set<string>): string {
   const sender = columns.has('sender_label') ? 'sender_label, sender_id' : 'NULL AS sender_label, NULL AS sender_id';
-  return `provider, family, account_scope, provider_item_id, provider_conversation_id, title, ${sender}, locator_uri`;
+  return `local_item_id, provider, family, account_scope, provider_item_id, provider_conversation_id, title, ${sender}, locator_uri`;
 }
 
 /** Stored items whose title, sender or file name holds the words, newest first; one row per item across twin stores. */
@@ -421,8 +431,13 @@ function judgeReason(record: TierLedgerRecord | undefined): string | null {
   return null;
 }
 
-function view(row: StoredItemRow, state: ItemState): OwnerTierItem {
+function view(row: StoredItemRow, state: ItemState, context: OwnerTierItemsContext): OwnerTierItem {
   const { record } = state;
+  const identity = identityOfRow(row);
+  const hold = record?.state === 'current' && record.contentTier === 'secure' && !record.contentRead
+    && record.reasons.some(isFailSafeMissingContentQuestion)
+    ? unreadHoldDisposition(context.extractionOutcome?.(row.family ?? undefined, identity, row.local_item_id ?? undefined), context.contentAllowed?.(identity, row.local_item_id, row.locator_uri))
+    : undefined;
   return {
     item_id: ownerTierItemId(identityOfRow(row)),
     source: row.provider,
@@ -441,7 +456,9 @@ function view(row: StoredItemRow, state: ItemState): OwnerTierItem {
     // A fail-safe hold for text not read yet is a holding label too, though
     // its row is current: never shown or sampled as the judge's verdict (#1295).
     ...((record?.state === 'pending' && (record.contentPending || record.metadataPending))
-      || (record && !record.contentRead && record.reasons.some(isFailSafeMissingContentQuestion)) ? { waiting_for_judge: true as const } : {}),
+      || hold?.kind === 'waiting' ? { waiting_for_judge: true as const } : {}),
+    ...(hold?.kind === 'by_choice' ? { not_read: { kind: 'by_choice' as const } }
+      : hold?.kind === 'cannot_read' ? { not_read: { kind: 'cannot_read' as const, reason: hold.reason } } : {}),
     ...(record?.reasons.includes(CONTENT_NAMES_ONLY_REASON) ? { names_only: true as const } : {}),
     decided_at: record?.decidedAt ?? null,
   };
@@ -453,7 +470,7 @@ function view(row: StoredItemRow, state: ItemState): OwnerTierItem {
  * Secret. For the owner's own dashboard only (judge-check.ts): an agent finds
  * items through `findOwnerTierItems` with `personalNamesOnly`.
  */
-export function getOwnerTierItem(itemId: string, context: TierCliContext = {}, options: { withPreview?: boolean } = {}): OwnerTierItem | undefined {
+export function getOwnerTierItem(itemId: string, context: OwnerTierItemsContext = {}, options: { withPreview?: boolean } = {}): OwnerTierItem | undefined {
   const identity = parseOwnerTierItemId(itemId);
   let located: LocatedItem[];
   try {
@@ -464,14 +481,14 @@ export function getOwnerTierItem(itemId: string, context: TierCliContext = {}, o
   if (located.length === 0) return undefined;
   const state = readLocatedState(located, context);
   if (state.secret) return undefined;
-  const item = view(storedRowFor(identity, located, context), state);
+  const item = view(storedRowFor(identity, located, context), state, context);
   if (options.withPreview) item.preview = previewOf(identity, context);
   return item;
 }
 
 // --- Set -----------------------------------------------------------------------
 
-export function setOwnerTierItem(input: OwnerTierItemSetInput, context: TierCliContext = {}): OwnerTierItemSetResult {
+export function setOwnerTierItem(input: OwnerTierItemSetInput, context: OwnerTierItemsContext = {}): OwnerTierItemSetResult {
   const { choice } = input;
   if (choice !== 'personal' && choice !== 'private' && choice !== 'judge') {
     throw new OperationError('invalid_params', 'tier must be "personal", "private" or "judge".');
@@ -517,7 +534,7 @@ export function setOwnerTierItem(input: OwnerTierItemSetInput, context: TierCliC
   const applies = target !== undefined && after.record?.state === 'current'
     && after.record.contentTier === target && after.record.metadataTier === target ? 'now' : 'next_pass';
   const row = storedRowFor(identity, located, context);
-  const item = view(row, after);
+  const item = view(row, after, context);
   // An agent never reads back names that are now Private.
   if (!input.allowLower && (namesAbovePersonal(before) || namesAbovePersonal(after))) {
     item.title = null;

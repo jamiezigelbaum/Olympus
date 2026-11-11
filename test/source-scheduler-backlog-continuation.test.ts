@@ -213,10 +213,10 @@ describe('extraction pass over a shared candidate store', () => {
   // Pages of one shared store: two pages of another lane's files, then this
   // lane's own files, then the end. The old pass stopped after the first page
   // (zero candidates, cursor mid-store) and went idle for its interval.
-  function runner(pages: Array<{ candidates: number; next?: string; done: boolean }>) {
+  function runner(pages: Array<{ candidates: number; next?: string; done: boolean; skipped?: Record<string, number> }>) {
     const plans: Array<string | undefined> = [];
     const runs: ExtractionRunRequest[] = [];
-    const byCursor = new Map<string | undefined, { candidates: number; next?: string; done: boolean }>();
+    const byCursor = new Map<string | undefined, { candidates: number; next?: string; done: boolean; skipped?: Record<string, number> }>();
     let cursor: string | undefined;
     for (const page of pages) {
       byCursor.set(cursor, page);
@@ -236,6 +236,7 @@ describe('extraction pass over a shared candidate store', () => {
           jobsSkippedTooLarge: 0,
           jobsUnroutable: 0,
           extractorKinds: page.candidates > 0 ? ['local_text'] : [],
+          ...(page.skipped ? { candidatesSkipped: page.skipped } : {}),
           ...(page.next !== undefined ? { nextCursor: page.next } : {}),
           done: page.done,
         };
@@ -257,6 +258,20 @@ describe('extraction pass over a shared candidate store', () => {
   }
 
   const lane = { corpusId: 'c', provider: 'fixture', accountScope: 'personal', approvedScopeKey: 'fixture.personal:/labs' };
+
+  test('says in its receipt what the source passed over on every page it read', async () => {
+    const { fake } = runner([
+      { candidates: 0, next: 'p2', done: false, skipped: { outside_scope: 2 } },
+      { candidates: 1, done: true, skipped: { outside_scope: 1, excluded_by_owner: 4 } },
+    ]);
+    const extract = fileExtractionSchedulerTask({ id: 'x', runner: fake, lane, planLimit: 3, batchSize: 2, maxBatchesPerPass: 1 });
+    const result = await extract.run();
+    expect(result.counts).toMatchObject({
+      candidates_seen: 1,
+      candidates_skipped_outside_scope: 3,
+      candidates_skipped_excluded_by_owner: 4,
+    });
+  });
 
   test('reads past pages with nothing in scope, queues this lane\'s files, and asks to continue', async () => {
     const { fake, plans, runs } = runner([

@@ -138,8 +138,8 @@ describe('extraction job store: module identity', () => {
     } finally { db.close(); }
     // A read-only handle on such a store counts none rather than failing.
     const reader = new LocalFileExtractionJobStore(dbPath, { readonly: true });
-    expect(reader.corpusReadiness(LANE.corpusId)).toMatchObject({ unsupportedKindItems: 0, queuedJobs: 1 });
-    expect(reader.scopedReadiness([LANE]).unsupportedKindItems).toBe(0);
+    expect(reader.corpusReadiness(LANE.corpusId)).toMatchObject({ unsupportedKindItems: 0, picturesNotReadHereItems: 0, queuedJobs: 1 });
+    expect(reader.scopedReadiness([LANE])).toMatchObject({ unsupportedKindItems: 0, picturesNotReadHereItems: 0 });
     reader.close();
     const upgraded = new LocalFileExtractionJobStore(dbPath);
     openStores.push(upgraded);
@@ -176,6 +176,52 @@ describe('extraction job store: module identity', () => {
 });
 
 describe('extraction job store: enqueue', () => {
+  test('terminal outcomes use the identity index, latest job warnings, the newest version, and read/active precedence', () => {
+    const { store, dbPath } = newStore();
+    const item = { provider: LANE.provider, accountScope: LANE.accountScope, providerItemId: 'outcome' };
+    expect(store.itemExtractionOutcome(item)).toBeUndefined();
+    const job = enqueueOne(store, 'outcome');
+    expect(store.itemExtractionOutcome(item)).toBeUndefined();
+    store.lease({ ...LANE, workerId: 'worker' });
+    store.record({ jobId: job, status: 'metadata_only', errorKind: 'extractor_empty_output',
+      derivations: [{ artifactKind: 'page', chars: 0, warnings: ['pdf_password_required'] }] });
+    expect(store.itemExtractionOutcome(item)).toEqual({ status: 'metadata_only', policyDecision: 'index_allowed',
+      lastErrorKind: 'extractor_empty_output', warnings: ['pdf_password_required'] });
+    expect(store.itemExtractionOutcome({ ...item, accountScope: 'other' })).toBeUndefined();
+    expect(store.itemExtractionOutcome({ ...item, provider: 'other' })).toBeUndefined();
+    const newer = enqueueOne(store, 'outcome', { version: 'v2' });
+    expect(store.itemExtractionOutcome(item)).toBeUndefined();
+    backdate(dbPath, newer, { status: 'failed_terminal', last_error_kind: 'pdf_damaged', updated_at: '2099-01-01T00:00:00Z' });
+    expect(store.itemExtractionOutcome(item)).toEqual({ status: 'failed_terminal', policyDecision: 'index_allowed', lastErrorKind: 'pdf_damaged', warnings: [] });
+    // A read of the same content wins over a newer extractor's failure...
+    backdate(dbPath, job, { status: 'indexed', last_error_kind: null });
+    expect(store.itemExtractionOutcome(item)?.status).toBe('indexed');
+    // ...but an older version's read never hides the current version's outcome.
+    backdate(dbPath, newer, { source_version: 'outcome-v2' });
+    expect(store.itemExtractionOutcome(item)).toEqual({ status: 'failed_terminal', policyDecision: 'index_allowed', lastErrorKind: 'pdf_damaged', warnings: [] });
+    backdate(dbPath, newer, { status: 'queued' });
+    expect(store.itemExtractionOutcome(item)).toBeUndefined();
+    backdate(dbPath, newer, { status: 'indexed', last_error_kind: null });
+    expect(store.itemExtractionOutcome(item)?.status).toBe('indexed');
+    expect(store.itemExtractionState(item)).toBe('settled');
+  });
+
+  test('an item inside a conversation never takes another conversation\'s outcome for the same provider item id', () => {
+    const { store, dbPath } = newStore();
+    const inChat = (chat: string) => ref('42#child:media', { localItemId: `${LANE.accountScope}:${chat}:42#child:media`, contentHash: `hash-${chat}` });
+    const result = store.enqueue({ refs: [inChat('chat-a'), inChat('chat-b')], extractorKind: KIND, extractorVersion: VERSION, policyDecision: 'index_allowed' });
+    const [a, b] = result.jobRefs.map(job => job.jobId);
+    backdate(dbPath, a!, { status: 'failed_terminal', last_error_kind: 'pdf_damaged' });
+    backdate(dbPath, b!, { status: 'indexed', updated_at: '2099-01-01T00:00:00Z' });
+    const item = (chat: string) => ({ provider: LANE.provider, accountScope: LANE.accountScope, providerItemId: '42#child:media',
+      providerConversationId: chat, localItemId: `${LANE.accountScope}:${chat}:42#child:media` });
+    expect(store.itemExtractionOutcome(item('chat-a'))?.status).toBe('failed_terminal');
+    expect(store.itemExtractionOutcome(item('chat-b'))?.status).toBe('indexed');
+    const none = { status: 'skipped_unsupported', warnings: [], policyDecision: 'index_allowed' } as const;
+    expect(store.itemExtractionOutcome(item('chat-c'), { whenNoJob: none })).toBe(none);
+    expect(store.itemExtractionOutcome(item('chat-c'))).toBeUndefined();
+  });
+
   test('an item text is owed until a job reads it or settles without it', () => {
     const { store, dbPath } = newStore();
     const item = { provider: LANE.provider, accountScope: LANE.accountScope, providerItemId: 'item-owed' };
@@ -994,6 +1040,27 @@ describe('extraction job store: janitor', () => {
 // for the same reason the queue does: the corpus id partitions it, and nothing
 // in it names a provider.
 describe('extraction job store: corpus readiness', () => {
+  test('splits unroutable pictures from unsupported kinds and filters stale pictures on both scoped paths', async () => {
+    const { store } = newStore();
+    store.recordUnroutable([
+      ref('picture', { mimeType: 'image/jpeg' }),
+      ref('document', { mimeType: 'application/msword' }),
+    ]);
+    expect(store.corpusReadiness(LANE.corpusId)).toMatchObject({
+      picturesNotReadHereItems: 1, unsupportedKindItems: 1,
+    });
+    expect(store.scopedReadiness([LANE, LANE])).toMatchObject({
+      picturesNotReadHereItems: 1, unsupportedKindItems: 1,
+    });
+    expect(store.scopedReadiness([LANE], {
+      currentItem: (item) => item.providerItemId !== 'picture',
+    })).toMatchObject({ picturesNotReadHereItems: 0, unsupportedKindItems: 1 });
+    expect(await store.scopedReadinessInTurns([LANE], {
+      currentItems: (items) => items.map((item) => item.providerItemId !== 'picture'),
+      turn: async () => {},
+    })).toMatchObject({ picturesNotReadHereItems: 0, unsupportedKindItems: 1 });
+  });
+
   test('a job for an older version does not hide the current version of an unsupported kind', () => {
     const { store } = newStore();
     enqueueOne(store, 'changed');
@@ -1085,14 +1152,15 @@ describe('extraction job store: corpus readiness', () => {
     expect(store.corpusReadiness('secure_local.files.other').unsupportedKindItems).toBe(1);
   });
 
-  test('the readiness ledger publishes unsupported kinds without turning them into policy exits', () => {
+  test('the readiness ledger publishes unsupported kinds and pictures without turning them into policy exits', () => {
     const { store } = newStore();
-    store.recordUnroutable([ref('unsupported')]);
+    store.recordUnroutable([ref('unsupported'), ref('picture', { mimeType: 'image/jpeg' })]);
     const unscoped = createExtractionReadinessLedger(store).snapshotForCorpus(LANE.corpusId);
     const scoped = createExtractionReadinessLedger(store, { lanesForCorpus: () => [LANE] }).snapshotForCorpus(LANE.corpusId);
     for (const snapshot of [unscoped, scoped]) {
       expect(snapshot?.counts).toMatchObject({
         extraction_items_unsupported_kind: 1,
+        extraction_items_pictures_not_read_here: 1,
         extraction_items_unreadable: 0,
         qa_metadata_only_expected: 0,
         qa_blocked_policy: 0,
@@ -1161,6 +1229,7 @@ describe('extraction job store: corpus readiness', () => {
       failedActionableJobs: 0,
       unreadableItems: 0,
       unsupportedKindItems: 0,
+      picturesNotReadHereItems: 0,
       retryableDueJobs: 0,
     });
   });
@@ -1256,6 +1325,7 @@ describe('extraction job store: corpus readiness', () => {
       extraction_jobs_failed_actionable: 0,
       extraction_items_unreadable: 1,
       extraction_items_unsupported_kind: 0,
+      extraction_items_pictures_not_read_here: 0,
       extraction_jobs_retryable_due_actionable: 0,
     });
   });

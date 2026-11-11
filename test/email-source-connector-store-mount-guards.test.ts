@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createConnectorStoreMountDiscovery, parseConnectorStoreMountsFromEnv } from '../src/workers/engine/server.ts';
+import { createConnectorStoreMountDiscovery, parseConnectorStoreMountsFromEnv } from '../src/workers/engine/runtime/connector-mounts.ts';
 import {
   createDropboxConnectorStore,
   DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,

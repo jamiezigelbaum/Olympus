@@ -12,24 +12,24 @@
 // `private_search` keeps the configured meaning lane and enables the bounded
 // keyword retry only for Private stores. Neither mode changes a model or epoch.
 
-import type { ClassificationCoverageNote, SecretLocationNote, SavedSecretLocation } from '../../core/evidence-pack.ts';
-import type { ParentLabelResolver } from '../../core/parent-label.ts';
-import type { SourceIndexAnswerRequest } from '../source-index/answer-types.ts';
-import type { SourceIndexCorpusRegistry } from '../../core/source-index/corpus.ts';
-import type { SourceIndexCorpusSearchAdapter, SourceIndexVisibilityGate } from '../../core/source-index/router.ts';
-import { sourceAnswerCorpusIds, type AnalystAnswerLanes } from '../source-index/analyst-answer.ts';
+import type { ClassificationCoverageNote, SecretLocationNote, SavedSecretLocation } from '../../../core/evidence-pack.ts';
+import type { ParentLabelResolver } from '../../../core/parent-label.ts';
+import type { SourceIndexAnswerRequest } from '../../source-index/answer-types.ts';
+import type { SourceIndexCorpusRegistry } from '../../../core/source-index/corpus.ts';
+import type { SourceIndexCorpusSearchAdapter, SourceIndexVisibilityGate } from '../../../core/source-index/router.ts';
+import { sourceAnswerCorpusIds, type AnalystAnswerLanes } from '../../source-index/analyst-answer.ts';
 import {
   builtInEmbeddingOnly,
   isApprovedSecureSourceEmbeddingProvider,
   memoizeQueryEmbeddings,
   type SourceEmbeddingProvider,
-} from '../source-index/embeddings.ts';
+} from '../../source-index/embeddings.ts';
 import {
   createConnectorStoreContentProvider,
   createConnectorStoreCorpusAdapter,
   type ConnectorStoreSearchFilters,
   type LocalConnectorStore,
-} from '../connector-store/index.ts';
+} from '../../connector-store/index.ts';
 
 export type SourceAnswerLaneMode = 'built_in_only' | 'private_search';
 

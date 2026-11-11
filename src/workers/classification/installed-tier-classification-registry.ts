@@ -6,6 +6,13 @@
 import type { OwnerTierRule, TierDecision, TierSniffer } from './tier-classifier.ts';
 import type { TierPlacementPlan } from './tier-ledger.ts';
 
+export interface AutomaticTierMoveContext {
+  /** The embedding ledger each automatic move is recorded in. */
+  embeddingLedgerPath: string;
+  /** Read the live configuration; automatic replacement requires built-in local embeddings only. */
+  localEmbeddingsOnly: () => boolean;
+}
+
 export interface InstalledStoreTierClassification {
   rules?: readonly OwnerTierRule[];
   sniffer?: TierSniffer;
@@ -16,6 +23,8 @@ export interface InstalledStoreTierClassification {
 }
 
 export interface InstalledTierClassificationProvider {
+  /** Engine move context inherited by every set, including sets opened lazily. */
+  readonly automaticMoveContext?: AutomaticTierMoveContext | undefined;
   /**
    * Inputs for decisions recorded in the ledger at `ledgerPath`: the owner's
    * rules file as they are NOW (re-read when edited) and the sniffer.

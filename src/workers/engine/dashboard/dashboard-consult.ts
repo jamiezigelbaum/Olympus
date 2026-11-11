@@ -50,9 +50,9 @@
  *     install's progress. It writes no setting and touches no wallet or key.
  */
 import { delimiter, dirname } from 'node:path';
-import { abandonHeldZkapiRequest, recoverHeldZkapiRequest } from '../../core/zkapi-recovery.ts';
-import { zkapiFundingDateRefresher } from '../../core/zkapi-funding-date.ts';
-import { CONSULT_LANGUAGE_PACKS, consultVocabularyFileStatus, DEFAULT_CONSULT_DOMAIN_PACKS, type ConsultDomainPacks, type ConsultLanguage } from '../../core/consult-gate.ts';
+import { abandonHeldZkapiRequest, recoverHeldZkapiRequest } from '../../../core/zkapi-recovery.ts';
+import { zkapiFundingDateRefresher } from '../../../core/zkapi-funding-date.ts';
+import { CONSULT_LANGUAGE_PACKS, consultVocabularyFileStatus, DEFAULT_CONSULT_DOMAIN_PACKS, type ConsultDomainPacks, type ConsultLanguage } from '../../../core/consult-gate.ts';
 import {
   CONSULT_LEVEL_FOR_REPAIR,
   CONSULT_LEVELS,
@@ -71,9 +71,9 @@ import {
   type ConsultSettingsLocation,
   type ConsultStandardMode,
   type ConsultWriterChoice,
-} from '../../core/consult-settings.ts';
-import type { ConsultWriterCheckReport, ConsultWriterCheckResult } from '../../core/consult-writer-check.ts';
-import { writeConsultSettings, type ConsultSettingsWriteRefusal } from '../../core/consult-settings-writer.ts';
+} from '../../../core/consult-settings.ts';
+import type { ConsultWriterCheckReport, ConsultWriterCheckResult } from '../../../core/consult-writer-check.ts';
+import { writeConsultSettings, type ConsultSettingsWriteRefusal } from '../../../core/consult-settings-writer.ts';
 import {
   defaultZkapiConfinement,
   defaultZkapiStatePath,
@@ -87,28 +87,28 @@ import {
   type ZkapiConsultReadiness,
   type ZkapiConsultResult,
   type ZkapiConsultTransportOptions,
-} from '../../core/consult-transport-zkapi.ts';
+} from '../../../core/consult-transport-zkapi.ts';
 import {
   updateSovereigntyConfigFile,
   type SovereigntyConfig,
   type SovereigntyModelProfile,
-} from '../../core/sovereignty.ts';
+} from '../../../core/sovereignty.ts';
 import {
   parseIsoDate,
   ZKAPI_DAEMON_DEFAULT_BASE_URL,
   ZKAPI_RISK_ACKNOWLEDGEMENTS,
   ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION,
   type ZkapiConsultSettings,
-} from '../../core/zkapi-consult-settings.ts';
-import { OperationError } from '../../core/operation-error.ts';
-import { createManagedToolsJob, managedToolsState, type ManagedToolsJob, type ManagedToolsJobState } from '../../core/managed-tools.ts';
-import type { DashboardOutsideHelpInstall, DashboardOutsideHelpTools } from '../dashboard/outside-help-tools.ts';
+} from '../../../core/zkapi-consult-settings.ts';
+import { OperationError } from '../../../core/operation-error.ts';
+import { createManagedToolsJob, managedToolsState, type ManagedToolsJob, type ManagedToolsJobState } from '../../../core/managed-tools.ts';
+import type { DashboardOutsideHelpInstall, DashboardOutsideHelpTools } from '../../dashboard/outside-help-tools.ts';
 import type {
   DashboardOutsideHelpLanguage,
   DashboardOutsideHelpRoute,
   DashboardOutsideHelpStatus,
   DashboardOutsideHelpWriter,
-} from '../dashboard/outside-help.ts';
+} from '../../dashboard/outside-help.ts';
 
 export type DashboardConsultOutcome =
   | { ok: true; status_message: string; restarting?: boolean; revision?: number }

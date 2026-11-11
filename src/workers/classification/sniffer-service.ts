@@ -17,11 +17,10 @@ import {
   readClassificationLedger,
 } from '../classification-ledger.ts';
 import { settleSecretsCopies } from '../connector-store/secrets-disposition.ts';
-import { moveTieredItem, TierMoveContentChangedError, type TierMoveEmbeddingIdentity } from '../connector-store/tier-move.ts';
-import type { ConnectorStoreItemCopy, LocalConnectorStore } from '../connector-store/local-index.ts';
-import type { SourceTrustDomain } from '../../core/source-index/types.ts';
+import { moveTieredItem, TierMoveContentChangedError } from '../connector-store/tier-move.ts';
+import type { LocalConnectorStore } from '../connector-store/local-index.ts';
 import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
-import { BUILT_IN_EMBEDDING_PROVIDER } from '../source-index/built-in-embedding/provider.ts';
+import { AUTO_MOVE_WHY, automaticTierMoveOptions, automaticTierMovesAllowed, setEmbedsWithBuiltInOnly } from '../connector-store/tier-auto-move.ts';
 import { BUILT_IN_SNIFFER_LANE } from './built-in-sniffer.ts';
 import type { InstalledTierClassification } from './installed-tier-classification.ts';
 import { snifferId, snifferMaterialCarriesSecret, snifferPromptVersions, type SnifferLaneKind } from './sniffer.ts';
@@ -38,7 +37,7 @@ import {
 } from './sniffer-resolver.ts';
 import { existsSync, rmSync } from 'node:fs';
 import { retiredEmbeddingPrefilterPaths, tierSnifferPathForLedger } from './tier-ledger-path.ts';
-import { tierSetPlannerForLedger } from './installed-tier-classification-registry.ts';
+import { tierSetPlannerForLedger, type AutomaticTierMoveContext } from './installed-tier-classification-registry.ts';
 import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
 import {
   DEFAULT_TIER_REJUDGE_PER_PASS,
@@ -234,10 +233,7 @@ export interface TierSnifferServiceOptions {
    * the item's set embeds with it (free, nothing leaves the Mac). Otherwise
    * the move stays queued for the owner-approved `olympus tier migrate` path.
    */
-  autoMoves?: {
-    localEmbeddingsOnly: () => boolean;
-    /** The embedding ledger each automatic move is recorded in. */
-    embeddingLedgerPath: string;
+  autoMoves?: AutomaticTierMoveContext & {
     maxPerPass?: number;
     /** Fixed lowering slice override; still capped at 25% of judge + moves. Default adapts to backlog. */
     lowerSliceMs?: number;
@@ -1768,12 +1764,7 @@ export class TierSnifferService {
   /** Whether this set's queued moves run automatically (see `autoMoves`). */
   private autoMovesFor(set: TieredStoreSet): boolean {
     const options = this.options.autoMoves;
-    if (!options) return false;
-    try {
-      return options.localEmbeddingsOnly() && setEmbedsWithBuiltInOnly(set);
-    } catch {
-      return false;
-    }
+    return automaticTierMovesAllowed(set, options);
   }
 
   /** Raises run first; lowerings use store batches outside the judge pass. */
@@ -1875,9 +1866,7 @@ export class TierSnifferService {
           pending.push({ record, move: {
             set, identity,
             target: { metadataTier: record.targetMetadataTier!, contentTier: record.targetContentTier! },
-            vectorIdentitiesFor: exported => matchingVectorIdentities(set, exported), timings,
-            embeddingLedger: { path: options.embeddingLedgerPath, approvedBy: 'system-automatic', why: AUTO_MOVE_WHY },
-            replaceOwnSupersededCopy: true, expectedGeneration: record.generation,
+            ...automaticTierMoveOptions(set, options), timings, expectedGeneration: record.generation,
           } });
         }
         if (direction === 'raise') {
@@ -2004,69 +1993,16 @@ function recordIdentity(record: TierLedgerRecord): TierLedgerIdentity {
   };
 }
 
-const AUTO_MOVE_WHY = 'Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).';
-
 function isBuiltInLane(lane: SnifferLane): boolean {
   return lane.kind === BUILT_IN_SNIFFER_LANE.kind
     && lane.profileId === BUILT_IN_SNIFFER_LANE.profileId
     && lane.modelId === BUILT_IN_SNIFFER_LANE.modelId;
 }
 
-/**
- * For each store of the set, its configured embedding identity (or recorded
- * identity when the lane declares none), if it matches the identity the
- * item's vectors were minted under: a move may copy them instead of embedding
- * again. A store with no such identity gets none (it embeds with its own model).
- */
-function matchingVectorIdentities(
-  set: TieredStoreSet,
-  exported: ConnectorStoreItemCopy,
-): Partial<Record<SourceTrustDomain, TierMoveEmbeddingIdentity>> {
-  const identities: Partial<Record<SourceTrustDomain, TierMoveEmbeddingIdentity>> = {};
-  for (const domain of ['public_safe', 'internal', 'secure_local'] as const) {
-    try {
-      const store = set.store(domain);
-      if (!store) continue;
-      const configured = domain === 'secure_local'
-        ? set.privateEmbeddingProvider()
-        : set.legSpec(domain)?.embeddingProvider;
-      const candidates = configured ? [configured] : store.embeddingAuthorities();
-      const own = candidates.find((authority) => exported.vectorAuthorities.some((minted) =>
-        minted.modelId === authority.modelId
-        && minted.provider === authority.provider
-        && minted.backend === authority.backend
-        && minted.dimension === authority.dimension
-        && minted.epochId === authority.epochId));
-      if (!own || (own.backend !== 'local' && own.backend !== 'cloud')) continue;
-      identities[domain] = {
-        modelId: own.modelId,
-        provider: own.provider,
-        backend: own.backend,
-        dimension: own.dimension,
-        epochId: own.epochId,
-        configHash: own.configHash ?? '',
-      };
-    } catch {
-      // That store embeds with its own model.
-    }
-  }
-  return identities;
-}
-
 /** Same candidate predicate for raise preemption and the actual drain. */
 function isAutoMoveCandidate(record: TierLedgerRecord): boolean {
   return record.routed && record.targetMetadataTier !== null && record.targetContentTier !== null
     && record.targetMetadataTier !== 'secrets' && record.targetContentTier !== 'secrets';
-}
-
-/** Every open store of the set embeds (if at all) with the built-in local model only. */
-function setEmbedsWithBuiltInOnly(set: TieredStoreSet): boolean {
-  try {
-    return set.openStores().every((store) => store.embeddingAuthorities()
-      .every((authority) => authority.provider === BUILT_IN_EMBEDDING_PROVIDER));
-  } catch {
-    return false;
-  }
 }
 
 /** Env knobs, all optional. Invalid values fall back to the defaults. */

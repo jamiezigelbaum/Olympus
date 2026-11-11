@@ -9,6 +9,7 @@ import {
   SOURCE_RERANKER_MODEL_DIR_ENV,
   SOURCE_RERANKER_THREADS_ENV,
   SOURCE_RERANKER_POOL_ENV,
+  SOURCE_RERANKER_MAX_TOKENS_ENV,
 } from '../src/workers/source-index/built-in-reranker.ts';
 import { BUILT_IN_RERANKER_MODELS, MS_MARCO_MINILM_L6_V2, MMARCO_MMINILMV2_L12_H384_V1 } from '../src/workers/source-index/built-in-reranker-manifest.ts';
 import type { EmbeddingBatch, EmbeddingRuntime, EmbeddingSession } from '../src/workers/source-index/built-in-embedding/runtime.ts';
@@ -32,6 +33,18 @@ const environment = (path: string) => ({
 const request = () => ({ query: 'invoice', passages: ['hello', ''], signal: new AbortController().signal });
 
 describe('built-in reranker model loading', () => {
+  test.each([['40', 40], ['8', 32], ['9999', 512]] as const)('OLYMPUS_SOURCE_RERANKER_MAX_TOKENS=%s bounds each pair to %d tokens', async (value, limit) => {
+    const path = modelDirectory('wordpiece');
+    let length = 0;
+    const runtime: EmbeddingRuntime = { createSession: async () => ({ run: async (input) => {
+      length = input.sequenceLength;
+      return { data: new Float32Array(input.batchSize), dims: [input.batchSize, 1] };
+    } }) };
+    const reranker = builtInRerankerFromEnv({ env: { ...environment(path), [SOURCE_RERANKER_MAX_TOKENS_ENV]: value }, runtime });
+    await reranker!.score({ ...request(), passages: [Array(1000).fill('hello').join(' ')] });
+    expect(length).toBe(limit);
+  });
+
   test.each(['unigram', 'bpe'] as const)('loads %s tokenizer.json without vocab.txt and pads XLM-R pairs', async (kind) => {
     const path = modelDirectory(kind);
     const batches: EmbeddingBatch[] = [];
