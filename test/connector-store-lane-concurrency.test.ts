@@ -80,7 +80,7 @@ test('the vector scan reads large pages on the read pool and yields at most once
   });
   cleanups.push(cleanup, () => store.close(), () => setReadPoolObserverForTests());
   const provider = new RecordingProvider('built-in', 'yield-model', 'local');
-  // Six 256-row pages of current embeddings on the request thread; one page on the pool.
+  // Six 256-row pages of current embeddings on the request thread; three 512-row pages on the pool.
   await store.syncFromConnector(fixtureConnector(() => Array.from({ length: 1300 }, (_, n) => ({
     id: `n${n}`, name: `note-${n}.txt`, text: `Synthetic note ${n} about item ${n * 7}.`,
   }))), { fetchContent: true });
@@ -105,7 +105,7 @@ test('the vector scan reads large pages on the read pool and yields at most once
   } finally {
     globalThis.setTimeout = realSetTimeout;
   }
-  expect(pages.length).toBe(1);
+  expect(pages.length).toBeLessThanOrEqual(3);
   expect(zeroDelayTimers).toBeLessThanOrEqual(1);
 });
 

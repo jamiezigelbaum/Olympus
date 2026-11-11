@@ -279,3 +279,27 @@ test('a corpus prepares its keywords and its query embedding at once, and the qu
   expect(stages).toBeDefined();
   expect(Object.keys(stages!).sort()).toEqual(['after_lanes_ms', 'lanes_ms', 'prepare_keywords_max_ms', 'prepare_ms', 'prepare_semantic_max_ms']);
 });
+
+test('a search stops waiting for a slow translation, uses the static equivalents, and the translation is cached for later (#1305)', async () => {
+  let finish!: (text: string) => void;
+  let calls = 0;
+  registerBuiltInPrivateModel({ available: () => true, model: { async complete() {
+    calls++;
+    return { text: await new Promise<string>((resolve) => { finish = resolve; }) } as never;
+  } } });
+  const owner = {};
+  await withKeywordRequestScope(async () => {
+    const quick = await expandSourceIndexKeywords('asteroid notary', ['spa'], owner, { waitMs: 0 });
+    expect(quick.get('asteroid')).toBeUndefined();
+    // Pinned for this request: the lanes do not wait either.
+    expect(await expandSourceIndexKeywords('asteroid notary', ['spa'], owner)).toBe(quick);
+  });
+  expect(calls).toBe(1);
+  finish(reply(['asteroide']));
+  await Promise.resolve();
+  await withKeywordRequestScope(async () => {
+    const later = await expandSourceIndexKeywords('asteroid notary', ['spa'], {}, { waitMs: 0 });
+    expect(later.get('asteroid')).toContain('asteroide');
+  });
+  expect(calls).toBe(1);
+});

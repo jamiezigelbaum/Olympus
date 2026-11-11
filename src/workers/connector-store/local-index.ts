@@ -7,7 +7,7 @@ import { extractionJobsDbPaths, oweExtractionRereadAfterRevive } from '../file-e
 import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
 import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled, withKeywordExpansionDisabled } from '../../core/source-index/keyword-context.ts';
 import { lastKeywordLanguages, storeKeywordLanguages, storeKeywordLanguagesWith } from '../../core/source-index/keyword-languages.ts';
-import { expandSourceIndexKeywords, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
+import { expandSourceIndexKeywords, KEYWORD_PREPARE_WAIT_MS, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
 import { controlPathHeadroom, ingestionTurn, type ControlPathHeadroom } from '../control-path-headroom.ts';
 import { OffThreadReadBusyError, offThreadReadsSupported, readOnPool, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
 // The shared connector ingest spine: ONE generic local store that turns any
@@ -2140,8 +2140,12 @@ export interface ConnectorStoreCurrentEmbeddingRow {
 
 const CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256;
 // On the read pool every page is a round trip through the request thread, so
-// pages are larger there: 2,048 vectors of 768 floats are about 6 MB.
-const CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 2048;
+// pages are larger there, but not so large that one page outlasts the lane:
+// the store's other reads wait for the page in flight, and a scan cut at its
+// deadline still finishes its page. 2,048-vector pages took up to 12 s each
+// on a busy large install's copy (#1305), so its keyword rows came back after
+// the lane's deadline; 512 vectors of 768 floats are about 1.5 MB.
+const CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512;
 
 interface ConnectorStoreCurrentEmbeddingRowsOptions {
   modelId: string;
@@ -14941,7 +14945,7 @@ export function createConnectorStoreCorpusAdapter(
     return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => metadataMatches(request), store);
   };
   expanded.selectedItemServable = (sourceItem) => store.selectedItemServable(sourceItem, options.accountScope, filters);
-  expanded.prepareKeywords = async (query) => { await expandSourceIndexKeywords(query, () => store.keywordLanguages(), store); };
+  expanded.prepareKeywords = async (query) => { await expandSourceIndexKeywords(query, () => store.keywordLanguages(), store, { waitMs: KEYWORD_PREPARE_WAIT_MS }); };
   expanded.hybridAvailability = adapter.hybridAvailability;
   expanded.semanticNeighbours = adapter.semanticNeighbours;
   // A local model that is still starting gets the router's preparation budget

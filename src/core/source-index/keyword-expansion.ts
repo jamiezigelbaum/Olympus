@@ -23,11 +23,47 @@ const SYSTEM = 'Translate only the INDIVIDUAL content words in concepts, never t
 
 /** The store's content languages, or a read of them made only when a translation needs them. */
 export type KeywordLanguageProfile = readonly string[] | (() => readonly string[] | Promise<readonly string[]>);
-export async function expandSourceIndexKeywords(query: string, profile: KeywordLanguageProfile, owner?: object): Promise<KeywordExpansionMap> {
+/**
+ * How long a search's preparation waits for the built-in model's translation
+ * before its lanes start on the static equivalents (#1305). On a large
+ * install's copy with the local model busy, the wait was 22-38 s of every
+ * first Ask, ahead of every lane. The translation keeps running and is cached
+ * for the answer's later reads and the next Ask.
+ */
+export const KEYWORD_PREPARE_WAIT_MS = 4_000;
+
+export async function expandSourceIndexKeywords(
+  query: string,
+  profile: KeywordLanguageProfile,
+  owner?: object,
+  options: { waitMs?: number } = {},
+): Promise<KeywordExpansionMap> {
   if (keywordExpansionDisabled()) return EMPTY;
   const pinned = requestKeywordAlternatives(owner, query);
   if (pinned) return pinned;
-  const alternatives = await expandCachedSourceIndexKeywords(query, profile, cachedKeywordExpansion());
+  if (options.waitMs === undefined) {
+    const alternatives = await expandCachedSourceIndexKeywords(query, profile, cachedKeywordExpansion());
+    pinKeywordAlternatives(owner, query, alternatives);
+    return alternatives;
+  }
+  // The profile is read once; a request that stops waiting uses it only if it is in.
+  let languages: readonly string[] | undefined = typeof profile === 'function' ? undefined : profile;
+  let read: Promise<readonly string[]> | undefined;
+  const once: KeywordLanguageProfile = typeof profile === 'function'
+    ? () => (read ??= Promise.resolve(profile()).then((value) => (languages = value)))
+    : profile;
+  const full = expandCachedSourceIndexKeywords(query, once, cachedKeywordExpansion());
+  full.catch(() => {});
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const waited = await Promise.race([
+    full.then((value) => ({ value })),
+    new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), Math.max(0, options.waitMs ?? 0)); }),
+  ]);
+  clearTimeout(timer);
+  // Not translated in time: this request uses what is cached, else the static equivalents.
+  const alternatives = waited
+    ? waited.value
+    : await expandCachedSourceIndexKeywords(query, languages ?? [], { missing: false });
   pinKeywordAlternatives(owner, query, alternatives);
   return alternatives;
 }
