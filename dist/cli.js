@@ -62634,6 +62634,8 @@ var init_vocabulary = __esm(() => {
     privateLine: "Only your private model reads it.",
     judgeChose: "The judge chose {tier}:",
     judgeMarked: "The judge marked this {tier}.",
+    waitingToRead: "Waiting to be read. It stays {tier} until the judge reads it.",
+    namesOnly: "Names only, by your choice. The judge decided it on its name alone.",
     youChose: "You chose {tier}",
     justNow: "just now",
     judgeSaid: "The judge said {tier}.",
@@ -152806,6 +152808,7 @@ function view3(row, state) {
     ...state.ownerTier && (!record4 || record4.contentTier !== state.ownerTier && record4.targetContentTier !== state.ownerTier) ? { owner_choice: tierDisplayName(state.ownerTier) } : {},
     judge_reason: judgeReason(record4),
     ...record4?.state === "pending" && (record4.contentPending || record4.metadataPending) || record4 && !record4.contentRead && record4.reasons.some(isFailSafeMissingContentQuestion) ? { waiting_for_judge: true } : {},
+    ...record4?.reasons.includes(CONTENT_NAMES_ONLY_REASON) ? { names_only: true } : {},
     decided_at: record4?.decidedAt ?? null
   };
 }
@@ -177191,7 +177194,11 @@ function privacyItemsClientScript(input) {
       foot = esc(effect) + ' ' + esc(C.undoGivesBack);
     } else {
       var phrase = reason(item);
-      if (tier) why = '<p class="piwhy" data-pi-why>' + (phrase ? '<b>' + esc(fill(C.judgeChose, { tier: tier })) + '</b> ' + esc(phrase) : esc(fill(C.judgeMarked, { tier: tier }))) + '</p>';
+      // A hold for unread text, or a label from the names alone, is not a verdict on what the item says (#1295).
+      var said = item.waiting_for_judge ? esc(fill(C.waitingToRead, { tier: tier }))
+        : item.names_only ? esc(C.namesOnly)
+          : phrase ? '<b>' + esc(fill(C.judgeChose, { tier: tier })) + '</b> ' + esc(phrase) : esc(fill(C.judgeMarked, { tier: tier }));
+      if (tier) why = '<p class="piwhy" data-pi-why>' + said + '</p>';
       var group = item.sender ? fill(C.promiseGroup, { sender: item.sender }) : C.promiseGroupNoSender;
       foot = esc(fill(C.promise, { group: group }));
     }

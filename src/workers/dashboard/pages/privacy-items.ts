@@ -329,7 +329,11 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
       foot = esc(effect) + ' ' + esc(C.undoGivesBack);
     } else {
       var phrase = reason(item);
-      if (tier) why = '<p class="piwhy" data-pi-why>' + (phrase ? '<b>' + esc(fill(C.judgeChose, { tier: tier })) + '</b> ' + esc(phrase) : esc(fill(C.judgeMarked, { tier: tier }))) + '</p>';
+      // A hold for unread text, or a label from the names alone, is not a verdict on what the item says (#1295).
+      var said = item.waiting_for_judge ? esc(fill(C.waitingToRead, { tier: tier }))
+        : item.names_only ? esc(C.namesOnly)
+          : phrase ? '<b>' + esc(fill(C.judgeChose, { tier: tier })) + '</b> ' + esc(phrase) : esc(fill(C.judgeMarked, { tier: tier }));
+      if (tier) why = '<p class="piwhy" data-pi-why>' + said + '</p>';
       var group = item.sender ? fill(C.promiseGroup, { sender: item.sender }) : C.promiseGroupNoSender;
       foot = esc(fill(C.promise, { group: group }));
     }
