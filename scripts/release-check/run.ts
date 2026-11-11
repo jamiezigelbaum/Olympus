@@ -249,6 +249,11 @@ class Run {
   readonly markers: LeakMarker[] = forbiddenMarkers();
   readonly logLines: string[] = [];
   readonly errors: string[] = [];
+  /**
+   * When the run's time budget ends (epoch ms). Every in-machine call is cut to what is left of it, so a degraded candidate fails the
+   * run inside its budget with the call named, instead of each phase waiting out its own long bound (olympus-ops#156).
+   */
+  deadline = Number.POSITIVE_INFINITY;
   readonly stages = new Map<string, Stage>();
   /** What the update changed, for the report. */
   differences: Difference[] = [];
@@ -339,9 +344,34 @@ class Run {
   }
 
   async agent(sub: string, args = '', timeoutMs = 120_000): Promise<{ result: Record<string, any> | undefined; stdout: string; stderr: string; code: number; ms: number }> {
-    const exec = await this.machine!.exec(`${BUN_LOCATE}\n"$BUN" --no-env-file ~/rc/agent.js ${sub} ${args}\n`, { timeoutMs });
+    const allowed = agentTimeoutMs(timeoutMs, this.deadline, Date.now());
+    const exec = await this.machine!.exec(`${BUN_LOCATE}\n"$BUN" --no-env-file ~/rc/agent.js ${sub} ${args}\n`, { timeoutMs: allowed });
+    if (stoppedByBudget(exec, allowed, timeoutMs)) this.errors.push(`${sub} was stopped when the run's time budget ran out (after ${Math.round(exec.ms / 1000)} s of its ${Math.round(timeoutMs / 1000)} s bound)`);
     return { result: parseAgentLine(exec.stdout), stdout: exec.stdout, stderr: exec.stderr, code: exec.code, ms: exec.ms };
   }
+}
+
+/**
+ * An in-machine call's timeout: its own bound, cut to what is left of the run's budget. Past the budget a call still gets a short
+ * floor, so the evidence and teardown calls after it can run.
+ */
+export const AGENT_PAST_BUDGET_MS = 60_000;
+export function agentTimeoutMs(timeoutMs: number, deadline: number, now: number): number {
+  return Math.min(timeoutMs, Math.max(deadline - now, AGENT_PAST_BUDGET_MS));
+}
+
+/**
+ * The run's time budget when none is given. Fresh runs took about 20 to 30 minutes without the archive-import leg and about 65 with
+ * it, update runs about 75 to 80 with it (green legs, 8 to 10 Nov 2026); each budget is about twice that or more, so only a degraded
+ * candidate reaches it (olympus-ops#156).
+ */
+/** A call cut by the budget that then ran out of time: the harness's timer fired, or the driver stopped it (its timeout exit, 124). */
+export function stoppedByBudget(exec: { code: number; timedOut: boolean }, allowedMs: number, requestedMs: number): boolean {
+  return allowedMs < requestedMs && (exec.timedOut || exec.code === 124);
+}
+
+export function defaultBudgetMs(upgrading: boolean, skipArchive: boolean): number {
+  return (upgrading ? (skipArchive ? 120 : 195) : (skipArchive ? 60 : 135)) * 60_000;
 }
 
 /**
@@ -1481,7 +1511,8 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
   run = new Run(options, driver);
   const judge: Judge | undefined = options.config.judge ? commandJudge(options.config.judge) : undefined;
   const upgrading = options.upgradeFromDir !== undefined;
-  const deadline = Date.now() + (options.budgetMs ?? (upgrading ? 195 : 135) * 60_000);
+  const deadline = Date.now() + (options.budgetMs ?? defaultBudgetMs(upgrading, options.skipArchive === true));
+  run.deadline = deadline;
   const versions = { from: upgrading ? tarballVersion(options.upgradeFromDir!) : undefined, to: upgrading ? tarballVersion(options.candidateDir) : undefined };
   if (upgrading) {
     run.stages.clear();
