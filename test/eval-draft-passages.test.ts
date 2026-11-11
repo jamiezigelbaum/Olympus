@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Database } from 'bun:sqlite';
@@ -72,4 +72,13 @@ test('balanced eligible sampling, local sequential requests, quote verification,
 });
 test('cloud endpoints are rejected before a model request', () => {
   expect(() => localDraftModel({ baseUrl: 'https://api.openai.com/v1', model: 'anything' })).toThrow('local');
+});
+test('a draft set written over an existing readable file is private afterwards', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'eval-draft-mode-')); dirs.push(dir);
+  const output = join(dir, 'questions.json');
+  writeFileSync(output, '{}', { mode: 0o644 }); chmodSync(output, 0o644);
+  const result = { dataset: { version: '2', description: '', questions: [] }, counts: {} } as unknown as Parameters<typeof writeDraftQuestionSet>[1];
+  writeDraftQuestionSet(output, result, () => {});
+  expect(statSync(output).mode & 0o777).toBe(0o600);
+  expect(readdirSync(dir)).toEqual(['questions.json']);
 });

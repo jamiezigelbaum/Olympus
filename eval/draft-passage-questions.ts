@@ -2,7 +2,7 @@
 import { Database } from 'bun:sqlite';
 import { hostname } from 'node:os';
 import { lookup } from 'node:dns/promises';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { SourceItemIdentity, SourceFamily, SourceTrustDomain } from '../src/core/source-index/types.ts';
 import { tierLedgerIdentityKey } from '../src/workers/classification/tier-ledger.ts';
@@ -195,7 +195,13 @@ export async function draftPassageQuestions(input: { opened: EvalDataRoot; count
  */
 export function writeDraftQuestionSet(output: string, result: Awaited<ReturnType<typeof draftPassageQuestions>>, print: (counts: string) => void = console.log): void {
   mkdirSync(dirname(output), { recursive: true, mode: 0o700 });
-  writeFileSync(output, `${JSON.stringify(result.dataset, null, 2)}\n`, { mode: 0o600 });
+  // A new 0600 file renamed into place: writeFileSync's mode applies only on
+  // create, so writing over an existing readable file would keep its mode.
+  const temporary = `${output}.${process.pid}.tmp`;
+  try {
+    writeFileSync(temporary, `${JSON.stringify(result.dataset, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+    renameSync(temporary, output);
+  } finally { rmSync(temporary, { force: true }); }
   print(JSON.stringify(result.counts));
 }
 
