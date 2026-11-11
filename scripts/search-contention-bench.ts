@@ -65,7 +65,7 @@ if (command === 'seed') {
     const items = Math.round(maxItems * (0.1 + 0.9 * (i / Math.max(1, count - 1)) ** 2));
     cpSync(template, path);
     const db = new Database(path);
-    db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF;');
+    db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF;');
     // Bulk SQL copies of the real imported item/chunk. No mock search or substitute index.
     const columns = (table: string) => (db.query(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(c => c.name);
     const quote = (name: string) => `"${name}"`;
