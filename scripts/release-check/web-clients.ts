@@ -1034,8 +1034,12 @@ export async function runWebClients(machine: Machine, options: WebClientsOptions
             if (!('inconclusive' in obs)) obs = { ...obs, olympus: olympusUse(before, await readConnectionUses(machine)) };
             // Claude.ai sometimes loads its tools and then says the connector gives it none in this chat (2026-11-11: 4 of
             // 9 questions, with the Claude App on and off). Asked once more in a new chat; the warning keeps a repeat visible.
-            if (attempt > 1 || 'inconclusive' in obs || !saidNoTools(client, obs.turn)) break;
-            checks.push({ id: `web.${client}.${q.id}.retried`, title: `${CLIENT_ADAPTERS[client].label}: ${q.id}: asked again in a new chat`, status: 'warn', detail: `the first reply said Olympus gave it no tools in that chat: ${obs.turn.slice(0, 200)}` });
+            // A first reply that leaked is kept, so its no-leak check fails rather than being asked away.
+            const forbid = forbiddenFor(q, sharedForbid);
+            if (attempt > 1 || 'inconclusive' in obs) break;
+            const { turn } = obs;
+            if (!saidNoTools(client, turn) || forbid.some((value) => value !== '' && turnContains(turn, value))) break;
+            checks.push({ id: `web.${client}.${q.id}.retried`, title: `${CLIENT_ADAPTERS[client].label}: ${q.id}: asked again in a new chat`, status: 'warn', detail: `the first reply said Olympus gave it no tools in that chat: ${redactForbidden(turn.replace(/\s+/g, ' '), forbid).slice(0, 200)}` });
             await t.sleep(gap);
           }
           // A Secret question the reply points to the computer for is held to the machine's own answer for it.
