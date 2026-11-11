@@ -2939,6 +2939,8 @@ const PRIVATE_NEIGHBOURS_MAX = 4;
 export async function searchPrivateEvidence(input: {
   lanes: (request: SourceIndexAnswerRequest, mode?: 'private_search') => AnalystAnswerLanes;
   question: string;
+  // Claim refresh only: the job's original Private match identities.
+  originalMatches?: readonly Readonly<Record<string, unknown>>[];
   maxResults?: number;
   maxCharsPerCandidate?: number;
   evidenceByteBudget?: number;
@@ -2951,7 +2953,7 @@ export async function searchPrivateEvidence(input: {
   const request: SourceIndexAnswerRequest = {
     question,
     retrieval_mode: 'hybrid',
-    include_internal: false,
+    include_internal: Boolean(input.originalMatches?.length),
     include_secure_local: true,
     include_secure_local_content: true,
     max_results: maxResults,
@@ -2985,12 +2987,42 @@ export async function searchPrivateEvidence(input: {
   const translation: CachedKeywordExpansion = { missing: false };
   let matches = await withCachedKeywordExpansion(translation, () => build(lanes.adapters));
   if (matches.length === 0 && !secretMatch && translation.missing) matches = await build(lanes.adapters);
+  // Rehydrate only original matches in their current lower-tier stores. This
+  // is identity lookup, never a Personal/Public search or cloud query.
+  const selectedItems: SelectedEvidenceItem[] = [];
+  for (const item of input.originalMatches ?? []) {
+    const provenance = item.provenance as SourceIndexProvenance | undefined;
+    if (item.trustDomain !== 'secure_local' || item.neighbour === true || !provenance?.sourceItem?.localItemId) continue;
+    for (const corpus of lanes.registry.list()) {
+      if (corpus.trustDomain !== 'internal' && corpus.trustDomain !== 'public_safe') continue;
+      if (lanes.adapters[corpus.corpusId]?.selectedItemServable?.(provenance.sourceItem) !== true) continue;
+      selectedItems.push({ corpusId: corpus.corpusId, sourceItem: provenance.sourceItem,
+        ...(provenance.citation ? { citation: provenance.citation } : {}),
+      });
+    }
+  }
+  if (selectedItems.length > 0) {
+    const detail = await buildEvidencePackDetailed({
+      question, maxResults, selectedItems,
+      searchContext: { allowedTrustDomains: ['internal', 'public_safe'], allowCloudQueries: false },
+      registry: lanes.registry, adapters: lanes.adapters, contentProviders: lanes.contentProviders,
+      maxCharsPerCandidate: input.maxCharsPerCandidate ?? DEFAULT_MAX_CHARS_PER_CANDIDATE,
+      evidenceByteBudget: input.evidenceByteBudget ?? PRIVATE_EVIDENCE_BYTE_BUDGET,
+    });
+    assertEvidencePackModelEligible(detail.pack);
+    matches.push(...detail.pack.candidates
+      .map((candidate, index) => ({ ...candidate, corpusId: detail.candidateCorpusIds[index] ?? '' }))
+      .filter(candidate => (candidate.trustDomain === 'internal' || candidate.trustDomain === 'public_safe')
+        && candidate.corpusId !== '' && candidate.chunks.length > 0));
+  }
   // Only a question that matched gets neighbours: the count (what leaves this
   // computer) and whether there is a panel at all stay the matches' alone.
   if (matches.length === 0) return { matched: secretMatch ? 1 : 0, candidates: [], ...(secretMatch ? { secretMatch: true } : {}) };
   // Neighbour hydration selects passages too. Keep it in the same cached-only
   // scope, so a match never queues a translation behind a running analysis.
-  const neighbours = await withCachedKeywordExpansion(translation, () => privateNeighbours(lanes.adapters, build, matches));
+  const neighbours = matches.some(candidate => candidate.trustDomain === 'secure_local')
+    ? await withCachedKeywordExpansion(translation, () => privateNeighbours(lanes.adapters, build, matches))
+    : [];
   return { matched: matches.length, candidates: [...matches, ...neighbours], ...(secretMatch ? { secretMatch: true as const } : {}) };
   });
 }
@@ -3214,12 +3246,20 @@ export async function guardSourceAnswerEvidence(input: {
   }
 }
 
+// Lower-tier admission is minted only by a private job for its original matches.
+function privateEvidenceDomain(item: Readonly<Record<string, unknown>>): SourceTrustDomain | undefined {
+  if (item.trustDomain === 'secure_local') return 'secure_local';
+  if (item.privateAnswerOriginalMatch === true && (item.trustDomain === 'internal' || item.trustDomain === 'public_safe')) return item.trustDomain;
+  return undefined;
+}
+
 /**
  * Whether each Private evidence item may be read by a model right now: the
  * private answer panel's eligibility guard, asked immediately before every
  * model submission and before an answer is sealed or released. Per item, from
  * live state only (no search, no cache): the item's corpus is still a
- * registered Private (secure_local) corpus, and its store's content provider
+ * registered Private corpus (or a lower-tier corpus for a job's marked
+ * original match), and its store's content provider
  * would serve its CONTENT now under the owner's current read scope. For a
  * connector store that is `contentServable` (connector-store/local-index.ts):
  * the scope filters, then the item row, a chunk-existence read and one
@@ -3246,7 +3286,7 @@ export async function checkPrivateEvidenceItems(input: {
     lanes = input.lanes({
       question: 'eligibility',
       retrieval_mode: 'keyword',
-      include_internal: false,
+      include_internal: input.items.some(item => item.privateAnswerOriginalMatch === true),
       include_secure_local: true,
       include_secure_local_content: true,
     });
@@ -3257,18 +3297,19 @@ export async function checkPrivateEvidenceItems(input: {
     try {
       const corpusId = typeof item.corpusId === 'string' ? item.corpusId : undefined;
       const provenance = item.provenance as SourceIndexProvenance | undefined;
-      if (!corpusId || !provenance?.sourceItem?.localItemId || item.trustDomain !== 'secure_local') return false;
-      if (lanes.registry.get(corpusId)?.trustDomain !== 'secure_local') return false;
+      const trustDomain = privateEvidenceDomain(item);
+      if (!corpusId || !provenance?.sourceItem?.localItemId || !trustDomain) return false;
+      if (lanes.registry.get(corpusId)?.trustDomain !== trustDomain) return false;
       const provider = lanes.contentProviders[corpusId] as
-        | (LocalContentProvider & { contentServable?: (request: { provenance: SourceIndexProvenance; trustDomain: 'secure_local' }) => boolean })
+        | (LocalContentProvider & { contentServable?: (request: { provenance: SourceIndexProvenance; trustDomain: SourceTrustDomain }) => boolean })
         | undefined;
       if (!provider) return false;
       if (typeof provider.contentServable === 'function') {
-        return provider.contentServable({ provenance, trustDomain: 'secure_local' }) === true;
+        return provider.contentServable({ provenance, trustDomain }) === true;
       }
-      const content = await provider.fetchLocalContent({ provenance, trustDomain: 'secure_local', maxChars: 1 });
+      const content = await provider.fetchLocalContent({ provenance, trustDomain, maxChars: 1 });
       if (!content || content.namesOnly || content.contentPrivate || content.chunks.length === 0) return false;
-      if (content.sensitivity.trustDomain !== 'secure_local') return false;
+      if (content.sensitivity.trustDomain !== trustDomain) return false;
       assertModelTrustTierAllowed(content.sensitivity.trustTier);
       return true;
     } catch {
@@ -3282,8 +3323,8 @@ export async function checkPrivateEvidenceItems(input: {
  * a larger budget: the whole item when it fits `maxChars`, else its passages
  * most relevant to `question` (the store's own selection, the same as at
  * search time). The private answer panel reads an item that clearly leads in
- * depth through this. Private (secure_local) corpora only, through the same
- * content provider, so the store's tier visibility applies as at search time;
+ * depth through this. Private corpora, or a lower-tier corpus for a job's
+ * marked original match, through the same content provider, so the store's tier visibility applies as at search time;
  * undefined when the item is not readable there.
  */
 export async function readPrivateEvidenceItem(input: {
@@ -3294,20 +3335,21 @@ export async function readPrivateEvidenceItem(input: {
 }): Promise<readonly string[] | undefined> {
   const corpusId = typeof input.item.corpusId === 'string' ? input.item.corpusId : undefined;
   const provenance = input.item.provenance as SourceIndexProvenance | undefined;
-  if (!corpusId || !provenance?.sourceItem || input.item.trustDomain !== 'secure_local') return undefined;
+  const trustDomain = privateEvidenceDomain(input.item);
+  if (!corpusId || !provenance?.sourceItem || !trustDomain) return undefined;
   const lanes = input.lanes({
     question: input.question,
     retrieval_mode: 'hybrid',
-    include_internal: false,
+    include_internal: input.item.privateAnswerOriginalMatch === true,
     include_secure_local: true,
     include_secure_local_content: true,
   });
-  if (lanes.registry.get(corpusId)?.trustDomain !== 'secure_local') return undefined;
+  if (lanes.registry.get(corpusId)?.trustDomain !== trustDomain) return undefined;
   const provider = lanes.contentProviders[corpusId];
   if (!provider) return undefined;
   const content = await provider.fetchLocalContent({
     provenance,
-    trustDomain: 'secure_local',
+    trustDomain,
     maxChars: Math.max(1, Math.floor(input.maxChars)),
     query: input.question,
     // In depth: as many of the item's passages as the budget holds.

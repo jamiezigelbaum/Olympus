@@ -7450,10 +7450,11 @@ export async function main(): Promise<void> {
   // EvidencePack build over Private corpora only, so each item carries its
   // own passages, read from the local store. The candidates go only to the
   // private answer job (and the built-in model on this computer); only their
-  // count leaves the engine. The claim-time refresh runs the same search.
+  // count leaves the engine. The claim refresh also follows original matches
+  // that have moved to a lower tier; those still go only to the private job.
   const chatgptPrivateMatchProbe = sourceAnswerLanes
-    ? async (question: string) => {
-        const result = await searchPrivateEvidence({ lanes: sourceAnswerLanes!, question });
+    ? async (question: string, _ctx: import('../../core/operations.ts').OperationContext, originalMatches?: readonly Readonly<Record<string, unknown>>[]) => {
+        const result = await searchPrivateEvidence({ lanes: sourceAnswerLanes!, question, ...(originalMatches ? { originalMatches } : {}) });
         return { count: result.matched, evidence: result.candidates as unknown as readonly Record<string, unknown>[], ...(result.secretMatch ? { secretMatch: true as const } : {}) };
       }
     : undefined;
