@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { createWorkerMessagingCaptureOwnership } from '../src/workers/email-source/server.ts';
+import { createWorkerMessagingCaptureOwnership } from '../src/workers/engine/server.ts';
 
 function deferred() {
   let resolve!: () => void;

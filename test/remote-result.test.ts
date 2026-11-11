@@ -53,7 +53,7 @@ import { handleMcpCallTool } from '../src/mcp/server.ts';
 import { listMcpTools } from '../src/mcp/tools.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { createReleaseTierCheck } from '../src/workers/connector-store/tier-visibility.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import { createInProcessOperationContext, createRemoteMcpHandler, withRemoteFailureBoundary, withRemoteMcpRoute } from '../src/workers/remote-mcp.ts';
 import { AUTHENTICATED_RESPONSE_HEADER, SURFACE_RESPONSE_HEADER } from '../connect-relay/shared/tokens.ts';
@@ -785,7 +785,7 @@ describe('over the wire', () => {
       connections: () => (verifyFails ? throwingStore(store) : store),
       publicUrls: () => urls,
       isRelayed: () => relayed,
-      // Wired as email-source/server.ts wires it: the check rides the context.
+      // Wired as engine/server.ts wires it: the check rides the context.
       makeOperationContext: (caller: OperationCaller, signal: AbortSignal) => {
         if (contextFails) throw new Error('context failed at /Users/secret/LEAK');
         return {

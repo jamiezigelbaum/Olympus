@@ -14,7 +14,7 @@ import { openSecretLocations } from '../src/core/source-storage.ts';
 import { secretLocationsPathForStore } from '../src/workers/classification/secret-locations.ts';
 import { WHATSAPP_LIVE_CORPUS_ID, WHATSAPP_PERSONAL_SOURCE_ID, createWhatsAppTierLane } from '../src/workers/whatsapp/store-sync.ts';
 
-const SERVER = join(import.meta.dir, '..', 'src', 'workers', 'email-source', 'server.ts');
+const SERVER = join(import.meta.dir, '..', 'src', 'workers', 'engine', 'server.ts');
 const REPO = join(import.meta.dir, '..');
 const TOKEN = 'engine-split-connect-token';
 

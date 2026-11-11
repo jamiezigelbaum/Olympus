@@ -28,7 +28,7 @@ import {
   type GuardReportFacts,
 } from '../src/workers/dashboard/embedding-runtime.ts';
 import type { SourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 
 const NOW = new Date('2026-08-24T12:00:00.000Z');

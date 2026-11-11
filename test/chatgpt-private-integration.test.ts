@@ -50,7 +50,7 @@ import { privateAnswerPageHtml } from '../src/workers/chatgpt/private-answer-res
 import { CHATGPT_PRIVATE_ANSWER_JOB_ID } from '../src/workers/dashboard/chatgpt/private-answer.ts';
 import { PRIVATE_ANSWER_PATH_PATTERN } from '../connect-relay/shared/private-answer.ts';
 import { CHATGPT_TOOLS } from '../src/workers/chatgpt/mcp-surface.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { createConnectorStoreContentProvider, createConnectorStoreCorpusAdapter, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';

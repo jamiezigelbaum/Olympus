@@ -262,7 +262,7 @@ test('fresh Mac install seeds the computer question; an existing install never g
 });
 
 test('dashboard server changes require local controls and the computer question precedes privacy writes', async () => {
-  const { createEmailSourceWorker } = await import('../src/workers/email-source/index.ts');
+  const { createEmailSourceWorker } = await import('../src/workers/engine/index.ts');
   const { DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER, DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER } = await import('../src/workers/http.ts');
   const f = fixture(); let computerWrites = 0; let privacyWrites = 0;
   const worker = createEmailSourceWorker({ sourceDashboard: { sovereigntyEngine: createSovereigntyEngine(loadSovereigntyPreset('local-first')), registryPath: join(f.home, 'handles.json'),

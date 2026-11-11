@@ -14,7 +14,7 @@ import {
   type SourceWatchClock,
   type SourceWatchDeliveryLease,
 } from '../src/core/source-watch.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import {
   listSourceWatchPublicViews,
   OpenClawSourceWatchDeliveryTransport,

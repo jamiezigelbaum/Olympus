@@ -651,7 +651,7 @@ export { openClawConfigPath, readOpenClawPluginRemote, type OpenClawPluginRemote
 
 /**
  * The worker's own config, for the launch cli.ts runWorkerForeground validated
- * (workers/email-source/server.ts main): the Gateway's child reads `remote`
+ * (workers/engine/server.ts main): the Gateway's child reads `remote`
  * from the handoff only, any other launch from openclaw.json where OpenClaw
  * runs Olympus.
  */

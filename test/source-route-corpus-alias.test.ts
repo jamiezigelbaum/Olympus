@@ -51,7 +51,7 @@ import {
   LocalSourceWatchStore,
   createTrustedSourceWatchOwnerContext,
 } from '../src/core/source-watch.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import {
   createAnalystSourceIndexAnswerHandler,
   sourceAnswerCorpusIds,
@@ -65,7 +65,7 @@ import type {
   ReadwiseConnectorStoreSyncResult,
 } from '../src/workers/readwise/index.ts';
 
-const WORKER_SOURCE = join(import.meta.dir, '..', 'src', 'workers', 'email-source', 'index.ts');
+const WORKER_SOURCE = join(import.meta.dir, '..', 'src', 'workers', 'engine', 'index.ts');
 const BASE = 'http://worker.test/v1';
 
 // The two ids under test are read from the registry, not written out here.

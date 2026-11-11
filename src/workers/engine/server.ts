@@ -1,4 +1,4 @@
-import { createDashboardPeople } from './dashboard-people.ts';
+import { createDashboardPeople } from '../email-source/dashboard-people.ts';
 import { LocalPeopleIndex, PeopleIndexRefresher, peopleIndexPath, type PeopleSenderIdentity } from '../../core/people-index.ts';
 import { adoptExistingCloudApproval, carryCloudJudgeApproval, createJudgeSetup } from '../classification/judge-setup.ts';
 import { createOwnerTierItems, getOwnerTierItem } from '../classification/tier-owner-items.ts';
@@ -20,7 +20,7 @@ import { saveFirstRunPrivacyChoice, savePrivateAnswerMode } from '../../core/fir
 import { createSpoolChangeSubscription } from '../messaging-spool-wake.ts';
 import { hasFolderLayout, resolvedRawPath, resolvedStorePath, retiredPathSettings } from '../../core/source-placement.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_COPY as PRIVATE_ANSWERS_COPY } from '../dashboard/vocabulary.ts';
-import { anonymousInboxConnectionId, localInboxLabel, askWithAnonymousInbox } from './local-private-answers.ts';
+import { anonymousInboxConnectionId, localInboxLabel, askWithAnonymousInbox } from '../email-source/local-private-answers.ts';
 import { installWorkerShutdownSignals } from '../../core/worker-shutdown.ts';
 import { connectLinuxOwnerBridgeHost, OWNER_BRIDGE_HOST_ENV } from '../../core/linux-owner-bridge-host.ts';
 import { createUpdateChecker, runningOlympusVersion } from '../../core/update-check.ts';
@@ -47,7 +47,7 @@ import {
   type MessagingCaptureStatus,
 } from '../../core/messaging-capture.ts';
 import { whatsappBridgePathForPackage } from '../../core/messaging-pairing.ts';
-import { unlinkHelper } from './dashboard-messaging-service.ts';
+import { unlinkHelper } from '../email-source/dashboard-messaging-service.ts';
 import { NATIVE_CAPTURE_OWNER_ENV_NAMES } from '../../core/native-worker-service.ts';
 import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } from '../../core/model-setup.ts';
 import { workerRestartsItself, type ModelKeyReloadRequest, type WorkerLaunch } from '../../core/model-key-reload.ts';
@@ -65,7 +65,7 @@ import {
   fileExtractionCorporaRoster,
   connectorStoreExtractionCandidateReader,
   parseFileExtractionCorporaEnv,
-} from './file-extraction-runtime.ts';
+} from '../email-source/file-extraction-runtime.ts';
 import { createExtractionReadinessLedger } from '../file-extraction/readiness-ledger.ts';
 import { createUnreadableFiles, createUnreadableVerdict } from '../file-extraction/unreadable-files.ts';
 import { VeniceVlmClient } from '../file-extraction/extractors/venice-client.ts';
@@ -150,7 +150,7 @@ import {
 } from '../../core/venice-model-catalog.ts';
 import { builtInModelEnvValue, readModelChoices, resolveVeniceStrongest } from '../../core/model-choices.ts';
 import { CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT, readConsultSettings } from '../../core/consult-settings.ts';
-import { createModelChoicesBackend, LOCAL_PROFILE_ID, VENICE_PROFILE_ID } from './model-choices-backend.ts';
+import { createModelChoicesBackend, LOCAL_PROFILE_ID, VENICE_PROFILE_ID } from '../email-source/model-choices-backend.ts';
 import {
   assertVeniceAnalystModelAllowed,
   assertVeniceEmbeddingModelAllowed,
@@ -321,10 +321,10 @@ import {
   type ConnectorStoreSearchFilters,
 } from '../connector-store/index.ts';
 import { canonicalConnectorStoreChatPrincipal } from '../connector-store/principal.ts';
-import { createSourceAnswerLanes } from './source-answer-lanes.ts';
+import { createSourceAnswerLanes } from '../email-source/source-answer-lanes.ts';
 import type { ConnectorStoreStatusScope } from '../connector-store/local-index.ts';
 import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
-import { gmailInternalStoreStatusScope, gmailPrivateStoreStatusScope } from './gmail-status-scope.ts';
+import { gmailInternalStoreStatusScope, gmailPrivateStoreStatusScope } from '../email-source/gmail-status-scope.ts';
 import {
   TIER_DOMAIN_ORDER,
   onDemandTierStore,
@@ -459,7 +459,7 @@ import {
 } from '../telegram-messages/media-extraction.ts';
 import { readArchiveInputMedia } from '../archive-import/input-media.ts';
 import { defaultSourceDashboardHistoryDbPath, type DashboardCaptureRuntime, type SourceDashboardViewModel } from '../source-dashboard.ts';
-import type { DashboardPanelTools } from './dashboard-panel-tools.ts';
+import type { DashboardPanelTools } from '../email-source/dashboard-panel-tools.ts';
 import { readEmbeddingRuntime } from '../dashboard/embedding-runtime.ts';
 import {
   SqliteSourceIngestionLedgerStore,
@@ -2329,7 +2329,6 @@ export function connectorStoreAnswerScope(input: {
 
 
 const PEOPLE_INDEX_FIRST_REFRESH_MS = 60_000;
-const PEOPLE_INDEX_REFRESH_MS = 15 * 60_000;
 /** How often the worker checks whether a sync or a tier visibility change needs a rebuild. */
 const PEOPLE_INDEX_CHECK_MS = 60_000;
 
@@ -4045,7 +4044,10 @@ export async function main(): Promise<void> {
   const peopleRefresher = !engineFront && peopleIndex ? new PeopleIndexRefresher(peopleIndex, () => connectorStores) : undefined;
   // After every scheduler tick (below) and on a one-minute check: a
   // rebuild only after a sync or a tier visibility change, at most once a
-  // minute (the markers are cheap to read); `force` rebuilds now.
+  // minute (the markers are cheap to read), reading only the stores that
+  // moved, off this thread (#1305); `force` reads every store again now.
+  // No timer forces a rebuild after startup: the markers cover every change
+  // a rebuild could pick up (#1305; the 15-minute one froze the worker).
   const refreshPeople = (force = false): void => {
     if (engineFront) {
       peopleIndex ??= openPeopleIndexOrUndefined({ readOnly: true });
@@ -4062,9 +4064,24 @@ export async function main(): Promise<void> {
       return;
     }
     if (!peopleRefresher) return;
+    const failed = (error: unknown): void => {
+      console.warn(`[olympus] people index refresh failed: ${error instanceof Error ? error.message : String(error)}`);
+    };
     try {
-      if (force) peopleRefresher.refresh();
-      else peopleRefresher.refreshIfChanged();
+      void (force ? peopleRefresher.refresh() : peopleRefresher.refreshIfChanged()).catch(failed);
+    } catch (error) {
+      failed(error);
+    }
+  };
+  // An owner's correction or contact card: link again at once from the
+  // senders already read; the one-minute check picks up store changes.
+  const relinkPeople = (): void => {
+    if (!peopleRefresher) {
+      refreshPeople(true);
+      return;
+    }
+    try {
+      if (peopleRefresher.relink() === undefined) refreshPeople(true);
     } catch (error) {
       console.warn(`[olympus] people index refresh failed: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -4073,8 +4090,6 @@ export async function main(): Promise<void> {
   peopleFirstRefresh.unref?.();
   const peopleCheck = setInterval(() => refreshPeople(), PEOPLE_INDEX_CHECK_MS);
   peopleCheck.unref?.();
-  const peopleRefresh = setInterval(() => refreshPeople(true), PEOPLE_INDEX_REFRESH_MS);
-  peopleRefresh.unref?.();
 
   // The source-neutral extraction factory. Off unless its roster names a corpus
   // whose connector store is also configured here, so it cannot half-exist: a
@@ -6451,7 +6466,7 @@ export async function main(): Promise<void> {
   let setupStatusNow: (() => Promise<import('../../core/setup-checklist.ts').SetupChecklist>) | undefined;
   // Private answers on this computer (local-private-answers.ts); built below,
   // beside the waiting-question store and the built-in model.
-  let localPrivateAnswers: import('./local-private-answers.ts').LocalPrivateAnswers | undefined;
+  let localPrivateAnswers: import('../email-source/local-private-answers.ts').LocalPrivateAnswers | undefined;
   // What AI apps received (apps-received.ts); built below, beside the waiting questions.
   let appsReceived: import('../apps-received.ts').AppsReceived | undefined;
   let desktopBridge: ReturnType<typeof manageLinuxOwnerBridge> | ReturnType<typeof connectLinuxOwnerBridgeHost> | undefined;
@@ -6650,7 +6665,7 @@ export async function main(): Promise<void> {
             },
             // People (#1076): the people index and the owner's corrections.
             ...(peopleIndex
-              ? { people: createDashboardPeople({ index: peopleIndex, refresh: () => refreshPeople(true) }) }
+              ? { people: createDashboardPeople({ index: peopleIndex, refresh: relinkPeople }) }
               : {}),
             // Private answers on this computer; bound late like the panel's tools.
             ...(sourceAnswerLanes
@@ -7038,8 +7053,8 @@ export async function main(): Promise<void> {
   // embedding model, synthesis by the built-in model; no connector query, no
   // cloud route, and never zkAPI.
   if (sourceAnswerLanes) {
-    const { createLocalAnswerPath, createLocalPrivateAnswers } = await import('./local-private-answers.ts');
-    const { privateVeniceMembers, createVeniceInboxAnswer } = await import('./venice-inbox-answer.ts');
+    const { createLocalAnswerPath, createLocalPrivateAnswers } = await import('../email-source/local-private-answers.ts');
+    const { privateVeniceMembers, createVeniceInboxAnswer } = await import('../email-source/venice-inbox-answer.ts');
     const { DASHBOARD_SUPPORTED_SOURCES } = await import('../source-dashboard.ts');
     // "Left out: Gmail": a corpus named by the dashboard card it belongs to.
     const sourceName = (corpusId: string): string | undefined => {
@@ -7062,8 +7077,8 @@ export async function main(): Promise<void> {
       },
       sourceName,
     });
-    const destinations = (): import('./venice-inbox-answer.ts').AskDestinationStates => {
-      let venice: import('./venice-inbox-answer.ts').AskDestinationState = 'not_allowed';
+    const destinations = (): import('../email-source/venice-inbox-answer.ts').AskDestinationStates => {
+      let venice: import('../email-source/venice-inbox-answer.ts').AskDestinationState = 'not_allowed';
       let veniceModel: string | undefined;
       try {
         const members = privateVeniceMembers(loadSourceWorkerSovereignty(olympusConfig, process.env));
@@ -7115,7 +7130,7 @@ export async function main(): Promise<void> {
     });
     if (frontOwnsPrivateAnswerQueue) localPrivateAnswers.start();
   } else {
-    const { createLocalPrivateAnswers } = await import('./local-private-answers.ts');
+    const { createLocalPrivateAnswers } = await import('../email-source/local-private-answers.ts');
     localPrivateAnswers = createLocalPrivateAnswers({
       destinations: () => ({ computer: 'not_set_up', venice: 'not_set_up' }),
       store: waitingQuestionStore, isActive: connectionActive,
@@ -7423,7 +7438,7 @@ export async function main(): Promise<void> {
   // outside-help settings writer. Wired here at the composition root so the
   // worker module itself never imports the writer; its routes are served
   // only inside an authenticated local control session (workers/http.ts).
-  const { createDashboardConsultAdapter } = await import('./dashboard-consult.ts');
+  const { createDashboardConsultAdapter } = await import('../email-source/dashboard-consult.ts');
   const consultRouteKey = (secretRef: string | undefined): string | undefined => {
     if (!secretRef) return undefined;
     try {
@@ -7624,7 +7639,7 @@ export async function main(): Promise<void> {
   };
   const { withEngineBriefRoute } = await import('../engine-brief-route.ts');
   const { dashboardViewModel: engineBriefView } = await import('../chatgpt/mcp-surface.ts');
-  const { createDashboardPanelTools } = await import('./dashboard-panel-tools.ts');
+  const { createDashboardPanelTools } = await import('../email-source/dashboard-panel-tools.ts');
   const { readSetupWorkerFacts, setupChecklistFromView } = await import('../setup-status.ts');
   const setupWorkerFacts = () => readSetupWorkerFacts({
     version: runningOlympusVersion(),

@@ -319,7 +319,7 @@ describe('the worker boot step', () => {
 
   test('main() takes the lock first, before the registry adoption switch and anything that mounts', () => {
     // main() is the process entry (it starts the server), so this holds the order in the source.
-    const source = readFileSync(join(import.meta.dir, '..', 'src', 'workers', 'email-source', 'server.ts'), 'utf8');
+    const source = readFileSync(join(import.meta.dir, '..', 'src', 'workers', 'engine', 'server.ts'), 'utf8');
     const opening = 'export async function main(): Promise<void> {';
     const body = source.slice(source.indexOf(opening) + opening.length);
     const beforeTake = body.slice(0, body.indexOf('dataOwnerLock = takeWorkerDataOwnerLock('));

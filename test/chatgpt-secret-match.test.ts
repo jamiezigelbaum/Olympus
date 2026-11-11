@@ -10,7 +10,7 @@ import { PrivateAnswerJobs } from '../src/workers/chatgpt/private-answer-jobs.ts
 import { generatePanelKeyPair, openPrivateAnswer, type SealedPrivateAnswer } from '../src/workers/chatgpt/private-answer-crypto.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import { createInProcessOperationContext } from '../src/workers/remote-mcp.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { callChatGptTool } from '../src/workers/chatgpt/mcp-surface.ts';
 import { REMOTE_SECRET_NOTE, REMOTE_PRIVATE_NOTE_PATTERN, remotePrivateNote, withRemotePrivateNote } from '../src/core/remote-result.ts';
 import { PRIVATE_ANSWER_META_KEY } from '../src/workers/chatgpt/private-answer-contract.ts';

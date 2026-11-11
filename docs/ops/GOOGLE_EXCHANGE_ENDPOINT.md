@@ -397,7 +397,7 @@ existing `docs/ops/OAUTH_RELAY.md` note about growing past one route into
 PR #2 (`claude/oauth-relay-worker`, merged) added the worker-side plumbing for
 the relay flow — `src/core/oauth-relay.ts`, `src/core/publisher-oauth-client.ts`,
 and the `/dashboard/connect/oauth/*` routes in
-`src/workers/email-source/index.ts`. This section originally specified, and now
+`src/workers/engine/index.ts`. This section originally specified, and now
 documents as built, the follow-up that makes the dashboard's Google connect
 flow call this endpoint.
 

@@ -15,7 +15,7 @@ import {
 } from '../src/core/sovereignty.ts';
 import type { OAuthFetch } from '../src/core/connect.ts';
 import type { SecretStore } from '../src/core/secret-store.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 
 const dirs: string[] = [];

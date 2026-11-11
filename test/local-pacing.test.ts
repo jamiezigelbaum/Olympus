@@ -131,7 +131,7 @@ test('in the engine split the background reads a choice the front saved', async 
   expect(background.goEasy()).toBe(true);
   await background.refresh();
   expect(background.pace()).toBe('trickle');
-  const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+  const server = readFileSync(join(import.meta.dir, '../src/workers/engine/server.ts'), 'utf8');
   expect(server).toMatch(/if \(engineFront\) void engineFront\.client\.post\(\{ kind: 'reload', target: 'pacing' \}\)/);
   expect(server).toMatch(/if \(target === 'pacing'\) \{ localPacer\.reloadSetting\(\);/);
 });

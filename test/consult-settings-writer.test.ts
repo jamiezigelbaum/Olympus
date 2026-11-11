@@ -278,8 +278,8 @@ describe('the writer stays off every hosted surface', () => {
   /** The only module that may import the writer (value import). */
   const WRITER_IMPORTERS: readonly string[] = [ADAPTER];
   /** The adapter's importers: the composition root (value) and the worker's option type (type-only). */
-  const ADAPTER_VALUE_IMPORTERS: readonly string[] = ['src/workers/email-source/server.ts'];
-  const ADAPTER_TYPE_IMPORTERS: readonly string[] = ['src/workers/email-source/index.ts'];
+  const ADAPTER_VALUE_IMPORTERS: readonly string[] = ['src/workers/engine/server.ts'];
+  const ADAPTER_TYPE_IMPORTERS: readonly string[] = ['src/workers/engine/index.ts'];
   /** Seeds: every hosted entry into the engine. None may reach the writer or the adapter. */
   const HOSTED_SEEDS: readonly string[] = [
     'src/workers/chatgpt/mcp-surface.ts',
@@ -360,6 +360,6 @@ describe('the writer stays off every hosted surface', () => {
   });
 
   test('the composition root reaches the adapter, so the product path exists', () => {
-    expect(importsOf('src/workers/email-source/server.ts').some((entry) => entry.target === ADAPTER && !entry.typeOnly)).toBe(true);
+    expect(importsOf('src/workers/engine/server.ts').some((entry) => entry.target === ADAPTER && !entry.typeOnly)).toBe(true);
   });
 });

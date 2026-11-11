@@ -7428,7 +7428,107 @@ function strongKeysFromText(value) {
   }
   return [...keys];
 }
-var PEOPLE_LINK_REASON_TEXT, MAX_ADDRESS_TEXT_CHARS = 4096, addressesIn = (value) => addressSpansIn(value.slice(0, MAX_ADDRESS_TEXT_CHARS)), PEOPLE_AUTHORED_FAMILIES;
+function authoredStores(stores) {
+  return stores.filter((store) => PEOPLE_AUTHORED_FAMILIES.has(store.family));
+}
+function readStoreObservations(store) {
+  return store.peopleObservationsOffThread ? store.peopleObservationsOffThread() : Promise.resolve(store.peopleObservations());
+}
+function linkStores(index, stores, observations) {
+  const people = index.rebuild([...observations]);
+  const resolver = (provider, senderId, senderLabel) => index.citationName(provider, senderId, senderLabel);
+  for (const store of stores)
+    store.setPeopleNames?.(resolver);
+  return people;
+}
+
+class PeopleIndexRefresher {
+  index;
+  stores;
+  lastFingerprint;
+  lastRefreshAt;
+  now;
+  observed = new Map;
+  inFlight;
+  constructor(index, stores, options = {}) {
+    this.index = index;
+    this.stores = stores;
+    this.now = options.now ?? (() => Date.now());
+  }
+  refresh() {
+    return this.rebuildOnce(true);
+  }
+  async refreshIfChanged() {
+    if (this.inFlight) {
+      await this.inFlight;
+      return false;
+    }
+    const fingerprint = fingerprintParts(authoredStores(this.stores())).join("|");
+    if (fingerprint === this.lastFingerprint)
+      return false;
+    if (this.lastRefreshAt !== undefined && this.now() - this.lastRefreshAt < PEOPLE_INDEX_MIN_REBUILD_MS)
+      return false;
+    await this.rebuildOnce(false);
+    return true;
+  }
+  relink() {
+    if (this.lastRefreshAt === undefined)
+      return;
+    const stores = this.stores();
+    const current2 = new Set(authoredStores(stores));
+    const observations = [...this.observed].filter(([store]) => current2.has(store)).flatMap(([, entry]) => entry.observations);
+    return linkStores(this.index, stores, observations);
+  }
+  rebuildOnce(force) {
+    this.inFlight ??= this.rebuild(force).finally(() => {
+      this.inFlight = undefined;
+    });
+    return this.inFlight;
+  }
+  async rebuild(force) {
+    const stores = this.stores();
+    const authored = authoredStores(stores);
+    const parts = fingerprintParts(authored);
+    this.lastRefreshAt = this.now();
+    const observed = new Map;
+    for (const [position, store] of authored.entries()) {
+      const part = parts[position];
+      const kept = this.observed.get(store);
+      if (!force && kept && kept.part === part && !part.endsWith(UNREADABLE_VISIBILITY)) {
+        observed.set(store, kept);
+        continue;
+      }
+      try {
+        observed.set(store, { part, observations: await readStoreObservations(store) });
+      } catch {
+        parts[position] = `${part}${READ_FAILED}`;
+      }
+    }
+    this.observed = observed;
+    const people = linkStores(this.index, stores, [...observed.values()].flatMap((entry) => entry.observations));
+    this.lastFingerprint = parts.join("|");
+    return people;
+  }
+}
+function fingerprintParts(stores) {
+  return stores.map((store) => {
+    let sync = "";
+    let visibility = "";
+    try {
+      const run = store.lastSyncRun?.();
+      sync = run && run.status === "completed" ? `${run.syncRunId}@${run.completedAt ?? ""}` : "";
+    } catch {
+      sync = "";
+    }
+    try {
+      visibility = store.peopleVisibilityMarker?.() ?? "";
+    } catch {
+      return `${sync}${UNREADABLE_VISIBILITY}`;
+    }
+    return `${sync}#${visibility}`;
+  });
+}
+var PEOPLE_LINK_REASON_TEXT, MAX_ADDRESS_TEXT_CHARS = 4096, addressesIn = (value) => addressSpansIn(value.slice(0, MAX_ADDRESS_TEXT_CHARS)), PEOPLE_AUTHORED_FAMILIES, PEOPLE_INDEX_MIN_REBUILD_MS = 60000, UNREADABLE_VISIBILITY = "#unreadable", READ_FAILED = "!read-failed";
 var init_people_index = __esm(() => {
   init_olympus_layout();
   init_sender_rules();
@@ -22760,6 +22860,14 @@ function createConnectorStoreSenderIndexes(db) {
     CREATE INDEX IF NOT EXISTS idx_connector_store_items_sender_owner
       ON items(sender_is_owner, sender_id);
   `);
+  createConnectorStorePeopleIndex(db);
+}
+function createConnectorStorePeopleIndex(db) {
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_connector_store_items_people
+      ON items(tombstoned, provider, sender_id, sender_label, provider_conversation_id, trust_tier, sender_is_owner)
+      WHERE ${PEOPLE_SENDER_PREDICATE.replaceAll("i.", "")};
+  `);
 }
 function createConnectorStoreEmbeddingModelsTable(db) {
   db.exec(`
@@ -23080,7 +23188,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, READ_ONLY_MIN_SCHEMA_VERSION = 7, LocalConnectorStore, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, LocalConnectorStore, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_store_write_guard();
   init_job_names();
@@ -23298,6 +23406,7 @@ var init_local_index = __esm(() => {
           createConnectorStoreMediaJudgments(this.db);
           createConnectorStoreItemTextVersions(this.db);
           createConnectorStoreVisibilityTables(this.db);
+          createConnectorStorePeopleIndex(this.db);
           validateConnectorStoreSchema(this.db);
         }
         if (options.readOnly !== true)
@@ -25434,18 +25543,42 @@ var init_local_index = __esm(() => {
     }
     peopleObservations() {
       const tierHidden = this.tierHiddenItemPks();
-      const heldSql = this.visibilityJournal && this.visibilitySqlMemo;
-      const rows = this.db.query(`
-      SELECT i.provider AS provider, i.sender_id AS sender_id, i.sender_label AS sender_label,
-        i.provider_conversation_id AS conversation_id, i.trust_tier AS trust_tier,
-        MAX(COALESCE(i.sender_is_owner, 0)) AS is_owner, COUNT(*) AS item_count
-      FROM items i
-      WHERE i.tombstoned = 0
-        AND ((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))
-        AND i.item_pk NOT IN (SELECT value FROM json_each(?))
-        ${heldSql ? "AND NOT EXISTS (SELECT 1 FROM temp.tier_visibility_pks v WHERE v.flag = 'held' AND v.item_pk = i.item_pk)" : ""}
-      GROUP BY i.provider, i.sender_id, i.sender_label, i.provider_conversation_id, i.trust_tier
-    `).all(JSON.stringify(heldSql ? tierHidden.hidden : [...tierHidden.hidden, ...tierHidden.held]));
+      return this.peopleObservationsFromRows(this.readHere(this.peopleObservationSteps(tierHidden)));
+    }
+    async peopleObservationsOffThread() {
+      if (!offThreadReadsSupported(this.dbPath))
+        return this.peopleObservations();
+      for (let attempt = 0;attempt < PEOPLE_OFF_THREAD_READ_ATTEMPTS; attempt += 1) {
+        const marker = this.peopleVisibilityMarker();
+        const tierHidden = await this.tierHiddenItemPksInTurns();
+        const steps = this.peopleObservationSteps(tierHidden);
+        let step = steps.next();
+        while (!step.done)
+          step = steps.next(await readOnPool(this.dbPath, step.value));
+        if (this.peopleVisibilityMarker() === marker)
+          return this.peopleObservationsFromRows(step.value);
+      }
+      return this.peopleObservations();
+    }
+    *peopleObservationSteps(tierHidden) {
+      return yield this.peopleObservationRead([...tierHidden.hidden, ...tierHidden.held]);
+    }
+    peopleObservationRead(excludedItemPks) {
+      return {
+        mode: "all",
+        sql: `
+        SELECT i.provider AS provider, i.sender_id AS sender_id, i.sender_label AS sender_label,
+          i.provider_conversation_id AS conversation_id, i.trust_tier AS trust_tier,
+          MAX(COALESCE(i.sender_is_owner, 0)) AS is_owner, COUNT(*) AS item_count
+        FROM items i
+        WHERE i.tombstoned = 0
+          AND ${PEOPLE_SENDER_PREDICATE}
+          AND i.item_pk NOT IN (SELECT value FROM json_each(?))
+        GROUP BY i.provider, i.sender_id, i.sender_label, i.provider_conversation_id, i.trust_tier`,
+        params: [JSON.stringify(excludedItemPks)]
+      };
+    }
+    peopleObservationsFromRows(rows) {
       const bySender = new Map;
       for (const row of rows) {
         const key2 = `${row.provider}\x00${row.sender_id ?? ""}\x00${row.sender_label ?? ""}`;
@@ -27118,6 +27251,9 @@ var init_local_index = __esm(() => {
       SET sender_id = ?, sender_label = ?, sender_is_owner = ?
       WHERE item_pk = ?
     `);
+      const noteChange = this.db.query(`
+      INSERT INTO item_visibility_feed (provider, account_scope, conversation_key, provider_item_id) VALUES (?, ?, ?, ?)
+    `);
       this.db.transaction(() => {
         for (const record of records) {
           const sender = normalizeSenderMetadata(record);
@@ -27150,8 +27286,12 @@ var init_local_index = __esm(() => {
             continue;
           }
           update.run(senderId, senderLabel, senderIsOwner, row.item_pk);
+          noteChange.run(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
           counts.itemsRepaired += 1;
           outputDigest.update(JSON.stringify({ identity: digestIdentity, status: "repaired" }));
+        }
+        if (counts.itemsRepaired > 0) {
+          this.db.query(`DELETE FROM item_visibility_feed WHERE seq <= (SELECT MAX(seq) - ${ITEM_VISIBILITY_FEED_RETENTION} FROM item_visibility_feed)`).run();
         }
       })();
       return {
@@ -72649,7 +72789,7 @@ import { dirname as dirname43, isAbsolute as isAbsolute16 } from "node:path";
 // src/workers/email-source/dashboard-people.ts
 init_people_index();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_people_index();
 
 // src/workers/classification/judge-setup.ts
@@ -72666,7 +72806,7 @@ init_tier_classifier();
 init_tier_ledger();
 init_tier_rules();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_judge_check();
 
 // src/workers/source-index/built-in-reranker.ts
@@ -72676,7 +72816,7 @@ init_manifest();
 init_runtime();
 init_wordpiece();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_judge_spending();
 init_judge_second_round();
 
@@ -72806,7 +72946,7 @@ init_sniffer_lane();
 init_sniffer();
 var endpoints = new Map;
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_engine_service();
 init_privacy_questions();
 init_sniffer();
@@ -72820,7 +72960,7 @@ init_local_model_policy();
 init_model_transport();
 init_sovereignty();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_first_run_privacy();
 init_source_placement();
 init_vocabulary();
@@ -72840,7 +72980,7 @@ init_update_check();
 var SELF_UPDATE_STALE_MS = 30 * 60000;
 var SELF_UPDATE_SHOWN_MS = 10 * 60000;
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_open_targets();
 init_linux_owner_bridge();
 init_linux_desktop_opener();
@@ -72854,7 +72994,7 @@ init_assets();
 init_transcription_model();
 init_manifest2();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_engine_maintenance();
 init_worker_transport();
 init_package_root();
@@ -73125,7 +73265,7 @@ init_update_check();
 // src/workers/email-source/dashboard-messaging-runner.ts
 var FIELDS = new Set(["api_id", "api_hash", "phone", "code", "password"]);
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_native_worker_service();
 
 // src/core/model-setup.ts
@@ -73136,7 +73276,7 @@ init_embedding_identity();
 var LOCAL_RECHECK_READY_MS = 10 * 60000;
 var LOCAL_RESPONSE_LIMIT_BYTES = 64 * 1024;
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_connect();
 init_worker_auth();
 init_remote_open();
@@ -73145,14 +73285,14 @@ init_remote_open();
 init_atomic_file();
 init_worker_auth();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_file_extraction_runtime();
 
 // src/workers/file-extraction/readiness-ledger.ts
 init_answer_ready_coverage();
 init_control_path_headroom();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_unreadable_files();
 
 // src/core/analyst-openai.ts
@@ -73491,10 +73631,10 @@ init_local_model_policy();
 init_model_transport();
 init_vlm();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_apple_vision_ocr();
 
-// src/workers/email-source/index.ts
+// src/workers/engine/index.ts
 init_judge_spending();
 
 // src/workers/dashboard/components.ts
@@ -74103,13 +74243,13 @@ var COMPUTER_HOST_PAGE_CSP = [
   "frame-ancestors 'none'"
 ].join("; ");
 
-// src/workers/email-source/index.ts
+// src/workers/engine/index.ts
 init_source_failure();
 
 // src/workers/dashboard/models-on-computer.ts
 var LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]", "0.0.0.0"]);
 
-// src/workers/email-source/index.ts
+// src/workers/engine/index.ts
 init_google_own_app();
 init_sovereignty();
 init_first_run_privacy();
@@ -74147,7 +74287,7 @@ var SETTINGS_PROPOSAL_SCHEMA = {
 // src/workers/settings-proposal-holder.ts
 init_privacy_language();
 
-// src/workers/email-source/index.ts
+// src/workers/engine/index.ts
 init_privacy_language();
 init_source_scope_approval();
 init_app_release_agent();
@@ -74168,7 +74308,7 @@ var RETIRED_GOOGLE_PILOT_CLIENT_ID_SHA256 = new Set([
   "de8b8602a0b5d721f22bc9e72a5b193d4cc99577e03db034ff328c8e739d3fee"
 ]);
 
-// src/workers/email-source/index.ts
+// src/workers/engine/index.ts
 init_publisher_oauth_client();
 init_oauth_relay();
 init_connect();
@@ -74224,7 +74364,7 @@ var WORKER_WRITE_ROUTES = WORKER_POST_PATHS.map((path) => ({ method: "POST", pat
 var READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 var WRITE_ROUTES = new Set(WORKER_WRITE_ROUTES.map((route) => `${route.method} ${route.path}`));
 
-// src/workers/email-source/index.ts
+// src/workers/engine/index.ts
 init_judge_check();
 init_unpaired_sources();
 init_pairing_session_paths();
@@ -74236,7 +74376,7 @@ init_olympus_layout();
 init_source_registry();
 init_unpaired_sources();
 
-// src/workers/email-source/index.ts
+// src/workers/engine/index.ts
 init_text();
 init_transcription();
 init_runner();
@@ -74246,7 +74386,7 @@ init_olympus_layout();
 init_answer_latency_trace();
 var DEFAULT_SOURCE_ANSWER_LATENCY_MAX_BYTES = 32 * 1024 * 1024;
 
-// src/workers/email-source/index.ts
+// src/workers/engine/index.ts
 init_answer_latency_trace();
 init_status();
 init_readwise();
@@ -74295,7 +74435,7 @@ function locatorFromScopePath(value) {
   return locator;
 }
 
-// src/workers/email-source/index.ts
+// src/workers/engine/index.ts
 init_dropbox_files();
 init_telegram_messages();
 init_embeddings();
@@ -74316,7 +74456,7 @@ var SOURCE_WATCH_POLICY = Object.freeze({
   evidence_pointers_only: true
 });
 
-// src/workers/email-source/index.ts
+// src/workers/engine/index.ts
 init_corpora();
 
 // src/workers/dashboard/pages/local.ts
@@ -74481,7 +74621,7 @@ init_vocabulary();
 // src/workers/dashboard/index.ts
 init_vocabulary();
 
-// src/workers/email-source/index.ts
+// src/workers/engine/index.ts
 init_dashboard_resource();
 init_dashboard_contract();
 init_vocabulary();
@@ -74496,7 +74636,7 @@ var GUARD_REPORT_MAX_AGE_MS = 5 * 60 * 1000;
 var DRAIN_REPORT_MAX_AGE_MS = 300 * 1000;
 var REPORT_MAX_FUTURE_SKEW_MS = 60 * 1000;
 
-// src/workers/email-source/index.ts
+// src/workers/engine/index.ts
 init_source_dashboard();
 init_credential_health();
 init_source_dispositions();
@@ -74626,7 +74766,7 @@ var CHAT_TITLE_STOPWORDS = new Set([
   "telegram"
 ]);
 
-// src/workers/email-source/index.ts
+// src/workers/engine/index.ts
 init_this_computer();
 init_data_lifecycle();
 init_cli_via_worker();
@@ -75560,7 +75700,7 @@ init_data_lifecycle();
 init_tier_cli();
 init_source_ingestion_ledger();
 
-// src/workers/email-source/index.ts
+// src/workers/engine/index.ts
 init_corpora();
 var CONNECTOR_STORE_FILTER_CAPABILITIES = connectorStoreFilterCapabilityRegistry([
   [{ family: "chat" }, { chatScope: CHAT_SCOPE_FILTER_CODEC }],
@@ -75608,7 +75748,7 @@ var FILE_EXTRACTION_ROUTE_ALIASES = new Map([
   }]
 ]);
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_analyst_answer();
 init_status();
 init_http();
@@ -75625,27 +75765,27 @@ init_operation_error();
 init_model_transport();
 init_analyst();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_analyst_openclaw_infer();
 
 // src/core/model-choices.ts
 init_atomic_file();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_consult_settings();
 
 // src/workers/email-source/model-choices-backend.ts
 init_sovereignty();
 init_manifest2();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_venice_models();
 
 // src/core/query-planner.ts
 init_answer_latency_trace();
 var QUERY_PLANNER_SYSTEM = "Generate up to 3 short, diverse search queries for finding documents that answer this question. " + "Return ONLY a JSON array of strings.";
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_config();
 init_delphi();
 init_sovereignty();
@@ -78383,7 +78523,7 @@ init_display_text();
 init_state();
 init_requests();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_lane();
 init_store();
 init_olympus_layout();
@@ -78425,7 +78565,7 @@ init_store();
 // src/workers/local-files/open-target.ts
 init_paths();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_paths();
 init_source_ingestion_policy();
 init_local_open();
@@ -78491,7 +78631,7 @@ var GMAIL_PROVIDER_ID = "gmail";
 var GMAIL_IMPORT_CONNECTOR_PREFIX = "archive.";
 var GMAIL_IMPORTED_FILTERS = Object.freeze({ provider: GMAIL_PROVIDER_ID, observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX });
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_tiered_store_set();
 init_archive_target();
 init_connector5();
@@ -78506,7 +78646,7 @@ init_live_sync3();
 var EVERNOTE_RATE_LIMIT_RETRY_MS = 15 * 60000;
 var AUTH_KINDS2 = new Set(["auth_missing", "auth_expired", "auth_revoked"]);
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_tier_set2();
 init_tier_set3();
 
@@ -78514,7 +78654,7 @@ init_tier_set3();
 init_parent_label();
 init_tier_ledger();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_child_visibility();
 
 // src/workers/connector-store/tier-visibility.ts
@@ -78587,7 +78727,7 @@ class JudgeBoosts {
 }
 var judgeBoosts = new JudgeBoosts;
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_secret_locations();
 init_source_storage();
 init_provider_account_history();
@@ -78619,7 +78759,7 @@ var SKIP_REASONS = new Set([
 ]);
 var NO_HARD_LINKS = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EMLINK"]);
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_data_owner_lock();
 init_data_lifecycle();
 init_tier_ledger();
@@ -78666,7 +78806,7 @@ var WHATSAPP_LANE_SYNC = Object.freeze({
   deferMetadataOnlyContent: true
 });
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_extraction_factory();
 init_media_extraction();
 init_source_dashboard();
@@ -78827,7 +78967,7 @@ class FileSourceScopeAuthority {
   }
 }
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_file_scope_sources();
 init_source_scope_approval();
 
@@ -78855,7 +78995,7 @@ init_request_budget();
 // src/workers/connector-store/embedding-plan.ts
 init_embeddings();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_source_registry();
 init_gmail_live_sync();
 
@@ -78873,7 +79013,7 @@ init_child_extraction_runtime();
 init_gmail();
 init_request_budget();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_tiered_store_set();
 
 // src/workers/source-account-guard.ts
@@ -78883,7 +79023,7 @@ init_connected_handles();
 init_credential_broker();
 var sourceExclusiveRunners = new Map;
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_provider_account_identity();
 init_request_budget();
 init_gmail();
@@ -78970,7 +79110,7 @@ class InstalledTierClassification {
   }
 }
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_built_in_sniffer();
 init_answer_activity();
 init_privacy_profile();
@@ -82054,7 +82194,7 @@ function moveFailureName(error2) {
   return /^[a-z][a-z ]{0,39}$/.test(error2.message) ? error2.message : "Error";
 }
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_classification_ledger();
 init_tier_migration();
 init_embedding_ledger();
@@ -82281,7 +82421,7 @@ init_source_dashboard();
 // src/core/remote-access-config.ts
 init_http();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 var GMAIL_ATTACHMENT_READER_REUSE_MS = 5 * 60000;
 function requireSourceEmbeddingDimension(options) {
   const configuredKey = options.envKeys.find((key2) => Boolean(options.env[key2]?.trim()));
@@ -82423,7 +82563,6 @@ var CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES = connectorStoreFilterCapabilityR
   [{ family: "file", provider: "dropbox" }, { approvedScope: DROPBOX_APPROVED_SCOPE_FILTER_CODEC }],
   [{ family: "file", provider: LOCAL_FILES_PROVIDER }, { approvedScope: LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC }]
 ]);
-var PEOPLE_INDEX_REFRESH_MS = 15 * 60000;
 function firstNonEmptyEnv2(env, names) {
   for (const name of names) {
     const value = optionalEnv(env, name);
