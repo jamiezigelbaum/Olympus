@@ -32,7 +32,7 @@ import type { EvidenceReranker } from '../src/core/evidence-reranker.ts';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createAnalyst, type AnalystModel } from '../src/core/analyst.ts';
+import { analystPromptBytes, createAnalyst, type AnalystModel } from '../src/core/analyst.ts';
 import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { createDelphiAnalystModel } from '../src/core/analyst-delphi.ts';
 import {
@@ -67,7 +67,7 @@ import {
   type AnalystAnswerLanes,
   type AnalystReleaseOutcome,
 } from '../src/workers/source-index/analyst-answer.ts';
-import type { Analyst, AnalystResult, EvidencePack } from '../src/core/contracts.ts';
+import type { Analyst, AnalystOptions, AnalystResult, EvidencePack } from '../src/core/contracts.ts';
 import type { OpsecReleaseAudit } from '../src/core/opsec.ts';
 import type { SourceTrustDomain } from '../src/core/source-index/types.ts';
 import type { SourceIndexCorpusSearchAdapter } from '../src/core/source-index/router.ts';
@@ -243,11 +243,16 @@ async function main(): Promise<void> {
   const rawResultsByPack = new WeakMap<object, AnalystResult>();
   // The pack seats (1-based) the Analyst was actually sent, per pack.
   const analystSeatsByPack = new WeakMap<object, number[]>();
+  // Where the bytes of the prompt each pack was sent as went.
+  const promptLayoutByPack = new WeakMap<object, EvalPromptLayout>();
   const fittedAnalyst = promptFittedEvalAnalyst(
     analyst,
     analystPromptByteBudget,
     (pack) => detailsByPack.get(pack)?.candidateCorpusIds,
-    (pack, seats) => analystSeatsByPack.set(pack, seats),
+    (pack, seats, sent, analyzeOptions) => {
+      analystSeatsByPack.set(pack, seats);
+      promptLayoutByPack.set(pack, evalPromptLayout(sent, analyzeOptions));
+    },
     (pack) => detailsByPack.get(pack)?.recencySeats,
   );
   const repeatsByPack = new WeakMap<object, { results: AnalystResult[]; failures: number }>();
@@ -338,6 +343,7 @@ async function main(): Promise<void> {
             }
             : {}),
           ...(seatOnlyByPack.has(pack) ? { expectedSeatOnly: expectedSeatOnlyAudit(question, seatOnlyByPack.get(pack)!) } : {}),
+          ...(promptLayoutByPack.has(pack) ? { promptLayout: promptLayoutByPack.get(pack)! } : {}),
         },
       });
     },
@@ -1129,6 +1135,34 @@ export function failIncompleteRetrieval<R extends EvalReport>(
 }
 
 /**
+ * Where the bytes of the Analyst's prompt go, for the pack as sent: the
+ * text every prompt carries (system rules, question, coverage), each seat's
+ * header (name, trust, provenance and citation labels) and each seat's
+ * passages, plus what the same seats would cost in the compact evidence
+ * format. Byte counts only, never text.
+ */
+export interface EvalPromptLayout {
+  promptBytes: number;
+  fixedBytes: number;
+  seats: Array<{ headerBytes: number; passageBytes: number }>;
+  compactPromptBytes: number;
+}
+
+export function evalPromptLayout(sent: EvidencePack, options: AnalystOptions): EvalPromptLayout {
+  const bytes = (candidates: EvidencePack['candidates']) => analystPromptBytes({ ...sent, candidates }, options);
+  const fixedBytes = bytes([]);
+  return {
+    promptBytes: analystPromptBytes(sent, options),
+    fixedBytes,
+    seats: sent.candidates.map((candidate) => {
+      const header = bytes([{ ...candidate, chunks: [] }]);
+      return { headerBytes: header - fixedBytes, passageBytes: bytes([candidate]) - header };
+    }),
+    compactPromptBytes: analystPromptBytes(sent, options, 'compact'),
+  };
+}
+
+/**
  * The Analyst as Ask's local leg runs it: the pack fitted to the leg's prompt
  * budget (fitPackToPromptBytes, Ask's own fit), or sent whole without a
  * budget. Told the 1-based pack seats each Analyst call was sent.
@@ -1137,7 +1171,7 @@ export function promptFittedEvalAnalyst(
   analyst: Analyst,
   promptByteBudget: number | undefined,
   candidateCorpusIds: (pack: EvidencePack) => readonly string[] | undefined,
-  onSeats: (pack: EvidencePack, seats: number[]) => void,
+  onSeats: (pack: EvidencePack, seats: number[], sent: EvidencePack, analyzeOptions: AnalystOptions) => void,
   recencySeats: (pack: EvidencePack) => number | undefined = () => undefined,
 ): Analyst {
   return {
@@ -1153,7 +1187,7 @@ export function promptFittedEvalAnalyst(
           recencySeats(pack),
         );
       onSeats(pack, sent.candidates.map((candidate) =>
-        pack.candidates.findIndex((original) => original.provenance === candidate.provenance) + 1));
+        pack.candidates.findIndex((original) => original.provenance === candidate.provenance) + 1), sent, analyzeOptions ?? {});
       return analyst.analyze(sent, analyzeOptions);
     },
   };

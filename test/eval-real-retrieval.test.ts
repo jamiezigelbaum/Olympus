@@ -7,7 +7,7 @@
 // Synthetic data only: fixture stores in a temp folder, a scripted model.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { createAnalyst, type AnalystModel } from '../src/core/analyst.ts';
+import { analystPromptBytes, createAnalyst, type AnalystModel } from '../src/core/analyst.ts';
 import type { AnalystResult, EvidencePack } from '../src/core/contracts.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { DROPBOX_TIER_CORPUS_IDS } from '../src/workers/dropbox-files/connector-store.ts';
@@ -17,6 +17,7 @@ import {
   createEvalDropboxLanes,
   evalAnswerRepeat,
   evalAnswerStageAudit,
+  evalPromptLayout,
   failIncompleteRetrieval,
   evalRetrievalAudit,
   informationalEvalMaxResults,
@@ -666,5 +667,36 @@ describe('the dataset shape the runner reads', () => {
     const dataset = await Bun.file(new URL('../eval/questions/held-out.json', import.meta.url)).json() as import('../eval/types.ts').EvalDataset;
     const withNotes = dataset.questions.filter((question) => typeof question.notes === 'string' && question.notes.length > 0);
     expect(withNotes.length).toBe(dataset.questions.length);
+  });
+});
+
+describe('evalPromptLayout', () => {
+  test("splits the sent prompt's bytes into fixed text, each seat's header and each seat's passages, and prices the compact format", () => {
+    const options = { localOnly: true };
+    const seat = (index: number, chunks: string[]) => ({
+      provenance: {
+        sourceItem: { family: 'chat', provider: 'telegram', accountScope: 'personal', providerItemId: `m-${index}`, localItemId: `m-${index}` },
+        citation: { title: `Message ${index}`, sourceLabel: 'Telegram', conversationLabel: 'Group', authorLabel: 'Ana', uri: `telegram://chat/1/message/${index}`, authoredAt: '2026-10-02T14:31:07.000Z' },
+      },
+      trustTier: 'S2',
+      trustDomain: 'secure_local',
+      chunks,
+    }) as EvidencePack['candidates'][number];
+    const sent: EvidencePack = {
+      question: 'When does the lease end?',
+      candidates: [seat(1, ['lease ends 31 May 2027', 'renewal "notice" due']), seat(2, []), seat(3, ['café receipt'])],
+      coverage: { searchedCorpora: ['a'], skippedCorpora: [], extractionGaps: [] },
+      builtAt: '2026-11-11T00:00:00Z',
+    };
+    const layout = evalPromptLayout(sent, options);
+    expect(layout.promptBytes).toBe(analystPromptBytes(sent, options));
+    expect(layout.compactPromptBytes).toBe(analystPromptBytes(sent, options, 'compact'));
+    expect(layout.seats).toHaveLength(3);
+    expect(layout.seats[1]!.passageBytes).toBe(0);
+    for (const entry of layout.seats) expect(entry.headerBytes).toBeGreaterThan(0);
+    const sum = layout.fixedBytes + layout.seats.reduce((total, entry) => total + entry.headerBytes + entry.passageBytes, 0);
+    // Blocks are joined by a blank line.
+    expect(sum + 2 * (sent.candidates.length - 1)).toBe(layout.promptBytes);
+    expect(layout.seats[0]!.passageBytes).toBeGreaterThan(Buffer.byteLength(JSON.stringify(['lease ends 31 May 2027', 'renewal "notice" due'])));
   });
 });
