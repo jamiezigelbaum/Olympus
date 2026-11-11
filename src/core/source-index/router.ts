@@ -913,7 +913,7 @@ export function resolveLaneTimeoutMs(explicit: number | undefined): number {
   return parsed;
 }
 
-/** The whole-Ask search budget (BuildEvidencePackInput.searchBudgetMs). */
+// The whole-Ask search budget (BuildEvidencePackInput.searchBudgetMs).
 export function resolveAskSearchBudgetMs(explicit: number | undefined): number {
   if (explicit !== undefined) return explicit;
   const raw = process.env.OLYMPUS_SOURCE_ANSWER_SEARCH_BUDGET_MS?.trim();
