@@ -839,16 +839,6 @@ testers have exercised the normal product journey without custom engineering.
   needs too, then the split's open failures (#1324), then the switch-on
   check, then the 48 hours. The ChatGPT and Grok submissions wait with 1.5.
   This reverses the next entry.
-- **2026-11-11 — The Claude dashboard passed its phone proof.** On the
-  Claude iPhone app nothing but a tool's `content` reached the model, so
-  the condition of the 2026-11-10 entry below holds on web, desktop and
-  phone (#1303). The iPhone app runs the tools but does not show MCP App
-  panels; Android is untested. The dashboard ships in 1.5 on by default for
-  Claude, with a setting to turn it off, if before the release candidate
-  each tool's text result stands on its own on a phone, the release checks
-  have a Claude leg that reruns the proof, and the release note says the
-  dashboard opens on web and desktop while phone apps show text answers.
-  Otherwise the switch ships off by default.
 - **2026-11-11 — (Reversed the same day, see above.) 1.5 does not wait for
   the engine split.** Taken by the
   release plan's own fallback rule (move 1 of 1.5), and the owner was told.
