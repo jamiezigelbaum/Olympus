@@ -165,6 +165,12 @@ local Dropbox index and a reachable Argus lane:
    For ordering runs that must not depend on machine load, lift the per-store
    lane deadline with `OLYMPUS_SOURCE_ANSWER_LANE_TIMEOUT_MS=120000` (0 turns
    it off) and report deadline losses at the product cap separately.
+   To tell a steady Analyst misreading from a coin flip, set
+   `OLYMPUS_EVAL_ANALYST_REPEATS=3` (and optionally
+   `OLYMPUS_EVAL_ANALYST_REPEAT_QUESTIONS=value-2,secure-summary-1`): the
+   Analyst answers each named question's frozen pack that many times. The
+   first answer is graded; the others are listed in `answerRepeats` by shape,
+   cited seats and value flags only. Raise the question timeout to match.
    The shared Analyst also caps model output at 1,600 characters by default so
    local eval questions fail or answer quickly instead of generating long JSON.
 

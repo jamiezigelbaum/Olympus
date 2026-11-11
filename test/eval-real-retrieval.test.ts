@@ -15,11 +15,13 @@ import type { AnalystReleaseOutcome } from '../src/workers/source-index/analyst-
 import {
   buildEvalPack,
   createEvalDropboxLanes,
+  evalAnswerRepeat,
   evalAnswerStageAudit,
   failIncompleteRetrieval,
   evalRetrievalAudit,
   informationalEvalMaxResults,
   promptFittedEvalAnalyst,
+  repeatedEvalAnalyst,
   openEvalDropboxStores,
   prepareEvalEmbedding,
   releaseEvalAnswer,
@@ -274,6 +276,46 @@ describe('the real eval report locates an expected item and value for a miss', (
     // A citation naming nothing in the pack is counted, not seated.
     const stray = { ...citing(), citations: [{ provenance: { sourceItem: { localItemId: 'elsewhere' } }, claim: 'x' }] } as unknown as AnalystResult;
     expect(evalAnswerStageAudit(question, pack, stray, stray)).toMatchObject({ answerCitedSeats: [], answerCitationsOutsidePack: 1 });
+  });
+});
+
+describe('Analyst repeats on a frozen pack', () => {
+  test('the Analyst answers the same pack again, and the first answer is the graded one', async () => {
+    const pack = { question: 'q', candidates: [], coverage: { searchedCorpora: [], skippedCorpora: [], extractionGaps: [] }, builtAt: 't' } as never;
+    const seen: unknown[] = [];
+    let call = 0;
+    const inner = { analyze: async (sent: unknown) => { seen.push(sent); call += 1; return { answer: `answer ${call}`, citations: [], unanswered: [] } as unknown as AnalystResult; } };
+    const repeats: AnalystResult[][] = [];
+    const result = await repeatedEvalAnalyst(inner, 2, (_pack, extra) => repeats.push(extra)).analyze(pack, {} as never);
+    expect(result.answer).toBe('answer 1');
+    expect(seen).toEqual([pack, pack, pack]);
+    expect(repeats.map((extra) => extra.map((r) => r.answer))).toEqual([['answer 2', 'answer 3']]);
+    // A repeat that fails is counted; the graded first answer still stands.
+    let calls = 0;
+    const flaky = { analyze: async () => { calls += 1; if (calls === 2) throw new Error('provider down'); return { answer: `answer ${calls}`, citations: [], unanswered: [] } as unknown as AnalystResult; } };
+    const failures: number[] = [];
+    const graded = await repeatedEvalAnalyst(flaky, 2, (_pack, extra, failed) => failures.push(extra.length, failed)).analyze(pack, {} as never);
+    expect(graded.answer).toBe('answer 1');
+    expect(failures).toEqual([1, 1]);
+    // No extra runs: the Analyst itself, untouched.
+    expect(repeatedEvalAnalyst(inner, 0, () => {})).toBe(inner);
+  });
+
+  test('a repeat is summarized by shape, cited seats and value flags only', async () => {
+    const { stores, ledger } = await twoTierWorld();
+    const lanes = createEvalDropboxLanes({ stores, ...(ledger ? { ledger } : {}), scope: { accountScope: 'personal' } });
+    const { pack } = await buildEvalPack({ question: 'What is the Kestrel boatyard invoice total?', lanes, maxResults: 5, maxCharsPerCandidate: 1_500 });
+    const cited = (answer: string) => ({ answer, citations: [{ provenance: pack.candidates[0]!.provenance, claim: 'total' }], unanswered: [] }) as unknown as AnalystResult;
+    const question = { expectedAnswerContains: ['4182', 'April'] };
+    expect(evalAnswerRepeat(question, pack, cited('The total is 4182 dollars [1].'))).toEqual({
+      answerShape: 'partial',
+      answerCitedSeats: [1],
+      valuesInAnswer: [true, false],
+      answerValueTokens: 1,
+      answerValueTokensInCitedSeats: 1,
+      answerValueTokensUnmatchedShapes: [],
+    });
+    expect(JSON.stringify(evalAnswerRepeat(question, pack, cited('The total is 4137 dollars.')))).not.toContain('4137');
   });
 });
 
