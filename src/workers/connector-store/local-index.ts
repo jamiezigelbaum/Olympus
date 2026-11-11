@@ -8956,6 +8956,9 @@ export class LocalConnectorStore {
       SET sender_id = ?, sender_label = ?, sender_is_owner = ?
       WHERE item_pk = ?
     `);
+    const noteChange = this.db.query(`
+      INSERT INTO item_visibility_feed (provider, account_scope, conversation_key, provider_item_id) VALUES (?, ?, ?, ?)
+    `);
 
     this.db.transaction(() => {
       for (const record of records) {
@@ -9013,8 +9016,16 @@ export class LocalConnectorStore {
           senderIsOwner,
           row.item_pk,
         );
+        // Who wrote an item is not visibility, so no trigger notes it, but the
+        // people index reads it: noted here, the change moves every
+        // connection's people marker and the refresh reads this store again
+        // (#1305; nothing forces a periodic rebuild any more).
+        noteChange.run(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
         counts.itemsRepaired += 1;
         outputDigest.update(JSON.stringify({ identity: digestIdentity, status: 'repaired' }));
+      }
+      if (counts.itemsRepaired > 0) {
+        this.db.query(`DELETE FROM item_visibility_feed WHERE seq <= (SELECT MAX(seq) - ${ITEM_VISIBILITY_FEED_RETENTION} FROM item_visibility_feed)`).run();
       }
     })();
 

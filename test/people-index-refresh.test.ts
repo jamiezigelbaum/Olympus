@@ -14,7 +14,7 @@ import {
 } from '../src/core/people-index.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { createTestClock } from './helpers/test-clock.ts';
-import { FIXTURE_PLACEMENT, fixtureConnector, identityOf, openTierFixture, tempDir, type FixtureSpec } from './helpers/tier-fixtures.ts';
+import { FIXTURE_PLACEMENT, fixtureConnector, fixtureItem, identityOf, openTierFixture, tempDir, type FixtureSpec } from './helpers/tier-fixtures.ts';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {
@@ -55,6 +55,28 @@ describe('people index refresh on a visibility change', () => {
     expect(await refresher.refreshIfChanged()).toBe(false);
     await clock.advance(PEOPLE_INDEX_MIN_REBUILD_MS / 2);
     expect(await refresher.refreshIfChanged()).toBe(true);
+  });
+
+  test("a store's marker moves when a sender repair changes who wrote an item", async () => {
+    const { dir, cleanup } = tempDir('olympus-people-repair-');
+    const fixture = openTierFixture(dir, { embed: false });
+    cleanups.push(() => {
+      fixture.close();
+      cleanup();
+    });
+    const specs: FixtureSpec[] = [{ id: 'note-1', name: 'note-1.txt', text: 'a note' }];
+    await fixture.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    const internal = fixture.stores.internal!;
+    const before = internal.peopleVisibilityMarker();
+    const unchanged = internal.repairSenderMetadata({ records: [] });
+    expect(unchanged.counts.itemsRepaired).toBe(0);
+    expect(internal.peopleVisibilityMarker()).toBe(before);
+    const repaired = internal.repairSenderMetadata({
+      records: [{ sourceItem: fixtureItem(specs[0]!).identity, senderId: 'quinn@example.com', senderLabel: 'Quinn Holloway' }],
+    });
+    expect(repaired.counts.itemsRepaired).toBe(1);
+    expect(internal.peopleVisibilityMarker()).not.toBe(before);
+    expect(internal.peopleObservations().map((o) => o.senderId)).toEqual(['quinn@example.com']);
   });
 
   test("a store's marker moves when a copy's tier visibility changes, not on a read", async () => {
