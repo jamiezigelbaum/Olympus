@@ -33681,14 +33681,16 @@ function withReservedRecencySeats(seated, pool, budget) {
     if (at > seat)
       hits.splice(at, 1);
     else if (hits.length >= budget) {
-      let drop = -1;
-      for (let index = hits.length - 1;index >= RESERVED_HEAD_SEATS; index -= 1) {
-        const candidate = hits[index];
-        if (!reserved.has(candidate) && storeSeats(candidate.corpusId) > 1) {
-          drop = index;
-          break;
+      const droppable = (onlySeatToo) => {
+        for (let index = hits.length - 1;index >= RESERVED_HEAD_SEATS; index -= 1) {
+          const candidate = hits[index];
+          if (!reserved.has(candidate) && (onlySeatToo || storeSeats(candidate.corpusId) > 1))
+            return index;
         }
-      }
+        return -1;
+      };
+      const laterResult = droppable(false);
+      const drop = laterResult >= 0 ? laterResult : droppable(true);
       if (drop < 0)
         break;
       hits.splice(drop, 1);
@@ -35742,6 +35744,7 @@ function createConnectorStoreCorpusAdapter(options) {
           const hits2 = withKeywordLeaderSignals(rows.map((row) => connectorStoreHitFromRow(store, row, -row.rank, options.resultProjector, filters?.locatorPathScope)), keywordLane);
           return {
             hits: hits2,
+            storeRelevance: connectorStoreRelevance(keywordLane),
             latencyMs: Date.now() - startedAt,
             laneAudits: [{
               ...connectorStoreKeywordLaneAudit(store.corpusId, rows.length, hits2.length),
@@ -35775,6 +35778,7 @@ function createConnectorStoreCorpusAdapter(options) {
         }), keywordLane);
         return {
           hits,
+          storeRelevance: connectorStoreRelevance(keywordLane),
           latencyMs: Date.now() - startedAt,
           laneAudits: [
             {
@@ -36005,6 +36009,7 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
   const contentBar = relevanceBar ?? CALIBRATED_CONTENT_PREFERENCE_BARS.get(provider.modelId);
   const vettedVectorItemIds = new Set(contentBar === undefined ? [] : vectorRows.filter((row) => row.bestCosine >= contentBar).map((row) => row.sourceItem.localItemId));
   const contentPreference = connectorStoreContentPreference(vettedVectorItemIds);
+  const vettedMargin = contentBar === undefined || vettedVectorItemIds.size === 0 ? undefined : Math.max(...vectorRows.filter((row) => vettedVectorItemIds.has(row.sourceItem.localItemId)).map((row) => row.bestCosine)) - contentBar;
   const lanes = [
     { name: "keyword", items: keywordRows },
     { name: "vector", items: vectorRows },
@@ -36032,6 +36037,7 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
   }), keywordLane);
   return {
     hits,
+    storeRelevance: connectorStoreRelevance(keywordLane, vettedMargin),
     latencyMs: Date.now() - startedAt,
     laneAudits: [
       { ...connectorStoreKeywordLaneAudit(store.corpusId, keywordRows.length, keywordRows.length), elapsedMs: keywordElapsedMs },
@@ -36172,6 +36178,13 @@ function withKeywordLeaderSignals(hits, lane) {
     return kinds.length === 0 ? hit : { ...hit, keywordLeader: { kinds, conceptShare: lane.conceptShare.get(id) ?? 0 } };
   });
 }
+function connectorStoreRelevance(lane, vectorMargin) {
+  let conceptShare = 0;
+  for (const share of lane.conceptShare?.values() ?? [])
+    if (share > conceptShare)
+      conceptShare = share;
+  return { conceptShare, ...vectorMargin !== undefined ? { vectorMargin } : {} };
+}
 function keywordExpansionChangesSearch(query, ftsOptions) {
   const shape = () => JSON.stringify([toFtsQuery(query, ftsOptions), sourceIndexFtsTermGroups(query), sourceIndexTopicTokens(query)]);
   return shape() !== withKeywordExpansionDisabled(shape);
@@ -36186,6 +36199,8 @@ function revalidateKeywordLane(store, lane) {
     allRows,
     matchedItemIds: served,
     completeItemIds: new Set([...lane.completeItemIds].filter((id) => served.has(id))),
+    ...lane.nameLeaderItemId !== undefined && served.has(lane.nameLeaderItemId) ? { nameLeaderItemId: lane.nameLeaderItemId } : {},
+    ...lane.conceptShare ? { conceptShare: new Map([...lane.conceptShare].filter(([id]) => served.has(id))) } : {},
     matchCount: {
       matchedItems: allRows.length,
       contentMatchedItems: allRows.filter(connectorStoreRowHasContent).length,
@@ -74761,6 +74776,7 @@ async function routePreparedSourceIndexSearch(options) {
       secureLaneAudits.push(...laneAudits.slice(corpusLaneAuditsStart));
     lanes.push({
       name: corpus.corpusId,
+      ...response.storeRelevance ? { relevance: response.storeRelevance } : {},
       items: response.hits.map((hit) => ({
         ...hit,
         corpusId: corpus.corpusId,
@@ -74773,7 +74789,7 @@ async function routePreparedSourceIndexSearch(options) {
     for (const lane of lanes)
       lane.items = lane.items.filter((hit) => kept.has(hit));
   }
-  const laneOrder = new Map(lanes.map((lane, index) => [lane.name, index]));
+  const laneOrder = storeOrderForQuestion(lanes);
   const fusedAll = fuseRankedCandidateLanes({
     lanes,
     getId: routedHitCandidateId,
@@ -74814,6 +74830,15 @@ function corpusContributedSecure(corpus, response) {
     return true;
   }
   return positiveCount && (count.secureMatchedItems === undefined || count.secureMatchedItems > 0);
+}
+function storeOrderForQuestion(lanes) {
+  const keyword = (lane) => {
+    const share = lane.relevance?.conceptShare ?? 0;
+    return share >= STORE_ORDER_MIN_CONCEPT_SHARE ? share : 0;
+  };
+  const vector = (lane) => lane.relevance?.vectorMargin ?? Number.NEGATIVE_INFINITY;
+  const ordered = lanes.map((lane, index) => ({ lane, index })).sort((left, right) => keyword(right.lane) - keyword(left.lane) || (vector(right.lane) === vector(left.lane) ? 0 : vector(right.lane) > vector(left.lane) ? 1 : -1) || left.index - right.index);
+  return new Map(ordered.map(({ lane }, index) => [lane.name, index]));
 }
 function compareTiedRoutedCandidates(left, right, laneOrder) {
   const bestRank = bestLaneRank(left) - bestLaneRank(right);
@@ -75066,7 +75091,7 @@ function assertNoForbiddenRouterResultKeys(value, path) {
 function normalizeRouterResultKey(key2) {
   return key2.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
-var REAL_LANE_CLOCK, DEFAULT_SEMANTIC_PREPARE_BUDGET_MS = 15000, DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 1e4, COOPERATIVE_LANE_DEADLINE_HEADROOM_MS = 50, HELD_THREAD_LATE_TIMER_MS = 500, HELD_THREAD_GRACE_MS = 1000, HELD_THREAD_MAX_DEADLINE_FACTOR = 6, FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS;
+var REAL_LANE_CLOCK, DEFAULT_SEMANTIC_PREPARE_BUDGET_MS = 15000, DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 1e4, COOPERATIVE_LANE_DEADLINE_HEADROOM_MS = 50, HELD_THREAD_LATE_TIMER_MS = 500, HELD_THREAD_GRACE_MS = 1000, HELD_THREAD_MAX_DEADLINE_FACTOR = 6, FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS, STORE_ORDER_MIN_CONCEPT_SHARE;
 var init_router = __esm(() => {
   init_keyword_context();
   init_types();
@@ -75108,6 +75133,7 @@ var init_router = __esm(() => {
     "token"
   ]);
   NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS = new Set([...FORBIDDEN_ROUTER_RESULT_KEYS].map(normalizeRouterResultKey));
+  STORE_ORDER_MIN_CONCEPT_SHARE = RESERVED_LEADER_MIN_CONCEPT_SHARE;
 });
 
 // src/core/evidence-pack.ts
