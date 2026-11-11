@@ -183687,7 +183687,7 @@ var init_live_sync3 = __esm(() => {
   AUTH_KINDS = new Set(["auth_missing", "auth_expired", "auth_revoked"]);
 });
 
-// src/workers/email-source/index.ts
+// src/workers/engine/index.ts
 import { createHash as createHash99, randomBytes as randomBytes32, timingSafeEqual as timingSafeEqual9 } from "node:crypto";
 import { readFileSync as readFileSync95, statSync as statSync44 } from "node:fs";
 import { homedir as homedir47 } from "node:os";
@@ -188710,7 +188710,7 @@ function mostPrivateTrustDomain(domains) {
   return "public_safe";
 }
 var CONNECTOR_STORE_FILTER_CAPABILITIES, EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL = "No email account is connected yet. Connect Gmail from the Olympus dashboard to enable email answers.", EmailSourceWorkerError, DASHBOARD_SETTINGS_PROPOSAL_APPLY_PATH = "/dashboard/settings/proposal/apply", DASHBOARD_SETTINGS_PROPOSAL_DISCARD_PATH = "/dashboard/settings/proposal/discard", DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000, DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30, DASHBOARD_UNPAIR_SOURCE_IDS, DASHBOARD_EVERNOTE_SIGN_IN_TTL_MS = 600000, CHATGPT_RETURN_TO = "https://chatgpt.com/", DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000, DASHBOARD_DEFAULT_ENGINE_PORT = 8010;
-var init_email_source = __esm(() => {
+var init_engine2 = __esm(() => {
   init_judge_spending();
   init_people();
   init_source_failure();
@@ -234378,7 +234378,7 @@ var init_private_agent_listeners = __esm(() => {
   init_first_run_privacy_gate();
 });
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 var exports_server2 = {};
 __export(exports_server2, {
   workerSovereigntyAnalystRoutePlan: () => workerSovereigntyAnalystRoutePlan,
@@ -240650,7 +240650,7 @@ var init_server5 = __esm(async () => {
   init_venice_client();
   init_openai_compatible_client();
   init_apple_vision_ocr();
-  init_email_source();
+  init_engine2();
   init_analyst_answer();
   init_answer_latency_log();
   init_status();

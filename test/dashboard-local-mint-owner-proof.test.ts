@@ -21,7 +21,7 @@ import {
 const TOKEN = 'owner-proof-worker-token';
 const ORIGIN = 'http://127.0.0.1:8010';
 
-/** A Mac engine: no owner socket, so `requireOwnerSocket` is unset (email-source/server.ts). */
+/** A Mac engine: no owner socket, so `requireOwnerSocket` is unset (engine/server.ts). */
 function macEngine(sessionSecret = newDashboardSessionSecret()) {
   const seen: Request[] = [];
   const fetch = withWorkerBearerAuth(async (request) => {

@@ -14,7 +14,7 @@ import {
   type SourceExclusionCriterion,
 } from '../src/core/source-ingestion-exclusions.ts';
 import { createSovereigntyEngine, buildEnvBridgeSovereigntyConfig } from '../src/core/sovereignty.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
 

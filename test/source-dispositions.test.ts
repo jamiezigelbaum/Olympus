@@ -34,7 +34,7 @@ import {
 } from '../src/workers/source-dispositions.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 
 const SOURCE = 'files.personal';

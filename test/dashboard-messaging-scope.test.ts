@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { MessagingCaptureSupervisor } from '../src/core/messaging-capture.ts';
-import { createWorkerMessagingCaptureOwnership } from '../src/workers/email-source/server.ts';
+import { createWorkerMessagingCaptureOwnership } from '../src/workers/engine/server.ts';
 import { createDashboardMessagingService, retainApprovedCaptureScope } from '../src/workers/email-source/dashboard-messaging-service.ts';
 import { waitFor as waitUntil } from './helpers/test-clock.ts';
 

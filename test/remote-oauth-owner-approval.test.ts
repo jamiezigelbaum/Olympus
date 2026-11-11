@@ -9,7 +9,7 @@
  * the owner socket (Linux) or this browser's live dashboard control session,
  * which only the owner's opening link or the worker token opens.
  *
- * Assembled the way the worker server assembles it (email-source/server.ts):
+ * Assembled the way the worker server assembles it (engine/server.ts):
  * the OAuth routes in front of the worker-bearer wrapper, one session secret
  * for both, each request's peer recorded. A small cookie jar that honours
  * each cookie's Path plays the browser, so the test fails if the dashboard

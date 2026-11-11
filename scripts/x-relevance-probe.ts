@@ -6,7 +6,7 @@ import {
   connectorStoreCurrentEmbeddingModelId,
   connectorStoreCurrentEmbeddingRows,
 } from '../src/workers/connector-store/index.ts';
-import { createCloudSourceIndexEmbeddingProviderFromEnv } from '../src/workers/email-source/server.ts';
+import { createCloudSourceIndexEmbeddingProviderFromEnv } from '../src/workers/engine/server.ts';
 import {
   cosineSimilarity,
   decodeEmbedding,

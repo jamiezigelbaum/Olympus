@@ -33,7 +33,7 @@ import { SNIFFER_PROMPT_VERSION } from '../src/workers/classification/sniffer.ts
 import type { SnifferLane } from '../src/workers/classification/sniffer-lane.ts';
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { secretLocationsPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import {
   archiveImportScheduling,

@@ -28,7 +28,7 @@ import type { ExternalPendingOAuthConnection } from '../src/core/connect.ts';
 import type { SecretStore } from '../src/core/secret-store.ts';
 import { isV04PublicDashboardRoute } from '../src/core/public-surface.ts';
 import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import {
   DASHBOARD_SAVED_SECRET_FIELD_VALUE,

@@ -863,7 +863,7 @@ describe('11b. the owner\'s own folder choice (names only) counts like a store r
 
 describe('10. olympus_search is not an answer on the private pool', () => {
   test('the worker does not wrap the ChatGPT evidence search in answer activity (it never preempts the sniffer)', () => {
-    const source = readFileSync(join(import.meta.dir, '..', 'src', 'workers', 'email-source', 'server.ts'), 'utf8');
+    const source = readFileSync(join(import.meta.dir, '..', 'src', 'workers', 'engine', 'server.ts'), 'utf8');
     const start = source.indexOf('const chatgptEvidenceSearch = ');
     expect(start).toBeGreaterThan(0);
     const body = source.slice(start, source.indexOf(': undefined;', start));

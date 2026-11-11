@@ -13,7 +13,7 @@ import {
   type ConnectorStoreSearchRow,
 } from '../src/workers/connector-store/index.ts';
 import { DROPBOX_FILES_CORPUS_ID } from '../src/workers/dropbox-files/index.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import type {
   SourceEmbeddingInput,
   SourceEmbeddingProvider,

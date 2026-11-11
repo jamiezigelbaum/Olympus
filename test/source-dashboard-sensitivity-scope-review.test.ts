@@ -478,7 +478,7 @@ describe('the delta stays additive', () => {
 describe('the /dashboard.json route wires both new inputs', () => {
   test('the route reads the picker\'s per-source gates and emits no categories block', async () => {
     const { withWorkerBearerAuth } = await import('../src/workers/http.ts');
-    const { createEmailSourceWorker } = await import('../src/workers/email-source/index.ts');
+    const { createEmailSourceWorker } = await import('../src/workers/engine/index.ts');
 
     const dir = mkdtempSync(join(tmpdir(), 'olympus-dashboard-sensitivity-'));
     tempDirs.push(dir);

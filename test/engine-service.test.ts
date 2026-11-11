@@ -382,7 +382,7 @@ const env = process.env;
 writeFileSync(env.READY_PATH!, env.INSTANCE + ':' + process.pid);
 setInterval(() => {}, 1000);
 if (env.LAUNCH === '0') {
-  // The worker's own wiring (email-source/server.ts): launched by the native
+  // The worker's own wiring (engine/server.ts): launched by the native
   // worker service, so it restarts itself by exiting.
   const requestReload = createModelKeyReload({
     managed: workerRestartsItself({ nativeServiceSupervised: true }, env),
