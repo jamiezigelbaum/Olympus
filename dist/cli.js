@@ -33647,11 +33647,12 @@ function withReservedLeaderSeats(budgeted, pool, budget) {
   if (hits.length === budgeted.hits.length && hits.every((hit, index) => hit === budgeted.hits[index]))
     return budgeted;
   const represented = new Set(hits.map((hit) => hit.corpusId));
-  const reported = new Set(budgeted.degradations.map((degradation) => degradation.laneName));
+  const kept = budgeted.degradations.filter((degradation) => degradation.reason !== "lane_budget_cut" || !represented.has(degradation.laneName));
+  const reported = new Set(kept.filter((degradation) => degradation.reason === "lane_budget_cut").map((degradation) => degradation.laneName));
   return {
     hits,
     degradations: [
-      ...budgeted.degradations,
+      ...kept,
       ...[...new Set(budgeted.hits.map((hit) => hit.corpusId))].filter((corpusId) => !represented.has(corpusId) && !reported.has(corpusId)).map((corpusId) => ({ laneName: corpusId, laneType: "keyword", reason: "lane_budget_cut", occurrences: 1 }))
     ]
   };

@@ -271,6 +271,17 @@ describe('reserved leader seats in the pack', () => {
     expect(result.ids).toEqual(['a1', 'a2', 'b1']);
     expect(result.degradations).toEqual([{ laneName: 'C', laneType: 'keyword', reason: 'lane_budget_cut', occurrences: 1 }]);
   });
+
+  test('a store a leader brings back is no longer reported as cut', () => {
+    const pool = [
+      hit('a1', 'A'), hit('b1', 'B'), hit('c1', 'C'),
+      hit('d1', 'D', { kinds: ['keyword_first'], conceptShare: 1 }),
+    ];
+    const cut = (laneName: string) => ({ laneName, laneType: 'keyword' as const, reason: 'lane_budget_cut' as const, occurrences: 1 });
+    const result = withReservedLeaderSeats({ hits: [pool[0]!, pool[1]!, pool[2]!], degradations: [cut('D')] }, pool, 3);
+    expect(result.hits.map((h) => h.id)).toEqual(['a1', 'd1', 'b1']);
+    expect(result.degradations).toEqual([cut('C')]);
+  });
 });
 
 describe('name leader seat', () => {

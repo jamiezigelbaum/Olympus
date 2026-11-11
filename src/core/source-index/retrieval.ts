@@ -263,12 +263,17 @@ export function withReservedLeaderSeats<T extends { corpusId: string; keywordLea
     hits.splice(Math.min(seat, hits.length), 0, leader);
   }
   if (hits.length === budgeted.hits.length && hits.every((hit, index) => hit === budgeted.hits[index])) return budgeted;
+  // Budget cuts are restated for the final pack: a store a leader brought
+  // back is no longer cut, and a store that lost its only seat now is.
   const represented = new Set(hits.map((hit) => hit.corpusId));
-  const reported = new Set(budgeted.degradations.map((degradation) => degradation.laneName));
+  const kept = budgeted.degradations.filter((degradation) => (
+    degradation.reason !== 'lane_budget_cut' || !represented.has(degradation.laneName)
+  ));
+  const reported = new Set(kept.filter((degradation) => degradation.reason === 'lane_budget_cut').map((degradation) => degradation.laneName));
   return {
     hits,
     degradations: [
-      ...budgeted.degradations,
+      ...kept,
       ...[...new Set(budgeted.hits.map((hit) => hit.corpusId))]
         .filter((corpusId) => !represented.has(corpusId) && !reported.has(corpusId))
         .map((corpusId) => ({ laneName: corpusId, laneType: 'keyword' as const, reason: 'lane_budget_cut' as const, occurrences: 1 })),
