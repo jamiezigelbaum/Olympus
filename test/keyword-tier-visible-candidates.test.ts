@@ -68,9 +68,19 @@ test('the read pool pages the same way (#1079 search path)', async () => {
 
 test('the same holds for a multi-concept query under the minimum-signal filter', async () => {
   const { store } = await crowdedStore(60, 'quietorchardmarker lanternledgerword');
-  const ids = store.searchItems('quietorchardmarker lanternledgerword', 5).map((row) => row.sourceItem.localItemId);
-  expect(ids).toEqual([localId('visible')]);
-});
+  for (const contentOnly of [false, true]) {
+    const options = { contentOnly, locate: false };
+    const direct = store.searchItemsDetailed('quietorchardmarker lanternledgerword', 5, undefined, undefined, options);
+    const pooled = await store.searchItemsDetailedOffThread('quietorchardmarker lanternledgerword', 5, undefined, undefined, options);
+    for (const result of [direct, pooled]) {
+      expect(result.rows.map(row => row.sourceItem.localItemId)).toEqual([localId('visible')]);
+      expect(result.concepts.total).toBe(2);
+      expect([...result.concepts.matched]).toEqual([[localId('visible'), 2]]);
+      expect(result.saturated).toBe(false);
+    }
+    expect(pooled).toEqual(direct);
+  }
+}, 60_000);
 
 test('superseded copies stay hidden however many pages are read', async () => {
   const { store } = await crowdedStore(30, 'quietorchardmarker');

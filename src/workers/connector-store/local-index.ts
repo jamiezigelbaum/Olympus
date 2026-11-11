@@ -2106,7 +2106,15 @@ export interface ConnectorStoreKeywordFtsOptions {
   locate?: boolean;
   relaxed?: boolean;
   privatePrecision?: boolean;
+  /** One lane's item-level group answers; stays on this thread, never sent to the read pool. */
+  conceptHitMemo?: ConnectorStoreConceptHitMemo;
 }
+
+type ConnectorStoreConceptHitMemo = Map<string, Map<number, {
+  local_item_id: string;
+  source_version: string | null;
+  hit: boolean;
+}>>;
 
 /** A keyword search's rows, whether more may match, and each row's concept coverage. */
 export interface ConnectorStoreKeywordSearch {
@@ -13013,6 +13021,7 @@ export class LocalConnectorStore {
   ): Generator<StoreRead, ConnectorStoreKeywordSearch, unknown> {
     const selectedFilters = connectorStoreFilterSql(filters);
     const selectedFtsScope = connectorStoreFtsScopeSql(filters);
+    const conceptScope = connectorStoreFtsScopeSql(filters, 'r.chunk_pk');
     const terms = ftsOptions.relaxed ? (ftsOptions.privatePrecision ? yield* this.privateRelaxedFtsQuerySteps(query) : toRelaxedLocalFtsQuery(query)) : toFtsQuery(query, ftsOptions);
     if (!terms) return { rows: [], saturated: false, concepts: { total: 0, matched: new Map() } };
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
@@ -13124,31 +13133,11 @@ export class LocalConnectorStore {
       for (const row of rows) seen.add(row.item_pk);
       let signalled = rows;
       if (minimumSignal && rows.length > 0) {
-        const pks = rows.map((row) => row.item_pk);
-        const placeholders = pks.map(() => '?').join(', ');
-        // On the read pool each read is its own transaction, so a pk the FTS
-        // read returned may name another item by the time a follow-up read
-        // runs (ingestion writes in between), or the same item at a newer
-        // version. A hit counts only for the item and version the row was read
-        // as; on one connection they always agree.
-        const itemAt = new Map(rows.map((row) => [row.item_pk, row]));
-        const sameItem = (hit: { item_pk: number; local_item_id: string; source_version: string | null }) => {
-          const row = itemAt.get(hit.item_pk);
-          return row !== undefined && row.local_item_id === hit.local_item_id && (row.source_version ?? null) === (hit.source_version ?? null);
-        };
         for (const [groupIndex, group] of groups.entries()) {
-          const hits = ((yield { mode: 'all', sql: `
-            SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id, i.source_version
-            FROM connector_store_fts
-            JOIN items i ON i.item_pk = connector_store_fts.item_pk
-            WHERE connector_store_fts MATCH ?
-              AND connector_store_fts.item_pk IN (${placeholders})
-              ${selectedFtsScope.sql}
-          `, params: [sourceIndexFtsGroupQuery(group, exact), ...pks, ...selectedFtsScope.params] }) as Array<{ item_pk: number; local_item_id: string; source_version: string | null }>)
-            .filter(sameItem);
-          for (const hit of hits) {
-            matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
-            matchedGroupIndexes.set(hit.item_pk, [...(matchedGroupIndexes.get(hit.item_pk) ?? []), groupIndex]);
+          const hits = yield* this.conceptHitsSteps(rows, sourceIndexFtsGroupQuery(group, exact), conceptScope, ftsOptions.conceptHitMemo);
+          for (const itemPk of hits) {
+            matchedGroups.set(itemPk, (matchedGroups.get(itemPk) ?? 0) + 1);
+            matchedGroupIndexes.set(itemPk, [...(matchedGroupIndexes.get(itemPk) ?? []), groupIndex]);
           }
         }
         const enough = (row: ItemRow) => (matchedGroups.get(row.item_pk) ?? 0) >= required;
@@ -13162,14 +13151,8 @@ export class LocalConnectorStore {
         const uniqueTerms = weights && weights.population >= 10
           ? groups.flatMap((group, index) => weights.counts[index] === 1 ? group.filter(term => literalTopics.has(term)) : [])
           : [];
-        const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : ((yield { mode: 'all', sql: `
-          SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id, i.source_version
-          FROM connector_store_fts JOIN items i ON i.item_pk = connector_store_fts.item_pk
-          WHERE connector_store_fts MATCH ? AND connector_store_fts.item_pk IN (${placeholders})
-            ${selectedFtsScope.sql}
-        `, params: [sourceIndexFtsGroupQuery(uniqueTerms, exact), ...pks, ...selectedFtsScope.params] }) as Array<{ item_pk: number; local_item_id: string; source_version: string | null }>)
-          .filter(sameItem)
-          .map(row => row.item_pk));
+        const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? []
+          : yield* this.conceptHitsSteps(rows, sourceIndexFtsGroupQuery(uniqueTerms, exact), conceptScope, ftsOptions.conceptHitMemo));
         signalled = rows.filter((row) => {
           if (enough(row) || uniqueLiteralMatches.has(row.item_pk)) return true;
           if (!weights) return false;
@@ -13240,6 +13223,42 @@ export class LocalConnectorStore {
     };
   }
 
+  private *conceptHitsSteps(
+    rows: readonly ItemRow[],
+    groupQuery: string,
+    scope: ReturnType<typeof connectorStoreFtsScopeSql>,
+    memo: ConnectorStoreConceptHitMemo | undefined,
+  ): Generator<StoreRead, number[], unknown> {
+    const key = JSON.stringify([groupQuery, scope.sql, scope.params]);
+    const answers = memo?.get(key);
+    // A pk can be reused, and each pool read is its own transaction. Both a
+    // fresh hit and a memo answer count only for the candidate's item/version.
+    const sameItem = (row: ItemRow, answer: { local_item_id: string; source_version: string | null } | undefined) =>
+      answer !== undefined && row.local_item_id === answer.local_item_id && (row.source_version ?? null) === (answer.source_version ?? null);
+    if (answers && rows.every(row => sameItem(row, answers.get(row.item_pk)))) {
+      return rows.filter(row => answers.get(row.item_pk)!.hit).map(row => row.item_pk);
+    }
+    // If any answer is unknown, read every pk on the page: the FTS doclist
+    // walk costs the same, and this refreshes the known answers too.
+    const hits = (yield connectorStoreConceptHitRead(rows.map(row => row.item_pk), groupQuery, scope)) as Array<{
+      item_pk: number; local_item_id: string; source_version: string | null;
+    }>;
+    const hitAt = new Map(hits.map(hit => [hit.item_pk, hit]));
+    const remembered = answers ?? new Map();
+    const matched: number[] = [];
+    for (const row of rows) {
+      const hit = hitAt.get(row.item_pk);
+      if (hit && !sameItem(row, hit)) {
+        remembered.delete(row.item_pk);
+        continue;
+      }
+      if (hit) matched.push(row.item_pk);
+      if (memo) remembered.set(row.item_pk, { local_item_id: row.local_item_id, source_version: row.source_version ?? null, hit: hit !== undefined });
+    }
+    memo?.set(key, remembered);
+    return matched;
+  }
+
   private *privateRelaxedFtsQuerySteps(query: string): Generator<StoreRead, string, unknown> {
     const terms = relaxedLocalFtsTerms(query);
     if (terms.length <= 2) return terms.join(' OR ');
@@ -13304,7 +13323,7 @@ export class LocalConnectorStore {
       if (count === undefined) {
         count = ((yield {
           mode: 'get',
-          sql: 'SELECT COUNT(DISTINCT item_pk) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ?',
+          sql: 'SELECT COUNT(DISTINCT r.item_pk) AS count FROM connector_store_fts_rows r WHERE r.fts_rowid IN (SELECT rowid FROM connector_store_fts WHERE connector_store_fts MATCH ?)',
           params: [groupQuery],
         }) as { count: number }).count;
         remember(groupQuery, count);
@@ -15171,9 +15190,10 @@ async function connectorStoreKeywordLaneRows(
   limit: number,
   accountScope: string | undefined,
   filters: ConnectorStoreSearchFilters | undefined,
-  ftsOptions: { prefix?: boolean; locate?: boolean; relaxed?: boolean; privatePrecision?: boolean } = {},
+  ftsOptions: ConnectorStoreKeywordFtsOptions = {},
   deadlineAtMs?: number,
 ): Promise<ConnectorStoreKeywordLane> {
+  ftsOptions = { ...ftsOptions, conceptHitMemo: ftsOptions.conceptHitMemo ?? new Map() };
   const pool = deadlineAtMs !== undefined ? { deadlineAtMs } : {};
   const plain = await store.searchItemsDetailedOffThread(query, MAX_SEARCH_RESULTS, accountScope, filters, ftsOptions, pool);
   const rows = plain.rows;
@@ -17352,13 +17372,33 @@ function connectorStoreFilterSql(filters: ConnectorStoreSearchFilters | undefine
   return { sql: clauses.join('\n'), params };
 }
 
-function connectorStoreFtsScopeSql(filters: ConnectorStoreSearchFilters | undefined): {
+function connectorStoreConceptHitRead(
+  pks: readonly number[],
+  groupQuery: string,
+  scope: ReturnType<typeof connectorStoreFtsScopeSql>,
+): StoreRead {
+  return {
+    mode: 'all',
+    sql: `
+      SELECT DISTINCT r.item_pk, i.local_item_id, i.source_version
+      FROM connector_store_fts_rows r JOIN items i ON i.item_pk = r.item_pk
+      WHERE r.item_pk IN (${pks.map(() => '?').join(', ')})
+        AND +r.fts_rowid IN (SELECT rowid FROM connector_store_fts WHERE connector_store_fts MATCH ?)
+        ${scope.sql}
+    `,
+    // Unary + keeps SQLite driving from the mapping table's item_pk index,
+    // rather than looking up every rowid the store-wide FTS match returns.
+    params: [...pks, groupQuery, ...scope.params],
+  };
+}
+
+function connectorStoreFtsScopeSql(filters: ConnectorStoreSearchFilters | undefined, chunkColumn = 'connector_store_fts.chunk_pk'): {
   sql: string;
   params: string[];
 } {
   const normalized = normalizeConnectorStoreSearchFilters(filters);
   const contentRow = `(
-    connector_store_fts.chunk_pk IS NOT NULL
+    ${chunkColumn} IS NOT NULL
     OR NOT EXISTS (SELECT 1 FROM chunks scope_chunk WHERE scope_chunk.item_pk = i.item_pk)
   )`;
   if (!normalized) return { sql: `AND ${contentRow}`, params: [] };
@@ -17383,7 +17423,7 @@ function connectorStoreFtsScopeSql(filters: ConnectorStoreSearchFilters | undefi
   const metadataExpression = `(${metadataOnly.join(' OR ')})`;
   return {
     sql: `AND (
-      (${metadataExpression} AND connector_store_fts.chunk_pk IS NULL)
+      (${metadataExpression} AND ${chunkColumn} IS NULL)
       OR (NOT ${metadataExpression} AND ${contentRow})
     )`,
     params: [...params, ...params],
