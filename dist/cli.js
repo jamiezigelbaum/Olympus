@@ -66490,7 +66490,8 @@ function settleOne(set, record) {
   const locator = exported.columns["locator_uri"];
   const mimeType = exported.columns["mime_type"];
   const container = typeof mimeType === "string" && CONTAINER_MIME_TYPES.includes(mimeType.trim().toLowerCase());
-  if (!container && store.metadataOnlyRuleForLocator(typeof locator === "string" ? locator : undefined) === undefined)
+  const path = typeof locator === "string" ? locator : undefined;
+  if (!container && store.metadataOnlyRuleForLocator(path) === undefined && !set.ownerKeepsNamesOnly(path))
     return false;
   const decision = {
     metadataTier: record.metadataTier,
@@ -70756,6 +70757,7 @@ class TieredStoreSet {
   onLegOpened;
   contentArrivesLater;
   contentArrivesLaterFor;
+  namesOnlyByOwner;
   privateEmbedder;
   privateEmbedWith;
   lastRowRehome;
@@ -70773,6 +70775,7 @@ class TieredStoreSet {
     this.onLegOpened = options.onLegOpened;
     this.contentArrivesLater = options.contentArrivesLater === true;
     this.contentArrivesLaterFor = options.contentArrivesLater === true ? undefined : options.contentArrivesLaterFor;
+    this.namesOnlyByOwner = options.namesOnlyByOwner;
     this.legs = new Map;
     for (const spec of options.legs) {
       if (this.legs.has(spec.trustDomain))
@@ -71064,6 +71067,15 @@ class TieredStoreSet {
     if (!this.contentArrivesLaterFor)
       return false;
     return item === undefined || this.contentArrivesLaterFor(item);
+  }
+  ownerKeepsNamesOnly(path) {
+    if (!this.namesOnlyByOwner || !path)
+      return false;
+    try {
+      return this.namesOnlyByOwner(path) === true;
+    } catch {
+      return false;
+    }
   }
   restingTierFor(domain) {
     return this.legs.get(domain)?.spec.restingTier ?? defaultStoreTrustTier(domain);
@@ -71448,7 +71460,8 @@ function createTieredLaneSet(options) {
     ...options.secretLocations ? { secretLocations: options.secretLocations } : {},
     ...options.onLegOpened ? { onLegOpened: options.onLegOpened } : {},
     ...options.contentArrivesLater === true ? { contentArrivesLater: true } : {},
-    ...options.contentArrivesLaterFor ? { contentArrivesLaterFor: options.contentArrivesLaterFor } : {}
+    ...options.contentArrivesLaterFor ? { contentArrivesLaterFor: options.contentArrivesLaterFor } : {},
+    ...options.namesOnlyByOwner ? { namesOnlyByOwner: options.namesOnlyByOwner } : {}
   });
 }
 function rehomeChatLaneOverrides(ledger, provider, stores) {
@@ -71750,7 +71763,7 @@ class TieredRoutingRun {
       return { kind: "delete", corpora: new Set(ledger.copies(identity2).map((copy) => copy.corpusId)), reason: "provider_deleted", ...location ? { location: true } : {} };
     }
     const deferred = this.set.readsContentLater(item);
-    const namesOnly = deferred && (input.metadataOnly || CONTAINER_MIME_TYPES.includes(item.mimeType?.trim().toLowerCase() ?? ""));
+    const namesOnly = deferred && (input.metadataOnly || CONTAINER_MIME_TYPES.includes(item.mimeType?.trim().toLowerCase() ?? "") || this.set.ownerKeepsNamesOnly(pathOf(sourceExclusionFactsFromMetadata(item.metadata).path)));
     const text2 = namesOnly ? undefined : connectorStoreItemText(item);
     const classification = this.classification;
     let decision = decideItemTiers(connector, item, text2, classification, ledger, {
@@ -72056,9 +72069,13 @@ function handoffConnector(source, item) {
     }
   };
 }
+function pathOf(path) {
+  return typeof path === "string" && path ? path : undefined;
+}
 var LOWER_CONTENT_REPAIR_INTERVAL_MS, TIER_DOMAIN_ORDER, TIER_KEY_TRUST_DOMAIN, SECRET_LOCATION_DOMAIN = "secure_local", TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff";
 var init_tiered_store_set = __esm(() => {
   init_store_write_guard();
+  init_source_ingestion_exclusions();
   init_control_path_headroom();
   init_types();
   init_engine();
@@ -82869,6 +82886,7 @@ function createDropboxTierLane(options) {
     setId: DROPBOX_FILES_SOURCE_ID,
     ledger,
     contentArrivesLater: true,
+    ...options.namesOnlyByOwner ? { namesOnlyByOwner: options.namesOnlyByOwner } : {},
     ...options.secretLocations ? { secretLocations: options.secretLocations } : {},
     ...options.tierClassification ? { tierClassification: options.tierClassification } : {},
     legs: {
@@ -128805,7 +128823,7 @@ function normalizeSelector(selector) {
 }
 function batchSelectorsFor(sourceId, item) {
   const selectors = [`source:${sourceId}`];
-  const path = pathOf(item);
+  const path = pathOf2(item);
   if (path) {
     const parts = path.split("/").filter(Boolean);
     for (let depth2 = 1;depth2 < parts.length; depth2 += 1)
@@ -128820,7 +128838,7 @@ function batchSelectorsFor(sourceId, item) {
     selectors.push(`chat:${item.identity.providerConversationId}`);
   return selectors;
 }
-function pathOf(item) {
+function pathOf2(item) {
   return item.locatorUri?.startsWith("/") ? item.locatorUri : undefined;
 }
 function signalsFromStoredItem(item) {
@@ -128828,7 +128846,7 @@ function signalsFromStoredItem(item) {
     ...item.folderKeys,
     ...item.identity.providerConversationId ? [item.identity.providerConversationId] : []
   ];
-  const path = pathOf(item);
+  const path = pathOf2(item);
   const sender = item.senderLabel ?? item.senderId;
   return {
     ...item.title ? { title: item.title } : {},
@@ -129212,7 +129230,7 @@ function addPlanned(planned, totals, patterns, lane, store, item, decision, from
   } else {
     totals.moves.push({ source: lane.sourceId, from: fromTier, toNames, toContent, items: 1, chunks: item.chunks.length });
   }
-  const path = pathOf(item);
+  const path = pathOf2(item);
   const folder = path ? path.slice(0, Math.max(1, path.lastIndexOf("/"))) : undefined;
   const sender = item.senderLabel ?? item.senderId;
   const facets = [
@@ -152739,7 +152757,7 @@ function view3(row, state) {
     owner_set: state.ownerSet,
     ...state.ownerTier && (!record4 || record4.contentTier !== state.ownerTier && record4.targetContentTier !== state.ownerTier) ? { owner_choice: tierDisplayName(state.ownerTier) } : {},
     judge_reason: judgeReason(record4),
-    ...record4?.state === "pending" && (record4.contentPending || record4.metadataPending) ? { waiting_for_judge: true } : {},
+    ...record4?.state === "pending" && (record4.contentPending || record4.metadataPending) || record4 && !record4.contentRead && record4.reasons.some(isFailSafeMissingContentQuestion) ? { waiting_for_judge: true } : {},
     decided_at: record4?.decidedAt ?? null
   };
 }
@@ -207698,33 +207716,39 @@ function createScopeBoundGoogleDriveContentScope(input) {
 }
 function createScopeBoundDropboxContentScope(input) {
   const current2 = () => input.authority.assertCurrent(input.ref);
-  const matching = (path) => {
-    const normalized2 = normalizeDropboxScopePath(path);
-    return current2().selections.filter((selection) => {
-      const root = normalizeDropboxScopePath(selection.key);
-      return normalized2 === root || root !== "/" && normalized2.startsWith(`${root}/`) || root === "/";
-    });
-  };
   return {
     generation: input.ref.accountGeneration,
     revision: input.ref.revision,
     assertCurrent() {
       current2();
     },
-    allowsMetadata(path) {
-      const approval = current2();
-      const selected = matching(path);
-      if (selected.some((entry) => entry.state === "exclude"))
-        return false;
-      return approval.wholeAccount || selected.some((entry) => entry.state !== "exclude");
-    },
-    allowsContent(path) {
-      const approval = current2();
-      const selected = matching(path);
-      if (selected.some((entry) => entry.state !== "ingest"))
-        return false;
-      return approval.wholeAccount || selected.some((entry) => entry.state === "ingest");
+    allowsMetadata: (path) => dropboxScopeAllows(current2(), path).metadata,
+    allowsContent: (path) => dropboxScopeAllows(current2(), path).content
+  };
+}
+function dropboxScopeAllows(approval, path) {
+  const normalized2 = normalizeDropboxScopePath(path);
+  const selected = approval.selections.filter((selection) => {
+    const root = normalizeDropboxScopePath(selection.key);
+    return normalized2 === root || root !== "/" && normalized2.startsWith(`${root}/`) || root === "/";
+  });
+  return {
+    metadata: !selected.some((entry) => entry.state === "exclude") && (approval.wholeAccount || selected.some((entry) => entry.state !== "exclude")),
+    content: !selected.some((entry) => entry.state !== "ingest") && (approval.wholeAccount || selected.some((entry) => entry.state === "ingest"))
+  };
+}
+function dropboxNamesOnlyByOwner(authority, now = Date.now) {
+  let cached3;
+  return (path) => {
+    const at = now();
+    if (!cached3 || at - cached3.at >= DROPBOX_NAMES_ONLY_APPROVAL_TTL_MS) {
+      const ref = authority.policyRef("dropbox.files");
+      cached3 = { at, approval: ref ? authority.assertCurrent(ref) : undefined };
     }
+    if (!cached3.approval || cached3.approval.status !== "approved")
+      return false;
+    const allows = dropboxScopeAllows(cached3.approval, path);
+    return allows.metadata && !allows.content;
   };
 }
 function normalizeDropboxScopePath(path) {
@@ -207783,7 +207807,7 @@ function scopeBoundSchedulerSource(input) {
     }))
   };
 }
-var FILTER_KEYS;
+var FILTER_KEYS, DROPBOX_NAMES_ONLY_APPROVAL_TTL_MS = 5000;
 var init_source_scope_runtime = __esm(() => {
   init_source_scope_approval();
   init_file_scope_sources();
@@ -235944,6 +235968,7 @@ ${key2}`;
       env: process.env,
       policy: dropboxIngestionPolicy,
       ...dropboxSecretLocations ? { secretLocations: dropboxSecretLocations } : {},
+      ...fileSourceScopeAuthority ? { namesOnlyByOwner: dropboxNamesOnlyByOwner(fileSourceScopeAuthority) } : {},
       onStoreOpened: (store) => registerTierLegStore(store, DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, sourceIndexEmbeddingProvider ?? null)
     }) : undefined;
     if (dropboxTierLane && dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider)) {

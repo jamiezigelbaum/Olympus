@@ -42,6 +42,7 @@
 // branches on which source an item came from.
 
 import { writableStoreOpensForbidden } from '../../core/store-write-guard.ts';
+import { sourceExclusionFactsFromMetadata } from '../../core/source-ingestion-exclusions.ts';
 import { ingestionTurn } from '../control-path-headroom.ts';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -222,6 +223,14 @@ export interface TieredStoreSetOptions {
    */
   contentArrivesLaterFor?: (item: RawItem) => boolean;
   /**
+   * The owner's own folder choice for this source (its scope approval, read
+   * live): true where the owner keeps a path names-only. Such an item's text
+   * never arrives, so it is decided on its names at listing and settled on
+   * them by the names-only pass, exactly like an item under a store's own
+   * metadata-only rule. A throw or absent answer is "no" (#1295).
+   */
+  namesOnlyByOwner?: (path: string) => boolean;
+  /**
    * False for a second set over a lane's stores and ledger that only reads
    * and lands extracted text (it must route exactly as the lane's own set
    * does): the lane's own set stays the one its ledger's background passes
@@ -290,6 +299,7 @@ export class TieredStoreSet {
   private readonly onLegOpened: TieredStoreSetOptions['onLegOpened'];
   private readonly contentArrivesLater: boolean;
   private readonly contentArrivesLaterFor: ((item: RawItem) => boolean) | undefined;
+  private readonly namesOnlyByOwner: ((path: string) => boolean) | undefined;
   private privateEmbedder: SourceEmbeddingProvider | undefined;
   private privateEmbedWith: (() => SourceEmbeddingProvider | undefined) | undefined;
   private lastRowRehome: TierRowRehomeReport | undefined;
@@ -308,6 +318,7 @@ export class TieredStoreSet {
     this.onLegOpened = options.onLegOpened;
     this.contentArrivesLater = options.contentArrivesLater === true;
     this.contentArrivesLaterFor = options.contentArrivesLater === true ? undefined : options.contentArrivesLaterFor;
+    this.namesOnlyByOwner = options.namesOnlyByOwner;
     this.legs = new Map();
     for (const spec of options.legs) {
       if (this.legs.has(spec.trustDomain)) throw new Error(`A tiered store set has one leg per trust domain (${spec.trustDomain}).`);
@@ -728,6 +739,19 @@ export class TieredStoreSet {
     if (this.contentArrivesLater) return true;
     if (!this.contentArrivesLaterFor) return false;
     return item === undefined || this.contentArrivesLaterFor(item);
+  }
+
+  /**
+   * @internal Whether the owner's own folder choice keeps this path
+   * names-only (options.namesOnlyByOwner). No path, no answer, or a throw: no.
+   */
+  ownerKeepsNamesOnly(path: string | undefined): boolean {
+    if (!this.namesOnlyByOwner || !path) return false;
+    try {
+      return this.namesOnlyByOwner(path) === true;
+    } catch {
+      return false;
+    }
   }
 
   /** @internal The tier a routed copy in this domain's leg is stored at. */
@@ -1336,6 +1360,8 @@ export interface TieredLaneSetOptions {
   contentArrivesLater?: boolean;
   /** See TieredStoreSetOptions.contentArrivesLaterFor. */
   contentArrivesLaterFor?: (item: RawItem) => boolean;
+  /** See TieredStoreSetOptions.namesOnlyByOwner. */
+  namesOnlyByOwner?: (path: string) => boolean;
 }
 
 /**
@@ -1378,6 +1404,7 @@ export function createTieredLaneSet(options: TieredLaneSetOptions): TieredStoreS
     ...(options.onLegOpened ? { onLegOpened: options.onLegOpened } : {}),
     ...(options.contentArrivesLater === true ? { contentArrivesLater: true } : {}),
     ...(options.contentArrivesLaterFor ? { contentArrivesLaterFor: options.contentArrivesLaterFor } : {}),
+    ...(options.namesOnlyByOwner ? { namesOnlyByOwner: options.namesOnlyByOwner } : {}),
   });
 }
 
@@ -1841,7 +1868,8 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     // ever answer a question about it.
     const deferred = this.set.readsContentLater(item);
     const namesOnly = deferred
-      && (input.metadataOnly || CONTAINER_MIME_TYPES.includes(item.mimeType?.trim().toLowerCase() ?? ''));
+      && (input.metadataOnly || CONTAINER_MIME_TYPES.includes(item.mimeType?.trim().toLowerCase() ?? '')
+        || this.set.ownerKeepsNamesOnly(pathOf(sourceExclusionFactsFromMetadata(item.metadata).path)));
     const text = namesOnly ? undefined : connectorStoreItemText(item);
     // The owner's installed inputs (map, rules file, sniffer) merged with the
     // set's own (TieredStoreSet.classification()), resolved once per run.
@@ -2268,3 +2296,8 @@ function handoffConnector(source: SourceConnector, item: RawItem): SourceConnect
 }
 
 export type { TierCopy };
+
+/** A listed item's path, when its metadata names one as text. */
+function pathOf(path: unknown): string | undefined {
+  return typeof path === 'string' && path ? path : undefined;
+}

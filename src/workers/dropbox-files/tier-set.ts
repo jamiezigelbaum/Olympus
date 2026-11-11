@@ -49,6 +49,8 @@ export function createDropboxTierLane(options: {
   tierClassification?: ConnectorStoreTierClassification;
   /** Told once when the Personal or Public store opens, so a runtime can serve it. */
   onStoreOpened?: (store: LocalConnectorStore) => void;
+  /** The owner's folder choice keeps this Dropbox path names-only (TieredStoreSetOptions.namesOnlyByOwner). */
+  namesOnlyByOwner?: (path: string) => boolean;
 }): DropboxTierLane {
   const env = options.env ?? process.env;
   const ledger = options.secureStore.tierLedger()
@@ -70,6 +72,7 @@ export function createDropboxTierLane(options: {
     setId: DROPBOX_FILES_SOURCE_ID,
     ledger,
     contentArrivesLater: true,
+    ...(options.namesOnlyByOwner ? { namesOnlyByOwner: options.namesOnlyByOwner } : {}),
     ...(options.secretLocations ? { secretLocations: options.secretLocations } : {}),
     ...(options.tierClassification ? { tierClassification: options.tierClassification } : {}),
     legs: {

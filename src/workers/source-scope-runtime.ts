@@ -459,31 +459,56 @@ export function createScopeBoundDropboxContentScope(input: {
   ref: FileSourceScopePolicyRef;
 }): DropboxContentScope {
   const current = (): FileSourceScopeApprovalSnapshot => input.authority.assertCurrent(input.ref);
-  const matching = (path: string): FileSourceScopeSelection[] => {
-    const normalized = normalizeDropboxScopePath(path);
-    return current().selections.filter((selection) => {
-      const root = normalizeDropboxScopePath(selection.key);
-      return normalized === root || (root !== '/' && normalized.startsWith(`${root}/`)) || root === '/';
-    });
-  };
   return {
     generation: input.ref.accountGeneration,
     revision: input.ref.revision,
     assertCurrent() {
       current();
     },
-    allowsMetadata(path) {
-      const approval = current();
-      const selected = matching(path);
-      if (selected.some((entry) => entry.state === 'exclude')) return false;
-      return approval.wholeAccount || selected.some((entry) => entry.state !== 'exclude');
-    },
-    allowsContent(path) {
-      const approval = current();
-      const selected = matching(path);
-      if (selected.some((entry) => entry.state !== 'ingest')) return false;
-      return approval.wholeAccount || selected.some((entry) => entry.state === 'ingest');
-    },
+    allowsMetadata: (path) => dropboxScopeAllows(current(), path).metadata,
+    allowsContent: (path) => dropboxScopeAllows(current(), path).content,
+  };
+}
+
+/** What one Dropbox folder approval lets Olympus read at a path: its names, its text. */
+function dropboxScopeAllows(approval: FileSourceScopeApprovalSnapshot, path: string): { metadata: boolean; content: boolean } {
+  const normalized = normalizeDropboxScopePath(path);
+  const selected = approval.selections.filter((selection) => {
+    const root = normalizeDropboxScopePath(selection.key);
+    return normalized === root || (root !== '/' && normalized.startsWith(`${root}/`)) || root === '/';
+  });
+  return {
+    metadata: !selected.some((entry) => entry.state === 'exclude')
+      && (approval.wholeAccount || selected.some((entry) => entry.state !== 'exclude')),
+    content: !selected.some((entry) => entry.state !== 'ingest')
+      && (approval.wholeAccount || selected.some((entry) => entry.state === 'ingest')),
+  };
+}
+
+/** How long one read of the Dropbox folder approval answers the names-only question. */
+const DROPBOX_NAMES_ONLY_APPROVAL_TTL_MS = 5_000;
+
+/**
+ * Whether the owner's current Dropbox folder choice keeps this path
+ * names-only: its names are listed and its text is never read (#1295). The
+ * approval is read again at most every few seconds, so a listing of many
+ * items reads it once and a changed choice applies within moments. No
+ * approval, or one that is not current: no.
+ */
+export function dropboxNamesOnlyByOwner(
+  authority: FileSourceScopeAuthority,
+  now: () => number = Date.now,
+): (path: string) => boolean {
+  let cached: { at: number; approval: FileSourceScopeApprovalSnapshot | undefined } | undefined;
+  return (path) => {
+    const at = now();
+    if (!cached || at - cached.at >= DROPBOX_NAMES_ONLY_APPROVAL_TTL_MS) {
+      const ref = authority.policyRef('dropbox.files');
+      cached = { at, approval: ref ? authority.assertCurrent(ref) : undefined };
+    }
+    if (!cached.approval || cached.approval.status !== 'approved') return false;
+    const allows = dropboxScopeAllows(cached.approval, path);
+    return allows.metadata && !allows.content;
   };
 }
 

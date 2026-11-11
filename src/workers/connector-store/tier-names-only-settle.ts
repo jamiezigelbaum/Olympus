@@ -9,7 +9,8 @@
 // that never comes, and an incremental listing never lists an unchanged item
 // again. This pass finds routed rows held only because their text was not
 // read, asks the store that keeps their names whether a names-only rule
-// covers them (`metadataOnlyRuleForLocator`), and records those exactly as a
+// covers them (`metadataOnlyRuleForLocator`, or the owner's folder choice for
+// the source, `TieredStoreSet.ownerKeepsNamesOnly`), and records those exactly as a
 // p4 listing would: the names decide both layers, `content:names_only`. The
 // placement of an unread item in a lane whose text arrives later is its
 // names' copy either way, so no store is written and nothing moves.
@@ -68,7 +69,10 @@ function settleOne(set: TieredStoreSet, record: TierLedgerRecord): boolean {
   // A container (a folder) has no text of its own: listed today it is
   // decided on its names, and one listed before is settled the same way here.
   const container = typeof mimeType === 'string' && CONTAINER_MIME_TYPES.includes(mimeType.trim().toLowerCase());
-  if (!container && store.metadataOnlyRuleForLocator(typeof locator === 'string' ? locator : undefined) === undefined) return false;
+  const path = typeof locator === 'string' ? locator : undefined;
+  // A store's own metadata-only rule, or the owner's folder choice for the
+  // source (its scope approval), which a store's rules do not carry (#1295).
+  if (!container && store.metadataOnlyRuleForLocator(path) === undefined && !set.ownerKeepsNamesOnly(path)) return false;
   const decision: TierDecision = {
     metadataTier: record.metadataTier,
     contentTier: record.metadataTier,

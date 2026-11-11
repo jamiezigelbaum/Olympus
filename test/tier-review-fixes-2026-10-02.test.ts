@@ -135,6 +135,7 @@ async function freshInstall(options: {
   extract?: boolean;
   gardenOwnRecord?: boolean;
   structuredBankName?: boolean;
+  namesOnlyByOwner?: (path: string) => boolean;
 } = {}) {
   ownerWords = undefined;
   const policy = loadSovereigntyPreset('no-sensitive');
@@ -148,7 +149,8 @@ async function freshInstall(options: {
   closers.push(() => secure.close());
   const secrets = new SecretLocationsIndex({ dbPath: join(root, 'secrets.sqlite') });
   closers.push(() => secrets.close());
-  const lane = createDropboxTierLane({ secureStore: secure, env, policy: defaultDropboxIngestionPolicy(), secretLocations: secrets });
+  const lane = createDropboxTierLane({ secureStore: secure, env, policy: defaultDropboxIngestionPolicy(), secretLocations: secrets,
+    ...(options.namesOnlyByOwner ? { namesOnlyByOwner: options.namesOnlyByOwner } : {}) });
   closers.push(() => {
     lane.internal.current()?.close();
     lane.public.current()?.close();
@@ -695,6 +697,44 @@ describe('11a. items a names-only folder covers stop waiting for text', () => {
       .toEqual([expect.objectContaining({ corpusId: INTERNAL_CORPUS, layers: 'metadata' })]);
     // The bank letter waits on its names question, not on text: left alone.
     expect(lane.ledger.getCurrent(identity('id:bank'))).toMatchObject({ state: 'pending', metadataPending: true });
+  });
+});
+
+describe('11b. the owner\'s own folder choice (names only) counts like a store rule (#1295)', () => {
+  // The Dropbox folder approval lives outside the stores' ingestion rules, so
+  // the tier set is told about it directly. No exclusions file in these tests.
+  const notesNamesOnly = (path: string) => path.toLowerCase().startsWith('/notes/');
+
+  test('a row waiting on text its folder never lets in settles on its names, and nothing moves', async () => {
+    const install = await freshInstall({ extract: false, structuredBankName: true });
+    expect(install.lane.ledger.getCurrent(garden)!.reasons).toContain('content:unread');
+    expect(settleNamesOnlyItems({ set: install.lane.set })).toMatchObject({ settled: 0 });
+    install.lane.internal.current()?.close();
+    const lane = createDropboxTierLane({ secureStore: install.secure, env, policy: defaultDropboxIngestionPolicy(), secretLocations: install.secrets, namesOnlyByOwner: notesNamesOnly });
+    closers.push(() => lane.internal.current()?.close());
+
+    expect(settleNamesOnlyItems({ set: lane.set }).settled).toBe(1);
+    const settled = lane.ledger.getCurrent(garden)!;
+    expect(settled).toMatchObject({ state: 'current', contentRead: false, contentPending: false, contentTier: settled.metadataTier });
+    expect(settled.reasons).toContain('content:names_only');
+    expect(settled.reasons.some((reason) => reason.includes('fail_safe'))).toBe(false);
+    expect(lane.ledger.copies(garden).filter((copy) => copy.state === 'current'))
+      .toEqual([expect.objectContaining({ corpusId: INTERNAL_CORPUS, layers: 'metadata' })]);
+    // Names still waiting on their own question are left alone.
+    expect(lane.ledger.getCurrent(identity('id:bank'))).toMatchObject({ state: 'pending', metadataPending: true });
+  });
+
+  test('listed under a names-only folder, an item is decided on its names and never waits on text', async () => {
+    const install = await freshInstall({ extract: false, namesOnlyByOwner: notesNamesOnly });
+    const record = install.lane.ledger.getCurrent(garden)!;
+    expect(record).toMatchObject({ contentRead: false, contentPending: false });
+    expect(record.reasons).not.toContain('content:unread');
+  });
+
+  test('a choice that cannot be read (a stale approval) keeps the item waiting', async () => {
+    const install = await freshInstall({ extract: false, structuredBankName: true, namesOnlyByOwner: () => { throw new Error('approval changed'); } });
+    expect(install.lane.ledger.getCurrent(garden)!.reasons).toContain('content:unread');
+    expect(settleNamesOnlyItems({ set: install.lane.set })).toMatchObject({ settled: 0 });
   });
 });
 

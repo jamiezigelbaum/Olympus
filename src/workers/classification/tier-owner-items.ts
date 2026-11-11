@@ -28,7 +28,7 @@ import {
   type TierCliContext,
 } from './tier-cli.ts';
 import { tierRank, type TierKey } from './tier-classifier.ts';
-import { tierLedgerIdentityKey, type TierLedgerIdentity, type TierLedgerRecord } from './tier-ledger.ts';
+import { isFailSafeMissingContentQuestion, tierLedgerIdentityKey, type TierLedgerIdentity, type TierLedgerRecord } from './tier-ledger.ts';
 import { tierDisplayName } from './tier-rules.ts';
 
 /** What the owner can choose for one item. `judge`: clear the owner's word and go back to the judge's verdict. */
@@ -433,7 +433,10 @@ function view(row: StoredItemRow, state: ItemState): OwnerTierItem {
     ...(state.ownerTier && (!record || (record.contentTier !== state.ownerTier && record.targetContentTier !== state.ownerTier))
       ? { owner_choice: tierDisplayName(state.ownerTier) } : {}),
     judge_reason: judgeReason(record),
-    ...(record?.state === 'pending' && (record.contentPending || record.metadataPending) ? { waiting_for_judge: true as const } : {}),
+    // A fail-safe hold for text not read yet is a holding label too, though
+    // its row is current: never shown or sampled as the judge's verdict (#1295).
+    ...((record?.state === 'pending' && (record.contentPending || record.metadataPending))
+      || (record && !record.contentRead && record.reasons.some(isFailSafeMissingContentQuestion)) ? { waiting_for_judge: true as const } : {}),
     decided_at: record?.decidedAt ?? null,
   };
 }
