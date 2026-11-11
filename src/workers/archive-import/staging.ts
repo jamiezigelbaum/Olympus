@@ -186,8 +186,9 @@ export interface ArchiveUploads {
   close(): void;
 }
 
-// Beside the staging folder, on the same volume, so setting a folder aside is one rename.
-const REMOVING_SUFFIX = '.removing';
+// A folder a sweep set aside to delete: never an upload's name (ID).
+export const ARCHIVE_STAGING_REMOVING_PREFIX = '.removing-';
+const REMOVING_PREFIX = ARCHIVE_STAGING_REMOVING_PREFIX;
 const removing = new Set<string>();
 function removeInBackground(path: string): void {
   if (removing.has(path)) return;
@@ -477,11 +478,13 @@ export function createArchiveUploads(options: ArchiveUploadsOptions): ArchiveUpl
       } catch {
         return;
       }
-      // Folders an earlier sweep set aside and did not finish deleting.
-      try {
-        for (const name of readdirSync(`${root}${REMOVING_SUFFIX}`)) removeInBackground(join(`${root}${REMOVING_SUFFIX}`, name));
-      } catch { /* none set aside */ }
+
       for (const name of names) {
+        // A folder an earlier sweep set aside and did not finish deleting.
+        if (name.startsWith(REMOVING_PREFIX)) {
+          removeInBackground(join(root, name));
+          continue;
+        }
         if (!ID.test(name)) continue;
         const dir = join(root, name);
         const found = sessions.get(name);
@@ -502,12 +505,13 @@ export function createArchiveUploads(options: ArchiveUploadsOptions): ArchiveUpl
         // A sweep runs on a dashboard read: the folder leaves its place at
         // once (one rename), and its files, which can be thousands, are
         // deleted off the request path.
-        const aside = join(`${root}${REMOVING_SUFFIX}`, name);
+        // Inside the staging folder, so deleting that folder (a source's
+        // data) takes anything left here too; a unique name never collides.
+        const aside = join(root, `${REMOVING_PREFIX}${name}-${randomBytes(4).toString('hex')}`);
         try {
-          mkdirSync(`${root}${REMOVING_SUFFIX}`, { recursive: true, mode: 0o700 });
           renameSync(dir, aside);
         } catch {
-          rmSync(dir, { recursive: true, force: true });
+          removeInBackground(dir);
           continue;
         }
         removeInBackground(aside);

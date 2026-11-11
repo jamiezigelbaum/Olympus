@@ -171292,11 +171292,11 @@ function createArchiveUploads(options) {
       } catch {
         return;
       }
-      try {
-        for (const name of readdirSync29(`${root}${REMOVING_SUFFIX}`))
-          removeInBackground(join134(`${root}${REMOVING_SUFFIX}`, name));
-      } catch {}
       for (const name of names) {
+        if (name.startsWith(REMOVING_PREFIX)) {
+          removeInBackground(join134(root, name));
+          continue;
+        }
         if (!ID2.test(name))
           continue;
         const dir = join134(root, name);
@@ -171316,12 +171316,11 @@ function createArchiveUploads(options) {
         if (found)
           found.cancelled = true;
         sessions.delete(name);
-        const aside = join134(`${root}${REMOVING_SUFFIX}`, name);
+        const aside = join134(root, `${REMOVING_PREFIX}${name}-${randomBytes30(4).toString("hex")}`);
         try {
-          mkdirSync66(`${root}${REMOVING_SUFFIX}`, { recursive: true, mode: 448 });
           renameSync24(dir, aside);
         } catch {
-          rmSync43(dir, { recursive: true, force: true });
+          removeInBackground(dir);
           continue;
         }
         removeInBackground(aside);
@@ -171337,7 +171336,7 @@ function createArchiveUploads(options) {
     }
   };
 }
-var ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES, ARCHIVE_UPLOAD_CHUNK_BYTES, ARCHIVE_UPLOAD_MAX_CHUNK_BYTES, SPACE_CHECK_EVERY_BYTES, SPACE_POLL_MS = 2000, ARCHIVE_UPLOAD_IDLE_MS, MAX_DEPTH = 64, MAX_PATH_CHARS = 4096, MAX_NAME_BYTES = 255, ID2, ArchiveUploadError, ARCHIVE_UPLOAD_COPY, REMOVING_SUFFIX = ".removing", removing;
+var ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES, ARCHIVE_UPLOAD_CHUNK_BYTES, ARCHIVE_UPLOAD_MAX_CHUNK_BYTES, SPACE_CHECK_EVERY_BYTES, SPACE_POLL_MS = 2000, ARCHIVE_UPLOAD_IDLE_MS, MAX_DEPTH = 64, MAX_PATH_CHARS = 4096, MAX_NAME_BYTES = 255, ID2, ArchiveUploadError, ARCHIVE_UPLOAD_COPY, ARCHIVE_STAGING_REMOVING_PREFIX = ".removing-", REMOVING_PREFIX, removing;
 var init_staging = __esm(() => {
   ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
   ARCHIVE_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
@@ -171366,6 +171365,7 @@ var init_staging = __esm(() => {
     unreadable: "Olympus could not read what was sent. Choose the folder again.",
     write_failed: "Olympus could not save the file on this computer. Check that its disk has room, then choose the folder again."
   };
+  REMOVING_PREFIX = ARCHIVE_STAGING_REMOVING_PREFIX;
   removing = new Set;
 });
 
