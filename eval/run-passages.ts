@@ -17,27 +17,34 @@ export type EvalSplit = 'open' | 'sealed';
 interface HitScore { firstHitRank: number | null; reciprocalRank: number; hitsAtK: Record<string, number> }
 interface Metrics { hitsAtK: Record<string, number>; recallAtK: Record<string, number>; mrr: number }
 export interface PassageSummary {
-  questions: number; answerable: number; unanswerable: number; negativeSeats: number;
+  /** Questions scored; a degraded question is counted in `degraded` instead. */
+  questions: number; answerable: number; unanswerable: number; negativeSeats: number; degraded: number;
   object: Metrics; passage: Metrics;
   timings: { buildPackMs: number; fitMs: number; totalMs: number; storeSearchMs: number };
 }
 export interface PassageRow {
   questionId: string; shape: string; families: string[]; tiers: string[];
   seatsFilled: number; answerable: boolean; object: HitScore; passage: HitScore;
+  /** Present when a store's search was cut short: which store and lane, and why (codes only). Left out of the metrics. */
+  degraded?: Degradation[];
   timings: PassageSummary['timings'];
   corpusTimings: { corpusId: string; elapsedMs: number; outcome: 'success' | 'timeout' }[];
 }
+export interface Degradation { corpusId: string; lane?: string; reason: string }
 export interface PassageReceipt {
-  schema: 2; rule: typeof PASSAGE_MATCH_RULE; gitSha: string; split: EvalSplit;
+  schema: 3; rule: typeof PASSAGE_MATCH_RULE; gitSha: string; split: EvalSplit;
   setId: string; maxResults: number; ks: number[];
   storeCounts: readonly EvalStoreCount[]; skippedStores: readonly EvalSkippedStore[];
   summary: { overall: PassageSummary; byShape: Record<string, PassageSummary>; byFamily: Record<string, PassageSummary>; byTier: Record<string, PassageSummary> };
   questions?: PassageRow[];
+  /** Ids of the questions left out as degraded; sealed receipts carry these but no rows. */
+  degradedIds: string[];
 }
 function score(rank: number | null, ks: readonly number[]): HitScore {
   return { firstHitRank: rank, reciprocalRank: rank === null ? 0 : 1 / rank, hitsAtK: Object.fromEntries(ks.map(k => [k, rank !== null && rank <= k ? 1 : 0])) };
 }
-function summarize(rows: readonly PassageRow[], ks: readonly number[]): PassageSummary {
+function summarize(all: readonly PassageRow[], ks: readonly number[]): PassageSummary {
+  const rows = all.filter(row => !row.degraded);
   const positives = rows.filter(row => row.answerable);
   const metric = (key: 'object' | 'passage'): Metrics => {
     const hitsAtK = Object.fromEntries(ks.map(k => [k, positives.reduce((n, row) => n + row[key].hitsAtK[k]!, 0)]));
@@ -46,11 +53,12 @@ function summarize(rows: readonly PassageRow[], ks: readonly number[]): PassageS
   return {
     questions: rows.length, answerable: positives.length, unanswerable: rows.length - positives.length,
     negativeSeats: rows.filter(row => !row.answerable).reduce((n, row) => n + row.seatsFilled, 0),
+    degraded: all.length - rows.length,
     object: metric('object'), passage: metric('passage'),
     timings: Object.fromEntries(['buildPackMs', 'fitMs', 'totalMs', 'storeSearchMs'].map(key => [key, rows.reduce((n, row) => n + row.timings[key as keyof PassageRow['timings']], 0)])) as PassageSummary['timings'],
   };
 }
-function grouped(rows: PassageRow[], ks: readonly number[], groups: (row: PassageRow) => string[]): Record<string, PassageSummary> {
+function grouped(rows: readonly PassageRow[], ks: readonly number[], groups: (row: PassageRow) => string[]): Record<string, PassageSummary> {
   const buckets = new Map<string, PassageRow[]>();
   for (const row of rows) for (const group of new Set(groups(row))) buckets.set(group, [...(buckets.get(group) ?? []), row]);
   return Object.fromEntries([...buckets].sort(([a], [b]) => a.localeCompare(b)).map(([key, entries]) => [key, summarize(entries, ks)]));
@@ -71,8 +79,9 @@ export async function runPassageEval(input: {
   for (const question of questions) {
     const started = performance.now();
     const detail = await input.buildPack(question);
-    // A truncated/timed-out search cannot be scored as an ordinary miss.
-    if (detail.degradations.length || detail.corpusTimings?.some(t => t.outcome !== 'success')) throw new Error('Retrieval incomplete; no passage receipt written.');
+    // A cut-short search is not an ordinary miss: the question is recorded
+    // as degraded, left out of the metrics, and the run goes on.
+    const degraded = degradationsOf(detail);
     const builtAt = performance.now();
     const original = detail.pack;
     const pack = input.promptBytes === undefined ? original : fitPackToPromptBytes(original, input.promptBytes,
@@ -99,26 +108,56 @@ export async function runPassageEval(input: {
       families: expectedStores.length ? [...new Set(expectedStores.map(store => store?.family ?? 'unknown'))] : ['unknown'],
       tiers: expectedStores.length ? [...new Set(expectedStores.map((store, i) => store?.tier ?? question.expectedEvidence![i]!.corpusId.split('.')[0]!))] : ['unknown'],
       seatsFilled: pack.candidates.length, answerable: question.shape !== 'coverage_negative', object: score(objectRank, ks), passage: score(passageRank, ks),
+      ...(degraded.length ? { degraded } : {}),
       timings: { buildPackMs: builtAt - started, fitMs: finished - builtAt, totalMs: finished - started, storeSearchMs: (detail.corpusTimings ?? []).reduce((n, t) => n + t.elapsedMs, 0) },
       corpusTimings: (detail.corpusTimings ?? []).map(t => ({ corpusId: t.corpusId, elapsedMs: t.elapsedMs, outcome: t.outcome })),
     });
   }
-  return { schema: 2, rule: PASSAGE_MATCH_RULE, gitSha: input.gitSha, split,
+  return { schema: 3, rule: PASSAGE_MATCH_RULE, gitSha: input.gitSha, split,
     // Identity includes only ids and structural labels; never hashes private text.
     setId: createHash('sha256').update(JSON.stringify(questions.map(q => [q.id, q.shape]).sort((a, b) => a[0]!.localeCompare(b[0]!)))).digest('hex'),
     maxResults: input.maxResults, ks, storeCounts: input.storeCounts, skippedStores: input.skippedStores ?? [],
-    summary: { overall: summarize(rows, ks), byShape: grouped(rows, ks, row => [row.shape]), byFamily: grouped(rows, ks, row => row.families), byTier: grouped(rows, ks, row => row.tiers) },
+    summary: summaries(rows, ks),
     ...(split === 'open' ? { questions: rows } : {}),
+    degradedIds: rows.filter(row => row.degraded).map(row => row.questionId),
   };
 }
 
-export function comparePassageReceipts(current: PassageReceipt, baseline: PassageReceipt): { kept: boolean; gained: number; shapeLosses: number; familyLosses: number } {
+function summaries(rows: readonly PassageRow[], ks: readonly number[]): PassageReceipt['summary'] {
+  return { overall: summarize(rows, ks), byShape: grouped(rows, ks, row => [row.shape]), byFamily: grouped(rows, ks, row => row.families), byTier: grouped(rows, ks, row => row.tiers) };
+}
+
+/** Which stores and lanes a question's search lost, by code; never the detail text. */
+export function degradationsOf(detail: EvidencePackBuildDetail): Degradation[] {
+  const lanes = detail.degradations.map(({ laneName, reason }) => {
+    const split = laneName.indexOf(':');
+    return split < 0 ? { corpusId: laneName, reason } : { corpusId: laneName.slice(0, split), lane: laneName.slice(split + 1), reason };
+  });
+  const timings = (detail.corpusTimings ?? []).filter(t => t.outcome !== 'success').map(t => ({ corpusId: t.corpusId, reason: t.outcome }));
+  return [...lanes, ...timings];
+}
+
+/**
+ * The keep verdict over the questions both runs scored. Open receipts are
+ * rescored on that intersection; sealed ones carry no rows, so both runs must
+ * have left out the same questions. `leftOut` counts the questions dropped.
+ */
+export function comparePassageReceipts(current: PassageReceipt, baseline: PassageReceipt): { kept: boolean; gained: number; shapeLosses: number; familyLosses: number; leftOut: number } {
   if (current.schema !== baseline.schema || current.rule !== baseline.rule || current.split !== baseline.split || current.setId !== baseline.setId || current.maxResults !== baseline.maxResults) throw new Error('Receipts must be compatible and use the same split, set and pack size.');
+  const left = new Set([...current.degradedIds, ...baseline.degradedIds]);
+  let now = current.summary; let before = baseline.summary;
+  if (current.questions && baseline.questions) {
+    const both = (rows: readonly PassageRow[]) => rows.filter(row => !left.has(row.questionId));
+    now = summaries(both(current.questions), current.ks); before = summaries(both(baseline.questions), baseline.ks);
+  } else if (left.size !== current.degradedIds.length || left.size !== baseline.degradedIds.length) {
+    throw new Error(`The sealed runs left out different degraded questions (${left.size} in all); rerun before comparing.`);
+  }
   const k = String(current.maxResults);
-  const gained = current.summary.overall.passage.hitsAtK[k]! - baseline.summary.overall.passage.hitsAtK[k]!;
-  const worstLoss = (group: 'byShape' | 'byFamily') => Math.max(0, ...Object.entries(baseline.summary[group]).map(([key, value]) => value.passage.hitsAtK[k]! - (current.summary[group][key]?.passage.hitsAtK[k] ?? 0)));
+  const hits = (summary: PassageSummary | undefined) => summary?.passage.hitsAtK[k] ?? 0;
+  const gained = hits(now.overall) - hits(before.overall);
+  const worstLoss = (group: 'byShape' | 'byFamily') => Math.max(0, ...Object.entries(before[group]).map(([key, value]) => hits(value) - hits(now[group][key])));
   const shapeLosses = worstLoss('byShape'); const familyLosses = worstLoss('byFamily');
-  return { kept: gained >= 2 && shapeLosses <= 1 && familyLosses <= 1, gained, shapeLosses, familyLosses };
+  return { kept: gained >= 2 && shapeLosses <= 1 && familyLosses <= 1, gained, shapeLosses, familyLosses, leftOut: left.size };
 }
 
 export function positiveInteger(value: string | undefined, fallback: number): number {
