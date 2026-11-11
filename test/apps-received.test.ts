@@ -41,7 +41,7 @@ import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { SEARCH_TOOL, callChatGptTool, type ChatGptSurfaceOptions } from '../src/workers/chatgpt/mcp-surface.ts';
 import { answerToolResult, searchToolResult } from '../src/workers/chatgpt/response-builder.ts';
 import { renderDashboardAppsReceivedPage } from '../src/workers/dashboard/pages/apps-received.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
 import { searchReleasedEvidence } from '../src/workers/source-index/analyst-answer.ts';
@@ -641,8 +641,8 @@ describe('the worker serves the list only inside a local control session', () =>
     expect(readers.sort()).toEqual([
       'src/core/app-release-log.ts',
       'src/workers/apps-received.ts',
-      'src/workers/email-source/index.ts',
-      'src/workers/email-source/server.ts',
+      'src/workers/engine/index.ts',
+      'src/workers/engine/server.ts',
     ]);
   });
 });

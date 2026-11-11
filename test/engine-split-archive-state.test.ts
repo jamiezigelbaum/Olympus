@@ -42,7 +42,7 @@ async function split() {
     NODE_ENV: 'test',
   };
   const spawn = (role: 'front' | 'background') => {
-    const child = Bun.spawn([process.execPath, join(import.meta.dir, '../src/workers/email-source/server.ts')], {
+    const child = Bun.spawn([process.execPath, join(import.meta.dir, '../src/workers/engine/server.ts')], {
       env: { ...env, OLYMPUS_WORKER_ENGINE_ROLE: role }, stdout: 'pipe', stderr: 'pipe',
     });
     children.push(child);

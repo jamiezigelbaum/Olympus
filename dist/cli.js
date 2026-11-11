@@ -38230,6 +38230,14 @@ function createConnectorStoreSenderIndexes(db) {
     CREATE INDEX IF NOT EXISTS idx_connector_store_items_sender_owner
       ON items(sender_is_owner, sender_id);
   `);
+  createConnectorStorePeopleIndex(db);
+}
+function createConnectorStorePeopleIndex(db) {
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_connector_store_items_people
+      ON items(tombstoned, provider, sender_id, sender_label, provider_conversation_id, trust_tier, sender_is_owner)
+      WHERE ${PEOPLE_SENDER_PREDICATE.replaceAll("i.", "")};
+  `);
 }
 function createConnectorStoreEmbeddingModelsTable(db) {
   db.exec(`
@@ -38550,7 +38558,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, READ_ONLY_MIN_SCHEMA_VERSION = 7, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_store_write_guard();
   init_job_names();
@@ -38768,6 +38776,7 @@ var init_local_index = __esm(() => {
           createConnectorStoreMediaJudgments(this.db);
           createConnectorStoreItemTextVersions(this.db);
           createConnectorStoreVisibilityTables(this.db);
+          createConnectorStorePeopleIndex(this.db);
           validateConnectorStoreSchema(this.db);
         }
         if (options.readOnly !== true)
@@ -40904,18 +40913,42 @@ var init_local_index = __esm(() => {
     }
     peopleObservations() {
       const tierHidden = this.tierHiddenItemPks();
-      const heldSql = this.visibilityJournal && this.visibilitySqlMemo;
-      const rows = this.db.query(`
-      SELECT i.provider AS provider, i.sender_id AS sender_id, i.sender_label AS sender_label,
-        i.provider_conversation_id AS conversation_id, i.trust_tier AS trust_tier,
-        MAX(COALESCE(i.sender_is_owner, 0)) AS is_owner, COUNT(*) AS item_count
-      FROM items i
-      WHERE i.tombstoned = 0
-        AND ((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))
-        AND i.item_pk NOT IN (SELECT value FROM json_each(?))
-        ${heldSql ? "AND NOT EXISTS (SELECT 1 FROM temp.tier_visibility_pks v WHERE v.flag = 'held' AND v.item_pk = i.item_pk)" : ""}
-      GROUP BY i.provider, i.sender_id, i.sender_label, i.provider_conversation_id, i.trust_tier
-    `).all(JSON.stringify(heldSql ? tierHidden.hidden : [...tierHidden.hidden, ...tierHidden.held]));
+      return this.peopleObservationsFromRows(this.readHere(this.peopleObservationSteps(tierHidden)));
+    }
+    async peopleObservationsOffThread() {
+      if (!offThreadReadsSupported(this.dbPath))
+        return this.peopleObservations();
+      for (let attempt = 0;attempt < PEOPLE_OFF_THREAD_READ_ATTEMPTS; attempt += 1) {
+        const marker = this.peopleVisibilityMarker();
+        const tierHidden = await this.tierHiddenItemPksInTurns();
+        const steps = this.peopleObservationSteps(tierHidden);
+        let step = steps.next();
+        while (!step.done)
+          step = steps.next(await readOnPool(this.dbPath, step.value));
+        if (this.peopleVisibilityMarker() === marker)
+          return this.peopleObservationsFromRows(step.value);
+      }
+      return this.peopleObservations();
+    }
+    *peopleObservationSteps(tierHidden) {
+      return yield this.peopleObservationRead([...tierHidden.hidden, ...tierHidden.held]);
+    }
+    peopleObservationRead(excludedItemPks) {
+      return {
+        mode: "all",
+        sql: `
+        SELECT i.provider AS provider, i.sender_id AS sender_id, i.sender_label AS sender_label,
+          i.provider_conversation_id AS conversation_id, i.trust_tier AS trust_tier,
+          MAX(COALESCE(i.sender_is_owner, 0)) AS is_owner, COUNT(*) AS item_count
+        FROM items i
+        WHERE i.tombstoned = 0
+          AND ${PEOPLE_SENDER_PREDICATE}
+          AND i.item_pk NOT IN (SELECT value FROM json_each(?))
+        GROUP BY i.provider, i.sender_id, i.sender_label, i.provider_conversation_id, i.trust_tier`,
+        params: [JSON.stringify(excludedItemPks)]
+      };
+    }
+    peopleObservationsFromRows(rows) {
       const bySender = new Map;
       for (const row of rows) {
         const key2 = `${row.provider}\x00${row.sender_id ?? ""}\x00${row.sender_label ?? ""}`;
@@ -42588,6 +42621,9 @@ var init_local_index = __esm(() => {
       SET sender_id = ?, sender_label = ?, sender_is_owner = ?
       WHERE item_pk = ?
     `);
+      const noteChange = this.db.query(`
+      INSERT INTO item_visibility_feed (provider, account_scope, conversation_key, provider_item_id) VALUES (?, ?, ?, ?)
+    `);
       this.db.transaction(() => {
         for (const record of records) {
           const sender = normalizeSenderMetadata(record);
@@ -42620,8 +42656,12 @@ var init_local_index = __esm(() => {
             continue;
           }
           update.run(senderId, senderLabel, senderIsOwner, row.item_pk);
+          noteChange.run(identity2.provider, identity2.accountScope, normalizeConversationId(identity2.providerConversationId), identity2.providerItemId);
           counts.itemsRepaired += 1;
           outputDigest.update(JSON.stringify({ identity: digestIdentity, status: "repaired" }));
+        }
+        if (counts.itemsRepaired > 0) {
+          this.db.query(`DELETE FROM item_visibility_feed WHERE seq <= (SELECT MAX(seq) - ${ITEM_VISIBILITY_FEED_RETENTION} FROM item_visibility_feed)`).run();
         }
       })();
       return {
@@ -49943,16 +49983,14 @@ class LocalPeopleIndex {
     }
   }
 }
-function refreshPeopleIndex(index, stores) {
-  const observations = [];
-  for (const store of stores) {
-    if (!PEOPLE_AUTHORED_FAMILIES.has(store.family))
-      continue;
-    try {
-      observations.push(...store.peopleObservations());
-    } catch {}
-  }
-  const people = index.rebuild(observations);
+function authoredStores(stores) {
+  return stores.filter((store) => PEOPLE_AUTHORED_FAMILIES.has(store.family));
+}
+function readStoreObservations(store) {
+  return store.peopleObservationsOffThread ? store.peopleObservationsOffThread() : Promise.resolve(store.peopleObservations());
+}
+function linkStores(index, stores, observations) {
+  const people = index.rebuild([...observations]);
   const resolver = (provider, senderId, senderLabel) => index.citationName(provider, senderId, senderLabel);
   for (const store of stores)
     store.setPeopleNames?.(resolver);
@@ -49965,29 +50003,70 @@ class PeopleIndexRefresher {
   lastFingerprint;
   lastRefreshAt;
   now;
+  observed = new Map;
+  inFlight;
   constructor(index, stores, options = {}) {
     this.index = index;
     this.stores = stores;
     this.now = options.now ?? (() => Date.now());
   }
   refresh() {
-    const stores = this.stores();
-    this.lastFingerprint = refreshFingerprint(stores);
-    this.lastRefreshAt = this.now();
-    return refreshPeopleIndex(this.index, stores);
+    return this.rebuildOnce(true);
   }
-  refreshIfChanged() {
-    const fingerprint = refreshFingerprint(this.stores());
+  async refreshIfChanged() {
+    if (this.inFlight) {
+      await this.inFlight;
+      return false;
+    }
+    const fingerprint = fingerprintParts(authoredStores(this.stores())).join("|");
     if (fingerprint === this.lastFingerprint)
       return false;
     if (this.lastRefreshAt !== undefined && this.now() - this.lastRefreshAt < PEOPLE_INDEX_MIN_REBUILD_MS)
       return false;
-    this.refresh();
+    await this.rebuildOnce(false);
     return true;
   }
+  relink() {
+    if (this.lastRefreshAt === undefined)
+      return;
+    const stores = this.stores();
+    const current2 = new Set(authoredStores(stores));
+    const observations = [...this.observed].filter(([store]) => current2.has(store)).flatMap(([, entry]) => entry.observations);
+    return linkStores(this.index, stores, observations);
+  }
+  rebuildOnce(force) {
+    this.inFlight ??= this.rebuild(force).finally(() => {
+      this.inFlight = undefined;
+    });
+    return this.inFlight;
+  }
+  async rebuild(force) {
+    const stores = this.stores();
+    const authored = authoredStores(stores);
+    const parts = fingerprintParts(authored);
+    this.lastRefreshAt = this.now();
+    const observed = new Map;
+    for (const [position, store] of authored.entries()) {
+      const part = parts[position];
+      const kept = this.observed.get(store);
+      if (!force && kept && kept.part === part && !part.endsWith(UNREADABLE_VISIBILITY)) {
+        observed.set(store, kept);
+        continue;
+      }
+      try {
+        observed.set(store, { part, observations: await readStoreObservations(store) });
+      } catch {
+        parts[position] = `${part}${READ_FAILED}`;
+      }
+    }
+    this.observed = observed;
+    const people = linkStores(this.index, stores, [...observed.values()].flatMap((entry) => entry.observations));
+    this.lastFingerprint = parts.join("|");
+    return people;
+  }
 }
-function refreshFingerprint(stores) {
-  return stores.filter((store) => PEOPLE_AUTHORED_FAMILIES.has(store.family)).map((store) => {
+function fingerprintParts(stores) {
+  return stores.map((store) => {
     let sync = "";
     let visibility = "";
     try {
@@ -49999,10 +50078,10 @@ function refreshFingerprint(stores) {
     try {
       visibility = store.peopleVisibilityMarker?.() ?? "";
     } catch {
-      visibility = "unreadable";
+      return `${sync}${UNREADABLE_VISIBILITY}`;
     }
     return `${sync}#${visibility}`;
-  }).join("|");
+  });
 }
 function forgetPeopleIndexRows(dbPath, scope, options = {}) {
   if (!existsSync38(dbPath) || scope.corpusIds.length === 0)
@@ -50048,7 +50127,7 @@ function forgetPeopleIndexRows(dbPath, scope, options = {}) {
     closeSqliteStore(db);
   }
 }
-var PEOPLE_LINK_REASON_TEXT, OWNER_PERSON_ID = "you", OWNER_DISPLAY_NAME = "You", MAX_GROUP_SIGNAL_MEMBERS = 50, MAX_NAMES_PER_IDENTITY = 8, PEOPLE_SCHEMA_VERSION = 2, PEOPLE_INDEX_STORE_ID = "people-index", MAX_ADDRESS_TEXT_CHARS = 4096, addressesIn = (value) => addressSpansIn(value.slice(0, MAX_ADDRESS_TEXT_CHARS)), PeopleCorrectionRefusedError, PEOPLE_AUTHORED_FAMILIES, PEOPLE_INDEX_MIN_REBUILD_MS = 60000;
+var PEOPLE_LINK_REASON_TEXT, OWNER_PERSON_ID = "you", OWNER_DISPLAY_NAME = "You", MAX_GROUP_SIGNAL_MEMBERS = 50, MAX_NAMES_PER_IDENTITY = 8, PEOPLE_SCHEMA_VERSION = 2, PEOPLE_INDEX_STORE_ID = "people-index", MAX_ADDRESS_TEXT_CHARS = 4096, addressesIn = (value) => addressSpansIn(value.slice(0, MAX_ADDRESS_TEXT_CHARS)), PeopleCorrectionRefusedError, PEOPLE_AUTHORED_FAMILIES, PEOPLE_INDEX_MIN_REBUILD_MS = 60000, UNREADABLE_VISIBILITY = "#unreadable", READ_FAILED = "!read-failed";
 var init_people_index = __esm(() => {
   init_olympus_layout();
   init_sender_rules();
@@ -184096,7 +184175,7 @@ var init_live_sync3 = __esm(() => {
   AUTH_KINDS = new Set(["auth_missing", "auth_expired", "auth_revoked"]);
 });
 
-// src/workers/email-source/index.ts
+// src/workers/engine/index.ts
 import { createHash as createHash99, randomBytes as randomBytes32, timingSafeEqual as timingSafeEqual9 } from "node:crypto";
 import { readFileSync as readFileSync95, statSync as statSync44 } from "node:fs";
 import { homedir as homedir47 } from "node:os";
@@ -189119,7 +189198,7 @@ function mostPrivateTrustDomain(domains) {
   return "public_safe";
 }
 var CONNECTOR_STORE_FILTER_CAPABILITIES, EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL = "No email account is connected yet. Connect Gmail from the Olympus dashboard to enable email answers.", EmailSourceWorkerError, DASHBOARD_SETTINGS_PROPOSAL_APPLY_PATH = "/dashboard/settings/proposal/apply", DASHBOARD_SETTINGS_PROPOSAL_DISCARD_PATH = "/dashboard/settings/proposal/discard", DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000, DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30, DASHBOARD_UNPAIR_SOURCE_IDS, DASHBOARD_EVERNOTE_SIGN_IN_TTL_MS = 600000, CHATGPT_RETURN_TO = "https://chatgpt.com/", DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000, DASHBOARD_DEFAULT_ENGINE_PORT = 8010;
-var init_email_source = __esm(() => {
+var init_engine2 = __esm(() => {
   init_judge_spending();
   init_people();
   init_source_failure();
@@ -234872,7 +234951,7 @@ var init_private_agent_listeners = __esm(() => {
   init_first_run_privacy_gate();
 });
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 var exports_server2 = {};
 __export(exports_server2, {
   workerTierLedgerProblem: () => workerTierLedgerProblem,
@@ -237263,11 +237342,23 @@ ${key2}`;
     }
     if (!peopleRefresher)
       return;
+    const failed = (error2) => {
+      console.warn(`[olympus] people index refresh failed: ${error2 instanceof Error ? error2.message : String(error2)}`);
+    };
     try {
-      if (force)
-        peopleRefresher.refresh();
-      else
-        peopleRefresher.refreshIfChanged();
+      (force ? peopleRefresher.refresh() : peopleRefresher.refreshIfChanged()).catch(failed);
+    } catch (error2) {
+      failed(error2);
+    }
+  };
+  const relinkPeople = () => {
+    if (!peopleRefresher) {
+      refreshPeople(true);
+      return;
+    }
+    try {
+      if (peopleRefresher.relink() === undefined)
+        refreshPeople(true);
     } catch (error2) {
       console.warn(`[olympus] people index refresh failed: ${error2 instanceof Error ? error2.message : String(error2)}`);
     }
@@ -237276,8 +237367,6 @@ ${key2}`;
   peopleFirstRefresh.unref?.();
   const peopleCheck = setInterval(() => refreshPeople(), PEOPLE_INDEX_CHECK_MS);
   peopleCheck.unref?.();
-  const peopleRefresh = setInterval(() => refreshPeople(true), PEOPLE_INDEX_REFRESH_MS);
-  peopleRefresh.unref?.();
   const configuredFileExtractionCorpora = parseFileExtractionCorporaEnv(process.env.OLYMPUS_FILE_EXTRACTION_CORPORA_JSON);
   const dropboxExtractionScopes = dropboxPolicyFullExtractionScopeKeys(dropboxIngestionPolicy);
   const selectedGoogleDriveExtractionHandle = () => selectedSourceCredentialHandle({
@@ -239182,7 +239271,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
             return dashboardPanelTools.call(name, args, context3);
           }
         },
-        ...peopleIndex ? { people: createDashboardPeople({ index: peopleIndex, refresh: () => refreshPeople(true) }) } : {},
+        ...peopleIndex ? { people: createDashboardPeople({ index: peopleIndex, refresh: relinkPeople }) } : {},
         ...sourceAnswerLanes ? {
           privateAnswers: {
             destinations: () => localPrivateAnswers?.destinations() ?? { computer: "not_set_up", venice: "not_set_up" },
@@ -241151,7 +241240,7 @@ function googleFilePage(locator) {
     return false;
   }
 }
-var SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS = 120000, GMAIL_ATTACHMENT_READER_REUSE_MS, SCOPE_APPROVED_SOURCE_IDS, INGESTION_DISPOSITION_SOURCES, BUILT_IN_MODEL_RETRY_MS, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES, PEOPLE_INDEX_FIRST_REFRESH_MS = 60000, PEOPLE_INDEX_REFRESH_MS, PEOPLE_INDEX_CHECK_MS = 60000, workerLaunch, dataOwnerLock;
+var SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS = 120000, GMAIL_ATTACHMENT_READER_REUSE_MS, SCOPE_APPROVED_SOURCE_IDS, INGESTION_DISPOSITION_SOURCES, BUILT_IN_MODEL_RETRY_MS, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES, PEOPLE_INDEX_FIRST_REFRESH_MS = 60000, PEOPLE_INDEX_CHECK_MS = 60000, workerLaunch, dataOwnerLock;
 var init_server5 = __esm(async () => {
   init_dashboard_people();
   init_people_index();
@@ -241203,7 +241292,7 @@ var init_server5 = __esm(async () => {
   init_venice_client();
   init_openai_compatible_client();
   init_apple_vision_ocr();
-  init_email_source();
+  init_engine2();
   init_analyst_answer();
   init_answer_latency_log();
   init_status();
@@ -241409,7 +241498,6 @@ var init_server5 = __esm(async () => {
     [{ family: "file", provider: "dropbox" }, { approvedScope: DROPBOX_APPROVED_SCOPE_FILTER_CODEC }],
     [{ family: "file", provider: LOCAL_FILES_PROVIDER }, { approvedScope: LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC }]
   ]);
-  PEOPLE_INDEX_REFRESH_MS = 15 * 60000;
   workerLaunch = {};
   if (false) {}
 });

@@ -130,7 +130,7 @@ test('ChatGPT olympus_search withholds an item moved after hydration', async () 
   expect(JSON.stringify(await searching)).not.toContain(SENTENCE);
   // This composition-root regression prevents ChatGPT losing the final check
   // while the shared search implementation still passes its own tests.
-  const server = readFileSync(new URL('../src/workers/email-source/server.ts', import.meta.url), 'utf8');
+  const server = readFileSync(new URL('../src/workers/engine/server.ts', import.meta.url), 'utf8');
   const chatgpt = server.slice(server.indexOf('const chatgptEvidenceSearch'), server.indexOf('const remoteEvidenceSearch'));
   expect(chatgpt).toContain('releaseCheck: remoteReleaseCheck');
 });

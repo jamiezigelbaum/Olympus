@@ -16,7 +16,7 @@ import { linuxEngineEnvironment, resolveLinuxEngineLayout } from '../src/core/li
 import { renderEngineSystemdUnit } from '../src/core/linux-engine-service.ts';
 import { recordRequestPeer } from '../src/core/request-peer.ts';
 import { DashboardLaunchTickets } from '../src/core/dashboard-launch.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { renderComputerHostPage } from '../src/workers/dashboard/host-page.ts';
 import { renderDashboardSettingsPage } from '../src/workers/dashboard/pages/local.ts';
 import {

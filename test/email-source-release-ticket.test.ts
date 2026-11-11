@@ -2,7 +2,7 @@ import { describe, expect, spyOn, test } from 'bun:test';
 import { defaultConfig } from '../src/core/config.ts';
 import { DirectHttpEmailTransport, EmailClient, type EmailFetch } from '../src/core/email.ts';
 import { recordReleaseManifest } from '../src/core/release-manifest.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import type { SourceIndexAnswerResult } from '../src/workers/source-index/answer-types.ts';
 
 const answer: SourceIndexAnswerResult = {

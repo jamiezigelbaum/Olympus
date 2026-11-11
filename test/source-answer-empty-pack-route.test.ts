@@ -20,7 +20,7 @@ import {
   analystRouteTrustDomain,
   secureLocalAnalystRouteStatus,
   sovereigntyAnalystRoutePlan,
-} from '../src/workers/email-source/server.ts';
+} from '../src/workers/engine/server.ts';
 import {
   createAnalystSourceIndexAnswerHandler,
   type SovereigntyAnalystRouteStep,

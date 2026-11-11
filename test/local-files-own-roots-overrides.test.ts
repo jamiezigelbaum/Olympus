@@ -22,7 +22,7 @@ import { isDedicatedOlympusFolder, olympusOwnLocations, olympusOwnRoots } from '
 import { SOURCE_INGESTION_EXCLUSIONS_PATH_ENV } from '../src/core/source-ingestion-exclusions.ts';
 import { defaultLocalFilesIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { localFilesItemId } from '../src/workers/local-files/connector.ts';
 import { LOCAL_FILES_OWN_ROOTS_CLEANUP_CONNECTOR_ID, createLocalFilesOwnRootsCleanup, createLocalFilesOwnRootsRecovery } from '../src/workers/local-files/own-roots-cleanup.ts';
 import {
@@ -615,7 +615,7 @@ describe('5. what an earlier version indexed inside an own folder', () => {
   });
 
   test('the worker\'s read scopes take no own folders, and the clean-up runs before it answers', () => {
-    const server = readFileSync(new URL('../src/workers/email-source/server.ts', import.meta.url), 'utf8');
+    const server = readFileSync(new URL('../src/workers/engine/server.ts', import.meta.url), 'utf8');
     // Read scopes come from the saved approval alone: no second argument.
     expect(server).not.toMatch(/fileSourceScope(?:Content|Metadata)Filters\([^()]*,/);
     expect(server).not.toContain('alwaysExcluded');

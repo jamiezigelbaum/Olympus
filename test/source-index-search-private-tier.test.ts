@@ -11,7 +11,7 @@ import { buildSourceSensitivity, type SourceTrustDomain, type SourceTrustTier } 
 import { defaultConfig } from '../src/core/config.ts';
 import { DirectHttpEmailTransport, EmailClient } from '../src/core/email.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 
 const ACCOUNT = 'personal';
 const INTERNAL = 'internal.fixture.files';

@@ -68,7 +68,7 @@
     "telegram:trust-reconcile": "bun scripts/telegram-trust-reconcile.ts",
     "worktree:audit": "bun scripts/worktree-integration-audit.ts",
     "local-vlm:promotion-gate": "bun scripts/local-vlm-promotion-gate.ts",
-    "email-source:serve": "bun src/workers/email-source/server.ts",
+    "email-source:serve": "bun src/workers/engine/server.ts",
     "test": "bun run build && bun scripts/test-suite.ts",
     "test:focus": "HOME=\"$(mktemp -d)\" bun test",
     "test:fast": "bun run build && bun scripts/test-lane.ts fast && bun run test:connect-relay",

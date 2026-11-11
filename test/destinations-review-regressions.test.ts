@@ -281,7 +281,7 @@ describe('anonymous send authorization and server-owned local quotas', () => {
     expect(anonymousInboxConnectionId({ connection_id: 'authenticated-remote', display_name: 'You' })).toBe('authenticated-remote');
     expect(localInboxLabel('@local:You')).toBe('You');
     expect(localInboxLabel('@local:ChatGPT')).toBe('Local agent: ChatGPT');
-    const server = readFileSync(new URL('../src/workers/email-source/server.ts', import.meta.url), 'utf8');
+    const server = readFileSync(new URL('../src/workers/engine/server.ts', import.meta.url), 'utf8');
     expect(server).toContain('connectionId: anonymousInboxConnectionId(caller)');
     expect(server).not.toContain('@local:${caller?.display_name');
   });

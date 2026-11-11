@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { engineStatusReport } from '../src/core/engine-cli.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { linuxModelReadiness } from '../src/core/linux-model-readiness.ts';
 import { renderComputerHostPage } from '../src/workers/dashboard/host-page.ts';
 

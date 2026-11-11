@@ -31,7 +31,7 @@ import {
   parseConnectorStoreMountsFromEnv,
   sourceIndexLaneAccountDecision,
   type SourceIndexLaneDecision,
-} from '../src/workers/email-source/server.ts';
+} from '../src/workers/engine/server.ts';
 
 let dir: string;
 let env: Record<string, string>;

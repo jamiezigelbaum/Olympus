@@ -11,7 +11,7 @@ import { Database } from 'bun:sqlite';
 import { LocalConnectorStore, connectorStoreReadableNow } from '../src/workers/connector-store/local-index.ts';
 import { waitFor } from './helpers/test-clock.ts';
 
-const SERVER = join(import.meta.dir, '..', 'src', 'workers', 'email-source', 'server.ts');
+const SERVER = join(import.meta.dir, '..', 'src', 'workers', 'engine', 'server.ts');
 const REPO = join(import.meta.dir, '..');
 const TOKEN = 'engine-split-connect-token';
 

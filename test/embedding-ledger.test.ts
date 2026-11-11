@@ -5,7 +5,7 @@ import * as fs from 'node:fs/promises';
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import {
   EMBEDDING_LEDGER_BACKFILL,
   EMBEDDING_LEDGER_PATH_ENV,

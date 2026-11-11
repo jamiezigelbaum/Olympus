@@ -2933,6 +2933,20 @@ export interface ConnectorStoreOwnedSearchFacetRefreshSummary {
   refreshedLocalItemIds: string[];
 }
 
+/** Off-thread people reads tried before a store whose visibility keeps moving is read on this thread. */
+const PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3;
+
+/** A people read's row: one sender in one conversation at one tier. */
+interface PeopleObservationRow {
+  provider: string;
+  sender_id: string | null;
+  sender_label: string | null;
+  conversation_id: string | null;
+  trust_tier: string;
+  is_owner: number;
+  item_count: number;
+}
+
 interface ItemRow {
   item_pk: number;
   provider: string;
@@ -3143,6 +3157,7 @@ export class LocalConnectorStore {
         createConnectorStoreMediaJudgments(this.db);
         createConnectorStoreItemTextVersions(this.db);
         createConnectorStoreVisibilityTables(this.db);
+        createConnectorStorePeopleIndex(this.db);
         validateConnectorStoreSchema(this.db);
       }
       if (options.readOnly !== true) this.createVisibilityJournal();
@@ -6218,26 +6233,65 @@ export class LocalConnectorStore {
     // for classification) never names anyone: an old Personal copy of an item
     // now judged Private must not make its sender's name shareable.
     const tierHidden = this.tierHiddenItemPks();
-    const heldSql = this.visibilityJournal && this.visibilitySqlMemo;
-    const rows = this.db.query(`
-      SELECT i.provider AS provider, i.sender_id AS sender_id, i.sender_label AS sender_label,
-        i.provider_conversation_id AS conversation_id, i.trust_tier AS trust_tier,
-        MAX(COALESCE(i.sender_is_owner, 0)) AS is_owner, COUNT(*) AS item_count
-      FROM items i
-      WHERE i.tombstoned = 0
-        AND ((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))
-        AND i.item_pk NOT IN (SELECT value FROM json_each(?))
-        ${heldSql ? "AND NOT EXISTS (SELECT 1 FROM temp.tier_visibility_pks v WHERE v.flag = 'held' AND v.item_pk = i.item_pk)" : ''}
-      GROUP BY i.provider, i.sender_id, i.sender_label, i.provider_conversation_id, i.trust_tier
-    `).all(JSON.stringify(heldSql ? tierHidden.hidden : [...tierHidden.hidden, ...tierHidden.held])) as Array<{
-      provider: string;
-      sender_id: string | null;
-      sender_label: string | null;
-      conversation_id: string | null;
-      trust_tier: string;
-      is_owner: number;
-      item_count: number;
-    }>;
+    return this.peopleObservationsFromRows(this.readHere(this.peopleObservationSteps(tierHidden)));
+  }
+
+  /**
+   * The same senders, read on this store's read pool (#1305): on a large
+   * install the read held the worker's thread for about a minute. The hidden
+   * and held copies are taken here, on this thread, against the current
+   * ledger, and travel with the query, since the pool's connection cannot see
+   * this connection's temp tables. A store the pool cannot read is read here.
+   * Unlike a read on this thread, writes can land between taking that set and
+   * the pool's read, and an item written and held in that gap would name its
+   * sender: the read counts only when the store's visibility marker did not
+   * move across it, and is taken again otherwise. A store that keeps moving
+   * (a judging backlog moves the ledger's cursor on every verdict) is read on
+   * this thread after that, with no gap between the set and the read: an
+   * index-only scan now, so about a second on a large store, not the minute
+   * this read once took (#1305).
+   */
+  async peopleObservationsOffThread(): Promise<PeopleSenderObservation[]> {
+    if (!offThreadReadsSupported(this.dbPath)) return this.peopleObservations();
+    for (let attempt = 0; attempt < PEOPLE_OFF_THREAD_READ_ATTEMPTS; attempt += 1) {
+      const marker = this.peopleVisibilityMarker();
+      const tierHidden = await this.tierHiddenItemPksInTurns();
+      const steps = this.peopleObservationSteps(tierHidden);
+      let step = steps.next();
+      while (!step.done) step = steps.next(await readOnPool(this.dbPath, step.value));
+      if (this.peopleVisibilityMarker() === marker) return this.peopleObservationsFromRows(step.value);
+    }
+    return this.peopleObservations();
+  }
+
+  private *peopleObservationSteps(tierHidden: { hidden: readonly number[]; held: readonly number[] }): Generator<StoreRead, PeopleObservationRow[], unknown> {
+    return (yield this.peopleObservationRead([...tierHidden.hidden, ...tierHidden.held])) as PeopleObservationRow[];
+  }
+
+  /**
+   * One row per sender, conversation and tier. The WHERE clause repeats the
+   * partial predicate of idx_connector_store_items_people word for word, and
+   * every column read is in that index (item_pk is the rowid it carries), so
+   * SQLite answers from the index alone, in GROUP BY order, without reading
+   * a row's text (createConnectorStorePeopleIndex).
+   */
+  private peopleObservationRead(excludedItemPks: readonly number[]): StoreRead {
+    return {
+      mode: 'all',
+      sql: `
+        SELECT i.provider AS provider, i.sender_id AS sender_id, i.sender_label AS sender_label,
+          i.provider_conversation_id AS conversation_id, i.trust_tier AS trust_tier,
+          MAX(COALESCE(i.sender_is_owner, 0)) AS is_owner, COUNT(*) AS item_count
+        FROM items i
+        WHERE i.tombstoned = 0
+          AND ${PEOPLE_SENDER_PREDICATE}
+          AND i.item_pk NOT IN (SELECT value FROM json_each(?))
+        GROUP BY i.provider, i.sender_id, i.sender_label, i.provider_conversation_id, i.trust_tier`,
+      params: [JSON.stringify(excludedItemPks)],
+    };
+  }
+
+  private peopleObservationsFromRows(rows: readonly PeopleObservationRow[]): PeopleSenderObservation[] {
     const bySender = new Map<string, PeopleSenderObservation & { conversations: Set<string>; anyPublic: boolean }>();
     for (const row of rows) {
       const key = `${row.provider}\u0000${row.sender_id ?? ''}\u0000${row.sender_label ?? ''}`;
@@ -8902,6 +8956,9 @@ export class LocalConnectorStore {
       SET sender_id = ?, sender_label = ?, sender_is_owner = ?
       WHERE item_pk = ?
     `);
+    const noteChange = this.db.query(`
+      INSERT INTO item_visibility_feed (provider, account_scope, conversation_key, provider_item_id) VALUES (?, ?, ?, ?)
+    `);
 
     this.db.transaction(() => {
       for (const record of records) {
@@ -8959,8 +9016,16 @@ export class LocalConnectorStore {
           senderIsOwner,
           row.item_pk,
         );
+        // Who wrote an item is not visibility, so no trigger notes it, but the
+        // people index reads it: noted here, the change moves every
+        // connection's people marker and the refresh reads this store again
+        // (#1305; nothing forces a periodic rebuild any more).
+        noteChange.run(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
         counts.itemsRepaired += 1;
         outputDigest.update(JSON.stringify({ identity: digestIdentity, status: 'repaired' }));
+      }
+      if (counts.itemsRepaired > 0) {
+        this.db.query(`DELETE FROM item_visibility_feed WHERE seq <= (SELECT MAX(seq) - ${ITEM_VISIBILITY_FEED_RETENTION} FROM item_visibility_feed)`).run();
       }
     })();
 
@@ -18460,6 +18525,26 @@ function createConnectorStoreSenderIndexes(db: Database): void {
       ON items(sender_label);
     CREATE INDEX IF NOT EXISTS idx_connector_store_items_sender_owner
       ON items(sender_is_owner, sender_id);
+  `);
+  createConnectorStorePeopleIndex(db);
+}
+
+/** An item that names its author: what the people index reads (and its index's partial predicate). */
+const PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`;
+
+/**
+ * The people index's sender read as an index-only scan (#1305): every column
+ * it groups, counts or filters on, for authored items only. Without it the
+ * read visited every row in full, overflow pages of the text included (110 MB
+ * for 94k items, where a count read 0.9 MB). Additive, so no schema version:
+ * a store opened by an older build still opens, and keeps it. Built once,
+ * when a writer of this build first opens the store.
+ */
+function createConnectorStorePeopleIndex(db: Database): void {
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_connector_store_items_people
+      ON items(tombstoned, provider, sender_id, sender_label, provider_conversation_id, trust_tier, sender_is_owner)
+      WHERE ${PEOPLE_SENDER_PREDICATE.replaceAll('i.', '')};
   `);
 }
 
