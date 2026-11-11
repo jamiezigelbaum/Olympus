@@ -148,3 +148,25 @@ test('an item that keeps failing is stepped past after three passes, so the rest
   expect(report.complete).toBe(true);
   expect(ctx.f.stores.secure_local!.copyContentState(broken)).toBeUndefined();
 });
+
+test('a receipt stepped past after repeated failures keeps its original chunk count for the audit (#1412)', async () => {
+  const ctx = await fixture();
+  const sweep = () => sweepAutomaticSupersededCopies(ctx.f.set, { limit: 1, embeddingLedger: ctx.embeddingLedger });
+  const store = ctx.f.stores.secure_local!;
+  const original = store.stripCopyContent.bind(store);
+  const failure = spyOn(store, 'stripCopyContent').mockImplementation((...args) => {
+    original(...args); throw new Error('store commit then crash');
+  });
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    for (let pass = 0; pass < 3; pass++) expect(sweep()).toMatchObject({ failed: 1 });
+  } finally { failure.mockRestore(); warn.mockRestore(); }
+  expect(store.copyContentState(identityOf('a'))?.chunks ?? 0).toBe(0);
+  let report = sweep();
+  for (let pass = 0; pass < 10 && !report.complete; pass++) report = sweep();
+  expect(report.complete).toBe(true);
+  await flushTierMoveNotes(ctx.f.ledger);
+  const entries = (await readEmbeddingLedger(ctx.embeddingLedger.path)).entries.filter(entry => entry.entry_id?.startsWith('automatic-superseded-prune:'));
+  expect(entries).toHaveLength(1);
+  expect(entries[0]?.scope?.chunks?.[CORPORA.secure_local]).toBe(2);
+});

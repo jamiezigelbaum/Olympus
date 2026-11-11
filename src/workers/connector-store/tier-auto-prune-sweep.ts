@@ -24,6 +24,8 @@ interface State {
   deleted?: Record<string, number>;
   /** The item the last pass failed on, and how many passes in a row failed on it. */
   failing?: { key: string; count: number };
+  /** Original chunk counts of receipts stepped past, so a later walk still audits what was already stripped. */
+  parked?: Record<string, Pending['copies']>;
   embeddingLedger?: NonNullable<TierMoveOptions['embeddingLedger']>;
 }
 
@@ -60,6 +62,7 @@ export function sweepAutomaticSupersededCopies(set: TieredStoreSet, options: {
         report.purged++;
       }
       state.after = pending.identity;
+      if (state.parked) delete state.parked[tierLedgerIdentityKey(pending.identity)];
       delete state.pending;
       delete state.failing;
       save();
@@ -107,6 +110,7 @@ export function sweepAutomaticSupersededCopies(set: TieredStoreSet, options: {
         const proof = destination?.copyContentState(identity);
         if (!proof || destination?.tierSetBinding()?.ledgerId !== ledger.ledgerId()) throw new Error('Current destination unavailable.');
         let unproven = false;
+        const parked = state.parked?.[tierLedgerIdentityKey(identity)];
         const targets = superseded.map(copy => {
           const store = set.store(copy.trustDomain);
           if (!store) throw new Error('Superseded store unavailable.');
@@ -121,7 +125,9 @@ export function sweepAutomaticSupersededCopies(set: TieredStoreSet, options: {
             const order = compareContentVersions(proof, held);
             if (order === undefined || order < 0) unproven = true;
           }
-          return { corpusId: copy.corpusId, chunks };
+          // A receipt stepped past may have stripped this copy already: keep its original count.
+          const original = parked?.find(target => target.corpusId === copy.corpusId)?.chunks ?? 0;
+          return { corpusId: copy.corpusId, chunks: Math.max(chunks, original) };
         });
         if (unproven) { report.kept++; return; }
         state.pending = { identity, generation: record.generation, copies: targets,
@@ -181,6 +187,8 @@ export function sweepAutomaticSupersededCopies(set: TieredStoreSet, options: {
       } else {
         // A pending receipt's tier-content-purged marker stays: some copies
         // may already be stripped, so rollback stays refused for this item.
+        // Its original counts are parked for the walk that retries it.
+        if (state.pending) (state.parked ??= {})[key] = state.pending.copies;
         delete state.pending;
         delete state.failing;
         state.after = identity;

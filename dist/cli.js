@@ -68731,6 +68731,8 @@ function sweepAutomaticSupersededCopies(set, options = {}) {
         report.purged++;
       }
       state.after = pending.identity;
+      if (state.parked)
+        delete state.parked[tierLedgerIdentityKey(pending.identity)];
       delete state.pending;
       delete state.failing;
       save();
@@ -68784,6 +68786,7 @@ function sweepAutomaticSupersededCopies(set, options = {}) {
         if (!proof || destination?.tierSetBinding()?.ledgerId !== ledger.ledgerId())
           throw new Error("Current destination unavailable.");
         let unproven = false;
+        const parked = state.parked?.[tierLedgerIdentityKey(identity2)];
         const targets = superseded.map((copy) => {
           const store = set.store(copy.trustDomain);
           if (!store)
@@ -68798,7 +68801,8 @@ function sweepAutomaticSupersededCopies(set, options = {}) {
             if (order === undefined || order < 0)
               unproven = true;
           }
-          return { corpusId: copy.corpusId, chunks };
+          const original = parked?.find((target) => target.corpusId === copy.corpusId)?.chunks ?? 0;
+          return { corpusId: copy.corpusId, chunks: Math.max(chunks, original) };
         });
         if (unproven) {
           report.kept++;
@@ -68863,6 +68867,8 @@ function sweepAutomaticSupersededCopies(set, options = {}) {
       if (count < MAX_ITEM_FAILURES) {
         state.failing = { key: key2, count };
       } else {
+        if (state.pending)
+          (state.parked ??= {})[key2] = state.pending.copies;
         delete state.pending;
         delete state.failing;
         state.after = identity2;
