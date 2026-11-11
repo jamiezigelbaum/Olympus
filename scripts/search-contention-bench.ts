@@ -93,6 +93,11 @@ if (command === 'seed') {
   ledgerDb.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF;');
   const ledgerColumns = (table: string) => (ledgerDb.query(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(c => c.name);
   const templateWhere = `provider = '${templateIdentity.provider}' AND account_scope = '${templateIdentity.accountScope}' AND provider_item_id = '${templateIdentity.providerItemId}'`;
+  // The template rows are read once into one-row temp tables: matched in the
+  // CROSS JOIN by a key that skips the unique index's middle column, every
+  // insert rescanned all synthetic rows so far, and the seed never finished.
+  ledgerDb.exec(`CREATE TEMP TABLE template_item AS SELECT * FROM tier_items WHERE ${templateWhere} LIMIT 1`);
+  ledgerDb.exec(`CREATE TEMP TABLE template_copy AS SELECT * FROM tier_copies WHERE ${templateWhere} LIMIT 1`);
   function seedLedger(store: number, items: number) {
     const q = (name: string) => `"${name}"`;
     const itemCols = ledgerColumns('tier_items');
@@ -107,9 +112,9 @@ if (command === 'seed') {
       const end = Math.min(items, offset + 50_000);
       const numbers = `WITH RECURSIVE seq(n) AS (SELECT ${offset} UNION ALL SELECT n+1 FROM seq WHERE n+1<${end})`;
       ledgerDb.transaction(() => {
-        ledgerDb.exec(`${numbers} INSERT INTO tier_items (${itemCols.map(q)}) SELECT ${itemExpr} FROM seq CROSS JOIN (SELECT * FROM tier_items WHERE ${templateWhere}) t`);
-        ledgerDb.exec(`${numbers} INSERT INTO tier_copies (${copyCols.map(q)}) SELECT ${copyExpr('superseded')} FROM seq CROSS JOIN (SELECT * FROM tier_copies WHERE ${templateWhere} LIMIT 1) t`);
-        ledgerDb.exec(`${numbers} INSERT INTO tier_copies (${copyCols.map(q)}) SELECT ${copyExpr('moved')} FROM seq CROSS JOIN (SELECT * FROM tier_copies WHERE ${templateWhere} LIMIT 1) t WHERE n % 50 = 0`);
+        ledgerDb.exec(`${numbers} INSERT INTO tier_items (${itemCols.map(q)}) SELECT ${itemExpr} FROM seq CROSS JOIN template_item t`);
+        ledgerDb.exec(`${numbers} INSERT INTO tier_copies (${copyCols.map(q)}) SELECT ${copyExpr('superseded')} FROM seq CROSS JOIN template_copy t`);
+        ledgerDb.exec(`${numbers} INSERT INTO tier_copies (${copyCols.map(q)}) SELECT ${copyExpr('moved')} FROM seq CROSS JOIN template_copy t WHERE n % 50 = 0`);
       })();
     }
   }
