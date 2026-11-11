@@ -119,7 +119,7 @@ const pressUpdateNow: JourneyStep = {
   expect: [{ text: UPDATE.updating(STAND_IN_TO), frame: 'host' }, { text: UPDATE.pause(STAND_IN_TO, STAND_IN_FROM), frame: 'host' }],
 };
 
-// --- Restore on a clean machine (#1065): restore.ts and run.ts runRestoreLeg.
+// --- Restore on a clean machine (#1065): restore.ts and run.ts prepareRestore and finishRestore.
 
 const tab = (name: string): Target => ({ role: 'link', name });
 

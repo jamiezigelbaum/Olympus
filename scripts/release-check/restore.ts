@@ -2,7 +2,7 @@
  * The release check's restore leg (#1065), as the owner's 1.5 plan states it: a backup made on one computer, restored into an empty
  * install on a clean one, brings back the sources, the owner's rules and the stores, judgments included; sign-ins never travel.
  *
- * The leg (run.ts runRestoreLeg) walks two journeys (journeys.ts): `backup-for-restore` on the first machine, then a second machine
+ * The leg (run.ts prepareRestore and finishRestore) walks two journeys (journeys.ts): `backup-for-restore` on the first machine, then a second machine
  * is provisioned fresh with the candidate and `restore-clean-machine` is walked there. Between them the install's state is read on
  * each side (machine-agent.ts `snapshot-state`, as the upgrade leg reads it) and compared here. Everything here is a pure function
  * over the two snapshots, so every rule is tested without a machine.

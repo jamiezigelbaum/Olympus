@@ -128,7 +128,7 @@ export interface Journey {
    */
   needs?: Array<'suite' | 'inbox'>;
   /**
-   * Walked only by the restore leg (run.ts runRestoreLeg), not with the other journeys: `restore-from` on the run's machine when the
+   * Walked only by the restore leg (run.ts prepareRestore and finishRestore), not with the other journeys: `restore-from` on the run's machine when the
    * backup is made, `restore-to` on a second, freshly provisioned machine, which has the candidate and the backup the leg put at
    * RESTORE_BACKUP_PATH (restore.ts) and nothing else.
    */
