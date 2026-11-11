@@ -23,7 +23,7 @@
 
 import type { ReleaseCheck, ReleaseInputVerdict } from '../../core/release-manifest.ts';
 import type { SourceIndexRoutedSearchHit, SourceIndexVisibilityGate } from '../../core/source-index/router.ts';
-import { contentHeldForJudgment } from '../classification/tier-classifier.ts';
+import { PERSONAL_FIRST_REASON, contentHeldForJudgment } from '../classification/tier-classifier.ts';
 import { tierLedgerIdentityKey, type TierLedger, type TierLedgerIdentity } from '../classification/tier-ledger.ts';
 import { hiddenChildKeys, itemVerdicts, type ChildVisibilityStore } from './child-visibility.ts';
 
@@ -88,6 +88,21 @@ export function createTierVisibilityGate(
         const currentHere = itemCopies.some((copy) => copy.corpusId === hit.corpusId && copy.state === 'current'
           && (!hit.servingLayer || copy.layers === 'both' || copy.layers === hit.servingLayer));
         if (!currentHere) hidden.add(hit);
+      }
+      // A row recorded Personal-first before #1316 waits for its verdict with its
+      // text still in Personal (no held copy): it is withheld from answers all the
+      // same (createReleaseTierCheck), so it is raised for the judge like any held match.
+      const waiting = onHeldMatches ? governed.filter((hit) => !hidden.has(hit) && !held.has(hit)) : [];
+      if (waiting.length > 0) {
+        try {
+          const states = scope.ledger.itemStatesForMany(waiting.map((hit) => hit.sourceItem));
+          for (const hit of waiting) {
+            const record = states.get(tierLedgerIdentityKey(hit.sourceItem))?.record;
+            if (record?.contentPending && record.reasons.includes(PERSONAL_FIRST_REASON)) held.add(hit);
+          }
+        } catch {
+          // Ordering the judge is best effort; the search is not affected.
+        }
       }
       // A child is served only while its parent is.
       const lane = childLane(scope);

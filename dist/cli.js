@@ -205706,6 +205706,17 @@ function createTierVisibilityGate(scopes, onHeldMatches) {
         if (!currentHere)
           hidden.add(hit);
       }
+      const waiting = onHeldMatches ? governed.filter((hit) => !hidden.has(hit) && !held.has(hit)) : [];
+      if (waiting.length > 0) {
+        try {
+          const states = scope.ledger.itemStatesForMany(waiting.map((hit) => hit.sourceItem));
+          for (const hit of waiting) {
+            const record8 = states.get(tierLedgerIdentityKey(hit.sourceItem))?.record;
+            if (record8?.contentPending && record8.reasons.includes(PERSONAL_FIRST_REASON))
+              held.add(hit);
+          }
+        } catch {}
+      }
       const lane = childLane(scope);
       if (lane) {
         const orphaned = hiddenChildKeys(lane, governed.filter((hit) => !hidden.has(hit)).map((hit) => hit.sourceItem));
