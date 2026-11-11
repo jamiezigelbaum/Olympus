@@ -66,6 +66,7 @@ import {
 import type { AnalystResult, EvidencePack } from '../src/core/contracts.ts';
 import type { OpsecReleaseAudit } from '../src/core/opsec.ts';
 import type { SourceTrustDomain } from '../src/core/source-index/types.ts';
+import type { SourceIndexCorpusSearchAdapter } from '../src/core/source-index/router.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { createParentLabelResolver } from '../src/workers/connector-store/parent-label.ts';
 import { tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
@@ -178,11 +179,14 @@ async function main(): Promise<void> {
   console.error(
     `eval retrieval: ${retrieval.note}; stores ${retrieval.corpora.join(', ')}; tier ledger ${retrieval.tierLedger}`,
   );
+  // Each run evaluates one question, so every store search recorded is that question's.
+  const storeSearches: EvalStoreSearch[] = [];
   const lanes = createEvalDropboxLanes({
     stores: opened.stores,
     ...(opened.ledger ? { ledger: opened.ledger } : {}),
     scope,
     embeddingFor: embedding.embeddingFor,
+    onStoreSearch: (search) => storeSearches.push(search),
   });
   const model = createEvalAnalystModel({
     provider: analystProvider,
@@ -192,10 +196,13 @@ async function main(): Promise<void> {
   // Each run evaluates one question, so every prompt recorded here is that
   // question's: the answer-stage audit checks the values against it.
   const analystPrompts: string[] = [];
+  const analystModelIds: string[] = [];
   const analyst = createAnalyst({
-    complete(request) {
+    async complete(request) {
       analystPrompts.push(request.prompt);
-      return model.complete(request);
+      const completion = await model.complete(request);
+      analystModelIds.push(completion.modelId);
+      return completion;
     },
   }, { auditSuspiciousDrafts: true });
   // Optional multi-query retrieval expansion over the same local Delphi lane:
@@ -243,8 +250,8 @@ async function main(): Promise<void> {
         ...classifyPrecisionStage(question, pack, result, {
           ...(detail ? { candidateCorpusIds: detail.candidateCorpusIds } : {}),
         }),
-        ...(detail ? { retrieval: evalRetrievalAudit(detail, question) } : {}),
-        answerStage: evalAnswerStageAudit(question, pack, rawResultsByPack.get(pack), result, analystPrompts),
+        ...(detail ? { retrieval: evalRetrievalAudit(detail, question, storeSearches) } : {}),
+        answerStage: evalAnswerStageAudit(question, pack, rawResultsByPack.get(pack), result, analystPrompts, analystModelIds),
       });
     },
     onProgress(event) {
@@ -411,6 +418,8 @@ export function createEvalDropboxLanes(input: {
   scope: { accountScope?: string; locatorPathScope?: string };
   embeddingFor?: (trustDomain: SourceTrustDomain) => SourceEmbeddingProvider | undefined;
   localEmbedding?: (provider: SourceEmbeddingProvider) => SourceEmbeddingProvider | undefined;
+  /** Told each store search's returned item ids, in order (the report's expectedStoreRanks). */
+  onStoreSearch?: (search: EvalStoreSearch) => void;
 }): (question: string) => AnalystAnswerLanes {
   const stores = () => input.stores;
   const scopes = () => (input.ledger
@@ -439,7 +448,23 @@ export function createEvalDropboxLanes(input: {
     visibilityGate: createTierVisibilityGate(scopes),
     parentLabels: createParentLabelResolver({ stores, scopes }),
   });
-  return (question) => lanes(localAnswerRequest(question), 'built_in_only');
+  const onStoreSearch = input.onStoreSearch;
+  if (!onStoreSearch) return (question) => lanes(localAnswerRequest(question), 'built_in_only');
+  return (question) => {
+    const built = lanes(localAnswerRequest(question), 'built_in_only');
+    return {
+      ...built,
+      adapters: Object.fromEntries(Object.entries(built.adapters).flatMap(([corpusId, adapter]) => adapter ? [[
+        corpusId,
+        // The adapter's own preparation hooks ride along unchanged.
+        Object.assign(async (...args: Parameters<SourceIndexCorpusSearchAdapter>) => {
+          const response = await adapter(...args);
+          onStoreSearch({ corpusId, providerItemIds: response.hits.map((hit) => hit.sourceItem.providerItemId) });
+          return response;
+        }, adapter) as SourceIndexCorpusSearchAdapter,
+      ]] : [])),
+    };
+  };
 }
 
 /**
@@ -494,13 +519,43 @@ export interface EvalRetrievalAudit {
   contentPrivateCandidates: number;
   corpusReadabilityGaps: number;
   secureExclusion: 'not_applied';
+  /**
+   * Where each store's own search ranked each expected item, before the pack
+   * merged the stores: 1-based rank in that store's returned hits, -1 when the
+   * store never returned it. `searches` counts the store's searches for the
+   * question (each formulation is one). Tells "the store never found it"
+   * apart from "it was found and lost in the merge". Absent when no store
+   * search was recorded.
+   */
+  expectedStoreRanks?: Array<{ expectedItem: number; corpusId: string; searches: number; bestRank: number; hitsReturned: number }>;
 }
+
+/** Each store search's returned item ids, in order, as the eval lanes record them. */
+export interface EvalStoreSearch { corpusId: string; providerItemIds: readonly string[] }
 
 export function evalRetrievalAudit(
   detail: EvidencePackBuildDetail,
   question?: Pick<EvalQuestion, 'expectedEvidence'>,
+  storeSearches?: readonly EvalStoreSearch[],
 ): EvalRetrievalAudit {
   const expected = question?.expectedEvidence ?? [];
+  const expectedStoreRanks = storeSearches && storeSearches.length > 0
+    ? expected.flatMap((want, index) => {
+      if (want.providerItemId === undefined) return [];
+      const byCorpus = new Map<string, EvalStoreSearch[]>();
+      for (const search of storeSearches) byCorpus.set(search.corpusId, [...(byCorpus.get(search.corpusId) ?? []), search]);
+      return [...byCorpus].map(([corpusId, searches]) => {
+        const ranks = searches.map((search) => search.providerItemIds.indexOf(want.providerItemId!) + 1).filter((rank) => rank > 0);
+        return {
+          expectedItem: index + 1,
+          corpusId,
+          searches: searches.length,
+          bestRank: ranks.length > 0 ? Math.min(...ranks) : -1,
+          hitsReturned: Math.max(...searches.map((search) => search.providerItemIds.length)),
+        };
+      });
+    })
+    : undefined;
   return {
     packCandidates: detail.pack.candidates.length,
     packCandidateSources: detail.pack.candidates.map((candidate, index) => {
@@ -545,6 +600,7 @@ export function evalRetrievalAudit(
     contentPrivateCandidates: detail.contentPrivateCandidateIndexes?.length ?? 0,
     corpusReadabilityGaps: detail.corpusReadabilityGaps?.length ?? 0,
     secureExclusion: 'not_applied',
+    ...(expectedStoreRanks ? { expectedStoreRanks } : {}),
   };
 }
 
@@ -577,7 +633,34 @@ export interface EvalAnswerStageAudit {
     packTokenShape?: string;
     /** The same for the Analyst's answer, when it holds the value only inside a longer token. */
     answerTokenShape?: string;
+    /**
+     * Each 1-based pack seat holding a form of the value as a substring: the
+     * value's character offset in the seat's excerpt (-1 when it is only in the
+     * seat's citation, facts or tables) and the excerpt's length.
+     */
+    packSeats: Array<{ seat: number; charOffset: number; seatChars: number }>;
+    /** The value's character offset in the prompt the Analyst model was sent, when it is there. */
+    promptCharOffset?: number;
   }>;
+  /**
+   * The Analyst's own answer, by its structure: every expected value in it,
+   * some, or none (with no citation: it said it found nothing; with
+   * citations: it answered from other evidence). Absent with no expected values.
+   */
+  answerShape?: 'contains_all' | 'partial' | 'not_found' | 'other_answer';
+  answerCitations: number;
+  answerUnanswered: number;
+  /** Characters of every prompt the Analyst model was sent for the question. */
+  analystPromptChars?: number;
+  /** The model id each Analyst model call reported, in call order. */
+  analystModelIds?: readonly string[];
+}
+
+/** The first offset of any accepted form of the value in the text (case-insensitive), or -1. */
+function valueOffset(value: string, text: string): number {
+  const lower = text.toLowerCase();
+  const offsets = acceptableForms(value).map((form) => lower.indexOf(form)).filter((at) => at >= 0);
+  return offsets.length > 0 ? Math.min(...offsets) : -1;
 }
 
 /** The shape of the first token holding a form of the value as a substring (digits to 9, letters to a). */
@@ -602,17 +685,35 @@ export function evalAnswerStageAudit(
   analystResult: AnalystResult | undefined,
   releasedResult: AnalystResult,
   analystPrompts?: readonly string[],
+  analystModelIds?: readonly string[],
 ): EvalAnswerStageAudit {
   // Every evidence field the Analyst can be shown: citation metadata
   // (title, locator, dates), chunk text, extracted facts and tables.
-  const packText = pack.candidates.map((candidate) => [
-    JSON.stringify(candidate.provenance.citation ?? {}),
-    ...candidate.chunks,
-    JSON.stringify(candidate.facts ?? []),
-    JSON.stringify(candidate.tables ?? []),
-  ].join('\n')).join('\n');
+  const seatTexts = pack.candidates.map((candidate) => ({
+    excerpt: candidate.chunks.join('\n'),
+    all: [
+      JSON.stringify(candidate.provenance.citation ?? {}),
+      ...candidate.chunks,
+      JSON.stringify(candidate.facts ?? []),
+      JSON.stringify(candidate.tables ?? []),
+    ].join('\n'),
+  }));
+  const packText = seatTexts.map((seat) => seat.all).join('\n');
   const promptText = analystPrompts && analystPrompts.length > 0 ? analystPrompts.join('\n') : undefined;
+  const analystOwn = analystResult ?? releasedResult;
+  const values = question.expectedAnswerContains ?? [];
+  const inAnswer = values.filter((value) => answerContainsExpectedValue(value, analystOwn.answer).matched).length;
+  const answerShape = values.length === 0
+    ? undefined
+    : inAnswer === values.length ? 'contains_all' as const
+      : inAnswer > 0 ? 'partial' as const
+        : analystOwn.citations.length === 0 ? 'not_found' as const : 'other_answer' as const;
   return {
+    ...(answerShape ? { answerShape } : {}),
+    answerCitations: analystOwn.citations.length,
+    answerUnanswered: analystOwn.unanswered.length,
+    ...(promptText !== undefined ? { analystPromptChars: analystPrompts!.reduce((sum, prompt) => sum + prompt.length, 0) } : {}),
+    ...(analystModelIds && analystModelIds.length > 0 ? { analystModelIds: [...analystModelIds] } : {}),
     expected: (question.expectedAnswerContains ?? []).map((value) => ({
       inPack: answerContainsExpectedValue(value, packText).matched,
       inPackAsSubstring: acceptableForms(value).some((form) => packText.toLowerCase().includes(form)),
@@ -623,11 +724,17 @@ export function evalAnswerStageAudit(
       const value = question.expectedAnswerContains![index]!;
       const analystAnswer = (analystResult ?? releasedResult).answer;
       const packShape = !entry.inPack && entry.inPackAsSubstring ? valueTokenShape(value, packText) : undefined;
-      const answerShape = !entry.inAnalystAnswer ? valueTokenShape(value, analystAnswer) : undefined;
+      const answerToken = !entry.inAnalystAnswer ? valueTokenShape(value, analystAnswer) : undefined;
+      const packSeats = seatTexts.flatMap((seat, index) => valueOffset(value, seat.all) < 0
+        ? []
+        : [{ seat: index + 1, charOffset: valueOffset(value, seat.excerpt), seatChars: seat.excerpt.length }]);
+      const promptCharOffset = promptText !== undefined ? valueOffset(value, promptText) : -1;
       return {
         ...entry,
         ...(packShape !== undefined ? { packTokenShape: packShape } : {}),
-        ...(answerShape !== undefined ? { answerTokenShape: answerShape } : {}),
+        ...(answerToken !== undefined ? { answerTokenShape: answerToken } : {}),
+        packSeats,
+        ...(promptCharOffset >= 0 ? { promptCharOffset } : {}),
       };
     }),
   };
