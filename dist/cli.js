@@ -23644,13 +23644,26 @@ class TierLedger {
     return row?.revision ?? 0;
   }
   itemIsSecret(identity2) {
-    const override = this.getOverride(identity2);
+    return this.readSteps(this.itemIsSecretSteps(identity2));
+  }
+  *itemIsSecretSteps(identity2) {
+    const row = yield {
+      sql: `SELECT override_json FROM tier_overrides
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`,
+      params: idParams(identity2),
+      mode: "get"
+    };
+    const override = row ? JSON.parse(row.override_json) : undefined;
     if (override?.kind === "tier" && override.tier === "secrets")
       return true;
-    const record = this.getCurrent(identity2);
-    if (!record)
-      return false;
-    return [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier].includes("secrets");
+    const item = yield {
+      sql: `SELECT * FROM tier_items
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`,
+      params: idParams(identity2),
+      mode: "get"
+    };
+    const record = item ? recordFromRow(item) : undefined;
+    return record !== undefined && [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier].includes("secrets");
   }
   getOverride(identity2) {
     const row = this.db.query(`
@@ -24199,34 +24212,31 @@ class TierLedger {
     return this.readSteps(routedWithoutCopiesSteps(uniqueIdentities(identities)));
   }
   itemStatesForMany(identities) {
+    return this.readSteps(this.itemStatesSteps(identities));
+  }
+  *itemStatesSteps(identities) {
     const result = new Map;
-    if (identities.length === 0)
-      return result;
-    const unique = new Map;
-    for (const identity2 of identities)
-      unique.set(tierLedgerIdentityKey(identity2), identity2);
-    const list = [...unique.values()];
-    this.db.transaction(() => {
-      for (let offset = 0;offset < list.length; offset += 200) {
-        const batch = list.slice(offset, offset + 200);
-        const values = batch.map(() => "(?, ?, ?, ?)").join(", ");
-        const params = batch.flatMap((identity2) => [...idParams(identity2)]);
-        const rows = this.db.query(`
-          SELECT * FROM tier_items
+    const list = uniqueIdentities(identities);
+    for (let offset = 0;offset < list.length; offset += IDENTITY_BATCH) {
+      const { values, params } = identityValues(list.slice(offset, offset + IDENTITY_BATCH));
+      const rows = yield {
+        sql: `SELECT * FROM tier_items
+          WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})`,
+        params,
+        mode: "all"
+      };
+      for (const row of rows)
+        result.set(tierLedgerIdentityKey(identityOfRow(row)), { record: recordFromRow(row), copies: [] });
+      const copies = yield {
+        sql: `SELECT * FROM tier_copies
           WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
-        `).all(...params);
-        for (const row of rows) {
-          result.set(tierLedgerIdentityKey(identityOfRow(row)), { record: recordFromRow(row), copies: [] });
-        }
-        const copies = this.db.query(`
-          SELECT * FROM tier_copies
-          WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
-          ORDER BY corpus_id
-        `).all(...params);
-        for (const row of copies)
-          result.get(tierLedgerIdentityKey(identityFromRow(row)))?.copies.push(copyFromRow(row));
-      }
-    })();
+          ORDER BY corpus_id`,
+        params,
+        mode: "all"
+      };
+      for (const row of copies)
+        result.get(tierLedgerIdentityKey(identityFromRow(row)))?.copies.push(copyFromRow(row));
+    }
     return result;
   }
   listRoutedOverrides() {
@@ -34024,6 +34034,143 @@ var init_secrets_disposition = __esm(() => {
 });
 
 // src/workers/connector-store/child-visibility.ts
+function* visibilityRead(here, offThread) {
+  return yield { here, offThread };
+}
+function visibilityHere(steps) {
+  let next = steps.next();
+  while (!next.done) {
+    let result;
+    try {
+      result = next.value.here();
+    } catch (error) {
+      next = steps.throw(error);
+      continue;
+    }
+    next = steps.next(result);
+  }
+  return next.value;
+}
+async function visibilityOffThread(steps, lane) {
+  const unchanged = lane ? childVisibilityUnchanged(lane) : undefined;
+  let next = steps.next();
+  while (!next.done) {
+    let result;
+    try {
+      result = await next.value.offThread();
+    } catch (error) {
+      next = steps.throw(error);
+      continue;
+    }
+    next = steps.next(result);
+  }
+  if (unchanged && !unchanged())
+    throw new Error("Visibility changed during read");
+  return next.value;
+}
+function memoVisibilityItemsHere(owner, kind, marker, items, keyOf, read) {
+  const asked = new Map(items.map((item) => [keyOf(item), item]));
+  const before = marker();
+  const memo = askReadMemo(owner, kind, before);
+  const missing = [...asked].filter(([key2]) => !memo?.rows.has(key2)).map(([, item]) => item);
+  const fresh = missing.length > 0 ? read(missing) : new Map;
+  if (memo)
+    for (const item of missing)
+      memo.rows.set(keyOf(item), fresh.get(keyOf(item)));
+  const out = new Map;
+  for (const key2 of asked.keys()) {
+    const row = memo ? memo.rows.get(key2) : fresh.get(key2);
+    if (row !== undefined)
+      out.set(key2, row);
+  }
+  return out;
+}
+function askReadMemo(owner, kind, marker) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  let owners = askReads.get(trace);
+  if (!owners)
+    askReads.set(trace, owners = new Map);
+  let kinds = owners.get(owner);
+  if (!kinds)
+    owners.set(owner, kinds = new Map);
+  let memo = kinds.get(kind);
+  if (memo?.marker !== marker)
+    kinds.set(kind, memo = { marker, rows: new Map });
+  return memo;
+}
+async function memoVisibilityItems(owner, kind, marker, items, keyOf, read) {
+  const asked = new Map(items.map((item) => [keyOf(item), item]));
+  const before = marker();
+  const memo = askReadMemo(owner, kind, before);
+  const missing = [...asked].filter(([key2]) => !memo?.rows.has(key2)).map(([, item]) => item);
+  const fresh = missing.length > 0 ? await read(missing) : new Map;
+  if (marker() !== before)
+    throw new Error("Visibility changed during read");
+  if (memo)
+    for (const item of missing)
+      memo.rows.set(keyOf(item), fresh.get(keyOf(item)));
+  const out = new Map;
+  for (const key2 of asked.keys()) {
+    const row = memo ? memo.rows.get(key2) : fresh.get(key2);
+    if (row !== undefined)
+      out.set(key2, row);
+  }
+  return out;
+}
+function itemStatesOffThread(ledger, identities) {
+  return memoVisibilityItems(ledger, "states", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => ledgerReadOffThread(ledger, ledger.itemStatesSteps(missing)));
+}
+function* itemSecretSteps(ledger, identity2) {
+  const key2 = tierLedgerIdentityKey(identity2);
+  const rows = yield* visibilityRead(() => memoVisibilityItemsHere(ledger, "secret", () => ledger.changeMarker(), [identity2], tierLedgerIdentityKey, (missing) => new Map(missing.map((item) => [tierLedgerIdentityKey(item), ledger.itemIsSecret(item)]))), () => memoVisibilityItems(ledger, "secret", () => ledger.changeMarker(), [identity2], tierLedgerIdentityKey, async (missing) => {
+    const rows2 = new Map;
+    for (const item of missing)
+      rows2.set(tierLedgerIdentityKey(item), await ledgerReadOffThread(ledger, ledger.itemIsSecretSteps(item)));
+    return rows2;
+  }));
+  return rows.get(key2) === true;
+}
+function visibilityRows(identities, read) {
+  return new Map(identities.map((identity2) => {
+    const key2 = tierLedgerIdentityKey(identity2);
+    return [key2, { copies: read.copies.get(key2), routed: read.routedWithoutCopies.has(key2), waiting: read.personalFirstWaiting.has(key2) }];
+  }));
+}
+function visibilityFromRows(rows) {
+  const result = { copies: new Map, routedWithoutCopies: new Set, personalFirstWaiting: new Set };
+  for (const [key2, row] of rows) {
+    if (row.copies)
+      result.copies.set(key2, row.copies);
+    if (row.routed)
+      result.routedWithoutCopies.add(key2);
+    if (row.waiting)
+      result.personalFirstWaiting.add(key2);
+  }
+  return result;
+}
+function ledgerVisibilityHere(ledger, identities, options = {}) {
+  return visibilityFromRows(memoVisibilityItemsHere(ledger, options.personalFirst ? "visibility-personal-first" : "visibility", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => visibilityRows(missing, ledger.readSteps(ledger.visibilityReadSteps(missing, options)))));
+}
+async function ledgerVisibilityOffThread(ledger, identities, options = {}) {
+  const rows = await memoVisibilityItems(ledger, options.personalFirst ? "visibility-personal-first" : "visibility", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, async (missing) => visibilityRows(missing, await ledgerReadOffThread(ledger, ledger.visibilityReadSteps(missing, options))));
+  return visibilityFromRows(rows);
+}
+async function ledgerReadOffThread(ledger, steps) {
+  if (!offThreadReadsSupported(ledger.dbPath))
+    return ledger.readSteps(steps);
+  if (!releasing.has(ledger)) {
+    releasing.add(ledger);
+    ledger.onClose(() => releaseOffThreadReads(ledger.dbPath));
+  }
+  return withOffThreadSnapshot(ledger.dbPath, async (read) => {
+    let next = steps.next();
+    while (!next.done)
+      next = steps.next(await read(next.value));
+    return next.value;
+  });
+}
 function parentIdentityOf(child) {
   const cut = child.providerItemId.lastIndexOf(CHILD_ITEM_ID_SEPARATOR);
   if (cut <= 0)
@@ -34039,20 +34186,33 @@ function parentIdentityField(child) {
   const identity2 = parentIdentityOf(child);
   return identity2 ? { identity: identity2 } : {};
 }
+function childVisibilityUnchanged(lane) {
+  const stores = lane.stores();
+  const ledger = lane.ledger();
+  const ledgerMarker = ledger?.changeMarker();
+  const markers = stores.map((store) => store.childVisibilityMarker?.());
+  return () => {
+    const current2 = lane.stores();
+    return lane.ledger() === ledger && ledger?.changeMarker() === ledgerMarker && current2.length === stores.length && current2.every((store, index) => store === stores[index] && store.childVisibilityMarker?.() === markers[index]);
+  };
+}
 function parentKey(parent) {
   return [parent.provider, parent.accountScope, parent.parentLocalItemId].join("\x00");
 }
 function parentVerdicts(lane, parents) {
+  return visibilityHere(parentVerdictsSteps(lane, parents));
+}
+function* parentVerdictsSteps(lane, parents) {
   const unique = new Map;
   for (const parent of parents)
     unique.set(parentKey(parent), parent);
   try {
-    return judge(lane, [...unique.values()], 0);
+    return yield* judge(lane, [...unique.values()], 0);
   } catch {
     return new Map([...unique.keys()].map((key2) => [key2, HIDDEN]));
   }
 }
-function judge(lane, parents, depth) {
+function* judge(lane, parents, depth) {
   const verdicts = new Map;
   if (parents.length === 0)
     return verdicts;
@@ -34063,7 +34223,7 @@ function judge(lane, parents, depth) {
   }
   const rows = new Map;
   for (const store of lane.stores()) {
-    for (const row of store.parentStandings(parents)) {
+    for (const row of yield* visibilityRead(() => store.parentStandings(parents), () => store.parentStandingsOffThread?.(parents) ?? Promise.resolve(store.parentStandings(parents)))) {
       const key2 = parentKey(row);
       const list = rows.get(key2) ?? [];
       list.push({ ...row, corpusId: store.corpusId });
@@ -34076,7 +34236,7 @@ function judge(lane, parents, depth) {
     for (const row of list)
       identities.set(tierLedgerIdentityKey(row.identity), row.identity);
   }
-  const states = ledger && identities.size > 0 ? ledger.itemStatesForMany([...identities.values()]) : undefined;
+  const states = ledger && identities.size > 0 ? yield* visibilityRead(() => memoVisibilityItemsHere(ledger, "states", () => ledger.changeMarker(), [...identities.values()], tierLedgerIdentityKey, (missing) => ledger.itemStatesForMany(missing)), () => itemStatesOffThread(ledger, [...identities.values()])) : undefined;
   const climbing = new Map;
   for (const parent of parents) {
     const key2 = parentKey(parent);
@@ -34092,7 +34252,7 @@ function judge(lane, parents, depth) {
       continue;
     }
     if (!identity2) {
-      if (ledger && parent.identity && ledger.itemIsSecret(parent.identity)) {
+      if (ledger && parent.identity && (yield* itemSecretSteps(ledger, parent.identity))) {
         verdicts.set(key2, HIDDEN);
       } else {
         verdicts.set(key2, { visible: false, gone: true });
@@ -34106,7 +34266,7 @@ function judge(lane, parents, depth) {
       const state = states?.get(tierLedgerIdentityKey(identity2));
       const copies = state?.copies ?? [];
       visible = copies.length === 0 ? state?.record.routed !== true && active.length > 0 : copies.some((copy) => copy.state === "current" && active.some((row) => row.corpusId === copy.corpusId));
-      if (!visible && active.length > 0 && ledger.itemIsSecret(identity2))
+      if (!visible && active.length > 0 && (yield* itemSecretSteps(ledger, identity2)))
         visible = true;
     }
     if (visible) {
@@ -34119,7 +34279,7 @@ function judge(lane, parents, depth) {
     }
   }
   if (climbing.size > 0) {
-    const above = judge(lane, [...climbing.values()], depth + 1);
+    const above = yield* judge(lane, [...climbing.values()], depth + 1);
     for (const [key2, grandparent] of climbing) {
       if (above.get(parentKey(grandparent))?.visible !== true)
         verdicts.set(key2, HIDDEN);
@@ -34153,6 +34313,9 @@ function goneParents(lane, parents) {
   return gone;
 }
 function itemVerdicts(lane, items) {
+  return visibilityHere(itemVerdictsSteps(lane, items));
+}
+function* itemVerdictsSteps(lane, items) {
   const asked = new Map;
   for (const item of items)
     asked.set(tierLedgerIdentityKey(item), item);
@@ -34163,7 +34326,7 @@ function itemVerdicts(lane, items) {
     const refs = new Map;
     const refKeyOf = new Map;
     for (const store of lane.stores()) {
-      for (const [key2, row] of store.itemStandings([...asked.values()])) {
+      for (const [key2, row] of yield* visibilityRead(() => store.itemStandings([...asked.values()]), () => store.itemStandingsOffThread?.([...asked.values()]) ?? Promise.resolve(store.itemStandings([...asked.values()])))) {
         const ref = {
           provider: row.provider,
           accountScope: row.accountScope,
@@ -34191,7 +34354,7 @@ function itemVerdicts(lane, items) {
       refs.set(parentKey(ref), ref);
       refKeyOf.set(key2, parentKey(ref));
     }
-    const verdicts = parentVerdicts(lane, [...refs.values()]);
+    const verdicts = yield* parentVerdictsSteps(lane, [...refs.values()]);
     for (const [key2, refKey] of refKeyOf)
       out.set(key2, verdicts.get(refKey) ?? HIDDEN);
   } catch {
@@ -34221,43 +34384,51 @@ function hiddenProbesByParentIdentity(lane, probes) {
   const hidden = hiddenByParentIdentity(lane, probes);
   return new Set(probes.filter((probe) => hidden.has(tierLedgerIdentityKey(probe))));
 }
-function childrenWithHiddenParents(lane, children) {
+function* childrenWithHiddenParentsSteps(lane, children) {
   const hidden = new Set;
   if (children.length === 0)
     return hidden;
-  const verdicts = parentVerdicts(lane, children.map((child) => child.parent));
+  const verdicts = yield* parentVerdictsSteps(lane, children.map((child) => child.parent));
   for (const child of children) {
     if (verdicts.get(parentKey(child.parent))?.visible !== true)
       hidden.add(child.key);
   }
   return hidden;
 }
-function childLinks(lane, probes) {
+function* childLinksSteps(lane, probes) {
   const found = new Map;
   let remaining = probes;
   for (const store of lane.stores()) {
     if (remaining.length === 0)
       break;
-    for (const [key2, parent] of store.parentLinksOf(remaining))
+    const asked = remaining;
+    for (const [key2, parent] of yield* visibilityRead(() => store.parentLinksOf(asked), () => store.parentLinksOfOffThread?.(asked) ?? Promise.resolve(store.parentLinksOf(asked))))
       found.set(key2, parent);
     remaining = remaining.filter((probe) => !found.has(tierLedgerIdentityKey(probe)));
   }
   return [...found].map(([key2, parent]) => ({ key: key2, parent }));
 }
 function hiddenChildKeys(lane, probes) {
+  return visibilityHere(hiddenChildKeysSteps(lane, probes));
+}
+function* hiddenChildKeysSteps(lane, probes) {
   if (probes.length === 0)
     return new Set;
   let links;
   try {
-    links = childLinks(lane, probes);
+    links = yield* childLinksSteps(lane, probes);
   } catch {
     return new Set(probes.map((probe) => tierLedgerIdentityKey(probe)));
   }
-  return childrenWithHiddenParents(lane, links);
+  return yield* childrenWithHiddenParentsSteps(lane, links);
 }
-var CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
+var askReads, releasing, CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
 var init_child_visibility = __esm(() => {
   init_tier_ledger();
+  init_answer_latency_trace();
+  init_off_thread_reads();
+  askReads = new WeakMap;
+  releasing = new WeakSet;
   HIDDEN = { visible: false, gone: false };
 });
 
@@ -36725,7 +36896,7 @@ function createConnectorStoreCorpusAdapter(options) {
     }
     if (!embeddingProvider || useHybrid !== "hybrid" || semanticSkippedReason)
       return (async () => {
-        const keywordLane = revalidateKeywordLane(store, await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters, await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, {}, request.deadlineAtMs), options.localKeywordFallback, {}, request.deadlineAtMs));
+        const keywordLane = await revalidateKeywordLane(store, await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters, await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, {}, request.deadlineAtMs), options.localKeywordFallback, {}, request.deadlineAtMs));
         const rows = keywordLane.rows;
         const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters, request.deadlineAtMs);
         if (recencyRows.length === 0) {
@@ -36850,8 +37021,8 @@ function createConnectorStoreCorpusAdapter(options) {
         }
       }
     }
-    const keywordLane = revalidateKeywordLane(store, readKeywordLane);
-    const visibleSemanticRows = store.stillVisibleSearchRows(semanticRows);
+    const keywordLane = await revalidateKeywordLane(store, readKeywordLane);
+    const visibleSemanticRows = await store.stillVisibleSearchRowsOffThread(semanticRows);
     const rows = [...keywordLane.rows, ...visibleSemanticRows];
     const semanticOnly = visibleSemanticRows.length;
     return {
@@ -36985,9 +37156,9 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
   const relaxStartedAt = Date.now();
   keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback, {}, request.deadlineAtMs);
   keywordElapsedMs += Date.now() - relaxStartedAt;
-  keywordLane = revalidateKeywordLane(store, keywordLane);
-  scoredVectorRows = store.stillVisibleSearchRows(scoredVectorRows);
-  vectorRows = store.stillVisibleSearchRows(vectorRows);
+  keywordLane = await revalidateKeywordLane(store, keywordLane);
+  scoredVectorRows = await store.stillVisibleSearchRowsOffThread(scoredVectorRows);
+  vectorRows = await store.stillVisibleSearchRowsOffThread(vectorRows);
   const keywordRows = keywordLane.rows;
   const suppressedBelowBar = scoredVectorRows.length - vectorRows.length;
   const bestCosine = scoredVectorRows.length > 0 ? roundCosine(Math.max(...scoredVectorRows.map((row) => row.bestCosine))) : undefined;
@@ -37173,8 +37344,8 @@ function keywordExpansionChangesSearch(query, ftsOptions) {
   const shape = () => JSON.stringify([toFtsQuery(query, ftsOptions), sourceIndexFtsTermGroups(query), sourceIndexTopicTokens(query)]);
   return shape() !== withKeywordExpansionDisabled(shape);
 }
-function revalidateKeywordLane(store, lane) {
-  const allRows = store.stillVisibleSearchRows(lane.allRows);
+async function revalidateKeywordLane(store, lane) {
+  const allRows = await store.stillVisibleSearchRowsOffThread(lane.allRows);
   if (allRows.length === lane.allRows.length)
     return lane;
   const served = new Set(allRows.map((row) => row.sourceItem.localItemId));
@@ -39855,13 +40026,16 @@ var init_local_index = __esm(() => {
       return hidden;
     }
     tierVisibleRows(rows, identityOf, layerOf, throwOnUnavailable = false, copiesAllowed) {
+      return visibilityHere(this.tierVisibleRowsSteps(rows, identityOf, layerOf, throwOnUnavailable, copiesAllowed));
+    }
+    *tierVisibleRowsSteps(rows, identityOf, layerOf, throwOnUnavailable = false, copiesAllowed) {
       if (rows.length === 0)
         return [];
       let copies;
       try {
         const ledger = this.visibilityLedger();
         if (ledger && ledger.corpusHasCopies(this.corpusId))
-          copies = ledger.copiesForMany(rows.map(identityOf));
+          copies = yield* visibilityRead(() => ledgerVisibilityHere(ledger, rows.map(identityOf)).copies, () => ledgerVisibilityOffThread(ledger, rows.map(identityOf)).then((read) => read.copies));
       } catch (error) {
         if (throwOnUnavailable)
           throw error;
@@ -39871,13 +40045,8 @@ var init_local_index = __esm(() => {
         const here = copies.get(tierLedgerIdentityKey(identityOf(row)));
         return tierRowVisible(here, this.corpusId, layerOf(row)) && (copiesAllowed?.(here ?? []) ?? true);
       }) : [...rows];
-      return this.withoutChildrenOfHiddenParents(served, identityOf);
-    }
-    withoutChildrenOfHiddenParents(rows, identityOf) {
-      if (rows.length === 0)
-        return rows;
-      const hidden = hiddenChildKeys(this.childVisibilityLane(), rows.map(identityOf));
-      return hidden.size === 0 ? rows : rows.filter((row) => !hidden.has(tierLedgerIdentityKey(identityOf(row))));
+      const hidden = yield* hiddenChildKeysSteps(this.childVisibilityLane(), served.map(identityOf));
+      return served.filter((row) => !hidden.has(tierLedgerIdentityKey(identityOf(row))));
     }
     tierHiddenItemPks(options = {}) {
       const maxAgeMs = options.countsMaxAgeMs ?? 0;
@@ -39909,7 +40078,7 @@ var init_local_index = __esm(() => {
     }
     async tierHiddenItemPksInTurns() {
       const base = await runStepsInTurns(this.tierLedgerHiddenSteps());
-      return this.withHiddenChildren(base, await runStepsInTurns(this.hiddenChildSteps()));
+      return this.withHiddenChildren(base, await visibilityOffThread(this.hiddenChildReadSteps()));
     }
     tierLedgerHiddenItemPks() {
       return runSteps(this.tierLedgerHiddenSteps());
@@ -40618,21 +40787,34 @@ var init_local_index = __esm(() => {
       return this.db.query("SELECT 1 AS present FROM items WHERE parent_local_item_id IS NOT NULL LIMIT 1").get() !== null;
     }
     parentLinksOf(identities) {
+      return memoVisibilityItemsHere(this, "parentLinksOf", () => this.childVisibilityMarker(), identities, tierLedgerIdentityKey, (missing) => this.readHere(this.parentLinksOfSteps(missing)));
+    }
+    parentLinksOfOffThread(identities) {
+      return memoVisibilityItems(this, "parentLinksOf", () => this.childVisibilityMarker(), identities, tierLedgerIdentityKey, (missing) => this.readOffThread(this.parentLinksOfSteps(missing)));
+    }
+    childVisibilityMarker() {
+      if (this.visibilityFeedPresent)
+        return String(this.itemVisibilityChangesSince().cursor);
+      const changes = this.db.query("SELECT total_changes() AS changes").get();
+      const version = this.db.query("PRAGMA data_version").get();
+      return `${version.data_version}:${changes.changes}`;
+    }
+    *parentLinksOfSteps(identities) {
       const links = new Map;
-      if (identities.length === 0 || !this.hasChildItems())
+      if (identities.length === 0 || !this.childItemColumnsPresent)
         return links;
       for (let offset = 0;offset < identities.length; offset += 200) {
         const batch = identities.slice(offset, offset + 200);
-        const rows = this.db.query(`
+        const rows = yield { sql: `
         SELECT provider, account_scope, provider_conversation_id, provider_item_id, parent_local_item_id FROM items
         WHERE parent_local_item_id IS NOT NULL
           AND (provider, account_scope, normalized_conversation, provider_item_id) IN (VALUES ${batch.map(() => "(?, ?, ?, ?)").join(", ")})
-      `).all(...batch.flatMap((identity2) => [
+      `, mode: "all", params: batch.flatMap((identity2) => [
           identity2.provider,
           identity2.accountScope,
           normalizeConversationId(identity2.providerConversationId),
           identity2.providerItemId
-        ]));
+        ]) };
         for (const row of rows) {
           links.set(tierLedgerIdentityKey({
             provider: row.provider,
@@ -40655,17 +40837,37 @@ var init_local_index = __esm(() => {
       return links;
     }
     parentStandings(parents) {
+      const rows = memoVisibilityItemsHere(this, "parentStandings", () => this.childVisibilityMarker(), parents, parentKey, (missing) => this.parentStandingGroups(this.readHere(this.parentStandingsSteps(missing))));
+      return [...rows.values()].flat();
+    }
+    async parentStandingsOffThread(parents) {
+      const rows = await memoVisibilityItems(this, "parentStandings", () => this.childVisibilityMarker(), parents, parentKey, async (missing) => {
+        return this.parentStandingGroups(await this.readOffThread(this.parentStandingsSteps(missing)));
+      });
+      return [...rows.values()].flat();
+    }
+    parentStandingGroups(rows) {
+      const groups = new Map;
+      for (const row of rows) {
+        const key2 = parentKey(row);
+        const list = groups.get(key2) ?? [];
+        list.push(row);
+        groups.set(key2, list);
+      }
+      return groups;
+    }
+    *parentStandingsSteps(parents) {
       if (parents.length === 0)
         return [];
       const wanted = new Set(parents.map((parent) => parentKey(parent)));
       const ids = [...new Set(parents.map((parent) => parent.parentLocalItemId))];
       const out = [];
-      for (let offset = 0;offset < ids.length; offset += 20000) {
-        const rows = this.db.query(`
+      for (let offset = 0;offset < ids.length; offset += 500) {
+        const rows = yield { sql: `
         SELECT provider, account_scope, provider_item_id, provider_conversation_id, local_item_id, tombstoned, trust_tier,
           ${this.childItemColumnsPresent ? "parent_local_item_id" : "NULL AS parent_local_item_id"}
         FROM items WHERE local_item_id IN (SELECT value FROM json_each(?))
-      `).all(JSON.stringify(ids.slice(offset, offset + 20000)));
+      `, mode: "all", params: [JSON.stringify(ids.slice(offset, offset + 500))] };
         for (const row of rows) {
           const ref = { provider: row.provider, accountScope: row.account_scope, parentLocalItemId: row.local_item_id };
           if (!wanted.has(parentKey(ref)))
@@ -40687,22 +40889,28 @@ var init_local_index = __esm(() => {
       return out;
     }
     itemStandings(identities) {
+      return memoVisibilityItemsHere(this, "itemStandings", () => this.childVisibilityMarker(), identities, tierLedgerIdentityKey, (missing) => this.readHere(this.itemStandingsSteps(missing)));
+    }
+    itemStandingsOffThread(identities) {
+      return memoVisibilityItems(this, "itemStandings", () => this.childVisibilityMarker(), identities, tierLedgerIdentityKey, (missing) => this.readOffThread(this.itemStandingsSteps(missing)));
+    }
+    *itemStandingsSteps(identities) {
       const out = new Map;
       if (identities.length === 0)
         return out;
       for (let offset = 0;offset < identities.length; offset += 200) {
         const batch = identities.slice(offset, offset + 200);
-        const rows = this.db.query(`
+        const rows = yield { sql: `
         SELECT provider, account_scope, provider_item_id, provider_conversation_id, normalized_conversation, local_item_id, tombstoned, trust_tier,
           ${this.childItemColumnsPresent ? "parent_local_item_id" : "NULL AS parent_local_item_id"}
         FROM items
         WHERE (provider, account_scope, normalized_conversation, provider_item_id) IN (VALUES ${batch.map(() => "(?, ?, ?, ?)").join(", ")})
-      `).all(...batch.flatMap((identity2) => [
+      `, mode: "all", params: batch.flatMap((identity2) => [
           identity2.provider,
           identity2.accountScope,
           normalizeConversationId(identity2.providerConversationId),
           identity2.providerItemId
-        ]));
+        ]) };
         const asked = new Map(batch.map((identity2) => [
           [identity2.provider, identity2.accountScope, normalizeConversationId(identity2.providerConversationId), identity2.providerItemId].join("\x00"),
           identity2
@@ -40732,27 +40940,52 @@ var init_local_index = __esm(() => {
     hiddenChildItemPks() {
       return runSteps(this.hiddenChildSteps());
     }
+    *visibilityStoreRead(read) {
+      return yield* visibilityRead(() => this.readHere(function* () {
+        return yield read;
+      }()), () => this.readOffThread(function* () {
+        return yield read;
+      }()));
+    }
     *hiddenChildSteps() {
-      if (!this.hasChildItems())
+      const steps = this.hiddenChildReadSteps();
+      let next = steps.next();
+      while (!next.done) {
+        yield;
+        let result;
+        try {
+          result = next.value.here();
+        } catch (error) {
+          next = steps.throw(error);
+          continue;
+        }
+        next = steps.next(result);
+      }
+      return next.value;
+    }
+    *hiddenChildReadSteps() {
+      if (!this.childItemColumnsPresent)
+        return [];
+      const present = yield* this.visibilityStoreRead({ sql: "SELECT 1 AS present FROM items WHERE parent_local_item_id IS NOT NULL LIMIT 1", params: [], mode: "get" });
+      if (!present)
         return [];
       const lane = this.childVisibilityLane();
       const hiddenParents = [];
       let from = "";
       let inclusive = true;
       while (true) {
-        yield;
-        const window2 = this.db.query(`
+        const window2 = (yield* this.visibilityStoreRead({ sql: `
         SELECT parent_local_item_id AS parent FROM items
         WHERE parent_local_item_id IS NOT NULL AND parent_local_item_id ${inclusive ? ">=" : ">"} ?
         GROUP BY parent_local_item_id ORDER BY parent_local_item_id LIMIT ?
-      `).all(from, HIDDEN_CHILD_PARENT_SLICE).map((row) => row.parent);
+      `, params: [from, HIDDEN_CHILD_PARENT_SLICE], mode: "all" })).map((row) => row.parent);
         if (window2.length === 0)
           break;
-        const groups = this.db.query(`
+        const groups = yield* this.visibilityStoreRead({ sql: `
         SELECT provider, account_scope, parent_local_item_id, MIN(provider_item_id) AS child_item_id, provider_conversation_id FROM items
         WHERE parent_local_item_id IN (SELECT value FROM json_each(?)) AND tombstoned = 0
         GROUP BY provider, account_scope, parent_local_item_id
-      `).all(JSON.stringify(window2));
+      `, params: [JSON.stringify(window2)], mode: "all" });
         const slice = groups.map((group) => ({
           provider: group.provider,
           accountScope: group.account_scope,
@@ -40764,7 +40997,7 @@ var init_local_index = __esm(() => {
             ...group.provider_conversation_id ? { providerConversationId: group.provider_conversation_id } : {}
           })
         }));
-        const verdicts = parentVerdicts(lane, slice);
+        const verdicts = yield* parentVerdictsSteps(lane, slice);
         for (const parent of slice)
           if (verdicts.get(parentKey(parent))?.visible !== true)
             hiddenParents.push(parent);
@@ -40775,14 +41008,13 @@ var init_local_index = __esm(() => {
       }
       const pks = [];
       for (let offset = 0;offset < hiddenParents.length; offset += 20000) {
-        yield;
-        const rows = this.db.query(`
+        const rows = yield* this.visibilityStoreRead({ sql: `
         SELECT item_pk FROM items
         WHERE tombstoned = 0 AND parent_local_item_id IS NOT NULL
           AND (provider, account_scope, parent_local_item_id) IN (
             SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'), json_extract(value, '$[2]') FROM json_each(?)
           )
-      `).all(JSON.stringify(hiddenParents.slice(offset, offset + 20000).map((parent) => [parent.provider, parent.accountScope, parent.parentLocalItemId])));
+      `, params: [JSON.stringify(hiddenParents.slice(offset, offset + 20000).map((parent) => [parent.provider, parent.accountScope, parent.parentLocalItemId]))], mode: "all" });
         for (const row of rows)
           pks.push(row.item_pk);
       }
@@ -45799,7 +46031,14 @@ var init_local_index = __esm(() => {
       while (!step.done) {
         if (this.closedForPoolReads)
           throw new OffThreadReadBusyError;
-        step = steps.next(await readOnPool(this.dbPath, step.value, pool.deadlineAtMs !== undefined ? { deadlineAtMs: pool.deadlineAtMs } : {}));
+        let result;
+        try {
+          result = "offThread" in step.value ? await step.value.offThread() : await readOnPool(this.dbPath, step.value, pool.deadlineAtMs !== undefined ? { deadlineAtMs: pool.deadlineAtMs } : {});
+        } catch (error) {
+          step = steps.throw(error);
+          continue;
+        }
+        step = steps.next(result);
       }
       return step.value;
     }
@@ -45811,16 +46050,53 @@ var init_local_index = __esm(() => {
         ...row.sourceItem.providerConversationId ? { providerConversationId: row.sourceItem.providerConversationId } : {}
       }), (row) => row.chunk !== undefined || row.contentMatched === true ? "content" : "metadata");
     }
+    async stillVisibleSearchRowsOffThread(rows) {
+      return visibilityOffThread(this.tierVisibleRowsSteps(rows, (row) => ({
+        provider: row.sourceItem.provider,
+        accountScope: row.sourceItem.accountScope,
+        providerItemId: row.sourceItem.providerItemId,
+        ...row.sourceItem.providerConversationId ? { providerConversationId: row.sourceItem.providerConversationId } : {}
+      }), (row) => row.chunk !== undefined || row.contentMatched === true ? "content" : "metadata"), this.childVisibilityLane());
+    }
     closedForPoolReads = false;
     conceptCountMemo;
     readHere(steps) {
       let step = steps.next();
       while (!step.done) {
         const read = step.value;
+        if ("here" in read) {
+          let result;
+          try {
+            result = read.here();
+          } catch (error) {
+            step = steps.throw(error);
+            continue;
+          }
+          step = steps.next(result);
+          continue;
+        }
         const statement = this.db.query(read.sql);
         step = steps.next(read.mode === "all" ? statement.all(...read.params) : statement.get(...read.params));
       }
       return step.value;
+    }
+    async readOffThread(steps) {
+      if (!offThreadReadsSupported(this.dbPath))
+        return this.readHere(steps);
+      let next = steps.next();
+      while (!next.done) {
+        if (this.closedForPoolReads)
+          throw new OffThreadReadBusyError;
+        let result;
+        try {
+          result = "offThread" in next.value ? await next.value.offThread() : await readOnPool(this.dbPath, next.value);
+        } catch (error) {
+          next = steps.throw(error);
+          continue;
+        }
+        next = steps.next(result);
+      }
+      return next.value;
     }
     *searchItemsSteps(query, maxResults, accountScope, filters, ftsOptions) {
       const selectedFilters = connectorStoreFilterSql(filters);
@@ -45937,7 +46213,7 @@ var init_local_index = __esm(() => {
             return weights.total > 0 && matched / weights.total >= RARE_CONCEPT_WEIGHT_SHARE;
           });
         }
-        const visible = this.tierVisibleRows(signalled, (row) => ({
+        const visible = yield* this.tierVisibleRowsSteps(signalled, (row) => ({
           provider: row.provider,
           accountScope: row.account_scope,
           providerItemId: row.provider_item_id,
@@ -46124,7 +46400,12 @@ var init_local_index = __esm(() => {
       }
       if (this.closedForPoolReads)
         return [];
-      return this.visibleRecentRows(rows);
+      return (await visibilityOffThread(this.tierVisibleRowsSteps(rows, (row) => ({
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+      }), () => "content"), this.childVisibilityLane())).map((row) => searchRowFromItemRow(row));
     }
     recentItemsRead(maxResults, accountScope, filters) {
       const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
@@ -77371,6 +77652,15 @@ function privateInputReleaseAllowed(input, verdict, constraints, postureNow) {
     return !privateNow || input.privateAtAnswer && authorized;
   return !privateNow || authorized;
 }
+async function answerReleaseWithheldReasonOffThread(manifests, check, ceiling = "private") {
+  try {
+    const inputs = manifests.flatMap((manifest) => manifest.inputs);
+    const verdicts = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
+    return answerReleaseWithheldReason(manifests, { inputs: () => verdicts, secureDerivativeDefault: () => check.secureDerivativeDefault() }, ceiling);
+  } catch {
+    return ANSWER_RELEASE_UNVERIFIED;
+  }
+}
 function answerReleaseWithheldReason(manifests, check, ceiling = "private") {
   if (manifests.length === 0)
     return ANSWER_RELEASE_UNVERIFIED;
@@ -77704,9 +77994,9 @@ function createAnalystSourceIndexAnswerHandler(options) {
       }
       let pack = detail.pack;
       const localPromptBytes = options.localAnalystPromptByteBudget ?? DEFAULT_LOCAL_ANALYST_PROMPT_BYTES;
-      const assertDispatchAllowed = (analysisDetail) => {
+      const assertDispatchAllowed = async (analysisDetail) => {
         if (options.releaseCheck) {
-          const reason = answerReleaseWithheldReason([{ inputs: releaseInputs(analysisDetail), constraints: releaseConstraints }], options.releaseCheck);
+          const reason = await answerReleaseWithheldReasonOffThread([{ inputs: releaseInputs(analysisDetail), constraints: releaseConstraints }], options.releaseCheck);
           if (reason)
             throw new OperationError("source_index_policy_violation", reason);
         }
@@ -77720,7 +78010,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
             trustTier: candidate.trustTier,
             rawExposed: false
           }));
-          const kept = new Set(lanes.visibilityGate(hits));
+          const kept = new Set(await applySourceIndexVisibilityGate(lanes.visibilityGate, hits));
           if (hits.some((hit) => !kept.has(hit))) {
             throw new OperationError("source_index_policy_violation", "Olympus withheld this answer because an item changed privacy tier before analysis.");
           }
@@ -77738,8 +78028,8 @@ function createAnalystSourceIndexAnswerHandler(options) {
         recordSourceAnswerPackSeats(analysisDetail.pack.candidates.map((_, index) => analysisDetail.candidateCorpusIds[index] ?? ""), analysisDetail.recencySeats ?? 0);
         const seatOf = new Map(analysisDetail.pack.candidates.map((candidate, index) => [candidate.provenance, index + 1]));
         const guarded = (analyst) => ({
-          analyze: (dispatchPack, analyzeOptions) => {
-            assertDispatchAllowed(analysisDetail);
+          analyze: async (dispatchPack, analyzeOptions) => {
+            await assertDispatchAllowed(analysisDetail);
             return analyst.analyze(dispatchPack, analyzeOptions);
           }
         });
@@ -77775,7 +78065,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
             currentAnalystAbortSignal()?.throwIfAborted();
             throw new OperationError("source_index_policy_violation", "Source evidence is no longer allowed.", "Ask again under the current source policy.");
           }
-          assertDispatchAllowed(analysisDetail);
+          await assertDispatchAllowed(analysisDetail);
         };
         const live2 = (analyst) => options.inferenceGuard ? {
           async analyze(legPack, legOptions) {
@@ -79140,12 +79430,12 @@ function provenanceCorpusId(provenance) {
 function sourceItemsEqual(left, right) {
   return left.family === right.family && left.provider === right.provider && left.accountScope === right.accountScope && left.providerItemId === right.providerItemId && left.providerThreadId === right.providerThreadId && left.providerConversationId === right.providerConversationId && left.providerFileId === right.providerFileId && left.providerEventId === right.providerEventId && left.localItemId === right.localItemId && left.sourceVersion === right.sourceVersion;
 }
-function recheckReleasedEvidence(evidence, identities, check) {
+async function recheckReleasedEvidence(evidence, identities, check) {
   if (evidence.length === 0)
     return { evidence: [], withheld: 0 };
   let verdicts;
   try {
-    verdicts = check.inputs(identities);
+    verdicts = await (check.inputsOffThread?.(identities) ?? check.inputs(identities));
   } catch (error) {
     console.error(`[olympus:search] release_check_failed error_message=${JSON.stringify((error instanceof Error ? error.message : String(error)).slice(0, 200))}`);
     throw new OperationError("source_index_policy_violation", "The current tiers could not be read.");
@@ -79255,7 +79545,7 @@ async function searchReleasedEvidence(input) {
       ...fact.sourceInstructionFlags.length > 0 ? { source_instructions_flagged: true } : {}
     }));
   });
-  const released = input.releaseCheck ? recheckReleasedEvidence(evidence, identities, input.releaseCheck) : { evidence, withheld: 0 };
+  const released = input.releaseCheck ? await recheckReleasedEvidence(evidence, identities, input.releaseCheck) : { evidence, withheld: 0 };
   recordReleaseManifest({
     inputs: identities.filter((_, index) => released.evidence.includes(evidence[index])),
     constraints: { secureDerivativeDefault: "approval", includeSecureLocalContent: false }
@@ -79399,7 +79689,7 @@ async function probePrivateMatch(input) {
     const lanes = input.lanes(request, "private_search");
     const corpusIds = sourceAnswerCorpusIds(request);
     const excluded = lanes.excludedCorpusIds ?? new Set;
-    const gate = (hits) => lanes.visibilityGate ? lanes.visibilityGate(hits) : hits;
+    const gate = (hits) => lanes.visibilityGate ? applySourceIndexVisibilityGate(lanes.visibilityGate, hits) : Promise.resolve(hits);
     if (request.selected_items?.length) {
       let unchecked2 = false;
       const hits = [];
@@ -79430,7 +79720,7 @@ async function probePrivateMatch(input) {
           rawExposed: false
         });
       }
-      if (hits.length > 0 && gate(hits).length > 0)
+      if (hits.length > 0 && (await gate(hits)).length > 0)
         return "match";
       return unchecked2 ? "unknown" : "no_match";
     }
@@ -115440,6 +115730,24 @@ function remoteToolSchema(operation, schema) {
 function remoteWithheldParam(operation, args) {
   const withheld = withheldParams(operation);
   return Object.keys(args).filter((name) => withheld.includes(name)).sort()[0];
+}
+async function remoteOperationOutputOffThread(operation, raw, options = {}) {
+  const check = options.releaseCheck;
+  if (!check?.inputsOffThread || !["source_answer", "source_answer_result"].includes(operation) || pendingOutput(raw) || isAnonymousAnswerResult(raw)) {
+    return remoteOperationOutput(operation, raw, options);
+  }
+  let verdicts;
+  try {
+    verdicts = await check.inputsOffThread((options.releaseManifests ?? []).flatMap((manifest) => manifest.inputs));
+  } catch {}
+  return remoteOperationOutput(operation, raw, { ...options, releaseCheck: {
+    inputs: () => {
+      if (!verdicts)
+        throw new Error("Release unavailable");
+      return verdicts;
+    },
+    secureDerivativeDefault: () => check.secureDerivativeDefault()
+  } });
 }
 function remoteOperationOutput(operation, raw, options = {}) {
   const pending = pendingOutput(raw);
@@ -152935,14 +153243,14 @@ async function handleRemoteCallTool(request, makeOperationContext) {
   try {
     const result = await runWithReleaseManifestSink(manifests, () => operation.handler(ctx, args));
     const capture = createReleaseCapture();
-    const release = () => runWithReleaseCapture(capture, () => remoteOperationOutput(operation.name, result, {
+    const release = () => runWithReleaseCapture(capture, () => remoteOperationOutputOffThread(operation.name, result, {
       pendingPrivacyItems: ctx.pendingPrivacyItems?.(),
       ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {},
       releaseManifests: manifests.manifests
     }));
-    const approved = release();
+    const approved = await release();
     const privateMayAnswer = privatePart ? await privatePart.settle(result, approved) : false;
-    const output = privatePart ? release() : approved;
+    const output = privatePart ? await release() : approved;
     recordRemoteOperation({ operation: operation.name, args, caller: ctx.caller, output, capture, privateQuestion: privateMayAnswer ? privatePart?.answerRef : undefined });
     return { content: text3(privateMayAnswer ? withRemotePrivateNote(output, privatePart?.answerId, privatePart?.secretMatch) : output) };
   } catch (error2) {
@@ -159450,7 +159758,7 @@ function createLocalAnswerPath(options) {
         privateAtAnswer: item.trustDomain === "secure_local" || item.trustTier === "S4" || item.trustTier === "S5"
       };
     });
-    const verdicts = options.releaseCheck.inputs(inputs);
+    const verdicts = await (options.releaseCheck.inputsOffThread?.(inputs) ?? options.releaseCheck.inputs(inputs));
     if (verdicts.length !== inputs.length || verdicts.some((v) => v.tier === "unknown"))
       throw new Error("Eligibility unavailable");
     const posture = options.releaseCheck.secureDerivativeDefault();
@@ -190142,7 +190450,7 @@ function createEmailSourceWorker(options = {}) {
         if (request.method === "POST" && url2.pathname === `${basePath}/source/answer/release`) {
           const body = await request.json();
           const entry = typeof body.ticket === "string" ? releaseTickets.get(body.ticket) : undefined;
-          const reason = entry?.expires !== undefined && entry.expires <= Date.now() ? "Olympus withheld this answer because its privacy release ticket expired after 15 minutes. Ask again." : !entry ? "Olympus withheld this answer because its privacy release ticket is no longer available (the engine may have restarted). Ask again." : options.sourceAnswerReleaseCheck ? answerReleaseWithheldReason(entry.manifests, options.sourceAnswerReleaseCheck) : "Olympus withheld this answer because the engine cannot check its current privacy classification. Update Olympus, then ask again.";
+          const reason = entry?.expires !== undefined && entry.expires <= Date.now() ? "Olympus withheld this answer because its privacy release ticket expired after 15 minutes. Ask again." : !entry ? "Olympus withheld this answer because its privacy release ticket is no longer available (the engine may have restarted). Ask again." : options.sourceAnswerReleaseCheck ? await answerReleaseWithheldReasonOffThread(entry.manifests, options.sourceAnswerReleaseCheck) : "Olympus withheld this answer because the engine cannot check its current privacy classification. Update Olympus, then ask again.";
           pruneReleaseTickets();
           return json({ ...reason ? { withheld: reason } : { allowed: true } });
         }
@@ -206941,7 +207249,7 @@ function createArchiveImportDashboard(options) {
   let closed = false;
   const now = options.now ?? (() => new Date);
   const countReads = new Set;
-  const releasing = new WeakSet;
+  const releasing2 = new WeakSet;
   const countTallies = new Map;
   let checks4 = Promise.resolve();
   const running = new Set;
@@ -207305,8 +207613,8 @@ function createArchiveImportDashboard(options) {
       if (!offThreadReadsSupported(ledger.dbPath)) {
         readHere();
       } else {
-        if (!releasing.has(ledger)) {
-          releasing.add(ledger);
+        if (!releasing2.has(ledger)) {
+          releasing2.add(ledger);
           ledger.onClose(() => releaseOffThreadReads(ledger.dbPath));
         }
         entry.inFlight = (async () => {
@@ -209945,18 +210253,28 @@ function createTierVisibilityGate(scopes, onHeldMatches) {
       if (governed.length === 0)
         continue;
       try {
-        reads.set(scope, scope.ledger.readSteps(scope.ledger.visibilityReadSteps(governed.map((hit) => hit.sourceItem), readOptions)));
+        reads.set(scope, ledgerVisibilityHere(scope.ledger, governed.map((hit) => hit.sourceItem), readOptions));
       } catch {
         reads.set(scope, undefined);
       }
     }
-    return judgeVisibility(current2, hits, reads, onHeldMatches);
+    return visibilityHere(judgeVisibility(current2, hits, reads, onHeldMatches));
   };
   gate.offThread = async (hits) => {
     const current2 = scopes();
     if (current2.length === 0 || hits.length === 0)
       return hits;
     const reads = new Map;
+    const unchanged = new Map;
+    for (const scope of current2) {
+      if (governedBy(scope, hits).length === 0)
+        continue;
+      try {
+        unchanged.set(scope, childVisibilityUnchanged({ ledger: () => scope.ledger, stores: scope.stores ?? (() => []) }));
+      } catch {
+        unchanged.set(scope, () => false);
+      }
+    }
     await Promise.all(current2.map(async (scope) => {
       const governed = governedBy(scope, hits);
       if (governed.length === 0)
@@ -209967,32 +210285,22 @@ function createTierVisibilityGate(scopes, onHeldMatches) {
         reads.set(scope, undefined);
       }
     }));
-    return judgeVisibility(current2, hits, reads, onHeldMatches);
+    const visible = await visibilityOffThread(judgeVisibility(current2, hits, reads, onHeldMatches));
+    const changed = current2.filter((scope) => {
+      try {
+        return unchanged.has(scope) && !unchanged.get(scope)();
+      } catch {
+        return true;
+      }
+    });
+    return visible.filter((hit) => !changed.some((scope) => scope.corpusIds.has(hit.corpusId)));
   };
   return gate;
 }
 async function ledgerVisibilityReads(ledger, identities, options) {
-  if (identities.length > 0 && offThreadReadsSupported(ledger.dbPath)) {
-    if (!releasing.has(ledger)) {
-      releasing.add(ledger);
-      ledger.onClose(() => releaseOffThreadReads(ledger.dbPath));
-    }
-    try {
-      return await withOffThreadSnapshot(ledger.dbPath, async (read) => {
-        const steps = ledger.visibilityReadSteps(identities, options);
-        let next = steps.next();
-        while (!next.done)
-          next = steps.next(await read(next.value));
-        return next.value;
-      });
-    } catch (error2) {
-      if (!(error2 instanceof OffThreadReadBusyError))
-        throw error2;
-    }
-  }
-  return ledger.readSteps(ledger.visibilityReadSteps(identities, options));
+  return ledgerVisibilityOffThread(ledger, identities, options);
 }
-function judgeVisibility(current2, hits, reads, onHeldMatches) {
+function* judgeVisibility(current2, hits, reads, onHeldMatches) {
   const hidden = new Set;
   const held = new Set;
   for (const scope of current2) {
@@ -210030,7 +210338,7 @@ function judgeVisibility(current2, hits, reads, onHeldMatches) {
     }
     const lane = childLane(scope);
     if (lane) {
-      const orphaned = hiddenChildKeys(lane, governed.filter((hit) => !hidden.has(hit)).map((hit) => hit.sourceItem));
+      const orphaned = yield* hiddenChildKeysSteps(lane, governed.filter((hit) => !hidden.has(hit)).map((hit) => hit.sourceItem));
       if (orphaned.size > 0) {
         for (const hit of governed)
           if (orphaned.has(tierLedgerIdentityKey(hit.sourceItem)))
@@ -210064,65 +210372,74 @@ function interleaveByCorpus(hits) {
   return ordered;
 }
 function createReleaseTierCheck(scopes, secureDerivativeDefault) {
-  return {
-    secureDerivativeDefault,
-    inputs: (inputs) => {
-      const verdicts = inputs.map(() => ({ tier: "legacy", gone: false }));
-      if (inputs.length === 0)
-        return verdicts;
-      for (const scope of scopes()) {
-        const governed = [];
-        inputs.forEach((input, index) => {
-          if (!scope.corpusIds.has(input.corpusId))
-            return;
-          if (!input.accountScope || !input.provider || !input.providerItemId) {
-            verdicts[index] = { tier: "unknown", gone: false };
-            return;
-          }
-          governed.push({
-            index,
-            identity: {
-              provider: input.provider,
-              accountScope: input.accountScope,
-              providerItemId: input.providerItemId,
-              ...input.providerConversationId ? { providerConversationId: input.providerConversationId } : {}
-            }
-          });
-        });
-        if (governed.length === 0)
-          continue;
-        const states = scope.ledger.itemStatesForMany(governed.map(({ identity: identity2 }) => identity2));
-        for (const { index, identity: identity2 } of governed) {
-          const state = states.get(tierLedgerIdentityKey(identity2));
-          if (!state)
-            continue;
-          const { record: record8, copies } = state;
-          const namesOnly = inputs[index].layer === "names";
-          const tiers = namesOnly ? [record8.metadataTier, record8.targetMetadataTier] : [record8.metadataTier, record8.contentTier, record8.targetMetadataTier, record8.targetContentTier];
-          const held = record8.metadataPending || !namesOnly && contentHeldForJudgment(record8);
-          verdicts[index] = {
-            tier: tiers.includes("secrets") ? "secret" : held || tiers.includes("secure") ? "private" : "public_or_personal",
-            gone: record8.routed && !copies.some((copy) => copy.state === "current" && (!namesOnly || copy.layers === "both" || copy.layers === "metadata"))
-          };
+  function* inputsSteps(inputs) {
+    const verdicts = inputs.map(() => ({ tier: "legacy", gone: false }));
+    if (inputs.length === 0)
+      return verdicts;
+    for (const scope of scopes()) {
+      const governed = [];
+      inputs.forEach((input, index) => {
+        if (!scope.corpusIds.has(input.corpusId))
+          return;
+        if (!input.accountScope || !input.provider || !input.providerItemId) {
+          verdicts[index] = { tier: "unknown", gone: false };
+          return;
         }
-        const lane = childLane(scope);
-        if (lane) {
-          const orphaned = hiddenChildKeys(lane, governed.filter(({ index }) => inputs[index].dependency !== "parent_label").map(({ identity: identity2 }) => identity2));
-          for (const { index, identity: identity2 } of governed) {
-            if (inputs[index].dependency !== "parent_label" && orphaned.has(tierLedgerIdentityKey(identity2))) {
-              verdicts[index] = { ...verdicts[index], gone: true, hiddenByParent: true };
-            }
+        governed.push({
+          index,
+          identity: {
+            provider: input.provider,
+            accountScope: input.accountScope,
+            providerItemId: input.providerItemId,
+            ...input.providerConversationId ? { providerConversationId: input.providerConversationId } : {}
           }
-          const named = governed.filter(({ index }) => inputs[index].dependency === "parent_label");
-          if (named.length > 0) {
-            const standing = itemVerdicts(lane, named.map(({ identity: identity2 }) => identity2));
-            for (const { index, identity: identity2 } of named) {
-              if (standing.get(tierLedgerIdentityKey(identity2))?.visible !== true)
-                verdicts[index] = { ...verdicts[index], gone: true };
-            }
+        });
+      });
+      if (governed.length === 0)
+        continue;
+      const identities = governed.map(({ identity: identity2 }) => identity2);
+      const states = yield* visibilityRead(() => memoVisibilityItemsHere(scope.ledger, "states", () => scope.ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => scope.ledger.itemStatesForMany(missing)), () => itemStatesOffThread(scope.ledger, identities));
+      for (const { index, identity: identity2 } of governed) {
+        const state = states.get(tierLedgerIdentityKey(identity2));
+        if (!state)
+          continue;
+        const { record: record8, copies } = state;
+        const namesOnly = inputs[index].layer === "names";
+        const tiers = namesOnly ? [record8.metadataTier, record8.targetMetadataTier] : [record8.metadataTier, record8.contentTier, record8.targetMetadataTier, record8.targetContentTier];
+        const held = record8.metadataPending || !namesOnly && contentHeldForJudgment(record8);
+        verdicts[index] = {
+          tier: tiers.includes("secrets") ? "secret" : held || tiers.includes("secure") ? "private" : "public_or_personal",
+          gone: record8.routed && !copies.some((copy) => copy.state === "current" && (!namesOnly || copy.layers === "both" || copy.layers === "metadata"))
+        };
+      }
+      const lane = childLane(scope);
+      if (lane) {
+        const orphaned = yield* hiddenChildKeysSteps(lane, governed.filter(({ index }) => inputs[index].dependency !== "parent_label").map(({ identity: identity2 }) => identity2));
+        for (const { index, identity: identity2 } of governed) {
+          if (inputs[index].dependency !== "parent_label" && orphaned.has(tierLedgerIdentityKey(identity2))) {
+            verdicts[index] = { ...verdicts[index], gone: true, hiddenByParent: true };
+          }
+        }
+        const named = governed.filter(({ index }) => inputs[index].dependency === "parent_label");
+        if (named.length > 0) {
+          const standing = yield* itemVerdictsSteps(lane, named.map(({ identity: identity2 }) => identity2));
+          for (const { index, identity: identity2 } of named) {
+            if (standing.get(tierLedgerIdentityKey(identity2))?.visible !== true)
+              verdicts[index] = { ...verdicts[index], gone: true };
           }
         }
       }
+    }
+    return verdicts;
+  }
+  return {
+    secureDerivativeDefault,
+    inputs: (inputs) => visibilityHere(inputsSteps(inputs)),
+    inputsOffThread: async (inputs) => {
+      const unchanged = scopes().map((scope) => childVisibilityUnchanged({ ledger: () => scope.ledger, stores: scope.stores ?? (() => []) }));
+      const verdicts = await visibilityOffThread(inputsSteps(inputs));
+      if (unchanged.some((check) => !check()))
+        throw new Error("Visibility changed during release");
       return verdicts;
     }
   };
@@ -210165,13 +210482,10 @@ function createPendingGovernance(lanes, newLane, log = () => {}) {
     waiting: () => [...waiting.keys()]
   };
 }
-var releasing;
 var init_tier_visibility = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
   init_child_visibility();
-  init_off_thread_reads();
-  releasing = new WeakSet;
 });
 
 // src/workers/classification/judge-boost.ts
@@ -224641,12 +224955,12 @@ async function callChatGptTool(name, args, ctx, options, signal, detachedContext
     return final;
   };
   if (name === SEARCH_TOOL_NAME && Array.isArray(result.structuredContent?.evidence) && result.structuredContent.evidence.length > 0) {
-    const reason = ctx.releaseCheck ? answerReleaseWithheldReason(manifests.manifests, ctx.releaseCheck, "personal") : ANSWER_RELEASE_UNVERIFIED;
+    const reason = ctx.releaseCheck ? await answerReleaseWithheldReasonOffThread(manifests.manifests, ctx.releaseCheck, "personal") : ANSWER_RELEASE_UNVERIFIED;
     if (reason)
       return record8(searchToolResult({ evidence: [], withheld: result.structuredContent.evidence.length, notes: [reason] }, { pendingPrivacyItems: ctx.pendingPrivacyItems?.() }), true);
   }
   if ((name === "source_answer" || name === "source_answer_result") && result.structuredContent?.status === "answered" && !(result.structuredContent && ("anonymous" in result.structuredContent))) {
-    const reason = ctx.releaseCheck ? answerReleaseWithheldReason(manifests.manifests, ctx.releaseCheck, "personal") : ANSWER_RELEASE_UNVERIFIED;
+    const reason = ctx.releaseCheck ? await answerReleaseWithheldReasonOffThread(manifests.manifests, ctx.releaseCheck, "personal") : ANSWER_RELEASE_UNVERIFIED;
     if (reason)
       return record8(withPrivateAnswerOutcome(answerToolResult(withheldSourceAnswer(reason), { pendingPrivacyItems: ctx.pendingPrivacyItems?.() })), true);
   }
@@ -234776,7 +235090,7 @@ async function runSearch(args, options, authorized, context3, signal) {
     if (afterWait !== "active")
       return refusedAccess(afterWait);
     const evidence = result.structuredContent?.evidence;
-    if (context3.releaseCheck && Array.isArray(evidence) && evidence.length > 0 && answerReleaseWithheldReason(manifests.manifests, context3.releaseCheck, "personal") !== undefined) {
+    if (context3.releaseCheck && Array.isArray(evidence) && evidence.length > 0 && await answerReleaseWithheldReasonOffThread(manifests.manifests, context3.releaseCheck, "personal") !== undefined) {
       const rawRecord = raw;
       const withheldBefore = typeof rawRecord.withheld === "number" && Number.isFinite(rawRecord.withheld) && rawRecord.withheld > 0 ? rawRecord.withheld : 0;
       result = searchToolResult({ ...rawRecord, evidence: [], withheld: withheldBefore + evidence.length }, { pendingPrivacyItems: context3.pendingPrivacyItems?.() });
@@ -238136,7 +238450,7 @@ function createRemotePrivateParts(options) {
         return false;
       let released;
       try {
-        released = remoteOperationOutput("source_answer", outcome.value, {
+        released = await remoteOperationOutputOffThread("source_answer", outcome.value, {
           ...releaseCheck ? { releaseCheck } : {},
           releaseManifests: outcome.releaseManifests
         });
@@ -238416,14 +238730,14 @@ async function callTool(request, name, options) {
   try {
     const result = await runWithReleaseManifestSink(manifests, () => operation.handler(ctx, params.value));
     const capture = createReleaseCapture();
-    const release2 = () => runWithReleaseCapture(capture, () => remoteOperationOutput(operation.name, result, {
+    const release2 = () => runWithReleaseCapture(capture, () => remoteOperationOutputOffThread(operation.name, result, {
       pendingPrivacyItems: ctx.pendingPrivacyItems?.(),
       ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {},
       releaseManifests: manifests.manifests
     }));
-    const approved = release2();
+    const approved = await release2();
     const privateMayAnswer = privatePart ? await privatePart.settle(result, approved) : false;
-    const output = privatePart ? release2() : approved;
+    const output = privatePart ? await release2() : approved;
     recordRemoteOperation({ operation: operation.name, args: params.value, caller: ctx.caller, output, capture, privateQuestion: privateMayAnswer ? privatePart?.answerRef : undefined });
     return jsonResponse(200, privateMayAnswer ? withRemotePrivateNote(output, privatePart?.answerId, privatePart?.secretMatch) : output);
   } catch (error2) {

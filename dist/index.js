@@ -19895,8 +19895,13 @@ var init_secrets_disposition = __esm(() => {
 });
 
 // src/workers/connector-store/child-visibility.ts
+var askReads, releasing;
 var init_child_visibility = __esm(() => {
   init_tier_ledger();
+  init_answer_latency_trace();
+  init_off_thread_reads();
+  askReads = new WeakMap;
+  releasing = new WeakSet;
 });
 
 // src/core/source-index/chunk-selection.ts
