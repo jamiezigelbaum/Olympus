@@ -176,8 +176,9 @@ Current blocking gates recorded here:
   false-positive budget: a run under heavy unrelated host load may be repeated
   once, with the load recorded. Owner: the session changing the Ask path.
   Retire when the Ask path reads no store or ledger on the request thread.
-  The seed does not yet hold a tier ledger or held copies; add them with the
-  ledger fixes that follow #1305's query plans.
+  The seed also writes a tier ledger (every item routed with its copy, one in
+  ten held from embedding, one in fifty moved), and `run` routes through the
+  search's visibility gate over it, as the product does.
 
 ## Focused proof and CI triage
 

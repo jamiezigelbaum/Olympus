@@ -12,7 +12,8 @@
  * scan reads real bytes; every store holds --sync-runs (default 200000) tier-move runs and a few real
  * syncs, as Sparta's stores do. Gate bound (1.5): with the writer on, each Ask's request-thread
  * SQLite (main_thread_sql.total_ms) is at most 2,000 ms and no statement runs 250 ms or more; a run
- * that breaks it exits non-zero. Defined in docs/ENGINEERING_PROCESS.md, "Busy-store gate".
+ * that breaks it exits non-zero. The seed also writes a tier ledger (every item routed, one in ten
+ * held from embedding, one in fifty moved), and a run routes through the visibility gate over it. Defined in docs/ENGINEERING_PROCESS.md, "Busy-store gate".
  */
 import { Database } from 'bun:sqlite';
 import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -45,6 +46,7 @@ const report = args.get('report') ?? join(tmpdir(), 'search-contention-result.md
 const formulations = ['orchard invoice budget', 'orchard lawyer contract', 'invoice budget report'];
 // The vector width the seed wrote (seed.json); older seeds had 4.
 const seedPath = join(dir, 'seed.json');
+const ledgerPath = join(dir, 'tier-ledger.sqlite');
 const dimension = command === 'seed'
   ? Number(args.get('dim') ?? 768)
   : existsSync(seedPath) ? (JSON.parse(readFileSync(seedPath, 'utf8')) as { dim: number }).dim : 4;
@@ -72,7 +74,7 @@ if (command === 'seed') {
   const count = Number(args.get('stores') ?? 11);
   const maxItems = Number(args.get('items') ?? 2_000_000);
   const syncRuns = Number(args.get('sync-runs') ?? 200_000);
-  writeFileSync(seedPath, JSON.stringify({ dim: dimension, syncRuns }));
+  writeFileSync(seedPath, JSON.stringify({ dim: dimension, syncRuns, ledger: true }));
   const f = fixtures.openTierFixture(join(dir, 'template'), { embed: false });
   const text = 'Synthetic orchard invoice budget lawyer contract report. '.repeat(4);
   await f.set.sync(fixtures.fixtureConnector(() => [{ id: 'template', name: 'Synthetic orchard invoice', text }]), { fetchContent: true, placement: fixtures.FIXTURE_PLACEMENT });
@@ -81,7 +83,36 @@ if (command === 'seed') {
   copy.vectors = copy.chunks.map((c: any) => ({ chunkIndex: c.chunkIndex, modelId: provider.modelId, contentHash: c.embeddingInputHash,
     embedding: new Uint8Array(new Float32Array(unitVector()).buffer) }));
   f.stores.internal.importItemCopy(copy, { trustTier: 'S3', syncConnectorId: 'synthetic', vectorProvider: provider });
+  const templateIdentity = fixtures.identityOf('template');
   f.close();
+  // The tier ledger the search's visibility gate reads, as on a real install:
+  // every item routed, with its copy in its store; one in ten held from
+  // embedding until judged, one in fifty moved (its copy here superseded).
+  cpSync(join(dir, 'template', 'fixture-secure-store.tier-ledger.sqlite'), ledgerPath);
+  const ledgerDb = new Database(ledgerPath);
+  ledgerDb.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF;');
+  const ledgerColumns = (table: string) => (ledgerDb.query(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(c => c.name);
+  const templateWhere = `provider = '${templateIdentity.provider}' AND account_scope = '${templateIdentity.accountScope}' AND provider_item_id = '${templateIdentity.providerItemId}'`;
+  function seedLedger(store: number, items: number) {
+    const q = (name: string) => `"${name}"`;
+    const itemCols = ledgerColumns('tier_items');
+    const copyCols = ledgerColumns('tier_copies');
+    const itemExpr = itemCols.map(c => c === 'provider_item_id' ? `'synthetic-${store}-'||n` : `t.${q(c)}`);
+    const copyExpr = (state: string) => copyCols.map(c => c === 'provider_item_id' ? `'synthetic-${store}-'||n`
+      : c === 'corpus_id' ? (state === 'moved' ? "'secure_local.synthetic'" : `'internal.synthetic.${store}'`)
+      : c === 'copy_state' ? (state === 'superseded' ? "CASE WHEN n % 50 = 0 THEN 'superseded' ELSE 'current' END" : "'current'")
+      : c === 'embed_hold' ? (state === 'superseded' ? 'CASE WHEN n % 10 = 0 THEN 1 ELSE 0 END' : '0')
+      : `t.${q(c)}`);
+    for (let offset = 1; offset < items; offset += 50_000) {
+      const end = Math.min(items, offset + 50_000);
+      const numbers = `WITH RECURSIVE seq(n) AS (SELECT ${offset} UNION ALL SELECT n+1 FROM seq WHERE n+1<${end})`;
+      ledgerDb.transaction(() => {
+        ledgerDb.exec(`${numbers} INSERT INTO tier_items (${itemCols.map(q)}) SELECT ${itemExpr} FROM seq CROSS JOIN (SELECT * FROM tier_items WHERE ${templateWhere}) t`);
+        ledgerDb.exec(`${numbers} INSERT INTO tier_copies (${copyCols.map(q)}) SELECT ${copyExpr('superseded')} FROM seq CROSS JOIN (SELECT * FROM tier_copies WHERE ${templateWhere} LIMIT 1) t`);
+        ledgerDb.exec(`${numbers} INSERT INTO tier_copies (${copyCols.map(q)}) SELECT ${copyExpr('moved')} FROM seq CROSS JOIN (SELECT * FROM tier_copies WHERE ${templateWhere} LIMIT 1) t WHERE n % 50 = 0`);
+      })();
+    }
+  }
   const template = fixtures.storePaths(join(dir, 'template')).internal;
   const manifest: any[] = [];
   for (let i = 0; i < count; i++) {
@@ -94,7 +125,8 @@ if (command === 'seed') {
     const columns = (table: string) => (db.query(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(c => c.name);
     const quote = (name: string) => `"${name}"`;
     const itemColumns = columns('items');
-    const expressions = itemColumns.map(c => c === 'item_pk' ? 'n+1' : c === 'local_item_id' ? "'personal:synthetic-'||n" : c === 'provider_item_id' ? "'synthetic-'||n" : `t.${quote(c)}`);
+    // Ids unique across stores, so each item has its own row and copy in the shared ledger.
+    const expressions = itemColumns.map(c => c === 'item_pk' ? 'n+1' : c === 'local_item_id' ? `'personal:synthetic-${i}-'||n` : c === 'provider_item_id' ? `'synthetic-${i}-'||n` : `t.${quote(c)}`);
     const chunkColumns = columns('chunks');
     const chunks = chunkColumns.map(c => c === 'chunk_pk' || c === 'item_pk' ? 'n+1' : `t.${quote(c)}`);
     const vectorColumns = columns('chunk_embeddings');
@@ -121,13 +153,16 @@ if (command === 'seed') {
       const end = Math.min(syncRuns, offset + 50_000);
       db.exec(`WITH RECURSIVE seq(n) AS (SELECT ${offset} UNION ALL SELECT n+1 FROM seq WHERE n+1<${end}) INSERT INTO sync_runs (${runColumns.map(quote)}) SELECT ${runs} FROM seq CROSS JOIN (SELECT * FROM sync_runs LIMIT 1) t`);
     }
+    seedLedger(i, items);
     // Fixed vectors on the imported template suffice to exercise the real hybrid path.
     db.exec("INSERT INTO connector_store_fts(connector_store_fts) VALUES('optimize'); PRAGMA wal_checkpoint(TRUNCATE)");
     db.close();
+    ledgerDb.exec('PRAGMA wal_checkpoint(TRUNCATE)');
     manifest.push({ path, items, bytes: statSync(path).size });
     writeFileSync(join(dir, 'manifest.json'), JSON.stringify(manifest));
     console.error(`seeded ${i+1}/${count}: ${items} items`);
   }
+  ledgerDb.exec('ANALYZE'); ledgerDb.close();
   const row = { phase: 'seed', stores: manifest.length, items: manifest.reduce((n,s) => n+s.items, 0), bytes: manifest.reduce((n,s) => n+s.bytes, 0), ms: performance.now()-started };
   console.log(JSON.stringify(row));
   appendFileSync(report, `\nSeed receipt: ${JSON.stringify(row)}\n`);
@@ -164,6 +199,16 @@ if (command === 'seed') {
     console.log(JSON.stringify(row)); appendFileSync(report, `\nCalibration:\n\n\`\`\`json\n${JSON.stringify(row)}\n\`\`\`\n`);
   } else {
     const definitions = stores.map((s: any) => defineConnectorCorpus({ corpusId: s.corpusId, family: 'file', trustDomain: 'internal', activationMode: 'hybrid_primary' }));
+    // The search's visibility gate over the seeded tier ledger, as the product wires it.
+    const seeded = JSON.parse(readFileSync(seedPath, 'utf8')) as { ledger?: boolean };
+    let visibilityGate: any;
+    let gateLedger: any;
+    if (seeded.ledger && existsSync(ledgerPath)) {
+      const { TierLedger } = await mod('src/workers/classification/tier-ledger.ts');
+      const { createTierVisibilityGate } = await mod('src/workers/connector-store/tier-visibility.ts');
+      gateLedger = new TierLedger({ dbPath: ledgerPath, readOnly: true });
+      visibilityGate = createTierVisibilityGate(() => [{ ledger: gateLedger, corpusIds: new Set(stores.map((s: any) => s.corpusId)) }]);
+    }
     const registry = buildSourceIndexCorpusRegistry(definitions);
     const keywordReads: Array<{ store: number; query: string; run_ms: number; results: number }> = [];
     stores.forEach((store: any, i: number) => {
@@ -239,7 +284,7 @@ if (command === 'seed') {
         const traceModule = existsSync(join(source,'src/workers/source-index/answer-latency-trace.ts')) ? await mod('src/workers/source-index/answer-latency-trace.ts') : undefined;
         const trace=traceModule?.createSourceAnswerTrace?.();
         const start=performance.now();
-        const run=() => routeSourceIndexSearch({ registry, adapters, request: { query, maxResults: 220, context: { allowedTrustDomains: ['internal'], allowCloudQueries: false } }, ...(args.has('budget-ms') ? { laneTimeoutMs: Number(args.get('budget-ms')) } : {}) });
+        const run=() => routeSourceIndexSearch({ registry, adapters, request: { query, maxResults: 220, context: { allowedTrustDomains: ['internal'], allowCloudQueries: false } }, ...(args.has('budget-ms') ? { laneTimeoutMs: Number(args.get('budget-ms')) } : {}), ...(visibilityGate ? { visibilityGate } : {}) });
         const result= traceModule?.observeSourceAnswerRoutedQuery ? await traceModule.runWithSourceAnswerTrace(trace, () => traceModule.observeSourceAnswerRetrievalAttempt('hybrid', () => traceModule.observeSourceAnswerRoutedQuery(ordinal+1, run))) : await run();
         return { ordinal: ordinal+1, wall_ms: performance.now()-start, timed_out: result.skippedCorpora.filter((s:any)=>s.reason==='lane_timeout').length, completed: result.searchedCorpora.length,
           completed_with_results: new Set(result.hits.map((h:any)=>h.corpusId)).size, hit_fingerprints: Object.fromEntries(stores.map((s:any) => [s.corpusId, Bun.hash(result.hits.filter((h:any)=>h.corpusId===s.corpusId).map((h:any)=>h.sourceItem.localItemId).sort().join('\n')).toString(16)])),
@@ -277,7 +322,7 @@ if (command === 'seed') {
       console.log(JSON.stringify(row));
       appendFileSync(report, `\n## ${row.label}, writer ${row.writer}, Ask ${ask}\n\n${row.lanes_completed_with_results}/${stores.length * 3} lanes with results; ${row.lanes_timed_out} timed out; ${(row.wall_ms/1000).toFixed(2)} s. Request-thread SQLite ${mainThreadSql ? `${mainThreadSql.total_ms} ms, longest ${mainThreadSql.max_ms} ms (${bound!.pass ? 'within' : 'OVER'} the gate bound)` : 'not traced by this build'}. RSS ${before.toFixed(1)} → ${row.rss_after_mb.toFixed(1)} MiB; peak ${peak.toFixed(1)} MiB. Imports ${row.imports}; tier moves ${row.tier_moves}.\n\n<details><summary>Full numeric receipt</summary>\n\n\`\`\`json\n${JSON.stringify(row)}\n\`\`\`\n</details>\n`);
     }
-    stopped=true; await writerTask; writer?.close();
+    stopped=true; await writerTask; writer?.close(); gateLedger?.close();
     if (writerError) throw new Error(`Writer failed: ${writerError}`);
     if (args.get('writer') === 'on' && (imports === 0 || moves === 0)) throw new Error('Writer did not import and move any items');
     if (boundFailures > 0) {
