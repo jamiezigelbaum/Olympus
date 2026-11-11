@@ -176,25 +176,28 @@ export function sweepAutomaticSupersededCopies(set: TieredStoreSet, options: {
   // done over it. The log names the ledger and corpora, never item content.
   function stepPastRepeatedFailure(identity: TierLedgerIdentity, error: unknown): void {
     try {
+      // Start from what is durable: the failed attempt's ledger transaction
+      // rolled back, so its in-memory edits (deleted totals, cursor) must not be saved.
+      const durable: State = JSON.parse(ledger.readMeta(STATE) || '{}');
       const key = tierLedgerIdentityKey(identity);
-      const count = state.failing?.key === key ? state.failing.count + 1 : 1;
-      const corpora = state.pending?.copies.map(copy => copy.corpusId).join(',') || 'unknown';
+      const count = durable.failing?.key === key ? durable.failing.count + 1 : 1;
+      const corpora = durable.pending?.copies.map(copy => copy.corpusId).join(',') || 'unknown';
       // The error's name only: a message from below could carry a path.
       const reason = error instanceof Error ? error.name : 'unknown';
       console.warn(`[tier-auto-prune] ledger=${ledger.ledgerId()} corpora=${corpora} failures=${count} reason=${reason}`);
       if (count < MAX_ITEM_FAILURES) {
-        state.failing = { key, count };
+        durable.failing = { key, count };
       } else {
         // A pending receipt's tier-content-purged marker stays: some copies
         // may already be stripped, so rollback stays refused for this item.
         // Its original counts are parked for the walk that retries it.
-        if (state.pending) (state.parked ??= {})[key] = state.pending.copies;
-        delete state.pending;
-        delete state.failing;
-        state.after = identity;
-        state.retry = true;
+        if (durable.pending) (durable.parked ??= {})[key] = durable.pending.copies;
+        delete durable.pending;
+        delete durable.failing;
+        durable.after = identity;
+        durable.retry = true;
       }
-      save();
+      ledger.writeMeta(STATE, JSON.stringify(durable));
     } catch {
       // The ledger itself is unavailable; the next pass starts from the same place.
     }

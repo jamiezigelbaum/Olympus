@@ -68859,22 +68859,23 @@ function sweepAutomaticSupersededCopies(set, options = {}) {
   return report;
   function stepPastRepeatedFailure(identity2, error) {
     try {
+      const durable = JSON.parse(ledger.readMeta(STATE) || "{}");
       const key2 = tierLedgerIdentityKey(identity2);
-      const count = state.failing?.key === key2 ? state.failing.count + 1 : 1;
-      const corpora = state.pending?.copies.map((copy) => copy.corpusId).join(",") || "unknown";
+      const count = durable.failing?.key === key2 ? durable.failing.count + 1 : 1;
+      const corpora = durable.pending?.copies.map((copy) => copy.corpusId).join(",") || "unknown";
       const reason = error instanceof Error ? error.name : "unknown";
       console.warn(`[tier-auto-prune] ledger=${ledger.ledgerId()} corpora=${corpora} failures=${count} reason=${reason}`);
       if (count < MAX_ITEM_FAILURES) {
-        state.failing = { key: key2, count };
+        durable.failing = { key: key2, count };
       } else {
-        if (state.pending)
-          (state.parked ??= {})[key2] = state.pending.copies;
-        delete state.pending;
-        delete state.failing;
-        state.after = identity2;
-        state.retry = true;
+        if (durable.pending)
+          (durable.parked ??= {})[key2] = durable.pending.copies;
+        delete durable.pending;
+        delete durable.failing;
+        durable.after = identity2;
+        durable.retry = true;
       }
-      save();
+      ledger.writeMeta(STATE, JSON.stringify(durable));
     } catch {}
   }
 }

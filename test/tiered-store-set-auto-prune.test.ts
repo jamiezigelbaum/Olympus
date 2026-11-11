@@ -170,3 +170,31 @@ test('a receipt stepped past after repeated failures keeps its original chunk co
   expect(entries).toHaveLength(1);
   expect(entries[0]?.scope?.chunks?.[CORPORA.secure_local]).toBe(2);
 });
+
+test('a failed attempt does not persist the rolled-back audit totals with its failure count (#1412)', async () => {
+  const ctx = await fixture();
+  const ledger = ctx.f.ledger;
+  const original = ledger.writeMeta.bind(ledger);
+  let thrown = false;
+  // Fail the ledger transaction that finishes item a's receipt, after its
+  // in-memory totals were raised and before it commits.
+  const failure = spyOn(ledger, 'writeMeta').mockImplementation((key: string, value: string) => {
+    if (!thrown && key === 'automatic-superseded-prune-v1' && value.includes('"deleted"') && !value.includes('"pending"')) {
+      thrown = true; throw new Error('commit failed');
+    }
+    return original(key, value);
+  });
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    expect(sweepAutomaticSupersededCopies(ctx.f.set, { limit: 1, embeddingLedger: ctx.embeddingLedger })).toMatchObject({ failed: 1 });
+  } finally { failure.mockRestore(); warn.mockRestore(); }
+  expect(thrown).toBe(true);
+  let report = sweepAutomaticSupersededCopies(ctx.f.set, { embeddingLedger: ctx.embeddingLedger });
+  for (let pass = 0; pass < 5 && !report.complete; pass++) report = sweepAutomaticSupersededCopies(ctx.f.set, { embeddingLedger: ctx.embeddingLedger });
+  expect(report.complete).toBe(true);
+  // The rolled-back removal is redone, not skipped by a cursor saved from memory.
+  expect(ledger.copies(identityOf('a')).some(copy => copy.state === 'superseded')).toBe(false);
+  await flushTierMoveNotes(ledger);
+  const entries = (await readEmbeddingLedger(ctx.embeddingLedger.path)).entries.filter(entry => entry.entry_id?.startsWith('automatic-superseded-prune:'));
+  expect(entries[0]?.scope?.chunks?.[CORPORA.secure_local]).toBe(2);
+});
