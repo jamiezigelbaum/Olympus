@@ -24503,6 +24503,17 @@ async function scanVectorPages(read, provider, beforeToken, queryVector, pageOpt
   }
   return { bestByItem, dimensionMismatches };
 }
+var VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128;
+var VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8;
+var VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25;
+var VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250;
+function nextVectorDigestBackfillRows(rows, turnMs) {
+  if (turnMs > VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS)
+    return Math.max(VECTOR_DIGEST_BACKFILL_MIN_ROWS, Math.floor(rows / 2));
+  if (turnMs < VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS / 3)
+    return Math.min(VECTOR_DIGEST_BACKFILL_MAX_ROWS, rows * 2);
+  return rows;
+}
 async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, visibility) {
   const heap = new VectorDigestHeap;
   const query = encodeVectorDigest(queryVector);
@@ -24749,6 +24760,8 @@ class LocalConnectorStore {
   }
   vectorDigestBackfillTimer;
   vectorDigestBackfillModel;
+  vectorDigestBackfillRows = VECTOR_DIGEST_BACKFILL_MAX_ROWS;
+  vectorLanesInFlight = 0;
   scheduleVectorDigestBackfill(modelId, delayMs = 0) {
     if (modelId)
       this.vectorDigestBackfillModel = modelId;
@@ -24762,8 +24775,14 @@ class LocalConnectorStore {
       if (!model)
         return;
       this.vectorDigestBackfillModel = model;
+      if (this.vectorLanesInFlight > 0) {
+        this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS);
+        return;
+      }
       try {
-        const state = this.backfillVectorDigest(model);
+        const started = performance.now();
+        const state = this.backfillVectorDigest(model, this.vectorDigestBackfillRows);
+        this.vectorDigestBackfillRows = nextVectorDigestBackfillRows(this.vectorDigestBackfillRows, performance.now() - started);
         if (!state.completed)
           this.scheduleVectorDigestBackfill();
       } catch (error) {
@@ -30806,6 +30825,14 @@ class LocalConnectorStore {
     });
   }
   async scoreVectorLaneSnapshot(input) {
+    this.vectorLanesInFlight += 1;
+    try {
+      return await this.scoreVectorLaneSnapshotInner(input);
+    } finally {
+      this.vectorLanesInFlight -= 1;
+    }
+  }
+  async scoreVectorLaneSnapshotInner(input) {
     const { provider, queryVector, maxResults, accountScope, filters, deadlineAtMs } = input;
     if (connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
       return { rows: [], skippedReason: "vector_scan_deadline_exceeded" };

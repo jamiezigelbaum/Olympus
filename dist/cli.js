@@ -36720,6 +36720,13 @@ async function scanVectorPages(read, provider, beforeToken, queryVector, pageOpt
   }
   return { bestByItem, dimensionMismatches };
 }
+function nextVectorDigestBackfillRows(rows, turnMs) {
+  if (turnMs > VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS)
+    return Math.max(VECTOR_DIGEST_BACKFILL_MIN_ROWS, Math.floor(rows / 2));
+  if (turnMs < VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS / 3)
+    return Math.min(VECTOR_DIGEST_BACKFILL_MAX_ROWS, rows * 2);
+  return rows;
+}
 async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, visibility) {
   const heap = new VectorDigestHeap;
   const query = encodeVectorDigest(queryVector);
@@ -39612,7 +39619,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, VECTOR_SCAN_RESERVE_MIN_MS = 1000, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128, VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8, VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, VECTOR_SCAN_RESERVE_MIN_MS = 1000, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_vector_digest();
   init_main_thread_sql_trace();
@@ -39862,6 +39869,8 @@ var init_local_index = __esm(() => {
     }
     vectorDigestBackfillTimer;
     vectorDigestBackfillModel;
+    vectorDigestBackfillRows = VECTOR_DIGEST_BACKFILL_MAX_ROWS;
+    vectorLanesInFlight = 0;
     scheduleVectorDigestBackfill(modelId, delayMs = 0) {
       if (modelId)
         this.vectorDigestBackfillModel = modelId;
@@ -39875,8 +39884,14 @@ var init_local_index = __esm(() => {
         if (!model)
           return;
         this.vectorDigestBackfillModel = model;
+        if (this.vectorLanesInFlight > 0) {
+          this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS);
+          return;
+        }
         try {
-          const state = this.backfillVectorDigest(model);
+          const started = performance.now();
+          const state = this.backfillVectorDigest(model, this.vectorDigestBackfillRows);
+          this.vectorDigestBackfillRows = nextVectorDigestBackfillRows(this.vectorDigestBackfillRows, performance.now() - started);
           if (!state.completed)
             this.scheduleVectorDigestBackfill();
         } catch (error) {
@@ -45919,6 +45934,14 @@ var init_local_index = __esm(() => {
       });
     }
     async scoreVectorLaneSnapshot(input) {
+      this.vectorLanesInFlight += 1;
+      try {
+        return await this.scoreVectorLaneSnapshotInner(input);
+      } finally {
+        this.vectorLanesInFlight -= 1;
+      }
+    }
+    async scoreVectorLaneSnapshotInner(input) {
       const { provider, queryVector, maxResults, accountScope, filters, deadlineAtMs } = input;
       if (connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
         return { rows: [], skippedReason: "vector_scan_deadline_exceeded" };

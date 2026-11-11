@@ -2354,6 +2354,19 @@ async function scanVectorPages(
   return { bestByItem, dimensionMismatches };
 }
 
+/** Backfill turns stay short on the worker thread (plan ruling on #1444). */
+const VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128;
+const VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8;
+const VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25;
+const VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250;
+
+/** Halve after a long turn, double back after a short one, within bounds. */
+export function nextVectorDigestBackfillRows(rows: number, turnMs: number): number {
+  if (turnMs > VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS) return Math.max(VECTOR_DIGEST_BACKFILL_MIN_ROWS, Math.floor(rows / 2));
+  if (turnMs < VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS / 3) return Math.min(VECTOR_DIGEST_BACKFILL_MAX_ROWS, rows * 2);
+  return rows;
+}
+
 /** Sequential compact pass, followed only by SQL-eligible full vectors. */
 export async function scanDigestPages(
   read: (query: StoreRead) => Promise<unknown>,
@@ -3425,6 +3438,10 @@ export class LocalConnectorStore {
 
   private vectorDigestBackfillTimer: ReturnType<typeof setTimeout> | undefined;
   private vectorDigestBackfillModel: string | undefined;
+  /** Rows per backfill turn: halves when a turn runs long, regrows when short. */
+  private vectorDigestBackfillRows = VECTOR_DIGEST_BACKFILL_MAX_ROWS;
+  /** Vector lanes reading this store now; the backfill stands back while any run. */
+  private vectorLanesInFlight = 0;
 
   /** One small physical window per turn, never a whole-store migration at open. */
   private scheduleVectorDigestBackfill(modelId?: string, delayMs = 0): void {
@@ -3441,8 +3458,12 @@ export class LocalConnectorStore {
       ).get() as { model_id: string } | null)?.model_id;
       if (!model) return;
       this.vectorDigestBackfillModel = model;
+      // An Ask in flight on this store goes first.
+      if (this.vectorLanesInFlight > 0) { this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS); return; }
       try {
-        const state = this.backfillVectorDigest(model);
+        const started = performance.now();
+        const state = this.backfillVectorDigest(model, this.vectorDigestBackfillRows);
+        this.vectorDigestBackfillRows = nextVectorDigestBackfillRows(this.vectorDigestBackfillRows, performance.now() - started);
         if (!state.completed) this.scheduleVectorDigestBackfill();
       } catch (error) {
         if (/busy|locked/i.test(String(error))) { this.scheduleVectorDigestBackfill(undefined, 250); return; }
@@ -12953,7 +12974,16 @@ export class LocalConnectorStore {
    * snapshot across its page yields, so a concurrent embedding rebind cannot
    * mix vector spaces.
    */
-  private async scoreVectorLaneSnapshot(input: {
+  private async scoreVectorLaneSnapshot(input: Parameters<LocalConnectorStore['scoreVectorLaneSnapshotInner']>[0]): Promise<{ rows: ConnectorStoreScoredSearchRow[]; skippedReason?: string }> {
+    this.vectorLanesInFlight += 1;
+    try {
+      return await this.scoreVectorLaneSnapshotInner(input);
+    } finally {
+      this.vectorLanesInFlight -= 1;
+    }
+  }
+
+  private async scoreVectorLaneSnapshotInner(input: {
     provider: SourceEmbeddingProvider;
     queryVector: readonly number[];
     beforeToken: string;

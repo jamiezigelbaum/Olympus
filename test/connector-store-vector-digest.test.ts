@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
-import { LocalConnectorStore, connectorStoreCurrentEmbeddingPageQuery, connectorStoreCurrentEmbeddingRowsIterator, connectorStoreVectorDigestPageQuery, scanDigestPages } from '../src/workers/connector-store/local-index.ts';
+import { LocalConnectorStore, nextVectorDigestBackfillRows, connectorStoreCurrentEmbeddingPageQuery, connectorStoreCurrentEmbeddingRowsIterator, connectorStoreVectorDigestPageQuery, scanDigestPages } from '../src/workers/connector-store/local-index.ts';
 import { backfillVectorDigests, createVectorDigestSchema, vectorDigestState, writeVectorDigest } from '../src/workers/connector-store/vector-digest.ts';
 import { cosineSimilarity, decodeEmbedding, encodeEmbedding, type SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { encodeVectorDigest, scoreVectorDigest } from '../src/workers/source-index/vector-digest.ts';
@@ -323,6 +323,32 @@ test('automatic maintenance yields between bounded slices and completes without 
     expect(slices).toBeGreaterThanOrEqual(3);
     expect(store.status().embeddingByModel.find((row) => row.modelId === modelId)?.fastSearchReady).toBe(1);
     expect(db.query('SELECT COUNT(*) AS n FROM chunk_vector_digest').get()).toEqual({ n: 280 });
+  } finally { store.close(); }
+});
+
+test('backfill turns shrink when slow, regrow when fast, and stand back while an Ask reads the store', async () => {
+  expect(nextVectorDigestBackfillRows(128, 60)).toBe(64);
+  expect(nextVectorDigestBackfillRows(8, 60)).toBe(8);
+  expect(nextVectorDigestBackfillRows(64, 2)).toBe(128);
+  expect(nextVectorDigestBackfillRows(128, 2)).toBe(128);
+  expect(nextVectorDigestBackfillRows(64, 15)).toBe(64);
+  const store = open();
+  try {
+    await store.syncFromConnector(connector(200), { fetchContent: true });
+    await store.embedChunks({ provider });
+    const db = database(store);
+    const lanes = store as unknown as { vectorLanesInFlight: number };
+    lanes.vectorLanesInFlight = 1;
+    db.exec('DELETE FROM chunk_vector_digest; DELETE FROM chunk_vector_digest_meta');
+    let slices = 0;
+    const advance = store.backfillVectorDigest.bind(store);
+    store.backfillVectorDigest = (model, maxRows) => { slices++; return advance(model, maxRows); };
+    (store as unknown as { scheduleVectorDigestBackfill(model?: string): void }).scheduleVectorDigestBackfill(modelId);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(slices).toBe(0);
+    lanes.vectorLanesInFlight = 0;
+    await waitFor(() => vectorDigestState(db, modelId).completed);
+    expect(slices).toBeGreaterThan(0);
   } finally { store.close(); }
 });
 
