@@ -69147,12 +69147,17 @@ function sweepAutomaticSupersededCopies(set, options = {}) {
         report.purged++;
       }
       state.after = pending.identity;
+      if (state.parked)
+        delete state.parked[tierLedgerIdentityKey(pending.identity)];
       delete state.pending;
+      delete state.failing;
       save();
     });
   };
+  let attempt;
   try {
     if (state.pending) {
+      attempt = state.pending.identity;
       report.checked++;
       const current2 = ledger.getCurrent(state.pending.identity);
       if (!current2 || current2.generation !== state.pending.generation) {
@@ -69174,6 +69179,7 @@ function sweepAutomaticSupersededCopies(set, options = {}) {
         providerItemId: record.providerItemId,
         ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
       };
+      attempt = identity2;
       ledger.withGenerationFence(identity2, record.generation, () => {
         const now = ledger.getCurrent(identity2);
         if (!now.routed || now.contentTier === "secrets" || now.metadataTier === "secrets" || ledger.hasMovedMigrationProposal(identity2))
@@ -69196,6 +69202,7 @@ function sweepAutomaticSupersededCopies(set, options = {}) {
         if (!proof || destination?.tierSetBinding()?.ledgerId !== ledger.ledgerId())
           throw new Error("Current destination unavailable.");
         let unproven = false;
+        const parked = state.parked?.[tierLedgerIdentityKey(identity2)];
         const targets = superseded.map((copy) => {
           const store = set.store(copy.trustDomain);
           if (!store)
@@ -69210,7 +69217,8 @@ function sweepAutomaticSupersededCopies(set, options = {}) {
             if (order === undefined || order < 0)
               unproven = true;
           }
-          return { corpusId: copy.corpusId, chunks };
+          const original = parked?.find((target) => target.corpusId === copy.corpusId)?.chunks ?? 0;
+          return { corpusId: copy.corpusId, chunks: Math.max(chunks, original) };
         });
         if (unproven) {
           report.kept++;
@@ -69229,6 +69237,7 @@ function sweepAutomaticSupersededCopies(set, options = {}) {
         finishPending();
       else {
         state.after = identity2;
+        delete state.failing;
         save();
       }
     }
@@ -69257,13 +69266,36 @@ function sweepAutomaticSupersededCopies(set, options = {}) {
         report.complete = true;
       }
     }
-  } catch {
+  } catch (error) {
     report.failed++;
     report.complete = false;
+    if (attempt)
+      stepPastRepeatedFailure(attempt, error);
   }
   return report;
+  function stepPastRepeatedFailure(identity2, error) {
+    try {
+      const durable = JSON.parse(ledger.readMeta(STATE) || "{}");
+      const key2 = tierLedgerIdentityKey(identity2);
+      const count = durable.failing?.key === key2 ? durable.failing.count + 1 : 1;
+      const corpora = durable.pending?.copies.map((copy) => copy.corpusId).join(",") || "unknown";
+      const reason = error instanceof Error ? error.name : "unknown";
+      console.warn(`[tier-auto-prune] ledger=${ledger.ledgerId()} corpora=${corpora} failures=${count} reason=${reason}`);
+      if (count < MAX_ITEM_FAILURES) {
+        durable.failing = { key: key2, count };
+      } else {
+        if (durable.pending)
+          (durable.parked ??= {})[key2] = durable.pending.copies;
+        delete durable.pending;
+        delete durable.failing;
+        durable.after = identity2;
+        durable.retry = true;
+      }
+      ledger.writeMeta(STATE, JSON.stringify(durable));
+    } catch {}
+  }
 }
-var STATE = "automatic-superseded-prune-v1", PAGE_SIZE = 200;
+var STATE = "automatic-superseded-prune-v1", PAGE_SIZE = 200, MAX_ITEM_FAILURES = 3;
 var init_tier_auto_prune_sweep = __esm(() => {
   init_tier_ledger();
   init_embedding_ledger();
