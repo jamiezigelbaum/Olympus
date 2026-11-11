@@ -19404,7 +19404,7 @@ var init_sniffer = __esm(() => {
   SNIFFER_PRIVATE_KINDS = ["none", "health", "therapy", "financial", "legal", "identity", "intimate", "family", "other"];
   SNIFFER_DECISION_BARS = [
     [QWEN35_4B.modelId, "qwen3\\.5-4b", 0.15],
-    [QWEN36_35B_A3B_SNIFFER_MODEL, "qwen3\\.6-35b-a3b", 0.374]
+    [QWEN36_35B_A3B_SNIFFER_MODEL, "qwen3\\.6-35b-a3b", 0.3738]
   ];
   ROLE_TAG = /<\s*\/?\s*(?:system|assistant|developer)(?:\s+[^<>@]{0,40})?\s*>|<\s*\/\s*user\s*>|<\|\s*[a-z][a-z0-9_]{1,29}\s*\|>|\[\s*\/?\s*(?:inst|sys)\s*\]/;
   TIER_VALUE_ENDS = String.raw`["'\x60]?\s*(?:[^a-z\s]|$|(?:and|or)\b)`;

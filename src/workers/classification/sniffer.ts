@@ -120,8 +120,10 @@ export interface SnifferLaneIdentity {
  * Qwen3.5 4B: on the owner's labels (5 Nov 2026) 0.15 missed 0 of 49
  * important Private items at 79% agreement; 0.5 missed 2.
  * Qwen3.6 35B-A3B (llama.cpp): on the fresh whole-item sample (#883, 10 Nov
- * 2026) 0.374, chosen on the dev half, missed 0 of 21 important Private items
- * at 90.5% agreement; 0.5 missed 2.
+ * 2026) 0.3738, chosen on the dev half, missed 0 of 21 important Private items
+ * at 90.5% agreement; 0.5 missed 2. Rounded DOWN from the chosen 0.37384: one
+ * important item scores 0.37384, and 0.374 let it through as Personal
+ * (re-run 11 Nov). A bar is never rounded up past an item it was chosen to catch.
  * Matched by the pinned model id a lane names, or by the weights file its
  * server reports (`servedWeights`), so a server alias does not hide a
  * measured bar. A file matches only as the base weights plus a quantization
@@ -132,7 +134,7 @@ export interface SnifferLaneIdentity {
 export const QWEN36_35B_A3B_SNIFFER_MODEL = 'qwen36-35b-a3b-text';
 const SNIFFER_DECISION_BARS: ReadonlyArray<readonly [modelId: string, weightsFile: string, bar: number]> = [
   [QWEN35_4B.modelId, 'qwen3\\.5-4b', 0.15],
-  [QWEN36_35B_A3B_SNIFFER_MODEL, 'qwen3\\.6-35b-a3b', 0.374],
+  [QWEN36_35B_A3B_SNIFFER_MODEL, 'qwen3\\.6-35b-a3b', 0.3738],
 ];
 const QUANTIZED_GGUF = '(?:-(?:ud-)?(?:i?q\\d\\w*|bf16|f16|f32))?(?:-\\d{5}-of-\\d{5})?\\.gguf$';
 
