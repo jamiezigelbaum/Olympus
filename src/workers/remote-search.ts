@@ -28,10 +28,11 @@
  * caller's connection is verified again, so a connection revoked while its
  * search ran gets nothing.
  *
- * Without an answer model, source_answer is neither listed nor callable;
- * source_answer_result stays while ask_anonymously is listed, because a
- * handed-off anonymous answer is collected with it.
+ * Answer tools stay listed without a model and explain setup. Anonymous
+ * answers can still be collected without a local answer model.
  */
+import { answerModelRequiredResult } from './answer-model-required.ts';
+import type { SourceAnswerJobScope } from '../core/source-answer-jobs.ts';
 import { createReleaseCapture, recordAppRequest, runWithReleaseCapture } from '../core/app-release-capture.ts';
 import type { OperationCaller } from '../core/operation-caller.ts';
 import { OperationError } from '../core/operations.ts';
@@ -51,6 +52,7 @@ export interface RemoteSearchOptions {
 
 /** What one request adds to the search: its connection's Private part and the tiers to read again. */
 export interface RemoteSearchRequestContext {
+  sourceAnswerJobs?: SourceAnswerJobScope;
   /** Global pending privacy-judgment count, read when building the response. */
   pendingPrivacyItems?: () => number | undefined;
   /**
@@ -119,29 +121,19 @@ export function remoteSearchExtension(
   authorized: RemoteSearchAuthorization,
   request: RemoteSearchRequestContext = {},
 ): McpServerExtension {
-  const answerHidden = () => options.answerModelAvailable !== undefined && !options.answerModelAvailable();
   return {
-    tools: (listed) => {
-      const hidden = answerHidden() ? hiddenWithoutAnswerModel(listed) : new Set<string>();
-      return [REMOTE_SEARCH_TOOL, ...listed.filter((tool) => !hidden.has(tool.name))];
-    },
+    tools: (listed) => [REMOTE_SEARCH_TOOL, ...listed],
     call: async (call, next, signal) => {
       if (call.params.name === REMOTE_SEARCH_TOOL.name) {
         const signals = [signal, request.signal].filter((one): one is AbortSignal => one !== undefined);
         const cancel = signals.length > 1 ? AbortSignal.any(signals) : signals[0];
         return await runSearch(call.params.arguments ?? {}, options, authorized, request, cancel);
       }
-      if (answerHidden() && call.params.name === 'source_answer') return errorResult(remoteSurfaceErrorOutput('unknown_operation'));
+      const setup = answerModelRequiredResult(call.params.name, call.params.arguments ?? {}, options.answerModelAvailable, request.sourceAnswerJobs);
+      if (setup) return setup;
       return await next();
     },
   };
-}
-
-/** source_answer always; source_answer_result unless ask_anonymously still needs it. */
-function hiddenWithoutAnswerModel(listed: readonly McpListedTool[]): Set<string> {
-  const hidden = new Set(['source_answer']);
-  if (!listed.some((tool) => tool.name === 'ask_anonymously')) hidden.add('source_answer_result');
-  return hidden;
 }
 
 async function runSearch(

@@ -129,6 +129,8 @@ export interface SourceAnswerPending {
  */
 export interface SourceAnswerJobScope {
   registry: SourceAnswerJobRegistry;
+  /** Marks jobs started by ask_anonymously for model-free collection. */
+  anonymousAsk?: boolean;
   /** Binding key: jobs are readable only under the same key. */
   owner: string;
   /** The calling client's cancellation (a remote client disconnecting). */
@@ -141,6 +143,7 @@ export interface SourceAnswerJobScope {
 }
 
 interface JobRecord {
+  anonymousAsk: boolean;
   id: string;
   owner: string;
   startedAt: number;
@@ -335,6 +338,7 @@ export class SourceAnswerJobRegistry {
     scope.detachFromClient?.();
     let wake!: () => void;
     const job: JobRecord = {
+      anonymousAsk: scope.anonymousAsk === true,
       id: newJobId(),
       owner: scope.owner,
       startedAt,
@@ -362,6 +366,12 @@ export class SourceAnswerJobRegistry {
     this.jobs.set(job.id, job);
     this.evictRetained(scope.owner);
     return pendingResult(job.id, this.now() - startedAt, this.limits.resultWaitMs);
+  }
+
+  /** Metadata only: never collects a result or starts work. Ownership still gates collection. */
+  isAnonymousAsk(owner: string, jobId: unknown): boolean {
+    const job = typeof jobId === 'string' ? this.jobs.get(jobId) : undefined;
+    return job?.anonymousAsk === true && sameOwner(job.owner, owner);
   }
 
   /**
