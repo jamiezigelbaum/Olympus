@@ -249,6 +249,12 @@ async function openDetails(driver: JourneyDriver): Promise<Array<{ key: string; 
   return Array.isArray(got) ? got : [];
 }
 
+// Dialogs open on the host page: a press may open one there (the pairing dialog) and nothing in the panel.
+async function hostDialogs(driver: JourneyDriver): Promise<string[]> {
+  const got = await driver.probe('host', '__rc.openDialogs()').catch(() => null) as string[] | null;
+  return Array.isArray(got) ? got : [];
+}
+
 async function frameAudits(driver: JourneyDriver): Promise<Array<{ bad: string[]; emptyButtons: string[]; overflowX: number }>> {
   const out: Array<{ bad: string[]; emptyButtons: string[]; overflowX: number }> = [];
   for (const frame of ['host', 'panel'] as const) {
@@ -608,6 +614,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       }
       const beforeText = await panelText(driver);
       const beforeOpen = await openDetails(driver);
+      const dialogsBefore = await hostDialogs(driver);
       const pagesBefore = await driver.pages();
       driver.drainEvents();
       const info = await press(control.key);
@@ -632,6 +639,10 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
         afterText = await panelText(driver);
         afterOpen = await openDetails(driver);
       } catch { left = true; }
+      const dialogsAfter = left ? dialogsBefore : await hostDialogs(driver);
+      const dialogOpened = dialogsAfter.some((name) => !dialogsBefore.includes(name));
+      // Closed again before the next press, which would otherwise land behind it.
+      if (dialogOpened) await driver.probe('host', '__rc.closeDialogs()').catch(() => undefined);
       const events = driver.drainEvents();
       const openedWindows = await windowsOpened();
       const at = await driver.where().catch(() => '');
@@ -676,7 +687,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       if (expectation) outcomes.push(expectation);
       // Something has to happen: the words, the controls, the address, a menu, a window or a request.
       const changed = left || afterText !== beforeText || JSON.stringify(afterControls.map((c) => [c.key, c.visible, c.disabled])) !== JSON.stringify(controlsNow.map((c) => [c.key, c.visible, c.disabled]))
-        || JSON.stringify(afterOpen) !== JSON.stringify(beforeOpen) || at !== '/dashboard' || openedWindows.length > 0 || pagesAfter !== pagesBefore || events.requests.length + events.console.length > 0;
+        || JSON.stringify(afterOpen) !== JSON.stringify(beforeOpen) || dialogOpened || at !== '/dashboard' || openedWindows.length > 0 || pagesAfter !== pagesBefore || events.requests.length + events.console.length > 0;
       if (!changed) findings.push(`pressing "${control.name}" did nothing: nothing on the page changed`);
       // The rules about what is shown.
       if (!left) findings.push(...await pageFindings(driver, afterControls).catch(() => []));

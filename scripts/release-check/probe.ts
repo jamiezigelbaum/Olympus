@@ -294,6 +294,10 @@ export const PROBE_SOURCE = String.raw`(() => {
       const body = clean(el.textContent).replace(summary ? clean(summary.textContent) : '', '').trim();
       return { key: el.getAttribute('data-open-key'), open: el.open === true, text: body.slice(0, 200) };
     }),
+    // Dialogs open on this page (the computer's pairing dialog opens here, outside the panel).
+    openDialogs: () => Array.from(document.querySelectorAll('dialog[open]')).map((el) => el.id || (el.hasAttribute('data-pairing-dialog') ? 'pairing' : el.className || 'dialog')),
+    // Closes them again, so the next press starts from the page as it was.
+    closeDialogs: () => { const open = Array.from(document.querySelectorAll('dialog[open]')); open.forEach((el) => el.close()); return open.length; },
     /** The rectangle of the framed panel in this page, if there is one. */
     frameBox: (id) => { const el = document.getElementById(id); if (!el) return null; const box = el.getBoundingClientRect(); return { x: box.left, y: box.top, w: box.width, h: box.height }; },
     scrollHeight: () => Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0),
