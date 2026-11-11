@@ -19459,6 +19459,14 @@ var init_manifest2 = __esm(() => {
     contextTokens: 4096
   };
 });
+
+// src/workers/classification/sniffer-lane.ts
+var init_sniffer_lane = __esm(() => {
+  init_operation_error();
+  init_local_model_policy();
+  init_sovereignty();
+  init_manifest2();
+});
 // src/workers/classification/delphi-scorer.ts
 var SCORER_SYSTEM_PROMPT;
 var init_delphi_scorer = __esm(() => {
@@ -19504,8 +19512,9 @@ function boundedOwnerContext(ownerContext) {
   const trimmed = ownerContext?.replace(/\s+/g, " ").trim();
   return trimmed ? trimmed.slice(0, SNIFFER_OWNER_CONTEXT_MAX_CHARS) : undefined;
 }
-var SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, QWEN36_35B_A3B_SNIFFER_MODEL = "qwen36-35b-a3b-text", SNIFFER_DECISION_BARS, ROLE_TAG, TIER_VALUE_ENDS, TIER_PREDICATE, INJECTION_RULES, INSTRUCTION_VERBS, OBJECT_GLUE, ASSIGN_VERBS, SETTING_VERBS, SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION;
+var SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, QWEN36_35B_A3B_SNIFFER_MODEL = "qwen36-35b-a3b-text", SNIFFER_DECISION_BARS, SNIFFER_DECISION_VERSION = "decision-v2", SNIFFER_UNION_VERSION, ROLE_TAG, TIER_VALUE_ENDS, TIER_PREDICATE, INJECTION_RULES, INSTRUCTION_VERBS, OBJECT_GLUE, ASSIGN_VERBS, SETTING_VERBS, SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION;
 var init_sniffer = __esm(() => {
+  init_sniffer_lane();
   init_secret_patterns();
   init_manifest2();
   init_engine();
@@ -19530,6 +19539,7 @@ var init_sniffer = __esm(() => {
     [QWEN35_4B.modelId, "qwen3\\.5-4b", 0.15],
     [QWEN36_35B_A3B_SNIFFER_MODEL, "qwen3\\.6-35b-a3b", 0.3738]
   ];
+  SNIFFER_UNION_VERSION = `union-v1:${SNIFFER_DECISION_VERSION}:bar-0.5`;
   ROLE_TAG = /<\s*\/?\s*(?:system|assistant|developer)(?:\s+[^<>@]{0,40})?\s*>|<\s*\/\s*user\s*>|<\|\s*[a-z][a-z0-9_]{1,29}\s*\|>|\[\s*\/?\s*(?:inst|sys)\s*\]/;
   TIER_VALUE_ENDS = String.raw`["'\x60]?\s*(?:[^a-z\s]|$|(?:and|or)\b)`;
   TIER_PREDICATE = String.raw`(?<!\b(?:made|make|makes|making|go|goes|going|went|gone|the|a|an|in|on|to|for|from|of|into|your|my|our|their)\s)\b(?:personal|public|not private)\b(?=${TIER_VALUE_ENDS}|\s+(?:with|regardless)\b)`;
@@ -19634,13 +19644,6 @@ var init_judge_spending = __esm(() => {
     "grok-4-3": { input: 1.42, output: 2.83 },
     "grok-4-5": { input: 2.27, output: 6.8 }
   });
-});
-
-// src/workers/classification/sniffer-lane.ts
-var init_sniffer_lane = __esm(() => {
-  init_operation_error();
-  init_local_model_policy();
-  init_sovereignty();
 });
 
 // src/workers/classification/built-in-sniffer.ts
@@ -20849,6 +20852,7 @@ var init_secret_scan_off_thread = __esm(() => {
 
 // src/workers/connector-store/tier-rejudge.ts
 var init_tier_rejudge = __esm(() => {
+  init_sniffer();
   init_media_judge();
   init_parent_context();
   init_stored_names();

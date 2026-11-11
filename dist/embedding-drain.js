@@ -7682,6 +7682,572 @@ var init_classification_ledger = __esm(() => {
   init_tier_ledger_path();
 });
 
+// src/core/local-model-policy.ts
+function isCloudForwardingModelId(modelId) {
+  const trimmed = modelId.trim().toLowerCase();
+  const lastSegment = trimmed.slice(trimmed.lastIndexOf("/") + 1);
+  const colon = lastSegment.lastIndexOf(":");
+  if (colon < 0)
+    return false;
+  const tag = lastSegment.slice(colon + 1);
+  return tag === "cloud" || tag.endsWith("-cloud");
+}
+function assertLocalModelIdNotCloudForwarding(label, modelId) {
+  if (!isCloudForwardingModelId(modelId))
+    return;
+  throw new OperationError("config_error", `${label} names model "${modelId.trim()}", whose tag is a reserved cloud-style tag, so it cannot serve as a local model.`, 'Ollama names its cloud models with a ":cloud" or "-cloud" tag and the local daemon forwards them off this machine, so local lanes refuse every model with such a tag, including a local custom model tagged that way. Choose a model that runs locally (rename a local custom tag), or configure the cloud model as a cloud profile.');
+}
+var init_local_model_policy = __esm(() => {
+  init_operation_error();
+});
+
+// src/core/source-model-policy.ts
+var init_source_model_policy = __esm(() => {
+  init_operation_error();
+});
+
+// src/core/venice-models.ts
+function normalizeVeniceAnalystModelId(value) {
+  const trimmed = value.trim();
+  if (!trimmed)
+    return trimmed;
+  const key = trimmed.toLowerCase().replace(/\bvenice\b/g, " ").replace(/\bgl m\b/g, "glm").replace(/\bqwen\s*3\.6\b/g, "qwen-3-6").replace(/\bqwen\s*3\s*vl\b/g, "qwen3-vl").replace(/\bgrok\s*4\.3\b/g, "grok-4-3").replace(/\bgrok\s*4\.5\b/g, "grok-4-5").replace(/\bglm\s*5\.2\b/g, "glm-5-2").replace(/\bglm\s*5\.1\b/g, "glm-5-1").replace(/\be2e\b/g, "e2ee").replace(/\bee2e\b/g, "e2ee").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return VENICE_MODEL_ALIASES[key] ?? trimmed.toLowerCase();
+}
+function venicePrivacyCategoryForModel(value) {
+  return VENICE_MODEL_PRIVACY_CATEGORIES[normalizeVeniceAnalystModelId(value)];
+}
+async function assertVeniceEmbeddingModelAllowed(modelId, resolveCategory, signal) {
+  const resolvedModelId = modelId.trim();
+  if (/e2e{2}|ee2e/i.test(resolvedModelId)) {
+    throw new OperationError("source_index_policy_violation", `Venice embedding model "${resolvedModelId}" uses a gated E2EE class.`, "Use the approved Venice Private or TEE embedding model; E2EE embedding remains unavailable until local key handling exists.");
+  }
+  const category = await resolveCategory(resolvedModelId, signal);
+  if (category !== "private" && category !== "tee") {
+    throw new OperationError("source_index_policy_violation", `Venice embedding model "${resolvedModelId}" has privacy category ${category ?? "unknown"}; source embeddings require Venice Private or TEE.`, "Choose a Venice embedding model published with Private or TEE privacy metadata.");
+  }
+}
+var VENICE_MODEL_ALIASES, VENICE_MODEL_PRIVACY_CATEGORIES;
+var init_venice_models = __esm(() => {
+  init_operation_error();
+  VENICE_MODEL_ALIASES = Object.freeze({
+    default: "kimi-k3",
+    strong: "kimi-k3",
+    "strong-reasoning": "kimi-k3",
+    reasoning: "kimi-k3",
+    "secure-reasoning": "kimi-k3",
+    kimi: "kimi-k3",
+    "kimi-3": "kimi-k3",
+    "kimi-k-3": "kimi-k3",
+    "kimi-k3": "kimi-k3",
+    normal: "inkling",
+    "normal-reasoning": "inkling",
+    inkling: "inkling",
+    "most-secure": "e2ee-glm-5-2-p",
+    "slower-most-secure": "e2ee-glm-5-2-p",
+    "slow-most-secure": "e2ee-glm-5-2-p",
+    "glm-5-2-e2ee": "e2ee-glm-5-2-p",
+    "glm-5-2-ee2e": "e2ee-glm-5-2-p",
+    "glm-5-2-private": "zai-org-glm-5-2",
+    "glm-5-2-p": "e2ee-glm-5-2-p",
+    "e2ee-glm-5-2": "e2ee-glm-5-2-p",
+    "ee2e-glm-5-2": "e2ee-glm-5-2-p",
+    "venice-glm-5-2-e2ee": "e2ee-glm-5-2-p",
+    "venice-glm-5-2-ee2e": "e2ee-glm-5-2-p",
+    "venice-glm-5-2-private": "zai-org-glm-5-2",
+    "glm-5-2": "zai-org-glm-5-2",
+    "fast-reasoning": "inkling",
+    "faster-reasoning": "inkling",
+    "acceptable-reasoning": "inkling",
+    "glm-5-2-fast": "zai-org-glm-5-2",
+    "glm-5-2-acceptable": "zai-org-glm-5-2",
+    "glm-5-1-e2ee": "e2ee-glm-5-1",
+    "glm-5-1-ee2e": "e2ee-glm-5-1",
+    "e2ee-glm-5-1": "e2ee-glm-5-1",
+    "ee2e-glm-5-1": "e2ee-glm-5-1",
+    "venice-glm-5-1-e2ee": "e2ee-glm-5-1",
+    "venice-glm-5-1-ee2e": "e2ee-glm-5-1",
+    "glm-5-1": "zai-org-glm-5-1",
+    "qwen-3-6-35b-e2ee": "e2ee-qwen3-6-35b-a3b",
+    "qwen-3-6-35b-ee2e": "e2ee-qwen3-6-35b-a3b",
+    "qwen3-6-35b-e2ee": "e2ee-qwen3-6-35b-a3b",
+    "qwen3-6-35b-ee2e": "e2ee-qwen3-6-35b-a3b",
+    "qwen-3-6-35b-a3b-e2ee": "e2ee-qwen3-6-35b-a3b",
+    "qwen-3-6-35b-a3b-ee2e": "e2ee-qwen3-6-35b-a3b",
+    "qwen3-6-35b-a3b-e2ee": "e2ee-qwen3-6-35b-a3b",
+    "qwen3-6-35b-a3b-ee2e": "e2ee-qwen3-6-35b-a3b",
+    vision: "kimi-k3",
+    "secure-vision": "kimi-k3",
+    "most-secure-vision": "kimi-k3",
+    "qwen-vision": "qwen3-vl-235b-a22b",
+    "qwen3-vl-vision": "qwen3-vl-235b-a22b",
+    "qwen-3-vl-vision": "qwen3-vl-235b-a22b",
+    "qwen3-vl-235b": "qwen3-vl-235b-a22b",
+    "qwen3-vl-235b-a22b": "qwen3-vl-235b-a22b",
+    "qwen-3-vl-235b": "qwen3-vl-235b-a22b",
+    "qwen-3-vl-235b-a22b": "qwen3-vl-235b-a22b",
+    "qwen3-vl-30b-e2ee": "e2ee-qwen3-vl-30b-a3b-p",
+    "qwen3-vl-30b-ee2e": "e2ee-qwen3-vl-30b-a3b-p",
+    "qwen3-vl-30b-a3b-e2ee": "e2ee-qwen3-vl-30b-a3b-p",
+    "qwen3-vl-30b-a3b-ee2e": "e2ee-qwen3-vl-30b-a3b-p",
+    "qwen-3-vl-30b-e2ee": "e2ee-qwen3-vl-30b-a3b-p",
+    "qwen-3-vl-30b-ee2e": "e2ee-qwen3-vl-30b-a3b-p",
+    "vision-escalation": "kimi-k3",
+    "private-grok-4-3": "grok-4-3",
+    "grok-4-3-private": "grok-4-3",
+    "grok-4-3-vision": "grok-4-3",
+    multimodal: "kimi-k3",
+    "fast-multimodal": "kimi-k3",
+    "faster-multimodal": "kimi-k3",
+    "acceptable-multimodal": "kimi-k3",
+    "grok-4-3": "grok-4-3",
+    "grok-4-3-multimodal": "grok-4-3",
+    "grok-4-5": "grok-4-5",
+    "grok-4-5-vision": "grok-4-5",
+    "private-grok-4-5": "grok-4-5"
+  });
+  VENICE_MODEL_PRIVACY_CATEGORIES = Object.freeze({
+    "kimi-k3": "private",
+    "deepseek-v4-flash-0731": "private",
+    inkling: "private",
+    "e2ee-glm-5-2-p": "e2ee",
+    "zai-org-glm-5-2": "private",
+    "e2ee-glm-5-1": "e2ee",
+    "zai-org-glm-5-1": "private",
+    "e2ee-qwen3-6-35b-a3b": "e2ee",
+    "grok-4-5": "private",
+    "qwen3-vl-235b-a22b": "private",
+    "e2ee-qwen3-vl-30b-a3b-p": "e2ee",
+    "grok-4-3": "private",
+    "claude-opus-4-7-fast": "anonymized",
+    "qwen3-6-27b": "private",
+    "tee-qwen3-5-122b-a10b": "tee"
+  });
+});
+
+// src/core/zkapi-consult-settings.ts
+import { readFileSync as readFileSync14, statSync as statSync7 } from "node:fs";
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
+function sovereigntyPolicyPath(env = process.env) {
+  return env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim() || defaultSovereigntyConfigPath(env);
+}
+function refreshZkapiPortsFromPolicyFile(env = process.env) {
+  let path;
+  try {
+    path = sovereigntyPolicyPath(env);
+  } catch {
+    policyFile.seen = undefined;
+    policyFile.unreadable = "the sovereignty settings (layout discovery refused)";
+    return;
+  }
+  let stamp;
+  try {
+    const stat2 = statSync7(path);
+    stamp = `${path}:${stat2.dev}:${stat2.ino}:${stat2.size}:${stat2.mtimeMs}:${stat2.ctimeMs}`;
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      policyFile.seen = `${path}:absent`;
+      policyFile.unreadable = undefined;
+    } else {
+      policyFile.seen = undefined;
+      policyFile.unreadable = path;
+    }
+    return;
+  }
+  if (policyFile.seen === stamp && policyFile.unreadable === undefined)
+    return;
+  try {
+    const ports = zkapiPortsInPolicy(JSON.parse(readFileSync14(path, "utf8")));
+    for (const port of ports)
+      zkapiDaemonPorts.add(port);
+    policyFile.seen = stamp;
+    policyFile.unreadable = undefined;
+  } catch {
+    policyFile.seen = undefined;
+    policyFile.unreadable = path;
+  }
+}
+function zkapiPortsInPolicy(parsed) {
+  const record = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
+  if (!record)
+    throw new Error("not a policy object");
+  const inner = record.sovereignty && typeof record.sovereignty === "object" ? record.sovereignty : record;
+  const profiles = inner.modelProfiles;
+  if (!profiles || typeof profiles !== "object" || Array.isArray(profiles))
+    throw new Error("policy has no modelProfiles");
+  const ports = [];
+  for (const profile of Object.values(profiles)) {
+    if (!profile || typeof profile !== "object")
+      throw new Error("malformed profile");
+    const entry = profile;
+    if (entry.provider !== "zkapi")
+      continue;
+    const port = loopbackPort(typeof entry.baseUrl === "string" ? entry.baseUrl : undefined);
+    if (port === undefined)
+      throw new Error("zkapi profile without a loopback baseUrl");
+    ports.push(port);
+  }
+  return ports;
+}
+function endpointPort(parsed) {
+  return parsed.port ? Number(parsed.port) : parsed.protocol === "https:" ? 443 : 80;
+}
+function assertNotZkapiDaemonEndpoint(url, label) {
+  refreshZkapiPortsFromPolicyFile();
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+    return;
+  const port = endpointPort(parsed);
+  const local = loopbackPort(url) !== undefined;
+  if (local && policyFile.unreadable) {
+    throw new ZkapiDaemonEndpointRefusal("policy_unreadable", `${label} is a local endpoint, and the sovereignty policy at ${policyFile.unreadable} cannot be read to rule out a zkAPI daemon on port ${port}.`, policyFile.unreadable);
+  }
+  if (!zkapiDaemonPorts.has(port))
+    return;
+  if (local) {
+    throw new ZkapiDaemonEndpointRefusal("daemon_port", `${label} points at port ${port}, where a zkAPI daemon serves; it forwards to cloud providers and may never receive evidence.`);
+  }
+  if (!isIP(parsed.hostname.replace(/^\[|\]$/g, ""))) {
+    throw new ZkapiDaemonEndpointRefusal("hostname_on_daemon_port", `${label} names a host on port ${port}, a zkAPI daemon port; a host name could point at this machine.`);
+  }
+}
+async function assertNotZkapiDaemonEndpointResolved(url, label, lookupAll = defaultLookupAll) {
+  assertNotZkapiDaemonEndpoint(url, label);
+  const unreadable = policyFile.unreadable;
+  if (!unreadable)
+    return;
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+    return;
+  const host = parsed.hostname.replace(/^\[|\]$/g, "");
+  if (isIP(host))
+    return;
+  const port = endpointPort(parsed);
+  const refuse = () => {
+    throw new ZkapiDaemonEndpointRefusal("policy_unreadable", `${label} may be a local endpoint, and the sovereignty policy at ${unreadable} cannot be read to rule out a zkAPI daemon on port ${port}.`, unreadable);
+  };
+  let addresses;
+  try {
+    addresses = await Promise.race([
+      lookupAll(host),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("lookup timed out")), 2000).unref?.())
+    ]);
+  } catch {
+    return refuse();
+  }
+  if (addresses.some((address) => loopbackPort(`http://${address.includes(":") ? `[${address}]` : address}:${port}`) !== undefined))
+    refuse();
+}
+async function defaultLookupAll(hostname) {
+  return (await lookup(hostname, { all: true })).map((entry) => entry.address);
+}
+function refusalSuggestion(reason, policyPath) {
+  if (reason === "policy_unreadable") {
+    return `Fix or remove the sovereignty policy file at ${policyPath ?? "its configured path"}; until it can be read, Olympus refuses every local model endpoint.`;
+  }
+  if (reason === "hostname_on_daemon_port") {
+    return "Use a numeric address: a cloud endpoint on its own port, or 127.0.0.1 for a local model, which must then not share a zkAPI daemon port.";
+  }
+  return "This address is the zkAPI daemon, which only carries consults. Point this model at a local model server on another port.";
+}
+function isZkapiDaemonEndpointRefusal(error) {
+  return error instanceof ZkapiDaemonEndpointRefusal;
+}
+function loopbackPort(baseUrl) {
+  if (!baseUrl)
+    return;
+  let url;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    return;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:" || !isLoopbackHost(url.hostname))
+    return;
+  if (url.port)
+    return Number(url.port);
+  return url.protocol === "https:" ? 443 : 80;
+}
+function isLoopbackHost(hostname) {
+  const host = hostname.toLowerCase().replace(/\.$/, "");
+  if (host === "localhost" || host.endsWith(".localhost"))
+    return true;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (v4)
+    return Number(v4[1]) === 127 || host === "0.0.0.0";
+  if (!host.startsWith("[") || !host.endsWith("]"))
+    return false;
+  const words = ipv6Words(host.slice(1, -1));
+  if (!words)
+    return false;
+  if (words.slice(0, 7).every((word) => word === 0) && (words[7] === 1 || words[7] === 0))
+    return true;
+  const mapped = words.slice(0, 5).every((word) => word === 0) && (words[5] === 65535 || words[5] === 0);
+  return mapped && (words[6] >> 8 === 127 || words[6] === 0 && words[7] === 0);
+}
+function ipv6Words(text2) {
+  let body = text2;
+  const tail = [];
+  const dotted = /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(body);
+  if (dotted) {
+    const bytes = dotted.slice(1).map(Number);
+    if (bytes.some((byte) => byte > 255))
+      return;
+    tail.push(bytes[0] << 8 | bytes[1], bytes[2] << 8 | bytes[3]);
+    body = text2.slice(0, dotted.index);
+    if (!body.endsWith("::"))
+      body = body.replace(/:$/, "");
+  }
+  const halves = body.split("::");
+  if (halves.length > 2)
+    return;
+  const parse2 = (part) => part ? part.split(":").map((word) => parseInt(word, 16)) : [];
+  const head = parse2(halves[0] ?? "");
+  const rest = halves.length === 2 ? parse2(halves[1] ?? "") : [];
+  if ([...head, ...rest].some((word) => Number.isNaN(word) || word < 0 || word > 65535))
+    return;
+  const fill = 8 - head.length - rest.length - tail.length;
+  if (fill < 0 || halves.length === 1 && fill !== 0)
+    return;
+  return [...head, ...Array(fill).fill(0), ...rest, ...tail];
+}
+var ZKAPI_DAEMON_DEFAULT_PORT = 8787, ZKAPI_DAEMON_DEFAULT_BASE_URL, ZKAPI_DEFAULT_TOR_SOCKS_PORT = 19050, DEFAULTS, INTEGER_BOUNDS, SETTINGS_KEYS, zkapiDaemonPorts, policyFile, ZkapiDaemonEndpointRefusal;
+var init_zkapi_consult_settings = __esm(() => {
+  init_owner_config_read();
+  init_operation_error();
+  ZKAPI_DAEMON_DEFAULT_BASE_URL = `http://127.0.0.1:${ZKAPI_DAEMON_DEFAULT_PORT}/v1`;
+  DEFAULTS = {
+    tor: "per_consult",
+    torSocksPort: ZKAPI_DEFAULT_TOR_SOCKS_PORT,
+    timeoutMs: 6 * 60 * 1000,
+    torBootstrapTimeoutMs: 210 * 1000,
+    daemonReadyTimeoutMs: 120 * 1000,
+    policyWarmTimeoutMs: 180 * 1000,
+    settleTimeoutMs: 300 * 1000,
+    maxResponseBytes: 256 * 1024
+  };
+  INTEGER_BOUNDS = {
+    torSocksPort: [1024, 65535],
+    dailyRequestCap: [1, 1e6],
+    timeoutMs: [30000, 30 * 60000],
+    torBootstrapTimeoutMs: [1e4, 10 * 60000],
+    daemonReadyTimeoutMs: [5000, 10 * 60000],
+    policyWarmTimeoutMs: [5000, 10 * 60000],
+    settleTimeoutMs: [5000, 30 * 60000],
+    maxResponseBytes: [1024, 4 * 1024 * 1024]
+  };
+  SETTINGS_KEYS = new Set([
+    ...Object.keys(INTEGER_BOUNDS),
+    "tor",
+    "fundingDate",
+    "depositUsd",
+    "acknowledgements",
+    "dailySpendCapUsd",
+    "daemonExecutable",
+    "torExecutable"
+  ]);
+  zkapiDaemonPorts = new Set([ZKAPI_DAEMON_DEFAULT_PORT]);
+  policyFile = { seen: undefined, unreadable: undefined };
+  ZkapiDaemonEndpointRefusal = class ZkapiDaemonEndpointRefusal extends OperationError {
+    reason;
+    constructor(reason, message2, policyPath) {
+      super("config_error", message2, refusalSuggestion(reason, policyPath));
+      this.name = "ZkapiDaemonEndpointRefusal";
+      this.reason = reason;
+    }
+  };
+});
+
+// src/core/sovereignty.ts
+function assertSecureAnalystPoolModelIdAllowed(profileId, rawModelId) {
+  const modelId = normalizeVeniceAnalystModelId(rawModelId);
+  if (modelId.toLowerCase().startsWith("e2ee-")) {
+    throw new SecureAnalystPoolE2EEGateError(profileId, modelId);
+  }
+}
+var BUILT_IN_EMBEDDING_MODEL_ID, SOVEREIGNTY_PRESETS, SecureAnalystPoolE2EEGateError;
+var init_sovereignty = __esm(() => {
+  init_owner_config_read();
+  init_owner_config_read();
+  init_atomic_file();
+  init_file_lease();
+  init_operation_error();
+  init_local_model_policy();
+  init_config();
+  init_secret_store();
+  init_source_model_policy();
+  init_venice_models();
+  init_manifest();
+  init_zkapi_consult_settings();
+  init_source_model_policy();
+  BUILT_IN_EMBEDDING_MODEL_ID = BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL.modelId;
+  SOVEREIGNTY_PRESETS = ["local-first", "local-only", "private-cloud-only", "no-sensitive"];
+  SecureAnalystPoolE2EEGateError = class SecureAnalystPoolE2EEGateError extends OperationError {
+    profileId;
+    modelId;
+    constructor(profileId, modelId) {
+      super("source_index_policy_violation", `Secure analyst pool profile "${profileId}" uses gated E2EE model "${modelId}".`, "E2EE secure-pool dispatch remains unavailable until Olympus has local key handling; use a catalog-approved non-E2EE Venice Private/TEE model.");
+      this.name = "SecureAnalystPoolE2EEGateError";
+      this.profileId = profileId;
+      this.modelId = modelId;
+    }
+  };
+});
+
+// src/workers/source-index/built-in-reasoning/manifest.ts
+function unslothQwen(size, revision, bytes, sha256) {
+  const name = `Qwen3.5-${size}-Q4_K_M.gguf`;
+  return {
+    name,
+    url: `https://huggingface.co/unsloth/Qwen3.5-${size}-GGUF/resolve/${revision}/${name}`,
+    bytes,
+    sha256
+  };
+}
+function ggmlOrgAsrFile(name, bytes, sha256) {
+  return {
+    name,
+    url: `https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/${QWEN3_ASR_06B_REVISION}/${name}`,
+    bytes,
+    sha256
+  };
+}
+var GIB, QWEN35_2B_REVISION = "f6d5376be1edb4d416d56da11e5397a961aca8ae", QWEN35_4B_REVISION = "e87f176479d0855a907a41277aca2f8ee7a09523", QWEN35_9B_REVISION = "3885219b6810b007914f3a7950a8d1b469d598a5", QWEN35_2B, QWEN35_4B, QWEN35_9B, BUILT_IN_REASONING_MODELS, LLAMA_CPP_RELEASE = "b11320", LLAMA_CPP_BASE, LLAMA_SERVER_RUNTIME, QWEN3_ASR_06B_REVISION = "928ab958557df9aa2ef1c93e0e83c7ad0933fae2", QWEN3_ASR_06B;
+var init_manifest2 = __esm(() => {
+  GIB = 1024 ** 3;
+  QWEN35_2B = {
+    modelId: "qwen3.5-2b-q4_k_m-f6d5376",
+    displayName: "Qwen3.5 2B",
+    sizeClass: "small",
+    baseRepository: "Qwen/Qwen3.5-2B",
+    license: "Apache-2.0",
+    repository: "unsloth/Qwen3.5-2B-GGUF",
+    revision: QWEN35_2B_REVISION,
+    file: unslothQwen("2B", QWEN35_2B_REVISION, 1280835840, "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"),
+    minimumMemoryBytes: 7 * GIB,
+    contextTokens: 12288
+  };
+  QWEN35_4B = {
+    modelId: "qwen3.5-4b-q4_k_m-e87f176",
+    displayName: "Qwen3.5 4B",
+    sizeClass: "standard",
+    baseRepository: "Qwen/Qwen3.5-4B",
+    license: "Apache-2.0",
+    repository: "unsloth/Qwen3.5-4B-GGUF",
+    revision: QWEN35_4B_REVISION,
+    file: unslothQwen("4B", QWEN35_4B_REVISION, 2740937888, "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"),
+    minimumMemoryBytes: 15 * GIB,
+    contextTokens: 12288
+  };
+  QWEN35_9B = {
+    modelId: "qwen3.5-9b-q4_k_m-3885219",
+    displayName: "Qwen3.5 9B",
+    sizeClass: "large",
+    baseRepository: "Qwen/Qwen3.5-9B",
+    license: "Apache-2.0",
+    repository: "unsloth/Qwen3.5-9B-GGUF",
+    revision: QWEN35_9B_REVISION,
+    file: unslothQwen("9B", QWEN35_9B_REVISION, 5680522464, "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"),
+    minimumMemoryBytes: 15 * GIB,
+    contextTokens: 12288
+  };
+  BUILT_IN_REASONING_MODELS = [QWEN35_2B, QWEN35_4B, QWEN35_9B];
+  LLAMA_CPP_BASE = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_RELEASE}`;
+  LLAMA_SERVER_RUNTIME = {
+    release: LLAMA_CPP_RELEASE,
+    license: "MIT",
+    archives: [
+      {
+        platform: "darwin-arm64",
+        name: `llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
+        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
+        bytes: 11827796,
+        sha256: "f6f337fc7d2ff9260f53177cf4fe6bbf6b0f7faa75a49fb224aaf66885a5c956",
+        gpu: true
+      },
+      {
+        platform: "linux-x64",
+        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
+        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
+        bytes: 17544875,
+        sha256: "ef1856938dc1434138ce53688791eb0d2d64cf46e309a0942a12bba3366c0919",
+        gpu: false
+      },
+      {
+        platform: "linux-arm64",
+        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
+        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
+        bytes: 13590823,
+        sha256: "88589b963d8e2ffd2d4df2f542ed7e301fb636b637c99081f5d58646aee20a9a",
+        gpu: false
+      }
+    ]
+  };
+  QWEN3_ASR_06B = {
+    modelId: "qwen3-asr-0.6b-q8_0-928ab95",
+    displayName: "Qwen3-ASR 0.6B",
+    baseRepository: "Qwen/Qwen3-ASR-0.6B",
+    license: "Apache-2.0",
+    repository: "ggml-org/Qwen3-ASR-0.6B-GGUF",
+    revision: QWEN3_ASR_06B_REVISION,
+    files: [
+      ggmlOrgAsrFile("Qwen3-ASR-0.6B-Q8_0.gguf", 804749248, "bca259818b50ca7c4c05e9bdb35a5dc04fa039653a6d6f3f0f331f96f6aa1971"),
+      ggmlOrgAsrFile("mmproj-Qwen3-ASR-0.6B-Q8_0.gguf", 214392480, "41a342b5e4c514e968cb756de6cd1b7be39eff43c44c57a2ef5fc6522e36603d")
+    ],
+    minimumMemoryBytes: 7 * GIB,
+    contextTokens: 4096
+  };
+});
+
+// src/workers/classification/sniffer-lane.ts
+function snifferLaneUsesUnion(lane) {
+  const weights = lane.cacheModelId ?? lane.modelId;
+  return lane.profile?.provider === "built-in" && (weights === QWEN35_4B.modelId || weights.startsWith(`${QWEN35_4B.modelId}:`));
+}
+function assertSnifferProfileAllowed(profileId, profile) {
+  if (profile.trust === "standard_cloud")
+    throw new SnifferLaneRefusedError("standard_cloud", profileId);
+  if (profile.provider === "local-openai-compatible" && profile.trust === "local") {
+    assertLocalModelIdNotCloudForwarding(`Privacy sniffer profile "${profileId}"`, profile.model);
+    return "local";
+  }
+  if (profile.provider === "built-in" && profile.trust === "local" && profileId === "built_in" && profile.purpose === "classification")
+    return "local";
+  if (profile.provider === "venice" && profile.trust === "encrypted_cloud") {
+    assertSecureAnalystPoolModelIdAllowed(profileId, profile.model);
+    return "venice";
+  }
+  throw new SnifferLaneRefusedError("unsupported_provider", profileId);
+}
+var SnifferLaneRefusedError;
+var init_sniffer_lane = __esm(() => {
+  init_operation_error();
+  init_local_model_policy();
+  init_sovereignty();
+  init_manifest2();
+  SnifferLaneRefusedError = class SnifferLaneRefusedError extends OperationError {
+    reason;
+    profileId;
+    constructor(reason, profileId) {
+      super("source_index_policy_violation", reason === "standard_cloud" ? `The privacy sniffer refuses model profile "${profileId}": it is a standard cloud model.` : reason === "unsupported_provider" ? `The privacy sniffer refuses model profile "${profileId}": only a local model or Venice Private may read possibly-private names.` : reason === "outside_private_policy" ? `The privacy sniffer refuses model profile "${profileId}": the secure_local route does not approve that kind of model for Private data.` : "No private model lane is configured for the privacy sniffer.", 'Configure a local model, or Venice Private, in the secure_local pool of sovereignty.json (or a profile with purpose "classification"). Until then, flagged items stay pending and held Private.');
+      this.name = "SnifferLaneRefusedError";
+      this.reason = reason;
+      this.profileId = profileId;
+    }
+  };
+});
+
 // node_modules/entities/dist/esm/decode-codepoint.js
 function replaceCodePoint(codePoint) {
   var _a2;
@@ -8813,111 +9379,6 @@ var init_secret_patterns = __esm(() => {
       accept: (match) => !isPlaceholderValue(match.groups?.sig ?? "")
     }
   ];
-});
-
-// src/workers/source-index/built-in-reasoning/manifest.ts
-function unslothQwen(size, revision, bytes, sha256) {
-  const name = `Qwen3.5-${size}-Q4_K_M.gguf`;
-  return {
-    name,
-    url: `https://huggingface.co/unsloth/Qwen3.5-${size}-GGUF/resolve/${revision}/${name}`,
-    bytes,
-    sha256
-  };
-}
-function ggmlOrgAsrFile(name, bytes, sha256) {
-  return {
-    name,
-    url: `https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/${QWEN3_ASR_06B_REVISION}/${name}`,
-    bytes,
-    sha256
-  };
-}
-var GIB, QWEN35_2B_REVISION = "f6d5376be1edb4d416d56da11e5397a961aca8ae", QWEN35_4B_REVISION = "e87f176479d0855a907a41277aca2f8ee7a09523", QWEN35_9B_REVISION = "3885219b6810b007914f3a7950a8d1b469d598a5", QWEN35_2B, QWEN35_4B, QWEN35_9B, BUILT_IN_REASONING_MODELS, LLAMA_CPP_RELEASE = "b11320", LLAMA_CPP_BASE, LLAMA_SERVER_RUNTIME, QWEN3_ASR_06B_REVISION = "928ab958557df9aa2ef1c93e0e83c7ad0933fae2", QWEN3_ASR_06B;
-var init_manifest2 = __esm(() => {
-  GIB = 1024 ** 3;
-  QWEN35_2B = {
-    modelId: "qwen3.5-2b-q4_k_m-f6d5376",
-    displayName: "Qwen3.5 2B",
-    sizeClass: "small",
-    baseRepository: "Qwen/Qwen3.5-2B",
-    license: "Apache-2.0",
-    repository: "unsloth/Qwen3.5-2B-GGUF",
-    revision: QWEN35_2B_REVISION,
-    file: unslothQwen("2B", QWEN35_2B_REVISION, 1280835840, "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"),
-    minimumMemoryBytes: 7 * GIB,
-    contextTokens: 12288
-  };
-  QWEN35_4B = {
-    modelId: "qwen3.5-4b-q4_k_m-e87f176",
-    displayName: "Qwen3.5 4B",
-    sizeClass: "standard",
-    baseRepository: "Qwen/Qwen3.5-4B",
-    license: "Apache-2.0",
-    repository: "unsloth/Qwen3.5-4B-GGUF",
-    revision: QWEN35_4B_REVISION,
-    file: unslothQwen("4B", QWEN35_4B_REVISION, 2740937888, "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"),
-    minimumMemoryBytes: 15 * GIB,
-    contextTokens: 12288
-  };
-  QWEN35_9B = {
-    modelId: "qwen3.5-9b-q4_k_m-3885219",
-    displayName: "Qwen3.5 9B",
-    sizeClass: "large",
-    baseRepository: "Qwen/Qwen3.5-9B",
-    license: "Apache-2.0",
-    repository: "unsloth/Qwen3.5-9B-GGUF",
-    revision: QWEN35_9B_REVISION,
-    file: unslothQwen("9B", QWEN35_9B_REVISION, 5680522464, "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"),
-    minimumMemoryBytes: 15 * GIB,
-    contextTokens: 12288
-  };
-  BUILT_IN_REASONING_MODELS = [QWEN35_2B, QWEN35_4B, QWEN35_9B];
-  LLAMA_CPP_BASE = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_RELEASE}`;
-  LLAMA_SERVER_RUNTIME = {
-    release: LLAMA_CPP_RELEASE,
-    license: "MIT",
-    archives: [
-      {
-        platform: "darwin-arm64",
-        name: `llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
-        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
-        bytes: 11827796,
-        sha256: "f6f337fc7d2ff9260f53177cf4fe6bbf6b0f7faa75a49fb224aaf66885a5c956",
-        gpu: true
-      },
-      {
-        platform: "linux-x64",
-        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
-        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
-        bytes: 17544875,
-        sha256: "ef1856938dc1434138ce53688791eb0d2d64cf46e309a0942a12bba3366c0919",
-        gpu: false
-      },
-      {
-        platform: "linux-arm64",
-        name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
-        url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
-        bytes: 13590823,
-        sha256: "88589b963d8e2ffd2d4df2f542ed7e301fb636b637c99081f5d58646aee20a9a",
-        gpu: false
-      }
-    ]
-  };
-  QWEN3_ASR_06B = {
-    modelId: "qwen3-asr-0.6b-q8_0-928ab95",
-    displayName: "Qwen3-ASR 0.6B",
-    baseRepository: "Qwen/Qwen3-ASR-0.6B",
-    license: "Apache-2.0",
-    repository: "ggml-org/Qwen3-ASR-0.6B-GGUF",
-    revision: QWEN3_ASR_06B_REVISION,
-    files: [
-      ggmlOrgAsrFile("Qwen3-ASR-0.6B-Q8_0.gguf", 804749248, "bca259818b50ca7c4c05e9bdb35a5dc04fa039653a6d6f3f0f331f96f6aa1971"),
-      ggmlOrgAsrFile("mmproj-Qwen3-ASR-0.6B-Q8_0.gguf", 214392480, "41a342b5e4c514e968cb756de6cd1b7be39eff43c44c57a2ef5fc6522e36603d")
-    ],
-    minimumMemoryBytes: 7 * GIB,
-    contextTokens: 4096
-  };
 });
 
 // src/workers/classification/sniffer-decision-mass.ts
@@ -10821,12 +11282,20 @@ function recordRequiresPrivate(verdict) {
   return verdict.ownRecord === true && verdict.privateKind !== undefined && verdict.privateKind !== "none";
 }
 function snifferReasonCode(verdict) {
+  if (verdict.category === SNIFFER_UNION_CATEGORY)
+    return verdict.failSafe ? "union:decision:failed" : `union:decision:${verdict.confidence.toFixed(2)}`;
   if (verdict.failSafe)
     return verdict.category === SNIFFER_INJECTION_CATEGORY ? "injection:classifier_instruction:0.00" : "unresolved:0.00";
   if (verdict.category === SNIFFER_DECISION_CATEGORY)
     return `decision:${verdict.confidence.toFixed(2)}`;
   const category = SNIFFER_CATEGORIES.includes(verdict.category) ? verdict.category : "other";
   return `${category}:${verdict.confidence.toFixed(2)}`;
+}
+function isSnifferUnionUpgrade(reasons, currentId) {
+  return [QWEN35_4B.modelId, `${QWEN35_4B.modelId}:${QWEN35_4B.revision}:${QWEN35_4B.file.sha256}`].some((weights) => {
+    const digest = (value) => createHash7("sha256").update(value).digest("hex").slice(0, 16);
+    return currentId.endsWith(`.m${digest(`${weights}:${SNIFFER_UNION_VERSION}`)}`) && reasons.some((reason) => reason.includes(`.m${digest(weights)}:`) || reason.endsWith(`.m${digest(weights)}`));
+  });
 }
 function cachedSnifferVerdictHolds(verdict) {
   return !(verdict.failSafe && verdict.category === SNIFFER_INJECTION_CATEGORY);
@@ -10898,6 +11367,8 @@ function snifferMaterialLooksLikeInjection(material) {
 }
 function snifferCacheModelId(lane) {
   const weights = lane.cacheModelId ?? lane.modelId;
+  if (snifferLaneUsesUnion(lane))
+    return `${weights}:${SNIFFER_UNION_VERSION}`;
   if (lane.snifferMode === "pending")
     return `${weights}:pending`;
   return lane.snifferMode === "decision" ? `${weights}:${SNIFFER_DECISION_VERSION}` : weights;
@@ -11088,8 +11559,9 @@ class CachedTierSniffer {
     return { verdict: "undecided" };
   }
 }
-var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, JudgeCloudStopped, QWEN36_35B_A3B_SNIFFER_MODEL = "qwen36-35b-a3b-text", SNIFFER_DECISION_BARS, QUANTIZED_GGUF = "(?:-(?:ud-)?(?:i?q\\d\\w*|bf16|f16|f32))?(?:-\\d{5}-of-\\d{5})?\\.gguf$", OWN_RECORD_FLAG_PREFIX = "content:own_record:", SNIFFER_RECORD_HELD_CODE_PREFIX = "record_held:", SNIFFER_INJECTION_CATEGORY = "injection", SNIFFER_DECISION_CATEGORY = "decision", SNIFFER_DECISION_VERSION = "decision-v2", ROLE_TAG, TIER_VALUE_ENDS, TIER_PREDICATE, INJECTION_RULES, INSTRUCTION_VERBS, VERDICT_SCHEMA, TIER_WORD, OBJECT_GLUE, SCHEMA_ONLY_FIELD, SCHEMA_VALUE, ASSIGN_VERBS, SETTING_VERBS, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, SNIFFER_CATEGORY_SYNONYMS;
+var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, JudgeCloudStopped, QWEN36_35B_A3B_SNIFFER_MODEL = "qwen36-35b-a3b-text", SNIFFER_DECISION_BARS, QUANTIZED_GGUF = "(?:-(?:ud-)?(?:i?q\\d\\w*|bf16|f16|f32))?(?:-\\d{5}-of-\\d{5})?\\.gguf$", OWN_RECORD_FLAG_PREFIX = "content:own_record:", SNIFFER_RECORD_HELD_CODE_PREFIX = "record_held:", SNIFFER_INJECTION_CATEGORY = "injection", SNIFFER_DECISION_CATEGORY = "decision", SNIFFER_DECISION_VERSION = "decision-v2", SNIFFER_UNION_VERSION, SNIFFER_UNION_CATEGORY = "union_decision", ROLE_TAG, TIER_VALUE_ENDS, TIER_PREDICATE, INJECTION_RULES, INSTRUCTION_VERBS, VERDICT_SCHEMA, TIER_WORD, OBJECT_GLUE, SCHEMA_ONLY_FIELD, SCHEMA_VALUE, ASSIGN_VERBS, SETTING_VERBS, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, SNIFFER_CATEGORY_SYNONYMS;
 var init_sniffer = __esm(() => {
+  init_sniffer_lane();
   init_secret_patterns();
   init_manifest2();
   init_engine();
@@ -11121,6 +11593,7 @@ var init_sniffer = __esm(() => {
     [QWEN35_4B.modelId, "qwen3\\.5-4b", 0.15],
     [QWEN36_35B_A3B_SNIFFER_MODEL, "qwen3\\.6-35b-a3b", 0.3738]
   ];
+  SNIFFER_UNION_VERSION = `union-v1:${SNIFFER_DECISION_VERSION}:bar-0.5`;
   ROLE_TAG = /<\s*\/?\s*(?:system|assistant|developer)(?:\s+[^<>@]{0,40})?\s*>|<\s*\/\s*user\s*>|<\|\s*[a-z][a-z0-9_]{1,29}\s*\|>|\[\s*\/?\s*(?:inst|sys)\s*\]/;
   TIER_VALUE_ENDS = String.raw`["'\x60]?\s*(?:[^a-z\s]|$|(?:and|or)\b)`;
   TIER_PREDICATE = String.raw`(?<!\b(?:made|make|makes|making|go|goes|going|went|gone|the|a|an|in|on|to|for|from|of|into|your|my|our|their)\s)\b(?:personal|public|not private)\b(?=${TIER_VALUE_ENDS}|\s+(?:with|regardless)\b)`;
@@ -11220,125 +11693,6 @@ var init_sniffer = __esm(() => {
   };
 });
 
-// src/core/venice-models.ts
-function normalizeVeniceAnalystModelId(value) {
-  const trimmed = value.trim();
-  if (!trimmed)
-    return trimmed;
-  const key = trimmed.toLowerCase().replace(/\bvenice\b/g, " ").replace(/\bgl m\b/g, "glm").replace(/\bqwen\s*3\.6\b/g, "qwen-3-6").replace(/\bqwen\s*3\s*vl\b/g, "qwen3-vl").replace(/\bgrok\s*4\.3\b/g, "grok-4-3").replace(/\bgrok\s*4\.5\b/g, "grok-4-5").replace(/\bglm\s*5\.2\b/g, "glm-5-2").replace(/\bglm\s*5\.1\b/g, "glm-5-1").replace(/\be2e\b/g, "e2ee").replace(/\bee2e\b/g, "e2ee").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-  return VENICE_MODEL_ALIASES[key] ?? trimmed.toLowerCase();
-}
-function venicePrivacyCategoryForModel(value) {
-  return VENICE_MODEL_PRIVACY_CATEGORIES[normalizeVeniceAnalystModelId(value)];
-}
-async function assertVeniceEmbeddingModelAllowed(modelId, resolveCategory, signal) {
-  const resolvedModelId = modelId.trim();
-  if (/e2e{2}|ee2e/i.test(resolvedModelId)) {
-    throw new OperationError("source_index_policy_violation", `Venice embedding model "${resolvedModelId}" uses a gated E2EE class.`, "Use the approved Venice Private or TEE embedding model; E2EE embedding remains unavailable until local key handling exists.");
-  }
-  const category = await resolveCategory(resolvedModelId, signal);
-  if (category !== "private" && category !== "tee") {
-    throw new OperationError("source_index_policy_violation", `Venice embedding model "${resolvedModelId}" has privacy category ${category ?? "unknown"}; source embeddings require Venice Private or TEE.`, "Choose a Venice embedding model published with Private or TEE privacy metadata.");
-  }
-}
-var VENICE_MODEL_ALIASES, VENICE_MODEL_PRIVACY_CATEGORIES;
-var init_venice_models = __esm(() => {
-  init_operation_error();
-  VENICE_MODEL_ALIASES = Object.freeze({
-    default: "kimi-k3",
-    strong: "kimi-k3",
-    "strong-reasoning": "kimi-k3",
-    reasoning: "kimi-k3",
-    "secure-reasoning": "kimi-k3",
-    kimi: "kimi-k3",
-    "kimi-3": "kimi-k3",
-    "kimi-k-3": "kimi-k3",
-    "kimi-k3": "kimi-k3",
-    normal: "inkling",
-    "normal-reasoning": "inkling",
-    inkling: "inkling",
-    "most-secure": "e2ee-glm-5-2-p",
-    "slower-most-secure": "e2ee-glm-5-2-p",
-    "slow-most-secure": "e2ee-glm-5-2-p",
-    "glm-5-2-e2ee": "e2ee-glm-5-2-p",
-    "glm-5-2-ee2e": "e2ee-glm-5-2-p",
-    "glm-5-2-private": "zai-org-glm-5-2",
-    "glm-5-2-p": "e2ee-glm-5-2-p",
-    "e2ee-glm-5-2": "e2ee-glm-5-2-p",
-    "ee2e-glm-5-2": "e2ee-glm-5-2-p",
-    "venice-glm-5-2-e2ee": "e2ee-glm-5-2-p",
-    "venice-glm-5-2-ee2e": "e2ee-glm-5-2-p",
-    "venice-glm-5-2-private": "zai-org-glm-5-2",
-    "glm-5-2": "zai-org-glm-5-2",
-    "fast-reasoning": "inkling",
-    "faster-reasoning": "inkling",
-    "acceptable-reasoning": "inkling",
-    "glm-5-2-fast": "zai-org-glm-5-2",
-    "glm-5-2-acceptable": "zai-org-glm-5-2",
-    "glm-5-1-e2ee": "e2ee-glm-5-1",
-    "glm-5-1-ee2e": "e2ee-glm-5-1",
-    "e2ee-glm-5-1": "e2ee-glm-5-1",
-    "ee2e-glm-5-1": "e2ee-glm-5-1",
-    "venice-glm-5-1-e2ee": "e2ee-glm-5-1",
-    "venice-glm-5-1-ee2e": "e2ee-glm-5-1",
-    "glm-5-1": "zai-org-glm-5-1",
-    "qwen-3-6-35b-e2ee": "e2ee-qwen3-6-35b-a3b",
-    "qwen-3-6-35b-ee2e": "e2ee-qwen3-6-35b-a3b",
-    "qwen3-6-35b-e2ee": "e2ee-qwen3-6-35b-a3b",
-    "qwen3-6-35b-ee2e": "e2ee-qwen3-6-35b-a3b",
-    "qwen-3-6-35b-a3b-e2ee": "e2ee-qwen3-6-35b-a3b",
-    "qwen-3-6-35b-a3b-ee2e": "e2ee-qwen3-6-35b-a3b",
-    "qwen3-6-35b-a3b-e2ee": "e2ee-qwen3-6-35b-a3b",
-    "qwen3-6-35b-a3b-ee2e": "e2ee-qwen3-6-35b-a3b",
-    vision: "kimi-k3",
-    "secure-vision": "kimi-k3",
-    "most-secure-vision": "kimi-k3",
-    "qwen-vision": "qwen3-vl-235b-a22b",
-    "qwen3-vl-vision": "qwen3-vl-235b-a22b",
-    "qwen-3-vl-vision": "qwen3-vl-235b-a22b",
-    "qwen3-vl-235b": "qwen3-vl-235b-a22b",
-    "qwen3-vl-235b-a22b": "qwen3-vl-235b-a22b",
-    "qwen-3-vl-235b": "qwen3-vl-235b-a22b",
-    "qwen-3-vl-235b-a22b": "qwen3-vl-235b-a22b",
-    "qwen3-vl-30b-e2ee": "e2ee-qwen3-vl-30b-a3b-p",
-    "qwen3-vl-30b-ee2e": "e2ee-qwen3-vl-30b-a3b-p",
-    "qwen3-vl-30b-a3b-e2ee": "e2ee-qwen3-vl-30b-a3b-p",
-    "qwen3-vl-30b-a3b-ee2e": "e2ee-qwen3-vl-30b-a3b-p",
-    "qwen-3-vl-30b-e2ee": "e2ee-qwen3-vl-30b-a3b-p",
-    "qwen-3-vl-30b-ee2e": "e2ee-qwen3-vl-30b-a3b-p",
-    "vision-escalation": "kimi-k3",
-    "private-grok-4-3": "grok-4-3",
-    "grok-4-3-private": "grok-4-3",
-    "grok-4-3-vision": "grok-4-3",
-    multimodal: "kimi-k3",
-    "fast-multimodal": "kimi-k3",
-    "faster-multimodal": "kimi-k3",
-    "acceptable-multimodal": "kimi-k3",
-    "grok-4-3": "grok-4-3",
-    "grok-4-3-multimodal": "grok-4-3",
-    "grok-4-5": "grok-4-5",
-    "grok-4-5-vision": "grok-4-5",
-    "private-grok-4-5": "grok-4-5"
-  });
-  VENICE_MODEL_PRIVACY_CATEGORIES = Object.freeze({
-    "kimi-k3": "private",
-    "deepseek-v4-flash-0731": "private",
-    inkling: "private",
-    "e2ee-glm-5-2-p": "e2ee",
-    "zai-org-glm-5-2": "private",
-    "e2ee-glm-5-1": "e2ee",
-    "zai-org-glm-5-1": "private",
-    "e2ee-qwen3-6-35b-a3b": "e2ee",
-    "grok-4-5": "private",
-    "qwen3-vl-235b-a22b": "private",
-    "e2ee-qwen3-vl-30b-a3b-p": "e2ee",
-    "grok-4-3": "private",
-    "claude-opus-4-7-fast": "anonymized",
-    "qwen3-6-27b": "private",
-    "tee-qwen3-5-122b-a10b": "tee"
-  });
-});
-
 // src/workers/classification/judge-spending.ts
 var JUDGE_PRICES;
 var init_judge_spending = __esm(() => {
@@ -11356,343 +11710,6 @@ var init_judge_spending = __esm(() => {
     "grok-4-3": { input: 1.42, output: 2.83 },
     "grok-4-5": { input: 2.27, output: 6.8 }
   });
-});
-
-// src/core/local-model-policy.ts
-function isCloudForwardingModelId(modelId) {
-  const trimmed = modelId.trim().toLowerCase();
-  const lastSegment = trimmed.slice(trimmed.lastIndexOf("/") + 1);
-  const colon = lastSegment.lastIndexOf(":");
-  if (colon < 0)
-    return false;
-  const tag = lastSegment.slice(colon + 1);
-  return tag === "cloud" || tag.endsWith("-cloud");
-}
-function assertLocalModelIdNotCloudForwarding(label, modelId) {
-  if (!isCloudForwardingModelId(modelId))
-    return;
-  throw new OperationError("config_error", `${label} names model "${modelId.trim()}", whose tag is a reserved cloud-style tag, so it cannot serve as a local model.`, 'Ollama names its cloud models with a ":cloud" or "-cloud" tag and the local daemon forwards them off this machine, so local lanes refuse every model with such a tag, including a local custom model tagged that way. Choose a model that runs locally (rename a local custom tag), or configure the cloud model as a cloud profile.');
-}
-var init_local_model_policy = __esm(() => {
-  init_operation_error();
-});
-
-// src/core/source-model-policy.ts
-var init_source_model_policy = __esm(() => {
-  init_operation_error();
-});
-
-// src/core/zkapi-consult-settings.ts
-import { readFileSync as readFileSync14, statSync as statSync7 } from "node:fs";
-import { lookup } from "node:dns/promises";
-import { isIP } from "node:net";
-function sovereigntyPolicyPath(env = process.env) {
-  return env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim() || defaultSovereigntyConfigPath(env);
-}
-function refreshZkapiPortsFromPolicyFile(env = process.env) {
-  let path;
-  try {
-    path = sovereigntyPolicyPath(env);
-  } catch {
-    policyFile.seen = undefined;
-    policyFile.unreadable = "the sovereignty settings (layout discovery refused)";
-    return;
-  }
-  let stamp;
-  try {
-    const stat2 = statSync7(path);
-    stamp = `${path}:${stat2.dev}:${stat2.ino}:${stat2.size}:${stat2.mtimeMs}:${stat2.ctimeMs}`;
-  } catch (error) {
-    if (error.code === "ENOENT") {
-      policyFile.seen = `${path}:absent`;
-      policyFile.unreadable = undefined;
-    } else {
-      policyFile.seen = undefined;
-      policyFile.unreadable = path;
-    }
-    return;
-  }
-  if (policyFile.seen === stamp && policyFile.unreadable === undefined)
-    return;
-  try {
-    const ports = zkapiPortsInPolicy(JSON.parse(readFileSync14(path, "utf8")));
-    for (const port of ports)
-      zkapiDaemonPorts.add(port);
-    policyFile.seen = stamp;
-    policyFile.unreadable = undefined;
-  } catch {
-    policyFile.seen = undefined;
-    policyFile.unreadable = path;
-  }
-}
-function zkapiPortsInPolicy(parsed) {
-  const record = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
-  if (!record)
-    throw new Error("not a policy object");
-  const inner = record.sovereignty && typeof record.sovereignty === "object" ? record.sovereignty : record;
-  const profiles = inner.modelProfiles;
-  if (!profiles || typeof profiles !== "object" || Array.isArray(profiles))
-    throw new Error("policy has no modelProfiles");
-  const ports = [];
-  for (const profile of Object.values(profiles)) {
-    if (!profile || typeof profile !== "object")
-      throw new Error("malformed profile");
-    const entry = profile;
-    if (entry.provider !== "zkapi")
-      continue;
-    const port = loopbackPort(typeof entry.baseUrl === "string" ? entry.baseUrl : undefined);
-    if (port === undefined)
-      throw new Error("zkapi profile without a loopback baseUrl");
-    ports.push(port);
-  }
-  return ports;
-}
-function endpointPort(parsed) {
-  return parsed.port ? Number(parsed.port) : parsed.protocol === "https:" ? 443 : 80;
-}
-function assertNotZkapiDaemonEndpoint(url, label) {
-  refreshZkapiPortsFromPolicyFile();
-  let parsed;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return;
-  }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
-    return;
-  const port = endpointPort(parsed);
-  const local = loopbackPort(url) !== undefined;
-  if (local && policyFile.unreadable) {
-    throw new ZkapiDaemonEndpointRefusal("policy_unreadable", `${label} is a local endpoint, and the sovereignty policy at ${policyFile.unreadable} cannot be read to rule out a zkAPI daemon on port ${port}.`, policyFile.unreadable);
-  }
-  if (!zkapiDaemonPorts.has(port))
-    return;
-  if (local) {
-    throw new ZkapiDaemonEndpointRefusal("daemon_port", `${label} points at port ${port}, where a zkAPI daemon serves; it forwards to cloud providers and may never receive evidence.`);
-  }
-  if (!isIP(parsed.hostname.replace(/^\[|\]$/g, ""))) {
-    throw new ZkapiDaemonEndpointRefusal("hostname_on_daemon_port", `${label} names a host on port ${port}, a zkAPI daemon port; a host name could point at this machine.`);
-  }
-}
-async function assertNotZkapiDaemonEndpointResolved(url, label, lookupAll = defaultLookupAll) {
-  assertNotZkapiDaemonEndpoint(url, label);
-  const unreadable = policyFile.unreadable;
-  if (!unreadable)
-    return;
-  let parsed;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return;
-  }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
-    return;
-  const host = parsed.hostname.replace(/^\[|\]$/g, "");
-  if (isIP(host))
-    return;
-  const port = endpointPort(parsed);
-  const refuse = () => {
-    throw new ZkapiDaemonEndpointRefusal("policy_unreadable", `${label} may be a local endpoint, and the sovereignty policy at ${unreadable} cannot be read to rule out a zkAPI daemon on port ${port}.`, unreadable);
-  };
-  let addresses;
-  try {
-    addresses = await Promise.race([
-      lookupAll(host),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("lookup timed out")), 2000).unref?.())
-    ]);
-  } catch {
-    return refuse();
-  }
-  if (addresses.some((address) => loopbackPort(`http://${address.includes(":") ? `[${address}]` : address}:${port}`) !== undefined))
-    refuse();
-}
-async function defaultLookupAll(hostname) {
-  return (await lookup(hostname, { all: true })).map((entry) => entry.address);
-}
-function refusalSuggestion(reason, policyPath) {
-  if (reason === "policy_unreadable") {
-    return `Fix or remove the sovereignty policy file at ${policyPath ?? "its configured path"}; until it can be read, Olympus refuses every local model endpoint.`;
-  }
-  if (reason === "hostname_on_daemon_port") {
-    return "Use a numeric address: a cloud endpoint on its own port, or 127.0.0.1 for a local model, which must then not share a zkAPI daemon port.";
-  }
-  return "This address is the zkAPI daemon, which only carries consults. Point this model at a local model server on another port.";
-}
-function isZkapiDaemonEndpointRefusal(error) {
-  return error instanceof ZkapiDaemonEndpointRefusal;
-}
-function loopbackPort(baseUrl) {
-  if (!baseUrl)
-    return;
-  let url;
-  try {
-    url = new URL(baseUrl);
-  } catch {
-    return;
-  }
-  if (url.protocol !== "http:" && url.protocol !== "https:" || !isLoopbackHost(url.hostname))
-    return;
-  if (url.port)
-    return Number(url.port);
-  return url.protocol === "https:" ? 443 : 80;
-}
-function isLoopbackHost(hostname) {
-  const host = hostname.toLowerCase().replace(/\.$/, "");
-  if (host === "localhost" || host.endsWith(".localhost"))
-    return true;
-  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
-  if (v4)
-    return Number(v4[1]) === 127 || host === "0.0.0.0";
-  if (!host.startsWith("[") || !host.endsWith("]"))
-    return false;
-  const words = ipv6Words(host.slice(1, -1));
-  if (!words)
-    return false;
-  if (words.slice(0, 7).every((word) => word === 0) && (words[7] === 1 || words[7] === 0))
-    return true;
-  const mapped = words.slice(0, 5).every((word) => word === 0) && (words[5] === 65535 || words[5] === 0);
-  return mapped && (words[6] >> 8 === 127 || words[6] === 0 && words[7] === 0);
-}
-function ipv6Words(text2) {
-  let body = text2;
-  const tail = [];
-  const dotted = /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(body);
-  if (dotted) {
-    const bytes = dotted.slice(1).map(Number);
-    if (bytes.some((byte) => byte > 255))
-      return;
-    tail.push(bytes[0] << 8 | bytes[1], bytes[2] << 8 | bytes[3]);
-    body = text2.slice(0, dotted.index);
-    if (!body.endsWith("::"))
-      body = body.replace(/:$/, "");
-  }
-  const halves = body.split("::");
-  if (halves.length > 2)
-    return;
-  const parse2 = (part) => part ? part.split(":").map((word) => parseInt(word, 16)) : [];
-  const head = parse2(halves[0] ?? "");
-  const rest = halves.length === 2 ? parse2(halves[1] ?? "") : [];
-  if ([...head, ...rest].some((word) => Number.isNaN(word) || word < 0 || word > 65535))
-    return;
-  const fill = 8 - head.length - rest.length - tail.length;
-  if (fill < 0 || halves.length === 1 && fill !== 0)
-    return;
-  return [...head, ...Array(fill).fill(0), ...rest, ...tail];
-}
-var ZKAPI_DAEMON_DEFAULT_PORT = 8787, ZKAPI_DAEMON_DEFAULT_BASE_URL, ZKAPI_DEFAULT_TOR_SOCKS_PORT = 19050, DEFAULTS, INTEGER_BOUNDS, SETTINGS_KEYS, zkapiDaemonPorts, policyFile, ZkapiDaemonEndpointRefusal;
-var init_zkapi_consult_settings = __esm(() => {
-  init_owner_config_read();
-  init_operation_error();
-  ZKAPI_DAEMON_DEFAULT_BASE_URL = `http://127.0.0.1:${ZKAPI_DAEMON_DEFAULT_PORT}/v1`;
-  DEFAULTS = {
-    tor: "per_consult",
-    torSocksPort: ZKAPI_DEFAULT_TOR_SOCKS_PORT,
-    timeoutMs: 6 * 60 * 1000,
-    torBootstrapTimeoutMs: 210 * 1000,
-    daemonReadyTimeoutMs: 120 * 1000,
-    policyWarmTimeoutMs: 180 * 1000,
-    settleTimeoutMs: 300 * 1000,
-    maxResponseBytes: 256 * 1024
-  };
-  INTEGER_BOUNDS = {
-    torSocksPort: [1024, 65535],
-    dailyRequestCap: [1, 1e6],
-    timeoutMs: [30000, 30 * 60000],
-    torBootstrapTimeoutMs: [1e4, 10 * 60000],
-    daemonReadyTimeoutMs: [5000, 10 * 60000],
-    policyWarmTimeoutMs: [5000, 10 * 60000],
-    settleTimeoutMs: [5000, 30 * 60000],
-    maxResponseBytes: [1024, 4 * 1024 * 1024]
-  };
-  SETTINGS_KEYS = new Set([
-    ...Object.keys(INTEGER_BOUNDS),
-    "tor",
-    "fundingDate",
-    "depositUsd",
-    "acknowledgements",
-    "dailySpendCapUsd",
-    "daemonExecutable",
-    "torExecutable"
-  ]);
-  zkapiDaemonPorts = new Set([ZKAPI_DAEMON_DEFAULT_PORT]);
-  policyFile = { seen: undefined, unreadable: undefined };
-  ZkapiDaemonEndpointRefusal = class ZkapiDaemonEndpointRefusal extends OperationError {
-    reason;
-    constructor(reason, message2, policyPath) {
-      super("config_error", message2, refusalSuggestion(reason, policyPath));
-      this.name = "ZkapiDaemonEndpointRefusal";
-      this.reason = reason;
-    }
-  };
-});
-
-// src/core/sovereignty.ts
-function assertSecureAnalystPoolModelIdAllowed(profileId, rawModelId) {
-  const modelId = normalizeVeniceAnalystModelId(rawModelId);
-  if (modelId.toLowerCase().startsWith("e2ee-")) {
-    throw new SecureAnalystPoolE2EEGateError(profileId, modelId);
-  }
-}
-var BUILT_IN_EMBEDDING_MODEL_ID, SOVEREIGNTY_PRESETS, SecureAnalystPoolE2EEGateError;
-var init_sovereignty = __esm(() => {
-  init_owner_config_read();
-  init_owner_config_read();
-  init_atomic_file();
-  init_file_lease();
-  init_operation_error();
-  init_local_model_policy();
-  init_config();
-  init_secret_store();
-  init_source_model_policy();
-  init_venice_models();
-  init_manifest();
-  init_zkapi_consult_settings();
-  init_source_model_policy();
-  BUILT_IN_EMBEDDING_MODEL_ID = BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL.modelId;
-  SOVEREIGNTY_PRESETS = ["local-first", "local-only", "private-cloud-only", "no-sensitive"];
-  SecureAnalystPoolE2EEGateError = class SecureAnalystPoolE2EEGateError extends OperationError {
-    profileId;
-    modelId;
-    constructor(profileId, modelId) {
-      super("source_index_policy_violation", `Secure analyst pool profile "${profileId}" uses gated E2EE model "${modelId}".`, "E2EE secure-pool dispatch remains unavailable until Olympus has local key handling; use a catalog-approved non-E2EE Venice Private/TEE model.");
-      this.name = "SecureAnalystPoolE2EEGateError";
-      this.profileId = profileId;
-      this.modelId = modelId;
-    }
-  };
-});
-
-// src/workers/classification/sniffer-lane.ts
-function assertSnifferProfileAllowed(profileId, profile) {
-  if (profile.trust === "standard_cloud")
-    throw new SnifferLaneRefusedError("standard_cloud", profileId);
-  if (profile.provider === "local-openai-compatible" && profile.trust === "local") {
-    assertLocalModelIdNotCloudForwarding(`Privacy sniffer profile "${profileId}"`, profile.model);
-    return "local";
-  }
-  if (profile.provider === "built-in" && profile.trust === "local" && profileId === "built_in" && profile.purpose === "classification")
-    return "local";
-  if (profile.provider === "venice" && profile.trust === "encrypted_cloud") {
-    assertSecureAnalystPoolModelIdAllowed(profileId, profile.model);
-    return "venice";
-  }
-  throw new SnifferLaneRefusedError("unsupported_provider", profileId);
-}
-var SnifferLaneRefusedError;
-var init_sniffer_lane = __esm(() => {
-  init_operation_error();
-  init_local_model_policy();
-  init_sovereignty();
-  SnifferLaneRefusedError = class SnifferLaneRefusedError extends OperationError {
-    reason;
-    profileId;
-    constructor(reason, profileId) {
-      super("source_index_policy_violation", reason === "standard_cloud" ? `The privacy sniffer refuses model profile "${profileId}": it is a standard cloud model.` : reason === "unsupported_provider" ? `The privacy sniffer refuses model profile "${profileId}": only a local model or Venice Private may read possibly-private names.` : reason === "outside_private_policy" ? `The privacy sniffer refuses model profile "${profileId}": the secure_local route does not approve that kind of model for Private data.` : "No private model lane is configured for the privacy sniffer.", 'Configure a local model, or Venice Private, in the secure_local pool of sovereignty.json (or a profile with purpose "classification"). Until then, flagged items stay pending and held Private.');
-      this.name = "SnifferLaneRefusedError";
-      this.reason = reason;
-      this.profileId = profileId;
-    }
-  };
 });
 
 // src/workers/classification/built-in-sniffer.ts
@@ -16558,7 +16575,8 @@ function rejudgeStoredContent(set, record, options) {
   const counting = options.sniffer && {
     id: options.sniffer.id,
     judge(request) {
-      const verdict = options.sniffer.judge(request);
+      const upgrade = !options.recheck && key && isSnifferUnionUpgrade(record.reasons, key.snifferId);
+      const verdict = options.sniffer.judge(upgrade ? { ...request, priority: HELD_UNTIL_JUDGED_PRIORITY } : request);
       if (verdict.verdict === "undecided" && verdict.queued !== true)
         questionNotQueued = true;
       return verdict;
@@ -16786,6 +16804,7 @@ function storedFolderKeys(value) {
 }
 var DEFAULT_TIER_REJUDGE_PER_PASS = 100, TIER_REJUDGE_CONNECTOR_ID = "olympus_tier_rejudge", CAUSE_FIELD;
 var init_tier_rejudge = __esm(() => {
+  init_sniffer();
   init_media_judge();
   init_parent_context();
   init_stored_names();
@@ -45079,9 +45098,20 @@ var init_data_lifecycle = __esm(() => {
   backgroundTrashRemovals = new Set;
 });
 
+// src/workers/classification/sniffer-decision.ts
+var endpoints;
+var init_sniffer_decision = __esm(() => {
+  init_model_transport();
+  init_sniffer_lane();
+  init_sniffer();
+  endpoints = new Map;
+});
+
 // src/core/analyst-built-in.ts
 var GAP_GENERIC_WORDS, utf82;
 var init_analyst_built_in = __esm(() => {
+  init_sniffer_decision();
+  init_sniffer_lane();
   init_analyst();
   init_operation_error();
   init_model_transport();
@@ -73311,13 +73341,8 @@ class JudgeRateLimitPacer {
   }
 }
 
-// src/workers/classification/sniffer-decision.ts
-init_model_transport();
-init_sniffer_lane();
-init_sniffer();
-var endpoints = new Map;
-
 // src/workers/engine/server.ts
+init_sniffer_decision();
 init_engine_service();
 init_privacy_questions();
 init_sniffer();
@@ -80041,7 +80066,7 @@ async function runSnifferPass(options) {
           const verdict = decisionVerdict ?? verdicts.get(index + 1);
           const key2 = keyOf(group2[0].question);
           if (verdict) {
-            const stored = { ...verdict, failSafe: false };
+            const stored = { ...verdict, failSafe: decisionVerdict?.failSafe ?? false };
             group2[0].target.sniffer.putVerdict(key2, stored, group2[0].question);
             for (const item of group2) {
               if (item.target !== group2[0].target)

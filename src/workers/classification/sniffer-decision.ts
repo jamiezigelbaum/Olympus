@@ -2,8 +2,8 @@
 // Endpoint state serializes every probe, prime and decision across clients.
 import type { AnalystModel, AnalystModelCompletion, AnalystModelRequest } from '../../core/analyst.ts';
 import { fetchModelEndpoint } from '../../core/model-transport.ts';
-import { assertSnifferProfileAllowed, initialSnifferMode, snifferLaneOffersDecision, type SnifferLane } from './sniffer-lane.ts';
-import { buildSnifferBatchPrompt, measuredSnifferDecisionBar, SNIFFER_DECISION_CATEGORY, SNIFFER_SYSTEM_PROMPT, snifferDecisionBar } from './sniffer.ts';
+import { assertSnifferProfileAllowed, initialSnifferMode, snifferLaneOffersDecision, snifferLaneUsesUnion, type SnifferLane } from './sniffer-lane.ts';
+import { buildSnifferBatchPrompt, measuredSnifferDecisionBar, SNIFFER_DECISION_CATEGORY, SNIFFER_SYSTEM_PROMPT, snifferDecisionBar, parseSnifferBatchResponse, snifferTierKey, snifferUnionVeto } from './sniffer.ts';
 import type { SnifferPass, StoredSnifferVerdict } from './sniffer-store.ts';
 import { privateChance, SNIFFER_DECISION_PRIVATE_BAR, tierMass, type TokenChance } from './sniffer-decision-mass.ts';
 
@@ -97,7 +97,8 @@ export function servedWeightsName(props: unknown): string | undefined {
   return name ? name.slice(0, 200) : undefined;
 }
 
-export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel, options: { apiKey?: string | undefined; log?: (line: string) => void } = {}): SnifferModel {
+export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel, options: { apiKey?: string | undefined; log?: (line: string) => void; fetchImpl?: typeof fetch; timeoutMs?: number } = {}): SnifferModel {
+  const union = snifferLaneUsesUnion(lane);
   lane.snifferMode = initialSnifferMode(lane.profile);
   if (!snifferLaneOffersDecision(lane)) return full;
   assertSnifferProfileAllowed(lane.profileId, lane.profile);
@@ -107,9 +108,9 @@ export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel
   const sharedState = state;
   let signal: AbortSignal | undefined;
   const post: DecisionPost = async <T>(path: string, body: unknown): Promise<T> => {
-    const timeout = AbortSignal.timeout(60_000);
+    const timeout = AbortSignal.timeout(options.timeoutMs ?? 60_000);
     try {
-      const response = await fetchModelEndpoint(fetch, `${endpoint}${path}`, {
+      const response = await fetchModelEndpoint(options.fetchImpl ?? fetch, `${endpoint}${path}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...(options.apiKey ? { authorization: `Bearer ${options.apiKey}` } : {}) },
         body: JSON.stringify(body),
@@ -128,7 +129,7 @@ export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel
     if (sharedState.weightsRead || Date.now() - (sharedState.weightsTriedAt ?? -Infinity) < 60_000) return;
     sharedState.weightsTriedAt = Date.now();
     try {
-      const response = await fetchModelEndpoint(fetch, `${endpoint}/props`, {
+      const response = await fetchModelEndpoint(options.fetchImpl ?? fetch, `${endpoint}/props`, {
         method: 'GET',
         headers: options.apiKey ? { authorization: `Bearer ${options.apiKey}` } : {},
         signal: AbortSignal.timeout(10_000),
@@ -156,6 +157,8 @@ export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel
     chat_template_kwargs: { enable_thinking: false },
   })).prompt;
   const prepare = async () => {
+    // Full stays primary. No capability probe can silently disable the veto.
+    if (union) { lane.snifferMode = 'full'; lane.rejudgeReady = true; return; }
     if (lane.profile.snifferMode === 'decision') {
       await readWeights();
       lane.snifferMode = 'decision'; lane.rejudgeReady = true; noteBar(); return;
@@ -192,7 +195,15 @@ export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel
       });
     },
     async complete(request: SnifferModelRequest): Promise<SnifferModelCompletion> {
-      if (!request.snifferItem || lane.snifferMode === 'full') {
+      let primary: AnalystModelCompletion | undefined;
+      if (union && request.snifferItem) {
+        primary = await full.complete(request);
+        sharedState.primed = undefined;
+        const verdict = parseSnifferBatchResponse(primary.text, new Set([1])).get(1);
+        // Invalid or uncertain full replies follow their existing fail-safe path.
+        if (!verdict || snifferTierKey(verdict) !== 'private') return primary;
+      }
+      if (!request.snifferItem || (!union && lane.snifferMode === 'full')) {
         sharedState.primed = undefined;
         return full.complete(request);
       }
@@ -202,7 +213,7 @@ export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel
         // Freeze the effective mode for a resolver run: its cache/reason id
         // was chosen before dispatch. A failed capability is re-probed next run.
         if (lane.snifferMode === undefined || lane.snifferMode === 'pending') await prepare();
-        if (lane.snifferMode !== 'decision') return full.complete(request);
+        if (!union && lane.snifferMode !== 'decision') return full.complete(request);
         try {
           const { pass, material, ownerContext } = request.snifferItem!;
           const key = buildSnifferBatchPrompt(pass, [{ i: 1, material: PLACEHOLDER }], ownerContext);
@@ -212,7 +223,7 @@ export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel
             sharedState.primed = undefined;
           }
           written ??= await decisionDivergence(post);
-          if (sharedState.primed !== shape.shared) {
+          if (!union && sharedState.primed !== shape.shared) {
             await post('/completion', { prompt: shape.shared, n_predict: 0, cache_prompt: true, id_slot: 0 });
             sharedState.primed = shape.shared;
           }
@@ -222,6 +233,10 @@ export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel
           const decisionMetrics = { privateProbability: chance ?? null, coverage: mass.private + mass.personal + mass.ambiguous };
           // A cold slot (e.g. a server restart between calls) must be primed again.
           if (reply?.tokens_cached === 0) reset();
+          if (primary) {
+            const veto = snifferUnionVeto(chance);
+            return { ...primary, decisionMetrics, ...(veto ? { decisionVerdict: veto } : {}) };
+          }
           if (chance === undefined || !Number.isFinite(chance)) { reset(); return { text: '', modelId: lane.modelId, decisionMetrics }; }
           // Stored as the tier at this lane's bar with that tier's mass, so
           // P(Private) is recoverable and a later bar re-reads it (sniffer.ts).
@@ -233,6 +248,7 @@ export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel
         } catch (error) {
           reset();
           sharedState.supported = undefined;
+          if (primary) return { ...primary, decisionVerdict: snifferUnionVeto(undefined)! };
           throw error instanceof NativeRequestError ? error : new NativeRequestError();
         }
       });
