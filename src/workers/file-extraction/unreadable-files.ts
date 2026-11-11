@@ -216,6 +216,14 @@ export type UnreadHoldDisposition =
   | { kind: 'by_choice' }
   | { kind: 'cannot_read'; reason: UnreadableFileReason; errorKind: string };
 
+// The outcome of an unread item that no extractor was ever queued for.
+export const NO_EXTRACTION_JOB_OUTCOME: ItemExtractionOutcome = Object.freeze({
+  status: 'skipped_unsupported',
+  lastErrorKind: 'no_extractor',
+  warnings: [],
+  policyDecision: 'index_allowed',
+});
+
 export function unreadHoldDisposition(outcome: ItemExtractionOutcome | undefined, contentAllowed = true): UnreadHoldDisposition {
   if (!contentAllowed) return { kind: 'by_choice' };
   if (!outcome || outcome.status === 'indexed') return { kind: 'waiting' };

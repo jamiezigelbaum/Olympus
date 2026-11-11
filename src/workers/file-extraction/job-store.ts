@@ -1485,18 +1485,23 @@ export class LocalFileExtractionJobStore {
 
   /**
    * Terminal outcome at the same identity scope and with the same precedence
-   * as itemExtractionState: a successful read wins; otherwise any active job
+   * as itemExtractionState, among the jobs for the newest source version: a
+   * successful read wins; otherwise any active job
    * means text is still owed. Among terminal attempts use the newest outcome,
    * with only that job's warnings (never an older failed attempt's).
    */
   itemExtractionOutcome(item: { provider: string; accountScope: string; providerItemId: string }): ItemExtractionOutcome | undefined {
-    const rows = this.db.query(`
-      SELECT job_id, status, last_error_kind, policy_decision FROM extraction_jobs
+    const all = this.db.query(`
+      SELECT job_id, status, last_error_kind, policy_decision, source_version FROM extraction_jobs
       WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
       ORDER BY updated_at DESC, job_id DESC
     `).all(item.provider, item.accountScope, item.providerItemId) as Array<{
-      job_id: string; status: ExtractionJobStatus; last_error_kind: string | null; policy_decision: ExtractionPolicyDecision;
+      job_id: string; status: ExtractionJobStatus; last_error_kind: string | null; policy_decision: ExtractionPolicyDecision; source_version: string | null;
     }>;
+    // Only the newest version's jobs speak for the item: an older version's
+    // successful read must not hide that the current one failed.
+    const current = all[0]?.source_version ?? null;
+    const rows = all.filter(row => (row.source_version ?? null) === current);
     const indexed = rows.find(row => row.status === 'indexed');
     if (!indexed && rows.some(row => row.status === 'queued' || row.status === 'leased' || row.status === 'failed_retryable')) return undefined;
     const row = indexed ?? rows[0];

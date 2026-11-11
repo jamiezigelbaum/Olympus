@@ -26374,9 +26374,15 @@ function createUnreadableFiles(options) {
     }
   };
 }
-var UNREAD_PRIVACY_CHECK_MISSING_KIND = "privacy_check_missing", TOKEN_LENGTH = 43, TOKEN_ALPHABET, DEFAULT_TOKEN_TTL_MS, MAX_TOKENS = 2000, OPEN_RATE, UNNAMED = "Unnamed file", CURSOR_TIME_ALPHABET;
+var UNREAD_PRIVACY_CHECK_MISSING_KIND = "privacy_check_missing", NO_EXTRACTION_JOB_OUTCOME, TOKEN_LENGTH = 43, TOKEN_ALPHABET, DEFAULT_TOKEN_TTL_MS, MAX_TOKENS = 2000, OPEN_RATE, UNNAMED = "Unnamed file", CURSOR_TIME_ALPHABET;
 var init_unreadable_files = __esm(() => {
   init_archive_formats();
+  NO_EXTRACTION_JOB_OUTCOME = Object.freeze({
+    status: "skipped_unsupported",
+    lastErrorKind: "no_extractor",
+    warnings: [],
+    policyDecision: "index_allowed"
+  });
   TOKEN_ALPHABET = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_");
   DEFAULT_TOKEN_TTL_MS = 30 * 60000;
   OPEN_RATE = { capacity: 10, refillPerSecond: 1 };
@@ -92891,11 +92897,13 @@ class LocalFileExtractionJobStore {
     return statuses.has("queued") || statuses.has("leased") || statuses.has("failed_retryable") ? "active" : "settled";
   }
   itemExtractionOutcome(item) {
-    const rows = this.db.query(`
-      SELECT job_id, status, last_error_kind, policy_decision FROM extraction_jobs
+    const all = this.db.query(`
+      SELECT job_id, status, last_error_kind, policy_decision, source_version FROM extraction_jobs
       WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
       ORDER BY updated_at DESC, job_id DESC
     `).all(item.provider, item.accountScope, item.providerItemId);
+    const current2 = all[0]?.source_version ?? null;
+    const rows = all.filter((row2) => (row2.source_version ?? null) === current2);
     const indexed = rows.find((row2) => row2.status === "indexed");
     if (!indexed && rows.some((row2) => row2.status === "queued" || row2.status === "leased" || row2.status === "failed_retryable"))
       return;
@@ -236057,9 +236065,10 @@ ${key2}`;
     beforeCurrent: () => mountSourceLanes(readActiveConnectedHandles(process.env))
   });
   const probeExtractionEnded = (store) => {
-    if (store.family !== "file" || !fileExtractionRuntime)
+    if (!fileExtractionRuntime)
       return;
-    store.setExtractionOutcomeProbe((identity2) => fileExtractionRuntime.jobs.itemExtractionOutcome(identity2));
+    const jobs = fileExtractionRuntime.jobs;
+    store.setExtractionOutcomeProbe(store.family === "file" ? (identity2) => jobs.itemExtractionOutcome(identity2) : (identity2) => jobs.itemExtractionOutcome(identity2) ?? (jobs.itemExtractionState(identity2) === "none" ? NO_EXTRACTION_JOB_OUTCOME : undefined));
   };
   for (const store of connectorStores)
     probeExtractionEnded(store);

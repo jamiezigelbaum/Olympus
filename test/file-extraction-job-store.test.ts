@@ -154,7 +154,7 @@ describe('extraction job store: module identity', () => {
 });
 
 describe('extraction job store: enqueue', () => {
-  test('terminal outcomes use the identity index, latest job warnings, and read/active precedence', () => {
+  test('terminal outcomes use the identity index, latest job warnings, the newest version, and read/active precedence', () => {
     const { store, dbPath } = newStore();
     const item = { provider: LANE.provider, accountScope: LANE.accountScope, providerItemId: 'outcome' };
     expect(store.itemExtractionOutcome(item)).toBeUndefined();
@@ -171,8 +171,15 @@ describe('extraction job store: enqueue', () => {
     expect(store.itemExtractionOutcome(item)).toBeUndefined();
     backdate(dbPath, newer, { status: 'failed_terminal', last_error_kind: 'pdf_damaged', updated_at: '2099-01-01T00:00:00Z' });
     expect(store.itemExtractionOutcome(item)).toEqual({ status: 'failed_terminal', policyDecision: 'index_allowed', lastErrorKind: 'pdf_damaged', warnings: [] });
+    // A read of the same content wins over a newer extractor's failure...
     backdate(dbPath, job, { status: 'indexed', last_error_kind: null });
+    expect(store.itemExtractionOutcome(item)?.status).toBe('indexed');
+    // ...but an older version's read never hides the current version's outcome.
+    backdate(dbPath, newer, { source_version: 'outcome-v2' });
+    expect(store.itemExtractionOutcome(item)).toEqual({ status: 'failed_terminal', policyDecision: 'index_allowed', lastErrorKind: 'pdf_damaged', warnings: [] });
     backdate(dbPath, newer, { status: 'queued' });
+    expect(store.itemExtractionOutcome(item)).toBeUndefined();
+    backdate(dbPath, newer, { status: 'indexed', last_error_kind: null });
     expect(store.itemExtractionOutcome(item)?.status).toBe('indexed');
     expect(store.itemExtractionState(item)).toBe('settled');
   });

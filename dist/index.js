@@ -19326,9 +19326,15 @@ var init_tier_set_binding = __esm(() => {
 });
 
 // src/workers/file-extraction/unreadable-files.ts
-var TOKEN_ALPHABET, DEFAULT_TOKEN_TTL_MS, CURSOR_TIME_ALPHABET;
+var NO_EXTRACTION_JOB_OUTCOME, TOKEN_ALPHABET, DEFAULT_TOKEN_TTL_MS, CURSOR_TIME_ALPHABET;
 var init_unreadable_files = __esm(() => {
   init_archive_formats();
+  NO_EXTRACTION_JOB_OUTCOME = Object.freeze({
+    status: "skipped_unsupported",
+    lastErrorKind: "no_extractor",
+    warnings: [],
+    policyDecision: "index_allowed"
+  });
   TOKEN_ALPHABET = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_");
   DEFAULT_TOKEN_TTL_MS = 30 * 60000;
   CURSOR_TIME_ALPHABET = new Set("0123456789TZ:.+-");

@@ -18223,9 +18223,15 @@ function unreadHoldDisposition(outcome, contentAllowed = true) {
   const errorKind = [outcome.lastErrorKind, ...outcome.warnings, outcome.status].find((kind) => kind !== undefined && specific(kind)) ?? outcome.lastErrorKind ?? outcome.warnings[0] ?? outcome.status;
   return { kind: "cannot_read", errorKind, reason: unreadableFileReason(errorKind) };
 }
-var UNREAD_PRIVACY_CHECK_MISSING_KIND = "privacy_check_missing", TOKEN_ALPHABET, DEFAULT_TOKEN_TTL_MS, CURSOR_TIME_ALPHABET;
+var UNREAD_PRIVACY_CHECK_MISSING_KIND = "privacy_check_missing", NO_EXTRACTION_JOB_OUTCOME, TOKEN_ALPHABET, DEFAULT_TOKEN_TTL_MS, CURSOR_TIME_ALPHABET;
 var init_unreadable_files = __esm(() => {
   init_archive_formats();
+  NO_EXTRACTION_JOB_OUTCOME = Object.freeze({
+    status: "skipped_unsupported",
+    lastErrorKind: "no_extractor",
+    warnings: [],
+    policyDecision: "index_allowed"
+  });
   TOKEN_ALPHABET = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_");
   DEFAULT_TOKEN_TTL_MS = 30 * 60000;
   CURSOR_TIME_ALPHABET = new Set("0123456789TZ:.+-");

@@ -67,7 +67,7 @@ import {
   parseFileExtractionCorporaEnv,
 } from '../email-source/file-extraction-runtime.ts';
 import { createExtractionReadinessLedger } from '../file-extraction/readiness-ledger.ts';
-import { createUnreadableFiles, createUnreadableVerdict } from '../file-extraction/unreadable-files.ts';
+import { NO_EXTRACTION_JOB_OUTCOME, createUnreadableFiles, createUnreadableVerdict } from '../file-extraction/unreadable-files.ts';
 import { VeniceVlmClient } from '../file-extraction/extractors/venice-client.ts';
 import { OpenAICompatibleVlmClient } from '../file-extraction/extractors/openai-compatible-client.ts';
 import { parseOcrEnginePreference } from '../file-extraction/extractors/apple-vision-ocr.ts';
@@ -4372,11 +4372,18 @@ export async function main(): Promise<void> {
     generation: () => sourceLaneGeneration,
     beforeCurrent: () => mountSourceLanes(readActiveConnectedHandles(process.env)),
   });
-  // A file store counts an item unreadable only once its extraction has ended
-  // (LocalConnectorStore.setExtractionOutcomeProbe); a tier store opened later gets it in registerTierLegStore.
+  // Every store reads its unread holds' outcomes from the extraction ledger
+  // (LocalConnectorStore.setExtractionOutcomeProbe): Gmail attachments and chat
+  // media are extracted there too. A file store queues every file, so a file
+  // with no job yet is still waiting; elsewhere an item with no job was never
+  // going to be read. A tier store opened later gets it in registerTierLegStore.
   const probeExtractionEnded = (store: LocalConnectorStore): void => {
-    if (store.family !== 'file' || !fileExtractionRuntime) return;
-    store.setExtractionOutcomeProbe((identity) => fileExtractionRuntime.jobs.itemExtractionOutcome(identity));
+    if (!fileExtractionRuntime) return;
+    const jobs = fileExtractionRuntime.jobs;
+    store.setExtractionOutcomeProbe(store.family === 'file'
+      ? (identity) => jobs.itemExtractionOutcome(identity)
+      : (identity) => jobs.itemExtractionOutcome(identity)
+        ?? (jobs.itemExtractionState(identity) === 'none' ? NO_EXTRACTION_JOB_OUTCOME : undefined));
   };
   for (const store of connectorStores) probeExtractionEnded(store);
   const connectorStoreEmbeddingProviders = new Map<string, SourceEmbeddingProvider>();
