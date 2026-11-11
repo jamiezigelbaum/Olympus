@@ -315,6 +315,21 @@ const CONTAINER_MIME_TYPES_SQL = CONTAINER_MIME_TYPES.map((type) => `'${type}'`)
 const VECTOR_BACKEND = 'exact_scan';
 const SQLITE_STORE_ID = 'connector-store';
 const CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15;
+/** Bits of `tier_visibility_members.flags`. */
+const VISIBILITY_MEMBER_BITS = {
+  hidden: 1, held: 2, heldForJudgment: 4, metadataLayer: 8, metadataLayerContentUnread: 16, moving: 32,
+} as const;
+const SUPERSEDED_HIDDEN_MASK = VISIBILITY_MEMBER_BITS.hidden | VISIBILITY_MEMBER_BITS.held
+  | VISIBILITY_MEMBER_BITS.heldForJudgment | VISIBILITY_MEMBER_BITS.moving;
+
+/** Only settled hidden copies leave FTS; staged/moving and held copies keep their rows. */
+function supersededHiddenSql(item: string, generation = '(SELECT generation FROM main.tier_visibility_state WHERE id = 1)'): string {
+  return `EXISTS (SELECT 1 FROM main.tier_visibility_members m
+    WHERE m.generation = ${generation}
+      AND m.provider = ${item}.provider AND m.account_scope = ${item}.account_scope
+      AND m.conversation_key = COALESCE(${item}.provider_conversation_id, '') AND m.provider_item_id = ${item}.provider_item_id
+      AND (m.flags & ${SUPERSEDED_HIDDEN_MASK}) = ${VISIBILITY_MEMBER_BITS.hidden})`;
+}
 /** The `sync_runs` connector id of a strip of picture content outside Private stores. */
 export const IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = 'olympus_image_content_private_only';
 /** A picture the image encoder fails on is retried after 1 h, 2 h, ... */
@@ -337,6 +352,7 @@ export function connectorStoreMigrations() {
       name: 'connector_store_item_search_text',
       up(db: Database) {
         addColumnIfMissing(db, 'items', 'search_text', 'TEXT');
+        createConnectorStoreVisibilityStateTables(db);
         db.query(`
           UPDATE items
           SET search_text = COALESCE(search_text, title)
@@ -350,6 +366,7 @@ export function connectorStoreMigrations() {
       version: 2,
       name: 'connector_store_fts_porter_unicode61_tokenizer',
       up(db: Database) {
+        createConnectorStoreVisibilityStateTables(db);
         runBoundedFtsTokenizerMigration(db, CONNECTOR_STORE_FTS_MIGRATION);
       },
     },
@@ -528,6 +545,12 @@ const ITEM_VISIBILITY_FEED_RETENTION = 65_536;
  * own connection.
  */
 function createConnectorStoreVisibilityTables(db: Database): void {
+  createConnectorStoreVisibilityStateTables(db);
+  createConnectorStoreVisibilityFeedTriggers(db);
+}
+
+/** Also needed before the older FTS migrations, which predate the item feed's columns. */
+function createConnectorStoreVisibilityStateTables(db: Database): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS item_visibility_feed (
       seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -551,6 +574,11 @@ function createConnectorStoreVisibilityTables(db: Database): void {
       owner TEXT NOT NULL,
       expires_at INTEGER NOT NULL
     );
+    -- Separate from the saved flags so older read-only builds keep their schema.
+    CREATE TABLE IF NOT EXISTS tier_visibility_fts_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      generation INTEGER NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS tier_visibility_state (
       id INTEGER PRIMARY KEY CHECK (id = 1),
       corpus_id TEXT NOT NULL,
@@ -560,6 +588,9 @@ function createConnectorStoreVisibilityTables(db: Database): void {
       store_cursor INTEGER NOT NULL
     );
   `);
+}
+
+function createConnectorStoreVisibilityFeedTriggers(db: Database): void {
   const note = (row: 'NEW' | 'OLD') => `
     INSERT INTO item_visibility_feed (provider, account_scope, conversation_key, provider_item_id)
       VALUES (${row}.provider, ${row}.account_scope, ${row}.normalized_conversation, ${row}.provider_item_id);
@@ -745,6 +776,7 @@ export const CONNECTOR_STORE_FTS_MIGRATION: SourceIndexFtsMigrationSpec = {
     LEFT JOIN chunks c
       ON c.item_pk = i.item_pk
     WHERE i.tombstoned = 0
+      AND NOT ${supersededHiddenSql('i')}
     ORDER BY i.item_pk, c.chunk_index;
   `,
 };
@@ -1114,11 +1146,6 @@ export class TierLedgerUnavailableError extends Error {
     this.name = 'TierLedgerUnavailableError';
   }
 }
-
-/** Bits of `tier_visibility_members.flags`. */
-const VISIBILITY_MEMBER_BITS = {
-  hidden: 1, held: 2, heldForJudgment: 4, metadataLayer: 8, metadataLayerContentUnread: 16, moving: 32,
-} as const;
 
 interface SavedVisibilityState {
   corpus_id: string;
@@ -4042,6 +4069,10 @@ export class LocalConnectorStore {
     const put = (generation: number, flags: TierLedgerIdentity) => {
       const key = [generation, flags.provider, flags.accountScope, flags.providerConversationId ?? '', flags.providerItemId] as const;
       const member = memo.members.get(tierLedgerIdentityKey(flags));
+      // A current, ordinary copy leaves memo.members entirely. Look its pks
+      // up in that case too, so a rollback restores the retained text to FTS.
+      const pks = member?.pks ?? this.itemRowsForIdentities([flags], identity => normalizeConversationId(identity.providerConversationId))
+        .map(row => row.item_pk);
       if (member) {
         this.db.query(`INSERT OR REPLACE INTO main.tier_visibility_members
           (generation, provider, account_scope, conversation_key, provider_item_id, flags, item_pks_json) VALUES (?, ?, ?, ?, ?, ?, ?)`)
@@ -4049,6 +4080,16 @@ export class LocalConnectorStore {
       } else {
         this.db.query(`DELETE FROM main.tier_visibility_members
           WHERE generation = ? AND provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`).run(...key);
+      }
+      // These writes share the member write's lease-checked transaction.
+      // Use the generation being built: on a full publish the live stamp
+      // still points at the old flags until every step has finished.
+      const hidden = member && (visibilityMemberBits(member.flags) & SUPERSEDED_HIDDEN_MASK) === VISIBILITY_MEMBER_BITS.hidden;
+      for (const pk of pks) {
+        if (hidden) this.deleteFtsForItem(pk);
+        else if (!this.db.query('SELECT 1 FROM connector_store_fts_rows WHERE item_pk = ? LIMIT 1').get(pk)) {
+          this.refreshFtsForItem(pk, generation);
+        }
       }
     };
     let leased = false;
@@ -4060,7 +4101,17 @@ export class LocalConnectorStore {
       }), { take: true });
       leased = true;
       const sameAuthority = state !== null && state.corpus_id === this.corpusId && state.ledger_id === ledgerId;
-      if (sameAuthority && state.ledger_cursor >= stamp.ledger && state.store_cursor >= stamp.store) return;
+      const reconciled = state !== null && this.db.query(
+        'SELECT 1 FROM main.tier_visibility_fts_state WHERE id = 1 AND generation = ?',
+      ).get(state.generation) !== null;
+      if (sameAuthority && state.ledger_cursor >= stamp.ledger && state.store_cursor >= stamp.store) {
+        // Older builds saved flags without pruning FTS. Repair that generation
+        // once, without rewriting members; the durable receipt survives reopen.
+        if (!reconciled && state.ledger_cursor === stamp.ledger && state.store_cursor === stamp.store) {
+          yield* this.reconcileVisibilityFtsSteps(state.generation, current);
+        }
+        return;
+      }
       const unchanged = () => {
         const now = this.readVisibilityState();
         if (now?.generation !== state?.generation || now?.ledger_cursor !== state?.ledger_cursor
@@ -4089,11 +4140,15 @@ export class LocalConnectorStore {
         yield;
         if (!current()) return;
         moveStamp(state.generation);
+        if (!reconciled) yield* this.reconcileVisibilityFtsSteps(state.generation, current);
         return;
       }
       // Unique while the lease is held: above every generation any earlier
       // publisher wrote, live or left behind.
       const generation = Math.max(state?.generation ?? 0, top) + 1;
+      // A partial full build can prune rows before switching the stamp. Its
+      // successor must reconcile even if it resumes from the old saved set.
+      this.visibilityWrite(() => this.db.exec('DELETE FROM main.tier_visibility_fts_state'));
       // The live members: one changed after this publish started is written
       // as it is now (a later state the feed covers), or not at all when it
       // left the set (also in the feed).
@@ -4118,6 +4173,7 @@ export class LocalConnectorStore {
       yield;
       if (!current()) return;
       moveStamp(generation);
+      yield* this.reconcileVisibilityFtsSteps(generation, current);
       // Generations older than the live one (and any a failed publish left
       // below it) go a chunk at a time; a newer one is never touched.
       for (;;) {
@@ -4147,6 +4203,40 @@ export class LocalConnectorStore {
     } finally {
       if (leased) this.releaseVisibilityLease();
     }
+  }
+
+  /** Mark only a completed scan, under the same lease as its FTS writes. */
+  private *reconcileVisibilityFtsSteps(generation: number, current: () => boolean): Generator<void, void> {
+    // A full rebuild has no changed-identity list: a rolled-back copy may
+    // no longer be in memo.members at all. Restore missing rows in bounded
+    // pages, also repairing deletions left by an interrupted older publish.
+    // Reconcile after switching the stamp: a concurrent sync refresh may
+    // have used the old generation while this one was being built. Now
+    // refreshes see these flags too and cannot undo the pruning.
+    const chunk = Math.max(1, this.visibilityPublishChunk);
+    let afterPk = 0;
+    for (;;) {
+      yield;
+      if (!current()) return;
+      const page = this.visibilityWrite(() => {
+        const rows = this.db.query(`SELECT i.item_pk,
+          EXISTS (SELECT 1 FROM connector_store_fts_rows f WHERE f.item_pk = i.item_pk) AS indexed,
+          ${supersededHiddenSql('i', String(generation))} AS hidden
+          FROM items i WHERE i.item_pk > ? AND i.tombstoned = 0 ORDER BY i.item_pk LIMIT ?`)
+          .all(afterPk, chunk) as Array<{ item_pk: number; indexed: number; hidden: number }>;
+        for (const row of rows) {
+          if (row.hidden && row.indexed) this.deleteFtsForItem(row.item_pk);
+          else if (!row.indexed && !row.hidden) this.refreshFtsForItem(row.item_pk, generation);
+        }
+        return rows;
+      });
+      if (page.length < chunk) break;
+      afterPk = page[page.length - 1]!.item_pk;
+    }
+    this.visibilityWrite(() => {
+      if (this.readVisibilityState()?.generation !== generation) throw visibilityPublishLeaseError();
+      this.db.query('INSERT OR REPLACE INTO main.tier_visibility_fts_state (id, generation) VALUES (1, ?)').run(generation);
+    });
   }
 
   /** Called as feeds move: refreshes and saves this writer's set before a feed drops what the saved stamp needs. */
@@ -7550,6 +7640,7 @@ export class LocalConnectorStore {
         c.bounded_text,
         c.content_hash,
         COALESCE(fts_counts.fts_rows, 0) AS fts_rows,
+        ${this.visibilityFeedPresent ? supersededHiddenSql('i') : '0'} AS superseded_hidden,
         CASE WHEN c.chunk_pk IS NULL THEN 1 ELSE EXISTS (
           SELECT 1
           FROM connector_store_fts_rows owned
@@ -7576,6 +7667,7 @@ export class LocalConnectorStore {
       bounded_text: string | null;
       content_hash: string | null;
       fts_rows: number;
+      superseded_hidden: number;
       chunk_fts_mapped: number;
       embedding_current: number;
     }>(this.db, rowsSql, embeddingModelId);
@@ -7583,6 +7675,7 @@ export class LocalConnectorStore {
     let currentItemPk: number | undefined;
     let currentLocalItemId = '';
     let currentFtsRows = 0;
+    let currentSupersededHidden = false;
     let currentChunkCount = 0;
     let currentChunkUnmapped = false;
     let currentMissingEmbedding = false;
@@ -7601,7 +7694,7 @@ export class LocalConnectorStore {
       // six-figure corpus scale. Dangling mappings share the item, so the
       // narrowed probe still detects the crash window — and additionally
       // flags a mapping that points at another item's chunk.
-      if (currentChunkUnmapped || currentFtsRows !== currentChunkCount + 1) {
+      if (!currentSupersededHidden && (currentChunkUnmapped || currentFtsRows !== currentChunkCount + 1)) {
         counts.itemsWithFtsDeficiency += 1;
         if (samples.ftsDeficientLocalItemIds.length < sampleLimit) {
           samples.ftsDeficientLocalItemIds.push(currentLocalItemId);
@@ -7627,6 +7720,7 @@ export class LocalConnectorStore {
         currentItemPk = row.item_pk;
         currentLocalItemId = row.local_item_id;
         currentFtsRows = row.fts_rows;
+        currentSupersededHidden = row.superseded_hidden === 1;
         currentChunkCount = 0;
         currentChunkUnmapped = false;
         currentMissingEmbedding = false;
@@ -10970,10 +11064,11 @@ export class LocalConnectorStore {
     `).run(Number(inserted.lastInsertRowid), itemPk, chunkPk);
   }
 
-  private refreshFtsForItem(itemPk: number): number {
+  private refreshFtsForItem(itemPk: number, visibilityGeneration?: number): number {
     return this.db.transaction(() => {
       this.deleteFtsForItem(itemPk);
-      const item = this.db.query('SELECT title, search_text FROM items WHERE item_pk = ? AND tombstoned = 0').get(itemPk) as
+      const item = this.db.query(`SELECT title, search_text FROM items i WHERE item_pk = ? AND tombstoned = 0
+        AND NOT ${supersededHiddenSql('i', visibilityGeneration === undefined ? undefined : String(visibilityGeneration))}`).get(itemPk) as
         | { title: string | null; search_text: string | null }
         | null;
       if (!item) return 0;
@@ -18116,6 +18211,7 @@ function validateConnectorStoreVisibilitySchema(db: Database, versionLabel: stri
   assertExactTableColumns(db, 'tier_visibility_state',
     ['id', 'corpus_id', 'ledger_id', 'generation', 'ledger_cursor', 'store_cursor'], false, versionLabel);
   assertExactTableColumns(db, 'tier_visibility_lease', ['id', 'owner', 'expires_at'], false, versionLabel);
+  assertExactTableColumns(db, 'tier_visibility_fts_state', ['id', 'generation'], false, versionLabel);
   for (const trigger of CONNECTOR_STORE_VISIBILITY_TRIGGERS) assertTriggerExists(db, trigger, versionLabel);
 }
 

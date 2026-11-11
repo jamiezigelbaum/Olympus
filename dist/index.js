@@ -19932,6 +19932,14 @@ var init_media_judge = __esm(() => {
 });
 
 // src/workers/connector-store/local-index.ts
+function supersededHiddenSql(item, generation = "(SELECT generation FROM main.tier_visibility_state WHERE id = 1)") {
+  return `EXISTS (SELECT 1 FROM main.tier_visibility_members m
+    WHERE m.generation = ${generation}
+      AND m.provider = ${item}.provider AND m.account_scope = ${item}.account_scope
+      AND m.conversation_key = COALESCE(${item}.provider_conversation_id, '') AND m.provider_item_id = ${item}.provider_item_id
+      AND (m.flags & ${SUPERSEDED_HIDDEN_MASK}) = ${VISIBILITY_MEMBER_BITS.hidden})`;
+}
+
 class MutablePkList {
   values = [];
   positions = new Map;
@@ -19956,7 +19964,7 @@ class MutablePkList {
 function connectorStoreContentPreference(vettedVectorItemIds) {
   return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
 }
-var CONCEPT_COUNT_MAX_AGE_MS, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, STATUS_COUNTS_MAX_AGE_MS, TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
+var CONCEPT_COUNT_MAX_AGE_MS, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VISIBILITY_MEMBER_BITS, SUPERSEDED_HIDDEN_MASK, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, STATUS_COUNTS_MAX_AGE_MS, TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
 var init_local_index = __esm(() => {
   init_store_write_guard();
   init_job_names();
@@ -20006,6 +20014,15 @@ var init_local_index = __esm(() => {
     "application/vnd.google-apps.folder"
   ]);
   CONTAINER_MIME_TYPES_SQL = CONTAINER_MIME_TYPES.map((type) => `'${type}'`).join(", ");
+  VISIBILITY_MEMBER_BITS = {
+    hidden: 1,
+    held: 2,
+    heldForJudgment: 4,
+    metadataLayer: 8,
+    metadataLayerContentUnread: 16,
+    moving: 32
+  };
+  SUPERSEDED_HIDDEN_MASK = VISIBILITY_MEMBER_BITS.hidden | VISIBILITY_MEMBER_BITS.held | VISIBILITY_MEMBER_BITS.heldForJudgment | VISIBILITY_MEMBER_BITS.moving;
   CHUNK_MEDIA_RETRY_BASE_MS = 60 * 60000;
   CONNECTOR_STORE_FTS_MIGRATION = {
     tableName: "connector_store_fts",
@@ -20030,6 +20047,7 @@ var init_local_index = __esm(() => {
     LEFT JOIN chunks c
       ON c.item_pk = i.item_pk
     WHERE i.tombstoned = 0
+      AND NOT ${supersededHiddenSql("i")}
     ORDER BY i.item_pk, c.chunk_index;
   `
   };
