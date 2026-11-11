@@ -74814,6 +74814,13 @@ function resolveLaneTimeoutMs(explicit) {
     return DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS;
   return parsed;
 }
+function resolveAskSearchBudgetMs(explicit) {
+  if (explicit !== undefined)
+    return explicit;
+  const raw = process.env.OLYMPUS_SOURCE_ANSWER_SEARCH_BUDGET_MS?.trim();
+  const parsed = raw ? Number(raw) : NaN;
+  return Number.isFinite(parsed) ? parsed : DEFAULT_ASK_SEARCH_BUDGET_MS;
+}
 function cooperativeLaneDeadlineAtMs(timeoutMs) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
     return;
@@ -74875,7 +74882,7 @@ function assertNoForbiddenRouterResultKeys(value, path) {
 function normalizeRouterResultKey(key2) {
   return key2.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
-var REAL_LANE_CLOCK, DEFAULT_SEMANTIC_PREPARE_BUDGET_MS = 15000, DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 710000, COOPERATIVE_LANE_DEADLINE_HEADROOM_MS = 50, HELD_THREAD_LATE_TIMER_MS = 500, HELD_THREAD_GRACE_MS = 1000, HELD_THREAD_MAX_DEADLINE_FACTOR = 6, FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS;
+var REAL_LANE_CLOCK, DEFAULT_SEMANTIC_PREPARE_BUDGET_MS = 15000, DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 60000, DEFAULT_ASK_SEARCH_BUDGET_MS = 1e5, COOPERATIVE_LANE_DEADLINE_HEADROOM_MS = 50, HELD_THREAD_LATE_TIMER_MS = 500, HELD_THREAD_GRACE_MS = 1000, HELD_THREAD_MAX_DEADLINE_FACTOR = 6, FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS;
 var init_router = __esm(() => {
   init_keyword_context();
   init_types();
@@ -75252,7 +75259,8 @@ function selectedItemsToRoutedSlice(input) {
 async function runRoutedSearches(input, retrievalLimit = input.maxResults) {
   const literalQuery = literalSearchQuery(input);
   const pendingPlan = input.queryPlanner ? startQueryPlanner(input.queryPlanner, input.question) : undefined;
-  const literalRun = await runRoutedSearch(input, literalQuery, 1, retrievalLimit);
+  const budget = searchBudget(input);
+  const literalRun = await runRoutedSearch(input, literalQuery, 1, retrievalLimit, budget.firstLaneTimeoutMs());
   if (!pendingPlan)
     return literalRun;
   if (isStrongLiteralRun(literalRun, input.maxResults)) {
@@ -75268,8 +75276,15 @@ async function runRoutedSearches(input, retrievalLimit = input.maxResults) {
     return literalRun;
   const runs = [literalRun];
   for (const query of expansions) {
-    runs.push(await runRoutedSearch(input, query, runs.length + 1, retrievalLimit));
+    const laneTimeoutMs = budget.laneTimeoutMs();
+    if (laneTimeoutMs === undefined) {
+      recordSourceAnswerQueryPlannerDisposition("search_budget_spent");
+      break;
+    }
+    runs.push(await runRoutedSearch(input, query, runs.length + 1, retrievalLimit, laneTimeoutMs));
   }
+  if (runs.length === 1)
+    return literalRun;
   const queries = [literalQuery, ...expansions];
   const ranked = fuseRankedCandidateLanes({
     lanes: runs.map((run, index) => ({ name: queries[index], items: run.hits })),
@@ -75302,7 +75317,23 @@ function mergeRoutedSkippedCorpora(runs) {
 function literalSearchQuery(input) {
   return input.searchQuery?.trim() || input.question;
 }
-function runRoutedSearch(input, query, ordinal, maxResults) {
+function searchBudget(input) {
+  const lane = resolveLaneTimeoutMs(input.laneTimeoutMs);
+  const total = resolveAskSearchBudgetMs(input.searchBudgetMs);
+  const startedAt = Date.now();
+  const cut = (left2) => Number.isFinite(lane) && lane > 0 ? Math.min(lane, left2) : left2;
+  const left = () => Math.max(1, total - (Date.now() - startedAt));
+  const unbounded = !Number.isFinite(total) || total <= 0;
+  return {
+    firstLaneTimeoutMs: () => unbounded ? lane : cut(left()),
+    laneTimeoutMs() {
+      if (unbounded)
+        return lane;
+      return left() < MIN_EXPANSION_BUDGET_MS ? undefined : cut(left());
+    }
+  };
+}
+function runRoutedSearch(input, query, ordinal, maxResults, laneTimeoutMs) {
   return observeSourceAnswerRoutedQuery(ordinal, () => routeSourceIndexSearch({
     registry: input.registry,
     adapters: input.adapters,
@@ -75312,7 +75343,7 @@ function runRoutedSearch(input, query, ordinal, maxResults) {
       ...input.corpusIds ? { corpusIds: input.corpusIds } : {},
       context: input.searchContext
     },
-    ...input.laneTimeoutMs !== undefined ? { laneTimeoutMs: input.laneTimeoutMs } : {},
+    laneTimeoutMs,
     ...input.visibilityGate ? { visibilityGate: input.visibilityGate } : {}
   }));
 }
@@ -75417,7 +75448,7 @@ function trustDomainRank2(trustDomain) {
     return 1;
   return 2;
 }
-var SOURCE_MODEL_POLICY_GAP_SUFFIX = "excluded one candidate from model use under current source policy.", MIN_BYTES_PER_CANDIDATE = 400, utf8, MAX_SEARCH_QUERIES = 3;
+var SOURCE_MODEL_POLICY_GAP_SUFFIX = "excluded one candidate from model use under current source policy.", MIN_BYTES_PER_CANDIDATE = 400, utf8, MAX_SEARCH_QUERIES = 3, MIN_EXPANSION_BUDGET_MS = 1000;
 var init_evidence_pack = __esm(() => {
   init_keyword_context();
   init_evidence_reranker();

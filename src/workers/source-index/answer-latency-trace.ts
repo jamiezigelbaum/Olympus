@@ -26,7 +26,8 @@ export type SourceAnswerRetrievalAttemptKind =
 export type SourceAnswerQueryPlannerDisposition =
   | 'awaited'
   | 'ignored_after_strong_literal'
-  | 'failed';
+  | 'failed'
+  | 'search_budget_spent';
 
 export interface SourceAnswerTraceCorpusTiming {
   corpus_id: string;

@@ -410,7 +410,7 @@ describe('source-index router per-lane retrieval deadline', () => {
     expect(result.skippedCorpora).toEqual([]);
   });
 
-  test('the default budget preserves the measured 155 s search and still bounds a wedged lane', async () => {
+  test('the default lane deadline keeps a slow healthy store and still bounds a wedged lane', async () => {
     const saved = process.env.OLYMPUS_SOURCE_ANSWER_LANE_TIMEOUT_MS;
     delete process.env.OLYMPUS_SOURCE_ANSWER_LANE_TIMEOUT_MS;
     const clock = createTestClock();
@@ -423,7 +423,7 @@ describe('source-index router per-lane retrieval deadline', () => {
         adapters: {
           'public_safe.fast': async request => {
             started++;
-            await clock.sleep(155_126); // #1305 measured successful full fan-out
+            await clock.sleep(50_000); // a slow but healthy store, inside the 60 s default
             return healthy(request);
           },
           'public_safe.slow': () => { started++; return new Promise(() => {}); },
@@ -431,7 +431,7 @@ describe('source-index router per-lane retrieval deadline', () => {
         request: { query: 'q', maxResults: 5, context },
       });
       await waitFor(() => started === 2, { description: 'both budget-test lanes started' });
-      await clock.advance(710_000);
+      await clock.advance(60_000);
       const result = await pending;
       expect(result.searchedCorpora).toEqual(['public_safe.fast']);
       expect(result.hits.map(hit => hit.corpusId)).toEqual(['public_safe.fast']);

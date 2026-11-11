@@ -292,7 +292,7 @@ export interface RouteSourceIndexSearchOptions {
   // reported in skippedCorpora with reason 'lane_timeout', so one slow corpus
   // (e.g. a multi-GB keyword index under write contention) can no longer hold
   // the whole source_answer hostage — total fan-out time is bounded by this
-  // budget. Defaults to OLYMPUS_SOURCE_ANSWER_LANE_TIMEOUT_MS, or 710s when
+  // budget. Defaults to OLYMPUS_SOURCE_ANSWER_LANE_TIMEOUT_MS, or 60s when
   // unset. A non-positive / non-finite value disables the deadline (unbounded
   // lanes — the pre-deadline behavior).
   laneTimeoutMs?: number;
@@ -326,14 +326,25 @@ const REAL_LANE_CLOCK: LaneDeadlineClock = {
 // EvidencePack's coverage says so.
 export const DEFAULT_SEMANTIC_PREPARE_BUDGET_MS = 15_000;
 
+// Default per-lane retrieval deadline (ms), and the whole-Ask search budget.
+//
+// Since #1305 each store reads on its own warm worker, so a lane's time is its
+// own store's statement, not a queue behind other stores. The lane deadline
+// covers one healthy store at Sparta size with margin; the Ask budget is about
+// what a 1.4.x Ask takes on Sparta (roughly 100 s), across the literal query
+// and its expansions, which run one after another. A lane that misses either
+// is reported as still being searched (#1317's wording), and its statement
+// finishes on its worker, so the store is warm for the next Ask. Neither
+// binds on a small install, whose lanes return in milliseconds.
+//
+// Never below the stores' SQLite busy_timeout (10 s): a lane waiting out the
+// single writer resolves within it.
+//
+// Provisional until the #1305 testbed copy's live pool fields set them.
+const DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 60_000;
+const DEFAULT_ASK_SEARCH_BUDGET_MS = 100_000;
 // Exact-vector adapters receive a cooperative deadline just inside the
 // authoritative timer, so a scan can yield before holding the event loop.
-// #1305, scripts/result.md: a313bb90~1 returned all 33 lanes in 505.486 s
-// without a writer and 701.681 s with one. Round the measured worst serial
-// fan-out up to 710 s rather than assuming a
-// parallel speedup. Store-affine readers normally finish much earlier; this
-// finite fallback budget preserves all 33 lanes in the measured baseline.
-const DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 710_000;
 const COOPERATIVE_LANE_DEADLINE_HEADROOM_MS = 50;
 // A deadline timer this late means the thread was held past it (see
 // runCorpusLaneWithDeadline); the lane then gets HELD_THREAD_GRACE_MS more,
@@ -892,7 +903,7 @@ async function runCorpusLaneWithDeadline(
   }
 }
 
-function resolveLaneTimeoutMs(explicit: number | undefined): number {
+export function resolveLaneTimeoutMs(explicit: number | undefined): number {
   if (explicit !== undefined) return explicit;
   const raw = process.env.OLYMPUS_SOURCE_ANSWER_LANE_TIMEOUT_MS?.trim();
   if (!raw) return DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS;
@@ -900,6 +911,14 @@ function resolveLaneTimeoutMs(explicit: number | undefined): number {
   if (!Number.isFinite(parsed)) return DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS;
   // parsed <= 0 is honored as "disable the deadline" by runCorpusLaneWithDeadline.
   return parsed;
+}
+
+/** The whole-Ask search budget (BuildEvidencePackInput.searchBudgetMs). */
+export function resolveAskSearchBudgetMs(explicit: number | undefined): number {
+  if (explicit !== undefined) return explicit;
+  const raw = process.env.OLYMPUS_SOURCE_ANSWER_SEARCH_BUDGET_MS?.trim();
+  const parsed = raw ? Number(raw) : NaN;
+  return Number.isFinite(parsed) ? parsed : DEFAULT_ASK_SEARCH_BUDGET_MS;
 }
 
 function cooperativeLaneDeadlineAtMs(timeoutMs: number): number | undefined {
