@@ -153,6 +153,7 @@ describe('the real eval report says where an expected value was lost (#1234)', (
       answerValueTokens: 1,
       answerValueTokensInCitedSeats: 0,
       answerValueTokensUnmatchedShapes: ['9999'],
+      answerValueTokensUnmatchedSeats: [[1]],
       expected: [
         { inPack: true, inPackAsSubstring: true, inAnalystAnswer: true, inReleasedAnswer: false, packSeats: [kestrelSeat], valueSeatCited: false },
         { inPack: false, inPackAsSubstring: false, inAnalystAnswer: false, inReleasedAnswer: false, packSeats: [], valueSeatCited: false },
@@ -283,6 +284,14 @@ describe('the real eval report locates an expected item and value for a miss', (
       answerValueTokensUnmatchedShapes: ['9,999', '9999-99-99'],
     });
     expect(evalAnswerStageAudit(question, pack, inSeat, inSeat).answerValueTokensUnmatchedShapes).toEqual([]);
+    // Where an unmatched value came from: another seat's text, and whether the model was sent it.
+    const elsewhere = { ...citing(1), answer: 'The total is 5120 dollars, due 2031-01-01.' } as unknown as AnalystResult;
+    expect(evalAnswerStageAudit(question, tabled, elsewhere, elsewhere, ['Evidence: total 5120'])).toMatchObject({
+      answerValueTokensUnmatchedShapes: ['9999', '9999-99-99'],
+      answerValueTokensUnmatchedInPrompt: [true, false],
+      answerValueTokensUnmatchedSeats: [[2], []],
+    });
+    expect(evalAnswerStageAudit(question, tabled, elsewhere, elsewhere).answerValueTokensUnmatchedInPrompt).toBeUndefined();
     // A value the answer takes from the cited seat's citation line (its date,
     // its file name inside a path) is in that seat, as the Analyst saw it.
     const dated = {

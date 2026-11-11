@@ -767,6 +767,15 @@ export interface EvalAnswerStageAudit {
    * one without carrying the value itself.
    */
   answerValueTokensUnmatchedShapes: string[];
+  /**
+   * For each unmatched token, in the same order: whether it occurs as a whole
+   * token in the prompt the Analyst model was sent (absent when no prompt was
+   * recorded), and the 1-based pack seats whose text holds it. A token in the
+   * prompt but in no cited seat came from another seat; one in no seat and
+   * not in the prompt was not read anywhere.
+   */
+  answerValueTokensUnmatchedInPrompt?: boolean[];
+  answerValueTokensUnmatchedSeats: number[][];
   /** The pack seats the Analyst was sent, when a prompt budget fitted the pack (Ask's local leg). */
   analystSeats?: number[];
   /**
@@ -1045,6 +1054,8 @@ export function evalAnswerStageAudit(
   const valueTokens = answerValueTokens(analystOwn.answer, pack.candidates.length);
   // Whole tokens, so '41' is not supported by a seat that says '4182'.
   const citedTokens = seatSupportTokens(citedSeats.map((seat) => seatTexts[seat - 1]!.all).join('\n'));
+  const unmatchedTokens = valueTokens.filter((token) => !citedTokens.has(token));
+  const promptTokens = promptText !== undefined ? seatSupportTokens(promptText) : undefined;
   const values = question.expectedAnswerContains ?? [];
   const inAnswer = values.filter((value) => answerContainsExpectedValue(value, analystOwn.answer).matched).length;
   const answerShape = values.length === 0
@@ -1066,7 +1077,12 @@ export function evalAnswerStageAudit(
       : {}),
     answerValueTokens: valueTokens.length,
     answerValueTokensInCitedSeats: valueTokens.filter((token) => citedTokens.has(token)).length,
-    answerValueTokensUnmatchedShapes: valueTokens.filter((token) => !citedTokens.has(token)).map(tokenShape),
+    answerValueTokensUnmatchedShapes: unmatchedTokens.map(tokenShape),
+    ...(promptText !== undefined
+      ? { answerValueTokensUnmatchedInPrompt: unmatchedTokens.map((token) => promptTokens!.has(token)) }
+      : {}),
+    answerValueTokensUnmatchedSeats: unmatchedTokens.map((token) => seatTexts.flatMap((seat, index) =>
+      seatSupportTokens(seat.all).has(token) ? [index + 1] : [])),
     ...(analystSeats ? { analystSeats: [...analystSeats] } : {}),
     ...(promptText !== undefined ? { analystPromptChars: analystPrompts!.reduce((sum, prompt) => sum + prompt.length, 0) } : {}),
     ...(analystModelIds && analystModelIds.length > 0 ? { analystModelIds: [...analystModelIds] } : {}),

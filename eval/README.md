@@ -195,6 +195,11 @@ local Dropbox index and a reachable Argus lane:
    date of a citation timestamp, each segment of its locator path and a file
    name without its extension, since
    the Analyst sees those in the seat's citation line.
+   For each value token found in no cited seat,
+   `answerValueTokensUnmatchedSeats` lists the pack seats whose text holds it,
+   and `answerValueTokensUnmatchedInPrompt` says whether the prompt the model
+   was sent held it. A token in the prompt came from another seat. A token in
+   neither the prompt nor any seat was not read anywhere.
    The shared Analyst also caps model output at 1,600 characters by default so
    local eval questions fail or answer quickly instead of generating long JSON.
 
