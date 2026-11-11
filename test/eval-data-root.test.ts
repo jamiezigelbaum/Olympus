@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
-import { cpSync, closeSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
+import { cpSync, closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -110,4 +110,20 @@ test('a declaration identifies an empty extension store without relabelling popu
   const seed = new LocalConnectorStore({ dbPath: path, ...identity }); seed.close(); Bun.gc(true);
   const opened = openEvalDataRoot({ dataRoot: root, mountDeclarations: [{ dbPath: path, ...identity }] });
   try { expect(opened.stores).toHaveLength(1); expect(opened.storeCounts[0]!.rows).toBe(0); } finally { opened.close(); }
+});
+
+test('refuses the live data folder, a folder inside it, and a folder holding it, with no --forbid-root', async () => {
+  const xdg = temp();
+  const saved = { XDG_DATA_HOME: process.env.XDG_DATA_HOME, OLYMPUS_DATA_DIR: process.env.OLYMPUS_DATA_DIR };
+  process.env.XDG_DATA_HOME = xdg;
+  delete process.env.OLYMPUS_DATA_DIR;
+  try {
+    const live = join(xdg, 'openclaw', 'olympus');
+    const inside = join(live, 'accounts');
+    mkdirSync(inside, { recursive: true });
+    await seed(inside);
+    for (const dataRoot of [live, inside, xdg]) expect(() => openEvalDataRoot({ dataRoot })).toThrow('live data folder');
+  } finally {
+    for (const [key, value] of Object.entries(saved)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
+  }
 });

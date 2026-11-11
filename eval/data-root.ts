@@ -124,10 +124,20 @@ function recordedMounts(root: string, explicit?: EvalDataRootOptions['mountDecla
   return mounts;
 }
 
+/** The real path when it exists, so a link to the live folder is caught too. */
+function canonicalPath(path: string): string {
+  return existsSync(path) ? realpathSync(path) : resolve(path);
+}
+
 export function openEvalDataRoot(options: EvalDataRootOptions): EvalDataRoot {
   const root = realpathSync(options.dataRoot);
+  // The live data folder is refused without being named: a copy must not be
+  // it, sit inside it or hold it (privacy review of #1450).
+  const live = canonicalPath(olympusDataRoot());
+  if (tierLedgerIsWithin(live, root) || tierLedgerIsWithin(root, live)) throw new Error('--data-root is, holds or lies inside the live data folder.');
   for (const forbidden of options.forbidRoots ?? []) {
-    if (tierLedgerIsWithin(forbidden, root) || tierLedgerIsWithin(root, forbidden)) throw new Error('--data-root lies inside a forbidden root.');
+    const path = canonicalPath(forbidden);
+    if (tierLedgerIsWithin(path, root) || tierLedgerIsWithin(root, path)) throw new Error('--data-root lies inside a forbidden root.');
   }
   const mounted = recordedMounts(root, options.mountDeclarations);
   const files = inventory(root);
