@@ -198,3 +198,18 @@ test('a failed attempt does not persist the rolled-back audit totals with its fa
   const entries = (await readEmbeddingLedger(ctx.embeddingLedger.path)).entries.filter(entry => entry.entry_id?.startsWith('automatic-superseded-prune:'));
   expect(entries[0]?.scope?.chunks?.[CORPORA.secure_local]).toBe(2);
 });
+
+test('with a time budget one call keeps paging until the walk ends, and the walk skips items without superseded copies', async () => {
+  const ctx = await fixture();
+  let clock = 0;
+  // Budget spent after the first page: one item only.
+  expect(sweepAutomaticSupersededCopies(ctx.f.set, { limit: 1, budgetMs: 5, now: () => (clock += 10),
+    embeddingLedger: ctx.embeddingLedger })).toMatchObject({ checked: 1, purged: 1, complete: false });
+  // A budget that lasts: the rest of the walk in one call.
+  expect(sweepAutomaticSupersededCopies(ctx.f.set, { limit: 1, budgetMs: 60_000, now: () => 0,
+    embeddingLedger: ctx.embeddingLedger })).toMatchObject({ purged: 1, complete: true });
+  // Only b (its moved migration proposal protects it) still holds a superseded copy.
+  expect(ctx.f.ledger.listSupersededItemWindow({ limit: 10 }).map(record => record.providerItemId))
+    .toEqual([identityOf('b').providerItemId]);
+  expect(ctx.f.ledger.listItemWindow({ limit: 10 })).toHaveLength(3);
+});
