@@ -38,6 +38,8 @@ export interface SourceDriver {
 const NOT_CONNECTED = ['not_connected', 'needs_setup', 'awaiting_consent', 'reauth_required'];
 const connected = (card: any): boolean => !!card && !NOT_CONNECTED.includes(String(card.connection?.state ?? 'not_connected'));
 const items = (card: any): number => Number(card?.coverage?.indexed_items ?? 0);
+// A disconnected source counts nothing as indexed, though its rows are still stored: Delete is owed while either is above zero (run 43101153800 skipped it).
+const kept = (card: any): number => Math.max(items(card), Number(card?.coverage?.stored_items ?? 0));
 const summary = (card: any): string => `connection ${String(card?.connection?.state ?? '?')} (${String(card?.connection?.label ?? '?').slice(0, 60)}), ${String(card?.coverage?.indexed_items ?? '?')} indexed`;
 /** Why a source was not indexed: the card parts that say whether its scope, queue, judge or schedule is holding it (runs 43043603156, 43043621929 showed only "syncing, 0 indexed"). */
 const notIndexed = (card: any): string => `${summary(card)}; ${JSON.stringify({
@@ -141,14 +143,14 @@ export function localFilesDriver(outer: SeedContext): SourceDriver {
       if (!done.ok) return done;
     }
     card = await ctx.cardOf('local_files');
-    if (items(card) > 0) {
+    if (kept(card) > 0) {
       const reply = await ask('/dashboard/delete-source-data', { source_id: 'local.files', acknowledge: true });
       if (reply.status !== 200) return { ok: false, detail: `delete-source-data answered ${reply.status}: ${flat(reply.text)}` };
       // The worker answers first and restarts a moment later (#1034): a page read in that gap fails, so the next step waits for it.
       if (reply.json?.worker_restarting === true) await settleRestart();
-      card = await until(async () => { const now = await ctx.cardOf('local_files'); return items(now) === 0 && !connected(now) ? now : undefined; }, 120_000, 3_000);
+      card = await until(async () => { const now = await ctx.cardOf('local_files'); return kept(now) === 0 && !connected(now) ? now : undefined; }, 120_000, 3_000);
     }
-    return card && items(card) === 0 ? { ok: true, detail: `Files on this computer: ${summary(card)}` } : { ok: false, detail: `Files on this computer did not read as empty: ${summary(await ctx.cardOf('local_files'))}` };
+    return card && kept(card) === 0 ? { ok: true, detail: `Files on this computer: ${summary(card)}` } : { ok: false, detail: `Files on this computer did not read as empty: ${summary(await ctx.cardOf('local_files'))}` };
   };
   return {
     label: 'Files on this computer',
