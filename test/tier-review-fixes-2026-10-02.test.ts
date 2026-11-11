@@ -700,6 +700,38 @@ describe('11a. items a names-only folder covers stop waiting for text', () => {
   });
 });
 
+describe('11c. a store names-only rule lifted later: the first text is held until judged (#1295)', () => {
+  test('an item settled on a metadata-only rule never serves its first text on the names verdict', async () => {
+    registeredBuiltIn(PERSONAL_VERDICT, () => false);
+    const install = await freshInstall({ lane: BUILT_IN_SNIFFER_LANE, extract: false });
+    writeFileSync(env.OLYMPUS_SOURCE_INGESTION_EXCLUSIONS_PATH!, JSON.stringify({
+      schemaVersion: 1,
+      rules: [{ id: 'notes-names-only', mode: 'metadata_only', sources: ['dropbox.personal'], path_prefixes: ['/Notes'], reason: 'names only' }],
+    }), { mode: 0o600 });
+    install.lane.internal.current()?.close();
+    const ruled = createDropboxTierLane({ secureStore: install.secure, env, policy: defaultDropboxIngestionPolicy(), secretLocations: install.secrets });
+    closers.push(() => ruled.internal.current()?.close());
+    expect(settleNamesOnlyItems({ set: ruled.set }).settled).toBeGreaterThan(0);
+    expect(ruled.ledger.getCurrent(garden)!.reasons).toContain('content:names_only');
+
+    // The owner removes the rule; the text arrives.
+    rmSync(env.OLYMPUS_SOURCE_INGESTION_EXCLUSIONS_PATH!, { force: true });
+    ruled.internal.current()?.close();
+    const lane = createDropboxTierLane({ secureStore: install.secure, env, policy: defaultDropboxIngestionPolicy(), secretLocations: install.secrets });
+    closers.push(() => lane.internal.current()?.close());
+    const sink = createTieredStoreExtractionSink({ set: lane.set, syncConnectorId: 'extraction', ownerConnectorId: 'dropbox', ownershipKind: 'observed' });
+    const file = FILES[0];
+    await sink.accept({
+      ref: { corpusId: SECURE_CORPUS, provider: 'dropbox', accountScope: 'personal', approvedScopeKey: 'dropbox.personal:/',
+        providerItemId: file.id, localItemId: `personal:${file.id}`, sourceVersion: 'r1' },
+      text: file.text, extractorKind: 'local_text', extractorVersion: 'test', fetchedAt: '2026-10-01T00:00:00.000Z',
+    });
+    expect(lane.ledger.getCurrent(garden)).toMatchObject({ state: 'pending', contentRead: true, contentPending: true });
+    expect(lane.ledger.copies(garden).filter((copy) => copy.state === 'current' && copy.corpusId === INTERNAL_CORPUS && copy.layers !== 'metadata')).toEqual([]);
+    expect(await olympusSearch({ ...install, lane }, 'orchard')).not.toContain('pruning plan');
+  });
+});
+
 describe('11b. the owner\'s own folder choice (names only) counts like a store rule (#1295)', () => {
   // The Dropbox folder approval lives outside the stores' ingestion rules, so
   // the tier set is told about it directly. No exclusions file in these tests.
