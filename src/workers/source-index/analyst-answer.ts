@@ -104,6 +104,8 @@ import type {
 import {
   observeSourceAnswerAnalystLeg,
   observeSourceAnswerRetrievalAttempt,
+  recordSourceAnswerAnalystFit,
+  recordSourceAnswerPackSeats,
   recordSourceAnswerPhaseTimings,
   recordSourceAnswerReleaseDecision,
   recordSourceAnswerResidualAnalystOrphan,
@@ -529,6 +531,11 @@ export function createAnalystSourceIndexAnswerHandler(
           candidate,
           analysisDetail.candidateCorpusIds[index] ?? '',
         ] as const));
+        recordSourceAnswerPackSeats(
+          analysisDetail.pack.candidates.map((_, index) => analysisDetail.candidateCorpusIds[index] ?? ''),
+          analysisDetail.recencySeats ?? 0,
+        );
+        const seatOf = new Map(analysisDetail.pack.candidates.map((candidate, index) => [candidate.provenance, index + 1] as const));
         const guarded = (analyst: Analyst): Analyst => ({
           analyze: (dispatchPack, analyzeOptions) => {
             assertDispatchAllowed(analysisDetail);
@@ -536,8 +543,8 @@ export function createAnalystSourceIndexAnswerHandler(
           },
         });
         return {
-          localLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(guarded(analyst), localPromptBytes, candidateCorpus, analysisDetail.recencySeats),
-          cloudLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(guarded(analyst), CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus, analysisDetail.recencySeats),
+          localLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(guarded(analyst), localPromptBytes, candidateCorpus, analysisDetail.recencySeats, 'local', seatOf),
+          cloudLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(guarded(analyst), CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus, analysisDetail.recencySeats, 'cloud', seatOf),
           trustedLeg: (analyst: Analyst): Analyst => guarded({ analyze: (dispatchPack, analyzeOptions) => {
             // Page asks use the same content-bearing candidates as the computer path.
             // Keep the full detail for the existing fail-closed release checks.
@@ -1001,13 +1008,19 @@ function promptBudgetedAnalyst(
   analyst: Analyst,
   promptBytes: number,
   candidateCorpus: ReadonlyMap<EvidenceCandidate, string>,
-  recencySeats?: number,
+  recencySeats: number | undefined,
+  lane: 'local' | 'cloud',
+  seatOf: ReadonlyMap<EvidenceCandidate['provenance'], number>,
 ): Analyst {
   return {
-    analyze: (pack, analyzeOptions) => analyst.analyze(
-      fitPackToPromptBytes(pack, promptBytes, candidateCorpus, analyzeOptions, recencySeats),
-      analyzeOptions,
-    ),
+    analyze: (pack, analyzeOptions) => {
+      const fitted = fitPackToPromptBytes(pack, promptBytes, candidateCorpus, analyzeOptions, recencySeats);
+      recordSourceAnswerAnalystFit(lane, fitted.candidates.flatMap((candidate) => {
+        const seat = seatOf.get(candidate.provenance);
+        return seat === undefined ? [] : [seat];
+      }));
+      return analyst.analyze(fitted, analyzeOptions);
+    },
   };
 }
 
