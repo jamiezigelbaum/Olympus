@@ -10,7 +10,7 @@ import { findBrowser } from '../scripts/release-check/browser.ts';
 import type { ExecResult, Machine } from '../scripts/release-check/machine.ts';
 import {
   askQuestion, blockedReason, connectionUses, evaluateTurn, forbiddenFor, olympusUse, parseClientQuestions, redactForbidden, runWebClients, SECRET_ANSWER_LEAD, startBrowserScript, turnText,
-  EXPAND_PANEL_SCRIPT, PAGE_STATE_SCRIPT, openMacInbox, type ClientQuestion, type PageState,
+  EXPAND_PANEL_SCRIPT, PAGE_STATE_SCRIPT, openMacInbox, type ClientQuestion, type PageState, saidNoTools,
 } from '../scripts/release-check/web-clients.ts';
 
 const statusOf = (checks: Array<{ id: string; status: string }>) => Object.fromEntries(checks.map((check) => [check.id, check.status]));
@@ -520,5 +520,19 @@ describe.skipIf(!browserPath)('web clients: a real browser on a stand-in app', (
     const { tunnel: _tunnel, ...rest } = machine();
     const result = await runWebClients(rest, { clients: ['chatgpt'], questions: [pickup], os: 'linux', screensDir: tmpdir() });
     expect(result.checks).toEqual([{ id: 'web.browser', title: 'The canary browser on the machine', status: 'skip', detail: 'Inconclusive: the driver has no tunnel verb, so the browser on the machine cannot be reached', ms: expect.any(Number) }]);
+  });
+});
+
+describe('a Claude reply that says the connector gave it no tools', () => {
+  test('is recognised in the wordings Claude used, and only for Claude', () => {
+    for (const turn of [
+      'Claude responded: I couldn’t ask Olympus. It shows as connected to your account, but it isn’t giving me any tools in this chat, so I have nothing to send.',
+      'I can’t ask Olympus right now. It shows as connected to your account, but none of its tools are available in this chat.',
+      'I couldn’t ask Olympus. It shows as connected to your account, but it exposes no tools in this chat.',
+    ]) {
+      expect(saidNoTools('claude', turn)).toBe(true);
+      expect(saidNoTools('chatgpt', turn)).toBe(false);
+    }
+    expect(saidNoTools('claude', 'I asked Olympus, "What time does school close on Friday the 7th?" It closes at 13:00.')).toBe(false);
   });
 });

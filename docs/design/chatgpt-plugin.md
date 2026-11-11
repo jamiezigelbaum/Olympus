@@ -323,9 +323,9 @@ private panels are unaffected: their job ids name the install, not the
 endpoint. Installs forward `/openai/mcp` from the release that added it; an
 older install answers it 404.
 
-**Claude dashboard (2026-11-10, #1266; on by default from 1.5).** The setting
-`remote.claudeAppEnabled` ("Show the dashboard in Claude") is on unless set to
-`false` in the install's configuration (`~/.olympus/engine.json` for the
+**Claude dashboard (2026-11-10, #1266; off by default).** The setting
+`remote.claudeAppEnabled` ("Show the dashboard in Claude") is off unless set to
+`true` in the install's configuration (`~/.olympus/engine.json` for the
 standalone engine, or the Olympus plugin's `remote` section in OpenClaw); a
 change needs a restart. Only the pinned Claude custom connector
 on `/mcp` gains the shared dashboard, private question and private answer

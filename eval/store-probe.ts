@@ -30,6 +30,7 @@
 // filter saw and kept it, its rank, content and concept match, and the
 // leader's (ids, ranks and counts only).
 
+import { assertTierLedgerInDirectory } from '../src/workers/classification/tier-set-binding.ts';
 import { Database } from 'bun:sqlite';
 import type { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
 import { existsSync, statSync } from 'node:fs';
@@ -39,6 +40,7 @@ import {
   createEvalDropboxLanes,
   evalDropboxStorePaths,
   evalRetrievalAudit,
+  assertEvalDropboxStoreIsolation,
   openEvalDropboxStores,
   resolveEvalDropboxScope,
 } from './run-real.ts';
@@ -88,6 +90,7 @@ export function probeStoreFile(input: {
   term: string;
   scanCapMs: number;
 }): Record<string, unknown> {
+  assertTierLedgerInDirectory(input.dbPath);
   const db = new Database(input.dbPath, { readonly: true, create: false, strict: true });
   try {
     db.exec('PRAGMA query_only = ON;');
@@ -360,6 +363,7 @@ function countPoolSearches(stores: readonly LocalConnectorStore[]): { report: ()
 async function main(): Promise<void> {
   const args = parseStoreProbeArgs(process.argv.slice(2));
   const paths = evalDropboxStorePaths(process.env);
+  assertEvalDropboxStoreIsolation(paths);
   const scope = resolveEvalDropboxScope(
     process.env.OLYMPUS_SOURCE_INDEX_ACCOUNT?.trim() || undefined,
     process.env.OLYMPUS_EVAL_DROPBOX_APPROVED_SCOPE_KEY?.trim() || undefined,

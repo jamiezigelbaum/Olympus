@@ -91,7 +91,7 @@ async function installLikeWorld(partials: readonly typeof PARTIAL_FILES[number][
     lane: { kind: BUILT_IN_SNIFFER_LANE.kind, modelId: BUILT_IN_SNIFFER_LANE.modelId },
     ...(isPublicTierRetired(policy) ? { retirePublic: true } : {}),
   });
-  const secure = new LocalConnectorStore({ dbPath: join(root, 'dropbox-secure.sqlite'), corpusId: SECURE_CORPUS, family: 'file', trustDomain: 'secure_local' });
+  const secure = new LocalConnectorStore({ dbPath: resolvedStorePath(DROPBOX_FILES_SOURCE_ID, 'secure_local', env), corpusId: SECURE_CORPUS, family: 'file', trustDomain: 'secure_local' });
   closers.push(() => secure.close());
   const secrets = new SecretLocationsIndex({ dbPath: join(root, 'secrets.sqlite') });
   closers.push(() => secrets.close());

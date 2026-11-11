@@ -382,7 +382,8 @@ describe('a tiered source, moved into its folder', () => {
     expect(migrateAccountFolders(env).moved).toEqual(['dropbox.files']);
 
     const after = folderPaths(env);
-    expect(ledgerFoundBy(after, 'internal')).toBeUndefined();
+    // #1398: the writable open refuses a store whose bound ledger is not in this install.
+    expect(() => ledgerFoundBy(after, 'internal')).toThrow(/missing or outside this install/);
     expect(ledgerFoundBy(after, 'secure_local')).toBe(tierLedgerPathForStore(after.secure_local));
   });
 });

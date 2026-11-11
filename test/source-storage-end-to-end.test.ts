@@ -15,6 +15,7 @@
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
+import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -35,7 +36,7 @@ import { localFilesItemId } from '../src/workers/local-files/connector.ts';
 import type { SourceConnector } from '../src/core/contracts.ts';
 import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { readSourceRegistry } from '../src/core/source-registry.ts';
-import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
+import { TierLedger, TIER_LEDGER_SCHEMA_VERSION, TIER_LEDGER_SQLITE_STORE_ID } from '../src/workers/classification/tier-ledger.ts';
 import { FileSourceScopeAuthority } from '../src/workers/source-scope-runtime.ts';
 import { connectThisComputerSource } from '../src/core/this-computer.ts';
 import { upsertConnectedHandle } from '../src/workers/credential-broker/connected-handles.ts';
@@ -288,6 +289,37 @@ function ownItemStillActive(dbPath: string, ownPath: string): boolean {
 }
 
 describe('source storage, end to end on this host', () => {
+  test('a newer privacy ledger leaves the worker up, reports Update Olympus, and keeps the tier set closed', async () => {
+    const env: Env = { ...freshHome(), OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false', OLYMPUS_MIGRATE_ACCOUNT_FOLDERS: '0' };
+    const storePath = resolvedStorePath('dropbox.files', 'secure_local', env);
+    await writeStore(storePath, 'secure_local.dropbox.files', 'file', 'secure_local');
+    const ledgerPath = tierLedgerPathForStore(storePath);
+    const ledger = new TierLedger({ dbPath: ledgerPath });
+    const store = new LocalConnectorStore({ dbPath: storePath, corpusId: 'secure_local.dropbox.files', family: 'file', trustDomain: 'secure_local' });
+    store.bindTierSet(ledger);
+    store.close();
+    ledger.close();
+    const db = new Database(ledgerPath);
+    db.query('UPDATE schema_version SET version = ? WHERE store_id = ?').run(TIER_LEDGER_SCHEMA_VERSION + 1, TIER_LEDGER_SQLITE_STORE_ID);
+    db.close();
+    const hash = (path: string) => createHash('sha256').update(readFileSync(path)).digest('hex');
+    const before = [hash(storePath), hash(ledgerPath)];
+    const worker = await boot(env);
+    try {
+      expect(worker.output(), listening(worker)).toContain('worker listening');
+      expect(worker.exitCode()).toBeNull();
+      const response = await createWorkerFetch({ env })(`http://127.0.0.1:${worker.port}/v1/health`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+      expect(response.status).toBe(200);
+      const health = await response.json() as { privacy_ledger_problems?: Record<string, string> };
+      expect(health.privacy_ledger_problems?.['dropbox.files']).toBe(`This install's privacy ledger was written by a newer Olympus (schema ${TIER_LEDGER_SCHEMA_VERSION + 1}); this build knows ${TIER_LEDGER_SCHEMA_VERSION}. Update Olympus.`);
+      const search = await ask(env, worker, '/v1/source/index/search', { query: 'orchard', corpus_id: 'secure_local.dropbox.files' });
+      expect(JSON.stringify(search.json)).not.toContain('orchard-lab.txt');
+      expect(worker.exitCode()).toBeNull();
+      expect([hash(storePath), hash(ledgerPath)]).toEqual(before);
+    } finally { await worker.stop(); }
+    expect([hash(storePath), hash(ledgerPath)]).toEqual(before);
+  }, 180_000);
+
   for (const read of ['status', 'search'] as const) {
     test(`a declared store ingested after boot is discovered by ${read} with the scheduler off`, async () => {
       const env: Env = { ...freshHome(), OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false' };
@@ -453,6 +485,7 @@ describe('source storage, end to end on this host', () => {
     writeFileSync(preload, `
       import { archiveSourceTargets } from ${JSON.stringify(join(REPO, 'src/workers/archive-import/source-targets.ts'))};
       import { Database } from 'bun:sqlite';
+import { createHash } from 'node:crypto';
       import { createArchiveImportRuntime } from ${JSON.stringify(join(REPO, 'src/workers/archive-import/runtime.ts'))};
       import { pullArchiveImport } from ${JSON.stringify(join(REPO, 'src/workers/archive-import/sync.ts'))};
       import { telegramChat, telegramJson, telegramSingleChatExport, telegramText, writeTelegramExport } from ${JSON.stringify(join(REPO, 'test/support/archive-fixtures-telegram.ts'))};
@@ -691,6 +724,7 @@ describe('source storage, end to end on this host', () => {
     const schemaPaused = join(env.HOME!, 'schema-paused');
     writeFileSync(preload, `
       import { Database } from 'bun:sqlite';
+import { createHash } from 'node:crypto';
       import { writeFileSync } from 'node:fs';
       const exec = Database.prototype.exec;
       Database.prototype.exec = function(sql, ...args) {

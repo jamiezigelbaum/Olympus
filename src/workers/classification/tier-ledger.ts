@@ -414,6 +414,15 @@ export class TierLedgerSecretsRollbackRefusedError extends Error {
   }
 }
 
+export class TierLedgerSchemaError extends Error {
+  constructor(readonly schema: number, readonly known = TIER_LEDGER_SCHEMA_VERSION) {
+    super(schema > known
+      ? `This install's privacy ledger was written by a newer Olympus (schema ${schema}); this build knows ${known}. Update Olympus.`
+      : `This install's privacy ledger is at schema ${schema}; this build requires ${known}. The writer must migrate it before read-only access.`);
+    this.name = 'TierLedgerSchemaError';
+  }
+}
+
 export class TierLedger {
   readonly dbPath: string;
   private readonly db: Database;
@@ -427,6 +436,7 @@ export class TierLedger {
     this.now = options.now ?? (() => new Date());
     if (!this.readOnly) assertWritableStoreOpenAllowed('tier ledger', this.dbPath);
     const onDisk = this.dbPath !== ':memory:';
+    if (onDisk) TierLedger.assertSchemaCanOpen(this.dbPath, this.readOnly);
     if (onDisk && !this.readOnly) {
       mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
       // Owner-only from the first byte, with an explicit file mode rather than
@@ -442,6 +452,8 @@ export class TierLedger {
       db = new Database(this.dbPath, this.readOnly ? { readonly: true, create: false } : { create: true });
       if (this.readOnly) {
         db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
+        const version = readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID);
+        if (version !== TIER_LEDGER_SCHEMA_VERSION) throw new TierLedgerSchemaError(version);
         this.db = db;
         return;
       }
@@ -454,6 +466,15 @@ export class TierLedger {
       throw error;
     }
     this.db = db;
+  }
+
+  /** Preflight existing files read-only, before chmod, WAL setup or a writable open. */
+  static assertSchemaCanOpen(dbPath: string, readOnly = false): void {
+    if (dbPath === ':memory:' || !existsSync(dbPath)) return;
+    const version = readSqliteWithoutWriting(dbPath, 10_000, (db) => readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID));
+    if (version !== undefined && (version > TIER_LEDGER_SCHEMA_VERSION || (readOnly && version !== TIER_LEDGER_SCHEMA_VERSION))) {
+      throw new TierLedgerSchemaError(version);
+    }
   }
 
   /** Whether this file is at this build's schema (a read-only open never migrates it). */
@@ -2169,36 +2190,16 @@ export class TierLedger {
    * candidate with this before it opens anything
    * (classification/tier-set-binding.ts).
    *
-   * The file is opened read-only first: a read-only connection never
-   * checkpoints or writes the main file, and it reads what a crash left in
-   * the -wal. SQLite may still create the -shm beside it. macOS's SQLite
-   * refuses a read-only connection to a WAL database that has no -wal file
-   * (how a ledger looks after a clean close and a rename); only then is it
-   * opened read-write with the connection set to query-only. That second open
-   * happens only when no -wal holds frames and no -journal is waiting, so
-   * there is nothing to checkpoint or roll back and the main file stays as it
-   * was; empty -wal and -shm files may appear beside it. A busy file is not
-   * tried a second way: an exclusive holder costs one `busyTimeoutMs`, not two.
+   * Read without writing (readSqliteWithoutWriting). An unreadable ledger
+   * fails closed.
    */
   static readLedgerId(dbPath: string, options: { busyTimeoutMs?: number } = {}): string | undefined {
     if (dbPath === ':memory:' || !existsSync(dbPath)) return undefined;
     const busyTimeoutMs = Math.max(0, Math.trunc(options.busyTimeoutMs ?? 10_000));
-    for (const mode of [{ readonly: true, create: false }, { readwrite: true, create: false }] as const) {
-      if ('readwrite' in mode && hasUnmergedWrites(dbPath)) return undefined;
-      let db: Database | undefined;
-      try {
-        db = new Database(dbPath, mode);
-        db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA query_only = ON;`);
-        const row = db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get() as { value?: unknown } | null;
-        return typeof row?.value === 'string' && row.value !== '' ? row.value : undefined;
-      } catch (error) {
-        if (isSqliteBusy(error)) return undefined;
-        // Try the next way of opening it.
-      } finally {
-        if (db) closeSqliteStore(db, { checkpoint: false });
-      }
-    }
-    return undefined;
+    return readSqliteWithoutWriting(dbPath, busyTimeoutMs, (db) => {
+      const row = db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get() as { value?: unknown } | null;
+      return typeof row?.value === 'string' && row.value !== '' ? row.value : undefined;
+    });
   }
 
   /**
@@ -4313,6 +4314,51 @@ interface TierMigrationProposalRow {
   moved_generation: number | null;
   outcome_json: string | null;
   updated_at: string;
+}
+
+/**
+ * The cursor a connector store recorded for its tier-set binding
+ * (classification/tier-set-binding.ts), read without writing the store and
+ * without running its migrations. Undefined when the store has no binding row
+ * or cannot be read.
+ */
+export function readStoreBindingCursor(storeDbPath: string, runId: string, connectorId: string): string | undefined {
+  if (storeDbPath === ':memory:' || !existsSync(storeDbPath)) return undefined;
+  return readSqliteWithoutWriting(storeDbPath, 10_000, (db) => {
+    if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sync_runs'").get()) return undefined;
+    const row = db.query('SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?').get(runId, connectorId) as { cursor: string | null } | null;
+    return row?.cursor ?? undefined;
+  });
+}
+
+/**
+ * Read a SQLite file (a ledger, or a store's binding row) without writing it. A read-only connection is tried
+ * first: it never checkpoints or writes the main file, and it reads what a
+ * crash left in the -wal (SQLite may still create the -shm). macOS's SQLite
+ * refuses a read-only connection to a WAL database that has no -wal file (how
+ * a ledger looks after a clean close and a rename); only then is it opened
+ * read-write with the connection set to query-only, and only when no -wal
+ * holds frames and no -journal is waiting, so there is nothing to checkpoint
+ * or roll back and the main file stays as it was (empty -wal and -shm files
+ * may appear beside it). No migration runs either way. A busy file is not
+ * tried a second way. Undefined when the file cannot be read.
+ */
+function readSqliteWithoutWriting<T>(dbPath: string, busyTimeoutMs: number, read: (db: Database) => T): T | undefined {
+  for (const mode of [{ readonly: true, create: false }, { readwrite: true, create: false }] as const) {
+    if ('readwrite' in mode && hasUnmergedWrites(dbPath)) return undefined;
+    let db: Database | undefined;
+    try {
+      db = new Database(dbPath, mode);
+      db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA query_only = ON;`);
+      return read(db);
+    } catch (error) {
+      if (isSqliteBusy(error)) return undefined;
+      // Try the next way of opening it.
+    } finally {
+      if (db) closeSqliteStore(db, { checkpoint: false });
+    }
+  }
+  return undefined;
 }
 
 /** SQLITE_BUSY (5) and SQLITE_LOCKED (6), as bun:sqlite reports them. */
