@@ -58,11 +58,13 @@ test('a second connection serves the saved set, applies the writer\'s later comm
   expect(reader.hasEmbeddings(MODEL)).toBe(false);
   expect(reader.status().counts).toEqual(writer.status().counts);
   expect(reader.status().tier).toEqual(writer.status().tier);
-  // What stays allowed stays allowed: held content is still found by words.
-  // Rows themselves are checked against the ledger, not the set.
+  // Rows themselves are checked against the ledger, not the set: both
+  // connections agree. Held text outside the private lane is not found by
+  // words (#1316); what stays allowed stays allowed.
   const found = (store: LocalConnectorStore) => store.searchItems('picnic', 20).map((row) => row.sourceItem.providerItemId).sort();
   expect(found(reader)).toEqual(found(writer));
-  expect(found(reader)).toContain('held');
+  expect(found(reader)).not.toContain('held');
+  expect(found(reader)).toContain('plain');
   expect(found(reader)).toContain('plain');
   expect(found(reader)).not.toContain('hid');
   expect(found(reader)).not.toContain('staged');
