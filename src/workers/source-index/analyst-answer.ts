@@ -274,7 +274,7 @@ export interface SourceAnswerSelfHealResult {
 // (DEFAULT_LOCAL_ANALYST_PROMPT_BYTES). Venice Private contexts are far
 // larger. A caller's max_results still asks for fewer, up to
 // MAX_EVIDENCE_CANDIDATES.
-const DEFAULT_MAX_RESULTS = 24;
+export const DEFAULT_MAX_RESULTS = 24;
 const MAX_EVIDENCE_CANDIDATES = 48;
 const DEFAULT_EVIDENCE_BYTE_BUDGET = 40_000;
 // A local model served over an OpenAI-compatible endpoint (Ollama, llama.cpp,
@@ -286,7 +286,7 @@ const DEFAULT_EVIDENCE_BYTE_BUDGET = 40_000;
 // footprint that ran safely: 3 candidates x 3,000 chars measured 13,667 bytes.
 // A host that serves a larger context declares it with
 // OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES.
-const DEFAULT_LOCAL_ANALYST_PROMPT_BYTES = 13_500;
+export const DEFAULT_LOCAL_ANALYST_PROMPT_BYTES = 13_500;
 // The OpenClaw infer ceiling less a margin for the CLI's own framing.
 const CLOUD_ANALYST_PROMPT_BYTES = OPENCLAW_INFER_MAX_PROMPT_BYTES - 10_000;
 // Candidate floor for temporal questions - see maxResults derivation below.

@@ -153,9 +153,18 @@ local Dropbox index and a reachable Argus lane:
    By default, the real eval uses literal-query retrieval so the gate stays
    usable. Set `OLYMPUS_EVAL_QUERY_PLANNER_ENABLED=true` only for a targeted
    recall experiment; it adds a local-model planning call before each question.
-   The default evidence budget is 5 candidates at 1,500 chars each; override
-   with `OLYMPUS_EVAL_MAX_RESULTS` and
-   `OLYMPUS_EVAL_MAX_CHARS_PER_CANDIDATE` for targeted diagnosis.
+   The gate's evidence budget is 5 candidates at Ask's per-candidate budget
+   (3,000 chars); override with `OLYMPUS_EVAL_MAX_RESULTS` and
+   `OLYMPUS_EVAL_MAX_CHARS_PER_CANDIDATE` for targeted diagnosis. A local
+   Analyst is sent the pack Ask's local leg would send: fitted to 13,500 prompt
+   bytes, or to `OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES` when set (the
+   same override Ask reads). After the gate, the same questions run again at
+   Ask's own pack size (24) as a second, informational score in the report's
+   `informational` section; it never decides pass or fail. Set
+   `OLYMPUS_EVAL_INFORMATIONAL_MAX_RESULTS` to another size, or 0 to skip it.
+   For ordering runs that must not depend on machine load, lift the per-store
+   lane deadline with `OLYMPUS_SOURCE_ANSWER_LANE_TIMEOUT_MS=120000` (0 turns
+   it off) and report deadline losses at the product cap separately.
    The shared Analyst also caps model output at 1,600 characters by default so
    local eval questions fail or answer quickly instead of generating long JSON.
 
