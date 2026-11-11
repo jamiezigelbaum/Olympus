@@ -137,7 +137,7 @@ describe('native sniffer decision', () => {
         await model.prepareSniffer!();
       }
       expect(measured.lane.servedWeights).toBe('Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf');
-      expect(snifferDecisionBar(measured.lane)).toBe(0.374);
+      expect(snifferDecisionBar(measured.lane)).toBe(0.3738);
       expect(measured.logs).toEqual([]);
       expect(unmeasured.lane.servedWeights).toBe('Some-Other-12B-Q4_K_M.gguf');
       expect(snifferDecisionBar(unmeasured.lane)).toBe(0.5);
@@ -164,7 +164,7 @@ describe('native sniffer decision', () => {
       now += 60_000;
       await model.prepareSniffer!();
       expect(f.lane.servedWeights).toBe('Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf');
-      expect(snifferDecisionBar(f.lane)).toBe(0.374);
+      expect(snifferDecisionBar(f.lane)).toBe(0.3738);
       expect(f.logs).toEqual([]);
     } finally { Date.now = realNow; f.stop(); }
   });

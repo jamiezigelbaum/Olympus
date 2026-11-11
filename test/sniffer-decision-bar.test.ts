@@ -53,7 +53,7 @@ test('the decision bar is per lane: the built-in 4B at 0.15, every other judge a
 });
 
 test('the 35B-A3B has its measured bar, by its model name or by its profile behind a router alias', () => {
-  expect(snifferDecisionBar({ kind: 'local', modelId: QWEN36_35B_A3B_SNIFFER_MODEL, snifferMode: 'decision' })).toBe(0.374);
+  expect(snifferDecisionBar({ kind: 'local', modelId: QWEN36_35B_A3B_SNIFFER_MODEL, snifferMode: 'decision' })).toBe(0.3738);
   // A router alias names no weights: the profile carries the measured bar.
   expect(snifferDecisionBar({ kind: 'local', modelId: 'delphi/source-answer', snifferMode: 'decision' })).toBe(0.5);
   expect(snifferDecisionBar({ kind: 'local', modelId: 'delphi/source-answer', snifferMode: 'decision', decisionBar: 0.374 })).toBe(0.374);
@@ -67,7 +67,7 @@ test('the 35B-A3B has its measured bar, by its model name or by its profile behi
 test('a served weights file finds its measured bar behind any alias, but a fine-tune does not (#1253)', () => {
   const alias: SnifferLaneIdentity = { kind: 'local', modelId: 'delphi/source-answer', snifferMode: 'decision' };
   for (const file of ['Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf', 'qwen3.6-35b-a3b-q8_0.gguf', 'Qwen3.6-35B-A3B.gguf', 'Qwen3.6-35B-A3B-Q4_K_M-00001-of-00002.gguf']) {
-    expect(snifferDecisionBar({ ...alias, servedWeights: file })).toBe(0.374);
+    expect(snifferDecisionBar({ ...alias, servedWeights: file })).toBe(0.3738);
   }
   expect(snifferDecisionBar({ ...alias, servedWeights: 'Qwen3.5-4B-Q4_K_M.gguf' })).toBe(0.15);
   for (const file of ['Qwen3.6-35B-A3B-Abliterated-Q4_K_M.gguf', 'Qwen3.5-40B-Q4_K_M.gguf', 'Qwen3.5-2B-Q4_K_M.gguf', 'my-qwen3.6-35b-a3b-q4.gguf', 'Qwen3.6-35B-A3B-Q4_K_M.bin']) {
