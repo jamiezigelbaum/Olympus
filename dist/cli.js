@@ -82889,6 +82889,12 @@ var init_file_mime = __esm(() => {
     html: "text/html",
     htm: "text/html",
     rtf: "application/rtf",
+    doc: "application/msword",
+    xls: "application/vnd.ms-excel",
+    odt: "application/vnd.oasis.opendocument.text",
+    ods: "application/vnd.oasis.opendocument.spreadsheet",
+    odp: "application/vnd.oasis.opendocument.presentation",
+    epub: "application/epub+zip",
     docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -95042,7 +95048,7 @@ function sanitizeThrownError(error, maxChars = 120) {
   const detail = error instanceof Error ? `${error.name || "Error"}: ${error.message}` : String(error);
   return sanitizeErrorDetail(detail, maxChars);
 }
-var DEFAULT_MAX_BOUNDED_TEXT_CHARS = 2000000, BOUNDED_TEXT_TRUNCATED_WARNING = "bounded_text_truncated", BOUNDED_TEXT_TRUNCATION_REASON = "max_bounded_text_chars", DEFAULT_MAX_TABLE_SAMPLE_ROWS = 25, DEFAULT_MAX_TABLE_SAMPLE_COLUMNS = 25, PDF_MIME_TYPE = "application/pdf", DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document", XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", PPTX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation", TEXT_MIME_TYPES, TABLE_MIME_TYPES, IMAGE_MIME_TYPES, ARTIFACT_KIND_BY_STRUCTURAL_KIND, GENERIC_MIME_TYPES;
+var DEFAULT_MAX_BOUNDED_TEXT_CHARS = 2000000, BOUNDED_TEXT_TRUNCATED_WARNING = "bounded_text_truncated", BOUNDED_TEXT_TRUNCATION_REASON = "max_bounded_text_chars", DEFAULT_MAX_TABLE_SAMPLE_ROWS = 25, DEFAULT_MAX_TABLE_SAMPLE_COLUMNS = 25, PDF_MIME_TYPE = "application/pdf", DOC_MIME_TYPE = "application/msword", XLS_MIME_TYPE = "application/vnd.ms-excel", ODT_MIME_TYPE = "application/vnd.oasis.opendocument.text", ODS_MIME_TYPE = "application/vnd.oasis.opendocument.spreadsheet", ODP_MIME_TYPE = "application/vnd.oasis.opendocument.presentation", EPUB_MIME_TYPE = "application/epub+zip", DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document", XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", PPTX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation", TEXT_MIME_TYPES, TABLE_MIME_TYPES, IMAGE_MIME_TYPES, ARTIFACT_KIND_BY_STRUCTURAL_KIND, GENERIC_MIME_TYPES;
 var init_bounded_text = __esm(() => {
   TEXT_MIME_TYPES = new Set([
     "application/json",
@@ -95083,277 +95089,6 @@ var init_bounded_text = __esm(() => {
     "application/octet-stream",
     "binary/octet-stream",
     "application/binary"
-  ]);
-});
-
-// src/workers/file-extraction/extractors/rtf.ts
-function hasRtfSignature(bytes) {
-  return bytes.length >= 5 && bytes[0] === 123 && bytes[1] === 92 && bytes[2] === 114 && bytes[3] === 116 && bytes[4] === 102;
-}
-function rtfSourceFromBytes(bytes) {
-  let source = "";
-  for (let start = 0;start < bytes.length; start += 8192) {
-    source += String.fromCharCode(...bytes.subarray(start, start + 8192));
-  }
-  return source;
-}
-function rtfToText(source, maxChars) {
-  const out = [];
-  let length = 0;
-  let truncated = false;
-  const emit = (text3) => {
-    const room = maxChars - length;
-    const piece = text3.length > room ? text3.slice(0, room) : text3;
-    if (piece.length < text3.length && text3.slice(piece.length).trim() !== "")
-      truncated = true;
-    if (piece.length === 0)
-      return;
-    out.push(piece);
-    length += piece.length;
-  };
-  let codePage = 1252;
-  const stack = [];
-  let state = { skip: false, unicodeSkip: 1 };
-  let pendingSkip = 0;
-  let groupStart = false;
-  const hexBytes = [];
-  const pushByte = (byte) => {
-    hexBytes.push(byte);
-    if (hexBytes.length >= (maxChars - length) * 4 + 4)
-      flushHex();
-  };
-  const flushHex = () => {
-    if (hexBytes.length === 0)
-      return;
-    if (!state.skip)
-      emit(decodeCodePage(Uint8Array.from(hexBytes), codePage));
-    hexBytes.length = 0;
-  };
-  let index = 0;
-  while (index < source.length && !truncated) {
-    const char = source[index];
-    if (char === "{") {
-      flushHex();
-      stack.push(state);
-      state = { ...state };
-      groupStart = true;
-      pendingSkip = 0;
-      index += 1;
-      continue;
-    }
-    if (char === "}") {
-      flushHex();
-      state = stack.pop() ?? { skip: false, unicodeSkip: 1 };
-      groupStart = false;
-      pendingSkip = 0;
-      index += 1;
-      continue;
-    }
-    if (char === "\\") {
-      const next = source[index + 1];
-      if (next === undefined)
-        break;
-      if (next === "'") {
-        const hex = source.slice(index + 2, index + 4);
-        index += 4;
-        if (pendingSkip > 0) {
-          pendingSkip -= 1;
-          continue;
-        }
-        const value2 = Number.parseInt(hex, 16);
-        if (Number.isFinite(value2))
-          pushByte(value2);
-        groupStart = false;
-        continue;
-      }
-      flushHex();
-      if (next === "*") {
-        if (groupStart)
-          state.skip = true;
-        index += 2;
-        continue;
-      }
-      if (!isLetter(next)) {
-        index += 2;
-        groupStart = false;
-        const symbol = next === "\\" || next === "{" || next === "}" ? next : next === "~" ? " " : next === "_" ? "-" : next === `
-` || next === "\r" ? `
-` : undefined;
-        if (symbol === undefined)
-          continue;
-        if (pendingSkip > 0) {
-          pendingSkip -= 1;
-          continue;
-        }
-        if (!state.skip)
-          emit(symbol);
-        continue;
-      }
-      let end = index + 1;
-      while (end < source.length && end - index <= 32 && isLetter(source[end]))
-        end += 1;
-      const word = source.slice(index + 1, end);
-      index = end;
-      let digitsEnd = source[index] === "-" ? index + 1 : index;
-      while (digitsEnd < source.length && digitsEnd - index < 11 && isDigit(source[digitsEnd]))
-        digitsEnd += 1;
-      const parameter = digitsEnd > index && isDigit(source[digitsEnd - 1]) ? source.slice(index, digitsEnd) : undefined;
-      if (parameter !== undefined)
-        index = digitsEnd;
-      if (source[index] === " ")
-        index += 1;
-      const value = parameter === undefined ? undefined : Number(parameter);
-      const atStart = groupStart;
-      groupStart = false;
-      if (atStart && SKIPPED_DESTINATIONS.has(word)) {
-        state.skip = true;
-        continue;
-      }
-      if (word === "ansicpg" && value !== undefined) {
-        codePage = value;
-        continue;
-      }
-      if (word === "uc" && value !== undefined) {
-        state.unicodeSkip = Math.max(0, value);
-        continue;
-      }
-      if (word === "u" && value !== undefined) {
-        if (!state.skip)
-          emit(String.fromCharCode(value < 0 ? value + 65536 : value));
-        pendingSkip = state.unicodeSkip;
-        continue;
-      }
-      if (word === "bin" && value !== undefined) {
-        index += Math.max(0, value);
-        continue;
-      }
-      if (!state.skip && BREAKS[word] !== undefined)
-        emit(BREAKS[word]);
-      continue;
-    }
-    if (char === "\r" || char === `
-`) {
-      index += 1;
-      continue;
-    }
-    groupStart = false;
-    index += 1;
-    if (pendingSkip > 0) {
-      pendingSkip -= 1;
-      continue;
-    }
-    if (char.charCodeAt(0) > 127) {
-      pushByte(char.charCodeAt(0));
-      continue;
-    }
-    flushHex();
-    if (!state.skip)
-      emit(char);
-  }
-  flushHex();
-  return { text: out.join(""), truncated };
-}
-function isLetter(char) {
-  const code = char.charCodeAt(0);
-  return code >= 65 && code <= 90 || code >= 97 && code <= 122;
-}
-function isDigit(char) {
-  const code = char.charCodeAt(0);
-  return code >= 48 && code <= 57;
-}
-function decodeCodePage(bytes, codePage) {
-  const label = CODE_PAGE_LABELS.get(codePage);
-  if (label) {
-    try {
-      return new TextDecoder(label).decode(bytes);
-    } catch {}
-  }
-  let text3 = "";
-  for (const byte of bytes)
-    text3 += byte < 128 ? String.fromCharCode(byte) : "�";
-  return text3;
-}
-var RTF_MIME_TYPES, SKIPPED_DESTINATIONS, BREAKS, CODE_PAGE_LABELS;
-var init_rtf = __esm(() => {
-  RTF_MIME_TYPES = new Set(["application/rtf", "text/rtf"]);
-  SKIPPED_DESTINATIONS = new Set([
-    "fonttbl",
-    "colortbl",
-    "stylesheet",
-    "info",
-    "pict",
-    "object",
-    "listtable",
-    "listoverridetable",
-    "rsidtbl",
-    "generator",
-    "themedata",
-    "colorschememapping",
-    "datastore",
-    "latentstyles",
-    "xmlnstbl",
-    "header",
-    "headerl",
-    "headerr",
-    "headerf",
-    "footer",
-    "footerl",
-    "footerr",
-    "footerf",
-    "filetbl",
-    "revtbl",
-    "mmathPr",
-    "pgdsctbl",
-    "fldinst"
-  ]);
-  BREAKS = {
-    par: `
-`,
-    line: `
-`,
-    sect: `
-`,
-    page: `
-`,
-    row: `
-`,
-    tab: "\t",
-    cell: "\t",
-    emdash: "—",
-    endash: "–",
-    bullet: "•",
-    lquote: "‘",
-    rquote: "’",
-    ldblquote: "“",
-    rdblquote: "”",
-    emspace: " ",
-    enspace: " ",
-    qmspace: " "
-  };
-  CODE_PAGE_LABELS = new Map([
-    [866, "ibm866"],
-    [874, "windows-874"],
-    [932, "shift_jis"],
-    [936, "gbk"],
-    [949, "euc-kr"],
-    [950, "big5"],
-    [1250, "windows-1250"],
-    [1251, "windows-1251"],
-    [1252, "windows-1252"],
-    [1253, "windows-1253"],
-    [1254, "windows-1254"],
-    [1255, "windows-1255"],
-    [1256, "windows-1256"],
-    [1257, "windows-1257"],
-    [1258, "windows-1258"],
-    [1e4, "macintosh"],
-    [10007, "x-mac-cyrillic"],
-    [20866, "koi8-r"],
-    [28591, "iso-8859-1"],
-    [28592, "iso-8859-2"],
-    [28595, "iso-8859-5"],
-    [54936, "gb18030"],
-    [65001, "utf-8"]
   ]);
 });
 
@@ -95439,7 +95174,7 @@ function officeTableSummary(input) {
   const nonEmptyRows = input.rows.filter((row) => row.some((cell) => cell.trim().length > 0));
   if (nonEmptyRows.length === 0)
     return "";
-  const totalColumns = Math.max(...nonEmptyRows.map((row) => row.length));
+  const totalColumns = nonEmptyRows.reduce((max2, row) => Math.max(max2, row.length), 0);
   const lines = [
     input.label,
     `Rows: ${nonEmptyRows.length}`,
@@ -96154,6 +95889,1312 @@ var init_document_formats = __esm(() => {
   };
 });
 
+// src/workers/file-extraction/extractors/compound-file.ts
+function damaged() {
+  throw new OfficeDocumentUnreadableError("damaged", "Compound file is inconsistent or exceeds the read limit.");
+}
+function checked(read) {
+  try {
+    return read();
+  } catch (error) {
+    if (error instanceof OfficeDocumentUnreadableError)
+      throw error;
+    return damaged();
+  }
+}
+function readCompoundFile(bytes) {
+  return checked(() => openCompoundFile(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)));
+}
+function openCompoundFile(file) {
+  if (file.length < 512 || file.subarray(0, 8).toString("hex") !== "d0cf11e0a1b11ae1")
+    damaged();
+  const major = file.readUInt16LE(26);
+  const shift = file.readUInt16LE(30);
+  if (file.readUInt16LE(28) !== 65534 || file.readUInt16LE(32) !== 6 || !(major === 3 && shift === 9 || major === 4 && shift === 12) || file.readUInt32LE(56) !== 4096)
+    damaged();
+  const sectorSize = 2 ** shift;
+  const sectorCount = Math.ceil(file.length / sectorSize) - 1;
+  let totalRead = 0;
+  const claimed = new Set;
+  const sector = (id) => {
+    if (!Number.isInteger(id) || id < 0 || id >= sectorCount)
+      damaged();
+    totalRead += sectorSize;
+    if (totalRead > MAX_READ_BYTES2)
+      damaged();
+    const data2 = file.subarray((id + 1) * sectorSize, (id + 2) * sectorSize);
+    if (data2.length === sectorSize)
+      return data2;
+    const padded = Buffer.alloc(sectorSize);
+    data2.copy(padded);
+    return padded;
+  };
+  const claim = (id) => {
+    if (claimed.has(id))
+      damaged();
+    claimed.add(id);
+  };
+  const fatCount = file.readUInt32LE(44);
+  const difatCount = file.readUInt32LE(72);
+  if (fatCount === 0 || fatCount > sectorCount || difatCount > sectorCount)
+    damaged();
+  const fatIds = [];
+  const addFatId = (id) => {
+    if (id !== FREE) {
+      if (fatIds.length >= fatCount)
+        damaged();
+      fatIds.push(id);
+    }
+  };
+  for (let at = 76;at < 512; at += 4)
+    addFatId(file.readUInt32LE(at));
+  const difatIds = [];
+  let next = file.readUInt32LE(68);
+  for (let i2 = 0;i2 < difatCount; i2 += 1) {
+    claim(next);
+    difatIds.push(next);
+    const data2 = sector(next);
+    for (let at = 0;at < sectorSize - 4; at += 4)
+      addFatId(data2.readUInt32LE(at));
+    next = data2.readUInt32LE(sectorSize - 4);
+  }
+  if (difatCount > 0 && next !== END || difatCount === 0 && next !== END && next !== FREE || fatIds.length !== fatCount)
+    damaged();
+  const fats = fatIds.map((id) => {
+    claim(id);
+    return sector(id);
+  });
+  const fatAt = (id) => {
+    const entriesPerSector = sectorSize / 4;
+    const part = fats[Math.floor(id / entriesPerSector)];
+    if (id < 0 || id >= sectorCount || !part)
+      damaged();
+    return part.readUInt32LE(id % entriesPerSector * 4);
+  };
+  for (const id of fatIds)
+    if (fatAt(id) !== FAT)
+      damaged();
+  for (const id of difatIds)
+    if (fatAt(id) !== DIFAT)
+      damaged();
+  const chain = (start, size) => {
+    if (size !== undefined && (!Number.isSafeInteger(size) || size < 0 || size > MAX_READ_BYTES2))
+      damaged();
+    const parts = [];
+    let id = start;
+    while (id !== END) {
+      if (parts.length >= sectorCount || size !== undefined && parts.length >= Math.ceil(size / sectorSize))
+        damaged();
+      claim(id);
+      parts.push(sector(id));
+      id = fatAt(id);
+    }
+    if (size !== undefined && parts.length !== Math.ceil(size / sectorSize))
+      damaged();
+    return Buffer.concat(parts).subarray(0, size);
+  };
+  const directory = chain(file.readUInt32LE(48));
+  if (directory.length === 0 || major === 4 && directory.length / sectorSize !== file.readUInt32LE(40) || major === 3 && file.readUInt32LE(40) !== 0)
+    damaged();
+  const entry = (id) => {
+    if (id >= directory.length / 128)
+      damaged();
+    const at = id * 128;
+    const type = directory[at + 66];
+    const nameBytes = directory.readUInt16LE(at + 64);
+    if (nameBytes < 2 || nameBytes > 64 || nameBytes % 2 || directory.readUInt16LE(at + nameBytes - 2) !== 0)
+      damaged();
+    const size = directory.readUInt32LE(at + 120) + directory.readUInt32LE(at + 124) * 2 ** 32;
+    if (!Number.isSafeInteger(size) || major === 3 && directory.readUInt32LE(at + 124) !== 0)
+      damaged();
+    return {
+      name: directory.subarray(at, at + nameBytes - 2).toString("utf16le"),
+      type,
+      size,
+      start: directory.readUInt32LE(at + 116),
+      child: directory.readUInt32LE(at + 76),
+      left: directory.readUInt32LE(at + 68),
+      right: directory.readUInt32LE(at + 72)
+    };
+  };
+  const root = entry(0);
+  if (root.type !== 5)
+    damaged();
+  const streams = new Map;
+  const pending = [root.child];
+  const visited = new Set;
+  while (pending.length) {
+    const id = pending.pop();
+    if (id === FREE)
+      continue;
+    if (visited.has(id) || id === 0)
+      damaged();
+    visited.add(id);
+    const item = entry(id);
+    if (item.type !== 1 && item.type !== 2)
+      damaged();
+    pending.push(item.left, item.right);
+    if (item.type === 2) {
+      const key2 = item.name.toLowerCase();
+      if (streams.has(key2))
+        damaged();
+      streams.set(key2, item);
+    }
+  }
+  const miniFatCount = file.readUInt32LE(64);
+  if (miniFatCount > sectorCount)
+    damaged();
+  const miniFat = chain(file.readUInt32LE(60), miniFatCount * sectorSize);
+  let miniStream;
+  const miniClaimed = new Set;
+  const cache = new Map;
+  return {
+    readStream(name) {
+      return checked(() => {
+        const key2 = name.toLowerCase();
+        const item = streams.get(key2);
+        if (!item)
+          return;
+        const previous = cache.get(key2);
+        if (previous)
+          return previous;
+        let data2;
+        if (item.size >= 4096)
+          data2 = chain(item.start, item.size);
+        else if (item.size === 0) {
+          if (item.start !== END)
+            damaged();
+          data2 = Buffer.alloc(0);
+        } else {
+          miniStream ??= chain(root.start, root.size);
+          const parts = [];
+          let id = item.start;
+          while (id !== END) {
+            if (parts.length >= Math.ceil(item.size / 64) || miniClaimed.has(id) || id >= miniFat.length / 4 || (id + 1) * 64 > miniStream.length)
+              damaged();
+            miniClaimed.add(id);
+            totalRead += 64;
+            if (totalRead > MAX_READ_BYTES2)
+              damaged();
+            parts.push(miniStream.subarray(id * 64, (id + 1) * 64));
+            id = miniFat.readUInt32LE(id * 4);
+          }
+          if (parts.length !== Math.ceil(item.size / 64))
+            damaged();
+          data2 = Buffer.concat(parts).subarray(0, item.size);
+        }
+        cache.set(key2, data2);
+        return data2;
+      });
+    }
+  };
+}
+var FREE = 4294967295, END = 4294967294, FAT = 4294967293, DIFAT = 4294967292, MAX_READ_BYTES2;
+var init_compound_file = __esm(() => {
+  init_document_formats();
+  MAX_READ_BYTES2 = 64 * 1024 * 1024;
+});
+
+// src/workers/file-extraction/extractors/legacy-word.ts
+function readLegacyWord(bytes) {
+  try {
+    return decodeLegacyWord(bytes);
+  } catch (error) {
+    if (error instanceof OfficeDocumentUnreadableError)
+      throw error;
+    throw new OfficeDocumentUnreadableError("damaged", "Word piece table is malformed.");
+  }
+}
+function decodeLegacyWord(bytes) {
+  const file = readCompoundFile(bytes);
+  const word = file.readStream("WordDocument");
+  if (!word || ![42476, 42460, 42647].includes(word.readUInt16LE(0))) {
+    throw new OfficeDocumentUnreadableError("damaged", "Word document stream is missing or malformed.");
+  }
+  if (word.readUInt16LE(0) !== 42476 || word.readUInt16LE(2) < 192) {
+    throw new OfficeDocumentUnreadableError("unsupported", "Word versions before Word 97 are unsupported.");
+  }
+  const flags = word.readUInt16LE(10);
+  if (flags & 33024)
+    throw new OfficeDocumentUnreadableError("encrypted", "Word document is encrypted.");
+  const table = file.readStream(flags & 512 ? "1Table" : "0Table");
+  if (!table)
+    throw new OfficeDocumentUnreadableError("unsupported", "Word piece table is missing.");
+  const cslwAt = 34 + word.readUInt16LE(32) * 2;
+  const pairsAt = cslwAt + 2 + word.readUInt16LE(cslwAt) * 4;
+  if (word.readUInt16LE(pairsAt) <= 33) {
+    throw new OfficeDocumentUnreadableError("unsupported", "Word piece table is missing.");
+  }
+  const fcClxAt = pairsAt + 2 + 33 * 8;
+  const offset = word.readUInt32LE(fcClxAt);
+  const length = word.readUInt32LE(fcClxAt + 4);
+  if (length === 0)
+    throw new OfficeDocumentUnreadableError("unsupported", "Word piece table is missing.");
+  if (offset + length > table.length)
+    throw new RangeError;
+  const clx = table.subarray(offset, offset + length);
+  let at = 0;
+  while (clx[at] === 1)
+    at += 3 + clx.readUInt16LE(at + 1);
+  if (at >= clx.length)
+    throw new OfficeDocumentUnreadableError("unsupported", "Word piece table is missing.");
+  if (clx[at] !== 2)
+    throw new RangeError;
+  const plcLength = clx.readUInt32LE(at + 1);
+  if (plcLength < 4 || (plcLength - 4) % 12 || at + 5 + plcLength !== clx.length)
+    throw new RangeError;
+  const plc = clx.subarray(at + 5);
+  const count = (plcLength - 4) / 12;
+  const pieces = [];
+  let decodedBytes = 0;
+  if (plc.readUInt32LE(0) !== 0)
+    throw new RangeError;
+  for (let i2 = 0;i2 < count; i2 += 1) {
+    const chars = plc.readUInt32LE((i2 + 1) * 4) - plc.readUInt32LE(i2 * 4);
+    const fc = plc.readUInt32LE((count + 1) * 4 + i2 * 8 + 2);
+    const compressed = (fc & 1073741824) !== 0;
+    const start = (fc & 1073741823) / (compressed ? 2 : 1);
+    const size = chars * (compressed ? 1 : 2);
+    decodedBytes += size;
+    if (chars < 0 || !Number.isInteger(start) || start + size > word.length || decodedBytes > 64 * 1024 * 1024)
+      throw new RangeError;
+    const data2 = word.subarray(start, start + size);
+    pieces.push(compressed ? new TextDecoder("windows-1252").decode(data2) : data2.toString("utf16le"));
+  }
+  return wordControlsToText(pieces.join(""));
+}
+function wordControlsToText(input) {
+  const fields = [];
+  let hidden = 0;
+  const text3 = [];
+  let start = 0;
+  for (let at = 0;at < input.length; at += 1) {
+    const code = input.charCodeAt(at);
+    if (code >= 32 || code === 9 || code === 10)
+      continue;
+    if (!hidden)
+      text3.push(input.slice(start, at));
+    if (code === 19) {
+      fields.push(true);
+      hidden += 1;
+    } else if (code === 20) {
+      if (fields.at(-1)) {
+        fields[fields.length - 1] = false;
+        hidden -= 1;
+      }
+    } else if (code === 21) {
+      if (fields.pop())
+        hidden -= 1;
+    } else if (!hidden) {
+      if (code === 7)
+        text3.push("\t");
+      else if (code === 11 || code === 12 || code === 13 || code === 14)
+        text3.push(`
+`);
+    }
+    start = at + 1;
+  }
+  if (!hidden)
+    text3.push(input.slice(start));
+  return text3.join("");
+}
+var init_legacy_word = __esm(() => {
+  init_compound_file();
+  init_document_formats();
+});
+
+// src/workers/file-extraction/extractors/legacy-workbook.ts
+function readLegacyWorkbook(bytes) {
+  try {
+    return decodeWorkbook(bytes);
+  } catch (error) {
+    if (error instanceof OfficeDocumentUnreadableError)
+      throw error;
+    throw new OfficeDocumentUnreadableError("damaged", "Workbook records are malformed.");
+  }
+}
+function decodeWorkbook(bytes) {
+  const file = readCompoundFile(bytes);
+  const stream = file.readStream("Workbook") ?? file.readStream("Book");
+  if (!stream)
+    throw new OfficeDocumentUnreadableError("damaged", "Workbook stream is missing.");
+  const records = [];
+  let at = 0;
+  while (at + 4 <= stream.length) {
+    const id = stream.readUInt16LE(at);
+    const length = stream.readUInt16LE(at + 2);
+    if (id === 0 && length === 0 && stream.subarray(at).every((byte) => byte === 0))
+      break;
+    if (at + 4 + length > stream.length)
+      break;
+    if (records.length >= 1e6)
+      throw new RangeError;
+    records.push({ id, offset: at, data: stream.subarray(at + 4, at + 4 + length) });
+    at += 4 + length;
+  }
+  if (records.some((record) => record.id === 47)) {
+    throw new OfficeDocumentUnreadableError("encrypted", "Workbook is encrypted.");
+  }
+  const first = records[0];
+  if (!first || ![9, 521, 1033, 2057].includes(first.id))
+    throw new RangeError;
+  if (first.id !== 2057 || first.data.readUInt16LE(0) !== 1536) {
+    throw new OfficeDocumentUnreadableError("unsupported", "Workbook versions before BIFF8 are unsupported.");
+  }
+  if (first.data.readUInt16LE(2) !== 5)
+    throw new RangeError;
+  const globalsEnd = records.findIndex((record) => record.id === 10);
+  if (globalsEnd < 0)
+    throw new RangeError;
+  const sheets = [];
+  let strings = [];
+  for (let i2 = 1;i2 < globalsEnd; i2 += 1) {
+    const record = records[i2];
+    if (record.id === 133) {
+      const data2 = record.data;
+      if (data2[5] !== 0)
+        continue;
+      const chars = data2.readUInt8(6);
+      const wide = (data2.readUInt8(7) & 1) !== 0;
+      const size = chars * (wide ? 2 : 1);
+      if (8 + size > data2.length)
+        throw new RangeError;
+      sheets.push({ name: biffText(data2.subarray(8, 8 + size), wide), offset: data2.readUInt32LE(0) });
+    } else if (record.id === 252) {
+      const parts = [record.data];
+      while (records[i2 + 1]?.id === 60)
+        parts.push(records[++i2].data);
+      strings = readSharedStrings(parts);
+    }
+  }
+  const byOffset = new Map(records.map((record, index) => [record.offset, index]));
+  let cellCount = 0;
+  const sheetOffsets = new Set;
+  return sheets.map((sheet) => {
+    if (sheetOffsets.has(sheet.offset))
+      throw new RangeError;
+    sheetOffsets.add(sheet.offset);
+    const index = byOffset.get(sheet.offset);
+    const bof = index === undefined ? undefined : records[index];
+    if (!bof || bof.id !== 2057 || bof.data.readUInt16LE(0) !== 1536 || bof.data.readUInt16LE(2) !== 16)
+      throw new RangeError;
+    const rows = new Map;
+    const put = (row, column, value) => {
+      if (column > 255 || ++cellCount > 500000)
+        throw new RangeError;
+      const cells = rows.get(row) ?? [];
+      while (cells.length <= column)
+        cells.push("");
+      cells[column] = value;
+      rows.set(row, cells);
+    };
+    let ended = false;
+    for (let i2 = index + 1;i2 < records.length; i2 += 1) {
+      const { id, data: data2 } = records[i2];
+      if (id === 10) {
+        ended = true;
+        break;
+      }
+      if (id === 2057)
+        throw new RangeError;
+      if (![253, 516, 515, 638, 189, 517].includes(id))
+        continue;
+      const row = data2.readUInt16LE(0);
+      const column = data2.readUInt16LE(2);
+      if (id === 253) {
+        const value = strings[data2.readUInt32LE(6)];
+        if (value === undefined)
+          throw new RangeError;
+        put(row, column, value);
+      } else if (id === 516) {
+        const count = data2.readUInt16LE(6);
+        const wide = (data2.readUInt8(8) & 1) !== 0;
+        const end = 9 + count * (wide ? 2 : 1);
+        if (end > data2.length)
+          throw new RangeError;
+        put(row, column, biffText(data2.subarray(9, end), wide));
+      } else if (id === 515)
+        put(row, column, finiteNumber(data2.readDoubleLE(6)));
+      else if (id === 638)
+        put(row, column, decodeRk(data2.readUInt32LE(6)));
+      else if (id === 189) {
+        const last = data2.readUInt16LE(data2.length - 2);
+        if (last < column || last > 255 || data2.length !== 6 + (last - column + 1) * 6)
+          throw new RangeError;
+        for (let col = column;col <= last; col += 1)
+          put(row, col, decodeRk(data2.readUInt32LE(6 + (col - column) * 6)));
+      } else {
+        const value = data2.readUInt8(6);
+        const error = data2.readUInt8(7);
+        if (error > 1 || error === 0 && value > 1)
+          throw new RangeError;
+        put(row, column, error ? biffError(value) : value ? "TRUE" : "FALSE");
+      }
+    }
+    if (!ended)
+      throw new RangeError;
+    return { name: sheet.name, rows: [...rows].sort(([a], [b]) => a - b).map(([, cells]) => cells) };
+  });
+}
+function biffText(bytes, wide) {
+  return bytes.toString(wide ? "utf16le" : "latin1");
+}
+function finiteNumber(value) {
+  if (!Number.isFinite(value))
+    throw new RangeError;
+  return String(value);
+}
+function decodeRk(rk) {
+  let value;
+  if (rk & 2)
+    value = rk >> 2;
+  else {
+    const data2 = Buffer.alloc(8);
+    data2.writeUInt32LE((rk & 4294967292) >>> 0, 4);
+    value = data2.readDoubleLE();
+  }
+  return finiteNumber(rk & 1 ? value / 100 : value);
+}
+function biffError(value) {
+  const errors = {
+    0: "#NULL!",
+    7: "#DIV/0!",
+    15: "#VALUE!",
+    23: "#REF!",
+    29: "#NAME?",
+    36: "#NUM!",
+    42: "#N/A"
+  };
+  const text3 = errors[value];
+  if (text3 === undefined)
+    throw new RangeError;
+  return text3;
+}
+function readSharedStrings(parts) {
+  let part = 0;
+  let at = 0;
+  const advance = () => {
+    while (part < parts.length && at === parts[part].length) {
+      part += 1;
+      at = 0;
+    }
+    if (part >= parts.length)
+      throw new RangeError;
+  };
+  const byte = () => {
+    advance();
+    return parts[part][at++];
+  };
+  const u162 = () => byte() + byte() * 256;
+  const u32 = () => u162() + u162() * 65536;
+  const skip = (count) => {
+    while (count > 0) {
+      advance();
+      const size = Math.min(count, parts[part].length - at);
+      at += size;
+      count -= size;
+    }
+  };
+  u32();
+  const unique = u32();
+  if (unique > parts.reduce((sum, data2) => sum + data2.length, 0) / 3)
+    throw new RangeError;
+  const strings = [];
+  let totalChars = 0;
+  for (let i2 = 0;i2 < unique; i2 += 1) {
+    const chars = u162();
+    const flags = byte();
+    let wide = (flags & 1) !== 0;
+    const runs = flags & 8 ? u162() : 0;
+    const extension = flags & 4 ? u32() : 0;
+    totalChars += chars;
+    if (totalChars > 8000000)
+      throw new RangeError;
+    const chunks = [];
+    let remaining = chars;
+    while (remaining > 0) {
+      if (at === parts[part].length) {
+        part += 1;
+        at = 0;
+        if (!parts[part]?.length)
+          throw new RangeError;
+        const option = byte();
+        if (option > 1)
+          throw new RangeError;
+        wide = option === 1;
+      }
+      const size = Math.min(remaining, Math.floor((parts[part].length - at) / (wide ? 2 : 1)));
+      if (size === 0)
+        throw new RangeError;
+      const end = at + size * (wide ? 2 : 1);
+      chunks.push(biffText(parts[part].subarray(at, end), wide));
+      at = end;
+      remaining -= size;
+    }
+    skip(runs * 4 + extension);
+    strings.push(chunks.join(""));
+  }
+  return strings;
+}
+var init_legacy_workbook = __esm(() => {
+  init_compound_file();
+  init_document_formats();
+});
+
+// src/workers/file-extraction/extractors/package-documents.ts
+import { posix as posix2 } from "node:path";
+function unreadable(reason, message2) {
+  throw new OfficeDocumentUnreadableError(reason, message2);
+}
+function parseMarkup(xml) {
+  const root = { name: "", attributes: {}, children: [] };
+  const stack = [root];
+  const tokens = xml.matchAll(/<!--[\s\S]*?-->|<\?[\s\S]*?\?>|<!\[CDATA\[([\s\S]*?)\]\]>|<![^>]*>|<\/?[^>]+>|[^<]+/g);
+  let count = 0;
+  let end = 0;
+  for (const token of tokens) {
+    if (token.index !== end)
+      unreadable("damaged", "Document markup is malformed.");
+    end += token[0].length;
+    const value = token[0];
+    const parent = stack.at(-1);
+    if (value.startsWith("<![CDATA["))
+      parent.children.push(token[1]);
+    else if (value.startsWith("<!") || value.startsWith("<?"))
+      continue;
+    else if (value.startsWith("</")) {
+      const name = value.slice(2, -1).trim();
+      const open4 = stack.map((node) => node.name).lastIndexOf(name);
+      if (open4 > 0)
+        stack.length = open4;
+    } else if (value.startsWith("<")) {
+      const inner = value.slice(1, value.endsWith("/>") ? -2 : -1).trim();
+      const name = inner.split(/\s/, 1)[0];
+      const attributes = Object.create(null);
+      for (const match of inner.slice(name.length).matchAll(/([^\s=]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) {
+        attributes[localName(match[1])] = decodeEntities(match[2] ?? match[3] ?? "");
+      }
+      const node = { name, attributes, children: [] };
+      if (++count > 200000 || stack.length > 256)
+        unreadable("unsupported", "Document markup exceeds the local read limit.");
+      parent.children.push(node);
+      if (!value.endsWith("/>") && !VOID_ELEMENTS.has(localName(name).toLowerCase()))
+        stack.push(node);
+    } else
+      parent.children.push(decodeEntities(value));
+  }
+  if (end !== xml.length)
+    unreadable("damaged", "Document markup is incomplete.");
+  return root;
+}
+function localName(name) {
+  return name.slice(name.lastIndexOf(":") + 1);
+}
+function decodeEntities(text3) {
+  return text3.replace(/&(#x[0-9a-f]+|#\d+|[a-z][a-z0-9]+);/gi, (whole, key2) => {
+    if (!key2.startsWith("#"))
+      return Object.hasOwn(MARKUP_ENTITIES, key2) ? MARKUP_ENTITIES[key2] : whole;
+    const code = key2[1]?.toLowerCase() === "x" ? Number.parseInt(key2.slice(2), 16) : Number(key2.slice(1));
+    return code > 0 && code <= 1114111 && !(code >= 55296 && code <= 57343) ? String.fromCodePoint(code) : "�";
+  });
+}
+function nodes(root, name) {
+  const found = [];
+  const walk = (node) => {
+    for (const child2 of node.children) {
+      if (typeof child2 === "string")
+        continue;
+      if (localName(child2.name) === name)
+        found.push(child2);
+      walk(child2);
+    }
+  };
+  walk(root);
+  return found;
+}
+function markupText(node) {
+  const name = localName(node.name).toLowerCase();
+  if (name === "script" || name === "style" || name === "head" || name === "binary-data")
+    return "";
+  if (name === "s")
+    return " ".repeat(repeatCount(node.attributes.c, 1000));
+  if (name === "tab")
+    return "\t";
+  if (name === "br" || name === "line-break")
+    return `
+`;
+  const text3 = node.children.map((child2) => typeof child2 === "string" ? child2 : markupText(child2)).join("");
+  if (name === "table-cell" || name === "covered-table-cell" || name === "td" || name === "th")
+    return `${text3.trim()}	`;
+  return ["p", "h", "list-item", "h1", "h2", "h3", "h4", "h5", "h6", "div", "li", "tr", "section", "table-row"].includes(name) ? `${text3.trim()}
+` : text3;
+}
+function repeatCount(value, maximum = 500000) {
+  if (value === undefined)
+    return 1;
+  const count = Number(value);
+  if (!Number.isSafeInteger(count) || count < 1 || count > maximum)
+    unreadable("unsupported", "Document repetition exceeds the local read limit.");
+  return count;
+}
+function packageReader(bytes) {
+  const entries = readZipEntries(bytes);
+  let total = 0;
+  return (name, required3 = false) => {
+    const text3 = readZipEntryText(bytes, entries, name);
+    if (text3 === undefined && required3)
+      unreadable("damaged", "A required document part is missing.");
+    total += (text3?.length ?? 0) * 2;
+    if (total > 64 * 1024 * 1024)
+      unreadable("unsupported", "Document parts exceed the local read limit.");
+    return text3;
+  };
+}
+function readOpenDocument(bytes, format) {
+  const read = packageReader(bytes);
+  const manifest = read("META-INF/manifest.xml");
+  if (manifest && nodes(parseMarkup(manifest), "encryption-data").length)
+    unreadable("encrypted", "OpenDocument content is encrypted.");
+  const content = parseMarkup(read("content.xml", true));
+  if (format === "odt")
+    return { text: markupText(content) };
+  if (format === "odp")
+    return {
+      sections: nodes(content, "page").map((page2, index) => ({ name: `Slide ${index + 1}`, text: markupText(page2) }))
+    };
+  let totalCells = 0;
+  const sheets = nodes(content, "table").map((table, index) => {
+    const rows = [];
+    for (const row of nodes(table, "table-row")) {
+      const cells = [];
+      for (const cell of row.children) {
+        if (typeof cell === "string" || !["table-cell", "covered-table-cell"].includes(localName(cell.name)))
+          continue;
+        const value = markupText(cell).trim() || cell.attributes["string-value"] || cell.attributes.value || cell.attributes["boolean-value"] || cell.attributes["date-value"] || cell.attributes["time-value"] || "";
+        const repeat2 = repeatCount(cell.attributes["number-columns-repeated"], 16384);
+        if (cells.length + repeat2 > 16384)
+          unreadable("unsupported", "Document table is too wide.");
+        for (let i2 = 0;i2 < repeat2; i2 += 1)
+          cells.push(value);
+      }
+      if (!cells.some((cell) => cell.trim()))
+        continue;
+      const repeat = repeatCount(row.attributes["number-rows-repeated"]);
+      totalCells += repeat * cells.length;
+      if (totalCells > 500000)
+        unreadable("unsupported", "Document table exceeds the local read limit.");
+      for (let i2 = 0;i2 < repeat; i2 += 1)
+        rows.push(cells);
+    }
+    return { name: table.attributes.name ?? `sheet ${index + 1}`, rows };
+  });
+  return { sheets };
+}
+function packagePath(base, href) {
+  let decoded;
+  try {
+    decoded = decodeURIComponent(href.split("#")[0].split("?")[0]);
+  } catch {
+    return unreadable("damaged", "Document part path is malformed.");
+  }
+  if (decoded.includes(":") || decoded.includes("\\") || decoded.startsWith("/"))
+    unreadable("unsupported", "External document parts are unsupported.");
+  const path = posix2.normalize(posix2.join(base, decoded));
+  if (path === ".." || path.startsWith("../"))
+    unreadable("damaged", "Document part path leaves its package.");
+  return path;
+}
+function readEpub(bytes) {
+  const read = packageReader(bytes);
+  const container = parseMarkup(read("META-INF/container.xml", true));
+  const rootfile = nodes(container, "rootfile")[0]?.attributes["full-path"];
+  if (!rootfile)
+    unreadable("damaged", "EPUB package path is missing.");
+  const opfPath = packagePath("", rootfile);
+  const opf = parseMarkup(read(opfPath, true));
+  const items = new Map;
+  for (const item of nodes(opf, "item")) {
+    const { id, href } = item.attributes;
+    if (!id || !href || items.has(id))
+      unreadable("damaged", "EPUB manifest item is malformed.");
+    items.set(id, { path: packagePath(posix2.dirname(opfPath), href), mime: item.attributes["media-type"] ?? "" });
+  }
+  const itemsByPath = new Map([...items.values()].map((item) => [item.path, item]));
+  const encryption = read("META-INF/encryption.xml");
+  if (encryption) {
+    for (const reference of nodes(parseMarkup(encryption), "CipherReference")) {
+      const uri = reference.attributes.URI;
+      if (!uri)
+        unreadable("damaged", "EPUB encryption reference is missing.");
+      const path = packagePath("", uri);
+      const item = itemsByPath.get(path);
+      const font = item && (item.mime.startsWith("font/") || ["application/vnd.ms-opentype", "application/font-sfnt", "application/font-woff"].includes(item.mime));
+      if (!font)
+        unreadable("encrypted", "EPUB content is encrypted.");
+    }
+  }
+  const spine = nodes(opf, "itemref");
+  if (spine.length === 0)
+    unreadable("damaged", "EPUB spine is missing.");
+  if (spine.length > 2048)
+    unreadable("unsupported", "EPUB spine exceeds the local read limit.");
+  const sections = spine.map((reference, index) => {
+    const item = items.get(reference.attributes.idref ?? "");
+    if (!item)
+      unreadable("damaged", "EPUB spine item is missing.");
+    if (!["application/xhtml+xml", "text/html"].includes(item.mime))
+      unreadable("unsupported", "EPUB spine item is not text.");
+    return { name: `Chapter ${index + 1}`, text: markupText(parseMarkup(read(item.path, true))) };
+  });
+  return { sections };
+}
+var VOID_ELEMENTS, MARKUP_ENTITIES;
+var init_package_documents = __esm(() => {
+  init_document_formats();
+  VOID_ELEMENTS = new Set([
+    "area",
+    "base",
+    "br",
+    "col",
+    "embed",
+    "hr",
+    "img",
+    "input",
+    "link",
+    "meta",
+    "param",
+    "source",
+    "track",
+    "wbr"
+  ]);
+  MARKUP_ENTITIES = Object.freeze({
+    AElig: "Æ",
+    Aacute: "Á",
+    Acirc: "Â",
+    Agrave: "À",
+    Alpha: "Α",
+    Aring: "Å",
+    Atilde: "Ã",
+    Auml: "Ä",
+    Beta: "Β",
+    Ccedil: "Ç",
+    Chi: "Χ",
+    Dagger: "‡",
+    Delta: "Δ",
+    ETH: "Ð",
+    Eacute: "É",
+    Ecirc: "Ê",
+    Egrave: "È",
+    Epsilon: "Ε",
+    Eta: "Η",
+    Euml: "Ë",
+    Gamma: "Γ",
+    Iacute: "Í",
+    Icirc: "Î",
+    Igrave: "Ì",
+    Iota: "Ι",
+    Iuml: "Ï",
+    Kappa: "Κ",
+    Lambda: "Λ",
+    Mu: "Μ",
+    Ntilde: "Ñ",
+    Nu: "Ν",
+    OElig: "Œ",
+    Oacute: "Ó",
+    Ocirc: "Ô",
+    Ograve: "Ò",
+    Omega: "Ω",
+    Omicron: "Ο",
+    Oslash: "Ø",
+    Otilde: "Õ",
+    Ouml: "Ö",
+    Phi: "Φ",
+    Pi: "Π",
+    Prime: "″",
+    Psi: "Ψ",
+    Rho: "Ρ",
+    Scaron: "Š",
+    Sigma: "Σ",
+    THORN: "Þ",
+    Tau: "Τ",
+    Theta: "Θ",
+    Uacute: "Ú",
+    Ucirc: "Û",
+    Ugrave: "Ù",
+    Upsilon: "Υ",
+    Uuml: "Ü",
+    Xi: "Ξ",
+    Yacute: "Ý",
+    Yuml: "Ÿ",
+    Zeta: "Ζ",
+    aacute: "á",
+    acirc: "â",
+    acute: "´",
+    aelig: "æ",
+    agrave: "à",
+    alefsym: "ℵ",
+    alpha: "α",
+    amp: "&",
+    and: "∧",
+    ang: "∠",
+    aring: "å",
+    asymp: "≈",
+    atilde: "ã",
+    auml: "ä",
+    bdquo: "„",
+    beta: "β",
+    brvbar: "¦",
+    bull: "•",
+    cap: "∩",
+    ccedil: "ç",
+    cedil: "¸",
+    cent: "¢",
+    chi: "χ",
+    circ: "ˆ",
+    clubs: "♣",
+    cong: "≅",
+    copy: "©",
+    crarr: "↵",
+    cup: "∪",
+    curren: "¤",
+    dArr: "⇓",
+    dagger: "†",
+    darr: "↓",
+    deg: "°",
+    delta: "δ",
+    diams: "♦",
+    divide: "÷",
+    eacute: "é",
+    ecirc: "ê",
+    egrave: "è",
+    empty: "∅",
+    emsp: " ",
+    ensp: " ",
+    epsilon: "ε",
+    equiv: "≡",
+    eta: "η",
+    eth: "ð",
+    euml: "ë",
+    euro: "€",
+    exist: "∃",
+    fnof: "ƒ",
+    forall: "∀",
+    frac12: "½",
+    frac14: "¼",
+    frac34: "¾",
+    frasl: "⁄",
+    gamma: "γ",
+    ge: "≥",
+    gt: ">",
+    hArr: "⇔",
+    harr: "↔",
+    hearts: "♥",
+    hellip: "…",
+    iacute: "í",
+    icirc: "î",
+    iexcl: "¡",
+    igrave: "ì",
+    image: "ℑ",
+    infin: "∞",
+    int: "∫",
+    iota: "ι",
+    iquest: "¿",
+    isin: "∈",
+    iuml: "ï",
+    kappa: "κ",
+    lArr: "⇐",
+    lambda: "λ",
+    lang: "〈",
+    laquo: "«",
+    larr: "←",
+    lceil: "⌈",
+    ldquo: "“",
+    le: "≤",
+    lfloor: "⌊",
+    lowast: "∗",
+    loz: "◊",
+    lrm: "‎",
+    lsaquo: "‹",
+    lsquo: "‘",
+    lt: "<",
+    macr: "¯",
+    mdash: "—",
+    micro: "µ",
+    middot: "·",
+    minus: "−",
+    mu: "μ",
+    nabla: "∇",
+    nbsp: " ",
+    ndash: "–",
+    ne: "≠",
+    ni: "∋",
+    not: "¬",
+    notin: "∉",
+    nsub: "⊄",
+    ntilde: "ñ",
+    nu: "ν",
+    oacute: "ó",
+    ocirc: "ô",
+    oelig: "œ",
+    ograve: "ò",
+    oline: "‾",
+    omega: "ω",
+    omicron: "ο",
+    oplus: "⊕",
+    or: "∨",
+    ordf: "ª",
+    ordm: "º",
+    oslash: "ø",
+    otilde: "õ",
+    otimes: "⊗",
+    ouml: "ö",
+    para: "¶",
+    part: "∂",
+    permil: "‰",
+    perp: "⊥",
+    phi: "φ",
+    pi: "π",
+    piv: "ϖ",
+    plusmn: "±",
+    pound: "£",
+    prime: "′",
+    prod: "∏",
+    prop: "∝",
+    psi: "ψ",
+    quot: '"',
+    rArr: "⇒",
+    radic: "√",
+    rang: "〉",
+    raquo: "»",
+    rarr: "→",
+    rceil: "⌉",
+    rdquo: "”",
+    real: "ℜ",
+    reg: "®",
+    rfloor: "⌋",
+    rho: "ρ",
+    rlm: "‏",
+    rsaquo: "›",
+    rsquo: "’",
+    sbquo: "‚",
+    scaron: "š",
+    sdot: "⋅",
+    sect: "§",
+    shy: "­",
+    sigma: "σ",
+    sigmaf: "ς",
+    sim: "∼",
+    spades: "♠",
+    sub: "⊂",
+    sube: "⊆",
+    sum: "∑",
+    sup: "⊃",
+    sup1: "¹",
+    sup2: "²",
+    sup3: "³",
+    supe: "⊇",
+    szlig: "ß",
+    tau: "τ",
+    there4: "∴",
+    theta: "θ",
+    thetasym: "ϑ",
+    thinsp: " ",
+    thorn: "þ",
+    tilde: "˜",
+    times: "×",
+    trade: "™",
+    uArr: "⇑",
+    uacute: "ú",
+    uarr: "↑",
+    ucirc: "û",
+    ugrave: "ù",
+    uml: "¨",
+    upsih: "ϒ",
+    upsilon: "υ",
+    uuml: "ü",
+    weierp: "℘",
+    xi: "ξ",
+    yacute: "ý",
+    yen: "¥",
+    yuml: "ÿ",
+    zeta: "ζ",
+    zwj: "‍",
+    zwnj: "‌",
+    apos: "'"
+  });
+});
+
+// src/workers/file-extraction/extractors/rtf.ts
+function hasRtfSignature(bytes) {
+  return bytes.length >= 5 && bytes[0] === 123 && bytes[1] === 92 && bytes[2] === 114 && bytes[3] === 116 && bytes[4] === 102;
+}
+function rtfSourceFromBytes(bytes) {
+  let source = "";
+  for (let start = 0;start < bytes.length; start += 8192) {
+    source += String.fromCharCode(...bytes.subarray(start, start + 8192));
+  }
+  return source;
+}
+function rtfToText(source, maxChars) {
+  const out = [];
+  let length = 0;
+  let truncated = false;
+  const emit = (text3) => {
+    const room = maxChars - length;
+    const piece = text3.length > room ? text3.slice(0, room) : text3;
+    if (piece.length < text3.length && text3.slice(piece.length).trim() !== "")
+      truncated = true;
+    if (piece.length === 0)
+      return;
+    out.push(piece);
+    length += piece.length;
+  };
+  let codePage = 1252;
+  const stack = [];
+  let state = { skip: false, unicodeSkip: 1 };
+  let pendingSkip = 0;
+  let groupStart = false;
+  const hexBytes = [];
+  const pushByte = (byte) => {
+    hexBytes.push(byte);
+    if (hexBytes.length >= (maxChars - length) * 4 + 4)
+      flushHex();
+  };
+  const flushHex = () => {
+    if (hexBytes.length === 0)
+      return;
+    if (!state.skip)
+      emit(decodeCodePage(Uint8Array.from(hexBytes), codePage));
+    hexBytes.length = 0;
+  };
+  let index = 0;
+  while (index < source.length && !truncated) {
+    const char = source[index];
+    if (char === "{") {
+      flushHex();
+      stack.push(state);
+      state = { ...state };
+      groupStart = true;
+      pendingSkip = 0;
+      index += 1;
+      continue;
+    }
+    if (char === "}") {
+      flushHex();
+      state = stack.pop() ?? { skip: false, unicodeSkip: 1 };
+      groupStart = false;
+      pendingSkip = 0;
+      index += 1;
+      continue;
+    }
+    if (char === "\\") {
+      const next = source[index + 1];
+      if (next === undefined)
+        break;
+      if (next === "'") {
+        const hex = source.slice(index + 2, index + 4);
+        index += 4;
+        if (pendingSkip > 0) {
+          pendingSkip -= 1;
+          continue;
+        }
+        const value2 = Number.parseInt(hex, 16);
+        if (Number.isFinite(value2))
+          pushByte(value2);
+        groupStart = false;
+        continue;
+      }
+      flushHex();
+      if (next === "*") {
+        if (groupStart)
+          state.skip = true;
+        index += 2;
+        continue;
+      }
+      if (!isLetter(next)) {
+        index += 2;
+        groupStart = false;
+        const symbol = next === "\\" || next === "{" || next === "}" ? next : next === "~" ? " " : next === "_" ? "-" : next === `
+` || next === "\r" ? `
+` : undefined;
+        if (symbol === undefined)
+          continue;
+        if (pendingSkip > 0) {
+          pendingSkip -= 1;
+          continue;
+        }
+        if (!state.skip)
+          emit(symbol);
+        continue;
+      }
+      let end = index + 1;
+      while (end < source.length && end - index <= 32 && isLetter(source[end]))
+        end += 1;
+      const word = source.slice(index + 1, end);
+      index = end;
+      let digitsEnd = source[index] === "-" ? index + 1 : index;
+      while (digitsEnd < source.length && digitsEnd - index < 11 && isDigit(source[digitsEnd]))
+        digitsEnd += 1;
+      const parameter = digitsEnd > index && isDigit(source[digitsEnd - 1]) ? source.slice(index, digitsEnd) : undefined;
+      if (parameter !== undefined)
+        index = digitsEnd;
+      if (source[index] === " ")
+        index += 1;
+      const value = parameter === undefined ? undefined : Number(parameter);
+      const atStart = groupStart;
+      groupStart = false;
+      if (atStart && SKIPPED_DESTINATIONS.has(word)) {
+        state.skip = true;
+        continue;
+      }
+      if (word === "ansicpg" && value !== undefined) {
+        codePage = value;
+        continue;
+      }
+      if (word === "uc" && value !== undefined) {
+        state.unicodeSkip = Math.max(0, value);
+        continue;
+      }
+      if (word === "u" && value !== undefined) {
+        if (!state.skip)
+          emit(String.fromCharCode(value < 0 ? value + 65536 : value));
+        pendingSkip = state.unicodeSkip;
+        continue;
+      }
+      if (word === "bin" && value !== undefined) {
+        index += Math.max(0, value);
+        continue;
+      }
+      if (!state.skip && BREAKS[word] !== undefined)
+        emit(BREAKS[word]);
+      continue;
+    }
+    if (char === "\r" || char === `
+`) {
+      index += 1;
+      continue;
+    }
+    groupStart = false;
+    index += 1;
+    if (pendingSkip > 0) {
+      pendingSkip -= 1;
+      continue;
+    }
+    if (char.charCodeAt(0) > 127) {
+      pushByte(char.charCodeAt(0));
+      continue;
+    }
+    flushHex();
+    if (!state.skip)
+      emit(char);
+  }
+  flushHex();
+  return { text: out.join(""), truncated };
+}
+function isLetter(char) {
+  const code = char.charCodeAt(0);
+  return code >= 65 && code <= 90 || code >= 97 && code <= 122;
+}
+function isDigit(char) {
+  const code = char.charCodeAt(0);
+  return code >= 48 && code <= 57;
+}
+function decodeCodePage(bytes, codePage) {
+  const label = CODE_PAGE_LABELS.get(codePage);
+  if (label) {
+    try {
+      return new TextDecoder(label).decode(bytes);
+    } catch {}
+  }
+  let text3 = "";
+  for (const byte of bytes)
+    text3 += byte < 128 ? String.fromCharCode(byte) : "�";
+  return text3;
+}
+var RTF_MIME_TYPES, SKIPPED_DESTINATIONS, BREAKS, CODE_PAGE_LABELS;
+var init_rtf = __esm(() => {
+  RTF_MIME_TYPES = new Set(["application/rtf", "text/rtf"]);
+  SKIPPED_DESTINATIONS = new Set([
+    "fonttbl",
+    "colortbl",
+    "stylesheet",
+    "info",
+    "pict",
+    "object",
+    "listtable",
+    "listoverridetable",
+    "rsidtbl",
+    "generator",
+    "themedata",
+    "colorschememapping",
+    "datastore",
+    "latentstyles",
+    "xmlnstbl",
+    "header",
+    "headerl",
+    "headerr",
+    "headerf",
+    "footer",
+    "footerl",
+    "footerr",
+    "footerf",
+    "filetbl",
+    "revtbl",
+    "mmathPr",
+    "pgdsctbl",
+    "fldinst"
+  ]);
+  BREAKS = {
+    par: `
+`,
+    line: `
+`,
+    sect: `
+`,
+    page: `
+`,
+    row: `
+`,
+    tab: "\t",
+    cell: "\t",
+    emdash: "—",
+    endash: "–",
+    bullet: "•",
+    lquote: "‘",
+    rquote: "’",
+    ldblquote: "“",
+    rdblquote: "”",
+    emspace: " ",
+    enspace: " ",
+    qmspace: " "
+  };
+  CODE_PAGE_LABELS = new Map([
+    [866, "ibm866"],
+    [874, "windows-874"],
+    [932, "shift_jis"],
+    [936, "gbk"],
+    [949, "euc-kr"],
+    [950, "big5"],
+    [1250, "windows-1250"],
+    [1251, "windows-1251"],
+    [1252, "windows-1252"],
+    [1253, "windows-1253"],
+    [1254, "windows-1254"],
+    [1255, "windows-1255"],
+    [1256, "windows-1256"],
+    [1257, "windows-1257"],
+    [1258, "windows-1258"],
+    [1e4, "macintosh"],
+    [10007, "x-mac-cyrillic"],
+    [20866, "koi8-r"],
+    [28591, "iso-8859-1"],
+    [28592, "iso-8859-2"],
+    [28595, "iso-8859-5"],
+    [54936, "gb18030"],
+    [65001, "utf-8"]
+  ]);
+});
+
 // src/workers/file-extraction/extractors/input-limits.ts
 var DOCUMENT_READER_MAX_INPUT_BYTES, IMAGE_READER_MAX_INPUT_BYTES;
 var init_input_limits = __esm(() => {
@@ -96292,17 +97333,18 @@ function createTextExtractor(options = {}) {
     kind,
     version,
     input: { kind: "bytes", maxInputBytes: DOCUMENT_READER_MAX_INPUT_BYTES },
-    ...imagePreparation || imageOcrVersion ? {
-      versionFor(mimeType) {
-        const normalized = normalizeMimeType2(mimeType);
-        if (!normalized || !IMAGE_MIME_TYPES.has(normalized))
-          return version;
-        if (imagePreparation) {
-          return imagePreparation.ready?.(normalized) ?? true ? `${version}${IMAGE_MEDIA_VERSION_SUFFIX}` : version;
-        }
-        return imageOcrVersion ? `${version}${IMAGE_OCR_VERSION_SUFFIX}` : version;
+    versionFor(mimeType) {
+      const normalized = normalizeMimeType2(mimeType);
+      if (normalized && ADDITIONAL_DOCUMENT_MIME_TYPES.has(normalized)) {
+        return `${version}${ADDITIONAL_DOCUMENT_VERSION_SUFFIX}`;
       }
-    } : {},
+      if (!normalized || !IMAGE_MIME_TYPES.has(normalized))
+        return version;
+      if (imagePreparation) {
+        return imagePreparation.ready?.(normalized) ?? true ? `${version}${IMAGE_MEDIA_VERSION_SUFFIX}` : version;
+      }
+      return imageOcrVersion ? `${version}${IMAGE_OCR_VERSION_SUFFIX}` : version;
+    },
     ...imagePreparation?.rereadPolicy ? { extraReread: [imagePreparation.rereadPolicy] } : {},
     ...options.ocrReread ? { reread: options.ocrReread } : {},
     egress: "local",
@@ -96322,6 +97364,9 @@ function createTextExtractor(options = {}) {
         maxTableSampleRows,
         maxTableSampleColumns
       };
+      if (mimeType && ADDITIONAL_DOCUMENT_MIME_TYPES.has(mimeType)) {
+        return structuredExtractionOrFailure(() => extractAdditionalDocument(context2));
+      }
       if (mimeType === DOCX_MIME_TYPE) {
         return structuredExtractionOrFailure(() => extractDocx(context2));
       }
@@ -96487,7 +97532,7 @@ function textLaneAccepts(mimeType) {
   const normalized = normalizeMimeType2(mimeType);
   if (!normalized)
     return false;
-  return normalized === PDF_MIME_TYPE || normalized === DOCX_MIME_TYPE || normalized === XLSX_MIME_TYPE || normalized === PPTX_MIME_TYPE || IMAGE_MIME_TYPES.has(normalized) || TEXT_MIME_TYPES.has(normalized) || RTF_MIME_TYPES.has(normalized);
+  return normalized === PDF_MIME_TYPE || ADDITIONAL_DOCUMENT_MIME_TYPES.has(normalized) || normalized === DOCX_MIME_TYPE || normalized === XLSX_MIME_TYPE || normalized === PPTX_MIME_TYPE || IMAGE_MIME_TYPES.has(normalized) || TEXT_MIME_TYPES.has(normalized) || RTF_MIME_TYPES.has(normalized);
 }
 function missingBytesFailure() {
   return { status: "failed_terminal", errorKind: "extractor_input_missing_bytes" };
@@ -96639,7 +97684,7 @@ async function extractPdfText(input) {
 function pdfTextLooksUndecoded(text3) {
   if (!text3)
     return false;
-  let unreadable = 0;
+  let unreadable2 = 0;
   let total = 0;
   for (const char of text3) {
     total += 1;
@@ -96647,9 +97692,9 @@ function pdfTextLooksUndecoded(text3) {
     if (code === 9 || code === 10 || code === 13)
       continue;
     if (code < 32 || code >= 127 && code <= 159 || code === 65533)
-      unreadable += 1;
+      unreadable2 += 1;
   }
-  return total > 0 && unreadable / total > 0.1;
+  return total > 0 && unreadable2 / total > 0.1;
 }
 async function extractPdfTextWithCommand(input) {
   const tempDir = await mkdtemp3(join83(tmpdir5(), TEMP_DIR_PREFIX3));
@@ -96901,8 +97946,82 @@ function extractDelimitedText(input) {
     ...bounded.warnings.length > 0 ? { warnings: appendBoundedTextWarnings(undefined, bounded) } : {}
   };
 }
-var TEXT_EXTRACTOR_KIND = "local_text", TEXT_EXTRACTOR_VERSION = "2026-05-22", DEFAULT_PDF_TEXT_TIMEOUT_MS = 120000, TEMP_DIR_PREFIX3 = "olympus-extraction-pdf-text-", DOCUMENT_BODY_LABEL = "document body", IMAGE_MEDIA_DESCRIPTOR = "Photo", IMAGE_MEDIA_VERSION_SUFFIX = ".image-media-2026-10-07", IMAGE_OCR_VERSION_SUFFIX = ".image-ocr-2026-10-12", OCR_UNAVAILABLE_PDF_WARNING = "ocr_unavailable_pdf", OCR_UNAVAILABLE_IMAGE_WARNING = "ocr_unavailable_image", OCR_FAILED_IMAGE_WARNING = "ocr_failed_image";
+function extractAdditionalDocument(context2) {
+  let document2;
+  let format;
+  switch (context2.mimeType) {
+    case DOC_MIME_TYPE:
+      document2 = { text: readLegacyWord(context2.bytes) };
+      format = "DOC";
+      break;
+    case XLS_MIME_TYPE:
+      document2 = { sheets: readLegacyWorkbook(context2.bytes) };
+      format = "XLS";
+      break;
+    case ODT_MIME_TYPE:
+      document2 = readOpenDocument(context2.bytes, "odt");
+      format = "ODT";
+      break;
+    case ODS_MIME_TYPE:
+      document2 = readOpenDocument(context2.bytes, "ods");
+      format = "ODS";
+      break;
+    case ODP_MIME_TYPE:
+      document2 = readOpenDocument(context2.bytes, "odp");
+      format = "ODP";
+      break;
+    default:
+      document2 = readEpub(context2.bytes);
+      format = "EPUB";
+  }
+  const slices = [];
+  const addText = (text3, label, kind, index, warnings2 = []) => {
+    const bounded = boundText(normalizeExtractedText(text3), context2.maxBoundedTextChars);
+    if (!bounded.text)
+      return;
+    slices.push({ text: bounded.text, label, derivation: buildDerivation({
+      artifact: kind === "sheet" ? "sheet" : kind === "slide" ? "slide" : "text",
+      structural: { kind, label, ...index !== undefined ? { index } : {} },
+      bounded,
+      warnings: warnings2
+    }) });
+  };
+  if (document2.text !== undefined)
+    addText(document2.text, DOCUMENT_BODY_LABEL, "whole_file");
+  for (const [index, section] of (document2.sections ?? []).entries()) {
+    addText(section.text, section.name, format === "ODP" ? "slide" : "section", index + 1);
+  }
+  for (const [index, sheet] of (document2.sheets ?? []).entries()) {
+    const rows = sheet.rows.filter((row) => row.some((cell) => cell.trim()));
+    const columns = rows.reduce((max2, row) => Math.max(max2, row.length), 0);
+    const warnings2 = [];
+    if (rows.length > context2.maxTableSampleRows)
+      warnings2.push("row_sample_truncated");
+    if (columns > context2.maxTableSampleColumns)
+      warnings2.push("column_sample_truncated");
+    addText(officeTableSummary({
+      label: `${format} ${sheet.name}`,
+      rows,
+      maxRows: context2.maxTableSampleRows,
+      maxColumns: context2.maxTableSampleColumns
+    }), sheet.name, "sheet", index + 1, warnings2);
+  }
+  const output = joinedOutput(slices, slices.map((slice) => slice.text).join(`
+
+`), context2.maxBoundedTextChars);
+  if (output.status !== "indexed")
+    return output;
+  const warnings = new Set(output.warnings ?? []);
+  for (const slice of slices)
+    for (const warning of slice.derivation.warnings ?? [])
+      warnings.add(warning);
+  return { ...output, ...warnings.size ? { warnings: [...warnings] } : {} };
+}
+var TEXT_EXTRACTOR_KIND = "local_text", TEXT_EXTRACTOR_VERSION = "2026-05-22", DEFAULT_PDF_TEXT_TIMEOUT_MS = 120000, TEMP_DIR_PREFIX3 = "olympus-extraction-pdf-text-", DOCUMENT_BODY_LABEL = "document body", ADDITIONAL_DOCUMENT_MIME_TYPES, ADDITIONAL_DOCUMENT_VERSION_SUFFIX = ".document-readers-2026-11-11", IMAGE_MEDIA_DESCRIPTOR = "Photo", IMAGE_MEDIA_VERSION_SUFFIX = ".image-media-2026-10-07", IMAGE_OCR_VERSION_SUFFIX = ".image-ocr-2026-10-12", OCR_UNAVAILABLE_PDF_WARNING = "ocr_unavailable_pdf", OCR_UNAVAILABLE_IMAGE_WARNING = "ocr_unavailable_image", OCR_FAILED_IMAGE_WARNING = "ocr_failed_image";
 var init_text = __esm(() => {
+  init_legacy_word();
+  init_legacy_workbook();
+  init_package_documents();
   init_rtf();
   init_bounded_text();
   init_command_runner();
@@ -96911,6 +98030,14 @@ var init_text = __esm(() => {
   init_media_cache();
   init_still_image_formats();
   init_input_limits();
+  ADDITIONAL_DOCUMENT_MIME_TYPES = new Set([
+    DOC_MIME_TYPE,
+    XLS_MIME_TYPE,
+    ODT_MIME_TYPE,
+    ODS_MIME_TYPE,
+    ODP_MIME_TYPE,
+    EPUB_MIME_TYPE
+  ]);
 });
 
 // src/workers/file-extraction/extractors/apple-vision-ocr.ts
@@ -98235,11 +99362,11 @@ function createRemoteVlmExtractor(options = {}) {
         bytes: renderedPdf?.bytes ?? bytes,
         mimeType: renderedPdf?.mimeType ?? mimeType
       };
-      const checked = await checkPayloadLocally(options.localReader, input, payload2);
-      if (checked.kind === "unread")
-        return checked.output;
-      if (checked.kind === "secret") {
-        return renderedPdf ? withWarnings(checked.output, [REMOTE_WITHHELD_SECRET_WARNING, "pdf_rendered_first_page"]) : withWarnings(checked.output, [REMOTE_WITHHELD_SECRET_WARNING]);
+      const checked2 = await checkPayloadLocally(options.localReader, input, payload2);
+      if (checked2.kind === "unread")
+        return checked2.output;
+      if (checked2.kind === "secret") {
+        return renderedPdf ? withWarnings(checked2.output, [REMOTE_WITHHELD_SECRET_WARNING, "pdf_rendered_first_page"]) : withWarnings(checked2.output, [REMOTE_WITHHELD_SECRET_WARNING]);
       }
       await input.assertRemoteEgressAllowed?.();
       const described = await client.describe({
@@ -104707,7 +105834,7 @@ function buildSourceIngestionLedgerSnapshot(status, options = {}) {
     ...unassignedAttention(unassignedCorpora),
     ...excludedByConfigurationAttention(excludedByConfiguration)
   ];
-  const unreadable = options.safeForCastor ? undefined : options.unreadableContent?.map((item) => ({
+  const unreadable2 = options.safeForCastor ? undefined : options.unreadableContent?.map((item) => ({
     source_id: "dropbox",
     name: item.name,
     ...item.path_display ? { path_display: item.path_display } : {},
@@ -104723,7 +105850,7 @@ function buildSourceIngestionLedgerSnapshot(status, options = {}) {
     unassigned_corpora: unassignedCorpora,
     excluded_by_configuration: excludedByConfiguration,
     attention,
-    ...unreadable && unreadable.length > 0 ? { unreadable_content: unreadable } : {},
+    ...unreadable2 && unreadable2.length > 0 ? { unreadable_content: unreadable2 } : {},
     policy: {
       read_only: true,
       raw_source_exposed: false,
@@ -105739,9 +106866,9 @@ function createSourceIndexStatusHandler(options = {}) {
           status.counts[PICTURES_NOT_READ_HERE_COUNT_KEY] = readiness.counts[PICTURES_NOT_READ_HERE_COUNT_KEY];
         }
         if (status.configured && request.include_readiness_ledger === true && options.unreadableCount) {
-          const unreadable = options.unreadableCount(corpus.corpusId);
-          if (unreadable !== undefined)
-            status.counts[UNREADABLE_ITEMS_COUNT_KEY] = unreadable;
+          const unreadable2 = options.unreadableCount(corpus.corpusId);
+          if (unreadable2 !== undefined)
+            status.counts[UNREADABLE_ITEMS_COUNT_KEY] = unreadable2;
         }
         if (status.configured && store && PEOPLE_AUTHORED_FAMILIES.has(corpus.family)) {
           const coverage = authorCoverageStatus(store);
@@ -106432,11 +107559,11 @@ function phaseAtParity(sample, counter, value) {
   const inScope = sample.in_scope_items;
   if (inScope === undefined || !Number.isFinite(inScope) || inScope <= 0)
     return false;
-  const unreadable = Math.max(0, sample.unreadable_items ?? 0);
+  const unreadable2 = Math.max(0, sample.unreadable_items ?? 0);
   if (counter === "content_ready_items")
-    return value + unreadable >= inScope;
+    return value + unreadable2 >= inScope;
   if (counter === "embedded_files") {
-    return value + unreadable >= inScope && sample.content_ready_items + unreadable >= inScope;
+    return value + unreadable2 >= inScope && sample.content_ready_items + unreadable2 >= inScope;
   }
   return false;
 }
@@ -106825,16 +107952,16 @@ function recheckedUnreadableCorpora(corpora, recheck) {
     }
     if (!now)
       return corpus;
-    const unreadable = Math.min(counted, Math.max(0, Math.trunc(now.unreadable)));
-    const moved = Math.min(counted - unreadable, Math.max(0, Math.trunc(now.blocked)));
-    if (unreadable === counted)
+    const unreadable2 = Math.min(counted, Math.max(0, Math.trunc(now.unreadable)));
+    const moved = Math.min(counted - unreadable2, Math.max(0, Math.trunc(now.blocked)));
+    if (unreadable2 === counted)
       return corpus;
     const blocked = counts[BLOCKED_BY_POLICY_COUNT_KEY];
     return {
       ...corpus,
       counts: {
         ...counts,
-        [UNREADABLE_ITEMS_COUNT_KEY]: unreadable,
+        [UNREADABLE_ITEMS_COUNT_KEY]: unreadable2,
         ...moved > 0 ? { [BLOCKED_BY_POLICY_COUNT_KEY]: (typeof blocked === "number" ? blocked : 0) + moved } : {}
       }
     };
@@ -107305,7 +108432,7 @@ function aggregateCoverage(cards) {
     notReadByPolicyItems: card.coverage.not_read_by_policy_items,
     eligibleItems: card.coverage.answer_ready_eligible_items
   })));
-  const unreadable = cards.reduce((sum2, card) => {
+  const unreadable2 = cards.reduce((sum2, card) => {
     const value = card.coverage.unreadable_items;
     return value === undefined ? sum2 : (sum2 ?? 0) + value;
   }, undefined);
@@ -107344,7 +108471,7 @@ function aggregateCoverage(cards) {
     ...notReadByPolicy !== undefined ? { not_read_by_policy_items: notReadByPolicy } : {},
     ...eligibleItems !== undefined ? { answer_ready_eligible_items: eligibleItems } : {},
     ...cards.some((card) => card.coverage.settled_unreadable_items !== undefined) ? { settled_unreadable_items: cards.reduce((sum2, card) => sum2 + (card.coverage.settled_unreadable_items ?? 0), 0) } : {},
-    ...unreadable !== undefined ? { unreadable_items: unreadable } : {},
+    ...unreadable2 !== undefined ? { unreadable_items: unreadable2 } : {},
     ...unsupportedKind !== undefined ? { unsupported_kind_items: unsupportedKind } : {},
     ...picturesNotReadHere !== undefined ? { pictures_not_read_here_items: picturesNotReadHere } : {},
     ...cards.some((card) => card.coverage.stored_items !== undefined) ? { stored_items: cards.reduce((sum2, card) => sum2 + (card.coverage.stored_items ?? card.coverage.indexed_items), 0) } : {}
@@ -107375,9 +108502,9 @@ function aggregateFreshness(cards, schedulers, corpora, definition, now) {
   if (schedulerHours.length > 0) {
     const hours = Math.min(...schedulerHours);
     const threshold = schedulers.map((scheduler) => scheduler.freshness_threshold_hours).filter((value) => typeof value === "number" && Number.isFinite(value))[0];
-    const checked = `Last checked ${relativeDurationFromHours(hours)}`;
+    const checked2 = `Last checked ${relativeDurationFromHours(hours)}`;
     return {
-      label: stale ? `${checked}; refresh is late` : checked,
+      label: stale ? `${checked2}; refresh is late` : checked2,
       hours,
       ...threshold !== undefined ? { threshold_hours: threshold } : {},
       stale
@@ -108037,7 +109164,7 @@ function coverageFromCounts(counts) {
   const needsReviewItems = sumCounts(counts, DASHBOARD_NEEDS_REVIEW_REASONS.map((reason) => reason.count_key));
   const notReadByPolicy = notReadByPolicyFromCounts(counts);
   const eligibleItems = corpusAnswerReadyEligibleItems(counts, indexedItems);
-  const unreadable = counts[UNREADABLE_ITEMS_COUNT_KEY];
+  const unreadable2 = counts[UNREADABLE_ITEMS_COUNT_KEY];
   const unsupportedKind = counts[UNSUPPORTED_KIND_COUNT_KEY];
   const picturesNotReadHere = counts[PICTURES_NOT_READ_HERE_COUNT_KEY];
   return {
@@ -108049,7 +109176,7 @@ function coverageFromCounts(counts) {
     ...notReadByPolicy !== undefined ? { not_read_by_policy_items: notReadByPolicy } : {},
     ...eligibleItems !== undefined ? { answer_ready_eligible_items: eligibleItems } : {},
     ...counts.settled_unreadable_items === undefined ? {} : { settled_unreadable_items: counts.settled_unreadable_items },
-    ...unreadable !== undefined ? { unreadable_items: Math.max(0, Math.trunc(unreadable)) } : {},
+    ...unreadable2 !== undefined ? { unreadable_items: Math.max(0, Math.trunc(unreadable2)) } : {},
     ...unsupportedKind !== undefined ? { unsupported_kind_items: Math.max(0, Math.trunc(unsupportedKind)) } : {},
     ...picturesNotReadHere !== undefined ? { pictures_not_read_here_items: Math.max(0, Math.trunc(picturesNotReadHere)) } : {},
     ...counts.stored_items === undefined ? {} : { stored_items: counts.stored_items }
@@ -108205,9 +109332,9 @@ function freshnessFrom(corpus, scheduler) {
   const threshold = scheduler?.freshness_threshold_hours;
   const stale = scheduler?.stale_sync_anomaly === true;
   if (hours !== undefined) {
-    const checked = `Last checked ${relativeDurationFromHours(hours)}`;
+    const checked2 = `Last checked ${relativeDurationFromHours(hours)}`;
     return {
-      label: stale ? `${checked}; refresh is late` : checked,
+      label: stale ? `${checked2}; refresh is late` : checked2,
       hours,
       ...threshold !== undefined ? { threshold_hours: threshold } : {},
       stale
@@ -108254,11 +109381,11 @@ function answerReadinessFrom(configured, coverage, queue, freshness, operatorPau
   return { state: "empty", label: "Waiting for the first sync" };
 }
 function unreadableShareTooHigh(coverage) {
-  const unreadable = coverage.unreadable_items ?? 0;
-  if (unreadable <= 0)
+  const unreadable2 = coverage.unreadable_items ?? 0;
+  if (unreadable2 <= 0)
     return false;
   const eligible = answerReadyEligibleItems(coverage.indexed_items, coverage.not_read_by_policy_items, coverage.answer_ready_eligible_items);
-  return eligible > 0 && unreadable > eligible * DASHBOARD_UNREADABLE_ALARM_SHARE;
+  return eligible > 0 && unreadable2 > eligible * DASHBOARD_UNREADABLE_ALARM_SHARE;
 }
 function unassignedCorporaFrom(corpora, schedulerByCorpus, now) {
   const entries = corpora.map((corpus) => {
@@ -110213,9 +111340,9 @@ var init_source_forget_registry = __esm(() => {
       forget(account, context2, { dryRun }) {
         const paths = extractionJobsDbPaths(context2.env);
         const lines = paths.flatMap((path) => line(path, "extraction rows", forgetExtractionJobs(path, { corpusIds: account.corpus_ids, tierLedgerIds: context2.tierLedgerIds ?? [] }, { dryRun })));
-        const unreadable = context2.unreadableTierLedgers?.length ?? 0;
+        const unreadable2 = context2.unreadableTierLedgers?.length ?? 0;
         const withSpool = [...lines, ...spoolLines(account, context2, { dryRun })];
-        return unreadable > 0 && paths[0] !== undefined ? [...withSpool, ...line(paths[0], "redaction claims kept, tier ledger unreadable", unreadable)] : withSpool;
+        return unreadable2 > 0 && paths[0] !== undefined ? [...withSpool, ...line(paths[0], "redaction claims kept, tier ledger unreadable", unreadable2)] : withSpool;
       }
     },
     {
@@ -111718,7 +112845,7 @@ function handleRegistryPathFor(context2) {
 function readTierLedgerIds(storePaths) {
   const ids = new Set;
   const scopes = new Map;
-  const unreadable = [];
+  const unreadable2 = [];
   for (const storePath of storePaths) {
     if (storePath === ":memory:")
       continue;
@@ -111739,13 +112866,13 @@ function readTierLedgerIds(storePaths) {
         }
       }
     } catch {
-      unreadable.push(ledgerPath);
+      unreadable2.push(ledgerPath);
     } finally {
       if (db)
         closeSqliteStore(db);
     }
   }
-  return { ids: [...ids], scopes: [...scopes.values()], unreadable };
+  return { ids: [...ids], scopes: [...scopes.values()], unreadable: unreadable2 };
 }
 function deleteOlympusDataWithCustody(options) {
   const sourceId = options.dryRun !== true && options.sourceId ? lifecycleSourceFor(options.sourceId) : undefined;
@@ -111949,7 +113076,7 @@ function readSourceMedia(sourceId, storePaths, env, options = {}) {
       continue;
     if (!looksLikeSqlite(storePath))
       continue;
-    const unreadable = () => new OperationError("invalid_params", `Cannot read the picture references in ${storePath}; nothing was deleted.`, "Stop the Olympus worker (olympus worker stop) so the store is not busy, or repair the store, then retry.");
+    const unreadable2 = () => new OperationError("invalid_params", `Cannot read the picture references in ${storePath}; nothing was deleted.`, "Stop the Olympus worker (olympus worker stop) so the store is not busy, or repair the store, then retry.");
     let rows = [];
     let db;
     try {
@@ -111958,7 +113085,7 @@ function readSourceMedia(sourceId, storePaths, env, options = {}) {
     } catch {
       if (options.skipUnreadable === true)
         continue;
-      throw unreadable();
+      throw unreadable2();
     }
     try {
       const columns = db.query("PRAGMA table_info(chunks)").all().map((column) => column.name);
@@ -111971,7 +113098,7 @@ function readSourceMedia(sourceId, storePaths, env, options = {}) {
     } catch {
       if (options.skipUnreadable === true)
         continue;
-      throw unreadable();
+      throw unreadable2();
     } finally {
       closeSqliteStore(db);
     }
@@ -115505,7 +116632,7 @@ import {
 } from "node:fs";
 import { open as open4 } from "node:fs/promises";
 import { homedir as homedir30 } from "node:os";
-import { dirname as dirname84, isAbsolute as isAbsolute30, join as join105, posix as posix2, sep as sep19 } from "node:path";
+import { dirname as dirname84, isAbsolute as isAbsolute30, join as join105, posix as posix3, sep as sep19 } from "node:path";
 import { gunzip } from "node:zlib";
 function zkapiAsset(url, sha2566, bytes, extra = {}) {
   return {
@@ -116121,8 +117248,8 @@ function safeRelativePath(raw) {
     return "";
   if (trimmed2.split("/").some((part) => part === ".."))
     throw new ManagedToolsError("unsafe_archive", `The archive has a path that leaves its folder (${raw}).`);
-  const normal = posix2.normalize(trimmed2);
-  if (normal.startsWith("../") || normal === ".." || posix2.isAbsolute(normal))
+  const normal = posix3.normalize(trimmed2);
+  if (normal.startsWith("../") || normal === ".." || posix3.isAbsolute(normal))
     throw new ManagedToolsError("unsafe_archive", `The archive has a path that leaves its folder (${raw}).`);
   return normal;
 }
@@ -116156,9 +117283,9 @@ async function extractVerifiedArchive(archivePath, staging, asset, tool) {
     seen.add(target);
     if (entry.type === "symlink") {
       const link = entry.linkTarget ?? "";
-      if (link === "" || link.includes("\x00") || posix2.isAbsolute(link))
+      if (link === "" || link.includes("\x00") || posix3.isAbsolute(link))
         throw new ManagedToolsError("unsafe_archive", `The archive has a link that leaves its folder (${entry.path}).`, tool);
-      const resolved = posix2.normalize(posix2.join(posix2.dirname(target), link));
+      const resolved = posix3.normalize(posix3.join(posix3.dirname(target), link));
       if (resolved === ".." || resolved.startsWith("../"))
         throw new ManagedToolsError("unsafe_archive", `The archive has a link that leaves its folder (${entry.path}).`, tool);
     }
@@ -116183,7 +117310,7 @@ async function extractVerifiedArchive(archivePath, staging, asset, tool) {
   for (const entry of planned) {
     if (entry.type !== "file")
       continue;
-    mkdirs(posix2.dirname(entry.target));
+    mkdirs(posix3.dirname(entry.target));
     const destination = join105(staging, entry.target);
     writeFileSync15(destination, entry.data ?? Buffer.alloc(0), { flag: "wx", mode: entry.mode & 64 ? 448 : 384 });
     chmodSync32(destination, entry.mode & 64 ? 448 : 384);
@@ -116191,7 +117318,7 @@ async function extractVerifiedArchive(archivePath, staging, asset, tool) {
   for (const entry of planned) {
     if (entry.type !== "symlink")
       continue;
-    mkdirs(posix2.dirname(entry.target));
+    mkdirs(posix3.dirname(entry.target));
     symlinkSync(entry.linkTarget, join105(staging, entry.target));
   }
   const realStaging = realpathSync17(staging);
@@ -116208,7 +117335,7 @@ async function extractVerifiedArchive(archivePath, staging, asset, tool) {
       throw new ManagedToolsError("unsafe_archive", `The archive has a link that leaves its folder (${entry.path}).`, tool);
   }
   if (asset.launcher) {
-    mkdirs(posix2.dirname(asset.launcher.path));
+    mkdirs(posix3.dirname(asset.launcher.path));
     const launcher = [
       "#!/bin/sh",
       "# Written by Olympus: runs the bundled Tor with its own libraries.",
@@ -135302,8 +136429,8 @@ function engineBriefFromViewModel(view3) {
     progress: progress ? {
       unit: progress.unit,
       phase: progress.phase,
-      ...finiteNumber(progress.percent) ? { percent: progress.percent } : {},
-      ...finiteNumber(progress.itemsLeft) ? { itemsLeft: progress.itemsLeft } : {},
+      ...finiteNumber2(progress.percent) ? { percent: progress.percent } : {},
+      ...finiteNumber2(progress.itemsLeft) ? { itemsLeft: progress.itemsLeft } : {},
       ...typeof progress.etaSeconds === "number" ? { etaSeconds: progress.etaSeconds } : {},
       stalled: progress.stalled === true
     } : null,
@@ -135314,7 +136441,7 @@ function engineBriefFromViewModel(view3) {
 function isRecord8(value2) {
   return typeof value2 === "object" && value2 !== null && !Array.isArray(value2);
 }
-function finiteNumber(value2) {
+function finiteNumber2(value2) {
   return typeof value2 === "number" && Number.isFinite(value2);
 }
 function parseEngineBrief(value2) {
@@ -135323,19 +136450,19 @@ function parseEngineBrief(value2) {
   let progress = null;
   if (value2.progress !== null && value2.progress !== undefined) {
     const raw = value2.progress;
-    if (!isRecord8(raw) || !UNITS.has(raw.unit) || !PHASES.has(raw.phase) || raw.percent !== undefined && !finiteNumber(raw.percent) || raw.itemsLeft !== undefined && !finiteNumber(raw.itemsLeft) || typeof raw.stalled !== "boolean")
+    if (!isRecord8(raw) || !UNITS.has(raw.unit) || !PHASES.has(raw.phase) || raw.percent !== undefined && !finiteNumber2(raw.percent) || raw.itemsLeft !== undefined && !finiteNumber2(raw.itemsLeft) || typeof raw.stalled !== "boolean")
       return;
     progress = {
       unit: raw.unit,
       phase: raw.phase,
-      ...finiteNumber(raw.percent) ? { percent: raw.percent } : {},
-      ...finiteNumber(raw.itemsLeft) ? { itemsLeft: raw.itemsLeft } : {},
-      ...finiteNumber(raw.etaSeconds) ? { etaSeconds: raw.etaSeconds } : {},
+      ...finiteNumber2(raw.percent) ? { percent: raw.percent } : {},
+      ...finiteNumber2(raw.itemsLeft) ? { itemsLeft: raw.itemsLeft } : {},
+      ...finiteNumber2(raw.etaSeconds) ? { etaSeconds: raw.etaSeconds } : {},
       stalled: raw.stalled
     };
   }
   const needs = value2.needsYou;
-  if (!isRecord8(needs) || !Array.isArray(needs.sentences) || !finiteNumber(needs.count))
+  if (!isRecord8(needs) || !Array.isArray(needs.sentences) || !finiteNumber2(needs.count))
     return;
   const sentences = needs.sentences.filter((item) => typeof item === "string").slice(0, ENGINE_BRIEF_MAX_SENTENCES);
   return {
@@ -144332,38 +145459,38 @@ var require_codegen = __commonJS((exports) => {
   }
 
   class ParentNode extends Node {
-    constructor(nodes = []) {
+    constructor(nodes2 = []) {
       super();
-      this.nodes = nodes;
+      this.nodes = nodes2;
     }
     render(opts) {
       return this.nodes.reduce((code, n) => code + n.render(opts), "");
     }
     optimizeNodes() {
-      const { nodes } = this;
-      let i2 = nodes.length;
+      const { nodes: nodes2 } = this;
+      let i2 = nodes2.length;
       while (i2--) {
-        const n = nodes[i2].optimizeNodes();
+        const n = nodes2[i2].optimizeNodes();
         if (Array.isArray(n))
-          nodes.splice(i2, 1, ...n);
+          nodes2.splice(i2, 1, ...n);
         else if (n)
-          nodes[i2] = n;
+          nodes2[i2] = n;
         else
-          nodes.splice(i2, 1);
+          nodes2.splice(i2, 1);
       }
-      return nodes.length > 0 ? this : undefined;
+      return nodes2.length > 0 ? this : undefined;
     }
     optimizeNames(names, constants17) {
-      const { nodes } = this;
-      let i2 = nodes.length;
+      const { nodes: nodes2 } = this;
+      let i2 = nodes2.length;
       while (i2--) {
-        const n = nodes[i2];
+        const n = nodes2[i2];
         if (n.optimizeNames(names, constants17))
           continue;
         subtractNames(names, n.names);
-        nodes.splice(i2, 1);
+        nodes2.splice(i2, 1);
       }
-      return nodes.length > 0 ? this : undefined;
+      return nodes2.length > 0 ? this : undefined;
     }
     get names() {
       return this.nodes.reduce((names, n) => addNames(names, n.names), {});
@@ -144384,8 +145511,8 @@ var require_codegen = __commonJS((exports) => {
   Else.kind = "else";
 
   class If extends BlockNode {
-    constructor(condition, nodes) {
-      super(nodes);
+    constructor(condition, nodes2) {
+      super(nodes2);
       this.condition = condition;
     }
     render(opts) {
@@ -153774,8 +154901,8 @@ function createJudgeSetup(options) {
     async save(choice, capDollars) {
       judgeCapMicros(capDollars);
       if (choice === "local") {
-        const unreadable = options.spending.status().stop === "storage";
-        if (!unreadable)
+        const unreadable2 = options.spending.status().stop === "storage";
+        if (!unreadable2)
           options.spending.choose("local", capDollars);
         if (cloud.source !== "off")
           await revokeClassifier(options.ledgerPath, cloud.lane, options.promptVersion(), "Owner chose local judging on this computer.");
@@ -154622,9 +155749,9 @@ var DictionarySplitter = class {
       if (EMPTY_NEGATED_POSIX_BRACKET_RE.test(suffix)) {
         throw new SyntaxError(`Malformed empty negated POSIX character class at index ${i2}`);
       }
-      const posix3 = POSIX_BRACKET_RE.exec(suffix);
-      if (posix3) {
-        const [, posix_negated, name] = posix3;
+      const posix4 = POSIX_BRACKET_RE.exec(suffix);
+      if (posix4) {
+        const [, posix_negated, name] = posix4;
         const fragment = POSIX_CLASS_FRAGMENTS.get(name);
         if (fragment === undefined) {
           throw new SyntaxError(`Unsupported POSIX character class "${name}" at index ${i2}`);
@@ -154637,7 +155764,7 @@ var DictionarySplitter = class {
         } else {
           append_character_class_fragment(operand, fragment, true, i2);
         }
-        i2 += posix3[0].length;
+        i2 += posix4[0].length;
         continue;
       }
       if (UNSUPPORTED_POSIX_BRACKET_RE.test(suffix)) {
@@ -155009,12 +156136,12 @@ var DictionarySplitter = class {
     return this.chars.slice(node.pos, node.pos + node.length).join("");
   }
   tokens() {
-    const nodes = this.viterbi();
-    return nodes.map((x2) => this.piece(x2));
+    const nodes2 = this.viterbi();
+    return nodes2.map((x2) => this.piece(x2));
   }
   token_ids() {
-    const nodes = this.viterbi();
-    return nodes.map((x2) => x2.token_id);
+    const nodes2 = this.viterbi();
+    return nodes2.map((x2) => x2.token_id);
   }
 }, TokenLattice_default, Unigram, Unigram_default, PriorityQueue = class {
   constructor(comparator = (a, b) => a > b, max_size = Infinity) {
@@ -157285,7 +158412,7 @@ function createBuiltInPrivateAnswerModel(options) {
       if (!model)
         throw new Error("no private answer model");
       const read = privateEvidence(evidence, limits.maxPassageChars);
-      let unreadable = read.unreadable;
+      let unreadable2 = read.unreadable;
       const readableHits = new Set(read.sources);
       const unreadableHits = evidence.filter((hit, index) => !readableHits.has(index) && hit.neighbour !== true);
       const hitOf = (index) => evidence[read.sources[index]];
@@ -157349,24 +158476,24 @@ function createBuiltInPrivateAnswerModel(options) {
         const before = picked.length;
         picked = picked.filter((_, position) => ok[position]);
         pickedRevoked ||= picked.length < before;
-        unreadable = ok.slice(ok.length - unreadableHits.length).filter(Boolean).length;
+        unreadable2 = ok.slice(ok.length - unreadableHits.length).filter(Boolean).length;
       }
-      if (hadReadable && picked.length === 0 && (readableMatch || unreadable === 0)) {
+      if (hadReadable && picked.length === 0 && (readableMatch || unreadable2 === 0)) {
         throw new NoPrivateEvidenceError(pickedRevoked ? "revoked" : "none_readable");
       }
       const items = picked.map((index) => deepItems.get(index) ?? read.items[index]);
       try {
         observe?.evidence?.({
           items: items.length,
-          unreadable,
+          unreadable: unreadable2,
           bytes: items.reduce((sum2, item) => sum2 + utf8Bytes2(item.text), 0),
           used: [...picked, ...eligibleSiblings].map((index) => read.sources[index])
         });
       } catch {}
       if (items.length === 0) {
-        if (unreadable === 0)
+        if (unreadable2 === 0)
           throw new Error("no private evidence");
-        return { answer: unreadableAnswer(unreadable), citations: [], unanswered: [] };
+        return { answer: unreadableAnswer(unreadable2), citations: [], unanswered: [] };
       }
       const prompted = picked.map(hitOf);
       let revoked = false;
@@ -157436,8 +158563,8 @@ function createBuiltInPrivateAnswerModel(options) {
         });
       }
       const unanswered = withoutRepeatedEntries(result.unanswered);
-      if (unreadable > 0)
-        unanswered.push(unreadableNote(unreadable));
+      if (unreadable2 > 0)
+        unanswered.push(unreadableNote(unreadable2));
       const answerText = withoutRepeatedSentences(withoutEvidenceMarkers(result.answer));
       const versionNote = citedVersionNote([...picked, ...eligibleSiblings].map((index) => read.items[index]), result.citations.map((citation) => citation.id));
       return {
@@ -157499,7 +158626,7 @@ function versionDateLabel(dates) {
 function privateEvidence(hits, maxPassageChars = MAX_PASSAGE_CHARS) {
   const items = [];
   const sources = [];
-  let unreadable = 0;
+  let unreadable2 = 0;
   hits.forEach((hit, index) => {
     const provenance = record5(hit.provenance);
     const sourceItem = record5(hit.sourceItem) ?? record5(provenance?.sourceItem);
@@ -157512,7 +158639,7 @@ function privateEvidence(hits, maxPassageChars = MAX_PASSAGE_CHARS) {
 `) : undefined) ?? string5(content?.passage) ?? string5(hit.excerpt) ?? string5(hit.text);
     const text3 = passage?.slice(0, maxPassageChars);
     if (!text3) {
-      unreadable += 1;
+      unreadable2 += 1;
       return;
     }
     const id = string5(sourceItem?.localItemId) ?? string5(sourceItem?.providerItemId) ?? `item-${index + 1}`;
@@ -157531,7 +158658,7 @@ function privateEvidence(hits, maxPassageChars = MAX_PASSAGE_CHARS) {
       ...family ? { family } : {}
     });
   });
-  return { items, unreadable, sources };
+  return { items, unreadable: unreadable2, sources };
 }
 async function panelItems(question, read, limits, relevance, signal) {
   return (await panelSelection(question, read, limits, relevance, signal)).items;
@@ -158689,8 +159816,8 @@ function verifySignedReleaseManifest(envelope, ...given) {
   } catch {
     return { ok: false, reason: "malformed" };
   }
-  const checked = parseReleaseManifest(parsed);
-  return checked ? { ok: true, manifest: checked } : { ok: false, reason: "malformed" };
+  const checked2 = parseReleaseManifest(parsed);
+  return checked2 ? { ok: true, manifest: checked2 } : { ok: false, reason: "malformed" };
 }
 function installerPin(script2, key2) {
   return new RegExp(`^${key2}=(\\S+)\\r?$`, "m").exec(script2)?.[1];
@@ -158910,8 +160037,8 @@ function createSelfUpdater(options) {
       fail(record6, "installer_mismatch");
       return;
     }
-    const checked = checkInstallerAgainstManifest(manifest2, installerBytes, platform2);
-    if (!checked.ok) {
+    const checked2 = checkInstallerAgainstManifest(manifest2, installerBytes, platform2);
+    if (!checked2.ok) {
       fail(record6, "installer_mismatch");
       return;
     }
@@ -161754,9 +162881,9 @@ function mountDashboardController(options) {
       return;
     }
     if (params.action === "test_local_models") {
-      const checked = result.body.result;
-      if (checked && typeof checked === "object" && !Array.isArray(checked)) {
-        const detail = checked;
+      const checked2 = result.body.result;
+      if (checked2 && typeof checked2 === "object" && !Array.isArray(checked2)) {
+        const detail = checked2;
         say(form, detail.working === true ? "Working. Synthetic checks passed. Your configured models have not changed." : `${typeof detail.step === "string" ? detail.step : "Model"}: ${typeof detail.detail === "string" ? detail.detail : "The model check failed."}`);
       } else
         say(form, "The local model check did not return a result.");
@@ -162619,12 +163746,12 @@ function mountDashboardController(options) {
     form.method = "dialog";
     form.dataset.messagingKind = "scope";
     form.dataset.kindPicker = "";
-    const switchInput = (name, value2, checked, label) => {
+    const switchInput = (name, value2, checked2, label) => {
       const input = make("input", "switch");
       input.type = "checkbox";
       input.name = name;
       input.value = value2;
-      input.checked = checked;
+      input.checked = checked2;
       input.setAttribute("role", "switch");
       input.setAttribute("aria-label", label);
       return input;
@@ -166474,11 +167601,11 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   }
   function archiveUnreadable(meta2, id) {
     const A = H.copy.archives;
-    const unreadable = meta2.unreadable;
-    if (!unreadable || typeof unreadable !== "object")
+    const unreadable2 = meta2.unreadable;
+    if (!unreadable2 || typeof unreadable2 !== "object")
       return null;
-    const reason = Object.prototype.hasOwnProperty.call(A.unreadable.why, unreadable.reason) ? String(unreadable.reason) : "other";
-    const file2 = typeof unreadable.file === "string" && unreadable.file ? unreadable.file : "";
+    const reason = Object.prototype.hasOwnProperty.call(A.unreadable.why, unreadable2.reason) ? String(unreadable2.reason) : "other";
+    const file2 = typeof unreadable2.file === "string" && unreadable2.file ? unreadable2.file : "";
     const box = details("why:" + id, doc2.createTextNode(P.seeWhy), "why");
     if (state.landed && state.landed.id === id)
       box.className += " landed";
@@ -166975,9 +168102,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   }
   function seeWhy(source, id, stalled) {
     const stall = stalled && source.progress ? stallLines(source.progress.stall, source) : [];
-    const unreadable = source.unreadable;
+    const unreadable2 = source.unreadable;
     const words2 = P.unreadableReasons;
-    const lines = unreadable && typeof unreadable === "object" && Array.isArray(unreadable.reasons) ? unreadable.reasons.filter((reason) => reason && words2[reason.code] && Number(reason.count) > 0).map((reason) => {
+    const lines = unreadable2 && typeof unreadable2 === "object" && Array.isArray(unreadable2.reasons) ? unreadable2.reasons.filter((reason) => reason && words2[reason.code] && Number(reason.count) > 0).map((reason) => {
       const n = Number(reason.count);
       return add(el("li"), document.createTextNode(fill2(n === 1 ? words2[reason.code].one : words2[reason.code].other, { count: count(n) })));
     }) : [];
@@ -166989,11 +168116,11 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (stall.length)
       add(box, add(el("ul", "plain stall-why"), ...stall.map((line2) => el("li", "", line2))));
     if (lines.length) {
-      add(box, add(el("ul", "plain"), ...lines), unreadableFiles(unreadable, id), el("p", "why-note", unreadable.many ? P.unreadableNoteMany : P.unreadableNote));
+      add(box, add(el("ul", "plain"), ...lines), unreadableFiles(unreadable2, id), el("p", "why-note", unreadable2.many ? P.unreadableNoteMany : P.unreadableNote));
     }
     return box;
   }
-  function unreadableFiles(unreadable, id) {
+  function unreadableFiles(unreadable2, id) {
     const list = el("ul", "plain files");
     const own3 = computerUnreadable(id);
     if (own3) {
@@ -167021,10 +168148,10 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       }
       return list.childNodes.length ? list : null;
     }
-    const names = Array.isArray(unreadable.names) ? unreadable.names.filter((name) => typeof name === "string" && name) : [];
+    const names = Array.isArray(unreadable2.names) ? unreadable2.names.filter((name) => typeof name === "string" && name) : [];
     names.forEach((name) => add(list, el("li", "", name)));
-    if (unreadable.more && typeof unreadable.more === "object") {
-      add(list, add(el("li"), fixControl(unreadable.more, "why-more:" + id, "plain", false)));
+    if (unreadable2.more && typeof unreadable2.more === "object") {
+      add(list, add(el("li"), fixControl(unreadable2.more, "why-more:" + id, "plain", false)));
     }
     return list.childNodes.length ? list : null;
   }
@@ -167899,9 +169026,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (picking)
       picker.afterRender();
     if (keepFocus) {
-      const nodes = root.querySelectorAll("[data-key]");
-      for (let i2 = 0;i2 < nodes.length; i2++) {
-        const node = nodes[i2];
+      const nodes2 = root.querySelectorAll("[data-key]");
+      for (let i2 = 0;i2 < nodes2.length; i2++) {
+        const node = nodes2[i2];
         if (node.getAttribute("data-key") === keepFocus) {
           node.focus();
           if (selection && (node.tagName === "TEXTAREA" || node.tagName === "INPUT")) {
@@ -169530,7 +170657,7 @@ function chatgptPickerProgram(kit) {
       p.catalog.set(node.key, node);
       p.ancestors.set(node.key, trail);
     }
-    const nodes = previous.concat(fresh2).sort((a, b) => (a.is_disk === true ? 1 : 0) - (b.is_disk === true ? 1 : 0) || String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: "base" }));
+    const nodes2 = previous.concat(fresh2).sort((a, b) => (a.is_disk === true ? 1 : 0) - (b.is_disk === true ? 1 : 0) || String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: "base" }));
     const levelAccess = page2.access && typeof page2.access.message === "string" && page2.access.message ? page2.access : null;
     if (levelAccess)
       p.access.set(parentKey2, levelAccess);
@@ -169547,13 +170674,13 @@ function chatgptPickerProgram(kit) {
     if (parentKey2 && blockedByComputer(levelAccess)) {
       p.branches.delete(parentKey2);
     } else if (parentKey2) {
-      p.branches.set(parentKey2, nodes);
+      p.branches.set(parentKey2, nodes2);
       if (next)
         p.cursors.set(parentKey2, next);
       else
         p.cursors.delete(parentKey2);
     } else {
-      p.roots = nodes;
+      p.roots = nodes2;
       p.rootCursor = next;
     }
     p.loading = "";
@@ -169970,15 +171097,15 @@ function chatgptPickerProgram(kit) {
     const now = effective(key2);
     const selectable = !node || node.selectable !== false;
     const capped2 = !own3 && p.own.size >= MAX_RULES2;
-    const unreadable = node && node.access && node.access.state === "needs_helper" ? String(node.access.message || Q.cannotChoose) : "";
+    const unreadable2 = node && node.access && node.access.state === "needs_helper" ? String(node.access.message || Q.cannotChoose) : "";
     return segControl(name, "picker:seg:" + key2 + ":", {
       pressed: own3,
       inherited: own3 ? now !== own3 ? now : "" : from.state,
       blocked: (state) => {
         if (!selectable)
           return Q.cannotChoose;
-        if (unreadable && state !== "exclude")
-          return unreadable;
+        if (unreadable2 && state !== "exclude")
+          return unreadable2;
         if (!allowed(key2, state))
           return fill2(Q.notPossible, { parent: sourceName(from.from), state: Q.statesLower[from.state] });
         if (capped2)
@@ -170111,11 +171238,11 @@ function chatgptPickerProgram(kit) {
     const label = more ? fill2(more === 1 ? Q.loadMoreCount.one : Q.loadMoreCount.many, { n: kit.count(more) }) : Q.loadMore;
     return kit.button(busy2 ? Q.loadingFolders : label, "picker:more:" + parentKey2, busy2 || p.loading ? null : () => list(parentKey2, true), "plain");
   }
-  function levelList(parentKey2, nodes, hasMore) {
+  function levelList(parentKey2, nodes2, hasMore) {
     const listNode = el("ul", "flist");
-    for (const node of nodes)
+    for (const node of nodes2)
       add(listNode, folderRow(node));
-    if (!nodes.length)
+    if (!nodes2.length)
       add(listNode, el("li", "muted fempty", Q.noFolders));
     if (hasMore)
       add(listNode, add(el("li", "fmore"), loadMore(parentKey2)));
@@ -170358,13 +171485,13 @@ function chatgptPickerProgram(kit) {
     p.saveError = "";
     kit.render(focus);
   }
-  function option(type, name, key2, checked, text3, hint, onChange) {
+  function option(type, name, key2, checked2, text3, hint, onChange) {
     const label = el("label", "opt");
     const input = el("input");
     input.type = type;
     if (name)
       input.name = name;
-    input.checked = checked;
+    input.checked = checked2;
     input.disabled = p.saving;
     input.setAttribute("data-key", key2);
     input.addEventListener("change", () => onChange(input));
@@ -180455,7 +181582,7 @@ function createDropboxFolderScopeBrowser(options) {
       const parent = normalizeDropboxParent(request.parentKey);
       const providerCursor = decodeCursor2("dropbox.files", parent, request.cursor);
       const api2 = await metadataClient();
-      const nodes = [];
+      const nodes2 = [];
       let cursor = providerCursor;
       const seenCursors = new Set;
       for (let pages = 0;pages < 10; pages += 1) {
@@ -180469,8 +181596,8 @@ function createDropboxFolderScopeBrowser(options) {
           if (entry.tag !== "folder")
             continue;
           const key2 = normalizeDropboxNodeKey(entry.pathLower ?? entry.pathDisplay ?? `${parent}/${entry.name}`);
-          if (!nodes.some((node) => node.key === key2))
-            nodes.push({
+          if (!nodes2.some((node) => node.key === key2))
+            nodes2.push({
               key: key2,
               ...request.parentKey ? { parent_key: parent } : {},
               name: entry.name,
@@ -180488,10 +181615,10 @@ function createDropboxFolderScopeBrowser(options) {
         }
         cursor = page2.cursor;
         seenCursors.add(cursor);
-        if (nodes.length >= 20)
+        if (nodes2.length >= 20)
           break;
       }
-      return { nodes, ...cursor ? { nextCursor: encodeCursor3("dropbox.files", parent, cursor) } : {} };
+      return { nodes: nodes2, ...cursor ? { nextCursor: encodeCursor3("dropbox.files", parent, cursor) } : {} };
     },
     async validateSelections(selections) {
       const api2 = await metadataClient();
@@ -191996,7 +193123,7 @@ var init_watch_hub = __esm(() => {
 // src/workers/local-files/connector.ts
 import { createHash as createHash100, randomUUID as randomUUID34 } from "node:crypto";
 import { realpathSync as realpathSync24, rmSync as rmSync43, readdirSync as readdirSync32 } from "node:fs";
-import { join as join142, posix as posix3 } from "node:path";
+import { join as join142, posix as posix4 } from "node:path";
 function nameAsOnDisk(scopeRoot, rel) {
   let dir = "";
   for (const part of rel.split("/")) {
@@ -192089,7 +193216,7 @@ function createLocalFilesSourceConnector(options) {
   };
   const foldPath = (path, forScopePath = root) => options.scope.ignoresCase?.(forScopePath) ? path.toLowerCase() : path;
   const pathIsAtOrBelow = (path, ancestor) => isWithinScopePath(foldPath(path, path), foldPath(ancestor, ancestor));
-  const scopePathOf = (relPath) => relPath === "" ? root : posix3.join(root, relPath).normalize("NFC");
+  const scopePathOf = (relPath) => relPath === "" ? root : posix4.join(root, relPath).normalize("NFC");
   const fileItem = (scopePath, name, stat7, decision) => {
     const mimeType = fileMimeTypeFromName(name);
     const modified = new Date(stat7.mtimeMs).toISOString();
@@ -192178,7 +193305,7 @@ function createLocalFilesSourceConnector(options) {
     }
     return items;
   };
-  const absentFromWalk = (seenIds, deletedSeen, unreadable, topLevel) => {
+  const absentFromWalk = (seenIds, deletedSeen, unreadable2, topLevel) => {
     const store = options.store;
     if (!store?.activeItemsUnderLocatorIfIndexed)
       return [];
@@ -192191,7 +193318,7 @@ function createLocalFilesSourceConnector(options) {
         return;
       if (seenIds.has(stored.identity.providerItemId) || deletedSeen.has(stored.identity.providerItemId))
         return;
-      if (unreadable.some((path) => pathIsAtOrBelow(stored.locatorUri, path)))
+      if (unreadable2.some((path) => pathIsAtOrBelow(stored.locatorUri, path)))
         return;
       deletedSeen.add(stored.identity.providerItemId);
       absent.push(deletedItem(stored.identity, stored.locatorUri));
@@ -201969,10 +203096,10 @@ function createWhatsAppArchiveConnector(input) {
           const isLastUnit = index === context2.units.length - 1;
           const afterUnit = index + 1 < context2.units.length ? { fileIndex: unit.fileIndex, memberIndex: context2.units[index + 1].memberIndex, offset: 0, mode: "start", order: "?", style: "", prev: "" } : { fileIndex: unit.fileIndex + 1, memberIndex: 0, offset: 0, mode: "start", order: "?", style: "", prev: "" };
           const progressAfterUnit = index + 1 < context2.units.length ? progressOffset(context2, context2.units[index + 1], 0) : context2.file.version.size;
-          const damaged = (error2, offset) => {
+          const damaged2 = (error2, offset) => {
             report(error2.code === "damaged" ? ARCHIVE_COMMON_FINDINGS.fileDamaged : ARCHIVE_COMMON_FINDINGS.sectionNotImported, "gap", offset);
           };
-          let unreadable = false;
+          let unreadable2 = false;
           let order = place.order;
           let style = place.style;
           let prev = place.prev;
@@ -201995,15 +203122,15 @@ function createWhatsAppArchiveConnector(input) {
             } catch (error2) {
               if (!(error2 instanceof ZipMemberError))
                 throw stoppedFrom2(error2, unit.file.relPath);
-              damaged(error2, 0);
-              unreadable = true;
+              damaged2(error2, 0);
+              unreadable2 = true;
             } finally {
               scanSource?.close();
             }
           }
           let opened;
           let reader;
-          if (!unreadable) {
+          if (!unreadable2) {
             try {
               opened = openSource(context2, unit, {
                 start: place.offset,
@@ -202016,7 +203143,7 @@ function createWhatsAppArchiveConnector(input) {
               opened = undefined;
               if (!(error2 instanceof ZipMemberError))
                 throw stoppedFrom2(error2, unit.file.relPath);
-              damaged(error2, place.offset);
+              damaged2(error2, place.offset);
             }
           }
           const source = opened?.source;
@@ -202091,7 +203218,7 @@ function createWhatsAppArchiveConnector(input) {
                 clean2 = false;
                 if (!(error2 instanceof ZipMemberError))
                   throw stoppedFrom2(error2, unit.file.relPath);
-                damaged(error2, place.offset);
+                damaged2(error2, place.offset);
                 ended = true;
                 break;
               }
@@ -202111,7 +203238,7 @@ function createWhatsAppArchiveConnector(input) {
               } catch (error2) {
                 if (error2 instanceof ZipMemberError) {
                   clean2 = false;
-                  damaged(error2, reader.resume()?.offset ?? mark);
+                  damaged2(error2, reader.resume()?.offset ?? mark);
                   ended = true;
                   break;
                 }
@@ -202620,7 +203747,7 @@ function createNoteArchiveConnector(input, spec) {
   const readJsonUnit = (unit, unitCursor, fileIndex, relPath, limits, segment, savedAt) => {
     if (source.kind !== "json")
       return "ended";
-    const damaged = (offset) => report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", fileIndex, unit.posOf(offset));
+    const damaged2 = (offset) => report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", fileIndex, unit.posOf(offset));
     const notRead = () => report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, "gap", fileIndex, unit.posOf(0));
     let root;
     if (unitCursor.resume) {
@@ -202632,7 +203759,7 @@ function createNoteArchiveConnector(input, spec) {
         throw stoppedFrom3(error2, relPath);
       }
       if (!root) {
-        damaged(0);
+        damaged2(0);
         return "ended";
       }
     }
@@ -202654,7 +203781,7 @@ function createNoteArchiveConnector(input, spec) {
       if (error2 instanceof ZipMemberError) {
         if (unitCursor.offset > 0)
           throw invalid4("Nothing starts where this import was to resume.");
-        damaged(0);
+        damaged2(0);
         return "ended";
       }
       throw stoppedFrom3(error2, relPath);
@@ -202684,7 +203811,7 @@ function createNoteArchiveConnector(input, spec) {
         if (error2 instanceof ArchiveImportStoppedError)
           throw error2;
         if (error2 instanceof ZipMemberError) {
-          damaged(unitCursor.offset);
+          damaged2(unitCursor.offset);
           return "ended";
         }
         throw stoppedFrom3(error2, relPath);
@@ -202747,7 +203874,7 @@ function createNoteArchiveConnector(input, spec) {
           throw error2;
         if (error2 instanceof ZipMemberError || error2 instanceof JsonStreamError && error2.code !== "resume_invalid") {
           segment.bytes += (last?.end ?? unitCursor.offset) - unitCursor.offset;
-          damaged(last?.end ?? unitCursor.offset);
+          damaged2(last?.end ?? unitCursor.offset);
           return "ended";
         }
         throw stoppedFrom3(error2, relPath);
@@ -202758,7 +203885,7 @@ function createNoteArchiveConnector(input, spec) {
         const end = unit.end();
         if (end && (end.crcOk !== true || !end.sizeOk)) {
           segment.bytes += readTo - unitCursor.offset;
-          damaged(end.bytes);
+          damaged2(end.bytes);
           return "ended";
         }
         if (!last && !unitCursor.resume) {
@@ -203291,12 +204418,12 @@ function isEditorDocument(value2) {
     return Array.isArray(children) && children.some(isEditorNode);
   });
 }
-function flattenEditorNodes(nodes, depth2) {
+function flattenEditorNodes(nodes2, depth2) {
   let text5 = "";
   let unsupported = 0;
   let previousWasBlock = false;
   let first = true;
-  for (const node of nodes) {
+  for (const node of nodes2) {
     const flat2 = flattenNode(node, depth2 + 1);
     unsupported += flat2.unsupported;
     if (!flat2.text)
@@ -203502,14 +204629,14 @@ function roamDailyPageDate(title) {
 }
 function flattenBlocks(children) {
   const out = { lines: [], blockCount: 0, created: undefined, edited: undefined, hasText: false, unsupported: 0 };
-  const walk = (nodes, depth2) => {
-    if (nodes === undefined || nodes === null)
+  const walk = (nodes2, depth2) => {
+    if (nodes2 === undefined || nodes2 === null)
       return;
-    if (!Array.isArray(nodes) || depth2 > MAX_BLOCK_DEPTH) {
+    if (!Array.isArray(nodes2) || depth2 > MAX_BLOCK_DEPTH) {
       out.unsupported += 1;
       return;
     }
-    for (const node of nodes) {
+    for (const node of nodes2) {
       if (!isRecord11(node)) {
         out.unsupported += 1;
         continue;
@@ -204821,7 +205948,7 @@ var init_source_targets = __esm(() => {
 
 // src/workers/archive-import/start.ts
 import { lstatSync as lstatSync51, realpathSync as realpathSync26 } from "node:fs";
-import { posix as posix4 } from "node:path";
+import { posix as posix5 } from "node:path";
 function prepareArchiveImport(input) {
   const path = input.path;
   if (!path.startsWith("/") || path.includes("\x00"))
@@ -204841,8 +205968,8 @@ function prepareArchiveImport(input) {
     const code = error2?.code;
     return { kind: "unreadable", code: code === "EPERM" || code === "EACCES" ? "permission_denied" : "not_found" };
   }
-  const rootPath = kind === "file" ? posix4.dirname(path) : path;
-  const chosenRelPath = kind === "file" ? posix4.basename(path) : "";
+  const rootPath = kind === "file" ? posix5.dirname(path) : path;
+  const chosenRelPath = kind === "file" ? posix5.basename(path) : "";
   let root;
   try {
     root = ScopeRoot.open(rootPath);
@@ -205115,7 +206242,7 @@ var init_runtime2 = __esm(() => {
 });
 
 // src/workers/archive-import/agent.ts
-import { posix as posix5 } from "node:path";
+import { posix as posix6 } from "node:path";
 function archivesOpenTarget() {
   const target = { kind: "archives" };
   return { target: openTargetPath(target), url: olympusOpenUrl(target), page: openPageUrl(target) };
@@ -205241,13 +206368,13 @@ function requestOf2(request) {
     note
   };
 }
-function unreadableMessage(unreadable) {
+function unreadableMessage(unreadable2) {
   const copy = DASHBOARD_ARCHIVE_COPY.unreadable;
-  const why = fill3(copy.why[unreadable.reason] ?? copy.why.other, { file: unreadable.file });
-  return `${why} ${copy.kept} ${copy.fix[unreadable.reason] ?? copy.fix.other}`;
+  const why = fill3(copy.why[unreadable2.reason] ?? copy.why.other, { file: unreadable2.file });
+  return `${why} ${copy.kept} ${copy.fix[unreadable2.reason] ?? copy.fix.other}`;
 }
 function recordedPath(rootPath, chosenRelPath) {
-  return chosenRelPath ? posix5.join(rootPath, chosenRelPath) : rootPath;
+  return chosenRelPath ? posix6.join(rootPath, chosenRelPath) : rootPath;
 }
 function spelled(path) {
   const composed = path.normalize("NFC");
@@ -205537,7 +206664,7 @@ var init_removal = __esm(() => {
 
 // src/workers/archive-import/dashboard.ts
 import { homedir as homedir49 } from "node:os";
-import { posix as posix6 } from "node:path";
+import { posix as posix7 } from "node:path";
 import { realpathSync as realpathSync27 } from "node:fs";
 function archivePrivateModelFromSniffer(sniffer) {
   if (!sniffer)
@@ -205642,7 +206769,7 @@ function createArchiveImportDashboard(options) {
     } catch {}
     return path.startsWith(`${canonical2}/`) || path.startsWith(`${stagingFolder}/`);
   };
-  const where2 = (path) => inStaging(path) ? "" : named(shown(posix6.dirname(path)));
+  const where2 = (path) => inStaging(path) ? "" : named(shown(posix7.dirname(path)));
   const refresh = () => {
     try {
       options.refreshScheduler();
@@ -205802,7 +206929,7 @@ function createArchiveImportDashboard(options) {
     }
   };
   const approvePath = async (path, from, answer = {}, only) => {
-    const name = named(posix6.basename(path));
+    const name = named(posix7.basename(path));
     const requestId = from?.status === "pending" ? from.requestId : undefined;
     const answered = () => {
       if (from)
@@ -206010,7 +207137,7 @@ function createArchiveImportDashboard(options) {
     const byFile = record8.findings.gaps_by_file;
     if (record8.files.length < 2 || !byFile || Object.keys(byFile).length === 0)
       return tallies(record8.findings.gaps);
-    const fileName = (index) => named(posix6.basename(record8.files[index]?.rel_path || record8.label) || record8.label);
+    const fileName = (index) => named(posix7.basename(record8.files[index]?.rel_path || record8.label) || record8.label);
     const perFile = Object.entries(byFile).map(([index, kinds]) => ({ index: Number(index), kinds })).filter((entry) => Number.isInteger(entry.index) && entry.index >= 0 && entry.index < record8.files.length).sort((a, b) => a.index - b.index);
     const placed = {};
     for (const entry of perFile) {
@@ -206033,13 +207160,13 @@ function createArchiveImportDashboard(options) {
     const counted = counts(record8);
     const earliest = dateOnly2(record8.date_range?.earliest);
     const latest = dateOnly2(record8.date_range?.latest);
-    const stopFile = record8.stop?.rel_path ? named(posix6.basename(record8.stop.rel_path)) : undefined;
+    const stopFile = record8.stop?.rel_path ? named(posix7.basename(record8.stop.rel_path)) : undefined;
     return {
       id: record8.archive_id,
       name: named(record8.label),
       format: getArchiveFormat(record8.format)?.label ?? record8.format,
       family: record8.family,
-      where: where2(posix6.join(record8.root_path, record8.chosen_rel_path || ".")),
+      where: where2(posix7.join(record8.root_path, record8.chosen_rel_path || ".")),
       status: record8.status,
       items: counted?.items ?? 0,
       judged: counted ? Math.max(0, counted.items - counted.held) : 0,
@@ -206059,14 +207186,14 @@ function createArchiveImportDashboard(options) {
   const importEntryOf = (record8) => {
     const earliest = dateOnly2(record8.date_range?.earliest);
     const latest = dateOnly2(record8.date_range?.latest);
-    const stopFile = record8.stop?.rel_path ? named(posix6.basename(record8.stop.rel_path)) : undefined;
+    const stopFile = record8.stop?.rel_path ? named(posix7.basename(record8.stop.rel_path)) : undefined;
     const intake = record8.intake;
     return {
       id: record8.archive_id,
       name: named(record8.label),
       format: getArchiveFormat(record8.format)?.label ?? record8.format,
       family: record8.family,
-      where: where2(posix6.join(record8.root_path, record8.chosen_rel_path || ".")),
+      where: where2(posix7.join(record8.root_path, record8.chosen_rel_path || ".")),
       status: record8.status === "removing" ? "stopped" : record8.status,
       read: intake ? Math.max(0, Math.floor(intake.read)) : 0,
       alreadyThere: intake ? Math.max(0, Math.floor(intake.already_there)) : 0,
@@ -206119,8 +207246,8 @@ function createArchiveImportDashboard(options) {
         id: request.request_id,
         kind: "remove",
         name: named(archive?.label ?? request.label),
-        where: archive ? where2(posix6.join(archive.root_path, archive.chosen_rel_path || ".")) : "",
-        ...archive ? { path: named(shown(posix6.join(archive.root_path, archive.chosen_rel_path || "."))) } : {},
+        where: archive ? where2(posix7.join(archive.root_path, archive.chosen_rel_path || ".")) : "",
+        ...archive ? { path: named(shown(posix7.join(archive.root_path, archive.chosen_rel_path || "."))) } : {},
         origin: request.origin,
         status: request.status,
         archiveId: request.archive_id
@@ -206343,8 +207470,8 @@ function createArchiveImportDashboard(options) {
       try {
         records = state.list();
       } catch (error2) {
-        const unreadable = { archives: 0, importing: false, attention: [{ kind: "unreadable", reason: recordUnreadableReason(error2) }] };
-        return Object.fromEntries(archiveSourceCards().map((card) => [card.id, unreadable]));
+        const unreadable2 = { archives: 0, importing: false, attention: [{ kind: "unreadable", reason: recordUnreadableReason(error2) }] };
+        return Object.fromEntries(archiveSourceCards().map((card) => [card.id, unreadable2]));
       }
       const setting = scheduling();
       return Object.fromEntries(archiveSourceCards().map((card) => {
@@ -208996,7 +210123,7 @@ var init_export_zone = __esm(() => {
 // src/workers/whatsapp/archive-input.ts
 import { createHash as createHash107 } from "node:crypto";
 import { existsSync as existsSync112 } from "node:fs";
-import { posix as posix7 } from "node:path";
+import { posix as posix8 } from "node:path";
 function hash2(value2) {
   return createHash107("sha256").update(value2).digest("hex").slice(0, 24);
 }
@@ -209292,7 +210419,7 @@ function createMediaLocator(archive) {
     child(message2, name) {
       if (message2.sourceMember !== undefined) {
         const members = membersOf(message2.sourceFileIndex);
-        const folder2 = posix7.dirname(message2.sourceMember);
+        const folder2 = posix8.dirname(message2.sourceMember);
         const member = members.get(folder2 === "." ? name : `${folder2}/${name}`) ?? members.get(name);
         if (!member)
           return { name, available: false };
@@ -209305,7 +210432,7 @@ function createMediaLocator(archive) {
       }
       if (!archive.media)
         return { name, available: false };
-      const folder = posix7.dirname(message2.sourceFile);
+      const folder = posix8.dirname(message2.sourceFile);
       const bound = archive.media.bind(folder === "." ? name : `${folder}/${name}`);
       if (!bound.ok)
         return { name, available: false };
@@ -210062,7 +211189,7 @@ function readable(value2) {
   }
 }
 function gmailHeaderMatch(client, options = {}) {
-  let checked;
+  let checked2;
   return async (headers) => {
     const wanted = bareMessageId(headers.messageId);
     if (!wanted || !SEARCHABLE.test(wanted))
@@ -210084,11 +211211,11 @@ function gmailHeaderMatch(client, options = {}) {
     }
   };
   async function matchWith(api2, wanted, headers) {
-    if (options.sameAccount && checked === undefined) {
+    if (options.sameAccount && checked2 === undefined) {
       const address = api2.getProfile ? (await api2.getProfile()).emailAddress : "";
-      checked = address !== "" && options.sameAccount(address);
+      checked2 = address !== "" && options.sameAccount(address);
     }
-    if (checked === false)
+    if (checked2 === false)
       return "none";
     const listed = await api2.listMessages({ maxResults: MAX_CANDIDATES + 1, query: `rfc822msgid:${wanted}` });
     const candidates = listed.messages.map((message2) => message2.id).filter(Boolean);
@@ -210464,11 +211591,11 @@ ${folderIds.join(",")}`).digest("hex");
   };
   const guard = {
     run(task) {
-      const checked = async () => {
+      const checked2 = async () => {
         await guard.assertAccount();
         return task();
       };
-      return exclusive2(checked);
+      return exclusive2(checked2);
     },
     async assertAccount() {
       await verifyAccount();
@@ -214261,20 +215388,20 @@ function inspect(ctx, sourceId, slot, entry) {
 function checkDatabases(ctx, moves) {
   const storeMax = limit("quickCheckStoreMaxBytes", QUICK_CHECK_STORE_MAX_BYTES);
   const totalMax = limit("quickCheckTotalMaxBytes", QUICK_CHECK_TOTAL_MAX_BYTES);
-  const checked = [];
+  const checked2 = [];
   for (const move of moves.filter((candidate2) => candidate2.db)) {
     const path = absPath(ctx, move.from);
     const reads = storeFileReads(path, waitMs(ctx));
     if (reads === "busy")
       return { busy: `${basename22(move.from)} is in use by another program, so the account stays where it is for now.` };
     if (reads === "damaged") {
-      checked.push({ file: move.to, result: "damaged" });
+      checked2.push({ file: move.to, result: "damaged" });
       continue;
     }
     const bytes = moves.filter((other) => other.from === move.from || other.from === `${move.from}-wal` || other.from === `${move.from}-journal`).reduce((total, other) => total + other.size, 0);
     const estimateMs = bytes / ASSUMED_BYTES_PER_SECOND * 1000;
     if (bytes > storeMax || ctx.quickCheckBytes + bytes > totalMax || ctx.quickCheckSpentMs + estimateMs > ctx.quickCheckBudgetMs) {
-      checked.push({ file: move.to, result: "not_checked" });
+      checked2.push({ file: move.to, result: "not_checked" });
       continue;
     }
     const started = ctx.now();
@@ -214283,9 +215410,9 @@ function checkDatabases(ctx, moves) {
     ctx.quickCheckBytes += bytes;
     if (result === "busy")
       return { busy: `${basename22(move.from)} is in use by another program, so the account stays where it is for now.` };
-    checked.push({ file: move.to, result });
+    checked2.push({ file: move.to, result });
   }
-  return { checked };
+  return { checked: checked2 };
 }
 function planIsCanonical(ctx, sourceId, slot, migration) {
   if (isMessaging(sourceId) && (migration.moves ?? []).length === 0)
@@ -214459,7 +215586,7 @@ function verifyRestored(ctx, moves) {
   }
 }
 function stateBefore(migration, move) {
-  return migration.checked?.find((checked) => checked.file === move.to)?.result;
+  return migration.checked?.find((checked2) => checked2.file === move.to)?.result;
 }
 function forward(ctx, sourceId, slot, migration) {
   const moves = migration.moves ?? [];
@@ -214715,7 +215842,7 @@ function startHeldMove(ctx, sourceId, slot, entry) {
       recordSkip(ctx, sourceId, slot, entry, busy2);
       return { kind: "skipped", reason: busy2.reason };
     }
-    const { checked } = looked;
+    const { checked: checked2 } = looked;
     inspection = inspect(ctx, sourceId, slot, entry);
     if (inspection.kind === "move" && inspection.moves.some((move) => move.db !== true && (move.from.endsWith("-wal") || move.from.endsWith("-journal")) && move.size > 0)) {
       inspection = skip("log_not_folded", "A store was written to while its write-ahead log was being folded, so the account stays where it is for now.");
@@ -214725,7 +215852,7 @@ function startHeldMove(ctx, sourceId, slot, entry) {
       updateAccount(ctx, sourceId, slot, (account) => {
         if (account.layout !== "legacy" || sourceAccountMovePending(account))
           throw new EntryChanged;
-        account.migration = { state: "moving", at: new Date(ctx.now()).toISOString(), moves, ...checked.length > 0 ? { checked } : {} };
+        account.migration = { state: "moving", at: new Date(ctx.now()).toISOString(), moves, ...checked2.length > 0 ? { checked: checked2 } : {} };
       }, { create: true });
       checkpoint("plan");
       return runPlan(ctx, readSourceRegistryAccount(ctx, sourceId, slot), { locksHeld: true });
@@ -215978,7 +217105,7 @@ function createEmailSourceConnectorFromEnv(env = process.env) {
   }) : undefined;
 }
 function accountCheckedXBookmarksRuntime(runtime, guard) {
-  const checked = (run2) => runGuarded(guard, run2).catch((error2) => {
+  const checked2 = (run2) => runGuarded(guard, run2).catch((error2) => {
     if (error2 instanceof SourceAccountChangedError) {
       throw new EmailSourceWorkerError(409, error2.code, error2.message);
     }
@@ -215988,15 +217115,15 @@ function accountCheckedXBookmarksRuntime(runtime, guard) {
   return {
     ...runtime,
     sync: {
-      syncHead: (request) => checked(() => sync.syncHead(request)),
-      reconcile: (request) => checked(() => sync.reconcile(request)),
+      syncHead: (request) => checked2(() => sync.syncHead(request)),
+      reconcile: (request) => checked2(() => sync.reconcile(request)),
       ...sync.diagnoseWindow ? { diagnoseWindow: sync.diagnoseWindow.bind(sync) } : {},
       lastCompleteReconcileAt: () => sync.lastCompleteReconcileAt(),
       completeReconcileWatermark: () => sync.completeReconcileWatermark(),
       apiUsageStatus: () => sync.apiUsageStatus()
     },
     contentRecovery: {
-      recover: (request) => checked(() => contentRecovery.recover(request))
+      recover: (request) => checked2(() => contentRecovery.recover(request))
     }
   };
 }
@@ -217983,7 +219110,7 @@ function sourceEntry(definition, card, status, actionKind, degraded, connecting,
   const manualLine = connecting ? undefined : dashboardManualSyncLine(card, now);
   const signinMoved = card.connection.google_signin_moved === true && status === "Fresh" && !connecting && !inFlight;
   const detail = manualLine && !(ownDetail ?? "").startsWith(manualLine) ? manualLine : signinMoved ? DASHBOARD_CHATGPT_VOCABULARY.googleSigninMoved : ownDetail;
-  const unreadable = card.coverage.unreadable_items ?? 0;
+  const unreadable2 = card.coverage.unreadable_items ?? 0;
   const manual = card.last_manual_sync;
   const lastSyncAt = isoOrUndefined(card.last_sync_at);
   const reconnect = wantsReconnect(card, status, actionKind, degraded, progress) ? reconnectFix(definition, card) : undefined;
@@ -218039,7 +219166,7 @@ function sourceEntry(definition, card, status, actionKind, degraded, connecting,
     ...connecting ? { connecting: { expiresAt: connecting.expiresAt } } : {},
     ...progress ? { progress } : {},
     ...menu.length > 0 ? { menu } : {},
-    ...unreadable > 0 ? { unreadable: unreadableView(definition, card, unreadable) } : {},
+    ...unreadable2 > 0 ? { unreadable: unreadableView(definition, card, unreadable2) } : {},
     ...manual ? {
       lastManualSync: {
         at: manual.at,
@@ -220930,13 +222057,13 @@ function chatgptPrivateQuestionProgram(config2) {
     card.appendChild(form);
     return card;
   }
-  function radio(name, value2, text5, hint, checked, onPick) {
+  function radio(name, value2, text5, hint, checked2, onPick) {
     const wrap = el("label", "q-radio");
     const input = doc2.createElement("input");
     input.type = "radio";
     input.name = name;
     input.value = value2;
-    input.checked = checked;
+    input.checked = checked2;
     input.setAttribute("data-key", name + "-" + value2);
     input.addEventListener("change", () => {
       if (input.checked)
@@ -221442,9 +222569,9 @@ function copySource(source) {
     out.progress = copySourceProgress(source.progress);
   if (source.menu && source.menu.length > 0)
     out.menu = source.menu.map(copyFix);
-  const unreadable = copyUnreadable(source.unreadable);
-  if (unreadable)
-    out.unreadable = unreadable;
+  const unreadable2 = copyUnreadable(source.unreadable);
+  if (unreadable2)
+    out.unreadable = unreadable2;
   const manual = source.lastManualSync;
   const manualAt = iso3(manual?.at);
   if (manual && manualAt && MANUAL_SYNC_OUTCOMES2.has(manual.outcome)) {
@@ -222768,7 +223895,7 @@ async function scopeList(backend, args) {
 }
 async function browseWholeLevel(backend, sourceId, parentKey2) {
   const first = await backend.browseFolders({ sourceId, ...parentKey2 ? { parentKey: parentKey2 } : {} });
-  const nodes = [...first.nodes];
+  const nodes2 = [...first.nodes];
   const seen = new Set;
   let cursor = first.next_cursor;
   for (let page2 = 1;cursor && !seen.has(cursor) && page2 < MAX_PROVIDER_PAGES; page2++) {
@@ -222777,10 +223904,10 @@ async function browseWholeLevel(backend, sourceId, parentKey2) {
     if (next.account_generation !== first.account_generation || next.scope_revision !== first.scope_revision) {
       throw new ChatGptSurfaceError("picker_unavailable");
     }
-    nodes.push(...next.nodes);
+    nodes2.push(...next.nodes);
     cursor = next.next_cursor;
   }
-  const unique2 = new Map(nodes.map((node) => [node.key, node]));
+  const unique2 = new Map(nodes2.map((node) => [node.key, node]));
   const { next_cursor: _providerCursor, ...rest } = first;
   const truncated = Boolean(cursor) && !seen.has(cursor);
   return { browse: { ...rest, nodes: [...unique2.values()] }, truncated };
@@ -238901,7 +240028,7 @@ function createDashboardPanelTools(options) {
         return;
       });
       const unpair = computerUnpairEntries(view4);
-      const unreadable = computerUnreadableEntries(view4, options.unreadableFiles?.(), context3.opener);
+      const unreadable2 = computerUnreadableEntries(view4, options.unreadableFiles?.(), context3.opener);
       const missingFolders = (view4?.sources ?? []).flatMap((source) => source.schedule?.missing_folders?.length ? [{ sourceId: source.source_id, paths: source.schedule.missing_folders }] : []);
       const permissionSettings = process.platform === "darwin" ? (view4?.sources ?? []).flatMap((source) => source.schedule?.degraded_reason === "scope_root_permission_needed" ? [{ sourceId: source.source_id, url: FILES_AND_FOLDERS_URL }] : []) : [];
       const waiting = context3.localSession === true ? waitingCount(options) : 0;
@@ -238911,14 +240038,14 @@ function createDashboardPanelTools(options) {
       const archiveSources = archiveSourcesMeta(options);
       const archiveCards = archiveCardsMeta(options);
       const setup = setupMeta(options, view4);
-      if (on === undefined && !setup && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && indexedItems === 0 && missingFolders.length === 0 && permissionSettings.length === 0 && !archives && !sourceImports && !archiveSources && !archiveCards)
+      if (on === undefined && !setup && unpair.length === 0 && unreadable2.length === 0 && waiting === 0 && indexedItems === 0 && missingFolders.length === 0 && permissionSettings.length === 0 && !archives && !sourceImports && !archiveSources && !archiveCards)
         return result;
       const meta2 = {
         ...missingFolders.length ? { missingFolders } : {},
         ...permissionSettings.length ? { permissionSettings } : {},
         ...on !== undefined ? { indexFaster: { on } } : {},
         ...unpair.length > 0 ? { unpair } : {},
-        ...unreadable.length > 0 ? { unreadable } : {},
+        ...unreadable2.length > 0 ? { unreadable: unreadable2 } : {},
         ...waiting > 0 ? { waitingPrivateQuestions: waiting } : {},
         ...indexedItems > 0 ? { indexedItems } : {},
         ...setup ? { setup } : {},
