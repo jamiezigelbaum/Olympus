@@ -25,7 +25,7 @@ import type { SourceEmbeddingInput, SourceEmbeddingProvider } from '../src/worke
 const ACCOUNT = 'personal';
 const CORPUS_ID = 'internal.fake.leader';
 
-interface FixtureItem { id: string; name: string; text: string }
+interface FixtureItem { id: string; name: string; text?: string }
 
 // The answer: short, so bm25 ranks it first for the question's words.
 const TARGET: FixtureItem = {
@@ -108,7 +108,58 @@ describe('lane leader seats', () => {
   });
 });
 
-async function withStore(run: (store: LocalConnectorStore, provider: SourceEmbeddingProvider) => Promise<void>): Promise<void> {
+// gap-1 (Sparta probe 2026-11-11): the keyword lane seats the best name match
+// right after the best readable partial match (#1287), but hybrid output
+// buried it. Readable notes the vector lane vets count as complete there, and
+// a names-only file has no chunks, so no vector hit can vet it: every vetted
+// note went ahead of it and the store's top results never held the file named
+// for the question.
+const LANTERN: FixtureItem = { id: 'lantern', name: 'Harbor Lantern Restoration Quote.pdf' };
+const LANTERN_NOTES: FixtureItem[] = Array.from({ length: 6 }, (_, index) => ({
+  id: `lantern-note-${index}`,
+  name: `crew-log-${index}.txt`,
+  text: `Crew log ${index}. Harbor lantern restoration: the crew compared brass polish, glass panes, `
+    + `wick holders and paint for the old lantern and agreed to look again at item ${index} next week.`,
+}));
+
+describe('hybrid output keeps the keyword lane\'s name leader', () => {
+  const QUESTION = 'harbor lantern restoration estimate';
+
+  test('the keyword lane seats the names-only leader second (precondition)', async () => {
+    await withStore(async (store) => {
+      const keyword = hitIds(await search(store, QUESTION, { retrievalMode: 'keyword', maxResults: 2 }));
+      expect(keyword[0]).not.toBe('lantern');
+      expect(keyword[1]).toBe('lantern');
+    }, [LANTERN, ...LANTERN_NOTES]);
+  });
+
+  test('vetted vector notes do not push the names-only leader out of the top results', async () => {
+    await withStore(async (store, provider) => {
+      const hybrid = await search(store, QUESTION, {
+        retrievalMode: 'hybrid', maxResults: 5, provider, semanticRelevanceBar: 0.62,
+      });
+      const ids = hitIds(hybrid);
+      // A readable note still takes the first seat; the file named for the question takes the next.
+      expect(ids[0]).toStartWith('lantern-note-');
+      expect(ids[1]).toBe('lantern');
+    }, [LANTERN, ...LANTERN_NOTES]);
+  });
+
+  test('with one seat, a readable note keeps it', async () => {
+    await withStore(async (store, provider) => {
+      const ids = hitIds(await search(store, QUESTION, {
+        retrievalMode: 'hybrid', maxResults: 1, provider, semanticRelevanceBar: 0.62,
+      }));
+      expect(ids).toHaveLength(1);
+      expect(ids[0]).toStartWith('lantern-note-');
+    }, [LANTERN, ...LANTERN_NOTES]);
+  });
+});
+
+async function withStore(
+  run: (store: LocalConnectorStore, provider: SourceEmbeddingProvider) => Promise<void>,
+  items: readonly FixtureItem[] = [TARGET, ...NEIGHBOURS],
+): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'olympus-keyword-leader-'));
   const store = new LocalConnectorStore({
     dbPath: join(dir, 'leader.sqlite'),
@@ -118,7 +169,7 @@ async function withStore(run: (store: LocalConnectorStore, provider: SourceEmbed
   });
   const provider = embeddingProvider();
   try {
-    await store.syncFromConnector(fixtureConnector([TARGET, ...NEIGHBOURS]), { fetchContent: true });
+    await store.syncFromConnector(fixtureConnector(items), { fetchContent: true });
     await store.embedChunks({ provider });
     await run(store, provider);
   } finally {
@@ -139,7 +190,7 @@ function fixtureConnector(items: readonly FixtureItem[]): SourceConnector {
       sourceVersion: `${item.id}:v1`,
     },
     mimeType: 'text/plain',
-    content: { kind: 'text', text: item.text },
+    content: item.text === undefined ? { kind: 'metadata_only' } : { kind: 'text', text: item.text },
     metadata: Object.freeze({
       name: item.name,
       locatorUri: `/notes/${item.name}`,
