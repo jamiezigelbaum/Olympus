@@ -356,21 +356,19 @@ test('backfill turns shrink when slow, regrow when fast, and stand back while an
   } finally { store.close(); }
 });
 
-test('hidden candidate items cause expansion and only the best chunk per item fills the limit', async () => {
+test('many winning chunks of one item cannot fill the item budget: the pass expands to distinct items', async () => {
   const db = numericStore();
   try {
     db.transaction(() => {
-      for (let i = 1; i <= 1000; i++) insert(db, i, [1, 0, 0]);
-      // Many winning chunks for one item cannot fill an item budget.
-      for (let i = 1001; i <= 1500; i++) insert(db, i, [1, 0, 0], 1001);
+      // 900 chunks of one item outrank everything else, so the first K are all its own.
+      for (let i = 1; i <= 900; i++) insert(db, i, [1, 0, 0], 5000);
+      for (let i = 901; i <= 1400; i++) insert(db, i, [1, 0.2, 0]);
     })();
     finish(db);
-    const result = await scanDigestPages(reader(db), [1, 0, 0], { modelId }, undefined, 20,
-      pks => new Set(pks.filter(pk => pk > 800)));
-    if ('bestByItem' in result) expect(result.bestByItem.has(900)).toBe(true);
-    const singleton = await scanDigestPages(reader(db), [1, 0, 0], { modelId }, undefined, 20,
-      pks => new Set(pks.filter(pk => pk === 1001)));
-    if ('bestByItem' in singleton) expect(singleton.bestByItem.size).toBe(1001);
+    const result = await scanDigestPages(reader(db), [1, 0, 0], { modelId }, undefined, 20);
+    if (!('bestByItem' in result)) throw new Error(result.skippedReason);
+    expect(result.bestByItem.has(5000)).toBe(true);
+    expect(rank(result).length).toBe(20);
   } finally { db.close(); }
 });
 

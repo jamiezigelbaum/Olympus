@@ -24467,7 +24467,7 @@ function foldVectorScore(bestByItem, row, queryVector) {
   }
   return { mismatch: 0, qualified };
 }
-async function scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, pageSize, resultLimit, visibility) {
+async function scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, pageSize, resultLimit) {
   const authority = embeddingAuthorityRead(provider);
   const after = embeddingAuthorityFromRow(await read(authority), provider);
   if (after.skippedReason)
@@ -24477,7 +24477,7 @@ async function scanVectorPages(read, provider, beforeToken, queryVector, pageOpt
   const digestTable = await read({ mode: "get", sql: "SELECT 1 FROM sqlite_master WHERE name = 'chunk_vector_digest_meta'", params: [] });
   const digestReady = digestTable && await read({ mode: "get", sql: "SELECT 1 FROM chunk_vector_digest_meta WHERE model_id = ? AND completed = 1", params: [pageOptions.modelId] });
   if (digestReady)
-    return scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit, visibility);
+    return scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit);
   const bestByItem = new Map;
   let dimensionMismatches = 0;
   let afterChunkPk = 0;
@@ -24514,10 +24514,11 @@ function nextVectorDigestBackfillRows(rows, turnMs) {
     return Math.min(VECTOR_DIGEST_BACKFILL_MAX_ROWS, rows * 2);
   return rows;
 }
-async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, visibility) {
+async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit) {
   const heap = new VectorDigestHeap;
   const query = encodeVectorDigest(queryVector);
   let afterChunkPk = 0;
+  let digestPages = 0;
   const expired = () => connectorStoreVectorDeadlineExpired(deadlineAtMs);
   const cut = { skippedReason: "vector_scan_deadline_exceeded" };
   while (true) {
@@ -24534,11 +24535,12 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, 
     if (rows.length < 4096)
       break;
     afterChunkPk = rows.at(-1).chunk_pk;
-    await yieldConnectorStoreVectorScan();
+    if (digestPages++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0)
+      await yieldConnectorStoreVectorScan();
   }
   for (let index = Math.floor(heap.length / 2) - 1;index >= 0; index--) {
     heap.siftDown(index);
-    if ((index & 4095) === 0) {
+    if (index > 0 && (index & 65535) === 0) {
       if (expired())
         return cut;
       await yieldConnectorStoreVectorScan();
@@ -24547,15 +24549,18 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, 
   const bestByItem = new Map;
   let dimensionMismatches = 0;
   const batchSize = Math.max(400, 20 * limit);
-  let eligibleItems = 0;
-  while (heap.length > 0 && eligibleItems < limit) {
+  let qualifiedItems = 0;
+  let batches = 0;
+  while (heap.length > 0 && qualifiedItems < limit) {
     if (expired())
       return cut;
+    if (batches++ > 0)
+      await yieldConnectorStoreVectorScan();
     const chunkPks = [];
     while (heap.length > 0 && chunkPks.length < batchSize)
       chunkPks.push(heap.pop());
-    const qualifiedPks = [];
     let after = 0;
+    let rePages = 0;
     while (true) {
       if (expired())
         return cut;
@@ -24566,16 +24571,14 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, 
           return cut;
         const folded = foldVectorScore(bestByItem, row, queryVector);
         dimensionMismatches += folded.mismatch;
-        if (folded.qualified)
-          qualifiedPks.push(row.item_pk);
+        qualifiedItems += folded.qualified;
       }
       if (rows.length < CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE)
         break;
       after = rows.at(-1).chunk_pk;
-      await yieldConnectorStoreVectorScan();
+      if (rePages++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0)
+        await yieldConnectorStoreVectorScan();
     }
-    eligibleItems += visibility ? visibility(qualifiedPks).size : qualifiedPks.length;
-    await yieldConnectorStoreVectorScan();
   }
   return expired() ? cut : { bestByItem, dimensionMismatches };
 }
@@ -24588,8 +24591,8 @@ function connectorStoreVectorDigestPageQuery(options, afterChunkPk, limit = 4096
     params: [afterChunkPk, options.modelId, ...account ? [account] : [], limit]
   };
 }
-async function scanVectorPagesOnPool(dbPath, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit, visibility) {
-  const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit, visibility)).catch((error) => {
+async function scanVectorPagesOnPool(dbPath, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit) {
+  const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit)).catch((error) => {
     if (error instanceof OffThreadReadBusyError)
       return { skippedReason: "vector_scan_store_busy" };
     throw error;
@@ -30844,7 +30847,7 @@ class LocalConnectorStore {
       ...selectedAccount ? { accountScope: selectedAccount } : {},
       ...filters ? { filters } : {}
     };
-    const scanned = offThreadReadsSupported(this.dbPath) ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit, (pks) => this.visibleVectorItemPks(pks, selectedAccount, filters)) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit, (pks) => this.visibleVectorItemPks(pks, selectedAccount, filters));
+    const scanned = offThreadReadsSupported(this.dbPath) ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit);
     if ("skippedReason" in scanned)
       return { rows: [], skippedReason: scanned.skippedReason };
     const { bestByItem, dimensionMismatches } = scanned;
@@ -30875,7 +30878,7 @@ class LocalConnectorStore {
       ...laneRows.length === 0 && dimensionMismatches > 0 ? { skippedReason: "embedding_stored_dimension_mismatch" } : {}
     };
   }
-  async scanVectorPagesInThread(provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit, visibility) {
+  async scanVectorPagesInThread(provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit) {
     const scanDb = this.dbPath === ":memory:" ? this.db : new Database6(this.dbPath, { readonly: true, create: false, strict: true });
     const ownsScanDb = scanDb !== this.db;
     try {
@@ -30888,7 +30891,7 @@ class LocalConnectorStore {
         const params = query.params;
         return query.mode === "all" ? statement.all(...params) : statement.get(...params);
       };
-      return await scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE, resultLimit, visibility);
+      return await scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE, resultLimit);
     } finally {
       try {
         scanDb.exec("ROLLBACK;");

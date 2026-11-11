@@ -2278,7 +2278,6 @@ type VectorScan =
   | { skippedReason: string };
 
 type VectorScoreRow = { item_pk: number; chunk_pk: number; local_item_id: string; embedding: unknown };
-type VectorVisibility = (itemPks: readonly number[]) => ReadonlySet<number>;
 type VectorWinners = Extract<VectorScan, { bestByItem: unknown }>['bestByItem'];
 
 /** Shared exact scoring preserves the winning chunk and deterministic ties. */
@@ -2314,7 +2313,6 @@ async function scanVectorPages(
   deadlineAtMs: number | undefined,
   pageSize: number,
   resultLimit: number,
-  visibility?: VectorVisibility,
 ): Promise<VectorScan> {
   const authority = embeddingAuthorityRead(provider);
   const after = embeddingAuthorityFromRow(await read(authority) as EmbeddingAuthorityRow | null, provider);
@@ -2323,7 +2321,7 @@ async function scanVectorPages(
   // Old/read-only schemas and incomplete backfills retain the exact scan.
   const digestTable = await read({ mode: 'get', sql: "SELECT 1 FROM sqlite_master WHERE name = 'chunk_vector_digest_meta'", params: [] });
   const digestReady = digestTable && await read({ mode: 'get', sql: 'SELECT 1 FROM chunk_vector_digest_meta WHERE model_id = ? AND completed = 1', params: [pageOptions.modelId] });
-  if (digestReady) return scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit, visibility);
+  if (digestReady) return scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit);
   const bestByItem = new Map<number, { bestCosine: number; bestChunkPk: number; localItemId: string }>();
   let dimensionMismatches = 0;
   let afterChunkPk = 0;
@@ -2374,11 +2372,11 @@ export async function scanDigestPages(
   options: ConnectorStoreCurrentEmbeddingRowsOptions,
   deadlineAtMs: number | undefined,
   limit: number,
-  visibility?: VectorVisibility,
 ): Promise<VectorScan> {
   const heap = new VectorDigestHeap();
   const query = encodeVectorDigest(queryVector);
   let afterChunkPk = 0;
+  let digestPages = 0;
   const expired = () => connectorStoreVectorDeadlineExpired(deadlineAtMs);
   const cut = { skippedReason: 'vector_scan_deadline_exceeded' };
   while (true) {
@@ -2392,42 +2390,45 @@ export async function scanDigestPages(
     }
     if (rows.length < 4096) break;
     afterChunkPk = rows.at(-1)!.chunk_pk;
-    await yieldConnectorStoreVectorScan();
+    // Same cadence as the exact scan: a timer tick per page costs more than the page.
+    if (digestPages++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0) await yieldConnectorStoreVectorScan();
   }
   // Heap construction is linear; extraction costs only O(K log N), and
   // retains the next K without re-reading the digest when filters are narrow.
   for (let index = Math.floor(heap.length / 2) - 1; index >= 0; index--) {
     heap.siftDown(index);
-    if ((index & 4095) === 0) { if (expired()) return cut; await yieldConnectorStoreVectorScan(); }
+    if (index > 0 && (index & 65535) === 0) { if (expired()) return cut; await yieldConnectorStoreVectorScan(); }
   }
   const bestByItem: Extract<VectorScan, { bestByItem: unknown }>['bestByItem'] = new Map();
   let dimensionMismatches = 0;
   const batchSize = Math.max(400, 20 * limit);
-  let eligibleItems = 0;
-  while (heap.length > 0 && eligibleItems < limit) {
+  // Expansion counts SQL-eligible items above the score floor. Ledger
+  // visibility is checked once, on the ranked winners, by the lane's final
+  // step; each batch re-scores 20x the limit, which leaves that step a deep
+  // list to walk past hidden copies without validating every candidate here.
+  let qualifiedItems = 0;
+  let batches = 0;
+  while (heap.length > 0 && qualifiedItems < limit) {
     if (expired()) return cut;
+    if (batches++ > 0) await yieldConnectorStoreVectorScan();
     const chunkPks: number[] = [];
     while (heap.length > 0 && chunkPks.length < batchSize) chunkPks.push(heap.pop());
-    const qualifiedPks: number[] = [];
     let after = 0;
+    let rePages = 0;
     while (true) {
       if (expired()) return cut;
       const page = connectorStoreCurrentEmbeddingPageQuery({ ...options, chunkPks }, after);
-      const rows = await read({ mode: 'all', ...page }) as Array<{ item_pk: number; chunk_pk: number; local_item_id: string; embedding: unknown }>;
+      const rows = await read({ mode: 'all', ...page }) as VectorScoreRow[];
       for (const [index, row] of rows.entries()) {
         if ((index & 31) === 0 && expired()) return cut;
         const folded = foldVectorScore(bestByItem, row, queryVector);
         dimensionMismatches += folded.mismatch;
-        if (folded.qualified) qualifiedPks.push(row.item_pk);
+        qualifiedItems += folded.qualified;
       }
       if (rows.length < CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE) break;
       after = rows.at(-1)!.chunk_pk;
-      await yieldConnectorStoreVectorScan();
+      if (rePages++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0) await yieldConnectorStoreVectorScan();
     }
-    // Hidden items must not fill the candidate budget. The final live
-    // visibility/hydration step still rechecks winners after the last yield.
-    eligibleItems += visibility ? visibility(qualifiedPks).size : qualifiedPks.length;
-    await yieldConnectorStoreVectorScan();
   }
   return expired() ? cut : { bestByItem, dimensionMismatches };
 }
@@ -2459,10 +2460,9 @@ async function scanVectorPagesOnPool(
   pageOptions: ConnectorStoreCurrentEmbeddingRowsOptions,
   deadlineAtMs: number | undefined,
   resultLimit: number,
-  visibility?: VectorVisibility,
 ): Promise<VectorScan> {
   const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(
-    read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit, visibility,
+    read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit,
   )).catch((error: unknown): VectorScan => {
     if (error instanceof OffThreadReadBusyError) return { skippedReason: 'vector_scan_store_busy' };
     throw error;
@@ -13008,8 +13008,8 @@ export class LocalConnectorStore {
     // snapshot (#1305): run on the request thread they held it for tens of
     // seconds on a large store, and every other lane and request waited.
     const scanned = offThreadReadsSupported(this.dbPath)
-      ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit, (pks) => this.visibleVectorItemPks(pks, selectedAccount, filters))
-      : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit, (pks) => this.visibleVectorItemPks(pks, selectedAccount, filters));
+      ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit)
+      : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit);
     if ('skippedReason' in scanned) return { rows: [], skippedReason: scanned.skippedReason };
     const { bestByItem, dimensionMismatches } = scanned;
 
@@ -13073,7 +13073,6 @@ export class LocalConnectorStore {
     pageOptions: ConnectorStoreCurrentEmbeddingRowsOptions,
     deadlineAtMs: number | undefined,
     resultLimit: number,
-    visibility?: VectorVisibility,
   ): Promise<VectorScan> {
     const scanDb = this.dbPath === ':memory:'
       ? this.db
@@ -13089,7 +13088,7 @@ export class LocalConnectorStore {
         const params = query.params as Array<string | number | null>;
         return query.mode === 'all' ? statement.all(...params) : statement.get(...params);
       };
-      return await scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE, resultLimit, visibility);
+      return await scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE, resultLimit);
     } finally {
       try {
         scanDb.exec('ROLLBACK;');
