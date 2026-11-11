@@ -2175,7 +2175,7 @@ export async function runWorkerForeground(options: {
     return;
   }
   const startWorker = options.startWorker
-    ?? (await import('./workers/email-source/server.ts')).startWorkerWithLaunch;
+    ?? (await import('./workers/engine/server.ts')).startWorkerWithLaunch;
   // Only the validated native-service launch is supervised; never an ambient marker.
   await startWorker({ nativeServiceSupervised: managedInstanceId !== undefined });
 }

@@ -50,7 +50,7 @@ are generic spine pieces that any local source can use.
    `OlympusFolderScopeSourceId` (`control-ui-contract.ts`),
    `FILE_SOURCE_SCOPE_IDS` / `FILE_SOURCE_SCOPE_CAPABILITIES`
    (`core/source-scope-approval.ts`) and the Dropbox/Drive ternary in the
-   browse route (`email-source/server.ts`). These become one registry that
+   browse route (`engine/server.ts`). These become one registry that
    sources add themselves to. Dropbox and Drive move onto it unchanged.
 2. **Sources without an account.** Scope approval and browse need a
    credential handle and an `accountGeneration`. Add a "this computer"
@@ -166,7 +166,7 @@ excluded under both spellings.
 What an earlier version indexed inside an own folder (a folder the owner had
 chosen by name) is removed at worker start, before the worker answers anything
 (`createLocalFilesOwnRootsCleanup` in `local-files/own-roots-cleanup.ts`, run
-from `email-source/server.ts`). It walks the stored paths under each own folder
+from `engine/server.ts`). It walks the stored paths under each own folder
 in each tier store, page by page in the index's own order, and keeps those the
 scanner itself would call inside it (`isInsideOwnRoot`, with the case rules of
 the volume holding the path: `~/Capture` beside an own `~/capture` is another

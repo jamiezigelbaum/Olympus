@@ -16,7 +16,7 @@ import {
 import type { ExternalPendingOAuthConnection } from '../src/core/connect.ts';
 import type { SecretStore } from '../src/core/secret-store.ts';
 import { DEFAULT_GOOGLE_DESKTOP_CLIENT_ID } from '../src/core/publisher-oauth-client.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import {
   DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER,
   withWorkerBearerAuth,

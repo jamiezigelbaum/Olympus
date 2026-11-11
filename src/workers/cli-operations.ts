@@ -4,7 +4,7 @@
  * "Owner lock"). Each operation is the function the CLI runs itself when the
  * owner lock is free, so a command prints the same thing either way.
  *
- * The routes (`POST /v1/cli/<operation>`, mounted in email-source/index.ts)
+ * The routes (`POST /v1/cli/<operation>`, mounted in engine/index.ts)
  * sit behind the worker bearer. The relay forwards none of them
  * (connect-relay/client/forward.ts) and a dashboard cookie alone reaches none
  * (workers/http.ts); the handlers stay thin: parse, call, return.

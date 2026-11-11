@@ -18,7 +18,7 @@ import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.
 import { deleteMarkedAccounts, deleteOlympusDataWithCustody, exportOlympusData, lifecycleAccountFiles, lifecycleDataRoot, type LifecyclePathContext } from '../src/data-lifecycle.ts';
 import { runTierCommand } from '../src/workers/classification/tier-cli.ts';
 import { writeConnectedHandleRegistry, readConnectedHandleRegistry, type ConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import { collectLocalSourceIngestionLedger } from '../src/workers/source-ingestion-ledger.ts';
 

@@ -618,6 +618,8 @@ describe('extraction runner: one refused bucket never fails a plan pass', () => 
                   ref(2, { mimeType: 'application/octet-stream', name: 'settings.yaml' }),
                   ref(3, { mimeType: 'application/octet-stream', name: 'keynote.key' }),
                   ref(4, { mimeType: 'application/octet-stream', name: 'no-extension' }),
+                  ref(5, { mimeType: 'application/octet-stream', name: 'notes.constructor' }),
+                  ref(6, { mimeType: 'application/octet-stream', name: 'notes.__proto__' }),
                 ],
                 done: true,
               };
@@ -626,7 +628,7 @@ describe('extraction runner: one refused bucket never fails a plan pass', () => 
         },
       });
       const plan = await runner.plan({ ...LANE, limit: 10 });
-      expect(plan).toMatchObject({ candidates: 4, jobsQueued: 2, jobsUnroutable: 2 });
+      expect(plan).toMatchObject({ candidates: 6, jobsQueued: 2, jobsUnroutable: 4 });
       const leased = jobs.lease({ ...LANE, workerId: 'w', limit: 10 }).leasedJobs
         .map((job) => [job.ref.providerItemId, job.ref.mimeType])
         .sort();

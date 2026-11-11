@@ -20,7 +20,7 @@ import {
   loadDropboxIngestionPolicy,
   parseSourceIngestionPolicy,
 } from '../src/core/source-ingestion-policy.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import type {
   ExtractionPlanRequest,
   FileExtractionRunner,

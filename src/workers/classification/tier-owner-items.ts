@@ -134,7 +134,7 @@ export type OwnerTierItemSetResult =
   | { ok: true; item: OwnerTierItem; changed: 'set' | 'cleared' | 'unchanged'; applies: 'now' | 'next_pass'; results: Array<Record<string, unknown>> }
   | { ok: false; code: 'not_found' | 'secret_item' | 'dashboard_only' | 'not_owner_set'; message: string };
 
-/** The bound engine the worker serves (email-source/index.ts). */
+/** The bound engine the worker serves (engine/index.ts). */
 export interface OwnerTierItems {
   find(input: OwnerTierItemFindInput): { items: OwnerTierItem[] };
   set(input: OwnerTierItemSetInput): OwnerTierItemSetResult;

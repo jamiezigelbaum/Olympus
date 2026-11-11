@@ -8,7 +8,7 @@ import {
   defineConnectorCorpus,
 } from '../src/workers/connector-store/index.ts';
 import { gmailMessageItem } from '../src/workers/google-connectors/gmail-mail-record.ts';
-import { connectorStoreAnswerScope } from '../src/workers/email-source/server.ts';
+import { connectorStoreAnswerScope } from '../src/workers/engine/server.ts';
 import { createSourceIndexStatusHandler } from '../src/workers/source-index/status.ts';
 
 // One person, Brianna, in three sources: Gmail (by her address), WhatsApp (by

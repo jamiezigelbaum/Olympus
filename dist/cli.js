@@ -81487,7 +81487,9 @@ function fileMimeTypeFromName(name) {
   if (dot2 <= 0 || dot2 === name.length - 1)
     return "application/octet-stream";
   const extension = name.slice(dot2 + 1).toLowerCase();
-  return MIME_BY_EXTENSION[extension] ?? (SOURCE_CODE_EXTENSIONS.has(extension) ? "text/plain" : "application/octet-stream");
+  if (Object.hasOwn(MIME_BY_EXTENSION, extension))
+    return MIME_BY_EXTENSION[extension];
+  return SOURCE_CODE_EXTENSIONS.has(extension) ? "text/plain" : "application/octet-stream";
 }
 function fileMimeTypeFromBytes(bytes) {
   const image = stillImageFormatFromBytes(bytes);
@@ -93595,6 +93597,277 @@ var init_bounded_text = __esm(() => {
   ]);
 });
 
+// src/workers/file-extraction/extractors/rtf.ts
+function hasRtfSignature(bytes) {
+  return bytes.length >= 5 && bytes[0] === 123 && bytes[1] === 92 && bytes[2] === 114 && bytes[3] === 116 && bytes[4] === 102;
+}
+function rtfSourceFromBytes(bytes) {
+  let source = "";
+  for (let start = 0;start < bytes.length; start += 8192) {
+    source += String.fromCharCode(...bytes.subarray(start, start + 8192));
+  }
+  return source;
+}
+function rtfToText(source, maxChars) {
+  const out = [];
+  let length = 0;
+  let truncated = false;
+  const emit = (text3) => {
+    const room = maxChars - length;
+    const piece = text3.length > room ? text3.slice(0, room) : text3;
+    if (piece.length < text3.length && text3.slice(piece.length).trim() !== "")
+      truncated = true;
+    if (piece.length === 0)
+      return;
+    out.push(piece);
+    length += piece.length;
+  };
+  let codePage = 1252;
+  const stack = [];
+  let state = { skip: false, unicodeSkip: 1 };
+  let pendingSkip = 0;
+  let groupStart = false;
+  const hexBytes = [];
+  const pushByte = (byte) => {
+    hexBytes.push(byte);
+    if (hexBytes.length >= (maxChars - length) * 4 + 4)
+      flushHex();
+  };
+  const flushHex = () => {
+    if (hexBytes.length === 0)
+      return;
+    if (!state.skip)
+      emit(decodeCodePage(Uint8Array.from(hexBytes), codePage));
+    hexBytes.length = 0;
+  };
+  let index = 0;
+  while (index < source.length && !truncated) {
+    const char = source[index];
+    if (char === "{") {
+      flushHex();
+      stack.push(state);
+      state = { ...state };
+      groupStart = true;
+      pendingSkip = 0;
+      index += 1;
+      continue;
+    }
+    if (char === "}") {
+      flushHex();
+      state = stack.pop() ?? { skip: false, unicodeSkip: 1 };
+      groupStart = false;
+      pendingSkip = 0;
+      index += 1;
+      continue;
+    }
+    if (char === "\\") {
+      const next = source[index + 1];
+      if (next === undefined)
+        break;
+      if (next === "'") {
+        const hex = source.slice(index + 2, index + 4);
+        index += 4;
+        if (pendingSkip > 0) {
+          pendingSkip -= 1;
+          continue;
+        }
+        const value2 = Number.parseInt(hex, 16);
+        if (Number.isFinite(value2))
+          pushByte(value2);
+        groupStart = false;
+        continue;
+      }
+      flushHex();
+      if (next === "*") {
+        if (groupStart)
+          state.skip = true;
+        index += 2;
+        continue;
+      }
+      if (!isLetter(next)) {
+        index += 2;
+        groupStart = false;
+        const symbol = next === "\\" || next === "{" || next === "}" ? next : next === "~" ? " " : next === "_" ? "-" : next === `
+` || next === "\r" ? `
+` : undefined;
+        if (symbol === undefined)
+          continue;
+        if (pendingSkip > 0) {
+          pendingSkip -= 1;
+          continue;
+        }
+        if (!state.skip)
+          emit(symbol);
+        continue;
+      }
+      let end = index + 1;
+      while (end < source.length && end - index <= 32 && isLetter(source[end]))
+        end += 1;
+      const word = source.slice(index + 1, end);
+      index = end;
+      let digitsEnd = source[index] === "-" ? index + 1 : index;
+      while (digitsEnd < source.length && digitsEnd - index < 11 && isDigit(source[digitsEnd]))
+        digitsEnd += 1;
+      const parameter = digitsEnd > index && isDigit(source[digitsEnd - 1]) ? source.slice(index, digitsEnd) : undefined;
+      if (parameter !== undefined)
+        index = digitsEnd;
+      if (source[index] === " ")
+        index += 1;
+      const value = parameter === undefined ? undefined : Number(parameter);
+      const atStart = groupStart;
+      groupStart = false;
+      if (atStart && SKIPPED_DESTINATIONS.has(word)) {
+        state.skip = true;
+        continue;
+      }
+      if (word === "ansicpg" && value !== undefined) {
+        codePage = value;
+        continue;
+      }
+      if (word === "uc" && value !== undefined) {
+        state.unicodeSkip = Math.max(0, value);
+        continue;
+      }
+      if (word === "u" && value !== undefined) {
+        if (!state.skip)
+          emit(String.fromCharCode(value < 0 ? value + 65536 : value));
+        pendingSkip = state.unicodeSkip;
+        continue;
+      }
+      if (word === "bin" && value !== undefined) {
+        index += Math.max(0, value);
+        continue;
+      }
+      if (!state.skip && BREAKS[word] !== undefined)
+        emit(BREAKS[word]);
+      continue;
+    }
+    if (char === "\r" || char === `
+`) {
+      index += 1;
+      continue;
+    }
+    groupStart = false;
+    index += 1;
+    if (pendingSkip > 0) {
+      pendingSkip -= 1;
+      continue;
+    }
+    if (char.charCodeAt(0) > 127) {
+      pushByte(char.charCodeAt(0));
+      continue;
+    }
+    flushHex();
+    if (!state.skip)
+      emit(char);
+  }
+  flushHex();
+  return { text: out.join(""), truncated };
+}
+function isLetter(char) {
+  const code = char.charCodeAt(0);
+  return code >= 65 && code <= 90 || code >= 97 && code <= 122;
+}
+function isDigit(char) {
+  const code = char.charCodeAt(0);
+  return code >= 48 && code <= 57;
+}
+function decodeCodePage(bytes, codePage) {
+  const label = CODE_PAGE_LABELS.get(codePage);
+  if (label) {
+    try {
+      return new TextDecoder(label).decode(bytes);
+    } catch {}
+  }
+  let text3 = "";
+  for (const byte of bytes)
+    text3 += byte < 128 ? String.fromCharCode(byte) : "�";
+  return text3;
+}
+var RTF_MIME_TYPES, SKIPPED_DESTINATIONS, BREAKS, CODE_PAGE_LABELS;
+var init_rtf = __esm(() => {
+  RTF_MIME_TYPES = new Set(["application/rtf", "text/rtf"]);
+  SKIPPED_DESTINATIONS = new Set([
+    "fonttbl",
+    "colortbl",
+    "stylesheet",
+    "info",
+    "pict",
+    "object",
+    "listtable",
+    "listoverridetable",
+    "rsidtbl",
+    "generator",
+    "themedata",
+    "colorschememapping",
+    "datastore",
+    "latentstyles",
+    "xmlnstbl",
+    "header",
+    "headerl",
+    "headerr",
+    "headerf",
+    "footer",
+    "footerl",
+    "footerr",
+    "footerf",
+    "filetbl",
+    "revtbl",
+    "mmathPr",
+    "pgdsctbl",
+    "fldinst"
+  ]);
+  BREAKS = {
+    par: `
+`,
+    line: `
+`,
+    sect: `
+`,
+    page: `
+`,
+    row: `
+`,
+    tab: "\t",
+    cell: "\t",
+    emdash: "—",
+    endash: "–",
+    bullet: "•",
+    lquote: "‘",
+    rquote: "’",
+    ldblquote: "“",
+    rdblquote: "”",
+    emspace: " ",
+    enspace: " ",
+    qmspace: " "
+  };
+  CODE_PAGE_LABELS = new Map([
+    [866, "ibm866"],
+    [874, "windows-874"],
+    [932, "shift_jis"],
+    [936, "gbk"],
+    [949, "euc-kr"],
+    [950, "big5"],
+    [1250, "windows-1250"],
+    [1251, "windows-1251"],
+    [1252, "windows-1252"],
+    [1253, "windows-1253"],
+    [1254, "windows-1254"],
+    [1255, "windows-1255"],
+    [1256, "windows-1256"],
+    [1257, "windows-1257"],
+    [1258, "windows-1258"],
+    [1e4, "macintosh"],
+    [10007, "x-mac-cyrillic"],
+    [20866, "koi8-r"],
+    [28591, "iso-8859-1"],
+    [28592, "iso-8859-2"],
+    [28595, "iso-8859-5"],
+    [54936, "gb18030"],
+    [65001, "utf-8"]
+  ]);
+});
+
 // src/workers/file-extraction/extractors/document-formats.ts
 import { Buffer as Buffer5 } from "node:buffer";
 import { inflateRawSync as inflateRawSync2, inflateSync } from "node:zlib";
@@ -94642,6 +94915,26 @@ function createTextExtractor(options = {}) {
           ]
         });
       }
+      if (mimeType && RTF_MIME_TYPES.has(mimeType)) {
+        if (!hasRtfSignature(bytes))
+          return { status: "skipped_unsupported" };
+        const plain = rtfToText(rtfSourceFromBytes(bytes), maxBoundedTextChars);
+        const read = boundText(normalizeExtractedText(plain.text), maxBoundedTextChars);
+        const bounded2 = plain.truncated && !read.truncated ? {
+          ...read,
+          truncated: true,
+          truncationReason: BOUNDED_TEXT_TRUNCATION_REASON,
+          warnings: [BOUNDED_TEXT_TRUNCATED_WARNING]
+        } : read;
+        if (!bounded2.text)
+          return { status: "empty_output" };
+        return {
+          status: "indexed",
+          text: bounded2.text,
+          derivations: [buildDerivation({ artifact: "text", structural: { kind: "whole_file" }, bounded: bounded2 })],
+          ...bounded2.warnings.length > 0 ? { warnings: [...bounded2.warnings] } : {}
+        };
+      }
       if (!mimeType || !TEXT_MIME_TYPES.has(mimeType)) {
         return { status: "skipped_unsupported" };
       }
@@ -94705,7 +94998,7 @@ function textLaneAccepts(mimeType) {
   const normalized = normalizeMimeType2(mimeType);
   if (!normalized)
     return false;
-  return normalized === PDF_MIME_TYPE || normalized === DOCX_MIME_TYPE || normalized === XLSX_MIME_TYPE || normalized === PPTX_MIME_TYPE || IMAGE_MIME_TYPES.has(normalized) || TEXT_MIME_TYPES.has(normalized);
+  return normalized === PDF_MIME_TYPE || normalized === DOCX_MIME_TYPE || normalized === XLSX_MIME_TYPE || normalized === PPTX_MIME_TYPE || IMAGE_MIME_TYPES.has(normalized) || TEXT_MIME_TYPES.has(normalized) || RTF_MIME_TYPES.has(normalized);
 }
 function missingBytesFailure() {
   return { status: "failed_terminal", errorKind: "extractor_input_missing_bytes" };
@@ -95121,6 +95414,7 @@ function extractDelimitedText(input) {
 }
 var TEXT_EXTRACTOR_KIND = "local_text", TEXT_EXTRACTOR_VERSION = "2026-05-22", DEFAULT_PDF_TEXT_TIMEOUT_MS = 120000, TEMP_DIR_PREFIX3 = "olympus-extraction-pdf-text-", DOCUMENT_BODY_LABEL = "document body", IMAGE_MEDIA_DESCRIPTOR = "Photo", IMAGE_MEDIA_VERSION_SUFFIX = ".image-media-2026-10-07", IMAGE_OCR_VERSION_SUFFIX = ".image-ocr-2026-10-12", OCR_UNAVAILABLE_PDF_WARNING = "ocr_unavailable_pdf", OCR_UNAVAILABLE_IMAGE_WARNING = "ocr_unavailable_image", OCR_FAILED_IMAGE_WARNING = "ocr_failed_image";
 var init_text = __esm(() => {
+  init_rtf();
   init_bounded_text();
   init_command_runner();
   init_document_formats();
@@ -183858,7 +184152,7 @@ var init_live_sync3 = __esm(() => {
   AUTH_KINDS = new Set(["auth_missing", "auth_expired", "auth_revoked"]);
 });
 
-// src/workers/email-source/index.ts
+// src/workers/engine/index.ts
 import { createHash as createHash99, randomBytes as randomBytes32, timingSafeEqual as timingSafeEqual9 } from "node:crypto";
 import { readFileSync as readFileSync95, statSync as statSync44 } from "node:fs";
 import { homedir as homedir47 } from "node:os";
@@ -188881,7 +189175,7 @@ function mostPrivateTrustDomain(domains) {
   return "public_safe";
 }
 var CONNECTOR_STORE_FILTER_CAPABILITIES, EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL = "No email account is connected yet. Connect Gmail from the Olympus dashboard to enable email answers.", EmailSourceWorkerError, DASHBOARD_SETTINGS_PROPOSAL_APPLY_PATH = "/dashboard/settings/proposal/apply", DASHBOARD_SETTINGS_PROPOSAL_DISCARD_PATH = "/dashboard/settings/proposal/discard", DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000, DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30, DASHBOARD_UNPAIR_SOURCE_IDS, DASHBOARD_EVERNOTE_SIGN_IN_TTL_MS = 600000, CHATGPT_RETURN_TO = "https://chatgpt.com/", DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000, DASHBOARD_DEFAULT_ENGINE_PORT = 8010;
-var init_email_source = __esm(() => {
+var init_engine2 = __esm(() => {
   init_judge_spending();
   init_people();
   init_source_failure();
@@ -204108,6 +204402,16 @@ function createArchiveImportDashboard(options) {
           resumeOne(request.request_id);
         } catch {}
       }
+    },
+    frontChanged() {
+      api2.resume();
+      refresh();
+      let removing2 = false;
+      try {
+        removing2 = state.list().some((record8) => record8.status === "removing");
+      } catch {}
+      if (removing2)
+        wakeScheduler();
     },
     idle: () => checks4,
     close() {
@@ -234564,7 +234868,7 @@ var init_private_agent_listeners = __esm(() => {
   init_first_run_privacy_gate();
 });
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 var exports_server2 = {};
 __export(exports_server2, {
   workerTierLedgerProblem: () => workerTierLedgerProblem,
@@ -235790,10 +236094,8 @@ function replaceEmptyAccountsAtBoot(env) {
 }
 function workerTierLedgerProblem(storePaths, readOnly = false) {
   try {
-    for (const path of storePaths) {
+    for (const path of storePaths)
       assertStoreTierLedgerCanOpen(path, readOnly);
-      TierLedger.assertSchemaCanOpen(tieredStoreSetLedgerPath(path), readOnly);
-    }
     return;
   } catch (error2) {
     if (error2 instanceof TierLedgerSchemaError)
@@ -237408,12 +237710,20 @@ ${key2}`;
     },
     onStoreOpened: (store) => registerTierLegStore(store, store.corpusId, store.trustDomain === "secure_local" ? tierSecureEmbeddingProvider ?? null : sourceIndexEmbeddingProvider ?? null)
   });
+  const mountArchiveLanes = () => {
+    try {
+      if (sourceAccountMountable({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }))
+        archiveImports.existingLanes();
+      tierLedgerProblems.delete(ARCHIVE_IMPORTS_SOURCE_ID2);
+    } catch (error2) {
+      if (error2 instanceof TierLedgerSchemaError)
+        tierLedgerProblems.set(ARCHIVE_IMPORTS_SOURCE_ID2, error2.message);
+      throw error2;
+    }
+  };
   try {
-    if (sourceAccountMountable({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }))
-      archiveImports.existingLanes();
+    mountArchiveLanes();
   } catch (error2) {
-    if (error2 instanceof TierLedgerSchemaError)
-      tierLedgerProblems.set(ARCHIVE_IMPORTS_SOURCE_ID2, error2.message);
     console.warn(`[archive-import] imported archives are not served this run: ${error2 instanceof Error ? error2.message : "error"}`);
   }
   const evernote = createEvernoteRuntime({
@@ -237447,7 +237757,7 @@ ${key2}`;
     if (sourceAccountMountable({ sourceId: EVERNOTE_SOURCE_ID }) && sourceTierLedgerReady(EVERNOTE_SOURCE_ID))
       evernote.existingLane();
   } catch (error2) {
-    console.warn(`[evernote] the Evernote stores are not served this run: ${error2 instanceof Error ? error2.name : "error"}`);
+    console.warn(`[evernote] the Evernote stores are not served this run: ${error2 instanceof Error ? error2.message : "error"}`);
   }
   const archiveExtraction = createArchiveExtractionRuntime({
     runtime: archiveImports,
@@ -238348,10 +238658,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const refreshFrontMounts = () => {
     const reads = [
       () => mountSourceLanes(activeLaneHandles(readActiveConnectedHandles(process.env), process.env)),
-      () => {
-        if (sourceAccountMountable({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }))
-          archiveImports.existingLanes();
-      },
+      mountArchiveLanes,
       openTierStoresThatExist
     ];
     for (const read of reads) {
@@ -240018,8 +240325,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           return { reloaded: target, ...target === "scope" ? { invalidated_jobs: invalidated } : {} };
         },
         archive_changed: () => {
-          archiveImportDashboard.resume();
-          refreshSchedulerSources();
+          archiveImportDashboard.frontChanged();
           return { resumed: true };
         },
         dashboard_samples: ({ samples }) => {
@@ -240903,7 +241209,7 @@ var init_server5 = __esm(async () => {
   init_venice_client();
   init_openai_compatible_client();
   init_apple_vision_ocr();
-  init_email_source();
+  init_engine2();
   init_analyst_answer();
   init_answer_latency_log();
   init_status();
