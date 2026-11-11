@@ -20847,6 +20847,11 @@ var init_provider = __esm(() => {
   PICTURE_HOLD_MS = 60 * 60000;
 });
 
+// src/workers/connector-store/tier-auto-move.ts
+var init_tier_auto_move = __esm(() => {
+  init_provider();
+});
+
 // src/workers/connector-store/tier-row-rehome.ts
 var MOVE_WHY;
 var init_tier_row_rehome = __esm(() => {
@@ -20938,6 +20943,7 @@ var init_tiered_store_set = __esm(() => {
   init_tier_content_purge();
   init_tier_auto_prune_sweep();
   init_tier_move();
+  init_tier_auto_move();
   init_tier_row_rehome();
   init_tier_rules_sweep();
   init_tier_override_settle();

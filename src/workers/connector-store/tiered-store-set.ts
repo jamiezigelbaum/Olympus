@@ -24,7 +24,8 @@
 //   index.
 // - A routed item whose new decision needs other stores is QUEUED as a move
 //   (hidden first on a raise). A cached content verdict's lowering finishes
-//   within the sync after its new body lands; tier-move.ts verifies the move.
+//   within the sync after its new body lands when automatic moves are enabled;
+//   tier-move.ts verifies the move.
 //
 // Phase P1c adds, each declared by the lane and source-neutral:
 // - `contentArrivesLater`: a lane whose text a later reader supplies (the
@@ -109,7 +110,7 @@ import {
   resolveStoreTierClassification,
   type ConnectorStoreTierClassification,
 } from './tier-placement.ts';
-import { registerTierSetPlanner } from '../classification/installed-tier-classification-registry.ts';
+import { registerTierSetPlanner, registeredInstalledTierClassification, type AutomaticTierMoveContext } from '../classification/installed-tier-classification-registry.ts';
 import { registerTierSetForLedger } from './tier-set-registry.ts';
 import { forgetSecretInSideStores, retireSecretRedactions, secretsDisposition } from './secrets-disposition.ts';
 import { parentNamesContext } from './parent-context.ts';
@@ -125,6 +126,7 @@ import { settlePersonalFirstItems } from './tier-held-settle.ts';
 import { purgeLowerTierContent } from './tier-content-purge.ts';
 import { sweepAutomaticSupersededCopies } from './tier-auto-prune-sweep.ts';
 import { flushTierMoveNotes, moveTieredItem, type TierMoveOptions } from './tier-move.ts';
+import { automaticTierMoveOptions, automaticTierMovesAllowed } from './tier-auto-move.ts';
 
 export const LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60_000;
 import { rehomePrivateTierRows, type TierRowRehomeReport } from './tier-row-rehome.ts';
@@ -195,6 +197,8 @@ export interface TieredStoreLegSpec {
 }
 
 export interface TieredStoreSetOptions {
+  /** Optional inline move authority; defaults to the engine's installed context. */
+  automaticMoveContext?: AutomaticTierMoveContext;
   /** Stable id for this set's resume points (e.g. provider plus account). */
   setId: string;
   /** The set ledger: the one visibility authority for every leg. */
@@ -295,6 +299,7 @@ interface PlanEntry {
 
 export class TieredStoreSet {
   readonly setId: string;
+  readonly automaticMoveContext: AutomaticTierMoveContext | undefined;
   readonly ledger: TierLedger;
   private readonly legs: Map<SourceTrustDomain, { spec: TieredStoreLegSpec; store: LocalConnectorStore | undefined }>;
   private readonly splitLayers: boolean;
@@ -315,6 +320,7 @@ export class TieredStoreSet {
     this.lastLowerContentRepairAt = Number.NEGATIVE_INFINITY;
     if (!options.setId.trim()) throw new Error('A tiered store set needs a stable id.');
     this.setId = options.setId;
+    this.automaticMoveContext = options.automaticMoveContext ?? registeredInstalledTierClassification()?.automaticMoveContext;
     this.ledger = options.ledger;
     this.splitLayers = options.splitLayers !== false;
     this.tierClassification = options.tierClassification;
@@ -1795,9 +1801,13 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     this.pendingWithdrawals.clear();
     for (const move of this.cachedLowerings.values()) {
       await ingestionTurn();
+      // Without automatic-move authority, leave this queued for the executor.
+      const context = this.set.automaticMoveContext;
+      if (!context || !automaticTierMovesAllowed(this.set, context)) continue;
       // The normal mover checks the complete stored-text digest again under
       // its generation fence, then verifies the destination before release.
-      await moveTieredItem({ set: this.set, identity: move.identity, target: move.target, expectedGeneration: move.generation });
+      await moveTieredItem({ set: this.set, identity: move.identity, target: move.target,
+        ...automaticTierMoveOptions(this.set, context), expectedGeneration: move.generation });
     }
     this.cachedLowerings.clear();
     for (const identity of this.copyRemovals.values()) {

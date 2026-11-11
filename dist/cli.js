@@ -70534,6 +70534,57 @@ var init_provider = __esm(() => {
   };
 });
 
+// src/workers/connector-store/tier-auto-move.ts
+function automaticTierMoveOptions(set, context2) {
+  return {
+    replaceOwnSupersededCopy: true,
+    vectorIdentitiesFor: (exported) => matchingVectorIdentities(set, exported),
+    embeddingLedger: { path: context2.embeddingLedgerPath, approvedBy: "system-automatic", why: AUTO_MOVE_WHY }
+  };
+}
+function automaticTierMovesAllowed(set, context2) {
+  try {
+    return context2 !== undefined && context2.localEmbeddingsOnly() && setEmbedsWithBuiltInOnly(set);
+  } catch {
+    return false;
+  }
+}
+function matchingVectorIdentities(set, exported) {
+  const identities = {};
+  for (const domain of ["public_safe", "internal", "secure_local"]) {
+    try {
+      const store = set.store(domain);
+      if (!store)
+        continue;
+      const configured = domain === "secure_local" ? set.privateEmbeddingProvider() : set.legSpec(domain)?.embeddingProvider;
+      const candidates = configured ? [configured] : store.embeddingAuthorities();
+      const own3 = candidates.find((authority) => exported.vectorAuthorities.some((minted) => minted.modelId === authority.modelId && minted.provider === authority.provider && minted.backend === authority.backend && minted.dimension === authority.dimension && minted.epochId === authority.epochId));
+      if (!own3 || own3.backend !== "local" && own3.backend !== "cloud")
+        continue;
+      identities[domain] = {
+        modelId: own3.modelId,
+        provider: own3.provider,
+        backend: own3.backend,
+        dimension: own3.dimension,
+        epochId: own3.epochId,
+        configHash: own3.configHash ?? ""
+      };
+    } catch {}
+  }
+  return identities;
+}
+function setEmbedsWithBuiltInOnly(set) {
+  try {
+    return set.openStores().every((store) => store.embeddingAuthorities().every((authority) => authority.provider === BUILT_IN_EMBEDDING_PROVIDER));
+  } catch {
+    return false;
+  }
+}
+var AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
+var init_tier_auto_move = __esm(() => {
+  init_provider();
+});
+
 // src/workers/connector-store/tier-row-rehome.ts
 function emptyTierRowRehomeReport() {
   return { examined: 0, adopted: 0, queued: 0, moved: 0, failed: 0, skipped: 0, guardedStores: 0, awaitingMigration: 0, refused: 0, receiptsReplayed: 0 };
@@ -70739,7 +70790,7 @@ async function runQueuedMoves(options, report, found) {
   } catch {
     return;
   }
-  const builtInOnly = setEmbedsWithBuiltInOnly(set);
+  const builtInOnly = setEmbedsWithBuiltInOnly2(set);
   const embeddingLedgerPath = options.embeddingLedgerPath ?? resolveEmbeddingLedgerPath(process.env);
   const refused = readRefused(ledger);
   const maxLooked = Math.max(1, options.maxLooked ?? DEFAULT_ROW_REHOME_LOOKED);
@@ -70891,7 +70942,7 @@ function openQuestion(record) {
 function forced(record) {
   return record.metadataForced || record.decidedBy === "override";
 }
-function setEmbedsWithBuiltInOnly(set) {
+function setEmbedsWithBuiltInOnly2(set) {
   try {
     return set.openStores().every((store) => store.embeddingAuthorities().every((authority) => authority.provider === BUILT_IN_EMBEDDING_PROVIDER));
   } catch {
@@ -72287,6 +72338,7 @@ function openSetLedger(dbPath) {
 
 class TieredStoreSet {
   setId;
+  automaticMoveContext;
   ledger;
   legs;
   splitLayers;
@@ -72306,6 +72358,7 @@ class TieredStoreSet {
     if (!options.setId.trim())
       throw new Error("A tiered store set needs a stable id.");
     this.setId = options.setId;
+    this.automaticMoveContext = options.automaticMoveContext ?? registeredInstalledTierClassification()?.automaticMoveContext;
     this.ledger = options.ledger;
     this.splitLayers = options.splitLayers !== false;
     this.tierClassification = options.tierClassification;
@@ -73240,7 +73293,16 @@ class TieredRoutingRun {
     this.pendingWithdrawals.clear();
     for (const move of this.cachedLowerings.values()) {
       await ingestionTurn();
-      await moveTieredItem({ set: this.set, identity: move.identity, target: move.target, expectedGeneration: move.generation });
+      const context2 = this.set.automaticMoveContext;
+      if (!context2 || !automaticTierMovesAllowed(this.set, context2))
+        continue;
+      await moveTieredItem({
+        set: this.set,
+        identity: move.identity,
+        target: move.target,
+        ...automaticTierMoveOptions(this.set, context2),
+        expectedGeneration: move.generation
+      });
     }
     this.cachedLowerings.clear();
     for (const identity2 of this.copyRemovals.values()) {
@@ -73666,6 +73728,7 @@ var init_tiered_store_set = __esm(() => {
   init_tier_content_purge();
   init_tier_auto_prune_sweep();
   init_tier_move();
+  init_tier_auto_move();
   init_tier_row_rehome();
   init_tier_rules_sweep();
   init_tier_override_settle();
@@ -210507,6 +210570,7 @@ var init_source_account_guard = __esm(() => {
 // src/workers/classification/installed-tier-classification.ts
 class InstalledTierClassification {
   lane;
+  automaticMoveContext;
   retirePublic;
   ownerContext;
   env;
@@ -210517,6 +210581,7 @@ class InstalledTierClassification {
   rulesInvalid = false;
   constructor(options = {}) {
     this.env = options.env ?? process.env;
+    this.automaticMoveContext = options.automaticMoveContext;
     this.lane = options.lane;
     this.retirePublic = options.retirePublic === true;
     this.ownerContext = options.ownerContext;
@@ -211312,7 +211377,7 @@ class TierSnifferService {
     for (const ledgerPath of this.ledgerPaths()) {
       try {
         const set2 = tierSetForLedger(ledgerPath);
-        if (!set2 || !setEmbedsWithBuiltInOnly2(set2))
+        if (!set2 || !setEmbedsWithBuiltInOnly(set2))
           continue;
       } catch {
         continue;
@@ -212155,7 +212220,7 @@ class TierSnifferService {
         return false;
       try {
         const set2 = tierSetForLedger(path);
-        if (!set2 || !setEmbedsWithBuiltInOnly2(set2))
+        if (!set2 || !setEmbedsWithBuiltInOnly(set2))
           continue;
         for (const record8 of set2.ledger.listMoving({ limit: budget, direction: "raise" }).filter(isAutoMoveCandidate)) {
           budget--;
@@ -212317,13 +212382,7 @@ class TierSnifferService {
   }
   autoMovesFor(set2) {
     const options = this.options.autoMoves;
-    if (!options)
-      return false;
-    try {
-      return options.localEmbeddingsOnly() && setEmbedsWithBuiltInOnly2(set2);
-    } catch {
-      return false;
-    }
+    return automaticTierMovesAllowed(set2, options);
   }
   async runAutoMoves(options, signal, direction) {
     const timings = emptyTierMoveTimings();
@@ -212356,7 +212415,7 @@ class TierSnifferService {
       if (!set2)
         continue;
       const queued = set2.ledger.listMoving({ limit: budget, direction }).filter(isAutoMoveCandidate);
-      if (!setEmbedsWithBuiltInOnly2(set2)) {
+      if (!setEmbedsWithBuiltInOnly(set2)) {
         report.notEligible += queued.length;
         continue;
       }
@@ -212413,10 +212472,8 @@ class TierSnifferService {
             set: set2,
             identity: identity2,
             target: { metadataTier: record8.targetMetadataTier, contentTier: record8.targetContentTier },
-            vectorIdentitiesFor: (exported) => matchingVectorIdentities(set2, exported),
+            ...automaticTierMoveOptions(set2, options),
             timings,
-            embeddingLedger: { path: options.embeddingLedgerPath, approvedBy: "system-automatic", why: AUTO_MOVE_WHY },
-            replaceOwnSupersededCopy: true,
             expectedGeneration: record8.generation
           } });
         }
@@ -212519,39 +212576,8 @@ function recordIdentity2(record8) {
 function isBuiltInLane(lane) {
   return lane.kind === BUILT_IN_SNIFFER_LANE.kind && lane.profileId === BUILT_IN_SNIFFER_LANE.profileId && lane.modelId === BUILT_IN_SNIFFER_LANE.modelId;
 }
-function matchingVectorIdentities(set2, exported) {
-  const identities = {};
-  for (const domain of ["public_safe", "internal", "secure_local"]) {
-    try {
-      const store = set2.store(domain);
-      if (!store)
-        continue;
-      const configured = domain === "secure_local" ? set2.privateEmbeddingProvider() : set2.legSpec(domain)?.embeddingProvider;
-      const candidates = configured ? [configured] : store.embeddingAuthorities();
-      const own3 = candidates.find((authority) => exported.vectorAuthorities.some((minted) => minted.modelId === authority.modelId && minted.provider === authority.provider && minted.backend === authority.backend && minted.dimension === authority.dimension && minted.epochId === authority.epochId));
-      if (!own3 || own3.backend !== "local" && own3.backend !== "cloud")
-        continue;
-      identities[domain] = {
-        modelId: own3.modelId,
-        provider: own3.provider,
-        backend: own3.backend,
-        dimension: own3.dimension,
-        epochId: own3.epochId,
-        configHash: own3.configHash ?? ""
-      };
-    } catch {}
-  }
-  return identities;
-}
 function isAutoMoveCandidate(record8) {
   return record8.routed && record8.targetMetadataTier !== null && record8.targetContentTier !== null && record8.targetMetadataTier !== "secrets" && record8.targetContentTier !== "secrets";
-}
-function setEmbedsWithBuiltInOnly2(set2) {
-  try {
-    return set2.openStores().every((store) => store.embeddingAuthorities().every((authority) => authority.provider === BUILT_IN_EMBEDDING_PROVIDER));
-  } catch {
-    return false;
-  }
 }
 function tierSnifferServiceEnv(env) {
   const enabledRaw = env.OLYMPUS_TIER_SNIFFER_ENABLED?.trim().toLowerCase();
@@ -212576,7 +212602,7 @@ function moveFailureName(error2) {
     return error2.name || error2.constructor.name || "Error";
   return /^[a-z][a-z ]{0,39}$/.test(error2.message) ? error2.message : "Error";
 }
-var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, NOT_ANSWERING_FIRST_BACKOFF_MS = 30000, NOT_ANSWERING_MAX_BACKOFF_MS = 60000, GLOBAL_TIMERS, MISSING_QUESTION_RECOVERY_PHASE_MS = 25, DEFAULT_AUTO_MOVES_PER_PASS = 1000, DEFAULT_LOWER_MOVE_SLICE_MS = 1000, MAX_LOWER_MOVE_SLICE_MS = 1e4, DEFAULT_LOWER_MOVE_BATCH_MS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, EXTRACTION_ENQUEUE_GRACE_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_CLASSIFICATION_FAIR_TURN_MS = 60000, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", MOVES_SCAN_BOUND = 2000, BACKLOG_EXACT_ROWS = 20000, BACKLOG_REFRESH_MS = 60000, BACKLOG_SLICE_ROWS = 5000, AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
+var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, NOT_ANSWERING_FIRST_BACKOFF_MS = 30000, NOT_ANSWERING_MAX_BACKOFF_MS = 60000, GLOBAL_TIMERS, MISSING_QUESTION_RECOVERY_PHASE_MS = 25, DEFAULT_AUTO_MOVES_PER_PASS = 1000, DEFAULT_LOWER_MOVE_SLICE_MS = 1000, MAX_LOWER_MOVE_SLICE_MS = 1e4, DEFAULT_LOWER_MOVE_BATCH_MS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, EXTRACTION_ENQUEUE_GRACE_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_CLASSIFICATION_FAIR_TURN_MS = 60000, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", MOVES_SCAN_BOUND = 2000, BACKLOG_EXACT_ROWS = 20000, BACKLOG_REFRESH_MS = 60000, BACKLOG_SLICE_ROWS = 5000;
 var init_sniffer_service = __esm(() => {
   init_tier_move();
   init_control_path_headroom();
@@ -212584,7 +212610,7 @@ var init_sniffer_service = __esm(() => {
   init_classification_ledger();
   init_secrets_disposition();
   init_tier_move();
-  init_provider();
+  init_tier_auto_move();
   init_built_in_sniffer();
   init_sniffer();
   init_sniffer_resolver();
@@ -239203,7 +239229,15 @@ async function main() {
   }
   const publicTierRetired = isPublicTierRetired(sovereigntyEngine.config);
   const privacyOwnerWords = () => privacyOwnerContext({ env: process.env });
+  const automaticMoveContext = {
+    localEmbeddingsOnly: () => ["public_safe", "internal", "secure_local"].every((domain) => {
+      const resolved = sovereigntyEngine.resolveEmbeddingProfile(domain);
+      return resolved === undefined || resolved.profile.provider === "built-in";
+    }),
+    embeddingLedgerPath: resolveEmbeddingLedgerPath(process.env)
+  };
   const installedTierClassification = configureInstalledTierClassification({
+    automaticMoveContext,
     env: process.env,
     ...snifferLane ? { lane: snifferLane } : {},
     ...publicTierRetired ? { retirePublic: true } : {},
@@ -243288,13 +243322,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     breakerOpen: () => secureAnalystPoolState.isBreakerOpen("secure_local", snifferLane.profileId),
     log: (line2) => console.log(line2),
     ...snifferRuntime.source === "built_in" ? { autoApproveBuiltIn: true } : {},
-    autoMoves: {
-      localEmbeddingsOnly: () => ["public_safe", "internal", "secure_local"].every((domain) => {
-        const resolved = sovereigntyEngine.resolveEmbeddingProfile(domain);
-        return resolved === undefined || resolved.profile.provider === "built-in";
-      }),
-      embeddingLedgerPath: resolveEmbeddingLedgerPath(process.env)
-    }
+    autoMoves: automaticMoveContext
   }) : undefined;
   if (tierSniffer && snifferResource) {
     localModelActivity.onBusy(snifferResource, () => tierSniffer.preempt());

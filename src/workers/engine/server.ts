@@ -710,7 +710,15 @@ export async function main(): Promise<void> {
   // A policy with no Public tier (fresh installs): Public verdicts are Personal.
   const publicTierRetired = isPublicTierRetired(sovereigntyEngine.config);
   const privacyOwnerWords = (): string | undefined => privacyOwnerContext({ env: process.env });
+  const automaticMoveContext = {
+    localEmbeddingsOnly: () => (['public_safe', 'internal', 'secure_local'] as const).every((domain) => {
+      const resolved = sovereigntyEngine.resolveEmbeddingProfile(domain);
+      return resolved === undefined || resolved.profile.provider === 'built-in';
+    }),
+    embeddingLedgerPath: resolveEmbeddingLedgerPath(process.env),
+  };
   const installedTierClassification = configureInstalledTierClassification({
+    automaticMoveContext,
     env: process.env,
     ...(snifferLane ? { lane: snifferLane } : {}),
     ...(publicTierRetired ? { retirePublic: true } : {}),
@@ -6068,13 +6076,7 @@ export async function main(): Promise<void> {
         // for the sniffer by default, and a Personal verdict's queued move
         // runs at once while every embedding is the built-in local model.
         ...(snifferRuntime.source === 'built_in' ? { autoApproveBuiltIn: true } : {}),
-        autoMoves: {
-          localEmbeddingsOnly: () => (['public_safe', 'internal', 'secure_local'] as const).every((domain) => {
-            const resolved = sovereigntyEngine.resolveEmbeddingProfile(domain);
-            return resolved === undefined || resolved.profile.provider === 'built-in';
-          }),
-          embeddingLedgerPath: resolveEmbeddingLedgerPath(process.env),
-        },
+        autoMoves: automaticMoveContext,
       })
     : undefined;
   if (tierSniffer && snifferResource) {
