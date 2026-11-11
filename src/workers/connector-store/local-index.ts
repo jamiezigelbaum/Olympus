@@ -2964,6 +2964,32 @@ interface SyncRunRow {
   completed_at: string | null;
 }
 
+// Read-only opens cannot migrate, so they accept every schema from the v7
+// filter columns forward.
+const READ_ONLY_MIN_SCHEMA_VERSION = 7;
+
+/**
+ * Whether a read-only open of the store at `dbPath` would find a schema now:
+ * the file exists as a regular file and its writer has recorded a schema a
+ * read-only open accepts. The engine split's front asks this before it mounts
+ * a store the background may still be creating. Never creates or changes the
+ * file.
+ */
+export function connectorStoreReadableNow(dbPath: string): boolean {
+  let db: Database | undefined;
+  try {
+    const stat = lstatSync(dbPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) return false;
+    db = new Database(dbPath, { readonly: true, create: false, strict: true });
+    db.exec('PRAGMA busy_timeout = 10000;');
+    return readSqliteSchemaVersion(db, SQLITE_STORE_ID) >= READ_ONLY_MIN_SCHEMA_VERSION;
+  } catch {
+    return false;
+  } finally {
+    db?.close();
+  }
+}
+
 export class LocalConnectorStore {
   readonly dbPath: string;
   /** The file this store opened, so a later delete or replace of it is seen. */
@@ -3095,10 +3121,9 @@ export class LocalConnectorStore {
       validateCurrentConnectorStoreSchemaBeforeMigration(this.db);
       if (options.readOnly === true) {
         const version = readSqliteSchemaVersion(this.db, SQLITE_STORE_ID);
-        // Read-only opens cannot migrate, so they accept every schema from the
-        // v7 filter columns forward. Anything newer than this build already
-        // failed assertSqliteSchemaCanOpen above.
-        if (version < 7) {
+        // Anything newer than this build already failed
+        // assertSqliteSchemaCanOpen above.
+        if (version < READ_ONLY_MIN_SCHEMA_VERSION) {
           throw new Error('Connector store read-only mode requires the v7 filter schema or newer.');
         }
       } else {

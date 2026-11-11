@@ -35166,6 +35166,21 @@ function connectorStoreCurrentEmbeddingPageQuery(options, afterChunkPk, limit = 
     ]
   };
 }
+function connectorStoreReadableNow(dbPath) {
+  let db;
+  try {
+    const stat2 = lstatSync19(dbPath);
+    if (!stat2.isFile() || stat2.isSymbolicLink())
+      return false;
+    db = new Database8(dbPath, { readonly: true, create: false, strict: true });
+    db.exec("PRAGMA busy_timeout = 10000;");
+    return readSqliteSchemaVersion(db, SQLITE_STORE_ID) >= READ_ONLY_MIN_SCHEMA_VERSION;
+  } catch {
+    return false;
+  } finally {
+    db?.close();
+  }
+}
 async function syncAndEmbedFromConnector(options) {
   const localItemIds = new Set;
   const connector = {
@@ -37824,7 +37839,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, READ_ONLY_MIN_SCHEMA_VERSION = 7, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_store_write_guard();
   init_job_names();
@@ -38030,7 +38045,7 @@ var init_local_index = __esm(() => {
         validateCurrentConnectorStoreSchemaBeforeMigration(this.db);
         if (options.readOnly === true) {
           const version = readSqliteSchemaVersion(this.db, SQLITE_STORE_ID);
-          if (version < 7) {
+          if (version < READ_ONLY_MIN_SCHEMA_VERSION) {
             throw new Error("Connector store read-only mode requires the v7 filter schema or newer.");
           }
         } else {
@@ -236089,25 +236104,40 @@ ${key2}`;
   const telegramSpoolChanges = createSpoolChangeSubscription(defaultTelegramCaptureSpoolDir(process.env));
   const whatsappSpoolChanges = createSpoolChangeSubscription(defaultWhatsAppSpoolDir(process.env));
   const telegramCaptureMaxItems = parseOptionalPositiveInteger(process.env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS, "OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS");
+  let frontLanesWaiting = false;
+  const storeAt = (sourceId, domain) => resolvedStorePath(sourceId, domain, process.env);
+  const frontCanMount = (paths) => {
+    if (paths.every(connectorStoreReadableNow))
+      return true;
+    frontLanesWaiting = true;
+    return false;
+  };
   const mountSourceLanes = (handles) => {
     if (sourceRuntimeClosed)
       return;
     const connected2 = (provider, capability) => activeCredentialHandle(handles, { provider, capability }) !== undefined;
-    if (!gmailInternalConnectorStore && gmailConnectorStoreLane.enabled && (sourceHasStores(GMAIL_SOURCE_ID) || connected2("gmail", "gmail.email.sync")))
+    frontLanesWaiting = false;
+    const wanted = (sourceId, connectedNow, paths) => {
+      if (!sourceHasStores(sourceId) && !connectedNow)
+        return false;
+      return !engineFront || frontCanMount(paths);
+    };
+    const both = (sourceId) => [storeAt(sourceId, "internal"), storeAt(sourceId, "secure_local")];
+    if (!gmailInternalConnectorStore && gmailConnectorStoreLane.enabled && wanted(GMAIL_SOURCE_ID, connected2("gmail", "gmail.email.sync"), both(GMAIL_SOURCE_ID)))
       mountGmail();
-    if (!googleDriveInternalConnectorStore && googleDriveConnectorStoreLane.enabled && (sourceHasStores(GOOGLE_DRIVE_SOURCE_ID) || connected2("google_drive", "google_drive.docs.sync")))
+    if (!googleDriveInternalConnectorStore && googleDriveConnectorStoreLane.enabled && wanted(GOOGLE_DRIVE_SOURCE_ID, connected2("google_drive", "google_drive.docs.sync"), both(GOOGLE_DRIVE_SOURCE_ID)))
       mountGoogleDrive();
-    if (!dropboxConnectorStore && dropboxConnectorStoreLane.enabled && (sourceHasStores(DROPBOX_FILES_SOURCE_ID) || connected2("dropbox", "dropbox.files.sync")))
+    if (!dropboxConnectorStore && dropboxConnectorStoreLane.enabled && wanted(DROPBOX_FILES_SOURCE_ID, connected2("dropbox", "dropbox.files.sync"), [storeAt(DROPBOX_FILES_SOURCE_ID, "secure_local")]))
       mountDropbox();
-    if (!localFilesConnectorStore && localFilesConnectorStoreLane.enabled && (sourceHasStores(LOCAL_FILES_SOURCE_ID) || fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID)))
+    if (!localFilesConnectorStore && localFilesConnectorStoreLane.enabled && wanted(LOCAL_FILES_SOURCE_ID, fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID) !== undefined, [storeAt(LOCAL_FILES_SOURCE_ID, "secure_local")]))
       mountLocalFiles();
-    if (!whatsappConnectorStore && whatsappConnectorStoreLane.enabled && (sourceHasStores(WHATSAPP_PERSONAL_SOURCE_ID) || connected2("whatsapp_personal", "whatsapp.personal.messages.sync")))
+    if (!whatsappConnectorStore && whatsappConnectorStoreLane.enabled && wanted(WHATSAPP_PERSONAL_SOURCE_ID, connected2("whatsapp_personal", "whatsapp.personal.messages.sync"), [storeAt(WHATSAPP_PERSONAL_SOURCE_ID, "secure_local")]))
       mountWhatsApp();
-    if (!telegramConnectorStores && telegramConnectorStoreLane.enabled && (sourceHasStores(TELEGRAM_MESSAGES_SOURCE_ID) || connected2("telegram", "telegram.messages.sync")))
+    if (!telegramConnectorStores && telegramConnectorStoreLane.enabled && wanted(TELEGRAM_MESSAGES_SOURCE_ID, connected2("telegram", "telegram.messages.sync"), both(TELEGRAM_MESSAGES_SOURCE_ID)))
       mountTelegram();
-    if (!readwiseConnectorStore && readwiseConnectorStoreLane.enabled && (sourceHasStores(READWISE_SOURCE_ID) || connected2("readwise", "readwise.sync")))
+    if (!readwiseConnectorStore && readwiseConnectorStoreLane.enabled && wanted(READWISE_SOURCE_ID, connected2("readwise", "readwise.sync"), [storeAt(READWISE_SOURCE_ID, "internal")]))
       mountReadwise();
-    if (!xBookmarksConnectorStore && xBookmarksConnectorStoreLane.enabled && (sourceHasStores(X_BOOKMARKS_SOURCE_ID) || connected2("x", "x.bookmarks.sync")))
+    if (!xBookmarksConnectorStore && xBookmarksConnectorStoreLane.enabled && wanted(X_BOOKMARKS_SOURCE_ID, connected2("x", "x.bookmarks.sync"), [storeAt(X_BOOKMARKS_SOURCE_ID, "internal")]))
       mountXBookmarks();
     mountConfiguredSourceStores();
   };
@@ -236760,12 +236790,17 @@ ${key2}`;
   if (readwiseConnectorStore) {
     connectorStoreAccountScopes.set(readwiseConnectorStore.corpusId, sourceIndexAccount?.trim() || "personal");
   }
-  for (const lane of tierLanes) {
-    for (const store of lane.onDemand) {
-      if (store.exists())
-        store.open();
+  const openTierStoresThatExist = () => {
+    for (const lane of tierLanes) {
+      for (const store of lane.onDemand) {
+        if (store.current())
+          continue;
+        if (engineFront ? connectorStoreReadableNow(store.dbPath) : store.exists())
+          store.open();
+      }
     }
-  }
+  };
+  openTierStoresThatExist();
   const createGmailConnectorStoreSyncForHandle = (handle) => {
     const scopeRef = handle && fileSourceScopeAuthority ? fileSourceScopeAuthority.mailPolicyRef() : undefined;
     const approval = scopeRef && fileSourceScopeAuthority ? fileSourceScopeAuthority.assertCurrentMail(scopeRef) : undefined;
@@ -237111,7 +237146,7 @@ ${key2}`;
       capability: "x.bookmarks.sync",
       handles: readActiveConnectedHandles(process.env)
     });
-    if (handle)
+    if (handle && (!engineFront || frontCanMount([storeAt(X_BOOKMARKS_SOURCE_ID, "internal")])))
       mountXBookmarks();
     const runtime = refreshableXBookmarksRuntime?.runtimeForHandle(handle);
     if (!runtime)
@@ -237121,7 +237156,7 @@ ${key2}`;
     return guard ? accountCheckedXBookmarksRuntime(runtime, guard) : runtime;
   };
   const readwiseSyncForHandle = (handle) => {
-    if (handle)
+    if (handle && (!engineFront || frontCanMount([storeAt(READWISE_SOURCE_ID, "internal")])))
       mountReadwise();
     const sync = refreshableReadwiseRuntime?.syncForHandle(handle);
     if (sync && readwiseConnectorStore) {
@@ -239125,6 +239160,16 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     localModelActivity.onBusy(snifferResource, () => relay.busy(snifferResource));
     localModelActivity.onIdle(snifferResource, () => relay.idle(snifferResource));
   }
+  const frontMountRetry = engineFront ? setInterval(() => {
+    try {
+      if (frontLanesWaiting)
+        mountSourceLanes(activeLaneHandles(readActiveConnectedHandles(process.env), process.env));
+      openTierStoresThatExist();
+    } catch (error2) {
+      console.warn(`[olympus] the front could not open a source's stores yet: ${error2 instanceof Error ? error2.message : String(error2)}`);
+    }
+  }, 2000) : undefined;
+  frontMountRetry?.unref?.();
   if (engineFront) {
     const judge3 = frontJudgeState(() => engineFront.status());
     classificationBusy = judge3.busy;
@@ -239347,6 +239392,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     waitingStore = undefined;
     fileExtractionRuntime?.close();
     engineBackground?.stop();
+    if (frontMountRetry)
+      clearInterval(frontMountRetry);
     engineFront?.stop();
     server?.stop();
   };
