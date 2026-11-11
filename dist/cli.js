@@ -22631,6 +22631,13 @@ class TierLedger {
     try {
       closeSqliteStore(this.db, { checkpoint: !this.readOnly });
     } finally {
+      const listeners = this.closeListeners ?? [];
+      this.closeListeners = undefined;
+      for (const listener of listeners) {
+        try {
+          listener();
+        } catch {}
+      }
       if (!this.readOnly && this.dbPath !== ":memory:")
         restrictLedgerFiles(this.dbPath);
     }
@@ -24957,12 +24964,34 @@ class TierLedger {
     return this.db.query("DELETE FROM tier_set_cursors WHERE set_id = ? AND connector_id = ?").run(setId, connectorId).changes > 0;
   }
   accountScopeCounts(provider, accountScope) {
-    const row = this.db.query(`
-      SELECT COUNT(*) AS items,
-        COALESCE(SUM(CASE WHEN state = 'pending' OR metadata_pending = 1 OR content_pending = 1 THEN 1 ELSE 0 END), 0) AS awaiting
-      FROM tier_items WHERE provider = ? AND account_scope = ?
-    `).get(provider, accountScope);
+    return this.readSteps(this.accountScopeCountSteps(provider, accountScope));
+  }
+  *accountScopeCountSteps(provider, accountScope) {
+    const row = yield {
+      sql: `
+        SELECT COUNT(*) AS items,
+          COALESCE(SUM(CASE WHEN state = 'pending' OR metadata_pending = 1 OR content_pending = 1 THEN 1 ELSE 0 END), 0) AS awaiting
+        FROM tier_items WHERE provider = ? AND account_scope = ?
+      `,
+      params: [provider, accountScope],
+      mode: "get"
+    };
     return { items: row.items, awaitingJudgment: row.awaiting };
+  }
+  onClose(listener) {
+    (this.closeListeners ??= []).push(listener);
+  }
+  closeListeners;
+  readSteps(steps) {
+    return this.db.transaction(() => {
+      let next = steps.next();
+      while (!next.done) {
+        const statement = this.db.query(next.value.sql);
+        const params = next.value.params;
+        next = steps.next(next.value.mode === "get" ? statement.get(...params) : statement.all(...params));
+      }
+      return next.value;
+    })();
   }
   withdrawAccountScope(provider, accountScope) {
     return this.db.transaction(() => {
@@ -61761,6 +61790,7 @@ var init_vocabulary = __esm(() => {
     notRunningLine: "{percent}% read · {items} so far. It goes on from there once imports can run.",
     notRunningLineUncounted: "{percent}% read. It goes on from there once imports can run.",
     removingNotRunningLine: "It is removed once removals can run. The file itself stays where it is.",
+    counting: "Counting what this archive holds…",
     judgedLine: "{judged} judged · {held} waiting for the private model",
     heldWhy: {
       ready: "Until the private model judges them, they stay Private.",
@@ -163276,7 +163306,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       add(item, line2);
     }
     const items = wholeCount(archive.items);
-    const uncounted = archive.countsUnavailable === true && archive.status !== "removing";
+    const unavailable3 = archive.countsUnavailable === true && archive.status !== "removing";
+    const uncounted = unavailable3 || archive.countsPending === true;
     if (halted && archive.status === "importing") {
       const pct = typeof archive.percent === "number" && isFinite(archive.percent) ? archive.percent : 0;
       add(item, el("p", "muted", uncounted ? fill2(A.notRunningLineUncounted, { percent: percent(pct) }) : fill2(A.notRunningLine, { percent: percent(pct), items: itemCount(archive, items) })));
@@ -163309,9 +163340,11 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       const file2 = typeof stop.file === "string" && stop.file ? stop.file : A.thisFile;
       add(item, el("p", "reason strong", fill2(words2.why, { file: file2 })), el("p", "muted", words2.fix));
     }
-    if (uncounted)
+    if (archive.countsPending === true && archive.status !== "removing")
+      add(item, el("p", "muted", A.counting));
+    if (unavailable3)
       add(item, el("p", "reason strong", A.countsUnavailable.why), el("p", "muted", A.countsUnavailable.fix));
-    else if (archive.status !== "removing" && items > 0)
+    else if (!uncounted && archive.status !== "removing" && items > 0)
       add(item, archiveHeld(archive, model));
     const why = archiveWhy(archive);
     if (why)
@@ -201694,6 +201727,9 @@ function summaryOf2(entry, stopped) {
     const read = entry.status === "importing" ? `${fill3(copy.importingLineUncounted, { percent: String(entry.percent ?? 0) })}. ` : "";
     return `${read}${copy.countsUnavailable.why} ${copy.countsUnavailable.fix}`;
   }
+  if (entry.countsPending === true && entry.status !== "stopped" && entry.status !== "removing") {
+    return entry.status === "importing" ? `${fill3(copy.importingLineUncounted, { percent: String(entry.percent ?? 0) })}.` : copy.counting;
+  }
   const items = itemsPhrase2(entry.family, entry.items);
   const held = entry.items > 0 && entry.status !== "removing" ? ` ${fill3(copy.judgedLine, { judged: String(entry.judged), held: String(entry.held) })}.` : "";
   switch (entry.status) {
@@ -201734,7 +201770,7 @@ function archiveOf(entry) {
     where: entry.where,
     status: entry.status,
     family: entry.family ?? "other",
-    ...entry.countsUnavailable ? { counts_unavailable: true } : {
+    ...entry.countsUnavailable ? { counts_unavailable: true } : entry.countsPending === true ? {} : {
       items: entry.items,
       ...entry.family === "email" || entry.family === "chat" ? { messages: entry.items } : {},
       judged: entry.judged,
@@ -202141,6 +202177,10 @@ function createArchiveImportDashboard(options) {
   const home2 = options.home ?? homedir49();
   const uploads = options.uploads ?? createArchiveUploads({ root: archiveStateSiblingPath(state.path, "archive-staging") });
   let closed = false;
+  const now = options.now ?? (() => new Date);
+  const countReads = new Set;
+  const releasing = new WeakSet;
+  const countTallies = new Map;
   let checks4 = Promise.resolve();
   const running = new Set;
   const cancelled2 = new Set;
@@ -202471,9 +202511,62 @@ function createArchiveImportDashboard(options) {
   };
   const counts = (record8) => {
     try {
-      const lane = options.runtime.lane(record8.family);
-      const tally = lane.ledger.accountScopeCounts(record8.provider, record8.archive_id);
-      return { items: tally.items, held: tally.awaitingJudgment };
+      const ledger = options.runtime.lane(record8.family).ledger;
+      const key2 = JSON.stringify([ledger.dbPath, record8.provider, record8.archive_id]);
+      let cached3 = countTallies.get(key2);
+      if (!cached3) {
+        cached3 = { value: null, at: -Infinity };
+        countTallies.set(key2, cached3);
+      }
+      const entry = cached3;
+      if (closed || entry.inFlight || now().getTime() - entry.at < 2000)
+        return entry.value;
+      entry.at = now().getTime();
+      const finish = (value2) => {
+        if (closed)
+          return;
+        entry.value = value2;
+        entry.at = now().getTime();
+      };
+      const readHere = () => {
+        let tally;
+        try {
+          tally = ledger.accountScopeCounts(record8.provider, record8.archive_id);
+        } catch {
+          finish(undefined);
+          return;
+        }
+        finish({ items: tally.items, held: tally.awaitingJudgment });
+      };
+      if (!offThreadReadsSupported(ledger.dbPath)) {
+        readHere();
+      } else {
+        if (!releasing.has(ledger)) {
+          releasing.add(ledger);
+          ledger.onClose(() => releaseOffThreadReads(ledger.dbPath));
+        }
+        entry.inFlight = (async () => {
+          try {
+            const steps = ledger.accountScopeCountSteps(record8.provider, record8.archive_id);
+            let step = steps.next();
+            while (!step.done)
+              step = steps.next(await readOnPool(ledger.dbPath, step.value));
+            finish({ items: step.value.items, held: step.value.awaitingJudgment });
+          } catch (error2) {
+            if (closed)
+              return;
+            if (error2 instanceof OffThreadReadBusyError)
+              readHere();
+            else
+              finish(undefined);
+          }
+        })().finally(() => {
+          countReads.delete(entry.inFlight);
+          delete entry.inFlight;
+        });
+        countReads.add(entry.inFlight);
+      }
+      return entry.value;
     } catch {
       return;
     }
@@ -202513,7 +202606,6 @@ function createArchiveImportDashboard(options) {
   };
   const entryOf = (record8) => {
     const counted = counts(record8);
-    const { items, held } = counted ?? { items: 0, held: 0 };
     const earliest = dateOnly2(record8.date_range?.earliest);
     const latest = dateOnly2(record8.date_range?.latest);
     const stopFile = record8.stop?.rel_path ? named(posix6.basename(record8.stop.rel_path)) : undefined;
@@ -202524,10 +202616,11 @@ function createArchiveImportDashboard(options) {
       family: record8.family,
       where: where2(posix6.join(record8.root_path, record8.chosen_rel_path || ".")),
       status: record8.status,
-      items,
-      judged: Math.max(0, items - held),
-      held,
-      ...counted ? {} : { countsUnavailable: true },
+      items: counted?.items ?? 0,
+      judged: counted ? Math.max(0, counted.items - counted.held) : 0,
+      held: counted?.held ?? 0,
+      ...counted === null ? { countsPending: true } : {},
+      ...counted === undefined ? { countsUnavailable: true } : {},
       ...record8.status === "importing" ? { percent: percent(record8) } : {},
       ...earliest ? { earliest } : {},
       ...latest ? { latest } : {},
@@ -202835,7 +202928,7 @@ function createArchiveImportDashboard(options) {
         for (const record8 of own3) {
           if (record8.status === "stopped" && record8.stop?.code !== "stopped_by_owner")
             attention.push({ kind: "stopped", id: record8.archive_id, name: record8.label });
-          else if (record8.status !== "removing" && !counts(record8))
+          else if (record8.status !== "removing" && counts(record8) === undefined)
             attention.push({ kind: "counts", id: record8.archive_id, name: record8.label });
         }
         return [card.id, {
@@ -202885,7 +202978,7 @@ function createArchiveImportDashboard(options) {
         const tally = counts(record8);
         if (tally)
           counted.set(record8.archive_id, tally);
-        else if (!cardOf(record8))
+        else if (tally === undefined && !cardOf(record8))
           attention.push({ kind: "counts", id: record8.archive_id, name: record8.label });
       }
       for (const request of askingNow(asked, records)) {
@@ -202939,9 +203032,13 @@ function createArchiveImportDashboard(options) {
       if (removing2)
         wakeScheduler();
     },
-    idle: () => checks4,
+    idle: async () => {
+      await checks4;
+      await Promise.all([...countReads]);
+    },
     close() {
       closed = true;
+      countTallies.clear();
       uploads.close();
     }
   };
@@ -202961,6 +203058,7 @@ var init_dashboard2 = __esm(() => {
   init_staging();
   init_start();
   init_display_text();
+  init_off_thread_reads();
   init_state();
   init_requests();
   ARCHIVE_APPROVE_COPY = {

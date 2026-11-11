@@ -138,6 +138,9 @@ function writeIntentFromRow(row: TierWriteIntentRow): TierWriteIntent {
   };
 }
 
+/** One read of the ledger: the same shape as a connector store's pool read. */
+export interface LedgerRead { sql: string; params: readonly unknown[]; mode: 'get' | 'all' }
+
 function idParams(identity: TierLedgerIdentity): [string, string, string, string] {
   return [identity.provider, identity.accountScope, tierLedgerConversationKey(identity), identity.providerItemId];
 }
@@ -488,6 +491,11 @@ export class TierLedger {
       // hand to another process the moment this returns.
       closeSqliteStore(this.db, { checkpoint: !this.readOnly });
     } finally {
+      const listeners = this.closeListeners ?? [];
+      this.closeListeners = undefined;
+      for (const listener of listeners) {
+        try { listener(); } catch { /* a listener's failure never fails the close */ }
+      }
       if (!this.readOnly && this.dbPath !== ':memory:') restrictLedgerFiles(this.dbPath);
     }
   }
@@ -4016,12 +4024,41 @@ export class TierLedger {
 
   /** How many items one account scope has here, and how many of them still wait for a judgment. */
   accountScopeCounts(provider: string, accountScope: string): { items: number; awaitingJudgment: number } {
-    const row = this.db.query(`
-      SELECT COUNT(*) AS items,
-        COALESCE(SUM(CASE WHEN state = 'pending' OR metadata_pending = 1 OR content_pending = 1 THEN 1 ELSE 0 END), 0) AS awaiting
-      FROM tier_items WHERE provider = ? AND account_scope = ?
-    `).get(provider, accountScope) as { items: number; awaiting: number };
+    return this.readSteps(this.accountScopeCountSteps(provider, accountScope));
+  }
+
+  /** The same account tally query for the caller's connection and the read pool. */
+  *accountScopeCountSteps(provider: string, accountScope: string): Generator<LedgerRead, { items: number; awaitingJudgment: number }, unknown> {
+    const row = (yield {
+      sql: `
+        SELECT COUNT(*) AS items,
+          COALESCE(SUM(CASE WHEN state = 'pending' OR metadata_pending = 1 OR content_pending = 1 THEN 1 ELSE 0 END), 0) AS awaiting
+        FROM tier_items WHERE provider = ? AND account_scope = ?
+      `,
+      params: [provider, accountScope],
+      mode: 'get',
+    }) as { items: number; awaiting: number };
     return { items: row.items, awaitingJudgment: row.awaiting };
+  }
+
+  /** Hears this ledger close, once (for a reader of its file elsewhere to let go). */
+  onClose(listener: () => void): void {
+    (this.closeListeners ??= []).push(listener);
+  }
+
+  private closeListeners: Array<() => void> | undefined;
+
+  /** Runs a read generator on this connection, in one transaction. */
+  readSteps<T>(steps: Generator<LedgerRead, T, unknown>): T {
+    return this.db.transaction(() => {
+      let next = steps.next();
+      while (!next.done) {
+        const statement = this.db.query(next.value.sql);
+        const params = next.value.params as never[];
+        next = steps.next(next.value.mode === 'get' ? statement.get(...params) : statement.all(...params));
+      }
+      return next.value;
+    })();
   }
 
   /**

@@ -11951,6 +11951,13 @@ class TierLedger {
     try {
       closeSqliteStore(this.db, { checkpoint: !this.readOnly });
     } finally {
+      const listeners = this.closeListeners ?? [];
+      this.closeListeners = undefined;
+      for (const listener of listeners) {
+        try {
+          listener();
+        } catch {}
+      }
       if (!this.readOnly && this.dbPath !== ":memory:")
         restrictLedgerFiles(this.dbPath);
     }
@@ -14277,12 +14284,34 @@ class TierLedger {
     return this.db.query("DELETE FROM tier_set_cursors WHERE set_id = ? AND connector_id = ?").run(setId, connectorId).changes > 0;
   }
   accountScopeCounts(provider, accountScope) {
-    const row = this.db.query(`
-      SELECT COUNT(*) AS items,
-        COALESCE(SUM(CASE WHEN state = 'pending' OR metadata_pending = 1 OR content_pending = 1 THEN 1 ELSE 0 END), 0) AS awaiting
-      FROM tier_items WHERE provider = ? AND account_scope = ?
-    `).get(provider, accountScope);
+    return this.readSteps(this.accountScopeCountSteps(provider, accountScope));
+  }
+  *accountScopeCountSteps(provider, accountScope) {
+    const row = yield {
+      sql: `
+        SELECT COUNT(*) AS items,
+          COALESCE(SUM(CASE WHEN state = 'pending' OR metadata_pending = 1 OR content_pending = 1 THEN 1 ELSE 0 END), 0) AS awaiting
+        FROM tier_items WHERE provider = ? AND account_scope = ?
+      `,
+      params: [provider, accountScope],
+      mode: "get"
+    };
     return { items: row.items, awaitingJudgment: row.awaiting };
+  }
+  onClose(listener) {
+    (this.closeListeners ??= []).push(listener);
+  }
+  closeListeners;
+  readSteps(steps) {
+    return this.db.transaction(() => {
+      let next = steps.next();
+      while (!next.done) {
+        const statement = this.db.query(next.value.sql);
+        const params = next.value.params;
+        next = steps.next(next.value.mode === "get" ? statement.get(...params) : statement.all(...params));
+      }
+      return next.value;
+    })();
   }
   withdrawAccountScope(provider, accountScope) {
     return this.db.transaction(() => {
@@ -33357,6 +33386,7 @@ var init_vocabulary = __esm(() => {
     notRunningLine: "{percent}% read · {items} so far. It goes on from there once imports can run.",
     notRunningLineUncounted: "{percent}% read. It goes on from there once imports can run.",
     removingNotRunningLine: "It is removed once removals can run. The file itself stays where it is.",
+    counting: "Counting what this archive holds…",
     judgedLine: "{judged} judged · {held} waiting for the private model",
     heldWhy: {
       ready: "Until the private model judges them, they stay Private.",
@@ -49043,7 +49073,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       add(item, line);
     }
     const items = wholeCount(archive.items);
-    const uncounted = archive.countsUnavailable === true && archive.status !== "removing";
+    const unavailable2 = archive.countsUnavailable === true && archive.status !== "removing";
+    const uncounted = unavailable2 || archive.countsPending === true;
     if (halted && archive.status === "importing") {
       const pct = typeof archive.percent === "number" && isFinite(archive.percent) ? archive.percent : 0;
       add(item, el("p", "muted", uncounted ? fill(A.notRunningLineUncounted, { percent: percent(pct) }) : fill(A.notRunningLine, { percent: percent(pct), items: itemCount(archive, items) })));
@@ -49076,9 +49107,11 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       const file = typeof stop.file === "string" && stop.file ? stop.file : A.thisFile;
       add(item, el("p", "reason strong", fill(words2.why, { file })), el("p", "muted", words2.fix));
     }
-    if (uncounted)
+    if (archive.countsPending === true && archive.status !== "removing")
+      add(item, el("p", "muted", A.counting));
+    if (unavailable2)
       add(item, el("p", "reason strong", A.countsUnavailable.why), el("p", "muted", A.countsUnavailable.fix));
-    else if (archive.status !== "removing" && items > 0)
+    else if (!uncounted && archive.status !== "removing" && items > 0)
       add(item, archiveHeld(archive, model));
     const why = archiveWhy(archive);
     if (why)
@@ -78495,6 +78528,7 @@ init_store();
 // src/workers/archive-import/dashboard.ts
 init_olympus_layout();
 init_display_text();
+init_off_thread_reads();
 init_state();
 init_requests();
 
