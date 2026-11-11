@@ -701,11 +701,20 @@ export interface EvalAnswerStageAudit {
   analystModelIds?: readonly string[];
 }
 
-/** The answer's distinct number-bearing tokens, lowercased, with edge punctuation trimmed. */
-function answerValueTokens(answer: string): string[] {
-  return [...new Set(answer.toLowerCase().split(/\s+/u)
+/**
+ * The text's distinct tokens, lowercased, with edge punctuation trimmed. Splits
+ * on whitespace and on JSON quotes and brackets too, so a value inside a
+ * serialized table or citation field is its own token.
+ */
+function textTokens(text: string): Set<string> {
+  return new Set(text.toLowerCase().split(/[\s"[\]{}]+/u)
     .map((token) => token.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ''))
-    .filter((token) => /\p{N}/u.test(token)))];
+    .filter((token) => token.length > 0));
+}
+
+/** The answer's distinct number-bearing tokens (textTokens). */
+function answerValueTokens(answer: string): string[] {
+  return [...textTokens(answer)].filter((token) => /\p{N}/u.test(token));
 }
 
 /** The first offset of any accepted form of the value in the text (case-insensitive), or -1. */
@@ -766,7 +775,8 @@ export function evalAnswerStageAudit(
   const expectedSeats = pack.candidates.flatMap((candidate, index) =>
     expectedIds.includes(candidate.provenance.sourceItem.providerItemId) ? [index + 1] : []);
   const valueTokens = answerValueTokens(analystOwn.answer);
-  const citedText = citedSeats.map((seat) => seatTexts[seat - 1]!.all.toLowerCase()).join('\n');
+  // Whole tokens, so '41' is not supported by a seat that says '4182'.
+  const citedTokens = textTokens(citedSeats.map((seat) => seatTexts[seat - 1]!.all).join('\n'));
   const values = question.expectedAnswerContains ?? [];
   const inAnswer = values.filter((value) => answerContainsExpectedValue(value, analystOwn.answer).matched).length;
   const answerShape = values.length === 0
@@ -782,7 +792,7 @@ export function evalAnswerStageAudit(
     answerCitationsOutsidePack: citationSeats.filter((seat) => seat === 0).length,
     ...(expectedIds.length > 0 ? { expectedSeatCited: expectedSeats.some((seat) => citedSeats.includes(seat)) } : {}),
     answerValueTokens: valueTokens.length,
-    answerValueTokensInCitedSeats: valueTokens.filter((token) => citedText.includes(token)).length,
+    answerValueTokensInCitedSeats: valueTokens.filter((token) => citedTokens.has(token)).length,
     ...(analystSeats ? { analystSeats: [...analystSeats] } : {}),
     ...(promptText !== undefined ? { analystPromptChars: analystPrompts!.reduce((sum, prompt) => sum + prompt.length, 0) } : {}),
     ...(analystModelIds && analystModelIds.length > 0 ? { analystModelIds: [...analystModelIds] } : {}),
