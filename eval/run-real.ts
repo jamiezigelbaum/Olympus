@@ -1348,7 +1348,7 @@ async function configuredEvalEmbedding(
   env: Record<string, string | undefined>,
 ): Promise<Parameters<typeof prepareEvalEmbedding>[0]['configured']> {
   try {
-    const { loadSourceWorkerSovereignty, createSourceIndexEmbeddingProviderFromSovereignty } = await import('../src/workers/engine/server.ts');
+    const { loadSourceWorkerSovereignty, createSourceIndexEmbeddingProviderFromSovereignty } = await import('../src/workers/engine/runtime/embedding-providers.ts');
     const engine = loadSourceWorkerSovereignty(config, env);
     const configured: Partial<Record<SourceTrustDomain, SourceEmbeddingProvider>> = {};
     for (const domain of ['public_safe', 'internal', 'secure_local'] as const) {

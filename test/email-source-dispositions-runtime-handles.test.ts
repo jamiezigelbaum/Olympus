@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { resolvedStorePath } from '../src/core/source-placement.ts';
-import { openIngestionDispositionsRuntime } from '../src/workers/engine/server.ts';
+import { openIngestionDispositionsRuntime } from '../src/workers/engine/runtime/ingestion-dispositions.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 
 function seedStore(dbPath: string, corpusId: string, trustDomain: 'internal' | 'secure_local'): void {

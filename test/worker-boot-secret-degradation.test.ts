@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { createSovereigntyEngine, type SovereigntyConfig, type SovereigntyTrustDomainPolicy } from '../src/core/sovereignty.ts';
 import { loadPreBuiltInPreset } from './helpers/pre-built-in-presets.ts';
 import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
-import { createSourceIndexEmbeddingProviderFromSovereignty } from '../src/workers/engine/server.ts';
+import { createSourceIndexEmbeddingProviderFromSovereignty } from '../src/workers/engine/runtime/embedding-providers.ts';
 import {
   credentialConfigFingerprint,
   WorkerBootSecretResolver,

@@ -21,7 +21,7 @@ import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import {
   createReadwiseConnectorStoreRuntime,
   createRefreshableReadwiseConnectorStoreRuntime,
-} from '../src/workers/engine/server.ts';
+} from '../src/workers/engine/runtime/source-runtimes.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import type { ConnectedCredentialHandle } from '../src/workers/credential-broker/connected-handles.ts';
 import { createReadwiseSchedulerSource } from '../src/workers/source-scheduler.ts';

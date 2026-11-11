@@ -28,7 +28,7 @@ import { EmailSourceWorkerError } from '../src/workers/engine/http/worker-respon
 import {
   accountCheckedXBookmarksRuntime,
   type XBookmarksConnectorStoreRuntime,
-} from '../src/workers/engine/server.ts';
+} from '../src/workers/engine/runtime/source-runtimes.ts';
 import {
   createExclusiveRunner,
   createSourceAccountGuard,
