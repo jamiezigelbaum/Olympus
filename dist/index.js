@@ -16184,6 +16184,7 @@ var init_vocabulary = __esm(() => {
     notRunningLine: "{percent}% read · {items} so far. It goes on from there once imports can run.",
     notRunningLineUncounted: "{percent}% read. It goes on from there once imports can run.",
     removingNotRunningLine: "It is removed once removals can run. The file itself stays where it is.",
+    counting: "Counting what this archive holds…",
     judgedLine: "{judged} judged · {held} waiting for the private model",
     heldWhy: {
       ready: "Until the private model judges them, they stay Private.",
@@ -19206,11 +19207,20 @@ var init_sniffer_store = __esm(() => {
   init_tier_ledger_path();
 });
 
+// src/workers/connector-store/off-thread-reads.ts
+var queues, releases;
+var init_off_thread_reads = __esm(() => {
+  init_answer_latency_trace();
+  queues = new Map;
+  releases = new Map;
+});
+
 // src/workers/classification/tier-ledger.ts
 var REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_store_write_guard();
+  init_off_thread_reads();
   init_tier_classifier();
   init_tier_ledger_path();
   REJUDGE_UNAVAILABLE_RETRY_MS = 60 * 60 * 1000;
@@ -19643,14 +19653,6 @@ class ControlPathHeadroom {
 var CONTROL_PATH_SLICE_MS = 20, CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200, CONTROL_PATH_REST_MS = 25, HEARTBEAT_MS = 50, CONTROL_PATH_FREEZE_LOG_MS = 2000, controlPathHeadroom;
 var init_control_path_headroom = __esm(() => {
   controlPathHeadroom = new ControlPathHeadroom;
-});
-
-// src/workers/connector-store/off-thread-reads.ts
-var queues, releases;
-var init_off_thread_reads = __esm(() => {
-  init_answer_latency_trace();
-  queues = new Map;
-  releases = new Map;
 });
 
 // src/core/store-identity.ts

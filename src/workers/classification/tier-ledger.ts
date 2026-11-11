@@ -20,7 +20,7 @@
 // keys, content-free reason codes and version ids. Never a title, path,
 // sender, text or excerpt. The file is created owner-only (0600).
 
-import { Database } from 'bun:sqlite';
+import { Database, type SQLQueryBindings } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -28,6 +28,7 @@ import type { SourceItemIdentity, SourceTrustDomain, SourceTrustTier } from '../
 import { readSqliteSchemaVersion, runSqliteMigrations, type SqliteMigration } from '../../core/sqlite-migrations.ts';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import { assertWritableStoreOpenAllowed } from '../../core/store-write-guard.ts';
+import { releaseOffThreadReads, type StoreRead } from '../connector-store/off-thread-reads.ts';
 import {
   PERSONAL_FIRST_REASON,
   TIER_KEYS,
@@ -483,6 +484,7 @@ export class TierLedger {
   }
 
   close(): void {
+    releaseOffThreadReads(this.dbPath);
     try {
       // Checkpointed close, like every Olympus store: the ledger is safe to
       // hand to another process the moment this returns.
@@ -4090,12 +4092,33 @@ export class TierLedger {
 
   /** How many items one account scope has here, and how many of them still wait for a judgment. */
   accountScopeCounts(provider: string, accountScope: string): { items: number; awaitingJudgment: number } {
-    const row = this.db.query(`
-      SELECT COUNT(*) AS items,
-        COALESCE(SUM(CASE WHEN state = 'pending' OR metadata_pending = 1 OR content_pending = 1 THEN 1 ELSE 0 END), 0) AS awaiting
-      FROM tier_items WHERE provider = ? AND account_scope = ?
-    `).get(provider, accountScope) as { items: number; awaiting: number };
+    return this.readSteps(this.accountScopeCountSteps(provider, accountScope));
+  }
+
+  /** The same account tally query for the caller's connection and the read pool. */
+  *accountScopeCountSteps(provider: string, accountScope: string): Generator<StoreRead, { items: number; awaitingJudgment: number }, unknown> {
+    const row = (yield {
+      sql: `
+        SELECT COUNT(*) AS items,
+          COALESCE(SUM(CASE WHEN state = 'pending' OR metadata_pending = 1 OR content_pending = 1 THEN 1 ELSE 0 END), 0) AS awaiting
+        FROM tier_items WHERE provider = ? AND account_scope = ?
+      `,
+      params: [provider, accountScope],
+      mode: 'get',
+    }) as { items: number; awaiting: number };
     return { items: row.items, awaitingJudgment: row.awaiting };
+  }
+
+  private readSteps<T>(steps: Generator<StoreRead, T, unknown>): T {
+    let step = steps.next();
+    while (!step.done) {
+      const read = step.value;
+      const query = this.db.query(read.sql);
+      step = steps.next(read.mode === 'all'
+        ? query.all(...(read.params as SQLQueryBindings[]))
+        : query.get(...(read.params as SQLQueryBindings[])));
+    }
+    return step.value;
   }
 
   /**

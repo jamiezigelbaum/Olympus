@@ -164,6 +164,8 @@ async function imported(f: Fixture, name: string, messages: readonly string[]): 
   const started = await f.dashboard.approve({ requestId: asked.request_id });
   if (!started.ok || started.status !== 'started') throw new Error('expected a start');
   await importAll(f.runtime, started.archive_id);
+  f.dashboard.view();
+  await f.dashboard.idle();
   return { id: started.archive_id, path };
 }
 

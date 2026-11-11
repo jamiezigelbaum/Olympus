@@ -11719,6 +11719,422 @@ var init_media_judge = __esm(() => {
   promptVectorCache = new Map;
 });
 
+// src/core/source-index/lane-busy.ts
+var SOURCE_INDEX_LANE_BUSY_CODE = "source_index_lane_busy";
+
+// src/workers/source-index/answer-latency-trace.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+function beginSourceAnswerPoolRead() {
+  const query = currentSourceAnswerTrace()?.activeQuery;
+  const corpusId = laneStorage.getStore();
+  if (!query || corpusId === undefined)
+    return;
+  return ({ queueWaitMs, runMs, outcome }) => {
+    let reads = query.poolByCorpus.get(corpusId);
+    if (!reads) {
+      reads = {
+        reads: 0,
+        queue_wait_ms: 0,
+        queue_wait_max_ms: 0,
+        run_ms: 0,
+        run_max_ms: 0,
+        refused: 0,
+        dropped_queued: 0,
+        past_deadline_running: 0,
+        errors: 0
+      };
+      query.poolByCorpus.set(corpusId, reads);
+    }
+    const wait = nonNegativeMs(queueWaitMs);
+    const ran = nonNegativeMs(runMs);
+    reads.reads += 1;
+    reads.queue_wait_ms += wait;
+    reads.queue_wait_max_ms = Math.max(reads.queue_wait_max_ms, wait);
+    reads.run_ms += ran;
+    reads.run_max_ms = Math.max(reads.run_max_ms, ran);
+    if (outcome === "refused")
+      reads.refused += 1;
+    else if (outcome === "dropped_queued")
+      reads.dropped_queued += 1;
+    else if (outcome === "past_deadline_running")
+      reads.past_deadline_running += 1;
+    else if (outcome === "error")
+      reads.errors += 1;
+  };
+}
+function currentSourceAnswerTrace() {
+  return storage.getStore();
+}
+function nonNegativeMs(value) {
+  return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+}
+var storage, laneStorage, CONTENT_FREE_ERROR_CLASSES;
+var init_answer_latency_trace = __esm(() => {
+  storage = new AsyncLocalStorage;
+  laneStorage = new AsyncLocalStorage;
+  CONTENT_FREE_ERROR_CLASSES = new Set([
+    "AbortError",
+    "AnalystUnavailable",
+    "AnalystCircuitOpen",
+    "EmailSourceWorkerError",
+    "Error",
+    "LocalTrustProviderMismatch",
+    "OperationError",
+    "RangeError",
+    "SourceModelPolicyDeniedError",
+    "SecureEvidencePolicySkip",
+    "SecureAnalystPoolE2EEGateError",
+    "SyntaxError",
+    "TrustedAnalystTimeoutError",
+    "TypeError"
+  ]);
+});
+
+// src/workers/connector-store/off-thread-reads.ts
+function live() {
+  return threads.filter((reader) => !reader.retired);
+}
+function busy(reader) {
+  return reader.pending.size + reader.snapshots + (reader.job ? 1 : 0);
+}
+function runtimeHasWorkers() {
+  return typeof Worker === "function" && typeof Blob === "function" && Boolean(globalThis.Bun);
+}
+function startThread() {
+  if (threads.length >= READ_POOL_SIZE || !runtimeHasWorkers())
+    return;
+  try {
+    const url = URL.createObjectURL(new Blob([WORKER_SOURCE], { type: "application/javascript" }));
+    const worker = workerFactory(url);
+    worker.unref?.();
+    const started = { worker, pending: new Map, snapshots: 0 };
+    worker.onmessage = (event) => {
+      const message2 = event.data;
+      const waiting = started.pending.get(message2.id);
+      if (!waiting)
+        return;
+      started.pending.delete(message2.id);
+      if (waiting.timer !== undefined)
+        clearTimeout(waiting.timer);
+      if (message2.ok)
+        waiting.resolve(message2.rows ?? null);
+      else
+        waiting.reject(new Error(message2.error ?? "off-thread read failed"));
+    };
+    worker.onerror = (event) => {
+      retire(started, new Error(event.message || "off-thread reader stopped"));
+    };
+    worker.addEventListener("close", () => {
+      const at = threads.indexOf(started);
+      if (at >= 0)
+        threads.splice(at, 1);
+      if (!started.retired)
+        retire(started, new Error("off-thread reader stopped"));
+      dispatch();
+    });
+    threads.push(started);
+    return started;
+  } catch {
+    return;
+  }
+}
+function retire(stopped, error) {
+  if (stopped.retired)
+    return;
+  stopped.retired = true;
+  for (const waiting of stopped.pending.values()) {
+    if (waiting.timer !== undefined)
+      clearTimeout(waiting.timer);
+    waiting.reject(error);
+  }
+  stopped.pending.clear();
+  try {
+    stopped.worker.terminate();
+  } catch {}
+}
+function offThreadReadsSupported(dbPath) {
+  return dbPath !== ":memory:" && !dbPath.startsWith("file::memory:") && runtimeHasWorkers();
+}
+function send(reader, message2, timeoutMs = OFF_THREAD_READ_TIMEOUT_MS) {
+  if (reader.retired)
+    return Promise.reject(new Error("off-thread reader stopped"));
+  const id = nextId++;
+  return new Promise((resolve7, reject) => {
+    const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
+      retire(reader, new Error("off-thread read timed out"));
+    }, timeoutMs);
+    reader.pending.set(id, { resolve: resolve7, reject, ...timer !== undefined ? { timer } : {} });
+    try {
+      reader.worker.postMessage({ ...message2, id });
+    } catch (error) {
+      reader.pending.delete(id);
+      if (timer !== undefined)
+        clearTimeout(timer);
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
+}
+async function withOffThreadSnapshot(dbPath, work) {
+  if (!runtimeHasWorkers())
+    throw new Error("off-thread reads are unavailable");
+  const generation = releases.get(dbPath) ?? 0;
+  const reader = await snapshotThread(dbPath);
+  if ((releases.get(dbPath) ?? 0) !== generation) {
+    reader.snapshots -= 1;
+    dispatch();
+    throw new OffThreadReadBusyError;
+  }
+  const snapshot = nextId++;
+  try {
+    await send(reader, { op: "open", snapshot, path: dbPath });
+    try {
+      return await work((query) => send(reader, { op: "read", snapshot, sql: query.sql, params: query.params, mode: query.mode }));
+    } finally {
+      await send(reader, { op: "close", snapshot }).catch(() => {
+        return;
+      });
+    }
+  } finally {
+    reader.snapshots -= 1;
+    dispatch();
+  }
+}
+function snapshotThreadNow() {
+  const best = live().filter((reader) => !reader.job).reduce((least, reader) => !least || busy(reader) < busy(least) ? reader : least, undefined);
+  if (best && busy(best) === 0)
+    return best;
+  return startThread() ?? best;
+}
+function snapshotThread(store) {
+  const reader = snapshotThreadNow();
+  if (reader) {
+    reader.snapshots += 1;
+    return Promise.resolve(reader);
+  }
+  return new Promise((resolve7, reject) => {
+    const waiter = {
+      store,
+      resolve: resolve7,
+      reject,
+      timer: setTimeout(() => {
+        const at = snapshotWaiters.indexOf(waiter);
+        if (at >= 0)
+          snapshotWaiters.splice(at, 1);
+        reject(new Error("off-thread reads are busy"));
+      }, OFF_THREAD_READ_TIMEOUT_MS)
+    };
+    snapshotWaiters.push(waiter);
+  });
+}
+function serveSnapshotWaiters() {
+  while (snapshotWaiters.length > 0) {
+    const reader = snapshotThreadNow();
+    if (!reader)
+      return;
+    const waiter = snapshotWaiters.shift();
+    clearTimeout(waiter.timer);
+    reader.snapshots += 1;
+    waiter.resolve(reader);
+  }
+}
+function readOnPool(dbPath, read, options = {}) {
+  const deadlineAtMs = options.deadlineAtMs ?? clock2.now() + OFF_THREAD_READ_TIMEOUT_MS;
+  const waiting = queues.get(dbPath) ?? [];
+  const report = beginSourceAnswerPoolRead();
+  if (waiting.length >= READ_POOL_QUEUE_PER_STORE || clock2.now() >= deadlineAtMs) {
+    report?.({ queueWaitMs: 0, runMs: 0, outcome: "refused" });
+    return Promise.reject(new OffThreadReadBusyError);
+  }
+  return new Promise((resolve7, reject) => {
+    const job = { store: dbPath, read, deadlineAtMs, resolve: resolve7, reject, timer: undefined, enqueuedAtMs: clock2.now(), report };
+    job.timer = clock2.setTimeout(() => missedDeadline(job), deadlineAtMs - clock2.now());
+    waiting.push(job);
+    if (!queues.has(dbPath)) {
+      queues.set(dbPath, waiting);
+      turns.push(dbPath);
+    }
+    dispatch();
+  });
+}
+function releaseOffThreadReads(dbPath) {
+  releases.set(dbPath, (releases.get(dbPath) ?? 0) + 1);
+  for (const waiter of snapshotWaiters.filter((entry) => entry.store === dbPath)) {
+    snapshotWaiters.splice(snapshotWaiters.indexOf(waiter), 1);
+    clearTimeout(waiter.timer);
+    waiter.reject(new OffThreadReadBusyError);
+  }
+  const waiting = queues.get(dbPath);
+  if (waiting) {
+    queues.delete(dbPath);
+    const turn = turns.indexOf(dbPath);
+    if (turn >= 0)
+      turns.splice(turn, 1);
+    for (const job of waiting)
+      settle(job, { error: new OffThreadReadBusyError });
+  }
+  for (const reader of live()) {
+    try {
+      reader.worker.postMessage({ op: "release", path: dbPath });
+    } catch {}
+  }
+}
+function settle(job, outcome) {
+  if (job.settled)
+    return;
+  job.settled = true;
+  clock2.clearTimeout(job.timer);
+  if (job.report) {
+    const now = clock2.now();
+    const sentAtMs = job.sentAtMs;
+    let ended;
+    if ("rows" in outcome)
+      ended = "rows";
+    else if (sentAtMs === undefined)
+      ended = "dropped_queued";
+    else if (outcome.error instanceof OffThreadReadBusyError)
+      ended = "past_deadline_running";
+    else
+      ended = "error";
+    job.report({
+      queueWaitMs: (sentAtMs ?? now) - job.enqueuedAtMs,
+      runMs: sentAtMs === undefined ? 0 : now - sentAtMs,
+      outcome: ended
+    });
+  }
+  if ("rows" in outcome)
+    job.resolve(outcome.rows);
+  else
+    job.reject(outcome.error);
+}
+function missedDeadline(job) {
+  if (job.settled)
+    return;
+  settle(job, { error: new OffThreadReadBusyError });
+  if (job.thread) {
+    retire(job.thread, new OffThreadReadBusyError);
+    return;
+  }
+  const waiting = queues.get(job.store);
+  const at = waiting?.indexOf(job) ?? -1;
+  if (waiting && at >= 0)
+    waiting.splice(at, 1);
+}
+function freeThread() {
+  return live().find((reader) => !reader.job && reader.pending.size === 0 && reader.snapshots === 0) ?? startThread();
+}
+function nextJob() {
+  while (turns.length > 0) {
+    const store = turns.shift();
+    const waiting = queues.get(store);
+    let job = waiting?.shift();
+    while (job && clock2.now() >= job.deadlineAtMs) {
+      settle(job, { error: new OffThreadReadBusyError });
+      job = waiting?.shift();
+    }
+    if (waiting && waiting.length > 0)
+      turns.push(store);
+    else
+      queues.delete(store);
+    if (job)
+      return job;
+  }
+  return;
+}
+function dispatch() {
+  serveSnapshotWaiters();
+  while (turns.length > 0) {
+    const reader = freeThread();
+    if (!reader)
+      return;
+    const job = nextJob();
+    if (!job)
+      return;
+    job.thread = reader;
+    job.sentAtMs = clock2.now();
+    reader.job = job;
+    observer?.(job.store, job.read);
+    send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, undefined).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => settle(job, { error: reader.retired ? new OffThreadReadBusyError : error })).finally(() => {
+      if (reader.job === job)
+        reader.job = undefined;
+      dispatch();
+    });
+  }
+}
+var READ_POOL_SIZE = 2, READ_POOL_QUEUE_PER_STORE = 8, OFF_THREAD_READ_TIMEOUT_MS = 120000, OffThreadReadBusyError, REAL_CLOCK, clock2, observer, workerFactory = (url) => new Worker(url), WORKER_SOURCE = `
+import { Database } from 'bun:sqlite';
+import { statSync } from 'node:fs';
+const snapshots = new Map();
+const connections = new Map();
+const open = (path) => {
+  const db = new Database(path, { readonly: true });
+  db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON');
+  return db;
+};
+const connection = (path) => {
+  const stat = statSync(path);
+  const file = stat.dev + ':' + stat.ino;
+  const held = connections.get(path);
+  if (held && held.file === file) return held.db;
+  if (held) held.db.close();
+  const db = open(path);
+  connections.set(path, { db, file });
+  return db;
+};
+self.onmessage = (event) => {
+  const { id, op, snapshot, path, sql, params, mode } = event.data;
+  if (op === 'release') {
+    const held = connections.get(path);
+    connections.delete(path);
+    try { held?.db.close(); } catch {}
+    return;
+  }
+  try {
+    if (op === 'open') {
+      const db = open(path);
+      db.exec('BEGIN');
+      snapshots.set(snapshot, db);
+      postMessage({ id, ok: true, rows: null });
+    } else if (op === 'close') {
+      const db = snapshots.get(snapshot);
+      snapshots.delete(snapshot);
+      if (db) {
+        try { db.exec('COMMIT'); } finally { db.close(); }
+      }
+      postMessage({ id, ok: true, rows: null });
+    } else {
+      const db = op === 'query' ? connection(path) : snapshots.get(snapshot);
+      if (!db) throw new Error('unknown snapshot');
+      const query = db.query(sql);
+      const rows = mode === 'all' ? query.all(...params) : query.get(...params);
+      postMessage({ id, ok: true, rows });
+    }
+  } catch (error) {
+    postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+};
+`, threads, nextId = 1, queues, turns, snapshotWaiters, releases;
+var init_off_thread_reads = __esm(() => {
+  init_answer_latency_trace();
+  OffThreadReadBusyError = class OffThreadReadBusyError extends Error {
+    code = SOURCE_INDEX_LANE_BUSY_CODE;
+    constructor() {
+      super("The store is busy; try again.");
+      this.name = "OffThreadReadBusyError";
+    }
+  };
+  REAL_CLOCK = {
+    now: () => Date.now(),
+    setTimeout: (callback, ms) => setTimeout(callback, ms),
+    clearTimeout: (timer) => clearTimeout(timer)
+  };
+  clock2 = REAL_CLOCK;
+  threads = [];
+  queues = new Map;
+  turns = [];
+  snapshotWaiters = [];
+  releases = new Map;
+});
+
 // src/workers/classification/tier-ledger.ts
 import { Database as Database2 } from "bun:sqlite";
 import { randomUUID as randomUUID4 } from "node:crypto";
@@ -11846,6 +12262,7 @@ class TierLedger {
     return readSqliteSchemaVersion(this.db, TIER_LEDGER_SQLITE_STORE_ID) === TIER_LEDGER_SCHEMA_VERSION;
   }
   close() {
+    releaseOffThreadReads(this.dbPath);
     try {
       closeSqliteStore(this.db, { checkpoint: !this.readOnly });
     } finally {
@@ -13959,11 +14376,11 @@ class TierLedger {
       });
     })();
   }
-  withWriteIntent(intent, run, settle) {
+  withWriteIntent(intent, run, settle2) {
     return this.db.transaction(() => {
       this.putWriteIntent(intent);
       const result = run();
-      const final = settle?.(result);
+      const final = settle2?.(result);
       if (final)
         this.putWriteIntent({ ...intent, ...final });
       return result;
@@ -14237,12 +14654,28 @@ class TierLedger {
     return this.db.query("DELETE FROM tier_set_cursors WHERE set_id = ? AND connector_id = ?").run(setId, connectorId).changes > 0;
   }
   accountScopeCounts(provider, accountScope) {
-    const row = this.db.query(`
-      SELECT COUNT(*) AS items,
-        COALESCE(SUM(CASE WHEN state = 'pending' OR metadata_pending = 1 OR content_pending = 1 THEN 1 ELSE 0 END), 0) AS awaiting
-      FROM tier_items WHERE provider = ? AND account_scope = ?
-    `).get(provider, accountScope);
+    return this.readSteps(this.accountScopeCountSteps(provider, accountScope));
+  }
+  *accountScopeCountSteps(provider, accountScope) {
+    const row = yield {
+      sql: `
+        SELECT COUNT(*) AS items,
+          COALESCE(SUM(CASE WHEN state = 'pending' OR metadata_pending = 1 OR content_pending = 1 THEN 1 ELSE 0 END), 0) AS awaiting
+        FROM tier_items WHERE provider = ? AND account_scope = ?
+      `,
+      params: [provider, accountScope],
+      mode: "get"
+    };
     return { items: row.items, awaitingJudgment: row.awaiting };
+  }
+  readSteps(steps) {
+    let step = steps.next();
+    while (!step.done) {
+      const read = step.value;
+      const query = this.db.query(read.sql);
+      step = steps.next(read.mode === "all" ? query.all(...read.params) : query.get(...read.params));
+    }
+    return step.value;
   }
   withdrawAccountScope(provider, accountScope) {
     return this.db.transaction(() => {
@@ -15152,6 +15585,7 @@ var TIER_LEDGER_SCHEMA_VERSION = 13, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_saf
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_store_write_guard();
+  init_off_thread_reads();
   init_tier_classifier();
   init_tier_ledger_path();
   REJUDGE_UNAVAILABLE_RETRY_MS = 60 * 60 * 1000;
@@ -15328,10 +15762,10 @@ var init_remote_oauth_store = __esm(() => {
 });
 
 // src/core/app-release-capture.ts
-import { AsyncLocalStorage } from "node:async_hooks";
-var storage, completedPrivateAnswers, JOB_QUESTION_TTL_MS, jobQuestions;
+import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
+var storage2, completedPrivateAnswers, JOB_QUESTION_TTL_MS, jobQuestions;
 var init_app_release_capture = __esm(() => {
-  storage = new AsyncLocalStorage;
+  storage2 = new AsyncLocalStorage2;
   completedPrivateAnswers = new Set;
   JOB_QUESTION_TTL_MS = 30 * 60000;
   jobQuestions = new Map;
@@ -16231,7 +16665,7 @@ function scanThread() {
       else
         waiting.reject(new Error(message2.error ?? "off-thread secret scan failed"));
     };
-    worker.onerror = (event) => retire(started, new Error(event.message || "secret scan thread stopped"));
+    worker.onerror = (event) => retire2(started, new Error(event.message || "secret scan thread stopped"));
     thread = started;
     return started;
   } catch {
@@ -16239,7 +16673,7 @@ function scanThread() {
     return;
   }
 }
-function retire(stopped, error) {
+function retire2(stopped, error) {
   if (thread === stopped)
     thread = undefined;
   for (const waiting of stopped.pending.values()) {
@@ -16257,10 +16691,10 @@ async function scanSecretsAhead(text2) {
   const scanner = scanThread();
   if (!scanner)
     return;
-  const id = nextId++;
+  const id = nextId2++;
   try {
     const kinds = await new Promise((resolve7, reject) => {
-      const timer = setTimeout(() => retire(scanner, new Error("off-thread secret scan timed out")), OFF_THREAD_SCAN_TIMEOUT_MS);
+      const timer = setTimeout(() => retire2(scanner, new Error("off-thread secret scan timed out")), OFF_THREAD_SCAN_TIMEOUT_MS);
       scanner.pending.set(id, { resolve: resolve7, reject, timer });
       scanner.worker.postMessage({ id, text: text2 });
     });
@@ -16269,7 +16703,7 @@ async function scanSecretsAhead(text2) {
     scanner.pending.delete(id);
   }
 }
-var OFF_THREAD_SCAN_TIMEOUT_MS = 120000, thread, unavailable = false, nextId = 1;
+var OFF_THREAD_SCAN_TIMEOUT_MS = 120000, thread, unavailable = false, nextId2 = 1;
 var init_secret_scan_off_thread = __esm(() => {
   init_engine();
 });
@@ -17109,7 +17543,7 @@ var init_stopwords_iso = __esm(() => {
 });
 
 // src/core/source-index/keyword-context.ts
-import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
 function keywordExpansionDisabled() {
   return disabled.getStore() === true;
 }
@@ -17124,10 +17558,10 @@ function withKeywordAlternatives(query, alternatives, run) {
 }
 var context, disabled, cachedOnly, requestContext;
 var init_keyword_context = __esm(() => {
-  context = new AsyncLocalStorage2;
-  disabled = new AsyncLocalStorage2;
-  cachedOnly = new AsyncLocalStorage2;
-  requestContext = new AsyncLocalStorage2;
+  context = new AsyncLocalStorage3;
+  disabled = new AsyncLocalStorage3;
+  cachedOnly = new AsyncLocalStorage3;
+  requestContext = new AsyncLocalStorage3;
 });
 
 // src/core/source-index/keyword-stopwords.ts
@@ -18236,422 +18670,6 @@ function ingestionTurn() {
 var CONTROL_PATH_SLICE_MS = 20, CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200, CONTROL_PATH_REST_MS = 25, HEARTBEAT_MS = 50, CONTROL_PATH_FREEZE_LOG_MS = 2000, controlPathHeadroom;
 var init_control_path_headroom = __esm(() => {
   controlPathHeadroom = new ControlPathHeadroom;
-});
-
-// src/core/source-index/lane-busy.ts
-var SOURCE_INDEX_LANE_BUSY_CODE = "source_index_lane_busy";
-
-// src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
-function beginSourceAnswerPoolRead() {
-  const query = currentSourceAnswerTrace()?.activeQuery;
-  const corpusId = laneStorage.getStore();
-  if (!query || corpusId === undefined)
-    return;
-  return ({ queueWaitMs, runMs, outcome }) => {
-    let reads = query.poolByCorpus.get(corpusId);
-    if (!reads) {
-      reads = {
-        reads: 0,
-        queue_wait_ms: 0,
-        queue_wait_max_ms: 0,
-        run_ms: 0,
-        run_max_ms: 0,
-        refused: 0,
-        dropped_queued: 0,
-        past_deadline_running: 0,
-        errors: 0
-      };
-      query.poolByCorpus.set(corpusId, reads);
-    }
-    const wait = nonNegativeMs(queueWaitMs);
-    const ran = nonNegativeMs(runMs);
-    reads.reads += 1;
-    reads.queue_wait_ms += wait;
-    reads.queue_wait_max_ms = Math.max(reads.queue_wait_max_ms, wait);
-    reads.run_ms += ran;
-    reads.run_max_ms = Math.max(reads.run_max_ms, ran);
-    if (outcome === "refused")
-      reads.refused += 1;
-    else if (outcome === "dropped_queued")
-      reads.dropped_queued += 1;
-    else if (outcome === "past_deadline_running")
-      reads.past_deadline_running += 1;
-    else if (outcome === "error")
-      reads.errors += 1;
-  };
-}
-function currentSourceAnswerTrace() {
-  return storage2.getStore();
-}
-function nonNegativeMs(value) {
-  return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
-}
-var storage2, laneStorage, CONTENT_FREE_ERROR_CLASSES;
-var init_answer_latency_trace = __esm(() => {
-  storage2 = new AsyncLocalStorage3;
-  laneStorage = new AsyncLocalStorage3;
-  CONTENT_FREE_ERROR_CLASSES = new Set([
-    "AbortError",
-    "AnalystUnavailable",
-    "AnalystCircuitOpen",
-    "EmailSourceWorkerError",
-    "Error",
-    "LocalTrustProviderMismatch",
-    "OperationError",
-    "RangeError",
-    "SourceModelPolicyDeniedError",
-    "SecureEvidencePolicySkip",
-    "SecureAnalystPoolE2EEGateError",
-    "SyntaxError",
-    "TrustedAnalystTimeoutError",
-    "TypeError"
-  ]);
-});
-
-// src/workers/connector-store/off-thread-reads.ts
-function live() {
-  return threads.filter((reader) => !reader.retired);
-}
-function busy(reader) {
-  return reader.pending.size + reader.snapshots + (reader.job ? 1 : 0);
-}
-function runtimeHasWorkers() {
-  return typeof Worker === "function" && typeof Blob === "function" && Boolean(globalThis.Bun);
-}
-function startThread() {
-  if (threads.length >= READ_POOL_SIZE || !runtimeHasWorkers())
-    return;
-  try {
-    const url = URL.createObjectURL(new Blob([WORKER_SOURCE], { type: "application/javascript" }));
-    const worker = workerFactory(url);
-    worker.unref?.();
-    const started = { worker, pending: new Map, snapshots: 0 };
-    worker.onmessage = (event) => {
-      const message2 = event.data;
-      const waiting = started.pending.get(message2.id);
-      if (!waiting)
-        return;
-      started.pending.delete(message2.id);
-      if (waiting.timer !== undefined)
-        clearTimeout(waiting.timer);
-      if (message2.ok)
-        waiting.resolve(message2.rows ?? null);
-      else
-        waiting.reject(new Error(message2.error ?? "off-thread read failed"));
-    };
-    worker.onerror = (event) => {
-      retire2(started, new Error(event.message || "off-thread reader stopped"));
-    };
-    worker.addEventListener("close", () => {
-      const at = threads.indexOf(started);
-      if (at >= 0)
-        threads.splice(at, 1);
-      if (!started.retired)
-        retire2(started, new Error("off-thread reader stopped"));
-      dispatch();
-    });
-    threads.push(started);
-    return started;
-  } catch {
-    return;
-  }
-}
-function retire2(stopped, error) {
-  if (stopped.retired)
-    return;
-  stopped.retired = true;
-  for (const waiting of stopped.pending.values()) {
-    if (waiting.timer !== undefined)
-      clearTimeout(waiting.timer);
-    waiting.reject(error);
-  }
-  stopped.pending.clear();
-  try {
-    stopped.worker.terminate();
-  } catch {}
-}
-function offThreadReadsSupported(dbPath) {
-  return dbPath !== ":memory:" && !dbPath.startsWith("file::memory:") && runtimeHasWorkers();
-}
-function send(reader, message2, timeoutMs = OFF_THREAD_READ_TIMEOUT_MS) {
-  if (reader.retired)
-    return Promise.reject(new Error("off-thread reader stopped"));
-  const id = nextId2++;
-  return new Promise((resolve8, reject) => {
-    const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
-      retire2(reader, new Error("off-thread read timed out"));
-    }, timeoutMs);
-    reader.pending.set(id, { resolve: resolve8, reject, ...timer !== undefined ? { timer } : {} });
-    try {
-      reader.worker.postMessage({ ...message2, id });
-    } catch (error) {
-      reader.pending.delete(id);
-      if (timer !== undefined)
-        clearTimeout(timer);
-      reject(error instanceof Error ? error : new Error(String(error)));
-    }
-  });
-}
-async function withOffThreadSnapshot(dbPath, work) {
-  if (!runtimeHasWorkers())
-    throw new Error("off-thread reads are unavailable");
-  const generation = releases.get(dbPath) ?? 0;
-  const reader = await snapshotThread(dbPath);
-  if ((releases.get(dbPath) ?? 0) !== generation) {
-    reader.snapshots -= 1;
-    dispatch();
-    throw new OffThreadReadBusyError;
-  }
-  const snapshot = nextId2++;
-  try {
-    await send(reader, { op: "open", snapshot, path: dbPath });
-    try {
-      return await work((query) => send(reader, { op: "read", snapshot, sql: query.sql, params: query.params, mode: query.mode }));
-    } finally {
-      await send(reader, { op: "close", snapshot }).catch(() => {
-        return;
-      });
-    }
-  } finally {
-    reader.snapshots -= 1;
-    dispatch();
-  }
-}
-function snapshotThreadNow() {
-  const best = live().filter((reader) => !reader.job).reduce((least, reader) => !least || busy(reader) < busy(least) ? reader : least, undefined);
-  if (best && busy(best) === 0)
-    return best;
-  return startThread() ?? best;
-}
-function snapshotThread(store) {
-  const reader = snapshotThreadNow();
-  if (reader) {
-    reader.snapshots += 1;
-    return Promise.resolve(reader);
-  }
-  return new Promise((resolve8, reject) => {
-    const waiter = {
-      store,
-      resolve: resolve8,
-      reject,
-      timer: setTimeout(() => {
-        const at = snapshotWaiters.indexOf(waiter);
-        if (at >= 0)
-          snapshotWaiters.splice(at, 1);
-        reject(new Error("off-thread reads are busy"));
-      }, OFF_THREAD_READ_TIMEOUT_MS)
-    };
-    snapshotWaiters.push(waiter);
-  });
-}
-function serveSnapshotWaiters() {
-  while (snapshotWaiters.length > 0) {
-    const reader = snapshotThreadNow();
-    if (!reader)
-      return;
-    const waiter = snapshotWaiters.shift();
-    clearTimeout(waiter.timer);
-    reader.snapshots += 1;
-    waiter.resolve(reader);
-  }
-}
-function readOnPool(dbPath, read, options = {}) {
-  const deadlineAtMs = options.deadlineAtMs ?? clock2.now() + OFF_THREAD_READ_TIMEOUT_MS;
-  const waiting = queues.get(dbPath) ?? [];
-  const report = beginSourceAnswerPoolRead();
-  if (waiting.length >= READ_POOL_QUEUE_PER_STORE || clock2.now() >= deadlineAtMs) {
-    report?.({ queueWaitMs: 0, runMs: 0, outcome: "refused" });
-    return Promise.reject(new OffThreadReadBusyError);
-  }
-  return new Promise((resolve8, reject) => {
-    const job = { store: dbPath, read, deadlineAtMs, resolve: resolve8, reject, timer: undefined, enqueuedAtMs: clock2.now(), report };
-    job.timer = clock2.setTimeout(() => missedDeadline(job), deadlineAtMs - clock2.now());
-    waiting.push(job);
-    if (!queues.has(dbPath)) {
-      queues.set(dbPath, waiting);
-      turns.push(dbPath);
-    }
-    dispatch();
-  });
-}
-function releaseOffThreadReads(dbPath) {
-  releases.set(dbPath, (releases.get(dbPath) ?? 0) + 1);
-  for (const waiter of snapshotWaiters.filter((entry) => entry.store === dbPath)) {
-    snapshotWaiters.splice(snapshotWaiters.indexOf(waiter), 1);
-    clearTimeout(waiter.timer);
-    waiter.reject(new OffThreadReadBusyError);
-  }
-  const waiting = queues.get(dbPath);
-  if (waiting) {
-    queues.delete(dbPath);
-    const turn = turns.indexOf(dbPath);
-    if (turn >= 0)
-      turns.splice(turn, 1);
-    for (const job of waiting)
-      settle(job, { error: new OffThreadReadBusyError });
-  }
-  for (const reader of live()) {
-    try {
-      reader.worker.postMessage({ op: "release", path: dbPath });
-    } catch {}
-  }
-}
-function settle(job, outcome) {
-  if (job.settled)
-    return;
-  job.settled = true;
-  clock2.clearTimeout(job.timer);
-  if (job.report) {
-    const now = clock2.now();
-    const sentAtMs = job.sentAtMs;
-    let ended;
-    if ("rows" in outcome)
-      ended = "rows";
-    else if (sentAtMs === undefined)
-      ended = "dropped_queued";
-    else if (outcome.error instanceof OffThreadReadBusyError)
-      ended = "past_deadline_running";
-    else
-      ended = "error";
-    job.report({
-      queueWaitMs: (sentAtMs ?? now) - job.enqueuedAtMs,
-      runMs: sentAtMs === undefined ? 0 : now - sentAtMs,
-      outcome: ended
-    });
-  }
-  if ("rows" in outcome)
-    job.resolve(outcome.rows);
-  else
-    job.reject(outcome.error);
-}
-function missedDeadline(job) {
-  if (job.settled)
-    return;
-  settle(job, { error: new OffThreadReadBusyError });
-  if (job.thread) {
-    retire2(job.thread, new OffThreadReadBusyError);
-    return;
-  }
-  const waiting = queues.get(job.store);
-  const at = waiting?.indexOf(job) ?? -1;
-  if (waiting && at >= 0)
-    waiting.splice(at, 1);
-}
-function freeThread() {
-  return live().find((reader) => !reader.job && reader.pending.size === 0 && reader.snapshots === 0) ?? startThread();
-}
-function nextJob() {
-  while (turns.length > 0) {
-    const store = turns.shift();
-    const waiting = queues.get(store);
-    let job = waiting?.shift();
-    while (job && clock2.now() >= job.deadlineAtMs) {
-      settle(job, { error: new OffThreadReadBusyError });
-      job = waiting?.shift();
-    }
-    if (waiting && waiting.length > 0)
-      turns.push(store);
-    else
-      queues.delete(store);
-    if (job)
-      return job;
-  }
-  return;
-}
-function dispatch() {
-  serveSnapshotWaiters();
-  while (turns.length > 0) {
-    const reader = freeThread();
-    if (!reader)
-      return;
-    const job = nextJob();
-    if (!job)
-      return;
-    job.thread = reader;
-    job.sentAtMs = clock2.now();
-    reader.job = job;
-    observer?.(job.store, job.read);
-    send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, undefined).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => settle(job, { error: reader.retired ? new OffThreadReadBusyError : error })).finally(() => {
-      if (reader.job === job)
-        reader.job = undefined;
-      dispatch();
-    });
-  }
-}
-var READ_POOL_SIZE = 2, READ_POOL_QUEUE_PER_STORE = 8, OFF_THREAD_READ_TIMEOUT_MS = 120000, OffThreadReadBusyError, REAL_CLOCK, clock2, observer, workerFactory = (url) => new Worker(url), WORKER_SOURCE = `
-import { Database } from 'bun:sqlite';
-import { statSync } from 'node:fs';
-const snapshots = new Map();
-const connections = new Map();
-const open = (path) => {
-  const db = new Database(path, { readonly: true });
-  db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON');
-  return db;
-};
-const connection = (path) => {
-  const stat = statSync(path);
-  const file = stat.dev + ':' + stat.ino;
-  const held = connections.get(path);
-  if (held && held.file === file) return held.db;
-  if (held) held.db.close();
-  const db = open(path);
-  connections.set(path, { db, file });
-  return db;
-};
-self.onmessage = (event) => {
-  const { id, op, snapshot, path, sql, params, mode } = event.data;
-  if (op === 'release') {
-    const held = connections.get(path);
-    connections.delete(path);
-    try { held?.db.close(); } catch {}
-    return;
-  }
-  try {
-    if (op === 'open') {
-      const db = open(path);
-      db.exec('BEGIN');
-      snapshots.set(snapshot, db);
-      postMessage({ id, ok: true, rows: null });
-    } else if (op === 'close') {
-      const db = snapshots.get(snapshot);
-      snapshots.delete(snapshot);
-      if (db) {
-        try { db.exec('COMMIT'); } finally { db.close(); }
-      }
-      postMessage({ id, ok: true, rows: null });
-    } else {
-      const db = op === 'query' ? connection(path) : snapshots.get(snapshot);
-      if (!db) throw new Error('unknown snapshot');
-      const query = db.query(sql);
-      const rows = mode === 'all' ? query.all(...params) : query.get(...params);
-      postMessage({ id, ok: true, rows });
-    }
-  } catch (error) {
-    postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error) });
-  }
-};
-`, threads, nextId2 = 1, queues, turns, snapshotWaiters, releases;
-var init_off_thread_reads = __esm(() => {
-  init_answer_latency_trace();
-  OffThreadReadBusyError = class OffThreadReadBusyError extends Error {
-    code = SOURCE_INDEX_LANE_BUSY_CODE;
-    constructor() {
-      super("The store is busy; try again.");
-      this.name = "OffThreadReadBusyError";
-    }
-  };
-  REAL_CLOCK = {
-    now: () => Date.now(),
-    setTimeout: (callback, ms) => setTimeout(callback, ms),
-    clearTimeout: (timer) => clearTimeout(timer)
-  };
-  clock2 = REAL_CLOCK;
-  threads = [];
-  queues = new Map;
-  turns = [];
-  snapshotWaiters = [];
-  releases = new Map;
 });
 
 // src/core/provider-account-identity.ts
@@ -33240,6 +33258,7 @@ var init_vocabulary = __esm(() => {
     notRunningLine: "{percent}% read · {items} so far. It goes on from there once imports can run.",
     notRunningLineUncounted: "{percent}% read. It goes on from there once imports can run.",
     removingNotRunningLine: "It is removed once removals can run. The file itself stays where it is.",
+    counting: "Counting what this archive holds…",
     judgedLine: "{judged} judged · {held} waiting for the private model",
     heldWhy: {
       ready: "Until the private model judges them, they stay Private.",
@@ -48926,7 +48945,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       add(item, line);
     }
     const items = wholeCount(archive.items);
-    const uncounted = archive.countsUnavailable === true && archive.status !== "removing";
+    const unavailable2 = archive.countsUnavailable === true && archive.status !== "removing";
+    const uncounted = unavailable2 || archive.countsPending === true;
     if (halted && archive.status === "importing") {
       const pct = typeof archive.percent === "number" && isFinite(archive.percent) ? archive.percent : 0;
       add(item, el("p", "muted", uncounted ? fill(A.notRunningLineUncounted, { percent: percent(pct) }) : fill(A.notRunningLine, { percent: percent(pct), items: itemCount(archive, items) })));
@@ -48959,9 +48979,11 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       const file = typeof stop.file === "string" && stop.file ? stop.file : A.thisFile;
       add(item, el("p", "reason strong", fill(words2.why, { file })), el("p", "muted", words2.fix));
     }
-    if (uncounted)
+    if (archive.countsPending === true && archive.status !== "removing")
+      add(item, el("p", "muted", A.counting));
+    if (unavailable2)
       add(item, el("p", "reason strong", A.countsUnavailable.why), el("p", "muted", A.countsUnavailable.fix));
-    else if (archive.status !== "removing" && items > 0)
+    else if (!uncounted && archive.status !== "removing" && items > 0)
       add(item, archiveHeld(archive, model));
     const why = archiveWhy(archive);
     if (why)
@@ -78380,6 +78402,7 @@ init_store();
 // src/workers/archive-import/dashboard.ts
 init_olympus_layout();
 init_display_text();
+init_off_thread_reads();
 init_state();
 init_requests();
 
