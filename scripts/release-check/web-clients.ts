@@ -151,6 +151,11 @@ export function redactForbidden(text: string, forbid: readonly string[]): string
   return out;
 }
 
+/** Claude's reply that the connector, though connected, gave it no tools in this chat. */
+export function saidNoTools(client: WebClientId, turn: string): boolean {
+  return client === 'claude' && /(couldn.t|can.t|cannot|could not) ask Olympus/i.test(turn) && /\b(no|any|none of its) tools\b|exposes no tools|isn.t (giving|exposing)/i.test(turn);
+}
+
 export interface TurnObservation {
   turn: string;
   /** Text of the frames under the reply (MCP App panels). */
@@ -1019,13 +1024,20 @@ export async function runWebClients(machine: Machine, options: WebClientsOptions
         for (const q of options.questions.filter((question) => !question.clients || question.clients.includes(client))) {
           if (stopped) break;
           await t.sleep(Math.max(0, gap - (Date.now() - lastAsked)));
-          const before = await readConnectionUses(machine);
           if (q.kind === 'secret') macInbox ??= await openMacInbox(machine, browser, t).catch((error: unknown) => error instanceof Error ? error.message : String(error));
           const known = q.kind === 'secret' ? await macInboxRows(macInbox!).catch((error: unknown) => error instanceof Error ? error.message : String(error)) : {};
-          let obs: TurnObservation | Inconclusive;
-          try { obs = await askQuestion(tab, client, q, t, options.newChatUrls?.[client], options.claudeApp !== undefined ? { claudeApp: options.claudeApp } : {}); } catch (error) { obs = { inconclusive: `${CLIENT_ADAPTERS[client].label} could not be driven: ${error instanceof Error ? error.message : String(error)}` }; }
-          lastAsked = Date.now();
-          if (!('inconclusive' in obs)) obs = { ...obs, olympus: olympusUse(before, await readConnectionUses(machine)) };
+          let obs!: TurnObservation | Inconclusive;
+          for (let attempt = 1; attempt <= 2; attempt += 1) {
+            const before = await readConnectionUses(machine);
+            try { obs = await askQuestion(tab, client, q, t, options.newChatUrls?.[client], options.claudeApp !== undefined ? { claudeApp: options.claudeApp } : {}); } catch (error) { obs = { inconclusive: `${CLIENT_ADAPTERS[client].label} could not be driven: ${error instanceof Error ? error.message : String(error)}` }; }
+            lastAsked = Date.now();
+            if (!('inconclusive' in obs)) obs = { ...obs, olympus: olympusUse(before, await readConnectionUses(machine)) };
+            // Claude.ai sometimes loads its tools and then says the connector gives it none in this chat (2026-11-11: 4 of
+            // 9 questions, with the Claude App on and off). Asked once more in a new chat; the warning keeps a repeat visible.
+            if (attempt > 1 || 'inconclusive' in obs || !saidNoTools(client, obs.turn)) break;
+            checks.push({ id: `web.${client}.${q.id}.retried`, title: `${CLIENT_ADAPTERS[client].label}: ${q.id}: asked again in a new chat`, status: 'warn', detail: `the first reply said Olympus gave it no tools in that chat: ${obs.turn.slice(0, 200)}` });
+            await t.sleep(gap);
+          }
           // A Secret question the reply points to the computer for is held to the machine's own answer for it.
           if (!('inconclusive' in obs) && q.kind === 'secret' && turnContains(obs.turn, REMOTE_SECRET_NOTE)) {
             obs = { ...obs, macSecret: await readMacSecret(macInbox!, known, t).catch((error: unknown) => ({ unreadable: error instanceof Error ? error.message : String(error) })) };
