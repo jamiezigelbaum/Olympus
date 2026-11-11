@@ -369,7 +369,7 @@ import { accountFolderMigrationEnabled, migrateAccountFolders, type AccountMigra
 import { messagingMoveFacts, repointMovedMessagingAccounts } from '../../core/messaging-account-move.ts';
 import { takeWorkerDataOwnerLock, type HeldDataOwnerLock } from '../../core/data-owner-lock.ts';
 import { deleteMarkedAccounts, exportOlympusData, lifecycleStoreFileOwner, type DeleteMarkedAccountsReport } from '../../data-lifecycle.ts';
-import { TierLedger, TierLedgerSchemaError } from '../classification/tier-ledger.ts';
+import { TierLedger, TierLedgerSchemaError, type TierLedgerIdentity } from '../classification/tier-ledger.ts';
 import { assertStoreTierLedgerCanOpen } from '../classification/tier-set-binding.ts';
 import { CHAT_SCOPE_FILTER_CODEC } from '../chat/chat-scope-filter.ts';
 import { createEnvCredentialBroker } from '../credential-broker/index.ts';
@@ -4377,12 +4377,12 @@ export async function main(): Promise<void> {
   // media are extracted there too. A file store queues every file, so a file
   // with no job yet is still waiting; elsewhere an item with no job was never
   // going to be read. A tier store opened later gets it in registerTierLegStore.
+  const extractionOutcomeFor = (family: string | undefined, identity: TierLedgerIdentity, localItemId: string | undefined) =>
+    fileExtractionRuntime?.jobs.itemExtractionOutcome({ ...identity, ...(localItemId === undefined ? {} : { localItemId }) },
+      family === 'file' ? {} : { whenNoJob: NO_EXTRACTION_JOB_OUTCOME });
   const probeExtractionEnded = (store: LocalConnectorStore): void => {
     if (!fileExtractionRuntime) return;
-    const jobs = fileExtractionRuntime.jobs;
-    store.setExtractionOutcomeProbe(store.family === 'file'
-      ? (identity, localItemId) => jobs.itemExtractionOutcome({ ...identity, localItemId })
-      : (identity, localItemId) => jobs.itemExtractionOutcome({ ...identity, localItemId }, { whenNoJob: NO_EXTRACTION_JOB_OUTCOME }));
+    store.setExtractionOutcomeProbe((identity, localItemId) => extractionOutcomeFor(store.family, identity, localItemId));
   };
   for (const store of connectorStores) probeExtractionEnded(store);
   const connectorStoreEmbeddingProviders = new Map<string, SourceEmbeddingProvider>();
@@ -6457,7 +6457,8 @@ export async function main(): Promise<void> {
   });
   // One item's privacy label (issue #1060): the same stores and ledgers `olympus tier set` reaches in this worker.
   const ownerTierItemsContext: OwnerTierItemsContext = {
-    extractionOutcome: (identity, localItemId) => fileExtractionRuntime?.jobs.itemExtractionOutcome({ ...identity, ...(localItemId === undefined ? {} : { localItemId }) }),
+    // The same outcome, and the same no-job rule, the store's status counts use.
+    extractionOutcome: extractionOutcomeFor,
     contentAllowed: (identity, localItemId, locator) => {
       for (const store of connectorStores) {
         if (!store.itemPresence(identity).active) continue;

@@ -152643,7 +152643,7 @@ function judgeReason(record4) {
 function view3(row, state, context2) {
   const { record: record4 } = state;
   const identity2 = identityOfRow2(row);
-  const hold = record4?.state === "current" && record4.contentTier === "secure" && !record4.contentRead && record4.reasons.some(isFailSafeMissingContentQuestion) ? unreadHoldDisposition(context2.extractionOutcome?.(identity2, row.local_item_id ?? undefined), context2.contentAllowed?.(identity2, row.local_item_id, row.locator_uri)) : undefined;
+  const hold = record4?.state === "current" && record4.contentTier === "secure" && !record4.contentRead && record4.reasons.some(isFailSafeMissingContentQuestion) ? unreadHoldDisposition(context2.extractionOutcome?.(row.family ?? undefined, identity2, row.local_item_id ?? undefined), context2.contentAllowed?.(identity2, row.local_item_id, row.locator_uri)) : undefined;
   return {
     item_id: ownerTierItemId(identityOfRow2(row)),
     source: row.provider,
@@ -236067,11 +236067,11 @@ ${key2}`;
     generation: () => sourceLaneGeneration,
     beforeCurrent: () => mountSourceLanes(readActiveConnectedHandles(process.env))
   });
+  const extractionOutcomeFor = (family, identity2, localItemId) => fileExtractionRuntime?.jobs.itemExtractionOutcome({ ...identity2, ...localItemId === undefined ? {} : { localItemId } }, family === "file" ? {} : { whenNoJob: NO_EXTRACTION_JOB_OUTCOME });
   const probeExtractionEnded = (store) => {
     if (!fileExtractionRuntime)
       return;
-    const jobs = fileExtractionRuntime.jobs;
-    store.setExtractionOutcomeProbe(store.family === "file" ? (identity2, localItemId) => jobs.itemExtractionOutcome({ ...identity2, localItemId }) : (identity2, localItemId) => jobs.itemExtractionOutcome({ ...identity2, localItemId }, { whenNoJob: NO_EXTRACTION_JOB_OUTCOME }));
+    store.setExtractionOutcomeProbe((identity2, localItemId) => extractionOutcomeFor(store.family, identity2, localItemId));
   };
   for (const store of connectorStores)
     probeExtractionEnded(store);
@@ -237568,7 +237568,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     fileEnv: () => readWorkerSetupEnv()
   });
   const ownerTierItemsContext = {
-    extractionOutcome: (identity2, localItemId) => fileExtractionRuntime?.jobs.itemExtractionOutcome({ ...identity2, ...localItemId === undefined ? {} : { localItemId } }),
+    extractionOutcome: extractionOutcomeFor,
     contentAllowed: (identity2, localItemId, locator) => {
       for (const store of connectorStores) {
         if (!store.itemPresence(identity2).active)

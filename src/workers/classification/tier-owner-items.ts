@@ -147,7 +147,7 @@ export interface OwnerTierItems {
 }
 
 export interface OwnerTierItemsContext extends TierCliContext {
-  extractionOutcome?(identity: TierLedgerIdentity, localItemId: string | undefined): ItemExtractionOutcome | undefined;
+  extractionOutcome?(family: string | undefined, identity: TierLedgerIdentity, localItemId: string | undefined): ItemExtractionOutcome | undefined;
   contentAllowed?(identity: TierLedgerIdentity, localItemId: string | undefined, locator: string | null): boolean;
 }
 
@@ -436,7 +436,7 @@ function view(row: StoredItemRow, state: ItemState, context: OwnerTierItemsConte
   const identity = identityOfRow(row);
   const hold = record?.state === 'current' && record.contentTier === 'secure' && !record.contentRead
     && record.reasons.some(isFailSafeMissingContentQuestion)
-    ? unreadHoldDisposition(context.extractionOutcome?.(identity, row.local_item_id ?? undefined), context.contentAllowed?.(identity, row.local_item_id, row.locator_uri))
+    ? unreadHoldDisposition(context.extractionOutcome?.(row.family ?? undefined, identity, row.local_item_id ?? undefined), context.contentAllowed?.(identity, row.local_item_id, row.locator_uri))
     : undefined;
   return {
     item_id: ownerTierItemId(identityOfRow(row)),
