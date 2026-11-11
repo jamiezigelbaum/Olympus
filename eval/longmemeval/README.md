@@ -8,8 +8,10 @@ model calls, no embeddings (see "Caveats").
 Olympus's shared keyword retrieval finds an evidence session in the top 5 for
 **93.2% of LongMemEval-S questions** (all 500, full session text) and **89.8%**
 in MemPalace's own setup (user turns only), against MemPalace's published 96.6%
-for dense-embedding retrieval. Record it; don't publish it until the hybrid
-(keyword + built-in embedding) run and an answer-accuracy run exist.
+for dense-embedding retrieval. On the first 100 questions, adding the built-in
+embedding lane (hybrid) moves top-5 from 95 to 96 and top-1 from 85 to 89.
+Record it; don't publish it until a full hybrid run and an answer-accuracy run
+exist.
 
 ## What was measured
 
@@ -92,10 +94,16 @@ latency 5–7 ms per question.
 - **Do:** keep the harness and this record. It runs the real shared path with
   no benchmark-specific code, so the architecture guard holds, and a full run
   takes under a minute keyword-only.
-- **Later — hybrid score:** run the same command with `--embedding built-in`
-  on a machine that has the built-in model installed (Xanthos or Sparta). That
-  is the number to compare with MemPalace's 96.6%, since theirs is a dense
-  embedding score. Expect the 28 no-evidence misses to be where it moves.
+- **Hybrid score, first 100 questions (measured 2026-11-10, Xanthos, Metal GPU,
+  `51a0d08`, EmbeddingGemma 2, semantic lane used on every question).** Keyword
+  then hybrid on the same 100: any@1 85 → 89, any@5 95 → 96, all@5 80 → 81,
+  any@10 95 → 96, all@10 84 → 84, no evidence 5 → 4. Hybrid gains most at
+  top 1; at top 5 and top 10 the keyword lane already finds nearly everything
+  in a 50-session haystack. The run took 2.5 h, almost all of it embedding each
+  haystack from scratch (search itself: 66 ms median), so all 500 would take
+  about 12.5 h on Xanthos. That subset covers only two question types
+  (30 multi-session, 70 single-session-user), so it isn't a headline number.
+  Results: #626.
 - **Later — answer accuracy:** LongMemEval's headline metric is QA accuracy
   with an LLM judge. It needs the Analyst (and `buildEvidencePackDetailed`)
   wired into this harness and a judge model; not done today. Report it next

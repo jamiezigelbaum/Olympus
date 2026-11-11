@@ -29,6 +29,7 @@ import type {
   ExtractorOutput,
   ExtractorRereadPolicy,
 } from '../types.ts';
+import { RTF_MIME_TYPES, hasRtfSignature, rtfToText } from './rtf.ts';
 import {
   DEFAULT_MAX_BOUNDED_TEXT_CHARS,
   DEFAULT_MAX_TABLE_SAMPLE_COLUMNS,
@@ -334,6 +335,20 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
           ],
         });
       }
+      if (mimeType && RTF_MIME_TYPES.has(mimeType)) {
+        if (!hasRtfSignature(bytes)) return { status: 'skipped_unsupported' };
+        // Latin-1 keeps every byte one character; the reader decodes \'hh
+        // escapes in the document's own code page.
+        const plain = rtfToText(new TextDecoder('latin1').decode(bytes), maxBoundedTextChars + 1);
+        const bounded = boundText(normalizeExtractedText(plain), maxBoundedTextChars);
+        if (!bounded.text) return { status: 'empty_output' };
+        return {
+          status: 'indexed',
+          text: bounded.text,
+          derivations: [buildDerivation({ artifact: 'text', structural: { kind: 'whole_file' }, bounded })],
+          ...(bounded.warnings.length > 0 ? { warnings: [...bounded.warnings] } : {}),
+        };
+      }
       if (!mimeType || !TEXT_MIME_TYPES.has(mimeType)) {
         return { status: 'skipped_unsupported' };
       }
@@ -448,7 +463,8 @@ export function textLaneAccepts(mimeType: string | undefined): boolean {
     || normalized === XLSX_MIME_TYPE
     || normalized === PPTX_MIME_TYPE
     || IMAGE_MIME_TYPES.has(normalized)
-    || TEXT_MIME_TYPES.has(normalized);
+    || TEXT_MIME_TYPES.has(normalized)
+    || RTF_MIME_TYPES.has(normalized);
 }
 
 /**

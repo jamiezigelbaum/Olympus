@@ -369,7 +369,8 @@ import { accountFolderMigrationEnabled, migrateAccountFolders, type AccountMigra
 import { messagingMoveFacts, repointMovedMessagingAccounts } from '../../core/messaging-account-move.ts';
 import { takeWorkerDataOwnerLock, type HeldDataOwnerLock } from '../../core/data-owner-lock.ts';
 import { deleteMarkedAccounts, exportOlympusData, lifecycleStoreFileOwner, type DeleteMarkedAccountsReport } from '../../data-lifecycle.ts';
-import type { TierLedger } from '../classification/tier-ledger.ts';
+import { TierLedger, TierLedgerSchemaError } from '../classification/tier-ledger.ts';
+import { assertStoreTierLedgerCanOpen } from '../classification/tier-set-binding.ts';
 import { CHAT_SCOPE_FILTER_CODEC } from '../chat/chat-scope-filter.ts';
 import { createEnvCredentialBroker } from '../credential-broker/index.ts';
 import {
@@ -562,7 +563,7 @@ import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classi
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 import { ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
 import { ENGINE_BACKGROUND_INSTANCE_ENV, engineRoleFromEnv } from '../../core/engine-split.ts';
-import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
+import { forbidWritableStoreOpens, writableStoreOpensForbidden } from '../../core/store-write-guard.ts';
 import { createEngineFront, createEngineFrontRoutes, createFrontGate, OwnerBusyMarks, engineBackgroundSocketFromEnv, engineStatusSnapshotPath, startEngineBackgroundServer, restartAfterFront, startEngineBackgroundStatus, waitForEngineBackground, waitForProcessExit, type EngineFront } from '../engine-split/runtime.ts';
 import { forwardedRecordId, forwardedRequestToRequest, responseToForwarded, tagForwardedRequest, type EngineForwardedRequest } from '../engine-split/commands.ts';
 import { frontCaptureRuntime, frontCaptureStop, frontDataExport, frontJudgeBoost, frontJudgeState, frontModelReload, frontSetItemPrivate, frontUnreadableFiles } from '../engine-split/front-state.ts';
@@ -2460,6 +2461,21 @@ export function replaceEmptyAccountsAtBoot(env: Record<string, string | undefine
   }
 }
 
+/** Schema refusal is a lane outage, not a process failure. Called before any tier store opens. */
+export function workerTierLedgerProblem(storePaths: readonly string[], readOnly = false): string | undefined {
+  try {
+    // A bound store is checked against the ledger that governs it, never a
+    // former per-leg ledger left beside it. An unbound or not-yet-created store
+    // is checked against the ledger beside it (the set ledger may exist before
+    // its secure store does).
+    for (const path of storePaths) assertStoreTierLedgerCanOpen(path, readOnly);
+    return undefined;
+  } catch (error) {
+    if (error instanceof TierLedgerSchemaError) return error.message;
+    throw error;
+  }
+}
+
 /**
  * Under the owner lock, after the empty accounts are placed and before
  * adoption is on and anything mounts (core/source-account-migration.ts): moves
@@ -3043,6 +3059,17 @@ export async function main(): Promise<void> {
       const path = resolvedStorePath(sourceId, domain, process.env);
       return existsSync(path) || existsSync(tieredStoreSetLedgerPath(path)) || existsSync(secretLocationsPathForStore(path));
     });
+  const tierLedgerProblems = new Map<string, string>();
+  const sourceTierLedgerReady = (sourceId: string): boolean => {
+    const problem = workerTierLedgerProblem(accountStoreNames(sourceId).map((name) => resolvedStorePath(sourceId, name, process.env)), !!engineFront);
+    if (problem) {
+      if (tierLedgerProblems.get(sourceId) !== problem) console.warn(`[privacy] ${sourceId}: ${problem}`);
+      tierLedgerProblems.set(sourceId, problem);
+      return false;
+    }
+    tierLedgerProblems.delete(sourceId);
+    return true;
+  };
   const tierLanes: Array<{
     ledger: TierLedger;
     secureCorpusId: string;
@@ -3226,6 +3253,7 @@ export async function main(): Promise<void> {
   const mountReadwise = (): void => {
     if (sourceRuntimeClosed) throw new Error('Source runtime is closed.');
     if (refreshableReadwiseRuntime) return;
+    if (!sourceTierLedgerReady(READWISE_SOURCE_ID)) return;
     refreshableReadwiseRuntime = createRefreshableReadwiseConnectorStoreRuntime({
       enabled: readwiseConnectorStoreLane.enabled,
       ...(readwiseEmbeddingProvider ? { embeddingProvider: readwiseEmbeddingProvider } : {}),
@@ -3263,6 +3291,7 @@ export async function main(): Promise<void> {
   const mountXBookmarks = (): void => {
     if (sourceRuntimeClosed) throw new Error('Source runtime is closed.');
     if (refreshableXBookmarksRuntime) return;
+    if (!sourceTierLedgerReady(X_BOOKMARKS_SOURCE_ID)) return;
     refreshableXBookmarksRuntime = createRefreshableXBookmarksConnectorStoreRuntime({
       enabled: xBookmarksConnectorStoreLane.enabled,
       ...(xBookmarksEmbeddingProvider ? { embeddingProvider: xBookmarksEmbeddingProvider } : {}),
@@ -3309,6 +3338,7 @@ export async function main(): Promise<void> {
   const mountGmail = (): void => {
     if (sourceRuntimeClosed) throw new Error('Source runtime is closed.');
     if (gmailInternalConnectorStore) return;
+    if (!sourceTierLedgerReady(GMAIL_SOURCE_ID)) return;
     gmailInternalConnectorStore = gmailConnectorStoreLane.enabled
       ? openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
         dbPath: resolvedStorePath(GMAIL_SOURCE_ID, 'internal', process.env),
@@ -3502,6 +3532,7 @@ export async function main(): Promise<void> {
   const mountGoogleDrive = (): void => {
     if (sourceRuntimeClosed) throw new Error('Source runtime is closed.');
     if (googleDriveInternalConnectorStore) return;
+    if (!sourceTierLedgerReady(GOOGLE_DRIVE_SOURCE_ID)) return;
     googleDriveInternalConnectorStore = googleDriveConnectorStoreLane.enabled
       ? openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
         dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, 'internal', process.env),
@@ -3560,6 +3591,7 @@ export async function main(): Promise<void> {
   const mountDropbox = (): void => {
     if (sourceRuntimeClosed) throw new Error('Source runtime is closed.');
     if (dropboxConnectorStore) return;
+    if (!sourceTierLedgerReady(DROPBOX_FILES_SOURCE_ID)) return;
     dropboxConnectorStore = dropboxConnectorStoreLane.enabled
       ? createDropboxConnectorStore(process.env, { policy: dropboxIngestionPolicy })
       : undefined;
@@ -3636,6 +3668,7 @@ export async function main(): Promise<void> {
   const mountLocalFiles = (): void => {
     if (sourceRuntimeClosed) throw new Error('Source runtime is closed.');
     if (localFilesConnectorStore) return;
+    if (!sourceTierLedgerReady(LOCAL_FILES_SOURCE_ID)) return;
     localFilesConnectorStore = localFilesConnectorStoreLane.enabled
       ? createLocalFilesConnectorStore(process.env, { policy: localFilesIngestionPolicy })
       : undefined;
@@ -3774,6 +3807,7 @@ export async function main(): Promise<void> {
   const mountWhatsApp = (): void => {
     if (sourceRuntimeClosed) throw new Error('Source runtime is closed.');
     if (whatsappConnectorStore) return;
+    if (!sourceTierLedgerReady(WHATSAPP_PERSONAL_SOURCE_ID)) return;
     whatsappConnectorStore = whatsappConnectorStoreLane.enabled
       ? createWhatsAppConnectorStore(process.env)
       : undefined;
@@ -3858,6 +3892,7 @@ export async function main(): Promise<void> {
   const mountTelegram = (): void => {
     if (sourceRuntimeClosed) throw new Error('Source runtime is closed.');
     if (telegramConnectorStores) return;
+    if (!sourceTierLedgerReady(TELEGRAM_MESSAGES_SOURCE_ID)) return;
     telegramConnectorStores = telegramConnectorStoreLane.enabled
       ? createTelegramConnectorStores(process.env)
       : undefined;
@@ -4569,10 +4604,21 @@ export async function main(): Promise<void> {
       store.trustDomain === 'secure_local' ? tierSecureEmbeddingProvider ?? null : sourceIndexEmbeddingProvider ?? null,
     ),
   });
+  // Startup and the split front's mount refresh both mount archives here, so a
+  // ledger problem is cleared once the background has migrated the ledger.
+  const mountArchiveLanes = (): void => {
+    try {
+      if (sourceAccountMountable({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID })) archiveImports.existingLanes();
+      tierLedgerProblems.delete(ARCHIVE_IMPORTS_SOURCE_ID);
+    } catch (error) {
+      if (error instanceof TierLedgerSchemaError) tierLedgerProblems.set(ARCHIVE_IMPORTS_SOURCE_ID, error.message);
+      throw error;
+    }
+  };
   try {
-    if (sourceAccountMountable({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID })) archiveImports.existingLanes();
+    mountArchiveLanes();
   } catch (error) {
-    console.warn(`[archive-import] imported archives are not served this run: ${error instanceof Error ? error.name : 'error'}`);
+    console.warn(`[archive-import] imported archives are not served this run: ${error instanceof Error ? error.message : 'error'}`);
   }
   // Evernote's account, read in passes over its MCP server (workers/evernote/):
   // its lane opens when an account is connected or a previous one left stores,
@@ -4609,9 +4655,9 @@ export async function main(): Promise<void> {
     },
   }));
   try {
-    if (sourceAccountMountable({ sourceId: EVERNOTE_SOURCE_ID })) evernote.existingLane();
+    if (sourceAccountMountable({ sourceId: EVERNOTE_SOURCE_ID }) && sourceTierLedgerReady(EVERNOTE_SOURCE_ID)) evernote.existingLane();
   } catch (error) {
-    console.warn(`[evernote] the Evernote stores are not served this run: ${error instanceof Error ? error.name : 'error'}`);
+    console.warn(`[evernote] the Evernote stores are not served this run: ${error instanceof Error ? error.message : 'error'}`);
   }
   // Reading the child items an import listed by name (an attachment, a photo): the shared
   // extraction factory over the archive lanes' stores, built on first use and again when a
@@ -5808,6 +5854,7 @@ export async function main(): Promise<void> {
           () => {
             if (!usable || !scopeRef || !fileSourceScopeAuthority) return undefined;
             const authority = fileSourceScopeAuthority;
+            if (!sourceTierLedgerReady(EVERNOTE_SOURCE_ID)) return undefined;
             const source = evernote.schedulerSource({
               config: olympusConfig,
               handle: usable,
@@ -5989,7 +6036,7 @@ export async function main(): Promise<void> {
   const refreshFrontMounts = (): void => {
     const reads = [
       () => mountSourceLanes(activeLaneHandles(readActiveConnectedHandles(process.env), process.env)),
-      () => { if (sourceAccountMountable({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID })) archiveImports.existingLanes(); },
+      mountArchiveLanes,
       openTierStoresThatExist,
     ];
     for (const read of reads) {
@@ -7450,10 +7497,11 @@ export async function main(): Promise<void> {
   // EvidencePack build over Private corpora only, so each item carries its
   // own passages, read from the local store. The candidates go only to the
   // private answer job (and the built-in model on this computer); only their
-  // count leaves the engine. The claim-time refresh runs the same search.
+  // count leaves the engine. The claim refresh also follows original matches
+  // that have moved to a lower tier; those still go only to the private job.
   const chatgptPrivateMatchProbe = sourceAnswerLanes
-    ? async (question: string) => {
-        const result = await searchPrivateEvidence({ lanes: sourceAnswerLanes!, question });
+    ? async (question: string, _ctx: import('../../core/operations.ts').OperationContext, originalMatches?: readonly Readonly<Record<string, unknown>>[]) => {
+        const result = await searchPrivateEvidence({ lanes: sourceAnswerLanes!, question, ...(originalMatches ? { originalMatches } : {}) });
         return { count: result.matched, evidence: result.candidates as unknown as readonly Record<string, unknown>[], ...(result.secretMatch ? { secretMatch: true as const } : {}) };
       }
     : undefined;
@@ -7687,6 +7735,15 @@ export async function main(): Promise<void> {
       )),
     )))), { pending: () => privacyChoicePending(sovereigntyEngine), isRelayed: carriesRelayMarker }), !!socketPath),
   };
+  const fetchWithTierLedgerStatus = serverOptions.fetch;
+  serverOptions.fetch = (async (request, server) => {
+    const response = await fetchWithTierLedgerStatus(request, server);
+    const path = new URL(request.url).pathname;
+    if ((path === '/v1/health' || path === '/health') && response?.ok && tierLedgerProblems.size) {
+      return Response.json({ ...await response.json() as object, privacy_ledger_problems: Object.fromEntries(tierLedgerProblems) }, { status: response.status, headers: response.headers });
+    }
+    return response;
+  }) as typeof serverOptions.fetch;
   if (engineFront) {
     // Every request passes the read gate a source-data delete closes.
     serverOptions.fetch = frontGate!.wrap(serverOptions.fetch) as typeof serverOptions.fetch;
@@ -9185,6 +9242,7 @@ function mountConnectorStoreDeclarations(
       // is skipped and reported like any other that cannot mount.
       const owner = options.storeOwner?.(declaration.dbPath);
       const account = owner ? { sourceId: owner } : storageAccountForCorpus(declaration, options.registeredCorpora);
+      if (!collidingStore) assertStoreTierLedgerCanOpen(declaration.dbPath, writableStoreOpensForbidden());
       const store = collidingStore ?? openConnectorStore(account, {
         dbPath: declaration.dbPath,
         corpusId: declaration.corpusId,

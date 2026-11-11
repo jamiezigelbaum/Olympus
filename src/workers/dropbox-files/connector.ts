@@ -41,11 +41,11 @@ import {
 } from '../credential-broker/index.ts';
 import { SOURCE_CHECKPOINT_MAX_LENGTH } from '../source-checkpoint.ts';
 import { scanDropboxContentPolicyText } from './content-policy.ts';
+import { fileMimeTypeFromName } from '../../core/file-mime.ts';
 import {
   DropboxApiContentDownloadClient,
   DropboxApiMetadataClient,
   DropboxContentTooLargeError,
-  dropboxMimeTypeFromName,
   type DropboxContentDownloadClient,
   type DropboxDeletedMetadataEntry,
   type DropboxFileMetadataEntry,
@@ -578,7 +578,7 @@ function rawItemFromDropboxEntry(
 }
 
 function rawItemFromFileEntry(entry: DropboxFileMetadataEntry, account: string, fetchedAt: string): RawItem {
-  const mimeType = entry.mimeType ?? dropboxMimeTypeFromName(entry.name) ?? UNKNOWN_MIME_TYPE;
+  const mimeType = entry.mimeType ?? fileMimeTypeFromName(entry.name);
   return {
     identity: {
       family: 'file',

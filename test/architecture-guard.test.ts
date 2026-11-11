@@ -240,6 +240,7 @@ const SOURCE_AGNOSTIC_SHARED_FILES = [
   'src/workers/file-extraction/extractors/built-in-transcriber.ts',
   'src/workers/file-extraction/extractors/command-runner.ts',
   'src/workers/file-extraction/extractors/document-formats.ts',
+  'src/workers/file-extraction/extractors/rtf.ts',
   'src/workers/file-extraction/extractors/image-prepare.ts',
   'src/workers/file-extraction/extractors/image-preparers.ts',
   'src/workers/file-extraction/extractors/input-limits.ts',
