@@ -27,7 +27,7 @@ import {
   type LocatedItem,
   type TierCliContext,
 } from './tier-cli.ts';
-import { tierRank, type TierKey } from './tier-classifier.ts';
+import { CONTENT_NAMES_ONLY_REASON, tierRank, type TierKey } from './tier-classifier.ts';
 import { isFailSafeMissingContentQuestion, tierLedgerIdentityKey, type TierLedgerIdentity, type TierLedgerRecord } from './tier-ledger.ts';
 import { tierDisplayName } from './tier-rules.ts';
 
@@ -70,6 +70,11 @@ export interface OwnerTierItem {
   judge_reason: string | null;
   /** The item is waiting for the judge to read it (again): its label is a holding label, not a verdict. */
   waiting_for_judge?: true;
+  /**
+   * Its text is never read, by the owner's choice (a names-only folder or
+   * rule): it was judged on its names alone (`content:names_only`, #1295).
+   */
+  names_only?: true;
   decided_at: string | null;
   /**
    * The start of what the item says, for the owner to read before deciding.
@@ -437,6 +442,7 @@ function view(row: StoredItemRow, state: ItemState): OwnerTierItem {
     // its row is current: never shown or sampled as the judge's verdict (#1295).
     ...((record?.state === 'pending' && (record.contentPending || record.metadataPending))
       || (record && !record.contentRead && record.reasons.some(isFailSafeMissingContentQuestion)) ? { waiting_for_judge: true as const } : {}),
+    ...(record?.reasons.includes(CONTENT_NAMES_ONLY_REASON) ? { names_only: true as const } : {}),
     decided_at: record?.decidedAt ?? null,
   };
 }
