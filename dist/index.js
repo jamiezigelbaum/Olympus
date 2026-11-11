@@ -7630,36 +7630,7 @@ var init_keyword_context = __esm(() => {
 });
 // src/workers/source-index/answer-latency-trace.ts
 import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
-function currentSourceAnswerTrace() {
-  return storage2.getStore();
-}
-function sourceAnswerTraceActive() {
-  return storage2.getStore() !== undefined;
-}
-function recordSourceAnswerMainThreadSql(elapsedMs, site) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  const ms = unroundedMs(elapsedMs);
-  const sql = trace.mainThreadSql;
-  sql.statements += 1;
-  sql.total_ms += ms;
-  sql.max_ms = Math.max(sql.max_ms, ms);
-  if (ms < SLOW_MAIN_THREAD_SQL_MS)
-    return;
-  sql.slow.push({ ms: nonNegativeMs(ms), site: site() });
-  if (sql.slow.length > SLOW_MAIN_THREAD_SQL_KEPT) {
-    sql.slow.sort((left, right) => right.ms - left.ms);
-    sql.slow.length = SLOW_MAIN_THREAD_SQL_KEPT;
-  }
-}
-function unroundedMs(value) {
-  return Number.isFinite(value) ? Math.max(0, value) : 0;
-}
-function nonNegativeMs(value) {
-  return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
-}
-var SLOW_MAIN_THREAD_SQL_MS = 250, SLOW_MAIN_THREAD_SQL_KEPT = 20, storage2, laneStorage, CONTENT_FREE_ERROR_CLASSES;
+var storage2, laneStorage, CONTENT_FREE_ERROR_CLASSES;
 var init_answer_latency_trace = __esm(() => {
   storage2 = new AsyncLocalStorage3;
   laneStorage = new AsyncLocalStorage3;
@@ -19246,60 +19217,8 @@ var init_tier_ledger = __esm(() => {
 });
 
 // src/workers/connector-store/main-thread-sql-trace.ts
-import { Database } from "bun:sqlite";
-import { isMainThread } from "node:worker_threads";
-function installMainThreadSqlTrace() {
-  if (installed || !isMainThread)
-    return;
-  installed = true;
-  for (const name of ["query", "prepare"]) {
-    const original = Database.prototype[name];
-    Database.prototype[name] = function(...args) {
-      return timeStatement(original.apply(this, args));
-    };
-  }
-}
-function timeStatement(statement) {
-  const held = statement;
-  if (!statement || held[TIMED])
-    return statement;
-  for (const method of STATEMENT_METHODS) {
-    const call = held[method];
-    if (typeof call !== "function")
-      continue;
-    held[method] = function(...args) {
-      if (!sourceAnswerTraceActive())
-        return call.apply(this, args);
-      const started = performance.now();
-      try {
-        return call.apply(this, args);
-      } finally {
-        recordSourceAnswerMainThreadSql(performance.now() - started, callSite);
-      }
-    };
-  }
-  held[TIMED] = true;
-  return statement;
-}
-function callSite() {
-  const frames = (new Error().stack ?? "").split(`
-`).slice(1).map((line) => line.trim()).map((line) => line.startsWith("at ") ? line.slice(3) : line).filter((line) => line.length > 0);
-  const recorder = frames.findIndex((frame) => frame.startsWith("recordSourceAnswerMainThreadSql"));
-  const caller = recorder >= 0 ? recorder + 2 : 3;
-  return frames.slice(caller, caller + SITE_FRAMES).map(shortFrame).join(" < ");
-}
-function shortFrame(frame) {
-  const open2 = frame.lastIndexOf("(");
-  const name = open2 > 0 ? frame.slice(0, open2).trim() : "<anonymous>";
-  const where = (open2 > 0 ? frame.slice(open2 + 1, frame.lastIndexOf(")")) : frame).split("/").at(-1) ?? "";
-  const [file, line] = where.split(":");
-  return `${name} ${file}${line ? `:${line}` : ""}`;
-}
-var TIMED, STATEMENT_METHODS, SITE_FRAMES = 3, installed = false;
 var init_main_thread_sql_trace = __esm(() => {
   init_answer_latency_trace();
-  TIMED = Symbol("olympus.mainThreadSqlTimed");
-  STATEMENT_METHODS = ["all", "get", "run", "values"];
 });
 
 // src/workers/file-extraction/job-names.ts
@@ -20126,7 +20045,6 @@ var init_local_index = __esm(() => {
   LAST_SYNC_RUN_SQL = `SELECT * FROM sync_runs
   WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
   ORDER BY started_at DESC, rowid DESC LIMIT 1`;
-  installMainThreadSqlTrace();
   lexicalContentPreference = connectorStoreContentPreference(new Set);
   CONNECTOR_STORE_V4_ITEM_COLUMNS = [
     "item_pk",

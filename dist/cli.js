@@ -26269,10 +26269,9 @@ function shortFrame(frame) {
   const [file, line] = where.split(":");
   return `${name} ${file}${line ? `:${line}` : ""}`;
 }
-var TIMED, STATEMENT_METHODS, SITE_FRAMES = 3, installed = false;
+var TIMED = "__olympusMainThreadSqlTimed", STATEMENT_METHODS, SITE_FRAMES = 3, installed = false;
 var init_main_thread_sql_trace = __esm(() => {
   init_answer_latency_trace();
-  TIMED = Symbol("olympus.mainThreadSqlTimed");
   STATEMENT_METHODS = ["all", "get", "run", "values"];
 });
 
@@ -38547,7 +38546,6 @@ var init_local_index = __esm(() => {
       this.name = "ConnectorStoreLocatorIdentityIndexNotReadyError";
     }
   };
-  installMainThreadSqlTrace();
   LocalConnectorStore = class LocalConnectorStore {
     dbPath;
     openedFile;
@@ -38578,6 +38576,7 @@ var init_local_index = __esm(() => {
     embeddingFailureState;
     embeddingDeferral;
     constructor(options) {
+      installMainThreadSqlTrace();
       this.visibilityOwner = randomUUID9();
       this.visibilityNow = () => Date.now();
       this.visibilityPublishChunk = VISIBILITY_PUBLISH_CHUNK;

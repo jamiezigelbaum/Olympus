@@ -2133,9 +2133,6 @@ export interface ConnectorStoreCurrentEmbeddingRow {
   embedding: unknown;
 }
 
-// The Ask trace names slow synchronous statements on the request thread (#1305).
-installMainThreadSqlTrace();
-
 const CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256;
 // On the read pool every page is a round trip through the request thread, so
 // pages are larger there: 2,048 vectors of 768 floats are about 6 MB.
@@ -3180,6 +3177,10 @@ export class LocalConnectorStore {
   private embeddingDeferral: string | undefined;
 
   constructor(options: LocalConnectorStoreOptions) {
+    // The Ask trace names slow synchronous statements on the request thread
+    // (#1305). Installed here, not at module load, so the Node plugin bundle
+    // can still drop this module (test/plugin-bundle-no-bun-sqlite.test.ts).
+    installMainThreadSqlTrace();
     this.visibilityOwner = randomUUID();
     this.visibilityNow = () => Date.now();
     this.visibilityPublishChunk = VISIBILITY_PUBLISH_CHUNK;

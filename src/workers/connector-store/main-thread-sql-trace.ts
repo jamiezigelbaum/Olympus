@@ -12,7 +12,9 @@ import { Database } from 'bun:sqlite';
 import { isMainThread } from 'node:worker_threads';
 import { recordSourceAnswerMainThreadSql, sourceAnswerTraceActive } from '../source-index/answer-latency-trace.ts';
 
-const TIMED = Symbol('olympus.mainThreadSqlTimed');
+// A plain key, not a Symbol: a module-level call would keep the plugin
+// bundle from tree-shaking this module (test/plugin-bundle-no-bun-sqlite).
+const TIMED = '__olympusMainThreadSqlTimed';
 const STATEMENT_METHODS = ['all', 'get', 'run', 'values'] as const;
 const SITE_FRAMES = 3;
 let installed = false;
@@ -30,7 +32,7 @@ export function installMainThreadSqlTrace(): void {
 }
 
 function timeStatement<T>(statement: T): T {
-  const held = statement as unknown as Record<string | symbol, unknown>;
+  const held = statement as unknown as Record<string, unknown>;
   if (!statement || held[TIMED]) return statement;
   for (const method of STATEMENT_METHODS) {
     const call = held[method];
