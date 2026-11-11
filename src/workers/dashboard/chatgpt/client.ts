@@ -1923,7 +1923,8 @@ export function chatgptDashboardClient(
     }
     const items = wholeCount(archive.items);
     // An index that cannot be read now is said as such, never as no messages.
-    const uncounted = archive.countsUnavailable === true && archive.status !== 'removing';
+    const unavailable = archive.countsUnavailable === true && archive.status !== 'removing';
+    const uncounted = unavailable || archive.countsPending === true;
     if (halted && archive.status === 'importing') {
       const pct = typeof archive.percent === 'number' && isFinite(archive.percent) ? archive.percent : 0;
       add(item, el('p', 'muted', uncounted ? fill(A.notRunningLineUncounted, { percent: percent(pct) }) : fill(A.notRunningLine, { percent: percent(pct), items: itemCount(archive, items) })));
@@ -1959,8 +1960,9 @@ export function chatgptDashboardClient(
       const file = typeof stop.file === 'string' && stop.file ? stop.file : A.thisFile;
       add(item, el('p', 'reason strong', fill(words.why, { file })), el('p', 'muted', words.fix));
     }
-    if (uncounted) add(item, el('p', 'reason strong', A.countsUnavailable.why), el('p', 'muted', A.countsUnavailable.fix));
-    else if (archive.status !== 'removing' && items > 0) add(item, archiveHeld(archive, model));
+    if (archive.countsPending === true && archive.status !== 'removing') add(item, el('p', 'muted', A.counting));
+    if (unavailable) add(item, el('p', 'reason strong', A.countsUnavailable.why), el('p', 'muted', A.countsUnavailable.fix));
+    else if (!uncounted && archive.status !== 'removing' && items > 0) add(item, archiveHeld(archive, model));
     const why = archiveWhy(archive);
     if (why) add(item, why);
     if (archive.status !== 'removing') {

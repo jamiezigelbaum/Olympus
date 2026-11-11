@@ -7,7 +7,7 @@ import { createReleaseManifestSink, recordReleaseManifest, runWithReleaseManifes
 import { buildSourceIndexCorpusRegistry, defineSourceIndexCorpus } from '../src/core/source-index/corpus.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import { createAnalystSourceIndexAnswerHandler } from '../src/workers/source-index/analyst-answer.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { callChatGptTool } from '../src/workers/chatgpt/mcp-surface.ts';
 import { createInProcessOperationContext } from '../src/workers/remote-mcp.ts';
 

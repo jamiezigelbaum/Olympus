@@ -45,7 +45,7 @@ import { SecretLocationsIndex } from '../src/workers/classification/secret-locat
 import { secretLocationsPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { DASHBOARD_ARCHIVE_COPY as A } from '../src/workers/dashboard/vocabulary.ts';
 import { createDashboardPanelTools } from '../src/workers/email-source/dashboard-panel-tools.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import { MacPermissions } from '../src/workers/local-files/mac-permissions.ts';
 import { createArchivePathResolver } from '../src/workers/local-files/scope-browser.ts';
@@ -164,6 +164,8 @@ async function imported(f: Fixture, name: string, messages: readonly string[]): 
   const started = await f.dashboard.approve({ requestId: asked.request_id });
   if (!started.ok || started.status !== 'started') throw new Error('expected a start');
   await importAll(f.runtime, started.archive_id);
+  f.dashboard.view();
+  await f.dashboard.idle();
   return { id: started.archive_id, path };
 }
 

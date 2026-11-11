@@ -39,6 +39,7 @@ import {
 } from '../src/core/source-index/types.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
+import { textLaneAccepts } from '../src/workers/file-extraction/extractors/text.ts';
 import {
   OCR_DETERMINISTIC_PDF_REJECTION_KINDS,
   OCR_EXTRACTOR_KIND,
@@ -537,6 +538,96 @@ describe('extraction runner: settlement comes from the source, never re-derived'
 });
 
 describe('extraction runner: one refused bucket never fails a plan pass', () => {
+  test('records normalized unroutable refs once per page and clears them when a reader accepts them', async () => {
+    const jobs = jobStore();
+    let readerReady = false;
+    const record = spyOn(jobs, 'recordUnroutable');
+    try {
+      const runner = runnerFor({
+        jobs,
+        extractors: [fakeExtractor({ kind: 'local_text', accepts: () => readerReady })],
+        corpus: { source: fakeSource({
+          async listCandidates() {
+            return { candidates: [ref(1, { mimeType: 'application/octet-stream', name: 'data.xml' }),
+              ref(2, { mimeType: 'application/msword', name: 'old.doc' })], done: true };
+          },
+        }) },
+      });
+      expect(await runner.plan({ ...LANE, limit: 10 })).toMatchObject({ jobsQueued: 0, jobsUnroutable: 2, jobsRefused: 0 });
+      expect(record).toHaveBeenCalledTimes(1);
+      expect(record.mock.calls[0]?.[0]).toEqual([
+        ref(1, { mimeType: 'application/xml', name: 'data.xml' }),
+        ref(2, { mimeType: 'application/msword', name: 'old.doc' }),
+      ]);
+      expect(jobs.corpusReadiness(CORPUS_ID).unsupportedKindItems).toBe(2);
+      readerReady = true;
+      expect(await runner.plan({ ...LANE, limit: 10 })).toMatchObject({ jobsQueued: 2, jobsUnroutable: 0 });
+      expect(jobs.corpusReadiness(CORPUS_ID)).toMatchObject({ unsupportedKindItems: 0, queuedJobs: 2 });
+      expect(record).toHaveBeenCalledTimes(1);
+    } finally { record.mockRestore(); jobs.close(); }
+  });
+
+  test('a plan held to a reader that is not here does not call its candidates unreadable', async () => {
+    const jobs = jobStore();
+    const record = spyOn(jobs, 'recordUnroutable');
+    try {
+      const runner = runnerFor({
+        jobs,
+        extractors: [fakeExtractor({ accepts: () => false })],
+        corpus: { source: fakeSource({ async listCandidates() {
+          return { candidates: [ref(1, { mimeType: 'video/mp4' })], done: true };
+        } }) },
+      });
+      expect(await runner.plan({ ...LANE, limit: 10, extractorKind: 'kind_not_installed_here' })).toMatchObject({ jobsUnroutable: 1 });
+      expect(record).not.toHaveBeenCalled();
+      expect(jobs.corpusReadiness(CORPUS_ID).unsupportedKindItems).toBe(0);
+    } finally { record.mockRestore(); jobs.close(); }
+  });
+
+  test('a refused image is not recorded even when no reader accepts it', async () => {
+    const jobs = jobStore();
+    const record = spyOn(jobs, 'recordUnroutable');
+    try {
+      const runner = runnerFor({
+        jobs,
+        extractors: [fakeExtractor({ accepts: () => false })],
+        corpus: {
+          refusesImageContent: () => true,
+          source: fakeSource({ async listCandidates() {
+            return { candidates: [ref(1, { mimeType: 'application/octet-stream', name: 'photo.jpg' })], done: true };
+          } }),
+        },
+      });
+      expect(await runner.plan({ ...LANE, limit: 10 })).toMatchObject({
+        jobsUnroutable: 0, jobsSkippedImageNotPrivate: 1, jobsQueued: 0,
+      });
+      expect(record).not.toHaveBeenCalled();
+      expect(jobs.corpusReadiness(CORPUS_ID).unsupportedKindItems).toBe(0);
+    } finally { record.mockRestore(); jobs.close(); }
+  });
+
+  test('a failed unsupported-kind write is logged once and does not stop routable work', async () => {
+    const jobs = jobStore();
+    const record = spyOn(jobs, 'recordUnroutable').mockImplementation(() => { throw new Error('write unavailable'); });
+    const log = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const runner = runnerFor({
+        jobs,
+        extractors: [fakeExtractor({ kind: 'local_text', accepts: (mime) => mime === 'text/plain' })],
+        corpus: { source: fakeSource({ async listCandidates() {
+          return { candidates: [ref(1), ref(2, { mimeType: 'application/msword' }),
+            ref(3, { mimeType: 'application/msword' })], done: true };
+        } }) },
+      });
+      expect(await runner.plan({ ...LANE, limit: 10 })).toMatchObject({
+        jobsQueued: 1, jobsUnroutable: 2, jobsRefused: 0,
+      });
+      expect(record).toHaveBeenCalledTimes(1);
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(log.mock.calls[0]?.[0]).toContain('reason_kind=unroutable_record_failed');
+    } finally { log.mockRestore(); record.mockRestore(); jobs.close(); }
+  });
+
   // 2026-10-07: an image-scoped extractor version the job store refused
   // (`+` is not a safe key part) threw out of plan(), so every Dropbox
   // extract pass failed and no file was queued at all.
@@ -597,6 +688,41 @@ describe('extraction runner: one refused bucket never fails a plan pass', () => 
       expect(plan).toMatchObject({ candidates: 3, jobsQueued: 2, jobsSkippedImageNotPrivate: 1 });
       const leased = jobs.lease({ ...LANE, workerId: 'w', limit: 10 }).leasedJobs.map((job) => job.ref.providerItemId).sort();
       expect(leased).toEqual(['item-1', 'item-3']);
+    } finally {
+      jobs.close();
+    }
+  });
+
+  test('a candidate stored as plain bytes is routed by its name when the name says what it is', async () => {
+    const jobs = jobStore();
+    try {
+      const runner = runnerFor({
+        jobs,
+        extractors: [fakeExtractor({ kind: 'local_text', accepts: textLaneAccepts })],
+        corpus: {
+          source: fakeSource({
+            async listCandidates() {
+              return {
+                candidates: [
+                  ref(1, { mimeType: 'application/octet-stream', name: 'minutes.xml' }),
+                  ref(2, { mimeType: 'application/octet-stream', name: 'settings.yaml' }),
+                  ref(3, { mimeType: 'application/octet-stream', name: 'keynote.key' }),
+                  ref(4, { mimeType: 'application/octet-stream', name: 'no-extension' }),
+                  ref(5, { mimeType: 'application/octet-stream', name: 'notes.constructor' }),
+                  ref(6, { mimeType: 'application/octet-stream', name: 'notes.__proto__' }),
+                ],
+                done: true,
+              };
+            },
+          }),
+        },
+      });
+      const plan = await runner.plan({ ...LANE, limit: 10 });
+      expect(plan).toMatchObject({ candidates: 6, jobsQueued: 2, jobsUnroutable: 4 });
+      const leased = jobs.lease({ ...LANE, workerId: 'w', limit: 10 }).leasedJobs
+        .map((job) => [job.ref.providerItemId, job.ref.mimeType])
+        .sort();
+      expect(leased).toEqual([['item-1', 'application/xml'], ['item-2', 'text/plain']]);
     } finally {
       jobs.close();
     }

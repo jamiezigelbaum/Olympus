@@ -29,7 +29,10 @@ import type {
   ExtractorOutput,
   ExtractorRereadPolicy,
 } from '../types.ts';
+import { RTF_MIME_TYPES, hasRtfSignature, rtfSourceFromBytes, rtfToText } from './rtf.ts';
 import {
+  BOUNDED_TEXT_TRUNCATED_WARNING,
+  BOUNDED_TEXT_TRUNCATION_REASON,
   DEFAULT_MAX_BOUNDED_TEXT_CHARS,
   DEFAULT_MAX_TABLE_SAMPLE_COLUMNS,
   DEFAULT_MAX_TABLE_SAMPLE_ROWS,
@@ -334,6 +337,28 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
           ],
         });
       }
+      if (mimeType && RTF_MIME_TYPES.has(mimeType)) {
+        if (!hasRtfSignature(bytes)) return { status: 'skipped_unsupported' };
+        // One character per byte; the reader decodes text above 0x7f in the
+        // document's own code page.
+        const plain = rtfToText(rtfSourceFromBytes(bytes), maxBoundedTextChars);
+        const read = boundText(normalizeExtractedText(plain.text), maxBoundedTextChars);
+        const bounded = plain.truncated && !read.truncated
+          ? {
+            ...read,
+            truncated: true,
+            truncationReason: BOUNDED_TEXT_TRUNCATION_REASON,
+            warnings: [BOUNDED_TEXT_TRUNCATED_WARNING],
+          }
+          : read;
+        if (!bounded.text) return { status: 'empty_output' };
+        return {
+          status: 'indexed',
+          text: bounded.text,
+          derivations: [buildDerivation({ artifact: 'text', structural: { kind: 'whole_file' }, bounded })],
+          ...(bounded.warnings.length > 0 ? { warnings: [...bounded.warnings] } : {}),
+        };
+      }
       if (!mimeType || !TEXT_MIME_TYPES.has(mimeType)) {
         return { status: 'skipped_unsupported' };
       }
@@ -448,7 +473,8 @@ export function textLaneAccepts(mimeType: string | undefined): boolean {
     || normalized === XLSX_MIME_TYPE
     || normalized === PPTX_MIME_TYPE
     || IMAGE_MIME_TYPES.has(normalized)
-    || TEXT_MIME_TYPES.has(normalized);
+    || TEXT_MIME_TYPES.has(normalized)
+    || RTF_MIME_TYPES.has(normalized);
 }
 
 /**

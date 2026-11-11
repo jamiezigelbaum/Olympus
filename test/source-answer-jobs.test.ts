@@ -30,7 +30,7 @@ import {
   type SourceAnswerPending,
 } from '../src/core/source-answer-jobs.ts';
 import { handleMcpCallTool } from '../src/mcp/server.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import {
   createInProcessOperationContext,
@@ -123,7 +123,7 @@ let analyst: ReturnType<typeof fakeAnalyst>;
 let jobs: SourceAnswerJobRegistry;
 
 function startServer(limits: Partial<SourceAnswerJobLimits> = FAST): void {
-  // Wired as the worker wires it (email-source/server.ts).
+  // Wired as the worker wires it (engine/server.ts).
   jobs = new SourceAnswerJobRegistry({
     limits,
     isOwnerRevoked: (owner) => {

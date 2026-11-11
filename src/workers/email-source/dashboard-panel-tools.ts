@@ -275,7 +275,7 @@ function archiveArg(value: unknown): value is string {
 }
 
 /**
- * One archive route on the worker (email-source/index.ts, under the grant
+ * One archive route on the worker (engine/index.ts, under the grant
  * guard): its JSON answer, or the refusal it gave in its own words.
  */
 async function archiveRoute(

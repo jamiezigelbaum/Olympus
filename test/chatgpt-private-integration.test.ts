@@ -16,6 +16,7 @@ import { recordScriptedSearch, scriptedSearchReleaseCheck } from './helpers/scri
 //   its download alone never puts the page into `installing`.
 
 import { afterEach, describe, expect, test } from 'bun:test';
+import { waitFor } from './helpers/test-clock.ts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -49,12 +50,13 @@ import { privateAnswerPageHtml } from '../src/workers/chatgpt/private-answer-res
 import { CHATGPT_PRIVATE_ANSWER_JOB_ID } from '../src/workers/dashboard/chatgpt/private-answer.ts';
 import { PRIVATE_ANSWER_PATH_PATTERN } from '../connect-relay/shared/private-answer.ts';
 import { CHATGPT_TOOLS } from '../src/workers/chatgpt/mcp-surface.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { createConnectorStoreContentProvider, createConnectorStoreCorpusAdapter, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
-import { checkPrivateEvidenceItems, releaseAnalystAnswer, searchPrivateEvidence, searchReleasedEvidence } from '../src/workers/source-index/analyst-answer.ts';
+import { checkPrivateEvidenceItems, readPrivateEvidenceItem, releaseAnalystAnswer, searchPrivateEvidence, searchReleasedEvidence } from '../src/workers/source-index/analyst-answer.ts';
 import { buildEvidencePackDetailed } from '../src/core/evidence-pack.ts';
+import { TieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { createInProcessOperationContext, createRemoteMcpHandler } from '../src/workers/remote-mcp.ts';
@@ -67,6 +69,7 @@ import {
   fixtureConnector,
   identityOf,
   openTierFixture,
+  openLegStore,
   tempDir,
   type FixtureSpec,
 } from './helpers/tier-fixtures.ts';
@@ -159,13 +162,15 @@ describe('olympus_search -> private answer panel -> built-in model (end to end)'
     const worker = createEmailSourceWorker({});
     const config = { ...defaultConfig(), sourceIndex: { ...defaultConfig().sourceIndex, enabled: true } };
     let refreshes = 0;
+    const probeOriginals: Array<readonly PrivateEvidenceItem[] | undefined> = [];
     const handler = createRemoteMcpHandler({
       connections: () => store,
       makeOperationContext: (caller, signal) => ({ ...createInProcessOperationContext({ config, sourceIndexReadEnabled: true, workerFetch: worker.fetch, caller, signal }), releaseCheck: scriptedSearchReleaseCheck }),
       chatgpt: {
         servesRequest: () => true,
         privateAnswers: jobs,
-        async privateMatchProbe() {
+        async privateMatchProbe(_question, _ctx, originalMatches) {
+          probeOriginals.push(originalMatches);
           refreshes += 1;
           return { count: 1, evidence: PRIVATE_HITS };
         },
@@ -257,6 +262,10 @@ describe('olympus_search -> private answer panel -> built-in model (end to end)'
     expect(stub.requests.every((request) => request.localOnly === true)).toBe(true);
     expect(stub.requests[0]!.prompt).toContain(PRIVATE_PASSAGE);
     expect(refreshes).toBe(2);
+    expect(probeOriginals[0]).toBeUndefined();
+    expect(probeOriginals[1]).toHaveLength(1);
+    expect(probeOriginals[1]![0]!.sourceItem).toEqual(PRIVATE_HITS[0]!.sourceItem);
+    expect(JSON.stringify(probeOriginals[1])).not.toContain(PRIVATE_PASSAGE);
   });
 
   test('Private candidates carry their passages to the built-in model; the tool result carries only the count', async () => {
@@ -430,9 +439,18 @@ describe('sealing and the panel page', () => {
 
 describe('claim-time evidence over a real local index', () => {
   /** The production search and the production live guard over one tier fixture. */
-  async function realPrivateLane(specs: FixtureSpec[]) {
+  async function realPrivateLane(specs: FixtureSpec[], held = false) {
     const { dir, cleanup } = tempDir();
     const fixture = openTierFixture(dir, { embed: false });
+    if (held) {
+      fixture.stores.public_safe = openLegStore(fixture.paths, 'public_safe', fixture.ledger);
+      fixture.set = new TieredStoreSet({ setId: 'held-fixture', ledger: fixture.ledger, secretLocations: fixture.secrets,
+        tierClassification: { sniffer: { id: 'fixture', judge: () => ({ verdict: 'undecided', queued: true }) } },
+        legs: (['public_safe', 'internal', 'secure_local'] as const).map(domain => ({
+          store: fixture.stores[domain]!, corpusId: CORPORA[domain], trustDomain: domain,
+        })),
+      });
+    }
     cleanups.push(() => {
       fixture.close();
       cleanup();
@@ -462,7 +480,84 @@ describe('claim-time evidence over a real local index', () => {
       guardCalls += 1;
       return checkPrivateEvidenceItems({ lanes, items });
     };
-    return { fixture, privateSearch, eligible, scope, guardCalls: () => guardCalls };
+    return { fixture, lanes, privateSearch, eligible, scope, guardCalls: () => guardCalls };
+  }
+
+  for (const tier of ['private', 'public', 'secrets', 'deleted'] as const) {
+    test(`a held match moved to ${tier} before claim follows only its original identity`, async () => {
+      const lane = await realPrivateLane([
+        { id: 'original', conversation: 'room', name: 'orchard-invoice.txt', text: 'The orchard invoice total is 42 euros.' },
+        { id: 'unmatched', name: 'other-notes.txt', text: 'UNMATCHED_SENTINEL: another total is 99 euros.' },
+      ], true);
+      const atSearch = await lane.privateSearch();
+      expect(atSearch.map(item => (item.provenance as { sourceItem: { providerItemId: string } }).sourceItem.providerItemId)).toEqual(['original']);
+      expect(lane.fixture.ledger.getCurrent(identityOf('original', 'room'))).toMatchObject({ contentPending: true });
+      const stub = stubBuiltInModel(JSON.stringify({
+        answer: 'The total is 42 euros [1].', citations: [{ evidence: 1, claim: 'The total is 42 euros.' }],
+        unanswered: [], sufficient: true,
+      }));
+      const depthReads: string[] = [];
+      const model = createBuiltInPrivateAnswerModel({
+        eligible: lane.eligible, model: stub.model, available: () => true, answer: answerPrivately,
+        readItem: async (item, request) => {
+          const chunks = await readPrivateEvidenceItem({ lanes: lane.lanes, item, ...request });
+          depthReads.push(...chunks ?? []);
+          return chunks;
+        },
+      });
+      const logs: string[] = [];
+      const jobs = new PrivateAnswerJobs({ eligible: lane.eligible, model: () => model, installId: () => INSTALL,
+        claimHoldMs: 0, log: line => logs.push(line) });
+      const { jobId } = jobs.begin({ question: 'orchard invoice', count: 1, evidence: atSearch, detail: 'full',
+        refresh: async (_signal, originalMatches) => (await searchPrivateEvidence({
+          lanes: lane.lanes, question: 'orchard invoice', originalMatches,
+        })).candidates as unknown as PrivateEvidenceItem[],
+      });
+      expect(stub.requests).toHaveLength(0);
+      // Another held item starts matching only after this job was created.
+      await lane.fixture.set.sync(fixtureConnector(() => [
+        { id: 'original', conversation: 'room', name: 'orchard-invoice.txt', text: 'The orchard invoice total is 42 euros.' },
+        { id: 'unmatched', name: 'other-notes.txt', text: 'UNMATCHED_SENTINEL: orchard invoice total is 99 euros.', version: 'v2' },
+      ]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+      // The real judge verdict and mover clear the hold before the panel claims.
+      for (const id of ['original', 'unmatched']) {
+        lane.fixture.ledger.applySnifferVerdict(identityOf(id, id === 'original' ? 'room' : undefined), {
+          pass: 'content', tier: 'private', reason: 'content:sniffer:fixture:personal', modelId: 'fixture',
+        }, { placementFor: decision => lane.fixture.set.placementFor(decision) });
+        await moveTieredItem({ set: lane.fixture.set, identity: identityOf(id, id === 'original' ? 'room' : undefined),
+          target: { metadataTier: 'private', contentTier: 'private' } });
+      }
+      expect(lane.fixture.ledger.getCurrent(identityOf('original', 'room'))).toMatchObject({ contentPending: false, contentTier: 'private' });
+      if (tier === 'public' || tier === 'secrets') {
+        await moveTieredItem({ set: lane.fixture.set, identity: identityOf('original', 'room'),
+          target: { metadataTier: tier, contentTier: tier } });
+      } else if (tier === 'deleted') {
+        lane.fixture.stores.internal!.tombstoneCopy(identityOf('original', 'room'), { connectorId: 'fixture_lane' });
+      }
+      expect(await lane.privateSearch()).toEqual([]);
+      const panel = await generatePanelKeyPair();
+      await jobs.claim(jobId!, panel.publicKey);
+      await waitFor(() => logs.length > 0);
+      const response = await jobs.claim(jobId!, panel.publicKey);
+      if (tier === 'secrets' || tier === 'deleted') {
+        expect(response.body.status).toBe('failed');
+        expect(logs.join(' ')).toContain('reason=no_evidence');
+        expect(stub.requests).toHaveLength(0);
+      } else {
+        expect(response.body.status).toBe('ready');
+        const opened = JSON.parse(await openPrivateAnswer(jobId!, panel.privateKey, response.body as unknown as SealedPrivateAnswer));
+        expect(opened.answer).toContain('42 euros');
+        expect(opened.citations).toHaveLength(1);
+        expect(opened.citations[0].title).toBe('orchard-invoice.txt');
+        expect(depthReads.join(' ')).toContain('42 euros');
+        expect(JSON.stringify(stub.requests)).not.toContain('UNMATCHED_SENTINEL');
+        expect(JSON.stringify(stub.requests)).toContain('42 euros');
+        // Hand-out rechecks the marked identity, including a later Secret move.
+        await moveTieredItem({ set: lane.fixture.set, identity: identityOf('original', 'room'),
+          target: { metadataTier: 'secrets', contentTier: 'secrets' } });
+        expect((await jobs.claim(jobId!, panel.publicKey)).body.status).toBe('failed');
+      }
+    });
   }
 
   test('a Private item re-tiered to Secret: the live guard refuses it, and no model ever reads it (claim or precompute)', async () => {

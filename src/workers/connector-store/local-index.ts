@@ -2933,6 +2933,20 @@ export interface ConnectorStoreOwnedSearchFacetRefreshSummary {
   refreshedLocalItemIds: string[];
 }
 
+/** Off-thread people reads tried before a store whose visibility keeps moving is read on this thread. */
+const PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3;
+
+/** A people read's row: one sender in one conversation at one tier. */
+interface PeopleObservationRow {
+  provider: string;
+  sender_id: string | null;
+  sender_label: string | null;
+  conversation_id: string | null;
+  trust_tier: string;
+  is_owner: number;
+  item_count: number;
+}
+
 interface ItemRow {
   item_pk: number;
   provider: string;
@@ -3143,6 +3157,7 @@ export class LocalConnectorStore {
         createConnectorStoreMediaJudgments(this.db);
         createConnectorStoreItemTextVersions(this.db);
         createConnectorStoreVisibilityTables(this.db);
+        createConnectorStorePeopleIndex(this.db);
         validateConnectorStoreSchema(this.db);
       }
       if (options.readOnly !== true) this.createVisibilityJournal();
@@ -6218,26 +6233,65 @@ export class LocalConnectorStore {
     // for classification) never names anyone: an old Personal copy of an item
     // now judged Private must not make its sender's name shareable.
     const tierHidden = this.tierHiddenItemPks();
-    const heldSql = this.visibilityJournal && this.visibilitySqlMemo;
-    const rows = this.db.query(`
-      SELECT i.provider AS provider, i.sender_id AS sender_id, i.sender_label AS sender_label,
-        i.provider_conversation_id AS conversation_id, i.trust_tier AS trust_tier,
-        MAX(COALESCE(i.sender_is_owner, 0)) AS is_owner, COUNT(*) AS item_count
-      FROM items i
-      WHERE i.tombstoned = 0
-        AND ((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))
-        AND i.item_pk NOT IN (SELECT value FROM json_each(?))
-        ${heldSql ? "AND NOT EXISTS (SELECT 1 FROM temp.tier_visibility_pks v WHERE v.flag = 'held' AND v.item_pk = i.item_pk)" : ''}
-      GROUP BY i.provider, i.sender_id, i.sender_label, i.provider_conversation_id, i.trust_tier
-    `).all(JSON.stringify(heldSql ? tierHidden.hidden : [...tierHidden.hidden, ...tierHidden.held])) as Array<{
-      provider: string;
-      sender_id: string | null;
-      sender_label: string | null;
-      conversation_id: string | null;
-      trust_tier: string;
-      is_owner: number;
-      item_count: number;
-    }>;
+    return this.peopleObservationsFromRows(this.readHere(this.peopleObservationSteps(tierHidden)));
+  }
+
+  /**
+   * The same senders, read on this store's read pool (#1305): on a large
+   * install the read held the worker's thread for about a minute. The hidden
+   * and held copies are taken here, on this thread, against the current
+   * ledger, and travel with the query, since the pool's connection cannot see
+   * this connection's temp tables. A store the pool cannot read is read here.
+   * Unlike a read on this thread, writes can land between taking that set and
+   * the pool's read, and an item written and held in that gap would name its
+   * sender: the read counts only when the store's visibility marker did not
+   * move across it, and is taken again otherwise. A store that keeps moving
+   * (a judging backlog moves the ledger's cursor on every verdict) is read on
+   * this thread after that, with no gap between the set and the read: an
+   * index-only scan now, so about a second on a large store, not the minute
+   * this read once took (#1305).
+   */
+  async peopleObservationsOffThread(): Promise<PeopleSenderObservation[]> {
+    if (!offThreadReadsSupported(this.dbPath)) return this.peopleObservations();
+    for (let attempt = 0; attempt < PEOPLE_OFF_THREAD_READ_ATTEMPTS; attempt += 1) {
+      const marker = this.peopleVisibilityMarker();
+      const tierHidden = await this.tierHiddenItemPksInTurns();
+      const steps = this.peopleObservationSteps(tierHidden);
+      let step = steps.next();
+      while (!step.done) step = steps.next(await readOnPool(this.dbPath, step.value));
+      if (this.peopleVisibilityMarker() === marker) return this.peopleObservationsFromRows(step.value);
+    }
+    return this.peopleObservations();
+  }
+
+  private *peopleObservationSteps(tierHidden: { hidden: readonly number[]; held: readonly number[] }): Generator<StoreRead, PeopleObservationRow[], unknown> {
+    return (yield this.peopleObservationRead([...tierHidden.hidden, ...tierHidden.held])) as PeopleObservationRow[];
+  }
+
+  /**
+   * One row per sender, conversation and tier. The WHERE clause repeats the
+   * partial predicate of idx_connector_store_items_people word for word, and
+   * every column read is in that index (item_pk is the rowid it carries), so
+   * SQLite answers from the index alone, in GROUP BY order, without reading
+   * a row's text (createConnectorStorePeopleIndex).
+   */
+  private peopleObservationRead(excludedItemPks: readonly number[]): StoreRead {
+    return {
+      mode: 'all',
+      sql: `
+        SELECT i.provider AS provider, i.sender_id AS sender_id, i.sender_label AS sender_label,
+          i.provider_conversation_id AS conversation_id, i.trust_tier AS trust_tier,
+          MAX(COALESCE(i.sender_is_owner, 0)) AS is_owner, COUNT(*) AS item_count
+        FROM items i
+        WHERE i.tombstoned = 0
+          AND ${PEOPLE_SENDER_PREDICATE}
+          AND i.item_pk NOT IN (SELECT value FROM json_each(?))
+        GROUP BY i.provider, i.sender_id, i.sender_label, i.provider_conversation_id, i.trust_tier`,
+      params: [JSON.stringify(excludedItemPks)],
+    };
+  }
+
+  private peopleObservationsFromRows(rows: readonly PeopleObservationRow[]): PeopleSenderObservation[] {
     const bySender = new Map<string, PeopleSenderObservation & { conversations: Set<string>; anyPublic: boolean }>();
     for (const row of rows) {
       const key = `${row.provider}\u0000${row.sender_id ?? ''}\u0000${row.sender_label ?? ''}`;
@@ -8902,6 +8956,9 @@ export class LocalConnectorStore {
       SET sender_id = ?, sender_label = ?, sender_is_owner = ?
       WHERE item_pk = ?
     `);
+    const noteChange = this.db.query(`
+      INSERT INTO item_visibility_feed (provider, account_scope, conversation_key, provider_item_id) VALUES (?, ?, ?, ?)
+    `);
 
     this.db.transaction(() => {
       for (const record of records) {
@@ -8959,8 +9016,16 @@ export class LocalConnectorStore {
           senderIsOwner,
           row.item_pk,
         );
+        // Who wrote an item is not visibility, so no trigger notes it, but the
+        // people index reads it: noted here, the change moves every
+        // connection's people marker and the refresh reads this store again
+        // (#1305; nothing forces a periodic rebuild any more).
+        noteChange.run(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
         counts.itemsRepaired += 1;
         outputDigest.update(JSON.stringify({ identity: digestIdentity, status: 'repaired' }));
+      }
+      if (counts.itemsRepaired > 0) {
+        this.db.query(`DELETE FROM item_visibility_feed WHERE seq <= (SELECT MAX(seq) - ${ITEM_VISIBILITY_FEED_RETENTION} FROM item_visibility_feed)`).run();
       }
     })();
 
@@ -13060,12 +13125,20 @@ export class LocalConnectorStore {
     // A bound that could not prove one page will not prove a later, deeper one.
     let tryBound = true;
     while (true) {
-      const rankedPage = (bound: number | undefined): StoreRead => ({ mode: 'all', sql: `
-        ${bound === undefined ? '' : `WITH top AS MATERIALIZED (
+      // Which FTS rows a page is ranked from: the best `bound` of them, every
+      // row ranking at or above `atOrAbove` (the rows tied with the bound, and
+      // better), or every match.
+      type Ranked = { bound: number } | { atOrAbove: number } | undefined;
+      const rankedPage = (from: Ranked): StoreRead => {
+        const bound = from === undefined ? undefined : 'bound' in from ? from.bound : undefined;
+        const atOrAbove = from === undefined ? undefined : 'atOrAbove' in from ? from.atOrAbove : undefined;
+        const top = from === undefined ? undefined : bound !== undefined ? 'top' : 'tied';
+        return { mode: 'all', sql: `
+        ${top === undefined ? '' : `WITH ${top} AS MATERIALIZED (
           SELECT rowid AS fts_rowid, rank FROM connector_store_fts
           WHERE connector_store_fts MATCH ?
             AND rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'
-          ORDER BY rank LIMIT ?
+            ${bound !== undefined ? 'ORDER BY rank LIMIT ?' : 'AND (rank + 0.0) <= ?'}
         )`}
         SELECT
           i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
@@ -13078,12 +13151,12 @@ export class LocalConnectorStore {
           -- item rather than an arbitrary one. That is exactly the chunk the
           -- citation should point at.
           connector_store_fts.chunk_pk AS chunk_pk,
-          ${bound === undefined ? 'MIN(connector_store_fts.rank) AS rank' : `MIN(top.rank) AS rank,
+          ${top === undefined ? 'MIN(connector_store_fts.rank) AS rank' : top === 'tied' ? 'MIN(tied.rank) AS rank' : `MIN(top.rank) AS rank,
           (SELECT COUNT(*) FROM top) AS bound_rows,
           (SELECT MAX(rank) FROM top) AS bound_rank`}
-        FROM ${bound === undefined ? 'connector_store_fts' : 'top JOIN connector_store_fts ON connector_store_fts.rowid = top.fts_rowid'}
+        FROM ${top === undefined ? 'connector_store_fts' : `${top} JOIN connector_store_fts ON connector_store_fts.rowid = ${top}.fts_rowid`}
         JOIN items i ON i.item_pk = connector_store_fts.item_pk
-        WHERE ${bound === undefined ? `connector_store_fts MATCH ?
+        WHERE ${top === undefined ? `connector_store_fts MATCH ?
           AND connector_store_fts.rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'` : '1'}
           AND i.tombstoned = 0
           AND LOWER(COALESCE(i.mime_type, '')) NOT IN (${CONTAINER_MIME_TYPES_SQL})
@@ -13097,28 +13170,41 @@ export class LocalConnectorStore {
       `, params: [
         terms,
         ...(bound === undefined ? [] : [bound]),
+        ...(atOrAbove === undefined ? [] : [atOrAbove]),
         ...(selectedAccount ? [selectedAccount] : []),
         ...selectedFilters.params,
         ...selectedFtsScope.params,
         pageSize,
         scanned,
-      ] });
+      ] };
+      };
       // Rank the best FTS rows first, then read only their items (#1242).
       // Every match outside those rows ranks at or below the last of them,
       // so the page is the full ranking's page when the bound held every
       // match, or when the page filled and its last item ranks strictly
       // above the bound. Otherwise (ties at the bound, or filters hid too
       // many of the best rows) the full ranking runs, as it always did.
+      // A full page whose last item ties with the bound is decided by the rows
+      // ranking at or above the bound's rank: any other match ranks strictly
+      // below every one of them. Those rows are read instead of every match,
+      // and their page holds at least the bounded page's items, so it is full.
       const bound = Math.min(KEYWORD_RANKED_BOUND_MAX, Math.max(KEYWORD_RANKED_BOUND_MIN, (scanned + pageSize) * KEYWORD_RANKED_BOUND_ROWS_PER_ITEM));
-      const boundedPage = tryBound ? (yield rankedPage(bound)) as Array<ItemRow & { bound_rows?: number; bound_rank?: number }> : [];
+      const boundedPage = tryBound ? (yield rankedPage({ bound })) as Array<ItemRow & { bound_rows?: number; bound_rank?: number }> : [];
       const head = boundedPage[0];
       const last = boundedPage.at(-1);
+      const full = boundedPage.length === pageSize;
       const proved = head !== undefined && last !== undefined && (head.bound_rows! < bound
-        || (boundedPage.length === pageSize && last.rank < head.bound_rank!));
-      if (!proved) tryBound = false;
+        || (full && last.rank < head.bound_rank!));
+      const tied = !proved && full && head !== undefined
+        ? (yield rankedPage({ atOrAbove: head.bound_rank! })) as ItemRow[]
+        : undefined;
+      // A read pool read is its own snapshot: the tied rows are trusted only
+      // when they filled the page in theirs.
+      const tiedProved = tied !== undefined && tied.length === pageSize;
+      if (!proved && !tiedProved) tryBound = false;
       const page = proved
         ? boundedPage.map(({ bound_rows: _rows, bound_rank: _rank, ...row }) => row as ItemRow)
-        : (yield rankedPage(undefined)) as ItemRow[];
+        : tiedProved ? tied : (yield rankedPage(undefined)) as ItemRow[];
       scanned += page.length;
       exhausted = page.length < pageSize;
       // OFFSET pages over one ordering. On the read pool each page is its own
@@ -18460,6 +18546,26 @@ function createConnectorStoreSenderIndexes(db: Database): void {
       ON items(sender_label);
     CREATE INDEX IF NOT EXISTS idx_connector_store_items_sender_owner
       ON items(sender_is_owner, sender_id);
+  `);
+  createConnectorStorePeopleIndex(db);
+}
+
+/** An item that names its author: what the people index reads (and its index's partial predicate). */
+const PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`;
+
+/**
+ * The people index's sender read as an index-only scan (#1305): every column
+ * it groups, counts or filters on, for authored items only. Without it the
+ * read visited every row in full, overflow pages of the text included (110 MB
+ * for 94k items, where a count read 0.9 MB). Additive, so no schema version:
+ * a store opened by an older build still opens, and keeps it. Built once,
+ * when a writer of this build first opens the store.
+ */
+function createConnectorStorePeopleIndex(db: Database): void {
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_connector_store_items_people
+      ON items(tombstoned, provider, sender_id, sender_label, provider_conversation_id, trust_tier, sender_is_owner)
+      WHERE ${PEOPLE_SENDER_PREDICATE.replaceAll('i.', '')};
   `);
 }
 

@@ -24,7 +24,7 @@ import {
   createSourceIndexEmbeddingProviderFromSovereignty,
   loadSourceWorkerSovereignty,
   storeEmbeddingScope,
-} from '../src/workers/email-source/server.ts';
+} from '../src/workers/engine/server.ts';
 import {
   createGmailImportedHistorySchedulerSource,
   withEmbeddingSweep,

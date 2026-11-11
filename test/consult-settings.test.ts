@@ -385,7 +385,7 @@ describe('the settings module stays off the hosted surfaces', () => {
     'src/core/consult-ask.ts',
     // The worker server wires ask_anonymously: the settings read, the zkAPI
     // model for the caller and the writer's deadline; it only reads.
-    'src/workers/email-source/server.ts',
+    'src/workers/engine/server.ts',
     // The C5 writer (its own module) reuses the reader's parser and re-reads
     // the file under its lease for compare-and-swap; it only writes through
     // the Mac dashboard adapter below.

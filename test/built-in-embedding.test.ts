@@ -73,7 +73,7 @@ import { mediaCacheDir } from '../src/core/media-cache.ts';
 import {
   createSourceIndexEmbeddingProviderFromEnv,
   createSourceIndexEmbeddingProviderFromSovereignty,
-} from '../src/workers/email-source/server.ts';
+} from '../src/workers/engine/server.ts';
 import { createSovereigntyEngine } from '../src/core/sovereignty.ts';
 import { setupPreflight } from '../src/core/setup-preflight.ts';
 import { loadPreBuiltInPreset } from './helpers/pre-built-in-presets.ts';

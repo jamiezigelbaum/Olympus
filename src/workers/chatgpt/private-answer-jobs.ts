@@ -32,9 +32,9 @@ import { REMOTE_SECRET_NOTE } from '../../core/remote-result.ts';
  *    An item it does not vouch for is never submitted. Nothing eligible left:
  *    no model call, and the analysis ends with no evidence.
  * 3. Claim time: the evidence is searched again (current tiers, not the
- *    search-time cache), and anything not Private-eligible now (Secret
- *    included) is dropped. The precomputed answer is used only when every
- *    item it read is still Private-eligible; otherwise it is discarded and the
+ *    search-time cache), including original matches now at a lower tier.
+ *    Anything not eligible now (Secret included) is dropped. The precomputed
+ *    answer is used only when every item it read is still Private-eligible; otherwise it is discarded and the
  *    answer is computed again from the current evidence (or the job fails).
  *    The claiming POST holds briefly (PRIVATE_ANSWER_CLAIM_HOLD_MS) for the
  *    answer; until it is sealed, the claiming key gets 202 `pending` with
@@ -278,7 +278,7 @@ export function formatAnalysisTiming(timing: AnalysisTiming): string {
 }
 
 /** Re-reads the job's evidence at claim time, at the items' current tiers. */
-export type PrivateEvidenceRefresh = (signal: AbortSignal) => Promise<readonly PrivateEvidenceItem[] & { secretMatch?: true }>;
+export type PrivateEvidenceRefresh = (signal: AbortSignal, originalMatches: readonly PrivateEvidenceItem[]) => Promise<readonly PrivateEvidenceItem[] & { secretMatch?: true }>;
 
 /**
  * One run of the private model over one question's eligible evidence: a
@@ -329,6 +329,8 @@ interface Job {
   question: string | undefined;
   evidence: readonly PrivateEvidenceItem[] | undefined;
   refresh: PrivateEvidenceRefresh | undefined;
+  /** Original identities and citation labels, retained until the claim refresh. */
+  originalMatches: readonly PrivateEvidenceItem[] | undefined;
   analysis: Analysis | undefined;
   claimKey?: string;
   pollTokens: number;
@@ -417,13 +419,16 @@ const defaultAudit = (event: PrivateAnswerAuditEvent) => {
 };
 
 /**
- * Whether a search hit may feed a private answer: Private (secure_local) only.
- * A hit that names any other trust domain, or any Secret tier, is dropped.
+ * Whether a search hit may feed a private answer: Private, or an original
+ * match that this job admitted after it moved to Personal/Public.
+ * Any other domain, or any Secret tier, is dropped. The lower-tier marker
+ * is minted by the job after matching its original identities, never by search.
  * A hit naming neither came from a Private corpus search and is kept.
  */
 export function isPrivateEligible(item: PrivateEvidenceItem): boolean {
   const domain = item.trust_domain ?? item.trustDomain;
-  if (domain !== undefined && domain !== 'secure_local') return false;
+  if (domain !== undefined && domain !== 'secure_local'
+    && !(item.privateAnswerOriginalMatch === true && (domain === 'internal' || domain === 'public_safe'))) return false;
   for (const key of ['trust_tier', 'trustTier', 'tier', 'content_tier', 'contentTier', 'metadata_tier', 'metadataTier']) {
     const tier = item[key];
     // Secret by name, or by trust tier: S5 is Secrets.
@@ -539,9 +544,9 @@ export class PrivateAnswerJobs {
    * tool result is built, so the id is valid only from then on. The job's
    * analysis starts when a panel claims it, from `evidence` (Private-eligible
    * items only).
-   * `refresh` is the same Private search again, at claim time: it proposes
-   * the current evidence (the live guard decides what may be read). `caller` (the
-   * connection) lets a newer job supersede that caller's older precomputes.
+   * `refresh` searches Private again and re-reads original matches that moved
+   * to a lower tier at claim time: it proposes the current evidence (the live
+   * guard decides what may be read). `caller` (the connection) lets a newer job supersede that caller's older precomputes.
    */
   begin(input: {
     question: string;
@@ -598,6 +603,15 @@ export class PrivateAnswerJobs {
       question: input.question.slice(0, MAX_QUESTION_CHARS),
       evidence: input.evidence.slice(0, MAX_EVIDENCE_ITEMS),
       refresh: input.refresh,
+      originalMatches: input.evidence.slice(0, MAX_EVIDENCE_ITEMS)
+        .filter((item) => isPrivateEligible({ ...item, privateAnswerOriginalMatch: false }) && item.neighbour !== true)
+        .map((item) => {
+          const identity = privateEvidenceIdentity(item);
+          const provenance = asRecord(item.provenance);
+          return provenance?.citation
+            ? { ...identity, provenance: { ...asRecord(identity.provenance), citation: provenance.citation } }
+            : identity;
+        }),
       analysis: undefined,
       pollTokens: this.pollRate.capacity,
       pollRefilledAt: at,
@@ -813,6 +827,7 @@ export class PrivateAnswerJobs {
     this.detach(job);
     job.question = undefined;
     job.evidence = undefined;
+    job.originalMatches = undefined;
     job.refresh = undefined;
     job.outcome = undefined;
     job.opens = undefined;
@@ -1169,6 +1184,8 @@ export class PrivateAnswerJobs {
         return;
       }
       const refresh = job.refresh;
+      const originalMatches = job.originalMatches ?? [];
+      job.originalMatches = undefined;
       const question = job.question ?? '';
       // The claim's computation holds the question from here; the job does not.
       job.question = undefined;
@@ -1176,7 +1193,7 @@ export class PrivateAnswerJobs {
       job.refresh = undefined;
       const refreshStarted = this.now();
       // No search to judge the items by now: nothing is read (fail closed).
-      const found: Awaited<ReturnType<PrivateEvidenceRefresh>> = refresh ? await refresh(abort.signal) : [];
+      const found: Awaited<ReturnType<PrivateEvidenceRefresh>> = refresh ? await refresh(abort.signal, originalMatches) : [];
       // A newly discovered Secret still needs its local location answer.
       // Preserve the Inbox as soon as the refresh knows, including mixed
       // results whose Private evidence can still answer in the panel.
@@ -1185,7 +1202,15 @@ export class PrivateAnswerJobs {
       // A refresh that finished after the deadline (or after the job was
       // dropped) must not start inference.
       if (settled || abort.signal.aborted) return;
-      const evidence = found.filter(isPrivateEligible).slice(0, MAX_EVIDENCE_ITEMS);
+      const originalKeys = new Set(originalMatches.map(privateEvidenceKey));
+      const evidence = found.map((item) => {
+        const { privateAnswerOriginalMatch: _marker, ...candidate } = item;
+        const domain = candidate.trustDomain ?? candidate.trust_domain;
+        // Only this job can grant the lower-tier exception, by original identity.
+        return (domain === 'internal' || domain === 'public_safe') && originalKeys.has(privateEvidenceKey(candidate))
+          ? { ...candidate, privateAnswerOriginalMatch: true }
+          : candidate;
+      }).filter(isPrivateEligible).slice(0, MAX_EVIDENCE_ITEMS);
       timing.neighbours = evidence.filter((item) => item.neighbour === true).length;
       timing.matched = evidence.length - timing.neighbours;
       if (evidence.length === 0) {
@@ -1393,7 +1418,7 @@ const IDENTITY_FIELDS = [
   'tier', 'content_tier', 'contentTier', 'metadata_tier', 'metadataTier',
 ] as const;
 /** The source-item identifiers the guard (`localItemId`) and the claim-time match (`privateEvidenceKey`) read; nothing else of it is kept. */
-const SOURCE_ITEM_FIELDS = ['family', 'provider', 'accountScope', 'providerItemId', 'localItemId'] as const;
+const SOURCE_ITEM_FIELDS = ['family', 'provider', 'accountScope', 'providerItemId', 'providerConversationId', 'localItemId'] as const;
 
 /** The identifier fields of a source item, or undefined when it carries none. */
 function sourceItemIdentity(value: unknown): Record<string, string> | undefined {
@@ -1416,6 +1441,7 @@ function sourceItemIdentity(value: unknown): Record<string, string> | undefined 
  */
 export function privateEvidenceIdentity(item: PrivateEvidenceItem): PrivateEvidenceItem {
   const kept: Record<string, unknown> = {};
+  if (item.privateAnswerOriginalMatch === true) kept.privateAnswerOriginalMatch = true;
   for (const key of IDENTITY_FIELDS) {
     const value = item[key];
     if (typeof value === 'string') kept[key] = value;

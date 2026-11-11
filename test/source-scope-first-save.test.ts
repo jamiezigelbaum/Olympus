@@ -8,7 +8,7 @@ import { afterEach, expect, test } from 'bun:test';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { startApprovedSourceRun } from '../src/workers/email-source/server.ts';
+import { startApprovedSourceRun } from '../src/workers/engine/server.ts';
 import { FileSourceScopeAuthority } from '../src/workers/source-scope-runtime.ts';
 
 const dirs: string[] = [];

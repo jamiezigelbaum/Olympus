@@ -581,7 +581,7 @@ are a delete hold (`core/source-delete-holds.ts`).
   restarts. From the mark, the storage service opens none of its files.
 - At boot, holding the owner lock and before the empty-account re-placement,
   the migration and anything else (`deleteMarkedAccountsAtBoot` in
-  `email-source/server.ts`), each `deleting` account is checked again,
+  `engine/server.ts`), each `deleting` account is checked again,
   the forget steps marked `repeatBeforeRestart` run again (the others ran
   at the mark; repeating them could erase a reconnect made since), its folder
   is renamed into `.trash/<uuid>` and emptied in the background, a legacy

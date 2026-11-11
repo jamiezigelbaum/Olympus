@@ -16,7 +16,7 @@ import {
   type ConnectorStoreSyncOptions,
   type ConnectorStoreSyncSummary,
 } from '../src/workers/connector-store/index.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { createSourceIndexStatusHandler } from '../src/workers/source-index/status.ts';
 import {
   INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,

@@ -26,7 +26,7 @@ test('H1a: real worker route contract: /v1/health is healthy and bare /health re
   const port = reservation.port!; await reservation.stop(true);
   const token = 'review-400-fixture-token-aaaaaaaaaaaaaaaaaaaa';
   const env = { ...process.env, HOME: root, XDG_DATA_HOME: join(root, '.local', 'share'), XDG_STATE_HOME: join(root, '.local', 'state'), XDG_CONFIG_HOME: join(root, '.config'), XDG_RUNTIME_DIR: runtime, OLYMPUS_EMAIL_SOURCE_PORT: String(port), OLYMPUS_WORKER_AUTH_TOKEN: token };
-  const child = spawn(process.execPath, [join(import.meta.dir, '../src/workers/email-source/server.ts')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [join(import.meta.dir, '../src/workers/engine/server.ts')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = ''; child.stdout!.on('data', d => { output += d; }); child.stderr!.on('data', d => { output += d; });
   const socket = join(runtime, 'olympus', 'worker.sock');
   try {
@@ -56,7 +56,7 @@ test('H1b: real engine host + real worker: the desktop bridge reaches `listening
     const host = run([join(import.meta.dir, 'helpers/linux-owner-bridge-process.ts'), 'host']);
     expect(await waitFor(() => host.out().includes('host-started'))).toBe(true);
     const control = join(runtime, 'olympus', readdirSync(join(runtime, 'olympus')).find(n => /^owner-host-.*\.sock$/.test(n))!);
-    const worker = run([join(import.meta.dir, '../src/workers/email-source/server.ts')], { [OWNER_BRIDGE_HOST_ENV]: control });
+    const worker = run([join(import.meta.dir, '../src/workers/engine/server.ts')], { [OWNER_BRIDGE_HOST_ENV]: control });
     const socket = join(runtime, 'olympus', 'worker.sock');
     const up = await waitFor(async () => (await fetch(`${entry}/v1/health`, { unix: socket, headers: { Authorization: `Bearer ${token}` } } as RequestInit)).status === 200);
     if (!up) throw new Error('worker did not boot: ' + worker.out().slice(-1200));

@@ -1,0 +1,329 @@
+{
+  "version": "1.0",
+  "truncation": null,
+  "padding": null,
+  "added_tokens": [
+    {
+      "id": 0,
+      "content": "<s>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 1,
+      "content": "<pad>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 2,
+      "content": "</s>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 3,
+      "content": "<unk>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    }
+  ],
+  "normalizer": {
+    "type": "Sequence",
+    "normalizers": [
+      {
+        "type": "Precompiled",
+        "precompiled_charsmap": "AAQAAAAEAAAAAACAAgAAgAUAAIAGAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGEBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABllAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgQkCAIAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIslAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAChkQIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAALzwAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADMMAMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA4ogDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADvvAMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB4AMOpAABBAA=="
+      },
+      {
+        "type": "NFKC"
+      }
+    ]
+  },
+  "pre_tokenizer": {
+    "type": "Metaspace",
+    "replacement": "▁",
+    "prepend_scheme": "always",
+    "split": true
+  },
+  "post_processor": {
+    "type": "TemplateProcessing",
+    "single": [
+      {
+        "SpecialToken": {
+          "id": "<s>",
+          "type_id": 0
+        }
+      },
+      {
+        "Sequence": {
+          "id": "A",
+          "type_id": 0
+        }
+      },
+      {
+        "SpecialToken": {
+          "id": "</s>",
+          "type_id": 0
+        }
+      }
+    ],
+    "pair": [
+      {
+        "SpecialToken": {
+          "id": "<s>",
+          "type_id": 0
+        }
+      },
+      {
+        "Sequence": {
+          "id": "A",
+          "type_id": 0
+        }
+      },
+      {
+        "SpecialToken": {
+          "id": "</s>",
+          "type_id": 0
+        }
+      },
+      {
+        "SpecialToken": {
+          "id": "</s>",
+          "type_id": 0
+        }
+      },
+      {
+        "Sequence": {
+          "id": "B",
+          "type_id": 0
+        }
+      },
+      {
+        "SpecialToken": {
+          "id": "</s>",
+          "type_id": 0
+        }
+      }
+    ],
+    "special_tokens": {
+      "<s>": {
+        "id": "<s>",
+        "ids": [
+          0
+        ],
+        "tokens": [
+          "<s>"
+        ]
+      },
+      "</s>": {
+        "id": "</s>",
+        "ids": [
+          2
+        ],
+        "tokens": [
+          "</s>"
+        ]
+      }
+    }
+  },
+  "decoder": {
+    "type": "Metaspace",
+    "replacement": "▁",
+    "prepend_scheme": "always",
+    "split": true
+  },
+  "model": {
+    "type": "BPE",
+    "dropout": null,
+    "unk_token": "<unk>",
+    "continuing_subword_prefix": "",
+    "end_of_word_suffix": "",
+    "fuse_unk": true,
+    "byte_fallback": false,
+    "ignore_merges": false,
+    "vocab": {
+      "<s>": 0,
+      "<pad>": 1,
+      "</s>": 2,
+      "<unk>": 3,
+      "\u0001": 4,
+      " ": 5,
+      ",": 6,
+      "-": 7,
+      ".": 8,
+      "?": 9,
+      "A": 10,
+      "C": 11,
+      "D": 12,
+      "K": 13,
+      "R": 14,
+      "T": 15,
+      "W": 16,
+      "X": 17,
+      "a": 18,
+      "b": 19,
+      "c": 20,
+      "d": 21,
+      "e": 22,
+      "f": 23,
+      "g": 24,
+      "h": 25,
+      "i": 26,
+      "j": 27,
+      "k": 28,
+      "l": 29,
+      "m": 30,
+      "n": 31,
+      "o": 32,
+      "p": 33,
+      "r": 34,
+      "s": 35,
+      "t": 36,
+      "u": 37,
+      "v": 38,
+      "w": 39,
+      "x": 40,
+      "z": 41,
+      " ": 42,
+      "à": 43,
+      "ä": 44,
+      "ç": 45,
+      "é": 46,
+      "ï": 47,
+      "ü": 48,
+      "́": 49,
+      "Г": 50,
+      "М": 51,
+      "П": 52,
+      "С": 53,
+      "а": 54,
+      "б": 55,
+      "в": 56,
+      "г": 57,
+      "д": 58,
+      "е": 59,
+      "и": 60,
+      "к": 61,
+      "л": 62,
+      "н": 63,
+      "о": 64,
+      "п": 65,
+      "р": 66,
+      "с": 67,
+      "т": 68,
+      "у": 69,
+      "х": 70,
+      "ч": 71,
+      "я": 72,
+      "ё": 73,
+      "​": 74,
+      "Å": 75,
+      "①": 76,
+      "▁": 77,
+      "。": 78,
+      "と": 79,
+      "の": 80,
+      "㍿": 81,
+      "世": 82,
+      "京": 83,
+      "你": 84,
+      "収": 85,
+      "发": 86,
+      "哪": 87,
+      "在": 88,
+      "好": 89,
+      "書": 90,
+      "東": 91,
+      "求": 92,
+      "界": 93,
+      "票": 94,
+      "請": 95,
+      "都": 96,
+      "里": 97,
+      "領": 98,
+      "ﬁ": 99,
+      "？": 100,
+      "Ａ": 101,
+      "Ｂ": 102,
+      "Ｃ": 103,
+      "～": 104,
+      "🦄": 105,
+      "🫠": 106,
+      "he": 107,
+      "hel": 108,
+      "hell": 109,
+      "hello": 110,
+      "▁hello": 111,
+      "in": 112,
+      "inv": 113,
+      "invo": 114,
+      "invoi": 115,
+      "invoic": 116,
+      "invoice": 117,
+      "▁invoice": 118
+    },
+    "merges": [
+      [
+        "h",
+        "e"
+      ],
+      [
+        "he",
+        "l"
+      ],
+      [
+        "hel",
+        "l"
+      ],
+      [
+        "hell",
+        "o"
+      ],
+      [
+        "▁",
+        "hello"
+      ],
+      [
+        "i",
+        "n"
+      ],
+      [
+        "in",
+        "v"
+      ],
+      [
+        "inv",
+        "o"
+      ],
+      [
+        "invo",
+        "i"
+      ],
+      [
+        "invoi",
+        "c"
+      ],
+      [
+        "invoic",
+        "e"
+      ],
+      [
+        "▁",
+        "invoice"
+      ]
+    ]
+  }
+}

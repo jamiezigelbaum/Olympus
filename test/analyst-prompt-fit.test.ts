@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { analystEvidenceFormat, analystPromptBytes, createAnalyst, withPromptBudget, type AnalystModelRequest } from '../src/core/analyst.ts';
 import { withBuiltInFallback } from '../src/core/analyst-built-in.ts';
 import { defaultConfig } from '../src/core/config.ts';
-import { createAnalystForSovereigntyProfile } from '../src/workers/email-source/server.ts';
+import { createAnalystForSovereigntyProfile } from '../src/workers/engine/server.ts';
 import { createAnalystSourceIndexAnswerHandler, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, fitPackToPromptBytes } from '../src/workers/source-index/analyst-answer.ts';
 import { buildSourceIndexCorpusRegistry, defineSourceIndexCorpus } from '../src/core/source-index/corpus.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';

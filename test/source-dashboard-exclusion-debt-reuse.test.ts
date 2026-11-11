@@ -18,7 +18,7 @@ import { createSovereigntyEngine, buildEnvBridgeSovereigntyConfig } from '../src
 import {
   DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS,
   createEmailSourceWorker,
-} from '../src/workers/email-source/index.ts';
+} from '../src/workers/engine/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
 

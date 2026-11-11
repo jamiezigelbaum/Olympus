@@ -32,8 +32,10 @@ export function fileMimeTypeFromName(name: string): string {
   const dot = name.lastIndexOf('.');
   if (dot <= 0 || dot === name.length - 1) return 'application/octet-stream';
   const extension = name.slice(dot + 1).toLowerCase();
-  return MIME_BY_EXTENSION[extension]
-    ?? (SOURCE_CODE_EXTENSIONS.has(extension) ? 'text/plain' : 'application/octet-stream');
+  // Own keys only: a name ending ".constructor" or ".__proto__" must not
+  // return an inherited object property as a media type.
+  if (Object.hasOwn(MIME_BY_EXTENSION, extension)) return MIME_BY_EXTENSION[extension]!;
+  return SOURCE_CODE_EXTENSIONS.has(extension) ? 'text/plain' : 'application/octet-stream';
 }
 
 const asciiAt = (bytes: Uint8Array, start: number, length: number): string =>
