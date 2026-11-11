@@ -314,7 +314,7 @@ class Run {
     const before = { checks: stage.checks.length, agents: stage.agents.length, traces: stage.traces?.length ?? 0 };
     try {
       const result = await work();
-      if (!legPartial(leg, this.options) && !(leg === 'relay' && !stage.agents.slice(before.agents).some((agent) => agent.ran))) this.legsRan.push(leg);
+      if (!legPartial(leg, this.options) && !(leg === 'relay' && !stage.agents.slice(before.agents).some((agent) => agent.ran)) && !this.legsRan.includes(leg)) this.legsRan.push(leg);
       return result;
     } finally {
       for (const check of stage.checks.slice(before.checks)) check.leg ??= leg;
@@ -1278,40 +1278,60 @@ const tarballVersion = (dir: string): string | undefined => {
  * provisioned fresh with the candidate, the backup is put on it, `restore-clean-machine` is walked there and its state read; then
  * the two are compared. The second machine is destroyed at the end, whatever happened, unless the run keeps its machines.
  */
-async function runRestoreLeg(run: Run, workDir: string, bundlePath: string, outDir: string): Promise<void> {
-  const options = run.options;
-  // Without the whole journeys leg there is no corrected item for the clean machine to find.
-  if (legPartial('restore', options)) return;
-  const first = run.machine!;
-  // Walks one restore journey on the current machine and records its trace; true when it passed.
-  const walk = async (machine: JourneyMachine, label: string): Promise<boolean> => {
-    const done = await run.phase(`restore-${machine}`, () => run.agent('journeys', `--out ~/rc/journeys-${machine} --machine ${machine} --skip-screens`, 1_800_000));
-    const traces = Array.isArray(done.result?.traces) ? done.result!.traces as JourneyTrace[] : [];
-    if (traces.length === 0) {
-      run.add({ id: `restore.${machine}`, title: `The ${label} journey was walked`, status: 'fail', detail: `no result from the machine (exit ${done.code}): ${String(done.result?.detail ?? done.stderr.slice(-200))}` });
-      return false;
-    }
-    const scratch = join(outDir, `_restore-${machine}`);
-    rmSync(scratch, { recursive: true, force: true });
-    mkdirSync(scratch, { recursive: true });
-    try {
-      await run.machine!.get(String(done.result!.archive), join(scratch, 'journeys.tgz'));
-      if (spawnSync('tar', ['-xzf', join(scratch, 'journeys.tgz'), '-C', scratch], { encoding: 'utf8' }).status === 0 && existsSync(join(scratch, 'traces'))) cpSync(join(scratch, 'traces'), join(outDir, 'traces'), { recursive: true });
-    } catch { /* the pictures are evidence; the trace itself came back in the result */ }
-    rmSync(scratch, { recursive: true, force: true });
-    (run.stage.traces ??= []).push(...traces);
-    for (const check of journeyChecks(traces)) run.add(check);
-    return traces.every((trace) => trace.ok);
-  };
+/**
+ * The Mac driver (tart) runs one machine at a time on its host: a run's second machine waits for the first to be gone, so
+ * a second Mac is provisioned only after the first is destroyed (run 42918085215: restore-provision timed out waiting).
+ */
+export const oneMachineAtATime = (os: Machine['os']): boolean => os === 'macos';
 
-  if (!(await walk('restore-from', 'backup'))) return;
+/** What the restore leg keeps between its two halves: the state when the backup was made, and the backup file here. */
+interface RestorePrepared { before: StateSnapshot; local: string }
+
+/** Walks one restore journey on the current machine and records its trace; true when it passed. */
+async function walkRestore(run: Run, machine: JourneyMachine, label: string, outDir: string): Promise<boolean> {
+  const done = await run.phase(`restore-${machine}`, () => run.agent('journeys', `--out ~/rc/journeys-${machine} --machine ${machine} --skip-screens`, 1_800_000));
+  const traces = Array.isArray(done.result?.traces) ? done.result!.traces as JourneyTrace[] : [];
+  if (traces.length === 0) {
+    run.add({ id: `restore.${machine}`, title: `The ${label} journey was walked`, status: 'fail', detail: `no result from the machine (exit ${done.code}): ${String(done.result?.detail ?? done.stderr.slice(-200))}` });
+    return false;
+  }
+  const scratch = join(outDir, `_restore-${machine}`);
+  rmSync(scratch, { recursive: true, force: true });
+  mkdirSync(scratch, { recursive: true });
+  try {
+    await run.machine!.get(String(done.result!.archive), join(scratch, 'journeys.tgz'));
+    if (spawnSync('tar', ['-xzf', join(scratch, 'journeys.tgz'), '-C', scratch], { encoding: 'utf8' }).status === 0 && existsSync(join(scratch, 'traces'))) cpSync(join(scratch, 'traces'), join(outDir, 'traces'), { recursive: true });
+  } catch { /* the pictures are evidence; the trace itself came back in the result */ }
+  rmSync(scratch, { recursive: true, force: true });
+  (run.stage.traces ??= []).push(...traces);
+  for (const check of journeyChecks(traces)) run.add(check);
+  return traces.every((trace) => trace.ok);
+}
+
+/** The restore leg's first half, on the run's machine: the backup journey, the state then, and the backup file brought here. */
+async function prepareRestore(run: Run, workDir: string, outDir: string): Promise<RestorePrepared | undefined> {
+  // Without the whole journeys leg there is no corrected item for the clean machine to find.
+  if (legPartial('restore', run.options)) return undefined;
+  const first = run.machine!;
+  if (!(await walkRestore(run, 'restore-from', 'backup', outDir))) return undefined;
   const before = await takeSnapshot(run, 'when the backup was made');
-  if (!before) return;
+  if (!before) return undefined;
   const listed = await first.exec(`ls -1 ${RESTORE_BACKUP_FOLDER}/*.olympusbackup | tail -1\n`, { timeoutMs: 30_000 });
   const remote = listed.stdout.trim().split('\n').pop() ?? '';
-  if (listed.code !== 0 || !remote) { run.add({ id: 'restore.backup-file', title: 'The backup file was found on the first machine', status: 'fail', detail: listed.stderr.slice(-200) || 'no .olympusbackup file' }); return; }
+  if (listed.code !== 0 || !remote) { run.add({ id: 'restore.backup-file', title: 'The backup file was found on the first machine', status: 'fail', detail: listed.stderr.slice(-200) || 'no .olympusbackup file' }); return undefined; }
   const local = join(workDir, 'restore.olympusbackup');
   await first.get(remote, local);
+  return { before, local };
+}
+
+/**
+ * The restore leg's second half: a clean machine, the backup restored into it, and the state compared. Where the driver runs
+ * one machine at a time the caller destroys the first machine before this, after everything else that needs it.
+ */
+async function finishRestore(run: Run, bundlePath: string, outDir: string, workDir: string, prepared: RestorePrepared): Promise<void> {
+  const options = run.options;
+  const first = run.machine!;
+  const { before, local } = prepared;
 
   let second: Machine | undefined;
   try {
@@ -1321,7 +1341,7 @@ async function runRestoreLeg(run: Run, workDir: string, bundlePath: string, outD
     await second.exec(`mkdir -p ~/rc ${RESTORE_BACKUP_FOLDER} && chmod 700 ~/rc ${RESTORE_BACKUP_FOLDER}\n`, { timeoutMs: 30_000 });
     await second.put(bundlePath, '~/rc/agent.js');
     await second.put(local, RESTORE_BACKUP_PATH);
-    if (!(await walk('restore-to', 'restore'))) return;
+    if (!(await walkRestore(run, 'restore-to', 'restore', outDir))) return;
     const after = await takeSnapshot(run, 'after the restore');
     if (!after) return;
     for (const check of evaluateRestore(before, after)) run.add(check);
@@ -1413,9 +1433,17 @@ async function runUpgradeLeg(run: Run, workDir: string, bundlePath: string, judg
   if (Date.now() < deadline) await runInboxLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the Ask page and Inbox leg');
   if (Date.now() < deadline) await runJourneyLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the journeys');
   if (Date.now() < deadline) await runArchiveLeg(run, options.outDir, deadline); else run.errors.push('the run exceeded its time budget before the archive-import leg');
+  if (Date.now() < deadline) await runRelayConsentCheck(run);
   if (Date.now() < deadline) await runExploreLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the control exploration');
   if (Date.now() < deadline) await runConfinementCheck(run); else run.errors.push('the run exceeded its time budget before the anonymous-answer confinement check');
   await collectEvidence(run, options.outDir);
+}
+
+// Before the control exploration: it presses Turn off remote access (answering OK), and the approval page and its
+// registration answer only in relay mode (run 42918085215: registration 404 after the explore leg).
+// Mac only, in relay mode: a second account's Connect on the app approval page is refused, the owner's approves (#1186).
+async function runRelayConsentCheck(run: Run): Promise<void> {
+  run.add(await run.phase('mac-consent-owner-proof', () => checkMacConsentOwnerProof(run.machine!, !run.options.skipRelay && !!run.options.config.relay)));
 }
 
 // Last, because installing the anonymous-answer tools and, on Ubuntu, the administrator's AppArmor profile changes what
@@ -1424,8 +1452,6 @@ async function runConfinementCheck(run: Run): Promise<void> {
   run.add(await run.phase('zkapi-confinement', () => checkZkapiConfinement(run.machine!)));
   // Mac only (a skip on Linux): a second account's local unlock is refused, the owner's still works (#1153).
   run.add(await run.phase('mac-owner-proof', () => checkMacOwnerProof(run.machine!)));
-  // Mac only, in relay mode: a second account's Connect on the app approval page is refused, the owner's approves (#1186).
-  run.add(await run.phase('mac-consent-owner-proof', () => checkMacConsentOwnerProof(run.machine!, !run.options.skipRelay && !!run.options.config.relay)));
   // Linux only (a skip on a Mac): the owner socket, which `olympus remote open` forwards, is not an owner proof by itself (#1188).
   run.add(await run.phase('forwarded-socket-owner-proof', () => checkForwardedSocketOwnerProof(run.machine!)));
 }
@@ -1485,12 +1511,33 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
         if (Date.now() < deadline) await run.inLeg('inbox', () => runInboxLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the Ask page and Inbox leg');
         if (Date.now() < deadline) await run.inLeg('journeys', () => runJourneyLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the journeys');
         if (Date.now() < deadline) await run.inLeg('archive', () => runArchiveLeg(run, options.outDir, deadline)); else run.errors.push('the run exceeded its time budget before the archive-import leg');
+        if (Date.now() < deadline) await runRelayConsentCheck(run);
         if (Date.now() < deadline) await run.inLeg('explore', () => runExploreLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the control exploration');
         if (Date.now() < deadline) await runConfinementCheck(run); else run.errors.push('the run exceeded its time budget before the anonymous-answer confinement check');
-        if (Date.now() < deadline) await run.inLeg('restore', () => runRestoreLeg(run, workDir, bundlePath, options.outDir)); else run.errors.push('the run exceeded its time budget before the restore leg');
+        // The restore leg's second machine: at once where the driver allows two, else after the first is done and gone.
+        const alone = oneMachineAtATime(run.machine!.os);
+        let restore: RestorePrepared | undefined;
+        if (Date.now() < deadline) {
+          await run.inLeg('restore', async () => {
+            restore = await prepareRestore(run, workDir, options.outDir);
+            if (restore && !alone) await finishRestore(run, bundlePath, options.outDir, workDir, restore);
+          });
+        } else run.errors.push('the run exceeded its time budget before the restore leg');
         if (Date.now() < deadline) await runServerModeCheck(run); else run.errors.push('the run exceeded its time budget before the Mac server-mode leg');
-      }
-      await collectEvidence(run, options.outDir);
+        await collectEvidence(run, options.outDir);
+        if (restore && alone) {
+          const prepared = restore;
+          if (Date.now() >= deadline) { rmSync(prepared.local, { force: true }); run.errors.push('the run exceeded its time budget before the restore leg\'s clean machine'); }
+          else if (options.keepMachine) { rmSync(prepared.local, { force: true }); run.errors.push('the restore leg\'s clean machine was left out: --keep-machine keeps the first machine, and this driver runs one at a time'); }
+          else {
+            await run.inLeg('restore', async () => {
+              // Teardown destroys run.machine again afterwards, which is a no-op for a machine already gone.
+              await run.driver.destroy({ handle: run.machine!.handle });
+              await finishRestore(run, bundlePath, options.outDir, workDir, prepared);
+            });
+          }
+        }
+      } else await collectEvidence(run, options.outDir);
     }
   } catch (error) {
     run.errors.push(error instanceof Error ? error.message : String(error));

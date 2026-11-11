@@ -663,7 +663,9 @@ export function evaluateClaudeTools(obs: TurnObservation | Inconclusive): CheckR
 }
 
 export function evaluateClaudeHidden(q: ClientQuestion, obs: TurnObservation | Inconclusive, questions: readonly ClientQuestion[]): CheckResult {
-  const forbidden = [...(q.forbid ?? []), ...(q.panel_expect ?? []), ...questions.flatMap((other) => other.kind === 'secret' ? [...(other.forbid ?? []), ...(other.expect ?? []), ...(other.panel_expect ?? [])] : [])];
+  // Every question's forbidden strings, as the answer turns are held to (forbiddenFor), plus this panel's values and every Secret.
+  const shared = questions.flatMap((other) => other.forbid ?? []);
+  const forbidden = [...forbiddenFor(q, shared), ...(q.panel_expect ?? []), ...questions.flatMap((other) => other.kind === 'secret' ? [...(other.forbid ?? []), ...(other.expect ?? []), ...(other.panel_expect ?? [])] : [])];
   const leaked = 'turn' in obs && forbidden.some((value) => !!value && turnContains(obs.turn, value));
   return claudeCheck(`${q.id}.hidden-values`, `${q.id}: hidden values stay hidden`, obs, !leaked,
     leaked ? 'a forbidden, panel-only or Secret string appeared in the follow-up reply' : `none of ${forbidden.length} forbidden, panel-only or Secret string(s) appeared`, false, leaked);
