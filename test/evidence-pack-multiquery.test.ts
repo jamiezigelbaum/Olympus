@@ -15,7 +15,11 @@ import type {
   SourceIndexSearchContext,
 } from '../src/core/source-index/router.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
-import { createAnalystSourceIndexAnswerHandler } from '../src/workers/source-index/analyst-answer.ts';
+import {
+  createAnalystSourceIndexAnswerHandler,
+  DEFAULT_LOCAL_ANALYST_PROMPT_BYTES,
+  fitPackToPromptBytes,
+} from '../src/workers/source-index/analyst-answer.ts';
 
 const CORPUS = 'internal.dropbox.files';
 const CHAT_CORPUS = 'internal.chat.messages';
@@ -259,52 +263,47 @@ describe('buildEvidencePackDetailed multi-query expansion', () => {
     expect(chatScoredHigh).toEqual(chatScoredLow);
   });
 
-  test('recent/latest questions order evidence by citation date before rank', async () => {
+  test('a recency question keeps the newest chat message in the seats a local Analyst reads', async () => {
+    // The 2026-07-05 "did I just get..." case: the chat store pins its newest
+    // messages at the tail of its cut (withPinnedNewestChatHits), behind the
+    // relevance hits. The pack no longer re-sorts by date, so the guarantee is
+    // that the pinned message reaches the local Analyst, not that it leads.
+    const chat = 'internal.chat.messages';
+    const ids: Array<[string, string]> = [
+      ...Array.from({ length: 6 }, (_, i) => [`chat-old-${i}`, `2026-0${1 + i}-10T09:00:00.000Z`] as [string, string]),
+      ['chat-newest', '2026-11-11T08:40:00.000Z'],
+      ['chat-second', '2026-11-11T08:00:00.000Z'],
+    ];
     const detail = await buildEvidencePackDetailed({
-      question: 'Analyze my recent lab results.',
-      searchQuery: 'lab results',
-      maxResults: 10,
+      question: 'Did I just get a message from the clinic?',
+      maxResults: 8,
       searchContext: allowAll,
-      registry: registry(),
+      registry: buildSourceIndexCorpusRegistry([defineSourceIndexCorpus({ corpusId: chat, family: 'chat', trustDomain: 'internal' })]),
       adapters: {
-        [CORPUS]: () => ({
-          hits: [
-            {
-              sourceItem: { family: 'file', provider: 'dropbox', accountScope: 'personal', providerItemId: 'old-lab', localItemId: 'old-lab' },
-              provenance: {
-                sourceItem: { family: 'file', provider: 'dropbox', accountScope: 'personal', providerItemId: 'old-lab', localItemId: 'old-lab' },
-                citation: { title: 'old-lab', authoredAt: '2014-10-23T00:00:00.000Z' },
-              },
-              score: 0.99,
-              rawExposed: false,
-            },
-            {
-              sourceItem: { family: 'file', provider: 'dropbox', accountScope: 'personal', providerItemId: 'new-lab', localItemId: 'new-lab' },
-              provenance: {
-                sourceItem: { family: 'file', provider: 'dropbox', accountScope: 'personal', providerItemId: 'new-lab', localItemId: 'new-lab' },
-                citation: { title: 'new-lab', authoredAt: '2026-04-17T00:00:00.000Z' },
-              },
-              score: 0.1,
-              rawExposed: false,
-            },
-          ],
+        [chat]: () => ({
+          hits: ids.map(([id, authoredAt], index) => {
+            const sourceItem = { family: 'chat' as const, provider: 'fixture', accountScope: 'personal', providerItemId: id, localItemId: id };
+            return { sourceItem, provenance: { sourceItem, citation: { title: id, authoredAt } }, score: 1 - index * 0.05, rawExposed: false as const };
+          }),
           latencyMs: 1,
           laneAudits: [],
-          rawExposed: false,
+          rawExposed: false as const,
         }),
       } as SourceIndexRouterAdapterMap,
       contentProviders: {
-        [CORPUS]: provider({
-          'old-lab': internalBlock('2014 sodium panel'),
-          'new-lab': internalBlock('2026 ApoB lipid panel'),
-        }),
+        [chat]: {
+          async fetchLocalContent(request) {
+            return internalBlock(`${request.provenance.sourceItem.providerItemId} from the clinic ${'x'.repeat(2_500)}`);
+          },
+        } satisfies LocalContentProvider,
       },
     });
-
-    expect(detail.pack.candidates.map((c) => c.provenance.sourceItem.providerItemId)).toEqual([
-      'new-lab',
-      'old-lab',
-    ]);
+    const corpusOf = new Map(detail.pack.candidates.map((candidate, index) => [candidate, detail.candidateCorpusIds[index] ?? ''] as const));
+    const read = fitPackToPromptBytes(detail.pack, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, corpusOf, { localOnly: true });
+    const readIds = read.candidates.map((c) => c.provenance.sourceItem.providerItemId);
+    expect(readIds).toContain('chat-newest');
+    expect(read.candidates.find((c) => c.provenance.sourceItem.providerItemId === 'chat-newest')?.provenance.citation?.authoredAt)
+      .toBe('2026-11-11T08:40:00.000Z');
   });
 
   test('caps at 3 queries total and dedupes planned queries against the base query', async () => {
