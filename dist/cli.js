@@ -73356,6 +73356,11 @@ function withEvidenceFormatOf(wrapper, ...inner) {
     analystEvidenceFormats.set(wrapper, [...formats][0]);
   return wrapper;
 }
+function withPromptBudget(pack, maxPromptBytes) {
+  const sent = { ...pack };
+  packPromptBudgets.set(sent, maxPromptBytes);
+  return sent;
+}
 function createAnalyst(model, createOptions = {}) {
   const analyst = {
     async analyze(pack, options) {
@@ -73381,9 +73386,7 @@ function createAnalyst(model, createOptions = {}) {
       if (createOptions.auditSuspiciousDrafts === true && shouldAuditPack(pack)) {
         const auditCompletion = await model.complete({
           system: ANALYST_AUDIT_SYSTEM,
-          prompt: compact ? compactAuditPrompt(pack, parsed, promptEncoder.encode(`${request.system}
-
-${request.prompt}`).length) : buildAnalystAuditPrompt(pack, parsed, localOnly),
+          prompt: compact ? compactAuditPrompt(pack, parsed, packPromptBudgets.get(pack)) : buildAnalystAuditPrompt(pack, parsed, localOnly),
           localOnly,
           maxOutputChars: auditMaxOutputChars,
           ...createOptions.boundedResponseSchema ? { responseSchema: analystResponseSchema(auditMaxOutputChars) } : {},
@@ -73526,6 +73529,8 @@ function compactLocator(uri, title) {
 function compactAuditPrompt(pack, draft, maxBytes) {
   let chars = AUDIT_CHARS_PER_CANDIDATE;
   let prompt = buildAnalystAuditPrompt(pack, draft, false, chars);
+  if (maxBytes === undefined)
+    return prompt;
   for (let attempt = 0;attempt < 6; attempt += 1) {
     const bytes = promptEncoder.encode(`${ANALYST_AUDIT_SYSTEM}
 
@@ -74074,7 +74079,7 @@ function coerceCitation(value) {
 function stripCodeFences2(text2) {
   return text2.replace(/```[a-zA-Z]*\n?/g, "").replace(/```/g, "").trim();
 }
-var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", VERSION_INSTRUCTION = 'Items with a "version group:" line have nearly the same text: likely versions of one document. If the question names a date, period or version, answer from that item. Otherwise answer from the newest version and say which version the value comes from by its date; where versions differ, also give the older value with its date.', ANALYST_SYSTEM, ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, AUDIT_CHARS_PER_CANDIDATE = 1200, FOLDED_ANSWER_SENTENCE_BUDGET = 5, PARALLEL_CLAIM_FRAME_OVERLAP = 0.5, ANALYST_SCHEMA_MAX_GAPS = 3, MAX_SCHEMA_CLAIM_CHARS = 80, NO_EVIDENCE_ANSWER = "I have no matching evidence for this question.", analystEvidenceFormats, promptEncoder, ANALYST_EVIDENCE_SCAFFOLDING_LABELS, STOP_WORDS2, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
+var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", VERSION_INSTRUCTION = 'Items with a "version group:" line have nearly the same text: likely versions of one document. If the question names a date, period or version, answer from that item. Otherwise answer from the newest version and say which version the value comes from by its date; where versions differ, also give the older value with its date.', ANALYST_SYSTEM, ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, AUDIT_CHARS_PER_CANDIDATE = 1200, FOLDED_ANSWER_SENTENCE_BUDGET = 5, PARALLEL_CLAIM_FRAME_OVERLAP = 0.5, ANALYST_SCHEMA_MAX_GAPS = 3, MAX_SCHEMA_CLAIM_CHARS = 80, NO_EVIDENCE_ANSWER = "I have no matching evidence for this question.", analystEvidenceFormats, packPromptBudgets, promptEncoder, ANALYST_EVIDENCE_SCAFFOLDING_LABELS, STOP_WORDS2, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
 var init_analyst = __esm(() => {
   init_opsec();
   init_chunk_selection();
@@ -74150,6 +74155,7 @@ var init_analyst = __esm(() => {
 `);
   DEFAULT_AUDIT_MAX_OUTPUT_CHARS = DEFAULT_ANALYST_MAX_OUTPUT_CHARS + AUDIT_OUTPUT_HEADROOM_CHARS;
   analystEvidenceFormats = new WeakMap;
+  packPromptBudgets = new WeakMap;
   promptEncoder = new TextEncoder;
   ANALYST_EVIDENCE_SCAFFOLDING_LABELS = [
     "trust: public_safe/",
@@ -76468,7 +76474,7 @@ function promptBudgetedAnalyst(analyst, promptBytes, candidateCorpus, recencySea
         const seat = seatOf.get(candidate.provenance);
         return seat === undefined ? [] : [seat];
       }));
-      return analyst.analyze(fitted, analyzeOptions);
+      return analyst.analyze(withPromptBudget(fitted, promptBytes), analyzeOptions);
     }
   };
 }
@@ -128750,7 +128756,8 @@ function isLocalServiceDown(error) {
 }
 async function answerPrivately(question, evidence, options = {}) {
   const model = options.model ?? (sharedPanelModel ??= createBuiltInAnalystModel({ waitForInstall: true }));
-  const pack = fitPrivatePack(privateEvidencePack(question, evidence), options.maxPromptBytes ?? DEFAULT_PRIVATE_ANSWER_PROMPT_BYTES, options.evidenceFormat ?? "full", options.maxAnswerChars ?? DEFAULT_ANALYST_MAX_OUTPUT_CHARS);
+  const maxPromptBytes = options.maxPromptBytes ?? DEFAULT_PRIVATE_ANSWER_PROMPT_BYTES;
+  const pack = withPromptBudget(fitPrivatePack(privateEvidencePack(question, evidence), maxPromptBytes, options.evidenceFormat ?? "full", options.maxAnswerChars ?? DEFAULT_ANALYST_MAX_OUTPUT_CHARS), maxPromptBytes);
   const verdict = { sufficient: undefined };
   const analyst = createAnalyst(withVerdict(options.onModelCall ? timedModel(model, options.onModelCall) : model, verdict), {
     auditSuspiciousDrafts: options.audit ?? true,

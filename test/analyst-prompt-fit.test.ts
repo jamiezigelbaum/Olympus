@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { analystEvidenceFormat, analystPromptBytes, createAnalyst, type AnalystModelRequest } from '../src/core/analyst.ts';
+import { analystEvidenceFormat, analystPromptBytes, createAnalyst, withPromptBudget, type AnalystModelRequest } from '../src/core/analyst.ts';
 import { withBuiltInFallback } from '../src/core/analyst-built-in.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import { createAnalystForSovereigntyProfile } from '../src/workers/email-source/server.ts';
@@ -109,7 +109,7 @@ describe('Ask local compact evidence', () => {
     const corpora = new Map(pack.candidates.map((candidate, index) => [candidate, corpusIds[index]!]));
     const auditBytes = async (evidenceFormat: 'full' | 'compact') => {
       const calls: AnalystModelRequest[] = [];
-      const fitted = fitPackToPromptBytes(pack, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, corpora, { localOnly: true }, 2, evidenceFormat);
+      const fitted = withPromptBudget(fitPackToPromptBytes(pack, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, corpora, { localOnly: true }, 2, evidenceFormat), DEFAULT_LOCAL_ANALYST_PROMPT_BYTES);
       await createAnalyst({ complete: async (request) => { calls.push(request); return { text: completion, modelId: 'fixture' }; } },
         { evidenceFormat, auditSuspiciousDrafts: true }).analyze(fitted, { localOnly: true });
       expect(calls).toHaveLength(2);
@@ -117,6 +117,18 @@ describe('Ask local compact evidence', () => {
     };
     expect(await auditBytes('full')).toBeLessThanOrEqual(DEFAULT_LOCAL_ANALYST_PROMPT_BYTES);
     expect(await auditBytes('compact')).toBeLessThanOrEqual(DEFAULT_LOCAL_ANALYST_PROMPT_BYTES);
+  });
+
+  test("a small pack's compact audit keeps its passages: it shrinks to the fit's budget, not the main call's size", async () => {
+    const { pack } = analystPromptFixture();
+    const small = { ...pack, candidates: [{ ...pack.candidates[0]!, chunks: ['The survey budget is 5120 dollars.'] }] };
+    for (const sent of [small, withPromptBudget(small, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES)]) {
+      const calls: AnalystModelRequest[] = [];
+      await createAnalyst({ complete: async (request) => { calls.push(request); return { text: completion, modelId: 'fixture' }; } },
+        { evidenceFormat: 'compact', auditSuspiciousDrafts: true }).analyze(sent, { localOnly: true });
+      expect(calls).toHaveLength(2);
+      expect(calls[1]!.prompt).toContain('The survey budget is 5120 dollars.');
+    }
   });
 
   test('a fallback wrapper carries its analysts\' format only when they share it', () => {

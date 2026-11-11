@@ -32,7 +32,7 @@ import type { EvidenceReranker } from '../../core/evidence-reranker.ts';
 import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
 import { runWithLocalInferenceGuard } from '../answer-activity.ts';
 import type { Analyst, AnalystCitation, AnalystOptions, AnalystResult, EvidenceCandidate, EvidencePack } from '../../core/contracts.ts';
-import { analystEvidenceFormat, analystPromptBytes, currentAnalystAbortSignal, noEvidenceAnalystResult, runWithAnalystAbortSignal, type AnalystEvidenceFormat } from '../../core/analyst.ts';
+import { analystEvidenceFormat, analystPromptBytes, currentAnalystAbortSignal, noEvidenceAnalystResult, runWithAnalystAbortSignal, withPromptBudget, type AnalystEvidenceFormat } from '../../core/analyst.ts';
 import { OPENCLAW_DEFAULT_MODEL_LABEL, OPENCLAW_INFER_MAX_PROMPT_BYTES } from '../../core/analyst-openclaw-infer.ts';
 import {
   buildEvidencePackDetailed,
@@ -1020,7 +1020,7 @@ function promptBudgetedAnalyst(
         const seat = seatOf.get(candidate.provenance);
         return seat === undefined ? [] : [seat];
       }));
-      return analyst.analyze(fitted, analyzeOptions);
+      return analyst.analyze(withPromptBudget(fitted, promptBytes), analyzeOptions);
     },
   };
 }

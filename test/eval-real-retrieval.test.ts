@@ -7,7 +7,7 @@
 // Synthetic data only: fixture stores in a temp folder, a scripted model.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { analystPromptBytes, createAnalyst, type AnalystModel, type AnalystModelRequest } from '../src/core/analyst.ts';
+import { analystPromptBytes, createAnalyst, withPromptBudget, type AnalystModel, type AnalystModelRequest } from '../src/core/analyst.ts';
 import type { AnalystResult, EvidencePack } from '../src/core/contracts.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { DROPBOX_TIER_CORPUS_IDS } from '../src/workers/dropbox-files/connector-store.ts';
@@ -467,7 +467,7 @@ describe('the real eval matches what Ask sends a local Analyst (rerun 20)', () =
     } }, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' }));
     const fitted = fitPackToPromptBytes(pack, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES,
       new Map(pack.candidates.map((candidate, index) => [candidate, corpusIds[index]!])), { localOnly: true }, 2, 'compact');
-    await analysts[0]!.analyze(fitted, { localOnly: true });
+    await analysts[0]!.analyze(withPromptBudget(fitted, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES), { localOnly: true });
     const kept: number[][] = [];
     await promptFittedEvalAnalyst(analysts[1]!, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, () => corpusIds,
       (_pack, seats) => kept.push(seats), () => 2).analyze(pack, { localOnly: true });

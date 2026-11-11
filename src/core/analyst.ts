@@ -356,6 +356,19 @@ export function withEvidenceFormatOf(wrapper: Analyst, ...inner: Analyst[]): Ana
   return wrapper;
 }
 
+const packPromptBudgets = new WeakMap<EvidencePack, number>();
+
+/**
+ * A copy of a fitted pack that records the prompt budget it was fitted to.
+ * A compact analyst's audit may grow to this budget; with none recorded the
+ * audit keeps its full passages, since nothing was fitted.
+ */
+export function withPromptBudget(pack: EvidencePack, maxPromptBytes: number): EvidencePack {
+  const sent = { ...pack };
+  packPromptBudgets.set(sent, maxPromptBytes);
+  return sent;
+}
+
 export function createAnalyst(model: AnalystModel, createOptions: CreateAnalystOptions = {}): Analyst {
   const analyst: Analyst = {
     async analyze(pack: EvidencePack, options: AnalystOptions): Promise<AnalystResult> {
@@ -400,7 +413,7 @@ export function createAnalyst(model: AnalystModel, createOptions: CreateAnalystO
         const auditCompletion = await model.complete({
           system: ANALYST_AUDIT_SYSTEM,
           prompt: compact
-            ? compactAuditPrompt(pack, parsed, promptEncoder.encode(`${request.system}\n\n${request.prompt}`).length)
+            ? compactAuditPrompt(pack, parsed, packPromptBudgets.get(pack))
             : buildAnalystAuditPrompt(pack, parsed, localOnly),
           localOnly,
           maxOutputChars: auditMaxOutputChars,
@@ -588,13 +601,15 @@ function compactLocator(uri: string | undefined, title: string): string | undefi
 /**
  * A compact Analyst's audit prompt. Its pack was fitted to a byte budget for
  * the compact main call, so the audit renders each candidate as that call
- * did (compact header, the audit's bounded passages) and is held to the main
- * call's size: the draft and the audit rules take their room from the
- * passages, shrunk evenly until the whole audit call fits.
+ * did (compact header, the audit's bounded passages) and is held to the
+ * budget the fit recorded (withPromptBudget): the draft and the audit rules
+ * take their room from the passages, shrunk evenly until the whole audit call
+ * fits. A pack with no recorded budget keeps the audit's full passages.
  */
-function compactAuditPrompt(pack: EvidencePack, draft: ParsedModelOutput | null, maxBytes: number): string {
+function compactAuditPrompt(pack: EvidencePack, draft: ParsedModelOutput | null, maxBytes: number | undefined): string {
   let chars = AUDIT_CHARS_PER_CANDIDATE;
   let prompt = buildAnalystAuditPrompt(pack, draft, false, chars);
+  if (maxBytes === undefined) return prompt;
   for (let attempt = 0; attempt < 6; attempt += 1) {
     const bytes = promptEncoder.encode(`${ANALYST_AUDIT_SYSTEM}\n\n${prompt}`).length;
     if (bytes <= maxBytes) break;

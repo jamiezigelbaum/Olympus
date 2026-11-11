@@ -32,7 +32,7 @@ import type { EvidenceReranker } from '../src/core/evidence-reranker.ts';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { analystEvidenceFormat, analystPromptBytes, createAnalyst, type AnalystEvidenceFormat, type AnalystModel } from '../src/core/analyst.ts';
+import { analystEvidenceFormat, analystPromptBytes, createAnalyst, withPromptBudget, type AnalystEvidenceFormat, type AnalystModel } from '../src/core/analyst.ts';
 import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { createDelphiAnalystModel } from '../src/core/analyst-delphi.ts';
 import {
@@ -1210,7 +1210,7 @@ export function promptFittedEvalAnalyst(
         );
       onSeats(pack, sent.candidates.map((candidate) =>
         pack.candidates.findIndex((original) => original.provenance === candidate.provenance) + 1), sent, analyzeOptions ?? {}, analystEvidenceFormat(analyst));
-      return analyst.analyze(sent, analyzeOptions);
+      return analyst.analyze(promptByteBudget === undefined ? sent : withPromptBudget(sent, promptByteBudget), analyzeOptions);
     },
   };
 }

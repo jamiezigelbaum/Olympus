@@ -40976,7 +40976,7 @@ var init_evidence_versions = __esm(() => {
 
 // src/core/analyst.ts
 import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
-var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", ANALYST_SYSTEM, ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, analystEvidenceFormats, promptEncoder, STOP_WORDS2, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
+var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", ANALYST_SYSTEM, ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, analystEvidenceFormats, packPromptBudgets, promptEncoder, STOP_WORDS2, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
 var init_analyst = __esm(() => {
   init_opsec();
   init_chunk_selection();
@@ -41052,6 +41052,7 @@ var init_analyst = __esm(() => {
 `);
   DEFAULT_AUDIT_MAX_OUTPUT_CHARS = DEFAULT_ANALYST_MAX_OUTPUT_CHARS + AUDIT_OUTPUT_HEADROOM_CHARS;
   analystEvidenceFormats = new WeakMap;
+  packPromptBudgets = new WeakMap;
   promptEncoder = new TextEncoder;
   STOP_WORDS2 = new Set([
     "a",
