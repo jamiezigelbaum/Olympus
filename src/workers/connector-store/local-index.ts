@@ -14720,13 +14720,13 @@ export function createConnectorStoreCorpusAdapter(
       const rows = keywordLane.rows;
       const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters);
       if (recencyRows.length === 0) {
-        const hits = rows.map((row) => connectorStoreHitFromRow(
+        const hits = withKeywordLeaderSignals(rows.map((row) => connectorStoreHitFromRow(
           store,
           row,
           -row.rank,
           options.resultProjector,
           filters?.locatorPathScope,
-        ));
+        )), keywordLane);
         return {
           hits,
           latencyMs: Date.now() - startedAt,
@@ -14752,10 +14752,13 @@ export function createConnectorStoreCorpusAdapter(
       });
       const complete = (candidate: FusedRankedCandidate<ConnectorStoreSearchRow>) =>
         candidate.laneRanks.has('keyword') && keywordLane.completeItemIds.has(candidate.item.sourceItem.localItemId);
-      const hits = withPinnedNewestChatHits({
+      const hits = withKeywordLeaderSignals(withPinnedNewestChatHits({
         store,
         recencyRows,
-        hits: rankedCandidates(fused, request.maxResults, complete, lexicalContentPreference, keywordLane.nameLeaderItemId).map((candidate) => connectorStoreHitFromRow(
+        hits: rankedCandidates(fused, request.maxResults, complete, lexicalContentPreference, {
+          ...(keywordLane.nameLeaderItemId !== undefined ? { nameLeaderItemId: keywordLane.nameLeaderItemId } : {}),
+          matchesWholeQuestion: complete,
+        }).map((candidate) => connectorStoreHitFromRow(
           store,
           candidate.item,
           candidate.score,
@@ -14765,7 +14768,7 @@ export function createConnectorStoreCorpusAdapter(
         limit: request.maxResults,
         ...(options.resultProjector ? { resultProjector: options.resultProjector } : {}),
         ...(filters?.locatorPathScope ? { locatorPathScope: filters.locatorPathScope } : {}),
-      });
+      }), keywordLane);
       return {
         hits,
         latencyMs: Date.now() - startedAt,
@@ -15163,15 +15166,18 @@ async function hybridConnectorStoreSearch(
     tieBreaker: connectorStoreCandidateComparator(contentPreference),
   });
   const seated = withLaneLeadersSeated(fused, vettedVectorItemIds);
-  const complete = (candidate: FusedRankedCandidate<ConnectorStoreSearchRow>) => {
-    const id = candidate.item.sourceItem.localItemId;
-    return (candidate.laneRanks.has('vector') && vettedVectorItemIds.has(id))
-      || (candidate.laneRanks.has('keyword') && keywordLane.completeItemIds.has(id));
-  };
-  const hits = withPinnedNewestChatHits({
+  const keywordComplete = (candidate: FusedRankedCandidate<ConnectorStoreSearchRow>) =>
+    candidate.laneRanks.has('keyword') && keywordLane.completeItemIds.has(candidate.item.sourceItem.localItemId);
+  const complete = (candidate: FusedRankedCandidate<ConnectorStoreSearchRow>) =>
+    (candidate.laneRanks.has('vector') && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId))
+    || keywordComplete(candidate);
+  const hits = withKeywordLeaderSignals(withPinnedNewestChatHits({
     store,
     recencyRows,
-    hits: rankedCandidates(seated, maxResults, complete, contentPreference, keywordLane.nameLeaderItemId).map((candidate) => connectorStoreHitFromRow(
+    hits: rankedCandidates(seated, maxResults, complete, contentPreference, {
+      ...(keywordLane.nameLeaderItemId !== undefined ? { nameLeaderItemId: keywordLane.nameLeaderItemId } : {}),
+      matchesWholeQuestion: keywordComplete,
+    }).map((candidate) => connectorStoreHitFromRow(
       store,
       candidate.item,
       candidate.score,
@@ -15181,7 +15187,7 @@ async function hybridConnectorStoreSearch(
     limit: maxResults,
     ...(resultProjector ? { resultProjector } : {}),
     ...(filters?.locatorPathScope ? { locatorPathScope: filters.locatorPathScope } : {}),
-  });
+  }), keywordLane);
 
   return {
     hits,
@@ -15319,6 +15325,12 @@ type ConnectorStoreKeywordLane = {
   completeItemIds: ReadonlySet<string>;
   /** The plain search's bm25 leader when it is a partial, title-only match: it keeps the lead among partial matches. */
   nameLeaderItemId?: string;
+  /**
+   * Each row's share of the question's concepts (matched over the question's
+   * concept groups, in its name or text). One denominator in every store, so
+   * the router can compare stores' leaders (withReservedLeaderSeats).
+   */
+  conceptShare?: ReadonlyMap<string, number>;
   allRows: ConnectorStoreSearchRow[];
   /** The expansion-free search, when expansion changed this one. */
   baseline?: ConnectorStoreKeywordLane;
@@ -15342,8 +15354,12 @@ async function connectorStoreKeywordLaneRows(
   const contentRows = content.rows;
   // Rows that match every concept of the question, in their name or text.
   const complete = new Set<string>();
+  const conceptShare = new Map<string, number>();
   for (const concepts of [plain.concepts, content.concepts]) {
-    for (const [id, matched] of concepts.matched) if (!ftsOptions.relaxed && matched >= concepts.total) complete.add(id);
+    for (const [id, matched] of concepts.matched) {
+      if (!ftsOptions.relaxed && matched >= concepts.total) complete.add(id);
+      if (!ftsOptions.relaxed && concepts.total > 0) conceptShare.set(id, Math.max(conceptShare.get(id) ?? 0, matched / concepts.total));
+    }
   }
   const seen = new Set<string>();
   const merged: ConnectorStoreSearchRow[] = [];
@@ -15377,11 +15393,11 @@ async function connectorStoreKeywordLaneRows(
     ? leader.sourceItem.localItemId
     : undefined;
   if (leader && nameLeader !== undefined) {
-    const at = ordered.findIndex((row) => row.sourceItem.localItemId === leader.sourceItem.localItemId);
-    const firstPartial = ordered.findIndex((row) => !complete.has(row.sourceItem.localItemId));
-    // Right after the best readable partial match, when one leads it.
-    const seat = firstPartial + (connectorStoreRowHasContent(ordered[firstPartial]!) ? 1 : 0);
-    if (firstPartial >= 0 && at > seat) ordered.splice(seat, 0, ...ordered.splice(at, 1));
+    seatNameLeader(ordered, {
+      isLeader: (row) => row.sourceItem.localItemId === leader.sourceItem.localItemId,
+      matchesWholeQuestion: (row) => complete.has(row.sourceItem.localItemId),
+      readable: connectorStoreRowHasContent,
+    });
   }
   // The expansion-free baseline is the same search when expansion changes
   // nothing about it (no alternatives, no foreign stopwords): running it
@@ -15409,8 +15425,30 @@ async function connectorStoreKeywordLaneRows(
     matchedItemIds: allIds,
     completeItemIds: new Set([...complete, ...(baseline?.completeItemIds ?? [])]),
     ...((baseline?.nameLeaderItemId ?? nameLeader) !== undefined ? { nameLeaderItemId: (baseline?.nameLeaderItemId ?? nameLeader)! } : {}),
+    conceptShare: new Map([...(baseline?.conceptShare ?? []), ...conceptShare].map(([id, share]) =>
+      [id, Math.max(share, baseline?.conceptShare?.get(id) ?? 0)] as const)),
     ...(baseline ? { baseline } : {}),
   };
+}
+
+/**
+ * Marks a store's keyword leaders among its hits (the lane's rank-1 row and
+ * its best name match), with their share of the question's concepts, so the
+ * router can keep the best of them across stores in the pack
+ * (withReservedLeaderSeats). Internal: search routes never return it.
+ */
+function withKeywordLeaderSignals<H extends SourceIndexSearchHit>(hits: H[], lane: ConnectorStoreKeywordLane): H[] {
+  const first = lane.rows[0]?.sourceItem.localItemId;
+  const name = lane.nameLeaderItemId;
+  if ((first === undefined && name === undefined) || !lane.conceptShare) return hits;
+  return hits.map((hit) => {
+    const id = hit.sourceItem.localItemId;
+    const kinds: Array<'keyword_first' | 'name'> = [
+      ...(id === first ? ['keyword_first' as const] : []),
+      ...(id === name ? ['name' as const] : []),
+    ];
+    return kinds.length === 0 ? hit : { ...hit, keywordLeader: { kinds, conceptShare: lane.conceptShare!.get(id) ?? 0 } };
+  });
 }
 
 /** Whether keyword expansion changes the SQL a keyword search would run for this question. */
@@ -15500,13 +15538,26 @@ const lexicalContentPreference: ContentPreference = connectorStoreContentPrefere
 // actually read. So a readable document never buries the file named for the
 // question just because it shares one of the question's words, and a name
 // never buries a document that answers the question as fully.
-function rankedCandidates(
+//
+// The keyword lane's own leaders then keep a place inside the cut, with or
+// without content: its rank-1 row and its best name match (#1287). The tiers
+// count every vetted vector hit as complete, so a leader that matches only
+// part of the question in words, or a file with no text for a vector hit to
+// vet, otherwise fell behind every vetted hit and out of the store's results
+// (gap-1 and value-2, rerun 19 on 2026-11-11). Each leader takes its seat
+// rule's place (seatNameLeader), but never later than the store's second and
+// third seats (STORE_LEADER_LATEST_SEAT), whatever the cut.
+export function rankedCandidates(
   candidates: readonly FusedRankedCandidate<ConnectorStoreSearchRow>[],
   limit: number,
   complete: (candidate: FusedRankedCandidate<ConnectorStoreSearchRow>) => boolean,
-  hasContent: ContentPreference = lexicalContentPreference,
-  nameLeaderItemId?: string,
+  hasContent: ContentPreference,
+  keywordLeaders: {
+    nameLeaderItemId?: string;
+    matchesWholeQuestion: (candidate: FusedRankedCandidate<ConnectorStoreSearchRow>) => boolean;
+  },
 ): FusedRankedCandidate<ConnectorStoreSearchRow>[] {
+  const { nameLeaderItemId, matchesWholeQuestion } = keywordLeaders;
   const tiers: FusedRankedCandidate<ConnectorStoreSearchRow>[][] = [[], [], [], []];
   for (const candidate of candidates) {
     // The best name match is never demoted for having no text: its lane
@@ -15514,7 +15565,63 @@ function rankedCandidates(
     const readable = hasContent(candidate) || candidate.item.sourceItem.localItemId === nameLeaderItemId;
     tiers[(complete(candidate) ? 0 : 2) + (readable ? 0 : 1)]!.push(candidate);
   }
-  return tiers.flat().slice(0, Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS)));
+  const ordered = tiers.flat();
+  const cut = Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS));
+  const keywordFirst = candidates.find((candidate) => candidate.laneRanks.get('keyword') === 1)?.item.sourceItem.localItemId;
+  const leaders = [...new Set([keywordFirst, nameLeaderItemId].filter((id): id is string => id !== undefined))];
+  leaders.forEach((leaderId, index) => seatNameLeader(ordered, {
+    isLeader: (candidate) => candidate.item.sourceItem.localItemId === leaderId,
+    matchesWholeQuestion,
+    readable: hasContent,
+    // Fixed, not taken from the cut, so a store's order is the same at every
+    // budget (a smaller result is the head of a larger one), and room inside
+    // the cut for this leader and every leader still to seat.
+    latestSeat: Math.min(STORE_LEADER_LATEST_SEAT, cut - leaders.length) + index,
+  }));
+  return ordered.slice(0, cut);
+}
+
+// The latest seat a store gives its first keyword leader (its second, if it
+// has two, takes the next): right after the store's own first result. The
+// pack seats stores in turn (applyPerCorpusResultBudget), so on an install
+// with many stores a pack holds only a store's first one or two results: the
+// default 24 seats over the owner's 22 stores, and a local Analyst's fitted
+// prompt holds fewer still. A leader any lower is never read. It was taken
+// from the cut before, which held at 5 results and never acted at 24 (rerun
+// 22, 2026-11-11).
+export const STORE_LEADER_LATEST_SEAT = 1;
+
+// The seat for the best name match (#1287): right after the best readable
+// candidate that matches only part of the question, so the first seat stays
+// with a readable candidate and candidates matching the whole question still
+// lead. The keyword lane applies it to its rows, and the final order applies
+// it again, because a vetted vector hit counts as complete there and a
+// names-only item has no chunks for a vector hit to vet: without it every
+// vetted note buried the file named for the question (gap-1, Sparta probe
+// 2026-11-11).
+// The final order does not keep whole-question matches ahead of every
+// partial one (its first tier mixes vetted vector hits with them in fusion
+// order), so the seat also follows the last whole-question match above the
+// leader: the leader never moves ahead of one (#1343 review). With
+// `latestSeat`, the seat is never later than it, and never the first seat:
+// the first seat stays with the order's own best candidate.
+export function seatNameLeader<T>(
+  ordered: T[],
+  rule: {
+    isLeader: (entry: T) => boolean;
+    matchesWholeQuestion: (entry: T) => boolean;
+    readable: (entry: T) => boolean;
+    latestSeat?: number;
+  },
+): void {
+  const at = ordered.findIndex(rule.isLeader);
+  const firstPartial = ordered.findIndex((entry) => !rule.matchesWholeQuestion(entry));
+  if (at < 0 || firstPartial < 0) return;
+  let lastWholeAbove = -1;
+  for (let index = 0; index < at; index += 1) if (rule.matchesWholeQuestion(ordered[index]!)) lastWholeAbove = index;
+  let seat = Math.max(firstPartial + (rule.readable(ordered[firstPartial]!) ? 1 : 0), lastWholeAbove + 1);
+  if (rule.latestSeat !== undefined) seat = Math.min(seat, Math.max(1, rule.latestSeat));
+  if (at > seat) ordered.splice(seat, 0, ...ordered.splice(at, 1));
 }
 
 // Each lane's best hit keeps a seat near the top of fusion's order (#1230).

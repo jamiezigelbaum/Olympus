@@ -67,8 +67,8 @@ const LINKS = {
 };
 
 /** The panel on the computer, answering the dashboard tool from `answer`. */
-async function mount(answer: unknown) {
-  const html = chatgptDashboardPageHtml({ resultTimeoutMs: 5_000 });
+async function mount(answer: unknown, options: { refresh?: { activeMs: number; idleMs: number }; reads?: { count: number } } = {}) {
+  const html = chatgptDashboardPageHtml({ resultTimeoutMs: 5_000, ...(options.refresh ? { refresh: options.refresh } : {}) });
   const start = html.indexOf('<script>') + '<script>'.length;
   const script = html.slice(start, html.indexOf('</script>', start));
   const win = new Window({ url: 'https://sandbox.test/' });
@@ -89,7 +89,10 @@ async function mount(answer: unknown) {
             [OLYMPUS_HOST_CONTEXT_KEY]: { kind: 'computer', readOnly: false, links: LINKS },
           },
         });
-      } else if (message.method === 'tools/call' && message.params.name === DASHBOARD_TOOL_NAME) reply(message.id, answer);
+      } else if (message.method === 'tools/call' && message.params.name === DASHBOARD_TOOL_NAME) {
+        if (options.reads) options.reads.count += 1;
+        reply(message.id, answer);
+      }
     },
   };
   Object.defineProperty(win, 'parent', { value: parent, configurable: true });
@@ -106,6 +109,21 @@ function dashboard(state: string, archives: ComputerArchivesMeta) {
 }
 
 const REQUEST_ID = '8c3b2a1f-6e5d-4c7b-8a9f-3d4e5f6a7b82';
+
+describe('the Archives row while the private model judges', () => {
+  const archive = { id: 'a1', name: 'rc.mbox', format: 'mbox', where: '~/Downloads', status: 'imported', family: 'email', items: 7, judged: 6, held: 1, gaps: [], skipped: [], startedAt: '2026-11-11T00:00:00Z' };
+  for (const [privateModel, rereads] of [['ready', true], ['off', false]] as const) {
+    test(`held items with the private model ${privateModel} ${rereads ? 'are re-read at the often cadence' : 'wait for the settled cadence'} (#1337)`, async () => {
+      const reads = { count: 0 };
+      await mount(dashboard('archives-request', { sourceId: 'archive.imports', archives: [archive], requests: [], privateModel } as unknown as ComputerArchivesMeta),
+        { refresh: { activeMs: 15, idleMs: 60_000 }, reads });
+      const first = reads.count;
+      await settle(80);
+      if (rereads) expect(reads.count).toBeGreaterThan(first);
+      else expect(reads.count).toBe(first);
+    });
+  }
+});
 
 describe('the request row in the panel', () => {
   test('an agent\'s request to import shows its name and folder as separate isolated values and the whole path under it', async () => {

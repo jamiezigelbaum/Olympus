@@ -18,6 +18,8 @@ import {
   evalAnswerStageAudit,
   failIncompleteRetrieval,
   evalRetrievalAudit,
+  informationalEvalMaxResults,
+  promptFittedEvalAnalyst,
   openEvalDropboxStores,
   prepareEvalEmbedding,
   releaseEvalAnswer,
@@ -131,16 +133,32 @@ describe('the real eval report says where an expected value was lost (#1234)', (
     const answer = (text: string): AnalystResult => ({ answer: text, citations: [], unanswered: [], sufficient: true } as unknown as AnalystResult);
     const question = { expectedAnswerContains: ['4182', 'April'] };
 
+    const excerpt = 'The Kestrel boatyard invoice total is 4182 dollars, due in March.';
+    const kestrelSeat = { seat: 1, charOffset: excerpt.indexOf('4182'), seatChars: excerpt.length };
+
     // The Analyst said it; the release removed it.
     expect(evalAnswerStageAudit(question, pack, answer('The total is 4182 dollars.'), answer('The total is [withheld].'))).toEqual({
+      answerShape: 'partial',
+      answerCitations: 0,
+      answerUnanswered: 0,
+      answerCitedSeats: [],
+      answerCitationsOutsidePack: 0,
+      answerValueTokens: 1,
+      answerValueTokensInCitedSeats: 0,
+      answerValueTokensUnmatchedShapes: ['9999'],
       expected: [
-        { inPack: true, inPackAsSubstring: true, inAnalystAnswer: true, inReleasedAnswer: false },
-        { inPack: false, inPackAsSubstring: false, inAnalystAnswer: false, inReleasedAnswer: false },
+        { inPack: true, inPackAsSubstring: true, inAnalystAnswer: true, inReleasedAnswer: false, packSeats: [kestrelSeat], valueSeatCited: false },
+        { inPack: false, inPackAsSubstring: false, inAnalystAnswer: false, inReleasedAnswer: false, packSeats: [], valueSeatCited: false },
       ],
     });
     // The value was in the pack and in the prompt, and the Analyst missed it.
-    expect(evalAnswerStageAudit(question, pack, answer('I could not find the total.'), answer('I could not find the total.'), ['Evidence 1: total is 4182 dollars']).expected[0])
-      .toEqual({ inPack: true, inPackAsSubstring: true, inAnalystPrompt: true, inAnalystAnswer: false, inReleasedAnswer: false });
+    const prompt = 'Evidence 1: total is 4182 dollars';
+    const missed = evalAnswerStageAudit(question, pack, answer('I could not find the total.'), answer('I could not find the total.'), [prompt], ['local-model-a']);
+    expect(missed.expected[0]).toEqual({
+      inPack: true, inPackAsSubstring: true, inAnalystPrompt: true, inAnalystAnswer: false, inReleasedAnswer: false,
+      packSeats: [kestrelSeat], promptCharOffset: prompt.indexOf('4182'), valueSeatCited: false,
+    });
+    expect(missed).toMatchObject({ answerShape: 'not_found', analystPromptChars: prompt.length, analystModelIds: ['local-model-a'] });
     // A value present only inside a longer token: the token's shape, never its text.
     const glued = evalAnswerStageAudit({ expectedAnswerContains: ['4182'] }, pack, answer('The total is 4182USD.'), answer('The total is 4182USD.')).expected[0]!;
     expect(glued).toMatchObject({ inAnalystAnswer: false, answerTokenShape: '9999aaa' });
@@ -164,6 +182,145 @@ describe('the real eval report says where an expected value was lost (#1234)', (
     } as unknown as typeof pack;
     const audit = evalAnswerStageAudit({ expectedAnswerContains: ['ZX-4471', 'B-17'] }, withStructure, answer('x'), answer('x'));
     expect(audit.expected.map((entry) => entry.inPack)).toEqual([true, true]);
+  });
+});
+
+describe('the real eval report locates an expected item and value for a miss', () => {
+  test('each store\'s rank for the expected item, before the stores merge, ids never in the report', async () => {
+    const { stores, ledger } = await twoTierWorld();
+    const searches: Array<{ corpusId: string; providerItemIds: readonly string[] }> = [];
+    const lanes = createEvalDropboxLanes({
+      stores, ...(ledger ? { ledger } : {}), scope: { accountScope: 'personal' },
+      onStoreSearch: (search) => searches.push(search),
+    });
+    const detail = await buildEvalPack({ question: 'What is the Kestrel boatyard invoice total?', lanes, maxResults: 5, maxCharsPerCandidate: 1_500 });
+    const expectedId = detail.pack.candidates[0]!.provenance.sourceItem.providerItemId;
+    const audit = evalRetrievalAudit(detail, { expectedEvidence: [{ corpusId: DROPBOX_TIER_CORPUS_IDS.internal!, providerItemId: expectedId, hint: 'invoice' }] } as never, searches);
+    const ranks = new Map(audit.expectedStoreRanks!.map((entry) => [entry.corpusId, entry]));
+    expect(ranks.get(DROPBOX_TIER_CORPUS_IDS.internal!)).toMatchObject({ expectedItem: 1, bestRank: 1 });
+    expect(ranks.get(DROPBOX_TIER_CORPUS_IDS.secure_local!)).toMatchObject({ expectedItem: 1, bestRank: -1 });
+    for (const entry of ranks.values()) expect(entry.searches).toBeGreaterThan(0);
+    expect(JSON.stringify(audit.expectedStoreRanks)).not.toContain(expectedId);
+    // Without recorded searches the field is absent, not empty.
+    expect(evalRetrievalAudit(detail).expectedStoreRanks).toBeUndefined();
+  });
+
+  test('an answer from other evidence is told apart from "found nothing"', async () => {
+    const { stores, ledger } = await twoTierWorld();
+    const lanes = createEvalDropboxLanes({ stores, ...(ledger ? { ledger } : {}), scope: { accountScope: 'personal' } });
+    const { pack } = await buildEvalPack({ question: 'What is the Kestrel boatyard invoice total?', lanes, maxResults: 5, maxCharsPerCandidate: 1_500 });
+    const cited = { answer: 'The total is 99 dollars.', citations: [{ provenance: pack.candidates[0]!.provenance, claim: 'total' }], unanswered: [] } as unknown as AnalystResult;
+    const audit = evalAnswerStageAudit({ expectedAnswerContains: ['4182'] }, pack, cited, cited);
+    expect(audit).toMatchObject({ answerShape: 'other_answer', answerCitations: 1, answerUnanswered: 0 });
+    expect(evalAnswerStageAudit({ expectedAnswerContains: [] }, pack, cited, cited).answerShape).toBeUndefined();
+  });
+
+  test('which seats the answer cites, and whether one holds the value or the expected item', async () => {
+    const { stores, ledger } = await twoTierWorld();
+    const lanes = createEvalDropboxLanes({ stores, ...(ledger ? { ledger } : {}), scope: { accountScope: 'personal' } });
+    const built = (await buildEvalPack({ question: 'What is the Kestrel boatyard invoice total?', lanes, maxResults: 5, maxCharsPerCandidate: 1_500 })).pack;
+    // A second seat: another document that does not hold the value.
+    const first = built.candidates[0]!;
+    const other = {
+      ...first,
+      provenance: { ...first.provenance, sourceItem: { ...first.provenance.sourceItem, localItemId: 'personal:other', providerItemId: 'other' } },
+      chunks: ['Marina fuel log for the spring.'],
+    };
+    const pack = { ...built, candidates: [first, other] } as typeof built;
+    const expectedId = pack.candidates[0]!.provenance.sourceItem.providerItemId;
+    const question = {
+      expectedAnswerContains: ['4182'],
+      expectedEvidence: [{ corpusId: DROPBOX_TIER_CORPUS_IDS.internal!, providerItemId: expectedId, hint: 'invoice' }],
+    } as never;
+    const citing = (...seats: number[]) => ({
+      answer: 'The total is 99 dollars.',
+      citations: seats.map((seat) => ({ provenance: pack.candidates[seat - 1]!.provenance, claim: 'total' })),
+      unanswered: [],
+    }) as unknown as AnalystResult;
+    // Cited the right document and still gave another value: a misreading.
+    expect(evalAnswerStageAudit(question, pack, citing(1), citing(1))).toMatchObject({
+      answerCitedSeats: [1], answerCitationsOutsidePack: 0, expectedSeatCited: true,
+      expected: [{ valueSeatCited: true }],
+    });
+    // Cited another seat only: the wrong document.
+    expect(evalAnswerStageAudit(question, pack, citing(2), citing(2))).toMatchObject({
+      answerCitedSeats: [2], expectedSeatCited: false, expected: [{ valueSeatCited: false }],
+    });
+    // The flag for a misreading: is the answer's value in the seat it cites?
+    const inSeat = { ...citing(1), answer: 'The total is 4182 dollars, due in March.' } as unknown as AnalystResult;
+    expect(evalAnswerStageAudit(question, pack, inSeat, inSeat)).toMatchObject({ answerValueTokens: 1, answerValueTokensInCitedSeats: 1 });
+    expect(evalAnswerStageAudit(question, pack, citing(1), citing(1))).toMatchObject({ answerValueTokens: 1, answerValueTokensInCitedSeats: 0 });
+    // Whole tokens only: '41' is not supported by a seat that says '4182'.
+    const part = { ...citing(1), answer: 'The total is 41 dollars.' } as unknown as AnalystResult;
+    expect(evalAnswerStageAudit(question, pack, part, part)).toMatchObject({ answerValueTokens: 1, answerValueTokensInCitedSeats: 0 });
+    // A value held only in a cited table is still whole-token supported.
+    const tabled = { ...pack, candidates: [pack.candidates[0]!, { ...other, tables: [{ columns: ['total'], rows: [['5120']] }] }] } as typeof pack;
+    const fromTable = { ...citing(2), answer: 'The fuel total is 5120 dollars.' } as unknown as AnalystResult;
+    expect(evalAnswerStageAudit(question, tabled, fromTable, fromTable)).toMatchObject({ answerValueTokens: 1, answerValueTokensInCitedSeats: 1 });
+    // A seat marker the Analyst writes inline ("[1]") names a seat, not a value.
+    const marked = { ...citing(1), answer: 'The total is 4182 dollars [1].' } as unknown as AnalystResult;
+    expect(evalAnswerStageAudit(question, pack, marked, marked)).toMatchObject({ answerValueTokens: 1, answerValueTokensInCitedSeats: 1 });
+    const markedList = { ...citing(1, 2), answer: 'The total is 4182 dollars [1, 2].' } as unknown as AnalystResult;
+    expect(evalAnswerStageAudit(question, pack, markedList, markedList)).toMatchObject({ answerValueTokens: 1, answerValueTokensInCitedSeats: 1 });
+    // A bracketed number past the pack is not a seat marker, so it still counts.
+    const year = { ...citing(1), answer: 'The total is 4182 dollars [2024].' } as unknown as AnalystResult;
+    expect(evalAnswerStageAudit(question, pack, year, year)).toMatchObject({ answerValueTokens: 2, answerValueTokensInCitedSeats: 1 });
+    // What did not match, by shape only (digits 9, letters a), so a run can say why without the value.
+    const reformatted = { ...citing(1), answer: 'The total is 4,182 dollars, due 2026-03-01.' } as unknown as AnalystResult;
+    expect(evalAnswerStageAudit(question, pack, reformatted, reformatted)).toMatchObject({
+      answerValueTokensUnmatchedShapes: ['9,999', '9999-99-99'],
+    });
+    expect(evalAnswerStageAudit(question, pack, inSeat, inSeat).answerValueTokensUnmatchedShapes).toEqual([]);
+    // A citation naming nothing in the pack is counted, not seated.
+    const stray = { ...citing(), citations: [{ provenance: { sourceItem: { localItemId: 'elsewhere' } }, claim: 'x' }] } as unknown as AnalystResult;
+    expect(evalAnswerStageAudit(question, pack, stray, stray)).toMatchObject({ answerCitedSeats: [], answerCitationsOutsidePack: 1 });
+  });
+});
+
+describe('the real eval matches what Ask sends a local Analyst (rerun 20)', () => {
+  test('the pack is fitted to the local prompt budget, and the seats sent are recorded', async () => {
+    const { stores, ledger } = await twoTierWorld();
+    const lanes = createEvalDropboxLanes({ stores, ...(ledger ? { ledger } : {}), scope: { accountScope: 'personal' } });
+    const detail = await buildEvalPack({ question: 'What is the Kestrel boatyard invoice total?', lanes, maxResults: 5, maxCharsPerCandidate: 1_500 });
+    const first = detail.pack.candidates[0]!;
+    // Five long seats: far more than a 4,000-byte prompt holds.
+    const seats = Array.from({ length: 5 }, (_, index) => ({
+      ...first,
+      provenance: { ...first.provenance, sourceItem: { ...first.provenance.sourceItem, localItemId: `personal:seat-${index}` } },
+      chunks: [`Seat ${index}. ${'harbor ledger line '.repeat(120)}`],
+    }));
+    const pack = { ...detail.pack, candidates: seats } as typeof detail.pack;
+    const sentPacks: Array<typeof pack> = [];
+    const recorded: number[][] = [];
+    const analyst = promptFittedEvalAnalyst(
+      { analyze: async (sent) => { sentPacks.push(sent); return { answer: 'x', citations: [], unanswered: [] } as unknown as AnalystResult; } },
+      4_000,
+      () => seats.map(() => DROPBOX_TIER_CORPUS_IDS.internal!),
+      (_pack, kept) => recorded.push(kept),
+    );
+    await analyst.analyze(pack, {} as never);
+    const sent = sentPacks[0]!;
+    const sentChars = sent.candidates.reduce((sum, candidate) => sum + candidate.chunks.join('').length, 0);
+    const packChars = pack.candidates.reduce((sum, candidate) => sum + candidate.chunks.join('').length, 0);
+    expect(sentChars).toBeLessThan(packChars);
+    expect(recorded[0]!.length).toBe(sent.candidates.length);
+    expect(recorded[0]!.every((seat) => seat >= 1 && seat <= 5)).toBe(true);
+
+    // Without a budget (a Venice leg) the pack goes whole.
+    const whole: Array<typeof pack> = [];
+    await promptFittedEvalAnalyst(
+      { analyze: async (sentPack) => { whole.push(sentPack); return { answer: 'x', citations: [], unanswered: [] } as unknown as AnalystResult; } },
+      undefined, () => undefined, () => {},
+    ).analyze(pack, {} as never);
+    expect(whole[0]).toBe(pack);
+  });
+
+  test('the second score runs at Ask\'s pack size unless turned off or equal to the gate', () => {
+    expect(informationalEvalMaxResults(undefined, 5)).toBe(24);
+    expect(informationalEvalMaxResults('12', 5)).toBe(12);
+    expect(informationalEvalMaxResults('0', 5)).toBeUndefined();
+    expect(informationalEvalMaxResults('5', 5)).toBeUndefined();
+    expect(() => informationalEvalMaxResults('-1', 5)).toThrow();
   });
 });
 

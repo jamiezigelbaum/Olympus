@@ -33,6 +33,7 @@ import { secretLocationAnswer } from '../../src/core/secret-location-note.ts';
 import { freshAnswerSays, INBOX_ROWS, PAGE_UNLOCK_OFFERED, PAGE_UNLOCKED } from './inbox-page.ts';
 import type { Machine } from './machine.ts';
 import type { CheckResult } from './report.ts';
+import { openingLinkOf } from './opening-link.ts';
 
 export type WebClientId = 'chatgpt' | 'claude' | 'grok';
 export const WEB_CLIENT_IDS: readonly WebClientId[] = ['chatgpt', 'claude', 'grok'];
@@ -337,8 +338,9 @@ async function readConnectionUses(machine: Machine): Promise<Map<string, { name:
  */
 export async function openMacInbox(machine: Machine, browser: BrowserSession, t: AskTimings): Promise<Tab | string> {
   const minted = await machine.exec('"$HOME/.local/bin/olympus" dashboard --no-open --target private', { timeoutMs: 60_000 }).catch((error: unknown) => ({ code: 1, stdout: '', stderr: error instanceof Error ? error.message : String(error) }));
-  const url = /https?:\/\/[^\s"]+/.exec(minted.stdout + minted.stderr)?.[0];
-  if (!url) return `olympus dashboard --no-open --target private printed no opening link (exit ${minted.code})`;
+  const read = openingLinkOf(minted);
+  if ('problem' in read) return `olympus dashboard --no-open --target private printed no opening link (${read.problem})`;
+  const url = read.url;
   const tab = await openTab(browser);
   let stopBridge: (() => Promise<void>) | undefined;
   const closeTab = tab.close;

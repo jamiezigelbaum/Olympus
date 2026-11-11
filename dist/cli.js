@@ -21391,7 +21391,7 @@ function contentPass(args) {
     return {
       tier: metadata.tier,
       decidedBy: metadata.decidedBy,
-      reasons: [args.namesOnly ? "content:names_only" : "content:unread", ...mark],
+      reasons: [args.namesOnly ? CONTENT_NAMES_ONLY_REASON : "content:unread", ...mark],
       pending: args.namesOnly ? false : metadata.pending
     };
   }
@@ -21665,7 +21665,7 @@ function namesOf(signals) {
 function slug(value) {
   return SLUG.test(value) ? value : "invalid";
 }
-var TIER_CLASSIFIER_VERSION = "2026-10-29.p8", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, HELD_UNTIL_JUDGED_PRIORITY = -1, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", HELD_UNTIL_JUDGED_REASON = "content:held_until_judged", PARENT_CONTEXT_MARKER = `
+var CONTENT_NAMES_ONLY_REASON = "content:names_only", CONTENT_NAMES_ONLY_LIFTED_REASON = "content:names_only_lifted", TIER_CLASSIFIER_VERSION = "2026-10-29.p8", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, HELD_UNTIL_JUDGED_PRIORITY = -1, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", HELD_UNTIL_JUDGED_REASON = "content:held_until_judged", PARENT_CONTEXT_MARKER = `
 Parent names (context only): `, PARENT_CONTEXT_MAX_CHARS = 200, IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", IMAGE_TEXT_DECIDES_REASON_PREFIX = "content:image_text_decides:", IMAGE_TEXT_DECIDES_MIN_WORDS = 8, PUBLIC_RETIRED_REASON = "tier:public_retired", RETIRED_SOURCE_PRIOR_REASON = "metadata:prior:source_", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
 var init_tier_classifier = __esm(() => {
   init_secret_patterns();
@@ -21806,8 +21806,8 @@ class SecretLocationsIndex {
     return false;
   }
   search(query, scope, options = {}) {
-    const terms = secretLocationQueryTerms(query);
-    if (terms.length === 0)
+    const readings = secretLocationQueryReadings(query);
+    if (readings.length === 0)
       return [];
     const limit = Math.max(1, Math.min(options.limit ?? 10, 100));
     const rows = this.db.query(`
@@ -21820,16 +21820,15 @@ class SecretLocationsIndex {
       const location = locationFromRow(row);
       if (!secretLocationWithinScope(location, scope))
         continue;
-      const haystack = [
-        location.namesReleasable ? location.locator ?? "" : "",
-        location.title ?? "",
-        location.findingKinds.join(" ").replaceAll("_", " ")
-      ].join(`
-`).toLowerCase();
-      const words2 = new Set(haystack.split(/[^\p{L}\p{N}]+/u));
-      const score = terms.filter((term) => words2.has(term)).length;
-      if (score >= Math.min(3, terms.length))
-        scored.push({ location, score });
+      const words2 = secretLocationWords(location);
+      let best = 0;
+      for (const terms of readings) {
+        const score = terms.filter((term) => words2.has(term)).length;
+        if (score >= Math.min(3, terms.length))
+          best = Math.max(best, score);
+      }
+      if (best > 0)
+        scored.push({ location, score: best });
     }
     const identities = scored.map(({ location }) => ({
       provider: location.source,
@@ -21900,8 +21899,26 @@ function locatorWithin(locator, scopePath) {
   const root = scopePath.toLowerCase().replace(/\/+$/, "");
   return path === root || path.startsWith(`${root}/`);
 }
-function secretLocationQueryTerms(query) {
-  return [...new Set(sourceIndexTopicTokens(query.replaceAll("_", " ")).filter((term) => term.length >= 2 && !STOP_WORDS.has(term)))];
+function secretLocationQueryReadings(query) {
+  const text2 = query.replaceAll("_", " ");
+  const joined = secretLocationQueryTerms(joinHyphenatedWords(text2));
+  const split = secretLocationQueryTerms(text2);
+  if (joined.length === 0 && split.length === 0)
+    return [];
+  return joined.join(" ") === split.join(" ") ? [joined] : [joined, split].filter((terms) => terms.length > 0);
+}
+function secretLocationQueryTerms(text2) {
+  return [...new Set(sourceIndexTopicTokens(text2).filter((term) => term.length >= 2 && !STOP_WORDS.has(term)))];
+}
+function joinHyphenatedWords(text2) {
+  return text2.replace(/(?<=[\p{L}\p{N}])[-\u2010\u2011](?=[\p{L}\p{N}])/gu, "");
+}
+function secretLocationWords(location) {
+  const names = [location.namesReleasable ? location.locator ?? "" : "", location.title ?? ""].join(`
+`).toLowerCase();
+  const kinds = location.findingKinds.flatMap((kind) => [kind.replaceAll("_", " "), ...FINDING_KIND_WORDS[kind] ?? []]).join(" ");
+  return new Set([names, joinHyphenatedWords(names), kinds].join(`
+`).split(/[^\p{L}\p{N}]+/u).filter(Boolean));
 }
 function locationFromRow(row) {
   return {
@@ -21948,7 +21965,7 @@ function secretLocationsMigrations() {
     }
   ];
 }
-var SECRET_LOCATIONS_SCHEMA_VERSION = 1, STOP_WORDS;
+var SECRET_LOCATIONS_SCHEMA_VERSION = 1, STOP_WORDS, FINDING_KIND_WORDS;
 var init_secret_locations = __esm(() => {
   init_fts();
   init_sqlite_migrations();
@@ -21994,6 +22011,13 @@ var init_secret_locations = __esm(() => {
     "who",
     "with"
   ]);
+  FINDING_KIND_WORDS = {
+    credential_assignment: ["password", "passwords", "passcode", "passphrase", "pin", "login", "credentials"],
+    private_key_material: ["ssh", "keys"],
+    aws_access_key_id: ["keys"],
+    api_secret_token: ["key", "keys", "tokens"],
+    slack_token: ["tokens"]
+  };
 });
 
 // src/core/sqlite-rows.ts
@@ -33841,6 +33865,58 @@ function applyPerCorpusResultBudget(ranked, budget) {
     }))
   };
 }
+function withReservedLeaderSeats(budgeted, pool, budget) {
+  if (budget < 3 || budgeted.hits.length < 1)
+    return budgeted;
+  const best = (kind, exclude) => {
+    let chosen;
+    for (const hit of pool) {
+      const signal = hit.keywordLeader;
+      if (!signal?.kinds.includes(kind) || exclude.has(hit) || signal.conceptShare < RESERVED_LEADER_MIN_CONCEPT_SHARE)
+        continue;
+      if (!chosen || signal.conceptShare > chosen.keywordLeader.conceptShare)
+        chosen = hit;
+    }
+    return chosen;
+  };
+  const hits = [...budgeted.hits];
+  const reserved = new Set;
+  for (const [kind, seat] of [["keyword_first", 1], ["name", 2]]) {
+    const leader = best(kind, reserved);
+    if (!leader)
+      continue;
+    reserved.add(leader);
+    const at = hits.indexOf(leader);
+    if (at >= 0 && at <= seat)
+      continue;
+    if (at > seat)
+      hits.splice(at, 1);
+    else {
+      let drop = -1;
+      for (let index = hits.length - 1;index >= 0; index -= 1) {
+        if (!reserved.has(hits[index])) {
+          drop = index;
+          break;
+        }
+      }
+      if (hits.length >= budget && drop >= 0)
+        hits.splice(drop, 1);
+    }
+    hits.splice(Math.min(seat, hits.length), 0, leader);
+  }
+  if (hits.length === budgeted.hits.length && hits.every((hit, index) => hit === budgeted.hits[index]))
+    return budgeted;
+  const represented = new Set(hits.map((hit) => hit.corpusId));
+  const kept = budgeted.degradations.filter((degradation) => degradation.reason !== "lane_budget_cut" || !represented.has(degradation.laneName));
+  const reported = new Set(kept.filter((degradation) => degradation.reason === "lane_budget_cut").map((degradation) => degradation.laneName));
+  return {
+    hits,
+    degradations: [
+      ...kept,
+      ...[...new Set(budgeted.hits.map((hit) => hit.corpusId))].filter((corpusId) => !represented.has(corpusId) && !reported.has(corpusId)).map((corpusId) => ({ laneName: corpusId, laneType: "keyword", reason: "lane_budget_cut", occurrences: 1 }))
+    ]
+  };
+}
 function mergeRetrievalDegradations(...lists) {
   const merged = new Map;
   for (const list of lists) {
@@ -33862,7 +33938,7 @@ function mergeRetrievalDegradations(...lists) {
     return (left.detail ?? "").localeCompare(right.detail ?? "");
   });
 }
-var DEFAULT_RRF_K = 60;
+var DEFAULT_RRF_K = 60, RESERVED_LEADER_MIN_CONCEPT_SHARE = 0.5;
 
 // src/core/source-index/reactions.ts
 function normalizeSourceReactions(value) {
@@ -35963,7 +36039,7 @@ function createConnectorStoreCorpusAdapter(options) {
         const rows = keywordLane.rows;
         const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters);
         if (recencyRows.length === 0) {
-          const hits2 = rows.map((row) => connectorStoreHitFromRow(store, row, -row.rank, options.resultProjector, filters?.locatorPathScope));
+          const hits2 = withKeywordLeaderSignals(rows.map((row) => connectorStoreHitFromRow(store, row, -row.rank, options.resultProjector, filters?.locatorPathScope)), keywordLane);
           return {
             hits: hits2,
             latencyMs: Date.now() - startedAt,
@@ -35986,14 +36062,17 @@ function createConnectorStoreCorpusAdapter(options) {
           tieBreaker: connectorStoreCandidateComparator(lexicalContentPreference)
         });
         const complete = (candidate) => candidate.laneRanks.has("keyword") && keywordLane.completeItemIds.has(candidate.item.sourceItem.localItemId);
-        const hits = withPinnedNewestChatHits({
+        const hits = withKeywordLeaderSignals(withPinnedNewestChatHits({
           store,
           recencyRows,
-          hits: rankedCandidates(fused, request.maxResults, complete, lexicalContentPreference, keywordLane.nameLeaderItemId).map((candidate) => connectorStoreHitFromRow(store, candidate.item, candidate.score, options.resultProjector, filters?.locatorPathScope)),
+          hits: rankedCandidates(fused, request.maxResults, complete, lexicalContentPreference, {
+            ...keywordLane.nameLeaderItemId !== undefined ? { nameLeaderItemId: keywordLane.nameLeaderItemId } : {},
+            matchesWholeQuestion: complete
+          }).map((candidate) => connectorStoreHitFromRow(store, candidate.item, candidate.score, options.resultProjector, filters?.locatorPathScope)),
           limit: request.maxResults,
           ...options.resultProjector ? { resultProjector: options.resultProjector } : {},
           ...filters?.locatorPathScope ? { locatorPathScope: filters.locatorPathScope } : {}
-        });
+        }), keywordLane);
         return {
           hits,
           latencyMs: Date.now() - startedAt,
@@ -36233,18 +36312,19 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
     tieBreaker: connectorStoreCandidateComparator(contentPreference)
   });
   const seated = withLaneLeadersSeated(fused, vettedVectorItemIds);
-  const complete = (candidate) => {
-    const id = candidate.item.sourceItem.localItemId;
-    return candidate.laneRanks.has("vector") && vettedVectorItemIds.has(id) || candidate.laneRanks.has("keyword") && keywordLane.completeItemIds.has(id);
-  };
-  const hits = withPinnedNewestChatHits({
+  const keywordComplete = (candidate) => candidate.laneRanks.has("keyword") && keywordLane.completeItemIds.has(candidate.item.sourceItem.localItemId);
+  const complete = (candidate) => candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId) || keywordComplete(candidate);
+  const hits = withKeywordLeaderSignals(withPinnedNewestChatHits({
     store,
     recencyRows,
-    hits: rankedCandidates(seated, maxResults, complete, contentPreference, keywordLane.nameLeaderItemId).map((candidate) => connectorStoreHitFromRow(store, candidate.item, candidate.score, resultProjector, filters?.locatorPathScope)),
+    hits: rankedCandidates(seated, maxResults, complete, contentPreference, {
+      ...keywordLane.nameLeaderItemId !== undefined ? { nameLeaderItemId: keywordLane.nameLeaderItemId } : {},
+      matchesWholeQuestion: keywordComplete
+    }).map((candidate) => connectorStoreHitFromRow(store, candidate.item, candidate.score, resultProjector, filters?.locatorPathScope)),
     limit: maxResults,
     ...resultProjector ? { resultProjector } : {},
     ...filters?.locatorPathScope ? { locatorPathScope: filters.locatorPathScope } : {}
-  });
+  }), keywordLane);
   return {
     hits,
     latencyMs: Date.now() - startedAt,
@@ -36322,10 +36402,14 @@ async function connectorStoreKeywordLaneRows(store, query, limit, accountScope, 
   const content = rows.every(connectorStoreRowHasContent) ? { rows: [], saturated: false, concepts: plain.concepts } : await store.searchItemsDetailedOffThread(query, MAX_SEARCH_RESULTS, accountScope, filters, { ...ftsOptions, contentOnly: true }, pool);
   const contentRows = content.rows;
   const complete = new Set;
+  const conceptShare = new Map;
   for (const concepts of [plain.concepts, content.concepts]) {
-    for (const [id, matched] of concepts.matched)
+    for (const [id, matched] of concepts.matched) {
       if (!ftsOptions.relaxed && matched >= concepts.total)
         complete.add(id);
+      if (!ftsOptions.relaxed && concepts.total > 0)
+        conceptShare.set(id, Math.max(conceptShare.get(id) ?? 0, matched / concepts.total));
+    }
   }
   const seen = new Set;
   const merged = [];
@@ -36346,11 +36430,11 @@ async function connectorStoreKeywordLaneRows(store, query, limit, accountScope, 
   const leader = rows[0];
   const nameLeader = leader && !connectorStoreRowHasContent(leader) && !complete.has(leader.sourceItem.localItemId) ? leader.sourceItem.localItemId : undefined;
   if (leader && nameLeader !== undefined) {
-    const at = ordered.findIndex((row) => row.sourceItem.localItemId === leader.sourceItem.localItemId);
-    const firstPartial = ordered.findIndex((row) => !complete.has(row.sourceItem.localItemId));
-    const seat = firstPartial + (connectorStoreRowHasContent(ordered[firstPartial]) ? 1 : 0);
-    if (firstPartial >= 0 && at > seat)
-      ordered.splice(seat, 0, ...ordered.splice(at, 1));
+    seatNameLeader(ordered, {
+      isLeader: (row) => row.sourceItem.localItemId === leader.sourceItem.localItemId,
+      matchesWholeQuestion: (row) => complete.has(row.sourceItem.localItemId),
+      readable: connectorStoreRowHasContent
+    });
   }
   const baseline = keywordExpansionDisabled() || ftsOptions.relaxed || !keywordExpansionChangesSearch(query, ftsOptions) ? undefined : await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, ftsOptions, deadlineAtMs));
   const enriched = new Map(ordered.map((row) => [row.sourceItem.localItemId, row]));
@@ -36371,8 +36455,23 @@ async function connectorStoreKeywordLaneRows(store, query, limit, accountScope, 
     matchedItemIds: allIds,
     completeItemIds: new Set([...complete, ...baseline?.completeItemIds ?? []]),
     ...(baseline?.nameLeaderItemId ?? nameLeader) !== undefined ? { nameLeaderItemId: baseline?.nameLeaderItemId ?? nameLeader } : {},
+    conceptShare: new Map([...baseline?.conceptShare ?? [], ...conceptShare].map(([id, share]) => [id, Math.max(share, baseline?.conceptShare?.get(id) ?? 0)])),
     ...baseline ? { baseline } : {}
   };
+}
+function withKeywordLeaderSignals(hits, lane) {
+  const first = lane.rows[0]?.sourceItem.localItemId;
+  const name = lane.nameLeaderItemId;
+  if (first === undefined && name === undefined || !lane.conceptShare)
+    return hits;
+  return hits.map((hit) => {
+    const id = hit.sourceItem.localItemId;
+    const kinds = [
+      ...id === first ? ["keyword_first"] : [],
+      ...id === name ? ["name"] : []
+    ];
+    return kinds.length === 0 ? hit : { ...hit, keywordLeader: { kinds, conceptShare: lane.conceptShare.get(id) ?? 0 } };
+  });
 }
 function keywordExpansionChangesSearch(query, ftsOptions) {
   const shape = () => JSON.stringify([toFtsQuery(query, ftsOptions), sourceIndexFtsTermGroups(query), sourceIndexTopicTokens(query)]);
@@ -36411,13 +36510,39 @@ function connectorStoreRowIsSecureTier(row) {
 function connectorStoreContentPreference(vettedVectorItemIds) {
   return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
 }
-function rankedCandidates(candidates, limit, complete, hasContent = lexicalContentPreference, nameLeaderItemId) {
+function rankedCandidates(candidates, limit, complete, hasContent, keywordLeaders) {
+  const { nameLeaderItemId, matchesWholeQuestion } = keywordLeaders;
   const tiers = [[], [], [], []];
   for (const candidate of candidates) {
     const readable = hasContent(candidate) || candidate.item.sourceItem.localItemId === nameLeaderItemId;
     tiers[(complete(candidate) ? 0 : 2) + (readable ? 0 : 1)].push(candidate);
   }
-  return tiers.flat().slice(0, Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS)));
+  const ordered = tiers.flat();
+  const cut = Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS));
+  const keywordFirst = candidates.find((candidate) => candidate.laneRanks.get("keyword") === 1)?.item.sourceItem.localItemId;
+  const leaders = [...new Set([keywordFirst, nameLeaderItemId].filter((id) => id !== undefined))];
+  leaders.forEach((leaderId, index) => seatNameLeader(ordered, {
+    isLeader: (candidate) => candidate.item.sourceItem.localItemId === leaderId,
+    matchesWholeQuestion,
+    readable: hasContent,
+    latestSeat: Math.min(STORE_LEADER_LATEST_SEAT, cut - leaders.length) + index
+  }));
+  return ordered.slice(0, cut);
+}
+function seatNameLeader(ordered, rule) {
+  const at = ordered.findIndex(rule.isLeader);
+  const firstPartial = ordered.findIndex((entry) => !rule.matchesWholeQuestion(entry));
+  if (at < 0 || firstPartial < 0)
+    return;
+  let lastWholeAbove = -1;
+  for (let index = 0;index < at; index += 1)
+    if (rule.matchesWholeQuestion(ordered[index]))
+      lastWholeAbove = index;
+  let seat = Math.max(firstPartial + (rule.readable(ordered[firstPartial]) ? 1 : 0), lastWholeAbove + 1);
+  if (rule.latestSeat !== undefined)
+    seat = Math.min(seat, Math.max(1, rule.latestSeat));
+  if (at > seat)
+    ordered.splice(seat, 0, ...ordered.splice(at, 1));
 }
 function withLaneLeadersSeated(fused, vettedVectorItemIds) {
   const isLeader = (candidate) => candidate.laneRanks.get("keyword") === 1 || candidate.laneRanks.get("vector") === 1 && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
@@ -38534,7 +38659,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, READ_ONLY_MIN_SCHEMA_VERSION = 7, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, VECTOR_SCAN_RESERVE_MIN_MS = 1000, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, READ_ONLY_MIN_SCHEMA_VERSION = 7, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, VECTOR_SCAN_RESERVE_MIN_MS = 1000, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_main_thread_sql_trace();
   init_store_write_guard();
@@ -62972,6 +63097,8 @@ var init_vocabulary = __esm(() => {
     privateLine: "Only your private model reads it.",
     judgeChose: "The judge chose {tier}:",
     judgeMarked: "The judge marked this {tier}.",
+    waitingToRead: "Waiting to be read. It stays {tier} until the judge reads it.",
+    namesOnly: "Names only, by your choice. The judge decided it on its name alone.",
     youChose: "You chose {tier}",
     justNow: "just now",
     judgeSaid: "The judge said {tier}.",
@@ -65402,6 +65529,7 @@ class GoogleDriveSourceConnector {
         content: text2?.trim() ? { kind: "text", text: text2 } : { kind: "metadata_only" },
         metadata: Object.freeze({
           ...metadata,
+          ...!excluded && !contentAllowed ? namesOnlyContentScopeMetadata() : {},
           ...file.md5Checksum ? { contentHash: file.md5Checksum } : { contentHash: hashString5(`${file.version ?? ""}:${text2 ?? title}`) }
         }),
         fetchedAt: new Date().toISOString()
@@ -66852,13 +66980,14 @@ function settleOne(set, record) {
   const locator = exported.columns["locator_uri"];
   const mimeType = exported.columns["mime_type"];
   const container = typeof mimeType === "string" && CONTAINER_MIME_TYPES.includes(mimeType.trim().toLowerCase());
-  if (!container && store.metadataOnlyRuleForLocator(typeof locator === "string" ? locator : undefined) === undefined)
+  const path = typeof locator === "string" ? locator : undefined;
+  if (!container && store.metadataOnlyRuleForLocator(path) === undefined && !set.ownerKeepsNamesOnly(path))
     return false;
   const decision = {
     metadataTier: record.metadataTier,
     contentTier: record.metadataTier,
     decidedBy: record.decidedBy,
-    reasons: [...record.reasons.filter((reason) => !reason.startsWith("content:")), "content:names_only"],
+    reasons: [...record.reasons.filter((reason) => !reason.startsWith("content:")), CONTENT_NAMES_ONLY_REASON],
     state: "current",
     contentRead: false,
     metadataPending: false,
@@ -66902,6 +67031,7 @@ function identityOf2(record) {
 }
 var DEFAULT_NAMES_ONLY_SETTLE_ROWS = 500, SETTLE_META_KEY = "names_only_settle_after";
 var init_tier_names_only_settle = __esm(() => {
+  init_tier_classifier();
   init_tier_ledger();
   init_local_index();
 });
@@ -71118,6 +71248,7 @@ class TieredStoreSet {
   onLegOpened;
   contentArrivesLater;
   contentArrivesLaterFor;
+  namesOnlyByOwner;
   privateEmbedder;
   privateEmbedWith;
   lastRowRehome;
@@ -71135,6 +71266,7 @@ class TieredStoreSet {
     this.onLegOpened = options.onLegOpened;
     this.contentArrivesLater = options.contentArrivesLater === true;
     this.contentArrivesLaterFor = options.contentArrivesLater === true ? undefined : options.contentArrivesLaterFor;
+    this.namesOnlyByOwner = options.namesOnlyByOwner;
     this.legs = new Map;
     for (const spec of options.legs) {
       if (this.legs.has(spec.trustDomain))
@@ -71426,6 +71558,15 @@ class TieredStoreSet {
     if (!this.contentArrivesLaterFor)
       return false;
     return item === undefined || this.contentArrivesLaterFor(item);
+  }
+  ownerKeepsNamesOnly(path) {
+    if (!this.namesOnlyByOwner || !path)
+      return false;
+    try {
+      return this.namesOnlyByOwner(path) === true;
+    } catch {
+      return false;
+    }
   }
   restingTierFor(domain) {
     return this.legs.get(domain)?.spec.restingTier ?? defaultStoreTrustTier(domain);
@@ -71810,7 +71951,8 @@ function createTieredLaneSet(options) {
     ...options.secretLocations ? { secretLocations: options.secretLocations } : {},
     ...options.onLegOpened ? { onLegOpened: options.onLegOpened } : {},
     ...options.contentArrivesLater === true ? { contentArrivesLater: true } : {},
-    ...options.contentArrivesLaterFor ? { contentArrivesLaterFor: options.contentArrivesLaterFor } : {}
+    ...options.contentArrivesLaterFor ? { contentArrivesLaterFor: options.contentArrivesLaterFor } : {},
+    ...options.namesOnlyByOwner ? { namesOnlyByOwner: options.namesOnlyByOwner } : {}
   });
 }
 function rehomeChatLaneOverrides(ledger, provider, stores) {
@@ -72112,7 +72254,7 @@ class TieredRoutingRun {
       return { kind: "delete", corpora: new Set(ledger.copies(identity2).map((copy) => copy.corpusId)), reason: "provider_deleted", ...location ? { location: true } : {} };
     }
     const deferred = this.set.readsContentLater(item);
-    const namesOnly = deferred && (input.metadataOnly || CONTAINER_MIME_TYPES.includes(item.mimeType?.trim().toLowerCase() ?? ""));
+    const namesOnly = deferred && (input.metadataOnly || CONTAINER_MIME_TYPES.includes(item.mimeType?.trim().toLowerCase() ?? "") || this.set.ownerKeepsNamesOnly(pathOf(sourceExclusionFactsFromMetadata(item.metadata).path)));
     const text2 = namesOnly ? undefined : connectorStoreItemText(item);
     const classification = this.classification;
     let decision = decideItemTiers(connector, item, text2, classification, ledger, {
@@ -72324,8 +72466,10 @@ function tieredRun(legs, routing, cursor) {
   return { legs, byDomain, ...cursor ? { cursor } : {}, routing: { ...routing } };
 }
 function withRecordedContent(decision, record) {
-  if (decision.contentRead || !record?.contentRead)
+  if (decision.contentRead)
     return decision;
+  if (!record?.contentRead)
+    return withNamesOnlyLifted(decision, record);
   const contentPending = record.contentPending;
   return {
     ...decision,
@@ -72339,6 +72483,14 @@ function withRecordedContent(decision, record) {
     ],
     state: decision.metadataPending || contentPending ? "pending" : "current"
   };
+}
+function withNamesOnlyLifted(decision, record) {
+  if (!record || decision.reasons.includes(CONTENT_NAMES_ONLY_REASON))
+    return decision;
+  const owed = record.reasons.includes(CONTENT_NAMES_ONLY_REASON) || record.reasons.includes(CONTENT_NAMES_ONLY_LIFTED_REASON);
+  if (!owed || decision.reasons.includes(CONTENT_NAMES_ONLY_LIFTED_REASON))
+    return decision;
+  return { ...decision, reasons: [...decision.reasons, CONTENT_NAMES_ONLY_LIFTED_REASON] };
 }
 function identityKey(identity2) {
   return tierLedgerIdentityKey(identity2);
@@ -72418,9 +72570,13 @@ function handoffConnector(source, item) {
     }
   };
 }
+function pathOf(path) {
+  return typeof path === "string" && path ? path : undefined;
+}
 var LOWER_CONTENT_REPAIR_INTERVAL_MS, TIER_DOMAIN_ORDER, TIER_KEY_TRUST_DOMAIN, SECRET_LOCATION_DOMAIN = "secure_local", TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff";
 var init_tiered_store_set = __esm(() => {
   init_store_write_guard();
+  init_source_ingestion_exclusions();
   init_control_path_headroom();
   init_types();
   init_engine();
@@ -74977,12 +75133,14 @@ async function routePreparedSourceIndexSearch(options) {
       lane.items = lane.items.filter((hit) => kept.has(hit));
   }
   const laneOrder = new Map(lanes.map((lane, index) => [lane.name, index]));
-  const { hits: fused, degradations: budgetDegradations } = applyPerCorpusResultBudget(fuseRankedCandidateLanes({
+  const fusedAll = fuseRankedCandidateLanes({
     lanes,
     getId: routedHitCandidateId,
     limit: lanes.reduce((total, lane) => total + lane.items.length, 0),
     tieBreaker: (left, right) => compareTiedRoutedCandidates(left, right, laneOrder)
-  }), request.maxResults);
+  });
+  const budgeted = applyPerCorpusResultBudget(fusedAll, request.maxResults);
+  const { hits: fused, degradations: budgetDegradations } = withReservedLeaderSeats(budgeted, fusedAll.map((candidate) => candidate.item), request.maxResults);
   const result = {
     hits: fused,
     searchedCorpora,
@@ -76540,7 +76698,8 @@ function promptBudgetedAnalyst(analyst, promptBytes, candidateCorpus) {
 function fitPackToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions) {
   if (analystPromptBytes(pack, analyzeOptions) <= maxPromptBytes)
     return pack;
-  const order = roundRobinCandidates(pack.candidates, candidateCorpus);
+  const head = pack.candidates.slice(0, RESERVED_PACK_HEAD_SEATS);
+  const order = [...head, ...roundRobinCandidates(pack.candidates.slice(RESERVED_PACK_HEAD_SEATS), candidateCorpus)];
   let fallback;
   for (let keep = order.length;keep >= 1; keep -= 1) {
     const kept = new Set(order.slice(0, keep));
@@ -77997,7 +78156,7 @@ async function readPrivateEvidenceItem(input) {
     return;
   return content.chunks;
 }
-var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES = 13500, CLOUD_ANALYST_PROMPT_BYTES, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 20000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 600000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 120000, DEFAULT_SELF_HEAL_MAX_MS = 20000, MIN_FITTED_BYTES_PER_CANDIDATE = 600, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS, RELEASED_EXCERPT_MAX_CHARS = 1500, PRIVATE_EVIDENCE_MAX_RESULTS = 12, PRIVATE_DEPTH_MAX_PASSAGES = 24, PRIVATE_EVIDENCE_BYTE_BUDGET = 20000, PRIVATE_NEIGHBOURS_MAX = 4;
+var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES = 13500, CLOUD_ANALYST_PROMPT_BYTES, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 20000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 600000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 120000, DEFAULT_SELF_HEAL_MAX_MS = 20000, RESERVED_PACK_HEAD_SEATS = 3, MIN_FITTED_BYTES_PER_CANDIDATE = 600, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS, RELEASED_EXCERPT_MAX_CHARS = 1500, PRIVATE_EVIDENCE_MAX_RESULTS = 12, PRIVATE_DEPTH_MAX_PASSAGES = 24, PRIVATE_EVIDENCE_BYTE_BUDGET = 20000, PRIVATE_NEIGHBOURS_MAX = 4;
 var init_analyst_answer = __esm(() => {
   init_embeddings();
   init_answer_activity();
@@ -83329,6 +83488,7 @@ function createDropboxTierLane(options) {
     setId: DROPBOX_FILES_SOURCE_ID,
     ledger,
     contentArrivesLater: true,
+    ...options.namesOnlyByOwner ? { namesOnlyByOwner: options.namesOnlyByOwner } : {},
     ...options.secretLocations ? { secretLocations: options.secretLocations } : {},
     ...options.tierClassification ? { tierClassification: options.tierClassification } : {},
     legs: {
@@ -100388,7 +100548,7 @@ function createTieredStoreExtractionSink(options) {
       const itemTitle2 = stringMetadata2(plan.item, ["title", "name", "subject"]);
       const itemPath = stringMetadata2(plan.item, ["locatorUri", "pathDisplay"]);
       const imageJudgment = plan.media ? setMediaJudgment(set, plan.media.sha256) : undefined;
-      const settledUnread = !record.contentRead && record.reasons.some(isFailSafeMissingContentQuestion);
+      const settledUnread = !record.contentRead && record.reasons.some(isFailSafeMissingContentQuestion) || record.reasons.some((reason) => reason === CONTENT_NAMES_ONLY_REASON || reason === CONTENT_NAMES_ONLY_LIFTED_REASON);
       const holdUntilJudged = tierClassification?.holdContentUntilJudged === true || set.holdsContentUntilJudged() || heldUntilJudged(record.reasons) || settledUnread;
       const parentContext = tierClassification?.sniffer ? parentNamesContext(set, identity2) : undefined;
       const content = classifyContentTier({
@@ -129265,7 +129425,7 @@ function normalizeSelector(selector) {
 }
 function batchSelectorsFor(sourceId, item) {
   const selectors = [`source:${sourceId}`];
-  const path = pathOf(item);
+  const path = pathOf2(item);
   if (path) {
     const parts = path.split("/").filter(Boolean);
     for (let depth2 = 1;depth2 < parts.length; depth2 += 1)
@@ -129280,7 +129440,7 @@ function batchSelectorsFor(sourceId, item) {
     selectors.push(`chat:${item.identity.providerConversationId}`);
   return selectors;
 }
-function pathOf(item) {
+function pathOf2(item) {
   return item.locatorUri?.startsWith("/") ? item.locatorUri : undefined;
 }
 function signalsFromStoredItem(item) {
@@ -129288,7 +129448,7 @@ function signalsFromStoredItem(item) {
     ...item.folderKeys,
     ...item.identity.providerConversationId ? [item.identity.providerConversationId] : []
   ];
-  const path = pathOf(item);
+  const path = pathOf2(item);
   const sender = item.senderLabel ?? item.senderId;
   return {
     ...item.title ? { title: item.title } : {},
@@ -129672,7 +129832,7 @@ function addPlanned(planned, totals, patterns, lane, store, item, decision, from
   } else {
     totals.moves.push({ source: lane.sourceId, from: fromTier, toNames, toContent, items: 1, chunks: item.chunks.length });
   }
-  const path = pathOf(item);
+  const path = pathOf2(item);
   const folder = path ? path.slice(0, Math.max(1, path.lastIndexOf("/"))) : undefined;
   const sender = item.senderLabel ?? item.senderId;
   const facets = [
@@ -153199,7 +153359,8 @@ function view3(row, state) {
     owner_set: state.ownerSet,
     ...state.ownerTier && (!record4 || record4.contentTier !== state.ownerTier && record4.targetContentTier !== state.ownerTier) ? { owner_choice: tierDisplayName(state.ownerTier) } : {},
     judge_reason: judgeReason(record4),
-    ...record4?.state === "pending" && (record4.contentPending || record4.metadataPending) ? { waiting_for_judge: true } : {},
+    ...record4?.state === "pending" && (record4.contentPending || record4.metadataPending) || record4 && !record4.contentRead && record4.reasons.some(isFailSafeMissingContentQuestion) ? { waiting_for_judge: true } : {},
+    ...record4?.reasons.includes(CONTENT_NAMES_ONLY_REASON) ? { names_only: true } : {},
     decided_at: record4?.decidedAt ?? null
   };
 }
@@ -163886,7 +164047,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     return archiveGroups().some(archiveMoving);
   }
   function archiveMoving(meta2) {
-    return !archiveSetting(meta2) && meta2.archives.some((entry) => !!entry && (entry.status === "importing" || entry.status === "removing")) || meta2.requests.some((entry) => !!entry && entry.status === "checking");
+    return !archiveSetting(meta2) && meta2.archives.some((entry) => !!entry && (entry.status === "importing" || entry.status === "removing")) || meta2.requests.some((entry) => !!entry && entry.status === "checking") || meta2.privateModel === "ready" && meta2.archives.some((entry) => !!entry && entry.status !== "removing" && wholeCount(entry.held) > 0);
   }
   function startArchivePick(key2, sourceId) {
     supersede();
@@ -171648,6 +171809,8 @@ function hostProgram(input, bridge, mount) {
     window.addEventListener("hashchange", () => {
       if (window.location.hash === input.setupAgent.fragment)
         openSetupAgent();
+      else if (window.location.hash.indexOf(input.openFragment) === 0)
+        window.location.reload();
     });
   }
   if (typeof document.addEventListener === "function")
@@ -177604,7 +177767,11 @@ function privacyItemsClientScript(input) {
       foot = esc(effect) + ' ' + esc(C.undoGivesBack);
     } else {
       var phrase = reason(item);
-      if (tier) why = '<p class="piwhy" data-pi-why>' + (phrase ? '<b>' + esc(fill(C.judgeChose, { tier: tier })) + '</b> ' + esc(phrase) : esc(fill(C.judgeMarked, { tier: tier }))) + '</p>';
+      // A hold for unread text, or a label from the names alone, is not a verdict on what the item says (#1295).
+      var said = item.waiting_for_judge ? esc(fill(C.waitingToRead, { tier: tier }))
+        : item.names_only ? esc(C.namesOnly)
+          : phrase ? '<b>' + esc(fill(C.judgeChose, { tier: tier })) + '</b> ' + esc(phrase) : esc(fill(C.judgeMarked, { tier: tier }));
+      if (tier) why = '<p class="piwhy" data-pi-why>' + said + '</p>';
       var group = item.sender ? fill(C.promiseGroup, { sender: item.sender }) : C.promiseGroupNoSender;
       foot = esc(fill(C.promise, { group: group }));
     }
@@ -186148,7 +186315,7 @@ function createEmailSourceWorker(options = {}) {
               kind: "source_index_search",
               corpus_id: connectorStore.corpusId,
               retrieval_source: "local_index",
-              hits: hits.map(({ corpusId: hitCorpusId, trustDomain: _hitTrustDomain, trustTier: _hitTrustTier, ...hit }) => addSelectedItemToSearchHit(hitCorpusId, hit)),
+              hits: hits.map(({ corpusId: hitCorpusId, trustDomain: _hitTrustDomain, trustTier: _hitTrustTier, keywordLeader: _hitKeywordLeader, ...hit }) => addSelectedItemToSearchHit(hitCorpusId, hit)),
               ...secretLocations.length > 0 ? {
                 secret_locations: secretLocations.map((location) => ({
                   source: location.source,
@@ -208232,33 +208399,47 @@ function createScopeBoundGoogleDriveContentScope(input) {
 }
 function createScopeBoundDropboxContentScope(input) {
   const current2 = () => input.authority.assertCurrent(input.ref);
-  const matching = (path) => {
-    const normalized2 = normalizeDropboxScopePath(path);
-    return current2().selections.filter((selection) => {
-      const root = normalizeDropboxScopePath(selection.key);
-      return normalized2 === root || root !== "/" && normalized2.startsWith(`${root}/`) || root === "/";
-    });
-  };
   return {
     generation: input.ref.accountGeneration,
     revision: input.ref.revision,
     assertCurrent() {
       current2();
     },
-    allowsMetadata(path) {
-      const approval = current2();
-      const selected = matching(path);
-      if (selected.some((entry) => entry.state === "exclude"))
-        return false;
-      return approval.wholeAccount || selected.some((entry) => entry.state !== "exclude");
-    },
-    allowsContent(path) {
-      const approval = current2();
-      const selected = matching(path);
-      if (selected.some((entry) => entry.state !== "ingest"))
-        return false;
-      return approval.wholeAccount || selected.some((entry) => entry.state === "ingest");
+    allowsMetadata: (path) => dropboxScopeAllows(current2(), path).metadata,
+    allowsContent: (path) => dropboxScopeAllows(current2(), path).content
+  };
+}
+function dropboxScopeAllows(approval, path) {
+  const normalized2 = normalizeDropboxScopePath(path);
+  const selected = approval.selections.filter((selection) => {
+    const root = normalizeDropboxScopePath(selection.key);
+    return normalized2 === root || root !== "/" && normalized2.startsWith(`${root}/`) || root === "/";
+  });
+  return {
+    metadata: !selected.some((entry) => entry.state === "exclude") && (approval.wholeAccount || selected.some((entry) => entry.state !== "exclude")),
+    content: !selected.some((entry) => entry.state !== "ingest") && (approval.wholeAccount || selected.some((entry) => entry.state === "ingest"))
+  };
+}
+function dropboxNamesOnlyByOwner(authority, now = Date.now) {
+  let cached3;
+  return (path) => {
+    const at = now();
+    if (!cached3 || at - cached3.at >= DROPBOX_NAMES_ONLY_APPROVAL_TTL_MS) {
+      cached3 = { at, ref: authority.policyRef("dropbox.files") };
     }
+    if (!cached3.ref)
+      return false;
+    let approval;
+    try {
+      approval = authority.assertCurrent(cached3.ref);
+    } catch {
+      cached3 = undefined;
+      return false;
+    }
+    if (approval.status !== "approved")
+      return false;
+    const allows = dropboxScopeAllows(approval, path);
+    return allows.metadata && !allows.content;
   };
 }
 function normalizeDropboxScopePath(path) {
@@ -208317,7 +208498,7 @@ function scopeBoundSchedulerSource(input) {
     }))
   };
 }
-var FILTER_KEYS;
+var FILTER_KEYS, DROPBOX_NAMES_ONLY_APPROVAL_TTL_MS = 5000;
 var init_source_scope_runtime = __esm(() => {
   init_source_scope_approval();
   init_file_scope_sources();
@@ -218639,7 +218820,13 @@ async function callChatGptTool(name, args, ctx, options, signal, detachedContext
     if (reason)
       return record8(withPrivateAnswerOutcome(answerToolResult(withheldSourceAnswer(reason), { pendingPrivacyItems: ctx.pendingPrivacyItems?.() })), true);
   }
-  return record8(PANEL_TOOL_NAMES2.has(name) ? withPrivateAnswerOutcome(result) : result);
+  return record8(withVisibleJobId(PANEL_TOOL_NAMES2.has(name) ? withPrivateAnswerOutcome(result) : result, options.appClient));
+}
+function withVisibleJobId(result, client) {
+  const structured = result.structuredContent;
+  if (client?.host !== "claude" || structured?.status !== "working" || typeof structured.job_id !== "string")
+    return result;
+  return { ...result, content: [...result.content, { type: "text", text: `job_id: ${structured.job_id}` }] };
 }
 function recordChatGptRequest(name, args, ctx, result, capture, withheldAfter) {
   if (result.isError)
@@ -236478,6 +236665,7 @@ ${key2}`;
       env: process.env,
       policy: dropboxIngestionPolicy,
       ...dropboxSecretLocations ? { secretLocations: dropboxSecretLocations } : {},
+      ...fileSourceScopeAuthority ? { namesOnlyByOwner: dropboxNamesOnlyByOwner(fileSourceScopeAuthority) } : {},
       onStoreOpened: (store) => registerTierLegStore(store, DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, sourceIndexEmbeddingProvider ?? null)
     }) : undefined;
     if (dropboxTierLane && dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider)) {
@@ -243548,6 +243736,11 @@ var ENGINE_CLI_USAGE = {
   "engine logs": "olympus engine logs [--lines <n>] [--follow]"
 };
 var DEFAULT_OPEN_HANDLER = { install: installOpenHandler, uninstall: uninstallOpenHandler };
+function runningBuildExpected(service) {
+  if ((service.platform ?? process.platform) === "linux")
+    return linuxInstalledBuild(service);
+  return installedEngineBuild(engineServicePaths(service).plistPath);
+}
 async function runEngineCommand(args, deps = {}) {
   const [command2, ...rest] = args;
   if ((deps.platform ?? process.platform) === "linux" && !deps.lifecycleLocked && ["install", "uninstall", "rollback"].includes(command2 ?? "")) {
@@ -243639,9 +243832,7 @@ async function runEngineCommand(args, deps = {}) {
   if (command2 === "restart") {
     const since = Date.now();
     const result = restartEngine({ ...service, ...parseNowArg("restart", rest) });
-    if ((deps.platform ?? process.platform) !== "linux")
-      return result;
-    const health = await waitForEngineHealthy({ paths: engineServicePaths(service), expectedBuild: linuxInstalledBuild(service), since }, { ...deps.health, exec: deps.exec });
+    const health = await waitForEngineHealthy({ paths: engineServicePaths(service), expectedBuild: runningBuildExpected(service), since }, { ...deps.health, exec: deps.exec });
     return { ...result, ok: health.ok, health };
   }
   if (command2 === "stop") {
@@ -243651,9 +243842,7 @@ async function runEngineCommand(args, deps = {}) {
     expectNoArgs("start", rest);
     const since = Date.now();
     const result = startEngine(service);
-    if ((deps.platform ?? process.platform) !== "linux")
-      return result;
-    const health = await waitForEngineHealthy({ paths: engineServicePaths(service), expectedBuild: linuxInstalledBuild(service), ...result.action === "already_running" ? {} : { since } }, { ...deps.health, exec: deps.exec });
+    const health = await waitForEngineHealthy({ paths: engineServicePaths(service), expectedBuild: runningBuildExpected(service), ...result.action === "already_running" ? {} : { since } }, { ...deps.health, exec: deps.exec });
     return { ...result, ok: health.ok, health };
   }
   if (command2 === "rollback") {

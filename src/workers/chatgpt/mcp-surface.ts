@@ -465,7 +465,19 @@ export async function callChatGptTool(
       : ANSWER_RELEASE_UNVERIFIED;
     if (reason) return record(withPrivateAnswerOutcome(answerToolResult(withheldSourceAnswer(reason), { pendingPrivacyItems: ctx.pendingPrivacyItems?.() })), true);
   }
-  return record(PANEL_TOOL_NAMES.has(name) ? withPrivateAnswerOutcome(result) : result);
+  return record(withVisibleJobId(PANEL_TOOL_NAMES.has(name) ? withPrivateAnswerOutcome(result) : result, options.appClient));
+}
+
+/**
+ * A handed-off answer names its job in the text too when the host's model
+ * never sees `structuredContent` (Claude, #1327), so the model can call
+ * source_answer_result. The id answers only the connection that asked
+ * (source-answer-jobs.ts), and a Private answer still reaches only the panel.
+ */
+function withVisibleJobId(result: ChatGptToolResult, client: McpAppClient | undefined): ChatGptToolResult {
+  const structured = result.structuredContent as { status?: unknown; job_id?: unknown } | undefined;
+  if (client?.host !== 'claude' || structured?.status !== 'working' || typeof structured.job_id !== 'string') return result;
+  return { ...result, content: [...result.content, { type: 'text', text: `job_id: ${structured.job_id}` }] };
 }
 
 /** Records a search or source answer as it leaves for ChatGPT; anything else (and an error) records nothing. */

@@ -20,7 +20,7 @@ const URL_ITEMS = new URL('http://127.0.0.1:8010/dashboard?privacy-items');
 interface Item {
   item_id: string; source: string; family: string; title: string | null; sender: string | null; location: string | null;
   tier: string | null; names_tier: string | null; decided_by: string | null; owner_set: boolean; judge_reason: string | null;
-  decided_at: string | null; preview?: string | null; owner_choice?: string;
+  decided_at: string | null; preview?: string | null; owner_choice?: string; waiting_for_judge?: true; names_only?: true;
 }
 
 const invoice = (): Item => ({
@@ -140,6 +140,16 @@ describe('finding an item', () => {
     await p.click('[data-pi-item="oti_appt"]');
     expect(p.text('[data-pi-why]')).toBe('The judge marked this Personal.');
     expect(p.text('[data-pi-foot]')).toContain('a rule for Clínica Sorriso or your other items');
+  });
+
+  test('an item held until its text is read, or judged on its names by the owner\'s choice, says so instead of a verdict (#1295)', async () => {
+    const unread: Item = { ...invoice(), item_id: 'oti_unread', title: 'Scan_0042.pdf', judge_reason: 'fail_safe:unread', decided_by: 'sniffer', waiting_for_judge: true, preview: null };
+    const names: Item = { ...appointment(), item_id: 'oti_names', source: 'dropbox', family: 'file', sender: null, title: 'Holiday plan.docx', location: '/Archive/Holiday plan.docx', judge_reason: null, decided_by: 'default', names_only: true, preview: null };
+    const p = await page([unread, names]);
+    await p.click('[data-pi-item="oti_unread"]');
+    expect(p.text('[data-pi-why]')).toBe('Waiting to be read. It stays Private until the judge reads it.');
+    await p.click('[data-pi-item="oti_names"]');
+    expect(p.text('[data-pi-why]')).toBe(C.namesOnly);
   });
 
   test('on a phone the item opens in place, under its row', async () => {

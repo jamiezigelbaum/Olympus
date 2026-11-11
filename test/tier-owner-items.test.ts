@@ -311,6 +311,35 @@ describe('finding an item', () => {
     expect(ownerItems().find({ query: 'bank', personalNamesOnly: true }).items).toEqual([]);
     expect(ownerItems().find({ query: 'bank' }).items).toHaveLength(1);
   });
+
+  test('a fail-safe Private hold for text never read is shown as waiting, not as the judge\'s verdict (#1295)', async () => {
+    const install = await judged();
+    const current = install.lane.ledger.getCurrent(bankIdentity)!;
+    expect(ownerItems().find({ query: 'bank' }).items[0]?.waiting_for_judge).toBeUndefined();
+    // Settled current, names Personal, text unread and held Private by the fail-safe.
+    install.lane.ledger.recordRoutedPlacement(bankIdentity, {
+      metadataTier: 'private', contentTier: 'secure', decidedBy: 'sniffer',
+      reasons: ['metadata:default:personal', 'content:unread', 'content:sniffer:local:p-test.o1.m-test:fail_safe:unread'], state: 'current',
+      contentRead: false, metadataPending: false, contentPending: false, metadataForced: false, metadataFlagged: false,
+      engineVersion: current.engineVersion, mapRevision: current.mapRevision, snifferId: 'test',
+    }, { copies: [], embedHold: false }, { staleCopiesGone: true });
+    expect(ownerItems().find({ query: 'bank' }).items[0]).toMatchObject({ tier: 'Private', waiting_for_judge: true });
+  });
+
+  test('an item judged on its names alone, by the owner\'s names-only choice, says so (#1295)', async () => {
+    const install = await judged();
+    const current = install.lane.ledger.getCurrent(bankIdentity)!;
+    expect(ownerItems().find({ query: 'bank' }).items[0]?.names_only).toBeUndefined();
+    install.lane.ledger.recordRoutedPlacement(bankIdentity, {
+      metadataTier: 'private', contentTier: 'private', decidedBy: 'default',
+      reasons: ['metadata:default:personal', 'content:names_only'], state: 'current',
+      contentRead: false, metadataPending: false, contentPending: false, metadataForced: false, metadataFlagged: false,
+      engineVersion: current.engineVersion, mapRevision: current.mapRevision, snifferId: 'test',
+    }, { copies: [], embedHold: false }, { staleCopiesGone: true });
+    const item = ownerItems().find({ query: 'bank' }).items[0];
+    expect(item).toMatchObject({ tier: 'Personal', names_only: true });
+    expect(item?.waiting_for_judge).toBeUndefined();
+  });
 });
 
 describe('one item, Private -> Personal -> Private', () => {

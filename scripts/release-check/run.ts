@@ -1308,11 +1308,6 @@ const tarballVersion = (dir: string): string | undefined => {
  * provisioned fresh with the candidate, the backup is put on it, `restore-clean-machine` is walked there and its state read; then
  * the two are compared. The second machine is destroyed at the end, whatever happened, unless the run keeps its machines.
  */
-/**
- * The Mac driver (tart) runs one machine at a time on its host: a run's second machine waits for the first to be gone, so
- * a second Mac is provisioned only after the first is destroyed (run 42918085215: restore-provision timed out waiting).
- */
-export const oneMachineAtATime = (os: Machine['os']): boolean => os === 'macos';
 
 /** What the restore leg keeps between its two halves: the state when the backup was made, and the backup file here. */
 interface RestorePrepared { before: StateSnapshot; local: string }
@@ -1386,7 +1381,8 @@ async function finishRestore(run: Run, bundlePath: string, outDir: string, workD
 }
 
 async function takeSnapshot(run: Run, what: string): Promise<StateSnapshot | undefined> {
-  const out = await run.agent('snapshot-state', '', 90_000);
+  // The agent waits up to a minute for tier moves to land before it reads the items.
+  const out = await run.agent('snapshot-state', '', 150_000);
   if (out.result?.ok !== true || !out.result.state) {
     run.errors.push(`the install's state could not be read ${what}: ${String(out.result?.detail ?? out.stderr.slice(-200))}`);
     return undefined;
@@ -1544,24 +1540,22 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
         if (Date.now() < deadline) await run.inLeg('archive', () => runArchiveLeg(run, options.outDir, deadline)); else run.errors.push('the run exceeded its time budget before the archive-import leg');
         // The backup is made before the control exploration, which ends with Readwise disconnected and its data deleted (its
         // `empty` state): a backup made after it holds no source to restore (#1323, run 42936532388).
-        // The restore leg's second machine: at once where the driver allows two, else after the first is done and gone.
-        const alone = oneMachineAtATime(run.machine!.os);
+        // The restore leg's second machine comes only after the first is done and gone: both drivers run one machine at a time
+        // on their host (tart: run 42918085215's restore-provision timed out waiting; LXD: run 42960983714's was refused, since
+        // two VMs do not fit in Sparta's memory).
         let restore: RestorePrepared | undefined;
         if (Date.now() < deadline) {
-          await run.inLeg('restore', async () => {
-            restore = await prepareRestore(run, workDir, options.outDir);
-            if (restore && !alone) await finishRestore(run, bundlePath, options.outDir, workDir, restore);
-          });
+          await run.inLeg('restore', async () => { restore = await prepareRestore(run, workDir, options.outDir); });
         } else run.errors.push('the run exceeded its time budget before the restore leg');
         if (Date.now() < deadline) await runRelayConsentCheck(run);
         if (Date.now() < deadline) await run.inLeg('explore', () => runExploreLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the control exploration');
         if (Date.now() < deadline) await runConfinementCheck(run); else run.errors.push('the run exceeded its time budget before the anonymous-answer confinement check');
         if (Date.now() < deadline) await runServerModeCheck(run); else run.errors.push('the run exceeded its time budget before the Mac server-mode leg');
         await collectEvidence(run, options.outDir);
-        if (restore && alone) {
-          const prepared = restore;
+        if (restore) {
+          const prepared: RestorePrepared = restore;
           if (Date.now() >= deadline) { rmSync(prepared.local, { force: true }); run.errors.push('the run exceeded its time budget before the restore leg\'s clean machine'); }
-          else if (options.keepMachine) { rmSync(prepared.local, { force: true }); run.errors.push('the restore leg\'s clean machine was left out: --keep-machine keeps the first machine, and this driver runs one at a time'); }
+          else if (options.keepMachine) { rmSync(prepared.local, { force: true }); run.errors.push('the restore leg\'s clean machine was left out: --keep-machine keeps the first machine, and the driver runs one at a time'); }
           else {
             await run.inLeg('restore', async () => {
               // Teardown destroys run.machine again afterwards, which is a no-op for a machine already gone.

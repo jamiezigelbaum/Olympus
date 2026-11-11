@@ -274,7 +274,7 @@ export interface SourceAnswerSelfHealResult {
 // (DEFAULT_LOCAL_ANALYST_PROMPT_BYTES). Venice Private contexts are far
 // larger. A caller's max_results still asks for fewer, up to
 // MAX_EVIDENCE_CANDIDATES.
-const DEFAULT_MAX_RESULTS = 24;
+export const DEFAULT_MAX_RESULTS = 24;
 const MAX_EVIDENCE_CANDIDATES = 48;
 const DEFAULT_EVIDENCE_BYTE_BUDGET = 40_000;
 // A local model served over an OpenAI-compatible endpoint (Ollama, llama.cpp,
@@ -286,7 +286,7 @@ const DEFAULT_EVIDENCE_BYTE_BUDGET = 40_000;
 // footprint that ran safely: 3 candidates x 3,000 chars measured 13,667 bytes.
 // A host that serves a larger context declares it with
 // OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES.
-const DEFAULT_LOCAL_ANALYST_PROMPT_BYTES = 13_500;
+export const DEFAULT_LOCAL_ANALYST_PROMPT_BYTES = 13_500;
 // The OpenClaw infer ceiling less a margin for the CLI's own framing.
 const CLOUD_ANALYST_PROMPT_BYTES = OPENCLAW_INFER_MAX_PROMPT_BYTES - 10_000;
 // Candidate floor for temporal questions - see maxResults derivation below.
@@ -1009,6 +1009,10 @@ function promptBudgetedAnalyst(
   };
 }
 
+// Pack seats kept ahead of store turn when fitting: seat 1 plus the two
+// reserved leader seats (withReservedLeaderSeats in core/source-index).
+const RESERVED_PACK_HEAD_SEATS = 3;
+
 // Floor for one candidate's passage share when fitting a pack to a lane.
 const MIN_FITTED_BYTES_PER_CANDIDATE = 600;
 
@@ -1016,7 +1020,8 @@ const MIN_FITTED_BYTES_PER_CANDIDATE = 600;
  * Fit a pack so the analyst's whole prompt (system rules, every candidate's
  * labels and provenance, passages, coverage) is at most maxPromptBytes of
  * UTF-8. Keeps as many candidates as can each carry a usable passage share,
- * seated round-robin across corpora, then clips passages; the measurement is
+ * the pack's first three seats first and the rest round-robin across
+ * corpora, then clips passages; the measurement is
  * the real prompt, so labels and escaping are counted, not estimated.
  */
 export function fitPackToPromptBytes(
@@ -1026,7 +1031,11 @@ export function fitPackToPromptBytes(
   analyzeOptions: AnalystOptions,
 ): EvidencePack {
   if (analystPromptBytes(pack, analyzeOptions) <= maxPromptBytes) return pack;
-  const order = roundRobinCandidates(pack.candidates, candidateCorpus);
+  // The first three seats go first: the router reserves seats 2 and 3 for
+  // the strongest keyword and names-only leaders across stores (#1350), and
+  // store turn alone would trim them whenever they share seat 1's store.
+  const head = pack.candidates.slice(0, RESERVED_PACK_HEAD_SEATS);
+  const order = [...head, ...roundRobinCandidates(pack.candidates.slice(RESERVED_PACK_HEAD_SEATS), candidateCorpus)];
   let fallback: EvidencePack | undefined;
   for (let keep = order.length; keep >= 1; keep -= 1) {
     const kept = new Set(order.slice(0, keep));

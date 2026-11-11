@@ -9893,7 +9893,7 @@ function contentPass(args) {
     return {
       tier: metadata.tier,
       decidedBy: metadata.decidedBy,
-      reasons: [args.namesOnly ? "content:names_only" : "content:unread", ...mark],
+      reasons: [args.namesOnly ? CONTENT_NAMES_ONLY_REASON : "content:unread", ...mark],
       pending: args.namesOnly ? false : metadata.pending
     };
   }
@@ -10167,7 +10167,7 @@ function namesOf(signals) {
 function slug(value) {
   return SLUG.test(value) ? value : "invalid";
 }
-var TIER_CLASSIFIER_VERSION = "2026-10-29.p8", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, HELD_UNTIL_JUDGED_PRIORITY = -1, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", HELD_UNTIL_JUDGED_REASON = "content:held_until_judged", PARENT_CONTEXT_MARKER = `
+var CONTENT_NAMES_ONLY_REASON = "content:names_only", TIER_CLASSIFIER_VERSION = "2026-10-29.p8", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, HELD_UNTIL_JUDGED_PRIORITY = -1, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", HELD_UNTIL_JUDGED_REASON = "content:held_until_judged", PARENT_CONTEXT_MARKER = `
 Parent names (context only): `, PARENT_CONTEXT_MAX_CHARS = 200, IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", IMAGE_TEXT_DECIDES_REASON_PREFIX = "content:image_text_decides:", IMAGE_TEXT_DECIDES_MIN_WORDS = 8, PUBLIC_RETIRED_REASON = "tier:public_retired", RETIRED_SOURCE_PRIOR_REASON = "metadata:prior:source_", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
 var init_tier_classifier = __esm(() => {
   init_secret_patterns();
@@ -17746,8 +17746,8 @@ class SecretLocationsIndex {
     return false;
   }
   search(query, scope, options = {}) {
-    const terms = secretLocationQueryTerms(query);
-    if (terms.length === 0)
+    const readings = secretLocationQueryReadings(query);
+    if (readings.length === 0)
       return [];
     const limit = Math.max(1, Math.min(options.limit ?? 10, 100));
     const rows = this.db.query(`
@@ -17760,16 +17760,15 @@ class SecretLocationsIndex {
       const location = locationFromRow(row);
       if (!secretLocationWithinScope(location, scope))
         continue;
-      const haystack = [
-        location.namesReleasable ? location.locator ?? "" : "",
-        location.title ?? "",
-        location.findingKinds.join(" ").replaceAll("_", " ")
-      ].join(`
-`).toLowerCase();
-      const words2 = new Set(haystack.split(/[^\p{L}\p{N}]+/u));
-      const score = terms.filter((term) => words2.has(term)).length;
-      if (score >= Math.min(3, terms.length))
-        scored.push({ location, score });
+      const words2 = secretLocationWords(location);
+      let best = 0;
+      for (const terms of readings) {
+        const score = terms.filter((term) => words2.has(term)).length;
+        if (score >= Math.min(3, terms.length))
+          best = Math.max(best, score);
+      }
+      if (best > 0)
+        scored.push({ location, score: best });
     }
     const identities = scored.map(({ location }) => ({
       provider: location.source,
@@ -17840,8 +17839,26 @@ function locatorWithin(locator, scopePath) {
   const root = scopePath.toLowerCase().replace(/\/+$/, "");
   return path === root || path.startsWith(`${root}/`);
 }
-function secretLocationQueryTerms(query) {
-  return [...new Set(sourceIndexTopicTokens(query.replaceAll("_", " ")).filter((term) => term.length >= 2 && !STOP_WORDS.has(term)))];
+function secretLocationQueryReadings(query) {
+  const text2 = query.replaceAll("_", " ");
+  const joined = secretLocationQueryTerms(joinHyphenatedWords(text2));
+  const split = secretLocationQueryTerms(text2);
+  if (joined.length === 0 && split.length === 0)
+    return [];
+  return joined.join(" ") === split.join(" ") ? [joined] : [joined, split].filter((terms) => terms.length > 0);
+}
+function secretLocationQueryTerms(text2) {
+  return [...new Set(sourceIndexTopicTokens(text2).filter((term) => term.length >= 2 && !STOP_WORDS.has(term)))];
+}
+function joinHyphenatedWords(text2) {
+  return text2.replace(/(?<=[\p{L}\p{N}])[-\u2010\u2011](?=[\p{L}\p{N}])/gu, "");
+}
+function secretLocationWords(location) {
+  const names = [location.namesReleasable ? location.locator ?? "" : "", location.title ?? ""].join(`
+`).toLowerCase();
+  const kinds = location.findingKinds.flatMap((kind) => [kind.replaceAll("_", " "), ...FINDING_KIND_WORDS[kind] ?? []]).join(" ");
+  return new Set([names, joinHyphenatedWords(names), kinds].join(`
+`).split(/[^\p{L}\p{N}]+/u).filter(Boolean));
 }
 function locationFromRow(row) {
   return {
@@ -17888,7 +17905,7 @@ function secretLocationsMigrations() {
     }
   ];
 }
-var SECRET_LOCATIONS_SCHEMA_VERSION = 1, STOP_WORDS;
+var SECRET_LOCATIONS_SCHEMA_VERSION = 1, STOP_WORDS, FINDING_KIND_WORDS;
 var init_secret_locations = __esm(() => {
   init_fts();
   init_sqlite_migrations();
@@ -17934,6 +17951,13 @@ var init_secret_locations = __esm(() => {
     "who",
     "with"
   ]);
+  FINDING_KIND_WORDS = {
+    credential_assignment: ["password", "passwords", "passcode", "passphrase", "pin", "login", "credentials"],
+    private_key_material: ["ssh", "keys"],
+    aws_access_key_id: ["keys"],
+    api_secret_token: ["key", "keys", "tokens"],
+    slack_token: ["tokens"]
+  };
 });
 
 // src/workers/source-index/answer-latency-trace.ts
@@ -37700,6 +37724,7 @@ class GoogleDriveSourceConnector {
         content: text2?.trim() ? { kind: "text", text: text2 } : { kind: "metadata_only" },
         metadata: Object.freeze({
           ...metadata,
+          ...!excluded && !contentAllowed ? namesOnlyContentScopeMetadata() : {},
           ...file.md5Checksum ? { contentHash: file.md5Checksum } : { contentHash: hashString5(`${file.version ?? ""}:${text2 ?? title}`) }
         }),
         fetchedAt: new Date().toISOString()
@@ -38187,13 +38212,14 @@ function settleOne(set, record) {
   const locator = exported.columns["locator_uri"];
   const mimeType = exported.columns["mime_type"];
   const container = typeof mimeType === "string" && CONTAINER_MIME_TYPES.includes(mimeType.trim().toLowerCase());
-  if (!container && store.metadataOnlyRuleForLocator(typeof locator === "string" ? locator : undefined) === undefined)
+  const path = typeof locator === "string" ? locator : undefined;
+  if (!container && store.metadataOnlyRuleForLocator(path) === undefined && !set.ownerKeepsNamesOnly(path))
     return false;
   const decision = {
     metadataTier: record.metadataTier,
     contentTier: record.metadataTier,
     decidedBy: record.decidedBy,
-    reasons: [...record.reasons.filter((reason) => !reason.startsWith("content:")), "content:names_only"],
+    reasons: [...record.reasons.filter((reason) => !reason.startsWith("content:")), CONTENT_NAMES_ONLY_REASON],
     state: "current",
     contentRead: false,
     metadataPending: false,
@@ -38237,6 +38263,7 @@ function identityOf3(record) {
 }
 var DEFAULT_NAMES_ONLY_SETTLE_ROWS = 500, SETTLE_META_KEY = "names_only_settle_after";
 var init_tier_names_only_settle = __esm(() => {
+  init_tier_classifier();
   init_tier_ledger();
   init_local_index();
 });
@@ -41024,6 +41051,7 @@ var init_tier_secrets_floor_sweep = __esm(() => {
 var LOWER_CONTENT_REPAIR_INTERVAL_MS;
 var init_tiered_store_set = __esm(() => {
   init_store_write_guard();
+  init_source_ingestion_exclusions();
   init_control_path_headroom();
   init_types();
   init_engine();
@@ -48541,7 +48569,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     return archiveGroups().some(archiveMoving);
   }
   function archiveMoving(meta) {
-    return !archiveSetting(meta) && meta.archives.some((entry) => !!entry && (entry.status === "importing" || entry.status === "removing")) || meta.requests.some((entry) => !!entry && entry.status === "checking");
+    return !archiveSetting(meta) && meta.archives.some((entry) => !!entry && (entry.status === "importing" || entry.status === "removing")) || meta.requests.some((entry) => !!entry && entry.status === "checking") || meta.privateModel === "ready" && meta.archives.some((entry) => !!entry && entry.status !== "removing" && wholeCount(entry.held) > 0);
   }
   function startArchivePick(key2, sourceId) {
     supersede();
