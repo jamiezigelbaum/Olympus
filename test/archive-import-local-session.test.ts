@@ -73,6 +73,7 @@ function archives() {
     view: () => ({ sourceId: 'archive.imports', privateModel: 'ready', archives: [], requests: [] }),
     present: () => ({ archives: 0, importing: false }),
     resume() {},
+    frontChanged() {},
     idle: () => Promise.resolve(),
     close() {},
   };
