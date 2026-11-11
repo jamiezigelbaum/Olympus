@@ -71,3 +71,44 @@ test('Secret locations require topic overlap on complete words', () => {
     expect(index.search('up', {})).toEqual([]);
   } finally { index.close(); }
 });
+
+// #1321: the release check's Wi-Fi question missed a Secret file named
+// home-wifi.txt. Spelling ("Wi-Fi") and the kind of Secret ("password" for a
+// credential) now count; unrelated Secrets still stay quiet.
+test('a Secret is found by its spelling variants and by the everyday word for its kind', () => {
+  const index = new SecretLocationsIndex({ dbPath: ':memory:' });
+  try {
+    index.record({
+      identity: { provider: 'fixture', accountScope: 'personal', providerItemId: 'wifi' },
+      title: 'home-wifi.txt', namesReleasable: true,
+      locator: '/Documents/home-wifi.txt', findingKinds: ['credential_assignment'],
+    });
+    index.record({
+      identity: { provider: 'fixture', accountScope: 'personal', providerItemId: 'deploy' },
+      title: 'deploy.env', namesReleasable: true,
+      locator: '/Code/deploy.env', findingKinds: ['api_secret_token'],
+    });
+    const found = (query: string) => index.search(query, {}).map((match) => match.locator);
+    for (const query of ['what is my home Wi-Fi password?', 'Search Olympus: what is my home Wi-Fi password?', 'wifi password', 'home Wi-Fi password', 'home-wifi', 'Wi‑Fi']) {
+      expect({ query, found: found(query) }).toEqual({ query, found: ['/Documents/home-wifi.txt'] });
+    }
+    expect(found('deploy api key')).toEqual(['/Code/deploy.env']);
+    // Still a whole-word overlap on the topic: these name neither Secret.
+    for (const query of ['my bank password', 'garden hose length', 'wi', 'office printer password reset']) {
+      expect({ query, found: found(query) }).toEqual({ query, found: [] });
+    }
+  } finally { index.close(); }
+});
+
+test('a withheld name stays unsearchable, joined or split', () => {
+  const index = new SecretLocationsIndex({ dbPath: ':memory:' });
+  try {
+    index.record({
+      identity: { provider: 'fixture', accountScope: 'personal', providerItemId: 'hidden' },
+      title: 'Note', namesReleasable: false,
+      locator: '/Private/home-wifi.txt', findingKinds: ['credential_assignment'],
+    });
+    expect(index.search('home wifi', {})).toEqual([]);
+    expect(index.search('home-wifi', {})).toEqual([]);
+  } finally { index.close(); }
+});

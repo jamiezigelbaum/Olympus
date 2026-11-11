@@ -17721,13 +17721,7 @@ class SecretLocationsIndex {
       const location = locationFromRow(row);
       if (!secretLocationWithinScope(location, scope))
         continue;
-      const haystack = [
-        location.namesReleasable ? location.locator ?? "" : "",
-        location.title ?? "",
-        location.findingKinds.join(" ").replaceAll("_", " ")
-      ].join(`
-`).toLowerCase();
-      const words2 = new Set(haystack.split(/[^\p{L}\p{N}]+/u));
+      const words2 = secretLocationWords(location);
       const score = terms.filter((term) => words2.has(term)).length;
       if (score >= Math.min(3, terms.length))
         scored.push({ location, score });
@@ -17802,7 +17796,17 @@ function locatorWithin(locator, scopePath) {
   return path === root || path.startsWith(`${root}/`);
 }
 function secretLocationQueryTerms(query) {
-  return [...new Set(sourceIndexTopicTokens(query.replaceAll("_", " ")).filter((term) => term.length >= 2 && !STOP_WORDS.has(term)))];
+  return [...new Set(sourceIndexTopicTokens(joinHyphenatedWords(query.replaceAll("_", " "))).filter((term) => term.length >= 2 && !STOP_WORDS.has(term)))];
+}
+function joinHyphenatedWords(text2) {
+  return text2.replace(/(?<=[\p{L}\p{N}])[-\u2010\u2011](?=[\p{L}\p{N}])/gu, "");
+}
+function secretLocationWords(location) {
+  const names = [location.namesReleasable ? location.locator ?? "" : "", location.title ?? ""].join(`
+`).toLowerCase();
+  const kinds = location.findingKinds.flatMap((kind) => [kind.replaceAll("_", " "), ...FINDING_KIND_WORDS[kind] ?? []]).join(" ");
+  return new Set([names, joinHyphenatedWords(names), kinds].join(`
+`).split(/[^\p{L}\p{N}]+/u).filter(Boolean));
 }
 function locationFromRow(row) {
   return {
@@ -17849,7 +17853,7 @@ function secretLocationsMigrations() {
     }
   ];
 }
-var SECRET_LOCATIONS_SCHEMA_VERSION = 1, STOP_WORDS;
+var SECRET_LOCATIONS_SCHEMA_VERSION = 1, STOP_WORDS, FINDING_KIND_WORDS;
 var init_secret_locations = __esm(() => {
   init_fts();
   init_sqlite_migrations();
@@ -17895,6 +17899,13 @@ var init_secret_locations = __esm(() => {
     "who",
     "with"
   ]);
+  FINDING_KIND_WORDS = {
+    credential_assignment: ["password", "passwords", "passcode", "passphrase", "pin", "login", "credentials"],
+    private_key_material: ["ssh", "keys"],
+    aws_access_key_id: ["keys"],
+    api_secret_token: ["key", "keys", "tokens"],
+    slack_token: ["tokens"]
+  };
 });
 
 // src/core/child-item-id.ts
