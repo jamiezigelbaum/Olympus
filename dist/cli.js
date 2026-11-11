@@ -36123,7 +36123,7 @@ function createConnectorStoreCorpusAdapter(options) {
       return (async () => {
         const keywordLane = revalidateKeywordLane(store, await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters, await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, {}, request.deadlineAtMs), options.localKeywordFallback, {}, request.deadlineAtMs));
         const rows = keywordLane.rows;
-        const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters);
+        const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters, request.deadlineAtMs);
         if (recencyRows.length === 0) {
           const hits2 = withKeywordLeaderSignals(rows.map((row) => connectorStoreHitFromRow(store, row, -row.rank, options.resultProjector, filters?.locatorPathScope)), keywordLane);
           return {
@@ -36281,10 +36281,10 @@ function createConnectorStoreCorpusAdapter(options) {
   }
   return expanded;
 }
-async function chatRecencyLaneRows(store, accountScope, filters) {
+async function chatRecencyLaneRows(store, accountScope, filters, deadlineAtMs) {
   if (store.family !== "chat")
     return [];
-  return store.recentItemsOffThread(CHAT_RECENCY_LANE_LIMIT, accountScope, filters);
+  return store.recentItemsOffThread(CHAT_RECENCY_LANE_LIMIT, accountScope, filters, deadlineAtMs);
 }
 function connectorStoreHitFromRow(store, row, score, resultProjector, locatorPathScope) {
   let locatorRead = false;
@@ -36387,7 +36387,7 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
   const keywordRows = keywordLane.rows;
   const suppressedBelowBar = scoredVectorRows.length - vectorRows.length;
   const bestCosine = scoredVectorRows.length > 0 ? roundCosine(Math.max(...scoredVectorRows.map((row) => row.bestCosine))) : undefined;
-  const recencyRows = await chatRecencyLaneRows(store, accountScope, filters);
+  const recencyRows = await chatRecencyLaneRows(store, accountScope, filters, request.deadlineAtMs);
   const contentBar = relevanceBar ?? CALIBRATED_CONTENT_PREFERENCE_BARS.get(provider.modelId);
   const vettedVectorItemIds = new Set(contentBar === undefined ? [] : vectorRows.filter((row) => row.bestCosine >= contentBar).map((row) => row.sourceItem.localItemId));
   const contentPreference = connectorStoreContentPreference(vettedVectorItemIds);
@@ -45424,12 +45424,12 @@ var init_local_index = __esm(() => {
       const read = this.recentItemsRead(maxResults, accountScope, filters);
       return this.visibleRecentRows(this.db.query(read.sql).all(...read.params));
     }
-    async recentItemsOffThread(maxResults, accountScope, filters) {
+    async recentItemsOffThread(maxResults, accountScope, filters, deadlineAtMs) {
       if (!offThreadReadsSupported(this.dbPath))
         return this.recentItems(maxResults, accountScope, filters);
       let rows;
       try {
-        rows = await readOnPool(this.dbPath, this.recentItemsRead(maxResults, accountScope, filters));
+        rows = await readOnPool(this.dbPath, this.recentItemsRead(maxResults, accountScope, filters), deadlineAtMs !== undefined ? { deadlineAtMs } : {});
       } catch (error) {
         if (error instanceof OffThreadReadBusyError)
           return [];
@@ -73455,6 +73455,19 @@ function semanticTimeoutGapCorpus(gap) {
   const end = gap.indexOf(";", PREFIX2.length);
   return end > PREFIX2.length ? gap.slice(PREFIX2.length, end) : undefined;
 }
+function laneTimeoutGap(corpusId) {
+  return `Ran out of time searching ${corpusId}; it is not part of this answer, so more may be there. Ask again in a moment.`;
+}
+function timedOutCorpora(coverage) {
+  const searched = new Set(coverage.searchedCorpora);
+  const stillSearching = [...new Set(coverage.skippedCorpora.filter((skip) => skip.reason === "lane_timeout" && !searched.has(skip.corpusId)).map((skip) => skip.corpusId))].sort();
+  const partlySearched = [...new Set(coverage.extractionGaps.map(semanticTimeoutGapCorpus).filter((corpusId) => corpusId !== undefined && !stillSearching.includes(corpusId)))].sort();
+  return { stillSearching, partlySearched };
+}
+function timedOutCoverageNotes(coverage) {
+  const { stillSearching, partlySearched } = timedOutCorpora(coverage);
+  return [...stillSearching.map(laneTimeoutGap), ...partlySearched.map(semanticTimeoutGap)];
+}
 var SEMANTIC_TIMEOUT_REASONS, PREFIX2 = "Ran out of time searching by meaning: ";
 var init_partial_search = __esm(() => {
   SEMANTIC_TIMEOUT_REASONS = new Set(["vector_scan_deadline_exceeded", "vector_scan_store_busy"]);
@@ -73605,8 +73618,7 @@ function analystSchemaGapChars(maxOutputChars) {
 }
 function noEvidenceAnalystResult(pack) {
   const searched = new Set(pack.coverage.searchedCorpora);
-  const stillSearching = [...new Set(pack.coverage.skippedCorpora.filter((skip) => skip.reason === "lane_timeout" && !searched.has(skip.corpusId)).map((skip) => skip.corpusId))].sort();
-  const partlySearched = [...new Set(pack.coverage.extractionGaps.map(semanticTimeoutGapCorpus).filter((corpusId) => corpusId !== undefined && !stillSearching.includes(corpusId)))].sort();
+  const { stillSearching, partlySearched } = timedOutCorpora(pack.coverage);
   if (stillSearching.length === 0 && partlySearched.length > 0) {
     const sources = partlySearched.length === 1 ? "1 source" : `${partlySearched.length} sources`;
     return {
@@ -73623,7 +73635,6 @@ function noEvidenceAnalystResult(pack) {
       answer: searched.size === 0 ? `Olympus ran out of time searching your sources (${sources}), so it cannot say whether the answer is there. Ask again in a moment.` : `I have no matching evidence for this question in the sources searched. Olympus ran out of time searching ${sources}, so the answer may still be there. Ask again in a moment.`,
       citations: [],
       unanswered: foldCoverageGaps(pack, [
-        `Ran out of time searching: ${stillSearching.join(", ")}`,
         ...searched.size > 0 ? [`No matching evidence found in the searched corpora for: ${pack.question}`] : []
       ])
     };
@@ -74229,8 +74240,9 @@ function countAnswerSentences(answer) {
 }
 function foldCoverageGaps(pack, modelUnanswered) {
   const gaps = [...modelUnanswered];
-  for (const skip of pack.coverage.skippedCorpora)
-    gaps.push(`Skipped ${skip.corpusId}: ${skip.reason}`);
+  for (const skip of pack.coverage.skippedCorpora) {
+    gaps.push(skip.reason === "lane_timeout" ? laneTimeoutGap(skip.corpusId) : `Skipped ${skip.corpusId}: ${skip.reason}`);
+  }
   for (const gap of pack.coverage.extractionGaps)
     gaps.push(gap);
   const seen = new Set;
@@ -77439,6 +77451,7 @@ function releaseAnalystAnswer(input) {
     ...input.result.unanswered.length === 0 && releasedEvidenceCount === 0 ? zeroEvidenceCoverageNotes(input.detail.pack) : [],
     ...releasedEvidenceCount === 0 ? corpusReadabilityCoverageNotes(input.detail) : [],
     ...secureLocalExclusionCoverageNotes(input.detail),
+    ...timedOutCoverageNotes(input.detail.pack.coverage),
     ...classificationCoverageNotes(input.detail),
     ...secretLocationCoverageNotes(input.detail)
   ]);
@@ -78247,6 +78260,7 @@ var init_analyst_answer = __esm(() => {
   init_embeddings();
   init_answer_activity();
   init_analyst();
+  init_partial_search();
   init_analyst_openclaw_infer();
   init_evidence_pack();
   init_opsec();

@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { laneTimeoutGap } from '../src/core/source-index/partial-search.ts';
 import {
   createAnalyst,
   NO_EVIDENCE_ANSWER,
@@ -1186,7 +1187,8 @@ describe('Analyst capability', () => {
     expect(result.answer.toLowerCase()).not.toContain('no matching evidence');
     expect(result.answer).toContain('ran out of time searching your sources (2 sources)');
     expect(result.answer).toContain('cannot say whether the answer is there');
-    expect(result.unanswered).toContain('Ran out of time searching: internal.email, internal.whatsapp.messages');
+    expect(result.unanswered).toContain(laneTimeoutGap('internal.email'));
+    expect(result.unanswered).toContain(laneTimeoutGap('internal.whatsapp.messages'));
     expect(result.citations).toEqual([]);
   });
 
@@ -1206,7 +1208,7 @@ describe('Analyst capability', () => {
 
     expect(result.answer).toContain('no matching evidence for this question in the sources searched');
     expect(result.answer).toContain('ran out of time searching 1 source, so the answer may still be there');
-    expect(result.unanswered).toContain('Ran out of time searching: internal.whatsapp.messages');
+    expect(result.unanswered).toContain(laneTimeoutGap('internal.whatsapp.messages'));
     expect(result.unanswered.some((u) => u.includes('No matching evidence'))).toBe(true);
   });
 

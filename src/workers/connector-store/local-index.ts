@@ -13543,11 +13543,12 @@ export class LocalConnectorStore {
     maxResults: number,
     accountScope?: string,
     filters?: ConnectorStoreSearchFilters,
+    deadlineAtMs?: number,
   ): Promise<ConnectorStoreSearchRow[]> {
     if (!offThreadReadsSupported(this.dbPath)) return this.recentItems(maxResults, accountScope, filters);
     let rows: ItemRow[];
     try {
-      rows = await readOnPool(this.dbPath, this.recentItemsRead(maxResults, accountScope, filters)) as ItemRow[];
+      rows = await readOnPool(this.dbPath, this.recentItemsRead(maxResults, accountScope, filters), deadlineAtMs !== undefined ? { deadlineAtMs } : {}) as ItemRow[];
     } catch (error) {
       if (error instanceof OffThreadReadBusyError) return [];
       throw error;
@@ -14722,7 +14723,7 @@ export function createConnectorStoreCorpusAdapter(
         await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, {}, request.deadlineAtMs),
         options.localKeywordFallback, {}, request.deadlineAtMs));
       const rows = keywordLane.rows;
-      const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters);
+      const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters, request.deadlineAtMs);
       if (recencyRows.length === 0) {
         const hits = withKeywordLeaderSignals(rows.map((row) => connectorStoreHitFromRow(
           store,
@@ -14982,12 +14983,16 @@ async function chatRecencyLaneRows(
   store: LocalConnectorStore,
   accountScope?: string,
   filters?: ConnectorStoreSearchFilters,
+  deadlineAtMs?: number,
 ): Promise<ConnectorStoreSearchRow[]> {
   if (store.family !== 'chat') return [];
   // Full lane depth regardless of maxResults: the lane feeds FUSION, not the
   // final cut. Capping it at maxResults=3 dropped a message that was only 4
-  // items deep minutes after it arrived (2026-07-05 probe).
-  return store.recentItemsOffThread(CHAT_RECENCY_LANE_LIMIT, accountScope, filters);
+  // items deep minutes after it arrived (2026-07-05 probe). It reads last, so
+  // it keeps the lane's deadline: queued behind a busy store's vector pages
+  // without one, it held the whole lane past the router's cut and the keyword
+  // rows already read were dropped with it (#1305). Busy, it is left out.
+  return store.recentItemsOffThread(CHAT_RECENCY_LANE_LIMIT, accountScope, filters, deadlineAtMs);
 }
 
 function connectorStoreHitFromRow(
@@ -15156,7 +15161,7 @@ async function hybridConnectorStoreSearch(
   const bestCosine = scoredVectorRows.length > 0
     ? roundCosine(Math.max(...scoredVectorRows.map((row) => row.bestCosine)))
     : undefined;
-  const recencyRows = await chatRecencyLaneRows(store, accountScope, filters);
+  const recencyRows = await chatRecencyLaneRows(store, accountScope, filters, request.deadlineAtMs);
   const contentBar = relevanceBar ?? CALIBRATED_CONTENT_PREFERENCE_BARS.get(provider.modelId);
   const vettedVectorItemIds = new Set(contentBar === undefined
     ? []

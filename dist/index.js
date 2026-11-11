@@ -21271,6 +21271,7 @@ var init_analyst_answer = __esm(() => {
   init_embeddings();
   init_answer_activity();
   init_analyst();
+  init_partial_search();
   init_analyst_openclaw_infer();
   init_evidence_pack();
   init_opsec();
