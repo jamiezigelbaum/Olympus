@@ -17536,8 +17536,8 @@ function sourceIndexFtsTermGroups(query, options = {}) {
   }
   return groups;
 }
-function sourceIndexFtsGroupQuery(group, exact = new Set) {
-  return group.map((term) => `"${escapeFtsPhrase(term)}"${exact.has(term) ? "" : "*"}`).join(" OR ");
+function sourceIndexFtsGroupQuery(group, exact = new Set, prefix = true) {
+  return group.map((term) => `"${escapeFtsPhrase(term)}"${exact.has(term) || !prefix ? "" : "*"}`).join(" OR ");
 }
 function runBoundedFtsTokenizerMigration(db, spec) {
   const indexedRows = readCount(db, spec.indexedRowCountSql);
@@ -29658,7 +29658,7 @@ var init_local_index = __esm(() => {
       const conceptScope = connectorStoreFtsScopeSql(filters, "r.chunk_pk");
       const groups = ftsOptions.relaxed ? [] : sourceIndexFtsTermGroups(query);
       const exact = queryInitialisms(query);
-      const commonTerms = ftsOptions.relaxed ? undefined : yield* this.commonConceptTermsSteps(groups, exact);
+      const commonTerms = ftsOptions.relaxed ? undefined : yield* this.commonConceptTermsSteps(groups, exact, ftsOptions.prefix !== false);
       const terms = ftsOptions.relaxed ? ftsOptions.privatePrecision ? yield* this.privateRelaxedFtsQuerySteps(query) : toRelaxedLocalFtsQuery(query) : sourceIndexFtsQuery(query, { ...ftsOptions.prefix !== undefined ? { prefix: ftsOptions.prefix } : {}, ...commonTerms ? { excludedTerms: commonTerms } : {} });
       if (!terms)
         return { rows: [], saturated: false, concepts: { total: 0, matched: new Map } };
@@ -29862,7 +29862,7 @@ var init_local_index = __esm(() => {
       }
       return alternatives.join(" OR ");
     }
-    *commonConceptTermsSteps(groups, exact) {
+    *commonConceptTermsSteps(groups, exact, prefix) {
       if (groups.length < 2)
         return;
       const memo = this.conceptCountMemo ??= new Map;
@@ -29887,7 +29887,7 @@ var init_local_index = __esm(() => {
       const countAll = function* (limit) {
         const counts = [];
         for (const group of groups) {
-          const groupQuery = sourceIndexFtsGroupQuery(group, exact);
+          const groupQuery = sourceIndexFtsGroupQuery(group, exact, prefix);
           const key2 = `\x01common:${limit}:${groupQuery}`;
           let count = remembered(key2);
           if (count === undefined) {

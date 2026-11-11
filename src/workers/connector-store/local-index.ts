@@ -13090,7 +13090,7 @@ export class LocalConnectorStore {
     const conceptScope = connectorStoreFtsScopeSql(filters, 'r.chunk_pk');
     const groups = ftsOptions.relaxed ? [] : sourceIndexFtsTermGroups(query);
     const exact = queryInitialisms(query);
-    const commonTerms = ftsOptions.relaxed ? undefined : yield* this.commonConceptTermsSteps(groups, exact);
+    const commonTerms = ftsOptions.relaxed ? undefined : yield* this.commonConceptTermsSteps(groups, exact, ftsOptions.prefix !== false);
     const terms = ftsOptions.relaxed
       ? (ftsOptions.privatePrecision ? yield* this.privateRelaxedFtsQuerySteps(query) : toRelaxedLocalFtsQuery(query))
       : sourceIndexFtsQuery(query, { ...(ftsOptions.prefix !== undefined ? { prefix: ftsOptions.prefix } : {}), ...(commonTerms ? { excludedTerms: commonTerms } : {}) });
@@ -13402,6 +13402,8 @@ export class LocalConnectorStore {
   private *commonConceptTermsSteps(
     groups: ReadonlyArray<readonly string[]>,
     exact: ReadonlyMap<string, unknown>,
+    // Counted as the match will run: an exact search counts exact words.
+    prefix: boolean,
   ): Generator<StoreRead, ReadonlySet<string> | undefined, unknown> {
     if (groups.length < 2) return undefined;
     const memo = this.conceptCountMemo ??= new Map();
@@ -13426,7 +13428,7 @@ export class LocalConnectorStore {
     const countAll = function* (limit: number): Generator<StoreRead, number[], unknown> {
       const counts: number[] = [];
       for (const group of groups) {
-        const groupQuery = sourceIndexFtsGroupQuery(group, exact);
+        const groupQuery = sourceIndexFtsGroupQuery(group, exact, prefix);
         const key = `\u0001common:${limit}:${groupQuery}`;
         let count = remembered(key);
         if (count === undefined) {

@@ -261,8 +261,12 @@ export function sourceIndexFtsTermGroups(
 
 // `exact` terms (the query's initialisms) match whole tokens only: "loi" is
 // the file named "LOI_…", not every word that starts with it.
-export function sourceIndexFtsGroupQuery(group: readonly string[], exact: ReadonlyMap<string, unknown> | ReadonlySet<string> = new Set()): string {
-  return group.map((term) => `"${escapeFtsPhrase(term)}"${exact.has(term) ? '' : '*'}`).join(' OR ');
+export function sourceIndexFtsGroupQuery(
+  group: readonly string[],
+  exact: ReadonlyMap<string, unknown> | ReadonlySet<string> = new Set(),
+  prefix = true,
+): string {
+  return group.map((term) => `"${escapeFtsPhrase(term)}"${exact.has(term) || !prefix ? '' : '*'}`).join(' OR ');
 }
 
 export function runBoundedFtsTokenizerMigration(

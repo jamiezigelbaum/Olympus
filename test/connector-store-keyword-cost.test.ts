@@ -231,6 +231,16 @@ test('when every word is common, the rarest one is kept', async () => {
   }
 }, 60_000);
 
+test('an exact-word search counts exact words: a rare word whose completions are common stays', async () => {
+  // "week*" reaches every "weekly" row; "week" itself is in none.
+  const store = await largeCommonStore();
+  const prefixed = rankedMatches(store, () => { store.searchItemsDetailed('kestrel week', 10); });
+  for (const match of prefixed) expect(match).not.toContain('"week"');
+  const exact = rankedMatches(store, () => { store.searchItemsDetailed('kestrel week', 10, undefined, undefined, { prefix: false }); });
+  expect(exact.length).toBeGreaterThan(0);
+  for (const match of exact) expect(match).toContain('"week"');
+}, 60_000);
+
 test('a question of rare words matches as before', async () => {
   const store = await largeCommonStore();
   const matches = rankedMatches(store, () => { store.searchItemsDetailed('kestrel boatyard harbour', 10); });
