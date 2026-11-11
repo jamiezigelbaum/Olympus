@@ -240,7 +240,7 @@ describe('people index refresh reads only what changed (#1305)', () => {
   });
 
   test('the worker no longer forces a rebuild on a timer after startup', () => {
-    const server = readFileSync(new URL('../src/workers/email-source/server.ts', import.meta.url), 'utf8');
+    const server = readFileSync(new URL('../src/workers/engine/server.ts', import.meta.url), 'utf8');
     expect(server.includes('PEOPLE_INDEX_REFRESH_MS')).toBe(false);
     const timers = server.match(/set(?:Interval|Timeout)\(\(\) => refreshPeople\([^)]*\)[^;]*;/g) ?? [];
     expect(timers.filter((timer) => timer.startsWith('setInterval') && timer.includes('refreshPeople(true)'))).toEqual([]);
