@@ -346,7 +346,7 @@ class Run {
   async agent(sub: string, args = '', timeoutMs = 120_000): Promise<{ result: Record<string, any> | undefined; stdout: string; stderr: string; code: number; ms: number }> {
     const allowed = agentTimeoutMs(timeoutMs, this.deadline, Date.now());
     const exec = await this.machine!.exec(`${BUN_LOCATE}\n"$BUN" --no-env-file ~/rc/agent.js ${sub} ${args}\n`, { timeoutMs: allowed });
-    if (exec.timedOut && allowed < timeoutMs) this.errors.push(`${sub} was stopped when the run's time budget ran out (after ${Math.round(exec.ms / 1000)} s of its ${Math.round(timeoutMs / 1000)} s bound)`);
+    if (stoppedByBudget(exec, allowed, timeoutMs)) this.errors.push(`${sub} was stopped when the run's time budget ran out (after ${Math.round(exec.ms / 1000)} s of its ${Math.round(timeoutMs / 1000)} s bound)`);
     return { result: parseAgentLine(exec.stdout), stdout: exec.stdout, stderr: exec.stderr, code: exec.code, ms: exec.ms };
   }
 }
@@ -365,6 +365,11 @@ export function agentTimeoutMs(timeoutMs: number, deadline: number, now: number)
  * it, update runs about 75 to 80 with it (green legs, 8 to 10 Nov 2026); each budget is about twice that or more, so only a degraded
  * candidate reaches it (olympus-ops#156).
  */
+/** A call cut by the budget that then ran out of time: the harness's timer fired, or the driver stopped it (its timeout exit, 124). */
+export function stoppedByBudget(exec: { code: number; timedOut: boolean }, allowedMs: number, requestedMs: number): boolean {
+  return allowedMs < requestedMs && (exec.timedOut || exec.code === 124);
+}
+
 export function defaultBudgetMs(upgrading: boolean, skipArchive: boolean): number {
   return (upgrading ? (skipArchive ? 120 : 195) : (skipArchive ? 60 : 135)) * 60_000;
 }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { AGENT_PAST_BUDGET_MS, agentTimeoutMs, defaultBudgetMs } from '../scripts/release-check/run.ts';
+import { AGENT_PAST_BUDGET_MS, agentTimeoutMs, defaultBudgetMs, stoppedByBudget } from '../scripts/release-check/run.ts';
 
 describe('release-check time budget (olympus-ops#156)', () => {
   test('an in-machine call keeps its own bound while the budget has room', () => {
@@ -13,6 +13,14 @@ describe('release-check time budget (olympus-ops#156)', () => {
   test('past the budget a call still gets a short floor, so evidence and teardown can run', () => {
     expect(agentTimeoutMs(1_800_000, 1_000_000, 2_000_000)).toBe(AGENT_PAST_BUDGET_MS);
     expect(agentTimeoutMs(10_000, 1_000_000, 2_000_000)).toBe(10_000);
+  });
+
+  test('a cut call counts as stopped by the budget whether the driver (exit 124) or the harness timer stopped it (Codex on #1325)', () => {
+    expect(stoppedByBudget({ code: 124, timedOut: false }, 60_000, 600_000)).toBe(true);
+    expect(stoppedByBudget({ code: 124, timedOut: true }, 60_000, 600_000)).toBe(true);
+    expect(stoppedByBudget({ code: 1, timedOut: false }, 60_000, 600_000)).toBe(false);
+    // A call that was not cut and timed out on its own bound is the phase's own failure, not the budget's.
+    expect(stoppedByBudget({ code: 124, timedOut: false }, 600_000, 600_000)).toBe(false);
   });
 
   test('a run without the archive-import leg gets a shorter budget than one with it', () => {
