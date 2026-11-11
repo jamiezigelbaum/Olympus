@@ -552,6 +552,18 @@ describe('answers on this computer, with every outbound request denied', () => {
     expect(out['built_in_only']).toEqual(['internal:personal:inv']);
   });
 
+  test('#1399: a private search reading a lowered original match never embeds the question in the cloud', async () => {
+    const inv: FixtureSpec = { id: 'inv', name: 'inventory.txt', text: 'SENTINEL_INV: the orchard inventory lists two chairs.', legacyDomain: 'internal' };
+    const local = await localFixture({ specs: [oweSpec, inv], privateIds: ['owe'], answer: oweAnswer });
+    const question = 'how many chairs are in the orchard inventory';
+    const sourceItem = { family: 'file', provider: identityOf('inv').provider, accountScope: identityOf('inv').accountScope, providerItemId: 'inv', localItemId: `${identityOf('inv').accountScope}:inv` };
+    local.fixture.cloud.inputs.length = 0;
+    const found = await searchPrivateEvidence({ lanes: local.lanes, question, originalMatches: [{ trustDomain: 'secure_local', provenance: { sourceItem } }] });
+    // The lowered item is read where it now sits, and the question never reached the Personal store's cloud embedder.
+    expect(found.candidates.some((candidate) => candidate.trustDomain === 'internal')).toBe(true);
+    expect(local.fixture.cloud.inputs.some((input) => input.includes('chairs') || input.includes('orchard'))).toBe(false);
+  });
+
   test('the retry never matches on request scaffolding the strict search ignores', async () => {
     const filesSpec: FixtureSpec = { ...oweSpec, id: 'files', name: 'Saved files.txt', text: 'SENTINEL_FILES: show and find the saved files and documents here.' };
     const local = await localFixture({ specs: [filesSpec], privateIds: ['files'], keywordOnly: true, answer: oweAnswer });

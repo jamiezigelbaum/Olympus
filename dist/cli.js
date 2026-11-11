@@ -77921,7 +77921,7 @@ async function readPrivateEvidenceItem(input) {
     include_internal: input.item.privateAnswerOriginalMatch === true,
     include_secure_local: true,
     include_secure_local_content: true
-  });
+  }, "private_search");
   if (lanes.registry.get(corpusId)?.trustDomain !== trustDomain)
     return;
   const provider = lanes.contentProviders[corpusId];
@@ -204903,7 +204903,7 @@ function createSourceAnswerLanes(deps) {
       if (!requestEmbeddings.has(store.corpusId)) {
         const configured = deps.embeddingProvider(store);
         const provider = mode === "built_in_only" ? builtInEmbeddingOnly(configured, deps.localEmbedding) : configured;
-        requestEmbeddings.set(store.corpusId, provider && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(provider)) ? memoizeQueryEmbeddings(provider) : undefined);
+        requestEmbeddings.set(store.corpusId, provider && (store.trustDomain !== "secure_local" && mode !== "private_search" || isApprovedSecureSourceEmbeddingProvider(provider)) ? memoizeQueryEmbeddings(provider) : undefined);
       }
       return requestEmbeddings.get(store.corpusId);
     };

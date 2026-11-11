@@ -3328,7 +3328,7 @@ export async function checkPrivateEvidenceItems(input: {
  * undefined when the item is not readable there.
  */
 export async function readPrivateEvidenceItem(input: {
-  lanes: (request: SourceIndexAnswerRequest) => AnalystAnswerLanes;
+  lanes: (request: SourceIndexAnswerRequest, mode?: 'private_search') => AnalystAnswerLanes;
   item: Readonly<Record<string, unknown>>;
   question: string;
   maxChars: number;
@@ -3337,13 +3337,14 @@ export async function readPrivateEvidenceItem(input: {
   const provenance = input.item.provenance as SourceIndexProvenance | undefined;
   const trustDomain = privateEvidenceDomain(input.item);
   if (!corpusId || !provenance?.sourceItem || !trustDomain) return undefined;
+  // A private search: query embeddings only from providers approved for Private.
   const lanes = input.lanes({
     question: input.question,
     retrieval_mode: 'hybrid',
     include_internal: input.item.privateAnswerOriginalMatch === true,
     include_secure_local: true,
     include_secure_local_content: true,
-  });
+  }, 'private_search');
   if (lanes.registry.get(corpusId)?.trustDomain !== trustDomain) return undefined;
   const provider = lanes.contentProviders[corpusId];
   if (!provider) return undefined;
