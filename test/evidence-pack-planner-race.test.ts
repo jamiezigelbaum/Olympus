@@ -414,16 +414,14 @@ describe('evidence pack query-planner trace counters', () => {
       laneTimeoutMs: 60_000,
       searchBudgetMs: 150,
       adapters: {
-        [CORPUS]: async (request) => {
-          if (request.query === QUESTION) await new Promise((resolve) => setTimeout(resolve, 600));
-          return slowLiteral(request);
-        },
+        // The literal lane never answers; only the search budget can end it.
+        [CORPUS]: (request) => (request.query === QUESTION ? new Promise(() => {}) : slowLiteral(request)),
       } as SourceIndexRouterAdapterMap,
       contentProviders: providers(),
     });
     // The literal lane was cut at the budget, not the 60 s lane deadline, and
     // no expansion ran once the budget was spent.
-    expect(Date.now() - startedAt).toBeLessThan(550);
+    expect(Date.now() - startedAt).toBeLessThan(30_000);
     expect(calls).toEqual([]);
     expect(detail.pack.candidates).toEqual([]);
   });
