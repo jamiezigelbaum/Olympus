@@ -157,7 +157,7 @@ import {
 } from '../../core/venice-models.ts';
 import { createOpenAICompatibleAnalystModel, type OpenAIReasoningEffort } from '../../core/analyst-openai.ts';
 import { createAnalystQueryPlanner } from '../../core/query-planner.ts';
-import { defaultConfig, loadConfig, loadWorkerConfig, parseLane, readOpenClawPluginRemote, parseModelProfile, parseOptionalBooleanEnv } from '../../core/config.ts';
+import { claudeAppEnabled, defaultConfig, loadConfig, loadWorkerConfig, parseLane, readOpenClawPluginRemote, parseModelProfile, parseOptionalBooleanEnv } from '../../core/config.ts';
 import { DelphiClient } from '../../core/delphi.ts';
 import {
   describeSovereigntyPolicy,
@@ -6807,7 +6807,7 @@ export async function main(): Promise<void> {
     if (!connectionId) return false;
     try {
       const record = remoteConnections()?.list().find((connection) => connection.id === connectionId);
-      return record !== undefined && grantMcpSurface(record, olympusConfig.remote?.claudeAppEnabled === true) === 'remote';
+      return record !== undefined && grantMcpSurface(record, claudeAppEnabled(olympusConfig)) === 'remote';
     } catch {
       return false;
     }
@@ -7624,7 +7624,7 @@ export async function main(): Promise<void> {
     fetch: withRequestPeer(withFirstRunPrivacyGate(withRelaySurfacesRoute(createRelaySurfacesHandler({
       connections: () => remoteConnections(),
       publicUrls: remotePublicUrls,
-      claudeAppEnabled: () => olympusConfig.remote?.claudeAppEnabled === true,
+      claudeAppEnabled: () => claudeAppEnabled(olympusConfig),
       isRelayed: isRelayedRequest,
     }), withChatGptHandoffRoutes(createChatGptHandoffHandler(chatgptHandoffs, { isRelayed: carriesRelayMarker }), withPrivateAnswerRoute(createPrivateAnswerHandler({
       jobs: privateAnswers,
@@ -7632,7 +7632,7 @@ export async function main(): Promise<void> {
       isRelayed: isRelayedRequest,
       extraOrigins: () => {
         const urls = currentRemotePublicUrls(remotePublicUrls);
-        return [DASHBOARD_UI_DOMAIN, ...(olympusConfig.remote?.claudeAppEnabled === true && urls
+        return [DASHBOARD_UI_DOMAIN, ...(claudeAppEnabled(olympusConfig) && urls
           ? [claudeAppOrigin(urls)] : [])];
       },
     }), withRemoteOAuthRoutes(
@@ -7654,7 +7654,7 @@ export async function main(): Promise<void> {
       withRemoteOpenApiRoutes(withRemoteFailureBoundary(remoteOpenApi), withRemoteMcpRoute(
         withRemoteFailureBoundary(createRemoteMcpHandler({
           ...sharedRemoteMcpOptions,
-          claudeApp: { enabled: () => olympusConfig.remote?.claudeAppEnabled === true },
+          claudeApp: { enabled: () => claudeAppEnabled(olympusConfig) },
           // Only the public relay route can select the pinned ChatGPT surface.
           chatgpt: {
             servesRequest: (request: Request, connection: { clientId?: string | null }) => isRelayedRequest(request) && isChatGptGrant(connection),

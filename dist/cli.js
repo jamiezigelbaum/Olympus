@@ -16891,6 +16891,9 @@ function applyOpenClawPluginRemote(config, env) {
   }
   config.remote = parseRemoteConfig(section.remote);
 }
+function claudeAppEnabled(config) {
+  return config.remote?.claudeAppEnabled !== false;
+}
 function parseRemoteConfig(remote) {
   const parsed = { enabled: remote.enabled === true };
   if (remote.claudeAppEnabled !== undefined)
@@ -31148,10 +31151,10 @@ function isClientIdMetadataUrl(clientId) {
 function isChatGptGrant(connection) {
   return typeof connection.clientId === "string" && pinnedClient(connection.clientId)?.host === "chatgpt";
 }
-function grantMcpSurface(connection, claudeAppEnabled = false) {
+function grantMcpSurface(connection, claudeAppEnabled2 = false) {
   if (isChatGptGrant(connection))
     return "chatgpt";
-  return claudeAppEnabled && connection.clientId === CLAUDE_CLIENT_ID ? "claude-app" : "remote";
+  return claudeAppEnabled2 && connection.clientId === CLAUDE_CLIENT_ID ? "claude-app" : "remote";
 }
 function pinnedClient(clientId) {
   if (clientId === CHATGPT_CODEX_CLIENT_ID) {
@@ -218329,6 +218332,8 @@ __export(exports_mcp_surface, {
   SEARCH_TOOL: () => SEARCH_TOOL,
   OPEN_PRIVATE_QUESTION_TOOL: () => OPEN_PRIVATE_QUESTION_TOOL,
   DASHBOARD_TOOL: () => DASHBOARD_TOOL,
+  CLAUDE_NO_QUESTION_PANEL: () => CLAUDE_NO_QUESTION_PANEL,
+  CLAUDE_NO_DASHBOARD_PANEL: () => CLAUDE_NO_DASHBOARD_PANEL,
   CHATGPT_TOOLS: () => CHATGPT_TOOLS,
   CHATGPT_RESOURCES: () => CHATGPT_RESOURCES,
   ASK_ANONYMOUSLY_TOOL: () => ASK_ANONYMOUSLY_TOOL
@@ -218377,13 +218382,14 @@ async function callChatGptTool(name, args, ctx, options, signal, detachedContext
     if (reason)
       return record8(withPrivateAnswerOutcome(answerToolResult(withheldSourceAnswer(reason), { pendingPrivacyItems: ctx.pendingPrivacyItems?.() })), true);
   }
-  return record8(withVisibleJobId(PANEL_TOOL_NAMES2.has(name) ? withPrivateAnswerOutcome(result) : result, options.appClient));
+  return record8(forClaude(name, PANEL_TOOL_NAMES2.has(name) ? withPrivateAnswerOutcome(result) : result, options.appClient));
 }
-function withVisibleJobId(result, client) {
-  const structured = result.structuredContent;
-  if (client?.host !== "claude" || structured?.status !== "working" || typeof structured.job_id !== "string")
+function forClaude(name, result, client) {
+  if (client?.host !== "claude" || result.isError)
     return result;
-  return { ...result, content: [...result.content, { type: "text", text: `job_id: ${structured.job_id}` }] };
+  const structured = result.structuredContent;
+  const line2 = structured?.status === "working" && typeof structured.job_id === "string" ? `job_id: ${structured.job_id}` : name === DASHBOARD_TOOL_NAME ? CLAUDE_NO_DASHBOARD_PANEL : name === OPEN_PRIVATE_QUESTION_TOOL.name && structured?.status === "opened" ? CLAUDE_NO_QUESTION_PANEL : undefined;
+  return line2 ? { ...result, content: [...result.content, { type: "text", text: line2 }] } : result;
 }
 function recordChatGptRequest(name, args, ctx, result, capture, withheldAfter) {
   if (result.isError)
@@ -218794,7 +218800,7 @@ function createChatGptMcpServer(makeOperationContext, options, makeDetachedConte
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => readChatGptResource(request.params.uri, options.appClient));
   return server;
 }
-var READ_ONLY, OAUTH2_REQUIRED2, OAUTH2_OPTIONAL, SOURCE_ANSWER_TIMEOUT_MS = 600000, DASHBOARD_TOOL, DETAIL_PROPERTY, QUESTION_PROPERTY, SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL, SOURCE_STATUS_TOOL, SEARCH_TOOL, ASK_ANONYMOUSLY_TOOL, OPEN_PRIVATE_QUESTION_TOOL, ANSWER_TOOLS, READ_ONLY_GRANT_EXCEPTIONS, CHATGPT_TOOLS, PANEL_TOOL_NAMES2, defaultProbeLog = (line2) => {
+var READ_ONLY, OAUTH2_REQUIRED2, OAUTH2_OPTIONAL, SOURCE_ANSWER_TIMEOUT_MS = 600000, DASHBOARD_TOOL, DETAIL_PROPERTY, QUESTION_PROPERTY, SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL, SOURCE_STATUS_TOOL, SEARCH_TOOL, ASK_ANONYMOUSLY_TOOL, OPEN_PRIVATE_QUESTION_TOOL, ANSWER_TOOLS, READ_ONLY_GRANT_EXCEPTIONS, CHATGPT_TOOLS, PANEL_TOOL_NAMES2, CLAUDE_NO_DASHBOARD_PANEL = "If no dashboard panel appears (Claude's phone apps don't show panels yet), give the user this status in words; the full dashboard opens in Claude on the web or desktop, and in Olympus on their computer.", CLAUDE_NO_QUESTION_PANEL = "If no panel appears (Claude's phone apps don't show panels yet), tell the user to open this chat in Claude on the web or desktop and type the question in the panel there.", defaultProbeLog = (line2) => {
   console.warn(line2);
 }, PROBE_HITS_PER_CORPUS = 10, PROBE_QUERY_MAX_CHARS = 500, PROBE_TIMEOUT_MS2 = 20000, privateMatchByJob, PRIVATE_MATCH_TTL_MS, PRIVATE_MATCH_MAX_JOBS = 1000, CHATGPT_RESOURCES;
 var init_mcp_surface = __esm(() => {
@@ -238638,7 +238644,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       return false;
     try {
       const record8 = remoteConnections()?.list().find((connection) => connection.id === connectionId);
-      return record8 !== undefined && grantMcpSurface2(record8, olympusConfig.remote?.claudeAppEnabled === true) === "remote";
+      return record8 !== undefined && grantMcpSurface2(record8, claudeAppEnabled(olympusConfig)) === "remote";
     } catch {
       return false;
     }
@@ -239287,7 +239293,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     fetch: withRequestPeer2(withFirstRunPrivacyGate(withRelaySurfacesRoute2(createRelaySurfacesHandler2({
       connections: () => remoteConnections(),
       publicUrls: remotePublicUrls,
-      claudeAppEnabled: () => olympusConfig.remote?.claudeAppEnabled === true,
+      claudeAppEnabled: () => claudeAppEnabled(olympusConfig),
       isRelayed: isRelayedRequest2
     }), withChatGptHandoffRoutes2(createChatGptHandoffHandler2(chatgptHandoffs, { isRelayed: carriesRelayMarker2 }), withPrivateAnswerRoute2(createPrivateAnswerHandler2({
       jobs: privateAnswers,
@@ -239295,7 +239301,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       isRelayed: isRelayedRequest2,
       extraOrigins: () => {
         const urls = currentRemotePublicUrls2(remotePublicUrls);
-        return [DASHBOARD_UI_DOMAIN2, ...olympusConfig.remote?.claudeAppEnabled === true && urls ? [claudeAppOrigin2(urls)] : []];
+        return [DASHBOARD_UI_DOMAIN2, ...claudeAppEnabled(olympusConfig) && urls ? [claudeAppOrigin2(urls)] : []];
       }
     }), withRemoteOAuthRoutes2(createRemoteOAuthHandler2({
       publicUrls: remotePublicUrls,
@@ -239306,7 +239312,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       connections: () => remoteConnections({ create: true })
     }), withRemoteOpenApiRoutes2(withRemoteFailureBoundary2(remoteOpenApi), withRemoteMcpRoute2(withRemoteFailureBoundary2(createRemoteMcpHandler2({
       ...sharedRemoteMcpOptions,
-      claudeApp: { enabled: () => olympusConfig.remote?.claudeAppEnabled === true },
+      claudeApp: { enabled: () => claudeAppEnabled(olympusConfig) },
       chatgpt: {
         servesRequest: (request, connection) => isRelayedRequest2(request) && isChatGptGrant2(connection),
         readOnlyFor: isDemoGrant2,
