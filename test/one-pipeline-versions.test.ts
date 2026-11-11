@@ -24,6 +24,13 @@ const KEY_MARKER = '-----BEGIN RSA ' + 'PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n----
 
 /** The privacy-safe model has judged every item ordinary. */
 const judgedOrdinary: TierSniffer = { id: 'scripted', judge: () => ({ verdict: 'decided', tier: 'private', code: 'ordinary:0.99' }) };
+/** The judge has cleared the live body as Personal; anything else waits for it (held, #1316). */
+const liveJudgedOrdinary: TierSniffer = {
+  id: 'scripted-live',
+  judge: (request) => request.material?.includes('the live words')
+    ? { verdict: 'decided', tier: 'private', code: 'ordinary:0.99' }
+    : { verdict: 'undecided', queued: true },
+};
 
 /** Every body any leg holds for the item, active or not, joined: a Secret's text must be in none. */
 function everyStoredText(h: OnePipelineHarness): string {
@@ -256,7 +263,7 @@ describe('a newer archive record is stored before its cursor advances, whatever 
     .filter((row) => row.providerItemId === id && row.tombstoned === 0 && row.chunks > 0).map((row) => row.domain);
 
   test('live v3 stored Personal, then archive v9: the v9 body is stored Private, the v3 body is gone, nothing is queued to lose it', async () => {
-    const h = onePipelineHarness(cleanups);
+    const h = onePipelineHarness(cleanups, { sniffer: liveJudgedOrdinary });
     h.connectLive();
     h.live.records = [rec('a', 3, 'the live words')];
     await h.pullLive();
@@ -280,7 +287,7 @@ describe('a newer archive record is stored before its cursor advances, whatever 
   for (const oldRow of ['versioned', 'unversioned'] as const) {
     for (const step of ['before the new body is written', 'after the new body, before the withdrawal', 'after the withdrawal'] as const) {
       test(`a crash ${step}, old row ${oldRow}: a body is always there, and reading the record again ends with the new one alone`, async () => {
-        const h = onePipelineHarness(cleanups);
+        const h = onePipelineHarness(cleanups, { sniffer: liveJudgedOrdinary });
         h.connectLive();
         h.live.records = [rec('a', 3, 'the live words')];
         await h.pullLive();
@@ -328,10 +335,10 @@ describe('an accepted record no store can take yet is not passed', () => {
     h.live.records = [rec('a', 3, 'the live words')];
     await h.pullLive();
     const key = { provider: 'fixture-source', accountScope: FIXTURE_ACCOUNT_SCOPE, providerItemId: 'a' };
-    // The private model judges the Personal-first live item Private: its raise is queued and the lower copy hidden.
+    // The live item's text waits held in Private (#1316); the private model judges it Personal, so its move down is queued.
     const queued = h.set.ledger.applySnifferVerdict(
       key,
-      { pass: 'content', tier: 'secure', reason: 'content:sniffer:fixture-waiting:private', modelId: 'fixture' },
+      { pass: 'content', tier: 'private', reason: 'content:sniffer:fixture-waiting:ordinary', modelId: 'fixture' },
       { placementFor: (decision) => h.set.placementFor(decision) },
     );
     expect(queued?.outcome).toBe('queued_move');

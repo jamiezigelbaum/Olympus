@@ -1189,6 +1189,7 @@ describe('the sniffer\'s automatic move of a judged-ordinary photo', () => {
       const dir = temporaryDir();
       const installed = configureInstalledTierClassification({
         env: { OLYMPUS_TIER_RULES_PATH: join(dir, 'tier-rules.json'), OLYMPUS_PRIVACY_PROFILE_PATH: join(dir, 'privacy.json') },
+        lane: { kind: BUILT_IN_SNIFFER_LANE.kind, modelId: BUILT_IN_SNIFFER_LANE.modelId },
       });
       const lane = openLane(dir);
       let service: TierSnifferService | undefined;
@@ -1219,14 +1220,18 @@ describe('the sniffer\'s automatic move of a judged-ordinary photo', () => {
         const personalProvider = sameModel ? provider : new (class extends BuiltInJudgingProvider {
           override modelId = 'another-built-in-model';
         })();
+        // No judge yet, so the notes' text waits held in Private too (#1316): nothing in Personal to embed.
         await lane.stores.internal!.embedChunks({ provider: personalProvider });
-        expect(vectorCount(lane.paths.internal)).toBe(1);
+        expect(vectorCount(lane.paths.internal)).toBe(0);
 
+        // The judge answers for the notes first; the photo's question fails until the Personal store has embedded.
+        let photoReady = false;
         const model: AnalystModel = {
-          async complete() {
-            return { text: '{"verdicts":[{"i":1,"tier":"personal","category":"ordinary","confidence":0.97}]}', modelId: 'built_in' };
+          async complete(request: { prompt?: string }) {
+            if (!photoReady && request.prompt?.includes('kitchen.jpg')) throw new Error('judge busy');
+            return { text: '{"verdicts":[{"i":1,"category":"ordinary","ownRecord":false,"privateKind":"none","confidence":0.97,"tier":"personal"}]}', modelId: 'built_in' };
           },
-        } as AnalystModel;
+        } as unknown as AnalystModel;
         service = new TierSnifferService({
           installed,
           lane: BUILT_IN_SNIFFER_LANE,
@@ -1238,7 +1243,19 @@ describe('the sniffer\'s automatic move of a judged-ordinary photo', () => {
           autoApproveBuiltIn: true,
           autoMoves: { localEmbeddingsOnly: () => true, embeddingLedgerPath: join(dir, 'embedding-ledger.jsonl'), maxPerPass: 5 },
         });
-        for (let tick = 0; tick < 3 && lane.ledger.getCurrent(identity('kitchen'))!.contentTier !== 'private'; tick += 1) {
+        const settledPersonal = (name: string) => {
+          const record = lane.ledger.getCurrent(identity(name))!;
+          return record.contentTier === 'private' && record.state === 'current' && !record.contentPending;
+        };
+        for (let tick = 0; tick < 8 && !settledPersonal('notes'); tick += 1) {
+          await service.runOnce();
+        }
+        expect(lane.ledger.getCurrent(identity('notes'))).toMatchObject({ contentTier: 'private', state: 'current' });
+        await lane.stores.internal!.embedChunks({ provider: personalProvider });
+        expect(vectorCount(lane.paths.internal)).toBe(1);
+
+        photoReady = true;
+        for (let tick = 0; tick < 8 && !settledPersonal('kitchen'); tick += 1) {
           await service.runOnce();
         }
         expect(lane.ledger.getCurrent(identity('kitchen'))).toMatchObject({ contentTier: 'private', state: 'current' });

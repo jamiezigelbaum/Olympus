@@ -198,8 +198,8 @@ const LOAN_TEXT = 'Orchard loan terms';
 async function judged(): Promise<Install> {
   const install = await start({ extract: true });
   for (let pass = 0; pass < 3; pass += 1) await install.service.runOnce();
-  // Judged Private, then moved there by the judge's automatic move.
-  expect(install.lane.ledger.getCurrent(bankIdentity)).toMatchObject({ state: 'current', contentTier: 'secure', decidedBy: 'move' });
+  // Held in Private until judged (#1316), then judged Private where it already was.
+  expect(install.lane.ledger.getCurrent(bankIdentity)).toMatchObject({ state: 'current', contentTier: 'secure', decidedBy: 'sniffer' });
   expect(install.lane.ledger.getCurrent(gardenIdentity)).toMatchObject({ state: 'current', contentTier: 'private' });
   return install;
 }
@@ -220,7 +220,7 @@ describe('finding an item', () => {
       family: 'file',
       title: 'bank letter.pdf',
       tier: 'Private',
-      decided_by: 'move',
+      decided_by: 'sniffer',
       owner_set: false,
     });
     expect(item.judge_reason).toStartWith('financial');

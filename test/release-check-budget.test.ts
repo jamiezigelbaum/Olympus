@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { engineStatePaths } from '../scripts/release-check/machine-agent.ts';
 import { AGENT_PAST_BUDGET_MS, agentTimeoutMs, defaultBudgetMs, stoppedByBudget } from '../scripts/release-check/run.ts';
 
 describe('release-check time budget (olympus-ops#156)', () => {
@@ -28,5 +29,18 @@ describe('release-check time budget (olympus-ops#156)', () => {
     expect(defaultBudgetMs(false, false)).toBe(135 * 60_000);
     expect(defaultBudgetMs(true, true)).toBe(120 * 60_000);
     expect(defaultBudgetMs(true, false)).toBe(195 * 60_000);
+    // The engine-split switch-on leg stops at 75 minutes, and never later than the leg it switches on.
+    expect(defaultBudgetMs(false, false, true)).toBe(75 * 60_000);
+    expect(defaultBudgetMs(false, true, true)).toBe(60 * 60_000);
+    expect(defaultBudgetMs(true, false, true)).toBe(75 * 60_000);
+  });
+});
+
+describe('the engine state a report keeps', () => {
+  test('names the front\'s snapshot and the archive state and request files, all under the install\'s own data folders', () => {
+    const home = '/home/rc-test';
+    const paths = engineStatePaths({ HOME: home, XDG_DATA_HOME: `${home}/.local/share`, XDG_STATE_HOME: `${home}/.local/state` });
+    expect(paths.map((path) => path.split('/').pop())).toEqual(['engine-background-status.json', 'archive-imports.json', 'archive-import-requests.json']);
+    for (const path of paths) expect(path.startsWith(`${home}/`)).toBe(true);
   });
 });

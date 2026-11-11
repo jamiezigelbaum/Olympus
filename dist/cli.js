@@ -16891,6 +16891,9 @@ function applyOpenClawPluginRemote(config, env) {
   }
   config.remote = parseRemoteConfig(section.remote);
 }
+function claudeAppEnabled(config) {
+  return config.remote?.claudeAppEnabled !== false;
+}
 function parseRemoteConfig(remote) {
   const parsed = { enabled: remote.enabled === true };
   if (remote.claudeAppEnabled !== undefined)
@@ -21019,7 +21022,7 @@ function conversationOrderedSniffer(sniffer, metadata) {
   };
 }
 function contentHeldForJudgment(decision) {
-  return decision.contentPending && decision.reasons?.includes(PERSONAL_FIRST_REASON) !== true;
+  return decision.contentPending;
 }
 function heldUntilJudged(reasons) {
   return reasons?.includes(HELD_UNTIL_JUDGED_REASON) === true;
@@ -21493,9 +21496,6 @@ function contentPass(args) {
         reasons.push(`content:rule:${verdict.rule}`);
     } else {
       pending = true;
-      if (verdict.queued === true && recordFlags.length === 0 && !metadata.pending && args.holdUntilJudged !== true) {
-        reasons.push(PERSONAL_FIRST_REASON);
-      }
       for (const flag of recordFlags)
         reasons.push(`content:own_record:${flag}`);
       for (const flag of detection.borderline)
@@ -22576,6 +22576,23 @@ function* copiesSteps(list) {
   }
   return result;
 }
+function* personalFirstWaitingSteps(list) {
+  const result = new Set;
+  for (let offset = 0;offset < list.length; offset += IDENTITY_BATCH) {
+    const { values, params } = identityValues(list.slice(offset, offset + IDENTITY_BATCH));
+    const rows = yield {
+      sql: `SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_items
+        WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
+          AND content_pending = 1
+          AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value = ?)`,
+      params: [...params, PERSONAL_FIRST_REASON],
+      mode: "all"
+    };
+    for (const row of rows)
+      result.add(tierLedgerIdentityKey(identityOfRow(row)));
+  }
+  return result;
+}
 function* routedWithoutCopiesSteps(list) {
   const result = new Set;
   for (let offset = 0;offset < list.length; offset += IDENTITY_BATCH) {
@@ -22596,6 +22613,33 @@ function* routedWithoutCopiesSteps(list) {
       result.add(tierLedgerIdentityKey(identityOfRow(row)));
   }
   return result;
+}
+function tierLedgerIdentityOfRecord(record) {
+  return {
+    provider: record.provider,
+    accountScope: record.accountScope,
+    providerItemId: record.providerItemId,
+    ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
+  };
+}
+function parseTierLedgerIdentity(raw) {
+  if (!raw)
+    return;
+  try {
+    const parsed = JSON.parse(raw);
+    const keys = ["provider", "accountScope", "providerItemId"];
+    if (!keys.every((key2) => typeof parsed[key2] === "string"))
+      return;
+    const identity2 = parsed;
+    return {
+      provider: identity2.provider,
+      accountScope: identity2.accountScope,
+      providerItemId: identity2.providerItemId,
+      ...typeof identity2.providerConversationId === "string" ? { providerConversationId: identity2.providerConversationId } : {}
+    };
+  } catch {
+    return;
+  }
 }
 function tierMovingDirectionClause(direction) {
   if (!direction)
@@ -23338,6 +23382,17 @@ class TierLedger {
     return rows.map(recordFromRow);
   }
   listAwaitingTextWindow(options = {}) {
+    return this.window(`routed = 1 AND content_read = 0 AND metadata_pending = 0
+        AND ((state = 'pending' AND content_pending = 1)
+          OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
+            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
+              OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))`, [], options);
+  }
+  listPersonalFirstWindow(options = {}) {
+    return this.window(`routed = 1 AND content_pending = 1 AND state != 'moving'
+        AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value = ?)`, [PERSONAL_FIRST_REASON], options);
+  }
+  window(where, params, options) {
     const limit = Math.max(1, Math.min(options.limit ?? 500, 5000));
     const examine = Math.max(limit, options.examine ?? 20000);
     const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : undefined;
@@ -23348,14 +23403,10 @@ class TierLedger {
         ORDER BY provider, account_scope, conversation_key, provider_item_id
         LIMIT ?
       )
-      WHERE routed = 1 AND content_read = 0 AND metadata_pending = 0
-        AND ((state = 'pending' AND content_pending = 1)
-          OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
-            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
-              OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))
+      WHERE ${where}
       ORDER BY provider, account_scope, conversation_key, provider_item_id
       LIMIT ?
-    `).all(...after ?? [], examine, limit);
+    `).all(...after ?? [], examine, ...params, limit);
     const records = rows.map(recordFromRow);
     const identityOfRow = (row) => ({
       provider: row.provider,
@@ -23971,11 +24022,15 @@ class TierLedger {
   copiesForMany(identities) {
     return this.readSteps(copiesSteps(uniqueIdentities(identities)));
   }
-  *visibilityReadSteps(identities) {
+  *visibilityReadSteps(identities, options = {}) {
     const list = uniqueIdentities(identities);
     const copies = yield* copiesSteps(list);
     const copyless = list.filter((identity2) => (copies.get(tierLedgerIdentityKey(identity2))?.length ?? 0) === 0);
-    return { copies, routedWithoutCopies: yield* routedWithoutCopiesSteps(copyless) };
+    const routedWithoutCopies = yield* routedWithoutCopiesSteps(copyless);
+    if (!options.personalFirst)
+      return { copies, routedWithoutCopies, personalFirstWaiting: new Set };
+    const unheld = list.filter((identity2) => !copies.get(tierLedgerIdentityKey(identity2))?.some((copy) => copy.state === "current" && copy.embedHold));
+    return { copies, routedWithoutCopies, personalFirstWaiting: yield* personalFirstWaitingSteps(unheld) };
   }
   onClose(listener) {
     (this.closeListeners ??= []).push(listener);
@@ -24954,6 +25009,19 @@ class TierLedger {
       yield;
     }
   }
+  heldItemCount(corpusIds) {
+    if (corpusIds.length === 0)
+      return 0;
+    return this.db.query(`
+      SELECT COUNT(*) AS n FROM tier_items t
+      WHERE t.state IN ('pending', 'moving')
+        AND (t.metadata_pending = 1 OR (t.content_pending = 1 AND t.content_read = 1))
+        AND EXISTS (SELECT 1 FROM tier_copies c
+          WHERE c.provider = t.provider AND c.account_scope = t.account_scope
+            AND c.conversation_key = t.conversation_key AND c.provider_item_id = t.provider_item_id
+            AND c.corpus_id IN (SELECT value FROM json_each(?)))
+    `).get(JSON.stringify(corpusIds)).n;
+  }
   corpusHeldCopyCount(corpusId) {
     return this.db.query(`
       SELECT COUNT(*) AS n FROM tier_copies
@@ -25868,15 +25936,31 @@ function tierLedgerMigrations() {
       }
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 12,
       name: "pending_move_metadata",
       up(db) {
         db.exec(`CREATE INDEX IF NOT EXISTS tier_ledger_pending_meta ON tier_ledger_meta (key) WHERE value <> '';`);
       }
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: "hold_personal_first_copies",
+      up(db) {
+        db.query(`
+          UPDATE tier_copies SET embed_hold = 1
+          WHERE copy_state = 'current' AND embed_hold = 0 AND EXISTS (
+            SELECT 1 FROM tier_items t
+            WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
+              AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
+              AND t.routed = 1 AND t.content_pending = 1
+              AND EXISTS (SELECT 1 FROM json_each(t.reasons_json) r WHERE r.value = ?)
+          )
+        `).run(PERSONAL_FIRST_REASON);
+      }
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 12, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", IDENTITY_BATCH = 200, DEFAULT_REJUDGE_SCAN_ROWS = 2000, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_RECHECK_META_PREFIX = "recheck:", STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 13, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", IDENTITY_BATCH = 200, DEFAULT_REJUDGE_SCAN_ROWS = 2000, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_RECHECK_META_PREFIX = "recheck:", STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_store_write_guard();
@@ -31426,10 +31510,10 @@ function isClientIdMetadataUrl(clientId) {
 function isChatGptGrant(connection) {
   return typeof connection.clientId === "string" && pinnedClient(connection.clientId)?.host === "chatgpt";
 }
-function grantMcpSurface(connection, claudeAppEnabled = false) {
+function grantMcpSurface(connection, claudeAppEnabled2 = false) {
   if (isChatGptGrant(connection))
     return "chatgpt";
-  return claudeAppEnabled && connection.clientId === CLAUDE_CLIENT_ID ? "claude-app" : "remote";
+  return claudeAppEnabled2 && connection.clientId === CLAUDE_CLIENT_ID ? "claude-app" : "remote";
 }
 function pinnedClient(clientId) {
   if (clientId === CHATGPT_CODEX_CLIENT_ID) {
@@ -36487,6 +36571,7 @@ function normalizeSemanticRelevanceBar(value) {
   return value;
 }
 async function connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, ftsOptions = {}, deadlineAtMs) {
+  ftsOptions = { ...ftsOptions, conceptHitMemo: ftsOptions.conceptHitMemo ?? new Map };
   const pool = deadlineAtMs !== undefined ? { deadlineAtMs } : {};
   const plain = await store.searchItemsDetailedOffThread(query, MAX_SEARCH_RESULTS, accountScope, filters, ftsOptions, pool);
   const rows = plain.rows;
@@ -37245,7 +37330,7 @@ function combineSearchText(parts) {
 function tierRowVisible(copies, corpusId, layer) {
   if (!copies || copies.length === 0)
     return true;
-  const here = copies.filter((copy) => copy.corpusId === corpusId && copy.state === "current");
+  const here = copies.filter((copy) => copy.corpusId === corpusId && copy.state === "current" && !(copy.embedHold && copy.layers !== "metadata" && copy.trustDomain !== "secure_local"));
   return copyServingLayer(here, layer) !== undefined;
 }
 function namesOnlyKeptCount(n) {
@@ -37731,10 +37816,23 @@ function connectorStoreFilterSql(filters) {
   return { sql: clauses.join(`
 `), params };
 }
-function connectorStoreFtsScopeSql(filters) {
+function connectorStoreConceptHitRead(pks, groupQuery, scope) {
+  return {
+    mode: "all",
+    sql: `
+      SELECT DISTINCT r.item_pk, i.local_item_id, i.source_version
+      FROM connector_store_fts_rows r JOIN items i ON i.item_pk = r.item_pk
+      WHERE r.item_pk IN (${pks.map(() => "?").join(", ")})
+        AND +r.fts_rowid IN (SELECT rowid FROM connector_store_fts WHERE connector_store_fts MATCH ?)
+        ${scope.sql}
+    `,
+    params: [...pks, groupQuery, ...scope.params]
+  };
+}
+function connectorStoreFtsScopeSql(filters, chunkColumn = "connector_store_fts.chunk_pk") {
   const normalized = normalizeConnectorStoreSearchFilters(filters);
   const contentRow = `(
-    connector_store_fts.chunk_pk IS NOT NULL
+    ${chunkColumn} IS NOT NULL
     OR NOT EXISTS (SELECT 1 FROM chunks scope_chunk WHERE scope_chunk.item_pk = i.item_pk)
   )`;
   if (!normalized)
@@ -37761,7 +37859,7 @@ function connectorStoreFtsScopeSql(filters) {
   const metadataExpression = `(${metadataOnly.join(" OR ")})`;
   return {
     sql: `AND (
-      (${metadataExpression} AND connector_store_fts.chunk_pk IS NULL)
+      (${metadataExpression} AND ${chunkColumn} IS NULL)
       OR (NOT ${metadataExpression} AND ${contentRow})
     )`,
     params: [...params, ...params]
@@ -45154,6 +45252,7 @@ var init_local_index = __esm(() => {
     *searchItemsSteps(query, maxResults, accountScope, filters, ftsOptions) {
       const selectedFilters = connectorStoreFilterSql(filters);
       const selectedFtsScope = connectorStoreFtsScopeSql(filters);
+      const conceptScope = connectorStoreFtsScopeSql(filters, "r.chunk_pk");
       const terms = ftsOptions.relaxed ? ftsOptions.privatePrecision ? yield* this.privateRelaxedFtsQuerySteps(query) : toRelaxedLocalFtsQuery(query) : toFtsQuery(query, ftsOptions);
       if (!terms)
         return { rows: [], saturated: false, concepts: { total: 0, matched: new Map } };
@@ -45232,37 +45331,18 @@ var init_local_index = __esm(() => {
           seen.add(row.item_pk);
         let signalled = rows;
         if (minimumSignal && rows.length > 0) {
-          const pks = rows.map((row) => row.item_pk);
-          const placeholders = pks.map(() => "?").join(", ");
-          const itemAt = new Map(rows.map((row) => [row.item_pk, row]));
-          const sameItem = (hit) => {
-            const row = itemAt.get(hit.item_pk);
-            return row !== undefined && row.local_item_id === hit.local_item_id && (row.source_version ?? null) === (hit.source_version ?? null);
-          };
           for (const [groupIndex, group] of groups.entries()) {
-            const hits = (yield { mode: "all", sql: `
-            SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id, i.source_version
-            FROM connector_store_fts
-            JOIN items i ON i.item_pk = connector_store_fts.item_pk
-            WHERE connector_store_fts MATCH ?
-              AND connector_store_fts.item_pk IN (${placeholders})
-              ${selectedFtsScope.sql}
-          `, params: [sourceIndexFtsGroupQuery(group, exact), ...pks, ...selectedFtsScope.params] }).filter(sameItem);
-            for (const hit of hits) {
-              matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
-              matchedGroupIndexes.set(hit.item_pk, [...matchedGroupIndexes.get(hit.item_pk) ?? [], groupIndex]);
+            const hits = yield* this.conceptHitsSteps(rows, sourceIndexFtsGroupQuery(group, exact), conceptScope, ftsOptions.conceptHitMemo);
+            for (const itemPk of hits) {
+              matchedGroups.set(itemPk, (matchedGroups.get(itemPk) ?? 0) + 1);
+              matchedGroupIndexes.set(itemPk, [...matchedGroupIndexes.get(itemPk) ?? [], groupIndex]);
             }
           }
           const enough = (row) => (matchedGroups.get(row.item_pk) ?? 0) >= required;
           const weights = rows.every(enough) ? undefined : conceptWeights ??= yield* this.conceptWeightsSteps(groups, exact);
           const literalTopics = new Set(sourceIndexTopicTokens(query).filter((term) => term.length >= 3));
           const uniqueTerms = weights && weights.population >= 10 ? groups.flatMap((group, index) => weights.counts[index] === 1 ? group.filter((term) => literalTopics.has(term)) : []) : [];
-          const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : (yield { mode: "all", sql: `
-          SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id, i.source_version
-          FROM connector_store_fts JOIN items i ON i.item_pk = connector_store_fts.item_pk
-          WHERE connector_store_fts MATCH ? AND connector_store_fts.item_pk IN (${placeholders})
-            ${selectedFtsScope.sql}
-        `, params: [sourceIndexFtsGroupQuery(uniqueTerms, exact), ...pks, ...selectedFtsScope.params] }).filter(sameItem).map((row) => row.item_pk));
+          const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : yield* this.conceptHitsSteps(rows, sourceIndexFtsGroupQuery(uniqueTerms, exact), conceptScope, ftsOptions.conceptHitMemo));
           signalled = rows.filter((row) => {
             if (enough(row) || uniqueLiteralMatches.has(row.item_pk))
               return true;
@@ -45315,6 +45395,31 @@ var init_local_index = __esm(() => {
           ]))
         }
       };
+    }
+    *conceptHitsSteps(rows, groupQuery, scope, memo) {
+      const key2 = JSON.stringify([groupQuery, scope.sql, scope.params]);
+      const answers = memo?.get(key2);
+      const sameItem = (row, answer) => answer !== undefined && row.local_item_id === answer.local_item_id && (row.source_version ?? null) === (answer.source_version ?? null);
+      if (answers && rows.every((row) => sameItem(row, answers.get(row.item_pk)))) {
+        return rows.filter((row) => answers.get(row.item_pk).hit).map((row) => row.item_pk);
+      }
+      const hits = yield connectorStoreConceptHitRead(rows.map((row) => row.item_pk), groupQuery, scope);
+      const hitAt = new Map(hits.map((hit) => [hit.item_pk, hit]));
+      const remembered = answers ?? new Map;
+      const matched = [];
+      for (const row of rows) {
+        const hit = hitAt.get(row.item_pk);
+        if (hit && !sameItem(row, hit)) {
+          remembered.delete(row.item_pk);
+          continue;
+        }
+        if (hit)
+          matched.push(row.item_pk);
+        if (memo)
+          remembered.set(row.item_pk, { local_item_id: row.local_item_id, source_version: row.source_version ?? null, hit: hit !== undefined });
+      }
+      memo?.set(key2, remembered);
+      return matched;
     }
     *privateRelaxedFtsQuerySteps(query) {
       const terms = relaxedLocalFtsTerms(query);
@@ -45369,7 +45474,7 @@ var init_local_index = __esm(() => {
         if (count === undefined) {
           count = (yield {
             mode: "get",
-            sql: "SELECT COUNT(DISTINCT item_pk) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ?",
+            sql: "SELECT COUNT(DISTINCT r.item_pk) AS count FROM connector_store_fts_rows r WHERE r.fts_rowid IN (SELECT rowid FROM connector_store_fts WHERE connector_store_fts MATCH ?)",
             params: [groupQuery]
           }).count;
           remember(groupQuery, count);
@@ -61410,7 +61515,7 @@ function archiveFindingList(kind) {
 function privateAnswerFailure(reason, mapping = PRIVATE_ANSWER_FAILURES) {
   return typeof reason === "string" && Object.prototype.hasOwnProperty.call(mapping, reason) ? mapping[reason] : { message: "Olympus could not answer this.", action: "Try again." };
 }
-var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = "Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.", DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_RETRYING_ON_ITS_OWN = "a sync is retrying on its own", DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_DISCONNECTED_DATA_KEPT = "Disconnected · indexed data kept", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", DASHBOARD_STORAGE_NOTICE_COPY, DASHBOARD_MEDIA_STORAGE_COPY, READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", DASHBOARD_CAPTURE_STALE_LABEL = "Live capture is stale", DASHBOARD_CAPTURE_BLOCKED_LABEL = "Live capture cannot start", DASHBOARD_CAPTURE_COPY, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_EVERNOTE_CONSENT_HELP = "On Evernote’s consent screen, leave only View ticked; untick Create, Edit and Delete.", DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_NONE_READ_OLD_MAIL = "older mail is kept as names only", DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_FILE_REASON_WORDS, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_SETUP_AGENT_COPY, DASHBOARD_HOST_GATE_COPY, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_PRIVACY_SETTINGS_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_APPS_RECEIVED_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY, PRIVATE_ANSWER_FAILURES, DASHBOARD_PRIVACY_ITEMS_COPY, JUDGE_REASON_PHRASES, DASHBOARD_JUDGE_CHECK_COPY;
+var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = "Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.", DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_RETRYING_ON_ITS_OWN = "a sync is retrying on its own", DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_DISCONNECTED_DATA_KEPT = "Disconnected · indexed data kept", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", DASHBOARD_STORAGE_NOTICE_COPY, DASHBOARD_MEDIA_STORAGE_COPY, READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", DASHBOARD_CAPTURE_STALE_LABEL = "Live capture is stale", DASHBOARD_CAPTURE_BLOCKED_LABEL = "Live capture cannot start", DASHBOARD_CAPTURE_COPY, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_EVERNOTE_CONSENT_HELP = "On Evernote’s consent screen, leave only View ticked; untick Create, Edit and Delete.", DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_NONE_READ_OLD_MAIL = "older mail is kept as names only", DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_FILE_REASON_WORDS, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_SETUP_AGENT_COPY, DASHBOARD_HOST_GATE_COPY, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_PRIVACY_SETTINGS_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVACY_NO_JUDGE_COPY, DASHBOARD_CHATGPT_PRIVACY_JUDGE_OFF_COPY, DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_APPS_RECEIVED_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY, PRIVATE_ANSWER_FAILURES, DASHBOARD_PRIVACY_ITEMS_COPY, JUDGE_REASON_PHRASES, DASHBOARD_JUDGE_CHECK_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_archive_formats();
@@ -62599,6 +62704,14 @@ var init_vocabulary = __esm(() => {
   DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY = {
     sentence: "Tell Olympus what's private for you",
     label: "Set up privacy"
+  };
+  DASHBOARD_CHATGPT_PRIVACY_NO_JUDGE_COPY = {
+    sentence: "No private model is set up to check what's private, so new items wait, unread by your AI apps, until one is.",
+    label: "Set up the private model"
+  };
+  DASHBOARD_CHATGPT_PRIVACY_JUDGE_OFF_COPY = {
+    sentence: "Checking what's private is turned off on the computer running Olympus, so new items wait, unread by your AI apps, until it's turned back on.",
+    label: "See the private model"
   };
   DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY = {
     sentence: "Approve the model that checks what's private. Until you do, new items it would check wait.",
@@ -67045,7 +67158,7 @@ function settleNamesOnlyItems(options) {
     return report;
   const ledger = set.ledger;
   const limit = Math.max(1, options.limit ?? DEFAULT_NAMES_ONLY_SETTLE_ROWS);
-  const after = parseIdentity(ledger.readMeta(SETTLE_META_KEY));
+  const after = parseTierLedgerIdentity(ledger.readMeta(SETTLE_META_KEY));
   const { records: rows, resumeAfter } = ledger.listAwaitingTextWindow({ limit, ...after ? { after } : {} });
   for (const record of rows) {
     report.checked += 1;
@@ -67060,7 +67173,7 @@ function settleNamesOnlyItems(options) {
 function settleOne(set, record) {
   if (!record.reasons.includes("content:unread") || record.decidedBy === "override")
     return false;
-  const identity2 = identityOf2(record);
+  const identity2 = tierLedgerIdentityOfRecord(record);
   const current2 = set.ledger.copies(identity2).filter((copy) => copy.state === "current");
   const names = copyServingLayer(current2, "metadata");
   const domain = names ? set.domainForCorpus(names.corpusId) : undefined;
@@ -67095,36 +67208,60 @@ function settleOne(set, record) {
   });
   return recorded.outcome === "updated" || recorded.outcome === "unchanged";
 }
-function parseIdentity(raw) {
-  if (!raw)
-    return;
-  try {
-    const parsed = JSON.parse(raw);
-    if (typeof parsed.provider !== "string" || typeof parsed.accountScope !== "string" || typeof parsed.providerItemId !== "string")
-      return;
-    return {
-      provider: parsed.provider,
-      accountScope: parsed.accountScope,
-      providerItemId: parsed.providerItemId,
-      ...typeof parsed.providerConversationId === "string" ? { providerConversationId: parsed.providerConversationId } : {}
-    };
-  } catch {
-    return;
-  }
-}
-function identityOf2(record) {
-  return {
-    provider: record.provider,
-    accountScope: record.accountScope,
-    providerItemId: record.providerItemId,
-    ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
-  };
-}
 var DEFAULT_NAMES_ONLY_SETTLE_ROWS = 500, SETTLE_META_KEY = "names_only_settle_after";
 var init_tier_names_only_settle = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
   init_local_index();
+});
+
+// src/workers/connector-store/tier-held-settle.ts
+function settlePersonalFirstItems(options) {
+  const report = { checked: 0, settled: 0, movesQueued: 0 };
+  const { set } = options;
+  const ledger = set.ledger;
+  const limit = Math.max(1, options.limit ?? DEFAULT_HELD_SETTLE_ROWS);
+  const after = parseTierLedgerIdentity(ledger.readMeta(SETTLE_META_KEY2));
+  const { records, resumeAfter } = ledger.listPersonalFirstWindow({ limit, ...after ? { after } : {} });
+  for (const record of records) {
+    report.checked += 1;
+    try {
+      const outcome = settleOne2(set, record);
+      if (outcome === "queued_move")
+        report.movesQueued += 1;
+      if (outcome === "queued_move" || outcome === "updated" || outcome === "unchanged")
+        report.settled += 1;
+    } catch {}
+  }
+  ledger.writeMeta(SETTLE_META_KEY2, resumeAfter ? JSON.stringify(resumeAfter) : "");
+  return report;
+}
+function settleOne2(set, record) {
+  const identity2 = tierLedgerIdentityOfRecord(record);
+  const decision = {
+    metadataTier: record.metadataTier,
+    contentTier: record.contentTier,
+    decidedBy: record.decidedBy,
+    reasons: record.reasons.filter((reason) => reason !== PERSONAL_FIRST_REASON),
+    state: "pending",
+    contentRead: record.contentRead,
+    metadataPending: record.metadataPending,
+    contentPending: true,
+    metadataForced: record.metadataForced,
+    metadataFlagged: record.metadataFlagged,
+    engineVersion: record.engineVersion,
+    mapRevision: record.mapRevision,
+    snifferId: "undecided"
+  };
+  return set.ledger.recordRoutedPlacement(identity2, decision, set.placementFor(decision), {
+    stagedLandingAllowed: true,
+    guard: { generation: record.generation, override: set.ledger.getOverride(identity2) }
+  }).outcome;
+}
+var DEFAULT_HELD_SETTLE_ROWS = 500, SETTLE_META_KEY2 = "personal_first_settle_after";
+var init_tier_held_settle = __esm(() => {
+  init_tier_classifier();
+  init_tier_ledger();
 });
 
 // src/workers/embedding-ledger.ts
@@ -70080,7 +70217,7 @@ async function rejudgeRoutedItemsInTurns(options) {
 }
 function storedContentText(set, record) {
   try {
-    const identity2 = identityOf3(record);
+    const identity2 = identityOf2(record);
     const current2 = set.ledger.copies(identity2).filter((copy) => copy.state === "current");
     const serving = copyServingLayer(current2, "content");
     const domain = serving ? set.domainForCorpus(serving.corpusId) : undefined;
@@ -70162,7 +70299,7 @@ function rechecks(record) {
 function rejudgeStoredContent(set, record, options) {
   const { report, key: key2, autoMoves } = options;
   const ledger = set.ledger;
-  const identity2 = identityOf3(record);
+  const identity2 = identityOf2(record);
   const read = ledger.classificationRead(identity2);
   if (read.override) {
     if (key2)
@@ -70390,7 +70527,7 @@ function recordSecretLocation(locations, decision, exported, finding) {
     ...finding.text !== undefined ? { text: finding.text } : {}
   });
 }
-function identityOf3(record) {
+function identityOf2(record) {
   return {
     provider: record.provider,
     accountScope: record.accountScope,
@@ -70475,7 +70612,7 @@ function isVerdictReceipt(reason) {
 }
 function restoreClearedOverride(set, record) {
   const ledger = set.ledger;
-  const identity2 = identityOf4(record);
+  const identity2 = identityOf3(record);
   const before = ledger.settledDecisionBeforeOverride(identity2);
   if (!before || before.metadataTier === "secrets" || before.contentTier === "secrets")
     return false;
@@ -70546,7 +70683,7 @@ function restoreClearedOverride(set, record) {
 }
 function applyOne(set, record, tier, retirePublic, report, guard) {
   const ledger = set.ledger;
-  const identity2 = identityOf4(record);
+  const identity2 = identityOf3(record);
   const holdUntilJudged = set.holdsContentUntilJudged() || heldUntilJudged(record.reasons);
   const decision = classifyItemTiers({ signals: {}, provider: record.provider, subject: identity2, ...holdUntilJudged ? { holdUntilJudged: true } : {} }, { override: { kind: "tier", tier }, ...retirePublic ? { retirePublic: true } : {} });
   const secrets = decision.contentTier === "secrets";
@@ -70628,7 +70765,7 @@ function storedCopy(set, identity2) {
   }
   return;
 }
-function identityOf4(record) {
+function identityOf3(record) {
   return {
     provider: record.provider,
     accountScope: record.accountScope,
@@ -70686,7 +70823,7 @@ function sweepOwnerRuleRaises(options) {
       report.secrets += 1;
     else if (raised === "deferred") {
       if (held.length < MAX_HELD_ITEMS)
-        held.push(identityOf5(record));
+        held.push(identityOf4(record));
       else
         overflow = true;
     }
@@ -70722,7 +70859,7 @@ function sweepOwnerRuleRaises(options) {
     report.complete = false;
     writeState2(ledger, {
       done,
-      pending: { rules: pendingKeys, after: identityOf5(rows.at(-1)), held, ...overflow ? { overflow: true } : {} }
+      pending: { rules: pendingKeys, after: identityOf4(rows.at(-1)), held, ...overflow ? { overflow: true } : {} }
     });
   }
   return report;
@@ -70730,7 +70867,7 @@ function sweepOwnerRuleRaises(options) {
 function raiseRoutedItem(set, record, rules, inputs, extraSignals = {}) {
   if (record.contentTier === "secrets" || record.metadataTier === "secrets")
     return "unchanged";
-  const identity2 = identityOf5(record);
+  const identity2 = identityOf4(record);
   if (set.ledger.getOverride(identity2))
     return "unchanged";
   const copies = set.ledger.copies(identity2);
@@ -70975,7 +71112,7 @@ function writeState2(ledger, state) {
 function sameKeys(left, right) {
   return left.length === right.length && left.every((key2, index) => key2 === right[index]);
 }
-function identityOf5(record) {
+function identityOf4(record) {
   return {
     provider: record.provider,
     accountScope: record.accountScope,
@@ -71016,7 +71153,7 @@ function sweepImageContentToPrivate(options) {
   }
   if (rows.length >= limit) {
     report.complete = false;
-    ledger.writeMeta(SWEEP_META_KEY2, JSON.stringify({ done: false, after: identityOf6(rows.at(-1)) }));
+    ledger.writeMeta(SWEEP_META_KEY2, JSON.stringify({ done: false, after: identityOf5(rows.at(-1)) }));
     return report;
   }
   for (const domain of ["public_safe", "internal"]) {
@@ -71033,7 +71170,7 @@ function raiseIfImage(set, record) {
     return false;
   if (record.contentTier === "secure")
     return false;
-  const identity2 = identityOf6(record);
+  const identity2 = identityOf5(record);
   if (set.ledger.getOverride(identity2))
     return false;
   const current2 = set.ledger.copies(identity2).filter((copy) => copy.state === "current");
@@ -71077,7 +71214,7 @@ function readState6(raw) {
     return { done: false };
   }
 }
-function identityOf6(record) {
+function identityOf5(record) {
   return {
     provider: record.provider,
     accountScope: record.accountScope,
@@ -71175,7 +71312,7 @@ async function sweepSecretsFloor(options) {
     else if (outcome === "failed") {
       report.failed += 1;
       if (held.length < MAX_HELD_ITEMS2)
-        held.push(identityOf7(record));
+        held.push(identityOf6(record));
       else
         overflow = true;
     }
@@ -71209,7 +71346,7 @@ async function sweepSecretsFloor(options) {
     report.complete = false;
     writeState3(ledger, {
       ...keep,
-      pending: { version: SECRETS_FLOOR_VERSION, after: identityOf7(rows.at(-1)), held, ...overflow ? { overflow: true } : {} }
+      pending: { version: SECRETS_FLOOR_VERSION, after: identityOf6(rows.at(-1)), held, ...overflow ? { overflow: true } : {} }
     });
   }
   return report;
@@ -71217,7 +71354,7 @@ async function sweepSecretsFloor(options) {
 async function applyFloor(set, record) {
   if (record.contentTier === "secrets" || record.metadataTier === "secrets")
     return "clear";
-  const identity2 = identityOf7(record);
+  const identity2 = identityOf6(record);
   if (set.ledger.getOverride(identity2))
     return "clear";
   const copies = set.ledger.copies(identity2);
@@ -71300,7 +71437,7 @@ function isIdentity2(value) {
 function writeState3(ledger, state) {
   ledger.writeMeta(SWEEP_META_KEY3, JSON.stringify(state));
 }
-function identityOf7(record) {
+function identityOf6(record) {
   return {
     provider: record.provider,
     accountScope: record.accountScope,
@@ -71733,6 +71870,9 @@ class TieredStoreSet {
     } catch {}
     try {
       settleNamesOnlyItems({ set: this });
+    } catch {}
+    try {
+      settlePersonalFirstItems({ set: this });
     } catch {}
     try {
       sweepImageContentToPrivate({ set: this });
@@ -72399,7 +72539,7 @@ class TieredRoutingRun {
     if (contentRead && decision.contentPending && fromContent && toContent && trustDomainRank(toContent.trustDomain) < trustDomainRank(fromContent.trustDomain) && !placementIsRaise(currentCopies, placement.copies)) {
       placement = { copies: currentCopies, embedHold: true };
     }
-    const holdsReplacement = routed && contentRead && item.holdContentUntilJudged === true && decision.contentTier !== "secrets" && ledger.getCurrent(identity2)?.state !== "moving";
+    const holdsReplacement = routed && contentRead && (item.holdContentUntilJudged === true || contentHeldForJudgment(decision)) && decision.contentTier !== "secrets" && ledger.getCurrent(identity2)?.state !== "moving";
     const replacesInPlace = holdsReplacement && currentCopies.length > 0 && placementIsRaise(currentCopies, placement.copies);
     const placedDomains = new Set(placement.copies.map((copy) => copy.trustDomain));
     const staleDomains = holdsReplacement ? TIER_DOMAIN_ORDER.filter((domain) => !placedDomains.has(domain) && this.set.store(domain)?.itemPresence(identity2).active === true) : [];
@@ -72679,6 +72819,7 @@ var init_tiered_store_set = __esm(() => {
   init_parent_context();
   init_child_visibility();
   init_tier_names_only_settle();
+  init_tier_held_settle();
   init_tier_content_purge();
   init_tier_move();
   init_tier_row_rehome();
@@ -128719,7 +128860,7 @@ var init_operations = __esm(() => {
           ...signal ? { signal } : {}
         });
         const jobs = ctx.sourceAnswerJobs;
-        return jobs ? runUnderCaller(jobs, ctx.signal, ask) : ask(ctx.signal);
+        return jobs ? runUnderCaller({ ...jobs, anonymousAsk: true }, ctx.signal, ask) : ask(ctx.signal);
       }
     },
     {
@@ -150417,6 +150558,7 @@ class SourceAnswerJobRegistry {
     scope.detachFromClient?.();
     let wake;
     const job = {
+      anonymousAsk: scope.anonymousAsk === true,
       id: newJobId(),
       owner: scope.owner,
       startedAt,
@@ -150444,6 +150586,10 @@ class SourceAnswerJobRegistry {
     this.jobs.set(job.id, job);
     this.evictRetained(scope.owner);
     return pendingResult(job.id, this.now() - startedAt, this.limits.resultWaitMs);
+  }
+  isAnonymousAsk(owner2, jobId) {
+    const job = typeof jobId === "string" ? this.jobs.get(jobId) : undefined;
+    return job?.anonymousAsk === true && sameOwner(job.owner, owner2);
   }
   async result(owner2, jobId, signal) {
     this.sweep();
@@ -171431,8 +171577,8 @@ var init_top_nav = __esm(() => {
 
 // src/workers/archive-import/staging.ts
 import { randomBytes as randomBytes30 } from "node:crypto";
-import { existsSync as existsSync102, mkdirSync as mkdirSync66, readdirSync as readdirSync29, realpathSync as realpathSync21, rmSync as rmSync43, statSync as statSync42, statfsSync as statfsSync4, utimesSync } from "node:fs";
-import { open as open5 } from "node:fs/promises";
+import { existsSync as existsSync102, mkdirSync as mkdirSync66, readdirSync as readdirSync29, realpathSync as realpathSync21, renameSync as renameSync24, rmSync as rmSync43, statSync as statSync42, statfsSync as statfsSync4, utimesSync } from "node:fs";
+import { open as open5, rm as rm11 } from "node:fs/promises";
 import { sep as sep22, join as join134, resolve as resolve28 } from "node:path";
 function sanitizeUploadPath(raw) {
   const bad = () => {
@@ -171456,6 +171602,14 @@ function sanitizeUploadPath(raw) {
       return bad();
   }
   return parts;
+}
+function removeInBackground(path) {
+  if (removing.has(path))
+    return;
+  removing.add(path);
+  rm11(path, { recursive: true, force: true }).catch(() => {
+    return;
+  }).finally(() => removing.delete(path));
 }
 function createArchiveUploads(options) {
   const freeBytes = options.freeBytes ?? ((path) => {
@@ -171762,6 +171916,10 @@ function createArchiveUploads(options) {
         return;
       }
       for (const name of names) {
+        if (name.startsWith(REMOVING_PREFIX)) {
+          removeInBackground(join134(root, name));
+          continue;
+        }
         if (!ID2.test(name))
           continue;
         const dir = join134(root, name);
@@ -171781,7 +171939,14 @@ function createArchiveUploads(options) {
         if (found)
           found.cancelled = true;
         sessions.delete(name);
-        rmSync43(dir, { recursive: true, force: true });
+        const aside = join134(root, `${REMOVING_PREFIX}${name}-${randomBytes30(4).toString("hex")}`);
+        try {
+          renameSync24(dir, aside);
+        } catch {
+          removeInBackground(dir);
+          continue;
+        }
+        removeInBackground(aside);
       }
     },
     close() {
@@ -171794,7 +171959,7 @@ function createArchiveUploads(options) {
     }
   };
 }
-var ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES, ARCHIVE_UPLOAD_CHUNK_BYTES, ARCHIVE_UPLOAD_MAX_CHUNK_BYTES, SPACE_CHECK_EVERY_BYTES, SPACE_POLL_MS = 2000, ARCHIVE_UPLOAD_IDLE_MS, MAX_DEPTH = 64, MAX_PATH_CHARS = 4096, MAX_NAME_BYTES = 255, ID2, ArchiveUploadError, ARCHIVE_UPLOAD_COPY;
+var ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES, ARCHIVE_UPLOAD_CHUNK_BYTES, ARCHIVE_UPLOAD_MAX_CHUNK_BYTES, SPACE_CHECK_EVERY_BYTES, SPACE_POLL_MS = 2000, ARCHIVE_UPLOAD_IDLE_MS, MAX_DEPTH = 64, MAX_PATH_CHARS = 4096, MAX_NAME_BYTES = 255, ID2, ArchiveUploadError, ARCHIVE_UPLOAD_COPY, ARCHIVE_STAGING_REMOVING_PREFIX = ".removing-", REMOVING_PREFIX, removing;
 var init_staging = __esm(() => {
   ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
   ARCHIVE_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
@@ -171823,6 +171988,8 @@ var init_staging = __esm(() => {
     unreadable: "Olympus could not read what was sent. Choose the folder again.",
     write_failed: "Olympus could not save the file on this computer. Check that its disk has room, then choose the folder again."
   };
+  REMOVING_PREFIX = ARCHIVE_STAGING_REMOVING_PREFIX;
+  removing = new Set;
 });
 
 // src/workers/dashboard/host-page.ts
@@ -203568,7 +203735,7 @@ function createArchiveImportDashboard(options) {
     }
   };
   const sweepStaging = () => {
-    if (closed)
+    if (closed || options.ownsUploads === false)
       return;
     try {
       uploads.sweep(stagingNeeded);
@@ -206422,6 +206589,7 @@ function childLane(scope) {
   return stores ? { ledger: () => scope.ledger, stores } : undefined;
 }
 function createTierVisibilityGate(scopes, onHeldMatches) {
+  const readOptions = { personalFirst: onHeldMatches !== undefined };
   const governedBy = (scope, hits) => hits.filter((hit) => scope.corpusIds.has(hit.corpusId));
   const gate = (hits) => {
     const current2 = scopes();
@@ -206433,9 +206601,7 @@ function createTierVisibilityGate(scopes, onHeldMatches) {
       if (governed.length === 0)
         continue;
       try {
-        const copies = scope.ledger.copiesForMany(governed.map((hit) => hit.sourceItem));
-        const copyless = governed.filter((hit) => (copies.get(tierLedgerIdentityKey(hit.sourceItem))?.length ?? 0) === 0);
-        reads.set(scope, { copies, routedWithoutCopies: scope.ledger.routedWithoutCopies(copyless.map((hit) => hit.sourceItem)) });
+        reads.set(scope, scope.ledger.readSteps(scope.ledger.visibilityReadSteps(governed.map((hit) => hit.sourceItem), readOptions)));
       } catch {
         reads.set(scope, undefined);
       }
@@ -206452,7 +206618,7 @@ function createTierVisibilityGate(scopes, onHeldMatches) {
       if (governed.length === 0)
         return;
       try {
-        reads.set(scope, await ledgerVisibilityReads(scope.ledger, governed.map((hit) => hit.sourceItem)));
+        reads.set(scope, await ledgerVisibilityReads(scope.ledger, governed.map((hit) => hit.sourceItem), readOptions));
       } catch {
         reads.set(scope, undefined);
       }
@@ -206461,7 +206627,7 @@ function createTierVisibilityGate(scopes, onHeldMatches) {
   };
   return gate;
 }
-async function ledgerVisibilityReads(ledger, identities) {
+async function ledgerVisibilityReads(ledger, identities, options) {
   if (identities.length > 0 && offThreadReadsSupported(ledger.dbPath)) {
     if (!releasing.has(ledger)) {
       releasing.add(ledger);
@@ -206469,7 +206635,7 @@ async function ledgerVisibilityReads(ledger, identities) {
     }
     try {
       return await withOffThreadSnapshot(ledger.dbPath, async (read) => {
-        const steps = ledger.visibilityReadSteps(identities);
+        const steps = ledger.visibilityReadSteps(identities, options);
         let next = steps.next();
         while (!next.done)
           next = steps.next(await read(next.value));
@@ -206480,7 +206646,7 @@ async function ledgerVisibilityReads(ledger, identities) {
         throw error2;
     }
   }
-  return ledger.readSteps(ledger.visibilityReadSteps(identities));
+  return ledger.readSteps(ledger.visibilityReadSteps(identities, options));
 }
 function judgeVisibility(current2, hits, reads, onHeldMatches) {
   const hidden = new Set;
@@ -206513,6 +206679,10 @@ function judgeVisibility(current2, hits, reads, onHeldMatches) {
       const currentHere = itemCopies.some((copy) => copy.corpusId === hit.corpusId && copy.state === "current" && (!hit.servingLayer || copy.layers === "both" || copy.layers === hit.servingLayer));
       if (!currentHere)
         hidden.add(hit);
+    }
+    for (const hit of governed) {
+      if (!hidden.has(hit) && read.personalFirstWaiting.has(tierLedgerIdentityKey(hit.sourceItem)))
+        held.add(hit);
     }
     const lane = childLane(scope);
     if (lane) {
@@ -206726,7 +206896,7 @@ var init_judge_boost = __esm(() => {
 });
 
 // src/core/source-account-migration.ts
-import { linkSync as linkSync5, lstatSync as lstatSync54, mkdirSync as mkdirSync70, readdirSync as readdirSync35, realpathSync as realpathSync29, renameSync as renameSync24, rmdirSync as rmdirSync8, statSync as statSync46, unlinkSync as unlinkSync5 } from "node:fs";
+import { linkSync as linkSync5, lstatSync as lstatSync54, mkdirSync as mkdirSync70, readdirSync as readdirSync35, realpathSync as realpathSync29, renameSync as renameSync25, rmdirSync as rmdirSync8, statSync as statSync46, unlinkSync as unlinkSync5 } from "node:fs";
 import { basename as basename22, dirname as dirname110, isAbsolute as isAbsolute39, join as join147, relative as relative17, resolve as resolve31, sep as sep23 } from "node:path";
 function accountFolderMigrationEnabled(env = process.env) {
   const value2 = env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim().toLowerCase() ?? "";
@@ -206825,7 +206995,7 @@ function absPath(ctx, rel) {
 }
 function moveWithoutReplacing(from, to, kind) {
   if (kind === "dir") {
-    renameSync24(from, to);
+    renameSync25(from, to);
     syncFolder(dirname110(to));
     syncFolder(dirname110(from));
     return;
@@ -209344,7 +209514,11 @@ class InstalledTierClassification {
     if (this.lane && ledgerPath !== ":memory:") {
       try {
         sniffer = new CachedTierSniffer(this.snifferStoreForLedger(ledgerPath), this.lane, snifferPromptVersions(this.ownerContext?.()).cache);
-      } catch {}
+      } catch {
+        sniffer = NO_JUDGE_TIER_SNIFFER;
+      }
+    } else if (!this.lane && ledgerPath !== ":memory:") {
+      sniffer = NO_JUDGE_TIER_SNIFFER;
     }
     return {
       ...rules.length > 0 ? { rules } : {},
@@ -209391,12 +209565,16 @@ function configureInstalledTierClassification(options = {}) {
   registerInstalledTierClassification(installed2);
   return installed2;
 }
-var installed2;
+var NO_JUDGE_TIER_SNIFFER, installed2;
 var init_installed_tier_classification = __esm(() => {
   init_sniffer();
   init_sniffer_store();
   init_tier_ledger_path();
   init_tier_rules();
+  NO_JUDGE_TIER_SNIFFER = {
+    id: "no_judge",
+    judge: () => ({ verdict: "undecided" })
+  };
 });
 
 // src/workers/classification/sniffer-resolver.ts
@@ -211184,6 +211362,12 @@ class TierSnifferService {
           this.options.log?.(`Olympus tier names-only: ${settled.settled} stored item(s) settled on their names.`);
         }
       } catch {}
+      try {
+        const held = settlePersonalFirstItems({ set: set2 });
+        if (held.settled > 0) {
+          this.options.log?.(`Olympus tier hold: ${held.settled} item(s) recorded before every open question held text are held now (${held.movesQueued} move(s) to Private queued).`);
+        }
+      } catch {}
     }
   }
   applyOwnerOverrides() {
@@ -211524,6 +211708,7 @@ var init_sniffer_service = __esm(() => {
   init_tier_ledger_path();
   init_tier_rejudge();
   init_tier_names_only_settle();
+  init_tier_held_settle();
   init_tier_rules_sweep();
   init_tier_override_settle();
   init_secrets_disposition();
@@ -212482,25 +212667,6 @@ function frontUnreadableFiles(local, snapshot2) {
     recheck: (corpusId) => current2(snapshot2)?.snapshot.unreadable?.[corpusId]
   };
 }
-function frontArchiveViews(local, snapshot2, changedAt = () => {
-  return;
-}) {
-  const archive = () => {
-    const read = current2(snapshot2);
-    if (!read)
-      return;
-    const changed = changedAt();
-    if (changed !== undefined && Date.parse(read.snapshot.written_at) < changed)
-      return;
-    return read.snapshot.archive;
-  };
-  return {
-    view: () => archive()?.view ?? local.view(),
-    cardViews: () => archive()?.cards ?? local.cardViews(),
-    sourceImports: () => archive()?.source_imports ?? local.sourceImports(),
-    archiveSources: () => archive()?.sources ?? local.archiveSources()
-  };
-}
 function frontDataExport(client) {
   return async (destination) => {
     const receipt = await client.send({ kind: "export_data", destination }, { timeoutMs: DATA_EXPORT_WAIT_MS });
@@ -212678,6 +212844,7 @@ function createFrontScheduler(options) {
       }
     },
     updateSources() {
+      options.sourcesChanged?.();
       post2({ kind: "reload", target: "sources" }).catch(() => {
         return;
       });
@@ -213390,6 +213557,24 @@ var init_webStandardStreamableHttp = __esm(() => {
   init_types2();
 });
 
+// src/workers/answer-model-required.ts
+function answerModelRequiredResult(name, args, available, jobs, client) {
+  if (name !== "source_answer" && name !== "source_answer_result")
+    return;
+  if (!available || available())
+    return;
+  if (name === "source_answer_result" && jobs?.registry.isAnonymousAsk(jobs.owner, typeof args.job_id === "string" ? args.job_id.trim() : args.job_id))
+    return;
+  return { content: [{ type: "text", text: appClientCopy(ANSWER_MODEL_REQUIRED_TEXT, client) }] };
+}
+var ANSWER_MODEL_REQUIRED_TEXT;
+var init_answer_model_required = __esm(() => {
+  init_mcp_app_client();
+  init_open_targets();
+  init_vocabulary();
+  ANSWER_MODEL_REQUIRED_TEXT = `No answer model is set up in Olympus. Set one up in the Olympus dashboard's Settings. [${DASHBOARD_CHATGPT_VOCABULARY.openOnMac}](${openPageUrl({ kind: "fix", section: "answers" })})`;
+});
+
 // src/workers/dashboard/shared-status.ts
 function dashboardHonestStatus(status, progress) {
   if (!progress || progress.stage === "done")
@@ -213472,6 +213657,14 @@ function buildChatGptDashboardViewModel(view4, options = {}) {
   }
   if (options.privacy?.classifierAwaitingApproval)
     needsYou.push(classifierApprovalItem(options.privacy, options.remote !== undefined));
+  else if (options.privacy?.judgeMissing) {
+    const copy = options.privacy.judgeMissing === "turned_off" ? DASHBOARD_CHATGPT_PRIVACY_JUDGE_OFF_COPY : DASHBOARD_CHATGPT_PRIVACY_NO_JUDGE_COPY;
+    needsYou.push({
+      id: "privacy:no_judge",
+      sentence: copy.sentence,
+      fix: { label: copy.label, tool: DASHBOARD_TOOL_NAME, args: {}, href: openOnComputer(undefined, "models") }
+    });
+  }
   const transcription = transcriptionModel(options.transcription);
   const progress = overallProgress(rows);
   const connected2 = rows.some(({ card }) => dashboardIsConnectedSource(card));
@@ -218882,6 +219075,8 @@ __export(exports_mcp_surface, {
   SEARCH_TOOL: () => SEARCH_TOOL,
   OPEN_PRIVATE_QUESTION_TOOL: () => OPEN_PRIVATE_QUESTION_TOOL,
   DASHBOARD_TOOL: () => DASHBOARD_TOOL,
+  CLAUDE_NO_QUESTION_PANEL: () => CLAUDE_NO_QUESTION_PANEL,
+  CLAUDE_NO_DASHBOARD_PANEL: () => CLAUDE_NO_DASHBOARD_PANEL,
   CHATGPT_TOOLS: () => CHATGPT_TOOLS,
   CHATGPT_RESOURCES: () => CHATGPT_RESOURCES,
   ASK_ANONYMOUSLY_TOOL: () => ASK_ANONYMOUSLY_TOOL
@@ -218891,7 +219086,7 @@ function readOnlyGrantMayUse(tool) {
 }
 function listChatGptTools(ctx, options = {}) {
   const tools = [DASHBOARD_TOOL, SEARCH_TOOL, SOURCE_STATUS_TOOL];
-  if (answerToolsListed(ctx, options))
+  if (answerToolsListed(ctx))
     tools.push(...ANSWER_TOOLS);
   else if (askToolListed(ctx))
     tools.push(SOURCE_ANSWER_RESULT_TOOL);
@@ -218900,9 +219095,7 @@ function listChatGptTools(ctx, options = {}) {
   tools.push(...SETUP_TOOLS);
   return appClientCopy(options.readOnly ? tools.filter(readOnlyGrantMayUse) : tools, options.appClient);
 }
-function answerToolsListed(ctx, options) {
-  if (options.answerModelAvailable && !options.answerModelAvailable())
-    return false;
+function answerToolsListed(ctx) {
   return ANSWER_TOOLS.every((tool) => {
     const operation = findOperationByName(tool.name);
     return operation !== undefined && shouldExposeOperation(operation, { config: ctx.config, surface: "remote" });
@@ -218930,13 +219123,14 @@ async function callChatGptTool(name, args, ctx, options, signal, detachedContext
     if (reason)
       return record8(withPrivateAnswerOutcome(answerToolResult(withheldSourceAnswer(reason), { pendingPrivacyItems: ctx.pendingPrivacyItems?.() })), true);
   }
-  return record8(withVisibleJobId(PANEL_TOOL_NAMES2.has(name) ? withPrivateAnswerOutcome(result) : result, options.appClient));
+  return record8(forClaude(name, PANEL_TOOL_NAMES2.has(name) ? withPrivateAnswerOutcome(result) : result, options.appClient));
 }
-function withVisibleJobId(result, client) {
-  const structured = result.structuredContent;
-  if (client?.host !== "claude" || structured?.status !== "working" || typeof structured.job_id !== "string")
+function forClaude(name, result, client) {
+  if (client?.host !== "claude" || result.isError)
     return result;
-  return { ...result, content: [...result.content, { type: "text", text: `job_id: ${structured.job_id}` }] };
+  const structured = result.structuredContent;
+  const line2 = structured?.status === "working" && typeof structured.job_id === "string" ? `job_id: ${structured.job_id}` : name === DASHBOARD_TOOL_NAME ? CLAUDE_NO_DASHBOARD_PANEL : name === OPEN_PRIVATE_QUESTION_TOOL.name && structured?.status === "opened" ? CLAUDE_NO_QUESTION_PANEL : undefined;
+  return line2 ? { ...result, content: [...result.content, { type: "text", text: line2 }] } : result;
 }
 function recordChatGptRequest(name, args, ctx, result, capture, withheldAfter) {
   if (result.isError)
@@ -218948,6 +219142,8 @@ function recordChatGptRequest(name, args, ctx, result, capture, withheldAfter) {
   if (name === SEARCH_TOOL_NAME)
     question = typeof args.question === "string" ? args.question : undefined;
   else if (name === "source_answer" || name === "source_answer_result") {
+    if (!structured)
+      return;
     question = sourceAnswerQuestion(name, args, structured?.status, structured?.job_id);
     if (structured?.status === "working")
       return;
@@ -219008,8 +219204,11 @@ async function runChatGptTool(name, args, ctx, options, signal, detachedContext)
         return result;
       }
       case SOURCE_ANSWER_TOOL.name: {
-        if (!answerToolsListed(ctx, options))
+        if (!answerToolsListed(ctx))
           throw new ChatGptSurfaceError("unknown_tool");
+        const setup = answerModelRequiredResult(name, args, options.answerModelAvailable, ctx.sourceAnswerJobs, options.appClient);
+        if (setup)
+          return setup;
         const question = typeof args.question === "string" ? args.question.trim() : "";
         if (!question)
           throw new ChatGptSurfaceError("invalid_params");
@@ -219040,8 +219239,11 @@ async function runChatGptTool(name, args, ctx, options, signal, detachedContext)
         return answerToolResult(raw, { pendingPrivacyItems: ctx.pendingPrivacyItems?.(), ...privateMatch ? { privateMatch } : late.timedOut ? { privateCheckPending: true } : {} });
       }
       case SOURCE_ANSWER_RESULT_TOOL.name: {
-        if (!answerToolsListed(ctx, options) && !askToolListed(ctx))
+        if (!answerToolsListed(ctx) && !askToolListed(ctx))
           throw new ChatGptSurfaceError("unknown_tool");
+        const setup = answerModelRequiredResult(name, args, options.answerModelAvailable, ctx.sourceAnswerJobs, options.appClient);
+        if (setup)
+          return setup;
         const jobId = typeof args.job_id === "string" ? args.job_id.trim() : "";
         if (!jobId)
           throw new ChatGptSurfaceError("invalid_params");
@@ -219347,10 +219549,11 @@ function createChatGptMcpServer(makeOperationContext, options, makeDetachedConte
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => readChatGptResource(request.params.uri, options.appClient));
   return server;
 }
-var READ_ONLY, OAUTH2_REQUIRED2, OAUTH2_OPTIONAL, SOURCE_ANSWER_TIMEOUT_MS = 600000, DASHBOARD_TOOL, DETAIL_PROPERTY, QUESTION_PROPERTY, SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL, SOURCE_STATUS_TOOL, SEARCH_TOOL, ASK_ANONYMOUSLY_TOOL, OPEN_PRIVATE_QUESTION_TOOL, ANSWER_TOOLS, READ_ONLY_GRANT_EXCEPTIONS, CHATGPT_TOOLS, PANEL_TOOL_NAMES2, defaultProbeLog = (line2) => {
+var READ_ONLY, OAUTH2_REQUIRED2, OAUTH2_OPTIONAL, SOURCE_ANSWER_TIMEOUT_MS = 600000, DASHBOARD_TOOL, DETAIL_PROPERTY, QUESTION_PROPERTY, SOURCE_ANSWER_TOOL, SOURCE_ANSWER_RESULT_TOOL, SOURCE_STATUS_TOOL, SEARCH_TOOL, ASK_ANONYMOUSLY_TOOL, OPEN_PRIVATE_QUESTION_TOOL, ANSWER_TOOLS, READ_ONLY_GRANT_EXCEPTIONS, CHATGPT_TOOLS, PANEL_TOOL_NAMES2, CLAUDE_NO_DASHBOARD_PANEL = "If no dashboard panel appears (Claude's phone apps don't show panels yet), give the user this status in words; the full dashboard opens in Claude on the web or desktop, and in Olympus on their computer.", CLAUDE_NO_QUESTION_PANEL = "If no panel appears (Claude's phone apps don't show panels yet), tell the user to open this chat in Claude on the web or desktop and type the question in the panel there.", defaultProbeLog = (line2) => {
   console.warn(line2);
 }, PROBE_HITS_PER_CORPUS = 10, PROBE_QUERY_MAX_CHARS = 500, PROBE_TIMEOUT_MS2 = 20000, privateMatchByJob, PRIVATE_MATCH_TTL_MS, PRIVATE_MATCH_MAX_JOBS = 1000, CHATGPT_RESOURCES;
 var init_mcp_surface = __esm(() => {
+  init_answer_model_required();
   init_mcp_app_client();
   init_app_release_capture();
   init_release_manifest();
@@ -228997,29 +229200,20 @@ var init_directory_surface = __esm(() => {
 
 // src/workers/remote-search.ts
 function remoteSearchExtension(options, authorized, request = {}) {
-  const answerHidden = () => options.answerModelAvailable !== undefined && !options.answerModelAvailable();
   return {
-    tools: (listed) => {
-      const hidden = answerHidden() ? hiddenWithoutAnswerModel(listed) : new Set;
-      return [REMOTE_SEARCH_TOOL, ...listed.filter((tool) => !hidden.has(tool.name))];
-    },
+    tools: (listed) => [REMOTE_SEARCH_TOOL, ...listed],
     call: async (call, next, signal) => {
       if (call.params.name === REMOTE_SEARCH_TOOL.name) {
         const signals = [signal, request.signal].filter((one) => one !== undefined);
         const cancel = signals.length > 1 ? AbortSignal.any(signals) : signals[0];
         return await runSearch(call.params.arguments ?? {}, options, authorized, request, cancel);
       }
-      if (answerHidden() && call.params.name === "source_answer")
-        return errorResult(remoteSurfaceErrorOutput("unknown_operation"));
+      const setup = answerModelRequiredResult(call.params.name, call.params.arguments ?? {}, options.answerModelAvailable, request.sourceAnswerJobs);
+      if (setup)
+        return setup;
       return await next();
     }
   };
-}
-function hiddenWithoutAnswerModel(listed) {
-  const hidden = new Set(["source_answer"]);
-  if (!listed.some((tool) => tool.name === "ask_anonymously"))
-    hidden.add("source_answer_result");
-  return hidden;
 }
 async function runSearch(args, options, authorized, context3, signal) {
   const question = typeof args.question === "string" ? args.question.trim() : "";
@@ -229106,6 +229300,7 @@ function errorResult(body) {
 }
 var MAX_QUESTION_CHARS2 = 2000, MAX_LIMIT = 48, REMOTE_SEARCH_TOOL;
 var init_remote_search = __esm(() => {
+  init_answer_model_required();
   init_app_release_capture();
   init_operations();
   init_remote_result();
@@ -229227,6 +229422,7 @@ function createRemoteMcpHandler(options) {
     const detached = () => options.makeOperationContext(caller, new AbortController().signal);
     const demo = options.demoGrant?.(verification.connection) === true;
     const server = chatgpt ? surface === "directory" ? (options.directoryServer ?? createChatGptDirectoryMcpServer)(() => ctx, chatgpt, detached) : createChatGptMcpServer(() => ctx, chatgpt, detached) : createOlympusMcpServer("remote", () => ctx, anonymousListing(options.anonymousAnswersEnabled, demoGrantLimit(demo, options.search ? remoteSearchExtension(options.search, () => stillAuthorized(request, verification.connection, options, surface), {
+      ...ctx.sourceAnswerJobs ? { sourceAnswerJobs: ctx.sourceAnswerJobs } : {},
       ...ctx.pendingPrivacyItems ? { pendingPrivacyItems: ctx.pendingPrivacyItems } : {},
       ...!demo && ctx.remotePrivatePart ? { privatePart: ctx.remotePrivatePart } : {},
       ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {},
@@ -236097,6 +236293,8 @@ async function main() {
   const snifferRuntime = resolveJudgeChoiceRuntime(judgeRuntimeInput, judgeSpending.status());
   const judgeObservations = new JudgeObservations(judgeObservationsPath(process.env));
   const snifferLane = snifferRuntime.source === "off" ? undefined : snifferRuntime.lane;
+  let snifferModelBuilt;
+  const judgeMissing = () => !tierSnifferServiceEnv(process.env).enabled ? "turned_off" : snifferRuntime.source === "off" || snifferModelBuilt === false ? "no_model" : undefined;
   if (snifferRuntime.source === "off") {
     console.warn(`Olympus tier sniffer is off (${snifferRuntime.reason}): items whose names look private stay pending, held Private; every other item is Personal.`);
   }
@@ -236379,7 +236577,7 @@ async function main() {
     sourceLaneGeneration += 1;
     earlySourceStores.push(stores);
   };
-  const sourceHasStores = (sourceId) => ["internal", "secure_local", "public_safe"].some((domain) => {
+  const sourceHasStores = (sourceId) => accountStoreNames(sourceId).some((domain) => {
     const path = resolvedStorePath(sourceId, domain, process.env);
     return existsSync117(path) || existsSync117(tieredStoreSetLedgerPath(path)) || existsSync117(secretLocationsPathForStore(path));
   });
@@ -237017,19 +237215,12 @@ ${key2}`;
   const telegramSpoolChanges = createSpoolChangeSubscription(defaultTelegramCaptureSpoolDir(process.env));
   const whatsappSpoolChanges = createSpoolChangeSubscription(defaultWhatsAppSpoolDir(process.env));
   const telegramCaptureMaxItems = parseOptionalPositiveInteger(process.env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS, "OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS");
-  let frontLanesWaiting = false;
   const storeAt = (sourceId, domain) => resolvedStorePath(sourceId, domain, process.env);
-  const frontCanMount = (paths) => {
-    if (paths.every(connectorStoreReadableNow))
-      return true;
-    frontLanesWaiting = true;
-    return false;
-  };
+  const frontCanMount = (paths) => paths.every(connectorStoreReadableNow);
   const mountSourceLanes = (handles) => {
     if (sourceRuntimeClosed)
       return;
     const connected2 = (provider, capability) => activeCredentialHandle(handles, { provider, capability }) !== undefined;
-    frontLanesWaiting = false;
     const wanted = (sourceId, connectedNow, paths) => {
       if (!sourceHasStores(sourceId) && !connectedNow)
         return false;
@@ -238458,7 +238649,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   };
   const schedulerAssembly = schedulerSourcesForHandles(connectedHandles);
   const schedulerSources = schedulerAssembly.sources;
-  const sourceScheduler = engineFront ? createFrontScheduler({ client: engineFront.client, snapshot: () => engineFront.status() }) : olympusConfig.worker.scheduler.enabled ? createSourceSchedulerFromConfig({
+  const sourceScheduler = engineFront ? createFrontScheduler({ client: engineFront.client, snapshot: () => engineFront.status(), sourcesChanged: () => refreshFrontMounts() }) : olympusConfig.worker.scheduler.enabled ? createSourceSchedulerFromConfig({
     config: olympusConfig,
     sources: schedulerSources,
     ...!(sourceIndexStatus && sourceIngestionLedger) ? {
@@ -238478,13 +238669,30 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       }
     } : {}
   }) : undefined;
-  let archiveChangedAt;
+  const refreshFrontMounts = () => {
+    const reads = [
+      () => mountSourceLanes(activeLaneHandles(readActiveConnectedHandles(process.env), process.env)),
+      () => {
+        if (sourceAccountMountable({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }))
+          archiveImports.existingLanes();
+      },
+      openTierStoresThatExist
+    ];
+    for (const read of reads) {
+      try {
+        read();
+      } catch (error2) {
+        console.warn(`[olympus] the front could not open a source's stores yet: ${error2 instanceof Error ? error2.message : String(error2)}`);
+      }
+    }
+  };
   const archiveImportDashboard = createArchiveImportDashboard({
     runtime: archiveImports,
     resolver: createArchivePathResolver(),
+    ownsUploads: engineRole !== "background",
     refreshScheduler: () => {
       if (engineFront) {
-        archiveChangedAt = Date.now();
+        refreshFrontMounts();
         engineFront.client.post({ kind: "archive_changed" }).catch(() => {
           return;
         });
@@ -238493,7 +238701,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       sourceScheduler?.updateSources(schedulerSourcesForHandles(activeLaneHandles(readActiveConnectedHandles(process.env), process.env)).sources);
     },
     ...engineFront ? { checksElsewhere: () => {
-      archiveChangedAt = Date.now();
+      refreshFrontMounts();
       engineFront.client.post({ kind: "archive_changed" }).catch(() => {
         return;
       });
@@ -238503,7 +238711,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   });
   if (!engineFront)
     archiveImportDashboard.resume();
-  const archiveViews = engineFront ? frontArchiveViews(archiveImportDashboard, () => engineFront.status(), () => archiveChangedAt) : archiveImportDashboard;
+  const archiveViews = archiveImportDashboard;
   wireBuiltInTranscriptionAtBoot({
     env: process.env,
     engine: process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() ? undefined : sharedBuiltInTranscriber(process.env),
@@ -239191,7 +239399,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       return false;
     try {
       const record8 = remoteConnections()?.list().find((connection) => connection.id === connectionId);
-      return record8 !== undefined && grantMcpSurface2(record8, olympusConfig.remote?.claudeAppEnabled === true) === "remote";
+      return record8 !== undefined && grantMcpSurface2(record8, claudeAppEnabled(olympusConfig)) === "remote";
     } catch {
       return false;
     }
@@ -239558,11 +239766,9 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const countPendingClassification = () => {
     let total = 0;
     for (const lane of tierLanes) {
-      for (const corpusId of lane.corpusIds) {
-        try {
-          total += lane.ledger.corpusCopyCounts(corpusId).held;
-        } catch {}
-      }
+      try {
+        total += lane.ledger.heldItemCount([...lane.corpusIds]);
+      } catch {}
     }
     return total;
   };
@@ -239757,11 +239963,13 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     privacy: () => {
       const settings = readChatGptPrivacySettings2(process.env, pendingClassificationCount());
       const backlog = tierSnifferBacklog?.();
+      const missing = judgeMissing();
       return {
         configured: settings.configured,
         pendingCount: settings.pendingCount,
         ruleCount: settings.rules.length,
         classifierAwaitingApproval: backlog?.awaitingOwnerApproval === true,
+        ...missing ? { judgeMissing: missing } : {},
         ...backlog?.awaitingApproval ? { classifierWaiting: { lane: backlog.awaitingApproval.lane, modelId: backlog.awaitingApproval.modelId } } : {}
       };
     }
@@ -239840,7 +240048,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     fetch: withRequestPeer2(withFirstRunPrivacyGate(withRelaySurfacesRoute2(createRelaySurfacesHandler2({
       connections: () => remoteConnections(),
       publicUrls: remotePublicUrls,
-      claudeAppEnabled: () => olympusConfig.remote?.claudeAppEnabled === true,
+      claudeAppEnabled: () => claudeAppEnabled(olympusConfig),
       isRelayed: isRelayedRequest2
     }), withChatGptHandoffRoutes2(createChatGptHandoffHandler2(chatgptHandoffs, { isRelayed: carriesRelayMarker2 }), withPrivateAnswerRoute2(createPrivateAnswerHandler2({
       jobs: privateAnswers,
@@ -239848,7 +240056,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       isRelayed: isRelayedRequest2,
       extraOrigins: () => {
         const urls = currentRemotePublicUrls2(remotePublicUrls);
-        return [DASHBOARD_UI_DOMAIN2, ...olympusConfig.remote?.claudeAppEnabled === true && urls ? [claudeAppOrigin2(urls)] : []];
+        return [DASHBOARD_UI_DOMAIN2, ...claudeAppEnabled(olympusConfig) && urls ? [claudeAppOrigin2(urls)] : []];
       }
     }), withRemoteOAuthRoutes2(createRemoteOAuthHandler2({
       publicUrls: remotePublicUrls,
@@ -239859,7 +240067,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       connections: () => remoteConnections({ create: true })
     }), withRemoteOpenApiRoutes2(withRemoteFailureBoundary2(remoteOpenApi), withRemoteMcpRoute2(withRemoteFailureBoundary2(createRemoteMcpHandler2({
       ...sharedRemoteMcpOptions,
-      claudeApp: { enabled: () => olympusConfig.remote?.claudeAppEnabled === true },
+      claudeApp: { enabled: () => claudeAppEnabled(olympusConfig) },
       chatgpt: {
         servesRequest: (request, connection) => isRelayedRequest2(request) && isChatGptGrant2(connection),
         readOnlyFor: isDemoGrant2,
@@ -239990,6 +240198,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const rawSnifferModel = !snifferEnv.enabled || snifferRuntime.source === "off" ? undefined : snifferRuntime.source === "built_in" ? snifferRuntime.builtIn.model : createTierSnifferModel({ lane: snifferRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[snifferRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => {
     requestModelReload();
   } });
+  snifferModelBuilt = rawSnifferModel !== undefined;
   const localDecisionBar = snifferLane ? snifferDecisionBar(snifferLane) : undefined;
   const snifferModel = rawSnifferModel && snifferLane?.kind === "local" ? observedJudge(rawSnifferModel, judgeObservations, localDecisionBar) : rawSnifferModel;
   const snifferResource = snifferRuntime.source === "built_in" ? "built_in" : snifferLane?.kind === "local" ? localModelResourceKey(snifferLane.profile) : undefined;
@@ -240073,15 +240282,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     localModelActivity.onBusy(snifferResource, () => relay.busy(snifferResource));
     localModelActivity.onIdle(snifferResource, () => relay.idle(snifferResource));
   }
-  const frontMountRetry = engineFront ? setInterval(() => {
-    try {
-      if (frontLanesWaiting)
-        mountSourceLanes(activeLaneHandles(readActiveConnectedHandles(process.env), process.env));
-      openTierStoresThatExist();
-    } catch (error2) {
-      console.warn(`[olympus] the front could not open a source's stores yet: ${error2 instanceof Error ? error2.message : String(error2)}`);
-    }
-  }, 2000) : undefined;
+  const frontMountRetry = engineFront ? setInterval(refreshFrontMounts, 2000) : undefined;
   frontMountRetry?.unref?.();
   if (engineFront) {
     const judge3 = frontJudgeState(() => engineFront.status());
@@ -240241,12 +240442,6 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
             return counted ? [[definition.corpusId, counted]] : [];
           }))
         } : {},
-        archive: {
-          view: archiveImportDashboard.view(),
-          cards: archiveImportDashboard.cardViews(),
-          source_imports: archiveImportDashboard.sourceImports(),
-          sources: archiveImportDashboard.archiveSources()
-        },
         manual_syncs: Object.fromEntries(manualSyncRuns),
         rss_restarts: rssRestart.restarts()
       })
@@ -241064,6 +241259,7 @@ var init_server5 = __esm(async () => {
   init_dashboard2();
   init_lane();
   init_store();
+  init_olympus_layout();
   init_state();
   init_extraction_runtime();
   init_scheduler_source2();

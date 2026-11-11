@@ -20210,6 +20210,12 @@ var init_tier_names_only_settle = __esm(() => {
   init_local_index();
 });
 
+// src/workers/connector-store/tier-held-settle.ts
+var init_tier_held_settle = __esm(() => {
+  init_tier_classifier();
+  init_tier_ledger();
+});
+
 // src/workers/embedding-ledger.ts
 var EMBEDDING_LEDGER_OWNER_APPROVAL, recordedIdCache, EMBEDDING_LEDGER_APPROVAL_TEXT, WIPED_CORPORA, QWEN3_MODEL_ID = "secure-local-qwen3-embed", QWEN3_EPOCH = "local:openai-compatible:secure-local-qwen3-embed:2560", DELPHI_ROUTER_ENDPOINT = "http://127.0.0.1:28090/v1", PREVIOUS_ENDPOINT = "http://127.0.0.1:28011/v1", GEMINI_MODEL_ID = "gemini-embedding-2", LANE_ENABLEMENT_CORPORA, EMBEDDING_LEDGER_BACKFILL;
 var init_embedding_ledger = __esm(() => {
@@ -20799,6 +20805,7 @@ var init_tiered_store_set = __esm(() => {
   init_parent_context();
   init_child_visibility();
   init_tier_names_only_settle();
+  init_tier_held_settle();
   init_tier_content_purge();
   init_tier_move();
   init_tier_row_rehome();
@@ -36789,7 +36796,7 @@ var operations = [
         ...signal ? { signal } : {}
       });
       const jobs = ctx.sourceAnswerJobs;
-      return jobs ? runUnderCaller(jobs, ctx.signal, ask) : ask(ctx.signal);
+      return jobs ? runUnderCaller({ ...jobs, anonymousAsk: true }, ctx.signal, ask) : ask(ctx.signal);
     }
   },
   {

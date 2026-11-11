@@ -4,7 +4,7 @@
 // path means, not from the implementation.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -15,6 +15,7 @@ import {
   createArchiveUploads,
   sanitizeUploadPath,
   type ArchiveUploads,
+  ARCHIVE_STAGING_REMOVING_PREFIX,
 } from '../src/workers/archive-import/staging.ts';
 
 const cleanups: Array<() => void> = [];
@@ -475,6 +476,9 @@ describe('cancel and the copies nothing reads', () => {
     live.send('c');
     await until(() => f.uploads.status(arriving).bytes === 1);
     f.uploads.sweep((dir) => dir.endsWith(read));
+    // The swept folders leave their place at once and are deleted off the request path.
+    expect(readdirSync(f.root).filter((name) => !name.startsWith(ARCHIVE_STAGING_REMOVING_PREFIX)).sort()).toEqual([arriving, read].sort());
+    await until(() => readdirSync(f.root).length === 2);
     expect(readdirSync(f.root).sort()).toEqual([arriving, read].sort());
     live.end();
     await receiving;
@@ -489,8 +493,13 @@ describe('cancel and the copies nothing reads', () => {
     cleanups.push(() => again.close());
     const foreign = join(f.root, 'not-an-upload');
     writeFileSync(foreign, 'mine');
+    // And a folder an earlier sweep set aside but did not finish deleting.
+    const leftover = join(f.root, `${ARCHIVE_STAGING_REMOVING_PREFIX}${uploadId}-0000`);
+    mkdirSync(leftover);
+    writeFileSync(join(leftover, 'a.txt'), 'a');
     again.sweep(() => false);
     expect(existsSync(join(f.root, uploadId))).toBe(false);
+    await until(() => !readdirSync(f.root).some((name) => name.startsWith(ARCHIVE_STAGING_REMOVING_PREFIX)));
     expect(readFileSync(foreign, 'utf8')).toBe('mine');
   });
 

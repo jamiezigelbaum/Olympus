@@ -30,6 +30,7 @@ import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import { assertWritableStoreOpenAllowed } from '../../core/store-write-guard.ts';
 
 import {
+  PERSONAL_FIRST_REASON,
   TIER_KEYS,
   contentJudgeVerdictReason,
   maxTier,
@@ -43,7 +44,7 @@ import {
 import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledger-path.ts';
 
 export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
-export const TIER_LEDGER_SCHEMA_VERSION = 12;
+export const TIER_LEDGER_SCHEMA_VERSION = 13;
 
 /** A scrub's start: the revision it took and the item's generation then. */
 export interface SecretScrubMark {
@@ -189,6 +190,27 @@ function* copiesSteps(list: readonly TierLedgerIdentity[]): Generator<LedgerRead
   return result;
 }
 
+/**
+ * Of these items, those recorded Personal-first before #1316 that still wait
+ * for their content verdict (listPersonalFirstWindow's rule, without the
+ * window): their text has no held copy, but they are withheld all the same.
+ */
+function* personalFirstWaitingSteps(list: readonly TierLedgerIdentity[]): Generator<LedgerRead, Set<string>, unknown> {
+  const result = new Set<string>();
+  for (let offset = 0; offset < list.length; offset += IDENTITY_BATCH) {
+    const { values, params } = identityValues(list.slice(offset, offset + IDENTITY_BATCH));
+    const rows = (yield {
+      sql: `SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_items
+        WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
+          AND content_pending = 1
+          AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value = ?)`,
+      params: [...params, PERSONAL_FIRST_REASON], mode: 'all',
+    }) as Array<Pick<TierItemRow, 'provider' | 'account_scope' | 'conversation_key' | 'provider_item_id'>>;
+    for (const row of rows) result.add(tierLedgerIdentityKey(identityOfRow(row)));
+  }
+  return result;
+}
+
 /** `routedWithoutCopies`'s reads: of these items, those routed that hold no copy. */
 function* routedWithoutCopiesSteps(list: readonly TierLedgerIdentity[]): Generator<LedgerRead, Set<string>, unknown> {
   const result = new Set<string>();
@@ -208,6 +230,14 @@ function* routedWithoutCopiesSteps(list: readonly TierLedgerIdentity[]): Generat
     for (const row of rows) result.add(tierLedgerIdentityKey(identityOfRow(row)));
   }
   return result;
+}
+
+/** What the search's visibility gate reads from one ledger (`visibilityReadSteps`). */
+export interface TierVisibilityReads {
+  copies: Map<string, TierCopy[]>;
+  routedWithoutCopies: Set<string>;
+  /** Items still waiting Personal-first (#1316); read only when asked for. */
+  personalFirstWaiting: Set<string>;
 }
 
 export interface TierLedgerStoredPlacement {
@@ -252,6 +282,43 @@ export interface TierLedgerRecord {
   decidedAt: string;
   /** True once the P1b router placed the item (it then has copy rows). */
   routed: boolean;
+}
+
+/** The identity of a ledger row. */
+export function tierLedgerIdentityOfRecord(record: TierLedgerRecord): TierLedgerIdentity {
+  return {
+    provider: record.provider,
+    accountScope: record.accountScope,
+    providerItemId: record.providerItemId,
+    ...(record.conversationKey ? { providerConversationId: record.conversationKey } : {}),
+  };
+}
+
+/** An identity a pass stored as JSON to resume from; undefined when absent or malformed. */
+export function parseTierLedgerIdentity(raw: string | undefined): TierLedgerIdentity | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as Partial<TierLedgerIdentity>;
+    // Every key field must be a string; their values are opaque here.
+    const keys = ['provider', 'accountScope', 'providerItemId'] as const;
+    if (!keys.every((key) => typeof parsed[key] === 'string')) return undefined;
+    const identity = parsed as TierLedgerIdentity;
+    return {
+      provider: identity.provider,
+      accountScope: identity.accountScope,
+      providerItemId: identity.providerItemId,
+      ...(typeof identity.providerConversationId === 'string' ? { providerConversationId: identity.providerConversationId } : {}),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/** A bounded page of ledger rows and where the next call resumes. */
+export interface TierLedgerWindow {
+  records: TierLedgerRecord[];
+  /** Where the next call resumes; undefined once the end of the ledger is reached. */
+  resumeAfter?: TierLedgerIdentity;
 }
 
 export type TierLedgerRecordOutcome = 'inserted' | 'updated' | 'unchanged' | 'held_moving';
@@ -1551,11 +1618,35 @@ export class TierLedger {
    * walked the whole ledger to fill its page (Sparta, 2007d67, 2026-11-05: a
    * 10 s freeze on one names-only settle pass).
    */
-  listAwaitingTextWindow(options: { limit?: number; after?: TierLedgerIdentity; examine?: number } = {}): {
-    records: TierLedgerRecord[];
-    /** Where the next call resumes; undefined once the end of the ledger is reached. */
-    resumeAfter?: TierLedgerIdentity;
-  } {
+  listAwaitingTextWindow(options: { limit?: number; after?: TierLedgerIdentity; examine?: number } = {}): TierLedgerWindow {
+    return this.window(`routed = 1 AND content_read = 0 AND metadata_pending = 0
+        AND ((state = 'pending' AND content_pending = 1)
+          OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
+            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
+              OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))`, [], options);
+  }
+
+  /**
+   * Routed items recorded Personal-first before every open question held its
+   * text (#1316): still waiting on their question, not moving, and carrying
+   * `content:personal_first`. Their text may still sit in a Personal store;
+   * the held-text settle pass (tier-held-settle.ts) re-places each one.
+   * Bounded the same way as listAwaitingTextWindow.
+   */
+  listPersonalFirstWindow(options: { limit?: number; after?: TierLedgerIdentity; examine?: number } = {}): TierLedgerWindow {
+    return this.window(`routed = 1 AND content_pending = 1 AND state != 'moving'
+        AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value = ?)`, [PERSONAL_FIRST_REASON], options);
+  }
+
+  /**
+   * At most `examine` rows in key order after `after` are looked at, matching
+   * `where` or not, and the result says where the next call resumes.
+   */
+  private window(
+    where: string,
+    params: readonly string[],
+    options: { limit?: number; after?: TierLedgerIdentity; examine?: number },
+  ): TierLedgerWindow {
     const limit = Math.max(1, Math.min(options.limit ?? 500, 5_000));
     const examine = Math.max(limit, options.examine ?? 20_000);
     const after = options.after
@@ -1568,14 +1659,10 @@ export class TierLedger {
         ORDER BY provider, account_scope, conversation_key, provider_item_id
         LIMIT ?
       )
-      WHERE routed = 1 AND content_read = 0 AND metadata_pending = 0
-        AND ((state = 'pending' AND content_pending = 1)
-          OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
-            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
-              OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))
+      WHERE ${where}
       ORDER BY provider, account_scope, conversation_key, provider_item_id
       LIMIT ?
-    `).all(...(after ?? []), examine, limit) as TierItemRow[];
+    `).all(...(after ?? []), examine, ...params, limit) as TierItemRow[];
     const records = rows.map(recordFromRow);
     const identityOfRow = (row: { provider: string; account_scope: string; conversation_key: string; provider_item_id: string }): TierLedgerIdentity => ({
       provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id,
@@ -2440,13 +2527,21 @@ export class TierLedger {
    * What the search's visibility gate reads, as reads a caller can make on
    * another connection in one snapshot (#1305): each item's copies
    * (`copiesForMany`) and, of the items with none, those routed without a
-   * copy (`routedWithoutCopies`). `readSteps` makes them here.
+   * copy (`routedWithoutCopies`), and with `personalFirst`, of the items with
+   * no held copy, those still waiting Personal-first (#1316), for the judge's
+   * order. `readSteps` makes them here.
    */
-  *visibilityReadSteps(identities: readonly TierLedgerIdentity[]): Generator<LedgerRead, { copies: Map<string, TierCopy[]>; routedWithoutCopies: Set<string> }, unknown> {
+  *visibilityReadSteps(
+    identities: readonly TierLedgerIdentity[],
+    options: { personalFirst?: boolean } = {},
+  ): Generator<LedgerRead, TierVisibilityReads, unknown> {
     const list = uniqueIdentities(identities);
     const copies = yield* copiesSteps(list);
     const copyless = list.filter((identity) => (copies.get(tierLedgerIdentityKey(identity))?.length ?? 0) === 0);
-    return { copies, routedWithoutCopies: yield* routedWithoutCopiesSteps(copyless) };
+    const routedWithoutCopies = yield* routedWithoutCopiesSteps(copyless);
+    if (!options.personalFirst) return { copies, routedWithoutCopies, personalFirstWaiting: new Set() };
+    const unheld = list.filter((identity) => !copies.get(tierLedgerIdentityKey(identity))?.some((copy) => copy.state === 'current' && copy.embedHold));
+    return { copies, routedWithoutCopies, personalFirstWaiting: yield* personalFirstWaitingSteps(unheld) };
   }
 
   /** Hears this ledger close, once (for a reader of its file elsewhere to let go). */
@@ -3997,6 +4092,26 @@ export class TierLedger {
   }
 
   /**
+   * Items with a copy in these stores whose text waits, held, for the privacy
+   * judge: a names question open, or read text whose question is open
+   * (`contentHeldForJudgment`), moving or not. Each item once, however many
+   * of its copies the stores hold; content-free. Reads the pending and moving
+   * rows only (tier_items_state).
+   */
+  heldItemCount(corpusIds: readonly string[]): number {
+    if (corpusIds.length === 0) return 0;
+    return (this.db.query(`
+      SELECT COUNT(*) AS n FROM tier_items t
+      WHERE t.state IN ('pending', 'moving')
+        AND (t.metadata_pending = 1 OR (t.content_pending = 1 AND t.content_read = 1))
+        AND EXISTS (SELECT 1 FROM tier_copies c
+          WHERE c.provider = t.provider AND c.account_scope = t.account_scope
+            AND c.conversation_key = t.conversation_key AND c.provider_item_id = t.provider_item_id
+            AND c.corpus_id IN (SELECT value FROM json_each(?)))
+    `).get(JSON.stringify(corpusIds)) as { n: number }).n;
+  }
+
+  /**
    * Content-free per-store counts for status surfaces. Each count reads only
    * the index that answers it: one join of the whole corpus against
    * tier_items was a fifth of Sparta's sampled freezes (2026-11-05). Current,
@@ -5329,12 +5444,34 @@ function tierLedgerMigrations(): SqliteMigration[] {
       },
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 12,
       name: 'pending_move_metadata',
       up(db) {
         // Completed obligations remain recorded as empty acknowledgements.
         // Never rescan that growing history to find the few pending notes.
         db.exec(`CREATE INDEX IF NOT EXISTS tier_ledger_pending_meta ON tier_ledger_meta (key) WHERE value <> '';`);
+      },
+    },
+    {
+      // #1316: a row recorded Personal-first still waits for its verdict with
+      // its text in its stores. Hold those copies in the upgrade itself, as a
+      // held copy is (no search or embedding outside the local private lane),
+      // so no backlog the bounded settle pass has not reached yet can be
+      // embedded or searched. The settle pass then moves the text up; a
+      // Personal verdict clears the hold.
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: 'hold_personal_first_copies',
+      up(db) {
+        db.query(`
+          UPDATE tier_copies SET embed_hold = 1
+          WHERE copy_state = 'current' AND embed_hold = 0 AND EXISTS (
+            SELECT 1 FROM tier_items t
+            WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
+              AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
+              AND t.routed = 1 AND t.content_pending = 1
+              AND EXISTS (SELECT 1 FROM json_each(t.reasons_json) r WHERE r.value = ?)
+          )
+        `).run(PERSONAL_FIRST_REASON);
       },
     },
   ];

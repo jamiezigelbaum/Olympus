@@ -3,6 +3,7 @@ import type { Machine } from './machine.ts';
 import type { CheckResult } from './report.ts';
 import { openEngineMcp, runLiveAccounts, type EngineMcp, type LiveSourceSpec } from './live-accounts.ts';
 import { openFreshDashboard, type FreshDashboard } from './fresh-dashboard.ts';
+import { ANSWER_MODEL_REQUIRED_TEXT } from '../../src/workers/answer-model-required.ts';
 
 export const FRESH_LEG = 'canary-test-omarchy-fresh';
 export const quote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
@@ -170,6 +171,23 @@ for i in $(seq 1 180); do
 done; exit 1`), 200_000);
       try { engine = await (options.engine ?? openEngineMcp)(fresh); } catch { throw new Error('engine MCP connection failed'); }
     });
+    // Nothing has chosen an answer model yet, so Ask must stay callable and explain setup instead of answering (#1370).
+    // A failure here is recorded without stopping the leg: nothing after it depends on it.
+    try {
+      await checked('ask-without-model', async () => {
+        // Listing is checked on its own: the call returns the setup text before dispatch, so a call alone can't prove it.
+        const listed = await engine!.listTools?.();
+        if (!listed) throw new Error('the engine connection cannot list tools');
+        if (!listed.includes('source_answer')) throw new Error('source_answer is not in tools/list');
+        const result = await engine!.call('source_answer', { question: 'Is an answer model set up?' });
+        if (!result.ok) throw new Error(`source_answer failed instead of explaining setup: ${result.error ?? 'no detail'}`);
+        if (result.text.trim() !== ANSWER_MODEL_REQUIRED_TEXT) throw new Error('source_answer did not return the setup text');
+        return 'source_answer listed; setup text returned, no answer run';
+      });
+    } catch (error) {
+      if (interrupted) throw error;
+      checks.push({ id: 'fresh.ask-without-model', title: 'ask-without-model', status: 'fail', detail: `check failed: ${error instanceof Error ? redactFreshDetail(error.message) : 'unexpected failure'}` });
+    }
     await checked('dashboard-opens', async () => { dashboard = await (options.dashboard ?? openFreshDashboard)(fresh, options.cdp ?? '127.0.0.1:9333'); });
     await checked('privacy-choice', () => dashboard!.privacyChoice());
     for (const source of sources) {

@@ -26,7 +26,7 @@ import {
   type EngineCommandHandlers,
 } from '../src/workers/engine-split/commands.ts';
 import { BackgroundSyncFailedError, createFrontScheduler } from '../src/workers/engine-split/front-scheduler.ts';
-import { frontArchiveViews, frontCaptureRuntime, frontCaptureStop, frontDataExport, frontJudgeBoost, frontJudgeState, frontModelReload, frontSetItemPrivate, frontUnreadableFiles } from '../src/workers/engine-split/front-state.ts';
+import { frontCaptureRuntime, frontCaptureStop, frontDataExport, frontJudgeBoost, frontJudgeState, frontModelReload, frontSetItemPrivate, frontUnreadableFiles } from '../src/workers/engine-split/front-state.ts';
 import { ENGINE_FORWARDED_ROUTES } from '../src/workers/engine-split/commands.ts';
 import { readFileSync } from 'node:fs';
 import { createFrontDashboardHistory, openReadOnlyDashboardHistory, openWritableDashboardHistory } from '../src/workers/engine-split/front-history.ts';
@@ -881,6 +881,17 @@ describe('the status snapshot', () => {
   });
 });
 
+test('a front source change adopts local stores before asking the background to reload sources', async () => {
+  const calls: string[] = [];
+  const scheduler = createFrontScheduler({
+    snapshot: () => undefined,
+    sourcesChanged: () => { calls.push('mount'); },
+    client: { post: async (command) => { calls.push(JSON.stringify(command)); return { id: 'c', state: 'done', instance_id: 'b' }; } },
+  });
+  scheduler.updateSources([]);
+  expect(calls).toEqual(['mount', JSON.stringify({ kind: 'reload', target: 'sources' })]);
+});
+
 describe('state the front shows from the snapshot', () => {
   function snapshotWith(fields: Record<string, unknown>) {
     let current: Record<string, unknown> | undefined = fields;
@@ -1013,12 +1024,11 @@ describe('state the front shows from the snapshot', () => {
     expect(server).toMatch(/captureRuntime: engineFront \? frontCaptureRuntime\(dashboardCaptureRuntime, \(\) => engineFront!\.status\(\)\) : dashboardCaptureRuntime,/);
   });
 
-  test('judge backlog, unreadable counts and the archive views come from the snapshot', () => {
+  test('judge backlog and unreadable counts come from the snapshot', () => {
     const backlog = { checkingItems: 3, remainingQuestions: 2, pendingItems: 3, summary: 'Checking 3 items.', awaitingOwnerApproval: false };
     const snapshot = snapshotWith({
       judge: { backlog, pending: 3, spending: null, busy: true, archive_private_model: 'ready' },
       unreadable: { 'dropbox.files': { unreadable: 4, blocked: 1 } },
-      archive: { view: { archives: ['from-background'] }, cards: [{ sourceId: 'card' }], source_imports: [], sources: [{ sourceId: 'whatsapp' }] },
     });
     const judge = frontJudgeState(snapshot.read);
     expect(judge.backlog()).toEqual(backlog as never);
@@ -1035,40 +1045,15 @@ describe('state the front shows from the snapshot', () => {
     // The front counts nothing itself; names stay its own reads.
     expect(counted).toEqual([]);
     expect(unreadable.names(['dropbox.files'], 5)).toEqual(['report.pdf']);
-    const read: string[] = [];
-    const views = frontArchiveViews({
-      view: () => { read.push('view'); return { archives: ['local'] } as never; },
-      cardViews: () => { read.push('cards'); return []; },
-      sourceImports: () => { read.push('imports'); return []; },
-      archiveSources: () => { read.push('sources'); return []; },
-    }, snapshot.read);
-    expect(views.view()).toEqual({ archives: ['from-background'] } as never);
-    expect(views.cardViews()).toEqual([{ sourceId: 'card' }] as never);
-    expect(views.archiveSources()).toEqual([{ sourceId: 'whatsapp' }] as never);
-    expect(read).toEqual([]);
-    // A stale snapshot is not shown as current: nothing pending, no counts, and the front's own archive read.
     snapshot.setStale(true);
     expect(judge.backlog()).toBeUndefined();
     expect(judge.busy()).toBe(false);
     expect(unreadable.recheck('dropbox.files')).toBeUndefined();
-    expect(views.view()).toEqual({ archives: ['local'] } as never);
-    snapshot.setStale(false);
-    // A snapshot written before the front's own last archive change is not shown either.
-    let changedAt: number | undefined = DEFAULT_TEST_CLOCK_START + 1_000;
-    const afterChange = frontArchiveViews({
-      view: () => ({ archives: ['local'] } as never), cardViews: () => [], sourceImports: () => [], archiveSources: () => [],
-    }, snapshot.read, () => changedAt);
-    expect(afterChange.view()).toEqual({ archives: ['local'] } as never);
-    snapshot.setWrittenAt(DEFAULT_TEST_CLOCK_START + 2_000);
-    expect(afterChange.view()).toEqual({ archives: ['from-background'] } as never);
-    changedAt = undefined;
-    read.length = 0;
     // Before any snapshot: nothing pending, and the front's own read of the archives.
     snapshot.set(undefined);
     expect(judge.backlog()).toBeUndefined();
     expect(judge.busy()).toBe(false);
     expect(judge.archivePrivateModel()).toBe('waiting');
-    expect(views.view()).toEqual({ archives: ['local'] } as never);
   });
 });
 

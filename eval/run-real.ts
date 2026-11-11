@@ -26,6 +26,7 @@
 // Set OLYMPUS_EVAL_QUERY_PLANNER_ENABLED=true to include model-planned
 // retrieval expansions; default is literal-query retrieval for a usable gate.
 
+import { createHash } from 'node:crypto';
 import { builtInRerankerFromEnv } from '../src/workers/source-index/built-in-reranker.ts';
 import type { EvidenceReranker } from '../src/core/evidence-reranker.ts';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -87,11 +88,11 @@ import {
 import { builtInEmbeddingModel } from '../src/workers/source-index/built-in-embedding/manifest.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { localAnswerRequest } from '../src/workers/source-index/local-answer.ts';
-import { acceptableForms, answerContainsExpectedValue, type EvalGrade } from './grade.ts';
+import { acceptableForms, answerContainsExpectedValue, expectedEvidenceMatches, type EvalGrade } from './grade.ts';
 import { runEval, type EvalQuestionTiming, type EvalReport } from './run.ts';
 import { classifyPrecisionStage, summarizePrecisionTraces, type PrecisionTrace } from './diagnose.ts';
 import { runBoundedEvalProcess } from './process-boundary.ts';
-import type { EvalDataset, EvalQuestion } from './types.ts';
+import type { EvalDataset, EvalExpectedEvidence, EvalQuestion } from './types.ts';
 
 const DEFAULT_DATASET_PATH = 'eval/private/held-out.real.json';
 const DEFAULT_REPORT_PATH = 'eval/private/report.latest.json';
@@ -156,8 +157,12 @@ async function main(): Promise<void> {
   const analystRepeats = parsePositiveIntegerEnv(process.env.OLYMPUS_EVAL_ANALYST_REPEATS, 1, 'OLYMPUS_EVAL_ANALYST_REPEATS');
   const analystRepeatQuestions = (process.env.OLYMPUS_EVAL_ANALYST_REPEAT_QUESTIONS ?? '')
     .split(',').map((id) => id.trim()).filter((id) => id.length > 0);
+  // Run the Analyst once more on each question's expected seats alone, to
+  // tell distraction by other seats from a misread document.
+  const analystExpectedSeatOnly = process.env.OLYMPUS_EVAL_ANALYST_EXPECTED_SEAT_ONLY === '1';
   const reportConfig = {
     analystProvider,
+    ...(analystExpectedSeatOnly ? { analystExpectedSeatOnly } : {}),
     ...(analystRepeats > 1 ? { analystRepeats, ...(analystRepeatQuestions.length > 0 ? { analystRepeatQuestions } : {}) } : {}),
     questionTimeoutMs,
     queryPlannerEnabled,
@@ -249,20 +254,43 @@ async function main(): Promise<void> {
   const repeatThisQuestion = analystRepeatQuestions.length === 0 || analystRepeatQuestions.includes(dataset.questions[0]!.id);
   // How many prompts and model ids the graded (first) answer recorded.
   let firstAnswer: { prompts: number; modelIds: number } | undefined;
-  const repeatingAnalyst = repeatedEvalAnalyst(
-    {
-      async analyze(pack, analyzeOptions) {
-        const result = await fittedAnalyst.analyze(pack, analyzeOptions);
-        firstAnswer ??= { prompts: analystPrompts.length, modelIds: analystModelIds.length };
-        return result;
-      },
+  // The audit's prompt and model fields describe the graded answer only.
+  const keepGradedAnswerRecords = () => {
+    analystPrompts.splice(firstAnswer?.prompts ?? 0);
+    analystModelIds.splice(firstAnswer?.modelIds ?? 0);
+  };
+  const gradedAnalyst: Analyst = {
+    async analyze(pack, analyzeOptions) {
+      const result = await fittedAnalyst.analyze(pack, analyzeOptions);
+      firstAnswer ??= { prompts: analystPrompts.length, modelIds: analystModelIds.length };
+      return result;
     },
+  };
+  const seatOnlyByPack = new WeakMap<object, { seats: number[]; alone: EvidencePack; result: AnalystResult | undefined; prompts: string[] }>();
+  // The seats the grader counts as expected evidence, by its own matcher.
+  const expectedSeatsOf = (pack: EvidencePack) => evalExpectedSeats(
+    dataset.questions[0]!.expectedEvidence ?? [],
+    pack,
+    detailsByPack.get(pack)?.candidateCorpusIds ?? [],
+  );
+  const seatOnlyAnalyst = analystExpectedSeatOnly && repeatThisQuestion
+    ? expectedSeatOnlyEvalAnalyst(
+      gradedAnalyst,
+      // Once per pack: a repeat of the same pack does not run it again.
+      (pack) => seatOnlyByPack.has(pack) ? [] : expectedSeatsOf(pack),
+      (pack, alone, result) => {
+        seatOnlyByPack.set(pack, { seats: expectedSeatsOf(pack), alone, result, prompts: analystPrompts.slice(firstAnswer?.prompts ?? 0) });
+        keepGradedAnswerRecords();
+      },
+      (pack) => detailsByPack.get(pack)?.candidateCorpusIds ?? [],
+    )
+    : gradedAnalyst;
+  const repeatingAnalyst = repeatedEvalAnalyst(
+    seatOnlyAnalyst,
     repeatThisQuestion ? analystRepeats - 1 : 0,
     (pack, results, failures) => {
       repeatsByPack.set(pack, { results, failures });
-      // The audit's prompt and model fields describe the graded answer only.
-      analystPrompts.splice(firstAnswer?.prompts ?? 0);
-      analystModelIds.splice(firstAnswer?.modelIds ?? 0);
+      keepGradedAnswerRecords();
     },
   );
   const traces: Array<PrecisionTrace & { retrieval?: EvalRetrievalAudit; answerStage?: EvalAnswerStageAudit }> = [];
@@ -309,6 +337,7 @@ async function main(): Promise<void> {
               ...(repeatsByPack.get(pack)!.failures > 0 ? { answerRepeatFailures: repeatsByPack.get(pack)!.failures } : {}),
             }
             : {}),
+          ...(seatOnlyByPack.has(pack) ? { expectedSeatOnly: expectedSeatOnlyAudit(question, seatOnlyByPack.get(pack)!) } : {}),
         },
       });
     },
@@ -713,6 +742,12 @@ export interface EvalAnswerStageAudit {
   /** Whether the answer cites a seat holding an expected evidence item; absent when the question names none. */
   expectedSeatCited?: boolean;
   /**
+   * Cited seats that hold no expected evidence item; absent when the question
+   * names none. Informational: an answer citing every seat still cites the
+   * expected one, and this shows the rest.
+   */
+  citedSeatsWithoutExpectedItem?: number;
+  /**
    * The answer's number-bearing tokens (dates, amounts, identifiers with a
    * digit), and how many of them occur in a seat the answer cites. Fewer in
    * the cited seats than in the answer means the answer states a value its
@@ -735,6 +770,13 @@ export interface EvalAnswerStageAudit {
   answerRepeats?: EvalAnswerRepeat[];
   /** Repeats whose Analyst call failed: diagnostics only, never the grade. */
   answerRepeatFailures?: number;
+  /**
+   * The Analyst on a pack of the expected seats alone
+   * (OLYMPUS_EVAL_ANALYST_EXPECTED_SEAT_ONLY=1): the full pack's seats it held,
+   * and that answer by shape and flags (its cited seats count within that
+   * pack), or failed when the call failed. Diagnostics only, never the grade.
+   */
+  expectedSeatOnly?: { seats: number[]; prompts?: Array<{ chars: number; sha256: string }> } & (EvalAnswerRepeat | { failed: true });
   /**
    * The Analyst's own answer, by its structure: every expected value in it,
    * some, or none (with no citation: it said it found nothing; with
@@ -777,6 +819,36 @@ export function evalAnswerRepeat(
 }
 
 /**
+ * The 1-based pack seats holding expected evidence, by the grader's own
+ * matcher (item id, locator, parent label and store, as the question gives).
+ */
+export function evalExpectedSeats(
+  expected: readonly EvalExpectedEvidence[],
+  pack: EvidencePack,
+  candidateCorpusIds: readonly string[],
+): number[] {
+  return pack.candidates.flatMap((candidate, index) =>
+    expected.some((want) => expectedEvidenceMatches(want, candidate.provenance, candidateCorpusIds[index]))
+      ? [index + 1]
+      : []);
+}
+
+/** The expected-seat-only answer, by the repeat audit's own measures. */
+export function expectedSeatOnlyAudit(
+  question: Pick<EvalQuestion, 'expectedAnswerContains'> & Partial<Pick<EvalQuestion, 'expectedEvidence'>>,
+  run: { seats: number[]; alone: EvidencePack; result: AnalystResult | undefined; prompts?: readonly string[] },
+): NonNullable<EvalAnswerStageAudit['expectedSeatOnly']> {
+  // Each model prompt by length and a short hash, so two runs can tell
+  // byte-identical prompts from different ones without carrying the text.
+  const prompts = run.prompts && run.prompts.length > 0
+    ? { prompts: run.prompts.map((prompt) => ({ chars: prompt.length, sha256: createHash('sha256').update(prompt).digest('hex').slice(0, 12) })) }
+    : {};
+  return run.result
+    ? { seats: [...run.seats], ...prompts, ...evalAnswerRepeat(question, run.alone, run.result) }
+    : { seats: [...run.seats], ...prompts, failed: true };
+}
+
+/**
  * The Analyst, run extraRuns more times on the same pack after its first
  * answer, so a run can tell a steady misreading from a coin flip on one
  * frozen pack. The first answer is the one graded and released; a repeat
@@ -807,6 +879,54 @@ export function repeatedEvalAnalyst(
 }
 
 /**
+ * The Analyst, run once more after its graded answer on a pack holding only
+ * the seats with the question's expected items (1-based, in pack order). Right
+ * alone but wrong in the full pack means the other seats distract it; wrong
+ * alone means it misreads that document as extracted. Nothing to run when no
+ * expected item is seated; a failed call is reported as undefined, never the
+ * grade.
+ */
+export function expectedSeatOnlyEvalAnalyst(
+  analyst: Analyst,
+  expectedSeats: (pack: EvidencePack) => readonly number[],
+  onResult: (pack: EvidencePack, alone: EvidencePack, result: AnalystResult | undefined) => void,
+  candidateCorpusIds: (pack: EvidencePack) => readonly string[] = () => [],
+): Analyst {
+  return {
+    async analyze(pack, analyzeOptions) {
+      const graded = await analyst.analyze(pack, analyzeOptions);
+      const seats = new Set(expectedSeats(pack));
+      if (seats.size === 0) return graded;
+      const corpusIds = candidateCorpusIds(pack);
+      const kept = pack.candidates.flatMap((candidate, index) => seats.has(index + 1) ? [{ candidate, corpusId: corpusIds[index] }] : []);
+      if (kept.length === 0) return graded;
+      // The pack's coverage restated for the seats it keeps, as Ask's own fit
+      // does: a store's items in evidence are the seats it holds here.
+      const inEvidence = new Map<string, number>();
+      for (const { corpusId } of kept) if (corpusId !== undefined) inEvidence.set(corpusId, (inEvidence.get(corpusId) ?? 0) + 1);
+      const alone: EvidencePack = {
+        ...pack,
+        candidates: kept.map(({ candidate }) => candidate),
+        coverage: {
+          ...pack.coverage,
+          ...(pack.coverage.matchCounts
+            ? { matchCounts: pack.coverage.matchCounts.map((count) => ({ ...count, inEvidence: inEvidence.get(count.corpusId) ?? 0 })) }
+            : {}),
+        },
+      };
+      let result: AnalystResult | undefined;
+      try {
+        result = await analyst.analyze(alone, analyzeOptions);
+      } catch {
+        result = undefined;
+      }
+      onResult(pack, alone, result);
+      return graded;
+    },
+  };
+}
+
+/**
  * The text's distinct tokens, lowercased, with edge punctuation trimmed. Splits
  * on whitespace and on JSON quotes and brackets too, so a value inside a
  * serialized table or citation field is its own token.
@@ -826,6 +946,33 @@ function answerValueTokens(answer: string, seats: number): string[] {
   const withoutMarkers = answer.replace(/\[\s*(\d+(?:\s*,\s*\d+)*)\s*\]/gu, (marker, list: string) =>
     list.split(',').every((seat) => { const n = Number(seat); return n >= 1 && n <= seats; }) ? ' ' : marker);
   return [...textTokens(withoutMarkers)].filter((token) => /\p{N}/u.test(token));
+}
+
+/**
+ * A seat's tokens as support for an answer value: its textTokens, plus the
+ * forms a citation line shows the Analyst that whole tokens miss. The
+ * full-format label prints the timestamp ("[2026-03-01T09:30:00.000Z]") and
+ * the compact one its date ("date: 2026-03-01"), so a timestamp also supports
+ * its date; a locator path also supports each of its segments (the file name),
+ * and a file name also supports itself without its extension.
+ */
+function seatSupportTokens(text: string): Set<string> {
+  const tokens = textTokens(text);
+  for (const token of [...tokens]) {
+    const parts = [token, ...(token.includes('/')
+      ? token.split('/').map((segment) => segment.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '')).filter(Boolean)
+      : [])];
+    for (const part of parts) {
+      tokens.add(part);
+      const date = /^(\d{4}-\d{2}-\d{2})t\d/u.exec(part);
+      if (date) tokens.add(date[1]!);
+      // A file name without its extension is still the name. The extension
+      // holds a letter, so a decimal ("4182.99") never supports its integer part.
+      const stem = /^(.+)\.(?=\p{N}*\p{L})[\p{L}\p{N}]{1,5}$/u.exec(part);
+      if (stem) tokens.add(stem[1]!);
+    }
+  }
+  return tokens;
 }
 
 function tokenShape(token: string): string {
@@ -891,7 +1038,7 @@ export function evalAnswerStageAudit(
     expectedIds.includes(candidate.provenance.sourceItem.providerItemId) ? [index + 1] : []);
   const valueTokens = answerValueTokens(analystOwn.answer, pack.candidates.length);
   // Whole tokens, so '41' is not supported by a seat that says '4182'.
-  const citedTokens = textTokens(citedSeats.map((seat) => seatTexts[seat - 1]!.all).join('\n'));
+  const citedTokens = seatSupportTokens(citedSeats.map((seat) => seatTexts[seat - 1]!.all).join('\n'));
   const values = question.expectedAnswerContains ?? [];
   const inAnswer = values.filter((value) => answerContainsExpectedValue(value, analystOwn.answer).matched).length;
   const answerShape = values.length === 0
@@ -905,7 +1052,12 @@ export function evalAnswerStageAudit(
     answerUnanswered: analystOwn.unanswered.length,
     answerCitedSeats: citedSeats,
     answerCitationsOutsidePack: citationSeats.filter((seat) => seat === 0).length,
-    ...(expectedIds.length > 0 ? { expectedSeatCited: expectedSeats.some((seat) => citedSeats.includes(seat)) } : {}),
+    ...(expectedIds.length > 0
+      ? {
+        expectedSeatCited: expectedSeats.some((seat) => citedSeats.includes(seat)),
+        citedSeatsWithoutExpectedItem: citedSeats.filter((seat) => !expectedSeats.includes(seat)).length,
+      }
+      : {}),
     answerValueTokens: valueTokens.length,
     answerValueTokensInCitedSeats: valueTokens.filter((token) => citedTokens.has(token)).length,
     answerValueTokensUnmatchedShapes: valueTokens.filter((token) => !citedTokens.has(token)).map(tokenShape),

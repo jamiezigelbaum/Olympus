@@ -121,6 +121,7 @@ import {
   type ParentRef,
 } from './child-visibility.ts';
 import { settleNamesOnlyItems } from './tier-names-only-settle.ts';
+import { settlePersonalFirstItems } from './tier-held-settle.ts';
 import { purgeLowerTierContent } from './tier-content-purge.ts';
 import { flushTierMoveNotes, type TierMoveOptions } from './tier-move.ts';
 
@@ -892,6 +893,13 @@ export class TieredStoreSet {
     }
     try {
       settleNamesOnlyItems({ set: this });
+    } catch {
+      // The next run (or the sniffer's tick) tries again.
+    }
+    try {
+      // Text recorded Personal-first before every open question held it
+      // (#1316) is hidden from Personal and moved to the Private store.
+      settlePersonalFirstItems({ set: this });
     } catch {
       // The next run (or the sniffer's tick) tries again.
     }
@@ -1955,14 +1963,16 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       && !placementIsRaise(currentCopies, placement.copies)) {
       placement = { copies: currentCopies, embedHold: true };
     }
-    // A record an input brought (it carries the hold) that raises an item stored lower, with the body that
+    // A record that holds its body for judgment (an archive input's hold, or any new text whose model question is
+    // open, #1316) and raises an item stored lower, with the body that
     // produced the raise, is the item's newer version: it replaces what is stored. The new placement is recorded
     // in place (the ledger then names only the new copies, so the old body is no longer served) and the new body
     // is written to its own stores in this pass; the lower copies are withdrawn only afterwards (`finalize`), so
     // a crash at any point leaves a body: the old one before the write, both after it (the old one unserved),
     // and the stale lower row makes the item incomplete, so the same record is read again and finishes the
     // withdrawal. Queuing a move instead would hide the old body and later copy it, never the newer one.
-    const holdsReplacement = routed && contentRead && item.holdContentUntilJudged === true && decision.contentTier !== 'secrets'
+    const holdsReplacement = routed && contentRead && (item.holdContentUntilJudged === true || contentHeldForJudgment(decision))
+      && decision.contentTier !== 'secrets'
       && ledger.getCurrent(identity)?.state !== 'moving';
     const replacesInPlace = holdsReplacement && currentCopies.length > 0 && placementIsRaise(currentCopies, placement.copies);
     const placedDomains = new Set(placement.copies.map(copy => copy.trustDomain));

@@ -731,8 +731,10 @@ describe('source storage, end to end on this host', () => {
         search = await ask(env, worker, '/v1/source/index/search', searchInput);
       }
       expect(search.status, JSON.stringify(search.json)).toBe(200);
-      expect(search.json.hits, `${worker.errors()}\n${worker.output()}`).toEqual(expect.arrayContaining([expect.objectContaining({ selected_item: expect.objectContaining({ title: 'harbour.txt', corpus_id: 'internal.local.files' }) })]));
-      expect(JSON.stringify(snapshotStore(internalPath).chunks)).toContain('zephyrtide');
+      // No judge on this host yet, so the file's text waits in Private (#1316); its names are Personal.
+      expect(search.json.hits, `${worker.errors()}\n${worker.output()}`).toEqual(expect.arrayContaining([expect.objectContaining({ selected_item: expect.objectContaining({ title: 'harbour.txt', corpus_id: 'secure_local.local.files' }) })]));
+      expect(JSON.stringify(snapshotStore(securePath).chunks)).toContain('zephyrtide');
+      expect(JSON.stringify(snapshotStore(internalPath).chunks)).not.toContain('zephyrtide');
       expect(existsSync(schemaPaused)).toBe(true);
       expect(existsSync(internalPath)).toBe(true);
       const secure = new LocalConnectorStore({ dbPath: securePath, corpusId: 'secure_local.local.files', family: 'file', trustDomain: 'secure_local', readOnly: true });
@@ -740,7 +742,7 @@ describe('source storage, end to end on this host', () => {
       try {
         const ledgerId = TierLedger.readLedgerId(ledgerPath);
         expect(ledgerId).toBeDefined();
-        // The empty legacy Private leg owns the ledger; the routed Personal copy is bound to it.
+        // The legacy Private leg owns the ledger; the routed Personal copy is bound to it.
         expect(secure.tierLedgerPathInUse()).toBe(ledgerPath);
         expect(internal.tierSetBinding()).toEqual({ ledgerId: ledgerId!, ledgerPath });
       } finally {

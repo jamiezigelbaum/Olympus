@@ -9995,9 +9995,6 @@ function contentPass(args) {
         reasons.push(`content:rule:${verdict.rule}`);
     } else {
       pending = true;
-      if (verdict.queued === true && recordFlags.length === 0 && !metadata.pending && args.holdUntilJudged !== true) {
-        reasons.push(PERSONAL_FIRST_REASON);
-      }
       for (const flag of recordFlags)
         reasons.push(`content:own_record:${flag}`);
       for (const flag of detection.borderline)
@@ -11799,6 +11796,23 @@ function* copiesSteps(list) {
   }
   return result;
 }
+function* personalFirstWaitingSteps(list) {
+  const result = new Set;
+  for (let offset = 0;offset < list.length; offset += IDENTITY_BATCH) {
+    const { values, params } = identityValues(list.slice(offset, offset + IDENTITY_BATCH));
+    const rows = yield {
+      sql: `SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_items
+        WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
+          AND content_pending = 1
+          AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value = ?)`,
+      params: [...params, PERSONAL_FIRST_REASON],
+      mode: "all"
+    };
+    for (const row of rows)
+      result.add(tierLedgerIdentityKey(identityOfRow(row)));
+  }
+  return result;
+}
 function* routedWithoutCopiesSteps(list) {
   const result = new Set;
   for (let offset = 0;offset < list.length; offset += IDENTITY_BATCH) {
@@ -11819,6 +11833,33 @@ function* routedWithoutCopiesSteps(list) {
       result.add(tierLedgerIdentityKey(identityOfRow(row)));
   }
   return result;
+}
+function tierLedgerIdentityOfRecord(record) {
+  return {
+    provider: record.provider,
+    accountScope: record.accountScope,
+    providerItemId: record.providerItemId,
+    ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
+  };
+}
+function parseTierLedgerIdentity(raw) {
+  if (!raw)
+    return;
+  try {
+    const parsed = JSON.parse(raw);
+    const keys = ["provider", "accountScope", "providerItemId"];
+    if (!keys.every((key) => typeof parsed[key] === "string"))
+      return;
+    const identity = parsed;
+    return {
+      provider: identity.provider,
+      accountScope: identity.accountScope,
+      providerItemId: identity.providerItemId,
+      ...typeof identity.providerConversationId === "string" ? { providerConversationId: identity.providerConversationId } : {}
+    };
+  } catch {
+    return;
+  }
 }
 function tierMovingDirectionClause(direction) {
   if (!direction)
@@ -12561,6 +12602,17 @@ class TierLedger {
     return rows.map(recordFromRow);
   }
   listAwaitingTextWindow(options = {}) {
+    return this.window(`routed = 1 AND content_read = 0 AND metadata_pending = 0
+        AND ((state = 'pending' AND content_pending = 1)
+          OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
+            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
+              OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))`, [], options);
+  }
+  listPersonalFirstWindow(options = {}) {
+    return this.window(`routed = 1 AND content_pending = 1 AND state != 'moving'
+        AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value = ?)`, [PERSONAL_FIRST_REASON], options);
+  }
+  window(where, params, options) {
     const limit = Math.max(1, Math.min(options.limit ?? 500, 5000));
     const examine = Math.max(limit, options.examine ?? 20000);
     const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : undefined;
@@ -12571,14 +12623,10 @@ class TierLedger {
         ORDER BY provider, account_scope, conversation_key, provider_item_id
         LIMIT ?
       )
-      WHERE routed = 1 AND content_read = 0 AND metadata_pending = 0
-        AND ((state = 'pending' AND content_pending = 1)
-          OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
-            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
-              OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))
+      WHERE ${where}
       ORDER BY provider, account_scope, conversation_key, provider_item_id
       LIMIT ?
-    `).all(...after ?? [], examine, limit);
+    `).all(...after ?? [], examine, ...params, limit);
     const records = rows.map(recordFromRow);
     const identityOfRow = (row) => ({
       provider: row.provider,
@@ -13194,11 +13242,15 @@ class TierLedger {
   copiesForMany(identities) {
     return this.readSteps(copiesSteps(uniqueIdentities(identities)));
   }
-  *visibilityReadSteps(identities) {
+  *visibilityReadSteps(identities, options = {}) {
     const list = uniqueIdentities(identities);
     const copies = yield* copiesSteps(list);
     const copyless = list.filter((identity) => (copies.get(tierLedgerIdentityKey(identity))?.length ?? 0) === 0);
-    return { copies, routedWithoutCopies: yield* routedWithoutCopiesSteps(copyless) };
+    const routedWithoutCopies = yield* routedWithoutCopiesSteps(copyless);
+    if (!options.personalFirst)
+      return { copies, routedWithoutCopies, personalFirstWaiting: new Set };
+    const unheld = list.filter((identity) => !copies.get(tierLedgerIdentityKey(identity))?.some((copy) => copy.state === "current" && copy.embedHold));
+    return { copies, routedWithoutCopies, personalFirstWaiting: yield* personalFirstWaitingSteps(unheld) };
   }
   onClose(listener) {
     (this.closeListeners ??= []).push(listener);
@@ -14177,6 +14229,19 @@ class TierLedger {
       yield;
     }
   }
+  heldItemCount(corpusIds) {
+    if (corpusIds.length === 0)
+      return 0;
+    return this.db.query(`
+      SELECT COUNT(*) AS n FROM tier_items t
+      WHERE t.state IN ('pending', 'moving')
+        AND (t.metadata_pending = 1 OR (t.content_pending = 1 AND t.content_read = 1))
+        AND EXISTS (SELECT 1 FROM tier_copies c
+          WHERE c.provider = t.provider AND c.account_scope = t.account_scope
+            AND c.conversation_key = t.conversation_key AND c.provider_item_id = t.provider_item_id
+            AND c.corpus_id IN (SELECT value FROM json_each(?)))
+    `).get(JSON.stringify(corpusIds)).n;
+  }
   corpusHeldCopyCount(corpusId) {
     return this.db.query(`
       SELECT COUNT(*) AS n FROM tier_copies
@@ -15091,15 +15156,31 @@ function tierLedgerMigrations() {
       }
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 12,
       name: "pending_move_metadata",
       up(db) {
         db.exec(`CREATE INDEX IF NOT EXISTS tier_ledger_pending_meta ON tier_ledger_meta (key) WHERE value <> '';`);
       }
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: "hold_personal_first_copies",
+      up(db) {
+        db.query(`
+          UPDATE tier_copies SET embed_hold = 1
+          WHERE copy_state = 'current' AND embed_hold = 0 AND EXISTS (
+            SELECT 1 FROM tier_items t
+            WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
+              AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
+              AND t.routed = 1 AND t.content_pending = 1
+              AND EXISTS (SELECT 1 FROM json_each(t.reasons_json) r WHERE r.value = ?)
+          )
+        `).run(PERSONAL_FIRST_REASON);
+      }
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 12, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", IDENTITY_BATCH = 200, DEFAULT_REJUDGE_SCAN_ROWS = 2000, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_RECHECK_META_PREFIX = "recheck:", STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 13, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", IDENTITY_BATCH = 200, DEFAULT_REJUDGE_SCAN_ROWS = 2000, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_RECHECK_META_PREFIX = "recheck:", STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_store_write_guard();
@@ -21752,7 +21833,7 @@ function combineSearchText(parts) {
 function tierRowVisible(copies, corpusId, layer) {
   if (!copies || copies.length === 0)
     return true;
-  const here = copies.filter((copy) => copy.corpusId === corpusId && copy.state === "current");
+  const here = copies.filter((copy) => copy.corpusId === corpusId && copy.state === "current" && !(copy.embedHold && copy.layers !== "metadata" && copy.trustDomain !== "secure_local"));
   return copyServingLayer(here, layer) !== undefined;
 }
 function namesOnlyKeptCount(n) {
@@ -22235,10 +22316,23 @@ function connectorStoreFilterSql(filters) {
   return { sql: clauses.join(`
 `), params };
 }
-function connectorStoreFtsScopeSql(filters) {
+function connectorStoreConceptHitRead(pks, groupQuery, scope) {
+  return {
+    mode: "all",
+    sql: `
+      SELECT DISTINCT r.item_pk, i.local_item_id, i.source_version
+      FROM connector_store_fts_rows r JOIN items i ON i.item_pk = r.item_pk
+      WHERE r.item_pk IN (${pks.map(() => "?").join(", ")})
+        AND +r.fts_rowid IN (SELECT rowid FROM connector_store_fts WHERE connector_store_fts MATCH ?)
+        ${scope.sql}
+    `,
+    params: [...pks, groupQuery, ...scope.params]
+  };
+}
+function connectorStoreFtsScopeSql(filters, chunkColumn = "connector_store_fts.chunk_pk") {
   const normalized = normalizeConnectorStoreSearchFilters(filters);
   const contentRow = `(
-    connector_store_fts.chunk_pk IS NOT NULL
+    ${chunkColumn} IS NOT NULL
     OR NOT EXISTS (SELECT 1 FROM chunks scope_chunk WHERE scope_chunk.item_pk = i.item_pk)
   )`;
   if (!normalized)
@@ -22265,7 +22359,7 @@ function connectorStoreFtsScopeSql(filters) {
   const metadataExpression = `(${metadataOnly.join(" OR ")})`;
   return {
     sql: `AND (
-      (${metadataExpression} AND connector_store_fts.chunk_pk IS NULL)
+      (${metadataExpression} AND ${chunkColumn} IS NULL)
       OR (NOT ${metadataExpression} AND ${contentRow})
     )`,
     params: [...params, ...params]
@@ -29658,6 +29752,7 @@ var init_local_index = __esm(() => {
     *searchItemsSteps(query, maxResults, accountScope, filters, ftsOptions) {
       const selectedFilters = connectorStoreFilterSql(filters);
       const selectedFtsScope = connectorStoreFtsScopeSql(filters);
+      const conceptScope = connectorStoreFtsScopeSql(filters, "r.chunk_pk");
       const terms = ftsOptions.relaxed ? ftsOptions.privatePrecision ? yield* this.privateRelaxedFtsQuerySteps(query) : toRelaxedLocalFtsQuery(query) : toFtsQuery(query, ftsOptions);
       if (!terms)
         return { rows: [], saturated: false, concepts: { total: 0, matched: new Map } };
@@ -29736,37 +29831,18 @@ var init_local_index = __esm(() => {
           seen.add(row.item_pk);
         let signalled = rows;
         if (minimumSignal && rows.length > 0) {
-          const pks = rows.map((row) => row.item_pk);
-          const placeholders = pks.map(() => "?").join(", ");
-          const itemAt = new Map(rows.map((row) => [row.item_pk, row]));
-          const sameItem = (hit) => {
-            const row = itemAt.get(hit.item_pk);
-            return row !== undefined && row.local_item_id === hit.local_item_id && (row.source_version ?? null) === (hit.source_version ?? null);
-          };
           for (const [groupIndex, group] of groups.entries()) {
-            const hits = (yield { mode: "all", sql: `
-            SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id, i.source_version
-            FROM connector_store_fts
-            JOIN items i ON i.item_pk = connector_store_fts.item_pk
-            WHERE connector_store_fts MATCH ?
-              AND connector_store_fts.item_pk IN (${placeholders})
-              ${selectedFtsScope.sql}
-          `, params: [sourceIndexFtsGroupQuery(group, exact), ...pks, ...selectedFtsScope.params] }).filter(sameItem);
-            for (const hit of hits) {
-              matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
-              matchedGroupIndexes.set(hit.item_pk, [...matchedGroupIndexes.get(hit.item_pk) ?? [], groupIndex]);
+            const hits = yield* this.conceptHitsSteps(rows, sourceIndexFtsGroupQuery(group, exact), conceptScope, ftsOptions.conceptHitMemo);
+            for (const itemPk of hits) {
+              matchedGroups.set(itemPk, (matchedGroups.get(itemPk) ?? 0) + 1);
+              matchedGroupIndexes.set(itemPk, [...matchedGroupIndexes.get(itemPk) ?? [], groupIndex]);
             }
           }
           const enough = (row) => (matchedGroups.get(row.item_pk) ?? 0) >= required;
           const weights = rows.every(enough) ? undefined : conceptWeights ??= yield* this.conceptWeightsSteps(groups, exact);
           const literalTopics = new Set(sourceIndexTopicTokens(query).filter((term) => term.length >= 3));
           const uniqueTerms = weights && weights.population >= 10 ? groups.flatMap((group, index) => weights.counts[index] === 1 ? group.filter((term) => literalTopics.has(term)) : []) : [];
-          const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : (yield { mode: "all", sql: `
-          SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id, i.source_version
-          FROM connector_store_fts JOIN items i ON i.item_pk = connector_store_fts.item_pk
-          WHERE connector_store_fts MATCH ? AND connector_store_fts.item_pk IN (${placeholders})
-            ${selectedFtsScope.sql}
-        `, params: [sourceIndexFtsGroupQuery(uniqueTerms, exact), ...pks, ...selectedFtsScope.params] }).filter(sameItem).map((row) => row.item_pk));
+          const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : yield* this.conceptHitsSteps(rows, sourceIndexFtsGroupQuery(uniqueTerms, exact), conceptScope, ftsOptions.conceptHitMemo));
           signalled = rows.filter((row) => {
             if (enough(row) || uniqueLiteralMatches.has(row.item_pk))
               return true;
@@ -29819,6 +29895,31 @@ var init_local_index = __esm(() => {
           ]))
         }
       };
+    }
+    *conceptHitsSteps(rows, groupQuery, scope, memo) {
+      const key2 = JSON.stringify([groupQuery, scope.sql, scope.params]);
+      const answers = memo?.get(key2);
+      const sameItem = (row, answer) => answer !== undefined && row.local_item_id === answer.local_item_id && (row.source_version ?? null) === (answer.source_version ?? null);
+      if (answers && rows.every((row) => sameItem(row, answers.get(row.item_pk)))) {
+        return rows.filter((row) => answers.get(row.item_pk).hit).map((row) => row.item_pk);
+      }
+      const hits = yield connectorStoreConceptHitRead(rows.map((row) => row.item_pk), groupQuery, scope);
+      const hitAt = new Map(hits.map((hit) => [hit.item_pk, hit]));
+      const remembered = answers ?? new Map;
+      const matched = [];
+      for (const row of rows) {
+        const hit = hitAt.get(row.item_pk);
+        if (hit && !sameItem(row, hit)) {
+          remembered.delete(row.item_pk);
+          continue;
+        }
+        if (hit)
+          matched.push(row.item_pk);
+        if (memo)
+          remembered.set(row.item_pk, { local_item_id: row.local_item_id, source_version: row.source_version ?? null, hit: hit !== undefined });
+      }
+      memo?.set(key2, remembered);
+      return matched;
     }
     *privateRelaxedFtsQuerySteps(query) {
       const terms = relaxedLocalFtsTerms(query);
@@ -29873,7 +29974,7 @@ var init_local_index = __esm(() => {
         if (count === undefined) {
           count = (yield {
             mode: "get",
-            sql: "SELECT COUNT(DISTINCT item_pk) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ?",
+            sql: "SELECT COUNT(DISTINCT r.item_pk) AS count FROM connector_store_fts_rows r WHERE r.fts_rowid IN (SELECT rowid FROM connector_store_fts WHERE connector_store_fts MATCH ?)",
             params: [groupQuery]
           }).count;
           remember(groupQuery, count);
@@ -38186,7 +38287,7 @@ function settleNamesOnlyItems(options) {
     return report;
   const ledger = set.ledger;
   const limit = Math.max(1, options.limit ?? DEFAULT_NAMES_ONLY_SETTLE_ROWS);
-  const after = parseIdentity(ledger.readMeta(SETTLE_META_KEY));
+  const after = parseTierLedgerIdentity(ledger.readMeta(SETTLE_META_KEY));
   const { records: rows, resumeAfter } = ledger.listAwaitingTextWindow({ limit, ...after ? { after } : {} });
   for (const record of rows) {
     report.checked += 1;
@@ -38201,7 +38302,7 @@ function settleNamesOnlyItems(options) {
 function settleOne(set, record) {
   if (!record.reasons.includes("content:unread") || record.decidedBy === "override")
     return false;
-  const identity = identityOf3(record);
+  const identity = tierLedgerIdentityOfRecord(record);
   const current2 = set.ledger.copies(identity).filter((copy) => copy.state === "current");
   const names = copyServingLayer(current2, "metadata");
   const domain = names ? set.domainForCorpus(names.corpusId) : undefined;
@@ -38236,36 +38337,60 @@ function settleOne(set, record) {
   });
   return recorded.outcome === "updated" || recorded.outcome === "unchanged";
 }
-function parseIdentity(raw) {
-  if (!raw)
-    return;
-  try {
-    const parsed = JSON.parse(raw);
-    if (typeof parsed.provider !== "string" || typeof parsed.accountScope !== "string" || typeof parsed.providerItemId !== "string")
-      return;
-    return {
-      provider: parsed.provider,
-      accountScope: parsed.accountScope,
-      providerItemId: parsed.providerItemId,
-      ...typeof parsed.providerConversationId === "string" ? { providerConversationId: parsed.providerConversationId } : {}
-    };
-  } catch {
-    return;
-  }
-}
-function identityOf3(record) {
-  return {
-    provider: record.provider,
-    accountScope: record.accountScope,
-    providerItemId: record.providerItemId,
-    ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
-  };
-}
 var DEFAULT_NAMES_ONLY_SETTLE_ROWS = 500, SETTLE_META_KEY = "names_only_settle_after";
 var init_tier_names_only_settle = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
   init_local_index();
+});
+
+// src/workers/connector-store/tier-held-settle.ts
+function settlePersonalFirstItems(options) {
+  const report = { checked: 0, settled: 0, movesQueued: 0 };
+  const { set } = options;
+  const ledger = set.ledger;
+  const limit = Math.max(1, options.limit ?? DEFAULT_HELD_SETTLE_ROWS);
+  const after = parseTierLedgerIdentity(ledger.readMeta(SETTLE_META_KEY2));
+  const { records, resumeAfter } = ledger.listPersonalFirstWindow({ limit, ...after ? { after } : {} });
+  for (const record of records) {
+    report.checked += 1;
+    try {
+      const outcome = settleOne2(set, record);
+      if (outcome === "queued_move")
+        report.movesQueued += 1;
+      if (outcome === "queued_move" || outcome === "updated" || outcome === "unchanged")
+        report.settled += 1;
+    } catch {}
+  }
+  ledger.writeMeta(SETTLE_META_KEY2, resumeAfter ? JSON.stringify(resumeAfter) : "");
+  return report;
+}
+function settleOne2(set, record) {
+  const identity = tierLedgerIdentityOfRecord(record);
+  const decision = {
+    metadataTier: record.metadataTier,
+    contentTier: record.contentTier,
+    decidedBy: record.decidedBy,
+    reasons: record.reasons.filter((reason) => reason !== PERSONAL_FIRST_REASON),
+    state: "pending",
+    contentRead: record.contentRead,
+    metadataPending: record.metadataPending,
+    contentPending: true,
+    metadataForced: record.metadataForced,
+    metadataFlagged: record.metadataFlagged,
+    engineVersion: record.engineVersion,
+    mapRevision: record.mapRevision,
+    snifferId: "undecided"
+  };
+  return set.ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), {
+    stagedLandingAllowed: true,
+    guard: { generation: record.generation, override: set.ledger.getOverride(identity) }
+  }).outcome;
+}
+var DEFAULT_HELD_SETTLE_ROWS = 500, SETTLE_META_KEY2 = "personal_first_settle_after";
+var init_tier_held_settle = __esm(() => {
+  init_tier_classifier();
+  init_tier_ledger();
 });
 
 // src/workers/embedding-ledger.ts
@@ -40471,7 +40596,7 @@ function isVerdictReceipt(reason) {
 }
 function restoreClearedOverride(set, record) {
   const ledger = set.ledger;
-  const identity = identityOf4(record);
+  const identity = identityOf3(record);
   const before = ledger.settledDecisionBeforeOverride(identity);
   if (!before || before.metadataTier === "secrets" || before.contentTier === "secrets")
     return false;
@@ -40542,7 +40667,7 @@ function restoreClearedOverride(set, record) {
 }
 function applyOne(set, record, tier, retirePublic, report, guard) {
   const ledger = set.ledger;
-  const identity = identityOf4(record);
+  const identity = identityOf3(record);
   const holdUntilJudged = set.holdsContentUntilJudged() || heldUntilJudged(record.reasons);
   const decision = classifyItemTiers({ signals: {}, provider: record.provider, subject: identity, ...holdUntilJudged ? { holdUntilJudged: true } : {} }, { override: { kind: "tier", tier }, ...retirePublic ? { retirePublic: true } : {} });
   const secrets = decision.contentTier === "secrets";
@@ -40624,7 +40749,7 @@ function storedCopy(set, identity) {
   }
   return;
 }
-function identityOf4(record) {
+function identityOf3(record) {
   return {
     provider: record.provider,
     accountScope: record.accountScope,
@@ -40682,7 +40807,7 @@ function sweepOwnerRuleRaises(options) {
       report.secrets += 1;
     else if (raised === "deferred") {
       if (held.length < MAX_HELD_ITEMS)
-        held.push(identityOf5(record));
+        held.push(identityOf4(record));
       else
         overflow = true;
     }
@@ -40718,7 +40843,7 @@ function sweepOwnerRuleRaises(options) {
     report.complete = false;
     writeState(ledger, {
       done,
-      pending: { rules: pendingKeys, after: identityOf5(rows.at(-1)), held, ...overflow ? { overflow: true } : {} }
+      pending: { rules: pendingKeys, after: identityOf4(rows.at(-1)), held, ...overflow ? { overflow: true } : {} }
     });
   }
   return report;
@@ -40726,7 +40851,7 @@ function sweepOwnerRuleRaises(options) {
 function raiseRoutedItem(set, record, rules, inputs, extraSignals = {}) {
   if (record.contentTier === "secrets" || record.metadataTier === "secrets")
     return "unchanged";
-  const identity = identityOf5(record);
+  const identity = identityOf4(record);
   if (set.ledger.getOverride(identity))
     return "unchanged";
   const copies = set.ledger.copies(identity);
@@ -40868,7 +40993,7 @@ function writeState(ledger, state) {
 function sameKeys(left, right) {
   return left.length === right.length && left.every((key2, index) => key2 === right[index]);
 }
-function identityOf5(record) {
+function identityOf4(record) {
   return {
     provider: record.provider,
     accountScope: record.accountScope,
@@ -40903,7 +41028,7 @@ function sweepImageContentToPrivate(options) {
   }
   if (rows.length >= limit) {
     report.complete = false;
-    ledger.writeMeta(SWEEP_META_KEY2, JSON.stringify({ done: false, after: identityOf6(rows.at(-1)) }));
+    ledger.writeMeta(SWEEP_META_KEY2, JSON.stringify({ done: false, after: identityOf5(rows.at(-1)) }));
     return report;
   }
   for (const domain of ["public_safe", "internal"]) {
@@ -40920,7 +41045,7 @@ function raiseIfImage(set, record) {
     return false;
   if (record.contentTier === "secure")
     return false;
-  const identity = identityOf6(record);
+  const identity = identityOf5(record);
   if (set.ledger.getOverride(identity))
     return false;
   const current2 = set.ledger.copies(identity).filter((copy) => copy.state === "current");
@@ -40964,7 +41089,7 @@ function readState5(raw) {
     return { done: false };
   }
 }
-function identityOf6(record) {
+function identityOf5(record) {
   return {
     provider: record.provider,
     accountScope: record.accountScope,
@@ -41063,6 +41188,7 @@ var init_tiered_store_set = __esm(() => {
   init_parent_context();
   init_child_visibility();
   init_tier_names_only_settle();
+  init_tier_held_settle();
   init_tier_content_purge();
   init_tier_move();
   init_tier_row_rehome();
@@ -74142,6 +74268,7 @@ var ARCHIVE_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
 var ARCHIVE_UPLOAD_MAX_CHUNK_BYTES = 64 * 1024 * 1024;
 var SPACE_CHECK_EVERY_BYTES = 16 * 1024 * 1024;
 var ARCHIVE_UPLOAD_IDLE_MS = 30 * 60000;
+var removing = new Set;
 
 // src/workers/dashboard/host-page.ts
 init_vocabulary();
@@ -78487,6 +78614,7 @@ init_requests();
 // src/workers/email-source/server.ts
 init_lane();
 init_store();
+init_olympus_layout();
 init_state();
 
 // src/workers/archive-import/extraction-runtime.ts
@@ -78995,6 +79123,10 @@ init_sniffer();
 init_sniffer_store();
 init_tier_ledger_path();
 init_tier_rules();
+var NO_JUDGE_TIER_SNIFFER = {
+  id: "no_judge",
+  judge: () => ({ verdict: "undecided" })
+};
 
 class InstalledTierClassification {
   lane;
@@ -79020,7 +79152,11 @@ class InstalledTierClassification {
     if (this.lane && ledgerPath !== ":memory:") {
       try {
         sniffer = new CachedTierSniffer(this.snifferStoreForLedger(ledgerPath), this.lane, snifferPromptVersions(this.ownerContext?.()).cache);
-      } catch {}
+      } catch {
+        sniffer = NO_JUDGE_TIER_SNIFFER;
+      }
+    } else if (!this.lane && ledgerPath !== ":memory:") {
+      sniffer = NO_JUDGE_TIER_SNIFFER;
     }
     return {
       ...rules.length > 0 ? { rules } : {},
@@ -80612,6 +80748,7 @@ function finish(report, monotonicNow, passStarted) {
 init_tier_ledger_path();
 init_tier_rejudge();
 init_tier_names_only_settle();
+init_tier_held_settle();
 init_tier_rules_sweep();
 init_tier_override_settle();
 init_secrets_disposition();
@@ -81828,6 +81965,12 @@ class TierSnifferService {
         const settled = settleNamesOnlyItems({ set: set2 });
         if (settled.settled > 0) {
           this.options.log?.(`Olympus tier names-only: ${settled.settled} stored item(s) settled on their names.`);
+        }
+      } catch {}
+      try {
+        const held = settlePersonalFirstItems({ set: set2 });
+        if (held.settled > 0) {
+          this.options.log?.(`Olympus tier hold: ${held.settled} item(s) recorded before every open question held text are held now (${held.movesQueued} move(s) to Private queued).`);
         }
       } catch {}
     }

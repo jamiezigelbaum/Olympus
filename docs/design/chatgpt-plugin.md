@@ -323,11 +323,11 @@ private panels are unaffected: their job ids name the install, not the
 endpoint. Installs forward `/openai/mcp` from the release that added it; an
 older install answers it 404.
 
-**Claude dashboard opt-in (2026-11-10, #1266).** Set
-`remote.claudeAppEnabled: true` in the install's existing configuration
-(`~/.olympus/engine.json` for the standalone engine, or the Olympus plugin's
-`remote` section in OpenClaw), then restart Olympus. This setting, “Show the
-dashboard in Claude”, defaults off. Only the pinned Claude custom connector
+**Claude dashboard (2026-11-10, #1266; on by default from 1.5).** The setting
+`remote.claudeAppEnabled` ("Show the dashboard in Claude") is on unless set to
+`false` in the install's configuration (`~/.olympus/engine.json` for the
+standalone engine, or the Olympus plugin's `remote` section in OpenClaw); a
+change needs a restart. Only the pinned Claude custom connector
 on `/mcp` gains the shared dashboard, private question and private answer
 MCP Apps. App-only tool visibility and widget-only privacy confirmations are
 unchanged. Grok, Cursor, bearer connections and `/openai/mcp` keep their
@@ -340,6 +340,21 @@ The exact Claude sandbox origin is accepted on private panel routes only
 while that install has a live Claude App mapping; the engine independently
 checks its opt-in. Panel job ownership, sealing and one-time collection use
 the existing handlers. Unknown surface names fall back to `remote`.
+
+What each Claude client does with it (privacy proof, 2026-11-10/11, test
+account): Claude on the web and the desktop app render the panels. The model
+sees only the `content` text, never `structuredContent`, `_meta` or app-only
+results, and can't call app-only tools. The Claude iPhone app (#1303) runs the
+tools with the same privacy result but renders no MCP App panel. Because web,
+desktop and phone share one OAuth client and every request arrives with
+user-agent `Claude-User`, the server can't tell them apart. So on Claude the
+text results stand on their own (`forClaude` in `mcp-surface.ts`):
+- a handed-off answer names its `job_id` (#1327);
+- the dashboard result tells the model to give the status in words if no panel
+  appears;
+- an opened private-question panel says to use Claude on the web or desktop if
+  none appears.
+Android was not tested.
 
 ## Dashboard view-model contract (v1)
 

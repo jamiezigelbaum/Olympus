@@ -30,6 +30,8 @@ import { wireTarget, type Target } from './probe.ts';
 /** The words on the page that mean something is stuck or broken for the person reading it. */
 const STUCK = /\b(stuck|stalled|paused while|not working|something went wrong)\b/i;
 const DASHBOARD_PAGES = ['/dashboard', '/dashboard?keys', '/dashboard?agents', '/dashboard?private-answers', '/dashboard?connector'] as const;
+/** Forwarded saves can take 120 s; leave time for the reply to render and the next observation. Only save steps use this. */
+const FORWARDED_SAVE_TIMEOUT_MS = 130_000;
 
 /** The privacy settings open from the setup prompt on a fresh install, or from Edit once they are saved. */
 const OPEN_PRIVACY: Target = { role: 'button', name: new RegExp(`^(${PRIVACY_SETUP.label}|${PRIVACY.edit}|${PRIVACY.editLabel})$`) };
@@ -540,8 +542,8 @@ export const JOURNEYS: readonly Journey[] = [
       {
         name: 'Confirm the change',
         do: { click: { role: 'button', name: PRIVACY.confirm }, frame: 'panel' },
-        timeoutMs: 60_000,
-        expect: [{ text: PRIVACY.saved, frame: 'panel' }, { noText: PRIVACY.saveFailed, frame: 'panel' }],
+        timeoutMs: FORWARDED_SAVE_TIMEOUT_MS,
+        expect: [{ text: PRIVACY.saved, frame: 'panel', transient: true }, { noText: PRIVACY.saveFailed, frame: 'panel' }],
       },
       { name: 'Reload the dashboard', do: { reload: true }, expect: [{ present: HOME_STATUS, frame: 'panel' }, { noText: PRIVACY_SETUP.sentence, frame: 'panel' }] },
       {
@@ -586,8 +588,9 @@ export const JOURNEYS: readonly Journey[] = [
       {
         name: 'Make it Private',
         do: { click: { css: '[data-pi-detail] [data-pi-choose="Private"]' }, frame: 'host' },
+        timeoutMs: FORWARDED_SAVE_TIMEOUT_MS,
         // Raising only adds protection, so nothing asks first.
-        expect: [{ text: ITEMS.toastPrivate, frame: 'host' }, { absent: { css: 'dialog[data-pi-confirm][open]' }, frame: 'host' }, { custom: itemListedAs('Private', true) }],
+        expect: [{ text: ITEMS.toastPrivate, frame: 'host', transient: true }, { absent: { css: 'dialog[data-pi-confirm][open]' }, frame: 'host' }, { custom: itemListedAs('Private', true) }],
       },
       { name: 'Reload the page', do: { reload: true }, timeoutMs: 45_000, expect: [{ count: PI_ROWS, atLeast: 1, frame: 'host' }] },
       {
@@ -605,7 +608,8 @@ export const JOURNEYS: readonly Journey[] = [
       {
         name: 'Press Make Personal',
         do: { click: { role: 'button', name: ITEMS.makePersonal }, frame: 'host' },
-        expect: [{ text: ITEMS.toastPersonal, frame: 'host' }, { custom: itemListedAs('Personal', true) }],
+        timeoutMs: FORWARDED_SAVE_TIMEOUT_MS,
+        expect: [{ text: ITEMS.toastPersonal, frame: 'host', transient: true }, { custom: itemListedAs('Personal', true) }],
       },
       { name: 'Reload the page again', do: { reload: true }, timeoutMs: 45_000, expect: [{ count: PI_ROWS, atLeast: 1, frame: 'host' }] },
       {

@@ -259,7 +259,7 @@ describe('/openai/mcp lists what the surface decides, as submitted', () => {
     }
     // The states differ the way the surface decides.
     ({ answerModel, readOnly } = { answerModel: false, readOnly: false });
-    expect(names(await listTools(connect('directory')))).not.toContain('source_answer');
+    expect(names(await listTools(connect('directory')))).toContain('source_answer');
     ({ answerModel, readOnly } = { answerModel: true, readOnly: true });
     expect(names(await listTools(connect('directory')))).not.toContain('ask_anonymously');
   });

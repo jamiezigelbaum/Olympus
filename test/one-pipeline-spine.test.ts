@@ -14,7 +14,7 @@ import { readSourceRegistry, findRegistryAccount } from '../src/core/source-regi
 import { recordProviderAccount } from '../src/core/source-storage.ts';
 import { deleteOlympusData } from '../src/data-lifecycle.ts';
 import { ForgetStepError } from '../src/core/source-forget-registry.ts';
-import { HELD_UNTIL_JUDGED_REASON } from '../src/workers/classification/tier-classifier.ts';
+import { HELD_UNTIL_JUDGED_REASON, type TierSniffer } from '../src/workers/classification/tier-classifier.ts';
 import { archiveConnectorId } from '../src/workers/archive-import/state.ts';
 import { archiveImportTaskId, createArchiveImportsSchedulerSource } from '../src/workers/archive-import/scheduler-source.ts';
 import { defaultConfig } from '../src/core/config.ts';
@@ -88,7 +88,14 @@ describe('live and archive build one dataset', () => {
   });
 
   test('a newer archive record over an item live stored raises it to Private: the new text lands in Private, never in Personal, and no move is left to lose it', async () => {
-    const h = onePipelineHarness(cleanups);
+    // The judge has cleared the live body as Personal; the archive version waits for it (held, #1316).
+    const liveJudgedOrdinary: TierSniffer = {
+      id: 'scripted-live',
+      judge: (request) => request.material?.includes('live a v3')
+        ? { verdict: 'decided', tier: 'private', code: 'ordinary:0.99' }
+        : { verdict: 'undecided', queued: true },
+    };
+    const h = onePipelineHarness(cleanups, { sniffer: liveJudgedOrdinary });
     h.connectLive();
     h.live.records = [rec('a', 3, 'live a v3')];
     await h.pullLive();
@@ -190,7 +197,7 @@ describe('each input keeps its own cursor', () => {
 });
 
 describe('a held item stays held', () => {
-  test('items an archive input built are held Private until judged; a live-only item is not', async () => {
+  test('items an archive input built carry the archive hold; a live-only item does not, though its unjudged text waits in Private too (#1316)', async () => {
     const h = onePipelineHarness(cleanups);
     h.connectLive();
     h.live.records = [rec('live-only', 1, 'only live ever saw this')];
@@ -199,9 +206,9 @@ describe('a held item stays held', () => {
     await h.importAll(id);
     expect(h.ledgerRecord('from-archive')?.reasons).toContain(HELD_UNTIL_JUDGED_REASON);
     expect(h.ledgerRecord('live-only')?.reasons ?? []).not.toContain(HELD_UNTIL_JUDGED_REASON);
-    // The held item's text rests Private; the live-only item's is where a live item's goes.
+    // Neither has a verdict yet, so both texts rest Private until the judge answers.
     expect(h.contentDomain('from-archive')).toBe('secure_local');
-    expect(h.contentDomain('live-only')).toBe('internal');
+    expect(h.contentDomain('live-only')).toBe('secure_local');
   });
 
   test('the hold keeps applying to a later version that live brings, until the private model has judged', async () => {
