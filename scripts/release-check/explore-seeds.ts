@@ -39,6 +39,11 @@ const NOT_CONNECTED = ['not_connected', 'needs_setup', 'awaiting_consent', 'reau
 const connected = (card: any): boolean => !!card && !NOT_CONNECTED.includes(String(card.connection?.state ?? 'not_connected'));
 const items = (card: any): number => Number(card?.coverage?.indexed_items ?? 0);
 const summary = (card: any): string => `connection ${String(card?.connection?.state ?? '?')} (${String(card?.connection?.label ?? '?').slice(0, 60)}), ${String(card?.coverage?.indexed_items ?? '?')} indexed`;
+/** Why a source was not indexed: the card parts that say whether its scope, queue, judge or schedule is holding it (runs 43043603156, 43043621929 showed only "syncing, 0 indexed"). */
+const notIndexed = (card: any): string => `${summary(card)}; ${JSON.stringify({
+  scope_selection: card?.scope_selection, coverage: card?.coverage, tier_classification: card?.tier_classification,
+  queue_health: card?.queue_health, ingestion_health: card?.ingestion_health, schedule: card?.schedule,
+}).slice(0, 2_000)}`;
 const flat = (text: unknown): string => String(text ?? '').replace(/\s+/g, ' ').slice(0, 160);
 
 export function helpers(ctx: SeedContext) {
@@ -113,7 +118,7 @@ export function localFilesDriver(outer: SeedContext): SourceDriver {
       return connected(now) && items(now) > 0 && (!strict || (now?.connection?.state === 'synced' && (now?.schedule?.missing_folders?.length ?? 0) === 0)) ? now : undefined; }, strict ? 300_000 : 120_000, 3_000);
     // The engine is busy embedding what it just read, and another source's action (a delete) waits behind that: the state is reached once it is quiet (best effort, a source that never embeds is not held up).
     if (card) card = (await until(async () => { const now = await ctx.cardOf('local_files'); return Number(now?.coverage?.embedded_items ?? 0) >= items(now) ? now : undefined; }, 240_000, 5_000)) ?? card;
-    return card ? { ok: true, detail: `Files on this computer: ${summary(card)}${(card?.schedule?.missing_folders?.length ?? 0) > 0 ? ` (card still lists ${card.schedule.missing_folders.length} missing folder(s) although the folder is back)` : ''}` } : { ok: false, detail: `Files on this computer: the folder was not indexed (${summary(await ctx.cardOf('local_files'))}; schedule ${JSON.stringify((await ctx.cardOf('local_files'))?.schedule ?? null).slice(0, 600)})` };
+    return card ? { ok: true, detail: `Files on this computer: ${summary(card)}${(card?.schedule?.missing_folders?.length ?? 0) > 0 ? ` (card still lists ${card.schedule.missing_folders.length} missing folder(s) although the folder is back)` : ''}` } : { ok: false, detail: `Files on this computer: the folder was not indexed (${notIndexed(await ctx.cardOf('local_files'))})` };
   };
   const disconnect = async (): Promise<StateResult> => {
     const reply = await ask('/dashboard/disconnect', { source_id: 'local.files', acknowledge: true });

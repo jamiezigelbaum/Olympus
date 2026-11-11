@@ -189,7 +189,10 @@ local Dropbox index and a reachable Argus lane:
    seats would cost in each evidence format (`fullPromptBytes`,
    `compactPromptBytes`). `evidenceFormat` names the format the prompt was
    sent in, which follows the Analyst: a local run sends the compact format, as
-   Ask's local leg does. These are byte counts only.
+   Ask's local leg does. `coverageBytes` counts the UTF-8 bytes of the Coverage
+   line as sent, and `extractionGapCount` counts the extraction gaps in that
+   sent pack (corpus-level gaps and the kept seats' per-item gaps). These are
+   counts only; no gap text is recorded.
    The value-token flag counts an answer token as held by a cited seat when
    it is in that seat's text, facts, tables or citation fields, including the
    date of a citation timestamp, each segment of its locator path and a file

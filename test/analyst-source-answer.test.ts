@@ -1843,7 +1843,7 @@ describe('analyst-backed source_answer handler', () => {
     expect(result.opsec.release_decision.reasons).toContain('secure_local_context_uncited_derivative_allowed');
   });
 
-  test('strict mode holds when a fitted pack keeps a Private item\'s extraction gap in the prompt', async () => {
+  test('strict mode still holds when fitting drops a Private item and its extraction gap', async () => {
     const { analyst, requests } = echoingAnalyst({});
     const result = await createAnalystSourceIndexAnswerHandler({
       analyst,
@@ -1854,12 +1854,12 @@ describe('analyst-backed source_answer handler', () => {
 
     expect(requests).toHaveLength(1);
     expect(requests[0]!.prompt).not.toContain('trust: secure_local/');
-    expect(requests[0]!.prompt).toContain(`${PRIVATE_TITLE_ID}.pdf`);
+    expect(requests[0]!.prompt).not.toContain(`${PRIVATE_TITLE_ID}.pdf`);
     expectStrictHold(result);
     expect(leakedText(result)).not.toContain('Nightingale');
   });
 
-  test('strict mode holds when compact Coverage and the audit carry a Private item\'s extraction gap', async () => {
+  test('strict mode still holds when compact Coverage and the model audit omit a dropped Private item\'s gap', async () => {
     const { analyst, requests } = echoingAnalyst({ evidenceFormat: 'compact', auditSuspiciousDrafts: true }, 'audit');
     const result = await createAnalystSourceIndexAnswerHandler({
       analyst,
@@ -1869,9 +1869,9 @@ describe('analyst-backed source_answer handler', () => {
     }).answer({ question: 'Latest labs?', include_secure_local: true });
 
     expect(requests).toHaveLength(2);
-    expect(requests[0]!.prompt).toContain(`${PRIVATE_TITLE_ID}.pdf`);
+    expect(requests[0]!.prompt).not.toContain(`${PRIVATE_TITLE_ID}.pdf`);
     expect(requests[0]!.prompt).not.toContain('SECURE-RAW-CHUNK-TEXT');
-    expect(requests[1]!.prompt).toContain(`${PRIVATE_TITLE_ID}.pdf`);
+    expect(requests[1]!.prompt).not.toContain(`${PRIVATE_TITLE_ID}.pdf`);
     expectStrictHold(result);
     expect(leakedText(result)).not.toContain('Nightingale');
   });
@@ -1901,7 +1901,7 @@ describe('analyst-backed source_answer handler', () => {
     expect(defaultResult.opsec.release_decision.reasons).toContain('secure_local_context_uncited_derivative_allowed');
   });
 
-  test('strict mode holds when compact Coverage (no audit) carries only a Private item\'s extraction gap', async () => {
+  test('strict mode still holds when compact Coverage (no audit) omits a dropped Private item\'s gap', async () => {
     const { analyst, requests } = echoingAnalyst({ evidenceFormat: 'compact' });
     const result = await createAnalystSourceIndexAnswerHandler({
       analyst,
@@ -1911,9 +1911,9 @@ describe('analyst-backed source_answer handler', () => {
     }).answer({ question: 'Latest labs?', include_secure_local: true });
 
     expect(requests).toHaveLength(1);
-    expect(requests[0]!.prompt).toContain(`${PRIVATE_TITLE_ID}.pdf`);
+    expect(requests[0]!.prompt).not.toContain(`${PRIVATE_TITLE_ID}.pdf`);
     expect(requests[0]!.prompt).not.toContain('SECURE-RAW-CHUNK-TEXT');
-    // The gap's Private metadata is still held by the release membrane.
+    // The release membrane still sees the unfitted pack's Private context.
     expectStrictHold(result);
   });
 
@@ -1933,7 +1933,7 @@ describe('analyst-backed source_answer handler', () => {
     expect(leakedText(result)).not.toContain('7 more matches');
   });
 
-  test('strict mode holds when an S4 item in a Personal corpus leaves only its title-bearing gap in the prompt', async () => {
+  test('strict mode still holds when fitting drops an S4 Personal-corpus item and its title-bearing gap', async () => {
     const { analyst, requests } = echoingAnalyst({});
     const result = await createAnalystSourceIndexAnswerHandler({
       analyst,
@@ -1944,7 +1944,7 @@ describe('analyst-backed source_answer handler', () => {
 
     expect(requests).toHaveLength(1);
     expect(requests[0]!.prompt).not.toContain('SECURE-RAW-CHUNK-TEXT');
-    expect(requests[0]!.prompt).toContain(`${UPGRADED_ID}.pdf`);
+    expect(requests[0]!.prompt).not.toContain(`${UPGRADED_ID}.pdf`);
     expectStrictHold(result);
     expect(leakedText(result)).not.toContain(UPGRADED_ID);
   });

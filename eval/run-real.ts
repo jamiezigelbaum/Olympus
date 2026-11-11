@@ -32,7 +32,7 @@ import type { EvidenceReranker } from '../src/core/evidence-reranker.ts';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { analystEvidenceFormat, analystPromptBytes, analystPromptWithoutDraft, createAnalyst, withPromptBudget, type AnalystEvidenceFormat, type AnalystModel } from '../src/core/analyst.ts';
+import { analystCoverageBytes, analystEvidenceFormat, analystPromptBytes, analystPromptWithoutDraft, createAnalyst, withPromptBudget, type AnalystEvidenceFormat, type AnalystModel } from '../src/core/analyst.ts';
 import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { createDelphiAnalystModel } from '../src/core/analyst-delphi.ts';
 import {
@@ -63,6 +63,7 @@ import {
   DEFAULT_MAX_CHARS_PER_CANDIDATE as PRODUCT_MAX_CHARS_PER_CANDIDATE,
   DEFAULT_MAX_RESULTS as PRODUCT_MAX_RESULTS,
   fitPackToPromptBytes,
+  withUnfittedCoverage,
   releaseAnalystAnswer,
   type AnalystAnswerLanes,
   type AnalystReleaseOutcome,
@@ -255,6 +256,7 @@ async function main(): Promise<void> {
       promptLayoutByPack.set(pack, evalPromptLayout(sent, analyzeOptions, evidenceFormat));
     },
     (pack) => detailsByPack.get(pack)?.recencySeats,
+    (pack) => detailsByPack.get(pack)?.candidateExtractionGapIndexes,
   );
   const repeatsByPack = new WeakMap<object, { results: AnalystResult[]; failures: number }>();
   const repeatThisQuestion = analystRepeatQuestions.length === 0 || analystRepeatQuestions.includes(dataset.questions[0]!.id);
@@ -1183,6 +1185,8 @@ export interface EvalPromptLayout {
   evidenceFormat: AnalystEvidenceFormat;
   promptBytes: number;
   fixedBytes: number;
+  coverageBytes: number;
+  extractionGapCount: number;
   seats: Array<{ headerBytes: number; passageBytes: number }>;
   fullPromptBytes: number;
   compactPromptBytes: number;
@@ -1195,6 +1199,8 @@ export function evalPromptLayout(sent: EvidencePack, options: AnalystOptions, ev
     evidenceFormat,
     promptBytes: analystPromptBytes(sent, options, evidenceFormat),
     fixedBytes,
+    coverageBytes: analystCoverageBytes(sent),
+    extractionGapCount: sent.coverage.extractionGaps.length,
     seats: sent.candidates.map((candidate) => {
       const header = bytes([{ ...candidate, chunks: [] }]);
       return { headerBytes: header - fixedBytes, passageBytes: bytes([candidate]) - header };
@@ -1215,10 +1221,12 @@ export function promptFittedEvalAnalyst(
   candidateCorpusIds: (pack: EvidencePack) => readonly string[] | undefined,
   onSeats: (pack: EvidencePack, seats: number[], sent: EvidencePack, analyzeOptions: AnalystOptions, evidenceFormat: AnalystEvidenceFormat) => void,
   recencySeats: (pack: EvidencePack) => number | undefined = () => undefined,
+  candidateExtractionGapIndexes: (pack: EvidencePack) => EvidencePackBuildDetail['candidateExtractionGapIndexes'] = () => undefined,
 ): Analyst {
   return {
     analyze(pack, analyzeOptions) {
       const corpusIds = candidateCorpusIds(pack);
+      const gapIndexes = candidateExtractionGapIndexes(pack);
       const sent = promptByteBudget === undefined || !corpusIds
         ? pack
         : fitPackToPromptBytes(
@@ -1228,10 +1236,12 @@ export function promptFittedEvalAnalyst(
           analyzeOptions,
           recencySeats(pack),
           analystEvidenceFormat(analyst),
+          new Map(pack.candidates.map((candidate, index) => [candidate.provenance, gapIndexes?.[index] ?? []] as const)),
         );
       onSeats(pack, sent.candidates.map((candidate) =>
         pack.candidates.findIndex((original) => original.provenance === candidate.provenance) + 1), sent, analyzeOptions ?? {}, analystEvidenceFormat(analyst));
-      return analyst.analyze(promptByteBudget === undefined ? sent : withPromptBudget(sent, promptByteBudget), analyzeOptions);
+      return analyst.analyze(promptByteBudget === undefined ? sent : withPromptBudget(sent, promptByteBudget), analyzeOptions)
+        .then((result) => withUnfittedCoverage(result, pack, sent));
     },
   };
 }

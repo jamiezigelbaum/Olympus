@@ -3,7 +3,7 @@ import { assertWritableStoreOpenAllowed, writableStoreOpensForbidden } from '../
 import type { PeopleCitationName, PeopleSenderIdentity, PeopleSenderObservation } from '../../core/people-index.ts';
 import { unreadHoldDisposition, type UnreadHoldDisposition } from '../file-extraction/unreadable-files.ts';
 import type { ItemExtractionOutcome, ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
-import { extractionJobsDbPaths, oweExtractionRereadAfterRevive } from '../file-extraction/job-names.ts';
+import { jobLedgerPathsToVisit, oweExtractionRereadAfterRevive } from '../file-extraction/job-names.ts';
 import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
 import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled, withKeywordExpansionDisabled } from '../../core/source-index/keyword-context.ts';
 import { storeKeywordLanguages } from '../../core/source-index/keyword-languages.ts';
@@ -66,6 +66,7 @@ import {
   sweepMediaCache,
 } from '../../core/media-cache.ts';
 import { readyStillImageFormats } from '../../core/still-image-readiness.ts';
+import { olympusDataRoot, pathResolvesWithin } from '../../core/olympus-layout.ts';
 import type { StoreHolder } from '../../core/store-identity.ts';
 import {
   STILL_IMAGE_FORMATS,
@@ -677,6 +678,15 @@ function createConnectorStoreItemTextVersions(db: Database): void {
         AND NOT EXISTS (SELECT 1 FROM item_text_versions WHERE item_pk = OLD.item_pk);
     END;
   `);
+}
+
+/** A recorded media path inside this install's media cache or data root. */
+function mediaPathInThisInstall(path: string): boolean {
+  try {
+    return pathResolvesWithin(mediaCacheDir(), path) || pathResolvesWithin(olympusDataRoot(), path);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -8012,7 +8022,9 @@ export class LocalConnectorStore {
           .get(entry.media_sha256) as { present: number } | null;
         // The media cache refuses any path that is not its own `<sha256>.jpg`.
         if (!referenced) {
-          releaseMediaCacheFile(entry.media_path, entry.media_sha256, this.mediaHolder);
+          // A copied store keeps the original install's media paths; it gives
+          // up only a file in this install's own cache (#1414).
+          if (mediaPathInThisInstall(entry.media_path)) releaseMediaCacheFile(entry.media_path, entry.media_sha256, this.mediaHolder);
           // The judgment goes with the last chunk that carried the picture.
           if (this.mediaJudgmentsPresent) this.db.query('DELETE FROM media_judgments WHERE media_sha256 = ?').run(entry.media_sha256);
         }
@@ -10335,7 +10347,7 @@ export class LocalConnectorStore {
     } catch {
       // The default path and the ledgers this process has open are still visited.
     }
-    for (const jobsPath of new Set([...extractionJobsDbPaths(), ...known])) {
+    for (const jobsPath of jobLedgerPathsToVisit(known).visit) {
       try {
         oweExtractionRereadAfterRevive(jobsPath, item);
       } catch {
