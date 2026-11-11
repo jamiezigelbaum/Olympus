@@ -251,6 +251,9 @@ export interface SelectedEvidenceItem {
 export interface EvidencePackBuildDetail {
   pack: EvidencePack;
   candidateCorpusIds: readonly string[];
+  // Index-aligned with candidates; indexes refer to pack.coverage.extractionGaps.
+  // Unowned gaps describe the corpus/policy and survive every prompt fit.
+  candidateExtractionGapIndexes?: readonly (readonly number[])[];
   // Recency seats the router took (seat 4 on; withReservedRecencySeats), so a
   // prompt fit can keep them. Absent when none were taken.
   recencySeats?: number;
@@ -354,6 +357,7 @@ async function buildPreparedEvidencePackDetailed(
 
   const candidates: EvidenceCandidate[] = [];
   const candidateCorpusIds: string[] = [];
+  const candidateExtractionGapIndexes: number[][] = [];
   const extractionGaps: string[] = semanticLaneSkippedGaps(routed.degradations, input);
   const policyDeniedCoverageGaps: string[] = [];
   let policyDeniedCandidates = 0;
@@ -497,6 +501,7 @@ async function buildPreparedEvidencePackDetailed(
     candidateCorpusIds.push(hit.corpusId);
 
     const gap = extractionGapFor(hit, provider !== undefined, content);
+    candidateExtractionGapIndexes.push(gap ? [extractionGaps.length] : []);
     if (gap) extractionGaps.push(gap);
   }
 
@@ -547,6 +552,7 @@ async function buildPreparedEvidencePackDetailed(
   return {
     pack: { question: input.question, candidates: labelled.candidates, coverage, builtAt },
     candidateCorpusIds,
+    candidateExtractionGapIndexes,
     ...(routed.recencySeats ? { recencySeats: routed.recencySeats } : {}),
     laneAudits,
     secureLaneAudits,
