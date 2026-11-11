@@ -16542,7 +16542,12 @@ export function tierRowVisible(
   layer: TierSearchLayer,
 ): boolean {
   if (!copies || copies.length === 0) return true;
-  const here = copies.filter((copy) => copy.corpusId === corpusId && copy.state === 'current');
+  // Held text outside the local private lane (a row recorded Personal-first
+  // before #1316, until the settle pass moves its text) waits for its verdict:
+  // it serves no search there, as its answers would be refused. A held item's
+  // names-only copy still serves.
+  const here = copies.filter((copy) => copy.corpusId === corpusId && copy.state === 'current'
+    && !(copy.embedHold && copy.layers !== 'metadata' && copy.trustDomain !== 'secure_local'));
   return copyServingLayer(here, layer) !== undefined;
 }
 
