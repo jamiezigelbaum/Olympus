@@ -23,7 +23,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { archiveFormatForProvider } from '../../core/archive-formats.ts';
 import type { ExtractionItemRef } from './types.ts';
-import type { ExtractionUnreadableItem, ExtractionUnreadableVerdict } from './job-store.ts';
+import type { ExtractionUnreadableItem, ExtractionUnreadableVerdict, ItemExtractionOutcome } from './job-store.ts';
 import type { TierLedgerIdentity } from '../classification/tier-ledger.ts';
 
 /**
@@ -188,7 +188,7 @@ export const UNREADABLE_FILE_REASONS = [
 ] as const;
 export type UnreadableFileReason = (typeof UNREADABLE_FILE_REASONS)[number];
 
-// The error kind settled for an item kept Private before its text was read, in connector-store.
+// Legacy widget code: accepted for older engines; new holds use the job's own reason.
 export const UNREAD_PRIVACY_CHECK_MISSING_KIND = 'privacy_check_missing';
 
 export function unreadableFileReason(errorKind: string | undefined): UnreadableFileReason {
@@ -200,10 +200,44 @@ export function unreadableFileReason(errorKind: string | undefined): UnreadableF
   if (kind.includes('timeout')) return 'timed_out';
   if (kind.includes('not_found') || kind.includes('content_unavailable') || kind.includes('missing_bytes')) return 'missing';
   if (kind.includes('permission') || kind.includes('auth')) return 'no_access';
-  if (kind.includes('unsupported')) return 'unsupported';
+  if (kind.includes('unsupported') || kind === 'extractor_kind_unknown' || kind === 'no_extractor') return 'unsupported';
   if (kind.includes('empty')) return 'no_text';
   if (kind.includes('invalid') || kind.includes('undecodable') || kind.includes('corrupt') || kind.includes('damaged')) return 'damaged';
   return 'other';
+}
+
+/**
+ * A display/count disposition only. None of these changes the content hold or
+ * the independent names verdict. Missing extraction evidence never proves a
+ * file unreadable; an indexed job means the text still awaits its judgment.
+ */
+export type UnreadHoldDisposition =
+  | { kind: 'waiting' }
+  | { kind: 'by_choice' }
+  | { kind: 'cannot_read'; reason: UnreadableFileReason; errorKind: string };
+
+// The outcome of an unread item that no extractor was ever queued for.
+export const NO_EXTRACTION_JOB_OUTCOME: ItemExtractionOutcome = Object.freeze({
+  status: 'skipped_unsupported',
+  lastErrorKind: 'no_extractor',
+  warnings: [],
+  policyDecision: 'index_allowed',
+});
+
+export function unreadHoldDisposition(outcome: ItemExtractionOutcome | undefined, contentAllowed = true): UnreadHoldDisposition {
+  if (!contentAllowed) return { kind: 'by_choice' };
+  if (!outcome || outcome.status === 'indexed') return { kind: 'waiting' };
+  if (outcome.status === 'blocked_policy' || (outcome.status === 'metadata_only'
+    && (outcome.policyDecision === 'metadata_only' || outcome.lastErrorKind === 'store_item_metadata_only'))) {
+    return { kind: 'by_choice' };
+  }
+  // A concrete warning (password, damage, ...) explains an otherwise generic
+  // empty-output result. Never expose a reader's free-form diagnostic.
+  const specific = (kind: string): boolean => !['other', 'no_text'].includes(unreadableFileReason(kind));
+  const errorKind = [outcome.lastErrorKind, ...outcome.warnings, outcome.status]
+    .find((kind): kind is string => kind !== undefined && specific(kind))
+    ?? outcome.lastErrorKind ?? outcome.warnings[0] ?? outcome.status;
+  return { kind: 'cannot_read', errorKind, reason: unreadableFileReason(errorKind) };
 }
 
 export interface UnreadableFileEntry {

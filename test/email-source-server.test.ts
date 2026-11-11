@@ -14,7 +14,7 @@ import {
   parseOptionalTimeoutSecondsOrNone,
   resolveEmailSourceBindHostFromEnv,
   sourceIndexLaneDecision,
-} from '../src/workers/email-source/server.ts';
+} from '../src/workers/engine/server.ts';
 
 describe('canonical source-worker server configuration', () => {
   test('keeps the worker on loopback by default and honors the canonical host key', () => {

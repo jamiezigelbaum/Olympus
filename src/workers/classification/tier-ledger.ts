@@ -43,7 +43,8 @@ import {
 import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledger-path.ts';
 
 export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
-export const TIER_LEDGER_SCHEMA_VERSION = 13;
+export const TIER_LEDGER_SCHEMA_VERSION = 15;
+export const RETIRED_EMBEDDING_CLEARANCE_REASON = 'content:sniffer:retired_embedding_clearance:undecided';
 
 /** A scrub's start: the revision it took and the item's generation then. */
 export interface SecretScrubMark {
@@ -136,6 +137,9 @@ function writeIntentFromRow(row: TierWriteIntentRow): TierWriteIntent {
     connectorId: row.connector_id,
   };
 }
+
+/** One read of the ledger: the same shape as a connector store's pool read. */
+export interface LedgerRead { sql: string; params: readonly unknown[]; mode: 'get' | 'all' }
 
 function idParams(identity: TierLedgerIdentity): [string, string, string, string] {
   return [identity.provider, identity.accountScope, tierLedgerConversationKey(identity), identity.providerItemId];
@@ -399,7 +403,7 @@ export class TierLedgerRaiseAbandonRefusedError extends Error {
 }
 
 /** A rollback never re-exposes a Secret: the ledger refuses to flip a Secrets row back. */
-/** Verified raises cannot restore a lower copy whose content was removed. */
+/** A purged move cannot restore a copy whose content was removed. */
 export class TierLedgerPurgedRollbackRefusedError extends Error {
   constructor() {
     super('already Private; its lower copy was removed');
@@ -427,7 +431,6 @@ export class TierLedger {
   readonly dbPath: string;
   private readonly db: Database;
   private readonly readOnly: boolean;
-  private metaChanges = 0;
   private readonly now: () => Date;
 
   constructor(options: TierLedgerOptions) {
@@ -488,6 +491,11 @@ export class TierLedger {
       // hand to another process the moment this returns.
       closeSqliteStore(this.db, { checkpoint: !this.readOnly });
     } finally {
+      const listeners = this.closeListeners ?? [];
+      this.closeListeners = undefined;
+      for (const listener of listeners) {
+        try { listener(); } catch { /* a listener's failure never fails the close */ }
+      }
       if (!this.readOnly && this.dbPath !== ':memory:') restrictLedgerFiles(this.dbPath);
     }
   }
@@ -684,64 +692,6 @@ export class TierLedger {
       `).run(verdict.modelId, ...idParams(identity));
     })();
     return outcome === undefined ? undefined : { outcome, record: this.getCurrent(identity)! };
-  }
-
-  /** A pre-filter may only finish an open Personal content question, under the ledger lock. */
-  clearEmbeddingQuestion(identity: TierLedgerIdentity, options: {
-    reason: string; receiptKey: string; receipt: string; modelId: string;
-    questionStillCurrent: () => boolean; placementFor?: (decision: TierDecision) => TierPlacementPlan;
-  }): boolean {
-    return this.db.transaction(() => {
-      const row = this.readRow(identity);
-      if (!row || row.state !== 'pending' || row.metadataPending || !row.contentPending || !row.contentRead
-        || row.metadataTier !== 'private' || row.contentTier !== 'private' || row.metadataForced
-        || row.decidedBy === 'override' || row.decidedBy === 'owner_rule' || this.getOverride(identity)
-        || row.reasons.some(reason => reason.startsWith('metadata:owner_rule:'))
-        || this.rejudgeQuestion(identity) || !options.questionStillCurrent()) return false;
-      // Receipt and decision share a transaction. The queue question remains until a good audit window.
-      this.writeMeta(options.receiptKey, options.receipt);
-      const result = this.applySnifferVerdict(identity, {
-        pass: 'content', tier: 'private', reason: options.reason, modelId: options.modelId, mapRevision: row.mapRevision,
-      }, { questionStillCurrent: options.questionStillCurrent, ...(options.placementFor ? { placementFor: options.placementFor } : {}) });
-      if (!result || ['unchanged', 'needs_placement', 'stale_question', 'stale_map', 'held_moving'].includes(result.outcome)) {
-        this.writeMeta(options.receiptKey, '');
-        return false;
-      }
-      return true;
-    })();
-  }
-
-  /** Withdraw only this pre-filter's decision. Fence a lowering in flight and hide before re-queueing. */
-  revokeEmbeddingClearance(identity: TierLedgerIdentity, reason: string, original: TierDecision,
-    placementFor?: (decision: TierDecision) => TierPlacementPlan): boolean {
-    return this.db.transaction(() => {
-      const row = this.readRow(identity);
-      if (!row || !row.reasons.includes(reason) || row.decidedBy === 'override' || row.decidedBy === 'owner_rule'
-        || this.getOverride(identity) || row.contentTier !== original.contentTier || row.metadataTier !== original.metadataTier
-        || row.metadataPending || row.contentPending || row.metadataForced
-        || row.reasons.some(code => code.startsWith('metadata:owner_rule:'))
-        || original.reasons.filter(code => code.startsWith('content:sha256:') || code.startsWith('content:names:')).some(code => !row.reasons.includes(code))) return true;
-      if (!row.routed) { this.writeRow(identity, rowOf({ ...row, ...original }), undefined, row); return true; }
-      if (!placementFor) return false;
-      if (row.state === 'moving') {
-        const now = this.now().toISOString();
-        const staleFlip = row.generation + 1;
-        this.db.query(`UPDATE tier_copies SET superseded_by_generation = ?, updated_at = ?
-          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-          AND copy_state = 'superseded' AND superseded_by_generation = ?`)
-          .run(staleFlip + 1, now, ...idParams(identity), staleFlip);
-        this.db.query(`UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
-          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'`)
-          .run(staleFlip, now, ...idParams(identity));
-        this.db.query(`UPDATE tier_items SET generation = ?
-          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`)
-          .run(staleFlip, ...idParams(identity));
-        this.queueMoveRow(identity, { ...row, generation: staleFlip }, original, { hide: true, decidedAt: now });
-      } else {
-        this.recordRoutedPlacement(identity, original, placementFor(original));
-      }
-      return true;
-    })();
   }
 
   /**
@@ -2229,29 +2179,15 @@ export class TierLedger {
 
   writeMeta(key: string, value: string): void {
     if (key === 'ledger_id') throw new Error('The ledger identity is never rewritten.');
-    this.metaChanges += this.db.query(`
+    this.db.query(`
       INSERT INTO tier_ledger_meta (key, value) VALUES (?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    `).run(key, value).changes;
+    `).run(key, value);
   }
 
   deleteMeta(key: string): void {
     if (key === 'ledger_id') throw new Error('The ledger identity is never deleted.');
-    this.metaChanges += this.db.query('DELETE FROM tier_ledger_meta WHERE key = ?').run(key).changes;
-  }
-
-  /** Atomic publication of related content-free background receipts. */
-  writeMetaBatch(entries: readonly (readonly [string, string])[]): void {
-    this.db.transaction(() => { for (const [key, value] of entries) this.writeMeta(key, value); })();
-  }
-
-  /** A withdrawal on another connection cannot be followed by stale scan references. */
-  writeEmbeddingTrainingScan(value: string, revision: string): boolean {
-    return this.db.transaction(() => {
-      if ((this.readMeta('embedding-prefilter:training-revision') ?? '0') !== revision) return false;
-      this.writeMeta('embedding-prefilter:training-scan-v1', value);
-      return true;
-    }).immediate();
+    this.db.query('DELETE FROM tier_ledger_meta WHERE key = ?').run(key);
   }
 
   /** Small durable work receipts, without exporting any store content. */
@@ -3734,8 +3670,8 @@ export class TierLedger {
   }
 
   /**
-   * Forget ONE superseded copy row, after the caller tombstoned that store's
-   * copy (the owner-approved purge, design section 4.6 M6). A current or
+   * Forget ONE superseded copy row, after the caller tombstoned or stripped
+   * that store's copy (automatic pruning or design section 4.6 M6). A current or
    * staged copy is never removed here. Returns whether a row was removed.
    */
   removeSupersededCopy(identity: TierLedgerIdentity, corpusId: string): boolean {
@@ -3747,6 +3683,13 @@ export class TierLedger {
   }
 
   // ---- P3: migration proposals (design section 4.6) ---------------------------
+
+  /** Any still-moved migration protects this identity's rollback copies. */
+  hasMovedMigrationProposal(identity: TierLedgerIdentity): boolean {
+    return this.db.query(`SELECT 1 FROM tier_migration_proposals
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND status = 'moved' LIMIT 1`).get(...idParams(identity)) !== null;
+  }
 
   /**
    * Record a plan's proposals, replacing any earlier rows for the same plan
@@ -3864,12 +3807,10 @@ export class TierLedger {
    * Changes whenever this ledger's database changes, from this connection or
    * another: lets a reader reuse what it derived from the ledger until then.
    */
-  changeMarker(ignoreOwnMetaWrites = false): string {
+  changeMarker(): string {
     const row = this.db.query('SELECT total_changes() AS changes').get() as { changes: number };
     const version = this.db.query('PRAGMA data_version').get() as { data_version: number };
-    // Background checkpoints cannot invalidate a sliced training validation.
-    // External commits still invalidate it; withdrawals are also revision-fenced.
-    return `${version.data_version}:${row.changes - (ignoreOwnMetaWrites ? this.metaChanges : 0)}`;
+    return `${version.data_version}:${row.changes}`;
   }
 
   /**
@@ -4090,12 +4031,41 @@ export class TierLedger {
 
   /** How many items one account scope has here, and how many of them still wait for a judgment. */
   accountScopeCounts(provider: string, accountScope: string): { items: number; awaitingJudgment: number } {
-    const row = this.db.query(`
-      SELECT COUNT(*) AS items,
-        COALESCE(SUM(CASE WHEN state = 'pending' OR metadata_pending = 1 OR content_pending = 1 THEN 1 ELSE 0 END), 0) AS awaiting
-      FROM tier_items WHERE provider = ? AND account_scope = ?
-    `).get(provider, accountScope) as { items: number; awaiting: number };
+    return this.readSteps(this.accountScopeCountSteps(provider, accountScope));
+  }
+
+  /** The same account tally query for the caller's connection and the read pool. */
+  *accountScopeCountSteps(provider: string, accountScope: string): Generator<LedgerRead, { items: number; awaitingJudgment: number }, unknown> {
+    const row = (yield {
+      sql: `
+        SELECT COUNT(*) AS items,
+          COALESCE(SUM(CASE WHEN state = 'pending' OR metadata_pending = 1 OR content_pending = 1 THEN 1 ELSE 0 END), 0) AS awaiting
+        FROM tier_items WHERE provider = ? AND account_scope = ?
+      `,
+      params: [provider, accountScope],
+      mode: 'get',
+    }) as { items: number; awaiting: number };
     return { items: row.items, awaitingJudgment: row.awaiting };
+  }
+
+  /** Hears this ledger close, once (for a reader of its file elsewhere to let go). */
+  onClose(listener: () => void): void {
+    (this.closeListeners ??= []).push(listener);
+  }
+
+  private closeListeners: Array<() => void> | undefined;
+
+  /** Runs a read generator on this connection, in one transaction. */
+  readSteps<T>(steps: Generator<LedgerRead, T, unknown>): T {
+    return this.db.transaction(() => {
+      let next = steps.next();
+      while (!next.done) {
+        const statement = this.db.query(next.value.sql);
+        const params = next.value.params as never[];
+        next = steps.next(next.value.mode === 'get' ? statement.get(...params) : statement.all(...params));
+      }
+      return next.value;
+    })();
   }
 
   /**
@@ -4112,13 +4082,6 @@ export class TierLedger {
   withdrawAccountScope(provider: string, accountScope: string): { items: number; copies: number } {
     return this.db.transaction(() => {
       const now = this.now().toISOString();
-      this.writeMeta('embedding-prefilter:training-revision', randomUUID());
-      // Partial training contains source-owned references, never retained after withdrawal.
-      this.deleteMeta('embedding-prefilter:training-scan-v1');
-      for (const kind of ['check:', 'clear:']) {
-        const prefix = `embedding-prefilter:${kind}${provider}\0${accountScope}\0`;
-        this.db.query('DELETE FROM tier_ledger_meta WHERE key >= ? AND key < ?').run(prefix, `${prefix}\uffff`);
-      }
       this.db.query(`
         UPDATE tier_copies
         SET copy_state = 'superseded',
@@ -5400,7 +5363,7 @@ function tierLedgerMigrations(): SqliteMigration[] {
       // so no backlog the bounded settle pass has not reached yet can be
       // embedded or searched. The settle pass then moves the text up; a
       // Personal verdict clears the hold.
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 13,
       name: 'hold_personal_first_copies',
       up(db) {
         db.query(`
@@ -5413,6 +5376,56 @@ function tierLedgerMigrations(): SqliteMigration[] {
               AND EXISTS (SELECT 1 FROM json_each(t.reasons_json) r WHERE r.value = ?)
           )
         `).run(PERSONAL_FIRST_REASON);
+      },
+    },
+    {
+      version: 14,
+      name: 'requeue_retired_embedding_clearances',
+      up(db) {
+        // Select CURRENT reasons only, never history. The schema receipt and
+        // requeue commit together, so neither restart nor a crash repeats it.
+        db.exec(`
+          CREATE TEMP TABLE retired_embedding_clearances AS
+            SELECT rowid AS item_rowid FROM tier_items
+            WHERE EXISTS (SELECT 1 FROM json_each(reasons_json) r
+              WHERE r.value GLOB 'content:embedding_prefilter:*');
+          -- Fence every old move and keep any staged destination hidden.
+          UPDATE tier_copies SET copy_state = 'superseded',
+            superseded_by_generation = generation
+          WHERE copy_state = 'staged' AND EXISTS (
+            SELECT 1 FROM tier_items t JOIN retired_embedding_clearances x ON x.item_rowid = t.rowid
+            WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
+              AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
+          );
+          UPDATE tier_items SET state = 'pending', content_pending = 1,
+            generation = generation + CASE WHEN state = 'moving' THEN 1 ELSE 0 END,
+            target_metadata_tier = NULL, target_content_tier = NULL,
+            move_attempts = 0, rejudge_json = NULL, rejudged_key = NULL,
+            reasons_json = (SELECT json_group_array(CASE
+              WHEN r.value GLOB 'content:embedding_prefilter:*' THEN '${RETIRED_EMBEDDING_CLEARANCE_REASON}'
+              ELSE r.value END) FROM json_each(tier_items.reasons_json) r)
+          WHERE rowid IN (SELECT item_rowid FROM retired_embedding_clearances);
+          -- Hold-until-judged (#1318): the requeued item's current copy is
+          -- not embeddable or searchable until the judge answers again.
+          UPDATE tier_copies SET embed_hold = 1
+          WHERE copy_state = 'current' AND embed_hold = 0 AND EXISTS (
+            SELECT 1 FROM tier_items t JOIN retired_embedding_clearances x ON x.item_rowid = t.rowid
+            WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
+              AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
+          );
+          DROP TABLE retired_embedding_clearances;
+          DELETE FROM tier_ledger_meta WHERE key GLOB 'embedding-prefilter:*';
+        `);
+      },
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: 'moved_migration_identity',
+      up(db) {
+        // The bounded automatic-copy sweep probes by identity across plans.
+        db.exec(`CREATE INDEX IF NOT EXISTS tier_migration_moved_identity
+          ON tier_migration_proposals (provider, account_scope, conversation_key, provider_item_id)
+          WHERE status = 'moved';`);
       },
     },
   ];

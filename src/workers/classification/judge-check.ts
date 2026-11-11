@@ -178,6 +178,7 @@ function judged(item: OwnerTierItem): item is OwnerTierItem & { tier: JudgeLabel
     && (item.decided_by === 'sniffer' || item.decided_by === 'move' || item.decided_by === 'default')
     && item.judge_reason !== null
     && item.waiting_for_judge !== true
+    && item.not_read === undefined
     && !item.owner_set
     && item.moving_to === undefined;
 }

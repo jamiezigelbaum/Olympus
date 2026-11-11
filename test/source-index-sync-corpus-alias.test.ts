@@ -13,7 +13,7 @@ import {
   READWISE_LIBRARY_CORPUS_ID,
   canonicalSourceCorpusId,
 } from '../src/core/source-corpus-registry.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import type {
   ReadwiseConnectorStoreSyncHandler,
   ReadwiseConnectorStoreSyncResult,

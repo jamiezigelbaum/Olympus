@@ -465,17 +465,21 @@ describe('Analyst repeats on a frozen pack', () => {
 describe('the real eval matches what Ask sends a local Analyst (rerun 20)', () => {
   test('the fitted local eval sends byte-identical main and audit prompts to the product local fit', async () => {
     const { pack, corpusIds } = analystPromptFixture();
+    pack.coverage = { ...pack.coverage, extractionGaps: [pack.coverage.extractionGaps[0]!,
+      ...pack.candidates.map((candidate) => `${candidate.provenance.citation!.title} content was truncated for length.`)] };
+    const gapIndexes = pack.candidates.map((_, index) => [index + 1]);
     const calls: AnalystModelRequest[][] = [[], []];
     const analysts = calls.map((requests) => createAnalyst({ complete: async (request) => {
       requests.push(request);
       return { modelId: 'fixture', text: JSON.stringify({ answer: 'Survey recorded [1].', citations: [{ evidence: 1, claim: 'Survey recorded.' }], unanswered: [], sufficient: true }) };
     } }, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' }));
     const fitted = fitPackToPromptBytes(pack, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES,
-      new Map(pack.candidates.map((candidate, index) => [candidate, corpusIds[index]!])), { localOnly: true }, 2, 'compact');
+      new Map(pack.candidates.map((candidate, index) => [candidate, corpusIds[index]!])), { localOnly: true }, 2, 'compact',
+      new Map(pack.candidates.map((candidate, index) => [candidate.provenance, gapIndexes[index]!])));
     await analysts[0]!.analyze(withPromptBudget(fitted, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES), { localOnly: true });
     const kept: number[][] = [];
     await promptFittedEvalAnalyst(analysts[1]!, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, () => corpusIds,
-      (_pack, seats) => kept.push(seats), () => 2).analyze(pack, { localOnly: true });
+      (_pack, seats) => kept.push(seats), () => 2, () => gapIndexes).analyze(pack, { localOnly: true });
     expect(calls[1]).toEqual(calls[0]);
     expect(kept[0]).toEqual(fitted.candidates.map((candidate) => pack.candidates.findIndex((original) => original.provenance === candidate.provenance) + 1));
     expect(calls[1]![0]!.prompt.split('\n').at(-1)).toStartWith('Coverage — searched:');
@@ -704,7 +708,7 @@ describe('the dataset shape the runner reads', () => {
 });
 
 describe('evalPromptLayout', () => {
-  test("splits the sent prompt's bytes into fixed text, each seat's header and each seat's passages, and prices the compact format", () => {
+  test("splits the sent prompt's bytes into fixed text, each seat's header and each seat's passages, and prices the compact format", async () => {
     const options = { localOnly: true };
     const seat = (index: number, chunks: string[]) => ({
       provenance: {
@@ -718,10 +722,22 @@ describe('evalPromptLayout', () => {
     const sent: EvidencePack = {
       question: 'When does the lease end?',
       candidates: [seat(1, ['lease ends 31 May 2027', 'renewal "notice" due']), seat(2, []), seat(3, ['café receipt'])],
-      coverage: { searchedCorpora: ['a'], skippedCorpora: [], extractionGaps: [] },
+      coverage: { searchedCorpora: ['a'], skippedCorpora: [], extractionGaps: ['Un café could not be read.', 'An item was truncated.'] },
       builtAt: '2026-11-11T00:00:00Z',
     };
     const layout = evalPromptLayout(sent, options);
+    for (const evidenceFormat of ['full', 'compact'] as const) {
+      const calls: AnalystModelRequest[] = [];
+      // createAnalyst renders the actual sent Coverage line before completing.
+      const analyst = createAnalyst({ complete: async (request) => {
+        calls.push(request);
+        return { text: JSON.stringify({ answer: '', citations: [], unanswered: [], sufficient: false }), modelId: 'fixture' };
+      } }, { evidenceFormat });
+      await analyst.analyze(sent, options);
+      const measured = evalPromptLayout(sent, options, evidenceFormat);
+      expect(measured.coverageBytes).toBe(Buffer.byteLength(calls[0]!.prompt.split('\n').at(-1)!));
+      expect(measured.extractionGapCount).toBe(2);
+    }
     expect(layout.promptBytes).toBe(analystPromptBytes(sent, options));
     expect(layout.compactPromptBytes).toBe(analystPromptBytes(sent, options, 'compact'));
     expect(layout.seats).toHaveLength(3);

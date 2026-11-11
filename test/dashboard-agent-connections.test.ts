@@ -20,7 +20,7 @@ import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.
 import { isV04PublicDashboardRoute, V0_4_PUBLIC_PACKAGE_FILES } from '../src/core/public-surface.ts';
 import { AGENT_INSTRUCTION_TEXT, AGENT_SKILL_PATH, agentSkillMarkdown } from '../src/core/agent-instructions.ts';
 import { defaultConfig } from '../src/core/config.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { AGENT_MINT_LIMIT, withWorkerBearerAuth } from '../src/workers/http.ts';
 import { FORWARDED_PATHS, forwardPath } from '../connect-relay/client/forward.ts';
 import { V0_4_PUBLIC_DASHBOARD_ROUTES } from '../src/core/public-surface.ts';

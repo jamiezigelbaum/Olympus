@@ -15862,14 +15862,14 @@ var init_vocabulary = __esm(() => {
     missing: "the file is no longer where it was",
     no_access: "Olympus isn't allowed to open it",
     unsupported: "a format Olympus can't read",
-    privacy_check_missing: "kept Private before it was read",
+    privacy_check_missing: "kept Private because Olympus couldn't read it",
     other: "Olympus couldn't read it"
   };
   DASHBOARD_UNREADABLE_NOTE_MANY = "That is more than a healthy source has, so it may be a problem in Olympus rather than your files." + " The other files still answer questions.";
   DASHBOARD_UNREADABLE_REASON_WORDS = {
     privacy_check_missing: {
-      one: "{count} item was kept Private without being read because its privacy check was missing. Open it below to check it, then use Sync now to try reading it again.",
-      other: "{count} items were kept Private without being read because their privacy checks were missing. Open them below to check them, then use Sync now to try reading them again."
+      one: "{count} item kept Private because Olympus couldn't read it. The reason is shown with the file below.",
+      other: "{count} items kept Private because Olympus couldn't read them. The reasons are shown with the files below."
     },
     damaged_or_unsupported: {
       one: "{count} file Olympus can't read at all",
@@ -16184,6 +16184,7 @@ var init_vocabulary = __esm(() => {
     notRunningLine: "{percent}% read · {items} so far. It goes on from there once imports can run.",
     notRunningLineUncounted: "{percent}% read. It goes on from there once imports can run.",
     removingNotRunningLine: "It is removed once removals can run. The file itself stays where it is.",
+    counting: "Counting what this archive holds…",
     judgedLine: "{judged} judged · {held} waiting for the private model",
     heldWhy: {
       ready: "Until the private model judges them, they stay Private.",
@@ -17252,7 +17253,107 @@ function strongKeysFromText(value) {
   }
   return [...keys];
 }
-var PEOPLE_LINK_REASON_TEXT, MAX_ADDRESS_TEXT_CHARS = 4096, addressesIn = (value) => addressSpansIn(value.slice(0, MAX_ADDRESS_TEXT_CHARS)), PEOPLE_AUTHORED_FAMILIES;
+function authoredStores(stores) {
+  return stores.filter((store) => PEOPLE_AUTHORED_FAMILIES.has(store.family));
+}
+function readStoreObservations(store) {
+  return store.peopleObservationsOffThread ? store.peopleObservationsOffThread() : Promise.resolve(store.peopleObservations());
+}
+function linkStores(index, stores, observations) {
+  const people = index.rebuild([...observations]);
+  const resolver = (provider, senderId, senderLabel) => index.citationName(provider, senderId, senderLabel);
+  for (const store of stores)
+    store.setPeopleNames?.(resolver);
+  return people;
+}
+
+class PeopleIndexRefresher {
+  index;
+  stores;
+  lastFingerprint;
+  lastRefreshAt;
+  now;
+  observed = new Map;
+  inFlight;
+  constructor(index, stores, options = {}) {
+    this.index = index;
+    this.stores = stores;
+    this.now = options.now ?? (() => Date.now());
+  }
+  refresh() {
+    return this.rebuildOnce(true);
+  }
+  async refreshIfChanged() {
+    if (this.inFlight) {
+      await this.inFlight;
+      return false;
+    }
+    const fingerprint = fingerprintParts(authoredStores(this.stores())).join("|");
+    if (fingerprint === this.lastFingerprint)
+      return false;
+    if (this.lastRefreshAt !== undefined && this.now() - this.lastRefreshAt < PEOPLE_INDEX_MIN_REBUILD_MS)
+      return false;
+    await this.rebuildOnce(false);
+    return true;
+  }
+  relink() {
+    if (this.lastRefreshAt === undefined)
+      return;
+    const stores = this.stores();
+    const current2 = new Set(authoredStores(stores));
+    const observations = [...this.observed].filter(([store]) => current2.has(store)).flatMap(([, entry]) => entry.observations);
+    return linkStores(this.index, stores, observations);
+  }
+  rebuildOnce(force) {
+    this.inFlight ??= this.rebuild(force).finally(() => {
+      this.inFlight = undefined;
+    });
+    return this.inFlight;
+  }
+  async rebuild(force) {
+    const stores = this.stores();
+    const authored = authoredStores(stores);
+    const parts = fingerprintParts(authored);
+    this.lastRefreshAt = this.now();
+    const observed = new Map;
+    for (const [position, store] of authored.entries()) {
+      const part = parts[position];
+      const kept = this.observed.get(store);
+      if (!force && kept && kept.part === part && !part.endsWith(UNREADABLE_VISIBILITY)) {
+        observed.set(store, kept);
+        continue;
+      }
+      try {
+        observed.set(store, { part, observations: await readStoreObservations(store) });
+      } catch {
+        parts[position] = `${part}${READ_FAILED}`;
+      }
+    }
+    this.observed = observed;
+    const people = linkStores(this.index, stores, [...observed.values()].flatMap((entry) => entry.observations));
+    this.lastFingerprint = parts.join("|");
+    return people;
+  }
+}
+function fingerprintParts(stores) {
+  return stores.map((store) => {
+    let sync = "";
+    let visibility = "";
+    try {
+      const run = store.lastSyncRun?.();
+      sync = run && run.status === "completed" ? `${run.syncRunId}@${run.completedAt ?? ""}` : "";
+    } catch {
+      sync = "";
+    }
+    try {
+      visibility = store.peopleVisibilityMarker?.() ?? "";
+    } catch {
+      return `${sync}${UNREADABLE_VISIBILITY}`;
+    }
+    return `${sync}#${visibility}`;
+  });
+}
+var PEOPLE_LINK_REASON_TEXT, MAX_ADDRESS_TEXT_CHARS = 4096, addressesIn = (value) => addressSpansIn(value.slice(0, MAX_ADDRESS_TEXT_CHARS)), PEOPLE_AUTHORED_FAMILIES, PEOPLE_INDEX_MIN_REBUILD_MS = 60000, UNREADABLE_VISIBILITY = "#unreadable", READ_FAILED = "!read-failed";
 var init_people_index = __esm(() => {
   init_olympus_layout();
   init_sender_rules();
@@ -19224,6 +19325,21 @@ var init_tier_set_binding = __esm(() => {
   init_tier_ledger_path();
 });
 
+// src/workers/file-extraction/unreadable-files.ts
+var NO_EXTRACTION_JOB_OUTCOME, TOKEN_ALPHABET, DEFAULT_TOKEN_TTL_MS, CURSOR_TIME_ALPHABET;
+var init_unreadable_files = __esm(() => {
+  init_archive_formats();
+  NO_EXTRACTION_JOB_OUTCOME = Object.freeze({
+    status: "skipped_unsupported",
+    lastErrorKind: "no_extractor",
+    warnings: [],
+    policyDecision: "index_allowed"
+  });
+  TOKEN_ALPHABET = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_");
+  DEFAULT_TOKEN_TTL_MS = 30 * 60000;
+  CURSOR_TIME_ALPHABET = new Set("0123456789TZ:.+-");
+});
+
 // src/workers/file-extraction/job-names.ts
 var openLedgerPaths;
 var init_job_names = __esm(() => {
@@ -19959,6 +20075,7 @@ function connectorStoreContentPreference(vettedVectorItemIds) {
 var CONCEPT_COUNT_MAX_AGE_MS, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, STATUS_COUNTS_MAX_AGE_MS, TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
 var init_local_index = __esm(() => {
   init_store_write_guard();
+  init_unreadable_files();
   init_job_names();
   init_keyword_context();
   init_keyword_languages();
@@ -20346,6 +20463,14 @@ var init_tier_content_purge = __esm(() => {
   init_embedding_ledger();
   init_tier_move();
 });
+
+// src/workers/connector-store/tier-auto-prune-sweep.ts
+var init_tier_auto_prune_sweep = __esm(() => {
+  init_tier_ledger();
+  init_embedding_ledger();
+  init_tier_move();
+  init_tier_content_purge();
+});
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { spawn as spawn4 } from "node:child_process";
 import { closeSync as closeSync8, constants as constants7, existsSync as existsSync18, fstatSync as fstatSync3, openSync as openSync7, readdirSync as readdirSync8, statSync as statSync17 } from "node:fs";
@@ -20685,7 +20810,6 @@ var init_remote_litert_runtime = () => {};
 
 // src/workers/source-index/built-in-embedding/runtime.ts
 var init_runtime = () => {};
-
 // src/workers/source-index/built-in-embedding/wordpiece.ts
 var init_wordpiece = () => {};
 
@@ -20728,7 +20852,6 @@ var init_tier_rejudge = __esm(() => {
   init_parent_context();
   init_stored_names();
   init_tier_classifier();
-  init_tier_ledger();
   init_tier_ledger();
   init_secrets_disposition();
   init_tier_placement();
@@ -20795,6 +20918,7 @@ var init_tiered_store_set = __esm(() => {
   init_tier_names_only_settle();
   init_tier_held_settle();
   init_tier_content_purge();
+  init_tier_auto_prune_sweep();
   init_tier_move();
   init_tier_row_rehome();
   init_tier_rules_sweep();
@@ -21446,6 +21570,99 @@ var init_x_bookmarks = __esm(() => {
   init_live_control2();
   init_reconcile_state();
 });
+// src/core/file-mime.ts
+var MIME_BY_EXTENSION, SOURCE_CODE_EXTENSIONS;
+var init_file_mime = __esm(() => {
+  init_still_image_formats();
+  MIME_BY_EXTENSION = Object.freeze({
+    pdf: "application/pdf",
+    txt: "text/plain",
+    text: "text/plain",
+    md: "text/plain",
+    markdown: "text/plain",
+    log: "text/plain",
+    rst: "text/plain",
+    org: "text/plain",
+    tex: "text/plain",
+    srt: "text/plain",
+    vtt: "text/plain",
+    csv: "text/csv",
+    tsv: "text/tab-separated-values",
+    json: "application/json",
+    yaml: "text/plain",
+    yml: "text/plain",
+    toml: "text/plain",
+    xml: "application/xml",
+    html: "text/html",
+    htm: "text/html",
+    rtf: "application/rtf",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    png: "image/png",
+    gif: "image/gif",
+    webp: "image/webp",
+    heic: "image/heic",
+    heif: "image/heif",
+    tif: "image/tiff",
+    tiff: "image/tiff",
+    bmp: "image/bmp",
+    mp3: "audio/mpeg",
+    m4a: "audio/mp4",
+    wav: "audio/wav",
+    flac: "audio/flac",
+    ogg: "audio/ogg",
+    aac: "audio/aac",
+    mp4: "video/mp4",
+    m4v: "video/x-m4v",
+    mov: "video/quicktime",
+    mkv: "video/x-matroska",
+    webm: "video/webm",
+    avi: "video/x-msvideo",
+    mpg: "video/mpeg",
+    mpeg: "video/mpeg",
+    "3gp": "video/3gpp"
+  });
+  SOURCE_CODE_EXTENSIONS = new Set([
+    "ts",
+    "tsx",
+    "js",
+    "jsx",
+    "mjs",
+    "cjs",
+    "py",
+    "rb",
+    "go",
+    "rs",
+    "java",
+    "kt",
+    "swift",
+    "c",
+    "h",
+    "cc",
+    "cpp",
+    "hpp",
+    "cs",
+    "php",
+    "sh",
+    "bash",
+    "zsh",
+    "sql",
+    "css",
+    "scss",
+    "lua",
+    "pl",
+    "r",
+    "scala",
+    "ini",
+    "cfg",
+    "conf",
+    "env"
+  ]);
+});
+
 // src/workers/dropbox-files/provider-client.ts
 var DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS;
 var init_provider_client = __esm(() => {
@@ -21456,6 +21673,7 @@ var init_provider_client = __esm(() => {
 // src/workers/dropbox-files/connector.ts
 var init_connector3 = __esm(() => {
   init_credential_broker();
+  init_file_mime();
   init_provider_client();
 });
 
@@ -23644,6 +23862,67 @@ var init_bounded_text = __esm(() => {
   ]);
 });
 
+// src/workers/file-extraction/extractors/rtf.ts
+var RTF_MIME_TYPES, SKIPPED_DESTINATIONS, CODE_PAGE_LABELS;
+var init_rtf = __esm(() => {
+  RTF_MIME_TYPES = new Set(["application/rtf", "text/rtf"]);
+  SKIPPED_DESTINATIONS = new Set([
+    "fonttbl",
+    "colortbl",
+    "stylesheet",
+    "info",
+    "pict",
+    "object",
+    "listtable",
+    "listoverridetable",
+    "rsidtbl",
+    "generator",
+    "themedata",
+    "colorschememapping",
+    "datastore",
+    "latentstyles",
+    "xmlnstbl",
+    "header",
+    "headerl",
+    "headerr",
+    "headerf",
+    "footer",
+    "footerl",
+    "footerr",
+    "footerf",
+    "filetbl",
+    "revtbl",
+    "mmathPr",
+    "pgdsctbl",
+    "fldinst"
+  ]);
+  CODE_PAGE_LABELS = new Map([
+    [866, "ibm866"],
+    [874, "windows-874"],
+    [932, "shift_jis"],
+    [936, "gbk"],
+    [949, "euc-kr"],
+    [950, "big5"],
+    [1250, "windows-1250"],
+    [1251, "windows-1251"],
+    [1252, "windows-1252"],
+    [1253, "windows-1253"],
+    [1254, "windows-1254"],
+    [1255, "windows-1255"],
+    [1256, "windows-1256"],
+    [1257, "windows-1257"],
+    [1258, "windows-1258"],
+    [1e4, "macintosh"],
+    [10007, "x-mac-cyrillic"],
+    [20866, "koi8-r"],
+    [28591, "iso-8859-1"],
+    [28592, "iso-8859-2"],
+    [28595, "iso-8859-5"],
+    [54936, "gb18030"],
+    [65001, "utf-8"]
+  ]);
+});
+
 // src/workers/file-extraction/extractors/document-formats.ts
 var init_document_formats = __esm(() => {
   init_bounded_text();
@@ -23668,6 +23947,7 @@ var init_image_prepare = __esm(() => {
 
 // src/workers/file-extraction/extractors/text.ts
 var init_text = __esm(() => {
+  init_rtf();
   init_bounded_text();
   init_command_runner();
   init_document_formats();
@@ -24243,6 +24523,7 @@ var init_runner = __esm(() => {
   init_command_runner();
   init_tier_classifier();
   init_bounded_text();
+  init_file_mime();
   init_job_store();
   init_secret_scan_off_thread();
   init_store_sink();

@@ -305,6 +305,15 @@ const GENERIC_MIME_TYPES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * True when a type says only that a file is bytes, or says nothing: its name
+ * or bytes must decide.
+ */
+export function isGenericMimeType(mimeType: string | undefined): boolean {
+  const normalized = normalizeMimeType(mimeType);
+  return normalized === undefined || GENERIC_MIME_TYPES.has(normalized);
+}
+
+/**
  * A PDF names itself in its first bytes, whatever label it arrived under.
  */
 export function hasPdfSignature(bytes: Uint8Array): boolean {

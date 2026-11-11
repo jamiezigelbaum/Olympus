@@ -42,7 +42,7 @@ async function split() {
     NODE_ENV: 'test',
   };
   const spawn = (role: 'front' | 'background') => {
-    const child = Bun.spawn([process.execPath, join(import.meta.dir, '../src/workers/email-source/server.ts')], {
+    const child = Bun.spawn([process.execPath, join(import.meta.dir, '../src/workers/engine/server.ts')], {
       env: { ...env, OLYMPUS_WORKER_ENGINE_ROLE: role }, stdout: 'pipe', stderr: 'pipe',
     });
     children.push(child);
@@ -153,9 +153,13 @@ test('the front reads changed archive state, requests and ledger counts while a 
   expect((await f.computer()).archives!.archives[0]).toMatchObject({ id, status: 'importing' });
   const lane = runtime.lane('email');
   await pullArchiveImport({ state: runtime.state, lane, archiveId: id });
-  expect((await f.computer()).archives!.archives[0]).toMatchObject({ id, status: 'imported', items: 1, judged: 0, held: 1 });
+  const counted = (judged: number) => waitFor(async () => {
+    const entry = (await f.computer()).archives!.archives[0];
+    return entry?.items === 1 && entry.judged === judged ? entry : undefined;
+  });
+  expect(await counted(0)).toMatchObject({ id, status: 'imported', items: 1, judged: 0, held: 1 });
   const record = lane.ledger.listPending()[0]!;
   lane.ledger.recordDecision({ provider: record.provider, accountScope: record.accountScope, providerItemId: record.providerItemId }, { metadataTier: 'secure', contentTier: 'secure', decidedBy: 'sniffer', reasons: ['content:judged'], state: 'current', contentRead: true, metadataPending: false, contentPending: false, metadataForced: false, metadataFlagged: false, engineVersion: 'fixture', mapRevision: 'fixture', snifferId: 'fixture' });
-  expect((await f.computer()).archives!.archives[0]).toMatchObject({ items: 1, judged: 1, held: 0 });
+  expect(await counted(1)).toMatchObject({ items: 1, judged: 1, held: 0 });
   expect(readEngineStatusSnapshot(snapshotPath)!.snapshot.written_at).toBe(fixed);
 }, 120_000);

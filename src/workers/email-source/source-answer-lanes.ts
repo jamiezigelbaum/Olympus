@@ -102,7 +102,12 @@ export function createSourceAnswerLanes(
           : configured;
         requestEmbeddings.set(
           store.corpusId,
-          provider && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(provider))
+          // A Private store, and any store a private search reads (a private
+          // job's original match can sit in a Personal store after the judge
+          // lowered it, #1399), embeds the query only with a provider approved
+          // for Private: the question of a private answer never reaches a
+          // cloud embedder.
+          provider && ((store.trustDomain !== 'secure_local' && mode !== 'private_search') || isApprovedSecureSourceEmbeddingProvider(provider))
             ? memoizeQueryEmbeddings(provider)
             : undefined,
         );

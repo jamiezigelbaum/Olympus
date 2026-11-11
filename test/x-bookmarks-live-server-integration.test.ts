@@ -2,11 +2,11 @@ import { describe, expect, test } from 'bun:test';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import {
   createRefreshableXBookmarksConnectorStoreRuntime,
   createXBookmarksConnectorStoreRuntime,
-} from '../src/workers/email-source/server.ts';
+} from '../src/workers/engine/server.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import type { ConnectedCredentialHandle } from '../src/workers/credential-broker/connected-handles.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';

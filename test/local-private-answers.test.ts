@@ -31,7 +31,7 @@ import { seedEngineSovereignty } from '../src/core/engine-service.ts';
 import { saveFirstRunPrivacyChoice } from '../src/core/first-run-privacy.ts';
 import { ModelSetupService } from '../src/core/model-setup.ts';
 import { loadConfig } from '../src/core/config.ts';
-import { builtInBacksPrivateAnalyst, createAnalystForSovereigntyProfile, loadSourceWorkerSovereignty } from '../src/workers/email-source/server.ts';
+import { builtInBacksPrivateAnalyst, createAnalystForSovereigntyProfile, loadSourceWorkerSovereignty } from '../src/workers/engine/server.ts';
 import { WorkerBootSecretResolver } from '../src/workers/credential-degradation.ts';
 import type { AnalystModelRequest } from '../src/core/analyst.ts';
 import { createRemotePrivateParts } from '../src/core/remote-private-part.ts';
@@ -54,7 +54,7 @@ import { DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT, DASHBOARD_SETTINGS_ZKAPI_
 import { DASHBOARD_COMPUTER_PANEL_COPY } from '../src/workers/dashboard/vocabulary.ts';
 import { createDashboardPanelTools, type DashboardPanelTools } from '../src/workers/email-source/dashboard-panel-tools.ts';
 import { DASHBOARD_TOOLS_CALL_PATH } from '../src/workers/dashboard/host-page.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { createLocalAnswerPath, createLocalPrivateAnswers, type LocalPrivateAnswers } from '../src/workers/email-source/local-private-answers.ts';
 import { createSourceAnswerLanes } from '../src/workers/email-source/source-answer-lanes.ts';
 import { DASHBOARD_LAUNCH_MINT_PATH, DASHBOARD_UNLOCK_HEADER, DASHBOARD_LAUNCH_REDEEM_PATH, DashboardLaunchTickets } from '../src/core/dashboard-launch.ts';
@@ -550,6 +550,18 @@ describe('answers on this computer, with every outbound request denied', () => {
     expect(out['undefined']).toEqual([]);
     expect(out['private_search']).toEqual([]);
     expect(out['built_in_only']).toEqual(['internal:personal:inv']);
+  });
+
+  test('#1399: a private search reading a lowered original match never embeds the question in the cloud', async () => {
+    const inv: FixtureSpec = { id: 'inv', name: 'inventory.txt', text: 'SENTINEL_INV: the orchard inventory lists two chairs.', legacyDomain: 'internal' };
+    const local = await localFixture({ specs: [oweSpec, inv], privateIds: ['owe'], answer: oweAnswer });
+    const question = 'how many chairs are in the orchard inventory';
+    const sourceItem = { family: 'file', provider: identityOf('inv').provider, accountScope: identityOf('inv').accountScope, providerItemId: 'inv', localItemId: `${identityOf('inv').accountScope}:inv` };
+    local.fixture.cloud.inputs.length = 0;
+    const found = await searchPrivateEvidence({ lanes: local.lanes, question, originalMatches: [{ trustDomain: 'secure_local', provenance: { sourceItem } }] });
+    // The lowered item is read where it now sits, and the question never reached the Personal store's cloud embedder.
+    expect(found.candidates.some((candidate) => candidate.trustDomain === 'internal')).toBe(true);
+    expect(local.fixture.cloud.inputs.some((input) => input.includes('chairs') || input.includes('orchard'))).toBe(false);
   });
 
   test('the retry never matches on request scaffolding the strict search ignores', async () => {

@@ -23,7 +23,7 @@ import {
   <source>DailyRequestBudgetFromEnv,
   type <Source>Fetch,
 } from '../src/workers/<source>/index.ts';
-import { create<Source>ConnectorStoreRuntime } from '../src/workers/email-source/server.ts';
+import { create<Source>ConnectorStoreRuntime } from '../src/workers/engine/server.ts';
 import { DeterministicSourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 
 const ACCOUNT = 'person@example.com';

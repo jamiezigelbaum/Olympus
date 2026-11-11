@@ -8,7 +8,8 @@ import { defaultConfig } from '../src/core/config.ts';
 import { DirectHttpEmailTransport, EmailClient } from '../src/core/email.ts';
 import { operations, type OperationContext } from '../src/core/operations.ts';
 import { SourceAnswerJobRegistry } from '../src/core/source-answer-jobs.ts';
-import { createEmailSourceWorker, type ConsultAskWireRequest } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
+import type { ConsultAskWireRequest } from '../src/workers/engine/http/source-index-requests.ts';
 import { askAnonymouslyToolResult, isAskAnonymouslyResult } from '../src/workers/chatgpt/response-builder.ts';
 
 const ask = operations.find((operation) => operation.name === 'ask_anonymously')!;

@@ -1,9 +1,8 @@
 // Tier classification review fixes (2026-10-02), end to end on a fresh
 // install (the harness of fresh-install-tiers.test.ts):
 //
-// 1. A Personal item an automatic move left a superseded copy of, raised
-//    again later, moves back even when its text changed meanwhile (the
-//    automatic move replaces its own earlier superseded copy); a move that
+// 1. A Personal item an automatic lowering moved (its Private copy pruned,
+//    #1174), raised again later, moves back with its changed text; a move that
 //    keeps failing goes to the back of the queue.
 // 2. A re-judge never hides an item pending an answer: it asks while the
 //    item stays where it is, and only a Private verdict raises it. With
@@ -277,7 +276,7 @@ function snifferFor(install: Install, builtIn: BuiltInPrivateModel, options: { l
   return service;
 }
 
-/** Garden judged Personal by the model and moved there: its held copy stays kept (superseded) in the Private store. */
+/** Garden judged Personal by the model and moved there: its held Private copy is pruned after the move (#1174). */
 async function gardenSettledPersonal(verdict: string | ((request: AnalystModelRequest) => string) = PERSONAL_VERDICT) {
   const model = registeredBuiltIn(verdict);
   const install = await freshInstall({ lane: BUILT_IN_SNIFFER_LANE, gardenOwnRecord: true });
@@ -288,7 +287,9 @@ async function gardenSettledPersonal(verdict: string | ((request: AnalystModelRe
   const service = snifferFor(install, model.builtIn);
   for (let pass = 0; pass < 3; pass += 1) await service.runOnce();
   expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ state: 'current', contentTier: 'private' });
-  expect(install.lane.ledger.copies(garden).find((copy) => copy.corpusId === SECURE_CORPUS)).toMatchObject({ state: 'superseded' });
+  // The automatic lowering prunes its superseded Private copy (#1174).
+  expect(install.lane.ledger.copies(garden).find((copy) => copy.corpusId === SECURE_CORPUS)).toBeUndefined();
+  expect(install.secure.copyContentState(garden)?.chunks ?? 0).toBe(0);
   return { install, service, ...model };
 }
 
@@ -322,7 +323,7 @@ describe('1. a raise back into a store that kept an older copy, and refused move
     expect(install.lane.ledger.listMoving()).toEqual([]);
   });
 
-  test('a raise back into the Private store whose kept copy holds OLDER text completes (the automatic move replaces it)', async () => {
+  test('a raise back into the Private store after an automatic lowering pruned its older copy completes with the current text', async () => {
     const { install, service } = await gardenSettledPersonal();
     rewriteInternalText(install, 'id:garden', 'Orchard grafting notes, revised for spring.');
     const settled = install.lane.ledger.getCurrent(garden)!;
@@ -339,20 +340,16 @@ describe('1. a raise back into a store that kept an older copy, and refused move
       engineVersion: settled.engineVersion,
       mapRevision: settled.mapRevision,
     };
-    // The migration's path (no replacement) still refuses: nothing it keeps is lost.
-    const refusedLedger = install.lane.ledger;
-    expect(refusedLedger.recordRoutedPlacement(garden, held, install.lane.set.placementFor(held))).toMatchObject({ outcome: 'queued_move', raise: true });
-    await expect(moveTieredItem({ set: install.lane.set, identity: { ...garden, family: 'file', localItemId: 'personal:id:garden' }, target: { metadataTier: 'private', contentTier: 'secure' } }))
-      .rejects.toBeInstanceOf(TierMoveRefusedError);
-    expect(await olympusSearch(install, 'grafting')).not.toContain('grafting notes');
-
-    // The automatic move replaces its own earlier copy and lands the item.
-    expect(await service.runOnce()).toMatchObject({ state: 'ran', autoMoves: { moved: 1, failed: 0 } });
+    // The automatic lowering pruned the older Private copy (#1174), so
+    // nothing older is kept there: even the migration's path (no replacement)
+    // lands the raise with the current text, and nothing is hidden or stuck.
+    expect(install.lane.ledger.recordRoutedPlacement(garden, held, install.lane.set.placementFor(held))).toMatchObject({ outcome: 'queued_move', raise: true });
+    await moveTieredItem({ set: install.lane.set, identity: { ...garden, family: 'file', localItemId: 'personal:id:garden' }, target: { metadataTier: 'private', contentTier: 'secure' } });
     expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ state: 'current', contentTier: 'secure' });
     expect(install.secure.exportItemCopy(garden)!.chunks.map((chunk) => chunk.boundedText).join(' ')).toContain('grafting notes');
     expect(install.lane.ledger.listMoving()).toEqual([]);
-    const ledger = await readEmbeddingLedger(join(root, 'embedding-ledger.jsonl'));
-    expect(ledger.entries.some((entry) => entry.what.includes('Replaced an older superseded copy'))).toBe(true);
+    expect(await service.runOnce()).toMatchObject({ state: 'ran' });
+    expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ state: 'current', contentTier: 'secure' });
   });
 
   test('a move that keeps failing goes to the back of the queue', () => {
@@ -490,7 +487,13 @@ describe('4. a re-judge that finds a secret in stored text', () => {
     expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ contentTier: 'secrets' });
     expect(install.lane.ledger.copies(garden)).toEqual([]);
     expect(install.lane.internal.current()!.exportItemCopy(garden)).toBeUndefined();
-    expect(install.secure.exportItemCopy(garden)).toBeUndefined();
+    // The automatic lowering already pruned the Private copy (#1174): at most
+    // a row with no names, text, chunks or vectors remains there.
+    const secureRow = install.secure.exportItemCopy(garden);
+    expect(secureRow?.chunks ?? []).toEqual([]);
+    expect(secureRow?.vectors ?? []).toEqual([]);
+    expect(secureRow?.columns.title ?? null).toBeNull();
+    expect(secureRow?.columns.search_text ?? null).toBeNull();
     expect(install.secrets.get(garden)).toMatchObject({ providerItemId: 'id:garden', findingKinds: expect.arrayContaining([expect.any(String)]) });
     const everything = await olympusSearch(install, 'orchard irrigation');
     expect(everything).not.toContain(FAKE_AWS_KEY);
@@ -863,7 +866,7 @@ describe('11b. the owner\'s own folder choice (names only) counts like a store r
 
 describe('10. olympus_search is not an answer on the private pool', () => {
   test('the worker does not wrap the ChatGPT evidence search in answer activity (it never preempts the sniffer)', () => {
-    const source = readFileSync(join(import.meta.dir, '..', 'src', 'workers', 'email-source', 'server.ts'), 'utf8');
+    const source = readFileSync(join(import.meta.dir, '..', 'src', 'workers', 'engine', 'server.ts'), 'utf8');
     const start = source.indexOf('const chatgptEvidenceSearch = ');
     expect(start).toBeGreaterThan(0);
     const body = source.slice(start, source.indexOf(': undefined;', start));

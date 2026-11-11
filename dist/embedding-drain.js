@@ -1205,6 +1205,10 @@ function embeddingPrefilterDirectory(ledgerPath) {
 function embeddingPrefilterInstallLedgerPath(classificationLedgerPath) {
   return `${classificationLedgerPath}.embedding-prefilter.tier-ledger.sqlite`;
 }
+function retiredEmbeddingPrefilterPaths(ledgerPath) {
+  const ledger = embeddingPrefilterInstallLedgerPath(ledgerPath);
+  return { directories: [embeddingPrefilterDirectory(ledgerPath), embeddingPrefilterDirectory(ledger)], ledger };
+}
 var TIER_LEDGER_SQLITE_STORE_ID = "olympus_tier_ledger", TIER_LEDGER_FILE_SUFFIX = ".tier-ledger.sqlite", SECRET_LOCATIONS_SQLITE_STORE_ID = "olympus_secret_locations", SECRET_LOCATIONS_FILE_SUFFIX = ".secret-locations.sqlite", TIER_SNIFFER_SQLITE_STORE_ID = "olympus_tier_sniffer", TIER_SNIFFER_FILE_SUFFIX = ".tier-sniffer.sqlite";
 var init_tier_ledger_path = __esm(() => {
   init_olympus_layout();
@@ -7428,7 +7432,107 @@ function strongKeysFromText(value) {
   }
   return [...keys];
 }
-var PEOPLE_LINK_REASON_TEXT, MAX_ADDRESS_TEXT_CHARS = 4096, addressesIn = (value) => addressSpansIn(value.slice(0, MAX_ADDRESS_TEXT_CHARS)), PEOPLE_AUTHORED_FAMILIES;
+function authoredStores(stores) {
+  return stores.filter((store) => PEOPLE_AUTHORED_FAMILIES.has(store.family));
+}
+function readStoreObservations(store) {
+  return store.peopleObservationsOffThread ? store.peopleObservationsOffThread() : Promise.resolve(store.peopleObservations());
+}
+function linkStores(index, stores, observations) {
+  const people = index.rebuild([...observations]);
+  const resolver = (provider, senderId, senderLabel) => index.citationName(provider, senderId, senderLabel);
+  for (const store of stores)
+    store.setPeopleNames?.(resolver);
+  return people;
+}
+
+class PeopleIndexRefresher {
+  index;
+  stores;
+  lastFingerprint;
+  lastRefreshAt;
+  now;
+  observed = new Map;
+  inFlight;
+  constructor(index, stores, options = {}) {
+    this.index = index;
+    this.stores = stores;
+    this.now = options.now ?? (() => Date.now());
+  }
+  refresh() {
+    return this.rebuildOnce(true);
+  }
+  async refreshIfChanged() {
+    if (this.inFlight) {
+      await this.inFlight;
+      return false;
+    }
+    const fingerprint = fingerprintParts(authoredStores(this.stores())).join("|");
+    if (fingerprint === this.lastFingerprint)
+      return false;
+    if (this.lastRefreshAt !== undefined && this.now() - this.lastRefreshAt < PEOPLE_INDEX_MIN_REBUILD_MS)
+      return false;
+    await this.rebuildOnce(false);
+    return true;
+  }
+  relink() {
+    if (this.lastRefreshAt === undefined)
+      return;
+    const stores = this.stores();
+    const current2 = new Set(authoredStores(stores));
+    const observations = [...this.observed].filter(([store]) => current2.has(store)).flatMap(([, entry]) => entry.observations);
+    return linkStores(this.index, stores, observations);
+  }
+  rebuildOnce(force) {
+    this.inFlight ??= this.rebuild(force).finally(() => {
+      this.inFlight = undefined;
+    });
+    return this.inFlight;
+  }
+  async rebuild(force) {
+    const stores = this.stores();
+    const authored = authoredStores(stores);
+    const parts = fingerprintParts(authored);
+    this.lastRefreshAt = this.now();
+    const observed = new Map;
+    for (const [position, store] of authored.entries()) {
+      const part = parts[position];
+      const kept = this.observed.get(store);
+      if (!force && kept && kept.part === part && !part.endsWith(UNREADABLE_VISIBILITY)) {
+        observed.set(store, kept);
+        continue;
+      }
+      try {
+        observed.set(store, { part, observations: await readStoreObservations(store) });
+      } catch {
+        parts[position] = `${part}${READ_FAILED}`;
+      }
+    }
+    this.observed = observed;
+    const people = linkStores(this.index, stores, [...observed.values()].flatMap((entry) => entry.observations));
+    this.lastFingerprint = parts.join("|");
+    return people;
+  }
+}
+function fingerprintParts(stores) {
+  return stores.map((store) => {
+    let sync = "";
+    let visibility = "";
+    try {
+      const run = store.lastSyncRun?.();
+      sync = run && run.status === "completed" ? `${run.syncRunId}@${run.completedAt ?? ""}` : "";
+    } catch {
+      sync = "";
+    }
+    try {
+      visibility = store.peopleVisibilityMarker?.() ?? "";
+    } catch {
+      return `${sync}${UNREADABLE_VISIBILITY}`;
+    }
+    return `${sync}#${visibility}`;
+  });
+}
+var PEOPLE_LINK_REASON_TEXT, MAX_ADDRESS_TEXT_CHARS = 4096, addressesIn = (value) => addressSpansIn(value.slice(0, MAX_ADDRESS_TEXT_CHARS)), PEOPLE_AUTHORED_FAMILIES, PEOPLE_INDEX_MIN_REBUILD_MS = 60000, UNREADABLE_VISIBILITY = "#unreadable", READ_FAILED = "!read-failed";
 var init_people_index = __esm(() => {
   init_olympus_layout();
   init_sender_rules();
@@ -11721,7 +11825,6 @@ var init_media_judge = __esm(() => {
 
 // src/workers/classification/tier-ledger.ts
 import { Database as Database2 } from "bun:sqlite";
-import { randomUUID as randomUUID4 } from "node:crypto";
 import { chmodSync as chmodSync4, closeSync as closeSync7, existsSync as existsSync10, mkdirSync as mkdirSync9, openSync as openSync7, statSync as statSync8 } from "node:fs";
 import { dirname as dirname15 } from "node:path";
 function isFailSafeMissingContentQuestion(reason) {
@@ -11794,7 +11897,6 @@ class TierLedger {
   dbPath;
   db;
   readOnly;
-  metaChanges = 0;
   now;
   constructor(options) {
     this.dbPath = options.dbPath;
@@ -11849,6 +11951,13 @@ class TierLedger {
     try {
       closeSqliteStore(this.db, { checkpoint: !this.readOnly });
     } finally {
+      const listeners = this.closeListeners ?? [];
+      this.closeListeners = undefined;
+      for (const listener of listeners) {
+        try {
+          listener();
+        } catch {}
+      }
       if (!this.readOnly && this.dbPath !== ":memory:")
         restrictLedgerFiles(this.dbPath);
     }
@@ -11985,54 +12094,6 @@ class TierLedger {
       `).run(verdict.modelId, ...idParams(identity));
     })();
     return outcome === undefined ? undefined : { outcome, record: this.getCurrent(identity) };
-  }
-  clearEmbeddingQuestion(identity, options) {
-    return this.db.transaction(() => {
-      const row = this.readRow(identity);
-      if (!row || row.state !== "pending" || row.metadataPending || !row.contentPending || !row.contentRead || row.metadataTier !== "private" || row.contentTier !== "private" || row.metadataForced || row.decidedBy === "override" || row.decidedBy === "owner_rule" || this.getOverride(identity) || row.reasons.some((reason) => reason.startsWith("metadata:owner_rule:")) || this.rejudgeQuestion(identity) || !options.questionStillCurrent())
-        return false;
-      this.writeMeta(options.receiptKey, options.receipt);
-      const result = this.applySnifferVerdict(identity, {
-        pass: "content",
-        tier: "private",
-        reason: options.reason,
-        modelId: options.modelId,
-        mapRevision: row.mapRevision
-      }, { questionStillCurrent: options.questionStillCurrent, ...options.placementFor ? { placementFor: options.placementFor } : {} });
-      if (!result || ["unchanged", "needs_placement", "stale_question", "stale_map", "held_moving"].includes(result.outcome)) {
-        this.writeMeta(options.receiptKey, "");
-        return false;
-      }
-      return true;
-    })();
-  }
-  revokeEmbeddingClearance(identity, reason, original, placementFor) {
-    return this.db.transaction(() => {
-      const row = this.readRow(identity);
-      if (!row || !row.reasons.includes(reason) || row.decidedBy === "override" || row.decidedBy === "owner_rule" || this.getOverride(identity) || row.contentTier !== original.contentTier || row.metadataTier !== original.metadataTier || row.metadataPending || row.contentPending || row.metadataForced || row.reasons.some((code) => code.startsWith("metadata:owner_rule:")) || original.reasons.filter((code) => code.startsWith("content:sha256:") || code.startsWith("content:names:")).some((code) => !row.reasons.includes(code)))
-        return true;
-      if (!row.routed) {
-        this.writeRow(identity, rowOf({ ...row, ...original }), undefined, row);
-        return true;
-      }
-      if (!placementFor)
-        return false;
-      if (row.state === "moving") {
-        const now = this.now().toISOString();
-        const staleFlip = row.generation + 1;
-        this.db.query(`UPDATE tier_copies SET superseded_by_generation = ?, updated_at = ?
-          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-          AND copy_state = 'superseded' AND superseded_by_generation = ?`).run(staleFlip + 1, now, ...idParams(identity), staleFlip);
-        this.db.query(`UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
-          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'`).run(staleFlip, now, ...idParams(identity));
-        this.db.query(`UPDATE tier_items SET generation = ?
-          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`).run(staleFlip, ...idParams(identity));
-        this.queueMoveRow(identity, { ...row, generation: staleFlip }, original, { hide: true, decidedAt: now });
-      } else {
-        this.recordRoutedPlacement(identity, original, placementFor(original));
-      }
-      return true;
-    })();
   }
   answerRejudgeQuestion(identity, question, verdict, options) {
     const base = question.decision;
@@ -13006,29 +13067,15 @@ class TierLedger {
   writeMeta(key, value) {
     if (key === "ledger_id")
       throw new Error("The ledger identity is never rewritten.");
-    this.metaChanges += this.db.query(`
+    this.db.query(`
       INSERT INTO tier_ledger_meta (key, value) VALUES (?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    `).run(key, value).changes;
+    `).run(key, value);
   }
   deleteMeta(key) {
     if (key === "ledger_id")
       throw new Error("The ledger identity is never deleted.");
-    this.metaChanges += this.db.query("DELETE FROM tier_ledger_meta WHERE key = ?").run(key).changes;
-  }
-  writeMetaBatch(entries) {
-    this.db.transaction(() => {
-      for (const [key, value] of entries)
-        this.writeMeta(key, value);
-    })();
-  }
-  writeEmbeddingTrainingScan(value, revision) {
-    return this.db.transaction(() => {
-      if ((this.readMeta("embedding-prefilter:training-revision") ?? "0") !== revision)
-        return false;
-      this.writeMeta("embedding-prefilter:training-scan-v1", value);
-      return true;
-    }).immediate();
+    this.db.query("DELETE FROM tier_ledger_meta WHERE key = ?").run(key);
   }
   metaEntries(prefix, options = {}) {
     return this.db.query(`SELECT key, value FROM tier_ledger_meta INDEXED BY tier_ledger_pending_meta
@@ -14014,6 +14061,11 @@ class TierLedger {
         AND corpus_id = ? AND copy_state = 'superseded'
     `).run(...idParams(identity), corpusId).changes > 0;
   }
+  hasMovedMigrationProposal(identity) {
+    return this.db.query(`SELECT 1 FROM tier_migration_proposals
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND status = 'moved' LIMIT 1`).get(...idParams(identity)) !== null;
+  }
   replaceMigrationProposals(planId, proposals) {
     const now = this.now().toISOString();
     this.db.transaction(() => {
@@ -14072,10 +14124,10 @@ class TierLedger {
   corpusHasCopies(corpusId) {
     return this.db.query("SELECT 1 FROM tier_copies WHERE corpus_id = ? LIMIT 1").get(corpusId) !== null;
   }
-  changeMarker(ignoreOwnMetaWrites = false) {
+  changeMarker() {
     const row = this.db.query("SELECT total_changes() AS changes").get();
     const version = this.db.query("PRAGMA data_version").get();
-    return `${version.data_version}:${row.changes - (ignoreOwnMetaWrites ? this.metaChanges : 0)}`;
+    return `${version.data_version}:${row.changes}`;
   }
   visibilityChangesSince(after) {
     return this.db.transaction(() => {
@@ -14237,22 +14289,38 @@ class TierLedger {
     return this.db.query("DELETE FROM tier_set_cursors WHERE set_id = ? AND connector_id = ?").run(setId, connectorId).changes > 0;
   }
   accountScopeCounts(provider, accountScope) {
-    const row = this.db.query(`
-      SELECT COUNT(*) AS items,
-        COALESCE(SUM(CASE WHEN state = 'pending' OR metadata_pending = 1 OR content_pending = 1 THEN 1 ELSE 0 END), 0) AS awaiting
-      FROM tier_items WHERE provider = ? AND account_scope = ?
-    `).get(provider, accountScope);
+    return this.readSteps(this.accountScopeCountSteps(provider, accountScope));
+  }
+  *accountScopeCountSteps(provider, accountScope) {
+    const row = yield {
+      sql: `
+        SELECT COUNT(*) AS items,
+          COALESCE(SUM(CASE WHEN state = 'pending' OR metadata_pending = 1 OR content_pending = 1 THEN 1 ELSE 0 END), 0) AS awaiting
+        FROM tier_items WHERE provider = ? AND account_scope = ?
+      `,
+      params: [provider, accountScope],
+      mode: "get"
+    };
     return { items: row.items, awaitingJudgment: row.awaiting };
+  }
+  onClose(listener) {
+    (this.closeListeners ??= []).push(listener);
+  }
+  closeListeners;
+  readSteps(steps) {
+    return this.db.transaction(() => {
+      let next = steps.next();
+      while (!next.done) {
+        const statement = this.db.query(next.value.sql);
+        const params = next.value.params;
+        next = steps.next(next.value.mode === "get" ? statement.get(...params) : statement.all(...params));
+      }
+      return next.value;
+    })();
   }
   withdrawAccountScope(provider, accountScope) {
     return this.db.transaction(() => {
       const now = this.now().toISOString();
-      this.writeMeta("embedding-prefilter:training-revision", randomUUID4());
-      this.deleteMeta("embedding-prefilter:training-scan-v1");
-      for (const kind of ["check:", "clear:"]) {
-        const prefix = `embedding-prefilter:${kind}${provider}\x00${accountScope}\x00`;
-        this.db.query("DELETE FROM tier_ledger_meta WHERE key >= ? AND key < ?").run(prefix, `${prefix}￿`);
-      }
       this.db.query(`
         UPDATE tier_copies
         SET copy_state = 'superseded',
@@ -15131,7 +15199,7 @@ function tierLedgerMigrations() {
       }
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 13,
       name: "hold_personal_first_copies",
       up(db) {
         db.query(`
@@ -15145,10 +15213,57 @@ function tierLedgerMigrations() {
           )
         `).run(PERSONAL_FIRST_REASON);
       }
+    },
+    {
+      version: 14,
+      name: "requeue_retired_embedding_clearances",
+      up(db) {
+        db.exec(`
+          CREATE TEMP TABLE retired_embedding_clearances AS
+            SELECT rowid AS item_rowid FROM tier_items
+            WHERE EXISTS (SELECT 1 FROM json_each(reasons_json) r
+              WHERE r.value GLOB 'content:embedding_prefilter:*');
+          -- Fence every old move and keep any staged destination hidden.
+          UPDATE tier_copies SET copy_state = 'superseded',
+            superseded_by_generation = generation
+          WHERE copy_state = 'staged' AND EXISTS (
+            SELECT 1 FROM tier_items t JOIN retired_embedding_clearances x ON x.item_rowid = t.rowid
+            WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
+              AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
+          );
+          UPDATE tier_items SET state = 'pending', content_pending = 1,
+            generation = generation + CASE WHEN state = 'moving' THEN 1 ELSE 0 END,
+            target_metadata_tier = NULL, target_content_tier = NULL,
+            move_attempts = 0, rejudge_json = NULL, rejudged_key = NULL,
+            reasons_json = (SELECT json_group_array(CASE
+              WHEN r.value GLOB 'content:embedding_prefilter:*' THEN '${RETIRED_EMBEDDING_CLEARANCE_REASON}'
+              ELSE r.value END) FROM json_each(tier_items.reasons_json) r)
+          WHERE rowid IN (SELECT item_rowid FROM retired_embedding_clearances);
+          -- Hold-until-judged (#1318): the requeued item's current copy is
+          -- not embeddable or searchable until the judge answers again.
+          UPDATE tier_copies SET embed_hold = 1
+          WHERE copy_state = 'current' AND embed_hold = 0 AND EXISTS (
+            SELECT 1 FROM tier_items t JOIN retired_embedding_clearances x ON x.item_rowid = t.rowid
+            WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
+              AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
+          );
+          DROP TABLE retired_embedding_clearances;
+          DELETE FROM tier_ledger_meta WHERE key GLOB 'embedding-prefilter:*';
+        `);
+      }
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: "moved_migration_identity",
+      up(db) {
+        db.exec(`CREATE INDEX IF NOT EXISTS tier_migration_moved_identity
+          ON tier_migration_proposals (provider, account_scope, conversation_key, provider_item_id)
+          WHERE status = 'moved';`);
+      }
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 13, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", DEFAULT_REJUDGE_SCAN_ROWS = 2000, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TierLedgerSchemaError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_RECHECK_META_PREFIX = "recheck:", STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 15, RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided", TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", DEFAULT_REJUDGE_SCAN_ROWS = 2000, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TierLedgerSchemaError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_RECHECK_META_PREFIX = "recheck:", STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_store_write_guard();
@@ -16482,7 +16597,13 @@ function rejudgeStoredContent(set, record, options) {
     return;
   }
   if (content.contentPending && record.state === "pending") {
-    ledger.recordRoutedPlacement(identity, decision, {
+    const retiredClearance = record.reasons.includes(RETIRED_EMBEDDING_CLEARANCE_REASON);
+    ledger.recordRoutedPlacement(identity, {
+      ...decision,
+      metadataTier: retiredClearance ? record.metadataTier : decision.metadataTier,
+      contentTier: retiredClearance ? record.contentTier : decision.contentTier,
+      reasons: retiredClearance ? [...decision.reasons, RETIRED_EMBEDDING_CLEARANCE_REASON] : decision.reasons
+    }, {
       copies: current2,
       embedHold: current2.some((copy) => copy.embedHold)
     }, { guard: { generation: record.generation, override: undefined } });
@@ -16648,7 +16769,6 @@ var init_tier_rejudge = __esm(() => {
   init_parent_context();
   init_stored_names();
   init_tier_classifier();
-  init_tier_ledger();
   init_tier_ledger();
   init_secrets_disposition();
   init_tier_placement();
@@ -18080,6 +18200,57 @@ var init_tier_set_binding = __esm(() => {
   init_tier_ledger_path();
 });
 
+// src/workers/file-extraction/unreadable-files.ts
+function unreadableFileReason(errorKind) {
+  const kind = (errorKind ?? "").toLowerCase();
+  if (!kind)
+    return "other";
+  if (kind === UNREAD_PRIVACY_CHECK_MISSING_KIND)
+    return "privacy_check_missing";
+  if (kind.includes("encrypted") || kind.includes("password"))
+    return "password";
+  if (kind.includes("too_large"))
+    return "too_large";
+  if (kind.includes("timeout"))
+    return "timed_out";
+  if (kind.includes("not_found") || kind.includes("content_unavailable") || kind.includes("missing_bytes"))
+    return "missing";
+  if (kind.includes("permission") || kind.includes("auth"))
+    return "no_access";
+  if (kind.includes("unsupported") || kind === "extractor_kind_unknown" || kind === "no_extractor")
+    return "unsupported";
+  if (kind.includes("empty"))
+    return "no_text";
+  if (kind.includes("invalid") || kind.includes("undecodable") || kind.includes("corrupt") || kind.includes("damaged"))
+    return "damaged";
+  return "other";
+}
+function unreadHoldDisposition(outcome, contentAllowed = true) {
+  if (!contentAllowed)
+    return { kind: "by_choice" };
+  if (!outcome || outcome.status === "indexed")
+    return { kind: "waiting" };
+  if (outcome.status === "blocked_policy" || outcome.status === "metadata_only" && (outcome.policyDecision === "metadata_only" || outcome.lastErrorKind === "store_item_metadata_only")) {
+    return { kind: "by_choice" };
+  }
+  const specific = (kind) => !["other", "no_text"].includes(unreadableFileReason(kind));
+  const errorKind = [outcome.lastErrorKind, ...outcome.warnings, outcome.status].find((kind) => kind !== undefined && specific(kind)) ?? outcome.lastErrorKind ?? outcome.warnings[0] ?? outcome.status;
+  return { kind: "cannot_read", errorKind, reason: unreadableFileReason(errorKind) };
+}
+var UNREAD_PRIVACY_CHECK_MISSING_KIND = "privacy_check_missing", NO_EXTRACTION_JOB_OUTCOME, TOKEN_ALPHABET, DEFAULT_TOKEN_TTL_MS, CURSOR_TIME_ALPHABET;
+var init_unreadable_files = __esm(() => {
+  init_archive_formats();
+  NO_EXTRACTION_JOB_OUTCOME = Object.freeze({
+    status: "skipped_unsupported",
+    lastErrorKind: "no_extractor",
+    warnings: [],
+    policyDecision: "index_allowed"
+  });
+  TOKEN_ALPHABET = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_");
+  DEFAULT_TOKEN_TTL_MS = 30 * 60000;
+  CURSOR_TIME_ALPHABET = new Set("0123456789TZ:.+-");
+});
+
 // src/core/child-item-id.ts
 function childProviderItemId(parentProviderItemId, key2) {
   if (!parentProviderItemId)
@@ -18999,7 +19170,7 @@ var init_store_identity = __esm(() => {
 });
 
 // src/core/media-cache.ts
-import { createHash as createHash9, randomUUID as randomUUID5 } from "node:crypto";
+import { createHash as createHash9, randomUUID as randomUUID4 } from "node:crypto";
 import {
   chmodSync as chmodSync7,
   closeSync as closeSync9,
@@ -20699,7 +20870,7 @@ var init_embeddings = __esm(() => {
 });
 
 // src/workers/connector-store/local-index.ts
-import { createHash as createHash11, randomUUID as randomUUID6 } from "node:crypto";
+import { createHash as createHash11, randomUUID as randomUUID5 } from "node:crypto";
 import { existsSync as existsSync19, lstatSync as lstatSync11, mkdirSync as mkdirSync13, statSync as statSync11 } from "node:fs";
 import { dirname as dirname23 } from "node:path";
 import { Database as Database6 } from "bun:sqlite";
@@ -22760,6 +22931,14 @@ function createConnectorStoreSenderIndexes(db) {
     CREATE INDEX IF NOT EXISTS idx_connector_store_items_sender_owner
       ON items(sender_is_owner, sender_id);
   `);
+  createConnectorStorePeopleIndex(db);
+}
+function createConnectorStorePeopleIndex(db) {
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_connector_store_items_people
+      ON items(tombstoned, provider, sender_id, sender_label, provider_conversation_id, trust_tier, sender_is_owner)
+      WHERE ${PEOPLE_SENDER_PREDICATE.replaceAll("i.", "")};
+  `);
 }
 function createConnectorStoreEmbeddingModelsTable(db) {
   db.exec(`
@@ -23080,9 +23259,10 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, READ_ONLY_MIN_SCHEMA_VERSION = 7, LocalConnectorStore, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, LocalConnectorStore, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_store_write_guard();
+  init_unreadable_files();
   init_job_names();
   init_keyword_context();
   init_keyword_languages();
@@ -23237,7 +23417,7 @@ var init_local_index = __esm(() => {
     embeddingFailureState;
     embeddingDeferral;
     constructor(options) {
-      this.visibilityOwner = randomUUID6();
+      this.visibilityOwner = randomUUID5();
       this.visibilityNow = () => Date.now();
       this.visibilityPublishChunk = VISIBILITY_PUBLISH_CHUNK;
       this.visibilityTimers = {
@@ -23249,7 +23429,7 @@ var init_local_index = __esm(() => {
       this.readOnly = options.readOnly === true;
       this.corpusId = requireNonEmpty(options.corpusId, "Connector store corpus id");
       this.dbPath = requireNonEmpty(options.dbPath, "Connector store db path");
-      this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID6()}` : options.mediaHolder ?? this.dbPath;
+      this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID5()}` : options.mediaHolder ?? this.dbPath;
       const configuredFormats = options.stillImagesRead === undefined ? undefined : resolveStillImageFormats(options.stillImagesRead);
       this.stillImageFormatsRead = configuredFormats ? () => configuredFormats : () => readyStillImageFormats();
       this.family = options.family;
@@ -23298,6 +23478,7 @@ var init_local_index = __esm(() => {
           createConnectorStoreMediaJudgments(this.db);
           createConnectorStoreItemTextVersions(this.db);
           createConnectorStoreVisibilityTables(this.db);
+          createConnectorStorePeopleIndex(this.db);
           validateConnectorStoreSchema(this.db);
         }
         if (options.readOnly !== true)
@@ -24544,7 +24725,7 @@ var init_local_index = __esm(() => {
       this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, nowIso(), "provider_listing");
     }
     tombstoneCopy(identity, options) {
-      const syncRunId = `connector-tier-copy-${randomUUID6()}`;
+      const syncRunId = `connector-tier-copy-${randomUUID5()}`;
       const startedAt = nowIso();
       try {
         return this.db.transaction(() => {
@@ -24577,7 +24758,7 @@ var init_local_index = __esm(() => {
           return "held";
         if (!row && options.record !== true)
           return "none";
-        const syncRunId = `connector-secret-retired-${randomUUID6()}`;
+        const syncRunId = `connector-secret-retired-${randomUUID5()}`;
         const now = nowIso();
         this.db.query(`
         INSERT INTO sync_runs (
@@ -24664,7 +24845,7 @@ var init_local_index = __esm(() => {
           }
           if (writeClaim && !this.acceptItemWriteClaim(existing.item_pk, writeClaim))
             return "stale_claim";
-          const syncRunId = `connector-secrets-extraction-${randomUUID6()}`;
+          const syncRunId = `connector-secrets-extraction-${randomUUID5()}`;
           const startedAt = nowIso();
           this.db.query(`
           INSERT INTO sync_runs (
@@ -24772,7 +24953,7 @@ var init_local_index = __esm(() => {
       if (options.vectorProvider) {
         assertConnectorStoreEmbeddingBackend(this.trustDomain, options.vectorProvider);
       }
-      const syncRunId = `connector-tier-move-${randomUUID6()}`;
+      const syncRunId = `connector-tier-move-${randomUUID5()}`;
       const now = nowIso();
       const imported = this.db.transaction(() => {
         this.db.query(`
@@ -25199,7 +25380,7 @@ var init_local_index = __esm(() => {
           INSERT INTO sync_runs (
             sync_run_id, corpus_id, connector_id, status, cursor, items_seen, items_indexed, started_at, completed_at
           ) VALUES (?, ?, ?, 'completed', NULL, ?, 0, ?, ?)
-        `).run(`image-content-private-only-${randomUUID6()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
+        `).run(`image-content-private-only-${randomUUID5()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
         }
       } finally {
         this.releaseUnreferencedChunkMedia();
@@ -25434,18 +25615,42 @@ var init_local_index = __esm(() => {
     }
     peopleObservations() {
       const tierHidden = this.tierHiddenItemPks();
-      const heldSql = this.visibilityJournal && this.visibilitySqlMemo;
-      const rows = this.db.query(`
-      SELECT i.provider AS provider, i.sender_id AS sender_id, i.sender_label AS sender_label,
-        i.provider_conversation_id AS conversation_id, i.trust_tier AS trust_tier,
-        MAX(COALESCE(i.sender_is_owner, 0)) AS is_owner, COUNT(*) AS item_count
-      FROM items i
-      WHERE i.tombstoned = 0
-        AND ((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))
-        AND i.item_pk NOT IN (SELECT value FROM json_each(?))
-        ${heldSql ? "AND NOT EXISTS (SELECT 1 FROM temp.tier_visibility_pks v WHERE v.flag = 'held' AND v.item_pk = i.item_pk)" : ""}
-      GROUP BY i.provider, i.sender_id, i.sender_label, i.provider_conversation_id, i.trust_tier
-    `).all(JSON.stringify(heldSql ? tierHidden.hidden : [...tierHidden.hidden, ...tierHidden.held]));
+      return this.peopleObservationsFromRows(this.readHere(this.peopleObservationSteps(tierHidden)));
+    }
+    async peopleObservationsOffThread() {
+      if (!offThreadReadsSupported(this.dbPath))
+        return this.peopleObservations();
+      for (let attempt = 0;attempt < PEOPLE_OFF_THREAD_READ_ATTEMPTS; attempt += 1) {
+        const marker = this.peopleVisibilityMarker();
+        const tierHidden = await this.tierHiddenItemPksInTurns();
+        const steps = this.peopleObservationSteps(tierHidden);
+        let step = steps.next();
+        while (!step.done)
+          step = steps.next(await readOnPool(this.dbPath, step.value));
+        if (this.peopleVisibilityMarker() === marker)
+          return this.peopleObservationsFromRows(step.value);
+      }
+      return this.peopleObservations();
+    }
+    *peopleObservationSteps(tierHidden) {
+      return yield this.peopleObservationRead([...tierHidden.hidden, ...tierHidden.held]);
+    }
+    peopleObservationRead(excludedItemPks) {
+      return {
+        mode: "all",
+        sql: `
+        SELECT i.provider AS provider, i.sender_id AS sender_id, i.sender_label AS sender_label,
+          i.provider_conversation_id AS conversation_id, i.trust_tier AS trust_tier,
+          MAX(COALESCE(i.sender_is_owner, 0)) AS is_owner, COUNT(*) AS item_count
+        FROM items i
+        WHERE i.tombstoned = 0
+          AND ${PEOPLE_SENDER_PREDICATE}
+          AND i.item_pk NOT IN (SELECT value FROM json_each(?))
+        GROUP BY i.provider, i.sender_id, i.sender_label, i.provider_conversation_id, i.trust_tier`,
+        params: [JSON.stringify(excludedItemPks)]
+      };
+    }
+    peopleObservationsFromRows(rows) {
       const bySender = new Map;
       for (const row of rows) {
         const key2 = `${row.provider}\x00${row.sender_id ?? ""}\x00${row.sender_label ?? ""}`;
@@ -26369,7 +26574,7 @@ var init_local_index = __esm(() => {
       }
       const tierLedgerForWrite = this.visibilityLedger();
       const summary = this.db.transaction(() => {
-        const syncRunId = `connector-representation-restore-${randomUUID6()}`;
+        const syncRunId = `connector-representation-restore-${randomUUID5()}`;
         const startedAt = this.now().toISOString();
         this.db.query(`
         INSERT INTO sync_runs (
@@ -26713,7 +26918,7 @@ var init_local_index = __esm(() => {
           };
         }
         const now = this.now().toISOString();
-        const syncRunId = `connector-relinquish-${randomUUID6()}`;
+        const syncRunId = `connector-relinquish-${randomUUID5()}`;
         this.db.query(`
         INSERT INTO sync_runs (
           sync_run_id, corpus_id, connector_id, status, cursor,
@@ -26852,7 +27057,7 @@ var init_local_index = __esm(() => {
         sync_run_id, corpus_id, connector_id, status, cursor,
         items_seen, items_indexed, started_at, completed_at
       ) VALUES (?, ?, ?, 'completed', ?, ?, 0, ?, ?)
-    `).run(`trust-reconcile-${randomUUID6()}`, this.corpusId, reconcileConnectorId, `${complete ? "complete:" : ""}stricter-item-pk:${cursorItemPk}`, identitiesScanned, now, now);
+    `).run(`trust-reconcile-${randomUUID5()}`, this.corpusId, reconcileConnectorId, `${complete ? "complete:" : ""}stricter-item-pk:${cursorItemPk}`, identitiesScanned, now, now);
       if (complete)
         (this.trustReconciliationReadyCursors ??= new Map).set(reconcileConnectorId, cursorItemPk);
     }
@@ -27118,6 +27323,9 @@ var init_local_index = __esm(() => {
       SET sender_id = ?, sender_label = ?, sender_is_owner = ?
       WHERE item_pk = ?
     `);
+      const noteChange = this.db.query(`
+      INSERT INTO item_visibility_feed (provider, account_scope, conversation_key, provider_item_id) VALUES (?, ?, ?, ?)
+    `);
       this.db.transaction(() => {
         for (const record of records) {
           const sender = normalizeSenderMetadata(record);
@@ -27150,8 +27358,12 @@ var init_local_index = __esm(() => {
             continue;
           }
           update.run(senderId, senderLabel, senderIsOwner, row.item_pk);
+          noteChange.run(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
           counts.itemsRepaired += 1;
           outputDigest.update(JSON.stringify({ identity: digestIdentity, status: "repaired" }));
+        }
+        if (counts.itemsRepaired > 0) {
+          this.db.query(`DELETE FROM item_visibility_feed WHERE seq <= (SELECT MAX(seq) - ${ITEM_VISIBILITY_FEED_RETENTION} FROM item_visibility_feed)`).run();
         }
       })();
       return {
@@ -27512,7 +27724,7 @@ var init_local_index = __esm(() => {
         windowRemovedLocalItemIds: reconcileWindowRemovedLocalItemIds
       });
       await connector.authenticate();
-      const syncRunId = `connector-sync-${randomUUID6()}`;
+      const syncRunId = `connector-sync-${randomUUID5()}`;
       const startedAt = nowIso();
       this.db.query(`
       INSERT INTO sync_runs (
@@ -29533,12 +29745,16 @@ var init_local_index = __esm(() => {
       let exhausted = false;
       let tryBound = true;
       while (true) {
-        const rankedPage = (bound2) => ({ mode: "all", sql: `
-        ${bound2 === undefined ? "" : `WITH top AS MATERIALIZED (
+        const rankedPage = (from) => {
+          const bound2 = from === undefined ? undefined : ("bound" in from) ? from.bound : undefined;
+          const atOrAbove = from === undefined ? undefined : ("atOrAbove" in from) ? from.atOrAbove : undefined;
+          const top = from === undefined ? undefined : bound2 !== undefined ? "top" : "tied";
+          return { mode: "all", sql: `
+        ${top === undefined ? "" : `WITH ${top} AS MATERIALIZED (
           SELECT rowid AS fts_rowid, rank FROM connector_store_fts
           WHERE connector_store_fts MATCH ?
             AND rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'
-          ORDER BY rank LIMIT ?
+            ${bound2 !== undefined ? "ORDER BY rank LIMIT ?" : "AND (rank + 0.0) <= ?"}
         )`}
         SELECT
           i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
@@ -29551,12 +29767,12 @@ var init_local_index = __esm(() => {
           -- item rather than an arbitrary one. That is exactly the chunk the
           -- citation should point at.
           connector_store_fts.chunk_pk AS chunk_pk,
-          ${bound2 === undefined ? "MIN(connector_store_fts.rank) AS rank" : `MIN(top.rank) AS rank,
+          ${top === undefined ? "MIN(connector_store_fts.rank) AS rank" : top === "tied" ? "MIN(tied.rank) AS rank" : `MIN(top.rank) AS rank,
           (SELECT COUNT(*) FROM top) AS bound_rows,
           (SELECT MAX(rank) FROM top) AS bound_rank`}
-        FROM ${bound2 === undefined ? "connector_store_fts" : "top JOIN connector_store_fts ON connector_store_fts.rowid = top.fts_rowid"}
+        FROM ${top === undefined ? "connector_store_fts" : `${top} JOIN connector_store_fts ON connector_store_fts.rowid = ${top}.fts_rowid`}
         JOIN items i ON i.item_pk = connector_store_fts.item_pk
-        WHERE ${bound2 === undefined ? `connector_store_fts MATCH ?
+        WHERE ${top === undefined ? `connector_store_fts MATCH ?
           AND connector_store_fts.rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'` : "1"}
           AND i.tombstoned = 0
           AND LOWER(COALESCE(i.mime_type, '')) NOT IN (${CONTAINER_MIME_TYPES_SQL})
@@ -29568,22 +29784,27 @@ var init_local_index = __esm(() => {
         ORDER BY rank ASC, COALESCE(i.updated_at, i.authored_at, i.indexed_at) DESC, i.item_pk ASC
         LIMIT ? OFFSET ?
       `, params: [
-          terms,
-          ...bound2 === undefined ? [] : [bound2],
-          ...selectedAccount ? [selectedAccount] : [],
-          ...selectedFilters.params,
-          ...selectedFtsScope.params,
-          pageSize,
-          scanned
-        ] });
+            terms,
+            ...bound2 === undefined ? [] : [bound2],
+            ...atOrAbove === undefined ? [] : [atOrAbove],
+            ...selectedAccount ? [selectedAccount] : [],
+            ...selectedFilters.params,
+            ...selectedFtsScope.params,
+            pageSize,
+            scanned
+          ] };
+        };
         const bound = Math.min(KEYWORD_RANKED_BOUND_MAX, Math.max(KEYWORD_RANKED_BOUND_MIN, (scanned + pageSize) * KEYWORD_RANKED_BOUND_ROWS_PER_ITEM));
-        const boundedPage = tryBound ? yield rankedPage(bound) : [];
+        const boundedPage = tryBound ? yield rankedPage({ bound }) : [];
         const head = boundedPage[0];
         const last = boundedPage.at(-1);
-        const proved = head !== undefined && last !== undefined && (head.bound_rows < bound || boundedPage.length === pageSize && last.rank < head.bound_rank);
-        if (!proved)
+        const full = boundedPage.length === pageSize;
+        const proved = head !== undefined && last !== undefined && (head.bound_rows < bound || full && last.rank < head.bound_rank);
+        const tied = !proved && full && head !== undefined ? yield rankedPage({ atOrAbove: head.bound_rank }) : undefined;
+        const tiedProved = tied !== undefined && tied.length === pageSize;
+        if (!proved && !tiedProved)
           tryBound = false;
-        const page = proved ? boundedPage.map(({ bound_rows: _rows, bound_rank: _rank, ...row }) => row) : yield rankedPage(undefined);
+        const page = proved ? boundedPage.map(({ bound_rows: _rows, bound_rank: _rank, ...row }) => row) : tiedProved ? tied : yield rankedPage(undefined);
         scanned += page.length;
         exhausted = page.length < pageSize;
         const rows = page.filter((row) => !seen.has(row.item_pk));
@@ -29960,11 +30181,11 @@ var init_local_index = __esm(() => {
       const key2 = JSON.stringify(scope ?? null);
       if (!this.settledUnreadableCountMemo?.has(key2)) {
         try {
-          const count = (await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true }))).length;
+          const counts = this.unreadHoldCounts(await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
           const memos = this.settledUnreadableCountMemo ??= new Map;
           if (memos.size > 32)
             memos.clear();
-          memos.set(key2, { at: Date.now(), count });
+          memos.set(key2, { at: Date.now(), ...counts });
         } catch {}
       }
     }
@@ -29975,13 +30196,13 @@ var init_local_index = __esm(() => {
       if (maxAgeMs > 0 && memo) {
         if (Date.now() - memo.at >= maxAgeMs)
           this.refreshSettledUnreadableCountInTurns(key2, scope);
-        return memo.count;
+        return memo;
       }
-      const count = runSteps(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true })).length;
+      const counts = this.unreadHoldCounts(runSteps(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
       if (memos.size > 32)
         memos.clear();
-      memos.set(key2, { at: Date.now(), count });
-      return count;
+      memos.set(key2, { at: Date.now(), ...counts });
+      return counts;
     }
     settledUnreadableCountRefresh;
     refreshSettledUnreadableCountInTurns(key2, scope) {
@@ -29991,21 +30212,28 @@ var init_local_index = __esm(() => {
       running.add(key2);
       (async () => {
         try {
-          const count = (await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true }))).length;
+          const counts = this.unreadHoldCounts(await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
           const memos = this.settledUnreadableCountMemo ??= new Map;
           if (memos.size > 32)
             memos.clear();
-          memos.set(key2, { at: Date.now(), count });
+          memos.set(key2, { at: Date.now(), ...counts });
         } catch {} finally {
           running.delete(key2);
         }
       })();
     }
     settledUnreadableCountMemo;
-    extractionEnded;
-    setExtractionEndedProbe(probe) {
-      this.extractionEnded = probe;
+    extractionOutcome;
+    setExtractionOutcomeProbe(probe) {
+      this.extractionOutcome = probe;
       this.settledUnreadableCountMemo = undefined;
+    }
+    unreadHoldCounts(rows) {
+      return {
+        count: rows.filter((item) => item.disposition.kind === "cannot_read").length,
+        waitingPks: rows.filter((item) => item.disposition.kind === "waiting").map((item) => item.row.item_pk),
+        policyPks: rows.filter((item) => item.disposition.kind === "by_choice").map((item) => item.row.item_pk)
+      };
     }
     *settledUnreadableRowsSteps(scope, options = {}) {
       if (scope?.itemsAllowed === false || scope?.contentAllowed === false)
@@ -30016,12 +30244,22 @@ var init_local_index = __esm(() => {
       const identities = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, options.withoutSecretsOverrides ? "metadata_layer_settled_unreadable_not_secret" : "metadata_layer_settled_unreadable");
       const filters = connectorStoreFilterSql(scope?.contentFilters ?? scope?.itemFilters);
       const account = normalizeOptionalAccountScope(scope?.accountScope);
-      const ended = this.extractionEnded;
+      const outcome = this.extractionOutcome;
       const rows = yield* this.itemRowsForIdentitiesSteps(identities, (identity) => identity.providerConversationId ?? "", {
         sql: `${this.childItemColumnsPresent ? "AND COALESCE(i.bytes_available, 1) <> 0" : ""} ${account ? "AND i.account_scope = ?" : ""} ${filters.sql}`,
         params: [...account ? [account] : [], ...filters.params]
       });
-      return rows.map((row) => ({ identity: identities[row.idx], row })).filter(({ identity }) => !ended || ended(identity));
+      const matched = [];
+      for (let index = 0;index < rows.length; index += 1) {
+        if (index > 0 && index % SETTLED_UNREADABLE_ITEMS_SLICE === 0)
+          yield;
+        const row = rows[index];
+        const identity = identities[row.idx];
+        const disposition = unreadHoldDisposition(outcome?.(identity, row.local_item_id));
+        if (options.includeUnsettled || disposition.kind === "cannot_read")
+          matched.push({ identity, row, disposition });
+      }
+      return matched;
     }
     *itemRowsForIdentitiesSteps(identities, conversationOf, extra = { sql: "", params: [] }) {
       const out = [];
@@ -30058,7 +30296,9 @@ var init_local_index = __esm(() => {
       for (let index = 0;index < matched.length; index += 1) {
         if (index > 0 && index % SETTLED_UNREADABLE_ITEMS_SLICE === 0)
           yield;
-        const { identity, row } = matched[index];
+        const { identity, row, disposition } = matched[index];
+        if (disposition.kind !== "cannot_read")
+          continue;
         const override = ledger.getOverride(identity);
         if (override?.kind === "tier" && override.tier === "secrets")
           continue;
@@ -30077,7 +30317,7 @@ var init_local_index = __esm(() => {
             ...row.source_version ? { sourceVersion: row.source_version } : {}
           },
           failedAt: record.decidedAt,
-          errorKind: "privacy_check_missing"
+          errorKind: disposition.errorKind
         });
       }
       return out;
@@ -30134,9 +30374,12 @@ var init_local_index = __esm(() => {
       ${namesOnlyNotIn}`;
       const parityWhere = `${contentWhere}
       ${heldNotIn}`;
+      const unreadHolds = this.settledUnreadableCount(scope, options.countsMaxAgeMs ?? 0);
+      const policyHolds = new Set(unreadHolds.policyPks);
       const unread = new Set(tier.metadataLayerContentUnread);
       const keptNamesOnlyPks = tier.metadataLayer.filter((pk) => !unread.has(pk));
-      const fileNamesOnlyNotIn = keptNamesOnlyPks.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
+      const fileNamesOnlyPks = [...new Set([...keptNamesOnlyPks, ...policyHolds])];
+      const fileNamesOnlyNotIn = fileNamesOnlyPks.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
       const fileScopeWhere = `${scope?.contentAllowed === false ? "AND 0" : ""}
       ${accountScope ? "AND i.account_scope = ?" : ""}
       ${contentFilters.sql}
@@ -30155,9 +30398,9 @@ var init_local_index = __esm(() => {
         ...accountScope ? [accountScope] : [],
         ...contentFilters.params,
         ...jsonList(tier.hidden),
-        ...jsonList(keptNamesOnlyPks)
+        ...jsonList(fileNamesOnlyPks)
       ];
-      const fileScoped = scope !== undefined && !(scope.contentNotBefore !== undefined && Object.entries(scope).every(([key2, value]) => key2 === "contentNotBefore" || value === undefined));
+      const fileScoped = policyHolds.size > 0 || scope !== undefined && !(scope.contentNotBefore !== undefined && Object.entries(scope).every(([key2, value]) => key2 === "contentNotBefore" || value === undefined));
       const contentNotBeforeMs = scope?.contentNotBefore === undefined ? Number.NaN : Date.parse(scope.contentNotBefore);
       const outsideWindowSql = Number.isFinite(contentNotBeforeMs) ? `(COALESCE(julianday(i.authored_at) < julianday(?), 0) = 1
           AND NOT EXISTS (SELECT 1 FROM chunks oc WHERE oc.item_pk = i.item_pk))` : undefined;
@@ -30283,14 +30526,14 @@ var init_local_index = __esm(() => {
         ...contentParams
       ], mode: "all" };
       const tierStatus = tier.hidden.length > 0 || tier.held.length > 0 || tier.moving > 0 || tier.metadataLayer.length > 0 ? {
-        pendingClassificationItems: tier.held.length,
+        pendingClassificationItems: new Set([...tier.held, ...unreadHolds.waitingPks]).size,
         supersededChunks: tier.hidden.length > 0 ? (yield { sql: `
                 SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))
               `, params: [JSON.stringify(tier.hidden)], mode: "get" }).n : 0,
         tierMoveInProgress: tier.moving,
         ...namesOnlyKeptCount(namesOnlyWithText.length > 0 ? (yield { sql: NAMES_ONLY_KEPT_SQL, params: [JSON.stringify(namesOnlyWithText)], mode: "get" }).n : 0)
       } : undefined;
-      const settledUnreadableItems = this.settledUnreadableCount(scope, options.countsMaxAgeMs ?? 0);
+      const settledUnreadableItems = unreadHolds.count;
       const last = this.lastSyncRun();
       return {
         corpusId: this.corpusId,
@@ -31937,7 +32180,7 @@ var init_file_scope_sources = __esm(() => {
 });
 
 // src/core/source-scope-approval.ts
-import { createHash as createHash12, randomUUID as randomUUID7 } from "node:crypto";
+import { createHash as createHash12, randomUUID as randomUUID6 } from "node:crypto";
 import { existsSync as existsSync20, readFileSync as readFileSync17 } from "node:fs";
 import { dirname as dirname24, join as join22 } from "node:path";
 function defaultFileSourceScopeStatePath(handleRegistryPath) {
@@ -32030,7 +32273,7 @@ function approveFileSourceScope(input) {
     }
     const existing = readState(input.statePath);
     const approvals = existing.kind === "valid" ? existing.state.approvals.filter((candidate) => candidate.source_id !== input.sourceId) : [];
-    const revision = randomUUID7();
+    const revision = randomUUID6();
     approvals.push({
       source_id: input.sourceId,
       account_generation: input.accountGeneration,
@@ -32170,7 +32413,7 @@ var init_source_scope_approval = __esm(() => {
 });
 
 // src/core/mail-source-scope.ts
-import { createHash as createHash13, randomUUID as randomUUID8 } from "node:crypto";
+import { createHash as createHash13, randomUUID as randomUUID7 } from "node:crypto";
 import { existsSync as existsSync21, readFileSync as readFileSync18 } from "node:fs";
 import { dirname as dirname25, join as join23 } from "node:path";
 function defaultMailSourceScopeStatePath(handleRegistryPath) {
@@ -32227,7 +32470,7 @@ function approveMailSourceScope(input) {
     const scope = normalizeMailScope({ ...input.scope, ...keptCutoff ? { contentAfter: keptCutoff } : {} }, now);
     const existing = readState2(input.statePath);
     const approvals = existing.kind === "valid" ? existing.state.approvals.filter((candidate) => candidate.source_id !== MAIL_SOURCE_SCOPE_ID) : [];
-    const revision = randomUUID8();
+    const revision = randomUUID7();
     const ownerTierRules = mailScopeOwnerTierRules(scope);
     approvals.push({
       source_id: MAIL_SOURCE_SCOPE_ID,
@@ -32532,7 +32775,7 @@ var init_forget = __esm(() => {
 // src/core/this-computer.ts
 import { spawnSync as spawnSync3 } from "node:child_process";
 import { existsSync as existsSync22, readFileSync as readFileSync19 } from "node:fs";
-import { createHash as createHash14, randomUUID as randomUUID9 } from "node:crypto";
+import { createHash as createHash14, randomUUID as randomUUID8 } from "node:crypto";
 import { dirname as dirname26, join as join24 } from "node:path";
 function hostBinding(machineId, hostIdentity) {
   const identity = hostIdentity();
@@ -32879,14 +33122,14 @@ var init_vocabulary = __esm(() => {
     missing: "the file is no longer where it was",
     no_access: "Olympus isn't allowed to open it",
     unsupported: "a format Olympus can't read",
-    privacy_check_missing: "kept Private before it was read",
+    privacy_check_missing: "kept Private because Olympus couldn't read it",
     other: "Olympus couldn't read it"
   };
   DASHBOARD_UNREADABLE_NOTE_MANY = "That is more than a healthy source has, so it may be a problem in Olympus rather than your files." + " The other files still answer questions.";
   DASHBOARD_UNREADABLE_REASON_WORDS = {
     privacy_check_missing: {
-      one: "{count} item was kept Private without being read because its privacy check was missing. Open it below to check it, then use Sync now to try reading it again.",
-      other: "{count} items were kept Private without being read because their privacy checks were missing. Open them below to check them, then use Sync now to try reading them again."
+      one: "{count} item kept Private because Olympus couldn't read it. The reason is shown with the file below.",
+      other: "{count} items kept Private because Olympus couldn't read them. The reasons are shown with the files below."
     },
     damaged_or_unsupported: {
       one: "{count} file Olympus can't read at all",
@@ -33240,6 +33483,7 @@ var init_vocabulary = __esm(() => {
     notRunningLine: "{percent}% read · {items} so far. It goes on from there once imports can run.",
     notRunningLineUncounted: "{percent}% read. It goes on from there once imports can run.",
     removingNotRunningLine: "It is removed once removals can run. The file itself stays where it is.",
+    counting: "Counting what this archive holds…",
     judgedLine: "{judged} judged · {held} waiting for the private model",
     heldWhy: {
       ready: "Until the private model judges them, they stay Private.",
@@ -35843,7 +36087,7 @@ var init_credential_broker = __esm(() => {
 });
 
 // src/workers/credential-broker/connected-handles.ts
-import { randomUUID as randomUUID10 } from "node:crypto";
+import { randomUUID as randomUUID9 } from "node:crypto";
 import { existsSync as existsSync23, mkdirSync as mkdirSync14, readFileSync as readFileSync20 } from "node:fs";
 import { homedir as homedir10 } from "node:os";
 import { dirname as dirname28, join as join25 } from "node:path";
@@ -35874,7 +36118,7 @@ async function withConnectedHandleGrantCustody(registryPath, options, mutation) 
         throw new ConnectedHandleGrantMutationError("credential_grant_superseded", "A newer Disconnect superseded this connection attempt. Start Connect again.");
       }
       if (options.advanceEpoch === true) {
-        writePrivateFileAtomicSync(connectedHandleGrantEpochPath(registryPath), `${JSON.stringify({ version: 1, epoch: randomUUID10() }, null, 2)}
+        writePrivateFileAtomicSync(connectedHandleGrantEpochPath(registryPath), `${JSON.stringify({ version: 1, epoch: randomUUID9() }, null, 2)}
 `);
       }
       return await mutation();
@@ -38525,7 +38769,7 @@ function moveTieredItemsLowering(moves, options = {}) {
       entry.move.beforeFlip?.();
       entry.move.afterVerified?.();
       try {
-        results.push({ result: flipVerifiedMove(entry.move, entry.receipt) });
+        results.push({ result: entry.receipt.result ?? flipVerifiedMove(entry.move, entry.receipt) });
       } catch (error) {
         results.push({ error });
       }
@@ -38534,6 +38778,15 @@ function moveTieredItemsLowering(moves, options = {}) {
     if (timings)
       timings.ledgerCommitMs += ms;
   }));
+  prepared.forEach((entry, index) => {
+    if ("error" in entry || !("result" in results[index]))
+      return;
+    try {
+      pruneAutomaticMove(entry.move, entry.receipt);
+    } catch (error) {
+      results[index] = { error };
+    }
+  });
   results.forEach((result, index) => {
     if ("result" in result)
       timed(moves[index].timings, "rereadMs", () => oweExtractionRereads(set.ledger, moves[index].identity));
@@ -38566,10 +38819,14 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
     throw new TierMoveRefusedError("Secrets cannot use the content repair path.");
   }
   const receiptKey = purgeReceiptKey(identity);
-  const receiptToResume = readVerifiedMove(ledger, identity);
+  let receiptToResume = readVerifiedMove(ledger, identity);
+  if (receiptToResume?.result && (record.state === "moving" || receiptToResume.result.generation !== record.generation || receiptToResume.target.metadataTier !== target.metadataTier || receiptToResume.target.contentTier !== target.contentTier)) {
+    pruneAutomaticMove(options, receiptToResume);
+    receiptToResume = undefined;
+  }
   if (receiptToResume) {
     const receipt = receiptToResume;
-    if (receipt.generation !== record.generation || receipt.target.metadataTier !== target.metadataTier || receipt.target.contentTier !== target.contentTier)
+    if ((receipt.result?.generation ?? receipt.generation) !== record.generation || receipt.target.metadataTier !== target.metadataTier || receipt.target.contentTier !== target.contentTier)
       throw new TierLedgerGenerationConflictError;
     if (loweringOnly && receipt.raise)
       throw new TierMoveRefusedError("Raises cannot enter a lowering batch.");
@@ -38738,6 +38995,7 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
           raise,
           sources,
           destinations,
+          ...options.replaceOwnSupersededCopy && !raise ? { pruneSuperseded: true } : {},
           ...options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {},
           rehomeTagged,
           replacedSuperseded,
@@ -38772,7 +39030,7 @@ function queueMoveNote(options, receipt, result) {
     entry_id: entryId,
     recorded_at: new Date().toISOString(),
     kind: "note",
-    what: `Tier move of one item (${raise ? "raise" : "lateral or lower"}) from ${sources.map((copy) => copy.corpusId).join(", ")} ` + `to ${destinations.map((copy) => `${copy.corpusId} (${copy.layers})`).join(", ")}: ` + `${result.chunkCount} chunk(s) at the destination, ${destinations.reduce((sum, copy) => sum + copy.vectorsCopied, 0)} vector(s) copied with no provider call, ` + `${destinations.reduce((sum, copy) => sum + copy.chunksToEmbed, 0)} chunk(s) left for the destination's own embedding model. ` + `Superseded copies are hidden; lower content on raises is purged: ${result.supersededCorpora.join(", ") || "none"}.` + (Object.keys(replaced).length ? ` Replaced an older superseded copy of this item's own earlier move: ${Object.entries(replaced).map(([corpus, count]) => `${corpus} (${count} chunk(s) of older text)`).join(", ")}.` : ""),
+    what: `Tier move of one item (${raise ? "raise" : "lateral or lower"}) from ${sources.map((copy) => copy.corpusId).join(", ")} ` + `to ${destinations.map((copy) => `${copy.corpusId} (${copy.layers})`).join(", ")}: ` + `${result.chunkCount} chunk(s) at the destination, ${destinations.reduce((sum, copy) => sum + copy.vectorsCopied, 0)} vector(s) copied with no provider call, ` + `${destinations.reduce((sum, copy) => sum + copy.chunksToEmbed, 0)} chunk(s) left for the destination's own embedding model. ` + `Superseded copies are ${receipt.pruneSuperseded ? "pruned after the committed flip" : "hidden"}; lower content on raises is purged: ${result.supersededCorpora.join(", ") || "none"}.` + (Object.keys(replaced).length ? ` Replaced an older superseded copy of this item's own earlier move: ${Object.entries(replaced).map(([corpus, count]) => `${corpus} (${count} chunk(s) of older text)`).join(", ")}.` : ""),
     scope: {
       corpora: [...new Set([...sources.map((copy) => copy.corpusId), ...destinations.map((copy) => copy.corpusId)])],
       chunks: Object.fromEntries(destinations.map((copy) => [copy.corpusId, copy.chunksWritten + copy.chunksKept]))
@@ -38781,7 +39039,12 @@ function queueMoveNote(options, receipt, result) {
     approved_by: config.approvedBy,
     status: "complete"
   };
-  options.set.ledger.writeMeta(`${MOVE_NOTE_PREFIX}${entryId}`, JSON.stringify({ path: config.path, entry }));
+  queueTierLedgerEntry(options.set.ledger, config.path, entry);
+}
+function queueTierLedgerEntry(ledger, path, entry) {
+  if (!entry.entry_id)
+    throw new Error("A durable tier ledger entry needs an id.");
+  ledger.writeMeta(`${MOVE_NOTE_PREFIX}${entry.entry_id}`, JSON.stringify({ path, entry }));
 }
 async function flushTierMoveNotes(ledger, options = {}) {
   const started = performance.now();
@@ -38844,6 +39107,8 @@ function readVerifiedMove(ledger, identity) {
   const current2 = ledger.getCurrent(identity);
   if (!current2)
     throw new TierLedgerGenerationConflictError;
+  if (receipt.pruneSuperseded && receipt.result && current2.generation >= receipt.result.generation)
+    return receipt;
   if (receipt.generation < current2.generation || receipt.generation === current2.generation && current2.state !== "moving") {
     ledger.withGenerationFence(identity, current2.generation, () => {
       const now = ledger.getCurrent(identity);
@@ -38864,9 +39129,50 @@ function copyFingerprint(copy, layers) {
   })).digest("hex");
 }
 function finishVerifiedMove(options, receipt) {
-  const result = flipVerifiedMove(options, receipt);
+  const result = receipt.result ?? flipVerifiedMove(options, receipt);
+  pruneAutomaticMove(options, receipt);
   timed(options.timings, "rereadMs", () => oweExtractionRereads(options.set.ledger, options.identity));
   return result;
+}
+function pruneSupersededStoreCopy(store, identity) {
+  const chunks = store.stripCopyContent(identity, { keepMetadata: false });
+  const row = store.exportItemCopy(identity)?.identity;
+  if (row) {
+    const { sourceVersion: _kept, ...withdrawn } = row;
+    store.tombstoneCopy(withdrawn, { connectorId: TIER_MOVE_CONNECTOR_ID });
+  }
+  return chunks;
+}
+function pruneAutomaticMove(options, receipt) {
+  if (!receipt.pruneSuperseded)
+    return;
+  const { set, identity } = options;
+  const raw = set.ledger.readMeta(purgeReceiptKey(identity));
+  if (!raw)
+    return;
+  const committed = JSON.parse(raw);
+  if (!committed.result)
+    throw new TierLedgerGenerationConflictError;
+  const current2 = set.ledger.getCurrent(identity);
+  if (!current2 || current2.generation < committed.result.generation)
+    throw new TierLedgerGenerationConflictError;
+  set.ledger.withGenerationFence(identity, current2.generation, () => {
+    if (set.ledger.readMeta(purgeReceiptKey(identity)) !== raw)
+      throw new TierLedgerGenerationConflictError;
+    for (const copy of set.ledger.copies(identity)) {
+      if (copy.state !== "superseded" || copy.supersededByGeneration !== committed.result.generation)
+        continue;
+      const store = set.store(copy.trustDomain);
+      if (!store)
+        throw new Error("Superseded store unavailable; automatic prune remains pending.");
+      store.bindTierSet(set.ledger);
+      timed(options.timings, "purgeMs", () => pruneSupersededStoreCopy(store, identity));
+      set.ledger.removeSupersededCopy(identity, copy.corpusId);
+    }
+    options.afterPurge?.();
+    set.ledger.writeMeta(purgeReceiptKey(identity), "");
+    queueMoveNote(options, committed, committed.result);
+  });
 }
 function oweExtractionRereads(ledger, identity) {
   let known = [];
@@ -38929,8 +39235,8 @@ function flipVerifiedMove(options, receipt) {
       }
       if (receipt.raise && content)
         ledger.writeMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`, String(flipped.generation));
-      options.afterPurge?.();
-      ledger.writeMeta(purgeReceiptKey(identity), "");
+      if (!receipt.pruneSuperseded)
+        options.afterPurge?.();
       const result = {
         outcome: "moved",
         raise: receipt.raise,
@@ -38939,7 +39245,14 @@ function flipVerifiedMove(options, receipt) {
         supersededCorpora: ledger.copies(identity).filter((copy) => copy.state === "superseded" && copy.supersededByGeneration === flipped.generation).map((copy) => copy.corpusId),
         chunkCount: receipt.destinations.reduce((sum, copy) => sum + copy.chunksWritten + copy.chunksKept, 0)
       };
-      queueMoveNote(options, receipt, result);
+      if (receipt.pruneSuperseded) {
+        if (result.supersededCorpora.length)
+          ledger.writeMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`, String(flipped.generation));
+        ledger.writeMeta(purgeReceiptKey(identity), JSON.stringify({ ...receipt, result }));
+      } else {
+        ledger.writeMeta(purgeReceiptKey(identity), "");
+        queueMoveNote(options, receipt, result);
+      }
       return result;
     }));
   });
@@ -39058,6 +39371,14 @@ var init_tier_content_purge = __esm(() => {
   init_tier_ledger();
   init_embedding_ledger();
   init_tier_move();
+});
+
+// src/workers/connector-store/tier-auto-prune-sweep.ts
+var init_tier_auto_prune_sweep = __esm(() => {
+  init_tier_ledger();
+  init_embedding_ledger();
+  init_tier_move();
+  init_tier_content_purge();
 });
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { spawn } from "node:child_process";
@@ -39507,6 +39828,20 @@ function onnxRuntimeFromDirectory(runtimeDir) {
 }
 var init_runtime = () => {};
 
+// src/workers/source-index/built-in-embedding/pair-tokenizer.ts
+function truncatePair(a, b, room, tiePolicy = "wordpiece") {
+  let keepA = a.length;
+  let keepB = b.length;
+  room = Math.max(0, room);
+  while (keepA + keepB > room) {
+    if (keepB > keepA || keepB === keepA && (tiePolicy === "wordpiece" || a.length > b.length))
+      keepB -= 1;
+    else
+      keepA -= 1;
+  }
+  return { a: a.slice(0, keepA), b: b.slice(0, keepB), truncated: keepA < a.length || keepB < b.length };
+}
+
 // src/workers/source-index/built-in-embedding/wordpiece.ts
 class WordPieceTokenizer {
   vocab;
@@ -39548,22 +39883,7 @@ class WordPieceTokenizer {
     };
   }
   encodePair(first, second, maxLength) {
-    let a = this.tokenize(first);
-    let b = this.tokenize(second);
-    const room = Math.max(0, maxLength - 3);
-    const truncated = a.length + b.length > room;
-    if (truncated) {
-      let keepA = a.length;
-      let keepB = b.length;
-      while (keepA + keepB > room) {
-        if (keepB >= keepA)
-          keepB -= 1;
-        else
-          keepA -= 1;
-      }
-      a = a.slice(0, keepA);
-      b = b.slice(0, keepB);
-    }
+    const { a, b, truncated } = truncatePair(this.tokenize(first), this.tokenize(second), maxLength - 3);
     const ids = [this.clsId, ...a, this.sepId, ...b, this.sepId];
     const typeIds = ids.map((_, index) => index < a.length + 2 ? 0 : 1);
     return { ids, typeIds, truncated };
@@ -40908,6 +41228,7 @@ var init_tiered_store_set = __esm(() => {
   init_tier_names_only_settle();
   init_tier_held_settle();
   init_tier_content_purge();
+  init_tier_auto_prune_sweep();
   init_tier_move();
   init_tier_row_rehome();
   init_tier_rules_sweep();
@@ -41601,6 +41922,99 @@ var init_x_bookmarks = __esm(() => {
   init_live_control2();
   init_reconcile_state();
 });
+// src/core/file-mime.ts
+var MIME_BY_EXTENSION, SOURCE_CODE_EXTENSIONS;
+var init_file_mime = __esm(() => {
+  init_still_image_formats();
+  MIME_BY_EXTENSION = Object.freeze({
+    pdf: "application/pdf",
+    txt: "text/plain",
+    text: "text/plain",
+    md: "text/plain",
+    markdown: "text/plain",
+    log: "text/plain",
+    rst: "text/plain",
+    org: "text/plain",
+    tex: "text/plain",
+    srt: "text/plain",
+    vtt: "text/plain",
+    csv: "text/csv",
+    tsv: "text/tab-separated-values",
+    json: "application/json",
+    yaml: "text/plain",
+    yml: "text/plain",
+    toml: "text/plain",
+    xml: "application/xml",
+    html: "text/html",
+    htm: "text/html",
+    rtf: "application/rtf",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    png: "image/png",
+    gif: "image/gif",
+    webp: "image/webp",
+    heic: "image/heic",
+    heif: "image/heif",
+    tif: "image/tiff",
+    tiff: "image/tiff",
+    bmp: "image/bmp",
+    mp3: "audio/mpeg",
+    m4a: "audio/mp4",
+    wav: "audio/wav",
+    flac: "audio/flac",
+    ogg: "audio/ogg",
+    aac: "audio/aac",
+    mp4: "video/mp4",
+    m4v: "video/x-m4v",
+    mov: "video/quicktime",
+    mkv: "video/x-matroska",
+    webm: "video/webm",
+    avi: "video/x-msvideo",
+    mpg: "video/mpeg",
+    mpeg: "video/mpeg",
+    "3gp": "video/3gpp"
+  });
+  SOURCE_CODE_EXTENSIONS = new Set([
+    "ts",
+    "tsx",
+    "js",
+    "jsx",
+    "mjs",
+    "cjs",
+    "py",
+    "rb",
+    "go",
+    "rs",
+    "java",
+    "kt",
+    "swift",
+    "c",
+    "h",
+    "cc",
+    "cpp",
+    "hpp",
+    "cs",
+    "php",
+    "sh",
+    "bash",
+    "zsh",
+    "sql",
+    "css",
+    "scss",
+    "lua",
+    "pl",
+    "r",
+    "scala",
+    "ini",
+    "cfg",
+    "conf",
+    "env"
+  ]);
+});
+
 // src/workers/dropbox-files/provider-client.ts
 class DropboxApiMetadataClient {
   supportsNativeRecursive = true;
@@ -41871,6 +42285,7 @@ var init_provider_client = __esm(() => {
 // src/workers/dropbox-files/connector.ts
 var init_connector3 = __esm(() => {
   init_credential_broker();
+  init_file_mime();
   init_provider_client();
 });
 
@@ -43257,6 +43672,67 @@ var init_bounded_text = __esm(() => {
   ]);
 });
 
+// src/workers/file-extraction/extractors/rtf.ts
+var RTF_MIME_TYPES, SKIPPED_DESTINATIONS, CODE_PAGE_LABELS;
+var init_rtf = __esm(() => {
+  RTF_MIME_TYPES = new Set(["application/rtf", "text/rtf"]);
+  SKIPPED_DESTINATIONS = new Set([
+    "fonttbl",
+    "colortbl",
+    "stylesheet",
+    "info",
+    "pict",
+    "object",
+    "listtable",
+    "listoverridetable",
+    "rsidtbl",
+    "generator",
+    "themedata",
+    "colorschememapping",
+    "datastore",
+    "latentstyles",
+    "xmlnstbl",
+    "header",
+    "headerl",
+    "headerr",
+    "headerf",
+    "footer",
+    "footerl",
+    "footerr",
+    "footerf",
+    "filetbl",
+    "revtbl",
+    "mmathPr",
+    "pgdsctbl",
+    "fldinst"
+  ]);
+  CODE_PAGE_LABELS = new Map([
+    [866, "ibm866"],
+    [874, "windows-874"],
+    [932, "shift_jis"],
+    [936, "gbk"],
+    [949, "euc-kr"],
+    [950, "big5"],
+    [1250, "windows-1250"],
+    [1251, "windows-1251"],
+    [1252, "windows-1252"],
+    [1253, "windows-1253"],
+    [1254, "windows-1254"],
+    [1255, "windows-1255"],
+    [1256, "windows-1256"],
+    [1257, "windows-1257"],
+    [1258, "windows-1258"],
+    [1e4, "macintosh"],
+    [10007, "x-mac-cyrillic"],
+    [20866, "koi8-r"],
+    [28591, "iso-8859-1"],
+    [28592, "iso-8859-2"],
+    [28595, "iso-8859-5"],
+    [54936, "gb18030"],
+    [65001, "utf-8"]
+  ]);
+});
+
 // src/workers/file-extraction/extractors/document-formats.ts
 var init_document_formats = __esm(() => {
   init_bounded_text();
@@ -43281,6 +43757,7 @@ var init_image_prepare = __esm(() => {
 
 // src/workers/file-extraction/extractors/text.ts
 var init_text = __esm(() => {
+  init_rtf();
   init_bounded_text();
   init_command_runner();
   init_document_formats();
@@ -43648,6 +44125,7 @@ var init_runner = __esm(() => {
   init_command_runner();
   init_tier_classifier();
   init_bounded_text();
+  init_file_mime();
   init_job_store();
   init_secret_scan_off_thread();
   init_store_sink();
@@ -47237,15 +47715,6 @@ var init_remote_open = __esm(() => {
   init_open_targets();
 });
 
-// src/workers/file-extraction/unreadable-files.ts
-var TOKEN_ALPHABET, DEFAULT_TOKEN_TTL_MS, CURSOR_TIME_ALPHABET;
-var init_unreadable_files = __esm(() => {
-  init_archive_formats();
-  TOKEN_ALPHABET = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_");
-  DEFAULT_TOKEN_TTL_MS = 30 * 60000;
-  CURSOR_TIME_ALPHABET = new Set("0123456789TZ:.+-");
-});
-
 // src/workers/dashboard/session-marker.ts
 var init_session_marker = () => {};
 
@@ -48772,7 +49241,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       add(item, line);
     }
     const items = wholeCount(archive.items);
-    const uncounted = archive.countsUnavailable === true && archive.status !== "removing";
+    const unavailable2 = archive.countsUnavailable === true && archive.status !== "removing";
+    const uncounted = unavailable2 || archive.countsPending === true;
     if (halted && archive.status === "importing") {
       const pct = typeof archive.percent === "number" && isFinite(archive.percent) ? archive.percent : 0;
       add(item, el("p", "muted", uncounted ? fill(A.notRunningLineUncounted, { percent: percent(pct) }) : fill(A.notRunningLine, { percent: percent(pct), items: itemCount(archive, items) })));
@@ -48805,9 +49275,11 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       const file = typeof stop.file === "string" && stop.file ? stop.file : A.thisFile;
       add(item, el("p", "reason strong", fill(words2.why, { file })), el("p", "muted", words2.fix));
     }
-    if (uncounted)
+    if (archive.countsPending === true && archive.status !== "removing")
+      add(item, el("p", "muted", A.counting));
+    if (unavailable2)
       add(item, el("p", "reason strong", A.countsUnavailable.why), el("p", "muted", A.countsUnavailable.fix));
-    else if (archive.status !== "removing" && items > 0)
+    else if (!uncounted && archive.status !== "removing" && items > 0)
       add(item, archiveHeld(archive, model));
     const why = archiveWhy(archive);
     if (why)
@@ -48887,7 +49359,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (stall.length)
       add(box, add(el("ul", "plain stall-why"), ...stall.map((line) => el("li", "", line))));
     if (lines.length) {
-      add(box, add(el("ul", "plain"), ...lines), unreadableFiles(unreadable, id), el("p", "why-note", unreadable.reasons.some((reason) => reason.code === "privacy_check_missing") ? "" : unreadable.many ? P.unreadableNoteMany : P.unreadableNote));
+      add(box, add(el("ul", "plain"), ...lines), unreadableFiles(unreadable, id), el("p", "why-note", unreadable.many ? P.unreadableNoteMany : P.unreadableNote));
     }
     return box;
   }
@@ -54183,9 +54655,6 @@ var init_app_release_agent = __esm(() => {
   init_remote_result();
 });
 
-// src/workers/remote-oauth/consent-page.ts
-var init_consent_page = () => {};
-
 // src/core/email-policy.ts
 var FORBIDDEN_RAW_RESPONSE_KEYS;
 var init_email_policy = __esm(() => {
@@ -54207,34 +54676,6 @@ var init_email_policy = __esm(() => {
     "embedding_vectors",
     "vector",
     "vectors"
-  ]);
-});
-
-// src/core/source-index/selected-item-safety.ts
-var FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS;
-var init_selected_item_safety = __esm(() => {
-  FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS = new Set([
-    "body",
-    "boundedtext",
-    "chunk",
-    "chunks",
-    "content",
-    "document",
-    "html",
-    "markdown",
-    "message",
-    "messages",
-    "packet",
-    "passage",
-    "raw",
-    "rawpacket",
-    "rawsource",
-    "rawtext",
-    "snippet",
-    "sourcepacket",
-    "sourcesnippet",
-    "sourcetext",
-    "text"
   ]);
 });
 // src/workers/chatgpt/dashboard-resource.ts
@@ -54663,6 +55104,37 @@ var init_mac_permissions = __esm(() => {
     unreadableLinux: 'Your user account is not allowed to open this folder. Check who may open it (for example with "ls -ld" on it) and change its permissions or choose another folder, then choose Try again.'
   };
 });
+
+// src/core/source-index/selected-item-safety.ts
+var FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS;
+var init_selected_item_safety = __esm(() => {
+  FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS = new Set([
+    "body",
+    "boundedtext",
+    "chunk",
+    "chunks",
+    "content",
+    "document",
+    "html",
+    "markdown",
+    "message",
+    "messages",
+    "packet",
+    "passage",
+    "raw",
+    "rawpacket",
+    "rawsource",
+    "rawtext",
+    "snippet",
+    "sourcepacket",
+    "sourcesnippet",
+    "sourcetext",
+    "text"
+  ]);
+});
+
+// src/workers/remote-oauth/consent-page.ts
+var init_consent_page = () => {};
 
 // src/core/consult-gate.ts
 function buildMonthNames() {
@@ -55944,99 +56416,6 @@ var init_delphi = __esm(() => {
   init_model_transport();
   init_zkapi_consult_settings();
   init_secret_store();
-});
-
-// src/core/file-mime.ts
-var MIME_BY_EXTENSION, SOURCE_CODE_EXTENSIONS;
-var init_file_mime = __esm(() => {
-  init_still_image_formats();
-  MIME_BY_EXTENSION = Object.freeze({
-    pdf: "application/pdf",
-    txt: "text/plain",
-    text: "text/plain",
-    md: "text/plain",
-    markdown: "text/plain",
-    log: "text/plain",
-    rst: "text/plain",
-    org: "text/plain",
-    tex: "text/plain",
-    srt: "text/plain",
-    vtt: "text/plain",
-    csv: "text/csv",
-    tsv: "text/tab-separated-values",
-    json: "application/json",
-    yaml: "text/plain",
-    yml: "text/plain",
-    toml: "text/plain",
-    xml: "application/xml",
-    html: "text/html",
-    htm: "text/html",
-    rtf: "application/rtf",
-    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    jpg: "image/jpeg",
-    jpeg: "image/jpeg",
-    png: "image/png",
-    gif: "image/gif",
-    webp: "image/webp",
-    heic: "image/heic",
-    heif: "image/heif",
-    tif: "image/tiff",
-    tiff: "image/tiff",
-    bmp: "image/bmp",
-    mp3: "audio/mpeg",
-    m4a: "audio/mp4",
-    wav: "audio/wav",
-    flac: "audio/flac",
-    ogg: "audio/ogg",
-    aac: "audio/aac",
-    mp4: "video/mp4",
-    m4v: "video/x-m4v",
-    mov: "video/quicktime",
-    mkv: "video/x-matroska",
-    webm: "video/webm",
-    avi: "video/x-msvideo",
-    mpg: "video/mpeg",
-    mpeg: "video/mpeg",
-    "3gp": "video/3gpp"
-  });
-  SOURCE_CODE_EXTENSIONS = new Set([
-    "ts",
-    "tsx",
-    "js",
-    "jsx",
-    "mjs",
-    "cjs",
-    "py",
-    "rb",
-    "go",
-    "rs",
-    "java",
-    "kt",
-    "swift",
-    "c",
-    "h",
-    "cc",
-    "cpp",
-    "hpp",
-    "cs",
-    "php",
-    "sh",
-    "bash",
-    "zsh",
-    "sql",
-    "css",
-    "scss",
-    "lua",
-    "pl",
-    "r",
-    "scala",
-    "ini",
-    "cfg",
-    "conf",
-    "env"
-  ]);
 });
 
 // src/workers/archive-import/notes/note.ts
@@ -60187,29 +60566,29 @@ var init_to_json_schema = __esm(() => {
 
 // node_modules/zod/v4/core/json-schema-processors.js
 var formatMap, stringProcessor = (schema, ctx, _json, _params) => {
-  const json = _json;
-  json.type = "string";
+  const json2 = _json;
+  json2.type = "string";
   const { minimum, maximum, format, patterns, contentEncoding } = schema._zod.bag;
   if (typeof minimum === "number")
-    json.minLength = minimum;
+    json2.minLength = minimum;
   if (typeof maximum === "number")
-    json.maxLength = maximum;
+    json2.maxLength = maximum;
   if (format) {
-    json.format = formatMap[format] ?? format;
-    if (json.format === "")
-      delete json.format;
+    json2.format = formatMap[format] ?? format;
+    if (json2.format === "")
+      delete json2.format;
     if (format === "time") {
-      delete json.format;
+      delete json2.format;
     }
   }
   if (contentEncoding)
-    json.contentEncoding = contentEncoding;
+    json2.contentEncoding = contentEncoding;
   if (patterns && patterns.size > 0) {
     const regexes = [...patterns];
     if (regexes.length === 1)
-      json.pattern = regexes[0].source;
+      json2.pattern = regexes[0].source;
     else if (regexes.length > 1) {
-      json.allOf = [
+      json2.allOf = [
         ...regexes.map((regex) => ({
           ...ctx.target === "draft-07" || ctx.target === "draft-04" || ctx.target === "openapi-3.0" ? { type: "string" } : {},
           pattern: regex.source
@@ -60218,66 +60597,66 @@ var formatMap, stringProcessor = (schema, ctx, _json, _params) => {
     }
   }
 }, numberProcessor = (schema, ctx, _json, _params) => {
-  const json = _json;
+  const json2 = _json;
   const { minimum, maximum, format, multipleOf, exclusiveMaximum, exclusiveMinimum } = schema._zod.bag;
   if (typeof format === "string" && format.includes("int"))
-    json.type = "integer";
+    json2.type = "integer";
   else
-    json.type = "number";
+    json2.type = "number";
   const exMin = typeof exclusiveMinimum === "number" && exclusiveMinimum >= (minimum ?? Number.NEGATIVE_INFINITY);
   const exMax = typeof exclusiveMaximum === "number" && exclusiveMaximum <= (maximum ?? Number.POSITIVE_INFINITY);
   const legacy = ctx.target === "draft-04" || ctx.target === "openapi-3.0";
   if (exMin) {
     if (legacy) {
-      json.minimum = exclusiveMinimum;
-      json.exclusiveMinimum = true;
+      json2.minimum = exclusiveMinimum;
+      json2.exclusiveMinimum = true;
     } else {
-      json.exclusiveMinimum = exclusiveMinimum;
+      json2.exclusiveMinimum = exclusiveMinimum;
     }
   } else if (typeof minimum === "number") {
-    json.minimum = minimum;
+    json2.minimum = minimum;
   }
   if (exMax) {
     if (legacy) {
-      json.maximum = exclusiveMaximum;
-      json.exclusiveMaximum = true;
+      json2.maximum = exclusiveMaximum;
+      json2.exclusiveMaximum = true;
     } else {
-      json.exclusiveMaximum = exclusiveMaximum;
+      json2.exclusiveMaximum = exclusiveMaximum;
     }
   } else if (typeof maximum === "number") {
-    json.maximum = maximum;
+    json2.maximum = maximum;
   }
   if (typeof multipleOf === "number")
-    json.multipleOf = multipleOf;
-}, booleanProcessor = (_schema, _ctx, json, _params) => {
-  json.type = "boolean";
+    json2.multipleOf = multipleOf;
+}, booleanProcessor = (_schema, _ctx, json2, _params) => {
+  json2.type = "boolean";
 }, bigintProcessor = (_schema, ctx, _json, _params) => {
   if (ctx.unrepresentable === "throw") {
     throw new Error("BigInt cannot be represented in JSON Schema");
   }
-}, nullProcessor = (_schema, ctx, json, _params) => {
+}, nullProcessor = (_schema, ctx, json2, _params) => {
   if (ctx.target === "openapi-3.0") {
-    json.type = "string";
-    json.nullable = true;
-    json.enum = [null];
+    json2.type = "string";
+    json2.nullable = true;
+    json2.enum = [null];
   } else {
-    json.type = "null";
+    json2.type = "null";
   }
-}, neverProcessor = (_schema, _ctx, json, _params) => {
-  json.not = {};
+}, neverProcessor = (_schema, _ctx, json2, _params) => {
+  json2.not = {};
 }, anyProcessor = (_schema, _ctx, _json, _params) => {}, unknownProcessor = (_schema, _ctx, _json, _params) => {}, dateProcessor = (_schema, ctx, _json, _params) => {
   if (ctx.unrepresentable === "throw") {
     throw new Error("Date cannot be represented in JSON Schema");
   }
-}, enumProcessor = (schema, _ctx, json, _params) => {
+}, enumProcessor = (schema, _ctx, json2, _params) => {
   const def = schema._zod.def;
   const values = getEnumValues(def.entries);
   if (values.every((v) => typeof v === "number"))
-    json.type = "number";
+    json2.type = "number";
   if (values.every((v) => typeof v === "string"))
-    json.type = "string";
-  json.enum = values;
-}, literalProcessor = (schema, ctx, json, _params) => {
+    json2.type = "string";
+  json2.enum = values;
+}, literalProcessor = (schema, ctx, json2, _params) => {
   const def = schema._zod.def;
   const vals = [];
   for (const val of def.values) {
@@ -60297,22 +60676,22 @@ var formatMap, stringProcessor = (schema, ctx, _json, _params) => {
   }
   if (vals.length === 0) {} else if (vals.length === 1) {
     const val = vals[0];
-    json.type = val === null ? "null" : typeof val;
+    json2.type = val === null ? "null" : typeof val;
     if (ctx.target === "draft-04" || ctx.target === "openapi-3.0") {
-      json.enum = [val];
+      json2.enum = [val];
     } else {
-      json.const = val;
+      json2.const = val;
     }
   } else {
     if (vals.every((v) => typeof v === "number"))
-      json.type = "number";
+      json2.type = "number";
     if (vals.every((v) => typeof v === "string"))
-      json.type = "string";
+      json2.type = "string";
     if (vals.every((v) => typeof v === "boolean"))
-      json.type = "boolean";
+      json2.type = "boolean";
     if (vals.every((v) => v === null))
-      json.type = "null";
-    json.enum = vals;
+      json2.type = "null";
+    json2.enum = vals;
   }
 }, customProcessor = (_schema, ctx, _json, _params) => {
   if (ctx.unrepresentable === "throw") {
@@ -60323,26 +60702,26 @@ var formatMap, stringProcessor = (schema, ctx, _json, _params) => {
     throw new Error("Transforms cannot be represented in JSON Schema");
   }
 }, arrayProcessor = (schema, ctx, _json, params) => {
-  const json = _json;
+  const json2 = _json;
   const def = schema._zod.def;
   const { minimum, maximum } = schema._zod.bag;
   if (typeof minimum === "number")
-    json.minItems = minimum;
+    json2.minItems = minimum;
   if (typeof maximum === "number")
-    json.maxItems = maximum;
-  json.type = "array";
-  json.items = process2(def.element, ctx, {
+    json2.maxItems = maximum;
+  json2.type = "array";
+  json2.items = process2(def.element, ctx, {
     ...params,
     path: [...params.path, "items"]
   });
 }, objectProcessor = (schema, ctx, _json, params) => {
-  const json = _json;
+  const json2 = _json;
   const def = schema._zod.def;
-  json.type = "object";
-  json.properties = {};
+  json2.type = "object";
+  json2.properties = {};
   const shape = def.shape;
   for (const key2 in shape) {
-    json.properties[key2] = process2(shape[key2], ctx, {
+    json2.properties[key2] = process2(shape[key2], ctx, {
       ...params,
       path: [...params.path, "properties", key2]
     });
@@ -60357,20 +60736,20 @@ var formatMap, stringProcessor = (schema, ctx, _json, _params) => {
     }
   }));
   if (requiredKeys.size > 0) {
-    json.required = Array.from(requiredKeys);
+    json2.required = Array.from(requiredKeys);
   }
   if (def.catchall?._zod.def.type === "never") {
-    json.additionalProperties = false;
+    json2.additionalProperties = false;
   } else if (!def.catchall) {
     if (ctx.io === "output")
-      json.additionalProperties = false;
+      json2.additionalProperties = false;
   } else if (def.catchall) {
-    json.additionalProperties = process2(def.catchall, ctx, {
+    json2.additionalProperties = process2(def.catchall, ctx, {
       ...params,
       path: [...params.path, "additionalProperties"]
     });
   }
-}, unionProcessor = (schema, ctx, json, params) => {
+}, unionProcessor = (schema, ctx, json2, params) => {
   const def = schema._zod.def;
   const isExclusive = def.inclusive === false;
   const options = def.options.map((x2, i2) => process2(x2, ctx, {
@@ -60378,11 +60757,11 @@ var formatMap, stringProcessor = (schema, ctx, _json, _params) => {
     path: [...params.path, isExclusive ? "oneOf" : "anyOf", i2]
   }));
   if (isExclusive) {
-    json.oneOf = options;
+    json2.oneOf = options;
   } else {
-    json.anyOf = options;
+    json2.anyOf = options;
   }
-}, intersectionProcessor = (schema, ctx, json, params) => {
+}, intersectionProcessor = (schema, ctx, json2, params) => {
   const def = schema._zod.def;
   const a = process2(def.left, ctx, {
     ...params,
@@ -60397,11 +60776,11 @@ var formatMap, stringProcessor = (schema, ctx, _json, _params) => {
     ...isSimpleIntersection(a) ? a.allOf : [a],
     ...isSimpleIntersection(b) ? b.allOf : [b]
   ];
-  json.allOf = allOf;
+  json2.allOf = allOf;
 }, recordProcessor = (schema, ctx, _json, params) => {
-  const json = _json;
+  const json2 = _json;
   const def = schema._zod.def;
-  json.type = "object";
+  json2.type = "object";
   const keyType = def.keyType;
   const keyBag = keyType._zod.bag;
   const patterns = keyBag?.patterns;
@@ -60410,18 +60789,18 @@ var formatMap, stringProcessor = (schema, ctx, _json, _params) => {
       ...params,
       path: [...params.path, "patternProperties", "*"]
     });
-    json.patternProperties = {};
+    json2.patternProperties = {};
     for (const pattern of patterns) {
-      json.patternProperties[pattern.source] = valueSchema;
+      json2.patternProperties[pattern.source] = valueSchema;
     }
   } else {
     if (ctx.target === "draft-07" || ctx.target === "draft-2020-12") {
-      json.propertyNames = process2(def.keyType, ctx, {
+      json2.propertyNames = process2(def.keyType, ctx, {
         ...params,
         path: [...params.path, "propertyNames"]
       });
     }
-    json.additionalProperties = process2(def.valueType, ctx, {
+    json2.additionalProperties = process2(def.valueType, ctx, {
       ...params,
       path: [...params.path, "additionalProperties"]
     });
@@ -60430,38 +60809,38 @@ var formatMap, stringProcessor = (schema, ctx, _json, _params) => {
   if (keyValues) {
     const validKeyValues = [...keyValues].filter((v) => typeof v === "string" || typeof v === "number");
     if (validKeyValues.length > 0) {
-      json.required = validKeyValues;
+      json2.required = validKeyValues;
     }
   }
-}, nullableProcessor = (schema, ctx, json, params) => {
+}, nullableProcessor = (schema, ctx, json2, params) => {
   const def = schema._zod.def;
   const inner = process2(def.innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   if (ctx.target === "openapi-3.0") {
     seen.ref = def.innerType;
-    json.nullable = true;
+    json2.nullable = true;
   } else {
-    json.anyOf = [inner, { type: "null" }];
+    json2.anyOf = [inner, { type: "null" }];
   }
 }, nonoptionalProcessor = (schema, ctx, _json, params) => {
   const def = schema._zod.def;
   process2(def.innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   seen.ref = def.innerType;
-}, defaultProcessor = (schema, ctx, json, params) => {
+}, defaultProcessor = (schema, ctx, json2, params) => {
   const def = schema._zod.def;
   process2(def.innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   seen.ref = def.innerType;
-  json.default = JSON.parse(JSON.stringify(def.defaultValue));
-}, prefaultProcessor = (schema, ctx, json, params) => {
+  json2.default = JSON.parse(JSON.stringify(def.defaultValue));
+}, prefaultProcessor = (schema, ctx, json2, params) => {
   const def = schema._zod.def;
   process2(def.innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   seen.ref = def.innerType;
   if (ctx.io === "input")
-    json._prefault = JSON.parse(JSON.stringify(def.defaultValue));
-}, catchProcessor = (schema, ctx, json, params) => {
+    json2._prefault = JSON.parse(JSON.stringify(def.defaultValue));
+}, catchProcessor = (schema, ctx, json2, params) => {
   const def = schema._zod.def;
   process2(def.innerType, ctx, params);
   const seen = ctx.seen.get(schema);
@@ -60472,7 +60851,7 @@ var formatMap, stringProcessor = (schema, ctx, _json, _params) => {
   } catch {
     throw new Error("Dynamic catch values are not supported in JSON Schema");
   }
-  json.default = catchValue;
+  json2.default = catchValue;
 }, pipeProcessor = (schema, ctx, _json, params) => {
   const def = schema._zod.def;
   const inIsTransform = def.in._zod.traits.has("$ZodTransform");
@@ -60480,12 +60859,12 @@ var formatMap, stringProcessor = (schema, ctx, _json, _params) => {
   process2(innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   seen.ref = innerType;
-}, readonlyProcessor = (schema, ctx, json, params) => {
+}, readonlyProcessor = (schema, ctx, json2, params) => {
   const def = schema._zod.def;
   process2(def.innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   seen.ref = def.innerType;
-  json.readOnly = true;
+  json2.readOnly = true;
 }, optionalProcessor = (schema, ctx, _json, params) => {
   const def = schema._zod.def;
   process2(def.innerType, ctx, params);
@@ -60996,7 +61375,7 @@ var init_schemas2 = __esm(() => {
   _ZodString = /* @__PURE__ */ $constructor("_ZodString", (inst, def) => {
     $ZodString.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => stringProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => stringProcessor(inst, ctx, json2, params);
     const bag = inst._zod.bag;
     inst.format = bag.format ?? null;
     inst.minLength = bag.minimum ?? null;
@@ -61163,7 +61542,7 @@ var init_schemas2 = __esm(() => {
   ZodNumber = /* @__PURE__ */ $constructor("ZodNumber", (inst, def) => {
     $ZodNumber.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => numberProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => numberProcessor(inst, ctx, json2, params);
     _installLazyMethods(inst, "ZodNumber", {
       gt(value, params) {
         return this.check(_gt(value, params));
@@ -61225,12 +61604,12 @@ var init_schemas2 = __esm(() => {
   ZodBoolean = /* @__PURE__ */ $constructor("ZodBoolean", (inst, def) => {
     $ZodBoolean.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => booleanProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => booleanProcessor(inst, ctx, json2, params);
   });
   ZodBigInt = /* @__PURE__ */ $constructor("ZodBigInt", (inst, def) => {
     $ZodBigInt.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => bigintProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => bigintProcessor(inst, ctx, json2, params);
     inst.gte = (value, params) => inst.check(_gte(value, params));
     inst.min = (value, params) => inst.check(_gte(value, params));
     inst.gt = (value, params) => inst.check(_gt(value, params));
@@ -61252,27 +61631,27 @@ var init_schemas2 = __esm(() => {
   ZodNull = /* @__PURE__ */ $constructor("ZodNull", (inst, def) => {
     $ZodNull.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => nullProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => nullProcessor(inst, ctx, json2, params);
   });
   ZodAny = /* @__PURE__ */ $constructor("ZodAny", (inst, def) => {
     $ZodAny.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => anyProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => anyProcessor(inst, ctx, json2, params);
   });
   ZodUnknown = /* @__PURE__ */ $constructor("ZodUnknown", (inst, def) => {
     $ZodUnknown.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => unknownProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => unknownProcessor(inst, ctx, json2, params);
   });
   ZodNever = /* @__PURE__ */ $constructor("ZodNever", (inst, def) => {
     $ZodNever.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => neverProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => neverProcessor(inst, ctx, json2, params);
   });
   ZodDate = /* @__PURE__ */ $constructor("ZodDate", (inst, def) => {
     $ZodDate.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => dateProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => dateProcessor(inst, ctx, json2, params);
     inst.min = (value, params) => inst.check(_gte(value, params));
     inst.max = (value, params) => inst.check(_lte(value, params));
     const c = inst._zod.bag;
@@ -61282,7 +61661,7 @@ var init_schemas2 = __esm(() => {
   ZodArray = /* @__PURE__ */ $constructor("ZodArray", (inst, def) => {
     $ZodArray.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => arrayProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => arrayProcessor(inst, ctx, json2, params);
     inst.element = def.element;
     _installLazyMethods(inst, "ZodArray", {
       min(n, params) {
@@ -61305,7 +61684,7 @@ var init_schemas2 = __esm(() => {
   ZodObject = /* @__PURE__ */ $constructor("ZodObject", (inst, def) => {
     $ZodObjectJIT.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => objectProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => objectProcessor(inst, ctx, json2, params);
     exports_util.defineLazy(inst, "shape", () => {
       return def.shape;
     });
@@ -61354,7 +61733,7 @@ var init_schemas2 = __esm(() => {
   ZodUnion = /* @__PURE__ */ $constructor("ZodUnion", (inst, def) => {
     $ZodUnion.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => unionProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => unionProcessor(inst, ctx, json2, params);
     inst.options = def.options;
   });
   ZodDiscriminatedUnion = /* @__PURE__ */ $constructor("ZodDiscriminatedUnion", (inst, def) => {
@@ -61364,19 +61743,19 @@ var init_schemas2 = __esm(() => {
   ZodIntersection = /* @__PURE__ */ $constructor("ZodIntersection", (inst, def) => {
     $ZodIntersection.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => intersectionProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => intersectionProcessor(inst, ctx, json2, params);
   });
   ZodRecord = /* @__PURE__ */ $constructor("ZodRecord", (inst, def) => {
     $ZodRecord.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => recordProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => recordProcessor(inst, ctx, json2, params);
     inst.keyType = def.keyType;
     inst.valueType = def.valueType;
   });
   ZodEnum = /* @__PURE__ */ $constructor("ZodEnum", (inst, def) => {
     $ZodEnum.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => enumProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => enumProcessor(inst, ctx, json2, params);
     inst.enum = def.entries;
     inst.options = Object.values(def.entries);
     const keys = new Set(Object.keys(def.entries));
@@ -61414,7 +61793,7 @@ var init_schemas2 = __esm(() => {
   ZodLiteral = /* @__PURE__ */ $constructor("ZodLiteral", (inst, def) => {
     $ZodLiteral.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => literalProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => literalProcessor(inst, ctx, json2, params);
     inst.values = new Set(def.values);
     Object.defineProperty(inst, "value", {
       get() {
@@ -61428,7 +61807,7 @@ var init_schemas2 = __esm(() => {
   ZodTransform = /* @__PURE__ */ $constructor("ZodTransform", (inst, def) => {
     $ZodTransform.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => transformProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => transformProcessor(inst, ctx, json2, params);
     inst._zod.parse = (payload2, _ctx) => {
       if (_ctx.direction === "backward") {
         throw new $ZodEncodeError(inst.constructor.name);
@@ -61462,51 +61841,51 @@ var init_schemas2 = __esm(() => {
   ZodOptional = /* @__PURE__ */ $constructor("ZodOptional", (inst, def) => {
     $ZodOptional.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => optionalProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => optionalProcessor(inst, ctx, json2, params);
     inst.unwrap = () => inst._zod.def.innerType;
   });
   ZodExactOptional = /* @__PURE__ */ $constructor("ZodExactOptional", (inst, def) => {
     $ZodExactOptional.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => optionalProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => optionalProcessor(inst, ctx, json2, params);
     inst.unwrap = () => inst._zod.def.innerType;
   });
   ZodNullable = /* @__PURE__ */ $constructor("ZodNullable", (inst, def) => {
     $ZodNullable.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => nullableProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => nullableProcessor(inst, ctx, json2, params);
     inst.unwrap = () => inst._zod.def.innerType;
   });
   ZodDefault = /* @__PURE__ */ $constructor("ZodDefault", (inst, def) => {
     $ZodDefault.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => defaultProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => defaultProcessor(inst, ctx, json2, params);
     inst.unwrap = () => inst._zod.def.innerType;
     inst.removeDefault = inst.unwrap;
   });
   ZodPrefault = /* @__PURE__ */ $constructor("ZodPrefault", (inst, def) => {
     $ZodPrefault.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => prefaultProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => prefaultProcessor(inst, ctx, json2, params);
     inst.unwrap = () => inst._zod.def.innerType;
   });
   ZodNonOptional = /* @__PURE__ */ $constructor("ZodNonOptional", (inst, def) => {
     $ZodNonOptional.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => nonoptionalProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => nonoptionalProcessor(inst, ctx, json2, params);
     inst.unwrap = () => inst._zod.def.innerType;
   });
   ZodCatch = /* @__PURE__ */ $constructor("ZodCatch", (inst, def) => {
     $ZodCatch.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => catchProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => catchProcessor(inst, ctx, json2, params);
     inst.unwrap = () => inst._zod.def.innerType;
     inst.removeCatch = inst.unwrap;
   });
   ZodPipe = /* @__PURE__ */ $constructor("ZodPipe", (inst, def) => {
     $ZodPipe.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => pipeProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => pipeProcessor(inst, ctx, json2, params);
     inst.in = def.in;
     inst.out = def.out;
   });
@@ -61517,13 +61896,13 @@ var init_schemas2 = __esm(() => {
   ZodReadonly = /* @__PURE__ */ $constructor("ZodReadonly", (inst, def) => {
     $ZodReadonly.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => readonlyProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => readonlyProcessor(inst, ctx, json2, params);
     inst.unwrap = () => inst._zod.def.innerType;
   });
   ZodCustom = /* @__PURE__ */ $constructor("ZodCustom", (inst, def) => {
     $ZodCustom.init(inst, def);
     ZodType.init(inst, def);
-    inst._zod.processJSONSchema = (ctx, json, params) => customProcessor(inst, ctx, json, params);
+    inst._zod.processJSONSchema = (ctx, json2, params) => customProcessor(inst, ctx, json2, params);
   });
 });
 
@@ -72581,14 +72960,14 @@ init_config();
 init_data_owner_lock();
 init_worker_auth();
 init_worker_transport();
-import { createHash as createHash33 } from "node:crypto";
-import { existsSync as existsSync37, lstatSync as lstatSync18, mkdirSync as mkdirSync21, writeFileSync as writeFileSync7 } from "node:fs";
+import { createHash as createHash32 } from "node:crypto";
+import { existsSync as existsSync36, lstatSync as lstatSync17, mkdirSync as mkdirSync20, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname43, isAbsolute as isAbsolute16 } from "node:path";
 
 // src/workers/email-source/dashboard-people.ts
 init_people_index();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_people_index();
 
 // src/workers/classification/judge-setup.ts
@@ -72603,9 +72982,10 @@ init_operation_error();
 init_tier_cli();
 init_tier_classifier();
 init_tier_ledger();
+init_unreadable_files();
 init_tier_rules();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_judge_check();
 
 // src/workers/source-index/built-in-reranker.ts
@@ -72615,7 +72995,160 @@ init_manifest();
 init_runtime();
 init_wordpiece();
 
-// src/workers/email-source/server.ts
+// node_modules/@huggingface/tokenizers/dist/tokenizers.mjs
+var UNICODE_WORD_CHARS_IN_CLASS = "\\p{Alphabetic}\\p{M}\\p{Nd}\\p{Pc}";
+var UNICODE_WORD_CHARS = `${UNICODE_WORD_CHARS_IN_CLASS}\\u00B2\\u00B3\\u00B9\\u00BC-\\u00BE`;
+var UNICODE_WORD_CLASS = `[${UNICODE_WORD_CHARS}]`;
+var UNICODE_NON_WORD_CLASS = `[^${UNICODE_WORD_CHARS}]`;
+var UNICODE_WORD_BOUNDARY = `(?:(?<!${UNICODE_WORD_CLASS})(?=${UNICODE_WORD_CLASS})|(?<=${UNICODE_WORD_CLASS})(?!${UNICODE_WORD_CLASS}))`;
+var UNICODE_NON_WORD_BOUNDARY = `(?:(?<!${UNICODE_WORD_CLASS})(?!${UNICODE_WORD_CLASS})|(?<=${UNICODE_WORD_CLASS})(?=${UNICODE_WORD_CLASS}))`;
+var HEX_DIGIT_CHARS = "0-9A-Fa-f";
+var ESCAPE_REWRITES = /* @__PURE__ */ new Map([
+  ["A", "(?<![\\s\\S])"],
+  ["z", "(?![\\s\\S])"],
+  ["Z", "(?=\\n?(?![\\s\\S]))"],
+  ["h", `[${HEX_DIGIT_CHARS}]`],
+  ["H", `[^${HEX_DIGIT_CHARS}]`],
+  ["w", UNICODE_WORD_CLASS],
+  ["W", UNICODE_NON_WORD_CLASS],
+  ["d", "\\p{Nd}"],
+  ["D", "\\P{Nd}"],
+  ["s", "\\p{White_Space}"],
+  ["S", "\\P{White_Space}"],
+  ["b", UNICODE_WORD_BOUNDARY],
+  ["B", UNICODE_NON_WORD_BOUNDARY],
+  ["a", "\\x07"],
+  ["e", "\\x1B"]
+]);
+var CLASS_COMPLEMENT_ALTERNATIVES = /* @__PURE__ */ new Map([
+  ["W", `[^${UNICODE_WORD_CHARS_IN_CLASS}]`],
+  ["H", `[^${HEX_DIGIT_CHARS}]`]
+]);
+var Callable = class {
+  constructor() {
+    const closure = function(...args) {
+      return closure._call(...args);
+    };
+    return Object.setPrototypeOf(closure, new.target.prototype);
+  }
+};
+var Callable_default = Callable;
+var Normalizer = class extends Callable_default {
+  constructor(config) {
+    super();
+    this.config = config;
+  }
+  _call(text3) {
+    return this.normalize(text3);
+  }
+};
+var Normalizer_default = Normalizer;
+var Precompiled = class extends Normalizer_default {
+  constructor(config) {
+    super(config);
+    this.charsmap = config.precompiled_charsmap ?? null;
+  }
+  normalize(text3) {
+    text3 = text3.replace(/[\u0001-\u0008\u000B\u000E-\u001F\u007F\u008F\u009F]/gm, "");
+    text3 = text3.replace(/[\u0009\u000A\u000C\u000D\u00A0\u1680\u2000-\u200F\u2028\u2029\u202F\u205F\u2581\u3000\uFEFF\uFFFD]/gm, " ");
+    if (text3.includes("～")) {
+      const parts = text3.split("～");
+      text3 = parts.map((part) => part.normalize("NFKC")).join("～");
+    } else {
+      text3 = text3.normalize("NFKC");
+    }
+    return text3;
+  }
+};
+var Precompiled_default = Precompiled;
+var BYTES_TO_UNICODE = (() => {
+  const bs = [
+    ...Array.from({ length: 126 - 33 + 1 }, (_, i2) => i2 + 33),
+    ...Array.from({ length: "¬".charCodeAt(0) - "¡".charCodeAt(0) + 1 }, (_, i2) => i2 + "¡".charCodeAt(0)),
+    ...Array.from({ length: "ÿ".charCodeAt(0) - "®".charCodeAt(0) + 1 }, (_, i2) => i2 + "®".charCodeAt(0))
+  ];
+  const cs = bs.slice();
+  let n = 0;
+  for (let b = 0;b < 256; ++b) {
+    if (!bs.includes(b)) {
+      bs.push(b);
+      cs.push(256 + n);
+      n += 1;
+    }
+  }
+  const ccs = cs.map((n2) => String.fromCharCode(n2));
+  return Object.fromEntries(bs.map((b, i2) => [b, ccs[i2]]));
+})();
+var reverse_dictionary = (data2) => Object.fromEntries(Object.entries(data2).map(([key2, value]) => [value, key2]));
+var UNICODE_TO_BYTES = reverse_dictionary(BYTES_TO_UNICODE);
+
+// src/workers/source-index/built-in-embedding/precompiled-charsmap.ts
+class CharsmapNormalizer extends Precompiled_default {
+  trie;
+  replacements;
+  graphemes = new Intl.Segmenter("und", { granularity: "grapheme" });
+  constructor(charsmap) {
+    super({ type: "Precompiled", precompiled_charsmap: charsmap });
+    const data2 = Buffer.from(charsmap, "base64");
+    if (data2.length < 8)
+      throw new Error("Invalid precompiled character map.");
+    const bytes = data2.readUInt32LE(0);
+    if (bytes < 4 || bytes % 4 || bytes + 4 >= data2.length)
+      throw new Error("Invalid precompiled character map.");
+    this.trie = new Uint32Array(bytes / 4);
+    for (let i2 = 0;i2 < this.trie.length; i2 += 1)
+      this.trie[i2] = data2.readUInt32LE(4 + i2 * 4);
+    this.replacements = data2.subarray(4 + bytes);
+  }
+  transform(text3) {
+    const offset = (unit) => unit >>> 10 << ((unit & 512) >>> 6) >>> 0;
+    let node = offset(this.trie[0]);
+    for (const byte of Buffer.from(text3, "utf8")) {
+      if (byte === 0)
+        break;
+      node = (node ^ byte) >>> 0;
+      const unit = this.trie[node];
+      if (unit === undefined || (unit & 2147483903) >>> 0 !== byte)
+        return;
+      node = (node ^ offset(unit)) >>> 0;
+      if (unit & 256) {
+        const leaf = this.trie[node];
+        if (leaf === undefined)
+          throw new Error("Invalid precompiled character map leaf.");
+        const start = leaf & 2147483647;
+        const end = this.replacements.indexOf(0, start);
+        if (end < 0)
+          throw new Error("Invalid precompiled character map replacement.");
+        return this.replacements.toString("utf8", start, end);
+      }
+    }
+    return;
+  }
+  normalize(text3) {
+    let result = "";
+    for (const { segment } of this.graphemes.segment(text3)) {
+      const mapped = Buffer.byteLength(segment) < 6 ? this.transform(segment) : undefined;
+      result += mapped ?? Array.from(segment, (char) => this.transform(char) ?? char).join("");
+    }
+    return result;
+  }
+}
+// src/workers/source-index/built-in-reranker-manifest.ts
+function candidate(modelId, repository, revision, modelFile, modelBytes, modelSha256, tokenizerFile, tokenizerBytes, tokenizerSha256) {
+  const base = `https://huggingface.co/${repository}/resolve/${revision}`;
+  return {
+    modelId,
+    repository,
+    revision,
+    license: "Apache-2.0",
+    maxTokens: 512,
+    model: { name: "model.onnx", url: `${base}/${modelFile}`, bytes: modelBytes, sha256: modelSha256 },
+    tokenizer: { name: tokenizerFile, url: `${base}/${tokenizerFile}`, bytes: tokenizerBytes, sha256: tokenizerSha256 }
+  };
+}
+var MS_MARCO_MINILM_L6_V2 = candidate("ms-marco-MiniLM-L6-v2-fp32-233902d", "cross-encoder/ms-marco-MiniLM-L6-v2", "233902d25c440f23af6f7d6e94d2946bac0bee0a", "onnx/model.onnx", 91011230, "5d3e70fd0c9ff14b9b5169a51e957b7a9c74897afd0a35ce4bd318150c1d4d4a", "vocab.txt", 231508, "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3");
+var MMARCO_MMINILMV2_L12_H384_V1 = candidate("mmarco-mMiniLMv2-L12-H384-v1-int8-1427fd6", "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1", "1427fd652930e4ba29e8149678df786c240d8825", "onnx/model_qint8_arm64.onnx", 118620017, "1825907d6c1a9001ff78124780bbde20a614a8c3df3b63409cf3c72c6fe5c8b4", "tokenizer.json", 17082660, "62c24cdc13d4c9952d63718d6c9fa4c287974249e16b7ade6d5a85e7bbb75626");
+// src/workers/engine/server.ts
 init_judge_spending();
 init_judge_second_round();
 
@@ -72745,7 +73278,7 @@ init_sniffer_lane();
 init_sniffer();
 var endpoints = new Map;
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_engine_service();
 init_privacy_questions();
 init_sniffer();
@@ -72759,7 +73292,7 @@ init_local_model_policy();
 init_model_transport();
 init_sovereignty();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_first_run_privacy();
 init_source_placement();
 init_vocabulary();
@@ -72779,7 +73312,7 @@ init_update_check();
 var SELF_UPDATE_STALE_MS = 30 * 60000;
 var SELF_UPDATE_SHOWN_MS = 10 * 60000;
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_open_targets();
 init_linux_owner_bridge();
 init_linux_desktop_opener();
@@ -72793,7 +73326,7 @@ init_assets();
 init_transcription_model();
 init_manifest2();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_engine_maintenance();
 init_worker_transport();
 init_package_root();
@@ -72867,7 +73400,7 @@ class MessagingCaptureSupervisor {
       await this.stop();
       return { source: grant.source, state: "stopped", reason: "grant_missing" };
     }
-    const handle = withoutUnpairedLaneHandles(readConnectedHandleRegistry(registryPath).handles, registryPath).find((candidate) => candidate.handle === grant.handle);
+    const handle = withoutUnpairedLaneHandles(readConnectedHandleRegistry(registryPath).handles, registryPath).find((candidate2) => candidate2.handle === grant.handle);
     if (!handleAllowsCapture(handle, grant.source)) {
       await this.stop();
       return { source: grant.source, state: "stopped", reason: "handle_unavailable" };
@@ -73064,7 +73597,7 @@ init_update_check();
 // src/workers/email-source/dashboard-messaging-runner.ts
 var FIELDS = new Set(["api_id", "api_hash", "phone", "code", "password"]);
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_native_worker_service();
 
 // src/core/model-setup.ts
@@ -73075,7 +73608,7 @@ init_embedding_identity();
 var LOCAL_RECHECK_READY_MS = 10 * 60000;
 var LOCAL_RESPONSE_LIMIT_BYTES = 64 * 1024;
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_connect();
 init_worker_auth();
 init_remote_open();
@@ -73084,14 +73617,14 @@ init_remote_open();
 init_atomic_file();
 init_worker_auth();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_file_extraction_runtime();
 
 // src/workers/file-extraction/readiness-ledger.ts
 init_answer_ready_coverage();
 init_control_path_headroom();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_unreadable_files();
 
 // src/core/analyst-openai.ts
@@ -73110,7 +73643,7 @@ import {
   rmSync as rmSync8,
   writeFileSync as writeFileSync6
 } from "node:fs";
-import { randomUUID as randomUUID11 } from "node:crypto";
+import { randomUUID as randomUUID10 } from "node:crypto";
 import { homedir as homedir15 } from "node:os";
 import { dirname as dirname38, isAbsolute as isAbsolute15, join as join37 } from "node:path";
 var DEFAULT_VENICE_MODEL_CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
@@ -73202,11 +73735,11 @@ function catalogCategory(catalog, modelId) {
   }
   return;
 }
-function newerCatalog(current2, candidate) {
-  if (!candidate)
+function newerCatalog(current2, candidate2) {
+  if (!candidate2)
     return current2;
-  if (!current2 || candidate.fetchedAtMs > current2.fetchedAtMs)
-    return candidate;
+  if (!current2 || candidate2.fetchedAtMs > current2.fetchedAtMs)
+    return candidate2;
   return current2;
 }
 function catalogIsFresh(catalog, nowMs, ttlMs) {
@@ -73327,7 +73860,7 @@ function readCatalogCache(path, type) {
   return { fetchedAtMs, type, models: Object.freeze(models) };
 }
 function writeCatalogCache(path, catalog) {
-  const tempPath = `${path}.${process.pid}.${randomUUID11()}.tmp`;
+  const tempPath = `${path}.${process.pid}.${randomUUID10()}.tmp`;
   try {
     mkdirSync16(dirname38(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
@@ -73430,10 +73963,10 @@ init_local_model_policy();
 init_model_transport();
 init_vlm();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_apple_vision_ocr();
 
-// src/workers/email-source/index.ts
+// src/workers/engine/index.ts
 init_judge_spending();
 
 // src/workers/dashboard/components.ts
@@ -74042,15 +74575,11 @@ var COMPUTER_HOST_PAGE_CSP = [
   "frame-ancestors 'none'"
 ].join("; ");
 
-// src/workers/email-source/index.ts
-init_source_failure();
-
 // src/workers/dashboard/models-on-computer.ts
 var LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]", "0.0.0.0"]);
 
-// src/workers/email-source/index.ts
+// src/workers/engine/index.ts
 init_google_own_app();
-init_sovereignty();
 init_first_run_privacy();
 
 // src/core/settings-proposal.ts
@@ -74083,42 +74612,21 @@ var SETTINGS_PROPOSAL_SCHEMA = {
   }
 };
 
-// src/workers/settings-proposal-holder.ts
-init_privacy_language();
-
-// src/workers/email-source/index.ts
+// src/workers/engine/index.ts
 init_privacy_language();
 init_source_scope_approval();
 init_app_release_agent();
 init_release_manifest();
 init_update_check();
-init_google_handle_compatibility();
-init_source_account_binding();
-init_source_registry();
-init_consent_page();
 init_analyst();
 init_types();
 init_file_lease();
 init_olympus_layout();
 init_email_policy();
-
-// src/core/google-pilot-client.ts
-var RETIRED_GOOGLE_PILOT_CLIENT_ID_SHA256 = new Set([
-  "de8b8602a0b5d721f22bc9e72a5b193d4cc99577e03db034ff328c8e739d3fee"
-]);
-
-// src/workers/email-source/index.ts
-init_publisher_oauth_client();
 init_oauth_relay();
 init_connect();
 init_operation_error();
-init_operation_caller();
-init_store2();
 init_ingestion_throughput();
-init_secret_store();
-init_source_corpus_registry();
-init_selected_item_safety();
-init_venice_models();
 
 // src/workers/email-source/write-routes.ts
 init_cli_via_worker();
@@ -74163,81 +74671,20 @@ var WORKER_WRITE_ROUTES = WORKER_POST_PATHS.map((path) => ({ method: "POST", pat
 var READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 var WRITE_ROUTES = new Set(WORKER_WRITE_ROUTES.map((route) => `${route.method} ${route.path}`));
 
-// src/workers/email-source/index.ts
+// src/workers/engine/index.ts
 init_judge_check();
 init_unpaired_sources();
 init_pairing_session_paths();
-
-// src/core/messaging-account-move.ts
-init_atomic_file();
-init_messaging_capture_grant_file();
-init_olympus_layout();
-init_source_registry();
-init_unpaired_sources();
-
-// src/workers/email-source/index.ts
 init_text();
 init_transcription();
 init_runner();
-
-// src/workers/source-index/answer-latency-log.ts
-init_olympus_layout();
-init_answer_latency_trace();
-var DEFAULT_SOURCE_ANSWER_LATENCY_MAX_BYTES = 32 * 1024 * 1024;
-
-// src/workers/email-source/index.ts
 init_answer_latency_trace();
 init_status();
 init_readwise();
 init_x_bookmarks();
-
-// src/workers/local-files/approved-scope-filter.ts
-init_locator_path_scope_codec();
-var LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC = locatorPathApprovedScopeCodec("local files");
-
-// src/workers/local-files/locator-result-projector.ts
-init_scope();
-init_paths();
-import { pathToFileURL as pathToFileURL3 } from "node:url";
-var LOCAL_FILES_LOCATOR_RESULT_PROJECTOR_CODEC = Object.freeze({
-  create(input) {
-    return Object.freeze({
-      project(candidate) {
-        if (input.principal.provider !== LOCAL_FILES_PROVIDER || candidate.sourceItem.family !== "file" || candidate.sourceItem.provider !== input.principal.provider || candidate.sourceItem.accountScope !== input.principal.accountScope)
-          return;
-        const locator = locatorFromScopePath(candidate.readLocatorUri());
-        return locator ? { locator } : undefined;
-      }
-    });
-  }
-});
-function locatorFromScopePath(value) {
-  if (!value?.startsWith("/"))
-    return;
-  let split;
-  try {
-    split = splitScopePath(value);
-  } catch {
-    return;
-  }
-  if (split.path === "/")
-    return;
-  const parent = split.path.slice(0, split.path.lastIndexOf("/")) || "/";
-  const locator = {
-    display_path: split.path,
-    parent_display_path: parent
-  };
-  if (!split.volumeId) {
-    locator.finder_url = pathToFileURL3(split.path).href;
-    locator.parent_finder_url = pathToFileURL3(parent).href;
-  }
-  return locator;
-}
-
-// src/workers/email-source/index.ts
 init_dropbox_files();
-init_telegram_messages();
 init_embeddings();
+init_sovereignty();
 
 // src/workers/source-watch-runtime.ts
 init_source_watch();
@@ -74255,7 +74702,7 @@ var SOURCE_WATCH_POLICY = Object.freeze({
   evidence_pointers_only: true
 });
 
-// src/workers/email-source/index.ts
+// src/workers/engine/index.ts
 init_corpora();
 
 // src/workers/dashboard/pages/local.ts
@@ -74420,7 +74867,7 @@ init_vocabulary();
 // src/workers/dashboard/index.ts
 init_vocabulary();
 
-// src/workers/email-source/index.ts
+// src/workers/engine/index.ts
 init_dashboard_resource();
 init_dashboard_contract();
 init_vocabulary();
@@ -74435,7 +74882,7 @@ var GUARD_REPORT_MAX_AGE_MS = 5 * 60 * 1000;
 var DRAIN_REPORT_MAX_AGE_MS = 300 * 1000;
 var REPORT_MAX_FUTURE_SKEW_MS = 60 * 1000;
 
-// src/workers/email-source/index.ts
+// src/workers/engine/index.ts
 init_source_dashboard();
 init_credential_health();
 init_source_dispositions();
@@ -74443,129 +74890,6 @@ init_source_ingestion_ledger();
 init_connected_handles();
 init_credential_broker();
 init_connector_store();
-
-// src/workers/chat/chat-scope-filter.ts
-init_principal();
-import { createHash as createHash28 } from "node:crypto";
-var STRUCTURED_CHAT_SCOPE_MARKER = ":chat:";
-var UNRESOLVED_CHAT_TITLE_CONVERSATION_ID_PREFIX = "__chat_title_unresolved__:";
-var CHAT_SCOPE_FILTER_CODEC = Object.freeze({
-  resolveConversationId(value, readTitleCandidates) {
-    const structured = parseStructuredChatScope(value);
-    if (structured) {
-      return {
-        kind: "structured",
-        conversationId: structured.conversationId,
-        ...structured.provider ? { provider: structured.provider } : {},
-        accountScope: structured.accountScope,
-        resolved: true
-      };
-    }
-    if (looksLikeStructuredChatScope(value)) {
-      return {
-        kind: "invalid",
-        conversationId: "",
-        resolved: false
-      };
-    }
-    const chatScope = value.trim();
-    const terms = conversationTitleTerms(chatScope);
-    if (terms.length === 0)
-      return unresolvedChatTitleResolution(chatScope);
-    const lookupTerms = terms.flatMap((term) => term === "4th" ? ["4th", "fourth"] : [term]);
-    const lookup3 = readTitleCandidates(lookupTerms);
-    if (lookup3.truncated)
-      return unresolvedChatTitleResolution(chatScope);
-    const rankedByConversation = new Map;
-    for (const candidate of lookup3.candidates) {
-      const score = conversationTitleMatchScore(candidate.title, terms);
-      const exact = conversationTitleExactMatch(candidate.title, terms);
-      if (!exact && (terms.length < 2 || score < Math.min(3, terms.length)))
-        continue;
-      const prior = rankedByConversation.get(candidate.conversationId);
-      if (!prior || Number(exact) > Number(prior.exact) || exact === prior.exact && score > prior.score) {
-        rankedByConversation.set(candidate.conversationId, {
-          conversationId: candidate.conversationId,
-          exact,
-          score
-        });
-      }
-    }
-    const ranked = [...rankedByConversation.values()].sort((left, right) => {
-      if (left.exact !== right.exact)
-        return left.exact ? -1 : 1;
-      return right.score - left.score;
-    });
-    const best = ranked[0];
-    if (!best || ranked[1] && ranked[1].score === best.score) {
-      return unresolvedChatTitleResolution(chatScope);
-    }
-    return { kind: "title", conversationId: best.conversationId, resolved: true };
-  }
-});
-function parseStructuredChatScope(value) {
-  const parts = value.split(":");
-  if (parts.length !== 3 || parts[1] !== "chat")
-    return;
-  const accountScope = parts[0].trim();
-  const conversationId = parts[2].trim();
-  if (parts[0] !== accountScope || parts[2] !== conversationId || !isCanonicalConnectorStoreAccountScope(accountScope) || !conversationId) {
-    return;
-  }
-  const provider = accountScope.includes(".") ? accountScope.split(".", 1)[0] : undefined;
-  return {
-    ...provider ? { provider } : {},
-    accountScope,
-    conversationId
-  };
-}
-function looksLikeStructuredChatScope(value) {
-  return value.includes(STRUCTURED_CHAT_SCOPE_MARKER);
-}
-function unresolvedChatTitleResolution(value) {
-  return {
-    kind: "title",
-    conversationId: `${UNRESOLVED_CHAT_TITLE_CONVERSATION_ID_PREFIX}${safeDigest(value).slice(0, 24)}`,
-    resolved: false
-  };
-}
-function safeDigest(value) {
-  return createHash28("sha256").update(value).digest("hex");
-}
-function conversationTitleTerms(value) {
-  const seen = new Set;
-  const terms = [];
-  for (const token of value.toLowerCase().match(/[a-z0-9]+/g) ?? []) {
-    if (CHAT_TITLE_STOPWORDS.has(token) || token.length < 3)
-      continue;
-    const normalized = token === "fourth" ? "4th" : token;
-    if (seen.has(normalized))
-      continue;
-    seen.add(normalized);
-    terms.push(normalized);
-  }
-  return terms;
-}
-function conversationTitleMatchScore(title, terms) {
-  const titleTerms = new Set((title.toLowerCase().match(/[a-z0-9]+/g) ?? []).map((token) => token === "fourth" ? "4th" : token));
-  return terms.reduce((score, term) => score + Number(titleTerms.has(term)), 0);
-}
-function conversationTitleExactMatch(title, terms) {
-  const titleTerms = conversationTitleTerms(title);
-  return titleTerms.length === terms.length && titleTerms.every((term, index) => term === terms[index]);
-}
-var CHAT_TITLE_STOPWORDS = new Set([
-  "the",
-  "and",
-  "for",
-  "group",
-  "chat",
-  "named",
-  "conversation",
-  "telegram"
-]);
-
-// src/workers/email-source/index.ts
 init_this_computer();
 init_data_lifecycle();
 init_cli_via_worker();
@@ -74748,7 +75072,7 @@ init_paths();
 
 // src/workers/local-files/volume-identity.ts
 init_paths();
-import { createHash as createHash29 } from "node:crypto";
+import { createHash as createHash28 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
 import { existsSync as existsSync30, lstatSync as lstatSync15, readFileSync as readFileSync25, readdirSync as readdirSync5, realpathSync as realpathSync8 } from "node:fs";
 import { homedir as homedir16 } from "node:os";
@@ -74958,7 +75282,7 @@ function labelFor2(mountPoint) {
   return mountPoint.slice(mountPoint.lastIndexOf("/") + 1) || mountPoint;
 }
 function shortHash(value) {
-  return createHash29("sha256").update(value).digest("hex").slice(0, 16);
+  return createHash28("sha256").update(value).digest("hex").slice(0, 16);
 }
 function normalizeNetworkSource(source) {
   return source.trim().toLowerCase().replace(/^\/\/[^@/]*@/, "//").replace(/\/+$/, "");
@@ -75499,8 +75823,200 @@ init_data_lifecycle();
 init_tier_cli();
 init_source_ingestion_ledger();
 
-// src/workers/email-source/index.ts
-init_corpora();
+// src/workers/engine/http/worker-options.ts
+init_first_run_privacy();
+
+// src/workers/settings-proposal-holder.ts
+init_privacy_language();
+
+// src/workers/engine/http/worker-options.ts
+init_privacy_language();
+
+// src/workers/engine/http/connector-store-search-request.ts
+init_x_bookmarks();
+
+// src/workers/local-files/approved-scope-filter.ts
+init_locator_path_scope_codec();
+var LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC = locatorPathApprovedScopeCodec("local files");
+
+// src/workers/local-files/locator-result-projector.ts
+init_scope();
+init_paths();
+import { pathToFileURL as pathToFileURL3 } from "node:url";
+var LOCAL_FILES_LOCATOR_RESULT_PROJECTOR_CODEC = Object.freeze({
+  create(input) {
+    return Object.freeze({
+      project(candidate2) {
+        if (input.principal.provider !== LOCAL_FILES_PROVIDER || candidate2.sourceItem.family !== "file" || candidate2.sourceItem.provider !== input.principal.provider || candidate2.sourceItem.accountScope !== input.principal.accountScope)
+          return;
+        const locator = locatorFromScopePath(candidate2.readLocatorUri());
+        return locator ? { locator } : undefined;
+      }
+    });
+  }
+});
+function locatorFromScopePath(value) {
+  if (!value?.startsWith("/"))
+    return;
+  let split;
+  try {
+    split = splitScopePath(value);
+  } catch {
+    return;
+  }
+  if (split.path === "/")
+    return;
+  const parent = split.path.slice(0, split.path.lastIndexOf("/")) || "/";
+  const locator = {
+    display_path: split.path,
+    parent_display_path: parent
+  };
+  if (!split.volumeId) {
+    locator.finder_url = pathToFileURL3(split.path).href;
+    locator.parent_finder_url = pathToFileURL3(parent).href;
+  }
+  return locator;
+}
+
+// src/workers/engine/http/connector-store-search-request.ts
+init_dropbox_files();
+init_connector_store();
+
+// src/workers/chat/chat-scope-filter.ts
+init_principal();
+import { createHash as createHash29 } from "node:crypto";
+var STRUCTURED_CHAT_SCOPE_MARKER = ":chat:";
+var UNRESOLVED_CHAT_TITLE_CONVERSATION_ID_PREFIX = "__chat_title_unresolved__:";
+var CHAT_SCOPE_FILTER_CODEC = Object.freeze({
+  resolveConversationId(value, readTitleCandidates) {
+    const structured = parseStructuredChatScope(value);
+    if (structured) {
+      return {
+        kind: "structured",
+        conversationId: structured.conversationId,
+        ...structured.provider ? { provider: structured.provider } : {},
+        accountScope: structured.accountScope,
+        resolved: true
+      };
+    }
+    if (looksLikeStructuredChatScope(value)) {
+      return {
+        kind: "invalid",
+        conversationId: "",
+        resolved: false
+      };
+    }
+    const chatScope = value.trim();
+    const terms = conversationTitleTerms(chatScope);
+    if (terms.length === 0)
+      return unresolvedChatTitleResolution(chatScope);
+    const lookupTerms = terms.flatMap((term) => term === "4th" ? ["4th", "fourth"] : [term]);
+    const lookup3 = readTitleCandidates(lookupTerms);
+    if (lookup3.truncated)
+      return unresolvedChatTitleResolution(chatScope);
+    const rankedByConversation = new Map;
+    for (const candidate2 of lookup3.candidates) {
+      const score = conversationTitleMatchScore(candidate2.title, terms);
+      const exact = conversationTitleExactMatch(candidate2.title, terms);
+      if (!exact && (terms.length < 2 || score < Math.min(3, terms.length)))
+        continue;
+      const prior = rankedByConversation.get(candidate2.conversationId);
+      if (!prior || Number(exact) > Number(prior.exact) || exact === prior.exact && score > prior.score) {
+        rankedByConversation.set(candidate2.conversationId, {
+          conversationId: candidate2.conversationId,
+          exact,
+          score
+        });
+      }
+    }
+    const ranked = [...rankedByConversation.values()].sort((left, right) => {
+      if (left.exact !== right.exact)
+        return left.exact ? -1 : 1;
+      return right.score - left.score;
+    });
+    const best = ranked[0];
+    if (!best || ranked[1] && ranked[1].score === best.score) {
+      return unresolvedChatTitleResolution(chatScope);
+    }
+    return { kind: "title", conversationId: best.conversationId, resolved: true };
+  }
+});
+function parseStructuredChatScope(value) {
+  const parts = value.split(":");
+  if (parts.length !== 3 || parts[1] !== "chat")
+    return;
+  const accountScope = parts[0].trim();
+  const conversationId = parts[2].trim();
+  if (parts[0] !== accountScope || parts[2] !== conversationId || !isCanonicalConnectorStoreAccountScope(accountScope) || !conversationId) {
+    return;
+  }
+  const provider = accountScope.includes(".") ? accountScope.split(".", 1)[0] : undefined;
+  return {
+    ...provider ? { provider } : {},
+    accountScope,
+    conversationId
+  };
+}
+function looksLikeStructuredChatScope(value) {
+  return value.includes(STRUCTURED_CHAT_SCOPE_MARKER);
+}
+function unresolvedChatTitleResolution(value) {
+  return {
+    kind: "title",
+    conversationId: `${UNRESOLVED_CHAT_TITLE_CONVERSATION_ID_PREFIX}${safeDigest(value).slice(0, 24)}`,
+    resolved: false
+  };
+}
+function safeDigest(value) {
+  return createHash29("sha256").update(value).digest("hex");
+}
+function conversationTitleTerms(value) {
+  const seen = new Set;
+  const terms = [];
+  for (const token of value.toLowerCase().match(/[a-z0-9]+/g) ?? []) {
+    if (CHAT_TITLE_STOPWORDS.has(token) || token.length < 3)
+      continue;
+    const normalized = token === "fourth" ? "4th" : token;
+    if (seen.has(normalized))
+      continue;
+    seen.add(normalized);
+    terms.push(normalized);
+  }
+  return terms;
+}
+function conversationTitleMatchScore(title, terms) {
+  const titleTerms = new Set((title.toLowerCase().match(/[a-z0-9]+/g) ?? []).map((token) => token === "fourth" ? "4th" : token));
+  return terms.reduce((score, term) => score + Number(titleTerms.has(term)), 0);
+}
+function conversationTitleExactMatch(title, terms) {
+  const titleTerms = conversationTitleTerms(title);
+  return titleTerms.length === terms.length && titleTerms.every((term, index) => term === terms[index]);
+}
+var CHAT_TITLE_STOPWORDS = new Set([
+  "the",
+  "and",
+  "for",
+  "group",
+  "chat",
+  "named",
+  "conversation",
+  "telegram"
+]);
+
+// src/workers/engine/http/request-fields.ts
+init_operation_caller();
+init_source_corpus_registry();
+
+// src/workers/engine/http/source-index-requests.ts
+init_selected_item_safety();
+init_venice_models();
+init_readwise();
+init_x_bookmarks();
+init_dropbox_files();
+init_telegram_messages();
+init_connector_store();
+
+// src/workers/engine/http/connector-store-search-request.ts
 var CONNECTOR_STORE_FILTER_CAPABILITIES = connectorStoreFilterCapabilityRegistry([
   [{ family: "chat" }, { chatScope: CHAT_SCOPE_FILTER_CODEC }],
   [{ family: "x" }, { folder: X_BOOKMARKS_FOLDER_FILTER_CODEC }],
@@ -75513,6 +76029,13 @@ var CONNECTOR_STORE_FILTER_CAPABILITIES = connectorStoreFilterCapabilityRegistry
     resultProjector: LOCAL_FILES_LOCATOR_RESULT_PROJECTOR_CODEC
   }]
 ]);
+
+// src/workers/engine/http/dashboard-oauth-attempts.ts
+init_secret_store();
+init_http();
+
+// src/workers/engine/http/file-extraction.ts
+init_dropbox_files();
 var DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox";
 var FILE_EXTRACTION_ROUTE_ALIASES = new Map([
   ["/source/index/dropbox/content/extract", {
@@ -75547,7 +76070,70 @@ var FILE_EXTRACTION_ROUTE_ALIASES = new Map([
   }]
 ]);
 
-// src/workers/email-source/server.ts
+// src/workers/source-index/answer-latency-log.ts
+init_olympus_layout();
+init_answer_latency_trace();
+var DEFAULT_SOURCE_ANSWER_LATENCY_MAX_BYTES = 32 * 1024 * 1024;
+
+// src/workers/engine/http/source-answer-runtime.ts
+init_answer_latency_trace();
+init_source_failure();
+
+// src/workers/engine/http/dropbox-export-requests.ts
+init_dropbox_files();
+
+// src/workers/engine/http/dashboard-source-requests.ts
+init_source_scope_approval();
+init_store2();
+init_readwise();
+init_x_bookmarks();
+init_dropbox_files();
+init_telegram_messages();
+init_corpora();
+init_source_dashboard();
+
+// src/workers/engine/http/dashboard-connections.ts
+init_google_handle_compatibility();
+init_source_account_binding();
+init_source_registry();
+init_secret_store();
+init_source_dashboard();
+init_connected_handles();
+init_this_computer();
+
+// src/workers/engine/http/dashboard-oauth-pages.ts
+init_consent_page();
+init_connect();
+init_http();
+
+// src/workers/engine/http/dashboard-oauth-clients.ts
+init_google_own_app();
+// src/core/google-pilot-client.ts
+var RETIRED_GOOGLE_PILOT_CLIENT_ID_SHA256 = new Set([
+  "de8b8602a0b5d721f22bc9e72a5b193d4cc99577e03db034ff328c8e739d3fee"
+]);
+
+// src/workers/engine/http/dashboard-oauth-clients.ts
+init_publisher_oauth_client();
+init_oauth_relay();
+init_secret_store();
+
+// src/workers/engine/http/dashboard-pairing.ts
+init_unpaired_sources();
+init_pairing_session_paths();
+
+// src/core/messaging-account-move.ts
+init_atomic_file();
+init_messaging_capture_grant_file();
+init_olympus_layout();
+init_source_registry();
+init_unpaired_sources();
+
+// src/workers/engine/http/x-bookmarks-admin.ts
+init_x_bookmarks();
+
+// src/workers/engine/server.ts
+init_corpora();
 init_analyst_answer();
 init_status();
 init_http();
@@ -75564,27 +76150,27 @@ init_operation_error();
 init_model_transport();
 init_analyst();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_analyst_openclaw_infer();
 
 // src/core/model-choices.ts
 init_atomic_file();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_consult_settings();
 
 // src/workers/email-source/model-choices-backend.ts
 init_sovereignty();
 init_manifest2();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_venice_models();
 
 // src/core/query-planner.ts
 init_answer_latency_trace();
 var QUERY_PLANNER_SYSTEM = "Generate up to 3 short, diverse search queries for finding documents that answer this question. " + "Return ONLY a JSON array of strings.";
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_config();
 init_delphi();
 init_sovereignty();
@@ -75802,11 +76388,11 @@ async function loadParcelWatcher(extraDirs = []) {
   }
   const dirs = [...extraDirs, ...process.env.OLYMPUS_NATIVE_MODULES_DIR ? [process.env.OLYMPUS_NATIVE_MODULES_DIR] : []];
   for (const dir of dirs) {
-    const candidate = join42(dir, "node_modules");
-    if (!existsSync33(join42(candidate, "@parcel", "watcher")))
+    const candidate2 = join42(dir, "node_modules");
+    if (!existsSync33(join42(candidate2, "@parcel", "watcher")))
       continue;
     try {
-      const requireFrom = createRequire8(join42(dirname41(candidate), "package.json"));
+      const requireFrom = createRequire8(join42(dirname41(candidate2), "package.json"));
       return unwrap(requireFrom(specifier));
     } catch (error) {
       failures.push(error instanceof Error ? error.message : String(error));
@@ -75815,8 +76401,8 @@ async function loadParcelWatcher(extraDirs = []) {
   throw new Error(`the file watcher could not be loaded (${failures[0] ?? "not installed"})`);
 }
 function unwrap(loaded) {
-  const candidate = loaded?.default ?? loaded;
-  const module = candidate;
+  const candidate2 = loaded?.default ?? loaded;
+  const module = candidate2;
   if (typeof module.subscribe !== "function" || typeof module.writeSnapshot !== "function") {
     throw new Error("the file watcher module has an unexpected shape");
   }
@@ -76962,8 +77548,8 @@ function normalizeSchedulerSourceId(value) {
   return sourceId;
 }
 function taskBootstrapLastSuccessAt(_source, task) {
-  const candidate = task.bootstrapLastSuccessAt?.();
-  return candidate && Number.isFinite(Date.parse(candidate)) ? candidate : undefined;
+  const candidate2 = task.bootstrapLastSuccessAt?.();
+  return candidate2 && Number.isFinite(Date.parse(candidate2)) ? candidate2 : undefined;
 }
 function schedulerTaskStateKey(source, task) {
   return {
@@ -76987,8 +77573,8 @@ function initialNextRunAt(input) {
     return input.firstRun;
   return boundFutureSchedule(cadenceAnchor + (input.persisted?.effectiveIntervalMs ?? input.configuredIntervalMs), input.firstRun);
 }
-function boundFutureSchedule(candidate, now) {
-  return Math.min(candidate, now + SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS);
+function boundFutureSchedule(candidate2, now) {
+  return Math.min(candidate2, now + SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS);
 }
 function nextCadenceAfter(anchor, intervalMs, completedAt) {
   const elapsedIntervals = Math.floor(Math.max(0, completedAt - anchor) / intervalMs);
@@ -78304,8 +78890,6 @@ var ARCHIVE_AGENT_COPY = {
 init_manifest3();
 
 // src/workers/archive-import/removal.ts
-init_atomic_file();
-init_classification_ledger();
 init_source_forget_registry();
 init_app_release_log();
 init_remote_connections();
@@ -78319,10 +78903,11 @@ init_store();
 // src/workers/archive-import/dashboard.ts
 init_olympus_layout();
 init_display_text();
+init_off_thread_reads();
 init_state();
 init_requests();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_lane();
 init_store();
 init_olympus_layout();
@@ -78364,7 +78949,7 @@ init_store();
 // src/workers/local-files/open-target.ts
 init_paths();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_paths();
 init_source_ingestion_policy();
 init_local_open();
@@ -78430,7 +79015,7 @@ var GMAIL_PROVIDER_ID = "gmail";
 var GMAIL_IMPORT_CONNECTOR_PREFIX = "archive.";
 var GMAIL_IMPORTED_FILTERS = Object.freeze({ provider: GMAIL_PROVIDER_ID, observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX });
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_tiered_store_set();
 init_archive_target();
 init_connector5();
@@ -78445,7 +79030,7 @@ init_live_sync3();
 var EVERNOTE_RATE_LIMIT_RETRY_MS = 15 * 60000;
 var AUTH_KINDS2 = new Set(["auth_missing", "auth_expired", "auth_revoked"]);
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_tier_set2();
 init_tier_set3();
 
@@ -78453,7 +79038,7 @@ init_tier_set3();
 init_parent_label();
 init_tier_ledger();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_child_visibility();
 
 // src/workers/connector-store/tier-visibility.ts
@@ -78526,7 +79111,7 @@ class JudgeBoosts {
 }
 var judgeBoosts = new JudgeBoosts;
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_secret_locations();
 init_source_storage();
 init_provider_account_history();
@@ -78558,7 +79143,7 @@ var SKIP_REASONS = new Set([
 ]);
 var NO_HARD_LINKS = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EMLINK"]);
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_data_owner_lock();
 init_data_lifecycle();
 init_tier_ledger();
@@ -78605,7 +79190,7 @@ var WHATSAPP_LANE_SYNC = Object.freeze({
   deferMetadataOnlyContent: true
 });
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_extraction_factory();
 init_media_extraction();
 init_source_dashboard();
@@ -78766,7 +79351,7 @@ class FileSourceScopeAuthority {
   }
 }
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_file_scope_sources();
 init_source_scope_approval();
 
@@ -78794,7 +79379,7 @@ init_request_budget();
 // src/workers/connector-store/embedding-plan.ts
 init_embeddings();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_source_registry();
 init_gmail_live_sync();
 
@@ -78812,7 +79397,7 @@ init_child_extraction_runtime();
 init_gmail();
 init_request_budget();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_tiered_store_set();
 
 // src/workers/source-account-guard.ts
@@ -78822,7 +79407,7 @@ init_connected_handles();
 init_credential_broker();
 var sourceExclusiveRunners = new Map;
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_provider_account_identity();
 init_request_budget();
 init_gmail();
@@ -78909,958 +79494,10 @@ class InstalledTierClassification {
   }
 }
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_built_in_sniffer();
 init_answer_activity();
 init_privacy_profile();
-
-// src/workers/classification/embedding-prefilter.ts
-init_atomic_file();
-init_control_path_headroom();
-init_sniffer();
-init_tier_ledger();
-init_tier_classifier();
-import { chmodSync as chmodSync9, existsSync as existsSync35, lstatSync as lstatSync17, mkdirSync as mkdirSync19, readFileSync as readFileSync29 } from "node:fs";
-import { join as join43 } from "node:path";
-import { createHash as createHash31, randomUUID as randomUUID12 } from "node:crypto";
-
-// src/workers/classification/embedding-logistic.ts
-var EMBEDDING_PREFILTER_MODEL_ID = "embeddinggemma-2-litert-24d962e";
-var EMBEDDING_PREFILTER_DIMENSIONS = 768;
-var EMBEDDING_PREFILTER_MIN_PER_CLASS = 2000;
-function normalized(vector) {
-  if (!Array.isArray(vector) || vector.length !== EMBEDDING_PREFILTER_DIMENSIONS || !vector.every(Number.isFinite))
-    return;
-  const norm = Math.hypot(...vector);
-  if (!Number.isFinite(norm) || norm === 0)
-    return;
-  return vector.map((value) => value / norm);
-}
-function sigmoid(value) {
-  return value >= 0 ? 1 / (1 + Math.exp(-value)) : Math.exp(value) / (1 + Math.exp(value));
-}
-function privateProbability(model, vector) {
-  if (!model || !Array.isArray(model.weights) || model.weights.length !== EMBEDDING_PREFILTER_DIMENSIONS || !model.weights.every(Number.isFinite) || !Number.isFinite(model.bias))
-    return;
-  const input = normalized(vector);
-  if (!input)
-    return;
-  let score = model.bias;
-  for (let i2 = 0;i2 < input.length; i2++)
-    score += input[i2] * model.weights[i2];
-  return Number.isFinite(score) ? sigmoid(score) : undefined;
-}
-var FIT_C = 10;
-var MAX_ITERATIONS = 500;
-var GRADIENT_TOLERANCE = 0.00000001;
-var HISTORY_SIZE = 10;
-var MAX_LINE_SEARCH = 40;
-var ARMIJO = 0.0001;
-function dot2(a, b) {
-  let result = 0;
-  for (let i2 = 0;i2 < a.length; i2++)
-    result += a[i2] * b[i2];
-  return result;
-}
-function* trainLogisticSteps(examples, minimumPerClass = EMBEDDING_PREFILTER_MIN_PER_CLASS) {
-  if (!Number.isSafeInteger(minimumPerClass) || minimumPerClass < 1)
-    return;
-  const counts = [0, 0];
-  const inputs = [];
-  for (const example of examples) {
-    const vector = normalized(example.vector);
-    if (!vector || typeof example.private !== "boolean")
-      continue;
-    const label = Number(example.private);
-    inputs.push({ vector, label });
-    counts[label]++;
-    yield;
-  }
-  if (counts.some((count) => count < minimumPerClass))
-    return;
-  const dimensions = EMBEDDING_PREFILTER_DIMENSIONS;
-  const penalty = 1 / (FIT_C * inputs.length);
-  function* evaluate(parameters2) {
-    const gradient = parameters2.map((value, i2) => i2 < dimensions ? penalty * value : 0);
-    let loss = 0;
-    for (let i2 = 0;i2 < dimensions; i2++)
-      loss += 0.5 * penalty * parameters2[i2] ** 2;
-    for (const { vector, label } of inputs) {
-      let score = parameters2[dimensions];
-      for (let i2 = 0;i2 < dimensions; i2++)
-        score += parameters2[i2] * vector[i2];
-      const scale = 1 / (2 * counts[label]);
-      const margin = (2 * label - 1) * score;
-      loss += scale * (Math.max(0, -margin) + Math.log1p(Math.exp(-Math.abs(margin))));
-      const error2 = scale * (label ? -sigmoid(-score) : sigmoid(score));
-      gradient[dimensions] += error2;
-      for (let i2 = 0;i2 < dimensions; i2++)
-        gradient[i2] += error2 * vector[i2];
-      yield;
-    }
-    return { loss, gradient };
-  }
-  let parameters = new Array(dimensions + 1).fill(0);
-  let current2 = yield* evaluate(parameters);
-  const history = [];
-  for (let iteration = 0;iteration <= MAX_ITERATIONS; iteration++) {
-    if (!Number.isFinite(current2.loss) || !current2.gradient.every(Number.isFinite))
-      throw new Error("Logistic fit is nonfinite");
-    if (Math.max(...current2.gradient.map(Math.abs)) <= GRADIENT_TOLERANCE) {
-      return { weights: parameters.slice(0, dimensions), bias: parameters[dimensions] };
-    }
-    if (iteration === MAX_ITERATIONS)
-      break;
-    const direction = current2.gradient.slice();
-    const alpha = new Array(history.length);
-    for (let j = history.length - 1;j >= 0; j--) {
-      const h = history[j];
-      alpha[j] = dot2(h.s, direction) / h.sy;
-      for (let i2 = 0;i2 < direction.length; i2++)
-        direction[i2] -= alpha[j] * h.y[i2];
-      yield;
-    }
-    const last = history.at(-1);
-    const scaling = last ? last.sy / last.yy : 1;
-    for (let i2 = 0;i2 < direction.length; i2++)
-      direction[i2] *= scaling;
-    for (let j = 0;j < history.length; j++) {
-      const h = history[j], beta = dot2(h.y, direction) / h.sy;
-      for (let i2 = 0;i2 < direction.length; i2++)
-        direction[i2] += h.s[i2] * (alpha[j] - beta);
-      yield;
-    }
-    for (let i2 = 0;i2 < direction.length; i2++)
-      direction[i2] = -direction[i2];
-    let slope = dot2(current2.gradient, direction);
-    if (!Number.isFinite(slope) || slope >= 0) {
-      history.length = 0;
-      for (let i2 = 0;i2 < direction.length; i2++)
-        direction[i2] = -current2.gradient[i2];
-      slope = -dot2(current2.gradient, current2.gradient);
-    }
-    let stepSize = 1, accepted = false;
-    for (let trial = 0;trial < MAX_LINE_SEARCH; trial++, stepSize *= 0.5) {
-      const candidate = parameters.map((value, i2) => value + stepSize * direction[i2]);
-      const next = yield* evaluate(candidate);
-      if (!Number.isFinite(next.loss) || next.loss > current2.loss + ARMIJO * stepSize * slope)
-        continue;
-      const s = candidate.map((value, i2) => value - parameters[i2]);
-      const y = next.gradient.map((value, i2) => value - current2.gradient[i2]);
-      const sy = dot2(s, y), yy = dot2(y, y);
-      if (sy > 0 && yy > 0) {
-        if (history.length === HISTORY_SIZE)
-          history.shift();
-        history.push({ s, y, sy, yy });
-      }
-      parameters = candidate;
-      current2 = next;
-      accepted = true;
-      yield;
-      break;
-    }
-    if (!accepted)
-      throw new Error("Logistic line search did not converge");
-  }
-  throw new Error("Logistic fit did not converge");
-}
-
-// src/workers/classification/embedding-prefilter.ts
-init_tier_ledger_path();
-init_tier_ledger_path();
-var PREFIX = "embedding-prefilter:";
-var RECEIPTS = `${PREFIX}clear:`;
-var CHECKS = `${PREFIX}check:`;
-var WINDOW = 200;
-var PREFILTER_CLEARING_CUTOFF = 0.002;
-var SPOT_CHECK_RATE = 1 / 20;
-var RETRAIN_MS = 24 * 60 * 60 * 1000;
-var PREFILTER_MAX_PER_CLASS = 5000;
-var MAX_PER_CLASS = PREFILTER_MAX_PER_CLASS;
-var TRAINING_SLICE_MS = 200;
-var FAILED_RETRY_MS = 3 * 60 * 60 * 1000;
-var NEW_VERDICTS = 1000;
-var TRAINING = `${PREFIX}training-v1`;
-var SCAN = `${PREFIX}training-scan-v1`;
-function prefilterVector(copy, reject = () => {
-  return;
-}) {
-  if (!copy)
-    return reject("copy_missing");
-  if (copy.chunks.length === 0)
-    return reject("chunks_empty");
-  if (copy.chunks.some((chunk) => chunk.mediaSha256 || chunk.mediaPath))
-    return reject("media_present");
-  if (snifferMaterialCarriesSecret(copy.chunks.map((chunk) => chunk.boundedText).join("")))
-    return reject("secret_material");
-  const vectors = copy.vectors.filter((vector) => vector.modelId === EMBEDDING_PREFILTER_MODEL_ID);
-  if (vectors.length !== copy.chunks.length)
-    return reject("vector_count");
-  const mean = new Array(EMBEDDING_PREFILTER_DIMENSIONS).fill(0);
-  for (const chunk of copy.chunks) {
-    const matching = vectors.filter((vector) => vector.chunkIndex === chunk.chunkIndex && vector.contentHash === chunk.embeddingInputHash);
-    if (matching.length !== 1)
-      return reject("vector_match");
-    if (matching[0].embedding.byteLength !== EMBEDDING_PREFILTER_DIMENSIONS * 4)
-      return reject("vector_bytes");
-    const bytes = matching[0].embedding;
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    for (let i2 = 0;i2 < mean.length; i2++) {
-      const value = view.getFloat32(i2 * 4, true);
-      if (!Number.isFinite(value))
-        return reject("vector_nonfinite");
-      mean[i2] = mean[i2] + value / vectors.length;
-    }
-  }
-  return mean;
-}
-function copyFingerprint2(copy) {
-  const hash2 = createHash31("sha256").update(JSON.stringify(copy.chunks));
-  for (const vector of copy.vectors) {
-    hash2.update(JSON.stringify([vector.chunkIndex, vector.modelId, vector.contentHash, vector.embedding.byteLength]));
-    hash2.update(vector.embedding);
-  }
-  return hash2.digest("hex");
-}
-function subjectOf(row) {
-  return {
-    provider: row.provider,
-    accountScope: row.accountScope,
-    providerItemId: row.providerItemId,
-    ...row.conversationKey ? { providerConversationId: row.conversationKey } : {}
-  };
-}
-function decisionOf(row) {
-  return { ...row, state: row.metadataPending || row.contentPending ? "pending" : "current", decidedBy: row.decidedBy, snifferId: "embedding-prefilter" };
-}
-function prefilterTrainingCopy(subject, ledger, setCopyFor, legacyCopyFor) {
-  const serving = copyServingLayer(ledger.copies(subject), "content");
-  if (setCopyFor && serving)
-    return setCopyFor(serving.corpusId);
-  if (ledger.getCurrent(subject)?.routed)
-    return;
-  return legacyCopyFor();
-}
-function prefilterTrainingExample(row, judge2, options, reject = () => {
-  return;
-}) {
-  if (!row.routed)
-    return reject("not_routed");
-  if (row.state !== "current" && row.state !== "moving")
-    return reject("not_current");
-  const metadataTier = row.state === "moving" ? row.targetMetadataTier : row.metadataTier;
-  const contentTier = row.state === "moving" ? row.targetContentTier : row.contentTier;
-  if (row.metadataPending)
-    return reject("metadata_pending");
-  if (row.contentPending)
-    return reject("content_pending");
-  if (!row.contentRead)
-    return reject("content_unread");
-  if (metadataTier !== "private" || row.metadataTier === "secrets")
-    return reject("metadata_tier");
-  if (contentTier !== "private" && contentTier !== "secure" || row.contentTier === "secrets")
-    return reject("content_tier");
-  if (row.metadataForced)
-    return reject("metadata_forced");
-  if (!row.modelId)
-    return reject("model_missing");
-  if (row.decidedBy === "owner_rule")
-    return reject("owner_decision");
-  if (row.decidedBy === "override")
-    return reject("override_decision");
-  if (options.ledger.getOverride(subjectOf(row)))
-    return reject("item_override");
-  if (options.ledger.rejudgeQuestion(subjectOf(row)))
-    return reject("rejudge_open");
-  for (const [prefix, reason] of [
-    ["metadata:owner_rule:", "metadata_owner_rule"],
-    ["metadata:floor:", "metadata_floor"],
-    ["metadata:secret:", "metadata_secret"],
-    ["override:", "override_reason"]
-  ])
-    if (row.reasons.some((value) => value.startsWith(prefix)))
-      return reject(reason);
-  const model = /^[^:]+:[^:]+\.m([0-9a-f]{16})$/.exec(judge2)?.[1];
-  if (!model)
-    return reject("judge_id_invalid");
-  let judged;
-  for (const reason of row.reasons) {
-    if (!reason.startsWith("content:"))
-      continue;
-    if (reason.startsWith("content:sniffer:")) {
-      const verdict = /^content:sniffer:[^:]+:[^:]+\.m([0-9a-f]{16}):(.*)$/.exec(reason);
-      if (!verdict)
-        return reject("judge_id_invalid");
-      if (verdict[1] !== model)
-        return reject("judge_model_mismatch");
-      const code = verdict[2];
-      if (!code)
-        return reject("judge_code_empty");
-      if (code.startsWith(SNIFFER_RECORD_HELD_CODE_PREFIX))
-        return reject("judge_code_held");
-      if (/(?:^|:)(?:rule|unresolved|fail_safe|injection|undecided)(?::|$)/.test(code))
-        return reject("judge_code_unsafe");
-      if (judged)
-        return reject("judge_duplicate");
-      judged = reason;
-    } else if (!(reason.startsWith("content:judge_verdict:") || reason.startsWith("content:sha256:") || reason.startsWith("content:names:") || reason.startsWith("content:borderline:") || [
-      "content:text_only",
-      "content:provenance:model",
-      "content:no_raise",
-      HELD_UNTIL_JUDGED_REASON,
-      PERSONAL_FIRST_REASON
-    ].includes(reason)))
-      return reject("content_reason_unknown");
-  }
-  if (!judged)
-    return reject("judge_missing");
-  const copy = options.copyFor(subjectOf(row));
-  if (!copy)
-    return reject("copy_missing");
-  const digest = contentDigestReason(copy.chunks.map((chunk) => chunk.boundedText).join(""));
-  if (!row.reasons.includes(digest))
-    return reject("digest_missing");
-  let provenance = "judge_receipt";
-  if (!row.reasons.includes(contentJudgeVerdictReason(judged, contentTier, digest))) {
-    if (row.reasons.some((reason) => reason.startsWith("content:judge_verdict:")))
-      return reject("verdict_missing");
-    if (!options.sniffer)
-      return reject("legacy_store_missing");
-    let verdict;
-    try {
-      verdict = options.sniffer.trainingVerdict(subjectOf(row), row.modelId);
-    } catch {
-      return reject("legacy_verdict_unreadable");
-    }
-    if (!verdict)
-      return reject("legacy_verdict_missing");
-    if (verdict.ambiguous)
-      return reject("legacy_verdict_ambiguous");
-    const time3 = Date.parse(verdict.decidedAt), decisionTime = Date.parse(row.decidedAt);
-    if (!Number.isFinite(time3) || !Number.isFinite(decisionTime) || time3 > decisionTime)
-      return reject("legacy_verdict_time");
-    if ((verdict.tier === "personal" ? "private" : verdict.tier === "private" ? "secure" : undefined) !== contentTier)
-      return reject("legacy_verdict_tier");
-    if (verdict.contentHash !== normalizedContentHash(copy.chunks.map((chunk) => chunk.boundedText).join("")))
-      return reject("legacy_verdict_content");
-    provenance = "legacy_sniffer";
-  }
-  const vector = prefilterVector(copy, reject);
-  if (!vector)
-    return;
-  if (Math.hypot(...vector) === 0)
-    return reject("vector_zero");
-  return { vector, copy, private: contentTier === "secure", provenance };
-}
-function prefilterTrainingWindow(ledger, after, limit) {
-  return ledger.listItemWindow({ ...after ? { after } : {}, limit });
-}
-function selectPrefilterTrainingExample(example, counts) {
-  return counts[Number(example.private)] < PREFILTER_MAX_PER_CLASS;
-}
-
-class EmbeddingPrefilter {
-  options;
-  owner;
-  members = new Set;
-  get control() {
-    return this.owner.options.stateLedger ?? this.owner.options.ledger;
-  }
-  get audit() {
-    return this.owner.auditState;
-  }
-  get saved() {
-    return this.owner.savedModel;
-  }
-  set saved(value) {
-    this.owner.savedModel = value;
-  }
-  savedModel;
-  attempt;
-  training;
-  preparing;
-  get trainingPending() {
-    return this.owner.enabled() && !this.owner.audit.stopped && (this.owner.attempt?.outcome === "scanning" || this.owner.attempt?.outcome === "fitting");
-  }
-  get trainingFinalizing() {
-    return this.trainingPending && this.owner.training?.model !== undefined;
-  }
-  get trainingOwner() {
-    return this.owner;
-  }
-  auditState;
-  path;
-  constructor(options) {
-    this.options = options;
-    this.owner = options.sharedWith?.owner ?? this;
-    this.owner.members.add(this);
-    this.path = join43(embeddingPrefilterDirectory(this.control.dbPath), "weights.json");
-    try {
-      const audit = this.control.readMeta(`${PREFIX}audit`);
-      this.auditState = audit ? JSON.parse(audit) : { misses: [], stopped: false };
-      if (!Array.isArray(this.auditState.misses) || this.auditState.misses.length > WINDOW || this.auditState.misses.some((value) => typeof value !== "boolean") || typeof this.auditState.stopped !== "boolean")
-        throw new Error;
-    } catch {
-      this.auditState = { misses: [], stopped: true, reason: "audit_unreadable" };
-      this.control.writeMeta(`${PREFIX}audit`, JSON.stringify(this.auditState));
-    }
-    if (this.owner !== this)
-      return;
-    try {
-      const raw = this.control.readMeta(TRAINING);
-      if (raw) {
-        const attempt = JSON.parse(raw);
-        if (typeof attempt.id !== "string" || !Array.isArray(attempt.counts) || attempt.counts.length !== 2 || !Number.isFinite(attempt.nextAt) || !Number.isFinite(attempt.elapsedMs))
-          throw new Error;
-        this.attempt = attempt;
-      }
-    } catch {
-      this.control.deleteMeta(TRAINING);
-    }
-    try {
-      if (existsSync35(this.path) && !lstatSync17(this.path).isSymbolicLink() && lstatSync17(embeddingPrefilterDirectory(this.control.dbPath)).isDirectory() && !lstatSync17(embeddingPrefilterDirectory(this.control.dbPath)).isSymbolicLink()) {
-        chmodSync9(embeddingPrefilterDirectory(this.control.dbPath), 448);
-        chmodSync9(this.path, 384);
-        this.saved = JSON.parse(readFileSync29(this.path, "utf8"));
-      }
-    } catch {
-      this.saved = undefined;
-    }
-  }
-  revisions() {
-    return JSON.stringify([...this.owner.members].map((member) => [member.options.ledger.ledgerId(), member.options.ledger.readMeta("embedding-prefilter:training-revision") ?? "0"]).sort()) + ":" + (this.control.readMeta(`${PREFIX}withdrawal`) ?? "0");
-  }
-  now() {
-    return this.options.now?.() ?? Date.now();
-  }
-  enabled() {
-    return this.options.enabled?.() !== false;
-  }
-  status() {
-    if (this.audit.reason === "audit_unreadable")
-      return "Embedding clearing stopped: its audit state could not be read. Cleared items are returning to the privacy judge.";
-    if (this.audit.stopped)
-      return "Embedding clearing stopped: more than 2% of the last 200 checks were Private. Cleared items are returning to the privacy judge.";
-    if (!this.enabled())
-      return "Embedding clearing is off.";
-    const training = this.owner.attempt;
-    const failure = training?.reason === "scan_failed" ? "could not read training examples" : training?.reason === "training_failed" ? "could not fit the model" : training?.reason === "weights_write_failed" ? "could not save the model" : "the ledgers or judge changed";
-    const detail = training ? ` Training ${training.outcome === "too_few" ? `found too few examples (needs ${EMBEDDING_PREFILTER_MIN_PER_CLASS} per class)` : training.outcome === "trained" ? `completed with model ${training.version}` : training.outcome === "failed" ? `failed: ${failure}` : training.outcome === "scanning" ? "is reading the ledger" : "is fitting the model"}; read ${training.rows} rows, ${training.counts[0]} Personal and ${training.counts[1]} Private examples in ${Math.round(training.elapsedMs)} ms. Next attempt: ${training.outcome === "scanning" || training.outcome === "fitting" ? "continue next tick" : new Date(training.nextAt).toISOString()}${training.outcome === "too_few" ? " or after 1,000 new verdicts, whichever comes first" : ""}.` : "";
-    if (!this.saved)
-      return detail ? `Embedding clearing waits.${detail}` : `Embedding clearing waits for ${EMBEDDING_PREFILTER_MIN_PER_CLASS} judge verdicts per class with complete stored vectors.`;
-    return `Embedding clearing is on; ${this.audit.misses.length} of 200 spot checks collected.${detail}`;
-  }
-  setPlacementFor(placementFor) {
-    if (placementFor)
-      this.options.placementFor = placementFor;
-    else
-      delete this.options.placementFor;
-  }
-  recover() {
-    if (this.audit.stopped || !this.enabled())
-      for (const member of this.owner.members)
-        member.rollback();
-  }
-  trainingFingerprint(row) {
-    const subject = subjectOf(row);
-    return createHash31("sha256").update(JSON.stringify([
-      row,
-      this.options.ledger.copies(subject),
-      this.options.ledger.getOverride(subject),
-      this.options.ledger.rejudgeQuestion(subject),
-      row.modelId && !row.reasons.some((reason) => reason.startsWith("content:judge_verdict:")) ? this.options.sniffer.trainingVerdict(subject, row.modelId) : null
-    ])).digest("hex");
-  }
-  trainingExample(row, judge2) {
-    const eligible = prefilterTrainingExample(row, judge2, this.options);
-    if (!eligible)
-      return;
-    const { vector, copy, private: isPrivate } = eligible;
-    let fingerprint = this.trainingFingerprint(row);
-    let awaitingMoveCompletion = row.state === "moving";
-    const copied = copyFingerprint2(copy);
-    const subject = subjectOf(row);
-    return { vector, private: isPrivate, current: (checkLedger) => {
-      const currentCopy = this.options.copyFor(subject);
-      if (!currentCopy || copyFingerprint2(currentCopy) !== copied)
-        return false;
-      if (!checkLedger)
-        return true;
-      const current2 = this.options.ledger.getCurrent(subject);
-      if (!current2)
-        return false;
-      const nextFingerprint = this.trainingFingerprint(current2);
-      if (nextFingerprint === fingerprint)
-        return true;
-      const staged = current2.state === "moving" && current2.generation === row.generation && current2.metadataTier === row.metadataTier && current2.contentTier === row.contentTier && current2.targetMetadataTier === row.targetMetadataTier && current2.targetContentTier === row.targetContentTier;
-      const flipped = current2.state === "current" && current2.generation === row.generation + 1 && current2.metadataTier === row.targetMetadataTier && current2.contentTier === row.targetContentTier && current2.targetMetadataTier === null && current2.targetContentTier === null;
-      if (!awaitingMoveCompletion || !staged && !flipped || current2.modelId !== row.modelId || current2.engineVersion !== row.engineVersion || current2.mapRevision !== row.mapRevision || current2.metadataFlagged !== row.metadataFlagged || JSON.stringify(current2.reasons) !== JSON.stringify(row.reasons))
-        return false;
-      const completed = prefilterTrainingExample(current2, judge2, this.options);
-      if (!completed || completed.private !== isPrivate || copyFingerprint2(completed.copy) !== copied)
-        return false;
-      fingerprint = nextFingerprint;
-      if (flipped)
-        awaitingMoveCompletion = false;
-      return true;
-    } };
-  }
-  verdictCount() {
-    return [...this.members].reduce((count, member) => count + member.options.sniffer.verdictCount(), 0);
-  }
-  finishTraining(attempt, outcome, reason) {
-    const verdicts = outcome === "too_few" ? this.verdictCount() : undefined;
-    attempt.outcome = outcome;
-    if (reason)
-      attempt.reason = reason;
-    attempt.nextAt = this.now() + (reason === "ledger_or_judge_changed" ? 0 : outcome === "failed" ? FAILED_RETRY_MS : RETRAIN_MS);
-    if (verdicts !== undefined)
-      attempt.verdicts = verdicts;
-    this.training = undefined;
-  }
-  logTraining(attempt) {
-    (this.options.log ?? console.log)(`[olympus:embedding-prefilter] rows_read=${attempt.rows} personal=${attempt.counts[0]} private=${attempt.counts[1]} outcome=${attempt.outcome}${attempt.reason ? ` reason=${attempt.reason}` : ""}${attempt.version ? ` model_version=${attempt.version}` : ""} elapsed_ms=${Math.round(attempt.elapsedMs)} next_attempt=${new Date(attempt.nextAt).toISOString()}${attempt.outcome === "too_few" ? " or_1000_new_verdicts" : ""}`);
-  }
-  async prepare(judge2, shouldYield = () => false) {
-    if (this.owner !== this)
-      return this.owner.prepare(judge2, shouldYield);
-    if (this.preparing)
-      return this.preparing;
-    if (shouldYield())
-      return;
-    const pending = this.prepareSlice(judge2, shouldYield);
-    this.preparing = pending;
-    try {
-      await pending;
-    } finally {
-      this.preparing = undefined;
-    }
-  }
-  async finishValidation(judge2, shouldYield) {
-    if (this.owner !== this)
-      return this.owner.finishValidation(judge2, shouldYield);
-    let markers;
-    while (this.trainingFinalizing && !shouldYield()) {
-      await this.prepare(judge2, shouldYield);
-      const next = this.training?.finalValidation?.markers;
-      if (markers !== undefined && next !== markers)
-        break;
-      markers = next;
-    }
-  }
-  async prepareSlice(judge2, shouldYield) {
-    if (this.audit.stopped || !this.enabled()) {
-      for (const member of this.members)
-        member.rollback();
-      return;
-    }
-    const clock3 = this.options.monotonicNow ?? (() => performance.now());
-    const started = clock3();
-    const deadline = started + TRAINING_SLICE_MS;
-    let attempt = this.attempt;
-    if (attempt && attempt.labelVersion !== 5) {
-      attempt = this.attempt = undefined;
-      this.training = undefined;
-    }
-    const finishedAtStart = attempt && ["trained", "too_few", "failed"].includes(attempt.outcome) ? attempt.id : undefined;
-    if (attempt?.outcome === "failed" && !attempt.revisions && this.now() < attempt.nextAt)
-      return;
-    let stage = "scan_failed";
-    try {
-      const revisions = this.revisions();
-      if (this.saved && (this.saved.judge !== judge2 || !/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt) || this.saved.revisions !== revisions || !existsSync35(this.path) || privateProbability(this.saved.model, [1, ...new Array(EMBEDDING_PREFILTER_DIMENSIONS - 1).fill(0)]) === undefined)) {
-        if (existsSync35(this.path))
-          removeFileDurablySync(this.path);
-        this.saved = undefined;
-        if (attempt?.outcome === "trained")
-          attempt = this.attempt = undefined;
-        this.training = undefined;
-      }
-      if (attempt && (attempt.revisions !== revisions || attempt.judge !== judge2)) {
-        if (attempt.outcome === "scanning" || attempt.outcome === "fitting") {
-          this.finishTraining(attempt, "failed", "ledger_or_judge_changed");
-          this.logTraining(attempt);
-        }
-        attempt = this.attempt = undefined;
-        this.training = undefined;
-      }
-      if (!attempt && this.saved && this.now() - this.saved.trainedAt < RETRAIN_MS)
-        return;
-      if (attempt && ["trained", "too_few", "failed"].includes(attempt.outcome)) {
-        if (this.now() < attempt.nextAt && !(attempt.outcome === "too_few" && this.verdictCount() >= (attempt.verdicts ?? 0) + NEW_VERDICTS))
-          return;
-        attempt = undefined;
-      }
-      if (!attempt) {
-        attempt = this.attempt = {
-          labelVersion: 5,
-          id: randomUUID12(),
-          revisions,
-          judge: judge2,
-          startedAt: this.now(),
-          elapsedMs: 0,
-          rows: 0,
-          counts: [0, 0],
-          nextAt: this.now(),
-          outcome: "scanning"
-        };
-        this.training = undefined;
-      }
-      if (!this.training || this.training.id !== attempt.id) {
-        const scans = [...this.members].map((member) => {
-          const raw = member.options.ledger.readMeta(SCAN);
-          const previous = raw ? JSON.parse(raw) : undefined;
-          const scan = previous?.attempt === attempt.id ? previous : { attempt: attempt.id, done: false, rows: 0, samples: [] };
-          if (!Array.isArray(scan.samples) || scan.samples.length > MAX_PER_CLASS * 2 || !Number.isSafeInteger(scan.rows))
-            throw new Error;
-          return { member, scan, dirty: false, revision: member.options.ledger.readMeta(`${PREFIX}training-revision`) ?? "0" };
-        });
-        this.training = { id: attempt.id, scans, scanIndex: 0, examples: [], memberIndex: 0, sampleIndex: 0, validationIndex: 0, validationRemaining: 0 };
-        attempt.counts = [0, 0];
-        attempt.rows = 0;
-        for (const { scan } of scans) {
-          attempt.rows += scan.rows;
-          for (const sample of scan.samples)
-            attempt.counts[Number(sample.private)]++;
-        }
-      }
-      const run = this.training;
-      const markers = run.scans.map(({ member }) => member.options.ledger.changeMarker());
-      const ledgerChanged = !run.markers || markers.some((marker, index) => marker !== run.markers[index]);
-      run.markers = markers;
-      if (ledgerChanged)
-        run.validationRemaining = run.examples.length;
-      let worked = false;
-      const hasTime = () => !shouldYield() && (!worked || clock3() < deadline);
-      const full = () => attempt.counts.every((count) => count >= MAX_PER_CLASS);
-      while (attempt.outcome !== "fitting" && !full() && run.scans.some(({ scan }) => !scan.done) && hasTime()) {
-        const entry = run.scans[run.scanIndex];
-        run.scanIndex = (run.scanIndex + 1) % run.scans.length;
-        const { member, scan } = entry;
-        if (scan.done)
-          continue;
-        const rows = prefilterTrainingWindow(member.options.ledger, scan.after, Math.min(32, MAX_PER_CLASS * 2 - attempt.counts[0] - attempt.counts[1]));
-        if (!rows.length) {
-          scan.done = true;
-          entry.dirty = true;
-          continue;
-        }
-        for (const row of rows) {
-          if (!hasTime() || full())
-            break;
-          worked = true;
-          entry.dirty = true;
-          scan.after = subjectOf(row);
-          scan.rows++;
-          attempt.rows++;
-          const example = member.trainingExample(row, judge2);
-          if (example && selectPrefilterTrainingExample(example, attempt.counts)) {
-            scan.samples.push({ subject: subjectOf(row), private: example.private });
-            attempt.counts[Number(example.private)]++;
-          }
-          await ingestionTurn();
-        }
-      }
-      if (attempt.outcome === "fitting" || run.scans.every(({ scan }) => scan.done) || attempt.counts.every((count) => count >= MAX_PER_CLASS)) {
-        if (attempt.counts.some((count) => count < EMBEDDING_PREFILTER_MIN_PER_CLASS))
-          this.finishTraining(attempt, "too_few");
-        else {
-          stage = "training_failed";
-          attempt.outcome = "fitting";
-          while (run.memberIndex < run.scans.length && hasTime()) {
-            const { member, scan } = run.scans[run.memberIndex];
-            if (run.sampleIndex >= scan.samples.length) {
-              run.memberIndex++;
-              run.sampleIndex = 0;
-              continue;
-            }
-            worked = true;
-            const sample = scan.samples[run.sampleIndex++];
-            const row = member.options.ledger.getCurrent(sample.subject);
-            const example = row && member.trainingExample(row, judge2);
-            if (example)
-              run.examples.push(example);
-            await ingestionTurn();
-          }
-          if (run.memberIndex === run.scans.length) {
-            if (!run.fit) {
-              attempt.counts = [0, 0];
-              for (const example of run.examples)
-                attempt.counts[Number(example.private)]++;
-              run.fit = trainLogisticSteps(run.examples);
-            }
-            const validationDeadline = started + TRAINING_SLICE_MS / 2;
-            let checked = 0;
-            while (!run.model && checked < run.examples.length && !shouldYield() && clock3() < validationDeadline) {
-              worked = true;
-              if (!run.examples[run.validationIndex].current(run.validationRemaining > 0)) {
-                stage = "ledger_or_judge_changed";
-                throw new Error;
-              }
-              run.validationIndex = (run.validationIndex + 1) % run.examples.length;
-              run.validationRemaining = Math.max(0, run.validationRemaining - 1);
-              checked++;
-              await ingestionTurn();
-            }
-            while (!run.model && hasTime()) {
-              worked = true;
-              const step = run.fit.next();
-              if (step.done) {
-                if (!step.value) {
-                  this.finishTraining(attempt, "too_few");
-                  break;
-                }
-                run.model = step.value;
-                break;
-              }
-              await ingestionTurn();
-            }
-            if (run.model) {
-              const changeMarkers = () => JSON.stringify(run.scans.map(({ member }) => [
-                member.options.ledger.changeMarker(true),
-                member.options.copyChangeMarker(),
-                member.options.sniffer.changeMarker()
-              ]));
-              const currentMarkers = changeMarkers();
-              if (!run.finalValidation || run.finalValidation.markers !== currentMarkers) {
-                run.finalValidation = { index: 0, markers: currentMarkers };
-              }
-              const validation = run.finalValidation;
-              while (validation.index < run.examples.length && hasTime()) {
-                worked = true;
-                if (!run.examples[validation.index++].current(true)) {
-                  stage = "ledger_or_judge_changed";
-                  throw new Error;
-                }
-                await ingestionTurn();
-              }
-              if (validation.index === run.examples.length && hasTime() && validation.markers === changeMarkers() && attempt.revisions === this.revisions()) {
-                stage = "weights_write_failed";
-                if (this.control.dbPath === ":memory:")
-                  throw new Error;
-                const directory = embeddingPrefilterDirectory(this.control.dbPath);
-                if (existsSync35(directory) && (!lstatSync17(directory).isDirectory() || lstatSync17(directory).isSymbolicLink()))
-                  throw new Error;
-                mkdirSync19(directory, { recursive: true, mode: 448 });
-                chmodSync9(directory, 448);
-                const saved = { model: run.model, judge: judge2, revisions, trainedAt: this.now(), version: randomUUID12() };
-                writePrivateFileAtomicSync(this.path, JSON.stringify(saved));
-                this.saved = saved;
-                attempt.version = saved.version;
-                this.finishTraining(attempt, "trained");
-              }
-            }
-          }
-        }
-      }
-      if (attempt.revisions !== this.revisions()) {
-        if (existsSync35(this.path))
-          removeFileDurablySync(this.path);
-        this.saved = undefined;
-        this.finishTraining(attempt, "failed", "ledger_or_judge_changed");
-      }
-      if (run.scans.some(({ member }, index) => member.options.ledger.changeMarker() !== markers[index])) {
-        run.validationRemaining = run.examples.length;
-      }
-      for (const entry of run.scans) {
-        if (entry.dirty && attempt.revisions === this.revisions()) {
-          if (!entry.member.options.ledger.writeEmbeddingTrainingScan(JSON.stringify(entry.scan), entry.revision)) {
-            this.finishTraining(attempt, "failed", "ledger_or_judge_changed");
-            break;
-          }
-          entry.dirty = false;
-        }
-      }
-    } catch {
-      if (!attempt)
-        attempt = this.attempt = { labelVersion: 5, id: randomUUID12(), judge: judge2, revisions: "", startedAt: this.now(), elapsedMs: 0, rows: 0, counts: [0, 0], nextAt: this.now(), outcome: "scanning" };
-      if (attempt.outcome === "scanning" || attempt.outcome === "fitting")
-        this.finishTraining(attempt, "failed", stage);
-    }
-    if (attempt && attempt.id !== finishedAtStart) {
-      attempt.elapsedMs += clock3() - started;
-      this.control.writeMeta(TRAINING, JSON.stringify(attempt));
-      if (this.training)
-        this.training.markers = this.training.scans.map(({ member }, index) => {
-          const marker = member.options.ledger.changeMarker();
-          const previous = this.training.markers?.[index];
-          return previous && previous.split(":")[0] !== marker.split(":")[0] ? previous : marker;
-        });
-      if (["trained", "too_few", "failed"].includes(attempt.outcome))
-        this.logTraining(attempt);
-    }
-  }
-  retained(question) {
-    const raw = this.options.ledger.readMeta(RECEIPTS + tierLedgerIdentityKey(question));
-    if (!raw)
-      return false;
-    const receipt = JSON.parse(raw);
-    const row = this.options.ledger.getCurrent(question);
-    if (receipt.hash === question.materialHash && row?.reasons.includes(receipt.reason)) {
-      return !this.options.ledger.rejudgeQuestion(question);
-    }
-    this.options.ledger.deleteMeta(RECEIPTS + tierLedgerIdentityKey(question));
-    return false;
-  }
-  tryClear(question, judge2, counts) {
-    if (counts)
-      counts.tried++;
-    const skip = (reason2) => {
-      if (counts)
-        counts.skipped[reason2] = (counts.skipped[reason2] ?? 0) + 1;
-      return false;
-    };
-    const spotCheck = () => {
-      if (counts)
-        counts.spotChecks++;
-      return false;
-    };
-    if (!this.enabled())
-      return skip("disabled");
-    if (this.audit.stopped)
-      return skip("audit_stopped");
-    if (!this.saved)
-      return skip("model_missing");
-    if (!/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt))
-      return skip("model_invalid");
-    if (!existsSync35(this.path))
-      return skip("weights_missing");
-    if (this.saved.revisions !== this.revisions())
-      return skip("revisions_changed");
-    if (this.saved.judge !== judge2)
-      return skip("judge_changed");
-    if (question.pass !== "content")
-      return skip("not_content");
-    const row = this.options.ledger.getCurrent(question);
-    if (!row)
-      return skip("row_missing");
-    if (row.state !== "pending")
-      return skip("row_not_pending");
-    if (row.metadataPending)
-      return skip("metadata_pending");
-    if (!row.contentPending)
-      return skip("content_not_pending");
-    if (!row.contentRead)
-      return skip("content_unread");
-    if (row.metadataTier !== "private")
-      return skip("metadata_tier");
-    if (row.contentTier !== "private")
-      return skip("content_tier");
-    if (row.metadataForced)
-      return skip("metadata_forced");
-    if (row.decidedBy === "override")
-      return skip("override_decision");
-    if (row.decidedBy === "owner_rule")
-      return skip("owner_decision");
-    if (this.options.ledger.getOverride(question))
-      return skip("item_override");
-    if (row.reasons.some((reason2) => reason2.startsWith("metadata:owner_rule:")))
-      return skip("metadata_owner_rule");
-    if (this.options.ledger.rejudgeQuestion(question))
-      return skip("rejudge_open");
-    if (this.options.sniffer.questionFor(question, "metadata"))
-      return skip("metadata_question_open");
-    const checkKey = this.checkKey(question);
-    if (this.isSpotCheck(question))
-      return spotCheck();
-    const copy = this.options.copyFor(question);
-    if (!copy)
-      return skip("copy_missing");
-    if (!row.reasons.includes(contentDigestReason(copy.chunks.map((chunk) => chunk.boundedText).join(""))))
-      return skip("digest_missing");
-    const vector = prefilterVector(copy);
-    if (!vector)
-      return skip("no_vector");
-    const probability = privateProbability(this.saved.model, vector);
-    if (probability === undefined)
-      return skip("score_unavailable");
-    if (probability >= PREFILTER_CLEARING_CUTOFF)
-      return skip("probability_high");
-    if ((this.options.random?.() ?? Math.random()) < SPOT_CHECK_RATE) {
-      this.options.ledger.writeMeta(checkKey, JSON.stringify({ hash: question.materialHash, token: randomUUID12() }));
-      return spotCheck();
-    }
-    const reason = `content:embedding_prefilter:${this.saved.version}:${probability.toFixed(8)}`;
-    const original = decisionOf(row);
-    original.reasons = [...original.reasons.filter((code) => code !== PERSONAL_FIRST_REASON), HELD_UNTIL_JUDGED_REASON];
-    const receipt = { subject: question, hash: question.materialHash, reason, original };
-    receipt.subject = {
-      provider: question.provider,
-      accountScope: question.accountScope,
-      providerItemId: question.providerItemId,
-      ...question.providerConversationId ? { providerConversationId: question.providerConversationId } : {}
-    };
-    const cleared = this.options.ledger.clearEmbeddingQuestion(question, {
-      reason,
-      receiptKey: RECEIPTS + tierLedgerIdentityKey(question),
-      receipt: JSON.stringify(receipt),
-      modelId: EMBEDDING_PREFILTER_MODEL_ID,
-      questionStillCurrent: () => this.options.sniffer.questionFor(question, "content")?.materialHash === question.materialHash,
-      ...this.options.placementFor ? { placementFor: this.options.placementFor } : {}
-    });
-    if (cleared)
-      this.options.ledger.markJudged(question, { engineVersion: TIER_CLASSIFIER_VERSION, snifferId: judge2 });
-    if (!cleared)
-      return skip("clear_rejected");
-    if (counts)
-      counts.cleared++;
-    return cleared;
-  }
-  checkKey(question) {
-    return CHECKS + tierLedgerIdentityKey(question);
-  }
-  selection(question) {
-    const raw = this.options.ledger.readMeta(this.checkKey(question));
-    if (!raw)
-      return;
-    try {
-      const value = JSON.parse(raw);
-      return value.hash === question.materialHash && /^[0-9a-f-]{36}$/.test(value.token) ? value : undefined;
-    } catch {
-      return;
-    }
-  }
-  isSpotCheck(question) {
-    return question.pass === "content" && this.selection(question) !== undefined;
-  }
-  observe(question, isPrivate) {
-    const selection = question.pass === "content" ? this.selection(question) : undefined;
-    if (!selection)
-      return;
-    const observedKey = `${PREFIX}observed:${selection.token}`;
-    if (!this.control.readMeta(observedKey)) {
-      this.audit.misses.push(isPrivate);
-      this.audit.misses = this.audit.misses.slice(-WINDOW);
-      this.audit.stopped ||= this.audit.misses.filter(Boolean).length > 4;
-      this.control.writeMetaBatch([[`${PREFIX}audit`, JSON.stringify(this.audit)], [observedKey, "1"]]);
-    }
-    this.options.ledger.deleteMeta(this.checkKey(question));
-    this.control.deleteMeta(observedKey);
-    if (this.audit.stopped)
-      for (const member of this.owner.members)
-        member.rollback();
-    else if (this.audit.misses.length === WINDOW)
-      for (const member of this.owner.members)
-        member.acceptClearances();
-  }
-  acceptClearances() {
-    for (const entry of this.options.ledger.metaEntries(RECEIPTS)) {
-      const receipt = JSON.parse(entry.value);
-      if (this.options.ledger.rejudgeQuestion(receipt.subject))
-        continue;
-      this.options.ledger.deleteMeta(entry.key);
-      this.options.sniffer.deleteQuestion(receipt.subject, "content", receipt.hash);
-    }
-  }
-  rollback() {
-    for (const entry of this.options.ledger.metaEntries(RECEIPTS)) {
-      const receipt = JSON.parse(entry.value);
-      if (this.options.ledger.revokeEmbeddingClearance(receipt.subject, receipt.reason, receipt.original, this.options.placementFor)) {
-        this.options.ledger.deleteMeta(entry.key);
-      }
-    }
-  }
-}
 
 // src/workers/classification/sniffer-service.ts
 init_tier_move();
@@ -79878,8 +79515,8 @@ import { Database as Database7 } from "bun:sqlite";
 init_answer_activity();
 init_atomic_file();
 init_sniffer();
-import { createHash as createHash32 } from "node:crypto";
-import { mkdirSync as mkdirSync20, readFileSync as readFileSync30 } from "node:fs";
+import { createHash as createHash31 } from "node:crypto";
+import { mkdirSync as mkdirSync19, readFileSync as readFileSync29 } from "node:fs";
 import { dirname as dirname42 } from "node:path";
 init_sniffer_lane();
 init_sniffer_store();
@@ -79907,7 +79544,7 @@ class SnifferCallBudget {
     this.statePath = options.statePath;
     if (this.statePath) {
       try {
-        const saved = JSON.parse(readFileSync30(this.statePath, "utf8"));
+        const saved = JSON.parse(readFileSync29(this.statePath, "utf8"));
         if (typeof saved.day === "string" && typeof saved.used === "number" && Number.isFinite(saved.used)) {
           this.day = saved.day;
           this.used = Math.max(0, Math.floor(saved.used));
@@ -79928,7 +79565,7 @@ class SnifferCallBudget {
     if (!this.statePath)
       return;
     try {
-      mkdirSync20(dirname42(this.statePath), { recursive: true, mode: 448 });
+      mkdirSync19(dirname42(this.statePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.statePath, `${JSON.stringify({ day: this.day, used: this.used })}
 `);
     } catch {}
@@ -79953,7 +79590,7 @@ var SECRET_SCREEN_CACHE_LIMIT = 20000;
 var secretScreenCache = new Map;
 function materialCarriesSecret(question) {
   const own3 = snifferOwnMaterial(question.material);
-  const key2 = createHash32("sha256").update(own3).digest("base64");
+  const key2 = createHash31("sha256").update(own3).digest("base64");
   const known = secretScreenCache.get(key2);
   if (known !== undefined)
     return known;
@@ -80003,7 +79640,6 @@ async function runSnifferPass(options) {
   const passStarted = monotonicNow();
   const deadline = passStarted + (options.passTimeMs ?? DEFAULT_SNIFFER_PASS_TIME_MS);
   const report = {
-    clearing: { tried: 0, cleared: 0, spotChecks: 0, skipped: {} },
     heldLowering: 0,
     callMs: 0,
     maxQueueWaitMs: 0,
@@ -80035,6 +79671,7 @@ async function runSnifferPass(options) {
     promptVersion,
     mapRevision: question.mapRevision
   });
+  const finalContentVerdict = ({ target, question }) => question.pass === "content" && question.contentHash ? target.sniffer.getFinalModelContentVerdict({ ...keyOf(question), contentHash: question.contentHash }) : undefined;
   const sameQuestion = (target, question) => {
     const current2 = target.sniffer.questionFor(question, question.pass);
     return current2?.materialHash === question.materialHash && current2.mapRevision === question.mapRevision && current2.contentHash === question.contentHash;
@@ -80180,8 +79817,6 @@ async function runSnifferPass(options) {
   for (const target of options.targets) {
     const admit = (question) => {
       report.pendingSeen += 1;
-      if (target.embeddingPrefilter?.retained(question))
-        return false;
       if (finishContentDonor(target, question) || midMove(target, question))
         return false;
       if (stillOpen(target, question))
@@ -80236,37 +79871,21 @@ async function runSnifferPass(options) {
     }
     id = snifferId(options.lane, promptVersion);
   }
-  if (options.trainingReady)
-    options.trainingReady(id);
-  else
-    for (const filter of new Set(options.targets.flatMap((target) => target.embeddingPrefilter ? [target.embeddingPrefilter.trainingOwner] : []))) {
-      await filter.prepare(id, () => options.signal?.aborted === true || options.shouldYield?.() === true);
-    }
   for (const pass of ["metadata", "content"]) {
     work[pass] = work[pass].filter((item) => {
       const key2 = keyOf(item.question);
-      const spotCheck = item.target.embeddingPrefilter?.isSpotCheck(item.question) === true;
       const cached3 = item.target.sniffer.getVerdict(key2);
       const usable = cached3 && cachedSnifferVerdictHolds(cached3) && (!item.question.contentHash || contentVerdictReusable(cached3, item.question.contentHash, item.question));
       const knownPrivate = cached3 && cachedSnifferVerdictHolds(cached3) && snifferVerdictTier(cached3, options.lane, item.question.flags).tier === "secure";
-      if (knownPrivate || usable && !spotCheck) {
-        if (spotCheck && knownPrivate)
-          item.target.embeddingPrefilter?.observe(item.question, true);
+      if (knownPrivate || usable) {
         apply(item, cached3, item.question.contentHash !== undefined && cached3.modelSubject !== snifferSubjectKey(item.question));
         report.cacheHits += 1;
         return false;
       }
-      const duplicate = item.question.pass === "content" && item.question.contentHash ? item.target.sniffer.getFinalModelContentVerdict({ ...key2, contentHash: item.question.contentHash }) : undefined;
-      if (duplicate && cachedSnifferVerdictHolds(duplicate) && (!spotCheck || snifferVerdictTier(duplicate, options.lane, item.question.flags).tier === "secure")) {
-        if (spotCheck)
-          item.target.embeddingPrefilter?.observe(item.question, true);
+      const duplicate = finalContentVerdict(item);
+      if (duplicate && cachedSnifferVerdictHolds(duplicate)) {
         apply(item, duplicate, true);
         report.cacheHits += 1;
-        return false;
-      }
-      if (item.target.embeddingPrefilter?.tryClear(item.question, id, report.clearing)) {
-        report.verdictsApplied += 1;
-        report.resolvedPersonal += 1;
         return false;
       }
       return true;
@@ -80300,7 +79919,7 @@ async function runSnifferPass(options) {
         }
         if (!screenQuestion(next.target, next.question))
           continue;
-        const duplicate = !next.target.embeddingPrefilter?.isSpotCheck(next.question) && next.question.contentHash && next.question.pass === "content" ? next.target.sniffer.getFinalModelContentVerdict({ ...keyOf(next.question), contentHash: next.question.contentHash }) : undefined;
+        const duplicate = finalContentVerdict(next);
         if (duplicate && cachedSnifferVerdictHolds(duplicate)) {
           apply(next, duplicate, true);
           report.cacheHits += 1;
@@ -80309,7 +79928,7 @@ async function runSnifferPass(options) {
         const group = [next];
         for (let i2 = pending.length - 1;i2 >= 0; i2--) {
           const item = pending[i2];
-          if (!next.target.embeddingPrefilter?.isSpotCheck(next.question) && !item.target.embeddingPrefilter?.isSpotCheck(item.question) && !next.question.contentHash && item.question.pass === pass && item.question.materialHash === next.question.materialHash && item.question.mapRevision === next.question.mapRevision && stillOpen(item.target, item.question) && screenQuestion(item.target, item.question)) {
+          if (!next.question.contentHash && item.question.pass === pass && item.question.materialHash === next.question.materialHash && item.question.mapRevision === next.question.mapRevision && stillOpen(item.target, item.question) && screenQuestion(item.target, item.question)) {
             group.push(item);
             pending.splice(i2, 1);
           }
@@ -80388,9 +80007,6 @@ async function runSnifferPass(options) {
             for (const item of group2) {
               if (item.target !== group2[0].target)
                 item.target.sniffer.putVerdict(key2, stored, group2[0].question);
-              const audit = sameQuestion(item.target, item.question) && stillOpen(item.target, item.question, false);
-              if (audit)
-                item.target.embeddingPrefilter?.observe(item.question, stored.tier === "private");
               apply(item, stored);
             }
             continue;
@@ -80466,7 +80082,7 @@ init_secrets_disposition();
 init_tier_image_content_sweep();
 init_tier_media_judgment_sweep();
 init_tier_ledger();
-import { existsSync as existsSync36 } from "node:fs";
+import { existsSync as existsSync35, rmSync as rmSync10 } from "node:fs";
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000;
 var NOT_ANSWERING_FIRST_BACKOFF_MS = 30000;
 var NOT_ANSWERING_MAX_BACKOFF_MS = 60000;
@@ -80506,10 +80122,6 @@ class TierSnifferService {
   budget;
   timer;
   continuation;
-  trainingTimer;
-  trainingJob;
-  trainingJudge;
-  finalizingTraining = false;
   lastTickEndedAt;
   lastTickYielded = false;
   cycleEndedAt;
@@ -80589,68 +80201,11 @@ class TierSnifferService {
       return { state: "skipped_running" };
     return this.runOnce();
   }
-  scheduleTraining(judge2, delay = 0) {
-    this.trainingJudge = judge2;
-    if (this.stopped || !this.timer || this.trainingTimer || this.trainingJob)
-      return;
-    const filters = [...new Set([...this.embeddingPrefilters.values()].map((filter) => filter.trainingOwner))];
-    if (!filters.length)
-      return;
-    this.trainingTimer = this.timers().setTimeout(() => {
-      this.trainingTimer = undefined;
-      const shouldYield = () => this.stopped || this.trainingJudge !== judge2 || this.yieldNow();
-      const job = (async () => {
-        for (const filter of filters) {
-          if (shouldYield())
-            break;
-          await filter.prepare(judge2, shouldYield);
-        }
-      })();
-      this.trainingJob = job;
-      job.catch(() => {}).finally(() => {
-        this.trainingJob = undefined;
-        if (this.stopped) {
-          if (!this.running)
-            this.closeLedgers();
-          return;
-        }
-        if (this.trainingJudge !== judge2)
-          return;
-        this.scheduleTraining(judge2, !this.yieldNow() && filters.some((filter) => filter.trainingPending) ? 0 : 1000);
-      });
-    }, delay);
-    unrefTimer(this.trainingTimer);
-  }
-  pauseTraining() {
-    this.trainingJudge = undefined;
-    if (this.trainingTimer)
-      this.timers().clearTimeout(this.trainingTimer);
-    this.trainingTimer = undefined;
-  }
-  async finishTrainingValidation(signal) {
-    const judge2 = this.trainingJudge;
-    const filters = [...new Set([...this.embeddingPrefilters.values()].map((filter) => filter.trainingOwner))];
-    if (!judge2 || !filters.some((filter) => filter.trainingFinalizing))
-      return;
-    this.pauseTraining();
-    await this.trainingJob;
-    this.finalizingTraining = true;
-    try {
-      await this.moving;
-      for (const filter of filters) {
-        await filter.finishValidation(judge2, () => signal.aborted || this.stopped || this.yieldNow());
-      }
-    } finally {
-      this.finalizingTraining = false;
-      this.scheduleTraining(judge2);
-    }
-  }
   get passRunning() {
     return this.running;
   }
   stop() {
     this.stopped = true;
-    this.pauseTraining();
     this.moveAbort.abort();
     if (this.continuation)
       this.timers().clearTimeout(this.continuation);
@@ -80669,8 +80224,7 @@ class TierSnifferService {
   }
   backlog() {
     const backlog = this.backlogFrom(this.backlogCounts());
-    const messages = [...new Set([...this.embeddingPrefilters.values()].map((filter) => filter.status()))];
-    return { ...backlog, lowerMovesQueued: this.lowerMovesQueued(backlog.pendingItems), summary: [backlog.summary, ...messages].join(" ") };
+    return { ...backlog, lowerMovesQueued: this.lowerMovesQueued(backlog.pendingItems) };
   }
   lowerMovesQueued(pendingItems) {
     const now = this.clockMs();
@@ -80760,7 +80314,7 @@ class TierSnifferService {
         }
       }
       const path = tierSnifferPathForLedger(ledgerPath);
-      const hasQueue = existsSync36(path);
+      const hasQueue = existsSync35(path);
       if (hasQueue)
         db.query("ATTACH DATABASE ? AS queue").run(path);
       return { db, hasQueue };
@@ -80898,14 +80452,12 @@ class TierSnifferService {
       return true;
     }
   }
-  embeddingState;
-  embeddingPrefilters = new Map;
+  retiredPrefilterCleaned = new Set;
   status() {
     return {
       lane: this.options.lane.kind,
       modelId: this.options.lane.modelId,
       callsToday: this.budget.usedToday(),
-      embeddingPrefilter: [...this.embeddingPrefilters.values()].map((filter) => filter.status()),
       ...this.lastTick ? { lastTick: this.lastTick } : {},
       ...this.waiting ? { waiting: { ...this.waiting } } : {},
       ...this.lastCycle ? { throughput: { last: { ...this.lastCycle }, total: { ...this.cycleTotals } } } : {}
@@ -80982,7 +80534,6 @@ class TierSnifferService {
       if (tick.state === "ran" && lowerMoves) {
         tick.autoMoves = mergeAutoMoveReports(tick.autoMoves, lowerMoves);
       }
-      await this.finishTrainingValidation(abort.signal);
     } catch (error2) {
       tick = { state: "failed", error: error2 instanceof Error ? error2.name : "unknown" };
     } finally {
@@ -81162,14 +80713,14 @@ class TierSnifferService {
       try {
         const binding = store.tierSetBinding?.();
         const bound = store.tierSetLedgerPath ? store.tierSetLedgerPath() : binding?.ledgerPath;
-        if (bound && bound !== ":memory:" && existsSync36(bound)) {
+        if (bound && bound !== ":memory:" && existsSync35(bound)) {
           paths.add(bound);
           if (binding?.ledgerId)
             this.boundLedgerIds.set(bound, binding.ledgerId);
         }
       } catch {}
       const own3 = tierLedgerPathForStore(store.dbPath);
-      if (existsSync36(own3))
+      if (existsSync35(own3))
         paths.add(own3);
     }
     return [...paths];
@@ -81188,28 +80739,16 @@ class TierSnifferService {
     return ledger;
   }
   closeLedgers() {
-    if (this.trainingJob)
-      return;
     for (const ledger of this.ledgers.values()) {
       try {
         ledger.close();
       } catch {}
     }
     this.ledgers.clear();
-    this.embeddingState?.close();
-    this.embeddingState = undefined;
-    this.embeddingPrefilters.clear();
   }
   snifferTargets() {
     const targets = [];
-    const filterLedgerPaths = this.ledgerPaths().sort();
-    if (filterLedgerPaths.length && !this.embeddingState)
-      this.embeddingState = new TierLedger({
-        dbPath: embeddingPrefilterInstallLedgerPath(this.options.classificationLedgerPath)
-      });
-    if ([...this.embeddingPrefilters.keys()].some((path) => !filterLedgerPaths.includes(path)))
-      this.embeddingPrefilters.clear();
-    for (const ledgerPath of filterLedgerPaths) {
+    for (const ledgerPath of this.ledgerPaths().sort()) {
       let ledger;
       try {
         ledger = this.ledgerAt(ledgerPath);
@@ -81217,47 +80756,8 @@ class TierSnifferService {
         continue;
       }
       const planner = tierSetPlannerForLedger(ledgerPath);
-      let embeddingPrefilter = this.embeddingPrefilters.get(ledgerPath);
-      if (!embeddingPrefilter) {
-        embeddingPrefilter = new EmbeddingPrefilter({
-          ledger,
-          stateLedger: this.embeddingState,
-          ...this.embeddingPrefilters.size ? { sharedWith: this.embeddingPrefilters.values().next().value } : {},
-          sniffer: this.options.installed.snifferStoreForLedger(ledgerPath),
-          ...planner ? { placementFor: planner } : {},
-          enabled: () => this.options.embeddingPrefilterEnabled?.() !== false,
-          log: (line) => this.options.log?.(line),
-          copyChangeMarker: () => {
-            const stores = tierSetForLedger(ledgerPath)?.openStores() ?? this.options.stores().filter((store) => (store.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(store.dbPath)) === ledgerPath);
-            return JSON.stringify(stores.map((store) => {
-              if (!store.changeMarker)
-                throw new Error("Copy change marker unavailable");
-              return [store.dbPath, store.changeMarker()];
-            }));
-          },
-          copyFor: (subject) => {
-            const set2 = tierSetForLedger(ledgerPath);
-            return prefilterTrainingCopy(subject, ledger, set2 ? (corpusId) => {
-              const domain = set2.domainForCorpus(corpusId);
-              return domain ? set2.store(domain)?.exportItemCopy(subject) : undefined;
-            } : undefined, () => {
-              for (const store of this.options.stores()) {
-                if ((store.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(store.dbPath)) !== ledgerPath)
-                  continue;
-                const copy = store.exportItemCopy?.(subject);
-                if (copy)
-                  return copy;
-              }
-              return;
-            });
-          }
-        });
-        this.embeddingPrefilters.set(ledgerPath, embeddingPrefilter);
-      }
-      embeddingPrefilter.setPlacementFor(planner);
       targets.push({
         ledger,
-        embeddingPrefilter,
         sniffer: this.options.installed.snifferStoreForLedger(ledgerPath),
         ...planner ? { placementFor: planner } : {},
         screenStoredQuestion: (question) => {
@@ -81355,11 +80855,20 @@ class TierSnifferService {
         }
       });
     }
+    for (const path of [...targets.map((target) => target.ledger.dbPath), this.options.classificationLedgerPath]) {
+      if (path === ":memory:" || this.retiredPrefilterCleaned.has(path))
+        continue;
+      const retired = retiredEmbeddingPrefilterPaths(path);
+      for (const directory of retired.directories) {
+        rmSync10(directory, { recursive: true, force: true });
+      }
+      for (const suffix of ["", "-wal", "-shm"])
+        rmSync10(`${retired.ledger}${suffix}`, { force: true });
+      this.retiredPrefilterCleaned.add(path);
+    }
     return targets;
   }
   async tick(signal) {
-    this.pauseTraining();
-    await this.trainingJob;
     const { lane } = this.options;
     const phaseStarted = this.monotonicNow();
     const idleMs = this.lastTickEndedAt === undefined ? undefined : phaseStarted - this.lastTickEndedAt;
@@ -81373,8 +80882,6 @@ class TierSnifferService {
     await this.settleStoredItems();
     phase("settle");
     const targets = this.snifferTargets();
-    for (const target of targets)
-      target.embeddingPrefilter?.recover();
     phase("targets");
     await this.recoverMissingQuestions(signal);
     phase("recover");
@@ -81441,7 +80948,6 @@ class TierSnifferService {
       model: this.options.model,
       promptVersion: versions2.cache,
       ...ownerContext ? { ownerContext } : {},
-      ...this.timer ? { trainingReady: (judge2) => this.scheduleTraining(judge2) } : {},
       budget: this.budget,
       maxCallsPerPass: this.options.maxCallsPerPass,
       concurrentCalls: this.options.concurrentCalls,
@@ -81456,9 +80962,9 @@ class TierSnifferService {
       this.forgetLowerMoves();
     const autoMoves = await this.drainMoves();
     phase("moves");
-    if (report.calls > 0 || report.verdictsApplied > 0 || report.heldLowering > 0 || report.clearing.tried > 0) {
+    if (report.calls > 0 || report.verdictsApplied > 0 || report.heldLowering > 0) {
       const phases = Object.entries(phaseMs).map(([name, ms]) => `${name}=${Math.round(ms)}`).join(" ");
-      this.options.log?.(`Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied ` + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), ` + `${report.cacheHits} from cache; ${report.heldLowering} lowering(s) held${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ""}; ` + `clearing: tried=${report.clearing.tried} cleared=${report.clearing.cleared} spot_checks=${report.clearing.spotChecks} skipped{${Object.entries(report.clearing.skipped).sort(([a], [b]) => a.localeCompare(b)).map(([reason, count]) => `${reason}=${count}`).join(",")}}; ` + `call_ms=${Math.round(report.callMs)} mean_call_ms=${report.calls ? Math.round(report.callMs / report.calls) : 0} queue_wait_max_ms=${Math.round(report.maxQueueWaitMs)}; ` + `promptChars=${report.promptChars} mean_promptChars=${report.calls ? Math.round(report.promptChars / report.calls) : 0} estimatedInputTokens=${report.estimatedInputTokens} mean_estimatedInputTokens=${report.calls ? Math.round(report.estimatedInputTokens / report.calls) : 0}; ` + `tick_ms=${Math.round(this.monotonicNow() - phaseStarted)} ${phases}${idleMs === undefined ? "" : ` idle_before=${Math.round(idleMs)} wait_before=${this.lastTickYielded ? "yield" : "idle"} after_prev_ms=${Math.round(this.lastAfterPassMs)}`}; ` + `pass_ms=${Math.round(report.timing.passMs)} setup_ms=${Math.round(report.timing.setupMs)} dispatch_ms=${Math.round(report.timing.dispatchMs)} ` + `slot_wait_ms=${Math.round(report.timing.slotWaitMs)} model_ms=${Math.round(report.timing.modelMs)} pass_switches=${report.timing.passSwitches}.`);
+      this.options.log?.(`Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied ` + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), ` + `${report.cacheHits} from cache; ${report.heldLowering} lowering(s) held${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ""}; ` + `call_ms=${Math.round(report.callMs)} mean_call_ms=${report.calls ? Math.round(report.callMs / report.calls) : 0} queue_wait_max_ms=${Math.round(report.maxQueueWaitMs)}; ` + `promptChars=${report.promptChars} mean_promptChars=${report.calls ? Math.round(report.promptChars / report.calls) : 0} estimatedInputTokens=${report.estimatedInputTokens} mean_estimatedInputTokens=${report.calls ? Math.round(report.estimatedInputTokens / report.calls) : 0}; ` + `tick_ms=${Math.round(this.monotonicNow() - phaseStarted)} ${phases}${idleMs === undefined ? "" : ` idle_before=${Math.round(idleMs)} wait_before=${this.lastTickYielded ? "yield" : "idle"} after_prev_ms=${Math.round(this.lastAfterPassMs)}`}; ` + `pass_ms=${Math.round(report.timing.passMs)} setup_ms=${Math.round(report.timing.setupMs)} dispatch_ms=${Math.round(report.timing.dispatchMs)} ` + `slot_wait_ms=${Math.round(report.timing.slotWaitMs)} model_ms=${Math.round(report.timing.modelMs)} pass_switches=${report.timing.passSwitches}.`);
     }
     if (autoMoves && autoMoves.moved > 0)
       this.applyOwnerOverrides();
@@ -81525,7 +81031,8 @@ class TierSnifferService {
             if (!missingMetadata && !missingContent)
               continue;
             const classification = set2?.classification();
-            if (set2 && row.contentRead && row.contentPending && !row.metadataPending && (row.contentTier === "private" || row.contentTier === "public") && classification?.sniffer && !classification.unavailableReason) {
+            const retiredClearance = row.reasons.includes(RETIRED_EMBEDDING_CLEARANCE_REASON);
+            if (set2 && row.contentRead && row.contentPending && !row.metadataPending && (row.contentTier === "private" || row.contentTier === "public" || retiredClearance && row.contentTier === "secure") && classification?.sniffer && !classification.unavailableReason) {
               if (!allowReask)
                 continue;
               rejudgeStoredContent(set2, row, {
@@ -81538,6 +81045,8 @@ class TierSnifferService {
               if (ledger.getCurrent(identity)?.state !== "pending" || queue.questionFor(identity, "metadata") || queue.questionFor(identity, "content"))
                 continue;
             }
+            if (retiredClearance)
+              continue;
             const planner = tierSetPlannerForLedger(ledgerPath);
             if (ledger.settleMissingQuestions(row, {
               missingMetadata,
@@ -81600,8 +81109,6 @@ class TierSnifferService {
   async drainMoves(direction = "raise") {
     try {
       if (!this.options.autoMoves || this.stopped || !this.options.autoMoves.localEmbeddingsOnly())
-        return;
-      if (direction === "raise" && this.finalizingTraining && !this.newRaisesQueued())
         return;
       if (this.moving && this.movingDirection !== direction) {
         if (direction === "raise") {
@@ -81993,7 +81500,7 @@ function moveFailureName(error2) {
   return /^[a-z][a-z ]{0,39}$/.test(error2.message) ? error2.message : "Error";
 }
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 init_classification_ledger();
 init_tier_migration();
 init_embedding_ledger();
@@ -82009,7 +81516,7 @@ init_worker_transport();
 
 // src/workers/engine-split/client.ts
 init_engine_split();
-import { randomUUID as randomUUID13 } from "node:crypto";
+import { randomUUID as randomUUID11 } from "node:crypto";
 
 // src/workers/engine-split/commands.ts
 init_engine_split();
@@ -82127,7 +81634,7 @@ class OwnerBusyRelay {
   constructor(client, log = () => {}, options = {}) {
     this.client = client;
     this.log = log;
-    this.front = options.front ?? randomUUID13();
+    this.front = options.front ?? randomUUID11();
     this.renewEveryMs = options.renewEveryMs ?? 3 * 60000;
     this.setTimer = options.setInterval ?? ((callback, ms) => {
       const timer = setInterval(callback, ms);
@@ -82220,7 +81727,7 @@ init_source_dashboard();
 // src/core/remote-access-config.ts
 init_http();
 
-// src/workers/email-source/server.ts
+// src/workers/engine/server.ts
 var GMAIL_ATTACHMENT_READER_REUSE_MS = 5 * 60000;
 function requireSourceEmbeddingDimension(options) {
   const configuredKey = options.envKeys.find((key2) => Boolean(options.env[key2]?.trim()));
@@ -82362,7 +81869,6 @@ var CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES = connectorStoreFilterCapabilityR
   [{ family: "file", provider: "dropbox" }, { approvedScope: DROPBOX_APPROVED_SCOPE_FILTER_CODEC }],
   [{ family: "file", provider: LOCAL_FILES_PROVIDER }, { approvedScope: LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC }]
 ]);
-var PEOPLE_INDEX_REFRESH_MS = 15 * 60000;
 function firstNonEmptyEnv2(env, names) {
   for (const name of names) {
     const value = optionalEnv(env, name);
@@ -82606,7 +82112,7 @@ async function runSourceEmbeddingDrain(options) {
         }
       }
       consecutiveFailures = Math.max(...laneConsecutiveFailures);
-      scopeReport.errors.push(createHash33("sha256").update(message2).digest("hex"));
+      scopeReport.errors.push(createHash32("sha256").update(message2).digest("hex"));
       consecutiveIdleScopeChecks = 0;
       emitProgress();
       if (!isolatedLanes[item.laneIndex] && errorBackoffMs > 0) {
@@ -82693,7 +82199,7 @@ function secureLocalBackfillDryRunFromEnv(env = process.env) {
   ];
   const force = env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_FORCE === "true";
   const corpora = configs.flatMap((config2) => {
-    if (!config2.dbPath || !existsSync37(config2.dbPath))
+    if (!config2.dbPath || !existsSync36(config2.dbPath))
       return [];
     const store = openConnectorStore(storageAccountForCorpus(config2), { ...config2, dbPath: config2.dbPath, readOnly: true }, env);
     try {
@@ -82936,7 +82442,7 @@ function normalizeOptionalList(values) {
   return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
 }
 function hashScope(scope) {
-  return createHash33("sha256").update(scope).digest("hex").slice(0, 16);
+  return createHash32("sha256").update(scope).digest("hex").slice(0, 16);
 }
 function sum(items, value) {
   return items.reduce((total, item) => total + value(item), 0);
@@ -82991,8 +82497,8 @@ function nonNegativeIntOption(value, defaultValue, name) {
   return value;
 }
 function isUnboundedToken(value) {
-  const normalized2 = value.trim().toLowerCase();
-  return normalized2 === "unbounded" || normalized2 === "none" || normalized2 === "disabled" || normalized2 === "infinite" || normalized2 === "infinity" || normalized2 === "max";
+  const normalized = value.trim().toLowerCase();
+  return normalized === "unbounded" || normalized === "none" || normalized === "disabled" || normalized === "infinite" || normalized === "infinity" || normalized === "max";
 }
 function parseBoolean2(value, name) {
   if (value === "true")
@@ -83013,8 +82519,8 @@ function isEmbeddingLaneBusyError(error2, message2) {
   return /embedding_lane_busy|file_lease_busy|already holds the lease/i.test(message2);
 }
 function isSqliteBusyError(message2) {
-  const normalized2 = message2.toLowerCase();
-  return normalized2.includes("database is locked") || normalized2.includes("sqlite_busy");
+  const normalized = message2.toLowerCase();
+  return normalized.includes("database is locked") || normalized.includes("sqlite_busy");
 }
 function parseArgs(argv) {
   const options = {};
@@ -83046,8 +82552,8 @@ function publishNativeEmbeddingDrainReadiness(env = process.env, pid = process.p
     throw new Error(`${NATIVE_SERVICE_READINESS_PATH_ENV} must be an absolute path for native startup.`);
   }
   const directory = dirname43(readinessPath);
-  mkdirSync21(directory, { recursive: true, mode: 448 });
-  const parent = lstatSync18(directory);
+  mkdirSync20(directory, { recursive: true, mode: 448 });
+  const parent = lstatSync17(directory);
   if (!parent.isDirectory() || process.platform !== "win32" && (parent.uid !== process.getuid?.() || (parent.mode & 18) !== 0)) {
     throw new Error("Native embedding readiness requires an owner-controlled report directory.");
   }
@@ -83074,19 +82580,19 @@ if (__require.main == __require.module) {
       console.error(error2.message);
       process.exit(1);
     }
-    const json = JSON.stringify(report, null, 2);
+    const json2 = JSON.stringify(report, null, 2);
     if (args.reportPath) {
-      mkdirSync21(dirname43(args.reportPath), { recursive: true });
-      writeFileSync7(args.reportPath, `${json}
+      mkdirSync20(dirname43(args.reportPath), { recursive: true });
+      writeFileSync7(args.reportPath, `${json2}
 `);
     }
-    console.log(json);
+    console.log(json2);
     process.exit();
   }
   const options = optionsFromEnv(process.env);
   try {
     if (args.reportPath) {
-      mkdirSync21(dirname43(args.reportPath), { recursive: true });
+      mkdirSync20(dirname43(args.reportPath), { recursive: true });
       options.onProgress = (report2) => {
         writeFileSync7(args.reportPath, `${JSON.stringify(report2, null, 2)}
 `);
@@ -83094,11 +82600,11 @@ if (__require.main == __require.module) {
     }
     publishNativeEmbeddingDrainReadiness(process.env);
     const report = await runSourceEmbeddingDrain(options);
-    const json = JSON.stringify(report, null, 2);
+    const json2 = JSON.stringify(report, null, 2);
     if (args.reportPath)
-      writeFileSync7(args.reportPath, `${json}
+      writeFileSync7(args.reportPath, `${json2}
 `);
-    console.log(json);
+    console.log(json2);
     if (process.env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_EXIT_ON_ATTENTION === "true" && report.status === "attention") {
       process.exitCode = 1;
     }

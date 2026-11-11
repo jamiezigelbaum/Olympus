@@ -972,6 +972,11 @@ function formatTable(table: EvidenceTableBlock): Record<string, unknown> {
   };
 }
 
+// UTF-8 bytes of the exact Coverage line sent in either evidence format.
+export function analystCoverageBytes(pack: EvidencePack): number {
+  return promptEncoder.encode(formatCoverage(pack)).length;
+}
+
 function formatCoverage(pack: EvidencePack): string {
   const parts = [`Coverage — searched: ${pack.coverage.searchedCorpora.join(', ') || 'none'}`];
   if (pack.coverage.skippedCorpora.length > 0) {

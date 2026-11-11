@@ -3,7 +3,7 @@
 // locations beside the hits. `all_tiers: false` pins the one corpus.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import {
   CORPORA,

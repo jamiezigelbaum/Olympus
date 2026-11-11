@@ -34,15 +34,12 @@
  * 6. The record.
  */
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
-import { removeFileDurablySync } from '../../core/atomic-file.ts';
-import { resolveClassificationLedgerPath } from '../classification-ledger.ts';
 import type { WaitingQuestionStore } from '../../core/waiting-private-questions.ts';
 import { runForgetAccountScopeSteps } from '../../core/source-forget-registry.ts';
 import { appReleaseLogDbPath, forgetAppReleaseItems } from '../../core/app-release-log.ts';
 import { resolveRemoteConnectionsDbPath } from '../../core/remote-connections.ts';
 import { openTierSniffer } from '../../core/source-storage.ts';
-import { embeddingPrefilterDirectory, embeddingPrefilterInstallLedgerPath, tierSnifferPathForLedger } from '../classification/tier-ledger-path.ts';
+import { tierSnifferPathForLedger } from '../classification/tier-ledger-path.ts';
 import { archiveContinuations } from './continuation-cache.ts';
 import { archiveLaneLegs, archiveLaneStores, type ArchiveTierLane } from './lane.ts';
 import type { ArchiveMediaBindings } from './media-bindings.ts';
@@ -185,9 +182,6 @@ export async function runArchiveRemoval(options: ArchiveRemovalOptions): Promise
 
   // Hidden everywhere, and out of every later pass's reach.
   const withdrawn = lane.ledger.withdrawAccountScope(provider, accountScope);
-  // A pooled model can retain this scope even when too few verdicts remain to retrain.
-  // Keep the install audit: a source removal must not reset a safety stop.
-  removeFileDurablySync(join(embeddingPrefilterDirectory(embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(lane.env))), 'weights.json'));
   counts.decisions_removed += withdrawn.items;
   counts.copies_hidden += withdrawn.copies;
   counts.questions_removed += deleteJudgeQuestions(lane, provider, accountScope);

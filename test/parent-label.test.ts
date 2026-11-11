@@ -30,7 +30,7 @@ import {
 } from '../src/core/release-manifest.ts';
 import { buildSourceIndexCorpusRegistry, defineSourceIndexCorpus } from '../src/core/source-index/corpus.ts';
 import { buildSourceSensitivity, type SourceTrustDomain, type SourceTrustTier } from '../src/core/source-index/types.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { answerToolResult } from '../src/workers/chatgpt/response-builder.ts';
 import { createAnalystSourceIndexAnswerHandler } from '../src/workers/source-index/analyst-answer.ts';
 import type { ParentLabelResolver } from '../src/core/parent-label.ts';

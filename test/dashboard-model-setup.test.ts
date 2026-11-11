@@ -6,7 +6,7 @@ import { buildDashboardPreviewView } from '../scripts/dashboard-preview.ts';
 import { createModelKeyReload, workerRestartsItself } from '../src/core/model-key-reload.ts';
 import type { ModelSetupView } from '../src/core/model-setup.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 
 function modelView(ready = false): ModelSetupView {

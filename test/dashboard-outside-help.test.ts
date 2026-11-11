@@ -37,7 +37,7 @@ import { DASHBOARD_OUTSIDE_HELP_TOOLS_COPY } from '../src/workers/dashboard/outs
 import { renderDashboardPrivateAnswersPage } from '../src/workers/dashboard/pages/private-answers.ts';
 import { DASHBOARD_OUTSIDE_HELP_COPY as W } from '../src/workers/dashboard/vocabulary.ts';
 import { createDashboardConsultAdapter, DASHBOARD_ZKAPI_PROFILE_ID, type DashboardConsultBackend } from '../src/workers/email-source/dashboard-consult.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { DASHBOARD_CONSULT_CONTROL_PATHS, DASHBOARD_LOCAL_CONTROL_SESSION_PATH, withWorkerBearerAuth } from '../src/workers/http.ts';
 import { __sovereigntyFileTestHooks } from '../src/core/sovereignty.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
