@@ -380,13 +380,7 @@ section consolidates and supersedes all other policy wording.
   `snifferId` but not the verdict cache key, so a bar change re-tiers stored
   decisions through the existing re-judge pass with no judge call. Full mode
   and its 0.9 Personal threshold are unchanged.
-- 2026-11-07 (no contract shape or version change): the shared queued-content
-  resolver can settle Personal from the item's complete own stored vector at
-  p(Private) < 0.05. Per-install training uses only final judge labels; owner
-  decisions, Secrets and names questions retain precedence. A 5% direct-judge
-  audit stops and requeues clearances above 2% Private in 200 checks. See
-  `design/per-item-four-tier-classification.md`, "Embedding Personal pre-filter".
-  This is Critical classification behavior; independent review precedes merge.
+2026-11-11: embedding pre-filter removed; it could not save 15% of judge calls at zero owner-label Private misses (#1025).
 
 - 2026-11-05 (no contract type version change; native sniffer cache
   `decision-v1`): **one token decides Personal or Private on a capable local
