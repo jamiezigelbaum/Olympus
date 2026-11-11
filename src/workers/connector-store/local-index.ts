@@ -10015,7 +10015,7 @@ export class LocalConnectorStore {
       metadataString(meta, 'locatorUri') ?? metadataString(meta, 'pathDisplay') ?? metadataString(meta, 'url');
     // sentAt is the chat-family idiom (WhatsApp live, message connectors);
     // without it every chat item lands with NULL authored_at, citations
-    // carry no time, and temporal evidence ordering has nothing to sort on
+    // carry no time, and the Analyst cannot tell the newest message
     // (2026-07-05 "did I just get..." acceptance miss).
     const authoredAt = metadataString(meta, 'authoredAt')
       ?? metadataString(meta, 'sentAt')
@@ -14855,8 +14855,7 @@ function connectorStoreHitFromRow(
 
 // Guarantee the newest chat messages a place in the final cut: evict the
 // lowest-scoring hits if needed. Pinned hits append at the tail (they earned
-// no relevance rank); temporal evidence ordering re-sorts when the question
-// asks about recency.
+// no relevance rank); each carries its date for the Analyst.
 function withPinnedNewestChatHits(input: {
   store: LocalConnectorStore;
   recencyRows: readonly ConnectorStoreSearchRow[];

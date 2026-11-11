@@ -80,57 +80,44 @@ describe('buildEvidencePack', () => {
     expect(pack.builtAt).toBe('2026-05-29T00:00:00.000Z');
   });
 
-  // Regression for the 2026-07-05 "did I just get a whatsapp..." miss: the
-  // chat phrasing of recency ("just got/received", "today", "N minutes ago")
-  // must trigger temporal evidence ordering, not only recent/latest/newest.
-  test('chat recency phrasings order evidence newest-first', async () => {
-    const timedAdapter: SourceIndexCorpusSearchAdapter = () => ({
-      hits: [
-        {
-          sourceItem: { family: 'file' as const, provider: 'dropbox', accountScope: 'personal', providerItemId: 'old-strong', localItemId: 'old-strong' },
-          provenance: {
-            sourceItem: { family: 'file' as const, provider: 'dropbox', accountScope: 'personal', providerItemId: 'old-strong', localItemId: 'old-strong' },
-            citation: { title: 'old-strong', authoredAt: '2026-07-01T10:00:00.000Z' },
-          },
-          score: 0.9,
-          rawExposed: false as const,
+  // A recency word in a question never reorders the pack (2026-11-11). The
+  // pool used to be re-sorted newest-first whenever the question said recent,
+  // latest, current or today: on a 24-seat pack that put a store's dated
+  // items ahead of relevance, undid store turn and the reserved leader seats,
+  // and a store's rank-1 answer fell to seat 15 or 20, past what a local
+  // Analyst reads (held-out value-1 and value-2). Recency for chats lives in
+  // the store (its newest messages are pinned into its results), and every
+  // seat carries its date for the Analyst.
+  test('a recency word does not reorder the pack', async () => {
+    const timed = (corpusId: string, ids: Array<[string, string]>): SourceIndexCorpusSearchAdapter => () => ({
+      hits: ids.map(([id, authoredAt]) => ({
+        sourceItem: { family: 'file' as const, provider: 'dropbox', accountScope: 'personal', providerItemId: id, localItemId: `${corpusId}:${id}` },
+        provenance: {
+          sourceItem: { family: 'file' as const, provider: 'dropbox', accountScope: 'personal', providerItemId: id, localItemId: `${corpusId}:${id}` },
+          citation: { title: id, authoredAt },
         },
-        {
-          sourceItem: { family: 'file' as const, provider: 'dropbox', accountScope: 'personal', providerItemId: 'fresh-weak', localItemId: 'fresh-weak' },
-          provenance: {
-            sourceItem: { family: 'file' as const, provider: 'dropbox', accountScope: 'personal', providerItemId: 'fresh-weak', localItemId: 'fresh-weak' },
-            citation: { title: 'fresh-weak', authoredAt: '2026-07-05T22:08:31.000Z' },
-          },
-          score: 0.1,
-          rawExposed: false as const,
-        },
-      ],
+        rawExposed: false as const,
+      })),
       latencyMs: 1,
       rawExposed: false as const,
     });
     const build = (question: string) => buildEvidencePack({
       question,
-      maxResults: 10,
+      maxResults: 6,
       searchContext: allowAll,
       registry: registry(),
-      adapters: { [INTERNAL]: timedAdapter } as SourceIndexRouterAdapterMap,
+      adapters: {
+        [INTERNAL]: timed(INTERNAL, [['best-old', '2024-01-01T00:00:00.000Z'], ['i2', '2026-07-01T00:00:00.000Z'], ['i3', '2026-07-05T00:00:00.000Z']]),
+        [SECURE]: timed(SECURE, [['s1', '2025-01-01T00:00:00.000Z'], ['s2', '2026-07-02T00:00:00.000Z'], ['s3', '2026-07-04T00:00:00.000Z']]),
+      } as SourceIndexRouterAdapterMap,
       contentProviders: {} as LocalContentProviderMap,
     });
-
-    for (const question of [
-      'Did I just get a message with test in it?',
-      'What arrived a few minutes ago?',
-      'Did anything come in today?',
-    ]) {
-      const { candidates } = await build(question);
-      expect(candidates.map((candidate) => candidate.provenance.sourceItem.providerItemId))
-        .toEqual(['fresh-weak', 'old-strong']);
+    const order = async (question: string) => (await build(question)).candidates.map((candidate) => candidate.provenance.sourceItem.providerItemId);
+    const plain = await order('What is the policy premium?');
+    expect(plain[0]).toBe('best-old');
+    for (const question of ['What is the current policy premium?', 'Did I just get the latest premium today?']) {
+      expect(await order(question)).toEqual(plain);
     }
-
-    // Non-temporal questions keep relevance order.
-    const { candidates } = await build('Which document discusses the test plan?');
-    expect(candidates.map((candidate) => candidate.provenance.sourceItem.providerItemId))
-      .toEqual(['old-strong', 'fresh-weak']);
   });
 
   test('reports an extraction gap when an item is located but unreadable', async () => {

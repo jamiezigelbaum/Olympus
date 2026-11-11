@@ -75068,7 +75068,7 @@ async function buildPreparedEvidencePackDetailed(input) {
   const retrievalLimit = reranker ? rerankPoolSize(reranker, input.maxResults) : input.maxResults;
   const routed = input.selectedItems?.length ? selectedItemsToRoutedSlice(input) : await runRoutedSearches(input, retrievalLimit);
   const visibleHits = input.visibilityGate && !input.selectedItems?.length ? input.visibilityGate(routed.hits) : routed.hits;
-  const routedHits = input.selectedItems?.length ? routed.hits : orderHitsForTemporalIntent(visibleHits, input);
+  const routedHits = input.selectedItems?.length ? routed.hits : visibleHits;
   const candidates = [];
   const candidateCorpusIds = [];
   const extractionGaps = semanticLaneSkippedGaps(routed.degradations, input);
@@ -75298,38 +75298,9 @@ function contentFreePolicyLaneAudits(audits) {
     rawExposed: audit.rawExposed
   }));
 }
-function orderHitsForTemporalIntent(hits, input) {
-  if (!hasTemporalIntent(input.question) && !hasTemporalIntent(input.searchQuery ?? "")) {
-    return hits;
-  }
-  return [...hits].sort((left, right) => {
-    const rightTime = hitCitationTime(right);
-    const leftTime = hitCitationTime(left);
-    if (rightTime !== leftTime)
-      return rightTime - leftTime;
-    const rightScore = right.score ?? 0;
-    const leftScore = left.score ?? 0;
-    if (rightScore !== leftScore)
-      return rightScore - leftScore;
-    return hitCandidateId(left).localeCompare(hitCandidateId(right));
-  });
-}
-function hitCandidateId(hit) {
-  return String(hit.candidateId ?? `${hit.corpusId}:${hit.sourceItem.localItemId || hit.sourceItem.providerItemId}`);
-}
 function hasTemporalIntent(value) {
   const normalized = value.toLowerCase();
   return /\b(recent|latest|newest|current|most\s+recent)\b/.test(normalized) || /\bjust\s+(got|get|received|receive|arrived|arrive|came|come|sent|send|landed|land)\b/.test(normalized) || /\bright\s+now\b/.test(normalized) || /\btoday\b/.test(normalized) || /\b(seconds?|minutes?|moments?|hours?)\s+ago\b/.test(normalized);
-}
-function hitCitationTime(hit) {
-  const citation = hit.provenance?.citation;
-  return safeTime(citation?.authoredAt) || safeTime(citation?.updatedAt);
-}
-function safeTime(value) {
-  if (!value)
-    return 0;
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? parsed : 0;
 }
 function selectedItemsToRoutedSlice(input) {
   const hits = [];
