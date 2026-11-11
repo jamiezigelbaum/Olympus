@@ -245,3 +245,16 @@ describe('anchor terms match the pack excerpt', () => {
     for (const candidate of fitted.candidates) expect(candidate.chunks.join('\n')).toContain(value);
   });
 });
+
+test('multibyte passages each keep their relevant region within the byte share', () => {
+  const { pack, corpusOf } = fixture(() => [
+    `${'界'.repeat(1_500)} zephyr 73.25 ${'界'.repeat(1_500)}`,
+    `${'界'.repeat(1_500)} cobalt 18.50 ${'界'.repeat(1_500)}`,
+  ]);
+  const fitted = fitPackToPromptBytes(pack, 13_500, corpusOf, options);
+  for (const candidate of fitted.candidates) {
+    expect(candidate.chunks.join('\n')).toContain('zephyr 73.25');
+    expect(candidate.chunks.join('\n')).toContain('cobalt 18.50');
+  }
+  expect(analystPromptBytes(fitted, options)).toBeLessThanOrEqual(13_500);
+});

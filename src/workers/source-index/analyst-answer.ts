@@ -1102,19 +1102,29 @@ function clipQuestionChunksToUtf8Bytes(
   if (maxBytes <= 0 || !chunks.some((chunk) => sourceIndexChunkTermScore(chunk, termGroups) > 0)) {
     return clipChunksToUtf8Bytes(chunks, maxBytes);
   }
-  // The byte share is a character ceiling for selection, not a UTF-8 size
-  // estimate: the byte cut below enforces the share for multibyte windows.
-  const windows = boundedSourceIndexChunks(chunks, maxBytes, termGroups).chunks
-    // The selector slices UTF-16 characters; discard partial code points at
-    // either window edge before the final code-point-safe UTF-8 byte cut.
-    .map((chunk) => {
-      const first = chunk.charCodeAt(0);
-      const last = chunk.charCodeAt(chunk.length - 1);
-      const start = first >= 0xDC00 && first <= 0xDFFF ? 1 : 0;
-      const end = last >= 0xD800 && last <= 0xDBFF ? chunk.length - 1 : chunk.length;
-      return chunk.slice(start, end);
-    });
+  // The selector budgets characters and shares them across passages. Start
+  // at the byte share and shrink by the observed bytes-per-character until
+  // every window fits, so multibyte text never lets an early window take a
+  // later one's room; the final cut only guards the last attempt.
+  let windows: string[] = [];
+  let chars = maxBytes;
+  for (let attempt = 0; attempt < 6 && chars > 0; attempt += 1) {
+    windows = boundedSourceIndexChunks(chunks, chars, termGroups).chunks.map(wholeCodePoints);
+    const bytes = windows.reduce((sum, window) => sum + utf8ByteLength(window), 0);
+    if (bytes <= maxBytes) return windows;
+    chars = Math.floor(chars * maxBytes / bytes) - 1;
+  }
   return clipChunksToUtf8Bytes(windows, maxBytes);
+}
+
+// The selector slices UTF-16 characters; drop a half surrogate pair at
+// either edge of a window.
+function wholeCodePoints(window: string): string {
+  const first = window.charCodeAt(0);
+  const last = window.charCodeAt(window.length - 1);
+  const start = first >= 0xDC00 && first <= 0xDFFF ? 1 : 0;
+  const end = last >= 0xD800 && last <= 0xDBFF ? window.length - 1 : window.length;
+  return window.slice(start, end);
 }
 
 function roundRobinCandidates(

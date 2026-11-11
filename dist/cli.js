@@ -76351,14 +76351,23 @@ function clipQuestionChunksToUtf8Bytes(chunks, maxBytes, termGroups) {
   if (maxBytes <= 0 || !chunks.some((chunk) => sourceIndexChunkTermScore(chunk, termGroups) > 0)) {
     return clipChunksToUtf8Bytes(chunks, maxBytes);
   }
-  const windows = boundedSourceIndexChunks(chunks, maxBytes, termGroups).chunks.map((chunk) => {
-    const first = chunk.charCodeAt(0);
-    const last = chunk.charCodeAt(chunk.length - 1);
-    const start = first >= 56320 && first <= 57343 ? 1 : 0;
-    const end = last >= 55296 && last <= 56319 ? chunk.length - 1 : chunk.length;
-    return chunk.slice(start, end);
-  });
+  let windows = [];
+  let chars = maxBytes;
+  for (let attempt = 0;attempt < 6 && chars > 0; attempt += 1) {
+    windows = boundedSourceIndexChunks(chunks, chars, termGroups).chunks.map(wholeCodePoints);
+    const bytes = windows.reduce((sum, window2) => sum + utf8ByteLength(window2), 0);
+    if (bytes <= maxBytes)
+      return windows;
+    chars = Math.floor(chars * maxBytes / bytes) - 1;
+  }
   return clipChunksToUtf8Bytes(windows, maxBytes);
+}
+function wholeCodePoints(window2) {
+  const first = window2.charCodeAt(0);
+  const last = window2.charCodeAt(window2.length - 1);
+  const start = first >= 56320 && first <= 57343 ? 1 : 0;
+  const end = last >= 55296 && last <= 56319 ? window2.length - 1 : window2.length;
+  return window2.slice(start, end);
 }
 function roundRobinCandidates(candidates, candidateCorpus) {
   const byCorpus = new Map;
