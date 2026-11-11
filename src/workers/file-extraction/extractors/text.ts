@@ -29,8 +29,10 @@ import type {
   ExtractorOutput,
   ExtractorRereadPolicy,
 } from '../types.ts';
-import { RTF_MIME_TYPES, hasRtfSignature, rtfToText } from './rtf.ts';
+import { RTF_MIME_TYPES, hasRtfSignature, rtfSourceFromBytes, rtfToText } from './rtf.ts';
 import {
+  BOUNDED_TEXT_TRUNCATED_WARNING,
+  BOUNDED_TEXT_TRUNCATION_REASON,
   DEFAULT_MAX_BOUNDED_TEXT_CHARS,
   DEFAULT_MAX_TABLE_SAMPLE_COLUMNS,
   DEFAULT_MAX_TABLE_SAMPLE_ROWS,
@@ -337,10 +339,18 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
       }
       if (mimeType && RTF_MIME_TYPES.has(mimeType)) {
         if (!hasRtfSignature(bytes)) return { status: 'skipped_unsupported' };
-        // Latin-1 keeps every byte one character; the reader decodes \'hh
-        // escapes in the document's own code page.
-        const plain = rtfToText(new TextDecoder('latin1').decode(bytes), maxBoundedTextChars + 1);
-        const bounded = boundText(normalizeExtractedText(plain), maxBoundedTextChars);
+        // One character per byte; the reader decodes text above 0x7f in the
+        // document's own code page.
+        const plain = rtfToText(rtfSourceFromBytes(bytes), maxBoundedTextChars);
+        const read = boundText(normalizeExtractedText(plain.text), maxBoundedTextChars);
+        const bounded = plain.truncated && !read.truncated
+          ? {
+            ...read,
+            truncated: true,
+            truncationReason: BOUNDED_TEXT_TRUNCATION_REASON,
+            warnings: [BOUNDED_TEXT_TRUNCATED_WARNING],
+          }
+          : read;
         if (!bounded.text) return { status: 'empty_output' };
         return {
           status: 'indexed',

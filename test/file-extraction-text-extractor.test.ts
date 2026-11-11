@@ -599,7 +599,7 @@ describe('text extractor: images', () => {
 describe('text extractor: Rich Text Format', () => {
   const rtf = String.raw`{\rtf1\ansi\ansicpg1252\deff0{\fonttbl{\f0\fnil Calibri;}}{\colortbl;\red0\green0\blue0;}
 {\*\generator Riched20 10.0;}{\info{\title Not body text}}\pard\f0\fs22 Caf\'e9 meeting notes\par
-Agenda:\tab budget \{draft\}\line next steps 舒? done\par
+Agenda:\tab budget \{draft\}\line next steps \u8212? done\par
 {\pict\pngblip 89504e470d0a}}`;
 
   test('reads the body text and leaves out tables, document info and pictures', async () => {
@@ -630,6 +630,28 @@ Agenda:\tab budget \{draft\}\line next steps 舒? done\par
       mimeType: 'application/rtf',
     }));
     expect(result.status === 'indexed' ? result.text : '').toBe('\u3042X and \u3042Y');
+  });
+
+  test('bytes written as themselves are read in the named code page too', async () => {
+    const body = new Uint8Array([
+      ...textBytes(String.raw`{\rtf1\ansi\ansicpg932 `), 0x82, 0xa0, ...textBytes(String.raw` \'82\'a0 }`),
+    ]);
+    const result = await createTextExtractor().extract(extractorInput({ bytes: body, mimeType: 'application/rtf' }));
+    expect(result.status === 'indexed' ? result.text : '').toBe('\u3042 \u3042');
+  });
+
+  test('text cut at the bound says so, even when the bound falls on a line break', async () => {
+    const result = await createTextExtractor({ maxBoundedTextChars: 5 }).extract(extractorInput({
+      bytes: textBytes(String.raw`{\rtf1 abcde\par Important text}`),
+      mimeType: 'application/rtf',
+    }));
+    expect(result.status === 'indexed' ? result.text : '').toBe('abcde');
+    expect(result.status === 'indexed' ? result.warnings : []).toEqual(['bounded_text_truncated']);
+    const whole = await createTextExtractor({ maxBoundedTextChars: 5 }).extract(extractorInput({
+      bytes: textBytes(String.raw`{\rtf1 abcde\par }`),
+      mimeType: 'application/rtf',
+    }));
+    expect(whole.status === 'indexed' ? whole.warnings : ['unexpected']).toBeUndefined();
   });
 
   test('bytes that are not RTF are not read as RTF', async () => {

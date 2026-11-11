@@ -93523,14 +93523,24 @@ var init_bounded_text = __esm(() => {
 function hasRtfSignature(bytes) {
   return bytes.length >= 5 && bytes[0] === 123 && bytes[1] === 92 && bytes[2] === 114 && bytes[3] === 116 && bytes[4] === 102;
 }
+function rtfSourceFromBytes(bytes) {
+  let source = "";
+  for (let start = 0;start < bytes.length; start += 8192) {
+    source += String.fromCharCode(...bytes.subarray(start, start + 8192));
+  }
+  return source;
+}
 function rtfToText(source, maxChars) {
   const out = [];
   let length = 0;
+  let truncated = false;
   const emit = (text3) => {
-    if (length >= maxChars)
-      return;
     const room = maxChars - length;
     const piece = text3.length > room ? text3.slice(0, room) : text3;
+    if (piece.length < text3.length && text3.slice(piece.length).trim() !== "")
+      truncated = true;
+    if (piece.length === 0)
+      return;
     out.push(piece);
     length += piece.length;
   };
@@ -93548,7 +93558,7 @@ function rtfToText(source, maxChars) {
     hexBytes.length = 0;
   };
   let index = 0;
-  while (index < source.length && length < maxChars) {
+  while (index < source.length && !truncated) {
     const char = source[index];
     if (char === "{") {
       flushHex();
@@ -93654,18 +93664,22 @@ function rtfToText(source, maxChars) {
       index += 1;
       continue;
     }
-    flushHex();
     groupStart = false;
     index += 1;
     if (pendingSkip > 0) {
       pendingSkip -= 1;
       continue;
     }
+    if (char.charCodeAt(0) > 127) {
+      hexBytes.push(char.charCodeAt(0));
+      continue;
+    }
+    flushHex();
     if (!state.skip)
       emit(char);
   }
   flushHex();
-  return out.join("");
+  return { text: out.join(""), truncated };
 }
 function isLetter(char) {
   const code = char.charCodeAt(0);
@@ -94818,8 +94832,14 @@ function createTextExtractor(options = {}) {
       if (mimeType && RTF_MIME_TYPES.has(mimeType)) {
         if (!hasRtfSignature(bytes))
           return { status: "skipped_unsupported" };
-        const plain = rtfToText(new TextDecoder("latin1").decode(bytes), maxBoundedTextChars + 1);
-        const bounded2 = boundText(normalizeExtractedText(plain), maxBoundedTextChars);
+        const plain = rtfToText(rtfSourceFromBytes(bytes), maxBoundedTextChars);
+        const read = boundText(normalizeExtractedText(plain.text), maxBoundedTextChars);
+        const bounded2 = plain.truncated && !read.truncated ? {
+          ...read,
+          truncated: true,
+          truncationReason: BOUNDED_TEXT_TRUNCATION_REASON,
+          warnings: [BOUNDED_TEXT_TRUNCATED_WARNING]
+        } : read;
         if (!bounded2.text)
           return { status: "empty_output" };
         return {

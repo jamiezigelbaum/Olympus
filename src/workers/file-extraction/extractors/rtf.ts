@@ -5,8 +5,8 @@
 // \'hh (the document's code page, Windows-1252 unless it says otherwise) and
 // \uN escapes, and skip the groups that hold no body text (font and colour
 // tables, styles, document info, pictures, embedded objects and every
-// \* destination). Output stops at `maxChars`, so a large file costs no more
-// than the bound it is read into.
+// \* destination). Output stops at `maxChars`, and reading stops at the first
+// body text past it, so a large file costs little more than its bound.
 
 export const RTF_MIME_TYPES: ReadonlySet<string> = new Set(['application/rtf', 'text/rtf']);
 
@@ -36,13 +36,32 @@ interface GroupState {
   unicodeSkip: number;
 }
 
-export function rtfToText(source: string, maxChars: number): string {
+// One character per byte, every byte kept as itself. TextDecoder('latin1') is
+// not this: the label means Windows-1252, which moves 0x80-0x9f.
+export function rtfSourceFromBytes(bytes: Uint8Array): string {
+  let source = '';
+  for (let start = 0; start < bytes.length; start += 8192) {
+    source += String.fromCharCode(...bytes.subarray(start, start + 8192));
+  }
+  return source;
+}
+
+export interface RtfText {
+  text: string;
+  // True when body text past `maxChars` was left out. Whitespace past the
+  // bound does not count, so a reader that trims the text can still tell.
+  truncated: boolean;
+}
+
+export function rtfToText(source: string, maxChars: number): RtfText {
   const out: string[] = [];
   let length = 0;
+  let truncated = false;
   const emit = (text: string): void => {
-    if (length >= maxChars) return;
     const room = maxChars - length;
     const piece = text.length > room ? text.slice(0, room) : text;
+    if (piece.length < text.length && text.slice(piece.length).trim() !== '') truncated = true;
+    if (piece.length === 0) return;
     out.push(piece);
     length += piece.length;
   };
@@ -61,7 +80,7 @@ export function rtfToText(source: string, maxChars: number): string {
   };
 
   let index = 0;
-  while (index < source.length && length < maxChars) {
+  while (index < source.length && !truncated) {
     const char = source[index]!;
     if (char === '{') {
       flushHex();
@@ -160,17 +179,23 @@ export function rtfToText(source: string, maxChars: number): string {
       index += 1;
       continue;
     }
-    flushHex();
     groupStart = false;
     index += 1;
     if (pendingSkip > 0) {
       pendingSkip -= 1;
       continue;
     }
+    // A byte above 0x7f written as itself is in the document's code page,
+    // the same as one written as \'hh.
+    if (char.charCodeAt(0) > 0x7f) {
+      hexBytes.push(char.charCodeAt(0));
+      continue;
+    }
+    flushHex();
     if (!state.skip) emit(char);
   }
   flushHex();
-  return out.join('');
+  return { text: out.join(''), truncated };
 }
 
 function isLetter(char: string): boolean {
