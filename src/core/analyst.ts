@@ -653,9 +653,10 @@ function amountReadings(amount: string): string[] {
 /** The draft's amounts whose value the evidence text never shows as an amount or a number. */
 export function amountsMissingFrom(answer: string, evidence: string): string[] {
   const seen = new Set<string>();
-  // Evidence numbers read both ways: a space can group thousands ("1 240,50").
-  for (const pattern of [/\d+(?:[.,']\d+)*/gu, /\d+(?:[.,' ]\d+)*/gu]) {
-    for (const match of evidence.matchAll(pattern)) for (const reading of amountReadings(match[0])) seen.add(reading);
+  // A space groups thousands only before exactly three digits ("1 240,50");
+  // such a number is read whole, never as its fragments.
+  for (const match of evidence.matchAll(/\d+(?:[.,']\d+| \d{3}(?!\d))*/gu)) {
+    for (const reading of amountReadings(match[0])) seen.add(reading);
   }
   const missing: string[] = [];
   for (const match of answer.matchAll(AMOUNT_PATTERN)) {

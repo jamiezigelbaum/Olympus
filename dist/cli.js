@@ -73632,10 +73632,9 @@ function amountReadings(amount) {
 }
 function amountsMissingFrom(answer, evidence) {
   const seen = new Set;
-  for (const pattern of [/\d+(?:[.,']\d+)*/gu, /\d+(?:[.,' ]\d+)*/gu]) {
-    for (const match of evidence.matchAll(pattern))
-      for (const reading of amountReadings(match[0]))
-        seen.add(reading);
+  for (const match of evidence.matchAll(/\d+(?:[.,']\d+| \d{3}(?!\d))*/gu)) {
+    for (const reading of amountReadings(match[0]))
+      seen.add(reading);
   }
   const missing = [];
   for (const match of answer.matchAll(AMOUNT_PATTERN)) {

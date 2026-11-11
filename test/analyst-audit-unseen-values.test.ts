@@ -57,3 +57,10 @@ test('amounts that differ by orders of magnitude stay apart', async () => {
   expect(amountsMissingFrom('Total €1,24', 'Total 1.24 EUR')).toEqual([]);
   expect(amountsMissingFrom('Total €1,24', 'Total 124 EUR')).toEqual(['€1,24']);
 });
+
+test('a space-grouped number in the evidence is one value, not its fragments', async () => {
+  const { amountsMissingFrom } = await import('../src/core/analyst.ts');
+  expect(amountsMissingFrom('Paid €240.50', 'Paid 1 240,50 EUR')).toEqual(['€240.50']);
+  expect(amountsMissingFrom('Paid €1,240.50', 'Paid 1 240,50 EUR')).toEqual([]);
+  expect(amountsMissingFrom('Pages 12.5', 'pages 12 5')).toEqual(['12.5']);
+});
