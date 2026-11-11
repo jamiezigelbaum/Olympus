@@ -218,3 +218,30 @@ describe('question-anchored prompt fitting', () => {
     expect(fitPackToPromptBytes(pack, 13_500, corpusOf, options)).toBe(pack);
   });
 });
+
+describe('anchor terms match the pack excerpt', () => {
+  function titled(title: string, chunk: string) {
+    const { pack, corpusOf } = fixture(() => [chunk]);
+    const candidates = pack.candidates.map((candidate) => ({
+      ...candidate,
+      provenance: { ...candidate.provenance, citation: { title } },
+    }));
+    const titledCorpus = new Map(candidates.map((candidate, index) => [candidate, corpusOf.get(pack.candidates[index]!)!]));
+    return { pack: { ...pack, candidates }, corpusOf: titledCorpus };
+  }
+
+  test("a seat's name terms do not anchor its clip", () => {
+    // The title word fills the head; the other question term and its value sit past the share.
+    const { pack, corpusOf } = titled('Zephyr report', `${'zephyr '.repeat(120)}${'x'.repeat(900)} cobalt 18.50 ${'y'.repeat(2_000)}`);
+    const fitted = fitPackToPromptBytes(pack, 13_500, corpusOf, options);
+    expect(fitted.candidates.length).toBeGreaterThan(1);
+    for (const candidate of fitted.candidates) expect(candidate.chunks.join('\n')).toContain('cobalt 18.50');
+    expect(analystPromptBytes(fitted, options)).toBeLessThanOrEqual(13_500);
+  });
+
+  test('a seat whose name carries every question term still anchors on all of them', () => {
+    const { pack, corpusOf } = titled('Zephyr cobalt measurement', `${'x'.repeat(1_500)} ${value} ${'y'.repeat(2_000)}`);
+    const fitted = fitPackToPromptBytes(pack, 13_500, corpusOf, options);
+    for (const candidate of fitted.candidates) expect(candidate.chunks.join('\n')).toContain(value);
+  });
+});

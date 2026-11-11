@@ -19315,6 +19315,14 @@ function boundedSourceIndexChunks(texts, maxChars, termGroups) {
   }
   return { chunks, truncated };
 }
+function withoutNameTerms(termGroups, title) {
+  if (!title)
+    return termGroups;
+  const nameTokens = new Set(title.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? []);
+  if (nameTokens.size === 0)
+    return termGroups;
+  return termGroups.filter((group) => !group.some((term) => nameTokens.has(term.toLowerCase())));
+}
 function sourceIndexChunkSnippet(text2, termGroups, maxChars) {
   if (maxChars === undefined || maxChars <= 0 || text2.length <= maxChars)
     return text2;
@@ -21571,14 +21579,6 @@ function selectEvidencePassages(chunks, maxChars, focus, context2 = {}) {
     chunks: ordered.map(([, text2]) => text2),
     truncated: ordered.length < chunks.length || ordered.some(([index, text2]) => text2.length < chunks[index].length)
   };
-}
-function withoutNameTerms(termGroups, title) {
-  if (!title)
-    return termGroups;
-  const nameTokens = new Set(title.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? []);
-  if (nameTokens.size === 0)
-    return termGroups;
-  return termGroups.filter((group) => !group.some((term) => nameTokens.has(term.toLowerCase())));
 }
 function budgetChunks(chunks, maxChars) {
   if (maxChars === undefined || maxChars <= 0)
@@ -41308,7 +41308,6 @@ var CLOUD_ANALYST_PROMPT_BYTES;
 var init_analyst_answer = __esm(() => {
   init_embeddings();
   init_chunk_selection();
-  init_fts();
   init_answer_activity();
   init_analyst();
   init_analyst_openclaw_infer();

@@ -33420,6 +33420,14 @@ function boundedSourceIndexChunks(texts, maxChars, termGroups) {
   }
   return { chunks, truncated };
 }
+function withoutNameTerms(termGroups, title) {
+  if (!title)
+    return termGroups;
+  const nameTokens = new Set(title.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? []);
+  if (nameTokens.size === 0)
+    return termGroups;
+  return termGroups.filter((group) => !group.some((term) => nameTokens.has(term.toLowerCase())));
+}
 function sourceIndexChunkSnippet(text2, termGroups, maxChars) {
   if (maxChars === undefined || maxChars <= 0 || text2.length <= maxChars)
     return text2;
@@ -37019,14 +37027,6 @@ function selectEvidencePassages(chunks, maxChars, focus, context2 = {}) {
     chunks: ordered.map(([, text2]) => text2),
     truncated: ordered.length < chunks.length || ordered.some(([index, text2]) => text2.length < chunks[index].length)
   };
-}
-function withoutNameTerms(termGroups, title) {
-  if (!title)
-    return termGroups;
-  const nameTokens = new Set(title.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? []);
-  if (nameTokens.size === 0)
-    return termGroups;
-  return termGroups.filter((group) => !group.some((term) => nameTokens.has(term.toLowerCase())));
 }
 function budgetChunks(chunks, maxChars) {
   if (maxChars === undefined || maxChars <= 0)
@@ -76316,7 +76316,11 @@ function promptBudgetedAnalyst(analyst, promptBytes, candidateCorpus, recencySea
 function fitPackToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats = 0) {
   if (analystPromptBytes(pack, analyzeOptions) <= maxPromptBytes)
     return pack;
-  const termGroups = sourceIndexFtsTermGroups(pack.question);
+  const questionTerms = sourceIndexChunkQueryTerms(pack.question);
+  const anchorTerms = (candidate) => {
+    const unnamed = withoutNameTerms(questionTerms, candidate.provenance.citation?.title);
+    return unnamed.length > 0 ? unnamed : questionTerms;
+  };
   const headSeats = RESERVED_HEAD_SEATS + recencySeats;
   const order = [
     ...pack.candidates.slice(0, headSeats),
@@ -76333,7 +76337,7 @@ function fitPackToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOpti
     for (let attempt = 0;attempt < 6; attempt += 1) {
       if (share < MIN_FITTED_BYTES_PER_CANDIDATE && keep > 1)
         break;
-      const fitted = restatePack(pack, base.map((candidate) => ({ ...candidate, chunks: clipQuestionChunksToUtf8Bytes(candidate.chunks, Math.max(0, share), termGroups) })), candidateCorpus);
+      const fitted = restatePack(pack, base.map((candidate) => ({ ...candidate, chunks: clipQuestionChunksToUtf8Bytes(candidate.chunks, Math.max(0, share), anchorTerms(candidate)) })), candidateCorpus);
       const bytes = analystPromptBytes(fitted, analyzeOptions);
       if (bytes <= maxPromptBytes)
         return fitted;
@@ -77795,7 +77799,6 @@ var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYT
 var init_analyst_answer = __esm(() => {
   init_embeddings();
   init_chunk_selection();
-  init_fts();
   init_answer_activity();
   init_analyst();
   init_analyst_openclaw_infer();

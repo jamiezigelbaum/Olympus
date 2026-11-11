@@ -134,6 +134,7 @@ import {
   compactPassageWhitespace,
   sourceIndexChunkQueryTerms,
   sourceIndexChunkTermScore,
+  withoutNameTerms,
 } from '../../core/source-index/chunk-selection.ts';
 import {
   fuseRankedCandidateLanes,
@@ -16818,16 +16819,6 @@ function selectEvidencePassages(
   };
 }
 
-// Query term groups minus those the item's name carries (see above).
-function withoutNameTerms(
-  termGroups: ReadonlyArray<readonly string[]>,
-  title: string | null | undefined,
-): ReadonlyArray<readonly string[]> {
-  if (!title) return termGroups;
-  const nameTokens = new Set(title.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? []);
-  if (nameTokens.size === 0) return termGroups;
-  return termGroups.filter((group) => !group.some((term) => nameTokens.has(term.toLowerCase())));
-}
 
 function budgetChunks(
   chunks: readonly string[],

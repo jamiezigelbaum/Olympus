@@ -29,8 +29,7 @@ import { withPriorityQueryEmbedding } from './embeddings.ts';
 //   audits — never raw chunks, packets, or pack internals.
 
 import type { EvidenceReranker } from '../../core/evidence-reranker.ts';
-import { boundedSourceIndexChunks, sourceIndexChunkTermScore } from '../../core/source-index/chunk-selection.ts';
-import { sourceIndexFtsTermGroups } from '../../core/source-index/fts.ts';
+import { boundedSourceIndexChunks, sourceIndexChunkQueryTerms, sourceIndexChunkTermScore, withoutNameTerms } from '../../core/source-index/chunk-selection.ts';
 import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
 import { runWithLocalInferenceGuard } from '../answer-activity.ts';
 import type { Analyst, AnalystCitation, AnalystOptions, AnalystResult, EvidenceCandidate, EvidencePack } from '../../core/contracts.ts';
@@ -1045,7 +1044,13 @@ export function fitPackToPromptBytes(
   recencySeats = 0,
 ): EvidencePack {
   if (analystPromptBytes(pack, analyzeOptions) <= maxPromptBytes) return pack;
-  const termGroups = sourceIndexFtsTermGroups(pack.question);
+  // The pack excerpt's term set: the question's terms minus each seat's name
+  // terms, or all of them when its name carries every one.
+  const questionTerms = sourceIndexChunkQueryTerms(pack.question);
+  const anchorTerms = (candidate: EvidenceCandidate) => {
+    const unnamed = withoutNameTerms(questionTerms, candidate.provenance.citation?.title);
+    return unnamed.length > 0 ? unnamed : questionTerms;
+  };
   // The first three seats go first: the router reserves seats 2 and 3 for
   // the strongest keyword and names-only leaders across stores (#1350), and
   // store turn alone would trim them whenever they share seat 1's store.
@@ -1071,7 +1076,7 @@ export function fitPackToPromptBytes(
       if (share < MIN_FITTED_BYTES_PER_CANDIDATE && keep > 1) break;
       const fitted = restatePack(
         pack,
-        base.map((candidate) => ({ ...candidate, chunks: clipQuestionChunksToUtf8Bytes(candidate.chunks, Math.max(0, share), termGroups) })),
+        base.map((candidate) => ({ ...candidate, chunks: clipQuestionChunksToUtf8Bytes(candidate.chunks, Math.max(0, share), anchorTerms(candidate)) })),
         candidateCorpus,
       );
       const bytes = analystPromptBytes(fitted, analyzeOptions);
