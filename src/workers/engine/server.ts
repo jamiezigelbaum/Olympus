@@ -82,7 +82,7 @@ import {
   type GmailEmailCorpusId,
 } from '../google-connectors/corpora.ts';
 import { GogcliEmailConnector } from '../email-source/gogcli.ts';
-import type { EmailSourceConnector } from './http/email-connector.ts';
+import type { EmailSourceConnector } from '../email-source/email-connector.ts';
 import type {
   ConnectorStoreChatPrincipal,
   ConnectorStoreDeclaredPrincipal,

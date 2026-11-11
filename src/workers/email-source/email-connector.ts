@@ -1,4 +1,4 @@
-import type { WorkerCredentialDegradation } from '../../credential-degradation.ts';
+import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
 
 export interface EmailAnswerRequest {
   question: string;

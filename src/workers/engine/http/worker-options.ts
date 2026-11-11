@@ -69,7 +69,7 @@ import type { LifecyclePathContext } from '../../../data-lifecycle.ts';
 import type { ModelKeyReloadRequest } from '../../../core/model-key-reload.ts';
 import type { BackupService } from '../../backup-service.ts';
 import type { WorkerCredentialDegradation, WorkerCredentialReadiness } from '../../credential-degradation.ts';
-import type { EmailSourceConnector } from './email-connector.ts';
+import type { EmailSourceConnector } from '../../email-source/email-connector.ts';
 import type { ConsultAskWireRequest } from './source-index-requests.ts';
 import type { ConnectorStoreDeclaredPrincipal } from './connector-store-search-request.ts';
 import type { DashboardSourceSyncRequest } from './dashboard-source-requests.ts';

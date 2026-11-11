@@ -1,4 +1,4 @@
-import type { EmailSourceConnector, EmailSourceHealth } from '../engine/http/email-connector.ts';
+import type { EmailSourceConnector, EmailSourceHealth } from './email-connector.ts';
 
 const COMMAND_TIMEOUT_EXIT_CODE = 124;
 const COMMAND_TIMEOUT_KILL_GRACE_MS = 500;

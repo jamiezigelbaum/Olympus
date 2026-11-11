@@ -180900,7 +180900,7 @@ var init_worker_options = __esm(() => {
   init_privacy_language();
 });
 
-// src/workers/engine/http/email-connector.ts
+// src/workers/email-source/email-connector.ts
 class GogcliEmailConnectorStub {
   name = "gogcli";
   async health() {

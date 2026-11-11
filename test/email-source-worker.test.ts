@@ -4,7 +4,7 @@ import {
   EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL,
   GogcliEmailConnectorStub,
   type EmailSourceConnector,
-} from '../src/workers/engine/http/email-connector.ts';
+} from '../src/workers/email-source/email-connector.ts';
 import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 
 function connector(): EmailSourceConnector {

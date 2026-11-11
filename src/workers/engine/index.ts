@@ -194,7 +194,7 @@ import {
   DASHBOARD_SETTINGS_PROPOSAL_APPLY_PATH,
   DASHBOARD_SETTINGS_PROPOSAL_DISCARD_PATH,
 } from './http/worker-options.ts';
-import { GogcliEmailConnectorStub, cheapWorkerHealth } from './http/email-connector.ts';
+import { GogcliEmailConnectorStub, cheapWorkerHealth } from '../email-source/email-connector.ts';
 import {
   CONNECTOR_STORE_FILTER_CAPABILITIES,
   assertSourceIndexSearchQuery,
