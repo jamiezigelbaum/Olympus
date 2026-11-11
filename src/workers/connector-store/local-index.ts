@@ -236,6 +236,13 @@ const MIN_VECTOR_SCORE = 0.18;
 const MAX_REQUIRED_CONCEPTS = 3;
 // Or the share of the query's concept weight (IDF) a keyword match must carry.
 const RARE_CONCEPT_WEIGHT_SHARE = 0.6;
+// A concept found in more of a store's FTS rows than this share is left out
+// of the keyword match (commonConceptTermsSteps).
+const KEYWORD_COMMON_ROW_SHARE = 0.2;
+// Only in a store this large: ranking every match is what costs, and in a
+// small store nearly every word of a question is "common" (a few files on one
+// topic), so leaving words out would only lose matches.
+const KEYWORD_COMMON_MIN_ROWS = 5_000;
 const READ_RESULT_PROJECTION_LOCATOR_URI = Symbol('connector-store-result-projection-locator-uri');
 // Below this bar, semantic similarity is treated as no evidence. Calibrated
 // against the live corpus (gemini-embedding-2, 2026-07-25: off-domain
@@ -13081,11 +13088,14 @@ export class LocalConnectorStore {
     const selectedFilters = connectorStoreFilterSql(filters);
     const selectedFtsScope = connectorStoreFtsScopeSql(filters);
     const conceptScope = connectorStoreFtsScopeSql(filters, 'r.chunk_pk');
-    const terms = ftsOptions.relaxed ? (ftsOptions.privatePrecision ? yield* this.privateRelaxedFtsQuerySteps(query) : toRelaxedLocalFtsQuery(query)) : toFtsQuery(query, ftsOptions);
-    if (!terms) return { rows: [], saturated: false, concepts: { total: 0, matched: new Map() } };
-    const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
     const groups = ftsOptions.relaxed ? [] : sourceIndexFtsTermGroups(query);
     const exact = queryInitialisms(query);
+    const commonTerms = ftsOptions.relaxed ? undefined : yield* this.commonConceptTermsSteps(groups, exact);
+    const terms = ftsOptions.relaxed
+      ? (ftsOptions.privatePrecision ? yield* this.privateRelaxedFtsQuerySteps(query) : toRelaxedLocalFtsQuery(query))
+      : sourceIndexFtsQuery(query, { ...(ftsOptions.prefix !== undefined ? { prefix: ftsOptions.prefix } : {}), ...(commonTerms ? { excludedTerms: commonTerms } : {}) });
+    if (!terms) return { rows: [], saturated: false, concepts: { total: 0, matched: new Map() } };
+    const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
     const minimumSignal = groups.length >= 2;
     const fetchLimit = minimumSignal ? Math.min(limit * 3, MAX_SEARCH_RESULTS) : limit;
     const selectedAccount = normalizeOptionalAccountScope(accountScope);
@@ -13377,6 +13387,64 @@ export class LocalConnectorStore {
    * weighs the most, so the question's missing words still count against a
    * partial match.
    */
+  /**
+   * The terms of a question's concepts that are very common in this store:
+   * found in over KEYWORD_COMMON_ROW_SHARE of its FTS rows. Left out of the
+   * match, they stop the ranking from reading almost every row while saying
+   * little about which one answers (Expert Agents' keyword rule; on Sparta's
+   * largest stores, 2026-11-11, olympus-ops#151, 8.4 to 2.1 s on the Private
+   * Dropbox store with most of the top 10 kept). A concept still counts toward
+   * each candidate's matched concepts. When every concept is common, the
+   * rarest is kept. A term a kept concept also holds stays. Each count stops
+   * at the threshold and is remembered like the concept weights. Stores
+   * under KEYWORD_COMMON_MIN_ROWS rows match every word, as before.
+   */
+  private *commonConceptTermsSteps(
+    groups: ReadonlyArray<readonly string[]>,
+    exact: ReadonlyMap<string, unknown>,
+  ): Generator<StoreRead, ReadonlySet<string> | undefined, unknown> {
+    if (groups.length < 2) return undefined;
+    const memo = this.conceptCountMemo ??= new Map();
+    const remembered = (key: string): number | undefined => {
+      const entry = memo.get(key);
+      return entry && Date.now() - entry.at < CONCEPT_COUNT_MAX_AGE_MS ? entry.count : undefined;
+    };
+    const remember = (key: string, count: number) => {
+      if (memo.size >= CONCEPT_COUNT_MEMO_LIMIT) memo.clear();
+      memo.set(key, { count, at: Date.now() });
+    };
+    // The largest rowid stands for the row count: no table scan, and deleted
+    // rows only raise the threshold, so fewer words count as common.
+    const ROWS = '\u0000fts-rows';
+    let rows = remembered(ROWS);
+    if (rows === undefined) {
+      rows = ((yield { mode: 'get', sql: 'SELECT COALESCE(MAX(rowid), 0) AS count FROM connector_store_fts', params: [] }) as { count: number }).count;
+      remember(ROWS, rows);
+    }
+    if (rows < KEYWORD_COMMON_MIN_ROWS) return undefined;
+    const threshold = Math.floor(rows * KEYWORD_COMMON_ROW_SHARE);
+    const counts: number[] = [];
+    for (const group of groups) {
+      const groupQuery = sourceIndexFtsGroupQuery(group, exact);
+      const key = `\u0001common:${threshold}:${groupQuery}`;
+      let count = remembered(key);
+      if (count === undefined) {
+        count = ((yield {
+          mode: 'get',
+          sql: 'SELECT COUNT(*) AS count FROM (SELECT 1 FROM connector_store_fts WHERE connector_store_fts MATCH ? LIMIT ?)',
+          params: [groupQuery, threshold + 1],
+        }) as { count: number }).count;
+        remember(key, count);
+      }
+      counts.push(count);
+    }
+    const common = counts.map((count) => count > threshold);
+    if (!common.some(Boolean)) return undefined;
+    if (common.every(Boolean)) common[counts.indexOf(Math.min(...counts))] = false;
+    const kept = new Set(groups.filter((_, index) => !common[index]).flat());
+    return new Set(groups.filter((_, index) => common[index]).flat().filter((term) => !kept.has(term)));
+  }
+
   private *conceptWeightsSteps(
     groups: ReadonlyArray<readonly string[]>,
     exact: ReadonlyMap<string, unknown>,

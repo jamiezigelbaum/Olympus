@@ -82,6 +82,8 @@ export interface SourceIndexFtsQueryOptions {
    * tokenizer still supplies ordinary inflectional matching.
    */
   prefix?: boolean;
+  /** Terms left out of the match (a store's very common words). */
+  excludedTerms?: ReadonlySet<string>;
 }
 
 export interface SourceIndexFtsTermGroupOptions {
@@ -97,7 +99,7 @@ export function sourceIndexFtsQuery(
   query: string,
   options: SourceIndexFtsQueryOptions = {},
 ): string {
-  const terms = sourceIndexFtsTerms(query);
+  const terms = sourceIndexFtsTerms(query).filter((term) => !options.excludedTerms?.has(term));
   if (terms.length === 0) return '';
   const suffix = options.prefix === false ? '' : '*';
   const exact = queryInitialisms(query);

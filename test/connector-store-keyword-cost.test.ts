@@ -6,7 +6,7 @@
 // alternatives), and counted each concept's matches store-wide again on
 // every search. These pin the cheaper shape with
 // synthetic data: the work done, not wall time.
-import { afterEach, expect, test } from 'bun:test';
+import { afterAll, afterEach, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { join } from 'node:path';
 import {
@@ -149,3 +149,87 @@ test('ties at the bound read only the rows tied with it or better, with the full
   expect(expected[0]).toBe('best');
   expect(rows.map((row) => row.sourceItem.providerItemId)).toEqual(expected);
 });
+
+// A word found in over a fifth of a store's FTS rows ranks almost every row
+// and says little about which one answers (the Expert Agents keyword rule).
+// On Sparta's largest stores (2026-11-11, olympus-ops#151) leaving such words
+// out of the match cut the ranking from 8.4 to 2.1 s on the Private Dropbox
+// store, keeping most of the top 10. The words still count toward a
+// candidate's concepts; they only stop deciding which rows are ranked.
+function rankedMatches(store: LocalConnectorStore, run: () => void): string[] {
+  const db = (store as unknown as { db: { query: (sql: string) => { all: (...params: unknown[]) => unknown[] } } }).db;
+  const query = db.query;
+  const matches: string[] = [];
+  db.query = function (sql: string) {
+    const statement = query.call(db, sql);
+    if (!sql.includes('LIMIT ? OFFSET ?')) return statement;
+    return { ...statement, all: (...params: unknown[]) => { matches.push(String(params[0])); return statement.all(...params); } };
+  };
+  try { run(); } finally { db.query = query; }
+  return matches;
+}
+
+// About 5,200 FTS rows (a name row and a text row per item): over the size
+// below which every word is matched.
+const COMMON_ITEMS = [
+  { id: 'answer', name: 'answer.txt', text: 'Kestrel boatyard notes from the harbour visit.' },
+  ...Array.from({ length: 1300 }, (_, n) => ({ id: `note-${n}`, name: `note-${n}.txt`, text: `${n < 1170 ? 'Weekly' : 'Monthly'} notes ${n} about the garden and the fence.` })),
+  ...Array.from({ length: 1300 }, (_, n) => ({ id: `other-${n}`, name: `other-${n}.txt`, text: `Shopping list ${n}: tomatoes, bread, coffee.` })),
+];
+
+// One large store for the tests below: syncing it takes seconds.
+let commonStore: Promise<LocalConnectorStore> | undefined;
+const sharedCleanups: Array<() => void> = [];
+afterAll(() => { while (sharedCleanups.length) sharedCleanups.pop()!(); });
+function largeCommonStore(): Promise<LocalConnectorStore> {
+  return commonStore ??= (async () => {
+    const { dir, cleanup } = tempDir('olympus-keyword-common-');
+    const store = new LocalConnectorStore({
+      dbPath: join(dir, 'internal.sqlite'),
+      corpusId: DROPBOX_TIER_CORPUS_IDS.internal!,
+      family: 'file',
+      trustDomain: 'internal',
+      tierLedger: null,
+    });
+    sharedCleanups.push(cleanup, () => store.close());
+    await store.syncFromConnector(fixtureConnector(() => COMMON_ITEMS), { fetchContent: true });
+    return store;
+  })();
+}
+
+test('a small store matches every word of the question', async () => {
+  const store = await openStoreWith(COMMON_ITEMS.slice(0, 81));
+  const matches = rankedMatches(store, () => { store.searchItemsDetailed('kestrel boatyard notes', 10); });
+  for (const match of matches) for (const word of ['kestrel', 'boatyard', 'notes']) expect(match).toContain(`"${word}"`);
+});
+
+test('a word in over a fifth of the rows is left out of the match, and the answer still leads', async () => {
+  const store = await largeCommonStore();
+  let rows: Array<{ sourceItem: { providerItemId: string } }> = [];
+  const matches = rankedMatches(store, () => { rows = store.searchItemsDetailed('kestrel boatyard notes', 10).rows; });
+  expect(matches.length).toBeGreaterThan(0);
+  for (const match of matches) {
+    expect(match).toContain('"kestrel"');
+    expect(match).not.toContain('"notes"');
+  }
+  expect(rows[0]?.sourceItem.providerItemId).toBe('answer');
+}, 60_000);
+
+test('when every word is common, the rarest one is kept', async () => {
+  // Each item has a name row and a text row: "notes" is in about half the
+  // rows, "shopping" in a quarter, "weekly" in a little over a fifth.
+  const store = await largeCommonStore();
+  const matches = rankedMatches(store, () => { store.searchItemsDetailed('weekly notes shopping', 10); });
+  expect(matches.length).toBeGreaterThan(0);
+  for (const match of matches) {
+    expect(match).toContain('"weekly"');
+    expect(match).not.toContain('"notes"');
+    expect(match).not.toContain('"shopping"');
+  }
+}, 60_000);
+
+test('a question of rare words matches as before', async () => {
+  const store = await largeCommonStore();
+  const matches = rankedMatches(store, () => { store.searchItemsDetailed('kestrel boatyard harbour', 10); });
+  for (const match of matches) for (const word of ['kestrel', 'boatyard', 'harbour']) expect(match).toContain(`"${word}"`);
+}, 60_000);
