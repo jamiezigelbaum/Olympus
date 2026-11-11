@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test';
 import type { EvidencePackBuildDetail } from '../src/core/evidence-pack.ts';
 import type { EvidencePack } from '../src/core/contracts.ts';
 import { comparePassageReceipts, runPassageEval } from '../eval/run-passages.ts';
+import { fitPackToPromptBytes } from '../src/workers/source-index/analyst-answer.ts';
 import type { EvalDataset } from '../eval/types.ts';
 const quote = 'Kestrel invoices total forty seven dollars this month';
 const question = 'Confidential fixture question that must never appear';
@@ -59,4 +60,19 @@ test('first-hit ranks and k cutoffs retain seat order', async () => {
   expect(receipt.questions![0]!.passage.firstHitRank).toBe(7);
   expect(receipt.summary.overall.passage.mrr).toBeCloseTo(1 / 7);
   expect(receipt.summary.overall.passage.hitsAtK).toEqual({ '1': 0, '3': 0, '5': 0, '10': 1, '12': 1 });
+});
+test('fits the pack in the compact format the local Analyst is sent', async () => {
+  const base = detail(`${'unrelated filler '.repeat(400)} ${quote}`);
+  const target = base.pack.candidates[0]!;
+  const candidates = Array.from({ length: 5 }, (_, i) => ({ ...target, provenance: { ...target.provenance, sourceItem: { ...target.provenance.sourceItem, providerItemId: i === 0 ? 'copy' : `other${i}` } } }));
+  const many = { ...base, pack: { ...base.pack, candidates }, candidateCorpusIds: candidates.map(() => 'internal.fixture.file') };
+  const sees = (format: 'full' | 'compact', bytes: number) => fitPackToPromptBytes(many.pack, bytes,
+    new Map(candidates.map(candidate => [candidate, 'internal.fixture.file'])), { localOnly: false }, many.recencySeats, format)
+    .candidates.find(candidate => candidate.provenance.sourceItem.providerItemId === 'copy')?.chunks.join('\n').includes(quote) ?? false;
+  // A budget where only the compact rendering leaves room for the quote.
+  let budget: number | undefined;
+  for (let bytes = 2_000; bytes <= 40_000 && budget === undefined; bytes += 250) if (sees('compact', bytes) && !sees('full', bytes)) budget = bytes;
+  expect(budget).toBeDefined();
+  const receipt = await runPassageEval({ dataset, maxResults: 5, promptBytes: budget!, storeCounts: counts, gitSha: 'abc', buildPack: async () => many });
+  expect(receipt.questions![0]!.passage.firstHitRank).toBe(1);
 });

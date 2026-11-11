@@ -77,7 +77,10 @@ export async function runPassageEval(input: {
     const original = detail.pack;
     const pack = input.promptBytes === undefined ? original : fitPackToPromptBytes(original, input.promptBytes,
       new Map(original.candidates.map((candidate, index) => [candidate, detail.candidateCorpusIds[index] ?? ''])),
-      { localOnly: original.candidates.some(candidate => candidate.trustDomain === 'secure_local') }, detail.recencySeats);
+      { localOnly: original.candidates.some(candidate => candidate.trustDomain === 'secure_local') }, detail.recencySeats,
+      // A prompt budget is the local Analyst lane's, which is sent the compact
+      // format and only the kept seats' extraction gaps (as run-real.ts fits).
+      'compact', new Map(original.candidates.map((candidate, index) => [candidate.provenance, detail.candidateExtractionGapIndexes?.[index] ?? []])));
     let objectRank: number | null = null;
     let passageRank: number | null = null;
     for (const [index, seat] of pack.candidates.entries()) {
