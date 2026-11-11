@@ -77706,7 +77706,7 @@ async function searchPrivateEvidence(input) {
     const request = {
       question,
       retrieval_mode: "hybrid",
-      include_internal: false,
+      include_internal: Boolean(input.originalMatches?.length),
       include_secure_local: true,
       include_secure_local_content: true,
       max_results: maxResults
@@ -77735,9 +77735,41 @@ async function searchPrivateEvidence(input) {
     let matches = await withCachedKeywordExpansion(translation, () => build(lanes.adapters));
     if (matches.length === 0 && !secretMatch && translation.missing)
       matches = await build(lanes.adapters);
+    const selectedItems = [];
+    for (const item of input.originalMatches ?? []) {
+      const provenance = item.provenance;
+      if (item.trustDomain !== "secure_local" || item.neighbour === true || !provenance?.sourceItem?.localItemId)
+        continue;
+      for (const corpus of lanes.registry.list()) {
+        if (corpus.trustDomain !== "internal" && corpus.trustDomain !== "public_safe")
+          continue;
+        if (lanes.adapters[corpus.corpusId]?.selectedItemServable?.(provenance.sourceItem) !== true)
+          continue;
+        selectedItems.push({
+          corpusId: corpus.corpusId,
+          sourceItem: provenance.sourceItem,
+          ...provenance.citation ? { citation: provenance.citation } : {}
+        });
+      }
+    }
+    if (selectedItems.length > 0) {
+      const detail = await withCachedKeywordExpansion(translation, () => buildEvidencePackDetailed({
+        question,
+        maxResults,
+        selectedItems,
+        searchContext: { allowedTrustDomains: ["internal", "public_safe"], allowCloudQueries: false },
+        registry: lanes.registry,
+        adapters: lanes.adapters,
+        contentProviders: lanes.contentProviders,
+        maxCharsPerCandidate: input.maxCharsPerCandidate ?? DEFAULT_MAX_CHARS_PER_CANDIDATE,
+        evidenceByteBudget: input.evidenceByteBudget ?? PRIVATE_EVIDENCE_BYTE_BUDGET
+      }));
+      assertEvidencePackModelEligible(detail.pack);
+      matches.push(...detail.pack.candidates.map((candidate, index) => ({ ...candidate, corpusId: detail.candidateCorpusIds[index] ?? "" })).filter((candidate) => (candidate.trustDomain === "internal" || candidate.trustDomain === "public_safe") && candidate.corpusId !== "" && candidate.chunks.length > 0));
+    }
     if (matches.length === 0)
       return { matched: secretMatch ? 1 : 0, candidates: [], ...secretMatch ? { secretMatch: true } : {} };
-    const neighbours = await withCachedKeywordExpansion(translation, () => privateNeighbours(lanes.adapters, build, matches));
+    const neighbours = matches.some((candidate) => candidate.trustDomain === "secure_local") ? await withCachedKeywordExpansion(translation, () => privateNeighbours(lanes.adapters, build, matches)) : [];
     return { matched: matches.length, candidates: [...matches, ...neighbours], ...secretMatch ? { secretMatch: true } : {} };
   });
 }
@@ -77901,6 +77933,13 @@ async function guardSourceAnswerEvidence(input) {
       throw new OperationError("source_index_policy_violation", "Source evidence is no longer allowed.", "Ask again under the current source policy.");
   }
 }
+function privateEvidenceDomain(item) {
+  if (item.trustDomain === "secure_local")
+    return "secure_local";
+  if (item.privateAnswerOriginalMatch === true && (item.trustDomain === "internal" || item.trustDomain === "public_safe"))
+    return item.trustDomain;
+  return;
+}
 async function checkPrivateEvidenceItems(input) {
   if (input.items.length === 0)
     return [];
@@ -77909,7 +77948,7 @@ async function checkPrivateEvidenceItems(input) {
     lanes = input.lanes({
       question: "eligibility",
       retrieval_mode: "keyword",
-      include_internal: false,
+      include_internal: input.items.some((item) => item.privateAnswerOriginalMatch === true),
       include_secure_local: true,
       include_secure_local_content: true
     });
@@ -77920,20 +77959,21 @@ async function checkPrivateEvidenceItems(input) {
     try {
       const corpusId = typeof item.corpusId === "string" ? item.corpusId : undefined;
       const provenance = item.provenance;
-      if (!corpusId || !provenance?.sourceItem?.localItemId || item.trustDomain !== "secure_local")
+      const trustDomain = privateEvidenceDomain(item);
+      if (!corpusId || !provenance?.sourceItem?.localItemId || !trustDomain)
         return false;
-      if (lanes.registry.get(corpusId)?.trustDomain !== "secure_local")
+      if (lanes.registry.get(corpusId)?.trustDomain !== trustDomain)
         return false;
       const provider = lanes.contentProviders[corpusId];
       if (!provider)
         return false;
       if (typeof provider.contentServable === "function") {
-        return provider.contentServable({ provenance, trustDomain: "secure_local" }) === true;
+        return provider.contentServable({ provenance, trustDomain }) === true;
       }
-      const content = await provider.fetchLocalContent({ provenance, trustDomain: "secure_local", maxChars: 1 });
+      const content = await provider.fetchLocalContent({ provenance, trustDomain, maxChars: 1 });
       if (!content || content.namesOnly || content.contentPrivate || content.chunks.length === 0)
         return false;
-      if (content.sensitivity.trustDomain !== "secure_local")
+      if (content.sensitivity.trustDomain !== trustDomain)
         return false;
       assertModelTrustTierAllowed(content.sensitivity.trustTier);
       return true;
@@ -77945,23 +77985,24 @@ async function checkPrivateEvidenceItems(input) {
 async function readPrivateEvidenceItem(input) {
   const corpusId = typeof input.item.corpusId === "string" ? input.item.corpusId : undefined;
   const provenance = input.item.provenance;
-  if (!corpusId || !provenance?.sourceItem || input.item.trustDomain !== "secure_local")
+  const trustDomain = privateEvidenceDomain(input.item);
+  if (!corpusId || !provenance?.sourceItem || !trustDomain)
     return;
   const lanes = input.lanes({
     question: input.question,
     retrieval_mode: "hybrid",
-    include_internal: false,
+    include_internal: input.item.privateAnswerOriginalMatch === true,
     include_secure_local: true,
     include_secure_local_content: true
-  });
-  if (lanes.registry.get(corpusId)?.trustDomain !== "secure_local")
+  }, "private_search");
+  if (lanes.registry.get(corpusId)?.trustDomain !== trustDomain)
     return;
   const provider = lanes.contentProviders[corpusId];
   if (!provider)
     return;
   const content = await provider.fetchLocalContent({
     provenance,
-    trustDomain: "secure_local",
+    trustDomain,
     maxChars: Math.max(1, Math.floor(input.maxChars)),
     query: input.question,
     maxPassages: PRIVATE_DEPTH_MAX_PASSAGES
@@ -204935,7 +204976,7 @@ function createSourceAnswerLanes(deps) {
       if (!requestEmbeddings.has(store.corpusId)) {
         const configured = deps.embeddingProvider(store);
         const provider = mode === "built_in_only" ? builtInEmbeddingOnly(configured, deps.localEmbedding) : configured;
-        requestEmbeddings.set(store.corpusId, provider && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(provider)) ? memoizeQueryEmbeddings(provider) : undefined);
+        requestEmbeddings.set(store.corpusId, provider && (store.trustDomain !== "secure_local" && mode !== "private_search" || isApprovedSecureSourceEmbeddingProvider(provider)) ? memoizeQueryEmbeddings(provider) : undefined);
       }
       return requestEmbeddings.get(store.corpusId);
     };
@@ -218879,8 +218920,8 @@ function privateCaller(ctx) {
   return id ? `${ctx.caller?.surface ?? "remote"}:${id}` : undefined;
 }
 function privateRefresh(question, probe, context3, options) {
-  return async () => {
-    const current3 = normalizeProbe(await probeWithinDeadline(probe, question, context3(), options, "refresh"));
+  return async (_signal, originalMatches) => {
+    const current3 = normalizeProbe(await probeWithinDeadline((query, ctx) => probe(query, ctx, originalMatches), question, context3(), options, "refresh"));
     return Object.assign([...current3.evidence], current3.secretMatch ? { secretMatch: true } : {});
   };
 }
@@ -218896,7 +218937,7 @@ function beginPrivateAnswer(pending, options) {
       preserveWaiting: match.secretMatch === true,
       refresh,
       ...match.secretMatch && match.evidence.length === 0 ? { secretMatch: async () => {
-        const current3 = await refresh(new AbortController().signal);
+        const current3 = await refresh(new AbortController().signal, []);
         return current3.secretMatch === true;
       } } : {},
       detail,
@@ -230507,7 +230548,7 @@ function formatAnalysisTiming(timing) {
 }
 function isPrivateEligible(item) {
   const domain = item.trust_domain ?? item.trustDomain;
-  if (domain !== undefined && domain !== "secure_local")
+  if (domain !== undefined && domain !== "secure_local" && !(item.privateAnswerOriginalMatch === true && (domain === "internal" || domain === "public_safe")))
     return false;
   for (const key2 of ["trust_tier", "trustTier", "tier", "content_tier", "contentTier", "metadata_tier", "metadataTier"]) {
     const tier = item[key2];
@@ -230629,6 +230670,11 @@ class PrivateAnswerJobs {
       question: input.question.slice(0, MAX_QUESTION_CHARS3),
       evidence: input.evidence.slice(0, MAX_EVIDENCE_ITEMS),
       refresh: input.refresh,
+      originalMatches: input.evidence.slice(0, MAX_EVIDENCE_ITEMS).filter((item) => isPrivateEligible({ ...item, privateAnswerOriginalMatch: false }) && item.neighbour !== true).map((item) => {
+        const identity2 = privateEvidenceIdentity(item);
+        const provenance = asRecord21(item.provenance);
+        return provenance?.citation ? { ...identity2, provenance: { ...asRecord21(identity2.provenance), citation: provenance.citation } } : identity2;
+      }),
       analysis: undefined,
       pollTokens: this.pollRate.capacity,
       pollRefilledAt: at,
@@ -230824,6 +230870,7 @@ class PrivateAnswerJobs {
     this.detach(job);
     job.question = undefined;
     job.evidence = undefined;
+    job.originalMatches = undefined;
     job.refresh = undefined;
     job.outcome = undefined;
     job.opens = undefined;
@@ -231167,19 +231214,26 @@ class PrivateAnswerJobs {
         return;
       }
       const refresh = job.refresh;
+      const originalMatches = job.originalMatches ?? [];
+      job.originalMatches = undefined;
       const question = job.question ?? "";
       job.question = undefined;
       job.evidence = undefined;
       job.refresh = undefined;
       const refreshStarted = this.now();
-      const found = refresh ? await refresh(abort.signal) : [];
+      const found = refresh ? await refresh(abort.signal, originalMatches) : [];
       if (found.secretMatch === true)
         job.preserveWaiting = true;
       if (refresh)
         timing.refreshMs = this.now() - refreshStarted;
       if (settled || abort.signal.aborted)
         return;
-      const evidence = found.filter(isPrivateEligible).slice(0, MAX_EVIDENCE_ITEMS);
+      const originalKeys = new Set(originalMatches.map(privateEvidenceKey));
+      const evidence = found.map((item) => {
+        const { privateAnswerOriginalMatch: _marker, ...candidate } = item;
+        const domain = candidate.trustDomain ?? candidate.trust_domain;
+        return (domain === "internal" || domain === "public_safe") && originalKeys.has(privateEvidenceKey(candidate)) ? { ...candidate, privateAnswerOriginalMatch: true } : candidate;
+      }).filter(isPrivateEligible).slice(0, MAX_EVIDENCE_ITEMS);
       timing.neighbours = evidence.filter((item) => item.neighbour === true).length;
       timing.matched = evidence.length - timing.neighbours;
       if (evidence.length === 0) {
@@ -231377,6 +231431,8 @@ function sourceItemIdentity(value2) {
 }
 function privateEvidenceIdentity(item) {
   const kept = {};
+  if (item.privateAnswerOriginalMatch === true)
+    kept.privateAnswerOriginalMatch = true;
   for (const key2 of IDENTITY_FIELDS) {
     const value2 = item[key2];
     if (typeof value2 === "string")
@@ -231540,7 +231596,7 @@ var init_private_answer_jobs = __esm(() => {
     "metadata_tier",
     "metadataTier"
   ];
-  SOURCE_ITEM_FIELDS = ["family", "provider", "accountScope", "providerItemId", "localItemId"];
+  SOURCE_ITEM_FIELDS = ["family", "provider", "accountScope", "providerItemId", "providerConversationId", "localItemId"];
 });
 
 // src/workers/chatgpt/private-question-jobs.ts
@@ -239454,8 +239510,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     ...input.limit ? { maxResults: input.limit } : {},
     releaseCheck: remoteReleaseCheck
   }) : undefined;
-  const chatgptPrivateMatchProbe = sourceAnswerLanes ? async (question) => {
-    const result = await searchPrivateEvidence({ lanes: sourceAnswerLanes, question });
+  const chatgptPrivateMatchProbe = sourceAnswerLanes ? async (question, _ctx, originalMatches) => {
+    const result = await searchPrivateEvidence({ lanes: sourceAnswerLanes, question, ...originalMatches ? { originalMatches } : {} });
     return { count: result.matched, evidence: result.candidates, ...result.secretMatch ? { secretMatch: true } : {} };
   } : undefined;
   const chatgptPrivateModelState = () => {

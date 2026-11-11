@@ -221,6 +221,28 @@ describe('one-time jobs', () => {
     expect(jobs.size).toBe(1);
   });
 
+  test('lower-tier refresh admits original matches only, even if another hit supplies the marker', async () => {
+    const hit = (id: string) => ({
+      sourceItem: { provider: 'fixture', accountScope: 'owner', localItemId: id },
+      trust_domain: 'secure_local',
+    });
+    const original = hit('original');
+    const neighbour = { ...hit('neighbour'), neighbour: true };
+    const lowered = { ...original, trust_domain: 'internal', privateAnswerOriginalMatch: true };
+    const model = readyModel();
+    const jobs = makeJobs(model, { now: 1_000_000 }, { precompute: false });
+    const { jobId } = jobs.begin({ question: 'q', count: 1, evidence: [original, neighbour], refresh: async () => [
+      { ...hit('new-match'), trust_domain: 'internal', privateAnswerOriginalMatch: true },
+      { ...neighbour, trust_domain: 'public_safe', privateAnswerOriginalMatch: true },
+      lowered,
+    ] });
+    const panel = await generatePanelKeyPair();
+    await jobs.claim(jobId!, panel.publicKey);
+    await settled(jobs);
+    expect((await jobs.claim(jobId!, panel.publicKey)).body.status).toBe('ready');
+    expect(model.calls).toEqual([{ question: 'q', evidence: [lowered] }]);
+  });
+
   test('a second key is audited locally, without content', async () => {
     const events: string[] = [];
     const jobs = makeJobs(readyModel(), { now: 0 }, { audit: (event) => events.push(event) });
