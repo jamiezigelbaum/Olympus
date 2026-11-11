@@ -108,3 +108,11 @@ test('the vector scan reads large pages on the read pool and yields at most once
   expect(pages.length).toBe(1);
   expect(zeroDelayTimers).toBeLessThanOrEqual(1);
 });
+
+test("the hybrid lane's vector scan stops before the lane's deadline, keeping time for its keyword rows (#1305)", async () => {
+  const { vectorScanDeadline } = await import('../src/workers/connector-store/local-index.ts');
+  expect(vectorScanDeadline(undefined, 0)).toBeUndefined();
+  // A tenth of the time left, at least a second.
+  expect(vectorScanDeadline(60_000, 0)).toBe(54_000);
+  expect(vectorScanDeadline(5_000, 0)).toBe(4_000);
+});

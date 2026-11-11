@@ -15080,7 +15080,7 @@ async function hybridConnectorStoreSearch(
       laneLimit,
       accountScope,
       filters,
-      request.deadlineAtMs,
+      vectorScanDeadline(request.deadlineAtMs, vectorStartedAt),
     );
     return { lane, elapsedMs: Date.now() - vectorStartedAt };
   })();
@@ -15245,6 +15245,20 @@ function roundCosine(value: number): number {
 
 function connectorStoreVectorDeadlineExpired(deadlineAtMs: number | undefined): boolean {
   return deadlineAtMs !== undefined && Number.isFinite(deadlineAtMs) && Date.now() >= deadlineAtMs;
+}
+
+/**
+ * The hybrid lane's vector scan stops a little before the lane's own
+ * deadline, so a store too big to scan in time still answers with its
+ * keyword rows and says its semantic lane was cut, instead of the whole lane
+ * timing out with nothing (#1305). It keeps a tenth of the time left, at
+ * least VECTOR_SCAN_RESERVE_MIN_MS, for fusion and the visibility recheck.
+ */
+const VECTOR_SCAN_RESERVE_MIN_MS = 1_000;
+export function vectorScanDeadline(laneDeadlineAtMs: number | undefined, nowMs: number): number | undefined {
+  if (laneDeadlineAtMs === undefined || !Number.isFinite(laneDeadlineAtMs)) return laneDeadlineAtMs;
+  const left = laneDeadlineAtMs - nowMs;
+  return laneDeadlineAtMs - Math.max(VECTOR_SCAN_RESERVE_MIN_MS, left / 10);
 }
 
 function yieldConnectorStoreVectorScan(): Promise<void> {
