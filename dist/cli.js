@@ -88307,6 +88307,7 @@ function connectorStoreExtractionCandidateReader(store, filters) {
           ...candidate.sizeBytes !== undefined ? { sizeBytes: candidate.sizeBytes } : {}
         })),
         ...page2.nextCursor !== undefined ? { nextCursor: page2.nextCursor } : {},
+        ...page2.skippedByDisposition ? { skippedByDisposition: page2.skippedByDisposition } : {},
         done: page2.done
       };
     }
@@ -88515,6 +88516,15 @@ var init_spool = __esm(() => {
   EXTRACTION_SPOOL_STALE_MS = 24 * 60 * 60 * 1000;
 });
 
+// src/workers/file-extraction/types.ts
+var EXTRACTION_CANDIDATE_SKIP;
+var init_types2 = __esm(() => {
+  EXTRACTION_CANDIDATE_SKIP = {
+    excludedByOwner: "excluded_by_owner",
+    outsideScope: "outside_scope"
+  };
+});
+
 // src/workers/dropbox-files/extraction-source.ts
 import { readFile as readFile5, realpath, stat as stat3 } from "node:fs/promises";
 import { relative as relative10, resolve as resolve17, sep as sep14 } from "node:path";
@@ -88563,15 +88573,23 @@ class DropboxExtractionSource {
       readerOptions.accountScope = sharedAccount;
     const page2 = await this.candidates.extractionCandidates(readerOptions);
     const candidates = [];
+    let outsideScope = 0;
     for (const row of page2.candidates) {
       const ref = this.refFromRow(row, scopes);
       if (ref)
         candidates.push(ref);
+      else
+        outsideScope += 1;
     }
+    const skipped = {
+      ...page2.skippedByDisposition ? { [EXTRACTION_CANDIDATE_SKIP.excludedByOwner]: page2.skippedByDisposition } : {},
+      ...outsideScope > 0 ? { [EXTRACTION_CANDIDATE_SKIP.outsideScope]: outsideScope } : {}
+    };
     return {
       candidates,
       ...page2.nextCursor !== undefined ? { nextCursor: page2.nextCursor } : {},
-      done: page2.done
+      done: page2.done,
+      ...Object.keys(skipped).length > 0 ? { skipped } : {}
     };
   }
   async fetch(ref, options) {
@@ -88873,6 +88891,7 @@ var init_extraction_source = __esm(() => {
   init_provider_client();
   init_http_timeout();
   init_file_extraction_source();
+  init_types2();
 });
 
 // src/workers/google-connectors/drive-extraction-source.ts
@@ -100911,6 +100930,7 @@ function createFileExtractionRunner(options) {
         jobsRefused,
         ...refused.size > 0 ? { jobsRefusedByReason: Object.fromEntries(refused) } : {},
         ...jobsSkippedImageNotPrivate > 0 ? { jobsSkippedImageNotPrivate } : {},
+        ...page2.skipped && Object.keys(page2.skipped).length > 0 ? { candidatesSkipped: { ...page2.skipped } } : {},
         extractorKinds: [...new Set([...byKind.values()].map((bucket) => bucket.kind))],
         ...page2.nextCursor !== undefined ? { nextCursor: page2.nextCursor } : {},
         done: page2.done,
@@ -140999,7 +141019,7 @@ var init_v4 = __esm(() => {
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/types.js
 var LATEST_PROTOCOL_VERSION = "2025-11-25", DEFAULT_NEGOTIATED_PROTOCOL_VERSION = "2025-03-26", SUPPORTED_PROTOCOL_VERSIONS, RELATED_TASK_META_KEY = "io.modelcontextprotocol/related-task", JSONRPC_VERSION = "2.0", AssertObjectSchema, ProgressTokenSchema, CursorSchema, TaskCreationParamsSchema, TaskMetadataSchema, RelatedTaskMetadataSchema, RequestMetaSchema, BaseRequestParamsSchema, TaskAugmentedRequestParamsSchema, isTaskAugmentedRequestParams = (value2) => TaskAugmentedRequestParamsSchema.safeParse(value2).success, RequestSchema, NotificationsParamsSchema, NotificationSchema, ResultSchema, RequestIdSchema, JSONRPCRequestSchema, isJSONRPCRequest = (value2) => JSONRPCRequestSchema.safeParse(value2).success, JSONRPCNotificationSchema, isJSONRPCNotification = (value2) => JSONRPCNotificationSchema.safeParse(value2).success, JSONRPCResultResponseSchema, isJSONRPCResultResponse = (value2) => JSONRPCResultResponseSchema.safeParse(value2).success, ErrorCode, JSONRPCErrorResponseSchema, isJSONRPCErrorResponse = (value2) => JSONRPCErrorResponseSchema.safeParse(value2).success, JSONRPCMessageSchema, JSONRPCResponseSchema, EmptyResultSchema, CancelledNotificationParamsSchema, CancelledNotificationSchema, IconSchema, IconsSchema, BaseMetadataSchema, ImplementationSchema, FormElicitationCapabilitySchema, ElicitationCapabilitySchema, ClientTasksCapabilitySchema, ServerTasksCapabilitySchema, ClientCapabilitiesSchema, InitializeRequestParamsSchema, InitializeRequestSchema, isInitializeRequest = (value2) => InitializeRequestSchema.safeParse(value2).success, ServerCapabilitiesSchema, InitializeResultSchema, InitializedNotificationSchema, isInitializedNotification = (value2) => InitializedNotificationSchema.safeParse(value2).success, PingRequestSchema, ProgressSchema, ProgressNotificationParamsSchema, ProgressNotificationSchema, PaginatedRequestParamsSchema, PaginatedRequestSchema, PaginatedResultSchema, TaskStatusSchema, TaskSchema, CreateTaskResultSchema, TaskStatusNotificationParamsSchema, TaskStatusNotificationSchema, GetTaskRequestSchema, GetTaskResultSchema, GetTaskPayloadRequestSchema, GetTaskPayloadResultSchema, ListTasksRequestSchema, ListTasksResultSchema, CancelTaskRequestSchema, CancelTaskResultSchema, ResourceContentsSchema, TextResourceContentsSchema, Base64Schema, BlobResourceContentsSchema, RoleSchema, AnnotationsSchema, ResourceSchema, ResourceTemplateSchema, ListResourcesRequestSchema, ListResourcesResultSchema, ListResourceTemplatesRequestSchema, ListResourceTemplatesResultSchema, ResourceRequestParamsSchema, ReadResourceRequestParamsSchema, ReadResourceRequestSchema, ReadResourceResultSchema, ResourceListChangedNotificationSchema, SubscribeRequestParamsSchema, SubscribeRequestSchema, UnsubscribeRequestParamsSchema, UnsubscribeRequestSchema, ResourceUpdatedNotificationParamsSchema, ResourceUpdatedNotificationSchema, PromptArgumentSchema, PromptSchema, ListPromptsRequestSchema, ListPromptsResultSchema, GetPromptRequestParamsSchema, GetPromptRequestSchema, TextContentSchema, ImageContentSchema, AudioContentSchema, ToolUseContentSchema, EmbeddedResourceSchema, ResourceLinkSchema, ContentBlockSchema, PromptMessageSchema, GetPromptResultSchema, PromptListChangedNotificationSchema, ToolAnnotationsSchema, ToolExecutionSchema, ToolSchema, ListToolsRequestSchema, ListToolsResultSchema, CallToolResultSchema, CompatibilityCallToolResultSchema, CallToolRequestParamsSchema, CallToolRequestSchema, ToolListChangedNotificationSchema, ListChangedOptionsBaseSchema, LoggingLevelSchema, SetLevelRequestParamsSchema, SetLevelRequestSchema, LoggingMessageNotificationParamsSchema, LoggingMessageNotificationSchema, ModelHintSchema, ModelPreferencesSchema, ToolChoiceSchema, ToolResultContentSchema, SamplingContentSchema, SamplingMessageContentBlockSchema, SamplingMessageSchema, CreateMessageRequestParamsSchema, CreateMessageRequestSchema, CreateMessageResultSchema, CreateMessageResultWithToolsSchema, BooleanSchemaSchema, StringSchemaSchema, NumberSchemaSchema, UntitledSingleSelectEnumSchemaSchema, TitledSingleSelectEnumSchemaSchema, LegacyTitledEnumSchemaSchema, SingleSelectEnumSchemaSchema, UntitledMultiSelectEnumSchemaSchema, TitledMultiSelectEnumSchemaSchema, MultiSelectEnumSchemaSchema, EnumSchemaSchema, PrimitiveSchemaDefinitionSchema, ElicitRequestFormParamsSchema, ElicitRequestURLParamsSchema, ElicitRequestParamsSchema, ElicitRequestSchema, ElicitationCompleteNotificationParamsSchema, ElicitationCompleteNotificationSchema, ElicitResultSchema, ResourceTemplateReferenceSchema, PromptReferenceSchema, CompleteRequestParamsSchema, CompleteRequestSchema, CompleteResultSchema, RootSchema, ListRootsRequestSchema, ListRootsResultSchema, RootsListChangedNotificationSchema, ClientRequestSchema, ClientNotificationSchema, ClientResultSchema, ServerRequestSchema, ServerNotificationSchema, ServerResultSchema, McpError, UrlElicitationRequiredError;
-var init_types2 = __esm(() => {
+var init_types3 = __esm(() => {
   init_v4();
   SUPPORTED_PROTOCOL_VERSIONS = [LATEST_PROTOCOL_VERSION, "2025-06-18", "2025-03-26", "2024-11-05", "2024-10-07"];
   AssertObjectSchema = custom((v) => v !== null && (typeof v === "object" || typeof v === "function"));
@@ -142909,7 +142929,7 @@ function mergeCapabilities(base, additional) {
 var DEFAULT_REQUEST_TIMEOUT_MSEC = 60000;
 var init_protocol = __esm(() => {
   init_zod_compat();
-  init_types2();
+  init_types3();
   init_zod_json_schema_compat();
 });
 
@@ -149506,7 +149526,7 @@ class ExperimentalServerTasks {
   }
 }
 var init_server2 = __esm(() => {
-  init_types2();
+  init_types3();
 });
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/experimental/tasks/helpers.js
@@ -149548,7 +149568,7 @@ function assertClientRequestTaskCapability(requests, method, entityName) {
 var Server;
 var init_server3 = __esm(() => {
   init_protocol();
-  init_types2();
+  init_types3();
   init_ajv_provider();
   init_zod_compat();
   init_server2();
@@ -149915,7 +149935,7 @@ function serializeMessage(message2) {
 `;
 }
 var init_stdio = __esm(() => {
-  init_types2();
+  init_types3();
 });
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js
@@ -150767,7 +150787,7 @@ var init_server4 = __esm(() => {
   init_server3();
   init_app_release_capture();
   init_stdio2();
-  init_types2();
+  init_types3();
   init_config();
   init_delphi();
   init_email();
@@ -182851,7 +182871,7 @@ async function registerClient(authorizationServerUrl, { metadata, clientMetadata
 var UnauthorizedError, AUTHORIZATION_CODE_RESPONSE_TYPE = "code", AUTHORIZATION_CODE_CHALLENGE_METHOD = "S256";
 var init_auth2 = __esm(() => {
   init_index_node();
-  init_types2();
+  init_types3();
   init_auth();
   init_auth();
   init_errors4();
@@ -183149,7 +183169,7 @@ class ExperimentalClientTasks {
   }
 }
 var init_client = __esm(() => {
-  init_types2();
+  init_types3();
 });
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js
@@ -183197,7 +183217,7 @@ function getSupportedElicitationModes(capabilities) {
 var Client;
 var init_client2 = __esm(() => {
   init_protocol();
-  init_types2();
+  init_types3();
   init_ajv_provider();
   init_zod_compat();
   init_client();
@@ -184185,7 +184205,7 @@ class StreamableHTTPClientTransport {
 }
 var DEFAULT_STREAMABLE_HTTP_RECONNECTION_OPTIONS, StreamableHTTPError;
 var init_streamableHttp = __esm(() => {
-  init_types2();
+  init_types3();
   init_auth2();
   init_stream();
   DEFAULT_STREAMABLE_HTTP_RECONNECTION_OPTIONS = {
@@ -193932,6 +193952,7 @@ function fileExtractionSchedulerTask(input) {
       let jobsExisting = 0;
       let jobsUnroutable = 0;
       let jobsRefused = 0;
+      const skipped2 = {};
       const extractorKinds = new Set;
       for (let page2 = 0;page2 < maxPages; page2 += 1) {
         await ingestionTurn();
@@ -193947,6 +193968,8 @@ function fileExtractionSchedulerTask(input) {
         jobsExisting += plan.jobsExisting;
         jobsUnroutable += plan.jobsUnroutable;
         jobsRefused += plan.jobsRefused;
+        for (const [reason, count] of Object.entries(plan.candidatesSkipped ?? {}))
+          skipped2[reason] = (skipped2[reason] ?? 0) + count;
         for (const kind of plan.extractorKinds)
           extractorKinds.add(kind);
         if (plan.done) {
@@ -193987,6 +194010,7 @@ function fileExtractionSchedulerTask(input) {
         jobs_existing: jobsExisting,
         jobs_unroutable: jobsUnroutable,
         jobs_refused: jobsRefused,
+        ...Object.fromEntries(Object.entries(skipped2).map(([reason, count]) => [`candidates_skipped_${reason}`, count])),
         jobs_processed: processedJobs,
         jobs_indexed: settled.indexed,
         jobs_metadata_only: settled.metadata_only,
@@ -215019,7 +215043,7 @@ data:
   }
 }
 var init_webStandardStreamableHttp = __esm(() => {
-  init_types2();
+  init_types3();
 });
 
 // src/workers/answer-model-required.ts
@@ -221024,7 +221048,7 @@ var init_mcp_surface = __esm(() => {
   init_app_release_capture();
   init_release_manifest();
   init_server3();
-  init_types2();
+  init_types3();
   init_operation_exposure();
   init_operations();
   init_source_corpus_registry();
@@ -230641,7 +230665,7 @@ function createChatGptDirectoryMcpServer(makeOperationContext, options, makeDeta
 }
 var APPROVED_TOOL_BY_NAME, APPROVED_PAGES;
 var init_directory_surface = __esm(() => {
-  init_types2();
+  init_types3();
   init_approved();
   init_directory_tools();
   init_dashboard_contract();
