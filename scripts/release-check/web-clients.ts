@@ -102,6 +102,8 @@ export interface PageState {
   challenge: boolean;
   /** The app offers Log in or Sign in: the test account is signed out. */
   signedOut: boolean;
+  /** The app says the account hit its message limit (Claude's Free plan: "You hit your 5-hour message limit"). */
+  limited?: boolean;
   composer: boolean;
   /** What the message box still holds: a question that is still there was not sent. */
   composerText: string;
@@ -119,6 +121,7 @@ export function blockedReason(client: WebClientId, state: PageState): string | u
   const label = CLIENT_ADAPTERS[client].label;
   if (state.challenge) return `${label} showed a bot check ("${state.title.slice(0, 60)}"); open it once in the canary browser and pass the check`;
   if (state.signedOut) return `${label} is signed out; sign the test account in again in the canary browser`;
+  if (state.limited) return `${label} says the test account hit its message limit, so the question was not answered; wait for the limit to reset or use a paid test account`;
   if (!state.composer) return `${label} showed no message box at ${state.url.slice(0, 120)}; the page may have changed (CLIENT_ADAPTERS in scripts/release-check/web-clients.ts)`;
   return undefined;
 }
@@ -151,9 +154,17 @@ export function redactForbidden(text: string, forbid: readonly string[]): string
   return out;
 }
 
+/**
+ * The dialog or notice an app shows when the account has used up its messages (seen on Claude's Free plan,
+ * 2026-11-11: "You hit your 5-hour message limit", "Upgrade to keep chatting"). The page behind it is a blank
+ * new chat, so without this the question reads as answered without Olympus.
+ */
+export const MESSAGE_LIMIT = /hit your (?:\d+-hour )?(?:message )?limit|you.ve hit your limit for|upgrade to keep chatting/i;
+
 /** Claude's reply that the connector, though connected, gave it no tools in this chat. */
 export function saidNoTools(client: WebClientId, turn: string): boolean {
-  return client === 'claude' && /(couldn.t|can.t|cannot|could not) ask Olympus/i.test(turn) && /\b(no|any|none of its) tools\b|exposes no tools|isn.t (giving|exposing)/i.test(turn);
+  return client === 'claude' && /(couldn.t|can.t|cannot|could not) (ask|reach|use) (Olympus|it|any of its tools)/i.test(turn)
+    && /\b(no|any|none of its|any of its) tools\b|exposes no tools|isn.t (giving|exposing)/i.test(turn);
 }
 
 export interface TurnObservation {
@@ -471,6 +482,7 @@ export async function connectBrowser(wsUrl: string): Promise<BrowserSession> {
 
 /** What the page shows, read in the page. Visible elements only: apps keep hidden copies of their controls. */
 export const PAGE_STATE_SCRIPT = (composers: readonly string[], client?: WebClientId, prompt = ''): string => `(() => {
+  const MESSAGE_LIMIT = ${MESSAGE_LIMIT.toString()};
   const visible = (el) => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
   const controls = [...document.querySelectorAll('button, a, [role="button"]')].filter(visible);
   const named = (el) => (el.getAttribute('aria-label') || el.innerText || '').trim();
@@ -491,6 +503,7 @@ export const PAGE_STATE_SCRIPT = (composers: readonly string[], client?: WebClie
     title: document.title,
     challenge: /just a moment|verify you are human|attention required/i.test(document.title) || !!document.querySelector('iframe[src*="challenges.cloudflare.com"], #challenge-form, #cf-challenge-running'),
     signedOut: /\\/(log-?in|sign-?in|auth)\\b/i.test(location.pathname) || controls.some((el) => /^(log ?in|sign ?in)$/i.test(named(el))),
+    limited: MESSAGE_LIMIT.test(document.body?.innerText || ''),
     composer: !!composer,
     composerText: composer ? (composer.value ?? composer.innerText ?? '') : '',
     busy: replyControls.some((el) => /^stop\\b/i.test(named(el)) || /stop-button/.test(el.getAttribute('data-testid') || '')),
@@ -883,7 +896,7 @@ export async function askQuestion(tab: Tab, client: WebClientId, q: ClientQuesti
     await t.sleep(t.pollMs);
     await tab.evaluate<boolean>(ALLOW_SCRIPT).catch(() => false);
     const state = await tab.evaluate<PageState>(script);
-    if (state.challenge || state.signedOut) return { inconclusive: blockedReason(client, state)! };
+    if (state.challenge || state.signedOut || state.limited) return { inconclusive: blockedReason(client, state)! };
     const turn = capturedTurn(state);
     // Some apps keep the text in the box when Enter only adds a line; their send button sends it.
     if (!sendRetried && (t.now ?? Date.now)() - started >= 2 * t.pollMs && state.composerText.includes(q.prompt.trim().slice(0, 40))) {
