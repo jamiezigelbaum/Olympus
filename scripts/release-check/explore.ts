@@ -641,8 +641,6 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       } catch { left = true; }
       const dialogsAfter = left ? dialogsBefore : await hostDialogs(driver);
       const dialogOpened = dialogsAfter.some((name) => !dialogsBefore.includes(name));
-      // Closed again before the next press, which would otherwise land behind it.
-      if (dialogOpened) await driver.probe('host', '__rc.closeDialogs()').catch(() => undefined);
       const events = driver.drainEvents();
       const openedWindows = await windowsOpened();
       const at = await driver.where().catch(() => '');
@@ -719,6 +717,8 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       };
       const shot = `explore-${seed.id}/${String(trace.n).padStart(2, '0')}.jpg`;
       if (await screenshotWithin(driver, shot)) trace.screenshot = shot;
+      // Audited and pictured above, then closed before the next press, which would otherwise land behind it.
+      if (dialogOpened) await driver.probe('host', '__rc.closeDialogs()').catch(() => undefined);
       steps.push(trace);
 
       // What the press opened gets its own turn: a question's Confirm and Cancel (keys that extend the control's own). What a confirmed press
