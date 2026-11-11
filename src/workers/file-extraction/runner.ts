@@ -698,6 +698,7 @@ export function createFileExtractionRunner(
       // under (Extractor.versionFor), so a media-scoped version only re-reads
       // that media type.
       const byKind = new Map<string, { kind: string; version: string; refs: ExtractionItemRef[] }>();
+      const unroutableRefs: ExtractionItemRef[] = [];
       let jobsUnroutable = 0;
       let jobsSkippedImageNotPrivate = 0;
       const refused = new Map<string, number>();
@@ -717,6 +718,8 @@ export function createFileExtractionRunner(
           extractor = registry.select(ref, request.extractorKind);
           if (!extractor) {
             jobsUnroutable += 1;
+            // Only a plan open to every reader can say no reader takes it.
+            if (request.extractorKind === undefined) unroutableRefs.push(ref);
             continue;
           }
           version = extractor.versionFor?.(ref.mimeType) ?? extractor.version;
@@ -732,6 +735,15 @@ export function createFileExtractionRunner(
         else byKind.set(key, { kind: extractor.kind, version, refs: [ref] });
       }
 
+      if (unroutableRefs.length > 0) {
+        try {
+          jobs.recordUnroutable(unroutableRefs);
+        } catch (error) {
+          // Only the dashboard's count misses them, until the next pass: no
+          // candidate was refused, so the plan's counts stay as they are.
+          logPlanRefusal(request.corpusId, 'unrouted', PLAN_REFUSED_UNROUTABLE_RECORD, unroutableRefs.length, error);
+        }
+      }
       let jobsQueued = 0;
       let jobsExisting = 0;
       let jobsForced = 0;
@@ -1632,6 +1644,7 @@ export const PLAN_REFUSED_EXTRACTOR_KIND = 'extractor_kind_refused';
 export const PLAN_REFUSED_EXTRACTOR_VERSION = 'extractor_version_refused';
 export const PLAN_REFUSED_ITEM_FIELD = 'item_field_refused';
 export const PLAN_REFUSED_ROUTING_FAILED = 'routing_failed';
+export const PLAN_REFUSED_UNROUTABLE_RECORD = 'unroutable_record_failed';
 
 /**
  * Fields of one candidate's ref. A refusal of one of these is about that item

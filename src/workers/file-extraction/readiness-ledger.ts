@@ -18,6 +18,7 @@ import {
   BLOCKED_BY_POLICY_COUNT_KEY,
   METADATA_ONLY_EXPECTED_COUNT_KEY,
   UNREADABLE_ITEMS_COUNT_KEY,
+  UNSUPPORTED_KIND_COUNT_KEY,
 } from '../dashboard/answer-ready-coverage.ts';
 import type { SourceIndexReadinessLedger } from '../source-index/status.ts';
 import { ingestionTurn } from '../control-path-headroom.ts';
@@ -189,6 +190,7 @@ function readinessSnapshot(
       extraction_jobs_failed: readiness.failedRetryableJobs + readiness.failedTerminalJobs,
       extraction_jobs_failed_actionable: readiness.failedActionableJobs,
       [UNREADABLE_ITEMS_COUNT_KEY]: readiness.unreadableItems,
+      [UNSUPPORTED_KIND_COUNT_KEY]: readiness.unsupportedKindItems,
       extraction_jobs_retryable_due_actionable: readiness.retryableDueJobs,
     },
     contentExtractionThroughput: {
