@@ -32,6 +32,7 @@ import {
 } from './source-index/chunk-selection.ts';
 import { assertEvidencePackModelEligible } from './source-model-policy.ts';
 import { isSecureSensitivity } from './source-index/types.ts';
+import { semanticTimeoutGapCorpus } from './source-index/partial-search.ts';
 import { OperationError } from './operation-error.ts';
 import { evidenceVersionIndex, evidenceVersionsDated, type VersionedEvidenceText } from './evidence-versions.ts';
 
@@ -305,6 +306,21 @@ export function noEvidenceAnalystResult(pack: EvidencePack): AnalystResult {
   const stillSearching = [...new Set(pack.coverage.skippedCorpora
     .filter((skip) => skip.reason === 'lane_timeout' && !searched.has(skip.corpusId))
     .map((skip) => skip.corpusId))].sort();
+  // A source searched by keyword only, its search by meaning cut for time,
+  // may still hold the answer too.
+  const partlySearched = [...new Set(pack.coverage.extractionGaps
+    .map(semanticTimeoutGapCorpus)
+    .filter((corpusId): corpusId is string => corpusId !== undefined && !stillSearching.includes(corpusId)))].sort();
+  if (stillSearching.length === 0 && partlySearched.length > 0) {
+    const sources = partlySearched.length === 1 ? '1 source' : `${partlySearched.length} sources`;
+    return {
+      answer: `I have no matching evidence for this question in the sources searched. Olympus ran out of time searching ${sources} by meaning and checked only their keyword matches, so the answer may still be there. Ask again in a moment.`,
+      citations: [],
+      unanswered: foldCoverageGaps(pack, [
+        `No matching evidence found in the searched corpora for: ${pack.question}`,
+      ]),
+    };
+  }
   if (stillSearching.length > 0) {
     const sources = stillSearching.length === 1 ? '1 source' : `${stillSearching.length} sources`;
     return {

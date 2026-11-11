@@ -1,4 +1,5 @@
 import { withKeywordRequestScope } from './source-index/keyword-context.ts';
+import { semanticSearchTimedOut, semanticTimeoutGap } from './source-index/partial-search.ts';
 import {
   rerankCandidates,
   rerankPassage,
@@ -1072,6 +1073,7 @@ function hitProvenance(hit: SourceIndexRoutedSearchHit): SourceIndexProvenance {
  * Counts only: the corpus id and the lane's own stable reason token.
  */
 export function semanticLaneSkippedGap(corpusId: string, detail: string | undefined): string {
+  if (semanticSearchTimedOut(detail)) return semanticTimeoutGap(corpusId);
   return `${corpusId}: the meaning-based search was skipped for this question`
     + `${detail ? ` (${detail})` : ''}; only keyword matches were searched, so related items may be missing.`;
 }

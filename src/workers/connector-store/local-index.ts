@@ -6,7 +6,7 @@ import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
 import { extractionJobsDbPaths, oweExtractionRereadAfterRevive } from '../file-extraction/job-names.ts';
 import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
 import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled, withKeywordExpansionDisabled } from '../../core/source-index/keyword-context.ts';
-import { storeKeywordLanguages } from '../../core/source-index/keyword-languages.ts';
+import { lastKeywordLanguages, storeKeywordLanguages, storeKeywordLanguagesWith } from '../../core/source-index/keyword-languages.ts';
 import { expandSourceIndexKeywords, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
 import { controlPathHeadroom, ingestionTurn, type ControlPathHeadroom } from '../control-path-headroom.ts';
 import { OffThreadReadBusyError, offThreadReadsSupported, readOnPool, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
@@ -12542,27 +12542,22 @@ export class LocalConnectorStore {
    * every lane missed its deadline. This only decides whether the lane runs:
    * what the lane returns is still filtered by the current tier ledger.
    *
-   * A rebind is checked on every ask (one row). Otherwise a `true` is kept
-   * for SEARCH_VECTOR_LANE_MEMO_MS, and the answer is computed from the
-   * hidden set the status path keeps (rebuilt in turns, never on this ask
-   * after the first). A `false` is never kept, so a store's first vectors
-   * switch the lane on at the next search.
+   * A rebind is checked on every ask (one row). Otherwise the lane runs when
+   * any live chunk has a current vector, hidden or not: the lane's rows are
+   * still filtered by the current tier ledger, so a hidden vector can switch
+   * the lane on but never be returned. A search never builds or refreshes
+   * the hidden-copy set: on Sparta (2026-11-11, #1305) the refresh an Ask
+   * started judged every parent of the large Telegram stores, 43 s of
+   * request-thread SQL inside one Ask. The status and embedding paths keep
+   * the set. A `true` is kept for SEARCH_VECTOR_LANE_MEMO_MS; a `false` is
+   * never kept, so a store's first vectors switch the lane on at the next
+   * search.
    */
   vectorLaneServable(modelId: string): boolean {
     if (this.embeddingCurrencyRebuildPending(modelId)) return false;
     const memo = this.vectorLaneMemo?.get(modelId);
     if (memo !== undefined && Date.now() - memo < SEARCH_VECTOR_LANE_MEMO_MS) return true;
-    // No hidden set built yet (the first search after a start): building it
-    // here held Sparta's thread for most of a 75-86 s freeze (2026-11-10).
-    // Build it in turns for the next search, and answer this one from the
-    // vectors alone, hidden or not: the lane's rows are still filtered by the
-    // current tier ledger, so a hidden vector can switch the lane on but
-    // never be returned.
-    if (!this.tierHiddenCountsMemo) {
-      void this.refreshTierHiddenCountsInTurns();
-      return this.anyCurrentEmbedding(modelId);
-    }
-    const servable = this.hasEmbeddings(modelId, { countsMaxAgeMs: SEARCH_VECTOR_LANE_MEMO_MS });
+    const servable = this.anyCurrentEmbedding(modelId);
     if (servable) (this.vectorLaneMemo ??= new Map()).set(modelId, Date.now());
     else this.vectorLaneMemo?.delete(modelId);
     return servable;
@@ -12974,7 +12969,20 @@ export class LocalConnectorStore {
     });
   }
 
-  keywordLanguages(): readonly string[] { return storeKeywordLanguages(this.db); }
+  /**
+   * The languages this store's content is written in, for keyword
+   * translation. The sample is read on the read pool where it can be; a
+   * store whose pool is full answers from its last profile.
+   */
+  async keywordLanguages(): Promise<readonly string[]> {
+    if (!offThreadReadsSupported(this.dbPath)) return storeKeywordLanguages(this.db);
+    try {
+      return await storeKeywordLanguagesWith(this.db, (read) => readOnPool(this.dbPath, read));
+    } catch (error) {
+      if (error instanceof OffThreadReadBusyError || this.closedForPoolReads) return lastKeywordLanguages(this.db);
+      throw error;
+    }
+  }
 
   // --- Read surfaces ----------------------------------------------------------
 

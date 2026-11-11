@@ -18083,53 +18083,94 @@ var CHILD_ITEM_ID_SEPARATOR = "#child:";
 
 // src/core/source-index/keyword-languages.ts
 function storeKeywordLanguages(db) {
+  const steps = profileSteps(db);
+  let next = steps.next();
+  while (!next.done) {
+    const read = next.value;
+    const statement = db.query(read.sql);
+    next = steps.next(read.mode === "get" ? statement.get(...read.params) : statement.all(...read.params));
+  }
+  return next.value;
+}
+function storeKeywordLanguagesWith(db, read) {
+  const steps = profileSteps(db);
+  const first = steps.next();
+  if (first.done)
+    return Promise.resolve(first.value);
+  const pending = sampling.get(db);
+  if (pending)
+    return pending;
+  const run = (async () => {
+    let next = first;
+    while (!next.done)
+      next = steps.next(await read(next.value));
+    return next.value;
+  })().finally(() => sampling.delete(db));
+  sampling.set(db, run);
+  return run;
+}
+function lastKeywordLanguages(db) {
+  return profiles.get(db)?.languages ?? [];
+}
+function* profileSteps(db) {
   const revision = JSON.stringify([db.query("PRAGMA data_version").get(), db.query("SELECT total_changes() AS n").get()]);
   const cached2 = profiles.get(db);
   if (cached2?.revision === revision)
     return cached2.languages;
-  const maxRowid = db.query("SELECT max(rowid) AS n FROM chunks").get().n ?? 0;
-  if (maxRowid > SAMPLE_LIMIT && cached2 && Date.now() - cached2.sampledAtMs < PROFILE_REUSE_MS)
+  if (cached2 && cached2.large && Date.now() - cached2.sampledAtMs < PROFILE_REUSE_MS)
+    return cached2.languages;
+  const maxRowid = (yield { sql: "SELECT max(rowid) AS n FROM chunks", params: [], mode: "get" })?.n ?? 0;
+  const large = maxRowid > SAMPLE_LIMIT;
+  if (large && cached2 && Date.now() - cached2.sampledAtMs < PROFILE_REUSE_MS)
     return cached2.languages;
   const live = `SELECT c.rowid AS pk, c.content_hash AS hash FROM chunks c
     JOIN items i ON i.item_pk = c.item_pk WHERE i.tombstoned = 0`;
   let rows;
-  if (maxRowid <= SAMPLE_LIMIT) {
-    rows = db.query(`${live} ORDER BY c.rowid LIMIT ${SAMPLE_LIMIT}`).all();
+  if (!large) {
+    rows = yield { sql: `${live} ORDER BY c.rowid LIMIT ${SAMPLE_LIMIT}`, params: [], mode: "all" };
   } else {
     const step = maxRowid / SAMPLE_TARGET;
     const ids = Array.from({ length: SAMPLE_TARGET }, (_, k) => Math.max(1, Math.floor((k + 1) * step)));
     rows = [];
-    for (let at = 0;at < ids.length; at += 500) {
-      const batch = ids.slice(at, at + 500);
-      rows.push(...db.query(`${live} AND c.rowid IN (${batch.map(() => "?").join(",")}) ORDER BY c.rowid`).all(...batch));
+    for (let at = 0;at < ids.length; at += READ_BATCH) {
+      const batch = ids.slice(at, at + READ_BATCH);
+      rows.push(...yield { sql: `${live} AND c.rowid IN (${batch.map(() => "?").join(",")}) ORDER BY c.rowid`, params: batch, mode: "all" });
     }
   }
   const signature = JSON.stringify(rows);
   if (cached2?.signature === signature) {
-    cached2.revision = revision;
-    cached2.sampledAtMs = Date.now();
+    profiles.set(db, { ...cached2, revision, large, sampledAtMs: Date.now() });
     return cached2.languages;
   }
   const detected = new Map;
-  const counts = new Map;
-  const textFor = db.query("SELECT substr(bounded_text, 1, 1000) AS text FROM chunks WHERE rowid = ?");
   for (const row of rows) {
-    let language = detected.get(row.hash) ?? cached2?.detected.get(row.hash);
-    if (language === undefined)
-      language = franc(textFor.get(row.pk).text, { minLength: 40 });
-    detected.set(row.hash, language);
+    const known = cached2?.detected.get(row.hash);
+    if (known !== undefined)
+      detected.set(row.hash, known);
+  }
+  const unread = [...new Map(rows.filter((row) => !detected.has(row.hash)).map((row) => [row.hash, row.pk])).values()];
+  for (let at = 0;at < unread.length; at += READ_BATCH) {
+    const batch = unread.slice(at, at + READ_BATCH);
+    const texts = yield { sql: `SELECT c.rowid AS pk, c.content_hash AS hash, substr(c.bounded_text, 1, 1000) AS text FROM chunks c WHERE c.rowid IN (${batch.map(() => "?").join(",")})`, params: batch, mode: "all" };
+    for (const text2 of texts)
+      detected.set(text2.hash, franc(text2.text ?? "", { minLength: 40 }));
+  }
+  const counts = new Map;
+  for (const row of rows) {
+    const language = detected.get(row.hash) ?? "und";
     if (language !== "und")
       counts.set(language, (counts.get(language) ?? 0) + 1);
   }
   const languages = [...counts].filter(([, count]) => count / Math.max(1, rows.length) >= 0.05).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 6).map(([language]) => language).sort();
-  profiles.set(db, { revision, signature, languages, detected, sampledAtMs: Date.now() });
+  profiles.set(db, { revision, signature, languages, detected, sampledAtMs: Date.now(), large });
   return languages;
 }
-var profiles, SAMPLE_TARGET = 1024, SAMPLE_LIMIT = 2048, PROFILE_REUSE_MS;
+var profiles, SAMPLE_TARGET = 1024, SAMPLE_LIMIT = 2048, READ_BATCH = 500, PROFILE_REUSE_MS, sampling;
 var init_keyword_languages = __esm(() => {
   init_franc_min();
   profiles = new WeakMap;
   PROFILE_REUSE_MS = 10 * 60000;
+  sampling = new WeakMap;
 });
 
 // src/core/source-index/keyword-equivalents.json
@@ -29297,11 +29338,7 @@ var init_local_index = __esm(() => {
       const memo = this.vectorLaneMemo?.get(modelId);
       if (memo !== undefined && Date.now() - memo < SEARCH_VECTOR_LANE_MEMO_MS)
         return true;
-      if (!this.tierHiddenCountsMemo) {
-        this.refreshTierHiddenCountsInTurns();
-        return this.anyCurrentEmbedding(modelId);
-      }
-      const servable = this.hasEmbeddings(modelId, { countsMaxAgeMs: SEARCH_VECTOR_LANE_MEMO_MS });
+      const servable = this.anyCurrentEmbedding(modelId);
       if (servable)
         (this.vectorLaneMemo ??= new Map).set(modelId, Date.now());
       else
@@ -29509,8 +29546,16 @@ var init_local_index = __esm(() => {
         return row ? [searchRowFromItemRow(row)] : [];
       });
     }
-    keywordLanguages() {
-      return storeKeywordLanguages(this.db);
+    async keywordLanguages() {
+      if (!offThreadReadsSupported(this.dbPath))
+        return storeKeywordLanguages(this.db);
+      try {
+        return await storeKeywordLanguagesWith(this.db, (read) => readOnPool(this.dbPath, read));
+      } catch (error) {
+        if (error instanceof OffThreadReadBusyError || this.closedForPoolReads)
+          return lastKeywordLanguages(this.db);
+        throw error;
+      }
     }
     searchItems(query, maxResults, accountScope, filters, ftsOptions = {}) {
       return this.searchItemsDetailed(query, maxResults, accountScope, filters, ftsOptions).rows;
@@ -41085,6 +41130,12 @@ var init_opsec = __esm(() => {
   init_types();
 });
 
+// src/core/source-index/partial-search.ts
+var SEMANTIC_TIMEOUT_REASONS;
+var init_partial_search = __esm(() => {
+  SEMANTIC_TIMEOUT_REASONS = new Set(["vector_scan_deadline_exceeded", "vector_scan_store_busy"]);
+});
+
 // src/core/evidence-versions.ts
 var DOCUMENT_FAMILIES;
 var init_evidence_versions = __esm(() => {
@@ -41099,6 +41150,7 @@ var init_analyst = __esm(() => {
   init_chunk_selection();
   init_source_model_policy();
   init_types();
+  init_partial_search();
   init_operation_error();
   init_evidence_versions();
   analystAbortSignalStorage = new AsyncLocalStorage6;
@@ -41413,6 +41465,7 @@ var init_router = __esm(() => {
 var utf8;
 var init_evidence_pack = __esm(() => {
   init_keyword_context();
+  init_partial_search();
   init_evidence_reranker();
   init_parent_label();
   init_source_model_policy();
@@ -45726,6 +45779,7 @@ var init_private_answer_model = __esm(() => {
 // src/workers/source-index/local-answer.ts
 var IN_SCOPE_SKIPS;
 var init_local_answer = __esm(() => {
+  init_partial_search();
   init_evidence_pack();
   init_remote_result();
   init_secret_location_note();

@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   createAnalyst,
+  NO_EVIDENCE_ANSWER,
   redactPackForEscalation,
   type AnalystModel,
   type AnalystModelCompletion,
@@ -15,6 +16,7 @@ import type {
   SourceTrustDomain,
   SourceTrustTier,
 } from '../src/core/source-index/types.ts';
+import { semanticLaneSkippedGap } from '../src/core/evidence-pack.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 
 function prov(id: string, title?: string): SourceIndexProvenance {
@@ -1206,6 +1208,35 @@ describe('Analyst capability', () => {
     expect(result.answer).toContain('ran out of time searching 1 source, so the answer may still be there');
     expect(result.unanswered).toContain('Ran out of time searching: internal.whatsapp.messages');
     expect(result.unanswered.some((u) => u.includes('No matching evidence'))).toBe(true);
+  });
+
+  test('an empty pack where a source was searched by keyword only, its search by meaning cut for time, says so', async () => {
+    const analyst = createAnalyst(throwingModel());
+    const result = await analyst.analyze(
+      pack('Where is the lake house?', [], {
+        searchedCorpora: ['internal.email', 'internal.telegram.messages'],
+        extractionGaps: [semanticLaneSkippedGap('internal.telegram.messages', 'vector_scan_deadline_exceeded')],
+      }),
+      { localOnly: false },
+    );
+
+    expect(result.answer).toContain('no matching evidence for this question in the sources searched');
+    expect(result.answer).toContain('ran out of time searching 1 source by meaning and checked only their keyword matches');
+    expect(result.unanswered.some((u) => u.startsWith('Ran out of time searching by meaning: internal.telegram.messages'))).toBe(true);
+    expect(result.citations).toEqual([]);
+  });
+
+  test('a search by meaning that could not run is not reported as running out of time', async () => {
+    const analyst = createAnalyst(throwingModel());
+    const result = await analyst.analyze(
+      pack('Where is the lake house?', [], {
+        searchedCorpora: ['internal.email'],
+        extractionGaps: [semanticLaneSkippedGap('internal.email', 'embedding_query_vector_missing')],
+      }),
+      { localOnly: false },
+    );
+
+    expect(result.answer).toBe(NO_EVIDENCE_ANSWER);
   });
 
   test('hard-denies an S5 candidate before calling the model', async () => {

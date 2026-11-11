@@ -26595,53 +26595,94 @@ var CHILD_ITEM_ID_SEPARATOR = "#child:";
 
 // src/core/source-index/keyword-languages.ts
 function storeKeywordLanguages(db) {
+  const steps = profileSteps(db);
+  let next = steps.next();
+  while (!next.done) {
+    const read = next.value;
+    const statement = db.query(read.sql);
+    next = steps.next(read.mode === "get" ? statement.get(...read.params) : statement.all(...read.params));
+  }
+  return next.value;
+}
+function storeKeywordLanguagesWith(db, read) {
+  const steps = profileSteps(db);
+  const first = steps.next();
+  if (first.done)
+    return Promise.resolve(first.value);
+  const pending = sampling.get(db);
+  if (pending)
+    return pending;
+  const run = (async () => {
+    let next = first;
+    while (!next.done)
+      next = steps.next(await read(next.value));
+    return next.value;
+  })().finally(() => sampling.delete(db));
+  sampling.set(db, run);
+  return run;
+}
+function lastKeywordLanguages(db) {
+  return profiles.get(db)?.languages ?? [];
+}
+function* profileSteps(db) {
   const revision = JSON.stringify([db.query("PRAGMA data_version").get(), db.query("SELECT total_changes() AS n").get()]);
   const cached2 = profiles.get(db);
   if (cached2?.revision === revision)
     return cached2.languages;
-  const maxRowid = db.query("SELECT max(rowid) AS n FROM chunks").get().n ?? 0;
-  if (maxRowid > SAMPLE_LIMIT && cached2 && Date.now() - cached2.sampledAtMs < PROFILE_REUSE_MS)
+  if (cached2 && cached2.large && Date.now() - cached2.sampledAtMs < PROFILE_REUSE_MS)
+    return cached2.languages;
+  const maxRowid = (yield { sql: "SELECT max(rowid) AS n FROM chunks", params: [], mode: "get" })?.n ?? 0;
+  const large = maxRowid > SAMPLE_LIMIT;
+  if (large && cached2 && Date.now() - cached2.sampledAtMs < PROFILE_REUSE_MS)
     return cached2.languages;
   const live = `SELECT c.rowid AS pk, c.content_hash AS hash FROM chunks c
     JOIN items i ON i.item_pk = c.item_pk WHERE i.tombstoned = 0`;
   let rows;
-  if (maxRowid <= SAMPLE_LIMIT) {
-    rows = db.query(`${live} ORDER BY c.rowid LIMIT ${SAMPLE_LIMIT}`).all();
+  if (!large) {
+    rows = yield { sql: `${live} ORDER BY c.rowid LIMIT ${SAMPLE_LIMIT}`, params: [], mode: "all" };
   } else {
     const step = maxRowid / SAMPLE_TARGET;
     const ids = Array.from({ length: SAMPLE_TARGET }, (_, k) => Math.max(1, Math.floor((k + 1) * step)));
     rows = [];
-    for (let at = 0;at < ids.length; at += 500) {
-      const batch = ids.slice(at, at + 500);
-      rows.push(...db.query(`${live} AND c.rowid IN (${batch.map(() => "?").join(",")}) ORDER BY c.rowid`).all(...batch));
+    for (let at = 0;at < ids.length; at += READ_BATCH) {
+      const batch = ids.slice(at, at + READ_BATCH);
+      rows.push(...yield { sql: `${live} AND c.rowid IN (${batch.map(() => "?").join(",")}) ORDER BY c.rowid`, params: batch, mode: "all" });
     }
   }
   const signature = JSON.stringify(rows);
   if (cached2?.signature === signature) {
-    cached2.revision = revision;
-    cached2.sampledAtMs = Date.now();
+    profiles.set(db, { ...cached2, revision, large, sampledAtMs: Date.now() });
     return cached2.languages;
   }
   const detected = new Map;
-  const counts = new Map;
-  const textFor = db.query("SELECT substr(bounded_text, 1, 1000) AS text FROM chunks WHERE rowid = ?");
   for (const row of rows) {
-    let language = detected.get(row.hash) ?? cached2?.detected.get(row.hash);
-    if (language === undefined)
-      language = franc(textFor.get(row.pk).text, { minLength: 40 });
-    detected.set(row.hash, language);
+    const known = cached2?.detected.get(row.hash);
+    if (known !== undefined)
+      detected.set(row.hash, known);
+  }
+  const unread = [...new Map(rows.filter((row) => !detected.has(row.hash)).map((row) => [row.hash, row.pk])).values()];
+  for (let at = 0;at < unread.length; at += READ_BATCH) {
+    const batch = unread.slice(at, at + READ_BATCH);
+    const texts = yield { sql: `SELECT c.rowid AS pk, c.content_hash AS hash, substr(c.bounded_text, 1, 1000) AS text FROM chunks c WHERE c.rowid IN (${batch.map(() => "?").join(",")})`, params: batch, mode: "all" };
+    for (const text2 of texts)
+      detected.set(text2.hash, franc(text2.text ?? "", { minLength: 40 }));
+  }
+  const counts = new Map;
+  for (const row of rows) {
+    const language = detected.get(row.hash) ?? "und";
     if (language !== "und")
       counts.set(language, (counts.get(language) ?? 0) + 1);
   }
   const languages = [...counts].filter(([, count]) => count / Math.max(1, rows.length) >= 0.05).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 6).map(([language]) => language).sort();
-  profiles.set(db, { revision, signature, languages, detected, sampledAtMs: Date.now() });
+  profiles.set(db, { revision, signature, languages, detected, sampledAtMs: Date.now(), large });
   return languages;
 }
-var profiles, SAMPLE_TARGET = 1024, SAMPLE_LIMIT = 2048, PROFILE_REUSE_MS;
+var profiles, SAMPLE_TARGET = 1024, SAMPLE_LIMIT = 2048, READ_BATCH = 500, PROFILE_REUSE_MS, sampling;
 var init_keyword_languages = __esm(() => {
   init_franc_min();
   profiles = new WeakMap;
   PROFILE_REUSE_MS = 10 * 60000;
+  sampling = new WeakMap;
 });
 
 // src/core/source-index/keyword-equivalents.json
@@ -29120,7 +29161,7 @@ async function expandCachedSourceIndexKeywords(query, profile, cachedOnly2) {
   const detectedLanguage = sourceIndexQueryLanguage(query);
   const knownLanguages = concepts.every(Boolean) && concepts.length > 0 ? Object.keys(concepts[0]).filter((language) => concepts.every((row, index) => row?.[language]?.some((word) => !word.includes(" ") && keyOf(word) === keyOf(sources[index])))) : [];
   const sourceLanguages = detectedLanguage === "und" ? knownLanguages : [detectedLanguage];
-  const targetProfile = typeof profile === "function" ? profile() : profile;
+  const targetProfile = typeof profile === "function" ? await profile() : profile;
   const languages = [...new Set(targetProfile.filter((code) => /^[a-z]{3}$/.test(code) && !sourceLanguages.includes(code)))].sort().slice(0, MAX_LANGUAGES);
   if (languages.length === 0)
     return EMPTY2;
@@ -44585,11 +44626,7 @@ var init_local_index = __esm(() => {
       const memo = this.vectorLaneMemo?.get(modelId);
       if (memo !== undefined && Date.now() - memo < SEARCH_VECTOR_LANE_MEMO_MS)
         return true;
-      if (!this.tierHiddenCountsMemo) {
-        this.refreshTierHiddenCountsInTurns();
-        return this.anyCurrentEmbedding(modelId);
-      }
-      const servable = this.hasEmbeddings(modelId, { countsMaxAgeMs: SEARCH_VECTOR_LANE_MEMO_MS });
+      const servable = this.anyCurrentEmbedding(modelId);
       if (servable)
         (this.vectorLaneMemo ??= new Map).set(modelId, Date.now());
       else
@@ -44797,8 +44834,16 @@ var init_local_index = __esm(() => {
         return row ? [searchRowFromItemRow(row)] : [];
       });
     }
-    keywordLanguages() {
-      return storeKeywordLanguages(this.db);
+    async keywordLanguages() {
+      if (!offThreadReadsSupported(this.dbPath))
+        return storeKeywordLanguages(this.db);
+      try {
+        return await storeKeywordLanguagesWith(this.db, (read) => readOnPool(this.dbPath, read));
+      } catch (error) {
+        if (error instanceof OffThreadReadBusyError || this.closedForPoolReads)
+          return lastKeywordLanguages(this.db);
+        throw error;
+      }
     }
     searchItems(query, maxResults, accountScope, filters, ftsOptions = {}) {
       return this.searchItemsDetailed(query, maxResults, accountScope, filters, ftsOptions).rows;
@@ -73097,6 +73142,24 @@ var init_opsec = __esm(() => {
   ];
 });
 
+// src/core/source-index/partial-search.ts
+function semanticSearchTimedOut(detail) {
+  return detail !== undefined && SEMANTIC_TIMEOUT_REASONS.has(detail);
+}
+function semanticTimeoutGap(corpusId) {
+  return `${PREFIX2}${corpusId}; only its keyword matches were searched, so related items may be missing. Ask again in a moment.`;
+}
+function semanticTimeoutGapCorpus(gap) {
+  if (!gap.startsWith(PREFIX2))
+    return;
+  const end = gap.indexOf(";", PREFIX2.length);
+  return end > PREFIX2.length ? gap.slice(PREFIX2.length, end) : undefined;
+}
+var SEMANTIC_TIMEOUT_REASONS, PREFIX2 = "Ran out of time searching by meaning: ";
+var init_partial_search = __esm(() => {
+  SEMANTIC_TIMEOUT_REASONS = new Set(["vector_scan_deadline_exceeded", "vector_scan_store_busy"]);
+});
+
 // src/core/evidence-versions.ts
 function evidenceVersions(items) {
   const shingles = items.map((item) => item.family === undefined || DOCUMENT_FAMILIES.has(item.family) ? shingleSet(item.text) : new Set);
@@ -73243,6 +73306,17 @@ function analystSchemaGapChars(maxOutputChars) {
 function noEvidenceAnalystResult(pack) {
   const searched = new Set(pack.coverage.searchedCorpora);
   const stillSearching = [...new Set(pack.coverage.skippedCorpora.filter((skip) => skip.reason === "lane_timeout" && !searched.has(skip.corpusId)).map((skip) => skip.corpusId))].sort();
+  const partlySearched = [...new Set(pack.coverage.extractionGaps.map(semanticTimeoutGapCorpus).filter((corpusId) => corpusId !== undefined && !stillSearching.includes(corpusId)))].sort();
+  if (stillSearching.length === 0 && partlySearched.length > 0) {
+    const sources = partlySearched.length === 1 ? "1 source" : `${partlySearched.length} sources`;
+    return {
+      answer: `I have no matching evidence for this question in the sources searched. Olympus ran out of time searching ${sources} by meaning and checked only their keyword matches, so the answer may still be there. Ask again in a moment.`,
+      citations: [],
+      unanswered: foldCoverageGaps(pack, [
+        `No matching evidence found in the searched corpora for: ${pack.question}`
+      ])
+    };
+  }
   if (stillSearching.length > 0) {
     const sources = stillSearching.length === 1 ? "1 source" : `${stillSearching.length} sources`;
     return {
@@ -73958,6 +74032,7 @@ var init_analyst = __esm(() => {
   init_chunk_selection();
   init_source_model_policy();
   init_types();
+  init_partial_search();
   init_operation_error();
   init_evidence_versions();
   analystAbortSignalStorage = new AsyncLocalStorage6;
@@ -75627,6 +75702,8 @@ function hitProvenance(hit) {
   return hit.provenance ?? { sourceItem: hit.sourceItem };
 }
 function semanticLaneSkippedGap(corpusId, detail) {
+  if (semanticSearchTimedOut(detail))
+    return semanticTimeoutGap(corpusId);
   return `${corpusId}: the meaning-based search was skipped for this question` + `${detail ? ` (${detail})` : ""}; only keyword matches were searched, so related items may be missing.`;
 }
 function semanticLaneSkippedGaps(degradations, input) {
@@ -75697,6 +75774,7 @@ function trustDomainRank2(trustDomain) {
 var SOURCE_MODEL_POLICY_GAP_SUFFIX = "excluded one candidate from model use under current source policy.", MIN_BYTES_PER_CANDIDATE = 400, utf8, MAX_SEARCH_QUERIES = 3, MIN_EXPANSION_BUDGET_MS = 1000;
 var init_evidence_pack = __esm(() => {
   init_keyword_context();
+  init_partial_search();
   init_evidence_reranker();
   init_parent_label();
   init_source_model_policy();
@@ -87041,18 +87119,18 @@ import { closeSync as closeSync19, constants as constants8, openSync as openSync
 function archiveInputMediaLocator(ref) {
   if (!ARCHIVE_ID.test(ref.archiveId) || !BINDING_ID.test(ref.bindingId))
     throw new Error("An archive media locator needs a plain archive and binding id.");
-  return `${PREFIX2}${ref.archiveId}:b:${ref.bindingId}`;
+  return `${PREFIX3}${ref.archiveId}:b:${ref.bindingId}`;
 }
 function archiveInputZipMediaLocator(ref) {
   if (!ARCHIVE_ID.test(ref.archiveId) || !Number.isSafeInteger(ref.fileIndex) || ref.fileIndex < 0 || !Number.isSafeInteger(ref.memberIndex) || ref.memberIndex < 0) {
     throw new Error("An archive zip media locator needs a plain archive id and two places.");
   }
-  return `${PREFIX2}${ref.archiveId}:z:${ref.fileIndex}:${ref.memberIndex}`;
+  return `${PREFIX3}${ref.archiveId}:z:${ref.fileIndex}:${ref.memberIndex}`;
 }
 function parseArchiveInputMedia(locator) {
-  if (!locator.startsWith(PREFIX2))
+  if (!locator.startsWith(PREFIX3))
     return;
-  const parts = locator.slice(PREFIX2.length).split(":");
+  const parts = locator.slice(PREFIX3.length).split(":");
   const [archiveId, kind] = parts;
   if (archiveId === undefined || !ARCHIVE_ID.test(archiveId))
     return;
@@ -87219,7 +87297,7 @@ function serveZipMember(record, root, ref, maxBytes, sink) {
     reader?.close();
   }
 }
-var PREFIX2 = "archive-input-media:v1:", ARCHIVE_ID, BINDING_ID;
+var PREFIX3 = "archive-input-media:v1:", ARCHIVE_ID, BINDING_ID;
 var init_input_media = __esm(() => {
   init_file_extraction_source();
   init_scope_safe_fs();
@@ -134380,13 +134458,13 @@ class EmbeddingPrefilter {
     this.owner.members.add(this);
     this.path = join123(embeddingPrefilterDirectory(this.control.dbPath), "weights.json");
     try {
-      const audit = this.control.readMeta(`${PREFIX3}audit`);
+      const audit = this.control.readMeta(`${PREFIX4}audit`);
       this.auditState = audit ? JSON.parse(audit) : { misses: [], stopped: false };
       if (!Array.isArray(this.auditState.misses) || this.auditState.misses.length > WINDOW || this.auditState.misses.some((value2) => typeof value2 !== "boolean") || typeof this.auditState.stopped !== "boolean")
         throw new Error;
     } catch {
       this.auditState = { misses: [], stopped: true, reason: "audit_unreadable" };
-      this.control.writeMeta(`${PREFIX3}audit`, JSON.stringify(this.auditState));
+      this.control.writeMeta(`${PREFIX4}audit`, JSON.stringify(this.auditState));
     }
     if (this.owner !== this)
       return;
@@ -134412,7 +134490,7 @@ class EmbeddingPrefilter {
     }
   }
   revisions() {
-    return JSON.stringify([...this.owner.members].map((member) => [member.options.ledger.ledgerId(), member.options.ledger.readMeta("embedding-prefilter:training-revision") ?? "0"]).sort()) + ":" + (this.control.readMeta(`${PREFIX3}withdrawal`) ?? "0");
+    return JSON.stringify([...this.owner.members].map((member) => [member.options.ledger.ledgerId(), member.options.ledger.readMeta("embedding-prefilter:training-revision") ?? "0"]).sort()) + ":" + (this.control.readMeta(`${PREFIX4}withdrawal`) ?? "0");
   }
   now() {
     return this.options.now?.() ?? Date.now();
@@ -134597,7 +134675,7 @@ class EmbeddingPrefilter {
           const scan = previous?.attempt === attempt.id ? previous : { attempt: attempt.id, done: false, rows: 0, samples: [] };
           if (!Array.isArray(scan.samples) || scan.samples.length > MAX_PER_CLASS * 2 || !Number.isSafeInteger(scan.rows))
             throw new Error;
-          return { member, scan, dirty: false, revision: member.options.ledger.readMeta(`${PREFIX3}training-revision`) ?? "0" };
+          return { member, scan, dirty: false, revision: member.options.ledger.readMeta(`${PREFIX4}training-revision`) ?? "0" };
         });
         this.training = { id: attempt.id, scans, scanIndex: 0, examples: [], memberIndex: 0, sampleIndex: 0, validationIndex: 0, validationRemaining: 0 };
         attempt.counts = [0, 0];
@@ -134911,12 +134989,12 @@ class EmbeddingPrefilter {
     const selection = question.pass === "content" ? this.selection(question) : undefined;
     if (!selection)
       return;
-    const observedKey = `${PREFIX3}observed:${selection.token}`;
+    const observedKey = `${PREFIX4}observed:${selection.token}`;
     if (!this.control.readMeta(observedKey)) {
       this.audit.misses.push(isPrivate);
       this.audit.misses = this.audit.misses.slice(-WINDOW);
       this.audit.stopped ||= this.audit.misses.filter(Boolean).length > 4;
-      this.control.writeMetaBatch([[`${PREFIX3}audit`, JSON.stringify(this.audit)], [observedKey, "1"]]);
+      this.control.writeMetaBatch([[`${PREFIX4}audit`, JSON.stringify(this.audit)], [observedKey, "1"]]);
     }
     this.options.ledger.deleteMeta(this.checkKey(question));
     this.control.deleteMeta(observedKey);
@@ -134945,7 +135023,7 @@ class EmbeddingPrefilter {
     }
   }
 }
-var PREFIX3 = "embedding-prefilter:", RECEIPTS, CHECKS, WINDOW = 200, PREFILTER_CLEARING_CUTOFF = 0.002, SPOT_CHECK_RATE, RETRAIN_MS, PREFILTER_MAX_PER_CLASS = 5000, MAX_PER_CLASS, TRAINING_SLICE_MS = 200, FAILED_RETRY_MS, NEW_VERDICTS = 1000, TRAINING, SCAN, PREFILTER_TRAINING_REJECTIONS;
+var PREFIX4 = "embedding-prefilter:", RECEIPTS, CHECKS, WINDOW = 200, PREFILTER_CLEARING_CUTOFF = 0.002, SPOT_CHECK_RATE, RETRAIN_MS, PREFILTER_MAX_PER_CLASS = 5000, MAX_PER_CLASS, TRAINING_SLICE_MS = 200, FAILED_RETRY_MS, NEW_VERDICTS = 1000, TRAINING, SCAN, PREFILTER_TRAINING_REJECTIONS;
 var init_embedding_prefilter = __esm(() => {
   init_atomic_file();
   init_control_path_headroom();
@@ -134954,14 +135032,14 @@ var init_embedding_prefilter = __esm(() => {
   init_tier_classifier();
   init_tier_ledger_path();
   init_tier_ledger_path();
-  RECEIPTS = `${PREFIX3}clear:`;
-  CHECKS = `${PREFIX3}check:`;
+  RECEIPTS = `${PREFIX4}clear:`;
+  CHECKS = `${PREFIX4}check:`;
   SPOT_CHECK_RATE = 1 / 20;
   RETRAIN_MS = 24 * 60 * 60 * 1000;
   MAX_PER_CLASS = PREFILTER_MAX_PER_CLASS;
   FAILED_RETRY_MS = 3 * 60 * 60 * 1000;
-  TRAINING = `${PREFIX3}training-v1`;
-  SCAN = `${PREFIX3}training-scan-v1`;
+  TRAINING = `${PREFIX4}training-v1`;
+  SCAN = `${PREFIX4}training-scan-v1`;
   PREFILTER_TRAINING_REJECTIONS = [
     "not_routed",
     "not_current",
@@ -154808,7 +154886,7 @@ function secretWhere(location) {
 function cutShortCorpora(audits) {
   const corpora = new Set;
   for (const audit of audits) {
-    if (audit.skippedReason !== "vector_scan_deadline_exceeded")
+    if (!semanticSearchTimedOut(audit.skippedReason))
       continue;
     const corpusId = audit.laneName.split(":")[0];
     if (corpusId)
@@ -154903,6 +154981,7 @@ async function readLocalEvidenceItem(input) {
 }
 var LOCAL_TRUST_DOMAINS, LOCAL_MAX_RESULTS = 16, LOCAL_MAX_CHARS_PER_CANDIDATE = 3000, LOCAL_EVIDENCE_BYTE_BUDGET = 24000, LOCAL_DEPTH_MAX_PASSAGES = 24, IN_SCOPE_SKIPS;
 var init_local_answer = __esm(() => {
+  init_partial_search();
   init_evidence_pack();
   init_remote_result();
   init_secret_location_note();

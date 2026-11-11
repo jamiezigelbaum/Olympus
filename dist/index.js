@@ -19229,10 +19229,11 @@ var init_job_names = __esm(() => {
 });
 
 // src/core/source-index/keyword-languages.ts
-var profiles, PROFILE_REUSE_MS;
+var profiles, PROFILE_REUSE_MS, sampling;
 var init_keyword_languages = __esm(() => {
   profiles = new WeakMap;
   PROFILE_REUSE_MS = 10 * 60000;
+  sampling = new WeakMap;
 });
 
 // src/core/source-index/keyword-equivalents.json
@@ -20875,6 +20876,12 @@ var init_answer_activity = __esm(() => {
   DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
 });
 
+// src/core/source-index/partial-search.ts
+var SEMANTIC_TIMEOUT_REASONS;
+var init_partial_search = __esm(() => {
+  SEMANTIC_TIMEOUT_REASONS = new Set(["vector_scan_deadline_exceeded", "vector_scan_store_busy"]);
+});
+
 // src/core/evidence-versions.ts
 var DOCUMENT_FAMILIES;
 var init_evidence_versions = __esm(() => {
@@ -20889,6 +20896,7 @@ var init_analyst = __esm(() => {
   init_chunk_selection();
   init_source_model_policy();
   init_types();
+  init_partial_search();
   init_operation_error();
   init_evidence_versions();
   analystAbortSignalStorage = new AsyncLocalStorage6;
@@ -21152,6 +21160,7 @@ var init_evidence_reranker = () => {};
 var utf8;
 var init_evidence_pack = __esm(() => {
   init_keyword_context();
+  init_partial_search();
   init_evidence_reranker();
   init_parent_label();
   init_source_model_policy();

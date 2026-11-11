@@ -20,7 +20,10 @@ const SYSTEM = 'Translate only the INDIVIDUAL content words in concepts, never t
   + 'At most 8 alternatives total per language; each is one word or a phrase of at most 3 words. '
   + 'Return only a compact JSON object keyed by language then numeric concept ID: {"spa":{"0":["word"]}}.';
 
-export async function expandSourceIndexKeywords(query: string, profile: readonly string[] | (() => readonly string[]), owner?: object): Promise<KeywordExpansionMap> {
+
+/** The store's content languages, or a read of them made only when a translation needs them. */
+export type KeywordLanguageProfile = readonly string[] | (() => readonly string[] | Promise<readonly string[]>);
+export async function expandSourceIndexKeywords(query: string, profile: KeywordLanguageProfile, owner?: object): Promise<KeywordExpansionMap> {
   if (keywordExpansionDisabled()) return EMPTY;
   const pinned = requestKeywordAlternatives(owner, query);
   if (pinned) return pinned;
@@ -29,7 +32,7 @@ export async function expandSourceIndexKeywords(query: string, profile: readonly
   return alternatives;
 }
 
-async function expandCachedSourceIndexKeywords(query: string, profile: readonly string[] | (() => readonly string[]), cachedOnly?: CachedKeywordExpansion): Promise<KeywordExpansionMap> {
+async function expandCachedSourceIndexKeywords(query: string, profile: KeywordLanguageProfile, cachedOnly?: CachedKeywordExpansion): Promise<KeywordExpansionMap> {
   const builtIn = registeredBuiltInPrivateModel();
   if (!query.trim() || query.length > 8000) return EMPTY;
   const sources = sourceIndexFtsTermGroups(query).map(group => group[0]!).filter(term => !/\p{N}/u.test(term));
@@ -42,7 +45,7 @@ async function expandCachedSourceIndexKeywords(query: string, profile: readonly 
     ? Object.keys(concepts[0]!).filter(language => concepts.every((row,index) => row?.[language]?.some(word => !word.includes(' ') && keyOf(word) === keyOf(sources[index]!))))
     : [];
   const sourceLanguages = detectedLanguage === 'und' ? knownLanguages : [detectedLanguage];
-  const targetProfile = typeof profile === 'function' ? profile() : profile;
+  const targetProfile = typeof profile === 'function' ? await profile() : profile;
   const languages = [...new Set(targetProfile.filter((code) => /^[a-z]{3}$/.test(code) && !sourceLanguages.includes(code)))].sort().slice(0, MAX_LANGUAGES);
   if (languages.length === 0) return EMPTY;
   if (sources.length === 0) return EMPTY;
@@ -153,7 +156,7 @@ export function parseKeywordExpansion(text: string, sources: readonly string[], 
   return result;
 }
 
-export async function withExpandedSourceIndexKeywords<T>(query: string | undefined, languages: readonly string[] | (() => readonly string[]), run: () => T, owner?: object): Promise<Awaited<T>> {
+export async function withExpandedSourceIndexKeywords<T>(query: string | undefined, languages: KeywordLanguageProfile, run: () => T, owner?: object): Promise<Awaited<T>> {
   if (!query) return await run();
   const alternatives = await expandSourceIndexKeywords(query, languages, owner);
   return await withKeywordAlternatives(query, alternatives, run);

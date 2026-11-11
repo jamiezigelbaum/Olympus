@@ -6,7 +6,7 @@ import { expandSourceIndexKeywords, parseKeywordExpansion, withExpandedSourceInd
 import { registerBuiltInPrivateModel } from '../src/workers/classification/built-in-sniffer.ts';
 import type { AnalystModelRequest } from '../src/core/analyst.ts';
 import { Database } from 'bun:sqlite';
-import { storeKeywordLanguages } from '../src/core/source-index/keyword-languages.ts';
+import { lastKeywordLanguages, storeKeywordLanguages, storeKeywordLanguagesWith, type KeywordLanguageRead } from '../src/core/source-index/keyword-languages.ts';
 
 afterEach(() => registerBuiltInPrivateModel(undefined));
 
@@ -228,5 +228,28 @@ test("a large store's language profile is reused across writes for a while, not 
   insert.run(spanish, 'after');
   expect(storeKeywordLanguages(db)).toEqual(['spa']);
   expect(reads).toBe(0);
+  db.close();
+});
+
+test('a language sample can be read elsewhere, one sample at a time, and a current profile needs no read (#1305)', async () => {
+  const db = new Database(':memory:');
+  db.exec('CREATE TABLE items(item_pk INTEGER PRIMARY KEY, tombstoned INTEGER); CREATE TABLE chunks(item_pk INTEGER, bounded_text TEXT, content_hash TEXT); INSERT INTO items VALUES(1,0)');
+  const spanish = 'La escritura pública se firmará ante el notario y los gastos correspondientes serán abonados por el comprador, conforme a las condiciones pactadas.';
+  db.query("INSERT INTO chunks VALUES(1, ?, 'h1')").run(spanish);
+  const reads: string[] = [];
+  const read = async (query: KeywordLanguageRead) => {
+    reads.push(query.sql);
+    await Promise.resolve();
+    const statement = db.query(query.sql);
+    return query.mode === 'get' ? statement.get(...(query.params as never[])) : statement.all(...(query.params as never[]));
+  };
+  const [first, second] = await Promise.all([storeKeywordLanguagesWith(db, read), storeKeywordLanguagesWith(db, read)]);
+  expect(first).toEqual(['spa']);
+  expect(second).toEqual(['spa']);
+  const sampled = reads.length;
+  expect(sampled).toBeGreaterThan(0);
+  expect(await storeKeywordLanguagesWith(db, read)).toEqual(['spa']);
+  expect(reads.length).toBe(sampled);
+  expect(lastKeywordLanguages(db)).toEqual(['spa']);
   db.close();
 });
