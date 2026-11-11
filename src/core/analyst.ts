@@ -634,6 +634,7 @@ function compactAuditPrompt(pack: EvidencePack, draft: ParsedModelOutput | null,
 
 const AUDIT_DRAFT_HEADING = 'Draft JSON:';
 const AUDIT_UNSEEN_AMOUNTS = 'Amounts in the draft that appear nowhere in the evidence:';
+const AUDIT_UNSEEN_AMOUNTS_TAIL = '. Remove each from the answer unless the answer shows how it is computed from cited values.';
 
 // Separator style differs between a draft and its source ("1,240.50" against
 // "1.240,50"), so an amount is compared by value: its whole digits, then its
@@ -707,6 +708,25 @@ export function analystPromptWithoutDraft(prompt: string): string {
   return withoutDraft.split('\n').filter((line) => !line.startsWith(AUDIT_UNSEEN_AMOUNTS)).join('\n');
 }
 
+/**
+ * For an audit prompt, how many amounts its note names as appearing nowhere
+ * in the evidence (0 without a note); undefined for any other prompt. A count
+ * only, for reports that must not carry the amounts.
+ */
+export function auditNamedAmountCount(prompt: string): number | undefined {
+  if (analystPromptWithoutDraft(prompt) === prompt) return undefined;
+  const line = prompt.split('\n').find((candidate) => candidate.startsWith(`${AUDIT_UNSEEN_AMOUNTS} `));
+  if (!line) return 0;
+  const end = line.lastIndexOf(AUDIT_UNSEEN_AMOUNTS_TAIL);
+  const listed = line.slice(AUDIT_UNSEEN_AMOUNTS.length + 1, end < 0 ? undefined : end);
+  try {
+    const amounts: unknown = JSON.parse(`[${listed}]`);
+    return Array.isArray(amounts) ? amounts.length : 0;
+  } catch {
+    return 0;
+  }
+}
+
 function buildAnalystAuditPrompt(
   pack: EvidencePack,
   draft: ParsedModelOutput | null,
@@ -735,7 +755,7 @@ function buildAnalystAuditPrompt(
     blocks.join('\n\n'),
     '',
     'Reconstruct the answer from every numbered candidate, account for every requested item, then replace the draft if it omitted, misstated, or failed to cite anything.',
-    ...(unseen.length > 0 ? [`${AUDIT_UNSEEN_AMOUNTS} ${unseen.map((value) => JSON.stringify(value)).join(', ')}. Remove each from the answer unless the answer shows how it is computed from cited values.`] : []),
+    ...(unseen.length > 0 ? [`${AUDIT_UNSEEN_AMOUNTS} ${unseen.map((value) => JSON.stringify(value)).join(', ')}${AUDIT_UNSEEN_AMOUNTS_TAIL}`] : []),
     ...versionInstruction(versions),
     formatCoverage(pack),
   ].join('\n');
