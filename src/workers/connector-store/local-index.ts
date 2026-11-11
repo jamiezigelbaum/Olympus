@@ -92,7 +92,7 @@ import {
 } from '../classification/tier-ledger.ts';
 import { conversationOrderedSniffer, itemHasNonTextContent, classifyContentTier, heldUntilJudged, isImageMediaType, namesDecidedByOwner, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
 import { screenedSecretLocator } from '../classification/secret-locations.ts';
-import { findTierSetLedger } from '../classification/tier-set-binding.ts';
+import { assertStoreTierLedgerCanOpen, findTierSetLedger } from '../classification/tier-set-binding.ts';
 import {
   decideItemTiers,
   placeInExistingStore,
@@ -3114,6 +3114,7 @@ export class LocalConnectorStore {
         throw new Error('Connector store read-only mode requires a regular non-symlink database file.');
       }
     } else {
+      assertStoreTierLedgerCanOpen(this.dbPath);
       assertWritableStoreOpenAllowed('connector store', this.dbPath);
       if (this.dbPath !== ':memory:') mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
     }
@@ -3369,15 +3370,8 @@ export class LocalConnectorStore {
     // by the handle that is kept: check its id, and refuse a different one. A
     // replacement has had its schema migrated by this open before it is
     // checked; that is accepted, since it is closed unused.
-    // A read-only store reads its ledger read-only too, so a read does not
-    // repair or lock the ledger another process is writing. A ledger from an
-    // older build is opened writable to migrate it, as it always was, except
-    // in the engine split's front, which writes nothing: the background migrates it.
-    let opened = new TierLedger({ dbPath: found, now: this.now, ...(this.readOnly ? { readOnly: true } : {}) });
-    if (this.readOnly && !opened.hasCurrentSchema() && !writableStoreOpensForbidden()) {
-      opened.close();
-      opened = new TierLedger({ dbPath: found, now: this.now });
-    }
+    // Readers never migrate; TierLedger rejects an incompatible schema.
+    const opened = new TierLedger({ dbPath: found, now: this.now, readOnly: this.readOnly });
     if (!holdsBoundId(opened)) {
       opened.close();
       throw new TierLedgerUnavailableError(this.corpusId);

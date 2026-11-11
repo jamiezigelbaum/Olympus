@@ -72,6 +72,7 @@ import type { Analyst, AnalystOptions, AnalystResult, EvidencePack } from '../sr
 import type { OpsecReleaseAudit } from '../src/core/opsec.ts';
 import type { SourceTrustDomain } from '../src/core/source-index/types.ts';
 import type { SourceIndexCorpusSearchAdapter } from '../src/core/source-index/router.ts';
+import { assertTierLedgerInDirectory, tierLedgerIsWithin } from '../src/workers/classification/tier-set-binding.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { createParentLabelResolver } from '../src/workers/connector-store/parent-label.ts';
 import { tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
@@ -458,6 +459,17 @@ export interface EvalDropboxStores {
   close(): void;
 }
 
+/** Refuse external ledgers before either the eval or probe starts reading stores. */
+export function assertEvalDropboxStoreIsolation(paths: EvalDropboxStorePaths): void {
+  const files = [paths.secure, paths.personal, paths.public];
+  const directory = dirname(paths.secure);
+  const ledgerPath = paths.ledger ?? tieredStoreSetLedgerPath(paths.secure);
+  if (!tierLedgerIsWithin(directory, ledgerPath)) throw new Error(`Refusing privacy ledger outside the requested directory ${directory}: ${ledgerPath}`);
+  for (const dbPath of files) {
+    if (dbPath && existsSync(dbPath)) assertTierLedgerInDirectory(dbPath, directory);
+  }
+}
+
 /**
  * Opens every Dropbox tier store that exists, query-only. A store bound to
  * the set ledger judges what it serves by that ledger itself; the ledger
@@ -473,24 +485,32 @@ export function openEvalDropboxStores(
     ['internal', paths.personal],
     ['public_safe', paths.public],
   ];
-  const stores: LocalConnectorStore[] = [];
-  for (const [trustDomain, dbPath] of files) {
-    const corpusId = DROPBOX_TIER_CORPUS_IDS[trustDomain];
-    if (!corpusId || !dbPath || !existsSync(dbPath)) continue;
-    const startedAt = performance.now();
-    stores.push(new LocalConnectorStore({
-      dbPath,
-      corpusId,
-      family: 'file',
-      trustDomain,
-      readOnly: true,
-    }));
-    if (openMs) openMs[corpusId] = Math.round(performance.now() - startedAt);
-  }
+  assertEvalDropboxStoreIsolation(paths);
   const ledgerPath = paths.ledger ?? tieredStoreSetLedgerPath(paths.secure);
-  const ledgerStartedAt = performance.now();
-  const ledger = existsSync(ledgerPath) ? new TierLedger({ dbPath: ledgerPath, readOnly: true }) : undefined;
-  if (openMs && ledger) openMs.ledger = Math.round(performance.now() - ledgerStartedAt);
+  const stores: LocalConnectorStore[] = [];
+  let ledger: TierLedger | undefined;
+  try {
+    for (const [trustDomain, dbPath] of files) {
+      const corpusId = DROPBOX_TIER_CORPUS_IDS[trustDomain];
+      if (!corpusId || !dbPath || !existsSync(dbPath)) continue;
+      const startedAt = performance.now();
+      stores.push(new LocalConnectorStore({
+        dbPath,
+        corpusId,
+        family: 'file',
+        trustDomain,
+        readOnly: true,
+      }));
+      if (openMs) openMs[corpusId] = Math.round(performance.now() - startedAt);
+    }
+    const ledgerStartedAt = performance.now();
+    ledger = existsSync(ledgerPath) ? new TierLedger({ dbPath: ledgerPath, readOnly: true }) : undefined;
+    if (openMs && ledger) openMs.ledger = Math.round(performance.now() - ledgerStartedAt);
+  } catch (error) {
+    for (const store of stores) store.close();
+    ledger?.close();
+    throw error;
+  }
   return {
     stores,
     ...(ledger ? { ledger } : {}),

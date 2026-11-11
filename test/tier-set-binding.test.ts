@@ -86,15 +86,14 @@ describe('the sibling store of an account folder', () => {
 });
 
 describe('where a bound store looks for its ledger', () => {
-  test('the recorded path first, then the folder\'s secure ledger, then the recorded name beside the store', () => {
+  test('co-located candidates first; external recorded paths are excluded', () => {
     expect(tierSetLedgerCandidates('/data/sources/dropbox.files/1/stores/internal.sqlite', '/old/dropbox-files-connector-store.tier-ledger.sqlite'))
       .toEqual([
-        '/old/dropbox-files-connector-store.tier-ledger.sqlite',
         '/data/sources/dropbox.files/1/stores/secure_local.tier-ledger.sqlite',
         '/data/sources/dropbox.files/1/stores/dropbox-files-connector-store.tier-ledger.sqlite',
       ]);
     expect(tierSetLedgerCandidates('/data/dropbox-files-internal-connector-store.sqlite', '/old/dropbox-files-connector-store.tier-ledger.sqlite'))
-      .toEqual(['/old/dropbox-files-connector-store.tier-ledger.sqlite', '/data/dropbox-files-connector-store.tier-ledger.sqlite']);
+      .toEqual(['/data/dropbox-files-connector-store.tier-ledger.sqlite']);
   });
 
   test('lists a place once, and looks nowhere else for an in-memory store or ledger', () => {
