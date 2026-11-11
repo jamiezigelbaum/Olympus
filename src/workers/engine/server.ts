@@ -1159,6 +1159,16 @@ export async function main(): Promise<void> {
       throw error;
     }
   };
+  // The same for a lane whose tier set this file builds (Gmail, Google Drive, Telegram): its stores are closed again
+  // when the tier lane over them fails to open, and the lane is kept only once both opened.
+  const closedOnThrow = <T>(stores: readonly LocalConnectorStore[], open: () => T): T => {
+    try {
+      return open();
+    } catch (error) {
+      for (const store of stores) store.close();
+      throw error;
+    }
+  };
   // P1c: a lane whose tier set its own module builds (Dropbox, Readwise, X,
   // WhatsApp) registers its ledger and its on-demand stores here.
   const adoptTierLane = (input: {
@@ -1183,15 +1193,23 @@ export async function main(): Promise<void> {
     secure: LocalConnectorStore;
     publicStore?: OnDemandTierStore;
   }) => {
+    // The split's front opens these stores read-only while the background may still be creating them: a ledger or
+    // secret-locations index not there yet throws, so closedOnThrow closes the stores and frontMountRetry mounts the
+    // whole lane later. Mounting without them left Telegram with no tier lane for the rest of release check run
+    // 43078655631 (no item menu, search or delete).
     const ledger = input.secure.tierLedger();
-    if (!ledger) return undefined;
-    input.internal.useTierLedger(ledger);
+    if (!ledger) {
+      if (engineFront) throw new Error(`the tier ledger for ${input.secure.corpusId} is not there yet`);
+      return undefined;
+    }
     let secrets: SecretLocationsIndex | undefined;
     try {
       secrets = openSecretLocations(input.account, { dbPath: secretLocationsPathForStore(input.secure.dbPath) });
     } catch (error) {
+      if (engineFront) throw error;
       console.warn(`[tier] secret-locations index unavailable for ${input.secure.corpusId}: ${error instanceof Error ? error.name : 'error'}`);
     }
+    input.internal.useTierLedger(ledger);
     const lane = {
       ledger,
       secureCorpusId: input.secure.corpusId,
@@ -1400,7 +1418,7 @@ export async function main(): Promise<void> {
     if (sourceRuntimeClosed) throw new Error('Source runtime is closed.');
     if (gmailInternalConnectorStore) return;
     if (!sourceTierLedgerReady(GMAIL_SOURCE_ID)) return;
-    gmailInternalConnectorStore = gmailConnectorStoreLane.enabled
+    const internal = gmailConnectorStoreLane.enabled
       ? openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
         dbPath: resolvedStorePath(GMAIL_SOURCE_ID, 'internal', process.env),
         corpusId: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
@@ -1408,22 +1426,22 @@ export async function main(): Promise<void> {
         trustDomain: 'internal',
       })
       : undefined;
-    gmailSecureConnectorStore = gmailInternalConnectorStore
-      ? openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
+    const secure = internal
+      ? closedOnThrow([internal], () => openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
         dbPath: resolvedStorePath(GMAIL_SOURCE_ID, 'secure_local', process.env),
         corpusId: GMAIL_SECURE_CONNECTOR_CORPUS_ID,
         family: 'email',
         trustDomain: 'secure_local',
-      })
+      }))
       : undefined;
     // Per-tier stores (design per-item-four-tier-classification.md, 3.2): the
     // lane's two stores plus a Public store created only when a message is
     // routed there, all governed by ONE ledger — the secure store's own.
-    gmailTierLane = gmailInternalConnectorStore && gmailSecureConnectorStore
-      ? tierLane({
+    const lane = internal && secure
+      ? closedOnThrow([internal, secure], () => tierLane({
           account: { sourceId: GMAIL_SOURCE_ID },
-          internal: gmailInternalConnectorStore,
-          secure: gmailSecureConnectorStore,
+          internal,
+          secure,
           publicStore: onDemandTierStore({
             corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
             dbPath: resolvedStorePath(GMAIL_SOURCE_ID, 'public_safe', process.env),
@@ -1435,8 +1453,11 @@ export async function main(): Promise<void> {
             }),
             onOpened: (store) => registerTierLegStore(store, GMAIL_INTERNAL_CONNECTOR_CORPUS_ID),
           }),
-        })
+        }))
       : undefined;
+    gmailInternalConnectorStore = internal;
+    gmailSecureConnectorStore = secure;
+    gmailTierLane = lane;
     if (gmailInternalConnectorStore && gmailSecureConnectorStore) sourceLaneMounted([gmailInternalConnectorStore, gmailSecureConnectorStore]);
   };
   // The account scope Gmail's items are kept under (gmail-archive-target.ts
@@ -1594,7 +1615,7 @@ export async function main(): Promise<void> {
     if (sourceRuntimeClosed) throw new Error('Source runtime is closed.');
     if (googleDriveInternalConnectorStore) return;
     if (!sourceTierLedgerReady(GOOGLE_DRIVE_SOURCE_ID)) return;
-    googleDriveInternalConnectorStore = googleDriveConnectorStoreLane.enabled
+    const internal = googleDriveConnectorStoreLane.enabled
       ? openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
         dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, 'internal', process.env),
         corpusId: GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
@@ -1603,22 +1624,22 @@ export async function main(): Promise<void> {
         ...(googleDriveExclusions ? { exclusions: googleDriveExclusions } : {}),
       })
       : undefined;
-    googleDriveSecureConnectorStore = googleDriveInternalConnectorStore
-      ? openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
+    const secure = internal
+      ? closedOnThrow([internal], () => openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
         dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, 'secure_local', process.env),
         corpusId: GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
         family: 'file',
         trustDomain: 'secure_local',
         ...(googleDriveExclusions ? { exclusions: googleDriveExclusions } : {}),
-      })
+      }))
       : undefined;
     // The Public Drive store carries the same exclusion gate and the same
     // approved-scope read filter as its siblings (connectorStoreReadScope).
-    googleDriveTierLane = googleDriveInternalConnectorStore && googleDriveSecureConnectorStore
-      ? tierLane({
+    const lane = internal && secure
+      ? closedOnThrow([internal, secure], () => tierLane({
           account: { sourceId: GOOGLE_DRIVE_SOURCE_ID },
-          internal: googleDriveInternalConnectorStore,
-          secure: googleDriveSecureConnectorStore,
+          internal,
+          secure,
           publicStore: onDemandTierStore({
             corpusId: GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID,
             dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, 'public_safe', process.env),
@@ -1631,8 +1652,11 @@ export async function main(): Promise<void> {
             }),
             onOpened: (store) => registerTierLegStore(store, GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID),
           }),
-        })
+        }))
       : undefined;
+    googleDriveInternalConnectorStore = internal;
+    googleDriveSecureConnectorStore = secure;
+    googleDriveTierLane = lane;
     if (googleDriveInternalConnectorStore && googleDriveSecureConnectorStore) sourceLaneMounted([googleDriveInternalConnectorStore, googleDriveSecureConnectorStore]);
   };
   // Dropbox product state: the lane's original store, secure_local. Every
@@ -1960,16 +1984,17 @@ export async function main(): Promise<void> {
     if (sourceRuntimeClosed) throw new Error('Source runtime is closed.');
     if (telegramConnectorStores) return;
     if (!sourceTierLedgerReady(TELEGRAM_MESSAGES_SOURCE_ID)) return;
-    telegramConnectorStores = telegramConnectorStoreLane.enabled
+    const stores = telegramConnectorStoreLane.enabled
       ? createTelegramConnectorStores(process.env)
       : undefined;
-    telegramTierLane = telegramConnectorStores
-      ? tierLane({
+    telegramTierLane = stores
+      ? closedOnThrow([stores.internal, stores.secureLocal], () => tierLane({
           account: { sourceId: TELEGRAM_MESSAGES_SOURCE_ID },
-          internal: telegramConnectorStores.internal,
-          secure: telegramConnectorStores.secureLocal,
-        })
+          internal: stores.internal,
+          secure: stores.secureLocal,
+        }))
       : undefined;
+    telegramConnectorStores = stores;
     if (telegramTierLane && telegramConnectorStores) {
       reportRehomedChatOverrides('telegram', rehomeChatLaneOverrides(
         telegramTierLane.ledger,
@@ -2023,14 +2048,22 @@ export async function main(): Promise<void> {
       return !engineFront || frontCanMount(paths);
     };
     const both = (sourceId: string): string[] => [storeAt(sourceId, 'internal'), storeAt(sourceId, 'secure_local')];
-    if (!gmailInternalConnectorStore && gmailConnectorStoreLane.enabled && wanted(GMAIL_SOURCE_ID, connected('gmail', 'gmail.email.sync'), both(GMAIL_SOURCE_ID))) mountGmail();
-    if (!googleDriveInternalConnectorStore && googleDriveConnectorStoreLane.enabled && wanted(GOOGLE_DRIVE_SOURCE_ID, connected('google_drive', 'google_drive.docs.sync'), both(GOOGLE_DRIVE_SOURCE_ID))) mountGoogleDrive();
-    if (!dropboxConnectorStore && dropboxConnectorStoreLane.enabled && wanted(DROPBOX_FILES_SOURCE_ID, connected('dropbox', 'dropbox.files.sync'), [storeAt(DROPBOX_FILES_SOURCE_ID, 'secure_local')])) mountDropbox();
-    if (!localFilesConnectorStore && localFilesConnectorStoreLane.enabled && wanted(LOCAL_FILES_SOURCE_ID, fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID) !== undefined, [storeAt(LOCAL_FILES_SOURCE_ID, 'secure_local')])) mountLocalFiles();
-    if (!whatsappConnectorStore && whatsappConnectorStoreLane.enabled && wanted(WHATSAPP_PERSONAL_SOURCE_ID, connected('whatsapp_personal', 'whatsapp.personal.messages.sync'), [storeAt(WHATSAPP_PERSONAL_SOURCE_ID, 'secure_local')])) mountWhatsApp();
-    if (!telegramConnectorStores && telegramConnectorStoreLane.enabled && wanted(TELEGRAM_MESSAGES_SOURCE_ID, connected('telegram', 'telegram.messages.sync'), both(TELEGRAM_MESSAGES_SOURCE_ID))) mountTelegram();
-    if (!readwiseConnectorStore && readwiseConnectorStoreLane.enabled && wanted(READWISE_SOURCE_ID, connected('readwise', 'readwise.sync'), [storeAt(READWISE_SOURCE_ID, 'internal')])) mountReadwise();
-    if (!xBookmarksConnectorStore && xBookmarksConnectorStoreLane.enabled && wanted(X_BOOKMARKS_SOURCE_ID, connected('x', 'x.bookmarks.sync'), [storeAt(X_BOOKMARKS_SOURCE_ID, 'internal')])) mountXBookmarks();
+    // In the front a lane the background is still creating fails to mount (its ledger or index is not there yet).
+    // That lane waits for frontMountRetry; it never stops the other lanes, or the front's own start.
+    const mount = (open: () => void): void => {
+      if (!engineFront) { open(); return; }
+      try { open(); } catch (error) {
+        console.warn(`[olympus] the front could not open a source's stores yet: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    };
+    if (!gmailInternalConnectorStore && gmailConnectorStoreLane.enabled && wanted(GMAIL_SOURCE_ID, connected('gmail', 'gmail.email.sync'), both(GMAIL_SOURCE_ID))) mount(mountGmail);
+    if (!googleDriveInternalConnectorStore && googleDriveConnectorStoreLane.enabled && wanted(GOOGLE_DRIVE_SOURCE_ID, connected('google_drive', 'google_drive.docs.sync'), both(GOOGLE_DRIVE_SOURCE_ID))) mount(mountGoogleDrive);
+    if (!dropboxConnectorStore && dropboxConnectorStoreLane.enabled && wanted(DROPBOX_FILES_SOURCE_ID, connected('dropbox', 'dropbox.files.sync'), [storeAt(DROPBOX_FILES_SOURCE_ID, 'secure_local')])) mount(mountDropbox);
+    if (!localFilesConnectorStore && localFilesConnectorStoreLane.enabled && wanted(LOCAL_FILES_SOURCE_ID, fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID) !== undefined, [storeAt(LOCAL_FILES_SOURCE_ID, 'secure_local')])) mount(mountLocalFiles);
+    if (!whatsappConnectorStore && whatsappConnectorStoreLane.enabled && wanted(WHATSAPP_PERSONAL_SOURCE_ID, connected('whatsapp_personal', 'whatsapp.personal.messages.sync'), [storeAt(WHATSAPP_PERSONAL_SOURCE_ID, 'secure_local')])) mount(mountWhatsApp);
+    if (!telegramConnectorStores && telegramConnectorStoreLane.enabled && wanted(TELEGRAM_MESSAGES_SOURCE_ID, connected('telegram', 'telegram.messages.sync'), both(TELEGRAM_MESSAGES_SOURCE_ID))) mount(mountTelegram);
+    if (!readwiseConnectorStore && readwiseConnectorStoreLane.enabled && wanted(READWISE_SOURCE_ID, connected('readwise', 'readwise.sync'), [storeAt(READWISE_SOURCE_ID, 'internal')])) mount(mountReadwise);
+    if (!xBookmarksConnectorStore && xBookmarksConnectorStoreLane.enabled && wanted(X_BOOKMARKS_SOURCE_ID, connected('x', 'x.bookmarks.sync'), [storeAt(X_BOOKMARKS_SOURCE_ID, 'internal')])) mount(mountXBookmarks);
     mountConfiguredSourceStores();
   };
   mountSourceLanes(connectedHandles);
