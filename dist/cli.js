@@ -99957,7 +99957,7 @@ function createTieredStoreExtractionSink(options) {
       const itemTitle2 = stringMetadata2(plan.item, ["title", "name", "subject"]);
       const itemPath = stringMetadata2(plan.item, ["locatorUri", "pathDisplay"]);
       const imageJudgment = plan.media ? setMediaJudgment(set, plan.media.sha256) : undefined;
-      const settledUnread = !record.contentRead && record.reasons.some((reason) => isFailSafeMissingContentQuestion(reason) || reason === CONTENT_NAMES_ONLY_REASON || reason === CONTENT_NAMES_ONLY_LIFTED_REASON);
+      const settledUnread = !record.contentRead && record.reasons.some(isFailSafeMissingContentQuestion) || record.reasons.some((reason) => reason === CONTENT_NAMES_ONLY_REASON || reason === CONTENT_NAMES_ONLY_LIFTED_REASON);
       const holdUntilJudged = tierClassification?.holdContentUntilJudged === true || set.holdsContentUntilJudged() || heldUntilJudged(record.reasons) || settledUnread;
       const parentContext = tierClassification?.sniffer ? parentNamesContext(set, identity2) : undefined;
       const content = classifyContentTier({

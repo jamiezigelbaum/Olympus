@@ -22,6 +22,7 @@
 // 12. A per-item owner override applies to an item already stored, in both
 //     directions, without the file changing (reviewer demo, 2026-10-11).
 
+import { Database } from 'bun:sqlite';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -821,6 +822,32 @@ describe('11b. the owner\'s own folder choice (names only) counts like a store r
     const after = lane.ledger.getCurrent(garden)!;
     expect(after).toMatchObject({ contentRead: true, contentPending: true });
     expect(after.reasons.some((reason) => reason.includes('personal_first'))).toBe(false);
+    expect(lane.ledger.copies(garden).filter((copy) => copy.state === 'current' && copy.corpusId === INTERNAL_CORPUS && copy.layers !== 'metadata')).toEqual([]);
+    expect(await olympusSearch({ ...install, lane }, 'orchard')).not.toContain('pruning plan');
+  });
+
+  test('let be read and re-listed, with the read flag set before its text arrives (an undone override): the first text is still held', async () => {
+    registeredBuiltIn(PERSONAL_VERDICT, () => false);
+    const install = await freshInstall({ lane: BUILT_IN_SNIFFER_LANE, extract: false, namesOnlyByOwner: notesNamesOnly });
+    install.lane.internal.current()?.close();
+    const lane = createDropboxTierLane({ secureStore: install.secure, env, policy: defaultDropboxIngestionPolicy(), secretLocations: install.secrets, namesOnlyByOwner: () => false });
+    closers.push(() => lane.internal.current()?.close());
+    await install.relist(lane.set, 'r1');
+    expect(lane.ledger.getCurrent(garden)!.reasons).toContain('content:names_only_lifted');
+    // An owner override that is later undone leaves the read flag it set (a queued move only raises
+    // it), with the names-only reason back: the reason, not the flag, says nothing was read.
+    const db = new Database(lane.ledger.dbPath);
+    try { db.query('UPDATE tier_items SET content_read = 1, content_pending = 0 WHERE provider_item_id = ?').run(garden.providerItemId); } finally { db.close(); }
+    expect(lane.ledger.getCurrent(garden)).toMatchObject({ contentRead: true, contentPending: false });
+    expect(lane.ledger.getCurrent(garden)!.reasons).toContain('content:names_only_lifted');
+    const sink = createTieredStoreExtractionSink({ set: lane.set, syncConnectorId: 'extraction', ownerConnectorId: 'dropbox', ownershipKind: 'observed' });
+    const file = FILES[0];
+    await sink.accept({
+      ref: { corpusId: SECURE_CORPUS, provider: 'dropbox', accountScope: 'personal', approvedScopeKey: 'dropbox.personal:/',
+        providerItemId: file.id, localItemId: `personal:${file.id}`, sourceVersion: 'r1' },
+      text: file.text, extractorKind: 'local_text', extractorVersion: 'test', fetchedAt: '2026-10-01T00:00:00.000Z',
+    });
+    expect(lane.ledger.getCurrent(garden)!.reasons.some((reason) => reason.includes('personal_first'))).toBe(false);
     expect(lane.ledger.copies(garden).filter((copy) => copy.state === 'current' && copy.corpusId === INTERNAL_CORPUS && copy.layers !== 'metadata')).toEqual([]);
     expect(await olympusSearch({ ...install, lane }, 'orchard')).not.toContain('pruning plan');
   });

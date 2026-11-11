@@ -187,9 +187,10 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       // So is one the owner kept names only and now lets be read: its names
       // verdict never covered this text, so the text is held the same way
       // until judged, never served on that verdict or a Personal-first guess.
-      const settledUnread = !record.contentRead
-        && record.reasons.some((reason) => isFailSafeMissingContentQuestion(reason)
-          || reason === CONTENT_NAMES_ONLY_REASON || reason === CONTENT_NAMES_ONLY_LIFTED_REASON);
+      // The names-only reasons say no text was ever read, whatever the read flag says: an
+      // owner override that was undone keeps the flag it set (a queued move never lowers it).
+      const settledUnread = (!record.contentRead && record.reasons.some(isFailSafeMissingContentQuestion))
+        || record.reasons.some((reason) => reason === CONTENT_NAMES_ONLY_REASON || reason === CONTENT_NAMES_ONLY_LIFTED_REASON);
       const holdUntilJudged = tierClassification?.holdContentUntilJudged === true
         || set.holdsContentUntilJudged() || heldUntilJudged(record.reasons) || settledUnread;
       const parentContext = tierClassification?.sniffer ? parentNamesContext(set, identity) : undefined;
