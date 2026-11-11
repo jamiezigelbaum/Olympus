@@ -1025,7 +1025,7 @@ function promptBudgetedAnalyst(
 }
 
 // Floor for one candidate's passage share when fitting a pack to a lane.
-const MIN_FITTED_BYTES_PER_CANDIDATE = 600;
+const MIN_FITTED_BYTES_PER_CANDIDATE = 1_500;
 
 /**
  * Fit a pack so the analyst's whole prompt (system rules, every candidate's

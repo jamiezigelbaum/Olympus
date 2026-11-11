@@ -186,7 +186,7 @@ describe('recency seats never cost a store its seat in the pack', () => {
       builtAt: '2026-11-11T00:00:00Z',
     };
     const corpusOf = new Map(ordered);
-    const read = fitPackToPromptBytes(pack as never, 9_000, corpusOf as never, { localOnly: true }, 2)
+    const read = fitPackToPromptBytes(pack as never, 13_500, corpusOf as never, { localOnly: true }, 2)
       .candidates.map((c) => c.provenance.sourceItem.providerItemId);
     // Eight seats fit: the first three, the recency seats (asked for), then
     // stores in turn.
