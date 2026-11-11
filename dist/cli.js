@@ -205293,8 +205293,10 @@ function createArchiveImportDashboard(options) {
       const ledger = options.runtime.lane(record8.family).ledger;
       const key2 = JSON.stringify([ledger.dbPath, record8.provider, record8.archive_id]);
       let cached3 = countTallies.get(key2);
-      if (!cached3) {
-        cached3 = { value: null, at: -Infinity };
+      if (cached3 && cached3.status !== record8.status && cached3.inFlight)
+        return null;
+      if (!cached3 || cached3.status !== record8.status) {
+        cached3 = { value: null, at: -Infinity, status: record8.status };
         countTallies.set(key2, cached3);
       }
       const entry = cached3;
@@ -238909,6 +238911,15 @@ async function main() {
       throw error2;
     }
   };
+  const closedOnThrow = (stores, open7) => {
+    try {
+      return open7();
+    } catch (error2) {
+      for (const store of stores)
+        store.close();
+      throw error2;
+    }
+  };
   const adoptTierLane = (input) => {
     tierLanes.push({
       ledger: input.ledger,
@@ -238920,15 +238931,20 @@ async function main() {
   };
   const tierLane = (input) => {
     const ledger = input.secure.tierLedger();
-    if (!ledger)
+    if (!ledger) {
+      if (engineFront)
+        throw new Error(`the tier ledger for ${input.secure.corpusId} is not there yet`);
       return;
-    input.internal.useTierLedger(ledger);
+    }
     let secrets;
     try {
       secrets = openSecretLocations(input.account, { dbPath: secretLocationsPathForStore(input.secure.dbPath) });
     } catch (error2) {
+      if (engineFront)
+        throw error2;
       console.warn(`[tier] secret-locations index unavailable for ${input.secure.corpusId}: ${error2 instanceof Error ? error2.name : "error"}`);
     }
+    input.internal.useTierLedger(ledger);
     const lane = {
       ledger,
       secureCorpusId: input.secure.corpusId,
@@ -239090,22 +239106,22 @@ async function main() {
       return;
     if (!sourceTierLedgerReady(GMAIL_SOURCE_ID))
       return;
-    gmailInternalConnectorStore = gmailConnectorStoreLane.enabled ? openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
+    const internal = gmailConnectorStoreLane.enabled ? openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
       dbPath: resolvedStorePath(GMAIL_SOURCE_ID, "internal", process.env),
       corpusId: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
       family: "email",
       trustDomain: "internal"
     }) : undefined;
-    gmailSecureConnectorStore = gmailInternalConnectorStore ? openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
+    const secure = internal ? closedOnThrow([internal], () => openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
       dbPath: resolvedStorePath(GMAIL_SOURCE_ID, "secure_local", process.env),
       corpusId: GMAIL_SECURE_CONNECTOR_CORPUS_ID,
       family: "email",
       trustDomain: "secure_local"
-    }) : undefined;
-    gmailTierLane = gmailInternalConnectorStore && gmailSecureConnectorStore ? tierLane({
+    })) : undefined;
+    const lane = internal && secure ? closedOnThrow([internal, secure], () => tierLane({
       account: { sourceId: GMAIL_SOURCE_ID },
-      internal: gmailInternalConnectorStore,
-      secure: gmailSecureConnectorStore,
+      internal,
+      secure,
       publicStore: onDemandTierStore({
         corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
         dbPath: resolvedStorePath(GMAIL_SOURCE_ID, "public_safe", process.env),
@@ -239117,7 +239133,10 @@ async function main() {
         }),
         onOpened: (store) => registerTierLegStore(store, GMAIL_INTERNAL_CONNECTOR_CORPUS_ID)
       })
-    }) : undefined;
+    })) : undefined;
+    gmailInternalConnectorStore = internal;
+    gmailSecureConnectorStore = secure;
+    gmailTierLane = lane;
     if (gmailInternalConnectorStore && gmailSecureConnectorStore)
       sourceLaneMounted([gmailInternalConnectorStore, gmailSecureConnectorStore]);
   };
@@ -239244,24 +239263,24 @@ ${key2}`;
       return;
     if (!sourceTierLedgerReady(GOOGLE_DRIVE_SOURCE_ID))
       return;
-    googleDriveInternalConnectorStore = googleDriveConnectorStoreLane.enabled ? openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
+    const internal = googleDriveConnectorStoreLane.enabled ? openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
       dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, "internal", process.env),
       corpusId: GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
       family: "file",
       trustDomain: "internal",
       ...googleDriveExclusions ? { exclusions: googleDriveExclusions } : {}
     }) : undefined;
-    googleDriveSecureConnectorStore = googleDriveInternalConnectorStore ? openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
+    const secure = internal ? closedOnThrow([internal], () => openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
       dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, "secure_local", process.env),
       corpusId: GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
       family: "file",
       trustDomain: "secure_local",
       ...googleDriveExclusions ? { exclusions: googleDriveExclusions } : {}
-    }) : undefined;
-    googleDriveTierLane = googleDriveInternalConnectorStore && googleDriveSecureConnectorStore ? tierLane({
+    })) : undefined;
+    const lane = internal && secure ? closedOnThrow([internal, secure], () => tierLane({
       account: { sourceId: GOOGLE_DRIVE_SOURCE_ID },
-      internal: googleDriveInternalConnectorStore,
-      secure: googleDriveSecureConnectorStore,
+      internal,
+      secure,
       publicStore: onDemandTierStore({
         corpusId: GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID,
         dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, "public_safe", process.env),
@@ -239274,7 +239293,10 @@ ${key2}`;
         }),
         onOpened: (store) => registerTierLegStore(store, GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID)
       })
-    }) : undefined;
+    })) : undefined;
+    googleDriveInternalConnectorStore = internal;
+    googleDriveSecureConnectorStore = secure;
+    googleDriveTierLane = lane;
     if (googleDriveInternalConnectorStore && googleDriveSecureConnectorStore)
       sourceLaneMounted([googleDriveInternalConnectorStore, googleDriveSecureConnectorStore]);
   };
@@ -239517,12 +239539,13 @@ ${key2}`;
       return;
     if (!sourceTierLedgerReady(TELEGRAM_MESSAGES_SOURCE_ID))
       return;
-    telegramConnectorStores = telegramConnectorStoreLane.enabled ? createTelegramConnectorStores(process.env) : undefined;
-    telegramTierLane = telegramConnectorStores ? tierLane({
+    const stores = telegramConnectorStoreLane.enabled ? createTelegramConnectorStores(process.env) : undefined;
+    telegramTierLane = stores ? closedOnThrow([stores.internal, stores.secureLocal], () => tierLane({
       account: { sourceId: TELEGRAM_MESSAGES_SOURCE_ID },
-      internal: telegramConnectorStores.internal,
-      secure: telegramConnectorStores.secureLocal
-    }) : undefined;
+      internal: stores.internal,
+      secure: stores.secureLocal
+    })) : undefined;
+    telegramConnectorStores = stores;
     if (telegramTierLane && telegramConnectorStores) {
       reportRehomedChatOverrides("telegram", rehomeChatLaneOverrides(telegramTierLane.ledger, "telegram", [telegramConnectorStores.internal, telegramConnectorStores.secureLocal]));
     }
