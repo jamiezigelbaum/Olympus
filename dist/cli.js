@@ -235154,6 +235154,18 @@ async function main() {
       return;
     }
   };
+  const openPrivateLane = (sourceId, label, create, lane) => {
+    const store = create();
+    let secrets;
+    try {
+      secrets = openTierSecretLocations({ sourceId }, store.dbPath, label);
+      return { store, secrets, lane: lane(store, secrets) };
+    } catch (error2) {
+      secrets?.close();
+      store.close();
+      throw error2;
+    }
+  };
   const adoptTierLane = (input) => {
     tierLanes.push({
       ledger: input.ledger,
@@ -235536,16 +235548,17 @@ ${key2}`;
       return;
     if (!sourceTierLedgerReady(DROPBOX_FILES_SOURCE_ID))
       return;
-    dropboxConnectorStore = dropboxConnectorStoreLane.enabled ? createDropboxConnectorStore(process.env, { policy: dropboxIngestionPolicy }) : undefined;
-    dropboxSecretLocations = dropboxConnectorStore ? openTierSecretLocations({ sourceId: DROPBOX_FILES_SOURCE_ID }, dropboxConnectorStore.dbPath, DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID) : undefined;
-    dropboxTierLane = dropboxConnectorStore ? createDropboxTierLane({
-      secureStore: dropboxConnectorStore,
+    const opened = dropboxConnectorStoreLane.enabled ? openPrivateLane(DROPBOX_FILES_SOURCE_ID, DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, () => createDropboxConnectorStore(process.env, { policy: dropboxIngestionPolicy }), (secureStore, secretLocations2) => createDropboxTierLane({
+      secureStore,
       env: process.env,
       policy: dropboxIngestionPolicy,
-      ...dropboxSecretLocations ? { secretLocations: dropboxSecretLocations } : {},
+      ...secretLocations2 ? { secretLocations: secretLocations2 } : {},
       ...fileSourceScopeAuthority ? { namesOnlyByOwner: dropboxNamesOnlyByOwner(fileSourceScopeAuthority) } : {},
       onStoreOpened: (store) => registerTierLegStore(store, DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, sourceIndexEmbeddingProvider ?? null)
-    }) : undefined;
+    })) : undefined;
+    dropboxConnectorStore = opened?.store;
+    dropboxSecretLocations = opened?.secrets;
+    dropboxTierLane = opened?.lane;
     if (dropboxTierLane && dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider)) {
       dropboxTierLane.set.declarePrivateEmbedder(dropboxFilesEmbeddingProvider, {
         embedWith: () => {
@@ -235585,15 +235598,16 @@ ${key2}`;
       return;
     if (!sourceTierLedgerReady(LOCAL_FILES_SOURCE_ID))
       return;
-    localFilesConnectorStore = localFilesConnectorStoreLane.enabled ? createLocalFilesConnectorStore(process.env, { policy: localFilesIngestionPolicy }) : undefined;
-    localFilesSecretLocations = localFilesConnectorStore ? openTierSecretLocations({ sourceId: LOCAL_FILES_SOURCE_ID }, localFilesConnectorStore.dbPath, LOCAL_FILES_CORPUS_ID) : undefined;
-    localFilesTierLane = localFilesConnectorStore ? createLocalFilesTierLane({
-      secureStore: localFilesConnectorStore,
+    const opened = localFilesConnectorStoreLane.enabled ? openPrivateLane(LOCAL_FILES_SOURCE_ID, LOCAL_FILES_CORPUS_ID, () => createLocalFilesConnectorStore(process.env, { policy: localFilesIngestionPolicy }), (secureStore, secretLocations2) => createLocalFilesTierLane({
+      secureStore,
       env: process.env,
       policy: localFilesIngestionPolicy,
-      ...localFilesSecretLocations ? { secretLocations: localFilesSecretLocations } : {},
+      ...secretLocations2 ? { secretLocations: secretLocations2 } : {},
       onStoreOpened: (store) => registerTierLegStore(store, LOCAL_FILES_CORPUS_ID, sourceIndexEmbeddingProvider ?? null)
-    }) : undefined;
+    })) : undefined;
+    localFilesConnectorStore = opened?.store;
+    localFilesSecretLocations = opened?.secrets;
+    localFilesTierLane = opened?.lane;
     if (localFilesTierLane && localFilesConnectorStore && localFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(localFilesEmbeddingProvider)) {
       localFilesTierLane.set.declarePrivateEmbedder(localFilesEmbeddingProvider, {
         embedWith: () => {
@@ -235693,18 +235707,19 @@ ${key2}`;
       return;
     if (!sourceTierLedgerReady(WHATSAPP_PERSONAL_SOURCE_ID))
       return;
-    whatsappConnectorStore = whatsappConnectorStoreLane.enabled ? createWhatsAppConnectorStore(process.env) : undefined;
-    whatsappSecretLocations = whatsappConnectorStore ? openTierSecretLocations({ sourceId: WHATSAPP_PERSONAL_SOURCE_ID }, whatsappConnectorStore.dbPath, WHATSAPP_LIVE_CORPUS_ID) : undefined;
-    whatsappTierSet = whatsappConnectorStore ? existingStoreTierSet(createWhatsAppTierLane({
-      store: whatsappConnectorStore,
+    const opened = whatsappConnectorStoreLane.enabled ? openPrivateLane(WHATSAPP_PERSONAL_SOURCE_ID, WHATSAPP_LIVE_CORPUS_ID, () => createWhatsAppConnectorStore(process.env), (store, secretLocations2) => existingStoreTierSet(createWhatsAppTierLane({
+      store,
       env: process.env,
       ...sourceIndexEmbeddingProvider ? { internalEmbeddingProvider: sourceIndexEmbeddingProvider } : {},
-      ...whatsappSecretLocations ? { secretLocations: whatsappSecretLocations } : {},
-      onStoreOpened: (opened) => registerTierLegStore(opened, WHATSAPP_LIVE_CORPUS_ID, sourceIndexEmbeddingProvider ?? null)
+      ...secretLocations2 ? { secretLocations: secretLocations2 } : {},
+      onStoreOpened: (leg) => registerTierLegStore(leg, WHATSAPP_LIVE_CORPUS_ID, sourceIndexEmbeddingProvider ?? null)
     }), {
-      store: whatsappConnectorStore,
-      ...whatsappSecretLocations ? { secrets: whatsappSecretLocations } : {}
-    }) : undefined;
+      store,
+      ...secretLocations2 ? { secrets: secretLocations2 } : {}
+    })) : undefined;
+    whatsappConnectorStore = opened?.store;
+    whatsappSecretLocations = opened?.secrets;
+    whatsappTierSet = opened?.lane;
     if (whatsappTierSet && tierSecureEmbeddingProvider)
       whatsappTierSet.declarePrivateEmbedder(tierSecureEmbeddingProvider);
     if (whatsappTierSet && whatsappConnectorStore) {
