@@ -28,7 +28,7 @@ describe('MCP server instructions', () => {
     expect(await instructions(createChatGptMcpServer(ctx, { ...view, appClient: { host: 'claude', connectorUrl: 'https://example.com/mcp' } }))).toBe(OLYMPUS_SERVER_INSTRUCTIONS);
     expect(OLYMPUS_SERVER_INSTRUCTIONS).toContain('olympus_search');
     expect(OLYMPUS_SERVER_INSTRUCTIONS).toContain('source_answer');
-    expect(OLYMPUS_SERVER_INSTRUCTIONS).toContain('search your tools for "Olympus"');
+    expect(OLYMPUS_SERVER_INSTRUCTIONS).toContain('search your tools for "Olympus source answer olympus_search"');
   });
 
   test('ChatGPT\'s surface and the directory path send none', async () => {

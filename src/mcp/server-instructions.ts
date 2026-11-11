@@ -8,6 +8,6 @@ export const OLYMPUS_SERVER_INSTRUCTIONS = [
   'Olympus searches the user\'s own sources that it indexes privately on their computer (mail, files, notes, chats and saved reading).',
   'Use it whenever the user asks about their own information: what someone wrote or sent, what a document says, when something happened,',
   'what they decided, their plans, people, places and money. olympus_search returns the evidence; source_answer answers from their computer.',
-  'If Olympus\'s tools are not loaded in this chat, search your tools for "Olympus" before saying you cannot reach it.',
+  'If Olympus\'s tools are not loaded in this chat, search your tools for "Olympus source answer olympus_search" (a search for "Olympus" alone can come back empty) before saying you cannot reach it.',
   'Do not use it for general knowledge.',
 ].join(' ');
