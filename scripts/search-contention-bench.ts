@@ -1,12 +1,15 @@
 #!/usr/bin/env bun
 /** Synthetic #1305 gate. Stores/logs MUST be outside the checkout.
  * bun scripts/search-contention-bench.ts seed --dir /tmp/olympus-gate5-data --items 2000000
- * bun scripts/search-contention-bench.ts run --dir /tmp/olympus-gate5-data --source /tmp/olympus-gate5-main --label main --writer off --asks 1
- * A source directory is a read-only git-archive snapshot, not a checkout/worktree.
+ * bun scripts/search-contention-bench.ts run --dir /tmp/olympus-gate5-data --source /tmp/olympus-gate5-data/src-main --label main --writer off --asks 1 --keep yes
+ * A source directory is a read-only git-archive snapshot, not a checkout/worktree. Put snapshots
+ * under --dir (src-<label>) so one directory holds everything the gate wrote.
+ * run, warm and calibrate delete --dir when they exit, snapshots included; pass --keep yes on
+ * every run but the last.
  * Prints exactly one JSON line per measured Ask; appends it to --report (Markdown).
  */
 import { Database } from 'bun:sqlite';
-import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { loadavg, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -18,6 +21,10 @@ const dir = resolve(args.get('dir') ?? '/tmp/olympus-gate5-data');
 if (!dir.startsWith('/tmp/olympus-gate5-')) throw new Error('Synthetic stores must be under /tmp/olympus-gate5-*');
 mkdirSync(dir, { recursive: true });
 if (!realpathSync(dir).startsWith('/tmp/olympus-gate5-')) throw new Error('No symlinks to live stores');
+// A gate's stores are gigabytes; a runner that keeps them fills its disk. Only seed keeps them by default.
+if (command !== 'seed' && args.get('keep') !== 'yes') {
+  process.on('exit', () => rmSync(dir, { recursive: true, force: true }));
+}
 // Isolate all incidental library settings/cache access as well as the stores.
 process.env.HOME = join(dir, 'home');
 mkdirSync(process.env.HOME, { recursive: true });
