@@ -5,6 +5,7 @@ import { canonicalSourceCorpusId } from '../../core/source-corpus-registry.ts';
 import {
   ITEMS_WITH_TEXT_COUNT_KEY,
   UNREADABLE_ITEMS_COUNT_KEY,
+  UNSUPPORTED_KIND_COUNT_KEY,
   METADATA_ONLY_EXPECTED_COUNT_KEY,
   OUT_OF_CONTENT_SCOPE_COUNT_KEY,
 } from '../dashboard/answer-ready-coverage.ts';
@@ -502,6 +503,9 @@ export function createSourceIndexStatusHandler(
             secretLocationCount(store),
           )
           : configuredCorpusStatus(corpus);
+        if (status.configured && readiness?.counts[UNSUPPORTED_KIND_COUNT_KEY] !== undefined) {
+          status.counts[UNSUPPORTED_KIND_COUNT_KEY] = readiness.counts[UNSUPPORTED_KIND_COUNT_KEY]!;
+        }
         if (status.configured && request.include_readiness_ledger === true && options.unreadableCount) {
           const unreadable = options.unreadableCount(corpus.corpusId);
           if (unreadable !== undefined) status.counts[UNREADABLE_ITEMS_COUNT_KEY] = unreadable;

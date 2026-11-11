@@ -45,6 +45,12 @@ export const OUT_OF_CONTENT_SCOPE_COUNT_KEY = 'qa_out_of_content_scope';
 export const UNREADABLE_ITEMS_COUNT_KEY = 'extraction_items_unreadable';
 
 /**
+ * In-scope items whose media type no extraction lane accepts yet. These stay
+ * in the eligible denominator: Olympus is meant to read them and lacks a reader.
+ */
+export const UNSUPPORTED_KIND_COUNT_KEY = 'extraction_items_unsupported_kind';
+
+/**
  * Items this corpus holds text for: the per-item numerator of every
  * answer-ready ratio, published by whoever owns the readiness evidence.
  */

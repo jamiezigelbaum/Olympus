@@ -13137,12 +13137,20 @@ export class LocalConnectorStore {
     // A bound that could not prove one page will not prove a later, deeper one.
     let tryBound = true;
     while (true) {
-      const rankedPage = (bound: number | undefined): StoreRead => ({ mode: 'all', sql: `
-        ${bound === undefined ? '' : `WITH top AS MATERIALIZED (
+      // Which FTS rows a page is ranked from: the best `bound` of them, every
+      // row ranking at or above `atOrAbove` (the rows tied with the bound, and
+      // better), or every match.
+      type Ranked = { bound: number } | { atOrAbove: number } | undefined;
+      const rankedPage = (from: Ranked): StoreRead => {
+        const bound = from === undefined ? undefined : 'bound' in from ? from.bound : undefined;
+        const atOrAbove = from === undefined ? undefined : 'atOrAbove' in from ? from.atOrAbove : undefined;
+        const top = from === undefined ? undefined : bound !== undefined ? 'top' : 'tied';
+        return { mode: 'all', sql: `
+        ${top === undefined ? '' : `WITH ${top} AS MATERIALIZED (
           SELECT rowid AS fts_rowid, rank FROM connector_store_fts
           WHERE connector_store_fts MATCH ?
             AND rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'
-          ORDER BY rank LIMIT ?
+            ${bound !== undefined ? 'ORDER BY rank LIMIT ?' : 'AND (rank + 0.0) <= ?'}
         )`}
         SELECT
           i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
@@ -13155,12 +13163,12 @@ export class LocalConnectorStore {
           -- item rather than an arbitrary one. That is exactly the chunk the
           -- citation should point at.
           connector_store_fts.chunk_pk AS chunk_pk,
-          ${bound === undefined ? 'MIN(connector_store_fts.rank) AS rank' : `MIN(top.rank) AS rank,
+          ${top === undefined ? 'MIN(connector_store_fts.rank) AS rank' : top === 'tied' ? 'MIN(tied.rank) AS rank' : `MIN(top.rank) AS rank,
           (SELECT COUNT(*) FROM top) AS bound_rows,
           (SELECT MAX(rank) FROM top) AS bound_rank`}
-        FROM ${bound === undefined ? 'connector_store_fts' : 'top JOIN connector_store_fts ON connector_store_fts.rowid = top.fts_rowid'}
+        FROM ${top === undefined ? 'connector_store_fts' : `${top} JOIN connector_store_fts ON connector_store_fts.rowid = ${top}.fts_rowid`}
         JOIN items i ON i.item_pk = connector_store_fts.item_pk
-        WHERE ${bound === undefined ? `connector_store_fts MATCH ?
+        WHERE ${top === undefined ? `connector_store_fts MATCH ?
           AND connector_store_fts.rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'` : '1'}
           AND i.tombstoned = 0
           AND LOWER(COALESCE(i.mime_type, '')) NOT IN (${CONTAINER_MIME_TYPES_SQL})
@@ -13174,28 +13182,41 @@ export class LocalConnectorStore {
       `, params: [
         terms,
         ...(bound === undefined ? [] : [bound]),
+        ...(atOrAbove === undefined ? [] : [atOrAbove]),
         ...(selectedAccount ? [selectedAccount] : []),
         ...selectedFilters.params,
         ...selectedFtsScope.params,
         pageSize,
         scanned,
-      ] });
+      ] };
+      };
       // Rank the best FTS rows first, then read only their items (#1242).
       // Every match outside those rows ranks at or below the last of them,
       // so the page is the full ranking's page when the bound held every
       // match, or when the page filled and its last item ranks strictly
       // above the bound. Otherwise (ties at the bound, or filters hid too
       // many of the best rows) the full ranking runs, as it always did.
+      // A full page whose last item ties with the bound is decided by the rows
+      // ranking at or above the bound's rank: any other match ranks strictly
+      // below every one of them. Those rows are read instead of every match,
+      // and their page holds at least the bounded page's items, so it is full.
       const bound = Math.min(KEYWORD_RANKED_BOUND_MAX, Math.max(KEYWORD_RANKED_BOUND_MIN, (scanned + pageSize) * KEYWORD_RANKED_BOUND_ROWS_PER_ITEM));
-      const boundedPage = tryBound ? (yield rankedPage(bound)) as Array<ItemRow & { bound_rows?: number; bound_rank?: number }> : [];
+      const boundedPage = tryBound ? (yield rankedPage({ bound })) as Array<ItemRow & { bound_rows?: number; bound_rank?: number }> : [];
       const head = boundedPage[0];
       const last = boundedPage.at(-1);
+      const full = boundedPage.length === pageSize;
       const proved = head !== undefined && last !== undefined && (head.bound_rows! < bound
-        || (boundedPage.length === pageSize && last.rank < head.bound_rank!));
-      if (!proved) tryBound = false;
+        || (full && last.rank < head.bound_rank!));
+      const tied = !proved && full && head !== undefined
+        ? (yield rankedPage({ atOrAbove: head.bound_rank! })) as ItemRow[]
+        : undefined;
+      // A read pool read is its own snapshot: the tied rows are trusted only
+      // when they filled the page in theirs.
+      const tiedProved = tied !== undefined && tied.length === pageSize;
+      if (!proved && !tiedProved) tryBound = false;
       const page = proved
         ? boundedPage.map(({ bound_rows: _rows, bound_rank: _rank, ...row }) => row as ItemRow)
-        : (yield rankedPage(undefined)) as ItemRow[];
+        : tiedProved ? tied : (yield rankedPage(undefined)) as ItemRow[];
       scanned += page.length;
       exhausted = page.length < pageSize;
       // OFFSET pages over one ordering. On the read pool each page is its own

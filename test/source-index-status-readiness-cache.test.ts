@@ -346,6 +346,8 @@ describe('connector-store status readiness', () => {
           return { counts: {
               qa_metadata_only_expected: 60,
               qa_blocked_policy: 3,
+              extraction_items_unreadable: 2,
+              extraction_items_unsupported_kind: 46,
               // A read authority's own fact, which the ledger must not be able to
               // overwrite: the store holds nothing, whatever this claims.
               indexed_items: 999_999,
@@ -358,12 +360,15 @@ describe('connector-store status readiness', () => {
       const cheapCounts = (cheap.corpora[0] as { counts: Record<string, number> }).counts;
       expect(asked).toEqual([]);
       expect(cheapCounts.qa_metadata_only_expected).toBeUndefined();
+      expect(cheapCounts.extraction_items_unsupported_kind).toBeUndefined();
 
       const full = await handler.status({ corpus_id: CORPUS_ID, include_readiness_ledger: true });
       const fullCounts = (full.corpora[0] as { counts: Record<string, number> }).counts;
       expect(asked).toEqual([CORPUS_ID]);
       expect(fullCounts.qa_metadata_only_expected).toBe(60);
       expect(fullCounts.qa_blocked_policy).toBe(3);
+      expect(fullCounts.extraction_items_unreadable).toBe(2);
+      expect(fullCounts.extraction_items_unsupported_kind).toBe(46);
       expect(fullCounts.indexed_items).toBe(0);
     } finally {
       store.close();
