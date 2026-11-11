@@ -1165,6 +1165,49 @@ describe('Analyst capability', () => {
     expect(result.escalation).toBeUndefined();
   });
 
+  // #1305: on Sparta every lane timed out and the Ask answered "no matching
+  // evidence", which reads as "not there". A search that ran out of time says so.
+  test('an empty pack where every lane timed out says it could not tell, not "no evidence"', async () => {
+    const analyst = createAnalyst(throwingModel());
+    const result = await analyst.analyze(
+      pack('Where is the lake house?', [], {
+        searchedCorpora: [],
+        skippedCorpora: [
+          { corpusId: 'internal.email', reason: 'lane_timeout' },
+          { corpusId: 'internal.whatsapp.messages', reason: 'lane_timeout' },
+          { corpusId: 'internal.email', reason: 'lane_timeout' },
+        ],
+      }),
+      { localOnly: false },
+    );
+
+    expect(result.answer.toLowerCase()).not.toContain('no matching evidence');
+    expect(result.answer).toContain('ran out of time searching your sources (2 sources)');
+    expect(result.answer).toContain('cannot say whether the answer is there');
+    expect(result.unanswered).toContain('Ran out of time searching: internal.email, internal.whatsapp.messages');
+    expect(result.citations).toEqual([]);
+  });
+
+  test('an empty pack where some lanes timed out says how many sources were still being searched', async () => {
+    const analyst = createAnalyst(throwingModel());
+    const result = await analyst.analyze(
+      pack('Where is the lake house?', [], {
+        searchedCorpora: ['internal.drive.docs', 'internal.email'],
+        // A lane that timed out on one formulation but was searched on another counts as searched.
+        skippedCorpora: [
+          { corpusId: 'internal.email', reason: 'lane_timeout' },
+          { corpusId: 'internal.whatsapp.messages', reason: 'lane_timeout' },
+        ],
+      }),
+      { localOnly: false },
+    );
+
+    expect(result.answer).toContain('no matching evidence for this question in the sources searched');
+    expect(result.answer).toContain('ran out of time searching 1 source, so the answer may still be there');
+    expect(result.unanswered).toContain('Ran out of time searching: internal.whatsapp.messages');
+    expect(result.unanswered.some((u) => u.includes('No matching evidence'))).toBe(true);
+  });
+
   test('hard-denies an S5 candidate before calling the model', async () => {
     const { model, calls } = fakeModel(
       JSON.stringify({ answer: 'must not run', citations: [], unanswered: [], sufficient: true }),
