@@ -56,7 +56,8 @@ import type {
   DashboardImportsUnreadableReason,
 } from '../source-dashboard.ts';
 import { displayText } from '../dashboard/display-text.ts';
-import { offThreadReadsSupported, OffThreadReadBusyError, readOnPool } from '../connector-store/off-thread-reads.ts';
+import { offThreadReadsSupported, OffThreadReadBusyError, readOnPool, releaseOffThreadReads } from '../connector-store/off-thread-reads.ts';
+import type { TierLedger } from '../classification/tier-ledger.ts';
 import { ARCHIVE_IMPORTS_SOURCE_ID, ArchiveRecordFormError, type ArchiveImportRecord } from './state.ts';
 import {
   ArchiveImportRequestStore,
@@ -359,6 +360,8 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
   // null is still counting; undefined means the read failed. Each dashboard
   // owns its cache so closing it also retires every cached archive.
   const countReads = new Set<Promise<void>>();
+  // A ledger whose tally the pool has read lets the pool's readers of its file go when it closes.
+  const releasing = new WeakSet<TierLedger>();
   const countTallies = new Map<string, { value: Tally | null | undefined; at: number; inFlight?: Promise<void> }>();
   // One check at a time: each reads whole files.
   let checks: Promise<void> = Promise.resolve();
@@ -794,6 +797,10 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
       if (!offThreadReadsSupported(ledger.dbPath)) {
         readHere();
       } else {
+        if (!releasing.has(ledger)) {
+          releasing.add(ledger);
+          ledger.onClose(() => releaseOffThreadReads(ledger.dbPath));
+        }
         entry.inFlight = (async () => {
           try {
             const steps = ledger.accountScopeCountSteps(record.provider, record.archive_id);

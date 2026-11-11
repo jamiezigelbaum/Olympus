@@ -20,7 +20,7 @@
 // keys, content-free reason codes and version ids. Never a title, path,
 // sender, text or excerpt. The file is created owner-only (0600).
 
-import { Database, type SQLQueryBindings } from 'bun:sqlite';
+import { Database } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -28,7 +28,6 @@ import type { SourceItemIdentity, SourceTrustDomain, SourceTrustTier } from '../
 import { readSqliteSchemaVersion, runSqliteMigrations, type SqliteMigration } from '../../core/sqlite-migrations.ts';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import { assertWritableStoreOpenAllowed } from '../../core/store-write-guard.ts';
-import { releaseOffThreadReads, type StoreRead } from '../connector-store/off-thread-reads.ts';
 import {
   PERSONAL_FIRST_REASON,
   TIER_KEYS,
@@ -137,6 +136,9 @@ function writeIntentFromRow(row: TierWriteIntentRow): TierWriteIntent {
     connectorId: row.connector_id,
   };
 }
+
+/** One read of the ledger: the same shape as a connector store's pool read. */
+export interface LedgerRead { sql: string; params: readonly unknown[]; mode: 'get' | 'all' }
 
 function idParams(identity: TierLedgerIdentity): [string, string, string, string] {
   return [identity.provider, identity.accountScope, tierLedgerConversationKey(identity), identity.providerItemId];
@@ -484,12 +486,16 @@ export class TierLedger {
   }
 
   close(): void {
-    releaseOffThreadReads(this.dbPath);
     try {
       // Checkpointed close, like every Olympus store: the ledger is safe to
       // hand to another process the moment this returns.
       closeSqliteStore(this.db, { checkpoint: !this.readOnly });
     } finally {
+      const listeners = this.closeListeners ?? [];
+      this.closeListeners = undefined;
+      for (const listener of listeners) {
+        try { listener(); } catch { /* a listener's failure never fails the close */ }
+      }
       if (!this.readOnly && this.dbPath !== ':memory:') restrictLedgerFiles(this.dbPath);
     }
   }
@@ -4096,7 +4102,7 @@ export class TierLedger {
   }
 
   /** The same account tally query for the caller's connection and the read pool. */
-  *accountScopeCountSteps(provider: string, accountScope: string): Generator<StoreRead, { items: number; awaitingJudgment: number }, unknown> {
+  *accountScopeCountSteps(provider: string, accountScope: string): Generator<LedgerRead, { items: number; awaitingJudgment: number }, unknown> {
     const row = (yield {
       sql: `
         SELECT COUNT(*) AS items,
@@ -4109,16 +4115,24 @@ export class TierLedger {
     return { items: row.items, awaitingJudgment: row.awaiting };
   }
 
-  private readSteps<T>(steps: Generator<StoreRead, T, unknown>): T {
-    let step = steps.next();
-    while (!step.done) {
-      const read = step.value;
-      const query = this.db.query(read.sql);
-      step = steps.next(read.mode === 'all'
-        ? query.all(...(read.params as SQLQueryBindings[]))
-        : query.get(...(read.params as SQLQueryBindings[])));
-    }
-    return step.value;
+  /** Hears this ledger close, once (for a reader of its file elsewhere to let go). */
+  onClose(listener: () => void): void {
+    (this.closeListeners ??= []).push(listener);
+  }
+
+  private closeListeners: Array<() => void> | undefined;
+
+  /** Runs a read generator on this connection, in one transaction. */
+  readSteps<T>(steps: Generator<LedgerRead, T, unknown>): T {
+    return this.db.transaction(() => {
+      let next = steps.next();
+      while (!next.done) {
+        const statement = this.db.query(next.value.sql);
+        const params = next.value.params as never[];
+        next = steps.next(next.value.mode === 'get' ? statement.get(...params) : statement.all(...params));
+      }
+      return next.value;
+    })();
   }
 
   /**
