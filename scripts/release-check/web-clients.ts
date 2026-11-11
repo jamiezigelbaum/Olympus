@@ -503,7 +503,8 @@ export const PAGE_STATE_SCRIPT = (composers: readonly string[], client?: WebClie
     title: document.title,
     challenge: /just a moment|verify you are human|attention required/i.test(document.title) || !!document.querySelector('iframe[src*="challenges.cloudflare.com"], #challenge-form, #cf-challenge-running'),
     signedOut: /\\/(log-?in|sign-?in|auth)\\b/i.test(location.pathname) || controls.some((el) => /^(log ?in|sign ?in)$/i.test(named(el))),
-    limited: MESSAGE_LIMIT.test(document.body?.innerText || ''),
+    // Only the app's own dialog or notice counts: a question or reply that quotes such a phrase must not.
+    limited: [...document.querySelectorAll('[role="dialog"], [role="alertdialog"], [role="alert"], [role="status"], [aria-live], [data-sonner-toast]')].some((el) => visible(el) && !el.closest('[data-message-author-role], [data-testid="user-message"], [data-testid="assistant-message"], [data-is-streaming]') && MESSAGE_LIMIT.test(el.innerText || '')),
     composer: !!composer,
     composerText: composer ? (composer.value ?? composer.innerText ?? '') : '',
     busy: replyControls.some((el) => /^stop\\b/i.test(named(el)) || /stop-button/.test(el.getAttribute('data-testid') || '')),

@@ -546,4 +546,18 @@ describe('an account that hit its message limit', () => {
     }
     expect(MESSAGE_LIMIT.test('Your card limit is 500 euros and you hit it in October.')).toBe(false);
   });
+
+  test('counts only the app\'s own dialog or notice, never a question or reply that quotes the phrase', () => {
+    const limited = (html: string): boolean | undefined => {
+      const window = new Window({ url: 'https://claude.ai/new' });
+      window.document.body.innerHTML = `<main>${html}<textarea></textarea></main>`;
+      for (const el of window.document.querySelectorAll('*')) el.getBoundingClientRect = () => new window.DOMRect(0, 0, 100, 20);
+      try { return (new Function('document', 'location', 'getComputedStyle', `return ${PAGE_STATE_SCRIPT(['textarea'], 'claude')}`)(window.document, window.location, window.getComputedStyle.bind(window)) as PageState).limited; }
+      finally { window.happyDOM.abort(); }
+    };
+    expect(limited('<div role="dialog">Upgrade to keep chatting. You hit your 5-hour message limit. It resets at 9:30 PM</div>')).toBe(true);
+    expect(limited('<section aria-live="polite">You’ve hit your limit for Claude messages. Resets at 9:30 PM.</section>')).toBe(true);
+    expect(limited('<div data-message-author-role="assistant">Your bank says you hit your limit on the card in October.</div>')).toBe(false);
+    expect(limited('<p>Upgrade to keep chatting</p>')).toBe(false);
+  });
 });
