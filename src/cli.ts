@@ -336,16 +336,6 @@ function printStatusHint(args: readonly string[]): void {
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
-  if (args[0] === 'prefilter-train-offline') {
-    const { prefilterTrainOfflineMain } = await import('./workers/classification/prefilter-train-offline.ts');
-    process.exitCode = prefilterTrainOfflineMain(args.slice(1));
-    return;
-  }
-  if (args[0] === 'prefilter-training-dry-run') {
-    const { prefilterTrainingDryRunMain } = await import('./workers/classification/prefilter-training-dry-run.ts');
-    process.exitCode = prefilterTrainingDryRunMain(args.slice(1));
-    return;
-  }
   if (!isV04PublicCliInvocation(args)) {
     console.error(`Unknown command: ${args.filter((arg) => !isHelpFlag(arg)).join(' ')}`);
     printStatusHint(args);

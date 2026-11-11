@@ -8,7 +8,6 @@ import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
 import * as resolver from '../src/workers/classification/sniffer-resolver.ts';
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
-import type { EmbeddingPrefilter } from '../src/workers/classification/embedding-prefilter.ts';
 import { flushTierMoveNotes, moveTieredItem, moveTieredItemsLowering, type TierMoveOptions } from '../src/workers/connector-store/tier-move.ts';
 import { readEmbeddingLedger } from '../src/workers/embedding-ledger.ts';
 import { createTestClock } from './helpers/test-clock.ts';
@@ -227,56 +226,6 @@ function serviceFor(f: TierFixture, autoMoves: Partial<NonNullable<ConstructorPa
   return { service, lines };
 }
 
-test('validation defers timer retries of failed raises, but new raises still run and failures retry afterward', async () => {
-  const f = await fixture(0);
-  const specs = ['stuck-raise', 'new-raise'].map(id => ({ id, name: 'Synthetic', text: body }));
-  await f.f.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
-  const { service } = serviceFor(f.f, {}, [], { intervalMs: 1 });
-  const runtime = service as unknown as {
-    trainingJudge: string; embeddingPrefilters: Map<string, EmbeddingPrefilter>; moving?: Promise<unknown>;
-    drainMoves(): Promise<unknown>; finishTrainingValidation(signal: AbortSignal): Promise<void>;
-  };
-  let failures = 0;
-  const originalCopy = f.f.stores.secure_local!.importItemCopy.bind(f.f.stores.secure_local!);
-  const copy = spyOn(f.f.stores.secure_local!, 'importItemCopy').mockImplementation((...args) => {
-    if (args[0].identity.providerItemId === 'stuck-raise') { failures++; throw new Error('Synthetic stuck raise'); }
-    return originalCopy(...args);
-  });
-  const wake = spyOn(service, 'wake').mockImplementation(() => {});
-  const run = spyOn(service, 'runOnce').mockResolvedValue({ state: 'skipped_running' });
-  let pulse!: () => void;
-  const originalInterval = globalThis.setInterval;
-  const interval = spyOn(globalThis, 'setInterval').mockImplementation(((callback: () => void, ms: number) => {
-    expect(ms).toBe(1); pulse = callback;
-    return originalInterval(() => {}, 60_000);
-  }) as typeof setInterval);
-  try { service.start(); } finally { interval.mockRestore(); }
-  try {
-    f.f.ledger.recordRoutedPlacement(identityOf('stuck-raise'), high, f.f.set.placementFor(high));
-    await runtime.drainMoves();
-    expect(failures).toBe(1);
-    const filter = { trainingOwner: undefined as unknown as EmbeddingPrefilter, trainingFinalizing: true,
-      async finishValidation() {
-        const marker = f.f.ledger.changeMarker(true);
-        for (let n = 0; n < 3; n++) { pulse(); await runtime.moving; }
-        expect(failures).toBe(1);
-        expect(f.f.ledger.changeMarker(true)).toBe(marker);
-        f.f.ledger.recordRoutedPlacement(identityOf('new-raise'), high, f.f.set.placementFor(high));
-        pulse(); await runtime.moving;
-        expect(f.f.ledger.getCurrent(identityOf('new-raise'))).toMatchObject({ state: 'current', contentTier: 'secure' });
-      } };
-    filter.trainingOwner = filter as unknown as EmbeddingPrefilter;
-    runtime.embeddingPrefilters.set(f.f.ledger.dbPath, filter as unknown as EmbeddingPrefilter);
-    runtime.trainingJudge = 'synthetic';
-    await runtime.finishTrainingValidation(new AbortController().signal);
-    const before = failures;
-    await runtime.drainMoves();
-    expect(failures).toBe(before + 1);
-    expect(f.f.ledger.getCurrent(identityOf('stuck-raise'))?.state).toBe('moving');
-    expect(f.f.stores.internal!.localContent(localId('stuck-raise'))?.chunks ?? []).toEqual([]);
-  } finally { service.stop(); copy.mockRestore(); wake.mockRestore(); run.mockRestore(); }
-});
-
 for (const interrupt of ['copies', 'flips'] as const) test(`interrupted lowering batch resumes after durable ${interrupt}, with one note per move`, async () => {
   const f = await fixture();
   if (interrupt === 'copies') {
@@ -451,7 +400,7 @@ for (const [passMs, fail, backlog] of [[18_000, false, 300], [18_000, true, 300]
     expect(options.passTimeMs).toBe(passMs);
     expect(imports).toBe(0);
     time.spend(passMs);
-    return { clearing: { tried: 3, cleared: 0, spotChecks: 0, skipped: { model_missing: 1, disabled: 2 } }, calls: 0, verdictsApplied: 0, heldLowering: 0,
+    return { calls: 0, verdictsApplied: 0, heldLowering: 0,
       timing: { passMs, setupMs: passMs, dispatchMs: 0, slotWaitMs: 0, modelMs: 0, passSwitches: 0 } } as Awaited<ReturnType<typeof resolver.runSnifferPass>>;
   });
   // Each copy costs one synthetic second, so the slice is a handful of real
@@ -478,7 +427,6 @@ for (const [passMs, fail, backlog] of [[18_000, false, 300], [18_000, true, 300]
     expect(f.f.stores.secure_local!.localContent(localId('synthetic-2'))?.chunks.join('')).toBe(body);
   }
   expect(lines.some(line => line.includes(`direction=lower elapsed_ms=${expectedSlice} backlog=${backlog} slice_ms=${expectedSlice}`))).toBe(true);
-  expect(lines.some(line => line.includes('clearing: tried=3 cleared=0 spot_checks=0 skipped{disabled=2,model_missing=1}'))).toBe(true);
   expect(lines.every(line => !line.includes('synthetic-') && !line.includes(body))).toBe(true);
 }, 15_000);
 
@@ -486,7 +434,7 @@ for (const count of [0, 4]) test(`backlog ${count} preserves the judge's full bu
   const f = await fixture(count, true);
   const pass = spyOn(resolver, 'runSnifferPass').mockImplementation(async options => {
     expect(options.passTimeMs).toBe(18_000);
-    return { clearing: { tried: 0, cleared: 0, spotChecks: 0, skipped: {} }, calls: 0, verdictsApplied: 0 } as Awaited<ReturnType<typeof resolver.runSnifferPass>>;
+    return { calls: 0, verdictsApplied: 0 } as Awaited<ReturnType<typeof resolver.runSnifferPass>>;
   });
   const { service, lines } = serviceFor(f.f, {}, [], {
     passTimeMs: 18_000, modelAvailable: () => true, autoApproveBuiltIn: true, rejudgePerPass: 0,

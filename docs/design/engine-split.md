@@ -5,6 +5,8 @@ Status: design, 2026-11-10. Lane 1 of the 1.5 plan. Code baseline: main
 42815695294, 2026-11-10) requested changes; they are folded in below and
 listed under "Review findings and how they are handled".
 
+2026-11-11: embedding pre-filter removed; it could not save 15% of judge calls at zero owner-label Private misses (#1025).
+
 ## The problem in one paragraph
 
 The worker runs HTTP (dashboard, approvals, pairing, remote surfaces, Ask

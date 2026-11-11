@@ -68,7 +68,6 @@
     "test/data-owner-lock.test.ts": 1,
     "test/email-source-post-connect-log-scrub.test.ts": 1,
     "test/embedding-pass-time-budget.test.ts": 1,
-    "test/embedding-prefilter.test.ts": 3,
     "test/engine-children.test.ts": 2,
     "test/engine-maintenance.test.ts": 4,
     "test/engine-service.test.ts": 2,

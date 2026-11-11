@@ -281,7 +281,7 @@ describe('Olympus data lifecycle', () => {
     }
   });
 
-  test('delete --all removes install prefilter audit and weights at a custom classification path', () => {
+  test('delete --all removes retired prefilter ledger and entire model directories at a custom classification path', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-prefilter-delete-all-'));
     const homeDir = join(dir, 'home');
     const env = { HOME: homeDir, OLYMPUS_CLASSIFICATION_LEDGER_PATH: join(dir, 'custom', 'classification.jsonl') };
@@ -293,10 +293,15 @@ describe('Olympus data lifecycle', () => {
       mkdirSync(weightsDir, { recursive: true, mode: 0o700 });
       const weightsPath = join(weightsDir, 'weights.json');
       writeFileSync(weightsPath, 'synthetic pooled weights', { mode: 0o600 });
+      const legacyDir = embeddingPrefilterDirectory(resolveClassificationLedgerPath(env));
+      mkdirSync(join(legacyDir, 'partial-fit'), { recursive: true });
+      writeFileSync(join(legacyDir, 'partial-fit', 'scratch.json'), 'retired scratch');
       writeFileSync(join(dir, 'custom', 'unrelated.txt'), 'keep');
       deleteOlympusData({ all: true, homeDir, env });
       expect(existsSync(auditPath)).toBe(false);
       expect(existsSync(weightsPath)).toBe(false);
+      expect(existsSync(weightsDir)).toBe(false);
+      expect(existsSync(legacyDir)).toBe(false);
       expect(existsSync(join(dir, 'custom', 'unrelated.txt'))).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });

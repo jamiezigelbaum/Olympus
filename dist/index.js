@@ -16184,6 +16184,7 @@ var init_vocabulary = __esm(() => {
     notRunningLine: "{percent}% read · {items} so far. It goes on from there once imports can run.",
     notRunningLineUncounted: "{percent}% read. It goes on from there once imports can run.",
     removingNotRunningLine: "It is removed once removals can run. The file itself stays where it is.",
+    counting: "Counting what this archive holds…",
     judgedLine: "{judged} judged · {held} waiting for the private model",
     heldWhy: {
       ready: "Until the private model judges them, they stay Private.",
@@ -20828,7 +20829,6 @@ var init_tier_rejudge = __esm(() => {
   init_parent_context();
   init_stored_names();
   init_tier_classifier();
-  init_tier_ledger();
   init_tier_ledger();
   init_secrets_disposition();
   init_tier_placement();

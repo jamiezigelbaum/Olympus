@@ -7930,7 +7930,6 @@ export async function main(): Promise<void> {
         ownerContext: privacyOwnerWords,
         budgetStatePath: join(dirname(resolveClassificationLedgerPath(process.env)), 'tier-sniffer-budget.json'),
         intervalMs: snifferEnv.intervalMs,
-        embeddingPrefilterEnabled: () => snifferEnv.embeddingPrefilterEnabled,
         ...(snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {}),
         ...(snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls }
           : snifferLane.kind === 'venice' ? { concurrentCalls: DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS } : {}),
