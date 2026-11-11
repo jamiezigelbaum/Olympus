@@ -175,10 +175,14 @@ done; exit 1`), 200_000);
     // A failure here is recorded without stopping the leg: nothing after it depends on it.
     try {
       await checked('ask-without-model', async () => {
+        // Listing is checked on its own: the call returns the setup text before dispatch, so a call alone can't prove it.
+        const listed = await engine!.listTools?.();
+        if (!listed) throw new Error('the engine connection cannot list tools');
+        if (!listed.includes('source_answer')) throw new Error('source_answer is not in tools/list');
         const result = await engine!.call('source_answer', { question: 'Is an answer model set up?' });
         if (!result.ok) throw new Error(`source_answer failed instead of explaining setup: ${result.error ?? 'no detail'}`);
         if (result.text.trim() !== ANSWER_MODEL_REQUIRED_TEXT) throw new Error('source_answer did not return the setup text');
-        return 'Ask listed; setup text returned, no answer run';
+        return 'source_answer listed; setup text returned, no answer run';
       });
     } catch (error) {
       if (interrupted) throw error;

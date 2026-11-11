@@ -49,6 +49,7 @@ function rig(failAt?: string, inconclusive = false) {
       if (tool === 'olympus_search') return response({ evidence: outside ? [] : [{ source: source.label, title: 'inside', excerpt: 'inside fact' }] });
       return response({ status: 'answered', answer: outside ? 'I could not find that information.' : 'inside fact', citations: outside ? [] : [{ label: source.label, title: 'inside' }] });
     },
+    listTools: async () => ['olympus_search', 'source_answer', 'source_answer_result', 'source_index_status'],
     close: () => step('engine.close'),
   };
   return { events, commands, machine, options: { sources, dashboard: async () => dashboard, engine: async () => engine, sleep: async () => {} } };
@@ -84,6 +85,7 @@ describe('fresh install canary', () => {
     const r = rig();
     const { checks } = await runFreshInstall(r.machine, { ...r.options, engine: async () => ({
       call: async () => response({ status: 'answered', answer: 'private words', citations: [] }),
+      listTools: async () => ['source_answer'],
       close: async () => {},
     }) });
     const check = checks.find(c => c.id === 'fresh.ask-without-model');
@@ -92,6 +94,17 @@ describe('fresh install canary', () => {
     expect(JSON.stringify(checks)).not.toContain('private words');
     expect(checks.map(c => c.id)).toContain('fresh.dropbox.first-items');
     expect(checks.at(-1)?.id).toBe('fresh.restore-zig');
+  });
+  test('Ask without a model must also be listed, not only callable', async () => {
+    const r = rig();
+    const { checks } = await runFreshInstall(r.machine, { ...r.options, engine: async () => ({
+      call: async () => ({ ok: true, structured: null, text: ANSWER_MODEL_REQUIRED_TEXT }),
+      listTools: async () => ['olympus_search', 'source_index_status'],
+      close: async () => {},
+    }) });
+    const check = checks.find(c => c.id === 'fresh.ask-without-model');
+    expect(check?.status).toBe('fail');
+    expect(check?.detail).toContain('source_answer is not in tools/list');
   });
   test('a failing live check and a failed answer say why, without the answer text', async () => {
     const r = rig();
