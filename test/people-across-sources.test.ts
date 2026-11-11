@@ -107,7 +107,7 @@ describe('one person across sources (#1076)', () => {
         keys: ['email:brianna@example.com', 'phone:+1 415 555 0123', 'sender:telegram:777'],
       });
       const stores = [mail, whatsapp, telegram];
-      const everyone = refreshPeopleIndex(people, stores);
+      const everyone = await refreshPeopleIndex(people, stores);
 
       const brianna = everyone.find((person) => person.displayName === 'Brianna Reyes')!;
       expect(brianna.identities.map((identity) => identity.provider).sort()).toEqual(['gmail', 'telegram', 'whatsapp']);
