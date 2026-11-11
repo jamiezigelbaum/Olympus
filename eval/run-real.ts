@@ -237,6 +237,7 @@ async function main(): Promise<void> {
     analystPromptByteBudget,
     (pack) => detailsByPack.get(pack)?.candidateCorpusIds,
     (pack, seats) => analystSeatsByPack.set(pack, seats),
+    (pack) => detailsByPack.get(pack)?.recencySeats,
   );
   const traces: Array<PrecisionTrace & { retrieval?: EvalRetrievalAudit; answerStage?: EvalAnswerStageAudit }> = [];
   const evaluated = await runEval(dataset, {
@@ -870,6 +871,7 @@ export function promptFittedEvalAnalyst(
   promptByteBudget: number | undefined,
   candidateCorpusIds: (pack: EvidencePack) => readonly string[] | undefined,
   onSeats: (pack: EvidencePack, seats: number[]) => void,
+  recencySeats: (pack: EvidencePack) => number | undefined = () => undefined,
 ): Analyst {
   return {
     analyze(pack, analyzeOptions) {
@@ -881,6 +883,7 @@ export function promptFittedEvalAnalyst(
           promptByteBudget,
           new Map(pack.candidates.map((candidate, index) => [candidate, corpusIds[index] ?? ''] as const)),
           analyzeOptions,
+          recencySeats(pack),
         );
       onSeats(pack, sent.candidates.map((candidate) =>
         pack.candidates.findIndex((original) => original.provenance === candidate.provenance) + 1));

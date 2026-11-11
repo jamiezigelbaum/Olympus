@@ -70,7 +70,7 @@ import {
   type SourceIndexSkippedCorpus,
   type SourceIndexVisibilityGate,
 } from '../../core/source-index/router.ts';
-import { mergeRetrievalDegradations } from '../../core/source-index/retrieval.ts';
+import { mergeRetrievalDegradations, RESERVED_HEAD_SEATS } from '../../core/source-index/retrieval.ts';
 import {
   assertEvidencePackModelEligible,
   assertModelTrustTierAllowed,
@@ -536,8 +536,8 @@ export function createAnalystSourceIndexAnswerHandler(
           },
         });
         return {
-          localLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(guarded(analyst), localPromptBytes, candidateCorpus),
-          cloudLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(guarded(analyst), CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus),
+          localLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(guarded(analyst), localPromptBytes, candidateCorpus, analysisDetail.recencySeats),
+          cloudLeg: (analyst: Analyst): Analyst => promptBudgetedAnalyst(guarded(analyst), CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus, analysisDetail.recencySeats),
           trustedLeg: (analyst: Analyst): Analyst => guarded({ analyze: (dispatchPack, analyzeOptions) => {
             // Page asks use the same content-bearing candidates as the computer path.
             // Keep the full detail for the existing fail-closed release checks.
@@ -1001,18 +1001,15 @@ function promptBudgetedAnalyst(
   analyst: Analyst,
   promptBytes: number,
   candidateCorpus: ReadonlyMap<EvidenceCandidate, string>,
+  recencySeats?: number,
 ): Analyst {
   return {
     analyze: (pack, analyzeOptions) => analyst.analyze(
-      fitPackToPromptBytes(pack, promptBytes, candidateCorpus, analyzeOptions),
+      fitPackToPromptBytes(pack, promptBytes, candidateCorpus, analyzeOptions, recencySeats),
       analyzeOptions,
     ),
   };
 }
-
-// Pack seats kept ahead of store turn when fitting: seat 1 plus the two
-// reserved leader seats (withReservedLeaderSeats in core/source-index).
-const RESERVED_PACK_HEAD_SEATS = 3;
 
 // Floor for one candidate's passage share when fitting a pack to a lane.
 const MIN_FITTED_BYTES_PER_CANDIDATE = 600;
@@ -1021,8 +1018,9 @@ const MIN_FITTED_BYTES_PER_CANDIDATE = 600;
  * Fit a pack so the analyst's whole prompt (system rules, every candidate's
  * labels and provenance, passages, coverage) is at most maxPromptBytes of
  * UTF-8. Keeps as many candidates as can each carry a usable passage share,
- * the pack's first three seats first and the rest round-robin across
- * corpora, then clips passages; the measurement is
+ * the pack's first three seats first, then each other store's first result,
+ * then any recency seats, and the rest round-robin across corpora, then clips
+ * passages; the measurement is
  * the real prompt, so labels and escaping are counted, not estimated.
  */
 export function fitPackToPromptBytes(
@@ -1030,13 +1028,19 @@ export function fitPackToPromptBytes(
   maxPromptBytes: number,
   candidateCorpus: ReadonlyMap<EvidenceCandidate, string>,
   analyzeOptions: AnalystOptions,
+  recencySeats = 0,
 ): EvidencePack {
   if (analystPromptBytes(pack, analyzeOptions) <= maxPromptBytes) return pack;
   // The first three seats go first: the router reserves seats 2 and 3 for
   // the strongest keyword and names-only leaders across stores (#1350), and
   // store turn alone would trim them whenever they share seat 1's store.
-  const head = pack.candidates.slice(0, RESERVED_PACK_HEAD_SEATS);
-  const order = [...head, ...roundRobinCandidates(pack.candidates.slice(RESERVED_PACK_HEAD_SEATS), candidateCorpus)];
+  // Recency seats (seat 4 on, a recency question's newest chat messages) come
+  // right after every store's first result, so they never cost a store its
+  // only read seat.
+  const head = pack.candidates.slice(0, RESERVED_HEAD_SEATS);
+  const recency = pack.candidates.slice(RESERVED_HEAD_SEATS, RESERVED_HEAD_SEATS + recencySeats);
+  const rest = roundRobinCandidates(pack.candidates.slice(RESERVED_HEAD_SEATS + recencySeats), candidateCorpus);
+  const order = [...head, ...withRecencyAfterStoreFirsts(recency, rest, [...head, ...recency], candidateCorpus)];
   let fallback: EvidencePack | undefined;
   for (let keep = order.length; keep >= 1; keep -= 1) {
     const kept = new Set(order.slice(0, keep));
@@ -1065,6 +1069,25 @@ export function fitPackToPromptBytes(
   // Nothing fits even one candidate's labels: send the smallest pack rather
   // than none, and let the transport's own ceiling report it.
   return fallback ?? restatePack(pack, order.slice(0, 1).map((candidate) => ({ ...candidate, chunks: [] })), candidateCorpus);
+}
+
+// Without recency seats this is store turn unchanged. With them, every store
+// not yet read gets its first result in before the recency seats.
+function withRecencyAfterStoreFirsts(
+  recency: readonly EvidenceCandidate[],
+  rest: readonly EvidenceCandidate[],
+  ahead: readonly EvidenceCandidate[],
+  candidateCorpus: ReadonlyMap<EvidenceCandidate, string>,
+): EvidenceCandidate[] {
+  if (recency.length === 0) return [...rest];
+  const read = new Set(ahead.map((candidate) => candidateCorpus.get(candidate) ?? ''));
+  const firsts = rest.filter((candidate) => {
+    const corpusId = candidateCorpus.get(candidate) ?? '';
+    if (read.has(corpusId)) return false;
+    read.add(corpusId);
+    return true;
+  });
+  return [...firsts, ...recency, ...rest.filter((candidate) => !firsts.includes(candidate))];
 }
 
 function roundRobinCandidates(

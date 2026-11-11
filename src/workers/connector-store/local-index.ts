@@ -14868,19 +14868,27 @@ function withPinnedNewestChatHits(input: {
   const pinCount = Math.min(CHAT_RECENCY_PIN_COUNT, input.hits.length ? limit - 1 : limit, input.recencyRows.length);
   if (pinCount === 0) return input.hits;
   const result = [...input.hits];
-  const present = new Set(result.map((hit) => hit.sourceItem.localItemId));
   for (let index = 0; index < pinCount; index += 1) {
     const row = input.recencyRows[index]!;
-    if (present.has(row.sourceItem.localItemId)) continue;
+    // Each pinned message says it is one of the newest, so a recency
+    // question can seat it in the pack (withReservedRecencySeats).
+    const newestInStore = index + 1;
+    const at = result.findIndex((hit) => hit.sourceItem.localItemId === row.sourceItem.localItemId);
+    if (at >= 0) {
+      result[at] = { ...result[at]!, newestInStore };
+      continue;
+    }
     while (result.length >= limit) result.pop();
-    result.push(connectorStoreHitFromRow(
-      input.store,
-      row,
-      CHAT_RECENCY_WEIGHT * reciprocalRank(index + 1),
-      input.resultProjector,
-      input.locatorPathScope,
-    ));
-    present.add(row.sourceItem.localItemId);
+    result.push({
+      ...connectorStoreHitFromRow(
+        input.store,
+        row,
+        CHAT_RECENCY_WEIGHT * reciprocalRank(index + 1),
+        input.resultProjector,
+        input.locatorPathScope,
+      ),
+      newestInStore,
+    });
   }
   return result;
 }

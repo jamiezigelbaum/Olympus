@@ -44,6 +44,7 @@ import {
   applyPerCorpusResultBudget,
   fuseRankedCandidateLanes,
   mergeRetrievalDegradations,
+  withReservedRecencySeats,
 } from './source-index/retrieval.ts';
 import {
   routeSourceIndexSearch,
@@ -250,6 +251,9 @@ export interface SelectedEvidenceItem {
 export interface EvidencePackBuildDetail {
   pack: EvidencePack;
   candidateCorpusIds: readonly string[];
+  // Recency seats the router took (seat 4 on; withReservedRecencySeats), so a
+  // prompt fit can keep them. Absent when none were taken.
+  recencySeats?: number;
   laneAudits: readonly RetrievalLaneAudit[];
   // Members of laneAudits (by object identity) from a corpus that contributed
   // anything secure (router.ts secureLaneAudits). Kept whole here for
@@ -327,8 +331,7 @@ export async function buildEvidencePackDetailed(input: BuildEvidencePackInput): 
 async function buildPreparedEvidencePackDetailed(
   input: BuildEvidencePackInput,
 ): Promise<EvidencePackBuildDetail> {
-  const reranker = input.reranker && !input.selectedItems?.length
-    && !hasTemporalIntent(input.question) && !hasTemporalIntent(input.searchQuery ?? '')
+  const reranker = input.reranker && !input.selectedItems?.length && !questionHasTemporalIntent(input)
     ? input.reranker
     : undefined;
   const retrievalLimit = reranker ? rerankPoolSize(reranker, input.maxResults) : input.maxResults;
@@ -544,6 +547,7 @@ async function buildPreparedEvidencePackDetailed(
   return {
     pack: { question: input.question, candidates: labelled.candidates, coverage, builtAt },
     candidateCorpusIds,
+    ...(routed.recencySeats ? { recencySeats: routed.recencySeats } : {}),
     laneAudits,
     secureLaneAudits,
     skippedCorpora: routed.skippedCorpora,
@@ -694,6 +698,10 @@ function contentFreePolicyLaneAudits(
   }));
 }
 
+function questionHasTemporalIntent(input: Pick<BuildEvidencePackInput, 'question' | 'searchQuery'>): boolean {
+  return hasTemporalIntent(input.question) || hasTemporalIntent(input.searchQuery ?? '');
+}
+
 export function hasTemporalIntent(value: string): boolean {
   const normalized = value.toLowerCase();
   // "just got/received", "right now", "today", "N minutes ago" are the chat
@@ -720,7 +728,7 @@ type RoutedSearchSlice = Pick<
   SourceIndexRoutedSearchResponse,
   'hits' | 'searchedCorpora' | 'skippedCorpora' | 'laneAudits' | 'degradations' | 'matchCounts'
   | 'encounteredSecureLocal' | 'secureLaneAudits'
-> & Partial<Pick<SourceIndexRoutedSearchResponse, 'corpusTimings'>>;
+> & Partial<Pick<SourceIndexRoutedSearchResponse, 'corpusTimings' | 'recencySeats'>>;
 
 function selectedItemsToRoutedSlice(input: BuildEvidencePackInput): RoutedSearchSlice {
   const hits: SourceIndexRoutedSearchHit[] = [];
@@ -854,7 +862,13 @@ async function runRoutedSearches(
     // record it.
     tieBreaker: (left, right) => String(left.id).localeCompare(String(right.id)),
   });
-  const { hits: fused, degradations: budgetDegradations } = applyPerCorpusResultBudget(ranked, retrievalLimit);
+  const budgeted = applyPerCorpusResultBudget(ranked, retrievalLimit);
+  // The fused budget cuts again, so the recency seats are taken again from
+  // the fused pool; the router's leader seats are not re-reserved here.
+  const recency = questionHasTemporalIntent(input)
+    ? withReservedRecencySeats(budgeted, ranked.map((candidate) => candidate.item), retrievalLimit)
+    : { ...budgeted, recencySeats: 0 };
+  const { hits: fused, degradations: budgetDegradations } = recency;
 
   return {
     hits: fused,
@@ -874,6 +888,7 @@ async function runRoutedSearches(
     ...(literalRun.matchCounts ? { matchCounts: literalRun.matchCounts } : {}),
     // Every run of this build, expansions included: what any of them met.
     encounteredSecureLocal: runs.some((run) => run.encounteredSecureLocal),
+    ...(recency.recencySeats > 0 ? { recencySeats: recency.recencySeats } : {}),
   };
 }
 
@@ -908,6 +923,7 @@ function runRoutedSearch(
         maxResults,
         ...(input.corpusIds ? { corpusIds: input.corpusIds } : {}),
         context: input.searchContext,
+        ...(questionHasTemporalIntent(input) ? { temporalIntent: true } : {}),
       },
       ...(input.laneTimeoutMs !== undefined ? { laneTimeoutMs: input.laneTimeoutMs } : {}),
       ...(input.visibilityGate ? { visibilityGate: input.visibilityGate } : {}),
