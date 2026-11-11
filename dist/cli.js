@@ -44775,14 +44775,15 @@ var init_local_index = __esm(() => {
       const kept = selected.slice(0, limit);
       const located = [];
       const locatedRows = [];
-      for (const row of kept) {
+      const chunks = ftsOptions.locate === false ? new Map : yield* this.keywordChunkMatchesSteps(kept, spanTerms);
+      for (const [index, row] of kept.entries()) {
         const base = searchRowFromItemRow(row);
         if (ftsOptions.locate === false || row.chunk_pk === null || row.chunk_pk === undefined) {
           located.push(row.chunk_pk === null || row.chunk_pk === undefined || ftsOptions.locate !== false ? base : { ...base, contentMatched: true });
           locatedRows.push(row);
           continue;
         }
-        const chunk = yield* this.keywordChunkMatchSteps(row, row.chunk_pk, spanTerms);
+        const chunk = chunks.get(index);
         if (!chunk)
           continue;
         located.push({ ...base, chunk });
@@ -44871,21 +44872,38 @@ var init_local_index = __esm(() => {
       const itemOffset = priorRows.reduce((sum, prior) => sum + prior.bounded_text.length, 0);
       return chunkMatchFromRows(chunkPk, row, itemOffset, lane, queryTerms);
     }
-    *keywordChunkMatchSteps(item, chunkPk, queryTerms) {
-      const rows = yield {
+    *keywordChunkMatchesSteps(rows, queryTerms) {
+      const wanted = [...rows.entries()].filter(([, row]) => row.chunk_pk !== null && row.chunk_pk !== undefined);
+      const matches = new Map;
+      if (wanted.length === 0)
+        return matches;
+      const found = yield {
         mode: "all",
-        sql: `SELECT c.chunk_pk, c.chunk_index, c.content_hash, c.bounded_text
-        FROM chunks c JOIN items i ON i.item_pk = c.item_pk
-        WHERE c.item_pk = ? AND i.local_item_id = ? AND i.source_version IS ? AND i.tombstoned = 0
-          AND c.chunk_index <= (SELECT t.chunk_index FROM chunks t WHERE t.chunk_pk = ? AND t.item_pk = ?)
-        ORDER BY c.chunk_index`,
-        params: [item.item_pk, item.local_item_id, item.source_version ?? null, chunkPk, item.item_pk]
+        sql: `WITH want(ordinal, item_pk, local_item_id, source_version, chunk_pk) AS (VALUES ${wanted.map(() => "(?, ?, ?, ?, ?)").join(", ")})
+        SELECT w.ordinal, w.chunk_pk AS want_chunk_pk, c.chunk_pk, c.chunk_index, c.content_hash, c.bounded_text
+        FROM want w
+        JOIN items i ON i.item_pk = w.item_pk AND i.local_item_id = w.local_item_id AND i.source_version IS w.source_version AND i.tombstoned = 0
+        JOIN chunks c ON c.item_pk = w.item_pk
+          AND c.chunk_index <= (SELECT t.chunk_index FROM chunks t WHERE t.chunk_pk = w.chunk_pk AND t.item_pk = w.item_pk)
+        ORDER BY w.ordinal, c.chunk_index`,
+        params: wanted.flatMap(([index, row]) => [index, row.item_pk, row.local_item_id, row.source_version ?? null, row.chunk_pk])
       };
-      const row = rows.at(-1);
-      if (!row || row.chunk_pk !== chunkPk)
-        return;
-      const itemOffset = rows.slice(0, -1).reduce((sum, prior) => sum + prior.bounded_text.length, 0);
-      return chunkMatchFromRows(chunkPk, row, itemOffset, "keyword", queryTerms);
+      const byOrdinal = new Map;
+      for (const row of found) {
+        const held = byOrdinal.get(row.ordinal);
+        if (held)
+          held.push(row);
+        else
+          byOrdinal.set(row.ordinal, [row]);
+      }
+      for (const [ordinal, chunks] of byOrdinal) {
+        const row = chunks.at(-1);
+        if (row.chunk_pk !== row.want_chunk_pk)
+          continue;
+        const itemOffset = chunks.slice(0, -1).reduce((sum, prior) => sum + prior.bounded_text.length, 0);
+        matches.set(ordinal, chunkMatchFromRows(row.chunk_pk, row, itemOffset, "keyword", queryTerms));
+      }
+      return matches;
     }
     recentItems(maxResults, accountScope, filters) {
       const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
