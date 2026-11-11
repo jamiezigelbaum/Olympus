@@ -28,7 +28,7 @@ import { tierLedgerIdentityKey, type TierLedger, type TierLedgerIdentity, type T
 import {
   hiddenChildKeysSteps, itemVerdictsSteps, childVisibilityUnchanged,
   ledgerVisibilityHere, ledgerVisibilityOffThread, itemStatesOffThread, memoVisibilityItemsHere,
-  visibilityRead, visibilityHere, visibilityOffThread,
+  visibilityRead, visibilityHere, visibilityOffThread, judgedAwaited, VisibilityChangedError,
   type VisibilityRead, type ChildVisibilityStore,
 } from './child-visibility.ts';
 
@@ -81,10 +81,15 @@ export function createTierVisibilityGate(
   // The same judgment with each ledger read in one snapshot on the read pool,
   // for the search's own fan-out, which can wait for it (#1305).
   gate.offThread = async (hits) => {
+    if (scopes().length === 0 || hits.length === 0) return hits;
+    // A write during the pooled judgment takes it again, then judges here once.
+    return judgedAwaited(() => judgedOffThread(hits), () => gate(hits));
+  };
+  const judgedOffThread = async (hits: readonly SourceIndexRoutedSearchHit[]): Promise<readonly SourceIndexRoutedSearchHit[]> => {
     const current = scopes();
-    if (current.length === 0 || hits.length === 0) return hits;
     const reads = new Map<TierVisibilityScope, TierVisibilityReads | undefined>();
     const unchanged = new Map<TierVisibilityScope, () => boolean>();
+    let changedDuringRead = false;
     for (const scope of current) {
       if (governedBy(scope, hits).length === 0) continue;
       try { unchanged.set(scope, childVisibilityUnchanged({ ledger: () => scope.ledger, stores: scope.stores ?? (() => []) })); }
@@ -95,16 +100,18 @@ export function createTierVisibilityGate(
       if (governed.length === 0) return;
       try {
         reads.set(scope, await ledgerVisibilityReads(scope.ledger, governed.map((hit) => hit.sourceItem), readOptions));
-      } catch {
+      } catch (error) {
+        if (error instanceof VisibilityChangedError) changedDuringRead = true;
         reads.set(scope, undefined);
       }
     }));
     const visible = await visibilityOffThread(judgeVisibility(current, hits, reads, onHeldMatches));
-    const changed = current.filter(scope => {
+    const changed = changedDuringRead || current.some(scope => {
       try { return unchanged.has(scope) && !unchanged.get(scope)!(); }
       catch { return true; }
     });
-    return visible.filter(hit => !changed.some(scope => scope.corpusIds.has(hit.corpusId)));
+    if (changed) throw new VisibilityChangedError();
+    return visible;
   };
   return gate;
 }
@@ -302,12 +309,13 @@ export function createReleaseTierCheck(
   return {
     secureDerivativeDefault,
     inputs: (inputs) => visibilityHere(inputsSteps(inputs)),
-    inputsOffThread: async (inputs) => {
+    // A write during the pooled check takes it again, then checks here once.
+    inputsOffThread: (inputs) => judgedAwaited(async () => {
       const unchanged = scopes().map(scope => childVisibilityUnchanged({ ledger: () => scope.ledger, stores: scope.stores ?? (() => []) }));
       const verdicts = await visibilityOffThread(inputsSteps(inputs));
-      if (unchanged.some(check => !check())) throw new Error('Visibility changed during release');
+      if (unchanged.some(check => !check())) throw new VisibilityChangedError();
       return verdicts;
-    },
+    }, () => visibilityHere(inputsSteps(inputs))),
   };
 }
 

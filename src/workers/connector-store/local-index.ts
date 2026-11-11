@@ -112,6 +112,7 @@ import {
   visibilityRead,
   visibilityHere,
   visibilityOffThread,
+  visibilityAwaited,
   parentVerdictsSteps,
   hiddenChildKeysSteps,
   ledgerVisibilityOffThread,
@@ -3800,7 +3801,9 @@ export class LocalConnectorStore {
     // Keep the counts' start-of-build semantics during continuous intake.
     // Search and embedding recheck served rows; requiring the whole lane to
     // stay unchanged across this full scan would prevent its memo ever filling.
-    return this.withHiddenChildren(base, await visibilityOffThread(this.hiddenChildReadSteps()));
+    // Not voided on a change: this set keeps its start-of-build semantics (above),
+    // and a change met inside one step is that step's to fail or hide.
+    return this.withHiddenChildren(base, await visibilityOffThread(this.hiddenChildReadSteps(), undefined, { voidOnChange: false }));
   }
 
   private tierLedgerHiddenItemPks(): TierLedgerHiddenItemPks {
@@ -13285,7 +13288,7 @@ export class LocalConnectorStore {
   }
 
   async stillVisibleSearchRowsOffThread<T extends Pick<ConnectorStoreSearchRow, 'sourceItem' | 'chunk' | 'contentMatched'>>(rows: readonly T[]): Promise<T[]> {
-    return visibilityOffThread(this.tierVisibleRowsSteps(
+    return visibilityAwaited(() => this.tierVisibleRowsSteps(
       rows,
       (row) => ({
         provider: row.sourceItem.provider,
@@ -13810,7 +13813,7 @@ export class LocalConnectorStore {
       throw error;
     }
     if (this.closedForPoolReads) return [];
-    return (await visibilityOffThread(this.tierVisibleRowsSteps(rows, row => ({
+    return (await visibilityAwaited(() => this.tierVisibleRowsSteps(rows, row => ({
       provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id,
       ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
     }), () => 'content'), this.childVisibilityLane())).map(row => searchRowFromItemRow(row));

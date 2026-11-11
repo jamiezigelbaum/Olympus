@@ -64,17 +64,49 @@ export function visibilityHere<T>(steps: Generator<VisibilityRead, T, unknown>):
   return next.value;
 }
 
-export async function visibilityOffThread<T>(steps: Generator<VisibilityRead, T, unknown>, lane?: ChildVisibilityLane): Promise<T> {
+// The ledger or a store changed while an awaited judgment read it. Its
+// verdicts may be stale, so the judgment is taken again, never served.
+export class VisibilityChangedError extends Error {
+  constructor() { super('Visibility changed during read'); this.name = 'VisibilityChangedError'; }
+}
+
+export async function visibilityOffThread<T>(steps: Generator<VisibilityRead, T, unknown>, lane?: ChildVisibilityLane, options: { voidOnChange?: boolean } = {}): Promise<T> {
   const unchanged = lane ? childVisibilityUnchanged(lane) : undefined;
+  let changed = false;
   let next = steps.next();
   while (!next.done) {
     let result: unknown;
     try { result = await next.value.offThread(); }
-    catch (error) { next = steps.throw(error); continue; }
+    catch (error) {
+      // A step may turn a failed read into a hidden verdict; a change must
+      // still void the whole judgment.
+      if (error instanceof VisibilityChangedError) changed = true;
+      next = steps.throw(error);
+      continue;
+    }
     next = steps.next(result);
   }
-  if (unchanged && !unchanged()) throw new Error('Visibility changed during read');
+  if ((changed && options.voidOnChange !== false) || (unchanged && !unchanged())) throw new VisibilityChangedError();
   return next.value;
+}
+
+// How many times an awaited judgment is taken again after a write landed
+// during it. The ledger marker covers the whole ledger, and a live install
+// writes to it constantly while it judges and syncs, so one unrelated write
+// must not withhold an Ask's hits. After these, the judgment runs once here,
+// on this thread, where it is atomic: only a busy or failing pool withholds.
+export const VISIBILITY_CHANGE_RETRIES = 3;
+
+export async function judgedAwaited<T>(attempt: () => Promise<T>, here: () => T): Promise<T> {
+  for (let tries = 0; tries < VISIBILITY_CHANGE_RETRIES; tries += 1) {
+    try { return await attempt(); }
+    catch (error) { if (!(error instanceof VisibilityChangedError)) throw error; }
+  }
+  return here();
+}
+
+export function visibilityAwaited<T>(make: () => Generator<VisibilityRead, T, unknown>, lane?: ChildVisibilityLane): Promise<T> {
+  return judgedAwaited(() => visibilityOffThread(make(), lane), () => visibilityHere(make()));
 }
 
 // A request rechecks the same identities at search, hydration and release.
@@ -121,7 +153,7 @@ export async function memoVisibilityItems<K, V>(
   const memo = askReadMemo(owner, kind, before);
   const missing = [...asked].filter(([key]) => !memo?.rows.has(key)).map(([, item]) => item);
   const fresh = missing.length > 0 ? await read(missing) : new Map<string, V>();
-  if (marker() !== before) throw new Error('Visibility changed during read');
+  if (marker() !== before) throw new VisibilityChangedError();
   if (memo) for (const item of missing) memo.rows.set(keyOf(item), fresh.get(keyOf(item)));
   const out = new Map<string, V>();
   for (const key of asked.keys()) {

@@ -34051,22 +34051,39 @@ function visibilityHere(steps) {
   }
   return next.value;
 }
-async function visibilityOffThread(steps, lane) {
+async function visibilityOffThread(steps, lane, options = {}) {
   const unchanged = lane ? childVisibilityUnchanged(lane) : undefined;
+  let changed = false;
   let next = steps.next();
   while (!next.done) {
     let result;
     try {
       result = await next.value.offThread();
     } catch (error) {
+      if (error instanceof VisibilityChangedError)
+        changed = true;
       next = steps.throw(error);
       continue;
     }
     next = steps.next(result);
   }
-  if (unchanged && !unchanged())
-    throw new Error("Visibility changed during read");
+  if (changed && options.voidOnChange !== false || unchanged && !unchanged())
+    throw new VisibilityChangedError;
   return next.value;
+}
+async function judgedAwaited(attempt, here) {
+  for (let tries = 0;tries < VISIBILITY_CHANGE_RETRIES; tries += 1) {
+    try {
+      return await attempt();
+    } catch (error) {
+      if (!(error instanceof VisibilityChangedError))
+        throw error;
+    }
+  }
+  return here();
+}
+function visibilityAwaited(make, lane) {
+  return judgedAwaited(() => visibilityOffThread(make(), lane), () => visibilityHere(make()));
 }
 function memoVisibilityItemsHere(owner, kind, marker, items, keyOf, read) {
   const asked = new Map(items.map((item) => [keyOf(item), item]));
@@ -34107,7 +34124,7 @@ async function memoVisibilityItems(owner, kind, marker, items, keyOf, read) {
   const missing = [...asked].filter(([key2]) => !memo?.rows.has(key2)).map(([, item]) => item);
   const fresh = missing.length > 0 ? await read(missing) : new Map;
   if (marker() !== before)
-    throw new Error("Visibility changed during read");
+    throw new VisibilityChangedError;
   if (memo)
     for (const item of missing)
       memo.rows.set(keyOf(item), fresh.get(keyOf(item)));
@@ -34422,11 +34439,17 @@ function* hiddenChildKeysSteps(lane, probes) {
   }
   return yield* childrenWithHiddenParentsSteps(lane, links);
 }
-var askReads, releasing, CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
+var VisibilityChangedError, VISIBILITY_CHANGE_RETRIES = 3, askReads, releasing, CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
 var init_child_visibility = __esm(() => {
   init_tier_ledger();
   init_answer_latency_trace();
   init_off_thread_reads();
+  VisibilityChangedError = class VisibilityChangedError extends Error {
+    constructor() {
+      super("Visibility changed during read");
+      this.name = "VisibilityChangedError";
+    }
+  };
   askReads = new WeakMap;
   releasing = new WeakSet;
   HIDDEN = { visible: false, gone: false };
@@ -40078,7 +40101,7 @@ var init_local_index = __esm(() => {
     }
     async tierHiddenItemPksInTurns() {
       const base = await runStepsInTurns(this.tierLedgerHiddenSteps());
-      return this.withHiddenChildren(base, await visibilityOffThread(this.hiddenChildReadSteps()));
+      return this.withHiddenChildren(base, await visibilityOffThread(this.hiddenChildReadSteps(), undefined, { voidOnChange: false }));
     }
     tierLedgerHiddenItemPks() {
       return runSteps(this.tierLedgerHiddenSteps());
@@ -46051,7 +46074,7 @@ var init_local_index = __esm(() => {
       }), (row) => row.chunk !== undefined || row.contentMatched === true ? "content" : "metadata");
     }
     async stillVisibleSearchRowsOffThread(rows) {
-      return visibilityOffThread(this.tierVisibleRowsSteps(rows, (row) => ({
+      return visibilityAwaited(() => this.tierVisibleRowsSteps(rows, (row) => ({
         provider: row.sourceItem.provider,
         accountScope: row.sourceItem.accountScope,
         providerItemId: row.sourceItem.providerItemId,
@@ -46400,7 +46423,7 @@ var init_local_index = __esm(() => {
       }
       if (this.closedForPoolReads)
         return [];
-      return (await visibilityOffThread(this.tierVisibleRowsSteps(rows, (row) => ({
+      return (await visibilityAwaited(() => this.tierVisibleRowsSteps(rows, (row) => ({
         provider: row.provider,
         accountScope: row.account_scope,
         providerItemId: row.provider_item_id,
@@ -210261,11 +210284,15 @@ function createTierVisibilityGate(scopes, onHeldMatches) {
     return visibilityHere(judgeVisibility(current2, hits, reads, onHeldMatches));
   };
   gate.offThread = async (hits) => {
-    const current2 = scopes();
-    if (current2.length === 0 || hits.length === 0)
+    if (scopes().length === 0 || hits.length === 0)
       return hits;
+    return judgedAwaited(() => judgedOffThread(hits), () => gate(hits));
+  };
+  const judgedOffThread = async (hits) => {
+    const current2 = scopes();
     const reads = new Map;
     const unchanged = new Map;
+    let changedDuringRead = false;
     for (const scope of current2) {
       if (governedBy(scope, hits).length === 0)
         continue;
@@ -210281,19 +210308,23 @@ function createTierVisibilityGate(scopes, onHeldMatches) {
         return;
       try {
         reads.set(scope, await ledgerVisibilityReads(scope.ledger, governed.map((hit) => hit.sourceItem), readOptions));
-      } catch {
+      } catch (error2) {
+        if (error2 instanceof VisibilityChangedError)
+          changedDuringRead = true;
         reads.set(scope, undefined);
       }
     }));
     const visible = await visibilityOffThread(judgeVisibility(current2, hits, reads, onHeldMatches));
-    const changed = current2.filter((scope) => {
+    const changed = changedDuringRead || current2.some((scope) => {
       try {
         return unchanged.has(scope) && !unchanged.get(scope)();
       } catch {
         return true;
       }
     });
-    return visible.filter((hit) => !changed.some((scope) => scope.corpusIds.has(hit.corpusId)));
+    if (changed)
+      throw new VisibilityChangedError;
+    return visible;
   };
   return gate;
 }
@@ -210435,13 +210466,13 @@ function createReleaseTierCheck(scopes, secureDerivativeDefault) {
   return {
     secureDerivativeDefault,
     inputs: (inputs) => visibilityHere(inputsSteps(inputs)),
-    inputsOffThread: async (inputs) => {
+    inputsOffThread: (inputs) => judgedAwaited(async () => {
       const unchanged = scopes().map((scope) => childVisibilityUnchanged({ ledger: () => scope.ledger, stores: scope.stores ?? (() => []) }));
       const verdicts = await visibilityOffThread(inputsSteps(inputs));
       if (unchanged.some((check) => !check()))
-        throw new Error("Visibility changed during release");
+        throw new VisibilityChangedError;
       return verdicts;
-    }
+    }, () => visibilityHere(inputsSteps(inputs)))
   };
 }
 function registerGovernedStore(lanes, store, newLane, log = () => {}) {

@@ -22352,22 +22352,47 @@ function visibilityHere(steps) {
   }
   return next.value;
 }
-async function visibilityOffThread(steps, lane) {
+
+class VisibilityChangedError extends Error {
+  constructor() {
+    super("Visibility changed during read");
+    this.name = "VisibilityChangedError";
+  }
+}
+async function visibilityOffThread(steps, lane, options = {}) {
   const unchanged = lane ? childVisibilityUnchanged(lane) : undefined;
+  let changed = false;
   let next = steps.next();
   while (!next.done) {
     let result;
     try {
       result = await next.value.offThread();
     } catch (error) {
+      if (error instanceof VisibilityChangedError)
+        changed = true;
       next = steps.throw(error);
       continue;
     }
     next = steps.next(result);
   }
-  if (unchanged && !unchanged())
-    throw new Error("Visibility changed during read");
+  if (changed && options.voidOnChange !== false || unchanged && !unchanged())
+    throw new VisibilityChangedError;
   return next.value;
+}
+var VISIBILITY_CHANGE_RETRIES = 3;
+async function judgedAwaited(attempt, here) {
+  for (let tries = 0;tries < VISIBILITY_CHANGE_RETRIES; tries += 1) {
+    try {
+      return await attempt();
+    } catch (error) {
+      if (!(error instanceof VisibilityChangedError))
+        throw error;
+    }
+  }
+  return here();
+}
+function visibilityAwaited(make, lane) {
+  return judgedAwaited(() => visibilityOffThread(make(), lane), () => visibilityHere(make()));
 }
 var askReads = new WeakMap;
 function memoVisibilityItemsHere(owner, kind, marker, items, keyOf, read) {
@@ -22409,7 +22434,7 @@ async function memoVisibilityItems(owner, kind, marker, items, keyOf, read) {
   const missing = [...asked].filter(([key2]) => !memo?.rows.has(key2)).map(([, item]) => item);
   const fresh = missing.length > 0 ? await read(missing) : new Map;
   if (marker() !== before)
-    throw new Error("Visibility changed during read");
+    throw new VisibilityChangedError;
   if (memo)
     for (const item of missing)
       memo.rows.set(keyOf(item), fresh.get(keyOf(item)));
@@ -24970,7 +24995,7 @@ class LocalConnectorStore {
   }
   async tierHiddenItemPksInTurns() {
     const base = await runStepsInTurns(this.tierLedgerHiddenSteps());
-    return this.withHiddenChildren(base, await visibilityOffThread(this.hiddenChildReadSteps()));
+    return this.withHiddenChildren(base, await visibilityOffThread(this.hiddenChildReadSteps(), undefined, { voidOnChange: false }));
   }
   tierLedgerHiddenItemPks() {
     return runSteps(this.tierLedgerHiddenSteps());
@@ -30943,7 +30968,7 @@ class LocalConnectorStore {
     }), (row) => row.chunk !== undefined || row.contentMatched === true ? "content" : "metadata");
   }
   async stillVisibleSearchRowsOffThread(rows) {
-    return visibilityOffThread(this.tierVisibleRowsSteps(rows, (row) => ({
+    return visibilityAwaited(() => this.tierVisibleRowsSteps(rows, (row) => ({
       provider: row.sourceItem.provider,
       accountScope: row.sourceItem.accountScope,
       providerItemId: row.sourceItem.providerItemId,
@@ -31292,7 +31317,7 @@ class LocalConnectorStore {
     }
     if (this.closedForPoolReads)
       return [];
-    return (await visibilityOffThread(this.tierVisibleRowsSteps(rows, (row) => ({
+    return (await visibilityAwaited(() => this.tierVisibleRowsSteps(rows, (row) => ({
       provider: row.provider,
       accountScope: row.account_scope,
       providerItemId: row.provider_item_id,
