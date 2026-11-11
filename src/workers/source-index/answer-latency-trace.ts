@@ -84,6 +84,20 @@ export interface SourceAnswerTraceAnalystLeg extends SourceAnswerTraceRouteStep 
   error_class?: string;
 }
 
+// The evidence pack's seat order (#1354): the store id at each seat, how many
+// seats were recency seats, and, per prompt fit an Analyst leg made, the seat
+// numbers (1-based) it kept. Store ids and counts only.
+export interface SourceAnswerTraceEvidenceSeats {
+  packCorpora: string[];
+  recencySeats: number;
+  fits: SourceAnswerTraceAnalystFit[];
+}
+
+export interface SourceAnswerTraceAnalystFit {
+  lane: 'local' | 'cloud';
+  keptSeats: number[];
+}
+
 export interface SourceAnswerTraceSnapshot {
   correlationId: string;
   receivedAt: string;
@@ -109,6 +123,7 @@ export interface SourceAnswerTraceSnapshot {
   recordBuildMs: number;
   appendMs: number;
   releaseDecision?: string;
+  evidenceSeats?: SourceAnswerTraceEvidenceSeats;
 }
 
 interface MutableTrace extends SourceAnswerTraceSnapshot {
@@ -401,6 +416,24 @@ export function recordSourceAnswerSkippedAnalystLeg(
   });
 }
 
+// A rebuilt pack (the private-outage fallback) replaces the earlier one and
+// starts its own list of fits.
+export function recordSourceAnswerPackSeats(corpusIds: readonly string[], recencySeats = 0): void {
+  const trace = currentSourceAnswerTrace();
+  if (!trace) return;
+  trace.evidenceSeats = {
+    packCorpora: [...corpusIds],
+    recencySeats: nonNegativeCount(recencySeats),
+    fits: [],
+  };
+}
+
+export function recordSourceAnswerAnalystFit(lane: SourceAnswerTraceAnalystFit['lane'], keptSeats: readonly number[]): void {
+  const seats = currentSourceAnswerTrace()?.evidenceSeats;
+  if (!seats) return;
+  seats.fits.push({ lane, keptSeats: keptSeats.map(nonNegativeCount) });
+}
+
 export function recordSourceAnswerResidualAnalystOrphan(): void {
   const trace = currentSourceAnswerTrace();
   if (trace) trace.residualAnalystOrphanCount += 1;
@@ -449,6 +482,15 @@ export function snapshotSourceAnswerTrace(trace: MutableTrace): SourceAnswerTrac
     recordBuildMs: trace.recordBuildMs,
     appendMs: trace.appendMs,
     ...(trace.releaseDecision ? { releaseDecision: trace.releaseDecision } : {}),
+    ...(trace.evidenceSeats
+      ? {
+        evidenceSeats: {
+          packCorpora: [...trace.evidenceSeats.packCorpora],
+          recencySeats: trace.evidenceSeats.recencySeats,
+          fits: trace.evidenceSeats.fits.map((fit) => ({ lane: fit.lane, keptSeats: [...fit.keptSeats] })),
+        },
+      }
+      : {}),
   };
 }
 
@@ -487,6 +529,10 @@ function errorClass(error: unknown): string {
 function sanitizeErrorClass(value: string): string {
   const normalized = value.replace(/[^A-Za-z0-9_]/g, '').slice(0, 64);
   return CONTENT_FREE_ERROR_CLASSES.has(normalized) ? normalized : 'Error';
+}
+
+function nonNegativeCount(value: number): number {
+  return Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
 }
 
 function nonNegativeMs(value: number): number {

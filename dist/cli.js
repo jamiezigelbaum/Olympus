@@ -29260,6 +29260,22 @@ function recordSourceAnswerSkippedAnalystLeg(input) {
     error_class: sanitizeErrorClass(input.errorClass)
   });
 }
+function recordSourceAnswerPackSeats(corpusIds, recencySeats = 0) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  trace.evidenceSeats = {
+    packCorpora: [...corpusIds],
+    recencySeats: nonNegativeCount(recencySeats),
+    fits: []
+  };
+}
+function recordSourceAnswerAnalystFit(lane, keptSeats) {
+  const seats = currentSourceAnswerTrace()?.evidenceSeats;
+  if (!seats)
+    return;
+  seats.fits.push({ lane, keptSeats: keptSeats.map(nonNegativeCount) });
+}
 function recordSourceAnswerResidualAnalystOrphan() {
   const trace = currentSourceAnswerTrace();
   if (trace)
@@ -29307,7 +29323,14 @@ function snapshotSourceAnswerTrace(trace) {
     selfHealRebuildMs: trace.selfHealRebuildMs,
     recordBuildMs: trace.recordBuildMs,
     appendMs: trace.appendMs,
-    ...trace.releaseDecision ? { releaseDecision: trace.releaseDecision } : {}
+    ...trace.releaseDecision ? { releaseDecision: trace.releaseDecision } : {},
+    ...trace.evidenceSeats ? {
+      evidenceSeats: {
+        packCorpora: [...trace.evidenceSeats.packCorpora],
+        recencySeats: trace.evidenceSeats.recencySeats,
+        fits: trace.evidenceSeats.fits.map((fit) => ({ lane: fit.lane, keptSeats: [...fit.keptSeats] }))
+      }
+    } : {}
   };
 }
 function sourceAnswerTraceErrorClass(error) {
@@ -29339,6 +29362,9 @@ function errorClass(error) {
 function sanitizeErrorClass(value) {
   const normalized = value.replace(/[^A-Za-z0-9_]/g, "").slice(0, 64);
   return CONTENT_FREE_ERROR_CLASSES.has(normalized) ? normalized : "Error";
+}
+function nonNegativeCount(value) {
+  return Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
 }
 function nonNegativeMs(value) {
   return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
@@ -60134,7 +60160,7 @@ function dropboxContentExtractionStallHours(env = process.env) {
   return value;
 }
 function assessContentExtractionThroughput(signal, options = {}) {
-  const actionable = nonNegativeCount(signal.actionable_queued) + nonNegativeCount(signal.actionable_retryable_due);
+  const actionable = nonNegativeCount2(signal.actionable_queued) + nonNegativeCount2(signal.actionable_retryable_due);
   const thresholdHours = options.thresholdHours ?? DEFAULT_DROPBOX_CONTENT_EXTRACTION_STALL_HOURS;
   if (!Number.isFinite(thresholdHours) || thresholdHours <= 0) {
     throw new Error("Content extraction stall threshold must be greater than zero.");
@@ -60164,7 +60190,7 @@ function validDateMs(value) {
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : undefined;
 }
-function nonNegativeCount(value) {
+function nonNegativeCount2(value) {
   return Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0;
 }
 function round1(value) {
@@ -76012,6 +76038,8 @@ function createAnalystSourceIndexAnswerHandler(options) {
           candidate,
           analysisDetail.candidateCorpusIds[index] ?? ""
         ]));
+        recordSourceAnswerPackSeats(analysisDetail.pack.candidates.map((_, index) => analysisDetail.candidateCorpusIds[index] ?? ""), analysisDetail.recencySeats ?? 0);
+        const seatOf = new Map(analysisDetail.pack.candidates.map((candidate, index) => [candidate.provenance, index + 1]));
         const guarded = (analyst) => ({
           analyze: (dispatchPack, analyzeOptions) => {
             assertDispatchAllowed(analysisDetail);
@@ -76019,8 +76047,8 @@ function createAnalystSourceIndexAnswerHandler(options) {
           }
         });
         return {
-          localLeg: (analyst) => promptBudgetedAnalyst(guarded(analyst), localPromptBytes, candidateCorpus, analysisDetail.recencySeats),
-          cloudLeg: (analyst) => promptBudgetedAnalyst(guarded(analyst), CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus, analysisDetail.recencySeats),
+          localLeg: (analyst) => promptBudgetedAnalyst(guarded(analyst), localPromptBytes, candidateCorpus, analysisDetail.recencySeats, "local", seatOf),
+          cloudLeg: (analyst) => promptBudgetedAnalyst(guarded(analyst), CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus, analysisDetail.recencySeats, "cloud", seatOf),
           trustedLeg: (analyst) => guarded({ analyze: (dispatchPack, analyzeOptions) => {
             const skip = new Set([...analysisDetail.namesOnlyCandidateIndexes ?? [], ...analysisDetail.contentPrivateCandidateIndexes ?? []]);
             const omitted = new Set(analysisDetail.pack.candidates.filter((_, index) => skip.has(index)));
@@ -76299,9 +76327,16 @@ function withLegPromptBudgets(route, localLeg, cloudLeg, veniceLeg) {
     return Array.isArray(resolved) ? fit(resolved) : { ...resolved, steps: fit(resolved.steps) };
   };
 }
-function promptBudgetedAnalyst(analyst, promptBytes, candidateCorpus, recencySeats) {
+function promptBudgetedAnalyst(analyst, promptBytes, candidateCorpus, recencySeats, lane, seatOf) {
   return {
-    analyze: (pack, analyzeOptions) => analyst.analyze(fitPackToPromptBytes(pack, promptBytes, candidateCorpus, analyzeOptions, recencySeats), analyzeOptions)
+    analyze: (pack, analyzeOptions) => {
+      const fitted = fitPackToPromptBytes(pack, promptBytes, candidateCorpus, analyzeOptions, recencySeats);
+      recordSourceAnswerAnalystFit(lane, fitted.candidates.flatMap((candidate) => {
+        const seat = seatOf.get(candidate.provenance);
+        return seat === undefined ? [] : [seat];
+      }));
+      return analyst.analyze(fitted, analyzeOptions);
+    }
   };
 }
 function fitPackToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats = 0) {
@@ -78299,10 +78334,10 @@ function xBookmarksReconcileEvidenceCounts(evidence) {
   const counts = {
     coverage_scope_recency_window: Number(evidence.coverage_scope === "recency_window"),
     window_boundary_verified: Number(evidence.window_boundary_verified),
-    traversal_cardinality: nonNegativeCount2(evidence.traversal_cardinality),
-    verification_cardinality: nonNegativeCount2(evidence.verification_cardinality),
-    absence_items_tombstoned: nonNegativeCount2(evidence.absence_items_tombstoned),
-    out_of_scope_removals: nonNegativeCount2(evidence.out_of_scope_removals)
+    traversal_cardinality: nonNegativeCount3(evidence.traversal_cardinality),
+    verification_cardinality: nonNegativeCount3(evidence.verification_cardinality),
+    absence_items_tombstoned: nonNegativeCount3(evidence.absence_items_tombstoned),
+    out_of_scope_removals: nonNegativeCount3(evidence.out_of_scope_removals)
   };
   for (let index = 0;index < 8; index += 1) {
     counts[`traversal_digest_word_${index}`] = Number.parseInt(traversalDigest.slice(index * 8, index * 8 + 8), 16);
@@ -78422,7 +78457,7 @@ class LocalXBookmarksApiUsageStore {
     }
     const traversalDigestSha256 = normalizeSha256(proof.traversalDigestSha256, "X reconciliation traversal digest");
     const verificationDigestSha256 = normalizeSha256(proof.verificationDigestSha256, "X reconciliation verification digest");
-    if (coverageScope === "recency_window" && (proof.windowBoundaryVerified !== true || traversalDigestSha256 !== verificationDigestSha256 || nonNegativeCount2(counts.traversalCardinality) !== nonNegativeCount2(counts.verificationCardinality))) {
+    if (coverageScope === "recency_window" && (proof.windowBoundaryVerified !== true || traversalDigestSha256 !== verificationDigestSha256 || nonNegativeCount3(counts.traversalCardinality) !== nonNegativeCount3(counts.verificationCardinality))) {
       throw new Error("X recency-window watermark requires matching verified boundary evidence.");
     }
     this.db.query(`
@@ -78470,7 +78505,7 @@ class LocalXBookmarksApiUsageStore {
         updated_at = excluded.updated_at
       WHERE x_bookmarks_live_state.reconcile_completed_at IS NULL
         OR excluded.reconcile_completed_at >= x_bookmarks_live_state.reconcile_completed_at
-    `).run(requireAccount4(account), now, nonNegativeCount2(counts.itemsSeen), nonNegativeCount2(counts.foldersSeen), nonNegativeCount2(counts.folderMembershipsSeen), Number(proof.globalTraversalExhausted === true), Number(proof.globalVerificationMatched === true), Number(proof.removalAuthoritative === true), coverageScope, Number(proof.windowBoundaryVerified === true), traversalDigestSha256, nonNegativeCount2(counts.traversalCardinality), verificationDigestSha256, nonNegativeCount2(counts.verificationCardinality), nonNegativeCount2(counts.absenceItemsTombstoned), nonNegativeCount2(counts.outOfScopeRemovals), Number(proof.folderInventoryAuthoritative === true), nonNegativeCount2(counts.folderInventoryCoverageGaps), nonNegativeCount2(counts.foldersCarriedForward), nonNegativeCount2(counts.folderMembershipCoverageGaps), Number(proof.folderProviderOutage === true || counts.folderProviderOutage === true), Number(proof.stagedRecoveryCompleted === true), now);
+    `).run(requireAccount4(account), now, nonNegativeCount3(counts.itemsSeen), nonNegativeCount3(counts.foldersSeen), nonNegativeCount3(counts.folderMembershipsSeen), Number(proof.globalTraversalExhausted === true), Number(proof.globalVerificationMatched === true), Number(proof.removalAuthoritative === true), coverageScope, Number(proof.windowBoundaryVerified === true), traversalDigestSha256, nonNegativeCount3(counts.traversalCardinality), verificationDigestSha256, nonNegativeCount3(counts.verificationCardinality), nonNegativeCount3(counts.absenceItemsTombstoned), nonNegativeCount3(counts.outOfScopeRemovals), Number(proof.folderInventoryAuthoritative === true), nonNegativeCount3(counts.folderInventoryCoverageGaps), nonNegativeCount3(counts.foldersCarriedForward), nonNegativeCount3(counts.folderMembershipCoverageGaps), Number(proof.folderProviderOutage === true || counts.folderProviderOutage === true), Number(proof.stagedRecoveryCompleted === true), now);
   }
   reserveRequest(input) {
     const account = requireAccount4(input.account);
@@ -78833,11 +78868,11 @@ function xBookmarksReconcileWatermarkFromRow(row) {
     coverage_scope: coverageScope,
     window_boundary_verified: row.reconcile_window_boundary_verified === 1,
     traversal_digest_sha256: normalizeSha256(row.reconcile_traversal_digest_sha256, "X reconciliation traversal digest"),
-    traversal_cardinality: nonNegativeCount2(row.reconcile_traversal_cardinality),
+    traversal_cardinality: nonNegativeCount3(row.reconcile_traversal_cardinality),
     verification_digest_sha256: normalizeSha256(row.reconcile_verification_digest_sha256, "X reconciliation verification digest"),
-    verification_cardinality: nonNegativeCount2(row.reconcile_verification_cardinality),
-    absence_items_tombstoned: nonNegativeCount2(row.reconcile_absence_items_tombstoned),
-    out_of_scope_removals: nonNegativeCount2(row.reconcile_out_of_scope_removals),
+    verification_cardinality: nonNegativeCount3(row.reconcile_verification_cardinality),
+    absence_items_tombstoned: nonNegativeCount3(row.reconcile_absence_items_tombstoned),
+    out_of_scope_removals: nonNegativeCount3(row.reconcile_out_of_scope_removals),
     folder_inventory_authoritative: row.reconcile_folder_inventory_authoritative === 1,
     folder_inventory_coverage_gaps: row.reconcile_folder_inventory_coverage_gaps,
     folders_carried_forward: row.reconcile_folders_carried_forward,
@@ -79091,7 +79126,7 @@ function cadenceSteppedHeadReserve(reserve, cadenceMs, now) {
   const remainingSlots = Math.ceil(remainingMs / cadenceMs);
   return Math.ceil(reserve * remainingSlots / slotsPerDay);
 }
-function nonNegativeCount2(value) {
+function nonNegativeCount3(value) {
   const count = value ?? 0;
   if (!Number.isSafeInteger(count) || count < 0)
     throw new TypeError("X reconciliation counts must be non-negative integers.");
@@ -173214,6 +173249,16 @@ function buildSourceAnswerLatencyTraceRecord(input) {
     })),
     residual_analyst_orphan_count: Math.max(0, Math.floor(input.trace.residualAnalystOrphanCount)),
     ...input.trace.releaseDecision ? { release_decision: input.trace.releaseDecision } : {},
+    ...input.trace.evidenceSeats ? {
+      evidence_seats: {
+        pack_corpora: input.trace.evidenceSeats.packCorpora.map(String),
+        recency_seats: Math.max(0, Math.floor(input.trace.evidenceSeats.recencySeats)),
+        fits: input.trace.evidenceSeats.fits.map((fit) => ({
+          lane: fit.lane,
+          kept_seats: fit.keptSeats.map((seat) => Math.max(0, Math.floor(seat)))
+        }))
+      }
+    } : {},
     ...input.caller ? { caller: copyCaller(input.caller) } : {},
     phase_ms: {
       ...fittedPhases,
