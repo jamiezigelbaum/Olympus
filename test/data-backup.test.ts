@@ -197,3 +197,26 @@ describe('data backup', () => {
     expect(listBackups(folder).map((backup) => backup.name)).toEqual([second.name, 'olympus-backup-2026-11-10-0310.olympusbackup']);
   }));
 });
+
+describe('olympus data backup and restore, as the release check runs them (#1323)', () => {
+  const CLI = join(import.meta.dir, '..', 'src', 'cli.ts');
+  const run = async (args: string[], home: string, input: string) => {
+    const child = Bun.spawn([process.execPath, CLI, ...args], { env: { PATH: process.env.PATH ?? '', HOME: home }, stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' });
+    child.stdin.write(input);
+    await child.stdin.end();
+    const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+    return { stdout, stderr, code };
+  };
+
+  test('a backup of an install with a source restores that source, its judgments and all, on a clean one', withHomes(async (_dir, homeA, homeB, folder) => {
+    const made = await run(['data', 'backup', '--output', folder, '--passphrase-stdin'], homeA, 'a passphrase for a test\n');
+    expect(made.code, made.stderr).toBe(0);
+    const [file] = readdirSync(folder);
+    expect(file).toMatch(/\.olympusbackup$/);
+    const restored = await run(['data', 'restore', '--input', join(folder, file!), '--passphrase-stdin'], homeB, 'a passphrase for a test\n');
+    expect(restored.code, restored.stderr).toBe(0);
+    expect(JSON.parse(restored.stdout)).toMatchObject({ ok: true, signInAgain: ['x.bookmarks'] });
+    expect(rows(storeOf(homeB), 'rows')).toEqual([{ value: 'a bookmark' }]);
+    expect(rows(tierLedgerPathForStore(storeOf(homeB)), 'judgments')).toEqual([{ value: 'Private' }]);
+  }), 60_000);
+});

@@ -1511,9 +1511,8 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
         if (Date.now() < deadline) await run.inLeg('inbox', () => runInboxLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the Ask page and Inbox leg');
         if (Date.now() < deadline) await run.inLeg('journeys', () => runJourneyLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the journeys');
         if (Date.now() < deadline) await run.inLeg('archive', () => runArchiveLeg(run, options.outDir, deadline)); else run.errors.push('the run exceeded its time budget before the archive-import leg');
-        if (Date.now() < deadline) await runRelayConsentCheck(run);
-        if (Date.now() < deadline) await run.inLeg('explore', () => runExploreLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the control exploration');
-        if (Date.now() < deadline) await runConfinementCheck(run); else run.errors.push('the run exceeded its time budget before the anonymous-answer confinement check');
+        // The backup is made before the control exploration, which ends with Readwise disconnected and its data deleted (its
+        // `empty` state): a backup made after it holds no source to restore (#1323, run 42936532388).
         // The restore leg's second machine: at once where the driver allows two, else after the first is done and gone.
         const alone = oneMachineAtATime(run.machine!.os);
         let restore: RestorePrepared | undefined;
@@ -1523,6 +1522,9 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
             if (restore && !alone) await finishRestore(run, bundlePath, options.outDir, workDir, restore);
           });
         } else run.errors.push('the run exceeded its time budget before the restore leg');
+        if (Date.now() < deadline) await runRelayConsentCheck(run);
+        if (Date.now() < deadline) await run.inLeg('explore', () => runExploreLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the control exploration');
+        if (Date.now() < deadline) await runConfinementCheck(run); else run.errors.push('the run exceeded its time budget before the anonymous-answer confinement check');
         if (Date.now() < deadline) await runServerModeCheck(run); else run.errors.push('the run exceeded its time budget before the Mac server-mode leg');
         await collectEvidence(run, options.outDir);
         if (restore && alone) {

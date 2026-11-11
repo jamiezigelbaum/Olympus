@@ -10,6 +10,15 @@ describe('release check: the restore leg on a driver that runs one machine at a 
     expect(oneMachineAtATime('linux')).toBe(false);
   });
 
+  test('the backup is made before the control exploration, which leaves Readwise disconnected and its data deleted (#1323)', () => {
+    const prepare = RUN.indexOf('restore = await prepareRestore(');
+    const explore = RUN.indexOf("await run.inLeg('explore', () => runExploreLeg(run, options.outDir))");
+    expect(prepare).toBeGreaterThanOrEqual(0);
+    expect(explore).toBeGreaterThan(prepare);
+    // After the journeys, so the item fix-one-item changed is in the backup.
+    expect(RUN.indexOf("await run.inLeg('journeys', () => runJourneyLeg(run, options.outDir))")).toBeLessThan(prepare);
+  });
+
   test('alone, the clean machine comes after the server-mode leg and the evidence, and only once the first machine is destroyed', () => {
     const at = (needle: string, from = 0) => {
       const i = RUN.indexOf(needle, from);
