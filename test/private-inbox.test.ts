@@ -11,7 +11,7 @@ import {
   type WaitingQuestionInput,
   type WaitingQuestionStore,
 } from '../src/core/waiting-private-questions.ts';
-import { createLocalPrivateAnswers, type LocalPrivateAnswersOptions } from '../src/workers/email-source/local-private-answers.ts';
+import { createLocalPrivateAnswers, type LocalPrivateAnswersOptions } from '../src/workers/engine/runtime/local-private-answers.ts';
 import { createLocalModelActivity, runBackgroundInference, runClassificationInference } from '../src/workers/answer-activity.ts';
 import type { LocalAnswerResult } from '../src/workers/source-index/local-answer.ts';
 

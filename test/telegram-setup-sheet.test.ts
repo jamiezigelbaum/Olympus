@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { renderMessagingCard } from '../src/workers/dashboard/messaging.ts';
-import { createDashboardMessagingPairing, type PairingField } from '../src/workers/email-source/dashboard-messaging.ts';
+import { createDashboardMessagingPairing, type PairingField } from '../src/workers/engine/dashboard/dashboard-messaging.ts';
 
 test('local Telegram setup uses the shared three-step sheet before starting pairing', () => {
   const html = renderMessagingCard('telegram', true);

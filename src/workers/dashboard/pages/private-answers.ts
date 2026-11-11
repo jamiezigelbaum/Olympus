@@ -16,7 +16,7 @@ import {
   PRIVATE_ANSWER_FAILURES,
   privateAnswerFailure,
 } from '../vocabulary.ts';
-import type { AskDestinationStates } from '../../email-source/venice-inbox-answer.ts';
+import type { AskDestinationStates } from '../../engine/runtime/venice-inbox-answer.ts';
 import type { DashboardPageOptions, DashboardWaitingQuestion } from './local.ts';
 import { SOURCE_LOGO_CSS } from '../source-logos.ts';
 

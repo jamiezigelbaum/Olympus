@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { Window } from 'happy-dom';
 import { loadSovereigntyPreset, type SovereigntyConfig } from '../src/core/sovereignty.ts';
 import { readModelChoices, resolveVeniceStrongest, builtInModelEnvValue } from '../src/core/model-choices.ts';
-import { createModelChoicesBackend, VENICE_PROFILE_ID } from '../src/workers/email-source/model-choices-backend.ts';
+import { createModelChoicesBackend, VENICE_PROFILE_ID } from '../src/workers/engine/runtime/model-choices-backend.ts';
 import { renderAnswerModelPickers, renderZkapiModelPicker } from '../src/workers/dashboard/model-pickers.ts';
 
 const GIB = 1024 ** 3;

@@ -274,7 +274,7 @@ describe('writeConsultSettings: refusals', () => {
 // remote workers, the OpenClaw Control UI gateway, or the browser bundle.
 describe('the writer stays off every hosted surface', () => {
   const WRITER = 'src/core/consult-settings-writer.ts';
-  const ADAPTER = 'src/workers/email-source/dashboard-consult.ts';
+  const ADAPTER = 'src/workers/engine/dashboard/dashboard-consult.ts';
   /** The only module that may import the writer (value import). */
   const WRITER_IMPORTERS: readonly string[] = [ADAPTER];
   /** The adapter's importers: the composition root (value) and the worker's option type (type-only). */

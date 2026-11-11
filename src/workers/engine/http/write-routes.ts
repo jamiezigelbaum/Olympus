@@ -8,8 +8,8 @@
 // route guard (test/engine-split-route-guard.test.ts) then makes every entry
 // say where it runs in the split, and holds this list to the handlers.
 
-import { WORKER_CLI_OPERATIONS, WORKER_CLI_ROUTE_PREFIX } from '../../core/cli-via-worker.ts';
-import { isV04PublicDashboardRoute } from '../../core/public-surface.ts';
+import { WORKER_CLI_OPERATIONS, WORKER_CLI_ROUTE_PREFIX } from '../../../core/cli-via-worker.ts';
+import { isV04PublicDashboardRoute } from '../../../core/public-surface.ts';
 
 const WORKER_POST_PATHS: readonly string[] = [
   '/consult/ask',

@@ -48,7 +48,7 @@ import {
   type DashboardOutsideHelpTools,
 } from '../src/workers/dashboard/outside-help-tools.ts';
 import { DEFAULT_CONSULT_DOMAIN_PACKS } from '../src/core/consult-gate.ts';
-import { createDashboardConsultAdapter, dashboardInstallView } from '../src/workers/email-source/dashboard-consult.ts';
+import { createDashboardConsultAdapter, dashboardInstallView } from '../src/workers/engine/dashboard/dashboard-consult.ts';
 import { loadSovereigntyPreset, type SovereigntyConfig } from '../src/core/sovereignty.ts';
 import { DASHBOARD_CONSULT_CONTROL_PATHS, withWorkerBearerAuth } from '../src/workers/http.ts';
 import { DashboardLaunchTickets } from '../src/core/dashboard-launch.ts';

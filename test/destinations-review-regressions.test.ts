@@ -15,8 +15,8 @@ import {
   type SovereigntyAnalystRouteStep,
 } from '../src/workers/source-index/analyst-answer.ts';
 import { checkLocalEvidenceItems } from '../src/workers/source-index/local-answer.ts';
-import { createVeniceInboxAnswer } from '../src/workers/email-source/venice-inbox-answer.ts';
-import { askWithAnonymousInbox, createLocalPrivateAnswers, anonymousInboxConnectionId, localInboxLabel } from '../src/workers/email-source/local-private-answers.ts';
+import { createVeniceInboxAnswer } from '../src/workers/engine/runtime/venice-inbox-answer.ts';
+import { askWithAnonymousInbox, createLocalPrivateAnswers, anonymousInboxConnectionId, localInboxLabel } from '../src/workers/engine/runtime/local-private-answers.ts';
 
 const SECURE = 'secure_local.test.pool';
 const NAMES = 'internal.test.names';

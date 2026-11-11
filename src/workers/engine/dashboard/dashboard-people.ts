@@ -9,13 +9,13 @@ import {
   type LocalPeopleIndex,
   type PeopleCorrection,
   type PeoplePerson,
-} from '../../core/people-index.ts';
+} from '../../../core/people-index.ts';
 import type {
   DashboardPeopleIdentityChip,
   DashboardPeoplePerson,
   DashboardPeopleSuggestion,
   DashboardPeopleView,
-} from '../dashboard/pages/people.ts';
+} from '../../dashboard/pages/people.ts';
 
 /**
  * A same-name pair is asked about only when both people have at least this

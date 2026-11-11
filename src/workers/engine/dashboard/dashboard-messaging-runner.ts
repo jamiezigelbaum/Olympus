@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import type { PairingCommandRequest, PairingCommandResult } from '../../core/messaging-pairing.ts';
+import type { PairingCommandRequest, PairingCommandResult } from '../../../core/messaging-pairing.ts';
 import type { PairingField, PairingHooks } from './dashboard-messaging.ts';
 
 const FIELDS = new Set(['api_id', 'api_hash', 'phone', 'code', 'password']);

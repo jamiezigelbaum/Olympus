@@ -2,8 +2,8 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
-import { listHelper, unlinkHelper } from '../src/workers/email-source/dashboard-messaging-service.ts';
-import { codedError, createDashboardMessagingPairing } from '../src/workers/email-source/dashboard-messaging.ts';
+import { listHelper, unlinkHelper } from '../src/workers/engine/dashboard/dashboard-messaging-service.ts';
+import { codedError, createDashboardMessagingPairing } from '../src/workers/engine/dashboard/dashboard-messaging.ts';
 
 describe('dashboard messaging pairing', () => {
   test('keeps prompt values out of status and prevents duplicate or stale replies', async () => {

@@ -102206,7 +102206,7 @@ var init_tiered_extraction = __esm(() => {
   };
 });
 
-// src/workers/email-source/file-extraction-runtime.ts
+// src/workers/engine/runtime/file-extraction-runtime.ts
 import { existsSync as existsSync64 } from "node:fs";
 function createRefreshableFileExtractionRuntime(options) {
   const first = options.build();
@@ -102671,7 +102671,7 @@ var init_file_extraction_runtime = __esm(() => {
   DROPBOX_SCOPE_ACCOUNT = /^dropbox\.([a-z0-9_-]+):/i;
 });
 
-// src/workers/email-source/child-extraction-runtime.ts
+// src/workers/engine/runtime/child-extraction-runtime.ts
 function childStillServed(lane, child2) {
   const own3 = itemVerdicts(lane, [child2]).get(tierLedgerIdentityKey(child2));
   if (!own3 || own3.gone)
@@ -152982,7 +152982,7 @@ var init_remote_relay_runtime = __esm(() => {
   init_remote_access();
 });
 
-// src/workers/email-source/dashboard-people.ts
+// src/workers/engine/dashboard/dashboard-people.ts
 function createDashboardPeople(input) {
   return {
     view: () => dashboardPeopleView(input.index),
@@ -157447,7 +157447,7 @@ var init_local_answer = __esm(() => {
   IN_SCOPE_SKIPS = new Set(["not_requested", "trust_domain_not_allowed", "corpus_not_allowed"]);
 });
 
-// src/workers/email-source/local-private-answers.ts
+// src/workers/engine/runtime/local-private-answers.ts
 var exports_local_private_answers = {};
 __export(exports_local_private_answers, {
   localInboxLabel: () => localInboxLabel,
@@ -158401,7 +158401,7 @@ var init_linux_model_readiness = __esm(() => {
   init_manifest2();
 });
 
-// src/workers/email-source/dashboard-messaging.ts
+// src/workers/engine/dashboard/dashboard-messaging.ts
 function createDashboardMessagingPairing(options) {
   const states = new Map;
   const attempts = new Map;
@@ -158608,7 +158608,7 @@ function codedError(message2, code) {
 }
 var ATTEMPTS_KEPT = 5;
 
-// src/workers/email-source/dashboard-messaging-runner.ts
+// src/workers/engine/dashboard/dashboard-messaging-runner.ts
 import { spawn as spawn12 } from "node:child_process";
 async function runDashboardPairingCommand(request, hooks) {
   const child2 = spawn12(request.executable, request.args, {
@@ -158705,7 +158705,7 @@ var init_dashboard_messaging_runner = __esm(() => {
   FIELDS = new Set(["api_id", "api_hash", "phone", "code", "password"]);
 });
 
-// src/workers/email-source/dashboard-messaging-service.ts
+// src/workers/engine/dashboard/dashboard-messaging-service.ts
 import { spawn as spawn13 } from "node:child_process";
 import { closeSync as closeSync33, constants as constants17, fstatSync as fstatSync8, openSync as openSync32, readFileSync as readFileSync85 } from "node:fs";
 import { arch, platform as platform2, release } from "node:os";
@@ -174731,7 +174731,7 @@ var init_models_on_computer = __esm(() => {
   };
 });
 
-// src/workers/email-source/write-routes.ts
+// src/workers/engine/http/write-routes.ts
 function workerRouteAllowed(method, pathname, basePath) {
   if (pathname.startsWith("/dashboard") || pathname.startsWith("/oauth/callback/")) {
     return isV04PublicDashboardRoute(method, pathname);
@@ -190865,7 +190865,7 @@ var init_model_choices = __esm(() => {
   PRIVATE_CATEGORIES = ["private", "tee"];
 });
 
-// src/workers/email-source/model-choices-backend.ts
+// src/workers/engine/runtime/model-choices-backend.ts
 function createModelChoicesBackend(options) {
   const profileModel = (id) => {
     const profile = options.config().modelProfiles[id];
@@ -206733,7 +206733,7 @@ var init_open_target2 = __esm(() => {
   init_paths();
 });
 
-// src/workers/email-source/source-answer-lanes.ts
+// src/workers/engine/runtime/source-answer-lanes.ts
 function createSourceAnswerLanes(deps) {
   return (request, mode) => {
     const searchScopes = new Map;
@@ -235875,7 +235875,7 @@ var init_private_question_jobs = __esm(() => {
   CLEANUPS2 = ["as_written", "light_cleanup", "custom"];
 });
 
-// src/workers/email-source/venice-inbox-answer.ts
+// src/workers/engine/runtime/venice-inbox-answer.ts
 var exports_venice_inbox_answer = {};
 __export(exports_venice_inbox_answer, {
   privateVeniceMembers: () => privateVeniceMembers,
@@ -237115,7 +237115,7 @@ var init_consult_settings_writer = __esm(() => {
   __consultSettingsWriterTestHooks = { afterPublish: undefined };
 });
 
-// src/workers/email-source/dashboard-consult.ts
+// src/workers/engine/dashboard/dashboard-consult.ts
 var exports_dashboard_consult = {};
 __export(exports_dashboard_consult, {
   dashboardInstallView: () => dashboardInstallView,
@@ -237788,7 +237788,7 @@ var init_engine_brief_route = __esm(() => {
   HEADERS = { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" };
 });
 
-// src/workers/email-source/dashboard-panel-tools.ts
+// src/workers/engine/dashboard/dashboard-panel-tools.ts
 var exports_dashboard_panel_tools = {};
 __export(exports_dashboard_panel_tools, {
   createDashboardPanelTools: () => createDashboardPanelTools,

@@ -14,7 +14,7 @@ import {
   fileExtractionCorporaRoster,
   type FileExtractionRuntime,
   type FileExtractionRuntimeOptions,
-} from '../../src/workers/email-source/file-extraction-runtime.ts';
+} from '../../src/workers/engine/runtime/file-extraction-runtime.ts';
 import type { ExtractionRunResult } from '../../src/workers/file-extraction/runner.ts';
 import { createFixtureChildConnector, type FixtureConnectorOptions, type FixtureParentSpec } from '../helpers/child-items-fixture.ts';
 import { FIXTURE_ARCHIVE_FORMAT, type ChildItemsArchiveHarness } from './child-items-archive-harness.ts';

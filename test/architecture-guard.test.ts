@@ -1002,14 +1002,21 @@ describe('architecture guard: capability, not per-source/per-question code', () 
   });
 
   test('the email source stays a source module, not a second engine (#1068)', () => {
-    // The worker entry and HTTP routes moved to src/workers/engine/ (#1403,
-    // #1425). An entry point or an engine import here would make the email
-    // source the engine again.
+    // The worker entry, routes, runtimes and dashboard backends moved to
+    // src/workers/engine/ (#1068). Only email modules belong here; an entry
+    // point or an engine import would make the email source the engine again.
     const dir = join(repoRoot, 'src', 'workers', 'email-source');
     const modules = readdirSync(dir, { recursive: true })
       .map(String)
       .filter((name) => name.endsWith('.ts'));
     expect(modules.length).toBeGreaterThan(0);
+    const allowedModules = new Set([
+      'email-connector.ts',
+      'gogcli.ts',
+      'gmail-status-scope.ts',
+      'ingest-filter.ts',
+    ]);
+    expect(modules.filter((name) => !allowedModules.has(name))).toEqual([]);
     expect(modules.filter((name) => name === 'server.ts' || name === 'index.ts')).toEqual([]);
     const engineImport = /\bfrom\s+['"](?:\.\.\/)+(?:workers\/)?engine(?:\/|['"])|\bimport\(\s*['"](?:\.\.\/)+(?:workers\/)?engine(?:\/|['"])/;
     expect(engineImport.test("import { x } from '../engine/http/routes.ts';")).toBe(true);

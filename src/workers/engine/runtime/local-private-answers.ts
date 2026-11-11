@@ -1,5 +1,5 @@
-import { providerSourceLabel } from '../../core/remote-result.ts';
-import { DASHBOARD_PRIVATE_ANSWERS_COPY as W } from '../dashboard/vocabulary.ts';
+import { providerSourceLabel } from '../../../core/remote-result.ts';
+import { DASHBOARD_PRIVATE_ANSWERS_COPY as W } from '../../dashboard/vocabulary.ts';
 /**
  * Local Private answers inbox and Ask privately. HTTP admits only a local
  * control session, never dash_ readers, ChatGPT widgets or Gateway read scope.
@@ -12,22 +12,22 @@ import { DASHBOARD_PRIVATE_ANSWERS_COPY as W } from '../dashboard/vocabulary.ts'
  * to the page. Delete/revoke/withdrawal invalidates every outstanding completion.
  * Retries persist bounded content-free reason codes and settle after eight attempts; never exception text.
  */
-import { TIER_LEDGER_IDENTITY_FIELDS } from '../classification/tier-ledger.ts';
+import { TIER_LEDGER_IDENTITY_FIELDS } from '../../classification/tier-ledger.ts';
 import { lstatSync } from 'node:fs';
-import { answerReleaseWithheldReason, type ReleaseCheck } from '../../core/release-manifest.ts';
+import { answerReleaseWithheldReason, type ReleaseCheck } from '../../../core/release-manifest.ts';
 import { randomBytes } from 'node:crypto';
-import { CHATGPT_INBOX_GRACE_MS, WAITING_QUESTION_RETRY_REASONS, type WaitingQuestionRetryReason, type StoredPrivateAnswer, type WaitingQuestion, type WaitingQuestionRef, type WaitingQuestionStore } from '../../core/waiting-private-questions.ts';
-import { answerPrivately, type BuiltInAnalystModel } from '../../core/analyst-built-in.ts';
-import type { PrivateAnswerSourceCitation, PrivateEvidenceItem } from '../chatgpt/private-answer-contract.ts';
+import { CHATGPT_INBOX_GRACE_MS, WAITING_QUESTION_RETRY_REASONS, type WaitingQuestionRetryReason, type StoredPrivateAnswer, type WaitingQuestion, type WaitingQuestionRef, type WaitingQuestionStore } from '../../../core/waiting-private-questions.ts';
+import { answerPrivately, type BuiltInAnalystModel } from '../../../core/analyst-built-in.ts';
+import type { PrivateAnswerSourceCitation, PrivateEvidenceItem } from '../../chatgpt/private-answer-contract.ts';
 import {
   createBuiltInPrivateAnswerModel,
   embeddingPanelRelevance,
   type PanelAnswerLimits,
   type PrivateSourceLinks,
-} from '../chatgpt/private-answer-model.ts';
-import type { AnalystAnswerLanes } from '../source-index/analyst-answer.ts';
-import type { SourceIndexAnswerRequest } from '../source-index/answer-types.ts';
-import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
+} from '../../chatgpt/private-answer-model.ts';
+import type { AnalystAnswerLanes } from '../../source-index/analyst-answer.ts';
+import type { SourceIndexAnswerRequest } from '../../source-index/answer-types.ts';
+import type { SourceEmbeddingProvider } from '../../source-index/embeddings.ts';
 import {
   answerOnThisComputer,
   localAnswerRequest,
@@ -35,7 +35,7 @@ import {
   readLocalEvidenceItem,
   type LocalAnswerRequest,
   type LocalAnswerResult,
-} from '../source-index/local-answer.ts';
+} from '../../source-index/local-answer.ts';
 
 export const LOCAL_AGENT_INBOX_ID = '@local:agents';
 
@@ -86,10 +86,10 @@ export interface LocalPrivateAnswersOptions {
   panelSecretNotice?: (ref: WaitingQuestionRef) => boolean;
   panelSecretOnlyNotice?: (ref: WaitingQuestionRef) => boolean;
   resolveSecretInbox?: (handle: string) => WaitingQuestionRef | undefined;
-  secretSources?: (input: LocalAnswerRequest, locations: readonly import('../../core/evidence-pack.ts').SavedSecretLocation[]) => PrivateAnswerSourceCitation[];
+  secretSources?: (input: LocalAnswerRequest, locations: readonly import('../../../core/evidence-pack.ts').SavedSecretLocation[]) => PrivateAnswerSourceCitation[];
   /** The computer's own ask identity; omitted by read-only/test adapters. */
   localConnectionId?: string;
-  anonymousAsk?: (input: import('../../core/consult-ask.ts').ConsultAskInput) => Promise<import('../../core/consult-ask.ts').ConsultAskResult>;
+  anonymousAsk?: (input: import('../../../core/consult-ask.ts').ConsultAskInput) => Promise<import('../../../core/consult-ask.ts').ConsultAskResult>;
   destinations?: () => import('./venice-inbox-answer.ts').AskDestinationStates;
   veniceAnswer?: (input: LocalAnswerRequest) => Promise<LocalAnswerResult>;
   answer: (input: LocalAnswerRequest) => Promise<LocalAnswerResult>;
@@ -98,7 +98,7 @@ export interface LocalPrivateAnswersOptions {
   connectionName?: (connectionId: string) => string | undefined;
   /** The live eligibility guard, re-asked before a cited file opens. */
   eligible?: (items: readonly PrivateEvidenceItem[]) => Promise<readonly boolean[]>;
-  eligibleSecrets?: (input: LocalAnswerRequest, locations: readonly import('../../core/evidence-pack.ts').SavedSecretLocation[]) => boolean;
+  eligibleSecrets?: (input: LocalAnswerRequest, locations: readonly import('../../../core/evidence-pack.ts').SavedSecretLocation[]) => boolean;
   /** Opens a local file (macOS `open`, checked by the caller). Absent: local files do not open. */
   openFile?: (path: string, eligible: () => Promise<boolean>) => Promise<void>;
   now?: () => number;
@@ -169,7 +169,7 @@ export interface LocalAnswerPathOptions {
  */
 export function createLocalAnswerPath(options: LocalAnswerPathOptions): {
   eligible: (items: readonly PrivateEvidenceItem[]) => Promise<readonly boolean[]>;
-  eligibleSecrets: (input: LocalAnswerRequest, locations: readonly import('../../core/evidence-pack.ts').SavedSecretLocation[]) => boolean;
+  eligibleSecrets: (input: LocalAnswerRequest, locations: readonly import('../../../core/evidence-pack.ts').SavedSecretLocation[]) => boolean;
   secretSources: NonNullable<LocalPrivateAnswersOptions['secretSources']>;
   answer: (input: LocalAnswerRequest) => Promise<LocalAnswerResult>;
 } {
@@ -542,9 +542,9 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
  * Reserve before sending: delete/revoke during the paid call cannot resurrect a row.
  * Anonymous questions have no retrieval context, source identities or citations. */
 export async function askWithAnonymousInbox(
-  input: import('../../core/consult-ask.ts').ConsultAskInput,
-  options: { deliveredToPanel?: boolean; isActive?: (id: string) => boolean; store: () => WaitingQuestionStore | undefined; connectionId: string; ask: (input: import('../../core/consult-ask.ts').ConsultAskInput) => Promise<import('../../core/consult-ask.ts').ConsultAskResult> },
-): Promise<import('../../core/consult-ask.ts').ConsultAskResult> {
+  input: import('../../../core/consult-ask.ts').ConsultAskInput,
+  options: { deliveredToPanel?: boolean; isActive?: (id: string) => boolean; store: () => WaitingQuestionStore | undefined; connectionId: string; ask: (input: import('../../../core/consult-ask.ts').ConsultAskInput) => Promise<import('../../../core/consult-ask.ts').ConsultAskResult> },
+): Promise<import('../../../core/consult-ask.ts').ConsultAskResult> {
   if (options.deliveredToPanel) return options.ask(input);
   if (typeof input.question !== 'string' || !input.question.trim()) return { ok: false, code: 'transport_unavailable', message: 'Type a question first.' };
   const store = options.store();
