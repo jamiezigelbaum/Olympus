@@ -75068,7 +75068,7 @@ async function buildPreparedEvidencePackDetailed(input) {
   const retrievalLimit = reranker ? rerankPoolSize(reranker, input.maxResults) : input.maxResults;
   const routed = input.selectedItems?.length ? selectedItemsToRoutedSlice(input) : await runRoutedSearches(input, retrievalLimit);
   const visibleHits = input.visibilityGate && !input.selectedItems?.length ? input.visibilityGate(routed.hits) : routed.hits;
-  const routedHits = input.selectedItems?.length ? routed.hits : orderHitsForTemporalIntent(visibleHits, input);
+  const routedHits = input.selectedItems?.length ? routed.hits : hasTemporalIntent(input.question) || hasTemporalIntent(input.searchQuery ?? "") ? withRecencyInFirstTurn(visibleHits) : visibleHits;
   const candidates = [];
   const candidateCorpusIds = [];
   const extractionGaps = semanticLaneSkippedGaps(routed.degradations, input);
@@ -75298,24 +75298,20 @@ function contentFreePolicyLaneAudits(audits) {
     rawExposed: audit.rawExposed
   }));
 }
-function orderHitsForTemporalIntent(hits, input) {
-  if (!hasTemporalIntent(input.question) && !hasTemporalIntent(input.searchQuery ?? "")) {
-    return hits;
+function withRecencyInFirstTurn(hits) {
+  const seen = new Set;
+  let turnEnd = 0;
+  for (;turnEnd < hits.length; turnEnd += 1) {
+    const corpusId = hits[turnEnd].corpusId;
+    if (seen.has(corpusId))
+      break;
+    seen.add(corpusId);
   }
-  return [...hits].sort((left, right) => {
-    const rightTime = hitCitationTime(right);
-    const leftTime = hitCitationTime(left);
-    if (rightTime !== leftTime)
-      return rightTime - leftTime;
-    const rightScore = right.score ?? 0;
-    const leftScore = left.score ?? 0;
-    if (rightScore !== leftScore)
-      return rightScore - leftScore;
-    return hitCandidateId(left).localeCompare(hitCandidateId(right));
-  });
-}
-function hitCandidateId(hit) {
-  return String(hit.candidateId ?? `${hit.corpusId}:${hit.sourceItem.localItemId || hit.sourceItem.providerItemId}`);
+  if (turnEnd <= RECENCY_FIXED_HEAD_SEATS + 1)
+    return [...hits];
+  const window2 = hits.slice(RECENCY_FIXED_HEAD_SEATS, turnEnd);
+  const sorted = window2.map((hit, index) => ({ hit, index, time: hitCitationTime(hit) })).sort((left, right) => right.time - left.time || left.index - right.index).map(({ hit }) => hit);
+  return [...hits.slice(0, RECENCY_FIXED_HEAD_SEATS), ...sorted, ...hits.slice(turnEnd)];
 }
 function hasTemporalIntent(value) {
   const normalized = value.toLowerCase();
@@ -75557,7 +75553,7 @@ function trustDomainRank2(trustDomain) {
     return 1;
   return 2;
 }
-var SOURCE_MODEL_POLICY_GAP_SUFFIX = "excluded one candidate from model use under current source policy.", MIN_BYTES_PER_CANDIDATE = 400, utf8, MAX_SEARCH_QUERIES = 3;
+var SOURCE_MODEL_POLICY_GAP_SUFFIX = "excluded one candidate from model use under current source policy.", MIN_BYTES_PER_CANDIDATE = 400, utf8, RECENCY_FIXED_HEAD_SEATS = 3, MAX_SEARCH_QUERIES = 3;
 var init_evidence_pack = __esm(() => {
   init_keyword_context();
   init_evidence_reranker();

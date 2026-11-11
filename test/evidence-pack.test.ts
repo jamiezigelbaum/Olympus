@@ -3,6 +3,7 @@ import { createAnalyst, type AnalystModel } from '../src/core/analyst.ts';
 import {
   buildEvidencePack,
   buildEvidencePackDetailed,
+  withRecencyInFirstTurn,
   type LocalContentBlock,
   type LocalContentProvider,
   type LocalContentProviderMap,
@@ -80,57 +81,46 @@ describe('buildEvidencePack', () => {
     expect(pack.builtAt).toBe('2026-05-29T00:00:00.000Z');
   });
 
-  // Regression for the 2026-07-05 "did I just get a whatsapp..." miss: the
-  // chat phrasing of recency ("just got/received", "today", "N minutes ago")
-  // must trigger temporal evidence ordering, not only recent/latest/newest.
-  test('chat recency phrasings order evidence newest-first', async () => {
-    const timedAdapter: SourceIndexCorpusSearchAdapter = () => ({
-      hits: [
-        {
-          sourceItem: { family: 'file' as const, provider: 'dropbox', accountScope: 'personal', providerItemId: 'old-strong', localItemId: 'old-strong' },
-          provenance: {
-            sourceItem: { family: 'file' as const, provider: 'dropbox', accountScope: 'personal', providerItemId: 'old-strong', localItemId: 'old-strong' },
-            citation: { title: 'old-strong', authoredAt: '2026-07-01T10:00:00.000Z' },
-          },
-          score: 0.9,
-          rawExposed: false as const,
+  // A recency word in a question never moves a store's best matches out of
+  // the head (2026-11-11). The pool used to be re-sorted newest-first whenever
+  // the question said recent, latest, current or today: on a 24-seat pack
+  // that undid store turn and the reserved leader seats, and a store's rank-1
+  // answer fell to seat 15 or 20, past what a local Analyst reads (held-out
+  // value-1 and value-2). Recency now orders only the stores' best hits after
+  // the first three seats, among themselves.
+  test('a recency word reorders only the first turn after the head', async () => {
+    const timed = (corpusId: string, ids: Array<[string, string]>): SourceIndexCorpusSearchAdapter => () => ({
+      hits: ids.map(([id, authoredAt]) => ({
+        sourceItem: { family: 'file' as const, provider: 'dropbox', accountScope: 'personal', providerItemId: id, localItemId: `${corpusId}:${id}` },
+        provenance: {
+          sourceItem: { family: 'file' as const, provider: 'dropbox', accountScope: 'personal', providerItemId: id, localItemId: `${corpusId}:${id}` },
+          citation: { title: id, authoredAt },
         },
-        {
-          sourceItem: { family: 'file' as const, provider: 'dropbox', accountScope: 'personal', providerItemId: 'fresh-weak', localItemId: 'fresh-weak' },
-          provenance: {
-            sourceItem: { family: 'file' as const, provider: 'dropbox', accountScope: 'personal', providerItemId: 'fresh-weak', localItemId: 'fresh-weak' },
-            citation: { title: 'fresh-weak', authoredAt: '2026-07-05T22:08:31.000Z' },
-          },
-          score: 0.1,
-          rawExposed: false as const,
-        },
-      ],
+        rawExposed: false as const,
+      })),
       latencyMs: 1,
       rawExposed: false as const,
     });
     const build = (question: string) => buildEvidencePack({
       question,
-      maxResults: 10,
+      maxResults: 6,
       searchContext: allowAll,
       registry: registry(),
-      adapters: { [INTERNAL]: timedAdapter } as SourceIndexRouterAdapterMap,
+      adapters: {
+        [INTERNAL]: timed(INTERNAL, [['best-old', '2024-01-01T00:00:00.000Z'], ['i2', '2026-07-01T00:00:00.000Z'], ['i3', '2026-07-05T00:00:00.000Z']]),
+        [SECURE]: timed(SECURE, [['s1', '2025-01-01T00:00:00.000Z'], ['s2', '2026-07-02T00:00:00.000Z'], ['s3', '2026-07-04T00:00:00.000Z']]),
+      } as SourceIndexRouterAdapterMap,
       contentProviders: {} as LocalContentProviderMap,
     });
-
-    for (const question of [
-      'Did I just get a message with test in it?',
-      'What arrived a few minutes ago?',
-      'Did anything come in today?',
-    ]) {
-      const { candidates } = await build(question);
-      expect(candidates.map((candidate) => candidate.provenance.sourceItem.providerItemId))
-        .toEqual(['fresh-weak', 'old-strong']);
+    const order = async (question: string) => (await build(question)).candidates.map((candidate) => candidate.provenance.sourceItem.providerItemId);
+    const plain = await order('What is the policy premium?');
+    expect(plain[0]).toBe('best-old');
+    for (const question of ['What is the current policy premium?', 'Did I just get the latest premium today?']) {
+      const temporal = await order(question);
+      // The head and every later seat are as relevance put them; with two
+      // stores the first turn ends inside the head, so nothing moves.
+      expect(temporal).toEqual(plain);
     }
-
-    // Non-temporal questions keep relevance order.
-    const { candidates } = await build('Which document discusses the test plan?');
-    expect(candidates.map((candidate) => candidate.provenance.sourceItem.providerItemId))
-      .toEqual(['old-strong', 'fresh-weak']);
   });
 
   test('reports an extraction gap when an item is located but unreadable', async () => {
@@ -499,3 +489,38 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
   }
   throw new Error('condition was not met');
 }
+
+describe('recency in the first turn', () => {
+  const hit = (corpusId: string, id: string, authoredAt: string) => ({
+    corpusId,
+    trustDomain: 'internal' as const,
+    sourceItem: { family: 'file' as const, provider: 'dropbox', accountScope: 'personal', providerItemId: id, localItemId: id },
+    provenance: {
+      sourceItem: { family: 'file' as const, provider: 'dropbox', accountScope: 'personal', providerItemId: id, localItemId: id },
+      citation: { title: id, authoredAt },
+    },
+    rawExposed: false as const,
+  });
+  // Six stores in turn; each store's best hit, then each store's second.
+  const days = ['2026-01-01', '2026-06-01', '2026-03-01', '2026-02-01', '2026-09-01', '2026-05-01'];
+  const pool = [
+    ...days.map((day, index) => hit(`s${index}`, `s${index}-1`, `${day}T00:00:00.000Z`)),
+    ...days.map((_, index) => hit(`s${index}`, `s${index}-2`, '2026-12-01T00:00:00.000Z')),
+  ];
+  const ids = (hits: ReadonlyArray<{ sourceItem: { providerItemId: string } }>) => hits.map((h) => h.sourceItem.providerItemId);
+
+  test('only the first turn after the head trades places, newest first', () => {
+    expect(ids(withRecencyInFirstTurn(pool))).toEqual([
+      's0-1', 's1-1', 's2-1', 's4-1', 's5-1', 's3-1',
+      's0-2', 's1-2', 's2-2', 's3-2', 's4-2', 's5-2',
+    ]);
+  });
+
+  test('the head, the first turn\'s set and every later seat are unchanged', () => {
+    const before = ids(pool);
+    const after = ids(withRecencyInFirstTurn(pool));
+    expect(after.slice(0, 3)).toEqual(before.slice(0, 3));
+    expect(new Set(after.slice(0, 6))).toEqual(new Set(before.slice(0, 6)));
+    expect(after.slice(6)).toEqual(before.slice(6));
+  });
+});

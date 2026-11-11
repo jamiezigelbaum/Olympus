@@ -345,7 +345,9 @@ async function buildPreparedEvidencePackDetailed(
     : routed.hits;
   const routedHits = input.selectedItems?.length
     ? routed.hits
-    : orderHitsForTemporalIntent(visibleHits, input);
+    : hasTemporalIntent(input.question) || hasTemporalIntent(input.searchQuery ?? '')
+      ? withRecencyInFirstTurn(visibleHits)
+      : visibleHits;
 
   const candidates: EvidenceCandidate[] = [];
   const candidateCorpusIds: string[] = [];
@@ -692,26 +694,35 @@ function contentFreePolicyLaneAudits(
   }));
 }
 
-function orderHitsForTemporalIntent(
-  hits: readonly SourceIndexRoutedSearchHit[],
-  input: BuildEvidencePackInput,
-): readonly SourceIndexRoutedSearchHit[] {
-  if (!hasTemporalIntent(input.question) && !hasTemporalIntent(input.searchQuery ?? '')) {
-    return hits;
-  }
-  return [...hits].sort((left, right) => {
-    const rightTime = hitCitationTime(right);
-    const leftTime = hitCitationTime(left);
-    if (rightTime !== leftTime) return rightTime - leftTime;
-    const rightScore = right.score ?? 0;
-    const leftScore = left.score ?? 0;
-    if (rightScore !== leftScore) return rightScore - leftScore;
-    return hitCandidateId(left).localeCompare(hitCandidateId(right));
-  });
-}
+// Seats a recency word never moves: seat 1 and the two reserved leader
+// seats (withReservedLeaderSeats).
+const RECENCY_FIXED_HEAD_SEATS = 3;
 
-function hitCandidateId(hit: SourceIndexRoutedSearchHit): string {
-  return String(hit.candidateId ?? `${hit.corpusId}:${hit.sourceItem.localItemId || hit.sourceItem.providerItemId}`);
+/**
+ * Recency, bounded (2026-11-11). Newest-first over the whole pool undid store
+ * turn and the reserved leader seats whenever a question said recent, latest,
+ * current or today, and a store's rank-1 answer fell to seat 15 or 20, past
+ * what a local Analyst reads. Now recency orders only the first turn after
+ * the head: the stores' best hits in seats 4 onward that come before any
+ * store's second hit trade places among themselves, newest first. Invariant:
+ * the first three seats, the set of items in the first turn, and every seat
+ * after it are what relevance gave them.
+ */
+export function withRecencyInFirstTurn<T extends SourceIndexRoutedSearchHit>(hits: readonly T[]): T[] {
+  const seen = new Set<string>();
+  let turnEnd = 0;
+  for (; turnEnd < hits.length; turnEnd += 1) {
+    const corpusId = hits[turnEnd]!.corpusId;
+    if (seen.has(corpusId)) break;
+    seen.add(corpusId);
+  }
+  if (turnEnd <= RECENCY_FIXED_HEAD_SEATS + 1) return [...hits];
+  const window = hits.slice(RECENCY_FIXED_HEAD_SEATS, turnEnd);
+  const sorted = window
+    .map((hit, index) => ({ hit, index, time: hitCitationTime(hit) }))
+    .sort((left, right) => (right.time - left.time) || (left.index - right.index))
+    .map(({ hit }) => hit);
+  return [...hits.slice(0, RECENCY_FIXED_HEAD_SEATS), ...sorted, ...hits.slice(turnEnd)];
 }
 
 export function hasTemporalIntent(value: string): boolean {
