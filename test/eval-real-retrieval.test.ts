@@ -292,6 +292,11 @@ describe('the real eval report locates an expected item and value for a miss', (
       answerValueTokensUnmatchedSeats: [[2], []],
     });
     expect(evalAnswerStageAudit(question, tabled, elsewhere, elsewhere).answerValueTokensUnmatchedInPrompt).toBeUndefined();
+    // The audit prompt quotes the model's own draft: a value only the draft holds was not sent as evidence.
+    const auditPrompt = ['Question: q', '', 'Draft JSON:', '{"answer":"due 2031-01-01"}', '', 'Audit evidence:', 'Evidence: total 5120'].join('\n');
+    expect(evalAnswerStageAudit(question, tabled, elsewhere, elsewhere, ['Evidence: total 5120', auditPrompt])).toMatchObject({
+      answerValueTokensUnmatchedInPrompt: [true, false],
+    });
     // A value the answer takes from the cited seat's citation line (its date,
     // its file name inside a path) is in that seat, as the Analyst saw it.
     const dated = {

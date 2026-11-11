@@ -32,7 +32,7 @@ import type { EvidenceReranker } from '../src/core/evidence-reranker.ts';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { analystEvidenceFormat, analystPromptBytes, createAnalyst, withPromptBudget, type AnalystEvidenceFormat, type AnalystModel } from '../src/core/analyst.ts';
+import { analystEvidenceFormat, analystPromptBytes, analystPromptWithoutDraft, createAnalyst, withPromptBudget, type AnalystEvidenceFormat, type AnalystModel } from '../src/core/analyst.ts';
 import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { createDelphiAnalystModel } from '../src/core/analyst-delphi.ts';
 import {
@@ -1058,7 +1058,8 @@ export function evalAnswerStageAudit(
     ].join('\n'),
   }));
   const packText = seatTexts.map((seat) => seat.all).join('\n');
-  const promptText = analystPrompts && analystPrompts.length > 0 ? analystPrompts.join('\n') : undefined;
+  // The audit quotes the model's own draft; that is not evidence it was sent.
+  const promptText = analystPrompts && analystPrompts.length > 0 ? analystPrompts.map(analystPromptWithoutDraft).join('\n') : undefined;
   const analystOwn = analystResult ?? releasedResult;
   // A citation names its seat by the candidate's own provenance, else by the item.
   const citationSeats = analystOwn.citations.map((citation) => {
