@@ -65,6 +65,10 @@ import {
   type TierSniffer,
 } from '../classification/tier-classifier.ts';
 import {
+  RETIRED_EMBEDDING_CLEARANCE_REASON,
+  STORED_NAMES_ASKED_REASON,
+  STORED_NAMES_REASON,
+  type TierLedger,
   copyServingLayer,
   holdSnifferLowering,
   type TierLedgerIdentity,
@@ -73,9 +77,7 @@ import {
   type TierRejudgeCause,
 } from '../classification/tier-ledger.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
-import { STORED_NAMES_ASKED_REASON, STORED_NAMES_REASON, type TierLedger } from '../classification/tier-ledger.ts';
-import type { LocalConnectorStore } from './local-index.ts';
-import type { ConnectorStoreItemCopy } from './local-index.ts';
+import type { LocalConnectorStore, ConnectorStoreItemCopy } from './local-index.ts';
 import { settleSecretsCopies } from './secrets-disposition.ts';
 import { secretFencedSniffer } from './tier-placement.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
@@ -416,7 +418,12 @@ export function rejudgeStoredContent(
     // (`subject` above); the sniffer's answer settles the row.
     // Refresh the content receipt too: an old held row may predate receipts,
     // or a refused move may have been judged against another stored body.
-    ledger.recordRoutedPlacement(identity, decision, {
+    const retiredClearance = record.reasons.includes(RETIRED_EMBEDDING_CLEARANCE_REASON);
+    ledger.recordRoutedPlacement(identity, { ...decision,
+      metadataTier: retiredClearance ? record.metadataTier : decision.metadataTier,
+      contentTier: retiredClearance ? record.contentTier : decision.contentTier,
+      reasons: retiredClearance ? [...decision.reasons, RETIRED_EMBEDDING_CLEARANCE_REASON] : decision.reasons,
+    }, {
       copies: current, embedHold: current.some(copy => copy.embedHold),
     }, { guard: { generation: record.generation, override: undefined } });
     if (key) ledger.markHeldRejudged(ledger.getCurrent(identity)!, key);
