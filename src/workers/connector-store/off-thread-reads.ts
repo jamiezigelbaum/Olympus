@@ -59,6 +59,7 @@ const REAL_CLOCK: ReadPoolClock = {
 };
 let clock: ReadPoolClock = REAL_CLOCK;
 let observer: ((dbPath: string, read: StoreRead) => void) | undefined;
+let observeSnapshots = false;
 let workerFactory: (url: string) => Worker = (url) => new Worker(url);
 
 /** Tests only: the clock that query deadlines use. Left out, the real one. */
@@ -66,9 +67,10 @@ export function setReadPoolClockForTests(testClock?: ReadPoolClock): void {
   clock = testClock ?? REAL_CLOCK;
 }
 
-/** Tests only: sees each pool query as it is sent to a thread. */
-export function setReadPoolObserverForTests(observe?: (dbPath: string, read: StoreRead) => void): void {
+/** Tests only: sees each pool query as it is sent to a thread, and with `snapshots`, each snapshot read too. */
+export function setReadPoolObserverForTests(observe?: (dbPath: string, read: StoreRead) => void, options: { snapshots?: boolean } = {}): void {
   observer = observe;
+  observeSnapshots = options.snapshots === true;
 }
 
 /** Tests only: how a thread is made (to fail a start). Left out, a Bun Worker. */
@@ -129,9 +131,10 @@ self.onmessage = (event) => {
     } else {
       const db = op === 'query' ? connection(path) : snapshots.get(snapshot);
       if (!db) throw new Error('unknown snapshot');
+      const started = performance.now();
       const query = db.query(sql);
       const rows = mode === 'all' ? query.all(...params) : query.get(...params);
-      postMessage({ id, ok: true, rows });
+      postMessage({ id, ok: true, rows, ms: performance.now() - started });
     }
   } catch (error) {
     postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error) });
@@ -139,7 +142,8 @@ self.onmessage = (event) => {
 };
 `;
 
-type Pending = { resolve: (rows: unknown) => void; reject: (error: Error) => void; timer?: unknown };
+// sqlMs: how long the statement ran on the thread, as the thread measured it.
+type Pending = { resolve: (rows: unknown) => void; reject: (error: Error) => void; timer?: unknown; sqlMs?: (ms: number) => void };
 
 interface ReaderThread {
   store: string;
@@ -169,7 +173,10 @@ interface PoolJob {
   // how to report its end (undefined outside a traced Ask lane).
   enqueuedAtMs: number;
   sentAtMs?: number;
-  report?: ((report: { queueWaitMs: number; runMs: number; outcome: SourceAnswerPoolReadOutcome }) => void) | undefined;
+  report?: ((report: { queueWaitMs: number; runMs: number; sqlMs: number; outcome: SourceAnswerPoolReadOutcome }) => void) | undefined;
+  // The statement's own time on the thread; runMs less this is the trip back
+  // (row copy, and the wait for the request thread to take the reply).
+  sqlMs?: number;
 }
 
 // Every thread the pool started that has not stopped, retired ones included.
@@ -218,7 +225,7 @@ function startThread(store: string): ReaderThread | undefined {
     if (startedStores.has(store)) counters.restarts += 1;
     startedStores.add(store);
     const started: ReaderThread = { store, worker, pending: new Map(), snapshots: 0 };
-    worker.onmessage = (event: MessageEvent<{ id: number; ok: boolean; rows?: unknown; error?: string }>) => {
+    worker.onmessage = (event: MessageEvent<{ id: number; ok: boolean; rows?: unknown; error?: string; ms?: number }>) => {
       const message = event.data;
       const diagnostic = message as unknown as { diagnostic?: string; path: string; ms: number };
       if (diagnostic.diagnostic === 'open') {
@@ -235,6 +242,7 @@ function startThread(store: string): ReaderThread | undefined {
       if (!waiting) return;
       started.pending.delete(message.id);
       if (waiting.timer !== undefined) clock.clearTimeout(waiting.timer);
+      if (typeof message.ms === 'number') waiting.sqlMs?.(message.ms);
       if (message.ok) waiting.resolve(message.rows ?? null);
       else waiting.reject(new Error(message.error ?? 'off-thread read failed'));
     };
@@ -282,7 +290,12 @@ export function offThreadReadsSupported(dbPath: string): boolean {
 
 // `timeoutMs` null: the caller owns the deadline (a pool query).
 // Passing undefined would silently restore the 120 s default in JavaScript.
-function send(reader: ReaderThread, message: Record<string, unknown>, timeoutMs: number | null = OFF_THREAD_READ_TIMEOUT_MS): Promise<unknown> {
+function send(
+  reader: ReaderThread,
+  message: Record<string, unknown>,
+  timeoutMs: number | null = OFF_THREAD_READ_TIMEOUT_MS,
+  sqlMs?: (ms: number) => void,
+): Promise<unknown> {
   // A retired thread answers nothing: fail at once rather than wait out the timeout.
   if (reader.retired) return Promise.reject(new Error('off-thread reader stopped'));
   const id = nextId++;
@@ -291,7 +304,7 @@ function send(reader: ReaderThread, message: Record<string, unknown>, timeoutMs:
     const timer = timeoutMs === null ? undefined : clock.setTimeout(() => {
       retire(reader, new Error('off-thread read timed out'));
     }, timeoutMs);
-    reader.pending.set(id, { resolve, reject, ...(timer !== undefined ? { timer } : {}) });
+    reader.pending.set(id, { resolve, reject, ...(timer !== undefined ? { timer } : {}), ...(sqlMs ? { sqlMs } : {}) });
     try {
       reader.worker.postMessage({ ...message, id });
     } catch (error) {
@@ -324,7 +337,23 @@ export async function withOffThreadSnapshot<T>(
   try {
     await send(reader, { op: 'open', snapshot, path: dbPath });
     try {
-      return await work((query) => send(reader, { op: 'read', snapshot, sql: query.sql, params: query.params, mode: query.mode }));
+      return await work(async (query) => {
+        if (observeSnapshots) observer?.(dbPath, query);
+        // A snapshot read made by a traced Ask lane counts in its pool reads.
+        const report = beginSourceAnswerPoolRead();
+        const sentAtMs = clock.now();
+        let sqlMs = 0;
+        try {
+          const rows = await send(reader, { op: 'read', snapshot, sql: query.sql, params: query.params, mode: query.mode }, undefined, (ms) => {
+            sqlMs = ms;
+          });
+          report?.({ queueWaitMs: 0, runMs: clock.now() - sentAtMs, sqlMs, outcome: 'rows' });
+          return rows;
+        } catch (error) {
+          report?.({ queueWaitMs: 0, runMs: clock.now() - sentAtMs, sqlMs, outcome: 'error' });
+          throw error;
+        }
+      });
     } finally {
       await send(reader, { op: 'close', snapshot }).catch(() => undefined);
     }
@@ -389,7 +418,7 @@ export function readOnPool(dbPath: string, read: StoreRead, options: { deadlineA
   const waiting = queues.get(dbPath) ?? [];
   const report = beginSourceAnswerPoolRead();
   if (waiting.length >= READ_POOL_QUEUE_PER_STORE || clock.now() >= deadlineAtMs) {
-    report?.({ queueWaitMs: 0, runMs: 0, outcome: 'refused' });
+    report?.({ queueWaitMs: 0, runMs: 0, sqlMs: 0, outcome: 'refused' });
     return Promise.reject(new OffThreadReadBusyError());
   }
   return new Promise((resolve, reject) => {
@@ -456,6 +485,7 @@ function settle(job: PoolJob, outcome: { rows: unknown } | { error: Error }): vo
     job.report({
       queueWaitMs: (sentAtMs ?? now) - job.enqueuedAtMs,
       runMs: sentAtMs === undefined ? 0 : now - sentAtMs,
+      sqlMs: job.sqlMs ?? 0,
       outcome: ended,
     });
   }
@@ -504,7 +534,9 @@ function dispatch(): void {
     reader.job = job;
     reader.executingStore = job.store;
     observer?.(job.store, job.read);
-    send(reader, { op: 'query', path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, null)
+    send(reader, { op: 'query', path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, null, (ms) => {
+      job.sqlMs = ms;
+    })
       .then(
         (rows) => settle(job, clock.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError() } : { rows }),
         (error: Error) => settle(job, { error: reader.retired ? new OffThreadReadBusyError() : error }),

@@ -25853,6 +25853,415 @@ var init_tier_ledger = __esm(() => {
   };
 });
 
+// src/workers/source-index/answer-latency-trace.ts
+import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
+import { randomUUID as randomUUID6 } from "node:crypto";
+function runInSourceAnswerLane(corpusId, run) {
+  return laneStorage.run(corpusId, run);
+}
+function beginSourceAnswerPoolRead() {
+  const query = currentSourceAnswerTrace()?.activeQuery;
+  const corpusId = laneStorage.getStore();
+  if (!query || corpusId === undefined)
+    return;
+  return ({ queueWaitMs, runMs, sqlMs, outcome }) => {
+    let reads = query.poolByCorpus.get(corpusId);
+    if (!reads) {
+      reads = {
+        reads: 0,
+        queue_wait_ms: 0,
+        queue_wait_max_ms: 0,
+        run_ms: 0,
+        run_max_ms: 0,
+        sql_ms: 0,
+        sql_max_ms: 0,
+        refused: 0,
+        dropped_queued: 0,
+        past_deadline_running: 0,
+        errors: 0
+      };
+      query.poolByCorpus.set(corpusId, reads);
+    }
+    const wait = nonNegativeMs(queueWaitMs);
+    const ran = nonNegativeMs(runMs);
+    reads.reads += 1;
+    reads.queue_wait_ms += wait;
+    reads.queue_wait_max_ms = Math.max(reads.queue_wait_max_ms, wait);
+    reads.run_ms += ran;
+    reads.run_max_ms = Math.max(reads.run_max_ms, ran);
+    const sql = nonNegativeMs(sqlMs);
+    reads.sql_ms += sql;
+    reads.sql_max_ms = Math.max(reads.sql_max_ms, sql);
+    if (outcome === "refused")
+      reads.refused += 1;
+    else if (outcome === "dropped_queued")
+      reads.dropped_queued += 1;
+    else if (outcome === "past_deadline_running")
+      reads.past_deadline_running += 1;
+    else if (outcome === "error")
+      reads.errors += 1;
+  };
+}
+function createSourceAnswerTrace(now = () => new Date) {
+  const received = now();
+  return {
+    correlationId: randomUUID6(),
+    receivedAt: received.toISOString(),
+    receivedAtMs: received.getTime(),
+    sqliteRetryCount: 0,
+    sqliteBackoffMs: 0,
+    queryPlannerMs: 0,
+    queryFormulationCount: 0,
+    queryPlannerAwaitedCount: 0,
+    queryPlannerIgnoredAfterStrongLiteralCount: 0,
+    queryPlannerFailedCount: 0,
+    retrievalAttempts: [],
+    routeResolutionMs: 0,
+    orderedRoute: [],
+    analystLegs: [],
+    residualAnalystOrphanCount: 0,
+    selfHealRebuildMs: 0,
+    recordBuildMs: 0,
+    appendMs: 0,
+    mainThreadSql: { statements: 0, total_ms: 0, max_ms: 0, slow: [] }
+  };
+}
+function runWithSourceAnswerTrace(trace, run) {
+  return Promise.resolve(storage.run(trace, run));
+}
+function currentSourceAnswerTrace() {
+  return storage.getStore();
+}
+function sourceAnswerTraceActive() {
+  return storage.getStore() !== undefined;
+}
+function recordSourceAnswerMainThreadSql(elapsedMs, site) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  const ms = nonNegativeMs(elapsedMs);
+  const sql = trace.mainThreadSql;
+  sql.statements += 1;
+  sql.total_ms += ms;
+  sql.max_ms = Math.max(sql.max_ms, ms);
+  if (ms < SLOW_MAIN_THREAD_SQL_MS)
+    return;
+  sql.slow.push({ ms, site: site() });
+  if (sql.slow.length > SLOW_MAIN_THREAD_SQL_KEPT) {
+    sql.slow.sort((left, right) => right.ms - left.ms);
+    sql.slow.length = SLOW_MAIN_THREAD_SQL_KEPT;
+  }
+}
+function recordSourceAnswerPhaseTimings(timings) {
+  const trace = currentSourceAnswerTrace();
+  if (trace)
+    trace.phaseTimings = { ...timings };
+}
+function recordSourceAnswerSqliteRetry(backoffMs) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  trace.sqliteRetryCount += 1;
+  trace.sqliteBackoffMs += nonNegativeMs(backoffMs);
+}
+function recordSourceAnswerQueryPlanner(elapsedMs, formulationCount) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  trace.queryPlannerMs += nonNegativeMs(elapsedMs);
+  trace.queryFormulationCount += Math.max(0, Math.floor(formulationCount));
+}
+function recordSourceAnswerQueryPlannerDisposition(disposition) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  if (disposition === "awaited")
+    trace.queryPlannerAwaitedCount += 1;
+  else if (disposition === "ignored_after_strong_literal") {
+    trace.queryPlannerIgnoredAfterStrongLiteralCount += 1;
+  } else
+    trace.queryPlannerFailedCount += 1;
+}
+async function observeSourceAnswerRetrievalAttempt(kind, run) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return run();
+  const previous = trace.activeAttempt;
+  const attempt = {
+    kind,
+    startedAtMs: Date.now(),
+    hydrationMs: 0,
+    queries: []
+  };
+  trace.activeAttempt = attempt;
+  try {
+    return await run();
+  } finally {
+    const elapsedMs = nonNegativeMs(Date.now() - attempt.startedAtMs);
+    trace.retrievalAttempts.push({
+      kind,
+      elapsed_ms: elapsedMs,
+      hydration_ms: attempt.hydrationMs,
+      queries: attempt.queries
+    });
+    if (kind === "self_heal_rebuild")
+      trace.selfHealRebuildMs += elapsedMs;
+    if (previous)
+      trace.activeAttempt = previous;
+    else
+      delete trace.activeAttempt;
+  }
+}
+function recordSourceAnswerHydration(elapsedMs) {
+  const attempt = currentSourceAnswerTrace()?.activeAttempt;
+  if (attempt)
+    attempt.hydrationMs += nonNegativeMs(elapsedMs);
+}
+async function observeSourceAnswerRoutedQuery(ordinal, run) {
+  const trace = currentSourceAnswerTrace();
+  const attempt = trace?.activeAttempt;
+  if (!trace || !attempt)
+    return run();
+  const previous = trace.activeQuery;
+  const query = {
+    ordinal: Math.max(1, Math.floor(ordinal)),
+    startedAtMs: Date.now(),
+    corpusTimings: [],
+    poolByCorpus: new Map
+  };
+  trace.activeQuery = query;
+  try {
+    return await run();
+  } finally {
+    attempt.queries.push({
+      ordinal: query.ordinal,
+      elapsed_ms: nonNegativeMs(Date.now() - query.startedAtMs),
+      corpus_timings: query.corpusTimings.map((timing) => ({
+        corpus_id: timing.corpus_id,
+        elapsed_ms: nonNegativeMs(timing.elapsed_ms),
+        ...timing.adapter_reported_ms !== undefined ? { adapter_reported_ms: nonNegativeMs(timing.adapter_reported_ms) } : {},
+        outcome: timing.outcome,
+        ...timing.error_class ? { error_class: sanitizeErrorClass(timing.error_class) } : {},
+        ...query.poolByCorpus.has(timing.corpus_id) ? { pool: { ...query.poolByCorpus.get(timing.corpus_id) } } : {}
+      }))
+    });
+    if (previous)
+      trace.activeQuery = previous;
+    else
+      delete trace.activeQuery;
+  }
+}
+function recordSourceAnswerCorpusTiming(timing) {
+  const query = currentSourceAnswerTrace()?.activeQuery;
+  if (!query)
+    return;
+  query.corpusTimings.push({
+    corpus_id: timing.corpus_id,
+    elapsed_ms: nonNegativeMs(timing.elapsed_ms),
+    ...timing.adapter_reported_ms !== undefined ? { adapter_reported_ms: nonNegativeMs(timing.adapter_reported_ms) } : {},
+    outcome: timing.outcome,
+    ...timing.error_class ? { error_class: sanitizeErrorClass(timing.error_class) } : {}
+  });
+}
+function recordSourceAnswerRoute(elapsedMs, route) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  trace.routeResolutionMs += nonNegativeMs(elapsedMs);
+  trace.orderedRoute = route.map((step) => ({
+    profile_id: step.profile_id,
+    backend: step.backend,
+    model_id: step.model_id
+  }));
+}
+async function observeSourceAnswerAnalystLeg(input, run) {
+  const startedAt = Date.now();
+  try {
+    const result = await run();
+    recordAnalystLeg(input, startedAt, "success");
+    return result;
+  } catch (error) {
+    recordAnalystLeg(input, startedAt, errorClass(error) === "TrustedAnalystTimeoutError" ? "timeout" : "error", error);
+    throw error;
+  }
+}
+function recordSourceAnswerSkippedAnalystLeg(input) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  trace.analystLegs.push({
+    profile_id: input.profile_id,
+    backend: input.backend,
+    model_id: input.model_id,
+    budget_ms: nonNegativeMs(input.budgetMs),
+    elapsed_ms: 0,
+    outcome: input.outcome ?? "policy_skipped",
+    error_class: sanitizeErrorClass(input.errorClass)
+  });
+}
+function recordSourceAnswerResidualAnalystOrphan() {
+  const trace = currentSourceAnswerTrace();
+  if (trace)
+    trace.residualAnalystOrphanCount += 1;
+}
+function recordSourceAnswerReleaseDecision(decision) {
+  const trace = currentSourceAnswerTrace();
+  if (trace)
+    trace.releaseDecision = decision;
+}
+function recordSourceAnswerLedgerBuild(elapsedMs) {
+  const trace = currentSourceAnswerTrace();
+  if (trace)
+    trace.recordBuildMs += nonNegativeMs(elapsedMs);
+}
+function recordSourceAnswerLedgerAppend(elapsedMs) {
+  const trace = currentSourceAnswerTrace();
+  if (trace)
+    trace.appendMs += nonNegativeMs(elapsedMs);
+}
+function snapshotSourceAnswerTrace(trace) {
+  return {
+    correlationId: trace.correlationId,
+    receivedAt: trace.receivedAt,
+    receivedAtMs: trace.receivedAtMs,
+    sqliteRetryCount: trace.sqliteRetryCount,
+    sqliteBackoffMs: trace.sqliteBackoffMs,
+    queryPlannerMs: trace.queryPlannerMs,
+    queryFormulationCount: trace.queryFormulationCount,
+    queryPlannerAwaitedCount: trace.queryPlannerAwaitedCount,
+    queryPlannerIgnoredAfterStrongLiteralCount: trace.queryPlannerIgnoredAfterStrongLiteralCount,
+    queryPlannerFailedCount: trace.queryPlannerFailedCount,
+    retrievalAttempts: trace.retrievalAttempts.map((attempt) => ({
+      ...attempt,
+      queries: attempt.queries.map((query) => ({
+        ...query,
+        corpus_timings: query.corpus_timings.map((timing) => ({ ...timing, ...timing.pool ? { pool: { ...timing.pool } } : {} }))
+      }))
+    })),
+    routeResolutionMs: trace.routeResolutionMs,
+    orderedRoute: trace.orderedRoute.map((step) => ({ ...step })),
+    analystLegs: trace.analystLegs.map((leg) => ({ ...leg })),
+    residualAnalystOrphanCount: Math.max(0, Math.floor(trace.residualAnalystOrphanCount)),
+    ...trace.phaseTimings ? { phaseTimings: { ...trace.phaseTimings } } : {},
+    selfHealRebuildMs: trace.selfHealRebuildMs,
+    recordBuildMs: trace.recordBuildMs,
+    appendMs: trace.appendMs,
+    ...trace.releaseDecision ? { releaseDecision: trace.releaseDecision } : {},
+    mainThreadSql: { ...trace.mainThreadSql, slow: trace.mainThreadSql.slow.map((entry) => ({ ...entry })) }
+  };
+}
+function sourceAnswerTraceErrorClass(error) {
+  return sanitizeErrorClass(errorClass(error));
+}
+function recordAnalystLeg(input, startedAt, outcome, error) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  trace.analystLegs.push({
+    profile_id: input.profile_id,
+    backend: input.backend,
+    model_id: input.model_id,
+    budget_ms: nonNegativeMs(input.budgetMs),
+    elapsed_ms: nonNegativeMs(Date.now() - startedAt),
+    outcome,
+    ...error !== undefined ? { error_class: sourceAnswerTraceErrorClass(error) } : {}
+  });
+}
+function errorClass(error) {
+  const candidate = error;
+  if (typeof candidate?.name === "string" && candidate.name.trim())
+    return candidate.name;
+  if (typeof candidate?.constructor?.name === "string" && candidate.constructor.name.trim()) {
+    return candidate.constructor.name;
+  }
+  return "UnknownError";
+}
+function sanitizeErrorClass(value) {
+  const normalized = value.replace(/[^A-Za-z0-9_]/g, "").slice(0, 64);
+  return CONTENT_FREE_ERROR_CLASSES.has(normalized) ? normalized : "Error";
+}
+function nonNegativeMs(value) {
+  return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+}
+var SLOW_MAIN_THREAD_SQL_MS = 250, SLOW_MAIN_THREAD_SQL_KEPT = 20, storage, laneStorage, CONTENT_FREE_ERROR_CLASSES;
+var init_answer_latency_trace = __esm(() => {
+  storage = new AsyncLocalStorage2;
+  laneStorage = new AsyncLocalStorage2;
+  CONTENT_FREE_ERROR_CLASSES = new Set([
+    "AbortError",
+    "AnalystUnavailable",
+    "AnalystCircuitOpen",
+    "EmailSourceWorkerError",
+    "Error",
+    "LocalTrustProviderMismatch",
+    "OperationError",
+    "RangeError",
+    "SourceModelPolicyDeniedError",
+    "SecureEvidencePolicySkip",
+    "SecureAnalystPoolE2EEGateError",
+    "SyntaxError",
+    "TrustedAnalystTimeoutError",
+    "TypeError"
+  ]);
+});
+
+// src/workers/connector-store/main-thread-sql-trace.ts
+import { Database as Database4 } from "bun:sqlite";
+import { isMainThread } from "node:worker_threads";
+function installMainThreadSqlTrace() {
+  if (installed || !isMainThread)
+    return;
+  installed = true;
+  for (const name of ["query", "prepare"]) {
+    const original = Database4.prototype[name];
+    Database4.prototype[name] = function(...args) {
+      return timeStatement(original.apply(this, args));
+    };
+  }
+}
+function timeStatement(statement) {
+  const held = statement;
+  if (!statement || held[TIMED])
+    return statement;
+  for (const method of STATEMENT_METHODS) {
+    const call = held[method];
+    if (typeof call !== "function")
+      continue;
+    held[method] = function(...args) {
+      if (!sourceAnswerTraceActive())
+        return call.apply(this, args);
+      const started = performance.now();
+      try {
+        return call.apply(this, args);
+      } finally {
+        recordSourceAnswerMainThreadSql(performance.now() - started, callSite);
+      }
+    };
+  }
+  held[TIMED] = true;
+  return statement;
+}
+function callSite() {
+  const frames = (new Error().stack ?? "").split(`
+`).slice(1).map((line) => line.trim()).map((line) => line.startsWith("at ") ? line.slice(3) : line).filter((line) => line.length > 0);
+  const recorder = frames.findIndex((frame) => frame.startsWith("recordSourceAnswerMainThreadSql"));
+  const caller = recorder >= 0 ? recorder + 2 : 3;
+  return frames.slice(caller, caller + SITE_FRAMES).map(shortFrame).join(" < ");
+}
+function shortFrame(frame) {
+  const open2 = frame.lastIndexOf("(");
+  const name = open2 > 0 ? frame.slice(0, open2).trim() : "<anonymous>";
+  const where = (open2 > 0 ? frame.slice(open2 + 1, frame.lastIndexOf(")")) : frame).split("/").at(-1) ?? "";
+  const [file, line] = where.split(":");
+  return `${name} ${file}${line ? `:${line}` : ""}`;
+}
+var TIMED, STATEMENT_METHODS, SITE_FRAMES = 3, installed = false;
+var init_main_thread_sql_trace = __esm(() => {
+  init_answer_latency_trace();
+  TIMED = Symbol("olympus.mainThreadSqlTimed");
+  STATEMENT_METHODS = ["all", "get", "run", "values"];
+});
+
 // src/core/sqlite-forget.ts
 function rowsKeyedBy(keys) {
   const present = keys.filter(([, values]) => values.length > 0);
@@ -25882,7 +26291,7 @@ function forgetSqliteRows(db, filters, dryRun) {
 
 // src/workers/file-extraction/job-names.ts
 import { existsSync as existsSync21 } from "node:fs";
-import { Database as Database4 } from "bun:sqlite";
+import { Database as Database5 } from "bun:sqlite";
 function defaultFileExtractionJobsDbPath(env = process.env) {
   return sharedDataPath("file-extraction-jobs", env);
 }
@@ -25918,7 +26327,7 @@ function itemNameRedacted(db, item) {
 function clearExtractionJobNames(dbPath, item, options = {}) {
   if (dbPath === ":memory:" || !existsSync21(dbPath))
     return { cleared: 0, durable: true };
-  const db = new Database4(dbPath, { readwrite: true, create: false });
+  const db = new Database5(dbPath, { readwrite: true, create: false });
   try {
     db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
     const table = db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_jobs'`).get();
@@ -25966,7 +26375,7 @@ function clearExtractionJobNames(dbPath, item, options = {}) {
 function retireExtractionJobRedaction(dbPath, item, claimant, stillSecret) {
   if (dbPath === ":memory:" || !existsSync21(dbPath))
     return { retired: 0, stillSecret: false };
-  const db = new Database4(dbPath, { readwrite: true, create: false });
+  const db = new Database5(dbPath, { readwrite: true, create: false });
   try {
     db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
     if (!redactionsTableExists(db))
@@ -26016,7 +26425,7 @@ function forgetExtractionJobs(dbPath, scope, options = {}) {
   const claimants = [...new Set(scope.tierLedgerIds ?? [])];
   if (!jobs && claimants.length === 0)
     return 0;
-  const db = new Database4(dbPath, dryRun ? { readonly: true } : { readwrite: true, create: false });
+  const db = new Database5(dbPath, dryRun ? { readonly: true } : { readwrite: true, create: false });
   try {
     db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
     if (!dryRun)
@@ -26048,7 +26457,7 @@ function forgetExtractionJobsOfAccountScopes(dbPath, corpusIds, accountScopes, o
   const marks = (values) => values.map(() => "?").join(", ");
   const ofScopes = `corpus_id IN (${marks(corpusIds)}) AND account_scope IN (${marks(accountScopes)})`;
   const params = [...corpusIds, ...accountScopes];
-  const db = new Database4(dbPath, dryRun ? { readonly: true } : { readwrite: true, create: false });
+  const db = new Database5(dbPath, dryRun ? { readonly: true } : { readwrite: true, create: false });
   try {
     db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
     if (!dryRun)
@@ -26075,7 +26484,7 @@ function settledByPlacement(job) {
 function oweExtractionRereadAfterTierMove(dbPath, item) {
   if (dbPath === ":memory:" || !existsSync21(dbPath))
     return 0;
-  const db = new Database4(dbPath, { readwrite: true, create: false });
+  const db = new Database5(dbPath, { readwrite: true, create: false });
   try {
     db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
     if (!rereadsTableExists(db) || !rereadsHaveReason(db))
@@ -26094,7 +26503,7 @@ function oweExtractionRereadAfterTierMove(dbPath, item) {
 function oweExtractionRereadAfterRevive(dbPath, item) {
   if (dbPath === ":memory:" || !existsSync21(dbPath))
     return 0;
-  const db = new Database4(dbPath, { readwrite: true, create: false });
+  const db = new Database5(dbPath, { readwrite: true, create: false });
   try {
     db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
     if (!rereadsTableExists(db) || !rereadsHaveReason(db))
@@ -27576,7 +27985,7 @@ import { chmodSync as chmodSync8, existsSync as existsSync23, mkdirSync as mkdir
 import { dirname as dirname29, join as join32, resolve as resolve9 } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
 import { isDeepStrictEqual } from "node:util";
-import { randomUUID as randomUUID6 } from "node:crypto";
+import { randomUUID as randomUUID7 } from "node:crypto";
 function isStandaloneEngineProcess(env) {
   const supervised = !!env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim();
   return (env.OLYMPUS_ENGINE_HOST === "1" || env.OLYMPUS_STANDALONE === "1") && (!supervised || env.OLYMPUS_WORKER_SUPERVISOR === "engine");
@@ -28031,7 +28440,7 @@ function migratePrivateMeaningSearch(path) {
       }
     };
     validateSovereigntyConfig(next);
-    const backup = `${path}.backup-private-meaning-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID6()}`;
+    const backup = `${path}.backup-private-meaning-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID7()}`;
     lease.commit(() => {
       writePrivateFileAtomicSync(backup, original);
       writePrivateFileAtomicSync(path, `${JSON.stringify(next, null, 2)}
@@ -29026,331 +29435,6 @@ function isSourceIndexLaneBusyError(error) {
 }
 var SOURCE_INDEX_LANE_BUSY_CODE = "source_index_lane_busy";
 
-// src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
-import { randomUUID as randomUUID7 } from "node:crypto";
-function runInSourceAnswerLane(corpusId, run) {
-  return laneStorage.run(corpusId, run);
-}
-function beginSourceAnswerPoolRead() {
-  const query = currentSourceAnswerTrace()?.activeQuery;
-  const corpusId = laneStorage.getStore();
-  if (!query || corpusId === undefined)
-    return;
-  return ({ queueWaitMs, runMs, outcome }) => {
-    let reads = query.poolByCorpus.get(corpusId);
-    if (!reads) {
-      reads = {
-        reads: 0,
-        queue_wait_ms: 0,
-        queue_wait_max_ms: 0,
-        run_ms: 0,
-        run_max_ms: 0,
-        refused: 0,
-        dropped_queued: 0,
-        past_deadline_running: 0,
-        errors: 0
-      };
-      query.poolByCorpus.set(corpusId, reads);
-    }
-    const wait = nonNegativeMs(queueWaitMs);
-    const ran = nonNegativeMs(runMs);
-    reads.reads += 1;
-    reads.queue_wait_ms += wait;
-    reads.queue_wait_max_ms = Math.max(reads.queue_wait_max_ms, wait);
-    reads.run_ms += ran;
-    reads.run_max_ms = Math.max(reads.run_max_ms, ran);
-    if (outcome === "refused")
-      reads.refused += 1;
-    else if (outcome === "dropped_queued")
-      reads.dropped_queued += 1;
-    else if (outcome === "past_deadline_running")
-      reads.past_deadline_running += 1;
-    else if (outcome === "error")
-      reads.errors += 1;
-  };
-}
-function createSourceAnswerTrace(now = () => new Date) {
-  const received = now();
-  return {
-    correlationId: randomUUID7(),
-    receivedAt: received.toISOString(),
-    receivedAtMs: received.getTime(),
-    sqliteRetryCount: 0,
-    sqliteBackoffMs: 0,
-    queryPlannerMs: 0,
-    queryFormulationCount: 0,
-    queryPlannerAwaitedCount: 0,
-    queryPlannerIgnoredAfterStrongLiteralCount: 0,
-    queryPlannerFailedCount: 0,
-    retrievalAttempts: [],
-    routeResolutionMs: 0,
-    orderedRoute: [],
-    analystLegs: [],
-    residualAnalystOrphanCount: 0,
-    selfHealRebuildMs: 0,
-    recordBuildMs: 0,
-    appendMs: 0
-  };
-}
-function runWithSourceAnswerTrace(trace, run) {
-  return Promise.resolve(storage.run(trace, run));
-}
-function currentSourceAnswerTrace() {
-  return storage.getStore();
-}
-function recordSourceAnswerPhaseTimings(timings) {
-  const trace = currentSourceAnswerTrace();
-  if (trace)
-    trace.phaseTimings = { ...timings };
-}
-function recordSourceAnswerSqliteRetry(backoffMs) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  trace.sqliteRetryCount += 1;
-  trace.sqliteBackoffMs += nonNegativeMs(backoffMs);
-}
-function recordSourceAnswerQueryPlanner(elapsedMs, formulationCount) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  trace.queryPlannerMs += nonNegativeMs(elapsedMs);
-  trace.queryFormulationCount += Math.max(0, Math.floor(formulationCount));
-}
-function recordSourceAnswerQueryPlannerDisposition(disposition) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  if (disposition === "awaited")
-    trace.queryPlannerAwaitedCount += 1;
-  else if (disposition === "ignored_after_strong_literal") {
-    trace.queryPlannerIgnoredAfterStrongLiteralCount += 1;
-  } else
-    trace.queryPlannerFailedCount += 1;
-}
-async function observeSourceAnswerRetrievalAttempt(kind, run) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return run();
-  const previous = trace.activeAttempt;
-  const attempt = {
-    kind,
-    startedAtMs: Date.now(),
-    hydrationMs: 0,
-    queries: []
-  };
-  trace.activeAttempt = attempt;
-  try {
-    return await run();
-  } finally {
-    const elapsedMs = nonNegativeMs(Date.now() - attempt.startedAtMs);
-    trace.retrievalAttempts.push({
-      kind,
-      elapsed_ms: elapsedMs,
-      hydration_ms: attempt.hydrationMs,
-      queries: attempt.queries
-    });
-    if (kind === "self_heal_rebuild")
-      trace.selfHealRebuildMs += elapsedMs;
-    if (previous)
-      trace.activeAttempt = previous;
-    else
-      delete trace.activeAttempt;
-  }
-}
-function recordSourceAnswerHydration(elapsedMs) {
-  const attempt = currentSourceAnswerTrace()?.activeAttempt;
-  if (attempt)
-    attempt.hydrationMs += nonNegativeMs(elapsedMs);
-}
-async function observeSourceAnswerRoutedQuery(ordinal, run) {
-  const trace = currentSourceAnswerTrace();
-  const attempt = trace?.activeAttempt;
-  if (!trace || !attempt)
-    return run();
-  const previous = trace.activeQuery;
-  const query = {
-    ordinal: Math.max(1, Math.floor(ordinal)),
-    startedAtMs: Date.now(),
-    corpusTimings: [],
-    poolByCorpus: new Map
-  };
-  trace.activeQuery = query;
-  try {
-    return await run();
-  } finally {
-    attempt.queries.push({
-      ordinal: query.ordinal,
-      elapsed_ms: nonNegativeMs(Date.now() - query.startedAtMs),
-      corpus_timings: query.corpusTimings.map((timing) => ({
-        corpus_id: timing.corpus_id,
-        elapsed_ms: nonNegativeMs(timing.elapsed_ms),
-        ...timing.adapter_reported_ms !== undefined ? { adapter_reported_ms: nonNegativeMs(timing.adapter_reported_ms) } : {},
-        outcome: timing.outcome,
-        ...timing.error_class ? { error_class: sanitizeErrorClass(timing.error_class) } : {},
-        ...query.poolByCorpus.has(timing.corpus_id) ? { pool: { ...query.poolByCorpus.get(timing.corpus_id) } } : {}
-      }))
-    });
-    if (previous)
-      trace.activeQuery = previous;
-    else
-      delete trace.activeQuery;
-  }
-}
-function recordSourceAnswerCorpusTiming(timing) {
-  const query = currentSourceAnswerTrace()?.activeQuery;
-  if (!query)
-    return;
-  query.corpusTimings.push({
-    corpus_id: timing.corpus_id,
-    elapsed_ms: nonNegativeMs(timing.elapsed_ms),
-    ...timing.adapter_reported_ms !== undefined ? { adapter_reported_ms: nonNegativeMs(timing.adapter_reported_ms) } : {},
-    outcome: timing.outcome,
-    ...timing.error_class ? { error_class: sanitizeErrorClass(timing.error_class) } : {}
-  });
-}
-function recordSourceAnswerRoute(elapsedMs, route) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  trace.routeResolutionMs += nonNegativeMs(elapsedMs);
-  trace.orderedRoute = route.map((step) => ({
-    profile_id: step.profile_id,
-    backend: step.backend,
-    model_id: step.model_id
-  }));
-}
-async function observeSourceAnswerAnalystLeg(input, run) {
-  const startedAt = Date.now();
-  try {
-    const result = await run();
-    recordAnalystLeg(input, startedAt, "success");
-    return result;
-  } catch (error) {
-    recordAnalystLeg(input, startedAt, errorClass(error) === "TrustedAnalystTimeoutError" ? "timeout" : "error", error);
-    throw error;
-  }
-}
-function recordSourceAnswerSkippedAnalystLeg(input) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  trace.analystLegs.push({
-    profile_id: input.profile_id,
-    backend: input.backend,
-    model_id: input.model_id,
-    budget_ms: nonNegativeMs(input.budgetMs),
-    elapsed_ms: 0,
-    outcome: input.outcome ?? "policy_skipped",
-    error_class: sanitizeErrorClass(input.errorClass)
-  });
-}
-function recordSourceAnswerResidualAnalystOrphan() {
-  const trace = currentSourceAnswerTrace();
-  if (trace)
-    trace.residualAnalystOrphanCount += 1;
-}
-function recordSourceAnswerReleaseDecision(decision) {
-  const trace = currentSourceAnswerTrace();
-  if (trace)
-    trace.releaseDecision = decision;
-}
-function recordSourceAnswerLedgerBuild(elapsedMs) {
-  const trace = currentSourceAnswerTrace();
-  if (trace)
-    trace.recordBuildMs += nonNegativeMs(elapsedMs);
-}
-function recordSourceAnswerLedgerAppend(elapsedMs) {
-  const trace = currentSourceAnswerTrace();
-  if (trace)
-    trace.appendMs += nonNegativeMs(elapsedMs);
-}
-function snapshotSourceAnswerTrace(trace) {
-  return {
-    correlationId: trace.correlationId,
-    receivedAt: trace.receivedAt,
-    receivedAtMs: trace.receivedAtMs,
-    sqliteRetryCount: trace.sqliteRetryCount,
-    sqliteBackoffMs: trace.sqliteBackoffMs,
-    queryPlannerMs: trace.queryPlannerMs,
-    queryFormulationCount: trace.queryFormulationCount,
-    queryPlannerAwaitedCount: trace.queryPlannerAwaitedCount,
-    queryPlannerIgnoredAfterStrongLiteralCount: trace.queryPlannerIgnoredAfterStrongLiteralCount,
-    queryPlannerFailedCount: trace.queryPlannerFailedCount,
-    retrievalAttempts: trace.retrievalAttempts.map((attempt) => ({
-      ...attempt,
-      queries: attempt.queries.map((query) => ({
-        ...query,
-        corpus_timings: query.corpus_timings.map((timing) => ({ ...timing, ...timing.pool ? { pool: { ...timing.pool } } : {} }))
-      }))
-    })),
-    routeResolutionMs: trace.routeResolutionMs,
-    orderedRoute: trace.orderedRoute.map((step) => ({ ...step })),
-    analystLegs: trace.analystLegs.map((leg) => ({ ...leg })),
-    residualAnalystOrphanCount: Math.max(0, Math.floor(trace.residualAnalystOrphanCount)),
-    ...trace.phaseTimings ? { phaseTimings: { ...trace.phaseTimings } } : {},
-    selfHealRebuildMs: trace.selfHealRebuildMs,
-    recordBuildMs: trace.recordBuildMs,
-    appendMs: trace.appendMs,
-    ...trace.releaseDecision ? { releaseDecision: trace.releaseDecision } : {}
-  };
-}
-function sourceAnswerTraceErrorClass(error) {
-  return sanitizeErrorClass(errorClass(error));
-}
-function recordAnalystLeg(input, startedAt, outcome, error) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  trace.analystLegs.push({
-    profile_id: input.profile_id,
-    backend: input.backend,
-    model_id: input.model_id,
-    budget_ms: nonNegativeMs(input.budgetMs),
-    elapsed_ms: nonNegativeMs(Date.now() - startedAt),
-    outcome,
-    ...error !== undefined ? { error_class: sourceAnswerTraceErrorClass(error) } : {}
-  });
-}
-function errorClass(error) {
-  const candidate = error;
-  if (typeof candidate?.name === "string" && candidate.name.trim())
-    return candidate.name;
-  if (typeof candidate?.constructor?.name === "string" && candidate.constructor.name.trim()) {
-    return candidate.constructor.name;
-  }
-  return "UnknownError";
-}
-function sanitizeErrorClass(value) {
-  const normalized = value.replace(/[^A-Za-z0-9_]/g, "").slice(0, 64);
-  return CONTENT_FREE_ERROR_CLASSES.has(normalized) ? normalized : "Error";
-}
-function nonNegativeMs(value) {
-  return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
-}
-var storage, laneStorage, CONTENT_FREE_ERROR_CLASSES;
-var init_answer_latency_trace = __esm(() => {
-  storage = new AsyncLocalStorage2;
-  laneStorage = new AsyncLocalStorage2;
-  CONTENT_FREE_ERROR_CLASSES = new Set([
-    "AbortError",
-    "AnalystUnavailable",
-    "AnalystCircuitOpen",
-    "EmailSourceWorkerError",
-    "Error",
-    "LocalTrustProviderMismatch",
-    "OperationError",
-    "RangeError",
-    "SourceModelPolicyDeniedError",
-    "SecureEvidencePolicySkip",
-    "SecureAnalystPoolE2EEGateError",
-    "SyntaxError",
-    "TrustedAnalystTimeoutError",
-    "TypeError"
-  ]);
-});
-
 // src/workers/connector-store/off-thread-reads.ts
 function live() {
   return threads.filter((reader) => !reader.retired);
@@ -29392,6 +29476,8 @@ function startThread(store) {
       started.pending.delete(message2.id);
       if (waiting.timer !== undefined)
         clock2.clearTimeout(waiting.timer);
+      if (typeof message2.ms === "number")
+        waiting.sqlMs?.(message2.ms);
       if (message2.ok)
         waiting.resolve(message2.rows ?? null);
       else
@@ -29432,7 +29518,7 @@ function retire(stopped, error) {
 function offThreadReadsSupported(dbPath) {
   return dbPath !== ":memory:" && !dbPath.startsWith("file::memory:") && runtimeHasWorkers();
 }
-function send(reader, message2, timeoutMs = OFF_THREAD_READ_TIMEOUT_MS) {
+function send(reader, message2, timeoutMs = OFF_THREAD_READ_TIMEOUT_MS, sqlMs) {
   if (reader.retired)
     return Promise.reject(new Error("off-thread reader stopped"));
   const id = nextId++;
@@ -29440,7 +29526,7 @@ function send(reader, message2, timeoutMs = OFF_THREAD_READ_TIMEOUT_MS) {
     const timer = timeoutMs === null ? undefined : clock2.setTimeout(() => {
       retire(reader, new Error("off-thread read timed out"));
     }, timeoutMs);
-    reader.pending.set(id, { resolve: resolve10, reject, ...timer !== undefined ? { timer } : {} });
+    reader.pending.set(id, { resolve: resolve10, reject, ...timer !== undefined ? { timer } : {}, ...sqlMs ? { sqlMs } : {} });
     try {
       reader.worker.postMessage({ ...message2, id });
     } catch (error) {
@@ -29465,7 +29551,23 @@ async function withOffThreadSnapshot(dbPath, work) {
   try {
     await send(reader, { op: "open", snapshot, path: dbPath });
     try {
-      return await work((query) => send(reader, { op: "read", snapshot, sql: query.sql, params: query.params, mode: query.mode }));
+      return await work(async (query) => {
+        if (observeSnapshots)
+          observer?.(dbPath, query);
+        const report = beginSourceAnswerPoolRead();
+        const sentAtMs = clock2.now();
+        let sqlMs = 0;
+        try {
+          const rows = await send(reader, { op: "read", snapshot, sql: query.sql, params: query.params, mode: query.mode }, undefined, (ms) => {
+            sqlMs = ms;
+          });
+          report?.({ queueWaitMs: 0, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "rows" });
+          return rows;
+        } catch (error) {
+          report?.({ queueWaitMs: 0, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "error" });
+          throw error;
+        }
+      });
     } finally {
       await send(reader, { op: "close", snapshot }).catch(() => {
         return;
@@ -29516,7 +29618,7 @@ function readOnPool(dbPath, read, options = {}) {
   const waiting = queues.get(dbPath) ?? [];
   const report = beginSourceAnswerPoolRead();
   if (waiting.length >= READ_POOL_QUEUE_PER_STORE || clock2.now() >= deadlineAtMs) {
-    report?.({ queueWaitMs: 0, runMs: 0, outcome: "refused" });
+    report?.({ queueWaitMs: 0, runMs: 0, sqlMs: 0, outcome: "refused" });
     return Promise.reject(new OffThreadReadBusyError);
   }
   return new Promise((resolve10, reject) => {
@@ -29573,6 +29675,7 @@ function settle(job, outcome) {
     job.report({
       queueWaitMs: (sentAtMs ?? now) - job.enqueuedAtMs,
       runMs: sentAtMs === undefined ? 0 : now - sentAtMs,
+      sqlMs: job.sqlMs ?? 0,
       outcome: ended
     });
   }
@@ -29627,14 +29730,16 @@ function dispatch() {
     reader.job = job;
     reader.executingStore = job.store;
     observer?.(job.store, job.read);
-    send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, null).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => settle(job, { error: reader.retired ? new OffThreadReadBusyError : error })).finally(() => {
+    send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, null, (ms) => {
+      job.sqlMs = ms;
+    }).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => settle(job, { error: reader.retired ? new OffThreadReadBusyError : error })).finally(() => {
       if (reader.job === job)
         reader.job = undefined;
       dispatch();
     });
   }
 }
-var READ_POOL_SIZE = 1, READ_POOL_QUEUE_PER_STORE = 8, OFF_THREAD_READ_TIMEOUT_MS = 120000, OffThreadReadBusyError, REAL_CLOCK, clock2, observer, workerFactory = (url) => new Worker(url), WORKER_SOURCE = `
+var READ_POOL_SIZE = 1, READ_POOL_QUEUE_PER_STORE = 8, OFF_THREAD_READ_TIMEOUT_MS = 120000, OffThreadReadBusyError, REAL_CLOCK, clock2, observer, observeSnapshots = false, workerFactory = (url) => new Worker(url), WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
 const snapshots = new Map();
@@ -29680,9 +29785,10 @@ self.onmessage = (event) => {
     } else {
       const db = op === 'query' ? connection(path) : snapshots.get(snapshot);
       if (!db) throw new Error('unknown snapshot');
+      const started = performance.now();
       const query = db.query(sql);
       const rows = mode === 'all' ? query.all(...params) : query.get(...params);
-      postMessage({ id, ok: true, rows });
+      postMessage({ id, ok: true, rows, ms: performance.now() - started });
     }
   } catch (error) {
     postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error) });
@@ -30863,15 +30969,15 @@ var registered2, tierSetPlanners;
 
 // src/workers/connector-store/tier-placement.ts
 function resolveStoreTierClassification(explicit, ledgerPath) {
-  const installed = registeredInstalledTierClassification()?.forLedger(ledgerPath);
-  if (!installed)
+  const installed2 = registeredInstalledTierClassification()?.forLedger(ledgerPath);
+  if (!installed2)
     return explicit;
   if (!explicit)
-    return installed;
-  const rules = [...explicit.rules ?? [], ...installed.rules ?? []];
-  const sniffer = explicit.sniffer ?? installed.sniffer;
-  const unavailableReason = installed.unavailableReason ?? explicit.unavailableReason;
-  const retirePublic = installed.retirePublic === true || explicit.retirePublic === true;
+    return installed2;
+  const rules = [...explicit.rules ?? [], ...installed2.rules ?? []];
+  const sniffer = explicit.sniffer ?? installed2.sniffer;
+  const unavailableReason = installed2.unavailableReason ?? explicit.unavailableReason;
+  const retirePublic = installed2.retirePublic === true || explicit.retirePublic === true;
   return {
     ...rules.length > 0 ? { rules } : {},
     ...sniffer ? { sniffer } : {},
@@ -31703,7 +31809,7 @@ __export(exports_waiting_private_questions, {
   WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION: () => WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION,
   CHATGPT_INBOX_GRACE_MS: () => CHATGPT_INBOX_GRACE_MS
 });
-import { Database as Database5 } from "bun:sqlite";
+import { Database as Database6 } from "bun:sqlite";
 import { createHash as createHash19, randomBytes as randomBytes9 } from "node:crypto";
 import { chmodSync as chmodSync10, existsSync as existsSync27, lstatSync as lstatSync16, mkdirSync as mkdirSync16 } from "node:fs";
 import { homedir as homedir18 } from "node:os";
@@ -31791,7 +31897,7 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
       listener();
   });
   hardenPrivatePath(dbPath);
-  const db = new Database5(dbPath, { create: true });
+  const db = new Database6(dbPath, { create: true });
   try {
     chmodSync10(dbPath, 384);
     const busyTimeoutMs = Math.max(0, Math.floor(options.busyTimeoutMs ?? STORE_BUSY_TIMEOUT_MS));
@@ -32052,7 +32158,7 @@ function forgetWaitingPrivateQuestions(dbPath, input, options = {}) {
       store.close();
     }
   }
-  const db = new Database5(dbPath, { readonly: true });
+  const db = new Database6(dbPath, { readonly: true });
   try {
     db.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS};`);
     if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'waiting_questions'").get())
@@ -32266,7 +32372,7 @@ __export(exports_remote_connections, {
   REMOTE_CONNECTIONS_STORE_ID: () => REMOTE_CONNECTIONS_STORE_ID,
   REMOTE_CONNECTIONS_SCHEMA_VERSION: () => REMOTE_CONNECTIONS_SCHEMA_VERSION
 });
-import { Database as Database6 } from "bun:sqlite";
+import { Database as Database7 } from "bun:sqlite";
 import { createHash as createHash20, randomBytes as randomBytes10, timingSafeEqual as timingSafeEqual4 } from "node:crypto";
 import { chmodSync as chmodSync11, existsSync as existsSync28, lstatSync as lstatSync17, mkdirSync as mkdirSync17 } from "node:fs";
 import { homedir as homedir19 } from "node:os";
@@ -32304,7 +32410,7 @@ function hashRemoteConnectionToken(token) {
 function openRemoteConnectionStore(dbPath = defaultRemoteConnectionsDbPath(), options = {}) {
   const now = options.now ?? (() => new Date);
   hardenPrivateDatabasePath(dbPath);
-  const db = new Database6(dbPath, { create: true });
+  const db = new Database7(dbPath, { create: true });
   try {
     chmodSync11(dbPath, 384);
     db.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS2}; PRAGMA secure_delete = ON; PRAGMA journal_mode = WAL;`);
@@ -32546,7 +32652,7 @@ __export(exports_app_release_log, {
   APP_RELEASE_LOG_SCHEMA_VERSION: () => APP_RELEASE_LOG_SCHEMA_VERSION,
   APP_RELEASE_DEFAULT_RETENTION_DAYS: () => APP_RELEASE_DEFAULT_RETENTION_DAYS
 });
-import { Database as Database7 } from "bun:sqlite";
+import { Database as Database8 } from "bun:sqlite";
 import { randomBytes as randomBytes11 } from "node:crypto";
 import { chmodSync as chmodSync12, existsSync as existsSync29, lstatSync as lstatSync18, mkdirSync as mkdirSync18 } from "node:fs";
 import { homedir as homedir20 } from "node:os";
@@ -32563,7 +32669,7 @@ function isAppReleaseRetentionDays(value) {
 function openAppReleaseLog(dbPath, options = {}) {
   const now = options.now ?? Date.now;
   hardenPrivatePath2(dbPath);
-  const db = new Database7(dbPath, { create: true });
+  const db = new Database8(dbPath, { create: true });
   try {
     chmodSync12(dbPath, 384);
     db.exec("PRAGMA busy_timeout = 5000; PRAGMA secure_delete = ON; PRAGMA journal_mode = DELETE; PRAGMA foreign_keys = ON;");
@@ -34951,7 +35057,7 @@ var init_media_judge = __esm(() => {
 import { createHash as createHash22, randomUUID as randomUUID9 } from "node:crypto";
 import { existsSync as existsSync31, lstatSync as lstatSync19, mkdirSync as mkdirSync19, statSync as statSync14 } from "node:fs";
 import { dirname as dirname36 } from "node:path";
-import { Database as Database8 } from "bun:sqlite";
+import { Database as Database9 } from "bun:sqlite";
 function semanticRelevanceBarFor(modelId, adapterBar) {
   return adapterBar ?? CALIBRATED_SEMANTIC_RELEVANCE_BARS.get(modelId);
 }
@@ -35501,15 +35607,67 @@ function embeddingFailureKind(error) {
   const name = error instanceof Error ? error.name : "error";
   return /^[A-Za-z0-9_]{1,64}$/.test(name) ? name.toLowerCase() : "error";
 }
-function connectorStoreCurrentEmbeddingRowsPage(db, options, afterChunkPk, limit = CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE) {
-  const { sql, params } = connectorStoreCurrentEmbeddingPageQuery(options, afterChunkPk, limit);
-  const rows = db.query(sql).all(...params);
-  return rows.map((row) => ({
-    itemPk: row.item_pk,
-    chunkPk: row.chunk_pk,
-    localItemId: row.local_item_id,
-    embedding: row.embedding
-  }));
+async function scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, pageSize) {
+  const authority = embeddingAuthorityRead(provider);
+  const after = embeddingAuthorityFromRow(await read(authority), provider);
+  if (after.skippedReason)
+    return { skippedReason: after.skippedReason };
+  if (after.token !== beforeToken)
+    return { skippedReason: "embedding_authority_changed_during_query" };
+  const bestByItem = new Map;
+  let dimensionMismatches = 0;
+  let afterChunkPk = 0;
+  let pagesScanned = 0;
+  while (true) {
+    if (connectorStoreVectorDeadlineExpired(deadlineAtMs))
+      return { skippedReason: "vector_scan_deadline_exceeded" };
+    const { sql, params } = connectorStoreCurrentEmbeddingPageQuery(pageOptions, afterChunkPk, pageSize);
+    const page2 = await read({ mode: "all", sql, params });
+    if (page2.length === 0)
+      break;
+    for (const [index, row] of page2.entries()) {
+      if ((index & 31) === 0 && connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
+        return { skippedReason: "vector_scan_deadline_exceeded" };
+      }
+      const documentVector = decodeEmbedding(row.embedding);
+      if (documentVector.length !== queryVector.length) {
+        dimensionMismatches += 1;
+        continue;
+      }
+      const score = cosineSimilarity(queryVector, documentVector);
+      const existing = bestByItem.get(row.item_pk);
+      if (existing === undefined || score > existing.bestCosine) {
+        bestByItem.set(row.item_pk, { bestCosine: score, bestChunkPk: row.chunk_pk, localItemId: row.local_item_id });
+      }
+    }
+    afterChunkPk = page2.at(-1).chunk_pk;
+    if (page2.length < pageSize)
+      break;
+    if (pagesScanned++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0)
+      await yieldConnectorStoreVectorScan();
+  }
+  return { bestByItem, dimensionMismatches };
+}
+async function scanVectorPagesOnPool(dbPath, provider, beforeToken, queryVector, pageOptions, deadlineAtMs) {
+  const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE)).catch((error) => {
+    if (error instanceof OffThreadReadBusyError)
+      return { skippedReason: "vector_scan_store_busy" };
+    throw error;
+  });
+  if (deadlineAtMs === undefined || !Number.isFinite(deadlineAtMs))
+    return scan;
+  let timer;
+  const deadline = new Promise((resolve12) => {
+    timer = setTimeout(() => resolve12({ skippedReason: "vector_scan_deadline_exceeded" }), Math.max(0, deadlineAtMs - Date.now()));
+  });
+  try {
+    return await Promise.race([scan, deadline]);
+  } finally {
+    clearTimeout(timer);
+    scan.catch(() => {
+      return;
+    });
+  }
 }
 function connectorStoreCurrentEmbeddingPageQuery(options, afterChunkPk, limit = CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE) {
   const modelId = requireNonEmpty(options.modelId, "Connector store embedding model id");
@@ -35541,13 +35699,43 @@ function connectorStoreCurrentEmbeddingPageQuery(options, afterChunkPk, limit = 
     ]
   };
 }
+function embeddingAuthorityRead(provider) {
+  return {
+    mode: "get",
+    sql: `SELECT status, cursor, audit_receipt_sha256
+      FROM sync_runs
+      WHERE sync_run_id = ? AND connector_id = ?`,
+    params: [connectorStoreEmbeddingWriteAuthorityId(provider.modelId), "connector_store_embedding_write_authority"]
+  };
+}
+function embeddingAuthorityFromRow(row, provider) {
+  if (!row)
+    return { token: "no_embedding_write_authority" };
+  if (row.status !== "running" || row.audit_receipt_sha256 !== hashString2(row.cursor ?? "")) {
+    return { token: "corrupt", skippedReason: "embedding_authority_corrupt" };
+  }
+  let record;
+  try {
+    record = parseConnectorStoreEmbeddingWriteAuthority(row.cursor);
+  } catch {
+    return { token: "unreadable", skippedReason: "embedding_authority_unreadable" };
+  }
+  const token = row.audit_receipt_sha256 ?? "";
+  if (!connectorStoreEmbeddingWriteAuthorityMatches(record, provider)) {
+    return { token, skippedReason: "embedding_authority_provider_mismatch" };
+  }
+  if (record.currencyRebuildPending) {
+    return { token, skippedReason: "embedding_currency_rebuild_pending" };
+  }
+  return { token };
+}
 function connectorStoreReadableNow(dbPath) {
   let db;
   try {
     const stat2 = lstatSync19(dbPath);
     if (!stat2.isFile() || stat2.isSymbolicLink())
       return false;
-    db = new Database8(dbPath, { readonly: true, create: false, strict: true });
+    db = new Database9(dbPath, { readonly: true, create: false, strict: true });
     db.exec("PRAGMA busy_timeout = 10000;");
     return readSqliteSchemaVersion(db, SQLITE_STORE_ID) >= READ_ONLY_MIN_SCHEMA_VERSION;
   } catch {
@@ -38208,7 +38396,7 @@ function fileIdentity(path) {
     return;
   }
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 2000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 2000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 2048, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -38216,6 +38404,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
     AND emb.content_hash = c.embedding_input_hash
 `, READ_ONLY_MIN_SCHEMA_VERSION = 7, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
+  init_main_thread_sql_trace();
   init_store_write_guard();
   init_job_names();
   init_keyword_context();
@@ -38344,6 +38533,7 @@ var init_local_index = __esm(() => {
       this.name = "ConnectorStoreLocatorIdentityIndexNotReadyError";
     }
   };
+  installMainThreadSqlTrace();
   LocalConnectorStore = class LocalConnectorStore {
     dbPath;
     openedFile;
@@ -38415,7 +38605,7 @@ var init_local_index = __esm(() => {
         if (this.dbPath !== ":memory:")
           mkdirSync19(dirname36(this.dbPath), { recursive: true, mode: 448 });
       }
-      this.db = new Database8(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
+      this.db = new Database9(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
       this.openedFile = fileIdentity(this.dbPath);
       try {
         this.db.exec(options.readOnly === true ? "PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;" : "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
@@ -44426,66 +44616,15 @@ var init_local_index = __esm(() => {
       }
       const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
       const selectedAccount = normalizeOptionalAccountScope(accountScope);
-      const scanDb = this.dbPath === ":memory:" ? this.db : new Database8(this.dbPath, { readonly: true, create: false, strict: true });
-      const ownsScanDb = scanDb !== this.db;
-      const bestByItem = new Map;
-      let dimensionMismatches = 0;
-      let afterChunkPk = 0;
-      let pagesScanned = 0;
-      try {
-        if (ownsScanDb) {
-          scanDb.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;");
-        }
-        scanDb.exec("BEGIN DEFERRED TRANSACTION;");
-        const after = this.embeddingReadAuthority(provider, scanDb);
-        if (after.skippedReason)
-          return { rows: [], skippedReason: after.skippedReason };
-        if (after.token !== input.beforeToken) {
-          return { rows: [], skippedReason: "embedding_authority_changed_during_query" };
-        }
-        while (true) {
-          if (connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
-            return { rows: [], skippedReason: "vector_scan_deadline_exceeded" };
-          }
-          const page2 = connectorStoreCurrentEmbeddingRowsPage(scanDb, {
-            modelId: provider.modelId,
-            ...selectedAccount ? { accountScope: selectedAccount } : {},
-            ...filters ? { filters } : {}
-          }, afterChunkPk);
-          if (page2.length === 0)
-            break;
-          for (const [index, row] of page2.entries()) {
-            if ((index & 31) === 0 && connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
-              return { rows: [], skippedReason: "vector_scan_deadline_exceeded" };
-            }
-            const documentVector = decodeEmbedding(row.embedding);
-            if (documentVector.length !== queryVector.length) {
-              dimensionMismatches += 1;
-              continue;
-            }
-            const score = cosineSimilarity(queryVector, documentVector);
-            const existing = bestByItem.get(row.itemPk);
-            if (existing === undefined || score > existing.bestCosine) {
-              bestByItem.set(row.itemPk, {
-                bestCosine: score,
-                bestChunkPk: row.chunkPk,
-                localItemId: row.localItemId
-              });
-            }
-          }
-          afterChunkPk = page2.at(-1).chunkPk;
-          if (page2.length < CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE)
-            break;
-          if (pagesScanned++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0)
-            await yieldConnectorStoreVectorScan();
-        }
-      } finally {
-        try {
-          scanDb.exec("ROLLBACK;");
-        } catch {}
-        if (ownsScanDb)
-          closeSqliteStore(scanDb);
-      }
+      const pageOptions = {
+        modelId: provider.modelId,
+        ...selectedAccount ? { accountScope: selectedAccount } : {},
+        ...filters ? { filters } : {}
+      };
+      const scanned = offThreadReadsSupported(this.dbPath) ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs);
+      if ("skippedReason" in scanned)
+        return { rows: [], skippedReason: scanned.skippedReason };
+      const { bestByItem, dimensionMismatches } = scanned;
       const candidates = Array.from(bestByItem.entries()).filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE).sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]);
       const rankedItems = [];
       let candidateOffset = 0;
@@ -44513,31 +44652,31 @@ var init_local_index = __esm(() => {
         ...laneRows.length === 0 && dimensionMismatches > 0 ? { skippedReason: "embedding_stored_dimension_mismatch" } : {}
       };
     }
-    embeddingReadAuthority(provider, db = this.db) {
-      const row = db.query(`
-      SELECT status, cursor, audit_receipt_sha256
-      FROM sync_runs
-      WHERE sync_run_id = ? AND connector_id = ?
-    `).get(connectorStoreEmbeddingWriteAuthorityId(provider.modelId), "connector_store_embedding_write_authority");
-      if (!row)
-        return { token: "no_embedding_write_authority" };
-      if (row.status !== "running" || row.audit_receipt_sha256 !== hashString2(row.cursor ?? "")) {
-        return { token: "corrupt", skippedReason: "embedding_authority_corrupt" };
-      }
-      let record;
+    async scanVectorPagesInThread(provider, beforeToken, queryVector, pageOptions, deadlineAtMs) {
+      const scanDb = this.dbPath === ":memory:" ? this.db : new Database9(this.dbPath, { readonly: true, create: false, strict: true });
+      const ownsScanDb = scanDb !== this.db;
       try {
-        record = parseConnectorStoreEmbeddingWriteAuthority(row.cursor);
-      } catch {
-        return { token: "unreadable", skippedReason: "embedding_authority_unreadable" };
+        if (ownsScanDb) {
+          scanDb.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;");
+        }
+        scanDb.exec("BEGIN DEFERRED TRANSACTION;");
+        const read = async (query) => {
+          const statement = scanDb.query(query.sql);
+          const params = query.params;
+          return query.mode === "all" ? statement.all(...params) : statement.get(...params);
+        };
+        return await scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE);
+      } finally {
+        try {
+          scanDb.exec("ROLLBACK;");
+        } catch {}
+        if (ownsScanDb)
+          closeSqliteStore(scanDb);
       }
-      const token = row.audit_receipt_sha256 ?? "";
-      if (!connectorStoreEmbeddingWriteAuthorityMatches(record, provider)) {
-        return { token, skippedReason: "embedding_authority_provider_mismatch" };
-      }
-      if (record.currencyRebuildPending) {
-        return { token, skippedReason: "embedding_currency_rebuild_pending" };
-      }
-      return { token };
+    }
+    embeddingReadAuthority(provider, db = this.db) {
+      const read = embeddingAuthorityRead(provider);
+      return embeddingAuthorityFromRow(db.query(read.sql).get(...read.params), provider);
     }
     embeddingSourceRows(localItemIds, accountScope, filters, tierHidden, allowHeld = false) {
       const selectedLocalItemIds = normalizeEmbedLocalItemIds(localItemIds);
@@ -45768,7 +45907,7 @@ var init_local_index = __esm(() => {
 });
 
 // src/core/source-storage.ts
-import { Database as Database9 } from "bun:sqlite";
+import { Database as Database10 } from "bun:sqlite";
 import { existsSync as existsSync32, lstatSync as lstatSync20, mkdtempSync as mkdtempSync2, readdirSync as readdirSync5, rmSync as rmSync9, rmdirSync as rmdirSync2, statSync as statSync15 } from "node:fs";
 import { basename as basename8, join as join38, resolve as resolve12, sep as sep9 } from "node:path";
 import { tmpdir as tmpdir3 } from "node:os";
@@ -45827,7 +45966,7 @@ function createStorageSnapshotReaders() {
   return {
     directory,
     database(path) {
-      const db = new Database9(snapshotPath(path), { readonly: true, create: false });
+      const db = new Database10(snapshotPath(path), { readonly: true, create: false });
       try {
         db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
         return db;
@@ -46159,7 +46298,7 @@ function openToLookAt(path, busyTimeoutMs) {
       break;
     let db;
     try {
-      db = new Database9(path, mode);
+      db = new Database10(path, mode);
       db.exec(`PRAGMA busy_timeout = ${busyWait(busyTimeoutMs)}; PRAGMA query_only = ON;`);
       db.query("SELECT count(*) AS n FROM sqlite_master").get();
       return db;
@@ -46201,7 +46340,7 @@ function storeFileQuickCheck(path, busyTimeoutMs = 2000) {
 function storeFileCheckpoint(path, busyTimeoutMs = 2000) {
   let db;
   try {
-    db = new Database9(path, { readwrite: true, create: false });
+    db = new Database10(path, { readwrite: true, create: false });
     db.exec(`PRAGMA busy_timeout = ${busyWait(busyTimeoutMs)};`);
     const row = db.query("PRAGMA wal_checkpoint(TRUNCATE)").get();
     const [busy2, log, checkpointed] = row ? Object.values(row) : [];
@@ -46403,7 +46542,7 @@ var init_messaging_chat_kinds = __esm(() => {
 });
 
 // src/core/messaging-pairing.ts
-import { Database as Database10 } from "bun:sqlite";
+import { Database as Database11 } from "bun:sqlite";
 import { chmodSync as chmodSync13, existsSync as existsSync34, linkSync as linkSync2, lstatSync as lstatSync21, mkdirSync as mkdirSync21, renameSync as renameSync5, rmSync as rmSync10, rmdirSync as rmdirSync4, statSync as statSync16 } from "node:fs";
 import { spawn as spawnChild } from "node:child_process";
 import { randomBytes as randomBytes12 } from "node:crypto";
@@ -46872,7 +47011,7 @@ function prepareLoginAside(base) {
 function copyLogin(from, to) {
   let db;
   try {
-    db = new Database10(from, { readonly: true });
+    db = new Database11(from, { readonly: true });
     db.run("PRAGMA busy_timeout = 5000");
     db.run("VACUUM INTO ?", [to]);
     chmodSync13(to, 384);
@@ -46913,7 +47052,7 @@ function loginChangedMeanwhile() {
   return new Error("Another Telegram pairing changed the login while this one ran, so this one was not kept. Re-run olympus connect telegram --pair in your private terminal.");
 }
 function writeLoginInto(from, to) {
-  const db = new Database10(to);
+  const db = new Database11(to);
   try {
     db.run("PRAGMA busy_timeout = 5000");
     let tables;
@@ -48900,7 +49039,7 @@ var init_dashboard_opening = __esm(() => {
 });
 
 // src/core/people-index.ts
-import { Database as Database11 } from "bun:sqlite";
+import { Database as Database12 } from "bun:sqlite";
 import { createHash as createHash25 } from "node:crypto";
 import { chmodSync as chmodSync14, existsSync as existsSync38, mkdirSync as mkdirSync26 } from "node:fs";
 import { dirname as dirname43 } from "node:path";
@@ -49383,7 +49522,7 @@ class LocalPeopleIndex {
     this.now = options.now ?? (() => new Date);
     this.readOnly = options.readOnly === true;
     if (this.readOnly) {
-      this.db = new Database11(options.dbPath, { readonly: true, create: false, strict: true });
+      this.db = new Database12(options.dbPath, { readonly: true, create: false, strict: true });
       try {
         this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA query_only = ON;");
         this.loadPeople();
@@ -49396,7 +49535,7 @@ class LocalPeopleIndex {
     assertWritableStoreOpenAllowed("people index", options.dbPath);
     if (options.dbPath !== ":memory:")
       mkdirSync26(dirname43(options.dbPath), { recursive: true, mode: 448 });
-    this.db = new Database11(options.dbPath, { create: true, strict: true });
+    this.db = new Database12(options.dbPath, { create: true, strict: true });
     try {
       if (options.dbPath !== ":memory:")
         chmodSync14(options.dbPath, 384);
@@ -49689,7 +49828,7 @@ function forgetPeopleIndexRows(dbPath, scope, options = {}) {
   if (!existsSync38(dbPath) || scope.corpusIds.length === 0)
     return 0;
   const dryRun = options.dryRun === true;
-  const db = new Database11(dbPath, dryRun ? { readonly: true } : { readwrite: true });
+  const db = new Database12(dbPath, dryRun ? { readonly: true } : { readwrite: true });
   try {
     db.exec(`PRAGMA busy_timeout = 10000; ${dryRun ? "" : "PRAGMA secure_delete = ON;"}`);
     const corpora = JSON.stringify([...scope.corpusIds]);
@@ -50764,7 +50903,7 @@ var init_scope_safe_fs = __esm(() => {
 });
 
 // src/workers/archive-import/media-bindings.ts
-import { Database as Database12 } from "bun:sqlite";
+import { Database as Database13 } from "bun:sqlite";
 import { createHash as createHash26 } from "node:crypto";
 import { chmodSync as chmodSync15, existsSync as existsSync41, mkdirSync as mkdirSync28 } from "node:fs";
 import { dirname as dirname45 } from "node:path";
@@ -50825,7 +50964,7 @@ class ArchiveMediaBindingStore {
       recordAccountPlacement({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }, options.path, options.env ?? process.env);
       mkdirSync28(dirname45(options.path), { recursive: true, mode: 448 });
     }
-    this.db = new Database12(options.path, { create: true });
+    this.db = new Database13(options.path, { create: true });
     if (options.path !== ":memory:")
       chmodSync15(options.path, 384);
     this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;");
@@ -51276,7 +51415,7 @@ var init_connector = __esm(() => {
 import { createHash as createHash28, randomUUID as randomUUID13 } from "node:crypto";
 import { chmodSync as chmodSync16, mkdirSync as mkdirSync29 } from "node:fs";
 import { dirname as dirname46 } from "node:path";
-import { Database as Database13 } from "bun:sqlite";
+import { Database as Database14 } from "bun:sqlite";
 
 class LocalXBookmarksReconcileStateStore {
   dbPath;
@@ -51287,7 +51426,7 @@ class LocalXBookmarksReconcileStateStore {
       recordAccountPlacement({ sourceId: X_BOOKMARKS_SOURCE_ID }, dbPath, env);
       mkdirSync29(dirname46(dbPath), { recursive: true, mode: 448 });
     }
-    this.db = new Database13(dbPath, { create: true });
+    this.db = new Database14(dbPath, { create: true });
     if (dbPath !== ":memory:")
       chmodSync16(dbPath, 384);
     this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
@@ -57517,7 +57656,7 @@ import {
 } from "node:fs";
 import { homedir as homedir25 } from "node:os";
 import { dirname as dirname48, isAbsolute as isAbsolute21 } from "node:path";
-import { Database as Database14 } from "bun:sqlite";
+import { Database as Database15 } from "bun:sqlite";
 function sourceWatchAuthenticatedRouteHeaders(route) {
   const headers = new Headers({
     [SOURCE_WATCH_OWNER_HEADER]: route.ownerId,
@@ -57539,7 +57678,7 @@ function forgetSourceWatches(dbPath, scope, options = {}) {
     return 0;
   const dryRun = options.dryRun === true;
   const filters = filterFor("source_watches", [["corpus_id", scope.corpusIds]]);
-  const db = new Database14(dbPath, dryRun ? { readonly: true } : { readwrite: true });
+  const db = new Database15(dbPath, dryRun ? { readonly: true } : { readwrite: true });
   try {
     db.exec(`PRAGMA busy_timeout = 10000; ${dryRun ? "" : "PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;"}`);
     return forgetSqliteRows(db, filters, dryRun).reduce((sum, count) => sum + count, 0);
@@ -57585,13 +57724,13 @@ class LocalSourceWatchStore {
     this.dbPath = dbPath;
     this.clock = options.clock ?? SYSTEM_CLOCK;
     if (options.readOnly === true) {
-      this.db = new Database14(dbPath, { readonly: true, create: false });
+      this.db = new Database15(dbPath, { readonly: true, create: false });
       this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
       return;
     }
     assertWritableStoreOpenAllowed("source watch store", dbPath);
     hardenPrivateDatabasePath2(dbPath);
-    this.db = new Database14(dbPath, { create: true });
+    this.db = new Database15(dbPath, { create: true });
     try {
       chmodSync17(dbPath, 384);
       this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON; PRAGMA journal_mode = WAL;");
@@ -63642,7 +63781,7 @@ import {
   renameSync as renameSync8
 } from "node:fs";
 import { dirname as dirname54 } from "node:path";
-import { Database as Database15 } from "bun:sqlite";
+import { Database as Database16 } from "bun:sqlite";
 
 class GoogleDailyRequestBudget {
   utcDay = "";
@@ -63838,7 +63977,7 @@ function recoverPersistentFutureUtcDay(input) {
   });
 }
 function withLedger(ledgerPath, run, options = {}) {
-  const db = new Database15(ledgerPath, { create: true });
+  const db = new Database16(ledgerPath, { create: true });
   hardenLedgerFiles(ledgerPath);
   try {
     db.exec(options.journalModeWal ? "PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;" : "PRAGMA busy_timeout = 10000;");
@@ -68485,7 +68624,7 @@ class BuiltInSourceEmbeddingProvider {
     this.dimension = this.spec.dimension;
     this.threads = resolveThreads(options.threads, this.env);
     this.device = resolveDevice(this.env);
-    this.runtimeFactory = options.runtime ?? ((installed) => onnxRuntimeFromDirectory(installed.runtimeDir));
+    this.runtimeFactory = options.runtime ?? ((installed2) => onnxRuntimeFromDirectory(installed2.runtimeDir));
     this.liteRtFactory = options.liteRt ?? startLiteRtEmbedder;
     this.install = options.install ?? installBuiltInEmbedding;
     this.installerOptions = options.installerOptions ?? {};
@@ -68630,9 +68769,9 @@ class BuiltInSourceEmbeddingProvider {
       ...this.installerOptions.now ? { now: this.installerOptions.now } : {},
       ...this.installerOptions.onProgress ? { onProgress: this.installerOptions.onProgress } : {}
     };
-    let installed;
+    let installed2;
     try {
-      installed = await this.install({ ...this.installerOptions, env: this.env, model: this.spec });
+      installed2 = await this.install({ ...this.installerOptions, env: this.env, model: this.spec });
     } catch (error) {
       throw builtInEmbeddingOperationError(error);
     }
@@ -68640,12 +68779,12 @@ class BuiltInSourceEmbeddingProvider {
       reportBuiltInEmbeddingState(reporterOptions, "loading");
       let model;
       if (this.spec.runtime === "litert") {
-        if (!installed.libraryPath)
+        if (!installed2.libraryPath)
           throw new Error("the LiteRT-LM runtime is not installed.");
         const settings = {
-          library: installed.libraryPath,
-          model: installed.modelPath,
-          cacheDir: join62(dirname58(installed.modelPath), "cache"),
+          library: installed2.libraryPath,
+          model: installed2.modelPath,
+          cacheDir: join62(dirname58(installed2.modelPath), "cache"),
           threads: this.threads,
           device: this.device,
           maxInputTokens: this.spec.maxTokens,
@@ -68665,13 +68804,13 @@ class BuiltInSourceEmbeddingProvider {
         if (this.spec.vision)
           reportBuiltInEmbeddingVision(embedder.vision, { env: this.env, model: this.spec });
       } else {
-        if (!installed.vocabularyPath)
+        if (!installed2.vocabularyPath)
           throw new Error("the model vocabulary is not installed.");
-        const tokenizer = loadTokenizer(installed.vocabularyPath);
-        const session = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
+        const tokenizer = loadTokenizer(installed2.vocabularyPath);
+        const session = await this.runtimeFactory(installed2).createSession(installed2.modelPath, { threads: this.threads });
         model = { kind: "onnx", session, tokenizer };
         try {
-          const querySession = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
+          const querySession = await this.runtimeFactory(installed2).createSession(installed2.modelPath, { threads: this.threads });
           this.priorityLoaded = { kind: "onnx", session: querySession, tokenizer };
         } catch (error) {
           await session.release?.().catch(() => {
@@ -78093,7 +78232,7 @@ var init_grant_fence = __esm(() => {
 import { createHash as createHash45, randomUUID as randomUUID19 } from "node:crypto";
 import { chmodSync as chmodSync19, existsSync as existsSync53, lstatSync as lstatSync28, mkdirSync as mkdirSync36 } from "node:fs";
 import { dirname as dirname60 } from "node:path";
-import { Database as Database16 } from "bun:sqlite";
+import { Database as Database17 } from "bun:sqlite";
 function xApiInvocationProvenance(value) {
   return value === "operator" ? "operator" : "scheduled";
 }
@@ -78181,7 +78320,7 @@ function forgetXBookmarksSyncState(usageDbPath, sourceIds, options) {
   if (!sourceIds.includes(X_BOOKMARKS_SOURCE_ID) || usageDbPath === ":memory:" || !existsSync53(usageDbPath))
     return 0;
   if (options.dryRun) {
-    const db = new Database16(usageDbPath, { readonly: true });
+    const db = new Database17(usageDbPath, { readonly: true });
     try {
       db.exec("PRAGMA busy_timeout = 10000;");
       const table = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'x_bookmarks_live_state'").get();
@@ -78205,7 +78344,7 @@ class LocalXBookmarksApiUsageStore {
     this.dbPath = dbPath;
     if (dbPath !== ":memory:")
       mkdirSync36(dirname60(dbPath), { recursive: true, mode: 448 });
-    this.db = new Database16(dbPath, { create: true });
+    this.db = new Database17(dbPath, { create: true });
     if (dbPath !== ":memory:")
       chmodSync19(dbPath, 384);
     this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
@@ -88554,7 +88693,7 @@ var init_reaction_index = __esm(() => {
 });
 
 // src/workers/whatsapp/spool-index.ts
-import { Database as Database17 } from "bun:sqlite";
+import { Database as Database18 } from "bun:sqlite";
 import { randomBytes as randomBytes14 } from "node:crypto";
 import { chmodSync as chmodSync23, existsSync as existsSync57 } from "node:fs";
 import { join as join76 } from "node:path";
@@ -88575,7 +88714,7 @@ class WhatsAppSpoolIndex {
     const path = join76(spoolDir, WHATSAPP_SPOOL_INDEX_FILE);
     let db;
     try {
-      db = new Database17(path, { create: true });
+      db = new Database18(path, { create: true });
       chmodSync23(path, 384);
       db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;");
       const version = db.query("PRAGMA user_version").get().user_version;
@@ -88820,7 +88959,7 @@ var init_spool_index = __esm(() => {
 });
 
 // src/workers/whatsapp/spool-resets.ts
-import { Database as Database18 } from "bun:sqlite";
+import { Database as Database19 } from "bun:sqlite";
 import { chmodSync as chmodSync24 } from "node:fs";
 import { join as join77 } from "node:path";
 
@@ -88833,7 +88972,7 @@ class WhatsAppSpoolResets {
     const path = join77(spoolDir, WHATSAPP_SPOOL_RESET_FILE);
     let db;
     try {
-      db = new Database18(path, { create: true });
+      db = new Database19(path, { create: true });
       chmodSync24(path, 384);
       db.exec(`
         PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;
@@ -90368,7 +90507,7 @@ var init_live_connector = __esm(() => {
 });
 
 // src/workers/whatsapp/media-fetch.ts
-import { Database as Database19 } from "bun:sqlite";
+import { Database as Database20 } from "bun:sqlite";
 import { createHash as createHash62 } from "node:crypto";
 import {
   chmodSync as chmodSync25,
@@ -90609,7 +90748,7 @@ class WhatsAppMediaFetchState {
   }
   static open(spoolDir) {
     const path = join80(spoolDir, WHATSAPP_MEDIA_FETCH_STATE_FILE);
-    const db = new Database19(path, { create: true });
+    const db = new Database20(path, { create: true });
     chmodSync25(path, 384);
     db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;");
     db.run(`CREATE TABLE IF NOT EXISTS media (
@@ -91416,7 +91555,7 @@ var init_extraction_factory = __esm(() => {
 import { chmodSync as chmodSync26, mkdirSync as mkdirSync40 } from "node:fs";
 import { createHash as createHash63, randomUUID as randomUUID22 } from "node:crypto";
 import { dirname as dirname67 } from "node:path";
-import { Database as Database20 } from "bun:sqlite";
+import { Database as Database21 } from "bun:sqlite";
 function settleUnreadable(candidates, classify2) {
   const items = [];
   let blocked = 0;
@@ -91463,7 +91602,7 @@ class LocalFileExtractionJobStore {
     if (!inMemory && !this.readonly) {
       mkdirSync40(dirname67(dbPath), { recursive: true, mode: 448 });
     }
-    this.db = this.readonly ? new Database20(dbPath, { readonly: true }) : new Database20(dbPath, { create: true });
+    this.db = this.readonly ? new Database21(dbPath, { readonly: true }) : new Database21(dbPath, { create: true });
     if (!inMemory && !this.readonly)
       chmodSync26(dbPath, 384);
     const busyTimeoutMs = options.busyTimeoutMs ?? (this.readonly ? DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS : DEFAULT_SQLITE_BUSY_TIMEOUT_MS);
@@ -96226,7 +96365,7 @@ var shared, nextHandle = 1;
 var init_off_thread = () => {};
 
 // src/workers/source-index/built-in-reasoning/install.ts
-import { isMainThread } from "node:worker_threads";
+import { isMainThread as isMainThread2 } from "node:worker_threads";
 import { spawn as spawn5 } from "node:child_process";
 import { createHash as createHash64, randomUUID as randomUUID23 } from "node:crypto";
 import {
@@ -96295,16 +96434,16 @@ async function installBuiltInReasoning(options) {
   const { model, ...tuning } = options;
   const runtime = options.runtime ?? LLAMA_SERVER_RUNTIME;
   const platform2 = options.platform ?? currentPlatform2();
-  const installed = await installPinnedModel({
+  const installed2 = await installPinnedModel({
     ...tuning,
     bundle: { modelId: model.modelId, displayName: model.displayName, files: [model.file] },
     layout: { ...builtInReasoningPaths(model, options.env, runtime, platform2), noun: REASONING_NOUN }
   });
-  return { modelPath: installed.filePaths[0], serverPath: installed.serverPath, gpu: installed.gpu };
+  return { modelPath: installed2.filePaths[0], serverPath: installed2.serverPath, gpu: installed2.gpu };
 }
 async function installPinnedModel(options) {
   const { onProgress, log: installLog, ...serializable } = options;
-  if (isMainThread && !Object.values(serializable).some((value) => typeof value === "function")) {
+  if (isMainThread2 && !Object.values(serializable).some((value) => typeof value === "function")) {
     try {
       return await modelThread().call({ kind: "install", options: serializable }, {
         progress: onProgress,
@@ -96357,7 +96496,7 @@ async function installPinnedModel(options) {
       throw new BuiltInReasoningInstallError("unsupported_platform", `The ${noun} does not run on ${platform2}.`);
     }
     ensureDirectory2(paths.root);
-    const installed = () => ({
+    const installed2 = () => ({
       filePaths: files.map(({ path }) => path),
       serverPath: findServerBinary(paths.runtimeDir),
       gpu: archive.gpu
@@ -96365,7 +96504,7 @@ async function installPinnedModel(options) {
     if (filesPresent() && runtimeInstalled2(paths.runtimeDir, archive)) {
       await stage("verify", verifyAll);
       finished();
-      return installed();
+      return installed2();
     }
     const now = (options.now ?? (() => new Date))();
     const previous = readPinnedModelStatus(paths.statusPath, bundle.modelId, noun);
@@ -96412,7 +96551,7 @@ async function installPinnedModel(options) {
       throw new BuiltInReasoningInstallError("runtime_load_failed", "The built-in model server did not install completely.");
     }
     finished();
-    return installed();
+    return installed2();
   } catch (error) {
     const failure = error instanceof BuiltInReasoningInstallError ? error : new BuiltInReasoningInstallError("disk_write_failed", error instanceof Error ? error.message : String(error));
     reporter.fail(failure.reason, failure.message, failure.shortfall);
@@ -96819,7 +96958,7 @@ var init_install = __esm(() => {
 });
 
 // src/workers/source-index/built-in-reasoning/server.ts
-import { isMainThread as isMainThread2 } from "node:worker_threads";
+import { isMainThread as isMainThread3 } from "node:worker_threads";
 import { spawn as spawn6 } from "node:child_process";
 import { randomBytes as randomBytes15 } from "node:crypto";
 import { mkdtempSync as mkdtempSync3, rmSync as rmSync25, writeFileSync as writeFileSync14 } from "node:fs";
@@ -96878,7 +97017,7 @@ function llamaServerArguments(launch, port, tokenFile) {
   ];
 }
 function createLlamaServerHandle(launch, options = {}) {
-  if (isMainThread2 && !options.spawnImpl && !options.fetchImpl && !options.onPid) {
+  if (isMainThread3 && !options.spawnImpl && !options.fetchImpl && !options.onPid) {
     const thread2 = modelThread();
     const handle = modelThreadHandleId();
     const translateError = (error) => {
@@ -97350,16 +97489,16 @@ async function installBuiltInTranscription(options = {}) {
   const { model = QWEN3_ASR_06B, ...tuning } = options;
   const runtime = options.runtime ?? LLAMA_SERVER_RUNTIME;
   const platform2 = options.platform ?? currentPlatform2();
-  const installed = await installPinnedModel({
+  const installed2 = await installPinnedModel({
     ...tuning,
     bundle: { modelId: model.modelId, displayName: model.displayName, files: model.files },
     layout: builtInTranscriptionLayout(model, options.env, runtime, platform2)
   });
   return {
-    modelPath: installed.filePaths[0],
-    mmprojPath: installed.filePaths[1],
-    serverPath: installed.serverPath,
-    gpu: installed.gpu
+    modelPath: installed2.filePaths[0],
+    mmprojPath: installed2.filePaths[1],
+    serverPath: installed2.serverPath,
+    gpu: installed2.gpu
   };
 }
 function readBuiltInTranscriptionStatus(env = process.env, model = QWEN3_ASR_06B) {
@@ -97648,7 +97787,7 @@ function createBuiltInTranscriber(options = {}) {
   const fileDeadlineMs = options.fileDeadlineMs ?? DEFAULT_FILE_DEADLINE_MS;
   const maxChars = options.maxTranscriptChars ?? Number.POSITIVE_INFINITY;
   let unavailable2 = (options.totalMemoryBytes ?? totalmem()) < model.minimumMemoryBytes ? "This computer does not have enough memory for the built-in transcription model." : undefined;
-  let installed;
+  let installed2;
   let installing2;
   let failedAt;
   let consecutiveFailures = 0;
@@ -97658,7 +97797,7 @@ function createBuiltInTranscriber(options = {}) {
   const prepare = () => {
     if (unavailable2)
       return "unavailable";
-    if (installed)
+    if (installed2)
       return "ready";
     if (installing2)
       return "pending";
@@ -97666,7 +97805,7 @@ function createBuiltInTranscriber(options = {}) {
     if (failedAt !== undefined && now() - failedAt < backoff)
       return "pending";
     installing2 = install({ ...options.installOptions, model, env, platform: platform2 }).then((result) => {
-      installed = result;
+      installed2 = result;
       failedAt = undefined;
       consecutiveFailures = 0;
       for (const listener of readyListeners) {
@@ -97719,12 +97858,12 @@ function createBuiltInTranscriber(options = {}) {
   return {
     prepare,
     downloadNow() {
-      if (failedAt !== undefined && manualSkipFor !== failedAt && !installing2 && !installed && !unavailable2) {
+      if (failedAt !== undefined && manualSkipFor !== failedAt && !installing2 && !installed2 && !unavailable2) {
         manualSkipFor = failedAt;
         failedAt = undefined;
       }
-      if (installed && readBuiltInTranscriptionStatus(env, model).failure?.reason === "runtime_load_failed") {
-        const paths = installed;
+      if (installed2 && readBuiltInTranscriptionStatus(env, model).failure?.reason === "runtime_load_failed") {
+        const paths = installed2;
         startServer(paths).then(({ handle }) => handle.touch(), () => {
           return;
         });
@@ -97753,10 +97892,10 @@ function createBuiltInTranscriber(options = {}) {
       }
       if (state === "unavailable")
         throw new TranscriberUnavailableError(unavailable2 ?? "Built-in transcription is unavailable.");
-      if (state === "pending" || !installed) {
+      if (state === "pending" || !installed2) {
         throw new TranscriberPendingError("The built-in transcription model is still being set up.");
       }
-      const paths = installed;
+      const paths = installed2;
       const tempDir = await mkdtemp7(join92(tmpdir11(), TEMP_DIR_PREFIX5));
       try {
         const wavPath = join92(tempDir, "audio.wav");
@@ -102328,7 +102467,7 @@ __export(exports_source_ingestion_ledger, {
 });
 import { existsSync as existsSync65, mkdirSync as mkdirSync42 } from "node:fs";
 import { dirname as dirname73 } from "node:path";
-import { Database as Database21 } from "bun:sqlite";
+import { Database as Database22 } from "bun:sqlite";
 function buildSourceIngestionLedgerSnapshot(status, options = {}) {
   const now = options.now ?? new Date(status.generated_at);
   const assign = ledgerSourceAssignment(options.sourceCorpusRegistry);
@@ -102381,7 +102520,7 @@ function buildSourceIngestionLedgerSnapshot(status, options = {}) {
   };
 }
 function openSourceDashboardFileReadOnly(dbPath = defaultSourceDashboardHistoryDbPath()) {
-  const db = new Database21(dbPath, { readonly: true, create: false });
+  const db = new Database22(dbPath, { readonly: true, create: false });
   try {
     db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
     return db;
@@ -102397,7 +102536,7 @@ class SqliteSourceIngestionLedgerStore {
     assertWritableStoreOpenAllowed("ingestion ledger", dbPath);
     if (dbPath !== ":memory:")
       mkdirSync42(dirname73(dbPath), { recursive: true, mode: 448 });
-    this.db = new Database21(dbPath);
+    this.db = new Database22(dbPath);
     this.db.exec("PRAGMA busy_timeout = 10000;");
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS source_dashboard_samples (
@@ -103943,7 +104082,7 @@ __export(exports_source_dashboard, {
 });
 import { existsSync as existsSync67, mkdirSync as mkdirSync43 } from "node:fs";
 import { dirname as dirname74 } from "node:path";
-import { Database as Database22 } from "bun:sqlite";
+import { Database as Database23 } from "bun:sqlite";
 function dashboardSchedulerTaskFailing(task) {
   if (task.consecutive_failures <= 0)
     return false;
@@ -104053,7 +104192,7 @@ function forgetSourceDashboardRows(dbPath, scope, options = {}) {
   ])];
   const corpusIds = [...new Set([...scope.corpusIds, ...cards.map((card) => card.primary_corpus_id)])];
   const dryRun = options.dryRun === true;
-  const db = new Database22(dbPath, dryRun ? { readonly: true } : { readwrite: true });
+  const db = new Database23(dbPath, dryRun ? { readonly: true } : { readwrite: true });
   try {
     db.exec("PRAGMA busy_timeout = 10000;");
     if (!dryRun)
@@ -104088,7 +104227,7 @@ class SqliteSourceDashboardHistory {
   constructor(dbPath = defaultSourceDashboardHistoryDbPath()) {
     if (dbPath !== ":memory:")
       mkdirSync43(dirname74(dbPath), { recursive: true, mode: 448 });
-    this.db = new Database22(dbPath);
+    this.db = new Database23(dbPath);
     this.db.exec("PRAGMA busy_timeout = 10000;");
     runSqliteMigrations(this.db, DASHBOARD_SQLITE_STORE_ID, currentStoreMigrations());
     this.db.exec(`
@@ -106513,7 +106652,7 @@ var init_source_dashboard = __esm(() => {
 // src/workers/source-scheduler-state.ts
 import { chmodSync as chmodSync27, existsSync as existsSync68, mkdirSync as mkdirSync44 } from "node:fs";
 import { dirname as dirname75 } from "node:path";
-import { Database as Database23 } from "bun:sqlite";
+import { Database as Database24 } from "bun:sqlite";
 function defaultSourceSchedulerStateDbPath(env = process.env) {
   return sharedDataPath("source-scheduler", env);
 }
@@ -106522,7 +106661,7 @@ function forgetSourceSchedulerState(dbPath, scope, options = {}) {
     return 0;
   const dryRun = options.dryRun === true;
   const keys = [["source_id", scope.sourceIds], ["corpus_id", scope.corpusIds]];
-  const db = new Database23(dbPath, dryRun ? { readonly: true } : { readwrite: true });
+  const db = new Database24(dbPath, dryRun ? { readonly: true } : { readwrite: true });
   try {
     db.exec("PRAGMA busy_timeout = 10000;");
     return forgetSqliteRows(db, [
@@ -106542,7 +106681,7 @@ class LocalSourceSchedulerStateStore {
     if (dbPath !== ":memory:") {
       mkdirSync44(dirname75(dbPath), { recursive: true, mode: 448 });
     }
-    this.db = new Database23(dbPath, { create: true });
+    this.db = new Database24(dbPath, { create: true });
     if (dbPath !== ":memory:")
       chmodSync27(dbPath, 384);
     this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
@@ -107382,7 +107521,7 @@ var init_judge_check = __esm(() => {
 });
 
 // src/workers/classification/judge-second-round.ts
-import { Database as Database24 } from "bun:sqlite";
+import { Database as Database25 } from "bun:sqlite";
 import { createHash as createHash69 } from "node:crypto";
 import { chmodSync as chmodSync28, existsSync as existsSync70, readFileSync as readFileSync53, rmSync as rmSync27 } from "node:fs";
 import { dirname as dirname77, join as join99, sep as sep16 } from "node:path";
@@ -107399,7 +107538,7 @@ function judgeSecondRoundConfirmedPath(env) {
 class SecondRoundConfirmed {
   db;
   constructor(path) {
-    this.db = new Database24(path, { create: true });
+    this.db = new Database25(path, { create: true });
     this.db.exec("PRAGMA busy_timeout = 10000;");
     try {
       chmodSync28(path, 384);
@@ -108761,7 +108900,7 @@ import {
 import { homedir as homedir29 } from "node:os";
 import { basename as basename14, dirname as dirname81, join as join101, relative as relative14, resolve as resolve20, sep as sep17 } from "node:path";
 import { rm as rm10 } from "node:fs/promises";
-import { Database as Database25 } from "bun:sqlite";
+import { Database as Database26 } from "bun:sqlite";
 function lifecycleStoreFileOwner(env) {
   return storeFileOwnerLookup(knownAccounts({ env }).flatMap((account) => account.files.stores.map((path) => [path, account.sourceId])));
 }
@@ -108966,7 +109105,7 @@ function exportOlympusData(options) {
   return { ok: true, destination, sourceIds: selected.map((source) => source.sourceId), files, skipped: skipped2, artifacts, media };
 }
 function readChunkMediaRefs(snapshotPath) {
-  const db = new Database25(snapshotPath, { readonly: true });
+  const db = new Database26(snapshotPath, { readonly: true });
   try {
     db.exec("PRAGMA busy_timeout = 10000;");
     const columns = db.query("PRAGMA table_info(chunks)").all().map((column) => column.name);
@@ -109362,7 +109501,7 @@ function readTierLedgerIds(storePaths) {
       continue;
     let db;
     try {
-      db = new Database25(ledgerPath, { readonly: true });
+      db = new Database26(ledgerPath, { readonly: true });
       db.exec("PRAGMA busy_timeout = 10000;");
       const meta = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tier_ledger_meta'").get();
       const row = meta ? db.query("SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'").get() : null;
@@ -109592,7 +109731,7 @@ function readSourceMedia(sourceId, storePaths, env, options = {}) {
     let rows = [];
     let db;
     try {
-      db = new Database25(storePath, { readonly: true });
+      db = new Database26(storePath, { readonly: true });
       db.exec("PRAGMA busy_timeout = 10000;");
     } catch {
       if (options.skipUnreadable === true)
@@ -109656,7 +109795,7 @@ function invalidateInstallEmbeddingPrefilter(context2) {
   const auditPath = embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(envForContext(context2)));
   if (existsSync73(auditPath)) {
     assertVerifiedExternalSqliteStore(auditPath, TIER_LEDGER_SQLITE_STORE_ID);
-    const db = new Database25(auditPath, { readwrite: true, create: false });
+    const db = new Database26(auditPath, { readwrite: true, create: false });
     try {
       db.exec("PRAGMA busy_timeout = 10000;");
       db.query(`INSERT INTO tier_ledger_meta (key, value) VALUES (?, ?)
@@ -109828,7 +109967,7 @@ function snapshotSqliteStore(sqlitePath, staging) {
   rmSync28(staging, { force: true });
   let db;
   try {
-    db = new Database25(sqlitePath, { readonly: true });
+    db = new Database26(sqlitePath, { readonly: true });
   } catch {
     return false;
   }
@@ -109849,7 +109988,7 @@ function assertSqliteSnapshotIntact(snapshotPath, sqlitePath) {
   inspectSqliteSnapshot(snapshotPath, sqlitePath, "unknown");
 }
 function inspectSqliteSnapshot(snapshotPath, sqlitePath, expectedStoreId) {
-  const db = new Database25(snapshotPath, { readonly: true });
+  const db = new Database26(snapshotPath, { readonly: true });
   try {
     db.exec("PRAGMA busy_timeout = 10000;");
     const rows = db.query("PRAGMA integrity_check").all();
@@ -110069,7 +110208,7 @@ function assertVerifiedExternalSqliteStore(path, storeId) {
   assertRegularFileTarget(path);
   let db;
   try {
-    db = new Database25(path, { readonly: true, create: false });
+    db = new Database26(path, { readonly: true, create: false });
     db.exec("PRAGMA busy_timeout = 10000;");
   } catch {
     throw new OperationError("invalid_params", `Refusing to delete external source path that is not a readable Olympus SQLite store: ${path}`, "Check the store paths a connector-store mount or a capture setting names before retrying data deletion.");
@@ -118712,14 +118851,14 @@ function expectedEngineBuild(options) {
   return engineBuildIdentity(root);
 }
 function preflightEnginePaths(homeDir, paths = enginePaths(homeDir), ownerUid = process.getuid?.()) {
-  const installed = [
+  const installed2 = [
     [paths.appSupportDir, "Olympus application"],
     [paths.appDir, "Olympus application"],
     [`${paths.appDir}.next`, "Olympus application"],
     [paths.previousAppDir, "Olympus application"],
     [paths.runtimeDir, "Olympus runtime"]
   ];
-  for (const [dir, label] of installed) {
+  for (const [dir, label] of installed2) {
     let problem;
     try {
       assertManagedPathParentsSync(homeDir, dir, label);
@@ -118841,9 +118980,9 @@ function openClawConfigHasOlympus(text3, stateDir) {
       return false;
     if (entry && typeof entry === "object" && entry.enabled === false)
       return false;
-    const installed = Boolean(plugins?.installs && Object.hasOwn(plugins.installs, "olympus"));
+    const installed2 = Boolean(plugins?.installs && Object.hasOwn(plugins.installs, "olympus"));
     const loaded = Array.isArray(plugins?.load?.paths) && plugins.load.paths.some((path) => typeof path === "string" && /olympus/i.test(path));
-    return installed || loaded || existsSync77(join109(stateDir, "extensions", "olympus"));
+    return installed2 || loaded || existsSync77(join109(stateDir, "extensions", "olympus"));
   } catch {
     return /["']?\bolympus\b["']?\s*:/.test(text3);
   }
@@ -118974,20 +119113,20 @@ async function rollbackEngineUnderFence(options = {}) {
   assertDarwin(options.platform);
   const homeDir = absolute2(options.homeDir ?? homedir32(), "home directory");
   const paths = engineServicePaths({ ...options, homeDir, platform: "darwin" });
-  const installed = installedProgram(paths.plistPath);
+  const installed2 = installedProgram(paths.plistPath);
   const appEntry = join109(paths.appDir, "dist", "cli.js");
-  if (!installed) {
+  if (!installed2) {
     throw new OperationError("config_error", "The engine is not installed, so there is nothing to roll back.", "Run the Olympus installer.");
   }
-  if (installed.entryPath !== appEntry) {
-    throw new OperationError("config_error", `This engine runs ${installed.entryPath}, not the installed app, so it has no previous version to return to.`, "Reinstall from the checkout or package you want with olympus engine install.");
+  if (installed2.entryPath !== appEntry) {
+    throw new OperationError("config_error", `This engine runs ${installed2.entryPath}, not the installed app, so it has no previous version to return to.`, "Reinstall from the checkout or package you want with olympus engine install.");
   }
   preflightEnginePaths(homeDir, paths);
   assertOlympusPackage(paths.previousAppDir, "The previous app");
   assertFile(join109(paths.previousAppDir, "dist", "cli.js"), `${paths.previousAppDir} has no dist/cli.js, so it cannot run.`);
   if (paths.engineManager === "daemon")
     assertServerModeCanRunPrevious(paths.previousAppDir);
-  const bunBin = options.bunBin ?? installed.runtimePath;
+  const bunBin = options.bunBin ?? installed2.runtimePath;
   swapAppDirectories(paths);
   const reinstall = () => installEngineVerified({
     ...options[MAINTENANCE_FENCE] ? { [MAINTENANCE_FENCE]: options[MAINTENANCE_FENCE] } : {},
@@ -119172,11 +119311,11 @@ function installedProgram(plistPath) {
 function inspectEngine(options = {}) {
   const homeDir = absolute2(options.homeDir ?? homedir32(), "home directory");
   const paths = engineServicePaths(options);
-  const installed = existsSync77(paths.plistPath);
+  const installed2 = existsSync77(paths.plistPath);
   const base = {
     ...paths.engineManager ? { manager: paths.engineManager } : {},
     label: paths.label,
-    installed,
+    installed: installed2,
     plist_path: paths.plistPath,
     config_path: paths.configPath,
     config_present: existsSync77(paths.configPath),
@@ -119197,7 +119336,7 @@ function inspectEngine(options = {}) {
       state: "not_loaded",
       pid: null,
       last_exit_code: null,
-      detail: installed ? "The agent is installed but not loaded; run olympus engine install." : "The engine is not installed; run olympus engine install."
+      detail: installed2 ? "The agent is installed but not loaded; run olympus engine install." : "The engine is not installed; run olympus engine install."
     };
   }
   if (result.status !== 0) {
@@ -120117,7 +120256,7 @@ function durableProgram(layout, source, transaction, options) {
   }
   transaction.generationArtifact = treeMachineArtifact(generation);
   writeInstallTransaction(layout, transaction);
-  const installed = {
+  const installed2 = {
     runtimePath: join110(generation, "runtime/bun"),
     entryPath: join110(generation, "app/dist/cli.js"),
     workingDirectory: join110(generation, "app"),
@@ -120125,10 +120264,10 @@ function durableProgram(layout, source, transaction, options) {
     ...source.build ? { build: source.build } : {},
     runtimeDigest: hashFile(join110(generation, "runtime/bun"))
   };
-  if (engineBuildIdentity(installed.workingDirectory) !== source.build)
+  if (engineBuildIdentity(installed2.workingDirectory) !== source.build)
     throw new Error("The durable package generation does not match the verified source build.");
-  requireLinuxApprovalTransport(installed);
-  return installed;
+  requireLinuxApprovalTransport(installed2);
+  return installed2;
 }
 function unitLinkCandidates(layout) {
   return [join110(layout.home, ".config/systemd/user", SYSTEMD_ENGINE_UNIT)].filter((path) => path !== layout.unitPath);
@@ -128258,14 +128397,14 @@ function createBuiltInAnalystModel(options = {}) {
     ...options.platform ? { platform: options.platform } : {},
     ...options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}
   };
-  let installed;
+  let installed2;
   let installing2;
   let server;
   const ensureInstalled = () => {
-    if (installed)
-      return Promise.resolve(installed);
+    if (installed2)
+      return Promise.resolve(installed2);
     installing2 ??= install(installerOptions).then((result) => {
-      installed = result;
+      installed2 = result;
       return result;
     }).finally(() => {
       installing2 = undefined;
@@ -128289,7 +128428,7 @@ function createBuiltInAnalystModel(options = {}) {
     spec,
     async prepare() {
       try {
-        const cached2 = installed !== undefined;
+        const cached2 = installed2 !== undefined;
         await ensureInstalled();
         const status = readBuiltInReasoningStatus(spec, env);
         if (cached2 && status.state === "failed" && status.failure?.reason === "runtime_load_failed") {
@@ -128304,10 +128443,10 @@ function createBuiltInAnalystModel(options = {}) {
       await server?.stop();
     },
     installedRuntime() {
-      return installed;
+      return installed2;
     },
     async complete(request) {
-      let paths = installed;
+      let paths = installed2;
       if (!paths) {
         const pending = ensureInstalled();
         if (options.waitForInstall) {
@@ -130980,7 +131119,7 @@ __export(exports_tier_cli, {
   applyTierSet: () => applyTierSet,
   TIER_CLI_USAGE: () => TIER_CLI_USAGE
 });
-import { Database as Database26 } from "bun:sqlite";
+import { Database as Database27 } from "bun:sqlite";
 import { existsSync as existsSync88 } from "node:fs";
 function tierCommandOpensStores(args) {
   return args[0] === "set" || args[0] === "explain" || args[0] === "recheck" || args[0] === "migrate";
@@ -131017,7 +131156,7 @@ function knownStorePaths(context2) {
   return [...new Set(paths)].filter((path) => path !== ":memory:" && existsSync88(path));
 }
 function matchStore2(dbPath, needle) {
-  const db = new Database26(dbPath, { readonly: true });
+  const db = new Database27(dbPath, { readonly: true });
   try {
     db.exec("PRAGMA busy_timeout = 10000;");
     const rows = "locator" in needle ? db.query(`
@@ -131122,7 +131261,7 @@ function locateMatched(needle, context2) {
 function withStore(dbPath, fallback, run) {
   let db;
   try {
-    db = new Database26(dbPath, { readonly: true });
+    db = new Database27(dbPath, { readonly: true });
     db.exec("PRAGMA busy_timeout = 10000;");
     const columns = new Set(db.query("PRAGMA table_info(items)").all().map((column) => column.name));
     if (!columns.has("provider_item_id"))
@@ -131142,7 +131281,7 @@ function knownTierLedgers(context2 = {}) {
     if (existsSync88(own3) && !ledgers.has(own3))
       ledgers.set(own3, undefined);
     let bound;
-    const db = new Database26(dbPath, { readonly: true });
+    const db = new Database27(dbPath, { readonly: true });
     try {
       db.exec("PRAGMA busy_timeout = 10000;");
       bound = storeBoundLedger(db, dbPath);
@@ -131387,7 +131526,7 @@ function knownLedgerPaths(context2) {
   return [...found].map(([path, id]) => ({ path, ...id ? { id } : {} }));
 }
 function boundLedgerOf(dbPath) {
-  const db = new Database26(dbPath, { readonly: true });
+  const db = new Database27(dbPath, { readonly: true });
   try {
     db.exec("PRAGMA busy_timeout = 10000;");
     const cursor = db.query("SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?").get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID)?.cursor;
@@ -131598,7 +131737,7 @@ var init_tier_cli = __esm(() => {
 import { closeSync as closeSync31, copyFileSync as copyFileSync4, existsSync as existsSync89, fsyncSync as fsyncSync9, openSync as openSync30, readFileSync as readFileSync74, renameSync as renameSync19, rmSync as rmSync35, statSync as statSync37, chmodSync as chmodSync38 } from "node:fs";
 import { dirname as dirname93, join as join119, resolve as resolve22 } from "node:path";
 import { randomUUID as randomUUID30 } from "node:crypto";
-import { Database as Database27 } from "bun:sqlite";
+import { Database as Database28 } from "bun:sqlite";
 function restoreOlympusData(options) {
   const input = resolve22(options.input);
   verifyOlympusDataExport({ destination: input });
@@ -131891,7 +132030,7 @@ function sourceSettingsTarget(artifact, context2) {
   return target;
 }
 function storeIsTierBound(path) {
-  const db = new Database27(path, { readonly: true });
+  const db = new Database28(path, { readonly: true });
   try {
     db.exec("PRAGMA busy_timeout = 10000;");
     const table = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sync_runs'").get();
@@ -131904,7 +132043,7 @@ function storeIsTierBound(path) {
   }
 }
 function repointMediaPaths(storePath, pictureFor) {
-  const db = new Database27(storePath, { readwrite: true, create: false });
+  const db = new Database28(storePath, { readwrite: true, create: false });
   try {
     db.exec("PRAGMA busy_timeout = 10000;");
     const columns = db.query("PRAGMA table_info(chunks)").all().map((column) => column.name);
@@ -131934,7 +132073,7 @@ function recordRestoredScope(storePath, sourceId, providerAccountId, secretLocat
   if (!definition || definition.account !== "provider_account" || !providerAccountId)
     return;
   const secretGenerations = secretLocationsPath ? secretLocationGenerations(secretLocationsPath, definition.provider) : [];
-  const db = new Database27(storePath, { readwrite: true, create: false });
+  const db = new Database28(storePath, { readwrite: true, create: false });
   try {
     db.exec("PRAGMA busy_timeout = 10000;");
     const tables = new Set(db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('items', 'sync_runs')").all().map((row) => row.name));
@@ -131961,7 +132100,7 @@ function recordRestoredScope(storePath, sourceId, providerAccountId, secretLocat
   }
 }
 function secretLocationGenerations(path, provider) {
-  const db = new Database27(path, { readonly: true });
+  const db = new Database28(path, { readonly: true });
   try {
     db.exec("PRAGMA busy_timeout = 10000;");
     const table = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'secret_locations'").get();
@@ -131975,7 +132114,7 @@ function secretLocationGenerations(path, provider) {
 function repointLedgerHint(storePath, ledgerFor) {
   if (!storeIsTierBound(storePath))
     return;
-  const db = new Database27(storePath, { readwrite: true, create: false });
+  const db = new Database28(storePath, { readwrite: true, create: false });
   try {
     db.exec("PRAGMA busy_timeout = 10000;");
     const row = db.query("SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?").get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID);
@@ -139737,14 +139876,14 @@ var init_parse3 = __esm(() => {
 // node_modules/zod/v4/classic/schemas.js
 function _installLazyMethods(inst, group, methods) {
   const proto = Object.getPrototypeOf(inst);
-  let installed = _installedGroups.get(proto);
-  if (!installed) {
-    installed = new Set;
-    _installedGroups.set(proto, installed);
+  let installed2 = _installedGroups.get(proto);
+  if (!installed2) {
+    installed2 = new Set;
+    _installedGroups.set(proto, installed2);
   }
-  if (installed.has(group))
+  if (installed2.has(group))
     return;
-  installed.add(group);
+  installed2.add(group);
   for (const key2 in methods) {
     const fn = methods[key2];
     Object.defineProperty(proto, key2, {
@@ -173078,6 +173217,14 @@ function buildSourceAnswerLatencyTraceRecord(input) {
     residual_analyst_orphan_count: Math.max(0, Math.floor(input.trace.residualAnalystOrphanCount)),
     ...input.trace.releaseDecision ? { release_decision: input.trace.releaseDecision } : {},
     ...input.caller ? { caller: copyCaller(input.caller) } : {},
+    ...input.trace.mainThreadSql ? {
+      main_thread_sql: {
+        statements: Math.max(0, Math.floor(input.trace.mainThreadSql.statements)),
+        total_ms: nonNegativeMs2(input.trace.mainThreadSql.total_ms),
+        max_ms: nonNegativeMs2(input.trace.mainThreadSql.max_ms),
+        slow: input.trace.mainThreadSql.slow.map((entry) => ({ ms: nonNegativeMs2(entry.ms), site: entry.site }))
+      }
+    } : {},
     phase_ms: {
       ...fittedPhases,
       unattributed_ms: unattributedMs
@@ -173202,6 +173349,8 @@ function copyPoolReads(pool) {
     queue_wait_max_ms: nonNegativeMs2(pool.queue_wait_max_ms),
     run_ms: nonNegativeMs2(pool.run_ms),
     run_max_ms: nonNegativeMs2(pool.run_max_ms),
+    sql_ms: nonNegativeMs2(pool.sql_ms ?? 0),
+    sql_max_ms: nonNegativeMs2(pool.sql_max_ms ?? 0),
     refused: count(pool.refused),
     dropped_queued: count(pool.dropped_queued),
     past_deadline_running: count(pool.past_deadline_running),
@@ -208659,12 +208808,12 @@ class InstalledTierClassification {
   }
 }
 function configureInstalledTierClassification(options = {}) {
-  installed?.close();
-  installed = new InstalledTierClassification(options);
-  registerInstalledTierClassification(installed);
-  return installed;
+  installed2?.close();
+  installed2 = new InstalledTierClassification(options);
+  registerInstalledTierClassification(installed2);
+  return installed2;
 }
-var installed;
+var installed2;
 var init_installed_tier_classification = __esm(() => {
   init_sniffer();
   init_sniffer_store();
@@ -209268,7 +209417,7 @@ var init_sniffer_resolver = __esm(() => {
 });
 
 // src/workers/classification/sniffer-service.ts
-import { Database as Database28 } from "bun:sqlite";
+import { Database as Database29 } from "bun:sqlite";
 import { existsSync as existsSync114 } from "node:fs";
 function unrefTimer(timer) {
   timer?.unref?.();
@@ -209528,7 +209677,7 @@ class TierSnifferService {
   openBacklogLedger(ledgerPath) {
     let db;
     try {
-      db = new Database28(ledgerPath, { readonly: true, create: false });
+      db = new Database29(ledgerPath, { readonly: true, create: false });
       db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
       const expectedId = this.boundLedgerIds.get(ledgerPath);
       if (expectedId !== undefined) {
@@ -233077,8 +233226,8 @@ function createDashboardConsultAdapter(options) {
           return { ok: false, httpStatus: 409, code: "acknowledgements_incomplete", message: MESSAGES3.acknowledgementsIncomplete };
       }
       if (turningOn || savingLanguages) {
-        const installed2 = new Set(languages().filter((entry) => entry.installed).map((entry) => entry.language));
-        if (!chosen.every((language) => installed2.has(language)))
+        const installed3 = new Set(languages().filter((entry) => entry.installed).map((entry) => entry.language));
+        if (!chosen.every((language) => installed3.has(language)))
           return invalid5(MESSAGES3.languageMissing, "language_pack_missing");
       }
       const result = writeConsultSettings({

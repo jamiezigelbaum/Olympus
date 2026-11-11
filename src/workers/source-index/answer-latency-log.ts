@@ -27,6 +27,7 @@ import type {
   SourceAnswerTracePoolReads,
   SourceAnswerTraceRouteStep,
   SourceAnswerTraceSnapshot,
+  SourceAnswerTraceMainThreadSql,
 } from './answer-latency-trace.ts';
 import { sourceAnswerTraceErrorClass } from './answer-latency-trace.ts';
 import type { OperationCallerWire } from '../../core/operation-caller.ts';
@@ -90,6 +91,8 @@ export interface SourceAnswerLatencyTraceRecord {
   residual_analyst_orphan_count?: number;
   release_decision?: string;
   caller?: OperationCallerWire;
+  // Synchronous SQLite the Ask ran on the request thread (#1305).
+  main_thread_sql?: SourceAnswerTraceMainThreadSql;
   phase_ms: {
     lane_setup_ms: number;
     bulk_gate_ms: number;
@@ -262,6 +265,16 @@ export function buildSourceAnswerLatencyTraceRecord(input: {
     ),
     ...(input.trace.releaseDecision ? { release_decision: input.trace.releaseDecision } : {}),
     ...(input.caller ? { caller: copyCaller(input.caller) } : {}),
+    ...(input.trace.mainThreadSql
+      ? {
+          main_thread_sql: {
+            statements: Math.max(0, Math.floor(input.trace.mainThreadSql.statements)),
+            total_ms: nonNegativeMs(input.trace.mainThreadSql.total_ms),
+            max_ms: nonNegativeMs(input.trace.mainThreadSql.max_ms),
+            slow: input.trace.mainThreadSql.slow.map((entry) => ({ ms: nonNegativeMs(entry.ms), site: entry.site })),
+          },
+        }
+      : {}),
     phase_ms: {
       ...fittedPhases,
       unattributed_ms: unattributedMs,
@@ -413,6 +426,8 @@ function copyPoolReads(pool: SourceAnswerTracePoolReads): SourceAnswerTracePoolR
     queue_wait_max_ms: nonNegativeMs(pool.queue_wait_max_ms),
     run_ms: nonNegativeMs(pool.run_ms),
     run_max_ms: nonNegativeMs(pool.run_max_ms),
+    sql_ms: nonNegativeMs(pool.sql_ms ?? 0),
+    sql_max_ms: nonNegativeMs(pool.sql_max_ms ?? 0),
     refused: count(pool.refused),
     dropped_queued: count(pool.dropped_queued),
     past_deadline_running: count(pool.past_deadline_running),

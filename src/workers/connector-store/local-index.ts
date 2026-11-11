@@ -1,4 +1,5 @@
 import { iterateRows } from '../../core/sqlite-rows.ts';
+import { installMainThreadSqlTrace } from './main-thread-sql-trace.ts';
 import { assertWritableStoreOpenAllowed, writableStoreOpensForbidden } from '../../core/store-write-guard.ts';
 import type { PeopleCitationName, PeopleSenderIdentity, PeopleSenderObservation } from '../../core/people-index.ts';
 import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
@@ -2132,7 +2133,13 @@ export interface ConnectorStoreCurrentEmbeddingRow {
   embedding: unknown;
 }
 
+// The Ask trace names slow synchronous statements on the request thread (#1305).
+installMainThreadSqlTrace();
+
 const CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256;
+// On the read pool every page is a round trip through the request thread, so
+// pages are larger there: 2,048 vectors of 768 floats are about 6 MB.
+const CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 2048;
 
 interface ConnectorStoreCurrentEmbeddingRowsOptions {
   modelId: string;
@@ -2216,33 +2223,104 @@ export function* connectorStoreCurrentEmbeddingRowsIterator(
   }
 }
 
+type VectorScan =
+  | { bestByItem: Map<number, { bestCosine: number; bestChunkPk: number; localItemId: string }>; dimensionMismatches: number }
+  | { skippedReason: string };
+
 /**
- * Keyset-paged form used by interactive exact-vector retrieval.
+ * The exact-vector scan: re-checks the embedding authority, then walks the
+ * model's current vectors in keyset pages, keeping each item's best chunk.
  *
- * A page bounds both the synchronous SQLite call and resident vector bytes.
- * Ordering by the embedding primary-key prefix makes progress monotonic; a
- * caller can yield between pages so route deadlines and unrelated lanes keep
- * making progress without ever materialising the full corpus.
+ * `read` runs every query in ONE read snapshot, so the rows the scan walks
+ * are the rows the authority check approved. A page bounds both a statement
+ * and the resident vector bytes; ordering by the embedding primary-key prefix
+ * makes progress monotonic, and the scan yields between pages so route
+ * deadlines and unrelated lanes keep making progress.
  */
-function connectorStoreCurrentEmbeddingRowsPage(
-  db: Database,
-  options: ConnectorStoreCurrentEmbeddingRowsOptions,
-  afterChunkPk: number,
-  limit = CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE,
-): ConnectorStoreCurrentEmbeddingRow[] {
-  const { sql, params } = connectorStoreCurrentEmbeddingPageQuery(options, afterChunkPk, limit);
-  const rows = db.query(sql).all(...params) as Array<{
-    item_pk: number;
-    chunk_pk: number;
-    local_item_id: string;
-    embedding: unknown;
-  }>;
-  return rows.map((row) => ({
-    itemPk: row.item_pk,
-    chunkPk: row.chunk_pk,
-    localItemId: row.local_item_id,
-    embedding: row.embedding,
-  }));
+async function scanVectorPages(
+  read: (query: StoreRead) => Promise<unknown>,
+  provider: SourceEmbeddingProvider,
+  beforeToken: string,
+  queryVector: readonly number[],
+  pageOptions: ConnectorStoreCurrentEmbeddingRowsOptions,
+  deadlineAtMs: number | undefined,
+  pageSize: number,
+): Promise<VectorScan> {
+  const authority = embeddingAuthorityRead(provider);
+  const after = embeddingAuthorityFromRow(await read(authority) as EmbeddingAuthorityRow | null, provider);
+  if (after.skippedReason) return { skippedReason: after.skippedReason };
+  if (after.token !== beforeToken) return { skippedReason: 'embedding_authority_changed_during_query' };
+  const bestByItem = new Map<number, { bestCosine: number; bestChunkPk: number; localItemId: string }>();
+  let dimensionMismatches = 0;
+  let afterChunkPk = 0;
+  let pagesScanned = 0;
+  while (true) {
+    if (connectorStoreVectorDeadlineExpired(deadlineAtMs)) return { skippedReason: 'vector_scan_deadline_exceeded' };
+    const { sql, params } = connectorStoreCurrentEmbeddingPageQuery(pageOptions, afterChunkPk, pageSize);
+    const page = await read({ mode: 'all', sql, params }) as Array<{
+      item_pk: number;
+      chunk_pk: number;
+      local_item_id: string;
+      embedding: unknown;
+    }>;
+    if (page.length === 0) break;
+    // The winning CHUNK is kept, not just its score. A cosine is a
+    // chunk-level measurement, so the chunk that produced the item's best
+    // score is the only defensible semantic citation target.
+    for (const [index, row] of page.entries()) {
+      if ((index & 31) === 0 && connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
+        return { skippedReason: 'vector_scan_deadline_exceeded' };
+      }
+      const documentVector = decodeEmbedding(row.embedding);
+      if (documentVector.length !== queryVector.length) {
+        dimensionMismatches += 1;
+        continue;
+      }
+      const score = cosineSimilarity(queryVector, documentVector);
+      const existing = bestByItem.get(row.item_pk);
+      if (existing === undefined || score > existing.bestCosine) {
+        bestByItem.set(row.item_pk, { bestCosine: score, bestChunkPk: row.chunk_pk, localItemId: row.local_item_id });
+      }
+    }
+    afterChunkPk = page.at(-1)!.chunk_pk;
+    if (page.length < pageSize) break;
+    if (pagesScanned++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0) await yieldConnectorStoreVectorScan();
+  }
+  return { bestByItem, dimensionMismatches };
+}
+
+/**
+ * The scan on the store's read-pool thread, inside one pool snapshot. Waiting
+ * for that thread counts against the lane's deadline: a scan that cannot
+ * start in time reports the deadline, and if the thread frees later the
+ * snapshot opens and closes at once.
+ */
+async function scanVectorPagesOnPool(
+  dbPath: string,
+  provider: SourceEmbeddingProvider,
+  beforeToken: string,
+  queryVector: readonly number[],
+  pageOptions: ConnectorStoreCurrentEmbeddingRowsOptions,
+  deadlineAtMs: number | undefined,
+): Promise<VectorScan> {
+  const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(
+    read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE,
+  )).catch((error: unknown): VectorScan => {
+    if (error instanceof OffThreadReadBusyError) return { skippedReason: 'vector_scan_store_busy' };
+    throw error;
+  });
+  if (deadlineAtMs === undefined || !Number.isFinite(deadlineAtMs)) return scan;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<VectorScan>((resolve) => {
+    timer = setTimeout(() => resolve({ skippedReason: 'vector_scan_deadline_exceeded' }), Math.max(0, deadlineAtMs - Date.now()));
+  });
+  try {
+    return await Promise.race([scan, deadline]);
+  } finally {
+    clearTimeout(timer);
+    // A scan that lost the race still settles; its outcome has no reader.
+    scan.catch(() => undefined);
+  }
 }
 
 /**
@@ -2283,6 +2361,43 @@ export function connectorStoreCurrentEmbeddingPageQuery(
       pageLimit,
     ],
   };
+}
+
+type EmbeddingAuthorityRow = { status: string; cursor: string | null; audit_receipt_sha256: string | null };
+
+/** The read of a model's embedding write authority (see LocalConnectorStore.embeddingReadAuthority). */
+function embeddingAuthorityRead(provider: ConnectorStoreEmbeddingAuthorityIdentity): StoreRead {
+  return {
+    mode: 'get',
+    sql: `SELECT status, cursor, audit_receipt_sha256
+      FROM sync_runs
+      WHERE sync_run_id = ? AND connector_id = ?`,
+    params: [connectorStoreEmbeddingWriteAuthorityId(provider.modelId), 'connector_store_embedding_write_authority'],
+  };
+}
+
+function embeddingAuthorityFromRow(
+  row: EmbeddingAuthorityRow | null,
+  provider: ConnectorStoreEmbeddingAuthorityIdentity,
+): { token: string; skippedReason?: string } {
+  if (!row) return { token: 'no_embedding_write_authority' };
+  if (row.status !== 'running' || row.audit_receipt_sha256 !== hashString(row.cursor ?? '')) {
+    return { token: 'corrupt', skippedReason: 'embedding_authority_corrupt' };
+  }
+  let record: ConnectorStoreEmbeddingWriteAuthorityRecord;
+  try {
+    record = parseConnectorStoreEmbeddingWriteAuthority(row.cursor);
+  } catch {
+    return { token: 'unreadable', skippedReason: 'embedding_authority_unreadable' };
+  }
+  const token = row.audit_receipt_sha256 ?? '';
+  if (!connectorStoreEmbeddingWriteAuthorityMatches(record, provider)) {
+    return { token, skippedReason: 'embedding_authority_provider_mismatch' };
+  }
+  if (record.currencyRebuildPending) {
+    return { token, skippedReason: 'embedding_currency_rebuild_pending' };
+  }
+  return { token };
 }
 
 /**
@@ -12578,9 +12693,9 @@ export class LocalConnectorStore {
   }
 
   /**
-   * The snapshot half of the vector lane. A dedicated read connection keeps
-   * one SQLite snapshot across cooperative page yields, so timers can run
-   * without letting a concurrent embedding rebind mix vector spaces.
+   * The snapshot half of the vector lane. The scan reads in one SQLite
+   * snapshot across its page yields, so a concurrent embedding rebind cannot
+   * mix vector spaces.
    */
   private async scoreVectorLaneSnapshot(input: {
     provider: SourceEmbeddingProvider;
@@ -12598,76 +12713,19 @@ export class LocalConnectorStore {
     }
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
     const selectedAccount = normalizeOptionalAccountScope(accountScope);
-    const scanDb = this.dbPath === ':memory:'
-      ? this.db
-      : new Database(this.dbPath, { readonly: true, create: false, strict: true });
-    const ownsScanDb = scanDb !== this.db;
-    const bestByItem = new Map<number, { bestCosine: number; bestChunkPk: number; localItemId: string }>();
-    let dimensionMismatches = 0;
-    let afterChunkPk = 0;
-    let pagesScanned = 0;
-
-    try {
-      if (ownsScanDb) {
-        scanDb.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;');
-      }
-      // A dedicated read connection lets this snapshot remain open while the
-      // scan yields to timers. The production store is file-backed; :memory:
-      // is retained only for isolated tests, where this connection cannot be
-      // reopened and no concurrent writer exists.
-      scanDb.exec('BEGIN DEFERRED TRANSACTION;');
-      const after = this.embeddingReadAuthority(provider, scanDb);
-      if (after.skippedReason) return { rows: [], skippedReason: after.skippedReason };
-      if (after.token !== input.beforeToken) {
-        return { rows: [], skippedReason: 'embedding_authority_changed_during_query' };
-      }
-
-      while (true) {
-        if (connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
-          return { rows: [], skippedReason: 'vector_scan_deadline_exceeded' };
-        }
-        const page = connectorStoreCurrentEmbeddingRowsPage(scanDb, {
-          modelId: provider.modelId,
-          ...(selectedAccount ? { accountScope: selectedAccount } : {}),
-          ...(filters ? { filters } : {}),
-        }, afterChunkPk);
-        if (page.length === 0) break;
-
-        // The winning CHUNK is kept, not just its score. A cosine is a
-        // chunk-level measurement, so the chunk that produced the item's best
-        // score is the only defensible semantic citation target.
-        for (const [index, row] of page.entries()) {
-          if ((index & 31) === 0 && connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
-            return { rows: [], skippedReason: 'vector_scan_deadline_exceeded' };
-          }
-          const documentVector = decodeEmbedding(row.embedding);
-          if (documentVector.length !== queryVector.length) {
-            dimensionMismatches += 1;
-            continue;
-          }
-          const score = cosineSimilarity(queryVector, documentVector);
-          const existing = bestByItem.get(row.itemPk);
-          if (existing === undefined || score > existing.bestCosine) {
-            bestByItem.set(row.itemPk, {
-              bestCosine: score,
-              bestChunkPk: row.chunkPk,
-              localItemId: row.localItemId,
-            });
-          }
-        }
-        afterChunkPk = page.at(-1)!.chunkPk;
-        if (page.length < CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE) break;
-        if (pagesScanned++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0) await yieldConnectorStoreVectorScan();
-      }
-    } finally {
-      try {
-        scanDb.exec('ROLLBACK;');
-      } catch {
-        // A read snapshot that never opened or was already closed has no state
-        // to recover. The original retrieval error, if any, remains primary.
-      }
-      if (ownsScanDb) closeSqliteStore(scanDb);
-    }
+    const pageOptions: ConnectorStoreCurrentEmbeddingRowsOptions = {
+      modelId: provider.modelId,
+      ...(selectedAccount ? { accountScope: selectedAccount } : {}),
+      ...(filters ? { filters } : {}),
+    };
+    // A file store's pages are read on its read-pool thread inside one
+    // snapshot (#1305): run on the request thread they held it for tens of
+    // seconds on a large store, and every other lane and request waited.
+    const scanned = offThreadReadsSupported(this.dbPath)
+      ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs)
+      : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs);
+    if ('skippedReason' in scanned) return { rows: [], skippedReason: scanned.skippedReason };
+    const { bestByItem, dimensionMismatches } = scanned;
 
     // Ties break on item_pk, explicitly.
     //
@@ -12718,6 +12776,44 @@ export class LocalConnectorStore {
   }
 
   /**
+   * The vector scan for a store the read pool does not serve (an in-memory
+   * test store, or a runtime without workers): a dedicated read connection
+   * keeps one snapshot across the scan's cooperative yields.
+   */
+  private async scanVectorPagesInThread(
+    provider: SourceEmbeddingProvider,
+    beforeToken: string,
+    queryVector: readonly number[],
+    pageOptions: ConnectorStoreCurrentEmbeddingRowsOptions,
+    deadlineAtMs: number | undefined,
+  ): Promise<VectorScan> {
+    const scanDb = this.dbPath === ':memory:'
+      ? this.db
+      : new Database(this.dbPath, { readonly: true, create: false, strict: true });
+    const ownsScanDb = scanDb !== this.db;
+    try {
+      if (ownsScanDb) {
+        scanDb.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;');
+      }
+      scanDb.exec('BEGIN DEFERRED TRANSACTION;');
+      const read = async (query: StoreRead): Promise<unknown> => {
+        const statement = scanDb.query(query.sql);
+        const params = query.params as Array<string | number | null>;
+        return query.mode === 'all' ? statement.all(...params) : statement.get(...params);
+      };
+      return await scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE);
+    } finally {
+      try {
+        scanDb.exec('ROLLBACK;');
+      } catch {
+        // A read snapshot that never opened or was already closed has no state
+        // to recover. The original retrieval error, if any, remains primary.
+      }
+      if (ownsScanDb) closeSqliteStore(scanDb);
+    }
+  }
+
+  /**
    * The read half of the embedding write fence: the authority row's receipt
    * digest, which covers the whole value identity (provider, backend,
    * dimension, epoch — configHash is recorded but carries no authority), the
@@ -12732,32 +12828,8 @@ export class LocalConnectorStore {
     provider: ConnectorStoreEmbeddingAuthorityIdentity,
     db: Database = this.db,
   ): { token: string; skippedReason?: string } {
-    const row = db.query(`
-      SELECT status, cursor, audit_receipt_sha256
-      FROM sync_runs
-      WHERE sync_run_id = ? AND connector_id = ?
-    `).get(
-      connectorStoreEmbeddingWriteAuthorityId(provider.modelId),
-      'connector_store_embedding_write_authority',
-    ) as { status: string; cursor: string | null; audit_receipt_sha256: string | null } | null;
-    if (!row) return { token: 'no_embedding_write_authority' };
-    if (row.status !== 'running' || row.audit_receipt_sha256 !== hashString(row.cursor ?? '')) {
-      return { token: 'corrupt', skippedReason: 'embedding_authority_corrupt' };
-    }
-    let record: ConnectorStoreEmbeddingWriteAuthorityRecord;
-    try {
-      record = parseConnectorStoreEmbeddingWriteAuthority(row.cursor);
-    } catch {
-      return { token: 'unreadable', skippedReason: 'embedding_authority_unreadable' };
-    }
-    const token = row.audit_receipt_sha256 ?? '';
-    if (!connectorStoreEmbeddingWriteAuthorityMatches(record, provider)) {
-      return { token, skippedReason: 'embedding_authority_provider_mismatch' };
-    }
-    if (record.currencyRebuildPending) {
-      return { token, skippedReason: 'embedding_currency_rebuild_pending' };
-    }
-    return { token };
+    const read = embeddingAuthorityRead(provider);
+    return embeddingAuthorityFromRow(db.query(read.sql).get(...(read.params as string[])) as EmbeddingAuthorityRow | null, provider);
   }
 
   // Embeddable chunk rows: every live (non-tombstoned) chunk plus the

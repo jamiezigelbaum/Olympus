@@ -17897,6 +17897,156 @@ var init_secret_locations = __esm(() => {
   ]);
 });
 
+// src/workers/source-index/answer-latency-trace.ts
+import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+function beginSourceAnswerPoolRead() {
+  const query = currentSourceAnswerTrace()?.activeQuery;
+  const corpusId = laneStorage.getStore();
+  if (!query || corpusId === undefined)
+    return;
+  return ({ queueWaitMs, runMs, sqlMs, outcome }) => {
+    let reads = query.poolByCorpus.get(corpusId);
+    if (!reads) {
+      reads = {
+        reads: 0,
+        queue_wait_ms: 0,
+        queue_wait_max_ms: 0,
+        run_ms: 0,
+        run_max_ms: 0,
+        sql_ms: 0,
+        sql_max_ms: 0,
+        refused: 0,
+        dropped_queued: 0,
+        past_deadline_running: 0,
+        errors: 0
+      };
+      query.poolByCorpus.set(corpusId, reads);
+    }
+    const wait = nonNegativeMs(queueWaitMs);
+    const ran = nonNegativeMs(runMs);
+    reads.reads += 1;
+    reads.queue_wait_ms += wait;
+    reads.queue_wait_max_ms = Math.max(reads.queue_wait_max_ms, wait);
+    reads.run_ms += ran;
+    reads.run_max_ms = Math.max(reads.run_max_ms, ran);
+    const sql = nonNegativeMs(sqlMs);
+    reads.sql_ms += sql;
+    reads.sql_max_ms = Math.max(reads.sql_max_ms, sql);
+    if (outcome === "refused")
+      reads.refused += 1;
+    else if (outcome === "dropped_queued")
+      reads.dropped_queued += 1;
+    else if (outcome === "past_deadline_running")
+      reads.past_deadline_running += 1;
+    else if (outcome === "error")
+      reads.errors += 1;
+  };
+}
+function currentSourceAnswerTrace() {
+  return storage2.getStore();
+}
+function sourceAnswerTraceActive() {
+  return storage2.getStore() !== undefined;
+}
+function recordSourceAnswerMainThreadSql(elapsedMs, site) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  const ms = nonNegativeMs(elapsedMs);
+  const sql = trace.mainThreadSql;
+  sql.statements += 1;
+  sql.total_ms += ms;
+  sql.max_ms = Math.max(sql.max_ms, ms);
+  if (ms < SLOW_MAIN_THREAD_SQL_MS)
+    return;
+  sql.slow.push({ ms, site: site() });
+  if (sql.slow.length > SLOW_MAIN_THREAD_SQL_KEPT) {
+    sql.slow.sort((left, right) => right.ms - left.ms);
+    sql.slow.length = SLOW_MAIN_THREAD_SQL_KEPT;
+  }
+}
+function nonNegativeMs(value) {
+  return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+}
+var SLOW_MAIN_THREAD_SQL_MS = 250, SLOW_MAIN_THREAD_SQL_KEPT = 20, storage2, laneStorage, CONTENT_FREE_ERROR_CLASSES;
+var init_answer_latency_trace = __esm(() => {
+  storage2 = new AsyncLocalStorage3;
+  laneStorage = new AsyncLocalStorage3;
+  CONTENT_FREE_ERROR_CLASSES = new Set([
+    "AbortError",
+    "AnalystUnavailable",
+    "AnalystCircuitOpen",
+    "EmailSourceWorkerError",
+    "Error",
+    "LocalTrustProviderMismatch",
+    "OperationError",
+    "RangeError",
+    "SourceModelPolicyDeniedError",
+    "SecureEvidencePolicySkip",
+    "SecureAnalystPoolE2EEGateError",
+    "SyntaxError",
+    "TrustedAnalystTimeoutError",
+    "TypeError"
+  ]);
+});
+
+// src/workers/connector-store/main-thread-sql-trace.ts
+import { Database as Database6 } from "bun:sqlite";
+import { isMainThread } from "node:worker_threads";
+function installMainThreadSqlTrace() {
+  if (installed || !isMainThread)
+    return;
+  installed = true;
+  for (const name of ["query", "prepare"]) {
+    const original = Database6.prototype[name];
+    Database6.prototype[name] = function(...args) {
+      return timeStatement(original.apply(this, args));
+    };
+  }
+}
+function timeStatement(statement) {
+  const held = statement;
+  if (!statement || held[TIMED])
+    return statement;
+  for (const method of STATEMENT_METHODS) {
+    const call = held[method];
+    if (typeof call !== "function")
+      continue;
+    held[method] = function(...args) {
+      if (!sourceAnswerTraceActive())
+        return call.apply(this, args);
+      const started = performance.now();
+      try {
+        return call.apply(this, args);
+      } finally {
+        recordSourceAnswerMainThreadSql(performance.now() - started, callSite);
+      }
+    };
+  }
+  held[TIMED] = true;
+  return statement;
+}
+function callSite() {
+  const frames = (new Error().stack ?? "").split(`
+`).slice(1).map((line) => line.trim()).map((line) => line.startsWith("at ") ? line.slice(3) : line).filter((line) => line.length > 0);
+  const recorder = frames.findIndex((frame) => frame.startsWith("recordSourceAnswerMainThreadSql"));
+  const caller = recorder >= 0 ? recorder + 2 : 3;
+  return frames.slice(caller, caller + SITE_FRAMES).map(shortFrame).join(" < ");
+}
+function shortFrame(frame) {
+  const open3 = frame.lastIndexOf("(");
+  const name = open3 > 0 ? frame.slice(0, open3).trim() : "<anonymous>";
+  const where = (open3 > 0 ? frame.slice(open3 + 1, frame.lastIndexOf(")")) : frame).split("/").at(-1) ?? "";
+  const [file, line] = where.split(":");
+  return `${name} ${file}${line ? `:${line}` : ""}`;
+}
+var TIMED, STATEMENT_METHODS, SITE_FRAMES = 3, installed = false;
+var init_main_thread_sql_trace = __esm(() => {
+  init_answer_latency_trace();
+  TIMED = Symbol("olympus.mainThreadSqlTimed");
+  STATEMENT_METHODS = ["all", "get", "run", "values"];
+});
+
 // src/core/child-item-id.ts
 function childProviderItemId(parentProviderItemId, key2) {
   if (!parentProviderItemId)
@@ -18068,74 +18218,6 @@ var init_control_path_headroom = __esm(() => {
 // src/core/source-index/lane-busy.ts
 var SOURCE_INDEX_LANE_BUSY_CODE = "source_index_lane_busy";
 
-// src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
-function beginSourceAnswerPoolRead() {
-  const query = currentSourceAnswerTrace()?.activeQuery;
-  const corpusId = laneStorage.getStore();
-  if (!query || corpusId === undefined)
-    return;
-  return ({ queueWaitMs, runMs, outcome }) => {
-    let reads = query.poolByCorpus.get(corpusId);
-    if (!reads) {
-      reads = {
-        reads: 0,
-        queue_wait_ms: 0,
-        queue_wait_max_ms: 0,
-        run_ms: 0,
-        run_max_ms: 0,
-        refused: 0,
-        dropped_queued: 0,
-        past_deadline_running: 0,
-        errors: 0
-      };
-      query.poolByCorpus.set(corpusId, reads);
-    }
-    const wait = nonNegativeMs(queueWaitMs);
-    const ran = nonNegativeMs(runMs);
-    reads.reads += 1;
-    reads.queue_wait_ms += wait;
-    reads.queue_wait_max_ms = Math.max(reads.queue_wait_max_ms, wait);
-    reads.run_ms += ran;
-    reads.run_max_ms = Math.max(reads.run_max_ms, ran);
-    if (outcome === "refused")
-      reads.refused += 1;
-    else if (outcome === "dropped_queued")
-      reads.dropped_queued += 1;
-    else if (outcome === "past_deadline_running")
-      reads.past_deadline_running += 1;
-    else if (outcome === "error")
-      reads.errors += 1;
-  };
-}
-function currentSourceAnswerTrace() {
-  return storage2.getStore();
-}
-function nonNegativeMs(value) {
-  return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
-}
-var storage2, laneStorage, CONTENT_FREE_ERROR_CLASSES;
-var init_answer_latency_trace = __esm(() => {
-  storage2 = new AsyncLocalStorage3;
-  laneStorage = new AsyncLocalStorage3;
-  CONTENT_FREE_ERROR_CLASSES = new Set([
-    "AbortError",
-    "AnalystUnavailable",
-    "AnalystCircuitOpen",
-    "EmailSourceWorkerError",
-    "Error",
-    "LocalTrustProviderMismatch",
-    "OperationError",
-    "RangeError",
-    "SourceModelPolicyDeniedError",
-    "SecureEvidencePolicySkip",
-    "SecureAnalystPoolE2EEGateError",
-    "SyntaxError",
-    "TrustedAnalystTimeoutError",
-    "TypeError"
-  ]);
-});
-
 // src/workers/connector-store/off-thread-reads.ts
 function live() {
   return threads.filter((reader) => !reader.retired);
@@ -18177,6 +18259,8 @@ function startThread(store) {
       started.pending.delete(message2.id);
       if (waiting.timer !== undefined)
         clock2.clearTimeout(waiting.timer);
+      if (typeof message2.ms === "number")
+        waiting.sqlMs?.(message2.ms);
       if (message2.ok)
         waiting.resolve(message2.rows ?? null);
       else
@@ -18217,7 +18301,7 @@ function retire2(stopped, error) {
 function offThreadReadsSupported(dbPath) {
   return dbPath !== ":memory:" && !dbPath.startsWith("file::memory:") && runtimeHasWorkers();
 }
-function send(reader, message2, timeoutMs = OFF_THREAD_READ_TIMEOUT_MS) {
+function send(reader, message2, timeoutMs = OFF_THREAD_READ_TIMEOUT_MS, sqlMs) {
   if (reader.retired)
     return Promise.reject(new Error("off-thread reader stopped"));
   const id = nextId2++;
@@ -18225,7 +18309,7 @@ function send(reader, message2, timeoutMs = OFF_THREAD_READ_TIMEOUT_MS) {
     const timer = timeoutMs === null ? undefined : clock2.setTimeout(() => {
       retire2(reader, new Error("off-thread read timed out"));
     }, timeoutMs);
-    reader.pending.set(id, { resolve: resolve7, reject, ...timer !== undefined ? { timer } : {} });
+    reader.pending.set(id, { resolve: resolve7, reject, ...timer !== undefined ? { timer } : {}, ...sqlMs ? { sqlMs } : {} });
     try {
       reader.worker.postMessage({ ...message2, id });
     } catch (error) {
@@ -18250,7 +18334,23 @@ async function withOffThreadSnapshot(dbPath, work) {
   try {
     await send(reader, { op: "open", snapshot, path: dbPath });
     try {
-      return await work((query) => send(reader, { op: "read", snapshot, sql: query.sql, params: query.params, mode: query.mode }));
+      return await work(async (query) => {
+        if (observeSnapshots)
+          observer?.(dbPath, query);
+        const report = beginSourceAnswerPoolRead();
+        const sentAtMs = clock2.now();
+        let sqlMs = 0;
+        try {
+          const rows = await send(reader, { op: "read", snapshot, sql: query.sql, params: query.params, mode: query.mode }, undefined, (ms) => {
+            sqlMs = ms;
+          });
+          report?.({ queueWaitMs: 0, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "rows" });
+          return rows;
+        } catch (error) {
+          report?.({ queueWaitMs: 0, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "error" });
+          throw error;
+        }
+      });
     } finally {
       await send(reader, { op: "close", snapshot }).catch(() => {
         return;
@@ -18301,7 +18401,7 @@ function readOnPool(dbPath, read, options = {}) {
   const waiting = queues.get(dbPath) ?? [];
   const report = beginSourceAnswerPoolRead();
   if (waiting.length >= READ_POOL_QUEUE_PER_STORE || clock2.now() >= deadlineAtMs) {
-    report?.({ queueWaitMs: 0, runMs: 0, outcome: "refused" });
+    report?.({ queueWaitMs: 0, runMs: 0, sqlMs: 0, outcome: "refused" });
     return Promise.reject(new OffThreadReadBusyError);
   }
   return new Promise((resolve7, reject) => {
@@ -18358,6 +18458,7 @@ function settle(job, outcome) {
     job.report({
       queueWaitMs: (sentAtMs ?? now) - job.enqueuedAtMs,
       runMs: sentAtMs === undefined ? 0 : now - sentAtMs,
+      sqlMs: job.sqlMs ?? 0,
       outcome: ended
     });
   }
@@ -18412,14 +18513,16 @@ function dispatch() {
     reader.job = job;
     reader.executingStore = job.store;
     observer?.(job.store, job.read);
-    send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, null).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => settle(job, { error: reader.retired ? new OffThreadReadBusyError : error })).finally(() => {
+    send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, null, (ms) => {
+      job.sqlMs = ms;
+    }).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => settle(job, { error: reader.retired ? new OffThreadReadBusyError : error })).finally(() => {
       if (reader.job === job)
         reader.job = undefined;
       dispatch();
     });
   }
 }
-var READ_POOL_SIZE = 1, READ_POOL_QUEUE_PER_STORE = 8, OFF_THREAD_READ_TIMEOUT_MS = 120000, OffThreadReadBusyError, REAL_CLOCK, clock2, observer, workerFactory = (url) => new Worker(url), WORKER_SOURCE = `
+var READ_POOL_SIZE = 1, READ_POOL_QUEUE_PER_STORE = 8, OFF_THREAD_READ_TIMEOUT_MS = 120000, OffThreadReadBusyError, REAL_CLOCK, clock2, observer, observeSnapshots = false, workerFactory = (url) => new Worker(url), WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
 const snapshots = new Map();
@@ -18465,9 +18568,10 @@ self.onmessage = (event) => {
     } else {
       const db = op === 'query' ? connection(path) : snapshots.get(snapshot);
       if (!db) throw new Error('unknown snapshot');
+      const started = performance.now();
       const query = db.query(sql);
       const rows = mode === 'all' ? query.all(...params) : query.get(...params);
-      postMessage({ id, ok: true, rows });
+      postMessage({ id, ok: true, rows, ms: performance.now() - started });
     }
   } catch (error) {
     postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error) });
@@ -20575,7 +20679,7 @@ var init_embeddings = __esm(() => {
 import { createHash as createHash11, randomUUID as randomUUID6 } from "node:crypto";
 import { existsSync as existsSync19, lstatSync as lstatSync11, mkdirSync as mkdirSync13, statSync as statSync11 } from "node:fs";
 import { dirname as dirname23 } from "node:path";
-import { Database as Database6 } from "bun:sqlite";
+import { Database as Database7 } from "bun:sqlite";
 function connectorStoreMigrations() {
   return [
     ...currentStoreMigrations(),
@@ -21000,15 +21104,67 @@ function visibilityMemberBits(flags) {
   }
   return value;
 }
-function connectorStoreCurrentEmbeddingRowsPage(db, options, afterChunkPk, limit = CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE) {
-  const { sql, params } = connectorStoreCurrentEmbeddingPageQuery(options, afterChunkPk, limit);
-  const rows = db.query(sql).all(...params);
-  return rows.map((row) => ({
-    itemPk: row.item_pk,
-    chunkPk: row.chunk_pk,
-    localItemId: row.local_item_id,
-    embedding: row.embedding
-  }));
+async function scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, pageSize) {
+  const authority = embeddingAuthorityRead(provider);
+  const after = embeddingAuthorityFromRow(await read(authority), provider);
+  if (after.skippedReason)
+    return { skippedReason: after.skippedReason };
+  if (after.token !== beforeToken)
+    return { skippedReason: "embedding_authority_changed_during_query" };
+  const bestByItem = new Map;
+  let dimensionMismatches = 0;
+  let afterChunkPk = 0;
+  let pagesScanned = 0;
+  while (true) {
+    if (connectorStoreVectorDeadlineExpired(deadlineAtMs))
+      return { skippedReason: "vector_scan_deadline_exceeded" };
+    const { sql, params } = connectorStoreCurrentEmbeddingPageQuery(pageOptions, afterChunkPk, pageSize);
+    const page = await read({ mode: "all", sql, params });
+    if (page.length === 0)
+      break;
+    for (const [index, row] of page.entries()) {
+      if ((index & 31) === 0 && connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
+        return { skippedReason: "vector_scan_deadline_exceeded" };
+      }
+      const documentVector = decodeEmbedding(row.embedding);
+      if (documentVector.length !== queryVector.length) {
+        dimensionMismatches += 1;
+        continue;
+      }
+      const score = cosineSimilarity(queryVector, documentVector);
+      const existing = bestByItem.get(row.item_pk);
+      if (existing === undefined || score > existing.bestCosine) {
+        bestByItem.set(row.item_pk, { bestCosine: score, bestChunkPk: row.chunk_pk, localItemId: row.local_item_id });
+      }
+    }
+    afterChunkPk = page.at(-1).chunk_pk;
+    if (page.length < pageSize)
+      break;
+    if (pagesScanned++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0)
+      await yieldConnectorStoreVectorScan();
+  }
+  return { bestByItem, dimensionMismatches };
+}
+async function scanVectorPagesOnPool(dbPath, provider, beforeToken, queryVector, pageOptions, deadlineAtMs) {
+  const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE)).catch((error) => {
+    if (error instanceof OffThreadReadBusyError)
+      return { skippedReason: "vector_scan_store_busy" };
+    throw error;
+  });
+  if (deadlineAtMs === undefined || !Number.isFinite(deadlineAtMs))
+    return scan;
+  let timer;
+  const deadline = new Promise((resolve9) => {
+    timer = setTimeout(() => resolve9({ skippedReason: "vector_scan_deadline_exceeded" }), Math.max(0, deadlineAtMs - Date.now()));
+  });
+  try {
+    return await Promise.race([scan, deadline]);
+  } finally {
+    clearTimeout(timer);
+    scan.catch(() => {
+      return;
+    });
+  }
 }
 function connectorStoreCurrentEmbeddingPageQuery(options, afterChunkPk, limit = CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE) {
   const modelId = requireNonEmpty(options.modelId, "Connector store embedding model id");
@@ -21039,6 +21195,36 @@ function connectorStoreCurrentEmbeddingPageQuery(options, afterChunkPk, limit = 
       pageLimit
     ]
   };
+}
+function embeddingAuthorityRead(provider) {
+  return {
+    mode: "get",
+    sql: `SELECT status, cursor, audit_receipt_sha256
+      FROM sync_runs
+      WHERE sync_run_id = ? AND connector_id = ?`,
+    params: [connectorStoreEmbeddingWriteAuthorityId(provider.modelId), "connector_store_embedding_write_authority"]
+  };
+}
+function embeddingAuthorityFromRow(row, provider) {
+  if (!row)
+    return { token: "no_embedding_write_authority" };
+  if (row.status !== "running" || row.audit_receipt_sha256 !== hashString2(row.cursor ?? "")) {
+    return { token: "corrupt", skippedReason: "embedding_authority_corrupt" };
+  }
+  let record;
+  try {
+    record = parseConnectorStoreEmbeddingWriteAuthority(row.cursor);
+  } catch {
+    return { token: "unreadable", skippedReason: "embedding_authority_unreadable" };
+  }
+  const token = row.audit_receipt_sha256 ?? "";
+  if (!connectorStoreEmbeddingWriteAuthorityMatches(record, provider)) {
+    return { token, skippedReason: "embedding_authority_provider_mismatch" };
+  }
+  if (record.currencyRebuildPending) {
+    return { token, skippedReason: "embedding_currency_rebuild_pending" };
+  }
+  return { token };
 }
 function connectorStoreVectorDeadlineExpired(deadlineAtMs) {
   return deadlineAtMs !== undefined && Number.isFinite(deadlineAtMs) && Date.now() >= deadlineAtMs;
@@ -22934,7 +23120,7 @@ function fileIdentity(path) {
     return;
   }
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 2000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 2000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 2048, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -22942,6 +23128,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
     AND emb.content_hash = c.embedding_input_hash
 `, READ_ONLY_MIN_SCHEMA_VERSION = 7, LocalConnectorStore, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
+  init_main_thread_sql_trace();
   init_store_write_guard();
   init_job_names();
   init_keyword_context();
@@ -23070,6 +23257,7 @@ var init_local_index = __esm(() => {
       this.name = "ConnectorStoreLocatorIdentityIndexNotReadyError";
     }
   };
+  installMainThreadSqlTrace();
   LocalConnectorStore = class LocalConnectorStore {
     dbPath;
     openedFile;
@@ -23141,7 +23329,7 @@ var init_local_index = __esm(() => {
         if (this.dbPath !== ":memory:")
           mkdirSync13(dirname23(this.dbPath), { recursive: true, mode: 448 });
       }
-      this.db = new Database6(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
+      this.db = new Database7(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
       this.openedFile = fileIdentity(this.dbPath);
       try {
         this.db.exec(options.readOnly === true ? "PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;" : "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
@@ -29152,66 +29340,15 @@ var init_local_index = __esm(() => {
       }
       const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
       const selectedAccount = normalizeOptionalAccountScope(accountScope);
-      const scanDb = this.dbPath === ":memory:" ? this.db : new Database6(this.dbPath, { readonly: true, create: false, strict: true });
-      const ownsScanDb = scanDb !== this.db;
-      const bestByItem = new Map;
-      let dimensionMismatches = 0;
-      let afterChunkPk = 0;
-      let pagesScanned = 0;
-      try {
-        if (ownsScanDb) {
-          scanDb.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;");
-        }
-        scanDb.exec("BEGIN DEFERRED TRANSACTION;");
-        const after = this.embeddingReadAuthority(provider, scanDb);
-        if (after.skippedReason)
-          return { rows: [], skippedReason: after.skippedReason };
-        if (after.token !== input.beforeToken) {
-          return { rows: [], skippedReason: "embedding_authority_changed_during_query" };
-        }
-        while (true) {
-          if (connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
-            return { rows: [], skippedReason: "vector_scan_deadline_exceeded" };
-          }
-          const page = connectorStoreCurrentEmbeddingRowsPage(scanDb, {
-            modelId: provider.modelId,
-            ...selectedAccount ? { accountScope: selectedAccount } : {},
-            ...filters ? { filters } : {}
-          }, afterChunkPk);
-          if (page.length === 0)
-            break;
-          for (const [index, row] of page.entries()) {
-            if ((index & 31) === 0 && connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
-              return { rows: [], skippedReason: "vector_scan_deadline_exceeded" };
-            }
-            const documentVector = decodeEmbedding(row.embedding);
-            if (documentVector.length !== queryVector.length) {
-              dimensionMismatches += 1;
-              continue;
-            }
-            const score = cosineSimilarity(queryVector, documentVector);
-            const existing = bestByItem.get(row.itemPk);
-            if (existing === undefined || score > existing.bestCosine) {
-              bestByItem.set(row.itemPk, {
-                bestCosine: score,
-                bestChunkPk: row.chunkPk,
-                localItemId: row.localItemId
-              });
-            }
-          }
-          afterChunkPk = page.at(-1).chunkPk;
-          if (page.length < CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE)
-            break;
-          if (pagesScanned++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0)
-            await yieldConnectorStoreVectorScan();
-        }
-      } finally {
-        try {
-          scanDb.exec("ROLLBACK;");
-        } catch {}
-        if (ownsScanDb)
-          closeSqliteStore(scanDb);
-      }
+      const pageOptions = {
+        modelId: provider.modelId,
+        ...selectedAccount ? { accountScope: selectedAccount } : {},
+        ...filters ? { filters } : {}
+      };
+      const scanned = offThreadReadsSupported(this.dbPath) ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs);
+      if ("skippedReason" in scanned)
+        return { rows: [], skippedReason: scanned.skippedReason };
+      const { bestByItem, dimensionMismatches } = scanned;
       const candidates = Array.from(bestByItem.entries()).filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE).sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]);
       const rankedItems = [];
       let candidateOffset = 0;
@@ -29239,31 +29376,31 @@ var init_local_index = __esm(() => {
         ...laneRows.length === 0 && dimensionMismatches > 0 ? { skippedReason: "embedding_stored_dimension_mismatch" } : {}
       };
     }
-    embeddingReadAuthority(provider, db = this.db) {
-      const row = db.query(`
-      SELECT status, cursor, audit_receipt_sha256
-      FROM sync_runs
-      WHERE sync_run_id = ? AND connector_id = ?
-    `).get(connectorStoreEmbeddingWriteAuthorityId(provider.modelId), "connector_store_embedding_write_authority");
-      if (!row)
-        return { token: "no_embedding_write_authority" };
-      if (row.status !== "running" || row.audit_receipt_sha256 !== hashString2(row.cursor ?? "")) {
-        return { token: "corrupt", skippedReason: "embedding_authority_corrupt" };
-      }
-      let record;
+    async scanVectorPagesInThread(provider, beforeToken, queryVector, pageOptions, deadlineAtMs) {
+      const scanDb = this.dbPath === ":memory:" ? this.db : new Database7(this.dbPath, { readonly: true, create: false, strict: true });
+      const ownsScanDb = scanDb !== this.db;
       try {
-        record = parseConnectorStoreEmbeddingWriteAuthority(row.cursor);
-      } catch {
-        return { token: "unreadable", skippedReason: "embedding_authority_unreadable" };
+        if (ownsScanDb) {
+          scanDb.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;");
+        }
+        scanDb.exec("BEGIN DEFERRED TRANSACTION;");
+        const read = async (query) => {
+          const statement = scanDb.query(query.sql);
+          const params = query.params;
+          return query.mode === "all" ? statement.all(...params) : statement.get(...params);
+        };
+        return await scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE);
+      } finally {
+        try {
+          scanDb.exec("ROLLBACK;");
+        } catch {}
+        if (ownsScanDb)
+          closeSqliteStore(scanDb);
       }
-      const token = row.audit_receipt_sha256 ?? "";
-      if (!connectorStoreEmbeddingWriteAuthorityMatches(record, provider)) {
-        return { token, skippedReason: "embedding_authority_provider_mismatch" };
-      }
-      if (record.currencyRebuildPending) {
-        return { token, skippedReason: "embedding_currency_rebuild_pending" };
-      }
-      return { token };
+    }
+    embeddingReadAuthority(provider, db = this.db) {
+      const read = embeddingAuthorityRead(provider);
+      return embeddingAuthorityFromRow(db.query(read.sql).get(...read.params), provider);
     }
     embeddingSourceRows(localItemIds, accountScope, filters, tierHidden, allowHeld = false) {
       const selectedLocalItemIds = normalizeEmbedLocalItemIds(localItemIds);
@@ -39561,7 +39698,7 @@ class BuiltInSourceEmbeddingProvider {
     this.dimension = this.spec.dimension;
     this.threads = resolveThreads(options.threads, this.env);
     this.device = resolveDevice(this.env);
-    this.runtimeFactory = options.runtime ?? ((installed) => onnxRuntimeFromDirectory(installed.runtimeDir));
+    this.runtimeFactory = options.runtime ?? ((installed2) => onnxRuntimeFromDirectory(installed2.runtimeDir));
     this.liteRtFactory = options.liteRt ?? startLiteRtEmbedder;
     this.install = options.install ?? installBuiltInEmbedding;
     this.installerOptions = options.installerOptions ?? {};
@@ -39706,9 +39843,9 @@ class BuiltInSourceEmbeddingProvider {
       ...this.installerOptions.now ? { now: this.installerOptions.now } : {},
       ...this.installerOptions.onProgress ? { onProgress: this.installerOptions.onProgress } : {}
     };
-    let installed;
+    let installed2;
     try {
-      installed = await this.install({ ...this.installerOptions, env: this.env, model: this.spec });
+      installed2 = await this.install({ ...this.installerOptions, env: this.env, model: this.spec });
     } catch (error) {
       throw builtInEmbeddingOperationError(error);
     }
@@ -39716,12 +39853,12 @@ class BuiltInSourceEmbeddingProvider {
       reportBuiltInEmbeddingState(reporterOptions, "loading");
       let model;
       if (this.spec.runtime === "litert") {
-        if (!installed.libraryPath)
+        if (!installed2.libraryPath)
           throw new Error("the LiteRT-LM runtime is not installed.");
         const settings = {
-          library: installed.libraryPath,
-          model: installed.modelPath,
-          cacheDir: join29(dirname31(installed.modelPath), "cache"),
+          library: installed2.libraryPath,
+          model: installed2.modelPath,
+          cacheDir: join29(dirname31(installed2.modelPath), "cache"),
           threads: this.threads,
           device: this.device,
           maxInputTokens: this.spec.maxTokens,
@@ -39741,13 +39878,13 @@ class BuiltInSourceEmbeddingProvider {
         if (this.spec.vision)
           reportBuiltInEmbeddingVision(embedder.vision, { env: this.env, model: this.spec });
       } else {
-        if (!installed.vocabularyPath)
+        if (!installed2.vocabularyPath)
           throw new Error("the model vocabulary is not installed.");
-        const tokenizer = loadTokenizer(installed.vocabularyPath);
-        const session = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
+        const tokenizer = loadTokenizer(installed2.vocabularyPath);
+        const session = await this.runtimeFactory(installed2).createSession(installed2.modelPath, { threads: this.threads });
         model = { kind: "onnx", session, tokenizer };
         try {
-          const querySession = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
+          const querySession = await this.runtimeFactory(installed2).createSession(installed2.modelPath, { threads: this.threads });
           this.priorityLoaded = { kind: "onnx", session: querySession, tokenizer };
         } catch (error) {
           await session.release?.().catch(() => {
@@ -60483,14 +60620,14 @@ var init_parse2 = __esm(() => {
 // node_modules/zod/v4/classic/schemas.js
 function _installLazyMethods(inst, group, methods) {
   const proto = Object.getPrototypeOf(inst);
-  let installed = _installedGroups.get(proto);
-  if (!installed) {
-    installed = new Set;
-    _installedGroups.set(proto, installed);
+  let installed2 = _installedGroups.get(proto);
+  if (!installed2) {
+    installed2 = new Set;
+    _installedGroups.set(proto, installed2);
   }
-  if (installed.has(group))
+  if (installed2.has(group))
     return;
-  installed.add(group);
+  installed2.add(group);
   for (const key2 in methods) {
     const fn = methods[key2];
     Object.defineProperty(proto, key2, {
@@ -79707,7 +79844,7 @@ init_tier_move();
 init_provider();
 init_built_in_sniffer();
 init_sniffer();
-import { Database as Database7 } from "bun:sqlite";
+import { Database as Database8 } from "bun:sqlite";
 
 // src/workers/classification/sniffer-resolver.ts
 init_answer_activity();
@@ -80583,7 +80720,7 @@ class TierSnifferService {
   openBacklogLedger(ledgerPath) {
     let db;
     try {
-      db = new Database7(ledgerPath, { readonly: true, create: false });
+      db = new Database8(ledgerPath, { readonly: true, create: false });
       db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
       const expectedId = this.boundLedgerIds.get(ledgerPath);
       if (expectedId !== undefined) {

@@ -12,6 +12,7 @@ import {
   createConnectorStoreCorpusAdapter,
   defineConnectorCorpus,
 } from '../src/workers/connector-store/index.ts';
+import { setReadPoolObserverForTests } from '../src/workers/connector-store/off-thread-reads.ts';
 import { DROPBOX_TIER_CORPUS_IDS } from '../src/workers/dropbox-files/connector-store.ts';
 import type { SourceEmbeddingInput } from '../src/workers/source-index/embeddings.ts';
 import { waitFor } from './helpers/test-clock.ts';
@@ -68,7 +69,7 @@ test('the vector lane starts while the keyword lane is still searching', async (
   expect(vectorStart).toBeLessThan(events.indexOf('keyword:end'));
 });
 
-test('the vector scan does not wait a timer tick after every page', async () => {
+test('the vector scan reads large pages on the read pool and yields at most once', async () => {
   const { dir, cleanup } = tempDir('olympus-vector-yield-');
   const store = new LocalConnectorStore({
     dbPath: join(dir, 'internal.sqlite'),
@@ -77,9 +78,9 @@ test('the vector scan does not wait a timer tick after every page', async () => 
     trustDomain: 'internal',
     tierLedger: null,
   });
-  cleanups.push(cleanup, () => store.close());
+  cleanups.push(cleanup, () => store.close(), () => setReadPoolObserverForTests());
   const provider = new RecordingProvider('built-in', 'yield-model', 'local');
-  // Six 256-row pages of current embeddings.
+  // Six 256-row pages of current embeddings on the request thread; one page on the pool.
   await store.syncFromConnector(fixtureConnector(() => Array.from({ length: 1300 }, (_, n) => ({
     id: `n${n}`, name: `note-${n}.txt`, text: `Synthetic note ${n} about item ${n * 7}.`,
   }))), { fetchContent: true });
@@ -87,6 +88,11 @@ test('the vector scan does not wait a timer tick after every page', async () => 
 
   // Rerun 7 on Sparta: 599 pages, each followed by setTimeout(0), cost the
   // lane about 0.7 s idle and more under load before it scored anything.
+  // On the pool every page is also a round trip through the request thread.
+  const pages: string[] = [];
+  setReadPoolObserverForTests((_, read) => {
+    if (/emb\.chunk_pk > \?/.test(read.sql)) pages.push(read.sql);
+  }, { snapshots: true });
   const realSetTimeout = globalThis.setTimeout;
   let zeroDelayTimers = 0;
   globalThis.setTimeout = ((handler: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
@@ -99,6 +105,6 @@ test('the vector scan does not wait a timer tick after every page', async () => 
   } finally {
     globalThis.setTimeout = realSetTimeout;
   }
-  // One yield after the first page; the next would follow page 9.
-  expect(zeroDelayTimers).toBe(1);
+  expect(pages.length).toBe(1);
+  expect(zeroDelayTimers).toBeLessThanOrEqual(1);
 });

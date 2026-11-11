@@ -47,6 +47,10 @@ export interface SourceAnswerTracePoolReads {
   queue_wait_max_ms: number;
   run_ms: number;
   run_max_ms: number;
+  // The statements' own time on the pool thread, inside run_ms. The rest of
+  // run_ms is the trip back: the row copy and the wait for the request thread.
+  sql_ms: number;
+  sql_max_ms: number;
   // Refused at once: the store's queue was full, or the deadline had passed.
   refused: number;
   // Still waiting for a thread at the deadline.
@@ -85,6 +89,24 @@ export interface SourceAnswerTraceAnalystLeg extends SourceAnswerTraceRouteStep 
   error_class?: string;
 }
 
+/**
+ * The Ask's synchronous SQLite on the request thread (#1305): every statement
+ * it ran there, their total and longest time, and the call site of each that
+ * held the thread past SLOW_MAIN_THREAD_SQL_MS. Sites are function names and
+ * file:line only, never SQL or data.
+ */
+export interface SourceAnswerTraceMainThreadSql {
+  statements: number;
+  total_ms: number;
+  max_ms: number;
+  slow: Array<{ ms: number; site: string }>;
+}
+
+/** A request-thread statement this long is named in the trace with its call site. */
+export const SLOW_MAIN_THREAD_SQL_MS = 250;
+// The slow list keeps the longest this many.
+const SLOW_MAIN_THREAD_SQL_KEPT = 20;
+
 export interface SourceAnswerTraceSnapshot {
   correlationId: string;
   receivedAt: string;
@@ -110,6 +132,7 @@ export interface SourceAnswerTraceSnapshot {
   recordBuildMs: number;
   appendMs: number;
   releaseDecision?: string;
+  mainThreadSql: SourceAnswerTraceMainThreadSql;
 }
 
 interface MutableTrace extends SourceAnswerTraceSnapshot {
@@ -145,12 +168,12 @@ export function runInSourceAnswerLane<T>(corpusId: string, run: () => T): T {
  * are captured now: the read ends in a pool callback outside their context.
  */
 export function beginSourceAnswerPoolRead():
-  | ((report: { queueWaitMs: number; runMs: number; outcome: SourceAnswerPoolReadOutcome }) => void)
+  | ((report: { queueWaitMs: number; runMs: number; sqlMs: number; outcome: SourceAnswerPoolReadOutcome }) => void)
   | undefined {
   const query = currentSourceAnswerTrace()?.activeQuery;
   const corpusId = laneStorage.getStore();
   if (!query || corpusId === undefined) return undefined;
-  return ({ queueWaitMs, runMs, outcome }) => {
+  return ({ queueWaitMs, runMs, sqlMs, outcome }) => {
     let reads = query.poolByCorpus.get(corpusId);
     if (!reads) {
       reads = {
@@ -159,6 +182,8 @@ export function beginSourceAnswerPoolRead():
         queue_wait_max_ms: 0,
         run_ms: 0,
         run_max_ms: 0,
+        sql_ms: 0,
+        sql_max_ms: 0,
         refused: 0,
         dropped_queued: 0,
         past_deadline_running: 0,
@@ -173,6 +198,9 @@ export function beginSourceAnswerPoolRead():
     reads.queue_wait_max_ms = Math.max(reads.queue_wait_max_ms, wait);
     reads.run_ms += ran;
     reads.run_max_ms = Math.max(reads.run_max_ms, ran);
+    const sql = nonNegativeMs(sqlMs);
+    reads.sql_ms += sql;
+    reads.sql_max_ms = Math.max(reads.sql_max_ms, sql);
     if (outcome === 'refused') reads.refused += 1;
     else if (outcome === 'dropped_queued') reads.dropped_queued += 1;
     else if (outcome === 'past_deadline_running') reads.past_deadline_running += 1;
@@ -217,6 +245,7 @@ export function createSourceAnswerTrace(now: () => Date = () => new Date()): Mut
     selfHealRebuildMs: 0,
     recordBuildMs: 0,
     appendMs: 0,
+    mainThreadSql: { statements: 0, total_ms: 0, max_ms: 0, slow: [] },
   };
 }
 
@@ -229,6 +258,31 @@ export function runWithSourceAnswerTrace<T>(
 
 export function currentSourceAnswerTrace(): MutableTrace | undefined {
   return storage.getStore();
+}
+
+/** Whether a traced Ask is running in the current async context. */
+export function sourceAnswerTraceActive(): boolean {
+  return storage.getStore() !== undefined;
+}
+
+/**
+ * One synchronous statement the Ask ran on the request thread. `site` is
+ * called only for a slow one, so ordinary statements never capture a stack.
+ */
+export function recordSourceAnswerMainThreadSql(elapsedMs: number, site: () => string): void {
+  const trace = currentSourceAnswerTrace();
+  if (!trace) return;
+  const ms = nonNegativeMs(elapsedMs);
+  const sql = trace.mainThreadSql;
+  sql.statements += 1;
+  sql.total_ms += ms;
+  sql.max_ms = Math.max(sql.max_ms, ms);
+  if (ms < SLOW_MAIN_THREAD_SQL_MS) return;
+  sql.slow.push({ ms, site: site() });
+  if (sql.slow.length > SLOW_MAIN_THREAD_SQL_KEPT) {
+    sql.slow.sort((left, right) => right.ms - left.ms);
+    sql.slow.length = SLOW_MAIN_THREAD_SQL_KEPT;
+  }
 }
 
 export function recordSourceAnswerPhaseTimings(timings: SourceIndexAnswerPhaseTimings): void {
@@ -450,6 +504,7 @@ export function snapshotSourceAnswerTrace(trace: MutableTrace): SourceAnswerTrac
     recordBuildMs: trace.recordBuildMs,
     appendMs: trace.appendMs,
     ...(trace.releaseDecision ? { releaseDecision: trace.releaseDecision } : {}),
+    mainThreadSql: { ...trace.mainThreadSql, slow: trace.mainThreadSql.slow.map((entry) => ({ ...entry })) },
   };
 }
 
