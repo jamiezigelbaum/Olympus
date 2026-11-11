@@ -1,9 +1,7 @@
 import { resolvedRawPath, resolvedStorePath } from '../../../core/source-placement.ts';
-import {
-  EmailSourceWorkerError,
-  GogcliEmailConnector,
-  type EmailSourceConnector,
-} from '../index.ts';
+import { EmailSourceWorkerError } from '../http/worker-responses.ts';
+import { GogcliEmailConnector } from '../../email-source/gogcli.ts';
+import type { EmailSourceConnector } from '../../email-source/email-connector.ts';
 import {
   READWISE_SOURCE_ID,
   ReadwiseDailyRequestBudget,

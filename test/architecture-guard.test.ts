@@ -1001,6 +1001,22 @@ describe('architecture guard: capability, not per-source/per-question code', () 
     expect(main).not.toContain('LegacyReplay');
   });
 
+  test('the email source stays a source module, not a second engine (#1068)', () => {
+    // The worker entry and HTTP routes moved to src/workers/engine/ (#1403,
+    // #1425). An entry point or an engine import here would make the email
+    // source the engine again.
+    const dir = join(repoRoot, 'src', 'workers', 'email-source');
+    const modules = readdirSync(dir, { recursive: true })
+      .map(String)
+      .filter((name) => name.endsWith('.ts'));
+    expect(modules.length).toBeGreaterThan(0);
+    expect(modules.filter((name) => name === 'server.ts' || name === 'index.ts')).toEqual([]);
+    const engineImport = /\bfrom\s+['"](?:\.\.\/)+(?:workers\/)?engine(?:\/|['"])|\bimport\(\s*['"](?:\.\.\/)+(?:workers\/)?engine(?:\/|['"])/;
+    expect(engineImport.test("import { x } from '../engine/http/routes.ts';")).toBe(true);
+    expect(engineImport.test("await import('../engine/server.ts')")).toBe(true);
+    expect(modules.filter((name) => engineImport.test(readFileSync(join(dir, name), 'utf8')))).toEqual([]);
+  });
+
   test('shared answer regex heuristics stay in reviewed generic helpers', () => {
     const offenders: string[] = [];
     for (const rel of SOURCE_AGNOSTIC_SHARED_FILES) {

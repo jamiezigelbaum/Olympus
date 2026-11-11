@@ -1,10 +1,10 @@
 import { hasFolderLayout } from '../../../core/source-placement.ts';
 import { existsSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
-import {
-  type ConnectorStoreChatPrincipal,
-  type ConnectorStoreDeclaredPrincipal,
-} from '../index.ts';
+import type {
+  ConnectorStoreChatPrincipal,
+  ConnectorStoreDeclaredPrincipal,
+} from '../http/connector-store-search-request.ts';
 import {
   type LocalConnectorStore,
   defineConnectorCorpus,

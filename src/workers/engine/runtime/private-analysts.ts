@@ -383,7 +383,7 @@ export function createAnalystForSovereigntyProfile(input: {
     }), { profile: 'source_answer', preflightTimeoutMs: 0 });
     return createAnalyst(input.localModelActivity
       ? input.localModelActivity.track(localModelResourceKey(profile), model, { serialize: false }) : model,
-    { auditSuspiciousDrafts: true });
+    { auditSuspiciousDrafts: true, evidenceFormat: 'compact' });
   }
   if (profile.provider === 'openclaw-infer') {
     return createAnalyst(createOpenClawInferAnalystModel({

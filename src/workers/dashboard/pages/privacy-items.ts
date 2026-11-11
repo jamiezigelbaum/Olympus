@@ -19,6 +19,7 @@ import {
   DASHBOARD_PRIVACY_ITEMS_COPY as C,
   DASHBOARD_PRIVATE_ANSWERS_COPY as W,
   JUDGE_REASON_PHRASES,
+  DASHBOARD_UNREADABLE_FILE_REASON_WORDS,
 } from '../vocabulary.ts';
 import { JUDGE_CHECK_CSS, JUDGE_CHECK_ITEMS_CHANGED_EVENT, JUDGE_CHECK_MOUNT, judgeCheckClientScript } from './judge-check.ts';
 import type { DashboardPageOptions } from './local.ts';
@@ -198,6 +199,7 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
     debounceMs: PRIVACY_ITEMS_SEARCH_DEBOUNCE_MS,
     logos: input.unlockOnly ? {} : sourceLogoTilesByProvider(),
     reasons: JUDGE_REASON_PHRASES,
+    unreadableReasons: DASHBOARD_UNREADABLE_FILE_REASON_WORDS,
     copy: C,
   };
   return `(function () {
@@ -332,6 +334,8 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
       // A hold for unread text, or a label from the names alone, is not a verdict on what the item says (#1295).
       var said = item.waiting_for_judge ? esc(fill(C.waitingToRead, { tier: tier }))
         : item.names_only ? esc(C.namesOnly)
+          : item.not_read && item.not_read.kind === 'by_choice' ? esc(C.notReadByChoice)
+          : item.not_read && item.not_read.kind === 'cannot_read' ? esc(fill(C.cannotRead, { reason: config.unreadableReasons[item.not_read.reason] || config.unreadableReasons.other }))
           : phrase ? '<b>' + esc(fill(C.judgeChose, { tier: tier })) + '</b> ' + esc(phrase) : esc(fill(C.judgeMarked, { tier: tier }));
       if (tier) why = '<p class="piwhy" data-pi-why>' + said + '</p>';
       var group = item.sender ? fill(C.promiseGroup, { sender: item.sender }) : C.promiseGroupNoSender;

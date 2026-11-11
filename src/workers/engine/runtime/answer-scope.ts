@@ -1,7 +1,5 @@
 import { type PeopleSenderIdentity } from '../../../core/people-index.ts';
-import {
-  type ConnectorStoreDeclaredPrincipal,
-} from '../index.ts';
+import type { ConnectorStoreDeclaredPrincipal } from '../http/connector-store-search-request.ts';
 import type { SourceIndexAnswerRequest } from '../../source-index/answer-types.ts';
 import {
   DROPBOX_APPROVED_SCOPE_FILTER_CODEC,

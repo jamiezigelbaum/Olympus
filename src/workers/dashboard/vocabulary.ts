@@ -1391,7 +1391,7 @@ export function dashboardUnreadableSentence(source: DashboardSourceCard): string
   const phrase = dashboardUnreadablePhrase(source);
   if (!phrase) return undefined;
   if ((source.coverage.settled_unreadable_items ?? 0) > 0) {
-    return `${phrase[0]!.toUpperCase()}${phrase.slice(1)}. Some items were kept Private without being read because their privacy checks were missing. See why lists the items; open them to check them, then use Sync now to try reading them again.`;
+    return `${phrase[0]!.toUpperCase()}${phrase.slice(1)}. Some items were kept Private because Olympus couldn't read them. See why lists the files and their reasons.`;
   }
   const lead = `${phrase[0]!.toUpperCase()}${phrase.slice(1)}: extraction failed permanently — the file is damaged`
     + " or in a format Olympus can't read.";
@@ -1416,7 +1416,7 @@ export const DASHBOARD_UNREADABLE_FILE_REASON_WORDS: Readonly<Record<string, str
   missing: 'the file is no longer where it was',
   no_access: 'Olympus isn\'t allowed to open it',
   unsupported: 'a format Olympus can\'t read',
-  privacy_check_missing: 'kept Private before it was read',
+  privacy_check_missing: "kept Private because Olympus couldn't read it",
   other: 'Olympus couldn\'t read it',
 };
 
@@ -1453,8 +1453,8 @@ export const DASHBOARD_UNREADABLE_REASON_WORDS: Readonly<
   Record<DashboardUnreadableReasonCode, { one: string; other: string }>
 > = {
   privacy_check_missing: {
-    one: "{count} item was kept Private without being read because its privacy check was missing. Open it below to check it, then use Sync now to try reading it again.",
-    other: "{count} items were kept Private without being read because their privacy checks were missing. Open them below to check them, then use Sync now to try reading them again.",
+    one: "{count} item kept Private because Olympus couldn't read it. The reason is shown with the file below.",
+    other: "{count} items kept Private because Olympus couldn't read them. The reasons are shown with the files below.",
   },
   damaged_or_unsupported: {
     one: "{count} file Olympus can't read at all",
@@ -3933,6 +3933,8 @@ export const DASHBOARD_PRIVACY_ITEMS_COPY = {
   judgeChose: 'The judge chose {tier}:',
   judgeMarked: 'The judge marked this {tier}.',
   waitingToRead: 'Waiting to be read. It stays {tier} until the judge reads it.',
+  notReadByChoice: 'Not read, by your choice.',
+  cannotRead: "Kept Private: Olympus couldn't read it ({reason}).",
   namesOnly: 'Names only, by your choice. The judge decided it on its name alone.',
   youChose: 'You chose {tier}',
   justNow: 'just now',

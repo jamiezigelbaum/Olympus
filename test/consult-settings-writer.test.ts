@@ -279,7 +279,7 @@ describe('the writer stays off every hosted surface', () => {
   const WRITER_IMPORTERS: readonly string[] = [ADAPTER];
   /** The adapter's importers: the composition root (value) and the worker's option type (type-only). */
   const ADAPTER_VALUE_IMPORTERS: readonly string[] = ['src/workers/engine/server.ts'];
-  const ADAPTER_TYPE_IMPORTERS: readonly string[] = ['src/workers/engine/index.ts'];
+  const ADAPTER_TYPE_IMPORTERS: readonly string[] = ['src/workers/engine/http/worker-options.ts'];
   /** Seeds: every hosted entry into the engine. None may reach the writer or the adapter. */
   const HOSTED_SEEDS: readonly string[] = [
     'src/workers/chatgpt/mcp-surface.ts',

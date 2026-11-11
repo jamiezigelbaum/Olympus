@@ -1,9 +1,9 @@
 import { createDashboardPeople } from '../email-source/dashboard-people.ts';
 import { PeopleIndexRefresher } from '../../core/people-index.ts';
 import { adoptExistingCloudApproval, carryCloudJudgeApproval, createJudgeSetup } from '../classification/judge-setup.ts';
-import { createOwnerTierItems, getOwnerTierItem } from '../classification/tier-owner-items.ts';
+import { createOwnerTierItems, getOwnerTierItem, type OwnerTierItemsContext } from '../classification/tier-owner-items.ts';
 import { createJudgeCheck } from '../classification/judge-check.ts';
-import { builtInRerankerFromEnv } from '../source-index/built-in-reranker.ts';
+import { prepareBuiltInRerankerFromEnv } from '../source-index/built-in-reranker.ts';
 import { JudgeSpending, judgeSpendingPath } from '../classification/judge-spending.ts';
 import { JudgeObservations, SecondRoundConfirmed, SecondRoundSweep, judgeObservationsPath, judgeSecondRoundConfirmedPath, judgeSecondRoundStatePath, observedJudge, secondRoundJudge } from '../classification/judge-second-round.ts';
 import { DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS } from '../classification/judge-pacing.ts';
@@ -59,17 +59,14 @@ import {
   parseFileExtractionCorporaEnv,
 } from '../email-source/file-extraction-runtime.ts';
 import { createExtractionReadinessLedger } from '../file-extraction/readiness-ledger.ts';
-import { createUnreadableFiles, createUnreadableVerdict } from '../file-extraction/unreadable-files.ts';
+import { NO_EXTRACTION_JOB_OUTCOME, createUnreadableFiles, createUnreadableVerdict } from '../file-extraction/unreadable-files.ts';
 import { VeniceVlmClient } from '../file-extraction/extractors/venice-client.ts';
 import { parseOcrEnginePreference } from '../file-extraction/extractors/apple-vision-ocr.ts';
-import {
-  EmailSourceWorkerError,
-  createEmailSourceWorker,
-  dashboardSourceSyncNotSupportedError,
-  defineGmailSecureLocalCorpus,
-  defineInternalEmailCorpus,
-  type ConnectorStoreDeclaredPrincipal,
-} from './index.ts';
+import { EmailSourceWorkerError } from './http/worker-responses.ts';
+import { createEmailSourceWorker } from './index.ts';
+import { dashboardSourceSyncNotSupportedError } from './http/dashboard-source-requests.ts';
+import { defineGmailSecureLocalCorpus, defineInternalEmailCorpus } from '../google-connectors/corpora.ts';
+import type { ConnectorStoreDeclaredPrincipal } from './http/connector-store-search-request.ts';
 import {
   createAnalystSourceIndexAnswerHandler,
   readPrivateEvidenceItem,
@@ -290,7 +287,7 @@ import {
 import { recordedProviderAccount } from '../../core/provider-account-history.ts';
 import { takeWorkerDataOwnerLock, type HeldDataOwnerLock } from '../../core/data-owner-lock.ts';
 import { exportOlympusData, lifecycleStoreFileOwner } from '../../data-lifecycle.ts';
-import { TierLedger, TierLedgerSchemaError } from '../classification/tier-ledger.ts';
+import { TierLedger, TierLedgerSchemaError, type TierLedgerIdentity } from '../classification/tier-ledger.ts';
 import { resolveSecretRefValueSync } from '../../core/secret-store.ts';
 import {
   WorkerBootSecretResolver,
@@ -2443,11 +2440,17 @@ export async function main(): Promise<void> {
     generation: () => sourceLaneGeneration,
     beforeCurrent: () => mountSourceLanes(readActiveConnectedHandles(process.env)),
   });
-  // A file store counts an item unreadable only once its extraction has ended
-  // (LocalConnectorStore.setExtractionEndedProbe); a tier store opened later gets it in registerTierLegStore.
+  // Every store reads its unread holds' outcomes from the extraction ledger
+  // (LocalConnectorStore.setExtractionOutcomeProbe): Gmail attachments and chat
+  // media are extracted there too. A file store queues every file, so a file
+  // with no job yet is still waiting; elsewhere an item with no job was never
+  // going to be read. A tier store opened later gets it in registerTierLegStore.
+  const extractionOutcomeFor = (family: string | undefined, identity: TierLedgerIdentity, localItemId: string | undefined) =>
+    fileExtractionRuntime?.jobs.itemExtractionOutcome({ ...identity, ...(localItemId === undefined ? {} : { localItemId }) },
+      family === 'file' ? {} : { whenNoJob: NO_EXTRACTION_JOB_OUTCOME });
   const probeExtractionEnded = (store: LocalConnectorStore): void => {
-    if (store.family !== 'file' || !fileExtractionRuntime) return;
-    store.setExtractionEndedProbe((identity) => fileExtractionRuntime.jobs.itemExtractionState(identity) === 'settled');
+    if (!fileExtractionRuntime) return;
+    store.setExtractionOutcomeProbe((identity, localItemId) => extractionOutcomeFor(store.family, identity, localItemId));
   };
   for (const store of connectorStores) probeExtractionEnded(store);
   const connectorStoreEmbeddingProviders = new Map<string, SourceEmbeddingProvider>();
@@ -2552,7 +2555,7 @@ export async function main(): Promise<void> {
     if (store === gmailInternalConnectorStore) return gmailInternalStoreStatusScope(fileSourceScopeAuthority);
     const readScope = connectorStoreReadScope(store);
     if (!readScope.allowed) return { itemsAllowed: false, contentAllowed: false };
-    if (!readScope.filters && !readScope.contentFilters) return undefined;
+    if (readScope.contentAllowed && !readScope.filters && !readScope.contentFilters) return undefined;
     return {
       ...(readScope.filters?.sourceScopeRevision
         ? { scopeRevision: readScope.filters.sourceScopeRevision }
@@ -3114,12 +3117,12 @@ export async function main(): Promise<void> {
         engine: sovereigntyEngine,
         olympusConfig,
         env: process.env,
-        defaultLocal: createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true }),
+        defaultLocal: createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' }),
         veniceAnalystTimeoutMs,
         veniceReasoningHeadroomTokens,
         bootSecretResolver,
         ...(builtInAnalystModel
-          ? { builtInAnalyst: createAnalyst(builtInAnalystModel, { auditSuspiciousDrafts: true }) }
+          ? { builtInAnalyst: createAnalyst(builtInAnalystModel, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' }) }
           : {}),
       });
       if (builtInAnalystModel) {
@@ -3131,9 +3134,9 @@ export async function main(): Promise<void> {
         });
       }
       const defaultLocalAnalyst = sovereigntyAnalysts.get('local-source-answer')?.analyst
-        ?? createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true });
+        ?? createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' });
       // Off unless the owner set OLYMPUS_SOURCE_RERANKER=built-in (issue #921).
-      const sourceReranker = builtInRerankerFromEnv();
+      const sourceReranker = await prepareBuiltInRerankerFromEnv();
       return createAnalystSourceIndexAnswerHandler({
         inferenceGuard: (pack, request, corpusIds) => guardSourceAnswerEvidence({ lanes: sourceAnswerLanes!, pack, request, corpusIds }),
         analyst: defaultLocalAnalyst,
@@ -3158,7 +3161,7 @@ export async function main(): Promise<void> {
             requestedProvider,
             analysts: sovereigntyAnalysts,
             defaultLocal: builtInAnalystModel
-              ? withBuiltInFallback(defaultLocalAnalyst, createAnalyst(builtInAnalystModel, { auditSuspiciousDrafts: true }))
+              ? withBuiltInFallback(defaultLocalAnalyst, createAnalyst(builtInAnalystModel, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' }))
               : defaultLocalAnalyst,
           });
         },
@@ -3379,7 +3382,7 @@ export async function main(): Promise<void> {
       void (async () => {
         try {
           const items: ExtractionUnreadableItem[] = [];
-          // A file store leaves out files still waiting for extraction (setExtractionEndedProbe).
+          // A file store leaves out files still waiting for extraction (setExtractionOutcomeProbe).
           for (const { store, scope } of scoped) {
             items.push(...await store.settledUnreadableItemsInTurns(scope));
           }
@@ -4521,7 +4524,21 @@ export async function main(): Promise<void> {
     env: process.env, fileEnv: () => readWorkerSetupEnv(),
   });
   // One item's privacy label (issue #1060): the same stores and ledgers `olympus tier set` reaches in this worker.
-  const ownerTierItemsEngine = createOwnerTierItems();
+  const ownerTierItemsContext: OwnerTierItemsContext = {
+    // The same outcome, and the same no-job rule, the store's status counts use.
+    extractionOutcome: extractionOutcomeFor,
+    contentAllowed: (identity, localItemId, locator) => {
+      for (const store of connectorStores) {
+        if (!store.itemPresence(identity).active) continue;
+        if (store.metadataOnlyRuleForLocator(locator ?? undefined) !== undefined) return false;
+        const scope = connectorStoreStatusScope(store);
+        if (scope?.itemsAllowed === false || scope?.contentAllowed === false) return false;
+        if (localItemId && !store.itemMatchesSearchFilters(localItemId, scope?.accountScope, scope?.contentFilters)) return false;
+      }
+      return true;
+    },
+  };
+  const ownerTierItemsEngine = createOwnerTierItems(ownerTierItemsContext);
   // Update now (#1063): only the standalone engine the installer put in place updates itself.
   const selfUpdater = createSelfUpdater({
     platform: process.platform, runningVersion: runningOlympusVersion(),
@@ -4563,7 +4580,7 @@ export async function main(): Promise<void> {
     // `olympus tier set` reaches in this worker (cli-operations.ts tierForCli).
     ownerTierItems: ownerTierItemsEngine,
     // "Check the judge" (issue #887): its round file sits beside the owner's privacy profile.
-    judgeCheck: createJudgeCheck({ items: ownerTierItemsEngine, get: (itemId) => getOwnerTierItem(itemId, {}, { withPreview: true }) }),
+    judgeCheck: createJudgeCheck({ items: ownerTierItemsEngine, get: (itemId) => getOwnerTierItem(itemId, ownerTierItemsContext, { withPreview: true }) }),
     // Bound late: the consult block below sets askAnonymouslyNow.
     consultAsk: async ({ caller, ...input }, signal) => (askAnonymouslyNow
       ? askWithAnonymousInbox({ ...input, ...(caller?.provider ? { callerProvider: caller.provider } : {}), signal }, {
