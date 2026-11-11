@@ -11,7 +11,8 @@ import { createChatGptDirectoryMcpServer } from '../src/workers/chatgpt/director
 import { createChatGptMcpServer } from '../src/workers/chatgpt/mcp-surface.ts';
 import { createInProcessOperationContext } from '../src/workers/remote-mcp.ts';
 
-const ctx = () => createInProcessOperationContext({ config: defaultConfig(), sourceIndexReadEnabled: true, caller: { surface: 'remote', connectionId: 'test' } });
+const view = { dashboardView: async () => ({ sources: [] }) as never };
+const ctx = () => createInProcessOperationContext({ config: defaultConfig(), sourceIndexReadEnabled: true, workerFetch: async () => new Response(null, { status: 404 }), caller: { surface: 'remote', connectionId: 'test' } });
 
 async function instructions(server: Server): Promise<string | undefined> {
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
@@ -24,14 +25,14 @@ async function instructions(server: Server): Promise<string | undefined> {
 describe('MCP server instructions', () => {
   test('the remote surface and Claude\'s app surface say when to use Olympus and how to find its tools', async () => {
     expect(await instructions(createOlympusMcpServer('remote', ctx))).toBe(OLYMPUS_SERVER_INSTRUCTIONS);
-    expect(await instructions(createChatGptMcpServer(ctx, { appClient: { host: 'claude', connectorUrl: 'https://example.com/mcp' } }))).toBe(OLYMPUS_SERVER_INSTRUCTIONS);
+    expect(await instructions(createChatGptMcpServer(ctx, { ...view, appClient: { host: 'claude', connectorUrl: 'https://example.com/mcp' } }))).toBe(OLYMPUS_SERVER_INSTRUCTIONS);
     expect(OLYMPUS_SERVER_INSTRUCTIONS).toContain('olympus_search');
     expect(OLYMPUS_SERVER_INSTRUCTIONS).toContain('source_answer');
     expect(OLYMPUS_SERVER_INSTRUCTIONS).toContain('search your tools for "Olympus"');
   });
 
   test('ChatGPT\'s surface and the directory path send none', async () => {
-    expect(await instructions(createChatGptMcpServer(ctx, {}))).toBeUndefined();
-    expect(await instructions(createChatGptDirectoryMcpServer(ctx, {}))).toBeUndefined();
+    expect(await instructions(createChatGptMcpServer(ctx, view))).toBeUndefined();
+    expect(await instructions(createChatGptDirectoryMcpServer(ctx, view))).toBeUndefined();
   });
 });
