@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { connectThisComputerSource, disconnectThisComputerSource, readThisComputerHandles } from '../src/core/this-computer.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { dashboardManualSyncLine } from '../src/workers/dashboard/vocabulary.ts';
 import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
 import { copyDashboardViewModel } from '../src/workers/chatgpt/response-builder.ts';

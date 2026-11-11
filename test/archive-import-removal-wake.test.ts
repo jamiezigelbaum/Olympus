@@ -95,7 +95,7 @@ function fixture() {
 type Fixture = ReturnType<typeof fixture>;
 interface Clock { now: number }
 
-/** What the engine builds on every roster change (email-source/server.ts). */
+/** What the engine builds on every roster change (engine/server.ts). */
 function roster(runtime: ArchiveImportRuntime): SourceSchedulerSource[] {
   const source = createArchiveImportsSchedulerSource({ runtime, config: defaultConfig() });
   return source ? [source] : [];

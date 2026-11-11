@@ -17,7 +17,7 @@
  *   unanswered   ≤ 4 × 300 units        (was 10 × 300; 3 model gaps + 1 note)
  *
  * Nothing shown today is cut: the production model is constructed without a
- * limits override (`email-source/server.ts`, `createBuiltInPrivateAnswerModel`),
+ * limits override (`engine/server.ts`, `createBuiltInPrivateAnswerModel`),
  * so its answers already sit inside these bounds. A model limit configured
  * above the contract is clamped here.
  *

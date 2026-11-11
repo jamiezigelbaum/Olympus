@@ -44,7 +44,7 @@ export function relaySurfaceEntries(options: Pick<RelaySurfacesOptions, 'connect
   return store.oauth.liveAccessTokens(resource, MAX_SURFACE_ENTRIES).map((token) => ({
     endpoint: 'default',
     fingerprint: surfaceFingerprint(token.tokenHash),
-    // The surface the worker serves this token through the relay (email-source/server.ts servesRequest).
+    // The surface the worker serves this token through the relay (engine/server.ts servesRequest).
     surface: grantMcpSurface({ clientId: token.clientId }, options.claudeAppEnabled?.() === true),
     expiresAt: Math.floor(Date.parse(token.expiresAt) / 1000),
   }));

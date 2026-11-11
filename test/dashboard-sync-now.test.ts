@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { upsertConnectedHandle, type ConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import {
   DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS,
   DASHBOARD_MANUAL_SYNC_SHOWN_MS,

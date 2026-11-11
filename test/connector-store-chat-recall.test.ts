@@ -5,7 +5,7 @@ import { expect, test } from 'bun:test';
 import fixtures from '../eval/classification/fixtures/chat-canary.json';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import { LocalConnectorStore, createConnectorStoreCorpusAdapter, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { ARCTIC_EMBED_M_V1_5 } from '../src/workers/source-index/built-in-embedding/manifest.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 

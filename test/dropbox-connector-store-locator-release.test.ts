@@ -18,7 +18,7 @@ import {
   DROPBOX_FILES_CORPUS_ID,
 } from '../src/workers/dropbox-files/index.ts';
 import { DROPBOX_LOCATOR_RESULT_PROJECTOR_CODEC } from '../src/workers/dropbox-files/locator-result-projector.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import type {
   SourceEmbeddingInput,
   SourceEmbeddingProvider,

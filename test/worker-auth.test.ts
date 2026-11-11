@@ -16,8 +16,8 @@ import {
   createEmailSourceWorker,
   type EmailSourceConnector,
   type EmailSourceHealth,
-} from '../src/workers/email-source/index.ts';
-import { resolveEmailSourceBindHostFromEnv } from '../src/workers/email-source/server.ts';
+} from '../src/workers/engine/index.ts';
+import { resolveEmailSourceBindHostFromEnv } from '../src/workers/engine/server.ts';
 import { DASHBOARD_UNLOCK_HEADER } from '../src/core/dashboard-launch.ts';
 import {
   DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER,

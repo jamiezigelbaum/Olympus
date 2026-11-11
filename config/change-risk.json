@@ -22,7 +22,7 @@
     "src/core/source-index/types.ts",
     "src/core/worker-service.ts",
     "src/native-plugin.ts",
-    "src/workers/email-source/server.ts",
+    "src/workers/engine/server.ts",
     "src/workers/source-index/analyst-answer.ts",
     "src/workers/source-index/analyst-pool.ts",
     "scripts/contract-version.ts",

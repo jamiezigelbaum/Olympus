@@ -23,7 +23,7 @@ import {
   type SourceAnswerPriorityOptions,
 } from '../src/core/source-answer-jobs.ts';
 import { createAnswerActivity } from '../src/workers/answer-activity.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import { createInProcessOperationContext, createRemoteMcpHandler, withRemoteMcpRoute } from '../src/workers/remote-mcp.ts';
 import { createRemoteOpenApiHandler, withRemoteOpenApiRoutes } from '../src/workers/remote-openapi.ts';

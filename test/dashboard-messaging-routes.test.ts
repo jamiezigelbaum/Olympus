@@ -3,7 +3,7 @@ import { ownerLocalMint } from './helpers/owner-local-mint.ts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { recordRequestPeer } from '../src/core/request-peer.ts';
 import { DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER, DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER, withWorkerBearerAuth } from '../src/workers/http.ts';
 

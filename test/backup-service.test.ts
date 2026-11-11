@@ -11,7 +11,7 @@ import { exportOlympusData, lifecycleEnv } from '../src/data-lifecycle.ts';
 import { BACKUP_WRONG_PASSPHRASE, listBackups } from '../src/data-backup.ts';
 import { BACKUP_KEY_INVALID, applyPendingRestoreAtBoot, backupDue, createBackupService, type BackupServicePaths, type BackupSettingsFile } from '../src/workers/backup-service.ts';
 import { sharedDataPath } from '../src/core/olympus-layout.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { recordRequestPeer } from '../src/core/request-peer.ts';
 import { DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER, DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER, withWorkerBearerAuth } from '../src/workers/http.ts';
 import { renderDashboardSettingsPage } from '../src/workers/dashboard/pages/local.ts';

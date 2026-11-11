@@ -42,7 +42,7 @@ test('rejected, offline, unexpected and oversized preflight responses fail witho
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import { createSovereigntyEngine, buildEnvBridgeSovereigntyConfig } from '../src/core/sovereignty.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';

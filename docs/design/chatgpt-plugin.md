@@ -1044,7 +1044,7 @@ buffer. The code is `src/core/consult-settings-writer.ts` (the writer),
 `src/workers/email-source/dashboard-consult.ts` (the Mac dashboard adapter,
 the writer's one caller), `src/workers/dashboard/outside-help.ts` and
 `pages/outside-help.ts` (the card), and the five routes in
-`src/workers/email-source/index.ts`.
+`src/workers/engine/index.ts`.
 
 - **Where.** The standalone Mac dashboard, `/dashboard?outside-help`,
   reached from Setup's Outside help row. The native OpenClaw Control UI and

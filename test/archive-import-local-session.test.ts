@@ -29,7 +29,7 @@ import {
 import type { ArchiveImportDashboard } from '../src/workers/archive-import/dashboard.ts';
 import { renderComputerHostPage } from '../src/workers/dashboard/host-page.ts';
 import { createDashboardPanelTools } from '../src/workers/email-source/dashboard-panel-tools.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import {
   DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS,
   DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER,
