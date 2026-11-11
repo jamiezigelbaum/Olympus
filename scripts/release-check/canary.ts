@@ -290,7 +290,15 @@ async function runDesktopChecks(machine: Machine, options: CanaryOptions): Promi
     const closing = strays.filter(isDashboard);
     await closeDashboards(machine, options, closing);
     await sleep(2_000);
-    const after = await listed();
+    let after = await listed();
+    // Control-W leaves a window whose page holds the shortcut, or an app window with nothing to close but itself
+    // (run 43006519632: a Brave app window stayed open on test-omarchy). Linux closes what is left by its address.
+    const stuck = typeof after === 'string' ? [] : after.filter(isDashboard);
+    if (options.os === 'linux' && stuck.length > 0) {
+      await machine.exec(stuck.map(closeByAddress).join('\n'), { timeoutMs: 30_000 });
+      await sleep(2_000);
+      after = await listed();
+    }
     const left = typeof after === 'string' ? [] : after.filter(isDashboard);
     checks.push({
       id: 'canary.window.leftover', title: 'Dashboard windows left from an earlier run, closed first', status: 'warn',
@@ -372,7 +380,7 @@ async function closeWindows(machine: Machine, options: CanaryOptions, before: re
   if (options.os === 'linux') {
     await machine.exec(opened.map((window) => window.reused
       ? hyprDispatch(`sendshortcut ${shellQuote(`CTRL, W, address:${window.id}`)}`, `hl.dsp.send_shortcut({ mods = "CTRL", key = "W", window = ${JSON.stringify(`address:${window.id}`)} })`)
-      : hyprDispatch(`closewindow address:${shellQuote(window.id)}`, `hl.dsp.window.close({ window = ${JSON.stringify(`address:${window.id}`)} })`)).join('\n'), { timeoutMs: 30_000 });
+      : closeByAddress(window)).join('\n'), { timeoutMs: 30_000 });
   } else {
     for (const app of new Set(opened.map((window) => window.app))) {
       const hadWindows = before.some((window) => window.app === app);
@@ -389,6 +397,10 @@ async function closeWindows(machine: Machine, options: CanaryOptions, before: re
   const left = opened.filter((window) => after.some((other) => other.id === window.id && (!window.reused || other.title === window.title)));
   return left.length === 0 ? undefined : `still open: ${left.map(describe).join(', ')}`;
 }
+
+/** Closes one Linux window outright, by its Hyprland address. */
+const closeByAddress = (window: DesktopWindow): string =>
+  hyprDispatch(`closewindow address:${shellQuote(window.id)}`, `hl.dsp.window.close({ window = ${JSON.stringify(`address:${window.id}`)} })`);
 
 /**
  * Closes dashboard windows that were on screen before the checks. A window's title is its front tab's, so on Linux Control-W goes
