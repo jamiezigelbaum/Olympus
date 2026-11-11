@@ -89,7 +89,7 @@ function fixture() {
     if (started.kind !== 'started') throw new Error(`expected a start, got ${started.kind}`);
     return started.archive.archive_id;
   };
-  return { home, exports, runtime, resolver, stateStore, start };
+  return { home, env, exports, runtime, resolver, stateStore, start };
 }
 
 type Fixture = ReturnType<typeof fixture>;
@@ -289,6 +289,50 @@ describe('removing an archive starts within one scheduler tick', () => {
     await removedWithinOneTick(f, done, e, clock);
     // The two share one concurrency key, so they ran one after the other.
     await waitFor(() => f.runtime.state.get(importing)?.status === 'imported', { description: 'the other archive finished importing' });
+  });
+});
+
+describe('with the engine split on', () => {
+  test('a Remove pressed on the front runs on the background within one tick', async () => {
+    const f = fixture();
+    const clock: Clock = { now: T0 };
+    const id = f.start('Done.mbox', mbox([mail(0, 's'), mail(1, 's')]));
+    const background = engine(f, clock);
+    await importThrough(background, f, id, clock);
+    background.scheduler.start();
+    clock.now += 10 * 60_000;
+    expect(durableNextPassMs(f, id, clock)).toBeGreaterThan(TICK_MS);
+
+    // The front: its own runtime over the same state file, and no scheduler. Its
+    // refresh hands the change to the background (email-source/server.ts).
+    const frontRuntime = createArchiveImportRuntime({
+      env: f.env,
+      statePath: f.runtime.state.path,
+    });
+    const front = createArchiveImportDashboard({
+      runtime: frontRuntime,
+      resolver: f.resolver,
+      refreshScheduler: () => background.dashboard.frontChanged(),
+      privateModel: () => 'ready',
+      home: f.home,
+      ownsUploads: true,
+    });
+    cleanups.push(() => front.close());
+
+    expect(front.remove(id)).toEqual({ ok: true });
+    expect(background.pendingWakes()).toBe(1);
+    await removedWithinOneTick(f, id, background, clock);
+  });
+
+  test('a front change with no removal waiting wakes nothing', async () => {
+    const f = fixture();
+    const clock: Clock = { now: T0 };
+    const id = f.start('Quiet.mbox', mbox([mail(0, 'z')]));
+    const background = engine(f, clock);
+    await importThrough(background, f, id, clock);
+    background.scheduler.start();
+    background.dashboard.frontChanged();
+    expect(background.pendingWakes()).toBe(0);
   });
 });
 

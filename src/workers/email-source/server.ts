@@ -8016,10 +8016,9 @@ export async function main(): Promise<void> {
           if (target === 'scope' || target === 'extraction') sourceScheduler?.wakeTasksOfKind('extract');
           return { reloaded: target, ...(target === 'scope' ? { invalidated_jobs: invalidated } : {}) };
         },
-        // The front changed an archive request or state file: resume checks and hand the scheduler the tasks.
+        // The front changed an archive request or state file: resume checks, hand the scheduler the tasks, and wake it for a removal.
         archive_changed: () => {
-          archiveImportDashboard.resume();
-          refreshSchedulerSources();
+          archiveImportDashboard.frontChanged();
           return { resumed: true };
         },
         // The front's render samples, recorded by the file's one writer.

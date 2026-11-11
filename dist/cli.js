@@ -204325,6 +204325,16 @@ function createArchiveImportDashboard(options) {
         } catch {}
       }
     },
+    frontChanged() {
+      api2.resume();
+      refresh();
+      let removing2 = false;
+      try {
+        removing2 = state.list().some((record8) => record8.status === "removing");
+      } catch {}
+      if (removing2)
+        wakeScheduler();
+    },
     idle: () => checks4,
     close() {
       closed = true;
@@ -240227,8 +240237,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           return { reloaded: target, ...target === "scope" ? { invalidated_jobs: invalidated } : {} };
         },
         archive_changed: () => {
-          archiveImportDashboard.resume();
-          refreshSchedulerSources();
+          archiveImportDashboard.frontChanged();
           return { resumed: true };
         },
         dashboard_samples: ({ samples }) => {
