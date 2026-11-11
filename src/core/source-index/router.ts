@@ -28,6 +28,7 @@ import {
 } from './retrieval.ts';
 import {
   recordSourceAnswerCorpusTiming,
+  runInSourceAnswerLane,
   sourceAnswerTraceErrorClass,
 } from '../../workers/source-index/answer-latency-trace.ts';
 
@@ -481,7 +482,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
     const retrievalState = retrievalStates.get(corpus.corpusId)!.state;
     const metadataMatches = request.context.metadataOnly === true ? adapter.metadataMatches : undefined;
     const outcome = await runCorpusLaneWithDeadline(
-      () => (metadataMatches ? metadataMatches(corpusRequest) : adapter(corpusRequest)),
+      () => runInSourceAnswerLane(corpus.corpusId, () => (metadataMatches ? metadataMatches(corpusRequest) : adapter(corpusRequest))),
       laneTimeoutMs,
       corpus.corpusId,
       options.laneClock ?? REAL_LANE_CLOCK,

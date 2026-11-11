@@ -34,7 +34,29 @@ export interface SourceAnswerTraceCorpusTiming {
   adapter_reported_ms?: number;
   outcome: 'success' | 'timeout' | 'error';
   error_class?: string;
+  // The lane's reads on the store read pool (#1305), present only when it
+  // made any: how many, how long they waited for a pool thread and ran on
+  // one, and how many ended without rows, by cause. Counts and times only.
+  pool?: SourceAnswerTracePoolReads;
 }
+
+export interface SourceAnswerTracePoolReads {
+  reads: number;
+  queue_wait_ms: number;
+  queue_wait_max_ms: number;
+  run_ms: number;
+  run_max_ms: number;
+  // Refused at once: the store's queue was full, or the deadline had passed.
+  refused: number;
+  // Still waiting for a thread at the deadline.
+  dropped_queued: number;
+  // Still running at the deadline (its thread terminated) or back too late.
+  past_deadline_running: number;
+  errors: number;
+}
+
+/** How one pool read ended, for the trace. */
+export type SourceAnswerPoolReadOutcome = 'rows' | 'refused' | 'dropped_queued' | 'past_deadline_running' | 'error';
 
 export interface SourceAnswerTraceQueryTiming {
   ordinal: number;
@@ -96,14 +118,66 @@ interface MutableTrace extends SourceAnswerTraceSnapshot {
     hydrationMs: number;
     queries: SourceAnswerTraceQueryTiming[];
   };
-  activeQuery?: {
-    ordinal: number;
-    startedAtMs: number;
-    corpusTimings: SourceAnswerTraceCorpusTiming[];
-  };
+  activeQuery?: ActiveQuery;
+}
+
+interface ActiveQuery {
+  ordinal: number;
+  startedAtMs: number;
+  corpusTimings: SourceAnswerTraceCorpusTiming[];
+  poolByCorpus: Map<string, SourceAnswerTracePoolReads>;
 }
 
 const storage = new AsyncLocalStorage<MutableTrace>();
+// The corpus lane a search adapter is running for, so a pool read made deep
+// inside the adapter is counted against its lane.
+const laneStorage = new AsyncLocalStorage<string>();
+
+/** Runs one corpus lane's search, so the pool reads it makes are traced against that corpus. */
+export function runInSourceAnswerLane<T>(corpusId: string, run: () => T): T {
+  return laneStorage.run(corpusId, run);
+}
+
+/**
+ * Called by the read pool when a read is asked for. Returns how to report
+ * its end, or undefined when no traced Ask lane made it. The lane and query
+ * are captured now: the read ends in a pool callback outside their context.
+ */
+export function beginSourceAnswerPoolRead():
+  | ((report: { queueWaitMs: number; runMs: number; outcome: SourceAnswerPoolReadOutcome }) => void)
+  | undefined {
+  const query = currentSourceAnswerTrace()?.activeQuery;
+  const corpusId = laneStorage.getStore();
+  if (!query || corpusId === undefined) return undefined;
+  return ({ queueWaitMs, runMs, outcome }) => {
+    let reads = query.poolByCorpus.get(corpusId);
+    if (!reads) {
+      reads = {
+        reads: 0,
+        queue_wait_ms: 0,
+        queue_wait_max_ms: 0,
+        run_ms: 0,
+        run_max_ms: 0,
+        refused: 0,
+        dropped_queued: 0,
+        past_deadline_running: 0,
+        errors: 0,
+      };
+      query.poolByCorpus.set(corpusId, reads);
+    }
+    const wait = nonNegativeMs(queueWaitMs);
+    const ran = nonNegativeMs(runMs);
+    reads.reads += 1;
+    reads.queue_wait_ms += wait;
+    reads.queue_wait_max_ms = Math.max(reads.queue_wait_max_ms, wait);
+    reads.run_ms += ran;
+    reads.run_max_ms = Math.max(reads.run_max_ms, ran);
+    if (outcome === 'refused') reads.refused += 1;
+    else if (outcome === 'dropped_queued') reads.dropped_queued += 1;
+    else if (outcome === 'past_deadline_running') reads.past_deadline_running += 1;
+    else if (outcome === 'error') reads.errors += 1;
+  };
+}
 const CONTENT_FREE_ERROR_CLASSES = new Set([
   'AbortError',
   'AnalystUnavailable',
@@ -230,10 +304,11 @@ export async function observeSourceAnswerRoutedQuery<T>(
   const attempt = trace?.activeAttempt;
   if (!trace || !attempt) return run();
   const previous = trace.activeQuery;
-  const query = {
+  const query: ActiveQuery = {
     ordinal: Math.max(1, Math.floor(ordinal)),
     startedAtMs: Date.now(),
-    corpusTimings: [] as SourceAnswerTraceCorpusTiming[],
+    corpusTimings: [],
+    poolByCorpus: new Map(),
   };
   trace.activeQuery = query;
   try {
@@ -250,6 +325,7 @@ export async function observeSourceAnswerRoutedQuery<T>(
           : {}),
         outcome: timing.outcome,
         ...(timing.error_class ? { error_class: sanitizeErrorClass(timing.error_class) } : {}),
+        ...(query.poolByCorpus.has(timing.corpus_id) ? { pool: { ...query.poolByCorpus.get(timing.corpus_id)! } } : {}),
       })),
     });
     if (previous) trace.activeQuery = previous;
@@ -361,7 +437,7 @@ export function snapshotSourceAnswerTrace(trace: MutableTrace): SourceAnswerTrac
       ...attempt,
       queries: attempt.queries.map((query) => ({
         ...query,
-        corpus_timings: query.corpus_timings.map((timing) => ({ ...timing })),
+        corpus_timings: query.corpus_timings.map((timing) => ({ ...timing, ...(timing.pool ? { pool: { ...timing.pool } } : {}) })),
       })),
     })),
     routeResolutionMs: trace.routeResolutionMs,
