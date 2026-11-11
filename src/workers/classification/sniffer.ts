@@ -734,6 +734,14 @@ export class CachedTierSniffer implements TierSniffer {
   }
 
   judge(request: TierSnifferRequest): TierSnifferVerdict {
+    return this.resolve(request, true);
+  }
+
+  cachedVerdict(request: TierSnifferRequest): TierSnifferVerdict {
+    return this.resolve(request, false);
+  }
+
+  private resolve(request: TierSnifferRequest, queueMiss: boolean): TierSnifferVerdict {
     const asked = request.material?.trim();
     if (!asked) return { verdict: 'undecided' };
     // The item's own words decide: a parent's names carried as context are
@@ -780,7 +788,7 @@ export class CachedTierSniffer implements TierSniffer {
           ...(duplicate ? { rule: 'duplicate_model' } : cached.failSafe ? { rule: 'fail_safe' } : {}),
           code: duplicate ? `rule:duplicate_model:${answer.code}` : answer.code };
       }
-      if (request.subject) {
+      if (request.subject && queueMiss) {
         const queued = this.store.enqueue({
           subject: request.subject,
           pass: request.pass,

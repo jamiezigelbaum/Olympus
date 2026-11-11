@@ -20847,6 +20847,11 @@ var init_provider = __esm(() => {
   PICTURE_HOLD_MS = 60 * 60000;
 });
 
+// src/workers/connector-store/tier-auto-move.ts
+var init_tier_auto_move = __esm(() => {
+  init_provider();
+});
+
 // src/workers/connector-store/tier-row-rehome.ts
 var MOVE_WHY;
 var init_tier_row_rehome = __esm(() => {
@@ -20938,6 +20943,7 @@ var init_tiered_store_set = __esm(() => {
   init_tier_content_purge();
   init_tier_auto_prune_sweep();
   init_tier_move();
+  init_tier_auto_move();
   init_tier_row_rehome();
   init_tier_rules_sweep();
   init_tier_override_settle();
@@ -21623,6 +21629,12 @@ var init_file_mime = __esm(() => {
     html: "text/html",
     htm: "text/html",
     rtf: "application/rtf",
+    doc: "application/msword",
+    xls: "application/vnd.ms-excel",
+    odt: "application/vnd.oasis.opendocument.text",
+    ods: "application/vnd.oasis.opendocument.spreadsheet",
+    odp: "application/vnd.oasis.opendocument.presentation",
+    epub: "application/epub+zip",
     docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -23873,7 +23885,7 @@ var init_job_store = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/bounded-text.ts
-var TEXT_MIME_TYPES, TABLE_MIME_TYPES, IMAGE_MIME_TYPES, GENERIC_MIME_TYPES;
+var DOC_MIME_TYPE = "application/msword", XLS_MIME_TYPE = "application/vnd.ms-excel", ODT_MIME_TYPE = "application/vnd.oasis.opendocument.text", ODS_MIME_TYPE = "application/vnd.oasis.opendocument.spreadsheet", ODP_MIME_TYPE = "application/vnd.oasis.opendocument.presentation", EPUB_MIME_TYPE = "application/epub+zip", TEXT_MIME_TYPES, TABLE_MIME_TYPES, IMAGE_MIME_TYPES, GENERIC_MIME_TYPES;
 var init_bounded_text = __esm(() => {
   TEXT_MIME_TYPES = new Set([
     "application/json",
@@ -23905,6 +23917,307 @@ var init_bounded_text = __esm(() => {
     "binary/octet-stream",
     "application/binary"
   ]);
+});
+
+// src/workers/file-extraction/extractors/document-formats.ts
+var init_document_formats = __esm(() => {
+  init_bounded_text();
+});
+
+// src/workers/file-extraction/extractors/compound-file.ts
+var MAX_READ_BYTES2;
+var init_compound_file = __esm(() => {
+  init_document_formats();
+  MAX_READ_BYTES2 = 64 * 1024 * 1024;
+});
+
+// src/workers/file-extraction/extractors/legacy-word.ts
+var init_legacy_word = __esm(() => {
+  init_compound_file();
+  init_document_formats();
+});
+
+// src/workers/file-extraction/extractors/legacy-workbook.ts
+var init_legacy_workbook = __esm(() => {
+  init_compound_file();
+  init_document_formats();
+});
+
+// src/workers/file-extraction/extractors/package-documents.ts
+var VOID_ELEMENTS, MARKUP_ENTITIES;
+var init_package_documents = __esm(() => {
+  init_document_formats();
+  VOID_ELEMENTS = new Set([
+    "area",
+    "base",
+    "br",
+    "col",
+    "embed",
+    "hr",
+    "img",
+    "input",
+    "link",
+    "meta",
+    "param",
+    "source",
+    "track",
+    "wbr"
+  ]);
+  MARKUP_ENTITIES = Object.freeze({
+    AElig: "Æ",
+    Aacute: "Á",
+    Acirc: "Â",
+    Agrave: "À",
+    Alpha: "Α",
+    Aring: "Å",
+    Atilde: "Ã",
+    Auml: "Ä",
+    Beta: "Β",
+    Ccedil: "Ç",
+    Chi: "Χ",
+    Dagger: "‡",
+    Delta: "Δ",
+    ETH: "Ð",
+    Eacute: "É",
+    Ecirc: "Ê",
+    Egrave: "È",
+    Epsilon: "Ε",
+    Eta: "Η",
+    Euml: "Ë",
+    Gamma: "Γ",
+    Iacute: "Í",
+    Icirc: "Î",
+    Igrave: "Ì",
+    Iota: "Ι",
+    Iuml: "Ï",
+    Kappa: "Κ",
+    Lambda: "Λ",
+    Mu: "Μ",
+    Ntilde: "Ñ",
+    Nu: "Ν",
+    OElig: "Œ",
+    Oacute: "Ó",
+    Ocirc: "Ô",
+    Ograve: "Ò",
+    Omega: "Ω",
+    Omicron: "Ο",
+    Oslash: "Ø",
+    Otilde: "Õ",
+    Ouml: "Ö",
+    Phi: "Φ",
+    Pi: "Π",
+    Prime: "″",
+    Psi: "Ψ",
+    Rho: "Ρ",
+    Scaron: "Š",
+    Sigma: "Σ",
+    THORN: "Þ",
+    Tau: "Τ",
+    Theta: "Θ",
+    Uacute: "Ú",
+    Ucirc: "Û",
+    Ugrave: "Ù",
+    Upsilon: "Υ",
+    Uuml: "Ü",
+    Xi: "Ξ",
+    Yacute: "Ý",
+    Yuml: "Ÿ",
+    Zeta: "Ζ",
+    aacute: "á",
+    acirc: "â",
+    acute: "´",
+    aelig: "æ",
+    agrave: "à",
+    alefsym: "ℵ",
+    alpha: "α",
+    amp: "&",
+    and: "∧",
+    ang: "∠",
+    aring: "å",
+    asymp: "≈",
+    atilde: "ã",
+    auml: "ä",
+    bdquo: "„",
+    beta: "β",
+    brvbar: "¦",
+    bull: "•",
+    cap: "∩",
+    ccedil: "ç",
+    cedil: "¸",
+    cent: "¢",
+    chi: "χ",
+    circ: "ˆ",
+    clubs: "♣",
+    cong: "≅",
+    copy: "©",
+    crarr: "↵",
+    cup: "∪",
+    curren: "¤",
+    dArr: "⇓",
+    dagger: "†",
+    darr: "↓",
+    deg: "°",
+    delta: "δ",
+    diams: "♦",
+    divide: "÷",
+    eacute: "é",
+    ecirc: "ê",
+    egrave: "è",
+    empty: "∅",
+    emsp: " ",
+    ensp: " ",
+    epsilon: "ε",
+    equiv: "≡",
+    eta: "η",
+    eth: "ð",
+    euml: "ë",
+    euro: "€",
+    exist: "∃",
+    fnof: "ƒ",
+    forall: "∀",
+    frac12: "½",
+    frac14: "¼",
+    frac34: "¾",
+    frasl: "⁄",
+    gamma: "γ",
+    ge: "≥",
+    gt: ">",
+    hArr: "⇔",
+    harr: "↔",
+    hearts: "♥",
+    hellip: "…",
+    iacute: "í",
+    icirc: "î",
+    iexcl: "¡",
+    igrave: "ì",
+    image: "ℑ",
+    infin: "∞",
+    int: "∫",
+    iota: "ι",
+    iquest: "¿",
+    isin: "∈",
+    iuml: "ï",
+    kappa: "κ",
+    lArr: "⇐",
+    lambda: "λ",
+    lang: "〈",
+    laquo: "«",
+    larr: "←",
+    lceil: "⌈",
+    ldquo: "“",
+    le: "≤",
+    lfloor: "⌊",
+    lowast: "∗",
+    loz: "◊",
+    lrm: "‎",
+    lsaquo: "‹",
+    lsquo: "‘",
+    lt: "<",
+    macr: "¯",
+    mdash: "—",
+    micro: "µ",
+    middot: "·",
+    minus: "−",
+    mu: "μ",
+    nabla: "∇",
+    nbsp: " ",
+    ndash: "–",
+    ne: "≠",
+    ni: "∋",
+    not: "¬",
+    notin: "∉",
+    nsub: "⊄",
+    ntilde: "ñ",
+    nu: "ν",
+    oacute: "ó",
+    ocirc: "ô",
+    oelig: "œ",
+    ograve: "ò",
+    oline: "‾",
+    omega: "ω",
+    omicron: "ο",
+    oplus: "⊕",
+    or: "∨",
+    ordf: "ª",
+    ordm: "º",
+    oslash: "ø",
+    otilde: "õ",
+    otimes: "⊗",
+    ouml: "ö",
+    para: "¶",
+    part: "∂",
+    permil: "‰",
+    perp: "⊥",
+    phi: "φ",
+    pi: "π",
+    piv: "ϖ",
+    plusmn: "±",
+    pound: "£",
+    prime: "′",
+    prod: "∏",
+    prop: "∝",
+    psi: "ψ",
+    quot: '"',
+    rArr: "⇒",
+    radic: "√",
+    rang: "〉",
+    raquo: "»",
+    rarr: "→",
+    rceil: "⌉",
+    rdquo: "”",
+    real: "ℜ",
+    reg: "®",
+    rfloor: "⌋",
+    rho: "ρ",
+    rlm: "‏",
+    rsaquo: "›",
+    rsquo: "’",
+    sbquo: "‚",
+    scaron: "š",
+    sdot: "⋅",
+    sect: "§",
+    shy: "­",
+    sigma: "σ",
+    sigmaf: "ς",
+    sim: "∼",
+    spades: "♠",
+    sub: "⊂",
+    sube: "⊆",
+    sum: "∑",
+    sup: "⊃",
+    sup1: "¹",
+    sup2: "²",
+    sup3: "³",
+    supe: "⊇",
+    szlig: "ß",
+    tau: "τ",
+    there4: "∴",
+    theta: "θ",
+    thetasym: "ϑ",
+    thinsp: " ",
+    thorn: "þ",
+    tilde: "˜",
+    times: "×",
+    trade: "™",
+    uArr: "⇑",
+    uacute: "ú",
+    uarr: "↑",
+    ucirc: "û",
+    ugrave: "ù",
+    uml: "¨",
+    upsih: "ϒ",
+    upsilon: "υ",
+    uuml: "ü",
+    weierp: "℘",
+    xi: "ξ",
+    yacute: "ý",
+    yen: "¥",
+    yuml: "ÿ",
+    zeta: "ζ",
+    zwj: "‍",
+    zwnj: "‌",
+    apos: "'"
+  });
 });
 
 // src/workers/file-extraction/extractors/rtf.ts
@@ -23968,11 +24281,6 @@ var init_rtf = __esm(() => {
   ]);
 });
 
-// src/workers/file-extraction/extractors/document-formats.ts
-var init_document_formats = __esm(() => {
-  init_bounded_text();
-});
-
 // src/workers/file-extraction/extractors/input-limits.ts
 var DOCUMENT_READER_MAX_INPUT_BYTES, IMAGE_READER_MAX_INPUT_BYTES;
 var init_input_limits = __esm(() => {
@@ -23991,7 +24299,11 @@ var init_image_prepare = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/text.ts
+var ADDITIONAL_DOCUMENT_MIME_TYPES;
 var init_text = __esm(() => {
+  init_legacy_word();
+  init_legacy_workbook();
+  init_package_documents();
   init_rtf();
   init_bounded_text();
   init_command_runner();
@@ -24000,6 +24312,14 @@ var init_text = __esm(() => {
   init_media_cache();
   init_still_image_formats();
   init_input_limits();
+  ADDITIONAL_DOCUMENT_MIME_TYPES = new Set([
+    DOC_MIME_TYPE,
+    XLS_MIME_TYPE,
+    ODT_MIME_TYPE,
+    ODS_MIME_TYPE,
+    ODP_MIME_TYPE,
+    EPUB_MIME_TYPE
+  ]);
 });
 
 // src/workers/file-extraction/extractors/apple-vision-ocr.ts

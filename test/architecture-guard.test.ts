@@ -241,6 +241,10 @@ const SOURCE_AGNOSTIC_SHARED_FILES = [
   'src/workers/file-extraction/extractors/command-runner.ts',
   'src/workers/file-extraction/extractors/document-formats.ts',
   'src/workers/file-extraction/extractors/rtf.ts',
+  'src/workers/file-extraction/extractors/compound-file.ts',
+  'src/workers/file-extraction/extractors/legacy-word.ts',
+  'src/workers/file-extraction/extractors/legacy-workbook.ts',
+  'src/workers/file-extraction/extractors/package-documents.ts',
   'src/workers/file-extraction/extractors/image-prepare.ts',
   'src/workers/file-extraction/extractors/image-preparers.ts',
   'src/workers/file-extraction/extractors/input-limits.ts',
@@ -429,6 +433,10 @@ const ALLOWED_SHARED_REGEX_FUNCTIONS = new Map<string, Set<string>>([
   ['src/workers/file-extraction/extractors/bounded-text.ts', new Set([
     'normalizeExtractedText',
     'sanitizeErrorDetail',
+  ])],
+  ['src/workers/file-extraction/extractors/package-documents.ts', new Set([
+    'parseMarkup',
+    'decodeEntities',
   ])],
   ['src/workers/file-extraction/extractors/document-formats.ts', new Set([
     'parseDelimitedRows',

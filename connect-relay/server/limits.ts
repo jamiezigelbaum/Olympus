@@ -63,6 +63,12 @@ export interface RelayLimits {
   /** Owner-lane requests in flight per install; the last slot is reserved for the dashboard tool. */
   readonly concurrentPerInstall: number;
   /**
+   * Extra owner-lane slots per install that only listing requests
+   * (`initialize`, `tools/list` and the like, isListingRequest) may take, so a
+   * Mac busy answering never makes an agent see Olympus with no tools.
+   */
+  readonly listingHeadroomPerInstall: number;
+  /**
    * `/mcp` requests in flight per install whose credential is not yet
    * confirmed (a fresh or rotated token, or a forged secret). A pool of its
    * own: it can never take an owner-lane slot. Shared fairly by address
@@ -149,6 +155,7 @@ export const DEFAULT_LIMITS: RelayLimits = {
   authTimeoutMs: 10_000,
   requestsPerInstall: { capacity: 60, refillPerSecond: 10 },
   concurrentPerInstall: 8,
+  listingHeadroomPerInstall: 4,
   unverifiedConcurrentPerInstall: 4,
   controlConcurrentPerInstall: 2,
   unverifiedPerAddress: 1,
@@ -182,6 +189,13 @@ export const DEFAULT_LIMITS: RelayLimits = {
  * engine has not confirmed yet. `control`: OAuth token and revocation calls.
  */
 export type AdmissionLane = 'owner' | 'unverified' | 'control';
+
+/**
+ * Which owner-lane slots a request may take: `normal` all but the last of
+ * `concurrentPerInstall`, `dashboard` the last one too, and `listing` those
+ * plus `listingHeadroomPerInstall` more. Other lanes ignore it.
+ */
+export type AdmissionPriority = 'normal' | 'dashboard' | 'listing';
 
 export type Admission =
   | {
@@ -297,7 +311,7 @@ export class FairPool {
  * refresh or a revocation from another address.
  */
 export function createInstallAdmission(limits: RelayLimits, now?: () => number): {
-  admit(installId: string, lane: AdmissionLane, dashboard: boolean, address?: string, signal?: AbortSignal): Promise<Admission>;
+  admit(installId: string, lane: AdmissionLane, priority: AdmissionPriority, address?: string, signal?: AbortSignal): Promise<Admission>;
   inFlight(installId: string): number;
 } {
   const rate = new KeyedTokenBuckets(limits.requestsPerInstall, now);
@@ -313,7 +327,7 @@ export function createInstallAdmission(limits: RelayLimits, now?: () => number):
     return pool;
   };
   return {
-    async admit(installId, lane, dashboard, address = 'unknown', signal) {
+    async admit(installId, lane, priority, address = 'unknown', signal) {
       if (lane !== 'owner') {
         const pool = poolFor(lane, installId);
         const release = await pool.acquire(address, limits.unverifiedQueueWaitMs, signal);
@@ -330,7 +344,9 @@ export function createInstallAdmission(limits: RelayLimits, now?: () => number):
           refund: () => {},
         };
       }
-      const max = dashboard ? limits.concurrentPerInstall : Math.max(1, limits.concurrentPerInstall - 1);
+      const max = priority === 'listing'
+        ? limits.concurrentPerInstall + Math.max(0, limits.listingHeadroomPerInstall)
+        : priority === 'dashboard' ? limits.concurrentPerInstall : Math.max(1, limits.concurrentPerInstall - 1);
       // Concurrency first: a refused request should not also spend a rate token.
       if (owner.get(installId) >= max) return { ok: false, reason: 'busy' };
       if (!rate.take(installId)) return { ok: false, reason: 'rate_limited' };

@@ -21744,7 +21744,28 @@ function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
   const fenced = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh }) : options?.sniffer;
   const signals = connector.classificationSignals(item);
   const parentContext = item.identity.parent ? options?.parentNamesContext?.(item.identity, item.identity.parent.localItemId) : undefined;
-  const sniffer = fenced && conversationOrderedSniffer(recordedContentVerdictSniffer(fenced, recorded, text2, contentNamesReason(signals, parentContext)), item.metadata);
+  const namesReceipt = contentNamesReason(signals, parentContext);
+  const cacheAware = fenced && {
+    id: fenced.id,
+    judge(request) {
+      if (!fenced.cachedVerdict || request.pass !== "content" || text2 === undefined || !recorded || recorded.state === "moving" || recorded.engineVersion !== TIER_CLASSIFIER_VERSION || recorded.mapRevision !== (request.mapRevision ?? "none") || !recorded.reasons.includes(namesReceipt))
+        return fenced.judge(request);
+      const verdict = fenced.cachedVerdict(request);
+      if (verdict.verdict === "decided")
+        return verdict;
+      const storedNames = extra.storedContentNames?.();
+      if (storedNames) {
+        const cached2 = fenced.cachedVerdict({
+          ...request,
+          materialHash: tierSnifferInputHash("content", storedNames, text2, parentContext)
+        });
+        if (cached2.verdict === "decided")
+          return cached2;
+      }
+      return fenced.judge(request);
+    }
+  };
+  const sniffer = cacheAware && conversationOrderedSniffer(recordedContentVerdictSniffer(cacheAware, recorded, text2, namesReceipt), item.metadata);
   const holdUntilJudged = options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true || heldUntilJudged(recorded?.reasons);
   return classifyItemTiers({
     signals,
@@ -21791,7 +21812,11 @@ function secretFencedSniffer(sniffer, ledger, identity, read, options = {}) {
       return true;
     return options.mayAskSecret === true && read.secret && JSON.stringify(read.override ?? null) === JSON.stringify(now.override ?? null);
   };
-  return { id: sniffer.id, judge: (request) => sniffer.judge({ ...request, stillAsk }) };
+  return {
+    id: sniffer.id,
+    ...sniffer.cachedVerdict ? { cachedVerdict: (request) => sniffer.cachedVerdict({ ...request, stillAsk }) } : {},
+    judge: (request) => sniffer.judge({ ...request, stillAsk })
+  };
 }
 
 // src/workers/connector-store/secrets-disposition.ts
@@ -25464,6 +25489,19 @@ class LocalConnectorStore {
       ...sender ? { sender } : {},
       ...row.authored_at ? { authoredAt: row.authored_at } : {}
     };
+  }
+  contentJudgmentNames(identity) {
+    const row = this.db.query(`
+      SELECT title, locator_uri, sender_label FROM items
+      WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+        AND tombstoned = 0
+    `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+    if (!row)
+      return;
+    const title = row.title?.trim();
+    const path = row.locator_uri?.trim();
+    const sender = row.sender_label?.trim();
+    return { ...title ? { title } : {}, ...path ? { path } : {}, ...sender ? { sender } : {} };
   }
   useChildVisibility(lane) {
     this.childLane = lane;
@@ -35775,6 +35813,12 @@ var MIME_BY_EXTENSION = Object.freeze({
   html: "text/html",
   htm: "text/html",
   rtf: "application/rtf",
+  doc: "application/msword",
+  xls: "application/vnd.ms-excel",
+  odt: "application/vnd.oasis.opendocument.text",
+  ods: "application/vnd.oasis.opendocument.spreadsheet",
+  odp: "application/vnd.oasis.opendocument.presentation",
+  epub: "application/epub+zip",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -36328,6 +36372,12 @@ function nonNegativeInteger(value, fallback) {
 // src/workers/source-index/analyst-answer.ts
 var CLOUD_ANALYST_PROMPT_BYTES = OPENCLAW_INFER_MAX_PROMPT_BYTES - 1e4;
 // src/workers/file-extraction/extractors/bounded-text.ts
+var DOC_MIME_TYPE = "application/msword";
+var XLS_MIME_TYPE = "application/vnd.ms-excel";
+var ODT_MIME_TYPE = "application/vnd.oasis.opendocument.text";
+var ODS_MIME_TYPE = "application/vnd.oasis.opendocument.spreadsheet";
+var ODP_MIME_TYPE = "application/vnd.oasis.opendocument.presentation";
+var EPUB_MIME_TYPE = "application/epub+zip";
 var TEXT_MIME_TYPES = new Set([
   "application/json",
   "application/x-ndjson",
@@ -37386,6 +37436,282 @@ var DEFAULT_INSTALL_RETRY_MS = 15 * 60000;
 var DEFAULT_INSTALL_RETRY_CEILING_MS = 24 * 60 * 60000;
 var DEFAULT_VERIFY_WAIT_MS = 5 * 60000;
 
+// src/workers/file-extraction/extractors/compound-file.ts
+var MAX_READ_BYTES = 64 * 1024 * 1024;
+
+// src/workers/file-extraction/extractors/package-documents.ts
+var VOID_ELEMENTS = new Set([
+  "area",
+  "base",
+  "br",
+  "col",
+  "embed",
+  "hr",
+  "img",
+  "input",
+  "link",
+  "meta",
+  "param",
+  "source",
+  "track",
+  "wbr"
+]);
+var MARKUP_ENTITIES = Object.freeze({
+  AElig: "Æ",
+  Aacute: "Á",
+  Acirc: "Â",
+  Agrave: "À",
+  Alpha: "Α",
+  Aring: "Å",
+  Atilde: "Ã",
+  Auml: "Ä",
+  Beta: "Β",
+  Ccedil: "Ç",
+  Chi: "Χ",
+  Dagger: "‡",
+  Delta: "Δ",
+  ETH: "Ð",
+  Eacute: "É",
+  Ecirc: "Ê",
+  Egrave: "È",
+  Epsilon: "Ε",
+  Eta: "Η",
+  Euml: "Ë",
+  Gamma: "Γ",
+  Iacute: "Í",
+  Icirc: "Î",
+  Igrave: "Ì",
+  Iota: "Ι",
+  Iuml: "Ï",
+  Kappa: "Κ",
+  Lambda: "Λ",
+  Mu: "Μ",
+  Ntilde: "Ñ",
+  Nu: "Ν",
+  OElig: "Œ",
+  Oacute: "Ó",
+  Ocirc: "Ô",
+  Ograve: "Ò",
+  Omega: "Ω",
+  Omicron: "Ο",
+  Oslash: "Ø",
+  Otilde: "Õ",
+  Ouml: "Ö",
+  Phi: "Φ",
+  Pi: "Π",
+  Prime: "″",
+  Psi: "Ψ",
+  Rho: "Ρ",
+  Scaron: "Š",
+  Sigma: "Σ",
+  THORN: "Þ",
+  Tau: "Τ",
+  Theta: "Θ",
+  Uacute: "Ú",
+  Ucirc: "Û",
+  Ugrave: "Ù",
+  Upsilon: "Υ",
+  Uuml: "Ü",
+  Xi: "Ξ",
+  Yacute: "Ý",
+  Yuml: "Ÿ",
+  Zeta: "Ζ",
+  aacute: "á",
+  acirc: "â",
+  acute: "´",
+  aelig: "æ",
+  agrave: "à",
+  alefsym: "ℵ",
+  alpha: "α",
+  amp: "&",
+  and: "∧",
+  ang: "∠",
+  aring: "å",
+  asymp: "≈",
+  atilde: "ã",
+  auml: "ä",
+  bdquo: "„",
+  beta: "β",
+  brvbar: "¦",
+  bull: "•",
+  cap: "∩",
+  ccedil: "ç",
+  cedil: "¸",
+  cent: "¢",
+  chi: "χ",
+  circ: "ˆ",
+  clubs: "♣",
+  cong: "≅",
+  copy: "©",
+  crarr: "↵",
+  cup: "∪",
+  curren: "¤",
+  dArr: "⇓",
+  dagger: "†",
+  darr: "↓",
+  deg: "°",
+  delta: "δ",
+  diams: "♦",
+  divide: "÷",
+  eacute: "é",
+  ecirc: "ê",
+  egrave: "è",
+  empty: "∅",
+  emsp: " ",
+  ensp: " ",
+  epsilon: "ε",
+  equiv: "≡",
+  eta: "η",
+  eth: "ð",
+  euml: "ë",
+  euro: "€",
+  exist: "∃",
+  fnof: "ƒ",
+  forall: "∀",
+  frac12: "½",
+  frac14: "¼",
+  frac34: "¾",
+  frasl: "⁄",
+  gamma: "γ",
+  ge: "≥",
+  gt: ">",
+  hArr: "⇔",
+  harr: "↔",
+  hearts: "♥",
+  hellip: "…",
+  iacute: "í",
+  icirc: "î",
+  iexcl: "¡",
+  igrave: "ì",
+  image: "ℑ",
+  infin: "∞",
+  int: "∫",
+  iota: "ι",
+  iquest: "¿",
+  isin: "∈",
+  iuml: "ï",
+  kappa: "κ",
+  lArr: "⇐",
+  lambda: "λ",
+  lang: "〈",
+  laquo: "«",
+  larr: "←",
+  lceil: "⌈",
+  ldquo: "“",
+  le: "≤",
+  lfloor: "⌊",
+  lowast: "∗",
+  loz: "◊",
+  lrm: "‎",
+  lsaquo: "‹",
+  lsquo: "‘",
+  lt: "<",
+  macr: "¯",
+  mdash: "—",
+  micro: "µ",
+  middot: "·",
+  minus: "−",
+  mu: "μ",
+  nabla: "∇",
+  nbsp: " ",
+  ndash: "–",
+  ne: "≠",
+  ni: "∋",
+  not: "¬",
+  notin: "∉",
+  nsub: "⊄",
+  ntilde: "ñ",
+  nu: "ν",
+  oacute: "ó",
+  ocirc: "ô",
+  oelig: "œ",
+  ograve: "ò",
+  oline: "‾",
+  omega: "ω",
+  omicron: "ο",
+  oplus: "⊕",
+  or: "∨",
+  ordf: "ª",
+  ordm: "º",
+  oslash: "ø",
+  otilde: "õ",
+  otimes: "⊗",
+  ouml: "ö",
+  para: "¶",
+  part: "∂",
+  permil: "‰",
+  perp: "⊥",
+  phi: "φ",
+  pi: "π",
+  piv: "ϖ",
+  plusmn: "±",
+  pound: "£",
+  prime: "′",
+  prod: "∏",
+  prop: "∝",
+  psi: "ψ",
+  quot: '"',
+  rArr: "⇒",
+  radic: "√",
+  rang: "〉",
+  raquo: "»",
+  rarr: "→",
+  rceil: "⌉",
+  rdquo: "”",
+  real: "ℜ",
+  reg: "®",
+  rfloor: "⌋",
+  rho: "ρ",
+  rlm: "‏",
+  rsaquo: "›",
+  rsquo: "’",
+  sbquo: "‚",
+  scaron: "š",
+  sdot: "⋅",
+  sect: "§",
+  shy: "­",
+  sigma: "σ",
+  sigmaf: "ς",
+  sim: "∼",
+  spades: "♠",
+  sub: "⊂",
+  sube: "⊆",
+  sum: "∑",
+  sup: "⊃",
+  sup1: "¹",
+  sup2: "²",
+  sup3: "³",
+  supe: "⊇",
+  szlig: "ß",
+  tau: "τ",
+  there4: "∴",
+  theta: "θ",
+  thetasym: "ϑ",
+  thinsp: " ",
+  thorn: "þ",
+  tilde: "˜",
+  times: "×",
+  trade: "™",
+  uArr: "⇑",
+  uacute: "ú",
+  uarr: "↑",
+  ucirc: "û",
+  ugrave: "ù",
+  uml: "¨",
+  upsih: "ϒ",
+  upsilon: "υ",
+  uuml: "ü",
+  weierp: "℘",
+  xi: "ξ",
+  yacute: "ý",
+  yen: "¥",
+  yuml: "ÿ",
+  zeta: "ζ",
+  zwj: "‍",
+  zwnj: "‌",
+  apos: "'"
+});
+
 // src/workers/file-extraction/extractors/rtf.ts
 var RTF_MIME_TYPES = new Set(["application/rtf", "text/rtf"]);
 var SKIPPED_DESTINATIONS = new Set([
@@ -37525,6 +37851,16 @@ var IMAGE_READER_MAX_INPUT_BYTES = 64 * 1024 * 1024;
 // src/workers/file-extraction/extractors/ocr.ts
 var OCR_PDF_TIMEOUT_BYTES_PER_STEP = 5 * 1024 * 1024;
 var OCR_PDF_MAX_TIMEOUT_MS = 12 * 60000;
+
+// src/workers/file-extraction/extractors/text.ts
+var ADDITIONAL_DOCUMENT_MIME_TYPES = new Set([
+  DOC_MIME_TYPE,
+  XLS_MIME_TYPE,
+  ODT_MIME_TYPE,
+  ODS_MIME_TYPE,
+  ODP_MIME_TYPE,
+  EPUB_MIME_TYPE
+]);
 // src/workers/telegram-messages/spool-lines.ts
 var CHUNK_BYTES2 = 1 << 20;
 var hints = new Map;
@@ -37566,7 +37902,7 @@ var TELEGRAM_CAPTURE_CONNECTOR_IDS = {
 };
 var TELEGRAM_TRUST_EVICTION_CONNECTOR_ID = `${TELEGRAM_CAPTURE_CONNECTOR_ID}_trust_eviction`;
 var TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID = `${TELEGRAM_CAPTURE_CONNECTOR_ID}_trust_reconciliation`;
-var MAX_READ_BYTES = 64 * 1024 * 1024;
+var MAX_READ_BYTES2 = 64 * 1024 * 1024;
 var MAX_RECORD_BYTES = 32 * 1024 * 1024;
 var MAX_TAIL_SCAN_BYTES = 16 * 1024 * 1024;
 var SERVICE_FIELDS = new Set([
