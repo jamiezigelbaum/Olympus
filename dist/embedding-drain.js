@@ -14061,6 +14061,11 @@ class TierLedger {
         AND corpus_id = ? AND copy_state = 'superseded'
     `).run(...idParams(identity), corpusId).changes > 0;
   }
+  hasMovedMigrationProposal(identity) {
+    return this.db.query(`SELECT 1 FROM tier_migration_proposals
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND status = 'moved' LIMIT 1`).get(...idParams(identity)) !== null;
+  }
   replaceMigrationProposals(planId, proposals) {
     const now = this.now().toISOString();
     this.db.transaction(() => {
@@ -15210,7 +15215,7 @@ function tierLedgerMigrations() {
       }
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 14,
       name: "requeue_retired_embedding_clearances",
       up(db) {
         db.exec(`
@@ -15246,10 +15251,19 @@ function tierLedgerMigrations() {
           DELETE FROM tier_ledger_meta WHERE key GLOB 'embedding-prefilter:*';
         `);
       }
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: "moved_migration_identity",
+      up(db) {
+        db.exec(`CREATE INDEX IF NOT EXISTS tier_migration_moved_identity
+          ON tier_migration_proposals (provider, account_scope, conversation_key, provider_item_id)
+          WHERE status = 'moved';`);
+      }
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 14, RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided", TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", DEFAULT_REJUDGE_SCAN_ROWS = 2000, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TierLedgerSchemaError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_RECHECK_META_PREFIX = "recheck:", STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 15, RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided", TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", DEFAULT_REJUDGE_SCAN_ROWS = 2000, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TierLedgerSchemaError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_RECHECK_META_PREFIX = "recheck:", STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_store_write_guard();
@@ -29731,12 +29745,16 @@ var init_local_index = __esm(() => {
       let exhausted = false;
       let tryBound = true;
       while (true) {
-        const rankedPage = (bound2) => ({ mode: "all", sql: `
-        ${bound2 === undefined ? "" : `WITH top AS MATERIALIZED (
+        const rankedPage = (from) => {
+          const bound2 = from === undefined ? undefined : ("bound" in from) ? from.bound : undefined;
+          const atOrAbove = from === undefined ? undefined : ("atOrAbove" in from) ? from.atOrAbove : undefined;
+          const top = from === undefined ? undefined : bound2 !== undefined ? "top" : "tied";
+          return { mode: "all", sql: `
+        ${top === undefined ? "" : `WITH ${top} AS MATERIALIZED (
           SELECT rowid AS fts_rowid, rank FROM connector_store_fts
           WHERE connector_store_fts MATCH ?
             AND rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'
-          ORDER BY rank LIMIT ?
+            ${bound2 !== undefined ? "ORDER BY rank LIMIT ?" : "AND (rank + 0.0) <= ?"}
         )`}
         SELECT
           i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
@@ -29749,12 +29767,12 @@ var init_local_index = __esm(() => {
           -- item rather than an arbitrary one. That is exactly the chunk the
           -- citation should point at.
           connector_store_fts.chunk_pk AS chunk_pk,
-          ${bound2 === undefined ? "MIN(connector_store_fts.rank) AS rank" : `MIN(top.rank) AS rank,
+          ${top === undefined ? "MIN(connector_store_fts.rank) AS rank" : top === "tied" ? "MIN(tied.rank) AS rank" : `MIN(top.rank) AS rank,
           (SELECT COUNT(*) FROM top) AS bound_rows,
           (SELECT MAX(rank) FROM top) AS bound_rank`}
-        FROM ${bound2 === undefined ? "connector_store_fts" : "top JOIN connector_store_fts ON connector_store_fts.rowid = top.fts_rowid"}
+        FROM ${top === undefined ? "connector_store_fts" : `${top} JOIN connector_store_fts ON connector_store_fts.rowid = ${top}.fts_rowid`}
         JOIN items i ON i.item_pk = connector_store_fts.item_pk
-        WHERE ${bound2 === undefined ? `connector_store_fts MATCH ?
+        WHERE ${top === undefined ? `connector_store_fts MATCH ?
           AND connector_store_fts.rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'` : "1"}
           AND i.tombstoned = 0
           AND LOWER(COALESCE(i.mime_type, '')) NOT IN (${CONTAINER_MIME_TYPES_SQL})
@@ -29766,22 +29784,27 @@ var init_local_index = __esm(() => {
         ORDER BY rank ASC, COALESCE(i.updated_at, i.authored_at, i.indexed_at) DESC, i.item_pk ASC
         LIMIT ? OFFSET ?
       `, params: [
-          terms,
-          ...bound2 === undefined ? [] : [bound2],
-          ...selectedAccount ? [selectedAccount] : [],
-          ...selectedFilters.params,
-          ...selectedFtsScope.params,
-          pageSize,
-          scanned
-        ] });
+            terms,
+            ...bound2 === undefined ? [] : [bound2],
+            ...atOrAbove === undefined ? [] : [atOrAbove],
+            ...selectedAccount ? [selectedAccount] : [],
+            ...selectedFilters.params,
+            ...selectedFtsScope.params,
+            pageSize,
+            scanned
+          ] };
+        };
         const bound = Math.min(KEYWORD_RANKED_BOUND_MAX, Math.max(KEYWORD_RANKED_BOUND_MIN, (scanned + pageSize) * KEYWORD_RANKED_BOUND_ROWS_PER_ITEM));
-        const boundedPage = tryBound ? yield rankedPage(bound) : [];
+        const boundedPage = tryBound ? yield rankedPage({ bound }) : [];
         const head = boundedPage[0];
         const last = boundedPage.at(-1);
-        const proved = head !== undefined && last !== undefined && (head.bound_rows < bound || boundedPage.length === pageSize && last.rank < head.bound_rank);
-        if (!proved)
+        const full = boundedPage.length === pageSize;
+        const proved = head !== undefined && last !== undefined && (head.bound_rows < bound || full && last.rank < head.bound_rank);
+        const tied = !proved && full && head !== undefined ? yield rankedPage({ atOrAbove: head.bound_rank }) : undefined;
+        const tiedProved = tied !== undefined && tied.length === pageSize;
+        if (!proved && !tiedProved)
           tryBound = false;
-        const page = proved ? boundedPage.map(({ bound_rows: _rows, bound_rank: _rank, ...row }) => row) : yield rankedPage(undefined);
+        const page = proved ? boundedPage.map(({ bound_rows: _rows, bound_rank: _rank, ...row }) => row) : tiedProved ? tied : yield rankedPage(undefined);
         scanned += page.length;
         exhausted = page.length < pageSize;
         const rows = page.filter((row) => !seen.has(row.item_pk));
@@ -38746,7 +38769,7 @@ function moveTieredItemsLowering(moves, options = {}) {
       entry.move.beforeFlip?.();
       entry.move.afterVerified?.();
       try {
-        results.push({ result: flipVerifiedMove(entry.move, entry.receipt) });
+        results.push({ result: entry.receipt.result ?? flipVerifiedMove(entry.move, entry.receipt) });
       } catch (error) {
         results.push({ error });
       }
@@ -38755,6 +38778,15 @@ function moveTieredItemsLowering(moves, options = {}) {
     if (timings)
       timings.ledgerCommitMs += ms;
   }));
+  prepared.forEach((entry, index) => {
+    if ("error" in entry || !("result" in results[index]))
+      return;
+    try {
+      pruneAutomaticMove(entry.move, entry.receipt);
+    } catch (error) {
+      results[index] = { error };
+    }
+  });
   results.forEach((result, index) => {
     if ("result" in result)
       timed(moves[index].timings, "rereadMs", () => oweExtractionRereads(set.ledger, moves[index].identity));
@@ -38787,10 +38819,14 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
     throw new TierMoveRefusedError("Secrets cannot use the content repair path.");
   }
   const receiptKey = purgeReceiptKey(identity);
-  const receiptToResume = readVerifiedMove(ledger, identity);
+  let receiptToResume = readVerifiedMove(ledger, identity);
+  if (receiptToResume?.result && (record.state === "moving" || receiptToResume.result.generation !== record.generation || receiptToResume.target.metadataTier !== target.metadataTier || receiptToResume.target.contentTier !== target.contentTier)) {
+    pruneAutomaticMove(options, receiptToResume);
+    receiptToResume = undefined;
+  }
   if (receiptToResume) {
     const receipt = receiptToResume;
-    if (receipt.generation !== record.generation || receipt.target.metadataTier !== target.metadataTier || receipt.target.contentTier !== target.contentTier)
+    if ((receipt.result?.generation ?? receipt.generation) !== record.generation || receipt.target.metadataTier !== target.metadataTier || receipt.target.contentTier !== target.contentTier)
       throw new TierLedgerGenerationConflictError;
     if (loweringOnly && receipt.raise)
       throw new TierMoveRefusedError("Raises cannot enter a lowering batch.");
@@ -38959,6 +38995,7 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
           raise,
           sources,
           destinations,
+          ...options.replaceOwnSupersededCopy && !raise ? { pruneSuperseded: true } : {},
           ...options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {},
           rehomeTagged,
           replacedSuperseded,
@@ -38993,7 +39030,7 @@ function queueMoveNote(options, receipt, result) {
     entry_id: entryId,
     recorded_at: new Date().toISOString(),
     kind: "note",
-    what: `Tier move of one item (${raise ? "raise" : "lateral or lower"}) from ${sources.map((copy) => copy.corpusId).join(", ")} ` + `to ${destinations.map((copy) => `${copy.corpusId} (${copy.layers})`).join(", ")}: ` + `${result.chunkCount} chunk(s) at the destination, ${destinations.reduce((sum, copy) => sum + copy.vectorsCopied, 0)} vector(s) copied with no provider call, ` + `${destinations.reduce((sum, copy) => sum + copy.chunksToEmbed, 0)} chunk(s) left for the destination's own embedding model. ` + `Superseded copies are hidden; lower content on raises is purged: ${result.supersededCorpora.join(", ") || "none"}.` + (Object.keys(replaced).length ? ` Replaced an older superseded copy of this item's own earlier move: ${Object.entries(replaced).map(([corpus, count]) => `${corpus} (${count} chunk(s) of older text)`).join(", ")}.` : ""),
+    what: `Tier move of one item (${raise ? "raise" : "lateral or lower"}) from ${sources.map((copy) => copy.corpusId).join(", ")} ` + `to ${destinations.map((copy) => `${copy.corpusId} (${copy.layers})`).join(", ")}: ` + `${result.chunkCount} chunk(s) at the destination, ${destinations.reduce((sum, copy) => sum + copy.vectorsCopied, 0)} vector(s) copied with no provider call, ` + `${destinations.reduce((sum, copy) => sum + copy.chunksToEmbed, 0)} chunk(s) left for the destination's own embedding model. ` + `Superseded copies are ${receipt.pruneSuperseded ? "pruned after the committed flip" : "hidden"}; lower content on raises is purged: ${result.supersededCorpora.join(", ") || "none"}.` + (Object.keys(replaced).length ? ` Replaced an older superseded copy of this item's own earlier move: ${Object.entries(replaced).map(([corpus, count]) => `${corpus} (${count} chunk(s) of older text)`).join(", ")}.` : ""),
     scope: {
       corpora: [...new Set([...sources.map((copy) => copy.corpusId), ...destinations.map((copy) => copy.corpusId)])],
       chunks: Object.fromEntries(destinations.map((copy) => [copy.corpusId, copy.chunksWritten + copy.chunksKept]))
@@ -39002,7 +39039,12 @@ function queueMoveNote(options, receipt, result) {
     approved_by: config.approvedBy,
     status: "complete"
   };
-  options.set.ledger.writeMeta(`${MOVE_NOTE_PREFIX}${entryId}`, JSON.stringify({ path: config.path, entry }));
+  queueTierLedgerEntry(options.set.ledger, config.path, entry);
+}
+function queueTierLedgerEntry(ledger, path, entry) {
+  if (!entry.entry_id)
+    throw new Error("A durable tier ledger entry needs an id.");
+  ledger.writeMeta(`${MOVE_NOTE_PREFIX}${entry.entry_id}`, JSON.stringify({ path, entry }));
 }
 async function flushTierMoveNotes(ledger, options = {}) {
   const started = performance.now();
@@ -39065,6 +39107,8 @@ function readVerifiedMove(ledger, identity) {
   const current2 = ledger.getCurrent(identity);
   if (!current2)
     throw new TierLedgerGenerationConflictError;
+  if (receipt.pruneSuperseded && receipt.result && current2.generation >= receipt.result.generation)
+    return receipt;
   if (receipt.generation < current2.generation || receipt.generation === current2.generation && current2.state !== "moving") {
     ledger.withGenerationFence(identity, current2.generation, () => {
       const now = ledger.getCurrent(identity);
@@ -39085,9 +39129,50 @@ function copyFingerprint(copy, layers) {
   })).digest("hex");
 }
 function finishVerifiedMove(options, receipt) {
-  const result = flipVerifiedMove(options, receipt);
+  const result = receipt.result ?? flipVerifiedMove(options, receipt);
+  pruneAutomaticMove(options, receipt);
   timed(options.timings, "rereadMs", () => oweExtractionRereads(options.set.ledger, options.identity));
   return result;
+}
+function pruneSupersededStoreCopy(store, identity) {
+  const chunks = store.stripCopyContent(identity, { keepMetadata: false });
+  const row = store.exportItemCopy(identity)?.identity;
+  if (row) {
+    const { sourceVersion: _kept, ...withdrawn } = row;
+    store.tombstoneCopy(withdrawn, { connectorId: TIER_MOVE_CONNECTOR_ID });
+  }
+  return chunks;
+}
+function pruneAutomaticMove(options, receipt) {
+  if (!receipt.pruneSuperseded)
+    return;
+  const { set, identity } = options;
+  const raw = set.ledger.readMeta(purgeReceiptKey(identity));
+  if (!raw)
+    return;
+  const committed = JSON.parse(raw);
+  if (!committed.result)
+    throw new TierLedgerGenerationConflictError;
+  const current2 = set.ledger.getCurrent(identity);
+  if (!current2 || current2.generation < committed.result.generation)
+    throw new TierLedgerGenerationConflictError;
+  set.ledger.withGenerationFence(identity, current2.generation, () => {
+    if (set.ledger.readMeta(purgeReceiptKey(identity)) !== raw)
+      throw new TierLedgerGenerationConflictError;
+    for (const copy of set.ledger.copies(identity)) {
+      if (copy.state !== "superseded" || copy.supersededByGeneration !== committed.result.generation)
+        continue;
+      const store = set.store(copy.trustDomain);
+      if (!store)
+        throw new Error("Superseded store unavailable; automatic prune remains pending.");
+      store.bindTierSet(set.ledger);
+      timed(options.timings, "purgeMs", () => pruneSupersededStoreCopy(store, identity));
+      set.ledger.removeSupersededCopy(identity, copy.corpusId);
+    }
+    options.afterPurge?.();
+    set.ledger.writeMeta(purgeReceiptKey(identity), "");
+    queueMoveNote(options, committed, committed.result);
+  });
 }
 function oweExtractionRereads(ledger, identity) {
   let known = [];
@@ -39150,8 +39235,8 @@ function flipVerifiedMove(options, receipt) {
       }
       if (receipt.raise && content)
         ledger.writeMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`, String(flipped.generation));
-      options.afterPurge?.();
-      ledger.writeMeta(purgeReceiptKey(identity), "");
+      if (!receipt.pruneSuperseded)
+        options.afterPurge?.();
       const result = {
         outcome: "moved",
         raise: receipt.raise,
@@ -39160,7 +39245,14 @@ function flipVerifiedMove(options, receipt) {
         supersededCorpora: ledger.copies(identity).filter((copy) => copy.state === "superseded" && copy.supersededByGeneration === flipped.generation).map((copy) => copy.corpusId),
         chunkCount: receipt.destinations.reduce((sum, copy) => sum + copy.chunksWritten + copy.chunksKept, 0)
       };
-      queueMoveNote(options, receipt, result);
+      if (receipt.pruneSuperseded) {
+        if (result.supersededCorpora.length)
+          ledger.writeMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`, String(flipped.generation));
+        ledger.writeMeta(purgeReceiptKey(identity), JSON.stringify({ ...receipt, result }));
+      } else {
+        ledger.writeMeta(purgeReceiptKey(identity), "");
+        queueMoveNote(options, receipt, result);
+      }
       return result;
     }));
   });
@@ -39279,6 +39371,14 @@ var init_tier_content_purge = __esm(() => {
   init_tier_ledger();
   init_embedding_ledger();
   init_tier_move();
+});
+
+// src/workers/connector-store/tier-auto-prune-sweep.ts
+var init_tier_auto_prune_sweep = __esm(() => {
+  init_tier_ledger();
+  init_embedding_ledger();
+  init_tier_move();
+  init_tier_content_purge();
 });
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { spawn } from "node:child_process";
@@ -39728,6 +39828,20 @@ function onnxRuntimeFromDirectory(runtimeDir) {
 }
 var init_runtime = () => {};
 
+// src/workers/source-index/built-in-embedding/pair-tokenizer.ts
+function truncatePair(a, b, room, tiePolicy = "wordpiece") {
+  let keepA = a.length;
+  let keepB = b.length;
+  room = Math.max(0, room);
+  while (keepA + keepB > room) {
+    if (keepB > keepA || keepB === keepA && (tiePolicy === "wordpiece" || a.length > b.length))
+      keepB -= 1;
+    else
+      keepA -= 1;
+  }
+  return { a: a.slice(0, keepA), b: b.slice(0, keepB), truncated: keepA < a.length || keepB < b.length };
+}
+
 // src/workers/source-index/built-in-embedding/wordpiece.ts
 class WordPieceTokenizer {
   vocab;
@@ -39769,22 +39883,7 @@ class WordPieceTokenizer {
     };
   }
   encodePair(first, second, maxLength) {
-    let a = this.tokenize(first);
-    let b = this.tokenize(second);
-    const room = Math.max(0, maxLength - 3);
-    const truncated = a.length + b.length > room;
-    if (truncated) {
-      let keepA = a.length;
-      let keepB = b.length;
-      while (keepA + keepB > room) {
-        if (keepB >= keepA)
-          keepB -= 1;
-        else
-          keepA -= 1;
-      }
-      a = a.slice(0, keepA);
-      b = b.slice(0, keepB);
-    }
+    const { a, b, truncated } = truncatePair(this.tokenize(first), this.tokenize(second), maxLength - 3);
     const ids = [this.clsId, ...a, this.sepId, ...b, this.sepId];
     const typeIds = ids.map((_, index) => index < a.length + 2 ? 0 : 1);
     return { ids, typeIds, truncated };
@@ -41129,6 +41228,7 @@ var init_tiered_store_set = __esm(() => {
   init_tier_names_only_settle();
   init_tier_held_settle();
   init_tier_content_purge();
+  init_tier_auto_prune_sweep();
   init_tier_move();
   init_tier_row_rehome();
   init_tier_rules_sweep();
@@ -72892,6 +72992,159 @@ init_manifest();
 init_runtime();
 init_wordpiece();
 
+// node_modules/@huggingface/tokenizers/dist/tokenizers.mjs
+var UNICODE_WORD_CHARS_IN_CLASS = "\\p{Alphabetic}\\p{M}\\p{Nd}\\p{Pc}";
+var UNICODE_WORD_CHARS = `${UNICODE_WORD_CHARS_IN_CLASS}\\u00B2\\u00B3\\u00B9\\u00BC-\\u00BE`;
+var UNICODE_WORD_CLASS = `[${UNICODE_WORD_CHARS}]`;
+var UNICODE_NON_WORD_CLASS = `[^${UNICODE_WORD_CHARS}]`;
+var UNICODE_WORD_BOUNDARY = `(?:(?<!${UNICODE_WORD_CLASS})(?=${UNICODE_WORD_CLASS})|(?<=${UNICODE_WORD_CLASS})(?!${UNICODE_WORD_CLASS}))`;
+var UNICODE_NON_WORD_BOUNDARY = `(?:(?<!${UNICODE_WORD_CLASS})(?!${UNICODE_WORD_CLASS})|(?<=${UNICODE_WORD_CLASS})(?=${UNICODE_WORD_CLASS}))`;
+var HEX_DIGIT_CHARS = "0-9A-Fa-f";
+var ESCAPE_REWRITES = /* @__PURE__ */ new Map([
+  ["A", "(?<![\\s\\S])"],
+  ["z", "(?![\\s\\S])"],
+  ["Z", "(?=\\n?(?![\\s\\S]))"],
+  ["h", `[${HEX_DIGIT_CHARS}]`],
+  ["H", `[^${HEX_DIGIT_CHARS}]`],
+  ["w", UNICODE_WORD_CLASS],
+  ["W", UNICODE_NON_WORD_CLASS],
+  ["d", "\\p{Nd}"],
+  ["D", "\\P{Nd}"],
+  ["s", "\\p{White_Space}"],
+  ["S", "\\P{White_Space}"],
+  ["b", UNICODE_WORD_BOUNDARY],
+  ["B", UNICODE_NON_WORD_BOUNDARY],
+  ["a", "\\x07"],
+  ["e", "\\x1B"]
+]);
+var CLASS_COMPLEMENT_ALTERNATIVES = /* @__PURE__ */ new Map([
+  ["W", `[^${UNICODE_WORD_CHARS_IN_CLASS}]`],
+  ["H", `[^${HEX_DIGIT_CHARS}]`]
+]);
+var Callable = class {
+  constructor() {
+    const closure = function(...args) {
+      return closure._call(...args);
+    };
+    return Object.setPrototypeOf(closure, new.target.prototype);
+  }
+};
+var Callable_default = Callable;
+var Normalizer = class extends Callable_default {
+  constructor(config) {
+    super();
+    this.config = config;
+  }
+  _call(text3) {
+    return this.normalize(text3);
+  }
+};
+var Normalizer_default = Normalizer;
+var Precompiled = class extends Normalizer_default {
+  constructor(config) {
+    super(config);
+    this.charsmap = config.precompiled_charsmap ?? null;
+  }
+  normalize(text3) {
+    text3 = text3.replace(/[\u0001-\u0008\u000B\u000E-\u001F\u007F\u008F\u009F]/gm, "");
+    text3 = text3.replace(/[\u0009\u000A\u000C\u000D\u00A0\u1680\u2000-\u200F\u2028\u2029\u202F\u205F\u2581\u3000\uFEFF\uFFFD]/gm, " ");
+    if (text3.includes("～")) {
+      const parts = text3.split("～");
+      text3 = parts.map((part) => part.normalize("NFKC")).join("～");
+    } else {
+      text3 = text3.normalize("NFKC");
+    }
+    return text3;
+  }
+};
+var Precompiled_default = Precompiled;
+var BYTES_TO_UNICODE = (() => {
+  const bs = [
+    ...Array.from({ length: 126 - 33 + 1 }, (_, i2) => i2 + 33),
+    ...Array.from({ length: "¬".charCodeAt(0) - "¡".charCodeAt(0) + 1 }, (_, i2) => i2 + "¡".charCodeAt(0)),
+    ...Array.from({ length: "ÿ".charCodeAt(0) - "®".charCodeAt(0) + 1 }, (_, i2) => i2 + "®".charCodeAt(0))
+  ];
+  const cs = bs.slice();
+  let n = 0;
+  for (let b = 0;b < 256; ++b) {
+    if (!bs.includes(b)) {
+      bs.push(b);
+      cs.push(256 + n);
+      n += 1;
+    }
+  }
+  const ccs = cs.map((n2) => String.fromCharCode(n2));
+  return Object.fromEntries(bs.map((b, i2) => [b, ccs[i2]]));
+})();
+var reverse_dictionary = (data2) => Object.fromEntries(Object.entries(data2).map(([key2, value]) => [value, key2]));
+var UNICODE_TO_BYTES = reverse_dictionary(BYTES_TO_UNICODE);
+
+// src/workers/source-index/built-in-embedding/precompiled-charsmap.ts
+class CharsmapNormalizer extends Precompiled_default {
+  trie;
+  replacements;
+  graphemes = new Intl.Segmenter("und", { granularity: "grapheme" });
+  constructor(charsmap) {
+    super({ type: "Precompiled", precompiled_charsmap: charsmap });
+    const data2 = Buffer.from(charsmap, "base64");
+    if (data2.length < 8)
+      throw new Error("Invalid precompiled character map.");
+    const bytes = data2.readUInt32LE(0);
+    if (bytes < 4 || bytes % 4 || bytes + 4 >= data2.length)
+      throw new Error("Invalid precompiled character map.");
+    this.trie = new Uint32Array(bytes / 4);
+    for (let i2 = 0;i2 < this.trie.length; i2 += 1)
+      this.trie[i2] = data2.readUInt32LE(4 + i2 * 4);
+    this.replacements = data2.subarray(4 + bytes);
+  }
+  transform(text3) {
+    const offset = (unit) => unit >>> 10 << ((unit & 512) >>> 6) >>> 0;
+    let node = offset(this.trie[0]);
+    for (const byte of Buffer.from(text3, "utf8")) {
+      if (byte === 0)
+        break;
+      node = (node ^ byte) >>> 0;
+      const unit = this.trie[node];
+      if (unit === undefined || (unit & 2147483903) >>> 0 !== byte)
+        return;
+      node = (node ^ offset(unit)) >>> 0;
+      if (unit & 256) {
+        const leaf = this.trie[node];
+        if (leaf === undefined)
+          throw new Error("Invalid precompiled character map leaf.");
+        const start = leaf & 2147483647;
+        const end = this.replacements.indexOf(0, start);
+        if (end < 0)
+          throw new Error("Invalid precompiled character map replacement.");
+        return this.replacements.toString("utf8", start, end);
+      }
+    }
+    return;
+  }
+  normalize(text3) {
+    let result = "";
+    for (const { segment } of this.graphemes.segment(text3)) {
+      const mapped = Buffer.byteLength(segment) < 6 ? this.transform(segment) : undefined;
+      result += mapped ?? Array.from(segment, (char) => this.transform(char) ?? char).join("");
+    }
+    return result;
+  }
+}
+// src/workers/source-index/built-in-reranker-manifest.ts
+function candidate(modelId, repository, revision, modelFile, modelBytes, modelSha256, tokenizerFile, tokenizerBytes, tokenizerSha256) {
+  const base = `https://huggingface.co/${repository}/resolve/${revision}`;
+  return {
+    modelId,
+    repository,
+    revision,
+    license: "Apache-2.0",
+    maxTokens: 512,
+    model: { name: "model.onnx", url: `${base}/${modelFile}`, bytes: modelBytes, sha256: modelSha256 },
+    tokenizer: { name: tokenizerFile, url: `${base}/${tokenizerFile}`, bytes: tokenizerBytes, sha256: tokenizerSha256 }
+  };
+}
+var MS_MARCO_MINILM_L6_V2 = candidate("ms-marco-MiniLM-L6-v2-fp32-233902d", "cross-encoder/ms-marco-MiniLM-L6-v2", "233902d25c440f23af6f7d6e94d2946bac0bee0a", "onnx/model.onnx", 91011230, "5d3e70fd0c9ff14b9b5169a51e957b7a9c74897afd0a35ce4bd318150c1d4d4a", "vocab.txt", 231508, "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3");
+var MMARCO_MMINILMV2_L12_H384_V1 = candidate("mmarco-mMiniLMv2-L12-H384-v1-int8-1427fd6", "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1", "1427fd652930e4ba29e8149678df786c240d8825", "onnx/model_qint8_arm64.onnx", 118620017, "1825907d6c1a9001ff78124780bbde20a614a8c3df3b63409cf3c72c6fe5c8b4", "tokenizer.json", 17082660, "62c24cdc13d4c9952d63718d6c9fa4c287974249e16b7ade6d5a85e7bbb75626");
 // src/workers/engine/server.ts
 init_judge_spending();
 init_judge_second_round();
@@ -73144,7 +73397,7 @@ class MessagingCaptureSupervisor {
       await this.stop();
       return { source: grant.source, state: "stopped", reason: "grant_missing" };
     }
-    const handle = withoutUnpairedLaneHandles(readConnectedHandleRegistry(registryPath).handles, registryPath).find((candidate) => candidate.handle === grant.handle);
+    const handle = withoutUnpairedLaneHandles(readConnectedHandleRegistry(registryPath).handles, registryPath).find((candidate2) => candidate2.handle === grant.handle);
     if (!handleAllowsCapture(handle, grant.source)) {
       await this.stop();
       return { source: grant.source, state: "stopped", reason: "handle_unavailable" };
@@ -73479,11 +73732,11 @@ function catalogCategory(catalog, modelId) {
   }
   return;
 }
-function newerCatalog(current2, candidate) {
-  if (!candidate)
+function newerCatalog(current2, candidate2) {
+  if (!candidate2)
     return current2;
-  if (!current2 || candidate.fetchedAtMs > current2.fetchedAtMs)
-    return candidate;
+  if (!current2 || candidate2.fetchedAtMs > current2.fetchedAtMs)
+    return candidate2;
   return current2;
 }
 function catalogIsFresh(catalog, nowMs, ttlMs) {
@@ -74479,10 +74732,10 @@ import { pathToFileURL as pathToFileURL3 } from "node:url";
 var LOCAL_FILES_LOCATOR_RESULT_PROJECTOR_CODEC = Object.freeze({
   create(input) {
     return Object.freeze({
-      project(candidate) {
-        if (input.principal.provider !== LOCAL_FILES_PROVIDER || candidate.sourceItem.family !== "file" || candidate.sourceItem.provider !== input.principal.provider || candidate.sourceItem.accountScope !== input.principal.accountScope)
+      project(candidate2) {
+        if (input.principal.provider !== LOCAL_FILES_PROVIDER || candidate2.sourceItem.family !== "file" || candidate2.sourceItem.provider !== input.principal.provider || candidate2.sourceItem.accountScope !== input.principal.accountScope)
           return;
-        const locator = locatorFromScopePath(candidate.readLocatorUri());
+        const locator = locatorFromScopePath(candidate2.readLocatorUri());
         return locator ? { locator } : undefined;
       }
     });
@@ -74754,15 +75007,15 @@ var CHAT_SCOPE_FILTER_CODEC = Object.freeze({
     if (lookup3.truncated)
       return unresolvedChatTitleResolution(chatScope);
     const rankedByConversation = new Map;
-    for (const candidate of lookup3.candidates) {
-      const score = conversationTitleMatchScore(candidate.title, terms);
-      const exact = conversationTitleExactMatch(candidate.title, terms);
+    for (const candidate2 of lookup3.candidates) {
+      const score = conversationTitleMatchScore(candidate2.title, terms);
+      const exact = conversationTitleExactMatch(candidate2.title, terms);
       if (!exact && (terms.length < 2 || score < Math.min(3, terms.length)))
         continue;
-      const prior = rankedByConversation.get(candidate.conversationId);
+      const prior = rankedByConversation.get(candidate2.conversationId);
       if (!prior || Number(exact) > Number(prior.exact) || exact === prior.exact && score > prior.score) {
-        rankedByConversation.set(candidate.conversationId, {
-          conversationId: candidate.conversationId,
+        rankedByConversation.set(candidate2.conversationId, {
+          conversationId: candidate2.conversationId,
           exact,
           score
         });
@@ -76079,11 +76332,11 @@ async function loadParcelWatcher(extraDirs = []) {
   }
   const dirs = [...extraDirs, ...process.env.OLYMPUS_NATIVE_MODULES_DIR ? [process.env.OLYMPUS_NATIVE_MODULES_DIR] : []];
   for (const dir of dirs) {
-    const candidate = join42(dir, "node_modules");
-    if (!existsSync33(join42(candidate, "@parcel", "watcher")))
+    const candidate2 = join42(dir, "node_modules");
+    if (!existsSync33(join42(candidate2, "@parcel", "watcher")))
       continue;
     try {
-      const requireFrom = createRequire8(join42(dirname41(candidate), "package.json"));
+      const requireFrom = createRequire8(join42(dirname41(candidate2), "package.json"));
       return unwrap(requireFrom(specifier));
     } catch (error) {
       failures.push(error instanceof Error ? error.message : String(error));
@@ -76092,8 +76345,8 @@ async function loadParcelWatcher(extraDirs = []) {
   throw new Error(`the file watcher could not be loaded (${failures[0] ?? "not installed"})`);
 }
 function unwrap(loaded) {
-  const candidate = loaded?.default ?? loaded;
-  const module = candidate;
+  const candidate2 = loaded?.default ?? loaded;
+  const module = candidate2;
   if (typeof module.subscribe !== "function" || typeof module.writeSnapshot !== "function") {
     throw new Error("the file watcher module has an unexpected shape");
   }
@@ -77239,8 +77492,8 @@ function normalizeSchedulerSourceId(value) {
   return sourceId;
 }
 function taskBootstrapLastSuccessAt(_source, task) {
-  const candidate = task.bootstrapLastSuccessAt?.();
-  return candidate && Number.isFinite(Date.parse(candidate)) ? candidate : undefined;
+  const candidate2 = task.bootstrapLastSuccessAt?.();
+  return candidate2 && Number.isFinite(Date.parse(candidate2)) ? candidate2 : undefined;
 }
 function schedulerTaskStateKey(source, task) {
   return {
@@ -77264,8 +77517,8 @@ function initialNextRunAt(input) {
     return input.firstRun;
   return boundFutureSchedule(cadenceAnchor + (input.persisted?.effectiveIntervalMs ?? input.configuredIntervalMs), input.firstRun);
 }
-function boundFutureSchedule(candidate, now) {
-  return Math.min(candidate, now + SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS);
+function boundFutureSchedule(candidate2, now) {
+  return Math.min(candidate2, now + SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS);
 }
 function nextCadenceAfter(anchor, intervalMs, completedAt) {
   const elapsedIntervals = Math.floor(Math.max(0, completedAt - anchor) / intervalMs);

@@ -1302,7 +1302,7 @@ describe('review of #189: the judge never lets a picture out of Private without 
     }
   });
 
-  /** An ordinary photo, judged in Private and moved to Personal; the Private copy stays behind, hidden. */
+  /** An ordinary photo, judged in Private and moved to Personal; the Private copy is pruned (#1174). */
   async function movedToPersonal(lane: Lane) {
     await lane.set.sync(connectorFor(['kitchen']), { fetchContent: false, placement: () => buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' }) });
     const photo = picture();
@@ -1319,7 +1319,10 @@ describe('review of #189: the judge never lets a picture out of Private without 
       replaceOwnSupersededCopy: true,
     });
     expect(lane.ledger.getCurrent(identity('kitchen'))).toMatchObject({ contentTier: 'private', state: 'current' });
-    expect(lane.stores.secure_local!.mediaJudgment(photo.sha256)?.verdict).toBe('ordinary');
+    // The automatic lowering pruned the Private copy and, with its last chunk,
+    // that store's judgment of the picture (#1174): only Personal's stands.
+    expect(lane.stores.secure_local!.mediaJudgment(photo.sha256)).toBeUndefined();
+    expect(lane.stores.internal!.mediaJudgment(photo.sha256)?.verdict).toBe('ordinary');
     return { photo, provider };
   }
 
@@ -1332,7 +1335,7 @@ describe('review of #189: the judge never lets a picture out of Private without 
     }
   }
 
-  test('a stale ordinary verdict on the hidden Private copy never outweighs a newer one in Personal', async () => {
+  test('a stale ordinary verdict never outweighs a newer one in Personal', async () => {
     const lane = openLane(temporaryDir());
     try {
       const { photo } = await movedToPersonal(lane);

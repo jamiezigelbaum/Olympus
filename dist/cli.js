@@ -24741,6 +24741,11 @@ class TierLedger {
         AND corpus_id = ? AND copy_state = 'superseded'
     `).run(...idParams(identity2), corpusId).changes > 0;
   }
+  hasMovedMigrationProposal(identity2) {
+    return this.db.query(`SELECT 1 FROM tier_migration_proposals
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND status = 'moved' LIMIT 1`).get(...idParams(identity2)) !== null;
+  }
   replaceMigrationProposals(planId, proposals) {
     const now = this.now().toISOString();
     this.db.transaction(() => {
@@ -25890,7 +25895,7 @@ function tierLedgerMigrations() {
       }
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 14,
       name: "requeue_retired_embedding_clearances",
       up(db) {
         db.exec(`
@@ -25926,10 +25931,19 @@ function tierLedgerMigrations() {
           DELETE FROM tier_ledger_meta WHERE key GLOB 'embedding-prefilter:*';
         `);
       }
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: "moved_migration_identity",
+      up(db) {
+        db.exec(`CREATE INDEX IF NOT EXISTS tier_migration_moved_identity
+          ON tier_migration_proposals (provider, account_scope, conversation_key, provider_item_id)
+          WHERE status = 'moved';`);
+      }
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 14, RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided", TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", DEFAULT_REJUDGE_SCAN_ROWS = 2000, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TierLedgerSchemaError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_RECHECK_META_PREFIX = "recheck:", STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 15, RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided", TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", DEFAULT_REJUDGE_SCAN_ROWS = 2000, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TierLedgerSchemaError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_RECHECK_META_PREFIX = "recheck:", STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_store_write_guard();
@@ -26562,6 +26576,7 @@ function forgetExtractionJobs(dbPath, scope, options = {}) {
     return forgetSqliteRows(db, [
       ...jobs ? [{ table: SECRET_RESTORED_REREADS_TABLE, where: `job_id IN (SELECT job_id FROM extraction_jobs WHERE ${jobs.where})`, params: jobs.params }] : [],
       ...filterFor("extraction_artifacts", [["corpus_id", scope.corpusIds]]),
+      ...filterFor("extraction_unroutable_items", [["corpus_id", scope.corpusIds]]),
       ...filterFor("extraction_jobs", [["corpus_id", scope.corpusIds]]),
       ...claimants.length > 0 && claimsTableExists(db) ? [{
         table: SECRET_ITEM_REDACTIONS_TABLE,
@@ -26596,6 +26611,7 @@ function forgetExtractionJobsOfAccountScopes(dbPath, corpusIds, accountScopes, o
       { table: "extraction_artifacts", where: jobIds, params },
       { table: SECRET_ITEM_REDACTION_CLAIMS_TABLE, where: byAccount, params: accountScopes },
       { table: SECRET_ITEM_REDACTIONS_TABLE, where: byAccount, params: accountScopes },
+      { table: "extraction_unroutable_items", where: ofScopes, params },
       { table: "extraction_jobs", where: ofScopes, params }
     ], dryRun).reduce((sum, count) => sum + count, 0);
   } finally {
@@ -45376,12 +45392,16 @@ var init_local_index = __esm(() => {
       let exhausted = false;
       let tryBound = true;
       while (true) {
-        const rankedPage = (bound2) => ({ mode: "all", sql: `
-        ${bound2 === undefined ? "" : `WITH top AS MATERIALIZED (
+        const rankedPage = (from) => {
+          const bound2 = from === undefined ? undefined : ("bound" in from) ? from.bound : undefined;
+          const atOrAbove = from === undefined ? undefined : ("atOrAbove" in from) ? from.atOrAbove : undefined;
+          const top = from === undefined ? undefined : bound2 !== undefined ? "top" : "tied";
+          return { mode: "all", sql: `
+        ${top === undefined ? "" : `WITH ${top} AS MATERIALIZED (
           SELECT rowid AS fts_rowid, rank FROM connector_store_fts
           WHERE connector_store_fts MATCH ?
             AND rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'
-          ORDER BY rank LIMIT ?
+            ${bound2 !== undefined ? "ORDER BY rank LIMIT ?" : "AND (rank + 0.0) <= ?"}
         )`}
         SELECT
           i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
@@ -45394,12 +45414,12 @@ var init_local_index = __esm(() => {
           -- item rather than an arbitrary one. That is exactly the chunk the
           -- citation should point at.
           connector_store_fts.chunk_pk AS chunk_pk,
-          ${bound2 === undefined ? "MIN(connector_store_fts.rank) AS rank" : `MIN(top.rank) AS rank,
+          ${top === undefined ? "MIN(connector_store_fts.rank) AS rank" : top === "tied" ? "MIN(tied.rank) AS rank" : `MIN(top.rank) AS rank,
           (SELECT COUNT(*) FROM top) AS bound_rows,
           (SELECT MAX(rank) FROM top) AS bound_rank`}
-        FROM ${bound2 === undefined ? "connector_store_fts" : "top JOIN connector_store_fts ON connector_store_fts.rowid = top.fts_rowid"}
+        FROM ${top === undefined ? "connector_store_fts" : `${top} JOIN connector_store_fts ON connector_store_fts.rowid = ${top}.fts_rowid`}
         JOIN items i ON i.item_pk = connector_store_fts.item_pk
-        WHERE ${bound2 === undefined ? `connector_store_fts MATCH ?
+        WHERE ${top === undefined ? `connector_store_fts MATCH ?
           AND connector_store_fts.rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'` : "1"}
           AND i.tombstoned = 0
           AND LOWER(COALESCE(i.mime_type, '')) NOT IN (${CONTAINER_MIME_TYPES_SQL})
@@ -45411,22 +45431,27 @@ var init_local_index = __esm(() => {
         ORDER BY rank ASC, COALESCE(i.updated_at, i.authored_at, i.indexed_at) DESC, i.item_pk ASC
         LIMIT ? OFFSET ?
       `, params: [
-          terms,
-          ...bound2 === undefined ? [] : [bound2],
-          ...selectedAccount ? [selectedAccount] : [],
-          ...selectedFilters.params,
-          ...selectedFtsScope.params,
-          pageSize,
-          scanned
-        ] });
+            terms,
+            ...bound2 === undefined ? [] : [bound2],
+            ...atOrAbove === undefined ? [] : [atOrAbove],
+            ...selectedAccount ? [selectedAccount] : [],
+            ...selectedFilters.params,
+            ...selectedFtsScope.params,
+            pageSize,
+            scanned
+          ] };
+        };
         const bound = Math.min(KEYWORD_RANKED_BOUND_MAX, Math.max(KEYWORD_RANKED_BOUND_MIN, (scanned + pageSize) * KEYWORD_RANKED_BOUND_ROWS_PER_ITEM));
-        const boundedPage = tryBound ? yield rankedPage(bound) : [];
+        const boundedPage = tryBound ? yield rankedPage({ bound }) : [];
         const head = boundedPage[0];
         const last = boundedPage.at(-1);
-        const proved = head !== undefined && last !== undefined && (head.bound_rows < bound || boundedPage.length === pageSize && last.rank < head.bound_rank);
-        if (!proved)
+        const full = boundedPage.length === pageSize;
+        const proved = head !== undefined && last !== undefined && (head.bound_rows < bound || full && last.rank < head.bound_rank);
+        const tied = !proved && full && head !== undefined ? yield rankedPage({ atOrAbove: head.bound_rank }) : undefined;
+        const tiedProved = tied !== undefined && tied.length === pageSize;
+        if (!proved && !tiedProved)
           tryBound = false;
-        const page2 = proved ? boundedPage.map(({ bound_rows: _rows, bound_rank: _rank, ...row }) => row) : yield rankedPage(undefined);
+        const page2 = proved ? boundedPage.map(({ bound_rows: _rows, bound_rank: _rank, ...row }) => row) : tiedProved ? tied : yield rankedPage(undefined);
         scanned += page2.length;
         exhausted = page2.length < pageSize;
         const rows = page2.filter((row) => !seen.has(row.item_pk));
@@ -60978,7 +61003,7 @@ function clampPercent(percent) {
     return 0;
   return Math.max(0, Math.min(100, Math.round(percent * 10) / 10));
 }
-var METADATA_ONLY_EXPECTED_COUNT_KEY = "qa_metadata_only_expected", BLOCKED_BY_POLICY_COUNT_KEY = "qa_blocked_policy", OUT_OF_CONTENT_SCOPE_COUNT_KEY = "qa_out_of_content_scope", UNREADABLE_ITEMS_COUNT_KEY = "extraction_items_unreadable", ITEMS_WITH_TEXT_COUNT_KEY = "items_with_text", POLICY_NOT_READ_COUNT_KEYS, METADATA_ONLY_POLICY_COUNT_KEYS, ANSWER_READY_ELIGIBLE_COUNT_KEYS;
+var METADATA_ONLY_EXPECTED_COUNT_KEY = "qa_metadata_only_expected", BLOCKED_BY_POLICY_COUNT_KEY = "qa_blocked_policy", OUT_OF_CONTENT_SCOPE_COUNT_KEY = "qa_out_of_content_scope", UNREADABLE_ITEMS_COUNT_KEY = "extraction_items_unreadable", UNSUPPORTED_KIND_COUNT_KEY = "extraction_items_unsupported_kind", ITEMS_WITH_TEXT_COUNT_KEY = "items_with_text", POLICY_NOT_READ_COUNT_KEYS, METADATA_ONLY_POLICY_COUNT_KEYS, ANSWER_READY_ELIGIBLE_COUNT_KEYS;
 var init_answer_ready_coverage = __esm(() => {
   POLICY_NOT_READ_COUNT_KEYS = [
     METADATA_ONLY_EXPECTED_COUNT_KEY,
@@ -61338,6 +61363,7 @@ function dashboardWorkingSummary(source) {
   const read = Math.max(0, Math.min(inScope, source.coverage.content_ready_items));
   const readPercent = clampPercent(read / inScope * 100);
   const unreadable = Math.max(0, Math.min(inScope - read, Math.trunc(source.coverage.unreadable_items ?? 0)));
+  const unsupportedKind = Math.max(0, Math.min(inScope - read - unreadable, Math.trunc(source.coverage.unsupported_kind_items ?? 0)));
   const backlog = source.embedding_backlog;
   const parityShort = backlog !== undefined && (backlog.missing_chunks > 0 || backlog.refresh_needed) && backlog.chunks > 0;
   const searchablePercent = parityShort ? clampPercent(backlog.embedded_chunks / backlog.chunks * 100) : undefined;
@@ -61345,9 +61371,10 @@ function dashboardWorkingSummary(source) {
     in_scope_items: inScope,
     read_items: read,
     ...unreadable > 0 ? { unreadable_items: unreadable } : {},
+    ...unsupportedKind > 0 ? { unsupported_kind_items: unsupportedKind } : {},
     read_percent: readPercent,
     ...searchablePercent !== undefined ? { searchable_percent: searchablePercent } : {},
-    fully_working: read + unreadable >= inScope && !parityShort
+    fully_working: read + unreadable + unsupportedKind >= inScope && !parityShort
   };
 }
 function dashboardCount(value) {
@@ -61363,10 +61390,11 @@ function freshLine(source, now) {
   if (source.connection.action.kind === "archive_import")
     return source.connection.label;
   const unreadable = dashboardUnreadablePhrase(source);
+  const unsupportedKind = dashboardUnsupportedKindPhrase(source);
   const manual = dashboardManualSyncLine(source, now);
   const capture = dashboardCaptureClause(source);
   const pass = dashboardLivePassClause(source);
-  const tail = [pass, unreadable, capture].filter((part) => !!part).join(" · ");
+  const tail = [pass, unreadable, unsupportedKind, capture].filter((part) => !!part).join(" · ");
   if (manual)
     return tail ? `${manual} · ${tail}` : manual;
   const hours = source.freshness.hours;
@@ -61414,6 +61442,10 @@ function itemsPhrase(source, count, adjective = "") {
 function dashboardUnreadablePhrase(source) {
   const count = Math.max(0, Math.trunc(source.coverage.unreadable_items ?? 0));
   return count > 0 ? `${itemsPhrase(source, count)} can't be read` : undefined;
+}
+function dashboardUnsupportedKindPhrase(source) {
+  const count = Math.max(0, Math.trunc(source.coverage.unsupported_kind_items ?? 0));
+  return count > 0 ? `${itemsPhrase(source, count)} of kinds Olympus can't read yet` : undefined;
 }
 function dashboardPhaseUnreadableWords(read, unreadable) {
   return `Done · ${dashboardCount(read)} read · ${dashboardCount(unreadable)} can't be read`;
@@ -67809,7 +67841,7 @@ function moveTieredItemsLowering(moves, options = {}) {
       entry.move.beforeFlip?.();
       entry.move.afterVerified?.();
       try {
-        results.push({ result: flipVerifiedMove(entry.move, entry.receipt) });
+        results.push({ result: entry.receipt.result ?? flipVerifiedMove(entry.move, entry.receipt) });
       } catch (error) {
         results.push({ error });
       }
@@ -67818,6 +67850,15 @@ function moveTieredItemsLowering(moves, options = {}) {
     if (timings)
       timings.ledgerCommitMs += ms;
   }));
+  prepared.forEach((entry, index) => {
+    if ("error" in entry || !("result" in results[index]))
+      return;
+    try {
+      pruneAutomaticMove(entry.move, entry.receipt);
+    } catch (error) {
+      results[index] = { error };
+    }
+  });
   results.forEach((result, index) => {
     if ("result" in result)
       timed(moves[index].timings, "rereadMs", () => oweExtractionRereads(set.ledger, moves[index].identity));
@@ -67857,10 +67898,14 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
     throw new TierMoveRefusedError("Secrets cannot use the content repair path.");
   }
   const receiptKey = purgeReceiptKey(identity2);
-  const receiptToResume = readVerifiedMove(ledger, identity2);
+  let receiptToResume = readVerifiedMove(ledger, identity2);
+  if (receiptToResume?.result && (record.state === "moving" || receiptToResume.result.generation !== record.generation || receiptToResume.target.metadataTier !== target.metadataTier || receiptToResume.target.contentTier !== target.contentTier)) {
+    pruneAutomaticMove(options, receiptToResume);
+    receiptToResume = undefined;
+  }
   if (receiptToResume) {
     const receipt = receiptToResume;
-    if (receipt.generation !== record.generation || receipt.target.metadataTier !== target.metadataTier || receipt.target.contentTier !== target.contentTier)
+    if ((receipt.result?.generation ?? receipt.generation) !== record.generation || receipt.target.metadataTier !== target.metadataTier || receipt.target.contentTier !== target.contentTier)
       throw new TierLedgerGenerationConflictError;
     if (loweringOnly && receipt.raise)
       throw new TierMoveRefusedError("Raises cannot enter a lowering batch.");
@@ -68029,6 +68074,7 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
           raise,
           sources,
           destinations,
+          ...options.replaceOwnSupersededCopy && !raise ? { pruneSuperseded: true } : {},
           ...options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {},
           rehomeTagged,
           replacedSuperseded,
@@ -68070,7 +68116,7 @@ function queueMoveNote(options, receipt, result) {
     entry_id: entryId,
     recorded_at: new Date().toISOString(),
     kind: "note",
-    what: `Tier move of one item (${raise ? "raise" : "lateral or lower"}) from ${sources.map((copy) => copy.corpusId).join(", ")} ` + `to ${destinations.map((copy) => `${copy.corpusId} (${copy.layers})`).join(", ")}: ` + `${result.chunkCount} chunk(s) at the destination, ${destinations.reduce((sum, copy) => sum + copy.vectorsCopied, 0)} vector(s) copied with no provider call, ` + `${destinations.reduce((sum, copy) => sum + copy.chunksToEmbed, 0)} chunk(s) left for the destination's own embedding model. ` + `Superseded copies are hidden; lower content on raises is purged: ${result.supersededCorpora.join(", ") || "none"}.` + (Object.keys(replaced).length ? ` Replaced an older superseded copy of this item's own earlier move: ${Object.entries(replaced).map(([corpus, count]) => `${corpus} (${count} chunk(s) of older text)`).join(", ")}.` : ""),
+    what: `Tier move of one item (${raise ? "raise" : "lateral or lower"}) from ${sources.map((copy) => copy.corpusId).join(", ")} ` + `to ${destinations.map((copy) => `${copy.corpusId} (${copy.layers})`).join(", ")}: ` + `${result.chunkCount} chunk(s) at the destination, ${destinations.reduce((sum, copy) => sum + copy.vectorsCopied, 0)} vector(s) copied with no provider call, ` + `${destinations.reduce((sum, copy) => sum + copy.chunksToEmbed, 0)} chunk(s) left for the destination's own embedding model. ` + `Superseded copies are ${receipt.pruneSuperseded ? "pruned after the committed flip" : "hidden"}; lower content on raises is purged: ${result.supersededCorpora.join(", ") || "none"}.` + (Object.keys(replaced).length ? ` Replaced an older superseded copy of this item's own earlier move: ${Object.entries(replaced).map(([corpus, count]) => `${corpus} (${count} chunk(s) of older text)`).join(", ")}.` : ""),
     scope: {
       corpora: [...new Set([...sources.map((copy) => copy.corpusId), ...destinations.map((copy) => copy.corpusId)])],
       chunks: Object.fromEntries(destinations.map((copy) => [copy.corpusId, copy.chunksWritten + copy.chunksKept]))
@@ -68079,7 +68125,12 @@ function queueMoveNote(options, receipt, result) {
     approved_by: config.approvedBy,
     status: "complete"
   };
-  options.set.ledger.writeMeta(`${MOVE_NOTE_PREFIX}${entryId}`, JSON.stringify({ path: config.path, entry }));
+  queueTierLedgerEntry(options.set.ledger, config.path, entry);
+}
+function queueTierLedgerEntry(ledger, path, entry) {
+  if (!entry.entry_id)
+    throw new Error("A durable tier ledger entry needs an id.");
+  ledger.writeMeta(`${MOVE_NOTE_PREFIX}${entry.entry_id}`, JSON.stringify({ path, entry }));
 }
 async function flushTierMoveNotes(ledger, options = {}) {
   const started = performance.now();
@@ -68142,6 +68193,8 @@ function readVerifiedMove(ledger, identity2) {
   const current2 = ledger.getCurrent(identity2);
   if (!current2)
     throw new TierLedgerGenerationConflictError;
+  if (receipt.pruneSuperseded && receipt.result && current2.generation >= receipt.result.generation)
+    return receipt;
   if (receipt.generation < current2.generation || receipt.generation === current2.generation && current2.state !== "moving") {
     ledger.withGenerationFence(identity2, current2.generation, () => {
       const now = ledger.getCurrent(identity2);
@@ -68162,9 +68215,50 @@ function copyFingerprint(copy, layers) {
   })).digest("hex");
 }
 function finishVerifiedMove(options, receipt) {
-  const result = flipVerifiedMove(options, receipt);
+  const result = receipt.result ?? flipVerifiedMove(options, receipt);
+  pruneAutomaticMove(options, receipt);
   timed(options.timings, "rereadMs", () => oweExtractionRereads(options.set.ledger, options.identity));
   return result;
+}
+function pruneSupersededStoreCopy(store, identity2) {
+  const chunks = store.stripCopyContent(identity2, { keepMetadata: false });
+  const row = store.exportItemCopy(identity2)?.identity;
+  if (row) {
+    const { sourceVersion: _kept, ...withdrawn } = row;
+    store.tombstoneCopy(withdrawn, { connectorId: TIER_MOVE_CONNECTOR_ID });
+  }
+  return chunks;
+}
+function pruneAutomaticMove(options, receipt) {
+  if (!receipt.pruneSuperseded)
+    return;
+  const { set, identity: identity2 } = options;
+  const raw = set.ledger.readMeta(purgeReceiptKey(identity2));
+  if (!raw)
+    return;
+  const committed = JSON.parse(raw);
+  if (!committed.result)
+    throw new TierLedgerGenerationConflictError;
+  const current2 = set.ledger.getCurrent(identity2);
+  if (!current2 || current2.generation < committed.result.generation)
+    throw new TierLedgerGenerationConflictError;
+  set.ledger.withGenerationFence(identity2, current2.generation, () => {
+    if (set.ledger.readMeta(purgeReceiptKey(identity2)) !== raw)
+      throw new TierLedgerGenerationConflictError;
+    for (const copy of set.ledger.copies(identity2)) {
+      if (copy.state !== "superseded" || copy.supersededByGeneration !== committed.result.generation)
+        continue;
+      const store = set.store(copy.trustDomain);
+      if (!store)
+        throw new Error("Superseded store unavailable; automatic prune remains pending.");
+      store.bindTierSet(set.ledger);
+      timed(options.timings, "purgeMs", () => pruneSupersededStoreCopy(store, identity2));
+      set.ledger.removeSupersededCopy(identity2, copy.corpusId);
+    }
+    options.afterPurge?.();
+    set.ledger.writeMeta(purgeReceiptKey(identity2), "");
+    queueMoveNote(options, committed, committed.result);
+  });
 }
 function oweExtractionRereads(ledger, identity2) {
   let known = [];
@@ -68227,8 +68321,8 @@ function flipVerifiedMove(options, receipt) {
       }
       if (receipt.raise && content)
         ledger.writeMeta(`tier-content-purged:${tierLedgerIdentityKey(identity2)}`, String(flipped.generation));
-      options.afterPurge?.();
-      ledger.writeMeta(purgeReceiptKey(identity2), "");
+      if (!receipt.pruneSuperseded)
+        options.afterPurge?.();
       const result = {
         outcome: "moved",
         raise: receipt.raise,
@@ -68237,7 +68331,14 @@ function flipVerifiedMove(options, receipt) {
         supersededCorpora: ledger.copies(identity2).filter((copy) => copy.state === "superseded" && copy.supersededByGeneration === flipped.generation).map((copy) => copy.corpusId),
         chunkCount: receipt.destinations.reduce((sum, copy) => sum + copy.chunksWritten + copy.chunksKept, 0)
       };
-      queueMoveNote(options, receipt, result);
+      if (receipt.pruneSuperseded) {
+        if (result.supersededCorpora.length)
+          ledger.writeMeta(`tier-content-purged:${tierLedgerIdentityKey(identity2)}`, String(flipped.generation));
+        ledger.writeMeta(purgeReceiptKey(identity2), JSON.stringify({ ...receipt, result }));
+      } else {
+        ledger.writeMeta(purgeReceiptKey(identity2), "");
+        queueMoveNote(options, receipt, result);
+      }
       return result;
     }));
   });
@@ -68551,6 +68652,161 @@ var init_tier_content_purge = __esm(() => {
   init_tier_ledger();
   init_embedding_ledger();
   init_tier_move();
+});
+
+// src/workers/connector-store/tier-auto-prune-sweep.ts
+function sweepAutomaticSupersededCopies(set, options = {}) {
+  const ledger = set.ledger;
+  const state = JSON.parse(ledger.readMeta(STATE) || "{}");
+  const report = { checked: 0, purged: 0, kept: 0, failed: 0, complete: state.done === true };
+  if (state.done)
+    return report;
+  state.embeddingLedger ??= state.pending?.embeddingLedger ?? options.embeddingLedger ?? { path: resolveEmbeddingLedgerPath(), approvedBy: "system-automatic" };
+  const limit = Math.max(1, Math.min(options.limit ?? PAGE_SIZE, PAGE_SIZE));
+  const save = () => ledger.writeMeta(STATE, JSON.stringify(state));
+  const finishPending = () => {
+    const pending = state.pending;
+    ledger.withGenerationFence(pending.identity, pending.generation, () => {
+      const current2 = ledger.getCurrent(pending.identity);
+      if (current2.state === "moving" || ledger.hasMovedMigrationProposal(pending.identity))
+        throw new Error("Placement or migration changed; retry cleanup later.");
+      for (const target of pending.copies) {
+        const copy = ledger.copies(pending.identity).find((copy2) => copy2.corpusId === target.corpusId);
+        if (copy?.state !== "superseded")
+          continue;
+        const store = set.store(copy.trustDomain);
+        if (!store)
+          throw new Error("Superseded store unavailable.");
+        store.bindTierSet(ledger);
+        pruneSupersededStoreCopy(store, pending.identity);
+        ledger.removeSupersededCopy(pending.identity, copy.corpusId);
+        const deleted = state.deleted ??= {};
+        deleted[copy.corpusId] = (deleted[copy.corpusId] ?? 0) + target.chunks;
+        report.purged++;
+      }
+      state.after = pending.identity;
+      delete state.pending;
+      save();
+    });
+  };
+  try {
+    if (state.pending) {
+      report.checked++;
+      const current2 = ledger.getCurrent(state.pending.identity);
+      if (!current2 || current2.generation !== state.pending.generation) {
+        state.retry = true;
+        state.after = state.pending.identity;
+        delete state.pending;
+        save();
+      } else
+        finishPending();
+    }
+    if (report.checked === limit)
+      return report;
+    const rows = ledger.listItemWindow({ ...state.after ? { after: state.after } : {}, limit: limit - report.checked });
+    for (const record of rows.slice(0, limit - report.checked)) {
+      report.checked++;
+      const identity2 = {
+        provider: record.provider,
+        accountScope: record.accountScope,
+        providerItemId: record.providerItemId,
+        ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
+      };
+      ledger.withGenerationFence(identity2, record.generation, () => {
+        const now = ledger.getCurrent(identity2);
+        if (!now.routed || now.contentTier === "secrets" || now.metadataTier === "secrets" || ledger.hasMovedMigrationProposal(identity2))
+          return;
+        const copies = ledger.copies(identity2);
+        if (!copies.some((copy) => copy.state === "superseded"))
+          return;
+        if (now.state === "moving") {
+          state.retry = true;
+          return;
+        }
+        const content = copyServingLayer(copies.filter((copy) => copy.state === "current"), "content");
+        if (!content)
+          return;
+        const superseded = copies.filter((copy) => copy.state === "superseded" && trustDomainRank(copy.trustDomain) > trustDomainRank(content.trustDomain));
+        if (!superseded.length)
+          return;
+        const destination = content && set.store(content.trustDomain);
+        const proof = destination?.copyContentState(identity2);
+        if (!proof || destination?.tierSetBinding()?.ledgerId !== ledger.ledgerId())
+          throw new Error("Current destination unavailable.");
+        let unproven = false;
+        const targets = superseded.map((copy) => {
+          const store = set.store(copy.trustDomain);
+          if (!store)
+            throw new Error("Superseded store unavailable.");
+          store.bindTierSet(ledger);
+          const held = store.copyContentState(identity2);
+          const chunks = held?.chunks ?? 0;
+          if (chunks && (!proof.chunks || !proof.currentText))
+            throw new Error("Current destination has no verified body.");
+          if (held && chunks) {
+            const order = compareContentVersions(proof, held);
+            if (order === undefined || order < 0)
+              unproven = true;
+          }
+          return { corpusId: copy.corpusId, chunks };
+        });
+        if (unproven) {
+          report.kept++;
+          return;
+        }
+        state.pending = {
+          identity: identity2,
+          generation: record.generation,
+          copies: targets,
+          embeddingLedger: state.embeddingLedger
+        };
+        ledger.writeMeta(`tier-content-purged:${tierLedgerIdentityKey(identity2)}`, String(record.generation));
+        save();
+      });
+      if (state.pending)
+        finishPending();
+      else {
+        state.after = identity2;
+        save();
+      }
+    }
+    if (report.checked < limit) {
+      if (state.retry) {
+        delete state.after;
+        delete state.retry;
+        save();
+      } else {
+        ledger.withMoveBatch(() => {
+          const config = state.embeddingLedger;
+          for (const [corpusId, chunks] of Object.entries(state.deleted ?? {})) {
+            queueTierLedgerEntry(ledger, config.path, {
+              entry_id: `automatic-superseded-prune:${ledger.ledgerId()}:${corpusId}`,
+              recorded_at: new Date().toISOString(),
+              kind: "invalidation",
+              what: `Pruned superseded automatic tier-move copies: ${chunks} kept chunk(s), their full-text content and vectors removed.`,
+              scope: { corpora: [corpusId], chunks: { [corpusId]: chunks } },
+              approved_by: config.approvedBy,
+              status: "complete"
+            });
+          }
+          state.done = true;
+          save();
+        });
+        report.complete = true;
+      }
+    }
+  } catch {
+    report.failed++;
+    report.complete = false;
+  }
+  return report;
+}
+var STATE = "automatic-superseded-prune-v1", PAGE_SIZE = 200;
+var init_tier_auto_prune_sweep = __esm(() => {
+  init_tier_ledger();
+  init_embedding_ledger();
+  init_tier_move();
+  init_tier_content_purge();
 });
 
 // src/core/model-install-failure.ts
@@ -69033,6 +69289,20 @@ function onnxRuntimeFromDirectory(runtimeDir) {
 }
 var init_runtime = () => {};
 
+// src/workers/source-index/built-in-embedding/pair-tokenizer.ts
+function truncatePair(a, b, room, tiePolicy = "wordpiece") {
+  let keepA = a.length;
+  let keepB = b.length;
+  room = Math.max(0, room);
+  while (keepA + keepB > room) {
+    if (keepB > keepA || keepB === keepA && (tiePolicy === "wordpiece" || a.length > b.length))
+      keepB -= 1;
+    else
+      keepA -= 1;
+  }
+  return { a: a.slice(0, keepA), b: b.slice(0, keepB), truncated: keepA < a.length || keepB < b.length };
+}
+
 // src/workers/source-index/built-in-embedding/wordpiece.ts
 class WordPieceTokenizer {
   vocab;
@@ -69074,22 +69344,7 @@ class WordPieceTokenizer {
     };
   }
   encodePair(first, second, maxLength) {
-    let a = this.tokenize(first);
-    let b = this.tokenize(second);
-    const room = Math.max(0, maxLength - 3);
-    const truncated = a.length + b.length > room;
-    if (truncated) {
-      let keepA = a.length;
-      let keepB = b.length;
-      while (keepA + keepB > room) {
-        if (keepB >= keepA)
-          keepB -= 1;
-        else
-          keepA -= 1;
-      }
-      a = a.slice(0, keepA);
-      b = b.slice(0, keepB);
-    }
+    const { a, b, truncated } = truncatePair(this.tokenize(first), this.tokenize(second), maxLength - 3);
     const ids = [this.clsId, ...a, this.sepId, ...b, this.sepId];
     const typeIds = ids.map((_, index) => index < a.length + 2 ? 0 : 1);
     return { ids, typeIds, truncated };
@@ -71791,6 +72046,9 @@ class TieredStoreSet {
             console.info(`[tier-content-purge] corpus=${corpus} copies=${copies} chunks=${chunks}`);
         }
       });
+      sweepAutomaticSupersededCopies(this, {
+        ...options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {}
+      });
       const pending = flushTierMoveNotes(this.ledger).catch(() => {}).finally(() => {
         this.lowerContentRepair = undefined;
       });
@@ -72913,6 +73171,7 @@ var init_tiered_store_set = __esm(() => {
   init_tier_names_only_settle();
   init_tier_held_settle();
   init_tier_content_purge();
+  init_tier_auto_prune_sweep();
   init_tier_move();
   init_tier_row_rehome();
   init_tier_rules_sweep();
@@ -92365,6 +92624,7 @@ class LocalFileExtractionJobStore {
     assertSqliteSchemaCanOpen(this.db, FILE_EXTRACTION_JOBS_STORE_ID, FILE_EXTRACTION_JOBS_SCHEMA_VERSION);
     if (!this.readonly) {
       runSqliteMigrations(this.db, FILE_EXTRACTION_JOBS_STORE_ID, fileExtractionJobMigrations());
+      createUnroutableItemsTable(this.db);
       this.unregisterPath = registerExtractionJobsDbPath(dbPath);
     }
   }
@@ -92375,10 +92635,38 @@ class LocalFileExtractionJobStore {
   invalidateUnsettledForCorpus(corpusId) {
     this.assertWritable("scope queue invalidation");
     const id = requireBoundedString(corpusId, "corpusId");
-    return this.db.query(`
-      DELETE FROM extraction_jobs
-      WHERE corpus_id = ? AND status IN ('queued', 'leased')
-    `).run(id).changes;
+    return this.db.transaction(() => {
+      this.db.query("DELETE FROM extraction_unroutable_items WHERE corpus_id = ?").run(id);
+      return this.db.query(`
+        DELETE FROM extraction_jobs
+        WHERE corpus_id = ? AND status IN ('queued', 'leased')
+      `).run(id).changes;
+    }).immediate();
+  }
+  recordUnroutable(refs) {
+    this.assertWritable("record unroutable items");
+    const now = nowIso4();
+    const insert = this.db.query(`
+      INSERT INTO extraction_unroutable_items (
+        corpus_id, provider, account_scope, approved_scope_key, local_item_id,
+        provider_item_id, source_version, content_hash, mime_type, seen_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(corpus_id, local_item_id) DO UPDATE SET
+        provider = excluded.provider,
+        account_scope = excluded.account_scope,
+        approved_scope_key = excluded.approved_scope_key,
+        provider_item_id = excluded.provider_item_id,
+        source_version = excluded.source_version,
+        content_hash = excluded.content_hash,
+        mime_type = excluded.mime_type,
+        seen_at = excluded.seen_at
+    `);
+    this.db.transaction(() => {
+      for (const rawRef of refs) {
+        const ref = requireItemRef(rawRef);
+        insert.run(ref.corpusId, ref.provider, ref.accountScope, ref.approvedScopeKey, ref.localItemId, ref.providerItemId, ref.sourceVersion ?? null, ref.contentHash ?? null, ref.mimeType ?? null, now);
+      }
+    }).immediate();
   }
   enqueue(request) {
     this.assertWritable("enqueue");
@@ -92398,6 +92686,7 @@ class LocalFileExtractionJobStore {
     this.db.transaction(() => {
       for (const rawRef of request.refs) {
         const ref = requireItemRef(rawRef);
+        this.db.query("DELETE FROM extraction_unroutable_items WHERE corpus_id = ? AND local_item_id = ?").run(ref.corpusId, ref.localItemId);
         const status = maxBytesPerFile !== undefined && ref.sizeBytes !== undefined && ref.sizeBytes > maxBytesPerFile ? "skipped_too_large" : "queued";
         const existing = this.existingJob(ref, extractorKind, extractorVersion);
         const jobId = existing?.job_id ?? makeJobId();
@@ -93017,11 +93306,23 @@ class LocalFileExtractionJobStore {
       SELECT * FROM extraction_jobs
       WHERE corpus_id = ? AND provider = ? AND account_scope = ? AND approved_scope_key = ?
     `);
+    const selectUnroutable = unroutableItemsTableExists(this.db) && this.db.query(`
+      SELECT u.* FROM extraction_unroutable_items u
+      WHERE corpus_id = ? AND provider = ? AND account_scope = ? AND approved_scope_key = ?
+        AND NOT EXISTS (SELECT 1 FROM extraction_jobs j
+          WHERE j.corpus_id = u.corpus_id AND j.local_item_id = u.local_item_id
+            AND j.source_version IS u.source_version)
+    `);
+    const unsupportedByItem = new Map;
     const byJobId = new Map;
     for (const lane of uniqueLanes.values()) {
       const rows2 = select.all(lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey);
       for (const row of rows2)
         byJobId.set(row.job_id, row);
+      const unroutable = selectUnroutable ? selectUnroutable.all(lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey) : [];
+      for (const row of unroutable) {
+        unsupportedByItem.set(JSON.stringify([row.corpus_id, row.local_item_id]), refFromRow(row));
+      }
       yield;
     }
     const allRows = [...byJobId.values()];
@@ -93041,6 +93342,14 @@ class LocalFileExtractionJobStore {
     } else if (options.currentItem) {
       const currentItem = options.currentItem;
       rows = allRows.filter((row) => currentItem(refFromRow(row)));
+    }
+    const unsupportedRefs = [...unsupportedByItem.values()];
+    let unsupportedKindItems = 0;
+    for (let start = 0;start < unsupportedRefs.length; start += SCOPED_READINESS_CURRENT_SLICE) {
+      const slice = unsupportedRefs.slice(start, start + SCOPED_READINESS_CURRENT_SLICE);
+      const answers = options.currentItems ? options.currentItems(slice) : slice.map((ref) => options.currentItem?.(ref) ?? true);
+      unsupportedKindItems += slice.filter((_ref, index) => answers[index] === true).length;
+      yield;
     }
     const byItem = new Map;
     for (const row of rows) {
@@ -93092,6 +93401,7 @@ class LocalFileExtractionJobStore {
       failedTerminalJobs: count("failed_terminal"),
       failedActionableJobs,
       unreadableItems,
+      unsupportedKindItems,
       retryableDueJobs: retryableDueRows.length,
       ...oldestActionableAt ? { oldestActionableAt } : {},
       ...newestTerminalProgressAt ? { newestTerminalProgressAt } : {}
@@ -93099,6 +93409,12 @@ class LocalFileExtractionJobStore {
   }
   corpusReadiness(corpusId, now = new Date, options = {}) {
     const corpus = requireKeyPart(corpusId, "corpusId");
+    const unsupported = unroutableItemsTableExists(this.db) ? this.db.query(`
+        SELECT COUNT(*) AS items FROM extraction_unroutable_items u
+        WHERE corpus_id = ? AND NOT EXISTS (SELECT 1 FROM extraction_jobs j
+          WHERE j.corpus_id = u.corpus_id AND j.local_item_id = u.local_item_id
+            AND j.source_version IS u.source_version)
+      `).get(corpus) : { items: 0 };
     const itemRetry = terminalRetryPathSql("x", options.terminalRetryPaths ?? []);
     const pendingRetry = terminalRetryPathSql("pending", options.terminalRetryPaths ?? []);
     const items = this.db.query(`
@@ -93208,6 +93524,7 @@ class LocalFileExtractionJobStore {
       failedTerminalJobs: jobCount("failed_terminal_jobs"),
       failedActionableJobs: jobCount("failed_actionable_jobs"),
       unreadableItems: unreadable.items.length,
+      unsupportedKindItems: unsupported.items,
       retryableDueJobs: jobCount("retryable_due_jobs"),
       ...typeof jobs?.oldest_actionable_at === "string" ? { oldestActionableAt: jobs.oldest_actionable_at } : {},
       ...typeof jobs?.newest_terminal_progress_at === "string" ? { newestTerminalProgressAt: jobs.newest_terminal_progress_at } : {}
@@ -93547,6 +93864,28 @@ function fileExtractionJobMigrations() {
     }
   }];
 }
+function createUnroutableItemsTable(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS extraction_unroutable_items (
+      corpus_id TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      account_scope TEXT NOT NULL,
+      approved_scope_key TEXT NOT NULL,
+      local_item_id TEXT NOT NULL,
+      provider_item_id TEXT NOT NULL,
+      source_version TEXT,
+      content_hash TEXT,
+      mime_type TEXT,
+      seen_at TEXT NOT NULL,
+      PRIMARY KEY (corpus_id, local_item_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_extraction_unroutable_lane
+      ON extraction_unroutable_items(corpus_id, provider, account_scope, approved_scope_key);
+  `);
+}
+function unroutableItemsTableExists(db) {
+  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_unroutable_items'`).get() !== null;
+}
 function nextRetryTimestamp(status, attempts, now) {
   if (status !== "failed_retryable")
     return null;
@@ -93565,7 +93904,7 @@ function refFromRow(row) {
     ...row.content_hash ? { contentHash: row.content_hash } : {},
     ...row.name ? { name: row.name } : {},
     ...row.mime_type ? { mimeType: row.mime_type } : {},
-    ...row.size_bytes === null ? {} : { sizeBytes: row.size_bytes }
+    ...row.size_bytes == null ? {} : { sizeBytes: row.size_bytes }
   };
 }
 function recordFromRow2(row) {
@@ -100340,6 +100679,7 @@ function createFileExtractionRunner(options) {
         approvedScopeKeys: [request.approvedScopeKey]
       });
       const byKind = new Map;
+      const unroutableRefs = [];
       let jobsUnroutable = 0;
       let jobsSkippedImageNotPrivate = 0;
       const refused = new Map;
@@ -100359,6 +100699,8 @@ function createFileExtractionRunner(options) {
           extractor = registry.select(ref, request.extractorKind);
           if (!extractor) {
             jobsUnroutable += 1;
+            if (request.extractorKind === undefined)
+              unroutableRefs.push(ref);
             continue;
           }
           version = extractor.versionFor?.(ref.mimeType) ?? extractor.version;
@@ -100373,6 +100715,13 @@ function createFileExtractionRunner(options) {
           bucket.refs.push(ref);
         else
           byKind.set(key2, { kind: extractor.kind, version, refs: [ref] });
+      }
+      if (unroutableRefs.length > 0) {
+        try {
+          jobs.recordUnroutable(unroutableRefs);
+        } catch (error) {
+          logPlanRefusal(request.corpusId, "unrouted", PLAN_REFUSED_UNROUTABLE_RECORD, unroutableRefs.length, error);
+        }
       }
       let jobsQueued = 0;
       let jobsExisting = 0;
@@ -101125,7 +101474,7 @@ function withMediaTypeFromName(ref) {
   const named = fileMimeTypeFromName(ref.name);
   return isGenericMimeType(named) ? ref : { ...ref, mimeType: named };
 }
-var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT = "model_endpoint_redirect", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_ERROR_KIND_INTERNAL_ERROR = "extraction_internal_error", EXTRACTION_ERROR_KIND_RECORD_REFUSED = "extraction_record_refused", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_EGRESS_REFUSED_JOB_UNKNOWN = "egress_job_policy_unreadable", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_SOURCE_BUDGET = "source_budget_exhausted", SOURCE_PARK_FALLBACK_MS, EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS, ExtractionEgressRefusedError, PLAN_REFUSED_EXTRACTOR_KIND = "extractor_kind_refused", PLAN_REFUSED_EXTRACTOR_VERSION = "extractor_version_refused", PLAN_REFUSED_ITEM_FIELD = "item_field_refused", PLAN_REFUSED_ROUTING_FAILED = "routing_failed", ITEM_REF_FIELDS, PDF_MIME_TYPES, PDF_DRAIN_PLAN_PAGE = 500, PDF_DRAIN_BATCH = 1;
+var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT = "model_endpoint_redirect", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_ERROR_KIND_INTERNAL_ERROR = "extraction_internal_error", EXTRACTION_ERROR_KIND_RECORD_REFUSED = "extraction_record_refused", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_EGRESS_REFUSED_JOB_UNKNOWN = "egress_job_policy_unreadable", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_SOURCE_BUDGET = "source_budget_exhausted", SOURCE_PARK_FALLBACK_MS, EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS, ExtractionEgressRefusedError, PLAN_REFUSED_EXTRACTOR_KIND = "extractor_kind_refused", PLAN_REFUSED_EXTRACTOR_VERSION = "extractor_version_refused", PLAN_REFUSED_ITEM_FIELD = "item_field_refused", PLAN_REFUSED_ROUTING_FAILED = "routing_failed", PLAN_REFUSED_UNROUTABLE_RECORD = "unroutable_record_failed", ITEM_REF_FIELDS, PDF_MIME_TYPES, PDF_DRAIN_PLAN_PAGE = 500, PDF_DRAIN_BATCH = 1;
 var init_runner = __esm(() => {
   init_control_path_headroom();
   init_media_cache();
@@ -104602,6 +104951,9 @@ function createSourceIndexStatusHandler(options = {}) {
           return cached2.status;
         const readiness = store && request.include_readiness_ledger === true ? options.readinessLedger?.snapshotForCorpus(corpus.corpusId, maxAgeMs > 0 ? { maxAgeMs } : {}) : undefined;
         const status = store ? connectorStoreStatus(corpus, storeStatus(store, statusScope, snapshot.countsMaxAgeMs ?? 0), readiness?.counts, readiness?.contentExtractionThroughput, availability?.modelId, secretLocationCount(store)) : configuredCorpusStatus(corpus);
+        if (status.configured && readiness?.counts[UNSUPPORTED_KIND_COUNT_KEY] !== undefined) {
+          status.counts[UNSUPPORTED_KIND_COUNT_KEY] = readiness.counts[UNSUPPORTED_KIND_COUNT_KEY];
+        }
         if (status.configured && request.include_readiness_ledger === true && options.unreadableCount) {
           const unreadable = options.unreadableCount(corpus.corpusId);
           if (unreadable !== undefined)
@@ -106173,6 +106525,10 @@ function aggregateCoverage(cards) {
     const value = card.coverage.unreadable_items;
     return value === undefined ? sum2 : (sum2 ?? 0) + value;
   }, undefined);
+  const unsupportedKind = cards.reduce((sum2, card) => {
+    const value = card.coverage.unsupported_kind_items;
+    return value === undefined ? sum2 : (sum2 ?? 0) + value;
+  }, undefined);
   const required3 = cards.filter((card) => card.embedding_required !== false);
   const exempt = cards.filter((card) => card.embedding_required === false);
   const measuring = required3.filter((card) => card.coverage.embedded_files !== undefined);
@@ -106201,6 +106557,7 @@ function aggregateCoverage(cards) {
     ...eligibleItems !== undefined ? { answer_ready_eligible_items: eligibleItems } : {},
     ...cards.some((card) => card.coverage.settled_unreadable_items !== undefined) ? { settled_unreadable_items: cards.reduce((sum2, card) => sum2 + (card.coverage.settled_unreadable_items ?? 0), 0) } : {},
     ...unreadable !== undefined ? { unreadable_items: unreadable } : {},
+    ...unsupportedKind !== undefined ? { unsupported_kind_items: unsupportedKind } : {},
     ...cards.some((card) => card.coverage.stored_items !== undefined) ? { stored_items: cards.reduce((sum2, card) => sum2 + (card.coverage.stored_items ?? card.coverage.indexed_items), 0) } : {}
   });
 }
@@ -106892,6 +107249,7 @@ function coverageFromCounts(counts) {
   const notReadByPolicy = notReadByPolicyFromCounts(counts);
   const eligibleItems = corpusAnswerReadyEligibleItems(counts, indexedItems);
   const unreadable = counts[UNREADABLE_ITEMS_COUNT_KEY];
+  const unsupportedKind = counts[UNSUPPORTED_KIND_COUNT_KEY];
   return {
     indexed_items: corpusOwnIndexedItems(counts, indexedItems),
     content_ready_items: contentReadyItems,
@@ -106902,6 +107260,7 @@ function coverageFromCounts(counts) {
     ...eligibleItems !== undefined ? { answer_ready_eligible_items: eligibleItems } : {},
     ...counts.settled_unreadable_items === undefined ? {} : { settled_unreadable_items: counts.settled_unreadable_items },
     ...unreadable !== undefined ? { unreadable_items: Math.max(0, Math.trunc(unreadable)) } : {},
+    ...unsupportedKind !== undefined ? { unsupported_kind_items: Math.max(0, Math.trunc(unsupportedKind)) } : {},
     ...counts.stored_items === undefined ? {} : { stored_items: counts.stored_items }
   };
 }
@@ -152766,6 +153125,2339 @@ var init_tier_owner_items = __esm(() => {
   init_tier_rules();
 });
 
+// node_modules/@huggingface/tokenizers/dist/tokenizers.mjs
+function create_normalizer(config2) {
+  if (config2 === null)
+    return null;
+  switch (config2.type) {
+    case "BertNormalizer":
+      return new BertNormalizer_default(config2);
+    case "Precompiled":
+      return new Precompiled_default(config2);
+    case "Sequence":
+      return new Sequence_default(config2);
+    case "Replace":
+      return new Replace_default(config2);
+    case "NFC":
+      return new NFC_default(config2);
+    case "NFD":
+      return new NFD_default(config2);
+    case "NFKC":
+      return new NFKC_default(config2);
+    case "NFKD":
+      return new NFKD_default(config2);
+    case "Strip":
+      return new Strip_default(config2);
+    case "StripAccents":
+      return new StripAccents_default(config2);
+    case "Lowercase":
+      return new Lowercase_default(config2);
+    case "Prepend":
+      return new Prepend_default(config2);
+    default:
+      throw new Error(`Unknown Normalizer type: ${config2.type}`);
+  }
+}
+function create_pre_tokenizer(config2) {
+  if (config2 === null)
+    return null;
+  switch (config2.type) {
+    case "BertPreTokenizer":
+      return new BertPreTokenizer_default;
+    case "Sequence":
+      return new Sequence_default2(config2);
+    case "Whitespace":
+      return new Whitespace_default;
+    case "WhitespaceSplit":
+      return new WhitespaceSplit_default;
+    case "Metaspace":
+      return new Metaspace_default(config2);
+    case "ByteLevel":
+      return new ByteLevel_default(config2);
+    case "Split":
+      return new Split_default(config2);
+    case "Punctuation":
+      return new Punctuation_default(config2);
+    case "Digits":
+      return new Digits_default(config2);
+    case "Replace":
+      return new Replace_default2(config2);
+    case "FixedLength":
+      return new FixedLength_default(config2);
+    default:
+      throw new Error(`Unknown PreTokenizer type: ${config2.type}`);
+  }
+}
+function min(arr) {
+  if (arr.length === 0)
+    throw new Error("Array must not be empty");
+  let min_value = arr[0];
+  let index_of_min = 0;
+  for (let i2 = 1;i2 < arr.length; ++i2) {
+    if (arr[i2] < min_value) {
+      min_value = arr[i2];
+      index_of_min = i2;
+    }
+  }
+  return [min_value, index_of_min];
+}
+function create_tokenizer_model(model_config, config2) {
+  switch (model_config.type) {
+    case "WordPiece":
+      return new WordPiece_default(model_config);
+    case "Unigram":
+      return new Unigram_default(model_config, config2.eos_token);
+    case "BPE":
+      return new BPE_default(model_config);
+    default:
+      if (model_config.vocab) {
+        if (Array.isArray(model_config.vocab)) {
+          return new Unigram_default(model_config, config2.eos_token);
+        } else if (Object.hasOwn(model_config, "continuing_subword_prefix") && Object.hasOwn(model_config, "unk_token")) {
+          if (Object.hasOwn(model_config, "merges")) {
+            return new BPE_default(model_config);
+          } else {
+            return new WordPiece_default(model_config);
+          }
+        } else {
+          return new Legacy_default(model_config, {
+            target_lang: config2.target_lang,
+            bos_token: config2.bos_token,
+            eos_token: config2.eos_token,
+            pad_token: config2.pad_token,
+            unk_token: config2.unk_token
+          });
+        }
+      }
+      throw new Error(`Unknown TokenizerModel type: ${model_config?.type}`);
+  }
+}
+function create_post_processor(config2) {
+  if (config2 === null)
+    return null;
+  switch (config2.type) {
+    case "TemplateProcessing":
+      return new TemplateProcessing_default(config2);
+    case "ByteLevel":
+      return new ByteLevel_default2(config2);
+    case "BertProcessing":
+      return new BertProcessing_default(config2);
+    case "RobertaProcessing":
+      return new RobertaProcessing_default(config2);
+    case "Sequence":
+      return new Sequence_default3(config2);
+    default:
+      throw new Error(`Unknown PostProcessor type: ${config2.type}`);
+  }
+}
+function create_decoder(config2) {
+  if (config2 === null)
+    return null;
+  switch (config2.type) {
+    case "ByteLevel":
+      return new ByteLevel_default3(config2);
+    case "WordPiece":
+      return new WordPiece_default2(config2);
+    case "Metaspace":
+      return new Metaspace_default2(config2);
+    case "BPEDecoder":
+      return new BPE_default2(config2);
+    case "CTC":
+      return new CTC_default(config2);
+    case "Sequence":
+      return new Sequence_default4(config2);
+    case "Replace":
+      return new Replace_default3(config2);
+    case "Fuse":
+      return new Fuse_default(config2);
+    case "Strip":
+      return new Strip_default2(config2);
+    case "ByteFallback":
+      return new ByteFallback_default(config2);
+    default:
+      throw new Error(`Unknown Decoder type: ${config2.type}`);
+  }
+}
+var DictionarySplitter = class {
+  constructor(dictionary) {
+    this.trie = this._build_trie(dictionary);
+  }
+  _build_trie(dictionary) {
+    const trie = /* @__PURE__ */ Object.create(null);
+    for (const word of dictionary) {
+      let node = trie;
+      for (let i2 = 0;i2 < word.length; ++i2) {
+        const char = word[i2];
+        node = node[char] ??= /* @__PURE__ */ Object.create(null);
+      }
+      node.end = word;
+    }
+    return trie;
+  }
+  split(text3) {
+    const result = [];
+    const n = text3.length;
+    let start = 0;
+    let i2 = 0;
+    while (i2 < n) {
+      let node = this.trie;
+      let match = null;
+      let j = i2;
+      while (j < n && (node = node[text3[j]])) {
+        if (node.end) {
+          match = node.end;
+        }
+        ++j;
+      }
+      if (match) {
+        if (i2 > start) {
+          result.push(text3.slice(start, i2));
+        }
+        result.push(match);
+        i2 += match.length;
+        start = i2;
+      } else {
+        ++i2;
+      }
+    }
+    if (start < n) {
+      result.push(text3.slice(start));
+    }
+    return result;
+  }
+}, DictionarySplitter_default, AddedToken = class {
+  constructor(config2) {
+    this.content = config2.content;
+    this.id = config2.id;
+    this.single_word = config2.single_word ?? false;
+    this.lstrip = config2.lstrip ?? false;
+    this.rstrip = config2.rstrip ?? false;
+    this.special = config2.special ?? false;
+    this.normalized = config2.normalized ?? !this.special;
+  }
+}, AddedToken_default, compile_unicode_regexp = (source, flags) => {
+  try {
+    return new RegExp(source, flags);
+  } catch (error2) {
+    if (!(error2 instanceof SyntaxError))
+      throw error2;
+    const property_names = /* @__PURE__ */ new Map;
+    const rewritten = source.replace(/(\\[pP])\{([^}=]+)\}/g, (text3, p, n, offset) => {
+      let preceding_backslashes = 0;
+      for (let i2 = offset - 1;i2 >= 0 && source[i2] === "\\"; --i2) {
+        ++preceding_backslashes;
+      }
+      if (preceding_backslashes % 2 === 1)
+        return text3;
+      let property_name = property_names.get(n);
+      if (property_name === undefined) {
+        try {
+          new RegExp(`\\p{${n}}`, "u");
+          property_name = n;
+        } catch {
+          property_name = `Script=${n}`;
+        }
+        property_names.set(n, property_name);
+      }
+      return `${p}{${property_name}}`;
+    });
+    if (rewritten === source)
+      throw error2;
+    try {
+      return new RegExp(rewritten, flags);
+    } catch {
+      throw error2;
+    }
+  }
+}, clean_up_tokenization = (text3) => text3.replace(/ \./g, ".").replace(/ \?/g, "?").replace(/ \!/g, "!").replace(/ ,/g, ",").replace(/ \' /g, "'").replace(/ n't/g, "n't").replace(/ 'm/g, "'m").replace(/ 's/g, "'s").replace(/ 've/g, "'ve").replace(/ 're/g, "'re"), create_pattern = (pattern, invert = true) => {
+  if (pattern.Regex !== undefined) {
+    const regex = rewrite_oniguruma_to_js(normalize_bloom_split_char_class(pattern.Regex));
+    return compile_unicode_regexp(regex, "gu");
+  } else if (pattern.String !== undefined) {
+    const escaped = escape_reg_exp(pattern.String);
+    return new RegExp(invert ? escaped : `(${escaped})`, "gu");
+  } else {
+    console.warn("Unknown pattern type:", pattern);
+    return null;
+  }
+}, UNICODE_WORD_CHARS_IN_CLASS = "\\p{Alphabetic}\\p{M}\\p{Nd}\\p{Pc}", UNICODE_WORD_CHARS, UNICODE_WORD_CLASS, UNICODE_NON_WORD_CLASS, UNICODE_WORD_BOUNDARY, UNICODE_NON_WORD_BOUNDARY, LINE_START_ANCHOR = "(?:(?<![\\s\\S])|(?<=\\n))", LINE_END_ANCHOR = "(?:(?=\\n)|(?![\\s\\S]))", HEX_DIGIT_CHARS = "0-9A-Fa-f", ESCAPE_REWRITES, CLASS_ESCAPE_REWRITES, CLASS_COMPLEMENT_ALTERNATIVES, RAW_WHITESPACE_ESCAPES, POSIX_CLASS_FRAGMENTS, JS_SYNTAX_CHARS = "^$\\.*+?()[]{}|/", GROUP_PREFIX_RE, BRACED_ESCAPE_RE, QUANTIFIER_BRACE_RE, POSIX_BRACKET_RE, EMPTY_NEGATED_POSIX_BRACKET_RE, UNSUPPORTED_POSIX_BRACKET_RE, FIXED_WIDTH_ESCAPE_RE, is_ascii_letter = (char) => char >= "A" && char <= "Z" || char >= "a" && char <= "z", character_at = (text3, index) => String.fromCodePoint(text3.codePointAt(index)), get_ascii_folded_hex_atom = (hex) => {
+  if (!/^[0-9A-Fa-f]{1,8}$/.test(hex))
+    return null;
+  const code_point = Number.parseInt(hex, 16);
+  if (code_point > 127)
+    return null;
+  const letter = String.fromCharCode(code_point);
+  return is_ascii_letter(letter) ? `[${letter.toLowerCase()}${letter.toUpperCase()}]` : null;
+}, normalize_bloom_split_char_class = (regex) => regex.replace(/\[\^\(\\s\|\[([^\]]+)\]\)\]/g, "[^()|\\s$1]"), ANY_CODE_POINT = "[\\s\\S]", MAX_CHARACTER_CLASS_NESTING_DEPTH = 256, create_character_class_operand = () => ({
+  fragment: "",
+  alternatives: [],
+  tail: null,
+  contains_complex_set: false
+}), throw_character_class_range_error = (index) => {
+  throw new SyntaxError(`Unsupported range with a set-valued character-class operand at index ${index}`);
+}, add_character_class_atom = (operand, atom, index, contains_complex_set = true) => {
+  if (operand.tail === "range")
+    throw_character_class_range_error(index);
+  operand.alternatives.push(atom);
+  operand.tail = "set";
+  operand.contains_complex_set = operand.contains_complex_set || contains_complex_set;
+}, append_character_class_fragment = (operand, fragment, set_valued = false, index = -1) => {
+  if (set_valued && operand.tail === "range") {
+    throw_character_class_range_error(index);
+  }
+  if (operand.tail === "range") {
+    operand.fragment += fragment;
+    operand.tail = "complete_range";
+    return;
+  }
+  operand.fragment += fragment;
+  operand.tail = set_valued ? "set" : "scalar";
+  operand.contains_complex_set = operand.contains_complex_set || set_valued;
+}, rewrite_character_class_escape = (regex, index, operand) => {
+  const braced = BRACED_ESCAPE_RE.exec(regex.slice(index));
+  if (braced) {
+    const [text3, kind, body] = braced;
+    if (kind === "P" && body === "Word") {
+      add_character_class_atom(operand, `[^${UNICODE_WORD_CHARS_IN_CLASS}]`, index);
+    } else {
+      const replacement2 = kind === "x" ? `\\u{${body}}` : kind === "p" && body === "Word" ? UNICODE_WORD_CHARS_IN_CLASS : text3;
+      append_character_class_fragment(operand, replacement2, kind === "p" || kind === "P", index);
+    }
+    return index + text3.length;
+  }
+  const fixed_width = FIXED_WIDTH_ESCAPE_RE.exec(regex.slice(index));
+  if (fixed_width) {
+    append_character_class_fragment(operand, fixed_width[0]);
+    return index + fixed_width[0].length;
+  }
+  if (index + 1 >= regex.length) {
+    throw new SyntaxError(`Unterminated escape in character class at index ${index}`);
+  }
+  const next = character_at(regex, index + 1);
+  const next_end = index + 1 + next.length;
+  const raw_whitespace = RAW_WHITESPACE_ESCAPES.get(next);
+  if (raw_whitespace !== undefined) {
+    append_character_class_fragment(operand, raw_whitespace);
+    return next_end;
+  }
+  const complement = CLASS_COMPLEMENT_ALTERNATIVES.get(next);
+  if (complement !== undefined) {
+    add_character_class_atom(operand, complement, index);
+    return next_end;
+  }
+  const rewrite = CLASS_ESCAPE_REWRITES.get(next);
+  let replacement;
+  let set_valued = false;
+  if (rewrite !== undefined) {
+    replacement = rewrite;
+    set_valued = next !== "a" && next !== "e";
+  } else if (/[A-Za-z0-9]/.test(next)) {
+    replacement = `\\${next}`;
+  } else if (JS_SYNTAX_CHARS.includes(next) || next === "-") {
+    replacement = `\\${next}`;
+  } else {
+    replacement = next;
+  }
+  append_character_class_fragment(operand, replacement, set_valued, index);
+  return next_end;
+}, compile_character_set_union = (pieces) => {
+  if (pieces.length === 1)
+    return pieces[0];
+  return `(?:(?=(?:${pieces.join("|")}))${ANY_CODE_POINT})`;
+}, compile_character_class_operand = (operand) => {
+  const pieces = operand.fragment.length === 0 ? operand.alternatives : [`[${operand.fragment}]`, ...operand.alternatives];
+  return compile_character_set_union(pieces);
+}, get_ascii_fold_additions = (positive_atom) => {
+  const membership = compile_unicode_regexp(`^(?:${positive_atom})$`, "u");
+  let additions = "";
+  for (let offset = 0;offset < 26; ++offset) {
+    const upper = String.fromCharCode(65 + offset);
+    const lower = String.fromCharCode(97 + offset);
+    const has_upper = membership.test(upper);
+    const has_lower = membership.test(lower);
+    if (has_upper !== has_lower)
+      additions += has_upper ? lower : upper;
+  }
+  return additions;
+}, parse_character_class = (regex, start, ascii_fold, apply_ascii_fold = true, nesting_depth = 1) => {
+  if (nesting_depth > MAX_CHARACTER_CLASS_NESTING_DEPTH) {
+    throw new SyntaxError(`Maximum character-class nesting depth of ${MAX_CHARACTER_CLASS_NESTING_DEPTH} exceeded at index ${start}`);
+  }
+  let i2 = start + 1;
+  const negated = regex[i2] === "^";
+  if (negated)
+    ++i2;
+  const first_content_index = i2;
+  const operands = [create_character_class_operand()];
+  let operand = operands[0];
+  let contains_nested_negated_complex_set = false;
+  while (i2 < regex.length) {
+    const char = character_at(regex, i2);
+    if (char === "\\") {
+      i2 = rewrite_character_class_escape(regex, i2, operand);
+      continue;
+    }
+    if (char === "]") {
+      if (i2 === first_content_index) {
+        append_character_class_fragment(operand, "\\]");
+        ++i2;
+        continue;
+      }
+      if (operand.tail === null) {
+        if (operands.length > 1) {
+          throw new SyntaxError(`Malformed character-class intersection with an empty operand at index ${i2}`);
+        }
+        throw new SyntaxError(`Empty character class at index ${start}`);
+      }
+      const contains_complex_set = operands.some((candidate) => candidate.contains_complex_set);
+      if (negated && operands.length > 1 && contains_nested_negated_complex_set) {
+        throw new SyntaxError(`Unsupported outer-negated character-class intersection with a nested negated class containing a Unicode property, POSIX class, or shorthand at index ${start}`);
+      }
+      const first_atom = compile_character_class_operand(operands[0]);
+      let positive_atom = first_atom;
+      if (operands.length > 1) {
+        let lookaheads = "";
+        for (let j = 1;j < operands.length; ++j) {
+          lookaheads += `(?=${compile_character_class_operand(operands[j])})`;
+        }
+        positive_atom = `(?:${lookaheads}${first_atom})`;
+      }
+      const is_direct_class = operands.length === 1 && operand.alternatives.length === 0;
+      let direct_fragment = operand.fragment;
+      if (ascii_fold && apply_ascii_fold) {
+        const additions = get_ascii_fold_additions(positive_atom);
+        if (additions.length > 0) {
+          if (is_direct_class) {
+            direct_fragment += additions;
+            positive_atom = `[${direct_fragment}]`;
+          } else {
+            positive_atom = compile_character_set_union([
+              positive_atom,
+              `[${additions}]`
+            ]);
+          }
+        }
+      }
+      const atom = negated ? is_direct_class ? `[^${direct_fragment}]` : `(?:(?!${positive_atom})${ANY_CODE_POINT})` : positive_atom;
+      return {
+        atom,
+        end: i2 + 1,
+        negated,
+        contains_complex_set,
+        contains_nested_negated_complex_set
+      };
+    }
+    if (regex.startsWith("&&", i2)) {
+      if (operand.tail === null) {
+        throw new SyntaxError(`Malformed character-class intersection with an empty operand at index ${i2}`);
+      }
+      operand = create_character_class_operand();
+      operands.push(operand);
+      i2 += 2;
+      continue;
+    }
+    if (char === "[") {
+      const suffix = regex.slice(i2);
+      if (EMPTY_NEGATED_POSIX_BRACKET_RE.test(suffix)) {
+        throw new SyntaxError(`Malformed empty negated POSIX character class at index ${i2}`);
+      }
+      const posix3 = POSIX_BRACKET_RE.exec(suffix);
+      if (posix3) {
+        const [, posix_negated, name] = posix3;
+        const fragment = POSIX_CLASS_FRAGMENTS.get(name);
+        if (fragment === undefined) {
+          throw new SyntaxError(`Unsupported POSIX character class "${name}" at index ${i2}`);
+        }
+        if (ascii_fold && posix_negated && (name === "lower" || name === "upper")) {
+          throw new SyntaxError(`Unsupported negated POSIX ${name} class inside an inline case-insensitive group`);
+        }
+        if (posix_negated) {
+          add_character_class_atom(operand, `[^${fragment}]`, i2);
+        } else {
+          append_character_class_fragment(operand, fragment, true, i2);
+        }
+        i2 += posix3[0].length;
+        continue;
+      }
+      if (UNSUPPORTED_POSIX_BRACKET_RE.test(suffix)) {
+        throw new SyntaxError(`Unsupported POSIX collating or equivalence bracket expression at index ${i2}`);
+      }
+      const nested = parse_character_class(regex, i2, ascii_fold, false, nesting_depth + 1);
+      add_character_class_atom(operand, nested.atom, i2, nested.contains_complex_set);
+      contains_nested_negated_complex_set ||= nested.contains_nested_negated_complex_set || nested.negated && nested.contains_complex_set;
+      i2 = nested.end;
+      continue;
+    }
+    if (char === "-") {
+      const is_terminal_literal = regex[i2 + 1] === "]" || regex.startsWith("&&", i2 + 1);
+      if (operand.tail === "set" && !is_terminal_literal) {
+        throw_character_class_range_error(i2);
+      }
+      if (operand.tail === null || operand.tail === "range" || operand.tail === "complete_range" || is_terminal_literal) {
+        append_character_class_fragment(operand, "\\-");
+      } else {
+        operand.fragment += "-";
+        operand.tail = "range";
+      }
+      ++i2;
+      continue;
+    }
+    append_character_class_fragment(operand, char === "^" && operand.fragment.length === 0 ? "\\^" : char);
+    i2 += char.length;
+  }
+  throw new SyntaxError(`${operands.length > 1 ? "Unterminated character-class intersection" : "Unterminated character class"} at index ${start}`);
+}, rewrite_oniguruma_to_js = (regex) => {
+  let out = "";
+  let atom_start = -1;
+  let last_was_quantifier = false;
+  let ascii_fold = false;
+  const group_states = [];
+  const emit_atom = (text3) => {
+    atom_start = out.length;
+    out += text3;
+    last_was_quantifier = false;
+  };
+  for (let i2 = 0;i2 < regex.length; ) {
+    const char = character_at(regex, i2);
+    if (char === "\\") {
+      const braced = BRACED_ESCAPE_RE.exec(regex.slice(i2));
+      if (braced) {
+        const [text3, kind, body] = braced;
+        let replacement2 = text3;
+        if (kind === "x") {
+          const code_point_escape = `\\u{${body}}`;
+          replacement2 = ascii_fold ? get_ascii_folded_hex_atom(body) ?? code_point_escape : code_point_escape;
+        } else if (body === "Word") {
+          replacement2 = kind === "p" ? UNICODE_WORD_CLASS : UNICODE_NON_WORD_CLASS;
+        }
+        emit_atom(replacement2);
+        i2 += text3.length;
+        continue;
+      }
+      const fixed_width = FIXED_WIDTH_ESCAPE_RE.exec(regex.slice(i2));
+      if (fixed_width) {
+        const text3 = fixed_width[0];
+        const replacement2 = ascii_fold && text3[1] !== "c" ? get_ascii_folded_hex_atom(text3.slice(2)) ?? text3 : text3;
+        emit_atom(replacement2);
+        i2 += text3.length;
+        continue;
+      }
+      if (i2 + 1 >= regex.length) {
+        out += char;
+        break;
+      }
+      const next = character_at(regex, i2 + 1);
+      i2 += 1 + next.length;
+      if (next === "G") {
+        continue;
+      }
+      const raw_whitespace = RAW_WHITESPACE_ESCAPES.get(next);
+      if (raw_whitespace !== undefined) {
+        emit_atom(raw_whitespace);
+        continue;
+      }
+      const rewrite = ESCAPE_REWRITES.get(next);
+      let replacement;
+      if (rewrite !== undefined) {
+        replacement = rewrite;
+      } else if (/[A-Za-z0-9]/.test(next)) {
+        replacement = `\\${next}`;
+      } else if (JS_SYNTAX_CHARS.includes(next)) {
+        replacement = `\\${next}`;
+      } else {
+        replacement = next;
+      }
+      emit_atom(replacement);
+      continue;
+    }
+    switch (char) {
+      case "[": {
+        const parsed = parse_character_class(regex, i2, ascii_fold);
+        emit_atom(parsed.atom);
+        i2 = parsed.end;
+        continue;
+      }
+      case "]":
+        emit_atom("\\]");
+        ++i2;
+        continue;
+      case ".":
+        emit_atom("[^\\n]");
+        ++i2;
+        continue;
+      case "^":
+        emit_atom(LINE_START_ANCHOR);
+        ++i2;
+        continue;
+      case "$":
+        emit_atom(LINE_END_ANCHOR);
+        ++i2;
+        continue;
+      case "(": {
+        const inline_case_insensitive = regex.startsWith("(?i:", i2);
+        const source_prefix = inline_case_insensitive ? "(?i:" : GROUP_PREFIX_RE.exec(regex.slice(i2))?.[0] ?? "(";
+        const output_prefix = inline_case_insensitive ? "(?:" : source_prefix === "(?>" ? "(?:" : source_prefix;
+        group_states.push([out.length, ascii_fold]);
+        if (inline_case_insensitive)
+          ascii_fold = true;
+        out += output_prefix;
+        last_was_quantifier = false;
+        i2 += source_prefix.length;
+        continue;
+      }
+      case ")":
+        out += char;
+        [atom_start, ascii_fold] = group_states.pop() ?? [-1, false];
+        last_was_quantifier = false;
+        ++i2;
+        continue;
+      case "|":
+        out += char;
+        atom_start = -1;
+        last_was_quantifier = false;
+        ++i2;
+        continue;
+      case "{": {
+        const quant = QUANTIFIER_BRACE_RE.exec(regex.slice(i2));
+        if (!quant || atom_start < 0) {
+          emit_atom("\\{");
+          ++i2;
+          continue;
+        }
+        const body = quant[1].startsWith(",") ? `0${quant[1]}` : quant[1];
+        i2 += quant[0].length;
+        const following = regex[i2];
+        if (following === "+" || following === "*") {
+          out = `${out.slice(0, atom_start)}(?:${out.slice(atom_start)}{${body}})${following}`;
+          ++i2;
+        } else {
+          out += `{${body}}`;
+        }
+        last_was_quantifier = true;
+        continue;
+      }
+      case "}":
+        emit_atom("\\}");
+        ++i2;
+        continue;
+      case "+":
+        if (last_was_quantifier) {
+          ++i2;
+          continue;
+        }
+        out += char;
+        last_was_quantifier = true;
+        ++i2;
+        continue;
+      case "*":
+      case "?":
+        out += char;
+        last_was_quantifier = true;
+        ++i2;
+        continue;
+      default:
+        emit_atom(ascii_fold && is_ascii_letter(char) ? `[${char.toLowerCase()}${char.toUpperCase()}]` : char);
+        i2 += char.length;
+        continue;
+    }
+  }
+  return out;
+}, escape_reg_exp = (string5) => string5.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), fuse_unk = (arr, tokens_to_ids, unk_token_id) => {
+  const fused = [];
+  let i2 = 0;
+  while (i2 < arr.length) {
+    fused.push(arr[i2]);
+    const token_id = tokens_to_ids.get(arr[i2]) ?? unk_token_id;
+    if (token_id !== unk_token_id) {
+      ++i2;
+      continue;
+    }
+    while (++i2 < arr.length && (tokens_to_ids.get(arr[i2]) ?? unk_token_id) === unk_token_id) {
+      if (tokens_to_ids.get(fused.at(-1)) !== unk_token_id) {
+        fused[fused.length - 1] += arr[i2];
+      }
+    }
+  }
+  return fused;
+}, is_chinese_char = (cp) => cp >= 19968 && cp <= 40959 || cp >= 13312 && cp <= 19903 || cp >= 131072 && cp <= 173791 || cp >= 173824 && cp <= 177983 || cp >= 177984 && cp <= 178207 || cp >= 178208 && cp <= 183983 || cp >= 63744 && cp <= 64255 || cp >= 194560 && cp <= 195103, is_integral_number = (x2) => Number.isInteger(x2) || typeof x2 === "bigint", len = (s) => {
+  let length = 0;
+  for (const c of s)
+    ++length;
+  return length;
+}, lowercase_and_remove_accents = (text3) => remove_accents(text3.toLowerCase()), merge_arrays = (...arrs) => Array.prototype.concat.apply([], arrs), object_to_map = (obj) => new Map(Object.entries(obj)), regex_split = (text3, regex) => {
+  const result = [];
+  let prev = 0;
+  for (const match of text3.matchAll(regex)) {
+    const full_match = match[0];
+    if (prev < match.index) {
+      result.push(text3.slice(prev, match.index));
+    }
+    if (full_match.length > 0) {
+      result.push(full_match);
+    }
+    prev = match.index + full_match.length;
+  }
+  if (prev < text3.length) {
+    result.push(text3.slice(prev));
+  }
+  return result;
+}, remove_accents = (text3) => text3.replace(/\p{M}/gu, ""), validate_object = (obj, name, required_keys = []) => {
+  if (!obj || Array.isArray(obj) || typeof obj !== "object") {
+    return `${name} must be a valid object`;
+  }
+  for (const key2 of required_keys) {
+    if (!(key2 in obj)) {
+      return `${name} must contain a "${key2}" property`;
+    }
+  }
+  return null;
+}, whitespace_split = (text3) => text3.match(/\S+/g) || [], Callable = class {
+  constructor() {
+    const closure = function(...args) {
+      return closure._call(...args);
+    };
+    return Object.setPrototypeOf(closure, new.target.prototype);
+  }
+}, Callable_default, Normalizer, Normalizer_default, BertNormalizer, BertNormalizer_default, Precompiled, Precompiled_default, Sequence, Sequence_default, Replace, Replace_default, UnicodeNormalizer, UnicodeNormalizer_default, NFC, NFC_default, NFD, NFD_default, NFKC, NFKC_default, NFKD, NFKD_default, Strip, Strip_default, StripAccents, StripAccents_default, Lowercase, Lowercase_default, Prepend, Prepend_default, create_normalizer_default, PreTokenizer, PreTokenizer_default, BYTES_TO_UNICODE, reverse_dictionary = (data2) => Object.fromEntries(Object.entries(data2).map(([key2, value2]) => [value2, key2])), UNICODE_TO_BYTES, PUNCTUATION_REGEX = "\\p{P}\\u0021-\\u002F\\u003A-\\u0040\\u005B-\\u0060\\u007B-\\u007E", ByteLevel, ByteLevel_default, Whitespace, Whitespace_default, Metaspace, Metaspace_default, Split, Split_default, Punctuation, Punctuation_default, Digits, Digits_default, BertPreTokenizer, BertPreTokenizer_default, Replace2, Replace_default2, Sequence2, Sequence_default2, WhitespaceSplit, WhitespaceSplit_default, FixedLength, FixedLength_default, create_pre_tokenizer_default, TokenizerModel, TokenizerModel_default, WordPieceTokenizer2, WordPiece_default, CharTrieNode = class _CharTrieNode {
+  constructor(is_leaf, children) {
+    this.is_leaf = is_leaf;
+    this.children = children;
+  }
+  static default() {
+    return new _CharTrieNode(false, /* @__PURE__ */ new Map);
+  }
+}, CharTrie = class {
+  constructor() {
+    this.root = CharTrieNode.default();
+  }
+  extend(texts) {
+    for (const text3 of texts) {
+      this.push(text3);
+    }
+  }
+  push(text3) {
+    let node = this.root;
+    for (const ch of text3) {
+      let child2 = node.children.get(ch);
+      if (child2 === undefined) {
+        child2 = CharTrieNode.default();
+        node.children.set(ch, child2);
+      }
+      node = child2;
+    }
+    node.is_leaf = true;
+  }
+  *common_prefix_search(chars, start = 0) {
+    let node = this.root;
+    if (node === undefined)
+      return;
+    let prefix = "";
+    for (let i2 = start;i2 < chars.length; ++i2) {
+      const ch = chars[i2];
+      prefix += ch;
+      node = node.children.get(ch);
+      if (node === undefined)
+        return;
+      if (node.is_leaf) {
+        yield prefix;
+      }
+    }
+  }
+}, CharTrie_default, TokenLatticeNode = class _TokenLatticeNode {
+  constructor(token_id, node_id, pos, length, score) {
+    this.token_id = token_id;
+    this.node_id = node_id;
+    this.pos = pos;
+    this.length = length;
+    this.score = score;
+    this.prev = null;
+    this.backtrace_score = 0;
+  }
+  clone() {
+    const n = new _TokenLatticeNode(this.token_id, this.node_id, this.pos, this.length, this.score);
+    n.prev = this.prev;
+    n.backtrace_score = this.backtrace_score;
+    return n;
+  }
+}, TokenLattice = class {
+  constructor(sentence, bos_token_id, eos_token_id) {
+    this.chars = Array.from(sentence);
+    this.len = this.chars.length;
+    this.bos_token_id = bos_token_id;
+    this.eos_token_id = eos_token_id;
+    this.nodes = [];
+    this.begin_nodes = Array.from({ length: this.len + 1 }, () => []);
+    this.end_nodes = Array.from({ length: this.len + 1 }, () => []);
+    const bos = new TokenLatticeNode(this.bos_token_id ?? 0, 0, 0, 0, 0);
+    const eos = new TokenLatticeNode(this.eos_token_id ?? 0, 1, this.len, 0, 0);
+    this.nodes.push(bos.clone());
+    this.nodes.push(eos.clone());
+    this.begin_nodes[this.len].push(eos);
+    this.end_nodes[0].push(bos);
+  }
+  insert(pos, length, score, token_id) {
+    const node_id = this.nodes.length;
+    const node = new TokenLatticeNode(token_id, node_id, pos, length, score);
+    this.begin_nodes[pos].push(node);
+    this.end_nodes[pos + length].push(node);
+    this.nodes.push(node);
+  }
+  viterbi() {
+    const len2 = this.len;
+    let pos = 0;
+    while (pos <= len2) {
+      if (this.begin_nodes[pos].length == 0) {
+        return [];
+      }
+      for (let rnode of this.begin_nodes[pos]) {
+        rnode.prev = null;
+        let best_score = 0;
+        let best_node = null;
+        for (let lnode of this.end_nodes[pos]) {
+          const score = lnode.backtrace_score + rnode.score;
+          if (best_node === null || score > best_score) {
+            best_node = lnode.clone();
+            best_score = score;
+          }
+        }
+        if (best_node !== null) {
+          rnode.prev = best_node;
+          rnode.backtrace_score = best_score;
+        } else {
+          return [];
+        }
+      }
+      ++pos;
+    }
+    const results = [];
+    const root = this.begin_nodes[len2][0];
+    const prev = root.prev;
+    if (prev === null) {
+      return [];
+    }
+    let node = prev.clone();
+    while (node.prev !== null) {
+      results.push(node.clone());
+      const n = node.clone();
+      node = n.prev.clone();
+    }
+    results.reverse();
+    return results;
+  }
+  piece(node) {
+    return this.chars.slice(node.pos, node.pos + node.length).join("");
+  }
+  tokens() {
+    const nodes = this.viterbi();
+    return nodes.map((x2) => this.piece(x2));
+  }
+  token_ids() {
+    const nodes = this.viterbi();
+    return nodes.map((x2) => x2.token_id);
+  }
+}, TokenLattice_default, Unigram, Unigram_default, PriorityQueue = class {
+  constructor(comparator = (a, b) => a > b, max_size = Infinity) {
+    this._heap = [];
+    this._comparator = comparator;
+    this._max_size = max_size;
+  }
+  get size() {
+    return this._heap.length;
+  }
+  is_empty() {
+    return this.size === 0;
+  }
+  peek() {
+    return this._heap[0];
+  }
+  push(...values) {
+    return this.extend(values);
+  }
+  extend(values) {
+    for (const value2 of values) {
+      if (this.size < this._max_size) {
+        this._heap.push(value2);
+        this._sift_up();
+      } else {
+        const smallest = this._smallest();
+        if (this._comparator(value2, this._heap[smallest])) {
+          this._heap[smallest] = value2;
+          this._sift_up_from(smallest);
+        }
+      }
+    }
+    return this.size;
+  }
+  pop() {
+    const popped_value = this.peek();
+    const bottom = this.size - 1;
+    if (bottom > 0) {
+      this._swap(0, bottom);
+    }
+    this._heap.pop();
+    this._sift_down();
+    return popped_value;
+  }
+  replace(value2) {
+    const replaced_value = this.peek();
+    this._heap[0] = value2;
+    this._sift_down();
+    return replaced_value;
+  }
+  _parent(i2) {
+    return (i2 + 1 >>> 1) - 1;
+  }
+  _left(i2) {
+    return (i2 << 1) + 1;
+  }
+  _right(i2) {
+    return i2 + 1 << 1;
+  }
+  _greater(i2, j) {
+    return this._comparator(this._heap[i2], this._heap[j]);
+  }
+  _swap(i2, j) {
+    const temp = this._heap[i2];
+    this._heap[i2] = this._heap[j];
+    this._heap[j] = temp;
+  }
+  _sift_up() {
+    this._sift_up_from(this.size - 1);
+  }
+  _sift_up_from(node) {
+    while (node > 0 && this._greater(node, this._parent(node))) {
+      this._swap(node, this._parent(node));
+      node = this._parent(node);
+    }
+  }
+  _sift_down() {
+    let node = 0;
+    while (this._left(node) < this.size && this._greater(this._left(node), node) || this._right(node) < this.size && this._greater(this._right(node), node)) {
+      const max_child = this._right(node) < this.size && this._greater(this._right(node), this._left(node)) ? this._right(node) : this._left(node);
+      this._swap(node, max_child);
+      node = max_child;
+    }
+  }
+  _smallest() {
+    return 2 ** Math.floor(Math.log2(this.size)) - 1;
+  }
+}, PriorityQueue_default, LRUCache = class {
+  constructor(capacity) {
+    this.capacity = capacity;
+    this.cache = /* @__PURE__ */ new Map;
+  }
+  get(key2) {
+    if (!this.cache.has(key2))
+      return;
+    const value2 = this.cache.get(key2);
+    this.cache.delete(key2);
+    this.cache.set(key2, value2);
+    return value2;
+  }
+  put(key2, value2) {
+    if (this.cache.has(key2)) {
+      this.cache.delete(key2);
+    }
+    this.cache.set(key2, value2);
+    if (this.cache.size > this.capacity) {
+      this.cache.delete(this.cache.keys().next().value);
+    }
+  }
+  clear() {
+    this.cache.clear();
+  }
+}, LRUCache_default, BPE, BPE_default, Legacy, Legacy_default, create_tokenizer_model_default, PostProcessor, PostProcessor_default, TemplateProcessing, TemplateProcessing_default, ByteLevel2, ByteLevel_default2, BertProcessing, BertProcessing_default, RobertaProcessing, RobertaProcessing_default, Sequence3, Sequence_default3, create_post_processor_default, Decoder, Decoder_default, ByteLevel3, ByteLevel_default3, WordPiece, WordPiece_default2, Metaspace2, Metaspace_default2, BPE2, BPE_default2, CTC, CTC_default, Sequence4, Sequence_default4, Replace3, Replace_default3, Fuse, Fuse_default, Strip2, Strip_default2, ByteFallback, ByteFallback_default, create_decoder_default, Tokenizer2 = class {
+  constructor(tokenizer, config2) {
+    const tokenizer_error = validate_object(tokenizer, "Tokenizer", [
+      "model",
+      "decoder",
+      "post_processor",
+      "pre_tokenizer",
+      "normalizer"
+    ]);
+    if (tokenizer_error) {
+      throw new Error(tokenizer_error);
+    }
+    const config_error = validate_object(config2, "Config");
+    if (config_error) {
+      throw new Error(config_error);
+    }
+    this.tokenizer = tokenizer;
+    this.config = config2;
+    this.normalizer = create_normalizer_default(this.tokenizer.normalizer);
+    this.pre_tokenizer = create_pre_tokenizer_default(this.tokenizer.pre_tokenizer);
+    this.model = create_tokenizer_model_default(this.tokenizer.model, this.config);
+    this.post_processor = create_post_processor_default(this.tokenizer.post_processor);
+    this.decoder = create_decoder_default(this.tokenizer.decoder);
+    this.special_tokens = [];
+    this.all_special_ids = [];
+    this.added_tokens = [];
+    const unnormalized_contents = [];
+    const normalized_contents = [];
+    this.added_tokens_map = /* @__PURE__ */ new Map;
+    for (const added_token of this.tokenizer.added_tokens) {
+      const token = new AddedToken_default(added_token);
+      this.added_tokens.push(token);
+      this.model.tokens_to_ids.set(token.content, token.id);
+      this.model.vocab[token.id] = token.content;
+      if (token.special) {
+        this.special_tokens.push(token.content);
+        this.all_special_ids.push(token.id);
+      }
+      this.added_tokens_map.set(token.content, token);
+      if (token.normalized && this.normalizer !== null) {
+        const normalized_content = this.normalizer(token.content);
+        normalized_contents.push(normalized_content);
+        this.added_tokens_map.set(normalized_content, token);
+      } else {
+        unnormalized_contents.push(token.content);
+      }
+    }
+    (this.config.additional_special_tokens ?? []).forEach((token) => {
+      if (!this.special_tokens.includes(token))
+        this.special_tokens.push(token);
+    });
+    if (this.decoder) {
+      this.decoder.added_tokens = this.added_tokens;
+      this.decoder.end_of_word_suffix = this.model.end_of_word_suffix;
+    }
+    this.splitter_unnormalized = new DictionarySplitter_default(unnormalized_contents);
+    this.splitter_normalized = new DictionarySplitter_default(normalized_contents);
+    this.remove_space = this.config.remove_space;
+    this.clean_up_tokenization_spaces = this.config.clean_up_tokenization_spaces ?? true;
+    this.do_lowercase_and_remove_accent = this.config.do_lowercase_and_remove_accent ?? false;
+  }
+  encode(text3, {
+    text_pair = null,
+    add_special_tokens = true,
+    return_token_type_ids = null
+  } = {}) {
+    const { tokens, token_type_ids } = this.tokenize_helper(text3, {
+      text_pair,
+      add_special_tokens
+    });
+    const input_ids = tokens.map((t) => this.added_tokens_map.get(t)?.id ?? this.model.tokens_to_ids.get(t) ?? this.model.unk_token_id);
+    const result = {
+      ids: input_ids,
+      tokens,
+      attention_mask: new Array(input_ids.length).fill(1)
+    };
+    if (return_token_type_ids && token_type_ids) {
+      result.token_type_ids = token_type_ids;
+    }
+    return result;
+  }
+  decode(token_ids, options = {}) {
+    if (!Array.isArray(token_ids) || token_ids.length === 0 || !is_integral_number(token_ids[0])) {
+      throw Error("token_ids must be a non-empty array of integers.");
+    }
+    let tokens = token_ids.map((i2) => this.model.vocab[Number(i2)] ?? this.model.unk_token);
+    if (options.skip_special_tokens) {
+      tokens = tokens.filter((x2) => !this.special_tokens.includes(x2));
+    }
+    let decoded = this.decoder ? this.decoder(tokens) : tokens.join(" ");
+    if (this.decoder && this.decoder.end_of_word_suffix) {
+      decoded = decoded.replaceAll(this.decoder.end_of_word_suffix, " ");
+      if (options.skip_special_tokens) {
+        decoded = decoded.trim();
+      }
+    }
+    if (options.clean_up_tokenization_spaces ?? this.clean_up_tokenization_spaces) {
+      decoded = clean_up_tokenization(decoded);
+    }
+    return decoded;
+  }
+  tokenize(text3, { text_pair = null, add_special_tokens = false } = {}) {
+    return this.tokenize_helper(text3, { text_pair, add_special_tokens }).tokens;
+  }
+  encode_text(text3) {
+    if (text3 === null) {
+      return null;
+    }
+    const sections = this.splitter_unnormalized.split(text3);
+    sections.forEach((section, i2) => {
+      const added_token = this.added_tokens_map.get(section);
+      if (added_token) {
+        if (added_token.lstrip && i2 > 0) {
+          sections[i2 - 1] = sections[i2 - 1].trimEnd();
+        }
+        if (added_token.rstrip && i2 < sections.length - 1) {
+          sections[i2 + 1] = sections[i2 + 1].trimStart();
+        }
+      }
+    });
+    return sections.flatMap((processed_text, section_index) => {
+      if (processed_text.length === 0) {
+        return [];
+      }
+      if (this.added_tokens_map.has(processed_text)) {
+        return [processed_text];
+      }
+      if (this.remove_space === true) {
+        processed_text = processed_text.trim().split(/\s+/).join(" ");
+      }
+      if (this.do_lowercase_and_remove_accent) {
+        processed_text = lowercase_and_remove_accents(processed_text);
+      }
+      if (this.normalizer !== null) {
+        processed_text = this.normalizer(processed_text);
+      }
+      if (processed_text.length === 0) {
+        return [];
+      }
+      const subsections = this.splitter_normalized.split(processed_text);
+      subsections.forEach((subsection, j) => {
+        const added_token = this.added_tokens_map.get(subsection);
+        if (added_token) {
+          if (added_token.lstrip && j > 0) {
+            subsections[j - 1] = subsections[j - 1].trimEnd();
+          }
+          if (added_token.rstrip && j < subsections.length - 1) {
+            subsections[j + 1] = subsections[j + 1].trimStart();
+          }
+        }
+      });
+      return subsections.flatMap((subsection) => {
+        if (subsection.length === 0) {
+          return [];
+        }
+        if (this.added_tokens_map.has(subsection)) {
+          return [subsection];
+        }
+        const section_tokens = this.pre_tokenizer !== null ? this.pre_tokenizer(subsection, {
+          section_index
+        }) : [subsection];
+        return this.model(section_tokens);
+      });
+    });
+  }
+  tokenize_helper(text3, { text_pair = null, add_special_tokens = true }) {
+    const tokens1 = this.encode_text(text3);
+    const tokens2 = this.encode_text(text_pair || null);
+    return this.post_processor ? this.post_processor(tokens1, tokens2, add_special_tokens) : { tokens: merge_arrays(tokens1 ?? [], tokens2 ?? []) };
+  }
+  token_to_id(token) {
+    return this.model.tokens_to_ids.get(token);
+  }
+  id_to_token(id) {
+    return this.model.vocab[id];
+  }
+  get_added_tokens_decoder() {
+    const decoder = /* @__PURE__ */ new Map;
+    for (const token of this.added_tokens) {
+      decoder.set(token.id, token);
+    }
+    return decoder;
+  }
+  get_vocab(with_added_tokens = true) {
+    const vocab = /* @__PURE__ */ new Map;
+    for (let i2 = 0;i2 < this.model.vocab.length; ++i2) {
+      const token = this.model.vocab[i2];
+      if (with_added_tokens || !this.added_tokens_map.has(token)) {
+        vocab.set(token, i2);
+      }
+    }
+    return vocab;
+  }
+}, Tokenizer_default;
+var init_tokenizers = __esm(() => {
+  DictionarySplitter_default = DictionarySplitter;
+  AddedToken_default = AddedToken;
+  UNICODE_WORD_CHARS = `${UNICODE_WORD_CHARS_IN_CLASS}\\u00B2\\u00B3\\u00B9\\u00BC-\\u00BE`;
+  UNICODE_WORD_CLASS = `[${UNICODE_WORD_CHARS}]`;
+  UNICODE_NON_WORD_CLASS = `[^${UNICODE_WORD_CHARS}]`;
+  UNICODE_WORD_BOUNDARY = `(?:(?<!${UNICODE_WORD_CLASS})(?=${UNICODE_WORD_CLASS})|(?<=${UNICODE_WORD_CLASS})(?!${UNICODE_WORD_CLASS}))`;
+  UNICODE_NON_WORD_BOUNDARY = `(?:(?<!${UNICODE_WORD_CLASS})(?!${UNICODE_WORD_CLASS})|(?<=${UNICODE_WORD_CLASS})(?=${UNICODE_WORD_CLASS}))`;
+  ESCAPE_REWRITES = /* @__PURE__ */ new Map([
+    ["A", "(?<![\\s\\S])"],
+    ["z", "(?![\\s\\S])"],
+    ["Z", "(?=\\n?(?![\\s\\S]))"],
+    ["h", `[${HEX_DIGIT_CHARS}]`],
+    ["H", `[^${HEX_DIGIT_CHARS}]`],
+    ["w", UNICODE_WORD_CLASS],
+    ["W", UNICODE_NON_WORD_CLASS],
+    ["d", "\\p{Nd}"],
+    ["D", "\\P{Nd}"],
+    ["s", "\\p{White_Space}"],
+    ["S", "\\P{White_Space}"],
+    ["b", UNICODE_WORD_BOUNDARY],
+    ["B", UNICODE_NON_WORD_BOUNDARY],
+    ["a", "\\x07"],
+    ["e", "\\x1B"]
+  ]);
+  CLASS_ESCAPE_REWRITES = /* @__PURE__ */ new Map([
+    ["h", HEX_DIGIT_CHARS],
+    ["w", UNICODE_WORD_CHARS_IN_CLASS],
+    ["d", "\\p{Nd}"],
+    ["D", "\\P{Nd}"],
+    ["s", "\\p{White_Space}"],
+    ["S", "\\P{White_Space}"],
+    ["a", "\\x07"],
+    ["e", "\\x1B"]
+  ]);
+  CLASS_COMPLEMENT_ALTERNATIVES = /* @__PURE__ */ new Map([
+    ["W", `[^${UNICODE_WORD_CHARS_IN_CLASS}]`],
+    ["H", `[^${HEX_DIGIT_CHARS}]`]
+  ]);
+  RAW_WHITESPACE_ESCAPES = /* @__PURE__ */ new Map([
+    [`
+`, "\\n"],
+    ["\r", "\\r"],
+    ["\t", "\\t"],
+    ["\f", "\\f"],
+    ["\v", "\\v"]
+  ]);
+  POSIX_CLASS_FRAGMENTS = /* @__PURE__ */ new Map([
+    ["alpha", "\\p{Alphabetic}"],
+    ["alnum", "\\p{Alphabetic}\\p{Nd}"],
+    ["digit", "\\p{Nd}"],
+    ["lower", "\\p{Lowercase}"],
+    ["upper", "\\p{Uppercase}"],
+    ["space", "\\p{White_Space}"],
+    ["blank", "\\t\\p{Zs}"],
+    ["punct", "\\p{P}\\p{S}"],
+    ["cntrl", "\\p{Cc}"],
+    ["word", UNICODE_WORD_CHARS_IN_CLASS],
+    ["xdigit", HEX_DIGIT_CHARS]
+  ]);
+  GROUP_PREFIX_RE = /^\(\?(?:<[=!]|<[A-Za-z_][A-Za-z0-9_]*>|[:=!>])/;
+  BRACED_ESCAPE_RE = /^\\([pPxu])\{([^}]*)\}/;
+  QUANTIFIER_BRACE_RE = /^\{(\d+(?:,\d*)?|,\d+)\}/;
+  POSIX_BRACKET_RE = /^\[:(\^?)(\p{Alphabetic}+):\]/u;
+  EMPTY_NEGATED_POSIX_BRACKET_RE = /^\[:\^:\]/;
+  UNSUPPORTED_POSIX_BRACKET_RE = /^\[(?:\.[^\]]*\.\]|=[^\]]*=\])/;
+  FIXED_WIDTH_ESCAPE_RE = /^(?:\\x[0-9A-Fa-f]{2}|\\u[0-9A-Fa-f]{4}|\\c[A-Za-z])/;
+  Callable_default = Callable;
+  Normalizer = class extends Callable_default {
+    constructor(config2) {
+      super();
+      this.config = config2;
+    }
+    _call(text3) {
+      return this.normalize(text3);
+    }
+  };
+  Normalizer_default = Normalizer;
+  BertNormalizer = class extends Normalizer_default {
+    tokenize_chinese_chars(text3) {
+      const output = [];
+      for (let i2 = 0;i2 < text3.length; ++i2) {
+        const char = text3[i2];
+        const cp = char.charCodeAt(0);
+        if (is_chinese_char(cp)) {
+          output.push(" ");
+          output.push(char);
+          output.push(" ");
+        } else {
+          output.push(char);
+        }
+      }
+      return output.join("");
+    }
+    strip_accents(text3) {
+      return text3.normalize("NFD").replace(/\p{Mn}/gu, "");
+    }
+    is_control(char) {
+      switch (char) {
+        case "\t":
+        case `
+`:
+        case "\r":
+          return false;
+        default:
+          return /^\p{Cc}|\p{Cf}|\p{Co}|\p{Cs}$/u.test(char);
+      }
+    }
+    clean_text(text3) {
+      const output = [];
+      for (const char of text3) {
+        const cp = char.charCodeAt(0);
+        if (cp === 0 || cp === 65533 || this.is_control(char)) {
+          continue;
+        }
+        if (/^\s$/.test(char)) {
+          output.push(" ");
+        } else {
+          output.push(char);
+        }
+      }
+      return output.join("");
+    }
+    normalize(text3) {
+      if (this.config.clean_text) {
+        text3 = this.clean_text(text3);
+      }
+      if (this.config.handle_chinese_chars) {
+        text3 = this.tokenize_chinese_chars(text3);
+      }
+      if (this.config.lowercase) {
+        text3 = text3.toLowerCase();
+        if (this.config.strip_accents !== false) {
+          text3 = this.strip_accents(text3);
+        }
+      } else if (this.config.strip_accents) {
+        text3 = this.strip_accents(text3);
+      }
+      return text3;
+    }
+  };
+  BertNormalizer_default = BertNormalizer;
+  Precompiled = class extends Normalizer_default {
+    constructor(config2) {
+      super(config2);
+      this.charsmap = config2.precompiled_charsmap ?? null;
+    }
+    normalize(text3) {
+      text3 = text3.replace(/[\u0001-\u0008\u000B\u000E-\u001F\u007F\u008F\u009F]/gm, "");
+      text3 = text3.replace(/[\u0009\u000A\u000C\u000D\u00A0\u1680\u2000-\u200F\u2028\u2029\u202F\u205F\u2581\u3000\uFEFF\uFFFD]/gm, " ");
+      if (text3.includes("～")) {
+        const parts = text3.split("～");
+        text3 = parts.map((part) => part.normalize("NFKC")).join("～");
+      } else {
+        text3 = text3.normalize("NFKC");
+      }
+      return text3;
+    }
+  };
+  Precompiled_default = Precompiled;
+  Sequence = class extends Normalizer_default {
+    constructor(config2) {
+      super(config2);
+      this.normalizers = (config2.normalizers ?? []).map((x2) => create_normalizer_default(x2));
+    }
+    normalize(text3) {
+      return this.normalizers.reduce((t, normalizer) => {
+        return normalizer ? normalizer.normalize(t) : t;
+      }, text3);
+    }
+  };
+  Sequence_default = Sequence;
+  Replace = class extends Normalizer_default {
+    constructor(config2) {
+      super(config2);
+      this.pattern = create_pattern(this.config.pattern ?? {});
+    }
+    normalize(text3) {
+      return this.pattern === null ? text3 : text3.replaceAll(this.pattern, this.config.content ?? "");
+    }
+  };
+  Replace_default = Replace;
+  UnicodeNormalizer = class extends Normalizer_default {
+    constructor() {
+      super(...arguments);
+      this.form = "NFC";
+    }
+    normalize(text3) {
+      text3 = text3.normalize(this.form);
+      return text3;
+    }
+  };
+  UnicodeNormalizer_default = UnicodeNormalizer;
+  NFC = class extends UnicodeNormalizer_default {
+    constructor() {
+      super(...arguments);
+      this.form = "NFC";
+    }
+  };
+  NFC_default = NFC;
+  NFD = class extends UnicodeNormalizer_default {
+    constructor() {
+      super(...arguments);
+      this.form = "NFD";
+    }
+  };
+  NFD_default = NFD;
+  NFKC = class extends UnicodeNormalizer_default {
+    constructor() {
+      super(...arguments);
+      this.form = "NFKC";
+    }
+  };
+  NFKC_default = NFKC;
+  NFKD = class extends UnicodeNormalizer_default {
+    constructor() {
+      super(...arguments);
+      this.form = "NFKD";
+    }
+  };
+  NFKD_default = NFKD;
+  Strip = class extends Normalizer_default {
+    normalize(text3) {
+      if (this.config.strip_left && this.config.strip_right) {
+        text3 = text3.trim();
+      } else {
+        if (this.config.strip_left) {
+          text3 = text3.trimStart();
+        }
+        if (this.config.strip_right) {
+          text3 = text3.trimEnd();
+        }
+      }
+      return text3;
+    }
+  };
+  Strip_default = Strip;
+  StripAccents = class extends Normalizer_default {
+    normalize(text3) {
+      return remove_accents(text3);
+    }
+  };
+  StripAccents_default = StripAccents;
+  Lowercase = class extends Normalizer_default {
+    normalize(text3) {
+      return text3.toLowerCase();
+    }
+  };
+  Lowercase_default = Lowercase;
+  Prepend = class extends Normalizer_default {
+    normalize(text3) {
+      text3 = this.config.prepend + text3;
+      return text3;
+    }
+  };
+  Prepend_default = Prepend;
+  create_normalizer_default = create_normalizer;
+  PreTokenizer = class extends Callable_default {
+    pre_tokenize(text3, options) {
+      return (Array.isArray(text3) ? text3.map((x2) => this.pre_tokenize_text(x2, options)) : this.pre_tokenize_text(text3, options)).flat();
+    }
+    _call(text3, options) {
+      return this.pre_tokenize(text3, options);
+    }
+  };
+  PreTokenizer_default = PreTokenizer;
+  BYTES_TO_UNICODE = (() => {
+    const bs = [
+      ...Array.from({ length: 126 - 33 + 1 }, (_, i2) => i2 + 33),
+      ...Array.from({ length: "¬".charCodeAt(0) - "¡".charCodeAt(0) + 1 }, (_, i2) => i2 + "¡".charCodeAt(0)),
+      ...Array.from({ length: "ÿ".charCodeAt(0) - "®".charCodeAt(0) + 1 }, (_, i2) => i2 + "®".charCodeAt(0))
+    ];
+    const cs = bs.slice();
+    let n = 0;
+    for (let b = 0;b < 256; ++b) {
+      if (!bs.includes(b)) {
+        bs.push(b);
+        cs.push(256 + n);
+        n += 1;
+      }
+    }
+    const ccs = cs.map((n2) => String.fromCharCode(n2));
+    return Object.fromEntries(bs.map((b, i2) => [b, ccs[i2]]));
+  })();
+  UNICODE_TO_BYTES = reverse_dictionary(BYTES_TO_UNICODE);
+  ByteLevel = class extends PreTokenizer_default {
+    constructor(config2) {
+      super();
+      this.config = config2;
+      this.add_prefix_space = this.config.add_prefix_space ?? false;
+      this.trim_offsets = this.config.trim_offsets ?? false;
+      this.use_regex = this.config.use_regex ?? true;
+      this.pattern = /'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+/gu;
+      this.byte_encoder = BYTES_TO_UNICODE;
+      this.text_encoder = new TextEncoder;
+    }
+    pre_tokenize_text(text3, options) {
+      if (this.add_prefix_space && !text3.startsWith(" ")) {
+        text3 = " " + text3;
+      }
+      const tokens = this.use_regex ? text3.match(this.pattern) || [] : [text3];
+      return tokens.map((token) => Array.from(this.text_encoder.encode(token), (byte) => this.byte_encoder[byte]).join(""));
+    }
+  };
+  ByteLevel_default = ByteLevel;
+  Whitespace = class extends PreTokenizer_default {
+    pre_tokenize_text(text3, options) {
+      return text3.match(/\w+|[^\w\s]+/g) || [];
+    }
+  };
+  Whitespace_default = Whitespace;
+  Metaspace = class extends PreTokenizer_default {
+    constructor(config2) {
+      super();
+      this.replacement = config2.replacement ?? "▁";
+      this.str_rep = config2.str_rep || this.replacement;
+      this.prepend_scheme = config2.prepend_scheme ?? "always";
+    }
+    pre_tokenize_text(text3, options) {
+      const { section_index = undefined } = options ?? {};
+      let normalized = text3.replaceAll(" ", this.str_rep);
+      if (!normalized.startsWith(this.replacement) && (this.prepend_scheme === "always" || this.prepend_scheme === "first" && section_index === 0)) {
+        normalized = this.str_rep + normalized;
+      }
+      return [normalized];
+    }
+  };
+  Metaspace_default = Metaspace;
+  Split = class extends PreTokenizer_default {
+    constructor(config2) {
+      super();
+      this.config = config2;
+      this.pattern = create_pattern(this.config.pattern ?? {}, this.config.invert ?? true);
+    }
+    pre_tokenize_text(text3) {
+      if (this.pattern === null) {
+        return [];
+      }
+      if (this.config.invert) {
+        return (text3.match(this.pattern) || []).filter((x2) => x2);
+      } else if (this.config.behavior?.toLowerCase() === "removed") {
+        return text3.split(this.pattern).filter((x2) => x2);
+      } else {
+        return regex_split(text3, this.pattern);
+      }
+    }
+  };
+  Split_default = Split;
+  Punctuation = class extends PreTokenizer_default {
+    constructor(config2) {
+      super();
+      this.config = config2;
+      this.pattern = new RegExp(`[^${PUNCTUATION_REGEX}]+|[${PUNCTUATION_REGEX}]+`, "gu");
+    }
+    pre_tokenize_text(text3) {
+      return text3.match(this.pattern) || [];
+    }
+  };
+  Punctuation_default = Punctuation;
+  Digits = class extends PreTokenizer_default {
+    constructor(config2) {
+      super();
+      this.config = config2;
+      const digit_pattern = `[^\\d]+|\\d${this.config.individual_digits ? "" : "+"}`;
+      this.pattern = new RegExp(digit_pattern, "gu");
+    }
+    pre_tokenize_text(text3) {
+      return text3.match(this.pattern) || [];
+    }
+  };
+  Digits_default = Digits;
+  BertPreTokenizer = class extends PreTokenizer_default {
+    constructor() {
+      super();
+      this.pattern = new RegExp(`[^\\s${PUNCTUATION_REGEX}]+|[${PUNCTUATION_REGEX}]`, "gu");
+    }
+    pre_tokenize_text(text3, options) {
+      return text3.trim().match(this.pattern) || [];
+    }
+  };
+  BertPreTokenizer_default = BertPreTokenizer;
+  Replace2 = class extends PreTokenizer_default {
+    constructor(config2) {
+      super();
+      this.config = config2;
+      this.pattern = create_pattern(this.config.pattern ?? {});
+      this.content = this.config.content ?? "";
+    }
+    pre_tokenize_text(text3) {
+      if (this.pattern === null) {
+        return [text3];
+      }
+      return [text3.replaceAll(this.pattern, this.config.content ?? "")];
+    }
+  };
+  Replace_default2 = Replace2;
+  Sequence2 = class extends PreTokenizer_default {
+    constructor(config2) {
+      super();
+      this.tokenizers = (config2.pretokenizers ?? []).map((x2) => create_pre_tokenizer_default(x2));
+    }
+    pre_tokenize_text(text3, options) {
+      return this.tokenizers.reduce((pre_tokenized_text, tokenizer) => {
+        return tokenizer ? tokenizer.pre_tokenize(pre_tokenized_text, options) : pre_tokenized_text;
+      }, [text3]);
+    }
+  };
+  Sequence_default2 = Sequence2;
+  WhitespaceSplit = class extends PreTokenizer_default {
+    pre_tokenize_text(text3) {
+      return whitespace_split(text3);
+    }
+  };
+  WhitespaceSplit_default = WhitespaceSplit;
+  FixedLength = class extends PreTokenizer_default {
+    constructor(config2) {
+      super();
+      this.config = config2;
+      this._length = config2.length;
+    }
+    pre_tokenize_text(text3) {
+      const tokens = [];
+      for (let i2 = 0;i2 < text3.length; i2 += this._length) {
+        tokens.push(text3.slice(i2, i2 + this._length));
+      }
+      return tokens;
+    }
+  };
+  FixedLength_default = FixedLength;
+  create_pre_tokenizer_default = create_pre_tokenizer;
+  TokenizerModel = class extends Callable_default {
+    constructor(config2) {
+      super();
+      this.config = config2;
+      this.vocab = [];
+      this.tokens_to_ids = /* @__PURE__ */ new Map;
+      this.unk_token_id = undefined;
+      this.unk_token = undefined;
+      this.end_of_word_suffix = undefined;
+      this.fuse_unk = this.config.fuse_unk ?? false;
+    }
+    _call(tokens) {
+      let result = this.encode(tokens);
+      if (this.fuse_unk) {
+        result = fuse_unk(result, this.tokens_to_ids, this.unk_token_id);
+      }
+      return result;
+    }
+  };
+  TokenizerModel_default = TokenizerModel;
+  WordPieceTokenizer2 = class extends TokenizerModel_default {
+    constructor(config2) {
+      super(config2);
+      this.max_input_chars_per_word = 100;
+      this.tokens_to_ids = object_to_map(config2.vocab);
+      this.unk_token_id = this.tokens_to_ids.get(config2.unk_token);
+      this.unk_token = config2.unk_token;
+      this.max_input_chars_per_word = config2.max_input_chars_per_word ?? 100;
+      this.vocab = new Array(this.tokens_to_ids.size);
+      for (const [key2, value2] of this.tokens_to_ids) {
+        this.vocab[value2] = key2;
+      }
+    }
+    encode(tokens) {
+      const output_tokens = [];
+      for (const token of tokens) {
+        const chars = [...token];
+        if (chars.length > this.max_input_chars_per_word) {
+          output_tokens.push(this.unk_token);
+          continue;
+        }
+        let is_unknown = false;
+        let start = 0;
+        const sub_tokens = [];
+        while (start < chars.length) {
+          let end = chars.length;
+          let current_substring = null;
+          while (start < end) {
+            let substr = chars.slice(start, end).join("");
+            if (start > 0) {
+              substr = this.config.continuing_subword_prefix + substr;
+            }
+            if (this.tokens_to_ids.has(substr)) {
+              current_substring = substr;
+              break;
+            }
+            --end;
+          }
+          if (current_substring === null) {
+            is_unknown = true;
+            break;
+          }
+          sub_tokens.push(current_substring);
+          start = end;
+        }
+        if (is_unknown) {
+          output_tokens.push(this.unk_token);
+        } else {
+          output_tokens.push(...sub_tokens);
+        }
+      }
+      return output_tokens;
+    }
+  };
+  WordPiece_default = WordPieceTokenizer2;
+  CharTrie_default = CharTrie;
+  TokenLattice_default = TokenLattice;
+  Unigram = class extends TokenizerModel_default {
+    constructor(config2, eos_token) {
+      super(config2);
+      const vocab_size = config2.vocab.length;
+      this.vocab = new Array(vocab_size);
+      this.scores = new Array(vocab_size);
+      for (let i2 = 0;i2 < vocab_size; ++i2) {
+        [this.vocab[i2], this.scores[i2]] = config2.vocab[i2];
+      }
+      this.unk_token_id = config2.unk_id;
+      this.unk_token = this.vocab[config2.unk_id];
+      this.tokens_to_ids = new Map(this.vocab.map((x2, i2) => [x2, i2]));
+      this.bos_token = " ";
+      this.bos_token_id = this.tokens_to_ids.get(this.bos_token);
+      this.eos_token = eos_token;
+      this.eos_token_id = this.tokens_to_ids.get(this.eos_token);
+      this.unk_token = this.vocab[this.unk_token_id];
+      this.min_score = min(this.scores)[0];
+      this.unk_score = this.min_score - 10;
+      this.scores[this.unk_token_id] = this.unk_score;
+      this.trie = new CharTrie_default;
+      this.trie.extend(this.vocab);
+      this.fuse_unk = true;
+    }
+    populate_nodes(lattice) {
+      const chars = lattice.chars;
+      const mblen = 1;
+      let begin_pos = 0;
+      while (begin_pos < chars.length) {
+        let has_single_node = false;
+        const prefixed_tokens = this.trie.common_prefix_search(chars, begin_pos);
+        for (const token of prefixed_tokens) {
+          const token_id = this.tokens_to_ids.get(token);
+          const token_score = this.scores[token_id];
+          const n = len(token);
+          lattice.insert(begin_pos, n, token_score, token_id);
+          if (!has_single_node && n === mblen) {
+            has_single_node = true;
+          }
+        }
+        if (!has_single_node) {
+          lattice.insert(begin_pos, mblen, this.unk_score, this.unk_token_id);
+        }
+        begin_pos += mblen;
+      }
+    }
+    tokenize(normalized) {
+      const lattice = new TokenLattice_default(normalized, this.bos_token_id, this.eos_token_id);
+      this.populate_nodes(lattice);
+      return lattice.tokens();
+    }
+    encode(tokens) {
+      const to_return = [];
+      for (const token of tokens) {
+        const tokenized = this.tokenize(token);
+        to_return.push(...tokenized);
+      }
+      return to_return;
+    }
+  };
+  Unigram_default = Unigram;
+  PriorityQueue_default = PriorityQueue;
+  LRUCache_default = LRUCache;
+  BPE = class extends TokenizerModel_default {
+    constructor(config2) {
+      super(config2);
+      this.tokens_to_ids = object_to_map(config2.vocab);
+      this.unk_token_id = this.tokens_to_ids.get(config2.unk_token);
+      this.unk_token = config2.unk_token;
+      this.vocab = new Array(this.tokens_to_ids.size);
+      for (const [key2, value2] of this.tokens_to_ids) {
+        this.vocab[value2] = key2;
+      }
+      const use_new_merge_format = Array.isArray(config2.merges[0]);
+      this.merges = use_new_merge_format ? config2.merges : config2.merges.map((x2) => x2.split(" ", 2));
+      this.bpe_ranks = new Map(this.merges.map((x2, i2) => [JSON.stringify(x2), i2]));
+      this.end_of_word_suffix = config2.end_of_word_suffix;
+      this.continuing_subword_suffix = config2.continuing_subword_suffix ?? null;
+      this.byte_fallback = this.config.byte_fallback ?? false;
+      if (this.byte_fallback) {
+        this.text_encoder = new TextEncoder;
+      }
+      this.ignore_merges = this.config.ignore_merges ?? false;
+      this.max_length_to_cache = 256;
+      this.cache_capacity = 1e4;
+      this.cache = new LRUCache_default(this.cache_capacity);
+    }
+    clear_cache() {
+      this.cache.clear();
+    }
+    bpe(token) {
+      if (token.length === 0) {
+        return [];
+      }
+      const cached3 = this.cache.get(token);
+      if (cached3 !== undefined) {
+        return cached3;
+      }
+      const word = Array.from(token);
+      if (this.end_of_word_suffix) {
+        word[word.length - 1] += this.end_of_word_suffix;
+      }
+      let result = [];
+      if (word.length > 1) {
+        const queue = new PriorityQueue_default((a, b) => a.score < b.score);
+        let starting_node = {
+          token: word[0],
+          bias: 0,
+          prev: null,
+          next: null
+        };
+        let previous_node = starting_node;
+        for (let i2 = 1;i2 < word.length; ++i2) {
+          const current_node = {
+            bias: i2 / word.length,
+            token: word[i2],
+            prev: previous_node,
+            next: null
+          };
+          previous_node.next = current_node;
+          this.add_node(queue, previous_node);
+          previous_node = current_node;
+        }
+        while (!queue.is_empty()) {
+          const node = queue.pop();
+          if (node.deleted || !node.next || node.next.deleted)
+            continue;
+          node.deleted = true;
+          node.next.deleted = true;
+          if (node.prev) {
+            const new_previous_node = { ...node.prev };
+            node.prev.deleted = true;
+            node.prev = new_previous_node;
+            if (new_previous_node.prev) {
+              new_previous_node.prev.next = new_previous_node;
+            } else {
+              starting_node = new_previous_node;
+            }
+          }
+          const merged = {
+            token: node.token + node.next.token,
+            bias: node.bias,
+            prev: node.prev,
+            next: node.next.next
+          };
+          if (merged.prev) {
+            merged.prev.next = merged;
+            this.add_node(queue, merged.prev);
+          } else {
+            starting_node = merged;
+          }
+          if (merged.next) {
+            merged.next.prev = merged;
+            this.add_node(queue, merged);
+          }
+        }
+        for (let current_node = starting_node;current_node !== null; current_node = current_node.next) {
+          result.push(current_node.token);
+        }
+      } else {
+        result = word;
+      }
+      if (this.continuing_subword_suffix) {
+        for (let i2 = 0;i2 < result.length - 1; ++i2) {
+          result[i2] += this.continuing_subword_suffix;
+        }
+      }
+      if (token.length < this.max_length_to_cache) {
+        this.cache.put(token, result);
+      }
+      return result;
+    }
+    add_node(queue, node) {
+      const rank = this.bpe_ranks.get(JSON.stringify([node.token, node.next.token]));
+      if (rank !== undefined) {
+        node.score = rank + node.bias;
+        queue.push(node);
+      }
+    }
+    encode(tokens) {
+      const output_tokens = [];
+      for (const token of tokens) {
+        if (this.ignore_merges && this.tokens_to_ids.has(token)) {
+          output_tokens.push(token);
+          continue;
+        }
+        const bpe_token_list = this.bpe(token);
+        for (const t of bpe_token_list) {
+          if (this.tokens_to_ids.has(t)) {
+            output_tokens.push(t);
+          } else if (this.byte_fallback) {
+            const byte_tokens = Array.from(this.text_encoder.encode(t)).map((x2) => `<0x${x2.toString(16).toUpperCase().padStart(2, "0")}>`);
+            if (byte_tokens.every((x2) => this.tokens_to_ids.has(x2))) {
+              output_tokens.push(...byte_tokens);
+            } else if (this.unk_token != null) {
+              output_tokens.push(this.unk_token);
+            }
+          } else if (this.unk_token != null) {
+            output_tokens.push(this.unk_token);
+          }
+        }
+      }
+      return output_tokens;
+    }
+  };
+  BPE_default = BPE;
+  Legacy = class extends TokenizerModel_default {
+    constructor(config2, more_config) {
+      super(config2);
+      const vocab = config2.vocab;
+      this.tokens_to_ids = object_to_map(more_config.target_lang ? vocab[more_config.target_lang] : vocab);
+      this.bos_token = more_config.bos_token;
+      this.bos_token_id = this.tokens_to_ids.get(this.bos_token);
+      this.eos_token = more_config.eos_token;
+      this.eos_token_id = this.tokens_to_ids.get(this.eos_token);
+      this.pad_token = more_config.pad_token;
+      this.pad_token_id = this.tokens_to_ids.get(this.pad_token);
+      this.unk_token = more_config.unk_token;
+      this.unk_token_id = this.tokens_to_ids.get(this.unk_token);
+      this.vocab = new Array(this.tokens_to_ids.size);
+      for (const [key2, value2] of this.tokens_to_ids) {
+        this.vocab[value2] = key2;
+      }
+    }
+    encode(tokens) {
+      return tokens;
+    }
+  };
+  Legacy_default = Legacy;
+  create_tokenizer_model_default = create_tokenizer_model;
+  PostProcessor = class extends Callable_default {
+    constructor(config2) {
+      super();
+      this.config = config2;
+    }
+    _call(tokens, ...args) {
+      return this.post_process(tokens, ...args);
+    }
+  };
+  PostProcessor_default = PostProcessor;
+  TemplateProcessing = class extends PostProcessor_default {
+    post_process(tokens, tokens_pair = null, add_special_tokens = true) {
+      const type = tokens_pair === null ? this.config.single : this.config.pair;
+      let processed_tokens = [];
+      let types = [];
+      for (const item of type) {
+        if ("SpecialToken" in item) {
+          if (add_special_tokens) {
+            processed_tokens.push(item.SpecialToken.id);
+            types.push(item.SpecialToken.type_id);
+          }
+        } else if ("Sequence" in item) {
+          if (item.Sequence.id === "A") {
+            processed_tokens = merge_arrays(processed_tokens, tokens);
+            types = merge_arrays(types, new Array(tokens.length).fill(item.Sequence.type_id));
+          } else if (item.Sequence.id === "B") {
+            processed_tokens = merge_arrays(processed_tokens, tokens_pair);
+            types = merge_arrays(types, new Array(tokens_pair.length).fill(item.Sequence.type_id));
+          }
+        }
+      }
+      return { tokens: processed_tokens, token_type_ids: types };
+    }
+  };
+  TemplateProcessing_default = TemplateProcessing;
+  ByteLevel2 = class extends PostProcessor_default {
+    post_process(tokens, tokens_pair = null) {
+      return { tokens, tokens_pair };
+    }
+  };
+  ByteLevel_default2 = ByteLevel2;
+  BertProcessing = class extends PostProcessor_default {
+    constructor(config2) {
+      super(config2);
+      this.sep = config2.sep;
+      this.cls = config2.cls;
+    }
+    post_process(tokens, tokens_pair = null, add_special_tokens = true) {
+      if (add_special_tokens) {
+        tokens = merge_arrays([this.cls[0]], tokens, [this.sep[0]]);
+      }
+      let token_type_ids = new Array(tokens.length).fill(0);
+      if (tokens_pair) {
+        const middle = [];
+        const after = add_special_tokens ? [this.sep[0]] : [];
+        tokens = merge_arrays(tokens, middle, tokens_pair, after);
+        token_type_ids = merge_arrays(token_type_ids, new Array(tokens_pair.length + middle.length + after.length).fill(1));
+      }
+      return { tokens, token_type_ids };
+    }
+  };
+  BertProcessing_default = BertProcessing;
+  RobertaProcessing = class extends PostProcessor_default {
+    constructor(config2) {
+      super(config2);
+      this.sep = config2.sep;
+      this.cls = config2.cls;
+    }
+    post_process(tokens, tokens_pair, add_special_tokens = true) {
+      if (add_special_tokens) {
+        tokens = merge_arrays([this.cls[0]], tokens, [this.sep[0]]);
+      }
+      let token_type_ids = new Array(tokens.length).fill(0);
+      if (tokens_pair) {
+        const middle = add_special_tokens ? [this.sep[0]] : [];
+        const after = add_special_tokens ? [this.sep[0]] : [];
+        tokens = merge_arrays(tokens, middle, tokens_pair, after);
+        token_type_ids = merge_arrays(token_type_ids, new Array(tokens_pair.length + middle.length + after.length).fill(1));
+      }
+      return { tokens, token_type_ids };
+    }
+  };
+  RobertaProcessing_default = RobertaProcessing;
+  Sequence3 = class extends PostProcessor_default {
+    constructor(config2) {
+      super(config2);
+      this.processors = (config2.processors ?? []).map((x2) => create_post_processor_default(x2));
+    }
+    post_process(tokens, tokens_pair = null, add_special_tokens = true) {
+      let processed_tokens = { tokens, tokens_pair };
+      for (const processor of this.processors) {
+        processed_tokens = processor.post_process(processed_tokens.tokens, processed_tokens.tokens_pair, add_special_tokens);
+      }
+      return processed_tokens;
+    }
+  };
+  Sequence_default3 = Sequence3;
+  create_post_processor_default = create_post_processor;
+  Decoder = class extends Callable_default {
+    constructor(config2) {
+      super();
+      this.config = config2;
+      this.added_tokens = [];
+      this.end_of_word_suffix = null;
+      this.trim_offsets = "trim_offsets" in config2 ? config2.trim_offsets : false;
+    }
+    _call(tokens) {
+      return this.decode(tokens);
+    }
+    decode(tokens) {
+      return this.decode_chain(tokens).join("");
+    }
+  };
+  Decoder_default = Decoder;
+  ByteLevel3 = class extends Decoder_default {
+    constructor(config2) {
+      super(config2);
+      this.byte_decoder = UNICODE_TO_BYTES;
+      this.text_decoder = new TextDecoder("utf-8", {
+        fatal: false,
+        ignoreBOM: true
+      });
+      this.end_of_word_suffix = null;
+    }
+    convert_tokens_to_string(tokens) {
+      const text3 = tokens.join("");
+      const byte_array = new Uint8Array([...text3].map((c) => this.byte_decoder[c]));
+      return this.text_decoder.decode(byte_array);
+    }
+    decode_chain(tokens) {
+      const sub_texts = [];
+      let current_sub_text = [];
+      for (const token of tokens) {
+        if (this.added_tokens.find((x2) => x2.content === token) !== undefined) {
+          if (current_sub_text.length > 0) {
+            sub_texts.push(this.convert_tokens_to_string(current_sub_text));
+            current_sub_text = [];
+          }
+          sub_texts.push(token);
+        } else {
+          current_sub_text.push(token);
+        }
+      }
+      if (current_sub_text.length > 0) {
+        sub_texts.push(this.convert_tokens_to_string(current_sub_text));
+      }
+      return sub_texts;
+    }
+  };
+  ByteLevel_default3 = ByteLevel3;
+  WordPiece = class extends Decoder_default {
+    constructor(config2) {
+      super(config2);
+      this.cleanup = config2.cleanup;
+    }
+    decode_chain(tokens) {
+      return tokens.map((token, i2) => {
+        if (i2 !== 0) {
+          const prefix = this.config.prefix;
+          if (prefix && token.startsWith(prefix)) {
+            token = token.replace(prefix, "");
+          } else {
+            token = " " + token;
+          }
+        }
+        if (this.cleanup) {
+          token = clean_up_tokenization(token);
+        }
+        return token;
+      });
+    }
+  };
+  WordPiece_default2 = WordPiece;
+  Metaspace2 = class extends Decoder_default {
+    constructor(config2) {
+      super(config2);
+      this.replacement = config2.replacement ?? "▁";
+    }
+    decode_chain(tokens) {
+      const result = [];
+      for (let i2 = 0;i2 < tokens.length; ++i2) {
+        let normalized = tokens[i2].replaceAll(this.replacement, " ");
+        if (i2 == 0 && normalized.startsWith(" ")) {
+          normalized = normalized.substring(1);
+        }
+        result.push(normalized);
+      }
+      return result;
+    }
+  };
+  Metaspace_default2 = Metaspace2;
+  BPE2 = class extends Decoder_default {
+    constructor(config2) {
+      super(config2);
+      this.suffix = config2.suffix ?? "";
+    }
+    decode_chain(tokens) {
+      return tokens.map((token, i2) => {
+        return token.replaceAll(this.suffix, i2 === tokens.length - 1 ? "" : " ");
+      });
+    }
+  };
+  BPE_default2 = BPE2;
+  CTC = class extends Decoder_default {
+    constructor(config2) {
+      super(config2);
+      this.pad_token = config2.pad_token ?? "";
+      this.word_delimiter_token = config2.word_delimiter_token ?? "";
+      this.cleanup = config2.cleanup;
+    }
+    convert_tokens_to_string(tokens) {
+      if (tokens.length === 0)
+        return "";
+      const grouped_tokens = [tokens[0]];
+      for (let i2 = 1;i2 < tokens.length; ++i2) {
+        if (tokens[i2] !== grouped_tokens.at(-1)) {
+          grouped_tokens.push(tokens[i2]);
+        }
+      }
+      const filtered_tokens = grouped_tokens.filter((token) => token !== this.pad_token);
+      let text3 = filtered_tokens.join("");
+      if (this.cleanup) {
+        text3 = clean_up_tokenization(text3).replaceAll(this.word_delimiter_token, " ").trim();
+      }
+      return text3;
+    }
+    decode_chain(tokens) {
+      return [this.convert_tokens_to_string(tokens)];
+    }
+  };
+  CTC_default = CTC;
+  Sequence4 = class extends Decoder_default {
+    constructor(config2) {
+      super(config2);
+      this.decoders = (config2.decoders ?? []).map((x2) => create_decoder_default(x2));
+    }
+    decode_chain(tokens) {
+      return this.decoders.reduce((toks, decoder) => {
+        return decoder.decode_chain(toks);
+      }, tokens);
+    }
+  };
+  Sequence_default4 = Sequence4;
+  Replace3 = class extends Decoder_default {
+    constructor(config2) {
+      super(config2);
+      this.pattern = create_pattern(this.config.pattern);
+    }
+    decode_chain(tokens) {
+      const content = this.config.content ?? "";
+      const pattern = this.pattern;
+      return pattern === null ? tokens : tokens.map((token) => token.replaceAll(pattern, content));
+    }
+  };
+  Replace_default3 = Replace3;
+  Fuse = class extends Decoder_default {
+    decode_chain(tokens) {
+      return [tokens.join("")];
+    }
+  };
+  Fuse_default = Fuse;
+  Strip2 = class extends Decoder_default {
+    constructor(config2) {
+      super(config2);
+      this.content = config2.content ?? "";
+      this.start = config2.start ?? 0;
+      this.stop = config2.stop ?? 0;
+    }
+    decode_chain(tokens) {
+      return tokens.map((token) => {
+        let start_cut = 0;
+        for (let i2 = 0;i2 < this.start; ++i2) {
+          if (token[i2] === this.content) {
+            start_cut = i2 + 1;
+            continue;
+          } else {
+            break;
+          }
+        }
+        let stop_cut = token.length;
+        for (let i2 = 0;i2 < this.stop; ++i2) {
+          const index = token.length - i2 - 1;
+          if (token[index] === this.content) {
+            stop_cut = index;
+            continue;
+          } else {
+            break;
+          }
+        }
+        return token.slice(start_cut, stop_cut);
+      });
+    }
+  };
+  Strip_default2 = Strip2;
+  ByteFallback = class extends Decoder_default {
+    constructor(config2) {
+      super(config2);
+      this.text_decoder = new TextDecoder;
+    }
+    decode_chain(tokens) {
+      const new_tokens = [];
+      let previous_byte_tokens = [];
+      for (const token of tokens) {
+        let bytes = null;
+        if (token.length === 6 && token.startsWith("<0x") && token.endsWith(">")) {
+          const byte = parseInt(token.slice(3, 5), 16);
+          if (!isNaN(byte)) {
+            bytes = byte;
+          }
+        }
+        if (bytes !== null) {
+          previous_byte_tokens.push(bytes);
+        } else {
+          if (previous_byte_tokens.length > 0) {
+            const string5 = this.text_decoder.decode(Uint8Array.from(previous_byte_tokens));
+            new_tokens.push(string5);
+            previous_byte_tokens = [];
+          }
+          new_tokens.push(token);
+        }
+      }
+      if (previous_byte_tokens.length > 0) {
+        const string5 = this.text_decoder.decode(Uint8Array.from(previous_byte_tokens));
+        new_tokens.push(string5);
+        previous_byte_tokens = [];
+      }
+      return new_tokens;
+    }
+  };
+  ByteFallback_default = ByteFallback;
+  create_decoder_default = create_decoder;
+  Tokenizer_default = Tokenizer2;
+});
+
+// src/workers/source-index/built-in-embedding/precompiled-charsmap.ts
+var CharsmapNormalizer;
+var init_precompiled_charsmap = __esm(() => {
+  init_tokenizers();
+  CharsmapNormalizer = class CharsmapNormalizer extends Precompiled_default {
+    trie;
+    replacements;
+    graphemes = new Intl.Segmenter("und", { granularity: "grapheme" });
+    constructor(charsmap) {
+      super({ type: "Precompiled", precompiled_charsmap: charsmap });
+      const data2 = Buffer.from(charsmap, "base64");
+      if (data2.length < 8)
+        throw new Error("Invalid precompiled character map.");
+      const bytes = data2.readUInt32LE(0);
+      if (bytes < 4 || bytes % 4 || bytes + 4 >= data2.length)
+        throw new Error("Invalid precompiled character map.");
+      this.trie = new Uint32Array(bytes / 4);
+      for (let i2 = 0;i2 < this.trie.length; i2 += 1)
+        this.trie[i2] = data2.readUInt32LE(4 + i2 * 4);
+      this.replacements = data2.subarray(4 + bytes);
+    }
+    transform(text3) {
+      const offset = (unit) => unit >>> 10 << ((unit & 512) >>> 6) >>> 0;
+      let node = offset(this.trie[0]);
+      for (const byte of Buffer.from(text3, "utf8")) {
+        if (byte === 0)
+          break;
+        node = (node ^ byte) >>> 0;
+        const unit = this.trie[node];
+        if (unit === undefined || (unit & 2147483903) >>> 0 !== byte)
+          return;
+        node = (node ^ offset(unit)) >>> 0;
+        if (unit & 256) {
+          const leaf = this.trie[node];
+          if (leaf === undefined)
+            throw new Error("Invalid precompiled character map leaf.");
+          const start = leaf & 2147483647;
+          const end = this.replacements.indexOf(0, start);
+          if (end < 0)
+            throw new Error("Invalid precompiled character map replacement.");
+          return this.replacements.toString("utf8", start, end);
+        }
+      }
+      return;
+    }
+    normalize(text3) {
+      let result = "";
+      for (const { segment } of this.graphemes.segment(text3)) {
+        const mapped = Buffer.byteLength(segment) < 6 ? this.transform(segment) : undefined;
+        result += mapped ?? Array.from(segment, (char) => this.transform(char) ?? char).join("");
+      }
+      return result;
+    }
+  };
+});
+
+// src/workers/source-index/built-in-embedding/json-tokenizer.ts
+function exactCharsmaps(normalizer) {
+  if (normalizer instanceof Precompiled_default)
+    return new CharsmapNormalizer(normalizer.charsmap);
+  if (normalizer instanceof Sequence_default)
+    normalizer.normalizers = normalizer.normalizers.map(exactCharsmaps);
+  return normalizer;
+}
+
+class JsonPairTokenizer {
+  tokenizer;
+  specialCount;
+  padId;
+  constructor(json) {
+    const data2 = JSON.parse(json);
+    if (data2.model?.type !== "Unigram" && data2.model?.type !== "BPE") {
+      throw new Error("The reranker tokenizer.json must use Unigram or BPE.");
+    }
+    if (!data2.post_processor)
+      throw new Error("The reranker tokenizer.json needs a pair post_processor.");
+    this.tokenizer = new Tokenizer_default(data2, {});
+    this.tokenizer.normalizer = exactCharsmaps(this.tokenizer.normalizer);
+    const pad2 = data2.padding?.pad_id ?? this.tokenizer.token_to_id("<pad>") ?? this.tokenizer.token_to_id("[PAD]");
+    if (!Number.isSafeInteger(pad2) || pad2 < 0)
+      throw new Error("The reranker tokenizer.json is missing a padding token.");
+    this.padId = pad2;
+    this.specialCount = this.postProcess([], []).ids.length;
+  }
+  postProcess(a, b) {
+    const output = this.tokenizer.post_processor.post_process(a, b, true);
+    const tokens = [...output.tokens, ...output.tokens_pair ?? []];
+    const ids = tokens.map((token) => {
+      const id = this.tokenizer.token_to_id(token) ?? this.tokenizer.model?.unk_token_id;
+      if (id === undefined)
+        throw new Error("The reranker pair template contains a token outside its vocabulary.");
+      return id;
+    });
+    return { ids, typeIds: output.token_type_ids ?? ids.map(() => 0) };
+  }
+  encodePair(first, second, maxLength) {
+    if (!Number.isSafeInteger(maxLength) || maxLength < this.specialCount) {
+      throw new Error("The reranker token window cannot hold its pair template.");
+    }
+    const { a, b, truncated } = truncatePair(this.tokenizer.tokenize(first), this.tokenizer.tokenize(second), maxLength - this.specialCount, "huggingface");
+    return { ...this.postProcess(a, b), truncated };
+  }
+}
+var init_json_tokenizer = __esm(() => {
+  init_tokenizers();
+  init_precompiled_charsmap();
+});
+
+// src/workers/source-index/built-in-reranker-manifest.ts
+function candidate(modelId, repository, revision, modelFile, modelBytes, modelSha256, tokenizerFile, tokenizerBytes, tokenizerSha256) {
+  const base = `https://huggingface.co/${repository}/resolve/${revision}`;
+  return {
+    modelId,
+    repository,
+    revision,
+    license: "Apache-2.0",
+    maxTokens: 512,
+    model: { name: "model.onnx", url: `${base}/${modelFile}`, bytes: modelBytes, sha256: modelSha256 },
+    tokenizer: { name: tokenizerFile, url: `${base}/${tokenizerFile}`, bytes: tokenizerBytes, sha256: tokenizerSha256 }
+  };
+}
+var MS_MARCO_MINILM_L6_V2, MMARCO_MMINILMV2_L12_H384_V1;
+var init_built_in_reranker_manifest = __esm(() => {
+  MS_MARCO_MINILM_L6_V2 = candidate("ms-marco-MiniLM-L6-v2-fp32-233902d", "cross-encoder/ms-marco-MiniLM-L6-v2", "233902d25c440f23af6f7d6e94d2946bac0bee0a", "onnx/model.onnx", 91011230, "5d3e70fd0c9ff14b9b5169a51e957b7a9c74897afd0a35ce4bd318150c1d4d4a", "vocab.txt", 231508, "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3");
+  MMARCO_MMINILMV2_L12_H384_V1 = candidate("mmarco-mMiniLMv2-L12-H384-v1-int8-1427fd6", "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1", "1427fd652930e4ba29e8149678df786c240d8825", "onnx/model_qint8_arm64.onnx", 118620017, "1825907d6c1a9001ff78124780bbde20a614a8c3df3b63409cf3c72c6fe5c8b4", "tokenizer.json", 17082660, "62c24cdc13d4c9952d63718d6c9fa4c287974249e16b7ade6d5a85e7bbb75626");
+});
+
 // src/workers/source-index/built-in-reranker.ts
 import { availableParallelism as availableParallelism3 } from "node:os";
 import { existsSync as existsSync96, readFileSync as readFileSync83 } from "node:fs";
@@ -152785,6 +155477,9 @@ function createCrossEncoderReranker(options) {
     id: options.id,
     localOnly: true,
     poolSize: options.poolSize ?? DEFAULT_RERANK_POOL_SIZE,
+    async prepare() {
+      await session();
+    },
     async score(request) {
       const model = await session();
       const scores = [];
@@ -152815,6 +155510,13 @@ function createCrossEncoderReranker(options) {
     }
   };
 }
+async function prepareBuiltInRerankerFromEnv(options = {}, warn = console.warn) {
+  const reranker = builtInRerankerFromEnv(options);
+  await reranker?.prepare().catch(() => {
+    warn("[reranker] Could not load the model at startup; scoring will retry.");
+  });
+  return reranker;
+}
 function builtInRerankerFromEnv(options = {}) {
   const env = options.env ?? process.env;
   if (env[SOURCE_RERANKER_ENV]?.trim().toLowerCase() !== "built-in")
@@ -152824,7 +155526,8 @@ function builtInRerankerFromEnv(options = {}) {
     return;
   const modelPath = join127(modelDir, "model.onnx");
   const vocabularyPath = join127(modelDir, "vocab.txt");
-  if (!existsSync96(modelPath) || !existsSync96(vocabularyPath))
+  const tokenizerPath = join127(modelDir, "tokenizer.json");
+  if (!existsSync96(modelPath) || !existsSync96(vocabularyPath) && !existsSync96(tokenizerPath))
     return;
   const runtimeDir = env[SOURCE_RERANKER_RUNTIME_DIR_ENV]?.trim() || builtInEmbeddingPaths(env, ARCTIC_EMBED_M_V1_5).runtimeDir;
   const runtime = options.runtime ?? onnxRuntimeFromDirectory(runtimeDir);
@@ -152833,7 +155536,7 @@ function builtInRerankerFromEnv(options = {}) {
   return createCrossEncoderReranker({
     id: `cross-encoder:${modelDir.split(/[\\/]/).filter(Boolean).pop() ?? "model"}`,
     session: () => runtime.createSession(modelPath, { threads: threads2 }),
-    tokenizer: new WordPieceTokenizer(readFileSync83(vocabularyPath, "utf8")),
+    tokenizer: existsSync96(vocabularyPath) ? new WordPieceTokenizer(readFileSync83(vocabularyPath, "utf8")) : new JsonPairTokenizer(readFileSync83(tokenizerPath, "utf8")),
     ...poolSize !== undefined ? { poolSize } : {}
   });
 }
@@ -152848,6 +155551,8 @@ var init_built_in_reranker = __esm(() => {
   init_manifest();
   init_runtime();
   init_wordpiece();
+  init_json_tokenizer();
+  init_built_in_reranker_manifest();
 });
 
 // src/workers/classification/judge-pacing.ts
@@ -153475,10 +156180,10 @@ class LocalModelDiscovery {
   }
   async discover(baseUrl) {
     const candidates = baseUrl === undefined ? ["http://127.0.0.1:11434/v1", "http://127.0.0.1:1234/v1"] : [baseUrl];
-    return Promise.all(candidates.map(async (candidate) => {
+    return Promise.all(candidates.map(async (candidate2) => {
       let normalized;
       try {
-        normalized = localBaseUrl(candidate);
+        normalized = localBaseUrl(candidate2);
       } catch {
         return { provider: "openai-compatible", baseUrl: "", models: [], working: false, step: "endpoint", detail: "Use an HTTP or HTTPS loopback URL without credentials, query parameters or fragments." };
       }
@@ -154355,11 +157060,11 @@ async function answerOnThisComputer(input, options) {
   const secretLocations = (detail.secretLocations ?? []).map(({ source, ref, locator, title }) => ({ source, ref, fingerprint: secretLocationFingerprint({ locator, title }) }));
   const notFound = () => secrets ? { status: "answered", answer: secrets, citations: [], unanswered: [], leftOut, ...busyField, read: [], secretLocations } : searchedCorpora.length === 0 && leftOut.length + busy2.length > 0 ? { status: "not_searched", leftOut, busy: busy2 } : { status: "not_found", leftOut, ...busyField };
   const skip = new Set([...detail.namesOnlyCandidateIndexes ?? [], ...detail.contentPrivateCandidateIndexes ?? []]);
-  const candidates = detail.pack.candidates.flatMap((candidate, index) => {
+  const candidates = detail.pack.candidates.flatMap((candidate2, index) => {
     const corpusId = detail.candidateCorpusIds[index] ?? "";
-    if (skip.has(index) || !corpusId || !LOCAL_TRUST_DOMAINS.includes(candidate.trustDomain))
+    if (skip.has(index) || !corpusId || !LOCAL_TRUST_DOMAINS.includes(candidate2.trustDomain))
       return [];
-    return [{ ...candidate, corpusId }];
+    return [{ ...candidate2, corpusId }];
   });
   if (secrets && candidates.length === 0)
     return notFound();
@@ -156740,6 +159445,7 @@ function readinessSnapshot(readiness) {
       extraction_jobs_failed: readiness.failedRetryableJobs + readiness.failedTerminalJobs,
       extraction_jobs_failed_actionable: readiness.failedActionableJobs,
       [UNREADABLE_ITEMS_COUNT_KEY]: readiness.unreadableItems,
+      [UNSUPPORTED_KIND_COUNT_KEY]: readiness.unsupportedKindItems,
       extraction_jobs_retryable_due_actionable: readiness.retryableDueJobs
     },
     contentExtractionThroughput: {
@@ -156979,11 +159685,11 @@ function catalogCategory(catalog, modelId2) {
   }
   return;
 }
-function newerCatalog(current2, candidate) {
-  if (!candidate)
+function newerCatalog(current2, candidate2) {
+  if (!candidate2)
     return current2;
-  if (!current2 || candidate.fetchedAtMs > current2.fetchedAtMs)
-    return candidate;
+  if (!current2 || candidate2.fetchedAtMs > current2.fetchedAtMs)
+    return candidate2;
   return current2;
 }
 function catalogIsFresh(catalog, nowMs, ttlMs) {
@@ -157738,7 +160444,7 @@ function mountDashboardController(options) {
         continue;
       if (active && region.contains(active) || region.querySelector("dialog[open]") || dirty(region))
         continue;
-      const next = Array.from(template.content.querySelectorAll("[id]")).find((candidate) => candidate.id === region.id);
+      const next = Array.from(template.content.querySelectorAll("[id]")).find((candidate2) => candidate2.id === region.id);
       if (!next || next.querySelector("[data-first-run-sheet]"))
         continue;
       const openSheets = new Set(Array.from(region.querySelectorAll(".sheet.on")).map((sheet) => sheet.id).concat(region.matches(".sheet.on") ? [region.id] : []));
@@ -157751,7 +160457,7 @@ function mountDashboardController(options) {
       });
       [fresh2, ...Array.from(fresh2.querySelectorAll(".sheet"))].filter((sheet) => sheet.classList.contains("sheet") && openSheets.has(sheet.id)).forEach((sheet) => setSheetOpen(sheet, true));
       const wait = authorizationWait;
-      const waitingSheet = wait && [fresh2, ...Array.from(fresh2.querySelectorAll(".sheet"))].find((candidate) => candidate.id === wait.sheetId);
+      const waitingSheet = wait && [fresh2, ...Array.from(fresh2.querySelectorAll(".sheet"))].find((candidate2) => candidate2.id === wait.sheetId);
       if (wait && waitingSheet)
         say(waitingSheet.querySelector('form[data-connect-kind="oauth"]') ?? waitingSheet, wait.message);
       fresh2.querySelectorAll("script[data-dashboard-rerun]").forEach((inert) => {
@@ -158632,13 +161338,13 @@ function mountDashboardController(options) {
         node.open = true;
     });
     for (const id of openSheets) {
-      const sheet = queryAll(".sheet").find((candidate) => candidate.id === id);
+      const sheet = queryAll(".sheet").find((candidate2) => candidate2.id === id);
       if (sheet)
         setSheetOpen(sheet, true);
       queryAll("[data-sheet-toggle]").filter((toggle) => toggle.dataset.sheetToggle === `#${id}`).forEach((toggle) => toggle.setAttribute("aria-expanded", "true"));
     }
     const wait = authorizationWait;
-    const waitingSheet = wait && queryAll(".sheet").find((candidate) => candidate.id === wait.sheetId);
+    const waitingSheet = wait && queryAll(".sheet").find((candidate2) => candidate2.id === wait.sheetId);
     if (wait && waitingSheet)
       say(waitingSheet.querySelector('form[data-connect-kind="oauth"]') ?? waitingSheet, wait.message);
     findByFocusKey(focused)?.focus();
@@ -159235,7 +161941,7 @@ function mountDashboardController(options) {
       const open5 = event.target.closest("[data-kind-open]");
       if (!open5)
         return;
-      const group = groups.find((candidate) => candidate.open === open5);
+      const group = groups.find((candidate2) => candidate2.open === open5);
       if (!group)
         return;
       group.list.hidden = !group.list.hidden;
@@ -159660,7 +162366,7 @@ function mountDashboardController(options) {
     let focus = null;
     const sourceId = Object.prototype.hasOwnProperty.call(sources, wanted) ? sources[wanted] : undefined;
     if (sourceId) {
-      const row = queryAll("[data-source-id]").find((candidate) => candidate.dataset.sourceId === sourceId);
+      const row = queryAll("[data-source-id]").find((candidate2) => candidate2.dataset.sourceId === sourceId);
       const addSheet = row?.closest("dialog");
       if (row && addSheet && typeof addSheet.showModal === "function") {
         if (addSheet.matches("[data-add-source]"))
@@ -171933,10 +174639,10 @@ function createSettingsProposalHolder(targets, now = () => new Date) {
         const list = choices[provider];
         if (!list)
           throw new SettingsProposalError(`There is no ${MODEL_LABELS[provider]} picker on this computer yet. Set it up first, then propose again.`);
-        const option = list.options.find((candidate) => candidate.value === value2);
+        const option = list.options.find((candidate2) => candidate2.value === value2);
         if (!option)
-          throw new SettingsProposalError(`models.${provider} must be one of: ${list.options.map((candidate) => candidate.value).join(", ")}.`);
-        const current2 = list.options.find((candidate) => candidate.value === list.current);
+          throw new SettingsProposalError(`models.${provider} must be one of: ${list.options.map((candidate2) => candidate2.value).join(", ")}.`);
+        const current2 = list.options.find((candidate2) => candidate2.value === list.current);
         rows.push({ key: `models.${provider}`, label: MODEL_LABELS[provider], current: current2?.label ?? list.current, proposed: option.label });
       }
     }
@@ -171977,7 +174683,7 @@ function createSettingsProposalHolder(targets, now = () => new Date) {
       const input = proposal.input;
       const results = [];
       const record6 = async (key2, run2) => {
-        const row = proposal.rows.find((candidate) => candidate.key === key2);
+        const row = proposal.rows.find((candidate2) => candidate2.key === key2);
         try {
           const saved = await run2();
           results.push({ ...row, applied: saved.ok, ...saved.message ? { message: saved.message } : {} });
@@ -172825,10 +175531,10 @@ var init_locator_result_projector2 = __esm(() => {
   LOCAL_FILES_LOCATOR_RESULT_PROJECTOR_CODEC = Object.freeze({
     create(input) {
       return Object.freeze({
-        project(candidate) {
-          if (input.principal.provider !== LOCAL_FILES_PROVIDER || candidate.sourceItem.family !== "file" || candidate.sourceItem.provider !== input.principal.provider || candidate.sourceItem.accountScope !== input.principal.accountScope)
+        project(candidate2) {
+          if (input.principal.provider !== LOCAL_FILES_PROVIDER || candidate2.sourceItem.family !== "file" || candidate2.sourceItem.provider !== input.principal.provider || candidate2.sourceItem.accountScope !== input.principal.accountScope)
             return;
-          const locator = locatorFromScopePath(candidate.readLocatorUri());
+          const locator = locatorFromScopePath(candidate2.readLocatorUri());
           return locator ? { locator } : undefined;
         }
       });
@@ -177285,15 +179991,15 @@ var init_chat_scope_filter = __esm(() => {
       if (lookup3.truncated)
         return unresolvedChatTitleResolution(chatScope);
       const rankedByConversation = new Map;
-      for (const candidate of lookup3.candidates) {
-        const score = conversationTitleMatchScore(candidate.title, terms);
-        const exact = conversationTitleExactMatch(candidate.title, terms);
+      for (const candidate2 of lookup3.candidates) {
+        const score = conversationTitleMatchScore(candidate2.title, terms);
+        const exact = conversationTitleExactMatch(candidate2.title, terms);
         if (!exact && (terms.length < 2 || score < Math.min(3, terms.length)))
           continue;
-        const prior = rankedByConversation.get(candidate.conversationId);
+        const prior = rankedByConversation.get(candidate2.conversationId);
         if (!prior || Number(exact) > Number(prior.exact) || exact === prior.exact && score > prior.score) {
-          rankedByConversation.set(candidate.conversationId, {
-            conversationId: candidate.conversationId,
+          rankedByConversation.set(candidate2.conversationId, {
+            conversationId: candidate2.conversationId,
             exact,
             score
           });
@@ -184365,7 +187071,7 @@ function createEmailSourceWorker(options = {}) {
                 for (const key2 of plan.credentialKeys)
                   await secretStore.delete(key2);
                 const oauth2StateStore = sourceDashboard.oauth2StateStore ?? credentialOAuth2StateStoreFromEnv(process.env);
-                for (const handle of plan.handles.filter((candidate) => candidate.provider === "x")) {
+                for (const handle of plan.handles.filter((candidate2) => candidate2.provider === "x")) {
                   if (handle.oauth2Refresh || handle.tokenSecretRefs?.length)
                     continue;
                   if (!oauth2StateStore?.delete) {
@@ -185421,14 +188127,14 @@ function createEmailSourceWorker(options = {}) {
   }
   function assertFileSourceSyncApproved(sourceId) {
     if (sourceId === "gmail.email") {
-      const scope = sourceDashboard?.fileSourceScopes?.summaries().find((candidate) => candidate.source_id === sourceId);
+      const scope = sourceDashboard?.fileSourceScopes?.summaries().find((candidate2) => candidate2.source_id === sourceId);
       if (scope && (scope.status !== "approved" || !scope.connected)) {
         throw new OperationError("source_index_policy_violation", "Choose and approve which mail Olympus may use before starting ingestion.");
       }
       return;
     }
     if (sourceId !== undefined && isFileSourceScopeId(sourceId)) {
-      const scope = sourceDashboard?.fileSourceScopes?.summaries().find((candidate) => candidate.source_id === sourceId);
+      const scope = sourceDashboard?.fileSourceScopes?.summaries().find((candidate2) => candidate2.source_id === sourceId);
       const hasSelectedFolders = scope?.whole_account_selected === true || scope?.selections?.some((selection) => selection.state !== "exclude") === true;
       if (!scope || scope.status !== "approved" || !scope.connected || !hasSelectedFolders) {
         throw new OperationError("source_index_policy_violation", "Choose and approve this file source scope before starting ingestion.");
@@ -185540,15 +188246,15 @@ function createEmailSourceWorker(options = {}) {
   }
   function dashboardSourceSyncAvailable(source) {
     const schedulerId = dashboardSchedulerSourceId(source);
-    if (schedulerId && sourceScheduler?.status().sources.some((candidate) => candidate.source_id === schedulerId || candidate.corpus_id === schedulerId))
+    if (schedulerId && sourceScheduler?.status().sources.some((candidate2) => candidate2.source_id === schedulerId || candidate2.corpus_id === schedulerId))
       return true;
     if (source === "gmail") {
       const schedulerStatus = sourceScheduler?.status();
-      return schedulerStatus?.sources.some((candidate) => candidate.source_id === "gmail.email" || candidate.corpus_id === INTERNAL_EMAIL_CORPUS_ID) === true || dashboardSyncHookServes(source);
+      return schedulerStatus?.sources.some((candidate2) => candidate2.source_id === "gmail.email" || candidate2.corpus_id === INTERNAL_EMAIL_CORPUS_ID) === true || dashboardSyncHookServes(source);
     }
     if (source === "google-drive") {
       const schedulerStatus = sourceScheduler?.status();
-      return schedulerStatus?.sources.some((candidate) => candidate.source_id === "google_drive.docs" || candidate.corpus_id === GOOGLE_DRIVE_DOCS_CORPUS_ID) === true || dashboardSyncHookServes(source);
+      return schedulerStatus?.sources.some((candidate2) => candidate2.source_id === "google_drive.docs" || candidate2.corpus_id === GOOGLE_DRIVE_DOCS_CORPUS_ID) === true || dashboardSyncHookServes(source);
     }
     if (source === "readwise")
       return currentReadwiseSync() !== undefined || dashboardSyncHookServes(source);
@@ -185556,7 +188262,7 @@ function createEmailSourceWorker(options = {}) {
       return currentXBookmarksRuntime()?.sync !== undefined || dashboardSyncHookServes(source);
     if (source === "dropbox") {
       const schedulerStatus = sourceScheduler?.status();
-      return schedulerStatus?.sources.some((candidate) => candidate.source_id === "dropbox.files" || candidate.corpus_id === DROPBOX_FILES_CORPUS_ID) === true || dashboardSyncHookServes(source);
+      return schedulerStatus?.sources.some((candidate2) => candidate2.source_id === "dropbox.files" || candidate2.corpus_id === DROPBOX_FILES_CORPUS_ID) === true || dashboardSyncHookServes(source);
     }
     return false;
   }
@@ -185676,11 +188382,11 @@ function classifySourceAnswerTraceOutcome(error2, requestParsed, requestAborted)
   const errorClass2 = sourceAnswerTraceErrorClass(error2);
   if (requestAborted || errorClass2 === "AbortError")
     return "cancelled";
-  const candidate = error2;
-  if (errorClass2 === "TrustedAnalystTimeoutError" || errorClass2 === "TimeoutError" || candidate?.code === "ETIMEDOUT") {
+  const candidate2 = error2;
+  if (errorClass2 === "TrustedAnalystTimeoutError" || errorClass2 === "TimeoutError" || candidate2?.code === "ETIMEDOUT") {
     return "timeout";
   }
-  if (/sovereignty analyst fallback chain exhausted/i.test(String(candidate?.message ?? ""))) {
+  if (/sovereignty analyst fallback chain exhausted/i.test(String(candidate2?.message ?? ""))) {
     return "route_exhausted";
   }
   return "error";
@@ -185722,8 +188428,8 @@ function sqliteBusyRetryDelays() {
   return parsed;
 }
 function isSqliteBusyError(error2) {
-  const candidate = error2;
-  return candidate?.code === "SQLITE_BUSY" || String(candidate?.message ?? "").toLowerCase().includes("database is locked");
+  const candidate2 = error2;
+  return candidate2?.code === "SQLITE_BUSY" || String(candidate2?.message ?? "").toLowerCase().includes("database is locked");
 }
 function sleep4(ms) {
   return new Promise((resolve30) => setTimeout(resolve30, ms));
@@ -186338,7 +189044,7 @@ function parseSourceDispositionsSave(body, sources) {
     if (!path) {
       throw new EmailSourceWorkerError(400, "invalid_request", `edits[${index}].path must be a non-empty string.`);
     }
-    const known = SOURCE_DISPOSITION_STATES.find((candidate) => candidate === state);
+    const known = SOURCE_DISPOSITION_STATES.find((candidate2) => candidate2 === state);
     if (!known) {
       throw new EmailSourceWorkerError(400, "invalid_request", `edits[${index}].state must be one of ${SOURCE_DISPOSITION_STATES.join(", ")}.`);
     }
@@ -186766,7 +189472,7 @@ async function dashboardPairingSession(sourceId, handleCredentialKeys, secretSto
   const fromStored = await dashboardStoredSessionPaths(sourceId, source, sessionKeys, secretStore, pairingLayoutEnv(resolved));
   const credentialKeys = [...new Set([
     ...handleCredentialKeys,
-    ...sessionKeys.filter((candidate) => candidate.stored).map((candidate) => candidate.key)
+    ...sessionKeys.filter((candidate2) => candidate2.stored).map((candidate2) => candidate2.key)
   ])].sort();
   if (fromStored === undefined)
     return { paths: withStagedLogins(source, derived), credentialKeys };
@@ -186804,10 +189510,10 @@ async function dashboardSessionPathSecretKeys(source, handleCredentialKeys, secr
 }
 async function dashboardStoredSessionPaths(sourceId, source, sessionKeys, secretStore, env) {
   const bySession = new Map;
-  for (const candidate of sessionKeys) {
-    if (!candidate.stored)
+  for (const candidate2 of sessionKeys) {
+    if (!candidate2.stored)
       continue;
-    const value2 = (await secretStore.get(candidate.key))?.trim();
+    const value2 = (await secretStore.get(candidate2.key))?.trim();
     if (!value2)
       continue;
     const paths = pairingSessionPathsFromStoredValue(source, movedSessionValue(source, value2, env));
@@ -188610,11 +191316,11 @@ async function loadParcelWatcher(extraDirs = []) {
   }
   const dirs = [...extraDirs, ...process.env.OLYMPUS_NATIVE_MODULES_DIR ? [process.env.OLYMPUS_NATIVE_MODULES_DIR] : []];
   for (const dir of dirs) {
-    const candidate = join141(dir, "node_modules");
-    if (!existsSync106(join141(candidate, "@parcel", "watcher")))
+    const candidate2 = join141(dir, "node_modules");
+    if (!existsSync106(join141(candidate2, "@parcel", "watcher")))
       continue;
     try {
-      const requireFrom = createRequire8(join141(dirname108(candidate), "package.json"));
+      const requireFrom = createRequire8(join141(dirname108(candidate2), "package.json"));
       return unwrap(requireFrom(specifier));
     } catch (error2) {
       failures.push(error2 instanceof Error ? error2.message : String(error2));
@@ -188623,8 +191329,8 @@ async function loadParcelWatcher(extraDirs = []) {
   throw new Error(`the file watcher could not be loaded (${failures[0] ?? "not installed"})`);
 }
 function unwrap(loaded) {
-  const candidate = loaded?.default ?? loaded;
-  const module = candidate;
+  const candidate2 = loaded?.default ?? loaded;
+  const module = candidate2;
   if (typeof module.subscribe !== "function" || typeof module.writeSnapshot !== "function") {
     throw new Error("the file watcher module has an unexpected shape");
   }
@@ -188987,7 +191693,7 @@ function createLocalFilesSourceConnector(options) {
           const parent = slash < 0 ? "" : rel.slice(0, slash);
           const name2 = rel.slice(slash + 1);
           try {
-            const entry = scopeRoot.list(parent).find((candidate) => candidate.name === name2);
+            const entry = scopeRoot.list(parent).find((candidate2) => candidate2.name === name2);
             if (entry?.kind === "symlink")
               linkName = name2;
           } catch {}
@@ -191741,8 +194447,8 @@ function normalizeSchedulerSourceId(value2) {
   return sourceId;
 }
 function taskBootstrapLastSuccessAt(_source, task) {
-  const candidate = task.bootstrapLastSuccessAt?.();
-  return candidate && Number.isFinite(Date.parse(candidate)) ? candidate : undefined;
+  const candidate2 = task.bootstrapLastSuccessAt?.();
+  return candidate2 && Number.isFinite(Date.parse(candidate2)) ? candidate2 : undefined;
 }
 function schedulerTaskStateKey(source, task) {
   return {
@@ -191766,8 +194472,8 @@ function initialNextRunAt(input) {
     return input.firstRun;
   return boundFutureSchedule(cadenceAnchor + (input.persisted?.effectiveIntervalMs ?? input.configuredIntervalMs), input.firstRun);
 }
-function boundFutureSchedule(candidate, now) {
-  return Math.min(candidate, now + SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS);
+function boundFutureSchedule(candidate2, now) {
+  return Math.min(candidate2, now + SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS);
 }
 function nextCadenceAfter(anchor, intervalMs, completedAt) {
   const elapsedIntervals = Math.floor(Math.max(0, completedAt - anchor) / intervalMs);
@@ -192356,19 +195062,19 @@ From `, "latin1");
 
 // node_modules/postal-mime/dist/esm/decode-strings.js
 function decodeBase642(base642) {
-  let len = base642.length;
-  while (len > 0 && base642.charAt(len - 1) === "=") {
-    len--;
+  let len2 = base642.length;
+  while (len2 > 0 && base642.charAt(len2 - 1) === "=") {
+    len2--;
   }
-  if (len % 4 === 1) {
-    len--;
+  if (len2 % 4 === 1) {
+    len2--;
   }
-  const remainder = len % 4;
-  const bufferLength = Math.floor(len / 4) * 3 + (remainder ? remainder - 1 : 0);
+  const remainder = len2 % 4;
+  const bufferLength = Math.floor(len2 / 4) * 3 + (remainder ? remainder - 1 : 0);
   const arrayBuffer = new ArrayBuffer(bufferLength);
   const bytes = new Uint8Array(arrayBuffer);
   let p = 0;
-  for (let i2 = 0;i2 < len; i2 += 4) {
+  for (let i2 = 0;i2 < len2; i2 += 4) {
     let encoded1 = base64Lookup[base642.charCodeAt(i2)];
     let encoded2 = base64Lookup[base642.charCodeAt(i2 + 1)];
     let encoded3 = base64Lookup[base642.charCodeAt(i2 + 2)];
@@ -192451,9 +195157,9 @@ function isUtf8(bytes) {
       return false;
     }
     const second = bytes[i2 + 1];
-    const min = lead === 224 ? 160 : lead === 240 ? 144 : 128;
+    const min2 = lead === 224 ? 160 : lead === 240 ? 144 : 128;
     const max2 = lead === 237 ? 159 : lead === 244 ? 143 : 191;
-    if (second < min || second > max2) {
+    if (second < min2 || second > max2) {
       return false;
     }
     for (let k = 2;k <= count; k++) {
@@ -192548,9 +195254,9 @@ function decodeWord(charset2, encoding, str) {
     str = str.replace(/=\s+([0-9a-fA-F])/g, "=$1").replace(/[_\s]/g, " ");
     let buf = textEncoder.encode(str);
     let encodedBytes = [];
-    for (let i2 = 0, len = buf.length;i2 < len; i2++) {
+    for (let i2 = 0, len2 = buf.length;i2 < len2; i2++) {
       let c = buf[i2];
-      if (i2 <= len - 2 && c === 61) {
+      if (i2 <= len2 - 2 && c === 61) {
         let high = hexNibble(buf[i2 + 1]);
         let low = hexNibble(buf[i2 + 2]);
         if (high >= 0 && low >= 0) {
@@ -192563,7 +195269,7 @@ function decodeWord(charset2, encoding, str) {
     }
     byteStr = new ArrayBuffer(encodedBytes.length);
     let dataView = new DataView(byteStr);
-    for (let i2 = 0, len = encodedBytes.length;i2 < len; i2++) {
+    for (let i2 = 0, len2 = encodedBytes.length;i2 < len2; i2++) {
       dataView.setUint8(i2, encodedBytes[i2]);
     }
   } else if (encoding === "B") {
@@ -192666,7 +195372,7 @@ function decodeURIComponentWithCharset(encodedStr, charset2) {
   }
   const byteStr = new ArrayBuffer(encodedBytes.length);
   const dataView = new DataView(byteStr);
-  for (let i2 = 0, len = encodedBytes.length;i2 < len; i2++) {
+  for (let i2 = 0, len2 = encodedBytes.length;i2 < len2; i2++) {
     dataView.setUint8(i2, encodedBytes[i2]);
   }
   return decodeCharset(byteStr, charset2);
@@ -192987,17 +195693,17 @@ class QPDecoder {
   }
   update(line2, lineBreak2) {
     this.writeLineBreak();
-    let len = line2.length;
-    while (len > 0 && isWsp(line2[len - 1])) {
-      len--;
+    let len2 = line2.length;
+    while (len2 > 0 && isWsp(line2[len2 - 1])) {
+      len2--;
     }
-    const softBreak = len > 0 && line2[len - 1] === CHR_EQUALS;
+    const softBreak = len2 > 0 && line2[len2 - 1] === CHR_EQUALS;
     if (softBreak) {
-      len--;
+      len2--;
     }
     let literalStart = 0;
-    for (let i2 = 0;i2 < len; i2++) {
-      if (line2[i2] !== CHR_EQUALS || i2 + 2 >= len) {
+    for (let i2 = 0;i2 < len2; i2++) {
+      if (line2[i2] !== CHR_EQUALS || i2 + 2 >= len2) {
         continue;
       }
       const high = hexNibble(line2[i2 + 1]);
@@ -193010,7 +195716,7 @@ class QPDecoder {
       i2 += 2;
       literalStart = i2 + 1;
     }
-    this.output.writeBytes(line2, literalStart, len);
+    this.output.writeBytes(line2, literalStart, len2);
     this.pendingLineBreak = softBreak ? null : lineBreak2;
   }
   finalize(boundaryEnded = false) {
@@ -193239,7 +195945,7 @@ class MimeNode {
     const storeEmptyKey = () => {
       storeParam(takeValue().trim().toLowerCase(), "");
     };
-    for (let i2 = 0, len = str.length;i2 < len; i2++) {
+    for (let i2 = 0, len2 = str.length;i2 < len2; i2++) {
       chr = str.charAt(i2);
       switch (stage) {
         case "key":
@@ -195794,11 +198500,11 @@ function replaceTags(str, prefix, pattern, replacement) {
   let searchFrom = 0;
   while (true) {
     prefix.lastIndex = searchFrom;
-    const candidate = prefix.exec(str);
-    if (!candidate) {
+    const candidate2 = prefix.exec(str);
+    if (!candidate2) {
       break;
     }
-    const start = candidate.index;
+    const start = candidate2.index;
     const gt = str.indexOf(">", start);
     if (gt < 0) {
       break;
@@ -195967,8 +198673,8 @@ function formatHtmlAddresses(addresses) {
 function foldLines(str, lineLength, afterSpace) {
   str = (str || "").toString();
   lineLength = lineLength || 76;
-  let pos = 0, len = str.length, result = "", line2, match;
-  while (pos < len) {
+  let pos = 0, len2 = str.length, result = "", line2, match;
+  while (pos < len2) {
     line2 = str.slice(pos, pos + lineLength);
     if (line2.length < lineLength) {
       result += line2;
@@ -195986,7 +198692,7 @@ function foldLines(str, lineLength, afterSpace) {
     }
     result += line2;
     pos += line2.length;
-    if (pos < len) {
+    if (pos < len2) {
       result += `\r
 `;
     }
@@ -196201,18 +198907,18 @@ function collapseAtSpacing(value2) {
   return joinAtSpacing(value2, at);
 }
 function looseAddressStart(text5) {
-  const len = text5.length;
+  const len2 = text5.length;
   let pos = 0;
-  while (pos < len) {
-    while (pos < len && isSpaceCode(text5.charCodeAt(pos))) {
+  while (pos < len2) {
+    while (pos < len2 && isSpaceCode(text5.charCodeAt(pos))) {
       pos++;
     }
-    if (pos >= len) {
+    if (pos >= len2) {
       break;
     }
     const runStart = pos;
     let runEnd = pos;
-    while (runEnd < len && !isSpaceCode(text5.charCodeAt(runEnd))) {
+    while (runEnd < len2 && !isSpaceCode(text5.charCodeAt(runEnd))) {
       runEnd++;
     }
     let at = indexOfAt(text5, runStart, runEnd);
@@ -196292,10 +198998,10 @@ function stripAddressComments(address) {
   let firstChar = "";
   let quoteSeen = false;
   let routeEnd = -1;
-  for (let i2 = 0, len = address.length;i2 < len; i2++) {
+  for (let i2 = 0, len2 = address.length;i2 < len2; i2++) {
     const chr = address.charAt(i2);
     if (depth2) {
-      if (chr === "\\" && i2 < len - 1) {
+      if (chr === "\\" && i2 < len2 - 1) {
         comment += address.charAt(++i2);
       } else if (chr === "(") {
         depth2++;
@@ -196317,7 +199023,7 @@ function stripAddressComments(address) {
       }
     }
     if (closer) {
-      if (chr === "\\" && closer === '"' && i2 < len - 1) {
+      if (chr === "\\" && closer === '"' && i2 < len2 - 1) {
         result += chr + address.charAt(++i2);
         lastChar = address.charAt(i2);
         continue;
@@ -196517,7 +199223,7 @@ function _handleAddress(tokens, from, to) {
   return address;
 }
 
-class Tokenizer2 {
+class Tokenizer3 {
   constructor(str) {
     this.str = (str || "").toString();
     this.operatorCurrent = "";
@@ -196543,11 +199249,11 @@ class Tokenizer2 {
   }
   tokenize() {
     const str = this.str;
-    const len = str.length;
-    for (let i2 = 0;i2 < len; i2++) {
+    const len2 = str.length;
+    for (let i2 = 0;i2 < len2; i2++) {
       this.checkChar(str.charAt(i2), i2);
     }
-    this.closeText(len);
+    this.closeText(len2);
     const list = this.list;
     const slots = list.slots;
     let kept = 0;
@@ -196749,14 +199455,14 @@ function mergeNameFragments(list) {
   return merged.reverse();
 }
 function parseAddressList(str) {
-  const tokens = new Tokenizer2(str).tokenize();
+  const tokens = new Tokenizer3(str).tokenize();
   const parsedAddresses = [];
   let group = null;
   let members = [];
   let from = 0;
-  for (let i2 = 0, len = tokens.length;i2 <= len; i2++) {
-    const operator = i2 < len ? tokens.operatorAt(i2) : "";
-    if (i2 < len && operator !== "," && operator !== ";" && operator !== ":") {
+  for (let i2 = 0, len2 = tokens.length;i2 <= len2; i2++) {
+    const operator = i2 < len2 ? tokens.operatorAt(i2) : "";
+    if (i2 < len2 && operator !== "," && operator !== ";" && operator !== ":") {
       continue;
     }
     if (operator === ":") {
@@ -196771,7 +199477,7 @@ function parseAddressList(str) {
       (group ? members : parsedAddresses).push(_handleAddress(tokens, from, i2));
     }
     from = i2 + 1;
-    if (group && (operator === ";" || i2 === len)) {
+    if (group && (operator === ";" || i2 === len2)) {
       group.group = mergeNameFragments(members);
       parsedAddresses.push(group);
       group = null;
@@ -196882,12 +199588,12 @@ function countAddresses(addresses) {
   }
   return count;
 }
-function parseLimitOption(value2, defaultValue, name, min = 0) {
+function parseLimitOption(value2, defaultValue, name, min2 = 0) {
   if (value2 === undefined || value2 === null) {
     return defaultValue;
   }
-  if (typeof value2 !== "number" || !Number.isInteger(value2) || value2 < min) {
-    throw createError("EINVALIDOPTION", `${name} must be a ${min ? "positive" : "non-negative"} integer`);
+  if (typeof value2 !== "number" || !Number.isInteger(value2) || value2 < min2) {
+    throw createError("EINVALIDOPTION", `${name} must be a ${min2 ? "positive" : "non-negative"} integer`);
   }
   return value2;
 }
@@ -197381,9 +200087,9 @@ function charsetDecodable(charset2) {
     return cached3;
   const stripped = label.replace(/^(?:x-ms-|x-|cs)/, "");
   let ok = false;
-  for (const candidate of [label, stripped, stripped.replace(/[\s._-]+/g, "")]) {
+  for (const candidate2 of [label, stripped, stripped.replace(/[\s._-]+/g, "")]) {
     try {
-      new TextDecoder(candidate);
+      new TextDecoder(candidate2);
       ok = true;
       break;
     } catch {}
@@ -200039,8 +202745,8 @@ function parseReflectNote(record8) {
     return { kind: "unreadable" };
   let body = "";
   let unsupported = 0;
-  for (const candidate of [record8.content, record8.body, record8.document_json, record8.documentJson]) {
-    const read = readReflectBody(candidate);
+  for (const candidate2 of [record8.content, record8.body, record8.document_json, record8.documentJson]) {
+    const read = readReflectBody(candidate2);
     unsupported += read.unsupported;
     body = read.text.trim();
     if (body !== "")
@@ -201685,7 +204391,7 @@ function createArchiveImportRuntime(options = {}) {
   const families = archiveImportFamilies();
   const lanes = new Map;
   const lane = (family) => {
-    const known = families.find((candidate) => candidate === family);
+    const known = families.find((candidate2) => candidate2 === family);
     if (!known)
       throw new Error("No archive format imports into this family.");
     const existing = lanes.get(known);
@@ -201928,7 +204634,7 @@ function createArchiveImportAgent(deps) {
         }
         throw error2;
       }
-      const record8 = records.filter((candidate) => spelled(recordedPath(candidate.root_path, candidate.chosen_rel_path)) === asked).sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+      const record8 = records.filter((candidate2) => spelled(recordedPath(candidate2.root_path, candidate2.chosen_rel_path)) === asked).sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
       const existing_record = record8 ? { archive_id: record8.archive_id, name: displayText(record8.label), state: record8.status } : undefined;
       let entry;
       try {
@@ -203186,7 +205892,7 @@ function archiveFileExtractionCorpora(input) {
 }
 function archiveFileExtractionSourceFactory(input) {
   return ({ config: config2, store, view: view4 }) => {
-    const family = archiveImportFamilies().find((candidate) => archiveCorpusId("secure_local", candidate) === config2.corpusId);
+    const family = archiveImportFamilies().find((candidate2) => archiveCorpusId("secure_local", candidate2) === config2.corpusId);
     if (!family)
       throw new Error("[file-extraction] an archive corpus names a family no archive format imports into.");
     const reader = view4 ?? store;
@@ -203931,7 +206637,7 @@ function createArchiveImportsSchedulerSource(input) {
         continue;
       if (record8.target)
         continue;
-      const family = known.find((candidate) => candidate === record8.family);
+      const family = known.find((candidate2) => candidate2 === record8.family);
       if (!family)
         continue;
       const archiveId = record8.archive_id;
@@ -205101,7 +207807,7 @@ function createParentLabelResolver(sources) {
   };
 }
 function resolveOne(request, stores, scopes) {
-  const scope = scopes.find((candidate) => candidate.corpusIds.has(request.corpusId));
+  const scope = scopes.find((candidate2) => candidate2.corpusIds.has(request.corpusId));
   const lane = stores.filter((store) => scope ? scope.corpusIds.has(store.corpusId) : store.corpusId === request.corpusId);
   if (lane.length === 0)
     return;
@@ -205599,7 +208305,7 @@ function absPath(ctx, rel) {
     return join144(ctx.root, ...rel.split("/"));
   const slash = rel.indexOf("/");
   const tag = rel.slice(1, slash < 0 ? undefined : slash);
-  const root = ctx.roots.find((candidate) => candidate.tag === tag && tag !== "")?.root;
+  const root = ctx.roots.find((candidate2) => candidate2.tag === tag && tag !== "")?.root;
   if (root === undefined || slash < 0)
     throw new TypeError(`A migration path names a folder this build does not know (${JSON.stringify(tag)}).`);
   return join144(root, ...rel.slice(slash + 1).split("/"));
@@ -205715,17 +208421,17 @@ function inspect(ctx, sourceId, slot, entry) {
   if (pinned)
     return pinned;
   const present = [];
-  for (const candidate of candidates(sourceId, slot, env)) {
-    const found = look(candidate.from);
+  for (const candidate2 of candidates(sourceId, slot, env)) {
+    const found = look(candidate2.from);
     if (found.kind === "absent")
       continue;
-    const name = basename22(candidate.from);
+    const name = basename22(candidate2.from);
     if (found.kind === "unreadable")
       return skip("unreadable", `${name} cannot be looked at.`);
-    if (found.kind === "link" || found.kind === "other" || found.kind !== candidate.kind) {
-      return skip("unexpected_file", `${name} is not an ordinary ${candidate.kind === "dir" ? "folder" : "file"}.`);
+    if (found.kind === "link" || found.kind === "other" || found.kind !== candidate2.kind) {
+      return skip("unexpected_file", `${name} is not an ordinary ${candidate2.kind === "dir" ? "folder" : "file"}.`);
     }
-    present.push({ candidate, found });
+    present.push({ candidate: candidate2, found });
   }
   if (present.length === 0) {
     return entry && entry.corpus_ids.length > 0 ? skip("files_elsewhere", "Its stores are not at the usual place in the data folder.") : { kind: "nothing" };
@@ -205736,11 +208442,11 @@ function inspect(ctx, sourceId, slot, entry) {
   } catch {
     return skip("unreadable", "The account folder cannot be looked at.");
   }
-  for (const { candidate, found } of present) {
-    const name = basename22(candidate.from);
-    if (!destinationIsOurs(ctx, candidate.to))
+  for (const { candidate: candidate2, found } of present) {
+    const name = basename22(candidate2.from);
+    if (!destinationIsOurs(ctx, candidate2.to))
       return skip("unexpected_file", `A folder on the way to ${name}'s place in the account folder is a link.`);
-    const destination = look(candidate.to);
+    const destination = look(candidate2.to);
     if (destination.kind === "unreadable")
       return skip("unreadable", `${name}'s place in the account folder cannot be looked at.`);
     if (destination.kind !== "absent")
@@ -205748,12 +208454,12 @@ function inspect(ctx, sourceId, slot, entry) {
     if (found.dev !== folderDevice)
       return skip("other_device", `${name} is on a different device than the account folder.`);
   }
-  const logBytes = present.filter(({ candidate }) => candidate.from.endsWith("-wal") || candidate.from.endsWith("-journal")).reduce((total, { found }) => total + Number(found.size), 0);
+  const logBytes = present.filter(({ candidate: candidate2 }) => candidate2.from.endsWith("-wal") || candidate2.from.endsWith("-journal")).reduce((total, { found }) => total + Number(found.size), 0);
   if (logBytes > limit("accountLogMaxBytes", ACCOUNT_LOG_MAX_BYTES)) {
     return skip("log_large", "Its write-ahead logs are large; they are folded into the stores the next time Olympus stops cleanly, and then it moves.");
   }
   if (entry) {
-    const stores = new Set(present.filter(({ candidate }) => candidate.role === "store" && candidate.db).map(({ candidate }) => candidate.to));
+    const stores = new Set(present.filter(({ candidate: candidate2 }) => candidate2.role === "store" && candidate2.db).map(({ candidate: candidate2 }) => candidate2.to));
     const account = { source_id: sourceId, slot, layout: "folder" };
     for (const corpusId of entry.corpus_ids) {
       let expected;
@@ -205766,15 +208472,15 @@ function inspect(ctx, sourceId, slot, entry) {
         return skip("files_elsewhere", "Its stores are not at the usual place in the data folder.");
     }
   }
-  const moves = present.map(({ candidate, found }) => ({
-    role: candidate.role,
-    from: relPath(ctx, candidate.from),
-    to: relPath(ctx, candidate.to),
-    kind: candidate.kind,
-    ...candidate.db ? { db: true } : {},
+  const moves = present.map(({ candidate: candidate2, found }) => ({
+    role: candidate2.role,
+    from: relPath(ctx, candidate2.from),
+    to: relPath(ctx, candidate2.to),
+    kind: candidate2.kind,
+    ...candidate2.db ? { db: true } : {},
     dev: String(found.dev),
     ino: String(found.ino),
-    size: candidate.kind === "dir" ? 0 : Number(found.size)
+    size: candidate2.kind === "dir" ? 0 : Number(found.size)
   }));
   return { kind: "move", moves };
 }
@@ -205782,7 +208488,7 @@ function checkDatabases(ctx, moves) {
   const storeMax = limit("quickCheckStoreMaxBytes", QUICK_CHECK_STORE_MAX_BYTES);
   const totalMax = limit("quickCheckTotalMaxBytes", QUICK_CHECK_TOTAL_MAX_BYTES);
   const checked = [];
-  for (const move of moves.filter((candidate) => candidate.db)) {
+  for (const move of moves.filter((candidate2) => candidate2.db)) {
     const path = absPath(ctx, move.from);
     const reads = storeFileReads(path, waitMs(ctx));
     if (reads === "busy")
@@ -205818,8 +208524,8 @@ function planIsCanonical(ctx, sourceId, slot, migration) {
   }
   let pairs;
   try {
-    pairs = new Set(known.map((candidate) => `${relPath(ctx, candidate.from)}
-${relPath(ctx, candidate.to)}`));
+    pairs = new Set(known.map((candidate2) => `${relPath(ctx, candidate2.from)}
+${relPath(ctx, candidate2.to)}`));
   } catch {
     return false;
   }
@@ -206185,8 +208891,8 @@ function removeEmptiedLegacyFolders(ctx, sourceId, slot) {
   const rootFolders = new Set(ctx.roots.map(({ root }) => resolve30(root)));
   const folders = new Set;
   try {
-    for (const candidate of candidates(sourceId, slot, ctx.env)) {
-      const folder = resolve30(dirname109(candidate.from));
+    for (const candidate2 of candidates(sourceId, slot, ctx.env)) {
+      const folder = resolve30(dirname109(candidate2.from));
       if (!rootFolders.has(folder) && rootOf(ctx, folder))
         folders.add(folder);
     }
@@ -206278,7 +208984,7 @@ function context2(env, options) {
   return {
     env,
     root,
-    roots: roots.filter((candidate) => isAbsolute39(candidate.root)),
+    roots: roots.filter((candidate2) => isAbsolute39(candidate2.root)),
     messaging: options.messaging,
     now,
     deadline: Number.POSITIVE_INFINITY,
@@ -206473,9 +209179,9 @@ function wallTimeToUtcMs(wall, zone) {
     return;
   const before = naive - zoneOffsetMs(zone, naive - 12 * 3600000);
   const after = naive - zoneOffsetMs(zone, naive + 12 * 3600000);
-  for (const candidate of [Math.min(before, after), Math.max(before, after)]) {
-    if (candidate + zoneOffsetMs(zone, candidate) === naive)
-      return candidate;
+  for (const candidate2 of [Math.min(before, after), Math.max(before, after)]) {
+    if (candidate2 + zoneOffsetMs(zone, candidate2) === naive)
+      return candidate2;
   }
   return before;
 }
@@ -212185,7 +214891,7 @@ function publicCards(cards) {
   for (const definition of DASHBOARD_SUPPORTED_SOURCES) {
     if (definition.family === "model")
       continue;
-    const card = cards.find((candidate) => candidate.source_id === definition.source_id);
+    const card = cards.find((candidate2) => candidate2.source_id === definition.source_id);
     if (card)
       out.push({ definition, card: withProviderRejection(card) });
   }
@@ -212834,6 +215540,7 @@ function scrubCard(definition, card) {
       ...finite(card.coverage.answer_ready_eligible_items) ? { answer_ready_eligible_items: count(card.coverage.answer_ready_eligible_items) } : {},
       ...finite(card.coverage.settled_unreadable_items) ? { settled_unreadable_items: count(card.coverage.settled_unreadable_items) } : {},
       ...finite(card.coverage.unreadable_items) ? { unreadable_items: count(card.coverage.unreadable_items) } : {},
+      ...finite(card.coverage.unsupported_kind_items) ? { unsupported_kind_items: count(card.coverage.unsupported_kind_items) } : {},
       ...finite(card.coverage.stored_items) ? { stored_items: count(card.coverage.stored_items) } : {}
     },
     ingestion_health: {
@@ -214391,7 +217098,7 @@ async function askAnonymously(input, deps) {
   let sameProvider = false;
   const model = input.model ?? consultFrontierModelFor(settings ?? DEFAULT_CONSULT_SETTINGS, input.callerProvider);
   let sentModel = model;
-  const fromCallersProvider = (candidate) => input.callerProvider !== undefined && consultModelProvider(candidate) === input.callerProvider;
+  const fromCallersProvider = (candidate2) => input.callerProvider !== undefined && consultModelProvider(candidate2) === input.callerProvider;
   const authorize = (modelInUse) => {
     if (input.signal?.aborted)
       return false;
@@ -216147,7 +218854,7 @@ function sourceLabel4(provider, family) {
   const imported = archiveFormatForProvider(provider)?.citationLabel;
   if (imported)
     return imported;
-  const definition = DASHBOARD_SUPPORTED_SOURCES.find((candidate) => candidate.provider === provider) ?? DASHBOARD_SUPPORTED_SOURCES.find((candidate) => candidate.source_id.split(".")[0] === provider);
+  const definition = DASHBOARD_SUPPORTED_SOURCES.find((candidate2) => candidate2.provider === provider) ?? DASHBOARD_SUPPORTED_SOURCES.find((candidate2) => candidate2.source_id.split(".")[0] === provider);
   if (definition && definition.family !== "model")
     return definition.label;
   if (family === "file")
@@ -228280,10 +230987,10 @@ function redirectUriMatches(requested, registered3) {
   if (!isLoopbackRedirectUri(requested))
     return false;
   const want = new URL(requested);
-  return registered3.some((candidate) => {
-    if (!isLoopbackRedirectUri(candidate))
+  return registered3.some((candidate2) => {
+    if (!isLoopbackRedirectUri(candidate2))
       return false;
-    const have = new URL(candidate);
+    const have = new URL(candidate2);
     return have.hostname === want.hostname && have.pathname === want.pathname && have.search === want.search;
   });
 }
@@ -230161,9 +232868,9 @@ class PrivateAnswerJobs {
         return;
       const originalKeys = new Set(originalMatches.map(privateEvidenceKey));
       const evidence = found.map((item) => {
-        const { privateAnswerOriginalMatch: _marker, ...candidate } = item;
-        const domain = candidate.trustDomain ?? candidate.trust_domain;
-        return (domain === "internal" || domain === "public_safe") && originalKeys.has(privateEvidenceKey(candidate)) ? { ...candidate, privateAnswerOriginalMatch: true } : candidate;
+        const { privateAnswerOriginalMatch: _marker, ...candidate2 } = item;
+        const domain = candidate2.trustDomain ?? candidate2.trust_domain;
+        return (domain === "internal" || domain === "public_safe") && originalKeys.has(privateEvidenceKey(candidate2)) ? { ...candidate2, privateAnswerOriginalMatch: true } : candidate2;
       }).filter(isPrivateEligible).slice(0, MAX_EVIDENCE_ITEMS);
       timing.neighbours = evidence.filter((item) => item.neighbour === true).length;
       timing.matched = evidence.length - timing.neighbours;
@@ -230855,16 +233562,16 @@ function createVeniceInboxAnswer(options) {
           if (options.state() !== "ready" || input.stillAuthorized?.() === false)
             throw new Error(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceNotAllowed);
           dispatched = true;
-          pack.candidates.forEach((candidate, i2) => {
-            const item = { ...candidate, corpusId: corpusIds2[i2] ?? "" };
+          pack.candidates.forEach((candidate2, i2) => {
+            const item = { ...candidate2, corpusId: corpusIds2[i2] ?? "" };
             const identity2 = inboxEvidenceIdentity(item);
             const key2 = JSON.stringify(identity2);
             if (sent.has(key2))
               return;
             sent.add(key2);
             read.push(identity2);
-            const citation = candidate.provenance.citation ?? {};
-            sentItems.push({ ...citation.title ? { title: citation.title } : {}, source: candidate.provenance.sourceItem.provider, ...citation.authoredAt ? { date: citation.authoredAt } : {} });
+            const citation = candidate2.provenance.citation ?? {};
+            sentItems.push({ ...citation.title ? { title: citation.title } : {}, source: candidate2.provenance.sourceItem.provider, ...citation.authoredAt ? { date: citation.authoredAt } : {} });
           });
         }
       });
@@ -231953,7 +234660,7 @@ function writeConsultSettings(input, location = {}) {
   if (path === undefined || !isAbsolute40(path))
     return { ok: false, reason: "no_home" };
   const nextRevision = input.expectedRevision + 1;
-  const candidate = parseConsultSettings({
+  const candidate2 = parseConsultSettings({
     v: CONSULT_SETTINGS_VERSION,
     revision: nextRevision,
     enabled: input.enabled,
@@ -231968,7 +234675,7 @@ function writeConsultSettings(input, location = {}) {
     ...input.standardInstruction !== undefined ? { standardInstruction: input.standardInstruction } : {},
     ...input.levelChosen ? { levelChosen: true } : {}
   });
-  if (!candidate || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0)
+  if (!candidate2 || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0)
     return { ok: false, reason: "invalid_input" };
   const custody = ensureSettingsDirectory(dirname112(path));
   if (custody !== "ok")
@@ -231994,7 +234701,7 @@ function writeConsultSettings(input, location = {}) {
       }
       try {
         lease.commit(() => {
-          writePrivateFileAtomicSync(path, `${JSON.stringify(candidate)}
+          writePrivateFileAtomicSync(path, `${JSON.stringify(candidate2)}
 `, { onPublished: () => {
             published = true;
           } });
@@ -234425,10 +237132,10 @@ function createTierSnifferModel(input) {
   return;
 }
 function analystRouteTrustDomain(pack, localOnly) {
-  if (localOnly || pack.candidates.some((candidate) => isSecureSensitivity(candidate))) {
+  if (localOnly || pack.candidates.some((candidate2) => isSecureSensitivity(candidate2))) {
     return "secure_local";
   }
-  if (pack.candidates.some((candidate) => candidate.trustDomain === "public_safe") && !pack.candidates.some((candidate) => candidate.trustDomain === "internal")) {
+  if (pack.candidates.some((candidate2) => candidate2.trustDomain === "public_safe") && !pack.candidates.some((candidate2) => candidate2.trustDomain === "internal")) {
     return "public_safe";
   }
   return "internal";
@@ -235112,6 +237819,18 @@ async function main() {
       return;
     }
   };
+  const openPrivateLane = (sourceId, label, create, lane) => {
+    const store = create();
+    let secrets;
+    try {
+      secrets = openTierSecretLocations({ sourceId }, store.dbPath, label);
+      return { store, secrets, lane: lane(store, secrets) };
+    } catch (error2) {
+      secrets?.close();
+      store.close();
+      throw error2;
+    }
+  };
   const adoptTierLane = (input) => {
     tierLanes.push({
       ledger: input.ledger,
@@ -235195,7 +237914,7 @@ async function main() {
   });
   const onDemandCorpusAbsent = (corpusId) => {
     for (const lane of tierLanes) {
-      const store = lane.onDemand.find((candidate) => candidate.corpusId === corpusId);
+      const store = lane.onDemand.find((candidate2) => candidate2.corpusId === corpusId);
       if (store)
         return store.current() === undefined;
     }
@@ -235494,16 +238213,17 @@ ${key2}`;
       return;
     if (!sourceTierLedgerReady(DROPBOX_FILES_SOURCE_ID))
       return;
-    dropboxConnectorStore = dropboxConnectorStoreLane.enabled ? createDropboxConnectorStore(process.env, { policy: dropboxIngestionPolicy }) : undefined;
-    dropboxSecretLocations = dropboxConnectorStore ? openTierSecretLocations({ sourceId: DROPBOX_FILES_SOURCE_ID }, dropboxConnectorStore.dbPath, DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID) : undefined;
-    dropboxTierLane = dropboxConnectorStore ? createDropboxTierLane({
-      secureStore: dropboxConnectorStore,
+    const opened = dropboxConnectorStoreLane.enabled ? openPrivateLane(DROPBOX_FILES_SOURCE_ID, DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, () => createDropboxConnectorStore(process.env, { policy: dropboxIngestionPolicy }), (secureStore, secretLocations2) => createDropboxTierLane({
+      secureStore,
       env: process.env,
       policy: dropboxIngestionPolicy,
-      ...dropboxSecretLocations ? { secretLocations: dropboxSecretLocations } : {},
+      ...secretLocations2 ? { secretLocations: secretLocations2 } : {},
       ...fileSourceScopeAuthority ? { namesOnlyByOwner: dropboxNamesOnlyByOwner(fileSourceScopeAuthority) } : {},
       onStoreOpened: (store) => registerTierLegStore(store, DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, sourceIndexEmbeddingProvider ?? null)
-    }) : undefined;
+    })) : undefined;
+    dropboxConnectorStore = opened?.store;
+    dropboxSecretLocations = opened?.secrets;
+    dropboxTierLane = opened?.lane;
     if (dropboxTierLane && dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider)) {
       dropboxTierLane.set.declarePrivateEmbedder(dropboxFilesEmbeddingProvider, {
         embedWith: () => {
@@ -235543,15 +238263,16 @@ ${key2}`;
       return;
     if (!sourceTierLedgerReady(LOCAL_FILES_SOURCE_ID))
       return;
-    localFilesConnectorStore = localFilesConnectorStoreLane.enabled ? createLocalFilesConnectorStore(process.env, { policy: localFilesIngestionPolicy }) : undefined;
-    localFilesSecretLocations = localFilesConnectorStore ? openTierSecretLocations({ sourceId: LOCAL_FILES_SOURCE_ID }, localFilesConnectorStore.dbPath, LOCAL_FILES_CORPUS_ID) : undefined;
-    localFilesTierLane = localFilesConnectorStore ? createLocalFilesTierLane({
-      secureStore: localFilesConnectorStore,
+    const opened = localFilesConnectorStoreLane.enabled ? openPrivateLane(LOCAL_FILES_SOURCE_ID, LOCAL_FILES_CORPUS_ID, () => createLocalFilesConnectorStore(process.env, { policy: localFilesIngestionPolicy }), (secureStore, secretLocations2) => createLocalFilesTierLane({
+      secureStore,
       env: process.env,
       policy: localFilesIngestionPolicy,
-      ...localFilesSecretLocations ? { secretLocations: localFilesSecretLocations } : {},
+      ...secretLocations2 ? { secretLocations: secretLocations2 } : {},
       onStoreOpened: (store) => registerTierLegStore(store, LOCAL_FILES_CORPUS_ID, sourceIndexEmbeddingProvider ?? null)
-    }) : undefined;
+    })) : undefined;
+    localFilesConnectorStore = opened?.store;
+    localFilesSecretLocations = opened?.secrets;
+    localFilesTierLane = opened?.lane;
     if (localFilesTierLane && localFilesConnectorStore && localFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(localFilesEmbeddingProvider)) {
       localFilesTierLane.set.declarePrivateEmbedder(localFilesEmbeddingProvider, {
         embedWith: () => {
@@ -235651,18 +238372,19 @@ ${key2}`;
       return;
     if (!sourceTierLedgerReady(WHATSAPP_PERSONAL_SOURCE_ID))
       return;
-    whatsappConnectorStore = whatsappConnectorStoreLane.enabled ? createWhatsAppConnectorStore(process.env) : undefined;
-    whatsappSecretLocations = whatsappConnectorStore ? openTierSecretLocations({ sourceId: WHATSAPP_PERSONAL_SOURCE_ID }, whatsappConnectorStore.dbPath, WHATSAPP_LIVE_CORPUS_ID) : undefined;
-    whatsappTierSet = whatsappConnectorStore ? existingStoreTierSet(createWhatsAppTierLane({
-      store: whatsappConnectorStore,
+    const opened = whatsappConnectorStoreLane.enabled ? openPrivateLane(WHATSAPP_PERSONAL_SOURCE_ID, WHATSAPP_LIVE_CORPUS_ID, () => createWhatsAppConnectorStore(process.env), (store, secretLocations2) => existingStoreTierSet(createWhatsAppTierLane({
+      store,
       env: process.env,
       ...sourceIndexEmbeddingProvider ? { internalEmbeddingProvider: sourceIndexEmbeddingProvider } : {},
-      ...whatsappSecretLocations ? { secretLocations: whatsappSecretLocations } : {},
-      onStoreOpened: (opened) => registerTierLegStore(opened, WHATSAPP_LIVE_CORPUS_ID, sourceIndexEmbeddingProvider ?? null)
+      ...secretLocations2 ? { secretLocations: secretLocations2 } : {},
+      onStoreOpened: (leg) => registerTierLegStore(leg, WHATSAPP_LIVE_CORPUS_ID, sourceIndexEmbeddingProvider ?? null)
     }), {
-      store: whatsappConnectorStore,
-      ...whatsappSecretLocations ? { secrets: whatsappSecretLocations } : {}
-    }) : undefined;
+      store,
+      ...secretLocations2 ? { secrets: secretLocations2 } : {}
+    })) : undefined;
+    whatsappConnectorStore = opened?.store;
+    whatsappSecretLocations = opened?.secrets;
+    whatsappTierSet = opened?.lane;
     if (whatsappTierSet && tierSecureEmbeddingProvider)
       whatsappTierSet.declarePrivateEmbedder(tierSecureEmbeddingProvider);
     if (whatsappTierSet && whatsappConnectorStore) {
@@ -236558,7 +239280,7 @@ ${key2}`;
       });
     }
     const defaultLocalAnalyst = sovereigntyAnalysts.get("local-source-answer")?.analyst ?? createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true });
-    const sourceReranker = builtInRerankerFromEnv();
+    const sourceReranker = await prepareBuiltInRerankerFromEnv();
     return createAnalystSourceIndexAnswerHandler({
       inferenceGuard: (pack, request, corpusIds) => guardSourceAnswerEvidence({ lanes: sourceAnswerLanes, pack, request, corpusIds }),
       analyst: defaultLocalAnalyst,
@@ -236622,7 +239344,7 @@ ${key2}`;
         parentLabels: parentLabelResolver,
         secretLocations: tierSecretLocations,
         checkSecretLocations: checkTierSecretLocations,
-        heldItems: (corpusId) => tierLanes.find((candidate) => candidate.corpusIds.has(corpusId))?.ledger.corpusCopyCounts(corpusId).held ?? 0
+        heldItems: (corpusId) => tierLanes.find((candidate2) => candidate2.corpusIds.has(corpusId))?.ledger.corpusCopyCounts(corpusId).held ?? 0
       })
     });
   })() : undefined;
@@ -237827,7 +240549,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           if (request.source !== "dropbox") {
             throw dashboardSourceSyncNotSupportedError(request.source);
           }
-          const source = schedulerSourcesForHandles(activeLaneHandles(readActiveConnectedHandles(process.env), process.env)).sources.find((candidate) => candidate.sourceId === SCHEDULER_SOURCE_IDS.dropbox);
+          const source = schedulerSourcesForHandles(activeLaneHandles(readActiveConnectedHandles(process.env), process.env)).sources.find((candidate2) => candidate2.sourceId === SCHEDULER_SOURCE_IDS.dropbox);
           if (!source)
             throw new Error("Dropbox sync is not configured.");
           const tasks = [];
@@ -243702,8 +246424,8 @@ Run: ${ocr.repairHint}`);
 function isFailedDoctorResult(result) {
   if (!result || typeof result !== "object")
     return false;
-  const candidate = result;
-  return candidate.ok === false && Array.isArray(candidate.checks);
+  const candidate2 = result;
+  return candidate2.ok === false && Array.isArray(candidate2.checks);
 }
 function doctorFailureSummary(result) {
   const failed = result.checks.filter((check) => check.ok !== true);
@@ -245949,13 +248671,13 @@ function formatCliFatalError(error2) {
   const message2 = error2 instanceof Error ? error2.message : String(error2);
   if (!error2 || typeof error2 !== "object")
     return [message2];
-  const candidate = error2;
-  if (typeof candidate.code !== "string" || !/^[a-z0-9][a-z0-9._:-]{0,127}$/.test(candidate.code))
+  const candidate2 = error2;
+  if (typeof candidate2.code !== "string" || !/^[a-z0-9][a-z0-9._:-]{0,127}$/.test(candidate2.code))
     return [message2];
-  const lines2 = [`Error [${candidate.code}]: ${message2}`];
-  if (candidate.retryable === true && typeof candidate.retryAfterMs === "number" && Number.isSafeInteger(candidate.retryAfterMs) && candidate.retryAfterMs > 0) {
-    lines2.push(`Retryable: retry after ${Math.ceil(candidate.retryAfterMs / 1000)} seconds.`);
-  } else if (candidate.retryable === true) {
+  const lines2 = [`Error [${candidate2.code}]: ${message2}`];
+  if (candidate2.retryable === true && typeof candidate2.retryAfterMs === "number" && Number.isSafeInteger(candidate2.retryAfterMs) && candidate2.retryAfterMs > 0) {
+    lines2.push(`Retryable: retry after ${Math.ceil(candidate2.retryAfterMs / 1000)} seconds.`);
+  } else if (candidate2.retryable === true) {
     lines2.push("Retryable: retry the operation after the transient condition clears.");
   }
   return lines2;

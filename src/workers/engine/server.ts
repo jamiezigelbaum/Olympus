@@ -3,7 +3,7 @@ import { LocalPeopleIndex, PeopleIndexRefresher, peopleIndexPath, type PeopleSen
 import { adoptExistingCloudApproval, carryCloudJudgeApproval, createJudgeSetup } from '../classification/judge-setup.ts';
 import { createOwnerTierItems, getOwnerTierItem, type OwnerTierItemsContext } from '../classification/tier-owner-items.ts';
 import { createJudgeCheck } from '../classification/judge-check.ts';
-import { builtInRerankerFromEnv } from '../source-index/built-in-reranker.ts';
+import { prepareBuiltInRerankerFromEnv } from '../source-index/built-in-reranker.ts';
 import { JudgeSpending, withJudgeSpendingStop, judgeSpendingPath } from '../classification/judge-spending.ts';
 import { JudgeObservations, SecondRoundConfirmed, SecondRoundSweep, judgeObservationsPath, judgeSecondRoundConfirmedPath, judgeSecondRoundStatePath, observedJudge, secondRoundJudge } from '../classification/judge-second-round.ts';
 import { DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS, JUDGE_PROMPT_CACHE_KEY, JUDGE_SAMPLING, JudgeRateLimitPacer } from '../classification/judge-pacing.ts';
@@ -3097,6 +3097,29 @@ export async function main(): Promise<void> {
       return undefined;
     }
   };
+  // A lane's Private store, its secret-locations index and the tier lane over them (which opens the ledger) are kept
+  // together or not at all. The split's front mounts a lane while the background is still creating it: the store
+  // first, then its index, then the ledger. A part that fails to open leaves nothing behind, so frontMountRetry tries
+  // the whole lane again, and by the time the ledger opens the index is there too. Release check run 43043603156 kept
+  // the store of a mount that failed on its ledger: the lane never mounted and its source read 0 items for the rest of
+  // the run.
+  const openPrivateLane = <Lane>(
+    sourceId: string,
+    label: string,
+    create: () => LocalConnectorStore,
+    lane: (store: LocalConnectorStore, secrets: SecretLocationsIndex | undefined) => Lane,
+  ): { store: LocalConnectorStore; secrets: SecretLocationsIndex | undefined; lane: Lane } => {
+    const store = create();
+    let secrets: SecretLocationsIndex | undefined;
+    try {
+      secrets = openTierSecretLocations({ sourceId }, store.dbPath, label);
+      return { store, secrets, lane: lane(store, secrets) };
+    } catch (error) {
+      secrets?.close();
+      store.close();
+      throw error;
+    }
+  };
   // P1c: a lane whose tier set its own module builds (Dropbox, Readwise, X,
   // WhatsApp) registers its ledger and its on-demand stores here.
   const adoptTierLane = (input: {
@@ -3591,33 +3614,35 @@ export async function main(): Promise<void> {
     if (sourceRuntimeClosed) throw new Error('Source runtime is closed.');
     if (dropboxConnectorStore) return;
     if (!sourceTierLedgerReady(DROPBOX_FILES_SOURCE_ID)) return;
-    dropboxConnectorStore = dropboxConnectorStoreLane.enabled
-      ? createDropboxConnectorStore(process.env, { policy: dropboxIngestionPolicy })
-      : undefined;
     // Per-tier stores (P1c, design per-item-four-tier-classification.md): the
     // lane's original secure store keeps every existing file where it is; a new
     // file's names go to the Personal store (by default) when it is listed, and
     // its text to the store its content tier decides once extraction reads it.
     // The Personal and Public stores are created on first need.
-    dropboxSecretLocations = dropboxConnectorStore
-      ? openTierSecretLocations({ sourceId: DROPBOX_FILES_SOURCE_ID }, dropboxConnectorStore.dbPath, DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID)
+    const opened = dropboxConnectorStoreLane.enabled
+      ? openPrivateLane(
+          DROPBOX_FILES_SOURCE_ID,
+          DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
+          () => createDropboxConnectorStore(process.env, { policy: dropboxIngestionPolicy }),
+          (secureStore, secretLocations) => createDropboxTierLane({
+            secureStore,
+            env: process.env,
+            policy: dropboxIngestionPolicy,
+            ...(secretLocations ? { secretLocations } : {}),
+            // The owner's folder choice (names only) reaches the tier set, which the
+            // store's own ingestion rules never carry (#1295).
+            ...(fileSourceScopeAuthority ? { namesOnlyByOwner: dropboxNamesOnlyByOwner(fileSourceScopeAuthority) } : {}),
+            onStoreOpened: (store) => registerTierLegStore(
+              store,
+              DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
+              sourceIndexEmbeddingProvider ?? null,
+            ),
+          }),
+        )
       : undefined;
-    dropboxTierLane = dropboxConnectorStore
-      ? createDropboxTierLane({
-          secureStore: dropboxConnectorStore,
-          env: process.env,
-          policy: dropboxIngestionPolicy,
-          ...(dropboxSecretLocations ? { secretLocations: dropboxSecretLocations } : {}),
-          // The owner's folder choice (names only) reaches the tier set, which the
-          // store's own ingestion rules never carry (#1295).
-          ...(fileSourceScopeAuthority ? { namesOnlyByOwner: dropboxNamesOnlyByOwner(fileSourceScopeAuthority) } : {}),
-          onStoreOpened: (store) => registerTierLegStore(
-            store,
-            DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
-            sourceIndexEmbeddingProvider ?? null,
-          ),
-        })
-      : undefined;
+    dropboxConnectorStore = opened?.store;
+    dropboxSecretLocations = opened?.secrets;
+    dropboxTierLane = opened?.lane;
     // The Dropbox set declares no embedder on its legs; the Private store's real
     // one is chosen here and handed to the scheduler. Tell the set, so the Private
     // row re-home pass knows whether it is local (it moves only when it is).
@@ -3668,25 +3693,27 @@ export async function main(): Promise<void> {
     if (sourceRuntimeClosed) throw new Error('Source runtime is closed.');
     if (localFilesConnectorStore) return;
     if (!sourceTierLedgerReady(LOCAL_FILES_SOURCE_ID)) return;
-    localFilesConnectorStore = localFilesConnectorStoreLane.enabled
-      ? createLocalFilesConnectorStore(process.env, { policy: localFilesIngestionPolicy })
+    const opened = localFilesConnectorStoreLane.enabled
+      ? openPrivateLane(
+          LOCAL_FILES_SOURCE_ID,
+          LOCAL_FILES_CORPUS_ID,
+          () => createLocalFilesConnectorStore(process.env, { policy: localFilesIngestionPolicy }),
+          (secureStore, secretLocations) => createLocalFilesTierLane({
+            secureStore,
+            env: process.env,
+            policy: localFilesIngestionPolicy,
+            ...(secretLocations ? { secretLocations } : {}),
+            onStoreOpened: (store) => registerTierLegStore(
+              store,
+              LOCAL_FILES_CORPUS_ID,
+              sourceIndexEmbeddingProvider ?? null,
+            ),
+          }),
+        )
       : undefined;
-    localFilesSecretLocations = localFilesConnectorStore
-      ? openTierSecretLocations({ sourceId: LOCAL_FILES_SOURCE_ID }, localFilesConnectorStore.dbPath, LOCAL_FILES_CORPUS_ID)
-      : undefined;
-    localFilesTierLane = localFilesConnectorStore
-      ? createLocalFilesTierLane({
-          secureStore: localFilesConnectorStore,
-          env: process.env,
-          policy: localFilesIngestionPolicy,
-          ...(localFilesSecretLocations ? { secretLocations: localFilesSecretLocations } : {}),
-          onStoreOpened: (store) => registerTierLegStore(
-            store,
-            LOCAL_FILES_CORPUS_ID,
-            sourceIndexEmbeddingProvider ?? null,
-          ),
-        })
-      : undefined;
+    localFilesConnectorStore = opened?.store;
+    localFilesSecretLocations = opened?.secrets;
+    localFilesTierLane = opened?.lane;
     if (localFilesTierLane && localFilesConnectorStore && localFilesEmbeddingProvider
       && isApprovedSecureSourceEmbeddingProvider(localFilesEmbeddingProvider)) {
       localFilesTierLane.set.declarePrivateEmbedder(localFilesEmbeddingProvider, {
@@ -3807,26 +3834,28 @@ export async function main(): Promise<void> {
     if (sourceRuntimeClosed) throw new Error('Source runtime is closed.');
     if (whatsappConnectorStore) return;
     if (!sourceTierLedgerReady(WHATSAPP_PERSONAL_SOURCE_ID)) return;
-    whatsappConnectorStore = whatsappConnectorStoreLane.enabled
-      ? createWhatsAppConnectorStore(process.env)
-      : undefined;
     // Per-tier stores (P1c): each message is tiered by its own content; Private
     // ones rest in the lane's own store and Personal ones in the Personal store.
-    whatsappSecretLocations = whatsappConnectorStore
-      ? openTierSecretLocations({ sourceId: WHATSAPP_PERSONAL_SOURCE_ID }, whatsappConnectorStore.dbPath, WHATSAPP_LIVE_CORPUS_ID)
+    const opened = whatsappConnectorStoreLane.enabled
+      ? openPrivateLane(
+          WHATSAPP_PERSONAL_SOURCE_ID,
+          WHATSAPP_LIVE_CORPUS_ID,
+          () => createWhatsAppConnectorStore(process.env),
+          (store, secretLocations) => existingStoreTierSet(createWhatsAppTierLane({
+            store,
+            env: process.env,
+            ...(sourceIndexEmbeddingProvider ? { internalEmbeddingProvider: sourceIndexEmbeddingProvider } : {}),
+            ...(secretLocations ? { secretLocations } : {}),
+            onStoreOpened: (leg) => registerTierLegStore(leg, WHATSAPP_LIVE_CORPUS_ID, sourceIndexEmbeddingProvider ?? null),
+          }), {
+            store,
+            ...(secretLocations ? { secrets: secretLocations } : {}),
+          }),
+        )
       : undefined;
-    whatsappTierSet = whatsappConnectorStore
-      ? existingStoreTierSet(createWhatsAppTierLane({
-          store: whatsappConnectorStore,
-          env: process.env,
-          ...(sourceIndexEmbeddingProvider ? { internalEmbeddingProvider: sourceIndexEmbeddingProvider } : {}),
-          ...(whatsappSecretLocations ? { secretLocations: whatsappSecretLocations } : {}),
-          onStoreOpened: (opened) => registerTierLegStore(opened, WHATSAPP_LIVE_CORPUS_ID, sourceIndexEmbeddingProvider ?? null),
-        }), {
-          store: whatsappConnectorStore,
-          ...(whatsappSecretLocations ? { secrets: whatsappSecretLocations } : {}),
-        })
-      : undefined;
+    whatsappConnectorStore = opened?.store;
+    whatsappSecretLocations = opened?.secrets;
+    whatsappTierSet = opened?.lane;
     if (whatsappTierSet && tierSecureEmbeddingProvider) whatsappTierSet.declarePrivateEmbedder(tierSecureEmbeddingProvider);
     if (whatsappTierSet && whatsappConnectorStore) {
       reportRehomedChatOverrides('whatsapp', rehomeChatLaneOverrides(whatsappTierSet.ledger, 'whatsapp', [whatsappConnectorStore]));
@@ -5068,7 +5097,7 @@ export async function main(): Promise<void> {
       const defaultLocalAnalyst = sovereigntyAnalysts.get('local-source-answer')?.analyst
         ?? createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true });
       // Off unless the owner set OLYMPUS_SOURCE_RERANKER=built-in (issue #921).
-      const sourceReranker = builtInRerankerFromEnv();
+      const sourceReranker = await prepareBuiltInRerankerFromEnv();
       return createAnalystSourceIndexAnswerHandler({
         inferenceGuard: (pack, request, corpusIds) => guardSourceAnswerEvidence({ lanes: sourceAnswerLanes!, pack, request, corpusIds }),
         analyst: defaultLocalAnalyst,

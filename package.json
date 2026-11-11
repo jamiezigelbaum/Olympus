@@ -100,6 +100,7 @@
     }
   },
   "dependencies": {
+    "@huggingface/tokenizers": "0.2.0",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@streamparser/json": "0.0.26",
     "entities": "7.0.1",
