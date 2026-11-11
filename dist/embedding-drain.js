@@ -39663,6 +39663,20 @@ function onnxRuntimeFromDirectory(runtimeDir) {
 }
 var init_runtime = () => {};
 
+// src/workers/source-index/built-in-embedding/pair-tokenizer.ts
+function truncatePair(a, b, room, tiePolicy = "wordpiece") {
+  let keepA = a.length;
+  let keepB = b.length;
+  room = Math.max(0, room);
+  while (keepA + keepB > room) {
+    if (keepB > keepA || keepB === keepA && (tiePolicy === "wordpiece" || a.length > b.length))
+      keepB -= 1;
+    else
+      keepA -= 1;
+  }
+  return { a: a.slice(0, keepA), b: b.slice(0, keepB), truncated: keepA < a.length || keepB < b.length };
+}
+
 // src/workers/source-index/built-in-embedding/wordpiece.ts
 class WordPieceTokenizer {
   vocab;
@@ -39704,22 +39718,7 @@ class WordPieceTokenizer {
     };
   }
   encodePair(first, second, maxLength) {
-    let a = this.tokenize(first);
-    let b = this.tokenize(second);
-    const room = Math.max(0, maxLength - 3);
-    const truncated = a.length + b.length > room;
-    if (truncated) {
-      let keepA = a.length;
-      let keepB = b.length;
-      while (keepA + keepB > room) {
-        if (keepB >= keepA)
-          keepB -= 1;
-        else
-          keepA -= 1;
-      }
-      a = a.slice(0, keepA);
-      b = b.slice(0, keepB);
-    }
+    const { a, b, truncated } = truncatePair(this.tokenize(first), this.tokenize(second), maxLength - 3);
     const ids = [this.clsId, ...a, this.sepId, ...b, this.sepId];
     const typeIds = ids.map((_, index) => index < a.length + 2 ? 0 : 1);
     return { ids, typeIds, truncated };
@@ -72835,6 +72834,159 @@ init_manifest();
 init_runtime();
 init_wordpiece();
 
+// node_modules/@huggingface/tokenizers/dist/tokenizers.mjs
+var UNICODE_WORD_CHARS_IN_CLASS = "\\p{Alphabetic}\\p{M}\\p{Nd}\\p{Pc}";
+var UNICODE_WORD_CHARS = `${UNICODE_WORD_CHARS_IN_CLASS}\\u00B2\\u00B3\\u00B9\\u00BC-\\u00BE`;
+var UNICODE_WORD_CLASS = `[${UNICODE_WORD_CHARS}]`;
+var UNICODE_NON_WORD_CLASS = `[^${UNICODE_WORD_CHARS}]`;
+var UNICODE_WORD_BOUNDARY = `(?:(?<!${UNICODE_WORD_CLASS})(?=${UNICODE_WORD_CLASS})|(?<=${UNICODE_WORD_CLASS})(?!${UNICODE_WORD_CLASS}))`;
+var UNICODE_NON_WORD_BOUNDARY = `(?:(?<!${UNICODE_WORD_CLASS})(?!${UNICODE_WORD_CLASS})|(?<=${UNICODE_WORD_CLASS})(?=${UNICODE_WORD_CLASS}))`;
+var HEX_DIGIT_CHARS = "0-9A-Fa-f";
+var ESCAPE_REWRITES = /* @__PURE__ */ new Map([
+  ["A", "(?<![\\s\\S])"],
+  ["z", "(?![\\s\\S])"],
+  ["Z", "(?=\\n?(?![\\s\\S]))"],
+  ["h", `[${HEX_DIGIT_CHARS}]`],
+  ["H", `[^${HEX_DIGIT_CHARS}]`],
+  ["w", UNICODE_WORD_CLASS],
+  ["W", UNICODE_NON_WORD_CLASS],
+  ["d", "\\p{Nd}"],
+  ["D", "\\P{Nd}"],
+  ["s", "\\p{White_Space}"],
+  ["S", "\\P{White_Space}"],
+  ["b", UNICODE_WORD_BOUNDARY],
+  ["B", UNICODE_NON_WORD_BOUNDARY],
+  ["a", "\\x07"],
+  ["e", "\\x1B"]
+]);
+var CLASS_COMPLEMENT_ALTERNATIVES = /* @__PURE__ */ new Map([
+  ["W", `[^${UNICODE_WORD_CHARS_IN_CLASS}]`],
+  ["H", `[^${HEX_DIGIT_CHARS}]`]
+]);
+var Callable = class {
+  constructor() {
+    const closure = function(...args) {
+      return closure._call(...args);
+    };
+    return Object.setPrototypeOf(closure, new.target.prototype);
+  }
+};
+var Callable_default = Callable;
+var Normalizer = class extends Callable_default {
+  constructor(config) {
+    super();
+    this.config = config;
+  }
+  _call(text3) {
+    return this.normalize(text3);
+  }
+};
+var Normalizer_default = Normalizer;
+var Precompiled = class extends Normalizer_default {
+  constructor(config) {
+    super(config);
+    this.charsmap = config.precompiled_charsmap ?? null;
+  }
+  normalize(text3) {
+    text3 = text3.replace(/[\u0001-\u0008\u000B\u000E-\u001F\u007F\u008F\u009F]/gm, "");
+    text3 = text3.replace(/[\u0009\u000A\u000C\u000D\u00A0\u1680\u2000-\u200F\u2028\u2029\u202F\u205F\u2581\u3000\uFEFF\uFFFD]/gm, " ");
+    if (text3.includes("～")) {
+      const parts = text3.split("～");
+      text3 = parts.map((part) => part.normalize("NFKC")).join("～");
+    } else {
+      text3 = text3.normalize("NFKC");
+    }
+    return text3;
+  }
+};
+var Precompiled_default = Precompiled;
+var BYTES_TO_UNICODE = (() => {
+  const bs = [
+    ...Array.from({ length: 126 - 33 + 1 }, (_, i2) => i2 + 33),
+    ...Array.from({ length: "¬".charCodeAt(0) - "¡".charCodeAt(0) + 1 }, (_, i2) => i2 + "¡".charCodeAt(0)),
+    ...Array.from({ length: "ÿ".charCodeAt(0) - "®".charCodeAt(0) + 1 }, (_, i2) => i2 + "®".charCodeAt(0))
+  ];
+  const cs = bs.slice();
+  let n = 0;
+  for (let b = 0;b < 256; ++b) {
+    if (!bs.includes(b)) {
+      bs.push(b);
+      cs.push(256 + n);
+      n += 1;
+    }
+  }
+  const ccs = cs.map((n2) => String.fromCharCode(n2));
+  return Object.fromEntries(bs.map((b, i2) => [b, ccs[i2]]));
+})();
+var reverse_dictionary = (data2) => Object.fromEntries(Object.entries(data2).map(([key2, value]) => [value, key2]));
+var UNICODE_TO_BYTES = reverse_dictionary(BYTES_TO_UNICODE);
+
+// src/workers/source-index/built-in-embedding/precompiled-charsmap.ts
+class CharsmapNormalizer extends Precompiled_default {
+  trie;
+  replacements;
+  graphemes = new Intl.Segmenter("und", { granularity: "grapheme" });
+  constructor(charsmap) {
+    super({ type: "Precompiled", precompiled_charsmap: charsmap });
+    const data2 = Buffer.from(charsmap, "base64");
+    if (data2.length < 8)
+      throw new Error("Invalid precompiled character map.");
+    const bytes = data2.readUInt32LE(0);
+    if (bytes < 4 || bytes % 4 || bytes + 4 >= data2.length)
+      throw new Error("Invalid precompiled character map.");
+    this.trie = new Uint32Array(bytes / 4);
+    for (let i2 = 0;i2 < this.trie.length; i2 += 1)
+      this.trie[i2] = data2.readUInt32LE(4 + i2 * 4);
+    this.replacements = data2.subarray(4 + bytes);
+  }
+  transform(text3) {
+    const offset = (unit) => unit >>> 10 << ((unit & 512) >>> 6) >>> 0;
+    let node = offset(this.trie[0]);
+    for (const byte of Buffer.from(text3, "utf8")) {
+      if (byte === 0)
+        break;
+      node = (node ^ byte) >>> 0;
+      const unit = this.trie[node];
+      if (unit === undefined || (unit & 2147483903) >>> 0 !== byte)
+        return;
+      node = (node ^ offset(unit)) >>> 0;
+      if (unit & 256) {
+        const leaf = this.trie[node];
+        if (leaf === undefined)
+          throw new Error("Invalid precompiled character map leaf.");
+        const start = leaf & 2147483647;
+        const end = this.replacements.indexOf(0, start);
+        if (end < 0)
+          throw new Error("Invalid precompiled character map replacement.");
+        return this.replacements.toString("utf8", start, end);
+      }
+    }
+    return;
+  }
+  normalize(text3) {
+    let result = "";
+    for (const { segment } of this.graphemes.segment(text3)) {
+      const mapped = Buffer.byteLength(segment) < 6 ? this.transform(segment) : undefined;
+      result += mapped ?? Array.from(segment, (char) => this.transform(char) ?? char).join("");
+    }
+    return result;
+  }
+}
+// src/workers/source-index/built-in-reranker-manifest.ts
+function candidate(modelId, repository, revision, modelFile, modelBytes, modelSha256, tokenizerFile, tokenizerBytes, tokenizerSha256) {
+  const base = `https://huggingface.co/${repository}/resolve/${revision}`;
+  return {
+    modelId,
+    repository,
+    revision,
+    license: "Apache-2.0",
+    maxTokens: 512,
+    model: { name: "model.onnx", url: `${base}/${modelFile}`, bytes: modelBytes, sha256: modelSha256 },
+    tokenizer: { name: tokenizerFile, url: `${base}/${tokenizerFile}`, bytes: tokenizerBytes, sha256: tokenizerSha256 }
+  };
+}
+var MS_MARCO_MINILM_L6_V2 = candidate("ms-marco-MiniLM-L6-v2-fp32-233902d", "cross-encoder/ms-marco-MiniLM-L6-v2", "233902d25c440f23af6f7d6e94d2946bac0bee0a", "onnx/model.onnx", 91011230, "5d3e70fd0c9ff14b9b5169a51e957b7a9c74897afd0a35ce4bd318150c1d4d4a", "vocab.txt", 231508, "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3");
+var MMARCO_MMINILMV2_L12_H384_V1 = candidate("mmarco-mMiniLMv2-L12-H384-v1-int8-1427fd6", "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1", "1427fd652930e4ba29e8149678df786c240d8825", "onnx/model_qint8_arm64.onnx", 118620017, "1825907d6c1a9001ff78124780bbde20a614a8c3df3b63409cf3c72c6fe5c8b4", "tokenizer.json", 17082660, "62c24cdc13d4c9952d63718d6c9fa4c287974249e16b7ade6d5a85e7bbb75626");
 // src/workers/engine/server.ts
 init_judge_spending();
 init_judge_second_round();
@@ -73087,7 +73239,7 @@ class MessagingCaptureSupervisor {
       await this.stop();
       return { source: grant.source, state: "stopped", reason: "grant_missing" };
     }
-    const handle = withoutUnpairedLaneHandles(readConnectedHandleRegistry(registryPath).handles, registryPath).find((candidate) => candidate.handle === grant.handle);
+    const handle = withoutUnpairedLaneHandles(readConnectedHandleRegistry(registryPath).handles, registryPath).find((candidate2) => candidate2.handle === grant.handle);
     if (!handleAllowsCapture(handle, grant.source)) {
       await this.stop();
       return { source: grant.source, state: "stopped", reason: "handle_unavailable" };
@@ -73422,11 +73574,11 @@ function catalogCategory(catalog, modelId) {
   }
   return;
 }
-function newerCatalog(current2, candidate) {
-  if (!candidate)
+function newerCatalog(current2, candidate2) {
+  if (!candidate2)
     return current2;
-  if (!current2 || candidate.fetchedAtMs > current2.fetchedAtMs)
-    return candidate;
+  if (!current2 || candidate2.fetchedAtMs > current2.fetchedAtMs)
+    return candidate2;
   return current2;
 }
 function catalogIsFresh(catalog, nowMs, ttlMs) {
@@ -74422,10 +74574,10 @@ import { pathToFileURL as pathToFileURL3 } from "node:url";
 var LOCAL_FILES_LOCATOR_RESULT_PROJECTOR_CODEC = Object.freeze({
   create(input) {
     return Object.freeze({
-      project(candidate) {
-        if (input.principal.provider !== LOCAL_FILES_PROVIDER || candidate.sourceItem.family !== "file" || candidate.sourceItem.provider !== input.principal.provider || candidate.sourceItem.accountScope !== input.principal.accountScope)
+      project(candidate2) {
+        if (input.principal.provider !== LOCAL_FILES_PROVIDER || candidate2.sourceItem.family !== "file" || candidate2.sourceItem.provider !== input.principal.provider || candidate2.sourceItem.accountScope !== input.principal.accountScope)
           return;
-        const locator = locatorFromScopePath(candidate.readLocatorUri());
+        const locator = locatorFromScopePath(candidate2.readLocatorUri());
         return locator ? { locator } : undefined;
       }
     });
@@ -74697,15 +74849,15 @@ var CHAT_SCOPE_FILTER_CODEC = Object.freeze({
     if (lookup3.truncated)
       return unresolvedChatTitleResolution(chatScope);
     const rankedByConversation = new Map;
-    for (const candidate of lookup3.candidates) {
-      const score = conversationTitleMatchScore(candidate.title, terms);
-      const exact = conversationTitleExactMatch(candidate.title, terms);
+    for (const candidate2 of lookup3.candidates) {
+      const score = conversationTitleMatchScore(candidate2.title, terms);
+      const exact = conversationTitleExactMatch(candidate2.title, terms);
       if (!exact && (terms.length < 2 || score < Math.min(3, terms.length)))
         continue;
-      const prior = rankedByConversation.get(candidate.conversationId);
+      const prior = rankedByConversation.get(candidate2.conversationId);
       if (!prior || Number(exact) > Number(prior.exact) || exact === prior.exact && score > prior.score) {
-        rankedByConversation.set(candidate.conversationId, {
-          conversationId: candidate.conversationId,
+        rankedByConversation.set(candidate2.conversationId, {
+          conversationId: candidate2.conversationId,
           exact,
           score
         });
@@ -76022,11 +76174,11 @@ async function loadParcelWatcher(extraDirs = []) {
   }
   const dirs = [...extraDirs, ...process.env.OLYMPUS_NATIVE_MODULES_DIR ? [process.env.OLYMPUS_NATIVE_MODULES_DIR] : []];
   for (const dir of dirs) {
-    const candidate = join42(dir, "node_modules");
-    if (!existsSync33(join42(candidate, "@parcel", "watcher")))
+    const candidate2 = join42(dir, "node_modules");
+    if (!existsSync33(join42(candidate2, "@parcel", "watcher")))
       continue;
     try {
-      const requireFrom = createRequire8(join42(dirname41(candidate), "package.json"));
+      const requireFrom = createRequire8(join42(dirname41(candidate2), "package.json"));
       return unwrap(requireFrom(specifier));
     } catch (error) {
       failures.push(error instanceof Error ? error.message : String(error));
@@ -76035,8 +76187,8 @@ async function loadParcelWatcher(extraDirs = []) {
   throw new Error(`the file watcher could not be loaded (${failures[0] ?? "not installed"})`);
 }
 function unwrap(loaded) {
-  const candidate = loaded?.default ?? loaded;
-  const module = candidate;
+  const candidate2 = loaded?.default ?? loaded;
+  const module = candidate2;
   if (typeof module.subscribe !== "function" || typeof module.writeSnapshot !== "function") {
     throw new Error("the file watcher module has an unexpected shape");
   }
@@ -77182,8 +77334,8 @@ function normalizeSchedulerSourceId(value) {
   return sourceId;
 }
 function taskBootstrapLastSuccessAt(_source, task) {
-  const candidate = task.bootstrapLastSuccessAt?.();
-  return candidate && Number.isFinite(Date.parse(candidate)) ? candidate : undefined;
+  const candidate2 = task.bootstrapLastSuccessAt?.();
+  return candidate2 && Number.isFinite(Date.parse(candidate2)) ? candidate2 : undefined;
 }
 function schedulerTaskStateKey(source, task) {
   return {
@@ -77207,8 +77359,8 @@ function initialNextRunAt(input) {
     return input.firstRun;
   return boundFutureSchedule(cadenceAnchor + (input.persisted?.effectiveIntervalMs ?? input.configuredIntervalMs), input.firstRun);
 }
-function boundFutureSchedule(candidate, now) {
-  return Math.min(candidate, now + SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS);
+function boundFutureSchedule(candidate2, now) {
+  return Math.min(candidate2, now + SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS);
 }
 function nextCadenceAfter(anchor, intervalMs, completedAt) {
   const elapsedIntervals = Math.floor(Math.max(0, completedAt - anchor) / intervalMs);

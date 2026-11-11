@@ -4,16 +4,10 @@
 // plugin ships as a bundled file with no node_modules, and the algorithm is
 // small, frozen, and pinned by a parity test against the reference output.
 
-export interface WordPieceEncoding {
-  ids: number[];
-  /** True when the text had more tokens than fit and was cut. */
-  truncated: boolean;
-}
+import { truncatePair, type TokenEncoding, type PairEncoding } from './pair-tokenizer.ts';
 
-export interface WordPiecePairEncoding extends WordPieceEncoding {
-  /** Segment id per token: 0 for the first text and its specials, 1 for the second. */
-  typeIds: number[];
-}
+export type WordPieceEncoding = TokenEncoding;
+export type WordPiecePairEncoding = PairEncoding;
 
 const MAX_INPUT_CHARS_PER_WORD = 100;
 const CONTINUING_SUBWORD_PREFIX = '##';
@@ -66,20 +60,7 @@ export class WordPieceTokenizer {
    * pair a cross-encoder reads.
    */
   encodePair(first: string, second: string, maxLength: number): WordPiecePairEncoding {
-    let a = this.tokenize(first);
-    let b = this.tokenize(second);
-    const room = Math.max(0, maxLength - 3);
-    const truncated = a.length + b.length > room;
-    if (truncated) {
-      let keepA = a.length;
-      let keepB = b.length;
-      while (keepA + keepB > room) {
-        if (keepB >= keepA) keepB -= 1;
-        else keepA -= 1;
-      }
-      a = a.slice(0, keepA);
-      b = b.slice(0, keepB);
-    }
+    const { a, b, truncated } = truncatePair(this.tokenize(first), this.tokenize(second), maxLength - 3);
     const ids = [this.clsId, ...a, this.sepId, ...b, this.sepId];
     const typeIds = ids.map((_, index) => (index < a.length + 2 ? 0 : 1));
     return { ids, typeIds, truncated };

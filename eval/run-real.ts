@@ -27,7 +27,7 @@
 // retrieval expansions; default is literal-query retrieval for a usable gate.
 
 import { createHash } from 'node:crypto';
-import { builtInRerankerFromEnv } from '../src/workers/source-index/built-in-reranker.ts';
+import { prepareBuiltInRerankerFromEnv } from '../src/workers/source-index/built-in-reranker.ts';
 import type { EvidenceReranker } from '../src/core/evidence-reranker.ts';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -238,7 +238,7 @@ async function main(): Promise<void> {
   const queryPlanner = queryPlannerEnabled ? createAnalystQueryPlanner(model) : undefined;
   // Off unless OLYMPUS_SOURCE_RERANKER=built-in names a reranker model
   // directory, so one corpus can be measured with and without it (issue #921).
-  const reranker = builtInRerankerFromEnv();
+  const reranker = await prepareBuiltInRerankerFromEnv();
 
   const detailsByPack = new WeakMap<object, EvidencePackBuildDetail>();
   const rawResultsByPack = new WeakMap<object, AnalystResult>();

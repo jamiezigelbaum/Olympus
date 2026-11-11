@@ -3,7 +3,7 @@ import { LocalPeopleIndex, PeopleIndexRefresher, peopleIndexPath, type PeopleSen
 import { adoptExistingCloudApproval, carryCloudJudgeApproval, createJudgeSetup } from '../classification/judge-setup.ts';
 import { createOwnerTierItems, getOwnerTierItem } from '../classification/tier-owner-items.ts';
 import { createJudgeCheck } from '../classification/judge-check.ts';
-import { builtInRerankerFromEnv } from '../source-index/built-in-reranker.ts';
+import { prepareBuiltInRerankerFromEnv } from '../source-index/built-in-reranker.ts';
 import { JudgeSpending, withJudgeSpendingStop, judgeSpendingPath } from '../classification/judge-spending.ts';
 import { JudgeObservations, SecondRoundConfirmed, SecondRoundSweep, judgeObservationsPath, judgeSecondRoundConfirmedPath, judgeSecondRoundStatePath, observedJudge, secondRoundJudge } from '../classification/judge-second-round.ts';
 import { DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS, JUDGE_PROMPT_CACHE_KEY, JUDGE_SAMPLING, JudgeRateLimitPacer } from '../classification/judge-pacing.ts';
@@ -5091,7 +5091,7 @@ export async function main(): Promise<void> {
       const defaultLocalAnalyst = sovereigntyAnalysts.get('local-source-answer')?.analyst
         ?? createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true });
       // Off unless the owner set OLYMPUS_SOURCE_RERANKER=built-in (issue #921).
-      const sourceReranker = builtInRerankerFromEnv();
+      const sourceReranker = await prepareBuiltInRerankerFromEnv();
       return createAnalystSourceIndexAnswerHandler({
         inferenceGuard: (pack, request, corpusIds) => guardSourceAnswerEvidence({ lanes: sourceAnswerLanes!, pack, request, corpusIds }),
         analyst: defaultLocalAnalyst,
