@@ -3951,6 +3951,19 @@ export class TierLedger {
    * can outlive their item during an account removal, so they still check
    * for it; moving items come from tier_items_state.
    */
+  /**
+   * The corpus's current copies held from embedding: one count on the
+   * tier_copies_corpus index. An Ask reads this for every corpus it searched;
+   * corpusCopyCounts' superseded and moving joins cost Sparta's ledger about
+   * 10 s of one Ask on the request thread (#1305).
+   */
+  corpusHeldCopyCount(corpusId: string): number {
+    return (this.db.query(`
+      SELECT COUNT(*) AS n FROM tier_copies
+      WHERE corpus_id = ? AND copy_state = 'current' AND embed_hold = 1
+    `).get(corpusId) as { n: number }).n;
+  }
+
   corpusCopyCounts(corpusId: string): { current: number; superseded: number; staged: number; held: number; moving: number } {
     const rows = this.db.query(`
       SELECT copy_state, embed_hold, COUNT(*) AS n FROM tier_copies

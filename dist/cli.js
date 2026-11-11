@@ -24897,6 +24897,12 @@ class TierLedger {
       yield;
     }
   }
+  corpusHeldCopyCount(corpusId) {
+    return this.db.query(`
+      SELECT COUNT(*) AS n FROM tier_copies
+      WHERE corpus_id = ? AND copy_state = 'current' AND embed_hold = 1
+    `).get(corpusId).n;
+  }
   corpusCopyCounts(corpusId) {
     const rows = this.db.query(`
       SELECT copy_state, embed_hold, COUNT(*) AS n FROM tier_copies
@@ -237291,7 +237297,7 @@ ${key2}`;
         parentLabels: parentLabelResolver,
         secretLocations: tierSecretLocations,
         checkSecretLocations: checkTierSecretLocations,
-        heldItems: (corpusId) => tierLanes.find((candidate) => candidate.corpusIds.has(corpusId))?.ledger.corpusCopyCounts(corpusId).held ?? 0
+        heldItems: (corpusId) => tierLanes.find((candidate) => candidate.corpusIds.has(corpusId))?.ledger.corpusHeldCopyCount(corpusId) ?? 0
       })
     });
   })() : undefined;
