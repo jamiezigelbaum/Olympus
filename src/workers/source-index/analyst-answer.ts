@@ -1120,7 +1120,7 @@ function clipQuestionChunksToUtf8Bytes(
   let windows: string[] = [];
   let chars = maxBytes;
   for (let attempt = 0; attempt < 6 && chars > 0; attempt += 1) {
-    windows = boundedSourceIndexChunks(chunks, chars, termGroups).chunks.map(wholeCodePoints);
+    windows = boundedSourceIndexChunks(chunks, chars, termGroups, { followCluster: true }).chunks.map(wholeCodePoints);
     const bytes = windows.reduce((sum, window) => sum + utf8ByteLength(window), 0);
     if (bytes <= maxBytes) return windows;
     chars = Math.floor(chars * maxBytes / bytes) - 1;

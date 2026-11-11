@@ -33462,7 +33462,7 @@ function sourceIndexChunkTermScore(text2, termGroups) {
   const normalized = text2.toLowerCase();
   return termGroups.reduce((score, group) => score + Math.max(0, ...group.map((term) => termOccurrences(normalized, term.toLowerCase()).length)), 0);
 }
-function boundedSourceIndexChunks(texts, maxChars, termGroups) {
+function boundedSourceIndexChunks(texts, maxChars, termGroups, options = {}) {
   const distinctTexts = [...new Set(texts.map((text2) => text2.trim()).filter(Boolean))];
   const chunks = [];
   let remaining = maxChars !== undefined && maxChars > 0 ? maxChars : Number.POSITIVE_INFINITY;
@@ -33472,7 +33472,7 @@ function boundedSourceIndexChunks(texts, maxChars, termGroups) {
       return { chunks, truncated: true };
     const text2 = distinctTexts[index];
     const fairShare = Number.isFinite(remaining) ? Math.max(1, Math.floor(remaining / (distinctTexts.length - index))) : undefined;
-    const snippet = sourceIndexChunkSnippet(text2, termGroups, fairShare);
+    const snippet = sourceIndexChunkSnippet(text2, termGroups, fairShare, options);
     if (!snippet)
       continue;
     const included = snippet.length > remaining ? snippet.slice(0, remaining) : snippet;
@@ -33491,14 +33491,19 @@ function withoutNameTerms(termGroups, title) {
     return termGroups;
   return termGroups.filter((group) => !group.some((term) => nameTokens.has(term.toLowerCase())));
 }
-function sourceIndexChunkSnippet(text2, termGroups, maxChars) {
+function sourceIndexChunkSnippet(text2, termGroups, maxChars, options = {}) {
   if (maxChars === undefined || maxChars <= 0 || text2.length <= maxChars)
     return text2;
   const lower = text2.toLowerCase();
   const normalizedGroups = termGroups.map((group) => [...new Set(group.map((term) => term.toLowerCase()).filter(Boolean))]).filter((group) => group.length > 0);
-  const occurrences = normalizedGroups.flatMap((group) => group.flatMap((term) => termOccurrences(lower, term)));
+  const occurrencesByGroup = normalizedGroups.map((group) => group.flatMap((term) => termOccurrences(lower, term)));
+  const occurrences = occurrencesByGroup.flat();
   if (occurrences.length === 0)
     return text2.slice(0, maxChars);
+  if (options.followCluster) {
+    const start = clusterWindowStart(text2.length, occurrencesByGroup, maxChars);
+    return text2.slice(start, start + maxChars);
+  }
   const starts = [...new Set(occurrences.map((matchIndex) => {
     const lead = Math.min(Math.floor(maxChars / 4), matchIndex);
     return Math.min(Math.max(0, matchIndex - lead), Math.max(0, text2.length - maxChars));
@@ -33517,6 +33522,26 @@ function termOccurrences(text2, term) {
     start = index + term.length;
   }
   return indexes;
+}
+function clusterWindowStart(textLength, occurrencesByGroup, maxChars) {
+  const matches = occurrencesByGroup.flatMap((indexes, group) => indexes.map((index) => ({ index, group }))).sort((left, right) => left.index - right.index || left.group - right.group);
+  const reach = Math.floor(maxChars / 2);
+  let best = { index: matches[0].index, groups: 0, span: Number.POSITIVE_INFINITY };
+  for (let first = 0;first < matches.length; first += 1) {
+    const seen = new Set;
+    let span = 0;
+    for (let next = first;next < matches.length && matches[next].index - matches[first].index <= reach; next += 1) {
+      if (seen.has(matches[next].group))
+        continue;
+      seen.add(matches[next].group);
+      span = matches[next].index - matches[first].index;
+    }
+    if (seen.size > best.groups || seen.size === best.groups && span < best.span) {
+      best = { index: matches[first].index, groups: seen.size, span };
+    }
+  }
+  const lead = Math.min(Math.floor(maxChars / 8), best.index);
+  return Math.min(best.index - lead, Math.max(0, textLength - maxChars));
 }
 function chunkWindowScore(text2, termGroups) {
   let distinctGroups = 0;
@@ -76477,7 +76502,7 @@ function clipQuestionChunksToUtf8Bytes(chunks, maxBytes, termGroups) {
   let windows = [];
   let chars = maxBytes;
   for (let attempt = 0;attempt < 6 && chars > 0; attempt += 1) {
-    windows = boundedSourceIndexChunks(chunks, chars, termGroups).chunks.map(wholeCodePoints);
+    windows = boundedSourceIndexChunks(chunks, chars, termGroups, { followCluster: true }).chunks.map(wholeCodePoints);
     const bytes = windows.reduce((sum, window2) => sum + utf8ByteLength(window2), 0);
     if (bytes <= maxBytes)
       return windows;

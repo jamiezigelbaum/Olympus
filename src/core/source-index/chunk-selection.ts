@@ -78,6 +78,7 @@ export function boundedSourceIndexChunks(
   texts: readonly string[],
   maxChars: number | undefined,
   termGroups: ReadonlyArray<readonly string[]>,
+  options: SourceIndexWindowOptions = {},
 ): { chunks: string[]; truncated: boolean } {
   const distinctTexts = [...new Set(texts.map((text) => text.trim()).filter(Boolean))];
   const chunks: string[] = [];
@@ -89,7 +90,7 @@ export function boundedSourceIndexChunks(
     const fairShare = Number.isFinite(remaining)
       ? Math.max(1, Math.floor(remaining / (distinctTexts.length - index)))
       : undefined;
-    const snippet = sourceIndexChunkSnippet(text, termGroups, fairShare);
+    const snippet = sourceIndexChunkSnippet(text, termGroups, fairShare, options);
     if (!snippet) continue;
     const included = snippet.length > remaining ? snippet.slice(0, remaining) : snippet;
     chunks.push(included);
@@ -114,19 +115,36 @@ export function withoutNameTerms(
   return termGroups.filter((group) => !group.some((term) => nameTokens.has(term.toLowerCase())));
 }
 
+export interface SourceIndexWindowOptions {
+  /**
+   * Open the window a short lead before the densest cluster of terms and
+   * spend the rest on what follows it: a label's value comes after the label.
+   * Without it a window can be placed to take in earlier, scattered mentions
+   * and end just after the cluster, cutting the value it labels. Used where
+   * windows are small (the prompt fit's per-seat share).
+   */
+  followCluster?: boolean;
+}
+
 function sourceIndexChunkSnippet(
   text: string,
   termGroups: ReadonlyArray<readonly string[]>,
   maxChars: number | undefined,
+  options: SourceIndexWindowOptions = {},
 ): string {
   if (maxChars === undefined || maxChars <= 0 || text.length <= maxChars) return text;
   const lower = text.toLowerCase();
   const normalizedGroups = termGroups
     .map((group) => [...new Set(group.map((term) => term.toLowerCase()).filter(Boolean))])
     .filter((group) => group.length > 0);
-  const occurrences = normalizedGroups.flatMap((group) =>
+  const occurrencesByGroup = normalizedGroups.map((group) =>
     group.flatMap((term) => termOccurrences(lower, term)));
+  const occurrences = occurrencesByGroup.flat();
   if (occurrences.length === 0) return text.slice(0, maxChars);
+  if (options.followCluster) {
+    const start = clusterWindowStart(text.length, occurrencesByGroup, maxChars);
+    return text.slice(start, start + maxChars);
+  }
 
   // A long chunk often mentions one broad query word in its preamble and
   // carries the actual table or values around a later cluster of distinctive
@@ -156,6 +174,38 @@ function termOccurrences(text: string, term: string): number[] {
     start = index + term.length;
   }
   return indexes;
+}
+
+/**
+ * Where a cluster-following window starts: find the densest cluster (the
+ * match that, within half a window, reaches the most distinct term groups in
+ * the shortest span, earliest on a tie) and open the window a short lead
+ * before its first term, leaving the rest for what the cluster labels.
+ */
+function clusterWindowStart(
+  textLength: number,
+  occurrencesByGroup: ReadonlyArray<readonly number[]>,
+  maxChars: number,
+): number {
+  const matches = occurrencesByGroup
+    .flatMap((indexes, group) => indexes.map((index) => ({ index, group })))
+    .sort((left, right) => left.index - right.index || left.group - right.group);
+  const reach = Math.floor(maxChars / 2);
+  let best = { index: matches[0]!.index, groups: 0, span: Number.POSITIVE_INFINITY };
+  for (let first = 0; first < matches.length; first += 1) {
+    const seen = new Set<number>();
+    let span = 0;
+    for (let next = first; next < matches.length && matches[next]!.index - matches[first]!.index <= reach; next += 1) {
+      if (seen.has(matches[next]!.group)) continue;
+      seen.add(matches[next]!.group);
+      span = matches[next]!.index - matches[first]!.index;
+    }
+    if (seen.size > best.groups || (seen.size === best.groups && span < best.span)) {
+      best = { index: matches[first]!.index, groups: seen.size, span };
+    }
+  }
+  const lead = Math.min(Math.floor(maxChars / 8), best.index);
+  return Math.min(best.index - lead, Math.max(0, textLength - maxChars));
 }
 
 function chunkWindowScore(

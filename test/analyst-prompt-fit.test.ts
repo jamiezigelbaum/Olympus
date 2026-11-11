@@ -265,3 +265,21 @@ test('a seat whose passages already fit its share is kept whole', () => {
   const fitted = fitPackToPromptBytes(pack, 13_500, corpusOf, options);
   expect(fitted.candidates[0]!.chunks).toEqual(short);
 });
+
+test("a seat's window follows its densest term cluster, so the value that cluster labels is kept", () => {
+  // Scattered early mentions hold more matches than the one place where every
+  // term sits together; the value comes after that place, as a label's value does.
+  const early = Array.from({ length: 6 }, () => `zephyr ${'p'.repeat(20)} cobalt ${'q'.repeat(20)}`).join(' ');
+  const chunk = `${'x'.repeat(100)}${early} ${'r'.repeat(520 - 101 - early.length)}measurement zephyr cobalt ${'s'.repeat(900 - 546)}73.25 ${'y'.repeat(2_000)}`;
+  expect(chunk.indexOf('measurement')).toBe(520);
+  expect(chunk.indexOf('73.25')).toBe(900);
+  const { pack, corpusOf } = fixture(() => [chunk]);
+  const fitted = fitPackToPromptBytes(pack, 13_500, corpusOf, options);
+  expect(fitted.candidates.length).toBeGreaterThan(1);
+  for (const candidate of fitted.candidates) {
+    expect(passageBytes(candidate)).toBeLessThan(761);
+    expect(candidate.chunks.join('\n')).toContain('measurement zephyr cobalt');
+    expect(candidate.chunks.join('\n')).toContain('73.25');
+  }
+  expect(analystPromptBytes(fitted, options)).toBeLessThanOrEqual(13_500);
+});
