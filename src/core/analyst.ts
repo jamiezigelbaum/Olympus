@@ -679,13 +679,15 @@ export function amountsMissingFrom(answer: string, evidence: string): string[] {
 const AUDIT_EVIDENCE_HEADING = 'Audit evidence:';
 
 /**
- * A prompt as sent, without the audit's quote of the model's own draft: what
- * the model was given as evidence and instructions only.
+ * A prompt as sent, without the audit's quote of the model's own draft or the
+ * note naming the draft's unseen amounts: what the model was given as
+ * evidence and instructions only.
  */
 export function analystPromptWithoutDraft(prompt: string): string {
   const draft = prompt.indexOf(`\n${AUDIT_DRAFT_HEADING}\n`);
   const evidence = prompt.indexOf(`\n${AUDIT_EVIDENCE_HEADING}\n`, draft + 1);
-  return draft < 0 || evidence < 0 ? prompt : prompt.slice(0, draft) + prompt.slice(evidence);
+  const withoutDraft = draft < 0 || evidence < 0 ? prompt : prompt.slice(0, draft) + prompt.slice(evidence);
+  return withoutDraft.split('\n').filter((line) => !line.startsWith(AUDIT_UNSEEN_AMOUNTS)).join('\n');
 }
 
 function buildAnalystAuditPrompt(

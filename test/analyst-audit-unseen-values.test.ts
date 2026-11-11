@@ -4,7 +4,7 @@
 // audit decides, because an amount the answer computes from cited values is
 // legitimate.
 import { expect, test } from 'bun:test';
-import { createAnalyst, type AnalystModelRequest } from '../src/core/analyst.ts';
+import { analystPromptWithoutDraft, createAnalyst, type AnalystModelRequest } from '../src/core/analyst.ts';
 import { analystPromptFixture } from './helpers/analyst-prompt-fixture.ts';
 
 const NOTE = 'Amounts in the draft that appear nowhere in the evidence:';
@@ -29,6 +29,9 @@ for (const format of ['full', 'compact'] as const) {
     expect(note).toBeDefined();
     expect(note).toContain('€1,240.50');
     expect(note).toContain('$312');
+    // The eval's origin check reads the prompt without the draft: the note
+    // quotes the draft, so it goes too, and the amount is not credited to the evidence.
+    expect(analystPromptWithoutDraft(prompt)).not.toContain('1,240.50');
   });
 
   test(`${format}: an amount the evidence holds, in another separator style, is not named`, async () => {
