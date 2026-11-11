@@ -68,6 +68,8 @@ test('names keyword statements by shape', () => {
   expect(keywordStatementKind('WITH top AS MATERIALIZED (SELECT rowid, rank FROM connector_store_fts) SELECT x, MIN(top.rank) AS rank FROM top')).toBe('ranked_match_page_bounded');
   expect(keywordStatementKind('SELECT COUNT(DISTINCT item_pk) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ?')).toBe('concept_weight_count');
   expect(keywordStatementKind('SELECT DISTINCT a FROM connector_store_fts WHERE connector_store_fts.item_pk IN (?, ?)')).toBe('concept_hits_for_candidates');
+  expect(keywordStatementKind('SELECT DISTINCT r.item_pk, i.local_item_id, i.source_version FROM connector_store_fts_rows r JOIN items i ON i.item_pk = r.item_pk WHERE r.item_pk IN (?, ?) AND +r.fts_rowid IN (SELECT rowid FROM connector_store_fts WHERE connector_store_fts MATCH ?)')).toBe('concept_hits_for_candidates');
+  expect(keywordStatementKind('SELECT COUNT(DISTINCT r.item_pk) AS count FROM connector_store_fts_rows r WHERE r.fts_rowid IN (SELECT rowid FROM connector_store_fts WHERE connector_store_fts MATCH ?)')).toBe('concept_weight_count');
 });
 
 test('parses its flags with safe defaults', () => {
