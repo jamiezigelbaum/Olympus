@@ -18357,6 +18357,8 @@ async function withOffThreadSnapshot(dbPath, work) {
         } catch (error) {
           report?.({ queueWaitMs: 0, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "error" });
           throw error;
+        } finally {
+          dispatch();
         }
       });
     } finally {
@@ -18488,7 +18490,7 @@ function missedDeadline(job) {
     waiting.splice(at, 1);
 }
 function freeThread(store) {
-  return live().find((reader) => reader.store === store && !reader.releaseWhenIdle && busy(reader) === 0) ?? startThread(store);
+  return live().find((reader) => reader.store === store && !reader.releaseWhenIdle && !reader.job && reader.pending.size === 0) ?? startThread(store);
 }
 function dispatch() {
   for (const reader of live()) {
@@ -29797,10 +29799,31 @@ var init_local_index = __esm(() => {
       return matches;
     }
     recentItems(maxResults, accountScope, filters) {
+      const read = this.recentItemsRead(maxResults, accountScope, filters);
+      return this.visibleRecentRows(this.db.query(read.sql).all(...read.params));
+    }
+    async recentItemsOffThread(maxResults, accountScope, filters) {
+      if (!offThreadReadsSupported(this.dbPath))
+        return this.recentItems(maxResults, accountScope, filters);
+      let rows;
+      try {
+        rows = await readOnPool(this.dbPath, this.recentItemsRead(maxResults, accountScope, filters));
+      } catch (error) {
+        if (error instanceof OffThreadReadBusyError)
+          return [];
+        throw error;
+      }
+      if (this.closedForPoolReads)
+        return [];
+      return this.visibleRecentRows(rows);
+    }
+    recentItemsRead(maxResults, accountScope, filters) {
       const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
       const selectedAccount = normalizeOptionalAccountScope(accountScope);
       const selectedFilters = connectorStoreFilterSql(filters);
-      const rows = this.db.query(`
+      return {
+        mode: "all",
+        sql: `
       SELECT
         i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
         i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
@@ -29815,7 +29838,15 @@ var init_local_index = __esm(() => {
         AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
       ORDER BY COALESCE(i.authored_at, i.updated_at, i.indexed_at) DESC, i.item_pk DESC
       LIMIT ?
-    `).all(...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params, limit);
+    `,
+        params: [
+          ...selectedAccount ? [selectedAccount] : [],
+          ...selectedFilters.params,
+          limit
+        ]
+      };
+    }
+    visibleRecentRows(rows) {
       return this.tierVisibleRows(rows, (row) => ({
         provider: row.provider,
         accountScope: row.account_scope,

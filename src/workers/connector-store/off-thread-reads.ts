@@ -11,9 +11,12 @@
 // event, since terminate() can leave SQLite running. Thus repeated Asks can
 // never accumulate more than one executing statement per store.
 //
-// Snapshots reserve the same worker while their transaction is open, so a
-// search never overlaps a snapshot. Snapshot transactions and search query
-// construction/visibility filtering otherwise keep their existing semantics.
+// A snapshot opens only on a worker no search statement is running on. While
+// it is open, searches still take turns with it: a search statement is sent
+// whenever none of the snapshot's reads is in flight, so a long snapshot (the
+// exact-vector scan reads a big store's pages for tens of seconds) never makes
+// a keyword read wait for all of it (#1305). The worker runs one statement at
+// a time either way; the snapshot's transaction is on its own connection.
 
 import { SOURCE_INDEX_LANE_BUSY_CODE } from '../../core/source-index/lane-busy.ts';
 import { beginSourceAnswerPoolRead, type SourceAnswerPoolReadOutcome } from '../source-index/answer-latency-trace.ts';
@@ -352,6 +355,9 @@ export async function withOffThreadSnapshot<T>(
         } catch (error) {
           report?.({ queueWaitMs: 0, runMs: clock.now() - sentAtMs, sqlMs, outcome: 'error' });
           throw error;
+        } finally {
+          // A search waiting for this thread takes its turn before the next read.
+          dispatch();
         }
       });
     } finally {
@@ -507,8 +513,11 @@ function missedDeadline(job: PoolJob): void {
 }
 
 /** A free executor of this store, or its first worker. Retired workers still occupy the slot. */
+// Free for a pool query: nothing in flight on it. An open snapshot between
+// its reads does not hold the thread.
 function freeThread(store: string): ReaderThread | undefined {
-  return live().find(reader => reader.store === store && !reader.releaseWhenIdle && busy(reader) === 0) ?? startThread(store);
+  return live().find(reader => reader.store === store && !reader.releaseWhenIdle && !reader.job && reader.pending.size === 0)
+    ?? startThread(store);
 }
 
 function dispatch(): void {

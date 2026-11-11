@@ -13505,10 +13505,44 @@ export class LocalConnectorStore {
     accountScope?: string,
     filters?: ConnectorStoreSearchFilters,
   ): ConnectorStoreSearchRow[] {
+    const read = this.recentItemsRead(maxResults, accountScope, filters);
+    return this.visibleRecentRows(this.db.query(read.sql).all(...(read.params as Array<string | number>)) as ItemRow[]);
+  }
+
+  /**
+   * recentItems with its read on the store's read-pool thread (#1305): the
+   * newest-first order has no index, so on a large chat store the read sorts
+   * every item, seconds of the request thread. The lane is optional: a busy
+   * store gives no recency rows.
+   */
+  async recentItemsOffThread(
+    maxResults: number,
+    accountScope?: string,
+    filters?: ConnectorStoreSearchFilters,
+  ): Promise<ConnectorStoreSearchRow[]> {
+    if (!offThreadReadsSupported(this.dbPath)) return this.recentItems(maxResults, accountScope, filters);
+    let rows: ItemRow[];
+    try {
+      rows = await readOnPool(this.dbPath, this.recentItemsRead(maxResults, accountScope, filters)) as ItemRow[];
+    } catch (error) {
+      if (error instanceof OffThreadReadBusyError) return [];
+      throw error;
+    }
+    if (this.closedForPoolReads) return [];
+    return this.visibleRecentRows(rows);
+  }
+
+  private recentItemsRead(
+    maxResults: number,
+    accountScope?: string,
+    filters?: ConnectorStoreSearchFilters,
+  ): StoreRead {
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
     const selectedAccount = normalizeOptionalAccountScope(accountScope);
     const selectedFilters = connectorStoreFilterSql(filters);
-    const rows = this.db.query(`
+    return {
+      mode: 'all',
+      sql: `
       SELECT
         i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
         i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
@@ -13523,11 +13557,16 @@ export class LocalConnectorStore {
         AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
       ORDER BY COALESCE(i.authored_at, i.updated_at, i.indexed_at) DESC, i.item_pk DESC
       LIMIT ?
-    `).all(
-      ...(selectedAccount ? [selectedAccount] : []),
-      ...selectedFilters.params,
-      limit,
-    ) as ItemRow[];
+    `,
+      params: [
+        ...(selectedAccount ? [selectedAccount] : []),
+        ...selectedFilters.params,
+        limit,
+      ],
+    };
+  }
+
+  private visibleRecentRows(rows: ItemRow[]): ConnectorStoreSearchRow[] {
     return this.tierVisibleRows(
       rows,
       (row) => ({
@@ -14659,7 +14698,7 @@ export function createConnectorStoreCorpusAdapter(
         await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, {}, request.deadlineAtMs),
         options.localKeywordFallback, {}, request.deadlineAtMs));
       const rows = keywordLane.rows;
-      const recencyRows = chatRecencyLaneRows(store, options.accountScope, filters);
+      const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters);
       if (recencyRows.length === 0) {
         const hits = rows.map((row) => connectorStoreHitFromRow(
           store,
@@ -14912,16 +14951,16 @@ const CHAT_RECENCY_WEIGHT = 0.25;
 // get pinned slots instead (2026-07-05 "Test 15" probe).
 const CHAT_RECENCY_PIN_COUNT = 2;
 
-function chatRecencyLaneRows(
+async function chatRecencyLaneRows(
   store: LocalConnectorStore,
   accountScope?: string,
   filters?: ConnectorStoreSearchFilters,
-): ConnectorStoreSearchRow[] {
+): Promise<ConnectorStoreSearchRow[]> {
   if (store.family !== 'chat') return [];
   // Full lane depth regardless of maxResults: the lane feeds FUSION, not the
   // final cut. Capping it at maxResults=3 dropped a message that was only 4
   // items deep minutes after it arrived (2026-07-05 probe).
-  return store.recentItems(CHAT_RECENCY_LANE_LIMIT, accountScope, filters);
+  return store.recentItemsOffThread(CHAT_RECENCY_LANE_LIMIT, accountScope, filters);
 }
 
 function connectorStoreHitFromRow(
@@ -15083,7 +15122,7 @@ async function hybridConnectorStoreSearch(
   const bestCosine = scoredVectorRows.length > 0
     ? roundCosine(Math.max(...scoredVectorRows.map((row) => row.bestCosine)))
     : undefined;
-  const recencyRows = chatRecencyLaneRows(store, accountScope, filters);
+  const recencyRows = await chatRecencyLaneRows(store, accountScope, filters);
   const contentBar = relevanceBar ?? CALIBRATED_CONTENT_PREFERENCE_BARS.get(provider.modelId);
   const vettedVectorItemIds = new Set(contentBar === undefined
     ? []

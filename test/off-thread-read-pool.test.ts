@@ -176,6 +176,24 @@ describe('read pool', () => {
     expect(((await snapshot) as { c: number }).c).toBe(3);
   });
 
+  test('a search takes its turn between the reads of an open snapshot instead of waiting for all of it (#1305)', async () => {
+    const path = storeFile();
+    const order: string[] = [];
+    let search: Promise<unknown> | undefined;
+    await withOffThreadSnapshot(path, async (read) => {
+      await read(COUNT);
+      search = readOnPool(path, COUNT).then((rows) => { order.push('search'); return rows; });
+      // The scan yields between pages, as the vector scan does.
+      await Promise.resolve();
+      for (let page = 0; page < 3; page += 1) {
+        await read(COUNT);
+        order.push(`page ${page}`);
+      }
+    });
+    expect(((await search) as { c: number }).c).toBe(3);
+    expect(order.indexOf('search')).toBeLessThan(order.indexOf('page 2'));
+  });
+
   test("closing a store cancels its waiting queries and no search reopens it", async () => {
     const root = mkdtempSync(join(tmpdir(), 'olympus-read-pool-closing-'));
     roots.push(root);
