@@ -143,3 +143,20 @@ for (const contentTier of ['private', 'secure'] as const) test(`rebuilding a mis
     expect(f.ledger.listMoving()).toHaveLength(0);
   } finally { f.close(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('upgrade holds the current copy of a requeued clearance until the judge answers (#1318)', () => {
+  const f = fixture();
+  const copy = { corpusId: 'personal.fixture', trustDomain: 'internal' as const, layers: 'both' as const };
+  f.ledger.recordRoutedPlacement(subject('cleared'), f.decision(), { copies: [copy], embedHold: false });
+  f.ledger.recordRoutedPlacement(subject('judged'), f.decision({ reasons: ['content:sniffer:real-judge:ordinary:1.00'] }),
+    { copies: [copy], embedHold: false });
+  expect(f.ledger.copies(subject('cleared'))).toEqual([expect.objectContaining({ state: 'current', embedHold: false })]);
+  f.ledger.close(); oldSchema(f.path);
+  const ledger = new TierLedger({ dbPath: f.path });
+  try {
+    expect(ledger.getCurrent(subject('cleared'))).toMatchObject({ state: 'pending', contentTier: 'private', contentPending: true });
+    expect(ledger.copies(subject('cleared'))).toEqual([expect.objectContaining({ corpusId: 'personal.fixture', state: 'current', embedHold: true })]);
+    // A judge-decided item keeps its released copy.
+    expect(ledger.copies(subject('judged'))).toEqual([expect.objectContaining({ state: 'current', embedHold: false })]);
+  } finally { ledger.close(); }
+});

@@ -25885,6 +25885,14 @@ function tierLedgerMigrations() {
               WHEN r.value GLOB 'content:embedding_prefilter:*' THEN '${RETIRED_EMBEDDING_CLEARANCE_REASON}'
               ELSE r.value END) FROM json_each(tier_items.reasons_json) r)
           WHERE rowid IN (SELECT item_rowid FROM retired_embedding_clearances);
+          -- Hold-until-judged (#1318): the requeued item's current copy is
+          -- not embeddable or searchable until the judge answers again.
+          UPDATE tier_copies SET embed_hold = 1
+          WHERE copy_state = 'current' AND embed_hold = 0 AND EXISTS (
+            SELECT 1 FROM tier_items t JOIN retired_embedding_clearances x ON x.item_rowid = t.rowid
+            WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
+              AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
+          );
           DROP TABLE retired_embedding_clearances;
           DELETE FROM tier_ledger_meta WHERE key GLOB 'embedding-prefilter:*';
         `);
