@@ -35671,7 +35671,10 @@ function createConnectorStoreCorpusAdapter(options) {
         const hits = withPinnedNewestChatHits({
           store,
           recencyRows,
-          hits: rankedCandidates(fused, request.maxResults, complete, lexicalContentPreference, keywordLane.nameLeaderItemId === undefined ? undefined : { itemId: keywordLane.nameLeaderItemId, matchesWholeQuestion: complete }).map((candidate) => connectorStoreHitFromRow(store, candidate.item, candidate.score, options.resultProjector, filters?.locatorPathScope)),
+          hits: rankedCandidates(fused, request.maxResults, complete, lexicalContentPreference, {
+            ...keywordLane.nameLeaderItemId !== undefined ? { nameLeaderItemId: keywordLane.nameLeaderItemId } : {},
+            matchesWholeQuestion: complete
+          }).map((candidate) => connectorStoreHitFromRow(store, candidate.item, candidate.score, options.resultProjector, filters?.locatorPathScope)),
           limit: request.maxResults,
           ...options.resultProjector ? { resultProjector: options.resultProjector } : {},
           ...filters?.locatorPathScope ? { locatorPathScope: filters.locatorPathScope } : {}
@@ -35920,7 +35923,10 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
   const hits = withPinnedNewestChatHits({
     store,
     recencyRows,
-    hits: rankedCandidates(seated, maxResults, complete, contentPreference, keywordLane.nameLeaderItemId === undefined ? undefined : { itemId: keywordLane.nameLeaderItemId, matchesWholeQuestion: keywordComplete }).map((candidate) => connectorStoreHitFromRow(store, candidate.item, candidate.score, resultProjector, filters?.locatorPathScope)),
+    hits: rankedCandidates(seated, maxResults, complete, contentPreference, {
+      ...keywordLane.nameLeaderItemId !== undefined ? { nameLeaderItemId: keywordLane.nameLeaderItemId } : {},
+      matchesWholeQuestion: keywordComplete
+    }).map((candidate) => connectorStoreHitFromRow(store, candidate.item, candidate.score, resultProjector, filters?.locatorPathScope)),
     limit: maxResults,
     ...resultProjector ? { resultProjector } : {},
     ...filters?.locatorPathScope ? { locatorPathScope: filters.locatorPathScope } : {}
@@ -36085,21 +36091,24 @@ function connectorStoreRowIsSecureTier(row) {
 function connectorStoreContentPreference(vettedVectorItemIds) {
   return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
 }
-function rankedCandidates(candidates, limit, complete, hasContent = lexicalContentPreference, nameLeader) {
+function rankedCandidates(candidates, limit, complete, hasContent, keywordLeaders) {
+  const { nameLeaderItemId, matchesWholeQuestion } = keywordLeaders;
   const tiers = [[], [], [], []];
   for (const candidate of candidates) {
-    const readable = hasContent(candidate) || candidate.item.sourceItem.localItemId === nameLeader?.itemId;
+    const readable = hasContent(candidate) || candidate.item.sourceItem.localItemId === nameLeaderItemId;
     tiers[(complete(candidate) ? 0 : 2) + (readable ? 0 : 1)].push(candidate);
   }
   const ordered = tiers.flat();
-  if (nameLeader) {
-    seatNameLeader(ordered, {
-      isLeader: (candidate) => candidate.item.sourceItem.localItemId === nameLeader.itemId,
-      matchesWholeQuestion: nameLeader.matchesWholeQuestion,
-      readable: hasContent
-    });
-  }
-  return ordered.slice(0, Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS)));
+  const cut = Math.max(1, Math.min(Math.floor(limit), MAX_SEARCH_RESULTS));
+  const keywordFirst = candidates.find((candidate) => candidate.laneRanks.get("keyword") === 1)?.item.sourceItem.localItemId;
+  const leaders = [...new Set([keywordFirst, nameLeaderItemId].filter((id) => id !== undefined))];
+  leaders.forEach((leaderId, index) => seatNameLeader(ordered, {
+    isLeader: (candidate) => candidate.item.sourceItem.localItemId === leaderId,
+    matchesWholeQuestion,
+    readable: hasContent,
+    latestSeat: cut - leaders.length + index
+  }));
+  return ordered.slice(0, cut);
 }
 function seatNameLeader(ordered, rule) {
   const at = ordered.findIndex(rule.isLeader);
@@ -36110,7 +36119,9 @@ function seatNameLeader(ordered, rule) {
   for (let index = 0;index < at; index += 1)
     if (rule.matchesWholeQuestion(ordered[index]))
       lastWholeAbove = index;
-  const seat = Math.max(firstPartial + (rule.readable(ordered[firstPartial]) ? 1 : 0), lastWholeAbove + 1);
+  let seat = Math.max(firstPartial + (rule.readable(ordered[firstPartial]) ? 1 : 0), lastWholeAbove + 1);
+  if (rule.latestSeat !== undefined)
+    seat = Math.min(seat, Math.max(1, rule.latestSeat));
   if (at > seat)
     ordered.splice(seat, 0, ...ordered.splice(at, 1));
 }

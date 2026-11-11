@@ -156,6 +156,41 @@ describe('hybrid output keeps the keyword lane\'s name leader', () => {
   });
 });
 
+// A store's keyword leader keeps a place in that store's hybrid result, with
+// or without content (rerun 19, 2026-11-11): the lane's best hit matched only
+// part of the question, so every vetted vector hit (complete in the final
+// tiers) went ahead of it and the store's top results left it out.
+describe('a store\'s keyword leader keeps a place in its hybrid result', () => {
+  test('a readable partial-match leader the vector lane missed (value-2 shape)', async () => {
+    await withStore(async (store, provider) => {
+      // "premium" is in no note, so no row matches the whole question.
+      const question = 'harbor boat insurance renewal premium';
+      const keyword = hitIds(await search(store, question, { retrievalMode: 'keyword', maxResults: 5 }));
+      expect(keyword[0]).toBe('target');
+      const hybrid = hitIds(await search(store, question, {
+        retrievalMode: 'hybrid', maxResults: 5, provider, semanticRelevanceBar: 0.62,
+      }));
+      expect(hybrid).toHaveLength(5);
+      expect(hybrid).toContain('target');
+    });
+  });
+
+  test('a names-only leader is not pushed out by a whole-question match ranked below the cut (gap-1 shape)', async () => {
+    // Names alone match the whole question, and the file has no text: the
+    // final tiers put it after every vetted note, and the name leader after it.
+    const ESTIMATE: FixtureItem = { id: 'estimate', name: 'Harbor Lantern Restoration Estimate.pdf' };
+    await withStore(async (store, provider) => {
+      const question = 'harbor lantern restoration estimate';
+      const hybrid = hitIds(await search(store, question, {
+        retrievalMode: 'hybrid', maxResults: 5, provider, semanticRelevanceBar: 0.62,
+      }));
+      expect(hybrid).toHaveLength(5);
+      expect(hybrid[0]).toStartWith('lantern-note-');
+      expect(hybrid).toContain('estimate');
+    }, [ESTIMATE, LANTERN, ...LANTERN_NOTES]);
+  });
+});
+
 describe('name leader seat', () => {
   // P = readable partial match, W = readable whole-question match, N = the names-only leader.
   const seat = (order: string[]) => {
@@ -175,6 +210,23 @@ describe('name leader seat', () => {
   test('never ahead of a whole-question match the final order placed after a partial one', () => {
     expect(seat(['P1', 'W1', 'N'])).toEqual(['P1', 'W1', 'N']);
     expect(seat(['P1', 'W1', 'P2', 'N'])).toEqual(['P1', 'W1', 'N', 'P2']);
+  });
+
+  test('never past the latest seat it is given, and never the first seat', () => {
+    const clamp = (order: string[], latestSeat: number) => {
+      const entries = [...order];
+      seatNameLeader(entries, {
+        isLeader: (entry) => entry === 'N',
+        matchesWholeQuestion: (entry) => entry.startsWith('W'),
+        readable: (entry) => entry !== 'N',
+        latestSeat,
+      });
+      return entries;
+    };
+    expect(clamp(['P1', 'W1', 'W2', 'W3', 'N'], 2)).toEqual(['P1', 'W1', 'N', 'W2', 'W3']);
+    expect(clamp(['P1', 'W1', 'W2', 'N'], 0)).toEqual(['P1', 'N', 'W1', 'W2']);
+    // Within the latest seat, the seat rule's own place stands.
+    expect(clamp(['W1', 'P1', 'P2', 'N'], 3)).toEqual(['W1', 'P1', 'N', 'P2']);
   });
 
   test('a leader already seated higher stays put', () => {
