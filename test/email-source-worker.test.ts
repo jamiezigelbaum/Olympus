@@ -3,9 +3,9 @@ import { OperationError } from '../src/core/operation-error.ts';
 import {
   EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL,
   GogcliEmailConnectorStub,
-  createEmailSourceWorker,
   type EmailSourceConnector,
-} from '../src/workers/engine/index.ts';
+} from '../src/workers/engine/http/email-connector.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 
 function connector(): EmailSourceConnector {
   return {
