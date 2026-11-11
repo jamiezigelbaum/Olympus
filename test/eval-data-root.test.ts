@@ -37,7 +37,7 @@ test('opens all source families from a copy, searches read-only, original bytes 
     opened.checkFileDescriptors();
   } finally { opened.close(); }
   expect(hashes(original)).toEqual(before);
-}, 60_000);
+});
 test('rejects an external store symlink before opening handles', async () => {
   const original = temp(); const copy = temp(); const path = await seed(original);
   symlinkSync(path, join(copy, 'linked.sqlite'));
@@ -92,7 +92,7 @@ test('a complete bound tier set follows the copied ledger identity, never the ol
     opened.checkFileDescriptors();
   } finally { opened.close(); }
   expect(hashes(original)).toEqual(before);
-}, 60_000);
+});
 test('an external ledger symlink is refused before mounting', async () => {
   const root = temp(); const external = temp(); const path = await seed(root);
   const outside = await seed(external);

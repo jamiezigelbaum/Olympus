@@ -69,7 +69,7 @@ test('balanced eligible sampling, local sequential requests, quote verification,
     const printed = printedRows.join('\n');
     for (const secret of ['Kestrel', 'invoice', 'boatyard', 'Tuesday', 'orchid']) expect(printed).not.toContain(secret);
   } finally { server.stop(true); opened.close(); }
-}, 60_000);
+});
 test('cloud endpoints are rejected before a model request', () => {
   expect(() => localDraftModel({ baseUrl: 'https://api.openai.com/v1', model: 'anything' })).toThrow('local');
 });
