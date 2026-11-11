@@ -145,6 +145,7 @@ describe('the real eval report says where an expected value was lost (#1234)', (
       answerCitationsOutsidePack: 0,
       answerValueTokens: 1,
       answerValueTokensInCitedSeats: 0,
+      answerValueTokensUnmatchedShapes: ['9999'],
       expected: [
         { inPack: true, inPackAsSubstring: true, inAnalystAnswer: true, inReleasedAnswer: false, packSeats: [kestrelSeat], valueSeatCited: false },
         { inPack: false, inPackAsSubstring: false, inAnalystAnswer: false, inReleasedAnswer: false, packSeats: [], valueSeatCited: false },
@@ -256,6 +257,20 @@ describe('the real eval report locates an expected item and value for a miss', (
     const tabled = { ...pack, candidates: [pack.candidates[0]!, { ...other, tables: [{ columns: ['total'], rows: [['5120']] }] }] } as typeof pack;
     const fromTable = { ...citing(2), answer: 'The fuel total is 5120 dollars.' } as unknown as AnalystResult;
     expect(evalAnswerStageAudit(question, tabled, fromTable, fromTable)).toMatchObject({ answerValueTokens: 1, answerValueTokensInCitedSeats: 1 });
+    // A seat marker the Analyst writes inline ("[1]") names a seat, not a value.
+    const marked = { ...citing(1), answer: 'The total is 4182 dollars [1].' } as unknown as AnalystResult;
+    expect(evalAnswerStageAudit(question, pack, marked, marked)).toMatchObject({ answerValueTokens: 1, answerValueTokensInCitedSeats: 1 });
+    const markedList = { ...citing(1, 2), answer: 'The total is 4182 dollars [1, 2].' } as unknown as AnalystResult;
+    expect(evalAnswerStageAudit(question, pack, markedList, markedList)).toMatchObject({ answerValueTokens: 1, answerValueTokensInCitedSeats: 1 });
+    // A bracketed number past the pack is not a seat marker, so it still counts.
+    const year = { ...citing(1), answer: 'The total is 4182 dollars [2024].' } as unknown as AnalystResult;
+    expect(evalAnswerStageAudit(question, pack, year, year)).toMatchObject({ answerValueTokens: 2, answerValueTokensInCitedSeats: 1 });
+    // What did not match, by shape only (digits 9, letters a), so a run can say why without the value.
+    const reformatted = { ...citing(1), answer: 'The total is 4,182 dollars, due 2026-03-01.' } as unknown as AnalystResult;
+    expect(evalAnswerStageAudit(question, pack, reformatted, reformatted)).toMatchObject({
+      answerValueTokensUnmatchedShapes: ['9,999', '9999-99-99'],
+    });
+    expect(evalAnswerStageAudit(question, pack, inSeat, inSeat).answerValueTokensUnmatchedShapes).toEqual([]);
     // A citation naming nothing in the pack is counted, not seated.
     const stray = { ...citing(), citations: [{ provenance: { sourceItem: { localItemId: 'elsewhere' } }, claim: 'x' }] } as unknown as AnalystResult;
     expect(evalAnswerStageAudit(question, pack, stray, stray)).toMatchObject({ answerCitedSeats: [], answerCitationsOutsidePack: 1 });

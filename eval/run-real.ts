@@ -685,6 +685,12 @@ export interface EvalAnswerStageAudit {
    */
   answerValueTokens: number;
   answerValueTokensInCitedSeats: number;
+  /**
+   * The shape of each answer value token not found in a cited seat (digits
+   * to 9, letters to a), so a run can tell a reformatted value from a wrong
+   * one without carrying the value itself.
+   */
+  answerValueTokensUnmatchedShapes: string[];
   /** The pack seats the Analyst was sent, when a prompt budget fitted the pack (Ask's local leg). */
   analystSeats?: number[];
   /**
@@ -712,9 +718,19 @@ function textTokens(text: string): Set<string> {
     .filter((token) => token.length > 0));
 }
 
-/** The answer's distinct number-bearing tokens (textTokens). */
-function answerValueTokens(answer: string): string[] {
-  return [...textTokens(answer)].filter((token) => /\p{N}/u.test(token));
+/**
+ * The answer's distinct number-bearing tokens (textTokens), without the seat
+ * markers the Analyst writes inline ("[2]", "[1, 3]"): a marker names a seat
+ * of this pack, not a value, and no seat's text holds it.
+ */
+function answerValueTokens(answer: string, seats: number): string[] {
+  const withoutMarkers = answer.replace(/\[\s*(\d+(?:\s*,\s*\d+)*)\s*\]/gu, (marker, list: string) =>
+    list.split(',').every((seat) => { const n = Number(seat); return n >= 1 && n <= seats; }) ? ' ' : marker);
+  return [...textTokens(withoutMarkers)].filter((token) => /\p{N}/u.test(token));
+}
+
+function tokenShape(token: string): string {
+  return token.replace(/\p{N}/gu, '9').replace(/\p{L}/gu, 'a');
 }
 
 /** The first offset of any accepted form of the value in the text (case-insensitive), or -1. */
@@ -774,7 +790,7 @@ export function evalAnswerStageAudit(
   const expectedIds = (question.expectedEvidence ?? []).flatMap((want) => want.providerItemId !== undefined ? [want.providerItemId] : []);
   const expectedSeats = pack.candidates.flatMap((candidate, index) =>
     expectedIds.includes(candidate.provenance.sourceItem.providerItemId) ? [index + 1] : []);
-  const valueTokens = answerValueTokens(analystOwn.answer);
+  const valueTokens = answerValueTokens(analystOwn.answer, pack.candidates.length);
   // Whole tokens, so '41' is not supported by a seat that says '4182'.
   const citedTokens = textTokens(citedSeats.map((seat) => seatTexts[seat - 1]!.all).join('\n'));
   const values = question.expectedAnswerContains ?? [];
@@ -793,6 +809,7 @@ export function evalAnswerStageAudit(
     ...(expectedIds.length > 0 ? { expectedSeatCited: expectedSeats.some((seat) => citedSeats.includes(seat)) } : {}),
     answerValueTokens: valueTokens.length,
     answerValueTokensInCitedSeats: valueTokens.filter((token) => citedTokens.has(token)).length,
+    answerValueTokensUnmatchedShapes: valueTokens.filter((token) => !citedTokens.has(token)).map(tokenShape),
     ...(analystSeats ? { analystSeats: [...analystSeats] } : {}),
     ...(promptText !== undefined ? { analystPromptChars: analystPrompts!.reduce((sum, prompt) => sum + prompt.length, 0) } : {}),
     ...(analystModelIds && analystModelIds.length > 0 ? { analystModelIds: [...analystModelIds] } : {}),
