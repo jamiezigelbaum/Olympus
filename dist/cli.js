@@ -128339,7 +128339,7 @@ var init_operations = __esm(() => {
           ...signal ? { signal } : {}
         });
         const jobs = ctx.sourceAnswerJobs;
-        return jobs ? runUnderCaller(jobs, ctx.signal, ask) : ask(ctx.signal);
+        return jobs ? runUnderCaller({ ...jobs, anonymousAsk: true }, ctx.signal, ask) : ask(ctx.signal);
       }
     },
     {
@@ -150037,6 +150037,7 @@ class SourceAnswerJobRegistry {
     scope.detachFromClient?.();
     let wake;
     const job = {
+      anonymousAsk: scope.anonymousAsk === true,
       id: newJobId(),
       owner: scope.owner,
       startedAt,
@@ -150064,6 +150065,10 @@ class SourceAnswerJobRegistry {
     this.jobs.set(job.id, job);
     this.evictRetained(scope.owner);
     return pendingResult(job.id, this.now() - startedAt, this.limits.resultWaitMs);
+  }
+  isAnonymousAsk(owner2, jobId) {
+    const job = typeof jobId === "string" ? this.jobs.get(jobId) : undefined;
+    return job?.anonymousAsk === true && sameOwner(job.owner, owner2);
   }
   async result(owner2, jobId, signal) {
     this.sweep();
@@ -212962,6 +212967,24 @@ var init_webStandardStreamableHttp = __esm(() => {
   init_types2();
 });
 
+// src/workers/answer-model-required.ts
+function answerModelRequiredResult(name, args, available, jobs, client) {
+  if (name !== "source_answer" && name !== "source_answer_result")
+    return;
+  if (!available || available())
+    return;
+  if (name === "source_answer_result" && jobs?.registry.isAnonymousAsk(jobs.owner, typeof args.job_id === "string" ? args.job_id.trim() : args.job_id))
+    return;
+  return { content: [{ type: "text", text: appClientCopy(ANSWER_MODEL_REQUIRED_TEXT, client) }] };
+}
+var ANSWER_MODEL_REQUIRED_TEXT;
+var init_answer_model_required = __esm(() => {
+  init_mcp_app_client();
+  init_open_targets();
+  init_vocabulary();
+  ANSWER_MODEL_REQUIRED_TEXT = `No answer model is set up in Olympus. Set one up in the Olympus dashboard's Settings. [${DASHBOARD_CHATGPT_VOCABULARY.openOnMac}](${openPageUrl({ kind: "fix", section: "answers" })})`;
+});
+
 // src/workers/dashboard/shared-status.ts
 function dashboardHonestStatus(status, progress) {
   if (!progress || progress.stage === "done")
@@ -218473,7 +218496,7 @@ function readOnlyGrantMayUse(tool) {
 }
 function listChatGptTools(ctx, options = {}) {
   const tools = [DASHBOARD_TOOL, SEARCH_TOOL, SOURCE_STATUS_TOOL];
-  if (answerToolsListed(ctx, options))
+  if (answerToolsListed(ctx))
     tools.push(...ANSWER_TOOLS);
   else if (askToolListed(ctx))
     tools.push(SOURCE_ANSWER_RESULT_TOOL);
@@ -218482,9 +218505,7 @@ function listChatGptTools(ctx, options = {}) {
   tools.push(...SETUP_TOOLS);
   return appClientCopy(options.readOnly ? tools.filter(readOnlyGrantMayUse) : tools, options.appClient);
 }
-function answerToolsListed(ctx, options) {
-  if (options.answerModelAvailable && !options.answerModelAvailable())
-    return false;
+function answerToolsListed(ctx) {
   return ANSWER_TOOLS.every((tool) => {
     const operation = findOperationByName(tool.name);
     return operation !== undefined && shouldExposeOperation(operation, { config: ctx.config, surface: "remote" });
@@ -218531,6 +218552,8 @@ function recordChatGptRequest(name, args, ctx, result, capture, withheldAfter) {
   if (name === SEARCH_TOOL_NAME)
     question = typeof args.question === "string" ? args.question : undefined;
   else if (name === "source_answer" || name === "source_answer_result") {
+    if (!structured)
+      return;
     question = sourceAnswerQuestion(name, args, structured?.status, structured?.job_id);
     if (structured?.status === "working")
       return;
@@ -218591,8 +218614,11 @@ async function runChatGptTool(name, args, ctx, options, signal, detachedContext)
         return result;
       }
       case SOURCE_ANSWER_TOOL.name: {
-        if (!answerToolsListed(ctx, options))
+        if (!answerToolsListed(ctx))
           throw new ChatGptSurfaceError("unknown_tool");
+        const setup = answerModelRequiredResult(name, args, options.answerModelAvailable, ctx.sourceAnswerJobs, options.appClient);
+        if (setup)
+          return setup;
         const question = typeof args.question === "string" ? args.question.trim() : "";
         if (!question)
           throw new ChatGptSurfaceError("invalid_params");
@@ -218623,8 +218649,11 @@ async function runChatGptTool(name, args, ctx, options, signal, detachedContext)
         return answerToolResult(raw, { pendingPrivacyItems: ctx.pendingPrivacyItems?.(), ...privateMatch ? { privateMatch } : late.timedOut ? { privateCheckPending: true } : {} });
       }
       case SOURCE_ANSWER_RESULT_TOOL.name: {
-        if (!answerToolsListed(ctx, options) && !askToolListed(ctx))
+        if (!answerToolsListed(ctx) && !askToolListed(ctx))
           throw new ChatGptSurfaceError("unknown_tool");
+        const setup = answerModelRequiredResult(name, args, options.answerModelAvailable, ctx.sourceAnswerJobs, options.appClient);
+        if (setup)
+          return setup;
         const jobId = typeof args.job_id === "string" ? args.job_id.trim() : "";
         if (!jobId)
           throw new ChatGptSurfaceError("invalid_params");
@@ -218934,6 +218963,7 @@ var READ_ONLY, OAUTH2_REQUIRED2, OAUTH2_OPTIONAL, SOURCE_ANSWER_TIMEOUT_MS = 600
   console.warn(line2);
 }, PROBE_HITS_PER_CORPUS = 10, PROBE_QUERY_MAX_CHARS = 500, PROBE_TIMEOUT_MS2 = 20000, privateMatchByJob, PRIVATE_MATCH_TTL_MS, PRIVATE_MATCH_MAX_JOBS = 1000, CHATGPT_RESOURCES;
 var init_mcp_surface = __esm(() => {
+  init_answer_model_required();
   init_mcp_app_client();
   init_app_release_capture();
   init_release_manifest();
@@ -228580,29 +228610,20 @@ var init_directory_surface = __esm(() => {
 
 // src/workers/remote-search.ts
 function remoteSearchExtension(options, authorized, request = {}) {
-  const answerHidden = () => options.answerModelAvailable !== undefined && !options.answerModelAvailable();
   return {
-    tools: (listed) => {
-      const hidden = answerHidden() ? hiddenWithoutAnswerModel(listed) : new Set;
-      return [REMOTE_SEARCH_TOOL, ...listed.filter((tool) => !hidden.has(tool.name))];
-    },
+    tools: (listed) => [REMOTE_SEARCH_TOOL, ...listed],
     call: async (call, next, signal) => {
       if (call.params.name === REMOTE_SEARCH_TOOL.name) {
         const signals = [signal, request.signal].filter((one) => one !== undefined);
         const cancel = signals.length > 1 ? AbortSignal.any(signals) : signals[0];
         return await runSearch(call.params.arguments ?? {}, options, authorized, request, cancel);
       }
-      if (answerHidden() && call.params.name === "source_answer")
-        return errorResult(remoteSurfaceErrorOutput("unknown_operation"));
+      const setup = answerModelRequiredResult(call.params.name, call.params.arguments ?? {}, options.answerModelAvailable, request.sourceAnswerJobs);
+      if (setup)
+        return setup;
       return await next();
     }
   };
-}
-function hiddenWithoutAnswerModel(listed) {
-  const hidden = new Set(["source_answer"]);
-  if (!listed.some((tool) => tool.name === "ask_anonymously"))
-    hidden.add("source_answer_result");
-  return hidden;
 }
 async function runSearch(args, options, authorized, context3, signal) {
   const question = typeof args.question === "string" ? args.question.trim() : "";
@@ -228689,6 +228710,7 @@ function errorResult(body) {
 }
 var MAX_QUESTION_CHARS2 = 2000, MAX_LIMIT = 48, REMOTE_SEARCH_TOOL;
 var init_remote_search = __esm(() => {
+  init_answer_model_required();
   init_app_release_capture();
   init_operations();
   init_remote_result();
@@ -228810,6 +228832,7 @@ function createRemoteMcpHandler(options) {
     const detached = () => options.makeOperationContext(caller, new AbortController().signal);
     const demo = options.demoGrant?.(verification.connection) === true;
     const server = chatgpt ? surface === "directory" ? (options.directoryServer ?? createChatGptDirectoryMcpServer)(() => ctx, chatgpt, detached) : createChatGptMcpServer(() => ctx, chatgpt, detached) : createOlympusMcpServer("remote", () => ctx, anonymousListing(options.anonymousAnswersEnabled, demoGrantLimit(demo, options.search ? remoteSearchExtension(options.search, () => stillAuthorized(request, verification.connection, options, surface), {
+      ...ctx.sourceAnswerJobs ? { sourceAnswerJobs: ctx.sourceAnswerJobs } : {},
       ...ctx.pendingPrivacyItems ? { pendingPrivacyItems: ctx.pendingPrivacyItems } : {},
       ...!demo && ctx.remotePrivatePart ? { privatePart: ctx.remotePrivatePart } : {},
       ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {},

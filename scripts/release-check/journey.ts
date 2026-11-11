@@ -79,7 +79,8 @@ export type Action =
   | { observe: true };
 
 export type Expectation =
-  | { text: Matcher; frame?: FrameName }
+  /** `transient`: a message that becomes visible after this action counts even after it disappears (a save toast). */
+  | { text: Matcher; frame?: FrameName; transient?: true }
   | { noText: Matcher; frame?: FrameName }
   | { present: Target; frame?: FrameName }
   | { absent: Target; frame?: FrameName }
@@ -282,11 +283,19 @@ function contextFor(driver: JourneyDriver, vars: Vars): StepContext {
 }
 
 interface Outcome { ok: boolean; expected: string; actual: string }
+interface TextWatch { frame: 'host' | 'panel'; id: string }
 
-async function evaluate(expectation: Expectation, context: StepContext, state: { pagesBefore: number; initialUrl: string; counts: Record<string, number> }): Promise<Outcome> {
+async function evaluate(expectation: Expectation, context: StepContext, state: { pagesBefore: number; initialUrl: string; counts: Record<string, number>; textWatches: Map<Expectation, TextWatch[]> }): Promise<Outcome> {
   const { vars } = context;
   if ('text' in expectation) {
     const want = resolve(expectation.text, vars);
+    if (expectation.transient) {
+      let seen = false;
+      for (const { frame, id } of state.textWatches.get(expectation) ?? []) {
+        if (await context.driver.probe(frame, `__rc.sawText(${JSON.stringify(id)})`) === true) seen = true;
+      }
+      return { ok: seen, expected: `the page says ${show(want)} after the action`, actual: seen ? 'it appeared after the action' : 'it does not appear after the action' };
+    }
     const text = await context.text(expectation.frame);
     const ok = matches(text, want);
     return { ok, expected: `the page says ${show(want)}`, actual: ok ? 'it does' : 'it does not' };
@@ -474,7 +483,7 @@ export async function runJourney(driver: JourneyDriver, journey: Journey, option
   for (const [index, step] of journey.steps.entries()) {
     const stepStarted = now();
     const context = contextFor(driver, vars);
-    const state = { pagesBefore: 0, initialUrl: '', counts: {} as Record<string, number> };
+    const state = { pagesBefore: 0, initialUrl: '', counts: {} as Record<string, number>, textWatches: new Map<Expectation, TextWatch[]>() };
     let actionResult: { ok: boolean; detail: string; waitedMs?: number };
     try {
       state.pagesBefore = await driver.pages();
@@ -492,6 +501,19 @@ export async function runJourney(driver: JourneyDriver, journey: Journey, option
           vars[name] = text;
         }
       }
+      // Arm before dispatching the action: a fast save can show and dismiss its toast before the next DevTools round trip.
+      for (const [n, expectation] of step.expect.entries()) {
+        if (!('text' in expectation) || !expectation.transient) continue;
+        const want = resolve(expectation.text, vars);
+        const wire = typeof want === 'string' ? want : { re: want.source, flags: want.flags };
+        const watches: TextWatch[] = [];
+        state.textWatches.set(expectation, watches);
+        for (const frame of frames(expectation.frame, await driver.hasPanel())) {
+          const id = `${index}:${n}`;
+          await driver.probe(frame, `__rc.watchText(${JSON.stringify(id)}, ${JSON.stringify(wire)})`);
+          watches.push({ frame, id });
+        }
+      }
       actionResult = await perform(step.do, driver, { now, sleep }, vars);
     } catch (caught) {
       actionResult = { ok: false, detail: `the action failed: ${caught instanceof Error ? caught.message.slice(0, 200) : String(caught)}` };
@@ -502,14 +524,22 @@ export async function runJourney(driver: JourneyDriver, journey: Journey, option
     // Time spent waiting for a disabled control to enable is not taken from the outcomes' own budget (Codex on #718).
     const until = stepStarted + (actionResult.waitedMs ?? 0) + timeoutMs;
     let outcomes: Outcome[] = [];
-    if (actionResult.ok) {
-      for (;;) {
-        outcomes = [];
-        for (const expectation of step.expect) {
-          try { outcomes.push(await evaluate(expectation, context, state)); } catch (caught) { outcomes.push({ ok: false, expected: 'the outcome can be read', actual: caught instanceof Error ? caught.message.slice(0, 160) : String(caught) }); }
+    try {
+      if (actionResult.ok) {
+        for (;;) {
+          outcomes = [];
+          for (const expectation of step.expect) {
+            try { outcomes.push(await evaluate(expectation, context, state)); } catch (caught) { outcomes.push({ ok: false, expected: 'the outcome can be read', actual: caught instanceof Error ? caught.message.slice(0, 160) : String(caught) }); }
+          }
+          if (outcomes.every((outcome) => outcome.ok) || now() >= until) break;
+          await sleep(POLL_MS);
         }
-        if (outcomes.every((outcome) => outcome.ok) || now() >= until) break;
-        await sleep(POLL_MS);
+      }
+    } finally {
+      for (const watches of state.textWatches.values()) {
+        for (const { frame, id } of watches) {
+          try { await driver.probe(frame, `__rc.stopTextWatch(${JSON.stringify(id)})`); } catch { /* navigation destroyed the observer's document */ }
+        }
       }
     }
 

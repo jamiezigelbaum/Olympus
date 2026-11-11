@@ -1,3 +1,8 @@
+import { SourceAnswerJobRegistry, type SourceAnswerPending } from '../src/core/source-answer-jobs.ts';
+import { findOperationByName } from '../src/core/operations.ts';
+import { callChatGptTool, listChatGptTools } from '../src/workers/chatgpt/mcp-surface.ts';
+import { remoteSearchExtension } from '../src/workers/remote-search.ts';
+import { ANSWER_MODEL_REQUIRED_TEXT } from '../src/workers/answer-model-required.ts';
 import { withFirstRunPrivacyGate } from '../src/workers/first-run-privacy-gate.ts';
 import { recordScriptedSearch, scriptedSearchReleaseCheck } from './helpers/scripted-search-release.ts';
 // Setup from ChatGPT and retrieval-only search: the setup tools, the
@@ -479,7 +484,7 @@ async function connectClient(): Promise<Client> {
   return client;
 }
 
-type ToolResult = { content: Array<{ text: string }>; structuredContent?: Record<string, unknown>; _meta?: Record<string, unknown>; isError?: boolean };
+type ToolResult = { content: Array<{ type: string; text: string }>; structuredContent?: Record<string, unknown>; _meta?: Record<string, unknown>; isError?: boolean };
 
 async function call(client: Client, name: string, args: Record<string, unknown>): Promise<ToolResult> {
   // Every privacy save is a compare-and-swap; tests that aren't about the
@@ -995,15 +1000,20 @@ describe('olympus_delete_source_data', () => {
 });
 
 describe('olympus_search (retrieval only)', () => {
-  test('without an answer model on the Mac, search is listed and source_answer is not; the collector stays for a handed-off anonymous answer', async () => {
+  test('without an answer model, Ask and its collector stay listed and explain setup', async () => {
     const client = await connectClient();
     try {
       const names = (await client.listTools()).tools.map((tool) => tool.name);
       expect(names).toContain('olympus_search');
-      expect(names).not.toContain('source_answer');
+      expect(names).toContain('source_answer');
       expect(names).toContain('ask_anonymously');
       expect(names).toContain('source_answer_result');
-      expect((await call(client, 'source_answer', { question: 'q' })).isError).toBe(true);
+      for (const [name, args] of [['source_answer', { question: 'q' }], ['source_answer_result', { job_id: 'saj_unknown' }]] as const) {
+        const result = await call(client, name, args);
+        expect(result.isError).toBeFalsy();
+        expect(result.content).toEqual([{ type: 'text', text: ANSWER_MODEL_REQUIRED_TEXT }]);
+      }
+      expect(searchCalls).toEqual([]);
       answerModel = true;
       expect((await client.listTools()).tools.map((tool) => tool.name)).toContain('source_answer');
     } finally {
@@ -1469,4 +1479,76 @@ describe('dashboard privacy field', () => {
     expect(venice?.fix.tool).toBe('olympus_dashboard');
     expect(venice?.sentence).toContain('tier classifier approve --why');
   });
+});
+
+describe('Ask setup guidance across AI apps', () => {
+  for (const host of ['chatgpt', 'claude', 'remote'] as const) {
+    test(`${host}: no operation or source read without a model; anonymous jobs still collect`, async () => {
+      let operations = 0;
+      const registry = new SourceAnswerJobRegistry({ limits: { handoffMs: 0, resultWaitMs: 0 } });
+      let finish!: (value: unknown) => void;
+      const anonymous = new Promise<unknown>((resolve) => { finish = resolve; });
+      const ctx = createInProcessOperationContext({
+        config: defaultConfig(), sourceIndexReadEnabled: true, caller: { surface: 'remote', connectionId: 'owner' },
+        workerFetch: async () => { operations++; throw new Error('unexpected read'); },
+      });
+      ctx.sourceAnswerJobs = { registry, owner: 'owner' };
+      ctx.email.askAnonymously = async () => await anonymous as never;
+      const options = {
+        answerModelAvailable: () => false,
+        dashboardView: async () => { operations++; throw new Error('unexpected dashboard read'); },
+        privateMatchProbe: async () => { operations++; throw new Error('unexpected probe'); },
+        ...(host === 'claude' ? { appClient: { host: 'claude' as const, connectorUrl: 'https://example.com/mcp' } } : {}),
+      };
+      const extension = remoteSearchExtension({
+        answerModelAvailable: () => false,
+        evidenceSearch: async () => { operations++; throw new Error('unexpected search'); },
+      }, () => 'active', { sourceAnswerJobs: ctx.sourceAnswerJobs });
+      const invoke = async (name: string, args: Record<string, unknown>) => host === 'remote'
+        ? extension.call({ params: { name, arguments: args } }, async () => {
+          operations++;
+          const raw = await findOperationByName(name)!.handler(ctx, args);
+          return { content: [{ type: 'text' as const, text: JSON.stringify(raw) }] };
+        })
+        : callChatGptTool(name, args, ctx, options);
+      try {
+        const listed = listChatGptTools(ctx, options);
+        const names = (host === 'remote' ? extension.tools(listed) : listed).map(tool => tool.name);
+        expect(names).toContain('source_answer');
+        expect(names).toContain('source_answer_result');
+        expect(ANSWER_MODEL_REQUIRED_TEXT).toContain("Olympus dashboard's Settings");
+        expect(ANSWER_MODEL_REQUIRED_TEXT).toContain('[Open Olympus on your computer](https://olympusplugin.ai/open/fix/answers/)');
+        for (const [name, args] of [['source_answer', { question: 'question' }], ['source_answer_result', { job_id: 'unknown' }]] as const) {
+          const result = await invoke(name, args);
+          expect(result.isError).toBeFalsy();
+          expect(result.content).toEqual([{ type: 'text', text: ANSWER_MODEL_REQUIRED_TEXT }]);
+          expect(JSON.stringify(result)).not.toContain('ChatGPT');
+        }
+        const regular = await registry.run(ctx.sourceAnswerJobs, () => anonymous) as SourceAnswerPending;
+        const held = await invoke('source_answer_result', { job_id: regular.job_id });
+        expect(held.content).toEqual([{ type: 'text', text: ANSWER_MODEL_REQUIRED_TEXT }]);
+        expect(operations).toBe(0);
+        // Start through the real operation so the job marker cannot drift from the ask path.
+        const handed = await findOperationByName('ask_anonymously')!.handler(ctx, { question: 'anonymous question' }) as SourceAnswerPending;
+        expect(handed.status).toBe('working');
+        ctx.sourceAnswerJobs.owner = 'other-owner';
+        const otherOwner = await invoke('source_answer_result', { job_id: handed.job_id });
+        expect(otherOwner.content).toEqual([{ type: 'text', text: ANSWER_MODEL_REQUIRED_TEXT }]);
+        ctx.sourceAnswerJobs.owner = 'owner';
+        expect(operations).toBe(0);
+        const pending = await invoke('source_answer_result', { job_id: handed.job_id });
+        // Same owner may collect even while the anonymous answer is still pending.
+        expect(JSON.stringify(pending)).toContain('working');
+        finish({ ok: false, code: 'route_not_configured', message: 'Anonymous answers are not set up yet.' });
+        await registry.whenFinished('owner', handed.job_id);
+        const result = await invoke('source_answer_result', { job_id: handed.job_id });
+        expect(result.isError).toBeFalsy();
+        expect(JSON.stringify(result)).not.toContain(ANSWER_MODEL_REQUIRED_TEXT);
+        expect(JSON.stringify(result)).toContain('Anonymous answers');
+      } finally {
+        finish({ ok: false, message: 'finished' });
+        registry.dropOwner('owner');
+      }
+    });
+  }
 });
