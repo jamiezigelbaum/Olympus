@@ -22506,6 +22506,73 @@ function writeIntentFromRow(row) {
 function idParams(identity2) {
   return [identity2.provider, identity2.accountScope, tierLedgerConversationKey(identity2), identity2.providerItemId];
 }
+function uniqueIdentities(identities) {
+  const unique = new Map;
+  for (const identity2 of identities)
+    unique.set(tierLedgerIdentityKey(identity2), identity2);
+  return [...unique.values()];
+}
+function identityValues(batch) {
+  return { values: batch.map(() => "(?, ?, ?, ?)").join(", "), params: batch.flatMap((identity2) => [...idParams(identity2)]) };
+}
+function* copiesSteps(list) {
+  const result = new Map;
+  for (let offset = 0;offset < list.length; offset += IDENTITY_BATCH) {
+    const { values, params } = identityValues(list.slice(offset, offset + IDENTITY_BATCH));
+    const rows = yield {
+      sql: `SELECT * FROM tier_copies
+        WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
+        ORDER BY corpus_id`,
+      params,
+      mode: "all"
+    };
+    for (const row of rows) {
+      const key2 = tierLedgerIdentityKey(identityFromRow(row));
+      const existing = result.get(key2);
+      if (existing)
+        existing.push(copyFromRow(row));
+      else
+        result.set(key2, [copyFromRow(row)]);
+    }
+    const pending = yield {
+      sql: `SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_write_intents
+        WHERE kind IN ('deletion', 'secret')
+          AND (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})`,
+      params,
+      mode: "all"
+    };
+    for (const row of pending) {
+      const hidden = result.get(tierLedgerIdentityKey(identityFromRow(row)));
+      if (hidden) {
+        for (const copy of hidden)
+          if (copy.state !== "superseded")
+            copy.state = "superseded";
+      }
+    }
+  }
+  return result;
+}
+function* routedWithoutCopiesSteps(list) {
+  const result = new Set;
+  for (let offset = 0;offset < list.length; offset += IDENTITY_BATCH) {
+    const { values, params } = identityValues(list.slice(offset, offset + IDENTITY_BATCH));
+    const rows = yield {
+      sql: `SELECT i.provider, i.account_scope, i.conversation_key, i.provider_item_id FROM tier_items i
+        WHERE i.routed = 1
+          AND (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) IN (VALUES ${values})
+          AND NOT EXISTS (
+            SELECT 1 FROM tier_copies c
+            WHERE c.provider = i.provider AND c.account_scope = i.account_scope
+              AND c.conversation_key = i.conversation_key AND c.provider_item_id = i.provider_item_id
+          )`,
+      params,
+      mode: "all"
+    };
+    for (const row of rows)
+      result.add(tierLedgerIdentityKey(identityOfRow(row)));
+  }
+  return result;
+}
 function tierMovingDirectionClause(direction) {
   if (!direction)
     return "";
@@ -22565,6 +22632,13 @@ class TierLedger {
     try {
       closeSqliteStore(this.db, { checkpoint: !this.readOnly });
     } finally {
+      const listeners = this.closeListeners ?? [];
+      this.closeListeners = undefined;
+      for (const listener of listeners) {
+        try {
+          listener();
+        } catch {}
+      }
       if (!this.readOnly && this.dbPath !== ":memory:")
         restrictLedgerFiles(this.dbPath);
     }
@@ -23871,45 +23945,28 @@ class TierLedger {
     `).all(...idParams(identity2)).map(copyFromRow);
   }
   copiesForMany(identities) {
-    const result = new Map;
-    if (identities.length === 0)
-      return result;
-    const unique = new Map;
-    for (const identity2 of identities)
-      unique.set(tierLedgerIdentityKey(identity2), identity2);
-    const list = [...unique.values()];
-    this.db.transaction(() => {
-      for (let offset = 0;offset < list.length; offset += 200) {
-        const batch = list.slice(offset, offset + 200);
-        const rows = this.db.query(`
-          SELECT * FROM tier_copies
-          WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${batch.map(() => "(?, ?, ?, ?)").join(", ")})
-          ORDER BY corpus_id
-        `).all(...batch.flatMap((identity2) => [...idParams(identity2)]));
-        for (const row of rows) {
-          const key2 = tierLedgerIdentityKey(identityFromRow(row));
-          const existing = result.get(key2);
-          if (existing)
-            existing.push(copyFromRow(row));
-          else
-            result.set(key2, [copyFromRow(row)]);
-        }
-        const pending = this.db.query(`
-          SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_write_intents
-          WHERE kind IN ('deletion', 'secret')
-            AND (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${batch.map(() => "(?, ?, ?, ?)").join(", ")})
-        `).all(...batch.flatMap((identity2) => [...idParams(identity2)]));
-        for (const row of pending) {
-          const hidden = result.get(tierLedgerIdentityKey(identityFromRow(row)));
-          if (hidden) {
-            for (const copy of hidden)
-              if (copy.state !== "superseded")
-                copy.state = "superseded";
-          }
-        }
+    return this.readSteps(copiesSteps(uniqueIdentities(identities)));
+  }
+  *visibilityReadSteps(identities) {
+    const list = uniqueIdentities(identities);
+    const copies = yield* copiesSteps(list);
+    const copyless = list.filter((identity2) => (copies.get(tierLedgerIdentityKey(identity2))?.length ?? 0) === 0);
+    return { copies, routedWithoutCopies: yield* routedWithoutCopiesSteps(copyless) };
+  }
+  onClose(listener) {
+    (this.closeListeners ??= []).push(listener);
+  }
+  closeListeners;
+  readSteps(steps) {
+    return this.db.transaction(() => {
+      let next = steps.next();
+      while (!next.done) {
+        const statement = this.db.query(next.value.sql);
+        const params = next.value.params;
+        next = steps.next(next.value.mode === "get" ? statement.get(...params) : statement.all(...params));
       }
+      return next.value;
     })();
-    return result;
   }
   recordRoutedPlacement(identity2, decision, plan, options = {}) {
     const decidedAt = this.now().toISOString();
@@ -24079,31 +24136,7 @@ class TierLedger {
     }
   }
   routedWithoutCopies(identities) {
-    const result = new Set;
-    if (identities.length === 0)
-      return result;
-    const unique = new Map;
-    for (const identity2 of identities)
-      unique.set(tierLedgerIdentityKey(identity2), identity2);
-    const list = [...unique.values()];
-    this.db.transaction(() => {
-      for (let offset = 0;offset < list.length; offset += 200) {
-        const batch = list.slice(offset, offset + 200);
-        const rows = this.db.query(`
-          SELECT i.provider, i.account_scope, i.conversation_key, i.provider_item_id FROM tier_items i
-          WHERE i.routed = 1
-            AND (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) IN (VALUES ${batch.map(() => "(?, ?, ?, ?)").join(", ")})
-            AND NOT EXISTS (
-              SELECT 1 FROM tier_copies c
-              WHERE c.provider = i.provider AND c.account_scope = i.account_scope
-                AND c.conversation_key = i.conversation_key AND c.provider_item_id = i.provider_item_id
-            )
-        `).all(...batch.flatMap((identity2) => [...idParams(identity2)]));
-        for (const row of rows)
-          result.add(tierLedgerIdentityKey(identityOfRow(row)));
-      }
-    })();
-    return result;
+    return this.readSteps(routedWithoutCopiesSteps(uniqueIdentities(identities)));
   }
   itemStatesForMany(identities) {
     const result = new Map;
@@ -25819,7 +25852,7 @@ function tierLedgerMigrations() {
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 12, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", DEFAULT_REJUDGE_SCAN_ROWS = 2000, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_RECHECK_META_PREFIX = "recheck:", STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 12, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", IDENTITY_BATCH = 200, DEFAULT_REJUDGE_SCAN_ROWS = 2000, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_RECHECK_META_PREFIX = "recheck:", STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_store_write_guard();
@@ -26065,13 +26098,29 @@ async function observeSourceAnswerRoutedQuery(ordinal, run) {
         outcome: timing.outcome,
         ...timing.error_class ? { error_class: sanitizeErrorClass(timing.error_class) } : {},
         ...query.poolByCorpus.has(timing.corpus_id) ? { pool: { ...query.poolByCorpus.get(timing.corpus_id) } } : {}
-      }))
+      })),
+      ...query.stages ? { stages: { ...query.stages } } : {}
     });
     if (previous)
       trace.activeQuery = previous;
     else
       delete trace.activeQuery;
   }
+}
+function recordSourceAnswerQueryStages(stages) {
+  const query = currentSourceAnswerTrace()?.activeQuery;
+  if (!query)
+    return;
+  query.stages = copyQueryStages(stages);
+}
+function copyQueryStages(stages) {
+  return {
+    prepare_ms: nonNegativeMs(stages.prepare_ms),
+    prepare_keywords_max_ms: nonNegativeMs(stages.prepare_keywords_max_ms),
+    prepare_semantic_max_ms: nonNegativeMs(stages.prepare_semantic_max_ms),
+    lanes_ms: nonNegativeMs(stages.lanes_ms),
+    after_lanes_ms: nonNegativeMs(stages.after_lanes_ms)
+  };
 }
 function recordSourceAnswerCorpusTiming(timing) {
   const query = currentSourceAnswerTrace()?.activeQuery;
@@ -74766,6 +74815,9 @@ var init_parent_label = __esm(() => {
 });
 
 // src/core/source-index/router.ts
+function applySourceIndexVisibilityGate(gate, hits) {
+  return gate.offThread ? gate.offThread(hits) : Promise.resolve(gate(hits));
+}
 async function routeSourceIndexSearch(options) {
   return withKeywordRequestScope(() => routePreparedSourceIndexSearch(options));
 }
@@ -74817,17 +74869,27 @@ async function routePreparedSourceIndexSearch(options) {
     })
   ]));
   const semanticPrepareBudgetMs = options.semanticPrepareBudgetMs ?? DEFAULT_SEMANTIC_PREPARE_BUDGET_MS;
+  let prepareKeywordsMaxMs = 0;
+  let prepareSemanticMaxMs = 0;
+  const timed2 = async (run) => {
+    const started = Date.now();
+    try {
+      await run();
+    } catch {}
+    return Date.now() - started;
+  };
+  const prepareStartedAt = Date.now();
   await Promise.all(searchableCorpora.map(async (corpus) => {
     const adapter = options.adapters[corpus.corpusId];
-    try {
-      await adapter.prepareKeywords?.(request.query);
-    } catch {}
-    if (adapter.prepareSemantic && semanticPrepareBudgetMs > 0 && request.context.metadataOnly !== true && retrievalStates.get(corpus.corpusId).hybridServable) {
-      try {
-        await adapter.prepareSemantic(request.query, semanticPrepareBudgetMs);
-      } catch {}
-    }
+    const semantic = adapter.prepareSemantic && semanticPrepareBudgetMs > 0 && request.context.metadataOnly !== true && retrievalStates.get(corpus.corpusId).hybridServable;
+    const [keywordsMs, semanticMs] = await Promise.all([
+      timed2(() => adapter.prepareKeywords?.(request.query)),
+      semantic ? timed2(() => adapter.prepareSemantic(request.query, semanticPrepareBudgetMs)) : Promise.resolve(0)
+    ]);
+    prepareKeywordsMaxMs = Math.max(prepareKeywordsMaxMs, keywordsMs);
+    prepareSemanticMaxMs = Math.max(prepareSemanticMaxMs, semanticMs);
   }));
+  const lanesStartedAt = Date.now();
   const laneTimeoutMs = resolveLaneTimeoutMs(options.laneTimeoutMs);
   const laneOutcomes = await Promise.all(searchableCorpora.map(async (corpus) => {
     const adapter = options.adapters[corpus.corpusId];
@@ -74908,8 +74970,9 @@ async function routePreparedSourceIndexSearch(options) {
       }))
     });
   }
+  const lanesSettledAt = Date.now();
   if (options.visibilityGate) {
-    const kept = new Set(options.visibilityGate(lanes.flatMap((lane) => lane.items)));
+    const kept = new Set(await applySourceIndexVisibilityGate(options.visibilityGate, lanes.flatMap((lane) => lane.items)));
     for (const lane of lanes)
       lane.items = lane.items.filter((hit) => kept.has(hit));
   }
@@ -74935,6 +74998,13 @@ async function routePreparedSourceIndexSearch(options) {
     rawExposed: false
   };
   assertSafeRoutedSearchResponse(result);
+  recordSourceAnswerQueryStages({
+    prepare_ms: lanesStartedAt - prepareStartedAt,
+    prepare_keywords_max_ms: prepareKeywordsMaxMs,
+    prepare_semantic_max_ms: prepareSemanticMaxMs,
+    lanes_ms: lanesSettledAt - lanesStartedAt,
+    after_lanes_ms: Date.now() - lanesSettledAt
+  });
   return result;
 }
 function corpusContributedSecure(corpus, response) {
@@ -75259,7 +75329,7 @@ async function buildPreparedEvidencePackDetailed(input) {
   const reranker = input.reranker && !input.selectedItems?.length && !hasTemporalIntent(input.question) && !hasTemporalIntent(input.searchQuery ?? "") ? input.reranker : undefined;
   const retrievalLimit = reranker ? rerankPoolSize(reranker, input.maxResults) : input.maxResults;
   const routed = input.selectedItems?.length ? selectedItemsToRoutedSlice(input) : await runRoutedSearches(input, retrievalLimit);
-  const visibleHits = input.visibilityGate && !input.selectedItems?.length ? input.visibilityGate(routed.hits) : routed.hits;
+  const visibleHits = input.visibilityGate && !input.selectedItems?.length ? await applySourceIndexVisibilityGate(input.visibilityGate, routed.hits) : routed.hits;
   const routedHits = input.selectedItems?.length ? routed.hits : orderHitsForTemporalIntent(visibleHits, input);
   const candidates = [];
   const candidateCorpusIds = [];
@@ -173496,7 +173566,8 @@ function copyRetrievalAttempt(attempt) {
         outcome: timing.outcome,
         ...timing.error_class ? { error_class: timing.error_class } : {},
         ...timing.pool ? { pool: copyPoolReads(timing.pool) } : {}
-      }))
+      })),
+      ...query.stages ? { stages: copyQueryStages(query.stages) } : {}
     }))
   };
 }
@@ -206074,62 +206145,114 @@ function childLane(scope) {
   return stores ? { ledger: () => scope.ledger, stores } : undefined;
 }
 function createTierVisibilityGate(scopes, onHeldMatches) {
-  return (hits) => {
+  const governedBy = (scope, hits) => hits.filter((hit) => scope.corpusIds.has(hit.corpusId));
+  const gate = (hits) => {
     const current2 = scopes();
     if (current2.length === 0 || hits.length === 0)
       return hits;
-    const hidden = new Set;
-    const held = new Set;
+    const reads = new Map;
     for (const scope of current2) {
-      const governed = hits.filter((hit) => scope.corpusIds.has(hit.corpusId));
+      const governed = governedBy(scope, hits);
       if (governed.length === 0)
         continue;
-      let copies;
-      let routedWithoutCopies;
       try {
-        copies = scope.ledger.copiesForMany(governed.map((hit) => hit.sourceItem));
+        const copies = scope.ledger.copiesForMany(governed.map((hit) => hit.sourceItem));
         const copyless = governed.filter((hit) => (copies.get(tierLedgerIdentityKey(hit.sourceItem))?.length ?? 0) === 0);
-        routedWithoutCopies = scope.ledger.routedWithoutCopies(copyless.map((hit) => hit.sourceItem));
+        reads.set(scope, { copies, routedWithoutCopies: scope.ledger.routedWithoutCopies(copyless.map((hit) => hit.sourceItem)) });
       } catch {
-        for (const hit of governed)
+        reads.set(scope, undefined);
+      }
+    }
+    return judgeVisibility(current2, hits, reads, onHeldMatches);
+  };
+  gate.offThread = async (hits) => {
+    const current2 = scopes();
+    if (current2.length === 0 || hits.length === 0)
+      return hits;
+    const reads = new Map;
+    await Promise.all(current2.map(async (scope) => {
+      const governed = governedBy(scope, hits);
+      if (governed.length === 0)
+        return;
+      try {
+        reads.set(scope, await ledgerVisibilityReads(scope.ledger, governed.map((hit) => hit.sourceItem)));
+      } catch {
+        reads.set(scope, undefined);
+      }
+    }));
+    return judgeVisibility(current2, hits, reads, onHeldMatches);
+  };
+  return gate;
+}
+async function ledgerVisibilityReads(ledger, identities) {
+  if (identities.length > 0 && offThreadReadsSupported(ledger.dbPath)) {
+    if (!releasing.has(ledger)) {
+      releasing.add(ledger);
+      ledger.onClose(() => releaseOffThreadReads(ledger.dbPath));
+    }
+    try {
+      return await withOffThreadSnapshot(ledger.dbPath, async (read) => {
+        const steps = ledger.visibilityReadSteps(identities);
+        let next = steps.next();
+        while (!next.done)
+          next = steps.next(await read(next.value));
+        return next.value;
+      });
+    } catch (error2) {
+      if (!(error2 instanceof OffThreadReadBusyError))
+        throw error2;
+    }
+  }
+  return ledger.readSteps(ledger.visibilityReadSteps(identities));
+}
+function judgeVisibility(current2, hits, reads, onHeldMatches) {
+  const hidden = new Set;
+  const held = new Set;
+  for (const scope of current2) {
+    if (!reads.has(scope))
+      continue;
+    const governed = hits.filter((hit) => scope.corpusIds.has(hit.corpusId));
+    const read = reads.get(scope);
+    if (!read) {
+      for (const hit of governed)
+        hidden.add(hit);
+      continue;
+    }
+    const { copies, routedWithoutCopies } = read;
+    for (const hit of governed) {
+      if (!hit.sourceItem.accountScope || !hit.sourceItem.provider || !hit.sourceItem.providerItemId) {
+        hidden.add(hit);
+        continue;
+      }
+      const key2 = tierLedgerIdentityKey(hit.sourceItem);
+      const itemCopies = copies.get(key2);
+      if (itemCopies?.some((copy) => copy.state === "current" && copy.embedHold))
+        held.add(hit);
+      if (!itemCopies || itemCopies.length === 0) {
+        if (routedWithoutCopies.has(key2))
           hidden.add(hit);
         continue;
       }
-      for (const hit of governed) {
-        if (!hit.sourceItem.accountScope || !hit.sourceItem.provider || !hit.sourceItem.providerItemId) {
-          hidden.add(hit);
-          continue;
-        }
-        const key2 = tierLedgerIdentityKey(hit.sourceItem);
-        const itemCopies = copies.get(key2);
-        if (itemCopies?.some((copy) => copy.state === "current" && copy.embedHold))
-          held.add(hit);
-        if (!itemCopies || itemCopies.length === 0) {
-          if (routedWithoutCopies.has(key2))
+      const currentHere = itemCopies.some((copy) => copy.corpusId === hit.corpusId && copy.state === "current" && (!hit.servingLayer || copy.layers === "both" || copy.layers === hit.servingLayer));
+      if (!currentHere)
+        hidden.add(hit);
+    }
+    const lane = childLane(scope);
+    if (lane) {
+      const orphaned = hiddenChildKeys(lane, governed.filter((hit) => !hidden.has(hit)).map((hit) => hit.sourceItem));
+      if (orphaned.size > 0) {
+        for (const hit of governed)
+          if (orphaned.has(tierLedgerIdentityKey(hit.sourceItem)))
             hidden.add(hit);
-          continue;
-        }
-        const currentHere = itemCopies.some((copy) => copy.corpusId === hit.corpusId && copy.state === "current" && (!hit.servingLayer || copy.layers === "both" || copy.layers === hit.servingLayer));
-        if (!currentHere)
-          hidden.add(hit);
-      }
-      const lane = childLane(scope);
-      if (lane) {
-        const orphaned = hiddenChildKeys(lane, governed.filter((hit) => !hidden.has(hit)).map((hit) => hit.sourceItem));
-        if (orphaned.size > 0) {
-          for (const hit of governed)
-            if (orphaned.has(tierLedgerIdentityKey(hit.sourceItem)))
-              hidden.add(hit);
-        }
       }
     }
-    if (onHeldMatches && held.size > 0) {
-      try {
-        onHeldMatches(interleaveByCorpus(hits.filter((hit) => held.has(hit))).map((hit) => hit.sourceItem));
-      } catch {}
-    }
-    return hidden.size === 0 ? hits : hits.filter((hit) => !hidden.has(hit));
-  };
+  }
+  if (onHeldMatches && held.size > 0) {
+    try {
+      onHeldMatches(interleaveByCorpus(hits.filter((hit) => held.has(hit))).map((hit) => hit.sourceItem));
+    } catch {}
+  }
+  return hidden.size === 0 ? hits : hits.filter((hit) => !hidden.has(hit));
 }
 function interleaveByCorpus(hits) {
   const byCorpus = new Map;
@@ -206251,10 +206374,13 @@ function createPendingGovernance(lanes, newLane, log = () => {}) {
     waiting: () => [...waiting.keys()]
   };
 }
+var releasing;
 var init_tier_visibility = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
   init_child_visibility();
+  init_off_thread_reads();
+  releasing = new WeakSet;
 });
 
 // src/workers/classification/judge-boost.ts

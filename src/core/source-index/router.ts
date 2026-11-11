@@ -28,6 +28,7 @@ import {
 } from './retrieval.ts';
 import {
   recordSourceAnswerCorpusTiming,
+  recordSourceAnswerQueryStages,
   runInSourceAnswerLane,
   sourceAnswerTraceErrorClass,
 } from '../../workers/source-index/answer-latency-trace.ts';
@@ -278,9 +279,21 @@ export interface SourceIndexRoutedCorpusTiming {
  * snapshot of their tier ledger, so an item whose copy moved between two
  * stores mid-query is never returned from both. Returns the hits to keep.
  */
-export type SourceIndexVisibilityGate = (
+export type SourceIndexVisibilityGate = ((
   hits: readonly SourceIndexRoutedSearchHit[],
-) => readonly SourceIndexRoutedSearchHit[];
+) => readonly SourceIndexRoutedSearchHit[]) & {
+  // The same judgment with its reads off the request thread, for a caller
+  // that can wait (#1305).
+  offThread?: (hits: readonly SourceIndexRoutedSearchHit[]) => Promise<readonly SourceIndexRoutedSearchHit[]>;
+};
+
+// Applies the gate off the request thread where it can be.
+export function applySourceIndexVisibilityGate(
+  gate: SourceIndexVisibilityGate,
+  hits: readonly SourceIndexRoutedSearchHit[],
+): Promise<readonly SourceIndexRoutedSearchHit[]> {
+  return gate.offThread ? gate.offThread(hits) : Promise.resolve(gate(hits));
+}
 
 export interface RouteSourceIndexSearchOptions {
   registry: SourceIndexCorpusRegistry;
@@ -451,20 +464,33 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
   // Preparation never sees corpus content and owns its own bounded timeout.
   // A cold local model must not spend the store's lock/vector deadline.
   const semanticPrepareBudgetMs = options.semanticPrepareBudgetMs ?? DEFAULT_SEMANTIC_PREPARE_BUDGET_MS;
+  // Keyword translation and the query embedding are independent, so each
+  // corpus prepares both at once: one after the other, every lane waited for
+  // the sum of the two model waits (#1305).
+  let prepareKeywordsMaxMs = 0;
+  let prepareSemanticMaxMs = 0;
+  const timed = async (run: () => Promise<void> | undefined): Promise<number> => {
+    const started = Date.now();
+    try { await run(); } catch { /* the original query remains usable, and a lane reports its own skip */ }
+    return Date.now() - started;
+  };
+  const prepareStartedAt = Date.now();
   await Promise.all(searchableCorpora.map(async (corpus) => {
     const adapter = options.adapters[corpus.corpusId]!;
-    try { await adapter.prepareKeywords?.(request.query); } catch { /* original query remains usable */ }
     // A metadata-only search (the Private-match probe) has its own short
     // budget and reports an incomplete lane as unknown; it never waits here.
-    if (
-      adapter.prepareSemantic
+    const semantic = adapter.prepareSemantic
       && semanticPrepareBudgetMs > 0
       && request.context.metadataOnly !== true
-      && retrievalStates.get(corpus.corpusId)!.hybridServable
-    ) {
-      try { await adapter.prepareSemantic(request.query, semanticPrepareBudgetMs); } catch { /* the lane reports its own skip */ }
-    }
+      && retrievalStates.get(corpus.corpusId)!.hybridServable;
+    const [keywordsMs, semanticMs] = await Promise.all([
+      timed(() => adapter.prepareKeywords?.(request.query)),
+      semantic ? timed(() => adapter.prepareSemantic!(request.query, semanticPrepareBudgetMs)) : Promise.resolve(0),
+    ]);
+    prepareKeywordsMaxMs = Math.max(prepareKeywordsMaxMs, keywordsMs);
+    prepareSemanticMaxMs = Math.max(prepareSemanticMaxMs, semanticMs);
   }));
+  const lanesStartedAt = Date.now();
   const laneTimeoutMs = resolveLaneTimeoutMs(options.laneTimeoutMs);
   const laneOutcomes = await Promise.all(searchableCorpora.map(async (corpus) => {
     const adapter = options.adapters[corpus.corpusId]!;
@@ -552,9 +578,10 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
     });
   }
 
+  const lanesSettledAt = Date.now();
   if (options.visibilityGate) {
     // One call for every lane's hits: one snapshot decides them all.
-    const kept = new Set(options.visibilityGate(lanes.flatMap((lane) => lane.items)));
+    const kept = new Set(await applySourceIndexVisibilityGate(options.visibilityGate, lanes.flatMap((lane) => lane.items)));
     for (const lane of lanes) lane.items = lane.items.filter((hit) => kept.has(hit));
   }
 
@@ -603,6 +630,13 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
     rawExposed: false,
   };
   assertSafeRoutedSearchResponse(result);
+  recordSourceAnswerQueryStages({
+    prepare_ms: lanesStartedAt - prepareStartedAt,
+    prepare_keywords_max_ms: prepareKeywordsMaxMs,
+    prepare_semantic_max_ms: prepareSemanticMaxMs,
+    lanes_ms: lanesSettledAt - lanesStartedAt,
+    after_lanes_ms: Date.now() - lanesSettledAt,
+  });
   return result;
 }
 

@@ -71,6 +71,21 @@ export interface SourceAnswerTraceQueryTiming {
   ordinal: number;
   elapsed_ms: number;
   corpus_timings: SourceAnswerTraceCorpusTiming[];
+  stages?: SourceAnswerTraceQueryStages;
+}
+
+/**
+ * Where a routed query's time went outside its lanes (#1305): the query
+ * preparation every lane waits for (the slowest corpus's keyword translation
+ * and query embedding), the lanes themselves, and the merge after the last
+ * lane settles.
+ */
+export interface SourceAnswerTraceQueryStages {
+  prepare_ms: number;
+  prepare_keywords_max_ms: number;
+  prepare_semantic_max_ms: number;
+  lanes_ms: number;
+  after_lanes_ms: number;
 }
 
 export interface SourceAnswerTraceRetrievalAttempt {
@@ -160,6 +175,7 @@ interface ActiveQuery {
   startedAtMs: number;
   corpusTimings: SourceAnswerTraceCorpusTiming[];
   poolByCorpus: Map<string, SourceAnswerTracePoolReads>;
+  stages?: SourceAnswerTraceQueryStages;
 }
 
 const storage = new AsyncLocalStorage<MutableTrace>();
@@ -409,10 +425,28 @@ export async function observeSourceAnswerRoutedQuery<T>(
         ...(timing.error_class ? { error_class: sanitizeErrorClass(timing.error_class) } : {}),
         ...(query.poolByCorpus.has(timing.corpus_id) ? { pool: { ...query.poolByCorpus.get(timing.corpus_id)! } } : {}),
       })),
+      ...(query.stages ? { stages: { ...query.stages } } : {}),
     });
     if (previous) trace.activeQuery = previous;
     else delete trace.activeQuery;
   }
+}
+
+/** The active routed query's stage times; the router reports them once per query. */
+export function recordSourceAnswerQueryStages(stages: SourceAnswerTraceQueryStages): void {
+  const query = currentSourceAnswerTrace()?.activeQuery;
+  if (!query) return;
+  query.stages = copyQueryStages(stages);
+}
+
+export function copyQueryStages(stages: SourceAnswerTraceQueryStages): SourceAnswerTraceQueryStages {
+  return {
+    prepare_ms: nonNegativeMs(stages.prepare_ms),
+    prepare_keywords_max_ms: nonNegativeMs(stages.prepare_keywords_max_ms),
+    prepare_semantic_max_ms: nonNegativeMs(stages.prepare_semantic_max_ms),
+    lanes_ms: nonNegativeMs(stages.lanes_ms),
+    after_lanes_ms: nonNegativeMs(stages.after_lanes_ms),
+  };
 }
 
 export function recordSourceAnswerCorpusTiming(timing: SourceAnswerTraceCorpusTiming): void {

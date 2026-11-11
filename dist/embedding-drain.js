@@ -11753,6 +11753,73 @@ function writeIntentFromRow(row) {
 function idParams(identity) {
   return [identity.provider, identity.accountScope, tierLedgerConversationKey(identity), identity.providerItemId];
 }
+function uniqueIdentities(identities) {
+  const unique = new Map;
+  for (const identity of identities)
+    unique.set(tierLedgerIdentityKey(identity), identity);
+  return [...unique.values()];
+}
+function identityValues(batch) {
+  return { values: batch.map(() => "(?, ?, ?, ?)").join(", "), params: batch.flatMap((identity) => [...idParams(identity)]) };
+}
+function* copiesSteps(list) {
+  const result = new Map;
+  for (let offset = 0;offset < list.length; offset += IDENTITY_BATCH) {
+    const { values, params } = identityValues(list.slice(offset, offset + IDENTITY_BATCH));
+    const rows = yield {
+      sql: `SELECT * FROM tier_copies
+        WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
+        ORDER BY corpus_id`,
+      params,
+      mode: "all"
+    };
+    for (const row of rows) {
+      const key = tierLedgerIdentityKey(identityFromRow(row));
+      const existing = result.get(key);
+      if (existing)
+        existing.push(copyFromRow(row));
+      else
+        result.set(key, [copyFromRow(row)]);
+    }
+    const pending = yield {
+      sql: `SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_write_intents
+        WHERE kind IN ('deletion', 'secret')
+          AND (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})`,
+      params,
+      mode: "all"
+    };
+    for (const row of pending) {
+      const hidden = result.get(tierLedgerIdentityKey(identityFromRow(row)));
+      if (hidden) {
+        for (const copy of hidden)
+          if (copy.state !== "superseded")
+            copy.state = "superseded";
+      }
+    }
+  }
+  return result;
+}
+function* routedWithoutCopiesSteps(list) {
+  const result = new Set;
+  for (let offset = 0;offset < list.length; offset += IDENTITY_BATCH) {
+    const { values, params } = identityValues(list.slice(offset, offset + IDENTITY_BATCH));
+    const rows = yield {
+      sql: `SELECT i.provider, i.account_scope, i.conversation_key, i.provider_item_id FROM tier_items i
+        WHERE i.routed = 1
+          AND (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) IN (VALUES ${values})
+          AND NOT EXISTS (
+            SELECT 1 FROM tier_copies c
+            WHERE c.provider = i.provider AND c.account_scope = i.account_scope
+              AND c.conversation_key = i.conversation_key AND c.provider_item_id = i.provider_item_id
+          )`,
+      params,
+      mode: "all"
+    };
+    for (const row of rows)
+      result.add(tierLedgerIdentityKey(identityOfRow(row)));
+  }
+  return result;
+}
 function tierMovingDirectionClause(direction) {
   if (!direction)
     return "";
@@ -11812,6 +11879,13 @@ class TierLedger {
     try {
       closeSqliteStore(this.db, { checkpoint: !this.readOnly });
     } finally {
+      const listeners = this.closeListeners ?? [];
+      this.closeListeners = undefined;
+      for (const listener of listeners) {
+        try {
+          listener();
+        } catch {}
+      }
       if (!this.readOnly && this.dbPath !== ":memory:")
         restrictLedgerFiles(this.dbPath);
     }
@@ -13118,45 +13192,28 @@ class TierLedger {
     `).all(...idParams(identity)).map(copyFromRow);
   }
   copiesForMany(identities) {
-    const result = new Map;
-    if (identities.length === 0)
-      return result;
-    const unique = new Map;
-    for (const identity of identities)
-      unique.set(tierLedgerIdentityKey(identity), identity);
-    const list = [...unique.values()];
-    this.db.transaction(() => {
-      for (let offset = 0;offset < list.length; offset += 200) {
-        const batch = list.slice(offset, offset + 200);
-        const rows = this.db.query(`
-          SELECT * FROM tier_copies
-          WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${batch.map(() => "(?, ?, ?, ?)").join(", ")})
-          ORDER BY corpus_id
-        `).all(...batch.flatMap((identity) => [...idParams(identity)]));
-        for (const row of rows) {
-          const key = tierLedgerIdentityKey(identityFromRow(row));
-          const existing = result.get(key);
-          if (existing)
-            existing.push(copyFromRow(row));
-          else
-            result.set(key, [copyFromRow(row)]);
-        }
-        const pending = this.db.query(`
-          SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_write_intents
-          WHERE kind IN ('deletion', 'secret')
-            AND (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${batch.map(() => "(?, ?, ?, ?)").join(", ")})
-        `).all(...batch.flatMap((identity) => [...idParams(identity)]));
-        for (const row of pending) {
-          const hidden = result.get(tierLedgerIdentityKey(identityFromRow(row)));
-          if (hidden) {
-            for (const copy of hidden)
-              if (copy.state !== "superseded")
-                copy.state = "superseded";
-          }
-        }
+    return this.readSteps(copiesSteps(uniqueIdentities(identities)));
+  }
+  *visibilityReadSteps(identities) {
+    const list = uniqueIdentities(identities);
+    const copies = yield* copiesSteps(list);
+    const copyless = list.filter((identity) => (copies.get(tierLedgerIdentityKey(identity))?.length ?? 0) === 0);
+    return { copies, routedWithoutCopies: yield* routedWithoutCopiesSteps(copyless) };
+  }
+  onClose(listener) {
+    (this.closeListeners ??= []).push(listener);
+  }
+  closeListeners;
+  readSteps(steps) {
+    return this.db.transaction(() => {
+      let next = steps.next();
+      while (!next.done) {
+        const statement = this.db.query(next.value.sql);
+        const params = next.value.params;
+        next = steps.next(next.value.mode === "get" ? statement.get(...params) : statement.all(...params));
       }
+      return next.value;
     })();
-    return result;
   }
   recordRoutedPlacement(identity, decision, plan, options = {}) {
     const decidedAt = this.now().toISOString();
@@ -13326,31 +13383,7 @@ class TierLedger {
     }
   }
   routedWithoutCopies(identities) {
-    const result = new Set;
-    if (identities.length === 0)
-      return result;
-    const unique = new Map;
-    for (const identity of identities)
-      unique.set(tierLedgerIdentityKey(identity), identity);
-    const list = [...unique.values()];
-    this.db.transaction(() => {
-      for (let offset = 0;offset < list.length; offset += 200) {
-        const batch = list.slice(offset, offset + 200);
-        const rows = this.db.query(`
-          SELECT i.provider, i.account_scope, i.conversation_key, i.provider_item_id FROM tier_items i
-          WHERE i.routed = 1
-            AND (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) IN (VALUES ${batch.map(() => "(?, ?, ?, ?)").join(", ")})
-            AND NOT EXISTS (
-              SELECT 1 FROM tier_copies c
-              WHERE c.provider = i.provider AND c.account_scope = i.account_scope
-                AND c.conversation_key = i.conversation_key AND c.provider_item_id = i.provider_item_id
-            )
-        `).all(...batch.flatMap((identity) => [...idParams(identity)]));
-        for (const row of rows)
-          result.add(tierLedgerIdentityKey(identityOfRow(row)));
-      }
-    })();
-    return result;
+    return this.readSteps(routedWithoutCopiesSteps(uniqueIdentities(identities)));
   }
   itemStatesForMany(identities) {
     const result = new Map;
@@ -15066,7 +15099,7 @@ function tierLedgerMigrations() {
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 12, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", DEFAULT_REJUDGE_SCAN_ROWS = 2000, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_RECHECK_META_PREFIX = "recheck:", STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 12, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", IDENTITY_BATCH = 200, DEFAULT_REJUDGE_SCAN_ROWS = 2000, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_RECHECK_META_PREFIX = "recheck:", STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_store_write_guard();
@@ -78559,6 +78592,8 @@ init_child_visibility();
 init_tier_classifier();
 init_tier_ledger();
 init_child_visibility();
+init_off_thread_reads();
+var releasing = new WeakSet;
 
 // src/workers/classification/judge-boost.ts
 init_tier_ledger();

@@ -57,6 +57,7 @@ import {
   type SourceIndexRouterAdapterMap,
   type SourceIndexSearchContext,
   type SourceIndexSkippedCorpus,
+  applySourceIndexVisibilityGate,
   type SourceIndexVisibilityGate,
 } from './source-index/router.ts';
 import {
@@ -350,7 +351,7 @@ async function buildPreparedEvidencePackDetailed(
   // snapshot, so a move that flipped between two runs cannot put both copies
   // of an item in the pack.
   const visibleHits = input.visibilityGate && !input.selectedItems?.length
-    ? input.visibilityGate(routed.hits)
+    ? await applySourceIndexVisibilityGate(input.visibilityGate, routed.hits)
     : routed.hits;
   const routedHits = input.selectedItems?.length
     ? routed.hits

@@ -29,7 +29,7 @@ import type {
   SourceAnswerTraceSnapshot,
   SourceAnswerTraceMainThreadSql,
 } from './answer-latency-trace.ts';
-import { sourceAnswerTraceErrorClass } from './answer-latency-trace.ts';
+import { copyQueryStages, sourceAnswerTraceErrorClass } from './answer-latency-trace.ts';
 import type { OperationCallerWire } from '../../core/operation-caller.ts';
 
 export interface SourceAnswerLatencyRecord {
@@ -419,6 +419,7 @@ function copyRetrievalAttempt(
         ...(timing.error_class ? { error_class: timing.error_class } : {}),
         ...(timing.pool ? { pool: copyPoolReads(timing.pool) } : {}),
       })),
+      ...(query.stages ? { stages: copyQueryStages(query.stages) } : {}),
     })),
   };
 }

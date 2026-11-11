@@ -24,8 +24,9 @@
 import type { ReleaseCheck, ReleaseInputVerdict } from '../../core/release-manifest.ts';
 import type { SourceIndexRoutedSearchHit, SourceIndexVisibilityGate } from '../../core/source-index/router.ts';
 import { contentHeldForJudgment } from '../classification/tier-classifier.ts';
-import { tierLedgerIdentityKey, type TierLedger, type TierLedgerIdentity } from '../classification/tier-ledger.ts';
+import { tierLedgerIdentityKey, type TierCopy, type TierLedger, type TierLedgerIdentity } from '../classification/tier-ledger.ts';
 import { hiddenChildKeys, itemVerdicts, type ChildVisibilityStore } from './child-visibility.ts';
+import { OffThreadReadBusyError, offThreadReadsSupported, releaseOffThreadReads, withOffThreadSnapshot } from './off-thread-reads.ts';
 
 export interface TierVisibilityScope {
   ledger: TierLedger;
@@ -55,58 +56,130 @@ export function createTierVisibilityGate(
   scopes: () => readonly TierVisibilityScope[],
   onHeldMatches?: (identities: readonly TierLedgerIdentity[]) => void,
 ): SourceIndexVisibilityGate {
-  return (hits) => {
+  const governedBy = (scope: TierVisibilityScope, hits: readonly SourceIndexRoutedSearchHit[]) =>
+    hits.filter((hit) => scope.corpusIds.has(hit.corpusId));
+  const gate: SourceIndexVisibilityGate = (hits) => {
     const current = scopes();
     if (current.length === 0 || hits.length === 0) return hits;
-    const hidden = new Set<SourceIndexRoutedSearchHit>();
-    const held = new Set<SourceIndexRoutedSearchHit>();
+    const reads = new Map<TierVisibilityScope, ScopeReads | undefined>();
     for (const scope of current) {
-      const governed = hits.filter((hit) => scope.corpusIds.has(hit.corpusId));
+      const governed = governedBy(scope, hits);
       if (governed.length === 0) continue;
-      let copies;
-      let routedWithoutCopies: Set<string>;
       try {
-        copies = scope.ledger.copiesForMany(governed.map((hit) => hit.sourceItem));
-        const copyless = governed.filter((hit) => (copies!.get(tierLedgerIdentityKey(hit.sourceItem))?.length ?? 0) === 0);
-        routedWithoutCopies = scope.ledger.routedWithoutCopies(copyless.map((hit) => hit.sourceItem));
+        const copies = scope.ledger.copiesForMany(governed.map((hit) => hit.sourceItem));
+        const copyless = governed.filter((hit) => (copies.get(tierLedgerIdentityKey(hit.sourceItem))?.length ?? 0) === 0);
+        reads.set(scope, { copies, routedWithoutCopies: scope.ledger.routedWithoutCopies(copyless.map((hit) => hit.sourceItem)) });
       } catch {
-        for (const hit of governed) hidden.add(hit);
+        reads.set(scope, undefined);
+      }
+    }
+    return judgeVisibility(current, hits, reads, onHeldMatches);
+  };
+  // The same judgment with each ledger read in one snapshot on the read pool,
+  // for the search's own fan-out, which can wait for it (#1305).
+  gate.offThread = async (hits) => {
+    const current = scopes();
+    if (current.length === 0 || hits.length === 0) return hits;
+    const reads = new Map<TierVisibilityScope, ScopeReads | undefined>();
+    await Promise.all(current.map(async (scope) => {
+      const governed = governedBy(scope, hits);
+      if (governed.length === 0) return;
+      try {
+        reads.set(scope, await ledgerVisibilityReads(scope.ledger, governed.map((hit) => hit.sourceItem)));
+      } catch {
+        reads.set(scope, undefined);
+      }
+    }));
+    return judgeVisibility(current, hits, reads, onHeldMatches);
+  };
+  return gate;
+}
+
+/**
+ * The ledger's visibility reads in one snapshot on the read pool where it
+ * can be: on a large install's copy one of these batches held the request
+ * thread for 1.3 s (#1305). A pool that is busy or unavailable reads here
+ * instead, so the gate never decides on less than the committed ledger.
+ */
+async function ledgerVisibilityReads(ledger: TierLedger, identities: readonly TierLedgerIdentity[]): Promise<ScopeReads> {
+  if (identities.length > 0 && offThreadReadsSupported(ledger.dbPath)) {
+    if (!releasing.has(ledger)) {
+      releasing.add(ledger);
+      ledger.onClose(() => releaseOffThreadReads(ledger.dbPath));
+    }
+    try {
+      return await withOffThreadSnapshot(ledger.dbPath, async (read) => {
+        const steps = ledger.visibilityReadSteps(identities);
+        let next = steps.next();
+        while (!next.done) next = steps.next(await read(next.value));
+        return next.value;
+      });
+    } catch (error) {
+      if (!(error instanceof OffThreadReadBusyError)) throw error;
+    }
+  }
+  return ledger.readSteps(ledger.visibilityReadSteps(identities));
+}
+
+const releasing = new WeakSet<TierLedger>();
+
+/** One scope's ledger read for the gate; undefined when the ledger could not be read. */
+interface ScopeReads {
+  copies: Map<string, TierCopy[]>;
+  routedWithoutCopies: Set<string>;
+}
+
+function judgeVisibility(
+  current: readonly TierVisibilityScope[],
+  hits: readonly SourceIndexRoutedSearchHit[],
+  reads: ReadonlyMap<TierVisibilityScope, ScopeReads | undefined>,
+  onHeldMatches: ((identities: readonly TierLedgerIdentity[]) => void) | undefined,
+): readonly SourceIndexRoutedSearchHit[] {
+  const hidden = new Set<SourceIndexRoutedSearchHit>();
+  const held = new Set<SourceIndexRoutedSearchHit>();
+  for (const scope of current) {
+    if (!reads.has(scope)) continue;
+    const governed = hits.filter((hit) => scope.corpusIds.has(hit.corpusId));
+    const read = reads.get(scope);
+    if (!read) {
+      // A set whose ledger cannot be read fails closed for its own stores only.
+      for (const hit of governed) hidden.add(hit);
+      continue;
+    }
+    const { copies, routedWithoutCopies } = read;
+    for (const hit of governed) {
+      if (!hit.sourceItem.accountScope || !hit.sourceItem.provider || !hit.sourceItem.providerItemId) {
+        hidden.add(hit);
         continue;
       }
-      for (const hit of governed) {
-        if (!hit.sourceItem.accountScope || !hit.sourceItem.provider || !hit.sourceItem.providerItemId) {
-          hidden.add(hit);
-          continue;
-        }
-        const key = tierLedgerIdentityKey(hit.sourceItem);
-        const itemCopies = copies.get(key);
-        if (itemCopies?.some((copy) => copy.state === 'current' && copy.embedHold)) held.add(hit);
-        if (!itemCopies || itemCopies.length === 0) {
-          if (routedWithoutCopies.has(key)) hidden.add(hit);
-          continue;
-        }
-        const currentHere = itemCopies.some((copy) => copy.corpusId === hit.corpusId && copy.state === 'current'
-          && (!hit.servingLayer || copy.layers === 'both' || copy.layers === hit.servingLayer));
-        if (!currentHere) hidden.add(hit);
+      const key = tierLedgerIdentityKey(hit.sourceItem);
+      const itemCopies = copies.get(key);
+      if (itemCopies?.some((copy) => copy.state === 'current' && copy.embedHold)) held.add(hit);
+      if (!itemCopies || itemCopies.length === 0) {
+        if (routedWithoutCopies.has(key)) hidden.add(hit);
+        continue;
       }
-      // A child is served only while its parent is.
-      const lane = childLane(scope);
-      if (lane) {
-        const orphaned = hiddenChildKeys(lane, governed.filter((hit) => !hidden.has(hit)).map((hit) => hit.sourceItem));
-        if (orphaned.size > 0) {
-          for (const hit of governed) if (orphaned.has(tierLedgerIdentityKey(hit.sourceItem))) hidden.add(hit);
-        }
+      const currentHere = itemCopies.some((copy) => copy.corpusId === hit.corpusId && copy.state === 'current'
+        && (!hit.servingLayer || copy.layers === 'both' || copy.layers === hit.servingLayer));
+      if (!currentHere) hidden.add(hit);
+    }
+    // A child is served only while its parent is.
+    const lane = childLane(scope);
+    if (lane) {
+      const orphaned = hiddenChildKeys(lane, governed.filter((hit) => !hidden.has(hit)).map((hit) => hit.sourceItem));
+      if (orphaned.size > 0) {
+        for (const hit of governed) if (orphaned.has(tierLedgerIdentityKey(hit.sourceItem))) hidden.add(hit);
       }
     }
-    if (onHeldMatches && held.size > 0) {
-      try {
-        onHeldMatches(interleaveByCorpus(hits.filter((hit) => held.has(hit))).map((hit) => hit.sourceItem));
-      } catch {
-        // Ordering the judge is best effort; the search is not affected.
-      }
+  }
+  if (onHeldMatches && held.size > 0) {
+    try {
+      onHeldMatches(interleaveByCorpus(hits.filter((hit) => held.has(hit))).map((hit) => hit.sourceItem));
+    } catch {
+      // Ordering the judge is best effort; the search is not affected.
     }
-    return hidden.size === 0 ? hits : hits.filter((hit) => !hidden.has(hit));
-  };
+  }
+  return hidden.size === 0 ? hits : hits.filter((hit) => !hidden.has(hit));
 }
 
 /**

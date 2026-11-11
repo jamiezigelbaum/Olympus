@@ -175,6 +175,28 @@ test('fresh dispatch visibility rejects stale content when the lower copy remain
   } finally { fixture.close(); cleanup(); }
 });
 
+test('the search reads the gate off the request thread and judges the same (#1305)', async () => {
+  const { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, openTierFixture, tempDir } = await import('./helpers/tier-fixtures.ts');
+  const { moveTieredItem } = await import('../src/workers/connector-store/tier-move.ts');
+  const { createTierVisibilityGate } = await import('../src/workers/connector-store/tier-visibility.ts');
+  const { setReadPoolObserverForTests } = await import('../src/workers/connector-store/off-thread-reads.ts');
+  const { dir, cleanup } = tempDir();
+  const fixture = openTierFixture(dir);
+  const pooled: string[] = [];
+  try {
+    await fixture.set.sync(fixtureConnector(() => [{ id: 'garden', name: 'garden.txt', text: 'The garden contains ordinary compost notes.' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    const stale = fixture.stores.internal!.searchItems('compost', 5)[0]!;
+    await moveTieredItem({ set: fixture.set, identity: identityOf('garden'), target: { metadataTier: 'private', contentTier: 'secure' } });
+    const gate = createTierVisibilityGate(() => [{ ledger: fixture.ledger, corpusIds: new Set(Object.values(CORPORA)) }]);
+    const hit = { sourceItem: stale.sourceItem, corpusId: CORPORA.internal, trustDomain: 'internal' as const, rawExposed: false as const };
+    setReadPoolObserverForTests((dbPath) => { pooled.push(dbPath); }, { snapshots: true });
+    expect(await gate.offThread!([{ ...hit, servingLayer: 'content' }])).toHaveLength(0);
+    expect(await gate.offThread!([{ ...hit, servingLayer: 'metadata' }])).toHaveLength(1);
+    expect(pooled.length).toBeGreaterThan(0);
+    expect(new Set(pooled)).toEqual(new Set([fixture.ledger.dbPath]));
+  } finally { setReadPoolObserverForTests(undefined); fixture.close(); cleanup(); }
+});
+
 test('ChatGPT fails closed for a cached answer without a checker or without a release manifest', async () => {
   for (const missing of ['checker', 'manifest'] as const) {
     const tier = mutableTier();

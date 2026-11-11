@@ -253,3 +253,29 @@ test('a language sample can be read elsewhere, one sample at a time, and a curre
   expect(lastKeywordLanguages(db)).toEqual(['spa']);
   db.close();
 });
+
+test('a corpus prepares its keywords and its query embedding at once, and the query records its stages (#1305)', async () => {
+  const {routeSourceIndexSearch} = await import('../src/core/source-index/router.ts');
+  const {buildSourceIndexCorpusRegistry, defineSourceIndexCorpus} = await import('../src/core/source-index/corpus.ts');
+  const trace = await import('../src/workers/source-index/answer-latency-trace.ts');
+  const corpus = defineSourceIndexCorpus({corpusId:'internal.prepared.notes',family:'note',trustDomain:'internal',activationMode:'hybrid_primary'});
+  const started: string[] = [];
+  let releaseKeywords!: () => void;
+  const keywordsWait = new Promise<void>((resolve) => { releaseKeywords = resolve; });
+  const adapter = Object.assign(() => ({hits:[],latencyMs:0,rawExposed:false as const}), {
+    hybridAvailability: () => ({servable: true, modelId: 'm1', backend: 'local'}),
+    prepareKeywords: async () => { started.push('keywords'); await keywordsWait; },
+    // The query embedding only finishes once it has started alongside the translation.
+    prepareSemantic: async () => { started.push('semantic'); releaseKeywords(); },
+  });
+  const t = trace.createSourceAnswerTrace();
+  const snapshot = await trace.runWithSourceAnswerTrace(t, () => trace.observeSourceAnswerRetrievalAttempt('hybrid', () =>
+    trace.observeSourceAnswerRoutedQuery(1, () => routeSourceIndexSearch({
+      registry: buildSourceIndexCorpusRegistry([corpus]), adapters: {[corpus.corpusId]: adapter},
+      request: {query:'notary',maxResults:4,context:{allowedTrustDomains:['internal']}}, laneTimeoutMs: 1000,
+    })))).then(() => trace.snapshotSourceAnswerTrace(t));
+  expect(started).toEqual(['keywords', 'semantic']);
+  const stages = snapshot.retrievalAttempts[0]?.queries[0]?.stages;
+  expect(stages).toBeDefined();
+  expect(Object.keys(stages!).sort()).toEqual(['after_lanes_ms', 'lanes_ms', 'prepare_keywords_max_ms', 'prepare_ms', 'prepare_semantic_max_ms']);
+});
