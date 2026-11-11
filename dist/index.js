@@ -20191,6 +20191,7 @@ var init_parent_context = __esm(() => {
 
 // src/workers/connector-store/tier-names-only-settle.ts
 var init_tier_names_only_settle = __esm(() => {
+  init_tier_classifier();
   init_tier_ledger();
   init_local_index();
 });
@@ -20772,6 +20773,7 @@ var init_tier_secrets_floor_sweep = __esm(() => {
 var LOWER_CONTENT_REPAIR_INTERVAL_MS;
 var init_tiered_store_set = __esm(() => {
   init_store_write_guard();
+  init_source_ingestion_exclusions();
   init_control_path_headroom();
   init_types();
   init_engine();
