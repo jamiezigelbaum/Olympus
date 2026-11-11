@@ -343,9 +343,11 @@ async function buildPreparedEvidencePackDetailed(
   const visibleHits = input.visibilityGate && !input.selectedItems?.length
     ? input.visibilityGate(routed.hits)
     : routed.hits;
-  const routedHits = input.selectedItems?.length
-    ? routed.hits
-    : orderHitsForTemporalIntent(visibleHits, input);
+  // Routed order is the pack order. A recency word in the question does not
+  // re-sort it: newest-first over the whole pool undid store turn and the
+  // reserved leader seats, and buried a store's best match past what a local
+  // Analyst reads (2026-11-11). Every seat carries its date.
+  const routedHits = input.selectedItems?.length ? routed.hits : visibleHits;
 
   const candidates: EvidenceCandidate[] = [];
   const candidateCorpusIds: string[] = [];
@@ -692,28 +694,6 @@ function contentFreePolicyLaneAudits(
   }));
 }
 
-function orderHitsForTemporalIntent(
-  hits: readonly SourceIndexRoutedSearchHit[],
-  input: BuildEvidencePackInput,
-): readonly SourceIndexRoutedSearchHit[] {
-  if (!hasTemporalIntent(input.question) && !hasTemporalIntent(input.searchQuery ?? '')) {
-    return hits;
-  }
-  return [...hits].sort((left, right) => {
-    const rightTime = hitCitationTime(right);
-    const leftTime = hitCitationTime(left);
-    if (rightTime !== leftTime) return rightTime - leftTime;
-    const rightScore = right.score ?? 0;
-    const leftScore = left.score ?? 0;
-    if (rightScore !== leftScore) return rightScore - leftScore;
-    return hitCandidateId(left).localeCompare(hitCandidateId(right));
-  });
-}
-
-function hitCandidateId(hit: SourceIndexRoutedSearchHit): string {
-  return String(hit.candidateId ?? `${hit.corpusId}:${hit.sourceItem.localItemId || hit.sourceItem.providerItemId}`);
-}
-
 export function hasTemporalIntent(value: string): boolean {
   const normalized = value.toLowerCase();
   // "just got/received", "right now", "today", "N minutes ago" are the chat
@@ -724,17 +704,6 @@ export function hasTemporalIntent(value: string): boolean {
     || /\bright\s+now\b/.test(normalized)
     || /\btoday\b/.test(normalized)
     || /\b(seconds?|minutes?|moments?|hours?)\s+ago\b/.test(normalized);
-}
-
-function hitCitationTime(hit: SourceIndexRoutedSearchHit): number {
-  const citation = hit.provenance?.citation;
-  return safeTime(citation?.authoredAt) || safeTime(citation?.updatedAt);
-}
-
-function safeTime(value: string | undefined): number {
-  if (!value) return 0;
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 // --- Multi-query retrieval ---------------------------------------------------

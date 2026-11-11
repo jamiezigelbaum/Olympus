@@ -416,7 +416,8 @@ export function createAnalystSourceIndexAnswerHandler(
       // Temporal questions ("did I just get...", "what arrived today") need a
       // deeper candidate cut than the relevance default: the newest matching
       // item can sit a few ranks down minutes later, and a 3-candidate pack
-      // silently drops it before temporal ordering runs (2026-07-05).
+      // silently drops it (2026-07-05). The pack keeps relevance order; each
+      // seat carries its date for the Analyst.
       // Explicit max_results from the caller is always respected.
       const configuredMaxResults = options.defaultMaxResults ?? DEFAULT_MAX_RESULTS;
       const maxResults = Math.min(
