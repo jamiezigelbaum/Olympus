@@ -40,6 +40,7 @@ import type { RemotePrivatePart } from '../core/remote-private-part.ts';
 import { remoteErrorOutput, remotePrivateNote, remoteSurfaceErrorOutput } from '../core/remote-result.ts';
 import { answerReleaseWithheldReason, createReleaseManifestSink, runWithReleaseManifestSink, type ReleaseCheck } from '../core/release-manifest.ts';
 import type { McpCallToolResult, McpListedTool, McpServerExtension } from '../mcp/server.ts';
+import { withOlympusSearchWords } from '../mcp/server-instructions.ts';
 import { SEARCH_TOOL_NAME } from './chatgpt/dashboard-contract.ts';
 import { searchToolResult } from './chatgpt/response-builder.ts';
 
@@ -122,7 +123,7 @@ export function remoteSearchExtension(
   request: RemoteSearchRequestContext = {},
 ): McpServerExtension {
   return {
-    tools: (listed) => [REMOTE_SEARCH_TOOL, ...listed],
+    tools: (listed) => [REMOTE_SEARCH_TOOL, ...listed].map(withOlympusSearchWords),
     call: async (call, next, signal) => {
       if (call.params.name === REMOTE_SEARCH_TOOL.name) {
         const signals = [signal, request.signal].filter((one): one is AbortSignal => one !== undefined);

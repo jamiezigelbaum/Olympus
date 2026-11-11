@@ -61,7 +61,7 @@ import {
   type ChatGptToolResult,
 } from './response-builder.ts';
 import { CHATGPT_ZKAPI_TOOL_ACCOUNT_SENTENCE } from './zkapi-copy.ts';
-import { OLYMPUS_SERVER_INSTRUCTIONS } from '../../mcp/server-instructions.ts';
+import { OLYMPUS_SERVER_INSTRUCTIONS, withOlympusSearchWords } from '../../mcp/server-instructions.ts';
 
 export interface ChatGptSurfaceOptions {
   /** Host presentation only; absent preserves the ChatGPT wire format. */
@@ -405,7 +405,8 @@ export function listChatGptTools(ctx: OperationContext, options: Pick<ChatGptSur
   else if (askToolListed(ctx)) tools.push(SOURCE_ANSWER_RESULT_TOOL);
   if (askToolListed(ctx)) tools.push(ASK_ANONYMOUSLY_TOOL, OPEN_PRIVATE_QUESTION_TOOL);
   tools.push(...SETUP_TOOLS);
-  return appClientCopy(options.readOnly ? tools.filter(readOnlyGrantMayUse) : tools, options.appClient);
+  const listed = appClientCopy(options.readOnly ? tools.filter(readOnlyGrantMayUse) : tools, options.appClient);
+  return options.appClient?.host === 'claude' ? listed.map(withOlympusSearchWords) : listed;
 }
 
 /** Answer tools stay listed wherever the operations are exposed remotely. */

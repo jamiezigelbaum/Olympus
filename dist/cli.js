@@ -150574,7 +150574,15 @@ var init_tools = __esm(() => {
 });
 
 // src/mcp/server-instructions.ts
-var OLYMPUS_SERVER_INSTRUCTIONS;
+function withOlympusSearchWords(tool) {
+  const visibility = tool._meta?.ui?.visibility;
+  if (Array.isArray(visibility) && !visibility.includes("model"))
+    return tool;
+  if (tool.description?.startsWith(OLYMPUS_SEARCH_WORDS))
+    return tool;
+  return { ...tool, description: tool.description ? `${OLYMPUS_SEARCH_WORDS} ${tool.description}` : OLYMPUS_SEARCH_WORDS };
+}
+var OLYMPUS_SERVER_INSTRUCTIONS, OLYMPUS_SEARCH_WORDS = "Olympus: private search and answers over the user's own email, messages, files, documents and notes.";
 var init_server_instructions = __esm(() => {
   OLYMPUS_SERVER_INSTRUCTIONS = [
     "Olympus searches the user's own sources that it indexes privately on their computer (mail, files, notes, chats and saved reading).",
@@ -218540,7 +218548,8 @@ function listChatGptTools(ctx, options = {}) {
   if (askToolListed(ctx))
     tools.push(ASK_ANONYMOUSLY_TOOL, OPEN_PRIVATE_QUESTION_TOOL);
   tools.push(...SETUP_TOOLS);
-  return appClientCopy(options.readOnly ? tools.filter(readOnlyGrantMayUse) : tools, options.appClient);
+  const listed = appClientCopy(options.readOnly ? tools.filter(readOnlyGrantMayUse) : tools, options.appClient);
+  return options.appClient?.host === "claude" ? listed.map(withOlympusSearchWords) : listed;
 }
 function answerToolsListed(ctx) {
   return ANSWER_TOOLS.every((tool) => {
@@ -228649,7 +228658,7 @@ var init_directory_surface = __esm(() => {
 // src/workers/remote-search.ts
 function remoteSearchExtension(options, authorized, request = {}) {
   return {
-    tools: (listed) => [REMOTE_SEARCH_TOOL, ...listed],
+    tools: (listed) => [REMOTE_SEARCH_TOOL, ...listed].map(withOlympusSearchWords),
     call: async (call, next, signal) => {
       if (call.params.name === REMOTE_SEARCH_TOOL.name) {
         const signals = [signal, request.signal].filter((one) => one !== undefined);
@@ -228753,6 +228762,7 @@ var init_remote_search = __esm(() => {
   init_operations();
   init_remote_result();
   init_release_manifest();
+  init_server_instructions();
   init_dashboard_contract();
   init_response_builder();
   REMOTE_SEARCH_TOOL = {

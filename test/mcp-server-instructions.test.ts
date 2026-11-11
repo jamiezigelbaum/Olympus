@@ -6,9 +6,10 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { defaultConfig } from '../src/core/config.ts';
 import { createOlympusMcpServer } from '../src/mcp/server.ts';
-import { OLYMPUS_SERVER_INSTRUCTIONS } from '../src/mcp/server-instructions.ts';
+import { OLYMPUS_SEARCH_WORDS, OLYMPUS_SERVER_INSTRUCTIONS, withOlympusSearchWords } from '../src/mcp/server-instructions.ts';
 import { createChatGptDirectoryMcpServer } from '../src/workers/chatgpt/directory-surface.ts';
-import { createChatGptMcpServer } from '../src/workers/chatgpt/mcp-surface.ts';
+import { createChatGptMcpServer, listChatGptTools } from '../src/workers/chatgpt/mcp-surface.ts';
+import { REMOTE_SEARCH_TOOL, remoteSearchExtension } from '../src/workers/remote-search.ts';
 import { createInProcessOperationContext } from '../src/workers/remote-mcp.ts';
 
 const view = { dashboardView: async () => ({ sources: [] }) as never };
@@ -34,5 +35,25 @@ describe('MCP server instructions', () => {
   test('ChatGPT\'s surface and the directory path send none', async () => {
     expect(await instructions(createChatGptMcpServer(ctx, view))).toBeUndefined();
     expect(await instructions(createChatGptDirectoryMcpServer(ctx, view))).toBeUndefined();
+  });
+
+  test('Claude\'s tool listing starts each model-visible description with the words a search for Olympus would use', () => {
+    const claude = listChatGptTools(ctx(), { appClient: { host: 'claude', connectorUrl: 'https://example.com/mcp' } });
+    const modelVisible = claude.filter((tool) => {
+      const visibility = (tool._meta as { ui?: { visibility?: string[] } } | undefined)?.ui?.visibility;
+      return !visibility || visibility.includes('model');
+    });
+    expect(modelVisible.length).toBeGreaterThan(0);
+    for (const tool of modelVisible) expect(tool.description?.startsWith(`${OLYMPUS_SEARCH_WORDS} `)).toBe(true);
+    for (const tool of claude.filter((one) => !modelVisible.includes(one))) expect(tool.description?.startsWith(OLYMPUS_SEARCH_WORDS)).toBe(false);
+    for (const tool of listChatGptTools(ctx(), {})) expect(tool.description?.startsWith(OLYMPUS_SEARCH_WORDS)).toBe(false);
+  });
+
+  test('the remote surface\'s search and operation tools carry the same words, once', () => {
+    const extension = remoteSearchExtension({ evidenceSearch: async () => ({ evidence: [] }) }, () => 'active');
+    const listed = extension.tools!([{ name: 'source_answer', description: 'Ask.', inputSchema: { type: 'object' } } as never]);
+    expect(listed.map((tool) => tool.name)).toEqual([REMOTE_SEARCH_TOOL.name, 'source_answer']);
+    for (const tool of listed) expect(tool.description?.startsWith(`${OLYMPUS_SEARCH_WORDS} `)).toBe(true);
+    expect(withOlympusSearchWords(listed[0]!).description).toBe(listed[0]!.description);
   });
 });
