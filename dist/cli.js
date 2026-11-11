@@ -76499,6 +76499,8 @@ function fitPackToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOpti
     return selected;
   const seated = restatePack(pack, pack.candidates.filter((candidate) => kept.has(candidate.provenance)), candidateCorpus, gapOwners);
   const minimumPack = restatePack(pack, [...selected.candidates], candidateCorpus, gapOwners);
+  if (analystPromptBytes(minimumPack, analyzeOptions, evidenceFormat) > analystPromptBytes(selected, analyzeOptions, evidenceFormat))
+    return selected;
   return fitPackPassagesToPromptBytes(seated, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats, evidenceFormat, minimumPack);
 }
 function fitPackPassagesToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats = 0, evidenceFormat = "full", minimumPack) {

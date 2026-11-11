@@ -47,6 +47,19 @@ describe('Ask local compact evidence', () => {
     });
   }
 
+  test('a count line longer than the dropped gaps it replaces never pushes the fit over budget', () => {
+    for (const evidenceFormat of ['full', 'compact'] as const) {
+      const { pack, corpusIds } = analystPromptFixture();
+      pack.coverage = { ...pack.coverage, extractionGaps: ['x.'] };
+      const corpora = new Map(pack.candidates.map((candidate, index) => [candidate, corpusIds[index]!]));
+      const owners = new Map([[pack.candidates[23]!.provenance, [0]]]);
+      for (let budget = 12_000; budget <= 13_500; budget += 61) {
+        const fitted = fitPackToPromptBytes(pack, budget, corpora, { localOnly: true }, 2, evidenceFormat, owners);
+        expect(analystPromptBytes(fitted, { localOnly: true }, evidenceFormat)).toBeLessThanOrEqual(budget);
+      }
+    }
+  });
+
   test('a pack that already fits retains all coverage and candidates', () => {
     const { pack, corpusIds } = analystPromptFixture();
     pack.candidates = pack.candidates.slice(0, 2).map((candidate) => ({ ...candidate, chunks: ['Short passage.'] }));

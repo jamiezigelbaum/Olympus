@@ -1065,6 +1065,9 @@ export function fitPackToPromptBytes(
   if (![...gapOwners.values()].some((owner) => !kept.has(owner))) return selected;
   const seated = restatePack(pack, pack.candidates.filter((candidate) => kept.has(candidate.provenance)), candidateCorpus, gapOwners);
   const minimumPack = restatePack(pack, [...selected.candidates], candidateCorpus, gapOwners);
+  // The count line can cost more than the gaps it replaces; then the rewrite
+  // saves nothing, and the first fit stands.
+  if (analystPromptBytes(minimumPack, analyzeOptions, evidenceFormat) > analystPromptBytes(selected, analyzeOptions, evidenceFormat)) return selected;
   // Start from the original passages, so the saved Coverage bytes flow into
   // the existing equal-share computation. The unfitted pack stays untouched.
   return fitPackPassagesToPromptBytes(seated, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats, evidenceFormat, minimumPack);
