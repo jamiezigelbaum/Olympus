@@ -343,8 +343,12 @@ test('backfill turns shrink when slow, regrow when fast, and stand back while an
     let slices = 0;
     const advance = store.backfillVectorDigest.bind(store);
     store.backfillVectorDigest = (model, maxRows) => { slices++; return advance(model, maxRows); };
-    (store as unknown as { scheduleVectorDigestBackfill(model?: string): void }).scheduleVectorDigestBackfill(modelId);
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    const scheduler = store as unknown as { scheduleVectorDigestBackfill(model?: string, delayMs?: number): void };
+    const schedule = scheduler.scheduleVectorDigestBackfill.bind(store);
+    let backoffs = 0;
+    scheduler.scheduleVectorDigestBackfill = (model, delayMs) => { if (delayMs === 250) backoffs++; schedule(model, delayMs); };
+    scheduler.scheduleVectorDigestBackfill(modelId);
+    await waitFor(() => backoffs >= 2);
     expect(slices).toBe(0);
     lanes.vectorLanesInFlight = 0;
     await waitFor(() => vectorDigestState(db, modelId).completed);
