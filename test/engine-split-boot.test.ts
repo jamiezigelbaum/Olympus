@@ -18,7 +18,7 @@ import { readEngineStatusSnapshot } from '../src/workers/engine-split/snapshot.t
 import { engineStatusSnapshotPath } from '../src/workers/engine-split/runtime.ts';
 import { waitFor } from './helpers/test-clock.ts';
 
-const SERVER = join(import.meta.dir, '..', 'src', 'workers', 'email-source', 'server.ts');
+const SERVER = join(import.meta.dir, '..', 'src', 'workers', 'engine', 'server.ts');
 const REPO = join(import.meta.dir, '..');
 const TOKEN = 'engine-split-boot-token';
 

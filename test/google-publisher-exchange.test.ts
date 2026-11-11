@@ -28,7 +28,7 @@ import type { SecretStore } from '../src/core/secret-store.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
 import { DEFAULT_OAUTH_RELAY_URL, googlePublisherExchangeUrl, googlePublisherExchangeRefreshUrl } from '../src/core/oauth-relay.ts';
 import { DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID } from '../src/core/publisher-oauth-client.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import {
   readConnectedHandleRegistry,

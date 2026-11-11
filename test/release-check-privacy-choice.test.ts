@@ -6,7 +6,7 @@ import { saveFreshInstallPrivacyChoice } from '../scripts/release-check/machine-
 import { createPendingPrivacyPolicy, saveFirstRunPrivacyChoice } from '../src/core/first-run-privacy.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset, writeSovereigntyConfigFile } from '../src/core/sovereignty.ts';
 import { recordRequestPeer } from '../src/core/request-peer.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER, DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER, withWorkerBearerAuth } from '../src/workers/http.ts';
 
 const cleanup: Array<() => void> = [];

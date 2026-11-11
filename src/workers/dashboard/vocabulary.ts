@@ -1182,6 +1182,8 @@ export interface DashboardWorkingSummary {
    * they finish the stage without ever counting as read.
    */
   unreadable_items?: number;
+  // In-scope items whose kind has no reader yet.
+  unsupported_kind_items?: number;
   /** Percent of in-scope files whose text is extracted, 0..100. */
   read_percent: number;
   /**
@@ -1191,8 +1193,8 @@ export interface DashboardWorkingSummary {
    */
   searchable_percent?: number;
   /**
-   * True when every in-scope file is read AND parity is met, so the headline
-   * may say so outright.
+   * True when every in-scope file is read or accounted for as unreadable or
+   * unsupported, and parity is met.
    */
   fully_working: boolean;
 }
@@ -1215,6 +1217,8 @@ export function dashboardWorkingSummary(
   const read = Math.max(0, Math.min(inScope, source.coverage.content_ready_items));
   const readPercent = clampPercent((read / inScope) * 100);
   const unreadable = Math.max(0, Math.min(inScope - read, Math.trunc(source.coverage.unreadable_items ?? 0)));
+  const unsupportedKind = Math.max(0, Math.min(inScope - read - unreadable,
+    Math.trunc(source.coverage.unsupported_kind_items ?? 0)));
   const backlog = source.embedding_backlog;
   // Parity counts chunks, so it can only ever qualify the headline — never
   // become it. `chunks` is documented as always > 0 where a backlog exists.
@@ -1228,9 +1232,10 @@ export function dashboardWorkingSummary(
     in_scope_items: inScope,
     read_items: read,
     ...(unreadable > 0 ? { unreadable_items: unreadable } : {}),
+    ...(unsupportedKind > 0 ? { unsupported_kind_items: unsupportedKind } : {}),
     read_percent: readPercent,
     ...(searchablePercent !== undefined ? { searchable_percent: searchablePercent } : {}),
-    fully_working: read + unreadable >= inScope && !parityShort,
+    fully_working: read + unreadable + unsupportedKind >= inScope && !parityShort,
   };
 }
 
@@ -1244,10 +1249,12 @@ export function dashboardWorkingSummary(
 export function dashboardWorkingHeadline(summary: DashboardWorkingSummary): string {
   if (summary.fully_working) {
     const unreadable = summary.unreadable_items ?? 0;
-    if (unreadable > 0) {
+    const unsupportedKind = summary.unsupported_kind_items ?? 0;
+    if (unreadable > 0 || unsupportedKind > 0) {
       return `everything readable is working — ${dashboardCount(summary.read_items)} of`
         + ` ${dashboardCount(summary.in_scope_items)} ${plural(summary.in_scope_items, 'file')}`
-        + ` · ${dashboardCount(unreadable)} can't be read`;
+        + (unreadable > 0 ? ` · ${dashboardCount(unreadable)} can't be read` : '')
+        + (unsupportedKind > 0 ? ` · ${dashboardCount(unsupportedKind)} of kinds Olympus can't read yet` : '');
     }
     return `everything in scope is working — ${dashboardCount(summary.in_scope_items)}`
       + ` ${plural(summary.in_scope_items, 'file')}`;
@@ -1278,12 +1285,13 @@ function freshLine(source: DashboardSourceCard, now: Date): string {
   // Imports are read once, never synced: the line says how many are held.
   if (source.connection.action.kind === 'archive_import') return source.connection.label;
   const unreadable = dashboardUnreadablePhrase(source);
+  const unsupportedKind = dashboardUnsupportedKindPhrase(source);
   // The owner's own Sync now press, while it is the latest word, says what it
   // found in place of the bare sync time.
   const manual = dashboardManualSyncLine(source, now);
   const capture = dashboardCaptureClause(source);
   const pass = dashboardLivePassClause(source);
-  const tail = [pass, unreadable, capture].filter((part): part is string => !!part).join(' · ');
+  const tail = [pass, unreadable, unsupportedKind, capture].filter((part): part is string => !!part).join(' · ');
   if (manual) return tail ? `${manual} · ${tail}` : manual;
   const hours = source.freshness.hours;
   if (typeof hours !== 'number' || !Number.isFinite(hours)) return tail;
@@ -1362,6 +1370,12 @@ function itemsPhrase(source: Pick<DashboardSourceCard, 'family'>, count: number,
 export function dashboardUnreadablePhrase(source: DashboardSourceCard): string | undefined {
   const count = Math.max(0, Math.trunc(source.coverage.unreadable_items ?? 0));
   return count > 0 ? `${itemsPhrase(source, count)} can't be read` : undefined;
+}
+
+// Counts only: a missing reader is never a pause or a request for help.
+export function dashboardUnsupportedKindPhrase(source: DashboardSourceCard): string | undefined {
+  const count = Math.max(0, Math.trunc(source.coverage.unsupported_kind_items ?? 0));
+  return count > 0 ? `${itemsPhrase(source, count)} of kinds Olympus can't read yet` : undefined;
 }
 
 /** A finished phase that left some files unread for good: "Done · 252 read · 2 can't be read". */
@@ -2323,6 +2337,7 @@ export const DASHBOARD_ARCHIVE_COPY = {
   notRunningLine: '{percent}% read · {items} so far. It goes on from there once imports can run.',
   notRunningLineUncounted: '{percent}% read. It goes on from there once imports can run.',
   removingNotRunningLine: 'It is removed once removals can run. The file itself stays where it is.',
+  counting: 'Counting what this archive holds…',
   judgedLine: '{judged} judged · {held} waiting for the private model',
   heldWhy: {
     ready: 'Until the private model judges them, they stay Private.',

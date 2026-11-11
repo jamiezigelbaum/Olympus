@@ -21,7 +21,7 @@
  *   staging copy that an import still reads is kept (`sweep` is told which);
  *   one nothing reads is deleted.
  *
- * The route layer (email-source/index.ts) owns authentication: only the
+ * The route layer (engine/index.ts) owns authentication: only the
  * dashboard's local-grade control session reaches this.
  */
 import { randomBytes } from 'node:crypto';

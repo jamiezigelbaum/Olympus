@@ -41,7 +41,7 @@ import { pathPrefixMatches } from '../src/core/location-rules.ts';
 import { createChatGptSetupBackend, readChatGptPrivacySettings } from '../src/workers/chatgpt/setup-backend.ts';
 import { writePrivacyProfile } from '../src/workers/classification/privacy-profile.ts';
 import { SetupBackendError, type ChatGptSetupBackend } from '../src/workers/chatgpt/setup-tools.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { createInProcessOperationContext, createRemoteMcpHandler } from '../src/workers/remote-mcp.ts';
 import type { SourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
 

@@ -101,7 +101,7 @@ describe('change risk', () => {
     // product behavior; a path-only classifier must see it.
     const trustRouting = [
       'docs/TRUST_MODEL.md',
-      'src/workers/email-source/server.ts',
+      'src/workers/engine/server.ts',
       'src/workers/source-index/analyst-answer.ts',
       'src/workers/source-index/analyst-pool.ts',
     ];

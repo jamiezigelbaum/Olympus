@@ -3,7 +3,7 @@ import { writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import {
   createDropboxConnectorStoreEvalShardSource,
   createDropboxEvalShardExportHandler,

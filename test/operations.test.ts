@@ -10,7 +10,7 @@ import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import { buildEnvBridgeSovereigntyConfig } from '../src/core/sovereignty.ts';
 import { operations, operationDescription, operationToolSchema } from '../src/core/operations.ts';
 import type { OperationContext } from '../src/core/operations.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 
 type DoctorRun = { result: { ok: boolean; checks: Array<{ name: string; ok: boolean; detail?: string }> }; profiles: unknown[] };

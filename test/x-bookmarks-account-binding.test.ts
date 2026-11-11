@@ -24,11 +24,11 @@ import {
   type CredentialBroker,
   type CredentialOAuth2StateStore,
 } from '../src/workers/credential-broker/index.ts';
-import { EmailSourceWorkerError } from '../src/workers/email-source/index.ts';
+import { EmailSourceWorkerError } from '../src/workers/engine/index.ts';
 import {
   accountCheckedXBookmarksRuntime,
   type XBookmarksConnectorStoreRuntime,
-} from '../src/workers/email-source/server.ts';
+} from '../src/workers/engine/server.ts';
 import {
   createExclusiveRunner,
   createSourceAccountGuard,

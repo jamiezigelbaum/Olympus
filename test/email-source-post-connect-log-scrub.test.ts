@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine } from '../src/core/sovereignty.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import type { ReadwiseConnectorStoreSyncHandler } from '../src/workers/readwise/index.ts';
 
 const PROVIDER_BODY_ECHO = 'Token abcdefghijklmnopqrstuvwxyz0123456789';

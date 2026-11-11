@@ -696,8 +696,8 @@ describe('architecture guard: capability, not per-source/per-question code', () 
     expect(owners).toEqual([LEGACY_TELEGRAM_INPUT_ALIAS_OWNER]);
 
     const workerSurface = [
-      'src/workers/email-source/index.ts',
-      'src/workers/email-source/server.ts',
+      'src/workers/engine/index.ts',
+      'src/workers/engine/server.ts',
       'src/workers/source-index/status.ts',
       'src/workers/telegram-messages/corpus-adapter.ts',
     ].map(read).join('\n');
@@ -961,7 +961,7 @@ describe('architecture guard: capability, not per-source/per-question code', () 
   });
 
   test('Dropbox product assembly uses the canonical store for writes and reads', () => {
-    const server = read('src/workers/email-source/server.ts');
+    const server = read('src/workers/engine/server.ts');
     expect(server).not.toContain('sourceReadAuthorities');
     expect(server).not.toContain('dropboxLegacyIndexLaneEnabled(process.env)');
     expect(server).toContain('const readConnectorStores = connectorStores;');
@@ -981,7 +981,7 @@ describe('architecture guard: capability, not per-source/per-question code', () 
   });
 
   test('Gmail product assembly is provider-native and has no legacy read selector', () => {
-    const server = read('src/workers/email-source/server.ts');
+    const server = read('src/workers/engine/server.ts');
     expect(server).not.toContain("sourceReadAuthorities.gmail");
     expect(server).not.toContain('OLYMPUS_SOURCE_INDEX_GMAIL_READ_AUTHORITY');
     expect(server).toContain('createGmailConnectorStoreSyncHandler({');
@@ -989,7 +989,7 @@ describe('architecture guard: capability, not per-source/per-question code', () 
   });
 
   test('product worker assembly cannot construct or register a bespoke source index', () => {
-    const server = read('src/workers/email-source/server.ts');
+    const server = read('src/workers/engine/server.ts');
     const mainStart = server.indexOf('export async function main()');
     const mainEnd = server.indexOf('export function resolveEmailSourceBindHostFromEnv', mainStart);
     expect(mainStart).toBeGreaterThanOrEqual(0);

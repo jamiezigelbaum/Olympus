@@ -15,7 +15,7 @@ import { chmodSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { accountFolder, accountStorePath, olympusDataRoot, sharedDataPath, type LayoutEnv } from '../../src/core/olympus-layout.ts';
 import { readSourceRegistry, sourceAccountMovePending, type SourceRegistryAccount } from '../../src/core/source-registry.ts';
-import { snapshotPrefilterDatabase } from '../../src/workers/classification/prefilter-training-dry-run.ts';
+import { snapshotDatabase } from './snapshot-database.ts';
 import { snifferInjectionRule, snifferMaterialForModel, snifferOwnMaterial } from '../../src/workers/classification/sniffer.ts';
 import { tierLedgerPathForStore, tierSnifferPathForStore } from '../../src/workers/classification/tier-ledger-path.ts';
 import { SNIFFER_EXCERPT_MAX_CHARS } from '../../src/workers/classification/tier-classifier.ts';
@@ -445,7 +445,7 @@ export function snapshotInstall(dest: string, env: LayoutEnv = process.env): { a
   let skippedAccounts = 0;
   const copy = (from: string, to: string) => {
     if (!existsSync(from)) return;
-    snapshotPrefilterDatabase(from, to, () => {});
+    snapshotDatabase(from, to, () => {});
     const db = new Database(to);
     try {
       db.exec('PRAGMA journal_mode = DELETE');

@@ -16,7 +16,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { secretLocationsPathForStore, tierLedgerPathForStore, tierSnifferPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { accountStorePath, legacyAccountFiles, olympusDataRoot } from '../src/core/olympus-layout.ts';
 import {

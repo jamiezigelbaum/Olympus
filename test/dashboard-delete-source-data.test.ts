@@ -19,7 +19,7 @@ import {
   treeDigest,
   writeBackAfterDelete,
 } from './helpers/forget-seeds.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { writeConnectedHandleRegistry, type ConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
 import { pinMessagingLegacy } from './fixtures/legacy-messaging-registry.ts';
 

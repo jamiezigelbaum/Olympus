@@ -8,7 +8,7 @@ import {
   UPDATE_MAX_BYTES, UPDATE_TIMEOUT_MS,
 } from '../src/core/update-check.ts';
 import { renderComputerHostPage } from '../src/workers/dashboard/host-page.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { engineStatusReport } from '../src/core/engine-cli.ts';
 
 const fetcher = (body: string, status = 200) => (async () => new Response(body, { status })) as unknown as typeof fetch;

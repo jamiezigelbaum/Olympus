@@ -14,7 +14,7 @@ import { V0_4_PUBLIC_DASHBOARD_ROUTES, V0_4_PUBLIC_REMOTE_MCP_TOOLS } from '../s
 import { ownerLocalMint } from './helpers/owner-local-mint.ts';
 import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine } from '../src/core/sovereignty.ts';
 import type { OwnerTierItems, OwnerTierItemFindInput, OwnerTierItemSetInput } from '../src/workers/classification/tier-owner-items.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import {
   DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER,
   DASHBOARD_PRIVACY_ITEM_PATHS,

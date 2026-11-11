@@ -5,6 +5,8 @@ Status: design, 2026-11-10. Lane 1 of the 1.5 plan. Code baseline: main
 42815695294, 2026-11-10) requested changes; they are folded in below and
 listed under "Review findings and how they are handled".
 
+2026-11-11: embedding pre-filter removed; it could not save 15% of judge calls at zero owner-label Private misses (#1025).
+
 ## The problem in one paragraph
 
 The worker runs HTTP (dashboard, approvals, pairing, remote surfaces, Ask
@@ -271,7 +273,7 @@ either kept front-owned or becomes one command.
 ## Writes the front still needs
 
 From an inventory of the request handlers on main `b649295` (handler
-bodies are in `src/workers/email-source/index.ts`; route sets in
+bodies are in `src/workers/engine/index.ts`; route sets in
 `src/workers/http.ts:600-720`). No request handler calls the sniffer or
 the tier-move code directly, and no answer path writes a verdict or a
 ledger. What the front does write falls into four kinds.

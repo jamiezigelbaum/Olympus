@@ -396,7 +396,7 @@ describe('the account guard', () => {
       await withSweep[0]!.tasks[1]!.run();
       expect(swept).toBe(1);
       // The worker applies the guards after the sweep is attached.
-      const server = readFileSync(new URL('../src/workers/email-source/server.ts', import.meta.url), 'utf8');
+      const server = readFileSync(new URL('../src/workers/engine/server.ts', import.meta.url), 'utf8');
       expect(server).toContain('guardAccountBoundLanes(sweptSources, laneGuards)');
       expect(server).not.toContain('accountBoundSchedulerSource(');
     } finally {

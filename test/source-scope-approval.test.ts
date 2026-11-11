@@ -31,7 +31,7 @@ import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import { GoogleDriveSourceConnector } from '../src/workers/google-connectors/drive.ts';
 import { createGoogleDriveConnectorStoreSyncHandler } from '../src/workers/google-connectors/drive-live-sync.ts';
 import { createDropboxProviderStoreSyncHandler } from '../src/workers/dropbox-files/provider-store-sync.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { SourceScheduler } from '../src/workers/source-scheduler.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { dropboxTestTierSet } from './helpers/lane-tier-sets.ts';

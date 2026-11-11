@@ -27,7 +27,7 @@ import {
 } from '../src/core/remote-access-config.ts';
 import { parseRemotePublicBaseUrl } from '../src/core/remote-public-url.ts';
 import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import {
   AGENT_MINT_LIMIT,
   REMOTE_ACCESS_TOGGLE_LIMIT,
