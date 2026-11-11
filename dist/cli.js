@@ -21094,6 +21094,23 @@ function tierSnifferInputHash(pass, signals, text2, parentContext) {
     ...context2 ? [context2] : []
   ])).digest("hex");
 }
+function namesInputReason(signals, parentContext) {
+  const keys = NAMES_INPUT_KEYS.filter((key2) => {
+    const value = signals[key2];
+    return Array.isArray(value) ? value.length > 0 : value !== undefined;
+  });
+  return `${NAMES_INPUT_REASON_PREFIX}${keys.join(",")}:${tierSnifferInputHash("metadata", signals, undefined, parentContext)}`;
+}
+function namesInputCovered(reasons, signals, parentContext) {
+  const receipts = reasons.filter((reason) => reason.startsWith(NAMES_INPUT_REASON_PREFIX));
+  return receipts.length > 0 && receipts.every((reason) => {
+    const keys = reason.slice(NAMES_INPUT_REASON_PREFIX.length).split(":")[0].split(",").filter(Boolean);
+    if (keys.some((key2) => !NAMES_INPUT_KEYS.some((known) => known === key2)))
+      return false;
+    const original = Object.fromEntries(keys.map((key2) => [key2, signals[key2]]));
+    return namesInputReason(original, parentContext) === reason;
+  });
+}
 function itemHasNonTextContent(item) {
   if (item.metadata.textComplete !== true || item.content.kind !== "text" || item.deferredBytes || item.identity.parent || item.identity.providerFileId || !textOnlyMime(item.mimeType))
     return true;
@@ -21134,6 +21151,8 @@ function withPublicRetired(decision) {
 }
 function classifyItemTiers(input, options = {}) {
   const decision = classifyItemTiersWithPublic(input, options);
+  if (decision.contentTier !== "secrets")
+    decision.reasons.push(namesInputReason(input.signals, input.parentContext));
   if (input.text !== undefined && decision.contentTier !== "secrets") {
     if (input.hasNonTextContent !== true && textOnlyMime(input.mimeType))
       decision.reasons.push("content:text_only");
@@ -21682,7 +21701,7 @@ function slug(value) {
   return SLUG.test(value) ? value : "invalid";
 }
 var CONTENT_NAMES_ONLY_REASON = "content:names_only", CONTENT_NAMES_ONLY_LIFTED_REASON = "content:names_only_lifted", TIER_CLASSIFIER_VERSION = "2026-10-29.p8", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, HELD_UNTIL_JUDGED_PRIORITY = -1, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", HELD_UNTIL_JUDGED_REASON = "content:held_until_judged", PARENT_CONTEXT_MARKER = `
-Parent names (context only): `, PARENT_CONTEXT_MAX_CHARS = 200, IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", IMAGE_TEXT_DECIDES_REASON_PREFIX = "content:image_text_decides:", IMAGE_TEXT_DECIDES_MIN_WORDS = 8, PUBLIC_RETIRED_REASON = "tier:public_retired", RETIRED_SOURCE_PRIOR_REASON = "metadata:prior:source_", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
+Parent names (context only): `, PARENT_CONTEXT_MAX_CHARS = 200, NAMES_INPUT_REASON_PREFIX = "metadata:names_input:", NAMES_INPUT_KEYS, IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", IMAGE_TEXT_DECIDES_REASON_PREFIX = "content:image_text_decides:", IMAGE_TEXT_DECIDES_MIN_WORDS = 8, PUBLIC_RETIRED_REASON = "tier:public_retired", RETIRED_SOURCE_PRIOR_REASON = "metadata:prior:source_", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
 var init_tier_classifier = __esm(() => {
   init_secret_patterns();
   init_secret_patterns();
@@ -21699,6 +21718,7 @@ var init_tier_classifier = __esm(() => {
     id: "undecided",
     judge: () => ({ verdict: "undecided" })
   });
+  NAMES_INPUT_KEYS = ["title", "path", "folderKeys", "labels", "sender"];
   SLUG = /^[a-z0-9][a-z0-9_.:-]{0,95}$/i;
 });
 
@@ -71226,7 +71246,7 @@ function rejudgeMetadata(record, sniffer, names, subject, holdUntilJudged = fals
     ...names.sender ? { sender: names.sender } : {},
     folderKeys: names.folderKeys
   };
-  const fresh = classifyItemTiers({ signals, namesOnly: true });
+  const fresh = classifyItemTiers({ signals, namesOnly: true, ...parentContext ? { parentContext } : {} });
   if (recheck && recheck.rules.length > 0) {
     const ruled = classifyItemTiers({ signals, namesOnly: true, provider: subject.provider }, { rules: recheck.rules });
     if (ruled.metadataForced || namesDecidedByOwner(ruled.reasons))
@@ -71234,8 +71254,8 @@ function rejudgeMetadata(record, sniffer, names, subject, holdUntilJudged = fals
   }
   const providerReasons = previous.reasons.filter((reason) => /^metadata:(floor|prior):/.test(reason) && !reason.startsWith(RETIRED_SOURCE_PRIOR_REASON));
   const fromStoredNames = record.reasons.includes(STORED_NAMES_REASON);
-  const ownerRecheck = recheck !== undefined && providerReasons.length === 0;
-  const baseline = retiredPrior || fromStoredNames || ownerRecheck ? fresh.metadataTier : maxTier(fresh.metadataTier, record.metadataTier);
+  const mayLower = retiredPrior || (recheck !== undefined ? providerReasons.length === 0 && namesInputCovered(record.reasons, signals, parentContext) : fromStoredNames);
+  const baseline = mayLower ? fresh.metadataTier : maxTier(fresh.metadataTier, record.metadataTier);
   if (baseline === "secrets")
     return { ...previous, metadataTier: baseline, metadataPending: false, reasons: fresh.reasons };
   const material = [names.title, names.path, ...snifferFolderKeyNames(names.folderKeys), names.sender].filter(Boolean).join(" | ").slice(0, SNIFFER_NAMES_MAX_CHARS);
@@ -71256,7 +71276,8 @@ function rejudgeMetadata(record, sniffer, names, subject, holdUntilJudged = fals
     metadataFlagged: pending || fresh.metadataFlagged,
     metadataPending: pending,
     reasons: [
-      ...fresh.reasons.filter((reason) => reason.startsWith("metadata:") && !reason.startsWith("metadata:sniffer:") && !reason.startsWith("metadata:possibly_private:")),
+      ...fresh.reasons.filter((reason) => reason.startsWith("metadata:") && !reason.startsWith("metadata:sniffer:") && !reason.startsWith("metadata:possibly_private:") && (mayLower || !reason.startsWith(NAMES_INPUT_REASON_PREFIX))),
+      ...!mayLower ? record.reasons.filter((reason) => reason.startsWith(NAMES_INPUT_REASON_PREFIX)) : [],
       ...providerReasons,
       `metadata:sniffer:${sniffer.id}:${pending ? "undecided" : verdict.code}`,
       ...pending ? [STORED_NAMES_ASKED_REASON] : metadataTier !== baseline ? [STORED_NAMES_REASON] : []

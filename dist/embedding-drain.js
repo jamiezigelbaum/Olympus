@@ -15290,6 +15290,15 @@ function tierSnifferInputHash(pass, signals, text2, parentContext) {
     ...context2 ? [context2] : []
   ])).digest("hex");
 }
+var NAMES_INPUT_REASON_PREFIX = "metadata:names_input:";
+var NAMES_INPUT_KEYS = ["title", "path", "folderKeys", "labels", "sender"];
+function namesInputReason(signals, parentContext) {
+  const keys = NAMES_INPUT_KEYS.filter((key2) => {
+    const value = signals[key2];
+    return Array.isArray(value) ? value.length > 0 : value !== undefined;
+  });
+  return `${NAMES_INPUT_REASON_PREFIX}${keys.join(",")}:${tierSnifferInputHash("metadata", signals, undefined, parentContext)}`;
+}
 function itemHasNonTextContent(item) {
   if (item.metadata.textComplete !== true || item.content.kind !== "text" || item.deferredBytes || item.identity.parent || item.identity.providerFileId || !textOnlyMime(item.mimeType))
     return true;
@@ -15336,6 +15345,8 @@ function withPublicRetired(decision) {
 }
 function classifyItemTiers(input, options = {}) {
   const decision = classifyItemTiersWithPublic(input, options);
+  if (decision.contentTier !== "secrets")
+    decision.reasons.push(namesInputReason(input.signals, input.parentContext));
   if (input.text !== undefined && decision.contentTier !== "secrets") {
     if (input.hasNonTextContent !== true && textOnlyMime(input.mimeType))
       decision.reasons.push("content:text_only");

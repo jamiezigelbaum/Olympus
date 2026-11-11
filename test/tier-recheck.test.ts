@@ -3,7 +3,7 @@
 // a tier for the chat. Owner overrides and owner rules still win.
 
 import { afterEach, expect, test } from 'bun:test';
-import { classifyItemTiers, type OwnerTierRule, type TierSnifferRequest } from '../src/workers/classification/tier-classifier.ts';
+import { classifyItemTiers, namesInputCovered, NAMES_INPUT_REASON_PREFIX, type OwnerTierRule, type TierSnifferRequest } from '../src/workers/classification/tier-classifier.ts';
 import { emptyTierRejudgeReport, rejudgeRoutedItems, rejudgeStoredContent } from '../src/workers/connector-store/tier-rejudge.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { runTierRecheck } from '../src/workers/classification/tier-cli.ts';
@@ -22,7 +22,7 @@ const personal = {
 };
 
 /** Two messages of one chat, held Private by an old build's names verdict (the 1.2.1 test-omarchy rows). */
-async function stuckChat(rules: readonly OwnerTierRule[] = []) {
+async function stuckChat(rules: readonly OwnerTierRule[] = [], tier: 'private' | 'secure' = 'secure') {
   const tmp = tempDir();
   const f = openTierFixture(tmp.dir, { embed: false });
   cleanup.push(() => { f.close(); tmp.cleanup(); });
@@ -31,10 +31,12 @@ async function stuckChat(rules: readonly OwnerTierRule[] = []) {
     { fetchContent: true, placement: FIXTURE_PLACEMENT });
   for (const id of ids) {
     const identity = identityOf(id, CHAT);
-    await moveTieredItem({ set: f.set, identity, target: { metadataTier: 'secure', contentTier: 'secure' } });
-    const decision = { ...classifyItemTiers({ signals: { title: 'Tiago Ferreira' }, text }),
-      metadataTier: 'secure' as const, contentTier: 'secure' as const,
-      reasons: ['metadata:sniffer:old-build:identity', 'content:no_raise'],
+    if (tier === 'secure') await moveTieredItem({ set: f.set, identity, target: { metadataTier: tier, contentTier: tier } });
+    const original = classifyItemTiers({ signals: { title: 'Tiago Ferreira', path: '/Files/Tiago Ferreira' }, text });
+    const decision = { ...original,
+      metadataTier: tier, contentTier: tier,
+      reasons: [...original.reasons.filter(reason => reason.startsWith(NAMES_INPUT_REASON_PREFIX)),
+        'metadata:sniffer:old-build:identity', 'content:no_raise'],
     };
     f.ledger.recordRoutedPlacement(identity, decision, f.set.placementFor(decision));
   }
@@ -61,6 +63,76 @@ test('a re-check of the chat lowers an item stuck Private to Personal when its c
   // The request is done: the next pass does not re-check the chat again.
   expect(f.ledger.recheckRequests()).toEqual([]);
   expect(rejudgeRoutedItems({ set: f.set, autoMoves: true }).report.rechecked).toBe(0);
+});
+
+for (const queued of [false, true])
+test(`an owner re-check keeps a label-based names verdict Private across repeated checks (queued=${queued})`, async () => {
+  const { f, first } = await stuckChat();
+  const original = classifyItemTiers({
+    signals: { title: 'Tiago Ferreira', path: '/Files/Tiago Ferreira', labels: ['SSN 123-45-6789'] }, text,
+  }, { sniffer: { id: 'old-build', judge: request => {
+    expect(request.material).toContain('SSN 123-45-6789');
+    return { verdict: 'decided', tier: 'secure', code: 'identity' };
+  } } });
+  expect(original.metadataTier).toBe('secure');
+  f.ledger.recordRoutedPlacement(first, original, f.set.placementFor(original));
+  if (queued) f.set.classification = () => ({ sniffer: { id: personal.id, judge: request => request.pass === 'metadata'
+    ? { verdict: 'undecided', queued: true } : personal.judge(request) } });
+  for (let pass = 0; pass < 2; pass++) {
+    f.ledger.requestRecheck({ conversationKey: CHAT });
+    const { report } = rejudgeRoutedItems({ set: f.set, autoMoves: true });
+    expect(report.failed).toBe(0);
+    expect(report.rechecked).toBeGreaterThan(0);
+    if (queued) {
+      expect(f.ledger.rejudgeQuestion(first)?.decision.metadataTier).toBe('secure');
+      f.ledger.applySnifferVerdict(first, { pass: 'metadata', tier: 'private', reason: `metadata:sniffer:${personal.id}:ordinary`, modelId: 'fixture' },
+        { placementFor: f.set.placementFor.bind(f.set) });
+    }
+    expect(f.ledger.getCurrent(first)).toMatchObject({ state: 'current', metadataTier: 'secure', contentTier: 'secure' });
+    expect(f.ledger.getCurrent(first)!.reasons.filter(reason => reason.startsWith(NAMES_INPUT_REASON_PREFIX)))
+      .toEqual(original.reasons.filter(reason => reason.startsWith(NAMES_INPUT_REASON_PREFIX)));
+    expect(f.stores.internal!.localContent(fixtureLocalId({ id: 'first', conversation: CHAT }))).toBeUndefined();
+  }
+});
+
+test('names input receipts accept additional stored names but reject missing, changed or unknown input', () => {
+  const signals = { title: 'Record', path: '/Files/Record' };
+  const { reasons } = classifyItemTiers({ signals: { ...signals, labels: [] }, namesOnly: true });
+  expect(namesInputCovered(reasons, { ...signals, folderKeys: [CHAT] })).toBe(true);
+  expect(namesInputCovered(reasons, { title: signals.title })).toBe(false);
+  expect(namesInputCovered(reasons, { ...signals, title: 'Renamed' })).toBe(false);
+  expect(namesInputCovered(reasons, signals, 'Different parent context')).toBe(false);
+  expect(namesInputCovered([`${NAMES_INPUT_REASON_PREFIX}unknown:invalid`], signals)).toBe(false);
+});
+
+test('an owner re-check fails safe when the old names decision has no input receipt', async () => {
+  const { f, first } = await stuckChat();
+  const original = f.ledger.getCurrent(first)!;
+  const legacy = { ...original, state: 'current' as const, snifferId: 'old-build', decidedBy: 'sniffer' as const,
+    reasons: original.reasons.filter(reason => !reason.startsWith(NAMES_INPUT_REASON_PREFIX)) };
+  f.ledger.recordRoutedPlacement(first, legacy, f.set.placementFor(legacy));
+  for (let pass = 0; pass < 2; pass++) {
+    f.ledger.requestRecheck({ conversationKey: CHAT });
+    rejudgeRoutedItems({ set: f.set, autoMoves: true });
+    expect(f.ledger.getCurrent(first)).toMatchObject({ state: 'current', metadataTier: 'secure', contentTier: 'secure' });
+    expect(f.ledger.getCurrent(first)!.reasons.some(reason => reason.startsWith(NAMES_INPUT_REASON_PREFIX))).toBe(false);
+  }
+});
+
+test('an owner re-check still raises names even without an old input receipt', async () => {
+  const { f, first } = await stuckChat([], 'private');
+  const original = f.ledger.getCurrent(first)!;
+  const personalDecision = { ...original, state: 'current' as const, snifferId: 'old-build', decidedBy: 'sniffer' as const,
+    metadataTier: 'private' as const, contentTier: 'private' as const,
+    reasons: ['metadata:sniffer:old-build:ordinary', 'content:no_raise'] };
+  f.ledger.recordRoutedPlacement(first, personalDecision, f.set.placementFor(personalDecision));
+  f.set.classification = () => ({ sniffer: { id: 'new-build', judge: request => ({
+    verdict: 'decided', tier: request.pass === 'metadata' ? 'secure' : 'private', code: 'identity',
+  }) } });
+  f.ledger.requestRecheck({ conversationKey: CHAT });
+  expect(rejudgeRoutedItems({ set: f.set, autoMoves: true }).report.failed).toBe(0);
+  expect(f.ledger.getCurrent(first)).toMatchObject({ state: 'moving', targetMetadataTier: 'secure', targetContentTier: 'secure' });
+  expect(f.stores.internal!.localContent(fixtureLocalId({ id: 'first', conversation: CHAT }))).toBeUndefined();
 });
 
 test('an owner override on one item of the chat survives the re-check', async () => {

@@ -386,6 +386,31 @@ export function tierSnifferInputHash(
   ])).digest('hex');
 }
 
+export const NAMES_INPUT_REASON_PREFIX = 'metadata:names_input:';
+const NAMES_INPUT_KEYS = ['title', 'path', 'folderKeys', 'labels', 'sender'] as const;
+
+/** Content-free receipt of the names read, in existing reasons (no schema change).
+ * Keep the signal kinds so a stored copy with additional names can still cover
+ * the original input. The digest also binds their values and parent context. */
+export function namesInputReason(signals: SourceClassificationSignals, parentContext?: string): string {
+  const keys = NAMES_INPUT_KEYS.filter(key => {
+    const value = signals[key];
+    return Array.isArray(value) ? value.length > 0 : value !== undefined;
+  });
+  return `${NAMES_INPUT_REASON_PREFIX}${keys.join(',')}:${tierSnifferInputHash('metadata', signals, undefined, parentContext)}`;
+}
+
+/** Missing/unknown receipts cannot authorize lowering from a partial copy. */
+export function namesInputCovered(reasons: readonly string[], signals: SourceClassificationSignals, parentContext?: string): boolean {
+  const receipts = reasons.filter(reason => reason.startsWith(NAMES_INPUT_REASON_PREFIX));
+  return receipts.length > 0 && receipts.every(reason => {
+    const keys = reason.slice(NAMES_INPUT_REASON_PREFIX.length).split(':')[0]!.split(',').filter(Boolean);
+    if (keys.some(key => !NAMES_INPUT_KEYS.some(known => known === key))) return false;
+    const original = Object.fromEntries(keys.map(key => [key, signals[key as typeof NAMES_INPUT_KEYS[number]]]));
+    return namesInputReason(original, parentContext) === reason;
+  });
+}
+
 /** Conservative capability check; no source identities or group privacy decisions. */
 export function itemHasNonTextContent(item: RawItem): boolean {
   if (item.metadata.textComplete !== true || item.content.kind !== 'text' || item.deferredBytes || item.identity.parent
@@ -610,6 +635,7 @@ export function classifyItemTiers(
   options: TierClassificationOptions = {},
 ): TierDecision {
   const decision = classifyItemTiersWithPublic(input, options);
+  if (decision.contentTier !== 'secrets') decision.reasons.push(namesInputReason(input.signals, input.parentContext));
   if (input.text !== undefined && decision.contentTier !== 'secrets') {
     if (input.hasNonTextContent !== true && textOnlyMime(input.mimeType)) decision.reasons.push('content:text_only');
     decision.reasons.push(contentDigestReason(input.text), contentNamesReason(input.signals, input.parentContext));
