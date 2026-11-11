@@ -50,7 +50,7 @@ export interface SourceAnswerTracePoolReads {
   refused: number;
   // Still waiting for a thread at the deadline.
   dropped_queued: number;
-  // Still running at the deadline (its thread terminated) or back too late.
+  // Still running at the deadline (result abandoned) or back too late.
   past_deadline_running: number;
   errors: number;
 }

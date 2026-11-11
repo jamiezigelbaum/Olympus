@@ -1,45 +1,19 @@
-// Read-only SQLite queries run on a small pool of threads, over the store's own file.
+// Read-only SQLite work uses one warm Bun Worker per open store (#1305).
+// Search statements and status snapshots share that store's executor. Its
+// connection stays open until releaseOffThreadReads: subsequent Asks do not
+// repeatedly pay a cold store open. Inline worker source also works in the CLI.
 //
-// A connector store's status counts are passes over the whole store, and on
-// the main thread each one held every request behind it: a third of the
-// worker's freeze time on Sparta (#870, 2026-11-05), even read once every five
-// minutes. The main thread still decides WHAT to count (the scope SQL and the
-// hidden and held lists); this only runs the finished queries elsewhere, so
-// the counts are the same SQL either way. SQLite's WAL mode lets a second,
-// read-only connection read while the store writes.
+// bun:sqlite cannot interrupt a statement. At a search deadline we abandon
+// the result, retaining BOTH its job and worker until SQLite answers. Nothing
+// else for that store is sent meanwhile. Later reads wait in a bounded queue
+// or fail busy at their own deadline; another store has its own executor.
+// Even a crashed/terminated worker retains its store slot until its close
+// event, since terminate() can leave SQLite running. Thus repeated Asks can
+// never accumulate more than one executing statement per store.
 //
-// The keyword search behind every Ask lane runs here too (#1079): on Sparta
-// its synchronous FTS was 38-67% of the 45-58 s freezes during which no
-// lane's timer could fire. The main thread still builds each query and
-// filters the rows it gets back by the current tier ledger.
-//
-// The pool is at most READ_POOL_SIZE Bun Workers for the whole process,
-// started as they are needed and made from inline source so the bundled CLI
-// needs no extra file. Only a store the pool can never read (an in-memory
-// store, a runtime without Bun's Worker) is read on its caller's connection.
-//
-// Two kinds of work share the pool:
-//
-// - A status snapshot (withOffThreadSnapshot): several queries inside one
-//   read transaction on one thread, so every count describes one state.
-// - A single query with a deadline (readOnPool), for searches. Each runs in
-//   its own short read transaction, so no search holds a snapshot open
-//   between queries (a long-lived reader stops WAL checkpoints). Queries wait
-//   in one bounded queue per store and are taken from the stores in turn, so
-//   one slow store cannot starve the others. A query still queued at its
-//   deadline is dropped; one still running is given up by terminating its
-//   thread. Either way the caller gets OffThreadReadBusyError and reports
-//   the lane busy: it never falls back to reading on the request thread.
-//
-// bun:sqlite has no interrupt (no sqlite3_interrupt binding, checked on Bun
-// 1.3.14 and 1.4.4), so a terminated thread keeps running its statement until
-// the statement ends; its "close" event fires then (measured: CPU use stops
-// when "close" fires). Until then it still counts against READ_POOL_SIZE, so
-// stuck statements can never add up to more than READ_POOL_SIZE threads.
-// While every place is taken, new queries wait and fail busy at their
-// deadline. A snapshot and a pool query never share a thread: a snapshot's
-// thread takes no pool query, and a snapshot waits for a thread no pool query
-// runs on, so terminating a query's thread never cuts a snapshot short.
+// Snapshots reserve the same worker while their transaction is open, so a
+// search never overlaps a snapshot. Snapshot transactions and search query
+// construction/visibility filtering otherwise keep their existing semantics.
 
 import { SOURCE_INDEX_LANE_BUSY_CODE } from '../../core/source-index/lane-busy.ts';
 import { beginSourceAnswerPoolRead, type SourceAnswerPoolReadOutcome } from '../source-index/answer-latency-trace.ts';
@@ -51,8 +25,8 @@ export interface StoreRead {
   mode: 'get' | 'all';
 }
 
-/** Threads in the read pool, counting a terminated thread until it has stopped. */
-export const READ_POOL_SIZE = 2;
+/** Workers per store, including a terminated worker until it has stopped. */
+export const READ_POOL_SIZE = 1;
 
 /** Queries one store may have waiting at once; more are refused as busy. */
 export const READ_POOL_QUEUE_PER_STORE = 8;
@@ -115,8 +89,10 @@ import { statSync } from 'node:fs';
 const snapshots = new Map();
 const connections = new Map();
 const open = (path) => {
+  const started = performance.now();
   const db = new Database(path, { readonly: true });
   db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON');
+  postMessage({ diagnostic: 'open', path, ms: performance.now() - started });
   return db;
 };
 const connection = (path) => {
@@ -163,9 +139,11 @@ self.onmessage = (event) => {
 };
 `;
 
-type Pending = { resolve: (rows: unknown) => void; reject: (error: Error) => void; timer?: ReturnType<typeof setTimeout> };
+type Pending = { resolve: (rows: unknown) => void; reject: (error: Error) => void; timer?: unknown };
 
 interface ReaderThread {
+  store: string;
+  releaseWhenIdle?: boolean;
   worker: Worker;
   pending: Map<number, Pending>;
   /** Snapshots open on this thread. */
@@ -174,6 +152,8 @@ interface ReaderThread {
   job?: PoolJob | undefined;
   /** Terminated, and still counted until its "close" event says it stopped. */
   retired?: boolean;
+  /** Actual SQL, retained even after the caller abandons or terminates it. */
+  executingStore?: string | undefined;
 }
 
 interface PoolJob {
@@ -195,6 +175,21 @@ interface PoolJob {
 // Every thread the pool started that has not stopped, retired ones included.
 const threads: ReaderThread[] = [];
 let nextId = 1;
+const counters = { starts: 0, terminations: 0, restarts: 0, opens: 0, openMs: 0 };
+const startedStores = new Set<string>();
+const storeOpens = new Map<string, { opens: number; openMs: number }>();
+
+/** Counts only; actual executing statements include callers that have given up. */
+export function readPoolDiagnostics() {
+  const stores: Record<string, { inFlight: number; abandoned: number; queued: number; opens: number; openMs: number }> = {};
+  for (const path of new Set([...storeOpens.keys(), ...queues.keys(), ...threads.flatMap(t => t.executingStore ? [t.executingStore] : [])])) {
+    const running = threads.filter(t => t.executingStore === path);
+    stores[path] = { inFlight: running.length, abandoned: running.filter(t => t.retired || t.job?.settled).length,
+      queued: queues.get(path)?.length ?? 0, opens: storeOpens.get(path)?.opens ?? 0, openMs: storeOpens.get(path)?.openMs ?? 0 };
+  }
+  return { ...counters, threads: threads.length, stores };
+}
+
 // Waiting pool queries by store, and the order the stores are served in.
 const queues = new Map<string, PoolJob[]>();
 const turns: string[] = [];
@@ -212,20 +207,34 @@ function runtimeHasWorkers(): boolean {
 }
 
 // A failed start is not remembered: the next request tries again.
-function startThread(): ReaderThread | undefined {
-  if (threads.length >= READ_POOL_SIZE || !runtimeHasWorkers()) return undefined;
+function startThread(store: string): ReaderThread | undefined {
+  if (threads.filter(reader => reader.store === store).length >= READ_POOL_SIZE || !runtimeHasWorkers()) return undefined;
   try {
     const url = URL.createObjectURL(new Blob([WORKER_SOURCE], { type: 'application/javascript' }));
     const worker = workerFactory(url);
     // The reader never keeps a finished command alive.
     (worker as Worker & { unref?: () => void }).unref?.();
-    const started: ReaderThread = { worker, pending: new Map(), snapshots: 0 };
+    counters.starts += 1;
+    if (startedStores.has(store)) counters.restarts += 1;
+    startedStores.add(store);
+    const started: ReaderThread = { store, worker, pending: new Map(), snapshots: 0 };
     worker.onmessage = (event: MessageEvent<{ id: number; ok: boolean; rows?: unknown; error?: string }>) => {
       const message = event.data;
+      const diagnostic = message as unknown as { diagnostic?: string; path: string; ms: number };
+      if (diagnostic.diagnostic === 'open') {
+        counters.opens += 1;
+        counters.openMs += diagnostic.ms;
+        const held = storeOpens.get(diagnostic.path) ?? { opens: 0, openMs: 0 };
+        held.opens += 1;
+        held.openMs += diagnostic.ms;
+        storeOpens.set(diagnostic.path, held);
+        return;
+      }
+      started.executingStore = undefined;
       const waiting = started.pending.get(message.id);
       if (!waiting) return;
       started.pending.delete(message.id);
-      if (waiting.timer !== undefined) clearTimeout(waiting.timer);
+      if (waiting.timer !== undefined) clock.clearTimeout(waiting.timer);
       if (message.ok) waiting.resolve(message.rows ?? null);
       else waiting.reject(new Error(message.error ?? 'off-thread read failed'));
     };
@@ -249,8 +258,9 @@ function startThread(): ReaderThread | undefined {
 function retire(stopped: ReaderThread, error: Error): void {
   if (stopped.retired) return;
   stopped.retired = true;
+  counters.terminations += 1;
   for (const waiting of stopped.pending.values()) {
-    if (waiting.timer !== undefined) clearTimeout(waiting.timer);
+    if (waiting.timer !== undefined) clock.clearTimeout(waiting.timer);
     waiting.reject(error);
   }
   stopped.pending.clear();
@@ -270,14 +280,15 @@ export function offThreadReadsSupported(dbPath: string): boolean {
   return dbPath !== ':memory:' && !dbPath.startsWith('file::memory:') && runtimeHasWorkers();
 }
 
-// `timeoutMs` undefined: the caller owns the deadline (a pool query).
-function send(reader: ReaderThread, message: Record<string, unknown>, timeoutMs: number | undefined = OFF_THREAD_READ_TIMEOUT_MS): Promise<unknown> {
+// `timeoutMs` null: the caller owns the deadline (a pool query).
+// Passing undefined would silently restore the 120 s default in JavaScript.
+function send(reader: ReaderThread, message: Record<string, unknown>, timeoutMs: number | null = OFF_THREAD_READ_TIMEOUT_MS): Promise<unknown> {
   // A retired thread answers nothing: fail at once rather than wait out the timeout.
   if (reader.retired) return Promise.reject(new Error('off-thread reader stopped'));
   const id = nextId++;
   return new Promise((resolve, reject) => {
     // Left referenced: a one-shot command waiting on a count must not exit first.
-    const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
+    const timer = timeoutMs === null ? undefined : clock.setTimeout(() => {
       retire(reader, new Error('off-thread read timed out'));
     }, timeoutMs);
     reader.pending.set(id, { resolve, reject, ...(timer !== undefined ? { timer } : {}) });
@@ -285,7 +296,7 @@ function send(reader: ReaderThread, message: Record<string, unknown>, timeoutMs:
       reader.worker.postMessage({ ...message, id });
     } catch (error) {
       reader.pending.delete(id);
-      if (timer !== undefined) clearTimeout(timer);
+      if (timer !== undefined) clock.clearTimeout(timer);
       reject(error instanceof Error ? error : new Error(String(error)));
     }
   });
@@ -328,23 +339,14 @@ const snapshotWaiters: Array<{ store: string; resolve: (reader: ReaderThread) =>
 // How many times each store's pool connections were released.
 const releases = new Map<string, number>();
 
-/**
- * A live thread with no pool query running on it, for a snapshot: the least
- * busy, or a new one while the pool has room. A pool query's thread can be
- * terminated when that query misses its deadline, and a snapshot on it would
- * fail with it, so a snapshot never shares one.
- */
-function snapshotThreadNow(): ReaderThread | undefined {
-  const best = live()
-    .filter((reader) => !reader.job)
-    .reduce<ReaderThread | undefined>((least, reader) => (!least || busy(reader) < busy(least) ? reader : least), undefined);
-  if (best && busy(best) === 0) return best;
-  return startThread() ?? best;
+/** A snapshot shares only its store's executor, once no search is executing. */
+function snapshotThreadNow(store: string): ReaderThread | undefined {
+  return live().find(reader => reader.store === store && !reader.releaseWhenIdle && !reader.job) ?? startThread(store);
 }
 
-/** Reserves a thread for a snapshot, waiting while every thread runs a pool query. */
+/** Reserves the store worker, waiting while its current search is executing. */
 function snapshotThread(store: string): Promise<ReaderThread> {
-  const reader = snapshotThreadNow();
+  const reader = snapshotThreadNow(store);
   if (reader) {
     reader.snapshots += 1;
     return Promise.resolve(reader);
@@ -365,12 +367,12 @@ function snapshotThread(store: string): Promise<ReaderThread> {
 }
 
 function serveSnapshotWaiters(): void {
-  while (snapshotWaiters.length > 0) {
-    const reader = snapshotThreadNow();
-    if (!reader) return;
-    const waiter = snapshotWaiters.shift()!;
+  // A busy store must not hold up another store's snapshot.
+  for (const waiter of [...snapshotWaiters]) {
+    const reader = snapshotThreadNow(waiter.store);
+    if (!reader) continue;
+    snapshotWaiters.splice(snapshotWaiters.indexOf(waiter), 1);
     clearTimeout(waiter.timer);
-    // Reserved now, so no pool query is sent to it in between.
     reader.snapshots += 1;
     waiter.resolve(reader);
   }
@@ -419,13 +421,11 @@ export function releaseOffThreadReads(dbPath: string): void {
     if (turn >= 0) turns.splice(turn, 1);
     for (const job of waiting) settle(job, { error: new OffThreadReadBusyError() });
   }
-  for (const reader of live()) {
-    try {
-      reader.worker.postMessage({ op: 'release', path: dbPath });
-    } catch {
-      // A thread that cannot take the message is stopping anyway.
-    }
+  for (const reader of live().filter(reader => reader.store === dbPath)) {
+    reader.releaseWhenIdle = true;
+    if (reader.job) settle(reader.job, { error: new OffThreadReadBusyError() });
   }
+  dispatch();
 }
 
 /** Stops the pool: waiting queries fail busy, and every thread (with its connections) is terminated. */
@@ -467,9 +467,8 @@ function missedDeadline(job: PoolJob): void {
   if (job.settled) return;
   settle(job, { error: new OffThreadReadBusyError() });
   if (job.thread) {
-    // bun:sqlite cannot interrupt the statement: the thread is terminated,
-    // and it keeps its place in the pool until it has stopped.
-    retire(job.thread, new OffThreadReadBusyError());
+    // Keep the executing job installed until its actual reply, including
+    // after its caller has given up. Never terminate or reuse this executor.
     return;
   }
   const waiting = queues.get(job.store);
@@ -477,44 +476,37 @@ function missedDeadline(job: PoolJob): void {
   if (waiting && at >= 0) waiting.splice(at, 1);
 }
 
-/** A live thread free for a pool query: nothing running or waiting on it and no open snapshot. */
-function freeThread(): ReaderThread | undefined {
-  return live().find((reader) => !reader.job && reader.pending.size === 0 && reader.snapshots === 0) ?? startThread();
-}
-
-/** The next waiting query, taking the stores in turn. Drops any whose deadline has passed. */
-function nextJob(): PoolJob | undefined {
-  while (turns.length > 0) {
-    const store = turns.shift()!;
-    const waiting = queues.get(store);
-    let job = waiting?.shift();
-    while (job && clock.now() >= job.deadlineAtMs) {
-      settle(job, { error: new OffThreadReadBusyError() });
-      job = waiting?.shift();
-    }
-    if (waiting && waiting.length > 0) turns.push(store);
-    else queues.delete(store);
-    if (job) return job;
-  }
-  return undefined;
+/** A free executor of this store, or its first worker. Retired workers still occupy the slot. */
+function freeThread(store: string): ReaderThread | undefined {
+  return live().find(reader => reader.store === store && !reader.releaseWhenIdle && busy(reader) === 0) ?? startThread(store);
 }
 
 function dispatch(): void {
+  for (const reader of live()) {
+    if (reader.releaseWhenIdle && busy(reader) === 0) retire(reader, new OffThreadReadBusyError());
+  }
   serveSnapshotWaiters();
-  while (turns.length > 0) {
-    const reader = freeThread();
-    if (!reader) return;
-    const job = nextJob();
-    if (!job) return;
+  // Try every store once: a busy/abandoned store cannot block a ready one.
+  for (let remaining = turns.length; remaining > 0; remaining -= 1) {
+    const store = turns.shift()!;
+    const waiting = queues.get(store)!;
+    while (waiting.length && clock.now() >= waiting[0]!.deadlineAtMs) {
+      settle(waiting.shift()!, { error: new OffThreadReadBusyError() });
+    }
+    if (!waiting.length) { queues.delete(store); continue; }
+    const reader = freeThread(store);
+    if (!reader) { turns.push(store); continue; }
+    const job = waiting.shift()!;
+    if (waiting.length) turns.push(store);
+    else queues.delete(store);
     job.thread = reader;
     job.sentAtMs = clock.now();
     reader.job = job;
+    reader.executingStore = job.store;
     observer?.(job.store, job.read);
-    send(reader, { op: 'query', path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, undefined)
+    send(reader, { op: 'query', path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, null)
       .then(
-        // Rows that come back after the deadline are too late, however the timer fared.
         (rows) => settle(job, clock.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError() } : { rows }),
-        // A thread that stopped under the query (terminated, or crashed) leaves the lane busy, not broken.
         (error: Error) => settle(job, { error: reader.retired ? new OffThreadReadBusyError() : error }),
       )
       .finally(() => {

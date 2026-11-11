@@ -1,5 +1,5 @@
 // The read pool behind the Ask keyword search (#1079): a query past its
-// deadline never holds up the next one beyond the pool's bound, a thread that
+// deadline retains only its store's executor until SQLite ends, a thread that
 // cannot be stopped keeps its place until it has stopped, a thread that
 // cannot start makes the lane busy (never a read on the request thread), a
 // deadline is checked when a query is sent and when its rows come back, and a
@@ -47,7 +47,7 @@ function storeFile(): string {
 }
 
 // A statement that runs for a few seconds on its thread: only a
-// deadline gives it up, and its thread stops when it ends.
+// deadline gives its result up; the warm thread becomes free when it ends.
 const SLOW: StoreRead = {
   mode: 'get',
   sql: 'WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 10000000) SELECT COUNT(*) AS c FROM n',
@@ -56,7 +56,7 @@ const SLOW: StoreRead = {
 const COUNT: StoreRead = { mode: 'get', sql: 'SELECT COUNT(*) AS c FROM items', params: [] };
 
 describe('read pool', () => {
-  test('stuck queries past their deadline fail busy, keep their places until their threads stop, and the next query then runs', async () => {
+  test('abandoned queries fail busy, retain their store executor until SQL ends, and the next query then runs', async () => {
     const path = storeFile();
     const clock = createTestClock();
     setReadPoolClockForTests(clock);
@@ -66,15 +66,15 @@ describe('read pool', () => {
     // Queued behind them: one that must wait out the stuck threads, one whose deadline comes first.
     const next = readOnPool(path, COUNT, { deadlineAtMs: clock.now() + 600_000 });
     const tooSoon = readOnPool(path, COUNT, { deadlineAtMs: clock.now() + 2_000 }).then(() => 'answered', (error) => error);
-    await waitFor(() => started.length === READ_POOL_SIZE, { description: 'both slow queries running' });
+    await waitFor(() => started.length === READ_POOL_SIZE, { description: 'the store query running' });
     await clock.advance(1_000);
     for (const outcome of await Promise.all(stuck)) expect(outcome).toBeInstanceOf(OffThreadReadBusyError);
-    // Terminated, but bun:sqlite cannot interrupt them: they still hold the pool's places, and no thread is added.
-    expect(readPoolThreadsForTests()).toEqual({ live: 0, stopping: READ_POOL_SIZE });
+    // Abandoned results keep their live executor: no replacement or extra statement is started.
+    expect(readPoolThreadsForTests()).toEqual({ live: READ_POOL_SIZE, stopping: 0 });
     await clock.advance(1_000);
     expect(await tooSoon).toBeInstanceOf(OffThreadReadBusyError);
     expect(started).toHaveLength(READ_POOL_SIZE);
-    // When a stuck thread stops, its place goes to the next query.
+    // When the statement ends, the SAME executor serves the next query.
     expect(((await next) as { c: number }).c).toBe(3);
     expect(readPoolThreadsForTests().live + readPoolThreadsForTests().stopping).toBeLessThanOrEqual(READ_POOL_SIZE);
   });
@@ -169,7 +169,7 @@ describe('read pool', () => {
     const started: string[] = [];
     setReadPoolObserverForTests((_, read) => started.push(read.sql));
     const stuck = Array.from({ length: READ_POOL_SIZE }, () => readOnPool(path, SLOW, { deadlineAtMs: clock.now() + 1_000 }).then(() => 'answered', (error) => error));
-    await waitFor(() => started.length === READ_POOL_SIZE, { description: 'both slow queries running' });
+    await waitFor(() => started.length === READ_POOL_SIZE, { description: 'the store query running' });
     const snapshot = withOffThreadSnapshot(path, async (read) => read(COUNT));
     await clock.advance(1_000);
     for (const outcome of await Promise.all(stuck)) expect(outcome).toBeInstanceOf(OffThreadReadBusyError);
@@ -177,27 +177,25 @@ describe('read pool', () => {
   });
 
   test("closing a store cancels its waiting queries and no search reopens it", async () => {
-    const busyPath = storeFile();
     const root = mkdtempSync(join(tmpdir(), 'olympus-read-pool-closing-'));
     roots.push(root);
     const path = join(root, 'files.sqlite');
     const store = new LocalConnectorStore({ dbPath: path, corpusId: 'internal.fixture.files', family: 'file', trustDomain: 'internal' });
     const sent: string[] = [];
     setReadPoolObserverForTests((dbPath) => sent.push(dbPath));
-    // Both threads busy on another store: the closing store's search waits in its queue.
-    const holders = Array.from({ length: READ_POOL_SIZE }, () => readOnPool(busyPath, SLOW));
-    await waitFor(() => sent.length === READ_POOL_SIZE, { description: 'both threads busy' });
+    // Its worker is busy: the closing store's search waits in its queue.
+    const holders = Array.from({ length: READ_POOL_SIZE }, () => readOnPool(path, SLOW).catch(error => error));
+    await waitFor(() => sent.length === READ_POOL_SIZE, { description: 'the store worker busy' });
     const waiting = store.searchItemsDetailedOffThread('orchard', 10).then(() => 'answered', (error) => error);
     store.close();
     expect(await waiting).toBeInstanceOf(OffThreadReadBusyError);
-    await Promise.all(holders);
+    for (const outcome of await Promise.all(holders)) expect(outcome).toBeInstanceOf(OffThreadReadBusyError);
     // A search started after the close never reaches the pool either.
     expect(await store.searchItemsDetailedOffThread('orchard', 10).then(() => 'answered', (error) => error)).toBeInstanceOf(OffThreadReadBusyError);
-    expect(sent.filter((dbPath) => dbPath === path)).toEqual([]);
+    expect(sent.filter((dbPath) => dbPath === path)).toHaveLength(1); // only the original slow SQL
   });
 
-  test('with every pool place held by stopping threads, a store status waits for the pool and reads nothing on the request thread', async () => {
-    const busyPath = storeFile();
+  test('with abandoned SQL in its worker, a store status waits and reads nothing on the request thread', async () => {
     const root = mkdtempSync(join(tmpdir(), 'olympus-read-pool-status-'));
     roots.push(root);
     const store = new LocalConnectorStore({ dbPath: join(root, 'files.sqlite'), corpusId: 'internal.fixture.files', family: 'file', trustDomain: 'internal' });
@@ -206,11 +204,11 @@ describe('read pool', () => {
       setReadPoolClockForTests(clock);
       const started: string[] = [];
       setReadPoolObserverForTests((_, read) => started.push(read.sql));
-      const stuck = Array.from({ length: READ_POOL_SIZE }, () => readOnPool(busyPath, SLOW, { deadlineAtMs: clock.now() + 1_000 }).then(() => 'answered', (error) => error));
-      await waitFor(() => started.length === READ_POOL_SIZE, { description: 'both slow queries running' });
+      const stuck = Array.from({ length: READ_POOL_SIZE }, () => readOnPool(join(root, 'files.sqlite'), SLOW, { deadlineAtMs: clock.now() + 1_000 }).then(() => 'answered', (error) => error));
+      await waitFor(() => started.length === READ_POOL_SIZE, { description: 'the store query running' });
       await clock.advance(1_000);
       for (const outcome of await Promise.all(stuck)) expect(outcome).toBeInstanceOf(OffThreadReadBusyError);
-      expect(readPoolThreadsForTests()).toEqual({ live: 0, stopping: READ_POOL_SIZE });
+      expect(readPoolThreadsForTests()).toEqual({ live: READ_POOL_SIZE, stopping: 0 });
       const db = (store as unknown as { db: { query: (sql: string) => unknown } }).db;
       const original = db.query;
       let here = 0;
@@ -229,7 +227,6 @@ describe('read pool', () => {
   });
 
   test("a store's release cancels its snapshots that wait for a thread or have one reserved but not yet open", async () => {
-    const busyPath = storeFile();
     const path = storeFile();
     const started: string[] = [];
     setReadPoolObserverForTests((_, read) => started.push(read.sql));
@@ -237,13 +234,13 @@ describe('read pool', () => {
     const reserved = withOffThreadSnapshot(path, async (read) => read(COUNT)).then(() => 'answered', (error) => error);
     releaseOffThreadReads(path);
     expect(await reserved).toBeInstanceOf(OffThreadReadBusyError);
-    // Waiting: both threads run queries on another store.
-    const holders = Array.from({ length: READ_POOL_SIZE }, () => readOnPool(busyPath, SLOW));
-    await waitFor(() => started.length === READ_POOL_SIZE, { description: 'both threads busy' });
+    // Waiting: this store's only worker runs SQL.
+    const holders = Array.from({ length: READ_POOL_SIZE }, () => readOnPool(path, SLOW).catch(error => error));
+    await waitFor(() => started.length === READ_POOL_SIZE, { description: 'the store worker busy' });
     const waiting = withOffThreadSnapshot(path, async (read) => read(COUNT)).then(() => 'answered', (error) => error);
     releaseOffThreadReads(path);
     expect(await waiting).toBeInstanceOf(OffThreadReadBusyError);
-    await Promise.all(holders);
+    for (const outcome of await Promise.all(holders)) expect(outcome).toBeInstanceOf(OffThreadReadBusyError);
     // The store, opened again, is read as usual.
     expect(((await withOffThreadSnapshot(path, async (read) => read(COUNT))) as { c: number }).c).toBe(3);
   });
