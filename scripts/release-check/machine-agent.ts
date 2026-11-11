@@ -1522,7 +1522,7 @@ function readwiseSeeds(config: AgentConfig): Seed[] {
         }
         if (card && (card?.coverage?.indexed_items ?? 0) > 0) {
           const response = await session.call('POST', '/dashboard/delete-source-data', { source_id: 'readwise.library', acknowledge: true });
-          if (response.status !== 200) return { ok: false, detail: `delete-source-data answered ${response.status}` };
+          if (response.status !== 200) return { ok: false, detail: `delete-source-data answered ${response.status}: ${String(response.text ?? '').replace(/\s+/g, ' ').slice(0, 160)}` };
           card = await until(async () => { const now = await readwiseCard(); return now && (now?.coverage?.indexed_items ?? 0) === 0 && !connected(now) ? now : undefined; }, 120_000, 3_000);
         }
         // A delete (here or in the press just before) restarts the engine's worker a moment later; the page is not opened until it has had time to come back.
