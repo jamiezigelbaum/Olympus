@@ -9,6 +9,7 @@ import { asFresh, consentBlock, FRESH_LEG, FreshInconclusive, GUARD, SOCKET_READ
 import { parseCdpEndpoint, type FreshDashboard } from '../scripts/release-check/fresh-dashboard.ts';
 import type { LiveSourceSpec, EngineMcp } from '../scripts/release-check/live-accounts.ts';
 import type { Machine } from '../scripts/release-check/machine.ts';
+import { ANSWER_MODEL_REQUIRED_TEXT } from '../src/workers/answer-model-required.ts';
 
 const sources: LiveSourceSpec[] = ['gmail', 'dropbox'].map(id => ({ id, label: id === 'gmail' ? 'Gmail' : 'Dropbox', known: { question: `${id} inside?`, expect: ['inside fact'] }, fresh: { scope: 'Canary', outside: { question: `${id} outside?`, expect: ['outside-unique-fact', 'outside-unique-title'] } } }));
 const snapshot = (extra: Partial<ConsentSnapshot> = {}): ConsentSnapshot => ({ url: 'https://accounts.google.com/consent', text: 'Advanced Go to Olympus (unsafe) Continue', password: false, accounts: 0, signedOut: false, ...extra });
@@ -16,6 +17,8 @@ const response = (structured: unknown, ok = true) => ({ ok, structured, text: ''
 
 function rig(failAt?: string, inconclusive = false) {
   const events: string[] = [];
+  // Like a fresh install: no answer model until the privacy choice sets one.
+  let modelSet = false;
   const commands: string[] = [];
   const step = async (name: string) => {
     events.push(name);
@@ -32,19 +35,21 @@ function rig(failAt?: string, inconclusive = false) {
     put: async () => {}, get: async () => {}, upgrade: async () => {},
   };
   const dashboard: FreshDashboard = {
-    privacyChoice: async () => { await step('privacy-choice'); return 'Local models with Venice fallback (local-first, Recommended) saved and verified after reload'; },
+    privacyChoice: async () => { await step('privacy-choice'); modelSet = true; return 'Local models with Venice fallback (local-first, Recommended) saved and verified after reload'; },
     connect: s => step(`${s.id}.connect`), consent: s => step(`${s.id}.consent`), callback: s => step(`${s.id}.callback`), scope: s => step(`${s.id}.scope`),
     indexed: async s => { await step(`${s.id}.first-items`); return 2; },
     close: () => step('dashboard.close'),
   };
   const engine: EngineMcp = {
     call: async (tool, args) => {
+      if (tool === 'source_answer' && !modelSet) return { ok: true, structured: null, text: ANSWER_MODEL_REQUIRED_TEXT };
       if (tool === 'source_index_status') return response({ corpora: sources.map(s => ({ corpus_id: s.id, label: s.label, configured: true, last_refresh: { status: 'completed', completed_at: new Date().toISOString() }, counts: { indexed_items: 2 } })) });
       const outside = String(args.question).includes('outside');
       const source = sources.find(s => String(args.question).includes(s.id))!;
       if (tool === 'olympus_search') return response({ evidence: outside ? [] : [{ source: source.label, title: 'inside', excerpt: 'inside fact' }] });
       return response({ status: 'answered', answer: outside ? 'I could not find that information.' : 'inside fact', citations: outside ? [] : [{ label: source.label, title: 'inside' }] });
     },
+    listTools: async () => ['olympus_search', 'source_answer', 'source_answer_result', 'source_index_status'],
     close: () => step('engine.close'),
   };
   return { events, commands, machine, options: { sources, dashboard: async () => dashboard, engine: async () => engine, sleep: async () => {} } };
@@ -57,7 +62,7 @@ describe('fresh install canary', () => {
     expect(canaryVerdict(checks)).toBe('pass');
     expect(FRESH_LEG).toBe('canary-test-omarchy-fresh');
     expect(checks.map(c => c.id)).toEqual([
-      'fresh.install', 'fresh.engine-up', 'fresh.dashboard-opens', 'fresh.privacy-choice',
+      'fresh.install', 'fresh.engine-up', 'fresh.ask-without-model', 'fresh.dashboard-opens', 'fresh.privacy-choice',
       ...sources.flatMap(s => ['connect', 'consent', 'callback', 'scope', 'first-items'].map(step => `fresh.${s.id}.${step}`)),
       'live.gmail.status', 'live.dropbox.status', 'live.gmail.known', 'live.dropbox.known',
       'fresh.gmail.answer', 'fresh.gmail.scope-absence', 'fresh.dropbox.answer', 'fresh.dropbox.scope-absence', 'fresh.restore-zig',
@@ -76,6 +81,31 @@ describe('fresh install canary', () => {
       expect(syntax.status).toBe(0);
     }
   }, 30_000);
+  test('Ask without a model must explain setup; a real answer fails that check without stopping the leg', async () => {
+    const r = rig();
+    const { checks } = await runFreshInstall(r.machine, { ...r.options, engine: async () => ({
+      call: async () => response({ status: 'answered', answer: 'private words', citations: [] }),
+      listTools: async () => ['source_answer'],
+      close: async () => {},
+    }) });
+    const check = checks.find(c => c.id === 'fresh.ask-without-model');
+    expect(check?.status).toBe('fail');
+    expect(check?.detail).toContain('did not return the setup text');
+    expect(JSON.stringify(checks)).not.toContain('private words');
+    expect(checks.map(c => c.id)).toContain('fresh.dropbox.first-items');
+    expect(checks.at(-1)?.id).toBe('fresh.restore-zig');
+  });
+  test('Ask without a model must also be listed, not only callable', async () => {
+    const r = rig();
+    const { checks } = await runFreshInstall(r.machine, { ...r.options, engine: async () => ({
+      call: async () => ({ ok: true, structured: null, text: ANSWER_MODEL_REQUIRED_TEXT }),
+      listTools: async () => ['olympus_search', 'source_index_status'],
+      close: async () => {},
+    }) });
+    const check = checks.find(c => c.id === 'fresh.ask-without-model');
+    expect(check?.status).toBe('fail');
+    expect(check?.detail).toContain('source_answer is not in tools/list');
+  });
   test('a failing live check and a failed answer say why, without the answer text', async () => {
     const r = rig();
     const engine = await r.options.engine();
