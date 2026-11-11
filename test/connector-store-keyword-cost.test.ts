@@ -219,12 +219,15 @@ test('when every word is common, the rarest one is kept', async () => {
   // Each item has a name row and a text row: "notes" is in about half the
   // rows, "shopping" in a quarter, "weekly" in a little over a fifth.
   const store = await largeCommonStore();
-  const matches = rankedMatches(store, () => { store.searchItemsDetailed('weekly notes shopping', 10); });
-  expect(matches.length).toBeGreaterThan(0);
-  for (const match of matches) {
-    expect(match).toContain('"weekly"');
-    expect(match).not.toContain('"notes"');
-    expect(match).not.toContain('"shopping"');
+  // The rarest word is kept wherever it stands in the question.
+  for (const question of ['weekly notes shopping', 'notes shopping weekly', 'shopping weekly notes']) {
+    const matches = rankedMatches(store, () => { store.searchItemsDetailed(question, 10); });
+    expect(matches.length).toBeGreaterThan(0);
+    for (const match of matches) {
+      expect(match).toContain('"weekly"');
+      expect(match).not.toContain('"notes"');
+      expect(match).not.toContain('"shopping"');
+    }
   }
 }, 60_000);
 

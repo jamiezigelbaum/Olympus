@@ -13423,24 +13423,32 @@ export class LocalConnectorStore {
     }
     if (rows < KEYWORD_COMMON_MIN_ROWS) return undefined;
     const threshold = Math.floor(rows * KEYWORD_COMMON_ROW_SHARE);
-    const counts: number[] = [];
-    for (const group of groups) {
-      const groupQuery = sourceIndexFtsGroupQuery(group, exact);
-      const key = `\u0001common:${threshold}:${groupQuery}`;
-      let count = remembered(key);
-      if (count === undefined) {
-        count = ((yield {
-          mode: 'get',
-          sql: 'SELECT COUNT(*) AS count FROM (SELECT 1 FROM connector_store_fts WHERE connector_store_fts MATCH ? LIMIT ?)',
-          params: [groupQuery, threshold + 1],
-        }) as { count: number }).count;
-        remember(key, count);
+    const countAll = function* (limit: number): Generator<StoreRead, number[], unknown> {
+      const counts: number[] = [];
+      for (const group of groups) {
+        const groupQuery = sourceIndexFtsGroupQuery(group, exact);
+        const key = `\u0001common:${limit}:${groupQuery}`;
+        let count = remembered(key);
+        if (count === undefined) {
+          count = ((yield {
+            mode: 'get',
+            sql: 'SELECT COUNT(*) AS count FROM (SELECT 1 FROM connector_store_fts WHERE connector_store_fts MATCH ? LIMIT ?)',
+            params: [groupQuery, limit],
+          }) as { count: number }).count;
+          remember(key, count);
+        }
+        counts.push(count);
       }
-      counts.push(count);
-    }
-    const common = counts.map((count) => count > threshold);
+      return counts;
+    };
+    const common = (yield* countAll(threshold + 1)).map((count) => count > threshold);
     if (!common.some(Boolean)) return undefined;
-    if (common.every(Boolean)) common[counts.indexOf(Math.min(...counts))] = false;
+    if (common.every(Boolean)) {
+      // Every bounded count stopped at the threshold, so only full counts
+      // tell which concept is rarest.
+      const counts = yield* countAll(rows + 1);
+      common[counts.indexOf(Math.min(...counts))] = false;
+    }
     const kept = new Set(groups.filter((_, index) => !common[index]).flat());
     return new Set(groups.filter((_, index) => common[index]).flat().filter((term) => !kept.has(term)));
   }

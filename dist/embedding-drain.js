@@ -29884,26 +29884,31 @@ var init_local_index = __esm(() => {
       if (rows < KEYWORD_COMMON_MIN_ROWS)
         return;
       const threshold = Math.floor(rows * KEYWORD_COMMON_ROW_SHARE);
-      const counts = [];
-      for (const group of groups) {
-        const groupQuery = sourceIndexFtsGroupQuery(group, exact);
-        const key2 = `\x01common:${threshold}:${groupQuery}`;
-        let count = remembered(key2);
-        if (count === undefined) {
-          count = (yield {
-            mode: "get",
-            sql: "SELECT COUNT(*) AS count FROM (SELECT 1 FROM connector_store_fts WHERE connector_store_fts MATCH ? LIMIT ?)",
-            params: [groupQuery, threshold + 1]
-          }).count;
-          remember(key2, count);
+      const countAll = function* (limit) {
+        const counts = [];
+        for (const group of groups) {
+          const groupQuery = sourceIndexFtsGroupQuery(group, exact);
+          const key2 = `\x01common:${limit}:${groupQuery}`;
+          let count = remembered(key2);
+          if (count === undefined) {
+            count = (yield {
+              mode: "get",
+              sql: "SELECT COUNT(*) AS count FROM (SELECT 1 FROM connector_store_fts WHERE connector_store_fts MATCH ? LIMIT ?)",
+              params: [groupQuery, limit]
+            }).count;
+            remember(key2, count);
+          }
+          counts.push(count);
         }
-        counts.push(count);
-      }
-      const common = counts.map((count) => count > threshold);
+        return counts;
+      };
+      const common = (yield* countAll(threshold + 1)).map((count) => count > threshold);
       if (!common.some(Boolean))
         return;
-      if (common.every(Boolean))
+      if (common.every(Boolean)) {
+        const counts = yield* countAll(rows + 1);
         common[counts.indexOf(Math.min(...counts))] = false;
+      }
       const kept = new Set(groups.filter((_, index) => !common[index]).flat());
       return new Set(groups.filter((_, index) => common[index]).flat().filter((term) => !kept.has(term)));
     }
