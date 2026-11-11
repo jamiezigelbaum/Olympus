@@ -1137,10 +1137,13 @@ export class PeopleIndexRefresher {
         parts[position] = `${part}${READ_FAILED}`;
       }
     }
-    this.lastFingerprint = parts.join('|');
     // Only the stores in the list now: a deleted source's senders are not kept.
     this.observed = observed;
-    return linkStores(this.index, stores, [...observed.values()].flatMap((entry) => entry.observations));
+    const people = linkStores(this.index, stores, [...observed.values()].flatMap((entry) => entry.observations));
+    // Recorded only once the index is rebuilt: a rebuild that failed (a busy
+    // index file) is tried again at the next check, from the senders kept.
+    this.lastFingerprint = parts.join('|');
+    return people;
   }
 }
 

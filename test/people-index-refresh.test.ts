@@ -172,6 +172,30 @@ describe('people index refresh reads only what changed (#1305)', () => {
     expect(await refresher.refreshIfChanged()).toBe(false);
   });
 
+  test('a rebuild that failed is tried again at the next check, from the senders already read', async () => {
+    const clock = createTestClock();
+    const index = new LocalPeopleIndex({ dbPath: ':memory:' });
+    cleanups.push(() => index.close());
+    const mail = countingStore('mail', 'quinn');
+    const rebuild = index.rebuild.bind(index);
+    let failNext = true;
+    index.rebuild = ((observations) => {
+      if (failNext) {
+        failNext = false;
+        throw new Error('database is locked');
+      }
+      return rebuild(observations);
+    }) as typeof index.rebuild;
+    const refresher = new PeopleIndexRefresher(index, () => [mail.store], { now: () => clock.now() });
+    await expect(refresher.refresh()).rejects.toThrow('database is locked');
+    expect(index.personForSender('mail', 'quinn@example.com')).toBeUndefined();
+
+    await clock.advance(PEOPLE_INDEX_MIN_REBUILD_MS);
+    expect(await refresher.refreshIfChanged()).toBe(true);
+    expect(index.personForSender('mail', 'quinn@example.com')).toBeDefined();
+    expect(mail.state.reads).toBe(1);
+  });
+
   test('two refreshes started together run one rebuild', async () => {
     const index = new LocalPeopleIndex({ dbPath: ':memory:' });
     cleanups.push(() => index.close());

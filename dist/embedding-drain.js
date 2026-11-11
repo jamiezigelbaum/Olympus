@@ -7504,9 +7504,10 @@ class PeopleIndexRefresher {
         parts[position] = `${part}${READ_FAILED}`;
       }
     }
-    this.lastFingerprint = parts.join("|");
     this.observed = observed;
-    return linkStores(this.index, stores, [...observed.values()].flatMap((entry) => entry.observations));
+    const people = linkStores(this.index, stores, [...observed.values()].flatMap((entry) => entry.observations));
+    this.lastFingerprint = parts.join("|");
+    return people;
   }
 }
 function fingerprintParts(stores) {
