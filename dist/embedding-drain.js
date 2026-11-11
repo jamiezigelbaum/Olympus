@@ -14061,6 +14061,11 @@ class TierLedger {
         AND corpus_id = ? AND copy_state = 'superseded'
     `).run(...idParams(identity), corpusId).changes > 0;
   }
+  hasMovedMigrationProposal(identity) {
+    return this.db.query(`SELECT 1 FROM tier_migration_proposals
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND status = 'moved' LIMIT 1`).get(...idParams(identity)) !== null;
+  }
   replaceMigrationProposals(planId, proposals) {
     const now = this.now().toISOString();
     this.db.transaction(() => {
@@ -15210,7 +15215,7 @@ function tierLedgerMigrations() {
       }
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 14,
       name: "requeue_retired_embedding_clearances",
       up(db) {
         db.exec(`
@@ -15246,10 +15251,19 @@ function tierLedgerMigrations() {
           DELETE FROM tier_ledger_meta WHERE key GLOB 'embedding-prefilter:*';
         `);
       }
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: "moved_migration_identity",
+      up(db) {
+        db.exec(`CREATE INDEX IF NOT EXISTS tier_migration_moved_identity
+          ON tier_migration_proposals (provider, account_scope, conversation_key, provider_item_id)
+          WHERE status = 'moved';`);
+      }
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 14, RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided", TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", DEFAULT_REJUDGE_SCAN_ROWS = 2000, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TierLedgerSchemaError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_RECHECK_META_PREFIX = "recheck:", STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 15, RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided", TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", DEFAULT_REJUDGE_SCAN_ROWS = 2000, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TierLedgerSchemaError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_RECHECK_META_PREFIX = "recheck:", STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_store_write_guard();
@@ -38681,7 +38695,7 @@ function moveTieredItemsLowering(moves, options = {}) {
       entry.move.beforeFlip?.();
       entry.move.afterVerified?.();
       try {
-        results.push({ result: flipVerifiedMove(entry.move, entry.receipt) });
+        results.push({ result: entry.receipt.result ?? flipVerifiedMove(entry.move, entry.receipt) });
       } catch (error) {
         results.push({ error });
       }
@@ -38690,6 +38704,15 @@ function moveTieredItemsLowering(moves, options = {}) {
     if (timings)
       timings.ledgerCommitMs += ms;
   }));
+  prepared.forEach((entry, index) => {
+    if ("error" in entry || !("result" in results[index]))
+      return;
+    try {
+      pruneAutomaticMove(entry.move, entry.receipt);
+    } catch (error) {
+      results[index] = { error };
+    }
+  });
   results.forEach((result, index) => {
     if ("result" in result)
       timed(moves[index].timings, "rereadMs", () => oweExtractionRereads(set.ledger, moves[index].identity));
@@ -38722,10 +38745,14 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
     throw new TierMoveRefusedError("Secrets cannot use the content repair path.");
   }
   const receiptKey = purgeReceiptKey(identity);
-  const receiptToResume = readVerifiedMove(ledger, identity);
+  let receiptToResume = readVerifiedMove(ledger, identity);
+  if (receiptToResume?.result && (record.state === "moving" || receiptToResume.result.generation !== record.generation || receiptToResume.target.metadataTier !== target.metadataTier || receiptToResume.target.contentTier !== target.contentTier)) {
+    pruneAutomaticMove(options, receiptToResume);
+    receiptToResume = undefined;
+  }
   if (receiptToResume) {
     const receipt = receiptToResume;
-    if (receipt.generation !== record.generation || receipt.target.metadataTier !== target.metadataTier || receipt.target.contentTier !== target.contentTier)
+    if ((receipt.result?.generation ?? receipt.generation) !== record.generation || receipt.target.metadataTier !== target.metadataTier || receipt.target.contentTier !== target.contentTier)
       throw new TierLedgerGenerationConflictError;
     if (loweringOnly && receipt.raise)
       throw new TierMoveRefusedError("Raises cannot enter a lowering batch.");
@@ -38894,6 +38921,7 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
           raise,
           sources,
           destinations,
+          ...options.replaceOwnSupersededCopy && !raise ? { pruneSuperseded: true } : {},
           ...options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {},
           rehomeTagged,
           replacedSuperseded,
@@ -38928,7 +38956,7 @@ function queueMoveNote(options, receipt, result) {
     entry_id: entryId,
     recorded_at: new Date().toISOString(),
     kind: "note",
-    what: `Tier move of one item (${raise ? "raise" : "lateral or lower"}) from ${sources.map((copy) => copy.corpusId).join(", ")} ` + `to ${destinations.map((copy) => `${copy.corpusId} (${copy.layers})`).join(", ")}: ` + `${result.chunkCount} chunk(s) at the destination, ${destinations.reduce((sum, copy) => sum + copy.vectorsCopied, 0)} vector(s) copied with no provider call, ` + `${destinations.reduce((sum, copy) => sum + copy.chunksToEmbed, 0)} chunk(s) left for the destination's own embedding model. ` + `Superseded copies are hidden; lower content on raises is purged: ${result.supersededCorpora.join(", ") || "none"}.` + (Object.keys(replaced).length ? ` Replaced an older superseded copy of this item's own earlier move: ${Object.entries(replaced).map(([corpus, count]) => `${corpus} (${count} chunk(s) of older text)`).join(", ")}.` : ""),
+    what: `Tier move of one item (${raise ? "raise" : "lateral or lower"}) from ${sources.map((copy) => copy.corpusId).join(", ")} ` + `to ${destinations.map((copy) => `${copy.corpusId} (${copy.layers})`).join(", ")}: ` + `${result.chunkCount} chunk(s) at the destination, ${destinations.reduce((sum, copy) => sum + copy.vectorsCopied, 0)} vector(s) copied with no provider call, ` + `${destinations.reduce((sum, copy) => sum + copy.chunksToEmbed, 0)} chunk(s) left for the destination's own embedding model. ` + `Superseded copies are ${receipt.pruneSuperseded ? "pruned after the committed flip" : "hidden"}; lower content on raises is purged: ${result.supersededCorpora.join(", ") || "none"}.` + (Object.keys(replaced).length ? ` Replaced an older superseded copy of this item's own earlier move: ${Object.entries(replaced).map(([corpus, count]) => `${corpus} (${count} chunk(s) of older text)`).join(", ")}.` : ""),
     scope: {
       corpora: [...new Set([...sources.map((copy) => copy.corpusId), ...destinations.map((copy) => copy.corpusId)])],
       chunks: Object.fromEntries(destinations.map((copy) => [copy.corpusId, copy.chunksWritten + copy.chunksKept]))
@@ -38937,7 +38965,12 @@ function queueMoveNote(options, receipt, result) {
     approved_by: config.approvedBy,
     status: "complete"
   };
-  options.set.ledger.writeMeta(`${MOVE_NOTE_PREFIX}${entryId}`, JSON.stringify({ path: config.path, entry }));
+  queueTierLedgerEntry(options.set.ledger, config.path, entry);
+}
+function queueTierLedgerEntry(ledger, path, entry) {
+  if (!entry.entry_id)
+    throw new Error("A durable tier ledger entry needs an id.");
+  ledger.writeMeta(`${MOVE_NOTE_PREFIX}${entry.entry_id}`, JSON.stringify({ path, entry }));
 }
 async function flushTierMoveNotes(ledger, options = {}) {
   const started = performance.now();
@@ -39000,6 +39033,8 @@ function readVerifiedMove(ledger, identity) {
   const current2 = ledger.getCurrent(identity);
   if (!current2)
     throw new TierLedgerGenerationConflictError;
+  if (receipt.pruneSuperseded && receipt.result && current2.generation >= receipt.result.generation)
+    return receipt;
   if (receipt.generation < current2.generation || receipt.generation === current2.generation && current2.state !== "moving") {
     ledger.withGenerationFence(identity, current2.generation, () => {
       const now = ledger.getCurrent(identity);
@@ -39020,9 +39055,50 @@ function copyFingerprint(copy, layers) {
   })).digest("hex");
 }
 function finishVerifiedMove(options, receipt) {
-  const result = flipVerifiedMove(options, receipt);
+  const result = receipt.result ?? flipVerifiedMove(options, receipt);
+  pruneAutomaticMove(options, receipt);
   timed(options.timings, "rereadMs", () => oweExtractionRereads(options.set.ledger, options.identity));
   return result;
+}
+function pruneSupersededStoreCopy(store, identity) {
+  const chunks = store.stripCopyContent(identity, { keepMetadata: false });
+  const row = store.exportItemCopy(identity)?.identity;
+  if (row) {
+    const { sourceVersion: _kept, ...withdrawn } = row;
+    store.tombstoneCopy(withdrawn, { connectorId: TIER_MOVE_CONNECTOR_ID });
+  }
+  return chunks;
+}
+function pruneAutomaticMove(options, receipt) {
+  if (!receipt.pruneSuperseded)
+    return;
+  const { set, identity } = options;
+  const raw = set.ledger.readMeta(purgeReceiptKey(identity));
+  if (!raw)
+    return;
+  const committed = JSON.parse(raw);
+  if (!committed.result)
+    throw new TierLedgerGenerationConflictError;
+  const current2 = set.ledger.getCurrent(identity);
+  if (!current2 || current2.generation < committed.result.generation)
+    throw new TierLedgerGenerationConflictError;
+  set.ledger.withGenerationFence(identity, current2.generation, () => {
+    if (set.ledger.readMeta(purgeReceiptKey(identity)) !== raw)
+      throw new TierLedgerGenerationConflictError;
+    for (const copy of set.ledger.copies(identity)) {
+      if (copy.state !== "superseded" || copy.supersededByGeneration !== committed.result.generation)
+        continue;
+      const store = set.store(copy.trustDomain);
+      if (!store)
+        throw new Error("Superseded store unavailable; automatic prune remains pending.");
+      store.bindTierSet(set.ledger);
+      timed(options.timings, "purgeMs", () => pruneSupersededStoreCopy(store, identity));
+      set.ledger.removeSupersededCopy(identity, copy.corpusId);
+    }
+    options.afterPurge?.();
+    set.ledger.writeMeta(purgeReceiptKey(identity), "");
+    queueMoveNote(options, committed, committed.result);
+  });
 }
 function oweExtractionRereads(ledger, identity) {
   let known = [];
@@ -39085,8 +39161,8 @@ function flipVerifiedMove(options, receipt) {
       }
       if (receipt.raise && content)
         ledger.writeMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`, String(flipped.generation));
-      options.afterPurge?.();
-      ledger.writeMeta(purgeReceiptKey(identity), "");
+      if (!receipt.pruneSuperseded)
+        options.afterPurge?.();
       const result = {
         outcome: "moved",
         raise: receipt.raise,
@@ -39095,7 +39171,14 @@ function flipVerifiedMove(options, receipt) {
         supersededCorpora: ledger.copies(identity).filter((copy) => copy.state === "superseded" && copy.supersededByGeneration === flipped.generation).map((copy) => copy.corpusId),
         chunkCount: receipt.destinations.reduce((sum, copy) => sum + copy.chunksWritten + copy.chunksKept, 0)
       };
-      queueMoveNote(options, receipt, result);
+      if (receipt.pruneSuperseded) {
+        if (result.supersededCorpora.length)
+          ledger.writeMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`, String(flipped.generation));
+        ledger.writeMeta(purgeReceiptKey(identity), JSON.stringify({ ...receipt, result }));
+      } else {
+        ledger.writeMeta(purgeReceiptKey(identity), "");
+        queueMoveNote(options, receipt, result);
+      }
       return result;
     }));
   });
@@ -39214,6 +39297,14 @@ var init_tier_content_purge = __esm(() => {
   init_tier_ledger();
   init_embedding_ledger();
   init_tier_move();
+});
+
+// src/workers/connector-store/tier-auto-prune-sweep.ts
+var init_tier_auto_prune_sweep = __esm(() => {
+  init_tier_ledger();
+  init_embedding_ledger();
+  init_tier_move();
+  init_tier_content_purge();
 });
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { spawn } from "node:child_process";
@@ -41063,6 +41154,7 @@ var init_tiered_store_set = __esm(() => {
   init_tier_names_only_settle();
   init_tier_held_settle();
   init_tier_content_purge();
+  init_tier_auto_prune_sweep();
   init_tier_move();
   init_tier_row_rehome();
   init_tier_rules_sweep();
