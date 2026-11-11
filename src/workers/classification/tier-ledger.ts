@@ -474,7 +474,7 @@ export class TierLedger {
   /** Preflight existing files read-only, before chmod, WAL setup or a writable open. */
   static assertSchemaCanOpen(dbPath: string, readOnly = false): void {
     if (dbPath === ':memory:' || !existsSync(dbPath)) return;
-    const version = readSqliteWithoutWriting(dbPath, 10_000, (db) => readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID));
+    const version = readSqliteWithoutWriting(dbPath, 10_000, (db) => readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID), readOnly);
     if (version !== undefined && (version > TIER_LEDGER_SCHEMA_VERSION || (readOnly && version !== TIER_LEDGER_SCHEMA_VERSION))) {
       throw new TierLedgerSchemaError(version);
     }
@@ -4288,7 +4288,9 @@ export function readStoreBindingCursor(storeDbPath: string, runId: string, conne
 }
 
 /**
- * Read a SQLite file (a ledger, or a store's binding row) without writing it. A read-only connection is tried
+ * Read a SQLite file (a ledger, or a store's binding row) without writing it.
+ * strictReadOnly forbids the query-only writable fallback (read-only schema preflight).
+ * A read-only connection is tried
  * first: it never checkpoints or writes the main file, and it reads what a
  * crash left in the -wal (SQLite may still create the -shm). macOS's SQLite
  * refuses a read-only connection to a WAL database that has no -wal file (how
@@ -4299,9 +4301,9 @@ export function readStoreBindingCursor(storeDbPath: string, runId: string, conne
  * may appear beside it). No migration runs either way. A busy file is not
  * tried a second way. Undefined when the file cannot be read.
  */
-function readSqliteWithoutWriting<T>(dbPath: string, busyTimeoutMs: number, read: (db: Database) => T): T | undefined {
+function readSqliteWithoutWriting<T>(dbPath: string, busyTimeoutMs: number, read: (db: Database) => T, strictReadOnly = false): T | undefined {
   for (const mode of [{ readonly: true, create: false }, { readwrite: true, create: false }] as const) {
-    if ('readwrite' in mode && hasUnmergedWrites(dbPath)) return undefined;
+    if ('readwrite' in mode && (strictReadOnly || hasUnmergedWrites(dbPath))) return undefined;
     let db: Database | undefined;
     try {
       db = new Database(dbPath, mode);

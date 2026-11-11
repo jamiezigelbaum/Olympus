@@ -22619,7 +22619,7 @@ class TierLedger {
   static assertSchemaCanOpen(dbPath, readOnly = false) {
     if (dbPath === ":memory:" || !existsSync20(dbPath))
       return;
-    const version = readSqliteWithoutWriting(dbPath, 1e4, (db) => readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID));
+    const version = readSqliteWithoutWriting(dbPath, 1e4, (db) => readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID), readOnly);
     if (version !== undefined && (version > TIER_LEDGER_SCHEMA_VERSION || readOnly && version !== TIER_LEDGER_SCHEMA_VERSION)) {
       throw new TierLedgerSchemaError(version);
     }
@@ -25082,9 +25082,9 @@ function readStoreBindingCursor(storeDbPath, runId, connectorId) {
     return row?.cursor ?? undefined;
   });
 }
-function readSqliteWithoutWriting(dbPath, busyTimeoutMs, read) {
+function readSqliteWithoutWriting(dbPath, busyTimeoutMs, read, strictReadOnly = false) {
   for (const mode of [{ readonly: true, create: false }, { readwrite: true, create: false }]) {
-    if ("readwrite" in mode && hasUnmergedWrites(dbPath))
+    if ("readwrite" in mode && (strictReadOnly || hasUnmergedWrites(dbPath)))
       return;
     let db;
     try {
