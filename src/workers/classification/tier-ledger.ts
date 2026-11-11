@@ -29,6 +29,7 @@ import { readSqliteSchemaVersion, runSqliteMigrations, type SqliteMigration } fr
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import { assertWritableStoreOpenAllowed } from '../../core/store-write-guard.ts';
 import {
+  PERSONAL_FIRST_REASON,
   TIER_KEYS,
   contentJudgeVerdictReason,
   maxTier,
@@ -42,7 +43,8 @@ import {
 import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledger-path.ts';
 
 export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
-export const TIER_LEDGER_SCHEMA_VERSION = 12;
+export const TIER_LEDGER_SCHEMA_VERSION = 15;
+export const RETIRED_EMBEDDING_CLEARANCE_REASON = 'content:sniffer:retired_embedding_clearance:undecided';
 
 /** A scrub's start: the revision it took and the item's generation then. */
 export interface SecretScrubMark {
@@ -136,6 +138,9 @@ function writeIntentFromRow(row: TierWriteIntentRow): TierWriteIntent {
   };
 }
 
+/** One read of the ledger: the same shape as a connector store's pool read. */
+export interface LedgerRead { sql: string; params: readonly unknown[]; mode: 'get' | 'all' }
+
 function idParams(identity: TierLedgerIdentity): [string, string, string, string] {
   return [identity.provider, identity.accountScope, tierLedgerConversationKey(identity), identity.providerItemId];
 }
@@ -182,6 +187,43 @@ export interface TierLedgerRecord {
   decidedAt: string;
   /** True once the P1b router placed the item (it then has copy rows). */
   routed: boolean;
+}
+
+/** The identity of a ledger row. */
+export function tierLedgerIdentityOfRecord(record: TierLedgerRecord): TierLedgerIdentity {
+  return {
+    provider: record.provider,
+    accountScope: record.accountScope,
+    providerItemId: record.providerItemId,
+    ...(record.conversationKey ? { providerConversationId: record.conversationKey } : {}),
+  };
+}
+
+/** An identity a pass stored as JSON to resume from; undefined when absent or malformed. */
+export function parseTierLedgerIdentity(raw: string | undefined): TierLedgerIdentity | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as Partial<TierLedgerIdentity>;
+    // Every key field must be a string; their values are opaque here.
+    const keys = ['provider', 'accountScope', 'providerItemId'] as const;
+    if (!keys.every((key) => typeof parsed[key] === 'string')) return undefined;
+    const identity = parsed as TierLedgerIdentity;
+    return {
+      provider: identity.provider,
+      accountScope: identity.accountScope,
+      providerItemId: identity.providerItemId,
+      ...(typeof identity.providerConversationId === 'string' ? { providerConversationId: identity.providerConversationId } : {}),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/** A bounded page of ledger rows and where the next call resumes. */
+export interface TierLedgerWindow {
+  records: TierLedgerRecord[];
+  /** Where the next call resumes; undefined once the end of the ledger is reached. */
+  resumeAfter?: TierLedgerIdentity;
 }
 
 export type TierLedgerRecordOutcome = 'inserted' | 'updated' | 'unchanged' | 'held_moving';
@@ -361,7 +403,7 @@ export class TierLedgerRaiseAbandonRefusedError extends Error {
 }
 
 /** A rollback never re-exposes a Secret: the ledger refuses to flip a Secrets row back. */
-/** Verified raises cannot restore a lower copy whose content was removed. */
+/** A purged move cannot restore a copy whose content was removed. */
 export class TierLedgerPurgedRollbackRefusedError extends Error {
   constructor() {
     super('already Private; its lower copy was removed');
@@ -376,11 +418,19 @@ export class TierLedgerSecretsRollbackRefusedError extends Error {
   }
 }
 
+export class TierLedgerSchemaError extends Error {
+  constructor(readonly schema: number, readonly known = TIER_LEDGER_SCHEMA_VERSION) {
+    super(schema > known
+      ? `This install's privacy ledger was written by a newer Olympus (schema ${schema}); this build knows ${known}. Update Olympus.`
+      : `This install's privacy ledger is at schema ${schema}; this build requires ${known}. The writer must migrate it before read-only access.`);
+    this.name = 'TierLedgerSchemaError';
+  }
+}
+
 export class TierLedger {
   readonly dbPath: string;
   private readonly db: Database;
   private readonly readOnly: boolean;
-  private metaChanges = 0;
   private readonly now: () => Date;
 
   constructor(options: TierLedgerOptions) {
@@ -389,6 +439,7 @@ export class TierLedger {
     this.now = options.now ?? (() => new Date());
     if (!this.readOnly) assertWritableStoreOpenAllowed('tier ledger', this.dbPath);
     const onDisk = this.dbPath !== ':memory:';
+    if (onDisk) TierLedger.assertSchemaCanOpen(this.dbPath, this.readOnly);
     if (onDisk && !this.readOnly) {
       mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
       // Owner-only from the first byte, with an explicit file mode rather than
@@ -404,6 +455,8 @@ export class TierLedger {
       db = new Database(this.dbPath, this.readOnly ? { readonly: true, create: false } : { create: true });
       if (this.readOnly) {
         db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
+        const version = readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID);
+        if (version !== TIER_LEDGER_SCHEMA_VERSION) throw new TierLedgerSchemaError(version);
         this.db = db;
         return;
       }
@@ -418,6 +471,15 @@ export class TierLedger {
     this.db = db;
   }
 
+  /** Preflight existing files read-only, before chmod, WAL setup or a writable open. */
+  static assertSchemaCanOpen(dbPath: string, readOnly = false): void {
+    if (dbPath === ':memory:' || !existsSync(dbPath)) return;
+    const version = readSqliteWithoutWriting(dbPath, 10_000, (db) => readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID));
+    if (version !== undefined && (version > TIER_LEDGER_SCHEMA_VERSION || (readOnly && version !== TIER_LEDGER_SCHEMA_VERSION))) {
+      throw new TierLedgerSchemaError(version);
+    }
+  }
+
   /** Whether this file is at this build's schema (a read-only open never migrates it). */
   hasCurrentSchema(): boolean {
     return readSqliteSchemaVersion(this.db, TIER_LEDGER_SQLITE_STORE_ID) === TIER_LEDGER_SCHEMA_VERSION;
@@ -429,6 +491,11 @@ export class TierLedger {
       // hand to another process the moment this returns.
       closeSqliteStore(this.db, { checkpoint: !this.readOnly });
     } finally {
+      const listeners = this.closeListeners ?? [];
+      this.closeListeners = undefined;
+      for (const listener of listeners) {
+        try { listener(); } catch { /* a listener's failure never fails the close */ }
+      }
       if (!this.readOnly && this.dbPath !== ':memory:') restrictLedgerFiles(this.dbPath);
     }
   }
@@ -625,64 +692,6 @@ export class TierLedger {
       `).run(verdict.modelId, ...idParams(identity));
     })();
     return outcome === undefined ? undefined : { outcome, record: this.getCurrent(identity)! };
-  }
-
-  /** A pre-filter may only finish an open Personal content question, under the ledger lock. */
-  clearEmbeddingQuestion(identity: TierLedgerIdentity, options: {
-    reason: string; receiptKey: string; receipt: string; modelId: string;
-    questionStillCurrent: () => boolean; placementFor?: (decision: TierDecision) => TierPlacementPlan;
-  }): boolean {
-    return this.db.transaction(() => {
-      const row = this.readRow(identity);
-      if (!row || row.state !== 'pending' || row.metadataPending || !row.contentPending || !row.contentRead
-        || row.metadataTier !== 'private' || row.contentTier !== 'private' || row.metadataForced
-        || row.decidedBy === 'override' || row.decidedBy === 'owner_rule' || this.getOverride(identity)
-        || row.reasons.some(reason => reason.startsWith('metadata:owner_rule:'))
-        || this.rejudgeQuestion(identity) || !options.questionStillCurrent()) return false;
-      // Receipt and decision share a transaction. The queue question remains until a good audit window.
-      this.writeMeta(options.receiptKey, options.receipt);
-      const result = this.applySnifferVerdict(identity, {
-        pass: 'content', tier: 'private', reason: options.reason, modelId: options.modelId, mapRevision: row.mapRevision,
-      }, { questionStillCurrent: options.questionStillCurrent, ...(options.placementFor ? { placementFor: options.placementFor } : {}) });
-      if (!result || ['unchanged', 'needs_placement', 'stale_question', 'stale_map', 'held_moving'].includes(result.outcome)) {
-        this.writeMeta(options.receiptKey, '');
-        return false;
-      }
-      return true;
-    })();
-  }
-
-  /** Withdraw only this pre-filter's decision. Fence a lowering in flight and hide before re-queueing. */
-  revokeEmbeddingClearance(identity: TierLedgerIdentity, reason: string, original: TierDecision,
-    placementFor?: (decision: TierDecision) => TierPlacementPlan): boolean {
-    return this.db.transaction(() => {
-      const row = this.readRow(identity);
-      if (!row || !row.reasons.includes(reason) || row.decidedBy === 'override' || row.decidedBy === 'owner_rule'
-        || this.getOverride(identity) || row.contentTier !== original.contentTier || row.metadataTier !== original.metadataTier
-        || row.metadataPending || row.contentPending || row.metadataForced
-        || row.reasons.some(code => code.startsWith('metadata:owner_rule:'))
-        || original.reasons.filter(code => code.startsWith('content:sha256:') || code.startsWith('content:names:')).some(code => !row.reasons.includes(code))) return true;
-      if (!row.routed) { this.writeRow(identity, rowOf({ ...row, ...original }), undefined, row); return true; }
-      if (!placementFor) return false;
-      if (row.state === 'moving') {
-        const now = this.now().toISOString();
-        const staleFlip = row.generation + 1;
-        this.db.query(`UPDATE tier_copies SET superseded_by_generation = ?, updated_at = ?
-          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-          AND copy_state = 'superseded' AND superseded_by_generation = ?`)
-          .run(staleFlip + 1, now, ...idParams(identity), staleFlip);
-        this.db.query(`UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
-          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'`)
-          .run(staleFlip, now, ...idParams(identity));
-        this.db.query(`UPDATE tier_items SET generation = ?
-          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`)
-          .run(staleFlip, ...idParams(identity));
-        this.queueMoveRow(identity, { ...row, generation: staleFlip }, original, { hide: true, decidedAt: now });
-      } else {
-        this.recordRoutedPlacement(identity, original, placementFor(original));
-      }
-      return true;
-    })();
   }
 
   /**
@@ -1476,11 +1485,35 @@ export class TierLedger {
    * walked the whole ledger to fill its page (Sparta, 2007d67, 2026-11-05: a
    * 10 s freeze on one names-only settle pass).
    */
-  listAwaitingTextWindow(options: { limit?: number; after?: TierLedgerIdentity; examine?: number } = {}): {
-    records: TierLedgerRecord[];
-    /** Where the next call resumes; undefined once the end of the ledger is reached. */
-    resumeAfter?: TierLedgerIdentity;
-  } {
+  listAwaitingTextWindow(options: { limit?: number; after?: TierLedgerIdentity; examine?: number } = {}): TierLedgerWindow {
+    return this.window(`routed = 1 AND content_read = 0 AND metadata_pending = 0
+        AND ((state = 'pending' AND content_pending = 1)
+          OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
+            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
+              OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))`, [], options);
+  }
+
+  /**
+   * Routed items recorded Personal-first before every open question held its
+   * text (#1316): still waiting on their question, not moving, and carrying
+   * `content:personal_first`. Their text may still sit in a Personal store;
+   * the held-text settle pass (tier-held-settle.ts) re-places each one.
+   * Bounded the same way as listAwaitingTextWindow.
+   */
+  listPersonalFirstWindow(options: { limit?: number; after?: TierLedgerIdentity; examine?: number } = {}): TierLedgerWindow {
+    return this.window(`routed = 1 AND content_pending = 1 AND state != 'moving'
+        AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value = ?)`, [PERSONAL_FIRST_REASON], options);
+  }
+
+  /**
+   * At most `examine` rows in key order after `after` are looked at, matching
+   * `where` or not, and the result says where the next call resumes.
+   */
+  private window(
+    where: string,
+    params: readonly string[],
+    options: { limit?: number; after?: TierLedgerIdentity; examine?: number },
+  ): TierLedgerWindow {
     const limit = Math.max(1, Math.min(options.limit ?? 500, 5_000));
     const examine = Math.max(limit, options.examine ?? 20_000);
     const after = options.after
@@ -1493,14 +1526,10 @@ export class TierLedger {
         ORDER BY provider, account_scope, conversation_key, provider_item_id
         LIMIT ?
       )
-      WHERE routed = 1 AND content_read = 0 AND metadata_pending = 0
-        AND ((state = 'pending' AND content_pending = 1)
-          OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
-            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
-              OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))
+      WHERE ${where}
       ORDER BY provider, account_scope, conversation_key, provider_item_id
       LIMIT ?
-    `).all(...(after ?? []), examine, limit) as TierItemRow[];
+    `).all(...(after ?? []), examine, ...params, limit) as TierItemRow[];
     const records = rows.map(recordFromRow);
     const identityOfRow = (row: { provider: string; account_scope: string; conversation_key: string; provider_item_id: string }): TierLedgerIdentity => ({
       provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id,
@@ -2111,36 +2140,16 @@ export class TierLedger {
    * candidate with this before it opens anything
    * (classification/tier-set-binding.ts).
    *
-   * The file is opened read-only first: a read-only connection never
-   * checkpoints or writes the main file, and it reads what a crash left in
-   * the -wal. SQLite may still create the -shm beside it. macOS's SQLite
-   * refuses a read-only connection to a WAL database that has no -wal file
-   * (how a ledger looks after a clean close and a rename); only then is it
-   * opened read-write with the connection set to query-only. That second open
-   * happens only when no -wal holds frames and no -journal is waiting, so
-   * there is nothing to checkpoint or roll back and the main file stays as it
-   * was; empty -wal and -shm files may appear beside it. A busy file is not
-   * tried a second way: an exclusive holder costs one `busyTimeoutMs`, not two.
+   * Read without writing (readSqliteWithoutWriting). An unreadable ledger
+   * fails closed.
    */
   static readLedgerId(dbPath: string, options: { busyTimeoutMs?: number } = {}): string | undefined {
     if (dbPath === ':memory:' || !existsSync(dbPath)) return undefined;
     const busyTimeoutMs = Math.max(0, Math.trunc(options.busyTimeoutMs ?? 10_000));
-    for (const mode of [{ readonly: true, create: false }, { readwrite: true, create: false }] as const) {
-      if ('readwrite' in mode && hasUnmergedWrites(dbPath)) return undefined;
-      let db: Database | undefined;
-      try {
-        db = new Database(dbPath, mode);
-        db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA query_only = ON;`);
-        const row = db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get() as { value?: unknown } | null;
-        return typeof row?.value === 'string' && row.value !== '' ? row.value : undefined;
-      } catch (error) {
-        if (isSqliteBusy(error)) return undefined;
-        // Try the next way of opening it.
-      } finally {
-        if (db) closeSqliteStore(db, { checkpoint: false });
-      }
-    }
-    return undefined;
+    return readSqliteWithoutWriting(dbPath, busyTimeoutMs, (db) => {
+      const row = db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get() as { value?: unknown } | null;
+      return typeof row?.value === 'string' && row.value !== '' ? row.value : undefined;
+    });
   }
 
   /**
@@ -2170,29 +2179,15 @@ export class TierLedger {
 
   writeMeta(key: string, value: string): void {
     if (key === 'ledger_id') throw new Error('The ledger identity is never rewritten.');
-    this.metaChanges += this.db.query(`
+    this.db.query(`
       INSERT INTO tier_ledger_meta (key, value) VALUES (?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    `).run(key, value).changes;
+    `).run(key, value);
   }
 
   deleteMeta(key: string): void {
     if (key === 'ledger_id') throw new Error('The ledger identity is never deleted.');
-    this.metaChanges += this.db.query('DELETE FROM tier_ledger_meta WHERE key = ?').run(key).changes;
-  }
-
-  /** Atomic publication of related content-free background receipts. */
-  writeMetaBatch(entries: readonly (readonly [string, string])[]): void {
-    this.db.transaction(() => { for (const [key, value] of entries) this.writeMeta(key, value); })();
-  }
-
-  /** A withdrawal on another connection cannot be followed by stale scan references. */
-  writeEmbeddingTrainingScan(value: string, revision: string): boolean {
-    return this.db.transaction(() => {
-      if ((this.readMeta('embedding-prefilter:training-revision') ?? '0') !== revision) return false;
-      this.writeMeta('embedding-prefilter:training-scan-v1', value);
-      return true;
-    }).immediate();
+    this.db.query('DELETE FROM tier_ledger_meta WHERE key = ?').run(key);
   }
 
   /** Small durable work receipts, without exporting any store content. */
@@ -3675,8 +3670,8 @@ export class TierLedger {
   }
 
   /**
-   * Forget ONE superseded copy row, after the caller tombstoned that store's
-   * copy (the owner-approved purge, design section 4.6 M6). A current or
+   * Forget ONE superseded copy row, after the caller tombstoned or stripped
+   * that store's copy (automatic pruning or design section 4.6 M6). A current or
    * staged copy is never removed here. Returns whether a row was removed.
    */
   removeSupersededCopy(identity: TierLedgerIdentity, corpusId: string): boolean {
@@ -3688,6 +3683,13 @@ export class TierLedger {
   }
 
   // ---- P3: migration proposals (design section 4.6) ---------------------------
+
+  /** Any still-moved migration protects this identity's rollback copies. */
+  hasMovedMigrationProposal(identity: TierLedgerIdentity): boolean {
+    return this.db.query(`SELECT 1 FROM tier_migration_proposals
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND status = 'moved' LIMIT 1`).get(...idParams(identity)) !== null;
+  }
 
   /**
    * Record a plan's proposals, replacing any earlier rows for the same plan
@@ -3805,12 +3807,10 @@ export class TierLedger {
    * Changes whenever this ledger's database changes, from this connection or
    * another: lets a reader reuse what it derived from the ledger until then.
    */
-  changeMarker(ignoreOwnMetaWrites = false): string {
+  changeMarker(): string {
     const row = this.db.query('SELECT total_changes() AS changes').get() as { changes: number };
     const version = this.db.query('PRAGMA data_version').get() as { data_version: number };
-    // Background checkpoints cannot invalidate a sliced training validation.
-    // External commits still invalidate it; withdrawals are also revision-fenced.
-    return `${version.data_version}:${row.changes - (ignoreOwnMetaWrites ? this.metaChanges : 0)}`;
+    return `${version.data_version}:${row.changes}`;
   }
 
   /**
@@ -3942,6 +3942,26 @@ export class TierLedger {
   }
 
   /**
+   * Items with a copy in these stores whose text waits, held, for the privacy
+   * judge: a names question open, or read text whose question is open
+   * (`contentHeldForJudgment`), moving or not. Each item once, however many
+   * of its copies the stores hold; content-free. Reads the pending and moving
+   * rows only (tier_items_state).
+   */
+  heldItemCount(corpusIds: readonly string[]): number {
+    if (corpusIds.length === 0) return 0;
+    return (this.db.query(`
+      SELECT COUNT(*) AS n FROM tier_items t
+      WHERE t.state IN ('pending', 'moving')
+        AND (t.metadata_pending = 1 OR (t.content_pending = 1 AND t.content_read = 1))
+        AND EXISTS (SELECT 1 FROM tier_copies c
+          WHERE c.provider = t.provider AND c.account_scope = t.account_scope
+            AND c.conversation_key = t.conversation_key AND c.provider_item_id = t.provider_item_id
+            AND c.corpus_id IN (SELECT value FROM json_each(?)))
+    `).get(JSON.stringify(corpusIds)) as { n: number }).n;
+  }
+
+  /**
    * Content-free per-store counts for status surfaces. Each count reads only
    * the index that answers it: one join of the whole corpus against
    * tier_items was a fifth of Sparta's sampled freezes (2026-11-05). Current,
@@ -4011,12 +4031,41 @@ export class TierLedger {
 
   /** How many items one account scope has here, and how many of them still wait for a judgment. */
   accountScopeCounts(provider: string, accountScope: string): { items: number; awaitingJudgment: number } {
-    const row = this.db.query(`
-      SELECT COUNT(*) AS items,
-        COALESCE(SUM(CASE WHEN state = 'pending' OR metadata_pending = 1 OR content_pending = 1 THEN 1 ELSE 0 END), 0) AS awaiting
-      FROM tier_items WHERE provider = ? AND account_scope = ?
-    `).get(provider, accountScope) as { items: number; awaiting: number };
+    return this.readSteps(this.accountScopeCountSteps(provider, accountScope));
+  }
+
+  /** The same account tally query for the caller's connection and the read pool. */
+  *accountScopeCountSteps(provider: string, accountScope: string): Generator<LedgerRead, { items: number; awaitingJudgment: number }, unknown> {
+    const row = (yield {
+      sql: `
+        SELECT COUNT(*) AS items,
+          COALESCE(SUM(CASE WHEN state = 'pending' OR metadata_pending = 1 OR content_pending = 1 THEN 1 ELSE 0 END), 0) AS awaiting
+        FROM tier_items WHERE provider = ? AND account_scope = ?
+      `,
+      params: [provider, accountScope],
+      mode: 'get',
+    }) as { items: number; awaiting: number };
     return { items: row.items, awaitingJudgment: row.awaiting };
+  }
+
+  /** Hears this ledger close, once (for a reader of its file elsewhere to let go). */
+  onClose(listener: () => void): void {
+    (this.closeListeners ??= []).push(listener);
+  }
+
+  private closeListeners: Array<() => void> | undefined;
+
+  /** Runs a read generator on this connection, in one transaction. */
+  readSteps<T>(steps: Generator<LedgerRead, T, unknown>): T {
+    return this.db.transaction(() => {
+      let next = steps.next();
+      while (!next.done) {
+        const statement = this.db.query(next.value.sql);
+        const params = next.value.params as never[];
+        next = steps.next(next.value.mode === 'get' ? statement.get(...params) : statement.all(...params));
+      }
+      return next.value;
+    })();
   }
 
   /**
@@ -4033,13 +4082,6 @@ export class TierLedger {
   withdrawAccountScope(provider: string, accountScope: string): { items: number; copies: number } {
     return this.db.transaction(() => {
       const now = this.now().toISOString();
-      this.writeMeta('embedding-prefilter:training-revision', randomUUID());
-      // Partial training contains source-owned references, never retained after withdrawal.
-      this.deleteMeta('embedding-prefilter:training-scan-v1');
-      for (const kind of ['check:', 'clear:']) {
-        const prefix = `embedding-prefilter:${kind}${provider}\0${accountScope}\0`;
-        this.db.query('DELETE FROM tier_ledger_meta WHERE key >= ? AND key < ?').run(prefix, `${prefix}\uffff`);
-      }
       this.db.query(`
         UPDATE tier_copies
         SET copy_state = 'superseded',
@@ -4235,6 +4277,51 @@ interface TierMigrationProposalRow {
   moved_generation: number | null;
   outcome_json: string | null;
   updated_at: string;
+}
+
+/**
+ * The cursor a connector store recorded for its tier-set binding
+ * (classification/tier-set-binding.ts), read without writing the store and
+ * without running its migrations. Undefined when the store has no binding row
+ * or cannot be read.
+ */
+export function readStoreBindingCursor(storeDbPath: string, runId: string, connectorId: string): string | undefined {
+  if (storeDbPath === ':memory:' || !existsSync(storeDbPath)) return undefined;
+  return readSqliteWithoutWriting(storeDbPath, 10_000, (db) => {
+    if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sync_runs'").get()) return undefined;
+    const row = db.query('SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?').get(runId, connectorId) as { cursor: string | null } | null;
+    return row?.cursor ?? undefined;
+  });
+}
+
+/**
+ * Read a SQLite file (a ledger, or a store's binding row) without writing it. A read-only connection is tried
+ * first: it never checkpoints or writes the main file, and it reads what a
+ * crash left in the -wal (SQLite may still create the -shm). macOS's SQLite
+ * refuses a read-only connection to a WAL database that has no -wal file (how
+ * a ledger looks after a clean close and a rename); only then is it opened
+ * read-write with the connection set to query-only, and only when no -wal
+ * holds frames and no -journal is waiting, so there is nothing to checkpoint
+ * or roll back and the main file stays as it was (empty -wal and -shm files
+ * may appear beside it). No migration runs either way. A busy file is not
+ * tried a second way. Undefined when the file cannot be read.
+ */
+function readSqliteWithoutWriting<T>(dbPath: string, busyTimeoutMs: number, read: (db: Database) => T): T | undefined {
+  for (const mode of [{ readonly: true, create: false }, { readwrite: true, create: false }] as const) {
+    if ('readwrite' in mode && hasUnmergedWrites(dbPath)) return undefined;
+    let db: Database | undefined;
+    try {
+      db = new Database(dbPath, mode);
+      db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA query_only = ON;`);
+      return read(db);
+    } catch (error) {
+      if (isSqliteBusy(error)) return undefined;
+      // Try the next way of opening it.
+    } finally {
+      if (db) closeSqliteStore(db, { checkpoint: false });
+    }
+  }
+  return undefined;
 }
 
 /** SQLITE_BUSY (5) and SQLITE_LOCKED (6), as bun:sqlite reports them. */
@@ -5261,12 +5348,84 @@ function tierLedgerMigrations(): SqliteMigration[] {
       },
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 12,
       name: 'pending_move_metadata',
       up(db) {
         // Completed obligations remain recorded as empty acknowledgements.
         // Never rescan that growing history to find the few pending notes.
         db.exec(`CREATE INDEX IF NOT EXISTS tier_ledger_pending_meta ON tier_ledger_meta (key) WHERE value <> '';`);
+      },
+    },
+    {
+      // #1316: a row recorded Personal-first still waits for its verdict with
+      // its text in its stores. Hold those copies in the upgrade itself, as a
+      // held copy is (no search or embedding outside the local private lane),
+      // so no backlog the bounded settle pass has not reached yet can be
+      // embedded or searched. The settle pass then moves the text up; a
+      // Personal verdict clears the hold.
+      version: 13,
+      name: 'hold_personal_first_copies',
+      up(db) {
+        db.query(`
+          UPDATE tier_copies SET embed_hold = 1
+          WHERE copy_state = 'current' AND embed_hold = 0 AND EXISTS (
+            SELECT 1 FROM tier_items t
+            WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
+              AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
+              AND t.routed = 1 AND t.content_pending = 1
+              AND EXISTS (SELECT 1 FROM json_each(t.reasons_json) r WHERE r.value = ?)
+          )
+        `).run(PERSONAL_FIRST_REASON);
+      },
+    },
+    {
+      version: 14,
+      name: 'requeue_retired_embedding_clearances',
+      up(db) {
+        // Select CURRENT reasons only, never history. The schema receipt and
+        // requeue commit together, so neither restart nor a crash repeats it.
+        db.exec(`
+          CREATE TEMP TABLE retired_embedding_clearances AS
+            SELECT rowid AS item_rowid FROM tier_items
+            WHERE EXISTS (SELECT 1 FROM json_each(reasons_json) r
+              WHERE r.value GLOB 'content:embedding_prefilter:*');
+          -- Fence every old move and keep any staged destination hidden.
+          UPDATE tier_copies SET copy_state = 'superseded',
+            superseded_by_generation = generation
+          WHERE copy_state = 'staged' AND EXISTS (
+            SELECT 1 FROM tier_items t JOIN retired_embedding_clearances x ON x.item_rowid = t.rowid
+            WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
+              AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
+          );
+          UPDATE tier_items SET state = 'pending', content_pending = 1,
+            generation = generation + CASE WHEN state = 'moving' THEN 1 ELSE 0 END,
+            target_metadata_tier = NULL, target_content_tier = NULL,
+            move_attempts = 0, rejudge_json = NULL, rejudged_key = NULL,
+            reasons_json = (SELECT json_group_array(CASE
+              WHEN r.value GLOB 'content:embedding_prefilter:*' THEN '${RETIRED_EMBEDDING_CLEARANCE_REASON}'
+              ELSE r.value END) FROM json_each(tier_items.reasons_json) r)
+          WHERE rowid IN (SELECT item_rowid FROM retired_embedding_clearances);
+          -- Hold-until-judged (#1318): the requeued item's current copy is
+          -- not embeddable or searchable until the judge answers again.
+          UPDATE tier_copies SET embed_hold = 1
+          WHERE copy_state = 'current' AND embed_hold = 0 AND EXISTS (
+            SELECT 1 FROM tier_items t JOIN retired_embedding_clearances x ON x.item_rowid = t.rowid
+            WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
+              AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
+          );
+          DROP TABLE retired_embedding_clearances;
+          DELETE FROM tier_ledger_meta WHERE key GLOB 'embedding-prefilter:*';
+        `);
+      },
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: 'moved_migration_identity',
+      up(db) {
+        // The bounded automatic-copy sweep probes by identity across plans.
+        db.exec(`CREATE INDEX IF NOT EXISTS tier_migration_moved_identity
+          ON tier_migration_proposals (provider, account_scope, conversation_key, provider_item_id)
+          WHERE status = 'moved';`);
       },
     },
   ];

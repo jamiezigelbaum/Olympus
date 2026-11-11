@@ -21,7 +21,7 @@ import { dirname, join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { OperationError } from '../src/core/operation-error.ts';
-import { accountStorePath, type LayoutEnv } from '../src/core/olympus-layout.ts';
+import { accountStorePath, olympusDataRoot, type LayoutEnv } from '../src/core/olympus-layout.ts';
 import { openConnectorStore } from '../src/core/source-storage.ts';
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { locateTierItem, runTierExplain, runTierSet } from '../src/workers/classification/tier-cli.ts';
@@ -62,12 +62,16 @@ interface World {
 function world(): World {
   const root = mkdtempSync(join(tmpdir(), 'olympus-tier-set-rename-'));
   cleanups.push(() => rmSync(root, { recursive: true, force: true }));
-  const legacy = join(root, 'legacy-data');
+  const legacy = olympusDataRoot({ HOME: root });
   mkdirSync(legacy, { recursive: true });
   for (const file of readdirSync(FIXTURE_DIR).filter((name) => name.endsWith('.gz'))) {
     const path = join(legacy, file.slice(0, -'.gz'.length));
     writeFileSync(path, gunzipSync(readFileSync(join(FIXTURE_DIR, file))));
     writeFileSync(`${path}-wal`, '');
+  }
+  // Schema migration belongs to the writer, before relocation/read-only assertions.
+  for (const file of readdirSync(legacy).filter((name) => name.endsWith('.tier-ledger.sqlite'))) {
+    new TierLedger({ dbPath: join(legacy, file) }).close();
   }
   return { root, env: { HOME: root }, legacy };
 }

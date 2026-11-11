@@ -232,6 +232,11 @@ function summaryOf(entry: ComputerArchiveEntry, stopped: AgentArchiveStopped | u
     const read = entry.status === 'importing' ? `${fill(copy.importingLineUncounted, { percent: String(entry.percent ?? 0) })}. ` : '';
     return `${read}${copy.countsUnavailable.why} ${copy.countsUnavailable.fix}`;
   }
+  if (entry.countsPending === true && entry.status !== 'stopped' && entry.status !== 'removing') {
+    return entry.status === 'importing'
+      ? `${fill(copy.importingLineUncounted, { percent: String(entry.percent ?? 0) })}.`
+      : copy.counting;
+  }
   const items = itemsPhrase(entry.family, entry.items);
   const held = entry.items > 0 && entry.status !== 'removing'
     ? ` ${fill(copy.judgedLine, { judged: String(entry.judged), held: String(entry.held) })}.`
@@ -278,7 +283,7 @@ function archiveOf(entry: ComputerArchiveEntry): AgentArchive {
     family: entry.family ?? 'other',
     ...(entry.countsUnavailable
       ? { counts_unavailable: true as const }
-      : {
+      : entry.countsPending === true ? {} : {
           items: entry.items,
           ...(entry.family === 'email' || entry.family === 'chat' ? { messages: entry.items } : {}),
           judged: entry.judged,

@@ -147,6 +147,13 @@ export const PROBE_SOURCE = String.raw`(() => {
     return found;
   }
   const pick = (target) => { const list = all(target); return list[target.nth || 0] || null; };
+  const visibleText = () => (document.body ? document.body.innerText : '');
+  const textWatches = new Map();
+  const stopTextWatch = (id) => {
+    const watch = textWatches.get(id);
+    if (watch) watch.observer.disconnect();
+    textWatches.delete(id);
+  };
 
   window.__rc = {
     clean,
@@ -168,7 +175,31 @@ export const PROBE_SOURCE = String.raw`(() => {
     },
     attr: (target, name) => { const el = pick(target); return el ? el.getAttribute(name) : null; },
     value: (target) => { const el = pick(target); return el ? (typeof el.value === 'string' ? el.value : clean(el.textContent)) : null; },
-    visibleText: () => (document.body ? document.body.innerText : ''),
+    visibleText,
+    /** Record a transient message in the browser, even while the harness is busy elsewhere. A stale message does not count. */
+    watchText: (id, want) => {
+      stopTextWatch(id);
+      const test = typeof want === 'string'
+        ? (text) => text.toLowerCase().includes(want.toLowerCase())
+        : (text) => new RegExp(want.re, want.flags).test(text);
+      let wasVisible = test(visibleText());
+      const watch = { seenAt: null, observer: null, check: null };
+      watch.check = () => {
+        const visible = test(visibleText());
+        if (visible && !wasVisible && watch.seenAt === null) watch.seenAt = Date.now();
+        wasVisible = visible;
+      };
+      watch.observer = new window.MutationObserver(watch.check);
+      watch.observer.observe(document.documentElement, { subtree: true, childList: true, characterData: true, attributes: true });
+      textWatches.set(id, watch);
+    },
+    sawText: (id) => {
+      const watch = textWatches.get(id);
+      if (!watch) return false;
+      watch.check();
+      return watch.seenAt !== null;
+    },
+    stopTextWatch,
     /** The generic rules, read off the page as it stands. */
     audit: () => {
       const text = document.body ? document.body.innerText : '';

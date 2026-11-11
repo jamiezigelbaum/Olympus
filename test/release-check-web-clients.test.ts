@@ -10,7 +10,7 @@ import { findBrowser } from '../scripts/release-check/browser.ts';
 import type { ExecResult, Machine } from '../scripts/release-check/machine.ts';
 import {
   askQuestion, blockedReason, connectionUses, evaluateTurn, forbiddenFor, olympusUse, parseClientQuestions, redactForbidden, runWebClients, SECRET_ANSWER_LEAD, startBrowserScript, turnText,
-  EXPAND_PANEL_SCRIPT, PAGE_STATE_SCRIPT, openMacInbox, type ClientQuestion, type PageState,
+  EXPAND_PANEL_SCRIPT, MESSAGE_LIMIT, PAGE_STATE_SCRIPT, openMacInbox, type ClientQuestion, type PageState, saidNoTools,
 } from '../scripts/release-check/web-clients.ts';
 
 const statusOf = (checks: Array<{ id: string; status: string }>) => Object.fromEntries(checks.map((check) => [check.id, check.status]));
@@ -347,6 +347,7 @@ describe('web clients: what a turn is held to', () => {
     expect(blockedReason('chatgpt', { ...base, signedOut: true })).toContain('signed out');
     expect(blockedReason('claude', { ...base, title: 'Just a moment...', challenge: true })).toContain('bot check');
     expect(blockedReason('grok', { ...base, composer: false })).toContain('no message box');
+    expect(blockedReason('claude', { ...base, limited: true })).toContain('message limit');
     expect(evaluateTurn('grok', pickup, { inconclusive: 'Grok is signed out' })[0]).toMatchObject({ id: 'web.grok.pickup', status: 'skip', detail: 'Inconclusive: Grok is signed out' });
   });
 
@@ -520,5 +521,43 @@ describe.skipIf(!browserPath)('web clients: a real browser on a stand-in app', (
     const { tunnel: _tunnel, ...rest } = machine();
     const result = await runWebClients(rest, { clients: ['chatgpt'], questions: [pickup], os: 'linux', screensDir: tmpdir() });
     expect(result.checks).toEqual([{ id: 'web.browser', title: 'The canary browser on the machine', status: 'skip', detail: 'Inconclusive: the driver has no tunnel verb, so the browser on the machine cannot be reached', ms: expect.any(Number) }]);
+  });
+});
+
+describe('a Claude reply that says the connector gave it no tools', () => {
+  test('is recognised in the wordings Claude used, and only for Claude', () => {
+    for (const turn of [
+      'Claude responded: I couldn’t ask Olympus. It shows as connected to your account, but it isn’t giving me any tools in this chat, so I have nothing to send.',
+      'I can’t ask Olympus right now. It shows as connected to your account, but none of its tools are available in this chat.',
+      'I couldn’t ask Olympus. It shows as connected to your account, but it exposes no tools in this chat.',
+      'Olympus shows as connected to your account, but I can’t reach any of its tools in this chat, so I couldn’t ask it about Leo’s weekend plan.',
+    ]) {
+      expect(saidNoTools('claude', turn)).toBe(true);
+      expect(saidNoTools('chatgpt', turn)).toBe(false);
+    }
+    expect(saidNoTools('claude', 'I asked Olympus, "What time does school close on Friday the 7th?" It closes at 13:00.')).toBe(false);
+  });
+});
+
+describe('an account that hit its message limit', () => {
+  test('is recognised from the dialog and notice Claude shows, and not from an ordinary reply', () => {
+    for (const text of ['You hit your 5-hour message limit. It resets at 9:30 PM', 'Upgrade to keep chatting', 'You’ve hit your limit for Claude messages. Resets at 9:30 PM.']) {
+      expect(MESSAGE_LIMIT.test(text)).toBe(true);
+    }
+    expect(MESSAGE_LIMIT.test('Your card limit is 500 euros and you hit it in October.')).toBe(false);
+  });
+
+  test('counts only the app\'s own dialog or notice, never a question or reply that quotes the phrase', () => {
+    const limited = (html: string): boolean | undefined => {
+      const window = new Window({ url: 'https://claude.ai/new' });
+      window.document.body.innerHTML = `<main>${html}<textarea></textarea></main>`;
+      for (const el of window.document.querySelectorAll('*')) el.getBoundingClientRect = () => new window.DOMRect(0, 0, 100, 20);
+      try { return (new Function('document', 'location', 'getComputedStyle', `return ${PAGE_STATE_SCRIPT(['textarea'], 'claude')}`)(window.document, window.location, window.getComputedStyle.bind(window)) as PageState).limited; }
+      finally { window.happyDOM.abort(); }
+    };
+    expect(limited('<div role="dialog">Upgrade to keep chatting. You hit your 5-hour message limit. It resets at 9:30 PM</div>')).toBe(true);
+    expect(limited('<section aria-live="polite">You’ve hit your limit for Claude messages. Resets at 9:30 PM.</section>')).toBe(true);
+    expect(limited('<div data-message-author-role="assistant">Your bank says you hit your limit on the card in October.</div>')).toBe(false);
+    expect(limited('<p>Upgrade to keep chatting</p>')).toBe(false);
   });
 });

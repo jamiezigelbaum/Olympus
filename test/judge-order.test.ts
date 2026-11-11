@@ -10,7 +10,7 @@ import { CachedTierSniffer } from '../src/workers/classification/sniffer.ts';
 import type { SnifferLane } from '../src/workers/classification/sniffer-lane.ts';
 import { runSnifferPass } from '../src/workers/classification/sniffer-resolver.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
-import { HELD_RECORD_PRIORITY, HELD_UNTIL_JUDGED_PRIORITY, classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
+import { HELD_RECORD_PRIORITY, HELD_UNTIL_JUDGED_PRIORITY, PERSONAL_FIRST_REASON, classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 
@@ -141,6 +141,26 @@ describe('items a question matched are judged first (#1062)', () => {
     const plain = createTierVisibilityGate(scopes);
     expect(gate(hits)).toEqual(plain(hits));
     expect(heard).toEqual([['held-a', 'held-b']]);
+  });
+
+  test('a row recorded Personal-first before #1316 is raised too: withheld until judged, its text still in Personal', () => {
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    cleanups.push(() => ledger.close());
+    const item = (id: string) => ({ provider: 'fixture', accountScope: 'owner', providerItemId: id });
+    const place = (id: string, waiting: boolean) => {
+      const decision = classifyItemTiers({ signals: { title: id }, subject: item(id), text: 'Tomatoes and beans this year.' },
+        waiting ? { sniffer: { id: 'order-test', judge: () => ({ verdict: 'undecided', queued: true }) } } : {});
+      const recorded = waiting ? { ...decision, reasons: [...decision.reasons, PERSONAL_FIRST_REASON] } : decision;
+      ledger.recordRoutedPlacement(item(id), recorded, { copies: [{ corpusId: 'personal', trustDomain: 'internal', layers: 'both' }], embedHold: false });
+    };
+    place('legacy', true);
+    place('settled', false);
+    const hit = (id: string) => ({ corpusId: 'personal', sourceItem: { family: 'files', ...item(id) } }) as unknown as SourceIndexRoutedSearchHit;
+    const heard: string[][] = [];
+    const scopes = () => [{ ledger, corpusIds: new Set(['personal']) }];
+    const gate = createTierVisibilityGate(scopes, (identities) => heard.push(identities.map((identity) => identity.providerItemId)));
+    expect(gate([hit('settled'), hit('legacy')])).toEqual(createTierVisibilityGate(scopes)([hit('settled'), hit('legacy')]));
+    expect(heard).toEqual([['legacy']]);
   });
 
   test('held matches from several corpora share the allowance: each corpus takes turns', () => {

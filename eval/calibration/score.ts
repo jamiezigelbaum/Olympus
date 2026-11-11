@@ -41,6 +41,9 @@ import { BUILT_IN_REASONING_MODELS } from '../../src/workers/source-index/built-
 import { createLlamaServerHandle, type LlamaServerHandle } from '../../src/workers/source-index/built-in-reasoning/server.ts';
 import { CALIBRATION_DIR_DEFAULT, SAMPLE_FILE, scoredTier, readLabels, readSample } from './files.ts';
 
+const MAX_MODEL_PASSES = 10_000;
+const PASS_TIME_MS = 10 * 60_000;
+
 const argv = process.argv.slice(2);
 const flag = (name: string) => {
   const index = argv.indexOf(name);
@@ -148,18 +151,26 @@ async function main(): Promise<void> {
     const asked = store.counts().questions;
     process.stdout.write(`Classified ${labeled.length} labeled files; ${asked} question(s) for the private model.\n`);
     let calls = 0;
-    for (let pass = 0; pass < 6; pass += 1) {
+    let idlePasses = 0;
+    // Run passes until one makes no calls and applies no verdicts. A whole item
+    // can take the built-in 4B about 27 s, so a fixed pass count ran out with
+    // most items still held (#1221). Three passes in a row with no verdict, or the cap,
+    // end a stuck loop.
+    for (let pass = 0; pass < MAX_MODEL_PASSES; pass += 1) {
       const report = await runSnifferPass({
         targets: [{ ledger, sniffer: store }],
         lane,
         model: recordingModel,
         maxCallsPerPass: 10_000,
         pendingPageSize: 5_000,
+        passTimeMs: PASS_TIME_MS,
         ...(ownerContext ? { ownerContext } : {}),
       });
       calls += report.calls;
       process.stdout.write(`  model pass ${pass + 1}: ${report.calls} call(s), ${report.verdictsApplied} verdict(s)\n`);
       if (report.calls === 0 && report.verdictsApplied === 0) break;
+      idlePasses = report.verdictsApplied === 0 ? idlePasses + 1 : 0;
+      if (idlePasses >= 3) break;
     }
 
     const rows = labeled.map((item) => {

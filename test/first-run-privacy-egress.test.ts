@@ -17,7 +17,13 @@ import { answerPrivately, type BuiltInAnalystModel } from '../src/core/analyst-b
 import type { AnalystModelRequest } from '../src/core/analyst.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
 import { openWaitingPrivateQuestionStore } from '../src/core/waiting-private-questions.ts';
-import { createSourceIndexEmbeddingProviderFromSovereignty, loadSourceWorkerSovereignty, createAnalystForSovereigntyProfile } from '../src/workers/email-source/server.ts';
+import {
+  createSourceIndexEmbeddingProviderFromSovereignty,
+  loadSourceWorkerSovereignty,
+} from '../src/workers/engine/runtime/embedding-providers.ts';
+import {
+  createAnalystForSovereigntyProfile,
+} from '../src/workers/engine/runtime/private-analysts.ts';
 import { WorkerBootSecretResolver } from '../src/workers/credential-degradation.ts';
 import { loadConfig } from '../src/core/config.ts';
 import { createSourceAnswerLanes } from '../src/workers/email-source/source-answer-lanes.ts';
@@ -151,6 +157,8 @@ async function sourcePaths(i: ReturnType<typeof install>) {
   ]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
   const service = new TierSnifferService({ installed, lane: sniffer.lane, model: classifier.model,
     stores: () => fixture.set.openStores(), classificationLedgerPath: join(i.root, 'classification-ledger.jsonl'), autoApproveBuiltIn: true, rejudgePerPass: 0,
+    // Held until judged (#1316): a Personal verdict's move down runs, as the worker's mover does.
+    autoMoves: { localEmbeddingsOnly: () => true, embeddingLedgerPath: join(i.root, 'embedding-ledger.jsonl'), maxPerPass: 5 },
   });
   cleanup.push(() => service.stop());
   expect(await service.runOnce()).toMatchObject({ state: 'ran' });

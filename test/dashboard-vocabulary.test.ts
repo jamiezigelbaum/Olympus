@@ -3,7 +3,8 @@ import {
   buildEnvBridgeSovereigntyConfig,
   createSovereigntyEngine,
 } from '../src/core/sovereignty.ts';
-import { buildSourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
+import { scrubCard } from '../src/workers/chatgpt/dashboard-view-model.ts';
+import { DASHBOARD_SUPPORTED_SOURCES, buildSourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
 import type {
   DashboardConnectionState,
   DashboardSourceCard,
@@ -29,6 +30,7 @@ import {
   dashboardDuration,
   dashboardWorkingHeadline,
   dashboardWorkingSummary,
+  dashboardUnsupportedKindPhrase,
   dashboardHomeMeta,
   dashboardIsConnectedSource,
   dashboardIsFirstRun,
@@ -937,6 +939,68 @@ interface CardOverrides {
 }
 
 describe('dashboard working summary', () => {
+  test('names unsupported kinds with singular and plural item words', () => {
+    expect(dashboardUnsupportedKindPhrase(card({ family: 'file' }))).toBeUndefined();
+    expect(dashboardUnsupportedKindPhrase(card({ family: 'file', coverage: { unsupported_kind_items: -3 } }))).toBeUndefined();
+    expect(dashboardUnsupportedKindPhrase(card({ family: 'file', coverage: { unsupported_kind_items: 1 } })))
+      .toBe("1 file of kinds Olympus can't read yet");
+    expect(dashboardUnsupportedKindPhrase(card({ family: 'file', coverage: { unsupported_kind_items: 46 } })))
+      .toBe("46 files of kinds Olympus can't read yet");
+    expect(dashboardUnsupportedKindPhrase(card({ coverage: { unsupported_kind_items: 2 } })))
+      .toBe("2 messages of kinds Olympus can't read yet");
+  });
+
+  test('names damaged files and unsupported kinds in the finished headline without changing coverage', () => {
+    const source = card({ family: 'file', coverage: {
+      indexed_items: 360, content_ready_items: 252, not_read_by_policy_items: 60,
+      unreadable_items: 2, unsupported_kind_items: 46,
+    } });
+    const summary = dashboardWorkingSummary(source)!;
+    expect(summary).toEqual({
+      in_scope_items: 300, read_items: 252, read_percent: 84,
+      unreadable_items: 2, unsupported_kind_items: 46, fully_working: true,
+    });
+    expect(dashboardWorkingHeadline(summary))
+      .toBe("everything readable is working — 252 of 300 files · 2 can't be read · 46 of kinds Olympus can't read yet");
+    const withoutKinds = dashboardWorkingSummary(card({ family: 'file', coverage: {
+      indexed_items: 360, content_ready_items: 252, not_read_by_policy_items: 60, unreadable_items: 2,
+    } }))!;
+    expect(withoutKinds).toMatchObject({ in_scope_items: 300, read_percent: 84, fully_working: false });
+    expect(dashboardSubLine(source, { now: NOW }))
+      .toBe("synced 12m ago · 2 files can't be read · 46 files of kinds Olympus can't read yet");
+    expect(dashboardStatus({ source })).toBe('Fresh');
+  });
+
+  test('ChatGPT keeps the unsupported-kind count when scrubbing coverage', () => {
+    const source = card({ coverage: { content_ready_items: 52, unreadable_items: 2, unsupported_kind_items: 46 } });
+    const definition = DASHBOARD_SUPPORTED_SOURCES.find((entry) => entry.source_id === 'gmail.email')!;
+    const scrubbed = scrubCard(definition, source);
+    expect(scrubbed.coverage).toMatchObject({ indexed_items: 100, content_ready_items: 52,
+      unreadable_items: 2, unsupported_kind_items: 46 });
+    expect(dashboardWorkingSummary(scrubbed)).toMatchObject({ in_scope_items: 100, read_percent: 52,
+      unsupported_kind_items: 46, fully_working: true });
+  });
+
+  test('unsupported kinds alone can finish the headline while read coverage stays below 100', () => {
+    const summary = dashboardWorkingSummary(card({ family: 'file', coverage: {
+      indexed_items: 100, content_ready_items: 60, unsupported_kind_items: 40,
+    } }))!;
+    expect(summary).toMatchObject({ in_scope_items: 100, read_percent: 60, fully_working: true });
+    expect(dashboardWorkingHeadline(summary))
+      .toBe("everything readable is working — 60 of 100 files · 40 of kinds Olympus can't read yet");
+  });
+
+  test('clamps unreadable plus unsupported to the unread population and still honors parity', () => {
+    const summary = dashboardWorkingSummary(card({ coverage: {
+      indexed_items: 300, content_ready_items: 252, unreadable_items: 2, unsupported_kind_items: 500,
+    }, embedding_backlog: { chunks: 100, embedded_chunks: 20, missing_chunks: 80, refresh_needed: false } }))!;
+    expect(summary).toEqual({
+      in_scope_items: 300, read_items: 252, read_percent: 84, unreadable_items: 2,
+      unsupported_kind_items: 46, fully_working: false, searchable_percent: 20,
+    });
+    expect(dashboardWorkingHeadline(summary)).toBe('84% of text extracted · 20% searchable until re-indexing completes');
+  });
+
   test('divides by the files Olympus is supposed to handle, not by everything stored', () => {
     // The live Dropbox shape: a quarter-million files stored, a fraction of
     // them in content scope. The denominator is the in-scope population.

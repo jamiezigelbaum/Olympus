@@ -61,7 +61,7 @@ import {
   installBuiltInTranscription,
   readBuiltInTranscriptionStatus,
 } from '../src/workers/source-index/built-in-reasoning/transcription-model.ts';
-import { stopBuiltInModelOnShutdown } from '../src/workers/email-source/server.ts';
+import { stopBuiltInModelOnShutdown } from '../src/workers/engine/runtime/judging-models.ts';
 import { extractorInput } from './fixtures/file-extraction-extractor-fixtures.ts';
 
 const roots: string[] = [];

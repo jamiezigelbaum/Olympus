@@ -8,7 +8,7 @@ import {
   defineConnectorCorpus,
 } from '../src/workers/connector-store/index.ts';
 import { gmailMessageItem } from '../src/workers/google-connectors/gmail-mail-record.ts';
-import { connectorStoreAnswerScope } from '../src/workers/email-source/server.ts';
+import { connectorStoreAnswerScope } from '../src/workers/engine/runtime/answer-scope.ts';
 import { createSourceIndexStatusHandler } from '../src/workers/source-index/status.ts';
 
 // One person, Brianna, in three sources: Gmail (by her address), WhatsApp (by
@@ -107,7 +107,7 @@ describe('one person across sources (#1076)', () => {
         keys: ['email:brianna@example.com', 'phone:+1 415 555 0123', 'sender:telegram:777'],
       });
       const stores = [mail, whatsapp, telegram];
-      const everyone = refreshPeopleIndex(people, stores);
+      const everyone = await refreshPeopleIndex(people, stores);
 
       const brianna = everyone.find((person) => person.displayName === 'Brianna Reyes')!;
       expect(brianna.identities.map((identity) => identity.provider).sort()).toEqual(['gmail', 'telegram', 'whatsapp']);

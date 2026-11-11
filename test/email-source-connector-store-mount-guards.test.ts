@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createConnectorStoreMountDiscovery, parseConnectorStoreMountsFromEnv } from '../src/workers/email-source/server.ts';
+import { createConnectorStoreMountDiscovery, parseConnectorStoreMountsFromEnv } from '../src/workers/engine/runtime/connector-mounts.ts';
 import {
   createDropboxConnectorStore,
   DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
@@ -136,7 +136,7 @@ describe('connector-store mount declaration guards', () => {
   // declared below that line is still in its temporal dead zone during startup,
   // and the first function that reads it throws ReferenceError.
   test('worker declares no top-level bindings after its entrypoint', () => {
-    const source = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+    const source = readFileSync(join(import.meta.dir, '../src/workers/engine/server.ts'), 'utf8');
     const entrypoint = source.indexOf('\nif (import.meta.main) {');
     expect(entrypoint).toBeGreaterThan(0);
     const late = source.slice(entrypoint).split('\n').filter(line => /^(export )?(const|let|class) /.test(line));

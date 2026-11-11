@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { parseCanaryAccounts } from '../scripts/release-check/canary.ts';
 import {
   askQuestion, checkClaudeDashboard, checkClaudePrivacy, clientAdapter, dashboardFrameFound,
-  evaluateClaudeHidden, evaluateClaudeTools, evaluateTurn, EXPAND_PANEL_SCRIPT, openTab, clickIn, runWebClients,
+  evaluateClaudeHidden, evaluateClaudePanelHidden, evaluateClaudeTools, evaluateTurn, EXPAND_PANEL_SCRIPT, openTab, clickIn, runWebClients,
   CLAUDE_HIDDEN_PROMPT, CLAUDE_DASHBOARD_PROMPT, CLAUDE_TOOLS_PROMPT, type AppFrame, type AskTimings, type BrowserSession, type ClientQuestion,
   type PageState, type Tab, type TurnObservation,
 } from '../scripts/release-check/web-clients.ts';
@@ -93,7 +93,8 @@ describe('Claude MCP App canary', () => {
   test('accounts validate an optional boolean without changing existing accounts', () => {
     const raw = { clients: ['claude'], questions: 'questions.json' };
     const parse = (extra: object) => parseCanaryAccounts({ ...raw, ...extra }, () => [privateQ]);
-    expect(parse({})).not.toHaveProperty('claude_app');
+    // Left out, the leg expects the product default (off), so it checks Claude gets the answer tools.
+    expect(parse({}).claude_app).toBe(false);
     expect(parse({ claude_app: true }).claude_app).toBe(true);
     expect(parse({ claude_app: false }).claude_app).toBe(false);
     for (const value of ['on', 'false', 1, null, {}]) expect(() => parse({ claude_app: value })).toThrow('claude_app must be true or false');
@@ -199,6 +200,14 @@ describe('Claude MCP App canary', () => {
     }
   });
 
+  test('app-only values the panel saw fail the dashboard hidden-values check only as whole words', () => {
+    const sender = 'olympus-canary-1b2c3d4e-0000-4000-8000-000000000000@example.invalid';
+    expect(evaluateClaudePanelHidden(observation('I only saw the dashboard summary: Olympus is ready.'), [sender]).status).toBe('pass');
+    expect(evaluateClaudePanelHidden(observation(`The panel listed a rule for ${sender}.`), [sender]).status).toBe('fail');
+    expect(evaluateClaudePanelHidden(observation('Keep my legal folder private, a description.'), ['Keep my legal folder private']).status).toBe('fail');
+    expect(evaluateClaudePanelHidden({ inconclusive: 'Claude is signed out' }, [sender]).status).toBe('skip');
+  });
+
   test('renewal, sign-out and bot checks remain inconclusive for the new probes', async () => {
     for (const obs of [{ inconclusive: 'Claude showed a bot check' }, { inconclusive: 'Claude is signed out' }, observation('Please reconnect Olympus.')]) {
       expect(evaluateClaudeTools(obs).status).toBe('skip');
@@ -212,7 +221,9 @@ describe('Claude MCP App canary', () => {
 
   test('privacy raising applies without confirmation, lowering asks, cancel retains it, and cleanup restores existing rules', async () => {
     const host = privacyFrame(); const checks: CheckResult[] = [];
-    await checkClaudePrivacy(host.frame, host.timings, async (check) => { checks.push(check); });
+    const panelOnly = await checkClaudePrivacy(host.frame, host.timings, async (check) => { checks.push(check); });
+    // The run's own temporary sender is always a panel-only value for the hidden-values probe.
+    expect(panelOnly.some((value) => /^olympus-canary-[0-9a-f-]{36}@example\.invalid$/.test(value))).toBe(true);
     expect(statuses(checks)).toEqual({ 'web.claude.privacy.raising': 'pass', 'web.claude.privacy.lowering': 'pass', 'web.claude.privacy.cancel': 'pass', 'web.claude.privacy.undo': 'pass' });
     expect(host.saved()).toEqual(host.original);
     expect(host.calls).toHaveLength(2); // Addition and final undo. Cancel never writes.
@@ -339,10 +350,12 @@ describe('Claude MCP App canary', () => {
         expect(result.checks.some((check) => check.id === 'web.claude.answer-tools')).toBe(mode === false);
         expect(result.checks.some((check) => check.id === 'web.claude.dashboard')).toBe(mode === true);
         if (mode) {
-          expect(prompts).toEqual([privateQ.prompt, CLAUDE_HIDDEN_PROMPT, CLAUDE_DASHBOARD_PROMPT]);
+          // The dashboard's hidden-values probe stays in the dashboard's chat (no third visit).
+          expect(prompts).toEqual([privateQ.prompt, CLAUDE_HIDDEN_PROMPT, CLAUDE_DASHBOARD_PROMPT, CLAUDE_HIDDEN_PROMPT]);
           expect(visits).toHaveLength(2);
+          expect(statuses(result.checks)['web.claude.dashboard.hidden-values']).toBe('pass');
           const extras = result.checks.filter((check) => check.id === 'web.claude.dashboard' || check.id.endsWith('hidden-values') || check.id.startsWith('web.claude.privacy.'));
-          expect(extras).toHaveLength(6);
+          expect(extras).toHaveLength(7);
           for (const check of extras) expect(result.screens.some((screen) => screen.label === check.title && existsSync(screen.path))).toBe(true);
           expect(host.saved()).toEqual(host.original);
         } else expect(prompts).toEqual(mode === false ? [CLAUDE_TOOLS_PROMPT, privateQ.prompt] : [privateQ.prompt]);

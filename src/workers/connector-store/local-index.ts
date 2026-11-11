@@ -1,8 +1,9 @@
 import { iterateRows } from '../../core/sqlite-rows.ts';
 import { assertWritableStoreOpenAllowed, writableStoreOpensForbidden } from '../../core/store-write-guard.ts';
 import type { PeopleCitationName, PeopleSenderIdentity, PeopleSenderObservation } from '../../core/people-index.ts';
-import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
-import { extractionJobsDbPaths, oweExtractionRereadAfterRevive } from '../file-extraction/job-names.ts';
+import { unreadHoldDisposition, type UnreadHoldDisposition } from '../file-extraction/unreadable-files.ts';
+import type { ItemExtractionOutcome, ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
+import { jobLedgerPathsToVisit, oweExtractionRereadAfterRevive } from '../file-extraction/job-names.ts';
 import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
 import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled, withKeywordExpansionDisabled } from '../../core/source-index/keyword-context.ts';
 import { storeKeywordLanguages } from '../../core/source-index/keyword-languages.ts';
@@ -65,6 +66,7 @@ import {
   sweepMediaCache,
 } from '../../core/media-cache.ts';
 import { readyStillImageFormats } from '../../core/still-image-readiness.ts';
+import { olympusDataRoot, pathResolvesWithin } from '../../core/olympus-layout.ts';
 import type { StoreHolder } from '../../core/store-identity.ts';
 import {
   STILL_IMAGE_FORMATS,
@@ -92,7 +94,7 @@ import {
 } from '../classification/tier-ledger.ts';
 import { conversationOrderedSniffer, itemHasNonTextContent, classifyContentTier, heldUntilJudged, isImageMediaType, namesDecidedByOwner, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
 import { screenedSecretLocator } from '../classification/secret-locations.ts';
-import { findTierSetLedger } from '../classification/tier-set-binding.ts';
+import { assertStoreTierLedgerCanOpen, findTierSetLedger } from '../classification/tier-set-binding.ts';
 import {
   decideItemTiers,
   placeInExistingStore,
@@ -677,6 +679,15 @@ function createConnectorStoreItemTextVersions(db: Database): void {
         AND NOT EXISTS (SELECT 1 FROM item_text_versions WHERE item_pk = OLD.item_pk);
     END;
   `);
+}
+
+/** A recorded media path inside this install's media cache or data root. */
+function mediaPathInThisInstall(path: string): boolean {
+  try {
+    return pathResolvesWithin(mediaCacheDir(), path) || pathResolvesWithin(olympusDataRoot(), path);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -2107,7 +2118,15 @@ export interface ConnectorStoreKeywordFtsOptions {
   locate?: boolean;
   relaxed?: boolean;
   privatePrecision?: boolean;
+  /** One lane's item-level group answers; stays on this thread, never sent to the read pool. */
+  conceptHitMemo?: ConnectorStoreConceptHitMemo;
 }
+
+type ConnectorStoreConceptHitMemo = Map<string, Map<number, {
+  local_item_id: string;
+  source_version: string | null;
+  hit: boolean;
+}>>;
 
 /** A keyword search's rows, whether more may match, and each row's concept coverage. */
 export interface ConnectorStoreKeywordSearch {
@@ -2926,6 +2945,20 @@ export interface ConnectorStoreOwnedSearchFacetRefreshSummary {
   refreshedLocalItemIds: string[];
 }
 
+/** Off-thread people reads tried before a store whose visibility keeps moving is read on this thread. */
+const PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3;
+
+/** A people read's row: one sender in one conversation at one tier. */
+interface PeopleObservationRow {
+  provider: string;
+  sender_id: string | null;
+  sender_label: string | null;
+  conversation_id: string | null;
+  trust_tier: string;
+  is_owner: number;
+  item_count: number;
+}
+
 interface ItemRow {
   item_pk: number;
   provider: string;
@@ -3107,6 +3140,7 @@ export class LocalConnectorStore {
         throw new Error('Connector store read-only mode requires a regular non-symlink database file.');
       }
     } else {
+      assertStoreTierLedgerCanOpen(this.dbPath);
       assertWritableStoreOpenAllowed('connector store', this.dbPath);
       if (this.dbPath !== ':memory:') mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
     }
@@ -3135,6 +3169,7 @@ export class LocalConnectorStore {
         createConnectorStoreMediaJudgments(this.db);
         createConnectorStoreItemTextVersions(this.db);
         createConnectorStoreVisibilityTables(this.db);
+        createConnectorStorePeopleIndex(this.db);
         validateConnectorStoreSchema(this.db);
       }
       if (options.readOnly !== true) this.createVisibilityJournal();
@@ -3362,15 +3397,8 @@ export class LocalConnectorStore {
     // by the handle that is kept: check its id, and refuse a different one. A
     // replacement has had its schema migrated by this open before it is
     // checked; that is accepted, since it is closed unused.
-    // A read-only store reads its ledger read-only too, so a read does not
-    // repair or lock the ledger another process is writing. A ledger from an
-    // older build is opened writable to migrate it, as it always was, except
-    // in the engine split's front, which writes nothing: the background migrates it.
-    let opened = new TierLedger({ dbPath: found, now: this.now, ...(this.readOnly ? { readOnly: true } : {}) });
-    if (this.readOnly && !opened.hasCurrentSchema() && !writableStoreOpensForbidden()) {
-      opened.close();
-      opened = new TierLedger({ dbPath: found, now: this.now });
-    }
+    // Readers never migrate; TierLedger rejects an incompatible schema.
+    const opened = new TierLedger({ dbPath: found, now: this.now, readOnly: this.readOnly });
     if (!holdsBoundId(opened)) {
       opened.close();
       throw new TierLedgerUnavailableError(this.corpusId);
@@ -6217,26 +6245,65 @@ export class LocalConnectorStore {
     // for classification) never names anyone: an old Personal copy of an item
     // now judged Private must not make its sender's name shareable.
     const tierHidden = this.tierHiddenItemPks();
-    const heldSql = this.visibilityJournal && this.visibilitySqlMemo;
-    const rows = this.db.query(`
-      SELECT i.provider AS provider, i.sender_id AS sender_id, i.sender_label AS sender_label,
-        i.provider_conversation_id AS conversation_id, i.trust_tier AS trust_tier,
-        MAX(COALESCE(i.sender_is_owner, 0)) AS is_owner, COUNT(*) AS item_count
-      FROM items i
-      WHERE i.tombstoned = 0
-        AND ((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))
-        AND i.item_pk NOT IN (SELECT value FROM json_each(?))
-        ${heldSql ? "AND NOT EXISTS (SELECT 1 FROM temp.tier_visibility_pks v WHERE v.flag = 'held' AND v.item_pk = i.item_pk)" : ''}
-      GROUP BY i.provider, i.sender_id, i.sender_label, i.provider_conversation_id, i.trust_tier
-    `).all(JSON.stringify(heldSql ? tierHidden.hidden : [...tierHidden.hidden, ...tierHidden.held])) as Array<{
-      provider: string;
-      sender_id: string | null;
-      sender_label: string | null;
-      conversation_id: string | null;
-      trust_tier: string;
-      is_owner: number;
-      item_count: number;
-    }>;
+    return this.peopleObservationsFromRows(this.readHere(this.peopleObservationSteps(tierHidden)));
+  }
+
+  /**
+   * The same senders, read on this store's read pool (#1305): on a large
+   * install the read held the worker's thread for about a minute. The hidden
+   * and held copies are taken here, on this thread, against the current
+   * ledger, and travel with the query, since the pool's connection cannot see
+   * this connection's temp tables. A store the pool cannot read is read here.
+   * Unlike a read on this thread, writes can land between taking that set and
+   * the pool's read, and an item written and held in that gap would name its
+   * sender: the read counts only when the store's visibility marker did not
+   * move across it, and is taken again otherwise. A store that keeps moving
+   * (a judging backlog moves the ledger's cursor on every verdict) is read on
+   * this thread after that, with no gap between the set and the read: an
+   * index-only scan now, so about a second on a large store, not the minute
+   * this read once took (#1305).
+   */
+  async peopleObservationsOffThread(): Promise<PeopleSenderObservation[]> {
+    if (!offThreadReadsSupported(this.dbPath)) return this.peopleObservations();
+    for (let attempt = 0; attempt < PEOPLE_OFF_THREAD_READ_ATTEMPTS; attempt += 1) {
+      const marker = this.peopleVisibilityMarker();
+      const tierHidden = await this.tierHiddenItemPksInTurns();
+      const steps = this.peopleObservationSteps(tierHidden);
+      let step = steps.next();
+      while (!step.done) step = steps.next(await readOnPool(this.dbPath, step.value));
+      if (this.peopleVisibilityMarker() === marker) return this.peopleObservationsFromRows(step.value);
+    }
+    return this.peopleObservations();
+  }
+
+  private *peopleObservationSteps(tierHidden: { hidden: readonly number[]; held: readonly number[] }): Generator<StoreRead, PeopleObservationRow[], unknown> {
+    return (yield this.peopleObservationRead([...tierHidden.hidden, ...tierHidden.held])) as PeopleObservationRow[];
+  }
+
+  /**
+   * One row per sender, conversation and tier. The WHERE clause repeats the
+   * partial predicate of idx_connector_store_items_people word for word, and
+   * every column read is in that index (item_pk is the rowid it carries), so
+   * SQLite answers from the index alone, in GROUP BY order, without reading
+   * a row's text (createConnectorStorePeopleIndex).
+   */
+  private peopleObservationRead(excludedItemPks: readonly number[]): StoreRead {
+    return {
+      mode: 'all',
+      sql: `
+        SELECT i.provider AS provider, i.sender_id AS sender_id, i.sender_label AS sender_label,
+          i.provider_conversation_id AS conversation_id, i.trust_tier AS trust_tier,
+          MAX(COALESCE(i.sender_is_owner, 0)) AS is_owner, COUNT(*) AS item_count
+        FROM items i
+        WHERE i.tombstoned = 0
+          AND ${PEOPLE_SENDER_PREDICATE}
+          AND i.item_pk NOT IN (SELECT value FROM json_each(?))
+        GROUP BY i.provider, i.sender_id, i.sender_label, i.provider_conversation_id, i.trust_tier`,
+      params: [JSON.stringify(excludedItemPks)],
+    };
+  }
+
+  private peopleObservationsFromRows(rows: readonly PeopleObservationRow[]): PeopleSenderObservation[] {
     const bySender = new Map<string, PeopleSenderObservation & { conversations: Set<string>; anyPublic: boolean }>();
     for (const row of rows) {
       const key = `${row.provider}\u0000${row.sender_id ?? ''}\u0000${row.sender_label ?? ''}`;
@@ -7956,7 +8023,9 @@ export class LocalConnectorStore {
           .get(entry.media_sha256) as { present: number } | null;
         // The media cache refuses any path that is not its own `<sha256>.jpg`.
         if (!referenced) {
-          releaseMediaCacheFile(entry.media_path, entry.media_sha256, this.mediaHolder);
+          // A copied store keeps the original install's media paths; it gives
+          // up only a file in this install's own cache (#1414).
+          if (mediaPathInThisInstall(entry.media_path)) releaseMediaCacheFile(entry.media_path, entry.media_sha256, this.mediaHolder);
           // The judgment goes with the last chunk that carried the picture.
           if (this.mediaJudgmentsPresent) this.db.query('DELETE FROM media_judgments WHERE media_sha256 = ?').run(entry.media_sha256);
         }
@@ -8901,6 +8970,9 @@ export class LocalConnectorStore {
       SET sender_id = ?, sender_label = ?, sender_is_owner = ?
       WHERE item_pk = ?
     `);
+    const noteChange = this.db.query(`
+      INSERT INTO item_visibility_feed (provider, account_scope, conversation_key, provider_item_id) VALUES (?, ?, ?, ?)
+    `);
 
     this.db.transaction(() => {
       for (const record of records) {
@@ -8958,8 +9030,16 @@ export class LocalConnectorStore {
           senderIsOwner,
           row.item_pk,
         );
+        // Who wrote an item is not visibility, so no trigger notes it, but the
+        // people index reads it: noted here, the change moves every
+        // connection's people marker and the refresh reads this store again
+        // (#1305; nothing forces a periodic rebuild any more).
+        noteChange.run(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
         counts.itemsRepaired += 1;
         outputDigest.update(JSON.stringify({ identity: digestIdentity, status: 'repaired' }));
+      }
+      if (counts.itemsRepaired > 0) {
+        this.db.query(`DELETE FROM item_visibility_feed WHERE seq <= (SELECT MAX(seq) - ${ITEM_VISIBILITY_FEED_RETENTION} FROM item_visibility_feed)`).run();
       }
     })();
 
@@ -10268,7 +10348,7 @@ export class LocalConnectorStore {
     } catch {
       // The default path and the ledgers this process has open are still visited.
     }
-    for (const jobsPath of new Set([...extractionJobsDbPaths(), ...known])) {
+    for (const jobsPath of jobLedgerPathsToVisit(known).visit) {
       try {
         oweExtractionRereadAfterRevive(jobsPath, item);
       } catch {
@@ -13014,6 +13094,7 @@ export class LocalConnectorStore {
   ): Generator<StoreRead, ConnectorStoreKeywordSearch, unknown> {
     const selectedFilters = connectorStoreFilterSql(filters);
     const selectedFtsScope = connectorStoreFtsScopeSql(filters);
+    const conceptScope = connectorStoreFtsScopeSql(filters, 'r.chunk_pk');
     const terms = ftsOptions.relaxed ? (ftsOptions.privatePrecision ? yield* this.privateRelaxedFtsQuerySteps(query) : toRelaxedLocalFtsQuery(query)) : toFtsQuery(query, ftsOptions);
     if (!terms) return { rows: [], saturated: false, concepts: { total: 0, matched: new Map() } };
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
@@ -13058,12 +13139,20 @@ export class LocalConnectorStore {
     // A bound that could not prove one page will not prove a later, deeper one.
     let tryBound = true;
     while (true) {
-      const rankedPage = (bound: number | undefined): StoreRead => ({ mode: 'all', sql: `
-        ${bound === undefined ? '' : `WITH top AS MATERIALIZED (
+      // Which FTS rows a page is ranked from: the best `bound` of them, every
+      // row ranking at or above `atOrAbove` (the rows tied with the bound, and
+      // better), or every match.
+      type Ranked = { bound: number } | { atOrAbove: number } | undefined;
+      const rankedPage = (from: Ranked): StoreRead => {
+        const bound = from === undefined ? undefined : 'bound' in from ? from.bound : undefined;
+        const atOrAbove = from === undefined ? undefined : 'atOrAbove' in from ? from.atOrAbove : undefined;
+        const top = from === undefined ? undefined : bound !== undefined ? 'top' : 'tied';
+        return { mode: 'all', sql: `
+        ${top === undefined ? '' : `WITH ${top} AS MATERIALIZED (
           SELECT rowid AS fts_rowid, rank FROM connector_store_fts
           WHERE connector_store_fts MATCH ?
             AND rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'
-          ORDER BY rank LIMIT ?
+            ${bound !== undefined ? 'ORDER BY rank LIMIT ?' : 'AND (rank + 0.0) <= ?'}
         )`}
         SELECT
           i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
@@ -13076,12 +13165,12 @@ export class LocalConnectorStore {
           -- item rather than an arbitrary one. That is exactly the chunk the
           -- citation should point at.
           connector_store_fts.chunk_pk AS chunk_pk,
-          ${bound === undefined ? 'MIN(connector_store_fts.rank) AS rank' : `MIN(top.rank) AS rank,
+          ${top === undefined ? 'MIN(connector_store_fts.rank) AS rank' : top === 'tied' ? 'MIN(tied.rank) AS rank' : `MIN(top.rank) AS rank,
           (SELECT COUNT(*) FROM top) AS bound_rows,
           (SELECT MAX(rank) FROM top) AS bound_rank`}
-        FROM ${bound === undefined ? 'connector_store_fts' : 'top JOIN connector_store_fts ON connector_store_fts.rowid = top.fts_rowid'}
+        FROM ${top === undefined ? 'connector_store_fts' : `${top} JOIN connector_store_fts ON connector_store_fts.rowid = ${top}.fts_rowid`}
         JOIN items i ON i.item_pk = connector_store_fts.item_pk
-        WHERE ${bound === undefined ? `connector_store_fts MATCH ?
+        WHERE ${top === undefined ? `connector_store_fts MATCH ?
           AND connector_store_fts.rank MATCH 'bm25(${CONNECTOR_STORE_FTS_TITLE_WEIGHT}, 1.0)'` : '1'}
           AND i.tombstoned = 0
           AND LOWER(COALESCE(i.mime_type, '')) NOT IN (${CONTAINER_MIME_TYPES_SQL})
@@ -13095,28 +13184,41 @@ export class LocalConnectorStore {
       `, params: [
         terms,
         ...(bound === undefined ? [] : [bound]),
+        ...(atOrAbove === undefined ? [] : [atOrAbove]),
         ...(selectedAccount ? [selectedAccount] : []),
         ...selectedFilters.params,
         ...selectedFtsScope.params,
         pageSize,
         scanned,
-      ] });
+      ] };
+      };
       // Rank the best FTS rows first, then read only their items (#1242).
       // Every match outside those rows ranks at or below the last of them,
       // so the page is the full ranking's page when the bound held every
       // match, or when the page filled and its last item ranks strictly
       // above the bound. Otherwise (ties at the bound, or filters hid too
       // many of the best rows) the full ranking runs, as it always did.
+      // A full page whose last item ties with the bound is decided by the rows
+      // ranking at or above the bound's rank: any other match ranks strictly
+      // below every one of them. Those rows are read instead of every match,
+      // and their page holds at least the bounded page's items, so it is full.
       const bound = Math.min(KEYWORD_RANKED_BOUND_MAX, Math.max(KEYWORD_RANKED_BOUND_MIN, (scanned + pageSize) * KEYWORD_RANKED_BOUND_ROWS_PER_ITEM));
-      const boundedPage = tryBound ? (yield rankedPage(bound)) as Array<ItemRow & { bound_rows?: number; bound_rank?: number }> : [];
+      const boundedPage = tryBound ? (yield rankedPage({ bound })) as Array<ItemRow & { bound_rows?: number; bound_rank?: number }> : [];
       const head = boundedPage[0];
       const last = boundedPage.at(-1);
+      const full = boundedPage.length === pageSize;
       const proved = head !== undefined && last !== undefined && (head.bound_rows! < bound
-        || (boundedPage.length === pageSize && last.rank < head.bound_rank!));
-      if (!proved) tryBound = false;
+        || (full && last.rank < head.bound_rank!));
+      const tied = !proved && full && head !== undefined
+        ? (yield rankedPage({ atOrAbove: head.bound_rank! })) as ItemRow[]
+        : undefined;
+      // A read pool read is its own snapshot: the tied rows are trusted only
+      // when they filled the page in theirs.
+      const tiedProved = tied !== undefined && tied.length === pageSize;
+      if (!proved && !tiedProved) tryBound = false;
       const page = proved
         ? boundedPage.map(({ bound_rows: _rows, bound_rank: _rank, ...row }) => row as ItemRow)
-        : (yield rankedPage(undefined)) as ItemRow[];
+        : tiedProved ? tied : (yield rankedPage(undefined)) as ItemRow[];
       scanned += page.length;
       exhausted = page.length < pageSize;
       // OFFSET pages over one ordering. On the read pool each page is its own
@@ -13125,31 +13227,11 @@ export class LocalConnectorStore {
       for (const row of rows) seen.add(row.item_pk);
       let signalled = rows;
       if (minimumSignal && rows.length > 0) {
-        const pks = rows.map((row) => row.item_pk);
-        const placeholders = pks.map(() => '?').join(', ');
-        // On the read pool each read is its own transaction, so a pk the FTS
-        // read returned may name another item by the time a follow-up read
-        // runs (ingestion writes in between), or the same item at a newer
-        // version. A hit counts only for the item and version the row was read
-        // as; on one connection they always agree.
-        const itemAt = new Map(rows.map((row) => [row.item_pk, row]));
-        const sameItem = (hit: { item_pk: number; local_item_id: string; source_version: string | null }) => {
-          const row = itemAt.get(hit.item_pk);
-          return row !== undefined && row.local_item_id === hit.local_item_id && (row.source_version ?? null) === (hit.source_version ?? null);
-        };
         for (const [groupIndex, group] of groups.entries()) {
-          const hits = ((yield { mode: 'all', sql: `
-            SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id, i.source_version
-            FROM connector_store_fts
-            JOIN items i ON i.item_pk = connector_store_fts.item_pk
-            WHERE connector_store_fts MATCH ?
-              AND connector_store_fts.item_pk IN (${placeholders})
-              ${selectedFtsScope.sql}
-          `, params: [sourceIndexFtsGroupQuery(group, exact), ...pks, ...selectedFtsScope.params] }) as Array<{ item_pk: number; local_item_id: string; source_version: string | null }>)
-            .filter(sameItem);
-          for (const hit of hits) {
-            matchedGroups.set(hit.item_pk, (matchedGroups.get(hit.item_pk) ?? 0) + 1);
-            matchedGroupIndexes.set(hit.item_pk, [...(matchedGroupIndexes.get(hit.item_pk) ?? []), groupIndex]);
+          const hits = yield* this.conceptHitsSteps(rows, sourceIndexFtsGroupQuery(group, exact), conceptScope, ftsOptions.conceptHitMemo);
+          for (const itemPk of hits) {
+            matchedGroups.set(itemPk, (matchedGroups.get(itemPk) ?? 0) + 1);
+            matchedGroupIndexes.set(itemPk, [...(matchedGroupIndexes.get(itemPk) ?? []), groupIndex]);
           }
         }
         const enough = (row: ItemRow) => (matchedGroups.get(row.item_pk) ?? 0) >= required;
@@ -13163,14 +13245,8 @@ export class LocalConnectorStore {
         const uniqueTerms = weights && weights.population >= 10
           ? groups.flatMap((group, index) => weights.counts[index] === 1 ? group.filter(term => literalTopics.has(term)) : [])
           : [];
-        const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : ((yield { mode: 'all', sql: `
-          SELECT DISTINCT connector_store_fts.item_pk, i.local_item_id, i.source_version
-          FROM connector_store_fts JOIN items i ON i.item_pk = connector_store_fts.item_pk
-          WHERE connector_store_fts MATCH ? AND connector_store_fts.item_pk IN (${placeholders})
-            ${selectedFtsScope.sql}
-        `, params: [sourceIndexFtsGroupQuery(uniqueTerms, exact), ...pks, ...selectedFtsScope.params] }) as Array<{ item_pk: number; local_item_id: string; source_version: string | null }>)
-          .filter(sameItem)
-          .map(row => row.item_pk));
+        const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? []
+          : yield* this.conceptHitsSteps(rows, sourceIndexFtsGroupQuery(uniqueTerms, exact), conceptScope, ftsOptions.conceptHitMemo));
         signalled = rows.filter((row) => {
           if (enough(row) || uniqueLiteralMatches.has(row.item_pk)) return true;
           if (!weights) return false;
@@ -13241,6 +13317,42 @@ export class LocalConnectorStore {
     };
   }
 
+  private *conceptHitsSteps(
+    rows: readonly ItemRow[],
+    groupQuery: string,
+    scope: ReturnType<typeof connectorStoreFtsScopeSql>,
+    memo: ConnectorStoreConceptHitMemo | undefined,
+  ): Generator<StoreRead, number[], unknown> {
+    const key = JSON.stringify([groupQuery, scope.sql, scope.params]);
+    const answers = memo?.get(key);
+    // A pk can be reused, and each pool read is its own transaction. Both a
+    // fresh hit and a memo answer count only for the candidate's item/version.
+    const sameItem = (row: ItemRow, answer: { local_item_id: string; source_version: string | null } | undefined) =>
+      answer !== undefined && row.local_item_id === answer.local_item_id && (row.source_version ?? null) === (answer.source_version ?? null);
+    if (answers && rows.every(row => sameItem(row, answers.get(row.item_pk)))) {
+      return rows.filter(row => answers.get(row.item_pk)!.hit).map(row => row.item_pk);
+    }
+    // If any answer is unknown, read every pk on the page: the FTS doclist
+    // walk costs the same, and this refreshes the known answers too.
+    const hits = (yield connectorStoreConceptHitRead(rows.map(row => row.item_pk), groupQuery, scope)) as Array<{
+      item_pk: number; local_item_id: string; source_version: string | null;
+    }>;
+    const hitAt = new Map(hits.map(hit => [hit.item_pk, hit]));
+    const remembered = answers ?? new Map();
+    const matched: number[] = [];
+    for (const row of rows) {
+      const hit = hitAt.get(row.item_pk);
+      if (hit && !sameItem(row, hit)) {
+        remembered.delete(row.item_pk);
+        continue;
+      }
+      if (hit) matched.push(row.item_pk);
+      if (memo) remembered.set(row.item_pk, { local_item_id: row.local_item_id, source_version: row.source_version ?? null, hit: hit !== undefined });
+    }
+    memo?.set(key, remembered);
+    return matched;
+  }
+
   private *privateRelaxedFtsQuerySteps(query: string): Generator<StoreRead, string, unknown> {
     const terms = relaxedLocalFtsTerms(query);
     if (terms.length <= 2) return terms.join(' OR ');
@@ -13305,7 +13417,7 @@ export class LocalConnectorStore {
       if (count === undefined) {
         count = ((yield {
           mode: 'get',
-          sql: 'SELECT COUNT(DISTINCT item_pk) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ?',
+          sql: 'SELECT COUNT(DISTINCT r.item_pk) AS count FROM connector_store_fts_rows r WHERE r.fts_rowid IN (SELECT rowid FROM connector_store_fts WHERE connector_store_fts MATCH ?)',
           params: [groupQuery],
         }) as { count: number }).count;
         remember(groupQuery, count);
@@ -13730,10 +13842,10 @@ export class LocalConnectorStore {
     const key = JSON.stringify(scope ?? null);
     if (!this.settledUnreadableCountMemo?.has(key)) {
       try {
-        const count = (await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true }))).length;
+        const counts = this.unreadHoldCounts(await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
         const memos = this.settledUnreadableCountMemo ??= new Map();
         if (memos.size > 32) memos.clear();
-        memos.set(key, { at: Date.now(), count });
+        memos.set(key, { at: Date.now(), ...counts });
       } catch {
         // A closed or busy store: the status read counts it itself.
       }
@@ -13741,7 +13853,7 @@ export class LocalConnectorStore {
   }
 
   /** How many settled unreadable items the counts show, reused up to `maxAgeMs` per scope. */
-  private settledUnreadableCount(scope: ConnectorStoreStatusScope | undefined, maxAgeMs: number): number {
+  private settledUnreadableCount(scope: ConnectorStoreStatusScope | undefined, maxAgeMs: number): { count: number; waitingPks: number[]; policyPks: number[] } {
     const key = JSON.stringify(scope ?? null);
     const memos = this.settledUnreadableCountMemo ??= new Map();
     const memo = memos.get(key);
@@ -13749,12 +13861,12 @@ export class LocalConnectorStore {
       // As the hidden-copy set: an older count is served while a new one is
       // counted in turns (refreshTierHiddenCountsInTurns).
       if (Date.now() - memo.at >= maxAgeMs) this.refreshSettledUnreadableCountInTurns(key, scope);
-      return memo.count;
+      return memo;
     }
-    const count = runSteps(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true })).length;
+    const counts = this.unreadHoldCounts(runSteps(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
     if (memos.size > 32) memos.clear();
-    memos.set(key, { at: Date.now(), count });
-    return count;
+    memos.set(key, { at: Date.now(), ...counts });
+    return counts;
   }
 
   private settledUnreadableCountRefresh: Set<string> | undefined;
@@ -13765,10 +13877,10 @@ export class LocalConnectorStore {
     running.add(key);
     void (async () => {
       try {
-        const count = (await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true }))).length;
+        const counts = this.unreadHoldCounts(await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
         const memos = this.settledUnreadableCountMemo ??= new Map();
         if (memos.size > 32) memos.clear();
-        memos.set(key, { at: Date.now(), count });
+        memos.set(key, { at: Date.now(), ...counts });
       } catch {
         // A closed or busy store: the older count stands until the next ask.
       } finally {
@@ -13779,21 +13891,22 @@ export class LocalConnectorStore {
 
   // Made on first use: a class-field initializer is a load-time side effect
   // that pulls this module into the plugin bundle (plugin-bundle-no-bun-sqlite).
-  private settledUnreadableCountMemo: Map<string, { at: number; count: number }> | undefined;
+  private settledUnreadableCountMemo: Map<string, { at: number; count: number; waitingPks: number[]; policyPks: number[] }> | undefined;
 
-  private extractionEnded: ((identity: TierLedgerIdentity) => boolean) | undefined;
+  private extractionOutcome: ((identity: TierLedgerIdentity, localItemId: string) => ItemExtractionOutcome | undefined) | undefined;
 
-  /**
-   * Whether an item's extraction has ended (a job ran and none is owed). The
-   * worker sets it on file stores only. A file kept Private before its text
-   * was read is waiting, not unreadable, until then, so the count and the
-   * list leave it out (2026-11-04: 7,249 Dropbox files waiting for
-   * extraction read as "could not be read"). Without a probe every settled
-   * item counts.
-   */
-  setExtractionEndedProbe(probe: ((identity: TierLedgerIdentity) => boolean) | undefined): void {
-    this.extractionEnded = probe;
+  /** The job's terminal outcome; absent evidence leaves the hold waiting. */
+  setExtractionOutcomeProbe(probe: ((identity: TierLedgerIdentity, localItemId: string) => ItemExtractionOutcome | undefined) | undefined): void {
+    this.extractionOutcome = probe;
     this.settledUnreadableCountMemo = undefined;
+  }
+
+  private unreadHoldCounts(rows: Array<{ row: { item_pk: number }; disposition: UnreadHoldDisposition }>): { count: number; waitingPks: number[]; policyPks: number[] } {
+    return {
+      count: rows.filter(item => item.disposition.kind === 'cannot_read').length,
+      waitingPks: rows.filter(item => item.disposition.kind === 'waiting').map(item => item.row.item_pk),
+      policyPks: rows.filter(item => item.disposition.kind === 'by_choice').map(item => item.row.item_pk),
+    };
   }
 
   /**
@@ -13804,8 +13917,8 @@ export class LocalConnectorStore {
    */
   private *settledUnreadableRowsSteps(
     scope: ConnectorStoreStatusScope | undefined,
-    options: { withoutSecretsOverrides?: boolean } = {},
-  ): Generator<void, Array<{ identity: TierLedgerIdentity; row: { local_item_id: string; title: string | null; source_version: string | null } }>> {
+    options: { withoutSecretsOverrides?: boolean; includeUnsettled?: boolean } = {},
+  ): Generator<void, Array<{ identity: TierLedgerIdentity; row: { item_pk: number; local_item_id: string; title: string | null; source_version: string | null }; disposition: UnreadHoldDisposition }>> {
     if (scope?.itemsAllowed === false || scope?.contentAllowed === false) return [];
     const ledger = this.visibilityLedger();
     if (!ledger) return [];
@@ -13816,7 +13929,7 @@ export class LocalConnectorStore {
       : 'metadata_layer_settled_unreadable');
     const filters = connectorStoreFilterSql(scope?.contentFilters ?? scope?.itemFilters);
     const account = normalizeOptionalAccountScope(scope?.accountScope);
-    const ended = this.extractionEnded;
+    const outcome = this.extractionOutcome;
     const rows = yield* this.itemRowsForIdentitiesSteps(identities, (identity) => identity.providerConversationId ?? '', {
       // A child whose source said it has no bytes (media an export left out, a
       // chat file the capture did not keep) was never a file Olympus failed to
@@ -13827,8 +13940,17 @@ export class LocalConnectorStore {
       sql: `${this.childItemColumnsPresent ? 'AND COALESCE(i.bytes_available, 1) <> 0' : ''} ${account ? 'AND i.account_scope = ?' : ''} ${filters.sql}`,
       params: [...(account ? [account] : []), ...filters.params],
     });
-    return rows.map((row) => ({ identity: identities[row.idx]!, row }))
-      .filter(({ identity }) => !ended || ended(identity));
+    const matched: Array<{ identity: TierLedgerIdentity; row: typeof rows[number]; disposition: UnreadHoldDisposition }> = [];
+    for (let index = 0; index < rows.length; index += 1) {
+      // Outcome lookups are indexed, but a large hold population still needs
+      // a turn between slices, just like the store and ledger reads above.
+      if (index > 0 && index % SETTLED_UNREADABLE_ITEMS_SLICE === 0) yield;
+      const row = rows[index]!;
+      const identity = identities[row.idx]!;
+      const disposition = unreadHoldDisposition(outcome?.(identity, row.local_item_id));
+      if (options.includeUnsettled || disposition.kind === 'cannot_read') matched.push({ identity, row, disposition });
+    }
+    return matched;
   }
 
   /**
@@ -13892,7 +14014,8 @@ export class LocalConnectorStore {
     const out: ExtractionUnreadableItem[] = [];
     for (let index = 0; index < matched.length; index += 1) {
       if (index > 0 && index % SETTLED_UNREADABLE_ITEMS_SLICE === 0) yield;
-      const { identity, row } = matched[index]!;
+      const { identity, row, disposition } = matched[index]!;
+      if (disposition.kind !== 'cannot_read') continue;
       const override = ledger.getOverride(identity);
       if (override?.kind === 'tier' && override.tier === 'secrets') continue;
       const record = ledger.getCurrent(identity);
@@ -13901,8 +14024,7 @@ export class LocalConnectorStore {
         providerItemId: identity.providerItemId, localItemId: row.local_item_id,
         approvedScopeKey: `${identity.provider}.${identity.accountScope}`,
         ...(row.title ? { name: row.title } : {}), ...(row.source_version ? { sourceVersion: row.source_version } : {}) },
-        // Kept Private before its text was read: unreadable-files.ts UNREAD_PRIVACY_CHECK_MISSING_KIND.
-        failedAt: record.decidedAt, errorKind: 'privacy_check_missing' });
+        failedAt: record.decidedAt, errorKind: disposition.errorKind });
     }
     return out;
   }
@@ -14004,9 +14126,12 @@ export class LocalConnectorStore {
     // holds yet is still waiting to be read, so it counts here even though it
     // stays out of every text, chunk and parity count above: counting it as
     // names only reported a freshly chosen Full folder as already finished.
+    const unreadHolds = this.settledUnreadableCount(scope, options.countsMaxAgeMs ?? 0);
+    const policyHolds = new Set(unreadHolds.policyPks);
     const unread = new Set(tier.metadataLayerContentUnread);
     const keptNamesOnlyPks = tier.metadataLayer.filter((pk) => !unread.has(pk));
-    const fileNamesOnlyNotIn = keptNamesOnlyPks.length > 0
+    const fileNamesOnlyPks = [...new Set([...keptNamesOnlyPks, ...policyHolds])];
+    const fileNamesOnlyNotIn = fileNamesOnlyPks.length > 0
       ? 'AND i.item_pk NOT IN (SELECT value FROM json_each(?))'
       : '';
     const fileScopeWhere = `${scope?.contentAllowed === false ? 'AND 0' : ''}
@@ -14027,13 +14152,13 @@ export class LocalConnectorStore {
       ...(accountScope ? [accountScope] : []),
       ...contentFilters.params,
       ...jsonList(tier.hidden),
-      ...jsonList(keptNamesOnlyPks),
+      ...jsonList(fileNamesOnlyPks),
     ];
     // A scope that says only "older than this is names only" narrows no
     // population, so it must not switch on the file-scope counts below: those
     // belong to a store whose scope picks WHICH files to read.
-    const fileScoped = scope !== undefined && !(scope.contentNotBefore !== undefined
-      && Object.entries(scope).every(([key, value]) => key === 'contentNotBefore' || value === undefined));
+    const fileScoped = policyHolds.size > 0 || (scope !== undefined && !(scope.contentNotBefore !== undefined
+      && Object.entries(scope).every(([key, value]) => key === 'contentNotBefore' || value === undefined)));
     // Rows dated before the window that hold no text. julianday reads any ISO
     // form (Z, fractional seconds, offsets), and COALESCE keeps an unparseable
     // date a plain "not outside" instead of a NULL that NOT would swallow.
@@ -14189,7 +14314,7 @@ export class LocalConnectorStore {
     const tierStatus: ConnectorStoreTierStatus | undefined = tier.hidden.length > 0 || tier.held.length > 0
       || tier.moving > 0 || tier.metadataLayer.length > 0
       ? {
-          pendingClassificationItems: tier.held.length,
+          pendingClassificationItems: new Set([...tier.held, ...unreadHolds.waitingPks]).size,
           supersededChunks: tier.hidden.length > 0
             ? ((yield { sql: `
                 SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))
@@ -14201,7 +14326,7 @@ export class LocalConnectorStore {
             : 0),
         }
       : undefined;
-    const settledUnreadableItems = this.settledUnreadableCount(scope, options.countsMaxAgeMs ?? 0);
+    const settledUnreadableItems = unreadHolds.count;
     const last = this.lastSyncRun();
     return {
       corpusId: this.corpusId,
@@ -15180,9 +15305,10 @@ async function connectorStoreKeywordLaneRows(
   limit: number,
   accountScope: string | undefined,
   filters: ConnectorStoreSearchFilters | undefined,
-  ftsOptions: { prefix?: boolean; locate?: boolean; relaxed?: boolean; privatePrecision?: boolean } = {},
+  ftsOptions: ConnectorStoreKeywordFtsOptions = {},
   deadlineAtMs?: number,
 ): Promise<ConnectorStoreKeywordLane> {
+  ftsOptions = { ...ftsOptions, conceptHitMemo: ftsOptions.conceptHitMemo ?? new Map() };
   const pool = deadlineAtMs !== undefined ? { deadlineAtMs } : {};
   const plain = await store.searchItemsDetailedOffThread(query, MAX_SEARCH_RESULTS, accountScope, filters, ftsOptions, pool);
   const rows = plain.rows;
@@ -16567,7 +16693,12 @@ export function tierRowVisible(
   layer: TierSearchLayer,
 ): boolean {
   if (!copies || copies.length === 0) return true;
-  const here = copies.filter((copy) => copy.corpusId === corpusId && copy.state === 'current');
+  // Held text outside the local private lane (a row recorded Personal-first
+  // before #1316, until the settle pass moves its text) waits for its verdict:
+  // it serves no search there, as its answers would be refused. A held item's
+  // names-only copy still serves.
+  const here = copies.filter((copy) => copy.corpusId === corpusId && copy.state === 'current'
+    && !(copy.embedHold && copy.layers !== 'metadata' && copy.trustDomain !== 'secure_local'));
   return copyServingLayer(here, layer) !== undefined;
 }
 
@@ -17372,13 +17503,33 @@ function connectorStoreFilterSql(filters: ConnectorStoreSearchFilters | undefine
   return { sql: clauses.join('\n'), params };
 }
 
-function connectorStoreFtsScopeSql(filters: ConnectorStoreSearchFilters | undefined): {
+function connectorStoreConceptHitRead(
+  pks: readonly number[],
+  groupQuery: string,
+  scope: ReturnType<typeof connectorStoreFtsScopeSql>,
+): StoreRead {
+  return {
+    mode: 'all',
+    sql: `
+      SELECT DISTINCT r.item_pk, i.local_item_id, i.source_version
+      FROM connector_store_fts_rows r JOIN items i ON i.item_pk = r.item_pk
+      WHERE r.item_pk IN (${pks.map(() => '?').join(', ')})
+        AND +r.fts_rowid IN (SELECT rowid FROM connector_store_fts WHERE connector_store_fts MATCH ?)
+        ${scope.sql}
+    `,
+    // Unary + keeps SQLite driving from the mapping table's item_pk index,
+    // rather than looking up every rowid the store-wide FTS match returns.
+    params: [...pks, groupQuery, ...scope.params],
+  };
+}
+
+function connectorStoreFtsScopeSql(filters: ConnectorStoreSearchFilters | undefined, chunkColumn = 'connector_store_fts.chunk_pk'): {
   sql: string;
   params: string[];
 } {
   const normalized = normalizeConnectorStoreSearchFilters(filters);
   const contentRow = `(
-    connector_store_fts.chunk_pk IS NOT NULL
+    ${chunkColumn} IS NOT NULL
     OR NOT EXISTS (SELECT 1 FROM chunks scope_chunk WHERE scope_chunk.item_pk = i.item_pk)
   )`;
   if (!normalized) return { sql: `AND ${contentRow}`, params: [] };
@@ -17403,7 +17554,7 @@ function connectorStoreFtsScopeSql(filters: ConnectorStoreSearchFilters | undefi
   const metadataExpression = `(${metadataOnly.join(' OR ')})`;
   return {
     sql: `AND (
-      (${metadataExpression} AND connector_store_fts.chunk_pk IS NULL)
+      (${metadataExpression} AND ${chunkColumn} IS NULL)
       OR (NOT ${metadataExpression} AND ${contentRow})
     )`,
     params: [...params, ...params],
@@ -18446,6 +18597,26 @@ function createConnectorStoreSenderIndexes(db: Database): void {
       ON items(sender_label);
     CREATE INDEX IF NOT EXISTS idx_connector_store_items_sender_owner
       ON items(sender_is_owner, sender_id);
+  `);
+  createConnectorStorePeopleIndex(db);
+}
+
+/** An item that names its author: what the people index reads (and its index's partial predicate). */
+const PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`;
+
+/**
+ * The people index's sender read as an index-only scan (#1305): every column
+ * it groups, counts or filters on, for authored items only. Without it the
+ * read visited every row in full, overflow pages of the text included (110 MB
+ * for 94k items, where a count read 0.9 MB). Additive, so no schema version:
+ * a store opened by an older build still opens, and keeps it. Built once,
+ * when a writer of this build first opens the store.
+ */
+function createConnectorStorePeopleIndex(db: Database): void {
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_connector_store_items_people
+      ON items(tombstoned, provider, sender_id, sender_label, provider_conversation_id, trust_tier, sender_is_owner)
+      WHERE ${PEOPLE_SENDER_PREDICATE.replaceAll('i.', '')};
   `);
 }
 

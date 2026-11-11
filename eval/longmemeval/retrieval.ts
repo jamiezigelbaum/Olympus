@@ -155,7 +155,7 @@ function connectorFor(items: readonly RawItem[], family: SourceFamily): SourceCo
 
 async function embeddingProviderFor(args: Args): Promise<SourceEmbeddingProvider | undefined> {
   if (!args.embedding) return undefined;
-  const { createSourceIndexEmbeddingProviderFromEnv } = await import('../../src/workers/email-source/server.ts');
+  const { createSourceIndexEmbeddingProviderFromEnv } = await import('../../src/workers/engine/runtime/embedding-providers.ts');
   process.env.OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER ??= 'built-in';
   const provider = createSourceIndexEmbeddingProviderFromEnv();
   if (!provider) throw new Error('No built-in embedding provider could be created from the environment.');

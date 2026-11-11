@@ -19,7 +19,7 @@
 > principal rather than displacing the lane-built (exclusion-carrying)
 > store handle; a declaration that disagrees with the lane's identity is
 > skipped whole (T7). Re-verify any mount claim below against
-> `src/workers/email-source/server.ts` before relying on it.
+> `src/workers/engine/server.ts` before relying on it.
 
 ## Who this is for
 
@@ -329,14 +329,14 @@ the registry and the layout module, so you write none of that code either.
 Two mount idioms exist. Choose:
 
 - **Dedicated runtime factory** — `create<Source>ConnectorStoreRuntime` in
-  `src/workers/email-source/server.ts` (see
+  `src/workers/engine/server.ts` (see
   `createReadwiseConnectorStoreRuntime`), gated by its own
   `OLYMPUS_SOURCE_INDEX_<SOURCE>_CONNECTOR_STORE_ENABLED` and by the credential
   handle's provider/capability/reauth state. Required when the lane needs a
   request budget, a sync handler, and scheduler tasks; every source with a
   folder layout mounts this way.
 - **Generic JSON mount** — `OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON`, parsed
-  in `src/workers/email-source/server.ts` (`parseConnectorStoreMountsFromEnv`),
+  in `src/workers/engine/server.ts` (`parseConnectorStoreMountsFromEnv`),
   host drop-in `66-connector-stores.conf`. Entries carry
   `corpusId`/`family`/`trustDomain`, plus optionally the all-or-nothing
   principal pair `principalProvider`/`principalAccountScope` (T3/K1 — required
@@ -355,7 +355,7 @@ Two ordering rules the tests pin:
   invalid-env cases.
 - **Mounting is not serving.** For a source that shadows a live legacy index,
   read authority stays with the legacy lane until an explicit flip; see
-  `readwiseReadAuthorityLane` in `src/workers/email-source/server.ts`. When you
+  `readwiseReadAuthorityLane` in `src/workers/engine/server.ts`. When you
   register the embedding lane for a shadow store, pass `servesReads: false` to
   `registerConnectorStoreEmbeddingLane` so status does not report an empty
   store's embedding state for a corpus the answer path still serves from the

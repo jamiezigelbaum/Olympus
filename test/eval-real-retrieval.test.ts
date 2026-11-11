@@ -7,16 +7,18 @@
 // Synthetic data only: fixture stores in a temp folder, a scripted model.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { createAnalyst, type AnalystModel } from '../src/core/analyst.ts';
+import { analystPromptBytes, createAnalyst, withPromptBudget, type AnalystModel, type AnalystModelRequest } from '../src/core/analyst.ts';
 import type { AnalystResult, EvidencePack } from '../src/core/contracts.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { DROPBOX_TIER_CORPUS_IDS } from '../src/workers/dropbox-files/connector-store.ts';
-import type { AnalystReleaseOutcome } from '../src/workers/source-index/analyst-answer.ts';
+import { DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, fitPackToPromptBytes, type AnalystReleaseOutcome } from '../src/workers/source-index/analyst-answer.ts';
+import { analystPromptFixture } from './helpers/analyst-prompt-fixture.ts';
 import {
   buildEvalPack,
   createEvalDropboxLanes,
   evalAnswerRepeat,
   evalAnswerStageAudit,
+  evalPromptLayout,
   failIncompleteRetrieval,
   evalRetrievalAudit,
   informationalEvalMaxResults,
@@ -151,6 +153,7 @@ describe('the real eval report says where an expected value was lost (#1234)', (
       answerValueTokens: 1,
       answerValueTokensInCitedSeats: 0,
       answerValueTokensUnmatchedShapes: ['9999'],
+      answerValueTokensUnmatchedSeats: [[1]],
       expected: [
         { inPack: true, inPackAsSubstring: true, inAnalystAnswer: true, inReleasedAnswer: false, packSeats: [kestrelSeat], valueSeatCited: false },
         { inPack: false, inPackAsSubstring: false, inAnalystAnswer: false, inReleasedAnswer: false, packSeats: [], valueSeatCited: false },
@@ -251,6 +254,11 @@ describe('the real eval report locates an expected item and value for a miss', (
     expect(evalAnswerStageAudit(question, pack, citing(2), citing(2))).toMatchObject({
       answerCitedSeats: [2], expectedSeatCited: false, expected: [{ valueSeatCited: false }],
     });
+    // How many cited seats hold no expected item: citing every seat still
+    // cites the expected one, and this count shows the rest.
+    expect(evalAnswerStageAudit(question, pack, citing(1), citing(1)).citedSeatsWithoutExpectedItem).toBe(0);
+    expect(evalAnswerStageAudit(question, pack, citing(1, 2), citing(1, 2))).toMatchObject({ expectedSeatCited: true, citedSeatsWithoutExpectedItem: 1 });
+    expect(evalAnswerStageAudit({ expectedAnswerContains: ['4182'] }, pack, citing(1, 2), citing(1, 2)).citedSeatsWithoutExpectedItem).toBeUndefined();
     // The flag for a misreading: is the answer's value in the seat it cites?
     const inSeat = { ...citing(1), answer: 'The total is 4182 dollars, due in March.' } as unknown as AnalystResult;
     expect(evalAnswerStageAudit(question, pack, inSeat, inSeat)).toMatchObject({ answerValueTokens: 1, answerValueTokensInCitedSeats: 1 });
@@ -276,6 +284,19 @@ describe('the real eval report locates an expected item and value for a miss', (
       answerValueTokensUnmatchedShapes: ['9,999', '9999-99-99'],
     });
     expect(evalAnswerStageAudit(question, pack, inSeat, inSeat).answerValueTokensUnmatchedShapes).toEqual([]);
+    // Where an unmatched value came from: another seat's text, and whether the model was sent it.
+    const elsewhere = { ...citing(1), answer: 'The total is 5120 dollars, due 2031-01-01.' } as unknown as AnalystResult;
+    expect(evalAnswerStageAudit(question, tabled, elsewhere, elsewhere, ['Evidence: total 5120'])).toMatchObject({
+      answerValueTokensUnmatchedShapes: ['9999', '9999-99-99'],
+      answerValueTokensUnmatchedInPrompt: [true, false],
+      answerValueTokensUnmatchedSeats: [[2], []],
+    });
+    expect(evalAnswerStageAudit(question, tabled, elsewhere, elsewhere).answerValueTokensUnmatchedInPrompt).toBeUndefined();
+    // The audit prompt quotes the model's own draft: a value only the draft holds was not sent as evidence.
+    const auditPrompt = ['Question: q', '', 'Draft JSON:', '{"answer":"due 2031-01-01"}', '', 'Audit evidence:', 'Evidence: total 5120'].join('\n');
+    expect(evalAnswerStageAudit(question, tabled, elsewhere, elsewhere, ['Evidence: total 5120', auditPrompt])).toMatchObject({
+      answerValueTokensUnmatchedInPrompt: [true, false],
+    });
     // A value the answer takes from the cited seat's citation line (its date,
     // its file name inside a path) is in that seat, as the Analyst saw it.
     const dated = {
@@ -289,13 +310,18 @@ describe('the real eval report locates an expected item and value for a miss', (
       }, other],
     } as typeof pack;
     const fromCitation = {
-      answer: 'The 2026-03-01_kestrel-invoice.pdf of 2026-03-01 says 4182 dollars [1].',
+      answer: 'The 2026-03-01_kestrel-invoice.pdf of 2026-03-01 says 4182 dollars [1], see 2026-03-01_kestrel-invoice.',
       citations: [{ provenance: dated.candidates[0]!.provenance, claim: 'total' }],
       unanswered: [],
     } as unknown as AnalystResult;
     expect(evalAnswerStageAudit(question, dated, fromCitation, fromCitation)).toMatchObject({
-      answerValueTokens: 3, answerValueTokensInCitedSeats: 3, answerValueTokensUnmatchedShapes: [],
+      // The file name without its extension is the name too.
+      answerValueTokens: 4, answerValueTokensInCitedSeats: 4, answerValueTokensUnmatchedShapes: [],
     });
+    // A decimal is not a file name: '4182.99' in a seat does not support '4182'.
+    const decimal = { ...pack, candidates: [{ ...first, chunks: ['The invoice total is 4182.99 dollars.'] }, other] } as typeof pack;
+    const misread = { answer: 'The total is 4182 dollars.', citations: [{ provenance: decimal.candidates[0]!.provenance, claim: 'total' }], unanswered: [] } as unknown as AnalystResult;
+    expect(evalAnswerStageAudit(question, decimal, misread, misread)).toMatchObject({ answerValueTokensInCitedSeats: 0, answerValueTokensUnmatchedShapes: ['9999'] });
     // Only the cited seat's citation counts: the same answer citing seat 2 is unmatched.
     const otherSeat = { ...fromCitation, citations: [{ provenance: dated.candidates[1]!.provenance, claim: 'total' }] } as unknown as AnalystResult;
     expect(evalAnswerStageAudit(question, dated, otherSeat, otherSeat).answerValueTokensInCitedSeats).toBe(0);
@@ -348,6 +374,35 @@ describe('the Analyst on the expected seat alone', () => {
     expect(audit).toMatchObject({ seats: [2], answerShape: 'contains_all', answerCitedSeats: [1], valuesInAnswer: [true] });
     expect(JSON.stringify(audit)).not.toContain('4182');
     expect(expectedSeatOnlyAudit({ expectedAnswerContains: ['4182'] }, { seats: [2], alone, result: undefined })).toEqual({ seats: [2], failed: true });
+  });
+
+  test('the seat-alone pack states its own coverage: each store\'s items in evidence are the seats it holds', async () => {
+    const counted = {
+      ...pack,
+      coverage: {
+        searchedCorpora: ['store.a', 'store.b'], skippedCorpora: [], extractionGaps: [],
+        matchCounts: [
+          { corpusId: 'store.a', family: 'file', trustDomain: 'internal', trustTier: 'S2', matchedItems: 9, inEvidence: 2 },
+          { corpusId: 'store.b', family: 'file', trustDomain: 'internal', trustTier: 'S2', matchedItems: 4, inEvidence: 1 },
+        ],
+      },
+    } as never as EvidencePack;
+    const sent: EvidencePack[] = [];
+    const inner = { analyze: async (packSent: EvidencePack) => { sent.push(packSent); return { answer: 'x', citations: [], unanswered: [] } as unknown as AnalystResult; } };
+    await expectedSeatOnlyEvalAnalyst(inner, () => [2], () => {}, () => ['store.a', 'store.b', 'store.a']).analyze(counted, {} as never);
+    expect(sent[1]!.coverage.matchCounts!.map((count) => [count.corpusId, count.matchedItems, count.inEvidence]))
+      .toEqual([['store.a', 9, 0], ['store.b', 4, 1]]);
+  });
+
+  test('each seat-alone prompt is reported by its length and a short hash, never its text', () => {
+    const alone = { ...pack, candidates: [pack.candidates[1]!] } as EvidencePack;
+    const right = { answer: 'x', citations: [], unanswered: [] } as unknown as AnalystResult;
+    const audit = expectedSeatOnlyAudit({ expectedAnswerContains: ['4182'] }, { seats: [2], alone, result: right, prompts: ['secret prompt one', 'secret prompt one', 'other'] });
+    expect(audit.prompts?.map((prompt) => prompt.chars)).toEqual([17, 17, 5]);
+    expect(audit.prompts![0]!.sha256).toMatch(/^[0-9a-f]{12}$/);
+    expect(audit.prompts![0]!.sha256).toBe(audit.prompts![1]!.sha256);
+    expect(audit.prompts![0]!.sha256).not.toBe(audit.prompts![2]!.sha256);
+    expect(JSON.stringify(audit)).not.toContain('secret');
   });
 
   test('no expected seat in the pack means no second call; a failed call is reported, never the grade', async () => {
@@ -408,6 +463,28 @@ describe('Analyst repeats on a frozen pack', () => {
 });
 
 describe('the real eval matches what Ask sends a local Analyst (rerun 20)', () => {
+  test('the fitted local eval sends byte-identical main and audit prompts to the product local fit', async () => {
+    const { pack, corpusIds } = analystPromptFixture();
+    pack.coverage = { ...pack.coverage, extractionGaps: [pack.coverage.extractionGaps[0]!,
+      ...pack.candidates.map((candidate) => `${candidate.provenance.citation!.title} content was truncated for length.`)] };
+    const gapIndexes = pack.candidates.map((_, index) => [index + 1]);
+    const calls: AnalystModelRequest[][] = [[], []];
+    const analysts = calls.map((requests) => createAnalyst({ complete: async (request) => {
+      requests.push(request);
+      return { modelId: 'fixture', text: JSON.stringify({ answer: 'Survey recorded [1].', citations: [{ evidence: 1, claim: 'Survey recorded.' }], unanswered: [], sufficient: true }) };
+    } }, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' }));
+    const fitted = fitPackToPromptBytes(pack, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES,
+      new Map(pack.candidates.map((candidate, index) => [candidate, corpusIds[index]!])), { localOnly: true }, 2, 'compact',
+      new Map(pack.candidates.map((candidate, index) => [candidate.provenance, gapIndexes[index]!])));
+    await analysts[0]!.analyze(withPromptBudget(fitted, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES), { localOnly: true });
+    const kept: number[][] = [];
+    await promptFittedEvalAnalyst(analysts[1]!, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, () => corpusIds,
+      (_pack, seats) => kept.push(seats), () => 2, () => gapIndexes).analyze(pack, { localOnly: true });
+    expect(calls[1]).toEqual(calls[0]);
+    expect(kept[0]).toEqual(fitted.candidates.map((candidate) => pack.candidates.findIndex((original) => original.provenance === candidate.provenance) + 1));
+    expect(calls[1]![0]!.prompt.split('\n').at(-1)).toStartWith('Coverage — searched:');
+  });
+
   test('the pack is fitted to the local prompt budget, and the seats sent are recorded', async () => {
     const { stores, ledger } = await twoTierWorld();
     const lanes = createEvalDropboxLanes({ stores, ...(ledger ? { ledger } : {}), scope: { accountScope: 'personal' } });
@@ -627,5 +704,48 @@ describe('the dataset shape the runner reads', () => {
     const dataset = await Bun.file(new URL('../eval/questions/held-out.json', import.meta.url)).json() as import('../eval/types.ts').EvalDataset;
     const withNotes = dataset.questions.filter((question) => typeof question.notes === 'string' && question.notes.length > 0);
     expect(withNotes.length).toBe(dataset.questions.length);
+  });
+});
+
+describe('evalPromptLayout', () => {
+  test("splits the sent prompt's bytes into fixed text, each seat's header and each seat's passages, and prices the compact format", async () => {
+    const options = { localOnly: true };
+    const seat = (index: number, chunks: string[]) => ({
+      provenance: {
+        sourceItem: { family: 'chat', provider: 'telegram', accountScope: 'personal', providerItemId: `m-${index}`, localItemId: `m-${index}` },
+        citation: { title: `Message ${index}`, sourceLabel: 'Telegram', conversationLabel: 'Group', authorLabel: 'Ana', uri: `telegram://chat/1/message/${index}`, authoredAt: '2026-10-02T14:31:07.000Z' },
+      },
+      trustTier: 'S2',
+      trustDomain: 'secure_local',
+      chunks,
+    }) as EvidencePack['candidates'][number];
+    const sent: EvidencePack = {
+      question: 'When does the lease end?',
+      candidates: [seat(1, ['lease ends 31 May 2027', 'renewal "notice" due']), seat(2, []), seat(3, ['café receipt'])],
+      coverage: { searchedCorpora: ['a'], skippedCorpora: [], extractionGaps: ['Un café could not be read.', 'An item was truncated.'] },
+      builtAt: '2026-11-11T00:00:00Z',
+    };
+    const layout = evalPromptLayout(sent, options);
+    for (const evidenceFormat of ['full', 'compact'] as const) {
+      const calls: AnalystModelRequest[] = [];
+      // createAnalyst renders the actual sent Coverage line before completing.
+      const analyst = createAnalyst({ complete: async (request) => {
+        calls.push(request);
+        return { text: JSON.stringify({ answer: '', citations: [], unanswered: [], sufficient: false }), modelId: 'fixture' };
+      } }, { evidenceFormat });
+      await analyst.analyze(sent, options);
+      const measured = evalPromptLayout(sent, options, evidenceFormat);
+      expect(measured.coverageBytes).toBe(Buffer.byteLength(calls[0]!.prompt.split('\n').at(-1)!));
+      expect(measured.extractionGapCount).toBe(2);
+    }
+    expect(layout.promptBytes).toBe(analystPromptBytes(sent, options));
+    expect(layout.compactPromptBytes).toBe(analystPromptBytes(sent, options, 'compact'));
+    expect(layout.seats).toHaveLength(3);
+    expect(layout.seats[1]!.passageBytes).toBe(0);
+    for (const entry of layout.seats) expect(entry.headerBytes).toBeGreaterThan(0);
+    const sum = layout.fixedBytes + layout.seats.reduce((total, entry) => total + entry.headerBytes + entry.passageBytes, 0);
+    // Blocks are joined by a blank line.
+    expect(sum + 2 * (sent.candidates.length - 1)).toBe(layout.promptBytes);
+    expect(layout.seats[0]!.passageBytes).toBeGreaterThan(Buffer.byteLength(JSON.stringify(['lease ends 31 May 2027', 'renewal "notice" due'])));
   });
 });

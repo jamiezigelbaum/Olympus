@@ -1,4 +1,3 @@
-import { prefilterTrainingCopy, EmbeddingPrefilter } from './embedding-prefilter.ts';
 import { emptyTierMoveTimings, moveTieredItemsLowering, flushTierMoveNotes, type TierMoveOptions } from '../connector-store/tier-move.ts';
 import { controlPathHeadroom, ingestionTurn } from '../control-path-headroom.ts';
 // The worker's background tick for the privacy-safe sniffer: a bounded
@@ -37,8 +36,8 @@ import {
   type SnifferPassReport,
   type SnifferTarget,
 } from './sniffer-resolver.ts';
-import { existsSync } from 'node:fs';
-import { embeddingPrefilterInstallLedgerPath, tierSnifferPathForLedger } from './tier-ledger-path.ts';
+import { existsSync, rmSync } from 'node:fs';
+import { retiredEmbeddingPrefilterPaths, tierSnifferPathForLedger } from './tier-ledger-path.ts';
 import { tierSetPlannerForLedger } from './installed-tier-classification-registry.ts';
 import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
 import {
@@ -51,6 +50,7 @@ import {
   type TierRejudgeReport,
 } from '../connector-store/tier-rejudge.ts';
 import { settleNamesOnlyItems } from '../connector-store/tier-names-only-settle.ts';
+import { settlePersonalFirstItems } from '../connector-store/tier-held-settle.ts';
 import { sweepOwnerRuleRaises } from '../connector-store/tier-rules-sweep.ts';
 import { applyOwnerOverrides } from '../connector-store/tier-override-settle.ts';
 import { retireSecretRedactions, retrySecretSideStoreDebts } from '../connector-store/secrets-disposition.ts';
@@ -60,6 +60,7 @@ import {
   TierLedger,
   TierLedgerRaiseAbandonRefusedError,
   TIER_LEDGER_UNREAD_RELABEL_DONE,
+  RETIRED_EMBEDDING_CLEARANCE_REASON,
   copyServingLayer,
   tierLedgerIdentityKey,
   tierLedgerPathForStore,
@@ -115,7 +116,6 @@ function unrefTimer(timer: unknown): void {
 }
 
 export interface TierSnifferServiceOptions {
-  embeddingPrefilterEnabled?: () => boolean;
   installed: InstalledTierClassification;
   lane: SnifferLane;
   model: AnalystModel;
@@ -152,7 +152,7 @@ export interface TierSnifferServiceOptions {
   /** Where the day's call count is kept across restarts (owner-only JSON). */
   budgetStatePath?: string;
   intervalMs?: number;
-  /** Test seam: the timers behind the tick, wakes and training slices. Default: the global timers. */
+  /** Test seam: the timers behind the tick and wakes. Default: the global timers. */
   timers?: SnifferTimers;
   /**
    * Test seam: the monotonic clock (ms) behind slice deadlines and tick
@@ -385,7 +385,7 @@ export interface TierSnifferWaiting {
  * - yieldedMs: that wait, when the tick before stopped to give the model to
  *   other work;
  * - stepsMs: the tick's work around the pass (settling, recovery, approval,
- *   re-judge, moves, training validation);
+ *   re-judge and moves);
  * - passMs: the pass itself.
  * The pass divides into setupMs and dispatchMs (its own work outside model
  * calls), slotWaitMs (calls waiting for the shared model slot, which is
@@ -427,17 +427,13 @@ export class TierSnifferService {
   private readonly budget: SnifferCallBudget;
   private timer: unknown;
   private continuation: unknown;
-  private trainingTimer: unknown;
-  private trainingJob: Promise<void> | undefined;
-  private trainingJudge: string | undefined;
-  private finalizingTraining = false;
   /** When the last tick ended (performance.now() by default), for the idle time before the next one. */
   private lastTickEndedAt: number | undefined;
   /** The last tick's pass stopped to give the model to other work: the wait after it is yielding (#893). */
   private lastTickYielded = false;
   /** When the last recorded tick's bookkeeping ended: the wait for the next one starts here. */
   private cycleEndedAt: number | undefined;
-  /** The last tick's work after its pass: lowerings, training validation and bookkeeping. */
+  /** The last tick's work after its pass: lowerings and bookkeeping. */
   private lastAfterPassMs = 0;
   private lastCycle: TierSnifferThroughput | undefined;
   private readonly cycleTotals = emptyThroughput();
@@ -526,58 +522,6 @@ export class TierSnifferService {
     return this.runOnce();
   }
 
-  /** Use idle time and inference waits, without putting a training slice ahead of a call. */
-  private scheduleTraining(judge: string, delay = 0): void {
-    this.trainingJudge = judge;
-    if (this.stopped || !this.timer || this.trainingTimer || this.trainingJob) return;
-    const filters = [...new Set([...this.embeddingPrefilters.values()].map(filter => filter.trainingOwner))];
-    if (!filters.length) return;
-    this.trainingTimer = this.timers().setTimeout(() => {
-      this.trainingTimer = undefined;
-      const shouldYield = () => this.stopped || this.trainingJudge !== judge || this.yieldNow();
-      const job = (async () => {
-        for (const filter of filters) {
-          if (shouldYield()) break;
-          await filter.prepare(judge, shouldYield);
-        }
-      })();
-      this.trainingJob = job;
-      void job.catch(() => { /* Preparation retains its content-free failure/retry record. */ }).finally(() => {
-        this.trainingJob = undefined;
-        if (this.stopped) { if (!this.running) this.closeLedgers(); return; }
-        if (this.trainingJudge !== judge) return;
-        // Active slices get the next event-loop turn; finished attempts only poll
-        // for the existing retry deadline/new-verdict trigger once per second.
-        this.scheduleTraining(judge, !this.yieldNow() && filters.some(filter => filter.trainingPending) ? 0 : 1000);
-      });
-    }, delay);
-    unrefTimer(this.trainingTimer);
-  }
-
-  private pauseTraining(): void {
-    this.trainingJudge = undefined;
-    if (this.trainingTimer) this.timers().clearTimeout(this.trainingTimer);
-    this.trainingTimer = undefined;
-  }
-
-  private async finishTrainingValidation(signal: AbortSignal): Promise<void> {
-    const judge = this.trainingJudge;
-    const filters = [...new Set([...this.embeddingPrefilters.values()].map(filter => filter.trainingOwner))];
-    if (!judge || !filters.some(filter => filter.trainingFinalizing)) return;
-    this.pauseTraining();
-    await this.trainingJob;
-    this.finalizingTraining = true;
-    try {
-      await this.moving;
-      for (const filter of filters) {
-        await filter.finishValidation(judge, () => signal.aborted || this.stopped || this.yieldNow());
-      }
-    } finally {
-      this.finalizingTraining = false;
-      this.scheduleTraining(judge);
-    }
-  }
-
   /** A judge pass is running now: a restart on memory waits for it to end (engine-split/rss-restart.ts). */
   get passRunning(): boolean {
     return this.running;
@@ -586,7 +530,6 @@ export class TierSnifferService {
   /** Stop the tick. A pass in flight is aborted; its ledgers close when it ends. */
   stop(): void {
     this.stopped = true;
-    this.pauseTraining();
     this.moveAbort.abort();
     if (this.continuation) this.timers().clearTimeout(this.continuation);
     this.continuation = undefined;
@@ -624,8 +567,7 @@ export class TierSnifferService {
    */
   backlog(): TierClassificationBacklog {
     const backlog = this.backlogFrom(this.backlogCounts());
-    const messages = [...new Set([...this.embeddingPrefilters.values()].map(filter => filter.status()))];
-    return { ...backlog, lowerMovesQueued: this.lowerMovesQueued(backlog.pendingItems), summary: [backlog.summary, ...messages].join(' ') };
+    return { ...backlog, lowerMovesQueued: this.lowerMovesQueued(backlog.pendingItems) };
   }
 
   /**
@@ -878,15 +820,13 @@ export class TierSnifferService {
     }
   }
 
-  private embeddingState: TierLedger | undefined;
-  private readonly embeddingPrefilters = new Map<string, EmbeddingPrefilter>();
+  private readonly retiredPrefilterCleaned = new Set<string>();
 
-  status(): { lane: string; modelId: string; callsToday: number; embeddingPrefilter: string[]; lastTick?: TierSnifferTick; waiting?: TierSnifferWaiting; throughput?: { last: TierSnifferThroughput; total: TierSnifferThroughput } } {
+  status(): { lane: string; modelId: string; callsToday: number; lastTick?: TierSnifferTick; waiting?: TierSnifferWaiting; throughput?: { last: TierSnifferThroughput; total: TierSnifferThroughput } } {
     return {
       lane: this.options.lane.kind,
       modelId: this.options.lane.modelId,
       callsToday: this.budget.usedToday(),
-      embeddingPrefilter: [...this.embeddingPrefilters.values()].map(filter => filter.status()),
       ...(this.lastTick ? { lastTick: this.lastTick } : {}),
       ...(this.waiting ? { waiting: { ...this.waiting } } : {}),
       ...(this.lastCycle ? { throughput: { last: { ...this.lastCycle }, total: { ...this.cycleTotals } } } : {}),
@@ -970,10 +910,6 @@ export class TierSnifferService {
       if (tick.state === 'ran' && lowerMoves) {
         tick.autoMoves = mergeAutoMoveReports(tick.autoMoves, lowerMoves);
       }
-      // Final validation can span several 200 ms slices. Our own judge and
-      // copy writes would restart it forever if the next pass ran between
-      // them. Give it a separate window after BOTH budgets, never out of either.
-      await this.finishTrainingValidation(abort.signal);
     } catch (error) {
       // Content-free: the class of failure only. Items stay pending.
       tick = { state: 'failed', error: error instanceof Error ? error.name : 'unknown' };
@@ -1148,7 +1084,7 @@ export class TierSnifferService {
         busy = false;
       }
     }
-    // Only a pass takes a turn; training and the timer's move drain still yield.
+    // Only a pass takes a turn; the timer's move drain still yields.
     if (!this.running) return busy;
     if (!busy) {
       if (!this.fairTurn) this.yieldingSinceMs = undefined;
@@ -1210,7 +1146,6 @@ export class TierSnifferService {
   }
 
   private closeLedgers(): void {
-    if (this.trainingJob) return; // The yielding slice closes these after it checkpoints.
     for (const ledger of this.ledgers.values()) {
       try {
         ledger.close();
@@ -1219,19 +1154,11 @@ export class TierSnifferService {
       }
     }
     this.ledgers.clear();
-    this.embeddingState?.close();
-    this.embeddingState = undefined;
-    this.embeddingPrefilters.clear();
   }
 
   private snifferTargets(): SnifferTarget[] {
     const targets: SnifferTarget[] = [];
-    const filterLedgerPaths = this.ledgerPaths().sort();
-    if (filterLedgerPaths.length && !this.embeddingState) this.embeddingState = new TierLedger({
-      dbPath: embeddingPrefilterInstallLedgerPath(this.options.classificationLedgerPath),
-    });
-    if ([...this.embeddingPrefilters.keys()].some(path => !filterLedgerPaths.includes(path))) this.embeddingPrefilters.clear();
-    for (const ledgerPath of filterLedgerPaths) {
+    for (const ledgerPath of this.ledgerPaths().sort()) {
       let ledger: TierLedger;
       try {
         ledger = this.ledgerAt(ledgerPath);
@@ -1239,41 +1166,8 @@ export class TierSnifferService {
         continue; // Not the ledger its store is bound to: left alone this pass.
       }
       const planner = tierSetPlannerForLedger(ledgerPath);
-      let embeddingPrefilter = this.embeddingPrefilters.get(ledgerPath);
-      if (!embeddingPrefilter) {
-        embeddingPrefilter = new EmbeddingPrefilter({ ledger, stateLedger: this.embeddingState!, ...(this.embeddingPrefilters.size ? { sharedWith: this.embeddingPrefilters.values().next().value! } : {}), sniffer: this.options.installed.snifferStoreForLedger(ledgerPath),
-          ...(planner ? { placementFor: planner } : {}),
-          enabled: () => this.options.embeddingPrefilterEnabled?.() !== false,
-          log: line => this.options.log?.(line),
-          copyChangeMarker: () => {
-            const stores = tierSetForLedger(ledgerPath)?.openStores() ?? this.options.stores().filter(store =>
-              (store.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(store.dbPath)) === ledgerPath);
-            return JSON.stringify(stores.map(store => {
-              if (!store.changeMarker) throw new Error('Copy change marker unavailable');
-              return [store.dbPath, store.changeMarker()];
-            }));
-          },
-          copyFor: subject => {
-            const set = tierSetForLedger(ledgerPath);
-            return prefilterTrainingCopy(subject, ledger, set ? corpusId => {
-              const domain = set.domainForCorpus(corpusId);
-              return domain ? set.store(domain)?.exportItemCopy(subject) : undefined;
-            } : undefined, () => {
-              for (const store of this.options.stores()) {
-                if ((store.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(store.dbPath)) !== ledgerPath) continue;
-                const copy = store.exportItemCopy?.(subject);
-                if (copy) return copy;
-              }
-              return undefined;
-            });
-          },
-        });
-        this.embeddingPrefilters.set(ledgerPath, embeddingPrefilter);
-      }
-      embeddingPrefilter.setPlacementFor(planner);
       targets.push({
         ledger,
-        embeddingPrefilter,
         sniffer: this.options.installed.snifferStoreForLedger(ledgerPath),
         ...(planner ? { placementFor: planner } : {}),
         screenStoredQuestion: question => {
@@ -1366,12 +1260,19 @@ export class TierSnifferService {
         },
       });
     }
+    for (const path of [...targets.map(target => target.ledger.dbPath), this.options.classificationLedgerPath]) {
+      if (path === ':memory:' || this.retiredPrefilterCleaned.has(path)) continue;
+      const retired = retiredEmbeddingPrefilterPaths(path);
+      for (const directory of retired.directories) {
+        rmSync(directory, { recursive: true, force: true });
+      }
+      for (const suffix of ['', '-wal', '-shm']) rmSync(`${retired.ledger}${suffix}`, { force: true });
+      this.retiredPrefilterCleaned.add(path);
+    }
     return targets;
   }
 
   private async tick(signal: AbortSignal): Promise<TierSnifferTick> {
-    this.pauseTraining();
-    await this.trainingJob; // Rebind members only after the prior slice has stopped.
     const { lane } = this.options;
     // Wall time of each step around the pass, for its log line: on Sparta
     // (2026-11-06) 30 s passes came 32-134 s apart, and nothing said where
@@ -1390,7 +1291,6 @@ export class TierSnifferService {
     await this.settleStoredItems();
     phase('settle');
     const targets = this.snifferTargets();
-    for (const target of targets) target.embeddingPrefilter?.recover();
     phase('targets');
     await this.recoverMissingQuestions(signal);
     phase('recover');
@@ -1468,7 +1368,6 @@ export class TierSnifferService {
       model: this.options.model,
       promptVersion: versions.cache,
       ...(ownerContext ? { ownerContext } : {}),
-      ...(this.timer ? { trainingReady: (judge: string) => this.scheduleTraining(judge) } : {}),
       budget: this.budget,
       maxCallsPerPass: this.options.maxCallsPerPass,
       concurrentCalls: this.options.concurrentCalls,
@@ -1483,13 +1382,12 @@ export class TierSnifferService {
     if (report.verdictsApplied > 0) this.forgetLowerMoves();
     const autoMoves = await this.drainMoves();
     phase('moves');
-    if (report.calls > 0 || report.verdictsApplied > 0 || report.heldLowering > 0 || report.clearing.tried > 0) {
+    if (report.calls > 0 || report.verdictsApplied > 0 || report.heldLowering > 0) {
       const phases = Object.entries(phaseMs).map(([name, ms]) => `${name}=${Math.round(ms)}`).join(' ');
       this.options.log?.(
         `Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied `
         + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), `
         + `${report.cacheHits} from cache; ${report.heldLowering} lowering(s) held${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ''}; `
-        + `clearing: tried=${report.clearing.tried} cleared=${report.clearing.cleared} spot_checks=${report.clearing.spotChecks} skipped{${Object.entries(report.clearing.skipped).sort(([a], [b]) => a.localeCompare(b)).map(([reason, count]) => `${reason}=${count}`).join(',')}}; `
         + `call_ms=${Math.round(report.callMs)} mean_call_ms=${report.calls ? Math.round(report.callMs / report.calls) : 0} queue_wait_max_ms=${Math.round(report.maxQueueWaitMs)}; `
         + `promptChars=${report.promptChars} mean_promptChars=${report.calls ? Math.round(report.promptChars / report.calls) : 0} estimatedInputTokens=${report.estimatedInputTokens} mean_estimatedInputTokens=${report.calls ? Math.round(report.estimatedInputTokens / report.calls) : 0}; `
         + `tick_ms=${Math.round(this.monotonicNow() - phaseStarted)} ${phases}${idleMs === undefined ? '' : ` idle_before=${Math.round(idleMs)} wait_before=${this.lastTickYielded ? 'yield' : 'idle'} after_prev_ms=${Math.round(this.lastAfterPassMs)}`}; `
@@ -1582,8 +1480,10 @@ export class TierSnifferService {
             // Preserve the existing content-question repair where the stored
             // body and configured classifier can reconstruct the question.
             const classification = set?.classification();
+            const retiredClearance = row.reasons.includes(RETIRED_EMBEDDING_CLEARANCE_REASON);
             if (set && row.contentRead && row.contentPending && !row.metadataPending
-              && (row.contentTier === 'private' || row.contentTier === 'public')
+              && (row.contentTier === 'private' || row.contentTier === 'public'
+                || (retiredClearance && row.contentTier === 'secure'))
               && classification?.sniffer && !classification.unavailableReason) {
               // Cached verdicts and reconstructed questions use the approved
               // pass; only conservative Private settlement precedes approval.
@@ -1594,6 +1494,9 @@ export class TierSnifferService {
               if (ledger.getCurrent(identity)?.state !== 'pending'
                 || queue.questionFor(identity, 'metadata') || queue.questionFor(identity, 'content')) continue;
             }
+            // Retired clearances must keep their tier until a judge answers.
+            // A missing question/material waits for reconstruction or the next sync.
+            if (retiredClearance) continue;
             const planner = tierSetPlannerForLedger(ledgerPath);
             if (ledger.settleMissingQuestions(row, {
               missingMetadata, missingContent: missingContent && !waitingForText,
@@ -1671,9 +1574,6 @@ export class TierSnifferService {
   private async drainMoves(direction: 'raise' | 'lower' = 'raise'): Promise<TierAutoMoveReport | undefined> {
     try {
       if (!this.options.autoMoves || this.stopped || !this.options.autoMoves.localEmbeddingsOnly()) return undefined;
-      // Failed-raise bookkeeping is a ledger write too. Timer retries must
-      // not restart every validation sweep; new raises still run immediately.
-      if (direction === 'raise' && this.finalizingTraining && !this.newRaisesQueued()) return undefined;
       if (this.moving && this.movingDirection !== direction) {
         if (direction === 'raise') {
           // The idle timer also asks for raises. Only real queued raises may
@@ -1770,6 +1670,14 @@ export class TierSnifferService {
         }
       } catch {
         // Left pending this tick.
+      }
+      try {
+        const held = settlePersonalFirstItems({ set });
+        if (held.settled > 0) {
+          this.options.log?.(`Olympus tier hold: ${held.settled} item(s) recorded before every open question held text are held now (${held.movesQueued} move(s) to Private queued).`);
+        }
+      } catch {
+        // Left as they are this tick.
       }
     }
   }
@@ -2164,7 +2072,6 @@ function setEmbedsWithBuiltInOnly(set: TieredStoreSet): boolean {
 /** Env knobs, all optional. Invalid values fall back to the defaults. */
 export function tierSnifferServiceEnv(env: Record<string, string | undefined>): {
   enabled: boolean;
-  embeddingPrefilterEnabled: boolean;
   intervalMs: number;
   /** Optional legacy override; absent means time-bounded passes. */
   maxCallsPerPass?: number;
@@ -2175,7 +2082,6 @@ export function tierSnifferServiceEnv(env: Record<string, string | undefined>): 
   const enabledRaw = env.OLYMPUS_TIER_SNIFFER_ENABLED?.trim().toLowerCase();
   return {
     enabled: !(enabledRaw === '0' || enabledRaw === 'false' || enabledRaw === 'no' || enabledRaw === 'off'),
-    embeddingPrefilterEnabled: !['0', 'false', 'no', 'off'].includes(env.OLYMPUS_EMBEDDING_PREFILTER_ENABLED?.trim().toLowerCase() ?? ''),
     intervalMs: positiveInteger(env.OLYMPUS_TIER_SNIFFER_INTERVAL_MS, DEFAULT_TIER_SNIFFER_INTERVAL_MS, 100),
     ...(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS?.trim()
       ? { maxCallsPerPass: positiveInteger(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS, 1, 1) }

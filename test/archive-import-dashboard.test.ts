@@ -11,6 +11,7 @@
 // held count is the engine's own, before and after the private model judges.
 
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
+import { createTestClock } from './helpers/test-clock.ts';
 import { ownerLocalMint } from './helpers/owner-local-mint.ts';
 import { Database } from 'bun:sqlite';
 import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -33,7 +34,7 @@ import { SNIFFER_PROMPT_VERSION } from '../src/workers/classification/sniffer.ts
 import type { SnifferLane } from '../src/workers/classification/sniffer-lane.ts';
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { secretLocationsPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import {
   archiveImportScheduling,
@@ -134,6 +135,7 @@ function bigMbox(): string {
 }
 
 function fixture(options: { model?: ArchivePrivateModelState; checksElsewhere?: () => void } = {}) {
+  const clock = createTestClock();
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'archive-dashboard-')));
   cleanups.push(() => rmSync(base, { recursive: true, force: true }));
   const home = join(base, 'home');
@@ -182,6 +184,7 @@ function fixture(options: { model?: ArchivePrivateModelState; checksElsewhere?: 
   const open = (elsewhere = options.checksElsewhere) => {
     const opened = createArchiveImportDashboard({
       runtime: counting,
+      now: clock.date,
       resolver,
       ...(elsewhere ? { checksElsewhere: elsewhere } : {}),
       refreshScheduler: () => { refreshes += 1; },
@@ -200,7 +203,7 @@ function fixture(options: { model?: ArchivePrivateModelState; checksElsewhere?: 
     return path;
   };
   return {
-    base, home, exports, env, runtime, resolver, folders, dashboard, write,
+    base, home, exports, env, runtime, resolver, folders, dashboard, write, clock,
     refreshes: () => refreshes,
     setModel: (next: ArchivePrivateModelState) => { model = next; },
     holdChecks: () => { hold = new Promise<void>((resolve) => { release = resolve; }); },
@@ -212,6 +215,14 @@ function fixture(options: { model?: ArchivePrivateModelState; checksElsewhere?: 
     /** The engine split's background over the same files: it runs the checks. */
     openBackground: () => open(undefined),
   };
+}
+
+/** Read a completed tally after its cache interval, without waiting on real time. */
+async function countedView(f: ReturnType<typeof fixture>) {
+  await f.clock.advance(2000);
+  f.dashboard.view();
+  await f.dashboard.idle();
+  return f.dashboard.view();
 }
 
 async function until(done: () => boolean): Promise<void> {
@@ -391,7 +402,7 @@ describe('the Archives row\'s list', () => {
     const text = mbox([mail(0), mail(1), withAttachment(2), spam]);
     const started = await approveKey(f, f.write('Takeout.mbox', text));
     if (!started.ok || started.status !== 'started') throw new Error('expected a start');
-    let view = f.dashboard.view();
+    let view = await countedView(f);
     expect(view).toMatchObject({ sourceId: 'archive.imports', privateModel: 'off', requests: [] });
     expect(view.archives).toEqual([expect.objectContaining({
       id: started.archive_id, name: 'Takeout.mbox', format: 'Mail (mbox)', where: '', status: 'importing', items: 0, percent: 0,
@@ -399,7 +410,7 @@ describe('the Archives row\'s list', () => {
     expect(f.dashboard.present()).toEqual({ archives: 1, importing: true });
 
     await importAll(f.runtime, started.archive_id);
-    view = f.dashboard.view();
+    view = await countedView(f);
     const entry = view.archives[0]!;
     expect(entry).toMatchObject({ status: 'imported', items: 3, earliest: '2015-01-05', latest: '2015-01-07' });
     // With no private model, every message is still held Private.
@@ -492,6 +503,7 @@ describe('what the imports need from the person', () => {
     const started = await approveKey(f, f.write('Takeout.mbox', mbox([mail(0), mail(1)])));
     if (!started.ok || started.status !== 'started') throw new Error('expected a start');
     await importAll(f.runtime, started.archive_id);
+    await countedView(f);
     expect(f.dashboard.present().attention).toEqual([{ kind: 'held', count: 2, model: 'waiting' }]);
     f.setModel('ready');
     expect(f.dashboard.present().attention).toBeUndefined();
@@ -835,7 +847,7 @@ describe('counts that cannot be read', () => {
     const started = await approveKey(f, f.write('Takeout.mbox', mbox([mail(0), mail(1)])));
     if (!started.ok || started.status !== 'started') throw new Error('expected a start');
     await importAll(f.runtime, started.archive_id);
-    expect(f.dashboard.view().archives[0]).toMatchObject({ items: 2 });
+    expect((await countedView(f)).archives[0]).toMatchObject({ items: 2 });
     f.breakCounts(true);
     expect(f.dashboard.view().archives[0]).toMatchObject({ countsUnavailable: true });
     expect(f.dashboard.present().attention).toEqual([{ kind: 'counts', id: started.archive_id, name: 'Takeout.mbox' }]);
@@ -972,7 +984,7 @@ describe('one archive from the picker to a cited answer and back out', () => {
     const started = await approveStaged(f.dashboard, path);
     if (!started.ok || started.status !== 'started') throw new Error('expected a start');
     await importAll(f.runtime, started.archive_id);
-    expect(f.dashboard.view().archives[0]).toMatchObject({ status: 'imported', items: 2 });
+    expect((await countedView(f)).archives[0]).toMatchObject({ status: 'imported', items: 2 });
 
     // The worker's own search route, over the archive's stores, finds it.
     const lane = f.runtime.lane('email');
@@ -1101,7 +1113,7 @@ describe('held counts against the engine', () => {
       return { text, embedded };
     };
 
-    let entry = f.dashboard.view().archives[0]!;
+    let entry = (await countedView(f)).archives[0]!;
     expect(entry).toMatchObject({ status: 'imported', items: 3, judged: 0, held: 3 });
     expect(heldRows()).toBe(entry.held);
     expect(outside()).toEqual({ text: 0, embedded: 0 });
@@ -1142,7 +1154,7 @@ describe('held counts against the engine', () => {
     const ran = await service.runOnce();
     expect(ran.state).toBe('ran');
     expect(model.calls).toBeGreaterThan(0);
-    entry = f.dashboard.view().archives[0]!;
+    entry = (await countedView(f)).archives[0]!;
     expect(entry).toMatchObject({ items: 3, judged: 3, held: 0 });
     expect(heldRows()).toBe(entry.held);
     expect(f.dashboard.present().attention).toBeUndefined();
@@ -1173,7 +1185,7 @@ describe('a dropped archive', () => {
 
     await importAll(f.runtime, started.archive_id);
     // Finished, the copy stays: the import's attachments are read from it later.
-    const row = f.dashboard.view().archives[0]!;
+    const row = (await countedView(f)).archives[0]!;
     expect(row).toMatchObject({ status: 'imported', items: 2, name: 'Takeout.mbox' });
     expect(copies(f)).toEqual([uploadId]);
     // The copy is not the person's folder: no place is named for it.
@@ -1292,7 +1304,7 @@ describe('a dropped archive', () => {
     expect(f.dashboard.upload.cancel(uploadId)).toEqual({ cancelled: false });
     expect(copies(f)).toEqual([uploadId]);
     await importAll(f.runtime, started.archive_id);
-    expect(f.dashboard.view().archives[0]).toMatchObject({ status: 'imported', items: 2 });
+    expect((await countedView(f)).archives[0]).toMatchObject({ status: 'imported', items: 2 });
     expect(copies(f)).toEqual([uploadId]);
   });
 

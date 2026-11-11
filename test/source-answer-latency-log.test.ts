@@ -33,7 +33,7 @@ import {
   runWithSourceAnswerTrace,
   snapshotSourceAnswerTrace,
 } from '../src/workers/source-index/answer-latency-trace.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 
 const SECRET_QUESTION = 'SECRET-QUESTION did I just get a private lab result?';
 const SECRET_ANSWER = 'SECRET-ANSWER-TEXT your LDL was 92 mg/dL';

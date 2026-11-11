@@ -56,6 +56,8 @@ import type {
   DashboardImportsUnreadableReason,
 } from '../source-dashboard.ts';
 import { displayText } from '../dashboard/display-text.ts';
+import { offThreadReadsSupported, OffThreadReadBusyError, readOnPool, releaseOffThreadReads } from '../connector-store/off-thread-reads.ts';
+import type { TierLedger } from '../classification/tier-ledger.ts';
 import { ARCHIVE_IMPORTS_SOURCE_ID, ArchiveRecordFormError, type ArchiveImportRecord } from './state.ts';
 import {
   ArchiveImportRequestStore,
@@ -199,7 +201,15 @@ export interface ArchiveImportDashboard {
    */
   resume(): void;
   /**
-   * Settles when every check started so far has finished (tests, shutdown).
+   * The engine split's background, told that the front changed a request or
+   * state file: resume its checks, hand the scheduler the tasks, and wake it
+   * when a removal waits. The front's own Remove woke the front's runtime,
+   * which has no scheduler, so without this a removal waited for the import's
+   * next pass (30 minutes by default).
+   */
+  frontChanged(): void;
+  /**
+   * Settles when checks and tally reads started so far have finished (tests, shutdown).
    */
   idle(): Promise<void>;
   close(): void;
@@ -214,6 +224,10 @@ export interface ArchiveImportDashboardOptions {
    * record), and the disk headroom they leave.
    */
   uploads?: ArchiveUploads;
+  /**
+   * Only the front (or single worker) owns the upload sessions and may sweep staging.
+   */
+  ownsUploads?: boolean;
   /**
    * Hands the scheduler the current archive tasks (its updateSources).
    */
@@ -341,6 +355,14 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
   // What the person dropped is received here, beside the archive record (staging.ts).
   const uploads = options.uploads ?? createArchiveUploads({ root: archiveStateSiblingPath(state.path, 'archive-staging') });
   let closed = false;
+  const now = options.now ?? (() => new Date());
+  type Tally = { items: number; held: number };
+  // null is still counting; undefined means the read failed. Each dashboard
+  // owns its cache so closing it also retires every cached archive.
+  const countReads = new Set<Promise<void>>();
+  // A ledger whose tally the pool has read lets the pool's readers of its file go when it closes.
+  const releasing = new WeakSet<TierLedger>();
+  const countTallies = new Map<string, { value: Tally | null | undefined; at: number; status: ArchiveImportRecord['status']; inFlight?: Promise<void> }>();
   // One check at a time: each reads whole files.
   let checks: Promise<void> = Promise.resolve();
   // Requests whose check runs in this process (a `checking` entry not here was left by a restart).
@@ -432,7 +454,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
   // Staging copies nothing reads any more are deleted: an upload walked away from, an approval that imported nothing,
   // an import that was removed.
   const sweepStaging = (): void => {
-    if (closed) return;
+    if (closed || options.ownsUploads === false) return;
     try {
       uploads.sweep(stagingNeeded);
     } catch (error) {
@@ -742,15 +764,61 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
   };
 
   /**
-   * How many items the archive holds and how many still wait for the private
-   * model; undefined when its index cannot be opened or read, which is said
-   * as such and never as an empty archive.
+   * Return the last tally immediately, refreshing stale tallies on the pool.
+   * null means no tally yet; undefined is reserved for an unreadable ledger.
+   * Only runtimes without a pool (or a refused pool read) count synchronously,
+   * and those reads share the same two-second throttle and query steps.
    */
-  const counts = (record: ArchiveImportRecord): { items: number; held: number } | undefined => {
+  const counts = (record: ArchiveImportRecord): Tally | null | undefined => {
     try {
-      const lane = options.runtime.lane(record.family);
-      const tally = lane.ledger.accountScopeCounts(record.provider, record.archive_id);
-      return { items: tally.items, held: tally.awaitingJudgment };
+      const ledger = options.runtime.lane(record.family).ledger;
+      const key = JSON.stringify([ledger.dbPath, record.provider, record.archive_id]);
+      let cached = countTallies.get(key);
+      // A tally from before the import changed state (still importing, now imported) is never shown as its count:
+      // the row says it is counting until the tally of the new state lands.
+      if (cached && cached.status !== record.status && cached.inFlight) return null;
+      if (!cached || cached.status !== record.status) {
+        cached = { value: null, at: -Infinity, status: record.status };
+        countTallies.set(key, cached);
+      }
+      const entry = cached;
+      if (closed || entry.inFlight || now().getTime() - entry.at < 2_000) return entry.value;
+      // Throttle failed attempts too, so a broken or busy pool never causes
+      // every dashboard surface to retry on the same request.
+      entry.at = now().getTime();
+      const finish = (value: Tally | undefined): void => {
+        if (closed) return;
+        entry.value = value;
+        entry.at = now().getTime();
+      };
+      const readHere = (): void => {
+        let tally;
+        try { tally = ledger.accountScopeCounts(record.provider, record.archive_id); }
+        catch { finish(undefined); return; }
+        finish({ items: tally.items, held: tally.awaitingJudgment });
+      };
+      if (!offThreadReadsSupported(ledger.dbPath)) {
+        readHere();
+      } else {
+        if (!releasing.has(ledger)) {
+          releasing.add(ledger);
+          ledger.onClose(() => releaseOffThreadReads(ledger.dbPath));
+        }
+        entry.inFlight = (async () => {
+          try {
+            const steps = ledger.accountScopeCountSteps(record.provider, record.archive_id);
+            let step = steps.next();
+            while (!step.done) step = steps.next(await readOnPool(ledger.dbPath, step.value));
+            finish({ items: step.value.items, held: step.value.awaitingJudgment });
+          } catch (error) {
+            if (closed) return;
+            if (error instanceof OffThreadReadBusyError) readHere();
+            else finish(undefined);
+          }
+        })().finally(() => { countReads.delete(entry.inFlight!); delete entry.inFlight; });
+        countReads.add(entry.inFlight);
+      }
+      return entry.value;
     } catch {
       return undefined;
     }
@@ -801,7 +869,6 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
 
   const entryOf = (record: ArchiveImportRecord): ComputerArchiveEntry => {
     const counted = counts(record);
-    const { items, held } = counted ?? { items: 0, held: 0 };
     const earliest = dateOnly(record.date_range?.earliest);
     const latest = dateOnly(record.date_range?.latest);
     const stopFile = record.stop?.rel_path ? named(posix.basename(record.stop.rel_path)) : undefined;
@@ -812,10 +879,11 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
       family: record.family,
       where: where(posix.join(record.root_path, record.chosen_rel_path || '.')),
       status: record.status,
-      items,
-      judged: Math.max(0, items - held),
-      held,
-      ...(counted ? {} : { countsUnavailable: true as const }),
+      items: counted?.items ?? 0,
+      judged: counted ? Math.max(0, counted.items - counted.held) : 0,
+      held: counted?.held ?? 0,
+      ...(counted === null ? { countsPending: true as const } : {}),
+      ...(counted === undefined ? { countsUnavailable: true as const } : {}),
       ...(record.status === 'importing' ? { percent: percent(record) } : {}),
       ...(earliest ? { earliest } : {}),
       ...(latest ? { latest } : {}),
@@ -1166,7 +1234,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
         const attention: DashboardImportAttention[] = [];
         for (const record of own) {
           if (record.status === 'stopped' && record.stop?.code !== 'stopped_by_owner') attention.push({ kind: 'stopped', id: record.archive_id, name: record.label });
-          else if (record.status !== 'removing' && !counts(record)) attention.push({ kind: 'counts', id: record.archive_id, name: record.label });
+          else if (record.status !== 'removing' && counts(record) === undefined) attention.push({ kind: 'counts', id: record.archive_id, name: record.label });
         }
         return [card.id, {
           archives: own.length,
@@ -1217,7 +1285,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
         if (record.status === 'removing' || record.target) continue;
         const tally = counts(record);
         if (tally) counted.set(record.archive_id, tally);
-        else if (!cardOf(record)) attention.push({ kind: 'counts', id: record.archive_id, name: record.label });
+        else if (tally === undefined && !cardOf(record)) attention.push({ kind: 'counts', id: record.archive_id, name: record.label });
       }
       for (const request of askingNow(asked, records)) {
         if (request.origin !== 'agent' || request.status !== 'pending') continue;
@@ -1268,10 +1336,26 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
       }
     },
 
-    idle: () => checks,
+    frontChanged() {
+      api.resume();
+      refresh();
+      let removing = false;
+      try {
+        removing = state.list().some((record) => record.status === 'removing');
+      } catch {
+        // An unreadable list is reported where it is shown; nothing to wake for.
+      }
+      if (removing) wakeScheduler();
+    },
+
+    idle: async () => {
+      await checks;
+      await Promise.all([...countReads]);
+    },
 
     close() {
       closed = true;
+      countTallies.clear();
       uploads.close();
     },
   };

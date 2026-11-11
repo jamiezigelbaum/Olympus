@@ -190,7 +190,7 @@ export interface OlympusConfig {
    */
   remote?: {
     enabled: boolean;
-    /** Show the dashboard in Claude custom connectors. Opt-in; restart the engine after changing. */
+    /** Show the dashboard in Claude custom connectors. Off unless set to true (claudeAppEnabled below); restart the engine after changing. */
     claudeAppEnabled?: boolean;
     relayHost?: string;
     publicBaseUrl?: string;
@@ -651,7 +651,7 @@ export { openClawConfigPath, readOpenClawPluginRemote, type OpenClawPluginRemote
 
 /**
  * The worker's own config, for the launch cli.ts runWorkerForeground validated
- * (workers/email-source/server.ts main): the Gateway's child reads `remote`
+ * (workers/engine/server.ts main): the Gateway's child reads `remote`
  * from the handoff only, any other launch from openclaw.json where OpenClaw
  * runs Olympus.
  */
@@ -695,6 +695,15 @@ function applyOpenClawPluginRemote(config: OlympusConfig, env: Record<string, st
     return;
   }
   config.remote = parseRemoteConfig(section.remote);
+}
+
+/**
+ * Whether Claude custom connectors get the dashboard and private panels (#1266).
+ * Off unless set to true: with it on, Claude gave no tools in 4 of 9 release-check
+ * chats (run 43006900498). It goes back on by default once the Claude leg shows no loss.
+ */
+export function claudeAppEnabled(config: Pick<OlympusConfig, 'remote'>): boolean {
+  return config.remote?.claudeAppEnabled === true;
 }
 
 /** The `remote` plugin-config section, kept to its known fields. */

@@ -175,14 +175,34 @@ local Dropbox index and a reachable Argus lane:
    `OLYMPUS_EVAL_ANALYST_EXPECTED_SEAT_ONLY=1`: after the graded answer, the
    Analyst answers once more on a pack holding only the seats with the
    question's expected items, read whole. `expectedSeatOnly` reports those
-   seats and that answer by shape and flags (or `failed`). Right alone but
+   seats and that answer by shape and flags (or `failed`), with each model
+   prompt's length and a 12-character SHA-256, so two runs can tell identical
+   prompts from different ones. The seat-alone pack's coverage counts only
+   the seats it holds, as Ask's own fit does. Right alone but
    wrong in the full pack means the other seats distract it; wrong alone means
    it misreads that document as extracted. It follows
    `OLYMPUS_EVAL_ANALYST_REPEAT_QUESTIONS` when set.
+   Every answer stage also reports `promptLayout`, which shows where the bytes
+   of the prompt the Analyst was sent went. It holds the text every prompt
+   carries (system rules, question, coverage), each sent seat's header (name,
+   trust, provenance and citation labels) and its passages, and what the same
+   seats would cost in each evidence format (`fullPromptBytes`,
+   `compactPromptBytes`). `evidenceFormat` names the format the prompt was
+   sent in, which follows the Analyst: a local run sends the compact format, as
+   Ask's local leg does. `coverageBytes` counts the UTF-8 bytes of the Coverage
+   line as sent, and `extractionGapCount` counts the extraction gaps in that
+   sent pack (corpus-level gaps and the kept seats' per-item gaps). These are
+   counts only; no gap text is recorded.
    The value-token flag counts an answer token as held by a cited seat when
    it is in that seat's text, facts, tables or citation fields, including the
-   date of a citation timestamp and each segment of its locator path, since
+   date of a citation timestamp, each segment of its locator path and a file
+   name without its extension, since
    the Analyst sees those in the seat's citation line.
+   For each value token found in no cited seat,
+   `answerValueTokensUnmatchedSeats` lists the pack seats whose text holds it,
+   and `answerValueTokensUnmatchedInPrompt` says whether the prompt the model
+   was sent held it. A token in the prompt came from another seat. A token in
+   neither the prompt nor any seat was not read anywhere.
    The shared Analyst also caps model output at 1,600 characters by default so
    local eval questions fail or answer quickly instead of generating long JSON.
 

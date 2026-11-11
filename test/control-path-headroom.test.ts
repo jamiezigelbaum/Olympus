@@ -123,9 +123,11 @@ describe('cpu samples taken during a freeze', () => {
     const kept = tracesInStalls(traces, [{ startMs, endMs }], newest - anchorMs / 1000);
     const named = (trace: { frames?: { name?: string }[] }, name: string) => (trace.frames ?? []).some((frame) => frame.name === name);
     expect(kept.length).toBeGreaterThan(0);
-    expect(kept.filter((trace) => named(trace, 'heldTheThread')).length / kept.length).toBeGreaterThan(0.8);
     // The clock anchor is good to a few ms, so a sample at the window's edge may
-    // fall either side (CI, 2026-11-05); the bulk of what follows stays out.
-    expect(kept.filter((trace) => named(trace, 'afterwards')).length / kept.length).toBeLessThan(0.1);
+    // fall either side (CI, 2026-11-05). Bound counts, not ratios: a slow runner
+    // keeps 9 or fewer samples, where one edge sample alone is over 10% (#1372).
+    const edge = Math.max(1, Math.floor(kept.length * 0.1));
+    expect(kept.filter((trace) => named(trace, 'heldTheThread')).length).toBeGreaterThanOrEqual(Math.max(1, Math.ceil(kept.length * 0.8) - edge));
+    expect(kept.filter((trace) => named(trace, 'afterwards')).length).toBeLessThanOrEqual(edge);
   });
 });

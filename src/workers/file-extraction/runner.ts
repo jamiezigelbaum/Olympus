@@ -59,7 +59,8 @@ import {
   ExtractionCommandTimeoutError,
 } from './extractors/command-runner.ts';
 import { isImageMediaType } from '../classification/tier-classifier.ts';
-import { resolveExtractionMimeType } from './extractors/bounded-text.ts';
+import { isGenericMimeType, resolveExtractionMimeType } from './extractors/bounded-text.ts';
+import { fileMimeTypeFromName } from '../../core/file-mime.ts';
 import type {
   ExtractionLaneKey,
   ExtractionStatusCount,
@@ -356,6 +357,8 @@ export interface ExtractionPlanResult {
    * store to land in.
    */
   jobsSkippedImageNotPrivate?: number;
+  // Rows the source passed over before they became candidates, by reason (ExtractionCandidatePage.skipped).
+  candidatesSkipped?: Readonly<Record<string, number>>;
   extractorKinds: readonly string[];
   nextCursor?: string;
   done: boolean;
@@ -697,14 +700,16 @@ export function createFileExtractionRunner(
       // under (Extractor.versionFor), so a media-scoped version only re-reads
       // that media type.
       const byKind = new Map<string, { kind: string; version: string; refs: ExtractionItemRef[] }>();
+      const unroutableRefs: ExtractionItemRef[] = [];
       let jobsUnroutable = 0;
       let jobsSkippedImageNotPrivate = 0;
       const refused = new Map<string, number>();
       const refuse = (reason: string, count: number): void => {
         refused.set(reason, (refused.get(reason) ?? 0) + count);
       };
-      for (const ref of page.candidates) {
+      for (const candidate of page.candidates) {
         await ingestionTurn();
+        const ref = withMediaTypeFromName(candidate);
         if (isImageMediaType(ref.mimeType) && refusesImageContent(corpus, ref)) {
           jobsSkippedImageNotPrivate += 1;
           continue;
@@ -715,6 +720,8 @@ export function createFileExtractionRunner(
           extractor = registry.select(ref, request.extractorKind);
           if (!extractor) {
             jobsUnroutable += 1;
+            // Only a plan open to every reader can say no reader takes it.
+            if (request.extractorKind === undefined) unroutableRefs.push(ref);
             continue;
           }
           version = extractor.versionFor?.(ref.mimeType) ?? extractor.version;
@@ -730,6 +737,15 @@ export function createFileExtractionRunner(
         else byKind.set(key, { kind: extractor.kind, version, refs: [ref] });
       }
 
+      if (unroutableRefs.length > 0) {
+        try {
+          jobs.recordUnroutable(unroutableRefs);
+        } catch (error) {
+          // Only the dashboard's count misses them, until the next pass: no
+          // candidate was refused, so the plan's counts stay as they are.
+          logPlanRefusal(request.corpusId, 'unrouted', PLAN_REFUSED_UNROUTABLE_RECORD, unroutableRefs.length, error);
+        }
+      }
       let jobsQueued = 0;
       let jobsExisting = 0;
       let jobsForced = 0;
@@ -812,6 +828,7 @@ export function createFileExtractionRunner(
         jobsRefused,
         ...(refused.size > 0 ? { jobsRefusedByReason: Object.fromEntries(refused) } : {}),
         ...(jobsSkippedImageNotPrivate > 0 ? { jobsSkippedImageNotPrivate } : {}),
+        ...(page.skipped && Object.keys(page.skipped).length > 0 ? { candidatesSkipped: { ...page.skipped } } : {}),
         extractorKinds: [...new Set([...byKind.values()].map((bucket) => bucket.kind))],
         ...(page.nextCursor !== undefined ? { nextCursor: page.nextCursor } : {}),
         done: page.done,
@@ -1630,6 +1647,7 @@ export const PLAN_REFUSED_EXTRACTOR_KIND = 'extractor_kind_refused';
 export const PLAN_REFUSED_EXTRACTOR_VERSION = 'extractor_version_refused';
 export const PLAN_REFUSED_ITEM_FIELD = 'item_field_refused';
 export const PLAN_REFUSED_ROUTING_FAILED = 'routing_failed';
+export const PLAN_REFUSED_UNROUTABLE_RECORD = 'unroutable_record_failed';
 
 /**
  * Fields of one candidate's ref. A refusal of one of these is about that item
@@ -1814,4 +1832,16 @@ function refusesImageContent(corpus: ExtractionRunnerCorpus, ref: ExtractionItem
   } catch {
     return false;
   }
+}
+
+/**
+ * A candidate whose stored type says only "bytes" takes the type its name
+ * gives. Listings that typed files from a short list stored every other name
+ * as bytes (until 2026-11), and an unchanged file is never listed
+ * again, so routing would count those rows unreadable on every pass.
+ */
+function withMediaTypeFromName(ref: ExtractionItemRef): ExtractionItemRef {
+  if (!ref.name || !isGenericMimeType(ref.mimeType)) return ref;
+  const named = fileMimeTypeFromName(ref.name);
+  return isGenericMimeType(named) ? ref : { ...ref, mimeType: named };
 }

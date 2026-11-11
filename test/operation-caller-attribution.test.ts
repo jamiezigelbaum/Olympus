@@ -21,7 +21,7 @@ import {
 import { remoteOperationCaller } from '../src/workers/remote-mcp.ts';
 import { CHATGPT_CLIENT_ID, CLAUDE_CLIENT_ID, CURSOR_CLIENT_ID, GROK_CLIENT_ID } from '../src/workers/remote-oauth/pinned-clients.ts';
 import { evaluateReleaseGate, isCallingAgentDestination } from '../src/core/opsec.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import type {
   SourceAnswerLatencyLedgerRecord,
   SourceAnswerLatencyRecord,

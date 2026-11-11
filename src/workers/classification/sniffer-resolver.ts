@@ -1,4 +1,3 @@
-import type { ClearingCounts, EmbeddingPrefilter } from './embedding-prefilter.ts';
 import type { SnifferModel, SnifferModelRequest, SnifferModelCompletion } from './sniffer-decision.ts';
 // The sniffer's background pass (design section 2.2): resolve pending items.
 //
@@ -83,7 +82,6 @@ const OUTPUT_CHARS_PER_ITEM = 110;
 export interface SnifferTarget {
   ledger: TierLedger;
   sniffer: TierSnifferStore;
-  embeddingPrefilter?: EmbeddingPrefilter;
   /**
    * The tiered store set's placement planner, for a set ledger. A routed item
    * (P1b) is settled through it, so a verdict that needs other stores queues
@@ -187,8 +185,6 @@ export interface SnifferPassOptions {
   /** True when an answer needs the private pool (or its breaker is open): stop before the next call. */
   shouldYield?: () => boolean;
   signal?: AbortSignal;
-  /** Service-owned idle scheduler; receives the identity after capability preparation. */
-  trainingReady?: (judge: string) => void;
   /**
    * Go easy on this computer (#922, local-pacing.ts): true while local work
    * should trickle, so the pass makes one call and stops. Only the service
@@ -203,7 +199,6 @@ export interface SnifferPassOptions {
 export type SnifferPassStop = 'pass_budget' | 'daily_budget' | 'yield' | 'preempted' | 'transport_failures' | 'aborted' | 'cloud_stopped';
 
 export interface SnifferPassReport {
-  clearing: ClearingCounts;
   /** Re-judge answers held at the previous Private placement during rollout. */
   heldLowering: number;
   callMs: number;
@@ -374,7 +369,6 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   const passStarted = monotonicNow();
   const deadline = passStarted + (options.passTimeMs ?? DEFAULT_SNIFFER_PASS_TIME_MS);
   const report: SnifferPassReport = {
-    clearing: { tried: 0, cleared: 0, spotChecks: 0, skipped: {} },
     heldLowering: 0,
     callMs: 0,
     maxQueueWaitMs: 0,
@@ -406,6 +400,9 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     promptVersion,
     mapRevision: question.mapRevision,
   });
+  const finalContentVerdict = ({ target, question }: WorkItem): StoredSnifferVerdict | undefined =>
+    question.pass === 'content' && question.contentHash
+      ? target.sniffer.getFinalModelContentVerdict({ ...keyOf(question), contentHash: question.contentHash }) : undefined;
   const sameQuestion = (target: SnifferTarget, question: SnifferQuestion): boolean => {
     const current = target.sniffer.questionFor(question, question.pass);
     return current?.materialHash === question.materialHash && current.mapRevision === question.mapRevision
@@ -567,7 +564,6 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   for (const target of options.targets) {
     const admit = (question: SnifferQuestion): boolean => {
       report.pendingSeen += 1;
-      if (target.embeddingPrefilter?.retained(question)) return false;
       if (finishContentDonor(target, question) || midMove(target, question)) return false;
       if (stillOpen(target, question)) return screenQuestion(target, question);
       target.sniffer.deleteQuestion(question, question.pass, question.materialHash);
@@ -624,37 +620,23 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     if (stopped) { report.stoppedBy = stopped; return finish(report, monotonicNow, passStarted); }
     id = snifferId(options.lane, promptVersion);
   }
-  // Pooled filters share one training budget, regardless of the number of sources.
-  if (options.trainingReady) options.trainingReady(id);
-  else for (const filter of new Set(options.targets.flatMap(target => target.embeddingPrefilter ? [target.embeddingPrefilter.trainingOwner] : []))) {
-    await filter.prepare(id, () => options.signal?.aborted === true || options.shouldYield?.() === true);
-  }
   for (const pass of ['metadata', 'content'] as const) {
     work[pass] = work[pass].filter(item => {
       const key = keyOf(item.question);
-      const spotCheck = item.target.embeddingPrefilter?.isSpotCheck(item.question) === true;
       const cached = item.target.sniffer.getVerdict(key);
       const usable = cached && cachedSnifferVerdictHolds(cached)
         && (!item.question.contentHash || contentVerdictReusable(cached, item.question.contentHash, item.question));
       // A known Private answer always wins, including one cached while placement was unavailable.
       const knownPrivate = cached && cachedSnifferVerdictHolds(cached)
         && snifferVerdictTier(cached, options.lane, item.question.flags).tier === 'secure';
-      if (knownPrivate || (usable && !spotCheck)) {
-        if (spotCheck && knownPrivate) item.target.embeddingPrefilter?.observe(item.question, true);
+      if (knownPrivate || usable) {
         apply(item, cached, item.question.contentHash !== undefined && cached.modelSubject !== snifferSubjectKey(item.question));
         report.cacheHits += 1;
         return false;
       }
-      const duplicate = item.question.pass === 'content' && item.question.contentHash
-        ? item.target.sniffer.getFinalModelContentVerdict({ ...key, contentHash: item.question.contentHash }) : undefined;
-      if (duplicate && cachedSnifferVerdictHolds(duplicate)
-        && (!spotCheck || snifferVerdictTier(duplicate, options.lane, item.question.flags).tier === 'secure')) {
-        if (spotCheck) item.target.embeddingPrefilter?.observe(item.question, true);
+      const duplicate = finalContentVerdict(item);
+      if (duplicate && cachedSnifferVerdictHolds(duplicate)) {
         apply(item, duplicate, true); report.cacheHits += 1; return false;
-      }
-      if (item.target.embeddingPrefilter?.tryClear(item.question, id, report.clearing)) {
-        report.verdictsApplied += 1; report.resolvedPersonal += 1;
-        return false;
       }
       return true;
     });
@@ -702,9 +684,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
         continue;
       }
       if (!screenQuestion(next.target, next.question)) continue;
-      const duplicate = !next.target.embeddingPrefilter?.isSpotCheck(next.question) && next.question.contentHash && next.question.pass === 'content'
-        ? next.target.sniffer.getFinalModelContentVerdict({ ...keyOf(next.question), contentHash: next.question.contentHash })
-        : undefined;
+      const duplicate = finalContentVerdict(next);
       if (duplicate && cachedSnifferVerdictHolds(duplicate)) {
         apply(next, duplicate, true);
         report.cacheHits += 1;
@@ -713,8 +693,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       const group = [next];
       for (let i = pending.length - 1; i >= 0; i--) {
         const item = pending[i]!;
-        if (!next.target.embeddingPrefilter?.isSpotCheck(next.question) && !item.target.embeddingPrefilter?.isSpotCheck(item.question)
-          && !next.question.contentHash && item.question.pass === pass && item.question.materialHash === next.question.materialHash
+        if (!next.question.contentHash && item.question.pass === pass && item.question.materialHash === next.question.materialHash
           && item.question.mapRevision === next.question.mapRevision && stillOpen(item.target, item.question)
           && screenQuestion(item.target, item.question)) {
           group.push(item); pending.splice(i, 1);
@@ -793,12 +772,10 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
         const verdict = decisionVerdict ?? verdicts.get(index + 1);
         const key = keyOf(group[0]!.question);
         if (verdict) {
-          const stored = { ...verdict, failSafe: false };
+          const stored = { ...verdict, failSafe: decisionVerdict?.failSafe ?? false };
           group[0]!.target.sniffer.putVerdict(key, stored, group[0]!.question);
           for (const item of group) {
             if (item.target !== group[0]!.target) item.target.sniffer.putVerdict(key, stored, group[0]!.question);
-            const audit = sameQuestion(item.target, item.question) && stillOpen(item.target, item.question, false);
-            if (audit) item.target.embeddingPrefilter?.observe(item.question, stored.tier === 'private');
             apply(item, stored);
           }
           continue;

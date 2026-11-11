@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import { buildSourceSensitivity, type SourceTrustTier } from '../src/core/source-index/types.ts';
 import { LocalConnectorStore, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { createSourceIndexStatusHandler } from '../src/workers/source-index/status.ts';
 
 const CORPUS_ID = 'internal.telegram.messages';

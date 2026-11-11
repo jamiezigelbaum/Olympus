@@ -16,7 +16,7 @@ import { MIGRATE_ACCOUNT_FOLDERS_ENV } from '../src/core/source-account-migratio
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { FIXTURE_PLACEMENT, fixtureConnector, snapshotStore, type FixtureSpec } from './helpers/tier-fixtures.ts';
 
-const SERVER = join(import.meta.dir, '..', 'src', 'workers', 'email-source', 'server.ts');
+const SERVER = join(import.meta.dir, '..', 'src', 'workers', 'engine', 'server.ts');
 const REPO = join(import.meta.dir, '..');
 
 const roots: string[] = [];

@@ -172,27 +172,28 @@ async function olympusSearch(install: Install, question: string) {
 const identity = (id: string) => ({ provider: 'dropbox', accountScope: 'personal', providerItemId: id });
 
 describe('fresh install: Personal by default, flagged items wait, Secrets never leave', () => {
-  test('no private model: unflagged content reaches olympus_search; the flagged file waits; the secret is nowhere', async () => {
+  test('no private model: unjudged text never reaches olympus_search, it waits in Private; the flagged file waits; the secret is nowhere', async () => {
     const install = await freshInstall();
 
-    // The unflagged file is Personal, content and names, at once.
+    // The unflagged file's names are Personal; its text waits in Private for a judge (#1316).
     const garden = install.lane.ledger.getCurrent(identity('id:garden'))!;
-    expect(garden).toMatchObject({ metadataTier: 'private', contentTier: 'private', state: 'current', contentRead: true });
+    expect(garden).toMatchObject({ metadataTier: 'private', contentRead: true, contentPending: true });
+    expect(install.secure.searchItems('pruning', 10).map((row) => row.sourceItem.providerItemId)).toEqual(['id:garden']);
     // The flagged one waits, held Private (keyword-searchable on the Mac, never embedded).
     const bank = install.lane.ledger.getCurrent(identity('id:bank'))!;
     expect(bank).toMatchObject({ state: 'pending', metadataPending: true, metadataFlagged: true });
     expect(install.secure.searchItems('lender', 10).map((row) => row.sourceItem.providerItemId)).toEqual(['id:bank']);
-    expect(install.lane.ledger.corpusCopyCounts(SECURE_CORPUS).held).toBe(1);
+    // Both count as still checking.
+    expect(install.lane.ledger.corpusCopyCounts(SECURE_CORPUS).held).toBe(2);
     // The secret is Secret: stored nowhere, its location only.
     expect(install.lane.ledger.getCurrent(identity('id:secret'))).toMatchObject({ contentTier: 'secrets' });
     // Public is retired: no Public store was ever created.
     expect(existsSync(resolvedStorePath('dropbox.files', 'public_safe', env))).toBe(false);
 
     const { result } = await olympusSearch(install, 'orchard');
-    const evidence = (result.structuredContent as { evidence: Array<{ title?: string; excerpt?: string }> }).evidence;
     const everything = JSON.stringify(result);
-    // The PDF's TEXT reaches ChatGPT, not just its name.
-    expect(evidence.some((item) => item.excerpt?.includes('pruning plan for the apple trees'))).toBe(true);
+    // The PDF's TEXT does not reach ChatGPT until a judge has cleared it.
+    expect(everything).not.toContain('pruning plan for the apple trees');
     expect(everything).not.toContain('loan terms');
     expect(everything).not.toContain('bank letter');
     expect(everything).not.toContain(FAKE_AWS_KEY);
@@ -270,9 +271,13 @@ describe('fresh install: Personal by default, flagged items wait, Secrets never 
 
     // Judged Private: no longer pending, and still never in olympus_search.
     expect(install.lane.ledger.getCurrent(identity('id:bank'))).toMatchObject({ state: 'current', metadataTier: 'secure', metadataPending: false });
-    // Ordinary content stays Personal while it is judged and needs no move.
+    // Ordinary content waited in Private until judged (#1316); its Personal verdict queues the move down.
     expect(prompts.some((prompt) => prompt.prompt.includes('pruning plan'))).toBe(true);
-    expect(install.lane.ledger.getCurrent(identity('id:garden'))).toMatchObject({ state: 'current', contentTier: 'private', contentPending: false });
+    const judged = install.lane.ledger.getCurrent(identity('id:garden'))!;
+    expect(judged).toMatchObject({ state: 'moving', targetContentTier: 'private', contentPending: false });
+    expect(JSON.stringify((await olympusSearch(install, 'orchard')).result)).not.toContain('pruning plan');
+    await moveTieredItem({ set: install.lane.set, identity: identity('id:garden'), target: { metadataTier: judged.targetMetadataTier!, contentTier: judged.targetContentTier! } });
+    expect(install.lane.ledger.getCurrent(identity('id:garden'))).toMatchObject({ state: 'current', contentTier: 'private' });
     const { result } = await olympusSearch(install, 'orchard');
     expect(JSON.stringify(result)).not.toContain('loan terms');
     expect(JSON.stringify(result)).toContain('pruning plan');
@@ -504,8 +509,8 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
     expect(install.lane.ledger.getCurrent(identity('id:bank'))).toMatchObject({ state: 'pending' });
     const service = snifferFor(install, builtIn, { localEmbeddingsOnly: true });
     const tick = await service.runOnce();
-    // Only the item held for its names needs a move; ordinary content is already Personal.
-    expect(tick).toMatchObject({ state: 'ran', report: { movesQueued: 1 }, autoMoves: { moved: 1, failed: 0, notEligible: 0 } });
+    // Both held items move: the one held for its names, and the ordinary one whose text waited for its verdict (#1316).
+    expect(tick).toMatchObject({ state: 'ran', report: { movesQueued: 2 }, autoMoves: { moved: 2, failed: 0, notEligible: 0 } });
     // Moved: current in Personal, and its text now reaches olympus_search.
     expect(install.lane.ledger.getCurrent(identity('id:bank'))).toMatchObject({ state: 'current', contentTier: 'private' });
     expect(install.lane.ledger.getCurrent(identity('id:garden'))).toMatchObject({ state: 'current', contentTier: 'private', contentPending: false });
@@ -566,11 +571,14 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
     const install = await freshInstall(runtime.source === 'built_in' ? { lane: runtime.lane, bankStructuredName: false } : {});
     const service = snifferFor(install, builtIn, { localEmbeddingsOnly: false });
     const tick = await service.runOnce();
-    expect(tick).toMatchObject({ state: 'ran', report: { movesQueued: 1 } });
+    expect(tick).toMatchObject({ state: 'ran', report: { movesQueued: 2 } });
     expect((tick as { autoMoves?: unknown }).autoMoves).toBeUndefined();
     expect(install.lane.ledger.getCurrent(identity('id:bank'))).toMatchObject({ state: 'moving', targetContentTier: 'private' });
+    // The ordinary file judged Personal waits for the same migration (#1316).
+    expect(install.lane.ledger.getCurrent(identity('id:garden'))).toMatchObject({ state: 'moving', targetContentTier: 'private' });
     const { result } = await olympusSearch(install, 'lender');
     expect(JSON.stringify(result)).not.toContain('loan terms');
+    expect(JSON.stringify((await olympusSearch(install, 'orchard')).result)).not.toContain('pruning plan');
   });
 
   /** The private model arrives after the items were judged without one (or under an older classifier). */
@@ -584,14 +592,13 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
     return { ...install, installed };
   }
 
-  test('a routed item judged Personal with no model is re-judged once a model is there: asked while it stays visible, raised only on a Private verdict', async () => {
+  test('an item that waited with no model is judged once a model is there: held while it is asked, kept Private on a Private verdict', async () => {
     const before = await freshInstall();
-    // Read, no detector fired, Personal at once (no private model yet).
-    expect(before.lane.ledger.getCurrent(identity('id:garden'))).toMatchObject({
-      state: 'current', contentTier: 'private', decidedBy: 'default',
-      reasons: ['metadata:default:personal', 'content:no_raise', expect.stringMatching(/^content:sha256:[a-f0-9]{64}$/), expect.stringMatching(/^content:names:[a-f0-9]{16}$/)],
-    });
-    expect(JSON.stringify((await olympusSearch(before, 'orchard')).result)).toContain('pruning plan');
+    // Read, no detector fired, and no judge yet: its names are Personal and its text waits in Private (#1316).
+    expect(before.lane.ledger.getCurrent(identity('id:garden'))).toMatchObject({ contentPending: true, contentRead: true, decidedBy: 'default' });
+    expect(before.lane.ledger.copies(identity('id:garden')).find((copy) => copy.state === 'current' && copy.layers !== 'metadata'))
+      .toMatchObject({ trustDomain: 'secure_local', embedHold: true });
+    expect(JSON.stringify((await olympusSearch(before, 'orchard')).result)).not.toContain('pruning plan');
 
     // The first call fails (transport), so the question stays open a tick.
     let calls = 0;
@@ -603,27 +610,15 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
     const install = addPrivateModel(before, runtime.source === 'built_in' ? runtime.lane : BUILT_IN_SNIFFER_LANE);
     const service = snifferFor(install, builtIn, { localEmbeddingsOnly: true });
 
-    // First pass: re-judged and ASKED. The item was visible under its
-    // previous decision and stays exactly where it was until the answer.
-    const first = await service.runOnce();
-    expect(first).toMatchObject({ state: 'ran', rejudged: { asked: 1, movesQueued: 0 }, report: { failedCalls: 1 } });
-    expect(install.lane.ledger.getCurrent(identity('id:garden'))).toMatchObject({ state: 'current', contentTier: 'private', contentPending: false });
-    expect(install.lane.ledger.rejudgeQuestion(identity('id:garden'))).toBeDefined();
-    expect(install.lane.ledger.copies(identity('id:garden')).find((copy) => copy.state === 'current' && copy.layers !== 'metadata'))
-      .toMatchObject({ trustDomain: 'internal', embedHold: false });
-    expect(JSON.stringify((await olympusSearch(install, 'orchard')).result)).toContain('pruning plan');
-    // Asked, not re-judged again while it waits.
-    expect(first).not.toHaveProperty('rejudged.seen', 2);
-
-    // Next pass: the model reads the names and the excerpt and says Private:
-    // raised (hidden first) and moved.
-    const second = await service.runOnce();
-    expect(second).not.toHaveProperty('rejudged');
-    expect(second).toMatchObject({ state: 'ran', report: { movesQueued: 1 }, autoMoves: { moved: 1, failed: 0 } });
+    // Passes until the model has answered: the text stays held in Private throughout.
+    for (let pass = 0; pass < 6 && install.lane.ledger.getCurrent(identity('id:garden'))!.contentPending; pass += 1) {
+      await service.runOnce();
+      expect(JSON.stringify((await olympusSearch(install, 'orchard')).result)).not.toContain('pruning plan');
+    }
+    expect(calls).toBeGreaterThan(1);
     const judged = install.lane.ledger.getCurrent(identity('id:garden'))!;
-    expect(judged).toMatchObject({ state: 'current', contentTier: 'secure', engineVersion: TIER_CLASSIFIER_VERSION });
+    expect(judged).toMatchObject({ state: 'current', contentTier: 'secure', contentPending: false });
     expect(judged.reasons.some((reason) => reason.startsWith('content:sniffer:local:'))).toBe(true);
-    expect(install.lane.ledger.rejudgeQuestion(identity('id:garden'))).toBeUndefined();
     expect(prompts.some((prompt) => prompt.prompt.includes('Names: orchard-plan.pdf') && prompt.prompt.includes('pruning plan'))).toBe(true);
     expect(JSON.stringify((await olympusSearch(install, 'orchard')).result)).not.toContain('pruning plan');
 
@@ -656,7 +651,8 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
     const garden = identity('id:garden');
     const settled = install.lane.ledger.getCurrent(garden)!;
     expect(settled).toMatchObject({ state: 'current', contentTier: 'private' });
-    expect(install.lane.ledger.copies(garden).find((copy) => copy.corpusId === SECURE_CORPUS)).toMatchObject({ state: 'superseded' });
+    // The automatic lowering pruned the held Private copy (#1174).
+    expect(install.lane.ledger.copies(garden).find((copy) => copy.corpusId === SECURE_CORPUS)).toBeUndefined();
 
     // A re-judgment (a new classifier version) re-holds the text question:
     // a raise back to the store that kept its copy, hidden at once.
@@ -805,8 +801,11 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
       destination: [{ corpusId: SECURE_CORPUS, trustDomain: 'secure_local', layers: 'both' }],
       hideSource: true,
     });
-    // The Personal copy is gone, but the secure store still holds the item:
-    // the move fails, and the item is not absent, so it stays hidden and queued.
+    // The secure store still holds the item (the automatic lowering pruned
+    // its own copy, #1174, so put one back as a store left over would hold it),
+    // but the Personal copy is gone: the move fails, and the item is not
+    // absent, so it stays hidden and queued.
+    install.secure.importItemCopy(install.lane.internal.current()!.exportItemCopy(bank)!, { trustTier: 'S4', syncConnectorId: 'test' });
     install.lane.internal.current()!.tombstoneCopy(
       { ...bank, family: 'file', localItemId: 'personal:id:bank' },
       { connectorId: 'test' },

@@ -32,7 +32,7 @@ import {
   createAnalystSourceIndexAnswerHandler,
   type SovereigntyAnalystRouteStep,
 } from '../src/workers/source-index/analyst-answer.ts';
-import { createAnalystForSovereigntyProfile } from '../src/workers/email-source/server.ts';
+import { createAnalystForSovereigntyProfile } from '../src/workers/engine/runtime/private-analysts.ts';
 import { createAnalyst } from '../src/core/analyst.ts';
 import { createOpenClawInferAnalystModel } from '../src/core/analyst-openclaw-infer.ts';
 import { setupPreflight } from '../src/core/setup-preflight.ts';

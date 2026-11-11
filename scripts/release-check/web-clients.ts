@@ -102,6 +102,8 @@ export interface PageState {
   challenge: boolean;
   /** The app offers Log in or Sign in: the test account is signed out. */
   signedOut: boolean;
+  /** The app says the account hit its message limit (Claude's Free plan: "You hit your 5-hour message limit"). */
+  limited?: boolean;
   composer: boolean;
   /** What the message box still holds: a question that is still there was not sent. */
   composerText: string;
@@ -119,6 +121,7 @@ export function blockedReason(client: WebClientId, state: PageState): string | u
   const label = CLIENT_ADAPTERS[client].label;
   if (state.challenge) return `${label} showed a bot check ("${state.title.slice(0, 60)}"); open it once in the canary browser and pass the check`;
   if (state.signedOut) return `${label} is signed out; sign the test account in again in the canary browser`;
+  if (state.limited) return `${label} says the test account hit its message limit, so the question was not answered; wait for the limit to reset or use a paid test account`;
   if (!state.composer) return `${label} showed no message box at ${state.url.slice(0, 120)}; the page may have changed (CLIENT_ADAPTERS in scripts/release-check/web-clients.ts)`;
   return undefined;
 }
@@ -149,6 +152,19 @@ export function redactForbidden(text: string, forbid: readonly string[]): string
     out = out.replace(pattern, `[forbidden ${index + 1}]`);
   });
   return out;
+}
+
+/**
+ * The dialog or notice an app shows when the account has used up its messages (seen on Claude's Free plan,
+ * 2026-11-11: "You hit your 5-hour message limit", "Upgrade to keep chatting"). The page behind it is a blank
+ * new chat, so without this the question reads as answered without Olympus.
+ */
+export const MESSAGE_LIMIT = /hit your (?:\d+-hour )?(?:message )?limit|you.ve hit your limit for|upgrade to keep chatting/i;
+
+/** Claude's reply that the connector, though connected, gave it no tools in this chat. */
+export function saidNoTools(client: WebClientId, turn: string): boolean {
+  return client === 'claude' && /(couldn.t|can.t|cannot|could not) (ask|reach|use) (Olympus|it|any of its tools)/i.test(turn)
+    && /\b(no|any|none of its|any of its) tools\b|exposes no tools|isn.t (giving|exposing)/i.test(turn);
 }
 
 export interface TurnObservation {
@@ -466,6 +482,7 @@ export async function connectBrowser(wsUrl: string): Promise<BrowserSession> {
 
 /** What the page shows, read in the page. Visible elements only: apps keep hidden copies of their controls. */
 export const PAGE_STATE_SCRIPT = (composers: readonly string[], client?: WebClientId, prompt = ''): string => `(() => {
+  const MESSAGE_LIMIT = ${MESSAGE_LIMIT.toString()};
   const visible = (el) => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
   const controls = [...document.querySelectorAll('button, a, [role="button"]')].filter(visible);
   const named = (el) => (el.getAttribute('aria-label') || el.innerText || '').trim();
@@ -486,6 +503,8 @@ export const PAGE_STATE_SCRIPT = (composers: readonly string[], client?: WebClie
     title: document.title,
     challenge: /just a moment|verify you are human|attention required/i.test(document.title) || !!document.querySelector('iframe[src*="challenges.cloudflare.com"], #challenge-form, #cf-challenge-running'),
     signedOut: /\\/(log-?in|sign-?in|auth)\\b/i.test(location.pathname) || controls.some((el) => /^(log ?in|sign ?in)$/i.test(named(el))),
+    // Only the app's own dialog or notice counts: a question or reply that quotes such a phrase must not.
+    limited: [...document.querySelectorAll('[role="dialog"], [role="alertdialog"], [role="alert"], [role="status"], [aria-live], [data-sonner-toast]')].some((el) => visible(el) && !el.closest('[data-message-author-role], [data-testid="user-message"], [data-testid="assistant-message"], [data-is-streaming]') && MESSAGE_LIMIT.test(el.innerText || '')),
     composer: !!composer,
     composerText: composer ? (composer.value ?? composer.innerText ?? '') : '',
     busy: replyControls.some((el) => /^stop\\b/i.test(named(el)) || /stop-button/.test(el.getAttribute('data-testid') || '')),
@@ -701,7 +720,12 @@ async function untilApp(t: AskTimings, condition: () => Promise<boolean>): Promi
 type RecordAppCheck = (check: CheckResult) => Promise<void>;
 
 /** A throwaway sender rule exercises real saves; only this exact rule may ever be confirmed for removal. */
-export async function checkClaudePrivacy(frame: AppFrame, t: AskTimings, record: RecordAppCheck): Promise<void> {
+/**
+ * Exercises the panel's privacy controls and returns the values it saw that only app-only tools
+ * returned: the run's own temporary sender rule, and the owner's longer rule names and description.
+ * None of them is ever in a model-visible result, so the hidden-values probe forbids them (#1266).
+ */
+export async function checkClaudePrivacy(frame: AppFrame, t: AskTimings, record: RecordAppCheck): Promise<string[]> {
   const sender = `olympus-canary-${crypto.randomUUID()}@example.invalid`;
   const check = async (id: string, ok: boolean, detail: string): Promise<void> => record({ id: `web.claude.privacy.${id}`, title: `Claude.ai: privacy: ${id}`, status: ok ? 'pass' : 'fail', detail });
   const press = async (key: string): Promise<void> => {
@@ -727,6 +751,8 @@ export async function checkClaudePrivacy(frame: AppFrame, t: AskTimings, record:
   let attempted = false;
   let baseline: string[] = [];
   let baselineDescription = '';
+  // Short owner values ("Tax", "Work") turn up in ordinary replies; the run's own sender never does.
+  const panelOnly = (): string[] => [...(attempted ? [sender] : []), ...[baselineDescription, ...baseline].filter((value) => value.trim().length >= 12)];
   const description = (): Promise<string> => frame.evaluate(`document.querySelector('[data-key="privacy:summary"]')?.textContent || ""`);
   try {
     await open();
@@ -749,7 +775,7 @@ export async function checkClaudePrivacy(frame: AppFrame, t: AskTimings, record:
     if (added && !asked) await reopen();
     const applied = added && !asked && (await rows()).some((row) => row.name === sender);
     await check('raising', applied, applied ? 'the new sender rule persisted with no lowering confirmation' : 'the raising change did not persist without confirmation');
-    if (!applied) return;
+    if (!applied) return panelOnly();
     const rule = (await rows()).find((row) => row.name === sender)!;
     await press(rule.key);
     const confirmed = await untilApp(t, confirmation);
@@ -782,11 +808,19 @@ export async function checkClaudePrivacy(frame: AppFrame, t: AskTimings, record:
       await check('undo', restored, restored ? 'the temporary rule was removed; the original rules and description are restored' : `cleanup could not verify the original rules; remove only ${sender} manually`);
     }
   }
+  return panelOnly();
 }
 
-export async function checkClaudeDashboard(tab: Tab, obs: TurnObservation | Inconclusive, t: AskTimings, record: RecordAppCheck): Promise<void> {
+/** After the dashboard ran, in the same chat: no value only the panel's app-only tools returned may reach the model. */
+export function evaluateClaudePanelHidden(obs: TurnObservation | Inconclusive, panelOnly: readonly string[]): CheckResult {
+  const leaked = 'turn' in obs && panelOnly.some((value) => saysWord(obs.turn, value));
+  return claudeCheck('dashboard.hidden-values', 'dashboard: app-only results stay hidden', obs, !leaked,
+    leaked ? 'a value only the panel\'s app-only tools returned appeared in the reply' : `none of ${panelOnly.length} panel-only value(s) appeared`, false, leaked);
+}
+
+export async function checkClaudeDashboard(tab: Tab, obs: TurnObservation | Inconclusive, t: AskTimings, record: RecordAppCheck): Promise<string[]> {
   const gate = claudeCheck('dashboard', 'dashboard opens', obs, true, '');
-  if (gate.status === 'skip') { await record(gate); return; }
+  if (gate.status === 'skip') { await record(gate); return []; }
   let frames: AppFrame[] = [];
   let texts: string[] = [];
   await untilApp(t, async () => {
@@ -798,9 +832,10 @@ export async function checkClaudeDashboard(tab: Tab, obs: TurnObservation | Inco
   await record(claudeCheck('dashboard', 'dashboard opens', obs, dashboardFrameFound(texts), dashboardFrameFound(texts) ? 'the dashboard App frame shows its title and Sources' : 'no App frame shows the dashboard\'s title and Sources section'));
   // The current App has privacy controls without the local dashboard's top bar. Still exercise those controls.
   for (const frame of frames) {
-    if (await hasControl(frame, 'privacy:edit').catch(() => false)) { await checkClaudePrivacy(frame, t, record); return; }
+    if (await hasControl(frame, 'privacy:edit').catch(() => false)) return checkClaudePrivacy(frame, t, record);
   }
   await record({ id: 'web.claude.privacy.controls', title: 'Claude.ai: privacy controls', status: 'fail', detail: 'no dashboard App frame exposes the source-defined privacy edit control' });
+  return [];
 }
 
 // ---------------------------------------------------------------------------
@@ -862,7 +897,7 @@ export async function askQuestion(tab: Tab, client: WebClientId, q: ClientQuesti
     await t.sleep(t.pollMs);
     await tab.evaluate<boolean>(ALLOW_SCRIPT).catch(() => false);
     const state = await tab.evaluate<PageState>(script);
-    if (state.challenge || state.signedOut) return { inconclusive: blockedReason(client, state)! };
+    if (state.challenge || state.signedOut || state.limited) return { inconclusive: blockedReason(client, state)! };
     const turn = capturedTurn(state);
     // Some apps keep the text in the box when Enter only adds a line; their send button sends it.
     if (!sendRetried && (t.now ?? Date.now)() - started >= 2 * t.pollMs && state.composerText.includes(q.prompt.trim().slice(0, 40))) {
@@ -1003,13 +1038,24 @@ export async function runWebClients(machine: Machine, options: WebClientsOptions
         for (const q of options.questions.filter((question) => !question.clients || question.clients.includes(client))) {
           if (stopped) break;
           await t.sleep(Math.max(0, gap - (Date.now() - lastAsked)));
-          const before = await readConnectionUses(machine);
           if (q.kind === 'secret') macInbox ??= await openMacInbox(machine, browser, t).catch((error: unknown) => error instanceof Error ? error.message : String(error));
           const known = q.kind === 'secret' ? await macInboxRows(macInbox!).catch((error: unknown) => error instanceof Error ? error.message : String(error)) : {};
-          let obs: TurnObservation | Inconclusive;
-          try { obs = await askQuestion(tab, client, q, t, options.newChatUrls?.[client], options.claudeApp !== undefined ? { claudeApp: options.claudeApp } : {}); } catch (error) { obs = { inconclusive: `${CLIENT_ADAPTERS[client].label} could not be driven: ${error instanceof Error ? error.message : String(error)}` }; }
-          lastAsked = Date.now();
-          if (!('inconclusive' in obs)) obs = { ...obs, olympus: olympusUse(before, await readConnectionUses(machine)) };
+          let obs!: TurnObservation | Inconclusive;
+          for (let attempt = 1; attempt <= 2; attempt += 1) {
+            const before = await readConnectionUses(machine);
+            try { obs = await askQuestion(tab, client, q, t, options.newChatUrls?.[client], options.claudeApp !== undefined ? { claudeApp: options.claudeApp } : {}); } catch (error) { obs = { inconclusive: `${CLIENT_ADAPTERS[client].label} could not be driven: ${error instanceof Error ? error.message : String(error)}` }; }
+            lastAsked = Date.now();
+            if (!('inconclusive' in obs)) obs = { ...obs, olympus: olympusUse(before, await readConnectionUses(machine)) };
+            // Claude.ai sometimes loads its tools and then says the connector gives it none in this chat (2026-11-11: 4 of
+            // 9 questions, with the Claude App on and off). Asked once more in a new chat; the warning keeps a repeat visible.
+            // A first reply that leaked is kept, so its no-leak check fails rather than being asked away.
+            const forbid = forbiddenFor(q, sharedForbid);
+            if (attempt > 1 || 'inconclusive' in obs) break;
+            const { turn } = obs;
+            if (!saidNoTools(client, turn) || forbid.some((value) => value !== '' && turnContains(turn, value))) break;
+            checks.push({ id: `web.${client}.${q.id}.retried`, title: `${CLIENT_ADAPTERS[client].label}: ${q.id}: asked again in a new chat`, status: 'warn', detail: `the first reply said Olympus gave it no tools in that chat: ${redactForbidden(turn.replace(/\s+/g, ' '), forbid).slice(0, 200)}` });
+            await t.sleep(gap);
+          }
           // A Secret question the reply points to the computer for is held to the machine's own answer for it.
           if (!('inconclusive' in obs) && q.kind === 'secret' && turnContains(obs.turn, REMOTE_SECRET_NOTE)) {
             obs = { ...obs, macSecret: await readMacSecret(macInbox!, known, t).catch((error: unknown) => ({ unreadable: error instanceof Error ? error.message : String(error) })) };
@@ -1028,8 +1074,11 @@ export async function runWebClients(machine: Machine, options: WebClientsOptions
         }
         if (client === 'claude' && options.claudeApp && !stopped) {
           const obs = await probe('dashboard', CLAUDE_DASHBOARD_PROMPT);
-          try { await checkClaudeDashboard(tab, obs, t, record); }
+          let panelOnly: string[] = [];
+          try { panelOnly = await checkClaudeDashboard(tab, obs, t, record); }
           catch { await record(claudeCheck('dashboard', 'dashboard opens', { inconclusive: 'the Claude App frames could not be read; inspect the sign-in and connector' }, false, '')); }
+          // Same chat: what the panel's app-only calls returned must not be repeatable by the model.
+          if (panelOnly.length > 0) await record(evaluateClaudePanelHidden(await probe('dashboard-hidden-values', CLAUDE_HIDDEN_PROMPT, true), panelOnly));
         }
       } finally {
         await tab.close();

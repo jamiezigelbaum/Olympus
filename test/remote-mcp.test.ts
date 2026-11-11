@@ -4,6 +4,7 @@
 // connection-token handler, every other route to the worker-bearer wrapper.
 // A real MCP SDK client talks Streamable HTTP to it over loopback.
 
+import { ANSWER_MODEL_REQUIRED_TEXT } from '../src/workers/answer-model-required.ts';
 import { AUTHENTICATED_RESPONSE_HEADER, SURFACE_RESPONSE_HEADER } from '../connect-relay/shared/tokens.ts';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -23,7 +24,7 @@ import {
   type RemoteConnectionStore,
 } from '../src/core/remote-connections.ts';
 import { runConnectionsCommand } from '../src/cli.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import {
   createInProcessOperationContext,
@@ -665,17 +666,21 @@ describe('remote evidence search', () => {
     return client;
   }
 
-  test('with no answer model: search is listed, source_answer is neither listed nor callable', async () => {
+  test('with no answer model: Ask and its collector stay listed and explain setup', async () => {
     const { token } = store.create('Claude');
     const client = await searchClient(token);
     try {
       const tools = await client.listTools();
-      expect(tools.tools.map((tool) => tool.name).sort()).toEqual(['ask_anonymously', 'olympus_search', 'source_answer_result', 'source_index_status']);
+      expect(tools.tools.map((tool) => tool.name).sort()).toEqual(['ask_anonymously', 'olympus_search', 'source_answer', 'source_answer_result', 'source_index_status']);
       const search = tools.tools.find((tool) => tool.name === 'olympus_search')!;
       expect(search.annotations).toEqual({ readOnlyHint: true, destructiveHint: false, openWorldHint: false });
 
-      const refused = await client.callTool({ name: 'source_answer', arguments: { question: 'when does the lease renew?' } });
-      expect(refused.isError).toBe(true);
+      for (const [name, args] of [['source_answer', { question: 'when does the lease renew?' }], ['source_answer_result', { job_id: 'saj_unknown' }]] as const) {
+        const result = await client.callTool({ name, arguments: args });
+        expect(result.isError).toBeFalsy();
+        expect(result.content).toEqual([{ type: 'text', text: ANSWER_MODEL_REQUIRED_TEXT }]);
+      }
+      expect(searches).toEqual([]);
       expect(answered).toBe(0);
     } finally {
       await client.close();

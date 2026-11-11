@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   connectorStoreAnswerScope,
   type ConnectorStoreAnswerScopeStore,
-} from '../src/workers/email-source/server.ts';
+} from '../src/workers/engine/runtime/answer-scope.ts';
 import type { ConnectorStoreConversationTitleCandidates } from '../src/workers/connector-store/index.ts';
 
 const CONVERSATIONS = [

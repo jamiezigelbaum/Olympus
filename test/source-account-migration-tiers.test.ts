@@ -16,7 +16,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { secretLocationsPathForStore, tierLedgerPathForStore, tierSnifferPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { accountStorePath, legacyAccountFiles, olympusDataRoot } from '../src/core/olympus-layout.ts';
 import {
@@ -382,7 +382,8 @@ describe('a tiered source, moved into its folder', () => {
     expect(migrateAccountFolders(env).moved).toEqual(['dropbox.files']);
 
     const after = folderPaths(env);
-    expect(ledgerFoundBy(after, 'internal')).toBeUndefined();
+    // #1398: the writable open refuses a store whose bound ledger is not in this install.
+    expect(() => ledgerFoundBy(after, 'internal')).toThrow(/missing or outside this install/);
     expect(ledgerFoundBy(after, 'secure_local')).toBe(tierLedgerPathForStore(after.secure_local));
   });
 });

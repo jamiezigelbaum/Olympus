@@ -11,7 +11,7 @@ import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createBuiltInAnalystModel } from '../src/core/analyst-built-in.ts';
-import { stopBuiltInModelOnShutdown } from '../src/workers/email-source/server.ts';
+import { stopBuiltInModelOnShutdown } from '../src/workers/engine/runtime/judging-models.ts';
 import { readBuiltInReasoningStatus, reportBuiltInReasoningState } from '../src/workers/source-index/built-in-reasoning/install.ts';
 import { QWEN35_4B } from '../src/workers/source-index/built-in-reasoning/manifest.ts';
 import {

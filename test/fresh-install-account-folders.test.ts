@@ -21,13 +21,13 @@ import { FileSourceScopeAuthority } from '../src/workers/source-scope-runtime.ts
 import {
   createRefreshableReadwiseConnectorStoreRuntime,
   createXBookmarksConnectorStoreRuntime,
-} from '../src/workers/email-source/server.ts';
+} from '../src/workers/engine/runtime/source-runtimes.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { defaultXBookmarksApiUsageDbPath } from '../src/workers/x-bookmarks/live-control.ts';
 import { LocalXBookmarksApiUsageStore } from '../src/workers/x-bookmarks/index.ts';
 import { readwiseTestTierSet, xBookmarksTestTierSet } from './helpers/lane-tier-sets.ts';
 
-const SERVER = join(import.meta.dir, '..', 'src', 'workers', 'email-source', 'server.ts');
+const SERVER = join(import.meta.dir, '..', 'src', 'workers', 'engine', 'server.ts');
 const REPO = join(import.meta.dir, '..');
 
 const roots: string[] = [];

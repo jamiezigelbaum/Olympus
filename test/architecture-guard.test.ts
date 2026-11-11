@@ -240,6 +240,7 @@ const SOURCE_AGNOSTIC_SHARED_FILES = [
   'src/workers/file-extraction/extractors/built-in-transcriber.ts',
   'src/workers/file-extraction/extractors/command-runner.ts',
   'src/workers/file-extraction/extractors/document-formats.ts',
+  'src/workers/file-extraction/extractors/rtf.ts',
   'src/workers/file-extraction/extractors/image-prepare.ts',
   'src/workers/file-extraction/extractors/image-preparers.ts',
   'src/workers/file-extraction/extractors/input-limits.ts',
@@ -695,8 +696,8 @@ describe('architecture guard: capability, not per-source/per-question code', () 
     expect(owners).toEqual([LEGACY_TELEGRAM_INPUT_ALIAS_OWNER]);
 
     const workerSurface = [
-      'src/workers/email-source/index.ts',
-      'src/workers/email-source/server.ts',
+      'src/workers/engine/index.ts',
+      'src/workers/engine/server.ts',
       'src/workers/source-index/status.ts',
       'src/workers/telegram-messages/corpus-adapter.ts',
     ].map(read).join('\n');
@@ -960,7 +961,7 @@ describe('architecture guard: capability, not per-source/per-question code', () 
   });
 
   test('Dropbox product assembly uses the canonical store for writes and reads', () => {
-    const server = read('src/workers/email-source/server.ts');
+    const server = read('src/workers/engine/server.ts');
     expect(server).not.toContain('sourceReadAuthorities');
     expect(server).not.toContain('dropboxLegacyIndexLaneEnabled(process.env)');
     expect(server).toContain('const readConnectorStores = connectorStores;');
@@ -980,7 +981,7 @@ describe('architecture guard: capability, not per-source/per-question code', () 
   });
 
   test('Gmail product assembly is provider-native and has no legacy read selector', () => {
-    const server = read('src/workers/email-source/server.ts');
+    const server = read('src/workers/engine/server.ts');
     expect(server).not.toContain("sourceReadAuthorities.gmail");
     expect(server).not.toContain('OLYMPUS_SOURCE_INDEX_GMAIL_READ_AUTHORITY');
     expect(server).toContain('createGmailConnectorStoreSyncHandler({');
@@ -988,7 +989,7 @@ describe('architecture guard: capability, not per-source/per-question code', () 
   });
 
   test('product worker assembly cannot construct or register a bespoke source index', () => {
-    const server = read('src/workers/email-source/server.ts');
+    const server = read('src/workers/engine/server.ts');
     const mainStart = server.indexOf('export async function main()');
     const mainEnd = server.indexOf('export function resolveEmailSourceBindHostFromEnv', mainStart);
     expect(mainStart).toBeGreaterThanOrEqual(0);
@@ -998,6 +999,22 @@ describe('architecture guard: capability, not per-source/per-question code', () 
     expect(main).not.toContain('legacy_index');
     expect(main).not.toContain('readAuthorities:');
     expect(main).not.toContain('LegacyReplay');
+  });
+
+  test('the email source stays a source module, not a second engine (#1068)', () => {
+    // The worker entry and HTTP routes moved to src/workers/engine/ (#1403,
+    // #1425). An entry point or an engine import here would make the email
+    // source the engine again.
+    const dir = join(repoRoot, 'src', 'workers', 'email-source');
+    const modules = readdirSync(dir, { recursive: true })
+      .map(String)
+      .filter((name) => name.endsWith('.ts'));
+    expect(modules.length).toBeGreaterThan(0);
+    expect(modules.filter((name) => name === 'server.ts' || name === 'index.ts')).toEqual([]);
+    const engineImport = /\bfrom\s+['"](?:\.\.\/)+(?:workers\/)?engine(?:\/|['"])|\bimport\(\s*['"](?:\.\.\/)+(?:workers\/)?engine(?:\/|['"])/;
+    expect(engineImport.test("import { x } from '../engine/http/routes.ts';")).toBe(true);
+    expect(engineImport.test("await import('../engine/server.ts')")).toBe(true);
+    expect(modules.filter((name) => engineImport.test(readFileSync(join(dir, name), 'utf8')))).toEqual([]);
   });
 
   test('shared answer regex heuristics stay in reviewed generic helpers', () => {

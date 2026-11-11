@@ -19,7 +19,7 @@ import type {
 } from '../src/workers/connector-store/index.ts';
 import { withDataOwnerLock } from '../src/core/data-owner-lock.ts';
 import { openConnectorStore, storageAccountForCorpus } from '../src/core/source-storage.ts';
-import { createSourceIndexEmbeddingProviderFromEnv } from '../src/workers/email-source/server.ts';
+import { createSourceIndexEmbeddingProviderFromEnv } from '../src/workers/engine/runtime/embedding-providers.ts';
 
 interface ConnectorStoreEmbedCliArgs {
   db: string;

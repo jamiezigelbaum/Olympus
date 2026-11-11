@@ -45,7 +45,7 @@ import {
   type LlamaServerHandle,
   type LlamaServerLaunch,
 } from '../src/workers/source-index/built-in-reasoning/server.ts';
-import { applyBuiltInPrivateAnalyst, builtInBacksPrivateAnalyst } from '../src/workers/email-source/server.ts';
+import { applyBuiltInPrivateAnalyst, builtInBacksPrivateAnalyst } from '../src/workers/engine/runtime/private-analysts.ts';
 
 const GIB = 1024 ** 3;
 const temporaryDirectories: string[] = [];

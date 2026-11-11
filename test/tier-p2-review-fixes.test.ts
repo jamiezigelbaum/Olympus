@@ -54,7 +54,7 @@ import { TierSnifferStore, snifferMaterialHash } from '../src/workers/classifica
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { loadOwnerTierRules } from '../src/workers/classification/tier-rules.ts';
 import { TierLedger, tierLedgerPathForStore } from '../src/workers/classification/tier-ledger.ts';
-import { embeddingPrefilterDirectory, embeddingPrefilterInstallLedgerPath, resolveClassificationLedgerPath, tierSnifferPathForLedger, tierSnifferPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
+import { tierSnifferPathForLedger, tierSnifferPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { SecureAnalystPoolState } from '../src/workers/source-index/analyst-pool.ts';
 import {
   CORPORA,
@@ -147,7 +147,9 @@ describe('1. an unusable rules file fails closed', () => {
 
     specs.push({ id: 'garden-1', name: 'garden notes', text: 'Tomatoes and beans this year.' });
     await sync();
-    expect(copies('garden-1')).toEqual([[CORPORA.internal, 'current', false]]);
+    // No judge here, so its text waits held in Private (#1316); its names are Personal.
+    const namesPersonalTextHeld = [[CORPORA.internal, 'current', true], [CORPORA.secure_local, 'current', true]];
+    expect(copies('garden-1')).toEqual(namesPersonalTextHeld);
 
     // The owner saves the rules with a trailing comma.
     writeFileSync(rulesPath, withTrailingComma(rulesJson('/Files/zebracorn budget')));
@@ -169,11 +171,11 @@ describe('1. an unusable rules file fails closed', () => {
     await sync();
     expect(copies('garden-3')).toEqual([[CORPORA.secure_local, 'current', true]]);
 
-    // Fixed: new items route by their tiers again.
+    // Fixed: new items route by their tiers again (names Personal, text waiting for the judge).
     writeFileSync(rulesPath, full);
     specs.push({ id: 'garden-4', name: 'garden hose', text: 'Twenty metres.' });
     await sync();
-    expect(copies('garden-4')).toEqual([[CORPORA.internal, 'current', false]]);
+    expect(copies('garden-4')).toEqual(namesPersonalTextHeld);
   });
 });
 
@@ -452,82 +454,6 @@ describe('nits', () => {
     expect((await service.runOnce()).state).toBe('skipped_running');
   });
 
-  test('deleting a non-owning source discards pooled weights even without enough remaining labels, and preserves the install audit', () => {
-    const dir = workspace();
-    const homeDir = join(dir, 'home');
-    const env = { HOME: homeDir, XDG_DATA_HOME: join(dir, 'xdg-data'), OLYMPUS_CLASSIFICATION_LEDGER_PATH: join(dir, 'custom', 'classification.jsonl') };
-    const auditPath = embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(env));
-    const audit = new TierLedger({ dbPath: auditPath });
-    audit.writeMeta('embedding-prefilter:state', 'synthetic stopped audit');
-    audit.writeMeta('embedding-prefilter:withdrawal', 'before-deletion');
-    audit.close();
-    const weightsDir = embeddingPrefilterDirectory(auditPath);
-    mkdirSync(weightsDir, { recursive: true, mode: 0o700 });
-    const weightsPath = join(weightsDir, 'weights.json');
-    writeFileSync(weightsPath, 'synthetic pooled model trained from another source', { mode: 0o600 });
-    const dryRun = deleteOlympusData({ sourceId: 'readwise.library', homeDir, env, dryRun: true });
-    expect(dryRun.removed).toContain(weightsPath);
-    expect(existsSync(weightsPath)).toBe(true);
-    const afterPreview = new TierLedger({ dbPath: auditPath });
-    expect(afterPreview.readMeta('embedding-prefilter:withdrawal')).toBe('before-deletion');
-    afterPreview.close();
-    const deleted = deleteOlympusData({ sourceId: 'readwise.library', homeDir, env });
-    expect(deleted.removed).toContain(weightsPath);
-    expect(deleted.missing).not.toContain(weightsPath);
-    expect(existsSync(weightsPath)).toBe(false);
-    const after = new TierLedger({ dbPath: auditPath });
-    expect(after.readMeta('embedding-prefilter:state')).toBe('synthetic stopped audit');
-    expect(after.readMeta('embedding-prefilter:withdrawal')).not.toBe('before-deletion');
-    expect(after.readMeta('embedding-prefilter:withdrawal')).toBeDefined();
-    after.close();
-  });
-
-  test('delete at restart fences in-flight training and removes weights immediately while source bytes stay', () => {
-    const dir = workspace();
-    const homeDir = join(dir, 'home');
-    const env = { HOME: homeDir, XDG_DATA_HOME: join(dir, 'xdg-data') };
-    const storePath = resolvedStorePath('readwise.library', 'internal', env);
-    const snifferPath = tierSnifferPathForStore(storePath);
-    const store = new TierSnifferStore({ dbPath: snifferPath });
-    store.close();
-    const auditPath = embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(env));
-    const audit = new TierLedger({ dbPath: auditPath });
-    audit.writeMeta('embedding-prefilter:state', 'synthetic stopped audit');
-    audit.writeMeta('embedding-prefilter:withdrawal', 'before-deletion');
-    const modelDir = embeddingPrefilterDirectory(auditPath);
-    mkdirSync(modelDir, { recursive: true, mode: 0o700 });
-    const weightsPath = join(modelDir, 'weights.json');
-    writeFileSync(weightsPath, 'synthetic weights', { mode: 0o600 });
-    const result = deleteOlympusData({ sourceId: 'readwise.library', homeDir, env, applyAtRestart: true });
-    expect(result.pending).toBe(true);
-    expect(existsSync(snifferPath)).toBe(true);
-    expect(existsSync(weightsPath)).toBe(false);
-    const firstWithdrawal = audit.readMeta('embedding-prefilter:withdrawal');
-    expect(firstWithdrawal).toBeDefined();
-    expect(firstWithdrawal).not.toBe('before-deletion');
-    expect(audit.readMeta('embedding-prefilter:state')).toBe('synthetic stopped audit');
-    // A first training run has no published weights, but still needs a new fence.
-    deleteOlympusData({ sourceId: 'readwise.library', homeDir, env, applyAtRestart: true });
-    expect(audit.readMeta('embedding-prefilter:withdrawal')).not.toBe(firstWithdrawal);
-    audit.close();
-  });
-
-  test('a refused source deletion does not bump the install withdrawal fence', () => {
-    const dir = workspace();
-    const homeDir = join(dir, 'home');
-    const env = { HOME: homeDir, XDG_DATA_HOME: join(dir, 'xdg-data') };
-    const auditPath = embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(env));
-    const audit = new TierLedger({ dbPath: auditPath });
-    audit.writeMeta('embedding-prefilter:withdrawal', 'before-refusal');
-    const weightsPath = join(embeddingPrefilterDirectory(auditPath), 'weights.json');
-    // A directory where a regular learned-model file belongs fails preflight.
-    mkdirSync(weightsPath, { recursive: true });
-    expect(() => deleteOlympusData({ sourceId: 'readwise.library', homeDir, env })).toThrow();
-    expect(audit.readMeta('embedding-prefilter:withdrawal')).toBe('before-refusal');
-    expect(existsSync(weightsPath)).toBe(true);
-    audit.close();
-  });
-
   test('data deletion takes the sniffer queue beside a source store', () => {
     const dir = workspace();
     const homeDir = join(dir, 'home');
@@ -633,7 +559,7 @@ describe('pace, daily cap and the visible backlog', () => {
   test('defaults: 20,000 full-mode calls a day, prompt idle polling, optional explicit caps', () => {
     expect(DEFAULT_SNIFFER_MAX_CALLS_PER_DAY).toBe(20_000);
     expect(DEFAULT_SNIFFER_PASS_TIME_MS).toBe(30_000);
-    expect(tierSnifferServiceEnv({})).toEqual({ enabled: true, embeddingPrefilterEnabled: true, intervalMs: 1_000 });
+    expect(tierSnifferServiceEnv({})).toEqual({ enabled: true, intervalMs: 1_000 });
     expect(tierSnifferServiceEnv({ OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS: '5' }).maxCallsPerPass).toBe(5);
     expect(tierSnifferServiceEnv({ OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY: '20000' }).maxCallsPerDay).toBe(20_000);
   });

@@ -142,7 +142,7 @@ describe('the threshold setting', () => {
 });
 
 describe('the background\'s wiring', () => {
-  const server = readFileSync(join(import.meta.dir, '../src/workers/email-source/server.ts'), 'utf8');
+  const server = readFileSync(join(import.meta.dir, '../src/workers/engine/server.ts'), 'utf8');
 
   test('only the background checks, between judge passes, and restarts through the model reload', () => {
     const at = server.indexOf('const rssRestart = startEngineRssRestart({');

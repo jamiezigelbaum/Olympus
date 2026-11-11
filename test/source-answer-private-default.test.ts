@@ -24,7 +24,7 @@ import { createSovereigntyEngine, type SovereigntyConfig } from '../src/core/sov
 import {
   secureLocalAnalystRouteStatus,
   sovereigntyAnalystRoutePlan,
-} from '../src/workers/email-source/server.ts';
+} from '../src/workers/engine/runtime/private-analysts.ts';
 import {
   createAnalystSourceIndexAnswerHandler,
   type SovereigntyAnalystRouteStep,

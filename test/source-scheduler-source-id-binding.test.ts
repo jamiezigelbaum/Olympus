@@ -16,7 +16,7 @@ import {
   SCHEDULER_SOURCE_IDS,
 } from '../src/workers/source-scheduler.ts';
 import { LocalSourceSchedulerStateStore } from '../src/workers/source-scheduler-state.ts';
-import { activeCredentialHandle, sourceIndexLaneEnabled } from '../src/workers/email-source/server.ts';
+import { activeCredentialHandle, sourceIndexLaneEnabled } from '../src/workers/engine/runtime/source-lanes.ts';
 import { readConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
 import { defaultDropboxIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
 import { OLYMPUS_SOURCE_FAMILY_POSTURES } from '../src/core/source-family.ts';

@@ -71,7 +71,7 @@ export interface OperationContext {
   doctorOcrProbe?: () => OcrReadiness | Promise<OcrReadiness>;
   /**
    * The worker's current tiers and release rules, set by the worker for its
-   * remote surface (email-source/server.ts). The remote output boundary
+   * remote surface (engine/server.ts). The remote output boundary
    * (core/remote-result.ts) revalidates a source answer's release manifest
    * with it when the answer is collected; no operation handler reads it.
    */
@@ -705,7 +705,7 @@ export const operations: Operation[] = [
         ...(signal ? { signal } : {}),
       });
       const jobs = ctx.sourceAnswerJobs;
-      return jobs ? runUnderCaller(jobs, ctx.signal, ask) : ask(ctx.signal);
+      return jobs ? runUnderCaller({ ...jobs, anonymousAsk: true }, ctx.signal, ask) : ask(ctx.signal);
     },
   },
   {

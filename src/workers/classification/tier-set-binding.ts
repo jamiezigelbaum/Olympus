@@ -4,27 +4,57 @@
 // IDENTITY and the absolute path the ledger had when the store was bound. The
 // identity is what binds: a ledger is the right one only when its id is the
 // recorded one, so a store never takes another set's tiers. The path is only a
-// hint to where to look first, because a store and its ledger move together
+// hint to where to look, because a store and its ledger move together
 // (the migration into account folders renames them, and the data folder itself
 // can be moved or restored elsewhere) and the row, which is never rewritten for
 // that, keeps naming the old place.
 //
-// Candidates, best first. Each is checked by its id before it is opened.
-// 1. The recorded path, while it still leads to the ledger.
-// 2. For a store in an account folder, the set ledger beside the folder's
-//    secure_local store, where the layout puts it
-//    (`stores/secure_local.tier-ledger.sqlite`). This is how the stores of a
-//    set renamed from their legacy files are found: their file names changed.
-// 3. The recorded file name in the store's own folder, which finds a set whose
-//    folder was moved as a whole.
-// A candidate that leads nowhere, or to another ledger, is passed over; when
-// none is left the store is refused, as it always was.
+// Prefer co-located ledgers. A recorded path is usable only inside this
+// store's data root: a copy must never borrow its original install's ledger.
 
 import { existsSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
-import { accountSiblingStorePath } from '../../core/olympus-layout.ts';
-import { TierLedger } from './tier-ledger.ts';
+import { basename, dirname, join, resolve } from 'node:path';
+import { accountSiblingStorePath, pathResolvesWithin } from '../../core/olympus-layout.ts';
+import { readStoreBindingCursor, TierLedger } from './tier-ledger.ts';
 import { tierLedgerPathForStore } from './tier-ledger-path.ts';
+
+/** Account layout identifies the data root; legacy/standalone stores use their directory. */
+export function tierStoreDataRoot(storeDbPath: string): string {
+  const folder = dirname(resolve(storeDbPath));
+  return accountSiblingStorePath(storeDbPath, 'secure_local')
+    ? dirname(dirname(dirname(dirname(folder)))) : folder;
+}
+
+/** A recorded ledger path is usable only inside this directory (symlinks resolved). */
+export const tierLedgerIsWithin = pathResolvesWithin;
+
+/** Read the binding without opening a store writable or running migrations. */
+export function readTierSetBinding(storeDbPath: string): TierSetBindingRecord | undefined {
+  const cursor = readStoreBindingCursor(storeDbPath, 'tiered-store-set-binding', 'tiered_store_set_binding');
+  if (!cursor) return undefined;
+  const binding = JSON.parse(cursor) as TierSetBindingRecord;
+  if (typeof binding.ledgerId !== 'string' || typeof binding.ledgerPath !== 'string') throw new Error('Invalid privacy ledger binding.');
+  return binding;
+}
+
+/** Preflight the governing ledger before a writer opens the connector database. */
+export function assertStoreTierLedgerCanOpen(storeDbPath: string, readOnly = false): void {
+  const binding = readTierSetBinding(storeDbPath);
+  const path = binding ? findTierSetLedger(storeDbPath, binding) : tierLedgerPathForStore(storeDbPath);
+  if (binding && !path) throw new Error(`The privacy ledger governing ${storeDbPath} is missing or outside this install. Restore the set ledger before opening the store.`);
+  if (path) TierLedger.assertSchemaCanOpen(path, readOnly);
+}
+
+/** Offline eval/probe boundary, checked before opening any store or ledger. */
+export function assertTierLedgerInDirectory(storeDbPath: string, directory = dirname(storeDbPath)): void {
+  const binding = readTierSetBinding(storeDbPath);
+  if (!binding) return;
+  const found = findTierSetLedger(storeDbPath, binding);
+  if (found && tierLedgerIsWithin(directory, found)) return;
+  // Resolution itself refuses external ledgers. Diagnose the rejected hint too,
+  // so a copy missing its ledger cannot silently start an empty eval.
+  throw new Error(`Refusing store ${storeDbPath}: its privacy ledger is missing or outside the requested directory ${directory}. Copy the tier set and its ledger together.`);
+}
 
 export interface TierSetBindingRecord {
   ledgerId: string;
@@ -32,15 +62,15 @@ export interface TierSetBindingRecord {
   ledgerPath: string;
 }
 
-/** Where a store's set ledger may be, best first. Reads no file. */
+/** Where a store's set ledger may be, co-located first; resolve links before accepting a path. */
 export function tierSetLedgerCandidates(storeDbPath: string, recordedLedgerPath: string): string[] {
-  const candidates = [recordedLedgerPath];
-  if (storeDbPath !== ':memory:' && recordedLedgerPath !== ':memory:') {
-    const secure = accountSiblingStorePath(storeDbPath, 'secure_local');
-    if (secure) candidates.push(tierLedgerPathForStore(secure));
-    candidates.push(join(dirname(storeDbPath), basename(recordedLedgerPath)));
-  }
-  return [...new Set(candidates)];
+  if (storeDbPath === ':memory:' || recordedLedgerPath === ':memory:') return [recordedLedgerPath];
+  const candidates: string[] = [];
+  const secure = accountSiblingStorePath(storeDbPath, 'secure_local');
+  if (secure) candidates.push(tierLedgerPathForStore(secure));
+  candidates.push(join(dirname(storeDbPath), basename(recordedLedgerPath)));
+  candidates.push(recordedLedgerPath);
+  return [...new Set(candidates)].filter((path) => tierLedgerIsWithin(tierStoreDataRoot(storeDbPath), path));
 }
 
 /**

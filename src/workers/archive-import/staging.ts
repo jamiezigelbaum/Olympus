@@ -21,12 +21,12 @@
  *   staging copy that an import still reads is kept (`sweep` is told which);
  *   one nothing reads is deleted.
  *
- * The route layer (email-source/index.ts) owns authentication: only the
+ * The route layer (engine/index.ts) owns authentication: only the
  * dashboard's local-grade control session reaches this.
  */
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, statfsSync, utimesSync } from 'node:fs';
-import { open, type FileHandle } from 'node:fs/promises';
+import { existsSync, mkdirSync, readdirSync, realpathSync, renameSync, rmSync, statSync, statfsSync, utimesSync } from 'node:fs';
+import { open, rm, type FileHandle } from 'node:fs/promises';
 import { sep, join, resolve } from 'node:path';
 
 /** Free space an upload leaves on the disk, so receiving never fills it (the built-in model download keeps the same headroom). */
@@ -184,6 +184,16 @@ export interface ArchiveUploads {
    */
   sweep(needed: (stagingDir: string) => boolean): void;
   close(): void;
+}
+
+// A folder a sweep set aside to delete: never an upload's name (ID).
+export const ARCHIVE_STAGING_REMOVING_PREFIX = '.removing-';
+const REMOVING_PREFIX = ARCHIVE_STAGING_REMOVING_PREFIX;
+const removing = new Set<string>();
+function removeInBackground(path: string): void {
+  if (removing.has(path)) return;
+  removing.add(path);
+  void rm(path, { recursive: true, force: true }).catch(() => undefined).finally(() => removing.delete(path));
 }
 
 export function createArchiveUploads(options: ArchiveUploadsOptions): ArchiveUploads {
@@ -468,7 +478,13 @@ export function createArchiveUploads(options: ArchiveUploadsOptions): ArchiveUpl
       } catch {
         return;
       }
+
       for (const name of names) {
+        // A folder an earlier sweep set aside and did not finish deleting.
+        if (name.startsWith(REMOVING_PREFIX)) {
+          removeInBackground(join(root, name));
+          continue;
+        }
         if (!ID.test(name)) continue;
         const dir = join(root, name);
         const found = sessions.get(name);
@@ -486,7 +502,19 @@ export function createArchiveUploads(options: ArchiveUploadsOptions): ArchiveUpl
         }
         if (found) found.cancelled = true;
         sessions.delete(name);
-        rmSync(dir, { recursive: true, force: true });
+        // A sweep runs on a dashboard read: the folder leaves its place at
+        // once (one rename), and its files, which can be thousands, are
+        // deleted off the request path.
+        // Inside the staging folder, so deleting that folder (a source's
+        // data) takes anything left here too; a unique name never collides.
+        const aside = join(root, `${REMOVING_PREFIX}${name}-${randomBytes(4).toString('hex')}`);
+        try {
+          renameSync(dir, aside);
+        } catch {
+          removeInBackground(dir);
+          continue;
+        }
+        removeInBackground(aside);
       }
     },
     close() {

@@ -18,8 +18,9 @@ Five moves:
    serves the dashboard and answers (#1064). It is built behind a switch and
    proven on the owner's large install first. If it is not proven by the scope
    freeze, 1.5 ships the two targeted fixes instead (#858 option 1 and #929)
-   and the split moves to 1.6. That fallback was taken on 2026-11-11 (see
-   Decisions): 1.5 does not wait for the split.
+   and the split moves to 1.6. That fallback was taken on 2026-11-11 and
+   reversed by the owner the same day (see Decisions): the split is in 1.5,
+   and 1.5 ships when the split is proven.
 2. **Findable in minutes**: judge the items a question matched first (#1062),
    shorten the wait for captured messages (#609, #866), show the judging
    choices with time and cost at setup (#891, #922), and say "still checking
@@ -32,11 +33,8 @@ Five moves:
 4. **Steady tests**: a shared test clock and a check that refuses new
    real-clock sleeps (#1066), `verify:full` as one process (#1018), and
    release testing v3 (olympus-ops #138).
-5. **Subtract**: the embedding pre-filter stays only if one week of live
-   counts on the owner's install saves at least 15% of judge calls with zero
-   spot-check Private misses (measurement started 2026-11-10, counts on
-   #1025); otherwise it is removed with its follow-ups. The Google pilot
-   client is removed before about 2026-12-03 (#765). Engine startup moves out
+5. **Subtract**: 2026-11-11: embedding pre-filter removed; it could not save 15% of judge calls at zero owner-label Private misses (#1025).
+   The Google pilot client is removed before about 2026-12-03 (#765). Engine startup moves out
    of `email-source` (#1068), last.
 
 Seven lanes, each with a brief and a done-when: Engine (#1064), Findable fast
@@ -77,9 +75,10 @@ kind, which join the Owner controls lane as Critical work: connection approval
 that trusts loopback alone (#1186), a forwarded Linux owner socket (#1188,
 fixed in #1196) and a dashboard cookie not confined to the engine's origin
 (#1187, fixed with a per-port unlock key: owner decision 2026-11-10). Published
-2026-11-10 (tag at `ebe51d4b`). The `release/1.4.x` branch stays for 1.4.5,
-the search fixes below, which ships only after #1276 lands and two runs in a
-row of the held-out eval on the owner's install drop no store.
+2026-11-10 (tag at `ebe51d4b`). There is no 1.4.5 (owner, 2026-11-11, see
+Decisions): the search fixes below ship in 1.5. The `release/1.4.x` branch
+stays at `ebe51d4b` and is used again only for a patch the release rule
+allows.
 
 Owner decisions on 2026-11-10 that change the Privacy accuracy lane:
 
@@ -124,6 +123,14 @@ important Private item there. Three things came out of the measurement:
   runs, and no judge needs approving again; the 7 Nov rule that a prompt
   change alone re-judges nothing stands. Whether an approval should carry
   over at the next wording change is #1286, to be decided then.
+
+The built-in 4B also gains the union rule for 1.5 (lane 3, #890): full mode
+stays primary; only a Personal verdict at confidence 0.9 or above gets the
+native one-token check. P(Private) at least 0.5, or a failed check, holds the
+item Private. Other judges, including the local-server 4B's 0.15 bar, keep
+their behavior. This changes the built-in 4B judge identity, so the existing
+bounded background re-judge revisits its eligible old verdicts once, at the
+lowest queue priority. This is a judge-rule change, not a prompt-only change.
 
 No freeze date is set. 2026-11-10 16:00Z was the target for that day's push,
 not the scope freeze.
@@ -200,6 +207,26 @@ rides on the lane budgets in #1329. The eval report now records where a
 question was lost: each store's rank for the expected item, the seat and
 offset of each value, what the answer cited, and the answer's shape (#1348).
 
+Later on 2026-11-11 (counts on #707): 5 of 7 on main at both pack sizes.
+Three changes got there, each run on the copies at its exact head: pack
+seats for a store's keyword leader and best names-only match (#1350), a
+store's order made independent of how many results are asked for (#1355),
+and the end of a newest-first re-sort of the whole pool on questions that
+ask for the latest of something, which had buried a second store's best
+match where a local model never read it (#1356; the newest pinned chat hits
+now take two fixed seats instead). The eval now grades two passes, and both
+gate a search change: 5 seats, and the product's 24-seat pack with the
+local answer model's 13,500-byte prompt fit (#1352). Found on the way and
+in scope for 1.5 (#1354, the same in 1.4.x): stores are seated in
+configuration order, not by relevance, so on an install with many stores a
+local answer reads the same first stores whatever is asked. Its fix (#1362)
+passed on the two-store copies and waits for a before/after on a copy with
+22 stores, read through the seat-order trace (#1363). The two failures left
+are at the answer model, the same on repeated answers (#1361): one misreads
+its passage even when given that item alone, and for the other the prompt
+fit keeps the first bytes of a seat's passages, not the part around the
+match, so at 24 seats the value is cut before the model sees it.
+
 That eval is necessary, not sufficient. The same night, main at `7c028be2`
 (engine split off), which scores on the copies, was installed on the owner's
 live engine and could not answer: in two Asks every lane of all 11 sources
@@ -207,7 +234,7 @@ ended at its deadline, where 1.4.3 and 1.4.4 search all 11 and answer in
 about 90 to 100 seconds (#1305). The owner's install is back on 1.4.4.
 Until an Ask passes on a full-size install that is busy importing and
 judging, no build from main goes onto the owner's live install, the engine
-split's switch-on there is held, and the search fixes do not ship as 1.4.5.
+split's switch-on there is held. The search fixes ship in 1.5.
 The fix has to keep three things true: an Ask never comes back empty because
 sources were slow, the budget is sized from measurement, and the default is
 never worse than 1.4.x.
@@ -263,12 +290,22 @@ answer; a Private answer route can read them meanwhile.
 Claude dashboard (owner decision 2026-11-10, #1266): Claude connectors may
 show the Olympus dashboard as an MCP App, not only the four remote tools, on
 the condition that a privacy proof passes on each Claude client. The proof
-passed on Claude web and desktop and is not yet run on the phone app. The
-build is behind `remote.claudeAppEnabled`, off by default (#1288). Because
-all three Claude clients share one pinned client id, the switch gets no
-dashboard control and no release-note line, and is turned on only on test
-machines, until the phone app passes. This is a side lane and does not gate
-1.5. Decisions has the entry.
+passed on Claude web, desktop and the iPhone app (2026-11-11, #1303). The
+iPhone app shows no panels, so Claude's text results stand on their own.
+`remote.claudeAppEnabled` is off by default again (2026-11-11): the first
+Claude leg run with it on (43006900498) had Claude say it had no Olympus tools
+in 4 of 9 chats, against 0 in five earlier runs with it off. It goes back on
+by default only when, with the switch on, the answer tools are available in as
+many chats as with it off, over at least 20 chats a side, with each side's tool
+count and listing size recorded. The first fix to try is listing less on the
+Claude surface. If that fails, 1.5 ships with it off and the setting
+documented. Release-note line if it ships on: "**Olympus's dashboard opens
+inside Claude.** In Claude on the web and the desktop app, Olympus shows its
+dashboard and private answers in a panel that Claude itself never reads.
+Claude's phone apps show answers as text for now. To turn it off, set
+`remote.claudeAppEnabled` to `false` and restart Olympus (#1266)." If it ships
+off, the line says to set it to `true`. There is no dashboard control for it yet. This is a side lane
+and does not gate 1.5. Decisions has the entry.
 
 Closed on approval as accepted or stale: #690, #695, #964, #1001, #1027, #698.
 Moved to 1.6: #672, #920. Waiting on the owner: optionally, #581. The fresh
@@ -291,20 +328,6 @@ the Linux leg three times (#954), `verify:full`, and every dashboard page in
 light and dark at 390 and 1280. After the tag: site publish, the relay deploy,
 the ChatGPT listing re-pin and resubmission (#732), and the Grok reviewer
 engine upgrade.
-
-## Embedding Personal pre-filter (#939; implementation, 2026-11-07)
-
-Implement a source-neutral Personal-only first pass over each item's own stored
-EmbeddingGemma 2 vector, below p(Private) 0.002 (0.05 until the 2026-11-08
-owner-label gate). One install-local logistic model
-trains daily after 2,000 final judge labels per class; the 5% direct-judge audit
-stops all clearing and requeues provisional clearances above 2% Private in 200
-checks. Owner rules, Secrets and open names questions precede it. The engine
-setting defaults on once trained. Implementation details and recovery behavior
-live in `design/per-item-four-tier-classification.md`, "Embedding Personal
-pre-filter". No live rollout in this branch; synthetic checks do not establish
-queue throughput or a real-data miss rate. The owner's supplied offline and
-200-item held-queue results are inputs, with no real labels or weights committed.
 
 ## Private embedding choices and pending judgments (#937; owner, 2026-11-06)
 
@@ -393,6 +416,10 @@ check on the final candidate. Listing updates ride only on a tested minor
 release; the demo box is updated right after the tag, before any upload.
 Before the tag, run `bun run eval:real` on the owner's install with the
 private held-out set to verify chat search (#619).
+
+The patch rule was tightened on 2026-11-11 (see Decisions): no patch is cut
+to carry a fix to the owner's own install, which takes tested builds from
+`main` without a public release.
 
 Centerpiece: the signed, notarized Mac helper under OCU (olympus-ops #64), so
 Files on this computer reads Desktop, Documents, Downloads and iCloud Drive.
@@ -795,7 +822,36 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
-- **2026-11-11 — 1.5 does not wait for the engine split.** Taken by the
+- **2026-11-11 — Every source holds new text until a judge has checked it.**
+  Owner decision (#1316, "Yes, hold on every source", 10:26Z): new text from
+  any source stays out of cloud answers (ChatGPT, Claude, Grok) until the
+  privacy judge has read it, also when no judge is set up. This retires the
+  2026-10-13 Personal-first rule, under which a new Dropbox file with no
+  record-like signs was usable as Personal before it was judged. Names stay
+  searchable, Private answers can read held text at once, and items a
+  question matched are judged first. Cost: on a large first sync, new items
+  wait for the judge (about 80 minutes for 15,000 items at the Delphi 35B
+  judge's ~188 a minute). Built in #1318; ships in 1.5.
+- **2026-11-11 — Fewer releases; 1.5 is the engine split release and has no
+  date.** Owner decision. Twelve public releases went out between 2026-10-30
+  and 2026-11-10, five of them in three days, for very few users. The
+  2026-10-31 rule already limited patches; it was stretched because a public
+  release was the only way a fix reached the owner's own install. From now:
+  no more 1.4.x, and 1.4.5 is cancelled (the search fixes ship in 1.5). A
+  patch is cut only for a privacy leak, a security problem or data loss that
+  affects someone other than the owner. The owner's own machines take tested
+  builds from an exact `main` commit without a public release (no GitHub
+  release, site deploy, ClawHub or listing change); the gate for the live
+  install is unchanged (an Ask passes the busy gate and a copy of the
+  install first). 1.5 keeps the engine split and ships when the split
+  passes the full release check with its switch on and has then run 48
+  hours on the owner's install; the original done-when of move 1 applies
+  again. Order: the Ask fix for large installs (#1305), which the split
+  needs too, then the split's open failures (#1324), then the switch-on
+  check, then the 48 hours. The ChatGPT and Grok submissions wait with 1.5.
+  This reverses the next entry.
+- **2026-11-11 — (Reversed the same day, see above.) 1.5 does not wait for
+  the engine split.** Taken by the
   release plan's own fallback rule (move 1 of 1.5), and the owner was told.
   With the switch on, the release check failed 31 checks (#1324); 19 of
   them were later traced to an unrelated open-link bug (#1336), and the
@@ -813,9 +869,12 @@ testers have exercised the normal product journey without custom engineering.
   are. The condition is a proof on each Claude client that tool-result `_meta`
   and app-only tool results reach the panel and never the model, and that the
   model cannot call app-only tools, because privacy-lowering saves ride a
-  confirmation in `_meta`. Passed on Claude web and desktop on 2026-11-10; the
-  phone app is not yet checked. Until it is, `remote.claudeAppEnabled` stays
-  off by default, has no dashboard control and is not in release notes.
+  confirmation in `_meta`. Passed on Claude web and desktop on 2026-11-10,
+  and on the Claude iPhone app on 2026-11-11 (#1303; the app shows no panel,
+  so text results stand alone). The plan owner set `remote.claudeAppEnabled`
+  on by default for 1.5, provided the Claude release-check leg covers it. On
+  2026-11-11 the default went back to off: with it on, Claude had no Olympus
+  tools in 4 of 9 leg chats. It returns when the leg shows no loss.
 - **2026-11-05 — Decision mode for local judging.** Local llama.cpp servers
   now answer the privacy question with a one-token read instead of a written
   JSON reply; Venice and the built-in model keep full mode. The owner approved

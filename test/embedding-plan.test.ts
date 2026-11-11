@@ -10,7 +10,7 @@ import {
 import type { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { createSourceCorpusRegistry, defaultSourceCorpusRegistryConfig } from '../src/core/source-corpus-registry.ts';
 import { archiveImportCorpora, withArchiveImportCorpora } from '../src/workers/archive-import/store.ts';
-import { sourceStoresCouldEmbed } from '../src/workers/email-source/server.ts';
+import { sourceStoresCouldEmbed } from '../src/workers/engine/runtime/embedding-providers.ts';
 import { RecordingProvider } from './helpers/tier-fixtures.ts';
 
 const store = (corpusId: string, trustDomain: string) => ({ corpusId, trustDomain }) as unknown as LocalConnectorStore;

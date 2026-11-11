@@ -2851,7 +2851,7 @@
           "claudeAppEnabled": {
             "type": "boolean",
             "default": false,
-            "description": "Show the dashboard in Claude custom connectors. Restart Olympus after changing this setting."
+            "description": "Show the Olympus dashboard and private answer panels inside Claude on the web and desktop. Claude's phone apps show answers as text. Leave off to give Claude only the answer tools. Restart Olympus after changing this setting."
           },
           "demoConsent": {
             "type": "object",

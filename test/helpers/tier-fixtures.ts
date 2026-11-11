@@ -11,6 +11,7 @@ import type { RawItem, SourceConnector, SourceConnectorListPage } from '../../sr
 import type { SourceExclusionMatcher } from '../../src/core/source-ingestion-exclusions.ts';
 import { buildSourceSensitivity, type SourceTrustDomain } from '../../src/core/source-index/types.ts';
 import { SecretLocationsIndex } from '../../src/workers/classification/secret-locations.ts';
+import type { TierSniffer } from '../../src/workers/classification/tier-classifier.ts';
 import { TierLedger } from '../../src/workers/classification/tier-ledger.ts';
 import { LocalConnectorStore } from '../../src/workers/connector-store/index.ts';
 import type { ConnectorStorePlacement } from '../../src/workers/connector-store/tier-placement.ts';
@@ -18,6 +19,17 @@ import { TieredStoreSet, tieredStoreSetLedgerPath } from '../../src/workers/conn
 import type { SourceEmbeddingInput, SourceEmbeddingProvider } from '../../src/workers/source-index/embeddings.ts';
 
 export const ACCOUNT = 'personal';
+
+/**
+ * A judge that has already answered Personal (ordinary) for every item it is
+ * asked about. Unjudged text waits in Private (#1316), so a test about
+ * something other than judging (a rule, an import, a move) uses this to start
+ * from mail and files the judge has cleared.
+ */
+export const JUDGED_PERSONAL_SNIFFER: TierSniffer = Object.freeze({
+  id: 'fixture-judged-personal',
+  judge: () => ({ verdict: 'decided' as const, tier: 'private' as const, code: 'ordinary:0.99' }),
+});
 export const PROVIDER = 'fixture';
 
 export interface FixtureSpec {

@@ -26,7 +26,7 @@ import { recordReleaseManifest, type ReleaseCheck } from '../src/core/release-ma
 import { REMOTE_OUTPUT_SCHEMAS } from '../src/core/remote-result.ts';
 import { openWaitingPrivateQuestionStore, type WaitingQuestionStore } from '../src/core/waiting-private-questions.ts';
 import { SEARCH_TOOL } from '../src/workers/chatgpt/mcp-surface.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { createLocalPrivateAnswers } from '../src/workers/email-source/local-private-answers.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import {

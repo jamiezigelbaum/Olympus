@@ -68,9 +68,19 @@ test('the read pool pages the same way (#1079 search path)', async () => {
 
 test('the same holds for a multi-concept query under the minimum-signal filter', async () => {
   const { store } = await crowdedStore(60, 'quietorchardmarker lanternledgerword');
-  const ids = store.searchItems('quietorchardmarker lanternledgerword', 5).map((row) => row.sourceItem.localItemId);
-  expect(ids).toEqual([localId('visible')]);
-});
+  for (const contentOnly of [false, true]) {
+    const options = { contentOnly, locate: false };
+    const direct = store.searchItemsDetailed('quietorchardmarker lanternledgerword', 5, undefined, undefined, options);
+    const pooled = await store.searchItemsDetailedOffThread('quietorchardmarker lanternledgerword', 5, undefined, undefined, options);
+    for (const result of [direct, pooled]) {
+      expect(result.rows.map(row => row.sourceItem.localItemId)).toEqual([localId('visible')]);
+      expect(result.concepts.total).toBe(2);
+      expect([...result.concepts.matched]).toEqual([[localId('visible'), 2]]);
+      expect(result.saturated).toBe(false);
+    }
+    expect(pooled).toEqual(direct);
+  }
+}, 60_000);
 
 test('superseded copies stay hidden however many pages are read', async () => {
   const { store } = await crowdedStore(30, 'quietorchardmarker');
@@ -83,21 +93,21 @@ test('the scan is bounded: past the cap, a buried match is not looked for', asyn
   const { store } = await crowdedStore(1_050, 'quietorchardmarker');
   const db = (store as unknown as { db: Database }).db;
   const original = db.query.bind(db);
-  let pages = 0;
-  let rowsRead = 0;
+  // Each page's candidates, by OFFSET. The bounded try ranks only the best
+  // rows; on these tied copies a page it cannot prove is read again from the
+  // rows tied with the bound (#1242), and that read replaces it.
+  const pageRows = new Map<number, number>();
+  let reads = 0;
   const spy = (sql: string) => {
-    // The bounded first try ranks only the best rows and, on these tied
-    // copies, is discarded for the full ranking (#1242): count the pages
-    // whose candidates the scan looked at.
-    if (!sql.includes('LIMIT ? OFFSET ?') || sql.includes('MIN(top.rank)')) return original(sql);
+    if (!sql.includes('LIMIT ? OFFSET ?')) return original(sql);
     // An uncached statement, so each page is wrapped once.
     const statement = db.prepare(sql);
     const all = statement.all.bind(statement);
     return Object.assign(statement, {
       all: (...params: unknown[]) => {
-        pages += 1;
+        reads += 1;
         const rows = (all as (...args: unknown[]) => unknown[])(...params);
-        rowsRead += rows.length;
+        pageRows.set(params.at(-1) as number, rows.length);
         return rows;
       },
     });
@@ -107,8 +117,9 @@ test('the scan is bounded: past the cap, a buried match is not looked for', asyn
     const detailed = store.searchItemsDetailed('quietorchardmarker', 10);
     expect(detailed.rows).toEqual([]);
     expect(detailed.saturated).toBe(true);
-    expect(rowsRead).toBe(1_000);
-    expect(pages).toBeLessThanOrEqual(8);
+    expect([...pageRows.values()].reduce((sum, rows) => sum + rows, 0)).toBe(1_000);
+    expect(pageRows.size).toBeLessThanOrEqual(8);
+    expect(reads).toBeLessThanOrEqual(16);
   } finally {
     (db as unknown as { query: typeof original }).query = original;
   }

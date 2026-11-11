@@ -97,7 +97,7 @@ function closeAll(): void {
   for (const close of closers.splice(0).reverse()) close();
 }
 
-const storePaths = () => [join(root, 'dropbox-secure.sqlite'), resolvedStorePath('dropbox.files', 'internal', env)];
+const storePaths = () => [resolvedStorePath('dropbox.files', 'secure_local', env), resolvedStorePath('dropbox.files', 'internal', env)];
 const ownerItems = () => createOwnerTierItems({ storePaths: storePaths() });
 const bankIdentity = { provider: 'dropbox', accountScope: 'personal', providerItemId: 'id:bank' };
 const gardenIdentity = { provider: 'dropbox', accountScope: 'personal', providerItemId: 'id:garden' };
@@ -121,7 +121,7 @@ async function start(options: { extract: boolean }) {
     ...(isPublicTierRetired(policy) ? { retirePublic: true } : {}),
     ownerContext: () => ownerWords,
   });
-  const secure = new LocalConnectorStore({ dbPath: join(root, 'dropbox-secure.sqlite'), corpusId: SECURE_CORPUS, family: 'file', trustDomain: 'secure_local' });
+  const secure = new LocalConnectorStore({ dbPath: resolvedStorePath('dropbox.files', 'secure_local', env), corpusId: SECURE_CORPUS, family: 'file', trustDomain: 'secure_local' });
   closers.push(() => secure.close());
   const secrets = new SecretLocationsIndex({ dbPath: join(root, 'secrets.sqlite') });
   closers.push(() => secrets.close());
@@ -198,8 +198,8 @@ const LOAN_TEXT = 'Orchard loan terms';
 async function judged(): Promise<Install> {
   const install = await start({ extract: true });
   for (let pass = 0; pass < 3; pass += 1) await install.service.runOnce();
-  // Judged Private, then moved there by the judge's automatic move.
-  expect(install.lane.ledger.getCurrent(bankIdentity)).toMatchObject({ state: 'current', contentTier: 'secure', decidedBy: 'move' });
+  // Held in Private until judged (#1316), then judged Private where it already was.
+  expect(install.lane.ledger.getCurrent(bankIdentity)).toMatchObject({ state: 'current', contentTier: 'secure', decidedBy: 'sniffer' });
   expect(install.lane.ledger.getCurrent(gardenIdentity)).toMatchObject({ state: 'current', contentTier: 'private' });
   return install;
 }
@@ -220,7 +220,7 @@ describe('finding an item', () => {
       family: 'file',
       title: 'bank letter.pdf',
       tier: 'Private',
-      decided_by: 'move',
+      decided_by: 'sniffer',
       owner_set: false,
     });
     expect(item.judge_reason).toStartWith('financial');

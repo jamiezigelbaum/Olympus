@@ -38,7 +38,7 @@ import {
 import { createGoogleDriveConnectorStoreSchedulerSource } from '../src/workers/source-scheduler.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import { OperationError } from '../src/core/operation-error.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 
 const TEXT_PDF = new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures/pdf/text-layer.pdf')));
 const SCANNED_PDF = new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures/pdf/scanned-receipt.pdf')));

@@ -26,12 +26,13 @@
 // Set OLYMPUS_EVAL_QUERY_PLANNER_ENABLED=true to include model-planned
 // retrieval expansions; default is literal-query retrieval for a usable gate.
 
-import { builtInRerankerFromEnv } from '../src/workers/source-index/built-in-reranker.ts';
+import { createHash } from 'node:crypto';
+import { prepareBuiltInRerankerFromEnv } from '../src/workers/source-index/built-in-reranker.ts';
 import type { EvidenceReranker } from '../src/core/evidence-reranker.ts';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createAnalyst, type AnalystModel } from '../src/core/analyst.ts';
+import { analystCoverageBytes, analystEvidenceFormat, analystPromptBytes, analystPromptWithoutDraft, createAnalyst, withPromptBudget, type AnalystEvidenceFormat, type AnalystModel } from '../src/core/analyst.ts';
 import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { createDelphiAnalystModel } from '../src/core/analyst-delphi.ts';
 import {
@@ -62,14 +63,16 @@ import {
   DEFAULT_MAX_CHARS_PER_CANDIDATE as PRODUCT_MAX_CHARS_PER_CANDIDATE,
   DEFAULT_MAX_RESULTS as PRODUCT_MAX_RESULTS,
   fitPackToPromptBytes,
+  withUnfittedCoverage,
   releaseAnalystAnswer,
   type AnalystAnswerLanes,
   type AnalystReleaseOutcome,
 } from '../src/workers/source-index/analyst-answer.ts';
-import type { Analyst, AnalystResult, EvidencePack } from '../src/core/contracts.ts';
+import type { Analyst, AnalystOptions, AnalystResult, EvidencePack } from '../src/core/contracts.ts';
 import type { OpsecReleaseAudit } from '../src/core/opsec.ts';
 import type { SourceTrustDomain } from '../src/core/source-index/types.ts';
 import type { SourceIndexCorpusSearchAdapter } from '../src/core/source-index/router.ts';
+import { assertTierLedgerInDirectory, tierLedgerIsWithin } from '../src/workers/classification/tier-set-binding.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { createParentLabelResolver } from '../src/workers/connector-store/parent-label.ts';
 import { tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
@@ -229,25 +232,31 @@ async function main(): Promise<void> {
       analystModelIds.push(completion.modelId);
       return completion;
     },
-  }, { auditSuspiciousDrafts: true });
+  }, { auditSuspiciousDrafts: true, evidenceFormat: analystProvider === 'local' ? 'compact' : 'full' });
   // Optional multi-query retrieval expansion over the same local Delphi lane:
   // useful for recall experiments, but disabled by default because it adds a
   // model call before every question and made the real eval too slow as a gate.
   const queryPlanner = queryPlannerEnabled ? createAnalystQueryPlanner(model) : undefined;
   // Off unless OLYMPUS_SOURCE_RERANKER=built-in names a reranker model
   // directory, so one corpus can be measured with and without it (issue #921).
-  const reranker = builtInRerankerFromEnv();
+  const reranker = await prepareBuiltInRerankerFromEnv();
 
   const detailsByPack = new WeakMap<object, EvidencePackBuildDetail>();
   const rawResultsByPack = new WeakMap<object, AnalystResult>();
   // The pack seats (1-based) the Analyst was actually sent, per pack.
   const analystSeatsByPack = new WeakMap<object, number[]>();
+  // Where the bytes of the prompt each pack was sent as went.
+  const promptLayoutByPack = new WeakMap<object, EvalPromptLayout>();
   const fittedAnalyst = promptFittedEvalAnalyst(
     analyst,
     analystPromptByteBudget,
     (pack) => detailsByPack.get(pack)?.candidateCorpusIds,
-    (pack, seats) => analystSeatsByPack.set(pack, seats),
+    (pack, seats, sent, analyzeOptions, evidenceFormat) => {
+      analystSeatsByPack.set(pack, seats);
+      promptLayoutByPack.set(pack, evalPromptLayout(sent, analyzeOptions, evidenceFormat));
+    },
     (pack) => detailsByPack.get(pack)?.recencySeats,
+    (pack) => detailsByPack.get(pack)?.candidateExtractionGapIndexes,
   );
   const repeatsByPack = new WeakMap<object, { results: AnalystResult[]; failures: number }>();
   const repeatThisQuestion = analystRepeatQuestions.length === 0 || analystRepeatQuestions.includes(dataset.questions[0]!.id);
@@ -265,7 +274,7 @@ async function main(): Promise<void> {
       return result;
     },
   };
-  const seatOnlyByPack = new WeakMap<object, { seats: number[]; alone: EvidencePack; result: AnalystResult | undefined }>();
+  const seatOnlyByPack = new WeakMap<object, { seats: number[]; alone: EvidencePack; result: AnalystResult | undefined; prompts: string[] }>();
   // The seats the grader counts as expected evidence, by its own matcher.
   const expectedSeatsOf = (pack: EvidencePack) => evalExpectedSeats(
     dataset.questions[0]!.expectedEvidence ?? [],
@@ -278,9 +287,10 @@ async function main(): Promise<void> {
       // Once per pack: a repeat of the same pack does not run it again.
       (pack) => seatOnlyByPack.has(pack) ? [] : expectedSeatsOf(pack),
       (pack, alone, result) => {
-        seatOnlyByPack.set(pack, { seats: expectedSeatsOf(pack), alone, result });
+        seatOnlyByPack.set(pack, { seats: expectedSeatsOf(pack), alone, result, prompts: analystPrompts.slice(firstAnswer?.prompts ?? 0) });
         keepGradedAnswerRecords();
       },
+      (pack) => detailsByPack.get(pack)?.candidateCorpusIds ?? [],
     )
     : gradedAnalyst;
   const repeatingAnalyst = repeatedEvalAnalyst(
@@ -336,6 +346,7 @@ async function main(): Promise<void> {
             }
             : {}),
           ...(seatOnlyByPack.has(pack) ? { expectedSeatOnly: expectedSeatOnlyAudit(question, seatOnlyByPack.get(pack)!) } : {}),
+          ...(promptLayoutByPack.has(pack) ? { promptLayout: promptLayoutByPack.get(pack)! } : {}),
         },
       });
     },
@@ -448,6 +459,17 @@ export interface EvalDropboxStores {
   close(): void;
 }
 
+/** Refuse external ledgers before either the eval or probe starts reading stores. */
+export function assertEvalDropboxStoreIsolation(paths: EvalDropboxStorePaths): void {
+  const files = [paths.secure, paths.personal, paths.public];
+  const directory = dirname(paths.secure);
+  const ledgerPath = paths.ledger ?? tieredStoreSetLedgerPath(paths.secure);
+  if (!tierLedgerIsWithin(directory, ledgerPath)) throw new Error(`Refusing privacy ledger outside the requested directory ${directory}: ${ledgerPath}`);
+  for (const dbPath of files) {
+    if (dbPath && existsSync(dbPath)) assertTierLedgerInDirectory(dbPath, directory);
+  }
+}
+
 /**
  * Opens every Dropbox tier store that exists, query-only. A store bound to
  * the set ledger judges what it serves by that ledger itself; the ledger
@@ -463,24 +485,32 @@ export function openEvalDropboxStores(
     ['internal', paths.personal],
     ['public_safe', paths.public],
   ];
-  const stores: LocalConnectorStore[] = [];
-  for (const [trustDomain, dbPath] of files) {
-    const corpusId = DROPBOX_TIER_CORPUS_IDS[trustDomain];
-    if (!corpusId || !dbPath || !existsSync(dbPath)) continue;
-    const startedAt = performance.now();
-    stores.push(new LocalConnectorStore({
-      dbPath,
-      corpusId,
-      family: 'file',
-      trustDomain,
-      readOnly: true,
-    }));
-    if (openMs) openMs[corpusId] = Math.round(performance.now() - startedAt);
-  }
+  assertEvalDropboxStoreIsolation(paths);
   const ledgerPath = paths.ledger ?? tieredStoreSetLedgerPath(paths.secure);
-  const ledgerStartedAt = performance.now();
-  const ledger = existsSync(ledgerPath) ? new TierLedger({ dbPath: ledgerPath, readOnly: true }) : undefined;
-  if (openMs && ledger) openMs.ledger = Math.round(performance.now() - ledgerStartedAt);
+  const stores: LocalConnectorStore[] = [];
+  let ledger: TierLedger | undefined;
+  try {
+    for (const [trustDomain, dbPath] of files) {
+      const corpusId = DROPBOX_TIER_CORPUS_IDS[trustDomain];
+      if (!corpusId || !dbPath || !existsSync(dbPath)) continue;
+      const startedAt = performance.now();
+      stores.push(new LocalConnectorStore({
+        dbPath,
+        corpusId,
+        family: 'file',
+        trustDomain,
+        readOnly: true,
+      }));
+      if (openMs) openMs[corpusId] = Math.round(performance.now() - startedAt);
+    }
+    const ledgerStartedAt = performance.now();
+    ledger = existsSync(ledgerPath) ? new TierLedger({ dbPath: ledgerPath, readOnly: true }) : undefined;
+    if (openMs && ledger) openMs.ledger = Math.round(performance.now() - ledgerStartedAt);
+  } catch (error) {
+    for (const store of stores) store.close();
+    ledger?.close();
+    throw error;
+  }
   return {
     stores,
     ...(ledger ? { ledger } : {}),
@@ -740,6 +770,12 @@ export interface EvalAnswerStageAudit {
   /** Whether the answer cites a seat holding an expected evidence item; absent when the question names none. */
   expectedSeatCited?: boolean;
   /**
+   * Cited seats that hold no expected evidence item; absent when the question
+   * names none. Informational: an answer citing every seat still cites the
+   * expected one, and this shows the rest.
+   */
+  citedSeatsWithoutExpectedItem?: number;
+  /**
    * The answer's number-bearing tokens (dates, amounts, identifiers with a
    * digit), and how many of them occur in a seat the answer cites. Fewer in
    * the cited seats than in the answer means the answer states a value its
@@ -753,6 +789,15 @@ export interface EvalAnswerStageAudit {
    * one without carrying the value itself.
    */
   answerValueTokensUnmatchedShapes: string[];
+  /**
+   * For each unmatched token, in the same order: whether it occurs as a whole
+   * token in the prompt the Analyst model was sent (absent when no prompt was
+   * recorded), and the 1-based pack seats whose text holds it. A token in the
+   * prompt but in no cited seat came from another seat; one in no seat and
+   * not in the prompt was not read anywhere.
+   */
+  answerValueTokensUnmatchedInPrompt?: boolean[];
+  answerValueTokensUnmatchedSeats: number[][];
   /** The pack seats the Analyst was sent, when a prompt budget fitted the pack (Ask's local leg). */
   analystSeats?: number[];
   /**
@@ -768,7 +813,7 @@ export interface EvalAnswerStageAudit {
    * and that answer by shape and flags (its cited seats count within that
    * pack), or failed when the call failed. Diagnostics only, never the grade.
    */
-  expectedSeatOnly?: { seats: number[] } & (EvalAnswerRepeat | { failed: true });
+  expectedSeatOnly?: { seats: number[]; prompts?: Array<{ chars: number; sha256: string }> } & (EvalAnswerRepeat | { failed: true });
   /**
    * The Analyst's own answer, by its structure: every expected value in it,
    * some, or none (with no citation: it said it found nothing; with
@@ -828,11 +873,16 @@ export function evalExpectedSeats(
 /** The expected-seat-only answer, by the repeat audit's own measures. */
 export function expectedSeatOnlyAudit(
   question: Pick<EvalQuestion, 'expectedAnswerContains'> & Partial<Pick<EvalQuestion, 'expectedEvidence'>>,
-  run: { seats: number[]; alone: EvidencePack; result: AnalystResult | undefined },
+  run: { seats: number[]; alone: EvidencePack; result: AnalystResult | undefined; prompts?: readonly string[] },
 ): NonNullable<EvalAnswerStageAudit['expectedSeatOnly']> {
+  // Each model prompt by length and a short hash, so two runs can tell
+  // byte-identical prompts from different ones without carrying the text.
+  const prompts = run.prompts && run.prompts.length > 0
+    ? { prompts: run.prompts.map((prompt) => ({ chars: prompt.length, sha256: createHash('sha256').update(prompt).digest('hex').slice(0, 12) })) }
+    : {};
   return run.result
-    ? { seats: [...run.seats], ...evalAnswerRepeat(question, run.alone, run.result) }
-    : { seats: [...run.seats], failed: true };
+    ? { seats: [...run.seats], ...prompts, ...evalAnswerRepeat(question, run.alone, run.result) }
+    : { seats: [...run.seats], ...prompts, failed: true };
 }
 
 /**
@@ -877,14 +927,30 @@ export function expectedSeatOnlyEvalAnalyst(
   analyst: Analyst,
   expectedSeats: (pack: EvidencePack) => readonly number[],
   onResult: (pack: EvidencePack, alone: EvidencePack, result: AnalystResult | undefined) => void,
+  candidateCorpusIds: (pack: EvidencePack) => readonly string[] = () => [],
 ): Analyst {
   return {
     async analyze(pack, analyzeOptions) {
       const graded = await analyst.analyze(pack, analyzeOptions);
       const seats = new Set(expectedSeats(pack));
       if (seats.size === 0) return graded;
-      const alone: EvidencePack = { ...pack, candidates: pack.candidates.filter((_, index) => seats.has(index + 1)) };
-      if (alone.candidates.length === 0) return graded;
+      const corpusIds = candidateCorpusIds(pack);
+      const kept = pack.candidates.flatMap((candidate, index) => seats.has(index + 1) ? [{ candidate, corpusId: corpusIds[index] }] : []);
+      if (kept.length === 0) return graded;
+      // The pack's coverage restated for the seats it keeps, as Ask's own fit
+      // does: a store's items in evidence are the seats it holds here.
+      const inEvidence = new Map<string, number>();
+      for (const { corpusId } of kept) if (corpusId !== undefined) inEvidence.set(corpusId, (inEvidence.get(corpusId) ?? 0) + 1);
+      const alone: EvidencePack = {
+        ...pack,
+        candidates: kept.map(({ candidate }) => candidate),
+        coverage: {
+          ...pack.coverage,
+          ...(pack.coverage.matchCounts
+            ? { matchCounts: pack.coverage.matchCounts.map((count) => ({ ...count, inEvidence: inEvidence.get(count.corpusId) ?? 0 })) }
+            : {}),
+        },
+      };
       let result: AnalystResult | undefined;
       try {
         result = await analyst.analyze(alone, analyzeOptions);
@@ -924,18 +990,23 @@ function answerValueTokens(answer: string, seats: number): string[] {
  * forms a citation line shows the Analyst that whole tokens miss. The
  * full-format label prints the timestamp ("[2026-03-01T09:30:00.000Z]") and
  * the compact one its date ("date: 2026-03-01"), so a timestamp also supports
- * its date; a locator path also supports each of its segments (the file name).
+ * its date; a locator path also supports each of its segments (the file name),
+ * and a file name also supports itself without its extension.
  */
 function seatSupportTokens(text: string): Set<string> {
   const tokens = textTokens(text);
   for (const token of [...tokens]) {
-    const date = /^(\d{4}-\d{2}-\d{2})t\d/u.exec(token);
-    if (date) tokens.add(date[1]!);
-    if (token.includes('/')) {
-      for (const segment of token.split('/')) {
-        const trimmed = segment.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '');
-        if (trimmed) tokens.add(trimmed);
-      }
+    const parts = [token, ...(token.includes('/')
+      ? token.split('/').map((segment) => segment.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '')).filter(Boolean)
+      : [])];
+    for (const part of parts) {
+      tokens.add(part);
+      const date = /^(\d{4}-\d{2}-\d{2})t\d/u.exec(part);
+      if (date) tokens.add(date[1]!);
+      // A file name without its extension is still the name. The extension
+      // holds a letter, so a decimal ("4182.99") never supports its integer part.
+      const stem = /^(.+)\.(?=\p{N}*\p{L})[\p{L}\p{N}]{1,5}$/u.exec(part);
+      if (stem) tokens.add(stem[1]!);
     }
   }
   return tokens;
@@ -989,7 +1060,8 @@ export function evalAnswerStageAudit(
     ].join('\n'),
   }));
   const packText = seatTexts.map((seat) => seat.all).join('\n');
-  const promptText = analystPrompts && analystPrompts.length > 0 ? analystPrompts.join('\n') : undefined;
+  // The audit quotes the model's own draft; that is not evidence it was sent.
+  const promptText = analystPrompts && analystPrompts.length > 0 ? analystPrompts.map(analystPromptWithoutDraft).join('\n') : undefined;
   const analystOwn = analystResult ?? releasedResult;
   // A citation names its seat by the candidate's own provenance, else by the item.
   const citationSeats = analystOwn.citations.map((citation) => {
@@ -1005,6 +1077,8 @@ export function evalAnswerStageAudit(
   const valueTokens = answerValueTokens(analystOwn.answer, pack.candidates.length);
   // Whole tokens, so '41' is not supported by a seat that says '4182'.
   const citedTokens = seatSupportTokens(citedSeats.map((seat) => seatTexts[seat - 1]!.all).join('\n'));
+  const unmatchedTokens = valueTokens.filter((token) => !citedTokens.has(token));
+  const promptTokens = promptText !== undefined ? seatSupportTokens(promptText) : undefined;
   const values = question.expectedAnswerContains ?? [];
   const inAnswer = values.filter((value) => answerContainsExpectedValue(value, analystOwn.answer).matched).length;
   const answerShape = values.length === 0
@@ -1018,10 +1092,20 @@ export function evalAnswerStageAudit(
     answerUnanswered: analystOwn.unanswered.length,
     answerCitedSeats: citedSeats,
     answerCitationsOutsidePack: citationSeats.filter((seat) => seat === 0).length,
-    ...(expectedIds.length > 0 ? { expectedSeatCited: expectedSeats.some((seat) => citedSeats.includes(seat)) } : {}),
+    ...(expectedIds.length > 0
+      ? {
+        expectedSeatCited: expectedSeats.some((seat) => citedSeats.includes(seat)),
+        citedSeatsWithoutExpectedItem: citedSeats.filter((seat) => !expectedSeats.includes(seat)).length,
+      }
+      : {}),
     answerValueTokens: valueTokens.length,
     answerValueTokensInCitedSeats: valueTokens.filter((token) => citedTokens.has(token)).length,
-    answerValueTokensUnmatchedShapes: valueTokens.filter((token) => !citedTokens.has(token)).map(tokenShape),
+    answerValueTokensUnmatchedShapes: unmatchedTokens.map(tokenShape),
+    ...(promptText !== undefined
+      ? { answerValueTokensUnmatchedInPrompt: unmatchedTokens.map((token) => promptTokens!.has(token)) }
+      : {}),
+    answerValueTokensUnmatchedSeats: unmatchedTokens.map((token) => seatTexts.flatMap((seat, index) =>
+      seatSupportTokens(seat.all).has(token) ? [index + 1] : [])),
     ...(analystSeats ? { analystSeats: [...analystSeats] } : {}),
     ...(promptText !== undefined ? { analystPromptChars: analystPrompts!.reduce((sum, prompt) => sum + prompt.length, 0) } : {}),
     ...(analystModelIds && analystModelIds.length > 0 ? { analystModelIds: [...analystModelIds] } : {}),
@@ -1090,6 +1174,43 @@ export function failIncompleteRetrieval<R extends EvalReport>(
 }
 
 /**
+ * Where the bytes of the Analyst's prompt go, for the pack as sent: the
+ * text every prompt carries (system rules, question, coverage), each seat's
+ * header (name, trust, provenance and citation labels) and each seat's
+ * passages, plus what the same seats would cost in the compact evidence
+ * format. Byte counts only, never text.
+ */
+export interface EvalPromptLayout {
+  /** The format the prompt was sent in; the other counts measure that format. */
+  evidenceFormat: AnalystEvidenceFormat;
+  promptBytes: number;
+  fixedBytes: number;
+  coverageBytes: number;
+  extractionGapCount: number;
+  seats: Array<{ headerBytes: number; passageBytes: number }>;
+  fullPromptBytes: number;
+  compactPromptBytes: number;
+}
+
+export function evalPromptLayout(sent: EvidencePack, options: AnalystOptions, evidenceFormat: AnalystEvidenceFormat = 'full'): EvalPromptLayout {
+  const bytes = (candidates: EvidencePack['candidates']) => analystPromptBytes({ ...sent, candidates }, options, evidenceFormat);
+  const fixedBytes = bytes([]);
+  return {
+    evidenceFormat,
+    promptBytes: analystPromptBytes(sent, options, evidenceFormat),
+    fixedBytes,
+    coverageBytes: analystCoverageBytes(sent),
+    extractionGapCount: sent.coverage.extractionGaps.length,
+    seats: sent.candidates.map((candidate) => {
+      const header = bytes([{ ...candidate, chunks: [] }]);
+      return { headerBytes: header - fixedBytes, passageBytes: bytes([candidate]) - header };
+    }),
+    fullPromptBytes: analystPromptBytes(sent, options),
+    compactPromptBytes: analystPromptBytes(sent, options, 'compact'),
+  };
+}
+
+/**
  * The Analyst as Ask's local leg runs it: the pack fitted to the leg's prompt
  * budget (fitPackToPromptBytes, Ask's own fit), or sent whole without a
  * budget. Told the 1-based pack seats each Analyst call was sent.
@@ -1098,12 +1219,14 @@ export function promptFittedEvalAnalyst(
   analyst: Analyst,
   promptByteBudget: number | undefined,
   candidateCorpusIds: (pack: EvidencePack) => readonly string[] | undefined,
-  onSeats: (pack: EvidencePack, seats: number[]) => void,
+  onSeats: (pack: EvidencePack, seats: number[], sent: EvidencePack, analyzeOptions: AnalystOptions, evidenceFormat: AnalystEvidenceFormat) => void,
   recencySeats: (pack: EvidencePack) => number | undefined = () => undefined,
+  candidateExtractionGapIndexes: (pack: EvidencePack) => EvidencePackBuildDetail['candidateExtractionGapIndexes'] = () => undefined,
 ): Analyst {
   return {
     analyze(pack, analyzeOptions) {
       const corpusIds = candidateCorpusIds(pack);
+      const gapIndexes = candidateExtractionGapIndexes(pack);
       const sent = promptByteBudget === undefined || !corpusIds
         ? pack
         : fitPackToPromptBytes(
@@ -1112,10 +1235,13 @@ export function promptFittedEvalAnalyst(
           new Map(pack.candidates.map((candidate, index) => [candidate, corpusIds[index] ?? ''] as const)),
           analyzeOptions,
           recencySeats(pack),
+          analystEvidenceFormat(analyst),
+          new Map(pack.candidates.map((candidate, index) => [candidate.provenance, gapIndexes?.[index] ?? []] as const)),
         );
       onSeats(pack, sent.candidates.map((candidate) =>
-        pack.candidates.findIndex((original) => original.provenance === candidate.provenance) + 1));
-      return analyst.analyze(sent, analyzeOptions);
+        pack.candidates.findIndex((original) => original.provenance === candidate.provenance) + 1), sent, analyzeOptions ?? {}, analystEvidenceFormat(analyst));
+      return analyst.analyze(promptByteBudget === undefined ? sent : withPromptBudget(sent, promptByteBudget), analyzeOptions)
+        .then((result) => withUnfittedCoverage(result, pack, sent));
     },
   };
 }
@@ -1222,7 +1348,7 @@ async function configuredEvalEmbedding(
   env: Record<string, string | undefined>,
 ): Promise<Parameters<typeof prepareEvalEmbedding>[0]['configured']> {
   try {
-    const { loadSourceWorkerSovereignty, createSourceIndexEmbeddingProviderFromSovereignty } = await import('../src/workers/email-source/server.ts');
+    const { loadSourceWorkerSovereignty, createSourceIndexEmbeddingProviderFromSovereignty } = await import('../src/workers/engine/runtime/embedding-providers.ts');
     const engine = loadSourceWorkerSovereignty(config, env);
     const configured: Partial<Record<SourceTrustDomain, SourceEmbeddingProvider>> = {};
     for (const domain of ['public_safe', 'internal', 'secure_local'] as const) {

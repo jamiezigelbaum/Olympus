@@ -204,6 +204,8 @@ export interface ExtractionCandidateReaderPage {
   candidates: readonly ExtractionCandidateRow[];
   nextCursor?: string;
   done: boolean;
+  // Rows passed over because the owner's exclusion rules say they are never read.
+  skippedByDisposition?: number;
 }
 
 /**

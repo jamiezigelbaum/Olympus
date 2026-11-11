@@ -1,13 +1,12 @@
 /**
  * State the engine split's front shows from the background's status snapshot
  * (docs/design/engine-split.md, part 3, "State the front reads"): the judge's
- * backlog and pending count, unreadable-file counts and the archive
- * dashboard. The background is the process that classifies, recounts
- * unreadable files and runs the imports, so the front reads what it last
+ * backlog and pending count, and unreadable-file counts. The background
+ * classifies and recounts unreadable files, so the front reads what it last
  * published instead of doing that work itself. Before the first snapshot
  * the front answers as a background with nothing to report would.
  */
-import type { ArchiveImportDashboard, ArchivePrivateModelState } from '../archive-import/dashboard.ts';
+import type { ArchivePrivateModelState } from '../archive-import/dashboard.ts';
 import type { TierClassificationBacklog } from '../classification/sniffer-service.ts';
 import type { UnreadableFiles } from '../file-extraction/unreadable-files.ts';
 import type { EngineCommandClient } from './client.ts';
@@ -50,30 +49,6 @@ export function frontUnreadableFiles(local: UnreadableFiles, snapshot: Snapshot)
   return {
     ...local,
     recheck: (corpusId) => current(snapshot)?.snapshot.unreadable?.[corpusId],
-  };
-}
-
-export type ArchiveViews = Pick<ArchiveImportDashboard, 'view' | 'cardViews' | 'sourceImports' | 'archiveSources'>;
-
-/**
- * The archive dashboard as the background, which runs the imports, last saw
- * it. The front reads the files itself when there is no current snapshot
- * (none yet, a stale one, or one written before the front's own last archive
- * change, `changedAt`), so a removed archive is not shown from an old reading.
- */
-export function frontArchiveViews(local: ArchiveViews, snapshot: Snapshot, changedAt: () => number | undefined = () => undefined): ArchiveViews {
-  const archive = () => {
-    const read = current(snapshot);
-    if (!read) return undefined;
-    const changed = changedAt();
-    if (changed !== undefined && Date.parse(read.snapshot.written_at) < changed) return undefined;
-    return read.snapshot.archive;
-  };
-  return {
-    view: () => (archive()?.view as ReturnType<ArchiveViews['view']> | undefined) ?? local.view(),
-    cardViews: () => (archive()?.cards as ReturnType<ArchiveViews['cardViews']> | undefined) ?? local.cardViews(),
-    sourceImports: () => (archive()?.source_imports as ReturnType<ArchiveViews['sourceImports']> | undefined) ?? local.sourceImports(),
-    archiveSources: () => (archive()?.sources as ReturnType<ArchiveViews['archiveSources']> | undefined) ?? local.archiveSources(),
   };
 }
 

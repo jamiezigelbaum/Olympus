@@ -56,7 +56,7 @@ import {
 } from '../src/workers/chatgpt/response-builder.ts';
 import { CHATGPT_TOOLS } from '../src/workers/chatgpt/mcp-surface.ts';
 import { DASHBOARD_CHATGPT_VOCABULARY } from '../src/workers/dashboard/vocabulary.ts';
-import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { createInProcessOperationContext, createRemoteMcpHandler } from '../src/workers/remote-mcp.ts';
 import { waitFor } from './helpers/test-clock.ts';
 import { CLAUDE_CLIENT_ID } from '../src/workers/remote-oauth/pinned-clients.ts';
@@ -219,6 +219,28 @@ describe('one-time jobs', () => {
     expect(await jobs.claim(begun.jobId!, (await generatePanelKeyPair()).publicKey)).toMatchObject({ status: 409, body: { status: 'claimed' } });
     expect(model.calls).toHaveLength(1);
     expect(jobs.size).toBe(1);
+  });
+
+  test('lower-tier refresh admits original matches only, even if another hit supplies the marker', async () => {
+    const hit = (id: string) => ({
+      sourceItem: { provider: 'fixture', accountScope: 'owner', localItemId: id },
+      trust_domain: 'secure_local',
+    });
+    const original = hit('original');
+    const neighbour = { ...hit('neighbour'), neighbour: true };
+    const lowered = { ...original, trust_domain: 'internal', privateAnswerOriginalMatch: true };
+    const model = readyModel();
+    const jobs = makeJobs(model, { now: 1_000_000 }, { precompute: false });
+    const { jobId } = jobs.begin({ question: 'q', count: 1, evidence: [original, neighbour], refresh: async () => [
+      { ...hit('new-match'), trust_domain: 'internal', privateAnswerOriginalMatch: true },
+      { ...neighbour, trust_domain: 'public_safe', privateAnswerOriginalMatch: true },
+      lowered,
+    ] });
+    const panel = await generatePanelKeyPair();
+    await jobs.claim(jobId!, panel.publicKey);
+    await settled(jobs);
+    expect((await jobs.claim(jobId!, panel.publicKey)).body.status).toBe('ready');
+    expect(model.calls).toEqual([{ question: 'q', evidence: [lowered] }]);
   });
 
   test('a second key is audited locally, without content', async () => {

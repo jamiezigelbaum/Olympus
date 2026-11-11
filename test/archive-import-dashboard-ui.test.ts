@@ -1152,6 +1152,19 @@ describe('each archive under the Archives row', () => {
     expect(A.gaps.assumption.one).toContain('import it again');
   });
 
+  test('an archive awaiting its first tally shows counting, with no empty or unreadable claim', async () => {
+    for (const status of ['importing', 'imported'] as const) {
+      const pending = { ...ARCHIVE, status, countsPending: true as const, items: 0, held: 0, judged: 0 };
+      const page = await mount({ [DASHBOARD_TOOL_NAME]: () => dashboard('archives-imported', meta([pending])) });
+      const item = archiveItem(page, status);
+      expect(item.textContent).toContain(A.counting);
+      expect(item.textContent).not.toContain(A.countsUnavailable.why);
+      expect(item.textContent).not.toContain('found in this archive');
+      expect(item.textContent).not.toContain(fill(A.nouns.email.many, { n: '0' }));
+      expect(item.textContent).not.toContain(fill(A.judgedLine, { judged: '0', held: '0' }));
+    }
+  });
+
   test('an archive from an engine that sends no family says items, and an empty import says it found nothing', async () => {
     const { family: _family, ...old } = ARCHIVE;
     const unknown = await mount({ [DASHBOARD_TOOL_NAME]: () => dashboard('archives-imported', meta([old])) });

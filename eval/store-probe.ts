@@ -30,6 +30,7 @@
 // filter saw and kept it, its rank, content and concept match, and the
 // leader's (ids, ranks and counts only).
 
+import { assertTierLedgerInDirectory } from '../src/workers/classification/tier-set-binding.ts';
 import { Database } from 'bun:sqlite';
 import type { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
 import { existsSync, statSync } from 'node:fs';
@@ -39,6 +40,7 @@ import {
   createEvalDropboxLanes,
   evalDropboxStorePaths,
   evalRetrievalAudit,
+  assertEvalDropboxStoreIsolation,
   openEvalDropboxStores,
   resolveEvalDropboxScope,
 } from './run-real.ts';
@@ -88,6 +90,7 @@ export function probeStoreFile(input: {
   term: string;
   scanCapMs: number;
 }): Record<string, unknown> {
+  assertTierLedgerInDirectory(input.dbPath);
   const db = new Database(input.dbPath, { readonly: true, create: false, strict: true });
   try {
     db.exec('PRAGMA query_only = ON;');
@@ -186,9 +189,11 @@ export function probeStoreFile(input: {
 /** What one SQL statement of the keyword search is, by its shape (code, never data). */
 export function keywordStatementKind(sql: string): string {
   if (sql.includes('MIN(top.rank)')) return 'ranked_match_page_bounded';
+  if (sql.includes('MIN(tied.rank)')) return 'ranked_match_page_tied';
   if (sql.includes('MIN(connector_store_fts.rank)')) return 'ranked_match_page';
-  if (sql.includes('COUNT(DISTINCT item_pk)')) return 'concept_weight_count';
-  if (sql.includes('connector_store_fts.item_pk IN (')) return 'concept_hits_for_candidates';
+  if (/COUNT\(DISTINCT (?:r\.)?item_pk\)/.test(sql)) return 'concept_weight_count';
+  if (sql.includes('connector_store_fts.item_pk IN (')
+    || (sql.includes('FROM connector_store_fts_rows r') && sql.includes('r.item_pk IN ('))) return 'concept_hits_for_candidates';
   if (/FROM items WHERE tombstoned = 0/.test(sql) && sql.includes('COUNT(*)')) return 'item_population_count';
   return `other:${sql.replace(/\s+/g, ' ').trim().slice(0, 60)}`;
 }
@@ -359,6 +364,7 @@ function countPoolSearches(stores: readonly LocalConnectorStore[]): { report: ()
 async function main(): Promise<void> {
   const args = parseStoreProbeArgs(process.argv.slice(2));
   const paths = evalDropboxStorePaths(process.env);
+  assertEvalDropboxStoreIsolation(paths);
   const scope = resolveEvalDropboxScope(
     process.env.OLYMPUS_SOURCE_INDEX_ACCOUNT?.trim() || undefined,
     process.env.OLYMPUS_EVAL_DROPBOX_APPROVED_SCOPE_KEY?.trim() || undefined,

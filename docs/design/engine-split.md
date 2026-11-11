@@ -5,6 +5,8 @@ Status: design, 2026-11-10. Lane 1 of the 1.5 plan. Code baseline: main
 42815695294, 2026-11-10) requested changes; they are folded in below and
 listed under "Review findings and how they are handled".
 
+2026-11-11: embedding pre-filter removed; it could not save 15% of judge calls at zero owner-label Private misses (#1025).
+
 ## The problem in one paragraph
 
 The worker runs HTTP (dashboard, approvals, pairing, remote surfaces, Ask
@@ -271,7 +273,7 @@ either kept front-owned or becomes one command.
 ## Writes the front still needs
 
 From an inventory of the request handlers on main `b649295` (handler
-bodies are in `src/workers/email-source/index.ts`; route sets in
+bodies are in `src/workers/engine/index.ts`; route sets in
 `src/workers/http.ts:600-720`). No request handler calls the sniffer or
 the tier-move code directly, and no answer path writes a verdict or a
 ledger. What the front does write falls into four kinds.
@@ -342,9 +344,11 @@ though privacy would not change. On one shared local model this still matters (#
 scheduler status (11 call sites), sniffer backlog and pending
 classification count (`server.ts:2562`, `:6860`), judge spending and
 runtime, capture statuses (`server.ts:2591`), unreadable-file state
-(`server.ts:4995`, `:5023`), the archive dashboard view, and manual-sync
-runs. The tier visibility gate (`tier-visibility.ts:48`) already reads the
-ledger per query and works read-only; the store memos are replaced by
+(`server.ts:4995`, `:5023`), and manual-sync runs. Archive rows, requests
+and counts use the shared dashboard read path directly over the state files
+and read-only tier ledgers; only the front (or single worker), which owns
+upload sessions, sweeps staging. The background publishes no archive view.
+The tier visibility gate (`tier-visibility.ts:48`) already reads the ledger per query and works read-only; the store memos are replaced by
 part 1.
 
 Not yet verified: the full remote MCP and OpenAPI operation registry
