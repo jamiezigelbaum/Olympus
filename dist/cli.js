@@ -73559,9 +73559,9 @@ function formatCompactCandidate(candidate, number, versionNote, passages = candi
   const source = citation?.sourceLabel?.trim();
   if (source && source !== title)
     details.push(`source: ${compactSourceText(source)}`);
-  const place = compactLocator(citation?.uri?.trim(), title);
-  if (place)
-    details.push(`in: ${place}`);
+  const locator = citation?.uri?.trim();
+  if (locator && locator !== title)
+    details.push(`at: ${locator}`);
   const author = citation?.authorLabel?.trim();
   if (author)
     details.push(`from: ${compactSourceText(author)}`);
@@ -73591,13 +73591,6 @@ function formatCompactCandidate(candidate, number, versionNote, passages = candi
     lines.push(`tables: ${JSON.stringify(tables)}`);
   return lines.join(`
 `);
-}
-function compactLocator(uri, title) {
-  if (!uri || uri === title)
-    return;
-  if (uri.endsWith(`/${title}`))
-    return uri.slice(0, -(title.length + 1)) || undefined;
-  return uri;
 }
 function compactAuditPrompt(pack, draft, maxBytes) {
   let chars = AUDIT_CHARS_PER_CANDIDATE;

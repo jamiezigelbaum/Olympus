@@ -207,6 +207,26 @@ describe('Ask local compact evidence', () => {
     expect(calls[0]!.prompt).toContain(citation.updatedAt!);
   });
 
+  // A locator question ("where is this file?") is answered with the whole
+  // path. The compact header once split it into its folder and the title,
+  // and the local model answered with the folder alone (eval rerun 39).
+  test('compact evidence carries each item\'s whole locator, in the main call and the audit', async () => {
+    const { pack } = analystPromptFixture();
+    const first = pack.candidates[0]!;
+    pack.candidates = [...pack.candidates.slice(0, 3), {
+      ...first,
+      provenance: { ...first.provenance, citation: { ...first.provenance.citation!, title: 'Root note.txt', uri: '/Root note.txt' } },
+    }];
+    const calls: AnalystModelRequest[] = [];
+    const draft = JSON.stringify({ answer: 'It is in the folder [1].', citations: [{ evidence: 1, claim: 'It is in the folder.' }], unanswered: [], sufficient: true });
+    await createAnalyst({ complete: async (request) => { calls.push(request); return { text: draft, modelId: 'fixture' }; } },
+      { evidenceFormat: 'compact', auditSuspiciousDrafts: true }).analyze(pack, { localOnly: true });
+    expect(calls.length).toBeGreaterThan(0);
+    for (const call of calls) {
+      for (const candidate of pack.candidates) expect(call.prompt).toContain(candidate.provenance.citation!.uri!);
+    }
+  });
+
   test("a compact analyst's audit stays in the local budget", async () => {
     const { pack, corpusIds } = analystPromptFixture();
     const corpora = new Map(pack.candidates.map((candidate, index) => [candidate, corpusIds[index]!]));
