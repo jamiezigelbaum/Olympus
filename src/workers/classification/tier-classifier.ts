@@ -222,6 +222,8 @@ export interface TierSniffer {
   readonly rejudgeReady?: boolean;
   /** An eligible final verdict for this item's unchanged content and names. */
   readonly recordedContentVerdict?: { readonly tier: 'private' | 'secure'; readonly code: string; readonly mapRevision: string };
+  /** Same checks as judge, but a cache miss never queues a question. */
+  cachedVerdict?(request: TierSnifferRequest): TierSnifferVerdict;
   judge(request: TierSnifferRequest): TierSnifferVerdict;
 }
 
@@ -305,8 +307,9 @@ export function contentJudgeVerdictReason(reason: string, tier: TierKey, digest:
  * was made with (title, path, sender) and the parent's context. A listing
  * reuses a recorded verdict only while both are unchanged, so a renamed or
  * moved item (into a records folder, under a new title) is judged again.
- * Labels and folder keys are left out: a re-judge reads names back from the
- * stored copy, which keeps only these, and must record the same digest.
+ * Labels and folder keys are left out. A re-judge reads names back from the
+ * stored copy; when that representation differs, it retains the listing's
+ * receipt beside its own only while the complete-text digest still matches.
  */
 export function contentNamesReason(
   names: { readonly title?: string | undefined; readonly path?: string | undefined; readonly sender?: string | undefined },

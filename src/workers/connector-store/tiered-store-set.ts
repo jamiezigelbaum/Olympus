@@ -14,8 +14,8 @@
 //   nothing stored before P1b moves, is re-embedded or is deleted.
 // - A new item is routed only from a decision made on text the set actually
 //   read. Unread content stays where the lane places it today.
-// - A names question holds the whole item. A content question holds only
-//   own-record content; Personal-first questions leave content usable.
+// - A names question holds the whole item. Every open content question holds
+//   its text in Private until judged (#1316).
 // - Otherwise the metadata row goes to the metadata tier's store and the
 //   content to the content tier's store (the two-tier invariant). A lane that
 //   keeps an item whole (a chat message) declares `splitLayers: false`, and
@@ -23,8 +23,8 @@
 // - Secrets are stored nowhere; their location goes to the secret-locations
 //   index.
 // - A routed item whose new decision needs other stores is QUEUED as a move
-//   (hidden first on a raise) and never moved by a sync; tier-move.ts is the
-//   move primitive.
+//   (hidden first on a raise). A cached content verdict's lowering finishes
+//   within the sync after its new body lands; tier-move.ts verifies the move.
 //
 // Phase P1c adds, each declared by the lane and source-neutral:
 // - `contentArrivesLater`: a lane whose text a later reader supplies (the
@@ -124,7 +124,7 @@ import { settleNamesOnlyItems } from './tier-names-only-settle.ts';
 import { settlePersonalFirstItems } from './tier-held-settle.ts';
 import { purgeLowerTierContent } from './tier-content-purge.ts';
 import { sweepAutomaticSupersededCopies } from './tier-auto-prune-sweep.ts';
-import { flushTierMoveNotes, type TierMoveOptions } from './tier-move.ts';
+import { flushTierMoveNotes, moveTieredItem, type TierMoveOptions } from './tier-move.ts';
 
 export const LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60_000;
 import { rehomePrivateTierRows, type TierRowRehomeReport } from './tier-row-rehome.ts';
@@ -1685,6 +1685,8 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
   /** Items whose same-version record only repeated what an earlier run still owes: nothing to hold the cursor for. */
   private readonly owedAlready: Set<string>;
   private readonly pendingWithdrawals: Map<string, { item: RawItem; domains: readonly SourceTrustDomain[]; text: readonly SourceTrustDomain[] }>;
+  /** Cached verdicts that lower this write: finish only after the judged body landed in every leg. */
+  private readonly cachedLowerings: Map<string, { identity: SourceItemIdentity; generation: number; target: { metadataTier: TierKey; contentTier: TierKey } }>;
   private readonly set: TieredStoreSet;
   private readonly mode: 'shared' | 'per_leg';
   /** Resolved once per run: one read of the owner's map and rules, not one per item. */
@@ -1700,6 +1702,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     this.versionPlans = new Map();
     this.copyRemovals = new Map();
     this.pendingWithdrawals = new Map();
+    this.cachedLowerings = new Map();
     this.intents = new Map();
     this.namesAdvance = new Map();
     this.emptied = new Map();
@@ -1790,6 +1793,13 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       for (const domain of text) this.set.store(domain)?.stripCopyContent(item.identity);
     }
     this.pendingWithdrawals.clear();
+    for (const move of this.cachedLowerings.values()) {
+      await ingestionTurn();
+      // The normal mover checks the complete stored-text digest again under
+      // its generation fence, then verifies the destination before release.
+      await moveTieredItem({ set: this.set, identity: move.identity, target: move.target, expectedGeneration: move.generation });
+    }
+    this.cachedLowerings.clear();
     for (const identity of this.copyRemovals.values()) {
       await ingestionTurn();
       this.set.ledger.removeCopies(identity);
@@ -1853,6 +1863,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     const hasRow = this.set.anyLegHasRow(identity);
     const routed = ledger.isRouted(identity);
     if (item.metadata['deleted'] === true) {
+      this.cachedLowerings.delete(identityKey(identity));
       this.set.secrets()?.remove(identity);
       if (item.metadata['deletedIdentityResolved'] !== false) {
         this.set.retireSecretPresence(identity, { record: ledger.itemIsSecret(identity) });
@@ -1893,6 +1904,11 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     let decision = decideItemTiers(connector, item, text, classification, ledger, {
       namesOnly,
       ...(input.contentFetchFailed ? { contentFetchFailed: true } : {}),
+      storedContentNames: () => {
+        const serving = copyServingLayer(ledger.copies(identity).filter(copy => copy.state === 'current'), 'content');
+        const domain = serving && this.set.domainForCorpus(serving.corpusId);
+        return domain ? this.set.store(domain)?.contentJudgmentNames(identity) : undefined;
+      },
     });
     // With the owner's rules file or map unusable, the decision (made with
     // the last good ones) may not place anything below Private: hold it
@@ -2010,6 +2026,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     }
     switch (recorded.outcome) {
       case 'secrets':
+        this.cachedLowerings.delete(identityKey(identity));
         this.counts.itemsSecrets += 1;
         // The ledger write above hid every copy. The one Secrets policy
         // (secrets-disposition.ts) decides whether they are tombstoned now or
@@ -2035,6 +2052,12 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       case 'queued_move':
         this.counts.movesQueued += 1;
         if (contentRead && !recorded.raise) {
+          if (classification?.sniffer?.cachedVerdict
+            && decision.reasons.some(reason => reason.startsWith(`content:sniffer:${classification.sniffer!.id}:`))
+            && !decision.contentPending && !decision.metadataPending) {
+            this.cachedLowerings.set(identityKey(identity), { identity, generation: recorded.record.generation,
+              target: { metadataTier: decision.metadataTier, contentTier: decision.contentTier } });
+          }
           // Retain the body that produced this lowering verdict in the
           // existing stores. Until this write lands the move's digest check
           // refuses the old body; a crash therefore cannot release it.

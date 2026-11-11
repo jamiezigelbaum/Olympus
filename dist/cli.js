@@ -29137,6 +29137,12 @@ class CachedTierSniffer {
     this.promptVersion = promptVersion;
   }
   judge(request) {
+    return this.resolve(request, true);
+  }
+  cachedVerdict(request) {
+    return this.resolve(request, false);
+  }
+  resolve(request, queueMiss) {
     const asked = request.material?.trim();
     if (!asked)
       return { verdict: "undecided" };
@@ -29183,7 +29189,7 @@ class CachedTierSniffer {
           code: duplicate ? `rule:duplicate_model:${answer.code}` : answer.code
         };
       }
-      if (request.subject) {
+      if (request.subject && queueMiss) {
         const queued = this.store.enqueue({
           subject: request.subject,
           pass: request.pass,
@@ -31752,7 +31758,28 @@ function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
   const fenced = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh }) : options?.sniffer;
   const signals = connector.classificationSignals(item);
   const parentContext = item.identity.parent ? options?.parentNamesContext?.(item.identity, item.identity.parent.localItemId) : undefined;
-  const sniffer = fenced && conversationOrderedSniffer(recordedContentVerdictSniffer(fenced, recorded, text2, contentNamesReason(signals, parentContext)), item.metadata);
+  const namesReceipt = contentNamesReason(signals, parentContext);
+  const cacheAware = fenced && {
+    id: fenced.id,
+    judge(request) {
+      if (!fenced.cachedVerdict || request.pass !== "content" || text2 === undefined || !recorded || recorded.state === "moving" || recorded.engineVersion !== TIER_CLASSIFIER_VERSION || recorded.mapRevision !== (request.mapRevision ?? "none") || !recorded.reasons.includes(namesReceipt))
+        return fenced.judge(request);
+      const verdict = fenced.cachedVerdict(request);
+      if (verdict.verdict === "decided")
+        return verdict;
+      const storedNames = extra.storedContentNames?.();
+      if (storedNames) {
+        const cached2 = fenced.cachedVerdict({
+          ...request,
+          materialHash: tierSnifferInputHash("content", storedNames, text2, parentContext)
+        });
+        if (cached2.verdict === "decided")
+          return cached2;
+      }
+      return fenced.judge(request);
+    }
+  };
+  const sniffer = cacheAware && conversationOrderedSniffer(recordedContentVerdictSniffer(cacheAware, recorded, text2, namesReceipt), item.metadata);
   const holdUntilJudged = options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true || heldUntilJudged(recorded?.reasons);
   return classifyItemTiers({
     signals,
@@ -31799,7 +31826,11 @@ function secretFencedSniffer(sniffer, ledger, identity2, read, options = {}) {
       return true;
     return options.mayAskSecret === true && read.secret && JSON.stringify(read.override ?? null) === JSON.stringify(now.override ?? null);
   };
-  return { id: sniffer.id, judge: (request) => sniffer.judge({ ...request, stillAsk }) };
+  return {
+    id: sniffer.id,
+    ...sniffer.cachedVerdict ? { cachedVerdict: (request) => sniffer.cachedVerdict({ ...request, stillAsk }) } : {},
+    judge: (request) => sniffer.judge({ ...request, stillAsk })
+  };
 }
 var DEFAULT_TIER_FOR_DOMAIN;
 var init_tier_placement = __esm(() => {
@@ -40528,6 +40559,19 @@ var init_local_index = __esm(() => {
         ...sender ? { sender } : {},
         ...row.authored_at ? { authoredAt: row.authored_at } : {}
       };
+    }
+    contentJudgmentNames(identity2) {
+      const row = this.db.query(`
+      SELECT title, locator_uri, sender_label FROM items
+      WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+        AND tombstoned = 0
+    `).get(identity2.provider, identity2.accountScope, normalizeConversationId(identity2.providerConversationId), identity2.providerItemId);
+      if (!row)
+        return;
+      const title = row.title?.trim();
+      const path = row.locator_uri?.trim();
+      const sender = row.sender_label?.trim();
+      return { ...title ? { title } : {}, ...path ? { path } : {}, ...sender ? { sender } : {} };
     }
     useChildVisibility(lane) {
       this.childLane = lane;
@@ -71131,7 +71175,8 @@ function rejudgeStoredContent(set, record, options) {
     decidedBy: content.decidedBy,
     reasons: [
       ...metadata.reasons,
-      ...content.reasons
+      ...content.reasons,
+      ...record.reasons.includes(contentDigestReason(text2)) ? record.reasons.filter((reason) => reason.startsWith("content:names:") && !content.reasons.includes(reason)) : []
     ],
     state: metadata.metadataPending || content.contentPending ? "pending" : "current",
     contentRead: true,
@@ -73110,6 +73155,7 @@ class TieredRoutingRun {
   emptied;
   owedAlready;
   pendingWithdrawals;
+  cachedLowerings;
   set;
   mode;
   classification;
@@ -73123,6 +73169,7 @@ class TieredRoutingRun {
     this.versionPlans = new Map;
     this.copyRemovals = new Map;
     this.pendingWithdrawals = new Map;
+    this.cachedLowerings = new Map;
     this.intents = new Map;
     this.namesAdvance = new Map;
     this.emptied = new Map;
@@ -73191,6 +73238,11 @@ class TieredRoutingRun {
         this.set.store(domain)?.stripCopyContent(item.identity);
     }
     this.pendingWithdrawals.clear();
+    for (const move of this.cachedLowerings.values()) {
+      await ingestionTurn();
+      await moveTieredItem({ set: this.set, identity: move.identity, target: move.target, expectedGeneration: move.generation });
+    }
+    this.cachedLowerings.clear();
     for (const identity2 of this.copyRemovals.values()) {
       await ingestionTurn();
       this.set.ledger.removeCopies(identity2);
@@ -73239,6 +73291,7 @@ class TieredRoutingRun {
     const hasRow = this.set.anyLegHasRow(identity2);
     const routed = ledger.isRouted(identity2);
     if (item.metadata["deleted"] === true) {
+      this.cachedLowerings.delete(identityKey(identity2));
       this.set.secrets()?.remove(identity2);
       if (item.metadata["deletedIdentityResolved"] !== false) {
         this.set.retireSecretPresence(identity2, { record: ledger.itemIsSecret(identity2) });
@@ -73267,7 +73320,12 @@ class TieredRoutingRun {
     const classification = this.classification;
     let decision = decideItemTiers(connector, item, text2, classification, ledger, {
       namesOnly,
-      ...input.contentFetchFailed ? { contentFetchFailed: true } : {}
+      ...input.contentFetchFailed ? { contentFetchFailed: true } : {},
+      storedContentNames: () => {
+        const serving = copyServingLayer(ledger.copies(identity2).filter((copy) => copy.state === "current"), "content");
+        const domain = serving && this.set.domainForCorpus(serving.corpusId);
+        return domain ? this.set.store(domain)?.contentJudgmentNames(identity2) : undefined;
+      }
     });
     if (classification?.unavailableReason && decision.contentTier !== "secrets") {
       decision = { ...decision, state: "pending", metadataPending: true, reasons: [...decision.reasons, `metadata:${classification.unavailableReason}`] };
@@ -73331,6 +73389,7 @@ class TieredRoutingRun {
     }
     switch (recorded.outcome) {
       case "secrets":
+        this.cachedLowerings.delete(identityKey(identity2));
         this.counts.itemsSecrets += 1;
         forgetSecretInSideStores({ ledger, identity: identity2 });
         for (const domain of TIER_DOMAIN_ORDER)
@@ -73350,6 +73409,13 @@ class TieredRoutingRun {
       case "queued_move":
         this.counts.movesQueued += 1;
         if (contentRead && !recorded.raise) {
+          if (classification?.sniffer?.cachedVerdict && decision.reasons.some((reason) => reason.startsWith(`content:sniffer:${classification.sniffer.id}:`)) && !decision.contentPending && !decision.metadataPending) {
+            this.cachedLowerings.set(identityKey(identity2), {
+              identity: identity2,
+              generation: recorded.record.generation,
+              target: { metadataTier: decision.metadataTier, contentTier: decision.contentTier }
+            });
+          }
           return this.storedPlan(currentCopies);
         }
         return { kind: "hold", reason: "move_queued" };

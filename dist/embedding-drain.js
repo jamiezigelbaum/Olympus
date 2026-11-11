@@ -21723,7 +21723,28 @@ function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
   const fenced = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh }) : options?.sniffer;
   const signals = connector.classificationSignals(item);
   const parentContext = item.identity.parent ? options?.parentNamesContext?.(item.identity, item.identity.parent.localItemId) : undefined;
-  const sniffer = fenced && conversationOrderedSniffer(recordedContentVerdictSniffer(fenced, recorded, text2, contentNamesReason(signals, parentContext)), item.metadata);
+  const namesReceipt = contentNamesReason(signals, parentContext);
+  const cacheAware = fenced && {
+    id: fenced.id,
+    judge(request) {
+      if (!fenced.cachedVerdict || request.pass !== "content" || text2 === undefined || !recorded || recorded.state === "moving" || recorded.engineVersion !== TIER_CLASSIFIER_VERSION || recorded.mapRevision !== (request.mapRevision ?? "none") || !recorded.reasons.includes(namesReceipt))
+        return fenced.judge(request);
+      const verdict = fenced.cachedVerdict(request);
+      if (verdict.verdict === "decided")
+        return verdict;
+      const storedNames = extra.storedContentNames?.();
+      if (storedNames) {
+        const cached2 = fenced.cachedVerdict({
+          ...request,
+          materialHash: tierSnifferInputHash("content", storedNames, text2, parentContext)
+        });
+        if (cached2.verdict === "decided")
+          return cached2;
+      }
+      return fenced.judge(request);
+    }
+  };
+  const sniffer = cacheAware && conversationOrderedSniffer(recordedContentVerdictSniffer(cacheAware, recorded, text2, namesReceipt), item.metadata);
   const holdUntilJudged = options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true || heldUntilJudged(recorded?.reasons);
   return classifyItemTiers({
     signals,
@@ -21770,7 +21791,11 @@ function secretFencedSniffer(sniffer, ledger, identity, read, options = {}) {
       return true;
     return options.mayAskSecret === true && read.secret && JSON.stringify(read.override ?? null) === JSON.stringify(now.override ?? null);
   };
-  return { id: sniffer.id, judge: (request) => sniffer.judge({ ...request, stillAsk }) };
+  return {
+    id: sniffer.id,
+    ...sniffer.cachedVerdict ? { cachedVerdict: (request) => sniffer.cachedVerdict({ ...request, stillAsk }) } : {},
+    judge: (request) => sniffer.judge({ ...request, stillAsk })
+  };
 }
 
 // src/workers/connector-store/secrets-disposition.ts
@@ -25443,6 +25468,19 @@ class LocalConnectorStore {
       ...sender ? { sender } : {},
       ...row.authored_at ? { authoredAt: row.authored_at } : {}
     };
+  }
+  contentJudgmentNames(identity) {
+    const row = this.db.query(`
+      SELECT title, locator_uri, sender_label FROM items
+      WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+        AND tombstoned = 0
+    `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+    if (!row)
+      return;
+    const title = row.title?.trim();
+    const path = row.locator_uri?.trim();
+    const sender = row.sender_label?.trim();
+    return { ...title ? { title } : {}, ...path ? { path } : {}, ...sender ? { sender } : {} };
   }
   useChildVisibility(lane) {
     this.childLane = lane;

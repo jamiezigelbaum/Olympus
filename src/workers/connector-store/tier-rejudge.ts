@@ -54,6 +54,7 @@ import {
   SNIFFER_NAMES_MAX_CHARS,
   snifferFolderKeyNames,
   tierSnifferInputHash,
+  contentDigestReason,
   maxTier,
   hasCredentialUrl,
   namesWithParentContext,
@@ -391,6 +392,11 @@ export function rejudgeStoredContent(
     reasons: [
       ...metadata.reasons,
       ...content.reasons,
+      // Stored names omit some connector signals and may use the citation
+      // locator as the path. Keep the listing's names receipt for these same
+      // bytes: a later unchanged listing must still recognize its verdict.
+      ...(record.reasons.includes(contentDigestReason(text))
+        ? record.reasons.filter(reason => reason.startsWith('content:names:') && !content.reasons.includes(reason)) : []),
     ],
     state: metadata.metadataPending || content.contentPending ? 'pending' : 'current',
     contentRead: true,
