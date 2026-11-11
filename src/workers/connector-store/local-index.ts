@@ -15359,14 +15359,20 @@ function rankedCandidates(
 // names-only item has no chunks for a vector hit to vet: without it every
 // vetted note buried the file named for the question (gap-1, Sparta probe
 // 2026-11-11).
-function seatNameLeader<T>(
+// The final order does not keep whole-question matches ahead of every
+// partial one (its first tier mixes vetted vector hits with them in fusion
+// order), so the seat also follows the last whole-question match above the
+// leader: the leader never moves ahead of one (#1343 review).
+export function seatNameLeader<T>(
   ordered: T[],
   rule: { isLeader: (entry: T) => boolean; matchesWholeQuestion: (entry: T) => boolean; readable: (entry: T) => boolean },
 ): void {
   const at = ordered.findIndex(rule.isLeader);
   const firstPartial = ordered.findIndex((entry) => !rule.matchesWholeQuestion(entry));
   if (at < 0 || firstPartial < 0) return;
-  const seat = firstPartial + (rule.readable(ordered[firstPartial]!) ? 1 : 0);
+  let lastWholeAbove = -1;
+  for (let index = 0; index < at; index += 1) if (rule.matchesWholeQuestion(ordered[index]!)) lastWholeAbove = index;
+  const seat = Math.max(firstPartial + (rule.readable(ordered[firstPartial]!) ? 1 : 0), lastWholeAbove + 1);
   if (at > seat) ordered.splice(seat, 0, ...ordered.splice(at, 1));
 }
 

@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import type { FusedRankedCandidate } from '../src/core/source-index/retrieval.ts';
-import { withLaneLeadersSeated } from '../src/workers/connector-store/local-index.ts';
+import { seatNameLeader, withLaneLeadersSeated } from '../src/workers/connector-store/local-index.ts';
 import {
   LocalConnectorStore,
   createConnectorStoreCorpusAdapter,
@@ -153,6 +153,32 @@ describe('hybrid output keeps the keyword lane\'s name leader', () => {
       expect(ids).toHaveLength(1);
       expect(ids[0]).toStartWith('lantern-note-');
     }, [LANTERN, ...LANTERN_NOTES]);
+  });
+});
+
+describe('name leader seat', () => {
+  // P = readable partial match, W = readable whole-question match, N = the names-only leader.
+  const seat = (order: string[]) => {
+    const entries = [...order];
+    seatNameLeader(entries, {
+      isLeader: (entry) => entry === 'N',
+      matchesWholeQuestion: (entry) => entry.startsWith('W'),
+      readable: (entry) => entry !== 'N',
+    });
+    return entries;
+  };
+
+  test('right after the best readable partial match', () => {
+    expect(seat(['W1', 'P1', 'P2', 'N'])).toEqual(['W1', 'P1', 'N', 'P2']);
+  });
+
+  test('never ahead of a whole-question match the final order placed after a partial one', () => {
+    expect(seat(['P1', 'W1', 'N'])).toEqual(['P1', 'W1', 'N']);
+    expect(seat(['P1', 'W1', 'P2', 'N'])).toEqual(['P1', 'W1', 'N', 'P2']);
+  });
+
+  test('a leader already seated higher stays put', () => {
+    expect(seat(['P1', 'N', 'P2'])).toEqual(['P1', 'N', 'P2']);
   });
 });
 

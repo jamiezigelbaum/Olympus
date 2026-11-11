@@ -36106,7 +36106,11 @@ function seatNameLeader(ordered, rule) {
   const firstPartial = ordered.findIndex((entry) => !rule.matchesWholeQuestion(entry));
   if (at < 0 || firstPartial < 0)
     return;
-  const seat = firstPartial + (rule.readable(ordered[firstPartial]) ? 1 : 0);
+  let lastWholeAbove = -1;
+  for (let index = 0;index < at; index += 1)
+    if (rule.matchesWholeQuestion(ordered[index]))
+      lastWholeAbove = index;
+  const seat = Math.max(firstPartial + (rule.readable(ordered[firstPartial]) ? 1 : 0), lastWholeAbove + 1);
   if (at > seat)
     ordered.splice(seat, 0, ...ordered.splice(at, 1));
 }
