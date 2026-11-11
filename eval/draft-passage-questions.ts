@@ -14,7 +14,7 @@ import { buildEvalPack, configuredEvalEmbedding, createEvalSourceLanes, prepareE
 import { prepareBuiltInRerankerFromEnv } from '../src/workers/source-index/built-in-reranker.ts';
 import { parseDataRootArgs } from './data-root-args.ts';
 import { passageContainsQuote, passageWords } from './passage-match.ts';
-import { positiveInteger } from './run-passages.ts';
+import { degradationsOf, positiveInteger } from './run-passages.ts';
 import { validatePassageDataset, type EvalDataset, type EvalQuestion } from './types.ts';
 
 export interface DraftItem {
@@ -160,8 +160,11 @@ export async function draftPassageQuestions(input: {
    * proposed negative is checked against its own passages by the same local
    * model, and one it can answer is dropped. Nobody reads the drafts: the text
    * stays on this machine, so this check stands in for a human review.
+   * Undefined means retrieval came back incomplete (a store timed out or a
+   * lane degraded): the passages cannot clear the negative, so it is kept
+   * only as unchecked.
    */
-  negativePassages?: (question: string) => Promise<readonly string[]>;
+  negativePassages?: (question: string) => Promise<readonly string[] | undefined>;
 }): Promise<{
   dataset: EvalDataset;
   counts: { sampled: number; kept: number; rejected: number; unanswerable: number; negativesKept: number; negativesDropped: number; negativesUnchecked: number; open: number; sealed: number; alternates: number; byFamily: Record<string, number>; byTier: Record<string, number> };
@@ -193,12 +196,14 @@ export async function draftPassageQuestions(input: {
   const negatives = await input.model.complete(`UNANSWERABLE: Draft ${negativeCount} natural unanswerable questions in the style of questions about personal records. No item or evidence is supplied. Ask for absent specific facts; do not invent answers. Return JSON only: {"questions":["..."]}.`);
   const unanswerable = (negatives as { questions?: unknown } | null)?.questions;
   if (!Array.isArray(unanswerable) || unanswerable.length < 5 || unanswerable.length > 10 || unanswerable.some(q => typeof q !== 'string' || !q.trim())) throw new Error('Invalid unanswerable draft response.');
-  let negativesKept = 0; let negativesDropped = 0;
+  let negativesKept = 0; let negativesDropped = 0; let negativesUnchecked = 0;
   for (const [index, question] of unanswerable.entries()) {
-    const verdict = input.negativePassages ? await negativeAnswerable(input.model, question, await input.negativePassages(question)) : undefined;
+    const passages = input.negativePassages ? await input.negativePassages(question) : undefined;
+    const verdict = passages ? await negativeAnswerable(input.model, question, passages) : undefined;
     // Answerable, or a reply the check could not read: dropped either way.
     if (verdict !== undefined && verdict !== false) { negativesDropped++; continue; }
     negativesKept++;
+    if (verdict === undefined) negativesUnchecked++;
     questions.push({ id: `n${String(index + 1).padStart(3, '0')}`, shape: 'coverage_negative', question, mustReportGap: true, notes: verdict === false ? 'negative-checked' : 'negative-unchecked' });
   }
   const order = shuffle(questions.map((_, index) => index), randomFor(`${input.seed}:split`));
@@ -206,7 +211,7 @@ export async function draftPassageQuestions(input: {
   const dataset: EvalDataset = { version: '2', description: 'Local passage retrieval drafts; review before use.', questions: questions.map((q, index) => ({ ...q, split: sealed.has(index) ? 'sealed' : 'open' })) };
   validatePassageDataset(dataset);
   return { dataset, counts: { sampled: items.length, kept: items.length - rejected, rejected, unanswerable: unanswerable.length,
-    negativesKept, negativesDropped, negativesUnchecked: input.negativePassages ? 0 : negativesKept, open: questions.length - sealed.size, sealed: sealed.size, alternates: alternatesCount, byFamily, byTier } };
+    negativesKept, negativesDropped, negativesUnchecked, open: questions.length - sealed.size, sealed: sealed.size, alternates: alternatesCount, byFamily, byTier } };
 }
 
 /** False only when the model reads the passages and says none answers the question. */
@@ -280,8 +285,10 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     const embedding = await prepareEvalEmbedding({ configured: await configuredEvalEmbedding(config, process.env) });
     const reranker = await prepareBuiltInRerankerFromEnv();
     const lanes = createEvalSourceLanes({ ...opened, embeddingFor: embedding.embeddingFor });
-    const negativePassages = async (question: string) => (await buildEvalPack({ question, lanes, maxResults: NEGATIVE_CHECK_SEATS, maxCharsPerCandidate: NEGATIVE_CHECK_CHARS, ...(reranker ? { reranker } : {}) }))
-      .pack.candidates.map(candidate => candidate.chunks.join('\n'));
+    const negativePassages = async (question: string) => {
+      const detail = await buildEvalPack({ question, lanes, maxResults: NEGATIVE_CHECK_SEATS, maxCharsPerCandidate: NEGATIVE_CHECK_CHARS, ...(reranker ? { reranker } : {}) });
+      return degradationsOf(detail).length ? undefined : detail.pack.candidates.map(candidate => candidate.chunks.join('\n'));
+    };
     const result = await draftPassageQuestions({ opened, count: positiveInteger(values.get('--count'), 60), seed: values.get('--seed') ?? '1', model, negativePassages });
     opened.checkFileDescriptors();
     writeDraftQuestionSet(values.get('--output')!, result);

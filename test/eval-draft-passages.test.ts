@@ -111,3 +111,26 @@ test('each proposed negative is checked against its own top passages, and one th
     expect(result.counts).toMatchObject({ unanswerable: 6, negativesKept: 4, negativesDropped: 2, negativesUnchecked: 0 });
   } finally { server.stop(true); opened.close(); }
 });
+test('a negative whose retrieval came back incomplete is kept only as unchecked, never certified', async () => {
+  const opened = await world();
+  const checked: string[] = [];
+  const server = Bun.serve({ port: 0, hostname: '127.0.0.1', async fetch(request) {
+    const body = await request.json() as { messages: { content: string }[] };
+    const prompt = body.messages.at(-1)!.content;
+    let result: unknown;
+    if (prompt.includes('NEGATIVE CHECK')) { checked.push(prompt); result = { answerable: false }; }
+    else if (prompt.includes('UNANSWERABLE')) result = { questions: Array.from({ length: 5 }, (_, i) => `Where are the nonexistent orchid records number ${i}?`) };
+    else result = { question: 'What amount should be paid for that boatyard bill?', quote: 'The Kestrel invoice total is forty seven dollars payable Tuesday' };
+    return Response.json({ choices: [{ message: { content: JSON.stringify(result) } }] });
+  } });
+  try {
+    // Number 2's retrieval left a store out, so its passages cannot certify it.
+    const result = await draftPassageQuestions({ opened, count: 4, seed: 'fixture', model: localDraftModel({ baseUrl: `http://127.0.0.1:${server.port}/v1`, model: 'synthetic' }),
+      negativePassages: async question => question.includes('number 2?') ? undefined : ['A synthetic retrieved passage about the garden fence.'] });
+    expect(checked).toHaveLength(4);
+    const negatives = result.dataset.questions.filter(q => q.shape === 'coverage_negative');
+    expect(negatives.find(q => q.question.includes('number 2?'))?.notes).toBe('negative-unchecked');
+    expect(negatives.filter(q => q.notes === 'negative-checked')).toHaveLength(4);
+    expect(result.counts).toMatchObject({ negativesKept: 5, negativesDropped: 0, negativesUnchecked: 1 });
+  } finally { server.stop(true); opened.close(); }
+});

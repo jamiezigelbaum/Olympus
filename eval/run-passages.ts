@@ -128,7 +128,7 @@ function summaries(rows: readonly PassageRow[], ks: readonly number[]): PassageR
 }
 
 /** Which stores and lanes a question's search lost, by code; never the detail text. */
-function degradationsOf(detail: EvidencePackBuildDetail): Degradation[] {
+export function degradationsOf(detail: EvidencePackBuildDetail): Degradation[] {
   const lanes = detail.degradations.map(({ laneName, reason }) => {
     const split = laneName.indexOf(':');
     return split < 0 ? { corpusId: laneName, reason } : { corpusId: laneName.slice(0, split), lane: laneName.slice(split + 1), reason };

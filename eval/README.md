@@ -434,6 +434,9 @@ No one reads the drafts, because their text stays on Sparta. A local check
 replaces that review for the 5–10 proposed negative questions. Each negative is
 run through the same retrieval, and the same local model is asked whether any of
 the top five passages answers it. A negative it can answer, or whose reply can't
-be read, is dropped. `negativesKept` and `negativesDropped` give the counts.
+be read, is dropped. A negative whose retrieval came back incomplete (a store
+timed out or a lane degraded) is kept but marked `negative-unchecked`, since
+those passages can't clear it. `negativesKept`, `negativesDropped` and
+`negativesUnchecked` give the counts.
 Negatives count only toward negative seat counts, never toward a pass or a
 fail. Do not tune on sealed questions.
