@@ -87813,6 +87813,7 @@ function connectorStoreExtractionCandidateReader(store, filters) {
           ...candidate.sizeBytes !== undefined ? { sizeBytes: candidate.sizeBytes } : {}
         })),
         ...page2.nextCursor !== undefined ? { nextCursor: page2.nextCursor } : {},
+        ...page2.skippedByDisposition ? { skippedByDisposition: page2.skippedByDisposition } : {},
         done: page2.done
       };
     }
