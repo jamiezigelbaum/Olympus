@@ -23,8 +23,12 @@
 //   [OLYMPUS_EVAL_DROPBOX_LEDGER=<ledger.sqlite>] \
 //   [OLYMPUS_SOURCE_INDEX_ACCOUNT=<account>] [OLYMPUS_EVAL_DROPBOX_APPROVED_SCOPE_KEY=<key>] \
 //   bun eval/store-probe.ts [--term <fts word>] [--question <text>] [--scan-cap-seconds 60]
+//     [--expect <local or provider item id>]
 //
 // The FTS term and the question are inputs only; neither is printed.
+// --expect locates one item through each keyword search: whether the tier
+// filter saw and kept it, its rank, content and concept match, and the
+// leader's (ids, ranks and counts only).
 
 import { Database } from 'bun:sqlite';
 import type { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
@@ -43,6 +47,8 @@ interface ProbeArgs {
   term: string;
   question: string;
   scanCapMs: number;
+  /** One item's local or provider id to locate through the keyword search (ids and ranks only). */
+  expect?: string;
 }
 
 export function parseStoreProbeArgs(argv: readonly string[]): ProbeArgs {
@@ -51,10 +57,12 @@ export function parseStoreProbeArgs(argv: readonly string[]): ProbeArgs {
     return index >= 0 ? argv[index + 1] : undefined;
   };
   const cap = Number(value('--scan-cap-seconds') ?? 60);
+  const expect = value('--expect')?.trim();
   return {
     term: value('--term') ?? 'invoice',
     question: value('--question') ?? 'What is the invoice total?',
     scanCapMs: (Number.isFinite(cap) && cap > 0 ? cap : 60) * 1000,
+    ...(expect ? { expect } : {}),
   };
 }
 
@@ -205,6 +213,7 @@ export function traceKeywordSearch(
   question: string,
   accountScope: string | undefined,
   filters: { provider?: string; locatorPathScope?: string } | undefined,
+  expectId?: string,
 ): Record<string, unknown> {
   const internals = store as unknown as {
     db: { query: (sql: string) => { all: (...params: unknown[]) => unknown[]; get: (...params: unknown[]) => unknown } };
@@ -216,6 +225,7 @@ export function traceKeywordSearch(
   const runs: Array<Record<string, unknown>> = [];
   let steps: StepTotals = {};
   let filter = { calls: 0, rowsIn: 0, rowsOut: 0, ms: 0 };
+  let expectedSeen = { inFilterInput: false, keptByFilter: false };
   db.query = function (sql: string) {
     const statement = query.call(db, sql);
     const kind = keywordStatementKind(sql);
@@ -237,6 +247,13 @@ export function traceKeywordSearch(
   internals.tierVisibleRows = function (...args: unknown[]) {
     const startedAt = performance.now();
     const out = visible.apply(store, args);
+    if (expectId !== undefined) {
+      const identityOf = args[1] as (row: unknown) => { providerItemId: string };
+      const isExpected = (row: unknown) => identityOf(row).providerItemId === expectId
+        || (row as { local_item_id?: unknown }).local_item_id === expectId;
+      if ((args[0] as unknown[]).some(isExpected)) expectedSeen.inFilterInput = true;
+      if (out.some(isExpected)) expectedSeen.keptByFilter = true;
+    }
     filter.calls += 1;
     filter.rowsIn += (args[0] as unknown[]).length;
     filter.rowsOut += out.length;
@@ -247,15 +264,19 @@ export function traceKeywordSearch(
     for (const [label, options] of [['plain', { prefix: false }], ['content', { prefix: false, contentOnly: true }]] as const) {
       steps = {};
       filter = { calls: 0, rowsIn: 0, rowsOut: 0, ms: 0 };
+      expectedSeen = { inFilterInput: false, keptByFilter: false };
       const startedAt = performance.now();
       const result = store.searchItemsDetailed(question, 50, accountScope, filters, options);
+      const ms = elapsed(startedAt);
+      const located = expectId === undefined ? {} : locateExpected(result, expectId, expectedSeen);
       runs.push({
         query: label,
-        ms: elapsed(startedAt),
+        ms,
         rows: result.rows.length,
         saturated: result.saturated,
         statements: Object.fromEntries(Object.entries(steps).map(([kind, entry]) => [kind, { ...entry, ms: Math.round(entry.ms) }])),
         visibilityFilter: { ...filter, ms: Math.round(filter.ms) },
+        ...located,
       });
     }
   } finally {
@@ -263,6 +284,40 @@ export function traceKeywordSearch(
     internals.tierVisibleRows = visible;
   }
   return { corpusId: store.corpusId, runs };
+}
+
+type DetailedSearch = ReturnType<LocalConnectorStore['searchItemsDetailed']>;
+
+/**
+ * Where one expected item sits in a keyword search: whether the tier filter
+ * saw and kept it, its rank, whether it has content, its concept match, and
+ * the same for the search's leader. Ids, ranks and counts only.
+ */
+function locateExpected(
+  result: DetailedSearch,
+  expectId: string,
+  seen: { inFilterInput: boolean; keptByFilter: boolean },
+): { expected: Record<string, unknown>; leader: Record<string, unknown> | null } {
+  const hasContent = (row: DetailedSearch['rows'][number]) => row.chunk !== undefined || row.contentMatched === true;
+  const matches = (row: DetailedSearch['rows'][number]) =>
+    row.sourceItem.localItemId === expectId || row.sourceItem.providerItemId === expectId;
+  const rank = result.rows.findIndex(matches);
+  const row = rank >= 0 ? result.rows[rank]! : undefined;
+  const leader = result.rows[0];
+  const concepts = (id: string) => result.concepts.matched.get(id) ?? 0;
+  return {
+    expected: {
+      ...seen,
+      rank,
+      ...(row ? { hasContent: hasContent(row), conceptsMatched: concepts(row.sourceItem.localItemId) } : {}),
+      conceptsTotal: result.concepts.total,
+    },
+    leader: leader ? {
+      isExpected: rank === 0,
+      hasContent: hasContent(leader),
+      conceptsMatched: concepts(leader.sourceItem.localItemId),
+    } : null,
+  };
 }
 
 /** Counts and times every keyword search the lanes run on the read pool, until restored. */
@@ -360,10 +415,11 @@ async function main(): Promise<void> {
     } finally {
       pool.restore();
     }
-    const audit = evalRetrievalAudit(detail);
+    const audit = evalRetrievalAudit(detail, args.expect ? { expectedEvidence: [{ providerItemId: args.expect, corpusId: '', hint: '' }] } : undefined);
     out.keywordOnlyPack = {
       ms: elapsed(startedAt),
       packCandidates: audit.packCandidates,
+      packCandidateSources: audit.packCandidateSources,
       corpusTimings: audit.corpusTimings,
       lanes: audit.lanes,
       skippedCorpora: audit.skippedCorpora,
@@ -372,7 +428,7 @@ async function main(): Promise<void> {
     // After the pack build, so its timings are the eval's own: these searches
     // run synchronously on this thread, and a cold one on a large store holds
     // it for many seconds (the probe's own "could not answer" stall).
-    out.keywordSearchSteps = opened.stores.map((store) => traceKeywordSearch(store, args.question, scope.accountScope, filters));
+    out.keywordSearchSteps = opened.stores.map((store) => traceKeywordSearch(store, args.question, scope.accountScope, filters, args.expect));
   } finally {
     opened.close();
   }
