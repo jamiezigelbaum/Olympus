@@ -32,7 +32,7 @@ import type { EvidenceReranker } from '../src/core/evidence-reranker.ts';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { analystCoverageBytes, analystEvidenceFormat, analystPromptBytes, analystPromptWithoutDraft, createAnalyst, withPromptBudget, type AnalystEvidenceFormat, type AnalystModel } from '../src/core/analyst.ts';
+import { analystCoverageBytes, analystEvidenceFormat, analystPromptBytes, analystPromptWithoutDraft, auditNamedAmountCount, createAnalyst, withPromptBudget, type AnalystEvidenceFormat, type AnalystModel } from '../src/core/analyst.ts';
 import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { createDelphiAnalystModel } from '../src/core/analyst-delphi.ts';
 import {
@@ -798,6 +798,12 @@ export interface EvalAnswerStageAudit {
    */
   answerValueTokensUnmatchedInPrompt?: boolean[];
   answerValueTokensUnmatchedSeats: number[][];
+  /**
+   * When an audit call was sent: how many amounts its note named as in no
+   * seat (counts only, never the amounts), and its prompt's bytes (#1442).
+   */
+  auditNamedAmounts?: number;
+  auditPromptBytes?: number;
   /** The pack seats the Analyst was sent, when a prompt budget fitted the pack (Ask's local leg). */
   analystSeats?: number[];
   /**
@@ -1039,6 +1045,11 @@ function valueTokenShape(value: string, text: string): string | undefined {
   return undefined;
 }
 
+function auditNoteFields(prompts: readonly string[] | undefined): { auditNamedAmounts?: number; auditPromptBytes?: number } {
+  const audit = prompts?.find((prompt) => auditNamedAmountCount(prompt) !== undefined);
+  return audit === undefined ? {} : { auditNamedAmounts: auditNamedAmountCount(audit)!, auditPromptBytes: new TextEncoder().encode(audit).length };
+}
+
 export function evalAnswerStageAudit(
   question: Pick<EvalQuestion, 'expectedAnswerContains'> & Partial<Pick<EvalQuestion, 'expectedEvidence'>>,
   pack: EvidencePack,
@@ -1108,6 +1119,7 @@ export function evalAnswerStageAudit(
       seatSupportTokens(seat.all).has(token) ? [index + 1] : [])),
     ...(analystSeats ? { analystSeats: [...analystSeats] } : {}),
     ...(promptText !== undefined ? { analystPromptChars: analystPrompts!.reduce((sum, prompt) => sum + prompt.length, 0) } : {}),
+    ...auditNoteFields(analystPrompts),
     ...(analystModelIds && analystModelIds.length > 0 ? { analystModelIds: [...analystModelIds] } : {}),
     expected: (question.expectedAnswerContains ?? []).map((value) => ({
       inPack: answerContainsExpectedValue(value, packText).matched,
