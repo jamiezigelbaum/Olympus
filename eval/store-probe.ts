@@ -419,6 +419,7 @@ async function main(): Promise<void> {
     out.keywordOnlyPack = {
       ms: elapsed(startedAt),
       packCandidates: audit.packCandidates,
+      packCandidateSources: audit.packCandidateSources,
       corpusTimings: audit.corpusTimings,
       lanes: audit.lanes,
       skippedCorpora: audit.skippedCorpora,
