@@ -51,6 +51,7 @@ import {
   type TierRejudgeReport,
 } from '../connector-store/tier-rejudge.ts';
 import { settleNamesOnlyItems } from '../connector-store/tier-names-only-settle.ts';
+import { settlePersonalFirstItems } from '../connector-store/tier-held-settle.ts';
 import { sweepOwnerRuleRaises } from '../connector-store/tier-rules-sweep.ts';
 import { applyOwnerOverrides } from '../connector-store/tier-override-settle.ts';
 import { retireSecretRedactions, retrySecretSideStoreDebts } from '../connector-store/secrets-disposition.ts';
@@ -1770,6 +1771,14 @@ export class TierSnifferService {
         }
       } catch {
         // Left pending this tick.
+      }
+      try {
+        const held = settlePersonalFirstItems({ set });
+        if (held.settled > 0) {
+          this.options.log?.(`Olympus tier hold: ${held.settled} item(s) recorded before every open question held text are held now (${held.movesQueued} move(s) to Private queued).`);
+        }
+      } catch {
+        // Left as they are this tick.
       }
     }
   }

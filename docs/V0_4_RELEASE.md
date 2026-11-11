@@ -827,6 +827,16 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-11-11 — Every source holds new text until a judge has checked it.**
+  Owner decision (#1316, "Yes, hold on every source", 10:26Z): new text from
+  any source stays out of cloud answers (ChatGPT, Claude, Grok) until the
+  privacy judge has read it, also when no judge is set up. This retires the
+  2026-10-13 Personal-first rule, under which a new Dropbox file with no
+  record-like signs was usable as Personal before it was judged. Names stay
+  searchable, Private answers can read held text at once, and items a
+  question matched are judged first. Cost: on a large first sync, new items
+  wait for the judge (about 80 minutes for 15,000 items at the Delphi 35B
+  judge's ~188 a minute). Built in #1318; ships in 1.5.
 - **2026-11-11 — Fewer releases; 1.5 is the engine split release and has no
   date.** Owner decision. Twelve public releases went out between 2026-10-30
   and 2026-11-10, five of them in three days, for very few users. The

@@ -436,8 +436,9 @@ describe('2. a re-judge asks while the item stays where it is', () => {
 describe('3. an always-Private rule saved later raises items already stored', () => {
   test('with no private model at all: the matching stored item is raised (hidden first), once', async () => {
     const install = await freshInstall();
-    expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ state: 'current', contentTier: 'private' });
-    expect(await olympusSearch(install, 'orchard')).toContain('pruning plan');
+    // No judge: its text waits, held, until one answers (#1316); not served meanwhile.
+    expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ state: 'pending', contentTier: 'private', contentPending: true });
+    expect(await olympusSearch(install, 'orchard')).not.toContain('pruning plan');
     // Nothing new yet: the first sweep reads every routed item once.
     expect(sweepOwnerRuleRaises({ set: install.lane.set })).toMatchObject({ raised: 0, complete: true });
 
@@ -466,7 +467,8 @@ describe('3. an always-Private rule saved later raises items already stored', ()
     const install = await freshInstall();
     writePrivacyProfile({ rules: [{ kind: 'folder', source_id: 'dropbox.files', key: '/Elsewhere' }] }, { env });
     expect(sweepOwnerRuleRaises({ set: install.lane.set })).toMatchObject({ raised: 0 });
-    expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ state: 'current', contentTier: 'private' });
+    // Unchanged: still waiting, held, for a judge (#1316).
+    expect(install.lane.ledger.getCurrent(garden)).toMatchObject({ state: 'pending', contentTier: 'private', contentPending: true });
   });
 });
 
@@ -939,7 +941,8 @@ describe('12. a per-item owner override applies to an item already stored (no fi
 
   test('the set\'s own pass raises an override it finds (hidden first), once, with no private model at all', async () => {
     const install = await freshInstall();
-    expect(currentCopies(install, garden)).toEqual([INTERNAL_CORPUS]);
+    // No judge: the names are in Personal, the text waits held in Private (#1316).
+    expect(currentCopies(install, garden).sort()).toEqual([INTERNAL_CORPUS, SECURE_CORPUS]);
     install.lane.ledger.setOverride(garden, { kind: 'tier', tier: 'secure' });
     expect(applyOwnerOverrides({ set: install.lane.set })).toMatchObject({ checked: 1, raised: 1 });
     expect(currentCopies(install, garden)).toEqual([]);

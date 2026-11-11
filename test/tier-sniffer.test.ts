@@ -1118,9 +1118,9 @@ describe('vocabulary-only detector hits (owner ruling 2026-10-01)', () => {
         subject: subject(1),
       }, { sniffer });
       ledger.recordDecision(subject(1), decision);
-      // Personal-first: usable while the content question waits; topic words do not hold it.
+      // Topic words do not raise it; its content waits for the question, held (#1316: no Personal-first).
       expect(ledger.getCurrent(subject(1))).toMatchObject({ state: 'pending', contentPending: true, contentTier: 'private', metadataFlagged: false });
-      expect(ledger.getCurrent(subject(1))?.reasons).toContain('content:personal_first');
+      expect(ledger.getCurrent(subject(1))?.reasons).not.toContain('content:personal_first');
       expect(store.counts().byPass).toEqual({ metadata: 0, content: 1 });
       const model = spyModel((_, items) => verdictsFor(items, verdict));
       const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model });

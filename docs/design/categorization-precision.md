@@ -1,6 +1,6 @@
 # Categorization precision: Private only when it is private
 
-Status: approved by the owner 2026-10-04 (Personal-first, the targets, and labeling); step 1 in progress (`eval/calibration/`); step 2 built (2026-10-13), with real-corpus evaluation still required before rollout.
+Status: approved by the owner 2026-10-04 (Personal-first, the targets, and labeling; Personal-first was retired 2026-11-11, #1316: every source now holds text until judged); step 1 in progress (`eval/calibration/`); step 2 built (2026-10-13), with real-corpus evaluation still required before rollout.
 Scope: the per-item tier classifier, the private model (sniffer), the move
 machinery and the dashboard. Source-agnostic throughout.
 

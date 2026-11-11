@@ -1,3 +1,6 @@
+import { mkdirSync } from 'node:fs';
+import { tierSnifferPathForLedger } from '../src/workers/classification/tier-ledger-path.ts';
+import { InstalledTierClassification, NO_JUDGE_TIER_SNIFFER } from '../src/workers/classification/installed-tier-classification.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
 import { CachedTierSniffer } from '../src/workers/classification/sniffer.ts';
 import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
@@ -7,7 +10,7 @@ import { rejudgeRoutedItems } from '../src/workers/connector-store/tier-rejudge.
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { createReleaseTierCheck } from '../src/workers/connector-store/tier-visibility.ts';
 import { afterEach, expect, test } from 'bun:test';
-import { classifyItemTiers, classifyContentTier, type TierSniffer, type TierSnifferRequest } from '../src/workers/classification/tier-classifier.ts';
+import { PERSONAL_FIRST_REASON, classifyItemTiers, classifyContentTier, contentHeldForJudgment, type TierSniffer, type TierSnifferRequest } from '../src/workers/classification/tier-classifier.ts';
 import { TieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
 import { ACCOUNT, CORPORA, FIXTURE_PLACEMENT, PROVIDER, fixtureConnector, identityOf, localId, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
 
@@ -26,17 +29,29 @@ function lane(sniffer: TierSniffer = waiting) {
   return { ...fixture, set };
 }
 
+/** Finishes a move a verdict queued, as the background mover would. */
+async function settleMove(f: ReturnType<typeof lane>, id: string) {
+  const row = f.ledger.getCurrent(identityOf(id))!;
+  if (row.state !== 'moving') return;
+  await moveTieredItem({ set: f.set, identity: identityOf(id), target: { metadataTier: row.targetMetadataTier!, contentTier: row.targetContentTier! }, expectedGeneration: row.generation });
+}
+
 for (const [title, text] of [
   ['Fruit reminder', 'Please remember bananas and oranges for tomorrow.'],
   ['Gmail tips', 'Organize your inbox with labels and keyboard shortcuts.'],
   ['Uber promo', 'Save on your next ride this weekend.'],
   ['Health and finance guide', 'Learn about treatment, symptoms, invoice processing and family life.'],
-] as const) test(`${title}: content is usable while its model question waits`, async () => {
+] as const) test(`${title}: ordinary content is held in Private while its model question waits (#1316)`, async () => {
   const f = lane();
   await f.set.sync(fixtureConnector(() => [{ id: 'ordinary', name: title, text }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
-  expect(f.stores.internal!.localContent(localId('ordinary'))?.chunks.join(' ')).toContain(text);
-  expect(f.ledger.copies(identityOf('ordinary'))).toEqual([expect.objectContaining({ corpusId: CORPORA.internal, layers: 'both', embedHold: false })]);
-  expect(requests.some(r => r.pass === 'content')).toBe(true);
+  // No body in Personal and nothing found there by its text; the names stay findable.
+  expect(f.stores.internal!.localContent(localId('ordinary'))?.chunks ?? []).toEqual([]);
+  expect(f.stores.internal!.searchItems(text.split(' ')[1]!, 10)).toEqual([]);
+  expect(f.stores.secure_local!.localContent(localId('ordinary'))?.chunks.join(' ')).toContain(text);
+  expect(f.ledger.copies(identityOf('ordinary'))).toContainEqual(expect.objectContaining({ trustDomain: 'secure_local', embedHold: true }));
+  expect(f.ledger.getCurrent(identityOf('ordinary'))!.reasons).not.toContain(PERSONAL_FIRST_REASON);
+  // Ordinary content keeps the ordinary queue priority; own records still go first.
+  expect(requests.find(r => r.pass === 'content')).toMatchObject({ priority: 0 });
 });
 
 for (const [title, text, path] of [
@@ -67,19 +82,31 @@ test('held names are searchable; no body, snippet or chunks reach Personal', asy
   expect(f.stores.secure_local!.localContent(localId('held'))?.chunks.join(' ')).toContain('Hiddenbodymarker');
 });
 
-test('background Private verdict hides Personal-first content before its move', async () => {
+test('a Personal verdict is what releases held content to Personal', async () => {
+  const f = lane();
+  await f.set.sync(fixtureConnector(() => [{ id: 'release', name: 'Orchard notes', text: 'Quietmarker from our conversation.' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  expect(f.stores.internal!.searchItems('Quietmarker', 10)).toEqual([]);
+  f.ledger.applySnifferVerdict(identityOf('release'), { pass: 'content', tier: 'private', reason: 'content:sniffer:fixture-waiting:personal', modelId: 'fixture' }, { placementFor: d => f.set.placementFor(d) });
+  await settleMove(f, 'release');
+  expect(f.ledger.getCurrent(identityOf('release'))).toMatchObject({ state: 'current', contentTier: 'private', contentPending: false });
+  expect(f.stores.internal!.searchItems('Quietmarker', 10)).toHaveLength(1);
+});
+
+test('a Private verdict keeps held content where it is', async () => {
   const f = lane();
   await f.set.sync(fixtureConnector(() => [{ id: 'raise', name: 'Orchard notes', text: 'Quietmarker from our conversation.' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
-  expect(f.stores.internal!.searchItems('Quietmarker', 10)).toHaveLength(1);
-  const result = f.ledger.applySnifferVerdict(identityOf('raise'), { pass: 'content', tier: 'secure', reason: 'content:sniffer:fixture-waiting:private', modelId: 'fixture' }, { placementFor: d => f.set.placementFor(d) });
-  expect(result?.outcome).toBe('queued_move');
+  f.ledger.applySnifferVerdict(identityOf('raise'), { pass: 'content', tier: 'secure', reason: 'content:sniffer:fixture-waiting:private', modelId: 'fixture' }, { placementFor: d => f.set.placementFor(d) });
+  await settleMove(f, 'raise');
+  expect(f.ledger.getCurrent(identityOf('raise'))).toMatchObject({ contentTier: 'secure', contentPending: false });
   expect(f.stores.internal!.searchItems('Quietmarker', 10)).toEqual([]);
-  expect(f.stores.internal!.localContent(localId('raise'))).toBeUndefined();
+  expect(f.stores.internal!.localContent(localId('raise'))?.chunks ?? []).toEqual([]);
 });
 
 test('late content uses the same waiting policy', () => {
   const base = { metadataTier: 'private' as const, metadataForced: false, metadataFlagged: false };
-  expect(classifyContentTier({ ...base, text: 'Remember the oranges.' }, { sniffer: waiting }).reasons).toContain('content:personal_first');
+  const late = classifyContentTier({ ...base, text: 'Remember the oranges.' }, { sniffer: waiting });
+  expect(late).toMatchObject({ contentPending: true });
+  expect(contentHeldForJudgment(late)).toBe(true);
   expect(classifyContentTier({ ...base, path: '/Records/Labs/report.txt', text: 'Follow up next week.' }, { sniffer: waiting }).reasons).not.toContain('content:personal_first');
 });
 
@@ -165,13 +192,13 @@ test('failed rejudge enqueue leaves a held row eligible for retry', async () => 
   expect(candidates()).not.toContain('retry');
 });
 
-test('a held own record is Private to every answer release until its model answers; Personal-first content is not', async () => {
+test('every unjudged read item is Private to every answer release until its model answers (#1316)', async () => {
   const f = lane();
   await f.set.sync(fixtureConnector(() => [
     { id: 'held', name: 'Cardiology notes', text: 'Resting heart rate 52 bpm. Prescribed lisinopril 5 mg daily.' },
     { id: 'usable', name: 'Orchard notes', text: 'Please remember bananas and oranges for tomorrow.' },
   ]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
-  // Both wait on the model with the Personal default recorded; only the own record is held.
+  // Both wait on the model with the Personal default recorded, and both are held.
   expect(f.ledger.getCurrent(identityOf('held'))).toMatchObject({ state: 'pending', contentTier: 'private', contentPending: true });
   const check = createReleaseTierCheck(() => [{ ledger: f.ledger, corpusIds: new Set([CORPORA.internal, CORPORA.secure_local]) }], () => 'approval');
   const input = (id: string, corpusId: string, layer?: 'names') => ({
@@ -181,7 +208,7 @@ test('a held own record is Private to every answer release until its model answe
     input('held', CORPORA.secure_local),
     input('held', CORPORA.internal, 'names'),
     input('usable', CORPORA.internal),
-  ]).map((verdict) => verdict.tier)).toEqual(['private', 'public_or_personal', 'public_or_personal']);
+  ]).map((verdict) => verdict.tier)).toEqual(['private', 'public_or_personal', 'private']);
 });
 
 test('an unchanged item keeps its model verdict on every later listing, whichever names the re-judge asked with', async () => {
@@ -234,6 +261,7 @@ test('a judged item that is renamed or moved is judged again, even with the same
   const pass = () => runSnifferPass({ targets: [{ ledger: f.ledger, sniffer: queue, placementFor: (d) => f.set.placementFor(d) }], lane: BUILT_IN_SNIFFER_LANE, model });
   await sync();
   await pass();
+  await settleMove(f, 'note');
   expect(f.ledger.getCurrent(identityOf('note'))).toMatchObject({ state: 'current', contentPending: false });
   expect(f.ledger.getCurrent(identityOf('note'))!.reasons.some((reason) => reason.endsWith(':ordinary:0.99'))).toBe(true);
   // Unchanged: the recorded verdict stands, nothing is asked.
@@ -244,6 +272,65 @@ test('a judged item that is renamed or moved is judged again, even with the same
   name = 'Medical records 2026';
   await sync();
   expect(queue.counts().questions).toBe(1);
+  // Its text is held again while it is re-asked: this listing writes it into Private and withdraws the Personal copy.
+  expect(f.ledger.getCurrent(identityOf('note'))).toMatchObject({ state: 'pending', contentPending: true, storedTrustDomain: 'secure_local' });
+  expect(f.stores.internal!.searchItems('doctor', 10)).toEqual([]);
+  expect(f.stores.secure_local!.searchItems('doctor', 10).map((hit) => hit.sourceItem.providerItemId)).toEqual(['note']);
   await pass();
   expect(calls).toBe(2);
+});
+
+test('an unjudged item\'s text is never evidence outside Private, and it counts as still being checked (#1316)', async () => {
+  const f = lane();
+  await f.set.sync(fixtureConnector(() => [{ id: 'unjudged', name: 'Weekend', text: 'Unjudgedmarker picnic plans for Saturday.' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  expect(f.stores.internal!.searchItems('Unjudgedmarker', 10)).toEqual([]);
+  // Held in Private: a Private answer (local model or private provider) may read it; any other answer is refused it.
+  expect(f.stores.secure_local!.searchItems('Unjudgedmarker', 10).map((hit) => hit.sourceItem.providerItemId)).toEqual(['unjudged']);
+  const check = createReleaseTierCheck(() => [{ ledger: f.ledger, corpusIds: new Set([CORPORA.internal, CORPORA.secure_local]) }], () => 'approval');
+  expect(check.inputs([{ corpusId: CORPORA.secure_local, provider: PROVIDER, accountScope: ACCOUNT, providerItemId: 'unjudged', privateAtAnswer: true }])
+    .map((verdict) => verdict.tier)).toEqual(['private']);
+  // "Still checking": the held copy is what the status counts.
+  expect(f.ledger.corpusCopyCounts(CORPORA.secure_local).held).toBe(1);
+});
+
+for (const provider of ['dropbox', 'google_drive', 'gmail', 'telegram', 'whatsapp', 'evernote', 'local_files', 'readwise', 'x_bookmarks'])
+  test(`${provider}: one shared rule holds unjudged content, whatever the source (#1316)`, () => {
+    const decision = classifyItemTiers({ signals: { title: 'Weekend' }, provider, text: 'Picnic plans for Saturday.' }, { sniffer: waiting });
+    expect(decision).toMatchObject({ contentPending: true });
+    expect(contentHeldForJudgment(decision)).toBe(true);
+    expect(decision.reasons).not.toContain(PERSONAL_FIRST_REASON);
+  });
+
+test('no privacy judge set up: ordinary text is still held and counted, and asked again once a judge exists (#1316)', async () => {
+  const f = lane(NO_JUDGE_TIER_SNIFFER);
+  await f.set.sync(fixtureConnector(() => [{ id: 'nojudge', name: 'Weekend', text: 'Nojudgemarker picnic plans for Saturday.' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  expect(f.ledger.getCurrent(identityOf('nojudge'))).toMatchObject({ state: 'pending', contentPending: true });
+  expect(f.stores.internal!.searchItems('Nojudgemarker', 10)).toEqual([]);
+  expect(f.ledger.corpusCopyCounts(CORPORA.secure_local).held).toBe(1);
+  // A judge set up later: the item is a re-judge candidate for it.
+  const later = { engineVersion: TIER_CLASSIFIER_VERSION, snifferId: 'local:p-000000000000.m0000000000000000', limit: 10 };
+  expect(f.ledger.rejudgeCandidatePage(later).records.map((row) => row.providerItemId)).toContain('nojudge');
+});
+
+test('an install with no judge gets the no-judge sniffer for every ledger it classifies (#1316)', () => {
+  const tmp = tempDir();
+  cleanups.push(() => tmp.cleanup());
+  const installed = new InstalledTierClassification({ env: { OLYMPUS_TIER_RULES_PATH: `${tmp.dir}/none.json` } });
+  cleanups.push(() => installed.close());
+  expect(installed.forLedger(`${tmp.dir}/tier-ledger.sqlite`).sniffer).toBe(NO_JUDGE_TIER_SNIFFER);
+  expect(installed.forLedger(':memory:').sniffer).toBeUndefined();
+});
+
+test('a judge whose queue cannot open falls back to the no-judge sniffer: content is still held (#1316)', () => {
+  const tmp = tempDir();
+  cleanups.push(() => tmp.cleanup());
+  const ledgerPath = `${tmp.dir}/tier-ledger.sqlite`;
+  // The judge's queue file is a directory: it cannot be opened.
+  mkdirSync(tierSnifferPathForLedger(ledgerPath));
+  const installed = new InstalledTierClassification({ lane: BUILT_IN_SNIFFER_LANE, env: { OLYMPUS_TIER_RULES_PATH: `${tmp.dir}/none.json` } });
+  cleanups.push(() => installed.close());
+  const sniffer = installed.forLedger(ledgerPath).sniffer;
+  expect(sniffer).toBe(NO_JUDGE_TIER_SNIFFER);
+  const decision = classifyItemTiers({ signals: { title: 'Weekend' }, provider: PROVIDER, text: 'Picnic plans for Saturday.' }, { sniffer: sniffer! });
+  expect(contentHeldForJudgment(decision)).toBe(true);
 });
