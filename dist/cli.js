@@ -96295,8 +96295,19 @@ function decodeWorkbook(bytes) {
         ended = true;
         break;
       }
-      if (id === 2057)
-        throw new RangeError;
+      if (id === 2057) {
+        let depth = 1;
+        while (depth > 0) {
+          const nested = records[++i2];
+          if (!nested)
+            throw new RangeError;
+          if (nested.id === 2057)
+            depth += 1;
+          else if (nested.id === 10)
+            depth -= 1;
+        }
+        continue;
+      }
       if (![253, 516, 515, 638, 189, 517, 6].includes(id))
         continue;
       const row = data2.readUInt16LE(0);
@@ -96545,7 +96556,7 @@ function markupText(node) {
   const name = localName(node.name).toLowerCase();
   if (name === "script" || name === "style" || name === "head" || name === "binary-data")
     return "";
-  if (name === "s")
+  if (name === "s" && node.children.length === 0)
     return " ".repeat(repeatCount(node.attributes.c, 1000));
   if (name === "tab")
     return "\t";

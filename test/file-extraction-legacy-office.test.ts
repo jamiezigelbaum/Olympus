@@ -285,6 +285,17 @@ describe('legacy Office', () => {
     expect(output.text).toBe('XLS Data\nRows: 4\nColumns: 2\nSample:\nÉ\n-7 | 12.34\nTRUE | #DIV/0!\n1.5');
   });
 
+  test('an embedded chart substream inside a sheet is skipped', async () => {
+    const label = cell(0x0204, 0, 0, Buffer.from([2, 0, 0, 0x4f, 0x4b]));
+    const chartText = cell(0x0204, 5, 0, Buffer.from([2, 0, 0, 0x4e, 0x4f]));
+    const bytes = singleSheet([label, bof(0x20), chartText, record(10), cell(0x0204, 1, 0, Buffer.from([1, 0, 0, 0x42]))]);
+    expect((await extract(compoundFile({ Workbook: bytes }), XLS_MIME_TYPE)).text).toBe('XLS Data\nRows: 2\nColumns: 1\nSample:\nOK\nB');
+    const unclosed = singleSheet([label, bof(0x20)]).subarray(0, -4);
+    expect(await extract(compoundFile({ Workbook: unclosed }), XLS_MIME_TYPE)).toEqual({
+      status: 'failed_terminal', errorKind: 'office_document_damaged',
+    });
+  });
+
   test('formula cells keep their cached results', async () => {
     const formula = (row: number, col: number, result: Buffer): Buffer => cell(0x0006, row, col,
       Buffer.concat([result, Buffer.alloc(6), Buffer.from([3, 0, 0x1e, 42, 0])]));
@@ -503,6 +514,12 @@ describe('OpenDocument and EPUB', () => {
     expect((await extract(storedZipBytes(parts), EPUB_MIME_TYPE)).text).toBe('First\nChapter two.\n\nLast & 雪');
     parts['OPS/book.opf'] = parts['OPS/book.opf']!.replace('chapters/a.xhtml', 'https://example.com/a.xhtml');
     expect(await extract(storedZipBytes(parts), EPUB_MIME_TYPE)).toEqual({ status: 'failed_terminal', errorKind: 'office_document_unsupported' });
+  });
+
+  test('EPUB keeps the text of an HTML <s> element', async () => {
+    const parts = epubParts();
+    parts['OPS/chapters/b.xhtml'] = '<html><body><p>Price: <s>$100</s> $75</p></body></html>';
+    expect((await extract(storedZipBytes(parts), EPUB_MIME_TYPE)).text).toBe('Price: $100 $75\n\nLast & 雪');
   });
 
   test('EPUB bounds chapter text with a visible warning', async () => {

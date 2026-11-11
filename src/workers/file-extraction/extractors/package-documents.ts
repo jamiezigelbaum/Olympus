@@ -133,7 +133,8 @@ function nodes(root: XmlNode, name: string): XmlNode[] {
 function markupText(node: XmlNode): string {
   const name = localName(node.name).toLowerCase();
   if (name === 'script' || name === 'style' || name === 'head' || name === 'binary-data') return '';
-  if (name === 's') return ' '.repeat(repeatCount(node.attributes.c, 1000));
+  // OpenDocument's text:s is always empty; an HTML <s> (strikethrough) keeps its text.
+  if (name === 's' && node.children.length === 0) return ' '.repeat(repeatCount(node.attributes.c, 1000));
   if (name === 'tab') return '\t';
   if (name === 'br' || name === 'line-break') return '\n';
   const text = node.children.map((child) => typeof child === 'string' ? child : markupText(child)).join('');

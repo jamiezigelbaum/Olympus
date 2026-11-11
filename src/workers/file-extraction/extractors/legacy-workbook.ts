@@ -87,7 +87,17 @@ function decodeWorkbook(bytes: Uint8Array): DocumentSheet[] {
     for (let i = index! + 1; i < records.length; i += 1) {
       const { id, data } = records[i]!;
       if (id === 0x000a) { ended = true; break; }
-      if (id === 0x0809) throw new RangeError();
+      if (id === 0x0809) {
+        // An embedded chart is a nested BOF..EOF substream inside the sheet; skip it whole.
+        let depth = 1;
+        while (depth > 0) {
+          const nested = records[++i];
+          if (!nested) throw new RangeError();
+          if (nested.id === 0x0809) depth += 1;
+          else if (nested.id === 0x000a) depth -= 1;
+        }
+        continue;
+      }
       if (![0x00fd, 0x0204, 0x0203, 0x027e, 0x00bd, 0x0205, 0x0006].includes(id)) continue;
       const row = data.readUInt16LE(0);
       const column = data.readUInt16LE(2);
