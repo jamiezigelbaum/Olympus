@@ -18,7 +18,7 @@
 // Bounded: a page of rows per call from a bounded window of the ledger,
 // resumed from the ledger, starting over once the end is reached.
 
-import type { TierDecision } from '../classification/tier-classifier.ts';
+import { CONTENT_NAMES_ONLY_REASON, type TierDecision } from '../classification/tier-classifier.ts';
 import { copyServingLayer, type TierLedgerIdentity, type TierLedgerRecord } from '../classification/tier-ledger.ts';
 import { CONTAINER_MIME_TYPES } from './local-index.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
@@ -77,7 +77,7 @@ function settleOne(set: TieredStoreSet, record: TierLedgerRecord): boolean {
     metadataTier: record.metadataTier,
     contentTier: record.metadataTier,
     decidedBy: record.decidedBy as TierDecision['decidedBy'],
-    reasons: [...record.reasons.filter((reason) => !reason.startsWith('content:')), 'content:names_only'],
+    reasons: [...record.reasons.filter((reason) => !reason.startsWith('content:')), CONTENT_NAMES_ONLY_REASON],
     state: 'current',
     contentRead: false,
     metadataPending: false,

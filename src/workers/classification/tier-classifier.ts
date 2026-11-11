@@ -40,6 +40,12 @@ import { pathPrefixMatches } from '../../core/location-rules.ts';
 import { isBareShareLink } from './bare-share-link.ts';
 export { isBareShareLink } from './bare-share-link.ts';
 
+/**
+ * An item whose content the owner keeps names only: the names decided both
+ * layers and no text was ever read (`content:names_only`).
+ */
+export const CONTENT_NAMES_ONLY_REASON = 'content:names_only';
+
 export const TIER_CLASSIFIER_KIND = 'olympus_shared_four_tier_classifier';
 // 2026-10-01.p2: vocabulary-only detector hits go to the privacy-safe model
 // (borderline) instead of final-deciding Private, when a model can be asked.
@@ -1053,7 +1059,7 @@ function contentPass(args: {
     return {
       tier: metadata.tier,
       decidedBy: metadata.decidedBy,
-      reasons: [args.namesOnly ? 'content:names_only' : 'content:unread', ...mark],
+      reasons: [args.namesOnly ? CONTENT_NAMES_ONLY_REASON : 'content:unread', ...mark],
       // Names only: the content IS the names' tier, and a names verdict
       // settles both; nothing is left open on the text.
       pending: args.namesOnly ? false : metadata.pending,

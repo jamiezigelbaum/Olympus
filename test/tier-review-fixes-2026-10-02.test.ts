@@ -731,6 +731,35 @@ describe('11b. the owner\'s own folder choice (names only) counts like a store r
     expect(record.reasons).not.toContain('content:unread');
   });
 
+  test('the owner later lets the folder be read: the first text is held until judged, never served on the names verdict', async () => {
+    registeredBuiltIn(PERSONAL_VERDICT, () => false);
+    const install = await freshInstall({ lane: BUILT_IN_SNIFFER_LANE, extract: false, namesOnlyByOwner: notesNamesOnly });
+    const before = install.lane.ledger.getCurrent(garden)!;
+    expect(before).toMatchObject({ contentRead: false, contentPending: false });
+    expect(before.reasons).toContain('content:names_only');
+
+    // The owner switches /Notes from names only to read; the text arrives.
+    install.lane.internal.current()?.close();
+    const lane = createDropboxTierLane({ secureStore: install.secure, env, policy: defaultDropboxIngestionPolicy(), secretLocations: install.secrets, namesOnlyByOwner: () => false });
+    closers.push(() => lane.internal.current()?.close());
+    const sink = createTieredStoreExtractionSink({ set: lane.set, syncConnectorId: 'extraction', ownerConnectorId: 'dropbox', ownershipKind: 'observed' });
+    const file = FILES[0];
+    await sink.accept({
+      ref: { corpusId: SECURE_CORPUS, provider: 'dropbox', accountScope: 'personal', approvedScopeKey: 'dropbox.personal:/',
+        providerItemId: file.id, localItemId: `personal:${file.id}`, sourceVersion: 'r1' },
+      text: file.text, extractorKind: 'local_text', extractorVersion: 'test', fetchedAt: '2026-10-01T00:00:00.000Z',
+    });
+
+    const after = lane.ledger.getCurrent(garden)!;
+    expect(after).toMatchObject({ state: 'pending', contentRead: true, contentPending: true });
+    expect(after.reasons).not.toContain('content:names_only');
+    // Held like an item settled fail-safe while unread (not placed Personal-first like a brand-new item):
+    // no body in the Personal store until the judge answers.
+    expect(after.reasons.some((reason) => reason.includes('personal_first'))).toBe(false);
+    expect(lane.ledger.copies(garden).filter((copy) => copy.state === 'current' && copy.corpusId === INTERNAL_CORPUS && copy.layers !== 'metadata')).toEqual([]);
+    expect(await olympusSearch({ ...install, lane }, 'orchard')).not.toContain('pruning plan');
+  });
+
   test('a choice that cannot be read (a stale approval) keeps the item waiting', async () => {
     const install = await freshInstall({ extract: false, structuredBankName: true, namesOnlyByOwner: () => { throw new Error('approval changed'); } });
     expect(install.lane.ledger.getCurrent(garden)!.reasons).toContain('content:unread');

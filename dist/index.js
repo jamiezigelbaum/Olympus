@@ -20191,6 +20191,7 @@ var init_parent_context = __esm(() => {
 
 // src/workers/connector-store/tier-names-only-settle.ts
 var init_tier_names_only_settle = __esm(() => {
+  init_tier_classifier();
   init_tier_ledger();
   init_local_index();
 });
