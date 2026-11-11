@@ -595,3 +595,31 @@ describe('text extractor: images', () => {
     expect(result.derivations?.[0]?.warnings).toEqual(['ocr_required', 'image_only']);
   });
 });
+
+describe('text extractor: Rich Text Format', () => {
+  const rtf = String.raw`{\rtf1\ansi\ansicpg1252\deff0{\fonttbl{\f0\fnil Calibri;}}{\colortbl;\red0\green0\blue0;}
+{\*\generator Riched20 10.0;}{\info{\title Not body text}}\pard\f0\fs22 Caf\'e9 meeting notes\par
+Agenda:\tab budget \{draft\}\line next steps 舒? done\par
+{\pict\pngblip 89504e470d0a}}`;
+
+  test('reads the body text and leaves out tables, document info and pictures', async () => {
+    const extractor = createTextExtractor();
+    expect(extractor.accepts('application/rtf')).toBe(true);
+    expect(extractor.accepts('text/rtf')).toBe(true);
+    const result = await extractor.extract(extractorInput({ bytes: textBytes(rtf), mimeType: 'application/rtf' }));
+    expect(result.status).toBe('indexed');
+    const text = result.status === 'indexed' ? result.text : '';
+    expect(text).toContain('Café meeting notes');
+    expect(text).toContain('budget {draft}');
+    expect(text).toContain('next steps — done');
+    for (const left of ['Calibri', 'Riched20', 'Not body text', '89504e']) expect(text).not.toContain(left);
+  });
+
+  test('bytes that are not RTF are not read as RTF', async () => {
+    const result = await createTextExtractor().extract(extractorInput({
+      bytes: new Uint8Array([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]),
+      mimeType: 'application/rtf',
+    }));
+    expect(result.status).toBe('skipped_unsupported');
+  });
+});
