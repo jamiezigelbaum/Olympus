@@ -77680,7 +77680,7 @@ async function searchPrivateEvidence(input) {
       }
     }
     if (selectedItems.length > 0) {
-      const detail = await buildEvidencePackDetailed({
+      const detail = await withCachedKeywordExpansion(translation, () => buildEvidencePackDetailed({
         question,
         maxResults,
         selectedItems,
@@ -77690,7 +77690,7 @@ async function searchPrivateEvidence(input) {
         contentProviders: lanes.contentProviders,
         maxCharsPerCandidate: input.maxCharsPerCandidate ?? DEFAULT_MAX_CHARS_PER_CANDIDATE,
         evidenceByteBudget: input.evidenceByteBudget ?? PRIVATE_EVIDENCE_BYTE_BUDGET
-      });
+      }));
       assertEvidencePackModelEligible(detail.pack);
       matches.push(...detail.pack.candidates.map((candidate, index) => ({ ...candidate, corpusId: detail.candidateCorpusIds[index] ?? "" })).filter((candidate) => (candidate.trustDomain === "internal" || candidate.trustDomain === "public_safe") && candidate.corpusId !== "" && candidate.chunks.length > 0));
     }

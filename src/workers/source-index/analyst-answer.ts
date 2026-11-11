@@ -3002,13 +3002,14 @@ export async function searchPrivateEvidence(input: {
     }
   }
   if (selectedItems.length > 0) {
-    const detail = await buildEvidencePackDetailed({
+    // Same cached-only scope: an identity lookup never waits on a new translation.
+    const detail = await withCachedKeywordExpansion(translation, () => buildEvidencePackDetailed({
       question, maxResults, selectedItems,
       searchContext: { allowedTrustDomains: ['internal', 'public_safe'], allowCloudQueries: false },
       registry: lanes.registry, adapters: lanes.adapters, contentProviders: lanes.contentProviders,
       maxCharsPerCandidate: input.maxCharsPerCandidate ?? DEFAULT_MAX_CHARS_PER_CANDIDATE,
       evidenceByteBudget: input.evidenceByteBudget ?? PRIVATE_EVIDENCE_BYTE_BUDGET,
-    });
+    }));
     assertEvidencePackModelEligible(detail.pack);
     matches.push(...detail.pack.candidates
       .map((candidate, index) => ({ ...candidate, corpusId: detail.candidateCorpusIds[index] ?? '' }))
