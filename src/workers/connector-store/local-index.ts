@@ -4674,6 +4674,24 @@ export class LocalConnectorStore {
     };
   }
 
+  /** The names a stored-content re-judge reads, without exporting chunks or vectors. */
+  contentJudgmentNames(
+    identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+  ): { title?: string; path?: string; sender?: string } | undefined {
+    const row = this.db.query(`
+      SELECT title, locator_uri, sender_label FROM items
+      WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+        AND tombstoned = 0
+    `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId) as {
+      title: string | null; locator_uri: string | null; sender_label: string | null;
+    } | null;
+    if (!row) return undefined;
+    const title = row.title?.trim();
+    const path = row.locator_uri?.trim();
+    const sender = row.sender_label?.trim();
+    return { ...(title ? { title } : {}), ...(path ? { path } : {}), ...(sender ? { sender } : {}) };
+  }
+
   // ---- Child items: who may be seen ------------------------------------------
   // A child is visible only while its parent is (child-visibility.ts; the rule
   // is decided where it is read, so nothing is recorded when a parent goes).

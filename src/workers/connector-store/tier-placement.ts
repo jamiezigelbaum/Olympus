@@ -27,6 +27,7 @@ import {
   itemHasNonTextContent,
   contentDigestReason,
   contentNamesReason,
+  tierSnifferInputHash,
   conversationOrderedSniffer,
   heldUntilJudged,
   type OwnerTierRule,
@@ -194,7 +195,12 @@ export function decideItemTiers(
   text: string | undefined,
   options: ConnectorStoreTierClassification | undefined,
   ledger: TierLedger | undefined,
-  extra: { namesOnly?: boolean; contentFetchFailed?: boolean } = {},
+  extra: {
+    namesOnly?: boolean;
+    contentFetchFailed?: boolean;
+    /** The names the current content copy gives a re-judge, read only on a cache miss. */
+    storedContentNames?: () => { title?: string; path?: string; sender?: string } | undefined;
+  } = {},
 ): TierDecision {
   const read = ledger?.classificationRead(item.identity);
   const override = read?.override;
@@ -210,8 +216,30 @@ export function decideItemTiers(
   const parentContext = item.identity.parent
     ? options?.parentNamesContext?.(item.identity, item.identity.parent.localItemId)
     : undefined;
-  const sniffer = fenced && conversationOrderedSniffer(
-    recordedContentVerdictSniffer(fenced, recorded, text, contentNamesReason(signals, parentContext)), item.metadata,
+  const namesReceipt = contentNamesReason(signals, parentContext);
+  // A re-judge can have cached the new body with the store's representation
+  // of the names. That verdict is eligible only for this same item with
+  // unchanged listing names, under the same classifier and map. It still
+  // keys the complete NEW text; a miss must queue the connector's own input.
+  const cacheAware: TierSniffer | undefined = fenced && {
+    id: fenced.id,
+    judge(request) {
+      if (!fenced.cachedVerdict || request.pass !== 'content' || text === undefined || !recorded || recorded.state === 'moving'
+        || recorded.engineVersion !== TIER_CLASSIFIER_VERSION || recorded.mapRevision !== (request.mapRevision ?? 'none')
+        || !recorded.reasons.includes(namesReceipt)) return fenced.judge(request);
+      const verdict = fenced.cachedVerdict(request);
+      if (verdict.verdict === 'decided') return verdict;
+      const storedNames = extra.storedContentNames?.();
+      if (storedNames) {
+        const cached = fenced.cachedVerdict({ ...request,
+          materialHash: tierSnifferInputHash('content', storedNames, text, parentContext) });
+        if (cached.verdict === 'decided') return cached;
+      }
+      return fenced.judge(request);
+    },
+  };
+  const sniffer = cacheAware && conversationOrderedSniffer(
+    recordedContentVerdictSniffer(cacheAware, recorded, text, namesReceipt), item.metadata,
   );
   // The lane's hold, the item's own (an item built from an archive record
   // carries it: contracts.ts, 2.2.0), or the one its stored decision carries
@@ -309,5 +337,9 @@ export function secretFencedSniffer(
     return options.mayAskSecret === true && read.secret
       && JSON.stringify(read.override ?? null) === JSON.stringify(now.override ?? null);
   };
-  return { id: sniffer.id, judge: (request) => sniffer.judge({ ...request, stillAsk }) };
+  return {
+    id: sniffer.id,
+    ...(sniffer.cachedVerdict ? { cachedVerdict: (request: Parameters<TierSniffer['judge']>[0]) => sniffer.cachedVerdict!({ ...request, stillAsk }) } : {}),
+    judge: (request) => sniffer.judge({ ...request, stillAsk }),
+  };
 }
