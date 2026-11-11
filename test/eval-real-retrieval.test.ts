@@ -23,6 +23,7 @@ import {
   promptFittedEvalAnalyst,
   expectedSeatOnlyAudit,
   expectedSeatOnlyEvalAnalyst,
+  evalExpectedSeats,
   repeatedEvalAnalyst,
   openEvalDropboxStores,
   prepareEvalEmbedding,
@@ -327,6 +328,17 @@ describe('the Analyst on the expected seat alone', () => {
     expect(seen[1]!.candidates).toEqual([pack.candidates[1]!]);
     expect(seen[1]!.question).toBe('q');
     expect(results.map(([alone, result]) => [alone.candidates.length, result?.answer])).toEqual([[1, 'answer 2']]);
+  });
+
+  test('the expected seats are the ones the grader would accept: by item id, or by locator alone, in the named store', () => {
+    const located = {
+      ...pack,
+      candidates: pack.candidates.map((entry, index) => ({ ...entry, provenance: { ...entry.provenance, citation: { uri: `/files/${index}.pdf` } } })),
+    } as never as EvidencePack;
+    const stores = ['store.a', 'store.b', 'store.a'];
+    expect(evalExpectedSeats([{ corpusId: 'store.a', providerItemId: 'c', hint: 'x' }], located, stores)).toEqual([3]);
+    expect(evalExpectedSeats([{ corpusId: 'store.b', uri: '/files/1.pdf', hint: 'x' }], located, stores)).toEqual([2]);
+    expect(evalExpectedSeats([{ corpusId: 'store.a', uri: '/files/1.pdf', hint: 'x' }], located, stores)).toEqual([]);
   });
 
   test('the report says which seats ran alone and how that answer came out, shape and flags only', () => {

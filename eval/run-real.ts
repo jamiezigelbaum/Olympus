@@ -87,11 +87,11 @@ import {
 import { builtInEmbeddingModel } from '../src/workers/source-index/built-in-embedding/manifest.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { localAnswerRequest } from '../src/workers/source-index/local-answer.ts';
-import { acceptableForms, answerContainsExpectedValue, type EvalGrade } from './grade.ts';
+import { acceptableForms, answerContainsExpectedValue, expectedEvidenceMatches, type EvalGrade } from './grade.ts';
 import { runEval, type EvalQuestionTiming, type EvalReport } from './run.ts';
 import { classifyPrecisionStage, summarizePrecisionTraces, type PrecisionTrace } from './diagnose.ts';
 import { runBoundedEvalProcess } from './process-boundary.ts';
-import type { EvalDataset, EvalQuestion } from './types.ts';
+import type { EvalDataset, EvalExpectedEvidence, EvalQuestion } from './types.ts';
 
 const DEFAULT_DATASET_PATH = 'eval/private/held-out.real.json';
 const DEFAULT_REPORT_PATH = 'eval/private/report.latest.json';
@@ -266,9 +266,12 @@ async function main(): Promise<void> {
     },
   };
   const seatOnlyByPack = new WeakMap<object, { seats: number[]; alone: EvidencePack; result: AnalystResult | undefined }>();
-  const expectedIds = (dataset.questions[0]!.expectedEvidence ?? []).flatMap((want) => want.providerItemId !== undefined ? [want.providerItemId] : []);
-  const expectedSeatsOf = (pack: EvidencePack) => pack.candidates.flatMap((candidate, index) =>
-    expectedIds.includes(candidate.provenance.sourceItem.providerItemId) ? [index + 1] : []);
+  // The seats the grader counts as expected evidence, by its own matcher.
+  const expectedSeatsOf = (pack: EvidencePack) => evalExpectedSeats(
+    dataset.questions[0]!.expectedEvidence ?? [],
+    pack,
+    detailsByPack.get(pack)?.candidateCorpusIds ?? [],
+  );
   const seatOnlyAnalyst = analystExpectedSeatOnly && repeatThisQuestion
     ? expectedSeatOnlyEvalAnalyst(
       gradedAnalyst,
@@ -805,6 +808,21 @@ export function evalAnswerRepeat(
     answerValueTokensInCitedSeats: audit.answerValueTokensInCitedSeats,
     answerValueTokensUnmatchedShapes: audit.answerValueTokensUnmatchedShapes,
   };
+}
+
+/**
+ * The 1-based pack seats holding expected evidence, by the grader's own
+ * matcher (item id, locator, parent label and store, as the question gives).
+ */
+export function evalExpectedSeats(
+  expected: readonly EvalExpectedEvidence[],
+  pack: EvidencePack,
+  candidateCorpusIds: readonly string[],
+): number[] {
+  return pack.candidates.flatMap((candidate, index) =>
+    expected.some((want) => expectedEvidenceMatches(want, candidate.provenance, candidateCorpusIds[index]))
+      ? [index + 1]
+      : []);
 }
 
 /** The expected-seat-only answer, by the repeat audit's own measures. */
