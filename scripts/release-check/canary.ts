@@ -156,10 +156,13 @@ export interface CanaryAccounts {
   sources: LiveSourceSpec[];
   clients: WebClientId[];
   questions: ClientQuestion[];
+  /** Expected Claude MCP Apps switch; absent keeps the original checks. */
+  claude_app?: boolean;
 }
 
 export function parseCanaryAccounts(raw: unknown, readQuestions: (path: string) => unknown): CanaryAccounts {
-  const record = (raw ?? {}) as { sources?: unknown; clients?: unknown; questions?: unknown };
+  const record = (raw ?? {}) as { sources?: unknown; clients?: unknown; questions?: unknown; claude_app?: unknown };
+  if (record.claude_app !== undefined && typeof record.claude_app !== 'boolean') throw new Error('claude_app must be true or false');
   const sources = Array.isArray(record.sources) ? record.sources as LiveSourceSpec[] : [];
   for (const source of sources) {
     if (typeof source?.id !== 'string' || !/^[a-z0-9-]{1,40}$/.test(source.id) || typeof source.label !== 'string') throw new Error('each source needs an id (lowercase) and a label');
@@ -173,7 +176,7 @@ export function parseCanaryAccounts(raw: unknown, readQuestions: (path: string) 
   // A client no question applies to would pass having been asked nothing.
   const unasked = clients.filter((client) => !questions.some((q) => !q.clients || q.clients.includes(client as WebClientId)));
   if (unasked.length > 0) throw new Error(`no question applies to ${unasked.join(', ')}`);
-  return { sources, clients: clients as WebClientId[], questions };
+  return { sources, clients: clients as WebClientId[], questions, ...(record.claude_app !== undefined ? { claude_app: record.claude_app as boolean } : {}) };
 }
 
 /** Runs the canary's checks on one machine. Never throws for a product problem: every failure is a check. */
@@ -195,7 +198,7 @@ export async function runCanary(machine: Machine, options: CanaryOptions): Promi
     }
   }
   if (accounts.clients.length > 0) {
-    const web = await runWebClients(machine, { clients: accounts.clients, questions: accounts.questions, os: options.os, screensDir: options.screensDir, ...(options.bridgeAgent ? { bridgeAgent: options.bridgeAgent } : {}) });
+    const web = await runWebClients(machine, { clients: accounts.clients, questions: accounts.questions, ...(accounts.claude_app !== undefined ? { claudeApp: accounts.claude_app } : {}), os: options.os, screensDir: options.screensDir, ...(options.bridgeAgent ? { bridgeAgent: options.bridgeAgent } : {}) });
     checks.push(...web.checks);
     screens.push(...web.screens);
   }
@@ -459,7 +462,7 @@ ${pictures}
 if (import.meta.main) {
   const argv = process.argv.slice(2);
   const option = (name: string): string | undefined => { const at = argv.indexOf(name); return at >= 0 ? argv[at + 1] : undefined; };
-  const usage = 'usage: bun scripts/release-check/canary.ts --config <file> --machine <handle> --os linux|macos --out <reports dir> [--candidate <bundle dir> | --published <site base URL>] [--accounts <file> [--accounts-only | --fresh-install [--cdp <host:port>]]] [--label <text>] [--sha <commit>] [--harness-commit <commit>]\n       bun scripts/release-check/canary.ts --config <file> --machine <handle> --os linux|macos --accounts <file> --web-sign-in\n       fresh mode: --fresh-install --accounts <file> [--candidate <tgz>] [--cdp <host:port>] (same --config, --machine, --os and --out)';
+  const usage = 'usage: bun scripts/release-check/canary.ts --config <file> --machine <handle> --os linux|macos --out <reports dir> [--candidate <bundle dir> | --published <site base URL>] [--accounts <file> [--claude-app on|off] [--accounts-only | --fresh-install [--cdp <host:port>]]] [--label <text>] [--sha <commit>] [--harness-commit <commit>]\n       bun scripts/release-check/canary.ts --config <file> --machine <handle> --os linux|macos --accounts <file> --web-sign-in\n       fresh mode: --fresh-install --accounts <file> [--candidate <tgz>] [--cdp <host:port>] (same --config, --machine, --os and --out)';
   const freshInstall = argv.includes('--fresh-install');
   const cdp = option('--cdp') ?? '127.0.0.1:9333';
   if (freshInstall) {
@@ -490,6 +493,13 @@ if (import.meta.main) {
       console.error(`the accounts file ${accountsPath} is not usable: ${error instanceof Error ? error.message : String(error)}`);
       process.exit(2);
     }
+  }
+  if (argv.includes('--claude-app')) {
+    const mode = option('--claude-app');
+    if (!accounts || (mode !== 'on' && mode !== 'off')) {
+      console.error('--claude-app requires --accounts and on or off'); process.exit(2);
+    }
+    accounts.claude_app = mode === 'on';
   }
   if ((argv.includes('--accounts-only') || argv.includes('--web-sign-in')) && !accounts) {
     console.error(usage);
