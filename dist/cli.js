@@ -45877,7 +45877,7 @@ var init_local_index = __esm(() => {
           yield;
         const row = rows[index];
         const identity2 = identities[row.idx];
-        const disposition = unreadHoldDisposition(outcome?.(identity2));
+        const disposition = unreadHoldDisposition(outcome?.(identity2, row.local_item_id));
         if (options.includeUnsettled || disposition.kind === "cannot_read")
           matched.push({ identity: identity2, row, disposition });
       }
@@ -92896,14 +92896,17 @@ class LocalFileExtractionJobStore {
       return "settled";
     return statuses.has("queued") || statuses.has("leased") || statuses.has("failed_retryable") ? "active" : "settled";
   }
-  itemExtractionOutcome(item) {
+  itemExtractionOutcome(item, options = {}) {
+    const inConversation = Boolean(item.providerConversationId) && item.localItemId !== undefined;
     const all = this.db.query(`
       SELECT job_id, status, last_error_kind, policy_decision, source_version FROM extraction_jobs
-      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?${inConversation ? " AND local_item_id = ?" : ""}
       ORDER BY updated_at DESC, job_id DESC
-    `).all(item.provider, item.accountScope, item.providerItemId);
+    `).all(item.provider, item.accountScope, item.providerItemId, ...inConversation ? [item.localItemId] : []);
     const current2 = all[0]?.source_version ?? null;
     const rows = all.filter((row2) => (row2.source_version ?? null) === current2);
+    if (rows.length === 0)
+      return options.whenNoJob;
     const indexed = rows.find((row2) => row2.status === "indexed");
     if (!indexed && rows.some((row2) => row2.status === "queued" || row2.status === "leased" || row2.status === "failed_retryable"))
       return;
@@ -152640,7 +152643,7 @@ function judgeReason(record4) {
 function view3(row, state, context2) {
   const { record: record4 } = state;
   const identity2 = identityOfRow2(row);
-  const hold = record4?.state === "current" && record4.contentTier === "secure" && !record4.contentRead && record4.reasons.some(isFailSafeMissingContentQuestion) ? unreadHoldDisposition(context2.extractionOutcome?.(identity2), context2.contentAllowed?.(identity2, row.local_item_id, row.locator_uri)) : undefined;
+  const hold = record4?.state === "current" && record4.contentTier === "secure" && !record4.contentRead && record4.reasons.some(isFailSafeMissingContentQuestion) ? unreadHoldDisposition(context2.extractionOutcome?.(identity2, row.local_item_id ?? undefined), context2.contentAllowed?.(identity2, row.local_item_id, row.locator_uri)) : undefined;
   return {
     item_id: ownerTierItemId(identityOfRow2(row)),
     source: row.provider,
@@ -236068,7 +236071,7 @@ ${key2}`;
     if (!fileExtractionRuntime)
       return;
     const jobs = fileExtractionRuntime.jobs;
-    store.setExtractionOutcomeProbe(store.family === "file" ? (identity2) => jobs.itemExtractionOutcome(identity2) : (identity2) => jobs.itemExtractionOutcome(identity2) ?? (jobs.itemExtractionState(identity2) === "none" ? NO_EXTRACTION_JOB_OUTCOME : undefined));
+    store.setExtractionOutcomeProbe(store.family === "file" ? (identity2, localItemId) => jobs.itemExtractionOutcome({ ...identity2, localItemId }) : (identity2, localItemId) => jobs.itemExtractionOutcome({ ...identity2, localItemId }, { whenNoJob: NO_EXTRACTION_JOB_OUTCOME }));
   };
   for (const store of connectorStores)
     probeExtractionEnded(store);
@@ -237565,7 +237568,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     fileEnv: () => readWorkerSetupEnv()
   });
   const ownerTierItemsContext = {
-    extractionOutcome: (identity2) => fileExtractionRuntime?.jobs.itemExtractionOutcome(identity2),
+    extractionOutcome: (identity2, localItemId) => fileExtractionRuntime?.jobs.itemExtractionOutcome({ ...identity2, ...localItemId === undefined ? {} : { localItemId } }),
     contentAllowed: (identity2, localItemId, locator) => {
       for (const store of connectorStores) {
         if (!store.itemPresence(identity2).active)

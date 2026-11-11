@@ -13859,10 +13859,10 @@ export class LocalConnectorStore {
   // that pulls this module into the plugin bundle (plugin-bundle-no-bun-sqlite).
   private settledUnreadableCountMemo: Map<string, { at: number; count: number; waitingPks: number[]; policyPks: number[] }> | undefined;
 
-  private extractionOutcome: ((identity: TierLedgerIdentity) => ItemExtractionOutcome | undefined) | undefined;
+  private extractionOutcome: ((identity: TierLedgerIdentity, localItemId: string) => ItemExtractionOutcome | undefined) | undefined;
 
   /** The job's terminal outcome; absent evidence leaves the hold waiting. */
-  setExtractionOutcomeProbe(probe: ((identity: TierLedgerIdentity) => ItemExtractionOutcome | undefined) | undefined): void {
+  setExtractionOutcomeProbe(probe: ((identity: TierLedgerIdentity, localItemId: string) => ItemExtractionOutcome | undefined) | undefined): void {
     this.extractionOutcome = probe;
     this.settledUnreadableCountMemo = undefined;
   }
@@ -13913,7 +13913,7 @@ export class LocalConnectorStore {
       if (index > 0 && index % SETTLED_UNREADABLE_ITEMS_SLICE === 0) yield;
       const row = rows[index]!;
       const identity = identities[row.idx]!;
-      const disposition = unreadHoldDisposition(outcome?.(identity));
+      const disposition = unreadHoldDisposition(outcome?.(identity, row.local_item_id));
       if (options.includeUnsettled || disposition.kind === 'cannot_read') matched.push({ identity, row, disposition });
     }
     return matched;

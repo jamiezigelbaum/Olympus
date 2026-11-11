@@ -1490,18 +1490,24 @@ export class LocalFileExtractionJobStore {
    * means text is still owed. Among terminal attempts use the newest outcome,
    * with only that job's warnings (never an older failed attempt's).
    */
-  itemExtractionOutcome(item: { provider: string; accountScope: string; providerItemId: string }): ItemExtractionOutcome | undefined {
+  itemExtractionOutcome(item: {
+    provider: string; accountScope: string; providerItemId: string; providerConversationId?: string | null; localItemId?: string;
+  }, options: { whenNoJob?: ItemExtractionOutcome } = {}): ItemExtractionOutcome | undefined {
+    // An item inside a conversation (chat media, a mail attachment) can share
+    // its provider item id with another conversation's: its local id tells them apart.
+    const inConversation = Boolean(item.providerConversationId) && item.localItemId !== undefined;
     const all = this.db.query(`
       SELECT job_id, status, last_error_kind, policy_decision, source_version FROM extraction_jobs
-      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?${inConversation ? ' AND local_item_id = ?' : ''}
       ORDER BY updated_at DESC, job_id DESC
-    `).all(item.provider, item.accountScope, item.providerItemId) as Array<{
+    `).all(item.provider, item.accountScope, item.providerItemId, ...(inConversation ? [item.localItemId!] : [])) as Array<{
       job_id: string; status: ExtractionJobStatus; last_error_kind: string | null; policy_decision: ExtractionPolicyDecision; source_version: string | null;
     }>;
     // Only the newest version's jobs speak for the item: an older version's
     // successful read must not hide that the current one failed.
     const current = all[0]?.source_version ?? null;
     const rows = all.filter(row => (row.source_version ?? null) === current);
+    if (rows.length === 0) return options.whenNoJob;
     const indexed = rows.find(row => row.status === 'indexed');
     if (!indexed && rows.some(row => row.status === 'queued' || row.status === 'leased' || row.status === 'failed_retryable')) return undefined;
     const row = indexed ?? rows[0];

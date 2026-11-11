@@ -184,6 +184,22 @@ describe('extraction job store: enqueue', () => {
     expect(store.itemExtractionState(item)).toBe('settled');
   });
 
+  test('an item inside a conversation never takes another conversation\'s outcome for the same provider item id', () => {
+    const { store, dbPath } = newStore();
+    const inChat = (chat: string) => ref('42#child:media', { localItemId: `${LANE.accountScope}:${chat}:42#child:media`, contentHash: `hash-${chat}` });
+    const result = store.enqueue({ refs: [inChat('chat-a'), inChat('chat-b')], extractorKind: KIND, extractorVersion: VERSION, policyDecision: 'index_allowed' });
+    const [a, b] = result.jobRefs.map(job => job.jobId);
+    backdate(dbPath, a!, { status: 'failed_terminal', last_error_kind: 'pdf_damaged' });
+    backdate(dbPath, b!, { status: 'indexed', updated_at: '2099-01-01T00:00:00Z' });
+    const item = (chat: string) => ({ provider: LANE.provider, accountScope: LANE.accountScope, providerItemId: '42#child:media',
+      providerConversationId: chat, localItemId: `${LANE.accountScope}:${chat}:42#child:media` });
+    expect(store.itemExtractionOutcome(item('chat-a'))?.status).toBe('failed_terminal');
+    expect(store.itemExtractionOutcome(item('chat-b'))?.status).toBe('indexed');
+    const none = { status: 'skipped_unsupported', warnings: [], policyDecision: 'index_allowed' } as const;
+    expect(store.itemExtractionOutcome(item('chat-c'), { whenNoJob: none })).toBe(none);
+    expect(store.itemExtractionOutcome(item('chat-c'))).toBeUndefined();
+  });
+
   test('an item text is owed until a job reads it or settles without it', () => {
     const { store, dbPath } = newStore();
     const item = { provider: LANE.provider, accountScope: LANE.accountScope, providerItemId: 'item-owed' };

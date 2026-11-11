@@ -30232,7 +30232,7 @@ var init_local_index = __esm(() => {
           yield;
         const row = rows[index];
         const identity = identities[row.idx];
-        const disposition = unreadHoldDisposition(outcome?.(identity));
+        const disposition = unreadHoldDisposition(outcome?.(identity, row.local_item_id));
         if (options.includeUnsettled || disposition.kind === "cannot_read")
           matched.push({ identity, row, disposition });
       }

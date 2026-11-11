@@ -4381,9 +4381,8 @@ export async function main(): Promise<void> {
     if (!fileExtractionRuntime) return;
     const jobs = fileExtractionRuntime.jobs;
     store.setExtractionOutcomeProbe(store.family === 'file'
-      ? (identity) => jobs.itemExtractionOutcome(identity)
-      : (identity) => jobs.itemExtractionOutcome(identity)
-        ?? (jobs.itemExtractionState(identity) === 'none' ? NO_EXTRACTION_JOB_OUTCOME : undefined));
+      ? (identity, localItemId) => jobs.itemExtractionOutcome({ ...identity, localItemId })
+      : (identity, localItemId) => jobs.itemExtractionOutcome({ ...identity, localItemId }, { whenNoJob: NO_EXTRACTION_JOB_OUTCOME }));
   };
   for (const store of connectorStores) probeExtractionEnded(store);
   const connectorStoreEmbeddingProviders = new Map<string, SourceEmbeddingProvider>();
@@ -6458,7 +6457,7 @@ export async function main(): Promise<void> {
   });
   // One item's privacy label (issue #1060): the same stores and ledgers `olympus tier set` reaches in this worker.
   const ownerTierItemsContext: OwnerTierItemsContext = {
-    extractionOutcome: identity => fileExtractionRuntime?.jobs.itemExtractionOutcome(identity),
+    extractionOutcome: (identity, localItemId) => fileExtractionRuntime?.jobs.itemExtractionOutcome({ ...identity, ...(localItemId === undefined ? {} : { localItemId }) }),
     contentAllowed: (identity, localItemId, locator) => {
       for (const store of connectorStores) {
         if (!store.itemPresence(identity).active) continue;
