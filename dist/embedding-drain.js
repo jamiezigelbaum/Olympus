@@ -7489,7 +7489,6 @@ class PeopleIndexRefresher {
     const stores = this.stores();
     const authored = authoredStores(stores);
     const parts = fingerprintParts(authored);
-    this.lastFingerprint = parts.join("|");
     this.lastRefreshAt = this.now();
     const observed = new Map;
     for (const [position, store] of authored.entries()) {
@@ -7501,8 +7500,11 @@ class PeopleIndexRefresher {
       }
       try {
         observed.set(store, { part, observations: await readStoreObservations(store) });
-      } catch {}
+      } catch {
+        parts[position] = `${part}${READ_FAILED}`;
+      }
     }
+    this.lastFingerprint = parts.join("|");
     this.observed = observed;
     return linkStores(this.index, stores, [...observed.values()].flatMap((entry) => entry.observations));
   }
@@ -7525,7 +7527,7 @@ function fingerprintParts(stores) {
     return `${sync}#${visibility}`;
   });
 }
-var PEOPLE_LINK_REASON_TEXT, MAX_ADDRESS_TEXT_CHARS = 4096, addressesIn = (value) => addressSpansIn(value.slice(0, MAX_ADDRESS_TEXT_CHARS)), PEOPLE_AUTHORED_FAMILIES, PEOPLE_INDEX_MIN_REBUILD_MS = 60000, UNREADABLE_VISIBILITY = "#unreadable";
+var PEOPLE_LINK_REASON_TEXT, MAX_ADDRESS_TEXT_CHARS = 4096, addressesIn = (value) => addressSpansIn(value.slice(0, MAX_ADDRESS_TEXT_CHARS)), PEOPLE_AUTHORED_FAMILIES, PEOPLE_INDEX_MIN_REBUILD_MS = 60000, UNREADABLE_VISIBILITY = "#unreadable", READ_FAILED = "!read-failed";
 var init_people_index = __esm(() => {
   init_olympus_layout();
   init_sender_rules();

@@ -1119,7 +1119,6 @@ export class PeopleIndexRefresher {
     const authored = authoredStores(stores);
     // Taken before the reads: a store that moves during one is read again next time.
     const parts = fingerprintParts(authored);
-    this.lastFingerprint = parts.join('|');
     this.lastRefreshAt = this.now();
     const observed = new Map<PeopleObservationSource, { part: string; observations: PeopleSenderObservation[] }>();
     for (const [position, store] of authored.entries()) {
@@ -1132,9 +1131,13 @@ export class PeopleIndexRefresher {
       try {
         observed.set(store, { part, observations: await readStoreObservations(store) });
       } catch {
-        // Unreadable now: its senders drop out, and the next refresh tries again.
+        // Unreadable now (a busy pool, a store mid-restore): its senders drop
+        // out, and its part is recorded as failed so the next change check
+        // reads it again, even for a store whose markers never move.
+        parts[position] = `${part}${READ_FAILED}`;
       }
     }
+    this.lastFingerprint = parts.join('|');
     // Only the stores in the list now: a deleted source's senders are not kept.
     this.observed = observed;
     return linkStores(this.index, stores, [...observed.values()].flatMap((entry) => entry.observations));
@@ -1142,6 +1145,8 @@ export class PeopleIndexRefresher {
 }
 
 const UNREADABLE_VISIBILITY = '#unreadable';
+/** Never a real fingerprint part: a store whose read failed is read again at the next check. */
+const READ_FAILED = '!read-failed';
 
 /** Each store's part of the fingerprint: its last completed sync run and its visibility marker. */
 function fingerprintParts(stores: readonly PeopleObservationSource[]): string[] {

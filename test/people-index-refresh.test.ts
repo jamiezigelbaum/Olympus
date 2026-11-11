@@ -120,6 +120,36 @@ describe('people index refresh reads only what changed (#1305)', () => {
     expect([mail.state.reads, chat.state.reads]).toEqual([3, 2]);
   });
 
+  test("a store whose read failed is read again at the next check, though its markers never moved", async () => {
+    const clock = createTestClock();
+    const index = new LocalPeopleIndex({ dbPath: ':memory:' });
+    cleanups.push(() => index.close());
+    const archive = countingStore('mail', 'quinn');
+    let failNext = true;
+    const flaky: PeopleObservationSource = {
+      ...archive.store,
+      peopleObservationsOffThread: async () => {
+        archive.state.reads += 1;
+        if (failNext) {
+          failNext = false;
+          throw new Error('read pool busy');
+        }
+        return archive.state.observations;
+      },
+    };
+    const refresher = new PeopleIndexRefresher(index, () => [flaky], { now: () => clock.now() });
+    await refresher.refresh();
+    expect(index.personForSender('mail', 'quinn@example.com')).toBeUndefined();
+
+    await clock.advance(PEOPLE_INDEX_MIN_REBUILD_MS);
+    expect(await refresher.refreshIfChanged()).toBe(true);
+    expect(archive.state.reads).toBe(2);
+    expect(index.personForSender('mail', 'quinn@example.com')).toBeDefined();
+    // Read fine: nothing to do until something moves.
+    await clock.advance(PEOPLE_INDEX_MIN_REBUILD_MS);
+    expect(await refresher.refreshIfChanged()).toBe(false);
+  });
+
   test('two refreshes started together run one rebuild', async () => {
     const index = new LocalPeopleIndex({ dbPath: ':memory:' });
     cleanups.push(() => index.close());

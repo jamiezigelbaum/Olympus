@@ -6239,6 +6239,9 @@ export class LocalConnectorStore {
    * and held copies are taken here, on this thread, against the current
    * ledger, and travel with the query, since the pool's connection cannot see
    * this connection's temp tables. A store the pool cannot read is read here.
+   * An item written and held between taking that set and the pool's read can
+   * be counted in this one read; the write moves the store's visibility
+   * marker, so the next change check reads the store again.
    */
   async peopleObservationsOffThread(): Promise<PeopleSenderObservation[]> {
     if (!offThreadReadsSupported(this.dbPath)) return this.peopleObservations();
