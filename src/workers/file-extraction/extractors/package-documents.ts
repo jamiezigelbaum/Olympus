@@ -174,16 +174,21 @@ export function readOpenDocument(bytes: Uint8Array, format: 'odt' | 'ods' | 'odp
   const sheets = nodes(content, 'table').map((table, index) => {
     const rows: string[][] = [];
     for (const row of nodes(table, 'table-row')) {
-      const cells: string[] = [];
+      const runs: Array<{ value: string; repeat: number }> = [];
+      let width = 0;
       for (const cell of row.children) {
         if (typeof cell === 'string' || !['table-cell', 'covered-table-cell'].includes(localName(cell.name))) continue;
         const value = markupText(cell).trim() || cell.attributes['string-value'] || cell.attributes.value
           || cell.attributes['boolean-value'] || cell.attributes['date-value'] || cell.attributes['time-value'] || '';
         const repeat = repeatCount(cell.attributes['number-columns-repeated'], 16_384);
-        if (cells.length + repeat > 16_384) unreadable('unsupported', 'Document table is too wide.');
-        for (let i = 0; i < repeat; i += 1) cells.push(value);
+        width += repeat;
+        if (width > 16_384) unreadable('unsupported', 'Document table is too wide.');
+        runs.push({ value, repeat });
       }
-      if (!cells.some((cell) => cell.trim())) continue;
+      // Writers pad rows with empty cells out to the sheet's full width; drop that padding before expanding.
+      while (runs.length && !runs.at(-1)!.value.trim()) runs.pop();
+      if (!runs.length) continue;
+      const cells = runs.flatMap(({ value, repeat }) => Array<string>(repeat).fill(value));
       const repeat = repeatCount(row.attributes['number-rows-repeated']);
       totalCells += repeat * cells.length;
       if (totalCells > 500_000) unreadable('unsupported', 'Document table exceeds the local read limit.');

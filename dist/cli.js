@@ -96595,19 +96595,23 @@ function readOpenDocument(bytes, format) {
   const sheets = nodes(content, "table").map((table, index) => {
     const rows = [];
     for (const row of nodes(table, "table-row")) {
-      const cells = [];
+      const runs = [];
+      let width = 0;
       for (const cell of row.children) {
         if (typeof cell === "string" || !["table-cell", "covered-table-cell"].includes(localName(cell.name)))
           continue;
         const value = markupText(cell).trim() || cell.attributes["string-value"] || cell.attributes.value || cell.attributes["boolean-value"] || cell.attributes["date-value"] || cell.attributes["time-value"] || "";
         const repeat2 = repeatCount(cell.attributes["number-columns-repeated"], 16384);
-        if (cells.length + repeat2 > 16384)
+        width += repeat2;
+        if (width > 16384)
           unreadable("unsupported", "Document table is too wide.");
-        for (let i2 = 0;i2 < repeat2; i2 += 1)
-          cells.push(value);
+        runs.push({ value, repeat: repeat2 });
       }
-      if (!cells.some((cell) => cell.trim()))
+      while (runs.length && !runs.at(-1).value.trim())
+        runs.pop();
+      if (!runs.length)
         continue;
+      const cells = runs.flatMap(({ value, repeat: repeat2 }) => Array(repeat2).fill(value));
       const repeat = repeatCount(row.attributes["number-rows-repeated"]);
       totalCells += repeat * cells.length;
       if (totalCells > 500000)

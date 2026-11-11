@@ -442,6 +442,13 @@ describe('OpenDocument and EPUB', () => {
     expect(output.text).toBe('ODS Stock\nRows: 2\nColumns: 2\nSample:\nItem | Count\nTools | 7');
   });
 
+  test('ODS padding of empty cells to the full sheet width is not counted or shown', async () => {
+    const row = '<table:table-row><table:table-cell><text:p>V</text:p></table:table-cell><table:table-cell table:number-columns-repeated="16383"/></table:table-row>';
+    const content = `<office:document-content><table:table table:name="Wide">${row.repeat(31)}</table:table></office:document-content>`;
+    const output = await extract(storedZipBytes({ 'content.xml': content }), ODS_MIME_TYPE);
+    expect(output.text).toStartWith('ODS Wide\nRows: 31\nColumns: 1\nSample:\nV');
+  });
+
   test('a > inside a quoted attribute stays inside its tag', async () => {
     const content = '<office:document-content><table:table table:name="Calc"><table:table-row><table:table-cell table:formula="of:=IF([.A1]>0;1;0)" office:value="1"><text:p>1</text:p></table:table-cell></table:table-row></table:table></office:document-content>';
     const output = await extract(storedZipBytes({ 'content.xml': content }), ODS_MIME_TYPE);
