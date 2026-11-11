@@ -21665,7 +21665,7 @@ function namesOf(signals) {
 function slug(value) {
   return SLUG.test(value) ? value : "invalid";
 }
-var CONTENT_NAMES_ONLY_REASON = "content:names_only", TIER_CLASSIFIER_VERSION = "2026-10-29.p8", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, HELD_UNTIL_JUDGED_PRIORITY = -1, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", HELD_UNTIL_JUDGED_REASON = "content:held_until_judged", PARENT_CONTEXT_MARKER = `
+var CONTENT_NAMES_ONLY_REASON = "content:names_only", CONTENT_NAMES_ONLY_LIFTED_REASON = "content:names_only_lifted", TIER_CLASSIFIER_VERSION = "2026-10-29.p8", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, HELD_UNTIL_JUDGED_PRIORITY = -1, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", HELD_UNTIL_JUDGED_REASON = "content:held_until_judged", PARENT_CONTEXT_MARKER = `
 Parent names (context only): `, PARENT_CONTEXT_MAX_CHARS = 200, IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", IMAGE_TEXT_DECIDES_REASON_PREFIX = "content:image_text_decides:", IMAGE_TEXT_DECIDES_MIN_WORDS = 8, PUBLIC_RETIRED_REASON = "tier:public_retired", RETIRED_SOURCE_PRIOR_REASON = "metadata:prior:source_", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
 var init_tier_classifier = __esm(() => {
   init_secret_patterns();
@@ -71976,8 +71976,10 @@ function tieredRun(legs, routing, cursor) {
   return { legs, byDomain, ...cursor ? { cursor } : {}, routing: { ...routing } };
 }
 function withRecordedContent(decision, record) {
-  if (decision.contentRead || !record?.contentRead)
+  if (decision.contentRead)
     return decision;
+  if (!record?.contentRead)
+    return withNamesOnlyLifted(decision, record);
   const contentPending = record.contentPending;
   return {
     ...decision,
@@ -71991,6 +71993,14 @@ function withRecordedContent(decision, record) {
     ],
     state: decision.metadataPending || contentPending ? "pending" : "current"
   };
+}
+function withNamesOnlyLifted(decision, record) {
+  if (!record || decision.reasons.includes(CONTENT_NAMES_ONLY_REASON))
+    return decision;
+  const owed = record.reasons.includes(CONTENT_NAMES_ONLY_REASON) || record.reasons.includes(CONTENT_NAMES_ONLY_LIFTED_REASON);
+  if (!owed || decision.reasons.includes(CONTENT_NAMES_ONLY_LIFTED_REASON))
+    return decision;
+  return { ...decision, reasons: [...decision.reasons, CONTENT_NAMES_ONLY_LIFTED_REASON] };
 }
 function identityKey(identity2) {
   return tierLedgerIdentityKey(identity2);
@@ -99947,7 +99957,7 @@ function createTieredStoreExtractionSink(options) {
       const itemTitle2 = stringMetadata2(plan.item, ["title", "name", "subject"]);
       const itemPath = stringMetadata2(plan.item, ["locatorUri", "pathDisplay"]);
       const imageJudgment = plan.media ? setMediaJudgment(set, plan.media.sha256) : undefined;
-      const settledUnread = !record.contentRead && record.reasons.some((reason) => isFailSafeMissingContentQuestion(reason) || reason === CONTENT_NAMES_ONLY_REASON);
+      const settledUnread = !record.contentRead && record.reasons.some((reason) => isFailSafeMissingContentQuestion(reason) || reason === CONTENT_NAMES_ONLY_REASON || reason === CONTENT_NAMES_ONLY_LIFTED_REASON);
       const holdUntilJudged = tierClassification?.holdContentUntilJudged === true || set.holdsContentUntilJudged() || heldUntilJudged(record.reasons) || settledUnread;
       const parentContext = tierClassification?.sniffer ? parentNamesContext(set, identity2) : undefined;
       const content = classifyContentTier({
@@ -207743,12 +207753,20 @@ function dropboxNamesOnlyByOwner(authority, now = Date.now) {
   return (path) => {
     const at = now();
     if (!cached3 || at - cached3.at >= DROPBOX_NAMES_ONLY_APPROVAL_TTL_MS) {
-      const ref = authority.policyRef("dropbox.files");
-      cached3 = { at, approval: ref ? authority.assertCurrent(ref) : undefined };
+      cached3 = { at, ref: authority.policyRef("dropbox.files") };
     }
-    if (!cached3.approval || cached3.approval.status !== "approved")
+    if (!cached3.ref)
       return false;
-    const allows = dropboxScopeAllows(cached3.approval, path);
+    let approval;
+    try {
+      approval = authority.assertCurrent(cached3.ref);
+    } catch {
+      cached3 = undefined;
+      return false;
+    }
+    if (approval.status !== "approved")
+      return false;
+    const allows = dropboxScopeAllows(approval, path);
     return allows.metadata && !allows.content;
   };
 }

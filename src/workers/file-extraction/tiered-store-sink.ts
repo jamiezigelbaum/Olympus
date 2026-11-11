@@ -29,7 +29,7 @@ import {
   type SourceTrustDomain,
 } from '../../core/source-index/types.ts';
 import { detectSecretFindingKinds } from '../classification/engine.ts';
-import { CONTENT_NAMES_ONLY_REASON, classifyContentTier, heldUntilJudged, maxTier, namesDecidedByOwner, type TierDecision, type TierKey } from '../classification/tier-classifier.ts';
+import { CONTENT_NAMES_ONLY_LIFTED_REASON, CONTENT_NAMES_ONLY_REASON, classifyContentTier, heldUntilJudged, maxTier, namesDecidedByOwner, type TierDecision, type TierKey } from '../classification/tier-classifier.ts';
 import { copyServingLayer, isFailSafeMissingContentQuestion, placementIsRaise, trustDomainRank, type TierCopy, type TierPlacementPlan } from '../classification/tier-ledger.ts';
 import type { ConnectorStoreOwnershipKind, LocalConnectorStore } from '../connector-store/index.ts';
 import { parentNamesContext } from '../connector-store/parent-context.ts';
@@ -188,7 +188,8 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       // verdict never covered this text, so the text is held the same way
       // until judged, never served on that verdict or a Personal-first guess.
       const settledUnread = !record.contentRead
-        && record.reasons.some((reason) => isFailSafeMissingContentQuestion(reason) || reason === CONTENT_NAMES_ONLY_REASON);
+        && record.reasons.some((reason) => isFailSafeMissingContentQuestion(reason)
+          || reason === CONTENT_NAMES_ONLY_REASON || reason === CONTENT_NAMES_ONLY_LIFTED_REASON);
       const holdUntilJudged = tierClassification?.holdContentUntilJudged === true
         || set.holdsContentUntilJudged() || heldUntilJudged(record.reasons) || settledUnread;
       const parentContext = tierClassification?.sniffer ? parentNamesContext(set, identity) : undefined;

@@ -64,6 +64,8 @@ import {
 import { detectSecretFindingKinds } from '../classification/engine.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
 import {
+  CONTENT_NAMES_ONLY_LIFTED_REASON,
+  CONTENT_NAMES_ONLY_REASON,
   maxTier,
   hasCredentialUrl,
   contentHeldForJudgment,
@@ -2169,7 +2171,8 @@ export function withRecordedContent(
   decision: TierDecision,
   record: Pick<TierLedgerRecordLike, 'contentRead' | 'contentTier' | 'contentPending' | 'decidedBy' | 'reasons'> | undefined,
 ): TierDecision {
-  if (decision.contentRead || !record?.contentRead) return decision;
+  if (decision.contentRead) return decision;
+  if (!record?.contentRead) return withNamesOnlyLifted(decision, record);
   const contentPending = record.contentPending;
   return {
     ...decision,
@@ -2183,6 +2186,18 @@ export function withRecordedContent(
     ],
     state: decision.metadataPending || contentPending ? 'pending' : 'current',
   };
+}
+
+/**
+ * An unread item re-listed after the owner stopped keeping it names only keeps
+ * the debt its names verdict left: its first text is held until judged
+ * (CONTENT_NAMES_ONLY_LIFTED_REASON). Still names only, nothing is owed.
+ */
+function withNamesOnlyLifted(decision: TierDecision, record: Pick<TierLedgerRecordLike, 'reasons'> | undefined): TierDecision {
+  if (!record || decision.reasons.includes(CONTENT_NAMES_ONLY_REASON)) return decision;
+  const owed = record.reasons.includes(CONTENT_NAMES_ONLY_REASON) || record.reasons.includes(CONTENT_NAMES_ONLY_LIFTED_REASON);
+  if (!owed || decision.reasons.includes(CONTENT_NAMES_ONLY_LIFTED_REASON)) return decision;
+  return { ...decision, reasons: [...decision.reasons, CONTENT_NAMES_ONLY_LIFTED_REASON] };
 }
 
 interface TierLedgerRecordLike {

@@ -45,6 +45,13 @@ export { isBareShareLink } from './bare-share-link.ts';
  * layers and no text was ever read (`content:names_only`).
  */
 export const CONTENT_NAMES_ONLY_REASON = 'content:names_only';
+/**
+ * An item the owner kept names only and now lets be read, re-listed before
+ * its text arrived: its names verdict never covered that text, so its first
+ * text is held until judged (tiered-store-sink.ts), as `content:names_only`'s
+ * would be. Carried on every re-listing until the text is read.
+ */
+export const CONTENT_NAMES_ONLY_LIFTED_REASON = 'content:names_only_lifted';
 
 export const TIER_CLASSIFIER_KIND = 'olympus_shared_four_tier_classifier';
 // 2026-10-01.p2: vocabulary-only detector hits go to the privacy-safe model

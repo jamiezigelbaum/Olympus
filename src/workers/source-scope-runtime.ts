@@ -491,23 +491,35 @@ const DROPBOX_NAMES_ONLY_APPROVAL_TTL_MS = 5_000;
 /**
  * Whether the owner's current Dropbox folder choice keeps this path
  * names-only: its names are listed and its text is never read (#1295). The
- * approval is read again at most every few seconds, so a listing of many
- * items reads it once and a changed choice applies within moments. No
- * approval, or one that is not current: no.
+ * approval's reference is looked up at most every few seconds, and the
+ * approval is checked on every call, so a listing of many items stays cheap
+ * and a revoked or changed choice answers no at once. No approval, or one
+ * that is not current: no.
  */
 export function dropboxNamesOnlyByOwner(
   authority: FileSourceScopeAuthority,
   now: () => number = Date.now,
 ): (path: string) => boolean {
-  let cached: { at: number; approval: FileSourceScopeApprovalSnapshot | undefined } | undefined;
+  // Only the reference is kept between calls. The approval itself is checked
+  // on every call (assertCurrent reuses a pass while its files are unchanged,
+  // so that is a few stats), so a revoked, changed or unreadable approval
+  // answers no at once, never a stale names-only.
+  let cached: { at: number; ref: FileSourceScopePolicyRef | undefined } | undefined;
   return (path) => {
     const at = now();
     if (!cached || at - cached.at >= DROPBOX_NAMES_ONLY_APPROVAL_TTL_MS) {
-      const ref = authority.policyRef('dropbox.files');
-      cached = { at, approval: ref ? authority.assertCurrent(ref) : undefined };
+      cached = { at, ref: authority.policyRef('dropbox.files') };
     }
-    if (!cached.approval || cached.approval.status !== 'approved') return false;
-    const allows = dropboxScopeAllows(cached.approval, path);
+    if (!cached.ref) return false;
+    let approval: FileSourceScopeApprovalSnapshot;
+    try {
+      approval = authority.assertCurrent(cached.ref);
+    } catch {
+      cached = undefined;
+      return false;
+    }
+    if (approval.status !== 'approved') return false;
+    const allows = dropboxScopeAllows(approval, path);
     return allows.metadata && !allows.content;
   };
 }
