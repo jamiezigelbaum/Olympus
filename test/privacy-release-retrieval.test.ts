@@ -93,6 +93,14 @@ test('a Secret is found by its spelling variants and by the everyday word for it
       expect({ query, found: found(query) }).toEqual({ query, found: ['/Documents/home-wifi.txt'] });
     }
     expect(found('deploy api key')).toEqual(['/Code/deploy.env']);
+    // A hyphen the name or kind spells as two words still matches them split.
+    index.record({
+      identity: { provider: 'fixture', accountScope: 'personal', providerItemId: 'aws' },
+      title: 'cloud notes.txt', namesReleasable: true,
+      locator: '/Documents/cloud notes.txt', findingKinds: ['aws_access_key_id'],
+    });
+    expect(found('AWS access-key')).toEqual(['/Documents/cloud notes.txt']);
+    expect(found('my cloud-notes')).toEqual(['/Documents/cloud notes.txt']);
     // Still a whole-word overlap on the topic: these name neither Secret.
     for (const query of ['my bank password', 'garden hose length', 'wi', 'office printer password reset']) {
       expect({ query, found: found(query) }).toEqual({ query, found: [] });

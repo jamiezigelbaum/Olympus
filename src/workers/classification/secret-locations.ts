@@ -309,8 +309,8 @@ export class SecretLocationsIndex {
       hide?: (identities: readonly SecretLocationIdentity[]) => ReadonlySet<SecretLocationIdentity>;
     } = {},
   ): SecretLocationMatch[] {
-    const terms = secretLocationQueryTerms(query);
-    if (terms.length === 0) return [];
+    const readings = secretLocationQueryReadings(query);
+    if (readings.length === 0) return [];
     const limit = Math.max(1, Math.min(options.limit ?? 10, 100));
     const rows = this.db.query(`
       SELECT * FROM secret_locations
@@ -322,8 +322,13 @@ export class SecretLocationsIndex {
       const location = locationFromRow(row);
       if (!secretLocationWithinScope(location, scope)) continue;
       const words = secretLocationWords(location);
-      const score = terms.filter((term) => words.has(term)).length;
-      if (score >= Math.min(3, terms.length)) scored.push({ location, score });
+      // Either reading of the hyphens may match; the better one scores.
+      let best = 0;
+      for (const terms of readings) {
+        const score = terms.filter((term) => words.has(term)).length;
+        if (score >= Math.min(3, terms.length)) best = Math.max(best, score);
+      }
+      if (best > 0) scored.push({ location, score: best });
     }
     const identities = scored.map(({ location }): SecretLocationIdentity => ({
       provider: location.source,
@@ -414,11 +419,21 @@ const STOP_WORDS = new Set([
   'where', 'which', 'who', 'with',
 ]);
 
-export function secretLocationQueryTerms(query: string): string[] {
-  return [...new Set(
-    sourceIndexTopicTokens(joinHyphenatedWords(query.replaceAll('_', ' ')))
-      .filter((term) => term.length >= 2 && !STOP_WORDS.has(term)),
-  )];
+/**
+ * The query's topic words, read twice when it has a hyphen: with hyphenated
+ * words joined ("Wi-Fi" as "wifi", #1321) and split ("access-key" as "access"
+ * and "key"), since a name or finding kind may spell it either way.
+ */
+export function secretLocationQueryReadings(query: string): string[][] {
+  const text = query.replaceAll('_', ' ');
+  const joined = secretLocationQueryTerms(joinHyphenatedWords(text));
+  const split = secretLocationQueryTerms(text);
+  if (joined.length === 0 && split.length === 0) return [];
+  return joined.join(' ') === split.join(' ') ? [joined] : [joined, split].filter((terms) => terms.length > 0);
+}
+
+function secretLocationQueryTerms(text: string): string[] {
+  return [...new Set(sourceIndexTopicTokens(text).filter((term) => term.length >= 2 && !STOP_WORDS.has(term)))];
 }
 
 /** "Wi-Fi" and "wifi" are one word: a hyphen between letters or digits joins them. */
