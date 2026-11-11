@@ -11750,6 +11750,31 @@ function writeIntentFromRow(row) {
 function idParams(identity) {
   return [identity.provider, identity.accountScope, tierLedgerConversationKey(identity), identity.providerItemId];
 }
+function tierLedgerIdentityOfRecord(record) {
+  return {
+    provider: record.provider,
+    accountScope: record.accountScope,
+    providerItemId: record.providerItemId,
+    ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
+  };
+}
+function parseTierLedgerIdentity(raw) {
+  if (!raw)
+    return;
+  try {
+    const parsed = JSON.parse(raw);
+    if (typeof parsed.provider !== "string" || typeof parsed.accountScope !== "string" || typeof parsed.providerItemId !== "string")
+      return;
+    return {
+      provider: parsed.provider,
+      accountScope: parsed.accountScope,
+      providerItemId: parsed.providerItemId,
+      ...typeof parsed.providerConversationId === "string" ? { providerConversationId: parsed.providerConversationId } : {}
+    };
+  } catch {
+    return;
+  }
+}
 function tierMovingDirectionClause(direction) {
   if (!direction)
     return "";
@@ -12484,6 +12509,17 @@ class TierLedger {
     return rows.map(recordFromRow);
   }
   listAwaitingTextWindow(options = {}) {
+    return this.window(`routed = 1 AND content_read = 0 AND metadata_pending = 0
+        AND ((state = 'pending' AND content_pending = 1)
+          OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
+            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
+              OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))`, [], options);
+  }
+  listPersonalFirstWindow(options = {}) {
+    return this.window(`routed = 1 AND content_pending = 1 AND state != 'moving'
+        AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value = ?)`, [PERSONAL_FIRST_REASON], options);
+  }
+  window(where, params, options) {
     const limit = Math.max(1, Math.min(options.limit ?? 500, 5000));
     const examine = Math.max(limit, options.examine ?? 20000);
     const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : undefined;
@@ -12494,14 +12530,10 @@ class TierLedger {
         ORDER BY provider, account_scope, conversation_key, provider_item_id
         LIMIT ?
       )
-      WHERE routed = 1 AND content_read = 0 AND metadata_pending = 0
-        AND ((state = 'pending' AND content_pending = 1)
-          OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
-            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
-              OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))
+      WHERE ${where}
       ORDER BY provider, account_scope, conversation_key, provider_item_id
       LIMIT ?
-    `).all(...after ?? [], examine, limit);
+    `).all(...after ?? [], examine, ...params, limit);
     const records = rows.map(recordFromRow);
     const identityOfRow = (row) => ({
       provider: row.provider,
@@ -14140,6 +14172,19 @@ class TierLedger {
       after = last.row_id;
       yield;
     }
+  }
+  heldItemCount(corpusIds) {
+    if (corpusIds.length === 0)
+      return 0;
+    return this.db.query(`
+      SELECT COUNT(*) AS n FROM tier_items t
+      WHERE t.state IN ('pending', 'moving')
+        AND (t.metadata_pending = 1 OR (t.content_pending = 1 AND t.content_read = 1))
+        AND EXISTS (SELECT 1 FROM tier_copies c
+          WHERE c.provider = t.provider AND c.account_scope = t.account_scope
+            AND c.conversation_key = t.conversation_key AND c.provider_item_id = t.provider_item_id
+            AND c.corpus_id IN (SELECT value FROM json_each(?)))
+    `).get(JSON.stringify(corpusIds)).n;
   }
   corpusCopyCounts(corpusId) {
     const rows = this.db.query(`
@@ -37826,7 +37871,7 @@ function settleNamesOnlyItems(options) {
     return report;
   const ledger = set.ledger;
   const limit = Math.max(1, options.limit ?? DEFAULT_NAMES_ONLY_SETTLE_ROWS);
-  const after = parseIdentity(ledger.readMeta(SETTLE_META_KEY));
+  const after = parseTierLedgerIdentity(ledger.readMeta(SETTLE_META_KEY));
   const { records: rows, resumeAfter } = ledger.listAwaitingTextWindow({ limit, ...after ? { after } : {} });
   for (const record of rows) {
     report.checked += 1;
@@ -37841,7 +37886,7 @@ function settleNamesOnlyItems(options) {
 function settleOne(set, record) {
   if (!record.reasons.includes("content:unread") || record.decidedBy === "override")
     return false;
-  const identity = identityOf3(record);
+  const identity = tierLedgerIdentityOfRecord(record);
   const current2 = set.ledger.copies(identity).filter((copy) => copy.state === "current");
   const names = copyServingLayer(current2, "metadata");
   const domain = names ? set.domainForCorpus(names.corpusId) : undefined;
@@ -37875,35 +37920,59 @@ function settleOne(set, record) {
   });
   return recorded.outcome === "updated" || recorded.outcome === "unchanged";
 }
-function parseIdentity(raw) {
-  if (!raw)
-    return;
-  try {
-    const parsed = JSON.parse(raw);
-    if (typeof parsed.provider !== "string" || typeof parsed.accountScope !== "string" || typeof parsed.providerItemId !== "string")
-      return;
-    return {
-      provider: parsed.provider,
-      accountScope: parsed.accountScope,
-      providerItemId: parsed.providerItemId,
-      ...typeof parsed.providerConversationId === "string" ? { providerConversationId: parsed.providerConversationId } : {}
-    };
-  } catch {
-    return;
-  }
-}
-function identityOf3(record) {
-  return {
-    provider: record.provider,
-    accountScope: record.accountScope,
-    providerItemId: record.providerItemId,
-    ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
-  };
-}
 var DEFAULT_NAMES_ONLY_SETTLE_ROWS = 500, SETTLE_META_KEY = "names_only_settle_after";
 var init_tier_names_only_settle = __esm(() => {
   init_tier_ledger();
   init_local_index();
+});
+
+// src/workers/connector-store/tier-held-settle.ts
+function settlePersonalFirstItems(options) {
+  const report = { checked: 0, settled: 0, movesQueued: 0 };
+  const { set } = options;
+  const ledger = set.ledger;
+  const limit = Math.max(1, options.limit ?? DEFAULT_HELD_SETTLE_ROWS);
+  const after = parseTierLedgerIdentity(ledger.readMeta(SETTLE_META_KEY2));
+  const { records, resumeAfter } = ledger.listPersonalFirstWindow({ limit, ...after ? { after } : {} });
+  for (const record of records) {
+    report.checked += 1;
+    try {
+      const outcome = settleOne2(set, record);
+      if (outcome === "queued_move")
+        report.movesQueued += 1;
+      if (outcome === "queued_move" || outcome === "updated" || outcome === "unchanged")
+        report.settled += 1;
+    } catch {}
+  }
+  ledger.writeMeta(SETTLE_META_KEY2, resumeAfter ? JSON.stringify(resumeAfter) : "");
+  return report;
+}
+function settleOne2(set, record) {
+  const identity = tierLedgerIdentityOfRecord(record);
+  const decision = {
+    metadataTier: record.metadataTier,
+    contentTier: record.contentTier,
+    decidedBy: record.decidedBy,
+    reasons: record.reasons.filter((reason) => reason !== PERSONAL_FIRST_REASON),
+    state: "pending",
+    contentRead: record.contentRead,
+    metadataPending: record.metadataPending,
+    contentPending: true,
+    metadataForced: record.metadataForced,
+    metadataFlagged: record.metadataFlagged,
+    engineVersion: record.engineVersion,
+    mapRevision: record.mapRevision,
+    snifferId: "undecided"
+  };
+  return set.ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), {
+    stagedLandingAllowed: true,
+    guard: { generation: record.generation, override: set.ledger.getOverride(identity) }
+  }).outcome;
+}
+var DEFAULT_HELD_SETTLE_ROWS = 500, SETTLE_META_KEY2 = "personal_first_settle_after";
+var init_tier_held_settle = __esm(() => {
+  init_tier_classifier();
+  init_tier_ledger();
 });
 
 // src/workers/embedding-ledger.ts
@@ -40109,7 +40178,7 @@ function isVerdictReceipt(reason) {
 }
 function restoreClearedOverride(set, record) {
   const ledger = set.ledger;
-  const identity = identityOf4(record);
+  const identity = identityOf3(record);
   const before = ledger.settledDecisionBeforeOverride(identity);
   if (!before || before.metadataTier === "secrets" || before.contentTier === "secrets")
     return false;
@@ -40180,7 +40249,7 @@ function restoreClearedOverride(set, record) {
 }
 function applyOne(set, record, tier, retirePublic, report, guard) {
   const ledger = set.ledger;
-  const identity = identityOf4(record);
+  const identity = identityOf3(record);
   const holdUntilJudged = set.holdsContentUntilJudged() || heldUntilJudged(record.reasons);
   const decision = classifyItemTiers({ signals: {}, provider: record.provider, subject: identity, ...holdUntilJudged ? { holdUntilJudged: true } : {} }, { override: { kind: "tier", tier }, ...retirePublic ? { retirePublic: true } : {} });
   const secrets = decision.contentTier === "secrets";
@@ -40262,7 +40331,7 @@ function storedCopy(set, identity) {
   }
   return;
 }
-function identityOf4(record) {
+function identityOf3(record) {
   return {
     provider: record.provider,
     accountScope: record.accountScope,
@@ -40320,7 +40389,7 @@ function sweepOwnerRuleRaises(options) {
       report.secrets += 1;
     else if (raised === "deferred") {
       if (held.length < MAX_HELD_ITEMS)
-        held.push(identityOf5(record));
+        held.push(identityOf4(record));
       else
         overflow = true;
     }
@@ -40356,7 +40425,7 @@ function sweepOwnerRuleRaises(options) {
     report.complete = false;
     writeState(ledger, {
       done,
-      pending: { rules: pendingKeys, after: identityOf5(rows.at(-1)), held, ...overflow ? { overflow: true } : {} }
+      pending: { rules: pendingKeys, after: identityOf4(rows.at(-1)), held, ...overflow ? { overflow: true } : {} }
     });
   }
   return report;
@@ -40364,7 +40433,7 @@ function sweepOwnerRuleRaises(options) {
 function raiseRoutedItem(set, record, rules, inputs, extraSignals = {}) {
   if (record.contentTier === "secrets" || record.metadataTier === "secrets")
     return "unchanged";
-  const identity = identityOf5(record);
+  const identity = identityOf4(record);
   if (set.ledger.getOverride(identity))
     return "unchanged";
   const copies = set.ledger.copies(identity);
@@ -40506,7 +40575,7 @@ function writeState(ledger, state) {
 function sameKeys(left, right) {
   return left.length === right.length && left.every((key2, index) => key2 === right[index]);
 }
-function identityOf5(record) {
+function identityOf4(record) {
   return {
     provider: record.provider,
     accountScope: record.accountScope,
@@ -40541,7 +40610,7 @@ function sweepImageContentToPrivate(options) {
   }
   if (rows.length >= limit) {
     report.complete = false;
-    ledger.writeMeta(SWEEP_META_KEY2, JSON.stringify({ done: false, after: identityOf6(rows.at(-1)) }));
+    ledger.writeMeta(SWEEP_META_KEY2, JSON.stringify({ done: false, after: identityOf5(rows.at(-1)) }));
     return report;
   }
   for (const domain of ["public_safe", "internal"]) {
@@ -40558,7 +40627,7 @@ function raiseIfImage(set, record) {
     return false;
   if (record.contentTier === "secure")
     return false;
-  const identity = identityOf6(record);
+  const identity = identityOf5(record);
   if (set.ledger.getOverride(identity))
     return false;
   const current2 = set.ledger.copies(identity).filter((copy) => copy.state === "current");
@@ -40602,7 +40671,7 @@ function readState5(raw) {
     return { done: false };
   }
 }
-function identityOf6(record) {
+function identityOf5(record) {
   return {
     provider: record.provider,
     accountScope: record.accountScope,
@@ -40700,6 +40769,7 @@ var init_tiered_store_set = __esm(() => {
   init_parent_context();
   init_child_visibility();
   init_tier_names_only_settle();
+  init_tier_held_settle();
   init_tier_content_purge();
   init_tier_move();
   init_tier_row_rehome();
@@ -78649,7 +78719,9 @@ class InstalledTierClassification {
     if (this.lane && ledgerPath !== ":memory:") {
       try {
         sniffer = new CachedTierSniffer(this.snifferStoreForLedger(ledgerPath), this.lane, snifferPromptVersions(this.ownerContext?.()).cache);
-      } catch {}
+      } catch {
+        sniffer = NO_JUDGE_TIER_SNIFFER;
+      }
     } else if (!this.lane && ledgerPath !== ":memory:") {
       sniffer = NO_JUDGE_TIER_SNIFFER;
     }
@@ -80243,6 +80315,7 @@ function finish(report, monotonicNow, passStarted) {
 init_tier_ledger_path();
 init_tier_rejudge();
 init_tier_names_only_settle();
+init_tier_held_settle();
 init_tier_rules_sweep();
 init_tier_override_settle();
 init_secrets_disposition();
@@ -81459,6 +81532,12 @@ class TierSnifferService {
         const settled = settleNamesOnlyItems({ set: set2 });
         if (settled.settled > 0) {
           this.options.log?.(`Olympus tier names-only: ${settled.settled} stored item(s) settled on their names.`);
+        }
+      } catch {}
+      try {
+        const held = settlePersonalFirstItems({ set: set2 });
+        if (held.settled > 0) {
+          this.options.log?.(`Olympus tier hold: ${held.settled} item(s) recorded before every open question held text are held now (${held.movesQueued} move(s) to Private queued).`);
         }
       } catch {}
     }

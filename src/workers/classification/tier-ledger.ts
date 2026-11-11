@@ -29,6 +29,7 @@ import { readSqliteSchemaVersion, runSqliteMigrations, type SqliteMigration } fr
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import { assertWritableStoreOpenAllowed } from '../../core/store-write-guard.ts';
 import {
+  PERSONAL_FIRST_REASON,
   TIER_KEYS,
   contentJudgeVerdictReason,
   maxTier,
@@ -182,6 +183,40 @@ export interface TierLedgerRecord {
   decidedAt: string;
   /** True once the P1b router placed the item (it then has copy rows). */
   routed: boolean;
+}
+
+/** The identity of a ledger row. */
+export function tierLedgerIdentityOfRecord(record: TierLedgerRecord): TierLedgerIdentity {
+  return {
+    provider: record.provider,
+    accountScope: record.accountScope,
+    providerItemId: record.providerItemId,
+    ...(record.conversationKey ? { providerConversationId: record.conversationKey } : {}),
+  };
+}
+
+/** An identity a pass stored as JSON to resume from; undefined when absent or malformed. */
+export function parseTierLedgerIdentity(raw: string | undefined): TierLedgerIdentity | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as Partial<TierLedgerIdentity>;
+    if (typeof parsed.provider !== 'string' || typeof parsed.accountScope !== 'string' || typeof parsed.providerItemId !== 'string') return undefined;
+    return {
+      provider: parsed.provider,
+      accountScope: parsed.accountScope,
+      providerItemId: parsed.providerItemId,
+      ...(typeof parsed.providerConversationId === 'string' ? { providerConversationId: parsed.providerConversationId } : {}),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/** A bounded page of ledger rows and where the next call resumes. */
+export interface TierLedgerWindow {
+  records: TierLedgerRecord[];
+  /** Where the next call resumes; undefined once the end of the ledger is reached. */
+  resumeAfter?: TierLedgerIdentity;
 }
 
 export type TierLedgerRecordOutcome = 'inserted' | 'updated' | 'unchanged' | 'held_moving';
@@ -1476,11 +1511,35 @@ export class TierLedger {
    * walked the whole ledger to fill its page (Sparta, 2007d67, 2026-11-05: a
    * 10 s freeze on one names-only settle pass).
    */
-  listAwaitingTextWindow(options: { limit?: number; after?: TierLedgerIdentity; examine?: number } = {}): {
-    records: TierLedgerRecord[];
-    /** Where the next call resumes; undefined once the end of the ledger is reached. */
-    resumeAfter?: TierLedgerIdentity;
-  } {
+  listAwaitingTextWindow(options: { limit?: number; after?: TierLedgerIdentity; examine?: number } = {}): TierLedgerWindow {
+    return this.window(`routed = 1 AND content_read = 0 AND metadata_pending = 0
+        AND ((state = 'pending' AND content_pending = 1)
+          OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
+            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
+              OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))`, [], options);
+  }
+
+  /**
+   * Routed items recorded Personal-first before every open question held its
+   * text (#1316): still waiting on their question, not moving, and carrying
+   * `content:personal_first`. Their text may still sit in a Personal store;
+   * the held-text settle pass (tier-held-settle.ts) re-places each one.
+   * Bounded the same way as listAwaitingTextWindow.
+   */
+  listPersonalFirstWindow(options: { limit?: number; after?: TierLedgerIdentity; examine?: number } = {}): TierLedgerWindow {
+    return this.window(`routed = 1 AND content_pending = 1 AND state != 'moving'
+        AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value = ?)`, [PERSONAL_FIRST_REASON], options);
+  }
+
+  /**
+   * At most `examine` rows in key order after `after` are looked at, matching
+   * `where` or not, and the result says where the next call resumes.
+   */
+  private window(
+    where: string,
+    params: readonly string[],
+    options: { limit?: number; after?: TierLedgerIdentity; examine?: number },
+  ): TierLedgerWindow {
     const limit = Math.max(1, Math.min(options.limit ?? 500, 5_000));
     const examine = Math.max(limit, options.examine ?? 20_000);
     const after = options.after
@@ -1493,14 +1552,10 @@ export class TierLedger {
         ORDER BY provider, account_scope, conversation_key, provider_item_id
         LIMIT ?
       )
-      WHERE routed = 1 AND content_read = 0 AND metadata_pending = 0
-        AND ((state = 'pending' AND content_pending = 1)
-          OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
-            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
-              OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))
+      WHERE ${where}
       ORDER BY provider, account_scope, conversation_key, provider_item_id
       LIMIT ?
-    `).all(...(after ?? []), examine, limit) as TierItemRow[];
+    `).all(...(after ?? []), examine, ...params, limit) as TierItemRow[];
     const records = rows.map(recordFromRow);
     const identityOfRow = (row: { provider: string; account_scope: string; conversation_key: string; provider_item_id: string }): TierLedgerIdentity => ({
       provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id,
@@ -3939,6 +3994,26 @@ export class TierLedger {
       after = last.row_id;
       yield;
     }
+  }
+
+  /**
+   * Items with a copy in these stores whose text waits, held, for the privacy
+   * judge: a names question open, or read text whose question is open
+   * (`contentHeldForJudgment`), moving or not. Each item once, however many
+   * of its copies the stores hold; content-free. Reads the pending and moving
+   * rows only (tier_items_state).
+   */
+  heldItemCount(corpusIds: readonly string[]): number {
+    if (corpusIds.length === 0) return 0;
+    return (this.db.query(`
+      SELECT COUNT(*) AS n FROM tier_items t
+      WHERE t.state IN ('pending', 'moving')
+        AND (t.metadata_pending = 1 OR (t.content_pending = 1 AND t.content_read = 1))
+        AND EXISTS (SELECT 1 FROM tier_copies c
+          WHERE c.provider = t.provider AND c.account_scope = t.account_scope
+            AND c.conversation_key = t.conversation_key AND c.provider_item_id = t.provider_item_id
+            AND c.corpus_id IN (SELECT value FROM json_each(?)))
+    `).get(JSON.stringify(corpusIds)) as { n: number }).n;
   }
 
   /**

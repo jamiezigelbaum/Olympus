@@ -1429,7 +1429,7 @@ describe('dashboard privacy field', () => {
 
   test('no privacy judge set up: needsYou says plainly that new items wait, with the way to set one up (#1316)', () => {
     const view = copyDashboardViewModel(buildChatGptDashboardViewModel(emptyView(), {
-      privacy: { configured: true, pendingCount: 3, ruleCount: 0, judgeMissing: true },
+      privacy: { configured: true, pendingCount: 3, ruleCount: 0, judgeMissing: 'no_model' },
     }));
     const item = view.needsYou.find((entry) => entry.id === 'privacy:no_judge');
     expect(item?.sentence).toBe('No private model is set up to check what\'s private, so new items wait, unread by your AI apps, until one is.');
@@ -1437,11 +1437,15 @@ describe('dashboard privacy field', () => {
     expect(item?.fix.href).toContain('/open/fix/models/');
     // A judge waiting for approval is the more specific ask: only that one shows.
     const waiting = buildChatGptDashboardViewModel(emptyView(), {
-      privacy: { configured: true, pendingCount: 3, ruleCount: 0, judgeMissing: true, classifierAwaitingApproval: true },
+      privacy: { configured: true, pendingCount: 3, ruleCount: 0, judgeMissing: 'no_model', classifierAwaitingApproval: true },
     });
     expect(waiting.needsYou.some((entry) => entry.id === 'privacy:no_judge')).toBe(false);
     const judged = buildChatGptDashboardViewModel(emptyView(), { privacy: { configured: true, pendingCount: 0, ruleCount: 0 } });
     expect(judged.needsYou.some((entry) => entry.id === 'privacy:no_judge')).toBe(false);
+    // Switched off where Olympus runs: the same wait, said as what it is.
+    const off = buildChatGptDashboardViewModel(emptyView(), { privacy: { configured: true, pendingCount: 3, ruleCount: 0, judgeMissing: 'turned_off' } });
+    expect(off.needsYou.find((entry) => entry.id === 'privacy:no_judge')?.sentence)
+      .toBe('Checking what\'s private is turned off on the computer running Olympus, so new items wait, unread by your AI apps, until it\'s turned back on.');
   });
 
   test('a local model gets one Approve button on the computer\'s own dashboard, and a pointer to the computer anywhere else', () => {

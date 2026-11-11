@@ -1,3 +1,5 @@
+import { mkdirSync } from 'node:fs';
+import { tierSnifferPathForLedger } from '../src/workers/classification/tier-ledger-path.ts';
 import { InstalledTierClassification, NO_JUDGE_TIER_SNIFFER } from '../src/workers/classification/installed-tier-classification.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
 import { CachedTierSniffer } from '../src/workers/classification/sniffer.ts';
@@ -317,4 +319,18 @@ test('an install with no judge gets the no-judge sniffer for every ledger it cla
   cleanups.push(() => installed.close());
   expect(installed.forLedger(`${tmp.dir}/tier-ledger.sqlite`).sniffer).toBe(NO_JUDGE_TIER_SNIFFER);
   expect(installed.forLedger(':memory:').sniffer).toBeUndefined();
+});
+
+test('a judge whose queue cannot open falls back to the no-judge sniffer: content is still held (#1316)', () => {
+  const tmp = tempDir();
+  cleanups.push(() => tmp.cleanup());
+  const ledgerPath = `${tmp.dir}/tier-ledger.sqlite`;
+  // The judge's queue file is a directory: it cannot be opened.
+  mkdirSync(tierSnifferPathForLedger(ledgerPath));
+  const installed = new InstalledTierClassification({ lane: BUILT_IN_SNIFFER_LANE, env: { OLYMPUS_TIER_RULES_PATH: `${tmp.dir}/none.json` } });
+  cleanups.push(() => installed.close());
+  const sniffer = installed.forLedger(ledgerPath).sniffer;
+  expect(sniffer).toBe(NO_JUDGE_TIER_SNIFFER);
+  const decision = classifyItemTiers({ signals: { title: 'Weekend' }, provider: PROVIDER, text: 'Picnic plans for Saturday.' }, { sniffer: sniffer! });
+  expect(contentHeldForJudgment(decision)).toBe(true);
 });

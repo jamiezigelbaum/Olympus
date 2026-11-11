@@ -18,7 +18,7 @@
 // resumed from the ledger, starting over once the end is reached.
 
 import type { TierDecision } from '../classification/tier-classifier.ts';
-import { copyServingLayer, type TierLedgerIdentity, type TierLedgerRecord } from '../classification/tier-ledger.ts';
+import { copyServingLayer, parseTierLedgerIdentity, tierLedgerIdentityOfRecord, type TierLedgerRecord } from '../classification/tier-ledger.ts';
 import { CONTAINER_MIME_TYPES } from './local-index.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
@@ -39,7 +39,7 @@ export function settleNamesOnlyItems(options: { set: TieredStoreSet; limit?: num
   if (!set.readsContentLater()) return report;
   const ledger = set.ledger;
   const limit = Math.max(1, options.limit ?? DEFAULT_NAMES_ONLY_SETTLE_ROWS);
-  const after = parseIdentity(ledger.readMeta(SETTLE_META_KEY));
+  const after = parseTierLedgerIdentity(ledger.readMeta(SETTLE_META_KEY));
   // A bounded window of the ledger per call, matching or not (listAwaitingTextWindow).
   const { records: rows, resumeAfter } = ledger.listAwaitingTextWindow({ limit, ...(after ? { after } : {}) });
   for (const record of rows) {
@@ -56,7 +56,7 @@ export function settleNamesOnlyItems(options: { set: TieredStoreSet; limit?: num
 
 function settleOne(set: TieredStoreSet, record: TierLedgerRecord): boolean {
   if (!record.reasons.includes('content:unread') || record.decidedBy === 'override') return false;
-  const identity = identityOf(record);
+  const identity = tierLedgerIdentityOfRecord(record);
   const current = set.ledger.copies(identity).filter((copy) => copy.state === 'current');
   const names = copyServingLayer(current, 'metadata');
   const domain = names ? set.domainForCorpus(names.corpusId) : undefined;
@@ -89,29 +89,4 @@ function settleOne(set: TieredStoreSet, record: TierLedgerRecord): boolean {
     guard: { generation: record.generation, override: set.ledger.getOverride(identity) },
   });
   return recorded.outcome === 'updated' || recorded.outcome === 'unchanged';
-}
-
-function parseIdentity(raw: string | undefined): TierLedgerIdentity | undefined {
-  if (!raw) return undefined;
-  try {
-    const parsed = JSON.parse(raw) as Partial<TierLedgerIdentity>;
-    if (typeof parsed.provider !== 'string' || typeof parsed.accountScope !== 'string' || typeof parsed.providerItemId !== 'string') return undefined;
-    return {
-      provider: parsed.provider,
-      accountScope: parsed.accountScope,
-      providerItemId: parsed.providerItemId,
-      ...(typeof parsed.providerConversationId === 'string' ? { providerConversationId: parsed.providerConversationId } : {}),
-    };
-  } catch {
-    return undefined;
-  }
-}
-
-function identityOf(record: TierLedgerRecord): TierLedgerIdentity {
-  return {
-    provider: record.provider,
-    accountScope: record.accountScope,
-    providerItemId: record.providerItemId,
-    ...(record.conversationKey ? { providerConversationId: record.conversationKey } : {}),
-  };
 }

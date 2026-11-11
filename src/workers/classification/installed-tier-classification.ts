@@ -96,7 +96,9 @@ export class InstalledTierClassification implements InstalledTierClassificationP
           snifferPromptVersions(this.ownerContext?.()).cache,
         );
       } catch {
-        // No sniffer store: flagged items stay pending (held Private).
+        // No sniffer store: no question can be queued, so the install has no
+        // judge for now, and every read item's content is held as with none.
+        sniffer = NO_JUDGE_TIER_SNIFFER;
       }
     } else if (!this.lane && ledgerPath !== ':memory:') {
       // No privacy judge on this install (#1316): every read item is still

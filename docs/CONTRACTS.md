@@ -1063,7 +1063,10 @@ per-item hold (`holdContentUntilJudged`); see the change log.
   never returns it, and the release check rates it `private`, so only a
   Private answer can read it before its verdict. A Personal verdict moves the
   text down to Personal. A decision recorded Personal-first earlier is held
-  the same way: an answer read from it is Private at once, and its next
-  placement moves its text into Private. The classifier version is not
-  bumped, so nothing is asked again; with no model configured nothing is
-  asked, and ordinary content is still not held (unchanged).
+  the same way: an answer read from it is Private at once, and a bounded
+  settle pass (`tier-held-settle.ts`) re-places it, hiding its Personal copy
+  from search and embedding before its text moves into Private. The
+  classifier version is not bumped, so nothing is asked again. With no
+  privacy judge configured, or one whose queue cannot open, every read item
+  is still asked (`NO_JUDGE_TIER_SNIFFER`) and its text held until a judge
+  answers; the dashboard says new items wait and counts each held item once.

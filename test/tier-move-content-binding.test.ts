@@ -1,7 +1,8 @@
 import { afterEach, expect, test } from 'bun:test';
+import { Database } from 'bun:sqlite';
 import { PERSONAL_FIRST_REASON, classifyItemTiers, type TierSniffer } from '../src/workers/classification/tier-classifier.ts';
 import { moveTieredItem, TierMoveRefusedError } from '../src/workers/connector-store/tier-move.ts';
-import { TieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
+import { TieredStoreSet, tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
 import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
 
 const cleanups: Array<() => void> = [];
@@ -98,6 +99,31 @@ test('a row recorded Personal-first before #1316 is held at its next placement a
     { trustTier: 'S3', syncConnectorId: 'fixture-replay', layers: 'both' });
   const row = f.ledger.getCurrent(identity)!;
   expect((await moveTieredItem({ set: f.set, identity, target: { metadataTier: row.targetMetadataTier!, contentTier: row.targetContentTier! } })).raise).toBe(true);
+  expect(f.stores.internal!.localContent(localId('edited'))?.chunks ?? []).toEqual([]);
+  expect(f.stores.secure_local!.localContent(localId('edited'))?.chunks.join('')).toBe(oldBody);
+});
+
+test('a background Private verdict on text left in Personal still hides first and moves upward even if stored content differs', async () => {
+  const f = lane();
+  await f.sync(newBody);
+  expect(f.stores.internal!.localContent(localId('edited'))?.chunks.join('')).toBe(newBody);
+  // Its question still open with the text in Personal, as a row recorded
+  // Personal-first before #1316 is until the settle pass re-places it.
+  const db = new Database(tieredStoreSetLedgerPath(f.paths.secure_local));
+  const { reasons_json } = db.query('SELECT reasons_json FROM tier_items').get() as { reasons_json: string };
+  db.query("UPDATE tier_items SET state = 'pending', content_pending = 1, reasons_json = ?")
+    .run(JSON.stringify([...JSON.parse(reasons_json) as string[], PERSONAL_FIRST_REASON]));
+  db.close();
+  const applied = f.ledger.applySnifferVerdict(identity, {
+    pass: 'content', tier: 'secure', reason: 'content:sniffer:binding-test:private', modelId: 'binding-test',
+  }, { placementFor: d => f.set.placementFor(d) });
+  expect(applied?.outcome).toBe('queued_move');
+  expect(f.stores.internal!.localContent(localId('edited'))?.chunks ?? []).toEqual([]);
+  // Simulate a different stored snapshot without changing the verdict.
+  const stored = f.stores.internal!.exportItemCopy(identity)!;
+  f.stores.internal!.importItemCopy({ ...stored, chunks: stored.chunks.map(c => ({ ...c, boundedText: oldBody })) },
+    { trustTier: 'S3', syncConnectorId: 'fixture-replay', layers: 'both' });
+  expect((await moveTieredItem({ set: f.set, identity, target: { metadataTier: 'private', contentTier: 'secure' } })).raise).toBe(true);
   expect(f.stores.internal!.localContent(localId('edited'))?.chunks ?? []).toEqual([]);
   expect(f.stores.secure_local!.localContent(localId('edited'))?.chunks.join('')).toBe(oldBody);
 });

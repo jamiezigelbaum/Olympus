@@ -118,6 +118,7 @@ import {
   type ParentRef,
 } from './child-visibility.ts';
 import { settleNamesOnlyItems } from './tier-names-only-settle.ts';
+import { settlePersonalFirstItems } from './tier-held-settle.ts';
 import { purgeLowerTierContent } from './tier-content-purge.ts';
 import { flushTierMoveNotes, type TierMoveOptions } from './tier-move.ts';
 
@@ -866,6 +867,13 @@ export class TieredStoreSet {
     }
     try {
       settleNamesOnlyItems({ set: this });
+    } catch {
+      // The next run (or the sniffer's tick) tries again.
+    }
+    try {
+      // Text recorded Personal-first before every open question held it
+      // (#1316) is hidden from Personal and moved to the Private store.
+      settlePersonalFirstItems({ set: this });
     } catch {
       // The next run (or the sniffer's tick) tries again.
     }

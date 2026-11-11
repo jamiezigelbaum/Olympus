@@ -76,6 +76,7 @@ import {
   DASHBOARD_CHATGPT_PICKER_COPY,
   DASHBOARD_CHATGPT_SETUP_LABELS as CHATGPT_SETUP_LABELS,
   DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY,
+  DASHBOARD_CHATGPT_PRIVACY_JUDGE_OFF_COPY,
   DASHBOARD_CHATGPT_PRIVACY_NO_JUDGE_COPY,
   DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY,
   DASHBOARD_MANY_UNREADABLE_LABEL,
@@ -207,8 +208,12 @@ export interface ChatGptDashboardOptions {
     classifierWaiting?: { lane: 'local' | 'venice'; modelId: string };
     /** The computer's own unlocked dashboard, which may approve a local model in place (dashboard-panel-tools.ts). */
     approveHere?: boolean;
-    /** No privacy judge is set up on this install: new items wait, held, until one is (#1316). */
-    judgeMissing?: boolean;
+    /**
+     * Nothing judges new items, so they wait, held, until something does
+     * (#1316): no judge is set up or its model cannot be built ('no_model'),
+     * or the check is switched off where Olympus runs ('turned_off').
+     */
+    judgeMissing?: 'no_model' | 'turned_off';
   };
   /**
    * The built-in private model (analyst-built-in.ts builtInPrivateModelStatus),
@@ -359,10 +364,11 @@ export function buildChatGptDashboardViewModel(
   if (options.privacy?.classifierAwaitingApproval) needsYou.push(classifierApprovalItem(options.privacy, options.remote !== undefined));
   // With no judge at all, new items wait held until one is set up (#1316): never silent either.
   else if (options.privacy?.judgeMissing) {
+    const copy = options.privacy.judgeMissing === 'turned_off' ? DASHBOARD_CHATGPT_PRIVACY_JUDGE_OFF_COPY : DASHBOARD_CHATGPT_PRIVACY_NO_JUDGE_COPY;
     needsYou.push({
       id: 'privacy:no_judge',
-      sentence: DASHBOARD_CHATGPT_PRIVACY_NO_JUDGE_COPY.sentence,
-      fix: { label: DASHBOARD_CHATGPT_PRIVACY_NO_JUDGE_COPY.label, tool: DASHBOARD_TOOL_NAME, args: {}, href: openOnComputer(undefined, 'models') },
+      sentence: copy.sentence,
+      fix: { label: copy.label, tool: DASHBOARD_TOOL_NAME, args: {}, href: openOnComputer(undefined, 'models') },
     });
   }
 
