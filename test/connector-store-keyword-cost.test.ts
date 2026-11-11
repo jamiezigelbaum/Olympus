@@ -232,14 +232,18 @@ test('when every word is common, the rarest one is kept', async () => {
   }
 }, 60_000);
 
-test('an exact-word search counts exact words: a rare word whose completions are common stays', async () => {
-  // "week*" reaches every "weekly" row; "week" itself is in none.
+test('shares are counted on exact words: a rare word whose completions are common stays, whatever the search mode', async () => {
+  // "week*" reaches every "weekly" row; "week" itself is in none. A prefix
+  // count reads every completion's doclist (FTS5 merges them), which cost
+  // more than the windows save (2026-11-11, #1423), so the count reads the
+  // exact word: a prefix search may keep a word it could have left out, and
+  // never leaves out a rare one.
   const store = await largeCommonStore();
-  const prefixed = rankedMatches(store, () => { store.searchItemsDetailed('kestrel week', 10); });
-  for (const match of prefixed) expect(match).not.toContain('"week"');
-  const exact = rankedMatches(store, () => { store.searchItemsDetailed('kestrel week', 10, undefined, undefined, { prefix: false }); });
-  expect(exact.length).toBeGreaterThan(0);
-  for (const match of exact) expect(match).toContain('"week"');
+  for (const options of [undefined, { prefix: false }]) {
+    const matches = rankedMatches(store, () => { store.searchItemsDetailed('kestrel week', 10, undefined, undefined, options); });
+    expect(matches.length).toBeGreaterThan(0);
+    for (const match of matches) expect(match).toContain('"week"');
+  }
 }, 60_000);
 
 test('a question of rare words matches as before', async () => {
@@ -254,7 +258,9 @@ test('a question of rare words matches as before', async () => {
 test('a large store estimates a word\'s share from a few bounded rowid windows', () => {
   expect(keywordCountWindows(5_200)).toEqual([[1, 5_200]]);
   const windows = keywordCountWindows(1_000_000);
-  expect(windows.length).toBeGreaterThan(1);
+  // Many small windows: a word that clusters in one stretch of the store
+  // (a month, a project) moves the estimate less than with a few large ones.
+  expect(windows.length).toBeGreaterThanOrEqual(8);
   expect(windows.reduce((sum, [from, to]) => sum + to - from + 1, 0)).toBeLessThanOrEqual(20_000);
   expect(windows[0]![0]).toBe(1);
   expect(windows.at(-1)![1]).toBeLessThanOrEqual(1_000_000);

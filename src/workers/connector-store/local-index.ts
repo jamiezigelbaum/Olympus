@@ -246,11 +246,12 @@ const KEYWORD_COMMON_ROW_SHARE = 0.2;
 const KEYWORD_COMMON_MIN_ROWS = 5_000;
 // A word's share of a store's FTS rows is counted over this many rowid
 // windows of this many rows, spread over the store; a store with no more
-// rows than the windows hold is counted whole. Counting a word's matches
-// store-wide read its whole doclist: cold, up to 9 s for one question on a
-// 1M-row store, against 0.1 to 0.5 s for the windows (2026-11-11, #1423).
-const KEYWORD_COMMON_WINDOWS = 4;
-const KEYWORD_COMMON_WINDOW_ROWS = 5_000;
+// rows than the windows hold is counted whole. Many small windows, so a word
+// that clusters in one stretch of the store moves the estimate less. On a
+// 1M-row seed (2026-11-11, #1423), an exact word's 16 windows read about
+// 0.3 MB in 4 ms, against 1.3 MB for a count bounded at the threshold.
+const KEYWORD_COMMON_WINDOWS = 16;
+const KEYWORD_COMMON_WINDOW_ROWS = 1_250;
 
 /** The rowid windows a word's share of `rows` FTS rows is counted over. */
 export function keywordCountWindows(rows: number): Array<[number, number]> {
@@ -13121,7 +13122,7 @@ export class LocalConnectorStore {
     const conceptScope = connectorStoreFtsScopeSql(filters, 'r.chunk_pk');
     const groups = ftsOptions.relaxed ? [] : sourceIndexFtsTermGroups(query);
     const exact = queryInitialisms(query);
-    const common = ftsOptions.relaxed ? undefined : yield* this.commonConceptTermsSteps(groups, exact, ftsOptions.prefix !== false);
+    const common = ftsOptions.relaxed ? undefined : yield* this.commonConceptTermsSteps(groups, exact);
     const commonTerms = common?.excluded;
     const commonWords = common?.audit;
     const terms = ftsOptions.relaxed
@@ -13430,15 +13431,13 @@ export class LocalConnectorStore {
    * Dropbox store with most of the top 10 kept). A concept still counts toward
    * each candidate's matched concepts. When every concept is common, the
    * rarest is kept. A term a kept concept also holds stays. The share is
-   * counted over a few rowid windows (keywordCountWindows), exactly in a
+   * counted on the exact words over rowid windows (keywordCountWindows), exactly in a
    * store the windows cover, and remembered like the concept weights. Stores
    * under KEYWORD_COMMON_MIN_ROWS rows match every word, as before.
    */
   private *commonConceptTermsSteps(
     groups: ReadonlyArray<readonly string[]>,
     exact: ReadonlyMap<string, unknown>,
-    // Counted as the match will run: an exact search counts exact words.
-    prefix: boolean,
   ): Generator<StoreRead, { excluded?: ReadonlySet<string>; audit: ConnectorStoreCommonWords } | undefined, unknown> {
     if (groups.length < 2) return undefined;
     const memo = this.conceptCountMemo ??= new Map();
@@ -13463,7 +13462,11 @@ export class LocalConnectorStore {
     const sampled = windows.reduce((sum, [from, to]) => sum + to - from + 1, 0);
     const shares: number[] = [];
     for (const group of groups) {
-      const groupQuery = sourceIndexFtsGroupQuery(group, exact, prefix);
+      // Exact words, whatever the search's mode: FTS5 reads every
+      // completion's doclist for a prefix, whatever the rowid bounds (3 to 6
+      // MB a count on the seed above). A prefix search may so keep a word its
+      // completions make common; it never leaves out a rare one.
+      const groupQuery = sourceIndexFtsGroupQuery(group, exact, false);
       const key = `\u0001common:${rows}:${groupQuery}`;
       let count = remembered(key);
       if (count === undefined) {
