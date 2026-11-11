@@ -21094,6 +21094,23 @@ function tierSnifferInputHash(pass, signals, text2, parentContext) {
     ...context2 ? [context2] : []
   ])).digest("hex");
 }
+function namesInputReason(signals, parentContext) {
+  const keys = NAMES_INPUT_KEYS.filter((key2) => {
+    const value = signals[key2];
+    return Array.isArray(value) ? value.length > 0 : value !== undefined;
+  });
+  return `${NAMES_INPUT_REASON_PREFIX}${keys.join(",")}:${tierSnifferInputHash("metadata", signals, undefined, parentContext)}`;
+}
+function namesInputCovered(reasons, signals, parentContext) {
+  const receipts = reasons.filter((reason) => reason.startsWith(NAMES_INPUT_REASON_PREFIX));
+  return receipts.length > 0 && receipts.every((reason) => {
+    const keys = reason.slice(NAMES_INPUT_REASON_PREFIX.length).split(":")[0].split(",").filter(Boolean);
+    if (keys.some((key2) => !NAMES_INPUT_KEYS.some((known) => known === key2)))
+      return false;
+    const original = Object.fromEntries(keys.map((key2) => [key2, signals[key2]]));
+    return namesInputReason(original, parentContext) === reason;
+  });
+}
 function itemHasNonTextContent(item) {
   if (item.metadata.textComplete !== true || item.content.kind !== "text" || item.deferredBytes || item.identity.parent || item.identity.providerFileId || !textOnlyMime(item.mimeType))
     return true;
@@ -21134,6 +21151,8 @@ function withPublicRetired(decision) {
 }
 function classifyItemTiers(input, options = {}) {
   const decision = classifyItemTiersWithPublic(input, options);
+  if (decision.contentTier !== "secrets")
+    decision.reasons.push(namesInputReason(input.signals, input.parentContext));
   if (input.text !== undefined && decision.contentTier !== "secrets") {
     if (input.hasNonTextContent !== true && textOnlyMime(input.mimeType))
       decision.reasons.push("content:text_only");
@@ -21682,7 +21701,7 @@ function slug(value) {
   return SLUG.test(value) ? value : "invalid";
 }
 var CONTENT_NAMES_ONLY_REASON = "content:names_only", CONTENT_NAMES_ONLY_LIFTED_REASON = "content:names_only_lifted", TIER_CLASSIFIER_VERSION = "2026-10-29.p8", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, HELD_UNTIL_JUDGED_PRIORITY = -1, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", HELD_UNTIL_JUDGED_REASON = "content:held_until_judged", PARENT_CONTEXT_MARKER = `
-Parent names (context only): `, PARENT_CONTEXT_MAX_CHARS = 200, IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", IMAGE_TEXT_DECIDES_REASON_PREFIX = "content:image_text_decides:", IMAGE_TEXT_DECIDES_MIN_WORDS = 8, PUBLIC_RETIRED_REASON = "tier:public_retired", RETIRED_SOURCE_PRIOR_REASON = "metadata:prior:source_", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
+Parent names (context only): `, PARENT_CONTEXT_MAX_CHARS = 200, NAMES_INPUT_REASON_PREFIX = "metadata:names_input:", NAMES_INPUT_KEYS, IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", IMAGE_TEXT_DECIDES_REASON_PREFIX = "content:image_text_decides:", IMAGE_TEXT_DECIDES_MIN_WORDS = 8, PUBLIC_RETIRED_REASON = "tier:public_retired", RETIRED_SOURCE_PRIOR_REASON = "metadata:prior:source_", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
 var init_tier_classifier = __esm(() => {
   init_secret_patterns();
   init_secret_patterns();
@@ -21699,6 +21718,7 @@ var init_tier_classifier = __esm(() => {
     id: "undecided",
     judge: () => ({ verdict: "undecided" })
   });
+  NAMES_INPUT_KEYS = ["title", "path", "folderKeys", "labels", "sender"];
   SLUG = /^[a-z0-9][a-z0-9_.:-]{0,95}$/i;
 });
 
@@ -23896,6 +23916,16 @@ class TierLedger {
     const rows = this.db.query(`SELECT * FROM tier_items
       ${after.length ? "WHERE (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)" : ""}
       ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ?`).all(...after, Math.max(1, Math.min(options.limit, 500)));
+    return rows.map(recordFromRow);
+  }
+  listSupersededItemWindow(options) {
+    const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : [];
+    const rows = this.db.query(`SELECT * FROM tier_items i
+      WHERE ${after.length ? "(i.provider, i.account_scope, i.conversation_key, i.provider_item_id) > (?, ?, ?, ?) AND" : ""}
+        EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = i.provider AND c.account_scope = i.account_scope
+          AND c.conversation_key = i.conversation_key AND c.provider_item_id = i.provider_item_id
+          AND c.copy_state = 'superseded')
+      ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id LIMIT ?`).all(...after, Math.max(1, Math.min(options.limit, 500)));
     return rows.map(recordFromRow);
   }
   listLowerContentLeftovers(options) {
@@ -27280,7 +27310,7 @@ function* profileSteps(db) {
     rows = yield { sql: `${live} ORDER BY c.rowid LIMIT ${SAMPLE_LIMIT}`, params: [], mode: "all" };
   } else {
     const step = maxRowid / SAMPLE_TARGET;
-    const ids = Array.from({ length: SAMPLE_TARGET }, (_, k) => Math.max(1, Math.floor((k + 1) * step)));
+    const ids = Array.from({ length: SAMPLE_TARGET }, (_, k) => Math.min(maxRowid, Math.max(1, Math.floor(k * step + k * 0.6180339887 % 1 * step) + 1)));
     rows = [];
     for (let at = 0;at < ids.length; at += READ_BATCH) {
       const batch = ids.slice(at, at + READ_BATCH);
@@ -61472,7 +61502,7 @@ function clampPercent(percent) {
     return 0;
   return Math.max(0, Math.min(100, Math.round(percent * 10) / 10));
 }
-var METADATA_ONLY_EXPECTED_COUNT_KEY = "qa_metadata_only_expected", BLOCKED_BY_POLICY_COUNT_KEY = "qa_blocked_policy", OUT_OF_CONTENT_SCOPE_COUNT_KEY = "qa_out_of_content_scope", UNREADABLE_ITEMS_COUNT_KEY = "extraction_items_unreadable", UNSUPPORTED_KIND_COUNT_KEY = "extraction_items_unsupported_kind", ITEMS_WITH_TEXT_COUNT_KEY = "items_with_text", POLICY_NOT_READ_COUNT_KEYS, METADATA_ONLY_POLICY_COUNT_KEYS, ANSWER_READY_ELIGIBLE_COUNT_KEYS;
+var METADATA_ONLY_EXPECTED_COUNT_KEY = "qa_metadata_only_expected", BLOCKED_BY_POLICY_COUNT_KEY = "qa_blocked_policy", OUT_OF_CONTENT_SCOPE_COUNT_KEY = "qa_out_of_content_scope", UNREADABLE_ITEMS_COUNT_KEY = "extraction_items_unreadable", UNSUPPORTED_KIND_COUNT_KEY = "extraction_items_unsupported_kind", PICTURES_NOT_READ_HERE_COUNT_KEY = "extraction_items_pictures_not_read_here", ITEMS_WITH_TEXT_COUNT_KEY = "items_with_text", POLICY_NOT_READ_COUNT_KEYS, METADATA_ONLY_POLICY_COUNT_KEYS, ANSWER_READY_ELIGIBLE_COUNT_KEYS;
 var init_answer_ready_coverage = __esm(() => {
   POLICY_NOT_READ_COUNT_KEYS = [
     METADATA_ONLY_EXPECTED_COUNT_KEY,
@@ -61833,6 +61863,8 @@ function dashboardWorkingSummary(source) {
   const readPercent = clampPercent(read / inScope * 100);
   const unreadable = Math.max(0, Math.min(inScope - read, Math.trunc(source.coverage.unreadable_items ?? 0)));
   const unsupportedKind = Math.max(0, Math.min(inScope - read - unreadable, Math.trunc(source.coverage.unsupported_kind_items ?? 0)));
+  const pictures = Math.max(0, Math.min(inScope - read - unreadable - unsupportedKind, Math.trunc(source.coverage.pictures_not_read_here_items ?? 0)));
+  const waiting = inScope - read - unreadable - unsupportedKind - pictures;
   const backlog = source.embedding_backlog;
   const parityShort = backlog !== undefined && (backlog.missing_chunks > 0 || backlog.refresh_needed) && backlog.chunks > 0;
   const searchablePercent = parityShort ? clampPercent(backlog.embedded_chunks / backlog.chunks * 100) : undefined;
@@ -61841,9 +61873,11 @@ function dashboardWorkingSummary(source) {
     read_items: read,
     ...unreadable > 0 ? { unreadable_items: unreadable } : {},
     ...unsupportedKind > 0 ? { unsupported_kind_items: unsupportedKind } : {},
+    ...pictures > 0 ? { pictures_not_read_here_items: pictures } : {},
+    ...waiting > 0 ? { waiting_items: waiting } : {},
     read_percent: readPercent,
     ...searchablePercent !== undefined ? { searchable_percent: searchablePercent } : {},
-    fully_working: read + unreadable + unsupportedKind >= inScope && !parityShort
+    fully_working: read + unreadable + unsupportedKind + pictures >= inScope && !parityShort
   };
 }
 function dashboardCount(value) {
@@ -61858,12 +61892,14 @@ function freshLine(source, now) {
     return "answers questions directly";
   if (source.connection.action.kind === "archive_import")
     return source.connection.label;
+  const waiting = dashboardWaitingToReadPhrase(source);
   const unreadable = dashboardUnreadablePhrase(source);
   const unsupportedKind = dashboardUnsupportedKindPhrase(source);
+  const pictures = dashboardPicturesNotReadHerePhrase(source);
   const manual = dashboardManualSyncLine(source, now);
   const capture = dashboardCaptureClause(source);
   const pass = dashboardLivePassClause(source);
-  const tail = [pass, unreadable, unsupportedKind, capture].filter((part) => !!part).join(" · ");
+  const tail = [pass, waiting, unreadable, unsupportedKind, pictures, capture].filter((part) => !!part).join(" · ");
   if (manual)
     return tail ? `${manual} · ${tail}` : manual;
   const hours = source.freshness.hours;
@@ -61911,6 +61947,14 @@ function itemsPhrase(source, count, adjective = "") {
 function dashboardUnreadablePhrase(source) {
   const count = Math.max(0, Math.trunc(source.coverage.unreadable_items ?? 0));
   return count > 0 ? `${itemsPhrase(source, count)} can't be read` : undefined;
+}
+function dashboardWaitingToReadPhrase(source) {
+  const count = dashboardWorkingSummary(source)?.waiting_items;
+  return count ? `${itemsPhrase(source, count)} waiting to be read` : undefined;
+}
+function dashboardPicturesNotReadHerePhrase(source) {
+  const count = Math.max(0, Math.trunc(source.coverage.pictures_not_read_here_items ?? 0));
+  return count > 0 ? `${dashboardCount(count)} ${plural(count, "picture")} not read on this computer` : undefined;
 }
 function dashboardUnsupportedKindPhrase(source) {
   const count = Math.max(0, Math.trunc(source.coverage.unsupported_kind_items ?? 0));
@@ -62060,6 +62104,9 @@ function degradedInput(degraded) {
 }
 function unknownStatus(value) {
   return { status: DASHBOARD_UNKNOWN_STATUS, mappedUnknown: true, unknownValue: value };
+}
+function plural(count, word) {
+  return count === 1 ? word : `${word}s`;
 }
 function archivePickIntro(formats = ARCHIVE_FORMATS) {
   return `Drop a file or folder from this computer: ${formats.map((format) => format.chooseHint ?? format.label).join("; or ")}. Olympus keeps a copy in its own storage to read it until you remove the import, and never changes the original.`;
@@ -69125,6 +69172,23 @@ var init_tier_content_purge = __esm(() => {
 
 // src/workers/connector-store/tier-auto-prune-sweep.ts
 function sweepAutomaticSupersededCopies(set, options = {}) {
+  const now = options.now ?? Date.now;
+  const started = now();
+  const total = sweepPage(set, options);
+  const limit = Math.max(1, Math.min(options.limit ?? PAGE_SIZE, PAGE_SIZE));
+  let last = total.checked;
+  while ((options.budgetMs ?? 0) > 0 && !total.complete && total.failed === 0 && last === limit && now() - started < options.budgetMs) {
+    const page2 = sweepPage(set, options);
+    total.checked += page2.checked;
+    total.purged += page2.purged;
+    total.kept += page2.kept;
+    total.failed += page2.failed;
+    total.complete = page2.complete;
+    last = page2.checked;
+  }
+  return total;
+}
+function sweepPage(set, options) {
   const ledger = set.ledger;
   const state = JSON.parse(ledger.readMeta(STATE) || "{}");
   const report = { checked: 0, purged: 0, kept: 0, failed: 0, complete: state.done === true };
@@ -69154,12 +69218,17 @@ function sweepAutomaticSupersededCopies(set, options = {}) {
         report.purged++;
       }
       state.after = pending.identity;
+      if (state.parked)
+        delete state.parked[tierLedgerIdentityKey(pending.identity)];
       delete state.pending;
+      delete state.failing;
       save();
     });
   };
+  let attempt;
   try {
     if (state.pending) {
+      attempt = state.pending.identity;
       report.checked++;
       const current2 = ledger.getCurrent(state.pending.identity);
       if (!current2 || current2.generation !== state.pending.generation) {
@@ -69172,7 +69241,7 @@ function sweepAutomaticSupersededCopies(set, options = {}) {
     }
     if (report.checked === limit)
       return report;
-    const rows = ledger.listItemWindow({ ...state.after ? { after: state.after } : {}, limit: limit - report.checked });
+    const rows = ledger.listSupersededItemWindow({ ...state.after ? { after: state.after } : {}, limit: limit - report.checked });
     for (const record of rows.slice(0, limit - report.checked)) {
       report.checked++;
       const identity2 = {
@@ -69181,6 +69250,7 @@ function sweepAutomaticSupersededCopies(set, options = {}) {
         providerItemId: record.providerItemId,
         ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
       };
+      attempt = identity2;
       ledger.withGenerationFence(identity2, record.generation, () => {
         const now = ledger.getCurrent(identity2);
         if (!now.routed || now.contentTier === "secrets" || now.metadataTier === "secrets" || ledger.hasMovedMigrationProposal(identity2))
@@ -69203,6 +69273,7 @@ function sweepAutomaticSupersededCopies(set, options = {}) {
         if (!proof || destination?.tierSetBinding()?.ledgerId !== ledger.ledgerId())
           throw new Error("Current destination unavailable.");
         let unproven = false;
+        const parked = state.parked?.[tierLedgerIdentityKey(identity2)];
         const targets = superseded.map((copy) => {
           const store = set.store(copy.trustDomain);
           if (!store)
@@ -69217,7 +69288,8 @@ function sweepAutomaticSupersededCopies(set, options = {}) {
             if (order === undefined || order < 0)
               unproven = true;
           }
-          return { corpusId: copy.corpusId, chunks };
+          const original = parked?.find((target) => target.corpusId === copy.corpusId)?.chunks ?? 0;
+          return { corpusId: copy.corpusId, chunks: Math.max(chunks, original) };
         });
         if (unproven) {
           report.kept++;
@@ -69236,6 +69308,7 @@ function sweepAutomaticSupersededCopies(set, options = {}) {
         finishPending();
       else {
         state.after = identity2;
+        delete state.failing;
         save();
       }
     }
@@ -69264,13 +69337,36 @@ function sweepAutomaticSupersededCopies(set, options = {}) {
         report.complete = true;
       }
     }
-  } catch {
+  } catch (error) {
     report.failed++;
     report.complete = false;
+    if (attempt)
+      stepPastRepeatedFailure(attempt, error);
   }
   return report;
+  function stepPastRepeatedFailure(identity2, error) {
+    try {
+      const durable = JSON.parse(ledger.readMeta(STATE) || "{}");
+      const key2 = tierLedgerIdentityKey(identity2);
+      const count = durable.failing?.key === key2 ? durable.failing.count + 1 : 1;
+      const corpora = durable.pending?.copies.map((copy) => copy.corpusId).join(",") || "unknown";
+      const reason = error instanceof Error ? error.name : "unknown";
+      console.warn(`[tier-auto-prune] ledger=${ledger.ledgerId()} corpora=${corpora} failures=${count} reason=${reason}`);
+      if (count < MAX_ITEM_FAILURES) {
+        durable.failing = { key: key2, count };
+      } else {
+        if (durable.pending)
+          (durable.parked ??= {})[key2] = durable.pending.copies;
+        delete durable.pending;
+        delete durable.failing;
+        durable.after = identity2;
+        durable.retry = true;
+      }
+      ledger.writeMeta(STATE, JSON.stringify(durable));
+    } catch {}
+  }
 }
-var STATE = "automatic-superseded-prune-v1", PAGE_SIZE = 200;
+var STATE = "automatic-superseded-prune-v1", PAGE_SIZE = 200, MAX_ITEM_FAILURES = 3;
 var init_tier_auto_prune_sweep = __esm(() => {
   init_tier_ledger();
   init_embedding_ledger();
@@ -71305,7 +71401,7 @@ function rejudgeMetadata(record, sniffer, names, subject, holdUntilJudged = fals
     ...names.sender ? { sender: names.sender } : {},
     folderKeys: names.folderKeys
   };
-  const fresh = classifyItemTiers({ signals, namesOnly: true });
+  const fresh = classifyItemTiers({ signals, namesOnly: true, ...parentContext ? { parentContext } : {} });
   if (recheck && recheck.rules.length > 0) {
     const ruled = classifyItemTiers({ signals, namesOnly: true, provider: subject.provider }, { rules: recheck.rules });
     if (ruled.metadataForced || namesDecidedByOwner(ruled.reasons))
@@ -71313,8 +71409,8 @@ function rejudgeMetadata(record, sniffer, names, subject, holdUntilJudged = fals
   }
   const providerReasons = previous.reasons.filter((reason) => /^metadata:(floor|prior):/.test(reason) && !reason.startsWith(RETIRED_SOURCE_PRIOR_REASON));
   const fromStoredNames = record.reasons.includes(STORED_NAMES_REASON);
-  const ownerRecheck = recheck !== undefined && providerReasons.length === 0;
-  const baseline = retiredPrior || fromStoredNames || ownerRecheck ? fresh.metadataTier : maxTier(fresh.metadataTier, record.metadataTier);
+  const mayLower = retiredPrior || (recheck !== undefined ? providerReasons.length === 0 && namesInputCovered(record.reasons, signals, parentContext) : fromStoredNames);
+  const baseline = mayLower ? fresh.metadataTier : maxTier(fresh.metadataTier, record.metadataTier);
   if (baseline === "secrets")
     return { ...previous, metadataTier: baseline, metadataPending: false, reasons: fresh.reasons };
   const material = [names.title, names.path, ...snifferFolderKeyNames(names.folderKeys), names.sender].filter(Boolean).join(" | ").slice(0, SNIFFER_NAMES_MAX_CHARS);
@@ -71335,7 +71431,8 @@ function rejudgeMetadata(record, sniffer, names, subject, holdUntilJudged = fals
     metadataFlagged: pending || fresh.metadataFlagged,
     metadataPending: pending,
     reasons: [
-      ...fresh.reasons.filter((reason) => reason.startsWith("metadata:") && !reason.startsWith("metadata:sniffer:") && !reason.startsWith("metadata:possibly_private:")),
+      ...fresh.reasons.filter((reason) => reason.startsWith("metadata:") && !reason.startsWith("metadata:sniffer:") && !reason.startsWith("metadata:possibly_private:") && (mayLower || !reason.startsWith(NAMES_INPUT_REASON_PREFIX))),
+      ...!mayLower ? record.reasons.filter((reason) => reason.startsWith(NAMES_INPUT_REASON_PREFIX)) : [],
       ...providerReasons,
       `metadata:sniffer:${sniffer.id}:${pending ? "undecided" : verdict.code}`,
       ...pending ? [STORED_NAMES_ASKED_REASON] : metadataTier !== baseline ? [STORED_NAMES_REASON] : []
@@ -72558,6 +72655,12 @@ class TieredStoreSet {
   repairLowerContent(options = {}) {
     if (this.lowerContentRepair)
       return this.lowerContentRepair;
+    try {
+      sweepAutomaticSupersededCopies(this, {
+        budgetMs: SUPERSEDED_SWEEP_SLICE_MS,
+        ...options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {}
+      });
+    } catch {}
     const now = options.nowMs ?? Date.now();
     if (now - this.lastLowerContentRepairAt < LOWER_CONTENT_REPAIR_INTERVAL_MS)
       return Promise.resolve();
@@ -72570,9 +72673,6 @@ class TieredStoreSet {
           if (chunks > 0)
             console.info(`[tier-content-purge] corpus=${corpus} copies=${copies} chunks=${chunks}`);
         }
-      });
-      sweepAutomaticSupersededCopies(this, {
-        ...options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {}
       });
       const pending = flushTierMoveNotes(this.ledger).catch(() => {}).finally(() => {
         this.lowerContentRepair = undefined;
@@ -73709,7 +73809,7 @@ function handoffConnector(source, item) {
 function pathOf(path) {
   return typeof path === "string" && path ? path : undefined;
 }
-var LOWER_CONTENT_REPAIR_INTERVAL_MS, TIER_DOMAIN_ORDER, TIER_KEY_TRUST_DOMAIN, SECRET_LOCATION_DOMAIN = "secure_local", TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff";
+var LOWER_CONTENT_REPAIR_INTERVAL_MS, SUPERSEDED_SWEEP_SLICE_MS = 250, TIER_DOMAIN_ORDER, TIER_KEY_TRUST_DOMAIN, SECRET_LOCATION_DOMAIN = "secure_local", TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff";
 var init_tiered_store_set = __esm(() => {
   init_store_write_guard();
   init_source_ingestion_exclusions();
@@ -74732,9 +74832,10 @@ function createAnalyst(model, createOptions = {}) {
       const completion = await model.complete(request);
       let parsed = parseAnalystModelOutput(completion.text);
       if (createOptions.auditSuspiciousDrafts === true && shouldAuditPack(pack)) {
+        const unseen = amountsMissingFrom(parsed?.answer ?? "", request.prompt.replace(`Question: ${pack.question}`, ""));
         const auditCompletion = await model.complete({
           system: ANALYST_AUDIT_SYSTEM,
-          prompt: compact ? compactAuditPrompt(pack, parsed, packPromptBudgets.get(pack)) : buildAnalystAuditPrompt(pack, parsed, localOnly),
+          prompt: compact ? compactAuditPrompt(pack, parsed, packPromptBudgets.get(pack), unseen) : buildAnalystAuditPrompt(pack, parsed, localOnly, undefined, unseen),
           localOnly,
           maxOutputChars: auditMaxOutputChars,
           ...createOptions.boundedResponseSchema ? { responseSchema: analystResponseSchema(auditMaxOutputChars) } : {},
@@ -74867,9 +74968,9 @@ function formatCompactCandidate(candidate, number, versionNote, passages = candi
   return lines.join(`
 `);
 }
-function compactAuditPrompt(pack, draft, maxBytes) {
+function compactAuditPrompt(pack, draft, maxBytes, unseen = []) {
   let chars = AUDIT_CHARS_PER_CANDIDATE;
-  let prompt = buildAnalystAuditPrompt(pack, draft, false, chars);
+  let prompt = buildAnalystAuditPrompt(pack, draft, false, chars, unseen);
   if (maxBytes === undefined)
     return prompt;
   for (let attempt = 0;attempt < 6; attempt += 1) {
@@ -74878,15 +74979,58 @@ function compactAuditPrompt(pack, draft, maxBytes) {
 ${prompt}`).length;
     if (bytes <= maxBytes)
       break;
-    const passageBytes = promptEncoder.encode(prompt).length - promptEncoder.encode(buildAnalystAuditPrompt(pack, draft, false, 0)).length;
+    const passageBytes = promptEncoder.encode(prompt).length - promptEncoder.encode(buildAnalystAuditPrompt(pack, draft, false, 0, unseen)).length;
     if (passageBytes <= 0)
       break;
     chars = Math.max(0, Math.floor(chars * Math.max(0, passageBytes - (bytes - maxBytes)) / passageBytes) - 1);
-    prompt = buildAnalystAuditPrompt(pack, draft, false, chars);
+    prompt = buildAnalystAuditPrompt(pack, draft, false, chars, unseen);
   }
   return prompt;
 }
-function buildAnalystAuditPrompt(pack, draft, includeLocalPrivateProvenance, compactChars) {
+function amountReadings(amount) {
+  const number = amount.replace(/[^\d.,' ]/gu, "").trim();
+  const parts = number.split(/[.,' ]/u).filter(Boolean);
+  if (parts.length === 0)
+    return [];
+  const canonical = (whole, fraction = "") => {
+    const integer = whole.join("").replace(/^0+(?=\d)/u, "");
+    const decimals = fraction.replace(/0+$/u, "");
+    return decimals ? `${integer}.${decimals}` : integer;
+  };
+  const last = parts.at(-1);
+  const separator = number.charAt(number.length - last.length - 1);
+  const grouped = canonical(parts);
+  const decimal = canonical(parts.slice(0, -1), last);
+  if (parts.length === 1 || separator === " " || separator === "'")
+    return [grouped];
+  return last.length === 3 ? [grouped, decimal] : [decimal];
+}
+function amountsMissingFrom(rawAnswer, rawEvidence) {
+  const answer = rawAnswer.replace(/[\u00a0\u2009\u202f]/gu, " ");
+  const evidence = rawEvidence.replace(/[\u00a0\u2009\u202f]/gu, " ");
+  const seen = new Set;
+  for (const match of evidence.matchAll(/\d+(?:[ .,']\d{3}(?!\d))*(?:[.,']\d+)?/gu)) {
+    for (const reading of amountReadings(match[0]))
+      seen.add(reading);
+    const chunks = match[0].split(" ");
+    if (chunks.length > 1) {
+      for (const chunk of chunks)
+        if (/^\d+$/u.test(chunk))
+          seen.add(amountReadings(chunk)[0]);
+    }
+  }
+  const missing = [];
+  for (const match of answer.matchAll(/([€$£¥]\s?)?\d+(?:[ .,']\d{3}(?!\d))*(?:[.,']\d+)?/gu)) {
+    const amount = match[0].trim();
+    if (!match[1] && !/[.,']/u.test(amount))
+      continue;
+    const readings = amountReadings(amount);
+    if (readings.length > 0 && !readings.some((reading) => seen.has(reading)) && !missing.includes(amount))
+      missing.push(amount);
+  }
+  return missing;
+}
+function buildAnalystAuditPrompt(pack, draft, includeLocalPrivateProvenance, compactChars, unseen = []) {
   const versions = candidateVersionNotes(pack);
   const blocks = pack.candidates.map((candidate, index) => compactChars !== undefined ? formatCompactCandidate(candidate, index + 1, versions[index], compactChars > 0 ? auditChunks(candidate, pack.question, compactChars) : []) : formatAuditCandidate(candidate, index + 1, includeLocalPrivateProvenance, pack.question, versions[index]));
   return [
@@ -74906,6 +75050,7 @@ function buildAnalystAuditPrompt(pack, draft, includeLocalPrivateProvenance, com
 `),
     "",
     "Reconstruct the answer from every numbered candidate, account for every requested item, then replace the draft if it omitted, misstated, or failed to cite anything.",
+    ...unseen.length > 0 ? [`${AUDIT_UNSEEN_AMOUNTS} ${unseen.map((value) => JSON.stringify(value)).join(", ")}${AUDIT_UNSEEN_AMOUNTS_TAIL}`] : [],
     ...versionInstruction(versions),
     formatCoverage(pack)
   ].join(`
@@ -75421,7 +75566,7 @@ function coerceCitation(value) {
 function stripCodeFences2(text2) {
   return text2.replace(/```[a-zA-Z]*\n?/g, "").replace(/```/g, "").trim();
 }
-var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", VERSION_INSTRUCTION = 'Items with a "version group:" line have nearly the same text: likely versions of one document. If the question names a date, period or version, answer from that item. Otherwise answer from the newest version and say which version the value comes from by its date; where versions differ, also give the older value with its date.', ANALYST_SYSTEM, ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, AUDIT_CHARS_PER_CANDIDATE = 1200, FOLDED_ANSWER_SENTENCE_BUDGET = 5, PARALLEL_CLAIM_FRAME_OVERLAP = 0.5, ANALYST_SCHEMA_MAX_GAPS = 3, MAX_SCHEMA_CLAIM_CHARS = 80, NO_EVIDENCE_ANSWER = "I have no matching evidence for this question.", analystEvidenceFormats, packPromptBudgets, promptEncoder, AUDIT_DRAFT_HEADING = "Draft JSON:", AUDIT_EVIDENCE_HEADING = "Audit evidence:", ANALYST_EVIDENCE_SCAFFOLDING_LABELS, STOP_WORDS2, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
+var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", VERSION_INSTRUCTION = 'Items with a "version group:" line have nearly the same text: likely versions of one document. If the question names a date, period or version, answer from that item. Otherwise answer from the newest version and say which version the value comes from by its date; where versions differ, also give the older value with its date.', ANALYST_SYSTEM, ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, AUDIT_CHARS_PER_CANDIDATE = 1200, FOLDED_ANSWER_SENTENCE_BUDGET = 5, PARALLEL_CLAIM_FRAME_OVERLAP = 0.5, ANALYST_SCHEMA_MAX_GAPS = 3, MAX_SCHEMA_CLAIM_CHARS = 80, NO_EVIDENCE_ANSWER = "I have no matching evidence for this question.", analystEvidenceFormats, packPromptBudgets, promptEncoder, AUDIT_DRAFT_HEADING = "Draft JSON:", AUDIT_UNSEEN_AMOUNTS = "Amounts in the draft that appear nowhere in the evidence:", AUDIT_UNSEEN_AMOUNTS_TAIL = ". Remove each from the answer unless the answer shows how it is computed from cited values.", AUDIT_EVIDENCE_HEADING = "Audit evidence:", ANALYST_EVIDENCE_SCAFFOLDING_LABELS, STOP_WORDS2, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
 var init_analyst = __esm(() => {
   init_opsec();
   init_chunk_selection();
@@ -76163,6 +76308,12 @@ var init_parent_label = __esm(() => {
 function applySourceIndexVisibilityGate(gate, hits) {
   return gate.offThread ? gate.offThread(hits) : Promise.resolve(gate(hits));
 }
+function laneTimeoutWithinDeadline(laneTimeoutMs, deadlineAtMs, now = Date.now()) {
+  if (deadlineAtMs === undefined || !Number.isFinite(deadlineAtMs))
+    return laneTimeoutMs;
+  const left = Math.max(1, deadlineAtMs - now);
+  return Number.isFinite(laneTimeoutMs) && laneTimeoutMs > 0 ? Math.min(laneTimeoutMs, left) : left;
+}
 async function routeSourceIndexSearch(options) {
   return withKeywordRequestScope(() => routePreparedSourceIndexSearch(options));
 }
@@ -76235,7 +76386,7 @@ async function routePreparedSourceIndexSearch(options) {
     prepareSemanticMaxMs = Math.max(prepareSemanticMaxMs, semanticMs);
   }));
   const lanesStartedAt = Date.now();
-  const laneTimeoutMs = resolveLaneTimeoutMs(options.laneTimeoutMs);
+  const laneTimeoutMs = laneTimeoutWithinDeadline(resolveLaneTimeoutMs(options.laneTimeoutMs), options.searchDeadlineAtMs);
   const laneOutcomes = await Promise.all(searchableCorpora.map(async (corpus) => {
     const adapter = options.adapters[corpus.corpusId];
     const cooperativeDeadlineAtMs = cooperativeLaneDeadlineAtMs(laneTimeoutMs);
@@ -76984,7 +77135,7 @@ async function runRoutedSearches(input, retrievalLimit = input.maxResults) {
   const literalQuery = literalSearchQuery(input);
   const pendingPlan = input.queryPlanner ? startQueryPlanner(input.queryPlanner, input.question) : undefined;
   const budget = searchBudget(input);
-  const literalRun = await runRoutedSearch(input, literalQuery, 1, retrievalLimit, budget.firstLaneTimeoutMs());
+  const literalRun = await runRoutedSearch(input, literalQuery, 1, retrievalLimit, budget.firstLaneTimeoutMs(), budget.deadlineAtMs);
   if (!pendingPlan)
     return literalRun;
   if (isStrongLiteralRun(literalRun, input.maxResults)) {
@@ -77005,7 +77156,7 @@ async function runRoutedSearches(input, retrievalLimit = input.maxResults) {
       recordSourceAnswerQueryPlannerDisposition("search_budget_spent");
       break;
     }
-    runs.push(await runRoutedSearch(input, query, runs.length + 1, retrievalLimit, laneTimeoutMs));
+    runs.push(await runRoutedSearch(input, query, runs.length + 1, retrievalLimit, laneTimeoutMs, budget.deadlineAtMs));
   }
   if (runs.length === 1)
     return literalRun;
@@ -77052,6 +77203,7 @@ function searchBudget(input) {
   const left = () => Math.max(1, total - (Date.now() - startedAt));
   const unbounded = !Number.isFinite(total) || total <= 0;
   return {
+    deadlineAtMs: unbounded ? undefined : startedAt + total,
     firstLaneTimeoutMs: () => unbounded ? lane : cut(left()),
     laneTimeoutMs() {
       if (unbounded)
@@ -77060,7 +77212,7 @@ function searchBudget(input) {
     }
   };
 }
-function runRoutedSearch(input, query, ordinal, maxResults, laneTimeoutMs) {
+function runRoutedSearch(input, query, ordinal, maxResults, laneTimeoutMs, searchDeadlineAtMs) {
   return observeSourceAnswerRoutedQuery(ordinal, () => routeSourceIndexSearch({
     registry: input.registry,
     adapters: input.adapters,
@@ -77072,6 +77224,7 @@ function runRoutedSearch(input, query, ordinal, maxResults, laneTimeoutMs) {
       ...questionHasTemporalIntent(input) ? { temporalIntent: true } : {}
     },
     laneTimeoutMs,
+    ...searchDeadlineAtMs !== undefined ? { searchDeadlineAtMs } : {},
     ...input.visibilityGate ? { visibilityGate: input.visibilityGate } : {}
   }));
 }
@@ -86207,7 +86360,7 @@ function quoted(value) {
   const words2 = text2(value);
   return words2 ? `"${words2.trim()}"` : undefined;
 }
-function plural(count, one) {
+function plural2(count, one) {
   return `${count} ${count === 1 ? one : `${one}s`}`;
 }
 function amountOf(message2) {
@@ -86364,7 +86517,7 @@ function telegramServiceContent(message2) {
     case "boost_apply": {
       const boosts = typeof message2.boosts === "number" ? message2.boosts : undefined;
       use("boosts");
-      sentence = `${who} boosted the chat${boosts !== undefined ? ` with ${plural(boosts, "boost")}` : ""}.`;
+      sentence = `${who} boosted the chat${boosts !== undefined ? ` with ${plural2(boosts, "boost")}` : ""}.`;
       break;
     }
     default: {
@@ -94118,10 +94271,18 @@ class LocalFileExtractionJobStore {
     }
     const unsupportedRefs = [...unsupportedByItem.values()];
     let unsupportedKindItems = 0;
+    let picturesNotReadHereItems = 0;
     for (let start = 0;start < unsupportedRefs.length; start += SCOPED_READINESS_CURRENT_SLICE) {
       const slice = unsupportedRefs.slice(start, start + SCOPED_READINESS_CURRENT_SLICE);
       const answers = options.currentItems ? options.currentItems(slice) : slice.map((ref) => options.currentItem?.(ref) ?? true);
-      unsupportedKindItems += slice.filter((_ref, index) => answers[index] === true).length;
+      for (let index = 0;index < slice.length; index += 1) {
+        if (answers[index] !== true)
+          continue;
+        if (slice[index].mimeType?.startsWith("image/"))
+          picturesNotReadHereItems += 1;
+        else
+          unsupportedKindItems += 1;
+      }
       yield;
     }
     const byItem = new Map;
@@ -94175,6 +94336,7 @@ class LocalFileExtractionJobStore {
       failedActionableJobs,
       unreadableItems,
       unsupportedKindItems,
+      picturesNotReadHereItems,
       retryableDueJobs: retryableDueRows.length,
       ...oldestActionableAt ? { oldestActionableAt } : {},
       ...newestTerminalProgressAt ? { newestTerminalProgressAt } : {}
@@ -94183,11 +94345,14 @@ class LocalFileExtractionJobStore {
   corpusReadiness(corpusId, now = new Date, options = {}) {
     const corpus = requireKeyPart(corpusId, "corpusId");
     const unsupported = unroutableItemsTableExists(this.db) ? this.db.query(`
-        SELECT COUNT(*) AS items FROM extraction_unroutable_items u
+        SELECT
+          SUM(CASE WHEN u.mime_type GLOB 'image/*' THEN 0 ELSE 1 END) AS items,
+          SUM(CASE WHEN u.mime_type GLOB 'image/*' THEN 1 ELSE 0 END) AS pictures
+        FROM extraction_unroutable_items u
         WHERE corpus_id = ? AND NOT EXISTS (SELECT 1 FROM extraction_jobs j
           WHERE j.corpus_id = u.corpus_id AND j.local_item_id = u.local_item_id
             AND j.source_version IS u.source_version)
-      `).get(corpus) : { items: 0 };
+      `).get(corpus) : { items: 0, pictures: 0 };
     const itemRetry = terminalRetryPathSql("x", options.terminalRetryPaths ?? []);
     const pendingRetry = terminalRetryPathSql("pending", options.terminalRetryPaths ?? []);
     const items = this.db.query(`
@@ -94297,7 +94462,8 @@ class LocalFileExtractionJobStore {
       failedTerminalJobs: jobCount("failed_terminal_jobs"),
       failedActionableJobs: jobCount("failed_actionable_jobs"),
       unreadableItems: unreadable.items.length,
-      unsupportedKindItems: unsupported.items,
+      unsupportedKindItems: count(unsupported.items),
+      picturesNotReadHereItems: count(unsupported.pictures),
       retryableDueJobs: jobCount("retryable_due_jobs"),
       ...typeof jobs?.oldest_actionable_at === "string" ? { oldestActionableAt: jobs.oldest_actionable_at } : {},
       ...typeof jobs?.newest_terminal_progress_at === "string" ? { newestTerminalProgressAt: jobs.newest_terminal_progress_at } : {}
@@ -105728,6 +105894,9 @@ function createSourceIndexStatusHandler(options = {}) {
         if (status.configured && readiness?.counts[UNSUPPORTED_KIND_COUNT_KEY] !== undefined) {
           status.counts[UNSUPPORTED_KIND_COUNT_KEY] = readiness.counts[UNSUPPORTED_KIND_COUNT_KEY];
         }
+        if (status.configured && readiness?.counts[PICTURES_NOT_READ_HERE_COUNT_KEY] !== undefined) {
+          status.counts[PICTURES_NOT_READ_HERE_COUNT_KEY] = readiness.counts[PICTURES_NOT_READ_HERE_COUNT_KEY];
+        }
         if (status.configured && request.include_readiness_ledger === true && options.unreadableCount) {
           const unreadable = options.unreadableCount(corpus.corpusId);
           if (unreadable !== undefined)
@@ -107303,6 +107472,10 @@ function aggregateCoverage(cards) {
     const value = card.coverage.unsupported_kind_items;
     return value === undefined ? sum2 : (sum2 ?? 0) + value;
   }, undefined);
+  const picturesNotReadHere = cards.reduce((sum2, card) => {
+    const value = card.coverage.pictures_not_read_here_items;
+    return value === undefined ? sum2 : (sum2 ?? 0) + value;
+  }, undefined);
   const required3 = cards.filter((card) => card.embedding_required !== false);
   const exempt = cards.filter((card) => card.embedding_required === false);
   const measuring = required3.filter((card) => card.coverage.embedded_files !== undefined);
@@ -107332,6 +107505,7 @@ function aggregateCoverage(cards) {
     ...cards.some((card) => card.coverage.settled_unreadable_items !== undefined) ? { settled_unreadable_items: cards.reduce((sum2, card) => sum2 + (card.coverage.settled_unreadable_items ?? 0), 0) } : {},
     ...unreadable !== undefined ? { unreadable_items: unreadable } : {},
     ...unsupportedKind !== undefined ? { unsupported_kind_items: unsupportedKind } : {},
+    ...picturesNotReadHere !== undefined ? { pictures_not_read_here_items: picturesNotReadHere } : {},
     ...cards.some((card) => card.coverage.stored_items !== undefined) ? { stored_items: cards.reduce((sum2, card) => sum2 + (card.coverage.stored_items ?? card.coverage.indexed_items), 0) } : {}
   });
 }
@@ -108024,6 +108198,7 @@ function coverageFromCounts(counts) {
   const eligibleItems = corpusAnswerReadyEligibleItems(counts, indexedItems);
   const unreadable = counts[UNREADABLE_ITEMS_COUNT_KEY];
   const unsupportedKind = counts[UNSUPPORTED_KIND_COUNT_KEY];
+  const picturesNotReadHere = counts[PICTURES_NOT_READ_HERE_COUNT_KEY];
   return {
     indexed_items: corpusOwnIndexedItems(counts, indexedItems),
     content_ready_items: contentReadyItems,
@@ -108035,6 +108210,7 @@ function coverageFromCounts(counts) {
     ...counts.settled_unreadable_items === undefined ? {} : { settled_unreadable_items: counts.settled_unreadable_items },
     ...unreadable !== undefined ? { unreadable_items: Math.max(0, Math.trunc(unreadable)) } : {},
     ...unsupportedKind !== undefined ? { unsupported_kind_items: Math.max(0, Math.trunc(unsupportedKind)) } : {},
+    ...picturesNotReadHere !== undefined ? { pictures_not_read_here_items: Math.max(0, Math.trunc(picturesNotReadHere)) } : {},
     ...counts.stored_items === undefined ? {} : { stored_items: counts.stored_items }
   };
 }
@@ -160267,6 +160443,7 @@ function readinessSnapshot(readiness) {
       extraction_jobs_failed_actionable: readiness.failedActionableJobs,
       [UNREADABLE_ITEMS_COUNT_KEY]: readiness.unreadableItems,
       [UNSUPPORTED_KIND_COUNT_KEY]: readiness.unsupportedKindItems,
+      [PICTURES_NOT_READ_HERE_COUNT_KEY]: readiness.picturesNotReadHereItems,
       extraction_jobs_retryable_due_actionable: readiness.retryableDueJobs
     },
     contentExtractionThroughput: {
@@ -162624,7 +162801,7 @@ function mountDashboardController(options) {
       const members = chats.filter((chat) => kind === "other" ? !known.has(chat.kind) : chat.kind === kind);
       const recent = members.some((chat) => chat.at);
       members.sort((a, b) => recent ? b.at.localeCompare(a.at) || a.title.localeCompare(b.title) : a.title.localeCompare(b.title));
-      const [label, plural2] = CHAT_KIND_LABELS[kind] ?? ["Other chosen chats", "chats"];
+      const [label, plural3] = CHAT_KIND_LABELS[kind] ?? ["Other chosen chats", "chats"];
       const group = make("div", "kindgroup");
       group.dataset.kindGroup = kind;
       const row = make("div", "kindrow");
@@ -162639,17 +162816,17 @@ function mountDashboardController(options) {
       title.append(name, note);
       open5.append(title, make("span", "kindchev", "›"));
       row.append(open5);
-      const toggle = kind === "other" ? undefined : switchInput("chatKind", kind, whole || kindsOn.has(kind), `All ${plural2}, including new ones`);
+      const toggle = kind === "other" ? undefined : switchInput("chatKind", kind, whole || kindsOn.has(kind), `All ${plural3}, including new ones`);
       if (toggle)
         row.append(toggle);
       const list = make("div", "kindlist");
       list.hidden = true;
       const search = make("input", "kindsearch");
       search.type = "search";
-      search.placeholder = `Search ${plural2}`;
-      search.setAttribute("aria-label", `Search ${plural2}`);
+      search.placeholder = `Search ${plural3}`;
+      search.setAttribute("aria-label", `Search ${plural3}`);
       search.dataset.kindSearch = "";
-      list.append(search, make("p", "kindcap", members.length ? recent ? "Most recent first" : "By name" : `No ${plural2} yet. New ones are read when this kind is on.`));
+      list.append(search, make("p", "kindcap", members.length ? recent ? "Most recent first" : "By name" : `No ${plural3} yet. New ones are read when this kind is on.`));
       const lines = make("fieldset", "kindlines");
       const boxes = [];
       for (const chat of members) {
@@ -162671,14 +162848,14 @@ function mountDashboardController(options) {
     }
     const refresh = () => {
       for (const group of groups) {
-        const [, plural2] = CHAT_KIND_LABELS[group.kind] ?? ["", "chats"];
+        const [, plural3] = CHAT_KIND_LABELS[group.kind] ?? ["", "chats"];
         const on = group.toggle?.checked === true;
         const chosen = group.boxes.filter((box) => box.checked).length;
         const lines = group.list.querySelector("fieldset");
         if (lines)
           lines.disabled = on;
         group.note.classList.toggle("partial", !on && chosen > 0);
-        group.note.textContent = on ? `All ${plural2}, including new ones` : !group.toggle ? `${chosen} chosen` : chosen > 0 ? `${chosen} of ${group.boxes.length} chosen · new ${plural2} are not read` : `Off · new ${plural2} are not read`;
+        group.note.textContent = on ? `All ${plural3}, including new ones` : !group.toggle ? `${chosen} chosen` : chosen > 0 ? `${chosen} of ${group.boxes.length} chosen · new ${plural3} are not read` : `Off · new ${plural3} are not read`;
       }
     };
     form.addEventListener("change", (event) => {
@@ -170385,7 +170562,7 @@ function chatgptPickerProgram(kit) {
   function lowerFirst2(value2) {
     return value2 ? value2.charAt(0).toLowerCase() + value2.slice(1) : value2;
   }
-  function plural2(words2, n) {
+  function plural3(words2, n) {
     return fill2(n === 1 ? words2.one : words2.many, { n: kit.count(n) });
   }
   function mailSummary() {
@@ -170393,9 +170570,9 @@ function chatgptPickerProgram(kit) {
     const skipped2 = draft.skipped_categories.length + draft.skipped_labels.length;
     return [
       fill2(Q.mailSummaryWindow, { window: lowerFirst2(Q.mailWindows[draft.window]) }),
-      plural2(Q.mailSummarySkipped, skipped2),
-      plural2(Q.mailSummaryPrivate, draft.always_private_senders.length),
-      plural2(Q.mailSummarySkipSenders, draft.skip_senders.length)
+      plural3(Q.mailSummarySkipped, skipped2),
+      plural3(Q.mailSummaryPrivate, draft.always_private_senders.length),
+      plural3(Q.mailSummarySkipSenders, draft.skip_senders.length)
     ].join(" · ");
   }
   function addSender(which, sender, focus) {
@@ -218524,6 +218701,7 @@ function scrubCard(definition, card) {
       ...finite(card.coverage.settled_unreadable_items) ? { settled_unreadable_items: count(card.coverage.settled_unreadable_items) } : {},
       ...finite(card.coverage.unreadable_items) ? { unreadable_items: count(card.coverage.unreadable_items) } : {},
       ...finite(card.coverage.unsupported_kind_items) ? { unsupported_kind_items: count(card.coverage.unsupported_kind_items) } : {},
+      ...finite(card.coverage.pictures_not_read_here_items) ? { pictures_not_read_here_items: count(card.coverage.pictures_not_read_here_items) } : {},
       ...finite(card.coverage.stored_items) ? { stored_items: count(card.coverage.stored_items) } : {}
     },
     ingestion_health: {
@@ -221756,7 +221934,7 @@ function searchToolResult(raw, options = {}) {
   const lines2 = [];
   if (evidence.length === 0) {
     if (!panelActive) {
-      lines2.push(options.noSourcesConnected ? NO_SOURCES_CONNECTED_TEXT : `Olympus found no Public or Personal evidence for this question in ${plural2(coverage.searchedSources, "searched source")}.`);
+      lines2.push(options.noSourcesConnected ? NO_SOURCES_CONNECTED_TEXT : `Olympus found no Public or Personal evidence for this question in ${plural3(coverage.searchedSources, "searched source")}.`);
     }
   } else {
     lines2.push(panelActive ? PANEL_SEARCH_INSTRUCTION : SEARCH_INSTRUCTION, "");
@@ -221787,7 +221965,7 @@ function terseCoverageLine(coverage) {
   ].filter(Boolean);
   return parts.length > 0 ? `Coverage, to mention only if the user asks why something is missing or the answer depends on it: ${parts.join(", ")}.` : undefined;
 }
-function plural2(count2, noun) {
+function plural3(count2, noun) {
   return `${count2} ${noun}${count2 === 1 ? "" : "s"}`;
 }
 function copyPrivateMatch(match) {

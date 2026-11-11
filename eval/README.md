@@ -203,6 +203,9 @@ local Dropbox index and a reachable Argus lane:
    and `answerValueTokensUnmatchedInPrompt` says whether the prompt the model
    was sent held it. A token in the prompt came from another seat. A token in
    neither the prompt nor any seat was not read anywhere.
+   When the answer stage sent an audit call, `auditNamedAmounts` counts the
+   draft amounts its note named as in no seat (the amounts themselves are
+   never reported) and `auditPromptBytes` gives the audit prompt's size.
    The shared Analyst also caps model output at 1,600 characters by default so
    local eval questions fail or answer quickly instead of generating long JSON.
 

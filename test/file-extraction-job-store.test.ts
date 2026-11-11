@@ -138,8 +138,8 @@ describe('extraction job store: module identity', () => {
     } finally { db.close(); }
     // A read-only handle on such a store counts none rather than failing.
     const reader = new LocalFileExtractionJobStore(dbPath, { readonly: true });
-    expect(reader.corpusReadiness(LANE.corpusId)).toMatchObject({ unsupportedKindItems: 0, queuedJobs: 1 });
-    expect(reader.scopedReadiness([LANE]).unsupportedKindItems).toBe(0);
+    expect(reader.corpusReadiness(LANE.corpusId)).toMatchObject({ unsupportedKindItems: 0, picturesNotReadHereItems: 0, queuedJobs: 1 });
+    expect(reader.scopedReadiness([LANE])).toMatchObject({ unsupportedKindItems: 0, picturesNotReadHereItems: 0 });
     reader.close();
     const upgraded = new LocalFileExtractionJobStore(dbPath);
     openStores.push(upgraded);
@@ -1040,6 +1040,27 @@ describe('extraction job store: janitor', () => {
 // for the same reason the queue does: the corpus id partitions it, and nothing
 // in it names a provider.
 describe('extraction job store: corpus readiness', () => {
+  test('splits unroutable pictures from unsupported kinds and filters stale pictures on both scoped paths', async () => {
+    const { store } = newStore();
+    store.recordUnroutable([
+      ref('picture', { mimeType: 'image/jpeg' }),
+      ref('document', { mimeType: 'application/msword' }),
+    ]);
+    expect(store.corpusReadiness(LANE.corpusId)).toMatchObject({
+      picturesNotReadHereItems: 1, unsupportedKindItems: 1,
+    });
+    expect(store.scopedReadiness([LANE, LANE])).toMatchObject({
+      picturesNotReadHereItems: 1, unsupportedKindItems: 1,
+    });
+    expect(store.scopedReadiness([LANE], {
+      currentItem: (item) => item.providerItemId !== 'picture',
+    })).toMatchObject({ picturesNotReadHereItems: 0, unsupportedKindItems: 1 });
+    expect(await store.scopedReadinessInTurns([LANE], {
+      currentItems: (items) => items.map((item) => item.providerItemId !== 'picture'),
+      turn: async () => {},
+    })).toMatchObject({ picturesNotReadHereItems: 0, unsupportedKindItems: 1 });
+  });
+
   test('a job for an older version does not hide the current version of an unsupported kind', () => {
     const { store } = newStore();
     enqueueOne(store, 'changed');
@@ -1131,14 +1152,15 @@ describe('extraction job store: corpus readiness', () => {
     expect(store.corpusReadiness('secure_local.files.other').unsupportedKindItems).toBe(1);
   });
 
-  test('the readiness ledger publishes unsupported kinds without turning them into policy exits', () => {
+  test('the readiness ledger publishes unsupported kinds and pictures without turning them into policy exits', () => {
     const { store } = newStore();
-    store.recordUnroutable([ref('unsupported')]);
+    store.recordUnroutable([ref('unsupported'), ref('picture', { mimeType: 'image/jpeg' })]);
     const unscoped = createExtractionReadinessLedger(store).snapshotForCorpus(LANE.corpusId);
     const scoped = createExtractionReadinessLedger(store, { lanesForCorpus: () => [LANE] }).snapshotForCorpus(LANE.corpusId);
     for (const snapshot of [unscoped, scoped]) {
       expect(snapshot?.counts).toMatchObject({
         extraction_items_unsupported_kind: 1,
+        extraction_items_pictures_not_read_here: 1,
         extraction_items_unreadable: 0,
         qa_metadata_only_expected: 0,
         qa_blocked_policy: 0,
@@ -1207,6 +1229,7 @@ describe('extraction job store: corpus readiness', () => {
       failedActionableJobs: 0,
       unreadableItems: 0,
       unsupportedKindItems: 0,
+      picturesNotReadHereItems: 0,
       retryableDueJobs: 0,
     });
   });
@@ -1302,6 +1325,7 @@ describe('extraction job store: corpus readiness', () => {
       extraction_jobs_failed_actionable: 0,
       extraction_items_unreadable: 1,
       extraction_items_unsupported_kind: 0,
+      extraction_items_pictures_not_read_here: 0,
       extraction_jobs_retryable_due_actionable: 0,
     });
   });

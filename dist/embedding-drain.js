@@ -15290,6 +15290,15 @@ function tierSnifferInputHash(pass, signals, text2, parentContext) {
     ...context2 ? [context2] : []
   ])).digest("hex");
 }
+var NAMES_INPUT_REASON_PREFIX = "metadata:names_input:";
+var NAMES_INPUT_KEYS = ["title", "path", "folderKeys", "labels", "sender"];
+function namesInputReason(signals, parentContext) {
+  const keys = NAMES_INPUT_KEYS.filter((key2) => {
+    const value = signals[key2];
+    return Array.isArray(value) ? value.length > 0 : value !== undefined;
+  });
+  return `${NAMES_INPUT_REASON_PREFIX}${keys.join(",")}:${tierSnifferInputHash("metadata", signals, undefined, parentContext)}`;
+}
 function itemHasNonTextContent(item) {
   if (item.metadata.textComplete !== true || item.content.kind !== "text" || item.deferredBytes || item.identity.parent || item.identity.providerFileId || !textOnlyMime(item.mimeType))
     return true;
@@ -15336,6 +15345,8 @@ function withPublicRetired(decision) {
 }
 function classifyItemTiers(input, options = {}) {
   const decision = classifyItemTiersWithPublic(input, options);
+  if (decision.contentTier !== "secrets")
+    decision.reasons.push(namesInputReason(input.signals, input.parentContext));
   if (input.text !== undefined && decision.contentTier !== "secrets") {
     if (input.hasNonTextContent !== true && textOnlyMime(input.mimeType))
       decision.reasons.push("content:text_only");
@@ -17284,6 +17295,16 @@ class TierLedger {
     const rows = this.db.query(`SELECT * FROM tier_items
       ${after.length ? "WHERE (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)" : ""}
       ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ?`).all(...after, Math.max(1, Math.min(options.limit, 500)));
+    return rows.map(recordFromRow);
+  }
+  listSupersededItemWindow(options) {
+    const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : [];
+    const rows = this.db.query(`SELECT * FROM tier_items i
+      WHERE ${after.length ? "(i.provider, i.account_scope, i.conversation_key, i.provider_item_id) > (?, ?, ?, ?) AND" : ""}
+        EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = i.provider AND c.account_scope = i.account_scope
+          AND c.conversation_key = i.conversation_key AND c.provider_item_id = i.provider_item_id
+          AND c.copy_state = 'superseded')
+      ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id LIMIT ?`).all(...after, Math.max(1, Math.min(options.limit, 500)));
     return rows.map(recordFromRow);
   }
   listLowerContentLeftovers(options) {
@@ -19823,7 +19844,7 @@ function* profileSteps(db) {
     rows = yield { sql: `${live} ORDER BY c.rowid LIMIT ${SAMPLE_LIMIT}`, params: [], mode: "all" };
   } else {
     const step = maxRowid / SAMPLE_TARGET;
-    const ids = Array.from({ length: SAMPLE_TARGET }, (_, k) => Math.max(1, Math.floor((k + 1) * step)));
+    const ids = Array.from({ length: SAMPLE_TARGET }, (_, k) => Math.min(maxRowid, Math.max(1, Math.floor(k * step + k * 0.6180339887 % 1 * step) + 1)));
     rows = [];
     for (let at = 0;at < ids.length; at += READ_BATCH) {
       const batch = ids.slice(at, at + READ_BATCH);

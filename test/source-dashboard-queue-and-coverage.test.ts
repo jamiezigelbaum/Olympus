@@ -15,15 +15,17 @@ import { buildSourceIngestionLedgerSnapshot } from '../src/workers/source-ingest
 const NOW = new Date('2026-07-02T12:00:00.000Z');
 
 describe('dashboard queue counts', () => {
-  test('sums unsupported kinds across corpora without excluding them or raising attention', () => {
+  test('sums unsupported kinds and pictures across corpora without excluding them or raising attention', () => {
     const status = statusWithDropbox({
       files: 200, qa_pass: 150, qa_metadata_only_expected: 20,
       extraction_items_unreadable: 1, extraction_items_unsupported_kind: 29,
+      extraction_items_pictures_not_read_here: 3,
     });
     status.corpora.push({
       ...status.corpora[0]!, corpus_id: 'internal.dropbox.files', trust_domain: 'internal',
       counts: { files: 100, qa_pass: 70, qa_metadata_only_expected: 10,
-        extraction_items_unreadable: 1, extraction_items_unsupported_kind: 17 },
+        extraction_items_unreadable: 1, extraction_items_unsupported_kind: 17,
+        extraction_items_pictures_not_read_here: 2 },
     } as unknown as SourceIndexStatusResult['corpora'][number]);
     const view = buildSourceDashboardViewModel({
       sourceIndexStatus: status,
@@ -33,11 +35,28 @@ describe('dashboard queue counts', () => {
     const card = view.sources.find((source) => source.source_id === 'dropbox.files');
     expect(card?.coverage).toMatchObject({
       indexed_items: 300, content_ready_items: 220, not_read_by_policy_items: 30,
-      unreadable_items: 2, unsupported_kind_items: 46, needs_review_items: 0,
+      unreadable_items: 2, unsupported_kind_items: 46, pictures_not_read_here_items: 5, needs_review_items: 0,
     });
     expect(card?.ingestion_health.coverage_percent).toBe(81.5);
     expect(card?.queue_health.needs_attention).toBe(0);
     expect(card?.answer_readiness.state).toBe('ready');
+  });
+
+  test('carries the picture count from one corpus into coverage without changing the denominator', () => {
+    const view = buildSourceDashboardViewModel({
+      sourceIndexStatus: statusWithDropbox({
+        files: 100, qa_pass: 60, qa_metadata_only_expected: 10,
+        extraction_items_pictures_not_read_here: 5,
+      }),
+      sovereigntyEngine: fixtureSovereigntyEngine(),
+      connectedHandleRegistry: dropboxHandleRegistry(), now: NOW,
+    });
+    const card = view.sources.find((source) => source.source_id === 'dropbox.files');
+    expect(card?.coverage).toMatchObject({
+      indexed_items: 100, content_ready_items: 60, not_read_by_policy_items: 10,
+      pictures_not_read_here_items: 5,
+    });
+    expect(card?.ingestion_health.coverage_percent).toBe(66.7);
   });
 
   test('reads the live gauge instead of adding the scheduler last-run deltas to it', () => {

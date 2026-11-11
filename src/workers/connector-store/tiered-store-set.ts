@@ -129,6 +129,8 @@ import { flushTierMoveNotes, moveTieredItem, type TierMoveOptions } from './tier
 import { automaticTierMoveOptions, automaticTierMovesAllowed } from './tier-auto-move.ts';
 
 export const LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60_000;
+/** Time the one-time superseded-copy sweep may take on each maintenance call. */
+export const SUPERSEDED_SWEEP_SLICE_MS = 250;
 import { rehomePrivateTierRows, type TierRowRehomeReport } from './tier-row-rehome.ts';
 import { sweepOwnerRuleRaises } from './tier-rules-sweep.ts';
 import { applyOwnerOverrides } from './tier-override-settle.ts';
@@ -584,9 +586,20 @@ export class TieredStoreSet {
     return store;
   }
 
-  /** Startup plus a five-minute maintenance cadence; completed sweeps idle durably. */
+  /**
+   * Startup plus a five-minute maintenance cadence; completed sweeps idle
+   * durably. The one-time superseded-copy sweep takes a short slice on every
+   * call instead, so it finishes on a large install in hours.
+   */
   repairLowerContent(options: { nowMs?: number; embeddingLedger?: TierMoveOptions['embeddingLedger'] } = {}): Promise<void> {
     if (this.lowerContentRepair) return this.lowerContentRepair;
+    try {
+      sweepAutomaticSupersededCopies(this, { budgetMs: SUPERSEDED_SWEEP_SLICE_MS,
+        ...(options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {}),
+      });
+    } catch {
+      // The sweep keeps its own cursor; the next call retries.
+    }
     const now = options.nowMs ?? Date.now();
     if (now - this.lastLowerContentRepairAt < LOWER_CONTENT_REPAIR_INTERVAL_MS) return Promise.resolve();
     this.lastLowerContentRepairAt = now;
@@ -596,9 +609,6 @@ export class TieredStoreSet {
         log: (corpus, copies, chunks) => {
           if (chunks > 0) console.info(`[tier-content-purge] corpus=${corpus} copies=${copies} chunks=${chunks}`);
         },
-      });
-      sweepAutomaticSupersededCopies(this, {
-        ...(options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {}),
       });
       const pending = flushTierMoveNotes(this.ledger).catch(() => {
         // The flip's durable note obligation stays pending for maintenance.

@@ -420,11 +420,17 @@ export function createAnalyst(model: AnalystModel, createOptions: CreateAnalystO
       let parsed = parseAnalystModelOutput(completion.text);
 
       if (createOptions.auditSuspiciousDrafts === true && shouldAuditPack(pack)) {
+        // Amounts the draft states that the evidence it was written from
+        // never shows: named to the audit, which keeps one only when the
+        // answer computes it from cited values.
+        // The question is left out: repeating a value the question proposes
+        // does not make it evidence.
+        const unseen = amountsMissingFrom(parsed?.answer ?? '', request.prompt.replace(`Question: ${pack.question}`, ''));
         const auditCompletion = await model.complete({
           system: ANALYST_AUDIT_SYSTEM,
           prompt: compact
-            ? compactAuditPrompt(pack, parsed, packPromptBudgets.get(pack))
-            : buildAnalystAuditPrompt(pack, parsed, localOnly),
+            ? compactAuditPrompt(pack, parsed, packPromptBudgets.get(pack), unseen)
+            : buildAnalystAuditPrompt(pack, parsed, localOnly, undefined, unseen),
           localOnly,
           maxOutputChars: auditMaxOutputChars,
           ...(createOptions.boundedResponseSchema ? { responseSchema: analystResponseSchema(auditMaxOutputChars) } : {}),
@@ -611,32 +617,114 @@ function formatCompactCandidate(
  * take their room from the passages, shrunk evenly until the whole audit call
  * fits. A pack with no recorded budget keeps the audit's full passages.
  */
-function compactAuditPrompt(pack: EvidencePack, draft: ParsedModelOutput | null, maxBytes: number | undefined): string {
+function compactAuditPrompt(pack: EvidencePack, draft: ParsedModelOutput | null, maxBytes: number | undefined, unseen: readonly string[] = []): string {
   let chars = AUDIT_CHARS_PER_CANDIDATE;
-  let prompt = buildAnalystAuditPrompt(pack, draft, false, chars);
+  let prompt = buildAnalystAuditPrompt(pack, draft, false, chars, unseen);
   if (maxBytes === undefined) return prompt;
   for (let attempt = 0; attempt < 6; attempt += 1) {
     const bytes = promptEncoder.encode(`${ANALYST_AUDIT_SYSTEM}\n\n${prompt}`).length;
     if (bytes <= maxBytes) break;
-    const passageBytes = promptEncoder.encode(prompt).length - promptEncoder.encode(buildAnalystAuditPrompt(pack, draft, false, 0)).length;
+    const passageBytes = promptEncoder.encode(prompt).length - promptEncoder.encode(buildAnalystAuditPrompt(pack, draft, false, 0, unseen)).length;
     if (passageBytes <= 0) break;
     chars = Math.max(0, Math.floor(chars * Math.max(0, passageBytes - (bytes - maxBytes)) / passageBytes) - 1);
-    prompt = buildAnalystAuditPrompt(pack, draft, false, chars);
+    prompt = buildAnalystAuditPrompt(pack, draft, false, chars, unseen);
   }
   return prompt;
 }
 
 const AUDIT_DRAFT_HEADING = 'Draft JSON:';
+const AUDIT_UNSEEN_AMOUNTS = 'Amounts in the draft that appear nowhere in the evidence:';
+const AUDIT_UNSEEN_AMOUNTS_TAIL = '. Remove each from the answer unless the answer shows how it is computed from cited values.';
+
+// Separator style differs between a draft and its source ("1,240.50" against
+// "1.240,50"), so an amount is compared by value: its whole digits, then its
+// fraction without padding zeros ("12.50" and "12.5" are one amount; "800"
+// and "8" are not). A last separator before exactly three digits may group
+// thousands or mark decimals ("1,240"), so such an amount has both readings.
+// Written number shapes only: no question semantics.
+function amountReadings(amount: string): string[] {
+  const number = amount.replace(/[^\d.,' ]/gu, '').trim();
+  const parts = number.split(/[.,' ]/u).filter(Boolean);
+  if (parts.length === 0) return [];
+  const canonical = (whole: readonly string[], fraction = '') => {
+    const integer = whole.join('').replace(/^0+(?=\d)/u, '');
+    const decimals = fraction.replace(/0+$/u, '');
+    return decimals ? `${integer}.${decimals}` : integer;
+  };
+  const last = parts.at(-1)!;
+  const separator = number.charAt(number.length - last.length - 1);
+  const grouped = canonical(parts);
+  const decimal = canonical(parts.slice(0, -1), last);
+  if (parts.length === 1 || separator === ' ' || separator === "'") return [grouped];
+  return last.length === 3 ? [grouped, decimal] : [decimal];
+}
+
+/**
+ * The draft's amounts whose value the evidence text never shows as an amount
+ * or a number. An amount is digits with a grouping or decimal separator
+ * between them, or next to a currency sign ("1,240.50", "12,5", "1 240,50",
+ * "$312"); plain counts, seat markers and years are not amounts. On both sides
+ * a space groups thousands only before exactly three digits, and such a number
+ * is read whole ("1 240,50" is 1240.50, never 240.50). Its space-separated
+ * whole-number chunks also count as evidence numbers, so "2024 100" still
+ * shows 2024. Written number shapes only: no question semantics.
+ */
+export function amountsMissingFrom(rawAnswer: string, rawEvidence: string): string[] {
+  // A no-break or thin space groups digits like a plain space.
+  const answer = rawAnswer.replace(/[\u00a0\u2009\u202f]/gu, ' ');
+  const evidence = rawEvidence.replace(/[\u00a0\u2009\u202f]/gu, ' ');
+  const seen = new Set<string>();
+  // Grouping (a space, comma, point or apostrophe before exactly three
+  // digits) comes before one optional fraction; nothing groups after it, so
+  // "12.50 100" is 12.50 and a count of 100.
+  for (const match of evidence.matchAll(/\d+(?:[ .,']\d{3}(?!\d))*(?:[.,']\d+)?/gu)) {
+    for (const reading of amountReadings(match[0])) seen.add(reading);
+    const chunks = match[0].split(' ');
+    if (chunks.length > 1) {
+      for (const chunk of chunks) if (/^\d+$/u.test(chunk)) seen.add(amountReadings(chunk)[0]!);
+    }
+  }
+  const missing: string[] = [];
+  for (const match of answer.matchAll(/([€$£¥]\s?)?\d+(?:[ .,']\d{3}(?!\d))*(?:[.,']\d+)?/gu)) {
+    const amount = match[0].trim();
+    if (!match[1] && !/[.,']/u.test(amount)) continue;
+    const readings = amountReadings(amount);
+    if (readings.length > 0 && !readings.some((reading) => seen.has(reading)) && !missing.includes(amount)) missing.push(amount);
+  }
+  return missing;
+}
+
 const AUDIT_EVIDENCE_HEADING = 'Audit evidence:';
 
 /**
- * A prompt as sent, without the audit's quote of the model's own draft: what
- * the model was given as evidence and instructions only.
+ * A prompt as sent, without the audit's quote of the model's own draft or the
+ * note naming the draft's unseen amounts: what the model was given as
+ * evidence and instructions only.
  */
 export function analystPromptWithoutDraft(prompt: string): string {
   const draft = prompt.indexOf(`\n${AUDIT_DRAFT_HEADING}\n`);
   const evidence = prompt.indexOf(`\n${AUDIT_EVIDENCE_HEADING}\n`, draft + 1);
-  return draft < 0 || evidence < 0 ? prompt : prompt.slice(0, draft) + prompt.slice(evidence);
+  const withoutDraft = draft < 0 || evidence < 0 ? prompt : prompt.slice(0, draft) + prompt.slice(evidence);
+  return withoutDraft.split('\n').filter((line) => !line.startsWith(AUDIT_UNSEEN_AMOUNTS)).join('\n');
+}
+
+/**
+ * For an audit prompt, how many amounts its note names as appearing nowhere
+ * in the evidence (0 without a note); undefined for any other prompt. A count
+ * only, for reports that must not carry the amounts.
+ */
+export function auditNamedAmountCount(prompt: string): number | undefined {
+  if (analystPromptWithoutDraft(prompt) === prompt) return undefined;
+  const line = prompt.split('\n').find((candidate) => candidate.startsWith(`${AUDIT_UNSEEN_AMOUNTS} `));
+  if (!line) return 0;
+  const end = line.lastIndexOf(AUDIT_UNSEEN_AMOUNTS_TAIL);
+  const listed = line.slice(AUDIT_UNSEEN_AMOUNTS.length + 1, end < 0 ? undefined : end);
+  try {
+    const amounts: unknown = JSON.parse(`[${listed}]`);
+    return Array.isArray(amounts) ? amounts.length : 0;
+  } catch {
+    return 0;
+  }
 }
 
 function buildAnalystAuditPrompt(
@@ -644,6 +732,7 @@ function buildAnalystAuditPrompt(
   draft: ParsedModelOutput | null,
   includeLocalPrivateProvenance: boolean,
   compactChars?: number,
+  unseen: readonly string[] = [],
 ): string {
   const versions = candidateVersionNotes(pack);
   // compactChars: render candidates as the compact main call does, with that
@@ -666,6 +755,7 @@ function buildAnalystAuditPrompt(
     blocks.join('\n\n'),
     '',
     'Reconstruct the answer from every numbered candidate, account for every requested item, then replace the draft if it omitted, misstated, or failed to cite anything.',
+    ...(unseen.length > 0 ? [`${AUDIT_UNSEEN_AMOUNTS} ${unseen.map((value) => JSON.stringify(value)).join(', ')}${AUDIT_UNSEEN_AMOUNTS_TAIL}`] : []),
     ...versionInstruction(versions),
     formatCoverage(pack),
   ].join('\n');
