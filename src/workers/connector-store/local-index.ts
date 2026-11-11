@@ -2993,7 +2993,7 @@ export function connectorStoreReadableNow(dbPath: string): boolean {
 export class LocalConnectorStore {
   readonly dbPath: string;
   /** The file this store opened, so a later delete or replace of it is seen. */
-  private openedFile: { dev: number; ino: number } | undefined;
+  private readonly openedFile: { dev: number; ino: number } | undefined;
   readonly corpusId: string;
   readonly family: SourceFamily;
   readonly trustDomain: SourceTrustDomain;
@@ -12950,16 +12950,13 @@ export class LocalConnectorStore {
     pool: { deadlineAtMs?: number } = {},
   ): Promise<ConnectorStoreKeywordSearch> {
     if (!offThreadReadsSupported(this.dbPath)) return this.searchItemsDetailed(query, maxResults, accountScope, filters, ftsOptions);
-    const openedFile = this.openedFile;
     const steps = this.searchItemsSteps(query, maxResults, accountScope, filters, ftsOptions);
     let step = steps.next();
     while (!step.done) {
       // A store closed while its search was reading: the pool's connections
       // to it are released, and no later read may open one again.
-      if (this.closedForPoolReads || this.openedFile !== openedFile) throw new OffThreadReadBusyError();
-      const rows = await readOnPool(this.dbPath, step.value, pool.deadlineAtMs !== undefined ? { deadlineAtMs: pool.deadlineAtMs } : {});
-      if (this.closedForPoolReads || this.openedFile !== openedFile) throw new OffThreadReadBusyError();
-      step = steps.next(rows);
+      if (this.closedForPoolReads) throw new OffThreadReadBusyError();
+      step = steps.next(await readOnPool(this.dbPath, step.value, pool.deadlineAtMs !== undefined ? { deadlineAtMs: pool.deadlineAtMs } : {}));
     }
     return step.value;
   }
@@ -13718,46 +13715,6 @@ export class LocalConnectorStore {
     if (!this.openedFile) return false;
     const current = fileIdentity(this.dbPath);
     return !current || current.dev !== this.openedFile.dev || current.ino !== this.openedFile.ino;
-  }
-
-  /**
-   * Follow a new file generation in a read-only mount without replacing the
-   * object the router, tier set and dashboard already share. A partial schema
-   * is retried later. Retire the old connection before opening its successor
-   * so closing it cannot unlink the successor's SQLite sidecars.
-   */
-  reopenReadOnlyIfReplaced(): boolean {
-    if (!this.readOnly || !this.fileReplacedOrRemoved() || !connectorStoreReadableNow(this.dbPath)) return false;
-    // A count refresh yields between pages. Let it finish on its connection
-    // before changing that connection beneath it.
-    if (this.tierHiddenCountsRefresh || this.visibilityRefreshing || this.settledUnreadableCountRefresh?.size) return false;
-    if (!this.closedForPoolReads) this.close();
-    const replacement = new LocalConnectorStore({
-      dbPath: this.dbPath, corpusId: this.corpusId, family: this.family,
-      trustDomain: this.trustDomain, readOnly: true, tierLedger: null,
-    });
-    this.db = replacement.db;
-    this.openedFile = replacement.openedFile;
-    this.reactionsColumnPresent = replacement.reactionsColumnPresent;
-    this.childItemColumnsPresent = replacement.childItemColumnsPresent;
-    this.chunkMediaColumnsPresent = replacement.chunkMediaColumnsPresent;
-    this.imageMediaReadsPresent = replacement.imageMediaReadsPresent;
-    this.itemTextVersionsPresent = replacement.itemTextVersionsPresent;
-    this.mediaJudgmentsPresent = replacement.mediaJudgmentsPresent;
-    this.visibilityFeedPresent = replacement.visibilityFeedPresent;
-    // Re-resolve the ledger binding from the new file, keeping the lane's
-    // callbacks and privacy policy but none of the old generation's caches.
-    this.tierLedgerOwned = false;
-    this.tierLedgerHiddenMemo = undefined;
-    this.tierHiddenCountsMemo = undefined;
-    this.visibilitySqlMemo = undefined;
-    this.settledUnreadableCountMemo = undefined;
-    this.vectorLaneMemo = undefined;
-    delete this.conceptCountMemo;
-    this.trustReconciliationReadyCursors = undefined;
-    this.closedForPoolReads = false;
-    this.visibilityClosed = false;
-    return true;
   }
 
   /**

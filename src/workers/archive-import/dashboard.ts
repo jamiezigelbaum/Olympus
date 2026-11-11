@@ -34,7 +34,6 @@ import type {
 import { SourceStorageUnavailableError } from '../../core/source-storage.ts';
 import type { ArchivePathResolver } from '../local-files/scope-browser.ts';
 import { archivePickIntro } from '../dashboard/vocabulary.ts';
-import { TierLedger } from '../classification/tier-ledger.ts';
 import type { ArchiveSourceTarget } from './source-targets.ts';
 import { createArchiveImportAgent, type ArchiveImportAgent } from './agent.ts';
 import { SCHEDULER_SOURCE_IDS } from '../source-scheduler.ts';
@@ -754,15 +753,10 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
   const counts = (record: ArchiveImportRecord): { items: number; held: number } | undefined => {
     try {
       const lane = options.runtime.lane(record.family);
-      // Read the current ledger file, including a replacement by the writer.
-      // The same read path serves a single worker and the split's front.
-      const ledger = new TierLedger({ dbPath: lane.ledger.dbPath, readOnly: true });
-      try {
-        const tally = ledger.accountScopeCounts(record.provider, record.archive_id);
-        return { items: tally.items, held: tally.awaitingJudgment };
-      } finally {
-        ledger.close();
-      }
+      // The lane's own ledger: the writer's in a single worker, the
+      // read-only mount on the split's front, which sees each commit (WAL).
+      const tally = lane.ledger.accountScopeCounts(record.provider, record.archive_id);
+      return { items: tally.items, held: tally.awaitingJudgment };
     } catch {
       return undefined;
     }

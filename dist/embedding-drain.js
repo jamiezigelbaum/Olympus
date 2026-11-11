@@ -21036,21 +21036,6 @@ function connectorStoreCurrentEmbeddingPageQuery(options, afterChunkPk, limit = 
     ]
   };
 }
-function connectorStoreReadableNow(dbPath) {
-  let db;
-  try {
-    const stat2 = lstatSync11(dbPath);
-    if (!stat2.isFile() || stat2.isSymbolicLink())
-      return false;
-    db = new Database6(dbPath, { readonly: true, create: false, strict: true });
-    db.exec("PRAGMA busy_timeout = 10000;");
-    return readSqliteSchemaVersion(db, SQLITE_STORE_ID) >= READ_ONLY_MIN_SCHEMA_VERSION;
-  } catch {
-    return false;
-  } finally {
-    db?.close();
-  }
-}
 function connectorStoreVectorDeadlineExpired(deadlineAtMs) {
   return deadlineAtMs !== undefined && Number.isFinite(deadlineAtMs) && Date.now() >= deadlineAtMs;
 }
@@ -29355,16 +29340,12 @@ var init_local_index = __esm(() => {
     async searchItemsDetailedOffThread(query, maxResults, accountScope, filters, ftsOptions = {}, pool = {}) {
       if (!offThreadReadsSupported(this.dbPath))
         return this.searchItemsDetailed(query, maxResults, accountScope, filters, ftsOptions);
-      const openedFile = this.openedFile;
       const steps = this.searchItemsSteps(query, maxResults, accountScope, filters, ftsOptions);
       let step = steps.next();
       while (!step.done) {
-        if (this.closedForPoolReads || this.openedFile !== openedFile)
+        if (this.closedForPoolReads)
           throw new OffThreadReadBusyError;
-        const rows = await readOnPool(this.dbPath, step.value, pool.deadlineAtMs !== undefined ? { deadlineAtMs: pool.deadlineAtMs } : {});
-        if (this.closedForPoolReads || this.openedFile !== openedFile)
-          throw new OffThreadReadBusyError;
-        step = steps.next(rows);
+        step = steps.next(await readOnPool(this.dbPath, step.value, pool.deadlineAtMs !== undefined ? { deadlineAtMs: pool.deadlineAtMs } : {}));
       }
       return step.value;
     }
@@ -29824,42 +29805,6 @@ var init_local_index = __esm(() => {
         return false;
       const current2 = fileIdentity(this.dbPath);
       return !current2 || current2.dev !== this.openedFile.dev || current2.ino !== this.openedFile.ino;
-    }
-    reopenReadOnlyIfReplaced() {
-      if (!this.readOnly || !this.fileReplacedOrRemoved() || !connectorStoreReadableNow(this.dbPath))
-        return false;
-      if (this.tierHiddenCountsRefresh || this.visibilityRefreshing || this.settledUnreadableCountRefresh?.size)
-        return false;
-      if (!this.closedForPoolReads)
-        this.close();
-      const replacement = new LocalConnectorStore({
-        dbPath: this.dbPath,
-        corpusId: this.corpusId,
-        family: this.family,
-        trustDomain: this.trustDomain,
-        readOnly: true,
-        tierLedger: null
-      });
-      this.db = replacement.db;
-      this.openedFile = replacement.openedFile;
-      this.reactionsColumnPresent = replacement.reactionsColumnPresent;
-      this.childItemColumnsPresent = replacement.childItemColumnsPresent;
-      this.chunkMediaColumnsPresent = replacement.chunkMediaColumnsPresent;
-      this.imageMediaReadsPresent = replacement.imageMediaReadsPresent;
-      this.itemTextVersionsPresent = replacement.itemTextVersionsPresent;
-      this.mediaJudgmentsPresent = replacement.mediaJudgmentsPresent;
-      this.visibilityFeedPresent = replacement.visibilityFeedPresent;
-      this.tierLedgerOwned = false;
-      this.tierLedgerHiddenMemo = undefined;
-      this.tierHiddenCountsMemo = undefined;
-      this.visibilitySqlMemo = undefined;
-      this.settledUnreadableCountMemo = undefined;
-      this.vectorLaneMemo = undefined;
-      delete this.conceptCountMemo;
-      this.trustReconciliationReadyCursors = undefined;
-      this.closedForPoolReads = false;
-      this.visibilityClosed = false;
-      return true;
     }
     async prepareStatusCounts(scope) {
       if (!this.tierHiddenCountsMemo)
@@ -73855,6 +73800,7 @@ var ARCHIVE_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
 var ARCHIVE_UPLOAD_MAX_CHUNK_BYTES = 64 * 1024 * 1024;
 var SPACE_CHECK_EVERY_BYTES = 16 * 1024 * 1024;
 var ARCHIVE_UPLOAD_IDLE_MS = 30 * 60000;
+var removing = new Set;
 
 // src/workers/dashboard/host-page.ts
 init_vocabulary();
@@ -78136,7 +78082,6 @@ init_archive_formats();
 init_scope_safe_fs();
 init_source_storage();
 init_vocabulary();
-init_tier_ledger();
 
 // src/workers/archive-import/agent.ts
 init_open_targets();

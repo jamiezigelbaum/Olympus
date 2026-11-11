@@ -44791,16 +44791,12 @@ var init_local_index = __esm(() => {
     async searchItemsDetailedOffThread(query, maxResults, accountScope, filters, ftsOptions = {}, pool = {}) {
       if (!offThreadReadsSupported(this.dbPath))
         return this.searchItemsDetailed(query, maxResults, accountScope, filters, ftsOptions);
-      const openedFile = this.openedFile;
       const steps = this.searchItemsSteps(query, maxResults, accountScope, filters, ftsOptions);
       let step = steps.next();
       while (!step.done) {
-        if (this.closedForPoolReads || this.openedFile !== openedFile)
+        if (this.closedForPoolReads)
           throw new OffThreadReadBusyError;
-        const rows = await readOnPool(this.dbPath, step.value, pool.deadlineAtMs !== undefined ? { deadlineAtMs: pool.deadlineAtMs } : {});
-        if (this.closedForPoolReads || this.openedFile !== openedFile)
-          throw new OffThreadReadBusyError;
-        step = steps.next(rows);
+        step = steps.next(await readOnPool(this.dbPath, step.value, pool.deadlineAtMs !== undefined ? { deadlineAtMs: pool.deadlineAtMs } : {}));
       }
       return step.value;
     }
@@ -45260,42 +45256,6 @@ var init_local_index = __esm(() => {
         return false;
       const current2 = fileIdentity(this.dbPath);
       return !current2 || current2.dev !== this.openedFile.dev || current2.ino !== this.openedFile.ino;
-    }
-    reopenReadOnlyIfReplaced() {
-      if (!this.readOnly || !this.fileReplacedOrRemoved() || !connectorStoreReadableNow(this.dbPath))
-        return false;
-      if (this.tierHiddenCountsRefresh || this.visibilityRefreshing || this.settledUnreadableCountRefresh?.size)
-        return false;
-      if (!this.closedForPoolReads)
-        this.close();
-      const replacement = new LocalConnectorStore({
-        dbPath: this.dbPath,
-        corpusId: this.corpusId,
-        family: this.family,
-        trustDomain: this.trustDomain,
-        readOnly: true,
-        tierLedger: null
-      });
-      this.db = replacement.db;
-      this.openedFile = replacement.openedFile;
-      this.reactionsColumnPresent = replacement.reactionsColumnPresent;
-      this.childItemColumnsPresent = replacement.childItemColumnsPresent;
-      this.chunkMediaColumnsPresent = replacement.chunkMediaColumnsPresent;
-      this.imageMediaReadsPresent = replacement.imageMediaReadsPresent;
-      this.itemTextVersionsPresent = replacement.itemTextVersionsPresent;
-      this.mediaJudgmentsPresent = replacement.mediaJudgmentsPresent;
-      this.visibilityFeedPresent = replacement.visibilityFeedPresent;
-      this.tierLedgerOwned = false;
-      this.tierLedgerHiddenMemo = undefined;
-      this.tierHiddenCountsMemo = undefined;
-      this.visibilitySqlMemo = undefined;
-      this.settledUnreadableCountMemo = undefined;
-      this.vectorLaneMemo = undefined;
-      delete this.conceptCountMemo;
-      this.trustReconciliationReadyCursors = undefined;
-      this.closedForPoolReads = false;
-      this.visibilityClosed = false;
-      return true;
     }
     async prepareStatusCounts(scope) {
       if (!this.tierHiddenCountsMemo)
@@ -170994,8 +170954,8 @@ var init_top_nav = __esm(() => {
 
 // src/workers/archive-import/staging.ts
 import { randomBytes as randomBytes30 } from "node:crypto";
-import { existsSync as existsSync102, mkdirSync as mkdirSync66, readdirSync as readdirSync29, realpathSync as realpathSync21, rmSync as rmSync43, statSync as statSync42, statfsSync as statfsSync4, utimesSync } from "node:fs";
-import { open as open5 } from "node:fs/promises";
+import { existsSync as existsSync102, mkdirSync as mkdirSync66, readdirSync as readdirSync29, realpathSync as realpathSync21, renameSync as renameSync24, rmSync as rmSync43, statSync as statSync42, statfsSync as statfsSync4, utimesSync } from "node:fs";
+import { open as open5, rm as rm11 } from "node:fs/promises";
 import { sep as sep22, join as join134, resolve as resolve28 } from "node:path";
 function sanitizeUploadPath(raw) {
   const bad = () => {
@@ -171019,6 +170979,14 @@ function sanitizeUploadPath(raw) {
       return bad();
   }
   return parts;
+}
+function removeInBackground(path) {
+  if (removing.has(path))
+    return;
+  removing.add(path);
+  rm11(path, { recursive: true, force: true }).catch(() => {
+    return;
+  }).finally(() => removing.delete(path));
 }
 function createArchiveUploads(options) {
   const freeBytes = options.freeBytes ?? ((path) => {
@@ -171324,6 +171292,10 @@ function createArchiveUploads(options) {
       } catch {
         return;
       }
+      try {
+        for (const name of readdirSync29(`${root}${REMOVING_SUFFIX}`))
+          removeInBackground(join134(`${root}${REMOVING_SUFFIX}`, name));
+      } catch {}
       for (const name of names) {
         if (!ID2.test(name))
           continue;
@@ -171344,7 +171316,15 @@ function createArchiveUploads(options) {
         if (found)
           found.cancelled = true;
         sessions.delete(name);
-        rmSync43(dir, { recursive: true, force: true });
+        const aside = join134(`${root}${REMOVING_SUFFIX}`, name);
+        try {
+          mkdirSync66(`${root}${REMOVING_SUFFIX}`, { recursive: true, mode: 448 });
+          renameSync24(dir, aside);
+        } catch {
+          rmSync43(dir, { recursive: true, force: true });
+          continue;
+        }
+        removeInBackground(aside);
       }
     },
     close() {
@@ -171357,7 +171337,7 @@ function createArchiveUploads(options) {
     }
   };
 }
-var ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES, ARCHIVE_UPLOAD_CHUNK_BYTES, ARCHIVE_UPLOAD_MAX_CHUNK_BYTES, SPACE_CHECK_EVERY_BYTES, SPACE_POLL_MS = 2000, ARCHIVE_UPLOAD_IDLE_MS, MAX_DEPTH = 64, MAX_PATH_CHARS = 4096, MAX_NAME_BYTES = 255, ID2, ArchiveUploadError, ARCHIVE_UPLOAD_COPY;
+var ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES, ARCHIVE_UPLOAD_CHUNK_BYTES, ARCHIVE_UPLOAD_MAX_CHUNK_BYTES, SPACE_CHECK_EVERY_BYTES, SPACE_POLL_MS = 2000, ARCHIVE_UPLOAD_IDLE_MS, MAX_DEPTH = 64, MAX_PATH_CHARS = 4096, MAX_NAME_BYTES = 255, ID2, ArchiveUploadError, ARCHIVE_UPLOAD_COPY, REMOVING_SUFFIX = ".removing", removing;
 var init_staging = __esm(() => {
   ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
   ARCHIVE_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
@@ -171386,6 +171366,7 @@ var init_staging = __esm(() => {
     unreadable: "Olympus could not read what was sent. Choose the folder again.",
     write_failed: "Olympus could not save the file on this computer. Check that its disk has room, then choose the folder again."
   };
+  removing = new Set;
 });
 
 // src/workers/dashboard/host-page.ts
@@ -203378,13 +203359,8 @@ function createArchiveImportDashboard(options) {
   const counts = (record8) => {
     try {
       const lane = options.runtime.lane(record8.family);
-      const ledger = new TierLedger({ dbPath: lane.ledger.dbPath, readOnly: true });
-      try {
-        const tally = ledger.accountScopeCounts(record8.provider, record8.archive_id);
-        return { items: tally.items, held: tally.awaitingJudgment };
-      } finally {
-        ledger.close();
-      }
+      const tally = lane.ledger.accountScopeCounts(record8.provider, record8.archive_id);
+      return { items: tally.items, held: tally.awaitingJudgment };
     } catch {
       return;
     }
@@ -203854,7 +203830,6 @@ var init_dashboard2 = __esm(() => {
   init_scope_safe_fs();
   init_source_storage();
   init_vocabulary();
-  init_tier_ledger();
   init_agent();
   init_source_scheduler();
   init_manifest3();
@@ -206222,7 +206197,7 @@ var init_judge_boost = __esm(() => {
 });
 
 // src/core/source-account-migration.ts
-import { linkSync as linkSync5, lstatSync as lstatSync54, mkdirSync as mkdirSync70, readdirSync as readdirSync35, realpathSync as realpathSync29, renameSync as renameSync24, rmdirSync as rmdirSync8, statSync as statSync46, unlinkSync as unlinkSync5 } from "node:fs";
+import { linkSync as linkSync5, lstatSync as lstatSync54, mkdirSync as mkdirSync70, readdirSync as readdirSync35, realpathSync as realpathSync29, renameSync as renameSync25, rmdirSync as rmdirSync8, statSync as statSync46, unlinkSync as unlinkSync5 } from "node:fs";
 import { basename as basename22, dirname as dirname110, isAbsolute as isAbsolute39, join as join147, relative as relative17, resolve as resolve31, sep as sep23 } from "node:path";
 function accountFolderMigrationEnabled(env = process.env) {
   const value2 = env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim().toLowerCase() ?? "";
@@ -206321,7 +206296,7 @@ function absPath(ctx, rel) {
 }
 function moveWithoutReplacing(from, to, kind) {
   if (kind === "dir") {
-    renameSync24(from, to);
+    renameSync25(from, to);
     syncFolder(dirname110(to));
     syncFolder(dirname110(from));
     return;
@@ -237959,11 +237934,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         if (sourceAccountMountable({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }))
           archiveImports.existingLanes();
       },
-      openTierStoresThatExist,
-      ...connectorStores.map((store) => () => {
-        if (store.reopenReadOnlyIfReplaced())
-          sourceLaneGeneration += 1;
-      })
+      openTierStoresThatExist
     ];
     for (const read of reads) {
       try {

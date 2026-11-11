@@ -5984,7 +5984,6 @@ export async function main(): Promise<void> {
       () => mountSourceLanes(activeLaneHandles(readActiveConnectedHandles(process.env), process.env)),
       () => { if (sourceAccountMountable({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID })) archiveImports.existingLanes(); },
       openTierStoresThatExist,
-      ...connectorStores.map((store) => () => { if (store.reopenReadOnlyIfReplaced()) sourceLaneGeneration += 1; }),
     ];
     for (const read of reads) {
       try { read(); }

@@ -97,31 +97,6 @@ test('a source absent at boot is mounted and searchable without a handle change'
   expect(f.front.output()).not.toContain('FrontStoreWriteError');
 }, 180_000);
 
-test('a read-only mount reopens a new store generation and clears its old search state', async () => {
-  const home = mkdtempSync('/tmp/oag-');
-  roots.push(home);
-  const path = join(home, 'store.sqlite');
-  const write = async (dbPath: string, word: string) => {
-    const store = new LocalConnectorStore({ dbPath, corpusId: 'internal.fixture', family: 'file', trustDomain: 'internal' });
-    await store.syncFromConnector(fixtureConnector(() => [{ id: word, name: word, text: `${word} harbour log` }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
-    store.close();
-  };
-  await write(path, 'orchard');
-  const reader = new LocalConnectorStore({ dbPath: path, corpusId: 'internal.fixture', family: 'file', trustDomain: 'internal', readOnly: true });
-  close.push(() => reader.close());
-  expect(reader.searchItemsDetailed('orchard', 5).rows).toHaveLength(1);
-  const replacement = join(home, 'replacement.sqlite');
-  await write(replacement, 'lighthouse');
-  // Preserve the old inode and its SQLite sidecars until the mount retires it.
-  renameSync(path, `${path}.prior`);
-  for (const suffix of ['-wal', '-shm']) if (existsSync(`${path}${suffix}`)) renameSync(`${path}${suffix}`, `${path}.prior${suffix}`);
-  renameSync(replacement, path);
-  expect(reader.reopenReadOnlyIfReplaced()).toBe(true);
-  expect(reader.searchItemsDetailed('lighthouse', 5).rows).toHaveLength(1);
-  expect(reader.searchItemsDetailed('orchard', 5).rows).toHaveLength(0);
-  expect(reader.reopenReadOnlyIfReplaced()).toBe(false);
-});
-
 test('snapshot collection and archive resume leave a front upload intact between chunks', async () => {
   const f = await split();
   const minted = await ownerLocalMint(f.fetcher, f.origin, TOKEN);
