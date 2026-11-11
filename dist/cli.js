@@ -27280,7 +27280,7 @@ function* profileSteps(db) {
     rows = yield { sql: `${live} ORDER BY c.rowid LIMIT ${SAMPLE_LIMIT}`, params: [], mode: "all" };
   } else {
     const step = maxRowid / SAMPLE_TARGET;
-    const ids = Array.from({ length: SAMPLE_TARGET }, (_, k) => Math.max(1, Math.floor((k + 1) * step)));
+    const ids = Array.from({ length: SAMPLE_TARGET }, (_, k) => Math.min(maxRowid, Math.max(1, Math.floor(k * step + k * 0.6180339887 % 1 * step) + 1)));
     rows = [];
     for (let at = 0;at < ids.length; at += READ_BATCH) {
       const batch = ids.slice(at, at + READ_BATCH);
