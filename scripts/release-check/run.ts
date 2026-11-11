@@ -1386,7 +1386,8 @@ async function finishRestore(run: Run, bundlePath: string, outDir: string, workD
 }
 
 async function takeSnapshot(run: Run, what: string): Promise<StateSnapshot | undefined> {
-  const out = await run.agent('snapshot-state', '', 90_000);
+  // The agent waits up to a minute for tier moves to land before it reads the items.
+  const out = await run.agent('snapshot-state', '', 150_000);
   if (out.result?.ok !== true || !out.result.state) {
     run.errors.push(`the install's state could not be read ${what}: ${String(out.result?.detail ?? out.stderr.slice(-200))}`);
     return undefined;

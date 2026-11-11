@@ -213,6 +213,17 @@ describe('the restore comparison', () => {
   });
 });
 
+describe('the restore leg names what changed', () => {
+  test('a changed item says which fields moved, and moves still in flight on either side are said', () => {
+    const before: ItemRow = { store: 'readwise-secure-connector-store', id: 'rc-doc-garden', tier: 'secure_local', tombstoned: 0, contentHash: 'h', metadataTier: 'private', contentTier: 'private' };
+    const after: ItemRow = { ...before, tombstoned: 1, metadataTier: 'personal', contentTier: 'personal' };
+    const base = { version: '1', build: 'b', engineState: 'running', installId: 'i', relayConnected: true, policy: null, configFiles: [], workerEnvKeys: [], tierRuleIds: [], connections: [], items: null, dashboard: null } as StateSnapshot;
+    const stores = evaluateRestore({ ...base, items: [before], movesInFlight: 1 }, { ...base, items: [after] }).find((check) => check.id === 'restore.stores')!;
+    expect(stores.status).toBe('fail');
+    expect(stores.detail).toBe('missing none; new none; changed readwise-secure-connector-store/rc-doc-garden (tombstoned false→true, metadataTier private→personal, contentTier private→personal); 1 move(s) in flight when the backup was made');
+  });
+});
+
 describe('Terminal steps and the restore leg\'s journeys', () => {
   const terminal: Journey = {
     id: 'terminal', title: 'A command runs', source: 'test',
