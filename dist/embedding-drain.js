@@ -48228,7 +48228,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     return archiveGroups().some(archiveMoving);
   }
   function archiveMoving(meta) {
-    return !archiveSetting(meta) && meta.archives.some((entry) => !!entry && (entry.status === "importing" || entry.status === "removing")) || meta.requests.some((entry) => !!entry && entry.status === "checking");
+    return !archiveSetting(meta) && meta.archives.some((entry) => !!entry && (entry.status === "importing" || entry.status === "removing")) || meta.requests.some((entry) => !!entry && entry.status === "checking") || meta.privateModel === "ready" && meta.archives.some((entry) => !!entry && entry.status !== "removing" && wholeCount(entry.held) > 0);
   }
   function startArchivePick(key2, sourceId) {
     supersede();

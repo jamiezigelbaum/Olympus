@@ -163495,7 +163495,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     return archiveGroups().some(archiveMoving);
   }
   function archiveMoving(meta2) {
-    return !archiveSetting(meta2) && meta2.archives.some((entry) => !!entry && (entry.status === "importing" || entry.status === "removing")) || meta2.requests.some((entry) => !!entry && entry.status === "checking");
+    return !archiveSetting(meta2) && meta2.archives.some((entry) => !!entry && (entry.status === "importing" || entry.status === "removing")) || meta2.requests.some((entry) => !!entry && entry.status === "checking") || meta2.privateModel === "ready" && meta2.archives.some((entry) => !!entry && entry.status !== "removing" && wholeCount(entry.held) > 0);
   }
   function startArchivePick(key2, sourceId) {
     supersede();

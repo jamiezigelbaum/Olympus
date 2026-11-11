@@ -1468,10 +1468,12 @@ export function chatgptDashboardClient(
     return archiveGroups().some(archiveMoving);
   }
 
-  /** One list of imports at work: an archive read or removed (unless this computer's settings keep it from running), or a request checked. */
+  /** One list of imports at work: an archive read or removed (unless this computer's settings keep it from running), a request checked, or held items being judged. */
   function archiveMoving(meta: Any): boolean {
     return (!archiveSetting(meta) && meta.archives.some((entry: Any) => !!entry && (entry.status === 'importing' || entry.status === 'removing')))
-      || meta.requests.some((entry: Any) => !!entry && entry.status === 'checking');
+      || meta.requests.some((entry: Any) => !!entry && entry.status === 'checking')
+      // Items the ready private model is still judging: their counts change, so the page reads often (#1337).
+      || (meta.privateModel === 'ready' && meta.archives.some((entry: Any) => !!entry && entry.status !== 'removing' && wholeCount(entry.held) > 0));
   }
 
   /**
