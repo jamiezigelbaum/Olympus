@@ -2,6 +2,7 @@
 // the next long timer (#1076, Codex P1 on #1152): a name whose only Personal
 // item is re-judged Private must stop being citable within about a minute.
 
+import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { SourceConnector } from '../src/core/contracts.ts';
 import {
@@ -35,25 +36,25 @@ describe('people index refresh on a visibility change', () => {
       peopleVisibilityMarker: () => marker,
     };
     const refresher = new PeopleIndexRefresher(index, () => [store], { now: () => clock.now() });
-    refresher.refresh();
+    await refresher.refresh();
     expect(index.personForSender('mail', 'quinn@example.com')?.nameShareable).toBe(true);
 
     // Nothing changed: no rebuild.
     await clock.advance(PEOPLE_INDEX_MIN_REBUILD_MS);
-    expect(refresher.refreshIfChanged()).toBe(false);
+    expect(await refresher.refreshIfChanged()).toBe(false);
 
     // The only Personal item is re-judged Private.
     observations = [{ ...observations[0]!, privateOnly: true }];
     marker = 'v2';
-    expect(refresher.refreshIfChanged()).toBe(true);
+    expect(await refresher.refreshIfChanged()).toBe(true);
     expect(index.personForSender('mail', 'quinn@example.com')?.nameShareable).toBe(false);
 
     // A judging backlog moves the marker again at once: held to one rebuild a minute.
     marker = 'v3';
     await clock.advance(PEOPLE_INDEX_MIN_REBUILD_MS / 2);
-    expect(refresher.refreshIfChanged()).toBe(false);
+    expect(await refresher.refreshIfChanged()).toBe(false);
     await clock.advance(PEOPLE_INDEX_MIN_REBUILD_MS / 2);
-    expect(refresher.refreshIfChanged()).toBe(true);
+    expect(await refresher.refreshIfChanged()).toBe(true);
   });
 
   test("a store's marker moves when a copy's tier visibility changes, not on a read", async () => {
@@ -72,5 +73,125 @@ describe('people index refresh on a visibility change', () => {
     expect(internal.peopleVisibilityMarker()).toBe(before);
     await moveTieredItem({ set: fixture.set, identity: identityOf('note-1'), target: { metadataTier: 'secure', contentTier: 'secure' } });
     expect(internal.peopleVisibilityMarker()).not.toBe(before);
+  });
+});
+
+/** A store stub that counts its sender reads and lets a test move its sync marker. */
+function countingStore(provider: string, sender: string) {
+  const state = { reads: 0, syncRun: 'run-1', observations: [
+    { provider, senderId: `${sender}@example.com`, senderLabel: sender, isOwner: false, itemCount: 1 },
+  ] as PeopleSenderObservation[] };
+  const store: PeopleObservationSource = {
+    family: 'email',
+    peopleObservations: () => {
+      throw new Error('the refresher reads senders off the main thread');
+    },
+    peopleObservationsOffThread: async () => {
+      state.reads += 1;
+      return state.observations;
+    },
+    lastSyncRun: () => ({ syncRunId: state.syncRun, status: 'completed', completedAt: state.syncRun }),
+    peopleVisibilityMarker: () => 'v1',
+  };
+  return { store, state };
+}
+
+describe('people index refresh reads only what changed (#1305)', () => {
+  test("a moved sync marker re-reads that store alone and keeps the other store's senders", async () => {
+    const clock = createTestClock();
+    const index = new LocalPeopleIndex({ dbPath: ':memory:' });
+    cleanups.push(() => index.close());
+    const mail = countingStore('mail', 'quinn');
+    const chat = countingStore('chat', 'ravi');
+    const refresher = new PeopleIndexRefresher(index, () => [mail.store, chat.store], { now: () => clock.now() });
+    await refresher.refresh();
+    expect([mail.state.reads, chat.state.reads]).toEqual([1, 1]);
+
+    await clock.advance(PEOPLE_INDEX_MIN_REBUILD_MS);
+    mail.state.syncRun = 'run-2';
+    mail.state.observations = [...mail.state.observations, { provider: 'mail', senderId: 'sol@example.com', senderLabel: 'sol', isOwner: false, itemCount: 2 }];
+    expect(await refresher.refreshIfChanged()).toBe(true);
+    expect([mail.state.reads, chat.state.reads]).toEqual([2, 1]);
+    expect(index.personForSender('mail', 'sol@example.com')).toBeDefined();
+    expect(index.personForSender('chat', 'ravi@example.com')).toBeDefined();
+
+    // A forced refresh still reads every store.
+    await refresher.refresh();
+    expect([mail.state.reads, chat.state.reads]).toEqual([3, 2]);
+  });
+
+  test('two refreshes started together run one rebuild', async () => {
+    const index = new LocalPeopleIndex({ dbPath: ':memory:' });
+    cleanups.push(() => index.close());
+    const mail = countingStore('mail', 'quinn');
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const slow: PeopleObservationSource = {
+      ...mail.store,
+      peopleObservationsOffThread: async () => {
+        mail.state.reads += 1;
+        await gate;
+        return mail.state.observations;
+      },
+    };
+    const refresher = new PeopleIndexRefresher(index, () => [slow]);
+    const first = refresher.refresh();
+    const second = refresher.refresh();
+    const third = refresher.refreshIfChanged();
+    release();
+    const [a, b] = await Promise.all([first, second, third]);
+    expect(mail.state.reads).toBe(1);
+    expect(b).toEqual(a);
+    expect(index.personForSender('mail', 'quinn@example.com')).toBeDefined();
+  });
+
+  test("a source's Delete is not brought back by a refresh that reuses the other stores' senders", async () => {
+    const clock = createTestClock();
+    const index = new LocalPeopleIndex({ dbPath: ':memory:' });
+    cleanups.push(() => index.close());
+    const mail = countingStore('mail', 'quinn');
+    const chat = countingStore('chat', 'ravi');
+    let stores: PeopleObservationSource[] = [mail.store, chat.store];
+    const refresher = new PeopleIndexRefresher(index, () => stores, { now: () => clock.now() });
+    await refresher.refresh();
+    expect(index.personForSender('chat', 'ravi@example.com')).toBeDefined();
+
+    // The chat source is deleted: its store leaves the worker's list.
+    stores = [mail.store];
+    await clock.advance(PEOPLE_INDEX_MIN_REBUILD_MS);
+    expect(await refresher.refreshIfChanged()).toBe(true);
+    expect(mail.state.reads).toBe(1);
+    expect(index.personForSender('chat', 'ravi@example.com')).toBeUndefined();
+    expect(index.personForSender('mail', 'quinn@example.com')).toBeDefined();
+
+    // Its senders do not come back later either, even if the same store object returns empty.
+    chat.state.observations = [];
+    chat.state.syncRun = 'run-2';
+    stores = [mail.store, chat.store];
+    await clock.advance(PEOPLE_INDEX_MIN_REBUILD_MS);
+    expect(await refresher.refreshIfChanged()).toBe(true);
+    expect(index.personForSender('chat', 'ravi@example.com')).toBeUndefined();
+  });
+
+  test("an owner's correction relinks from the senders already read, without reading a store", async () => {
+    const index = new LocalPeopleIndex({ dbPath: ':memory:' });
+    cleanups.push(() => index.close());
+    const mail = countingStore('mail', 'quinn');
+    const chat = countingStore('chat', 'ravi');
+    const refresher = new PeopleIndexRefresher(index, () => [mail.store, chat.store]);
+    expect(refresher.relink()).toBeUndefined();
+    expect(await refresher.refresh()).toHaveLength(2);
+    // The owner says these two senders are one person.
+    index.putContactCard({ cardId: 'contacts:quinn', name: 'Quinn Holloway', keys: ['sender:mail:quinn@example.com', 'sender:chat:ravi@example.com'] });
+    expect(refresher.relink()).toHaveLength(1);
+    expect([mail.state.reads, chat.state.reads]).toEqual([1, 1]);
+  });
+
+  test('the worker no longer forces a rebuild on a timer after startup', () => {
+    const server = readFileSync(new URL('../src/workers/email-source/server.ts', import.meta.url), 'utf8');
+    expect(server.includes('PEOPLE_INDEX_REFRESH_MS')).toBe(false);
+    const timers = server.match(/set(?:Interval|Timeout)\(\(\) => refreshPeople\([^)]*\)[^;]*;/g) ?? [];
+    expect(timers.filter((timer) => timer.startsWith('setInterval') && timer.includes('refreshPeople(true)'))).toEqual([]);
+    expect(timers.some((timer) => timer.startsWith('setTimeout') && timer.includes('PEOPLE_INDEX_FIRST_REFRESH_MS'))).toBe(true);
   });
 });

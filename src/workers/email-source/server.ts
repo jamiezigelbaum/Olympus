@@ -2329,7 +2329,6 @@ export function connectorStoreAnswerScope(input: {
 
 
 const PEOPLE_INDEX_FIRST_REFRESH_MS = 60_000;
-const PEOPLE_INDEX_REFRESH_MS = 15 * 60_000;
 /** How often the worker checks whether a sync or a tier visibility change needs a rebuild. */
 const PEOPLE_INDEX_CHECK_MS = 60_000;
 
@@ -4016,7 +4015,10 @@ export async function main(): Promise<void> {
   const peopleRefresher = !engineFront && peopleIndex ? new PeopleIndexRefresher(peopleIndex, () => connectorStores) : undefined;
   // After every scheduler tick (below) and on a one-minute check: a
   // rebuild only after a sync or a tier visibility change, at most once a
-  // minute (the markers are cheap to read); `force` rebuilds now.
+  // minute (the markers are cheap to read), reading only the stores that
+  // moved, off this thread (#1305); `force` reads every store again now.
+  // No timer forces a rebuild after startup: the markers cover every change
+  // a rebuild could pick up (#1305; the 15-minute one froze the worker).
   const refreshPeople = (force = false): void => {
     if (engineFront) {
       peopleIndex ??= openPeopleIndexOrUndefined({ readOnly: true });
@@ -4033,9 +4035,24 @@ export async function main(): Promise<void> {
       return;
     }
     if (!peopleRefresher) return;
+    const failed = (error: unknown): void => {
+      console.warn(`[olympus] people index refresh failed: ${error instanceof Error ? error.message : String(error)}`);
+    };
     try {
-      if (force) peopleRefresher.refresh();
-      else peopleRefresher.refreshIfChanged();
+      void (force ? peopleRefresher.refresh() : peopleRefresher.refreshIfChanged()).catch(failed);
+    } catch (error) {
+      failed(error);
+    }
+  };
+  // An owner's correction or contact card: link again at once from the
+  // senders already read; the one-minute check picks up store changes.
+  const relinkPeople = (): void => {
+    if (!peopleRefresher) {
+      refreshPeople(true);
+      return;
+    }
+    try {
+      if (peopleRefresher.relink() === undefined) refreshPeople(true);
     } catch (error) {
       console.warn(`[olympus] people index refresh failed: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -4044,8 +4061,6 @@ export async function main(): Promise<void> {
   peopleFirstRefresh.unref?.();
   const peopleCheck = setInterval(() => refreshPeople(), PEOPLE_INDEX_CHECK_MS);
   peopleCheck.unref?.();
-  const peopleRefresh = setInterval(() => refreshPeople(true), PEOPLE_INDEX_REFRESH_MS);
-  peopleRefresh.unref?.();
 
   // The source-neutral extraction factory. Off unless its roster names a corpus
   // whose connector store is also configured here, so it cannot half-exist: a
@@ -6611,7 +6626,7 @@ export async function main(): Promise<void> {
             },
             // People (#1076): the people index and the owner's corrections.
             ...(peopleIndex
-              ? { people: createDashboardPeople({ index: peopleIndex, refresh: () => refreshPeople(true) }) }
+              ? { people: createDashboardPeople({ index: peopleIndex, refresh: relinkPeople }) }
               : {}),
             // Private answers on this computer; bound late like the panel's tools.
             ...(sourceAnswerLanes

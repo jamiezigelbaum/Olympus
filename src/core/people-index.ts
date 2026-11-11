@@ -988,6 +988,11 @@ export const PEOPLE_AUTHORED_FAMILIES: ReadonlySet<string> = new Set(['chat', 'e
 export interface PeopleObservationSource {
   family: string;
   peopleObservations(): PeopleSenderObservation[];
+  /**
+   * The same senders, read off the worker's main thread where the store can
+   * be (#1305). A refresh reads through this when the store has it.
+   */
+  peopleObservationsOffThread?(): Promise<PeopleSenderObservation[]>;
   /** The store's latest sync run, so a refresh can tell when a sync has finished. */
   lastSyncRun?(): { syncRunId: string; status: string; completedAt?: string } | undefined;
   /**
@@ -1000,26 +1005,42 @@ export interface PeopleObservationSource {
   setPeopleNames?(resolver: ((provider: string, senderId: string | undefined, senderLabel: string | undefined) => PeopleCitationName | undefined) | undefined): void;
 }
 
+function authoredStores(stores: readonly PeopleObservationSource[]): PeopleObservationSource[] {
+  return stores.filter((store) => PEOPLE_AUTHORED_FAMILIES.has(store.family));
+}
+
+function readStoreObservations(store: PeopleObservationSource): Promise<PeopleSenderObservation[]> {
+  return store.peopleObservationsOffThread ? store.peopleObservationsOffThread() : Promise.resolve(store.peopleObservations());
+}
+
+/**
+ * Rebuild the index from senders already read (small, on this thread: the
+ * owner's corrections and contact cards apply here) and point each store's
+ * citations at it.
+ */
+function linkStores(index: LocalPeopleIndex, stores: readonly PeopleObservationSource[], observations: readonly PeopleSenderObservation[]): PeoplePerson[] {
+  const people = index.rebuild([...observations]);
+  const resolver = (provider: string, senderId: string | undefined, senderLabel: string | undefined) =>
+    index.citationName(provider, senderId, senderLabel);
+  for (const store of stores) store.setPeopleNames?.(resolver);
+  return people;
+}
+
 /**
  * Rebuild the index from every authored store and point each store's
  * citations at it. A store that cannot be read is left out of this rebuild
  * (its senders drop out until the next one); the others still link.
  */
-export function refreshPeopleIndex(index: LocalPeopleIndex, stores: readonly PeopleObservationSource[]): PeoplePerson[] {
+export async function refreshPeopleIndex(index: LocalPeopleIndex, stores: readonly PeopleObservationSource[]): Promise<PeoplePerson[]> {
   const observations: PeopleSenderObservation[] = [];
-  for (const store of stores) {
-    if (!PEOPLE_AUTHORED_FAMILIES.has(store.family)) continue;
+  for (const store of authoredStores(stores)) {
     try {
-      observations.push(...store.peopleObservations());
+      observations.push(...await readStoreObservations(store));
     } catch {
       // Unreadable now; the next refresh tries again.
     }
   }
-  const people = index.rebuild(observations);
-  const resolver = (provider: string, senderId: string | undefined, senderLabel: string | undefined) =>
-    index.citationName(provider, senderId, senderLabel);
-  for (const store of stores) store.setPeopleNames?.(resolver);
-  return people;
+  return linkStores(index, stores, observations);
 }
 
 /** A sync or visibility change rebuilds the people index at most this often. */
@@ -1028,13 +1049,18 @@ export const PEOPLE_INDEX_MIN_REBUILD_MS = 60_000;
 /**
  * Keeps the index current: a rebuild soon after any authored store finishes
  * a sync or changes its tier visibility (`refreshIfChanged`, cheap to call
- * often), and on demand.
+ * often), and on demand. Each store's senders are kept with that store's own
+ * part of the fingerprint, so a rebuild after one store moved reads only that
+ * store (#1305: on a large install every read is a pass over a big store).
+ * One rebuild runs at a time; a call made while one runs joins it.
  */
-
 export class PeopleIndexRefresher {
   private lastFingerprint: string | undefined;
   private lastRefreshAt: number | undefined;
   private readonly now: () => number;
+  /** Per current store: the fingerprint part its senders were read at. A store that leaves the list leaves this. */
+  private observed = new Map<PeopleObservationSource, { part: string; observations: PeopleSenderObservation[] }>();
+  private inFlight: Promise<PeoplePerson[]> | undefined;
 
   constructor(
     private readonly index: LocalPeopleIndex,
@@ -1044,31 +1070,82 @@ export class PeopleIndexRefresher {
     this.now = options.now ?? (() => Date.now());
   }
 
-  /** Rebuild now. */
-  refresh(): PeoplePerson[] {
-    const stores = this.stores();
-    this.lastFingerprint = refreshFingerprint(stores);
-    this.lastRefreshAt = this.now();
-    return refreshPeopleIndex(this.index, stores);
+  /** Rebuild now, reading every store again. */
+  refresh(): Promise<PeoplePerson[]> {
+    return this.rebuildOnce(true);
   }
 
   /**
    * Rebuild when a sync has completed or a store's tier visibility has
    * changed since the last rebuild, at most once every
-   * PEOPLE_INDEX_MIN_REBUILD_MS (a judging backlog moves the markers often);
-   * true when it rebuilt. Reading the markers is cheap, so call it often.
+   * PEOPLE_INDEX_MIN_REBUILD_MS (a judging backlog moves the markers often),
+   * reading only the stores that moved; true when it rebuilt. Reading the
+   * markers is cheap, so call it often.
    */
-  refreshIfChanged(): boolean {
-    const fingerprint = refreshFingerprint(this.stores());
+  async refreshIfChanged(): Promise<boolean> {
+    if (this.inFlight) {
+      await this.inFlight;
+      return false;
+    }
+    const fingerprint = fingerprintParts(authoredStores(this.stores())).join('|');
     if (fingerprint === this.lastFingerprint) return false;
     if (this.lastRefreshAt !== undefined && this.now() - this.lastRefreshAt < PEOPLE_INDEX_MIN_REBUILD_MS) return false;
-    this.refresh();
+    await this.rebuildOnce(false);
     return true;
+  }
+
+  /**
+   * Link again from the senders already read, without reading any store: an
+   * owner's correction or contact card applies at once. Undefined before the
+   * first rebuild has read anything.
+   */
+  relink(): PeoplePerson[] | undefined {
+    if (this.lastRefreshAt === undefined) return undefined;
+    const stores = this.stores();
+    const current = new Set(authoredStores(stores));
+    const observations = [...this.observed].filter(([store]) => current.has(store)).flatMap(([, entry]) => entry.observations);
+    return linkStores(this.index, stores, observations);
+  }
+
+  private rebuildOnce(force: boolean): Promise<PeoplePerson[]> {
+    this.inFlight ??= this.rebuild(force).finally(() => {
+      this.inFlight = undefined;
+    });
+    return this.inFlight;
+  }
+
+  private async rebuild(force: boolean): Promise<PeoplePerson[]> {
+    const stores = this.stores();
+    const authored = authoredStores(stores);
+    // Taken before the reads: a store that moves during one is read again next time.
+    const parts = fingerprintParts(authored);
+    this.lastFingerprint = parts.join('|');
+    this.lastRefreshAt = this.now();
+    const observed = new Map<PeopleObservationSource, { part: string; observations: PeopleSenderObservation[] }>();
+    for (const [position, store] of authored.entries()) {
+      const part = parts[position]!;
+      const kept = this.observed.get(store);
+      if (!force && kept && kept.part === part && !part.endsWith(UNREADABLE_VISIBILITY)) {
+        observed.set(store, kept);
+        continue;
+      }
+      try {
+        observed.set(store, { part, observations: await readStoreObservations(store) });
+      } catch {
+        // Unreadable now: its senders drop out, and the next refresh tries again.
+      }
+    }
+    // Only the stores in the list now: a deleted source's senders are not kept.
+    this.observed = observed;
+    return linkStores(this.index, stores, [...observed.values()].flatMap((entry) => entry.observations));
   }
 }
 
-function refreshFingerprint(stores: readonly PeopleObservationSource[]): string {
-  return stores.filter((store) => PEOPLE_AUTHORED_FAMILIES.has(store.family)).map((store) => {
+const UNREADABLE_VISIBILITY = '#unreadable';
+
+/** Each store's part of the fingerprint: its last completed sync run and its visibility marker. */
+function fingerprintParts(stores: readonly PeopleObservationSource[]): string[] {
+  return stores.map((store) => {
     let sync = '';
     let visibility = '';
     try {
@@ -1081,10 +1158,10 @@ function refreshFingerprint(stores: readonly PeopleObservationSource[]): string 
       visibility = store.peopleVisibilityMarker?.() ?? '';
     } catch {
       // A store whose visibility cannot be read now: rebuild once it can.
-      visibility = 'unreadable';
+      return `${sync}${UNREADABLE_VISIBILITY}`;
     }
     return `${sync}#${visibility}`;
-  }).join('|');
+  });
 }
 
 /**

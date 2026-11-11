@@ -17252,7 +17252,104 @@ function strongKeysFromText(value) {
   }
   return [...keys];
 }
-var PEOPLE_LINK_REASON_TEXT, MAX_ADDRESS_TEXT_CHARS = 4096, addressesIn = (value) => addressSpansIn(value.slice(0, MAX_ADDRESS_TEXT_CHARS)), PEOPLE_AUTHORED_FAMILIES;
+function authoredStores(stores) {
+  return stores.filter((store) => PEOPLE_AUTHORED_FAMILIES.has(store.family));
+}
+function readStoreObservations(store) {
+  return store.peopleObservationsOffThread ? store.peopleObservationsOffThread() : Promise.resolve(store.peopleObservations());
+}
+function linkStores(index, stores, observations) {
+  const people = index.rebuild([...observations]);
+  const resolver = (provider, senderId, senderLabel) => index.citationName(provider, senderId, senderLabel);
+  for (const store of stores)
+    store.setPeopleNames?.(resolver);
+  return people;
+}
+
+class PeopleIndexRefresher {
+  index;
+  stores;
+  lastFingerprint;
+  lastRefreshAt;
+  now;
+  observed = new Map;
+  inFlight;
+  constructor(index, stores, options = {}) {
+    this.index = index;
+    this.stores = stores;
+    this.now = options.now ?? (() => Date.now());
+  }
+  refresh() {
+    return this.rebuildOnce(true);
+  }
+  async refreshIfChanged() {
+    if (this.inFlight) {
+      await this.inFlight;
+      return false;
+    }
+    const fingerprint = fingerprintParts(authoredStores(this.stores())).join("|");
+    if (fingerprint === this.lastFingerprint)
+      return false;
+    if (this.lastRefreshAt !== undefined && this.now() - this.lastRefreshAt < PEOPLE_INDEX_MIN_REBUILD_MS)
+      return false;
+    await this.rebuildOnce(false);
+    return true;
+  }
+  relink() {
+    if (this.lastRefreshAt === undefined)
+      return;
+    const stores = this.stores();
+    const current2 = new Set(authoredStores(stores));
+    const observations = [...this.observed].filter(([store]) => current2.has(store)).flatMap(([, entry]) => entry.observations);
+    return linkStores(this.index, stores, observations);
+  }
+  rebuildOnce(force) {
+    this.inFlight ??= this.rebuild(force).finally(() => {
+      this.inFlight = undefined;
+    });
+    return this.inFlight;
+  }
+  async rebuild(force) {
+    const stores = this.stores();
+    const authored = authoredStores(stores);
+    const parts = fingerprintParts(authored);
+    this.lastFingerprint = parts.join("|");
+    this.lastRefreshAt = this.now();
+    const observed = new Map;
+    for (const [position, store] of authored.entries()) {
+      const part = parts[position];
+      const kept = this.observed.get(store);
+      if (!force && kept && kept.part === part && !part.endsWith(UNREADABLE_VISIBILITY)) {
+        observed.set(store, kept);
+        continue;
+      }
+      try {
+        observed.set(store, { part, observations: await readStoreObservations(store) });
+      } catch {}
+    }
+    this.observed = observed;
+    return linkStores(this.index, stores, [...observed.values()].flatMap((entry) => entry.observations));
+  }
+}
+function fingerprintParts(stores) {
+  return stores.map((store) => {
+    let sync = "";
+    let visibility = "";
+    try {
+      const run = store.lastSyncRun?.();
+      sync = run && run.status === "completed" ? `${run.syncRunId}@${run.completedAt ?? ""}` : "";
+    } catch {
+      sync = "";
+    }
+    try {
+      visibility = store.peopleVisibilityMarker?.() ?? "";
+    } catch {
+      return `${sync}${UNREADABLE_VISIBILITY}`;
+    }
+    return `${sync}#${visibility}`;
+  });
+}
+var PEOPLE_LINK_REASON_TEXT, MAX_ADDRESS_TEXT_CHARS = 4096, addressesIn = (value) => addressSpansIn(value.slice(0, MAX_ADDRESS_TEXT_CHARS)), PEOPLE_AUTHORED_FAMILIES, PEOPLE_INDEX_MIN_REBUILD_MS = 60000, UNREADABLE_VISIBILITY = "#unreadable";
 var init_people_index = __esm(() => {
   init_olympus_layout();
   init_sender_rules();
