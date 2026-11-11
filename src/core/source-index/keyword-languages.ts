@@ -5,17 +5,33 @@ import { franc } from 'franc-min';
 
 interface Profile { revision: string; signature: string; languages: readonly string[]; detected: Map<string, string> }
 const profiles = new WeakMap<Database, Profile>();
+const SAMPLE_TARGET = 1024;
+const SAMPLE_LIMIT = 2048;
 export function storeKeywordLanguages(db: Database): readonly string[] {
   const revision = JSON.stringify([db.query('PRAGMA data_version').get(), db.query('SELECT total_changes() AS n').get()]);
   const cached = profiles.get(db);
   if (cached?.revision === revision) return cached.languages;
-  const total = (db.query('SELECT count(*) AS n FROM chunks c JOIN items i ON i.item_pk = c.item_pk WHERE i.tombstoned = 0').get() as {n:number}).n;
-  // A stable uniform hash sample caps cold detection and JS memory. All chunks
-  // in small stores; around 1,024 in large stores, never over 2,048.
-  const threshold = Math.floor(Math.min(1, 1024 / Math.max(1, total)) * 4294967296);
-  const rows = db.query(`SELECT c.rowid AS pk, c.content_hash AS hash FROM chunks c
-    JOIN items i ON i.item_pk = c.item_pk WHERE i.tombstoned = 0
-      AND ((c.rowid * 2654435761) % 4294967296) < ? ORDER BY c.rowid LIMIT 2048`).all(threshold) as {pk: number; hash: string}[];
+  // A stable uniform sample caps cold detection and JS memory: every live
+  // chunk in a small store, about 1,024 evenly spaced rowids in a large one,
+  // never over 2,048. Both reads use the rowid, never a scan: this runs on
+  // the request thread before every Ask's keyword search, and a full pass
+  // over a 700k-item store's chunks held that thread for about 36 s on
+  // Sparta (#1305), again after every write the cache could not survive.
+  const maxRowid = (db.query('SELECT max(rowid) AS n FROM chunks').get() as {n: number | null}).n ?? 0;
+  const live = `SELECT c.rowid AS pk, c.content_hash AS hash FROM chunks c
+    JOIN items i ON i.item_pk = c.item_pk WHERE i.tombstoned = 0`;
+  let rows: {pk: number; hash: string}[];
+  if (maxRowid <= SAMPLE_LIMIT) {
+    rows = db.query(`${live} ORDER BY c.rowid LIMIT ${SAMPLE_LIMIT}`).all() as {pk: number; hash: string}[];
+  } else {
+    const step = maxRowid / SAMPLE_TARGET;
+    const ids = Array.from({ length: SAMPLE_TARGET }, (_, k) => Math.max(1, Math.floor((k + 1) * step)));
+    rows = [];
+    for (let at = 0; at < ids.length; at += 500) {
+      const batch = ids.slice(at, at + 500);
+      rows.push(...db.query(`${live} AND c.rowid IN (${batch.map(() => '?').join(',')}) ORDER BY c.rowid`).all(...batch) as {pk: number; hash: string}[]);
+    }
+  }
   const signature = JSON.stringify(rows);
   if (cached?.signature === signature) { cached.revision = revision; return cached.languages; }
   const detected = new Map<string, string>();

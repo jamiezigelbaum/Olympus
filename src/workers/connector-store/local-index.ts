@@ -1208,6 +1208,10 @@ export const TIER_MOVE_CONNECTOR_ID = 'olympus_tier_move';
  * its last sync saw the one item a tier move copied.
  */
 const NON_SYNC_RUN_CONNECTORS_SQL = `('connector_store_embedding_write_authority', '${TIER_SET_BINDING_CONNECTOR_ID}', '${TIER_MOVE_CONNECTOR_ID}', '${RESTORED_SCOPE_CONNECTOR_ID}')`;
+/** The newest real sync run; idx_sync_runs_last_sync serves it without a sort. */
+export const LAST_SYNC_RUN_SQL = `SELECT * FROM sync_runs
+  WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
+  ORDER BY started_at DESC, rowid DESC LIMIT 1`;
 
 export class ConnectorStoreLocatorIdentityIndexNotReadyError extends Error {
   constructor() {
@@ -9312,6 +9316,13 @@ export class LocalConnectorStore {
         error TEXT,
         audit_receipt_sha256 TEXT
       );
+      -- lastSyncRun's order, over real syncs only: every tier move and
+      -- binding also writes a run, and sorting hundreds of thousands of them
+      -- held the request thread for seconds on each status or people check
+      -- (#1305). The WHERE must stay identical to lastSyncRun's for SQLite
+      -- to use it.
+      CREATE INDEX IF NOT EXISTS idx_sync_runs_last_sync ON sync_runs(started_at)
+        WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL};
     `);
     createConversationScopedItemsTable(this.db, 'items', true);
     this.db.exec(`
@@ -14278,11 +14289,7 @@ export class LocalConnectorStore {
     // random UUID, so tie-breaking on it picks a run at random (an
     // order-dependent flake in status().lastSyncRun). rowid is monotonic with
     // insertion, so it breaks the tie by true recency.
-    const last = this.db.query(
-      `SELECT * FROM sync_runs
-       WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
-       ORDER BY started_at DESC, rowid DESC LIMIT 1`,
-    ).get() as SyncRunRow | null;
+    const last = this.db.query(LAST_SYNC_RUN_SQL).get() as SyncRunRow | null;
     return last ? syncRunFromRow(last) : undefined;
   }
 

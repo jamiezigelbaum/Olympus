@@ -43,6 +43,7 @@ import {
   verifyConnectorStoreCorpusIntegrity,
 } from '../src/workers/connector-store/index.ts';
 import { TIER_MOVE_CONNECTOR_ID } from '../src/workers/connector-store/tier-move.ts';
+import { LAST_SYNC_RUN_SQL } from '../src/workers/connector-store/local-index.ts';
 import { setReadPoolClockForTests } from '../src/workers/connector-store/off-thread-reads.ts';
 import { ControlPathHeadroom } from '../src/workers/control-path-headroom.ts';
 import { createTestClock } from './helpers/test-clock.ts';
@@ -2163,6 +2164,17 @@ describe('LocalConnectorStore sync', () => {
     expect(store.status().lastSyncRun?.syncRunId).toBe('connector-sync-aaa-latest');
     // The cheap accessor schedulers use answers exactly what status reports.
     expect(store.lastSyncRun()).toEqual(store.status().lastSyncRun);
+    store.close();
+  });
+
+  test('lastSyncRun reads the newest real sync through its index, without sorting every run (#1305)', () => {
+    const dbPath = join(mkdtempSync(join(tmpdir(), 'connector-store-')), 'store.sqlite');
+    const store = newStore(dbPath);
+    const db = new Database(dbPath, { readonly: true });
+    const plan = (db.query(`EXPLAIN QUERY PLAN ${LAST_SYNC_RUN_SQL}`).all() as Array<{ detail: string }>).map((row) => row.detail);
+    db.close();
+    expect(plan.join('\n')).toContain('idx_sync_runs_last_sync');
+    expect(plan.join('\n')).not.toContain('TEMP B-TREE');
     store.close();
   });
 
