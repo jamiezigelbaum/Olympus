@@ -39,6 +39,7 @@ import {
 } from '../src/core/source-index/types.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
+import { textLaneAccepts } from '../src/workers/file-extraction/extractors/text.ts';
 import {
   OCR_DETERMINISTIC_PDF_REJECTION_KINDS,
   OCR_EXTRACTOR_KIND,
@@ -597,6 +598,39 @@ describe('extraction runner: one refused bucket never fails a plan pass', () => 
       expect(plan).toMatchObject({ candidates: 3, jobsQueued: 2, jobsSkippedImageNotPrivate: 1 });
       const leased = jobs.lease({ ...LANE, workerId: 'w', limit: 10 }).leasedJobs.map((job) => job.ref.providerItemId).sort();
       expect(leased).toEqual(['item-1', 'item-3']);
+    } finally {
+      jobs.close();
+    }
+  });
+
+  test('a candidate stored as plain bytes is routed by its name when the name says what it is', async () => {
+    const jobs = jobStore();
+    try {
+      const runner = runnerFor({
+        jobs,
+        extractors: [fakeExtractor({ kind: 'local_text', accepts: textLaneAccepts })],
+        corpus: {
+          source: fakeSource({
+            async listCandidates() {
+              return {
+                candidates: [
+                  ref(1, { mimeType: 'application/octet-stream', name: 'minutes.xml' }),
+                  ref(2, { mimeType: 'application/octet-stream', name: 'settings.yaml' }),
+                  ref(3, { mimeType: 'application/octet-stream', name: 'keynote.key' }),
+                  ref(4, { mimeType: 'application/octet-stream', name: 'no-extension' }),
+                ],
+                done: true,
+              };
+            },
+          }),
+        },
+      });
+      const plan = await runner.plan({ ...LANE, limit: 10 });
+      expect(plan).toMatchObject({ candidates: 4, jobsQueued: 2, jobsUnroutable: 2 });
+      const leased = jobs.lease({ ...LANE, workerId: 'w', limit: 10 }).leasedJobs
+        .map((job) => [job.ref.providerItemId, job.ref.mimeType])
+        .sort();
+      expect(leased).toEqual([['item-1', 'application/xml'], ['item-2', 'text/plain']]);
     } finally {
       jobs.close();
     }

@@ -81287,6 +81287,130 @@ function isBoundedSourceCheckpoint(value) {
 }
 var SOURCE_CHECKPOINT_MAX_LENGTH = 32768;
 
+// src/core/file-mime.ts
+function fileMimeTypeFromName(name) {
+  const dot2 = name.lastIndexOf(".");
+  if (dot2 <= 0 || dot2 === name.length - 1)
+    return "application/octet-stream";
+  const extension = name.slice(dot2 + 1).toLowerCase();
+  return MIME_BY_EXTENSION[extension] ?? (SOURCE_CODE_EXTENSIONS.has(extension) ? "text/plain" : "application/octet-stream");
+}
+function fileMimeTypeFromBytes(bytes) {
+  const image = stillImageFormatFromBytes(bytes);
+  if (image)
+    return stillImageMimeTypes(image)[0];
+  if (asciiAt(bytes, 0, 5) === "%PDF-")
+    return "application/pdf";
+  if (asciiAt(bytes, 0, 3) === "ID3" || bytes.length >= 2 && bytes[0] === 255 && (bytes[1] & 224) === 224)
+    return "audio/mpeg";
+  if (asciiAt(bytes, 0, 4) === "RIFF" && asciiAt(bytes, 8, 4) === "WAVE")
+    return "audio/wav";
+  if (asciiAt(bytes, 0, 4) === "OggS")
+    return "audio/ogg";
+  if (asciiAt(bytes, 0, 4) === "fLaC")
+    return "audio/flac";
+  if (asciiAt(bytes, 4, 4) === "ftyp") {
+    const brand = asciiAt(bytes, 8, 4);
+    if (brand === "M4A " || brand === "M4B ")
+      return "audio/mp4";
+    if (brand === "qt  ")
+      return "video/quicktime";
+    return "video/mp4";
+  }
+  return;
+}
+var MIME_BY_EXTENSION, SOURCE_CODE_EXTENSIONS, asciiAt = (bytes, start, length) => bytes.length >= start + length ? String.fromCharCode(...bytes.subarray(start, start + length)) : "";
+var init_file_mime = __esm(() => {
+  init_still_image_formats();
+  MIME_BY_EXTENSION = Object.freeze({
+    pdf: "application/pdf",
+    txt: "text/plain",
+    text: "text/plain",
+    md: "text/plain",
+    markdown: "text/plain",
+    log: "text/plain",
+    rst: "text/plain",
+    org: "text/plain",
+    tex: "text/plain",
+    srt: "text/plain",
+    vtt: "text/plain",
+    csv: "text/csv",
+    tsv: "text/tab-separated-values",
+    json: "application/json",
+    yaml: "text/plain",
+    yml: "text/plain",
+    toml: "text/plain",
+    xml: "application/xml",
+    html: "text/html",
+    htm: "text/html",
+    rtf: "application/rtf",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    png: "image/png",
+    gif: "image/gif",
+    webp: "image/webp",
+    heic: "image/heic",
+    heif: "image/heif",
+    tif: "image/tiff",
+    tiff: "image/tiff",
+    bmp: "image/bmp",
+    mp3: "audio/mpeg",
+    m4a: "audio/mp4",
+    wav: "audio/wav",
+    flac: "audio/flac",
+    ogg: "audio/ogg",
+    aac: "audio/aac",
+    mp4: "video/mp4",
+    m4v: "video/x-m4v",
+    mov: "video/quicktime",
+    mkv: "video/x-matroska",
+    webm: "video/webm",
+    avi: "video/x-msvideo",
+    mpg: "video/mpeg",
+    mpeg: "video/mpeg",
+    "3gp": "video/3gpp"
+  });
+  SOURCE_CODE_EXTENSIONS = new Set([
+    "ts",
+    "tsx",
+    "js",
+    "jsx",
+    "mjs",
+    "cjs",
+    "py",
+    "rb",
+    "go",
+    "rs",
+    "java",
+    "kt",
+    "swift",
+    "c",
+    "h",
+    "cc",
+    "cpp",
+    "hpp",
+    "cs",
+    "php",
+    "sh",
+    "bash",
+    "zsh",
+    "sql",
+    "css",
+    "scss",
+    "lua",
+    "pl",
+    "r",
+    "scala",
+    "ini",
+    "cfg",
+    "conf",
+    "env"
+  ]);
+});
+
 // src/workers/dropbox-files/provider-client.ts
 function isDropboxCursorResetError(error) {
   return dropboxErrorKind(error) === "dropbox_cursor_reset";
@@ -81455,42 +81579,6 @@ class DropboxApiContentDownloadClient {
       size_bytes: declaredSize ?? bytes.byteLength
     };
   }
-}
-function dropboxMimeTypeFromName(name) {
-  const lower = name.toLowerCase();
-  if (lower.endsWith(".pdf"))
-    return "application/pdf";
-  if (lower.endsWith(".txt") || lower.endsWith(".md"))
-    return "text/plain";
-  if (lower.endsWith(".csv"))
-    return "text/csv";
-  if (lower.endsWith(".json"))
-    return "application/json";
-  if (lower.endsWith(".html") || lower.endsWith(".htm"))
-    return "text/html";
-  if (lower.endsWith(".docx"))
-    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-  if (lower.endsWith(".xlsx"))
-    return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-  if (lower.endsWith(".pptx"))
-    return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
-  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg"))
-    return "image/jpeg";
-  if (lower.endsWith(".png"))
-    return "image/png";
-  if (lower.endsWith(".gif"))
-    return "image/gif";
-  if (lower.endsWith(".webp"))
-    return "image/webp";
-  if (lower.endsWith(".heic"))
-    return "image/heic";
-  if (lower.endsWith(".heif"))
-    return "image/heif";
-  if (lower.endsWith(".tif") || lower.endsWith(".tiff"))
-    return "image/tiff";
-  if (lower.endsWith(".bmp"))
-    return "image/bmp";
-  return;
 }
 function metadataPageFromDropboxJson(payload2) {
   if (!Array.isArray(payload2.entries)) {
@@ -82000,7 +82088,7 @@ function rawItemFromDropboxEntry(entry, account, fetchedAt, deletedItemIdentityR
   return rawItemFromFileEntry(entry, account, fetchedAt);
 }
 function rawItemFromFileEntry(entry, account, fetchedAt) {
-  const mimeType = entry.mimeType ?? dropboxMimeTypeFromName(entry.name) ?? UNKNOWN_MIME_TYPE;
+  const mimeType = entry.mimeType ?? fileMimeTypeFromName(entry.name);
   return {
     identity: {
       family: "file",
@@ -82212,6 +82300,7 @@ function nowIso2() {
 var CONNECTOR_ID = "dropbox", DEFAULT_CREDENTIAL_HANDLE = "dropbox.personal", DEFAULT_MAX_FETCH_BYTES = 8000000, DEFAULT_PAGE_LIMIT = 1000, MAX_PAGE_LIMIT = 2000, MAX_TRAVERSAL_ITEMS = 1e5, DELETED_FOLDER_LOOKAHEAD_ENTRIES = 50000, DROPBOX_PAGE_CURSOR_PREFIX = "dbxp1:", FOLDER_MIME_TYPE = "inode/directory", UNKNOWN_MIME_TYPE = "application/octet-stream";
 var init_connector3 = __esm(() => {
   init_credential_broker();
+  init_file_mime();
   init_provider_client();
 });
 
@@ -93254,6 +93343,10 @@ function resolveExtractionMimeType(refMimeType, fetchedMimeType) {
     return enqueued;
   return normalizeMimeType2(fetchedMimeType) ?? enqueued;
 }
+function isGenericMimeType(mimeType) {
+  const normalized = normalizeMimeType2(mimeType);
+  return normalized === undefined || GENERIC_MIME_TYPES.has(normalized);
+}
 function hasPdfSignature(bytes) {
   return bytes.length >= 5 && bytes[0] === 37 && bytes[1] === 80 && bytes[2] === 68 && bytes[3] === 70 && bytes[4] === 45;
 }
@@ -99395,8 +99488,9 @@ function createFileExtractionRunner(options) {
       const refuse2 = (reason, count) => {
         refused.set(reason, (refused.get(reason) ?? 0) + count);
       };
-      for (const ref of page2.candidates) {
+      for (const candidate of page2.candidates) {
         await ingestionTurn();
+        const ref = withMediaTypeFromName(candidate);
         if (isImageMediaType(ref.mimeType) && refusesImageContent(corpus, ref)) {
           jobsSkippedImageNotPrivate += 1;
           continue;
@@ -100167,6 +100261,12 @@ function refusesImageContent(corpus, ref) {
     return false;
   }
 }
+function withMediaTypeFromName(ref) {
+  if (!ref.name || !isGenericMimeType(ref.mimeType))
+    return ref;
+  const named = fileMimeTypeFromName(ref.name);
+  return isGenericMimeType(named) ? ref : { ...ref, mimeType: named };
+}
 var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT = "model_endpoint_redirect", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_ERROR_KIND_INTERNAL_ERROR = "extraction_internal_error", EXTRACTION_ERROR_KIND_RECORD_REFUSED = "extraction_record_refused", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_EGRESS_REFUSED_JOB_UNKNOWN = "egress_job_policy_unreadable", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_SOURCE_BUDGET = "source_budget_exhausted", SOURCE_PARK_FALLBACK_MS, EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS, ExtractionEgressRefusedError, PLAN_REFUSED_EXTRACTOR_KIND = "extractor_kind_refused", PLAN_REFUSED_EXTRACTOR_VERSION = "extractor_version_refused", PLAN_REFUSED_ITEM_FIELD = "item_field_refused", PLAN_REFUSED_ROUTING_FAILED = "routing_failed", ITEM_REF_FIELDS, PDF_MIME_TYPES, PDF_DRAIN_PLAN_PAGE = 500, PDF_DRAIN_BATCH = 1;
 var init_runner = __esm(() => {
   init_control_path_headroom();
@@ -100178,6 +100278,7 @@ var init_runner = __esm(() => {
   init_command_runner();
   init_tier_classifier();
   init_bounded_text();
+  init_file_mime();
   init_job_store();
   init_secret_scan_off_thread();
   init_store_sink();
@@ -182327,130 +182428,6 @@ var init_session = __esm(() => {
   init_pacer();
   RATE_LIMIT_TEXT = /rate.?limit|too many requests|\b429\b/i;
   PERMISSION_TEXT = /permission denied|insufficient[_ ]scope|wasn't granted|was not granted|\bforbidden\b/i;
-});
-
-// src/core/file-mime.ts
-function fileMimeTypeFromName(name) {
-  const dot3 = name.lastIndexOf(".");
-  if (dot3 <= 0 || dot3 === name.length - 1)
-    return "application/octet-stream";
-  const extension = name.slice(dot3 + 1).toLowerCase();
-  return MIME_BY_EXTENSION[extension] ?? (SOURCE_CODE_EXTENSIONS.has(extension) ? "text/plain" : "application/octet-stream");
-}
-function fileMimeTypeFromBytes(bytes) {
-  const image = stillImageFormatFromBytes(bytes);
-  if (image)
-    return stillImageMimeTypes(image)[0];
-  if (asciiAt(bytes, 0, 5) === "%PDF-")
-    return "application/pdf";
-  if (asciiAt(bytes, 0, 3) === "ID3" || bytes.length >= 2 && bytes[0] === 255 && (bytes[1] & 224) === 224)
-    return "audio/mpeg";
-  if (asciiAt(bytes, 0, 4) === "RIFF" && asciiAt(bytes, 8, 4) === "WAVE")
-    return "audio/wav";
-  if (asciiAt(bytes, 0, 4) === "OggS")
-    return "audio/ogg";
-  if (asciiAt(bytes, 0, 4) === "fLaC")
-    return "audio/flac";
-  if (asciiAt(bytes, 4, 4) === "ftyp") {
-    const brand = asciiAt(bytes, 8, 4);
-    if (brand === "M4A " || brand === "M4B ")
-      return "audio/mp4";
-    if (brand === "qt  ")
-      return "video/quicktime";
-    return "video/mp4";
-  }
-  return;
-}
-var MIME_BY_EXTENSION, SOURCE_CODE_EXTENSIONS, asciiAt = (bytes, start, length) => bytes.length >= start + length ? String.fromCharCode(...bytes.subarray(start, start + length)) : "";
-var init_file_mime = __esm(() => {
-  init_still_image_formats();
-  MIME_BY_EXTENSION = Object.freeze({
-    pdf: "application/pdf",
-    txt: "text/plain",
-    text: "text/plain",
-    md: "text/plain",
-    markdown: "text/plain",
-    log: "text/plain",
-    rst: "text/plain",
-    org: "text/plain",
-    tex: "text/plain",
-    srt: "text/plain",
-    vtt: "text/plain",
-    csv: "text/csv",
-    tsv: "text/tab-separated-values",
-    json: "application/json",
-    yaml: "text/plain",
-    yml: "text/plain",
-    toml: "text/plain",
-    xml: "application/xml",
-    html: "text/html",
-    htm: "text/html",
-    rtf: "application/rtf",
-    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    jpg: "image/jpeg",
-    jpeg: "image/jpeg",
-    png: "image/png",
-    gif: "image/gif",
-    webp: "image/webp",
-    heic: "image/heic",
-    heif: "image/heif",
-    tif: "image/tiff",
-    tiff: "image/tiff",
-    bmp: "image/bmp",
-    mp3: "audio/mpeg",
-    m4a: "audio/mp4",
-    wav: "audio/wav",
-    flac: "audio/flac",
-    ogg: "audio/ogg",
-    aac: "audio/aac",
-    mp4: "video/mp4",
-    m4v: "video/x-m4v",
-    mov: "video/quicktime",
-    mkv: "video/x-matroska",
-    webm: "video/webm",
-    avi: "video/x-msvideo",
-    mpg: "video/mpeg",
-    mpeg: "video/mpeg",
-    "3gp": "video/3gpp"
-  });
-  SOURCE_CODE_EXTENSIONS = new Set([
-    "ts",
-    "tsx",
-    "js",
-    "jsx",
-    "mjs",
-    "cjs",
-    "py",
-    "rb",
-    "go",
-    "rs",
-    "java",
-    "kt",
-    "swift",
-    "c",
-    "h",
-    "cc",
-    "cpp",
-    "hpp",
-    "cs",
-    "php",
-    "sh",
-    "bash",
-    "zsh",
-    "sql",
-    "css",
-    "scss",
-    "lua",
-    "pl",
-    "r",
-    "scala",
-    "ini",
-    "cfg",
-    "conf",
-    "env"
-  ]);
 });
 
 // src/workers/archive-import/notes/note.ts

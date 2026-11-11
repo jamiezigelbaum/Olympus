@@ -416,27 +416,6 @@ export class DropboxApiContentDownloadClient implements DropboxContentDownloadCl
   }
 }
 
-export function dropboxMimeTypeFromName(name: string): string | undefined {
-  const lower = name.toLowerCase();
-  if (lower.endsWith('.pdf')) return 'application/pdf';
-  if (lower.endsWith('.txt') || lower.endsWith('.md')) return 'text/plain';
-  if (lower.endsWith('.csv')) return 'text/csv';
-  if (lower.endsWith('.json')) return 'application/json';
-  if (lower.endsWith('.html') || lower.endsWith('.htm')) return 'text/html';
-  if (lower.endsWith('.docx')) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-  if (lower.endsWith('.xlsx')) return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-  if (lower.endsWith('.pptx')) return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
-  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
-  if (lower.endsWith('.png')) return 'image/png';
-  if (lower.endsWith('.gif')) return 'image/gif';
-  if (lower.endsWith('.webp')) return 'image/webp';
-  if (lower.endsWith('.heic')) return 'image/heic';
-  if (lower.endsWith('.heif')) return 'image/heif';
-  if (lower.endsWith('.tif') || lower.endsWith('.tiff')) return 'image/tiff';
-  if (lower.endsWith('.bmp')) return 'image/bmp';
-  return undefined;
-}
-
 function metadataPageFromDropboxJson(payload: Record<string, unknown>): DropboxMetadataPage {
   if (!Array.isArray(payload.entries)) {
     throw new Error('Dropbox metadata API page did not include entries.');
