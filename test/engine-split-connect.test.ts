@@ -43,7 +43,7 @@ function spawnWorker(env: Record<string, string>, role: 'background' | 'front'):
   return { output: () => output };
 }
 
-async function startSplit(extraEnv: Record<string, string> = {}) {
+async function startSplit(extraEnv: Record<string, string> = {}, beforeFront?: (env: Record<string, string>) => void) {
   const home = mkdtempSync(join('/tmp', 'oec-'));
   roots.push(home);
   mkdirSync(join(home, 'run'), { mode: 0o700 });
@@ -71,6 +71,7 @@ async function startSplit(extraEnv: Record<string, string> = {}) {
   };
   const background = spawnWorker(env, 'background');
   await waitFor(() => background.output().includes('engine background ready'), { timeoutMs: 60_000 });
+  beforeFront?.(env);
   const front = spawnWorker(env, 'front');
   await waitFor(() => front.output().includes('worker listening'), { timeoutMs: 60_000 });
 
@@ -155,8 +156,12 @@ describe('the engine split with a source connected after boot', () => {
   // 43078655631 mounted Telegram's two stores before their ledger existed, with no tier lane over them, and its items
   // had no menu, search or delete for the rest of the run.
   test('the front mounts a two-store lane only once its ledger and index exist', async () => {
-    const { env, front, mountedCorpora, mounts } = await startSplit({ OLYMPUS_SOURCE_INDEX_TELEGRAM_CONNECTOR_STORES_ENABLED: 'true' });
-    const stores = createTelegramConnectorStores(env);
+    // The stores exist before the front starts, so its first mount meets the missing ledger: the front starts anyway.
+    let stores!: ReturnType<typeof createTelegramConnectorStores>;
+    const { env, front, mountedCorpora, mounts } = await startSplit(
+      { OLYMPUS_SOURCE_INDEX_TELEGRAM_CONNECTOR_STORES_ENABLED: 'true' },
+      (env) => { stores = createTelegramConnectorStores(env); },
+    );
     const tries = () => front.output().split("the front could not open a source's stores yet").length - 1;
     await waitFor(() => tries() >= 2 || undefined, { timeoutMs: 20_000, intervalMs: 100 });
     expect(await mountedCorpora()).not.toContain(PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID);

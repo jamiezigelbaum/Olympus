@@ -239584,22 +239584,33 @@ ${key2}`;
       return !engineFront || frontCanMount(paths);
     };
     const both = (sourceId) => [storeAt(sourceId, "internal"), storeAt(sourceId, "secure_local")];
+    const mount = (open7) => {
+      if (!engineFront) {
+        open7();
+        return;
+      }
+      try {
+        open7();
+      } catch (error2) {
+        console.warn(`[olympus] the front could not open a source's stores yet: ${error2 instanceof Error ? error2.message : String(error2)}`);
+      }
+    };
     if (!gmailInternalConnectorStore && gmailConnectorStoreLane.enabled && wanted(GMAIL_SOURCE_ID, connected2("gmail", "gmail.email.sync"), both(GMAIL_SOURCE_ID)))
-      mountGmail();
+      mount(mountGmail);
     if (!googleDriveInternalConnectorStore && googleDriveConnectorStoreLane.enabled && wanted(GOOGLE_DRIVE_SOURCE_ID, connected2("google_drive", "google_drive.docs.sync"), both(GOOGLE_DRIVE_SOURCE_ID)))
-      mountGoogleDrive();
+      mount(mountGoogleDrive);
     if (!dropboxConnectorStore && dropboxConnectorStoreLane.enabled && wanted(DROPBOX_FILES_SOURCE_ID, connected2("dropbox", "dropbox.files.sync"), [storeAt(DROPBOX_FILES_SOURCE_ID, "secure_local")]))
-      mountDropbox();
+      mount(mountDropbox);
     if (!localFilesConnectorStore && localFilesConnectorStoreLane.enabled && wanted(LOCAL_FILES_SOURCE_ID, fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID) !== undefined, [storeAt(LOCAL_FILES_SOURCE_ID, "secure_local")]))
-      mountLocalFiles();
+      mount(mountLocalFiles);
     if (!whatsappConnectorStore && whatsappConnectorStoreLane.enabled && wanted(WHATSAPP_PERSONAL_SOURCE_ID, connected2("whatsapp_personal", "whatsapp.personal.messages.sync"), [storeAt(WHATSAPP_PERSONAL_SOURCE_ID, "secure_local")]))
-      mountWhatsApp();
+      mount(mountWhatsApp);
     if (!telegramConnectorStores && telegramConnectorStoreLane.enabled && wanted(TELEGRAM_MESSAGES_SOURCE_ID, connected2("telegram", "telegram.messages.sync"), both(TELEGRAM_MESSAGES_SOURCE_ID)))
-      mountTelegram();
+      mount(mountTelegram);
     if (!readwiseConnectorStore && readwiseConnectorStoreLane.enabled && wanted(READWISE_SOURCE_ID, connected2("readwise", "readwise.sync"), [storeAt(READWISE_SOURCE_ID, "internal")]))
-      mountReadwise();
+      mount(mountReadwise);
     if (!xBookmarksConnectorStore && xBookmarksConnectorStoreLane.enabled && wanted(X_BOOKMARKS_SOURCE_ID, connected2("x", "x.bookmarks.sync"), [storeAt(X_BOOKMARKS_SOURCE_ID, "internal")]))
-      mountXBookmarks();
+      mount(mountXBookmarks);
     mountConfiguredSourceStores();
   };
   mountSourceLanes(connectedHandles);

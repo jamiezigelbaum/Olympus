@@ -2048,14 +2048,22 @@ export async function main(): Promise<void> {
       return !engineFront || frontCanMount(paths);
     };
     const both = (sourceId: string): string[] => [storeAt(sourceId, 'internal'), storeAt(sourceId, 'secure_local')];
-    if (!gmailInternalConnectorStore && gmailConnectorStoreLane.enabled && wanted(GMAIL_SOURCE_ID, connected('gmail', 'gmail.email.sync'), both(GMAIL_SOURCE_ID))) mountGmail();
-    if (!googleDriveInternalConnectorStore && googleDriveConnectorStoreLane.enabled && wanted(GOOGLE_DRIVE_SOURCE_ID, connected('google_drive', 'google_drive.docs.sync'), both(GOOGLE_DRIVE_SOURCE_ID))) mountGoogleDrive();
-    if (!dropboxConnectorStore && dropboxConnectorStoreLane.enabled && wanted(DROPBOX_FILES_SOURCE_ID, connected('dropbox', 'dropbox.files.sync'), [storeAt(DROPBOX_FILES_SOURCE_ID, 'secure_local')])) mountDropbox();
-    if (!localFilesConnectorStore && localFilesConnectorStoreLane.enabled && wanted(LOCAL_FILES_SOURCE_ID, fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID) !== undefined, [storeAt(LOCAL_FILES_SOURCE_ID, 'secure_local')])) mountLocalFiles();
-    if (!whatsappConnectorStore && whatsappConnectorStoreLane.enabled && wanted(WHATSAPP_PERSONAL_SOURCE_ID, connected('whatsapp_personal', 'whatsapp.personal.messages.sync'), [storeAt(WHATSAPP_PERSONAL_SOURCE_ID, 'secure_local')])) mountWhatsApp();
-    if (!telegramConnectorStores && telegramConnectorStoreLane.enabled && wanted(TELEGRAM_MESSAGES_SOURCE_ID, connected('telegram', 'telegram.messages.sync'), both(TELEGRAM_MESSAGES_SOURCE_ID))) mountTelegram();
-    if (!readwiseConnectorStore && readwiseConnectorStoreLane.enabled && wanted(READWISE_SOURCE_ID, connected('readwise', 'readwise.sync'), [storeAt(READWISE_SOURCE_ID, 'internal')])) mountReadwise();
-    if (!xBookmarksConnectorStore && xBookmarksConnectorStoreLane.enabled && wanted(X_BOOKMARKS_SOURCE_ID, connected('x', 'x.bookmarks.sync'), [storeAt(X_BOOKMARKS_SOURCE_ID, 'internal')])) mountXBookmarks();
+    // In the front a lane the background is still creating fails to mount (its ledger or index is not there yet).
+    // That lane waits for frontMountRetry; it never stops the other lanes, or the front's own start.
+    const mount = (open: () => void): void => {
+      if (!engineFront) { open(); return; }
+      try { open(); } catch (error) {
+        console.warn(`[olympus] the front could not open a source's stores yet: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    };
+    if (!gmailInternalConnectorStore && gmailConnectorStoreLane.enabled && wanted(GMAIL_SOURCE_ID, connected('gmail', 'gmail.email.sync'), both(GMAIL_SOURCE_ID))) mount(mountGmail);
+    if (!googleDriveInternalConnectorStore && googleDriveConnectorStoreLane.enabled && wanted(GOOGLE_DRIVE_SOURCE_ID, connected('google_drive', 'google_drive.docs.sync'), both(GOOGLE_DRIVE_SOURCE_ID))) mount(mountGoogleDrive);
+    if (!dropboxConnectorStore && dropboxConnectorStoreLane.enabled && wanted(DROPBOX_FILES_SOURCE_ID, connected('dropbox', 'dropbox.files.sync'), [storeAt(DROPBOX_FILES_SOURCE_ID, 'secure_local')])) mount(mountDropbox);
+    if (!localFilesConnectorStore && localFilesConnectorStoreLane.enabled && wanted(LOCAL_FILES_SOURCE_ID, fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID) !== undefined, [storeAt(LOCAL_FILES_SOURCE_ID, 'secure_local')])) mount(mountLocalFiles);
+    if (!whatsappConnectorStore && whatsappConnectorStoreLane.enabled && wanted(WHATSAPP_PERSONAL_SOURCE_ID, connected('whatsapp_personal', 'whatsapp.personal.messages.sync'), [storeAt(WHATSAPP_PERSONAL_SOURCE_ID, 'secure_local')])) mount(mountWhatsApp);
+    if (!telegramConnectorStores && telegramConnectorStoreLane.enabled && wanted(TELEGRAM_MESSAGES_SOURCE_ID, connected('telegram', 'telegram.messages.sync'), both(TELEGRAM_MESSAGES_SOURCE_ID))) mount(mountTelegram);
+    if (!readwiseConnectorStore && readwiseConnectorStoreLane.enabled && wanted(READWISE_SOURCE_ID, connected('readwise', 'readwise.sync'), [storeAt(READWISE_SOURCE_ID, 'internal')])) mount(mountReadwise);
+    if (!xBookmarksConnectorStore && xBookmarksConnectorStoreLane.enabled && wanted(X_BOOKMARKS_SOURCE_ID, connected('x', 'x.bookmarks.sync'), [storeAt(X_BOOKMARKS_SOURCE_ID, 'internal')])) mount(mountXBookmarks);
     mountConfiguredSourceStores();
   };
   mountSourceLanes(connectedHandles);
