@@ -15366,9 +15366,9 @@ const lexicalContentPreference: ContentPreference = connectorStoreContentPrefere
 // part of the question in words, or a file with no text for a vector hit to
 // vet, otherwise fell behind every vetted hit and out of the store's results
 // (gap-1 and value-2, rerun 19 on 2026-11-11). Each leader takes its seat
-// rule's place (seatNameLeader), but never a place past the cut: when that
-// place is past it, the leader takes the last seat the cut leaves it.
-function rankedCandidates(
+// rule's place (seatNameLeader), but never later than the store's second and
+// third seats (STORE_LEADER_LATEST_SEAT), whatever the cut.
+export function rankedCandidates(
   candidates: readonly FusedRankedCandidate<ConnectorStoreSearchRow>[],
   limit: number,
   complete: (candidate: FusedRankedCandidate<ConnectorStoreSearchRow>) => boolean,
@@ -15394,11 +15394,23 @@ function rankedCandidates(
     isLeader: (candidate) => candidate.item.sourceItem.localItemId === leaderId,
     matchesWholeQuestion,
     readable: hasContent,
-    // Room inside the cut for this leader and every leader still to seat.
-    latestSeat: cut - leaders.length + index,
+    // Fixed, not taken from the cut, so a store's order is the same at every
+    // budget (a smaller result is the head of a larger one), and room inside
+    // the cut for this leader and every leader still to seat.
+    latestSeat: Math.min(STORE_LEADER_LATEST_SEAT, cut - leaders.length) + index,
   }));
   return ordered.slice(0, cut);
 }
+
+// The latest seat a store gives its first keyword leader (its second, if it
+// has two, takes the next): right after the store's own first result. The
+// pack seats stores in turn (applyPerCorpusResultBudget), so on an install
+// with many stores a pack holds only a store's first one or two results: the
+// default 24 seats over the owner's 22 stores, and a local Analyst's fitted
+// prompt holds fewer still. A leader any lower is never read. It was taken
+// from the cut before, which held at 5 results and never acted at 24 (rerun
+// 22, 2026-11-11).
+export const STORE_LEADER_LATEST_SEAT = 1;
 
 // The seat for the best name match (#1287): right after the best readable
 // candidate that matches only part of the question, so the first seat stays
