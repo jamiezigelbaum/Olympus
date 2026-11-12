@@ -156447,6 +156447,8 @@ async function handleRemoteCallTool(request, makeOperationContext, authorized = 
         ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {},
         releaseManifests: manifests.manifests
       });
+    if (operation.name === "source_item_read")
+      recordRemoteItemRead(ctx.caller, args.selected_item, output);
     recordRemoteOperation({ operation: operation.name, args, caller: ctx.caller, output, capture, privateQuestion: privateMayAnswer ? privatePart?.answerRef : undefined });
     return { content: text3(privateMayAnswer ? withRemotePrivateNote(output, privatePart?.answerId, privatePart?.secretMatch) : output) };
   } catch (error2) {
@@ -156488,6 +156490,19 @@ async function normalizedJsonRpcErrorResponse(response) {
   const headers = new Headers(response.headers);
   headers.delete("Content-Length");
   return new Response(JSON.stringify(normalized), { status: response.status, statusText: response.statusText, headers });
+}
+function recordRemoteItemRead(caller, selected, output) {
+  const pages = Array.isArray(output.pages) ? output.pages : [];
+  if (pages.length === 0 || !selected || typeof selected !== "object")
+    return;
+  const identity2 = selected;
+  const numbers = pages.map((page2) => page2.page).filter((n) => typeof n === "number");
+  const span = numbers.length > 1 ? `pages ${numbers[0]}-${numbers[numbers.length - 1]}` : `page ${numbers[0] ?? 1}`;
+  recordAppRequest({
+    caller,
+    question: `Read ${span} of a found item`,
+    capture: { items: [releasedItemFromEvidence({ ...identity2, trust_domain: "internal" }, sourceLabel(identity2.provider, identity2.family))], heldBack: 0 }
+  });
 }
 function createOlympusMcpServer(surface, makeOperationContext, extension, authorized, readHandles) {
   const server = new Server({ name: "olympus", version: VERSION }, { capabilities: { tools: {} } });
@@ -239311,6 +239326,14 @@ async function runSearch(args, options, authorized, context3, signal) {
       const handle = item ? context3.issueReadHandle(item) : undefined;
       if (handle)
         entry.read_handle = handle;
+    }
+    const lines2 = evidence.filter((entry) => entry.read_handle).map((entry) => `[${entry.id}] read_handle: ${entry.read_handle}`);
+    if (lines2.length > 0 && result.content[0]) {
+      result = { ...result, content: [{ ...result.content[0], text: `${result.content[0].text}
+
+To read more of an item, pass its read_handle to source_item_read:
+${lines2.join(`
+`)}` }, ...result.content.slice(1)] };
     }
   }
   if (context3.caller) {

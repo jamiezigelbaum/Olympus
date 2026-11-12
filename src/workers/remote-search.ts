@@ -209,6 +209,11 @@ async function runSearch(
       const handle = item ? context.issueReadHandle(item) : undefined;
       if (handle) entry.read_handle = handle;
     }
+    // Clients that pass only text to their model need the handles there too.
+    const lines = evidence.filter((entry) => entry.read_handle).map((entry) => `[${entry.id}] read_handle: ${entry.read_handle}`);
+    if (lines.length > 0 && result.content[0]) {
+      result = { ...result, content: [{ ...result.content[0], text: `${result.content[0].text}\n\nTo read more of an item, pass its read_handle to source_item_read:\n${lines.join('\n')}` }, ...result.content.slice(1)] };
+    }
   }
   if (context.caller) {
     recordAppRequest({

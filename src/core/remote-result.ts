@@ -145,7 +145,8 @@ export const REMOTE_SOURCE_LABELS: readonly string[] = Object.freeze([...new Set
   OTHER_SOURCE_LABEL,
 ])].sort());
 
-function sourceLabel(provider: unknown, family: unknown): string {
+/** The product name a remote result shows for an item's source. */
+export function sourceLabel(provider: unknown, family: unknown): string {
   if (typeof provider === 'string' && Object.prototype.hasOwnProperty.call(PROVIDER_LABELS, provider)) return PROVIDER_LABELS[provider]!;
   if (typeof family === 'string' && Object.prototype.hasOwnProperty.call(FAMILY_LABELS, family)) return FAMILY_LABELS[family]!;
   return OTHER_SOURCE_LABEL;

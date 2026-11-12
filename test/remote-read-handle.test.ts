@@ -17,6 +17,7 @@ import { createRemoteMcpHandler } from '../src/workers/remote-mcp.ts';
 import { searchToolResult } from '../src/workers/chatgpt/response-builder.ts';
 import { recordReleaseManifest, releasedTextDigest } from '../src/core/release-manifest.ts';
 import { createTestClock } from './helpers/test-clock.ts';
+import { setAppReleaseRecorder } from '../src/core/app-release-capture.ts';
 import { fixtureConnector, fixtureItem, JUDGED_PERSONAL_SNIFFER, tempDir } from './helpers/tier-fixtures.ts';
 import { provedReleaseCheck } from './helpers/scripted-search-release.ts';
 
@@ -48,7 +49,7 @@ async function fixture() {
   const first = connections.create('First app'); const second = connections.create('Second app');
   const clock = createTestClock();
   const handler = createRemoteMcpHandler({ connections: () => connections, readHandleNow: clock.now, log: () => {},
-    makeOperationContext: () => ctx,
+    makeOperationContext: (caller) => ({ ...ctx, caller }),
     search: { evidenceSearch: async () => {
       const result = raw();
       recordReleaseManifest({ inputs: result.evidence.filter(item => item.trust_domain === 'internal' || item.trust_domain === 'public_safe').map(item => ({
@@ -210,4 +211,29 @@ test('OpenAPI neither advertises nor accepts the MCP-only handle read', async ()
   }));
   expect(result.status).toBe(404);
   expect(await result.text()).not.toContain('orchard');
+});
+
+test('remote search text names each handle beside its evidence id for content-only clients', async () => {
+  const f = await fixture(); const result = await f.search();
+  const [first, second] = result.structuredContent.evidence;
+  const text = result.content.map((part: any) => part.text).join('\n');
+  expect(text).toContain(`[E1] read_handle: ${first.read_handle}`);
+  expect(text).toContain(`[E2] read_handle: ${second.read_handle}`);
+  expect(text).not.toContain('[E3] read_handle');
+  expect(text).not.toContain(selected.local_item_id);
+});
+
+test('a remote item read lands in the owner\'s received-items history; a refusal records nothing', async () => {
+  const records: any[] = [];
+  setAppReleaseRecorder((record) => records.push(record)); cleanup.push(() => setAppReleaseRecorder(undefined));
+  const f = await fixture(); const handle = (await f.search()).structuredContent.evidence[0].read_handle;
+  records.length = 0;
+  expect(body(await f.read(handle)).pages).toHaveLength(1);
+  expect(records).toHaveLength(1);
+  expect(records[0].items).toEqual([expect.objectContaining({ tier: 'personal', corpusId: selected.corpus_id, provider: selected.provider, providerItemId: selected.provider_item_id, accountScope: selected.account_scope })]);
+  expect(typeof records[0].question).toBe('string');
+  expect(JSON.stringify(records[0])).not.toContain('Personal orchard.');
+  f.ledgerDb.exec("UPDATE tier_items SET content_tier = 'secure'");
+  await f.read(handle); await f.read(`rh_${'0'.repeat(32)}`);
+  expect(records).toHaveLength(1);
 });
