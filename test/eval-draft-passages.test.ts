@@ -192,7 +192,7 @@ test('a resumed run reuses the drafts already made and asks the model only for t
   let drafts = 0;
   const server = Bun.serve({ port: 0, hostname: '127.0.0.1', async fetch(request) {
     const prompt = ((await request.json()) as { messages: { content: string }[] }).messages.at(-1)!.content;
-    if (!prompt.includes('UNANSWERABLE')) drafts++;
+    if (!prompt.includes('UNANSWERABLE') && !prompt.includes('QUESTION CHECK')) drafts++;
     const result = prompt.includes('UNANSWERABLE')
       ? { questions: Array.from({ length: 5 }, (_, i) => `Where are the nonexistent orchid records number ${i}?`) }
       : { question: 'Which day is the bill due?', quote: 'The Kestrel invoice total is forty seven dollars payable Tuesday' };
@@ -221,7 +221,7 @@ test('a resumed draft is reused only for the same sampled item, and a failed req
   let drafts = 0; let failNext = false;
   const server = Bun.serve({ port: 0, hostname: '127.0.0.1', async fetch(request) {
     const prompt = ((await request.json()) as { messages: { content: string }[] }).messages.at(-1)!.content;
-    if (!prompt.includes('UNANSWERABLE')) {
+    if (!prompt.includes('UNANSWERABLE') && !prompt.includes('QUESTION CHECK')) {
       drafts++;
       if (failNext) { failNext = false; return new Response('busy', { status: 503 }); }
     }
@@ -369,7 +369,7 @@ test('resuming a growth run that wrote over its own input grows from the origina
   let failNext = false; let drafts = 0;
   const server = Bun.serve({ port: 0, hostname: '127.0.0.1', async fetch(request) {
     const prompt = ((await request.json()) as { messages: { content: string }[] }).messages.at(-1)!.content;
-    if (!prompt.includes('UNANSWERABLE')) { drafts++; if (failNext) { failNext = false; return new Response('busy', { status: 503 }); } }
+    if (!prompt.includes('UNANSWERABLE') && !prompt.includes('QUESTION CHECK')) { drafts++; if (failNext) { failNext = false; return new Response('busy', { status: 503 }); } }
     const result = prompt.includes('UNANSWERABLE')
       ? { questions: Array.from({ length: 5 }, (_, i) => `Where are the nonexistent orchid records number ${i}?`) }
       : { question: 'Which day is the bill due?', quote: 'The Kestrel invoice total is forty seven dollars payable Tuesday' };
@@ -391,5 +391,27 @@ test('resuming a growth run that wrote over its own input grows from the origina
     expect(resumed.counts.kept).toBe(3);
     // A file that lost questions the run grew from is refused.
     await expect(draftPassageQuestions({ opened, count: 3, seed: 'grow', model, existing: { ...base, questions: base.questions.slice(1) }, checkpoint: { load: () => saved, save: () => {} } })).rejects.toThrow('grew from');
+  } finally { server.stop(true); opened.close(); }
+});
+test('a question the judge calls generic is redrafted once to be specific, then rejected as generic', async () => {
+  const opened = await world();
+  const judgements: boolean[] = [];
+  let redraftPrompts = 0;
+  const server = Bun.serve({ port: 0, hostname: '127.0.0.1', async fetch(request) {
+    const prompt = ((await request.json()) as { messages: { content: string }[] }).messages.at(-1)!.content;
+    const reply = (value: unknown) => Response.json({ choices: [{ message: { content: JSON.stringify(value) } }] });
+    if (prompt.includes('UNANSWERABLE')) return reply({ questions: Array.from({ length: 5 }, (_, i) => `Where are the orchid records number ${i}?`) });
+    if (prompt.includes('QUESTION CHECK')) return reply({ answers: true, specific: judgements.shift() ?? true });
+    if (prompt.includes('SPECIFIC:')) redraftPrompts++;
+    return reply({ question: 'Which boatyard bill amount is due?', quote: 'The Kestrel invoice total is forty seven dollars payable Tuesday' });
+  } });
+  try {
+    // Item 0: generic, then specific on the redraft (kept). Item 1: generic twice (rejected).
+    judgements.push(false, true, false, false);
+    const result = await draftPassageQuestions({ opened, count: 2, seed: 'generic', model: localDraftModel({ baseUrl: `http://127.0.0.1:${server.port}/v1`, model: 'synthetic' }) });
+    expect(redraftPrompts).toBe(2);
+    expect(result.counts.kept).toBe(1);
+    expect(result.counts.redrafted).toBe(1);
+    expect(result.counts.rejectedBy).toEqual({ generic: 1 });
   } finally { server.stop(true); opened.close(); }
 });
