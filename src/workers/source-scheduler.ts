@@ -2603,6 +2603,8 @@ function gmailStoreProgress(
     // traversal, a string carries the two-lane resume envelope for the next
     // bounded slice.
     checkpoint: outcome.checkpoint,
+    // A walk in progress continues within seconds, not at the next interval.
+    ...(outcome.backlog ? { continueSoon: true } : {}),
   };
 }
 

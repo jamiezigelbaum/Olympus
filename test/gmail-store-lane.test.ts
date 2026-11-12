@@ -63,6 +63,8 @@ describe('Gmail connector-store lane', () => {
     expect(first.receipt.counts.traversal_complete).toBe(0);
     expect(first.receipt.counts.resumed_from_checkpoint).toBe(0);
     expect(first.checkpoint).toBeTruthy();
+    // More of this walk is ready now, so the scheduler continues within seconds.
+    expect(first.backlog).toBe(true);
     // The bound truncated the traversal, so the resume point is the provider's
     // own page token and the watermark stays where it was.
     expect(client.queries).toEqual([undefined]);
@@ -75,10 +77,12 @@ describe('Gmail connector-store lane', () => {
     // silently skip every message the remaining pages still owe.
     expect(client.queries).toEqual([undefined, undefined]);
     expect(client.listCalls).toBe(2);
+    expect(second.backlog).toBe(true);
 
     const third = await lane.handler.pull({ max_items: 2, checkpoint: second.checkpoint! });
     expect(third.receipt.counts.items_seen).toBe(1);
     expect(third.receipt.counts.traversal_complete).toBe(1);
+    expect(third.backlog).toBeUndefined();
 
     // The completed traversal promoted its high-water internalDate, so the next
     // run asks Gmail for new mail instead of for the whole mailbox.
@@ -87,6 +91,8 @@ describe('Gmail connector-store lane', () => {
     // `after:` takes whole epoch seconds, so the watermark is floored.
     expect(client.queries.at(-1)).toBe(`after:${Math.floor(messageInternalDateMs(5) / 1_000)}`);
     expect(fourth.receipt.counts.traversal_complete).toBe(1);
+    // A finished walk waiting for new mail keeps the pull's own interval.
+    expect(fourth.backlog).toBeUndefined();
   });
 
   test('an unbounded traversal that fits inside the bound is reported complete', async () => {
