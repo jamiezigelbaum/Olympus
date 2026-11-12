@@ -205,4 +205,6 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     if (values.has('--compare')) console.log(JSON.stringify(comparePassageReceipts(receipt, JSON.parse(readFileSync(values.get('--compare')!, 'utf8')) as PassageReceipt)));
   } finally { try { opened.checkFileDescriptors(); } finally { opened.close(); } }
 }
-if (import.meta.main) main().catch(() => { console.error('Passage eval failed; no content is logged.'); process.exitCode = 1; });
+// The embedding and reranker helpers keep the event loop alive after the
+// receipt is written, so the CLI exits itself once main settles.
+if (import.meta.main) main().then(() => process.exit(process.exitCode ?? 0), () => { console.error('Passage eval failed; no content is logged.'); process.exit(1); });
