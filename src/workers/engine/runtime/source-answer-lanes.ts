@@ -12,6 +12,7 @@
 // `private_search` keeps the configured meaning lane and enables the bounded
 // keyword retry only for Private stores. Neither mode changes a model or epoch.
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { ClassificationCoverageNote, SecretLocationNote, SavedSecretLocation } from '../../../core/evidence-pack.ts';
 import type { ParentLabelResolver } from '../../../core/parent-label.ts';
 import type { SourceIndexAnswerRequest } from '../../source-index/answer-types.ts';
@@ -33,6 +34,40 @@ import {
 
 export type SourceAnswerLaneMode = 'built_in_only' | 'private_search';
 
+export const OWNER_QUESTION_RESOURCE = 'owner_question';
+
+/**
+ * A question's lifetime surrounds its handler; the shared lane factory below
+ * activates it only when it reaches retrieval. Keep the lease through synthesis,
+ * failures and cancellation, and count overlapping questions independently.
+ * Watches and eligibility reads outside a question scope acquire no lease.
+ */
+export function createOwnerQuestionActivity(relay?: { busy(resource: string): void; idle(resource: string): void }) {
+  const context = new AsyncLocalStorage<{ active: boolean; settled: boolean } | undefined>();
+  let inFlight = 0;
+  return {
+    get busy(): boolean { return inFlight > 0; },
+    retrieving(): void {
+      const scope = context.getStore();
+      if (!scope || scope.active || scope.settled) return;
+      scope.active = true;
+      if (++inFlight === 1) relay?.busy(OWNER_QUESTION_RESOURCE);
+    },
+    async run<T>(work: () => Promise<T>, kind: 'owner' | 'background' = 'owner'): Promise<T> {
+      if (kind === 'background') return context.run(undefined, work);
+      const current = context.getStore();
+      if (current && !current.settled) return work();
+      const scope = { active: false, settled: false };
+      try {
+        return await context.run(scope, work);
+      } finally {
+        scope.settled = true;
+        if (scope.active && --inFlight === 0) relay?.idle(OWNER_QUESTION_RESOURCE);
+      }
+    },
+  };
+}
+
 /** The owner's read scope for a store, as server.ts decides it. */
 export type SourceAnswerReadScope =
   | { allowed: false }
@@ -50,6 +85,7 @@ export type SourceAnswerRequestScope =
   | Readonly<{ kind: 'skip'; reason: string }>;
 
 export interface SourceAnswerLaneDependencies {
+  ownerQuestions?: Pick<ReturnType<typeof createOwnerQuestionActivity>, 'retrieving'>;
   limitStops?: () => readonly import('../../../core/limit-stops.ts').LimitStop[];
   /** The mounted stores, read at each request (a tier leg may join later). */
   stores: () => readonly LocalConnectorStore[];
@@ -89,6 +125,7 @@ export function createSourceAnswerLanes(
   deps: SourceAnswerLaneDependencies,
 ): (request: SourceIndexAnswerRequest, mode?: SourceAnswerLaneMode) => AnalystAnswerLanes {
   return (request, mode) => {
+    deps.ownerQuestions?.retrieving();
     // The scope each corpus is searched under in THIS request, so the
     // Secret locations released beside the answer are confined to it.
     const searchScopes = new Map<string, { accountScope?: string; filters?: ConnectorStoreSearchFilters }>();
