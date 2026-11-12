@@ -472,6 +472,7 @@ import { createFrontScheduler } from '../engine-split/front-scheduler.ts';
 import { createFrontDashboardHistory, openWritableDashboardHistory } from '../engine-split/front-history.ts';
 import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
 import { startSupersededSweepTicker } from '../connector-store/tier-auto-prune-sweep.ts';
+import { withStoreReadPriority } from '../../core/store-reclaim-admission.ts';
 import { remoteAccessFromStatus, type DashboardAgentConnectionsBackend } from '../agent-connections.ts';
 import { applyPendingRestoreAtBoot, createBackupService, defaultBackupServicePaths } from '../backup-service.ts';
 import { createDashboardRemoteAccessControl, createGatewayRemoteAccessConfigWriter, createStandaloneRemoteAccessControl, createDashboardEngineRestart } from '../remote-access-control.ts';
@@ -3298,7 +3299,7 @@ export async function main(): Promise<void> {
           // A background agent's answer does not hold back queued background
           // answers the way the owner's own work does (core/source-answer-jobs.ts).
           const kind = request.caller?.surface === 'remote' && isBackgroundConnection(request.caller.connection_id) ? 'background' : 'owner';
-          return answerActivity.run(() => analystSourceAnswer.answer(request, local), kind);
+          return withStoreReadPriority(() => answerActivity.run(() => analystSourceAnswer.answer(request, local), kind));
         },
       }
     : undefined;
@@ -5228,8 +5229,8 @@ export async function main(): Promise<void> {
       localConnectionId: '@local:You',
       anonymousAsk: localAnonymousAsk,
       // The built-in model serves one question at once: an answer preempts the sniffer.
-      answer: (input) => answerActivity.run(() => local.answer(input)),
-      backgroundAnswer: (input) => runBackgroundInference(() => answerActivity.run(() => local.answer(input), 'background')),
+      answer: (input) => withStoreReadPriority(() => answerActivity.run(() => local.answer(input))),
+      backgroundAnswer: (input) => withStoreReadPriority(() => runBackgroundInference(() => answerActivity.run(() => local.answer(input), 'background'))),
       interactiveBusy: () => answerActivity.interactiveInFlight > 0,
       backgroundBusy: () => classificationBusy(),
       panelClaimed: (ref) => privateAnswers.hasClaimedWaiting(ref),
@@ -5429,9 +5430,9 @@ export async function main(): Promise<void> {
   // "Couldn't check yet" records are re-probed here every ten minutes.
   const { createRemotePrivateParts } = await import('../../core/remote-private-part.ts');
   const remotePrivateParts = createRemotePrivateParts({
-    probe: (request, timeoutMs) => (sourceAnswerLanes
+    probe: (request, timeoutMs) => withStoreReadPriority(() => (sourceAnswerLanes
       ? probePrivateMatch({ lanes: sourceAnswerLanes, request: request as unknown as SourceIndexAnswerRequest, timeoutMs, distinguishSecret: true })
-      : Promise.resolve('unknown' as const)),
+      : Promise.resolve('unknown' as const))),
     store: waitingQuestionStore,
     isActive: connectionActive,
     // The re-check is background work: it waits on the model's keyword
@@ -5641,23 +5642,23 @@ export async function main(): Promise<void> {
         // sniffer. It does ask the built-in model, once per new wording, to
         // translate the question's words (core/source-index/keyword-expansion.ts),
         // on the model directly, so that call queues behind what the model runs.
-        return searchReleasedEvidence({
+        return withStoreReadPriority(() => searchReleasedEvidence({
           lanes: sourceAnswerLanes!,
           question: input.question,
           ...(input.limit ? { maxResults: input.limit } : {}),
           releaseCheck: remoteReleaseCheck,
-        });
+        }));
       }
     : undefined;
   // The same search for every other remote agent, with the tiers read once
   // more right before the result leaves (workers/remote-search.ts).
   const remoteEvidenceSearch = sourceAnswerLanes
-    ? async (input: { question: string; limit?: number }) => searchReleasedEvidence({
+    ? async (input: { question: string; limit?: number }) => withStoreReadPriority(() => searchReleasedEvidence({
         lanes: sourceAnswerLanes!,
         question: input.question,
         ...(input.limit ? { maxResults: input.limit } : {}),
         releaseCheck: remoteReleaseCheck,
-      })
+      }))
     : undefined;
   // Which Private items match, for the private answer panel: the shared
   // EvidencePack build over Private corpora only, so each item carries its
@@ -5667,7 +5668,7 @@ export async function main(): Promise<void> {
   // that have moved to a lower tier; those still go only to the private job.
   const chatgptPrivateMatchProbe = sourceAnswerLanes
     ? async (question: string, _ctx: import('../../core/operations.ts').OperationContext, originalMatches?: readonly Readonly<Record<string, unknown>>[]) => {
-        const result = await searchPrivateEvidence({ lanes: sourceAnswerLanes!, question, ...(originalMatches ? { originalMatches } : {}) });
+        const result = await withStoreReadPriority(() => searchPrivateEvidence({ lanes: sourceAnswerLanes!, question, ...(originalMatches ? { originalMatches } : {}) }));
         return { count: result.matched, evidence: result.candidates as unknown as readonly Record<string, unknown>[], ...(result.secretMatch ? { secretMatch: true as const } : {}) };
       }
     : undefined;

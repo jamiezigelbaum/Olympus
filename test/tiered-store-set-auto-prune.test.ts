@@ -1,11 +1,15 @@
 import { afterEach, expect, spyOn, test } from 'bun:test';
+import { Database } from 'bun:sqlite';
+import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { TierLedgerPurgedRollbackRefusedError } from '../src/workers/classification/tier-ledger.ts';
 import { moveTieredItem, flushTierMoveNotes } from '../src/workers/connector-store/tier-move.ts';
-import { startSupersededSweepTicker, sweepAutomaticSupersededCopies } from '../src/workers/connector-store/tier-auto-prune-sweep.ts';
+import { reclaimAutomaticSupersededCopies, startSupersededSweepTicker, sweepAutomaticSupersededCopies } from '../src/workers/connector-store/tier-auto-prune-sweep.ts';
+import { SUPERSEDED_SWEEP_SLICE_MS } from '../src/workers/connector-store/tiered-store-set.ts';
+import { createSourceAnswerTrace, runWithSourceAnswerTrace } from '../src/workers/source-index/answer-latency-trace.ts';
 import { readEmbeddingLedger } from '../src/workers/embedding-ledger.ts';
-import { createTestClock } from './helpers/test-clock.ts';
+import { createTestClock, flushMicrotasks, waitFor } from './helpers/test-clock.ts';
 import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
 
 const cleanup: Array<() => void> = [];
@@ -214,6 +218,137 @@ test('with a time budget one call keeps paging until the walk ends, and the walk
   expect(ctx.f.ledger.listItemWindow({ limit: 10 })).toHaveLength(3);
 });
 
+// Real SQLite payload pages tied to the three fixture chunks. The sweep must
+// delete a/c's vectors, while b's migration-protected vector and body survive.
+function fillReclaimFixture(ctx: Awaited<ReturnType<typeof fixture>>, legacy = false): number {
+  const db = new Database(ctx.f.paths.secure_local);
+  db.exec('PRAGMA busy_timeout = 10000;');
+  try {
+    if (legacy) db.exec('PRAGMA auto_vacuum = NONE; VACUUM;');
+    expect(db.query('PRAGMA auto_vacuum').get()).toEqual({ auto_vacuum: legacy ? 0 : 2 });
+    db.query(`INSERT INTO chunk_embeddings(chunk_pk, model_id, item_pk, content_hash, embedding, embedded_at)
+      SELECT chunk_pk, 'fixture-reclaim', item_pk, content_hash, zeroblob(?), '2026-11-12' FROM chunks`).run(36 * 1024 * 1024);
+    db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+    return statSync(ctx.f.paths.secure_local).size;
+  } finally { db.close(); }
+}
+
+function reclaimFixtureIntact(ctx: Awaited<ReturnType<typeof fixture>>): void {
+  for (const id of ['a', 'c']) expect(ctx.f.stores.internal!.localContent(localId(id))?.chunks.join('')).toBe(text);
+  expect(ctx.f.stores.secure_local!.copyContentState(identityOf('b'))?.chunks).toBe(1);
+  const db = new Database(ctx.f.paths.secure_local, { readonly: true });
+  db.exec('PRAGMA busy_timeout = 10000;');
+  try {
+    expect(db.query('PRAGMA quick_check').get()).toEqual({ quick_check: 'ok' });
+    expect(db.query('PRAGMA auto_vacuum').get()).toEqual({ auto_vacuum: 2 });
+    expect(db.query('PRAGMA foreign_key_check').all()).toEqual([]);
+    expect(db.query('SELECT bounded_text AS text FROM chunks').all()).toEqual([{ text }]);
+    expect(db.query('SELECT count(*) AS rows, sum(length(embedding)) AS bytes FROM chunk_embeddings').get())
+      .toEqual({ rows: 1, bytes: 36 * 1024 * 1024 });
+  } finally { db.close(); }
+}
+
+for (const legacy of [false, true]) test(`real ${legacy ? 'legacy NONE' : 'incremental'} store shrinks once after the sweep and survives reopen`, async () => {
+  const ctx = await fixture();
+  const beforeSweep = fillReclaimFixture(ctx, legacy);
+  expect(sweepAutomaticSupersededCopies(ctx.f.set, { embeddingLedger: ctx.embeddingLedger }).complete).toBe(true);
+  const afterSweep = statSync(ctx.f.paths.secure_local).size;
+  expect(afterSweep).toBe(beforeSweep);
+  const log = spyOn(console, 'info').mockImplementation(() => {});
+  try {
+    if (legacy) {
+      // Death after SQLite commits, before the ledger records completion:
+      // retain the intent and retry even though the freelist is now small.
+      const write = ctx.f.ledger.writeMeta.bind(ctx.f.ledger);
+      let interrupted = false;
+      const failure = spyOn(ctx.f.ledger, 'writeMeta').mockImplementation((key, value) => {
+        if (key === 'automatic-superseded-prune-v1' && JSON.parse(value).reclaimed?.[CORPORA.secure_local]?.done) {
+          interrupted = true;
+          throw new Error('reclaim receipt crash');
+        }
+        return write(key, value);
+      });
+      try {
+        await waitFor(async () => {
+          try { await reclaimAutomaticSupersededCopies(ctx.f.set); }
+          catch (error) { expect((error as Error).message).toBe('reclaim receipt crash'); }
+          return interrupted;
+        }, { timeoutMs: 120_000, description: 'reclaim commits before its completion receipt' });
+      } finally { failure.mockRestore(); }
+      expect(JSON.parse(ctx.f.ledger.readMeta('automatic-superseded-prune-v1')!).reclaimed[CORPORA.secure_local].done).toBeUndefined();
+      expect(log.mock.calls).toHaveLength(0);
+      ctx.reopen();
+    }
+    await waitFor(() => reclaimAutomaticSupersededCopies(ctx.f.set), { timeoutMs: 120_000, description: 'reclaim drains the fixture' });
+    const afterReclaim = statSync(ctx.f.paths.secure_local).size;
+    expect(afterReclaim).toBeLessThan(afterSweep - 64 * 1024 * 1024);
+    reclaimFixtureIntact(ctx);
+    expect(log.mock.calls.filter(([line]) => String(line).startsWith('[tier-auto-prune-reclaim]'))).toHaveLength(1);
+    expect(log.mock.calls[0]![0]).toBe(`[tier-auto-prune-reclaim] ledger=${ctx.f.ledger.ledgerId()} tier=secure_local bytes_before=${afterSweep} bytes_after=${afterReclaim}`);
+    ctx.reopen();
+    const reclaim = spyOn(ctx.f.stores.secure_local!, 'reclaimFreePages');
+    expect(await reclaimAutomaticSupersededCopies(ctx.f.set)).toBe(true);
+    expect(reclaim).not.toHaveBeenCalled();
+    reclaim.mockRestore();
+    reclaimFixtureIntact(ctx);
+    // This receipt is copied into result.md, not committed as a benchmark DB.
+    process.stdout.write(`reclaim-fixture ${JSON.stringify({ legacy, beforeSweep, afterSweep, afterReclaim })}\n`);
+  } finally { log.mockRestore(); }
+}, 150_000);
+
+test('an Ask preempts a running legacy conversion within the slice budget, and the next tick retries safely', async () => {
+  const ctx = await fixture();
+  fillReclaimFixture(ctx, true);
+  expect(sweepAutomaticSupersededCopies(ctx.f.set, { embeddingLedger: ctx.embeddingLedger }).complete).toBe(true);
+  const store = ctx.f.stores.secure_local!;
+  const original = store.reclaimFreePages.bind(store);
+  let started = false;
+  const observe = spyOn(store, 'reclaimFreePages').mockImplementation(budget => original(budget, { onStarted: () => { started = true; } }));
+  const reclaim = reclaimAutomaticSupersededCopies(ctx.f.set);
+  try {
+    await waitFor(() => started, { description: 'conversion worker opens the store' });
+    const beforeAsk = performance.now();
+    let admissionMs = 0;
+    let holdAsk!: () => void;
+    const held = new Promise<void>(resolve => { holdAsk = resolve; });
+    const ask = runWithSourceAnswerTrace(createSourceAnswerTrace(), async () => {
+      admissionMs = performance.now() - beforeAsk;
+      expect(admissionMs).toBeLessThan(SUPERSEDED_SWEEP_SLICE_MS);
+      expect(store.copyContentState(identityOf('b'))?.chunks).toBe(1);
+      await held;
+    });
+    try {
+      expect(await reclaim).toBe(false);
+      const receipt = JSON.parse(ctx.f.ledger.readMeta('automatic-superseded-prune-v1')!).reclaimed[CORPORA.secure_local];
+      expect(receipt.done).toBeUndefined();
+      // A new tick must not start disk work for the whole duration of an Ask.
+      const calls = observe.mock.calls.length;
+      expect(await reclaimAutomaticSupersededCopies(ctx.f.set)).toBe(false);
+      expect(observe.mock.calls.length).toBe(calls);
+    } finally { holdAsk(); await ask; }
+    process.stdout.write(`reclaim-ask ${JSON.stringify({ admissionMs, budgetMs: SUPERSEDED_SWEEP_SLICE_MS })}\n`);
+  } finally { observe.mockRestore(); await reclaim; }
+  ctx.reopen();
+  await waitFor(() => reclaimAutomaticSupersededCopies(ctx.f.set), { timeoutMs: 120_000, description: 'interrupted conversion retries' });
+  reclaimFixtureIntact(ctx);
+}, 150_000);
+
+for (const free of [1_000, 20_000]) test(`a small ${free === 1_000 ? 'absolute' : 'relative'} freelist is skipped durably`, async () => {
+  const ctx = await fixture();
+  expect(sweepAutomaticSupersededCopies(ctx.f.set, { embeddingLedger: ctx.embeddingLedger }).complete).toBe(true);
+  const store = ctx.f.stores.secure_local!;
+  const space = spyOn(store, 'reclaimablePages').mockReturnValue({ pages: 1_000_000, free, pageBytes: 4096, bytes: 4_096_000_000 });
+  const disk = spyOn(store, 'reclaimFreePages');
+  const log = spyOn(console, 'info').mockImplementation(() => {});
+  try {
+    expect(await reclaimAutomaticSupersededCopies(ctx.f.set)).toBe(true);
+    expect(await reclaimAutomaticSupersededCopies(ctx.f.set)).toBe(true);
+    expect(disk).not.toHaveBeenCalled();
+    expect(log.mock.calls).toHaveLength(1);
+    expect(JSON.parse(ctx.f.ledger.readMeta('automatic-superseded-prune-v1')!).reclaimed[CORPORA.secure_local].done).toBe(true);
+  } finally { space.mockRestore(); disk.mockRestore(); log.mockRestore(); }
+});
+
 test('the background ticker sweeps without the sniffer or a sync, then leaves a finished set alone', async () => {
   const ctx = await fixture();
   const slice = spyOn(ctx.f.set, 'sweepSupersededSlice');
@@ -228,6 +363,9 @@ test('the background ticker sweeps without the sniffer or a sync, then leaves a 
   active = true;
   for (let i = 0; i < 10 && !JSON.parse(ctx.f.ledger.readMeta('automatic-superseded-prune-v1') || '{}').done; i++) tick!();
   expect(JSON.parse(ctx.f.ledger.readMeta('automatic-superseded-prune-v1') || '{}').done).toBe(true);
+  await waitFor(() => JSON.parse(ctx.f.ledger.readMeta('automatic-superseded-prune-v1') || '{}').reclaimed?.[CORPORA.secure_local]?.done,
+    { description: 'ticker records small-store reclaim completion' });
+  await flushMicrotasks();
   expect(ctx.f.ledger.listSupersededItemWindow({ limit: 10 }).map(record => record.providerItemId))
     .toEqual([identityOf('b').providerItemId]);
   const calls = slice.mock.calls.length;

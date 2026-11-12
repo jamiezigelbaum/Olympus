@@ -34,21 +34,22 @@ function target(): string {
   return join(root, 'state.json');
 }
 
-const holderScript = (path: string, mode: 'sync' | 'async') => `
+const holderScript = (path: string, mode: 'sync' | 'async', leaseMode: 'shared' | 'exclusive') => `
 import { withFileLease, withFileLeaseSync } from ${JSON.stringify(MODULE)};
+import { writeSync } from 'node:fs';
 const hold = () => new Promise(() => setInterval(() => {}, 1000));
 if (${JSON.stringify(mode)} === 'sync') {
-  withFileLeaseSync(${JSON.stringify(path)}, () => { process.stdout.write('HELD\\n'); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60000); });
+  withFileLeaseSync(${JSON.stringify(path)}, () => { writeSync(1, 'HELD\\n'); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60000); });
 } else {
-  await withFileLease(${JSON.stringify(path)}, async () => { process.stdout.write('HELD\\n'); await hold(); });
+  await withFileLease(${JSON.stringify(path)}, async () => { writeSync(1, 'HELD\\n'); await hold(); }, { mode: ${JSON.stringify(leaseMode)} });
 }
 `;
 
-async function startHolder(runtime: string, path: string, mode: 'sync' | 'async') {
+async function startHolder(runtime: string, path: string, mode: 'sync' | 'async', leaseMode: 'shared' | 'exclusive' = 'exclusive') {
   const dir = mkdtempSync(join(tmpdir(), 'olympus-kernel-holder-'));
   roots.push(dir);
   const script = join(dir, 'holder.mts');
-  await Bun.write(script, holderScript(path, mode));
+  await Bun.write(script, holderScript(path, mode, leaseMode));
   const child = Bun.spawn([runtime, script], { stdout: 'pipe', stderr: 'pipe' });
   children.push(child);
   const reader = child.stdout.getReader();
@@ -83,6 +84,20 @@ describe('a kernel-held lease across processes', () => {
       }, 10_000);
     }
   }
+
+  for (const [name, runtime] of runtimes) test(`${name}: shared readers coexist but exclude maintenance across processes`, async () => {
+    if (!runtime) return;
+    const path = target();
+    const holder = await startHolder(runtime, path, 'async', 'shared');
+    await withFileLease(path, async () => {
+      await expect(withFileLease(path, async () => undefined, fast)).rejects.toBeInstanceOf(FileLeaseBusyError);
+      holder.kill('SIGKILL');
+      await holder.exited;
+      // Releasing one reader cannot release the other's lock.
+      expect(() => withFileLeaseSync(path, () => undefined, fast)).toThrow(FileLeaseBusyError);
+    }, { mode: 'shared' });
+    expect(withFileLeaseSync(path, () => 'free')).toBe('free');
+  }, 10_000);
 
   test('a live holder is never judged stale, however old the lease is', async () => {
     const path = target();

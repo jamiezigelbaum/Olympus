@@ -2,6 +2,7 @@ import { createVectorDigestSchema, writeVectorDigest, backfillVectorDigests, vec
 import { encodeVectorDigest, scoreVectorDigest, VectorDigestHeap } from '../source-index/vector-digest.ts';
 import { iterateRows } from '../../core/sqlite-rows.ts';
 import { installMainThreadSqlTrace } from './main-thread-sql-trace.ts';
+import { storeReadHasPriority } from '../../core/store-reclaim-admission.ts';
 import { assertWritableStoreOpenAllowed, writableStoreOpensForbidden } from '../../core/store-write-guard.ts';
 import type { PeopleCitationName, PeopleSenderIdentity, PeopleSenderObservation } from '../../core/people-index.ts';
 import { unreadHoldDisposition, type UnreadHoldDisposition } from '../file-extraction/unreadable-files.ts';
@@ -12,7 +13,7 @@ import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled,
 import { lastKeywordLanguages, storeKeywordLanguages, storeKeywordLanguagesWith } from '../../core/source-index/keyword-languages.ts';
 import { expandSourceIndexKeywords, KEYWORD_PREPARE_WAIT_MS, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
 import { RECENT_ITEMS_CUT_SHORT } from '../../core/source-index/partial-search.ts';
-import { controlPathHeadroom, ingestionTurn, type ControlPathHeadroom } from '../control-path-headroom.ts';
+import { CONTROL_PATH_SLICE_MS, controlPathHeadroom, ingestionTurn, type ControlPathHeadroom } from '../control-path-headroom.ts';
 import { OffThreadReadBusyError, offThreadReadsSupported, readOnPool, readPoolHasWaitingWork, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
 // The shared connector ingest spine: ONE generic local store that turns any
 // Contract 1 SourceConnector into a searchable, analyst-served corpus with
@@ -3354,6 +3355,48 @@ export function connectorStoreReadableNow(dbPath: string): boolean {
   }
 }
 
+/** The store's own maintenance opener, like its read-pool opener, on an isolated Bun process. */
+const CONNECTOR_RECLAIM_WORKER_SOURCE = `
+import { Database } from 'bun:sqlite';
+import { statSync } from 'node:fs';
+self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
+  // This is the mounted store's own maintenance connection. Never create a missing store.
+  const db = new Database(path, { create: false, strict: true });
+  db.exec('PRAGMA busy_timeout = 0; PRAGMA foreign_keys = ON;');
+  try {
+    postMessage({ started: true });
+    const mode = db.query('PRAGMA auto_vacuum').get().auto_vacuum;
+    if (mode !== 2) {
+      db.exec('PRAGMA auto_vacuum = INCREMENTAL;');
+      // NONE needs one transactional rebuild. A killed conversion leaves the
+      // original database usable; there is no rename or half-swapped file.
+      if (mode === 0) {
+        // VACUUM may renumber rowids in the composite-key embedding table.
+        // Restart unfinished physical backfills before that can happen.
+        db.exec('UPDATE chunk_vector_digest_meta SET cursor_rowid = 0 WHERE completed = 0;');
+        db.exec('VACUUM;');
+      }
+    }
+    const started = performance.now();
+    let free = db.query('PRAGMA freelist_count').get().freelist_count;
+    while (free > 0 && performance.now() - started < budgetMs) {
+      db.exec('PRAGMA incremental_vacuum(' + pagesPerStep + ')');
+      free = db.query('PRAGMA freelist_count').get().freelist_count;
+    }
+    // WAL truncation is part of reclaim, not a blocking close-time courtesy.
+    // A status snapshot may still own old pages: retry on the next tick.
+    const checkpoint = db.query('PRAGMA wal_checkpoint(TRUNCATE)').get();
+    postMessage({ done: free === 0 && checkpoint.busy === 0, bytes: statSync(path).size });
+  } catch {
+    postMessage({ failed: true });
+  } finally {
+    db.close();
+  }
+};`;
+
+/** Pages per statement; the worker also stops at the existing sweep slice budget. */
+const RECLAIM_MAX_PAGES_PER_STEP = 128;
+
 export class LocalConnectorStore {
   readonly dbPath: string;
   /** The file this store opened, so a later delete or replace of it is seen. */
@@ -3478,6 +3521,7 @@ export class LocalConnectorStore {
       assertWritableStoreOpenAllowed('connector store', this.dbPath);
       if (this.dbPath !== ':memory:') mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
     }
+    const creatingFile = this.dbPath === ':memory:' || !existsSync(this.dbPath);
     this.db = new Database(this.dbPath, options.readOnly === true
       ? { readonly: true, create: false, strict: true }
       : { create: true });
@@ -3485,7 +3529,11 @@ export class LocalConnectorStore {
     try {
       this.db.exec(options.readOnly === true
         ? 'PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;'
+        : creatingFile
+        ? 'PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL; PRAGMA journal_mode = WAL;'
         : 'PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;');
+      // New stores need no conversion. Existing stores are converted only by
+      // background reclaim, after the sweep, never by opening a request's store.
       assertSqliteSchemaCanOpen(this.db, SQLITE_STORE_ID, CONNECTOR_STORE_SQLITE_SCHEMA_VERSION);
       validateCurrentConnectorStoreSchemaBeforeMigration(this.db);
       if (options.readOnly === true) {
@@ -3562,7 +3610,7 @@ export class LocalConnectorStore {
       if (!model) return;
       // An Ask in flight on this store, or any owner-visible read waiting
       // for the pool (a status count, another store's lane), goes first.
-      if (this.vectorLanesInFlight > 0 || (offThreadReadsSupported(this.dbPath) && readPoolHasWaitingWork())) { this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS); return; }
+      if (this.reclaimProcess || this.vectorLanesInFlight > 0 || (offThreadReadsSupported(this.dbPath) && readPoolHasWaitingWork())) { this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS); return; }
       if (offThreadReadsSupported(this.dbPath)) { void this.backfillVectorDigestTurnOnPool(model); return; }
       try {
         const started = performance.now();
@@ -3634,10 +3682,14 @@ export class LocalConnectorStore {
   }
 
   close(): void {
+    const reclaiming = this.reclaimProcess !== undefined;
+    this.reclaimProcess?.kill('SIGKILL');
     clearTimeout(this.vectorDigestBackfillTimer);
     this.stopVisibilityPublisher();
     try {
-      if (!this.readOnly) this.releaseUnreferencedChunkMedia();
+      // SIGKILL releases the worker's write lock asynchronously. Media cleanup
+      // can retry on a later close; close must not race it with another write.
+      if (!this.readOnly && !reclaiming) this.releaseUnreferencedChunkMedia();
       if (this.tierLedgerOwned === true) this.tierLedgerHandle?.close();
       this.boundLedgerHandle?.close();
       this.boundLedgerHandle = undefined;
@@ -3648,6 +3700,80 @@ export class LocalConnectorStore {
       this.closedForPoolReads = true;
       if (offThreadReadsSupported(this.dbPath)) releaseOffThreadReads(this.dbPath);
       closeSqliteStore(this.db, { checkpoint: !this.readOnly });
+    }
+  }
+
+  private reclaimProcess: ReturnType<typeof Bun.spawn> | undefined;
+
+  /** Cheap header introspection for the ticker's eligibility check. */
+  reclaimablePages(): { pages: number; free: number; pageBytes: number; bytes: number } | undefined {
+    if (this.readOnly || this.dbPath === ':memory:' || this.closedForPoolReads || this.fileReplacedOrRemoved()) return undefined;
+    return {
+      pages: (this.db.query('PRAGMA page_count').get() as { page_count: number }).page_count,
+      free: (this.db.query('PRAGMA freelist_count').get() as { freelist_count: number }).freelist_count,
+      pageBytes: (this.db.query('PRAGMA page_size').get() as { page_size: number }).page_size,
+      bytes: statSync(this.dbPath).size,
+    };
+  }
+
+  /** Called under withIdleStoreReclaim, from the ticker only. Ask preempts a rebuild. */
+  async reclaimFreePages(budgetMs: number, options: { pagesPerStep?: number; onStarted?: () => void } = {}): Promise<{ done: boolean; bytes: number } | undefined> {
+    if (!this.reclaimablePages() || this.reclaimProcess || this.vectorDigestBackfillReading || storeReadHasPriority()) return undefined;
+    let pagesPerStep = options.pagesPerStep ?? RECLAIM_MAX_PAGES_PER_STEP;
+    if (pagesPerStep > RECLAIM_MAX_PAGES_PER_STEP) pagesPerStep = RECLAIM_MAX_PAGES_PER_STEP;
+    pagesPerStep = Math.max(1, Math.floor(pagesPerStep));
+    assertWritableStoreOpenAllowed('connector store reclaim', this.dbPath);
+    assertStoreTierLedgerCanOpen(this.dbPath);
+    // A separate process is essential: Bun Worker.terminate() cannot interrupt
+    // an executing SQLite statement. SIGKILL can, and SQLite rolls it back.
+    // Its main thread watches our stdin even while its worker runs VACUUM:
+    // parent death closes the pipe and kills the child, releasing every lock.
+    const supervisor = `
+      const worker = new Worker(URL.createObjectURL(new Blob([${JSON.stringify(CONNECTOR_RECLAIM_WORKER_SOURCE)}], {type:'text/javascript'})));
+      process.stdin.resume();
+      process.stdin.on('end', () => process.kill(process.pid, 'SIGKILL'));
+      worker.onmessage = ({data}) => {
+        console.log(JSON.stringify(data));
+        if (!data.started) process.exit(0);
+      };
+      worker.onerror = () => process.exit(1);
+      worker.postMessage(JSON.parse(process.argv[1]));`;
+    const child = Bun.spawn([process.execPath, '-e', supervisor, JSON.stringify([this.dbPath, budgetMs, pagesPerStep])],
+      { stdin: 'pipe', stdout: 'pipe', stderr: 'ignore' });
+    this.reclaimProcess = child;
+    // Writers on this connection must retry instead of holding the engine's
+    // event loop behind the conversion's write lock (normally timeout 10 s).
+    const timeout = (this.db.query('PRAGMA busy_timeout').get() as { timeout: number }).timeout;
+    this.db.exec('PRAGMA busy_timeout = 0;');
+    const interrupt = setInterval(() => {
+      try { if (storeReadHasPriority()) child.kill('SIGKILL'); }
+      catch { child.kill('SIGKILL'); } // fail closed if admission cannot be checked
+    }, CONTROL_PATH_SLICE_MS);
+    try {
+      let result: { failed?: boolean; done: boolean; bytes: number } | undefined;
+      const output = (async () => {
+        const decoder = new TextDecoder();
+        let buffer = '';
+        for await (const chunk of child.stdout) {
+          buffer += decoder.decode(chunk, { stream: true });
+          let newline: number;
+          while ((newline = buffer.indexOf('\n')) >= 0) {
+            const message = JSON.parse(buffer.slice(0, newline));
+            buffer = buffer.slice(newline + 1);
+            if (message.started) options.onStarted?.();
+            else result = message;
+          }
+        }
+      })();
+      const code = await child.exited;
+      await output;
+      if (code !== 0 || this.closedForPoolReads) return undefined;
+      return result?.failed ? undefined : result;
+    } finally {
+      clearInterval(interrupt);
+      child.stdin.end();
+      this.reclaimProcess = undefined;
+      if (!this.closedForPoolReads) this.db.exec(`PRAGMA busy_timeout = ${timeout};`);
     }
   }
 
