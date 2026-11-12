@@ -16,7 +16,7 @@ export interface SourceDispositionsRuntime {
   close?: () => void;
 }
 
-const SOURCE_DISPOSITION_STATES: readonly SourceDispositionState[] = ['ingest', 'metadata_only', 'exclude'];
+const SOURCE_DISPOSITION_STATES: readonly SourceDispositionState[] = ['ingest', 'metadata_only', 'on_demand', 'exclude'];
 
 /**
  * Validate a folder-picker save.

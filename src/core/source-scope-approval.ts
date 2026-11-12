@@ -37,7 +37,7 @@ export interface SourceScopeConnectedHandleRegistry {
  * `file-scope-sources.ts`; `isFileSourceScopeId` is the validator.
  */
 export type FileSourceScopeId = string;
-export type FileSourceScopeDisposition = 'ingest' | 'metadata_only' | 'exclude';
+export type FileSourceScopeDisposition = 'ingest' | 'metadata_only' | 'on_demand' | 'exclude';
 
 export interface FileSourceScopeSelection {
   key: string;
@@ -393,7 +393,7 @@ function normalizeSelections(input: readonly FileSourceScopeSelection[]): FileSo
   for (const selection of input) {
     const key = selection.key.trim();
     if (!key || key.length > 1_024) throw new OperationError('invalid_request', 'Every selected folder requires a valid key.');
-    if (!['ingest', 'metadata_only', 'exclude'].includes(selection.state)) {
+    if (!['ingest', 'metadata_only', 'on_demand', 'exclude'].includes(selection.state)) {
       throw new OperationError('invalid_request', 'Every selected folder requires a valid disposition.');
     }
     if (byKey.has(key)) throw new OperationError('invalid_request', 'A folder may be selected only once.');

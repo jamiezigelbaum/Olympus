@@ -1,3 +1,6 @@
+import { parseOwnerTierItemId } from '../classification/tier-owner-items.ts';
+import { fileSourceScopeOnDemandFilters } from '../source-scope-runtime.ts';
+import type { OnDemandReadRequest, OnDemandReadResult } from '../file-extraction/on-demand-read.ts';
 import { ConnectionRequestStore, connectionRequestsPath, requestCredentialTag } from '../../core/connection-requests.ts';
 import { createDashboardPeople } from './dashboard/dashboard-people.ts';
 import { PeopleIndexRefresher } from '../../core/people-index.ts';
@@ -139,6 +142,7 @@ import {
 import { createSourceCorpusRegistry } from '../../core/source-corpus-registry.ts';
 import {
   dropboxPolicyFullExtractionScopeKeys,
+  dropboxPolicyApprovedScopeKeys,
   loadDropboxIngestionPolicy,
 } from '../../core/source-ingestion-policy.ts';
 import { OperationError } from '../../core/operation-error.ts';
@@ -2279,6 +2283,10 @@ export async function main(): Promise<void> {
       ? {
           dropbox: {
             extractionScopes: dropboxExtractionScopes,
+            resolveReadScopes: () => {
+              const approval = fileSourceScopeAuthority?.snapshot('dropbox.files');
+              return approval ? dropboxPolicyApprovedScopeKeys(fileSourceScopeDropboxPolicy(dropboxIngestionPolicy, approval)) : [];
+            },
             resolveExtractionScopes: () => {
               const ref = fileSourceScopeAuthority?.policyRef('dropbox.files');
               if (!ref || !fileSourceScopeAuthority) return [];
@@ -2311,6 +2319,10 @@ export async function main(): Promise<void> {
     ...(localFilesConnectorStore
       ? {
           localFiles: {
+            resolveReadScopes: () => {
+              const approval = fileSourceScopeAuthority?.snapshot(LOCAL_FILES_SOURCE_ID);
+              return approval ? fileSourceScopeLocalFilesPolicy(localFilesIngestionPolicy, approval, localFilesExclusionContext).roots.map((root) => root.approved_scope_key) : [];
+            },
             resolveExtractionScopes: () => {
               const ref = fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID);
               if (!ref || !fileSourceScopeAuthority) return [];
@@ -2520,7 +2532,14 @@ export async function main(): Promise<void> {
         const connector = createLocalFilesSourceConnector({
           connectorId: 'local.files.extraction',
           root: '/',
-          scope: createScopeBoundLocalFilesContentScope({ authority: fileSourceScopeAuthority, ref, context: localFilesExclusionContext }),
+          scope: (() => {
+            const scope = createScopeBoundLocalFilesContentScope({ authority: fileSourceScopeAuthority, ref, context: localFilesExclusionContext });
+            const allow = (decide: (path: string) => 'content' | 'metadata' | 'denied') => (path: string) => {
+              const decision = decide(path);
+              return decision === 'metadata' && connectorStores.some((holder) => holder.onDemandReadForLocator(path)) ? 'content' : decision;
+            };
+            return { ...scope, decide: allow(scope.decide), snapshotDecider: () => allow(scope.snapshotDecider()) };
+          })(),
           volumes: localFilesVolumes,
           locate: (localItemId) => reader.localContent(localItemId)?.locatorUri,
         });
@@ -2529,7 +2548,7 @@ export async function main(): Promise<void> {
           corpusId: config.corpusId,
           provider: config.provider,
           connector,
-          candidates: connectorStoreExtractionCandidateReader(reader, config.resolveCandidateFilters?.()),
+          candidates: connectorStoreExtractionCandidateReader(reader, config.resolveCandidateFilters),
           lanes: (config.resolveScopes?.() ?? config.scopes).map((approvedScopeKey) => ({
             approvedScopeKey,
             matches: (row) => row.locatorUri !== undefined
@@ -2541,6 +2560,18 @@ export async function main(): Promise<void> {
       ['whatsapp', ({ config, store, view }) => whatsappExtraction({ config, store, ...(view ? { view } : {}) })],
     ]),
     tierSets: fileExtractionTierSets(),
+    onDemandPolicy(holder, localItemId) {
+      const sourceId = fileSourceScopeIdForProvider(holder.activeLocalItemRow(localItemId)?.identity.provider ?? '');
+      if (!sourceId) return { allowed: true, readableOnRequest: false };
+      const approval = fileSourceScopeAuthority?.snapshot(sourceId);
+      if (!approval) return { allowed: false, readableOnRequest: false };
+      const metadata = fileSourceScopeMetadataFilters(approval);
+      const onDemand = fileSourceScopeOnDemandFilters(approval);
+      return {
+        allowed: metadata.allowed && holder.itemMatchesSearchFilters(localItemId, undefined, metadata.filters),
+        readableOnRequest: onDemand.allowed && holder.itemMatchesSearchFilters(localItemId, undefined, onDemand.filters),
+      };
+    },
     scopeGuard: {
       assertAuthorized({ config }) {
         assertFileSourceScopeCurrent(config.provider);
@@ -2552,7 +2583,9 @@ export async function main(): Promise<void> {
         if (!approval) return false;
         const scope = fileSourceScopeContentFilters(approval);
         // The row may sit in any of the lane's tier stores: the corpus reads it through its view.
-        return scope.allowed && reader.itemMatchesSearchFilters(ref.localItemId, ref.accountScope, scope.filters);
+        const granted = connectorStores.some((holder) => holder.readOnDemand(ref.localItemId, ref.sourceVersion ?? ''));
+        const effective = granted ? fileSourceScopeMetadataFilters(approval) : scope;
+        return effective.allowed && reader.itemMatchesSearchFilters(ref.localItemId, ref.accountScope, effective.filters);
       },
     },
     extractors: fileExtractionExtractors,
@@ -2575,6 +2608,19 @@ export async function main(): Promise<void> {
     store.setExtractionOutcomeProbe((identity, localItemId) => extractionOutcomeFor(store.family, identity, localItemId));
   };
   for (const store of connectorStores) probeExtractionEnded(store);
+  const requestFileRead = async (request: OnDemandReadRequest): Promise<OnDemandReadResult> => {
+    if (engineFront) {
+      const receipt = await engineFront.client.send({ kind: 'extraction_queue', request: {
+        path: '/v1/source/index/files/read-on-demand', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(request),
+      } });
+      if (receipt.state !== 'done') return { state: 'refused', reason: 'background_unavailable' };
+      const response = receipt.result as { status: number; body: string };
+      if (response.status !== 200) return { state: 'refused', reason: 'background_unavailable' };
+      return JSON.parse(response.body) as OnDemandReadResult;
+    }
+    return fileExtractionRuntime?.requestOnDemandRead(request) ?? { state: 'refused', reason: 'read_unavailable' };
+  };
   const connectorStoreEmbeddingProviders = new Map<string, SourceEmbeddingProvider>();
   const connectorStoreAccountScopes = new Map<string, string>();
   const connectorStorePrincipals = new Map<string, ConnectorStoreDeclaredPrincipal>();
@@ -3260,6 +3306,7 @@ export async function main(): Promise<void> {
       // Off unless the owner set OLYMPUS_SOURCE_RERANKER=built-in (issue #921).
       const sourceReranker = await prepareBuiltInRerankerFromEnv();
       return createAnalystSourceIndexAnswerHandler({
+        requestOnDemandRead: requestFileRead,
         inferenceGuard: (pack, request, corpusIds) => guardSourceAnswerEvidence({ lanes: sourceAnswerLanes!, pack, request, corpusIds }),
         analyst: defaultLocalAnalyst,
         releaseCheck: createReleaseTierCheck(
@@ -4539,7 +4586,7 @@ export async function main(): Promise<void> {
       sourceId: string;
       accountGeneration: string;
       expectedRevision: string;
-      selections: Array<{ key: string; state: 'ingest' | 'metadata_only' | 'exclude'; ancestor_keys?: string[] }>;
+      selections: Array<{ key: string; state: 'ingest' | 'metadata_only' | 'on_demand' | 'exclude'; ancestor_keys?: string[] }>;
       wholeAccount: boolean;
       explicitWholeAccountConfirmation: boolean;
     }) => {
@@ -4727,6 +4774,17 @@ export async function main(): Promise<void> {
     currentXBookmarksRuntime,
     dropboxIngestionPolicy,
     ...(sourceIndexEmbeddingProvider ? { sourceIndexEmbeddingProvider } : {}),
+    requestOnDemandRead: requestFileRead,
+    readOwnerItem: async (itemId) => {
+      const identity = parseOwnerTierItemId(itemId);
+      for (const holder of connectorStores) {
+        const candidate = holder.onDemandReadCandidate(identity.providerItemId);
+        if (!candidate || candidate.identity.provider !== identity.provider || candidate.identity.accountScope !== identity.accountScope
+          || candidate.identity.providerConversationId !== identity.providerConversationId) continue;
+        return requestFileRead({ itemRef: { corpusId: holder.corpusId, providerItemId: identity.providerItemId }, requester: 'owner' });
+      }
+      return { state: 'refused', reason: 'item_not_found' };
+    },
     ...(fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {}),
     authorizeFileExtractionLane: (lane) => {
       if (lane.provider === LOCAL_FILES_PROVIDER && !localFilesCleanupRecovery?.ready()) {

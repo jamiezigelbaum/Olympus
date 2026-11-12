@@ -957,7 +957,7 @@ export interface ConnectSourceResult {
   expiresAt: string;
 }
 
-export type ScopeSelectionState = 'ingest' | 'metadata_only' | 'exclude';
+export type ScopeSelectionState = 'ingest' | 'metadata_only' | 'on_demand' | 'exclude';
 
 export interface ScopeSelection {
   /** Opaque provider key from a node. */

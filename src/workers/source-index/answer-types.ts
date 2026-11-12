@@ -1,3 +1,4 @@
+import type { OnDemandReadLimit } from '../file-extraction/on-demand-read.ts';
 // Castor-visible wire types for the `source_answer` operation.
 //
 // Extracted from the old template path (answer.ts) before the Lane F deletion
@@ -90,6 +91,7 @@ export interface SourceIndexAnswerResult {
   // Present only when Secrets matched the question: where they are, never what they say.
   secret_locations?: SourceIndexAnswerSecretLocation[];
   audit: {
+    on_demand_limits?: OnDemandReadLimit[];
     searched_corpora: string[];
     skipped_corpora: SourceIndexAnswerSkippedCorpus[];
     lane_audits: RetrievalLaneAudit[];

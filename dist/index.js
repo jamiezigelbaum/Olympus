@@ -3804,8 +3804,8 @@ var init_source_ingestion_exclusions = __esm(() => {
     metadata_only: 1,
     exclude: 2
   };
-  SOURCE_INGESTION_RULE_MODES = ["exclude", "metadata_only"];
-  SOURCE_INGESTION_DISPOSITION_ORDER = [...SOURCE_INGESTION_RULE_MODES].sort((left, right) => SOURCE_INGESTION_DISPOSITION_RANK[right] - SOURCE_INGESTION_DISPOSITION_RANK[left]);
+  SOURCE_INGESTION_RULE_MODES = ["exclude", "metadata_only", "on_demand"];
+  SOURCE_INGESTION_DISPOSITION_ORDER = [...SOURCE_INGESTION_RULE_MODES].sort((left, right) => (right === "on_demand" ? 0.5 : SOURCE_INGESTION_DISPOSITION_RANK[right]) - (left === "on_demand" ? 0.5 : SOURCE_INGESTION_DISPOSITION_RANK[left]));
   ADMITTED = Object.freeze({
     excluded: false,
     disposition: "admit",
@@ -16865,12 +16865,12 @@ var init_vocabulary = __esm(() => {
     loadMore: "Load more folders",
     loadMoreCount: { one: "Load 1 more folder", many: "Load {n} more folders" },
     truncated: "This folder has more folders than Olympus can list here, so this list is incomplete.",
-    states: { ingest: "Fully indexed", metadata_only: "Names only", exclude: "Skipped" },
-    statesLower: { ingest: "fully indexed", metadata_only: "names only", exclude: "skipped" },
+    states: { ingest: "Fully indexed", metadata_only: "Names only", on_demand: "Names with read on demand", exclude: "Skipped" },
+    statesLower: { ingest: "fully indexed", metadata_only: "names only", on_demand: "names with read on demand", exclude: "skipped" },
     notIncluded: "Not included",
     mixed: "Mixed",
     mixedSome: "Mixed: some folders inside are {state}",
-    segments: { ingest: ["Full", "Full"], metadata_only: ["Names only", "Names"], exclude: ["Skip", "Skip"] },
+    segments: { ingest: ["Full", "Full"], metadata_only: ["Names only", "Names"], on_demand: ["Names with read on demand", "Read on demand"], exclude: ["Skip", "Skip"] },
     choiceGroup: "Choice for {name}",
     openFolder: "Open {name}",
     cannotChoose: "Olympus cannot read this folder.",
@@ -23681,6 +23681,9 @@ var init_input_media = __esm(() => {
   init_media_bindings();
   init_zip_reader();
 });
+// src/workers/file-extraction/on-demand-read.ts
+var init_on_demand_read = () => {};
+
 // src/workers/file-extraction/spool.ts
 var EXTRACTION_SPOOL_STALE_MS;
 var init_spool = __esm(() => {
@@ -25288,6 +25291,7 @@ var init_tiered_extraction = __esm(() => {
 
 // src/workers/engine/runtime/file-extraction-runtime.ts
 var init_file_extraction_runtime = __esm(() => {
+  init_on_demand_read();
   init_credential_broker();
   init_types();
   init_file_extraction_source();

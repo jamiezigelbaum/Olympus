@@ -391,7 +391,7 @@ export function fileSourceScopeMetadataFilters(
     .filter((selection) => selection.state === 'exclude')
     .map((selection) => selection.key);
   const metadataOnlyKeys = approval.selections
-    .filter((selection) => selection.state === 'metadata_only')
+    .filter((selection) => (selection.state === 'metadata_only' || selection.state === 'on_demand'))
     .map((selection) => selection.key);
   const base: ConnectorStoreSearchFilters = {
     ...scopeStampFilter(definition, approval.accountGeneration, approval.revision),
@@ -432,7 +432,7 @@ export function fileSourceScopeDropboxPolicy(
         .map((selection) => ({
           path: normalizeDropboxScopePath(selection.key),
           approved_scope_key: `${base.source}:${normalizeDropboxScopePath(selection.key)}`,
-          default_action: selection.state === 'ingest' ? 'full_extract' as const : 'metadata_only' as const,
+          default_action: selection.state === 'ingest' ? 'full_extract' as const : selection.state === 'on_demand' ? 'on_demand' as const : 'metadata_only' as const,
         }));
   return { ...base, roots };
 }
@@ -600,4 +600,13 @@ export function scopeBoundSchedulerSource(input: {
       },
     })),
   };
+}
+
+/** The owner's third folder choice, using the same path/id scope arithmetic. */
+export function fileSourceScopeOnDemandFilters(approval: FileSourceScopeApprovalSnapshot) {
+  return fileSourceScopeContentFilters({ ...approval, wholeAccount: false,
+    selections: approval.selections.filter((selection) => selection.state !== 'ingest').map((selection) => ({
+      ...selection, state: selection.state === 'on_demand' ? 'ingest' as const : 'exclude' as const,
+    })),
+  });
 }
