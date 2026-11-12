@@ -1,4 +1,4 @@
-import { createVectorDigestSchema, writeVectorDigest, backfillVectorDigests, vectorDigestState } from './vector-digest.ts';
+import { createVectorDigestSchema, writeVectorDigest, backfillVectorDigests, vectorDigestState, vectorDigestSourceQuery, applyVectorDigestWindow, type VectorDigestSourceRow } from './vector-digest.ts';
 import { encodeVectorDigest, scoreVectorDigest, VectorDigestHeap } from '../source-index/vector-digest.ts';
 import { iterateRows } from '../../core/sqlite-rows.ts';
 import { installMainThreadSqlTrace } from './main-thread-sql-trace.ts';
@@ -3456,7 +3456,7 @@ export class LocalConnectorStore {
   /** One small physical window per turn, never a whole-store migration at open. */
   private scheduleVectorDigestBackfill(modelId?: string, delayMs = 0): void {
     if (modelId) this.vectorDigestBackfillModel = modelId;
-    if (this.readOnly || this.closedForPoolReads || this.vectorDigestBackfillTimer) return;
+    if (this.readOnly || this.closedForPoolReads || this.vectorDigestBackfillTimer || this.vectorDigestBackfillReading) return;
     this.vectorDigestBackfillTimer = setTimeout(() => {
       this.vectorDigestBackfillTimer = undefined;
       if (this.closedForPoolReads) return;
@@ -3467,19 +3467,54 @@ export class LocalConnectorStore {
       if (!model) return;
       // An Ask in flight on this store goes first.
       if (this.vectorLanesInFlight > 0) { this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS); return; }
+      if (offThreadReadsSupported(this.dbPath)) { void this.backfillVectorDigestTurnOnPool(model); return; }
       try {
         const started = performance.now();
         const state = this.backfillVectorDigest(model, this.vectorDigestBackfillRows);
         this.vectorDigestBackfillRows = nextVectorDigestBackfillRows(this.vectorDigestBackfillRows, performance.now() - started);
         if (!state.completed) this.scheduleVectorDigestBackfill();
       } catch (error) {
-        if (/busy|locked/i.test(String(error))) { this.scheduleVectorDigestBackfill(undefined, 250); return; }
-        // A failed maintenance slice must not crash the worker. The receipt
-        // stays incomplete and search continues through the exact fallback.
-        console.warn('Connector store vector digest backfill failed; exact scan retained.');
+        this.vectorDigestBackfillFailed(error);
       }
     }, delayMs);
     this.vectorDigestBackfillTimer.unref?.();
+  }
+
+  private vectorDigestBackfillReading = false;
+
+  /**
+   * One turn for a file store: the window's vectors are read on the read
+   * pool, where an IO stall cannot freeze this thread (part 1 on Sparta saw
+   * single in-thread reads of 13 s under load), and only the short digest
+   * write runs here. The write skips any row replaced since the read.
+   */
+  private async backfillVectorDigestTurnOnPool(model: string): Promise<void> {
+    this.vectorDigestBackfillReading = true;
+    let next: number | undefined;
+    try {
+      const state = vectorDigestState(this.db, model);
+      if (state.completed) return;
+      const rows = this.vectorDigestBackfillRows;
+      const started = performance.now();
+      const source = await readOnPool(this.dbPath, { mode: 'all', ...vectorDigestSourceQuery(state.cursorRowid, rows) }) as VectorDigestSourceRow[];
+      if (this.closedForPoolReads) return;
+      const applied = applyVectorDigestWindow(this.db, model, state.cursorRowid, source, rows);
+      this.vectorDigestBackfillRows = nextVectorDigestBackfillRows(rows, performance.now() - started);
+      if (!applied.completed) next = 0;
+    } catch (error) {
+      if (error instanceof OffThreadReadBusyError) next = VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS;
+      else this.vectorDigestBackfillFailed(error);
+    } finally {
+      this.vectorDigestBackfillReading = false;
+    }
+    if (next !== undefined) this.scheduleVectorDigestBackfill(undefined, next);
+  }
+
+  private vectorDigestBackfillFailed(error: unknown): void {
+    if (/busy|locked/i.test(String(error))) { this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS); return; }
+    // A failed maintenance slice must not crash the worker. The receipt
+    // stays incomplete and search continues through the exact fallback.
+    console.warn('Connector store vector digest backfill failed; exact scan retained.');
   }
 
   /** Durable per-model store metadata and one bounded, resumable window. */

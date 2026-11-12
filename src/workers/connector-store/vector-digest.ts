@@ -58,8 +58,38 @@ export function writeVectorDigest(db: Database, chunkPk: number, modelId: string
     )`).run(modelId, modelId, chunkPk);
 }
 
-export function backfillVectorDigests(db: Database, modelId: string, maxRows = 128): { cursorRowid: number; completed: boolean; scanned: number } {
+/** A backfill window's source rows: a rowid range, never the (chunk_pk, model_id) index. */
+export interface VectorDigestSourceRow {
+  rowid: number; chunk_pk: number; model_id: string; item_pk: number;
+  embedding: Uint8Array; content_hash: string; embedded_at: string;
+}
+
+export function vectorDigestSourceQuery(cursorRowid: number, maxRows: number): { sql: string; params: number[] } {
   if (!Number.isInteger(maxRows) || maxRows < 1 || maxRows > 256) throw new Error('Vector digest slice must contain 1 to 256 rows.');
+  // Range over the rowid table, not its (chunk_pk,model_id) index. Walk all
+  // models in bounded physical windows so a rare model cannot cause a long
+  // synchronous statement while searching for the next matching row.
+  return {
+    sql: `SELECT rowid, chunk_pk, model_id, item_pk, embedding, content_hash, embedded_at FROM chunk_embeddings
+      WHERE rowid > ? ORDER BY rowid LIMIT ?`,
+    params: [cursorRowid, maxRows],
+  };
+}
+
+/**
+ * Writes one window's digests and advances the cursor, in one short
+ * transaction. The rows may have been read on the read pool before this
+ * runs: a vector replaced or deleted since is skipped (its own write keeps
+ * its digest), and a cursor moved since (another model displaced this one)
+ * discards the window, so a stale read never lands.
+ */
+export function applyVectorDigestWindow(
+  db: Database,
+  modelId: string,
+  readFromCursor: number,
+  rows: readonly VectorDigestSourceRow[],
+  maxRows: number,
+): { cursorRowid: number; completed: boolean; scanned: number } {
   // A competing writer must not turn a small background slice into a
   // ten-second busy_timeout wait on the worker's request thread.
   const timeout = (db.query('PRAGMA busy_timeout').get() as { timeout: number }).timeout;
@@ -67,15 +97,14 @@ export function backfillVectorDigests(db: Database, modelId: string, maxRows = 1
   try {
     return db.transaction(() => {
       const state = vectorDigestState(db, modelId);
-      if (state.completed) return { ...state, scanned: 0 };
-      // Range over the rowid table, not its (chunk_pk,model_id) index. Walk all
-      // models in bounded physical windows so a rare model cannot cause a long
-      // synchronous statement while searching for the next matching row.
-      const rows = db.query(`SELECT rowid, chunk_pk, model_id, item_pk, embedding FROM chunk_embeddings
-        WHERE rowid > ? ORDER BY rowid LIMIT ?`).all(state.cursorRowid, maxRows) as Array<{
-          rowid: number; chunk_pk: number; model_id: string; item_pk: number; embedding: Uint8Array;
-        }>;
-      for (const row of rows) if (row.model_id === modelId) writeVectorDigest(db, row.chunk_pk, modelId, row.item_pk, row.embedding);
+      if (state.completed || state.cursorRowid !== readFromCursor) return { ...state, scanned: 0 };
+      const current = db.query(`SELECT 1 AS present FROM chunk_embeddings
+        WHERE chunk_pk = ? AND model_id = ? AND content_hash = ? AND embedded_at = ?`);
+      for (const row of rows) {
+        if (row.model_id !== modelId) continue;
+        if (!current.get(row.chunk_pk, modelId, row.content_hash, row.embedded_at)) continue;
+        writeVectorDigest(db, row.chunk_pk, modelId, row.item_pk, row.embedding);
+      }
       const cursorRowid = rows.at(-1)?.rowid ?? state.cursorRowid;
       const completed = rows.length < maxRows;
       db.query(`INSERT INTO chunk_vector_digest_meta VALUES (?, ?, ?)
@@ -84,4 +113,13 @@ export function backfillVectorDigests(db: Database, modelId: string, maxRows = 1
       return { cursorRowid, completed, scanned: rows.length };
     })();
   } finally { db.exec(`PRAGMA busy_timeout = ${timeout}`); }
+}
+
+/** One window read and written on this connection (stores the read pool does not serve). */
+export function backfillVectorDigests(db: Database, modelId: string, maxRows = 128): { cursorRowid: number; completed: boolean; scanned: number } {
+  const state = vectorDigestState(db, modelId);
+  if (state.completed) return { ...state, scanned: 0 };
+  const query = vectorDigestSourceQuery(state.cursorRowid, maxRows);
+  const rows = db.query(query.sql).all(...query.params) as VectorDigestSourceRow[];
+  return applyVectorDigestWindow(db, modelId, state.cursorRowid, rows, maxRows);
 }

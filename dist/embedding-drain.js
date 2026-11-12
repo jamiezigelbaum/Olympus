@@ -20472,21 +20472,32 @@ function writeVectorDigest(db, chunkPk, modelId, itemPk, embedding) {
       SELECT 1 FROM chunk_embeddings WHERE model_id = ? AND chunk_pk <> ? LIMIT 1
     )`).run(modelId, modelId, chunkPk);
 }
-function backfillVectorDigests(db, modelId, maxRows = 128) {
+function vectorDigestSourceQuery(cursorRowid, maxRows) {
   if (!Number.isInteger(maxRows) || maxRows < 1 || maxRows > 256)
     throw new Error("Vector digest slice must contain 1 to 256 rows.");
+  return {
+    sql: `SELECT rowid, chunk_pk, model_id, item_pk, embedding, content_hash, embedded_at FROM chunk_embeddings
+      WHERE rowid > ? ORDER BY rowid LIMIT ?`,
+    params: [cursorRowid, maxRows]
+  };
+}
+function applyVectorDigestWindow(db, modelId, readFromCursor, rows, maxRows) {
   const timeout = db.query("PRAGMA busy_timeout").get().timeout;
   db.exec("PRAGMA busy_timeout = 25");
   try {
     return db.transaction(() => {
       const state = vectorDigestState(db, modelId);
-      if (state.completed)
+      if (state.completed || state.cursorRowid !== readFromCursor)
         return { ...state, scanned: 0 };
-      const rows = db.query(`SELECT rowid, chunk_pk, model_id, item_pk, embedding FROM chunk_embeddings
-        WHERE rowid > ? ORDER BY rowid LIMIT ?`).all(state.cursorRowid, maxRows);
-      for (const row of rows)
-        if (row.model_id === modelId)
-          writeVectorDigest(db, row.chunk_pk, modelId, row.item_pk, row.embedding);
+      const current2 = db.query(`SELECT 1 AS present FROM chunk_embeddings
+        WHERE chunk_pk = ? AND model_id = ? AND content_hash = ? AND embedded_at = ?`);
+      for (const row of rows) {
+        if (row.model_id !== modelId)
+          continue;
+        if (!current2.get(row.chunk_pk, modelId, row.content_hash, row.embedded_at))
+          continue;
+        writeVectorDigest(db, row.chunk_pk, modelId, row.item_pk, row.embedding);
+      }
       const cursorRowid = rows.at(-1)?.rowid ?? state.cursorRowid;
       const completed = rows.length < maxRows;
       db.query(`INSERT INTO chunk_vector_digest_meta VALUES (?, ?, ?)
@@ -20496,6 +20507,14 @@ function backfillVectorDigests(db, modelId, maxRows = 128) {
   } finally {
     db.exec(`PRAGMA busy_timeout = ${timeout}`);
   }
+}
+function backfillVectorDigests(db, modelId, maxRows = 128) {
+  const state = vectorDigestState(db, modelId);
+  if (state.completed)
+    return { ...state, scanned: 0 };
+  const query = vectorDigestSourceQuery(state.cursorRowid, maxRows);
+  const rows = db.query(query.sql).all(...query.params);
+  return applyVectorDigestWindow(db, modelId, state.cursorRowid, rows, maxRows);
 }
 
 // src/core/sqlite-rows.ts
@@ -24771,7 +24790,7 @@ class LocalConnectorStore {
   scheduleVectorDigestBackfill(modelId, delayMs = 0) {
     if (modelId)
       this.vectorDigestBackfillModel = modelId;
-    if (this.readOnly || this.closedForPoolReads || this.vectorDigestBackfillTimer)
+    if (this.readOnly || this.closedForPoolReads || this.vectorDigestBackfillTimer || this.vectorDigestBackfillReading)
       return;
     this.vectorDigestBackfillTimer = setTimeout(() => {
       this.vectorDigestBackfillTimer = undefined;
@@ -24784,6 +24803,10 @@ class LocalConnectorStore {
         this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS);
         return;
       }
+      if (offThreadReadsSupported(this.dbPath)) {
+        this.backfillVectorDigestTurnOnPool(model);
+        return;
+      }
       try {
         const started = performance.now();
         const state = this.backfillVectorDigest(model, this.vectorDigestBackfillRows);
@@ -24791,14 +24814,45 @@ class LocalConnectorStore {
         if (!state.completed)
           this.scheduleVectorDigestBackfill();
       } catch (error) {
-        if (/busy|locked/i.test(String(error))) {
-          this.scheduleVectorDigestBackfill(undefined, 250);
-          return;
-        }
-        console.warn("Connector store vector digest backfill failed; exact scan retained.");
+        this.vectorDigestBackfillFailed(error);
       }
     }, delayMs);
     this.vectorDigestBackfillTimer.unref?.();
+  }
+  vectorDigestBackfillReading = false;
+  async backfillVectorDigestTurnOnPool(model) {
+    this.vectorDigestBackfillReading = true;
+    let next;
+    try {
+      const state = vectorDigestState(this.db, model);
+      if (state.completed)
+        return;
+      const rows = this.vectorDigestBackfillRows;
+      const started = performance.now();
+      const source = await readOnPool(this.dbPath, { mode: "all", ...vectorDigestSourceQuery(state.cursorRowid, rows) });
+      if (this.closedForPoolReads)
+        return;
+      const applied = applyVectorDigestWindow(this.db, model, state.cursorRowid, source, rows);
+      this.vectorDigestBackfillRows = nextVectorDigestBackfillRows(rows, performance.now() - started);
+      if (!applied.completed)
+        next = 0;
+    } catch (error) {
+      if (error instanceof OffThreadReadBusyError)
+        next = VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS;
+      else
+        this.vectorDigestBackfillFailed(error);
+    } finally {
+      this.vectorDigestBackfillReading = false;
+    }
+    if (next !== undefined)
+      this.scheduleVectorDigestBackfill(undefined, next);
+  }
+  vectorDigestBackfillFailed(error) {
+    if (/busy|locked/i.test(String(error))) {
+      this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS);
+      return;
+    }
+    console.warn("Connector store vector digest backfill failed; exact scan retained.");
   }
   backfillVectorDigest(modelId, maxRows = 128) {
     if (this.readOnly)

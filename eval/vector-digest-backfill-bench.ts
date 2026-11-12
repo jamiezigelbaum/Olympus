@@ -6,14 +6,14 @@
 //   scan loop: bun eval/vector-digest-backfill-bench.ts scan --store SCRATCH.sqlite --model MODEL --stop STOPFILE
 //
 // The backfill mode runs the worker's own bounded turns (same row bounds and
-// time-based shrinking) and reports turn times, event-loop lag and lock
-// retries. The scan mode, run in a second process at the same time, times the
+// time-based shrinking) and reports read and write times apart, event-loop
+// lag and lock retries. The scan mode, run in a second process at the same time, times the
 // exact scan read-only until the stop file appears, so scans during backfill
 // can be compared with an idle baseline.
 import { Database } from 'bun:sqlite';
 import { existsSync } from 'node:fs';
 import { connectorStoreCurrentEmbeddingRowsIterator, nextVectorDigestBackfillRows } from '../src/workers/connector-store/local-index.ts';
-import { backfillVectorDigests, createVectorDigestSchema } from '../src/workers/connector-store/vector-digest.ts';
+import { applyVectorDigestWindow, createVectorDigestSchema, vectorDigestSourceQuery, vectorDigestState, type VectorDigestSourceRow } from '../src/workers/connector-store/vector-digest.ts';
 import { cosineSimilarity, decodeEmbedding } from '../src/workers/source-index/embeddings.ts';
 
 function summary(values: number[]): { n: number; max: number; p99: number; p50: number } {
@@ -26,6 +26,11 @@ async function backfill(path: string, modelId: string): Promise<Record<string, u
   const db = new Database(path, { create: false, strict: true });
   db.exec('PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;');
   createVectorDigestSchema(db);
+  // The worker reads each window on the read pool and only writes here, so
+  // the read and the write are timed apart; the write is what its thread pays.
+  const reader = new Database(path, { readonly: true, create: false, strict: true });
+  reader.exec('PRAGMA query_only = ON');
+  const reads: number[] = [];
   const turns: number[] = [];
   const lags: number[] = [];
   let last = performance.now();
@@ -34,15 +39,21 @@ async function backfill(path: string, modelId: string): Promise<Record<string, u
   const started = performance.now();
   try {
     for (;;) {
+      const cursor = vectorDigestState(db, modelId);
+      if (cursor.completed) break;
+      const readStart = performance.now();
+      const query = vectorDigestSourceQuery(cursor.cursorRowid, rows);
+      const source = reader.query(query.sql).all(...query.params) as VectorDigestSourceRow[];
+      reads.push(performance.now() - readStart);
       const turnStart = performance.now();
       let state;
-      try { state = backfillVectorDigests(db, modelId, rows); } catch (error) {
+      try { state = applyVectorDigestWindow(db, modelId, cursor.cursorRowid, source, rows); } catch (error) {
         if (/busy|locked/i.test(String(error))) { busy++; await new Promise((resolve) => setTimeout(resolve, 250)); continue; }
         throw error;
       }
       const ms = performance.now() - turnStart;
       turns.push(ms);
-      rows = nextVectorDigestBackfillRows(rows, ms);
+      rows = nextVectorDigestBackfillRows(rows, ms + reads.at(-1)!);
       scanned += state.scanned;
       if (state.completed) break;
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -51,7 +62,9 @@ async function backfill(path: string, modelId: string): Promise<Record<string, u
   const totalMs = Math.round(performance.now() - started);
   const digests = (db.query('SELECT COUNT(*) AS n FROM chunk_vector_digest WHERE model_id = ?').get(modelId) as { n: number }).n;
   db.close();
-  return { mode: 'backfill', totalMs, rowsScanned: scanned, digests, busyRetries: busy, turnMs: summary(turns), eventLoopLagMs: summary(lags) };
+  reader.close();
+  // eventLoopLagMs here includes the reads; in the worker they run on the pool.
+  return { mode: 'backfill', totalMs, rowsScanned: scanned, digests, busyRetries: busy, poolReadMs: summary(reads), writeTurnMs: summary(turns), eventLoopLagMs: summary(lags) };
 }
 
 function scanLoop(path: string, modelId: string, stop: string): Record<string, unknown> {

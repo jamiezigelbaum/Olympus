@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import { LocalConnectorStore, nextVectorDigestBackfillRows, connectorStoreCurrentEmbeddingPageQuery, connectorStoreCurrentEmbeddingRowsIterator, connectorStoreVectorDigestPageQuery, scanDigestPages } from '../src/workers/connector-store/local-index.ts';
-import { backfillVectorDigests, createVectorDigestSchema, vectorDigestState, writeVectorDigest } from '../src/workers/connector-store/vector-digest.ts';
+import { applyVectorDigestWindow, backfillVectorDigests, createVectorDigestSchema, vectorDigestSourceQuery, vectorDigestState, writeVectorDigest, type VectorDigestSourceRow } from '../src/workers/connector-store/vector-digest.ts';
 import { cosineSimilarity, decodeEmbedding, encodeEmbedding, type SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { encodeVectorDigest, scoreVectorDigest } from '../src/workers/source-index/vector-digest.ts';
 import type { StoreRead } from '../src/workers/connector-store/off-thread-reads.ts';
@@ -385,6 +385,46 @@ test('when ledger visibility hides every first-pass candidate, the lane scans wi
     const result = await store.vectorSearchLane('harbor note', provider, 2);
     expect(result.rows).toHaveLength(2);
   } finally { store.close(); }
+});
+
+test('a file store backfills on the read pool: the worker thread only writes digests', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vector-digest-pool-'));
+  const store = open(join(dir, 'store.sqlite'));
+  try {
+    await store.syncFromConnector(connector(300), { fetchContent: true });
+    await store.embedChunks({ provider });
+    const db = database(store);
+    db.exec('DELETE FROM chunk_vector_digest; DELETE FROM chunk_vector_digest_meta');
+    let inThread = 0;
+    const advance = store.backfillVectorDigest.bind(store);
+    store.backfillVectorDigest = (model, maxRows) => { inThread++; return advance(model, maxRows); };
+    (store as unknown as { scheduleVectorDigestBackfill(model?: string): void }).scheduleVectorDigestBackfill(modelId);
+    await waitFor(() => vectorDigestState(db, modelId).completed);
+    expect(inThread).toBe(0);
+    expect(db.query('SELECT COUNT(*) AS n FROM chunk_vector_digest').get()).toEqual({ n: 300 });
+  } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a window read before a vector was replaced, or before the cursor moved, never lands a stale digest', () => {
+  const db = numericStore();
+  try {
+    db.transaction(() => { for (let i = 1; i <= 4; i++) insert(db, i, [1, 0, 0]); })();
+    db.exec('DELETE FROM chunk_vector_digest; DELETE FROM chunk_vector_digest_meta');
+    const query = vectorDigestSourceQuery(0, 128);
+    const stale = db.query(query.sql).all(...query.params) as VectorDigestSourceRow[];
+    // Chunk 2 is re-embedded after the read; its own write keeps its digest current.
+    db.transaction(() => {
+      const embedding = encodeEmbedding([0, 1, 0], 3);
+      db.query('UPDATE chunk_embeddings SET embedding = ?, embedded_at = ? WHERE chunk_pk = 2').run(embedding, 'later');
+      writeVectorDigest(db, 2, modelId, 2, embedding);
+    })();
+    const fresh = (db.query('SELECT digest FROM chunk_vector_digest WHERE chunk_pk = 2').get() as { digest: Uint8Array }).digest;
+    expect(applyVectorDigestWindow(db, modelId, 1, stale, 128).scanned).toBe(0);
+    expect(applyVectorDigestWindow(db, modelId, 0, stale, 128)).toEqual({ cursorRowid: 4, completed: true, scanned: 4 });
+    const after = (db.query('SELECT digest FROM chunk_vector_digest WHERE chunk_pk = 2').get() as { digest: Uint8Array }).digest;
+    expect([...after]).toEqual([...fresh]);
+    expect(db.query('SELECT COUNT(*) AS n FROM chunk_vector_digest').get()).toEqual({ n: 4 });
+  } finally { db.close(); }
 });
 
 test('a competing writer rolls back the backfill slice and restores the normal lock timeout', () => {
