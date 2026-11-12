@@ -313,6 +313,23 @@ describe('source_answer latency trace seat order (#1354)', () => {
     expect(contentBearingKeys(record)).toEqual([]);
   });
 
+  test('carries a short hash of the item at each seat and each fit\'s prompt bytes, never the raw ids', async () => {
+    const trace = createSourceAnswerTrace(() => new Date('2026-07-23T12:00:00.000Z'));
+    await runWithSourceAnswerTrace(trace, async () => {
+      recordSourceAnswerPackSeats(['a.store', 'b.store', 'a.store'], 0, ['local-item-17', 'local-item-17', 'local-item-17']);
+      recordSourceAnswerAnalystFit('local', [1, 2], 4321.9);
+    });
+    const record = buildSourceAnswerLatencyTraceRecord({ trace: snapshotSourceAnswerTrace(trace), outcome: 'success' });
+    const hashes = record.evidence_seats?.item_hashes ?? [];
+    expect(hashes).toHaveLength(3);
+    for (const hash of hashes) expect(hash).toMatch(/^[0-9a-f]{12}$/);
+    // The same item in the same store hashes alike; the same id in another store does not.
+    expect(hashes[0]).toBe(hashes[2]);
+    expect(hashes[0]).not.toBe(hashes[1]);
+    expect(record.evidence_seats?.fits).toEqual([{ lane: 'local', kept_seats: [1, 2], prompt_bytes: 4321 }]);
+    expect(JSON.stringify(record)).not.toContain('local-item-17');
+  });
+
   test('a later pack replaces the earlier one with its own fits, and no pack means no field', async () => {
     const trace = createSourceAnswerTrace(() => new Date('2026-07-23T12:00:00.000Z'));
     const empty = buildSourceAnswerLatencyTraceRecord({ trace: snapshotSourceAnswerTrace(trace), outcome: 'success' });
