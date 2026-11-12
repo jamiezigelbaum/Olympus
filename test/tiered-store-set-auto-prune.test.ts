@@ -236,3 +236,19 @@ test('the background ticker sweeps without the sniffer or a sync, then leaves a 
   stop();
   expect(cancelled).toBe(true);
 });
+
+test('a time budget stops a page between items, keeps the cursor, and does not end the walk early', async () => {
+  const ctx = await fixture();
+  let clock = 0;
+  const info = spyOn(console, 'info').mockImplementation(() => {});
+  cleanup.push(() => info.mockRestore());
+  // Each read of the clock advances it, so the budget is spent after the first item of a 200-item page.
+  const first = sweepAutomaticSupersededCopies(ctx.f.set, { budgetMs: 5, now: () => (clock += 10),
+    embeddingLedger: ctx.embeddingLedger });
+  expect(first).toMatchObject({ checked: 1, purged: 1, complete: false });
+  expect(JSON.parse(ctx.f.ledger.readMeta('automatic-superseded-prune-v1') || '{}').done).toBeUndefined();
+  expect(info.mock.calls.some(([line]) => /\[tier-auto-prune\] ledger=\S+ slice_ms=\d+ prune_ms=\d+ max_item_ms=\d+ checked=1 purged=1 complete=false/.test(String(line)))).toBe(true);
+  // The next call carries on from the cursor and finishes.
+  expect(sweepAutomaticSupersededCopies(ctx.f.set, { budgetMs: 60_000, now: () => 0,
+    embeddingLedger: ctx.embeddingLedger })).toMatchObject({ purged: 1, complete: true });
+});

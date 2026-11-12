@@ -38,7 +38,15 @@ import {
 } from './live-control.ts';
 import type { LocalXBookmarksReconcileStateStore } from './reconcile-state.ts';
 import { LocalXBookmarksReconcileStateStore as XBookmarksReconcileStateStore } from './reconcile-state.ts';
-import { X_BOOKMARKS_PROVIDER, X_BOOKMARKS_STORE_PLACEMENT } from './connector.ts';
+import {
+  X_BOOKMARKS_ARCHIVE_CONNECTOR_ID,
+  X_BOOKMARKS_LIVE_CONNECTOR_ID,
+  X_BOOKMARKS_PROVIDER,
+  X_BOOKMARKS_STORE_PLACEMENT,
+  xBookmarkLocalItemId,
+} from './connector.ts';
+import { XBookmarksArchiveImportError, archivedXBookmarksConnector, readArchivedXBookmarks } from './archive-import.ts';
+import { resolve } from 'node:path';
 import {
   runXBookmarksWindowDiagnostic,
   type XBookmarksWindowDiagnosticResult,
@@ -74,6 +82,11 @@ export interface XBookmarksWindowDiagnosticRequest {
   attempted_at?: string;
   /** Same contract as XBookmarksHeadSyncRequest.provenance. */
   provenance?: XApiInvocationProvenance;
+}
+
+export interface XBookmarksArchiveImportRequest {
+  /** Absolute path to an earlier Olympus install's X bookmarks connector store. */
+  archive_path: string;
 }
 
 export interface XBookmarksLiveSyncResult {
@@ -133,6 +146,7 @@ export interface XBookmarksConnectorStoreSyncHandler {
   syncHead(request?: XBookmarksHeadSyncRequest): Promise<XBookmarksLiveSyncResult>;
   reconcile(request?: XBookmarksReconcileRequest): Promise<XBookmarksLiveSyncResult>;
   diagnoseWindow?(request?: XBookmarksWindowDiagnosticRequest): Promise<XBookmarksLiveSyncResult>;
+  importArchive?(request: XBookmarksArchiveImportRequest): Promise<XBookmarksLiveSyncResult>;
   lastCompleteReconcileAt(): string | undefined;
   completeReconcileWatermark(): XBookmarksReconcileWatermark | undefined;
   apiUsageStatus(): XApiUsageStatus;
@@ -242,9 +256,23 @@ export function createXBookmarksConnectorStoreSyncHandler(
   return {
     async syncHead(request: XBookmarksHeadSyncRequest = {}): Promise<XBookmarksLiveSyncResult> {
       const attemptedAt = validAttemptedAt(request.attempted_at, now);
+      const hasCheckpoint = Boolean(usageStore.headCheckpoint(account) || request.checkpoint?.trim());
       const connector = createXBookmarksApiSourceConnector({
         ...connectorBase,
         mode: 'incremental',
+        hasStoredBookmark: (postId) => {
+          const identity = {
+            family: 'x' as const, provider: X_BOOKMARKS_PROVIDER, accountScope: account,
+            providerItemId: postId, localItemId: xBookmarkLocalItemId(account, postId),
+          };
+          // A truncated head pass can have indexed a prefix without proving
+          // overlap. Those rows cannot certify their own retry. Imported rows
+          // are an independent boundary; live rows use the proven checkpoint.
+          return (!hasCheckpoint && tierSet.anyLegHasRow(identity))
+            || tierSet.openStores().some((store) => store.itemOwnerPresent(
+              identity, X_BOOKMARKS_ARCHIVE_CONNECTOR_ID, 'preservation',
+            ));
+        },
         attemptedAt,
         provenance: xApiInvocationProvenance(request.provenance),
       });
@@ -627,6 +655,58 @@ export function createXBookmarksConnectorStoreSyncHandler(
         },
         ...(incomplete ? { warnings: ['x_window_diagnostic_incomplete_review_report'] } : {}),
       }, diagnostic.report.api_usage, config);
+    },
+
+    // The archived set goes in through the archive connector with preservation
+    // ownership: the same tier set, judge and embedding as a fetched bookmark,
+    // no X API call, and a reconcile never reads its absence from a provider
+    // window as a removal. The store keys items by post id, so a second import
+    // writes nothing new. The head lane then stops at the first imported id.
+    async importArchive(request: XBookmarksArchiveImportRequest): Promise<XBookmarksLiveSyncResult> {
+      const archived = readArchivedXBookmarks(request.archive_path);
+      if (options.store.dbPath !== ':memory:' && resolve(request.archive_path) === resolve(options.store.dbPath)) {
+        throw new XBookmarksArchiveImportError('The archive path is this install\'s own X store.');
+      }
+      // Fill only what is missing. A bookmark the live lane already holds
+      // keeps its record: the archive has no folders, author id or source
+      // version, and writing it again would overwrite the live ones. A row an
+      // earlier import wrote is written again, so an import cut off between
+      // its store legs completes on the retry; unchanged content is not
+      // re-embedded.
+      const missing = archived.posts.filter((post) => {
+        const identity = {
+          family: 'x' as const, provider: X_BOOKMARKS_PROVIDER, accountScope: account,
+          providerItemId: post.id, localItemId: xBookmarkLocalItemId(account, post.id),
+        };
+        if (!tierSet.anyLegHasRow(identity)) return true;
+        return tierSet.openStores().some((store) => store.itemOwnerPresent(
+          identity, X_BOOKMARKS_ARCHIVE_CONNECTOR_ID, 'preservation',
+        )) && !tierSet.openStores().some((store) => store.itemOwnerPresent(
+          identity, X_BOOKMARKS_LIVE_CONNECTOR_ID, 'observed',
+        ));
+      });
+      const connector = archivedXBookmarksConnector(account, missing, now().toISOString());
+      const run = await runLane(connector, {
+        placement: X_BOOKMARKS_STORE_PLACEMENT,
+        fetchContent: true,
+        ownershipKind: 'preservation',
+        maxItems: Math.max(1, missing.length),
+      }, false);
+      return withGuard({
+        status: run.sync.itemsIndexed > 0 ? 'progress' : 'idle',
+        counts: {
+          api_requests: 0,
+          archive_rows_read: archived.rowsRead,
+          archive_rows_skipped: archived.rowsSkipped,
+          archive_posts_with_text: archived.postsWithText,
+          archive_posts_already_held: archived.posts.length - missing.length,
+          items_seen: archived.posts.length,
+          items_indexed: run.sync.itemsIndexed,
+          chunks_indexed: run.sync.chunksIndexed,
+          chunks_embedded: run.embed.chunksEmbedded,
+          ...(run.tiered ?? {}),
+        },
+      }, usageStore.status({ account, config, now: now() }), config);
     },
 
     lastCompleteReconcileAt: () => usageStore.lastCompleteReconcileAt(account),
