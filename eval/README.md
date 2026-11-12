@@ -433,7 +433,8 @@ private output file contains the drafts; stdout contains counts only, and
 stderr a counts-only progress line per stage and every 10 questions. Each draft
 is kept in `<output>.drafts.json` (0600) as it is made; after a stop, the same
 command with `--resume` (same seed and count) asks the model only for the rest.
-The file is removed once the set is written.
+A saved draft is reused only for the same sampled item while its quote is still
+in that item. The file is removed once the set is written with no failed request.
 
 No one reads the drafts, because their text stays on Sparta. A local check
 replaces that review for the 5–10 proposed negative questions. Each negative is

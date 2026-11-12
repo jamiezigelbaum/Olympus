@@ -164,7 +164,8 @@ function overlapsContent(question: string, quote: string): boolean {
 /** The drafts a run has made so far, by sample index: what --resume reads back. */
 export interface DraftCheckpoint {
   seed: string; count: number;
-  drafted: Array<{ index: number; question: string; quote: string } | { index: number; rejected: true }>;
+  /** Each entry names the item it was drafted from, so a resumed run reuses it only for the same sample. */
+  drafted: Array<({ question: string; quote: string } | { rejected: true }) & { index: number; corpusId: string; providerItemId: string }>;
 }
 
 /** One sampled item's question and quote, or a throw when the model's draft fails a check. */
@@ -201,7 +202,7 @@ export async function draftPassageQuestions(input: {
   checkpoint?: { load(): DraftCheckpoint | undefined; save(checkpoint: DraftCheckpoint): void };
 }): Promise<{
   dataset: EvalDataset;
-  counts: { sampled: number; kept: number; rejected: number; unanswerable: number; negativesKept: number; negativesDropped: number; negativesUnchecked: number; open: number; sealed: number; alternates: number; byFamily: Record<string, number>; byTier: Record<string, number> };
+  counts: { sampled: number; kept: number; rejected: number; requestsFailed: number; unanswerable: number; negativesKept: number; negativesDropped: number; negativesUnchecked: number; open: number; sealed: number; alternates: number; byFamily: Record<string, number>; byTier: Record<string, number> };
 }> {
   const count = input.count ?? 60;
   if (!Number.isInteger(count) || count < 1) throw new Error('Count must be a positive integer.');
@@ -216,18 +217,28 @@ export async function draftPassageQuestions(input: {
   const resumed = new Map(checkpoint.drafted.map(entry => [entry.index, entry]));
   if (resumed.size) progress(`drafting: resuming with ${resumed.size} of ${items.length} already drafted`);
   const kept: Array<{ index: number; item: DraftItem; question: string; quote: string; paraphrase: boolean }> = [];
+  let requestsFailed = 0;
   for (const [index, item] of items.entries()) {
     const paraphrase = index % 2 === 0;
     let entry = resumed.get(index);
+    // Reused only when it names the item sampled here and, for a kept draft,
+    // the quote is still in that item's text (a refreshed copy can change both).
+    if (entry && (entry.corpusId !== item.corpusId || entry.providerItemId !== item.providerItemId
+      || ('quote' in entry && !passageContainsQuote(item.text, entry.quote)))) {
+      checkpoint.drafted = checkpoint.drafted.filter(saved => saved !== entry);
+      entry = undefined;
+    }
     if (!entry) {
       // A draft that failed its checks is kept as rejected; a failed request is
       // not, so a resumed run asks the model again.
       let failedRequest = false;
-      entry = await draftOne(input.model, item, paraphrase).then(draft => ({ index, ...draft }), (error: unknown) => {
+      const drafted = { index, corpusId: item.corpusId, providerItemId: item.providerItemId };
+      entry = await draftOne(input.model, item, paraphrase).then(draft => ({ ...drafted, ...draft }), (error: unknown) => {
         failedRequest = !(error instanceof DraftRejected);
-        return { index, rejected: true as const };
+        return { ...drafted, rejected: true as const };
       });
-      if (!failedRequest) { checkpoint.drafted.push(entry); input.checkpoint?.save(checkpoint); }
+      if (failedRequest) requestsFailed++;
+      else { checkpoint.drafted.push(entry); input.checkpoint?.save(checkpoint); }
     }
     if ('rejected' in entry) rejected++;
     else kept.push({ index, item, question: entry.question, quote: entry.quote, paraphrase });
@@ -262,7 +273,7 @@ export async function draftPassageQuestions(input: {
   const sealed = new Set(order.slice(0, Math.floor(questions.length / 3)));
   const dataset: EvalDataset = { version: '2', description: 'Local passage retrieval drafts; review before use.', questions: questions.map((q, index) => ({ ...q, split: sealed.has(index) ? 'sealed' : 'open' })) };
   validatePassageDataset(dataset);
-  return { dataset, counts: { sampled: items.length, kept: items.length - rejected, rejected, unanswerable: unanswerable.length,
+  return { dataset, counts: { sampled: items.length, kept: items.length - rejected, rejected, requestsFailed, unanswerable: unanswerable.length,
     negativesKept, negativesDropped, negativesUnchecked, open: questions.length - sealed.size, sealed: sealed.size, alternates: alternatesCount, byFamily, byTier } };
 }
 
@@ -359,7 +370,8 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     const result = await draftPassageQuestions({ opened, count: positiveInteger(values.get('--count'), 60), seed: values.get('--seed') ?? '1', model, negativePassages, progress, checkpoint });
     opened.checkFileDescriptors();
     writeDraftQuestionSet(output, result);
-    rmSync(checkpointPath, { force: true });
+    // Kept while a request failed, so --resume asks again for just those.
+    if (result.counts.requestsFailed === 0) rmSync(checkpointPath, { force: true });
   } finally { try { opened.checkFileDescriptors(); } finally { opened.close(); } }
 }
 if (import.meta.main) main().catch(() => { console.error('Passage drafting failed; no content is logged.'); process.exitCode = 1; });

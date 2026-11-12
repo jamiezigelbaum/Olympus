@@ -209,3 +209,33 @@ test('a resumed run reuses the drafts already made and asks the model only for t
     expect(resumed.dataset).toEqual(first.dataset);
   } finally { server.stop(true); opened.close(); }
 });
+test('a resumed draft is reused only for the same sampled item, and a failed request is counted so its drafts are kept', async () => {
+  const opened = await world();
+  let drafts = 0; let failNext = false;
+  const server = Bun.serve({ port: 0, hostname: '127.0.0.1', async fetch(request) {
+    const prompt = ((await request.json()) as { messages: { content: string }[] }).messages.at(-1)!.content;
+    if (!prompt.includes('UNANSWERABLE')) {
+      drafts++;
+      if (failNext) { failNext = false; return new Response('busy', { status: 503 }); }
+    }
+    const result = prompt.includes('UNANSWERABLE')
+      ? { questions: Array.from({ length: 5 }, (_, i) => `Where are the nonexistent orchid records number ${i}?`) }
+      : { question: 'Which day is the bill due?', quote: 'The Kestrel invoice total is forty seven dollars payable Tuesday' };
+    return Response.json({ choices: [{ message: { content: JSON.stringify(result) } }] });
+  } });
+  try {
+    const model = localDraftModel({ baseUrl: `http://127.0.0.1:${server.port}/v1`, model: 'synthetic' });
+    let saved: import('../eval/draft-passage-questions.ts').DraftCheckpoint | undefined;
+    failNext = true;
+    const first = await draftPassageQuestions({ opened, count: 4, seed: 'bind', model, checkpoint: { load: () => undefined, save: state => { saved = structuredClone(state); } } });
+    expect(first.counts.requestsFailed).toBe(1);
+    expect(saved!.drafted).toHaveLength(3);
+    // A checkpoint from another copy: its first entry names an item this sample does not hold.
+    const moved = { ...saved!, drafted: saved!.drafted.map((entry, at) => at === 0 ? { ...entry, providerItemId: 'not-sampled' } : entry) };
+    drafts = 0;
+    const resumed = await draftPassageQuestions({ opened, count: 4, seed: 'bind', model, checkpoint: { load: () => moved, save: () => {} } });
+    // The moved entry and the failed one are drafted again; the other two are reused.
+    expect(drafts).toBe(2);
+    expect(resumed.counts.requestsFailed).toBe(0);
+  } finally { server.stop(true); opened.close(); }
+});
