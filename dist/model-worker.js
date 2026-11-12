@@ -22,185 +22,6 @@ function untilAborted(work, signal) {
 var NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
 var DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES = 64 * 1024;
 
-// src/workers/source-index/pinned-download.ts
-import { closeSync, createReadStream, existsSync, openSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
-var REQUEST_BYTES = 256 * 1024 ** 2;
-var READ_RETRIES = 3;
-var RETRY_DELAY_MS = 250;
-
-class InterruptedRead extends Error {
-}
-async function downloadPinnedFile(options) {
-  const { fetchImpl, url, target, partial, expectedBytes, algorithm, encoding, noun, stallMs, error } = options;
-  let hash = createHash(algorithm);
-  let received = 0;
-  let fd;
-  let discard = false;
-  const close = () => {
-    if (fd !== undefined) {
-      const open = fd;
-      fd = undefined;
-      closeSync(open);
-    }
-  };
-  const mismatch = (message) => {
-    discard = true;
-    return error("checksum_mismatch", message);
-  };
-  const disk = (cause) => {
-    discard = true;
-    close();
-    rmSync(partial, { force: true });
-    return options.diskError?.(cause) ?? error("disk_write_failed", `Could not write the download: ${String(cause)}`);
-  };
-  try {
-    if (existsSync(partial)) {
-      const size = statSync(partial).size;
-      if (size > 0 && size < expectedBytes) {
-        await hashPartial(partial, hash, options.verifyTimeoutMs);
-        received = size;
-        options.onProgress(size);
-      } else
-        rmSync(partial, { force: true });
-    }
-    let retries = 0;
-    while (received < expectedBytes) {
-      const start = received;
-      const end = Math.min(expectedBytes - 1, start + REQUEST_BYTES - 1);
-      const controller = new AbortController;
-      let timer;
-      const armStall = () => {
-        clearTimeout(timer);
-        timer = setTimeout(() => controller.abort(new Error(`no data for ${Math.round(stallMs / 1000)} s`)), stallMs);
-      };
-      let response;
-      let reader;
-      let retry = false;
-      try {
-        armStall();
-        try {
-          response = await untilAborted(fetchImpl(url, {
-            redirect: "follow",
-            signal: controller.signal,
-            headers: { Range: `bytes=${start}-${end}`, "Accept-Encoding": "identity" }
-          }), controller.signal);
-        } catch (cause) {
-          throw error("download_failed", `Could not reach the download server for the ${noun} (${message(cause)}).`);
-        }
-        if (response.status !== 200 && response.status !== 206 || !response.body) {
-          throw error("download_failed", `The ${noun} download failed (HTTP ${response.status}).`);
-        }
-        let responseEnd = expectedBytes - 1;
-        if (response.status === 206) {
-          const range = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(response.headers.get("Content-Range") ?? "");
-          if (!range || Number(range[1]) !== start || Number(range[2]) !== end || Number(range[3]) !== expectedBytes) {
-            throw error("download_failed", `The ${noun} download returned an invalid Content-Range.`);
-          }
-          responseEnd = end;
-        } else if (received > 0) {
-          try {
-            close();
-            fd = openSync(partial, "w", 420);
-          } catch (cause) {
-            throw disk(cause);
-          }
-          hash = createHash(algorithm);
-          options.onProgress(-received);
-          received = 0;
-        }
-        options.onStart();
-        if (fd === undefined) {
-          try {
-            fd = openSync(partial, received > 0 ? "a" : "w", 420);
-          } catch (cause) {
-            throw disk(cause);
-          }
-        }
-        reader = response.body.getReader();
-        for (;; ) {
-          armStall();
-          let part;
-          try {
-            part = await untilAborted(reader.read(), controller.signal);
-          } catch (cause) {
-            throw new InterruptedRead(message(cause));
-          }
-          if (part.done)
-            break;
-          if (received + part.value.byteLength > responseEnd + 1) {
-            throw mismatch(`${url} is larger than its pinned size or requested range.`);
-          }
-          try {
-            (options.write ?? writeDownloadChunk)(fd, part.value);
-          } catch (cause) {
-            throw disk(cause);
-          }
-          hash.update(part.value);
-          received += part.value.byteLength;
-          options.onProgress(part.value.byteLength);
-        }
-        if (received !== responseEnd + 1)
-          throw mismatch(`${url} did not match its pinned size; nothing was installed.`);
-      } catch (cause) {
-        if (!(cause instanceof InterruptedRead))
-          throw cause;
-        if (retries >= READ_RETRIES) {
-          throw error("download_failed", `The ${noun} download was interrupted (${cause.message}).`);
-        }
-        retries += 1;
-        retry = true;
-      } finally {
-        clearTimeout(timer);
-        if (reader) {
-          reader.cancel().catch(() => {
-            return;
-          });
-          reader.releaseLock();
-        } else if (response?.body)
-          response.body.cancel().catch(() => {
-            return;
-          });
-        controller.abort();
-      }
-      if (retry)
-        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS * 2 ** (retries - 1)));
-    }
-    close();
-    if (received !== expectedBytes || hash.digest(encoding) !== options.digest) {
-      throw mismatch(`${url} did not match its pinned checksum; nothing was installed.`);
-    }
-    renameSync(partial, target);
-  } catch (cause) {
-    close();
-    if (discard || !options.keepPartial)
-      rmSync(partial, { force: true });
-    throw cause;
-  }
-}
-function writeDownloadChunk(fd, bytes) {
-  let offset = 0;
-  while (offset < bytes.byteLength) {
-    const written = writeSync(fd, bytes, offset, bytes.byteLength - offset);
-    if (written === 0)
-      throw new Error("The disk stopped accepting data.");
-    offset += written;
-  }
-}
-async function hashPartial(path, hash, timeoutMs) {
-  const stream = createReadStream(path);
-  const timer = setTimeout(() => stream.destroy(new Error(`Checking ${path} did not finish in time.`)), timeoutMs);
-  try {
-    for await (const bytes of stream)
-      hash.update(bytes);
-  } finally {
-    clearTimeout(timer);
-    stream.destroy();
-  }
-}
-function message(cause) {
-  return cause instanceof Error ? cause.message : String(cause);
-}
-
 // src/core/olympus-layout.ts
 import { homedir as homedir3 } from "node:os";
 import { basename, dirname as dirname5, isAbsolute as isAbsolute4, join as join4, relative as relative3, resolve as resolve3, sep as sep3 } from "node:path";
@@ -259,32 +80,32 @@ import { dirname as dirname2, isAbsolute as isAbsolute2, join as join2 } from "n
 // src/core/atomic-file.ts
 import { randomUUID } from "node:crypto";
 import {
-  closeSync as closeSync2,
-  existsSync as existsSync2,
+  closeSync,
+  existsSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
-  openSync as openSync2,
-  renameSync as renameSync2,
-  rmSync as rmSync2,
+  openSync,
+  renameSync,
+  rmSync,
   writeFileSync
 } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 function writePrivateFileAtomicSync(path, text, options = {}) {
   const temp = temporaryPathFor(path);
   try {
-    const descriptor = openSync2(temp, "wx", 384);
+    const descriptor = openSync(temp, "wx", 384);
     try {
       writeFileSync(descriptor, text, { encoding: "utf8" });
       fsyncSync(descriptor);
     } finally {
-      closeSync2(descriptor);
+      closeSync(descriptor);
     }
-    renameSync2(temp, path);
+    renameSync(temp, path);
     options.onPublished?.();
   } catch (error) {
     try {
-      rmSync2(temp, { force: true });
+      rmSync(temp, { force: true });
     } catch {}
     throw error;
   }
@@ -292,7 +113,7 @@ function writePrivateFileAtomicSync(path, text, options = {}) {
 }
 function removeFileDurablySync(path) {
   try {
-    rmSync2(path);
+    rmSync(path);
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "ENOENT")
       return false;
@@ -311,7 +132,7 @@ function ensurePrivateDirectoryTreeSync(root, target) {
   let current = normalizedRoot;
   for (const component of suffix.split(sep)) {
     current = resolve(current, component);
-    if (existsSync2(current)) {
+    if (existsSync(current)) {
       assertDirectoryComponent(current);
       continue;
     }
@@ -322,12 +143,12 @@ function ensurePrivateDirectoryTreeSync(root, target) {
 }
 function ensurePrivateRootDirectorySync(root) {
   const normalizedRoot = resolveTrustedRoot(root);
-  if (existsSync2(normalizedRoot)) {
+  if (existsSync(normalizedRoot)) {
     assertDirectoryComponent(normalizedRoot, "managed custody root");
     return;
   }
   let ancestor = dirname(normalizedRoot);
-  while (!existsSync2(ancestor)) {
+  while (!existsSync(ancestor)) {
     const parent = dirname(ancestor);
     if (parent === ancestor)
       break;
@@ -340,7 +161,7 @@ function temporaryPathFor(path) {
   return `${path}.${randomUUID()}.tmp`;
 }
 function syncDirectorySync(path) {
-  const descriptor = openSync2(path, "r");
+  const descriptor = openSync(path, "r");
   try {
     try {
       fsyncSync(descriptor);
@@ -349,7 +170,7 @@ function syncDirectorySync(path) {
         throw error;
     }
   } finally {
-    closeSync2(descriptor);
+    closeSync(descriptor);
   }
 }
 function resolveTrustedRoot(root) {
@@ -402,7 +223,7 @@ import { dirname as dirname4, isAbsolute as isAbsolute3, join as join3, relative
 
 // src/core/file-lease.ts
 import { execFileSync } from "node:child_process";
-import { closeSync as closeSync3, existsSync as existsSync3, mkdirSync as mkdirSync2, openSync as openSync3, readFileSync as readFileSync2 } from "node:fs";
+import { closeSync as closeSync2, existsSync as existsSync2, mkdirSync as mkdirSync2, openSync as openSync2, readFileSync as readFileSync2 } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname as dirname3 } from "node:path";
 var DEFAULT_OPTIONS = {
@@ -487,9 +308,9 @@ function openSqlite(path) {
   return connection;
 }
 function tryKernelLock(lockPath) {
-  if (!existsSync3(lockPath)) {
+  if (!existsSync2(lockPath)) {
     try {
-      closeSync3(openSync3(lockPath, "wx", 384));
+      closeSync2(openSync2(lockPath, "wx", 384));
     } catch (error) {
       if (!isNodeErrorWithCode(error, "EEXIST"))
         throw error;
@@ -839,6 +660,314 @@ function legacyWhatsAppStateDir(env) {
 }
 function whatsappStateDirs() {
   return { resolved: legacyWhatsAppStateDir, default: (env) => join4(legacyCaptureDataRoot(env), "whatsapp-live") };
+}
+
+// src/core/engine-split.ts
+var ENGINE_ROLE_ENV = "OLYMPUS_WORKER_ENGINE_ROLE";
+function engineRoleFromEnv(env = process.env) {
+  const value = env[ENGINE_ROLE_ENV]?.trim();
+  if (!value)
+    return "single";
+  if (value === "background" || value === "front")
+    return value;
+  throw new Error(`${ENGINE_ROLE_ENV} must be background or front.`);
+}
+
+// src/workers/control-path-headroom.ts
+var CONTROL_PATH_SLICE_MS = 20;
+var CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200;
+var CONTROL_PATH_REST_MS = 25;
+var HEARTBEAT_MS = 50;
+var CONTROL_PATH_FREEZE_LOG_MS = 2000;
+function controlPathFreezeSubject(role) {
+  if (role === "front")
+    return "the front process could not answer requests";
+  if (role === "background")
+    return "the background process was blocked";
+  return "the worker could not answer requests";
+}
+function roleFromEnv() {
+  try {
+    return engineRoleFromEnv();
+  } catch {
+    return "single";
+  }
+}
+
+class ControlPathHeadroom {
+  sliceMs;
+  lagRestThresholdMs;
+  restMs;
+  now;
+  turn;
+  lastTurnAt;
+  pendingTurn;
+  lastLagMs = 0;
+  heartbeat;
+  expectedBeatAt = 0;
+  turns = 0;
+  rests = 0;
+  freezes = 0;
+  active = new Map;
+  log;
+  freezeLogMs;
+  freezeSubject;
+  constructor(options = {}) {
+    this.sliceMs = options.sliceMs ?? CONTROL_PATH_SLICE_MS;
+    this.lagRestThresholdMs = options.lagRestThresholdMs ?? CONTROL_PATH_LAG_REST_THRESHOLD_MS;
+    this.restMs = options.restMs ?? CONTROL_PATH_REST_MS;
+    this.now = options.now ?? (() => performance.now());
+    this.turn = options.turn ?? ((ms) => new Promise((resolve4) => {
+      setTimeout(resolve4, ms);
+    }));
+    this.log = options.log ?? ((line) => console.error(line));
+    this.freezeLogMs = options.freezeLogMs ?? CONTROL_PATH_FREEZE_LOG_MS;
+    this.freezeSubject = controlPathFreezeSubject(options.role ?? roleFromEnv());
+    this.lastTurnAt = this.now();
+  }
+  enter(label) {
+    this.ensureHeartbeat();
+    this.active.set(label, (this.active.get(label) ?? 0) + 1);
+    let left = false;
+    return () => {
+      if (left)
+        return;
+      left = true;
+      const count = (this.active.get(label) ?? 1) - 1;
+      if (count <= 0)
+        this.active.delete(label);
+      else
+        this.active.set(label, count);
+    };
+  }
+  ingestionTurn() {
+    this.ensureHeartbeat();
+    if (this.pendingTurn)
+      return this.pendingTurn;
+    const now = this.now();
+    if (now - this.lastTurnAt < this.sliceMs)
+      return;
+    const rest = this.lastLagMs >= this.lagRestThresholdMs;
+    if (rest)
+      this.rests += 1;
+    this.turns += 1;
+    const pending = this.turn(rest ? this.restMs : 0).then(() => {
+      this.pendingTurn = undefined;
+      this.lastTurnAt = this.now();
+    });
+    this.pendingTurn = pending;
+    return pending;
+  }
+  snapshot() {
+    return { turns: this.turns, rests: this.rests, freezes: this.freezes, lagMs: Math.round(this.lastLagMs) };
+  }
+  stop() {
+    if (this.heartbeat)
+      clearInterval(this.heartbeat);
+    this.heartbeat = undefined;
+  }
+  ensureHeartbeat() {
+    if (this.heartbeat)
+      return;
+    this.expectedBeatAt = this.now() + HEARTBEAT_MS;
+    this.heartbeat = setInterval(() => {
+      const now = this.now();
+      this.lastLagMs = Math.max(0, now - this.expectedBeatAt);
+      this.expectedBeatAt = now + HEARTBEAT_MS;
+      if (this.lastLagMs >= this.freezeLogMs) {
+        this.freezes += 1;
+        const running = [...this.active.keys()].sort().join(",") || "none";
+        this.log(`${new Date().toISOString()} [olympus:control-path] ${this.freezeSubject} for ${Math.round(this.lastLagMs)} ms; background work running: ${running}`);
+      }
+    }, HEARTBEAT_MS);
+    this.heartbeat.unref?.();
+  }
+}
+var controlPathHeadroom = new ControlPathHeadroom;
+function ingestionTurn() {
+  return controlPathHeadroom.ingestionTurn();
+}
+
+// src/workers/source-index/pinned-download.ts
+import { closeSync as closeSync3, createReadStream, existsSync as existsSync3, openSync as openSync3, renameSync as renameSync2, rmSync as rmSync2, statSync, writeSync } from "node:fs";
+var REQUEST_BYTES = 256 * 1024 ** 2;
+var READ_RETRIES = 3;
+var RETRY_DELAY_MS = 250;
+
+class InterruptedRead extends Error {
+}
+async function downloadPinnedFile(options) {
+  const { fetchImpl, url, target, partial, expectedBytes, algorithm, encoding, noun, stallMs, error } = options;
+  let hash = createHash(algorithm);
+  let received = 0;
+  let fd;
+  let discard = false;
+  const close = () => {
+    if (fd !== undefined) {
+      const open = fd;
+      fd = undefined;
+      closeSync3(open);
+    }
+  };
+  const mismatch = (message) => {
+    discard = true;
+    return error("checksum_mismatch", message);
+  };
+  const disk = (cause) => {
+    discard = true;
+    close();
+    rmSync2(partial, { force: true });
+    return options.diskError?.(cause) ?? error("disk_write_failed", `Could not write the download: ${String(cause)}`);
+  };
+  try {
+    if (existsSync3(partial)) {
+      const size = statSync(partial).size;
+      if (size > 0 && size < expectedBytes) {
+        await hashPartial(partial, hash, options.verifyTimeoutMs);
+        received = size;
+        options.onProgress(size);
+      } else
+        rmSync2(partial, { force: true });
+    }
+    let retries = 0;
+    while (received < expectedBytes) {
+      const start = received;
+      const end = Math.min(expectedBytes - 1, start + REQUEST_BYTES - 1);
+      const controller = new AbortController;
+      let timer;
+      const armStall = () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => controller.abort(new Error(`no data for ${Math.round(stallMs / 1000)} s`)), stallMs);
+      };
+      let response;
+      let reader;
+      let retry = false;
+      try {
+        armStall();
+        try {
+          response = await untilAborted(fetchImpl(url, {
+            redirect: "follow",
+            signal: controller.signal,
+            headers: { Range: `bytes=${start}-${end}`, "Accept-Encoding": "identity" }
+          }), controller.signal);
+        } catch (cause) {
+          throw error("download_failed", `Could not reach the download server for the ${noun} (${message(cause)}).`);
+        }
+        if (response.status !== 200 && response.status !== 206 || !response.body) {
+          throw error("download_failed", `The ${noun} download failed (HTTP ${response.status}).`);
+        }
+        let responseEnd = expectedBytes - 1;
+        if (response.status === 206) {
+          const range = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(response.headers.get("Content-Range") ?? "");
+          if (!range || Number(range[1]) !== start || Number(range[2]) !== end || Number(range[3]) !== expectedBytes) {
+            throw error("download_failed", `The ${noun} download returned an invalid Content-Range.`);
+          }
+          responseEnd = end;
+        } else if (received > 0) {
+          try {
+            close();
+            fd = openSync3(partial, "w", 420);
+          } catch (cause) {
+            throw disk(cause);
+          }
+          hash = createHash(algorithm);
+          options.onProgress(-received);
+          received = 0;
+        }
+        options.onStart();
+        if (fd === undefined) {
+          try {
+            fd = openSync3(partial, received > 0 ? "a" : "w", 420);
+          } catch (cause) {
+            throw disk(cause);
+          }
+        }
+        reader = response.body.getReader();
+        for (;; ) {
+          armStall();
+          let part;
+          try {
+            part = await untilAborted(reader.read(), controller.signal);
+          } catch (cause) {
+            throw new InterruptedRead(message(cause));
+          }
+          if (part.done)
+            break;
+          if (received + part.value.byteLength > responseEnd + 1) {
+            throw mismatch(`${url} is larger than its pinned size or requested range.`);
+          }
+          try {
+            (options.write ?? writeDownloadChunk)(fd, part.value);
+          } catch (cause) {
+            throw disk(cause);
+          }
+          hash.update(part.value);
+          received += part.value.byteLength;
+          options.onProgress(part.value.byteLength);
+          const turn = (options.turn ?? ingestionTurn)();
+          if (turn)
+            await turn;
+        }
+        if (received !== responseEnd + 1)
+          throw mismatch(`${url} did not match its pinned size; nothing was installed.`);
+      } catch (cause) {
+        if (!(cause instanceof InterruptedRead))
+          throw cause;
+        if (retries >= READ_RETRIES) {
+          throw error("download_failed", `The ${noun} download was interrupted (${cause.message}).`);
+        }
+        retries += 1;
+        retry = true;
+      } finally {
+        clearTimeout(timer);
+        if (reader) {
+          reader.cancel().catch(() => {
+            return;
+          });
+          reader.releaseLock();
+        } else if (response?.body)
+          response.body.cancel().catch(() => {
+            return;
+          });
+        controller.abort();
+      }
+      if (retry)
+        await new Promise((resolve4) => setTimeout(resolve4, RETRY_DELAY_MS * 2 ** (retries - 1)));
+    }
+    close();
+    if (received !== expectedBytes || hash.digest(encoding) !== options.digest) {
+      throw mismatch(`${url} did not match its pinned checksum; nothing was installed.`);
+    }
+    renameSync2(partial, target);
+  } catch (cause) {
+    close();
+    if (discard || !options.keepPartial)
+      rmSync2(partial, { force: true });
+    throw cause;
+  }
+}
+function writeDownloadChunk(fd, bytes) {
+  let offset = 0;
+  while (offset < bytes.byteLength) {
+    const written = writeSync(fd, bytes, offset, bytes.byteLength - offset);
+    if (written === 0)
+      throw new Error("The disk stopped accepting data.");
+    offset += written;
+  }
+}
+async function hashPartial(path, hash, timeoutMs) {
+  const stream = createReadStream(path);
+  const timer = setTimeout(() => stream.destroy(new Error(`Checking ${path} did not finish in time.`)), timeoutMs);
+  try {
+    for await (const bytes of stream)
+      hash.update(bytes);
+  } finally {
+    clearTimeout(timer);
+    stream.destroy();
+  }
+}
+function message(cause) {
+  return cause instanceof Error ? cause.message : String(cause);
 }
 
 // src/workers/source-index/built-in-reasoning/install.ts
