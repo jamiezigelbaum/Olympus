@@ -123,6 +123,20 @@ describe('schema updates back up the store first', () => {
     expect(lines.join('\n')).not.toContain(env.HOME!);
   });
 
+  test('a store that updates inside its own transaction is still backed up', () => {
+    const env = home();
+    const { path, db } = storeAtVersion1(env);
+    db.transaction(() => {
+      runSqliteMigrations(db, 'fixture', MIGRATIONS, { env, log: () => {} });
+    }).immediate();
+    expect(readSqliteSchemaVersion(db, 'fixture')).toBe(2);
+    db.close();
+    const copy = new Database(`${path}.pre-schema-1.bak`, { readonly: true });
+    expect(readSqliteSchemaVersion(copy, 'fixture')).toBe(1);
+    expect(copy.query('SELECT body FROM items').get()).toEqual({ body: 'kept' });
+    copy.close();
+  });
+
   test('a new store has nothing to back up', () => {
     const env = home();
     const path = join(env.HOME!, 'new.sqlite');

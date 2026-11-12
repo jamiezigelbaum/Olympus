@@ -199,7 +199,15 @@ function backUpBeforeUpdate(
   try {
     // Created empty and owner-only first: SQLite would create it with the umask's mode.
     closeSync(openSync(partial, 'wx', 0o600));
-    db.query('VACUUM INTO ?').run(partial);
+    // Copied through a second, read-only handle: a store may run its update inside
+    // its own transaction, where VACUUM is refused. That handle sees the last
+    // committed state, which is the version being replaced.
+    const source = openReadonly(db, file);
+    try {
+      source.query('VACUUM INTO ?').run(partial);
+    } finally {
+      source.close();
+    }
     chmodSync(partial, 0o600);
     // Another opener may have finished the update first: its backup stands,
     // and a copy of the updated store must not replace it.
@@ -215,9 +223,13 @@ function backUpBeforeUpdate(
   return Math.round(performance.now() - started);
 }
 
+/** Opens `path` read-only with the open handle's own class: this module never loads bun:sqlite itself. */
+function openReadonly(db: Database, path: string): Database {
+  return new (db.constructor as new (path: string, options: { readonly: boolean }) => Database)(path, { readonly: true });
+}
+
 function copyVersion(db: Database, path: string, storeId: string): number {
-  // The open handle's own class: this module never loads bun:sqlite itself.
-  const copy = new (db.constructor as new (path: string, options: { readonly: boolean }) => Database)(path, { readonly: true });
+  const copy = openReadonly(db, path);
   try {
     return readSqliteSchemaVersion(copy, storeId);
   } finally {

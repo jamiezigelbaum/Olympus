@@ -19523,7 +19523,12 @@ function backUpBeforeUpdate(db, storeId, fromVersion, env, report, freeBytes = d
   recordSchemaBackup(env, { storeId, dbPath: file, backupPath: backup });
   try {
     closeSync11(openSync11(partial, "wx", 384));
-    db.query("VACUUM INTO ?").run(partial);
+    const source = openReadonly(db, file);
+    try {
+      source.query("VACUUM INTO ?").run(partial);
+    } finally {
+      source.close();
+    }
     chmodSync5(partial, 384);
     if (copyVersion(db, partial, storeId) !== fromVersion) {
       rmSync9(partial, { force: true });
@@ -19536,8 +19541,11 @@ function backUpBeforeUpdate(db, storeId, fromVersion, env, report, freeBytes = d
   }
   return Math.round(performance.now() - started);
 }
+function openReadonly(db, path) {
+  return new db.constructor(path, { readonly: true });
+}
 function copyVersion(db, path, storeId) {
-  const copy = new db.constructor(path, { readonly: true });
+  const copy = openReadonly(db, path);
   try {
     return readSqliteSchemaVersion(copy, storeId);
   } finally {
