@@ -39863,8 +39863,11 @@ var init_local_index = __esm(() => {
         this.itemTextVersionsPresent = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'item_text_versions'").get() !== null;
         const judgmentColumns = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'media_judgments'").get() !== null ? tableColumns(this.db, "media_judgments", false) : [];
         this.mediaJudgmentsPresent = CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS.every((column) => judgmentColumns.includes(column));
-        if (!this.readOnly)
-          this.scheduleVectorDigestBackfill();
+        if (!this.readOnly) {
+          const model = this.db.query("SELECT model_id FROM chunk_embeddings ORDER BY rowid DESC LIMIT 1").get()?.model_id;
+          if (model && !vectorDigestState(this.db, model).completed)
+            this.scheduleVectorDigestBackfill(model);
+        }
       } catch (error) {
         closeSqliteStore(this.db, { checkpoint: !this.readOnly });
         throw error;
@@ -39883,10 +39886,9 @@ var init_local_index = __esm(() => {
         this.vectorDigestBackfillTimer = undefined;
         if (this.closedForPoolReads)
           return;
-        const model = this.vectorDigestBackfillModel ?? this.db.query("SELECT model_id FROM chunk_embeddings ORDER BY rowid DESC LIMIT 1").get()?.model_id;
+        const model = this.vectorDigestBackfillModel;
         if (!model)
           return;
-        this.vectorDigestBackfillModel = model;
         if (this.vectorLanesInFlight > 0) {
           this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS);
           return;

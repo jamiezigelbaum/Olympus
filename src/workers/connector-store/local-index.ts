@@ -3429,7 +3429,12 @@ export class LocalConnectorStore {
         "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'media_judgments'",
       ).get() !== null ? tableColumns(this.db, 'media_judgments', false) : [];
       this.mediaJudgmentsPresent = CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS.every((column) => judgmentColumns.includes(column));
-      if (!this.readOnly) this.scheduleVectorDigestBackfill();
+      // Only a store that holds vectors without a complete digest starts a
+      // backfill timer at open; an empty or finished store keeps none pending.
+      if (!this.readOnly) {
+        const model = (this.db.query('SELECT model_id FROM chunk_embeddings ORDER BY rowid DESC LIMIT 1').get() as { model_id: string } | null)?.model_id;
+        if (model && !vectorDigestState(this.db, model).completed) this.scheduleVectorDigestBackfill(model);
+      }
     } catch (error) {
       closeSqliteStore(this.db, { checkpoint: !this.readOnly });
       throw error;
@@ -3450,14 +3455,11 @@ export class LocalConnectorStore {
     this.vectorDigestBackfillTimer = setTimeout(() => {
       this.vectorDigestBackfillTimer = undefined;
       if (this.closedForPoolReads) return;
-      // One digest slot per chunk: prefer the model most recently written,
-      // never oscillate between overlapping old and new models. This is one
-      // physical row read, including on a large legacy store with no metadata.
-      const model = this.vectorDigestBackfillModel ?? (this.db.query(
-        'SELECT model_id FROM chunk_embeddings ORDER BY rowid DESC LIMIT 1',
-      ).get() as { model_id: string } | null)?.model_id;
+      // One digest slot per chunk: the model most recently written (set at
+      // open from the last physical row, then by each embedding write), so
+      // overlapping old and new models never oscillate.
+      const model = this.vectorDigestBackfillModel;
       if (!model) return;
-      this.vectorDigestBackfillModel = model;
       // An Ask in flight on this store goes first.
       if (this.vectorLanesInFlight > 0) { this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS); return; }
       try {
