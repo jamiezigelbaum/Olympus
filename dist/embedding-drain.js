@@ -25688,14 +25688,10 @@ class LocalConnectorStore {
   tierLedgerHiddenItemPks() {
     return runSteps(this.tierLedgerHiddenSteps());
   }
-  async warmVisibilityInTurns() {
+  async keepVisibilityCurrentInTurns() {
     await this.tierHiddenItemPksInTurns();
-  }
-  async saveVisibilityInTurns() {
-    if (this.readOnly)
-      return;
-    await runStepsInTurns(this.tierLedgerHiddenSteps());
-    await this.publishVisibility();
+    if (!this.readOnly)
+      await this.publishVisibility();
   }
   tierLedgerHiddenMemo;
   hiddenChildMemo;
@@ -25841,14 +25837,16 @@ class LocalConnectorStore {
     const ledgerId = this.ledgerIdOf(ledger);
     if (ledgerId === undefined)
       return;
-    const page = this.db.query(`SELECT provider, account_scope, conversation_key, provider_item_id, flags, item_pks_json
-      FROM main.tier_visibility_members
-      WHERE generation = ?1 AND (provider, account_scope, conversation_key, provider_item_id) > (?2, ?3, ?4, ?5)
-      ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ?6`);
     for (let attempt = 0;attempt < 3; attempt += 1) {
       const state = this.readVisibilityState();
       if (!state || state.corpus_id !== this.corpusId || state.ledger_id !== ledgerId)
         return;
+      if (ledger.visibilityChangesSince(state.ledger_cursor).identities === undefined || this.itemVisibilityChangesSince(state.store_cursor).identities === undefined)
+        return;
+      const page = this.db.query(`SELECT provider, account_scope, conversation_key, provider_item_id, flags, item_pks_json
+        FROM main.tier_visibility_members
+        WHERE generation = ?1 AND (provider, account_scope, conversation_key, provider_item_id) > (?2, ?3, ?4, ?5)
+        ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ?6`);
       const memo = emptyTierVisibilityMemo(ledger, ledgerId, state.ledger_cursor, state.store_cursor, 0);
       let after = ["", "", "", ""];
       for (;; ) {

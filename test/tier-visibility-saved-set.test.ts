@@ -42,7 +42,7 @@ test('a second connection serves the saved set, applies the writer\'s later comm
   const { f, writer, ledgerDb, pk, embed, openReader } = await fixtureWithEveryState();
   // The writer's set, built from scratch and saved in the store.
   const expected = sorted(probe(writer).tierHiddenItemPks());
-  await writer.saveVisibilityInTurns();
+  await writer.keepVisibilityCurrentInTurns();
   expect(expected.hidden).toEqual([pk('hid'), pk('staged'), pk('hid#child:photo')].sort((a, b) => a - b));
   expect(expected.held).toEqual([pk('held')]);
   expect(expected.metadataLayer).toEqual([pk('names')]);
@@ -85,7 +85,7 @@ test('a second connection serves the saved set, applies the writer\'s later comm
 
 test('a copy raised after the reader read its cursors is not returned by its next search', async () => {
   const { ledgerDb, openReader, writer } = await fixtureWithEveryState();
-  await writer.saveVisibilityInTurns();
+  await writer.keepVisibilityCurrentInTurns();
   const reader = openReader();
   const ledger = probe(reader).visibilityLedger()!;
   const original = ledger.visibilityChangesSince.bind(ledger);
@@ -108,7 +108,7 @@ test('a copy raised after the reader read its cursors is not returned by its nex
 
 test('a retention gap in either feed never serves the saved set: a read-only connection rebuilds from the ledger', async () => {
   const { ledgerDb, storeDb, openReader, writer, pk } = await fixtureWithEveryState();
-  await writer.saveVisibilityInTurns();
+  await writer.keepVisibilityCurrentInTurns();
   const reader = openReader();
   probe(reader).tierHiddenItemPks();
   const rebuilds = countFullRebuilds(probe(reader).visibilityLedger()!);
@@ -144,7 +144,7 @@ test('the writer publishes its set in bounded steps and switches the saved set i
   const clock = createTestClock();
   probe(writer).visibilityTimers = clock;
   probe(writer).visibilityPublishChunk = 2;
-  await writer.saveVisibilityInTurns();
+  await writer.keepVisibilityCurrentInTurns();
   const saved = () => ledgerStamp(probe(writer).db);
   const before = saved();
   expect(before?.members).toBe(4);
@@ -184,7 +184,7 @@ test('a save that finds the store busy is retried', async () => {
   const { storeDb, writer, openReader, ledgerDb, pk } = await fixtureWithEveryState();
   const clock = createTestClock();
   probe(writer).visibilityTimers = clock;
-  await writer.saveVisibilityInTurns();
+  await writer.keepVisibilityCurrentInTurns();
   ledgerDb.query("UPDATE tier_copies SET copy_state = 'superseded' WHERE provider_item_id = 'plain' AND corpus_id = ?").run(CORPORA.internal);
   const stampBefore = ledgerStamp(probe(writer).db);
   storeDb.exec('BEGIN IMMEDIATE');
@@ -208,7 +208,7 @@ test('a save that finds the store busy is retried', async () => {
 test('an older publisher that resumes after a newer one saved never writes its older flags', async () => {
   const { f, writer, ledgerDb, openReader } = await fixtureWithEveryState();
   const clock = createTestClock();
-  await writer.saveVisibilityInTurns();
+  await writer.keepVisibilityCurrentInTurns();
   probe(writer).visibilityTimers = clock;
   probe(writer).visibilityNow = () => clock.now();
   const supersede = (state: string) => ledgerDb.query('UPDATE tier_copies SET copy_state = ? WHERE provider_item_id = ? AND corpus_id = ?')
@@ -233,7 +233,7 @@ test('an older publisher that resumes after a newer one saved never writes its o
 test('a publisher cleaning up after its switch never deletes a generation another connection switched to', async () => {
   const { f, writer, storeDb, ledgerDb, openReader } = await fixtureWithEveryState();
   const clock = createTestClock();
-  await writer.saveVisibilityInTurns();
+  await writer.keepVisibilityCurrentInTurns();
   probe(writer).visibilityTimers = clock;
   probe(writer).visibilityNow = () => clock.now();
   probe(writer).visibilityPublishChunk = 1;
@@ -262,7 +262,7 @@ test('a publisher cleaning up after its switch never deletes a generation anothe
 test('one publisher at a time: a second connection waits while the first holds the lease', async () => {
   const { f, writer, ledgerDb, openReader } = await fixtureWithEveryState();
   const clock = createTestClock();
-  await writer.saveVisibilityInTurns();
+  await writer.keepVisibilityCurrentInTurns();
   probe(writer).visibilityTimers = clock;
   probe(writer).visibilityNow = () => clock.now();
   ledgerDb.query("UPDATE tier_copies SET copy_state = 'superseded' WHERE provider_item_id = 'plain' AND corpus_id = ?").run(CORPORA.internal);
@@ -286,7 +286,7 @@ test('one publisher at a time: a second connection waits while the first holds t
 test('two full publishers never share a generation', async () => {
   const { f, writer, storeDb, ledgerDb, openReader } = await fixtureWithEveryState();
   const clock = createTestClock();
-  await writer.saveVisibilityInTurns();
+  await writer.keepVisibilityCurrentInTurns();
   probe(writer).visibilityTimers = clock;
   probe(writer).visibilityNow = () => clock.now();
   probe(writer).visibilityPublishChunk = 1;
@@ -321,7 +321,7 @@ test('two full publishers never share a generation', async () => {
 test('a publish with nothing queued does not swallow the next one', async () => {
   const { writer, ledgerDb } = await fixtureWithEveryState();
   const clock = createTestClock();
-  await writer.saveVisibilityInTurns();
+  await writer.keepVisibilityCurrentInTurns();
   probe(writer).visibilityTimers = clock;
   await probe(writer).publishVisibility();
   ledgerDb.query("UPDATE tier_copies SET copy_state = 'superseded' WHERE provider_item_id = 'plain' AND corpus_id = ?").run(CORPORA.internal);
@@ -337,7 +337,7 @@ test('a publish with nothing queued does not swallow the next one', async () => 
 test('a reopened writer starts from the saved set instead of rebuilding', async () => {
   const { f, writer, ledgerDb, pk } = await fixtureWithEveryState();
   const expected = sorted(probe(writer).tierHiddenItemPks());
-  await writer.saveVisibilityInTurns();
+  await writer.keepVisibilityCurrentInTurns();
   const rebuilds = countFullRebuilds(f.ledger);
   cleanups.push(() => rebuilds.restore());
   const again = new LocalConnectorStore({ dbPath: f.paths.internal, corpusId: CORPORA.internal, family: 'file', trustDomain: 'internal', tierLedger: f.ledger });
@@ -372,7 +372,7 @@ test('a read-only open of a store from before the saved set keeps the older full
 
 test('schema v16 fences older builds while legacy TEMP journals still coexist with the feed', async () => {
   const { f, writer, storeDb, pk, addChild, openReader } = await fixtureWithEveryState();
-  await writer.saveVisibilityInTurns();
+  await writer.keepVisibilityCurrentInTurns();
   const reader = openReader();
   const rebuilds = countFullRebuilds(probe(reader).visibilityLedger()!);
   cleanups.push(() => rebuilds.restore());
@@ -402,7 +402,7 @@ test('schema v16 fences older builds while legacy TEMP journals still coexist wi
 
 test('a read-only store reads its ledger without writing it', async () => {
   const { ledgerDb, openReader, writer } = await fixtureWithEveryState();
-  await writer.saveVisibilityInTurns();
+  await writer.keepVisibilityCurrentInTurns();
   // A hold with no pending judgment: a writable ledger open settles it.
   ledgerDb.query("UPDATE tier_copies SET embed_hold = 1 WHERE provider_item_id = 'plain' AND corpus_id = ?").run(CORPORA.internal);
   const before = ledgerDb.query('SELECT MAX(seq) AS seq FROM tier_visibility_changes').get();
@@ -417,7 +417,7 @@ test('a read-only store reads its ledger without writing it', async () => {
 test('a warmed read-only store answers from its built set: a later read runs no set-build step', async () => {
   const { writer, ledgerDb, pk, openReader } = await fixtureWithEveryState();
   const expected = sorted(probe(writer).tierHiddenItemPks());
-  await writer.saveVisibilityInTurns();
+  await writer.keepVisibilityCurrentInTurns();
   // Control: a cold reader builds its set on the read that first needs it.
   const cold = openReader();
   const coldBuild = spyOn(cold as unknown as { savedVisibilitySteps: () => unknown }, 'savedVisibilitySteps');
@@ -427,7 +427,7 @@ test('a warmed read-only store answers from its built set: a later read runs no 
 
   // The split's front warms every store before it reports ready (gate 1, ops#168).
   const reader = openReader();
-  await reader.warmVisibilityInTurns();
+  await reader.keepVisibilityCurrentInTurns();
   const build = spyOn(reader as unknown as { savedVisibilitySteps: () => unknown }, 'savedVisibilitySteps');
   cleanups.push(() => build.mockRestore());
   const rebuilds = countFullRebuilds(probe(reader).visibilityLedger()!);
@@ -443,4 +443,41 @@ test('a warmed read-only store answers from its built set: a later read runs no 
   expect(probe(reader).tierHiddenItemPks().hidden).toContain(pk('plain'));
   expect(build).not.toHaveBeenCalled();
   expect(rebuilds.count).toBe(0);
+});
+
+test('a writer kept current while only its ledger moves: a second start applies the delta, with no rebuild (gate 1, ops#151)', async () => {
+  const { writer, ledgerDb, pk, openReader } = await fixtureWithEveryState();
+  await writer.keepVisibilityCurrentInTurns();
+  // Ledger-only writes, as the prune sweep and judging make: no import runs,
+  // so nothing but the engine's refresh moves this store's saved stamp. In
+  // all, far more entries than the ledger's feed keeps.
+  const churn = () => ledgerDb.transaction(() => {
+    for (let n = 0; n < 3_000; n++) ledgerDb.query("UPDATE tier_copies SET embed_hold = 0 WHERE provider_item_id = 'names'").run();
+  })();
+  ledgerDb.query("UPDATE tier_copies SET copy_state = 'superseded' WHERE provider_item_id = 'plain' AND corpus_id = ?").run(CORPORA.internal);
+  for (let burst = 0; burst < 3; burst++) {
+    churn();
+    await writer.keepVisibilityCurrentInTurns(); // the background's refresh tick
+  }
+  const reader = openReader();
+  const rebuilds = countFullRebuilds(probe(reader).visibilityLedger()!);
+  cleanups.push(() => rebuilds.restore());
+  expect(probe(reader).tierHiddenItemPks().hidden).toContain(pk('plain'));
+  expect(sorted(probe(reader).tierHiddenItemPks())).toEqual(sorted(probe(writer).tierHiddenItemPks()));
+  expect(rebuilds.count).toBe(0);
+
+  // Control: the same churn with no refresh between, as on Sparta after a
+  // restart when the background never built this store's set. The stamp
+  // falls outside the feed, and a start rebuilds from the ledger (never a
+  // stale set), without first reading every saved row.
+  ledgerDb.query("UPDATE tier_copies SET copy_state = 'superseded' WHERE provider_item_id = 'held' AND corpus_id = ?").run(CORPORA.internal);
+  for (let burst = 0; burst < 3; burst++) churn();
+  const cold = openReader();
+  const coldRebuilds = countFullRebuilds(probe(cold).visibilityLedger()!);
+  cleanups.push(() => coldRebuilds.restore());
+  const savedRows = spyOn(probe(cold).db, 'query');
+  cleanups.push(() => savedRows.mockRestore());
+  expect(probe(cold).tierHiddenItemPks().hidden).toContain(pk('held'));
+  expect(coldRebuilds.count).toBe(1);
+  expect(savedRows.mock.calls.some(([sql]) => String(sql).includes('FROM main.tier_visibility_members'))).toBe(false);
 });

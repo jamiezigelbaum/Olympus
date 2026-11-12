@@ -575,13 +575,20 @@ export async function startWorkerWithLaunch(launch: WorkerLaunch): Promise<void>
  */
 let dataOwnerLock: HeldDataOwnerLock | undefined;
 
-/** How often the split's front brings each store's hidden-copy set up to date between Asks. */
-const FRONT_VISIBILITY_REFRESH_MS = 30_000;
+/**
+ * How often every engine role brings each store's hidden-copy set up to date:
+ * the front between Asks, and the background (or the single worker) so the
+ * set it saves stays within this much of the ledger's visibility feed, and a
+ * front start applies a small delta instead of rebuilding.
+ */
+const VISIBILITY_REFRESH_MS = 30_000;
 /**
  * The longest the front waits on those sets before it listens; the rest
  * finishes after, in turns. Well inside the verified install's 60 s health
  * deadline (engine-service.ts ENGINE_HEALTH_TIMEOUT_MS), which also covers the
- * background's start. Sparta's cold build: about 7.6 s (gate 1, ops#151).
+ * background's start. A rebuild from the ledger took about 59 s on Sparta
+ * (gate 1, ops#151); from a saved set the background keeps current, a start
+ * applies a delta of at most a refresh period.
  */
 const FRONT_VISIBILITY_READY_BOUND_MS = 15_000;
 
@@ -2147,25 +2154,27 @@ export async function main(): Promise<void> {
   ]);
   configuredMountStores = connectorStores;
   const readConnectorStores = connectorStores;
-  // The front builds every store's hidden-copy set before it reports ready,
-  // then keeps each one current on a timer, so an Ask (the first included)
+  // Every store's hidden-copy set, built and then kept current on a timer.
+  // The front does it before it reports ready, so an Ask (the first included)
   // applies a small delta at most instead of building a set on its thread.
-  // A store mounted later is built on the next tick.
-  let frontVisibilityWarming = false;
-  async function warmFrontVisibility(when: string): Promise<void> {
-    if (frontVisibilityWarming || sourceRuntimeClosed) return;
-    frontVisibilityWarming = true;
+  // The background (or the single worker) does it after it starts and saves
+  // each set, so the front's start reads from a saved set inside the ledger's
+  // feed. A store mounted later is built on the next tick.
+  let visibilityKeeping = false;
+  async function keepVisibilityCurrent(when: string): Promise<void> {
+    if (visibilityKeeping || sourceRuntimeClosed) return;
+    visibilityKeeping = true;
     const started = performance.now();
     try {
       for (const store of [...connectorStores]) {
-        try { await store.warmVisibilityInTurns(); }
-        catch (error) { console.warn(`[olympus] front: a store's hidden-copy set could not be built yet: ${error instanceof Error ? error.message : String(error)}`); }
+        try { await store.keepVisibilityCurrentInTurns(); }
+        catch (error) { console.warn(`[olympus] ${engineRole}: a store's hidden-copy set could not be built yet: ${error instanceof Error ? error.message : String(error)}`); }
       }
     } finally {
-      frontVisibilityWarming = false;
+      visibilityKeeping = false;
     }
-    if (when === 'before ready') {
-      console.log(`[olympus] front: built ${connectorStores.length} stores' hidden-copy sets in ${Math.round(performance.now() - started)} ms`);
+    if (when !== 'refresh') {
+      console.log(`[olympus] ${engineRole}: built ${connectorStores.length} stores' hidden-copy sets in ${Math.round(performance.now() - started)} ms`);
     }
   }
   // One person across sources (#1076): the shared people index, Private and
@@ -5982,7 +5991,7 @@ export async function main(): Promise<void> {
   // Bounded: a set that has to be rebuilt from the ledger (a retention gap)
   // finishes after the front listens, in turns, rather than hold readiness.
   if (engineFront) {
-    const warming = warmFrontVisibility('before ready');
+    const warming = keepVisibilityCurrent('before ready');
     let bound: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([warming, new Promise<void>((resolve) => { bound = setTimeout(resolve, FRONT_VISIBILITY_READY_BOUND_MS); })]);
     clearTimeout(bound);
@@ -6161,9 +6170,10 @@ export async function main(): Promise<void> {
   // store, on its first item) is opened here too.
   const frontMountRetry = engineFront ? setInterval(refreshFrontMounts, 2_000) : undefined;
   frontMountRetry?.unref?.();
-  // Keeps each store's set current between Asks; see warmFrontVisibility.
-  const frontVisibilityRefresh = engineFront ? setInterval(() => { void warmFrontVisibility('refresh'); }, FRONT_VISIBILITY_REFRESH_MS) : undefined;
-  frontVisibilityRefresh?.unref?.();
+  // Keeps each store's set current, and saved by a writer; see keepVisibilityCurrent.
+  if (!engineFront) void keepVisibilityCurrent('after start');
+  const visibilityRefresh = setInterval(() => { void keepVisibilityCurrent('refresh'); }, VISIBILITY_REFRESH_MS);
+  visibilityRefresh.unref?.();
   if (engineFront) {
     // The judge runs in the background: the front shows what it last published.
     const judge = frontJudgeState(() => engineFront!.status());
@@ -6401,7 +6411,7 @@ export async function main(): Promise<void> {
     fileExtractionRuntime?.close();
     engineBackground?.stop();
     if (frontMountRetry) clearInterval(frontMountRetry);
-    if (frontVisibilityRefresh) clearInterval(frontVisibilityRefresh);
+    clearInterval(visibilityRefresh);
     engineFront?.stop();
     void server?.stop();
     // The data owner lock stays held: the teardown above is still running, and
