@@ -17460,6 +17460,15 @@ class TierLedger {
     return this.db.query(`SELECT key, value FROM tier_ledger_meta INDEXED BY tier_ledger_pending_meta
       WHERE key >= ? AND key < ? AND key > ? AND value <> '' ORDER BY key LIMIT ?`).all(prefix, `${prefix}￿`, options.after ?? "", options.limit ?? -1);
   }
+  withoutBusyWait(work) {
+    const previous = this.db.query("PRAGMA busy_timeout").get().timeout;
+    this.db.exec("PRAGMA busy_timeout = 0");
+    try {
+      return work();
+    } finally {
+      this.db.exec(`PRAGMA busy_timeout = ${previous}`);
+    }
+  }
   withGenerationFence(identity, generation, work) {
     return this.db.transaction(() => {
       this.db.query("UPDATE tier_ledger_meta SET value = value WHERE key = 'ledger_id'").run();
@@ -20972,10 +20981,22 @@ var TIMED = "__olympusMainThreadSqlTimed";
 var STATEMENT_METHODS = ["all", "get", "run", "values"];
 var SITE_FRAMES = 3;
 var installed = false;
+var sliceTiming;
 function installMainThreadSqlTrace() {
   if (installed || !isMainThread)
     return;
   installed = true;
+  const exec = Database2.prototype.exec;
+  Database2.prototype.exec = function(...args) {
+    if (!sliceTiming)
+      return exec.apply(this, args);
+    const started = performance.now();
+    try {
+      return exec.apply(this, args);
+    } finally {
+      sliceTiming.maxStatementMs = Math.max(sliceTiming.maxStatementMs, performance.now() - started);
+    }
+  };
   for (const name of ["query", "prepare"]) {
     const original = Database2.prototype[name];
     Database2.prototype[name] = function(...args) {
@@ -20992,13 +21013,18 @@ function timeStatement(statement) {
     if (typeof call !== "function")
       continue;
     held[method] = function(...args) {
-      if (!sourceAnswerTraceActive())
+      const answer = sourceAnswerTraceActive();
+      if (!answer && !sliceTiming)
         return call.apply(this, args);
       const started = performance.now();
       try {
         return call.apply(this, args);
       } finally {
-        recordSourceAnswerMainThreadSql(performance.now() - started, callSite);
+        const ms = performance.now() - started;
+        if (sliceTiming)
+          sliceTiming.maxStatementMs = Math.max(sliceTiming.maxStatementMs, ms);
+        if (answer)
+          recordSourceAnswerMainThreadSql(ms, callSite);
       }
     };
   }
@@ -25751,6 +25777,7 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
 };`;
 var RECLAIM_MAX_PAGES_PER_STEP = 128;
 var RECLAIM_CONVERSION_BYTES_PER_MS = 15000;
+var SUPERSEDED_PRUNE_MEDIA_ROWS = 1;
 
 class LocalConnectorStore {
   dbPath;
@@ -28298,6 +28325,58 @@ ${parentKey(ref)}`, { ref, origin });
       this.releaseUnreferencedChunkMedia();
     }
   }
+  pruneSupersededCopyStep(identity, options) {
+    if (this.reclaimProcess)
+      throw new Error("Superseded store is reclaiming; retry cleanup later.");
+    const limit = Math.max(1, Math.floor(options.rowLimit));
+    const previousWait = this.db.query("PRAGMA busy_timeout").get().timeout;
+    this.db.exec("PRAGMA busy_timeout = 0");
+    try {
+      return this.db.transaction(() => {
+        const row = this.db.query(`SELECT item_pk, family, local_item_id, tombstoned FROM items
+          WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?`).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+        let remaining = limit;
+        if (row) {
+          remaining -= this.db.query(`DELETE FROM chunk_embeddings WHERE rowid IN
+            (SELECT rowid FROM chunk_embeddings WHERE item_pk = ? LIMIT ?)`).run(row.item_pk, remaining).changes;
+          if (this.db.query("SELECT 1 FROM chunk_embeddings WHERE item_pk = ? LIMIT 1").get(row.item_pk))
+            return false;
+          const fts = this.db.query(`SELECT fts_rowid FROM connector_store_fts_rows WHERE item_pk = ? LIMIT ?`).all(row.item_pk, remaining);
+          for (const held of fts) {
+            this.db.query("DELETE FROM connector_store_fts WHERE rowid = ?").run(held.fts_rowid);
+            this.db.query("DELETE FROM connector_store_fts_rows WHERE fts_rowid = ?").run(held.fts_rowid);
+          }
+          remaining -= fts.length;
+          if (this.db.query("SELECT 1 FROM connector_store_fts_rows WHERE item_pk = ? LIMIT 1").get(row.item_pk))
+            return false;
+          remaining -= this.db.query(`DELETE FROM chunks WHERE chunk_pk IN
+            (SELECT chunk_pk FROM chunks WHERE item_pk = ? LIMIT ?)`).run(row.item_pk, remaining).changes;
+          if (this.db.query("SELECT 1 FROM chunks WHERE item_pk = ? LIMIT 1").get(row.item_pk))
+            return false;
+          if (!remaining && this.db.query("SELECT 1 FROM item_text_versions WHERE item_pk = ?").get(row.item_pk))
+            return false;
+          remaining -= this.db.query("DELETE FROM item_text_versions WHERE item_pk = ?").run(row.item_pk).changes;
+        }
+        const mediaPending = this.db.query("SELECT 1 FROM chunk_media_releases LIMIT 1").get();
+        if (mediaPending) {
+          if (remaining !== limit)
+            return false;
+          if (!this.releaseUnreferencedChunkMedia(SUPERSEDED_PRUNE_MEDIA_ROWS))
+            return false;
+        }
+        if (!row)
+          return true;
+        this.db.query(`UPDATE items SET title = NULL, search_text = NULL, locator_uri = NULL,
+          sender_id = NULL, sender_label = NULL, sender_is_owner = NULL, reactions_json = NULL, authored_at = NULL, updated_at = NULL
+          WHERE item_pk = ?`).run(row.item_pk);
+        if (!row.tombstoned)
+          this.tombstoneCopy({ ...identity, family: row.family, localItemId: row.local_item_id }, { connectorId: options.connectorId });
+        return true;
+      }).immediate();
+    } finally {
+      this.db.exec(`PRAGMA busy_timeout = ${previousWait}`);
+    }
+  }
   stripCopyContentHeld(identity, options = {}) {
     return this.db.transaction(() => {
       const row = this.db.query(`
@@ -29675,14 +29754,16 @@ ${parentKey(ref)}`, { ref, origin });
       reassertedMediaHolders.add(holderKey);
     } catch {}
   }
-  releaseUnreferencedChunkMedia() {
-    if (!this.chunkMediaColumnsPresent || this.reclaimProcess)
-      return;
+  releaseUnreferencedChunkMedia(limit) {
+    if (!this.chunkMediaColumnsPresent)
+      return true;
+    if (this.reclaimProcess)
+      return false;
     try {
       for (;; ) {
-        const queued = this.db.query("SELECT media_sha256, media_path FROM chunk_media_releases LIMIT 1000").all();
+        const queued = this.db.query("SELECT media_sha256, media_path FROM chunk_media_releases LIMIT ?").all(limit ?? 1000);
         if (queued.length === 0)
-          break;
+          return true;
         for (const entry of queued) {
           const referenced = this.db.query("SELECT 1 AS present FROM chunks WHERE media_sha256 = ? LIMIT 1").get(entry.media_sha256);
           if (!referenced) {
@@ -29693,8 +29774,14 @@ ${parentKey(ref)}`, { ref, origin });
           }
           this.db.query("DELETE FROM chunk_media_releases WHERE media_sha256 = ?").run(entry.media_sha256);
         }
+        if (limit !== undefined)
+          return !this.db.query("SELECT 1 FROM chunk_media_releases LIMIT 1").get();
       }
-    } catch {}
+    } catch (error) {
+      if (limit !== undefined)
+        throw error;
+      return false;
+    }
   }
   mediaJudgmentSettled(mediaSha256, judgeId) {
     if (!this.mediaJudgmentsPresent)

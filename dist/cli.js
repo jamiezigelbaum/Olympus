@@ -24633,6 +24633,15 @@ class TierLedger {
     return this.db.query(`SELECT key, value FROM tier_ledger_meta INDEXED BY tier_ledger_pending_meta
       WHERE key >= ? AND key < ? AND key > ? AND value <> '' ORDER BY key LIMIT ?`).all(prefix, `${prefix}￿`, options.after ?? "", options.limit ?? -1);
   }
+  withoutBusyWait(work) {
+    const previous = this.db.query("PRAGMA busy_timeout").get().timeout;
+    this.db.exec("PRAGMA busy_timeout = 0");
+    try {
+      return work();
+    } finally {
+      this.db.exec(`PRAGMA busy_timeout = ${previous}`);
+    }
+  }
   withGenerationFence(identity2, generation, work) {
     return this.db.transaction(() => {
       this.db.query("UPDATE tier_ledger_meta SET value = value WHERE key = 'ledger_id'").run();
@@ -28667,10 +28676,31 @@ var init_answer_latency_trace = __esm(() => {
 // src/workers/connector-store/main-thread-sql-trace.ts
 import { Database as Database4 } from "bun:sqlite";
 import { isMainThread } from "node:worker_threads";
+function withMainThreadSqlTiming(timing, work) {
+  installMainThreadSqlTrace();
+  const previous = sliceTiming;
+  sliceTiming = timing;
+  try {
+    return work();
+  } finally {
+    sliceTiming = previous;
+  }
+}
 function installMainThreadSqlTrace() {
   if (installed || !isMainThread)
     return;
   installed = true;
+  const exec = Database4.prototype.exec;
+  Database4.prototype.exec = function(...args) {
+    if (!sliceTiming)
+      return exec.apply(this, args);
+    const started = performance.now();
+    try {
+      return exec.apply(this, args);
+    } finally {
+      sliceTiming.maxStatementMs = Math.max(sliceTiming.maxStatementMs, performance.now() - started);
+    }
+  };
   for (const name of ["query", "prepare"]) {
     const original = Database4.prototype[name];
     Database4.prototype[name] = function(...args) {
@@ -28687,13 +28717,18 @@ function timeStatement(statement) {
     if (typeof call !== "function")
       continue;
     held[method] = function(...args) {
-      if (!sourceAnswerTraceActive())
+      const answer = sourceAnswerTraceActive();
+      if (!answer && !sliceTiming)
         return call.apply(this, args);
       const started = performance.now();
       try {
         return call.apply(this, args);
       } finally {
-        recordSourceAnswerMainThreadSql(performance.now() - started, callSite);
+        const ms = performance.now() - started;
+        if (sliceTiming)
+          sliceTiming.maxStatementMs = Math.max(sliceTiming.maxStatementMs, ms);
+        if (answer)
+          recordSourceAnswerMainThreadSql(ms, callSite);
       }
     };
   }
@@ -28714,7 +28749,7 @@ function shortFrame(frame) {
   const [file, line] = where.split(":");
   return `${name} ${file}${line ? `:${line}` : ""}`;
 }
-var TIMED = "__olympusMainThreadSqlTimed", STATEMENT_METHODS, SITE_FRAMES = 3, installed = false;
+var TIMED = "__olympusMainThreadSqlTimed", STATEMENT_METHODS, SITE_FRAMES = 3, installed = false, sliceTiming;
 var init_main_thread_sql_trace = __esm(() => {
   init_answer_latency_trace();
   STATEMENT_METHODS = ["all", "get", "run", "values"];
@@ -42258,7 +42293,7 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
   } finally {
     closeSqliteStore(db);
   }
-};`, RECLAIM_MAX_PAGES_PER_STEP = 128, RECLAIM_CONVERSION_BYTES_PER_MS = 15000, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, VECTOR_SCAN_RESERVE_MIN_MS = 1000, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+};`, RECLAIM_MAX_PAGES_PER_STEP = 128, RECLAIM_CONVERSION_BYTES_PER_MS = 15000, SUPERSEDED_PRUNE_MEDIA_ROWS = 1, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, VECTOR_SCAN_RESERVE_MIN_MS = 1000, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_vector_digest();
   init_main_thread_sql_trace();
@@ -44942,6 +44977,58 @@ ${parentKey(ref)}`, { ref, origin });
         this.releaseUnreferencedChunkMedia();
       }
     }
+    pruneSupersededCopyStep(identity2, options) {
+      if (this.reclaimProcess)
+        throw new Error("Superseded store is reclaiming; retry cleanup later.");
+      const limit = Math.max(1, Math.floor(options.rowLimit));
+      const previousWait = this.db.query("PRAGMA busy_timeout").get().timeout;
+      this.db.exec("PRAGMA busy_timeout = 0");
+      try {
+        return this.db.transaction(() => {
+          const row = this.db.query(`SELECT item_pk, family, local_item_id, tombstoned FROM items
+          WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?`).get(identity2.provider, identity2.accountScope, normalizeConversationId(identity2.providerConversationId), identity2.providerItemId);
+          let remaining = limit;
+          if (row) {
+            remaining -= this.db.query(`DELETE FROM chunk_embeddings WHERE rowid IN
+            (SELECT rowid FROM chunk_embeddings WHERE item_pk = ? LIMIT ?)`).run(row.item_pk, remaining).changes;
+            if (this.db.query("SELECT 1 FROM chunk_embeddings WHERE item_pk = ? LIMIT 1").get(row.item_pk))
+              return false;
+            const fts = this.db.query(`SELECT fts_rowid FROM connector_store_fts_rows WHERE item_pk = ? LIMIT ?`).all(row.item_pk, remaining);
+            for (const held of fts) {
+              this.db.query("DELETE FROM connector_store_fts WHERE rowid = ?").run(held.fts_rowid);
+              this.db.query("DELETE FROM connector_store_fts_rows WHERE fts_rowid = ?").run(held.fts_rowid);
+            }
+            remaining -= fts.length;
+            if (this.db.query("SELECT 1 FROM connector_store_fts_rows WHERE item_pk = ? LIMIT 1").get(row.item_pk))
+              return false;
+            remaining -= this.db.query(`DELETE FROM chunks WHERE chunk_pk IN
+            (SELECT chunk_pk FROM chunks WHERE item_pk = ? LIMIT ?)`).run(row.item_pk, remaining).changes;
+            if (this.db.query("SELECT 1 FROM chunks WHERE item_pk = ? LIMIT 1").get(row.item_pk))
+              return false;
+            if (!remaining && this.db.query("SELECT 1 FROM item_text_versions WHERE item_pk = ?").get(row.item_pk))
+              return false;
+            remaining -= this.db.query("DELETE FROM item_text_versions WHERE item_pk = ?").run(row.item_pk).changes;
+          }
+          const mediaPending = this.db.query("SELECT 1 FROM chunk_media_releases LIMIT 1").get();
+          if (mediaPending) {
+            if (remaining !== limit)
+              return false;
+            if (!this.releaseUnreferencedChunkMedia(SUPERSEDED_PRUNE_MEDIA_ROWS))
+              return false;
+          }
+          if (!row)
+            return true;
+          this.db.query(`UPDATE items SET title = NULL, search_text = NULL, locator_uri = NULL,
+          sender_id = NULL, sender_label = NULL, sender_is_owner = NULL, reactions_json = NULL, authored_at = NULL, updated_at = NULL
+          WHERE item_pk = ?`).run(row.item_pk);
+          if (!row.tombstoned)
+            this.tombstoneCopy({ ...identity2, family: row.family, localItemId: row.local_item_id }, { connectorId: options.connectorId });
+          return true;
+        }).immediate();
+      } finally {
+        this.db.exec(`PRAGMA busy_timeout = ${previousWait}`);
+      }
+    }
     stripCopyContentHeld(identity2, options = {}) {
       return this.db.transaction(() => {
         const row = this.db.query(`
@@ -46319,14 +46406,16 @@ ${parentKey(ref)}`, { ref, origin });
         reassertedMediaHolders.add(holderKey);
       } catch {}
     }
-    releaseUnreferencedChunkMedia() {
-      if (!this.chunkMediaColumnsPresent || this.reclaimProcess)
-        return;
+    releaseUnreferencedChunkMedia(limit) {
+      if (!this.chunkMediaColumnsPresent)
+        return true;
+      if (this.reclaimProcess)
+        return false;
       try {
         for (;; ) {
-          const queued = this.db.query("SELECT media_sha256, media_path FROM chunk_media_releases LIMIT 1000").all();
+          const queued = this.db.query("SELECT media_sha256, media_path FROM chunk_media_releases LIMIT ?").all(limit ?? 1000);
           if (queued.length === 0)
-            break;
+            return true;
           for (const entry of queued) {
             const referenced = this.db.query("SELECT 1 AS present FROM chunks WHERE media_sha256 = ? LIMIT 1").get(entry.media_sha256);
             if (!referenced) {
@@ -46337,8 +46426,14 @@ ${parentKey(ref)}`, { ref, origin });
             }
             this.db.query("DELETE FROM chunk_media_releases WHERE media_sha256 = ?").run(entry.media_sha256);
           }
+          if (limit !== undefined)
+            return !this.db.query("SELECT 1 FROM chunk_media_releases LIMIT 1").get();
         }
-      } catch {}
+      } catch (error) {
+        if (limit !== undefined)
+          throw error;
+        return false;
+      }
     }
     mediaJudgmentSettled(mediaSha256, judgeId) {
       if (!this.mediaJudgmentsPresent)
@@ -72376,7 +72471,9 @@ function finishVerifiedMove(options, receipt) {
   timed(options.timings, "rereadMs", () => oweExtractionRereads(options.set.ledger, options.identity));
   return result;
 }
-function pruneSupersededStoreCopy(store, identity2) {
+function pruneSupersededStoreCopy(store, identity2, options) {
+  if (options?.bounded)
+    return store.pruneSupersededCopyStep(identity2, { rowLimit: SUPERSEDED_PRUNE_STEP_ROWS, connectorId: TIER_MOVE_CONNECTOR_ID });
   const chunks = store.stripCopyContent(identity2, { keepMetadata: false });
   const row = store.exportItemCopy(identity2)?.identity;
   if (row) {
@@ -72588,7 +72685,7 @@ function fullIdentity(identity2) {
     ...identity2.providerConversationId ? { providerConversationId: identity2.providerConversationId } : {}
   };
 }
-var ROW_REHOME_REASON = "row_tier:private_rehome", TierMoveRefusedError, TierMoveContentChangedError, MOVE_NOTE_PREFIX = "tier-move-note:";
+var ROW_REHOME_REASON = "row_tier:private_rehome", TierMoveRefusedError, TierMoveContentChangedError, MOVE_NOTE_PREFIX = "tier-move-note:", SUPERSEDED_PRUNE_STEP_ROWS = 128;
 var init_tier_move = __esm(() => {
   init_engine();
   init_tier_classifier();
@@ -72852,27 +72949,29 @@ async function reclaimAutomaticSupersededCopies(set, reclaimStore = (_store, wor
   }) ?? false;
 }
 function sweepAutomaticSupersededCopies(set, options = {}) {
-  const now = options.now ?? Date.now;
-  const started = now();
-  const budget = options.budgetMs ?? 0;
-  const spent = budget > 0 ? () => now() - started >= budget : () => false;
-  const timing = { pruneMs: 0, maxItemMs: 0, cut: false };
-  const total = sweepPage(set, options, spent, now, timing);
-  const limit = Math.max(1, Math.min(options.limit ?? PAGE_SIZE, PAGE_SIZE));
-  let last = total.checked;
-  while (budget > 0 && !total.complete && total.failed === 0 && !timing.cut && last === limit && !spent()) {
-    const page2 = sweepPage(set, options, spent, now, timing);
-    total.checked += page2.checked;
-    total.purged += page2.purged;
-    total.kept += page2.kept;
-    total.failed += page2.failed;
-    total.complete = page2.complete;
-    last = page2.checked;
-  }
-  if (total.purged > 0 || total.failed > 0) {
-    console.info(`[tier-auto-prune] ledger=${set.ledger.ledgerId()} slice_ms=${now() - started} prune_ms=${timing.pruneMs}` + ` max_item_ms=${timing.maxItemMs} checked=${total.checked} purged=${total.purged} complete=${total.complete}`);
-  }
-  return total;
+  const timing = { pruneMs: 0, maxItemMs: 0, maxStatementMs: 0, cut: false };
+  return withMainThreadSqlTiming(timing, () => set.ledger.withoutBusyWait(() => {
+    const now = options.now ?? (() => performance.now());
+    const started = now();
+    const budget = options.budgetMs ?? 0;
+    const spent = budget > 0 ? () => now() - started >= budget : () => false;
+    const total = sweepPage(set, options, spent, now, timing);
+    const limit = Math.max(1, Math.min(options.limit ?? PAGE_SIZE, PAGE_SIZE));
+    let last = total.checked;
+    while (budget > 0 && !total.complete && total.failed === 0 && !timing.cut && last === limit && !spent()) {
+      const page2 = sweepPage(set, options, spent, now, timing);
+      total.checked += page2.checked;
+      total.purged += page2.purged;
+      total.kept += page2.kept;
+      total.failed += page2.failed;
+      total.complete = page2.complete;
+      last = page2.checked;
+    }
+    if (timing.pruneMs > 0 || total.purged > 0 || total.failed > 0 || timing.maxStatementMs >= SWEEP_LOG_STATEMENT_MS) {
+      console.info(`[tier-auto-prune] ledger=${set.ledger.ledgerId()} slice_ms=${now() - started} prune_ms=${timing.pruneMs}` + ` max_item_ms=${timing.maxItemMs} checked=${total.checked} purged=${total.purged} complete=${total.complete} max_statement_ms=${timing.maxStatementMs.toFixed(3)}`);
+    }
+    return total;
+  }));
 }
 function sweepPage(set, options, spent, now, timing) {
   const ledger = set.ledger;
@@ -72886,34 +72985,54 @@ function sweepPage(set, options, spent, now, timing) {
   const finishPending = () => {
     const pending = state.pending;
     const itemStarted = now();
-    ledger.withGenerationFence(pending.identity, pending.generation, () => {
-      const current3 = ledger.getCurrent(pending.identity);
-      if (current3.state === "moving" || ledger.hasMovedMigrationProposal(pending.identity))
-        throw new Error("Placement or migration changed; retry cleanup later.");
-      for (const target2 of pending.copies) {
-        const copy = ledger.copies(pending.identity).find((copy2) => copy2.corpusId === target2.corpusId);
-        if (copy?.state !== "superseded")
-          continue;
-        const store = set.store(copy.trustDomain);
-        if (!store)
-          throw new Error("Superseded store unavailable.");
-        store.bindTierSet(ledger);
-        const pruneStarted = now();
-        pruneSupersededStoreCopy(store, pending.identity);
-        timing.pruneMs += now() - pruneStarted;
-        ledger.removeSupersededCopy(pending.identity, copy.corpusId);
-        const deleted = state.deleted ??= {};
-        deleted[copy.corpusId] = (deleted[copy.corpusId] ?? 0) + target2.chunks;
-        report.purged++;
-      }
-      state.after = pending.identity;
-      if (state.parked)
-        delete state.parked[tierLedgerIdentityKey(pending.identity)];
-      delete state.pending;
-      delete state.failing;
-      save();
-    });
-    timing.maxItemMs = Math.max(timing.maxItemMs, now() - itemStarted);
+    try {
+      ledger.withGenerationFence(pending.identity, pending.generation, () => {
+        const current3 = ledger.getCurrent(pending.identity);
+        if (current3.state === "moving" || ledger.hasMovedMigrationProposal(pending.identity))
+          throw new Error("Placement or migration changed; retry cleanup later.");
+        let stepped = false;
+        for (const target2 of pending.copies) {
+          const copy = ledger.copies(pending.identity).find((copy2) => copy2.corpusId === target2.corpusId);
+          if (copy?.state !== "superseded")
+            continue;
+          if (stepped && spent()) {
+            save();
+            return;
+          }
+          const store = set.store(copy.trustDomain);
+          if (!store)
+            throw new Error("Superseded store unavailable.");
+          store.bindTierSet(ledger);
+          const pruneStarted = now();
+          const done = pruneSupersededStoreCopy(store, pending.identity, { bounded: true });
+          timing.pruneMs += now() - pruneStarted;
+          stepped = true;
+          if (!done) {
+            save();
+            return;
+          }
+          ledger.removeSupersededCopy(pending.identity, copy.corpusId);
+          const deleted = state.deleted ??= {};
+          deleted[copy.corpusId] = (deleted[copy.corpusId] ?? 0) + target2.chunks;
+          report.purged++;
+        }
+        state.after = pending.identity;
+        if (state.parked)
+          delete state.parked[tierLedgerIdentityKey(pending.identity)];
+        delete state.pending;
+        delete state.failing;
+        save();
+      });
+    } finally {
+      timing.maxItemMs = Math.max(timing.maxItemMs, now() - itemStarted);
+    }
+  };
+  const drainPending = () => {
+    do {
+      finishPending();
+    } while (state.pending && !spent());
+    if (state.pending)
+      timing.cut = true;
   };
   let attempt;
   try {
@@ -72927,7 +73046,9 @@ function sweepPage(set, options, spent, now, timing) {
         delete state.pending;
         save();
       } else
-        finishPending();
+        drainPending();
+      if (timing.cut)
+        return report;
     }
     if (report.checked === limit)
       return report;
@@ -72999,12 +73120,14 @@ function sweepPage(set, options, spent, now, timing) {
         save();
       });
       if (state.pending)
-        finishPending();
+        drainPending();
       else {
         state.after = identity2;
         delete state.failing;
         save();
       }
+      if (timing.cut)
+        break;
     }
     if (report.checked < limit && !timing.cut) {
       if (state.retry) {
@@ -73061,22 +73184,42 @@ function sweepPage(set, options, spent, now, timing) {
   }
 }
 function startSupersededSweepTicker(options = {}) {
+  const now = options.now ?? Date.now;
+  const started = now();
+  let interval = options.intervalMs ?? SUPERSEDED_SWEEP_TICK_MS;
+  let nextSet = 0;
+  let stopped = false;
   const finished = new WeakSet;
   const reclaiming = new WeakSet;
   const sets = options.sets ?? registeredTierSets;
-  const every = options.every ?? ((tick, ms) => {
-    const timer = setInterval(tick, ms);
+  const every = options.every ?? ((tick2, ms) => {
+    const timer = setInterval(tick2, ms);
     timer.unref?.();
     return () => clearInterval(timer);
   });
-  return every(() => {
-    if (options.active && !options.active())
+  let cancel;
+  const tick = () => {
+    if (stopped)
       return;
-    for (const set of sets()) {
+    const active = !options.active || options.active();
+    const idleSince = Math.max(started, options.ownerQuestionEndedAt?.() ?? started);
+    const cadence = options.intervalMs ?? (active && now() - idleSince >= SUPERSEDED_SWEEP_IDLE_AFTER_MS ? SUPERSEDED_SWEEP_IDLE_TICK_MS : SUPERSEDED_SWEEP_TICK_MS);
+    if (cadence !== interval) {
+      cancel();
+      interval = cadence;
+      cancel = every(tick, interval);
+      if (cadence === SUPERSEDED_SWEEP_TICK_MS)
+        return;
+    }
+    if (!active)
+      return;
+    const all = sets();
+    for (let checked = 0;checked < all.length; checked++) {
+      const set = all[nextSet++ % all.length];
       if (finished.has(set) || reclaiming.has(set))
         continue;
       if (!set.sweepSupersededSlice())
-        continue;
+        return;
       reclaiming.add(set);
       reclaimAutomaticSupersededCopies(set, options.reclaimStore).then((done) => {
         if (done)
@@ -73084,15 +73227,22 @@ function startSupersededSweepTicker(options = {}) {
       }).catch(() => {}).finally(() => {
         reclaiming.delete(set);
       });
+      return;
     }
-  }, options.intervalMs ?? SUPERSEDED_SWEEP_TICK_MS);
+  };
+  cancel = every(tick, interval);
+  return () => {
+    stopped = true;
+    cancel();
+  };
 }
-var STATE = "automatic-superseded-prune-v1", SUPERSEDED_SWEEP_TICK_MS = 5000, PAGE_SIZE = 200, MAX_ITEM_FAILURES = 3, RECLAIM_MAX_RETAINED_FREE_BYTES, RECLAIM_MAX_RETAINED_FREE_RATIO = 0.1;
+var STATE = "automatic-superseded-prune-v1", SUPERSEDED_SWEEP_TICK_MS = 5000, SUPERSEDED_SWEEP_IDLE_TICK_MS = 250, SUPERSEDED_SWEEP_IDLE_AFTER_MS = 60000, SWEEP_LOG_STATEMENT_MS = 250, PAGE_SIZE = 200, MAX_ITEM_FAILURES = 3, RECLAIM_MAX_RETAINED_FREE_BYTES, RECLAIM_MAX_RETAINED_FREE_RATIO = 0.1;
 var init_tier_auto_prune_sweep = __esm(() => {
   init_tier_ledger();
   init_embedding_ledger();
   init_tier_move();
   init_tier_content_purge();
+  init_main_thread_sql_trace();
   init_store_reclaim_admission();
   init_tiered_store_set();
   RECLAIM_MAX_RETAINED_FREE_BYTES = 64 * 1024 * 1024;
@@ -77574,7 +77724,7 @@ function handoffConnector(source, item) {
 function pathOf(path) {
   return typeof path === "string" && path ? path : undefined;
 }
-var LOWER_CONTENT_REPAIR_INTERVAL_MS, SUPERSEDED_SWEEP_SLICE_MS = 250, TIER_DOMAIN_ORDER, TIER_KEY_TRUST_DOMAIN, SECRET_LOCATION_DOMAIN = "secure_local", TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff";
+var LOWER_CONTENT_REPAIR_INTERVAL_MS, SUPERSEDED_SWEEP_SLICE_MS = 100, TIER_DOMAIN_ORDER, TIER_KEY_TRUST_DOMAIN, SECRET_LOCATION_DOMAIN = "secure_local", TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff";
 var init_tiered_store_set = __esm(() => {
   init_store_write_guard();
   init_source_ingestion_exclusions();
@@ -212944,10 +213094,20 @@ var init_open_target2 = __esm(() => {
 
 // src/workers/engine/runtime/source-answer-lanes.ts
 import { AsyncLocalStorage as AsyncLocalStorage10 } from "node:async_hooks";
-function createOwnerQuestionActivity(relay) {
+function createOwnerQuestionActivity(relay, now = Date.now) {
   const context2 = new AsyncLocalStorage10;
   let inFlight = 0;
+  let lastEndedAt;
+  const release2 = () => {
+    if (--inFlight === 0) {
+      lastEndedAt = now();
+      relay?.idle(OWNER_QUESTION_RESOURCE);
+    }
+  };
   return {
+    get lastEndedAt() {
+      return lastEndedAt;
+    },
     get busy() {
       return inFlight > 0;
     },
@@ -212967,8 +213127,7 @@ function createOwnerQuestionActivity(relay) {
         if (released)
           return;
         released = true;
-        if (--inFlight === 0)
-          relay?.idle(OWNER_QUESTION_RESOURCE);
+        release2();
       };
     },
     async run(work, kind = "owner") {
@@ -212982,8 +213141,8 @@ function createOwnerQuestionActivity(relay) {
         return await context2.run(scope, work);
       } finally {
         scope.settled = true;
-        if (scope.active && --inFlight === 0)
-          relay?.idle(OWNER_QUESTION_RESOURCE);
+        if (scope.active)
+          release2();
       }
     }
   };
@@ -219254,8 +219413,19 @@ class OwnerBusyMarks {
     const last = this.marks.get(change.resource);
     if (last && last.front === change.front && change.seq <= last.seq)
       return false;
-    this.marks.set(change.resource, { front: change.front, seq: change.seq, busyUntil: change.kind === "owner_busy" ? this.now() + this.lapseMs : 0 });
+    this.marks.set(change.resource, {
+      front: change.front,
+      seq: change.seq,
+      busyUntil: change.kind === "owner_busy" ? this.now() + this.lapseMs : 0,
+      endedAt: change.kind === "owner_idle" ? this.now() : last?.endedAt
+    });
     return true;
+  }
+  lastEndedAt(resource) {
+    const mark = this.marks.get(resource);
+    if (mark && mark.busyUntil > 0 && mark.busyUntil <= this.now())
+      return Math.max(mark.endedAt ?? 0, mark.busyUntil);
+    return mark?.endedAt;
   }
   busy(resource) {
     return (this.marks.get(resource)?.busyUntil ?? 0) > this.now();
@@ -249455,6 +249625,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   captureTick.unref?.();
   const stopSupersededSweep = startSupersededSweepTicker({
     active: () => !engineFront && !ownerQuestions.busy && !remoteOwnerBusy(OWNER_QUESTION_RESOURCE),
+    ownerQuestionEndedAt: () => Math.max(ownerQuestions.lastEndedAt ?? 0, remoteOwnerMarks.lastEndedAt(OWNER_QUESTION_RESOURCE) ?? 0),
     reclaimStore: (store, work) => sourceScheduler ? sourceScheduler.withIdleTasks(work, { quietForMs: store.reclaimQuietWindowMs(), preempt: () => store.preemptReclaim() }) : work()
   });
   const snifferEnv = tierSnifferServiceEnv(process.env);
