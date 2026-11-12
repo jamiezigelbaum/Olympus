@@ -140,7 +140,7 @@ describe('schema updates back up the store first', () => {
     db.close();
   });
 
-  test('a backup left by an attempt that did not finish is reused', () => {
+  test('a backup left by an earlier attempt is replaced, since the store may have changed since', () => {
     const env = home();
     const { path, db } = storeAtVersion1(env);
     const backup = `${path}.pre-schema-1.bak`;
@@ -148,10 +148,11 @@ describe('schema updates back up the store first', () => {
     const events: BootStepEvent[] = [];
     runSqliteMigrations(db, 'fixture', MIGRATIONS, { env, log: () => {}, report: (event) => events.push(event) });
     db.close();
-    expect(readFileSync(backup, 'utf8')).toBe('earlier attempt');
-    expect(events.map((event) => event.phase)).not.toContain('backing_up');
-    // Dated now, so this attempt's rollback puts it back.
-    expect(statSync(backup).mtimeMs).toBeGreaterThan(Date.now() - 60_000);
+    expect(events.map((event) => event.phase)).toContain('backing_up');
+    const copy = new Database(backup, { readonly: true });
+    expect(readSqliteSchemaVersion(copy, 'fixture')).toBe(1);
+    expect(copy.query('SELECT body FROM items').get()).toEqual({ body: 'kept' });
+    copy.close();
   });
 
   test('a restore puts the copy back and removes the -wal and -shm', () => {
@@ -178,7 +179,7 @@ describe('a long store update is not a stall', () => {
     const env = home();
     const { db } = storeAtVersion1(env);
     beginBootProgress(env);
-    const seen: Array<{ phase?: string; liveAfter10Min: boolean }> = [];
+    const seen: Array<{ phase: string | undefined; liveAfter10Min: boolean }> = [];
     // The update writes nothing to the progress file while it runs; ten minutes later it must still read as live.
     const slow: SqliteMigration = { version: 2, name: 'slow', up: () => {
       seen.push({ phase: readBootProgress(env)?.phase, liveAfter10Min: bootInProgress(env, Date.now() + 10 * 60_000) });

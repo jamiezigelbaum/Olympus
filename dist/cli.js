@@ -19408,7 +19408,7 @@ var init_boot_progress = __esm(() => {
 });
 
 // src/core/sqlite-migrations.ts
-import { chmodSync as chmodSync5, existsSync as existsSync20, renameSync as renameSync5, rmSync as rmSync9, statfsSync, statSync as statSync12, utimesSync } from "node:fs";
+import { chmodSync as chmodSync5, existsSync as existsSync20, renameSync as renameSync5, rmSync as rmSync9, statfsSync, statSync as statSync12 } from "node:fs";
 import { dirname as dirname26 } from "node:path";
 function schemaUpdateSpaceNeeded(fileBytes) {
   return Math.ceil(fileBytes * 1.2) + 512 * 1024 * 1024;
@@ -19495,26 +19495,21 @@ function backUpBeforeUpdate(db, storeId, fromVersion, env, report, freeBytes = d
   const file = db.filename;
   const backup = preSchemaBackupPath(file, fromVersion);
   const started = performance.now();
-  if (existsSync20(backup)) {
-    const now = new Date;
-    utimesSync(backup, now, now);
-  } else {
-    const needed = schemaUpdateSpaceNeeded(statSync12(file).size);
-    const free = freeBytes(dirname26(file));
-    if (free < needed) {
-      throw new OperationError("config_error", `Updating the "${storeId}" store needs ${formatBytes(needed)} free on its disk, and ${formatBytes(free)} is free.`, "Free up space on that disk, then start Olympus again. Nothing was changed.");
-    }
-    report({ phase: "backing_up", storeId });
-    const partial = `${backup}.${process.pid}.partial`;
+  const needed = schemaUpdateSpaceNeeded(statSync12(file).size) - (existsSync20(backup) ? statSync12(backup).size : 0);
+  const free = freeBytes(dirname26(file));
+  if (free < needed) {
+    throw new OperationError("config_error", `Updating the "${storeId}" store needs ${formatBytes(needed)} free on its disk, and ${formatBytes(free)} is free.`, "Free up space on that disk, then start Olympus again. Nothing was changed.");
+  }
+  report({ phase: "backing_up", storeId });
+  const partial = `${backup}.${process.pid}.partial`;
+  rmSync9(partial, { force: true });
+  try {
+    db.query("VACUUM INTO ?").run(partial);
+    chmodSync5(partial, 384);
+    renameSync5(partial, backup);
+  } catch (error) {
     rmSync9(partial, { force: true });
-    try {
-      db.query("VACUUM INTO ?").run(partial);
-      chmodSync5(partial, 384);
-      renameSync5(partial, backup);
-    } catch (error) {
-      rmSync9(partial, { force: true });
-      throw error;
-    }
+    throw error;
   }
   recordSchemaBackup(env, { storeId, dbPath: file, backupPath: backup });
   return Math.round(performance.now() - started);
@@ -176475,7 +176470,7 @@ var init_top_nav = __esm(() => {
 
 // src/workers/archive-import/staging.ts
 import { randomBytes as randomBytes30 } from "node:crypto";
-import { existsSync as existsSync103, mkdirSync as mkdirSync65, readdirSync as readdirSync28, realpathSync as realpathSync21, renameSync as renameSync26, rmSync as rmSync43, statSync as statSync43, statfsSync as statfsSync5, utimesSync as utimesSync2 } from "node:fs";
+import { existsSync as existsSync103, mkdirSync as mkdirSync65, readdirSync as readdirSync28, realpathSync as realpathSync21, renameSync as renameSync26, rmSync as rmSync43, statSync as statSync43, statfsSync as statfsSync5, utimesSync } from "node:fs";
 import { open as open5, rm as rm11 } from "node:fs/promises";
 import { sep as sep22, join as join132, resolve as resolve27 } from "node:path";
 function sanitizeUploadPath(raw) {
@@ -176686,7 +176681,7 @@ function createArchiveUploads(options) {
       if (modified !== undefined && Number.isFinite(modified) && modified > 0 && modified < 4102444800000) {
         try {
           const when = new Date(modified);
-          utimesSync2(target, when, when);
+          utimesSync(target, when, when);
         } catch {}
       }
       found.fileCount += 1;

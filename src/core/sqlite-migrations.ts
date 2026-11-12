@@ -1,5 +1,5 @@
 import type { Database } from 'bun:sqlite';
-import { chmodSync, existsSync, renameSync, rmSync, statfsSync, statSync, utimesSync } from 'node:fs';
+import { chmodSync, existsSync, renameSync, rmSync, statfsSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { preSchemaBackupPath, recordSchemaBackup, reportBootStep, type BootStepEvent } from './boot-progress.ts';
 import type { LayoutEnv } from './olympus-layout.ts';
@@ -164,9 +164,9 @@ function storeOnDisk(db: Database): boolean {
 
 /**
  * Checks for room, then writes `<db>.pre-schema-<from>.bak` with VACUUM INTO,
- * outside any transaction and owner-only. A backup left by an attempt that did
- * not finish is kept, and dated now so this attempt's rollback restores it.
- * Returns how long it took.
+ * outside any transaction and owner-only. A backup left by an earlier attempt
+ * is replaced: the store may have taken writes at the same version since, and
+ * restoring the old copy would lose them. Returns how long it took.
  */
 function backUpBeforeUpdate(
   db: Database,
@@ -179,31 +179,27 @@ function backUpBeforeUpdate(
   const file = db.filename;
   const backup = preSchemaBackupPath(file, fromVersion);
   const started = performance.now();
-  if (existsSync(backup)) {
-    const now = new Date();
-    utimesSync(backup, now, now);
-  } else {
-    const needed = schemaUpdateSpaceNeeded(statSync(file).size);
-    const free = freeBytes(dirname(file));
-    if (free < needed) {
-      throw new OperationError(
-        'config_error',
-        `Updating the "${storeId}" store needs ${formatBytes(needed)} free on its disk, and ${formatBytes(free)} is free.`,
-        'Free up space on that disk, then start Olympus again. Nothing was changed.',
-      );
-    }
-    report({ phase: 'backing_up', storeId });
-    // Written beside the backup and renamed into place: a backup that exists is whole.
-    const partial = `${backup}.${process.pid}.partial`;
+  // The copy being replaced frees its own space.
+  const needed = schemaUpdateSpaceNeeded(statSync(file).size) - (existsSync(backup) ? statSync(backup).size : 0);
+  const free = freeBytes(dirname(file));
+  if (free < needed) {
+    throw new OperationError(
+      'config_error',
+      `Updating the "${storeId}" store needs ${formatBytes(needed)} free on its disk, and ${formatBytes(free)} is free.`,
+      'Free up space on that disk, then start Olympus again. Nothing was changed.',
+    );
+  }
+  report({ phase: 'backing_up', storeId });
+  // Written beside the backup and renamed into place: a backup that exists is whole.
+  const partial = `${backup}.${process.pid}.partial`;
+  rmSync(partial, { force: true });
+  try {
+    db.query('VACUUM INTO ?').run(partial);
+    chmodSync(partial, 0o600);
+    renameSync(partial, backup);
+  } catch (error) {
     rmSync(partial, { force: true });
-    try {
-      db.query('VACUUM INTO ?').run(partial);
-      chmodSync(partial, 0o600);
-      renameSync(partial, backup);
-    } catch (error) {
-      rmSync(partial, { force: true });
-      throw error;
-    }
+    throw error;
   }
   recordSchemaBackup(env, { storeId, dbPath: file, backupPath: backup });
   return Math.round(performance.now() - started);

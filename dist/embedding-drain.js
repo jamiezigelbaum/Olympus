@@ -13273,7 +13273,7 @@ function metadataStringArray(metadata, key2) {
 }
 
 // src/core/sqlite-migrations.ts
-import { chmodSync as chmodSync3, existsSync as existsSync15, renameSync as renameSync6, rmSync as rmSync7, statfsSync, statSync as statSync9, utimesSync } from "node:fs";
+import { chmodSync as chmodSync3, existsSync as existsSync15, renameSync as renameSync6, rmSync as rmSync7, statfsSync, statSync as statSync9 } from "node:fs";
 import { dirname as dirname19 } from "node:path";
 
 // src/core/boot-progress.ts
@@ -13415,26 +13415,21 @@ function backUpBeforeUpdate(db, storeId, fromVersion, env, report, freeBytes = d
   const file = db.filename;
   const backup = preSchemaBackupPath(file, fromVersion);
   const started = performance.now();
-  if (existsSync15(backup)) {
-    const now = new Date;
-    utimesSync(backup, now, now);
-  } else {
-    const needed = schemaUpdateSpaceNeeded(statSync9(file).size);
-    const free = freeBytes(dirname19(file));
-    if (free < needed) {
-      throw new OperationError("config_error", `Updating the "${storeId}" store needs ${formatBytes(needed)} free on its disk, and ${formatBytes(free)} is free.`, "Free up space on that disk, then start Olympus again. Nothing was changed.");
-    }
-    report({ phase: "backing_up", storeId });
-    const partial = `${backup}.${process.pid}.partial`;
+  const needed = schemaUpdateSpaceNeeded(statSync9(file).size) - (existsSync15(backup) ? statSync9(backup).size : 0);
+  const free = freeBytes(dirname19(file));
+  if (free < needed) {
+    throw new OperationError("config_error", `Updating the "${storeId}" store needs ${formatBytes(needed)} free on its disk, and ${formatBytes(free)} is free.`, "Free up space on that disk, then start Olympus again. Nothing was changed.");
+  }
+  report({ phase: "backing_up", storeId });
+  const partial = `${backup}.${process.pid}.partial`;
+  rmSync7(partial, { force: true });
+  try {
+    db.query("VACUUM INTO ?").run(partial);
+    chmodSync3(partial, 384);
+    renameSync6(partial, backup);
+  } catch (error) {
     rmSync7(partial, { force: true });
-    try {
-      db.query("VACUUM INTO ?").run(partial);
-      chmodSync3(partial, 384);
-      renameSync6(partial, backup);
-    } catch (error) {
-      rmSync7(partial, { force: true });
-      throw error;
-    }
+    throw error;
   }
   recordSchemaBackup(env, { storeId, dbPath: file, backupPath: backup });
   return Math.round(performance.now() - started);
