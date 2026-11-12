@@ -405,6 +405,29 @@ test('a file store backfills on the read pool: the worker thread only writes dig
   } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('a locked digest write on the pool path retries instead of stalling the backfill (#1469)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vector-digest-pool-lock-'));
+  const path = join(dir, 'store.sqlite');
+  const store = open(path);
+  const writer = new Database(path);
+  try {
+    await store.syncFromConnector(connector(50), { fetchContent: true });
+    await store.embedChunks({ provider });
+    const db = database(store);
+    db.exec('DELETE FROM chunk_vector_digest; DELETE FROM chunk_vector_digest_meta');
+    const scheduler = store as unknown as { scheduleVectorDigestBackfill(model?: string, delayMs?: number): void };
+    const schedule = scheduler.scheduleVectorDigestBackfill.bind(store);
+    let backoffs = 0;
+    scheduler.scheduleVectorDigestBackfill = (model, delayMs) => { if (delayMs === 250) backoffs++; schedule(model, delayMs); };
+    writer.exec('PRAGMA busy_timeout = 0; BEGIN IMMEDIATE');
+    scheduler.scheduleVectorDigestBackfill(modelId);
+    await waitFor(() => backoffs >= 1);
+    writer.exec('ROLLBACK');
+    await waitFor(() => vectorDigestState(db, modelId).completed);
+    expect(db.query('SELECT COUNT(*) AS n FROM chunk_vector_digest').get()).toEqual({ n: 50 });
+  } finally { writer.close(); store.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('a window read before a vector was replaced, or before the cursor moved, never lands a stale digest', () => {
   const db = numericStore();
   try {

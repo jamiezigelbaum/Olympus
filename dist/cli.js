@@ -39946,7 +39946,7 @@ var init_local_index = __esm(() => {
         if (!applied.completed)
           next = 0;
       } catch (error) {
-        if (error instanceof OffThreadReadBusyError)
+        if (error instanceof OffThreadReadBusyError || /busy|locked/i.test(String(error)))
           next = VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS;
         else
           this.vectorDigestBackfillFailed(error);

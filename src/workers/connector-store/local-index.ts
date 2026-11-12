@@ -3502,7 +3502,9 @@ export class LocalConnectorStore {
       this.vectorDigestBackfillRows = nextVectorDigestBackfillRows(rows, performance.now() - started);
       if (!applied.completed) next = 0;
     } catch (error) {
-      if (error instanceof OffThreadReadBusyError) next = VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS;
+      // A busy pool or a locked write retries after the reading flag clears;
+      // rescheduling from here would be dropped while it is still set (#1469).
+      if (error instanceof OffThreadReadBusyError || /busy|locked/i.test(String(error))) next = VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS;
       else this.vectorDigestBackfillFailed(error);
     } finally {
       this.vectorDigestBackfillReading = false;
