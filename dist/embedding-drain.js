@@ -13534,7 +13534,7 @@ function fingerprintParts(stores) {
       sync = "";
     }
     try {
-      visibility = store.peopleVisibilityMarker?.() ?? "";
+      visibility = store.visibilityMarker?.() ?? "";
     } catch {
       return `${sync}${UNREADABLE_VISIBILITY}`;
     }
@@ -26935,7 +26935,7 @@ class LocalConnectorStore {
     }
   }
   peopleNames;
-  peopleVisibilityMarker() {
+  visibilityMarker() {
     const ledger = this.visibilityLedger();
     const ledgerCursor = ledger ? ledger.visibilityChangesSince().cursor : 0;
     const storeCursor = this.visibilityJournal ? String(this.itemVisibilityChangesSince().cursor) : `v${this.db.query("PRAGMA data_version").get().data_version}`;
@@ -26949,13 +26949,13 @@ class LocalConnectorStore {
     if (!offThreadReadsSupported(this.dbPath))
       return this.peopleObservations();
     for (let attempt = 0;attempt < PEOPLE_OFF_THREAD_READ_ATTEMPTS; attempt += 1) {
-      const marker = this.peopleVisibilityMarker();
+      const marker = this.visibilityMarker();
       const tierHidden = await this.tierHiddenItemPksInTurns();
       const steps = this.peopleObservationSteps(tierHidden);
       let step = steps.next();
       while (!step.done)
         step = steps.next(await readOnPool(this.dbPath, step.value));
-      if (this.peopleVisibilityMarker() === marker)
+      if (this.visibilityMarker() === marker)
         return this.peopleObservationsFromRows(step.value);
     }
     return this.peopleObservations();

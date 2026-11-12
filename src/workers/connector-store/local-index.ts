@@ -6481,7 +6481,7 @@ export class LocalConnectorStore {
    * are cursors on bounded change tables, so reading them is cheap; neither
    * moves for embedding, status or other bookkeeping writes.
    */
-  peopleVisibilityMarker(): string {
+  visibilityMarker(): string {
     const ledger = this.visibilityLedger();
     const ledgerCursor = ledger ? ledger.visibilityChangesSince().cursor : 0;
     // A handle without the journal (read-only) sees other connections' writes by data_version.
@@ -6517,12 +6517,12 @@ export class LocalConnectorStore {
   async peopleObservationsOffThread(): Promise<PeopleSenderObservation[]> {
     if (!offThreadReadsSupported(this.dbPath)) return this.peopleObservations();
     for (let attempt = 0; attempt < PEOPLE_OFF_THREAD_READ_ATTEMPTS; attempt += 1) {
-      const marker = this.peopleVisibilityMarker();
+      const marker = this.visibilityMarker();
       const tierHidden = await this.tierHiddenItemPksInTurns();
       const steps = this.peopleObservationSteps(tierHidden);
       let step = steps.next();
       while (!step.done) step = steps.next(await readOnPool(this.dbPath, step.value));
-      if (this.peopleVisibilityMarker() === marker) return this.peopleObservationsFromRows(step.value);
+      if (this.visibilityMarker() === marker) return this.peopleObservationsFromRows(step.value);
     }
     return this.peopleObservations();
   }
