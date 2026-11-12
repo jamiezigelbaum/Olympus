@@ -96,7 +96,8 @@ describe('the words the leg expects', () => {
       expect(messagesWord(fx.expect.messages, fx.expect.family)).toBe('4 notes');
       // A row that counts them as messages is not the notes\' row.
       expect(rowProblems(goodRow(fx), fx.expect)).toEqual([]);
-      expect(rowProblems(goodRow(fx, { text: goodRow(fx).text.replace('4 notes', '4 messages') }), fx.expect)).toEqual([`the row does not say "4 notes"`]);
+      const asMessages = goodRow(fx, { text: goodRow(fx).text.replace('4 notes', '4 messages') });
+      expect(rowProblems(asMessages, fx.expect)).toEqual([`the row does not say "4 notes" (it reads "${asMessages.text.slice(0, 160)}")`]);
     }
   });
 
