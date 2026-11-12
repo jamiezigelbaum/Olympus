@@ -9,6 +9,7 @@
 // judging and embedding run exactly as they do for fetched bookmarks.
 
 import { Database } from 'bun:sqlite';
+import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import { existsSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import type { XBookmarkPost } from './api.ts';
@@ -44,6 +45,7 @@ export function readArchivedXBookmarks(archivePath: string): ArchivedXBookmarks 
   }
   const db = new Database(path, { readonly: true });
   try {
+    db.exec('PRAGMA busy_timeout = 10000;');
     const columns = new Set(
       (db.query('PRAGMA table_info(items)').all() as Array<{ name: string }>).map((column) => column.name),
     );
@@ -102,7 +104,7 @@ export function readArchivedXBookmarks(archivePath: string): ArchivedXBookmarks 
       ...(newestAuthoredAt ? { newestAuthoredAt } : {}),
     };
   } finally {
-    db.close();
+    closeSqliteStore(db, { checkpoint: false });
   }
 }
 

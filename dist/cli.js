@@ -82975,6 +82975,7 @@ function readArchivedXBookmarks(archivePath) {
   }
   const db = new Database18(path, { readonly: true });
   try {
+    db.exec("PRAGMA busy_timeout = 10000;");
     const columns = new Set(db.query("PRAGMA table_info(items)").all().map((column) => column.name));
     if (!columns.has("provider_item_id")) {
       throw new XBookmarksArchiveImportError("That store has no X bookmark items table.");
@@ -83022,7 +83023,7 @@ function readArchivedXBookmarks(archivePath) {
       ...newestAuthoredAt ? { newestAuthoredAt } : {}
     };
   } finally {
-    db.close();
+    closeSqliteStore(db, { checkpoint: false });
   }
 }
 function chunkTextByItem(db) {
