@@ -1,5 +1,6 @@
 // Retrieval-only eval: no Analyst or query planner is constructed or called.
 import { createHash } from 'node:crypto';
+import { Database } from 'bun:sqlite';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -33,6 +34,8 @@ interface Metrics { hitsAtK: Record<string, number>; recallAtK: Record<string, n
 export type FunnelStage = 'not_found' | 'not_returned' | 'found_not_returned' | 'returned_not_packed' | 'packed_not_fitted' | 'fitted_no_passage' | 'hit';
 export interface FunnelRow {
   stage: FunnelStage;
+  /** Most stored chunks of any expected item (a long document has many), when counted. */
+  chunks?: number;
   /** Best rank of the item in its store's returned hits, and how many that store returned (null when no search was recorded). */
   storeRank: number | null; storeHits: number | null;
   /** Seat in the pack as built, and its size; seat after the prompt fit. */
@@ -51,6 +54,8 @@ export interface PassageSummary {
   /** The question judge's counts, when it ran. */
   judged?: { answers: number; notAnswers: number; specific: number; generic: number; unclear: number };
   timings: { buildPackMs: number; fitMs: number; totalMs: number; storeSearchMs: number };
+  /** Answerable questions whose item got at least this far: found by a lane or returned, returned by its store, seated in the pack, kept by the fit, with the exact passage. */
+  reach: { found: number; returned: number; seated: number; fitted: number; passage: number };
   /** Reranker outcomes and time, when one ran: a timed-out or failed rerank kept the fused order. */
   rerank?: { applied: number; timedOut: number; failed: number; elapsedMs: number; maxElapsedMs: number };
 }
@@ -71,7 +76,9 @@ export interface PassageReceipt {
   /** The reranker's id (its model folder's name), or 'off'. */
   reranker: string;
   storeCounts: readonly EvalStoreCount[]; skippedStores: readonly EvalSkippedStore[];
-  summary: { overall: PassageSummary; byShape: Record<string, PassageSummary>; byFamily: Record<string, PassageSummary>; byTier: Record<string, PassageSummary> };
+  summary: { overall: PassageSummary; byShape: Record<string, PassageSummary>; byFamily: Record<string, PassageSummary>; byTier: Record<string, PassageSummary>;
+    /** By the expected item's stored chunks (1_chunk, 2-3_chunks, 4+_chunks), when counted. */
+    byLength: Record<string, PassageSummary> };
   questions?: PassageRow[];
   /** Ids of the questions left out as degraded; sealed receipts carry these but no rows. */
   degradedIds: string[];
@@ -89,9 +96,17 @@ function summarize(all: readonly PassageRow[], ks: readonly number[]): PassageSu
   const funnel: Partial<Record<FunnelStage, number>> = {};
   for (const row of positives) if (row.funnel) funnel[row.funnel.stage] = (funnel[row.funnel.stage] ?? 0) + 1;
   const judgedRows = positives.filter(row => row.judge);
+  const reached = (stages: readonly FunnelStage[]) => positives.filter(row => row.funnel && stages.includes(row.funnel.stage)).length;
   const reranked = rows.filter(row => row.rerank);
   return {
     funnel,
+    reach: {
+      found: reached(['found_not_returned', 'returned_not_packed', 'packed_not_fitted', 'fitted_no_passage', 'hit']),
+      returned: reached(['returned_not_packed', 'packed_not_fitted', 'fitted_no_passage', 'hit']),
+      seated: reached(['packed_not_fitted', 'fitted_no_passage', 'hit']),
+      fitted: reached(['fitted_no_passage', 'hit']),
+      passage: reached(['hit']),
+    },
     ...(judgedRows.length ? { judged: {
       answers: judgedRows.filter(row => row.judge!.answers === true).length,
       notAnswers: judgedRows.filter(row => row.judge!.answers === false).length,
@@ -128,6 +143,8 @@ export async function runPassageEval(input: {
   probeLanes?: (question: EvalQuestion, items: ReadonlyArray<{ corpusId: string; providerItemId?: string }>) => Promise<LaneProbe>;
   /** Whether a question's pinned quote answers it, and whether it is specific enough to pick its item out. */
   judgeQuestion?: (question: string, quote: string) => Promise<QuestionJudgement>;
+  /** How many chunks an item has in its store (undefined when unknown). */
+  itemChunks?: (corpusId: string, providerItemId: string) => number | undefined;
   /** Called as each question enters a step (1-based index; step names only). */
   onProgress?: (index: number, total: number, step: 'build_pack' | 'fit' | 'probe_lanes' | 'judge') => void;
 }): Promise<PassageReceipt> {
@@ -139,6 +156,11 @@ export async function runPassageEval(input: {
   const rows: PassageRow[] = [];
   let rerankerId: string | undefined;
   const stores = new Map(input.storeCounts.map(store => [store.corpusId, store]));
+  const chunkCount = (items: ReadonlyArray<{ corpusId: string; providerItemId?: string }>): { chunks?: number } => {
+    if (!input.itemChunks) return {};
+    const known = items.flatMap(item => { const n = item.providerItemId ? input.itemChunks!(item.corpusId, item.providerItemId) : undefined; return n === undefined ? [] : [n]; });
+    return known.length ? { chunks: Math.max(...known) } : {};
+  };
   for (const [position, question] of questions.entries()) {
     const step = (name: 'build_pack' | 'fit' | 'probe_lanes' | 'judge') => input.onProgress?.(position + 1, questions.length, name);
     const started = performance.now();
@@ -187,7 +209,7 @@ export async function runPassageEval(input: {
       const stage: FunnelStage = passageRank !== null ? 'hit' : objectRank !== null ? 'fitted_no_passage' : packRank !== null ? 'packed_not_fitted'
         : storeRank !== null ? 'returned_not_packed' : !lanes ? 'not_returned' : lanes.keyword !== null || lanes.vector !== null ? 'found_not_returned' : 'not_found';
       funnel = { stage, storeRank, storeHits: searches.length ? Math.max(...searches.map(search => search.providerItemIds.length)) : null,
-        packRank, packSize: original.candidates.length, fitRank: objectRank, ...(lanes ? { keywordRank: lanes.keyword, vectorRank: lanes.vector } : {}) };
+        packRank, packSize: original.candidates.length, fitRank: objectRank, ...chunkCount(identities), ...(lanes ? { keywordRank: lanes.keyword, vectorRank: lanes.vector } : {}) };
     }
     const quoted = question.expectedEvidence?.find(expected => expected.quote)?.quote;
     if (answerable && quoted && input.judgeQuestion) step('judge');
@@ -214,7 +236,8 @@ export async function runPassageEval(input: {
 }
 
 function summaries(rows: readonly PassageRow[], ks: readonly number[]): PassageReceipt['summary'] {
-  return { overall: summarize(rows, ks), byShape: grouped(rows, ks, row => [row.shape]), byFamily: grouped(rows, ks, row => row.families), byTier: grouped(rows, ks, row => row.tiers) };
+  return { overall: summarize(rows, ks), byShape: grouped(rows, ks, row => [row.shape]), byFamily: grouped(rows, ks, row => row.families), byTier: grouped(rows, ks, row => row.tiers),
+    byLength: grouped(rows, ks, row => (row.funnel?.chunks === undefined ? [] : [row.funnel.chunks <= 1 ? '1_chunk' : row.funnel.chunks <= 3 ? '2-3_chunks' : '4+_chunks'])) };
 }
 
 /** Which stores and lanes a question's search lost, by code; never the detail text. */
@@ -282,6 +305,26 @@ export function laneProbe(stores: readonly LocalConnectorStore[], embeddingFor: 
   };
 }
 
+/**
+ * Stored chunks per item, read-only from each store's file in the copy (the
+ * funnel's long-document tag). Each store is opened at its first count.
+ */
+export function storedChunkCounter(stores: readonly LocalConnectorStore[]) {
+  const open = new Map<string, Database>();
+  return {
+    count(corpusId: string, providerItemId: string): number | undefined {
+      const store = stores.find(candidate => candidate.corpusId === corpusId);
+      if (!store) return undefined;
+      let db = open.get(corpusId);
+      if (!db) { db = new Database(store.dbPath, { readonly: true, create: false }); db.exec('PRAGMA query_only = ON;'); open.set(corpusId, db); }
+      const row = db.query(`SELECT MAX(n) AS n FROM (SELECT COUNT(c.item_pk) AS n FROM items i LEFT JOIN chunks c ON c.item_pk = i.item_pk
+        WHERE i.provider_item_id = ? AND i.tombstoned = 0 GROUP BY i.item_pk)`).get(providerItemId) as { n: number | null } | null;
+      return row?.n ?? undefined;
+    },
+    close() { for (const db of open.values()) db.close(); open.clear(); },
+  };
+}
+
 /** The local model's read of a drafted question against its pinned quote; an unreadable reply is null. */
 export function questionJudge(model: DraftModel) {
   return async (question: string, quote: string): Promise<QuestionJudgement> => {
@@ -320,6 +363,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
   const maxCharsPerCandidate = positiveInteger(values.get('--max-chars-per-candidate') ?? process.env.OLYMPUS_EVAL_MAX_CHARS_PER_CANDIDATE, DEFAULT_MAX_CHARS_PER_CANDIDATE);
   enter('open_data_root');
   const opened = openEvalDataRoot(isolation);
+  const cleanups: Array<() => void> = [];
   try {
     enter('load_embedding');
     const embedding = await prepareEvalEmbedding({ configured: await configuredEvalEmbedding(loadConfig(), process.env) });
@@ -331,6 +375,8 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     const config = loadConfig();
     const judge = values.has('--judge-questions') ? questionJudge(localEvalModel(config)) : undefined;
     const probe = values.has('--probe-lanes') ? laneProbe(opened.stores, embedding.embeddingFor) : undefined;
+    const itemChunks = storedChunkCounter(opened.stores);
+    cleanups.push(itemChunks.close);
     const receipt = await runPassageEval({ dataset, split, maxResults, storeCounts: opened.storeCounts, skippedStores: opened.skipped,
       gitSha: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
       ...(provider === 'local' ? { promptBytes: positiveInteger(values.get('--prompt-bytes') ?? process.env.OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES) } : {}),
@@ -341,6 +387,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
       },
       ...(probe ? { probeLanes: probe } : {}),
       ...(judge ? { judgeQuestion: judge } : {}),
+      itemChunks: itemChunks.count,
       onProgress: (index, total, step) => enter(`question ${index}/${total}: ${step}`),
     });
     enter('write_receipt');
@@ -351,6 +398,6 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     console.log(JSON.stringify(receipt.summary));
     if (values.has('--compare')) enter('compare');
     if (values.has('--compare')) console.log(JSON.stringify(comparePassageReceipts(receipt, JSON.parse(readFileSync(values.get('--compare')!, 'utf8')) as PassageReceipt)));
-  } finally { try { opened.checkFileDescriptors(); } finally { opened.close(); } }
+  } finally { for (const cleanup of cleanups) cleanup(); try { opened.checkFileDescriptors(); } finally { opened.close(); } }
 }
 if (import.meta.main) runEvalCli('Passage eval', stage => main(process.argv.slice(2), stage));

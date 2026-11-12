@@ -426,6 +426,15 @@ Analyst model (same endpoint rules as drafting) whether each question is
 answered by its quote and is specific enough to point at one item. Rows record
 two booleans and summaries count them; no question or quote text is written.
 
+Each summary also has `reach`, the answerable questions whose item got at least
+as far as each step: `found` (by a probed lane or its store), `returned`,
+`seated`, `fitted`, `passage` (the exact quote in the seat). So a family's
+"found it" and "showed the answering passage" read side by side. Rows record
+`funnel.chunks`, the expected item's stored chunk count, read-only from the
+copied store, and `summary.byLength` groups questions by it (`1_chunk`,
+`2-3_chunks`, `4+_chunks`): an item over three chunks can never be passed
+whole, so long documents show up as their own group.
+
 With `OLYMPUS_SOURCE_RERANKER=built-in`, each row also records the reranker's
 outcome (`applied`, `timed_out` or `failed`), how many candidates it scored and
 promoted, and its time. Summaries count outcomes and give total and longest
