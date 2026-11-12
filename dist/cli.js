@@ -236111,6 +236111,7 @@ __export(exports_remote_mcp, {
   unauthorized: () => unauthorized,
   remoteOperationCaller: () => remoteOperationCaller,
   remoteMcpSurface: () => remoteMcpSurface,
+  remoteMcpLogLine: () => remoteMcpLogLine,
   remoteFailureResponse: () => remoteFailureResponse,
   lazyRemoteConnectionStore: () => lazyRemoteConnectionStore,
   jsonResponse: () => jsonResponse,
@@ -236123,6 +236124,7 @@ __export(exports_remote_mcp, {
   REMOTE_DIRECTORY_MCP_PATH: () => REMOTE_DIRECTORY_MCP_PATH,
   DEMO_GRANT_REMOTE_TOOLS: () => DEMO_GRANT_REMOTE_TOOLS
 });
+import { createHash as createHash111 } from "node:crypto";
 import { existsSync as existsSync118 } from "node:fs";
 function isRemoteMcpRequest(request) {
   return remoteMcpSurface(request) !== undefined;
@@ -236140,20 +236142,30 @@ function withRemoteMcpRoute(remoteMcp, rest) {
 }
 function createRemoteMcpHandler(options) {
   const isRelayed = options.isRelayed ?? isRelayedRequest;
+  const log = options.log ?? ((line2) => console.log(line2));
   return async (request) => {
+    const started = performance.now();
+    const trace = { surface: remoteMcpSurface(request) ?? "default", relayed: isRelayed(request) };
+    const response = await handle(request, trace);
+    log(remoteMcpLogLine(trace, response.status, performance.now() - started));
+    return response;
+  };
+  async function handle(request, trace) {
     try {
-      const surface = remoteMcpSurface(request) ?? "default";
+      const surface = trace.surface;
       const verification = authenticateRemoteRequest(request, options, surface);
       if (!verification.ok)
         return verification.response;
-      const response = await serveAuthenticated(request, verification, surface);
-      if (!isRelayed(request))
+      trace.connection = verification.connection.id;
+      const response = await serveAuthenticated(request, verification, surface, trace);
+      if (!trace.relayed)
         return response;
       return markAuthenticated(response, appSurface(request, verification.connection, surface));
     } catch (error2) {
+      trace.failed = true;
       return remoteFailureResponse(error2);
     }
-  };
+  }
   function appSurface(request, connection, surface) {
     if (options.chatgpt?.servesRequest(request, connection))
       return "chatgpt";
@@ -236161,7 +236173,7 @@ function createRemoteMcpHandler(options) {
       return "claude-app";
     return "remote";
   }
-  async function serveAuthenticated(request, verification, surface) {
+  async function serveAuthenticated(request, verification, surface, trace) {
     if (request.method !== "POST") {
       return jsonResponse(405, remoteSurfaceErrorOutput("method_not_allowed"), { Allow: "POST" });
     }
@@ -236173,6 +236185,7 @@ function createRemoteMcpHandler(options) {
     try {
       parsedBody = JSON.parse(body.text);
     } catch {}
+    trace.calls = rpcCallNames(parsedBody);
     const caller = remoteOperationCaller(verification.connection);
     const ctx = options.makeOperationContext(caller, request.signal);
     const selected = appSurface(request, verification.connection, surface);
@@ -236209,6 +236222,34 @@ function createRemoteMcpHandler(options) {
       });
     }
   }
+}
+function rpcCallNames(body) {
+  const messages = Array.isArray(body) ? body : [body];
+  const names = [];
+  for (const message2 of messages.slice(0, 8)) {
+    const { method, params } = message2 && typeof message2 === "object" ? message2 : {};
+    if (typeof method !== "string" || method.length > 64) {
+      names.push("?");
+      continue;
+    }
+    const tool = method === "tools/call" && typeof params?.name === "string" && /^[a-z0-9_]{1,64}$/.test(params.name) ? `:${params.name}` : "";
+    names.push(`${method}${tool}`);
+  }
+  return names;
+}
+function remoteMcpLogLine(trace, status, ms) {
+  return JSON.stringify({
+    at: new Date().toISOString(),
+    event: "remote_mcp",
+    surface: trace.surface,
+    relayed: trace.relayed,
+    calls: trace.calls ?? [],
+    status,
+    ms: Math.round(ms),
+    ...trace.connection ? { connection: createHash111("sha256").update(`olympus-remote-log
+${trace.connection}`).digest("hex").slice(0, 8) } : {},
+    ...trace.failed ? { failed: true } : {}
+  });
 }
 function anonymousListing(enabled, inner) {
   return {
@@ -236597,7 +236638,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash111, randomBytes as randomBytes34, timingSafeEqual as timingSafeEqual11 } from "node:crypto";
+import { createHash as createHash112, randomBytes as randomBytes34, timingSafeEqual as timingSafeEqual11 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -236971,7 +237012,7 @@ function createRemoteOAuthHandler(options) {
         codes.delete(hash3);
         return oauthError(400, "invalid_grant", "The authorization code was issued to another client or redirect.");
       }
-      if (!constantTimeEqual(createHash111("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
+      if (!constantTimeEqual(createHash112("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
         codes.delete(hash3);
         return oauthError(400, "invalid_grant", "The code verifier does not match the challenge.");
       }
@@ -237247,7 +237288,7 @@ function constantTimeEqual(left, right) {
   return a.length === b.length && a.length > 0 && timingSafeEqual11(a, b);
 }
 function sha25613(value2) {
-  return createHash111("sha256").update(value2).digest("hex");
+  return createHash112("sha256").update(value2).digest("hex");
 }
 function redirectWithParams(redirectUri, params) {
   const target = new URL(redirectUri);
@@ -239568,7 +239609,7 @@ __export(exports_remote_openapi, {
   REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES,
   REMOTE_OPENAPI_API_VERSION: () => REMOTE_OPENAPI_API_VERSION
 });
-import { createHash as createHash112 } from "node:crypto";
+import { createHash as createHash113 } from "node:crypto";
 function isRemoteOpenApiRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_OPENAPI_SPEC_PATH || TOOL_PATH_PATTERN.test(pathname);
@@ -239585,7 +239626,7 @@ function createRemoteOpenApiHandler(options) {
     const serverUrl = typeof configured === "function" ? livePublicServerUrl(configured()) : publicServerUrl(configured);
     if (spec?.serverUrl !== serverUrl) {
       const text7 = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-      spec = { serverUrl, text: text7, etag: `"${createHash112("sha256").update(text7).digest("base64url").slice(0, 27)}"` };
+      spec = { serverUrl, text: text7, etag: `"${createHash113("sha256").update(text7).digest("base64url").slice(0, 27)}"` };
     }
     return spec;
   };
@@ -239993,7 +240034,7 @@ __export(exports_setup_backend, {
   createChatGptSetupBackend: () => createChatGptSetupBackend
 });
 import { readFileSync as readFileSync100 } from "node:fs";
-import { createHash as createHash113 } from "node:crypto";
+import { createHash as createHash114 } from "node:crypto";
 function privacyRuleView(rule) {
   if (rule.kind === "sender" && rule.value)
     return [{ kind: "sender", source_id: "gmail.email", value: rule.value }];
@@ -240020,7 +240061,7 @@ function readChatGptPrivacySettings(env, pendingCount) {
 function privacyRevision(profile) {
   if (!profile)
     return "prv1.unset";
-  const digest5 = createHash113("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
+  const digest5 = createHash114("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
   return `prv1.${digest5.slice(0, 32)}`;
 }
 function createChatGptSetupBackend(options) {
@@ -240028,7 +240069,7 @@ function createChatGptSetupBackend(options) {
   const privacySettings = () => {
     const current3 = options.sovereignty.source === "file" && options.sovereignty.path ? validateSovereigntyConfig(JSON.parse(readFileSync100(options.sovereignty.path, "utf8"))) : policy;
     policy = current3;
-    const policyRevision = createHash113("sha256").update(JSON.stringify(current3)).digest("hex").slice(0, 16);
+    const policyRevision = createHash114("sha256").update(JSON.stringify(current3)).digest("hex").slice(0, 16);
     if (isPendingPrivacyPolicy(current3))
       return {
         configured: false,
