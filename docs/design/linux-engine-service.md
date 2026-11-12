@@ -1024,6 +1024,13 @@ not physical-host or minimum-floor qualification.
 `qualified-omarchy` since 1.0.0 (2026-10-14, owner-approved): the owner's
 Omarchy x64 laptop (glibc 2.44, SSE4.2) ran the full 1.0.0 release test on this
 exact Bun executable. Asset publication refuses while it reads `pending-omarchy`.
+
+On 2026-11-12 the pin moved to Bun 1.4.4 (#1523): 1.3.14 corrupts its heap when
+worker threads open and close SQLite connections concurrently. The 1.4.4 x64
+baseline archive is 51,794,559 bytes, SHA-256
+`e0446eb55995772eb9894bebae9a6be368d985a8b9271ee124486f9946eedd76` (Bun's
+SHASUMS256.txt), and still needs glibc 2.17. The pin reads `pending-omarchy`
+until the Omarchy release test runs on that executable.
 arm64 is absent and refused. No Linux Tor/zkAPI capability is enabled here.
 Existing model runtime authorities are unchanged: llama.cpp b11320 in
 `src/workers/source-index/built-in-reasoning/manifest.ts`, LiteRT-LM 0.18.0
