@@ -25233,6 +25233,9 @@ function visibilityStepAwaited(read) {
 var CONNECTOR_RECLAIM_WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
+// core/sqlite-store.ts closeSqliteStore, inlined: this source runs in its own
+// process and cannot import it. Checkpoint first so no WAL is left for a reap.
+const closeSqliteStore = (db) => { try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch {} db.close(); };
 self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
   // This is the mounted store's own maintenance connection. Never create a missing store.
   const db = new Database(path, { create: false, strict: true });
@@ -25264,7 +25267,7 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
   } catch {
     postMessage({ failed: true });
   } finally {
-    db.close();
+    closeSqliteStore(db);
   }
 };`;
 var RECLAIM_MAX_PAGES_PER_STEP = 128;
