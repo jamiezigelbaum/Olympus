@@ -27,7 +27,7 @@ afterEach(() => {
 
 test('a read-only reader stays served from the saved set while another store\'s import moves the ledger feed past its window', async () => {
   const { f, writer, ledgerDb, openReader, pk } = await fixtureWithEveryState();
-  await writer.saveVisibilityInTurns();
+  await writer.keepVisibilityCurrentInTurns();
   const reader = openReader();
   const rebuilds = countFullRebuilds(probe(reader).visibilityLedger()!);
   cleanups.push(() => rebuilds.restore());
