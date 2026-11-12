@@ -249386,7 +249386,8 @@ function qualifyWorkerReadiness(options, port) {
   const probe = () => options.readinessProbe ? options.readinessProbe(url) : defaultWorkerReadinessProbe(url, options.bunBin);
   const timeoutMs = validateSettleWindow(options.readinessTimeoutMs ?? options.actionSettleTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS, "Lifecycle readiness timeout", MAX_READINESS_TIMEOUT_MS);
   const pollMs = validateSettleWindow(options.actionSettlePollMs ?? DEFAULT_ACTION_SETTLE_POLL_MS, "Lifecycle readiness poll interval", 1e4);
-  const deadline = Date.now() + timeoutMs;
+  const firstDeadline = Date.now() + timeoutMs;
+  let deadline = firstDeadline;
   const readProgress = options.bootProgress ?? (() => readBootProgress(lifecycleEnv2(options)));
   const progressLine = options.progressLine ?? ((line2) => process.stderr.write(`${line2}
 `));
@@ -249396,14 +249397,15 @@ function qualifyWorkerReadiness(options, port) {
     if (inspectWorkerService(serviceActionOptions(options)).state !== "active")
       break;
     const now = Date.now();
-    if (now >= deadline) {
-      const progress = readProgress();
-      if (!bootProgressIsLive(progress, now))
-        break;
-      if (now - lastLineAt >= READINESS_PROGRESS_LINE_MS) {
+    const progress = readProgress();
+    if (bootProgressIsLive(progress, now)) {
+      if (now >= firstDeadline && now - lastLineAt >= READINESS_PROGRESS_LINE_MS) {
         progressLine(bootProgressLine(progress, now));
         lastLineAt = now;
       }
+      deadline = Math.max(deadline, now + timeoutMs);
+    } else if (now >= deadline) {
+      break;
     }
     waitForActivationSettle(Math.max(1, Math.min(pollMs, now < deadline ? deadline - now : pollMs)));
     ready = probe();
