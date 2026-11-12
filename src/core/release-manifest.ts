@@ -21,6 +21,7 @@
  * worker keeps content-free manifests behind opaque tickets for stdio's
  * trusted local transport and delayed collection.
  */
+import { createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 /** One item the analyst read, identified down to its account. */
@@ -41,8 +42,14 @@ export interface ReleaseInput {
    * whose names stay Personal) is one too, and it may be cited.
    */
   layer?: 'names';
-  /** Stored chunks whose text contributed to this output, never snippet hashes. */
+  /**
+   * Stored chunks whose text contributed to this output, never snippet hashes.
+   * Text the model read that maps to no stored chunk (a reaction line, a table
+   * or fact) adds an unproved marker, which no judgment ever allows.
+   */
   chunkHashes?: readonly string[];
+  /** Search only: the digest of the excerpt this input's proved passages made, bound to the hit that carries it. */
+  releasedTextDigest?: string;
   /**
    * `parent_label`: the input is a child citation's parent label, a
    * dependency of the answer that never stands for a cited item (its names
@@ -124,6 +131,26 @@ export async function checkReleaseChunks(check: ReleaseCheck | undefined, inputs
   };
 }
 
+/**
+ * Passages still unproved among inputs whose current tier would release them as passages.
+ * A Private input is governed by privateInputReleaseAllowed (consent or posture), not by
+ * passage proof, so its unjudged windows do not withhold an authorized Private derivative.
+ */
+export function passagesWithheldAtReleasableTiers(
+  inputs: readonly ReleaseInput[], verdicts: readonly ReleaseInputVerdict[], report: Pick<ChunkReleaseResult, 'allowed'>,
+): number {
+  return inputs.reduce((total, input, index) => {
+    const verdict = verdicts[index];
+    if (input.layer === 'names' || !verdict) return total;
+    const releasable = verdict.tier === 'public_or_personal' || (verdict.tier === 'legacy' && !input.privateAtAnswer);
+    if (!releasable) return total;
+    const hashes = new Set(input.chunkHashes ?? []);
+    // No ledger governs a legacy item now, so nothing vouches for passages it once proved.
+    const allowed = verdict.tier === 'legacy' ? 0 : (report.allowed[index] ?? []).filter(hash => hashes.has(hash)).length;
+    return total + Math.max(0, Math.max(1, hashes.size) - allowed);
+  }, 0);
+}
+
 /** Revalidate each search hit independently after a delayed probe or privacy judgment. */
 export async function recheckSearchEvidence(
   raw: Record<string, unknown>, manifests: readonly ReleaseManifest[], check: ReleaseCheck | undefined,
@@ -143,19 +170,34 @@ export async function recheckSearchEvidence(
   const cleared = (index: number): boolean => {
     const input = inputs[index]!;
     const verdict = verdicts[index];
-    return !!verdict && !verdict.gone && ['public_or_personal', 'legacy'].includes(verdict.tier)
-      && (input.layer === 'names' || (!!input.chunkHashes?.length
-        && input.chunkHashes.every(hash => report?.allowed[index]?.includes(hash))));
+    // Passages need a ledger that governs them now; names may still stand on a legacy tier.
+    return !!verdict && !verdict.gone && (input.layer === 'names'
+      ? ['public_or_personal', 'legacy'].includes(verdict.tier)
+      : verdict.tier === 'public_or_personal' && !!input.chunkHashes?.length
+        && input.chunkHashes.every(hash => report?.allowed[index]?.includes(hash)));
+  };
+  const held = (index: number): number => {
+    const input = inputs[index]!;
+    if (input.layer === 'names') return 0;
+    const hashes = new Set(input.chunkHashes ?? []);
+    return Math.max(1, hashes.size) - [...hashes].filter(hash => report?.allowed[index]?.includes(hash)).length;
   };
   const parentsCleared = inputs.every((input, index) => input.dependency !== 'parent_label' || cleared(index));
+  // Passages counted by the judge report, plus each hit dropped for another reason (tier, identity, text).
+  let droppedOtherwise = 0;
   const kept = evidence.filter(value => {
-    if (!parentsCleared || !value || typeof value !== 'object') return false;
+    if (!value || typeof value !== 'object') { droppedOtherwise += 1; return false; }
     const hit = value as Record<string, unknown>;
     const matches = inputs.flatMap((input, index) => input.dependency !== 'parent_label'
       && input.corpusId === hit.corpus_id && input.provider === hit.provider
       && input.accountScope === hit.account_scope && input.providerItemId === hit.provider_item_id
       && input.providerConversationId === hit.provider_conversation_id ? [index] : []);
-    return matches.length > 0 && matches.every(cleared);
+    // Text leaves only as the excerpt a content input's proved passages made; a names-only hit carries none.
+    const textBound = hit.excerpt === undefined || hit.excerpt === '' || (typeof hit.excerpt === 'string'
+      && matches.some(index => inputs[index]!.layer !== 'names' && inputs[index]!.releasedTextDigest === releasedTextDigest(hit.excerpt as string)));
+    if (parentsCleared && matches.length > 0 && matches.every(cleared) && textBound) return true;
+    if (!report || !matches.some(index => held(index) > 0)) droppedOtherwise += 1;
+    return false;
   });
   const dropped = evidence.length - kept.length;
   if (!dropped) return { raw, withheldAfter: false };
@@ -163,7 +205,7 @@ export async function recheckSearchEvidence(
   const note = report && chunkCoverageNote(report);
   const priorNotes = Array.isArray(coverage.cut_short) ? coverage.cut_short : [];
   const withheld = typeof raw.withheld === 'number' && Number.isFinite(raw.withheld) ? Math.max(0, raw.withheld) : 0;
-  return { raw: { ...raw, evidence: kept, withheld: withheld + Math.max(dropped, report?.withheldPassages ?? 0),
+  return { raw: { ...raw, evidence: kept, withheld: withheld + (report?.withheldPassages ?? 0) + droppedOtherwise,
     ...(note ? { coverage: { ...coverage, cut_short: [...new Set([...priorNotes, note])] } } : {}),
   }, withheldAfter: true };
 }
@@ -181,8 +223,31 @@ export function copyReleaseChunks(from: object, into: object): void {
 export function releasePassageHashes(provenance: object, text: string): readonly string[] {
   return [...new Set((chunkProvenance.get(provenance) ?? []).filter(entry => entry.text.includes(text)).flatMap(entry => entry.hashes))];
 }
-export function releaseCandidateHashes(candidate: { provenance: object; chunks: readonly string[] }): readonly string[] {
-  return [...new Set(candidate.chunks.flatMap(text => releasePassageHashes(candidate.provenance, text)))];
+/** Marks text with no stored chunk behind it: never judged, so never allowed, and counted as held. */
+const UNPROVED_PASSAGE = 'unproved:';
+export function isUnprovedPassageMarker(hash: string): boolean {
+  return hash.startsWith(UNPROVED_PASSAGE);
+}
+/**
+ * The chunks behind a candidate's text. `holdUnmapped` (what a model read
+ * whole) adds a marker for each passage, table or fact no stored chunk
+ * proves, so the derivative is held; a passage filter (search, cloud leg)
+ * drops that text itself and leaves it out.
+ */
+export function releaseCandidateHashes(
+  candidate: { provenance: object; chunks: readonly string[]; tables?: readonly unknown[]; facts?: readonly unknown[] },
+  options: { holdUnmapped?: boolean } = {},
+): readonly string[] {
+  const mapped = candidate.chunks.map(text => releasePassageHashes(candidate.provenance, text));
+  // Nothing proved at all already holds the input (no hashes); a marker matters only beside proved text.
+  const unmapped = options.holdUnmapped && mapped.some(hashes => hashes.length > 0)
+    ? mapped.filter(hashes => hashes.length === 0).length + (candidate.tables?.length ?? 0) + (candidate.facts?.length ?? 0) : 0;
+  return [...new Set(mapped.flat()), ...Array.from({ length: unmapped }, (_, index) => `${UNPROVED_PASSAGE}${index}`)];
+}
+
+/** Binds a released search excerpt to the input whose proved passages made it. */
+export function releasedTextDigest(text: string): string {
+  return createHash('sha256').update(text).digest('hex');
 }
 
 export interface ReleaseManifestSink {
@@ -247,10 +312,12 @@ export async function answerReleaseWithheldReasonOffThread(
 ): Promise<string | undefined> {
   try {
     const inputs = manifests.flatMap((manifest) => manifest.inputs);
+    // Judging chunks can raise a whole item, so read tiers only after it settles.
+    const report = options.chunks ? await checkReleaseChunks(check, inputs) : undefined;
     const verdicts = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
     const reason = answerReleaseWithheldReason(manifests, { inputs: () => verdicts, secureDerivativeDefault: () => check.secureDerivativeDefault() }, ceiling);
     if (reason) return reason;
-    if (options.chunks && (await checkReleaseChunks(check, inputs)).withheldPassages > 0) return ANSWER_RELEASE_UNVERIFIED;
+    if (report && passagesWithheldAtReleasableTiers(inputs, verdicts, report) > 0) return ANSWER_RELEASE_UNVERIFIED;
     return undefined;
   } catch {
     return ANSWER_RELEASE_UNVERIFIED;

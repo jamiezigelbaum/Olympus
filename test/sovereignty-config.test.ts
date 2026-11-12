@@ -1,3 +1,4 @@
+import { provedContent, provedReleaseCheck } from './helpers/scripted-search-release.ts';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1265,6 +1266,7 @@ describe('openclaw-infer analyst: OpenClaw default model unless one is named', (
     const handler = createAnalystSourceIndexAnswerHandler({
       analyst: local.analyst,
       lanes: () => lanesFixture({ internal: ['doc-1'] }),
+      releaseCheck: provedReleaseCheck,
       sovereigntyAnalystRoute: ({ localOnly, requestedProvider }) => engine.resolveAnalystRoute({
         trustDomain: localOnly ? 'secure_local' : 'internal',
         requestedProvider,
@@ -1403,7 +1405,7 @@ function lanesFixture(input: {
   return {
     registry,
     adapters: adapters as SourceIndexRouterAdapterMap,
-    contentProviders: {
+    contentProviders: provedContent({
       [INTERNAL]: {
         async fetchLocalContent() {
           return {
@@ -1421,7 +1423,7 @@ function lanesFixture(input: {
           };
         },
       },
-    } as LocalContentProviderMap,
+    } as LocalContentProviderMap),
   };
 }
 

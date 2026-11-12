@@ -1,3 +1,4 @@
+import { provedContent, provedReleaseCheck } from './helpers/scripted-search-release.ts';
 // Private material is searched by default when policy approves Argus for it.
 //
 // source_answer used to leave secure_local out unless the caller opted in, so
@@ -425,7 +426,11 @@ function answerWorld(preset: Preset, options: {
   const fallbackLocal = recordingAnalyst([]);
   const handler = createAnalystSourceIndexAnswerHandler({
     analyst: fallbackLocal,
-    lanes: options.lanes ?? (() => lanes(options.secureTitle)),
+    lanes: () => {
+      const built = (options.lanes ?? (() => lanes(options.secureTitle)))();
+      return { ...built, contentProviders: provedContent(built.contentProviders) };
+    },
+    releaseCheck: provedReleaseCheck,
     ...(options.secureDerivativeDefault ? { secureDerivativeDefault: options.secureDerivativeDefault } : {}),
     ...(options.secureAnalystPoolLastLegTimeoutMs !== undefined
       ? { secureAnalystPool: { lastLegTimeoutMs: options.secureAnalystPoolLastLegTimeoutMs } }

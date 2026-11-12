@@ -58,7 +58,7 @@ import {
   type StructuredEvidenceFact,
 } from '../../core/opsec.ts';
 import { parentLabelReleaseInputs, type ParentLabelResolver } from '../../core/parent-label.ts';
-import { answerReleaseWithheldReasonOffThread, recordReleaseManifest, checkReleaseChunks, chunkCoverageNote, releaseCandidateHashes, releasePassageHashes, type ChunkReleaseResult, type ReleaseCheck, type ReleaseConstraints, type ReleaseInput } from '../../core/release-manifest.ts';
+import { answerReleaseWithheldReasonOffThread, recordReleaseManifest, checkReleaseChunks, chunkCoverageNote, releaseCandidateHashes, releasedTextDigest, releasePassageHashes, type ChunkReleaseResult, type ReleaseCheck, type ReleaseConstraints, type ReleaseInput } from '../../core/release-manifest.ts';
 import { secretLocationCoverageNote } from '../../core/secret-location-note.ts';
 import { canonicalSourceCorpusId } from '../../core/source-corpus-registry.ts';
 import type { SourceIndexCorpusRegistry } from '../../core/source-index/corpus.ts';
@@ -843,20 +843,21 @@ function releaseInputs(detail: EvidencePackBuildDetail): ReleaseInput[] {
   return [...items, ...parentLabelReleaseInputs(detail.parentLabelDependencies ?? [])];
 }
 
-function candidateReleaseInput(candidate: EvidenceCandidate, corpusId: string): ReleaseInput {
+function candidateReleaseInput(candidate: EvidenceCandidate, corpusId: string, options: { holdUnmapped: boolean } = { holdUnmapped: true }): ReleaseInput {
   const item = candidate.provenance.sourceItem;
   const namesOnly = candidate.chunks.length === 0 && !candidate.tables?.length && !candidate.facts?.length;
   return {
     corpusId, provider: item.provider, accountScope: item.accountScope ?? '', providerItemId: item.providerItemId,
     ...(item.providerConversationId ? { providerConversationId: item.providerConversationId } : {}),
     privateAtAnswer: isSecureSensitivity(candidate),
-    ...(namesOnly ? { layer: 'names' as const } : { chunkHashes: releaseCandidateHashes(candidate) }),
+    ...(namesOnly ? { layer: 'names' as const } : { chunkHashes: releaseCandidateHashes(candidate, options) }),
   };
 }
 
 // The search and cloud leg use the same passage filtering, before any text leaves.
 async function checkedRemotePack(pack: EvidencePack, corpusOf: (candidate: EvidenceCandidate) => string, check?: ReleaseCheck): Promise<{ pack: EvidencePack; report: ChunkReleaseResult }> {
-  const inputs = pack.candidates.map(candidate => candidateReleaseInput(candidate, corpusOf(candidate)));
+  // Text with no stored chunk is dropped below, so it is not held here.
+  const inputs = pack.candidates.map(candidate => candidateReleaseInput(candidate, corpusOf(candidate), { holdUnmapped: false }));
   const report = await checkReleaseChunks(check, inputs);
   const candidates = pack.candidates.flatMap((candidate, index) => {
     if (inputs[index]!.layer === 'names') return [candidate];
@@ -2906,10 +2907,10 @@ export async function searchReleasedEvidence(input: {
    * The current tiers, read once more after every item is read and right
    * before the result is returned: an item moved to Private or Secrets (or
    * gone) while the search ran is withheld, and so is one whose tier cannot
-   * be proven. A check that cannot be read fails the whole search. Absent:
-   * the tiers seen when each item was selected (the ChatGPT surface).
+   * be proven. A check that cannot be read fails the whole search. Required:
+   * without it no passage is proved read.
    */
-  releaseCheck?: ReleaseCheck;
+  releaseCheck: ReleaseCheck;
 }): Promise<ReleasedEvidenceResult> {
   const question = input.question.trim();
   if (!question) throw new OperationError('invalid_params', 'A question is required.');
@@ -2990,7 +2991,7 @@ export async function searchReleasedEvidence(input: {
       withheld += 1;
       return;
     }
-    identities.push(candidateReleaseInput(candidate, corpusId));
+    identities.push({ ...candidateReleaseInput(candidate, corpusId), ...(excerpt ? { releasedTextDigest: releasedTextDigest(excerpt) } : {}) });
     evidence.push(withoutSecretLikeLabels({
       corpus_id: corpusId,
       trust_domain: candidate.trustDomain,

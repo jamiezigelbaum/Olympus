@@ -1,3 +1,4 @@
+import { provedReleaseCheck } from './helpers/scripted-search-release.ts';
 import { recordReleaseManifest } from '../src/core/release-manifest.ts';
 // Slow source_answer hand-off (v0.5 hosted agents): a call that is not done by
 // the threshold returns a connection-bound job id, the work keeps running, and
@@ -109,6 +110,8 @@ function fakeAnalyst() {
         });
         await Promise.race([waiting, aborted]);
       }
+      // The answer read nothing, so its release manifest names no input.
+      recordReleaseManifest({ inputs: [], constraints: { secureDerivativeDefault: 'allow', includeSecureLocalContent: false } });
       return answerFixture();
     },
   };
@@ -137,8 +140,8 @@ function startServer(limits: Partial<SourceAnswerJobLimits> = FAST): void {
   });
   const remote = {
     connections: () => store,
-    makeOperationContext: (caller: Parameters<typeof createInProcessOperationContext>[0]['caller'], signal: AbortSignal) =>
-      createInProcessOperationContext({
+    makeOperationContext: (caller: Parameters<typeof createInProcessOperationContext>[0]['caller'], signal: AbortSignal) => ({
+      ...createInProcessOperationContext({
         config: defaultConfig(),
         sourceIndexReadEnabled: true,
         workerFetch: worker.fetch,
@@ -146,6 +149,8 @@ function startServer(limits: Partial<SourceAnswerJobLimits> = FAST): void {
         signal,
         sourceAnswerJobs: jobs,
       }),
+      releaseCheck: provedReleaseCheck,
+    }),
   };
   server = Bun.serve({
     hostname: '127.0.0.1',
