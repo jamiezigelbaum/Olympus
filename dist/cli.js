@@ -3143,6 +3143,7 @@ var init_public_surface = __esm(() => {
     "connections list",
     "connections revoke",
     "connections status",
+    "connections requests",
     "dashboard",
     "open",
     "open-handler install",
@@ -254035,5 +254036,6 @@ export {
   formatCliFatalError,
   doctorFailureSummary,
   dashboardTargetArg,
-  dashboardPortArg
+  dashboardPortArg,
+  PUBLIC_LEAF_USAGE
 };
