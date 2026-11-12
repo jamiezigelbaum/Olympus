@@ -12,7 +12,11 @@ const logs = (): string[] => {
   const root = process.platform === 'darwin' ? join(homedir(), 'Library/Logs/Olympus') : join(homedir(), '.local/state/olympus/engine');
   return [join(root, 'engine.log'), join(root, 'engine.err')];
 };
-function queue(path = sharedDataPath('file-extraction-jobs')): Database { return new Database(path, { readonly: true }); }
+function queue(path = sharedDataPath('file-extraction-jobs')): Database {
+  const db = new Database(path, { readonly: true });
+  db.exec('PRAGMA busy_timeout = 10000;');
+  return db;
+}
 export function readCursor(options: { dbPath?: string; logPaths?: string[] } = {}): ReadCursor {
   const db = queue(options.dbPath);
   try {
