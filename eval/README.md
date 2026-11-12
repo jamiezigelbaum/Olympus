@@ -426,6 +426,13 @@ Analyst model (same endpoint rules as drafting) whether each question is
 answered by its quote and is specific enough to point at one item. Rows record
 two booleans and summaries count them; no question or quote text is written.
 
+With `OLYMPUS_SOURCE_RERANKER=built-in`, each row also records the reranker's
+outcome (`applied`, `timed_out` or `failed`), how many candidates it scored and
+promoted, and its time. Summaries count outcomes and give total and longest
+rerank time, and the receipt names the reranker (its model folder) or `off`. A
+timed-out or failed rerank keeps the fused order, so check `timedOut` before
+reading a pool's hits.
+
 On **Sparta**, draft a private set through the local OpenAI-compatible model:
 
 ```sh

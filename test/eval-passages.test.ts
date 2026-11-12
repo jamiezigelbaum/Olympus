@@ -158,3 +158,15 @@ test('the lane probe and question judge are not counted in retrieval timings', a
   expect(receipt.questions![0]!.judge).toEqual({ answers: true, specific: true });
   expect(receipt.questions![0]!.timings.totalMs).toBeLessThan(250);
 });
+test('each row records what the reranker did, and the summary counts outcomes and time', async () => {
+  const one = { ...dataset, questions: [dataset.questions[0]!, dataset.questions[1]!] };
+  let call = 0;
+  const receipt = await runPassageEval({ dataset: one, maxResults: 5, storeCounts: counts, gitSha: 'abc',
+    buildPack: async () => ({ ...detail(), rerank: call++ === 0
+      ? { rerankerId: 'cross-encoder:model', outcome: 'applied', scored: 24, kept: 5, promoted: 2, elapsedMs: 900 }
+      : { rerankerId: 'cross-encoder:model', outcome: 'timed_out', scored: 0, kept: 5, promoted: 0, elapsedMs: 5000 } }) });
+  expect(receipt.questions![0]!.rerank).toEqual({ outcome: 'applied', scored: 24, promoted: 2, elapsedMs: 900 });
+  expect(receipt.questions![1]!.rerank).toEqual({ outcome: 'timed_out', scored: 0, promoted: 0, elapsedMs: 5000 });
+  expect(receipt.summary.overall.rerank).toEqual({ applied: 1, timedOut: 1, failed: 0, elapsedMs: 5900, maxElapsedMs: 5000 });
+  expect(receipt.reranker).toBe('cross-encoder:model');
+});

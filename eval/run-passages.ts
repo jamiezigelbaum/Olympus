@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { EvidencePackBuildDetail } from '../src/core/evidence-pack.ts';
+import type { EvidenceRerankOutcome } from '../src/core/evidence-reranker.ts';
 import { loadConfig } from '../src/core/config.ts';
 import { fitPackToPromptBytes, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, DEFAULT_MAX_CHARS_PER_CANDIDATE } from '../src/workers/source-index/analyst-answer.ts';
 import { prepareBuiltInRerankerFromEnv } from '../src/workers/source-index/built-in-reranker.ts';
@@ -49,11 +50,14 @@ export interface PassageSummary {
   /** The question judge's counts, when it ran. */
   judged?: { answers: number; notAnswers: number; specific: number; generic: number; unclear: number };
   timings: { buildPackMs: number; fitMs: number; totalMs: number; storeSearchMs: number };
+  /** Reranker outcomes and time, when one ran: a timed-out or failed rerank kept the fused order. */
+  rerank?: { applied: number; timedOut: number; failed: number; elapsedMs: number; maxElapsedMs: number };
 }
 export interface PassageRow {
   questionId: string; shape: string; families: string[]; tiers: string[];
   seatsFilled: number; answerable: boolean; object: HitScore; passage: HitScore;
   funnel?: FunnelRow; judge?: QuestionJudgement;
+  rerank?: { outcome: EvidenceRerankOutcome; scored: number; promoted: number; elapsedMs: number };
   /** Present when a store's search was cut short: which store and lane, and why (codes only). Left out of the metrics. */
   degraded?: Degradation[];
   timings: PassageSummary['timings'];
@@ -63,6 +67,8 @@ export interface Degradation { corpusId: string; lane?: string; reason: string }
 export interface PassageReceipt {
   schema: 3; rule: typeof PASSAGE_MATCH_RULE; gitSha: string; split: EvalSplit;
   setId: string; maxResults: number; ks: number[];
+  /** The reranker's id (its model folder's name), or 'off'. */
+  reranker: string;
   storeCounts: readonly EvalStoreCount[]; skippedStores: readonly EvalSkippedStore[];
   summary: { overall: PassageSummary; byShape: Record<string, PassageSummary>; byFamily: Record<string, PassageSummary>; byTier: Record<string, PassageSummary> };
   questions?: PassageRow[];
@@ -82,6 +88,7 @@ function summarize(all: readonly PassageRow[], ks: readonly number[]): PassageSu
   const funnel: Partial<Record<FunnelStage, number>> = {};
   for (const row of positives) if (row.funnel) funnel[row.funnel.stage] = (funnel[row.funnel.stage] ?? 0) + 1;
   const judgedRows = positives.filter(row => row.judge);
+  const reranked = rows.filter(row => row.rerank);
   return {
     funnel,
     ...(judgedRows.length ? { judged: {
@@ -90,6 +97,13 @@ function summarize(all: readonly PassageRow[], ks: readonly number[]): PassageSu
       specific: judgedRows.filter(row => row.judge!.specific === true).length,
       generic: judgedRows.filter(row => row.judge!.specific === false).length,
       unclear: judgedRows.filter(row => row.judge!.answers === null || row.judge!.specific === null).length,
+    } } : {}),
+    ...(reranked.length ? { rerank: {
+      applied: reranked.filter(row => row.rerank!.outcome === 'applied').length,
+      timedOut: reranked.filter(row => row.rerank!.outcome === 'timed_out').length,
+      failed: reranked.filter(row => row.rerank!.outcome === 'failed').length,
+      elapsedMs: reranked.reduce((n, row) => n + row.rerank!.elapsedMs, 0),
+      maxElapsedMs: Math.max(...reranked.map(row => row.rerank!.elapsedMs)),
     } } : {}),
     questions: rows.length, answerable: positives.length, unanswerable: rows.length - positives.length,
     negativeSeats: rows.filter(row => !row.answerable).reduce((n, row) => n + row.seatsFilled, 0),
@@ -120,6 +134,7 @@ export async function runPassageEval(input: {
   if (!Number.isInteger(input.maxResults) || input.maxResults < 1) throw new Error('Pack size must be positive.');
   const ks = [...new Set([1, 3, 5, 10, input.maxResults])].sort((a, b) => a - b);
   const rows: PassageRow[] = [];
+  let rerankerId: string | undefined;
   const stores = new Map(input.storeCounts.map(store => [store.corpusId, store]));
   for (const question of questions) {
     const started = performance.now();
@@ -127,6 +142,7 @@ export async function runPassageEval(input: {
     // A cut-short search is not an ordinary miss: the question is recorded
     // as degraded, left out of the metrics, and the run goes on.
     const degraded = degradationsOf(detail);
+    rerankerId ??= detail.rerank?.rerankerId;
     const builtAt = performance.now();
     const original = detail.pack;
     const pack = input.promptBytes === undefined ? original : fitPackToPromptBytes(original, input.promptBytes,
@@ -173,6 +189,7 @@ export async function runPassageEval(input: {
       tiers: expectedStores.length ? [...new Set(expectedStores.map((store, i) => store?.tier ?? question.expectedEvidence![i]!.corpusId.split('.')[0]!))] : ['unknown'],
       seatsFilled: pack.candidates.length, answerable, object: score(objectRank, ks), passage: score(passageRank, ks),
       ...(funnel ? { funnel } : {}), ...(judge ? { judge } : {}),
+      ...(detail.rerank ? { rerank: { outcome: detail.rerank.outcome, scored: detail.rerank.scored, promoted: detail.rerank.promoted, elapsedMs: detail.rerank.elapsedMs } } : {}),
       ...(degraded.length ? { degraded } : {}),
       timings: { buildPackMs: builtAt - started, fitMs: finished - builtAt, totalMs: finished - started, storeSearchMs: (detail.corpusTimings ?? []).reduce((n, t) => n + t.elapsedMs, 0) },
       corpusTimings: (detail.corpusTimings ?? []).map(t => ({ corpusId: t.corpusId, elapsedMs: t.elapsedMs, outcome: t.outcome })),
@@ -181,7 +198,7 @@ export async function runPassageEval(input: {
   return { schema: 3, rule: PASSAGE_MATCH_RULE, gitSha: input.gitSha, split,
     // Identity includes only ids and structural labels; never hashes private text.
     setId: createHash('sha256').update(JSON.stringify(questions.map(q => [q.id, q.shape]).sort((a, b) => a[0]!.localeCompare(b[0]!)))).digest('hex'),
-    maxResults: input.maxResults, ks, storeCounts: input.storeCounts, skippedStores: input.skippedStores ?? [],
+    maxResults: input.maxResults, ks, reranker: rerankerId ?? 'off', storeCounts: input.storeCounts, skippedStores: input.skippedStores ?? [],
     summary: summaries(rows, ks),
     ...(split === 'open' ? { questions: rows } : {}),
     degradedIds: rows.filter(row => row.degraded).map(row => row.questionId),
