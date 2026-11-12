@@ -14859,7 +14859,7 @@ async function probeEngineBackground(fetchBackground, authToken, instanceId, tim
     clearTimeout(timeout);
   }
 }
-var ENGINE_ROLE_ENV = "OLYMPUS_WORKER_ENGINE_ROLE", ENGINE_BACKGROUND_SOCKET_ENV = "OLYMPUS_ENGINE_BACKGROUND_SOCKET", ENGINE_BACKGROUND_INSTANCE_ENV = "OLYMPUS_ENGINE_BACKGROUND_INSTANCE_ID", ENGINE_BACKGROUND_ORIGIN = "http://olympus-background", ENGINE_READY_PATH = "/engine/ready", ENGINE_COMMANDS_PATH = "/engine/commands";
+var ENGINE_ROLE_ENV = "OLYMPUS_WORKER_ENGINE_ROLE", ENGINE_BACKGROUND_SOCKET_ENV = "OLYMPUS_ENGINE_BACKGROUND_SOCKET", ENGINE_BACKGROUND_INSTANCE_ENV = "OLYMPUS_ENGINE_BACKGROUND_INSTANCE_ID", ENGINE_BACKGROUND_ORIGIN = "http://olympus-background", ENGINE_READY_PATH = "/engine/ready", ENGINE_COMMANDS_PATH = "/engine/commands", ENGINE_MODEL_COMPLETE_PATH = "/engine/model/complete";
 var init_engine_split = __esm(() => {
   init_olympus_layout();
   init_worker_transport();
@@ -214638,6 +214638,7 @@ function parseEngineCommandEnvelope(value2) {
       } };
     }
     case "archive_changed":
+    case "model_prepare":
       return { id, command: { kind } };
     case "dashboard_samples": {
       const samples = command2.samples;
@@ -214849,6 +214850,23 @@ function createEngineCommandHandler(options) {
         throw error2;
       }
     }
+    if (url2.pathname === ENGINE_MODEL_COMPLETE_PATH && request.method === "POST") {
+      if (!options.ready() || !options.modelComplete)
+        return Response.json({ error: "model_unavailable" }, { status: 503 });
+      const parsed = parseModelRequest(await request.json().catch(() => {
+        return;
+      }));
+      if (!parsed)
+        return Response.json({ error: "invalid_model_request" }, { status: 400 });
+      try {
+        const completion = await options.modelComplete({ ...parsed, signal: request.signal });
+        return Response.json(completion);
+      } catch (error2) {
+        if (error2 instanceof OperationError)
+          return Response.json({ operation_error: error2.toJSON() }, { status: 503 });
+        return Response.json({ error: "model_failed", message: error2 instanceof Error ? error2.message : "unknown error" }, { status: 500 });
+      }
+    }
     if (url2.pathname.startsWith(`${ENGINE_COMMANDS_PATH}/`) && request.method === "GET") {
       const id = decodeURIComponent(url2.pathname.slice(ENGINE_COMMANDS_PATH.length + 1));
       if (!ID3.test(id))
@@ -214870,9 +214888,29 @@ function createEngineCommandHandler(options) {
     return Response.json({ error: "not_found" }, { status: 404 });
   };
 }
+function parseModelRequest(value2) {
+  const record8 = asRecord19(value2);
+  if (!record8)
+    return;
+  const { system, prompt, localOnly, maxOutputChars, responseSchema } = record8;
+  if (typeof system !== "string" || typeof prompt !== "string" || typeof localOnly !== "boolean")
+    return;
+  if (maxOutputChars !== undefined && (!Number.isSafeInteger(maxOutputChars) || maxOutputChars < 1))
+    return;
+  if (responseSchema !== undefined && !asRecord19(responseSchema))
+    return;
+  return {
+    system,
+    prompt,
+    localOnly,
+    ...maxOutputChars !== undefined ? { maxOutputChars } : {},
+    ...responseSchema !== undefined ? { responseSchema } : {}
+  };
+}
 var ENGINE_RELOAD_KINDS, ENGINE_JUDGE_BOOST_MAX_IDS = 20, ENGINE_JUDGE_BOOST_TTL_MS, ENGINE_FORWARDED_ROUTES, ENGINE_BODY_MAX_BYTES, ENGINE_DASHBOARD_SAMPLES_MAX = 500, EngineCommandError, ID3, SOURCE, RESOURCE, forwardedRecordIds, HOP_HEADERS;
 var init_commands = __esm(() => {
   init_engine_split();
+  init_operation_error();
   init_http();
   ENGINE_RELOAD_KINDS = ["sources", "scope", "exclusions", "embedding", "models", "archive", "extraction", "pacing"];
   ENGINE_JUDGE_BOOST_TTL_MS = 15 * 60000;
@@ -215194,7 +215232,7 @@ function startEngineBackgroundServer(input) {
   }
   let ready = false;
   const ledger = new EngineCommandLedger({ instanceId, handlers: input.handlers });
-  const handler = createEngineCommandHandler({ authToken: input.authToken, ledger, ready: () => ready });
+  const handler = createEngineCommandHandler({ authToken: input.authToken, ledger, ready: () => ready, ...input.modelComplete ? { modelComplete: input.modelComplete } : {} });
   const server = bindWorkerSocket(input.socketPath, () => Bun.serve(workerSocketServe({
     unix: input.socketPath,
     fetch: (request) => handler(request)
@@ -215236,10 +215274,11 @@ async function waitForEngineBackground(input) {
 }
 function createEngineFront(input) {
   const now = input.now ?? (() => Date.now());
+  const fetchBackground = input.fetch ?? createUnixSocketFetch(input.socketPath);
   let relay;
   let answering;
   const client = new EngineCommandClient({
-    fetch: input.fetch ?? createUnixSocketFetch(input.socketPath),
+    fetch: fetchBackground,
     authToken: input.authToken,
     onInstance: (instanceId) => {
       answering = { instance: instanceId, at: now() };
@@ -215271,7 +215310,8 @@ function createEngineFront(input) {
     status();
   }, 2000);
   poll.unref?.();
-  return { client, ownerBusy: relay, status, stop: () => {
+  const completeModel = (request) => completeModelInBackground(fetchBackground, input.authToken, request);
+  return { client, ownerBusy: relay, status, completeModel, stop: () => {
     clearInterval(poll);
     relay?.stop();
   } };
@@ -215441,9 +215481,36 @@ function restartAfterFront(input) {
   });
   return true;
 }
+async function completeModelInBackground(fetchBackground, authToken, request) {
+  const { signal, ...body } = request;
+  let response;
+  try {
+    response = await fetchBackground(`${ENGINE_BACKGROUND_ORIGIN}${ENGINE_MODEL_COMPLETE_PATH}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", Authorization: `Bearer ${authToken}` },
+      body: JSON.stringify(body),
+      ...signal ? { signal } : {}
+    });
+  } catch (error2) {
+    if (signal?.aborted)
+      throw error2;
+    throw new OperationError("argus_unreachable", "The built-in private model is not answering: the background engine is not reachable.", "Try again in a moment.");
+  }
+  const payload2 = await response.json().catch(() => {
+    return;
+  });
+  if (response.ok && payload2 && typeof payload2.text === "string" && typeof payload2.modelId === "string")
+    return payload2;
+  const typed = payload2?.operation_error;
+  if (typed && typeof typed.error === "string" && typeof typed.message === "string") {
+    throw new OperationError(typed.error, typed.message, typeof typed.suggestion === "string" ? typed.suggestion : undefined);
+  }
+  throw new OperationError("argus_unreachable", `The built-in private model did not answer (HTTP ${response.status}).`, "Try again in a moment.");
+}
 var SOURCE_SYNC_WAIT_MS, DATA_EXPORT_WAIT_MS, OWNER_ACTION_WAIT_MS;
 var init_runtime4 = __esm(() => {
   init_engine_split();
+  init_operation_error();
   init_olympus_layout();
   init_atomic_file();
   init_worker_transport();
@@ -217614,9 +217681,11 @@ function stopBuiltInModelOnShutdown(model) {
     });
   } catch {}
 }
-function createWorkerSharedBuiltInModel(env) {
+function createWorkerSharedBuiltInModel(env, background) {
   const base = createWorkerBuiltInAnalystModel(env);
-  return base ? sharedBuiltInModel(base) : undefined;
+  if (!base)
+    return;
+  return background ? frontBuiltInModel(base, background) : sharedBuiltInModel(base);
 }
 function sharedBuiltInModel(base, nowMs = Date.now) {
   let prepared = false;
@@ -217656,6 +217725,49 @@ function sharedBuiltInModel(base, nowMs = Date.now) {
     }
   };
   return { model, available: () => prepared && installedOnDisk(), startIfIdle };
+}
+function frontBuiltInModel(base, background, nowMs = Date.now) {
+  const installed3 = () => {
+    try {
+      const state = base.status().state;
+      return state === "loading" || state === "ready";
+    } catch {
+      return false;
+    }
+  };
+  let verified = false;
+  let lastVerifyMs = Number.NEGATIVE_INFINITY;
+  let lastAskMs = Number.NEGATIVE_INFINITY;
+  const verify3 = async () => {
+    lastVerifyMs = nowMs();
+    await base.prepare();
+    verified = installed3();
+  };
+  const model = {
+    ...base,
+    async prepare() {
+      if (installed3())
+        await verify3();
+      else
+        background.prepare();
+    },
+    async stop() {},
+    complete: (request) => background.complete(request)
+  };
+  if (installed3())
+    verify3();
+  const startIfIdle = () => {
+    if (installed3()) {
+      if (!verified && nowMs() - lastVerifyMs >= BUILT_IN_MODEL_REVERIFY_MS)
+        verify3();
+      return;
+    }
+    if (nowMs() - lastAskMs < BUILT_IN_MODEL_REVERIFY_MS)
+      return;
+    lastAskMs = nowMs();
+    background.prepare();
+  };
+  return { model, available: installed3, startIfIdle };
 }
 function createTierSnifferModel(input) {
   const { lane } = input;
@@ -241138,7 +241250,14 @@ async function main() {
     if (builtInChoice)
       process.env[BUILT_IN_ANALYST_MODEL_ENV] = builtInChoice;
   }
-  const workerBuiltInModel = createWorkerSharedBuiltInModel(process.env);
+  const workerBuiltInModel = createWorkerSharedBuiltInModel(process.env, engineFront ? {
+    complete: (request) => engineFront.completeModel(request),
+    prepare: () => {
+      engineFront.client.post({ kind: "model_prepare" }).catch(() => {
+        return;
+      });
+    }
+  } : undefined);
   const answerBuiltInModel = workerBuiltInModel ? localModelActivity.track("built_in", workerBuiltInModel.model) : undefined;
   registerBuiltInPrivateModel(workerBuiltInModel ? { cacheModelId: `${workerBuiltInModel.model.spec.modelId}:${workerBuiltInModel.model.spec.revision}:${workerBuiltInModel.model.spec.file.sha256}`, model: workerBuiltInModel.model, available: workerBuiltInModel.available, startIfIdle: workerBuiltInModel.startIfIdle } : undefined);
   const judgeSpending = new JudgeSpending(judgeSpendingPath(process.env));
@@ -245308,7 +245427,13 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       authToken,
       ...process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID || process.env[ENGINE_BACKGROUND_INSTANCE_ENV] ? { instanceId: process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID || process.env[ENGINE_BACKGROUND_INSTANCE_ENV] } : {},
       log: (line2) => console.warn(line2),
+      ...answerBuiltInModel ? { modelComplete: (request) => answerBuiltInModel.complete(request) } : {},
       handlers: {
+        model_prepare: () => {
+          if (workerBuiltInModel)
+            workerBuiltInModel.model.prepare();
+          return { preparing: workerBuiltInModel !== undefined };
+        },
         reload: ({ target, corpora, frontPid }) => {
           if (target === "pacing") {
             localPacer.reloadSetting();
