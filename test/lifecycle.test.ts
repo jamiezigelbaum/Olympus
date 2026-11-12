@@ -14,6 +14,8 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, setSystemTime, test } from 'bun:test';
+import { Database } from 'bun:sqlite';
+import { readSqliteSchemaVersion, runSqliteMigrations } from '../src/core/sqlite-migrations.ts';
 import {
   installManagedWorkerFiles,
   lifecycleRecoveryPlan,
@@ -668,6 +670,123 @@ describe('versioned Olympus worker lifecycle', () => {
       expect(existsSync(transactionPath(home))).toBe(false);
     } finally {
       setSystemTime();
+      makeTreeWritable(home);
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('past its readiness timeout, an upgrade waits while the worker reports boot work, and prints progress (#1494)', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-boot-progress-'));
+    const manager = linuxManager('active');
+    try {
+      const artifact = createUpgradeArtifact(home, '0.4.3');
+      installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: '/opt/olympus-old', bunBin: process.execPath, authToken: 'old-token' });
+      let probes = 0;
+      const lines: string[] = [];
+      const startedAt = new Date(Date.now() - 4 * 60_000).toISOString();
+      const result = runWorkerLifecycle('upgrade', {
+        platform: 'linux', homeDir: home, artifactPath: artifact.path,
+        bunBin: process.execPath, exec: manager.exec, activationSettleMs: 0,
+        readinessTimeoutMs: 0, actionSettlePollMs: 1,
+        bootProgress: () => ({ schema: 'olympus.boot-progress.v1', pid: process.pid, phase: 'migrating', storeId: 'tier-ledger', startedAt, updatedAt: startedAt, completedStores: 2 }),
+        progressLine: (line) => lines.push(line),
+        readinessProbe: () => ++probes >= 5,
+      });
+      expect(probes).toBe(5);
+      expect(result).toMatchObject({ ok: true, readiness: { status: 'ready' } });
+      expect(lines).toEqual(['Updating your data: 2 stores done, now tier-ledger (4m)']);
+    } finally {
+      makeTreeWritable(home);
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('a failed upgrade puts back the stores its worker updated before the previous worker starts (#1494)', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-store-restore-'));
+    const manager = linuxManager('active');
+    const env = { HOME: home, XDG_DATA_HOME: join(home, '.local', 'share') };
+    const dbPath = join(home, 'ledger.sqlite');
+    const migrations = [
+      { version: 1, name: 'create', up: (db: Database) => db.exec('CREATE TABLE items (id INTEGER PRIMARY KEY)') },
+      { version: 2, name: 'widen', up: (db: Database) => db.exec('ALTER TABLE items ADD COLUMN tier TEXT') },
+    ];
+    try {
+      const seed = new Database(dbPath, { create: true });
+      seed.exec('PRAGMA journal_mode = WAL');
+      runSqliteMigrations(seed, 'tier-ledger', [migrations[0]!], { env, log: () => {} });
+      seed.close();
+      const artifact = createUpgradeArtifact(home, '0.4.3');
+      installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: '/opt/olympus-old', bunBin: process.execPath, authToken: 'old-token' });
+      let stopped = false;
+      let atPreviousStart: { version: number; wal: boolean } | undefined;
+      const exec: WorkerServiceExec = (command, args) => {
+        const call = [command, ...args].join(' ');
+        if (call === 'systemctl --user stop olympus-worker.service') stopped = true;
+        if (stopped && !atPreviousStart && (call.endsWith('restart olympus-worker.service') || call.endsWith('enable --now olympus-worker.service'))) {
+          const db = new Database(dbPath, { readonly: true });
+          atPreviousStart = { version: readSqliteSchemaVersion(db, 'tier-ledger'), wal: existsSync(`${dbPath}-wal`) };
+          db.close();
+        }
+        return manager.exec(command, args);
+      };
+      let error: unknown;
+      try {
+        runWorkerLifecycle('upgrade', {
+          platform: 'linux', homeDir: home, artifactPath: artifact.path,
+          bunBin: process.execPath, exec, activationSettleMs: 0, actionSettleTimeoutMs: 0,
+          bootProgress: () => undefined,
+          readinessProbe: () => {
+            // The new worker updates the store, leaving a -wal, and never answers.
+            const db = new Database(dbPath);
+            runSqliteMigrations(db, 'tier-ledger', migrations, { env, log: () => {} });
+            db.close();
+            writeFileSync(`${dbPath}-wal`, 'new version');
+            return false;
+          },
+        });
+      } catch (caught) {
+        error = caught;
+      }
+      expect(String(error)).toContain('did not answer its loopback readiness probe');
+      expect((error as { suggestion?: string }).suggestion).toContain('Stores put back as they were before the update: tier-ledger.');
+      expect(atPreviousStart).toEqual({ version: 1, wal: false });
+      expect(existsSync(`${dbPath}.pre-schema-1.bak`)).toBe(false);
+    } finally {
+      makeTreeWritable(home);
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('a successful upgrade removes the copies its worker took', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-store-backup-cleanup-'));
+    const manager = linuxManager('active');
+    const env = { HOME: home, XDG_DATA_HOME: join(home, '.local', 'share') };
+    const dbPath = join(home, 'ledger.sqlite');
+    const migrations = [
+      { version: 1, name: 'create', up: (db: Database) => db.exec('CREATE TABLE items (id INTEGER PRIMARY KEY)') },
+      { version: 2, name: 'widen', up: (db: Database) => db.exec('ALTER TABLE items ADD COLUMN tier TEXT') },
+    ];
+    try {
+      const seed = new Database(dbPath, { create: true });
+      runSqliteMigrations(seed, 'tier-ledger', [migrations[0]!], { env, log: () => {} });
+      seed.close();
+      const artifact = createUpgradeArtifact(home, '0.4.3');
+      installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: '/opt/olympus-old', bunBin: process.execPath, authToken: 'old-token' });
+      runWorkerLifecycle('upgrade', {
+        platform: 'linux', homeDir: home, artifactPath: artifact.path,
+        bunBin: process.execPath, exec: manager.exec, activationSettleMs: 0,
+        readinessProbe: () => {
+          const db = new Database(dbPath);
+          runSqliteMigrations(db, 'tier-ledger', migrations, { env, log: () => {} });
+          db.close();
+          return true;
+        },
+      });
+      expect(existsSync(`${dbPath}.pre-schema-1.bak`)).toBe(false);
+      const db = new Database(dbPath, { readonly: true });
+      expect(readSqliteSchemaVersion(db, 'tier-ledger')).toBe(2);
+      db.close();
+    } finally {
       makeTreeWritable(home);
       rmSync(home, { recursive: true, force: true });
     }

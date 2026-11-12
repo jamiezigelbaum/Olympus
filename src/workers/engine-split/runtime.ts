@@ -4,6 +4,7 @@
  * client, owner-busy relay and snapshot reader. Kept here so `main()` only
  * chooses by role (core/engine-split.ts).
  */
+import { bootInProgress } from '../../core/boot-progress.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { lstatSync } from 'node:fs';
@@ -92,14 +93,17 @@ export async function waitForEngineBackground(input: {
   fetch?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
+  /** Whether the background is still doing boot work; past the deadline the front keeps waiting while it is (#1494). */
+  inProgress?: () => boolean;
 }): Promise<void> {
   const fetchBackground = input.fetch ?? createUnixSocketFetch(input.socketPath);
   const now = input.now ?? (() => Date.now());
   const sleep = input.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const inProgress = input.inProgress ?? (() => bootInProgress(process.env));
   const deadline = now() + (input.timeoutMs ?? 120_000);
   for (;;) {
     if (await probeEngineBackground(fetchBackground, input.authToken, undefined, 1_000)) return;
-    if (now() >= deadline) throw new Error('The background engine did not become ready; the front is not serving.');
+    if (now() >= deadline && !inProgress()) throw new Error('The background engine did not become ready; the front is not serving.');
     await sleep(input.pollMs ?? 250);
   }
 }
