@@ -1713,13 +1713,13 @@ var V0_4_PUBLIC_CLI_OPERATIONS = [
   "privacy_item_find",
   "privacy_item_set"
 ];
-var V0_4_PUBLIC_REMOTE_MCP_TOOLS = [
+var V0_4_HERMES_MCP_TOOLS = [
   "source_answer",
   "source_answer_result",
   "source_index_status",
-  "source_item_read",
   "ask_anonymously"
 ];
+var V0_4_PUBLIC_REMOTE_MCP_TOOLS = V0_4_HERMES_MCP_TOOLS;
 var V0_4_PUBLIC_SOURCE_IDS = [
   "gmail.email",
   "google_drive.docs",

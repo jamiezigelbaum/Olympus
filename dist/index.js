@@ -1373,7 +1373,7 @@ var init_corpus = __esm(() => {
 function isV04PublicOperation(surface, operationName) {
   return PUBLIC_OPERATION_NAMES[surface].has(operationName);
 }
-var V0_4_PUBLIC_NATIVE_TOOLS, V0_4_PUBLIC_MCP_TOOLS, V0_4_PUBLIC_CLI_OPERATIONS, V0_4_PUBLIC_REMOTE_MCP_TOOLS, V0_4_PUBLIC_SOURCE_IDS, PUBLIC_OPERATION_NAMES;
+var V0_4_PUBLIC_NATIVE_TOOLS, V0_4_PUBLIC_MCP_TOOLS, V0_4_PUBLIC_CLI_OPERATIONS, V0_4_HERMES_MCP_TOOLS, V0_4_PUBLIC_REMOTE_MCP_TOOLS, V0_4_PUBLIC_SOURCE_IDS, PUBLIC_OPERATION_NAMES;
 var init_public_surface = __esm(() => {
   V0_4_PUBLIC_NATIVE_TOOLS = [
     "argus_ping",
@@ -1425,13 +1425,13 @@ var init_public_surface = __esm(() => {
     "privacy_item_find",
     "privacy_item_set"
   ];
-  V0_4_PUBLIC_REMOTE_MCP_TOOLS = [
+  V0_4_HERMES_MCP_TOOLS = [
     "source_answer",
     "source_answer_result",
     "source_index_status",
-    "source_item_read",
     "ask_anonymously"
   ];
+  V0_4_PUBLIC_REMOTE_MCP_TOOLS = V0_4_HERMES_MCP_TOOLS;
   V0_4_PUBLIC_SOURCE_IDS = [
     "gmail.email",
     "google_drive.docs",

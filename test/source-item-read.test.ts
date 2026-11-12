@@ -11,7 +11,6 @@ import { defaultConfig } from '../src/core/config.ts';
 import { EmailClient, DirectHttpEmailTransport } from '../src/core/email.ts';
 import { operations, type OperationContext } from '../src/core/operations.ts';
 import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
-import { handleMcpCallTool } from '../src/mcp/server.ts';
 import { listMcpTools } from '../src/mcp/tools.ts';
 import { readFileSync } from 'node:fs';
 import { createReleaseTierCheck } from '../src/workers/connector-store/tier-visibility.ts';
@@ -207,36 +206,10 @@ test('client permits pages text while rejecting raw and operational fields', asy
   }
 });
 
-test('MCP connection revoked during a chunk release receives only the fixed refusal', async () => {
-  const f = await fixture('Personal orchard.'); let active = true;
-  f.onCheck(() => { queueMicrotask(() => { active = false; }); });
-  const ctx = { config: config(), email: client(f), delphi: {} } as OperationContext;
-  const result = await handleMcpCallTool({ params: { name: 'source_item_read', arguments: { selected_item: selected(f) } } }, () => ctx, 'remote', () => active ? 'active' : 'revoked');
-  expect(active).toBe(false); expect(result.isError).toBe(true);
-  expect(JSON.stringify(result)).toContain('invalid_token'); expect(JSON.stringify(result)).not.toContain('orchard');
-});
-
-
 test('search skill directs long-hit reads and Private selected-item answers', () => {
   const skill = readFileSync(new URL('../skills/ask-sources/SKILL.md', import.meta.url), 'utf8');
   expect(skill).toContain('read a long hit with `source_item_read` before answering from it');
   expect(skill).toContain('Private hit, ask `source_answer` with `selected_items` instead');
-});
-
-
-test('remote pages are withheld if the owner overrides the item during release await', async () => {
-  const f = await fixture('Personal orchard.');
-  const check = createReleaseTierCheck(() => [{ ledger: f.ledger, corpusIds: new Set([f.store.corpusId]) }], () => 'allow');
-  let checked = false;
-  const ctx = { config: config(), email: client(f), delphi: {}, releaseCheck: {
-    inputs(inputs) {
-      const result = check.inputs(inputs);
-      if (!checked) { checked = true; queueMicrotask(() => f.ledger.setOverride(f.item.identity, { kind: 'tier', tier: 'secure' })); }
-      return result;
-    }, secureDerivativeDefault: () => 'allow',
-  } } as OperationContext;
-  const result = await handleMcpCallTool({ params: { name: 'source_item_read', arguments: { selected_item: selected(f) } } }, () => ctx, 'remote');
-  expect(checked).toBe(true); expect(result.isError).toBe(true); expect(JSON.stringify(result)).not.toContain('orchard');
 });
 
 
@@ -347,4 +320,9 @@ test('a missing ledger row refuses before checking chunks', async () => {
 test('the CLI accepts `olympus source item read` before dispatch', async () => {
   const { isV04PublicCliInvocation } = await import('../src/cli.ts');
   expect(isV04PublicCliInvocation(['source', 'item', 'read'])).toBe(true);
+});
+
+test('source_item_read stays off the remote surface until remote callers get a read handle', async () => {
+  const { V0_4_PUBLIC_REMOTE_MCP_TOOLS } = await import('../src/core/public-surface.ts');
+  expect(V0_4_PUBLIC_REMOTE_MCP_TOOLS as readonly string[]).not.toContain('source_item_read');
 });

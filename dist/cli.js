@@ -3027,7 +3027,7 @@ function isV04PublicOperation(surface, operationName) {
 function isV04PublicDashboardRoute(method, pathname) {
   return V0_4_PUBLIC_DASHBOARD_ROUTES.some((route) => route.method === method && (route.prefix === true ? pathname.startsWith(route.path) : pathname === route.path));
 }
-var V0_4_PUBLIC_NATIVE_TOOLS, V0_4_PUBLIC_MCP_TOOLS, V0_4_PUBLIC_CLI_OPERATIONS, V0_4_PUBLIC_REMOTE_MCP_TOOLS, V0_4_PUBLIC_CONNECT_SOURCES, V0_4_PUBLIC_SOURCE_IDS, V0_4_PUBLIC_CLI_COMMANDS, V0_4_PUBLIC_CLI_GLOBALS, V0_4_PACKAGE_INTERNAL_CLI_HELPERS, V0_4_PUBLIC_DASHBOARD_ROUTES, PUBLIC_OPERATION_NAMES;
+var V0_4_PUBLIC_NATIVE_TOOLS, V0_4_PUBLIC_MCP_TOOLS, V0_4_PUBLIC_CLI_OPERATIONS, V0_4_HERMES_MCP_TOOLS, V0_4_PUBLIC_REMOTE_MCP_TOOLS, V0_4_PUBLIC_CONNECT_SOURCES, V0_4_PUBLIC_SOURCE_IDS, V0_4_PUBLIC_CLI_COMMANDS, V0_4_PUBLIC_CLI_GLOBALS, V0_4_PACKAGE_INTERNAL_CLI_HELPERS, V0_4_PUBLIC_DASHBOARD_ROUTES, PUBLIC_OPERATION_NAMES;
 var init_public_surface = __esm(() => {
   V0_4_PUBLIC_NATIVE_TOOLS = [
     "argus_ping",
@@ -3079,13 +3079,13 @@ var init_public_surface = __esm(() => {
     "privacy_item_find",
     "privacy_item_set"
   ];
-  V0_4_PUBLIC_REMOTE_MCP_TOOLS = [
+  V0_4_HERMES_MCP_TOOLS = [
     "source_answer",
     "source_answer_result",
     "source_index_status",
-    "source_item_read",
     "ask_anonymously"
   ];
+  V0_4_PUBLIC_REMOTE_MCP_TOOLS = V0_4_HERMES_MCP_TOOLS;
   V0_4_PUBLIC_CONNECT_SOURCES = [
     "google",
     "gmail",

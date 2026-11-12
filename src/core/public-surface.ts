@@ -92,11 +92,11 @@ export const V0_4_HERMES_MCP_TOOLS = [
 ] as const;
 
 // Remote MCP (`/mcp` on the worker, reached by agents outside this machine
-// through an owner-approved connection) adds Personal item pages to the
-// narrowed Hermes list. Watches need OpenClaw delivery routing.
-export const V0_4_PUBLIC_REMOTE_MCP_TOOLS = [
-  'source_answer', 'source_answer_result', 'source_index_status', 'source_item_read', 'ask_anonymously',
-] as const;
+// through an owner-approved connection) serves the same narrowed list Hermes
+// gets. Source watches stay native-only: their delivery needs OpenClaw routing.
+// source_item_read joins it with the remote read handle (remote callers have
+// no selected_item today).
+export const V0_4_PUBLIC_REMOTE_MCP_TOOLS = V0_4_HERMES_MCP_TOOLS;
 
 export const V0_4_PUBLIC_SKILL_DIRS = [
   'skills/ask-argus',

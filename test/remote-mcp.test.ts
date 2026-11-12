@@ -18,7 +18,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { defaultConfig } from '../src/core/config.ts';
 import { exposedOperations } from '../src/core/operation-exposure.ts';
 import { operations } from '../src/core/operations.ts';
-import { V0_4_PUBLIC_REMOTE_MCP_TOOLS } from '../src/core/public-surface.ts';
+import { V0_4_HERMES_MCP_TOOLS } from '../src/core/public-surface.ts';
 import {
   openRemoteConnectionStore,
   REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS,
@@ -179,10 +179,10 @@ function mcpInitialize(authorization?: string, extraHeaders: Record<string, stri
 }
 
 describe('remote operation surface', () => {
-  test('exposes exactly the remote tool list', () => {
+  test('exposes exactly the Hermes tool list', () => {
     const config = { ...defaultConfig(), sourceIndex: { ...defaultConfig().sourceIndex, enabled: true } };
     expect(exposedOperations(operations, { config, surface: 'remote' }).map((op) => op.name))
-      .toEqual([...V0_4_PUBLIC_REMOTE_MCP_TOOLS]);
+      .toEqual([...V0_4_HERMES_MCP_TOOLS]);
   });
 });
 
@@ -230,7 +230,7 @@ describe('remote MCP over loopback with a connection token', () => {
     const client = await connectClient(token);
     try {
       const tools = await client.listTools();
-      expect(tools.tools.map((tool) => tool.name).sort()).toEqual(['source_answer', 'source_answer_result', 'source_index_status', 'source_item_read']);
+      expect(tools.tools.map((tool) => tool.name).sort()).toEqual(['source_answer', 'source_answer_result', 'source_index_status']);
 
       const status = await client.callTool({ name: 'source_index_status', arguments: {} });
       const statusText = (status.content as Array<{ type: string; text: string }>)[0]!.text;
@@ -753,7 +753,7 @@ describe('remote evidence search', () => {
     const client = await searchClient(token);
     try {
       const tools = await client.listTools();
-      expect(tools.tools.map((tool) => tool.name).sort()).toEqual(['ask_anonymously', 'olympus_search', 'source_answer', 'source_answer_result', 'source_index_status', 'source_item_read']);
+      expect(tools.tools.map((tool) => tool.name).sort()).toEqual(['ask_anonymously', 'olympus_search', 'source_answer', 'source_answer_result', 'source_index_status']);
       const search = tools.tools.find((tool) => tool.name === 'olympus_search')!;
       expect(search.annotations).toEqual({ readOnlyHint: true, destructiveHint: false, openWorldHint: false });
 
@@ -846,7 +846,7 @@ describe('remote evidence search', () => {
     try {
       const tools = await client.listTools();
       expect(tools.tools.map((tool) => tool.name).sort())
-        .toEqual(['ask_anonymously', 'olympus_search', 'source_answer', 'source_answer_result', 'source_index_status', 'source_item_read']);
+        .toEqual(['ask_anonymously', 'olympus_search', 'source_answer', 'source_answer_result', 'source_index_status']);
       const answer = await client.callTool({ name: 'source_answer', arguments: { question: 'what changed?' } });
       expect(answer.isError).toBeFalsy();
       expect(answered).toBe(1);
