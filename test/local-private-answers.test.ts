@@ -17,6 +17,7 @@
 
 import { Database } from 'bun:sqlite';
 import * as poolReads from '../src/workers/connector-store/off-thread-reads.ts';
+import { waitFor } from './helpers/test-clock.ts';
 import type { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { searchPrivateEvidence, probePrivateMatch, type AnalystAnswerLanes } from '../src/workers/source-index/analyst-answer.ts';
 import { ownerLocalMint, ownerUnlockKey } from './helpers/owner-local-mint.ts';
@@ -1962,9 +1963,12 @@ test('a real SQLITE_BUSY on the pool withholds a stored answer without changing 
   const before = c.store.get(c.ref.id)!;
   expect(before.result?.status).toBe('answered');
   const ledgerDb = (c.local.fixture.ledger as unknown as { db: Database }).db;
-  // Snapshot connections have closed after the answer. Rollback journal mode
-  // lets another connection's exclusive write lock block the worker's read.
-  ledgerDb.exec('PRAGMA journal_mode = DELETE');
+  // Release the pool's idle connections to the ledger, which a journal mode
+  // change needs. Rollback journal mode lets another connection's exclusive
+  // write lock block the worker's read.
+  poolReads.releaseOffThreadReads(ledgerPath);
+  await waitFor(() => (ledgerDb.query('PRAGMA journal_mode = DELETE').get() as { journal_mode: string }).journal_mode === 'delete',
+    { description: "the pool's ledger connections closed" });
   const db = new Database(ledgerPath);
   const snapshot = poolReads.withOffThreadSnapshot;
   let locked = false;
