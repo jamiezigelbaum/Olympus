@@ -33,7 +33,7 @@ export async function releaseChunks(
   const now = options.now ?? (() => performance.now());
   const budgetMs = Math.min(ENGINE_JUDGE_NOW_MAX_BUDGET_MS, Math.max(0, options.budgetMs ?? RELEASE_CHUNK_JUDGE_BUDGET_MS));
   const deadline = now() + budgetMs;
-  const cached = await inspectChunks(inputs, scopes, check, { ...options, readOnly: true });
+  const cached = await inspectChunks(inputs, scopes, check, { ...options, readOnly: true, currentScopes: scopesNow });
   const allowed = cached.allowed.map(hashes => [...hashes]);
   const pending = inputs.flatMap((input, index) => {
     const hashes = (input.chunkHashes ?? []).filter(hash => !allowed[index]!.includes(hash) && !isUnprovedPassageMarker(hash));
@@ -57,7 +57,7 @@ export async function releaseChunks(
   }
   // Repeat the read after every await: names, model, content and item tiers may have changed.
   // Scopes too: a ledger replaced or removed meanwhile no longer vouches for what it read.
-  const final = await inspectChunks(inputs, scopesNow(), check, { ...options, readOnly: true });
+  const final = await inspectChunks(inputs, scopesNow(), check, { ...options, readOnly: true, currentScopes: scopesNow });
   const result = chunkResult(inputs, allowed.map((hashes, index) => hashes.filter(hash => final.allowed[index]?.includes(hash))));
   const rest = pending.filter(({ index, item }) => item.chunkHashes.some(hash => !result.allowed[index]?.includes(hash)));
   for (let offset = 0; offset < rest.length; offset += ENGINE_JUDGE_BOOST_MAX_IDS) {
@@ -85,10 +85,11 @@ export function frontJudgeNow(client: Pick<EngineCommandClient, 'post'>): NonNul
 
 async function inspectChunks(
   inputs: readonly ReleaseInput[], scopes: readonly TierVisibilityScope[], check: ReleaseCheck,
-  options: ChunkReleaseOptions & { readOnly?: boolean } = {},
+  options: ChunkReleaseOptions & { readOnly?: boolean; currentScopes?: () => readonly TierVisibilityScope[] } = {},
 ): Promise<ChunkReleaseResult> {
   const now = options.now ?? (() => performance.now());
   const deadline = now() + Math.max(0, options.budgetMs ?? RELEASE_CHUNK_JUDGE_BUDGET_MS);
+  const scopesNow = options.currentScopes ?? (() => scopes);
   const allowed: string[][] = inputs.map(() => []);
   const blockedItems = new Set<string>();
   const initial = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
@@ -120,7 +121,9 @@ async function inspectChunks(
       const current = store?.releaseItemChunks?.(input);
       const currentClassification = registeredInstalledTierClassification()?.forLedger(scope.ledger.dbPath);
       const currentReader = currentClassification?.releaseWindows ?? currentClassification?.releaseJudge;
-      return !!current && JSON.stringify([current.title, current.path, current.sender]) === names
+      // A ledger replaced or removed while the release waited no longer vouches for what it read.
+      return scopesNow().find(now => now.corpusIds.has(input.corpusId))?.ledger === scope.ledger
+        && !!current && JSON.stringify([current.title, current.path, current.sender]) === names
         // An owner choice or a new decision made while the release waited withholds what was read before it.
         && JSON.stringify(scope.ledger.getOverride(input)) === overrideKey
         && scope.ledger.getCurrent(input)?.generation === record.generation

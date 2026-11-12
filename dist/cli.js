@@ -212674,7 +212674,7 @@ async function releaseChunks(inputs, currentScopes, check, options = {}) {
   const now = options.now ?? (() => performance.now());
   const budgetMs = Math.min(ENGINE_JUDGE_NOW_MAX_BUDGET_MS, Math.max(0, options.budgetMs ?? RELEASE_CHUNK_JUDGE_BUDGET_MS));
   const deadline = now() + budgetMs;
-  const cached3 = await inspectChunks(inputs, scopes, check, { ...options, readOnly: true });
+  const cached3 = await inspectChunks(inputs, scopes, check, { ...options, readOnly: true, currentScopes: scopesNow });
   const allowed = cached3.allowed.map((hashes) => [...hashes]);
   const pending = inputs.flatMap((input, index) => {
     const hashes = (input.chunkHashes ?? []).filter((hash2) => !allowed[index].includes(hash2) && !isUnprovedPassageMarker(hash2));
@@ -212701,7 +212701,7 @@ async function releaseChunks(inputs, currentScopes, check, options = {}) {
       });
     } catch {}
   }
-  const final = await inspectChunks(inputs, scopesNow(), check, { ...options, readOnly: true });
+  const final = await inspectChunks(inputs, scopesNow(), check, { ...options, readOnly: true, currentScopes: scopesNow });
   const result = chunkResult(inputs, allowed.map((hashes, index) => hashes.filter((hash2) => final.allowed[index]?.includes(hash2))));
   const rest = pending.filter(({ index, item }) => item.chunkHashes.some((hash2) => !result.allowed[index]?.includes(hash2)));
   for (let offset = 0;offset < rest.length; offset += ENGINE_JUDGE_BOOST_MAX_IDS) {
@@ -212724,6 +212724,7 @@ function frontJudgeNow(client) {
 async function inspectChunks(inputs, scopes, check, options = {}) {
   const now = options.now ?? (() => performance.now());
   const deadline = now() + Math.max(0, options.budgetMs ?? RELEASE_CHUNK_JUDGE_BUDGET_MS);
+  const scopesNow = options.currentScopes ?? (() => scopes);
   const allowed = inputs.map(() => []);
   const blockedItems = new Set;
   const initial = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
@@ -212756,7 +212757,7 @@ async function inspectChunks(inputs, scopes, check, options = {}) {
       const current3 = store?.releaseItemChunks?.(input);
       const currentClassification = registeredInstalledTierClassification()?.forLedger(scope.ledger.dbPath);
       const currentReader = currentClassification?.releaseWindows ?? currentClassification?.releaseJudge;
-      return !!current3 && JSON.stringify([current3.title, current3.path, current3.sender]) === names && JSON.stringify(scope.ledger.getOverride(input)) === overrideKey && scope.ledger.getCurrent(input)?.generation === record8.generation && (!set2 || parentNamesContext(set2, input) === parentContext) && currentReader?.modelId === reader?.modelId && currentReader?.promptVersion === reader?.promptVersion && allowed[index].every((hash2) => current3.chunks.some((chunk) => chunk.contentHash === hash2));
+      return scopesNow().find((now2) => now2.corpusIds.has(input.corpusId))?.ledger === scope.ledger && !!current3 && JSON.stringify([current3.title, current3.path, current3.sender]) === names && JSON.stringify(scope.ledger.getOverride(input)) === overrideKey && scope.ledger.getCurrent(input)?.generation === record8.generation && (!set2 || parentNamesContext(set2, input) === parentContext) && currentReader?.modelId === reader?.modelId && currentReader?.promptVersion === reader?.promptVersion && allowed[index].every((hash2) => current3.chunks.some((chunk) => chunk.contentHash === hash2));
     });
     const fullText = snapshot.chunks.map((chunk) => chunk.text).join("");
     const shortRead = normalize5(fullText).length <= SNIFFER_EXCERPT_MAX_CHARS && record8.reasons.includes(contentDigestReason(fullText)) && record8.reasons.some((reason) => reason.startsWith(sniffer && sniffer.id !== "no_judge" ? `content:sniffer:${sniffer.id}:` : "content:sniffer:") && !reason.endsWith(":undecided"));
