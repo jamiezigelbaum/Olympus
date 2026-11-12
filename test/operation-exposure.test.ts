@@ -19,6 +19,7 @@ describe('operation exposure policy', () => {
       'argus_complete',
       'source_answer',
       'source_index_status',
+      'source_item_read',
       'source_index_search',
       'source_watch_create',
       'source_watches',

@@ -1,4 +1,5 @@
 export type OperationErrorCode =
+  | 'not_personal'
   | 'invalid_params'
   | 'config_error'
   | 'argus_unreachable'

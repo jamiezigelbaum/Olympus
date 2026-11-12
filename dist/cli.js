@@ -3035,6 +3035,7 @@ var init_public_surface = __esm(() => {
     "argus_complete",
     "source_answer",
     "source_index_status",
+    "source_item_read",
     "source_index_search",
     "source_watch_create",
     "source_watches",
@@ -3054,6 +3055,7 @@ var init_public_surface = __esm(() => {
     "source_answer",
     "source_answer_result",
     "source_index_status",
+    "source_item_read",
     "source_index_search",
     "olympus_doctor",
     "olympus_setup_status",
@@ -3068,6 +3070,7 @@ var init_public_surface = __esm(() => {
     "argus_complete",
     "source_answer",
     "source_index_status",
+    "source_item_read",
     "source_index_search",
     "olympus_doctor",
     "olympus_setup_status",
@@ -3161,6 +3164,7 @@ var init_public_surface = __esm(() => {
     "source answer",
     "source index status",
     "source index search",
+    "source item read",
     "source extract-pdfs",
     "data export",
     "data verify",
@@ -33745,6 +33749,1626 @@ var init_media_cache = __esm(() => {
   MEDIA_CACHE_DIR_NAMES = new Set(["media-cache", "olympus-media"]);
 });
 
+// src/core/release-manifest.ts
+import { createHash as createHash20 } from "node:crypto";
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+function chunkCoverageNote(result) {
+  return result.withheldPassages > 0 ? `${result.withheldPassages} passages from ${result.withheldDocuments} documents are still being checked for privacy and weren't shared. Ask again in a minute.` : undefined;
+}
+async function checkReleaseChunks(check, inputs, options) {
+  try {
+    const result = await check?.chunks?.(inputs, options);
+    if (result && result.allowed.length === inputs.length)
+      return result;
+  } catch {}
+  return {
+    allowed: inputs.map(() => []),
+    withheldPassages: inputs.reduce((n, input) => n + (input.layer === "names" ? 0 : Math.max(1, input.chunkHashes?.length ?? 0)), 0),
+    withheldDocuments: inputs.filter((input) => input.layer !== "names").length
+  };
+}
+function passagesWithheldAtReleasableTiers(inputs, verdicts, report) {
+  return inputs.reduce((total, input, index) => {
+    const verdict = verdicts[index];
+    if (input.layer === "names" || !verdict)
+      return total;
+    const releasable = verdict.tier === "public_or_personal" || verdict.tier === "legacy" && !input.privateAtAnswer;
+    if (!releasable)
+      return total;
+    const hashes = new Set(input.chunkHashes ?? []);
+    const allowed = verdict.tier === "legacy" ? 0 : (report.allowed[index] ?? []).filter((hash) => hashes.has(hash)).length;
+    return total + Math.max(0, Math.max(1, hashes.size) - allowed);
+  }, 0);
+}
+async function recheckSearchEvidence(raw, manifests, check) {
+  const evidence = Array.isArray(raw.evidence) ? raw.evidence : [];
+  if (!evidence.length)
+    return { raw, withheldAfter: false };
+  const inputs = manifests.flatMap((manifest) => manifest.inputs);
+  let report;
+  let verdicts = [];
+  try {
+    if (check && manifests.length) {
+      report = await checkReleaseChunks(check, inputs);
+      verdicts = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
+    }
+  } catch {}
+  const cleared = (index) => {
+    const input = inputs[index];
+    const verdict = verdicts[index];
+    return !!verdict && !verdict.gone && (input.layer === "names" ? ["public_or_personal", "legacy"].includes(verdict.tier) : verdict.tier === "public_or_personal" && !!input.chunkHashes?.length && input.chunkHashes.every((hash) => report?.allowed[index]?.includes(hash)));
+  };
+  const held = (index) => {
+    const input = inputs[index];
+    if (input.layer === "names")
+      return 0;
+    const hashes = new Set(input.chunkHashes ?? []);
+    return Math.max(1, hashes.size) - [...hashes].filter((hash) => report?.allowed[index]?.includes(hash)).length;
+  };
+  const parentsCleared = inputs.every((input, index) => input.dependency !== "parent_label" || cleared(index));
+  let droppedOtherwise = 0;
+  const kept = evidence.filter((value) => {
+    if (!value || typeof value !== "object") {
+      droppedOtherwise += 1;
+      return false;
+    }
+    const hit = value;
+    const matches = inputs.flatMap((input, index) => input.dependency !== "parent_label" && input.corpusId === hit.corpus_id && input.provider === hit.provider && input.accountScope === hit.account_scope && input.providerItemId === hit.provider_item_id && input.providerConversationId === hit.provider_conversation_id ? [index] : []);
+    const textBound = hit.excerpt === undefined || hit.excerpt === "" || typeof hit.excerpt === "string" && matches.some((index) => inputs[index].layer !== "names" && inputs[index].releasedTextDigest === releasedTextDigest(hit.excerpt));
+    if (parentsCleared && matches.length > 0 && matches.every(cleared) && textBound)
+      return true;
+    if (!report || !matches.some((index) => held(index) > 0))
+      droppedOtherwise += 1;
+    return false;
+  });
+  const dropped = evidence.length - kept.length;
+  if (!dropped)
+    return { raw, withheldAfter: false };
+  const coverage = raw.coverage && typeof raw.coverage === "object" ? raw.coverage : {};
+  const note = report && chunkCoverageNote(report);
+  const priorNotes = Array.isArray(coverage.cut_short) ? coverage.cut_short : [];
+  const withheld = typeof raw.withheld === "number" && Number.isFinite(raw.withheld) ? Math.max(0, raw.withheld) : 0;
+  return { raw: {
+    ...raw,
+    evidence: kept,
+    withheld: withheld + (report?.withheldPassages ?? 0) + droppedOtherwise,
+    ...note ? { coverage: { ...coverage, cut_short: [...new Set([...priorNotes, note])] } } : {}
+  }, withheldAfter: true };
+}
+function bindReleaseChunks(provenance, chunks, hashes) {
+  chunkProvenance.set(provenance, chunks.map((text2, index) => ({ text: text2, hashes: hashes[index] ?? [] })));
+}
+function copyReleaseChunks(from, into) {
+  const chunks = chunkProvenance.get(from);
+  if (chunks)
+    chunkProvenance.set(into, chunks);
+}
+function releasePassageHashes(provenance, text2) {
+  return [...new Set((chunkProvenance.get(provenance) ?? []).filter((entry) => entry.text.includes(text2)).flatMap((entry) => entry.hashes))];
+}
+function isUnprovedPassageMarker(hash) {
+  return hash.startsWith(UNPROVED_PASSAGE);
+}
+function releaseCandidateHashes(candidate, options = {}) {
+  const mapped = candidate.chunks.map((text2) => releasePassageHashes(candidate.provenance, text2));
+  const unmapped = options.holdUnmapped && mapped.some((hashes) => hashes.length > 0) ? mapped.filter((hashes) => hashes.length === 0).length + (candidate.tables?.length ?? 0) + (candidate.facts?.length ?? 0) : 0;
+  return [...new Set(mapped.flat()), ...Array.from({ length: unmapped }, (_, index) => `${UNPROVED_PASSAGE}${index}`)];
+}
+function releasedTextDigest(text2) {
+  return createHash20("sha256").update(text2).digest("hex");
+}
+function createReleaseManifestSink() {
+  return { manifests: [] };
+}
+function runWithReleaseManifestSink(sink, fn) {
+  return storage2.run(sink, fn);
+}
+function currentReleaseManifestSink() {
+  return storage2.getStore();
+}
+function recordReleaseManifest(manifest) {
+  storage2.getStore()?.manifests.push({
+    inputs: manifest.inputs.map((input) => ({ ...input, ...input.chunkHashes ? { chunkHashes: [...input.chunkHashes] } : {} })),
+    constraints: { ...manifest.constraints }
+  });
+}
+function adoptReleaseManifests(into, from) {
+  into.manifests.push(...from.manifests);
+}
+function privateInputReleaseAllowed(input, verdict, constraints, postureNow) {
+  const privateNow = verdict.tier === "private" || verdict.tier === "legacy" && input.privateAtAnswer;
+  const authorized = constraints.includeSecureLocalContent || postureNow === "allow";
+  if (input.layer === "names")
+    return !privateNow || input.privateAtAnswer && authorized;
+  return !privateNow || authorized;
+}
+async function answerReleaseWithheldReasonOffThread(manifests, check, ceiling = "private", options = {}) {
+  try {
+    const inputs = manifests.flatMap((manifest) => manifest.inputs);
+    const report = options.chunks ? await checkReleaseChunks(check, inputs) : undefined;
+    const verdicts = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
+    const reason = answerReleaseWithheldReason(manifests, { inputs: () => verdicts, secureDerivativeDefault: () => check.secureDerivativeDefault() }, ceiling);
+    if (reason)
+      return reason;
+    if (report && passagesWithheldAtReleasableTiers(inputs, verdicts, report) > 0)
+      return ANSWER_RELEASE_UNVERIFIED;
+    return;
+  } catch {
+    return ANSWER_RELEASE_UNVERIFIED;
+  }
+}
+function answerReleaseWithheldReason(manifests, check, ceiling = "private") {
+  if (manifests.length === 0)
+    return ANSWER_RELEASE_UNVERIFIED;
+  const entries = manifests.flatMap((manifest) => manifest.inputs.map((input) => ({ input, constraints: manifest.constraints })));
+  const inputs = entries.map(({ input }) => input);
+  try {
+    const verdicts = check.inputs(inputs);
+    if (verdicts.length !== inputs.length)
+      return ANSWER_RELEASE_UNVERIFIED;
+    const postureNow = check.secureDerivativeDefault();
+    for (const [index, verdict] of verdicts.entries()) {
+      if (verdict.tier === "unknown" || verdict.gone)
+        return ANSWER_RELEASE_UNVERIFIED;
+      if (verdict.tier === "secret")
+        return ANSWER_RELEASE_UNVERIFIED;
+      const { input, constraints } = entries[index];
+      if (verdict.tier === "private" && (ceiling === "personal" || !input.privateAtAnswer))
+        return ANSWER_BECAME_PRIVATE;
+      if (!privateInputReleaseAllowed(input, verdict, constraints, postureNow)) {
+        return "Olympus withheld this answer because current settings require approval for Private content.";
+      }
+    }
+  } catch {
+    return ANSWER_RELEASE_UNVERIFIED;
+  }
+  return;
+}
+function isWithheldSourceAnswer(result) {
+  return withheldAnswers.has(result);
+}
+function withheldSourceAnswer(reason) {
+  const result = { answer: reason, evidence: [] };
+  withheldAnswers.add(result);
+  return result;
+}
+var RELEASE_CHUNK_JUDGE_BUDGET_MS = 8000, chunkProvenance, UNPROVED_PASSAGE = "unproved:", storage2, ANSWER_BECAME_PRIVATE = "Olympus withheld this answer because an item became Private.", ANSWER_RELEASE_UNVERIFIED = "Olympus withheld this answer because its current privacy classification could not be verified.", withheldAnswers;
+var init_release_manifest = __esm(() => {
+  chunkProvenance = new WeakMap;
+  storage2 = new AsyncLocalStorage4;
+  withheldAnswers = new WeakSet;
+});
+
+// src/core/source-item-read.ts
+function parseSourceItemReadResult(value) {
+  const fail = () => {
+    throw new OperationError("source_index_error", "Invalid source item read result.");
+  };
+  if (!value || typeof value !== "object")
+    return fail();
+  const r = value;
+  const integer = (n, min) => typeof n === "number" && Number.isSafeInteger(n) && n >= min ? n : fail();
+  if (!Array.isArray(r.pages) || r.pages.length > 3 || !Array.isArray(r.couldNotRead))
+    return fail();
+  const pages = r.pages.map((p) => {
+    if (!p || typeof p !== "object")
+      return fail();
+    const entry = p;
+    if (typeof entry.text !== "string" || entry.text.length > 12000)
+      return fail();
+    return { page: integer(entry.page, 1), text: entry.text };
+  });
+  const couldNotRead = r.couldNotRead.map((code) => typeof code === "string" && SOURCE_ITEM_READ_REFUSALS.includes(code) ? code : fail());
+  if (couldNotRead.some((code) => code !== "window_judging") && pages.length > 0)
+    return fail();
+  if (r.coverageNote !== undefined && typeof r.coverageNote !== "string")
+    return fail();
+  return {
+    pages,
+    totalPages: integer(r.totalPages, 0),
+    totalChars: integer(r.totalChars, 0),
+    couldNotRead,
+    ...r.coverageNote === undefined ? {} : { coverageNote: r.coverageNote },
+    ...r.nextPage === undefined ? {} : { nextPage: integer(r.nextPage, 1) },
+    ...r.etaSeconds === undefined ? {} : { etaSeconds: integer(r.etaSeconds, 0) }
+  };
+}
+var SOURCE_ITEM_READ_REFUSALS;
+var init_source_item_read = __esm(() => {
+  init_operation_error();
+  SOURCE_ITEM_READ_REFUSALS = [
+    "held_until_judged",
+    "content_private",
+    "names_only",
+    "not_in_scope",
+    "extraction_pending",
+    "window_judging",
+    "not_personal",
+    "reading_on_demand",
+    "on_demand_capped"
+  ];
+});
+
+// src/core/app-release-capture.ts
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+function privateQuestionKey(ref) {
+  if (!ref || typeof ref !== "object")
+    return;
+  const { id, generation } = ref;
+  if (typeof id !== "string" || !id || id.length > 128)
+    return;
+  if (typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 1)
+    return;
+  return `${id}#${generation}`;
+}
+function createReleaseCapture() {
+  return { heldBack: 0 };
+}
+function runWithReleaseCapture(capture, fn) {
+  return storage3.run(capture, fn);
+}
+function noteReleasedItems(items, heldBack = 0, withheld = false) {
+  const capture = storage3.getStore();
+  if (!capture)
+    return;
+  capture.items = items.map((item) => ({ ...item }));
+  capture.heldBack = Math.max(0, Math.floor(Number.isFinite(heldBack) ? heldBack : 0));
+  capture.withheld = withheld;
+}
+function boundedString(value, max) {
+  if (typeof value !== "string")
+    return;
+  const trimmed = value.trim();
+  return trimmed ? trimmed.slice(0, max) : undefined;
+}
+function releasedTierOf(trustDomain) {
+  if (trustDomain === "public_safe")
+    return "public";
+  if (trustDomain === "internal")
+    return "personal";
+  return "private";
+}
+function releasedItemFromEvidence(evidence, source, title) {
+  const shownTitle = boundedString(title, TITLE_MAX);
+  const corpusId = boundedString(evidence.corpus_id, ID_MAX);
+  const provider = boundedString(evidence.provider, ID_MAX);
+  const accountScope = boundedString(evidence.account_scope, ID_MAX);
+  const providerItemId = boundedString(evidence.provider_item_id, ID_MAX);
+  const providerConversationId = boundedString(evidence.provider_conversation_id, ID_MAX);
+  const locator = boundedString(evidence.uri, ID_MAX);
+  return {
+    source: boundedString(source, 80) ?? "Other source",
+    ...shownTitle ? { title: shownTitle } : {},
+    tier: releasedTierOf(evidence.trust_domain),
+    ...corpusId ? { corpusId } : {},
+    ...provider ? { provider } : {},
+    ...accountScope ? { accountScope } : {},
+    ...providerItemId ? { providerItemId } : {},
+    ...providerConversationId ? { providerConversationId } : {},
+    ...locator ? { locator } : {}
+  };
+}
+function appConnectionOf(caller) {
+  if (!caller || caller.surface === "cli")
+    return;
+  const display = boundedString(caller.displayName, 80);
+  const id = boundedString(caller.connectionId, 128);
+  if (caller.surface === "remote") {
+    const known = caller.provider ? PROVIDER_APP_NAMES[caller.provider] : undefined;
+    return { ...id ? { id } : {}, name: known ?? display ?? "An AI app", kind: "app" };
+  }
+  return { ...id ? { id } : {}, name: display ?? "An agent", kind: "agent" };
+}
+function setPrivateAnswerCompletionHook(next) {
+  completionHook = next;
+}
+function notePrivateAnswerCompleted(ref) {
+  try {
+    const key2 = privateQuestionKey(ref);
+    if (!key2)
+      return;
+    completedPrivateAnswers.add(key2);
+    while (completedPrivateAnswers.size > COMPLETED_MAX)
+      completedPrivateAnswers.delete(completedPrivateAnswers.values().next().value);
+    completionHook?.(key2);
+  } catch {}
+}
+function notePrivateQuestion(ref) {
+  const capture = storage3.getStore();
+  if (capture && ref && privateQuestionKey(ref))
+    capture.privateQuestion = { id: ref.id, generation: ref.generation };
+}
+function setAppReleaseRecorder(next) {
+  recorder = next;
+}
+function recordAppRequest(input) {
+  try {
+    const write2 = recorder ?? input.fallback;
+    if (!write2)
+      return;
+    const connection = appConnectionOf(input.caller);
+    const question = boundedString(input.question, 2000);
+    if (!connection || !question || input.capture.items === undefined)
+      return;
+    const withheld = input.withheldAfter === true || input.capture.withheld === true;
+    const privateQuestionKeyOf = privateQuestionKey(input.privateQuestion ?? input.capture.privateQuestion);
+    write2({
+      at: (input.now ?? Date.now)(),
+      connection,
+      question,
+      items: withheld ? [] : input.capture.items,
+      heldBack: input.capture.heldBack + (withheld ? input.capture.items.length : 0),
+      answeredPrivately: privateQuestionKeyOf !== undefined && completedPrivateAnswers.has(privateQuestionKeyOf),
+      withheld,
+      ...privateQuestionKeyOf ? { privateQuestionKey: privateQuestionKeyOf } : {}
+    });
+  } catch {}
+}
+function rememberJobQuestion(jobId, question, now = Date.now()) {
+  if (typeof jobId !== "string" || typeof question !== "string" || !jobId || !question.trim())
+    return;
+  for (const [key2, entry] of jobQuestions)
+    if (entry.expires <= now)
+      jobQuestions.delete(key2);
+  jobQuestions.set(jobId, { question: question.trim().slice(0, 2000), expires: now + JOB_QUESTION_TTL_MS });
+  while (jobQuestions.size > JOB_QUESTIONS_MAX)
+    jobQuestions.delete(jobQuestions.keys().next().value);
+}
+function jobQuestion(jobId, now = Date.now()) {
+  if (typeof jobId !== "string")
+    return;
+  const entry = jobQuestions.get(jobId);
+  if (!entry || entry.expires <= now)
+    return;
+  return entry.question;
+}
+function forgetJobQuestions() {
+  jobQuestions.clear();
+  completedPrivateAnswers.clear();
+}
+function sourceAnswerQuestion(name, args, status, jobId) {
+  if (name === "source_answer") {
+    const question = typeof args.question === "string" ? args.question : undefined;
+    if (status === "working")
+      rememberJobQuestion(jobId, question);
+    return question;
+  }
+  if (name === "source_answer_result")
+    return jobQuestion(args.job_id);
+  return;
+}
+function recordRemoteOperation(input) {
+  const { operation, args, output } = input;
+  if (operation !== "source_answer" && operation !== "source_answer_result")
+    return;
+  const question = sourceAnswerQuestion(operation, args, output.status, output.job_id);
+  if (output.kind !== "source_answer" || output.status !== "answered" && output.status !== "withheld")
+    return;
+  recordAppRequest({
+    caller: input.caller,
+    question,
+    capture: input.privateQuestion ? { ...input.capture, heldBack: Math.max(1, input.capture.heldBack) } : input.capture,
+    privateQuestion: input.privateQuestion
+  });
+}
+var storage3, TITLE_MAX = 300, ID_MAX = 512, PROVIDER_APP_NAMES, recorder, completionHook, COMPLETED_MAX = 512, completedPrivateAnswers, JOB_QUESTIONS_MAX = 256, JOB_QUESTION_TTL_MS, jobQuestions;
+var init_app_release_capture = __esm(() => {
+  storage3 = new AsyncLocalStorage5;
+  PROVIDER_APP_NAMES = {
+    openai: "ChatGPT",
+    anthropic: "Claude",
+    xai: "Grok",
+    meta: "Meta AI"
+  };
+  completedPrivateAnswers = new Set;
+  JOB_QUESTION_TTL_MS = 30 * 60000;
+  jobQuestions = new Map;
+});
+
+// src/core/opsec.ts
+function createStructuredEvidenceFact(input) {
+  const factId = input.factId.trim();
+  const claim = input.claim.trim();
+  if (!factId)
+    throw new Error("Structured evidence facts require a factId.");
+  if (!claim)
+    throw new Error("Structured evidence facts require a claim.");
+  if (input.sourceProvenance.length === 0) {
+    throw new Error("Structured evidence facts require source provenance.");
+  }
+  return {
+    factId,
+    claim,
+    sourceProvenance: [...input.sourceProvenance],
+    sensitivity: input.sensitivity,
+    confidence: input.confidence,
+    extractionKind: input.extractionKind,
+    sourceInstructionFlags: detectSourceInstructionFlags(claim),
+    releaseSurface: input.releaseSurface ?? defaultReleaseSurfaceForSensitivity(input.sensitivity)
+  };
+}
+function evaluateReleaseGate(input) {
+  const reasons = new Set;
+  const redactions = [];
+  if (input.action !== "read" && input.action !== "answer") {
+    return {
+      decision: "needs_approval",
+      reasons: ["high_impact_action_requires_approval"],
+      requiredApproval: input.action === "send" || input.action === "write" || input.action === "delete" ? "write_action" : "user_review"
+    };
+  }
+  const secretLabels = secretLabelsInText([
+    input.draftAnswer,
+    ...input.facts.map((fact) => fact.claim)
+  ].join(`
+`));
+  for (const label of secretLabels) {
+    redactions.push({ label, reason: "s5_like_secret_detected" });
+  }
+  if (secretLabels.length > 0 || input.facts.some((fact) => fact.sensitivity.trustTier === "S5")) {
+    return {
+      decision: "deny",
+      reasons: ["s5_secret_denied_from_ordinary_output"],
+      ...redactions.length > 0 ? { redactions } : {},
+      requiredApproval: "s5_secret_use"
+    };
+  }
+  const allInstructionFlags = new Set(input.facts.flatMap((fact) => [...fact.sourceInstructionFlags]));
+  if (allInstructionFlags.size > 0) {
+    reasons.add("hostile_source_instruction_treated_as_data");
+  }
+  const crossingToCallingAgent = isCallingAgentDestination(input.destination);
+  const secureFacts = input.facts.filter((fact) => isSecureSensitivity(fact.sensitivity));
+  if (crossingToCallingAgent && secureFacts.some((fact) => fact.releaseSurface === "local_only")) {
+    return {
+      decision: "needs_approval",
+      reasons: [...reasons, "secure_local_fact_not_marked_for_castor_release"],
+      requiredApproval: "s4_release"
+    };
+  }
+  if (crossingToCallingAgent && secureFacts.length > 0) {
+    reasons.add("bounded_secure_derivative_allowed");
+  }
+  return {
+    decision: "allow",
+    reasons: [...reasons, "release_gate_passed"],
+    allowedText: input.draftAnswer
+  };
+}
+function isCallingAgentDestination(destination) {
+  return destination === "calling_agent" || destination === "castor";
+}
+function buildOpsecReleaseAudit(facts, decision) {
+  return {
+    structured_evidence: facts.map((fact) => ({
+      fact_id: fact.factId,
+      trust_tier: fact.sensitivity.trustTier,
+      trust_domain: fact.sensitivity.trustDomain,
+      confidence: fact.confidence,
+      extraction_kind: fact.extractionKind,
+      source_instruction_flags: [...fact.sourceInstructionFlags],
+      release_surface: fact.releaseSurface,
+      provenance_count: fact.sourceProvenance.length
+    })),
+    release_decision: {
+      decision: decision.decision,
+      reasons: [...decision.reasons],
+      ...decision.redactions ? { redactions: [...decision.redactions] } : {},
+      ...decision.requiredApproval ? { required_approval: decision.requiredApproval } : {}
+    },
+    raw_source_exposed: false
+  };
+}
+function answerForReleaseDecision(decision) {
+  if ((decision.decision === "allow" || decision.decision === "redact") && decision.allowedText) {
+    return decision.allowedText;
+  }
+  if (decision.decision === "needs_approval") {
+    return "I found matching source material, but this needs review before I can summarize it in this calling-assistant-safe path.";
+  }
+  return "I found matching source material, but it cannot be summarized in this calling-assistant-safe path.";
+}
+function detectSourceInstructionFlags(text2) {
+  const flags = new Set;
+  if (/\b(ignore|disregard)\s+(all\s+)?(previous|prior|above)\s+instructions?\b/i.test(text2)) {
+    flags.add("ignore_previous_instructions");
+  }
+  if (/\b(system|developer|policy)\s+(prompt|message|instructions?)\b/i.test(text2) || /\byou are now\b/i.test(text2)) {
+    flags.add("role_or_policy_override");
+  }
+  if (/\b(send|exfiltrate|upload|forward|post)\b.{0,80}\b(secret|token|password|key|credential|email|gmail|document|file)s?\b/i.test(text2)) {
+    flags.add("credential_exfiltration_request");
+  }
+  if (/\b(send|forward|email|post|upload|webhook|dm|slack)\b.{0,100}\b(attacker|external|http|https|@)\b/i.test(text2)) {
+    flags.add("external_communication_request");
+  }
+  if (/\b(call|use|invoke)\b.{0,60}\btool\b/i.test(text2) || /\bdelete\b.{0,80}\b(log|file|email|message|record)s?\b/i.test(text2)) {
+    flags.add("tool_escalation_request");
+  }
+  if (/\b(as an ai|assistant|model)\b/i.test(text2)) {
+    flags.add("general_source_instruction");
+  }
+  return [...flags].sort();
+}
+function defaultReleaseSurfaceForSensitivity(sensitivity) {
+  if (sensitivity.trustTier === "S5")
+    return "local_only";
+  return "castor_answer";
+}
+function secretLabelsInText(text2) {
+  const labels = new Set;
+  const variants = secretScreeningVariants(text2);
+  for (const { label, pattern } of SECRET_PATTERNS) {
+    const shared = {
+      label: ["private_key", "openai_key", "github_token", "slack_token"].includes(label) ? label : "credential_assignment",
+      findingType: "credential_assignment",
+      confidence: 1,
+      pattern: new RegExp(pattern.source, `${pattern.flags}g`)
+    };
+    if (hasSecretPatternHit(text2, shared, variants))
+      labels.add(label);
+  }
+  for (const shared of SHARED_SECRET_PATTERNS) {
+    if (hasSecretPatternHit(text2, shared, variants))
+      labels.add(shared.label);
+  }
+  return [...labels];
+}
+var SECRET_PATTERNS;
+var init_opsec = __esm(() => {
+  init_secret_patterns();
+  init_types();
+  SECRET_PATTERNS = [
+    { label: "private_key", pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/i },
+    { label: "oauth_refresh_token", pattern: /\brefresh[_ -]?token\s*[:=]\s*["']?[A-Za-z0-9._~+/=-]{8,}/i },
+    { label: "client_secret", pattern: /\bclient[_ -]?secret\s*[:=]\s*["']?[A-Za-z0-9._~+/=-]{8,}/i },
+    { label: "api_key", pattern: /\bapi[_ -]?key\s*[:=]\s*["']?[A-Za-z0-9._~+/=-]{12,}/i },
+    { label: "password", pattern: /\bpassword\s*[:=]\s*["']?\S{8,}/i },
+    { label: "openai_key", pattern: /\bsk-[A-Za-z0-9_-]{16,}\b/ },
+    { label: "github_token", pattern: /\b(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]{16,}\b/ },
+    { label: "slack_token", pattern: /\bxox[abp]-[A-Za-z0-9-]{16,}\b/ }
+  ];
+});
+
+// src/core/parent-label.ts
+function candidateNamesCeiling(candidate) {
+  if (isSecureSensitivity(candidate))
+    return "private";
+  return candidate.trustDomain === "public_safe" ? "public" : "personal";
+}
+function parentNamesMayTravel(names, ceiling) {
+  return TIER_RANK2[names] <= TIER_RANK2[ceiling];
+}
+function flattened(value, max) {
+  if (typeof value !== "string")
+    return;
+  let text2 = "";
+  let pendingSpace = false;
+  for (const char of value) {
+    const code = char.codePointAt(0);
+    const blank = code <= 32 || code >= 127 && code <= 160 || code === 8232 || code === 8233;
+    if (blank) {
+      pendingSpace = text2.length > 0;
+      continue;
+    }
+    if (pendingSpace)
+      text2 += " ";
+    pendingSpace = false;
+    text2 += char;
+  }
+  if (!text2)
+    return;
+  return text2.length > max ? `${text2.slice(0, max - 1).trimEnd()}…` : text2;
+}
+function labelDate(value) {
+  if (typeof value !== "string")
+    return;
+  const at = Date.parse(value);
+  if (!Number.isFinite(at))
+    return;
+  const date = new Date(at);
+  return `${date.getUTCDate()} ${MONTHS2[date.getUTCMonth()]} ${date.getUTCFullYear()}`;
+}
+function parentLabelText(names) {
+  const subject = flattened(names.subject, SUBJECT_MAX_CHARS);
+  const sender = flattened(names.sender, SENDER_MAX_CHARS);
+  const date = labelDate(names.authoredAt);
+  const who = [subject ? `'${subject}'` : undefined, sender ? `from ${sender}` : undefined].filter(Boolean).join(" ");
+  const label = date ? who ? `${who}, ${date}` : date : who;
+  if (!label)
+    return;
+  return label.length > PARENT_LABEL_MAX_CHARS ? `${label.slice(0, PARENT_LABEL_MAX_CHARS - 1).trimEnd()}…` : label;
+}
+function citationTitleWithParent(title, parentLabel) {
+  const label = flattened(parentLabel, PARENT_LABEL_MAX_CHARS);
+  const own3 = title?.trim();
+  if (!label)
+    return own3 || undefined;
+  return own3 ? `${own3}, in ${label}` : `In ${label}`;
+}
+function applyParentLabels(candidates, corpusIds, resolver, scope) {
+  const unchanged = { candidates: [...candidates], dependencies: [] };
+  if (!resolver || candidates.length === 0)
+    return unchanged;
+  let parents;
+  try {
+    parents = resolver(candidates.map((candidate, index) => ({
+      corpusId: corpusIds[index] ?? "",
+      sourceItem: candidate.provenance.sourceItem
+    })));
+  } catch {
+    return unchanged;
+  }
+  if (parents.length !== candidates.length)
+    return unchanged;
+  const dependencies = [];
+  const labelled = candidates.map((candidate, index) => {
+    const parent = parents[index];
+    if (!parent)
+      return candidate;
+    if (!parentNamesMayTravel(parent.tier, candidateNamesCeiling(candidate)))
+      return candidate;
+    if (!namesCorpusInScope(parent.corpusId, scope))
+      return candidate;
+    const label = parentLabelText(parent);
+    if (!label)
+      return candidate;
+    dependencies.push({
+      candidateIndex: index,
+      corpusId: parent.corpusId,
+      parent: parent.identity,
+      private: parent.tier === "private"
+    });
+    return {
+      ...candidate,
+      provenance: {
+        ...candidate.provenance,
+        citation: { ...candidate.provenance.citation, parentLabel: label }
+      }
+    };
+  });
+  return { candidates: labelled, dependencies };
+}
+function namesCorpusInScope(corpusId, scope) {
+  if (!corpusId || scope.excludedCorpusIds?.has(corpusId))
+    return false;
+  if (scope.allowedCorpusIds && !scope.allowedCorpusIds.includes(corpusId))
+    return false;
+  const domain = scope.domainOf(corpusId);
+  return domain !== undefined && scope.allowedTrustDomains.includes(domain);
+}
+function parentLabelReleaseInputs(dependencies) {
+  const seen = new Map;
+  for (const dependency of dependencies) {
+    const { parent } = dependency;
+    const key2 = JSON.stringify([dependency.corpusId, parent.provider, parent.accountScope, parent.providerConversationId ?? "", parent.providerItemId]);
+    const existing = seen.get(key2);
+    if (existing) {
+      if (dependency.private)
+        existing.privateAtAnswer = true;
+      continue;
+    }
+    seen.set(key2, {
+      corpusId: dependency.corpusId,
+      provider: parent.provider,
+      accountScope: parent.accountScope,
+      providerItemId: parent.providerItemId,
+      ...parent.providerConversationId ? { providerConversationId: parent.providerConversationId } : {},
+      privateAtAnswer: dependency.private,
+      layer: "names",
+      dependency: "parent_label"
+    });
+  }
+  return [...seen.values()];
+}
+var TIER_RANK2, PARENT_LABEL_MAX_CHARS = 160, SUBJECT_MAX_CHARS = 90, SENDER_MAX_CHARS = 40, MONTHS2;
+var init_parent_label = __esm(() => {
+  init_types();
+  TIER_RANK2 = { public: 0, personal: 1, private: 2 };
+  MONTHS2 = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December"
+  ];
+});
+
+// src/core/secret-location-note.ts
+function secretLocationCoverageNote(count) {
+  return `${count} Secret(s) matched by location only; their contents are never read into an answer.`;
+}
+function secretLocationAnswer(locations) {
+  if (locations.length === 0)
+    return "";
+  const lead = locations.length === 1 ? "A matching item is stored as a Secret, so Olympus never shows it to an AI, this one included. Open it on this Mac:" : `${locations.length} matching items are stored as Secrets, so Olympus never shows them to an AI, this one included. Open them on this Mac:`;
+  return [lead, ...locations.map((location) => `- ${location.where}`)].join(`
+`);
+}
+function withoutSecretLocationCoverageNotes(answer) {
+  const lines = answer.split(`
+`);
+  if (!lines.some((line) => NOTE_LINE.test(line)))
+    return answer;
+  const kept = lines.filter((line) => !NOTE_LINE.test(line));
+  const heading = kept.lastIndexOf(NOTES_HEADING);
+  if (heading !== -1 && kept.slice(heading + 1).every((line) => !line.startsWith("- "))) {
+    const start = heading > 0 && kept[heading - 1] === "" ? heading - 1 : heading;
+    kept.splice(start, heading + 1 - start);
+  }
+  return kept.join(`
+`).replace(/\s+$/, "");
+}
+var NOTE_LINE, NOTES_HEADING = "Coverage notes:";
+var init_secret_location_note = __esm(() => {
+  NOTE_LINE = /^- \d+ Secret\(s\) matched by location only; their contents are never read into an answer\.$/;
+});
+
+// src/core/privacy-backlog-coverage.ts
+function privacyBacklogCoverageNote(pendingItems, audience = "remote") {
+  if (pendingItems === undefined || !Number.isSafeInteger(pendingItems) || pendingItems <= 0)
+    return;
+  const one = pendingItems === 1;
+  if (audience === "local") {
+    return `Olympus is still checking ${pendingItems} new item${one ? "" : "s"} for privacy. ` + `Until then ${one ? "it is" : "they are"} found by exact words only, not by meaning. ` + "This can take a while on this computer.";
+  }
+  return `Olympus is still checking ${pendingItems} new item${one ? "" : "s"} for privacy before ${one ? "it" : "they"} can be searched. ` + "This can take a while on this computer.";
+}
+function withCoverageNote(answer, note) {
+  if (!note)
+    return answer;
+  if (/\n\nCoverage notes:\n(- [^\n]*\n?)+$/.test(answer))
+    return `${answer.replace(/\s+$/, "")}
+- ${note}`;
+  return `${answer.replace(/\s+$/, "")}
+
+Coverage notes:
+- ${note}`;
+}
+
+// src/core/remote-result.ts
+function providerSourceLabel(provider) {
+  return Object.prototype.hasOwnProperty.call(PROVIDER_LABELS, provider) ? PROVIDER_LABELS[provider] : undefined;
+}
+function sourceLabel(provider, family) {
+  if (typeof provider === "string" && Object.prototype.hasOwnProperty.call(PROVIDER_LABELS, provider))
+    return PROVIDER_LABELS[provider];
+  if (typeof family === "string" && Object.prototype.hasOwnProperty.call(FAMILY_LABELS, family))
+    return FAMILY_LABELS[family];
+  return OTHER_SOURCE_LABEL;
+}
+function oneOf(value, allowed) {
+  return typeof value === "string" && allowed.includes(value) ? value : undefined;
+}
+function withheldParams(operation) {
+  return Object.prototype.hasOwnProperty.call(REMOTE_WITHHELD_PARAMS, operation) ? REMOTE_WITHHELD_PARAMS[operation] ?? [] : [];
+}
+function remoteDeclaredParams(operation, declared) {
+  const withheld = withheldParams(operation);
+  return declared.filter((name) => !withheld.includes(name));
+}
+function remoteToolDescription(operation, description) {
+  return Object.prototype.hasOwnProperty.call(REMOTE_DESCRIPTIONS, operation) ? REMOTE_DESCRIPTIONS[operation] ?? description : description;
+}
+function remoteToolSchema(operation, schema) {
+  const withheld = withheldParams(operation);
+  if (withheld.length === 0)
+    return schema;
+  const properties = asRecord7(schema.properties) ?? {};
+  const required = Array.isArray(schema.required) ? schema.required : [];
+  return {
+    ...schema,
+    properties: Object.fromEntries(Object.entries(properties).filter(([name]) => !withheld.includes(name))),
+    required: required.filter((name) => typeof name === "string" && !withheld.includes(name))
+  };
+}
+function remoteWithheldParam(operation, args) {
+  const withheld = withheldParams(operation);
+  return Object.keys(args).filter((name) => withheld.includes(name)).sort()[0];
+}
+async function remoteOperationOutputOffThread(operation, raw, options = {}) {
+  const check = options.releaseCheck;
+  if (!["source_answer", "source_answer_result"].includes(operation) || pendingOutput(raw) || isAnonymousAnswerResult(raw)) {
+    return remoteOperationOutput(operation, raw, options);
+  }
+  if (!check)
+    return remoteOperationOutput(operation, raw, { ...options, releaseCheck: {
+      inputs: (inputs) => inputs.map(() => ({ tier: "unknown", gone: false })),
+      secureDerivativeDefault: () => "approval"
+    } });
+  let verdicts;
+  try {
+    const inputs = (options.releaseManifests ?? []).flatMap((manifest) => manifest.inputs);
+    const chunks = await checkReleaseChunks(check, inputs);
+    verdicts = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
+    if (passagesWithheldAtReleasableTiers(inputs, verdicts, chunks) > 0)
+      verdicts = inputs.map((input, index) => {
+        const tier = verdicts[index];
+        return tier?.tier === "secret" ? tier : { tier: "unknown", gone: false };
+      });
+  } catch {}
+  const verified = {
+    inputs: () => {
+      if (!verdicts)
+        throw new Error("Release unavailable");
+      return verdicts;
+    },
+    secureDerivativeDefault: () => check.secureDerivativeDefault()
+  };
+  return remoteOperationOutput(operation, raw, { ...options, releaseCheck: verified });
+}
+function remoteOperationOutput(operation, raw, options = {}) {
+  const pending = pendingOutput(raw);
+  switch (operation) {
+    case "source_answer":
+      return pending ?? sourceAnswerOutput(raw, options);
+    case "ask_anonymously":
+      return pending ?? anonymousAnswerOutput(raw);
+    case "source_answer_result":
+      return pending ?? (isAnonymousAnswerResult(raw) ? anonymousAnswerOutput(raw) : sourceAnswerOutput(raw, options));
+    case "source_item_read": {
+      const result = parseSourceItemReadResult(raw);
+      if (result.pages.length > 0) {
+        const inputs = (options.releaseManifests ?? []).flatMap((manifest) => manifest.inputs);
+        if (inputs.length !== 1 || inputs[0].layer === "names" || !options.releaseCheck) {
+          throw new OperationError("email_policy_violation", "Current item privacy could not be verified.");
+        }
+        const verdicts = options.releaseCheck.inputs(inputs);
+        if (verdicts.length !== 1 || verdicts[0].gone || verdicts[0].tier !== "public_or_personal") {
+          throw new OperationError("not_personal", "Private item: ask with source_answer");
+        }
+      }
+      if (result.pages.some((page2) => secretLabelsInText(page2.text).length > 0))
+        throw new OperationError("email_policy_violation", "Item text withheld.");
+      return { ...result };
+    }
+    case "source_index_status":
+      return sourceIndexStatusOutput(raw);
+    default:
+      throw new OperationError("invalid_request", `No remote output for operation ${operation}.`);
+  }
+}
+function isAnonymousAnswerResult(raw) {
+  const record = asRecord7(raw);
+  return record !== undefined && typeof record.ok === "boolean" && typeof record.answer !== "string";
+}
+function pendingOutput(raw) {
+  const record = asRecord7(raw);
+  if (record?.status !== "working")
+    return;
+  if (typeof record.job_id !== "string" || !JOB_ID.test(record.job_id) || isSecretLike(record.job_id)) {
+    throw new OperationError("source_index_error", "unexpected pending shape");
+  }
+  return {
+    status: "working",
+    job_id: record.job_id,
+    elapsed_ms: wholeNumber(record.elapsed_ms),
+    next_tool: "source_answer_result",
+    message: REMOTE_PENDING_MESSAGE
+  };
+}
+function sourceAnswerOutput(raw, options) {
+  const record = asRecord7(raw);
+  if (!record || typeof record.answer !== "string" || !Array.isArray(record.evidence)) {
+    throw new OperationError("source_index_error", "unexpected answer shape");
+  }
+  const evidence = record.evidence.map(asRecord7).filter((entry) => entry !== undefined);
+  let dropped = new Set;
+  if (options.releaseCheck) {
+    const recheck = recheckRelease(evidence, options.releaseManifests ?? [], options.releaseCheck);
+    if ("withhold" in recheck)
+      return withheldAnswer(recheck.withhold, evidence.length);
+    dropped = recheck.dropped;
+  }
+  if (isSecretLike(record.answer))
+    return withheldAnswer(REMOTE_ANSWER_WITHHELD, evidence.length);
+  const answer = scannedText(withoutSecretLocationCoverageNotes(record.answer), MAX_ANSWER, "multiline");
+  if (answer.secret)
+    return withheldAnswer(REMOTE_ANSWER_WITHHELD, evidence.length);
+  const citations = [];
+  const released = [];
+  evidence.forEach((entry, index) => {
+    if (dropped.has(index) || citations.length >= MAX_CITATIONS)
+      return;
+    const citation = citationOutput(entry);
+    citations.push(citation);
+    released.push(releasedItemFromEvidence(entry, String(citation.label), typeof citation.title === "string" ? citation.title : undefined));
+  });
+  noteReleasedItems(released);
+  const privacyCoverage = privacyBacklogCoverageNote(options.pendingPrivacyItems);
+  const coverageSuffix = privacyCoverage ? `
+
+Coverage notes:
+- ${privacyCoverage}` : "";
+  return {
+    kind: "source_answer",
+    status: "answered",
+    answer: (answer.text ?? "").slice(0, MAX_ANSWER - coverageSuffix.length) + coverageSuffix,
+    citations
+  };
+}
+function withRemotePrivateNote(output, answerId, secretMatch = false) {
+  return output.kind === "source_answer" && output.status === "answered" ? { ...output, private_note: remotePrivateNote(answerId, secretMatch) } : output;
+}
+function remotePrivateNote(answerId, secretMatch = false) {
+  const pointer = answerId && PRIVATE_ANSWER_ID.test(answerId) ? `${REMOTE_PRIVATE_NOTE} [Open answer](olympus://open/private/${answerId})` : REMOTE_PRIVATE_NOTE;
+  return secretMatch ? `${pointer} ${REMOTE_SECRET_NOTE}` : pointer;
+}
+function withheldAnswer(message2, heldBack = 0) {
+  noteReleasedItems([], heldBack, true);
+  return { kind: "source_answer", status: "withheld", answer: message2, citations: [] };
+}
+function recheckRelease(evidence, manifests, check) {
+  if (manifests.length === 0) {
+    console.error("[olympus:remote] release_manifest_missing");
+    return { withhold: REMOTE_ANSWER_UNVERIFIED };
+  }
+  const inputs = manifests.flatMap((manifest) => manifest.inputs.map((input) => ({ input, manifest })));
+  let verdicts;
+  let postureNow;
+  try {
+    verdicts = check.inputs(inputs.map(({ input }) => input));
+    if (verdicts.length !== inputs.length)
+      throw new Error("release check returned the wrong number of verdicts");
+    postureNow = check.secureDerivativeDefault();
+  } catch (error) {
+    console.error(`[olympus:remote] release_check_failed error_message=${boundedLogErrorMessage(error)}`);
+    return { withhold: REMOTE_ANSWER_UNVERIFIED };
+  }
+  if (verdicts.some((verdict) => verdict.tier === "secret"))
+    return { withhold: REMOTE_ANSWER_CHANGED };
+  if (verdicts.some((verdict) => verdict.tier === "unknown"))
+    return { withhold: REMOTE_ANSWER_UNVERIFIED };
+  if (verdicts.some((verdict) => verdict.hiddenByParent === true))
+    return { withhold: REMOTE_ANSWER_UNVERIFIED };
+  for (const [index, { input, manifest }] of inputs.entries()) {
+    const verdict = verdicts[index];
+    if (input.dependency === "parent_label" && verdict.gone)
+      return { withhold: REMOTE_ANSWER_UNVERIFIED };
+    if (!privateInputReleaseAllowed(input, verdict, manifest.constraints, postureNow))
+      return { withhold: input.privateAtAnswer ? REMOTE_ANSWER_WITHHELD : REMOTE_ANSWER_CHANGED };
+  }
+  const dropped = new Set;
+  for (const [index, entry] of evidence.entries()) {
+    const matches = inputs.flatMap(({ input }, position) => citesInput(entry, input) ? [verdicts[position]] : []);
+    if (matches.length === 0) {
+      console.error("[olympus:remote] release_manifest_incomplete");
+      return { withhold: REMOTE_ANSWER_UNVERIFIED };
+    }
+    if (matches.some((verdict) => verdict.gone))
+      dropped.add(index);
+  }
+  return { dropped };
+}
+function citesInput(entry, input) {
+  return input.dependency !== "parent_label" && entry.corpus_id === input.corpusId && entry.provider === input.provider && entry.provider_item_id === input.providerItemId && (typeof entry.provider_conversation_id === "string" && entry.provider_conversation_id ? entry.provider_conversation_id : undefined) === input.providerConversationId;
+}
+function citationOutput(entry) {
+  const title = scannedText(entry.title, MAX_TITLE, "line");
+  const date = dateOnly(entry.authored_at) ?? dateOnly(entry.updated_at);
+  const parent = keptText(entry.parent_label, PARENT_LABEL_MAX_CHARS, "line");
+  const composed = title.secret ? { secret: true } : scannedText(citationTitleWithParent(title.text, parent), MAX_TITLE, "line");
+  return {
+    label: sourceLabel(entry.provider, entry.family),
+    ...composed.text && !composed.secret ? { title: composed.text } : {},
+    ...date ? { date } : {}
+  };
+}
+function anonymousAnswerOutput(raw) {
+  const record = asRecord7(raw);
+  if (!record || typeof record.ok !== "boolean") {
+    throw new OperationError("email_error", "unexpected anonymous answer shape");
+  }
+  if (record.ok) {
+    if (typeof record.reply !== "string")
+      throw new OperationError("email_error", "unexpected anonymous answer shape");
+    const reply = scannedText(record.reply, MAX_ANSWER, "multiline");
+    const sent2 = keptText(record.sent, MAX_SENT, "multiline");
+    const route = keptText(record.route, MAX_ROUTE, "line");
+    const note = keptText(record.note, MAX_MESSAGE, "line");
+    const model = typeof record.model === "string" && MODEL_ID.test(record.model) && !isSecretLike(record.model) ? record.model : undefined;
+    const cleanup = oneOf(record.cleanup, CLEANUPS);
+    return {
+      kind: "anonymous_answer",
+      status: "answered",
+      reply: reply.secret ? REMOTE_REPLY_WITHHELD : reply.text ?? "",
+      level: record.level === "strict" ? "strict" : "standard",
+      rewritten: record.rewritten === true,
+      remembered: record.remembered === true,
+      network_identity: oneOf(record.networkIdentity, NETWORK_IDENTITIES) ?? "not_verified",
+      ...cleanup ? { cleanup } : {},
+      ...model ? { model } : {},
+      ...route ? { route } : {},
+      ...sent2 ? { sent: sent2 } : {},
+      ...note ? { note } : {},
+      ...typeof record.providerNote === "string" ? { provider_note: REMOTE_PROVIDER_UNKNOWN_NOTE } : {}
+    };
+  }
+  if (record.code === "needs_choice") {
+    const options = asRecord7(record.options);
+    return {
+      kind: "anonymous_answer",
+      status: "needs_choice",
+      message: REMOTE_NEEDS_CHOICE_MESSAGE,
+      options: {
+        suggested_level: options?.suggestedLevel === "strict" ? "strict" : "standard",
+        suggested_cleanup: oneOf(options?.suggestedCleanup, CLEANUPS) ?? "as_written",
+        custom_instruction: options?.customInstruction === true
+      }
+    };
+  }
+  const sent = keptText(record.sent, MAX_SENT, "multiline");
+  const outcome = oneOf(record.outcome, OUTCOMES);
+  const daemonCode = oneOf(record.daemonCode, REMOTE_DAEMON_CODES);
+  return {
+    kind: "anonymous_answer",
+    status: "refused",
+    code: oneOf(record.code, REMOTE_REFUSAL_CODES) ?? "refused",
+    message: keptText(record.message, MAX_MESSAGE, "line") ?? REMOTE_REFUSAL_FALLBACK,
+    ...outcome ? { outcome } : {},
+    ...daemonCode ? { daemon_code: daemonCode } : {},
+    ...sent ? { sent } : {}
+  };
+}
+function sourceIndexStatusOutput(raw) {
+  const record = asRecord7(raw);
+  if (!record || record.kind !== "source_index_status" || !Array.isArray(record.corpora)) {
+    throw new OperationError("source_index_error", "unexpected status shape");
+  }
+  const generatedAt = iso(record.generated_at);
+  const corpora = [];
+  for (const value of record.corpora) {
+    if (corpora.length >= MAX_CORPORA)
+      break;
+    const corpus = asRecord7(value);
+    if (!corpus || typeof corpus.corpus_id !== "string" || corpus.corpus_id.length > 128 || !CORPUS_ID.test(corpus.corpus_id) || isSecretLike(corpus.corpus_id))
+      continue;
+    const retrieval = asRecord7(corpus.retrieval);
+    const mode = oneOf(retrieval?.servable_mode, RETRIEVAL_MODES);
+    const state = oneOf(retrieval?.state, RETRIEVAL_STATES);
+    const refresh = asRecord7(corpus.last_refresh);
+    const refreshStatus = oneOf(refresh?.status, REFRESH_STATUSES);
+    const completedAt = iso(refresh?.completed_at);
+    const counts = asRecord7(corpus.counts);
+    const trustDomain = oneOf(corpus.trust_domain, TRUST_DOMAINS);
+    corpora.push({
+      corpus_id: corpus.corpus_id,
+      label: sourceLabel(corpus.provider, corpus.family),
+      ...trustDomain ? { trust_domain: trustDomain } : {},
+      configured: corpus.configured === true,
+      ...mode && state ? { retrieval: { mode, state } } : {},
+      ...refreshStatus ? { last_refresh: { status: refreshStatus, ...completedAt ? { completed_at: completedAt } : {} } } : {},
+      ...counts ? {
+        counts: {
+          indexed_items: wholeNumber(counts.indexed_items),
+          chunks: wholeNumber(counts.chunks),
+          embedded_chunks: wholeNumber(counts.embedded_chunks)
+        }
+      } : {}
+    });
+  }
+  return { kind: "source_index_status", ...generatedAt ? { generated_at: generatedAt } : {}, corpora };
+}
+function remoteRetryAfterSeconds(body) {
+  if (!body || typeof body !== "object")
+    return;
+  const value = body.retry_after_seconds;
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 86400 ? value : undefined;
+}
+function remoteErrorCode(error) {
+  if (error instanceof OperationError && Object.prototype.hasOwnProperty.call(REMOTE_ERROR_TEXT, error.code))
+    return error.code;
+  return "internal_error";
+}
+function remoteErrorOutput(error, options = {}) {
+  const code = remoteErrorCode(error);
+  if (code === "invalid_params" && options.declaredParams && error instanceof OperationError) {
+    const param = namedParam(error.message, options.declaredParams);
+    if (param)
+      return { error: code, message: invalidParamMessage(param), param };
+  }
+  const retryAfter = RETRY_AFTER_SECONDS[code];
+  if (retryAfter !== undefined)
+    return { error: code, message: REMOTE_ERROR_TEXT[code], retry_after_seconds: retryAfter };
+  if (!REFERENCED_ERROR_CODES.has(code))
+    return { error: code, message: REMOTE_ERROR_TEXT[code] };
+  const ref = mintErrorRef();
+  const errorClass2 = error instanceof Error ? error.name : typeof error;
+  console.error(`[olympus:remote] tool_error code=${code} ref=${ref} class=${JSON.stringify(errorClass2)} error_message=${boundedLogErrorMessage(error)} origin=${logErrorOrigin(error)}`);
+  return { error: code, message: REMOTE_ERROR_TEXT[code], ref };
+}
+function remoteSurfaceErrorOutput(code) {
+  return { error: code, message: REMOTE_ERROR_TEXT[code] };
+}
+function remoteWithheldParamOutput(param) {
+  if (!PARAM_NAME.test(param))
+    return { error: "invalid_params", message: REMOTE_ERROR_TEXT.invalid_params };
+  return {
+    error: "invalid_params",
+    message: `The ${param} argument is not available to remote agents. Remove it and try again.`,
+    param
+  };
+}
+function invalidParamMessage(param) {
+  return `The ${param} argument was not valid. Check it against the tool's schema and try again.`;
+}
+function namedParam(message2, declared) {
+  let best;
+  for (const name of declared) {
+    if (!PARAM_NAME.test(name))
+      continue;
+    const match = new RegExp(`(?<![A-Za-z0-9_])${name}(?![A-Za-z0-9_])`).exec(message2);
+    if (match && (!best || match.index < best.at))
+      best = { name, at: match.index };
+  }
+  return best?.name;
+}
+function mintErrorRef() {
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+function remoteOutputSchema(operation) {
+  return Object.prototype.hasOwnProperty.call(REMOTE_OUTPUT_SCHEMAS, operation) ? REMOTE_OUTPUT_SCHEMAS[operation] : undefined;
+}
+function isSecretLike(text2) {
+  return secretLabelsInText(text2).length > 0;
+}
+function scannedText(value, max, mode) {
+  if (typeof value !== "string")
+    return { secret: false };
+  if (isSecretLike(value))
+    return { secret: true };
+  const normalized = mode === "line" ? value.replace(UNSAFE_CHARS, " ").replace(/\s+/g, " ").trim() : value.replace(UNSAFE_CHARS, "");
+  if (isSecretLike(normalized))
+    return { secret: true };
+  const emitted = mode === "line" ? normalized.slice(0, max).trim() : normalized.slice(0, max);
+  if (isSecretLike(emitted))
+    return { secret: true };
+  return emitted ? { text: emitted, secret: false } : { secret: false };
+}
+function keptText(value, max, mode) {
+  const scanned = scannedText(value, max, mode);
+  const text2 = mode === "multiline" ? scanned.text?.trim() : scanned.text;
+  return text2 && !scanned.secret ? text2 : undefined;
+}
+function wholeNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+}
+function iso(value) {
+  if (typeof value !== "string")
+    return;
+  const at = Date.parse(value);
+  return Number.isFinite(at) ? new Date(at).toISOString() : undefined;
+}
+function dateOnly(value) {
+  return iso(value)?.slice(0, 10);
+}
+function asRecord7(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
+}
+var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CITATIONS = 50, MAX_CORPORA = 200, JOB_ID, PARAM_NAME, CORPUS_ID, MODEL_ID, UNSAFE_CHARS, REMOTE_PENDING_MESSAGE, REMOTE_ANSWER_CHANGED = "Olympus withheld this answer because an item it drew on has changed privacy level since the answer was written. Ask the question again.", REMOTE_ANSWER_UNVERIFIED = "Olympus withheld this answer because it could not confirm the items it drew on may still be shared. Ask the question again.", REMOTE_PRIVATE_NOTE = "Your answer is in Olympus on your computer.", REMOTE_SECRET_NOTE = "A matching item is a Secret. Open it in Olympus on your computer.", REMOTE_PRIVATE_NOTE_PATTERN = "^Your answer is in Olympus on your computer\\.(?: \\[Open answer\\]\\(olympus://open/private/[A-Za-z0-9_-]{22}\\))?(?: A matching item is a Secret\\. Open it in Olympus on your computer\\.)?$", PRIVATE_ANSWER_ID, REMOTE_ANSWER_WITHHELD = "Olympus withheld this answer under the owner's privacy rules.", REMOTE_REPLY_WITHHELD = "Olympus withheld the reply because it looked like it contained a password, key or token.", REMOTE_REFUSAL_FALLBACK = "Olympus could not ask anonymously.", REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.", REMOTE_NEEDS_CHOICE_MESSAGE = "Nothing was sent. Ask the user once: Strict (their model rewrites it into general questions first) or Standard (their words, prepared as they choose: as written, light cleanup, or their own instruction). Then call again with level, and remember=true to keep it.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, REMOTE_REFUSAL_CODES, REMOTE_DAEMON_CODES, REFRESH_STATUSES, TRUST_DOMAINS, RETRIEVAL_MODES, RETRIEVAL_STATES, NETWORK_IDENTITIES, CLEANUPS, OUTCOMES, REMOTE_WITHHELD_PARAMS, REMOTE_DESCRIPTIONS, REMOTE_ERROR_TEXT, SOURCE_ANSWER_BUSY_RETRY_AFTER_SECONDS = 30, RETRY_AFTER_SECONDS, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA, REMOTE_OUTPUT_SCHEMAS;
+var init_remote_result = __esm(() => {
+  init_source_item_read();
+  init_app_release_capture();
+  init_operation_error();
+  init_opsec();
+  init_parent_label();
+  init_release_manifest();
+  init_secret_location_note();
+  MAX_ANSWER = 64 * 1024;
+  MAX_SENT = 16 * 1024;
+  JOB_ID = /^saj_[A-Za-z0-9_-]{43}$/;
+  PARAM_NAME = /^[a-z][a-z0-9_]{0,63}$/;
+  CORPUS_ID = /^[a-z0-9_]+(\.[a-z0-9_-]+)+$/i;
+  MODEL_ID = /^[A-Za-z0-9._:/-]{1,128}$/;
+  UNSAFE_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g;
+  REMOTE_PENDING_MESSAGE = "Olympus is still working on this and it keeps running. " + "Call source_answer_result with this job_id to get the result; repeat while it says working. Do not ask again.";
+  PRIVATE_ANSWER_ID = /^[A-Za-z0-9_-]{22}$/;
+  PROVIDER_LABELS = {
+    gmail: "Gmail",
+    google_drive: "Google Drive",
+    "google-drive": "Google Drive",
+    google_calendar: "Google Calendar",
+    dropbox: "Dropbox",
+    x: "X bookmarks",
+    readwise: "Readwise",
+    telegram: "Telegram",
+    whatsapp: "WhatsApp",
+    whatsapp_personal: "WhatsApp",
+    whatsapp_business: "WhatsApp",
+    apple_messages: "Apple Messages",
+    signal: "Signal",
+    reflect: "Reflect",
+    roam: "Roam",
+    evernote: "Evernote",
+    local_files: "Files on this computer"
+  };
+  FAMILY_LABELS = {
+    email: "Mail",
+    file: "Files",
+    chat: "Messages",
+    note: "Notes",
+    x: "X bookmarks",
+    readwise: "Readwise"
+  };
+  REMOTE_SOURCE_LABELS = Object.freeze([...new Set([
+    ...Object.values(PROVIDER_LABELS),
+    ...Object.values(FAMILY_LABELS),
+    OTHER_SOURCE_LABEL
+  ])].sort());
+  REMOTE_REFUSAL_CODES = Object.freeze([
+    "refused",
+    "anonymous_answers_off",
+    "cancelled",
+    "gate_refused",
+    "internal_error",
+    "invalid_params",
+    "model_same_provider",
+    "question_empty",
+    "question_too_long",
+    "route_not_configured",
+    "secret_detected",
+    "settings_invalid",
+    "settings_stale",
+    "writer_declined",
+    "writer_failed",
+    "invalid_question",
+    "busy",
+    "acknowledgements_incomplete",
+    "funding_date_missing",
+    "funding_date_invalid",
+    "note_expired",
+    "daemon_api_key_missing",
+    "daemon_not_found",
+    "tor_not_found",
+    "unresolved_session",
+    "unresolved_session_other_wallet",
+    "no_unresolved_session",
+    "stranded_processes",
+    "daemon_already_running",
+    "tor_port_busy",
+    "tor_bootstrap_failed",
+    "daemon_start_failed",
+    "daemon_version_unsupported",
+    "daemon_supervisor_unsupported",
+    "relay_mismatch",
+    "key_reuse_on",
+    "key_reuse_unverified",
+    "daemon_keyless",
+    "daemon_identity_failed",
+    "daemon_api_key_rejected",
+    "session_process_exited",
+    "confinement_self_test_failed",
+    "confinement_unavailable",
+    "policy_unavailable",
+    "model_unavailable",
+    "daily_cap_reached",
+    "spend_cap_reached",
+    "state_unavailable",
+    "timeout",
+    "aborted",
+    "redirect_refused",
+    "response_too_large",
+    "invalid_response",
+    "daemon_error",
+    "transport_failed",
+    "teardown_incomplete",
+    "authorization_refused",
+    "session_spent"
+  ].filter((code, index, all) => all.indexOf(code) === index));
+  REMOTE_DAEMON_CODES = Object.freeze([
+    "busy",
+    "request_cancelled",
+    "funding_required",
+    "model_budget_unavailable",
+    "model_policy_unavailable",
+    "invalid_model",
+    "anonymous_access_failed",
+    "upstream_error",
+    "invalid_upstream_response",
+    "withdrawal_pending",
+    "wallet_conflict",
+    "invalid_request_error",
+    "invalid_body",
+    "testnet_password_required",
+    "invalid_api_key",
+    "local_connection_required",
+    "browser_origin_denied",
+    "unrecognized"
+  ]);
+  REFRESH_STATUSES = Object.freeze(["running", "completed", "failed"]);
+  TRUST_DOMAINS = Object.freeze(["public_safe", "internal", "secure_local"]);
+  RETRIEVAL_MODES = Object.freeze(["keyword", "hybrid"]);
+  RETRIEVAL_STATES = Object.freeze(["ready", "degraded"]);
+  NETWORK_IDENTITIES = Object.freeze(["hidden", "visible", "not_verified"]);
+  CLEANUPS = Object.freeze(["as_written", "light_cleanup", "custom"]);
+  OUTCOMES = Object.freeze(["not_sent", "sent_failed", "unknown"]);
+  REMOTE_WITHHELD_PARAMS = {
+    source_index_status: [
+      "conversation_id",
+      "include_sender_aggregation",
+      "max_senders",
+      "include_readiness_ledger",
+      "include_ingestion_ledger",
+      "include_items",
+      "max_items",
+      "query"
+    ]
+  };
+  REMOTE_DESCRIPTIONS = {
+    source_index_status: [
+      "Inspect source-index corpus status: each corpus's refresh status and aggregate counts.",
+      "Read-only: it never returns item metadata, sender counts, ledgers, source text, vectors or credentials.",
+      "Legacy extraction filter fields are refused on the connector-store status surface rather than silently returning whole-corpus counts."
+    ].join(" ")
+  };
+  REMOTE_ERROR_TEXT = {
+    not_personal: "Private item: ask with source_answer",
+    invalid_params: "The request was not valid. Check the arguments against the tool's schema and try again.",
+    invalid_request: "The request was not valid. Check the arguments against the tool's schema and try again.",
+    unsupported_filter: "That filter is not supported here.",
+    config_error: "Olympus on the computer needs setup before it can answer.",
+    argus_unreachable: "Olympus could not reach its private analyst. Try again later.",
+    argus_error: "Olympus's private analyst could not answer. Try again later.",
+    email_not_configured: "Olympus on the computer needs setup before it can answer.",
+    email_unreachable: "Olympus could not reach its source worker in time. Try again later.",
+    email_error: "Olympus could not complete this request.",
+    email_policy_violation: "Olympus withheld this result under the owner's privacy rules.",
+    source_index_not_enabled: "Searching sources is not turned on in Olympus on the computer.",
+    source_index_policy_violation: "Olympus withheld this result under the owner's privacy rules.",
+    source_index_error: "Olympus could not complete this request.",
+    source_answer_busy: "Olympus is already answering as many questions as it can at once. Wait for the answers in progress (call source_answer_result with their job ids), then ask again.",
+    source_answer_job_not_found: "No Olympus answer with that job_id is available to this connection. It may have expired or Olympus may have restarted. Ask the question again with source_answer.",
+    source_answer_deadline: "The answer did not finish within Olympus's time limit and was stopped. Ask a narrower question, or try again later.",
+    source_answer_too_large: "The finished answer was too large for Olympus to return. Ask a narrower question.",
+    internal_error: "Olympus could not complete this request.",
+    unknown_operation: "Olympus has no operation with that name here.",
+    operation_unavailable: "That operation is not enabled on this Olympus install.",
+    unauthorized: "A connection token is required.",
+    invalid_token: "The connection token is not valid or has been revoked.",
+    remote_connections_unavailable: "Olympus could not check the connection token. Try again later.",
+    not_found: "There is nothing at this path.",
+    method_not_allowed: "That HTTP method is not allowed here.",
+    unsupported_media_type: "The request body must be JSON (Content-Type: application/json).",
+    payload_too_large: "The request body is too large.",
+    olympus_offline: "Olympus is off; try again later."
+  };
+  RETRY_AFTER_SECONDS = {
+    source_answer_busy: SOURCE_ANSWER_BUSY_RETRY_AFTER_SECONDS
+  };
+  REMOTE_ERROR_CODES = Object.freeze(Object.keys(REMOTE_ERROR_TEXT));
+  REFERENCED_ERROR_CODES = new Set([
+    "internal_error",
+    "email_error",
+    "source_index_error",
+    "argus_error",
+    "config_error"
+  ]);
+  PENDING_SCHEMA = {
+    type: "object",
+    description: "Still working: call source_answer_result with job_id, again while it says working.",
+    additionalProperties: false,
+    required: ["status", "job_id", "elapsed_ms", "next_tool", "message"],
+    properties: {
+      status: { const: "working" },
+      job_id: { type: "string", pattern: JOB_ID.source },
+      elapsed_ms: { type: "integer", minimum: 0 },
+      next_tool: { const: "source_answer_result" },
+      message: { type: "string" }
+    }
+  };
+  CITATION_SCHEMA = {
+    type: "object",
+    additionalProperties: false,
+    required: ["label"],
+    properties: {
+      label: { type: "string", enum: [...REMOTE_SOURCE_LABELS] },
+      title: { type: "string", maxLength: MAX_TITLE },
+      date: { type: "string", format: "date" }
+    }
+  };
+  SOURCE_ANSWER_SCHEMA = {
+    type: "object",
+    description: 'A source answer: give the answer with its citations. "withheld" carries a fixed sentence to pass on instead. When private_note is present, pass it on as written.',
+    additionalProperties: false,
+    required: ["kind", "status", "answer", "citations"],
+    properties: {
+      kind: { const: "source_answer" },
+      status: { enum: ["answered", "withheld"] },
+      answer: { type: "string", maxLength: MAX_ANSWER },
+      citations: { type: "array", maxItems: MAX_CITATIONS, items: CITATION_SCHEMA },
+      private_note: { type: "string", pattern: REMOTE_PRIVATE_NOTE_PATTERN }
+    }
+  };
+  ANONYMOUS_ANSWERED_SCHEMA = {
+    type: "object",
+    description: 'The anonymous reply. When rewritten is true, say the question was rewritten first and offer to show "sent". When provider_note is present, pass it on as written.',
+    additionalProperties: false,
+    required: ["kind", "status", "reply", "level", "rewritten", "remembered", "network_identity"],
+    properties: {
+      kind: { const: "anonymous_answer" },
+      status: { const: "answered" },
+      reply: { type: "string", maxLength: MAX_ANSWER },
+      level: { enum: ["strict", "standard"] },
+      rewritten: { type: "boolean" },
+      remembered: { type: "boolean" },
+      network_identity: { enum: [...NETWORK_IDENTITIES] },
+      cleanup: { enum: [...CLEANUPS] },
+      model: { type: "string", pattern: MODEL_ID.source },
+      route: { type: "string", maxLength: MAX_ROUTE },
+      sent: { type: "string", maxLength: MAX_SENT },
+      note: { type: "string", maxLength: MAX_MESSAGE },
+      provider_note: { const: REMOTE_PROVIDER_UNKNOWN_NOTE }
+    }
+  };
+  ANONYMOUS_NEEDS_CHOICE_SCHEMA = {
+    type: "object",
+    description: "Nothing was sent: ask the user once, Strict or Standard, then call again with level (and remember=true to keep it).",
+    additionalProperties: false,
+    required: ["kind", "status", "message", "options"],
+    properties: {
+      kind: { const: "anonymous_answer" },
+      status: { const: "needs_choice" },
+      message: { type: "string" },
+      options: {
+        type: "object",
+        additionalProperties: false,
+        required: ["suggested_level", "suggested_cleanup", "custom_instruction"],
+        properties: {
+          suggested_level: { enum: ["strict", "standard"] },
+          suggested_cleanup: { enum: [...CLEANUPS] },
+          custom_instruction: { type: "boolean" }
+        }
+      }
+    }
+  };
+  ANONYMOUS_REFUSED_SCHEMA = {
+    type: "object",
+    description: "Not answered: tell the user the message in those words. outcome says whether the question left (absent: never handed to the transport).",
+    additionalProperties: false,
+    required: ["kind", "status", "code", "message"],
+    properties: {
+      kind: { const: "anonymous_answer" },
+      status: { const: "refused" },
+      code: { enum: [...REMOTE_REFUSAL_CODES] },
+      message: { type: "string", maxLength: MAX_MESSAGE },
+      outcome: { enum: [...OUTCOMES] },
+      daemon_code: { enum: [...REMOTE_DAEMON_CODES] },
+      sent: { type: "string", maxLength: MAX_SENT }
+    }
+  };
+  SOURCE_INDEX_STATUS_SCHEMA = {
+    type: "object",
+    description: "Per-corpus status and counts.",
+    additionalProperties: false,
+    required: ["kind", "corpora"],
+    properties: {
+      kind: { const: "source_index_status" },
+      generated_at: { type: "string", format: "date-time" },
+      corpora: {
+        type: "array",
+        maxItems: MAX_CORPORA,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["corpus_id", "label", "configured"],
+          properties: {
+            corpus_id: { type: "string", pattern: CORPUS_ID.source, maxLength: 128 },
+            label: { type: "string", enum: [...REMOTE_SOURCE_LABELS] },
+            trust_domain: { enum: [...TRUST_DOMAINS] },
+            configured: { type: "boolean" },
+            retrieval: {
+              type: "object",
+              additionalProperties: false,
+              required: ["mode", "state"],
+              properties: {
+                mode: { enum: [...RETRIEVAL_MODES] },
+                state: { enum: [...RETRIEVAL_STATES] }
+              }
+            },
+            last_refresh: {
+              type: "object",
+              additionalProperties: false,
+              required: ["status"],
+              properties: {
+                status: { enum: [...REFRESH_STATUSES] },
+                completed_at: { type: "string", format: "date-time" }
+              }
+            },
+            counts: {
+              type: "object",
+              additionalProperties: false,
+              required: ["indexed_items", "chunks", "embedded_chunks"],
+              properties: {
+                indexed_items: { type: "integer", minimum: 0 },
+                chunks: { type: "integer", minimum: 0 },
+                embedded_chunks: { type: "integer", minimum: 0 }
+              }
+            }
+          }
+        }
+      }
+    }
+  };
+  REMOTE_ERROR_SCHEMA = {
+    type: "object",
+    additionalProperties: false,
+    required: ["error", "message"],
+    properties: {
+      error: { enum: [...REMOTE_ERROR_CODES], description: "A stable error code." },
+      message: { type: "string", description: "A fixed sentence for this code." },
+      ref: { type: "string", pattern: "^[0-9a-f]{16}$", description: "Where the owner finds this failure in Olympus's log on the computer." },
+      param: { type: "string", pattern: PARAM_NAME.source, description: "The argument at fault, when it is one the operation declares." },
+      retry_after_seconds: {
+        type: "integer",
+        minimum: 1,
+        maximum: 86400,
+        description: "Seconds to wait before trying again, when Olympus is busy or offline; also sent as the HTTP Retry-After header."
+      }
+    }
+  };
+  REMOTE_OUTPUT_SCHEMAS = {
+    source_answer: { oneOf: [SOURCE_ANSWER_SCHEMA, PENDING_SCHEMA] },
+    source_answer_result: {
+      oneOf: [SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, PENDING_SCHEMA]
+    },
+    ask_anonymously: { oneOf: [ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, PENDING_SCHEMA] },
+    source_index_status: SOURCE_INDEX_STATUS_SCHEMA,
+    source_item_read: {
+      type: "object",
+      additionalProperties: false,
+      required: ["pages", "totalPages", "totalChars", "couldNotRead"],
+      properties: {
+        pages: { type: "array", maxItems: 3, items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["page", "text"],
+          properties: { page: { type: "integer", minimum: 1 }, text: { type: "string", maxLength: 12000 } }
+        } },
+        nextPage: { type: "integer", minimum: 1 },
+        totalPages: { type: "integer", minimum: 0 },
+        totalChars: { type: "integer", minimum: 0 },
+        couldNotRead: { type: "array", items: { type: "string", enum: [...SOURCE_ITEM_READ_REFUSALS] } },
+        etaSeconds: { type: "integer", minimum: 0 }
+      }
+    }
+  };
+});
+
+// src/workers/remote-access-recheck.ts
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
+function currentAccess(authorized) {
+  try {
+    return authorized();
+  } catch {
+    return "unavailable";
+  }
+}
+function refusedAccess(access) {
+  const body = remoteSurfaceErrorOutput(access === "revoked" ? "invalid_token" : "remote_connections_unavailable");
+  return { content: [{ type: "text", text: JSON.stringify(body, null, 2) }], isError: true };
+}
+function withRemoteReadAuthorization(authorized, fn) {
+  return readAuthorization.run(authorized, fn);
+}
+function currentRemoteReadAccess() {
+  const authorized = readAuthorization.getStore();
+  return authorized ? currentAccess(authorized) : "active";
+}
+var readAuthorization;
+var init_remote_access_recheck = __esm(() => {
+  init_remote_result();
+  readAuthorization = new AsyncLocalStorage6;
+});
+
 // src/workers/classification/installed-tier-classification-registry.ts
 function registerInstalledTierClassification(provider) {
   registered2 = provider;
@@ -33997,12 +35621,12 @@ var init_operation_caller = __esm(() => {
 });
 
 // connect-relay/shared/tokens.ts
-import { createHash as createHash20, randomBytes as randomBytes8 } from "node:crypto";
+import { createHash as createHash21, randomBytes as randomBytes8 } from "node:crypto";
 function credentialSurface(value) {
   return value === "chatgpt" || value === "claude-app" ? value : "remote";
 }
 function surfaceFingerprint(digest2) {
-  return createHash20("sha256").update(SURFACE_FINGERPRINT_DOMAIN, "utf8").update(digest2).digest("base64url");
+  return createHash21("sha256").update(SURFACE_FINGERPRINT_DOMAIN, "utf8").update(digest2).digest("base64url");
 }
 function mintCredential(kind, installId) {
   return `${PREFIX2[kind]}.${installId}.${randomBytes8(32).toString("base64url")}`;
@@ -34103,7 +35727,7 @@ var init_pinned_clients = __esm(() => {
 });
 
 // src/core/remote-oauth-store.ts
-import { createHash as createHash21, randomBytes as randomBytes9, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
+import { createHash as createHash22, randomBytes as randomBytes9, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
 function isRemoteConnectionProvider(value) {
   return typeof value === "string" && OPERATION_CALLER_PROVIDERS.includes(value);
 }
@@ -34131,7 +35755,7 @@ function normalizePairingCode(input) {
   return compact;
 }
 function digest2(value) {
-  return createHash21("sha256").update(value, "utf8").digest();
+  return createHash22("sha256").update(value, "utf8").digest();
 }
 function randomPairingSymbols(length) {
   const limit = 256 - 256 % PAIRING_ALPHABET.length;
@@ -34435,182 +36059,6 @@ var init_remote_oauth_store = __esm(() => {
   UNUSED_CLIENT_PRUNE_AGE_MS = 24 * 3600000;
 });
 
-// src/core/app-release-capture.ts
-import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
-function privateQuestionKey(ref) {
-  if (!ref || typeof ref !== "object")
-    return;
-  const { id, generation } = ref;
-  if (typeof id !== "string" || !id || id.length > 128)
-    return;
-  if (typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 1)
-    return;
-  return `${id}#${generation}`;
-}
-function createReleaseCapture() {
-  return { heldBack: 0 };
-}
-function runWithReleaseCapture(capture, fn) {
-  return storage2.run(capture, fn);
-}
-function noteReleasedItems(items, heldBack = 0, withheld = false) {
-  const capture = storage2.getStore();
-  if (!capture)
-    return;
-  capture.items = items.map((item) => ({ ...item }));
-  capture.heldBack = Math.max(0, Math.floor(Number.isFinite(heldBack) ? heldBack : 0));
-  capture.withheld = withheld;
-}
-function boundedString(value, max) {
-  if (typeof value !== "string")
-    return;
-  const trimmed = value.trim();
-  return trimmed ? trimmed.slice(0, max) : undefined;
-}
-function releasedTierOf(trustDomain) {
-  if (trustDomain === "public_safe")
-    return "public";
-  if (trustDomain === "internal")
-    return "personal";
-  return "private";
-}
-function releasedItemFromEvidence(evidence, source, title) {
-  const shownTitle = boundedString(title, TITLE_MAX);
-  const corpusId = boundedString(evidence.corpus_id, ID_MAX);
-  const provider = boundedString(evidence.provider, ID_MAX);
-  const accountScope = boundedString(evidence.account_scope, ID_MAX);
-  const providerItemId = boundedString(evidence.provider_item_id, ID_MAX);
-  const providerConversationId = boundedString(evidence.provider_conversation_id, ID_MAX);
-  const locator = boundedString(evidence.uri, ID_MAX);
-  return {
-    source: boundedString(source, 80) ?? "Other source",
-    ...shownTitle ? { title: shownTitle } : {},
-    tier: releasedTierOf(evidence.trust_domain),
-    ...corpusId ? { corpusId } : {},
-    ...provider ? { provider } : {},
-    ...accountScope ? { accountScope } : {},
-    ...providerItemId ? { providerItemId } : {},
-    ...providerConversationId ? { providerConversationId } : {},
-    ...locator ? { locator } : {}
-  };
-}
-function appConnectionOf(caller) {
-  if (!caller || caller.surface === "cli")
-    return;
-  const display = boundedString(caller.displayName, 80);
-  const id = boundedString(caller.connectionId, 128);
-  if (caller.surface === "remote") {
-    const known = caller.provider ? PROVIDER_APP_NAMES[caller.provider] : undefined;
-    return { ...id ? { id } : {}, name: known ?? display ?? "An AI app", kind: "app" };
-  }
-  return { ...id ? { id } : {}, name: display ?? "An agent", kind: "agent" };
-}
-function setPrivateAnswerCompletionHook(next) {
-  completionHook = next;
-}
-function notePrivateAnswerCompleted(ref) {
-  try {
-    const key2 = privateQuestionKey(ref);
-    if (!key2)
-      return;
-    completedPrivateAnswers.add(key2);
-    while (completedPrivateAnswers.size > COMPLETED_MAX)
-      completedPrivateAnswers.delete(completedPrivateAnswers.values().next().value);
-    completionHook?.(key2);
-  } catch {}
-}
-function notePrivateQuestion(ref) {
-  const capture = storage2.getStore();
-  if (capture && ref && privateQuestionKey(ref))
-    capture.privateQuestion = { id: ref.id, generation: ref.generation };
-}
-function setAppReleaseRecorder(next) {
-  recorder = next;
-}
-function recordAppRequest(input) {
-  try {
-    const write2 = recorder ?? input.fallback;
-    if (!write2)
-      return;
-    const connection = appConnectionOf(input.caller);
-    const question = boundedString(input.question, 2000);
-    if (!connection || !question || input.capture.items === undefined)
-      return;
-    const withheld = input.withheldAfter === true || input.capture.withheld === true;
-    const privateQuestionKeyOf = privateQuestionKey(input.privateQuestion ?? input.capture.privateQuestion);
-    write2({
-      at: (input.now ?? Date.now)(),
-      connection,
-      question,
-      items: withheld ? [] : input.capture.items,
-      heldBack: input.capture.heldBack + (withheld ? input.capture.items.length : 0),
-      answeredPrivately: privateQuestionKeyOf !== undefined && completedPrivateAnswers.has(privateQuestionKeyOf),
-      withheld,
-      ...privateQuestionKeyOf ? { privateQuestionKey: privateQuestionKeyOf } : {}
-    });
-  } catch {}
-}
-function rememberJobQuestion(jobId, question, now = Date.now()) {
-  if (typeof jobId !== "string" || typeof question !== "string" || !jobId || !question.trim())
-    return;
-  for (const [key2, entry] of jobQuestions)
-    if (entry.expires <= now)
-      jobQuestions.delete(key2);
-  jobQuestions.set(jobId, { question: question.trim().slice(0, 2000), expires: now + JOB_QUESTION_TTL_MS });
-  while (jobQuestions.size > JOB_QUESTIONS_MAX)
-    jobQuestions.delete(jobQuestions.keys().next().value);
-}
-function jobQuestion(jobId, now = Date.now()) {
-  if (typeof jobId !== "string")
-    return;
-  const entry = jobQuestions.get(jobId);
-  if (!entry || entry.expires <= now)
-    return;
-  return entry.question;
-}
-function forgetJobQuestions() {
-  jobQuestions.clear();
-  completedPrivateAnswers.clear();
-}
-function sourceAnswerQuestion(name, args, status, jobId) {
-  if (name === "source_answer") {
-    const question = typeof args.question === "string" ? args.question : undefined;
-    if (status === "working")
-      rememberJobQuestion(jobId, question);
-    return question;
-  }
-  if (name === "source_answer_result")
-    return jobQuestion(args.job_id);
-  return;
-}
-function recordRemoteOperation(input) {
-  const { operation, args, output } = input;
-  if (operation !== "source_answer" && operation !== "source_answer_result")
-    return;
-  const question = sourceAnswerQuestion(operation, args, output.status, output.job_id);
-  if (output.kind !== "source_answer" || output.status !== "answered" && output.status !== "withheld")
-    return;
-  recordAppRequest({
-    caller: input.caller,
-    question,
-    capture: input.privateQuestion ? { ...input.capture, heldBack: Math.max(1, input.capture.heldBack) } : input.capture,
-    privateQuestion: input.privateQuestion
-  });
-}
-var storage2, TITLE_MAX = 300, ID_MAX = 512, PROVIDER_APP_NAMES, recorder, completionHook, COMPLETED_MAX = 512, completedPrivateAnswers, JOB_QUESTIONS_MAX = 256, JOB_QUESTION_TTL_MS, jobQuestions;
-var init_app_release_capture = __esm(() => {
-  storage2 = new AsyncLocalStorage4;
-  PROVIDER_APP_NAMES = {
-    openai: "ChatGPT",
-    anthropic: "Claude",
-    xai: "Grok",
-    meta: "Meta AI"
-  };
-  completedPrivateAnswers = new Set;
-  JOB_QUESTION_TTL_MS = 30 * 60000;
-  jobQuestions = new Map;
-});
-
 // src/core/waiting-private-questions.ts
 var exports_waiting_private_questions = {};
 __export(exports_waiting_private_questions, {
@@ -34628,7 +36076,7 @@ __export(exports_waiting_private_questions, {
   CHATGPT_INBOX_GRACE_MS: () => CHATGPT_INBOX_GRACE_MS
 });
 import { Database as Database6 } from "bun:sqlite";
-import { createHash as createHash22, randomBytes as randomBytes10 } from "node:crypto";
+import { createHash as createHash23, randomBytes as randomBytes10 } from "node:crypto";
 import { chmodSync as chmodSync11, existsSync as existsSync30, lstatSync as lstatSync16, mkdirSync as mkdirSync18 } from "node:fs";
 import { homedir as homedir18 } from "node:os";
 import { dirname as dirname36, isAbsolute as isAbsolute16, join as join39 } from "node:path";
@@ -34765,7 +36213,7 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
       if (utf8Length(selectors) > WAITING_QUESTION_LIMITS.selectorBytes)
         return;
       const detail = input.detail === "full" ? "full" : "summary";
-      const dedupeKey = createHash22("sha256").update(JSON.stringify([ticket.connectionId, ...input.path === "anonymous" || input.retainEachAsk ? [input.path ?? "private", randomBytes10(16).toString("hex")] : [], selectors, normalizeWaitingQuestion(question)])).digest("hex");
+      const dedupeKey = createHash23("sha256").update(JSON.stringify([ticket.connectionId, ...input.path === "anonymous" || input.retainEachAsk ? [input.path ?? "private", randomBytes10(16).toString("hex")] : [], selectors, normalizeWaitingQuestion(question)])).digest("hex");
       const at = now();
       let active = false;
       try {
@@ -35191,7 +36639,7 @@ __export(exports_remote_connections, {
   REMOTE_CONNECTIONS_SCHEMA_VERSION: () => REMOTE_CONNECTIONS_SCHEMA_VERSION
 });
 import { Database as Database7 } from "bun:sqlite";
-import { createHash as createHash23, randomBytes as randomBytes11, timingSafeEqual as timingSafeEqual4 } from "node:crypto";
+import { createHash as createHash24, randomBytes as randomBytes11, timingSafeEqual as timingSafeEqual4 } from "node:crypto";
 import { chmodSync as chmodSync12, existsSync as existsSync31, lstatSync as lstatSync17, mkdirSync as mkdirSync19 } from "node:fs";
 import { homedir as homedir19 } from "node:os";
 import { dirname as dirname37, isAbsolute as isAbsolute17 } from "node:path";
@@ -35223,7 +36671,7 @@ function isWellFormedRemoteConnectionToken(token) {
   return TOKEN_PATTERN2.test(token);
 }
 function hashRemoteConnectionToken(token) {
-  return createHash23("sha256").update(token, "utf8").digest();
+  return createHash24("sha256").update(token, "utf8").digest();
 }
 function openRemoteConnectionStore(dbPath = defaultRemoteConnectionsDbPath(), options = {}) {
   const now = options.now ?? (() => new Date);
@@ -37134,7 +38582,7 @@ var init_media_judge = __esm(() => {
 });
 
 // src/workers/connector-store/local-index.ts
-import { createHash as createHash24, randomUUID as randomUUID9 } from "node:crypto";
+import { createHash as createHash25, randomUUID as randomUUID9 } from "node:crypto";
 import { existsSync as existsSync34, lstatSync as lstatSync19, mkdirSync as mkdirSync21, statSync as statSync17, statfsSync as statfsSync2 } from "node:fs";
 import { dirname as dirname39 } from "node:path";
 import { Database as Database9 } from "bun:sqlite";
@@ -39113,7 +40561,7 @@ function connectorStoreEmbeddingSelectionSha256(localItemIds) {
   return hashString2(JSON.stringify(normalized ? [...normalized].sort() : null));
 }
 function connectorStoreEmbeddingInputSha256(rows) {
-  const digest3 = createHash24("sha256");
+  const digest3 = createHash25("sha256");
   for (const row of rows)
     digest3.update(`${row.chunk_pk}\x00${row.content_hash}
 `);
@@ -39207,7 +40655,7 @@ function namesOnlyKeptCount(n) {
   return n > 0 ? { namesOnlyKeptChunks: n } : {};
 }
 function migrationFingerprint(contentHash, chunkHashes) {
-  return createHash24("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
+  return createHash25("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
 }
 function carryHold(listed, fetched) {
   return listed.holdContentUntilJudged === true && fetched.holdContentUntilJudged !== true ? { ...fetched, holdContentUntilJudged: true } : fetched;
@@ -40708,7 +42156,7 @@ function requireNonEmpty(value, label) {
   return text2;
 }
 function hashString2(value) {
-  return createHash24("sha256").update(value).digest("hex");
+  return createHash25("sha256").update(value).digest("hex");
 }
 function errorMessage2(error) {
   return error instanceof Error ? error.message : String(error);
@@ -40796,6 +42244,8 @@ var init_local_index = __esm(() => {
   init_engine();
   init_tier_ledger();
   init_tier_classifier();
+  init_release_manifest();
+  init_remote_access_recheck();
   init_secret_locations();
   init_tier_set_binding();
   init_tier_placement();
@@ -44488,7 +45938,7 @@ ${parentKey(ref)}`, { ref, origin });
           embeddingsComplete: false
         };
       }
-      const chunkTextCoherent = chunkRows.every((chunk) => createHash24("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
+      const chunkTextCoherent = chunkRows.every((chunk) => createHash25("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
       if (!chunkTextCoherent) {
         return {
           chunksIndexed: 0,
@@ -45390,8 +46840,8 @@ ${parentKey(ref)}`, { ref, origin });
         itemsUnchanged: 0,
         itemsMissing: 0
       };
-      const inputDigest = createHash24("sha256");
-      const outputDigest = createHash24("sha256");
+      const inputDigest = createHash25("sha256");
+      const outputDigest = createHash25("sha256");
       const select = this.db.query(`
       SELECT item_pk, sender_id, sender_label, sender_is_owner
       FROM items
@@ -45468,8 +46918,8 @@ ${parentKey(ref)}`, { ref, origin });
         ftsRowsRefreshed: 0,
         chunkEmbeddingInputsInvalidated: 0
       };
-      const inputDigest = createHash24("sha256");
-      const outputDigest = createHash24("sha256");
+      const inputDigest = createHash25("sha256");
+      const outputDigest = createHash25("sha256");
       let lastItemPk = startAfter;
       let hasMore = false;
       while (maxItems === undefined || counts.itemsScanned < maxItems) {
@@ -48264,6 +49714,111 @@ ${parentKey(ref)}`, { ref, origin });
       };
       return this.tierVisibleRows([identity2], (entry) => entry, () => "content", throwOnUnavailable).length > 0;
     }
+    async readItemPages(localItemId, options = {}) {
+      const page2 = Math.max(1, Math.trunc(options.page ?? 1));
+      const count = Math.min(3, Math.max(1, Math.trunc(options.pages ?? 1)));
+      const cap = 12000;
+      let totalPages = 0;
+      let totalChars = 0;
+      const refuse2 = (reason, nextPage) => ({
+        pages: [],
+        totalPages,
+        totalChars,
+        couldNotRead: [reason],
+        ...nextPage ? { nextPage } : {}
+      });
+      const active = this.activeLocalItemRow(localItemId);
+      if (!active)
+        return refuse2("not_in_scope");
+      const identity2 = active.identity;
+      const ledger = this.governingTierLedger();
+      let generation;
+      let initialOverride;
+      const gate = () => {
+        if (currentRemoteReadAccess() !== "active")
+          return "not_in_scope";
+        const scope = options.scope?.();
+        if (scope?.allowed === false || !this.itemMatchesSearchFilters(localItemId, scope?.accountScope, scope?.filters))
+          return "not_in_scope";
+        const now = this.activeLocalItemRow(localItemId);
+        if (!now || tierLedgerIdentityKey(now.identity) !== tierLedgerIdentityKey(identity2))
+          return "not_in_scope";
+        const row = ledger?.getCurrent(identity2);
+        const override = ledger?.getOverride(identity2);
+        if (!row)
+          return "held_until_judged";
+        if (row.metadataTier === "secure" || row.metadataTier === "secrets" || row.contentTier !== "private" || override?.kind === "tier" && override.tier !== "private")
+          return "not_personal";
+        if (row.state !== "current" || row.metadataPending || row.contentPending || ledger.rejudgeQuestion(identity2) || heldUntilJudged(row.reasons))
+          return "held_until_judged";
+        if (generation !== undefined && (row.generation !== generation || JSON.stringify(override) !== initialOverride))
+          return "held_until_judged";
+        if (this.contentHeldPrivate(localItemId))
+          return "content_private";
+        if (!this.readOnDemand(localItemId) && (scope?.contentAllowed === false || this.metadataOnlyRuleForLocator(now.locatorUri) !== undefined || scope?.contentFilters && !this.itemMatchesSearchFilters(localItemId, scope.accountScope, scope.contentFilters)))
+          return "names_only";
+        if (!this.contentServedNow(localItemId, true))
+          return "extraction_pending";
+        return;
+      };
+      const initial = gate();
+      if (initial)
+        return refuse2(initial);
+      generation = ledger.getCurrent(identity2).generation;
+      initialOverride = JSON.stringify(ledger.getOverride(identity2));
+      const readChunks = () => this.db.query(`SELECT c.bounded_text AS text, c.content_hash AS hash
+      FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+      WHERE i.local_item_id = ? AND i.tombstoned = 0 ORDER BY c.chunk_index`).all(localItemId);
+      const chunks = readChunks();
+      totalChars = chunks.reduce((n, chunk) => n + chunk.text.length, 0);
+      if (!totalChars || chunks.some((chunk) => chunk.text.length > cap))
+        return refuse2("extraction_pending");
+      const split = [];
+      let size = 0;
+      for (const chunk of chunks) {
+        if (!split.length || size + chunk.text.length > cap) {
+          split.push([]);
+          size = 0;
+        }
+        split[split.length - 1].push(chunk);
+        size += chunk.text.length;
+      }
+      totalPages = split.length;
+      const selected = split.slice(page2 - 1, page2 - 1 + count);
+      const result = { pages: [], totalPages, totalChars, couldNotRead: [] };
+      if (!selected.length)
+        return result;
+      const inputs = [{
+        corpusId: this.corpusId,
+        provider: identity2.provider,
+        accountScope: identity2.accountScope ?? "",
+        providerItemId: identity2.providerItemId,
+        ...identity2.providerConversationId ? { providerConversationId: identity2.providerConversationId } : {},
+        privateAtAnswer: false,
+        chunkHashes: [...new Set(selected.flatMap((chunks2) => chunks2.map((chunk) => chunk.hash)))]
+      }];
+      const report = await checkReleaseChunks(options.releaseCheck, inputs, { budgetMs: options.budgetMs ?? RELEASE_CHUNK_JUDGE_BUDGET_MS });
+      const after = gate();
+      if (after)
+        return refuse2(after);
+      if (JSON.stringify(readChunks()) !== JSON.stringify(chunks))
+        return refuse2("held_until_judged");
+      const coverageNote = chunkCoverageNote(report);
+      if (coverageNote)
+        result.coverageNote = coverageNote;
+      for (const [index, chunks2] of selected.entries()) {
+        if (chunks2.some((chunk) => !report.allowed[0]?.includes(chunk.hash))) {
+          result.couldNotRead.push("window_judging");
+          result.nextPage = page2 + index;
+          return result;
+        }
+        result.pages.push({ page: page2 + index, text: chunks2.map((chunk) => chunk.text).join("") });
+      }
+      const next = page2 + result.pages.length;
+      if (next <= totalPages)
+        result.nextPage = next;
+      return result;
+    }
     localContent(localItemId, maxChars, passageFocus, options = {}) {
       const row = this.db.query(`
       SELECT item_pk, trust_tier, locator_uri, mime_type, provider, account_scope, provider_item_id,
@@ -49576,11 +51131,11 @@ var init_pairing_placement = __esm(() => {
 });
 
 // src/core/whatsapp-bridge-name.ts
-import { createHash as createHash25 } from "node:crypto";
+import { createHash as createHash26 } from "node:crypto";
 import { existsSync as existsSync36, readdirSync as readdirSync7, readFileSync as readFileSync30 } from "node:fs";
 import { join as join42 } from "node:path";
 function whatsappBridgeFileName(sourceDir) {
-  const hash = createHash25("sha256");
+  const hash = createHash26("sha256");
   for (const name of ["main.go", "go.mod", "go.sum"]) {
     const path = join42(sourceDir, name);
     if (!existsSync36(path))
@@ -49887,7 +51442,7 @@ function assertPairingPlacement(source, layout, env) {
     return;
   }
   if (entry && (sourceAccountMovePending(entry) || entry.layout !== layout)) {
-    throw new Error(`Olympus moved this ${sourceLabel(source)} account's files into its folder while it was pairing, so nothing was paired. Re-run olympus connect ${source} --pair.`);
+    throw new Error(`Olympus moved this ${sourceLabel2(source)} account's files into its folder while it was pairing, so nothing was paired. Re-run olympus connect ${source} --pair.`);
   }
 }
 async function resolveHelper(options, packageRoot) {
@@ -50077,12 +51632,12 @@ function producerLaunch(source, approval, helperExecutable, packageRoot, session
 function parseReadyReceipt(events, source) {
   const event = [...events].reverse().find((candidate) => candidate.event === "ready");
   if (!event || event.status !== "ready" || event.capture_started !== false || !isRecord2(event.proof)) {
-    throw new Error(`${sourceLabel(source)} pairing did not return a verified ready receipt.`);
+    throw new Error(`${sourceLabel2(source)} pairing did not return a verified ready receipt.`);
   }
   const proof = event.proof;
   const proved = source === "telegram" ? proof.authorized === true && proof.session_persisted === true && proof.credentials_transferred === true && typeof proof.account_ref === "string" : proof.authenticated === true && proof.device_persisted === true;
   if (!proved)
-    throw new Error(`${sourceLabel(source)} pairing readiness proof was incomplete.`);
+    throw new Error(`${sourceLabel2(source)} pairing readiness proof was incomplete.`);
   return event;
 }
 function isKindToken(value) {
@@ -50258,16 +51813,16 @@ function pairingFailureMessage(source, code) {
     return new Error("Scan the current QR through WhatsApp Settings > Linked devices > Link a device, then wait for linking to finish.");
   }
   if (code === "pairing_cancelled")
-    return new Error(`${sourceLabel(source)} pairing was cancelled before readiness was proved.`);
+    return new Error(`${sourceLabel2(source)} pairing was cancelled before readiness was proved.`);
   if (code === "pairing_timeout")
-    return new Error(`${sourceLabel(source)} pairing timed out before readiness was proved. Re-run pairing to continue.`);
+    return new Error(`${sourceLabel2(source)} pairing timed out before readiness was proved. Re-run pairing to continue.`);
   if (source === "telegram" && code === "telethon_not_installed") {
     return new Error(`Telethon is required for Telegram pairing. ${TELEGRAM_DEPENDENCY_HINT}`);
   }
   if (source === "telegram" && code === "controlling_terminal_required") {
     return new Error("Telegram pairing needs the private controlling terminal so credentials and login codes never enter argv, logs, or chat.");
   }
-  return new Error(`${sourceLabel(source)} pairing failed safely (${code ?? "helper_failed"}). Re-run olympus connect ${source} --pair in your private terminal.`);
+  return new Error(`${sourceLabel2(source)} pairing failed safely (${code ?? "helper_failed"}). Re-run olympus connect ${source} --pair in your private terminal.`);
 }
 function safeErrorCode(stderr) {
   for (const line of stderr.split(/\r?\n/).reverse()) {
@@ -50294,7 +51849,7 @@ function isRecord2(value) {
 function uniqueNonEmpty(values) {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }
-function sourceLabel(source) {
+function sourceLabel2(source) {
   return source === "telegram" ? "Telegram" : "WhatsApp";
 }
 async function runPairingCommand(request) {
@@ -51657,17 +53212,17 @@ async function prepareWorkerStart(input, worker) {
   };
 }
 function freshConfig(contextConfig, initialPluginConfig) {
-  const root = asRecord7(contextConfig);
-  const plugins = asRecord7(root?.plugins);
-  const entries = asRecord7(plugins?.entries);
-  const olympus = asRecord7(entries?.olympus);
+  const root = asRecord8(contextConfig);
+  const plugins = asRecord8(root?.plugins);
+  const entries = asRecord8(plugins?.entries);
+  const olympus = asRecord8(entries?.olympus);
   const livePluginConfig = olympus && Object.prototype.hasOwnProperty.call(olympus, "config") ? olympus.config : undefined;
   const directPluginConfig = root && ["worker", "email", "sourceIndex", "argus", "identity", "sovereignty"].some((key2) => Object.prototype.hasOwnProperty.call(root, key2)) ? root : undefined;
   const pluginConfig = entries ? livePluginConfig : directPluginConfig ?? initialPluginConfig;
   return { config: configFromPluginConfig(pluginConfig), pluginConfig };
 }
 function assertNativeWorkerScopeConfigSupported(pluginConfig) {
-  const sourceIndex = asRecord7(asRecord7(pluginConfig)?.sourceIndex);
+  const sourceIndex = asRecord8(asRecord8(pluginConfig)?.sourceIndex);
   const unsupported = [
     "corpusRegistry",
     "corpora",
@@ -51839,7 +53394,7 @@ function stripGatewayBootstrapSecrets(env) {
       delete env[key2];
   }
 }
-function asRecord7(value) {
+function asRecord8(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 async function waitUntil(condition, timeoutMs, pollMs) {
@@ -52121,7 +53676,7 @@ var init_dashboard_opening = __esm(() => {
 
 // src/core/people-index.ts
 import { Database as Database12 } from "bun:sqlite";
-import { createHash as createHash27 } from "node:crypto";
+import { createHash as createHash28 } from "node:crypto";
 import { chmodSync as chmodSync15, existsSync as existsSync41, mkdirSync as mkdirSync27 } from "node:fs";
 import { dirname as dirname45 } from "node:path";
 function peopleIndexMigrations() {
@@ -52453,7 +54008,7 @@ function linkPeople(input) {
   for (const [root, memberSet] of uf.members) {
     const members = [...memberSet].sort().map((key2) => identities.get(key2));
     const isOwner = members.some((member) => member.isOwner);
-    const personId = isOwner ? OWNER_PERSON_ID : `p_${createHash27("sha256").update(members[0].identityKey).digest("hex").slice(0, 16)}`;
+    const personId = isOwner ? OWNER_PERSON_ID : `p_${createHash28("sha256").update(members[0].identityKey).digest("hex").slice(0, 16)}`;
     const renamed = [...memberSet].map((identity2) => renames.get(identity2)).reduce((best, next) => next && (!best || next.at > best.at) ? next : best, undefined)?.name;
     const displayName = isOwner ? OWNER_DISPLAY_NAME : renamed ?? bestName(members);
     const nameShareable = isOwner || renamed !== undefined || members.some((member) => member.publicNames.size > 0);
@@ -54024,7 +55579,7 @@ var init_scope_safe_fs = __esm(() => {
 
 // src/workers/archive-import/media-bindings.ts
 import { Database as Database13 } from "bun:sqlite";
-import { createHash as createHash28 } from "node:crypto";
+import { createHash as createHash29 } from "node:crypto";
 import { chmodSync as chmodSync16, existsSync as existsSync44, mkdirSync as mkdirSync29 } from "node:fs";
 import { dirname as dirname47 } from "node:path";
 function archiveMediaBindingsPath(statePath) {
@@ -54070,7 +55625,7 @@ function bindingOf(row) {
   };
 }
 function mediaBindingId(archiveId, relPath) {
-  return `mb-${createHash28("sha256").update(`${archiveId}\x00${relPath}`).digest("hex").slice(0, 32)}`;
+  return `mb-${createHash29("sha256").update(`${archiveId}\x00${relPath}`).digest("hex").slice(0, 32)}`;
 }
 
 class ArchiveMediaBindingStore {
@@ -54380,7 +55935,7 @@ var init_folder_facets = __esm(() => {
 });
 
 // src/workers/x-bookmarks/connector.ts
-import { createHash as createHash29 } from "node:crypto";
+import { createHash as createHash30 } from "node:crypto";
 function createXBookmarksSourceConnector(options) {
   const account = requireAccount(options.account);
   const fetchedAt = validIso(options.fetchedAt ?? new Date().toISOString());
@@ -54481,7 +56036,7 @@ function xBookmarkRawItemFromPost(post, account, folderMemberships, fetchedAt) {
       ...folders.length > 0 ? { folders, folderIds, folderNames } : {},
       ...post.lang ? { language: post.lang } : {},
       ...post.mediaUrls?.length ? { mediaUrls: [...post.mediaUrls] } : {},
-      contentHash: createHash29("sha256").update(JSON.stringify({ text: text2, title, url, folders })).digest("hex")
+      contentHash: createHash30("sha256").update(JSON.stringify({ text: text2, title, url, folders })).digest("hex")
     }),
     fetchedAt
   };
@@ -54532,7 +56087,7 @@ var init_connector = __esm(() => {
 });
 
 // src/workers/x-bookmarks/reconcile-state.ts
-import { createHash as createHash30, randomUUID as randomUUID13 } from "node:crypto";
+import { createHash as createHash31, randomUUID as randomUUID13 } from "node:crypto";
 import { chmodSync as chmodSync17, mkdirSync as mkdirSync30 } from "node:fs";
 import { dirname as dirname48 } from "node:path";
 import { Database as Database14 } from "bun:sqlite";
@@ -56683,7 +58238,7 @@ function normalizeFolderFacetRefreshCounts(counts) {
   };
 }
 function reconcileCompatibilityHash(limits, providerUserId, coverageScope, windowBoundaryAlgorithmVersion) {
-  return createHash30("sha256").update(JSON.stringify({
+  return createHash31("sha256").update(JSON.stringify({
     algorithm: RECONCILE_ALGORITHM_VERSION,
     providerUserId,
     coverageScope,
@@ -56709,7 +58264,7 @@ function recoveryPolicy() {
   };
 }
 function sha256Json(value) {
-  return createHash30("sha256").update(JSON.stringify(value)).digest("hex");
+  return createHash31("sha256").update(JSON.stringify(value)).digest("hex");
 }
 function normalizeOptionalSha2562(value, label) {
   if (value === undefined)
@@ -58897,15 +60452,15 @@ var init_json_stream = __esm(() => {
       if (Number.isSafeInteger(value) || !Number.isFinite(value))
         return value;
       const digits = numberStr.startsWith("-") ? numberStr.slice(1) : numberStr;
-      let wholeNumber = digits.length > 0;
+      let wholeNumber2 = digits.length > 0;
       for (let index = 0;index < digits.length; index += 1) {
         const code = digits.charCodeAt(index);
         if (code < 48 || code > 57) {
-          wholeNumber = false;
+          wholeNumber2 = false;
           break;
         }
       }
-      if (!wholeNumber)
+      if (!wholeNumber2)
         return value;
       if (digits.length < MAX_SAFE_DIGITS.length)
         return value;
@@ -59316,7 +60871,7 @@ var init_browser = __esm(() => {
 });
 
 // src/workers/archive-import/zip-reader.ts
-import { createHash as createHash31 } from "node:crypto";
+import { createHash as createHash32 } from "node:crypto";
 function decodeCp437(bytes) {
   let out = "";
   for (const byte of bytes)
@@ -59543,7 +61098,7 @@ class ZipArchive {
     }
   }
   memberTable() {
-    const hash = createHash31("sha256");
+    const hash = createHash32("sha256");
     let count = 0;
     for (const entry of this.entries()) {
       hash.update(`${JSON.stringify([entry.name, entry.method, entry.flags, entry.crc32, entry.compressedSize, entry.uncompressedSize, entry.localHeaderOffset])}
@@ -60147,7 +61702,7 @@ var init_zip_reader = __esm(() => {
 });
 
 // src/workers/archive-import/manifest.ts
-import { createHash as createHash32 } from "node:crypto";
+import { createHash as createHash33 } from "node:crypto";
 function lastComponent(relPath, rootPath) {
   const source = relPath === "" ? rootPath : relPath;
   const parts = source.split("/").filter((part) => part !== "");
@@ -60384,7 +61939,7 @@ function probeArchivePath(root, chosenRelPath, options = {}) {
   };
 }
 function sha256(bytes) {
-  return createHash32("sha256").update(bytes).digest("hex");
+  return createHash33("sha256").update(bytes).digest("hex");
 }
 function zipMemberTable(reader, head) {
   if (!ZipArchive.looksLikeZip(head))
@@ -60431,7 +61986,7 @@ function archiveFileEntries(files) {
   }));
 }
 function archiveManifestSha256(files) {
-  return createHash32("sha256").update(JSON.stringify(files.map((file) => [
+  return createHash33("sha256").update(JSON.stringify(files.map((file) => [
     file.rel_path,
     file.dev,
     file.ino,
@@ -60484,7 +62039,7 @@ function verifyArchiveManifest(root, files, options = {}) {
 function* archiveFileDigestSteps(root, file) {
   const reader = root.openFile(file.rel_path, { expected: manifestFileVersion(file) });
   try {
-    const hash = createHash32("sha256");
+    const hash = createHash33("sha256");
     for (let offset = 0;offset < file.size; offset += ARCHIVE_DIGEST_RANGE_BYTES) {
       hash.update(reader.readAt(offset, Math.min(ARCHIVE_DIGEST_RANGE_BYTES, file.size - offset)));
       reader.assertCurrent();
@@ -60767,7 +62322,7 @@ var init_source_delete_holds = __esm(() => {
 });
 
 // src/core/source-watch.ts
-import { createHash as createHash33, randomUUID as randomUUID15 } from "node:crypto";
+import { createHash as createHash34, randomUUID as randomUUID15 } from "node:crypto";
 import {
   chmodSync as chmodSync18,
   existsSync as existsSync46,
@@ -60828,7 +62383,7 @@ function createSourceWatchExecutorCapability(input) {
 }
 function sourceWatchDeliveryKey(watchId, ref) {
   const canonical = requireCanonicalRef(ref);
-  return createHash33("sha256").update(JSON.stringify([
+  return createHash34("sha256").update(JSON.stringify([
     requireId(watchId, "watchId"),
     canonical.corpusId,
     canonical.localItemId,
@@ -61900,7 +63455,7 @@ function addMilliseconds(timestamp, deltaMs) {
   return new Date(Date.parse(timestamp) + deltaMs).toISOString();
 }
 function sha2562(value) {
-  return createHash33("sha256").update(value, "utf8").digest("hex");
+  return createHash34("sha256").update(value, "utf8").digest("hex");
 }
 var SOURCE_WATCH_STORE_ID = "source-watch", SOURCE_WATCH_SCHEMA_VERSION = 1, SOURCE_WATCH_MIN_LEASE_MS = 1000, SOURCE_WATCH_MAX_LEASE_MS, SOURCE_WATCH_MIN_RETRY_MS = 1000, SOURCE_WATCH_MAX_RETRY_MS, SOURCE_WATCH_MIN_RETENTION_MS, SOURCE_WATCH_MAX_RETENTION_MS, SOURCE_WATCH_OWNER_HEADER = "X-Olympus-Source-Watch-Owner", SOURCE_WATCH_ROUTE_KIND_HEADER = "X-Olympus-Source-Watch-Route-Kind", SOURCE_WATCH_ROUTE_TARGET_HEADER = "X-Olympus-Source-Watch-Route-Target", SOURCE_WATCH_ROUTE_ACCOUNT_HEADER = "X-Olympus-Source-Watch-Route-Account", SOURCE_WATCH_MAX_QUERY_LENGTH = 4096, MAX_WATCH_LIFETIME_MS, MAX_SOURCE_CLOCK_SKEW_MS, MAX_LOCAL_ITEM_ID_LENGTH = 4096, MAX_SOURCE_VERSION_LENGTH = 1024, MAX_DELIVERY_ATTEMPTS = 100, MAX_AVAILABLE_DELAY_MS, MAX_PAGE_SIZE = 100, MAX_MAINTENANCE_BATCH = 1000, MAX_CURSOR_LENGTH = 1024, DEFAULT_MAX_DELIVERY_ATTEMPTS = 5, DEFAULT_PAGE_SIZE = 50, SAFE_ID, SAFE_TOKEN, SAFE_HASH, SAFE_UUID, SAFE_CHANNEL_TARGET, SAFE_CANONICAL_REF, OWNER_CONTEXT_FIELDS, CREATE_WATCH_FIELDS, CANONICAL_REF_FIELDS, WATCH_STATUS_VALUES, OUTBOX_STATUS_VALUES, ownedContexts, executorCapabilities, OWNED_SCHEMA_OBJECTS, REQUIRED_COLUMNS, SYSTEM_CLOCK;
 var init_source_watch = __esm(() => {
@@ -62022,12 +63577,12 @@ function readIngestionHealthState(path) {
     if (!existsSync47(path))
       return;
     const parsed = JSON.parse(readFileSync37(path, "utf8"));
-    const record = asRecord8(parsed);
-    const sources = asRecord8(record.sources);
+    const record = asRecord9(parsed);
+    const sources = asRecord9(record.sources);
     const normalized = {};
     for (const [sourceId, sourceValue] of Object.entries(sources)) {
-      const source = asRecord8(sourceValue);
-      const terminal = asRecord8(source.failed_terminal_by_class);
+      const source = asRecord9(sourceValue);
+      const terminal = asRecord9(source.failed_terminal_by_class);
       normalized[sourceId] = {
         actionable_stuck: asCount(source.actionable_stuck),
         failed_terminal_by_class: Object.fromEntries(Object.entries(terminal).map(([key2, value]) => [key2, asCount(value)]))
@@ -62058,7 +63613,7 @@ function forgetIngestionHealthState(path, ledgerSourceIds, options = {}) {
 `);
   return doomed.length;
 }
-function asRecord8(value) {
+function asRecord9(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 function asCount(value) {
@@ -62191,7 +63746,7 @@ var init_file_scope_sources = __esm(() => {
 });
 
 // src/core/source-scope-approval.ts
-import { createHash as createHash34, randomUUID as randomUUID16 } from "node:crypto";
+import { createHash as createHash35, randomUUID as randomUUID16 } from "node:crypto";
 import { existsSync as existsSync48, readFileSync as readFileSync38 } from "node:fs";
 import { dirname as dirname52, join as join55 } from "node:path";
 function defaultFileSourceScopeStatePath(handleRegistryPath) {
@@ -62240,7 +63795,7 @@ function connectedSourceScopeAccountGeneration(sourceId, capability, registry, p
   if (handles.length !== 1)
     return;
   const handle = handles[0];
-  const generation = createHash34("sha256").update(JSON.stringify([
+  const generation = createHash35("sha256").update(JSON.stringify([
     sourceId,
     handle.handle,
     handle.providerAccountId ?? "",
@@ -62419,7 +63974,7 @@ function readState2(path) {
   } catch {
     return { kind: "malformed", digest: "unreadable" };
   }
-  const digest3 = createHash34("sha256").update(raw).digest("hex");
+  const digest3 = createHash35("sha256").update(raw).digest("hex");
   try {
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
@@ -62475,7 +64030,7 @@ var init_source_scope_approval = __esm(() => {
 });
 
 // src/core/mail-source-scope.ts
-import { createHash as createHash35, randomUUID as randomUUID17 } from "node:crypto";
+import { createHash as createHash36, randomUUID as randomUUID17 } from "node:crypto";
 import { existsSync as existsSync49, readFileSync as readFileSync39 } from "node:fs";
 import { dirname as dirname53, join as join56 } from "node:path";
 function defaultMailSourceScopeStatePath(handleRegistryPath) {
@@ -62603,7 +64158,7 @@ function assertMailSourceScopeApproved(input) {
 }
 function mailScopeOwnerTierRules(scope) {
   return scope.alwaysPrivateSenders.map((sender) => ({
-    id: `mail-scope-always-private-${createHash35("sha256").update(sender).digest("hex").slice(0, 12)}`,
+    id: `mail-scope-always-private-${createHash36("sha256").update(sender).digest("hex").slice(0, 12)}`,
     source: MAIL_SCOPE_RULE_SOURCE,
     match: { kind: "sender", value: sender },
     tier: "secure",
@@ -62855,7 +64410,7 @@ function readState3(path) {
   } catch {
     return { kind: "malformed", digest: "unreadable" };
   }
-  const digest3 = createHash35("sha256").update(raw).digest("hex");
+  const digest3 = createHash36("sha256").update(raw).digest("hex");
   try {
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
@@ -63079,11 +64634,11 @@ var init_forget = __esm(() => {
 // src/core/this-computer.ts
 import { spawnSync as spawnSync10 } from "node:child_process";
 import { existsSync as existsSync51, readFileSync as readFileSync40 } from "node:fs";
-import { createHash as createHash36, randomUUID as randomUUID18 } from "node:crypto";
+import { createHash as createHash37, randomUUID as randomUUID18 } from "node:crypto";
 import { dirname as dirname54, join as join58 } from "node:path";
 function hostBinding(machineId, hostIdentity) {
   const identity2 = hostIdentity();
-  return identity2 ? createHash36("sha256").update(`${machineId}:${identity2}`).digest("hex") : undefined;
+  return identity2 ? createHash37("sha256").update(`${machineId}:${identity2}`).digest("hex") : undefined;
 }
 function readStateForHost(path, hostIdentity) {
   const state = readState4(path);
@@ -66596,7 +68151,7 @@ function sourceInvocationProvenance(value) {
 }
 
 // src/core/file-extraction-source.ts
-import { createHash as createHash37 } from "node:crypto";
+import { createHash as createHash38 } from "node:crypto";
 function isFileExtractionSourceError(value) {
   if (!value || typeof value !== "object")
     return false;
@@ -66640,7 +68195,7 @@ var init_file_extraction_source = __esm(() => {
       this.errorKind = errorKind;
       this.settleAs = FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS[errorKind];
       this.retryable = this.settleAs === "failed_retryable";
-      const errorHash = options.detailForHash === undefined ? undefined : createHash37("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
+      const errorHash = options.detailForHash === undefined ? undefined : createHash38("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
       if (errorHash)
         this.errorHash = errorHash;
       if (options.retryAt !== undefined && Number.isFinite(Date.parse(options.retryAt)))
@@ -66721,7 +68276,7 @@ function metadataStringArray2(metadata, key2) {
 }
 
 // src/workers/google-connectors/gmail-mail-record.ts
-import { createHash as createHash38 } from "node:crypto";
+import { createHash as createHash39 } from "node:crypto";
 function isGmailAttachmentPart(part) {
   const type = (part.mimeType ?? "").trim().toLowerCase();
   if (type.startsWith("multipart/"))
@@ -66750,7 +68305,7 @@ function childrenOf(record, build) {
   return record.metadataOnly || build.children !== true ? [] : record.attachments.filter((attachment) => attachment.filename.trim() !== "" && (attachment.partId === "" ? 0 : attachment.partId.split(".").length) <= GMAIL_CHILD_MAX_DEPTH);
 }
 function hashString3(value) {
-  return createHash38("sha256").update(value).digest("hex");
+  return createHash39("sha256").update(value).digest("hex");
 }
 function parsedDate(value) {
   if (!value)
@@ -67269,7 +68824,7 @@ var init_request_budget = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail.ts
-import { createHash as createHash39 } from "node:crypto";
+import { createHash as createHash40 } from "node:crypto";
 
 class GoogleGmailSourceConnector {
   id = GMAIL_PROVIDER;
@@ -67921,9 +69476,9 @@ class RestGmailApiClient {
     for (const labelId of request.labelIds ?? [])
       params.append("labelIds", labelId);
     const json = await this.getJson(`users/me/messages?${params.toString()}`);
-    const record = asRecord9(json, "Gmail messages list response");
+    const record = asRecord10(json, "Gmail messages list response");
     return {
-      messages: Array.isArray(record.messages) ? record.messages.map((item) => asRecord9(item, "Gmail message list item")).map((item) => ({
+      messages: Array.isArray(record.messages) ? record.messages.map((item) => asRecord10(item, "Gmail message list item")).map((item) => ({
         id: stringValue(item.id),
         threadId: stringValue(item.threadId)
       })).filter((item) => item.id) : [],
@@ -67941,22 +69496,22 @@ class RestGmailApiClient {
     return json;
   }
   async getProfile() {
-    const record = asRecord9(await this.getJson("users/me/profile"), "Gmail profile");
+    const record = asRecord10(await this.getJson("users/me/profile"), "Gmail profile");
     return { emailAddress: stringValue(record.emailAddress) };
   }
   async getAttachment(messageId, attachmentId) {
-    const record = asRecord9(await this.getJson(`users/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`), "Gmail attachment");
+    const record = asRecord10(await this.getJson(`users/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`), "Gmail attachment");
     return {
       data: stringValue(record.data),
       ...typeof record.size === "number" && Number.isSafeInteger(record.size) ? { size: record.size } : {}
     };
   }
   async listLabels() {
-    const record = asRecord9(await this.getJson("users/me/labels"), "Gmail labels list response");
-    return Array.isArray(record.labels) ? record.labels.map((item) => gmailLabelFromJson(asRecord9(item, "Gmail label"))).filter((label) => label.id) : [];
+    const record = asRecord10(await this.getJson("users/me/labels"), "Gmail labels list response");
+    return Array.isArray(record.labels) ? record.labels.map((item) => gmailLabelFromJson(asRecord10(item, "Gmail label"))).filter((label) => label.id) : [];
   }
   async getLabel(id) {
-    return gmailLabelFromJson(asRecord9(await this.getJson(`users/me/labels/${encodeURIComponent(id)}`), "Gmail label"));
+    return gmailLabelFromJson(asRecord10(await this.getJson(`users/me/labels/${encodeURIComponent(id)}`), "Gmail label"));
   }
   async getJson(path) {
     let attempt = 0;
@@ -68160,7 +69715,7 @@ function normalizeGmailMaxMessages(value) {
     return DEFAULT_GMAIL_SYNC_MAX_MESSAGES;
   return Math.max(1, Math.min(Math.floor(value), MAX_GMAIL_SYNC_MESSAGES));
 }
-function asRecord9(value, label) {
+function asRecord10(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object.`);
   }
@@ -68181,7 +69736,7 @@ function metadataCount(metadata, key2) {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 function hashString4(value) {
-  return createHash39("sha256").update(value).digest("hex");
+  return createHash40("sha256").update(value).digest("hex");
 }
 var GMAIL_SOURCE_ID = "gmail.email", GMAIL_INTERNAL_CONNECTOR_CORPUS_ID = "internal.email", GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PUBLIC_CONNECTOR_CORPUS_ID = "public_safe.email", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, GMAIL_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET", GMAIL_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GMAIL_DAILY_REQUEST_BUDGET = 1e6, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS = 32, GmailPageTokenRejectedError, GMAIL_LABEL_PAGE_SIZE = 500, GMAIL_METADATA_HEADERS, GMAIL_PART_LOCATOR_PREFIX = "gmail-part1:";
 var init_gmail = __esm(() => {
@@ -68203,7 +69758,7 @@ var init_gmail = __esm(() => {
 });
 
 // src/workers/google-connectors/drive.ts
-import { createHash as createHash40 } from "node:crypto";
+import { createHash as createHash41 } from "node:crypto";
 
 class GoogleDriveSourceConnector {
   id = GOOGLE_DRIVE_PROVIDER;
@@ -68674,16 +70229,16 @@ class RestGoogleDriveApiClient {
     if (request.pageToken)
       params.set("pageToken", request.pageToken);
     const json = await this.getJson(`files?${params.toString()}`);
-    const record = asRecord10(json, "Google Drive files list response");
+    const record = asRecord11(json, "Google Drive files list response");
     return {
-      files: Array.isArray(record.files) ? record.files.map((item) => normalizeDriveFile(asRecord10(item, "Google Drive file"))).filter((file) => file.id) : [],
+      files: Array.isArray(record.files) ? record.files.map((item) => normalizeDriveFile(asRecord11(item, "Google Drive file"))).filter((file) => file.id) : [],
       ...optionalStringProp2(record, "nextPageToken")
     };
   }
   async getFolder(folderId) {
     const params = new URLSearchParams({ fields: "id,name,parents", supportsAllDrives: "true" });
     const json = await this.getJson(`files/${encodeURIComponent(folderId)}?${params.toString()}`);
-    const record = asRecord10(json, "Google Drive folder");
+    const record = asRecord11(json, "Google Drive folder");
     const id = typeof record.id === "string" ? record.id : folderId;
     return {
       id,
@@ -68778,7 +70333,7 @@ function normalizeDriveFile(record) {
     ...optionalStringProp2(record, "size"),
     ...optionalStringProp2(record, "md5Checksum"),
     ...Array.isArray(record.parents) ? { parents: record.parents.map(stringValue2).filter(Boolean) } : {},
-    ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord10(owner, "Google Drive owner")).map((owner) => optionalStringProp2(owner, "emailAddress")) } : {}
+    ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord11(owner, "Google Drive owner")).map((owner) => optionalStringProp2(owner, "emailAddress")) } : {}
   };
 }
 function isDownloadableTextMime(mimeType, name) {
@@ -68806,7 +70361,7 @@ function normalizeMaxTextBytes(value) {
     return DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES;
   return Math.max(1000, Math.min(Math.floor(value), 512000));
 }
-function asRecord10(value, label) {
+function asRecord11(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object.`);
   }
@@ -68823,7 +70378,7 @@ function safeProviderDetail2(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString5(value) {
-  return createHash40("sha256").update(value).digest("hex");
+  return createHash41("sha256").update(value).digest("hex");
 }
 var GOOGLE_DRIVE_SOURCE_ID = "google_drive.docs", GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = "internal.drive.docs", GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID = "secure_local.drive.docs", GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID = "public_safe.drive.docs", GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, GOOGLE_DRIVE_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_DAILY_API_REQUEST_BUDGET", GOOGLE_DRIVE_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GOOGLE_DRIVE_DAILY_REQUEST_BUDGET = 3000, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED, GOOGLE_DRIVE_INGESTION_EXCLUSION_SOURCE = "google_drive.personal", GOOGLE_DRIVE_ENFORCEABLE_EXCLUSION_CRITERIA;
 var init_drive = __esm(() => {
@@ -69142,7 +70697,7 @@ var init_corpus_adapter2 = __esm(() => {
 });
 
 // src/workers/readwise/connector.ts
-import { createHash as createHash41 } from "node:crypto";
+import { createHash as createHash42 } from "node:crypto";
 import { mkdirSync as mkdirSync36, readFileSync as readFileSync43 } from "node:fs";
 import { dirname as dirname57 } from "node:path";
 
@@ -69513,7 +71068,7 @@ function rawItem(input) {
       ...input.authoredAt ? { authoredAt: input.authoredAt } : {},
       ...input.updatedAt ? { updatedAt: input.updatedAt } : {},
       ...input.metadata,
-      contentHash: createHash41("sha256").update(JSON.stringify({
+      contentHash: createHash42("sha256").update(JSON.stringify({
         text: input.text,
         title: input.title,
         author: input.author,
@@ -70269,7 +71824,7 @@ var init_embedding_ledger = __esm(() => {
 });
 
 // src/workers/connector-store/tier-move.ts
-import { createHash as createHash42 } from "node:crypto";
+import { createHash as createHash43 } from "node:crypto";
 function rowRehomeReceiptId(ledger, identity2, generation) {
   return `row-rehome:${ledger.ledgerId()}:${tierLedgerIdentityKey(identity2)}:${generation}`;
 }
@@ -70751,7 +72306,7 @@ function readVerifiedMove(ledger, identity2) {
   return receipt;
 }
 function copyFingerprint(copy, layers) {
-  return createHash42("sha256").update(JSON.stringify({
+  return createHash43("sha256").update(JSON.stringify({
     identity: copy.identity,
     columns: copy.columns,
     chunks: layers === "metadata" ? [] : copy.chunks
@@ -72122,7 +73677,7 @@ var init_wordpiece = __esm(() => {
 });
 
 // src/workers/source-index/built-in-embedding/provider.ts
-import { createHash as createHash43 } from "node:crypto";
+import { createHash as createHash44 } from "node:crypto";
 import { readFileSync as readFileSync45 } from "node:fs";
 import { availableParallelism } from "node:os";
 import { dirname as dirname60, join as join64 } from "node:path";
@@ -72198,7 +73753,7 @@ class BuiltInSourceEmbeddingProvider {
       backend: this.backend,
       ...options.epochId ? { epochOverride: options.epochId } : {}
     });
-    this.configHash = createHash43("sha256").update(JSON.stringify({
+    this.configHash = createHash44("sha256").update(JSON.stringify({
       provider: this.provider,
       model: this.modelId,
       repository: this.spec.repository,
@@ -73899,7 +75454,7 @@ var init_tier_override_settle = __esm(() => {
 });
 
 // src/workers/connector-store/tier-rules-sweep.ts
-import { createHash as createHash44 } from "node:crypto";
+import { createHash as createHash45 } from "node:crypto";
 function sweepOwnerRuleRaises(options) {
   const report = { scanned: 0, raised: 0, secrets: 0, complete: true };
   const { set } = options;
@@ -74174,7 +75729,7 @@ function isRaisingRule(rule) {
   return tierRank(rule.tier) > tierRank("private");
 }
 function ruleKey(rule) {
-  return createHash44("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
+  return createHash45("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
 }
 function readState5(raw) {
   if (!raw)
@@ -74569,7 +76124,7 @@ var init_tier_secrets_floor_sweep = __esm(() => {
 });
 
 // src/workers/connector-store/tiered-store-set.ts
-import { createHash as createHash45 } from "node:crypto";
+import { createHash as createHash46 } from "node:crypto";
 import { existsSync as existsSync55 } from "node:fs";
 function tieredStoreSetLedgerPath(secureLocalStoreDbPath) {
   return tierLedgerPathForStore(secureLocalStoreDbPath);
@@ -75884,7 +77439,7 @@ function identityKey(identity2) {
   return tierLedgerIdentityKey(identity2);
 }
 function planKey(item) {
-  const judged = createHash45("sha256").update(JSON.stringify([
+  const judged = createHash46("sha256").update(JSON.stringify([
     item.content.kind,
     item.content.kind === "metadata_only" ? "" : connectorStoreItemText(item) ?? "",
     stringMetadata(item, ["title", "name", "subject"]) ?? "",
@@ -75997,7 +77552,7 @@ var init_tiered_store_set = __esm(() => {
 });
 
 // src/workers/readwise/live-sync.ts
-import { createHash as createHash46 } from "node:crypto";
+import { createHash as createHash47 } from "node:crypto";
 function createReadwiseConnectorStoreSyncHandler(options) {
   const env = options.env ?? process.env;
   const config = options.config ?? defaultReadwiseLiveSyncConfig(env);
@@ -76162,7 +77717,7 @@ function taskOutcome(input) {
   };
 }
 function readwiseReceiptDigest(receipt) {
-  return createHash46("sha256").update(JSON.stringify(receipt)).digest("hex");
+  return createHash47("sha256").update(JSON.stringify(receipt)).digest("hex");
 }
 function emptyEmbedSummary(store, provider) {
   return {
@@ -76353,22 +77908,22 @@ function onDemandFailedCoverageNote(count) {
 }
 
 // src/workers/answer-activity.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
 function runPrivacyReleaseInference(work) {
-  privacyReleaseInference ??= new AsyncLocalStorage5;
-  localInferencePriority ??= new AsyncLocalStorage5;
+  privacyReleaseInference ??= new AsyncLocalStorage7;
+  localInferencePriority ??= new AsyncLocalStorage7;
   return privacyReleaseInference.run(true, () => localInferencePriority.run("owner", work));
 }
 function runWithLocalInferenceGuard(guard, work) {
-  localInferenceGuards ??= new AsyncLocalStorage5;
+  localInferenceGuards ??= new AsyncLocalStorage7;
   return localInferenceGuards.run([...localInferenceGuards?.getStore() ?? [], guard], work);
 }
 function runBackgroundInference(work) {
-  localInferencePriority ??= new AsyncLocalStorage5;
+  localInferencePriority ??= new AsyncLocalStorage7;
   return localInferencePriority.run("background", work);
 }
 function runClassificationInference(work) {
-  localInferencePriority ??= new AsyncLocalStorage5;
+  localInferencePriority ??= new AsyncLocalStorage7;
   return localInferencePriority.run(privacyReleaseInference?.getStore() ? "owner" : "maintenance", work);
 }
 function currentLocalInferencePriority() {
@@ -76601,171 +78156,6 @@ var init_answer_activity = __esm(() => {
   DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
 });
 
-// src/core/opsec.ts
-function createStructuredEvidenceFact(input) {
-  const factId = input.factId.trim();
-  const claim = input.claim.trim();
-  if (!factId)
-    throw new Error("Structured evidence facts require a factId.");
-  if (!claim)
-    throw new Error("Structured evidence facts require a claim.");
-  if (input.sourceProvenance.length === 0) {
-    throw new Error("Structured evidence facts require source provenance.");
-  }
-  return {
-    factId,
-    claim,
-    sourceProvenance: [...input.sourceProvenance],
-    sensitivity: input.sensitivity,
-    confidence: input.confidence,
-    extractionKind: input.extractionKind,
-    sourceInstructionFlags: detectSourceInstructionFlags(claim),
-    releaseSurface: input.releaseSurface ?? defaultReleaseSurfaceForSensitivity(input.sensitivity)
-  };
-}
-function evaluateReleaseGate(input) {
-  const reasons = new Set;
-  const redactions = [];
-  if (input.action !== "read" && input.action !== "answer") {
-    return {
-      decision: "needs_approval",
-      reasons: ["high_impact_action_requires_approval"],
-      requiredApproval: input.action === "send" || input.action === "write" || input.action === "delete" ? "write_action" : "user_review"
-    };
-  }
-  const secretLabels = secretLabelsInText([
-    input.draftAnswer,
-    ...input.facts.map((fact) => fact.claim)
-  ].join(`
-`));
-  for (const label of secretLabels) {
-    redactions.push({ label, reason: "s5_like_secret_detected" });
-  }
-  if (secretLabels.length > 0 || input.facts.some((fact) => fact.sensitivity.trustTier === "S5")) {
-    return {
-      decision: "deny",
-      reasons: ["s5_secret_denied_from_ordinary_output"],
-      ...redactions.length > 0 ? { redactions } : {},
-      requiredApproval: "s5_secret_use"
-    };
-  }
-  const allInstructionFlags = new Set(input.facts.flatMap((fact) => [...fact.sourceInstructionFlags]));
-  if (allInstructionFlags.size > 0) {
-    reasons.add("hostile_source_instruction_treated_as_data");
-  }
-  const crossingToCallingAgent = isCallingAgentDestination(input.destination);
-  const secureFacts = input.facts.filter((fact) => isSecureSensitivity(fact.sensitivity));
-  if (crossingToCallingAgent && secureFacts.some((fact) => fact.releaseSurface === "local_only")) {
-    return {
-      decision: "needs_approval",
-      reasons: [...reasons, "secure_local_fact_not_marked_for_castor_release"],
-      requiredApproval: "s4_release"
-    };
-  }
-  if (crossingToCallingAgent && secureFacts.length > 0) {
-    reasons.add("bounded_secure_derivative_allowed");
-  }
-  return {
-    decision: "allow",
-    reasons: [...reasons, "release_gate_passed"],
-    allowedText: input.draftAnswer
-  };
-}
-function isCallingAgentDestination(destination) {
-  return destination === "calling_agent" || destination === "castor";
-}
-function buildOpsecReleaseAudit(facts, decision) {
-  return {
-    structured_evidence: facts.map((fact) => ({
-      fact_id: fact.factId,
-      trust_tier: fact.sensitivity.trustTier,
-      trust_domain: fact.sensitivity.trustDomain,
-      confidence: fact.confidence,
-      extraction_kind: fact.extractionKind,
-      source_instruction_flags: [...fact.sourceInstructionFlags],
-      release_surface: fact.releaseSurface,
-      provenance_count: fact.sourceProvenance.length
-    })),
-    release_decision: {
-      decision: decision.decision,
-      reasons: [...decision.reasons],
-      ...decision.redactions ? { redactions: [...decision.redactions] } : {},
-      ...decision.requiredApproval ? { required_approval: decision.requiredApproval } : {}
-    },
-    raw_source_exposed: false
-  };
-}
-function answerForReleaseDecision(decision) {
-  if ((decision.decision === "allow" || decision.decision === "redact") && decision.allowedText) {
-    return decision.allowedText;
-  }
-  if (decision.decision === "needs_approval") {
-    return "I found matching source material, but this needs review before I can summarize it in this calling-assistant-safe path.";
-  }
-  return "I found matching source material, but it cannot be summarized in this calling-assistant-safe path.";
-}
-function detectSourceInstructionFlags(text2) {
-  const flags = new Set;
-  if (/\b(ignore|disregard)\s+(all\s+)?(previous|prior|above)\s+instructions?\b/i.test(text2)) {
-    flags.add("ignore_previous_instructions");
-  }
-  if (/\b(system|developer|policy)\s+(prompt|message|instructions?)\b/i.test(text2) || /\byou are now\b/i.test(text2)) {
-    flags.add("role_or_policy_override");
-  }
-  if (/\b(send|exfiltrate|upload|forward|post)\b.{0,80}\b(secret|token|password|key|credential|email|gmail|document|file)s?\b/i.test(text2)) {
-    flags.add("credential_exfiltration_request");
-  }
-  if (/\b(send|forward|email|post|upload|webhook|dm|slack)\b.{0,100}\b(attacker|external|http|https|@)\b/i.test(text2)) {
-    flags.add("external_communication_request");
-  }
-  if (/\b(call|use|invoke)\b.{0,60}\btool\b/i.test(text2) || /\bdelete\b.{0,80}\b(log|file|email|message|record)s?\b/i.test(text2)) {
-    flags.add("tool_escalation_request");
-  }
-  if (/\b(as an ai|assistant|model)\b/i.test(text2)) {
-    flags.add("general_source_instruction");
-  }
-  return [...flags].sort();
-}
-function defaultReleaseSurfaceForSensitivity(sensitivity) {
-  if (sensitivity.trustTier === "S5")
-    return "local_only";
-  return "castor_answer";
-}
-function secretLabelsInText(text2) {
-  const labels = new Set;
-  const variants = secretScreeningVariants(text2);
-  for (const { label, pattern } of SECRET_PATTERNS) {
-    const shared = {
-      label: ["private_key", "openai_key", "github_token", "slack_token"].includes(label) ? label : "credential_assignment",
-      findingType: "credential_assignment",
-      confidence: 1,
-      pattern: new RegExp(pattern.source, `${pattern.flags}g`)
-    };
-    if (hasSecretPatternHit(text2, shared, variants))
-      labels.add(label);
-  }
-  for (const shared of SHARED_SECRET_PATTERNS) {
-    if (hasSecretPatternHit(text2, shared, variants))
-      labels.add(shared.label);
-  }
-  return [...labels];
-}
-var SECRET_PATTERNS;
-var init_opsec = __esm(() => {
-  init_secret_patterns();
-  init_types();
-  SECRET_PATTERNS = [
-    { label: "private_key", pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/i },
-    { label: "oauth_refresh_token", pattern: /\brefresh[_ -]?token\s*[:=]\s*["']?[A-Za-z0-9._~+/=-]{8,}/i },
-    { label: "client_secret", pattern: /\bclient[_ -]?secret\s*[:=]\s*["']?[A-Za-z0-9._~+/=-]{8,}/i },
-    { label: "api_key", pattern: /\bapi[_ -]?key\s*[:=]\s*["']?[A-Za-z0-9._~+/=-]{12,}/i },
-    { label: "password", pattern: /\bpassword\s*[:=]\s*["']?\S{8,}/i },
-    { label: "openai_key", pattern: /\bsk-[A-Za-z0-9_-]{16,}\b/ },
-    { label: "github_token", pattern: /\b(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]{16,}\b/ },
-    { label: "slack_token", pattern: /\bxox[abp]-[A-Za-z0-9-]{16,}\b/ }
-  ];
-});
-
 // src/core/evidence-versions.ts
 function evidenceVersions(items) {
   const shingles = items.map((item) => item.family === undefined || DOCUMENT_FAMILIES.has(item.family) ? shingleSet(item.text) : new Set);
@@ -76861,7 +78251,7 @@ var init_evidence_versions = __esm(() => {
 });
 
 // src/core/analyst.ts
-import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
 function refuseLocalOnlyOnOrdinaryCloud(request, providerLabel3) {
   if (!request.localOnly)
     return;
@@ -77328,8 +78718,8 @@ function versionDateLabels(dates) {
   const days = dates.map((date) => new Date(Date.parse(date)).toISOString().slice(0, 10));
   const sameDay = new Set(days).size < days.length;
   return new Map(dates.map((date) => {
-    const iso = new Date(Date.parse(date)).toISOString();
-    return [date, sameDay ? `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC` : iso.slice(0, 10)];
+    const iso2 = new Date(Date.parse(date)).toISOString();
+    return [date, sameDay ? `${iso2.slice(0, 10)} ${iso2.slice(11, 16)} UTC` : iso2.slice(0, 10)];
   }));
 }
 function candidateCitationMetadata(candidate) {
@@ -77720,7 +79110,7 @@ var init_analyst = __esm(() => {
   init_partial_search();
   init_operation_error();
   init_evidence_versions();
-  analystAbortSignalStorage = new AsyncLocalStorage6;
+  analystAbortSignalStorage = new AsyncLocalStorage8;
   ANALYST_SYSTEM = [
     "You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.",
     "Rules:",
@@ -78202,196 +79592,6 @@ var init_analyst_openclaw_infer = __esm(() => {
   };
 });
 
-// src/core/release-manifest.ts
-import { createHash as createHash47 } from "node:crypto";
-import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
-function chunkCoverageNote(result) {
-  return result.withheldPassages > 0 ? `${result.withheldPassages} passages from ${result.withheldDocuments} documents are still being checked for privacy and weren't shared. Ask again in a minute.` : undefined;
-}
-async function checkReleaseChunks(check, inputs, options) {
-  try {
-    const result = await check?.chunks?.(inputs, options);
-    if (result && result.allowed.length === inputs.length)
-      return result;
-  } catch {}
-  return {
-    allowed: inputs.map(() => []),
-    withheldPassages: inputs.reduce((n, input) => n + (input.layer === "names" ? 0 : Math.max(1, input.chunkHashes?.length ?? 0)), 0),
-    withheldDocuments: inputs.filter((input) => input.layer !== "names").length
-  };
-}
-function passagesWithheldAtReleasableTiers(inputs, verdicts, report) {
-  return inputs.reduce((total, input, index) => {
-    const verdict = verdicts[index];
-    if (input.layer === "names" || !verdict)
-      return total;
-    const releasable = verdict.tier === "public_or_personal" || verdict.tier === "legacy" && !input.privateAtAnswer;
-    if (!releasable)
-      return total;
-    const hashes = new Set(input.chunkHashes ?? []);
-    const allowed = verdict.tier === "legacy" ? 0 : (report.allowed[index] ?? []).filter((hash) => hashes.has(hash)).length;
-    return total + Math.max(0, Math.max(1, hashes.size) - allowed);
-  }, 0);
-}
-async function recheckSearchEvidence(raw, manifests, check) {
-  const evidence = Array.isArray(raw.evidence) ? raw.evidence : [];
-  if (!evidence.length)
-    return { raw, withheldAfter: false };
-  const inputs = manifests.flatMap((manifest) => manifest.inputs);
-  let report;
-  let verdicts = [];
-  try {
-    if (check && manifests.length) {
-      report = await checkReleaseChunks(check, inputs);
-      verdicts = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
-    }
-  } catch {}
-  const cleared = (index) => {
-    const input = inputs[index];
-    const verdict = verdicts[index];
-    return !!verdict && !verdict.gone && (input.layer === "names" ? ["public_or_personal", "legacy"].includes(verdict.tier) : verdict.tier === "public_or_personal" && !!input.chunkHashes?.length && input.chunkHashes.every((hash) => report?.allowed[index]?.includes(hash)));
-  };
-  const held = (index) => {
-    const input = inputs[index];
-    if (input.layer === "names")
-      return 0;
-    const hashes = new Set(input.chunkHashes ?? []);
-    return Math.max(1, hashes.size) - [...hashes].filter((hash) => report?.allowed[index]?.includes(hash)).length;
-  };
-  const parentsCleared = inputs.every((input, index) => input.dependency !== "parent_label" || cleared(index));
-  let droppedOtherwise = 0;
-  const kept = evidence.filter((value) => {
-    if (!value || typeof value !== "object") {
-      droppedOtherwise += 1;
-      return false;
-    }
-    const hit = value;
-    const matches = inputs.flatMap((input, index) => input.dependency !== "parent_label" && input.corpusId === hit.corpus_id && input.provider === hit.provider && input.accountScope === hit.account_scope && input.providerItemId === hit.provider_item_id && input.providerConversationId === hit.provider_conversation_id ? [index] : []);
-    const textBound = hit.excerpt === undefined || hit.excerpt === "" || typeof hit.excerpt === "string" && matches.some((index) => inputs[index].layer !== "names" && inputs[index].releasedTextDigest === releasedTextDigest(hit.excerpt));
-    if (parentsCleared && matches.length > 0 && matches.every(cleared) && textBound)
-      return true;
-    if (!report || !matches.some((index) => held(index) > 0))
-      droppedOtherwise += 1;
-    return false;
-  });
-  const dropped = evidence.length - kept.length;
-  if (!dropped)
-    return { raw, withheldAfter: false };
-  const coverage = raw.coverage && typeof raw.coverage === "object" ? raw.coverage : {};
-  const note = report && chunkCoverageNote(report);
-  const priorNotes = Array.isArray(coverage.cut_short) ? coverage.cut_short : [];
-  const withheld = typeof raw.withheld === "number" && Number.isFinite(raw.withheld) ? Math.max(0, raw.withheld) : 0;
-  return { raw: {
-    ...raw,
-    evidence: kept,
-    withheld: withheld + (report?.withheldPassages ?? 0) + droppedOtherwise,
-    ...note ? { coverage: { ...coverage, cut_short: [...new Set([...priorNotes, note])] } } : {}
-  }, withheldAfter: true };
-}
-function bindReleaseChunks(provenance, chunks, hashes) {
-  chunkProvenance.set(provenance, chunks.map((text2, index) => ({ text: text2, hashes: hashes[index] ?? [] })));
-}
-function copyReleaseChunks(from, into) {
-  const chunks = chunkProvenance.get(from);
-  if (chunks)
-    chunkProvenance.set(into, chunks);
-}
-function releasePassageHashes(provenance, text2) {
-  return [...new Set((chunkProvenance.get(provenance) ?? []).filter((entry) => entry.text.includes(text2)).flatMap((entry) => entry.hashes))];
-}
-function isUnprovedPassageMarker(hash) {
-  return hash.startsWith(UNPROVED_PASSAGE);
-}
-function releaseCandidateHashes(candidate, options = {}) {
-  const mapped = candidate.chunks.map((text2) => releasePassageHashes(candidate.provenance, text2));
-  const unmapped = options.holdUnmapped && mapped.some((hashes) => hashes.length > 0) ? mapped.filter((hashes) => hashes.length === 0).length + (candidate.tables?.length ?? 0) + (candidate.facts?.length ?? 0) : 0;
-  return [...new Set(mapped.flat()), ...Array.from({ length: unmapped }, (_, index) => `${UNPROVED_PASSAGE}${index}`)];
-}
-function releasedTextDigest(text2) {
-  return createHash47("sha256").update(text2).digest("hex");
-}
-function createReleaseManifestSink() {
-  return { manifests: [] };
-}
-function runWithReleaseManifestSink(sink, fn) {
-  return storage3.run(sink, fn);
-}
-function currentReleaseManifestSink() {
-  return storage3.getStore();
-}
-function recordReleaseManifest(manifest) {
-  storage3.getStore()?.manifests.push({
-    inputs: manifest.inputs.map((input) => ({ ...input, ...input.chunkHashes ? { chunkHashes: [...input.chunkHashes] } : {} })),
-    constraints: { ...manifest.constraints }
-  });
-}
-function adoptReleaseManifests(into, from) {
-  into.manifests.push(...from.manifests);
-}
-function privateInputReleaseAllowed(input, verdict, constraints, postureNow) {
-  const privateNow = verdict.tier === "private" || verdict.tier === "legacy" && input.privateAtAnswer;
-  const authorized = constraints.includeSecureLocalContent || postureNow === "allow";
-  if (input.layer === "names")
-    return !privateNow || input.privateAtAnswer && authorized;
-  return !privateNow || authorized;
-}
-async function answerReleaseWithheldReasonOffThread(manifests, check, ceiling = "private", options = {}) {
-  try {
-    const inputs = manifests.flatMap((manifest) => manifest.inputs);
-    const report = options.chunks ? await checkReleaseChunks(check, inputs) : undefined;
-    const verdicts = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
-    const reason = answerReleaseWithheldReason(manifests, { inputs: () => verdicts, secureDerivativeDefault: () => check.secureDerivativeDefault() }, ceiling);
-    if (reason)
-      return reason;
-    if (report && passagesWithheldAtReleasableTiers(inputs, verdicts, report) > 0)
-      return ANSWER_RELEASE_UNVERIFIED;
-    return;
-  } catch {
-    return ANSWER_RELEASE_UNVERIFIED;
-  }
-}
-function answerReleaseWithheldReason(manifests, check, ceiling = "private") {
-  if (manifests.length === 0)
-    return ANSWER_RELEASE_UNVERIFIED;
-  const entries = manifests.flatMap((manifest) => manifest.inputs.map((input) => ({ input, constraints: manifest.constraints })));
-  const inputs = entries.map(({ input }) => input);
-  try {
-    const verdicts = check.inputs(inputs);
-    if (verdicts.length !== inputs.length)
-      return ANSWER_RELEASE_UNVERIFIED;
-    const postureNow = check.secureDerivativeDefault();
-    for (const [index, verdict] of verdicts.entries()) {
-      if (verdict.tier === "unknown" || verdict.gone)
-        return ANSWER_RELEASE_UNVERIFIED;
-      if (verdict.tier === "secret")
-        return ANSWER_RELEASE_UNVERIFIED;
-      const { input, constraints } = entries[index];
-      if (verdict.tier === "private" && (ceiling === "personal" || !input.privateAtAnswer))
-        return ANSWER_BECAME_PRIVATE;
-      if (!privateInputReleaseAllowed(input, verdict, constraints, postureNow)) {
-        return "Olympus withheld this answer because current settings require approval for Private content.";
-      }
-    }
-  } catch {
-    return ANSWER_RELEASE_UNVERIFIED;
-  }
-  return;
-}
-function isWithheldSourceAnswer(result) {
-  return withheldAnswers.has(result);
-}
-function withheldSourceAnswer(reason) {
-  const result = { answer: reason, evidence: [] };
-  withheldAnswers.add(result);
-  return result;
-}
-var RELEASE_CHUNK_JUDGE_BUDGET_MS = 8000, chunkProvenance, UNPROVED_PASSAGE = "unproved:", storage3, ANSWER_BECAME_PRIVATE = "Olympus withheld this answer because an item became Private.", ANSWER_RELEASE_UNVERIFIED = "Olympus withheld this answer because its current privacy classification could not be verified.", withheldAnswers;
-var init_release_manifest = __esm(() => {
-  chunkProvenance = new WeakMap;
-  storage3 = new AsyncLocalStorage7;
-  withheldAnswers = new WeakSet;
-});
-
 // src/core/evidence-reranker.ts
 async function rerankCandidates(options) {
   const timers = options.timers ?? systemTimers;
@@ -78568,157 +79768,6 @@ var limits;
 var init_limit_stops = __esm(() => {
   init_sqlite_migrations();
   limits = new Map;
-});
-
-// src/core/parent-label.ts
-function candidateNamesCeiling(candidate) {
-  if (isSecureSensitivity(candidate))
-    return "private";
-  return candidate.trustDomain === "public_safe" ? "public" : "personal";
-}
-function parentNamesMayTravel(names, ceiling) {
-  return TIER_RANK2[names] <= TIER_RANK2[ceiling];
-}
-function flattened(value, max2) {
-  if (typeof value !== "string")
-    return;
-  let text2 = "";
-  let pendingSpace = false;
-  for (const char of value) {
-    const code = char.codePointAt(0);
-    const blank = code <= 32 || code >= 127 && code <= 160 || code === 8232 || code === 8233;
-    if (blank) {
-      pendingSpace = text2.length > 0;
-      continue;
-    }
-    if (pendingSpace)
-      text2 += " ";
-    pendingSpace = false;
-    text2 += char;
-  }
-  if (!text2)
-    return;
-  return text2.length > max2 ? `${text2.slice(0, max2 - 1).trimEnd()}…` : text2;
-}
-function labelDate(value) {
-  if (typeof value !== "string")
-    return;
-  const at = Date.parse(value);
-  if (!Number.isFinite(at))
-    return;
-  const date = new Date(at);
-  return `${date.getUTCDate()} ${MONTHS2[date.getUTCMonth()]} ${date.getUTCFullYear()}`;
-}
-function parentLabelText(names) {
-  const subject = flattened(names.subject, SUBJECT_MAX_CHARS);
-  const sender = flattened(names.sender, SENDER_MAX_CHARS);
-  const date = labelDate(names.authoredAt);
-  const who = [subject ? `'${subject}'` : undefined, sender ? `from ${sender}` : undefined].filter(Boolean).join(" ");
-  const label = date ? who ? `${who}, ${date}` : date : who;
-  if (!label)
-    return;
-  return label.length > PARENT_LABEL_MAX_CHARS ? `${label.slice(0, PARENT_LABEL_MAX_CHARS - 1).trimEnd()}…` : label;
-}
-function citationTitleWithParent(title, parentLabel) {
-  const label = flattened(parentLabel, PARENT_LABEL_MAX_CHARS);
-  const own3 = title?.trim();
-  if (!label)
-    return own3 || undefined;
-  return own3 ? `${own3}, in ${label}` : `In ${label}`;
-}
-function applyParentLabels(candidates, corpusIds, resolver, scope) {
-  const unchanged = { candidates: [...candidates], dependencies: [] };
-  if (!resolver || candidates.length === 0)
-    return unchanged;
-  let parents;
-  try {
-    parents = resolver(candidates.map((candidate, index) => ({
-      corpusId: corpusIds[index] ?? "",
-      sourceItem: candidate.provenance.sourceItem
-    })));
-  } catch {
-    return unchanged;
-  }
-  if (parents.length !== candidates.length)
-    return unchanged;
-  const dependencies = [];
-  const labelled = candidates.map((candidate, index) => {
-    const parent = parents[index];
-    if (!parent)
-      return candidate;
-    if (!parentNamesMayTravel(parent.tier, candidateNamesCeiling(candidate)))
-      return candidate;
-    if (!namesCorpusInScope(parent.corpusId, scope))
-      return candidate;
-    const label = parentLabelText(parent);
-    if (!label)
-      return candidate;
-    dependencies.push({
-      candidateIndex: index,
-      corpusId: parent.corpusId,
-      parent: parent.identity,
-      private: parent.tier === "private"
-    });
-    return {
-      ...candidate,
-      provenance: {
-        ...candidate.provenance,
-        citation: { ...candidate.provenance.citation, parentLabel: label }
-      }
-    };
-  });
-  return { candidates: labelled, dependencies };
-}
-function namesCorpusInScope(corpusId, scope) {
-  if (!corpusId || scope.excludedCorpusIds?.has(corpusId))
-    return false;
-  if (scope.allowedCorpusIds && !scope.allowedCorpusIds.includes(corpusId))
-    return false;
-  const domain = scope.domainOf(corpusId);
-  return domain !== undefined && scope.allowedTrustDomains.includes(domain);
-}
-function parentLabelReleaseInputs(dependencies) {
-  const seen = new Map;
-  for (const dependency of dependencies) {
-    const { parent } = dependency;
-    const key2 = JSON.stringify([dependency.corpusId, parent.provider, parent.accountScope, parent.providerConversationId ?? "", parent.providerItemId]);
-    const existing = seen.get(key2);
-    if (existing) {
-      if (dependency.private)
-        existing.privateAtAnswer = true;
-      continue;
-    }
-    seen.set(key2, {
-      corpusId: dependency.corpusId,
-      provider: parent.provider,
-      accountScope: parent.accountScope,
-      providerItemId: parent.providerItemId,
-      ...parent.providerConversationId ? { providerConversationId: parent.providerConversationId } : {},
-      privateAtAnswer: dependency.private,
-      layer: "names",
-      dependency: "parent_label"
-    });
-  }
-  return [...seen.values()];
-}
-var TIER_RANK2, PARENT_LABEL_MAX_CHARS = 160, SUBJECT_MAX_CHARS = 90, SENDER_MAX_CHARS = 40, MONTHS2;
-var init_parent_label = __esm(() => {
-  init_types();
-  TIER_RANK2 = { public: 0, personal: 1, private: 2 };
-  MONTHS2 = [
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December"
-  ];
 });
 
 // src/core/source-index/router.ts
@@ -79830,36 +80879,6 @@ var init_evidence_pack = __esm(() => {
     [RECENT_ITEMS_CUT_SHORT, { suffix: ":recency", gap: recentItemsTimeoutGap }],
     [VISIBILITY_CHECK_CUT_SHORT, { suffix: ":visibility", gap: visibilityCheckTimeoutGap }]
   ]);
-});
-
-// src/core/secret-location-note.ts
-function secretLocationCoverageNote(count) {
-  return `${count} Secret(s) matched by location only; their contents are never read into an answer.`;
-}
-function secretLocationAnswer(locations) {
-  if (locations.length === 0)
-    return "";
-  const lead = locations.length === 1 ? "A matching item is stored as a Secret, so Olympus never shows it to an AI, this one included. Open it on this Mac:" : `${locations.length} matching items are stored as Secrets, so Olympus never shows them to an AI, this one included. Open them on this Mac:`;
-  return [lead, ...locations.map((location) => `- ${location.where}`)].join(`
-`);
-}
-function withoutSecretLocationCoverageNotes(answer) {
-  const lines = answer.split(`
-`);
-  if (!lines.some((line) => NOTE_LINE.test(line)))
-    return answer;
-  const kept = lines.filter((line) => !NOTE_LINE.test(line));
-  const heading = kept.lastIndexOf(NOTES_HEADING);
-  if (heading !== -1 && kept.slice(heading + 1).every((line) => !line.startsWith("- "))) {
-    const start = heading > 0 && kept[heading - 1] === "" ? heading - 1 : heading;
-    kept.splice(start, heading + 1 - start);
-  }
-  return kept.join(`
-`).replace(/\s+$/, "");
-}
-var NOTE_LINE, NOTES_HEADING = "Coverage notes:";
-var init_secret_location_note = __esm(() => {
-  NOTE_LINE = /^- \d+ Secret\(s\) matched by location only; their contents are never read into an answer\.$/;
 });
 
 // src/workers/source-index/analyst-pool.ts
@@ -87479,7 +88498,7 @@ var init_provider_store_sync = __esm(() => {
 });
 
 // src/workers/connector-store/locator-path-scope-codec.ts
-function locatorPathApprovedScopeCodec(sourceLabel2) {
+function locatorPathApprovedScopeCodec(sourceLabel3) {
   const invalid2 = (expectedPrefix) => ({
     kind: "invalid",
     message: `"approved_scope_key" must exactly match "${expectedPrefix}:<rooted path>" with no surrounding whitespace.`
@@ -87496,7 +88515,7 @@ function locatorPathApprovedScopeCodec(sourceLabel2) {
       if (scopedValue.startsWith("folder_id:")) {
         return {
           kind: "invalid",
-          message: `The "approved_scope_key" folder_id form cannot be served from connector-store data because ancestor folder ids are not persisted. Use a path-form ${sourceLabel2} scope.`
+          message: `The "approved_scope_key" folder_id form cannot be served from connector-store data because ancestor folder ids are not persisted. Use a path-form ${sourceLabel3} scope.`
         };
       }
       if (!scopedValue.startsWith("/") || scopedValue !== scopedValue.trim() || scopedValue !== "/" && scopedValue.endsWith("/")) {
@@ -90493,9 +91512,9 @@ function appendFields(lines, indent, record, skip, depth) {
       const base = key2.slice(0, -"_unixtime".length);
       if (base !== "" && scalarText(record[base]) !== undefined)
         continue;
-      const iso = unixTimeText(value);
-      if (iso) {
-        lines.push(`${indent}${labelOf(base === "" ? key2 : base)}: ${iso}`);
+      const iso2 = unixTimeText(value);
+      if (iso2) {
+        lines.push(`${indent}${labelOf(base === "" ? key2 : base)}: ${iso2}`);
         continue;
       }
     }
@@ -91216,8 +92235,8 @@ function telegramExportSenderId(value) {
     return;
   return telegramPeerId(found[1], found[2]);
 }
-function liveIso(iso) {
-  return iso?.replace(/\.000Z$/, "Z");
+function liveIso(iso2) {
+  return iso2?.replace(/\.000Z$/, "Z");
 }
 function sha2565(value) {
   return createHash60("sha256").update(value).digest("hex");
@@ -91838,7 +92857,7 @@ function connectorStoreExtractionCandidateReader(store, filters) {
 }
 
 // src/workers/file-extraction/on-demand-read.ts
-import { randomUUID as randomUUID23 } from "node:crypto";
+import { createHash as createHash62, randomUUID as randomUUID23 } from "node:crypto";
 async function requestOnDemandRead(request, context2) {
   if (!["owner", "remote_app", "analyst"].includes(request.requester))
     return { state: "refused", reason: "invalid_requester" };
@@ -91854,10 +92873,21 @@ async function requestOnDemandRead(request, context2) {
     itemRef: { corpusId: ref.corpusId, providerItemId: ref.providerItemId }
   }, target2.job, target2.grant, context2.limits);
 }
+async function itemReadOnDemand(read, corpusId, providerItemId) {
+  const questionId = `item-read-${createHash62("sha256").update(JSON.stringify([corpusId, providerItemId])).digest("hex").slice(0, 32)}`;
+  const outcome = await read({ itemRef: { corpusId, providerItemId }, requester: "remote_app", questionId }).catch(() => {
+    return;
+  });
+  if (outcome?.state === "reading" || outcome?.state === "queued") {
+    const eta = outcome.etaSeconds;
+    return { couldNotRead: ["reading_on_demand"], ...typeof eta === "number" && Number.isSafeInteger(eta) && eta >= 0 ? { etaSeconds: eta } : {} };
+  }
+  return { couldNotRead: [outcome?.state === "capped" ? "on_demand_capped" : "names_only"] };
+}
 var init_on_demand_read = () => {};
 
 // src/workers/file-extraction/spool.ts
-import { createHash as createHash62 } from "node:crypto";
+import { createHash as createHash63 } from "node:crypto";
 import { chmodSync as chmodSync23, existsSync as existsSync60, mkdirSync as mkdirSync39, readdirSync as readdirSync12, rmSync as rmSync20, rmdirSync as rmdirSync5, statSync as statSync27 } from "node:fs";
 import { dirname as dirname66, isAbsolute as isAbsolute25, join as join74, relative as relative9, sep as sep13 } from "node:path";
 function extractionSpoolOwnerDir(root, owner) {
@@ -92053,7 +93083,7 @@ function makeExtractionSpoolOwnerDir(ownerDir, anchor) {
     }
   }
 }
-var EXTRACTION_SPOOL_STALE_MS, digest3 = (value) => createHash62("sha256").update(value).digest("hex").slice(0, 32), corpusFolder = (corpusId) => `c-${digest3(corpusId)}`, accountFolder2 = (accountScope) => `a-${digest3(accountScope)}`;
+var EXTRACTION_SPOOL_STALE_MS, digest3 = (value) => createHash63("sha256").update(value).digest("hex").slice(0, 32), corpusFolder = (corpusId) => `c-${digest3(corpusId)}`, accountFolder2 = (accountScope) => `a-${digest3(accountScope)}`;
 var init_spool = __esm(() => {
   EXTRACTION_SPOOL_STALE_MS = 24 * 60 * 60 * 1000;
 });
@@ -93726,7 +94756,7 @@ var WHATSAPP_SPOOL_RESET_FILE = "spool-reset.sqlite";
 var init_spool_resets = () => {};
 
 // src/workers/whatsapp/match-keys.ts
-import { createHash as createHash63 } from "node:crypto";
+import { createHash as createHash64 } from "node:crypto";
 function nameKey(name) {
   return name.normalize("NFKC").replace(/[‎‏‪-‮⁦-⁩]/gu, "").replace(/\s+/gu, " ").trim().toLowerCase();
 }
@@ -93736,7 +94766,7 @@ function textKey(text3) {
 `).trim();
 }
 function keyDigest(...parts) {
-  return createHash63("sha256").update(parts.join("\x00")).digest("hex").slice(0, 32);
+  return createHash64("sha256").update(parts.join("\x00")).digest("hex").slice(0, 32);
 }
 function timeSlot(ms, precision) {
   return precision === "second" ? `s${Math.floor(ms / 1000)}` : `m${Math.floor(ms / 60000)}`;
@@ -94042,7 +95072,7 @@ var init_spool_reader = __esm(() => {
 
 // src/workers/whatsapp/live-connector.ts
 import { execFileSync as execFileSync3 } from "node:child_process";
-import { createHash as createHash64 } from "node:crypto";
+import { createHash as createHash65 } from "node:crypto";
 import { closeSync as closeSync25, existsSync as existsSync62, fsyncSync as fsyncSync4, lstatSync as lstatSync32, openSync as openSync25, readFileSync as readFileSync48, readdirSync as readdirSync13, realpathSync as realpathSync15, rmSync as rmSync24, statSync as statSync30 } from "node:fs";
 import { basename as basename14, dirname as dirname67, isAbsolute as isAbsolute27, join as join81, relative as relative13 } from "node:path";
 function emptyWhatsAppSpoolPassFindings() {
@@ -94938,7 +95968,7 @@ function whatsAppMediaFileStem(chatJid, id) {
     const device = user.indexOf(":");
     normalized = `${device === -1 ? user : user.slice(0, device)}@${jid.slice(at + 1)}`;
   }
-  const digest4 = createHash64("sha256").update(`${normalized}\x00${id}`).digest("hex").slice(0, 16);
+  const digest4 = createHash65("sha256").update(`${normalized}\x00${id}`).digest("hex").slice(0, 16);
   let readable = [...id].map((char) => /^[A-Za-z0-9._-]$/u.test(char) ? char : "_").join("");
   if (readable === "")
     readable = "message";
@@ -94956,7 +95986,7 @@ function whatsAppBootNonce() {
   } catch {
     id = "";
   }
-  currentBootNonce = id === "" ? "00000000" : createHash64("sha256").update(id).digest("hex").slice(0, 8);
+  currentBootNonce = id === "" ? "00000000" : createHash65("sha256").update(id).digest("hex").slice(0, 8);
   return currentBootNonce;
 }
 function processAlive3(pid) {
@@ -95209,7 +96239,7 @@ var init_live_connector = __esm(() => {
 
 // src/workers/whatsapp/media-fetch.ts
 import { Database as Database21 } from "bun:sqlite";
-import { createHash as createHash65 } from "node:crypto";
+import { createHash as createHash66 } from "node:crypto";
 import {
   chmodSync as chmodSync26,
   closeSync as closeSync26,
@@ -95500,7 +96530,7 @@ class WhatsAppMediaFetchState {
   }
 }
 function versionDigestOf(version) {
-  return createHash65("sha256").update(version, "utf8").digest("hex").slice(0, 16);
+  return createHash66("sha256").update(version, "utf8").digest("hex").slice(0, 16);
 }
 function rowKey(stem, version) {
   return `${stem}@${versionDigestOf(version)}`;
@@ -96254,7 +97284,7 @@ var init_extraction_factory = __esm(() => {
 
 // src/workers/file-extraction/job-store.ts
 import { chmodSync as chmodSync27, mkdirSync as mkdirSync41 } from "node:fs";
-import { createHash as createHash66, randomUUID as randomUUID24 } from "node:crypto";
+import { createHash as createHash67, randomUUID as randomUUID24 } from "node:crypto";
 import { dirname as dirname69 } from "node:path";
 import { Database as Database22 } from "bun:sqlite";
 function settleUnreadable(candidates, classify2) {
@@ -97865,7 +98895,7 @@ function makeJobId() {
   return `fx_${randomUUID24()}`;
 }
 function hashString6(value) {
-  return createHash66("sha256").update(value).digest("hex");
+  return createHash67("sha256").update(value).digest("hex");
 }
 function nowIso4() {
   return new Date().toISOString();
@@ -102749,7 +103779,7 @@ var init_off_thread = () => {};
 // src/workers/source-index/built-in-reasoning/install.ts
 import { isMainThread as isMainThread2 } from "node:worker_threads";
 import { spawn as spawn5 } from "node:child_process";
-import { createHash as createHash67, randomUUID as randomUUID25 } from "node:crypto";
+import { createHash as createHash68, randomUUID as randomUUID25 } from "node:crypto";
 import {
   closeSync as closeSync27,
   createReadStream as createReadStream3,
@@ -103160,7 +104190,7 @@ function hashInto(path, hash, timeoutMs, onProgress) {
   });
 }
 async function sha256File2(path, timeoutMs, onProgress) {
-  const hash = createHash67("sha256");
+  const hash = createHash68("sha256");
   await hashInto(path, hash, timeoutMs, onProgress);
   return hash.digest("hex");
 }
@@ -104712,9 +105742,9 @@ var init_transcription = __esm(() => {
 
 // src/workers/file-extraction/extractors/vlm.ts
 import { Buffer as Buffer6 } from "node:buffer";
-import { createHash as createHash68 } from "node:crypto";
+import { createHash as createHash69 } from "node:crypto";
 function buildVlmPdfPagePrompt(input) {
-  const itemToken = createHash68("sha256").update(input.localItemId).digest("hex");
+  const itemToken = createHash69("sha256").update(input.localItemId).digest("hex");
   return `Page ${input.pageNumber} of ${input.totalPages ?? "unknown"} — item sha256:${itemToken}
 
 ${input.prompt}`;
@@ -105476,7 +106506,7 @@ var init_store_sink = __esm(() => {
 });
 
 // src/workers/file-extraction/runner.ts
-import { createHash as createHash69 } from "node:crypto";
+import { createHash as createHash70 } from "node:crypto";
 import { dirname as dirname74 } from "node:path";
 function evaluateExtractionEgress(input) {
   if (input.egress === "local")
@@ -106229,7 +107259,7 @@ function retryable(errorKind, error) {
 }
 function hashError(error) {
   const detail = error instanceof Error ? `${error.name}:${error.message}` : String(error);
-  return createHash69("sha256").update(detail).digest("hex").slice(0, ERROR_HASH_CHARS2);
+  return createHash70("sha256").update(detail).digest("hex").slice(0, ERROR_HASH_CHARS2);
 }
 function isLostLeaseRecordError(error) {
   const message2 = error instanceof Error ? error.message : "";
@@ -106365,7 +107395,7 @@ function logPlanRefusal(corpusId, extractorKind, reason, count, error) {
   console.error(`[olympus:file-extraction] plan_bucket_refused corpus_id=${corpusId} extractor_kind=${extractorKind} ` + `reason_kind=${reason}${field} candidates=${count} reason=${boundedLogErrorMessage(error)}`);
 }
 function hashToken(value) {
-  return createHash69("sha256").update(value).digest("hex");
+  return createHash70("sha256").update(value).digest("hex");
 }
 function isScopeApprovalRefusal(error) {
   return error instanceof OperationError && error.code === "source_index_policy_violation";
@@ -106377,7 +107407,7 @@ async function drainPdfExtraction(input) {
     const result = {
       corpusId: lane.corpusId,
       provider: lane.provider,
-      scopeKeyHash: createHash69("sha256").update(lane.approvedScopeKey).digest("hex").slice(0, 16),
+      scopeKeyHash: createHash70("sha256").update(lane.approvedScopeKey).digest("hex").slice(0, 16),
       candidatesRequeued: 0,
       jobsProcessed: 0,
       jobsIndexed: 0,
@@ -108206,7 +109236,7 @@ var init_gmail_live_control = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-live-sync.ts
-import { createHash as createHash70 } from "node:crypto";
+import { createHash as createHash71 } from "node:crypto";
 function gmailLaneSyncOptions(ownerRules = []) {
   return {
     fetchContent: true,
@@ -108559,7 +109589,7 @@ function scopedTraversal(connector, connectorId, assertScopeCurrent) {
 function gmailCursorConnectorId(account, scope) {
   if (!scope)
     return GMAIL_PROVIDER;
-  const digest4 = createHash70("sha256").update(`${account}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
+  const digest4 = createHash71("sha256").update(`${account}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
   return `${GMAIL_SCOPED_CONNECTOR_PREFIX}${digest4}`;
 }
 function encodeCheckpoint(envelope) {
@@ -108655,7 +109685,7 @@ function taskOutcome2(input) {
   };
 }
 function gmailReceiptDigest(receipt) {
-  return createHash70("sha256").update(JSON.stringify(receipt)).digest("hex");
+  return createHash71("sha256").update(JSON.stringify(receipt)).digest("hex");
 }
 function isRejectedCursorError2(error) {
   if (error instanceof TypeError)
@@ -108723,7 +109753,7 @@ var init_drive_live_control = __esm(() => {
 });
 
 // src/workers/google-connectors/drive-live-sync.ts
-import { createHash as createHash71 } from "node:crypto";
+import { createHash as createHash72 } from "node:crypto";
 function createGoogleDriveLaneTierSet(options) {
   return createLaneTieredStoreSet({
     ...options,
@@ -108881,7 +109911,7 @@ function scopedTraversal2(connector, connectorId) {
 function googleDriveCursorConnectorId(account, scope) {
   if (!scope)
     return GOOGLE_DRIVE_PROVIDER;
-  const digest4 = createHash71("sha256").update(`${account}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
+  const digest4 = createHash72("sha256").update(`${account}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
   return `${GOOGLE_DRIVE_PROVIDER}.scope.${digest4}`;
 }
 function googleDriveScopedCheckpoint(cursor, connectorId) {
@@ -108970,7 +110000,7 @@ function taskOutcome3(input) {
   };
 }
 function googleDriveReceiptDigest(receipt) {
-  return createHash71("sha256").update(JSON.stringify(receipt)).digest("hex");
+  return createHash72("sha256").update(JSON.stringify(receipt)).digest("hex");
 }
 function isRejectedCursorError3(error) {
   if (error instanceof TypeError)
@@ -112007,10 +113037,10 @@ function guidedSessionLabel(connected, reauthRequired, sessionEvidence) {
     return "Pairing required";
   return sessionEvidence === "unconfirmed" ? "Session state not surfaced" : "Session ready";
 }
-function publisherOAuthSetupInstructions(sourceLabel2, actionLabel, byo) {
+function publisherOAuthSetupInstructions(sourceLabel3, actionLabel, byo) {
   return {
-    plain_intro: publisherConnectIntro(sourceLabel2),
-    agent_prompt: `Connect ${sourceLabel2} to Olympus from the Olympus dashboard: press ${actionLabel} on the ` + `${sourceLabel2} card, approve the access in the provider tab that opens, and come back to the dashboard. ` + "Olympus uses its own registered app, so there is nothing for me to create, register, or paste. " + "Do not ask me to edit files, configuration, or code.",
+    plain_intro: publisherConnectIntro(sourceLabel3),
+    agent_prompt: `Connect ${sourceLabel3} to Olympus from the Olympus dashboard: press ${actionLabel} on the ` + `${sourceLabel3} card, approve the access in the provider tab that opens, and come back to the dashboard. ` + "Olympus uses its own registered app, so there is nothing for me to create, register, or paste. " + "Do not ask me to edit files, configuration, or code.",
     provider_console_url: byo.provider_console_url,
     ...byo.google_cloud_project_id ? { google_cloud_project_id: byo.google_cloud_project_id } : {},
     diy_summary: byo.credential_file ? "Use my own Google app" : PUBLISHER_ADVANCED_BYO_SUMMARY,
@@ -112020,8 +113050,8 @@ function publisherOAuthSetupInstructions(sourceLabel2, actionLabel, byo) {
     advanced_byo: byo
   };
 }
-function publisherConnectIntro(sourceLabel2) {
-  return `Olympus connects ${sourceLabel2} through its own registered app. ` + "Press Connect, approve it with your account, and come back to this page.";
+function publisherConnectIntro(sourceLabel3) {
+  return `Olympus connects ${sourceLabel3} through its own registered app. ` + "Press Connect, approve it with your account, and come back to this page.";
 }
 function oauthSetupInstructions(source, googleCloudProjectId, redirectBaseUrl) {
   const clientIdField = {
@@ -112326,7 +113356,7 @@ function sourceCardFromCorpus(corpus, scheduler, _history, _now) {
   return {
     corpus_id: corpus.corpus_id,
     source_id: sourceId,
-    label: sourceLabel2(provider, corpus.family, corpus.trust_domain),
+    label: sourceLabel3(provider, corpus.family, corpus.trust_domain),
     provider,
     family: corpus.family,
     trust_domain: corpus.trust_domain,
@@ -112843,7 +113873,7 @@ function providerFromCorpusId2(corpusId) {
     return parts[1] ?? "source";
   return parts[0] ?? "source";
 }
-function sourceLabel2(provider, family, trustDomain) {
+function sourceLabel3(provider, family, trustDomain) {
   const providerText = {
     gmail: "Gmail",
     dropbox: "Dropbox",
@@ -114187,7 +115217,7 @@ var init_judge_check = __esm(() => {
 
 // src/workers/classification/judge-second-round.ts
 import { Database as Database26 } from "bun:sqlite";
-import { createHash as createHash72 } from "node:crypto";
+import { createHash as createHash73 } from "node:crypto";
 import { chmodSync as chmodSync29, existsSync as existsSync74, readFileSync as readFileSync54, rmSync as rmSync29 } from "node:fs";
 import { dirname as dirname79, join as join101, sep as sep17 } from "node:path";
 function judgeObservationsPath(env) {
@@ -114211,7 +115241,7 @@ class SecondRoundConfirmed {
     this.db.run("CREATE TABLE IF NOT EXISTS confirmed (digest TEXT PRIMARY KEY)");
   }
   static digest(request) {
-    return createHash72("sha256").update(`${request.system}
+    return createHash73("sha256").update(`${request.system}
 ${request.prompt}`).digest("hex");
   }
   has(digest4) {
@@ -114827,7 +115857,7 @@ function validateTierRulesFile(options = {}) {
   };
 }
 function parseOwnerTierRules(raw, label = "tier rules") {
-  const root = asRecord11(raw);
+  const root = asRecord12(raw);
   if (!root)
     throw new OperationError("config_error", `${label} must be a JSON object.`);
   if (root.schemaVersion !== TIER_RULES_SCHEMA_VERSION) {
@@ -114852,7 +115882,7 @@ function parseOwnerTierRules(raw, label = "tier rules") {
   });
 }
 function parseOwnerTierRule(raw, label = "tier rule") {
-  const record = asRecord11(raw);
+  const record = asRecord12(raw);
   if (!record)
     throw new OperationError("config_error", `${label} must be an object.`);
   const unknownKeys = Object.keys(record).filter((key2) => !["id", "source", "match", "tier", "strength"].includes(key2));
@@ -114882,7 +115912,7 @@ function parseOwnerTierRule(raw, label = "tier rule") {
   return { id, ...source ? { source } : {}, match, tier, strength };
 }
 function parseMatch(raw, label) {
-  const record = asRecord11(raw);
+  const record = asRecord12(raw);
   if (!record)
     throw new OperationError("config_error", `${label} must be an object.`);
   const keys = Object.keys(record);
@@ -114976,7 +116006,7 @@ function tightenPermissions(path) {
 function tierRulesRemedy(path) {
   return `Write the rules to ${path} (schemaVersion 1), or add them with \`olympus tier rules add\`.`;
 }
-function asRecord11(value) {
+function asRecord12(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 var TIER_RULES_SCHEMA_VERSION = 1, OLYMPUS_TIER_RULES_ENV = "OLYMPUS_TIER_RULES_PATH", OWNER_TIER_RULE_MATCH_KINDS, MAX_RULES = 500, MAX_VALUE_LENGTH = 240, RULE_ID_PATTERN, SOURCE_PATTERN, SENDER_PATTERN;
@@ -114992,7 +116022,7 @@ var init_tier_rules = __esm(() => {
 });
 
 // src/workers/classification/privacy-profile.ts
-import { createHash as createHash73 } from "node:crypto";
+import { createHash as createHash74 } from "node:crypto";
 import { mkdirSync as mkdirSync48 } from "node:fs";
 import { dirname as dirname81 } from "node:path";
 function defaultPrivacyProfilePath(env = process.env) {
@@ -115016,7 +116046,7 @@ function readPrivacyProfile(options = {}) {
   } catch {
     throw new OperationError("config_error", `The privacy profile at ${path} is not valid JSON.`);
   }
-  const record = asRecord12(raw);
+  const record = asRecord13(raw);
   if (!record || record.schemaVersion !== PRIVACY_PROFILE_SCHEMA_VERSION) {
     throw new OperationError("config_error", `The privacy profile at ${path} must have schemaVersion ${PRIVACY_PROFILE_SCHEMA_VERSION}.`);
   }
@@ -115036,7 +116066,7 @@ function privacyOwnerContext(options = {}) {
   }
 }
 function parsePrivacyProfileInput(raw) {
-  const record = asRecord12(raw);
+  const record = asRecord13(raw);
   if (!record)
     throw invalid2("The privacy settings must be an object.");
   const unknownKeys = Object.keys(record).filter((key2) => key2 !== "description" && key2 !== "rules");
@@ -115074,7 +116104,7 @@ function parsePrivacyProfileInput(raw) {
   return out;
 }
 function parsePrivacyRule(raw) {
-  const record = asRecord12(raw);
+  const record = asRecord13(raw);
   if (!record)
     throw invalid2("Each rule must be an object.");
   const unknownKeys = Object.keys(record).filter((key3) => !["kind", "source_id", "key", "value", "display"].includes(key3));
@@ -115134,7 +116164,7 @@ function privacyRuleToTierRule(rule) {
 }
 function privacyRuleId(rule) {
   const matched = rule.kind === "sender" ? rule.value ?? "" : rule.key ?? "";
-  const digest4 = createHash73("sha256").update(`${rule.kind}\x00${rule.source_id}\x00${matched}`).digest("hex").slice(0, 16);
+  const digest4 = createHash74("sha256").update(`${rule.kind}\x00${rule.source_id}\x00${matched}`).digest("hex").slice(0, 16);
   return `${PRIVACY_RULE_ID_PREFIX}${rule.kind}-${digest4}`;
 }
 function writePrivacyProfile(update, options = {}) {
@@ -115160,7 +116190,7 @@ function writePrivacyProfile(update, options = {}) {
 function invalid2(message2) {
   return new OperationError("invalid_params", message2);
 }
-function asRecord12(value) {
+function asRecord13(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 var PRIVACY_PROFILE_SCHEMA_VERSION = 1, OLYMPUS_PRIVACY_PROFILE_ENV = "OLYMPUS_PRIVACY_PROFILE_PATH", PRIVACY_DESCRIPTION_MAX_CHARS = 2000, PRIVACY_RULES_MAX = 100, PRIVACY_DISPLAY_MAX_CHARS = 200, PRIVACY_KEY_MAX_CHARS = 1024, PRIVACY_RULE_ID_PREFIX = "privacy-", PRIVACY_RULE_KINDS, RULE_SOURCES;
@@ -115554,7 +116584,7 @@ var init_source_dispositions = __esm(() => {
 
 // src/data-lifecycle.ts
 import { spawnSync as spawnSync11 } from "node:child_process";
-import { createHash as createHash74, randomUUID as randomUUID26 } from "node:crypto";
+import { createHash as createHash75, randomUUID as randomUUID26 } from "node:crypto";
 import {
   chmodSync as chmodSync32,
   closeSync as closeSync28,
@@ -116681,7 +117711,7 @@ function fileArtifact(exportRoot, path, sourceId, role) {
   };
 }
 function sha256File3(path) {
-  const hash = createHash74("sha256");
+  const hash = createHash75("sha256");
   const descriptor = openSync28(path, "r");
   const buffer = Buffer.allocUnsafe(1024 * 1024);
   try {
@@ -117356,6 +118386,159 @@ var init_delphi = __esm(() => {
   init_secret_store();
 });
 
+// src/core/source-index/selected-item-safety.ts
+function selectedItemContentFieldPath(value) {
+  return selectedItemContentFieldPathInner(value, "selected_items");
+}
+function selectedItemContentFieldPathInner(value, path) {
+  if (!value || typeof value !== "object")
+    return;
+  if (Array.isArray(value)) {
+    for (let index = 0;index < value.length; index += 1) {
+      const nested = selectedItemContentFieldPathInner(value[index], `${path}.${index}`);
+      if (nested)
+        return nested;
+    }
+    return;
+  }
+  for (const [key2, nestedValue] of Object.entries(value)) {
+    if (FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS.has(normalizeSelectedItemField(key2))) {
+      return `${path}.${key2}`;
+    }
+    const nested = selectedItemContentFieldPathInner(nestedValue, `${path}.${key2}`);
+    if (nested)
+      return nested;
+  }
+  return;
+}
+function normalizeSelectedItemField(key2) {
+  return key2.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+var FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS;
+var init_selected_item_safety = __esm(() => {
+  FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS = new Set([
+    "body",
+    "boundedtext",
+    "chunk",
+    "chunks",
+    "content",
+    "document",
+    "html",
+    "markdown",
+    "message",
+    "messages",
+    "packet",
+    "passage",
+    "raw",
+    "rawpacket",
+    "rawsource",
+    "rawtext",
+    "snippet",
+    "sourcepacket",
+    "sourcesnippet",
+    "sourcetext",
+    "text"
+  ]);
+});
+
+// src/core/source-index/selected-items.ts
+function optionalSourceAnswerSelectedItems(value, fallbackCorpusId) {
+  if (value === undefined || value === null || value === "")
+    return;
+  if (!Array.isArray(value)) {
+    throw new OperationError("invalid_params", "selected_items must be an array.");
+  }
+  return value.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new OperationError("invalid_params", `selected_items.${index} must be an object.`);
+    }
+    const initialRecord = item;
+    const forbiddenPath = selectedItemContentFieldPath(initialRecord);
+    if (forbiddenPath) {
+      throw new OperationError("invalid_params", `selected_items.${index} must not include source content field ${forbiddenPath}.`);
+    }
+    const record = selectedItemRecord(initialRecord, fallbackCorpusId);
+    return {
+      corpus_id: requiredSelectedItemString(record.corpus_id, `selected_items.${index}.corpus_id`),
+      family: requiredSelectedItemString(record.family, `selected_items.${index}.family`),
+      provider: requiredSelectedItemString(record.provider, `selected_items.${index}.provider`),
+      account_scope: requiredSelectedItemString(record.account_scope, `selected_items.${index}.account_scope`),
+      provider_item_id: requiredSelectedItemString(record.provider_item_id, `selected_items.${index}.provider_item_id`),
+      local_item_id: requiredSelectedItemString(record.local_item_id, `selected_items.${index}.local_item_id`),
+      ...optionalSelectedItemString(record.provider_thread_id, "provider_thread_id"),
+      ...optionalSelectedItemString(record.provider_conversation_id, "provider_conversation_id"),
+      ...optionalSelectedItemString(record.provider_file_id, "provider_file_id"),
+      ...optionalSelectedItemString(record.source_version, "source_version"),
+      ...optionalSelectedItemString(record.conversation_label, "conversation_label"),
+      ...optionalSelectedItemString(record.author_label, "author_label"),
+      ...optionalSelectedItemString(record.authored_at, "authored_at")
+    };
+  });
+}
+function selectedItemRecord(record, fallbackCorpusId) {
+  const selectedItem = record.selected_item;
+  if (selectedItem && typeof selectedItem === "object" && !Array.isArray(selectedItem)) {
+    return selectedItem;
+  }
+  const sourceItem = record.sourceItem;
+  if (sourceItem && typeof sourceItem === "object" && !Array.isArray(sourceItem)) {
+    const source = sourceItem;
+    return {
+      corpus_id: record.corpus_id ?? fallbackCorpusId,
+      family: source.family,
+      provider: source.provider,
+      account_scope: source.accountScope,
+      provider_item_id: source.providerItemId,
+      local_item_id: source.localItemId,
+      provider_thread_id: source.providerThreadId,
+      provider_conversation_id: source.providerConversationId,
+      provider_file_id: source.providerFileId,
+      source_version: source.sourceVersion
+    };
+  }
+  return {
+    ...record,
+    account_scope: record.account_scope ?? record.accountScope,
+    provider_item_id: record.provider_item_id ?? record.providerItemId,
+    local_item_id: record.local_item_id ?? record.localItemId,
+    provider_thread_id: record.provider_thread_id ?? record.providerThreadId,
+    provider_conversation_id: record.provider_conversation_id ?? record.providerConversationId,
+    provider_file_id: record.provider_file_id ?? record.providerFileId,
+    source_version: record.source_version ?? record.sourceVersion
+  };
+}
+function requiredSelectedItemString(value, name) {
+  if (typeof value !== "string" || value.trim().length === 0 || value.length > 500) {
+    throw new OperationError("invalid_params", `${name} must be a non-empty safe identifier string.`);
+  }
+  return value.trim();
+}
+function optionalSelectedItemString(value, key2) {
+  if (value === undefined || value === null || value === "")
+    return {};
+  if (typeof value !== "string" || value.length > 1000) {
+    throw new OperationError("invalid_params", `selected_items.${key2} must be a safe string.`);
+  }
+  return { [key2]: value.trim() };
+}
+function sourceItemReadSelectedItem(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new OperationError("invalid_params", "selected_item is required.");
+  return optionalSourceAnswerSelectedItems([value])[0];
+}
+function sourceItemReadPage(value, name, max2 = Number.MAX_SAFE_INTEGER) {
+  if (value === undefined)
+    return 1;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > max2) {
+    throw new OperationError("invalid_params", `${name} must be an integer from 1 to ${max2}.`);
+  }
+  return value;
+}
+var init_selected_items = __esm(() => {
+  init_operation_error();
+  init_selected_item_safety();
+});
+
 // src/core/email-policy.ts
 function assertNoRawEmailFields(value) {
   assertNoRawEmailFieldsAtPath(value, []);
@@ -117397,28 +118580,6 @@ var init_email_policy = __esm(() => {
     "vectors"
   ]);
 });
-
-// src/core/privacy-backlog-coverage.ts
-function privacyBacklogCoverageNote(pendingItems, audience = "remote") {
-  if (pendingItems === undefined || !Number.isSafeInteger(pendingItems) || pendingItems <= 0)
-    return;
-  const one = pendingItems === 1;
-  if (audience === "local") {
-    return `Olympus is still checking ${pendingItems} new item${one ? "" : "s"} for privacy. ` + `Until then ${one ? "it is" : "they are"} found by exact words only, not by meaning. ` + "This can take a while on this computer.";
-  }
-  return `Olympus is still checking ${pendingItems} new item${one ? "" : "s"} for privacy before ${one ? "it" : "they"} can be searched. ` + "This can take a while on this computer.";
-}
-function withCoverageNote(answer, note) {
-  if (!note)
-    return answer;
-  if (/\n\nCoverage notes:\n(- [^\n]*\n?)+$/.test(answer))
-    return `${answer.replace(/\s+$/, "")}
-- ${note}`;
-  return `${answer.replace(/\s+$/, "")}
-
-Coverage notes:
-- ${note}`;
-}
 
 // src/core/email.ts
 class EmailClient {
@@ -117523,7 +118684,7 @@ class EmailClient {
         ...options.caller ? { caller: operationCallerToWire(options.caller) } : {}
       })
     }, options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : undefined);
-    const data2 = asRecord13(response);
+    const data2 = asRecord14(response);
     assertNoRawEmailFields(data2);
     assertNoSourceIndexOperationalLeakFields(data2);
     const ticket = data2._release_ticket;
@@ -117560,7 +118721,7 @@ class EmailClient {
     if (!ticket)
       return withheldSourceAnswer("Olympus withheld this answer because the engine did not provide a privacy release ticket. Update Olympus, then ask again.");
     try {
-      const verdict = asRecord13(await this.transport.requestJson(`${this.config.email.baseUrl}/source/answer/release`, {
+      const verdict = asRecord14(await this.transport.requestJson(`${this.config.email.baseUrl}/source/answer/release`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ticket })
@@ -117609,7 +118770,7 @@ class EmailClient {
         ...options.query ? { query: options.query } : {}
       })
     });
-    const data2 = asRecord13(response);
+    const data2 = asRecord14(response);
     assertNoRawEmailFields(data2);
     assertNoSourceIndexOperationalLeakFields(data2);
     return parseSourceIndexStatusResult(data2);
@@ -117626,7 +118787,7 @@ class EmailClient {
         ...options.maxSeconds !== undefined ? { max_seconds: options.maxSeconds } : {}
       })
     }, { timeoutMs: ((options.maxSeconds ?? 240) + 600) * 1000 });
-    const data2 = asRecord13(response);
+    const data2 = asRecord14(response);
     assertNoRawEmailFields(data2);
     return data2;
   }
@@ -117642,9 +118803,39 @@ class EmailClient {
         ...options.limit !== undefined ? { limit: options.limit } : {}
       })
     });
-    const data2 = asRecord13(response);
+    const data2 = asRecord14(response);
     assertNoRawEmailFields(data2);
     return data2;
+  }
+  async sourceItemRead(options) {
+    if (!isSourceIndexReadSurfaceEnabled(this.config))
+      throw new OperationError("source_index_not_enabled", "Source-index read is disabled.");
+    if (!this.config.email.enabled)
+      throw new OperationError("email_not_configured", "Private source worker is disabled.");
+    const selected = sourceItemReadSelectedItem(options.selectedItem);
+    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/item/read`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ selected_item: selected, page: sourceItemReadPage(options.page, "page"), pages: sourceItemReadPage(options.pages, "pages", 3) })
+    });
+    assertNoRawEmailFields(response);
+    assertNoSourceIndexOperationalLeakFields(response);
+    const result = parseSourceItemReadResult(response);
+    if (result.couldNotRead.includes("not_personal"))
+      throw new OperationError("not_personal", "Private item: ask with source_answer");
+    if (result.pages.length > 0)
+      recordReleaseManifest({
+        inputs: [{
+          corpusId: selected.corpus_id,
+          provider: selected.provider,
+          accountScope: selected.account_scope,
+          providerItemId: selected.provider_item_id,
+          ...selected.provider_conversation_id ? { providerConversationId: selected.provider_conversation_id } : {},
+          privateAtAnswer: false
+        }],
+        constraints: { secureDerivativeDefault: "approval", includeSecureLocalContent: false }
+      });
+    return result;
   }
   async sourceIndexSearch(options) {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) {
@@ -117682,7 +118873,7 @@ class EmailClient {
         ...options.allTiers !== undefined ? { all_tiers: options.allTiers } : {}
       })
     });
-    const data2 = asRecord13(response);
+    const data2 = asRecord14(response);
     assertNoRawEmailFields(data2);
     assertNoSourceIndexOperationalLeakFields(data2);
     return parseSourceIndexSearchResult(data2, {
@@ -117831,7 +119022,8 @@ function isAllowlistedEmailWorkerErrorResponse(status, url) {
   if (status !== 403)
     return false;
   try {
-    return new URL(url).pathname.endsWith("/source/answer");
+    const path = new URL(url).pathname;
+    return path.endsWith("/source/answer") || path.endsWith("/source/item/read");
   } catch {
     return false;
   }
@@ -117943,7 +119135,7 @@ function hasUniqueJsonObjectMembers(input) {
     return false;
   }
 }
-function asRecord13(value) {
+function asRecord14(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new OperationError("email_error", "Private email lane response was not a JSON object.");
   }
@@ -117973,8 +119165,8 @@ function parseSourceIndexAnswerResult(value) {
   if (!Array.isArray(value.evidence)) {
     throw new OperationError("email_error", "source answer evidence must be an array.");
   }
-  const audit = asRecord13(value.audit);
-  const policy = asRecord13(value.policy);
+  const audit = asRecord14(value.audit);
+  const policy = asRecord14(value.policy);
   if (audit.raw_source_exposed !== false) {
     throw new OperationError("email_error", "source answer audit must be raw-source-safe.");
   }
@@ -118018,7 +119210,7 @@ function parseSecretLocations(value) {
     throw new OperationError("email_error", "secret_locations must be an array.");
   }
   return value.map((entry) => {
-    const record = asRecord13(entry);
+    const record = asRecord14(entry);
     const allowed = new Set(["source", "ref", "locator", "title", "finding_kinds"]);
     const extra = Object.keys(record).filter((key2) => !allowed.has(key2));
     if (extra.length > 0 || typeof record.source !== "string" || typeof record.ref !== "string" || !Array.isArray(record.finding_kinds) || record.locator !== undefined && typeof record.locator !== "string" || record.title !== undefined && typeof record.title !== "string" || record.finding_kinds.some((kind) => typeof kind !== "string")) {
@@ -118034,7 +119226,7 @@ function parseSecretLocations(value) {
   });
 }
 function parseSourceAnswerSelfHealAudit(value) {
-  const audit = asRecord13(value);
+  const audit = asRecord14(value);
   const outcome = audit.outcome;
   if (outcome !== "healed" && outcome !== "in_progress" && outcome !== "failed" && outcome !== "skipped") {
     return;
@@ -118061,7 +119253,7 @@ function parseSourceAnswerSelfHealAudit(value) {
   if (typeof audit.reason === "string")
     parsed.reason = audit.reason;
   if (audit.prior_state !== undefined) {
-    const prior = asRecord13(audit.prior_state);
+    const prior = asRecord14(audit.prior_state);
     parsed.prior_state = {
       ...typeof prior.extraction_status === "string" ? { extraction_status: prior.extraction_status } : {},
       ...typeof prior.extraction_completeness === "string" ? { extraction_completeness: prior.extraction_completeness } : {}
@@ -118070,7 +119262,7 @@ function parseSourceAnswerSelfHealAudit(value) {
   return parsed;
 }
 function parseSourceAnswerPhaseTimings(value) {
-  const timings = asRecord13(value);
+  const timings = asRecord14(value);
   const parsed = {
     lane_setup_ms: requiredNonNegativeNumber(timings.lane_setup_ms, "audit.phase_timings.lane_setup_ms"),
     bulk_gate_ms: requiredNonNegativeNumber(timings.bulk_gate_ms, "audit.phase_timings.bulk_gate_ms"),
@@ -118091,7 +119283,7 @@ function parseSourceAnswerPhaseTimings(value) {
   return parsed;
 }
 function parseSourceAnswerSynthesisAudit(value) {
-  const audit = asRecord13(value);
+  const audit = asRecord14(value);
   if (audit.raw_source_exposed !== false) {
     throw new OperationError("email_error", "source answer synthesis audit must be raw-source-safe.");
   }
@@ -118110,7 +119302,7 @@ function parseSourceAnswerSynthesisAudit(value) {
   };
 }
 function parseSourceAnswerAnalystFallback(value) {
-  const fallback = asRecord13(value);
+  const fallback = asRecord14(value);
   const from = fallback.from === "venice" || fallback.from === "cloud" ? fallback.from : undefined;
   const reason = fallback.reason === "timeout" || fallback.reason === "escalation" || fallback.reason === "unavailable" || isSanitizedAnalystFallbackReason(fallback.reason) ? fallback.reason : undefined;
   if (!from || fallback.to !== "local" || !reason) {
@@ -118131,7 +119323,7 @@ function parseSourceIndexStatusResult(value) {
   if (value.kind !== "source_index_status") {
     throw new OperationError("email_error", "source index status result must have kind=source_index_status.");
   }
-  const policy = asRecord13(value.policy);
+  const policy = asRecord14(value.policy);
   if (policy.read_only !== true || policy.raw_source_exposed !== false || policy.source_packets_exposed !== false || policy.source_text_returned !== false || policy.secure_local_item_metadata_exposed !== false || policy.castor_visible !== true) {
     throw new OperationError("email_error", "source index status policy must describe a read-only calling-assistant-visible result.");
   }
@@ -118173,7 +119365,7 @@ function parseSourceIndexSearchResult(value, context2) {
   if (!corpus) {
     throw new OperationError("email_error", "source index search returned an unsupported corpus.");
   }
-  const auditRecord = asRecord13(value.audit);
+  const auditRecord = asRecord14(value.audit);
   const tierCorpora = Array.isArray(auditRecord.searched_corpora) ? auditRecord.searched_corpora.map((searchedId) => {
     const entry = typeof searchedId === "string" ? createSourceCorpusRegistry(context2.config.sourceIndex.corpusRegistry).list().find((candidate) => candidate.corpusId === searchedId) : undefined;
     if (!entry || entry.sourceId !== corpus.sourceId) {
@@ -118185,8 +119377,8 @@ function parseSourceIndexSearchResult(value, context2) {
   if (!Array.isArray(value.hits)) {
     throw new OperationError("email_error", "source index search hits must be an array.");
   }
-  const audit = asRecord13(value.audit);
-  const policy = asRecord13(value.policy);
+  const audit = asRecord14(value.audit);
+  const policy = asRecord14(value.policy);
   const sourceTextReturned = audit.source_text_returned === true || policy.source_text_returned === true;
   const sourceTextAllowed = sourceTextReturned === false || corpusId === "internal.x.bookmarks" && policy.trust_domain === "internal" && audit.raw_source_exposed === false && policy.raw_source_exposed === false;
   if (audit.raw_source_exposed !== false || policy.raw_source_exposed !== false || audit.source_text_returned !== false && audit.source_text_returned !== true || policy.source_text_returned !== false && policy.source_text_returned !== true || !sourceTextAllowed || policy.source_packets_exposed !== false || typeof policy.local_only !== "boolean" || expectedTrustDomain === "secure_local" && policy.local_only !== true || policy.trust_domain !== expectedTrustDomain) {
@@ -118273,13 +119465,13 @@ function withSourceWatchHeaders(route) {
   return headers;
 }
 function parseSourceWatchResult(value, kind) {
-  const record = asRecord13(value);
+  const record = asRecord14(value);
   assertNoRawEmailFields(record);
   assertNoSourceIndexOperationalLeakFields(record);
   if (record.kind !== kind) {
     throw new OperationError("email_error", `Source watch result must have kind=${kind}.`);
   }
-  const policy = asRecord13(record.policy);
+  const policy = asRecord14(record.policy);
   if (policy.raw_source_exposed !== false || policy.source_text_returned !== false || policy.message_bodies_returned !== false || policy.evidence_pointers_only !== true) {
     throw new OperationError("email_error", "Source watch result must be content-free and evidence-pointer-only.");
   }
@@ -118292,7 +119484,7 @@ function parseSourceWatchResult(value, kind) {
   if (kind === "source_watch") {
     return {
       kind,
-      watch: asRecord13(record.watch),
+      watch: asRecord14(record.watch),
       policy: safePolicy
     };
   }
@@ -118301,7 +119493,7 @@ function parseSourceWatchResult(value, kind) {
   }
   return {
     kind,
-    watches: record.watches.map(asRecord13),
+    watches: record.watches.map(asRecord14),
     ...typeof record.next_cursor === "string" ? { next_cursor: record.next_cursor } : {},
     policy: safePolicy
   };
@@ -118410,14 +119602,14 @@ function assertNoSourceIndexOperationalLeakFieldsAtPath(value, path) {
   }
 }
 function parseSourceAnswerOpsec(value) {
-  const opsec = asRecord13(value);
+  const opsec = asRecord14(value);
   if (opsec.raw_source_exposed !== false) {
     throw new OperationError("email_error", "source answer OPSEC audit must be raw-source-safe.");
   }
   if (!Array.isArray(opsec.structured_evidence)) {
     throw new OperationError("email_error", "source answer OPSEC audit must include structured evidence.");
   }
-  const releaseDecision = asRecord13(opsec.release_decision);
+  const releaseDecision = asRecord14(opsec.release_decision);
   if (typeof releaseDecision.decision !== "string" || !Array.isArray(releaseDecision.reasons)) {
     throw new OperationError("email_error", "source answer OPSEC audit must include a release decision.");
   }
@@ -118436,6 +119628,8 @@ async function safeText2(response) {
 }
 var MAX_EMAIL_WORKER_ERROR_MESSAGE_LENGTH = 512, MAX_EMAIL_WORKER_ERROR_BODY_LENGTH, PASSTHROUGH_EMAIL_WORKER_ERROR_CODES, CONSULT_ASK_CLIENT_TIMEOUT_MS, sourceAnswerTickets, MAX_EMAIL_REQUEST_TIMEOUT_MS = 600000, SOURCE_INDEX_LOCATOR_KEYS, DROPBOX_LOCATOR_REQUIRED_KEYS, DROPBOX_LOCATOR_OPTIONAL_KEYS, FORBIDDEN_SOURCE_INDEX_OPERATIONAL_KEYS;
 var init_email = __esm(() => {
+  init_source_item_read();
+  init_selected_items();
   init_release_manifest();
   init_worker_transport();
   init_config();
@@ -118448,6 +119642,7 @@ var init_email = __esm(() => {
   init_worker_auth();
   MAX_EMAIL_WORKER_ERROR_BODY_LENGTH = 8 * 1024;
   PASSTHROUGH_EMAIL_WORKER_ERROR_CODES = new Map([
+    ["not_personal", "not_personal"],
     ["unsupported_filter", "unsupported_filter"],
     ["invalid_request", "invalid_request"],
     ["source_index_policy_violation", "source_index_policy_violation"]
@@ -118515,780 +119710,6 @@ function shouldExposeOperation(operation, context2) {
 var init_operation_exposure = __esm(() => {
   init_config();
   init_public_surface();
-});
-
-// src/core/remote-result.ts
-function providerSourceLabel(provider) {
-  return Object.prototype.hasOwnProperty.call(PROVIDER_LABELS, provider) ? PROVIDER_LABELS[provider] : undefined;
-}
-function sourceLabel3(provider, family) {
-  if (typeof provider === "string" && Object.prototype.hasOwnProperty.call(PROVIDER_LABELS, provider))
-    return PROVIDER_LABELS[provider];
-  if (typeof family === "string" && Object.prototype.hasOwnProperty.call(FAMILY_LABELS, family))
-    return FAMILY_LABELS[family];
-  return OTHER_SOURCE_LABEL;
-}
-function oneOf(value, allowed) {
-  return typeof value === "string" && allowed.includes(value) ? value : undefined;
-}
-function withheldParams(operation) {
-  return Object.prototype.hasOwnProperty.call(REMOTE_WITHHELD_PARAMS, operation) ? REMOTE_WITHHELD_PARAMS[operation] ?? [] : [];
-}
-function remoteDeclaredParams(operation, declared) {
-  const withheld = withheldParams(operation);
-  return declared.filter((name) => !withheld.includes(name));
-}
-function remoteToolDescription(operation, description) {
-  return Object.prototype.hasOwnProperty.call(REMOTE_DESCRIPTIONS, operation) ? REMOTE_DESCRIPTIONS[operation] ?? description : description;
-}
-function remoteToolSchema(operation, schema) {
-  const withheld = withheldParams(operation);
-  if (withheld.length === 0)
-    return schema;
-  const properties = asRecord14(schema.properties) ?? {};
-  const required3 = Array.isArray(schema.required) ? schema.required : [];
-  return {
-    ...schema,
-    properties: Object.fromEntries(Object.entries(properties).filter(([name]) => !withheld.includes(name))),
-    required: required3.filter((name) => typeof name === "string" && !withheld.includes(name))
-  };
-}
-function remoteWithheldParam(operation, args) {
-  const withheld = withheldParams(operation);
-  return Object.keys(args).filter((name) => withheld.includes(name)).sort()[0];
-}
-async function remoteOperationOutputOffThread(operation, raw, options = {}) {
-  const check = options.releaseCheck;
-  if (!["source_answer", "source_answer_result"].includes(operation) || pendingOutput(raw) || isAnonymousAnswerResult(raw)) {
-    return remoteOperationOutput(operation, raw, options);
-  }
-  if (!check)
-    return remoteOperationOutput(operation, raw, { ...options, releaseCheck: {
-      inputs: (inputs) => inputs.map(() => ({ tier: "unknown", gone: false })),
-      secureDerivativeDefault: () => "approval"
-    } });
-  let verdicts;
-  try {
-    const inputs = (options.releaseManifests ?? []).flatMap((manifest) => manifest.inputs);
-    const chunks = await checkReleaseChunks(check, inputs);
-    verdicts = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
-    if (passagesWithheldAtReleasableTiers(inputs, verdicts, chunks) > 0)
-      verdicts = inputs.map((input, index) => {
-        const tier = verdicts[index];
-        return tier?.tier === "secret" ? tier : { tier: "unknown", gone: false };
-      });
-  } catch {}
-  const verified = {
-    inputs: () => {
-      if (!verdicts)
-        throw new Error("Release unavailable");
-      return verdicts;
-    },
-    secureDerivativeDefault: () => check.secureDerivativeDefault()
-  };
-  return remoteOperationOutput(operation, raw, { ...options, releaseCheck: verified });
-}
-function remoteOperationOutput(operation, raw, options = {}) {
-  const pending = pendingOutput(raw);
-  switch (operation) {
-    case "source_answer":
-      return pending ?? sourceAnswerOutput(raw, options);
-    case "ask_anonymously":
-      return pending ?? anonymousAnswerOutput(raw);
-    case "source_answer_result":
-      return pending ?? (isAnonymousAnswerResult(raw) ? anonymousAnswerOutput(raw) : sourceAnswerOutput(raw, options));
-    case "source_index_status":
-      return sourceIndexStatusOutput(raw);
-    default:
-      throw new OperationError("invalid_request", `No remote output for operation ${operation}.`);
-  }
-}
-function isAnonymousAnswerResult(raw) {
-  const record = asRecord14(raw);
-  return record !== undefined && typeof record.ok === "boolean" && typeof record.answer !== "string";
-}
-function pendingOutput(raw) {
-  const record = asRecord14(raw);
-  if (record?.status !== "working")
-    return;
-  if (typeof record.job_id !== "string" || !JOB_ID.test(record.job_id) || isSecretLike(record.job_id)) {
-    throw new OperationError("source_index_error", "unexpected pending shape");
-  }
-  return {
-    status: "working",
-    job_id: record.job_id,
-    elapsed_ms: wholeNumber(record.elapsed_ms),
-    next_tool: "source_answer_result",
-    message: REMOTE_PENDING_MESSAGE
-  };
-}
-function sourceAnswerOutput(raw, options) {
-  const record = asRecord14(raw);
-  if (!record || typeof record.answer !== "string" || !Array.isArray(record.evidence)) {
-    throw new OperationError("source_index_error", "unexpected answer shape");
-  }
-  const evidence = record.evidence.map(asRecord14).filter((entry) => entry !== undefined);
-  let dropped = new Set;
-  if (options.releaseCheck) {
-    const recheck = recheckRelease(evidence, options.releaseManifests ?? [], options.releaseCheck);
-    if ("withhold" in recheck)
-      return withheldAnswer(recheck.withhold, evidence.length);
-    dropped = recheck.dropped;
-  }
-  if (isSecretLike(record.answer))
-    return withheldAnswer(REMOTE_ANSWER_WITHHELD, evidence.length);
-  const answer = scannedText(withoutSecretLocationCoverageNotes(record.answer), MAX_ANSWER, "multiline");
-  if (answer.secret)
-    return withheldAnswer(REMOTE_ANSWER_WITHHELD, evidence.length);
-  const citations = [];
-  const released = [];
-  evidence.forEach((entry, index) => {
-    if (dropped.has(index) || citations.length >= MAX_CITATIONS)
-      return;
-    const citation = citationOutput(entry);
-    citations.push(citation);
-    released.push(releasedItemFromEvidence(entry, String(citation.label), typeof citation.title === "string" ? citation.title : undefined));
-  });
-  noteReleasedItems(released);
-  const privacyCoverage = privacyBacklogCoverageNote(options.pendingPrivacyItems);
-  const coverageSuffix = privacyCoverage ? `
-
-Coverage notes:
-- ${privacyCoverage}` : "";
-  return {
-    kind: "source_answer",
-    status: "answered",
-    answer: (answer.text ?? "").slice(0, MAX_ANSWER - coverageSuffix.length) + coverageSuffix,
-    citations
-  };
-}
-function withRemotePrivateNote(output, answerId, secretMatch = false) {
-  return output.kind === "source_answer" && output.status === "answered" ? { ...output, private_note: remotePrivateNote(answerId, secretMatch) } : output;
-}
-function remotePrivateNote(answerId, secretMatch = false) {
-  const pointer = answerId && PRIVATE_ANSWER_ID.test(answerId) ? `${REMOTE_PRIVATE_NOTE} [Open answer](olympus://open/private/${answerId})` : REMOTE_PRIVATE_NOTE;
-  return secretMatch ? `${pointer} ${REMOTE_SECRET_NOTE}` : pointer;
-}
-function withheldAnswer(message2, heldBack = 0) {
-  noteReleasedItems([], heldBack, true);
-  return { kind: "source_answer", status: "withheld", answer: message2, citations: [] };
-}
-function recheckRelease(evidence, manifests, check) {
-  if (manifests.length === 0) {
-    console.error("[olympus:remote] release_manifest_missing");
-    return { withhold: REMOTE_ANSWER_UNVERIFIED };
-  }
-  const inputs = manifests.flatMap((manifest) => manifest.inputs.map((input) => ({ input, manifest })));
-  let verdicts;
-  let postureNow;
-  try {
-    verdicts = check.inputs(inputs.map(({ input }) => input));
-    if (verdicts.length !== inputs.length)
-      throw new Error("release check returned the wrong number of verdicts");
-    postureNow = check.secureDerivativeDefault();
-  } catch (error) {
-    console.error(`[olympus:remote] release_check_failed error_message=${boundedLogErrorMessage(error)}`);
-    return { withhold: REMOTE_ANSWER_UNVERIFIED };
-  }
-  if (verdicts.some((verdict) => verdict.tier === "secret"))
-    return { withhold: REMOTE_ANSWER_CHANGED };
-  if (verdicts.some((verdict) => verdict.tier === "unknown"))
-    return { withhold: REMOTE_ANSWER_UNVERIFIED };
-  if (verdicts.some((verdict) => verdict.hiddenByParent === true))
-    return { withhold: REMOTE_ANSWER_UNVERIFIED };
-  for (const [index, { input, manifest }] of inputs.entries()) {
-    const verdict = verdicts[index];
-    if (input.dependency === "parent_label" && verdict.gone)
-      return { withhold: REMOTE_ANSWER_UNVERIFIED };
-    if (!privateInputReleaseAllowed(input, verdict, manifest.constraints, postureNow))
-      return { withhold: input.privateAtAnswer ? REMOTE_ANSWER_WITHHELD : REMOTE_ANSWER_CHANGED };
-  }
-  const dropped = new Set;
-  for (const [index, entry] of evidence.entries()) {
-    const matches = inputs.flatMap(({ input }, position) => citesInput(entry, input) ? [verdicts[position]] : []);
-    if (matches.length === 0) {
-      console.error("[olympus:remote] release_manifest_incomplete");
-      return { withhold: REMOTE_ANSWER_UNVERIFIED };
-    }
-    if (matches.some((verdict) => verdict.gone))
-      dropped.add(index);
-  }
-  return { dropped };
-}
-function citesInput(entry, input) {
-  return input.dependency !== "parent_label" && entry.corpus_id === input.corpusId && entry.provider === input.provider && entry.provider_item_id === input.providerItemId && (typeof entry.provider_conversation_id === "string" && entry.provider_conversation_id ? entry.provider_conversation_id : undefined) === input.providerConversationId;
-}
-function citationOutput(entry) {
-  const title = scannedText(entry.title, MAX_TITLE, "line");
-  const date = dateOnly(entry.authored_at) ?? dateOnly(entry.updated_at);
-  const parent = keptText(entry.parent_label, PARENT_LABEL_MAX_CHARS, "line");
-  const composed = title.secret ? { secret: true } : scannedText(citationTitleWithParent(title.text, parent), MAX_TITLE, "line");
-  return {
-    label: sourceLabel3(entry.provider, entry.family),
-    ...composed.text && !composed.secret ? { title: composed.text } : {},
-    ...date ? { date } : {}
-  };
-}
-function anonymousAnswerOutput(raw) {
-  const record = asRecord14(raw);
-  if (!record || typeof record.ok !== "boolean") {
-    throw new OperationError("email_error", "unexpected anonymous answer shape");
-  }
-  if (record.ok) {
-    if (typeof record.reply !== "string")
-      throw new OperationError("email_error", "unexpected anonymous answer shape");
-    const reply = scannedText(record.reply, MAX_ANSWER, "multiline");
-    const sent2 = keptText(record.sent, MAX_SENT, "multiline");
-    const route = keptText(record.route, MAX_ROUTE, "line");
-    const note = keptText(record.note, MAX_MESSAGE, "line");
-    const model = typeof record.model === "string" && MODEL_ID.test(record.model) && !isSecretLike(record.model) ? record.model : undefined;
-    const cleanup = oneOf(record.cleanup, CLEANUPS);
-    return {
-      kind: "anonymous_answer",
-      status: "answered",
-      reply: reply.secret ? REMOTE_REPLY_WITHHELD : reply.text ?? "",
-      level: record.level === "strict" ? "strict" : "standard",
-      rewritten: record.rewritten === true,
-      remembered: record.remembered === true,
-      network_identity: oneOf(record.networkIdentity, NETWORK_IDENTITIES) ?? "not_verified",
-      ...cleanup ? { cleanup } : {},
-      ...model ? { model } : {},
-      ...route ? { route } : {},
-      ...sent2 ? { sent: sent2 } : {},
-      ...note ? { note } : {},
-      ...typeof record.providerNote === "string" ? { provider_note: REMOTE_PROVIDER_UNKNOWN_NOTE } : {}
-    };
-  }
-  if (record.code === "needs_choice") {
-    const options = asRecord14(record.options);
-    return {
-      kind: "anonymous_answer",
-      status: "needs_choice",
-      message: REMOTE_NEEDS_CHOICE_MESSAGE,
-      options: {
-        suggested_level: options?.suggestedLevel === "strict" ? "strict" : "standard",
-        suggested_cleanup: oneOf(options?.suggestedCleanup, CLEANUPS) ?? "as_written",
-        custom_instruction: options?.customInstruction === true
-      }
-    };
-  }
-  const sent = keptText(record.sent, MAX_SENT, "multiline");
-  const outcome = oneOf(record.outcome, OUTCOMES);
-  const daemonCode = oneOf(record.daemonCode, REMOTE_DAEMON_CODES);
-  return {
-    kind: "anonymous_answer",
-    status: "refused",
-    code: oneOf(record.code, REMOTE_REFUSAL_CODES) ?? "refused",
-    message: keptText(record.message, MAX_MESSAGE, "line") ?? REMOTE_REFUSAL_FALLBACK,
-    ...outcome ? { outcome } : {},
-    ...daemonCode ? { daemon_code: daemonCode } : {},
-    ...sent ? { sent } : {}
-  };
-}
-function sourceIndexStatusOutput(raw) {
-  const record = asRecord14(raw);
-  if (!record || record.kind !== "source_index_status" || !Array.isArray(record.corpora)) {
-    throw new OperationError("source_index_error", "unexpected status shape");
-  }
-  const generatedAt = iso(record.generated_at);
-  const corpora = [];
-  for (const value of record.corpora) {
-    if (corpora.length >= MAX_CORPORA)
-      break;
-    const corpus = asRecord14(value);
-    if (!corpus || typeof corpus.corpus_id !== "string" || corpus.corpus_id.length > 128 || !CORPUS_ID.test(corpus.corpus_id) || isSecretLike(corpus.corpus_id))
-      continue;
-    const retrieval = asRecord14(corpus.retrieval);
-    const mode = oneOf(retrieval?.servable_mode, RETRIEVAL_MODES);
-    const state = oneOf(retrieval?.state, RETRIEVAL_STATES);
-    const refresh = asRecord14(corpus.last_refresh);
-    const refreshStatus = oneOf(refresh?.status, REFRESH_STATUSES);
-    const completedAt = iso(refresh?.completed_at);
-    const counts = asRecord14(corpus.counts);
-    const trustDomain = oneOf(corpus.trust_domain, TRUST_DOMAINS);
-    corpora.push({
-      corpus_id: corpus.corpus_id,
-      label: sourceLabel3(corpus.provider, corpus.family),
-      ...trustDomain ? { trust_domain: trustDomain } : {},
-      configured: corpus.configured === true,
-      ...mode && state ? { retrieval: { mode, state } } : {},
-      ...refreshStatus ? { last_refresh: { status: refreshStatus, ...completedAt ? { completed_at: completedAt } : {} } } : {},
-      ...counts ? {
-        counts: {
-          indexed_items: wholeNumber(counts.indexed_items),
-          chunks: wholeNumber(counts.chunks),
-          embedded_chunks: wholeNumber(counts.embedded_chunks)
-        }
-      } : {}
-    });
-  }
-  return { kind: "source_index_status", ...generatedAt ? { generated_at: generatedAt } : {}, corpora };
-}
-function remoteRetryAfterSeconds(body) {
-  if (!body || typeof body !== "object")
-    return;
-  const value = body.retry_after_seconds;
-  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 86400 ? value : undefined;
-}
-function remoteErrorCode(error) {
-  if (error instanceof OperationError && Object.prototype.hasOwnProperty.call(REMOTE_ERROR_TEXT, error.code))
-    return error.code;
-  return "internal_error";
-}
-function remoteErrorOutput(error, options = {}) {
-  const code = remoteErrorCode(error);
-  if (code === "invalid_params" && options.declaredParams && error instanceof OperationError) {
-    const param = namedParam(error.message, options.declaredParams);
-    if (param)
-      return { error: code, message: invalidParamMessage(param), param };
-  }
-  const retryAfter = RETRY_AFTER_SECONDS[code];
-  if (retryAfter !== undefined)
-    return { error: code, message: REMOTE_ERROR_TEXT[code], retry_after_seconds: retryAfter };
-  if (!REFERENCED_ERROR_CODES.has(code))
-    return { error: code, message: REMOTE_ERROR_TEXT[code] };
-  const ref = mintErrorRef();
-  const errorClass2 = error instanceof Error ? error.name : typeof error;
-  console.error(`[olympus:remote] tool_error code=${code} ref=${ref} class=${JSON.stringify(errorClass2)} error_message=${boundedLogErrorMessage(error)} origin=${logErrorOrigin(error)}`);
-  return { error: code, message: REMOTE_ERROR_TEXT[code], ref };
-}
-function remoteSurfaceErrorOutput(code) {
-  return { error: code, message: REMOTE_ERROR_TEXT[code] };
-}
-function remoteWithheldParamOutput(param) {
-  if (!PARAM_NAME.test(param))
-    return { error: "invalid_params", message: REMOTE_ERROR_TEXT.invalid_params };
-  return {
-    error: "invalid_params",
-    message: `The ${param} argument is not available to remote agents. Remove it and try again.`,
-    param
-  };
-}
-function invalidParamMessage(param) {
-  return `The ${param} argument was not valid. Check it against the tool's schema and try again.`;
-}
-function namedParam(message2, declared) {
-  let best;
-  for (const name of declared) {
-    if (!PARAM_NAME.test(name))
-      continue;
-    const match = new RegExp(`(?<![A-Za-z0-9_])${name}(?![A-Za-z0-9_])`).exec(message2);
-    if (match && (!best || match.index < best.at))
-      best = { name, at: match.index };
-  }
-  return best?.name;
-}
-function mintErrorRef() {
-  const bytes = new Uint8Array(8);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-function remoteOutputSchema(operation) {
-  return Object.prototype.hasOwnProperty.call(REMOTE_OUTPUT_SCHEMAS, operation) ? REMOTE_OUTPUT_SCHEMAS[operation] : undefined;
-}
-function isSecretLike(text3) {
-  return secretLabelsInText(text3).length > 0;
-}
-function scannedText(value, max2, mode) {
-  if (typeof value !== "string")
-    return { secret: false };
-  if (isSecretLike(value))
-    return { secret: true };
-  const normalized = mode === "line" ? value.replace(UNSAFE_CHARS, " ").replace(/\s+/g, " ").trim() : value.replace(UNSAFE_CHARS, "");
-  if (isSecretLike(normalized))
-    return { secret: true };
-  const emitted = mode === "line" ? normalized.slice(0, max2).trim() : normalized.slice(0, max2);
-  if (isSecretLike(emitted))
-    return { secret: true };
-  return emitted ? { text: emitted, secret: false } : { secret: false };
-}
-function keptText(value, max2, mode) {
-  const scanned = scannedText(value, max2, mode);
-  const text3 = mode === "multiline" ? scanned.text?.trim() : scanned.text;
-  return text3 && !scanned.secret ? text3 : undefined;
-}
-function wholeNumber(value) {
-  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
-}
-function iso(value) {
-  if (typeof value !== "string")
-    return;
-  const at = Date.parse(value);
-  return Number.isFinite(at) ? new Date(at).toISOString() : undefined;
-}
-function dateOnly(value) {
-  return iso(value)?.slice(0, 10);
-}
-function asRecord14(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
-}
-var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CITATIONS = 50, MAX_CORPORA = 200, JOB_ID, PARAM_NAME, CORPUS_ID, MODEL_ID, UNSAFE_CHARS, REMOTE_PENDING_MESSAGE, REMOTE_ANSWER_CHANGED = "Olympus withheld this answer because an item it drew on has changed privacy level since the answer was written. Ask the question again.", REMOTE_ANSWER_UNVERIFIED = "Olympus withheld this answer because it could not confirm the items it drew on may still be shared. Ask the question again.", REMOTE_PRIVATE_NOTE = "Your answer is in Olympus on your computer.", REMOTE_SECRET_NOTE = "A matching item is a Secret. Open it in Olympus on your computer.", REMOTE_PRIVATE_NOTE_PATTERN = "^Your answer is in Olympus on your computer\\.(?: \\[Open answer\\]\\(olympus://open/private/[A-Za-z0-9_-]{22}\\))?(?: A matching item is a Secret\\. Open it in Olympus on your computer\\.)?$", PRIVATE_ANSWER_ID, REMOTE_ANSWER_WITHHELD = "Olympus withheld this answer under the owner's privacy rules.", REMOTE_REPLY_WITHHELD = "Olympus withheld the reply because it looked like it contained a password, key or token.", REMOTE_REFUSAL_FALLBACK = "Olympus could not ask anonymously.", REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.", REMOTE_NEEDS_CHOICE_MESSAGE = "Nothing was sent. Ask the user once: Strict (their model rewrites it into general questions first) or Standard (their words, prepared as they choose: as written, light cleanup, or their own instruction). Then call again with level, and remember=true to keep it.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, REMOTE_REFUSAL_CODES, REMOTE_DAEMON_CODES, REFRESH_STATUSES, TRUST_DOMAINS, RETRIEVAL_MODES, RETRIEVAL_STATES, NETWORK_IDENTITIES, CLEANUPS, OUTCOMES, REMOTE_WITHHELD_PARAMS, REMOTE_DESCRIPTIONS, REMOTE_ERROR_TEXT, SOURCE_ANSWER_BUSY_RETRY_AFTER_SECONDS = 30, RETRY_AFTER_SECONDS, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA, REMOTE_OUTPUT_SCHEMAS;
-var init_remote_result = __esm(() => {
-  init_app_release_capture();
-  init_operation_error();
-  init_opsec();
-  init_parent_label();
-  init_release_manifest();
-  init_secret_location_note();
-  MAX_ANSWER = 64 * 1024;
-  MAX_SENT = 16 * 1024;
-  JOB_ID = /^saj_[A-Za-z0-9_-]{43}$/;
-  PARAM_NAME = /^[a-z][a-z0-9_]{0,63}$/;
-  CORPUS_ID = /^[a-z0-9_]+(\.[a-z0-9_-]+)+$/i;
-  MODEL_ID = /^[A-Za-z0-9._:/-]{1,128}$/;
-  UNSAFE_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g;
-  REMOTE_PENDING_MESSAGE = "Olympus is still working on this and it keeps running. " + "Call source_answer_result with this job_id to get the result; repeat while it says working. Do not ask again.";
-  PRIVATE_ANSWER_ID = /^[A-Za-z0-9_-]{22}$/;
-  PROVIDER_LABELS = {
-    gmail: "Gmail",
-    google_drive: "Google Drive",
-    "google-drive": "Google Drive",
-    google_calendar: "Google Calendar",
-    dropbox: "Dropbox",
-    x: "X bookmarks",
-    readwise: "Readwise",
-    telegram: "Telegram",
-    whatsapp: "WhatsApp",
-    whatsapp_personal: "WhatsApp",
-    whatsapp_business: "WhatsApp",
-    apple_messages: "Apple Messages",
-    signal: "Signal",
-    reflect: "Reflect",
-    roam: "Roam",
-    evernote: "Evernote",
-    local_files: "Files on this computer"
-  };
-  FAMILY_LABELS = {
-    email: "Mail",
-    file: "Files",
-    chat: "Messages",
-    note: "Notes",
-    x: "X bookmarks",
-    readwise: "Readwise"
-  };
-  REMOTE_SOURCE_LABELS = Object.freeze([...new Set([
-    ...Object.values(PROVIDER_LABELS),
-    ...Object.values(FAMILY_LABELS),
-    OTHER_SOURCE_LABEL
-  ])].sort());
-  REMOTE_REFUSAL_CODES = Object.freeze([
-    "refused",
-    "anonymous_answers_off",
-    "cancelled",
-    "gate_refused",
-    "internal_error",
-    "invalid_params",
-    "model_same_provider",
-    "question_empty",
-    "question_too_long",
-    "route_not_configured",
-    "secret_detected",
-    "settings_invalid",
-    "settings_stale",
-    "writer_declined",
-    "writer_failed",
-    "invalid_question",
-    "busy",
-    "acknowledgements_incomplete",
-    "funding_date_missing",
-    "funding_date_invalid",
-    "note_expired",
-    "daemon_api_key_missing",
-    "daemon_not_found",
-    "tor_not_found",
-    "unresolved_session",
-    "unresolved_session_other_wallet",
-    "no_unresolved_session",
-    "stranded_processes",
-    "daemon_already_running",
-    "tor_port_busy",
-    "tor_bootstrap_failed",
-    "daemon_start_failed",
-    "daemon_version_unsupported",
-    "daemon_supervisor_unsupported",
-    "relay_mismatch",
-    "key_reuse_on",
-    "key_reuse_unverified",
-    "daemon_keyless",
-    "daemon_identity_failed",
-    "daemon_api_key_rejected",
-    "session_process_exited",
-    "confinement_self_test_failed",
-    "confinement_unavailable",
-    "policy_unavailable",
-    "model_unavailable",
-    "daily_cap_reached",
-    "spend_cap_reached",
-    "state_unavailable",
-    "timeout",
-    "aborted",
-    "redirect_refused",
-    "response_too_large",
-    "invalid_response",
-    "daemon_error",
-    "transport_failed",
-    "teardown_incomplete",
-    "authorization_refused",
-    "session_spent"
-  ].filter((code, index, all) => all.indexOf(code) === index));
-  REMOTE_DAEMON_CODES = Object.freeze([
-    "busy",
-    "request_cancelled",
-    "funding_required",
-    "model_budget_unavailable",
-    "model_policy_unavailable",
-    "invalid_model",
-    "anonymous_access_failed",
-    "upstream_error",
-    "invalid_upstream_response",
-    "withdrawal_pending",
-    "wallet_conflict",
-    "invalid_request_error",
-    "invalid_body",
-    "testnet_password_required",
-    "invalid_api_key",
-    "local_connection_required",
-    "browser_origin_denied",
-    "unrecognized"
-  ]);
-  REFRESH_STATUSES = Object.freeze(["running", "completed", "failed"]);
-  TRUST_DOMAINS = Object.freeze(["public_safe", "internal", "secure_local"]);
-  RETRIEVAL_MODES = Object.freeze(["keyword", "hybrid"]);
-  RETRIEVAL_STATES = Object.freeze(["ready", "degraded"]);
-  NETWORK_IDENTITIES = Object.freeze(["hidden", "visible", "not_verified"]);
-  CLEANUPS = Object.freeze(["as_written", "light_cleanup", "custom"]);
-  OUTCOMES = Object.freeze(["not_sent", "sent_failed", "unknown"]);
-  REMOTE_WITHHELD_PARAMS = {
-    source_index_status: [
-      "conversation_id",
-      "include_sender_aggregation",
-      "max_senders",
-      "include_readiness_ledger",
-      "include_ingestion_ledger",
-      "include_items",
-      "max_items",
-      "query"
-    ]
-  };
-  REMOTE_DESCRIPTIONS = {
-    source_index_status: [
-      "Inspect source-index corpus status: each corpus's refresh status and aggregate counts.",
-      "Read-only: it never returns item metadata, sender counts, ledgers, source text, vectors or credentials.",
-      "Legacy extraction filter fields are refused on the connector-store status surface rather than silently returning whole-corpus counts."
-    ].join(" ")
-  };
-  REMOTE_ERROR_TEXT = {
-    invalid_params: "The request was not valid. Check the arguments against the tool's schema and try again.",
-    invalid_request: "The request was not valid. Check the arguments against the tool's schema and try again.",
-    unsupported_filter: "That filter is not supported here.",
-    config_error: "Olympus on the computer needs setup before it can answer.",
-    argus_unreachable: "Olympus could not reach its private analyst. Try again later.",
-    argus_error: "Olympus's private analyst could not answer. Try again later.",
-    email_not_configured: "Olympus on the computer needs setup before it can answer.",
-    email_unreachable: "Olympus could not reach its source worker in time. Try again later.",
-    email_error: "Olympus could not complete this request.",
-    email_policy_violation: "Olympus withheld this result under the owner's privacy rules.",
-    source_index_not_enabled: "Searching sources is not turned on in Olympus on the computer.",
-    source_index_policy_violation: "Olympus withheld this result under the owner's privacy rules.",
-    source_index_error: "Olympus could not complete this request.",
-    source_answer_busy: "Olympus is already answering as many questions as it can at once. Wait for the answers in progress (call source_answer_result with their job ids), then ask again.",
-    source_answer_job_not_found: "No Olympus answer with that job_id is available to this connection. It may have expired or Olympus may have restarted. Ask the question again with source_answer.",
-    source_answer_deadline: "The answer did not finish within Olympus's time limit and was stopped. Ask a narrower question, or try again later.",
-    source_answer_too_large: "The finished answer was too large for Olympus to return. Ask a narrower question.",
-    internal_error: "Olympus could not complete this request.",
-    unknown_operation: "Olympus has no operation with that name here.",
-    operation_unavailable: "That operation is not enabled on this Olympus install.",
-    unauthorized: "A connection token is required.",
-    invalid_token: "The connection token is not valid or has been revoked.",
-    remote_connections_unavailable: "Olympus could not check the connection token. Try again later.",
-    not_found: "There is nothing at this path.",
-    method_not_allowed: "That HTTP method is not allowed here.",
-    unsupported_media_type: "The request body must be JSON (Content-Type: application/json).",
-    payload_too_large: "The request body is too large.",
-    olympus_offline: "Olympus is off; try again later."
-  };
-  RETRY_AFTER_SECONDS = {
-    source_answer_busy: SOURCE_ANSWER_BUSY_RETRY_AFTER_SECONDS
-  };
-  REMOTE_ERROR_CODES = Object.freeze(Object.keys(REMOTE_ERROR_TEXT));
-  REFERENCED_ERROR_CODES = new Set([
-    "internal_error",
-    "email_error",
-    "source_index_error",
-    "argus_error",
-    "config_error"
-  ]);
-  PENDING_SCHEMA = {
-    type: "object",
-    description: "Still working: call source_answer_result with job_id, again while it says working.",
-    additionalProperties: false,
-    required: ["status", "job_id", "elapsed_ms", "next_tool", "message"],
-    properties: {
-      status: { const: "working" },
-      job_id: { type: "string", pattern: JOB_ID.source },
-      elapsed_ms: { type: "integer", minimum: 0 },
-      next_tool: { const: "source_answer_result" },
-      message: { type: "string" }
-    }
-  };
-  CITATION_SCHEMA = {
-    type: "object",
-    additionalProperties: false,
-    required: ["label"],
-    properties: {
-      label: { type: "string", enum: [...REMOTE_SOURCE_LABELS] },
-      title: { type: "string", maxLength: MAX_TITLE },
-      date: { type: "string", format: "date" }
-    }
-  };
-  SOURCE_ANSWER_SCHEMA = {
-    type: "object",
-    description: 'A source answer: give the answer with its citations. "withheld" carries a fixed sentence to pass on instead. When private_note is present, pass it on as written.',
-    additionalProperties: false,
-    required: ["kind", "status", "answer", "citations"],
-    properties: {
-      kind: { const: "source_answer" },
-      status: { enum: ["answered", "withheld"] },
-      answer: { type: "string", maxLength: MAX_ANSWER },
-      citations: { type: "array", maxItems: MAX_CITATIONS, items: CITATION_SCHEMA },
-      private_note: { type: "string", pattern: REMOTE_PRIVATE_NOTE_PATTERN }
-    }
-  };
-  ANONYMOUS_ANSWERED_SCHEMA = {
-    type: "object",
-    description: 'The anonymous reply. When rewritten is true, say the question was rewritten first and offer to show "sent". When provider_note is present, pass it on as written.',
-    additionalProperties: false,
-    required: ["kind", "status", "reply", "level", "rewritten", "remembered", "network_identity"],
-    properties: {
-      kind: { const: "anonymous_answer" },
-      status: { const: "answered" },
-      reply: { type: "string", maxLength: MAX_ANSWER },
-      level: { enum: ["strict", "standard"] },
-      rewritten: { type: "boolean" },
-      remembered: { type: "boolean" },
-      network_identity: { enum: [...NETWORK_IDENTITIES] },
-      cleanup: { enum: [...CLEANUPS] },
-      model: { type: "string", pattern: MODEL_ID.source },
-      route: { type: "string", maxLength: MAX_ROUTE },
-      sent: { type: "string", maxLength: MAX_SENT },
-      note: { type: "string", maxLength: MAX_MESSAGE },
-      provider_note: { const: REMOTE_PROVIDER_UNKNOWN_NOTE }
-    }
-  };
-  ANONYMOUS_NEEDS_CHOICE_SCHEMA = {
-    type: "object",
-    description: "Nothing was sent: ask the user once, Strict or Standard, then call again with level (and remember=true to keep it).",
-    additionalProperties: false,
-    required: ["kind", "status", "message", "options"],
-    properties: {
-      kind: { const: "anonymous_answer" },
-      status: { const: "needs_choice" },
-      message: { type: "string" },
-      options: {
-        type: "object",
-        additionalProperties: false,
-        required: ["suggested_level", "suggested_cleanup", "custom_instruction"],
-        properties: {
-          suggested_level: { enum: ["strict", "standard"] },
-          suggested_cleanup: { enum: [...CLEANUPS] },
-          custom_instruction: { type: "boolean" }
-        }
-      }
-    }
-  };
-  ANONYMOUS_REFUSED_SCHEMA = {
-    type: "object",
-    description: "Not answered: tell the user the message in those words. outcome says whether the question left (absent: never handed to the transport).",
-    additionalProperties: false,
-    required: ["kind", "status", "code", "message"],
-    properties: {
-      kind: { const: "anonymous_answer" },
-      status: { const: "refused" },
-      code: { enum: [...REMOTE_REFUSAL_CODES] },
-      message: { type: "string", maxLength: MAX_MESSAGE },
-      outcome: { enum: [...OUTCOMES] },
-      daemon_code: { enum: [...REMOTE_DAEMON_CODES] },
-      sent: { type: "string", maxLength: MAX_SENT }
-    }
-  };
-  SOURCE_INDEX_STATUS_SCHEMA = {
-    type: "object",
-    description: "Per-corpus status and counts.",
-    additionalProperties: false,
-    required: ["kind", "corpora"],
-    properties: {
-      kind: { const: "source_index_status" },
-      generated_at: { type: "string", format: "date-time" },
-      corpora: {
-        type: "array",
-        maxItems: MAX_CORPORA,
-        items: {
-          type: "object",
-          additionalProperties: false,
-          required: ["corpus_id", "label", "configured"],
-          properties: {
-            corpus_id: { type: "string", pattern: CORPUS_ID.source, maxLength: 128 },
-            label: { type: "string", enum: [...REMOTE_SOURCE_LABELS] },
-            trust_domain: { enum: [...TRUST_DOMAINS] },
-            configured: { type: "boolean" },
-            retrieval: {
-              type: "object",
-              additionalProperties: false,
-              required: ["mode", "state"],
-              properties: {
-                mode: { enum: [...RETRIEVAL_MODES] },
-                state: { enum: [...RETRIEVAL_STATES] }
-              }
-            },
-            last_refresh: {
-              type: "object",
-              additionalProperties: false,
-              required: ["status"],
-              properties: {
-                status: { enum: [...REFRESH_STATUSES] },
-                completed_at: { type: "string", format: "date-time" }
-              }
-            },
-            counts: {
-              type: "object",
-              additionalProperties: false,
-              required: ["indexed_items", "chunks", "embedded_chunks"],
-              properties: {
-                indexed_items: { type: "integer", minimum: 0 },
-                chunks: { type: "integer", minimum: 0 },
-                embedded_chunks: { type: "integer", minimum: 0 }
-              }
-            }
-          }
-        }
-      }
-    }
-  };
-  REMOTE_ERROR_SCHEMA = {
-    type: "object",
-    additionalProperties: false,
-    required: ["error", "message"],
-    properties: {
-      error: { enum: [...REMOTE_ERROR_CODES], description: "A stable error code." },
-      message: { type: "string", description: "A fixed sentence for this code." },
-      ref: { type: "string", pattern: "^[0-9a-f]{16}$", description: "Where the owner finds this failure in Olympus's log on the computer." },
-      param: { type: "string", pattern: PARAM_NAME.source, description: "The argument at fault, when it is one the operation declares." },
-      retry_after_seconds: {
-        type: "integer",
-        minimum: 1,
-        maximum: 86400,
-        description: "Seconds to wait before trying again, when Olympus is busy or offline; also sent as the HTTP Retry-After header."
-      }
-    }
-  };
-  REMOTE_OUTPUT_SCHEMAS = {
-    source_answer: { oneOf: [SOURCE_ANSWER_SCHEMA, PENDING_SCHEMA] },
-    source_answer_result: {
-      oneOf: [SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, PENDING_SCHEMA]
-    },
-    ask_anonymously: { oneOf: [ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, PENDING_SCHEMA] },
-    source_index_status: SOURCE_INDEX_STATUS_SCHEMA
-  };
 });
 
 // src/core/app-release-agent.ts
@@ -119973,7 +120394,7 @@ __export(exports_managed_tools, {
   MANAGED_TOOL_ORDER: () => MANAGED_TOOL_ORDER
 });
 import { execFile as execFile2 } from "node:child_process";
-import { createHash as createHash75, randomUUID as randomUUID27 } from "node:crypto";
+import { createHash as createHash76, randomUUID as randomUUID27 } from "node:crypto";
 import {
   accessSync as accessSync9,
   constants as constants13,
@@ -120419,7 +120840,7 @@ async function installOne(tool, pin, platformKey, root, uid, options, lease) {
   }
 }
 function fileSha256(path) {
-  return createHash75("sha256").update(readFileSync61(path)).digest("hex");
+  return createHash76("sha256").update(readFileSync61(path)).digest("hex");
 }
 function verifyPinnedFiles(staging, asset, uid, label, tool) {
   for (const pinned of asset.pinnedFiles ?? []) {
@@ -120471,7 +120892,7 @@ async function downloadTo(path, asset, options, onBytes, tool, label) {
     });
     throw new ManagedToolsError("size_mismatch", `The ${label} download is not the pinned size, so nothing was installed.`, tool);
   }
-  const hash = createHash75("sha256");
+  const hash = createHash76("sha256");
   const file = await open4(path, "wx", 384);
   let received = 0;
   let lastReport = 0;
@@ -122218,7 +122639,7 @@ __export(exports_zkapi_confinement_linux, {
 import { execFile as execFile3 } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile as readFile11, stat as fileStat } from "node:fs/promises";
-import { createHash as createHash76 } from "node:crypto";
+import { createHash as createHash77 } from "node:crypto";
 import { lstatSync as lstatSync38, readFileSync as readFileSync63, readlinkSync as readlinkSync2, readdirSync as readdirSync22, realpathSync as realpathSync18 } from "node:fs";
 import { dirname as dirname87, join as join109 } from "node:path";
 function record(value) {
@@ -122395,7 +122816,7 @@ async function launcherPath(env) {
           break;
         current3 = dirname87(current3);
       }
-      if (!lstatSync38(path).isFile() || createHash76("sha256").update(await readFile11(path)).digest("hex") !== ZKAPI_CONFINE_SHA256)
+      if (!lstatSync38(path).isFile() || createHash77("sha256").update(await readFile11(path)).digest("hex") !== ZKAPI_CONFINE_SHA256)
         continue;
       return path;
     } catch {}
@@ -122406,7 +122827,7 @@ async function launcherIdentity(path) {
   const info = await fileStat(path);
   if (!info.isFile())
     throw new Error("not a launcher");
-  const hash = createHash76("sha256").update(await readFile11(path)).digest("hex");
+  const hash = createHash77("sha256").update(await readFile11(path)).digest("hex");
   return [info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs, info.mode, hash].join(":");
 }
 function linuxZkapiConfinement(deps = {}) {
@@ -122612,7 +123033,7 @@ __export(exports_consult_transport_zkapi, {
   DEFAULT_EXECUTABLE_TRUST: () => DEFAULT_EXECUTABLE_TRUST
 });
 import { spawn as spawn7, execFileSync as execFileSync4 } from "node:child_process";
-import { createHash as createHash77, randomUUID as randomUUID28 } from "node:crypto";
+import { createHash as createHash78, randomUUID as randomUUID28 } from "node:crypto";
 import { accessSync as accessSync10, chmodSync as chmodSync35, closeSync as closeSync29, constants as constants14, existsSync as existsSync80, mkdirSync as mkdirSync53, mkdtempSync as mkdtempSync4, readdirSync as readdirSync23, readFileSync as readFileSync64, readlinkSync as readlinkSync3, realpathSync as realpathSync19, rmSync as rmSync33, statSync as statSync35, writeFileSync as writeFileSync17 } from "node:fs";
 import { createConnection as createConnection4, createServer as createServer4 } from "node:net";
 import { homedir as homedir31, tmpdir as tmpdir12 } from "node:os";
@@ -122901,7 +123322,7 @@ function zkapiWalletDirectory(env) {
   }
 }
 function zkapiFenceScope(input) {
-  return createHash77("sha256").update(zkapiWalletDirectory(input.env)).digest("hex").slice(0, 32);
+  return createHash78("sha256").update(zkapiWalletDirectory(input.env)).digest("hex").slice(0, 32);
 }
 function abandonZkapiFence(path, scope, now) {
   let found = false;
@@ -124939,7 +125360,7 @@ __export(exports_engine_service, {
   ENGINE_BUILD_ENV: () => ENGINE_BUILD_ENV
 });
 import { spawn as spawn8, spawnSync as spawnSync13 } from "node:child_process";
-import { createHash as createHash78, randomBytes as randomBytes19 } from "node:crypto";
+import { createHash as createHash79, randomBytes as randomBytes19 } from "node:crypto";
 import { existsSync as existsSync81, lstatSync as lstatSync39, readdirSync as readdirSync24, readFileSync as readFileSync65, renameSync as renameSync17, rmSync as rmSync34, statSync as statSync36 } from "node:fs";
 import { homedir as homedir32, platform as osPlatform3 } from "node:os";
 import { basename as basename16, dirname as dirname89, isAbsolute as isAbsolute33, join as join111, resolve as resolvePath2 } from "node:path";
@@ -125026,7 +125447,7 @@ function engineBuildIdentity(packageRoot) {
     if (typeof manifest.version === "string" && /^[0-9A-Za-z.+-]{1,64}$/.test(manifest.version))
       version = manifest.version;
   } catch {}
-  const hash = createHash78("sha256");
+  const hash = createHash79("sha256");
   for (const name of BUILD_DIGEST_FILES) {
     try {
       const bytes = readFileSync65(join111(packageRoot, "dist", name));
@@ -126477,7 +126898,7 @@ import { chmodSync as chmodSync36, closeSync as closeSync30, constants as consta
 import { createRequire as createRequire7 } from "node:module";
 import { basename as basename17, dirname as dirname90, join as join112, relative as relative16, resolve as resolve23, sep as sep20 } from "node:path";
 import { userInfo as userInfo2 } from "node:os";
-import { randomBytes as randomBytes20, createHash as createHash79, randomUUID as randomUUID29 } from "node:crypto";
+import { randomBytes as randomBytes20, createHash as createHash80, randomUUID as randomUUID29 } from "node:crypto";
 function linuxEngineExec(command, args) {
   const r = spawnSync14(command, args, { encoding: "utf8", timeout: 35000, env: { ...process.env, SYSTEMD_PAGER: "", SYSTEMD_COLORS: "0" } });
   return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? r.error?.message ?? "" };
@@ -126830,7 +127251,7 @@ function hashFile(path) {
   const info = lstatSync40(path);
   if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1)
     throw new Error(`${path} must be a singly-linked regular file.`);
-  return createHash79("sha256").update(readFileSync66(path)).digest("hex");
+  return createHash80("sha256").update(readFileSync66(path)).digest("hex");
 }
 function linuxMachineArtifactDigest(path, kind) {
   if (kind === "file")
@@ -126839,13 +127260,13 @@ function linuxMachineArtifactDigest(path, kind) {
     const info = lstatSync40(path);
     if (!info.isSymbolicLink())
       throw new Error(`${path} is not a symbolic link.`);
-    return createHash79("sha256").update(readlinkSync4(path)).digest("hex");
+    return createHash80("sha256").update(readlinkSync4(path)).digest("hex");
   }
   const root = resolve23(path);
   const rootInfo = lstatSync40(root);
   if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink())
     throw new Error(`${path} is not a real directory tree.`);
-  const hash = createHash79("sha256");
+  const hash = createHash80("sha256");
   const walk = (dir) => {
     for (const name of readdirSync25(dir).sort()) {
       const full = join112(dir, name);
@@ -126927,7 +127348,7 @@ function durableProgram(layout, source, transaction, options) {
   syncCopiedFile(runtime);
   syncDirectorySync(runtimeDir);
   syncDirectorySync(staging);
-  const custodyToken = createHash79("sha256").update(`olympus.engine.generation.v1\x00${linuxMachineArtifactDigest(app, "tree")}\x00${hashFile(runtime)}`).digest("hex");
+  const custodyToken = createHash80("sha256").update(`olympus.engine.generation.v1\x00${linuxMachineArtifactDigest(app, "tree")}\x00${hashFile(runtime)}`).digest("hex");
   writePrivateFileAtomicSync(join112(staging, ".olympus-generation.json"), `${JSON.stringify({ schema: "olympus.engine.generation.v1", token: custodyToken, build: source.build ?? null })}
 `);
   syncDirectorySync(staging);
@@ -127984,7 +128405,7 @@ async function rollbackLinuxEngine(options) {
       throw new Error("The current service generation is unknown; rollback refused.");
     for (const p of [previous.program.runtimePath, previous.program.entryPath, current3.runtimePath, current3.entryPath])
       assertLinuxManagedPath(p);
-    if (!previous.program.runtimeDigest || createHash79("sha256").update(readFileSync66(previous.program.runtimePath)).digest("hex") !== previous.program.runtimeDigest)
+    if (!previous.program.runtimeDigest || createHash80("sha256").update(readFileSync66(previous.program.runtimePath)).digest("hex") !== previous.program.runtimeDigest)
       throw new Error("The previous Bun runtime has changed; rollback refused.");
     if (engineBuildIdentity(previous.program.workingDirectory) !== previous.program.build)
       throw new Error("The previous package has changed; rollback refused.");
@@ -128213,7 +128634,7 @@ var init_setup_preflight = __esm(() => {
 });
 
 // src/workers/credential-degradation.ts
-import { createHash as createHash80 } from "node:crypto";
+import { createHash as createHash81 } from "node:crypto";
 function credentialConfigFingerprint(profileId, profile) {
   const material = JSON.stringify({
     version: 1,
@@ -128225,7 +128646,7 @@ function credentialConfigFingerprint(profileId, profile) {
     secret_ref: profile.secretRef ?? null,
     purpose: profile.purpose ?? null
   });
-  return createHash80("sha256").update(material, "utf8").digest("hex");
+  return createHash81("sha256").update(material, "utf8").digest("hex");
 }
 
 class WorkerBootSecretResolver {
@@ -128424,7 +128845,7 @@ var init_credential_degradation = __esm(() => {
 });
 
 // src/core/consult-gate.ts
-import { createHash as createHash81 } from "node:crypto";
+import { createHash as createHash82 } from "node:crypto";
 import { existsSync as existsSync84, readFileSync as readFileSync68, statSync as statSync38 } from "node:fs";
 import { homedir as homedir33 } from "node:os";
 import { basename as basename18, dirname as dirname92, join as join114 } from "node:path";
@@ -128938,7 +129359,7 @@ function verifiedPackFile(path, sha2566) {
     if (statSync38(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
       return "too_large";
     const gz = readFileSync68(path);
-    return createHash81("sha256").update(gz).digest("hex") === sha2566 ? gz : "hash_mismatch";
+    return createHash82("sha256").update(gz).digest("hex") === sha2566 ? gz : "hash_mismatch";
   } catch {
     return "unreadable";
   }
@@ -133461,61 +133882,6 @@ var init_ocr_readiness = __esm(() => {
   FEDORA_IDS2 = ["fedora", "rhel", "centos", "rocky", "almalinux", "ol", "nobara"];
 });
 
-// src/core/source-index/selected-item-safety.ts
-function selectedItemContentFieldPath(value2) {
-  return selectedItemContentFieldPathInner(value2, "selected_items");
-}
-function selectedItemContentFieldPathInner(value2, path) {
-  if (!value2 || typeof value2 !== "object")
-    return;
-  if (Array.isArray(value2)) {
-    for (let index = 0;index < value2.length; index += 1) {
-      const nested = selectedItemContentFieldPathInner(value2[index], `${path}.${index}`);
-      if (nested)
-        return nested;
-    }
-    return;
-  }
-  for (const [key2, nestedValue] of Object.entries(value2)) {
-    if (FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS.has(normalizeSelectedItemField(key2))) {
-      return `${path}.${key2}`;
-    }
-    const nested = selectedItemContentFieldPathInner(nestedValue, `${path}.${key2}`);
-    if (nested)
-      return nested;
-  }
-  return;
-}
-function normalizeSelectedItemField(key2) {
-  return key2.toLowerCase().replace(/[^a-z0-9]/g, "");
-}
-var FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS;
-var init_selected_item_safety = __esm(() => {
-  FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS = new Set([
-    "body",
-    "boundedtext",
-    "chunk",
-    "chunks",
-    "content",
-    "document",
-    "html",
-    "markdown",
-    "message",
-    "messages",
-    "packet",
-    "passage",
-    "raw",
-    "rawpacket",
-    "rawsource",
-    "rawtext",
-    "snippet",
-    "sourcepacket",
-    "sourcesnippet",
-    "sourcetext",
-    "text"
-  ]);
-});
-
 // src/core/setup-checklist.ts
 var exports_setup_checklist = {};
 __export(exports_setup_checklist, {
@@ -134277,85 +134643,6 @@ function optionalSourceAnswerAnalystProvider(value2) {
     return value2;
   throw new OperationError("invalid_params", "analyst_provider must be default, local, venice, or cloud.");
 }
-function optionalSourceAnswerSelectedItems(value2, fallbackCorpusId) {
-  if (value2 === undefined || value2 === null || value2 === "")
-    return;
-  if (!Array.isArray(value2)) {
-    throw new OperationError("invalid_params", "selected_items must be an array.");
-  }
-  return value2.map((item, index) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) {
-      throw new OperationError("invalid_params", `selected_items.${index} must be an object.`);
-    }
-    const initialRecord = item;
-    const forbiddenPath = selectedItemContentFieldPath(initialRecord);
-    if (forbiddenPath) {
-      throw new OperationError("invalid_params", `selected_items.${index} must not include source content field ${forbiddenPath}.`);
-    }
-    const record2 = selectedItemRecord(initialRecord, fallbackCorpusId);
-    return {
-      corpus_id: requiredSelectedItemString(record2.corpus_id, `selected_items.${index}.corpus_id`),
-      family: requiredSelectedItemString(record2.family, `selected_items.${index}.family`),
-      provider: requiredSelectedItemString(record2.provider, `selected_items.${index}.provider`),
-      account_scope: requiredSelectedItemString(record2.account_scope, `selected_items.${index}.account_scope`),
-      provider_item_id: requiredSelectedItemString(record2.provider_item_id, `selected_items.${index}.provider_item_id`),
-      local_item_id: requiredSelectedItemString(record2.local_item_id, `selected_items.${index}.local_item_id`),
-      ...optionalSelectedItemString(record2.provider_thread_id, "provider_thread_id"),
-      ...optionalSelectedItemString(record2.provider_conversation_id, "provider_conversation_id"),
-      ...optionalSelectedItemString(record2.provider_file_id, "provider_file_id"),
-      ...optionalSelectedItemString(record2.source_version, "source_version"),
-      ...optionalSelectedItemString(record2.conversation_label, "conversation_label"),
-      ...optionalSelectedItemString(record2.author_label, "author_label"),
-      ...optionalSelectedItemString(record2.authored_at, "authored_at")
-    };
-  });
-}
-function selectedItemRecord(record2, fallbackCorpusId) {
-  const selectedItem = record2.selected_item;
-  if (selectedItem && typeof selectedItem === "object" && !Array.isArray(selectedItem)) {
-    return selectedItem;
-  }
-  const sourceItem = record2.sourceItem;
-  if (sourceItem && typeof sourceItem === "object" && !Array.isArray(sourceItem)) {
-    const source = sourceItem;
-    return {
-      corpus_id: record2.corpus_id ?? fallbackCorpusId,
-      family: source.family,
-      provider: source.provider,
-      account_scope: source.accountScope,
-      provider_item_id: source.providerItemId,
-      local_item_id: source.localItemId,
-      provider_thread_id: source.providerThreadId,
-      provider_conversation_id: source.providerConversationId,
-      provider_file_id: source.providerFileId,
-      source_version: source.sourceVersion
-    };
-  }
-  return {
-    ...record2,
-    account_scope: record2.account_scope ?? record2.accountScope,
-    provider_item_id: record2.provider_item_id ?? record2.providerItemId,
-    local_item_id: record2.local_item_id ?? record2.localItemId,
-    provider_thread_id: record2.provider_thread_id ?? record2.providerThreadId,
-    provider_conversation_id: record2.provider_conversation_id ?? record2.providerConversationId,
-    provider_file_id: record2.provider_file_id ?? record2.providerFileId,
-    source_version: record2.source_version ?? record2.sourceVersion
-  };
-}
-function requiredSelectedItemString(value2, name) {
-  if (typeof value2 !== "string" || value2.trim().length === 0 || value2.length > 500) {
-    throw new OperationError("invalid_params", `${name} must be a non-empty safe identifier string.`);
-  }
-  return value2.trim();
-}
-function optionalSelectedItemString(value2, key2) {
-  if (value2 === undefined || value2 === null || value2 === "")
-    return {};
-  if (typeof value2 !== "string" || value2.length > 1000) {
-    throw new OperationError("invalid_params", `selected_items.${key2} must be a safe string.`);
-  }
-  return { [key2]: value2.trim() };
-}
 function optionalAnalystModel(value2, name, analystProvider) {
   const model = optionalString10(value2)?.trim();
   if (model === undefined)
@@ -134388,7 +134675,7 @@ var init_operations = __esm(() => {
   init_config();
   init_config();
   init_operation_error();
-  init_selected_item_safety();
+  init_selected_items();
   init_source_corpus_registry();
   init_venice_models();
   init_public_surface();
@@ -134733,6 +135020,23 @@ var init_operations = __esm(() => {
           ...query !== undefined ? { query } : {}
         });
       }
+    },
+    {
+      name: "source_item_read",
+      cliHints: { name: "source item read" },
+      description: "Read more of a found Personal item. Pass its exact selected_item from source_index_search. Each page is judged before release. For Private items ask source_answer with selected_items instead.",
+      params: {
+        selected_item: { type: "object", required: true, description: "The selected_item returned by source_index_search; identifiers only." },
+        page: { type: "number", description: "Page to read, starting at 1 (default 1)." },
+        pages: { type: "number", description: "Number of pages to read, 1 to 3 (default 1)." }
+      },
+      mutating: false,
+      nativeExposure: "sourceIndexEnabledOnly",
+      handler: async (ctx, params) => ctx.email.sourceItemRead({
+        selectedItem: sourceItemReadSelectedItem(params.selected_item),
+        page: sourceItemReadPage(params.page, "page"),
+        pages: sourceItemReadPage(params.pages, "pages", 3)
+      })
     },
     {
       name: "source_index_search",
@@ -135932,7 +136236,7 @@ var init_installed_sniffer_runtime = __esm(() => {
 });
 
 // src/workers/classification/tier-migration.ts
-import { createHash as createHash84 } from "node:crypto";
+import { createHash as createHash85 } from "node:crypto";
 import { chmodSync as chmodSync38, existsSync as existsSync90, mkdirSync as mkdirSync56, readFileSync as readFileSync74, renameSync as renameSync20, writeFileSync as writeFileSync20 } from "node:fs";
 import { dirname as dirname94, join as join120 } from "node:path";
 function domainTier(domain) {
@@ -135978,7 +136282,7 @@ function findPlan(statePath, planId) {
   return plan;
 }
 function sha2567(text3) {
-  return createHash84("sha256").update(text3, "utf8").digest("hex");
+  return createHash85("sha256").update(text3, "utf8").digest("hex");
 }
 function tierMigrationBatchKey(selector) {
   return sha2567(`tier-migration-batch\x00${normalizeSelector(selector)}`).slice(0, 32);
@@ -137742,7 +138046,7 @@ __export(exports_tier_migration_cli, {
   runTierMigrateCommand: () => runTierMigrateCommand,
   TIER_MIGRATE_USAGE: () => TIER_MIGRATE_USAGE
 });
-import { createHash as createHash85 } from "node:crypto";
+import { createHash as createHash86 } from "node:crypto";
 async function runTierMigrateCommand(args, context2 = {}) {
   const [command2, ...rest] = args;
   const flags = parseFlags(rest);
@@ -137911,7 +138215,7 @@ async function withLanes(context2, env, mode, inputs, run) {
 }
 async function installedInputs(env, options) {
   const rules = loadOwnerTierRules({ env, allowMissing: true });
-  const rulesDigest = createHash85("sha256").update(JSON.stringify(rules)).digest("hex").slice(0, 16);
+  const rulesDigest = createHash86("sha256").update(JSON.stringify(rules)).digest("hex").slice(0, 16);
   const revision = `map:${TIER_MAP_REVISION};rules:${rules.length > 0 ? rulesDigest : "none"}`;
   const base = {
     ...rules.length > 0 ? { rules } : {},
@@ -139114,7 +139418,7 @@ var init_data_restore = __esm(() => {
 });
 
 // src/data-backup.ts
-import { createCipheriv as createCipheriv2, createDecipheriv as createDecipheriv2, createHash as createHash86, createHmac as createHmac5, randomBytes as randomBytes21, randomUUID as randomUUID33, scryptSync as scryptSync2, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
+import { createCipheriv as createCipheriv2, createDecipheriv as createDecipheriv2, createHash as createHash87, createHmac as createHmac5, randomBytes as randomBytes21, randomUUID as randomUUID33, scryptSync as scryptSync2, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
 import { closeSync as closeSync34, existsSync as existsSync94, lstatSync as lstatSync44, mkdirSync as mkdirSync57, openSync as openSync33, readdirSync as readdirSync27, readSync as readSync12, renameSync as renameSync22, rmSync as rmSync38, statSync as statSync41, unlinkSync as unlinkSync4, writeSync as writeSync9, chmodSync as chmodSync40, fsyncSync as fsyncSync10 } from "node:fs";
 import { open as openAsync } from "node:fs/promises";
 import { basename as basename20, dirname as dirname96, join as join122, resolve as resolve25, sep as sep21 } from "node:path";
@@ -139234,7 +139538,7 @@ class BodyWriter {
       this.cipher = createCipheriv2("aes-256-gcm", key2, nonce, { authTagLength: TAG_BYTES });
       this.cipher.setAAD(header);
     } else {
-      this.hash = createHash86("sha256").update(header);
+      this.hash = createHash87("sha256").update(header);
     }
   }
   async write(plain) {
@@ -139521,7 +139825,7 @@ function openBackupFile(options) {
     decipher = createDecipheriv2("aes-256-gcm", key2, nonce, { authTagLength: TAG_BYTES });
     decipher.setAAD(headerBytes);
   } else {
-    hash = createHash86("sha256").update(headerBytes);
+    hash = createHash87("sha256").update(headerBytes);
   }
   const into = resolve25(options.into);
   if (existsSync94(into))
@@ -155432,7 +155736,7 @@ __export(exports_source_answer_jobs, {
   SOURCE_ANSWER_HANDOFF_DEFAULT_MS: () => SOURCE_ANSWER_HANDOFF_DEFAULT_MS,
   SOURCE_ANSWER_BACKGROUND_MAX_WAIT_MS: () => SOURCE_ANSWER_BACKGROUND_MAX_WAIT_MS
 });
-import { createHash as createHash87, randomBytes as randomBytes23, timingSafeEqual as timingSafeEqual7 } from "node:crypto";
+import { createHash as createHash88, randomBytes as randomBytes23, timingSafeEqual as timingSafeEqual7 } from "node:crypto";
 
 class SourceAnswerJobRegistry {
   limits;
@@ -155941,8 +156245,8 @@ class SourceAnswerJobRegistry {
   }
 }
 function sameOwner(a, b) {
-  const left = createHash87("sha256").update(a).digest();
-  const right = createHash87("sha256").update(b).digest();
+  const left = createHash88("sha256").update(a).digest();
+  const right = createHash88("sha256").update(b).digest();
   return timingSafeEqual7(left, right);
 }
 function callerAbortError(message2) {
@@ -156009,22 +156313,6 @@ var init_source_answer_jobs = __esm(() => {
   SOURCE_ANSWER_JOB_DEADLINE_MS = 20 * 60000;
   SOURCE_ANSWER_MAX_RESULT_BYTES = 2 * 1024 * 1024;
   JOB_ID_PATTERN = /^saj_[A-Za-z0-9_-]{43}$/;
-});
-
-// src/workers/remote-access-recheck.ts
-function currentAccess(authorized) {
-  try {
-    return authorized();
-  } catch {
-    return "unavailable";
-  }
-}
-function refusedAccess(access) {
-  const body = remoteSurfaceErrorOutput(access === "revoked" ? "invalid_token" : "remote_connections_unavailable");
-  return { content: [{ type: "text", text: JSON.stringify(body, null, 2) }], isError: true };
-}
-var init_remote_access_recheck = __esm(() => {
-  init_remote_result();
 });
 
 // src/mcp/tools.ts
@@ -156096,7 +156384,7 @@ async function handleRemoteCallTool(request, makeOperationContext, authorized = 
     ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}
   });
   try {
-    const result = await runWithReleaseManifestSink(manifests, () => operation.handler(ctx, args));
+    const result = await runWithReleaseManifestSink(manifests, () => withRemoteReadAuthorization(authorized, () => operation.handler(ctx, args)));
     const afterHandler = currentAccess(authorized);
     if (afterHandler !== "active")
       return refusedAccess(afterHandler);
@@ -156114,10 +156402,15 @@ async function handleRemoteCallTool(request, makeOperationContext, authorized = 
     const afterSettle = currentAccess(authorized);
     if (afterSettle !== "active")
       return refusedAccess(afterSettle);
-    const output = privatePart ? await release() : approved;
+    let output = privatePart ? await release() : approved;
     const afterFinalRelease = currentAccess(authorized);
     if (afterFinalRelease !== "active")
       return refusedAccess(afterFinalRelease);
+    if (operation.name === "source_item_read")
+      output = remoteOperationOutput(operation.name, result, {
+        ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {},
+        releaseManifests: manifests.manifests
+      });
     recordRemoteOperation({ operation: operation.name, args, caller: ctx.caller, output, capture, privateQuestion: privateMayAnswer ? privatePart?.answerRef : undefined });
     return { content: text3(privateMayAnswer ? withRemotePrivateNote(output, privatePart?.answerId, privatePart?.secretMatch) : output) };
   } catch (error2) {
@@ -157225,7 +157518,7 @@ var init_engine_host = __esm(() => {
 });
 
 // connect-relay/shared/protocol.ts
-import { createHash as createHash88, createPublicKey, randomBytes as randomBytes24, sign, verify } from "node:crypto";
+import { createHash as createHash89, createPublicKey, randomBytes as randomBytes24, sign, verify } from "node:crypto";
 function parseSurfacesMessage(message2) {
   if (message2.type !== "surfaces" || message2.v !== 1 || !Array.isArray(message2.entries))
     return;
@@ -157277,7 +157570,7 @@ function base32(data2) {
   return out;
 }
 function installIdForPublicKey(spkiDer) {
-  return base32(createHash88("sha256").update(spkiDer).digest().subarray(0, 20));
+  return base32(createHash89("sha256").update(spkiDer).digest().subarray(0, 20));
 }
 function spkiOf(key2) {
   return key2.export({ format: "der", type: "spki" });
@@ -157291,7 +157584,7 @@ function signInstallMessage(privateKey, kind, nonce, installId, relayHost, schem
   return base64url2(sign(null, signedPayload(kind, nonce, installId, relayHost, scheme), privateKey));
 }
 function powDigest(nonce, installId, relayHost, counter) {
-  return createHash88("sha256").update(`${POW_DOMAIN}
+  return createHash89("sha256").update(`${POW_DOMAIN}
 ${nonce}
 ${installId}
 ${relayHost.toLowerCase()}
@@ -161586,8 +161879,8 @@ var init_built_in_reranker = __esm(() => {
 });
 
 // src/workers/classification/judge-pacing.ts
-import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
-import { createHash as createHash89 } from "node:crypto";
+import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
+import { createHash as createHash90 } from "node:crypto";
 function header(response, name) {
   const raw = response.headers.get(name);
   if (raw === null || raw.trim() === "")
@@ -161603,7 +161896,7 @@ class JudgeRateLimitPacer {
   lastSeq = 0;
   reportSeq = 0;
   blockedUntil = 0;
-  calls = new AsyncLocalStorage8;
+  calls = new AsyncLocalStorage9;
   constructor(clock3 = realClock) {
     this.clock = clock3;
   }
@@ -161684,7 +161977,7 @@ var JUDGE_SAMPLING, JUDGE_PROMPT_CACHE_KEY, DEFAULT_VENICE_JUDGE_CONCURRENT_CALL
 var init_judge_pacing = __esm(() => {
   init_sniffer();
   JUDGE_SAMPLING = Object.freeze({ temperature: 0, seed: 883 });
-  JUDGE_PROMPT_CACHE_KEY = `olympus-judge-${createHash89("sha256").update(SNIFFER_SYSTEM_PROMPT).digest("hex").slice(0, 16)}`;
+  JUDGE_PROMPT_CACHE_KEY = `olympus-judge-${createHash90("sha256").update(SNIFFER_SYSTEM_PROMPT).digest("hex").slice(0, 16)}`;
   realClock = {
     now: () => Date.now(),
     sleep: (ms, signal) => new Promise((resolve27, reject) => {
@@ -163568,7 +163861,7 @@ var init_local_private_answers = __esm(() => {
 });
 
 // src/core/release-signing.ts
-import { createHash as createHash90, createPublicKey as createPublicKey3, verify as verify2 } from "node:crypto";
+import { createHash as createHash91, createPublicKey as createPublicKey3, verify as verify2 } from "node:crypto";
 function releaseManifestUrl(installerUrl) {
   return `${installerUrl}.release.json`;
 }
@@ -163576,7 +163869,7 @@ function releasePlatformFor(platform2) {
   return platform2 === "darwin" ? "darwin-arm64" : platform2 === "linux" ? "linux-x64" : undefined;
 }
 function sha256Hex(bytes) {
-  return createHash90("sha256").update(bytes).digest("hex");
+  return createHash91("sha256").update(bytes).digest("hex");
 }
 function releasePublicKey(...given) {
   const pem = given.length ? given[0] : RELEASE_SIGNING_PUBLIC_KEY;
@@ -166081,9 +166374,9 @@ var fixedIdentity;
 var init_computer_identity = () => {};
 
 // src/workers/dashboard/session-marker.ts
-import { createHash as createHash91 } from "node:crypto";
+import { createHash as createHash92 } from "node:crypto";
 function dashboardSessionMarker(csrfToken) {
-  return createHash91("sha256").update("olympus-dashboard-session-marker\x00").update(csrfToken).digest("hex").slice(0, 24);
+  return createHash92("sha256").update("olympus-dashboard-session-marker\x00").update(csrfToken).digest("hex").slice(0, 24);
 }
 var init_session_marker = () => {};
 
@@ -168918,7 +169211,7 @@ dialog.msgdialog > .messaging-card { margin: 0; border: 0; border-radius: 12px; 
 });
 
 // src/workers/dashboard/components.ts
-import { createHash as createHash92 } from "node:crypto";
+import { createHash as createHash93 } from "node:crypto";
 function escapeHtml(value2) {
   return value2.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
@@ -168969,7 +169262,7 @@ function externalLink(input) {
 }
 function dashboardPageSignature(body) {
   const normalised = body.replace(/<span id="dashboard-poll-signature"[^>]*><\/span>/g, "").replace(/\b\d+s\b/g, "0s");
-  return createHash92("sha256").update(normalised).digest("hex");
+  return createHash93("sha256").update(normalised).digest("hex");
 }
 function pageShell(input) {
   const crumb = (input.crumb ?? "").trim();
@@ -180388,6 +180681,7 @@ var init_write_routes = __esm(() => {
     "/source/index/files/status",
     "/source/index/dropbox/content/export-eval-shard",
     "/source/index/search",
+    "/source/item/read",
     "/source/index/embed",
     "/source/index/dropbox/content/extract",
     "/source/index/dropbox/content/plan",
@@ -180402,7 +180696,7 @@ var init_write_routes = __esm(() => {
 });
 
 // src/workers/source-watch-runtime.ts
-import { createHash as createHash93 } from "node:crypto";
+import { createHash as createHash94 } from "node:crypto";
 import { readFileSync as readFileSync89 } from "node:fs";
 import { request as httpsRequest2 } from "node:https";
 import { homedir as homedir42 } from "node:os";
@@ -180895,7 +181189,7 @@ function compareToWatermark(hit, watermark) {
   return hit.sourceObservedAt.localeCompare(watermark.sourceObservedAt) || hit.ref.localItemId.localeCompare(watermark.ref.localItemId) || hit.ref.sourceVersion.localeCompare(watermark.ref.sourceVersion);
 }
 function sha2568(value2) {
-  return createHash93("sha256").update(value2, "utf8").digest("hex");
+  return createHash94("sha256").update(value2, "utf8").digest("hex");
 }
 function leaseFence(lease) {
   return {
@@ -184755,9 +185049,9 @@ __export(exports_dashboard_resource, {
   DASHBOARD_RESOURCE: () => DASHBOARD_RESOURCE,
   DASHBOARD_REDIRECT_DOMAINS: () => DASHBOARD_REDIRECT_DOMAINS
 });
-import { createHash as createHash94 } from "node:crypto";
+import { createHash as createHash95 } from "node:crypto";
 function versionedResourceUri(base, html3) {
-  return `${base}?v=${createHash94("sha256").update(html3).digest("hex").slice(0, 12)}`;
+  return `${base}?v=${createHash95("sha256").update(html3).digest("hex").slice(0, 12)}`;
 }
 function matchesResourceUri(uri, base) {
   return uri === base || uri.startsWith(`${base}?v=`) && /^[0-9a-f]{12}$/.test(uri.slice(base.length + 3));
@@ -184809,7 +185103,7 @@ var init_locations = __esm(() => {
 });
 
 // src/workers/local-files/volume-identity.ts
-import { createHash as createHash95 } from "node:crypto";
+import { createHash as createHash96 } from "node:crypto";
 import { execFileSync as execFileSync6 } from "node:child_process";
 import { existsSync as existsSync105, lstatSync as lstatSync49, readFileSync as readFileSync90, readdirSync as readdirSync30, realpathSync as realpathSync22 } from "node:fs";
 import { homedir as homedir43 } from "node:os";
@@ -184973,7 +185267,7 @@ function labelFor2(mountPoint) {
   return mountPoint.slice(mountPoint.lastIndexOf("/") + 1) || mountPoint;
 }
 function shortHash(value2) {
-  return createHash95("sha256").update(value2).digest("hex").slice(0, 16);
+  return createHash96("sha256").update(value2).digest("hex").slice(0, 16);
 }
 function normalizeNetworkSource(source) {
   return source.trim().toLowerCase().replace(/^\/\/[^@/]*@/, "//").replace(/\/+$/, "");
@@ -186727,7 +187021,7 @@ var init_locator_result_projector2 = __esm(() => {
 });
 
 // src/workers/chat/chat-scope-filter.ts
-import { createHash as createHash96 } from "node:crypto";
+import { createHash as createHash97 } from "node:crypto";
 function parseStructuredChatScope(value2) {
   const parts = value2.split(":");
   if (parts.length !== 3 || parts[1] !== "chat")
@@ -186755,7 +187049,7 @@ function unresolvedChatTitleResolution(value2) {
   };
 }
 function safeDigest(value2) {
-  return createHash96("sha256").update(value2).digest("hex");
+  return createHash97("sha256").update(value2).digest("hex");
 }
 function conversationTitleTerms(value2) {
   const seen = new Set;
@@ -189950,7 +190244,7 @@ var init_session = __esm(() => {
 });
 
 // src/workers/archive-import/notes/note.ts
-import { createHash as createHash97 } from "node:crypto";
+import { createHash as createHash98 } from "node:crypto";
 function isRecord11(value2) {
   return typeof value2 === "object" && value2 !== null && !Array.isArray(value2);
 }
@@ -190004,7 +190298,7 @@ function cleanTags(tags) {
   return out;
 }
 function sha2569(value2) {
-  return createHash97("sha256").update(value2).digest("hex");
+  return createHash98("sha256").update(value2).digest("hex");
 }
 function buildNoteItem(input, draft, place, savedAt) {
   const title = draft.title.trim().slice(0, MAX_TITLE_CHARS);
@@ -190377,7 +190671,7 @@ var init_listing = __esm(() => {
 });
 
 // src/workers/evernote/connector.ts
-import { createHash as createHash98 } from "node:crypto";
+import { createHash as createHash99 } from "node:crypto";
 function evernoteDeletionCap(storedNotes) {
   return Math.max(EVERNOTE_DELETION_FLOOR, Math.ceil(storedNotes * EVERNOTE_DELETION_SHARE));
 }
@@ -190484,7 +190778,7 @@ function createEvernoteSourceConnector(options) {
         ...createdAt ? { createdAt } : {},
         ...updatedAt ? { updatedAt } : {},
         attachmentCount: resources.length,
-        contentHash: createHash98("sha256").update(text5).digest("hex")
+        contentHash: createHash99("sha256").update(text5).digest("hex")
       }),
       fetchedAt: now().toISOString()
     };
@@ -190777,7 +191071,7 @@ function createEvernoteSourceConnector(options) {
       bytes.set(chunk, at);
       at += chunk.byteLength;
     }
-    if (createHash98("md5").update(bytes).digest("hex") !== hash)
+    if (createHash99("md5").update(bytes).digest("hex") !== hash)
       throw new FileExtractionSourceError("source_content_unavailable");
     allowed();
     const mimeType = fileMimeTypeFromBytes(bytes) ?? "application/octet-stream";
@@ -190818,7 +191112,7 @@ function createEvernoteSourceConnector(options) {
     lastOutcome: () => outcome
   };
 }
-var EVERNOTE_SOURCE_ID = "evernote.notes", EVERNOTE_PROVIDER = "evernote", EVERNOTE_CONNECTOR_ID = "evernote_live", EVERNOTE_MCP_SERVER_URL = "https://mcp.evernote.com/mcp", EVERNOTE_MCP_SCOPE = "read", EVERNOTE_AUTHORIZATION_HOSTS, EVERNOTE_DOWNLOAD_HOSTS, EVERNOTE_READ_TOOLS, EVERNOTE_PASS_CALL_BUDGET = 3000, EVERNOTE_ATTACHMENT_LOCATOR_PREFIX = "evernote-res1:", PAGE_ITEMS = 50, MAX_TITLE_CHARS2 = 500, EVERNOTE_DELETION_FLOOR = 50, EVERNOTE_DELETION_SHARE = 0.1, digest4 = (value2) => createHash98("sha256").update(value2).digest("hex").slice(0, 16), record7 = (value2) => value2 && typeof value2 === "object" && !Array.isArray(value2) ? value2 : undefined, PASS_STOPS, MCP_TO_SOURCE_ERROR;
+var EVERNOTE_SOURCE_ID = "evernote.notes", EVERNOTE_PROVIDER = "evernote", EVERNOTE_CONNECTOR_ID = "evernote_live", EVERNOTE_MCP_SERVER_URL = "https://mcp.evernote.com/mcp", EVERNOTE_MCP_SCOPE = "read", EVERNOTE_AUTHORIZATION_HOSTS, EVERNOTE_DOWNLOAD_HOSTS, EVERNOTE_READ_TOOLS, EVERNOTE_PASS_CALL_BUDGET = 3000, EVERNOTE_ATTACHMENT_LOCATOR_PREFIX = "evernote-res1:", PAGE_ITEMS = 50, MAX_TITLE_CHARS2 = 500, EVERNOTE_DELETION_FLOOR = 50, EVERNOTE_DELETION_SHARE = 0.1, digest4 = (value2) => createHash99("sha256").update(value2).digest("hex").slice(0, 16), record7 = (value2) => value2 && typeof value2 === "object" && !Array.isArray(value2) ? value2 : undefined, PASS_STOPS, MCP_TO_SOURCE_ERROR;
 var init_connector5 = __esm(() => {
   init_file_extraction_source();
   init_file_mime();
@@ -191184,7 +191478,7 @@ var init_live_sync3 = __esm(() => {
 });
 
 // src/workers/engine/http/dashboard-oauth-attempts.ts
-import { randomBytes as randomBytes31, timingSafeEqual as timingSafeEqual9, createHash as createHash99 } from "node:crypto";
+import { randomBytes as randomBytes31, timingSafeEqual as timingSafeEqual9, createHash as createHash100 } from "node:crypto";
 function createDashboardOAuthCallbackRateLimiter() {
   const buckets = new Map;
   return (key2, now) => {
@@ -191255,7 +191549,7 @@ function dashboardOAuthStateMatches(attempt, state) {
   const expected = attempt.pending.state;
   if (typeof expected !== "string" || expected.length === 0)
     return false;
-  return timingSafeEqual9(createHash99("sha256").update(expected).digest(), createHash99("sha256").update(state).digest());
+  return timingSafeEqual9(createHash100("sha256").update(expected).digest(), createHash100("sha256").update(state).digest());
 }
 function dashboardOAuthAttemptExpired(attempt, now) {
   const expiresAt = Date.parse(attempt.expiresAt);
@@ -192764,12 +193058,12 @@ p.small a { color: var(--accent); }
 var init_consent_page = () => {};
 
 // src/core/google-pilot-client.ts
-import { createHash as createHash100 } from "node:crypto";
+import { createHash as createHash101 } from "node:crypto";
 function isRetiredGooglePilotClientId(clientId) {
   const trimmed2 = clientId?.trim();
   if (!trimmed2)
     return false;
-  return RETIRED_GOOGLE_PILOT_CLIENT_ID_SHA256.has(createHash100("sha256").update(trimmed2).digest("hex"));
+  return RETIRED_GOOGLE_PILOT_CLIENT_ID_SHA256.has(createHash101("sha256").update(trimmed2).digest("hex"));
 }
 function resolveGooglePilotClientId(packaged, shipped) {
   const substituted = packaged.trim();
@@ -192985,10 +193279,10 @@ var init_dashboard_oauth_clients = __esm(() => {
 });
 
 // src/workers/engine/http/dashboard-oauth-pages.ts
-import { createHash as createHash101 } from "node:crypto";
+import { createHash as createHash102 } from "node:crypto";
 function dashboardPanelOpener(request) {
   const csrf = request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
-  return csrf ? `session:${createHash101("sha256").update(csrf).digest("base64url")}` : "bearer";
+  return csrf ? `session:${createHash102("sha256").update(csrf).digest("base64url")}` : "bearer";
 }
 function dashboardPanelCallContext(url2, request) {
   const gateway = request.headers.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER)?.trim();
@@ -195876,6 +196170,46 @@ function createEmailSourceWorker(options = {}) {
           assertNoRawEmailFields(result);
           return json(result);
         }
+        if (request.method === "POST" && url2.pathname === `${basePath}/source/item/read`) {
+          const record8 = await parseObjectBody(request);
+          const selected = sourceItemReadSelectedItem(record8.selected_item);
+          const page2 = sourceItemReadPage(record8.page, "page");
+          const pages = sourceItemReadPage(record8.pages, "pages", 3);
+          const store = connectorStoresByCorpusId.get(selected.corpus_id);
+          const refused3 = { pages: [], totalPages: 0, totalChars: 0, couldNotRead: ["not_in_scope"] };
+          if (!store || selected.family !== store.family)
+            return json(refused3);
+          const identity2 = store.activeLocalItemRow(selected.local_item_id)?.identity;
+          if (!identity2 || identity2.provider !== selected.provider || identity2.accountScope !== selected.account_scope || identity2.providerItemId !== selected.provider_item_id || identity2.providerConversationId !== selected.provider_conversation_id)
+            return json(refused3);
+          const result = await store.readItemPages(selected.local_item_id, {
+            page: page2,
+            pages,
+            releaseCheck: options.sourceAnswerReleaseCheck,
+            scope: () => {
+              const scope = connectorStoreReadScope?.(store);
+              if (scope?.allowed === false)
+                return scope;
+              const principal = connectorStorePrincipals.get(store.corpusId);
+              return {
+                allowed: true,
+                ...scope,
+                accountScope: scope?.accountScope ?? connectorStoreAccountScopes.get(store.corpusId) ?? principal?.accountScope,
+                ...principal ? { filters: { ...scope?.filters, provider: principal.provider } } : {}
+              };
+            }
+          });
+          if (currentRemoteReadAccess() !== "active")
+            return json(refused3);
+          if (result.couldNotRead.length === 1 && result.couldNotRead[0] === "names_only" && options.requestOnDemandRead) {
+            Object.assign(result, await itemReadOnDemand(options.requestOnDemandRead, store.corpusId, selected.provider_item_id));
+          }
+          if (result.couldNotRead.includes("not_personal"))
+            throw new EmailSourceWorkerError(403, "not_personal", "Private item: ask with source_answer");
+          assertNoRawEmailFields(result);
+          assertNoSourceIndexOperationalLeakFields(result);
+          return json(result);
+        }
         if (request.method === "POST" && url2.pathname === `${basePath}/source/index/search`) {
           const record8 = await parseObjectBody(request);
           assertSourceIndexSearchQuery(record8.query);
@@ -196361,6 +196695,10 @@ function createEmailSourceWorker(options = {}) {
   }
 }
 var init_engine2 = __esm(() => {
+  init_remote_access_recheck();
+  init_selected_items();
+  init_on_demand_read();
+  init_email();
   init_judge_spending();
   init_people();
   init_models_on_computer();
@@ -197043,7 +197381,7 @@ var init_watch_hub = __esm(() => {
 });
 
 // src/workers/local-files/connector.ts
-import { createHash as createHash102, randomUUID as randomUUID37 } from "node:crypto";
+import { createHash as createHash103, randomUUID as randomUUID37 } from "node:crypto";
 import { realpathSync as realpathSync24, rmSync as rmSync45, readdirSync as readdirSync33 } from "node:fs";
 import { join as join144, posix as posix4 } from "node:path";
 function nameAsOnDisk(scopeRoot, rel) {
@@ -197058,7 +197396,7 @@ function nameAsOnDisk(scopeRoot, rel) {
   return dir;
 }
 function localFilesItemId(scopePath) {
-  return `f1.${createHash102("sha256").update(scopePath.normalize("NFC")).digest("hex").slice(0, 32)}`;
+  return `f1.${createHash103("sha256").update(scopePath.normalize("NFC")).digest("hex").slice(0, 32)}`;
 }
 function identityFor(scopePath, version2) {
   const providerItemId = localFilesItemId(scopePath);
@@ -197615,7 +197953,7 @@ var init_connector6 = __esm(() => {
 });
 
 // src/workers/local-files/provider-store-sync.ts
-import { createHash as createHash103 } from "node:crypto";
+import { createHash as createHash104 } from "node:crypto";
 function localFilesRootOfApprovedScopeKey(approvedScopeKey) {
   const prefix = `${LOCAL_FILES_POLICY_SOURCE}:`;
   if (!approvedScopeKey.startsWith(prefix))
@@ -197625,7 +197963,7 @@ function localFilesRootOfApprovedScopeKey(approvedScopeKey) {
   return root;
 }
 function localFilesConnectorIdForScope(approvedScopeKey, scope) {
-  const hash = createHash103("sha256").update(`${LOCAL_FILES_ACCOUNT_SCOPE}\x00${approvedScopeKey}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
+  const hash = createHash104("sha256").update(`${LOCAL_FILES_ACCOUNT_SCOPE}\x00${approvedScopeKey}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
   return `local.files.${hash}`;
 }
 function localFilesStoreView(tierSet) {
@@ -197780,7 +198118,7 @@ function createLocalFilesProviderStoreSyncHandler(options) {
       return {
         receipt: {
           ...receiptWithoutDigest,
-          receipt_sha256: createHash103("sha256").update(JSON.stringify(receiptWithoutDigest)).digest("hex")
+          receipt_sha256: createHash104("sha256").update(JSON.stringify(receiptWithoutDigest)).digest("hex")
         },
         checkpoint: scopedCheckpoint(sync.cursor, connectorId)
       };
@@ -198389,7 +198727,7 @@ var init_local_pacing = __esm(() => {
 });
 
 // src/workers/source-scheduler.ts
-import { createHash as createHash104 } from "node:crypto";
+import { createHash as createHash105 } from "node:crypto";
 function sourceSchedulerConstructionLogLines(input) {
   const constructed = input.decisions.filter((decision) => decision.outcome === "constructed");
   const constructedIds = new Set(constructed.map((decision) => decision.sourceId));
@@ -199478,7 +199816,7 @@ function fileExtractionSchedulerTask(input) {
   };
 }
 function schedulerScopeHash(approvedScopeKey) {
-  return createHash104("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
+  return createHash105("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
 }
 function createReadwiseSchedulerSource(input) {
   if (!input.liveSync)
@@ -200265,7 +200603,7 @@ function normalizeRetryAt(retryAt, completedAt) {
   };
 }
 function hash(value2) {
-  return createHash104("sha256").update(value2).digest("hex").slice(0, 16);
+  return createHash105("sha256").update(value2).digest("hex").slice(0, 16);
 }
 function reportedDegradedReason(degradedReason, lastCompletedAt, now) {
   if (!degradedReason || !UTC_DAY_SCOPED_DEGRADED_REASONS.has(degradedReason))
@@ -205809,9 +206147,9 @@ var init_postal_mime = __esm(() => {
 });
 
 // src/workers/archive-import/mbox/parse.ts
-import { createHash as createHash105 } from "node:crypto";
+import { createHash as createHash106 } from "node:crypto";
 function sha25610(value2) {
-  return createHash105("sha256").update(value2).digest("hex");
+  return createHash106("sha256").update(value2).digest("hex");
 }
 function headerValue(email2, key2) {
   const value2 = email2.headers.find((header2) => header2.key === key2)?.value?.trim();
@@ -206864,9 +207202,9 @@ var init_place = __esm(() => {
 });
 
 // src/workers/archive-import/whatsapp/connector.ts
-import { createHash as createHash106 } from "node:crypto";
+import { createHash as createHash107 } from "node:crypto";
 function sha25611(value2) {
-  return createHash106("sha256").update(value2).digest("hex");
+  return createHash107("sha256").update(value2).digest("hex");
 }
 function stoppedFrom2(error2, relPath) {
   if (error2 instanceof WhatsAppFormatError) {
@@ -209185,9 +209523,9 @@ var init_xml_stream = __esm(() => {
 });
 
 // src/workers/archive-import/evernote/connector.ts
-import { createHash as createHash107 } from "node:crypto";
+import { createHash as createHash108 } from "node:crypto";
 function sha25612(value2) {
-  return createHash107("sha256").update(value2).digest("hex");
+  return createHash108("sha256").update(value2).digest("hex");
 }
 function enexTime(value2) {
   const match = /^\s*(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z\s*$/.exec(value2 ?? "");
@@ -209264,7 +209602,7 @@ function decodeBase64Range(reader, start, end, cap) {
   return bytes;
 }
 function md5OfBase64Range(reader, start, end) {
-  const hash2 = createHash107("md5");
+  const hash2 = createHash108("md5");
   decodeBase64Chunks(reader, start, end, Number.MAX_SAFE_INTEGER, (chunk) => hash2.update(chunk));
   return hash2.digest("hex");
 }
@@ -211859,7 +212197,7 @@ var init_extraction_runtime = __esm(() => {
 });
 
 // src/workers/archive-import/sync.ts
-import { createHash as createHash108 } from "node:crypto";
+import { createHash as createHash109 } from "node:crypto";
 function tally(values) {
   return Object.values(values).reduce((total, value2) => total + value2, 0);
 }
@@ -211885,7 +212223,7 @@ function receiptOf(record8, input) {
   };
   return {
     ...withoutDigest,
-    receipt_sha256: createHash108("sha256").update(JSON.stringify(withoutDigest)).digest("hex")
+    receipt_sha256: createHash109("sha256").update(JSON.stringify(withoutDigest)).digest("hex")
   };
 }
 function stopFrom(error2, at) {
@@ -212507,9 +212845,9 @@ var init_open_target2 = __esm(() => {
 });
 
 // src/workers/engine/runtime/source-answer-lanes.ts
-import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage10 } from "node:async_hooks";
 function createOwnerQuestionActivity(relay) {
-  const context2 = new AsyncLocalStorage9;
+  const context2 = new AsyncLocalStorage10;
   let inFlight = 0;
   return {
     get busy() {
@@ -213879,6 +214217,7 @@ function parseEngineCommandEnvelope(value2) {
     case "storage_registry":
     case "capture":
     case "embed_chunks":
+    case "source_item_read":
     case "source_watch":
     case "extraction_queue":
     case "people":
@@ -214197,6 +214536,7 @@ var init_commands = __esm(() => {
       "/dashboard/messaging/scope"
     ],
     embed_chunks: ["/v1/source/index/embed"],
+    source_item_read: ["/v1/source/item/read"],
     data_export: ["/v1/cli/data-export"],
     source_watch: ["/v1/source/watch/create", "/v1/source/watch/cancel"],
     extraction_queue: [
@@ -214934,11 +215274,11 @@ var init_export_zone = __esm(() => {
 });
 
 // src/workers/whatsapp/archive-input.ts
-import { createHash as createHash109 } from "node:crypto";
+import { createHash as createHash110 } from "node:crypto";
 import { existsSync as existsSync115 } from "node:fs";
 import { posix as posix8 } from "node:path";
 function hash2(value2) {
-  return createHash109("sha256").update(value2).digest("hex").slice(0, 24);
+  return createHash110("sha256").update(value2).digest("hex").slice(0, 24);
 }
 function encodeCursor4(state, inner) {
   return `${CURSOR_PREFIX}${Buffer.from(JSON.stringify(state)).toString("base64url")}~${inner ?? ""}`;
@@ -215901,7 +216241,7 @@ var init_gmail_attachment_extraction = __esm(() => {
 });
 
 // src/workers/source-account-guard.ts
-import { createHash as createHash110 } from "node:crypto";
+import { createHash as createHash111 } from "node:crypto";
 function createExclusiveRunner() {
   let tail = Promise.resolve();
   return (task) => {
@@ -215937,7 +216277,7 @@ function createSourceAccountGuard(options) {
   let lastAccessToken;
   const evidenceChecked = new Map;
   const evidenceOpens = async (accessToken, folderIds) => {
-    const key2 = createHash110("sha256").update(`${accessToken}
+    const key2 = createHash111("sha256").update(`${accessToken}
 ${folderIds.join(",")}`).digest("hex");
     const known = evidenceChecked.get(key2);
     if (known !== undefined)
@@ -215995,7 +216335,7 @@ ${folderIds.join(",")}`).digest("hex");
     if (session.kind !== "bearer_token")
       return;
     lastAccessToken = session.token;
-    const key2 = createHash110("sha256").update(session.token).digest("hex");
+    const key2 = createHash111("sha256").update(session.token).digest("hex");
     const known = verified.get(key2);
     if (known)
       return known;
@@ -216248,7 +216588,7 @@ var init_installed_tier_classification = __esm(() => {
 });
 
 // src/workers/classification/sniffer-resolver.ts
-import { createHash as createHash111 } from "node:crypto";
+import { createHash as createHash112 } from "node:crypto";
 import { mkdirSync as mkdirSync69, readFileSync as readFileSync99 } from "node:fs";
 import { dirname as dirname112 } from "node:path";
 
@@ -216327,7 +216667,7 @@ function slotWaitOf(error2) {
 }
 function materialCarriesSecret(question) {
   const own3 = snifferOwnMaterial(question.material);
-  const key2 = createHash111("sha256").update(own3).digest("base64");
+  const key2 = createHash112("sha256").update(own3).digest("base64");
   const known = secretScreenCache.get(key2);
   if (known !== undefined)
     return known;
@@ -218552,7 +218892,7 @@ var init_snapshot = __esm(() => {
 });
 
 // src/workers/engine-split/runtime.ts
-import { AsyncLocalStorage as AsyncLocalStorage10 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage11 } from "node:async_hooks";
 import { randomUUID as randomUUID40 } from "node:crypto";
 import { lstatSync as lstatSync52 } from "node:fs";
 function engineBackgroundSocketFromEnv(env) {
@@ -218673,7 +219013,7 @@ function restartingResponse() {
 function createFrontGate() {
   let open7 = true;
   let generation = 0;
-  const current3 = new AsyncLocalStorage10;
+  const current3 = new AsyncLocalStorage11;
   return {
     isOpen: () => open7,
     close() {
@@ -227774,6 +228114,7 @@ var init_response_builder = __esm(() => {
   MAIL_WINDOWS = new Set(["6m", "1y", "2y", "5y", "all"]);
   MAIL_CATEGORIES = new Set(["primary", "social", "promotions", "updates", "forums"]);
   ERROR_TEXT = {
+    not_personal: "Private item: ask with source_answer",
     invalid_params: "The request was not valid. Check the arguments and try again.",
     invalid_request: "The request was not valid. Check the arguments and try again.",
     unsupported_filter: "That filter is not supported here.",
@@ -238941,7 +239282,7 @@ __export(exports_remote_mcp, {
   REMOTE_DIRECTORY_MCP_PATH: () => REMOTE_DIRECTORY_MCP_PATH,
   DEMO_GRANT_REMOTE_TOOLS: () => DEMO_GRANT_REMOTE_TOOLS
 });
-import { createHash as createHash112 } from "node:crypto";
+import { createHash as createHash113 } from "node:crypto";
 import { existsSync as existsSync121 } from "node:fs";
 function isRemoteMcpRequest(request) {
   return remoteMcpSurface(request) !== undefined;
@@ -238989,7 +239330,7 @@ function createRemoteMcpHandler(options) {
       trace.app = verification.connection.displayName;
       const bearer = /^Bearer\s+(\S+)$/i.exec(request.headers.get("authorization")?.trim() ?? "")?.[1];
       if (bearer)
-        trace.credential = requestCredentialTag(createHash112("sha256").update(bearer).digest());
+        trace.credential = requestCredentialTag(createHash113("sha256").update(bearer).digest());
       const response = await serveAuthenticated(request, verification, surface, trace);
       if (!trace.relayed)
         return response;
@@ -239065,7 +239406,7 @@ function remoteMcpLogLine(trace, status, ms) {
     calls: trace.calls ?? [],
     status,
     ms: Math.round(ms),
-    ...trace.connection ? { connection: createHash112("sha256").update(`olympus-remote-log
+    ...trace.connection ? { connection: createHash113("sha256").update(`olympus-remote-log
 ${trace.connection}`).digest("hex").slice(0, 8) } : {},
     ...trace.failed ? { failed: true } : {}
   });
@@ -239483,7 +239824,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash113, randomBytes as randomBytes34, timingSafeEqual as timingSafeEqual11 } from "node:crypto";
+import { createHash as createHash114, randomBytes as randomBytes34, timingSafeEqual as timingSafeEqual11 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -239857,7 +240198,7 @@ function createRemoteOAuthHandler(options) {
         codes.delete(hash3);
         return oauthError(400, "invalid_grant", "The authorization code was issued to another client or redirect.");
       }
-      if (!constantTimeEqual(createHash113("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
+      if (!constantTimeEqual(createHash114("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
         codes.delete(hash3);
         return oauthError(400, "invalid_grant", "The code verifier does not match the challenge.");
       }
@@ -240133,7 +240474,7 @@ function constantTimeEqual(left, right) {
   return a.length === b.length && a.length > 0 && timingSafeEqual11(a, b);
 }
 function sha25613(value2) {
-  return createHash113("sha256").update(value2).digest("hex");
+  return createHash114("sha256").update(value2).digest("hex");
 }
 function redirectWithParams(redirectUri, params) {
   const target2 = new URL(redirectUri);
@@ -242454,7 +242795,7 @@ __export(exports_remote_openapi, {
   REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES,
   REMOTE_OPENAPI_API_VERSION: () => REMOTE_OPENAPI_API_VERSION
 });
-import { createHash as createHash114 } from "node:crypto";
+import { createHash as createHash115 } from "node:crypto";
 function isRemoteOpenApiRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_OPENAPI_SPEC_PATH || TOOL_PATH_PATTERN.test(pathname);
@@ -242471,7 +242812,7 @@ function createRemoteOpenApiHandler(options) {
     const serverUrl = typeof configured === "function" ? livePublicServerUrl(configured()) : publicServerUrl(configured);
     if (spec?.serverUrl !== serverUrl) {
       const text7 = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-      spec = { serverUrl, text: text7, etag: `"${createHash114("sha256").update(text7).digest("base64url").slice(0, 27)}"` };
+      spec = { serverUrl, text: text7, etag: `"${createHash115("sha256").update(text7).digest("base64url").slice(0, 27)}"` };
     }
     return spec;
   };
@@ -242549,7 +242890,7 @@ async function callTool(request, name, options) {
     ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}
   });
   try {
-    const result = await runWithReleaseManifestSink(manifests, () => operation.handler(ctx, params.value));
+    const result = await runWithReleaseManifestSink(manifests, () => withRemoteReadAuthorization(authorized, () => operation.handler(ctx, params.value)));
     const afterHandler = currentAccess(authorized);
     if (afterHandler !== "active")
       return refused3(afterHandler);
@@ -242567,10 +242908,15 @@ async function callTool(request, name, options) {
     const afterSettle = currentAccess(authorized);
     if (afterSettle !== "active")
       return refused3(afterSettle);
-    const output = privatePart ? await release2() : approved;
+    let output = privatePart ? await release2() : approved;
     const afterFinalRelease = currentAccess(authorized);
     if (afterFinalRelease !== "active")
       return refused3(afterFinalRelease);
+    if (operation.name === "source_item_read")
+      output = remoteOperationOutput(operation.name, result, {
+        ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {},
+        releaseManifests: manifests.manifests
+      });
     recordRemoteOperation({ operation: operation.name, args: params.value, caller: ctx.caller, output, capture, privateQuestion: privateMayAnswer ? privatePart?.answerRef : undefined });
     return jsonResponse(200, privateMayAnswer ? withRemotePrivateNote(output, privatePart?.answerId, privatePart?.secretMatch) : output);
   } catch (error2) {
@@ -242747,7 +243093,8 @@ var init_remote_openapi = __esm(() => {
     source_answer_busy: 429,
     source_answer_job_not_found: 404,
     source_answer_deadline: 504,
-    source_answer_too_large: 502
+    source_answer_too_large: 502,
+    not_personal: 403
   };
 });
 
@@ -242879,7 +243226,7 @@ __export(exports_setup_backend, {
   createChatGptSetupBackend: () => createChatGptSetupBackend
 });
 import { readFileSync as readFileSync101 } from "node:fs";
-import { createHash as createHash115 } from "node:crypto";
+import { createHash as createHash116 } from "node:crypto";
 function privacyRuleView(rule) {
   if (rule.kind === "sender" && rule.value)
     return [{ kind: "sender", source_id: "gmail.email", value: rule.value }];
@@ -242906,7 +243253,7 @@ function readChatGptPrivacySettings(env, pendingCount) {
 function privacyRevision(profile) {
   if (!profile)
     return "prv1.unset";
-  const digest5 = createHash115("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
+  const digest5 = createHash116("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
   return `prv1.${digest5.slice(0, 32)}`;
 }
 function createChatGptSetupBackend(options) {
@@ -242914,7 +243261,7 @@ function createChatGptSetupBackend(options) {
   const privacySettings = () => {
     const current4 = options.sovereignty.source === "file" && options.sovereignty.path ? validateSovereigntyConfig(JSON.parse(readFileSync101(options.sovereignty.path, "utf8"))) : policy;
     policy = current4;
-    const policyRevision = createHash115("sha256").update(JSON.stringify(current4)).digest("hex").slice(0, 16);
+    const policyRevision = createHash116("sha256").update(JSON.stringify(current4)).digest("hex").slice(0, 16);
     if (isPendingPrivacyPolicy(current4))
       return {
         configured: false,
@@ -250364,7 +250711,7 @@ init_worker_cli_launcher();
 init_worker_transport();
 init_atomic_file();
 init_boot_progress();
-import { createHash as createHash83 } from "node:crypto";
+import { createHash as createHash84 } from "node:crypto";
 import { spawnSync as spawnSync17 } from "node:child_process";
 import { existsSync as existsSync89, lstatSync as lstatSync43, mkdirSync as mkdirSync55, readFileSync as readFileSync73 } from "node:fs";
 import { homedir as homedir35, platform as osPlatform4 } from "node:os";
@@ -250373,7 +250720,7 @@ import { dirname as dirname93, isAbsolute as isAbsolute35, join as join119 } fro
 // src/core/lifecycle-artifact.ts
 init_atomic_file();
 init_operation_error();
-import { createHash as createHash82, randomUUID as randomUUID30 } from "node:crypto";
+import { createHash as createHash83, randomUUID as randomUUID30 } from "node:crypto";
 import { spawnSync as spawnSync16 } from "node:child_process";
 import {
   chmodSync as chmodSync37,
@@ -250401,7 +250748,7 @@ function prepareWorkerUpgradeArtifact(options) {
   if (artifactBytes.byteLength <= 0 || artifactBytes.byteLength > MAX_UPGRADE_ARTIFACT_BYTES) {
     throw new OperationError("invalid_params", `Upgrade artifact must be between 1 byte and ${MAX_UPGRADE_ARTIFACT_BYTES} bytes.`);
   }
-  const artifactSha256 = createHash82("sha256").update(artifactBytes).digest("hex");
+  const artifactSha256 = createHash83("sha256").update(artifactBytes).digest("hex");
   const snapshotDir = mkdtempSync5(join117(tmpdir13(), ".olympus-artifact-snapshot-"));
   const artifactPath = join117(snapshotDir, "artifact.tgz");
   const descriptor = openSync31(artifactPath, "wx", 384);
@@ -250651,7 +250998,7 @@ function syncVersionTree(root) {
   syncDirectorySync(root);
 }
 function versionTreeDigest(root) {
-  const digest4 = createHash82("sha256");
+  const digest4 = createHash83("sha256");
   hashVersionTree(root, "", digest4);
   return digest4.digest("hex");
 }
@@ -251523,7 +251870,7 @@ function assertRegularFile2(path, label) {
   throw new OperationError("config_error", `Refusing a non-regular ${label}: ${path}`);
 }
 function sha2566(value2) {
-  return createHash83("sha256").update(value2).digest("hex");
+  return createHash84("sha256").update(value2).digest("hex");
 }
 
 // src/cli.ts
@@ -253254,6 +253601,18 @@ function doctorFailureSummary(result) {
     "Fix the failed checks and run olympus doctor again; the JSON above carries each check's detail and hint."
   ];
 }
+function parseCliObject(value2, key2) {
+  let parsed;
+  try {
+    parsed = JSON.parse(value2);
+  } catch {
+    parsed = undefined;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new OperationError("invalid_params", `--${key2.replace(/_/g, "-")} must be a JSON object.`);
+  }
+  return parsed;
+}
 function parseArgs(operation, args) {
   const params = {};
   const positional = operation.cliHints.positional ?? [];
@@ -253283,7 +253642,7 @@ function parseArgs(operation, args) {
         if (value2 === undefined) {
           throw new OperationError("invalid_params", `Missing value for --${key2.replace(/_/g, "-")}.`);
         }
-        params[key2] = definition?.type === "number" ? Number(value2) : value2;
+        params[key2] = definition?.type === "number" ? Number(value2) : definition?.type === "object" ? parseCliObject(value2, key2) : value2;
         if (inlineValue === undefined)
           index += 1;
       }

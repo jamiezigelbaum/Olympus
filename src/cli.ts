@@ -971,6 +971,16 @@ export function doctorFailureSummary(result: DoctorSummaryShape): string[] {
   ];
 }
 
+/** An object-valued flag is JSON on the command line, e.g. a search hit's selected_item. */
+function parseCliObject(value: string, key: string): Record<string, unknown> {
+  let parsed: unknown;
+  try { parsed = JSON.parse(value); } catch { parsed = undefined; }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new OperationError('invalid_params', `--${key.replace(/_/g, '-')} must be a JSON object.`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
 export function parseArgs(operation: Operation, args: string[]): Record<string, unknown> {
   const params: Record<string, unknown> = {};
   const positional = operation.cliHints.positional ?? [];
@@ -1000,7 +1010,8 @@ export function parseArgs(operation: Operation, args: string[]): Record<string, 
         if (value === undefined) {
           throw new OperationError('invalid_params', `Missing value for --${key.replace(/_/g, '-')}.`);
         }
-        params[key] = definition?.type === 'number' ? Number(value) : value;
+        params[key] = definition?.type === 'number' ? Number(value)
+          : definition?.type === 'object' ? parseCliObject(value, key) : value;
         if (inlineValue === undefined) index += 1;
       }
     } else if (position < positional.length) {
