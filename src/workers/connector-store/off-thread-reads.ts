@@ -114,7 +114,11 @@ const snapshotConnection = (path) => {
   const idle = idleSnapshots.get(path) ?? [];
   while (idle.length > 0) {
     const held = idle.pop();
-    if (held.file === file) return held;
+    if (held.file === file) {
+      // A snapshot may have changed its connection's settings; the next starts from the defaults.
+      held.db.exec('PRAGMA busy_timeout = 10000');
+      return held;
+    }
     try { held.db.close(); } catch {}
   }
   return { db: open(path), file, path };
