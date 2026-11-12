@@ -240894,11 +240894,17 @@ async function main() {
   let registerTierLegStore = (...registration) => {
     tierLegsOpenedEarly.push(registration);
   };
+  const sqliteFailure = (error2) => {
+    if (!(error2 instanceof Error))
+      return "error";
+    const code = error2.code;
+    return `${error2.name}${typeof code === "string" ? ` ${code}` : ""}: ${error2.message.slice(0, 120)}`;
+  };
   const openTierSecretLocations = (account, secureDbPath, label) => {
     try {
       return openSecretLocations(account, { dbPath: secretLocationsPathForStore(secureDbPath) });
     } catch (error2) {
-      console.warn(`[tier] secret-locations index unavailable for ${label}: ${error2 instanceof Error ? error2.name : "error"}`);
+      console.warn(`[tier] secret-locations index unavailable for ${label}: ${sqliteFailure(error2)}`);
       return;
     }
   };
@@ -240945,7 +240951,7 @@ async function main() {
     } catch (error2) {
       if (engineFront)
         throw error2;
-      console.warn(`[tier] secret-locations index unavailable for ${input.secure.corpusId}: ${error2 instanceof Error ? error2.name : "error"}`);
+      console.warn(`[tier] secret-locations index unavailable for ${input.secure.corpusId}: ${sqliteFailure(error2)}`);
     }
     input.internal.useTierLedger(ledger);
     const lane = {

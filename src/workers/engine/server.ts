@@ -1136,11 +1136,19 @@ export async function main(): Promise<void> {
   let registerTierLegStore: (...registration: TierLegRegistration) => void = (...registration) => {
     tierLegsOpenedEarly.push(registration);
   };
+  // Which SQLite failure it was (busy, cannot open, corrupt): the name alone left a
+  // release check unable to tell a lock from a missing file. SQLite's own codes
+  // and messages name no path and no content.
+  const sqliteFailure = (error: unknown): string => {
+    if (!(error instanceof Error)) return 'error';
+    const code = (error as { code?: unknown }).code;
+    return `${error.name}${typeof code === 'string' ? ` ${code}` : ''}: ${error.message.slice(0, 120)}`;
+  };
   const openTierSecretLocations = (account: StorageAccount, secureDbPath: string, label: string): SecretLocationsIndex | undefined => {
     try {
       return openSecretLocations(account, { dbPath: secretLocationsPathForStore(secureDbPath) });
     } catch (error) {
-      console.warn(`[tier] secret-locations index unavailable for ${label}: ${error instanceof Error ? error.name : 'error'}`);
+      console.warn(`[tier] secret-locations index unavailable for ${label}: ${sqliteFailure(error)}`);
       return undefined;
     }
   };
@@ -1215,7 +1223,7 @@ export async function main(): Promise<void> {
       secrets = openSecretLocations(input.account, { dbPath: secretLocationsPathForStore(input.secure.dbPath) });
     } catch (error) {
       if (engineFront) throw error;
-      console.warn(`[tier] secret-locations index unavailable for ${input.secure.corpusId}: ${error instanceof Error ? error.name : 'error'}`);
+      console.warn(`[tier] secret-locations index unavailable for ${input.secure.corpusId}: ${sqliteFailure(error)}`);
     }
     input.internal.useTierLedger(ledger);
     const lane = {
