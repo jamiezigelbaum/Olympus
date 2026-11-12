@@ -14,6 +14,7 @@ import { buildEvalPack, createEvalSourceLanes, configuredEvalEmbedding, prepareE
 import { passageContainsQuote, PASSAGE_MATCH_RULE } from './passage-match.ts';
 import { validatePassageDataset, type EvalDataset, type EvalQuestion } from './types.ts';
 import { localEvalModel, type DraftModel } from './local-model.ts';
+import { enterStage, runEvalCli, type EvalStage } from './cli-failure.ts';
 import type { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import type { SourceTrustDomain } from '../src/core/source-index/types.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
@@ -127,6 +128,8 @@ export async function runPassageEval(input: {
   probeLanes?: (question: EvalQuestion, items: ReadonlyArray<{ corpusId: string; providerItemId?: string }>) => Promise<LaneProbe>;
   /** Whether a question's pinned quote answers it, and whether it is specific enough to pick its item out. */
   judgeQuestion?: (question: string, quote: string) => Promise<QuestionJudgement>;
+  /** Called as each question enters a step (1-based index; step names only). */
+  onProgress?: (index: number, total: number, step: 'build_pack' | 'fit' | 'probe_lanes' | 'judge') => void;
 }): Promise<PassageReceipt> {
   validatePassageDataset(input.dataset);
   const split = input.split ?? 'open';
@@ -136,14 +139,17 @@ export async function runPassageEval(input: {
   const rows: PassageRow[] = [];
   let rerankerId: string | undefined;
   const stores = new Map(input.storeCounts.map(store => [store.corpusId, store]));
-  for (const question of questions) {
+  for (const [position, question] of questions.entries()) {
+    const step = (name: 'build_pack' | 'fit' | 'probe_lanes' | 'judge') => input.onProgress?.(position + 1, questions.length, name);
     const started = performance.now();
+    step('build_pack');
     const detail = await input.buildPack(question);
     // A cut-short search is not an ordinary miss: the question is recorded
     // as degraded, left out of the metrics, and the run goes on.
     const degraded = degradationsOf(detail);
     rerankerId ??= detail.rerank?.rerankerId;
     const builtAt = performance.now();
+    step('fit');
     const original = detail.pack;
     const pack = input.promptBytes === undefined ? original : fitPackToPromptBytes(original, input.promptBytes,
       new Map(original.candidates.map((candidate, index) => [candidate, detail.candidateCorpusIds[index] ?? ''])),
@@ -174,6 +180,7 @@ export async function runPassageEval(input: {
       const searches = (detail.storeSearches ?? []).filter(search => identities.some(item => item.corpusId === search.corpusId));
       const storeRanks = searches.flatMap(search => { const at = search.providerItemIds.findIndex(id => holds(search.corpusId, id)); return at < 0 ? [] : [at + 1]; });
       const packAt = original.candidates.findIndex((candidate, index) => holds(detail.candidateCorpusIds[index], candidate.provenance.sourceItem.providerItemId));
+      if (input.probeLanes) step('probe_lanes');
       const lanes = input.probeLanes ? await input.probeLanes(question, identities) : undefined;
       const storeRank = storeRanks.length ? Math.min(...storeRanks) : null;
       const packRank = packAt < 0 ? null : packAt + 1;
@@ -183,6 +190,7 @@ export async function runPassageEval(input: {
         packRank, packSize: original.candidates.length, fitRank: objectRank, ...(lanes ? { keywordRank: lanes.keyword, vectorRank: lanes.vector } : {}) };
     }
     const quoted = question.expectedEvidence?.find(expected => expected.quote)?.quote;
+    if (answerable && quoted && input.judgeQuestion) step('judge');
     const judge = answerable && quoted && input.judgeQuestion ? await input.judgeQuestion(question.question, quoted) : undefined;
     rows.push({ questionId: question.id, shape: question.shape,
       families: expectedStores.length ? [...new Set(expectedStores.map(store => store?.family ?? 'unknown'))] : ['unknown'],
@@ -283,7 +291,9 @@ export function questionJudge(model: DraftModel) {
   };
 }
 
-export async function main(argv = process.argv.slice(2)): Promise<void> {
+export async function main(argv = process.argv.slice(2), stage?: EvalStage): Promise<void> {
+  const enter = (name: string) => enterStage(stage, name, 'passage eval');
+  enter('arguments');
   const { isolation, rest } = parseDataRootArgs(argv);
   if (!isolation) throw new Error('--data-root is required.');
   const values = new Map<string, string>(); let datasetPath: string | undefined;
@@ -306,9 +316,12 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   validatePassageDataset(dataset);
   const maxResults = positiveInteger(values.get('--max-results') ?? process.env.OLYMPUS_EVAL_MAX_RESULTS, 5);
   const maxCharsPerCandidate = positiveInteger(values.get('--max-chars-per-candidate') ?? process.env.OLYMPUS_EVAL_MAX_CHARS_PER_CANDIDATE, DEFAULT_MAX_CHARS_PER_CANDIDATE);
+  enter('open_data_root');
   const opened = openEvalDataRoot(isolation);
   try {
+    enter('load_embedding');
     const embedding = await prepareEvalEmbedding({ configured: await configuredEvalEmbedding(loadConfig(), process.env) });
+    enter('load_reranker');
     const reranker = await prepareBuiltInRerankerFromEnv();
     // Each store search's returned ids, for the funnel's store rank.
     let searches: EvalStoreSearch[] = [];
@@ -326,15 +339,16 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       },
       ...(probe ? { probeLanes: probe } : {}),
       ...(judge ? { judgeQuestion: judge } : {}),
+      onProgress: (index, total, step) => enter(`question ${index}/${total}: ${step}`),
     });
+    enter('write_receipt');
     opened.checkFileDescriptors();
     const output = values.get('--output') ?? 'eval/private/passages.latest.json';
     mkdirSync(dirname(output), { recursive: true, mode: 0o700 });
     writeFileSync(output, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 });
     console.log(JSON.stringify(receipt.summary));
+    if (values.has('--compare')) enter('compare');
     if (values.has('--compare')) console.log(JSON.stringify(comparePassageReceipts(receipt, JSON.parse(readFileSync(values.get('--compare')!, 'utf8')) as PassageReceipt)));
   } finally { try { opened.checkFileDescriptors(); } finally { opened.close(); } }
 }
-// The embedding and reranker helpers keep the event loop alive after the
-// receipt is written, so the CLI exits itself once main settles.
-if (import.meta.main) main().then(() => process.exit(process.exitCode ?? 0), () => { console.error('Passage eval failed; no content is logged.'); process.exit(1); });
+if (import.meta.main) runEvalCli('Passage eval', stage => main(process.argv.slice(2), stage));

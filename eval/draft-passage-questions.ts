@@ -12,6 +12,7 @@ import { DraftUnreadable, localEvalModel, type DraftModel } from './local-model.
 export { DraftUnreadable, localDraftModel, type DraftModel } from './local-model.ts';
 import { openEvalDataRoot, type EvalDataRoot } from './data-root.ts';
 import { buildEvalPack, configuredEvalEmbedding, createEvalSourceLanes, prepareEvalEmbedding } from './retrieval.ts';
+import { enterStage, runEvalCli, type EvalStage } from './cli-failure.ts';
 import { prepareBuiltInRerankerFromEnv } from '../src/workers/source-index/built-in-reranker.ts';
 import { parseDataRootArgs } from './data-root-args.ts';
 import { passageContainsQuote, passageWords, passageWordsContainQuote } from './passage-match.ts';
@@ -457,7 +458,9 @@ export function parseMinimums(values: readonly string[]): Record<string, number>
   return out;
 }
 
-export async function main(argv = process.argv.slice(2)): Promise<void> {
+export async function main(argv = process.argv.slice(2), stage?: EvalStage): Promise<void> {
+  const enter = (name: string) => enterStage(stage, name, 'passage drafting');
+  enter('arguments');
   if (hostname().split('.')[0]!.toLowerCase() !== 'sparta') throw new Error('Run the drafting CLI on Sparta.');
   const { isolation, rest } = parseDataRootArgs(argv);
   if (!isolation) throw new Error('--data-root is required.');
@@ -479,6 +482,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   if (existing) validatePassageDataset(existing);
   const config = loadConfig();
   const model = localEvalModel(config, { baseUrl: values.get('--base-url'), model: values.get('--model') });
+  enter('open_data_root');
   const opened = openEvalDataRoot(isolation);
   try {
     // Negatives are checked against what the passage eval itself would seat.
@@ -489,6 +493,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     // and negativeChecksDegraded now names the lanes.
     let retrieval: Promise<(question: string) => Promise<NegativeRetrieval>> | undefined;
     const prepareRetrieval = async () => {
+      enter('load_retrieval');
       const embedding = await prepareEvalEmbedding({ configured: await configuredEvalEmbedding(config, process.env) });
       const reranker = await prepareBuiltInRerankerFromEnv();
       const lanes = createEvalSourceLanes({ ...opened, embeddingFor: embedding.embeddingFor });
@@ -509,7 +514,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       save: (state: DraftCheckpoint) => writePrivateFile(checkpointPath, `${JSON.stringify(state)}\n`),
     };
     const progress = (line: string) => console.error(line);
+    enter('draft');
     const result = await draftPassageQuestions({ opened, count: positiveInteger(values.get('--count'), 60), seed: values.get('--seed') ?? '1', model, negativePassages, progress, checkpoint, minimums, ...(existing ? { existing } : {}) });
+    enter('write_set');
     opened.checkFileDescriptors();
     writeDraftQuestionSet(output, result);
     // Kept while a request failed, so --resume asks again for just those.
@@ -518,4 +525,4 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 }
 // The embedding and reranker helpers keep the event loop alive after the set
 // is written, so the CLI exits itself once main settles.
-if (import.meta.main) main().then(() => process.exit(process.exitCode ?? 0), () => { console.error('Passage drafting failed; no content is logged.'); process.exit(1); });
+if (import.meta.main) runEvalCli('Passage drafting', stage => main(process.argv.slice(2), stage));
