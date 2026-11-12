@@ -14,6 +14,7 @@ import { sharedDataPath } from '../../core/olympus-layout.ts';
 import { removeFileDurablySync } from '../../core/atomic-file.ts';
 import { bindWorkerSocket, createUnixSocketFetch, workerSocketListenerStopped, workerSocketServe } from '../../core/worker-transport.ts';
 import { EngineCommandClient, OwnerBusyRelay } from './client.ts';
+import { currentLocalInferencePriority } from '../answer-activity.ts';
 import { createEngineCommandHandler, ENGINE_FORWARDED_ROUTES, EngineCommandLedger, requestToForwarded, type EngineCommandHandlers, type EngineForwardedKind, type EngineForwardedResponse } from './commands.ts';
 import { ENGINE_STATUS_STALE_MS, readEngineStatusSnapshot, startEngineStatusPublisher, type EngineStatusRead, type EngineStatusSnapshot } from './snapshot.ts';
 
@@ -429,7 +430,7 @@ export async function completeModelInBackground(
     response = await fetchBackground(`${ENGINE_BACKGROUND_ORIGIN}${ENGINE_MODEL_COMPLETE_PATH}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', Authorization: `Bearer ${authToken}` },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ ...body, priority: currentLocalInferencePriority() }),
       ...(signal ? { signal } : {}),
     });
   } catch (error) {

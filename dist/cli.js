@@ -75044,6 +75044,16 @@ function runClassificationInference(work) {
   localInferencePriority ??= new AsyncLocalStorage5;
   return localInferencePriority.run("maintenance", work);
 }
+function currentLocalInferencePriority() {
+  return localInferencePriority?.getStore() ?? "owner";
+}
+function runAtLocalInferencePriority(priority, work) {
+  if (priority === "background")
+    return runBackgroundInference(work);
+  if (priority === "maintenance")
+    return runClassificationInference(work);
+  return work();
+}
 function createAnswerActivity(onBusy, options = {}) {
   const maxLeaseMs = options.maxLeaseMs ?? DEFAULT_ANSWER_LEASE_MS;
   const now = options.now ?? Date.now;
@@ -215274,13 +215284,16 @@ function createEngineCommandHandler(options) {
     if (url2.pathname === ENGINE_MODEL_COMPLETE_PATH && request.method === "POST") {
       if (!options.ready() || !options.modelComplete)
         return Response.json({ error: "model_unavailable" }, { status: 503 });
-      const parsed = parseModelRequest(await request.json().catch(() => {
+      const body = await request.json().catch(() => {
         return;
-      }));
-      if (!parsed)
+      });
+      const parsed = parseModelRequest(body);
+      const priority = parseModelPriority(asRecord19(body)?.priority);
+      if (!parsed || !priority)
         return Response.json({ error: "invalid_model_request" }, { status: 400 });
+      const modelComplete = options.modelComplete;
       try {
-        const completion = await options.modelComplete({ ...parsed, signal: request.signal });
+        const completion = await runAtLocalInferencePriority(priority, () => modelComplete({ ...parsed, signal: request.signal }));
         return Response.json(completion);
       } catch (error2) {
         if (error2 instanceof OperationError)
@@ -215309,6 +215322,11 @@ function createEngineCommandHandler(options) {
     return Response.json({ error: "not_found" }, { status: 404 });
   };
 }
+function parseModelPriority(value2) {
+  if (value2 === undefined)
+    return "owner";
+  return MODEL_PRIORITIES.find((priority) => priority === value2);
+}
 function parseModelRequest(value2) {
   const record8 = asRecord19(value2);
   if (!record8)
@@ -215328,11 +215346,12 @@ function parseModelRequest(value2) {
     ...responseSchema !== undefined ? { responseSchema } : {}
   };
 }
-var ENGINE_RELOAD_KINDS, ENGINE_JUDGE_BOOST_MAX_IDS = 20, ENGINE_JUDGE_BOOST_TTL_MS, ENGINE_FORWARDED_ROUTES, ENGINE_BODY_MAX_BYTES, ENGINE_DASHBOARD_SAMPLES_MAX = 500, EngineCommandError, ID3, SOURCE, RESOURCE, forwardedRecordIds, HOP_HEADERS;
+var ENGINE_RELOAD_KINDS, ENGINE_JUDGE_BOOST_MAX_IDS = 20, ENGINE_JUDGE_BOOST_TTL_MS, ENGINE_FORWARDED_ROUTES, ENGINE_BODY_MAX_BYTES, ENGINE_DASHBOARD_SAMPLES_MAX = 500, EngineCommandError, ID3, SOURCE, RESOURCE, forwardedRecordIds, HOP_HEADERS, MODEL_PRIORITIES;
 var init_commands = __esm(() => {
   init_engine_split();
   init_operation_error();
   init_http();
+  init_answer_activity();
   ENGINE_RELOAD_KINDS = ["sources", "scope", "exclusions", "embedding", "models", "archive", "extraction", "pacing"];
   ENGINE_JUDGE_BOOST_TTL_MS = 15 * 60000;
   ENGINE_FORWARDED_ROUTES = {
@@ -215380,6 +215399,7 @@ var init_commands = __esm(() => {
   RESOURCE = /^[\x21-\x7e]{1,200}$/;
   forwardedRecordIds = new WeakMap;
   HOP_HEADERS = new Set(["host", "content-length", "connection", "transfer-encoding", "keep-alive", "upgrade"]);
+  MODEL_PRIORITIES = ["owner", "background", "maintenance"];
 });
 
 // src/workers/engine-split/client.ts
@@ -215909,7 +215929,7 @@ async function completeModelInBackground(fetchBackground, authToken, request) {
     response = await fetchBackground(`${ENGINE_BACKGROUND_ORIGIN}${ENGINE_MODEL_COMPLETE_PATH}`, {
       method: "POST",
       headers: { "content-type": "application/json", Authorization: `Bearer ${authToken}` },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ ...body, priority: currentLocalInferencePriority() }),
       ...signal ? { signal } : {}
     });
   } catch (error2) {
@@ -215936,6 +215956,7 @@ var init_runtime4 = __esm(() => {
   init_atomic_file();
   init_worker_transport();
   init_client3();
+  init_answer_activity();
   init_commands();
   init_snapshot();
   SOURCE_SYNC_WAIT_MS = 35 * 60000;

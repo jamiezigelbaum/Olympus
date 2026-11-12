@@ -23,6 +23,7 @@ import { ENGINE_COMMANDS_PATH, ENGINE_MODEL_COMPLETE_PATH, ENGINE_READY_PATH, ty
 import type { AnalystModelCompletion, AnalystModelRequest } from '../../core/analyst.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import { hasValidWorkerBearerToken } from '../http.ts';
+import { runAtLocalInferencePriority, type LocalInferencePriority } from '../answer-activity.ts';
 
 /** Config files the front writes and the background re-reads (design, "Writes the front still needs", B). */
 export const ENGINE_RELOAD_KINDS = ['sources', 'scope', 'exclusions', 'embedding', 'models', 'archive', 'extraction', 'pacing'] as const;
@@ -612,10 +613,15 @@ export function createEngineCommandHandler(options: EngineCommandServerOptions):
     }
     if (url.pathname === ENGINE_MODEL_COMPLETE_PATH && request.method === 'POST') {
       if (!options.ready() || !options.modelComplete) return Response.json({ error: 'model_unavailable' }, { status: 503 });
-      const parsed = parseModelRequest(await request.json().catch(() => undefined));
-      if (!parsed) return Response.json({ error: 'invalid_model_request' }, { status: 400 });
+      const body = await request.json().catch(() => undefined);
+      const parsed = parseModelRequest(body);
+      const priority = parseModelPriority(asRecord(body)?.priority);
+      if (!parsed || !priority) return Response.json({ error: 'invalid_model_request' }, { status: 400 });
+      const modelComplete = options.modelComplete;
       try {
-        const completion = await options.modelComplete({ ...parsed, signal: request.signal });
+        // The front's call keeps its priority here: a background answer stays
+        // background, so the judge still gets its fair turn behind it.
+        const completion = await runAtLocalInferencePriority(priority, () => modelComplete({ ...parsed, signal: request.signal }));
         return Response.json(completion);
       } catch (error) {
         // The model's own answer, typed as it would be in one process: a
@@ -643,6 +649,14 @@ export function createEngineCommandHandler(options: EngineCommandServerOptions):
 }
 
 /** A completion request from the wire: the fields AnalystModelRequest carries, nothing coerced. */
+const MODEL_PRIORITIES: readonly LocalInferencePriority[] = ['owner', 'background', 'maintenance'];
+
+/** The priority the front's call ran at; a front that sends none ran the owner's call. */
+export function parseModelPriority(value: unknown): LocalInferencePriority | undefined {
+  if (value === undefined) return 'owner';
+  return MODEL_PRIORITIES.find((priority) => priority === value);
+}
+
 export function parseModelRequest(value: unknown): Omit<AnalystModelRequest, 'signal'> | undefined {
   const record = asRecord(value);
   if (!record) return undefined;
