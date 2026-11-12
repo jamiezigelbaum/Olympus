@@ -46705,18 +46705,15 @@ var init_local_index = __esm(() => {
       return !current2 || current2.dev !== this.openedFile.dev || current2.ino !== this.openedFile.ino;
     }
     async prepareStatusCounts(scope) {
-      if (!this.tierHiddenCountsMemo)
-        await this.refreshTierHiddenCountsInTurns();
+      await this.refreshTierHiddenCountsInTurns();
       const key2 = JSON.stringify(scope ?? null);
-      if (!this.settledUnreadableCountMemo?.has(key2)) {
-        try {
-          const counts = this.unreadHoldCounts(await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
-          const memos = this.settledUnreadableCountMemo ??= new Map;
-          if (memos.size > 32)
-            memos.clear();
-          memos.set(key2, { at: Date.now(), ...counts });
-        } catch {}
-      }
+      try {
+        const counts = this.unreadHoldCounts(await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
+        const memos = this.settledUnreadableCountMemo ??= new Map;
+        if (memos.size > 32)
+          memos.clear();
+        memos.set(key2, { at: Date.now(), ...counts });
+      } catch {}
     }
     settledUnreadableCount(scope, maxAgeMs) {
       const key2 = JSON.stringify(scope ?? null);
@@ -46901,6 +46898,10 @@ var init_local_index = __esm(() => {
       ${contentFilters.sql}
       ${hiddenNotIn}
       ${namesOnlyNotIn}`;
+      const approvedContentWhere = `${scope?.contentAllowed === false ? "AND 0" : ""}
+      ${accountScope ? "AND i.account_scope = ?" : ""}
+      ${contentFilters.sql}
+      ${hiddenNotIn}`;
       const parityWhere = `${contentWhere}
       ${heldNotIn}`;
       const unreadHolds = this.settledUnreadableCount(scope, options.countsMaxAgeMs ?? 0);
@@ -46942,6 +46943,7 @@ var init_local_index = __esm(() => {
           (1 ${itemWhere}) AS in_items,
           (1 ${hiddenNotIn}) AS stored,
           i.item_pk IN (SELECT value FROM json_each(?)) AS elsewhere,
+          (1 ${approvedContentWhere}) AS in_content_scope,
           (1 ${fileScopeWhere}) AS in_file_scope
         FROM items i
       )
@@ -46949,6 +46951,7 @@ var init_local_index = __esm(() => {
         COALESCE(SUM(t = 0 AND in_items), 0) AS items,
         COALESCE(SUM(t = 0 AND stored), 0) AS stored_items,
         COALESCE(SUM(t = 0 AND in_items AND elsewhere), 0) AS content_elsewhere_items,
+        COALESCE(SUM(t = 0 AND in_items AND NOT dir AND elsewhere AND in_content_scope), 0) AS content_elsewhere_in_scope_files,
         COALESCE(SUM(t = 0 AND in_items AND NOT dir), 0) AS files,
         COALESCE(SUM(t = 0 AND in_items AND dir), 0) AS folders,
         COALESCE(SUM(t = 1 AND in_items), 0) AS tombstoned_items,
@@ -46958,6 +46961,9 @@ var init_local_index = __esm(() => {
         ...itemParams,
         ...jsonList(tier.hidden),
         JSON.stringify(keptNamesOnlyPks),
+        ...accountScope ? [accountScope] : [],
+        ...contentFilters.params,
+        ...jsonList(tier.hidden),
         ...fileScopeParams
       ], mode: "get" };
       const textCounts = yield { sql: `
@@ -47082,7 +47088,7 @@ var init_local_index = __esm(() => {
             files: counts.files,
             folders: counts.folders,
             fullIngestionFiles: counts.full_ingestion_files,
-            scopeMetadataOnlyFiles: Math.max(0, counts.files - counts.full_ingestion_files),
+            scopeMetadataOnlyFiles: Math.max(0, counts.files - counts.full_ingestion_files - counts.content_elsewhere_in_scope_files),
             contentEligibleItems: Math.max(0, counts.full_ingestion_files - policyDeferredItems - outsideContentWindowItems),
             policyDeferredItems
           } : {},
