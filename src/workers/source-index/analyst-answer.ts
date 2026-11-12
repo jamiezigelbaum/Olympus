@@ -2812,6 +2812,11 @@ export interface ReleasedEvidenceCoverage {
   content_private_items: number;
   partially_read_items: number;
   unclassified_items: number;
+  // One note per source a search cut short (a lane out of time or its store
+  // busy), naming it by corpus id: an unread lane is never a silently thinner
+  // list. The answer path already names them (#1305); the search tool reads
+  // this.
+  cut_short?: string[];
   // Breadth per family beyond the bounded selection (counts only).
   matches: Array<{ family: string; matched_items: number; in_evidence: number; at_least: boolean }>;
 }
@@ -2979,6 +2984,7 @@ export async function searchReleasedEvidence(input: {
   });
   withheld += released.withheld;
   const coverage = detail.pack.coverage;
+  const cutShort = timedOutCoverageNotes(coverage);
   return {
     evidence: released.evidence,
     withheld,
@@ -2992,6 +2998,7 @@ export async function searchReleasedEvidence(input: {
       content_private_items: detail.contentPrivateCandidateIndexes?.length ?? 0,
       partially_read_items: (detail.corpusReadabilityGaps ?? []).reduce((sum, gap) => sum + gap.partialDocuments, 0),
       unclassified_items: (detail.classificationCoverage ?? []).reduce((sum, note) => sum + note.pendingClassificationItems, 0),
+      ...(cutShort.length > 0 ? { cut_short: cutShort } : {}),
       matches: (coverage.matchCounts ?? []).map((count) => ({
         family: count.family,
         matched_items: count.matchedItems,
