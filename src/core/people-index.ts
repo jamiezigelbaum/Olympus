@@ -1001,7 +1001,7 @@ export interface PeopleObservationSource {
    * not on every write, so a refresh can tell when a name may have stopped
    * being shareable.
    */
-  peopleVisibilityMarker?(): string;
+  visibilityMarker?(): string;
   setPeopleNames?(resolver: ((provider: string, senderId: string | undefined, senderLabel: string | undefined) => PeopleCitationName | undefined) | undefined): void;
 }
 
@@ -1163,7 +1163,7 @@ function fingerprintParts(stores: readonly PeopleObservationSource[]): string[] 
       sync = '';
     }
     try {
-      visibility = store.peopleVisibilityMarker?.() ?? '';
+      visibility = store.visibilityMarker?.() ?? '';
     } catch {
       // A store whose visibility cannot be read now: rebuild once it can.
       return `${sync}${UNREADABLE_VISIBILITY}`;

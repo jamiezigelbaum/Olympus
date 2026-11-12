@@ -234,12 +234,14 @@ for (const choice of ['pending', 'local-first', 'local-only'] as const) {
       relevance: embeddingPanelRelevance(() => p.providers.get('secure_local')),
       readItem: (item, request) => readPrivateEvidenceItem({ lanes: p.lanes, item, ...request }),
     });
-    const jobs = new PrivateAnswerJobs({ model: () => panelModel, eligible, installId: () => 'c'.repeat(32), claimHoldMs: 0, log: () => {} });
+    const jobs = new PrivateAnswerJobs({ model: () => panelModel, eligible, installId: () => 'c'.repeat(32), claimHoldMs: 0, log: () => {},
+      // The test polls every 10 ms, far faster than a panel; the product's 1/s poll budget would answer 429 under CI load (#1283).
+      pollRate: { capacity: 10_000, refillPerSecond: 10_000 } });
     const { jobId } = jobs.begin({ question: QUESTION, count: evidence.matched, evidence: evidence.candidates.map(item => ({ ...item })), refresh: async () => (await searchPrivateEvidence({ lanes: p.lanes, question: QUESTION })).candidates.map(item => ({ ...item })) });
     expect(jobId).toBeDefined();
     const keys = await generatePanelKeyPair();
     let response = await jobs.claim(jobId!, keys.publicKey);
-    for (let n = 0; n < 100 && response.status === 202; n++) { await Bun.sleep(10); response = await jobs.claim(jobId!, keys.publicKey); }
+    for (let n = 0; n < 2_000 && response.status === 202; n++) { await Bun.sleep(10); response = await jobs.claim(jobId!, keys.publicKey); }
     expect(response.body.status).toBe('ready');
     expect(JSON.stringify(response.body)).not.toContain('twenty euros');
     const plaintext = JSON.parse(await openPrivateAnswer(jobId!, keys.privateKey, response.body as unknown as SealedPrivateAnswer));

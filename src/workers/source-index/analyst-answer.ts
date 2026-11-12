@@ -540,6 +540,7 @@ export function createAnalystSourceIndexAnswerHandler(
         recordSourceAnswerPackSeats(
           analysisDetail.pack.candidates.map((_, index) => analysisDetail.candidateCorpusIds[index] ?? ''),
           analysisDetail.recencySeats ?? 0,
+          analysisDetail.pack.candidates.map((candidate) => candidate.provenance.sourceItem.localItemId),
         );
         const seatOf = new Map(analysisDetail.pack.candidates.map((candidate, index) => [candidate.provenance, index + 1] as const));
         const guarded = (analyst: Analyst): Analyst => ({
@@ -1026,7 +1027,7 @@ function promptBudgetedAnalyst(
       recordSourceAnswerAnalystFit(lane, fitted.candidates.flatMap((candidate) => {
         const seat = seatOf.get(candidate.provenance);
         return seat === undefined ? [] : [seat];
-      }));
+      }), analystPromptBytes(fitted, analyzeOptions, evidenceFormat));
       return analyst.analyze(withPromptBudget(fitted, promptBytes), analyzeOptions)
         .then((result) => withUnfittedCoverage(result, pack, fitted));
     },

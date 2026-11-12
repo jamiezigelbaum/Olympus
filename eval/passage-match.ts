@@ -11,9 +11,12 @@ export function passageWords(text: string): string[] {
  * order and repeated words both matter. Small quotes keep this bounded.
  */
 export function passageContainsQuote(passage: string, quote: string): boolean {
-  const wanted = passageWords(quote);
+  return passageWordsContainQuote(passageWords(passage), passageWords(quote));
+}
+
+/** passageContainsQuote on words already split by passageWords, so one passage can be tested against many quotes. */
+export function passageWordsContainQuote(words: readonly string[], wanted: readonly string[]): boolean {
   if (!wanted.length) return false;
-  const words = passageWords(passage);
   const needed = Math.ceil(0.8 * wanted.length);
   const window = wanted.length + Math.max(4, Math.ceil(wanted.length / 2));
   if (words.length < needed) return false;

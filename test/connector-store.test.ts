@@ -2244,7 +2244,7 @@ describe('LocalConnectorStore reactions', () => {
     await store.syncFromConnector(createChatConnector([reactedChatItem(THUMBS_UP_BY_TWO)]), { fetchContent: true });
     store.close();
 
-    expect(connectorStoreQualificationFingerprint(dbPath).schemaVersion).toBe(15);
+    expect(connectorStoreQualificationFingerprint(dbPath).schemaVersion).toBe(16);
 
     const db = new Database(dbPath, { readonly: true });
     try {
@@ -3003,7 +3003,7 @@ describe('LocalConnectorStore embeddings', () => {
     // embedded anything. The half-embedded item and the item with no chunks
     // at all are both excluded.
     expect(store.status().embeddingByModel).toEqual([
-      { modelId: 'fake-embed-v1', embeddedChunks: 2, itemsEmbedded: 1 },
+      { modelId: 'fake-embed-v1', embeddedChunks: 2, itemsEmbedded: 1, fastSearchReady: 1 },
     ]);
     store.close();
   });

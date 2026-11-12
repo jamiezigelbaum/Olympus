@@ -104,6 +104,8 @@ let answered: number;
 let answerFailure: Error | undefined;
 let base: string;
 let sourceIndexReadEnabled: boolean;
+let answerHeld: Promise<void> | undefined;
+let answerStarted: (() => void) | undefined;
 
 function startServer(): void {
   const worker = createEmailSourceWorker({
@@ -111,6 +113,8 @@ function startServer(): void {
       async answer() {
         if (answerFailure) throw answerFailure;
         answered += 1;
+        answerStarted?.();
+        if (answerHeld) await answerHeld;
         return answerFixture();
       },
     },
@@ -145,6 +149,8 @@ beforeEach(() => {
   ledger = [];
   answered = 0;
   answerFailure = undefined;
+  answerHeld = undefined;
+  answerStarted = undefined;
   sourceIndexReadEnabled = true;
   startServer();
 });
@@ -172,6 +178,28 @@ async function getSpec(): Promise<Record<string, any>> {
   expect(response.headers.get('Content-Type')).toContain('application/json');
   return response.json() as Promise<Record<string, any>>;
 }
+
+test('a connection revoked while the OpenAPI operation handler runs gets only a refusal', async () => {
+  const { connection, token } = store.create('Muse');
+  let release!: () => void;
+  answerHeld = new Promise<void>((resolve) => { release = resolve; });
+  const started = new Promise<void>((resolve) => { answerStarted = resolve; });
+  try {
+    const pending = call('source_answer', `Bearer ${token}`, { question: 'what changed?' });
+    await started;
+    store.revoke(connection.id);
+    release();
+    const response = await pending;
+    expect(response.status).toBe(401);
+    expect(response.headers.get('WWW-Authenticate')).toContain('error="invalid_token"');
+    const body = await response.json();
+    expect(body).toEqual({ error: 'invalid_token', message: 'The connection token is not valid or has been revoked.' });
+    expect(JSON.stringify(body)).not.toContain(answerFixture().answer);
+    expect(JSON.stringify(body)).not.toContain('private_note');
+  } finally {
+    release();
+  }
+});
 
 describe('OpenAPI document', () => {
   test('validates against the OpenAPI 3.1 schema, and every operation schema is valid JSON Schema 2020-12', async () => {

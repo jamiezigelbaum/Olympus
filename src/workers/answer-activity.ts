@@ -20,6 +20,24 @@ export function runClassificationInference<T>(work: () => Promise<T>): Promise<T
   return localInferencePriority.run('maintenance', work);
 }
 
+/** Who a model call is for: the owner, background answers, or maintenance (classification). */
+export type LocalInferencePriority = AnswerLeaseKind | 'maintenance';
+
+/** The priority the current call runs at; a call outside any is the owner's. */
+export function currentLocalInferencePriority(): LocalInferencePriority {
+  return localInferencePriority?.getStore() ?? 'owner';
+}
+
+/**
+ * Runs work at a priority another process reported (the split's front
+ * forwarding a completion): async context does not cross the socket.
+ */
+export function runAtLocalInferencePriority<T>(priority: LocalInferencePriority, work: () => Promise<T>): Promise<T> {
+  if (priority === 'background') return runBackgroundInference(work);
+  if (priority === 'maintenance') return runClassificationInference(work);
+  return work();
+}
+
 /**
  * Answers in flight on this worker (source answers, ChatGPT evidence
  * searches, private answer panel jobs). These leases coordinate owner and

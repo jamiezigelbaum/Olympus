@@ -450,7 +450,9 @@ function view(row: StoredItemRow, state: ItemState, context: OwnerTierItemsConte
     ...(record?.state === 'moving' && record.targetContentTier ? { moving_to: tierDisplayName(record.targetContentTier) } : {}),
     decided_by: record?.decidedBy ?? null,
     owner_set: state.ownerSet,
-    ...(state.ownerTier && (!record || (record.contentTier !== state.ownerTier && record.targetContentTier !== state.ownerTier))
+    // The owner's choice until it has landed: a lowering waits as a queued
+    // move, and the page shows the owner's word, not the tier it leaves.
+    ...(state.ownerTier && (!record || record.contentTier !== state.ownerTier)
       ? { owner_choice: tierDisplayName(state.ownerTier) } : {}),
     judge_reason: judgeReason(record),
     // A fail-safe hold for text not read yet is a holding label too, though

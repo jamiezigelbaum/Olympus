@@ -357,6 +357,10 @@ describe('one item, Private -> Personal -> Private', () => {
     expect(ownerItems().set({ itemId, choice: 'personal', allowLower: true })).toMatchObject({ ok: true, changed: 'set', applies: 'next_pass' });
     // Until that pass, a reload still shows what the owner chose.
     expect(bankItem()).toMatchObject({ tier: 'Private', owner_choice: 'Personal', owner_set: true });
+    // While the lowering is queued as a move, a reload still shows the owner's choice.
+    expect(applyOwnerOverrides({ set: install.lane.set }).lowered).toBe(1);
+    expect(install.lane.ledger.getCurrent(bankIdentity)?.state).toBe('moving');
+    expect(bankItem()).toMatchObject({ tier: 'Private', moving_to: 'Personal', owner_choice: 'Personal', owner_set: true });
     await install.service.runOnce();
     expect(install.lane.ledger.getCurrent(bankIdentity)).toMatchObject({ state: 'current', metadataTier: 'private', contentTier: 'private', decidedBy: 'override' });
     expect(await search(install, 'loan terms')).toContain(LOAN_TEXT);

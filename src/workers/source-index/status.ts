@@ -362,6 +362,14 @@ export const DASHBOARD_READINESS_LEDGER_MAX_AGE_MS = 120_000;
  * (2026-11-05, 2065a89), because each read is a pass over the whole store.
  */
 export const STORE_STATUS_REUSE_MS = 5 * 60_000;
+/**
+ * How long counts are reused once the store's visibility has moved since they
+ * were read (an item added, held, judged or released). Five minutes of such
+ * counts kept a freshly read folder at "3 waiting, 0 indexed" for the release
+ * check's whole wait (run 43157415118). Bookkeeping writes such as embeddings
+ * do not move the marker, so a busy store keeps the long window.
+ */
+export const STORE_STATUS_CHANGED_REUSE_MS = 30_000;
 
 /** A live names-only policy is a status fact, not a content retrieval mode. */
 type StatusCorpusDefinition = Omit<SourceIndexCorpusDefinition, 'activationMode'> & {
@@ -381,22 +389,34 @@ export function createSourceIndexStatusHandler(
   // the scheduler's status publish) for up to STORE_STATUS_REUSE_MS: each read is a
   // synchronous pass over the whole store, and the two callers' separate
   // reads were most of the worker's freezes (Sparta CPU samples, 2026-11-05).
-  const storeStatusCache = new Map<string, { recordedAtMs: number; status: ConnectorStoreStatus }>();
+  const storeStatusCache = new Map<string, { recordedAtMs: number; marker: string | undefined; status: ConnectorStoreStatus }>();
   const nowMs = options.nowMs ?? Date.now;
   const storeStatusKey = (store: LocalConnectorStore, statusScope: ConnectorStoreStatusScope | undefined) => JSON.stringify([store.corpusId, statusScope ?? null]);
+  // Test doubles and older stores may lack the marker: they keep the plain window.
+  const visibilityMarker = (store: LocalConnectorStore): string | undefined => {
+    try {
+      return store.visibilityMarker?.();
+    } catch {
+      return undefined;
+    }
+  };
   const storeStatusFresh = (store: LocalConnectorStore, statusScope: ConnectorStoreStatusScope | undefined, countsMaxAgeMs: number): boolean => {
     const reuseMs = Math.min(countsMaxAgeMs, STORE_STATUS_REUSE_MS);
     const cached = reuseMs > 0 ? storeStatusCache.get(storeStatusKey(store, statusScope)) : undefined;
-    return cached !== undefined && nowMs() - cached.recordedAtMs <= reuseMs;
+    if (!cached) return false;
+    const age = nowMs() - cached.recordedAtMs;
+    if (age > reuseMs) return false;
+    return age <= Math.min(reuseMs, STORE_STATUS_CHANGED_REUSE_MS) || cached.marker === visibilityMarker(store);
   };
   const storeStatus = (store: LocalConnectorStore, statusScope: ConnectorStoreStatusScope | undefined, countsMaxAgeMs: number): ConnectorStoreStatus => {
     const reuseMs = Math.min(countsMaxAgeMs, STORE_STATUS_REUSE_MS);
     if (reuseMs <= 0) return store.status(statusScope, { countsMaxAgeMs: 0 });
     const key = storeStatusKey(store, statusScope);
     const cached = storeStatusCache.get(key);
-    if (cached && nowMs() - cached.recordedAtMs <= reuseMs) return cached.status;
+    if (cached && storeStatusFresh(store, statusScope, countsMaxAgeMs)) return cached.status;
+    const marker = visibilityMarker(store);
     const status = store.status(statusScope, { countsMaxAgeMs });
-    storeStatusCache.set(key, { recordedAtMs: nowMs(), status });
+    storeStatusCache.set(key, { recordedAtMs: nowMs(), marker, status });
     return status;
   };
   // One off-thread refresh per store and scope at a time: a dashboard poll and
@@ -412,8 +432,9 @@ export function createSourceIndexStatusHandler(
     if (running) return running;
     const refresh = (async () => {
       try {
+        const marker = visibilityMarker(store);
         const status = await store.statusOffThread(statusScope, { countsMaxAgeMs });
-        storeStatusCache.set(key, { recordedAtMs: nowMs(), status });
+        storeStatusCache.set(key, { recordedAtMs: nowMs(), marker, status });
       } catch {
         // Read on this thread by statusFor, as before.
       } finally {

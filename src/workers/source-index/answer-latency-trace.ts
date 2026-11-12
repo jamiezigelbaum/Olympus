@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { AnalystBackend, SourceIndexAnswerPhaseTimings } from './answer-types.ts';
 
 export type SourceAnswerTraceOutcome =
@@ -134,9 +134,12 @@ const SITE_TALLY_KEPT = 10;
 
 // The evidence pack's seat order (#1354): the store id at each seat, how many
 // seats were recency seats, and, per prompt fit an Analyst leg made, the seat
-// numbers (1-based) it kept. Store ids and counts only.
+// numbers (1-based) it kept and the bytes of the prompt it built. Store ids,
+// counts, and per seat a short one-way hash of store and item, so two Asks
+// can be compared seat by seat without the trace naming an item.
 export interface SourceAnswerTraceEvidenceSeats {
   packCorpora: string[];
+  itemHashes?: string[];
   recencySeats: number;
   fits: SourceAnswerTraceAnalystFit[];
 }
@@ -144,6 +147,13 @@ export interface SourceAnswerTraceEvidenceSeats {
 export interface SourceAnswerTraceAnalystFit {
   lane: 'local' | 'cloud';
   keptSeats: number[];
+  promptBytes?: number;
+}
+
+const SEAT_ITEM_HASH_HEX = 12;
+
+function seatItemHash(corpusId: string, itemKey: string): string {
+  return createHash('sha256').update(`${corpusId}\u0000${itemKey}`).digest('hex').slice(0, SEAT_ITEM_HASH_HEX);
 }
 
 export interface SourceAnswerTraceSnapshot {
@@ -534,20 +544,25 @@ export function recordSourceAnswerSkippedAnalystLeg(
 
 // A rebuilt pack (the private-outage fallback) replaces the earlier one and
 // starts its own list of fits.
-export function recordSourceAnswerPackSeats(corpusIds: readonly string[], recencySeats = 0): void {
+export function recordSourceAnswerPackSeats(corpusIds: readonly string[], recencySeats = 0, itemKeys?: readonly string[]): void {
   const trace = currentSourceAnswerTrace();
   if (!trace) return;
   trace.evidenceSeats = {
     packCorpora: [...corpusIds],
+    ...(itemKeys ? { itemHashes: corpusIds.map((corpusId, index) => seatItemHash(corpusId, itemKeys[index] ?? '')) } : {}),
     recencySeats: nonNegativeCount(recencySeats),
     fits: [],
   };
 }
 
-export function recordSourceAnswerAnalystFit(lane: SourceAnswerTraceAnalystFit['lane'], keptSeats: readonly number[]): void {
+export function recordSourceAnswerAnalystFit(lane: SourceAnswerTraceAnalystFit['lane'], keptSeats: readonly number[], promptBytes?: number): void {
   const seats = currentSourceAnswerTrace()?.evidenceSeats;
   if (!seats) return;
-  seats.fits.push({ lane, keptSeats: keptSeats.map(nonNegativeCount) });
+  seats.fits.push({
+    lane,
+    keptSeats: keptSeats.map(nonNegativeCount),
+    ...(promptBytes === undefined ? {} : { promptBytes: nonNegativeCount(promptBytes) }),
+  });
 }
 
 export function recordSourceAnswerResidualAnalystOrphan(): void {
@@ -612,8 +627,9 @@ export function snapshotSourceAnswerTrace(trace: MutableTrace): SourceAnswerTrac
       ? {
         evidenceSeats: {
           packCorpora: [...trace.evidenceSeats.packCorpora],
+          ...(trace.evidenceSeats.itemHashes ? { itemHashes: [...trace.evidenceSeats.itemHashes] } : {}),
           recencySeats: trace.evidenceSeats.recencySeats,
-          fits: trace.evidenceSeats.fits.map((fit) => ({ lane: fit.lane, keptSeats: [...fit.keptSeats] })),
+          fits: trace.evidenceSeats.fits.map((fit) => ({ ...fit, keptSeats: [...fit.keptSeats] })),
         },
       }
       : {}),
