@@ -10,6 +10,8 @@ import {
 import { closeSqliteStore } from '../core/sqlite-store.ts';
 import { filterFor, forgetSqliteRows } from '../core/sqlite-forget.ts';
 import { isBoundedSourceCheckpoint } from './source-checkpoint.ts';
+import { initializeLimitStops } from '../core/limit-stops.ts';
+import { syncSchedulerLimitStop } from './dashboard/scheduler-markers.ts';
 
 export { SOURCE_CHECKPOINT_MAX_LENGTH } from './source-checkpoint.ts';
 
@@ -262,6 +264,7 @@ export class LocalSourceSchedulerStateStore {
       SOURCE_SCHEDULER_STATE_STORE_ID,
       sourceSchedulerStateMigrations(),
     );
+    initializeLimitStops(this.db);
   }
 
   close(): void {
@@ -755,16 +758,17 @@ export class LocalSourceSchedulerStateStore {
   ): PersistedSourceSchedulerTaskState {
     return this.db.transaction(() => {
       const existing = this.db.query(`
-        SELECT state_version
+        SELECT state_version, degraded_reason
         FROM source_scheduler_task_state
         WHERE source_id = ? AND corpus_id = ? AND task_id = ?
-      `).get(key.sourceId, key.corpusId, key.taskId) as { state_version?: number } | null;
+      `).get(key.sourceId, key.corpusId, key.taskId) as { state_version?: number; degraded_reason?: string } | null;
       if (existing && existing.state_version !== SOURCE_SCHEDULER_TASK_STATE_VERSION) {
         throw new Error('Source scheduler task state uses an unsupported state_version.');
       }
       write();
       const state = this.get(key);
       if (!state) throw new Error('Source scheduler task state could not be read after its atomic update.');
+      syncSchedulerLimitStop(this.db, existing?.degraded_reason, state);
       return state;
     })();
   }
