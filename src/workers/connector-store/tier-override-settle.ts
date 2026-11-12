@@ -240,8 +240,12 @@ function restoreClearedOverride(set: TieredStoreSet, record: TierLedgerRecord): 
     staleCopiesGone: set.routedWithoutAnyCopy(identity),
   });
   if (recorded.outcome !== 'unchanged') askProvider();
+  // Not finished here: the undo stays owed across this pass's own write, so a
+  // later pass retries it (a re-judge that could not be queued, a move still
+  // landing) instead of reading that write as a newer decision.
+  const keepOwed = () => { if (request) ledger.advanceOverrideRestore(identity, request.receipt); };
   if (namesChanged) {
-    if (recorded.record.state !== 'current' || !classification.sniffer) return recorded.outcome !== 'unchanged';
+    if (recorded.record.state !== 'current' || !classification.sniffer) { keepOwed(); return recorded.outcome !== 'unchanged'; }
     const report = emptyTierRejudgeReport();
     // Re-read both names and text through the shared re-judge path. Its
     // question carries the fresh baseline beside the held row, so a pending
@@ -255,10 +259,10 @@ function restoreClearedOverride(set: TieredStoreSet, record: TierLedgerRecord): 
     });
     if (request && (report.asked > 0 || report.updated > 0 || report.movesQueued > 0 || report.secrets > 0)) {
       ledger.completeOverrideRestore(identity, request.receipt);
-    }
+    } else keepOwed();
   } else if (request && recorded.outcome !== 'held_moving') {
     ledger.completeOverrideRestore(identity, request.receipt);
-  }
+  } else keepOwed();
   return recorded.outcome !== 'unchanged';
 }
 

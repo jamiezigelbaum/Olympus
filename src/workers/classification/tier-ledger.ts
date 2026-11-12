@@ -3057,6 +3057,25 @@ export class TierLedger {
     return row.pk ?? 0;
   }
 
+  /**
+   * Keep the request read by this pass owed across the pass's own write: it
+   * is rebound to where the row is now (or its move's landing), so only a
+   * decision recorded after this point voids it. A later owner action wins.
+   */
+  advanceOverrideRestore(identity: TierLedgerIdentity, receipt: string): void {
+    this.db.transaction(() => {
+      const row = this.readRow(identity);
+      if (!row || this.getOverride(identity) || this.readMeta(overrideRestoreKey(identity)) !== receipt) return;
+      const parsed = JSON.parse(receipt) as Record<string, unknown>;
+      this.writeMeta(overrideRestoreKey(identity), JSON.stringify({
+        ...parsed,
+        generation: row.state === 'moving' ? row.generation + 1 : row.generation,
+        landing: row.state === 'moving',
+        historyPk: this.latestHistoryPk(identity),
+      }));
+    })();
+  }
+
   /** Acknowledge only the request read by this pass; a later owner action wins. */
   completeOverrideRestore(identity: TierLedgerIdentity, receipt: string): void {
     this.db.transaction(() => {

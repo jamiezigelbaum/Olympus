@@ -24377,6 +24377,20 @@ class TierLedger {
     `).get(...idParams(identity2));
     return row.pk ?? 0;
   }
+  advanceOverrideRestore(identity2, receipt) {
+    this.db.transaction(() => {
+      const row = this.readRow(identity2);
+      if (!row || this.getOverride(identity2) || this.readMeta(overrideRestoreKey(identity2)) !== receipt)
+        return;
+      const parsed = JSON.parse(receipt);
+      this.writeMeta(overrideRestoreKey(identity2), JSON.stringify({
+        ...parsed,
+        generation: row.state === "moving" ? row.generation + 1 : row.generation,
+        landing: row.state === "moving",
+        historyPk: this.latestHistoryPk(identity2)
+      }));
+    })();
+  }
   completeOverrideRestore(identity2, receipt) {
     this.db.transaction(() => {
       if (!this.getOverride(identity2) && this.readMeta(overrideRestoreKey(identity2)) === receipt) {
@@ -72112,9 +72126,15 @@ function restoreClearedOverride(set, record) {
   });
   if (recorded.outcome !== "unchanged")
     askProvider();
+  const keepOwed = () => {
+    if (request)
+      ledger.advanceOverrideRestore(identity2, request.receipt);
+  };
   if (namesChanged) {
-    if (recorded.record.state !== "current" || !classification.sniffer)
+    if (recorded.record.state !== "current" || !classification.sniffer) {
+      keepOwed();
       return recorded.outcome !== "unchanged";
+    }
     const report = emptyTierRejudgeReport();
     rejudgeStoredContent(set, recorded.record, {
       sniffer: classification.sniffer,
@@ -72125,10 +72145,12 @@ function restoreClearedOverride(set, record) {
     });
     if (request && (report.asked > 0 || report.updated > 0 || report.movesQueued > 0 || report.secrets > 0)) {
       ledger.completeOverrideRestore(identity2, request.receipt);
-    }
+    } else
+      keepOwed();
   } else if (request && recorded.outcome !== "held_moving") {
     ledger.completeOverrideRestore(identity2, request.receipt);
-  }
+  } else
+    keepOwed();
   return recorded.outcome !== "unchanged";
 }
 function applyOne(set, record, tier, retirePublic, report, guard) {

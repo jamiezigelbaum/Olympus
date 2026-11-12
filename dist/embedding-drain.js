@@ -17766,6 +17766,20 @@ class TierLedger {
     `).get(...idParams(identity));
     return row.pk ?? 0;
   }
+  advanceOverrideRestore(identity, receipt) {
+    this.db.transaction(() => {
+      const row = this.readRow(identity);
+      if (!row || this.getOverride(identity) || this.readMeta(overrideRestoreKey(identity)) !== receipt)
+        return;
+      const parsed = JSON.parse(receipt);
+      this.writeMeta(overrideRestoreKey(identity), JSON.stringify({
+        ...parsed,
+        generation: row.state === "moving" ? row.generation + 1 : row.generation,
+        landing: row.state === "moving",
+        historyPk: this.latestHistoryPk(identity)
+      }));
+    })();
+  }
   completeOverrideRestore(identity, receipt) {
     this.db.transaction(() => {
       if (!this.getOverride(identity) && this.readMeta(overrideRestoreKey(identity)) === receipt) {

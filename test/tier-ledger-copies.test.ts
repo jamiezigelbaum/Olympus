@@ -75,6 +75,34 @@ describe('tier ledger copies (P1b)', () => {
     }
   });
 
+  test('an undo request stays owed across the restore pass\'s own write, and only a later decision voids it', () => {
+    const store = ledger();
+    try {
+      store.recordRoutedPlacement(ITEM, decision({ decidedBy: 'sniffer' }), whole(INTERNAL));
+      store.setOverride(ITEM, { kind: 'tier', tier: 'secure' });
+      store.recordRoutedPlacement(ITEM, decision({ metadataTier: 'secure', contentTier: 'secure', decidedBy: 'override', reasons: ['override:tier:secure'] }), whole(SECURE), { staleCopiesGone: true });
+      store.clearOverride(ITEM);
+      const request = store.overrideRestoreRequest(ITEM)!;
+      expect(store.overrideRestoreStillCurrent(ITEM, request)).toBe(true);
+      // The pass's own write (a renamed item held while its re-judge could not be queued).
+      store.recordRoutedPlacement(ITEM, decision({ metadataTier: 'secure', contentTier: 'secure', decidedBy: 'sniffer', reasons: ['content:held'] }), whole(SECURE), { staleCopiesGone: true });
+      expect(store.overrideRestoreStillCurrent(ITEM, request)).toBe(false);
+      store.advanceOverrideRestore(ITEM, request.receipt);
+      const owed = store.overrideRestoreRequest(ITEM)!;
+      expect(owed.decision).toEqual(request.decision);
+      expect(store.overrideRestoreStillCurrent(ITEM, owed)).toBe(true);
+      expect(store.listClearedOverrideRows().map(row => row.providerItemId)).toEqual([ITEM.providerItemId]);
+      // A decision recorded after that point is newer: the request no longer applies.
+      store.recordRoutedPlacement(ITEM, decision({ metadataTier: 'secure', contentTier: 'secure', decidedBy: 'sniffer', reasons: ['content:newer'] }), whole(SECURE), { staleCopiesGone: true });
+      expect(store.overrideRestoreStillCurrent(ITEM, owed)).toBe(false);
+      // A stale receipt never rewrites a newer request.
+      store.advanceOverrideRestore(ITEM, request.receipt);
+      expect(store.overrideRestoreRequest(ITEM)).toEqual(owed);
+    } finally {
+      store.close();
+    }
+  });
+
   test('undo of a cancelled lowering still restores tiers held above the original verdict', () => {
     const store = ledger();
     try {
