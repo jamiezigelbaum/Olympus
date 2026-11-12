@@ -84,7 +84,9 @@ export function reportLimitStop(input: LimitStop, db: Database): void {
       resumes_at = excluded.resumes_at, cleared_at = NULL
   `).run(input.id, input.subject, input.since, input.limit, input.used,
     input.waiting ? JSON.stringify(input.waiting) : null,
-    input.toContinue ? JSON.stringify(input.toContinue) : null, input.resumesAt ?? null);
+    input.toContinue ? JSON.stringify(input.toContinue) : null,
+    // Stored in one ISO form, so listing can compare it as text.
+    input.resumesAt === undefined ? null : new Date(input.resumesAt).toISOString());
 }
 
 export function clearLimitStop(id: string, subject: string, db: Database): void {
@@ -93,10 +95,12 @@ export function clearLimitStop(id: string, subject: string, db: Database): void 
   `).run(new Date().toISOString(), id, subject);
 }
 
-export function listOpenLimitStops(db: Database): LimitStop[] {
+/** Open stops at `now`: not cleared, and not past the time they resume by themselves. */
+export function listOpenLimitStops(db: Database, now: Date = new Date()): LimitStop[] {
   // Reading a pre-upgrade database never creates or migrates a table.
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'limit_stops'").get()) return [];
-  const rows = db.query('SELECT * FROM limit_stops WHERE cleared_at IS NULL ORDER BY id, subject').all() as Array<{
+  const rows = db.query(`SELECT * FROM limit_stops WHERE cleared_at IS NULL
+    AND (resumes_at IS NULL OR resumes_at > ?) ORDER BY id, subject`).all(now.toISOString()) as Array<{
     id: string; subject: string; since: string; limit: number | null; used: number | null;
     waiting_json: string | null; to_continue_json: string | null; resumes_at: string | null;
   }>;

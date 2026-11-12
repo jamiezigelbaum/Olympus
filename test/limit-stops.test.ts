@@ -20,7 +20,9 @@ function withDb<T>(path: string, action: (db: Database) => T): T {
   const db = new Database(path);
   try { return action(db); } finally { db.close(); }
 }
-const listAt = (path: string): LimitStop[] => withDb(path, listOpenLimitStops);
+// Every listing reads at a fixed time inside the stops' day, never the wall clock.
+const AT = new Date('2026-11-12T13:00:00.000Z');
+const listAt = (path: string, now = AT): LimitStop[] => withDb(path, (db) => listOpenLimitStops(db, now));
 
 const registration = {
   id: 'test.limit', kind: 'cost', scope: 'answer', label: 'Daily cost', unit: 'usd', continue: 'raise',
@@ -45,19 +47,19 @@ describe('limit stops', () => {
       initializeLimitStops(db);
       reportLimitStop(stop, db);
       reportLimitStop(stop, db);
-      expect(listOpenLimitStops(db)).toEqual([stop]);
+      expect(listOpenLimitStops(db, AT)).toEqual([stop]);
       reportLimitStop({ ...stop, since: '2026-11-12T13:00:00.000Z', used: 2.1 }, db);
-      expect(listOpenLimitStops(db)[0]).toEqual({ ...stop, used: 2.1 });
+      expect(listOpenLimitStops(db, AT)[0]).toEqual({ ...stop, used: 2.1 });
       reportLimitStop({ ...stop, subject: 'other' }, db);
       clearLimitStop(stop.id, stop.subject, db);
       const cleared = db.query('SELECT cleared_at FROM limit_stops WHERE subject = ?').get(stop.subject);
       expect(cleared).toMatchObject({ cleared_at: expect.any(String) });
       clearLimitStop(stop.id, stop.subject, db);
       expect(db.query('SELECT cleared_at FROM limit_stops WHERE subject = ?').get(stop.subject)).toEqual(cleared);
-      expect(listOpenLimitStops(db)).toEqual([{ ...stop, subject: 'other' }]);
+      expect(listOpenLimitStops(db, AT)).toEqual([{ ...stop, subject: 'other' }]);
       const reopened = { id: stop.id, subject: stop.subject, since: '2026-11-13T12:00:00.000Z', limit: 2, used: 2 };
       reportLimitStop(reopened, db);
-      expect(listOpenLimitStops(db).find((row) => row.subject === stop.subject)).toEqual(reopened);
+      expect(listOpenLimitStops(db, AT).find((row) => row.subject === stop.subject)).toEqual(reopened);
       expect(db.query('SELECT COUNT(*) AS n FROM limit_stops').get()).toEqual({ n: 2 });
     } finally { db.close(); }
   });
@@ -69,7 +71,7 @@ describe('limit stops', () => {
     reportLimitStop(stop, db);
     db.close();
     const reader = new Database(path, { readonly: true });
-    try { expect(listOpenLimitStops(reader)).toEqual([stop]); } finally { reader.close(); }
+    try { expect(listOpenLimitStops(reader, AT)).toEqual([stop]); } finally { reader.close(); }
     withDb(path, (db) => clearLimitStop(stop.id, stop.subject, db));
     expect(listAt(path)).toEqual([]);
     withDb(path, (db) => reportLimitStop(stop, db));
@@ -90,7 +92,7 @@ describe('limit stops', () => {
     try {
       initializeLimitStops(db);
       expect(() => reportLimitStop({ ...stop, id: 'test.unknown' }, db)).toThrow('Unregistered limit');
-      expect(listOpenLimitStops(db)).toEqual([]);
+      expect(listOpenLimitStops(db, AT)).toEqual([]);
     } finally { db.close(); }
   });
 
@@ -195,5 +197,23 @@ describe('limit stops', () => {
       [JSON.stringify(['kept', 'kept-corpus', 'pull']), stop.subject].sort());
     forgetSourceSchedulerState(path, { sourceIds: [], corpusIds: ['kept-corpus'] });
     expect(listAt(path).map((row) => row.subject)).toEqual([stop.subject]);
+  });
+
+  test('a daily stop ends when its UTC day does, even if the task never runs again', () => {
+    const path = databasePath();
+    const store = new LocalSourceSchedulerStateStore(path);
+    const key = { sourceId: 'source', corpusId: 'corpus', taskId: 'pull' };
+    try {
+      // Booked to retry in two days: the budget still resets at midnight.
+      store.recordSuccess({ ...key, completedAt: stop.since, resultStatus: 'idle', degradedReason: 'daily_cost_guard',
+        notBeforeAt: '2026-11-14T00:00:00.000Z' });
+      const [open] = listAt(path, new Date(stop.since));
+      expect(open?.resumesAt).toBe('2026-11-13T00:00:00.000Z');
+      expect(listAt(path, new Date('2026-11-12T23:59:59.000Z'))).toHaveLength(1);
+      expect(listAt(path, new Date('2026-11-13T00:00:00.000Z'))).toEqual([]);
+    } finally { store.close(); }
+    // Reopening backfills the expired marker, but it still does not list as open.
+    const reopened = new LocalSourceSchedulerStateStore(path);
+    try { expect(reopened.openLimitStops(new Date('2026-11-13T09:00:00.000Z'))).toEqual([]); } finally { reopened.close(); }
   });
 });

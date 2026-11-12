@@ -39,6 +39,19 @@ export function syncSchedulerLimitStop(db: Database, previousReason: string | un
   if (previous && previous.id !== current?.id) clearLimitStop(previous.id, subject, db);
   if (current) reportLimitStop({
     id: current.id, subject, since: state.updatedAt, limit: null, used: null,
-    ...(state.notBeforeAt ? { resumesAt: state.notBeforeAt } : {}),
+    resumesAt: dailyResume(state.updatedAt, state.notBeforeAt),
   }, db);
+}
+
+/**
+ * These budgets are per UTC day, and the scheduler treats their markers as
+ * absent once the day they were set on has ended (source-scheduler.ts,
+ * reportedDegradedReason), even if the task never runs again. The stop ends
+ * then too, or earlier when the task is booked to retry earlier.
+ */
+function dailyResume(since: string, notBeforeAt: string | undefined): string {
+  const day = new Date(since);
+  const midnight = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate() + 1);
+  const retry = notBeforeAt ? Date.parse(notBeforeAt) : NaN;
+  return new Date(Number.isFinite(retry) && retry < midnight ? retry : midnight).toISOString();
 }

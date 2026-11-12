@@ -292,8 +292,8 @@ export class LocalSourceSchedulerStateStore {
   }
 
   /** Open limit stops recorded in this database (core/limit-stops.ts). */
-  openLimitStops(): LimitStop[] {
-    return listOpenLimitStops(this.db);
+  openLimitStops(now?: Date): LimitStop[] {
+    return listOpenLimitStops(this.db, now);
   }
 
   close(): void {

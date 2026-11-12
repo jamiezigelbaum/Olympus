@@ -111986,17 +111986,18 @@ function reportLimitStop(input, db) {
       "limit" = excluded."limit", used = excluded.used,
       waiting_json = excluded.waiting_json, to_continue_json = excluded.to_continue_json,
       resumes_at = excluded.resumes_at, cleared_at = NULL
-  `).run(input.id, input.subject, input.since, input.limit, input.used, input.waiting ? JSON.stringify(input.waiting) : null, input.toContinue ? JSON.stringify(input.toContinue) : null, input.resumesAt ?? null);
+  `).run(input.id, input.subject, input.since, input.limit, input.used, input.waiting ? JSON.stringify(input.waiting) : null, input.toContinue ? JSON.stringify(input.toContinue) : null, input.resumesAt === undefined ? null : new Date(input.resumesAt).toISOString());
 }
 function clearLimitStop(id, subject, db) {
   db.query(`
     UPDATE limit_stops SET cleared_at = ? WHERE id = ? AND subject = ? AND cleared_at IS NULL
   `).run(new Date().toISOString(), id, subject);
 }
-function listOpenLimitStops(db) {
+function listOpenLimitStops(db, now = new Date) {
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'limit_stops'").get())
     return [];
-  const rows = db.query("SELECT * FROM limit_stops WHERE cleared_at IS NULL ORDER BY id, subject").all();
+  const rows = db.query(`SELECT * FROM limit_stops WHERE cleared_at IS NULL
+    AND (resumes_at IS NULL OR resumes_at > ?) ORDER BY id, subject`).all(now.toISOString());
   return rows.map((row) => ({
     id: row.id,
     subject: row.subject,
@@ -112033,8 +112034,14 @@ function syncSchedulerLimitStop(db, previousReason, state) {
       since: state.updatedAt,
       limit: null,
       used: null,
-      ...state.notBeforeAt ? { resumesAt: state.notBeforeAt } : {}
+      resumesAt: dailyResume(state.updatedAt, state.notBeforeAt)
     }, db);
+}
+function dailyResume(since, notBeforeAt) {
+  const day = new Date(since);
+  const midnight = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate() + 1);
+  const retry = notBeforeAt ? Date.parse(notBeforeAt) : NaN;
+  return new Date(Number.isFinite(retry) && retry < midnight ? retry : midnight).toISOString();
 }
 var DAILY_LIMITS;
 var init_scheduler_limit_stops = __esm(() => {
@@ -112110,8 +112117,8 @@ class LocalSourceSchedulerStateStore {
       }
     })();
   }
-  openLimitStops() {
-    return listOpenLimitStops(this.db);
+  openLimitStops(now) {
+    return listOpenLimitStops(this.db, now);
   }
   close() {
     closeSqliteStore(this.db);
