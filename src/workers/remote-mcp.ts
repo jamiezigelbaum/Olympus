@@ -209,12 +209,13 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
     if (surface === 'directory' && !chatgpt) return jsonResponse(404, remoteSurfaceErrorOutput('not_found'));
     const detached = () => options.makeOperationContext(caller, new AbortController().signal);
     const demo = options.demoGrant?.(verification.connection) === true;
+    const authorized = () => stillAuthorized(request, verification.connection, options, surface);
     const server = chatgpt
       ? surface === 'directory'
         ? (options.directoryServer ?? createChatGptDirectoryMcpServer)(() => ctx, chatgpt, detached)
         : createChatGptMcpServer(() => ctx, chatgpt, detached)
       : createOlympusMcpServer('remote', () => ctx, anonymousListing(options.anonymousAnswersEnabled, demoGrantLimit(demo, options.search
-        ? remoteSearchExtension(options.search, () => stillAuthorized(request, verification.connection, options, surface), {
+        ? remoteSearchExtension(options.search, authorized, {
           ...(ctx.sourceAnswerJobs ? { sourceAnswerJobs: ctx.sourceAnswerJobs } : {}),
           ...(ctx.pendingPrivacyItems ? { pendingPrivacyItems: ctx.pendingPrivacyItems } : {}),
           // A demo sign-in grant is a shared password: its searches never write to the owner's Inbox.
@@ -225,7 +226,7 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
           // The owner's list of what each AI app received (a demo grant's too: it is what left).
           caller,
         })
-        : undefined)));
+        : undefined)), authorized);
     // No sessionIdGenerator: stateless mode.
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     try {

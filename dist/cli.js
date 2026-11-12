@@ -153300,6 +153300,22 @@ var init_source_answer_jobs = __esm(() => {
   JOB_ID_PATTERN = /^saj_[A-Za-z0-9_-]{43}$/;
 });
 
+// src/workers/remote-access-recheck.ts
+function currentAccess(authorized) {
+  try {
+    return authorized();
+  } catch {
+    return "unavailable";
+  }
+}
+function refusedAccess(access) {
+  const body = remoteSurfaceErrorOutput(access === "revoked" ? "invalid_token" : "remote_connections_unavailable");
+  return { content: [{ type: "text", text: JSON.stringify(body, null, 2) }], isError: true };
+}
+var init_remote_access_recheck = __esm(() => {
+  init_remote_result();
+});
+
 // src/mcp/tools.ts
 function listMcpTools(config2, surface = "mcp") {
   return exposedOperations(operations, { config: config2, surface }).map((operation) => ({
@@ -153327,9 +153343,9 @@ __export(exports_server, {
   handleMcpCallTool: () => handleMcpCallTool,
   createOlympusMcpServer: () => createOlympusMcpServer
 });
-async function handleMcpCallTool(request, makeOperationContext = makeContext, surface = "mcp") {
+async function handleMcpCallTool(request, makeOperationContext = makeContext, surface = "mcp", authorized) {
   if (surface === "remote")
-    return handleRemoteCallTool(request, makeOperationContext);
+    return handleRemoteCallTool(request, makeOperationContext, authorized);
   const operation = findOperationByName(request.params.name);
   if (!operation) {
     throw new OperationError("invalid_params", `Unknown Olympus operation: ${request.params.name}`);
@@ -153348,7 +153364,7 @@ async function handleMcpCallTool(request, makeOperationContext = makeContext, su
     ]
   };
 }
-async function handleRemoteCallTool(request, makeOperationContext) {
+async function handleRemoteCallTool(request, makeOperationContext, authorized = () => "active") {
   const text3 = (value2) => [{ type: "text", text: JSON.stringify(value2, null, 2) }];
   const operation = findOperationByName(request.params.name);
   if (!operation || !isV04PublicOperation("remote", operation.name)) {
@@ -153370,6 +153386,9 @@ async function handleRemoteCallTool(request, makeOperationContext) {
   });
   try {
     const result = await runWithReleaseManifestSink(manifests, () => operation.handler(ctx, args));
+    const afterHandler = currentAccess(authorized);
+    if (afterHandler !== "active")
+      return refusedAccess(afterHandler);
     const capture = createReleaseCapture();
     const release = () => runWithReleaseCapture(capture, () => remoteOperationOutputOffThread(operation.name, result, {
       pendingPrivacyItems: ctx.pendingPrivacyItems?.(),
@@ -153377,11 +153396,23 @@ async function handleRemoteCallTool(request, makeOperationContext) {
       releaseManifests: manifests.manifests
     }));
     const approved = await release();
+    const afterRelease = currentAccess(authorized);
+    if (afterRelease !== "active")
+      return refusedAccess(afterRelease);
     const privateMayAnswer = privatePart ? await privatePart.settle(result, approved) : false;
+    const afterSettle = currentAccess(authorized);
+    if (afterSettle !== "active")
+      return refusedAccess(afterSettle);
     const output = privatePart ? await release() : approved;
+    const afterFinalRelease = currentAccess(authorized);
+    if (afterFinalRelease !== "active")
+      return refusedAccess(afterFinalRelease);
     recordRemoteOperation({ operation: operation.name, args, caller: ctx.caller, output, capture, privateQuestion: privateMayAnswer ? privatePart?.answerRef : undefined });
     return { content: text3(privateMayAnswer ? withRemotePrivateNote(output, privatePart?.answerId, privatePart?.secretMatch) : output) };
   } catch (error2) {
+    const afterFailure = currentAccess(authorized);
+    if (afterFailure !== "active")
+      return refusedAccess(afterFailure);
     return { content: text3(remoteErrorOutput(error2, { declaredParams })), isError: true };
   }
 }
@@ -153418,14 +153449,14 @@ async function normalizedJsonRpcErrorResponse(response) {
   headers.delete("Content-Length");
   return new Response(JSON.stringify(normalized), { status: response.status, statusText: response.statusText, headers });
 }
-function createOlympusMcpServer(surface, makeOperationContext, extension) {
+function createOlympusMcpServer(surface, makeOperationContext, extension, authorized) {
   const server = new Server({ name: "olympus", version: VERSION }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const listed = listMcpTools(makeOperationContext().config, surface);
     return { tools: extension ? extension.tools(listed) : listed };
   });
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-    const next = () => handleMcpCallTool(request, makeOperationContext, surface);
+    const next = () => handleMcpCallTool(request, makeOperationContext, surface, authorized);
     return extension ? extension.call(request, next, extra.signal) : next();
   });
   if (surface === "remote") {
@@ -153494,6 +153525,7 @@ var init_server4 = __esm(() => {
   init_remote_result();
   init_source_answer_jobs();
   init_version();
+  init_remote_access_recheck();
   init_tools();
   REMOTE_JSON_RPC_ERROR_TEXT = {
     [-32700]: "Parse error: the request was not valid JSON-RPC.",
@@ -178350,7 +178382,7 @@ async function setRemoteAccess(body, backend) {
   }
   if ("manual" in control)
     return refusal3(501, "config_write_unsupported", control.manual(body.enabled));
-  const before = currentAccess(backend);
+  const before = currentAccess2(backend);
   if (before?.state === "on" && before.setBy === "worker_env") {
     return refusal3(409, "set_by_worker_env", WORKER_ENV_ADDRESS_MESSAGE);
   }
@@ -178363,7 +178395,7 @@ async function setRemoteAccess(body, backend) {
   if (!written.ok)
     return refusal3(written.status, written.code, written.message);
   if (!body.enabled && written.unchanged) {
-    const after = currentAccess(backend);
+    const after = currentAccess2(backend);
     if (after && after.state === "on") {
       return refusal3(409, "remote_access_still_reachable", `Remote access is already off in OpenClaw's settings, but agents in the cloud can still reach Olympus at ${hostOfUrl(after.mcpUrl)}. ` + "Restart OpenClaw so the change takes effect, then check this page again.");
     }
@@ -178374,7 +178406,7 @@ async function setRemoteAccess(body, backend) {
     status_message: body.enabled ? "Remote access is turning on. Olympus connects to its relay, which usually takes a few seconds." : written.unchanged ? "Remote access is off. Agents in the cloud cannot reach Olympus; agents on this computer are unaffected." : "Remote access is turning off. Within a few seconds agents in the cloud can no longer reach Olympus; agents on this computer are unaffected."
   });
 }
-function currentAccess(backend) {
+function currentAccess2(backend) {
   try {
     return backend.remoteAccess();
   } catch {
@@ -235232,7 +235264,7 @@ async function runSearch(args, options, authorized, context3, signal) {
   } catch (error2) {
     return errorResult(remoteErrorOutput(error2));
   }
-  const afterSearch = currentAccess2(authorized);
+  const afterSearch = currentAccess(authorized);
   if (afterSearch !== "active")
     return refusedAccess(afterSearch);
   if (!Array.isArray(raw?.evidence)) {
@@ -235244,7 +235276,7 @@ async function runSearch(args, options, authorized, context3, signal) {
   let note;
   if (privateCall) {
     const recorded = await privateCall.settle(raw, undefined);
-    const afterWait = currentAccess2(authorized);
+    const afterWait = currentAccess(authorized);
     if (afterWait !== "active")
       return refusedAccess(afterWait);
     const evidence = result.structuredContent?.evidence;
@@ -235254,7 +235286,7 @@ async function runSearch(args, options, authorized, context3, signal) {
       result = searchToolResult({ ...rawRecord, evidence: [], withheld: withheldBefore + evidence.length }, { pendingPrivacyItems: context3.pendingPrivacyItems?.() });
       withheldAfter = true;
     }
-    const afterRelease = currentAccess2(authorized);
+    const afterRelease = currentAccess(authorized);
     if (afterRelease !== "active")
       return refusedAccess(afterRelease);
     if (recorded)
@@ -235284,16 +235316,6 @@ ${note}`].filter((part) => part !== "").join(`
     structuredContent: { ...result.structuredContent, private_note: note }
   };
 }
-function currentAccess2(authorized) {
-  try {
-    return authorized();
-  } catch {
-    return "unavailable";
-  }
-}
-function refusedAccess(access) {
-  return errorResult(remoteSurfaceErrorOutput(access === "revoked" ? "invalid_token" : "remote_connections_unavailable"));
-}
 function invalidParams(param) {
   return errorResult(remoteErrorOutput(new OperationError("invalid_params", `${param} is invalid.`), { declaredParams: ["question", "limit"] }));
 }
@@ -235309,6 +235331,7 @@ var init_remote_search = __esm(() => {
   init_release_manifest();
   init_dashboard_contract();
   init_response_builder();
+  init_remote_access_recheck();
   REMOTE_SEARCH_TOOL = {
     name: SEARCH_TOOL_NAME,
     description: [
@@ -235423,14 +235446,15 @@ function createRemoteMcpHandler(options) {
       return jsonResponse(404, remoteSurfaceErrorOutput("not_found"));
     const detached = () => options.makeOperationContext(caller, new AbortController().signal);
     const demo = options.demoGrant?.(verification.connection) === true;
-    const server = chatgpt ? surface === "directory" ? (options.directoryServer ?? createChatGptDirectoryMcpServer)(() => ctx, chatgpt, detached) : createChatGptMcpServer(() => ctx, chatgpt, detached) : createOlympusMcpServer("remote", () => ctx, anonymousListing(options.anonymousAnswersEnabled, demoGrantLimit(demo, options.search ? remoteSearchExtension(options.search, () => stillAuthorized(request, verification.connection, options, surface), {
+    const authorized = () => stillAuthorized(request, verification.connection, options, surface);
+    const server = chatgpt ? surface === "directory" ? (options.directoryServer ?? createChatGptDirectoryMcpServer)(() => ctx, chatgpt, detached) : createChatGptMcpServer(() => ctx, chatgpt, detached) : createOlympusMcpServer("remote", () => ctx, anonymousListing(options.anonymousAnswersEnabled, demoGrantLimit(demo, options.search ? remoteSearchExtension(options.search, authorized, {
       ...ctx.sourceAnswerJobs ? { sourceAnswerJobs: ctx.sourceAnswerJobs } : {},
       ...ctx.pendingPrivacyItems ? { pendingPrivacyItems: ctx.pendingPrivacyItems } : {},
       ...!demo && ctx.remotePrivatePart ? { privatePart: ctx.remotePrivatePart } : {},
       ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {},
       signal: request.signal,
       caller
-    }) : undefined)));
+    }) : undefined)), authorized);
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     try {
       await server.connect(transport);
@@ -238858,6 +238882,13 @@ async function callTool(request, name, options) {
   const verification = authenticateRemoteRequest(request, options);
   if (!verification.ok)
     return credentialFailure(verification.response);
+  const authorized = () => {
+    const again = authenticateRemoteRequest(request, options);
+    if (again.ok)
+      return again.connection.id === verification.connection.id ? "active" : "revoked";
+    return again.response.status === 503 ? "unavailable" : "revoked";
+  };
+  const refused3 = (access) => access === "unavailable" ? failure2(503, remoteSurfaceErrorOutput("remote_connections_unavailable")) : credentialFailure(unauthorized("invalid_token", currentRemotePublicUrls(options.publicUrls)));
   if (request.method !== "POST") {
     return failure2(405, remoteSurfaceErrorOutput("method_not_allowed"), { Allow: "POST" });
   }
@@ -238874,6 +238905,9 @@ async function callTool(request, name, options) {
     return failure2(503, remoteSurfaceErrorOutput("operation_unavailable"));
   }
   const params = await readParams(request);
+  const afterParams = currentAccess(authorized);
+  if (afterParams !== "active")
+    return refused3(afterParams);
   if (!params.ok)
     return params.response;
   const withheld = remoteWithheldParam(operation.name, params.value);
@@ -238890,6 +238924,9 @@ async function callTool(request, name, options) {
   });
   try {
     const result = await runWithReleaseManifestSink(manifests, () => operation.handler(ctx, params.value));
+    const afterHandler = currentAccess(authorized);
+    if (afterHandler !== "active")
+      return refused3(afterHandler);
     const capture = createReleaseCapture();
     const release2 = () => runWithReleaseCapture(capture, () => remoteOperationOutputOffThread(operation.name, result, {
       pendingPrivacyItems: ctx.pendingPrivacyItems?.(),
@@ -238897,11 +238934,23 @@ async function callTool(request, name, options) {
       releaseManifests: manifests.manifests
     }));
     const approved = await release2();
+    const afterRelease = currentAccess(authorized);
+    if (afterRelease !== "active")
+      return refused3(afterRelease);
     const privateMayAnswer = privatePart ? await privatePart.settle(result, approved) : false;
+    const afterSettle = currentAccess(authorized);
+    if (afterSettle !== "active")
+      return refused3(afterSettle);
     const output = privatePart ? await release2() : approved;
+    const afterFinalRelease = currentAccess(authorized);
+    if (afterFinalRelease !== "active")
+      return refused3(afterFinalRelease);
     recordRemoteOperation({ operation: operation.name, args: params.value, caller: ctx.caller, output, capture, privateQuestion: privateMayAnswer ? privatePart?.answerRef : undefined });
     return jsonResponse(200, privateMayAnswer ? withRemotePrivateNote(output, privatePart?.answerId, privatePart?.secretMatch) : output);
   } catch (error2) {
+    const afterFailure = currentAccess(authorized);
+    if (afterFailure !== "active")
+      return refused3(afterFailure);
     return operationErrorResponse(error2, declaredParams);
   }
 }
@@ -239055,8 +239104,10 @@ var init_remote_openapi = __esm(() => {
   init_release_manifest();
   init_remote_result();
   init_operation_exposure();
+  init_remote_public_url();
   init_operations();
   init_remote_mcp();
+  init_remote_access_recheck();
   init_remote_request_body();
   REMOTE_OPENAPI_MAX_BODY_BYTES = REMOTE_REQUEST_MAX_BODY_BYTES;
   TOOL_PATH_PATTERN = /^\/api\/v1\/tools\/([a-z][a-z0-9_]{0,63})$/;
