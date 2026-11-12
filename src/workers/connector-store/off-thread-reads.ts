@@ -82,7 +82,8 @@ export function setReadPoolWorkerFactoryForTests(factory?: (url: string) => Work
   workerFactory = factory ?? ((url) => new Worker(url));
 }
 
-// A snapshot is its own read-only connection inside one read transaction, so
+// A snapshot is its own read-only connection inside one read transaction (a
+// connection kept from an earlier snapshot on this thread when one is idle), so
 // every count in one status describes the same database state, as they did
 // when status() ran them back to back with no write in between. A single
 // query uses the thread's one connection to that file and opens no
@@ -101,6 +102,23 @@ const open = (path) => {
   postMessage({ diagnostic: 'open', path, ms: performance.now() - started });
   return db;
 };
+// Snapshot connections are kept for the next snapshot instead of closed:
+// Bun 1.3.x corrupts its heap when pool threads open and close SQLite
+// connections concurrently (olympus-ops#151), and a store's searches would
+// otherwise open one connection per snapshot.
+const IDLE_SNAPSHOT_CONNECTIONS = 8;
+const idleSnapshots = new Map();
+const snapshotConnection = (path) => {
+  const stat = statSync(path);
+  const file = stat.dev + ':' + stat.ino;
+  const idle = idleSnapshots.get(path) ?? [];
+  while (idle.length > 0) {
+    const held = idle.pop();
+    if (held.file === file) return held;
+    try { held.db.close(); } catch {}
+  }
+  return { db: open(path), file, path };
+};
 const connection = (path) => {
   const stat = statSync(path);
   const file = stat.dev + ':' + stat.ino;
@@ -117,23 +135,31 @@ self.onmessage = (event) => {
     const held = connections.get(path);
     connections.delete(path);
     try { held?.db.close(); } catch {}
+    for (const idle of idleSnapshots.get(path) ?? []) { try { idle.db.close(); } catch {} }
+    idleSnapshots.delete(path);
+    // A snapshot still open on the released store closes, rather than idles, when it ends.
+    for (const open of snapshots.values()) if (open.path === path) open.discard = true;
     return;
   }
   try {
     if (op === 'open') {
-      const db = open(path);
-      db.exec('BEGIN');
-      snapshots.set(snapshot, db);
+      const held = snapshotConnection(path);
+      try { held.db.exec('BEGIN'); } catch (error) { held.db.close(); throw error; }
+      snapshots.set(snapshot, held);
       postMessage({ id, ok: true, rows: null });
     } else if (op === 'close') {
-      const db = snapshots.get(snapshot);
+      const held = snapshots.get(snapshot);
       snapshots.delete(snapshot);
-      if (db) {
-        try { db.exec('COMMIT'); } finally { db.close(); }
+      if (held) {
+        let reusable = false;
+        try { held.db.exec('COMMIT'); reusable = true; } finally {
+          const idle = idleSnapshots.get(held.path) ?? [];
+          if (reusable && !held.discard && idle.length < IDLE_SNAPSHOT_CONNECTIONS) { idle.push(held); idleSnapshots.set(held.path, idle); } else held.db.close();
+        }
       }
       postMessage({ id, ok: true, rows: null });
     } else {
-      const db = op === 'query' ? connection(path) : snapshots.get(snapshot);
+      const db = op === 'query' ? connection(path) : snapshots.get(snapshot)?.db;
       if (!db) throw new Error('unknown snapshot');
       const started = performance.now();
       const query = db.query(sql);
