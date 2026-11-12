@@ -112178,6 +112178,7 @@ function forgetSourceSchedulerState(dbPath, scope, options = {}) {
 class LocalSourceSchedulerStateStore {
   dbPath;
   db;
+  closed = false;
   constructor(dbPath = defaultSourceSchedulerStateDbPath()) {
     this.dbPath = dbPath;
     if (dbPath !== ":memory:") {
@@ -112206,9 +112207,10 @@ class LocalSourceSchedulerStateStore {
     })();
   }
   openLimitStops(now) {
-    return listOpenLimitStops(this.db, now);
+    return this.closed ? [] : listOpenLimitStops(this.db, now);
   }
   close() {
+    this.closed = true;
     closeSqliteStore(this.db);
   }
   get(key2) {
