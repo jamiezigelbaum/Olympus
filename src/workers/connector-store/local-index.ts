@@ -17549,13 +17549,32 @@ function selectEvidencePassages(
       ...(anchor !== undefined ? [anchor] : []),
       ...(mostSimilar !== undefined ? [mostSimilar] : []),
       ...scored.map((entry) => entry.index),
-    ])].slice(0, maxPassages);
+    ])].slice(0, maxPassages).sort((left, right) => left - right);
+    // Similarity's vote is a full one: the most similar chunk reads for half
+    // the budget rather than an equal share, and the word picks share the
+    // rest. Equal thirds of a 3,000-character candidate cut a 4,000-character
+    // file chunk at its first thousand, where a paraphrase that matches no
+    // query word rarely carries the answer (2026-11-12 grown passage set:
+    // the vote changed no found passage at equal shares).
+    const similarPick = mostSimilar !== undefined && picked.length > 1 && picked.includes(mostSimilar)
+      ? mostSimilar
+      : undefined;
+    const similarRead = similarPick !== undefined
+      ? boundedSourceIndexChunks([chunks[similarPick]!], Math.floor(maxChars / 2), termGroups)
+      : undefined;
+    const others = picked.filter((index) => index !== similarPick);
     const bounded = boundedSourceIndexChunks(
-      picked.sort((left, right) => left - right).map((index) => chunks[index]!),
-      maxChars,
+      others.map((index) => chunks[index]!),
+      maxChars - (similarRead?.chunks.join('').length ?? 0),
       termGroups,
     );
-    return { chunks: bounded.chunks, truncated: picked.length < chunks.length || bounded.truncated };
+    const read = new Map(others.map((index, position) => [index, bounded.chunks[position]]));
+    if (similarPick !== undefined && similarRead?.chunks[0]) read.set(similarPick, similarRead.chunks[0]);
+    const ordered = picked.flatMap((index) => read.get(index) ?? []);
+    return {
+      chunks: ordered,
+      truncated: picked.length < chunks.length || bounded.truncated || similarRead?.truncated === true,
+    };
   }
   // Most relevant first (the anchor, then by embedding), filled whole until
   // the budget runs out, then read in document order. Chunks within

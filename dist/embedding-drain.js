@@ -33008,9 +33008,19 @@ function selectEvidencePassages(chunks, maxChars, focus, context2 = {}) {
       ...anchor !== undefined ? [anchor] : [],
       ...mostSimilar !== undefined ? [mostSimilar] : [],
       ...scored.map((entry) => entry.index)
-    ])].slice(0, maxPassages);
-    const bounded = boundedSourceIndexChunks(picked.sort((left, right) => left - right).map((index) => chunks[index]), maxChars, termGroups);
-    return { chunks: bounded.chunks, truncated: picked.length < chunks.length || bounded.truncated };
+    ])].slice(0, maxPassages).sort((left, right) => left - right);
+    const similarPick = mostSimilar !== undefined && picked.length > 1 && picked.includes(mostSimilar) ? mostSimilar : undefined;
+    const similarRead = similarPick !== undefined ? boundedSourceIndexChunks([chunks[similarPick]], Math.floor(maxChars / 2), termGroups) : undefined;
+    const others = picked.filter((index) => index !== similarPick);
+    const bounded = boundedSourceIndexChunks(others.map((index) => chunks[index]), maxChars - (similarRead?.chunks.join("").length ?? 0), termGroups);
+    const read = new Map(others.map((index, position) => [index, bounded.chunks[position]]));
+    if (similarPick !== undefined && similarRead?.chunks[0])
+      read.set(similarPick, similarRead.chunks[0]);
+    const ordered2 = picked.flatMap((index) => read.get(index) ?? []);
+    return {
+      chunks: ordered2,
+      truncated: picked.length < chunks.length || bounded.truncated || similarRead?.truncated === true
+    };
   }
   const ranked = chunks.map((_, index) => index).sort((left, right) => (left === anchor ? -1 : right === anchor ? 1 : 0) || relevance(right) - relevance(left) || left - right);
   const kept = new Map;

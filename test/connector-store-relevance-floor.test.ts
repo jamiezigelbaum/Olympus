@@ -286,6 +286,29 @@ describe('similarity inside a long item with word hits', () => {
     const content = await read({ similarIndex: 1, anchorChunkIndex: 0 });
     expect(content.chunks).toEqual([chunks[0]!, chunks[1]!, chunks[2]!]);
   });
+
+  test('at a candidate-sized budget the most similar chunk is read for half of it, not a third', async () => {
+    // The paraphrase answers past its first thousand characters. Three equal
+    // shares of 3,000 cut it at about 1,000; similarity's own vote reads it
+    // for 1,500, and the word picks share the other half.
+    const answer = 'Diabetes care is covered at the full rate.';
+    const answering = chunks.slice(0, 4).join('')
+      + `Paraphrase. ${'.'.repeat(1_300)} ${answer}`.padEnd(4_000, '.')
+      + chunks[5]!;
+    let content: ReturnType<Store['localContent']>;
+    await withStore([{ ...item, text: answering }], async (store) => {
+      const provider = chunkCosineProvider(Object.fromEntries(openings.map((opening, index) =>
+        [`${opening}.`, index === 4 ? 0.95 : 0.4])));
+      await store.embedChunks({ provider });
+      content = store.localContent(`${ACCOUNT}:policy`, 3_000, {
+        query: 'coverage', anchorChunkIndex: 0, anchorLane: 'keyword',
+        queryVector: [1, 0], queryVectorModelId: provider.modelId,
+      });
+    });
+    expect(content!.chunks).toHaveLength(3);
+    expect(content!.chunks[2]).toContain(answer);
+    expect(content!.chunks.join('').length).toBeLessThanOrEqual(3_000);
+  });
 });
 
 describe('passages of a document in another language', () => {
