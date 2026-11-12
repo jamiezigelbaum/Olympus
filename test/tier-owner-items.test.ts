@@ -502,6 +502,32 @@ describe('one item, Private -> Personal -> Private', () => {
     expect(applyOwnerOverrides({ set: install.lane.set })).toMatchObject({ restored: 0 });
   });
 
+  test('a judgment recorded after the undo stands: the saved older verdict never replaces it', async () => {
+    const install = await judged();
+    const gardenId = ownerItems().find({ query: 'orchard-plan' }).items[0]!.item_id;
+    ownerItems().set({ itemId: gardenId, choice: 'private', allowLower: true });
+    await install.service.runOnce();
+    expect(install.lane.ledger.getCurrent(gardenIdentity)).toMatchObject({ state: 'current', contentTier: 'secure', decidedBy: 'override' });
+    ownerItems().set({ itemId: gardenId, choice: 'judge', allowLower: true });
+    expect(install.lane.ledger.overrideRestoreRequest(gardenIdentity)).toBeDefined();
+
+    // Before the override pass runs, the judge decides again: Private now.
+    const held = install.lane.ledger.getCurrent(gardenIdentity)!;
+    const ledger = install.lane.ledger;
+    const newer = {
+      metadataTier: 'secure', contentTier: 'secure', decidedBy: 'sniffer', reasons: ['content:sniffer:test:private'],
+      state: 'current', contentRead: true, metadataPending: false, contentPending: false,
+      metadataForced: false, metadataFlagged: false, engineVersion: held.engineVersion, mapRevision: held.mapRevision, snifferId: '',
+    } as unknown as Parameters<typeof ledger.recordRoutedPlacement>[1];
+    ledger.recordRoutedPlacement(gardenIdentity, newer, install.lane.set.placementFor(newer));
+
+    expect(applyOwnerOverrides({ set: install.lane.set })).toMatchObject({ restored: 0 });
+    expect(ledger.overrideRestoreRequest(gardenIdentity)).toBeUndefined();
+    for (let pass = 0; pass < 2; pass += 1) await install.service.runOnce();
+    expect(ledger.getCurrent(gardenIdentity)).toMatchObject({ contentTier: 'secure' });
+    expect(await search(install, 'pruning plan')).not.toContain('Orchard pruning plan');
+  });
+
   test('undo under an always-Private rule added while the owner\'s word stood: the rule holds, across a restart', async () => {
     let install = await judged();
     const gardenId = ownerItems().find({ query: 'orchard-plan' }).items[0]!.item_id;

@@ -23731,10 +23731,18 @@ class TierLedger {
       cleared = this.db.query(`
         DELETE FROM tier_overrides WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
       `).run(...idParams(identity2)).changes > 0;
-      if (cleared && before && !this.itemIsSecret(identity2) && before.metadataTier !== "secrets" && before.contentTier !== "secrets") {
-        this.writeMeta(overrideRestoreKey(identity2), JSON.stringify({ id: randomUUID5(), decision: before }));
-      }
       this.settleRevokedOwnerMove(identity2);
+      const settled = this.readRow(identity2);
+      if (cleared && before && settled && !this.itemIsSecret(identity2) && before.metadataTier !== "secrets" && before.contentTier !== "secrets") {
+        const generation = settled.state === "moving" ? settled.generation + 1 : settled.generation;
+        this.writeMeta(overrideRestoreKey(identity2), JSON.stringify({
+          id: randomUUID5(),
+          generation,
+          landing: settled.state === "moving",
+          historyPk: this.latestHistoryPk(identity2),
+          decision: before
+        }));
+      }
     })();
     return cleared;
   }
@@ -24341,10 +24349,33 @@ class TierLedger {
       return;
     const parsed = JSON.parse(receipt);
     const decision = parsed?.decision;
-    if (typeof parsed?.id !== "string" || !decision || !TIER_KEYS.includes(decision.metadataTier) || !TIER_KEYS.includes(decision.contentTier) || typeof decision.decidedBy !== "string" || decision.decidedBy === "override" || !Array.isArray(decision.reasons) || !decision.reasons.every((reason) => typeof reason === "string") || decision.reasons.some((reason) => reason.startsWith("override:"))) {
+    if (typeof parsed?.id !== "string" || !Number.isInteger(parsed.generation) || typeof parsed.landing !== "boolean" || !Number.isInteger(parsed.historyPk) || !decision || !TIER_KEYS.includes(decision.metadataTier) || !TIER_KEYS.includes(decision.contentTier) || typeof decision.decidedBy !== "string" || decision.decidedBy === "override" || !Array.isArray(decision.reasons) || !decision.reasons.every((reason) => typeof reason === "string") || decision.reasons.some((reason) => reason.startsWith("override:"))) {
       throw new Error("Invalid owner undo decision.");
     }
-    return { receipt, decision };
+    return {
+      receipt,
+      generation: parsed.generation,
+      landing: parsed.landing,
+      historyPk: parsed.historyPk,
+      decision
+    };
+  }
+  overrideRestoreStillCurrent(identity2, request) {
+    const row = this.readRow(identity2);
+    if (!row || row.generation !== request.generation)
+      return false;
+    const since = this.db.query(`
+      SELECT COUNT(*) AS n FROM tier_history
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND history_pk > ?
+    `).get(...idParams(identity2), request.historyPk);
+    return since.n === (request.landing ? 1 : 0);
+  }
+  latestHistoryPk(identity2) {
+    const row = this.db.query(`
+      SELECT MAX(history_pk) AS pk FROM tier_history
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(...idParams(identity2));
+    return row.pk ?? 0;
   }
   completeOverrideRestore(identity2, receipt) {
     this.db.transaction(() => {
@@ -72007,6 +72038,10 @@ function restoreClearedOverride(set, record) {
   const ledger = set.ledger;
   const identity2 = identityOf3(record);
   const request = ledger.overrideRestoreRequest(identity2);
+  if (request && !ledger.overrideRestoreStillCurrent(identity2, request)) {
+    ledger.completeOverrideRestore(identity2, request.receipt);
+    return false;
+  }
   if (ledger.rejudgeQuestion(identity2))
     return false;
   const before = ledger.settledDecisionBeforeOverride(identity2);

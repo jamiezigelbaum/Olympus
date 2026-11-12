@@ -2057,11 +2057,22 @@ export class TierLedger {
       cleared = this.db.query(`
         DELETE FROM tier_overrides WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
       `).run(...idParams(identity)).changes > 0;
-      if (cleared && before && !this.itemIsSecret(identity)
-        && before.metadataTier !== 'secrets' && before.contentTier !== 'secrets') {
-        this.writeMeta(overrideRestoreKey(identity), JSON.stringify({ id: randomUUID(), decision: before }));
-      }
       this.settleRevokedOwnerMove(identity);
+      const settled = this.readRow(identity);
+      if (cleared && before && settled && !this.itemIsSecret(identity)
+        && before.metadataTier !== 'secrets' && before.contentTier !== 'secrets') {
+        // Bound to where this undo leads: the row as it is now, or the landing
+        // of the move still in flight (`completeMove` and `abandonMove` advance
+        // the generation by one and record one history row). Any other
+        // decision recorded before the restore pass, even one that keeps the
+        // tiers and generation, adds history and voids the request
+        // (`overrideRestoreStillCurrent`), so a newer judgment is never
+        // replaced by this older one.
+        const generation = settled.state === 'moving' ? settled.generation + 1 : settled.generation;
+        this.writeMeta(overrideRestoreKey(identity), JSON.stringify({
+          id: randomUUID(), generation, landing: settled.state === 'moving', historyPk: this.latestHistoryPk(identity), decision: before,
+        }));
+      }
     })();
     return cleared;
   }
@@ -3001,19 +3012,49 @@ export class TierLedger {
   }
 
   /** A carried undo decision. Invalid state fails closed rather than borrowing a later landing. */
-  overrideRestoreRequest(identity: TierLedgerIdentity): { receipt: string; decision: OverrideRestoreDecision } | undefined {
+  overrideRestoreRequest(identity: TierLedgerIdentity): { receipt: string; generation: number; landing: boolean; historyPk: number; decision: OverrideRestoreDecision } | undefined {
     const receipt = this.readMeta(overrideRestoreKey(identity));
     if (!receipt) return undefined;
-    const parsed = JSON.parse(receipt) as { id?: unknown; decision?: Partial<OverrideRestoreDecision> };
+    const parsed = JSON.parse(receipt) as { id?: unknown; generation?: unknown; landing?: unknown; historyPk?: unknown; decision?: Partial<OverrideRestoreDecision> };
     const decision = parsed?.decision;
-    if (typeof parsed?.id !== 'string' || !decision
+    if (typeof parsed?.id !== 'string' || !Number.isInteger(parsed.generation) || typeof parsed.landing !== 'boolean'
+      || !Number.isInteger(parsed.historyPk) || !decision
       || !TIER_KEYS.includes(decision.metadataTier!) || !TIER_KEYS.includes(decision.contentTier!)
       || typeof decision.decidedBy !== 'string' || decision.decidedBy === 'override'
       || !Array.isArray(decision.reasons) || !decision.reasons.every(reason => typeof reason === 'string')
       || decision.reasons.some(reason => reason.startsWith('override:'))) {
       throw new Error('Invalid owner undo decision.');
     }
-    return { receipt, decision: decision as OverrideRestoreDecision };
+    return {
+      receipt, generation: parsed.generation as number, landing: parsed.landing as boolean,
+      historyPk: parsed.historyPk as number, decision: decision as OverrideRestoreDecision,
+    };
+  }
+
+  /**
+   * Whether nothing but the undo's own move landing has been recorded since
+   * the undo: the row is at the generation it led to, and the item's history
+   * holds exactly that landing (or nothing) after the undo's last row.
+   */
+  overrideRestoreStillCurrent(
+    identity: TierLedgerIdentity,
+    request: { generation: number; landing: boolean; historyPk: number },
+  ): boolean {
+    const row = this.readRow(identity);
+    if (!row || row.generation !== request.generation) return false;
+    const since = this.db.query(`
+      SELECT COUNT(*) AS n FROM tier_history
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND history_pk > ?
+    `).get(...idParams(identity), request.historyPk) as { n: number };
+    return since.n === (request.landing ? 1 : 0);
+  }
+
+  private latestHistoryPk(identity: TierLedgerIdentity): number {
+    const row = this.db.query(`
+      SELECT MAX(history_pk) AS pk FROM tier_history
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(...idParams(identity)) as { pk: number | null };
+    return row.pk ?? 0;
   }
 
   /** Acknowledge only the request read by this pass; a later owner action wins. */

@@ -150,6 +150,12 @@ function restoreClearedOverride(set: TieredStoreSet, record: TierLedgerRecord): 
   const ledger = set.ledger;
   const identity = identityOf(record);
   const request = ledger.overrideRestoreRequest(identity);
+  if (request && !ledger.overrideRestoreStillCurrent(identity, request)) {
+    // A decision recorded after the undo (a sync, a re-judge, or this pass's
+    // own move landing) is newer than the one the undo saved: it stands.
+    ledger.completeOverrideRestore(identity, request.receipt);
+    return false;
+  }
   if (ledger.rejudgeQuestion(identity)) return false;
   const before = ledger.settledDecisionBeforeOverride(identity);
   if (!before || before.metadataTier === 'secrets' || before.contentTier === 'secrets') return false;

@@ -17120,10 +17120,18 @@ class TierLedger {
       cleared = this.db.query(`
         DELETE FROM tier_overrides WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
       `).run(...idParams(identity)).changes > 0;
-      if (cleared && before && !this.itemIsSecret(identity) && before.metadataTier !== "secrets" && before.contentTier !== "secrets") {
-        this.writeMeta(overrideRestoreKey(identity), JSON.stringify({ id: randomUUID8(), decision: before }));
-      }
       this.settleRevokedOwnerMove(identity);
+      const settled = this.readRow(identity);
+      if (cleared && before && settled && !this.itemIsSecret(identity) && before.metadataTier !== "secrets" && before.contentTier !== "secrets") {
+        const generation = settled.state === "moving" ? settled.generation + 1 : settled.generation;
+        this.writeMeta(overrideRestoreKey(identity), JSON.stringify({
+          id: randomUUID8(),
+          generation,
+          landing: settled.state === "moving",
+          historyPk: this.latestHistoryPk(identity),
+          decision: before
+        }));
+      }
     })();
     return cleared;
   }
@@ -17730,10 +17738,33 @@ class TierLedger {
       return;
     const parsed = JSON.parse(receipt);
     const decision = parsed?.decision;
-    if (typeof parsed?.id !== "string" || !decision || !TIER_KEYS.includes(decision.metadataTier) || !TIER_KEYS.includes(decision.contentTier) || typeof decision.decidedBy !== "string" || decision.decidedBy === "override" || !Array.isArray(decision.reasons) || !decision.reasons.every((reason) => typeof reason === "string") || decision.reasons.some((reason) => reason.startsWith("override:"))) {
+    if (typeof parsed?.id !== "string" || !Number.isInteger(parsed.generation) || typeof parsed.landing !== "boolean" || !Number.isInteger(parsed.historyPk) || !decision || !TIER_KEYS.includes(decision.metadataTier) || !TIER_KEYS.includes(decision.contentTier) || typeof decision.decidedBy !== "string" || decision.decidedBy === "override" || !Array.isArray(decision.reasons) || !decision.reasons.every((reason) => typeof reason === "string") || decision.reasons.some((reason) => reason.startsWith("override:"))) {
       throw new Error("Invalid owner undo decision.");
     }
-    return { receipt, decision };
+    return {
+      receipt,
+      generation: parsed.generation,
+      landing: parsed.landing,
+      historyPk: parsed.historyPk,
+      decision
+    };
+  }
+  overrideRestoreStillCurrent(identity, request) {
+    const row = this.readRow(identity);
+    if (!row || row.generation !== request.generation)
+      return false;
+    const since = this.db.query(`
+      SELECT COUNT(*) AS n FROM tier_history
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND history_pk > ?
+    `).get(...idParams(identity), request.historyPk);
+    return since.n === (request.landing ? 1 : 0);
+  }
+  latestHistoryPk(identity) {
+    const row = this.db.query(`
+      SELECT MAX(history_pk) AS pk FROM tier_history
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(...idParams(identity));
+    return row.pk ?? 0;
   }
   completeOverrideRestore(identity, receipt) {
     this.db.transaction(() => {
