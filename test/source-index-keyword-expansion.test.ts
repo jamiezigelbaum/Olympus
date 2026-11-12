@@ -334,17 +334,20 @@ test('once a translation has outlasted the wait, later searches start at once on
     // A store whose language profile read is slow must not hold the search up either.
     const unread = await withKeywordRequestScope(() => expandSourceIndexKeywords('nebula notary', () => new Promise<readonly string[]>(() => {}), {}, { waitMs: 4_000 }));
     expect(unread.get('nebula')).toBeUndefined();
+    // A profile the store already has answers at once, so the static equivalents still apply.
+    const cachedProfile = await withKeywordRequestScope(() => expandSourceIndexKeywords('quasar notary', () => ['spa'], {}, { waitMs: 4_000 }));
+    expect(cachedProfile.get('notary')?.length ?? 0).toBeGreaterThan(0);
     // A new question would wait 4 s (past this test's 2 s limit) if it waited at all: it must not.
     const skipped = await withKeywordRequestScope(() => expandSourceIndexKeywords('comet notary', ['spa'], {}, { waitMs: 4_000 }));
     expect(skipped.get('comet')).toBeUndefined();
-    expect(finishers.length).toBe(2); // the translation still started, for the answer's later reads and the next Ask
+    expect(finishers.length).toBe(3); // quasar's and comet's translations still started, for the answer's later reads and the next Ask
     // That translation comes back in 1 s, inside a 4 s wait: the next search waits again and gets its translation.
     setSystemTime(start + 6_000);
-    finishers[1]!(reply(['cometa']));
+    finishers[2]!(reply(['cometa']));
     await new Promise<void>((resolve) => setImmediate(resolve));
     const waiting = withKeywordRequestScope(() => expandSourceIndexKeywords('meteor notary', ['spa'], {}, { waitMs: 4_000 }));
     await new Promise<void>((resolve) => setImmediate(resolve));
-    finishers[2]!(reply(['meteoro']));
+    finishers[3]!(reply(['meteoro']));
     expect((await waiting).get('meteor')).toContain('meteoro');
   } finally {
     setSystemTime();
