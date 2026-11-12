@@ -1,3 +1,4 @@
+import { provedReleaseCheck } from './helpers/scripted-search-release.ts';
 // A search lane cut short is named in the search result's notes, never a
 // silently thinner list. A store whose reader is busy (another read holds its
 // pool thread, or the lane's deadline passes) leaves its lane out as a lane
@@ -37,6 +38,7 @@ describe('olympus_search names every lane it cut short', () => {
   test('a store whose reader is held is named with its reason, beside the evidence the others gave', async () => {
     const store = await noteStore();
     const raw = await searchReleasedEvidence({
+      releaseCheck: provedReleaseCheck,
       question: 'orchard',
       maxResults: 10,
       lanes: () => ({
@@ -81,6 +83,7 @@ describe('olympus_search names every lane it cut short', () => {
       }
     });
     const raw = await searchReleasedEvidence({
+      releaseCheck: provedReleaseCheck,
       question: 'orchard',
       maxResults: 10,
       lanes: () => ({
@@ -120,7 +123,7 @@ describe('olympus_search names every lane it cut short', () => {
         },
         visibilityGate: createTierVisibilityGate(() => [{ ledger: fixture.ledger, corpusIds: new Set(Object.values(CORPORA)) }]),
       });
-      const before = await searchReleasedEvidence({ question: 'orchard', maxResults: 10, lanes });
+      const before = await searchReleasedEvidence({ question: 'orchard', maxResults: 10, lanes, releaseCheck: provedReleaseCheck });
       expect(before.coverage.cut_short).toBeUndefined();
       expect(JSON.stringify(before.evidence)).toContain('orchard garden');
 
@@ -135,7 +138,7 @@ describe('olympus_search names every lane it cut short', () => {
         }
         return steps(identities, options);
       });
-      const raw = await searchReleasedEvidence({ question: 'orchard', maxResults: 10, lanes });
+      const raw = await searchReleasedEvidence({ question: 'orchard', maxResults: 10, lanes, releaseCheck: provedReleaseCheck });
       expect(gateReads).toBeGreaterThan(0);
       expect(JSON.stringify(raw.evidence)).not.toContain('orchard garden');
       expect(raw.evidence.length).toBeGreaterThan(0);

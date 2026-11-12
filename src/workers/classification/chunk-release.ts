@@ -1,5 +1,5 @@
 /** The single chunk gate: windows prove reading, and only item tiers decide privacy. */
-import { RELEASE_CHUNK_JUDGE_BUDGET_MS, type ChunkReleaseResult, type ReleaseCheck, type ReleaseInput } from '../../core/release-manifest.ts';
+import { isUnprovedPassageMarker, RELEASE_CHUNK_JUDGE_BUDGET_MS, type ChunkReleaseResult, type ReleaseCheck, type ReleaseInput } from '../../core/release-manifest.ts';
 import { classifyContentTier, contentDigestReason, SNIFFER_EXCERPT_MAX_CHARS, TIER_CLASSIFIER_VERSION, type TierSnifferRequest, type TierSnifferVerdict } from './tier-classifier.ts';
 import { DEFAULT_EXCERPT_LIMIT } from './delphi-scorer.ts';
 import { registeredInstalledTierClassification } from './installed-tier-classification-registry.ts';
@@ -25,16 +25,18 @@ export interface ChunkReleaseOptions {
 
 /** The request process only reads. Every unread window goes through judgeNow. */
 export async function releaseChunks(
-  inputs: readonly ReleaseInput[], scopes: readonly TierVisibilityScope[], check: ReleaseCheck,
+  inputs: readonly ReleaseInput[], currentScopes: readonly TierVisibilityScope[] | (() => readonly TierVisibilityScope[]), check: ReleaseCheck,
   options: ChunkReleaseOptions = {},
 ): Promise<ChunkReleaseResult> {
+  const scopesNow = typeof currentScopes === 'function' ? currentScopes : () => currentScopes;
+  const scopes = scopesNow();
   const now = options.now ?? (() => performance.now());
   const budgetMs = Math.min(ENGINE_JUDGE_NOW_MAX_BUDGET_MS, Math.max(0, options.budgetMs ?? RELEASE_CHUNK_JUDGE_BUDGET_MS));
   const deadline = now() + budgetMs;
   const cached = await inspectChunks(inputs, scopes, check, { ...options, readOnly: true });
   const allowed = cached.allowed.map(hashes => [...hashes]);
   const pending = inputs.flatMap((input, index) => {
-    const hashes = (input.chunkHashes ?? []).filter(hash => !allowed[index]!.includes(hash));
+    const hashes = (input.chunkHashes ?? []).filter(hash => !allowed[index]!.includes(hash) && !isUnprovedPassageMarker(hash));
     return input.layer === 'names' || !hashes.length ? [] : [{ index, item: {
       provider: input.provider, accountScope: input.accountScope, providerItemId: input.providerItemId,
       ...(input.providerConversationId ? { providerConversationId: input.providerConversationId } : {}),
@@ -54,7 +56,8 @@ export async function releaseChunks(
     } catch { /* A busy or unavailable background holds passages, never fails the request. */ }
   }
   // Repeat the read after every await: names, model, content and item tiers may have changed.
-  const final = await inspectChunks(inputs, scopes, check, { ...options, readOnly: true });
+  // Scopes too: a ledger replaced or removed meanwhile no longer vouches for what it read.
+  const final = await inspectChunks(inputs, scopesNow(), check, { ...options, readOnly: true });
   const result = chunkResult(inputs, allowed.map((hashes, index) => hashes.filter(hash => final.allowed[index]?.includes(hash))));
   const rest = pending.filter(({ index, item }) => item.chunkHashes.some(hash => !result.allowed[index]?.includes(hash)));
   for (let offset = 0; offset < rest.length; offset += ENGINE_JUDGE_BOOST_MAX_IDS) {
@@ -106,6 +109,11 @@ async function inspectChunks(
     const snapshot = store?.releaseItemChunks?.(input);
     const record = scope.ledger.getCurrent(input);
     if (!snapshot || !record) continue;
+    // The owner's own word on this item (a per-item choice or a rule they set) decides all of its text.
+    const override = scope.ledger.getOverride(input);
+    const overrideKey = JSON.stringify(override);
+    const ownerRead = (override?.kind === 'tier' && (override.tier === 'public' || override.tier === 'private'))
+      || (record.decidedBy === 'owner_rule' && record.reasons.some(reason => reason.startsWith('metadata:owner_rule:')));
     const names = JSON.stringify([snapshot.title, snapshot.path, snapshot.sender]);
     const parentContext = set ? parentNamesContext(set, input) : undefined;
     snapshots.set(index, () => {
@@ -113,6 +121,9 @@ async function inspectChunks(
       const currentClassification = registeredInstalledTierClassification()?.forLedger(scope.ledger.dbPath);
       const currentReader = currentClassification?.releaseWindows ?? currentClassification?.releaseJudge;
       return !!current && JSON.stringify([current.title, current.path, current.sender]) === names
+        // An owner choice or a new decision made while the release waited withholds what was read before it.
+        && JSON.stringify(scope.ledger.getOverride(input)) === overrideKey
+        && scope.ledger.getCurrent(input)?.generation === record.generation
         && (!set || parentNamesContext(set, input) === parentContext)
         && currentReader?.modelId === reader?.modelId && currentReader?.promptVersion === reader?.promptVersion
         && allowed[index]!.every(hash => current.chunks.some(chunk => chunk.contentHash === hash));
@@ -125,7 +136,7 @@ async function inspectChunks(
     for (const hash of new Set(input.chunkHashes ?? [])) {
       const chunk = snapshot.chunks.find(chunk => chunk.contentHash === hash);
       if (!chunk) continue;
-      if (shortRead) { allowed[index]!.push(hash); continue; }
+      if (ownerRead || shortRead) { allowed[index]!.push(hash); continue; }
       // Keep layout for the production detectors. The production excerpt
       // builder normalizes only after those screens have read this window.
       const text = chunk.text;

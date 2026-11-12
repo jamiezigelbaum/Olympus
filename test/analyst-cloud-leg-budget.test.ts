@@ -1,3 +1,4 @@
+import { provedContent, provedReleaseCheck } from './helpers/scripted-search-release.ts';
 // The handler bounds every analyst leg it dispatches — except, before this,
 // the ordinary-cloud one. `local-first` routes internal/public_safe questions
 // to cloud-openclaw-infer FIRST, so the unbounded leg was the one on the live
@@ -52,6 +53,7 @@ test('a bounded cloud leg gives the client an abort signal to honour', async () 
   const handler = createAnalystSourceIndexAnswerHandler({
     analyst: local.analyst,
     lanes: () => lanesFixture(),
+    releaseCheck: provedReleaseCheck,
     cloudAnalystTimeoutMs: 5_000,
     sovereigntyAnalystRoute: () => [
       cloudStep({
@@ -163,7 +165,7 @@ function lanesFixture() {
       defineSourceIndexCorpus({ corpusId: CORPUS, family: 'file', trustDomain: 'internal' }),
     ]),
     adapters: { [CORPUS]: adapter } as SourceIndexRouterAdapterMap,
-    contentProviders: {
+    contentProviders: provedContent({
       [CORPUS]: {
         async fetchLocalContent() {
           return {
@@ -172,6 +174,6 @@ function lanesFixture() {
           };
         },
       },
-    } as LocalContentProviderMap,
+    } as LocalContentProviderMap),
   };
 }

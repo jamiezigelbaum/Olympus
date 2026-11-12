@@ -1,3 +1,4 @@
+import { provedReleaseCheck } from './helpers/scripted-search-release.ts';
 // Lane B: the analyst-backed source_answer handler. Proves the contracts path
 // (route -> pack -> Analyst -> release gate) produces the existing Castor-safe
 // wire shape with honest audits, and that the trust postures hold: secure_local
@@ -3572,7 +3573,7 @@ describe('row tiers reach the secure_local context decision', () => {
   test('ChatGPT evidence withholds an S4 row of a Personal store and counts it', async () => {
     const store = await mergerStore();
     try {
-      const raw = await searchReleasedEvidence({ lanes: () => mergerLanes(store), question: 'garden tomatoes' });
+      const raw = await searchReleasedEvidence({ lanes: () => mergerLanes(store), question: 'garden tomatoes', releaseCheck: provedReleaseCheck });
       expect(raw.evidence.map((item) => item.provider_item_id)).toEqual(['plain']);
       expect(raw.withheld).toBe(1);
       const shown = searchToolResult(raw);
@@ -3611,6 +3612,7 @@ describe('row tiers reach the secure_local context decision', () => {
           analyst: titleEchoAnalyst('held.md').analyst,
           cloudAnalyst: cloud.analyst,
           lanes: () => mixedLanes(store, variant === 'visibility-filtered' ? true : undefined),
+          releaseCheck: provedReleaseCheck,
         }).answer({
           question: 'garden tomatoes',
           retrieval_mode: 'keyword',

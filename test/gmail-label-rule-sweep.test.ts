@@ -1,3 +1,4 @@
+import { laneReleaseCheck } from './helpers/lane-release-check.ts';
 // An always-Private (or Secrets) Gmail label saved AFTER mail was stored
 // (launch-blocking privacy review, 2026-10-13). A store keeps no labels and
 // Gmail never lists mail it already holds again, so the label rule used to be
@@ -196,6 +197,7 @@ async function olympusSearch(lane: Lane, question: string): Promise<string> {
         corpusId, pendingClassificationItems: lane.ledger.corpusCopyCounts(corpusId).held,
       })),
     }),
+    releaseCheck: laneReleaseCheck(lane.ledger, () => stores),
   });
   return JSON.stringify(searchToolResult(raw));
 }
@@ -508,7 +510,8 @@ describe('a move in flight does not exempt an item from a rule', () => {
     // A re-judge on an install whose moves wait for the migration: heading to Private, the Personal copy still served.
     const queued = lane.ledger.recordRoutedPlacement(identity('pruning'), movingTo('secure'), lane.tierSet.placementFor(movingTo('secure')), { queueWithoutHiding: true });
     expect(queued.outcome).toBe('queued_move');
-    expect(await olympusSearch(lane, 'apple pruning cellar')).toContain('Pruning the apple trees');
+    // The copy is still listed locally, but its release check already reads the raise's target tier.
+    expect(await olympusSearch(lane, 'apple pruning cellar')).not.toContain('Pruning the apple trees');
 
     saveLabelRule();
     await lane.handler.pull({ max_items: 50 });

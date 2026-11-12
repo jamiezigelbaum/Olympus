@@ -36,7 +36,7 @@ import { boundedLogErrorMessage, logErrorOrigin } from './log-redaction.ts';
 import { OperationError, type OperationErrorCode } from './operation-error.ts';
 import { secretLabelsInText } from './opsec.ts';
 import { citationTitleWithParent, PARENT_LABEL_MAX_CHARS } from './parent-label.ts';
-import { checkReleaseChunks, privateInputReleaseAllowed, type ReleaseCheck, type ReleaseInput, type ReleaseInputVerdict, type ReleaseManifest } from './release-manifest.ts';
+import { checkReleaseChunks, passagesWithheldAtReleasableTiers, privateInputReleaseAllowed, type ReleaseCheck, type ReleaseInput, type ReleaseInputVerdict, type ReleaseManifest } from './release-manifest.ts';
 import { withoutSecretLocationCoverageNotes } from './secret-location-note.ts';
 import { privacyBacklogCoverageNote } from './privacy-backlog-coverage.ts';
 
@@ -289,7 +289,7 @@ export async function remoteOperationOutputOffThread(
     const inputs = (options.releaseManifests ?? []).flatMap(manifest => manifest.inputs);
     const chunks = await checkReleaseChunks(check, inputs);
     verdicts = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
-    if (chunks.withheldPassages > 0) verdicts = inputs.map((input, index) => {
+    if (passagesWithheldAtReleasableTiers(inputs, verdicts, chunks) > 0) verdicts = inputs.map((input, index) => {
       const tier = verdicts![index];
       return tier?.tier === 'secret' ? tier : { tier: 'unknown', gone: false };
     });

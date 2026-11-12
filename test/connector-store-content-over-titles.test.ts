@@ -1,3 +1,5 @@
+import type { LocalContentProviderMap } from '../src/core/evidence-pack.ts';
+import { provedContent, provedReleaseCheck } from './helpers/scripted-search-release.ts';
 // Content-bearing evidence outranks bare file names.
 //
 // Mirrors the shape a first-time Dropbox install produced on 2026-09-22: 599
@@ -839,7 +841,7 @@ describe('local analyst leg budget', () => {
             rawExposed: false as const,
           }),
         },
-        contentProviders: {
+        contentProviders: provedContent({
           [NOTES_CORPUS_ID]: {
             async fetchLocalContent(request: { maxChars?: number }) {
               return {
@@ -848,8 +850,9 @@ describe('local analyst leg budget', () => {
               };
             },
           },
-        },
+        } as LocalContentProviderMap),
       }),
+      releaseCheck: provedReleaseCheck,
     });
     await handler.answer({ question: '整合理論について', max_results: 48 });
     expect(received).toHaveLength(1);

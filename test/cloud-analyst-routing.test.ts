@@ -1,3 +1,4 @@
+import { provedContent, provedReleaseCheck } from './helpers/scripted-search-release.ts';
 // Cloud analyst routing + THE HARD MEMBRANE.
 //
 // The handler routes INTERNAL/PUBLIC-tier packs to the frontier cloud analyst
@@ -86,7 +87,7 @@ function lanesFixture(input: { internal?: string[]; secure?: string[] }) {
   return {
     registry,
     adapters: adapters as SourceIndexRouterAdapterMap,
-    contentProviders: contentProviders as LocalContentProviderMap,
+    contentProviders: provedContent(contentProviders as LocalContentProviderMap),
   };
 }
 
@@ -146,6 +147,7 @@ describe('cloud analyst routing', () => {
       analyst: local.analyst,
       cloudAnalyst: cloud.analyst,
       lanes: () => lanesFixture({ internal: ['doc-1'] }),
+      releaseCheck: provedReleaseCheck,
     });
 
     const result = await handler.answer({ question: 'What do my notes say?' });

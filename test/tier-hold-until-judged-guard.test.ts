@@ -73,6 +73,7 @@ const CLASSIFIER_INPUT_SETTERS = new Map<string, string>([
   ['src/workers/connector-store/tier-override-settle.ts', 'override settling keeps the hold reason'],
   ['src/workers/connector-store/local-index.ts', 'extracted content of a legacy store: the inputs or the stored hold'],
   ['src/workers/file-extraction/tiered-store-sink.ts', 'tiered extraction landing: the inputs, the set\'s option or the stored hold'],
+  ['src/workers/classification/chunk-release.ts', 'a release window is never sent to a remote app before the judge reads it, on any lane'],
 ]);
 
 const HOLD_REASON_LITERAL = 'content:held_until_judged';

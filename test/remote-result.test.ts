@@ -167,7 +167,7 @@ const REFUSED_RAW = { ok: false, code: 'daily_cap_reached', message: 'The daily 
 
 /** One item the analyst read: a `fixture` item in the internal fixture corpus, account `personal`. */
 function input(id: string, overrides: Partial<ReleaseInput> = {}): ReleaseInput {
-  return { corpusId: CORPORA.internal, provider: 'fixture', accountScope: ACCOUNT, providerItemId: id, privateAtAnswer: false, ...overrides };
+  return { corpusId: CORPORA.internal, provider: 'fixture', accountScope: ACCOUNT, providerItemId: id, privateAtAnswer: false, chunkHashes: [`${id}-chunk`], ...overrides };
 }
 
 function manifest(inputs: ReleaseInput[], constraints: Partial<ReleaseConstraints> = {}): ReleaseManifest {
