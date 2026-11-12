@@ -7,7 +7,7 @@ import {
   clearLimitStop, initializeLimitStops, listOpenLimitStops, registerLimit,
   registeredLimits, reportLimitStop, withinOverrunMargin, type LimitStop,
 } from '../src/core/limit-stops.ts';
-import { LocalSourceSchedulerStateStore } from '../src/workers/source-scheduler-state.ts';
+import { forgetSourceSchedulerState, LocalSourceSchedulerStateStore } from '../src/workers/source-scheduler-state.ts';
 
 const roots: string[] = [];
 function databasePath(): string {
@@ -148,5 +148,46 @@ describe('limit stops', () => {
       store.adoptExternalSuccess({ ...key, taskId: 'reconcile', completedAt: '2026-11-12T13:00:00.000Z', resultStatus: 'idle' });
       expect(listOpenLimitStops(path)).toEqual([]);
     } finally { store.close(); }
+  });
+
+  test('a task parked before the record existed gets its stop when the store opens', () => {
+    const path = databasePath();
+    const key = { sourceId: 'source', corpusId: 'corpus', taskId: 'pull' };
+    const first = new LocalSourceSchedulerStateStore(path);
+    first.recordSuccess({ ...key, completedAt: stop.since, resultStatus: 'idle', degradedReason: 'daily_cost_guard', notBeforeAt: stop.resumesAt });
+    first.close();
+    // An install upgraded across this change: the marker is set, the record is not.
+    const raw = new Database(path);
+    raw.exec('DELETE FROM limit_stops');
+    raw.close();
+    expect(listOpenLimitStops(path)).toEqual([]);
+    const reopened = new LocalSourceSchedulerStateStore(path);
+    try {
+      expect(listOpenLimitStops(path).map((row) => [row.id, row.subject, row.resumesAt])).toEqual([
+        ['x.daily_cost', JSON.stringify(['source', 'corpus', 'pull']), stop.resumesAt],
+      ]);
+    } finally { reopened.close(); }
+    const again = new LocalSourceSchedulerStateStore(path);
+    try { expect(listOpenLimitStops(path)).toHaveLength(1); } finally { again.close(); }
+  });
+
+  test('forgetting a source removes its stops and keeps other sources and non-scheduler subjects', () => {
+    const path = databasePath();
+    const store = new LocalSourceSchedulerStateStore(path);
+    const parked = (sourceId: string, corpusId: string) => store.recordSuccess({
+      sourceId, corpusId, taskId: 'pull', completedAt: stop.since, resultStatus: 'idle', degradedReason: 'daily_cost_guard',
+    });
+    try {
+      parked('gone', 'gone-corpus');
+      parked('kept', 'kept-corpus');
+      reportLimitStop(stop, path);
+    } finally { store.close(); }
+    expect(forgetSourceSchedulerState(path, { sourceIds: ['gone'], corpusIds: [] }, { dryRun: true })).toBeGreaterThanOrEqual(2);
+    expect(listOpenLimitStops(path)).toHaveLength(3);
+    forgetSourceSchedulerState(path, { sourceIds: ['gone'], corpusIds: [] });
+    expect(listOpenLimitStops(path).map((row) => row.subject).sort()).toEqual(
+      [JSON.stringify(['kept', 'kept-corpus', 'pull']), stop.subject].sort());
+    forgetSourceSchedulerState(path, { sourceIds: [], corpusIds: ['kept-corpus'] });
+    expect(listOpenLimitStops(path).map((row) => row.subject)).toEqual([stop.subject]);
   });
 });

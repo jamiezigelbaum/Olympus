@@ -229,6 +229,11 @@ export function forgetSourceSchedulerState(
     return forgetSqliteRows(db, [
       ...filterFor('source_scheduler_task_state', keys),
       ...filterFor('source_scheduler_unpark_request', keys),
+      // A scheduler stop's subject is [source_id, corpus_id, task_id].
+      ...filterFor('limit_stops', [
+        ["CASE WHEN json_valid(subject) THEN json_extract(subject, '$[0]') END", scope.sourceIds],
+        ["CASE WHEN json_valid(subject) THEN json_extract(subject, '$[1]') END", scope.corpusIds],
+      ]),
     ], dryRun).reduce((sum, count) => sum + count, 0);
   } finally {
     closeSqliteStore(db);
@@ -265,6 +270,25 @@ export class LocalSourceSchedulerStateStore {
       sourceSchedulerStateMigrations(),
     );
     initializeLimitStops(this.db);
+    this.backfillLimitStops();
+  }
+
+  /**
+   * Tasks parked behind a daily budget before the stop record existed (or
+   * across a crash) get their stop now, so none waits unseen until its next
+   * state write. Idempotent: an open stop keeps its own `since`.
+   */
+  private backfillLimitStops(): void {
+    this.db.transaction(() => {
+      const keys = this.db.query(`
+        SELECT source_id, corpus_id, task_id FROM source_scheduler_task_state
+        WHERE degraded_reason IS NOT NULL
+      `).all() as Array<{ source_id: string; corpus_id: string; task_id: string }>;
+      for (const key of keys) {
+        const state = this.get({ sourceId: key.source_id, corpusId: key.corpus_id, taskId: key.task_id });
+        if (state) syncSchedulerLimitStop(this.db, undefined, state);
+      }
+    })();
   }
 
   close(): void {

@@ -112068,7 +112068,11 @@ function forgetSourceSchedulerState(dbPath, scope, options = {}) {
     db.exec("PRAGMA busy_timeout = 10000;");
     return forgetSqliteRows(db, [
       ...filterFor("source_scheduler_task_state", keys),
-      ...filterFor("source_scheduler_unpark_request", keys)
+      ...filterFor("source_scheduler_unpark_request", keys),
+      ...filterFor("limit_stops", [
+        ["CASE WHEN json_valid(subject) THEN json_extract(subject, '$[0]') END", scope.sourceIds],
+        ["CASE WHEN json_valid(subject) THEN json_extract(subject, '$[1]') END", scope.corpusIds]
+      ])
     ], dryRun).reduce((sum2, count) => sum2 + count, 0);
   } finally {
     closeSqliteStore(db);
@@ -112090,6 +112094,20 @@ class LocalSourceSchedulerStateStore {
     assertSqliteSchemaCanOpen(this.db, SOURCE_SCHEDULER_STATE_STORE_ID, SOURCE_SCHEDULER_STATE_SCHEMA_VERSION);
     runSqliteMigrations(this.db, SOURCE_SCHEDULER_STATE_STORE_ID, sourceSchedulerStateMigrations());
     initializeLimitStops(this.db);
+    this.backfillLimitStops();
+  }
+  backfillLimitStops() {
+    this.db.transaction(() => {
+      const keys = this.db.query(`
+        SELECT source_id, corpus_id, task_id FROM source_scheduler_task_state
+        WHERE degraded_reason IS NOT NULL
+      `).all();
+      for (const key2 of keys) {
+        const state = this.get({ sourceId: key2.source_id, corpusId: key2.corpus_id, taskId: key2.task_id });
+        if (state)
+          syncSchedulerLimitStop(this.db, undefined, state);
+      }
+    })();
   }
   close() {
     closeSqliteStore(this.db);
