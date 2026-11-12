@@ -555,9 +555,12 @@ export function createAnalystSourceIndexAnswerHandler(
               if (note) chunkHoldNotes.add(note);
             }
             await assertDispatchAllowed(analysisDetail);
+            const result = await analyst.analyze(dispatchPack, analyzeOptions);
+            // Only a leg that answered can shape the answer: a failed Private
+            // route must not hold back the ordinary fallback that replaced it.
             analyzedInputs.push(...dispatchPack.candidates.map(candidate => candidateReleaseInput(candidate,
               candidateCorpus.get(candidate) ?? analysisDetail.candidateCorpusIds[analysisDetail.pack.candidates.findIndex(original => original.provenance === candidate.provenance)] ?? '')));
-            return analyst.analyze(dispatchPack, analyzeOptions);
+            return result;
           },
         });
         return {

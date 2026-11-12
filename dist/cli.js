@@ -79494,8 +79494,9 @@ function createAnalystSourceIndexAnswerHandler(options) {
                 chunkHoldNotes.add(note);
             }
             await assertDispatchAllowed(analysisDetail);
+            const result = await analyst.analyze(dispatchPack, analyzeOptions);
             analyzedInputs.push(...dispatchPack.candidates.map((candidate) => candidateReleaseInput(candidate, candidateCorpus.get(candidate) ?? analysisDetail.candidateCorpusIds[analysisDetail.pack.candidates.findIndex((original) => original.provenance === candidate.provenance)] ?? "")));
-            return analyst.analyze(dispatchPack, analyzeOptions);
+            return result;
           }
         });
         return {
