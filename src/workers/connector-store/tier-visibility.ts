@@ -22,7 +22,7 @@
 // an answer was written is not cited.
 
 import type { ReleaseCheck, ReleaseInputVerdict } from '../../core/release-manifest.ts';
-import type { SourceIndexRoutedSearchHit, SourceIndexVisibilityGate } from '../../core/source-index/router.ts';
+import type { SourceIndexRoutedSearchHit, SourceIndexVisibilityGate, SourceIndexVisibilityGateReport } from '../../core/source-index/router.ts';
 import { contentHeldForJudgment } from '../classification/tier-classifier.ts';
 import { tierLedgerIdentityKey, type TierLedger, type TierLedgerIdentity, type TierVisibilityReads } from '../classification/tier-ledger.ts';
 import {
@@ -63,10 +63,19 @@ export function createTierVisibilityGate(
   const readOptions = { personalFirst: onHeldMatches !== undefined };
   const governedBy = (scope: TierVisibilityScope, hits: readonly SourceIndexRoutedSearchHit[]) =>
     hits.filter((hit) => scope.corpusIds.has(hit.corpusId));
-  const gate: SourceIndexVisibilityGate = (hits) => {
+  // The corpora of a set whose ledger could not be read: their hits fail
+  // closed, and the caller is told which, once the judgment stands (#1460).
+  const unreadCorpora = (governed: readonly SourceIndexRoutedSearchHit[], unread: Set<string>) => {
+    for (const hit of governed) unread.add(hit.corpusId);
+  };
+  const reportUnread = (unread: ReadonlySet<string>, report: SourceIndexVisibilityGateReport | undefined) => {
+    if (unread.size > 0) report?.onUnchecked?.([...unread].sort());
+  };
+  const gate: SourceIndexVisibilityGate = (hits, report) => {
     const current = scopes();
     if (current.length === 0 || hits.length === 0) return hits;
     const reads = new Map<TierVisibilityScope, TierVisibilityReads | undefined>();
+    const unread = new Set<string>();
     for (const scope of current) {
       const governed = governedBy(scope, hits);
       if (governed.length === 0) continue;
@@ -74,18 +83,25 @@ export function createTierVisibilityGate(
         reads.set(scope, ledgerVisibilityHere(scope.ledger, governed.map((hit) => hit.sourceItem), readOptions));
       } catch {
         reads.set(scope, undefined);
+        unreadCorpora(governed, unread);
       }
     }
-    return visibilityHere(judgeVisibility(current, hits, reads, onHeldMatches));
+    const visible = visibilityHere(judgeVisibility(current, hits, reads, onHeldMatches));
+    reportUnread(unread, report);
+    return visible;
   };
   // The same judgment with each ledger read in one snapshot on the read pool,
   // for the search's own fan-out, which can wait for it (#1305).
-  gate.offThread = async (hits) => {
+  gate.offThread = async (hits, report) => {
     if (scopes().length === 0 || hits.length === 0) return hits;
     // A write during the pooled judgment takes it again, then judges here once.
-    return judgedAwaited(() => judgedOffThread(hits), () => gate(hits));
+    return judgedAwaited(() => judgedOffThread(hits, report), () => gate(hits, report));
   };
-  const judgedOffThread = async (hits: readonly SourceIndexRoutedSearchHit[]): Promise<readonly SourceIndexRoutedSearchHit[]> => {
+  const judgedOffThread = async (
+    hits: readonly SourceIndexRoutedSearchHit[],
+    report: SourceIndexVisibilityGateReport | undefined,
+  ): Promise<readonly SourceIndexRoutedSearchHit[]> => {
+    const unread = new Set<string>();
     const current = scopes();
     const reads = new Map<TierVisibilityScope, TierVisibilityReads | undefined>();
     const unchanged = new Map<TierVisibilityScope, () => boolean>();
@@ -102,6 +118,7 @@ export function createTierVisibilityGate(
         reads.set(scope, await ledgerVisibilityReads(scope.ledger, governed.map((hit) => hit.sourceItem), readOptions));
       } catch (error) {
         if (error instanceof VisibilityChangedError) changedDuringRead = true;
+        else unreadCorpora(governed, unread);
         reads.set(scope, undefined);
       }
     }));
@@ -111,6 +128,7 @@ export function createTierVisibilityGate(
       catch { return true; }
     });
     if (changed) throw new VisibilityChangedError();
+    reportUnread(unread, report);
     return visible;
   };
   return gate;

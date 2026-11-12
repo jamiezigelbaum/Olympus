@@ -1,5 +1,5 @@
 import { isSourceIndexLaneBusyError } from './lane-busy.ts';
-import { RECENT_ITEMS_CUT_SHORT } from './partial-search.ts';
+import { RECENT_ITEMS_CUT_SHORT, VISIBILITY_CHECK_CUT_SHORT } from './partial-search.ts';
 import { withKeywordRequestScope } from './keyword-context.ts';
 import type {
   RetrievalDegradation,
@@ -322,18 +322,30 @@ export interface SourceIndexRoutedCorpusTiming {
  */
 export type SourceIndexVisibilityGate = ((
   hits: readonly SourceIndexRoutedSearchHit[],
+  report?: SourceIndexVisibilityGateReport,
 ) => readonly SourceIndexRoutedSearchHit[]) & {
   // The same judgment with its reads off the request thread, for a caller
   // that can wait (#1305).
-  offThread?: (hits: readonly SourceIndexRoutedSearchHit[]) => Promise<readonly SourceIndexRoutedSearchHit[]>;
+  offThread?: (hits: readonly SourceIndexRoutedSearchHit[], report?: SourceIndexVisibilityGateReport) => Promise<readonly SourceIndexRoutedSearchHit[]>;
 };
+
+/**
+ * What a gate tells its caller besides the hits it keeps (#1460): the corpora
+ * whose hits it left out because it could not read their visibility (a busy
+ * read pool, an unreadable ledger), so the search names them instead of
+ * returning a silently thinner list. Called once per judgment that stands.
+ */
+export interface SourceIndexVisibilityGateReport {
+  onUnchecked?: (corpusIds: readonly string[]) => void;
+}
 
 // Applies the gate off the request thread where it can be.
 export function applySourceIndexVisibilityGate(
   gate: SourceIndexVisibilityGate,
   hits: readonly SourceIndexRoutedSearchHit[],
+  report?: SourceIndexVisibilityGateReport,
 ): Promise<readonly SourceIndexRoutedSearchHit[]> {
-  return gate.offThread ? gate.offThread(hits) : Promise.resolve(gate(hits));
+  return gate.offThread ? gate.offThread(hits, report) : Promise.resolve(gate(hits, report));
 }
 
 export interface RouteSourceIndexSearchOptions {
@@ -636,8 +648,13 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
   const lanesSettledAt = Date.now();
   if (options.visibilityGate) {
     // One call for every lane's hits: one snapshot decides them all.
-    const kept = new Set(await applySourceIndexVisibilityGate(options.visibilityGate, lanes.flatMap((lane) => lane.items)));
+    const unchecked = new Set<string>();
+    const kept = new Set(await applySourceIndexVisibilityGate(options.visibilityGate, lanes.flatMap((lane) => lane.items), {
+      onUnchecked: (corpusIds) => { for (const corpusId of corpusIds) unchecked.add(corpusId); },
+    }));
     for (const lane of lanes) lane.items = lane.items.filter((hit) => kept.has(hit));
+    // A source whose hits the gate could not judge is named, never thinner in silence (#1460).
+    for (const corpusId of [...unchecked].sort()) degradations.push(visibilityCheckDegradation(corpusId));
   }
 
   // Store order within each turn: how well each store's best hit answers
@@ -837,6 +854,16 @@ function recentItemsLaneDegradation(
     laneType: cut.laneType,
     reason: 'lane_timeout',
     detail: RECENT_ITEMS_CUT_SHORT,
+    occurrences: 1,
+  };
+}
+
+function visibilityCheckDegradation(corpusId: string): RetrievalDegradation {
+  return {
+    laneName: `${corpusId}:visibility`,
+    laneType: 'keyword',
+    reason: 'lane_timeout',
+    detail: VISIBILITY_CHECK_CUT_SHORT,
     occurrences: 1,
   };
 }

@@ -6,17 +6,19 @@
 // (#1305, #1317). A chat source whose read of its newest items runs out of
 // time is still searched by its other lanes, and is named too (#1460).
 
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
-import { laneTimeoutGap, recentItemsTimeoutGap, semanticTimeoutGap } from '../src/core/source-index/partial-search.ts';
+import { laneTimeoutGap, recentItemsTimeoutGap, semanticTimeoutGap, visibilityCheckTimeoutGap } from '../src/core/source-index/partial-search.ts';
 import { LocalConnectorStore, createConnectorStoreContentProvider, createConnectorStoreCorpusAdapter, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
 import { OffThreadReadBusyError, setReadPoolClockForTests, setReadPoolObserverForTests } from '../src/workers/connector-store/off-thread-reads.ts';
 import { searchToolResult } from '../src/workers/chatgpt/response-builder.ts';
 import { searchReleasedEvidence } from '../src/workers/source-index/analyst-answer.ts';
+import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
+import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
 
 const READ = 'internal.fake.notes';
 const HELD = 'internal.fake.chats';
@@ -93,6 +95,57 @@ describe('olympus_search names every lane it cut short', () => {
     expect(raw.coverage.cut_short).toEqual([recentItemsTimeoutGap(HELD)]);
     expect(notes(searchToolResult(raw))).toContain(recentItemsTimeoutGap(HELD));
     store.close();
+  });
+
+  test('a tiered source whose privacy check finds the read pool busy is named, and its matches are left out (#1460)', async () => {
+    const notesStore = await noteStore();
+    const { dir, cleanup } = tempDir('search-cut-visibility-');
+    const fixture = openTierFixture(dir, { embed: false });
+    try {
+      await fixture.set.sync(fixtureConnector(() => [{ id: 'garden', name: 'orchard garden.txt', text: 'The orchard garden needs compost.' }]),
+        { fetchContent: true, placement: FIXTURE_PLACEMENT });
+      const tiered = fixture.stores.internal!;
+      const lanes = () => ({
+        registry: buildSourceIndexCorpusRegistry([
+          defineConnectorCorpus({ corpusId: READ, family: 'file', trustDomain: 'internal' }),
+          defineConnectorCorpus({ corpusId: tiered.corpusId, family: tiered.family, trustDomain: 'internal' }),
+        ]),
+        adapters: {
+          [READ]: createConnectorStoreCorpusAdapter({ store: notesStore }),
+          [tiered.corpusId]: createConnectorStoreCorpusAdapter({ store: tiered }),
+        },
+        contentProviders: {
+          [READ]: createConnectorStoreContentProvider({ store: notesStore }),
+          [tiered.corpusId]: createConnectorStoreContentProvider({ store: tiered }),
+        },
+        visibilityGate: createTierVisibilityGate(() => [{ ledger: fixture.ledger, corpusIds: new Set(Object.values(CORPORA)) }]),
+      });
+      const before = await searchReleasedEvidence({ question: 'orchard', maxResults: 10, lanes });
+      expect(before.coverage.cut_short).toBeUndefined();
+      expect(JSON.stringify(before.evidence)).toContain('orchard garden');
+
+      // Only the gate's ledger read finds the pool busy: what a status read
+      // holding the ledger's reader does to the search's final privacy check.
+      let gateReads = 0;
+      const steps = fixture.ledger.visibilityReadSteps.bind(fixture.ledger);
+      spyOn(fixture.ledger, 'visibilityReadSteps').mockImplementation((identities, options) => {
+        if (identities.some((identity) => identity.providerItemId === 'garden') && options?.personalFirst === false) {
+          gateReads += 1;
+          throw new OffThreadReadBusyError();
+        }
+        return steps(identities, options);
+      });
+      const raw = await searchReleasedEvidence({ question: 'orchard', maxResults: 10, lanes });
+      expect(gateReads).toBeGreaterThan(0);
+      expect(JSON.stringify(raw.evidence)).not.toContain('orchard garden');
+      expect(raw.evidence.length).toBeGreaterThan(0);
+      expect(raw.coverage.cut_short).toEqual([visibilityCheckTimeoutGap(CORPORA.internal)]);
+      expect(notes(searchToolResult(raw))).toContain(visibilityCheckTimeoutGap(CORPORA.internal));
+    } finally {
+      notesStore.close();
+      fixture.close();
+      cleanup();
+    }
   });
 
   test('a lane searched by keyword only is named too, and a full search adds no note', () => {
