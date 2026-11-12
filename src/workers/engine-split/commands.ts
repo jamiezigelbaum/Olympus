@@ -23,6 +23,7 @@ import { ENGINE_COMMANDS_PATH, ENGINE_MODEL_COMPLETE_PATH, ENGINE_READY_PATH, ty
 import type { AnalystModelCompletion, AnalystModelRequest } from '../../core/analyst.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import { hasValidWorkerBearerToken } from '../http.ts';
+import { boundedLogErrorMessage, logErrorOrigin } from '../../core/log-redaction.ts';
 import { runAtLocalInferencePriority, type LocalInferencePriority } from '../answer-activity.ts';
 
 /** Config files the front writes and the background re-reads (design, "Writes the front still needs", B). */
@@ -543,6 +544,8 @@ export class EngineCommandLedger {
     } catch (error) {
       entry.receipt.state = 'failed';
       entry.receipt.error = error instanceof Error ? error.message : 'The command failed.';
+      // The front sees only the message; the class and frame stay here (#1502).
+      console.warn(`[engine-split] ${command.kind} failed: error_message=${boundedLogErrorMessage(error)} origin=${logErrorOrigin(error)}`);
     }
     entry.settledAt = this.now();
   }
@@ -627,6 +630,7 @@ export function createEngineCommandHandler(options: EngineCommandServerOptions):
         // The model's own answer, typed as it would be in one process: a
         // download still running or a server that failed to start.
         if (error instanceof OperationError) return Response.json({ operation_error: error.toJSON() }, { status: 503 });
+        console.warn(`[engine-split] model completion failed: error_message=${boundedLogErrorMessage(error)} origin=${logErrorOrigin(error)}`);
         return Response.json({ error: 'model_failed', message: error instanceof Error ? error.message : 'unknown error' }, { status: 500 });
       }
     }
