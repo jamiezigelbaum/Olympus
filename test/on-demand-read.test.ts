@@ -1,7 +1,7 @@
 import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { classifyContentTier } from '../src/workers/classification/tier-classifier.ts';
 import { approveFileSourceScope, readFileSourceScopeApproval, connectedFileSourceAccountGeneration, fileSourceScopeAllowsMetadata, fileSourceScopeAllowsContent } from '../src/core/source-scope-approval.ts';
-import { createFileExtractionRuntime } from '../src/workers/engine/runtime/file-extraction-runtime.ts';
+import { createFileExtractionRuntime, fileExtractionCorporaRoster } from '../src/workers/engine/runtime/file-extraction-runtime.ts';
 import { waitFor } from './helpers/test-clock.ts';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -214,5 +214,21 @@ describe('read on demand', () => {
     expect(store.contentServedNow('a')).toBe(false);
     expect(store.localContent('a')?.chunks ?? []).toEqual([]);
     expect(store.readOnDemand('a', 'v2')).toBe(false);
+  });
+});
+
+describe('on-demand read scopes reach the Dropbox extraction lane', () => {
+  test('a Dropbox roster with only names-only folders keeps its read scopes', () => {
+    const roster = fileExtractionCorporaRoster({
+      configured: [],
+      dropbox: {
+        extractionScopes: [],
+        resolveExtractionScopes: () => [],
+        resolveReadScopes: () => ['/archive'],
+        resolveCredentialHandle: () => 'dropbox.personal',
+      },
+    });
+    expect(roster).toHaveLength(1);
+    expect(roster[0]!.resolveReadScopes?.()).toEqual(['/archive']);
   });
 });

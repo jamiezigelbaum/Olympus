@@ -695,6 +695,7 @@ export function fileExtractionCorporaRoster(input: {
   if (input.dropbox && (
     input.dropbox.extractionScopes.length > 0
     || input.dropbox.resolveExtractionScopes !== undefined
+    || input.dropbox.resolveReadScopes !== undefined
   )) {
     canonicalIds.add(DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID);
     canonical.push({
@@ -704,6 +705,9 @@ export function fileExtractionCorporaRoster(input: {
       ...(input.dropbox.resolveExtractionScopes
         ? { resolveScopes: input.dropbox.resolveExtractionScopes }
         : {}),
+      // Individual reads (owner or on demand) reach names-only folders too,
+      // which the Full-only extraction scopes leave out.
+      ...(input.dropbox.resolveReadScopes ? { resolveReadScopes: input.dropbox.resolveReadScopes } : {}),
       ...(input.dropbox.resolveCandidateFilters
         ? { resolveCandidateFilters: input.dropbox.resolveCandidateFilters }
         : {}),
