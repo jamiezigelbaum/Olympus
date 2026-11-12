@@ -19512,7 +19512,8 @@ function backUpBeforeUpdate(db, storeId, fromVersion, env, report, freeBytes = d
   const file = db.filename;
   const backup = preSchemaBackupPath(file, fromVersion);
   const started = performance.now();
-  const needed = schemaUpdateSpaceNeeded(statSync12(file).size) - (existsSync20(backup) ? statSync12(backup).size : 0);
+  rmSync9(backup, { force: true });
+  const needed = schemaUpdateSpaceNeeded(statSync12(file).size);
   const free = freeBytes(dirname26(file));
   if (free < needed) {
     throw new OperationError("config_error", `Updating the "${storeId}" store needs ${formatBytes(needed)} free on its disk, and ${formatBytes(free)} is free.`, "Free up space on that disk, then start Olympus again. Nothing was changed.");

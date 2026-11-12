@@ -179,8 +179,9 @@ function backUpBeforeUpdate(
   const file = db.filename;
   const backup = preSchemaBackupPath(file, fromVersion);
   const started = performance.now();
-  // The copy being replaced frees its own space.
-  const needed = schemaUpdateSpaceNeeded(statSync(file).size) - (existsSync(backup) ? statSync(backup).size : 0);
+  // An earlier attempt's copy is stale, and the store is still at this version: it goes first.
+  rmSync(backup, { force: true });
+  const needed = schemaUpdateSpaceNeeded(statSync(file).size);
   const free = freeBytes(dirname(file));
   if (free < needed) {
     throw new OperationError(
