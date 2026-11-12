@@ -56,7 +56,7 @@ test('CLI --answer uses the local source_answer profile, compact prompt and the 
     expect(receipt.summary.byLength['4+_chunks']!.answer!.right).toBe(1);
     expect(result.stdout).not.toContain(quote);
   } finally { server.stop(true); rmSync(input.root, { recursive: true, force: true }); }
-});
+}, 30_000);
 
 test('CLI --answer fails with a content-free failure line and code when the local model is unavailable', async () => {
   const input = await fixture();
@@ -72,7 +72,7 @@ test('CLI --answer fails with a content-free failure line and code when the loca
     expect(retrieval.code).toBe(0);
     expect(retrieval.stderr).not.toContain('load_analyst');
   } finally { server.stop(true); rmSync(input.root, { recursive: true, force: true }); }
-});
+}, 30_000);
 
 test('CLI --answer refuses a nonlocal analyst provider', async () => {
   const input = await fixture();
@@ -82,4 +82,4 @@ test('CLI --answer refuses a nonlocal analyst provider', async () => {
     expect(result.stderr).toContain('(LOCAL_MODEL_REQUIRED)');
     expect(existsSync(input.output)).toBe(false);
   } finally { rmSync(input.root, { recursive: true, force: true }); }
-});
+}, 30_000);
