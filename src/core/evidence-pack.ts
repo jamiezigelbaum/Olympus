@@ -1,4 +1,5 @@
 import { withKeywordRequestScope } from './source-index/keyword-context.ts';
+import { RECENT_ITEMS_CUT_SHORT, VISIBILITY_CHECK_CUT_SHORT, recentItemsTimeoutGap, semanticSearchTimedOut, semanticTimeoutGap, visibilityCheckTimeoutGap } from './source-index/partial-search.ts';
 import {
   rerankCandidates,
   rerankPassage,
@@ -47,6 +48,8 @@ import {
   withReservedRecencySeats,
 } from './source-index/retrieval.ts';
 import {
+  resolveAskSearchBudgetMs,
+  resolveLaneTimeoutMs,
   routeSourceIndexSearch,
   type SourceIndexRoutedCorpusTiming,
   type SourceIndexRoutedMatchCount,
@@ -55,6 +58,7 @@ import {
   type SourceIndexRouterAdapterMap,
   type SourceIndexSearchContext,
   type SourceIndexSkippedCorpus,
+  applySourceIndexVisibilityGate,
   type SourceIndexVisibilityGate,
 } from './source-index/router.ts';
 import {
@@ -184,6 +188,12 @@ export interface BuildEvidencePackInput {
   // caller that knows its own wall-clock budget can set one rather than reach
   // for a process-wide env var (see RouteSourceIndexSearchOptions.laneTimeoutMs).
   laneTimeoutMs?: number;
+  // Wall-clock budget for all of this build's routed runs together (the
+  // literal query and any planner expansions, which run one after another).
+  // Each run's lanes get at most what is left of it; an expansion is not
+  // started once it is spent. Omitted, OLYMPUS_SOURCE_ANSWER_SEARCH_BUDGET_MS
+  // or the router's default. Non-positive disables it.
+  searchBudgetMs?: number;
   // See SourceIndexVisibilityGate: one tier-ledger snapshot over every routed run's hits.
   visibilityGate?: SourceIndexVisibilityGate;
   /**
@@ -347,7 +357,7 @@ async function buildPreparedEvidencePackDetailed(
   // snapshot, so a move that flipped between two runs cannot put both copies
   // of an item in the pack.
   const visibleHits = input.visibilityGate && !input.selectedItems?.length
-    ? input.visibilityGate(routed.hits)
+    ? await applySourceIndexVisibilityGate(input.visibilityGate, routed.hits)
     : routed.hits;
   // Routed order is the pack order. A recency word in the question does not
   // re-sort it: newest-first over the whole pool undid store turn and the
@@ -358,7 +368,7 @@ async function buildPreparedEvidencePackDetailed(
   const candidates: EvidenceCandidate[] = [];
   const candidateCorpusIds: string[] = [];
   const candidateExtractionGapIndexes: number[][] = [];
-  const extractionGaps: string[] = semanticLaneSkippedGaps(routed.degradations, input);
+  const extractionGaps: string[] = laneCutShortGaps(routed.degradations, input);
   const policyDeniedCoverageGaps: string[] = [];
   let policyDeniedCandidates = 0;
   const namesOnlyCandidateIndexes: number[] = [];
@@ -833,7 +843,8 @@ async function runRoutedSearches(
     ? startQueryPlanner(input.queryPlanner, input.question)
     : undefined;
 
-  const literalRun = await runRoutedSearch(input, literalQuery, 1, retrievalLimit);
+  const budget = searchBudget(input);
+  const literalRun = await runRoutedSearch(input, literalQuery, 1, retrievalLimit, budget.firstLaneTimeoutMs(), budget.deadlineAtMs);
   if (!pendingPlan) return literalRun;
 
   if (isStrongLiteralRun(literalRun, input.maxResults)) {
@@ -850,8 +861,16 @@ async function runRoutedSearches(
 
   const runs: SourceIndexRoutedSearchResponse[] = [literalRun];
   for (const query of expansions) {
-    runs.push(await runRoutedSearch(input, query, runs.length + 1, retrievalLimit));
+    // A spent budget answers from the runs already made; the literal run's
+    // lanes that ran out of time are already in its skippedCorpora.
+    const laneTimeoutMs = budget.laneTimeoutMs();
+    if (laneTimeoutMs === undefined) {
+      recordSourceAnswerQueryPlannerDisposition('search_budget_spent');
+      break;
+    }
+    runs.push(await runRoutedSearch(input, query, runs.length + 1, retrievalLimit, laneTimeoutMs, budget.deadlineAtMs));
   }
+  if (runs.length === 1) return literalRun;
 
   const queries = [literalQuery, ...expansions];
   const ranked = fuseRankedCandidateLanes({
@@ -914,11 +933,44 @@ function literalSearchQuery(input: BuildEvidencePackInput): string {
   return input.searchQuery?.trim() || input.question;
 }
 
+// Below this much left of the search budget, an expansion is not worth starting.
+const MIN_EXPANSION_BUDGET_MS = 1_000;
+
+/**
+ * The lane timeout for the next routed run: the per-lane timeout, cut to what
+ * is left of the whole search budget. An expansion gets undefined once too
+ * little is left to start it; the literal run always starts.
+ */
+function searchBudget(input: BuildEvidencePackInput): {
+  firstLaneTimeoutMs(): number;
+  laneTimeoutMs(): number | undefined;
+  // When the whole search ends, for the router to cut its lanes to after preparation; undefined when unbounded.
+  deadlineAtMs: number | undefined;
+} {
+  const lane = resolveLaneTimeoutMs(input.laneTimeoutMs);
+  const total = resolveAskSearchBudgetMs(input.searchBudgetMs);
+  const startedAt = Date.now();
+  const cut = (left: number) => (Number.isFinite(lane) && lane > 0 ? Math.min(lane, left) : left);
+  const left = () => Math.max(1, total - (Date.now() - startedAt));
+  const unbounded = !Number.isFinite(total) || total <= 0;
+  return {
+    deadlineAtMs: unbounded ? undefined : startedAt + total,
+    firstLaneTimeoutMs: () => (unbounded ? lane : cut(left())),
+    laneTimeoutMs() {
+      if (unbounded) return lane;
+      // A disabled lane timeout (non-positive) still ends at the search budget.
+      return left() < MIN_EXPANSION_BUDGET_MS ? undefined : cut(left());
+    },
+  };
+}
+
 function runRoutedSearch(
   input: BuildEvidencePackInput,
   query: string,
   ordinal: number,
   maxResults: number,
+  laneTimeoutMs: number,
+  searchDeadlineAtMs?: number,
 ): Promise<SourceIndexRoutedSearchResponse> {
   return observeSourceAnswerRoutedQuery(ordinal, () =>
     routeSourceIndexSearch({
@@ -931,7 +983,8 @@ function runRoutedSearch(
         context: input.searchContext,
         ...(questionHasTemporalIntent(input) ? { temporalIntent: true } : {}),
       },
-      ...(input.laneTimeoutMs !== undefined ? { laneTimeoutMs: input.laneTimeoutMs } : {}),
+      laneTimeoutMs,
+      ...(searchDeadlineAtMs !== undefined ? { searchDeadlineAtMs } : {}),
       ...(input.visibilityGate ? { visibilityGate: input.visibilityGate } : {}),
     }));
 }
@@ -1017,26 +1070,41 @@ function hitProvenance(hit: SourceIndexRoutedSearchHit): SourceIndexProvenance {
  * Counts only: the corpus id and the lane's own stable reason token.
  */
 export function semanticLaneSkippedGap(corpusId: string, detail: string | undefined): string {
+  if (semanticSearchTimedOut(detail)) return semanticTimeoutGap(corpusId);
   return `${corpusId}: the meaning-based search was skipped for this question`
     + `${detail ? ` (${detail})` : ''}; only keyword matches were searched, so related items may be missing.`;
 }
 
-function semanticLaneSkippedGaps(
+// The lane timeouts that leave a source searched but cut short, by the
+// degradation detail the router gives them: the lane suffix it names and the
+// gap that says so (#1460).
+const CUT_SHORT_LANES: ReadonlyMap<string, { suffix: string; gap: (corpusId: string) => string }> = new Map([
+  [RECENT_ITEMS_CUT_SHORT, { suffix: ':recency', gap: recentItemsTimeoutGap }],
+  [VISIBILITY_CHECK_CUT_SHORT, { suffix: ':visibility', gap: visibilityCheckTimeoutGap }],
+]);
+
+function laneCutShortGaps(
   degradations: readonly RetrievalDegradation[],
   input: BuildEvidencePackInput,
 ): string[] {
   const gaps: string[] = [];
   const seen = new Set<string>();
   for (const degradation of degradations) {
-    if (degradation.reason !== 'semantic_lane_skipped') continue;
-    const corpusId = degradation.laneName.endsWith(':semantic')
-      ? degradation.laneName.slice(0, -':semantic'.length)
+    const cut = degradation.reason === 'lane_timeout' && degradation.detail !== undefined
+      ? CUT_SHORT_LANES.get(degradation.detail)
+      : undefined;
+    if (degradation.reason !== 'semantic_lane_skipped' && !cut) continue;
+    const suffix = cut?.suffix ?? ':semantic';
+    const corpusId = degradation.laneName.endsWith(suffix)
+      ? degradation.laneName.slice(0, -suffix.length)
       : degradation.laneName;
     // A rebuild that leaves secure content out leaves its lanes' notes out too.
     if (input.excludeSecureSensitivity && input.registry.get(corpusId)?.trustDomain === 'secure_local') continue;
-    if (seen.has(corpusId)) continue;
-    seen.add(corpusId);
-    gaps.push(semanticLaneSkippedGap(corpusId, degradation.detail));
+    // Each source is named once per kind of cut (#1460).
+    const key = `${suffix}\u0000${corpusId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    gaps.push(cut ? cut.gap(corpusId) : semanticLaneSkippedGap(corpusId, degradation.detail));
   }
   return gaps;
 }

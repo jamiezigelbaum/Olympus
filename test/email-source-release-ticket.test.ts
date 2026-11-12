@@ -1,7 +1,7 @@
 import { describe, expect, spyOn, test } from 'bun:test';
 import { defaultConfig } from '../src/core/config.ts';
 import { DirectHttpEmailTransport, EmailClient, type EmailFetch } from '../src/core/email.ts';
-import { recordReleaseManifest } from '../src/core/release-manifest.ts';
+import { recordReleaseManifest, type ReleaseInput } from '../src/core/release-manifest.ts';
 import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import type { SourceIndexAnswerResult } from '../src/workers/source-index/answer-types.ts';
 
@@ -51,6 +51,42 @@ describe('local release ticket diagnostics', () => {
       includeSecureLocalContent = true;
       const explicit = await email.sourceAnswer({ question: 'fixture?', includeSecureLocalContent: true, caller: { surface } });
       expect(explicit.answer).toBe(answer.answer);
+    } finally { worker.close(); }
+  });
+
+  test.each(['sync', 'pool'] as const)('a cached ticket withholds when the %s release read fails and recovers', async path => {
+    let unavailable = false;
+    let checked = false;
+    const worker = createEmailSourceWorker({
+      sourceAnswer: { answer: async () => {
+        recordReleaseManifest({
+          inputs: [{ corpusId: 'internal.fixture.files', provider: 'fixture', accountScope: 'personal', providerItemId: 'lease', privateAtAnswer: false }],
+          constraints: { secureDerivativeDefault: 'allow', includeSecureLocalContent: false },
+        });
+        return answer;
+      } },
+      sourceAnswerReleaseCheck: {
+        inputs: inputs => {
+          if (path === 'sync' && unavailable) { checked = true; throw new Error('SQLITE_BUSY'); }
+          return inputs.map(() => ({ tier: 'public_or_personal', gone: false }));
+        },
+        ...(path === 'pool' ? { inputsOffThread: async (inputs: readonly ReleaseInput[]) => {
+          if (unavailable) { checked = true; throw new Error('SQLITE_BUSY'); }
+          return inputs.map(() => ({ tier: 'public_or_personal' as const, gone: false }));
+        } } : {}),
+        secureDerivativeDefault: () => 'allow',
+      },
+    });
+    try {
+      const email = client(async (input, init) => worker.fetch(new Request(input, init)));
+      const cached = await email.sourceAnswer({ question: 'fixture?', caller: { surface: 'mcp' } });
+      expect(cached.answer).toBe(answer.answer);
+      unavailable = true;
+      const withheld = await email.revalidateSourceAnswer(cached);
+      expect(checked).toBe(true);
+      expect(withheld).toEqual({ answer: 'Olympus withheld this answer because its current privacy classification could not be verified.', evidence: [] });
+      unavailable = false;
+      expect(await email.revalidateSourceAnswer(cached)).toMatchObject({ answer: answer.answer });
     } finally { worker.close(); }
   });
 

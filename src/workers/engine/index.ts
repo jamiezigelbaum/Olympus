@@ -9,13 +9,13 @@ import {
 import { privateAnswerMode } from '../../core/first-run-privacy.ts';
 import { parseSettingsProposalInput, parseProposalFrom, SettingsProposalError } from '../../core/settings-proposal.ts';
 import { PRIVACY_PRESET_LABELS } from '../../core/privacy-language.ts';
-import { createDashboardMessagingService } from '../email-source/dashboard-messaging-service.ts';
+import { createDashboardMessagingService } from './dashboard/dashboard-messaging-service.ts';
 import { isFileSourceScopeId } from '../../core/source-scope-approval.ts';
 import { type AgentAnswerReceipt, recordAgentAnswerReceipt, agentAnswerReceipt } from '../../core/app-release-agent.ts';
 import { privacyBacklogCoverageNote, withCoverageNote } from '../../core/privacy-backlog-coverage.ts';
 import {
   type ReleaseManifest,
-  answerReleaseWithheldReason,
+  answerReleaseWithheldReasonOffThread,
   createReleaseManifestSink,
   runWithReleaseManifestSink,
   recordReleaseManifest,
@@ -49,7 +49,7 @@ import { OperationError } from '../../core/operation-error.ts';
 import type { OperationCallerWire } from '../../core/operation-caller.ts';
 import { dropboxContentExtractionStallHours } from '../../core/ingestion-throughput.ts';
 import type { SecretStore } from '../../core/secret-store.ts';
-import { workerRouteAllowed } from '../email-source/write-routes.ts';
+import { workerRouteAllowed } from './http/write-routes.ts';
 import type { OwnerItemChoice } from '../classification/tier-owner-items.ts';
 import { JudgeCheckError } from '../classification/judge-check.ts';
 import { ArchiveUploadError } from '../archive-import/staging.ts';
@@ -652,7 +652,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             : !entry
               ? 'Olympus withheld this answer because its privacy release ticket is no longer available (the engine may have restarted). Ask again.'
               : options.sourceAnswerReleaseCheck
-                ? answerReleaseWithheldReason(entry.manifests, options.sourceAnswerReleaseCheck)
+                ? await answerReleaseWithheldReasonOffThread(entry.manifests, options.sourceAnswerReleaseCheck)
                 : 'Olympus withheld this answer because the engine cannot check its current privacy classification. Update Olympus, then ask again.';
           pruneReleaseTickets();
           return json({ ...(reason ? { withheld: reason } : { allowed: true }) });

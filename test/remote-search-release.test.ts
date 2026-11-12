@@ -95,10 +95,14 @@ describe('remote search: tiers reread before release', () => {
     });
   }
 
-  test('a tier check that cannot be read fails the whole search', async () => {
+  test.each(['sync', 'pool'] as const)('a tier check that cannot be read fails the whole search (%s)', async path => {
     const lane = await gardenLane();
     const broken: ReleaseCheck = {
-      inputs: () => { throw new Error('ledger locked'); },
+      inputs: inputs => {
+        if (path === 'sync') throw new Error('ledger locked');
+        return inputs.map(() => ({ tier: 'public_or_personal', gone: false }));
+      },
+      ...(path === 'pool' ? { inputsOffThread: async () => { throw new Error('ledger locked'); } } : {}),
       secureDerivativeDefault: () => 'allow',
     };
     await expect(searchReleasedEvidence({ lanes: lane.lanes, question: 'violet turnips garden', releaseCheck: broken }))
@@ -175,4 +179,33 @@ test('ChatGPT final search check leaves unchanged Personal evidence readable', a
     privateMatchProbe: async () => ({ count: 0, evidence: [] }),
   });
   expect(JSON.stringify(result)).toContain(SENTENCE);
+});
+
+// The search implementation already released evidence. This check belongs to
+// the ChatGPT boundary after any Private probe has finished waiting.
+test.each(['sync', 'pool'] as const)('ChatGPT final search check withholds on a %s read failure', async path => {
+  const lane = await gardenLane();
+  let checked = false;
+  const broken: ReleaseCheck = {
+    inputs: inputs => {
+      if (path === 'sync') { checked = true; throw new Error('SQLITE_BUSY'); }
+      return inputs.map(() => ({ tier: 'public_or_personal', gone: false }));
+    },
+    ...(path === 'pool' ? { inputsOffThread: async () => { checked = true; throw new Error('SQLITE_BUSY'); } } : {}),
+    secureDerivativeDefault: () => 'allow',
+  };
+  const result = await callChatGptTool('olympus_search', { question: 'violet turnips garden' }, { releaseCheck: broken } as OperationContext, {
+    dashboardView: async () => { throw new Error('unused'); },
+    evidenceSearch: async input => {
+      const raw = await searchReleasedEvidence({ lanes: lane.lanes, question: input.question, releaseCheck: lane.releaseCheck });
+      expect(JSON.stringify(raw.evidence)).toContain(SENTENCE);
+      return raw;
+    },
+    privateMatchProbe: async () => ({ count: 0, evidence: [] }),
+  });
+  expect(checked).toBe(true);
+  expect(result.structuredContent?.evidence).toEqual([]);
+  expect(JSON.stringify(result)).not.toContain(SENTENCE);
+  expect(JSON.stringify(result)).not.toContain('garden-notes');
+  expect(result.structuredContent?.notes).toEqual(["Olympus held back some matching items under the owner's privacy rules."]);
 });

@@ -34,6 +34,7 @@ import { createReleaseCapture, noteReleasedItems, recordAppRequest, runWithRelea
 import { createAppsReceived } from '../src/workers/apps-received.ts';
 import { appReleaseLogDbPath, openAppReleaseLog } from '../src/core/app-release-log.ts';
 import { resolveRemoteConnectionsDbPath } from '../src/core/remote-connections.ts';
+import { olympusDataRoot } from '../src/core/olympus-layout.ts';
 import { createTestClock } from './helpers/test-clock.ts';
 import { LocalFileExtractionJobStore, defaultFileExtractionJobsDbPath } from '../src/workers/file-extraction/job-store.ts';
 import { registerExtractionJobsDbPath, SECRET_ITEM_REDACTIONS_TABLE } from '../src/workers/file-extraction/job-names.ts';
@@ -94,6 +95,11 @@ function pointJobsDefaultInto(dir: string): string {
   const path = defaultFileExtractionJobsDbPath(process.env);
   mkdirSync(dirname(path), { recursive: true });
   return path;
+}
+
+/** A file in this install's data root, beside the default job ledger but not it. */
+function inDataRoot(name: string): string {
+  return join(olympusDataRoot(process.env), name);
 }
 
 /** One job's name, read without opening the store (which would upgrade an older ledger). */
@@ -361,7 +367,8 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
     const dir = workspace('olympus-secret-side-jobs-');
     const fx = fixture(dir);
     pointJobsDefaultInto(join(dir, 'not-this-one'));
-    const runtimePath = join(dir, 'runtime-jobs.sqlite');
+    // Another job ledger of this install: inside its data root (#1414).
+    const runtimePath = inDataRoot('runtime-jobs.sqlite');
     await fx.set.sync(fixtureConnector(() => [GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
     const before = new LocalFileExtractionJobStore(runtimePath);
     const [gardenJob] = before.enqueue({ refs: [ref(GARDEN)], extractorKind: 'text', extractorVersion: 'v1' }).jobRefs.map((entry) => entry.jobId);
@@ -385,7 +392,8 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
     const dir = workspace('olympus-secret-side-jobs-');
     const fx = fixture(dir);
     pointJobsDefaultInto(join(dir, 'not-this-one'));
-    const runtimePath = join(dir, 'runtime-jobs.sqlite');
+    // Another job ledger of this install: inside its data root (#1414).
+    const runtimePath = inDataRoot('runtime-jobs.sqlite');
     await fx.set.sync(fixtureConnector(() => [GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
     const runtime = new LocalFileExtractionJobStore(runtimePath);
     const [gardenJob] = runtime.enqueue({ refs: [ref(GARDEN)], extractorKind: 'text', extractorVersion: 'v1' }).jobRefs.map((entry) => entry.jobId);
@@ -403,7 +411,8 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
     const dir = workspace('olympus-secret-side-jobs-');
     const fx = fixture(dir);
     pointJobsDefaultInto(join(dir, 'not-this-one'));
-    const runtimePath = join(dir, 'runtime-jobs.sqlite');
+    // Another job ledger of this install: inside its data root (#1414).
+    const runtimePath = inDataRoot('runtime-jobs.sqlite');
     await fx.set.sync(fixtureConnector(() => [GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
     writeFileSync(runtimePath, 'not a database');
     const unregister = registerExtractionJobsDbPath(runtimePath);
@@ -598,7 +607,8 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
     const dir = workspace('olympus-secret-side-jobs-');
     const fx = fixture(dir);
     pointJobsDefaultInto(join(dir, 'not-this-one'));
-    const runtimePath = join(dir, 'runtime-jobs.sqlite');
+    // Another job ledger of this install: inside its data root (#1414).
+    const runtimePath = inDataRoot('runtime-jobs.sqlite');
     const runtime = new LocalFileExtractionJobStore(runtimePath);
     await fx.set.sync(fixtureConnector(() => [KEYS]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
     // Cleared there while the runtime held it open, then the runtime stops.
@@ -827,8 +837,8 @@ describe('a Secret whose side stores could not be cleared and whose debt could n
 describe('a Secret owed in a store\'s own ledger (no tier set)', () => {
   test('is retried by the worker\'s tier tick', async () => {
     const dir = workspace('olympus-secret-side-debt-');
-    const jobsPath = join(dir, 'runtime-jobs.sqlite');
     pointJobsDefaultInto(join(dir, 'not-this-one'));
+    const jobsPath = inDataRoot('runtime-jobs.sqlite');
     const store = new LocalConnectorStore({
       dbPath: join(dir, 'plain.sqlite'),
       corpusId: 'internal.plain.files',

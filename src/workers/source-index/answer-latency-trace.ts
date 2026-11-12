@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { AnalystBackend, SourceIndexAnswerPhaseTimings } from './answer-types.ts';
 
 export type SourceAnswerTraceOutcome =
@@ -26,7 +26,8 @@ export type SourceAnswerRetrievalAttemptKind =
 export type SourceAnswerQueryPlannerDisposition =
   | 'awaited'
   | 'ignored_after_strong_literal'
-  | 'failed';
+  | 'failed'
+  | 'search_budget_spent';
 
 export interface SourceAnswerTraceCorpusTiming {
   corpus_id: string;
@@ -46,11 +47,19 @@ export interface SourceAnswerTracePoolReads {
   queue_wait_max_ms: number;
   run_ms: number;
   run_max_ms: number;
+  // The statements' own time on the pool thread, inside run_ms. The rest of
+  // run_ms is the trip back: the row copy and the wait for the request thread.
+  sql_ms: number;
+  sql_max_ms: number;
+  // The part of reads and sql_ms read inside one snapshot (the exact-vector
+  // scan's pages); the rest are single queries (keyword search, recency).
+  snapshot_reads: number;
+  snapshot_sql_ms: number;
   // Refused at once: the store's queue was full, or the deadline had passed.
   refused: number;
   // Still waiting for a thread at the deadline.
   dropped_queued: number;
-  // Still running at the deadline (its thread terminated) or back too late.
+  // Still running at the deadline (result abandoned) or back too late.
   past_deadline_running: number;
   errors: number;
 }
@@ -62,6 +71,21 @@ export interface SourceAnswerTraceQueryTiming {
   ordinal: number;
   elapsed_ms: number;
   corpus_timings: SourceAnswerTraceCorpusTiming[];
+  stages?: SourceAnswerTraceQueryStages;
+}
+
+/**
+ * Where a routed query's time went outside its lanes (#1305): the query
+ * preparation every lane waits for (the slowest corpus's keyword translation
+ * and query embedding), the lanes themselves, and the merge after the last
+ * lane settles.
+ */
+export interface SourceAnswerTraceQueryStages {
+  prepare_ms: number;
+  prepare_keywords_max_ms: number;
+  prepare_semantic_max_ms: number;
+  lanes_ms: number;
+  after_lanes_ms: number;
 }
 
 export interface SourceAnswerTraceRetrievalAttempt {
@@ -84,11 +108,38 @@ export interface SourceAnswerTraceAnalystLeg extends SourceAnswerTraceRouteStep 
   error_class?: string;
 }
 
+/**
+ * The Ask's synchronous SQLite on the request thread (#1305): every statement
+ * it ran there, their total and longest time, and the call site of each that
+ * held the thread past SLOW_MAIN_THREAD_SQL_MS. Sites are function names and
+ * file:line only, never SQL or data.
+ */
+export interface SourceAnswerTraceMainThreadSql {
+  statements: number;
+  total_ms: number;
+  max_ms: number;
+  slow: Array<{ ms: number; site: string }>;
+  // Statements of SITE_TALLY_MS or more, summed by call site, longest total
+  // first: where the time went when no one statement was slow.
+  by_site: Array<{ site: string; statements: number; ms: number }>;
+}
+
+/** A request-thread statement this long is named in the trace with its call site. */
+export const SLOW_MAIN_THREAD_SQL_MS = 250;
+// The slow list keeps the longest this many.
+const SLOW_MAIN_THREAD_SQL_KEPT = 20;
+// A statement this long is tallied by call site (one stack capture each).
+const SITE_TALLY_MS = 25;
+const SITE_TALLY_KEPT = 10;
+
 // The evidence pack's seat order (#1354): the store id at each seat, how many
 // seats were recency seats, and, per prompt fit an Analyst leg made, the seat
-// numbers (1-based) it kept. Store ids and counts only.
+// numbers (1-based) it kept and the bytes of the prompt it built. Store ids,
+// counts, and per seat a short one-way hash of store and item, so two Asks
+// can be compared seat by seat without the trace naming an item.
 export interface SourceAnswerTraceEvidenceSeats {
   packCorpora: string[];
+  itemHashes?: string[];
   recencySeats: number;
   fits: SourceAnswerTraceAnalystFit[];
 }
@@ -96,6 +147,13 @@ export interface SourceAnswerTraceEvidenceSeats {
 export interface SourceAnswerTraceAnalystFit {
   lane: 'local' | 'cloud';
   keptSeats: number[];
+  promptBytes?: number;
+}
+
+const SEAT_ITEM_HASH_HEX = 12;
+
+function seatItemHash(corpusId: string, itemKey: string): string {
+  return createHash('sha256').update(`${corpusId}\u0000${itemKey}`).digest('hex').slice(0, SEAT_ITEM_HASH_HEX);
 }
 
 export interface SourceAnswerTraceSnapshot {
@@ -123,6 +181,7 @@ export interface SourceAnswerTraceSnapshot {
   recordBuildMs: number;
   appendMs: number;
   releaseDecision?: string;
+  mainThreadSql: SourceAnswerTraceMainThreadSql;
   evidenceSeats?: SourceAnswerTraceEvidenceSeats;
 }
 
@@ -141,6 +200,7 @@ interface ActiveQuery {
   startedAtMs: number;
   corpusTimings: SourceAnswerTraceCorpusTiming[];
   poolByCorpus: Map<string, SourceAnswerTracePoolReads>;
+  stages?: SourceAnswerTraceQueryStages;
 }
 
 const storage = new AsyncLocalStorage<MutableTrace>();
@@ -159,12 +219,12 @@ export function runInSourceAnswerLane<T>(corpusId: string, run: () => T): T {
  * are captured now: the read ends in a pool callback outside their context.
  */
 export function beginSourceAnswerPoolRead():
-  | ((report: { queueWaitMs: number; runMs: number; outcome: SourceAnswerPoolReadOutcome }) => void)
+  | ((report: { queueWaitMs: number; runMs: number; sqlMs: number; outcome: SourceAnswerPoolReadOutcome; snapshot?: boolean }) => void)
   | undefined {
   const query = currentSourceAnswerTrace()?.activeQuery;
   const corpusId = laneStorage.getStore();
   if (!query || corpusId === undefined) return undefined;
-  return ({ queueWaitMs, runMs, outcome }) => {
+  return ({ queueWaitMs, runMs, sqlMs, outcome, snapshot }) => {
     let reads = query.poolByCorpus.get(corpusId);
     if (!reads) {
       reads = {
@@ -173,6 +233,10 @@ export function beginSourceAnswerPoolRead():
         queue_wait_max_ms: 0,
         run_ms: 0,
         run_max_ms: 0,
+        sql_ms: 0,
+        sql_max_ms: 0,
+        snapshot_reads: 0,
+        snapshot_sql_ms: 0,
         refused: 0,
         dropped_queued: 0,
         past_deadline_running: 0,
@@ -180,13 +244,22 @@ export function beginSourceAnswerPoolRead():
       };
       query.poolByCorpus.set(corpusId, reads);
     }
-    const wait = nonNegativeMs(queueWaitMs);
-    const ran = nonNegativeMs(runMs);
+    // Summed unrounded: most reads take under a millisecond, and rounding
+    // each one first would report a lane of a thousand of them as zero.
+    const wait = unroundedMs(queueWaitMs);
+    const ran = unroundedMs(runMs);
     reads.reads += 1;
     reads.queue_wait_ms += wait;
     reads.queue_wait_max_ms = Math.max(reads.queue_wait_max_ms, wait);
     reads.run_ms += ran;
     reads.run_max_ms = Math.max(reads.run_max_ms, ran);
+    const sql = unroundedMs(sqlMs);
+    reads.sql_ms += sql;
+    reads.sql_max_ms = Math.max(reads.sql_max_ms, sql);
+    if (snapshot) {
+      reads.snapshot_reads += 1;
+      reads.snapshot_sql_ms += sql;
+    }
     if (outcome === 'refused') reads.refused += 1;
     else if (outcome === 'dropped_queued') reads.dropped_queued += 1;
     else if (outcome === 'past_deadline_running') reads.past_deadline_running += 1;
@@ -231,6 +304,7 @@ export function createSourceAnswerTrace(now: () => Date = () => new Date()): Mut
     selfHealRebuildMs: 0,
     recordBuildMs: 0,
     appendMs: 0,
+    mainThreadSql: { statements: 0, total_ms: 0, max_ms: 0, slow: [], by_site: [] },
   };
 }
 
@@ -243,6 +317,40 @@ export function runWithSourceAnswerTrace<T>(
 
 export function currentSourceAnswerTrace(): MutableTrace | undefined {
   return storage.getStore();
+}
+
+/** Whether a traced Ask is running in the current async context. */
+export function sourceAnswerTraceActive(): boolean {
+  return storage.getStore() !== undefined;
+}
+
+/**
+ * One synchronous statement the Ask ran on the request thread. `site` is
+ * called only for a slow one, so ordinary statements never capture a stack.
+ */
+export function recordSourceAnswerMainThreadSql(elapsedMs: number, site: () => string): void {
+  const trace = currentSourceAnswerTrace();
+  if (!trace) return;
+  const ms = unroundedMs(elapsedMs);
+  const sql = trace.mainThreadSql;
+  sql.statements += 1;
+  sql.total_ms += ms;
+  sql.max_ms = Math.max(sql.max_ms, ms);
+  if (ms < SITE_TALLY_MS) return;
+  const where = site();
+  const tally = sql.by_site.find((entry) => entry.site === where);
+  if (tally) {
+    tally.statements += 1;
+    tally.ms += ms;
+  } else {
+    sql.by_site.push({ site: where, statements: 1, ms });
+  }
+  if (ms < SLOW_MAIN_THREAD_SQL_MS) return;
+  sql.slow.push({ ms: nonNegativeMs(ms), site: where });
+  if (sql.slow.length > SLOW_MAIN_THREAD_SQL_KEPT) {
+    sql.slow.sort((left, right) => right.ms - left.ms);
+    sql.slow.length = SLOW_MAIN_THREAD_SQL_KEPT;
+  }
 }
 
 export function recordSourceAnswerPhaseTimings(timings: SourceIndexAnswerPhaseTimings): void {
@@ -342,10 +450,28 @@ export async function observeSourceAnswerRoutedQuery<T>(
         ...(timing.error_class ? { error_class: sanitizeErrorClass(timing.error_class) } : {}),
         ...(query.poolByCorpus.has(timing.corpus_id) ? { pool: { ...query.poolByCorpus.get(timing.corpus_id)! } } : {}),
       })),
+      ...(query.stages ? { stages: { ...query.stages } } : {}),
     });
     if (previous) trace.activeQuery = previous;
     else delete trace.activeQuery;
   }
+}
+
+/** The active routed query's stage times; the router reports them once per query. */
+export function recordSourceAnswerQueryStages(stages: SourceAnswerTraceQueryStages): void {
+  const query = currentSourceAnswerTrace()?.activeQuery;
+  if (!query) return;
+  query.stages = copyQueryStages(stages);
+}
+
+export function copyQueryStages(stages: SourceAnswerTraceQueryStages): SourceAnswerTraceQueryStages {
+  return {
+    prepare_ms: nonNegativeMs(stages.prepare_ms),
+    prepare_keywords_max_ms: nonNegativeMs(stages.prepare_keywords_max_ms),
+    prepare_semantic_max_ms: nonNegativeMs(stages.prepare_semantic_max_ms),
+    lanes_ms: nonNegativeMs(stages.lanes_ms),
+    after_lanes_ms: nonNegativeMs(stages.after_lanes_ms),
+  };
 }
 
 export function recordSourceAnswerCorpusTiming(timing: SourceAnswerTraceCorpusTiming): void {
@@ -418,20 +544,25 @@ export function recordSourceAnswerSkippedAnalystLeg(
 
 // A rebuilt pack (the private-outage fallback) replaces the earlier one and
 // starts its own list of fits.
-export function recordSourceAnswerPackSeats(corpusIds: readonly string[], recencySeats = 0): void {
+export function recordSourceAnswerPackSeats(corpusIds: readonly string[], recencySeats = 0, itemKeys?: readonly string[]): void {
   const trace = currentSourceAnswerTrace();
   if (!trace) return;
   trace.evidenceSeats = {
     packCorpora: [...corpusIds],
+    ...(itemKeys ? { itemHashes: corpusIds.map((corpusId, index) => seatItemHash(corpusId, itemKeys[index] ?? '')) } : {}),
     recencySeats: nonNegativeCount(recencySeats),
     fits: [],
   };
 }
 
-export function recordSourceAnswerAnalystFit(lane: SourceAnswerTraceAnalystFit['lane'], keptSeats: readonly number[]): void {
+export function recordSourceAnswerAnalystFit(lane: SourceAnswerTraceAnalystFit['lane'], keptSeats: readonly number[], promptBytes?: number): void {
   const seats = currentSourceAnswerTrace()?.evidenceSeats;
   if (!seats) return;
-  seats.fits.push({ lane, keptSeats: keptSeats.map(nonNegativeCount) });
+  seats.fits.push({
+    lane,
+    keptSeats: keptSeats.map(nonNegativeCount),
+    ...(promptBytes === undefined ? {} : { promptBytes: nonNegativeCount(promptBytes) }),
+  });
 }
 
 export function recordSourceAnswerResidualAnalystOrphan(): void {
@@ -482,12 +613,23 @@ export function snapshotSourceAnswerTrace(trace: MutableTrace): SourceAnswerTrac
     recordBuildMs: trace.recordBuildMs,
     appendMs: trace.appendMs,
     ...(trace.releaseDecision ? { releaseDecision: trace.releaseDecision } : {}),
+    mainThreadSql: {
+      statements: trace.mainThreadSql.statements,
+      total_ms: nonNegativeMs(trace.mainThreadSql.total_ms),
+      max_ms: nonNegativeMs(trace.mainThreadSql.max_ms),
+      slow: trace.mainThreadSql.slow.map((entry) => ({ ...entry })),
+      by_site: [...trace.mainThreadSql.by_site]
+        .sort((left, right) => right.ms - left.ms)
+        .slice(0, SITE_TALLY_KEPT)
+        .map((entry) => ({ site: entry.site, statements: entry.statements, ms: nonNegativeMs(entry.ms) })),
+    },
     ...(trace.evidenceSeats
       ? {
         evidenceSeats: {
           packCorpora: [...trace.evidenceSeats.packCorpora],
+          ...(trace.evidenceSeats.itemHashes ? { itemHashes: [...trace.evidenceSeats.itemHashes] } : {}),
           recencySeats: trace.evidenceSeats.recencySeats,
-          fits: trace.evidenceSeats.fits.map((fit) => ({ lane: fit.lane, keptSeats: [...fit.keptSeats] })),
+          fits: trace.evidenceSeats.fits.map((fit) => ({ ...fit, keptSeats: [...fit.keptSeats] })),
         },
       }
       : {}),
@@ -529,6 +671,10 @@ function errorClass(error: unknown): string {
 function sanitizeErrorClass(value: string): string {
   const normalized = value.replace(/[^A-Za-z0-9_]/g, '').slice(0, 64);
   return CONTENT_FREE_ERROR_CLASSES.has(normalized) ? normalized : 'Error';
+}
+
+function unroundedMs(value: number): number {
+  return Number.isFinite(value) ? Math.max(0, value) : 0;
 }
 
 function nonNegativeCount(value: number): number {

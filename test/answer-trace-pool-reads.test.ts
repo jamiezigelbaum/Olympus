@@ -72,7 +72,7 @@ test('each lane reports its pool reads: queue wait, run time, and reads given up
       laneTimeoutMs: 400,
       adapters: {
         'public_safe.quick': poolAdapter(path, [COUNT, COUNT]),
-        'public_safe.stuck': poolAdapter(path, [SLOW]),
+        'public_safe.stuck': poolAdapter(storeFile(), [SLOW]),
       },
       request: { query: 'q', maxResults: 5, context: { allowedTrustDomains: ['public_safe'], allowCloudQueries: true } },
     }))));

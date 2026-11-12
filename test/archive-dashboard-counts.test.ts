@@ -42,7 +42,7 @@ function fixture(options: { memory?: boolean; readOnly?: boolean } = {}) {
     refreshScheduler: () => {}, privateModel: () => 'ready', now: clock.date,
   });
   cleanups.push(async () => { dashboard.close(); await dashboard.idle(); });
-  return { root, clock, ledger, writer, write, record, dashboard };
+  return { root, clock, ledger, writer, write, record, dashboard, runtime };
 }
 
 test('a large tally is read on the pool, never by the dashboard thread', async () => {
@@ -170,4 +170,20 @@ test('closing a dashboard suppresses a late completion notification', async () =
   const pending = f.dashboard.idle();
   f.dashboard.close();
   await pending;
+});
+
+// Release check run 43078655631 read an imported archive's row while it still showed the tally taken during the
+// import. A tally from before the import changed state is never shown as its count: the row counts again.
+test('a tally from before the import finished is not shown once it has', async () => {
+  const f = fixture();
+  f.runtime.state.update(f.record.archive_id, (entry) => { entry.status = 'importing'; });
+  f.write('one');
+  f.dashboard.view();
+  await f.dashboard.idle();
+  expect(f.dashboard.view().archives[0]).toMatchObject({ items: 1 });
+  f.write('two');
+  f.runtime.state.update(f.record.archive_id, (entry) => { entry.status = 'imported'; });
+  expect(f.dashboard.view().archives[0]).toMatchObject({ countsPending: true });
+  await f.dashboard.idle();
+  expect(f.dashboard.view().archives[0]).toMatchObject({ items: 2 });
 });

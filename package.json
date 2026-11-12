@@ -87,6 +87,8 @@
     "verify:full": "bun run typecheck && bun run test && bun run dist:check",
     "eval": "bun eval/run.ts",
     "eval:real": "bun eval/run-real.ts",
+    "eval:passages": "bun eval/run-passages.ts",
+    "eval:draft-passages": "bun eval/draft-passage-questions.ts",
     "eval:classification": "bun eval/classification/cli.ts",
     "eval:inspect-pack": "bun scripts/source-eval-pack-inspect.ts",
     "tools-json": "bun src/cli.ts --tools-json"

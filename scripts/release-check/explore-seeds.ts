@@ -38,7 +38,14 @@ export interface SourceDriver {
 const NOT_CONNECTED = ['not_connected', 'needs_setup', 'awaiting_consent', 'reauth_required'];
 const connected = (card: any): boolean => !!card && !NOT_CONNECTED.includes(String(card.connection?.state ?? 'not_connected'));
 const items = (card: any): number => Number(card?.coverage?.indexed_items ?? 0);
+// A disconnected source counts nothing as indexed, though its rows are still stored: Delete is owed while either is above zero (run 43101153800 skipped it).
+const kept = (card: any): number => Math.max(items(card), Number(card?.coverage?.stored_items ?? 0));
 const summary = (card: any): string => `connection ${String(card?.connection?.state ?? '?')} (${String(card?.connection?.label ?? '?').slice(0, 60)}), ${String(card?.coverage?.indexed_items ?? '?')} indexed`;
+/** Why a source was not indexed: the card parts that say whether its scope, queue, judge or schedule is holding it (runs 43043603156, 43043621929 showed only "syncing, 0 indexed"). */
+const notIndexed = (card: any): string => `${summary(card)}; ${JSON.stringify({
+  scope_selection: card?.scope_selection, coverage: card?.coverage, tier_classification: card?.tier_classification,
+  queue_health: card?.queue_health, ingestion_health: card?.ingestion_health, schedule: card?.schedule,
+}).slice(0, 2_000)}`;
 const flat = (text: unknown): string => String(text ?? '').replace(/\s+/g, ' ').slice(0, 160);
 
 export function helpers(ctx: SeedContext) {
@@ -60,7 +67,21 @@ export function helpers(ctx: SeedContext) {
     }
     return reply;
   };
-  return { until, ask };
+  /** The page's own first call answers: the dashboard tool, not only a page file. */
+  const engineAnswers = async (): Promise<boolean> => {
+    const reply = await ctx.call('POST', '/dashboard/tools/call', { name: 'olympus_dashboard', arguments: {} });
+    return reply.status === 200 && reply.json?.isError !== true;
+  };
+  // The engine answers twice in a row, a poll apart. With the engine split a source-data delete restarts the front and then the
+  // background, and a front that answered once in between went down again: run 43120046965 opened the page in that gap.
+  const engineSteady = async (timeoutMs = 180_000): Promise<boolean> => {
+    let streak = 0;
+    return (await until(async () => {
+      streak = (await engineAnswers().catch(() => false)) ? streak + 1 : 0;
+      return streak >= 2 ? true : undefined;
+    }, timeoutMs, 2_000)) === true;
+  };
+  return { until, ask, engineAnswers, engineSteady };
 }
 
 // ---------------------------------------------------------------------------
@@ -75,7 +96,7 @@ export function localFilesDriver(outer: SeedContext): SourceDriver {
   const guarded = <A extends unknown[], R>(fn: (...args: A) => Promise<R>) => async (...args: A): Promise<R> => { guard(); const out = await fn(...args); guard(); return out; };
   const ctx: SeedContext = { ...outer, call: guarded(outer.call), cardOf: guarded(outer.cardOf), sleep: guarded(outer.sleep) };
   const withSignal = (state: () => Promise<StateResult>) => (given?: AbortSignal): Promise<StateResult> => { signal = given; return state(); };
-  const { until, ask } = helpers(ctx);
+  const { until, ask, engineAnswers, engineSteady } = helpers(ctx);
   const folder = join(ctx.home, LOCAL_FILES_FOLDER);
   const away = `${folder}.away`;
   const meta = (reply: Reply): any => reply.json?._meta?.['olympus/scope'] ?? reply.json?.result?._meta?.['olympus/scope'];
@@ -113,7 +134,7 @@ export function localFilesDriver(outer: SeedContext): SourceDriver {
       return connected(now) && items(now) > 0 && (!strict || (now?.connection?.state === 'synced' && (now?.schedule?.missing_folders?.length ?? 0) === 0)) ? now : undefined; }, strict ? 300_000 : 120_000, 3_000);
     // The engine is busy embedding what it just read, and another source's action (a delete) waits behind that: the state is reached once it is quiet (best effort, a source that never embeds is not held up).
     if (card) card = (await until(async () => { const now = await ctx.cardOf('local_files'); return Number(now?.coverage?.embedded_items ?? 0) >= items(now) ? now : undefined; }, 240_000, 5_000)) ?? card;
-    return card ? { ok: true, detail: `Files on this computer: ${summary(card)}${(card?.schedule?.missing_folders?.length ?? 0) > 0 ? ` (card still lists ${card.schedule.missing_folders.length} missing folder(s) although the folder is back)` : ''}` } : { ok: false, detail: `Files on this computer: the folder was not indexed (${summary(await ctx.cardOf('local_files'))}; schedule ${JSON.stringify((await ctx.cardOf('local_files'))?.schedule ?? null).slice(0, 600)})` };
+    return card ? { ok: true, detail: `Files on this computer: ${summary(card)}${(card?.schedule?.missing_folders?.length ?? 0) > 0 ? ` (card still lists ${card.schedule.missing_folders.length} missing folder(s) although the folder is back)` : ''}` } : { ok: false, detail: `Files on this computer: the folder was not indexed (${notIndexed(await ctx.cardOf('local_files'))})` };
   };
   const disconnect = async (): Promise<StateResult> => {
     const reply = await ask('/dashboard/disconnect', { source_id: 'local.files', acknowledge: true });
@@ -121,13 +142,10 @@ export function localFilesDriver(outer: SeedContext): SourceDriver {
     const card = await until(async () => { const now = await ctx.cardOf('local_files'); return now && !connected(now) ? now : undefined; }, 60_000);
     return card ? { ok: true, detail: `Files on this computer: ${summary(card)}` } : { ok: false, detail: `Files on this computer did not read as disconnected: ${summary(await ctx.cardOf('local_files'))}` };
   };
-  /** A worker restart the route announced: see it go down (bounded: it may already be back), then wait until it answers again. */
-  const reachable = async (): Promise<boolean> => {
-    try { return (await ctx.call('GET', '/dashboard.json')).status === 200; } catch (error) { if (signal?.aborted) throw error; return false; }
-  };
+  /** A worker restart the route announced: see it go down (bounded: it may already be back), then wait until it answers steadily again. */
   const settleRestart = async (): Promise<void> => {
-    await until(async () => (await reachable()) ? undefined : true, 20_000, 500);
-    await until(async () => (await reachable()) ? true : undefined, 180_000, 2_000);
+    await until(async () => (await engineAnswers().catch(() => false)) ? undefined : true, 20_000, 500);
+    await engineSteady();
   };
   const emptyState = async (): Promise<StateResult> => {
     let card = await ctx.cardOf('local_files');
@@ -136,14 +154,14 @@ export function localFilesDriver(outer: SeedContext): SourceDriver {
       if (!done.ok) return done;
     }
     card = await ctx.cardOf('local_files');
-    if (items(card) > 0) {
+    if (kept(card) > 0) {
       const reply = await ask('/dashboard/delete-source-data', { source_id: 'local.files', acknowledge: true });
       if (reply.status !== 200) return { ok: false, detail: `delete-source-data answered ${reply.status}: ${flat(reply.text)}` };
       // The worker answers first and restarts a moment later (#1034): a page read in that gap fails, so the next step waits for it.
       if (reply.json?.worker_restarting === true) await settleRestart();
-      card = await until(async () => { const now = await ctx.cardOf('local_files'); return items(now) === 0 && !connected(now) ? now : undefined; }, 120_000, 3_000);
+      card = await until(async () => { const now = await ctx.cardOf('local_files'); return kept(now) === 0 && !connected(now) ? now : undefined; }, 120_000, 3_000);
     }
-    return card && items(card) === 0 ? { ok: true, detail: `Files on this computer: ${summary(card)}` } : { ok: false, detail: `Files on this computer did not read as empty: ${summary(await ctx.cardOf('local_files'))}` };
+    return card && kept(card) === 0 ? { ok: true, detail: `Files on this computer: ${summary(card)}` } : { ok: false, detail: `Files on this computer did not read as empty: ${summary(await ctx.cardOf('local_files'))}` };
   };
   return {
     label: 'Files on this computer',
@@ -184,7 +202,11 @@ export function localFilesDriver(outer: SeedContext): SourceDriver {
 /** The longest one source may take to reach one state. */
 const STATE_BOUND_MS = 420_000;
 
-export function composeSeeds(primary: readonly Seed[], drivers: readonly SourceDriver[]): Seed[] {
+/**
+ * `ready`, when given, is waited on once every source has its state, before the page opens: whichever step restarted the engine, the
+ * page's first call must find it answering.
+ */
+export function composeSeeds(primary: readonly Seed[], drivers: readonly SourceDriver[], ready?: () => Promise<boolean>): Seed[] {
   return primary.map((seed) => ({
     ...seed,
     apply: async () => {
@@ -208,6 +230,7 @@ export function composeSeeds(primary: readonly Seed[], drivers: readonly SourceD
         details.push(`${result.ok ? result.detail : `${driver.label} NOT PRODUCED`} (${Math.round((Date.now() - started) / 1000)} s)`);
         if (!result.ok) failedSources.push({ source: driver.label, detail: result.detail });
       }
+      if (ready && !(await ready().catch(() => false))) details.push('the engine was not answering steadily when the page opened');
       return { ok: true, detail: details.join('; '), ...(failedSources.length > 0 ? { failedSources } : {}) };
     },
   }));

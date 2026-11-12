@@ -17,7 +17,7 @@ import { createReleaseManifestSink, runWithReleaseManifestSink } from '../core/r
 import {
   remoteDeclaredParams,
   remoteErrorOutput,
-  remoteOperationOutput,
+  remoteOperationOutputOffThread,
   withRemotePrivateNote,
   remoteSurfaceErrorOutput,
   remoteWithheldParam,
@@ -26,6 +26,7 @@ import {
 import { SourceAnswerJobRegistry, sourceAnswerJobLimitsFromEnv, sourceAnswerJobOwner } from '../core/source-answer-jobs.ts';
 import type { OperationContext } from '../core/operations.ts';
 import { VERSION } from '../version.ts';
+import { currentAccess, refusedAccess, type RemoteAccessAuthorization } from '../workers/remote-access-recheck.ts';
 import { listMcpTools } from './tools.ts';
 
 type McpSurface = Extract<OperationSurface, 'mcp' | 'remote'>;
@@ -60,8 +61,9 @@ export async function handleMcpCallTool(
   request: McpCallToolRequest,
   makeOperationContext: () => OperationContext = makeContext,
   surface: McpSurface = 'mcp',
+  authorized?: RemoteAccessAuthorization,
 ): Promise<McpCallToolResult> {
-  if (surface === 'remote') return handleRemoteCallTool(request, makeOperationContext);
+  if (surface === 'remote') return handleRemoteCallTool(request, makeOperationContext, authorized);
   const operation = findOperationByName(request.params.name);
   if (!operation) {
     throw new OperationError('invalid_params', `Unknown Olympus operation: ${request.params.name}`);
@@ -98,6 +100,7 @@ export async function handleMcpCallTool(
 async function handleRemoteCallTool(
   request: McpCallToolRequest,
   makeOperationContext: () => OperationContext,
+  authorized: RemoteAccessAuthorization = () => 'active',
 ): Promise<McpCallToolResult> {
   const text = (value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }];
   const operation = findOperationByName(request.params.name);
@@ -120,23 +123,33 @@ async function handleRemoteCallTool(
   });
   try {
     const result = await runWithReleaseManifestSink(manifests, () => operation.handler(ctx, args));
+    const afterHandler = currentAccess(authorized);
+    if (afterHandler !== 'active') return refusedAccess(afterHandler);
     // The output builders note what the agent receives (core/app-release-capture.ts).
     const capture = createReleaseCapture();
-    const release = () => runWithReleaseCapture(capture, () => remoteOperationOutput(operation.name, result, {
+    const release = () => runWithReleaseCapture(capture, () => remoteOperationOutputOffThread(operation.name, result, {
       pendingPrivacyItems: ctx.pendingPrivacyItems?.(),
       ...(ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}),
       releaseManifests: manifests.manifests,
     }));
-    const approved = release();
+    const approved = await release();
+    const afterRelease = currentAccess(authorized);
+    if (afterRelease !== 'active') return refusedAccess(afterRelease);
     // Settled against the release the agent would get (slice 2's recheck included).
     const privateMayAnswer = privatePart ? await privatePart.settle(result, approved) : false;
+    const afterSettle = currentAccess(authorized);
+    if (afterSettle !== 'active') return refusedAccess(afterSettle);
     // The settle can wait on the local probe: an item reclassified meanwhile
     // (to Secret, say) is caught by checking the release again right before
     // it leaves. The note follows the output that actually leaves.
-    const output = privatePart ? release() : approved;
+    const output = privatePart ? await release() : approved;
+    const afterFinalRelease = currentAccess(authorized);
+    if (afterFinalRelease !== 'active') return refusedAccess(afterFinalRelease);
     recordRemoteOperation({ operation: operation.name, args, caller: ctx.caller, output, capture, privateQuestion: privateMayAnswer ? privatePart?.answerRef : undefined });
     return { content: text(privateMayAnswer ? withRemotePrivateNote(output, privatePart?.answerId, privatePart?.secretMatch) : output) };
   } catch (error) {
+    const afterFailure = currentAccess(authorized);
+    if (afterFailure !== 'active') return refusedAccess(afterFailure);
     return { content: text(remoteErrorOutput(error, { declaredParams })), isError: true };
   }
 }
@@ -202,6 +215,7 @@ export function createOlympusMcpServer(
   surface: McpSurface,
   makeOperationContext: () => OperationContext,
   extension?: McpServerExtension,
+  authorized?: RemoteAccessAuthorization,
 ): Server {
   const server = new Server(
     { name: 'olympus', version: VERSION },
@@ -212,7 +226,7 @@ export function createOlympusMcpServer(
     return { tools: extension ? extension.tools(listed) : listed };
   });
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-    const next = () => handleMcpCallTool(request, makeOperationContext, surface);
+    const next = () => handleMcpCallTool(request, makeOperationContext, surface, authorized);
     return extension ? extension.call(request, next, extra.signal) : next();
   });
   if (surface === 'remote') {

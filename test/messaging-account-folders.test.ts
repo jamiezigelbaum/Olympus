@@ -39,7 +39,7 @@ import { SourceStorageUnavailableError, placeOwnedAccount, replaceEmptyLegacyAcc
 import { settlePairingPlacement } from '../src/core/pairing-placement.ts';
 import { pairingAccountForCli, pairingPlacementForCli } from '../src/workers/cli-operations.ts';
 import { deleteOlympusData } from '../src/data-lifecycle.ts';
-import { replaceEmptyAccountsAtBoot } from '../src/workers/engine/server.ts';
+import { replaceEmptyAccountsAtBoot } from '../src/workers/engine/runtime/boot-storage.ts';
 import { defaultWhatsAppMediaRoots, whatsAppLiveSyncScriptPaths } from '../src/workers/whatsapp/store-sync.ts';
 import { pinMessagingLegacy } from './fixtures/legacy-messaging-registry.ts';
 

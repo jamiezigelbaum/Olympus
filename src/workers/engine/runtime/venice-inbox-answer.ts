@@ -1,9 +1,9 @@
 /** An owner question through the existing source_answer route, never a new model lane. */
-import type { SovereigntyEngine } from '../../core/sovereignty.ts';
-import { DASHBOARD_PRIVATE_ANSWERS_COPY as W } from '../dashboard/vocabulary.ts';
-import type { PrivateEvidenceItem } from '../chatgpt/private-answer-contract.ts';
-import type { SourceIndexAnswerHandler } from '../source-index/answer-types.ts';
-import { localAnswerRequest, type LocalAnswerRequest, type LocalAnswerResult } from '../source-index/local-answer.ts';
+import type { SovereigntyEngine } from '../../../core/sovereignty.ts';
+import { DASHBOARD_PRIVATE_ANSWERS_COPY as W } from '../../dashboard/vocabulary.ts';
+import type { PrivateEvidenceItem } from '../../chatgpt/private-answer-contract.ts';
+import type { SourceIndexAnswerHandler } from '../../source-index/answer-types.ts';
+import { localAnswerRequest, type LocalAnswerRequest, type LocalAnswerResult } from '../../source-index/local-answer.ts';
 import { inboxEvidenceIdentity } from './local-private-answers.ts';
 
 export type AskDestinationState = 'ready' | 'not_set_up' | 'not_allowed' | 'busy';

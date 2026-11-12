@@ -29,7 +29,7 @@ import { extractorInput } from './fixtures/file-extraction-extractor-fixtures.ts
 import {
   fileExtractionCorporaRoster,
   pdfExtractionLanes,
-} from '../src/workers/email-source/file-extraction-runtime.ts';
+} from '../src/workers/engine/runtime/file-extraction-runtime.ts';
 import { GOOGLE_DRIVE_EXTRACTION_SCOPE_KEY } from '../src/workers/google-connectors/drive-extraction-source.ts';
 import {
   GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,

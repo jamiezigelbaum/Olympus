@@ -450,7 +450,7 @@ test('real Dropbox 5xx and timeouts retain the provider-unavailable wording', as
 
 
 test('missing chosen paths reach only the computer panel metadata', async () => {
-  const { createDashboardPanelTools } = await import('../src/workers/email-source/dashboard-panel-tools.ts');
+  const { createDashboardPanelTools } = await import('../src/workers/engine/dashboard/dashboard-panel-tools.ts');
   const view = { sources: [card({ scope_selection: { kind: 'folders', status: 'approved', connected: true }, schedule: { running: false, consecutive_failures: 1, degraded_reason: 'scope_root_missing', missing_folders: ['/Gone'] } } as any)], generated_at: NOW.toISOString() } as unknown as SourceDashboardViewModel;
   const tools = createDashboardPanelTools({ surface: () => ({ dashboardView: async () => view } as any), setup: {} as any, workerFetch: async () => new Response('{}'), makeContext: () => ({} as any), indexFasterState: async () => undefined });
   const result = await tools.call('olympus_dashboard', {}, { origin: 'http://127.0.0.1:8787' });

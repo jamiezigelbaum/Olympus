@@ -44,7 +44,7 @@ import { pullArchiveImport } from '../src/workers/archive-import/sync.ts';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
 import { secretLocationsPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { DASHBOARD_ARCHIVE_COPY as A } from '../src/workers/dashboard/vocabulary.ts';
-import { createDashboardPanelTools } from '../src/workers/email-source/dashboard-panel-tools.ts';
+import { createDashboardPanelTools } from '../src/workers/engine/dashboard/dashboard-panel-tools.ts';
 import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import { MacPermissions } from '../src/workers/local-files/mac-permissions.ts';

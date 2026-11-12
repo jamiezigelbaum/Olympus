@@ -362,7 +362,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
   const countReads = new Set<Promise<void>>();
   // A ledger whose tally the pool has read lets the pool's readers of its file go when it closes.
   const releasing = new WeakSet<TierLedger>();
-  const countTallies = new Map<string, { value: Tally | null | undefined; at: number; inFlight?: Promise<void> }>();
+  const countTallies = new Map<string, { value: Tally | null | undefined; at: number; status: ArchiveImportRecord['status']; inFlight?: Promise<void> }>();
   // One check at a time: each reads whole files.
   let checks: Promise<void> = Promise.resolve();
   // Requests whose check runs in this process (a `checking` entry not here was left by a restart).
@@ -774,8 +774,11 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
       const ledger = options.runtime.lane(record.family).ledger;
       const key = JSON.stringify([ledger.dbPath, record.provider, record.archive_id]);
       let cached = countTallies.get(key);
-      if (!cached) {
-        cached = { value: null, at: -Infinity };
+      // A tally from before the import changed state (still importing, now imported) is never shown as its count:
+      // the row says it is counting until the tally of the new state lands.
+      if (cached && cached.status !== record.status && cached.inFlight) return null;
+      if (!cached || cached.status !== record.status) {
+        cached = { value: null, at: -Infinity, status: record.status };
         countTallies.set(key, cached);
       }
       const entry = cached;

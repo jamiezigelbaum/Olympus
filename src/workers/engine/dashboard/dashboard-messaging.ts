@@ -1,4 +1,4 @@
-import type { MessagingChatKind } from '../../core/messaging-chat-kinds.ts';
+import type { MessagingChatKind } from '../../../core/messaging-chat-kinds.ts';
 
 /** Local dashboard pairing state. Credentials only cross the helper's pipes. */
 export type MessagingSource = 'telegram' | 'whatsapp';

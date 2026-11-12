@@ -12,6 +12,8 @@
 // idle so its memory comes back.
 
 import { totalmem } from 'node:os';
+import { createDecisionSnifferModel, type SnifferModel } from '../workers/classification/sniffer-decision.ts';
+import { snifferLaneUsesUnion, type SnifferLane } from '../workers/classification/sniffer-lane.ts';
 import {
   ANALYST_EVIDENCE_SCAFFOLDING_LABELS,
   analystPromptBytes,
@@ -186,6 +188,13 @@ export function createBuiltInAnalystModel(options: BuiltInAnalystModelOptions = 
   let installed: InstalledBuiltInReasoning | undefined;
   let installing: Promise<InstalledBuiltInReasoning> | undefined;
   let server: LlamaServerHandle | undefined;
+  let snifferEndpoint: { baseUrl: string; token: string } | undefined;
+  let snifferModel: SnifferModel | undefined;
+  const snifferLane: SnifferLane = {
+    kind: 'local', modelId: 'built_in', profileId: 'built_in',
+    cacheModelId: `${spec.modelId}:${spec.revision}:${spec.file.sha256}`,
+    profile: { provider: 'built-in', trust: 'local', model: spec.modelId, purpose: 'classification' },
+  };
 
   const ensureInstalled = (): Promise<InstalledBuiltInReasoning> => {
     if (installed) return Promise.resolve(installed);
@@ -280,6 +289,20 @@ export function createBuiltInAnalystModel(options: BuiltInAnalystModelOptions = 
         throw unavailable(error);
       }
       try {
+        if (snifferLaneUsesUnion(snifferLane)) {
+          // The same boundary runs in the engine and its background worker.
+          // The adapter uses this handle's authenticated loopback endpoint and
+          // single server slot; it never starts a second model or batches items.
+          if (!snifferModel || snifferEndpoint?.baseUrl !== endpoint.baseUrl || snifferEndpoint.token !== endpoint.token) {
+            const current = endpoint;
+            snifferModel = createDecisionSnifferModel({ ...snifferLane,
+              profile: { ...snifferLane.profile, baseUrl: current.baseUrl },
+            }, { complete: next => chatCompletion(fetchImpl, current, spec, next, requestTimeoutMs) },
+            { apiKey: current.token, fetchImpl, timeoutMs: requestTimeoutMs });
+            snifferEndpoint = current;
+          }
+          return await snifferModel.complete(request);
+        }
         return await chatCompletion(fetchImpl, endpoint, spec, request, requestTimeoutMs);
       } finally {
         handle.touch();

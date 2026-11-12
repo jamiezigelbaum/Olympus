@@ -451,8 +451,10 @@ export interface ExtractionCorpusReadiness {
    * only the items it calls `unreadable` (ExtractionUnreadableVerdict).
    */
   unreadableItems: number;
-  // In-scope items with no accepting reader and no job.
+  // In-scope non-picture items with no accepting reader and no job.
   unsupportedKindItems: number;
+  // In-scope pictures with no accepting reader on this computer and no job.
+  picturesNotReadHereItems: number;
   retryableDueJobs: number;
   oldestActionableAt?: string;
   newestTerminalProgressAt?: string;
@@ -1778,12 +1780,17 @@ export class LocalFileExtractionJobStore {
     }
     const unsupportedRefs = [...unsupportedByItem.values()];
     let unsupportedKindItems = 0;
+    let picturesNotReadHereItems = 0;
     for (let start = 0; start < unsupportedRefs.length; start += SCOPED_READINESS_CURRENT_SLICE) {
       const slice = unsupportedRefs.slice(start, start + SCOPED_READINESS_CURRENT_SLICE);
       const answers = options.currentItems
         ? options.currentItems(slice)
         : slice.map((ref) => options.currentItem?.(ref) ?? true);
-      unsupportedKindItems += slice.filter((_ref, index) => answers[index] === true).length;
+      for (let index = 0; index < slice.length; index += 1) {
+        if (answers[index] !== true) continue;
+        if (slice[index]!.mimeType?.startsWith('image/')) picturesNotReadHereItems += 1;
+        else unsupportedKindItems += 1;
+      }
       yield;
     }
     const byItem = new Map<string, ExtractionJobSqlRow[]>();
@@ -1864,6 +1871,7 @@ export class LocalFileExtractionJobStore {
       failedActionableJobs,
       unreadableItems,
       unsupportedKindItems,
+      picturesNotReadHereItems,
       retryableDueJobs: retryableDueRows.length,
       ...(oldestActionableAt ? { oldestActionableAt } : {}),
       ...(newestTerminalProgressAt ? { newestTerminalProgressAt } : {}),
@@ -1884,12 +1892,15 @@ export class LocalFileExtractionJobStore {
     const corpus = requireKeyPart(corpusId, 'corpusId');
     const unsupported = unroutableItemsTableExists(this.db)
       ? this.db.query(`
-        SELECT COUNT(*) AS items FROM extraction_unroutable_items u
+        SELECT
+          SUM(CASE WHEN u.mime_type GLOB 'image/*' THEN 0 ELSE 1 END) AS items,
+          SUM(CASE WHEN u.mime_type GLOB 'image/*' THEN 1 ELSE 0 END) AS pictures
+        FROM extraction_unroutable_items u
         WHERE corpus_id = ? AND NOT EXISTS (SELECT 1 FROM extraction_jobs j
           WHERE j.corpus_id = u.corpus_id AND j.local_item_id = u.local_item_id
             AND j.source_version IS u.source_version)
-      `).get(corpus) as { items: number }
-      : { items: 0 };
+      `).get(corpus) as { items: number | null; pictures: number | null }
+      : { items: 0, pictures: 0 };
     const itemRetry = terminalRetryPathSql('x', options.terminalRetryPaths ?? []);
     const pendingRetry = terminalRetryPathSql('pending', options.terminalRetryPaths ?? []);
     const items = this.db.query(`
@@ -2003,7 +2014,8 @@ export class LocalFileExtractionJobStore {
       failedTerminalJobs: jobCount('failed_terminal_jobs'),
       failedActionableJobs: jobCount('failed_actionable_jobs'),
       unreadableItems: unreadable.items.length,
-      unsupportedKindItems: unsupported.items,
+      unsupportedKindItems: count(unsupported.items),
+      picturesNotReadHereItems: count(unsupported.pictures),
       retryableDueJobs: jobCount('retryable_due_jobs'),
       ...(typeof jobs?.oldest_actionable_at === 'string' ? { oldestActionableAt: jobs.oldest_actionable_at } : {}),
       ...(typeof jobs?.newest_terminal_progress_at === 'string'

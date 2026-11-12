@@ -1815,7 +1815,25 @@ describe('analyst-backed source_answer handler', () => {
     expect(seats?.recencySeats).toBe(0);
     expect(calls).toHaveLength(1);
     const internalSeat = seats!.packCorpora.indexOf(INTERNAL) + 1;
-    expect(seats?.fits).toEqual([{ lane: 'local', keptSeats: [internalSeat] }]);
+    expect(seats?.fits.map(({ lane, keptSeats }) => ({ lane, keptSeats }))).toEqual([{ lane: 'local', keptSeats: [internalSeat] }]);
+  });
+
+  test('the answer trace records a hash of each seat\'s item and the bytes of the prompt each fit built', async () => {
+    const { analyst } = scriptedAnalyst(citeInternal);
+    const trace = createSourceAnswerTrace();
+    await runWithSourceAnswerTrace(trace, () => createAnalystSourceIndexAnswerHandler({
+      analyst,
+      lanes: () => lanesFixture({ internal: ['note-1'], secure: ['lab-1'] }),
+      localAnalystPromptByteBudget: ONE_CANDIDATE_PROMPT_BYTES,
+    }).answer({ question: 'Latest labs?', include_secure_local: true }));
+
+    const seats = snapshotSourceAnswerTrace(trace).evidenceSeats;
+    expect(seats?.itemHashes).toHaveLength(2);
+    expect(new Set(seats?.itemHashes).size).toBe(2);
+    expect(seats?.fits).toHaveLength(1);
+    const bytes = seats!.fits[0]!.promptBytes ?? 0;
+    expect(bytes).toBeGreaterThan(0);
+    expect(bytes).toBeLessThanOrEqual(ONE_CANDIDATE_PROMPT_BYTES);
   });
 
   test('the answer trace records every seat as kept when the pack fits the local prompt whole', async () => {
@@ -1826,7 +1844,7 @@ describe('analyst-backed source_answer handler', () => {
       lanes: () => lanesFixture({ internal: ['note-1'], secure: ['lab-1'] }),
     }).answer({ question: 'Latest labs?', include_secure_local: true }));
 
-    expect(snapshotSourceAnswerTrace(trace).evidenceSeats?.fits).toEqual([{ lane: 'local', keptSeats: [1, 2] }]);
+    expect(snapshotSourceAnswerTrace(trace).evidenceSeats?.fits.map(({ lane, keptSeats }) => ({ lane, keptSeats }))).toEqual([{ lane: 'local', keptSeats: [1, 2] }]);
   });
 
   test('default mode records the uncited secure context even when fitting dropped every Private candidate', async () => {

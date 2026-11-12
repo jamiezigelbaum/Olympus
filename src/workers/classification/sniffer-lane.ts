@@ -21,6 +21,15 @@ import type {
 } from '../../core/sovereignty.ts';
 import type { SnifferLaneIdentity, SnifferLaneKind } from './sniffer.ts';
 
+import { QWEN35_4B } from '../source-index/built-in-reasoning/manifest.ts';
+
+/** Model-provider eligibility belongs with lane selection, never item-source policy. */
+export function snifferLaneUsesUnion(lane: SnifferLaneIdentity): boolean {
+  const weights = lane.cacheModelId ?? lane.modelId;
+  return lane.profile?.provider === 'built-in'
+    && (weights === QWEN35_4B.modelId || weights.startsWith(`${QWEN35_4B.modelId}:`));
+}
+
 export type SnifferLaneRefusalReason = 'standard_cloud' | 'unsupported_provider' | 'no_private_lane' | 'outside_private_policy';
 
 export class SnifferLaneRefusedError extends OperationError {
@@ -56,8 +65,9 @@ export function initialSnifferMode(profile: SovereigntyModelProfile): 'pending' 
   return profile.snifferMode === 'decision' ? 'decision' : profile.snifferMode === 'full' ? 'full' : 'pending';
 }
 
-/** Whether a lane may use the native one-token read: a local server not forced to full mode. */
+/** Whether a lane may use the native one-token read: the built-in union, or a local server not forced to full mode. */
 export function snifferLaneOffersDecision(lane: SnifferLane): boolean {
+  if (snifferLaneUsesUnion(lane)) return true;
   return lane.kind === 'local' && lane.profile.provider === 'local-openai-compatible' && lane.profile.snifferMode !== 'full';
 }
 

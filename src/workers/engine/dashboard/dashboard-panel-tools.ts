@@ -67,17 +67,17 @@ import {
   type ComputerSourceImportsMeta,
   type ComputerUnpairEntry,
   type ComputerUnreadableEntry,
-} from '../chatgpt/dashboard-contract.ts';
-import { archiveExportGuideLinks } from '../../core/archive-formats.ts';
-import { isUnreadablePageCursor, type UnreadableFiles } from '../file-extraction/unreadable-files.ts';
-import { callChatGptTool, type ChatGptSurfaceOptions } from '../chatgpt/mcp-surface.ts';
-import type { ChatGptToolResult } from '../chatgpt/response-builder.ts';
-import { SetupBackendError, type ChatGptSetupBackend } from '../chatgpt/setup-tools.ts';
-import type { OperationContext } from '../../core/operations.ts';
-import { FILES_AND_FOLDERS_URL } from '../local-files/mac-permissions.ts';
-import type { SourceDashboardViewModel } from '../source-dashboard.ts';
-import type { SetupChecklist } from '../../core/setup-checklist.ts';
-import { DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER, DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER } from '../http.ts';
+} from '../../chatgpt/dashboard-contract.ts';
+import { archiveExportGuideLinks } from '../../../core/archive-formats.ts';
+import { isUnreadablePageCursor, type UnreadableFiles } from '../../file-extraction/unreadable-files.ts';
+import { callChatGptTool, type ChatGptSurfaceOptions } from '../../chatgpt/mcp-surface.ts';
+import type { ChatGptToolResult } from '../../chatgpt/response-builder.ts';
+import { SetupBackendError, type ChatGptSetupBackend } from '../../chatgpt/setup-tools.ts';
+import type { OperationContext } from '../../../core/operations.ts';
+import { FILES_AND_FOLDERS_URL } from '../../local-files/mac-permissions.ts';
+import type { SourceDashboardViewModel } from '../../source-dashboard.ts';
+import type { SetupChecklist } from '../../../core/setup-checklist.ts';
+import { DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER, DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER } from '../../http.ts';
 
 /** Where the call came from: the origin the browser reached Olympus at. */
 export interface DashboardPanelCallContext {

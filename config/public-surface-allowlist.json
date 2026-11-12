@@ -28,11 +28,6 @@
       "retire_when": "Never; drop this entry only when the module is deleted."
     },
     {
-      "path": "src/workers/file-extraction/types.ts",
-      "reason": "Type-only module: product code imports it with `import type`, so the bundler erases it.",
-      "retire_when": "Never; drop this entry only when the module is deleted."
-    },
-    {
       "path": "src/workers/source-index/answer-types.ts",
       "reason": "Type-only module: product code imports it with `import type`, so the bundler erases it.",
       "retire_when": "Never; drop this entry only when the module is deleted."

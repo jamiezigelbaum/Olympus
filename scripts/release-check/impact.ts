@@ -61,7 +61,7 @@ const RULES: Rule[] = [
   { test: (f) => f === 'src/data-backup.ts' || f === 'src/data-restore.ts', legs: ['restore'], why: 'back up and restore' },
   { test: under('src/workers/dashboard/'), legs: SCREEN_LEGS, why: 'the dashboard pages' },
   { test: (f) => f === 'src/core/linux-owner-bridge.ts', legs: SCREEN_LEGS, why: 'how the owner\'s browser opens the dashboard' },
-  { test: (f) => f === 'src/workers/email-source/local-private-answers.ts' || f === 'src/core/waiting-private-questions.ts', legs: ['inbox', ...SCREEN_LEGS], why: 'Private questions and the Inbox' },
+  { test: (f) => f === 'src/workers/engine/runtime/local-private-answers.ts' || f === 'src/core/waiting-private-questions.ts', legs: ['inbox', ...SCREEN_LEGS], why: 'Private questions and the Inbox' },
   { test: under('skills/'), legs: ['suite', 'relay', 'inbox'], why: 'what agents are told' },
 ];
 

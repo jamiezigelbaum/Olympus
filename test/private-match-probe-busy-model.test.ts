@@ -156,11 +156,12 @@ const FIRST_TIME_WORDING = 'What did my cardiology follow-up say about my restin
 
 describe('the Private-match probe with the local model busy', () => {
   test('the setup starves a translation: a first-time wording would wait on the model', async () => {
-    expect(store.keywordLanguages()).toContain('spa');
+    const languages = await store.keywordLanguages();
+    expect(languages).toContain('spa');
     busy.holdSlot();
     // Any other wording, so nothing here is cached for the probe's own.
     const waited = await Promise.race([
-      expandSourceIndexKeywords(`${FIRST_TIME_WORDING} Again.`, store.keywordLanguages()).then(() => 'translated'),
+      expandSourceIndexKeywords(`${FIRST_TIME_WORDING} Again.`, languages).then(() => 'translated'),
       Bun.sleep(200).then(() => 'still waiting'),
     ]);
     expect(waited).toBe('still waiting');

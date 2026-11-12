@@ -1,4 +1,5 @@
 import { isSourceIndexLaneBusyError } from './lane-busy.ts';
+import { RECENT_ITEMS_CUT_SHORT, VISIBILITY_CHECK_CUT_SHORT } from './partial-search.ts';
 import { withKeywordRequestScope } from './keyword-context.ts';
 import type {
   RetrievalDegradation,
@@ -18,6 +19,7 @@ import type {
 } from './corpus.ts';
 import {
   applyPerCorpusResultBudget,
+  RESERVED_LEADER_MIN_CONCEPT_SHARE,
   withReservedLeaderSeats,
   withReservedRecencySeats,
   assessSourceIndexRetrievalState,
@@ -30,6 +32,7 @@ import {
 } from './retrieval.ts';
 import {
   recordSourceAnswerCorpusTiming,
+  recordSourceAnswerQueryStages,
   runInSourceAnswerLane,
   sourceAnswerTraceErrorClass,
 } from '../../workers/source-index/answer-latency-trace.ts';
@@ -139,7 +142,21 @@ export interface SourceIndexCorpusSearchResponse {
    * lane audits.
    */
   incomplete?: boolean;
+  /**
+   * Internal: how well this store's best hit answers the question, in terms
+   * that compare across stores. The router orders stores within each turn by
+   * it (#1354). Search routes never return it.
+   */
+  storeRelevance?: SourceIndexStoreRelevance;
   rawExposed: false;
+}
+
+export interface SourceIndexStoreRelevance {
+  // The best hit's share of the question's concepts, 0 to 1.
+  conceptShare: number;
+  // The best vetted cosine minus this store's own relevance bar. Raw cosines
+  // do not compare across models, a margin over each store's bar does.
+  vectorMargin?: number;
 }
 
 /**
@@ -303,9 +320,33 @@ export interface SourceIndexRoutedCorpusTiming {
  * snapshot of their tier ledger, so an item whose copy moved between two
  * stores mid-query is never returned from both. Returns the hits to keep.
  */
-export type SourceIndexVisibilityGate = (
+export type SourceIndexVisibilityGate = ((
   hits: readonly SourceIndexRoutedSearchHit[],
-) => readonly SourceIndexRoutedSearchHit[];
+  report?: SourceIndexVisibilityGateReport,
+) => readonly SourceIndexRoutedSearchHit[]) & {
+  // The same judgment with its reads off the request thread, for a caller
+  // that can wait (#1305).
+  offThread?: (hits: readonly SourceIndexRoutedSearchHit[], report?: SourceIndexVisibilityGateReport) => Promise<readonly SourceIndexRoutedSearchHit[]>;
+};
+
+/**
+ * What a gate tells its caller besides the hits it keeps (#1460): the corpora
+ * whose hits it left out because it could not read their visibility (a busy
+ * read pool, an unreadable ledger), so the search names them instead of
+ * returning a silently thinner list. Called once per judgment that stands.
+ */
+export interface SourceIndexVisibilityGateReport {
+  onUnchecked?: (corpusIds: readonly string[]) => void;
+}
+
+// Applies the gate off the request thread where it can be.
+export function applySourceIndexVisibilityGate(
+  gate: SourceIndexVisibilityGate,
+  hits: readonly SourceIndexRoutedSearchHit[],
+  report?: SourceIndexVisibilityGateReport,
+): Promise<readonly SourceIndexRoutedSearchHit[]> {
+  return gate.offThread ? gate.offThread(hits, report) : Promise.resolve(gate(hits, report));
+}
 
 export interface RouteSourceIndexSearchOptions {
   registry: SourceIndexCorpusRegistry;
@@ -317,13 +358,17 @@ export interface RouteSourceIndexSearchOptions {
   // reported in skippedCorpora with reason 'lane_timeout', so one slow corpus
   // (e.g. a multi-GB keyword index under write contention) can no longer hold
   // the whole source_answer hostage — total fan-out time is bounded by this
-  // budget. Defaults to OLYMPUS_SOURCE_ANSWER_LANE_TIMEOUT_MS, or 10s when
+  // budget. Defaults to OLYMPUS_SOURCE_ANSWER_LANE_TIMEOUT_MS, or 60s when
   // unset. A non-positive / non-finite value disables the deadline (unbounded
   // lanes — the pre-deadline behavior).
   laneTimeoutMs?: number;
   // How long preparation may wait for a starting embedding model before the
   // lanes run (see DEFAULT_SEMANTIC_PREPARE_BUDGET_MS). Non-positive skips it.
   semanticPrepareBudgetMs?: number;
+  // When the whole search must end (epoch ms), preparation included: the lane
+  // timeout is cut to what is left once preparation is done, so a slow model
+  // wait cannot push a search past the Ask's budget.
+  searchDeadlineAtMs?: number;
   // The lane deadline's clock and timers. Tests pass a test clock; the default is the real one.
   laneClock?: LaneDeadlineClock;
 }
@@ -344,35 +389,39 @@ const REAL_LANE_CLOCK: LaneDeadlineClock = {
 // How long one search may wait, before its lane deadlines start, for a local
 // embedding model that is still starting (#1172). A third of the 45 s
 // source-answer hand-off (SOURCE_ANSWER_HANDOFF_DEFAULT_MS in
-// core/source-answer-jobs.ts): this wait plus the 10 s lane deadline below
-// leaves the remaining 20 s for evidence reading and the Analyst, so a cold
-// first question still answers before the hand-off instead of becoming a job.
+// core/source-answer-jobs.ts). Longer searches continue through the existing
+// background-job hand-off while the request thread remains responsive.
 // A warm model never waits: preparation returns as soon as the query embeds.
 // A model still not started by then leaves the semantic lane skipped, and the
 // EvidencePack's coverage says so.
 export const DEFAULT_SEMANTIC_PREPARE_BUDGET_MS = 15_000;
 
-// Default per-lane retrieval deadline (ms).
+// The lane timeout, cut to what is left before the search's own deadline (at least 1 ms).
+export function laneTimeoutWithinDeadline(laneTimeoutMs: number, deadlineAtMs: number | undefined, now = Date.now()): number {
+  if (deadlineAtMs === undefined || !Number.isFinite(deadlineAtMs)) return laneTimeoutMs;
+  const left = Math.max(1, deadlineAtMs - now);
+  return Number.isFinite(laneTimeoutMs) && laneTimeoutMs > 0 ? Math.min(laneTimeoutMs, left) : left;
+}
+
+// Default per-lane retrieval deadline (ms), and the whole-Ask search budget.
 //
-// 10s is not a round number picked for feel — it is the SQLite busy_timeout
-// every store in this repo opens with (`PRAGMA busy_timeout = 10000`). That
-// makes it a floor, not a preference: a lane whose only problem is waiting
-// behind the single writer resolves within busy_timeout, so any deadline
-// SHORTER than busy_timeout would drop lanes that were about to succeed and
-// report contention as loss. Lower this only in lockstep with that pragma.
+// Since #1305 each store reads on its own warm worker, so a lane's time is its
+// own store's statement, not a queue behind other stores. The lane deadline
+// covers one healthy store at Sparta size with margin; the Ask budget is about
+// what a 1.4.x Ask takes on Sparta (roughly 100 s), across the literal query
+// and its expansions, which run one after another. A lane that misses either
+// is reported as still being searched (#1317's wording), and its statement
+// finishes on its worker, so the store is warm for the next Ask. Neither
+// binds on a small install, whose lanes return in milliseconds.
 //
-// Headroom against measured healthy latency, re-checked 2026-07-28:
-//   keyword FTS       tens of ms on every live corpus
-//   semantic (vector) ~1.3s on the largest live corpus (170,721 vectors) after
-//                     the decodeEmbedding boxing fix; it was ~17.5s before,
-//                     which is why hybrid answers used to lose this race
-// so a healthy fan-out finishes with roughly 7x headroom, and the deadline
-// binds only on genuine contention or a wedge.
+// Never below the stores' SQLite busy_timeout (10 s): a lane waiting out the
+// single writer resolves within it.
 //
-// Exact-vector adapters receive a cooperative deadline just inside this
-// authoritative timer. That lets CPU-bound scans yield or stop before they can
-// monopolize the event loop and prevent the timer itself from firing.
-const DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 10_000;
+// Provisional until the #1305 testbed copy's live pool fields set them.
+const DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 60_000;
+const DEFAULT_ASK_SEARCH_BUDGET_MS = 100_000;
+// Exact-vector adapters receive a cooperative deadline just inside the
+// authoritative timer, so a scan can yield before holding the event loop.
 const COOPERATIVE_LANE_DEADLINE_HEADROOM_MS = 50;
 // A deadline timer this late means the thread was held past it (see
 // runCorpusLaneWithDeadline); the lane then gets HELD_THREAD_GRACE_MS more,
@@ -428,7 +477,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
   const laneAudits: RetrievalLaneAudit[] = [];
   const degradations: RetrievalDegradation[] = [];
   const corpusTimings: SourceIndexRoutedCorpusTiming[] = [];
-  const lanes: Array<{ name: string; items: SourceIndexRoutedSearchHit[] }> = [];
+  const lanes: Array<{ name: string; items: SourceIndexRoutedSearchHit[]; relevance?: SourceIndexStoreRelevance }> = [];
   const matchCounts: SourceIndexRoutedMatchCount[] = [];
   const incompleteCorpora: string[] = [];
   let encounteredSecureLocal = false;
@@ -479,21 +528,34 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
   // Preparation never sees corpus content and owns its own bounded timeout.
   // A cold local model must not spend the store's lock/vector deadline.
   const semanticPrepareBudgetMs = options.semanticPrepareBudgetMs ?? DEFAULT_SEMANTIC_PREPARE_BUDGET_MS;
+  // Keyword translation and the query embedding are independent, so each
+  // corpus prepares both at once: one after the other, every lane waited for
+  // the sum of the two model waits (#1305).
+  let prepareKeywordsMaxMs = 0;
+  let prepareSemanticMaxMs = 0;
+  const timed = async (run: () => Promise<void> | undefined): Promise<number> => {
+    const started = Date.now();
+    try { await run(); } catch { /* the original query remains usable, and a lane reports its own skip */ }
+    return Date.now() - started;
+  };
+  const prepareStartedAt = Date.now();
   await Promise.all(searchableCorpora.map(async (corpus) => {
     const adapter = options.adapters[corpus.corpusId]!;
-    try { await adapter.prepareKeywords?.(request.query); } catch { /* original query remains usable */ }
     // A metadata-only search (the Private-match probe) has its own short
     // budget and reports an incomplete lane as unknown; it never waits here.
-    if (
-      adapter.prepareSemantic
+    const semantic = adapter.prepareSemantic
       && semanticPrepareBudgetMs > 0
       && request.context.metadataOnly !== true
-      && retrievalStates.get(corpus.corpusId)!.hybridServable
-    ) {
-      try { await adapter.prepareSemantic(request.query, semanticPrepareBudgetMs); } catch { /* the lane reports its own skip */ }
-    }
+      && retrievalStates.get(corpus.corpusId)!.hybridServable;
+    const [keywordsMs, semanticMs] = await Promise.all([
+      timed(() => adapter.prepareKeywords?.(request.query)),
+      semantic ? timed(() => adapter.prepareSemantic!(request.query, semanticPrepareBudgetMs)) : Promise.resolve(0),
+    ]);
+    prepareKeywordsMaxMs = Math.max(prepareKeywordsMaxMs, keywordsMs);
+    prepareSemanticMaxMs = Math.max(prepareSemanticMaxMs, semanticMs);
   }));
-  const laneTimeoutMs = resolveLaneTimeoutMs(options.laneTimeoutMs);
+  const lanesStartedAt = Date.now();
+  const laneTimeoutMs = laneTimeoutWithinDeadline(resolveLaneTimeoutMs(options.laneTimeoutMs), options.searchDeadlineAtMs);
   const laneOutcomes = await Promise.all(searchableCorpora.map(async (corpus) => {
     const adapter = options.adapters[corpus.corpusId]!;
     const cooperativeDeadlineAtMs = cooperativeLaneDeadlineAtMs(laneTimeoutMs);
@@ -569,9 +631,12 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
       const semanticLoss = semanticLaneDegradation(corpus.corpusId, retrievalState, response);
       if (semanticLoss) degradations.push(semanticLoss);
     }
+    const newestLoss = recentItemsLaneDegradation(corpus.corpusId, response);
+    if (newestLoss) degradations.push(newestLoss);
     if (contributedSecure) secureLaneAudits.push(...laneAudits.slice(corpusLaneAuditsStart));
     lanes.push({
       name: corpus.corpusId,
+      ...(response.storeRelevance ? { relevance: response.storeRelevance } : {}),
       items: response.hits.map((hit) => ({
         ...hit,
         corpusId: corpus.corpusId,
@@ -580,17 +645,24 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
     });
   }
 
+  const lanesSettledAt = Date.now();
   if (options.visibilityGate) {
     // One call for every lane's hits: one snapshot decides them all.
-    const kept = new Set(options.visibilityGate(lanes.flatMap((lane) => lane.items)));
+    const unchecked = new Set<string>();
+    const kept = new Set(await applySourceIndexVisibilityGate(options.visibilityGate, lanes.flatMap((lane) => lane.items), {
+      onUnchecked: (corpusIds) => { for (const corpusId of corpusIds) unchecked.add(corpusId); },
+    }));
     for (const lane of lanes) lane.items = lane.items.filter((hit) => kept.has(hit));
+    // A source whose hits the gate could not judge is named, never thinner in silence (#1460).
+    for (const corpusId of [...unchecked].sort()) degradations.push(visibilityCheckDegradation(corpusId));
   }
 
-  // Lane declaration order — registry.list() preserves the order the corpora
-  // were registered in, which deliberately interleaves trust domains. It is the
-  // one ordering available here that is neither adapter-scale-derived nor
-  // spelling-derived, so it is what the tie-break falls back on.
-  const laneOrder = new Map(lanes.map((lane, index) => [lane.name, index] as const));
+  // Store order within each turn: how well each store's best hit answers
+  // this question (storeOrderForQuestion), then lane declaration order.
+  // registry.list() preserves the order the corpora were registered in, which
+  // deliberately interleaves trust domains, and it is neither adapter-scale-
+  // derived nor spelling-derived, so it is the last tie-break.
+  const laneOrder = storeOrderForQuestion(lanes);
   const fusedAll = fuseRankedCandidateLanes({
     lanes,
     getId: routedHitCandidateId,
@@ -636,6 +708,13 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
     rawExposed: false,
   };
   assertSafeRoutedSearchResponse(result);
+  recordSourceAnswerQueryStages({
+    prepare_ms: lanesStartedAt - prepareStartedAt,
+    prepare_keywords_max_ms: prepareKeywordsMaxMs,
+    prepare_semantic_max_ms: prepareSemanticMaxMs,
+    lanes_ms: lanesSettledAt - lanesStartedAt,
+    after_lanes_ms: Date.now() - lanesSettledAt,
+  });
   return result;
 }
 
@@ -659,6 +738,38 @@ function corpusContributedSecure(
     return true;
   }
   return positiveCount && (count.secureMatchedItems === undefined || count.secureMatchedItems > 0);
+}
+
+// Below half the question's concepts a store's best keyword hit counts as no
+// keyword match, so one shared common word does not lead a turn (the same
+// floor as the reserved leader seats).
+const STORE_ORDER_MIN_CONCEPT_SHARE = RESERVED_LEADER_MIN_CONCEPT_SHARE;
+
+/**
+ * Store order within each turn of the pack (#1354). Every store's rank k ties
+ * in the fusion, so this order decides which stores' best hits the pack and a
+ * local Analyst's fitted prompt read first. It was config order for every
+ * question, so on an install with many stores a local answer read the same
+ * few stores whatever was asked. Now: a store whose best hit matches at least
+ * half the question's concepts first, by that share; then a store whose best
+ * hit is a vetted semantic match, by its margin over the store's own bar (a
+ * paraphrase with no word in common); then config order. Order only: which
+ * items may reach which Analyst is decided elsewhere and is unchanged.
+ */
+function storeOrderForQuestion(
+  lanes: ReadonlyArray<{ name: string; relevance?: SourceIndexStoreRelevance }>,
+): ReadonlyMap<string, number> {
+  const keyword = (lane: (typeof lanes)[number]) => {
+    const share = lane.relevance?.conceptShare ?? 0;
+    return share >= STORE_ORDER_MIN_CONCEPT_SHARE ? share : 0;
+  };
+  const vector = (lane: (typeof lanes)[number]) => lane.relevance?.vectorMargin ?? Number.NEGATIVE_INFINITY;
+  const ordered = lanes
+    .map((lane, index) => ({ lane, index }))
+    .sort((left, right) => (keyword(right.lane) - keyword(left.lane))
+      || (vector(right.lane) === vector(left.lane) ? 0 : vector(right.lane) > vector(left.lane) ? 1 : -1)
+      || left.index - right.index);
+  return new Map(ordered.map(({ lane }, index) => [lane.name, index] as const));
 }
 
 /**
@@ -729,6 +840,34 @@ function laneIndex(laneOrder: ReadonlyMap<string, number>, corpusId: string): nu
  * The evidence for "ran" is a lane audit of semantic or hybrid type in the
  * adapter's own response — the adapter cannot claim a lane it did not audit.
  */
+// A lane that read a source's newest items and ran out of time (#1460): the
+// source answered from its other lanes, so it is searched, and this one lane
+// is marked so the evidence pack can say its newest items may be missing.
+function recentItemsLaneDegradation(
+  corpusId: string,
+  response: SourceIndexCorpusSearchResponse,
+): RetrievalDegradation | undefined {
+  const cut = (response.laneAudits ?? []).find((audit) => audit.skippedReason === RECENT_ITEMS_CUT_SHORT);
+  if (!cut) return undefined;
+  return {
+    laneName: `${corpusId}:recency`,
+    laneType: cut.laneType,
+    reason: 'lane_timeout',
+    detail: RECENT_ITEMS_CUT_SHORT,
+    occurrences: 1,
+  };
+}
+
+function visibilityCheckDegradation(corpusId: string): RetrievalDegradation {
+  return {
+    laneName: `${corpusId}:visibility`,
+    laneType: 'keyword',
+    reason: 'lane_timeout',
+    detail: VISIBILITY_CHECK_CUT_SHORT,
+    occurrences: 1,
+  };
+}
+
 function semanticLaneDegradation(
   corpusId: string,
   state: SourceIndexRetrievalState,
@@ -936,7 +1075,7 @@ async function runCorpusLaneWithDeadline(
   }
 }
 
-function resolveLaneTimeoutMs(explicit: number | undefined): number {
+export function resolveLaneTimeoutMs(explicit: number | undefined): number {
   if (explicit !== undefined) return explicit;
   const raw = process.env.OLYMPUS_SOURCE_ANSWER_LANE_TIMEOUT_MS?.trim();
   if (!raw) return DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS;
@@ -944,6 +1083,14 @@ function resolveLaneTimeoutMs(explicit: number | undefined): number {
   if (!Number.isFinite(parsed)) return DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS;
   // parsed <= 0 is honored as "disable the deadline" by runCorpusLaneWithDeadline.
   return parsed;
+}
+
+// The whole-Ask search budget (BuildEvidencePackInput.searchBudgetMs).
+export function resolveAskSearchBudgetMs(explicit: number | undefined): number {
+  if (explicit !== undefined) return explicit;
+  const raw = process.env.OLYMPUS_SOURCE_ANSWER_SEARCH_BUDGET_MS?.trim();
+  const parsed = raw ? Number(raw) : NaN;
+  return Number.isFinite(parsed) ? parsed : DEFAULT_ASK_SEARCH_BUDGET_MS;
 }
 
 function cooperativeLaneDeadlineAtMs(timeoutMs: number): number | undefined {

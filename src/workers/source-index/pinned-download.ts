@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { untilAborted } from '../../core/http-timeout.ts';
+import { ingestionTurn } from '../control-path-headroom.ts';
 import { closeSync, createReadStream, existsSync, openSync, renameSync, rmSync, statSync, writeSync } from 'node:fs';
 
 /** Bound fetch's read-ahead even when the runtime does not backpressure it. */
@@ -27,6 +28,13 @@ interface PinnedDownloadOptions {
   write?: (fd: number, bytes: Uint8Array) => void;
   onStart: () => void;
   onProgress: (delta: number) => void;
+  /**
+   * Returns the thread to the event loop once a slice has run (the worker's
+   * control-path headroom). Fetch reads ahead, so buffered chunks resolve as
+   * microtasks: without this a fast download writes and hashes for seconds
+   * and the worker answers no request meanwhile. Tests inject one to count.
+   */
+  turn?: () => Promise<void> | undefined;
 }
 
 class InterruptedRead extends Error {}
@@ -121,6 +129,8 @@ export async function downloadPinnedFile(options: PinnedDownloadOptions): Promis
           hash.update(part.value);
           received += part.value.byteLength;
           options.onProgress(part.value.byteLength);
+          const turn = (options.turn ?? ingestionTurn)();
+          if (turn) await turn;
         }
         if (received !== responseEnd + 1) throw mismatch(`${url} did not match its pinned size; nothing was installed.`);
       } catch (cause) {

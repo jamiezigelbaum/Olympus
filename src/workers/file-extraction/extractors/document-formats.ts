@@ -143,7 +143,7 @@ export function officeTableSummary(input: {
 }): string {
   const nonEmptyRows = input.rows.filter((row) => row.some((cell) => cell.trim().length > 0));
   if (nonEmptyRows.length === 0) return '';
-  const totalColumns = Math.max(...nonEmptyRows.map((row) => row.length));
+  const totalColumns = nonEmptyRows.reduce((max, row) => Math.max(max, row.length), 0);
   const lines = [
     input.label,
     `Rows: ${nonEmptyRows.length}`,

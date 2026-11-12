@@ -46,7 +46,7 @@ import {
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import { TIER_MOVE_CONNECTOR_ID, type ConnectorStoreItemCopy } from './local-index.ts';
 import { settleSecretsCopies, type SecretsDisposition } from './secrets-disposition.ts';
-import { extractionJobsDbPaths, oweExtractionRereadAfterTierMove } from '../file-extraction/job-names.ts';
+import { jobLedgerPathsToVisit, oweExtractionRereadAfterTierMove } from '../file-extraction/job-names.ts';
 import { defaultStoreTrustTier } from './tier-placement.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
@@ -783,7 +783,7 @@ function oweExtractionRereads(ledger: TierLedger, identity: TierLedgerIdentity):
     // The default path and the ledgers this process has open are still visited.
   }
   const item = { provider: identity.provider, accountScope: identity.accountScope, providerItemId: identity.providerItemId };
-  for (const jobsPath of new Set([...extractionJobsDbPaths(), ...known])) {
+  for (const jobsPath of jobLedgerPathsToVisit(known).visit) {
     try {
       oweExtractionRereadAfterTierMove(jobsPath, item);
     } catch {

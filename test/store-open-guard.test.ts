@@ -73,6 +73,8 @@ const ALLOWED: Record<string, string> = {
   // and opens nothing else.
   'scripts/engine-split-bench.ts':
     'a disposable benchmark on a store set it builds itself in a temp directory (seed, then a copy per run); never opens a live store',
+  'scripts/search-contention-bench.ts':
+    'the #1305 busy-Ask gate: opens, read-only, only the synthetic stores its own seed step wrote (seed refuses an existing manifest); never a live store',
   'scripts/whatsapp-identity-backfill.ts':
     'an operator tool on the --db and --session-db its command line names; holds the owner lock for its run',
 };

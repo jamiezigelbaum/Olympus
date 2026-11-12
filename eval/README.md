@@ -203,6 +203,9 @@ local Dropbox index and a reachable Argus lane:
    and `answerValueTokensUnmatchedInPrompt` says whether the prompt the model
    was sent held it. A token in the prompt came from another seat. A token in
    neither the prompt nor any seat was not read anywhere.
+   When the answer stage sent an audit call, `auditNamedAmounts` counts the
+   draft amounts its note named as in no seat (the amounts themselves are
+   never reported) and `auditPromptBytes` gives the audit prompt's size.
    The shared Analyst also caps model output at 1,600 characters by default so
    local eval questions fail or answer quickly instead of generating long JSON.
 
@@ -341,3 +344,140 @@ The six missing-fact cases may retrieve explicit absence evidence and are
 therefore graded for gap honesty. The unchanged-or-lower read budget applies
 to the historical off-topic negatives. Keep historical questions, stores and
 model output local; only aggregate replay counts belong in the PR.
+
+## Passage retrieval eval (question set version 2, receipt schema 3)
+
+`eval:passages` scores retrieval without constructing an Analyst or a query
+planner. The answer eval above remains the release gate. Work on a complete
+copy of an install's data folder, including each tier set's ledger:
+
+```sh
+bun run eval:passages -- --data-root /tmp/olympus-copy \
+  --forbid-root /path/to/live/data eval/private/passage-questions.json \
+  --max-results 12 --output eval/private/passages.open.json
+bun run eval:passages -- --data-root /tmp/olympus-copy \
+  --forbid-root /path/to/live/data eval/private/passage-questions.json \
+  --split sealed --max-results 12 --output eval/private/passages.sealed.json
+```
+
+The opener discovers connector databases throughout the copy, including
+extension stores identified by their saved corpus and family. Empty stores at
+standard account and legacy placements are recognized too. Empty extension
+stores use `OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON`; its recorded paths must
+name the copied files inside `--data-root`, or preflight refuses them. Stores and ledgers
+are query-only and never migrated. Incompatible schemas are skipped and
+reported by store ordinal and reason. An external store or sidecar link fails
+preflight. A binding's original absolute ledger hint is ignored when the
+co-located copy has the bound identity; without that copy, an external hint
+fails preflight. Nothing follows a recorded path out of the copy.
+
+Linux descriptor checks run as stores mount and at completion, checking the
+live default data folder and each repeatable `--forbid-root`. Platforms without
+`/proc/self/fd` require explicit `--allow-no-fd-check`. Keep model assets outside
+forbidden data folders, or point the existing model settings at copied assets.
+The existing built-in embedding selection, `OLYMPUS_SOURCE_RERANKER*` settings,
+`OLYMPUS_EVAL_MAX_RESULTS`, and `OLYMPUS_EVAL_MAX_CHARS_PER_CANDIDATE` apply.
+`--max-chars-per-candidate` overrides the last setting. The local Analyst lane's
+prompt budget applies by default (`--prompt-bytes` overrides it);
+`--analyst-provider venice` selects that lane's unfitted pack without calling it.
+
+Each answerable question needs precise `expectedEvidence` with a verbatim
+`quote` of 6–40 normalized words. Optional `alternates` name other
+`{corpusId, providerItemId}` items holding the quote. A question may set
+`split: "open" | "sealed"`; absent means open. At each cutoff (1, 3, 5, 10,
+and pack size), a question hits when at least one expected item or alternate
+is seated; a passage hit additionally needs its fitted seat body to match the
+quote. Multiple expected items are alternatives for this question-level metric,
+not an assertion that a synthesis question has all its evidence. The matcher
+`ordered-word-coverage-0.8-window-v1` normalizes Unicode/accents and punctuation,
+rejoins line-break hyphenation, and requires an ordered subsequence covering
+80% of the quote in a window of `n + max(4, ceil(n/2))` passage words.
+
+A question whose search was cut short (a lane degraded or a store timed out)
+is not scored as a miss. The receipt records it as degraded, with the store,
+lane and reason code. Each summary's `degraded` count says how many were left
+out of its figures, and `degradedIds` lists them. The run goes on.
+
+Receipts contain ranks, hit counts, recall, MRR, negative seat counts, store row
+counts, timings, rule and git SHA. They contain no questions, quotes, titles,
+answers or passages. Summaries group by shape, expected source family and tier;
+negatives without a source use `unknown`. Sealed receipts contain summaries
+only, with no question rows. `--compare /path/to/baseline.json` prints the keep
+verdict: at least two more passage hits at pack size overall, with no shape or
+family losing more than one. Comparison requires the same split, question-id
+set, matcher version and pack size. Open receipts are rescored on the
+questions neither run left out as degraded, and `leftOut` says how many were
+dropped. Sealed receipts carry no rows, so two sealed runs compare only when
+they left out the same questions. Inspect skipped-store counts before comparing
+runs.
+
+On **Sparta**, draft a private set through the local OpenAI-compatible model:
+
+```sh
+bun run eval:draft-passages -- --data-root /tmp/olympus-copy \
+  --forbid-root /path/to/live/data --count 60 --seed 42 \
+  --base-url http://127.0.0.1:28090/v1 --model local-model \
+  --output eval/private/passage-questions.draft.json
+```
+
+The endpoint settings default to the eval's local Analyst profile/lane. Only
+loopback/private addresses (or `localhost`/`sparta` resolving entirely to them)
+are accepted, with redirects refused. Requests run sequentially. `--count` is
+how many items the model drafts from, kept or rejected. Sampling uses a seeded
+reservoir per store, taken one store at a time in turn, over active, judged,
+unheld items with served text; stderr gives each store's eligible count. Half
+the requests ask for a paraphrase with no quote content words. Invalid quotes
+and paraphrases are discarded and counted by reason in `rejectedBy`
+(`not_json`, `missing_fields`, `quote_length`, `quote_not_in_item`,
+`question_repeats_quote`). A reply that is not a JSON object counts as
+`not_json`, not as a failed request. Alternates
+for every kept quote are found in one read of each store after drafting: each
+item's words are split once and tested against all quotes with the same passage
+rule. One third of the resulting questions are deterministically sealed. The
+private output file contains the drafts; stdout contains counts only, and
+stderr a counts-only progress line per stage and every 10 questions. Each draft
+is kept in `<output>.drafts.json` (0600) as it is made; after a stop, the same
+command with `--resume` (same seed and count) asks the model only for the rest.
+A saved draft is reused only for the same sampled item while its quote is still
+in that item. The file is removed once the set is written with no failed request.
+
+To grow a set, run again with another seed and `--append <set.json>`. It writes
+the set's questions unchanged, splits included, plus this run's questions to
+`--output`, which may be the same file. Items the set already quotes, or lists
+as alternates, are not drafted again. New ids continue after the set's highest,
+only the new questions are split (a third sealed), and a negative already in
+the set is not added twice. `--min-store <corpus>=N` and `--min-family
+<family>=N` (comma lists or repeated) set the least kept per store or family,
+counting the set being grown. Drafting goes to a store, then a family, still
+short of its minimum before taking stores in turn. `unmetMinimums` reports any
+shortfall left when the count ran out or a store had no more eligible items.
+The checkpoint records which questions the run grew from, so `--resume` after
+a failed request grows from that set even when `--output` overwrote it;
+`existing` and `total` give the set's size before and after.
+
+```sh
+bun run eval:draft-passages -- --data-root /tmp/olympus-copy \
+  --forbid-root /path/to/live/data --count 80 --seed 43 \
+  --append eval/private/passage-questions.draft.json \
+  --min-store internal.whatsapp.messages=6,secure_local.whatsapp.messages=4 \
+  --output eval/private/passage-questions.draft.json
+```
+
+Both CLIs exit once their output is written; the embedding and reranker
+helpers would otherwise keep the process open.
+
+No one reads the drafts, because their text stays on Sparta. A local check
+replaces that review for the 5–10 proposed negative questions. Each negative is
+run through the same retrieval, and the same local model is asked whether any of
+the top five passages answers it. A negative it can answer, or whose reply can't
+be read, is dropped. A check whose retrieval came back incomplete (a store
+timed out or a lane degraded) is asked once more after five seconds. If it is
+incomplete again, the model still reads what came back: a negative those
+passages answer is dropped, and one they don't is kept but marked
+`negative-unchecked`, since a partial pack can't clear it. The embedding model,
+reranker and lanes load at the first check, after the alternates pass.
+`negativesKept`, `negativesDropped` and `negativesUnchecked` give the counts,
+and `negativeChecksDegraded` counts each incomplete lane as
+`store:lane:reason` (codes only; free text becomes `other`).
+Negatives count only toward negative seat counts, never toward a pass or a
+fail. Do not tune on sealed questions.

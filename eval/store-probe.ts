@@ -223,11 +223,11 @@ export function traceKeywordSearch(
 ): Record<string, unknown> {
   const internals = store as unknown as {
     db: { query: (sql: string) => { all: (...params: unknown[]) => unknown[]; get: (...params: unknown[]) => unknown } };
-    tierVisibleRows: (...args: unknown[]) => unknown[];
+    tierVisibleRowsSteps: (...args: unknown[]) => Generator<unknown, unknown[], unknown>;
   };
   const db = internals.db;
   const query = db.query;
-  const visible = internals.tierVisibleRows;
+  const visible = internals.tierVisibleRowsSteps;
   const runs: Array<Record<string, unknown>> = [];
   let steps: StepTotals = {};
   let filter = { calls: 0, rowsIn: 0, rowsOut: 0, ms: 0 };
@@ -250,9 +250,11 @@ export function traceKeywordSearch(
       },
     };
   };
-  internals.tierVisibleRows = function (...args: unknown[]) {
+  // The search drives the filter as a generator of visibility reads, so the
+  // wrapper is one too: it times the whole filter, its own reads included.
+  internals.tierVisibleRowsSteps = function* (...args: unknown[]) {
     const startedAt = performance.now();
-    const out = visible.apply(store, args);
+    const out = yield* visible.apply(store, args);
     if (expectId !== undefined) {
       const identityOf = args[1] as (row: unknown) => { providerItemId: string };
       const isExpected = (row: unknown) => identityOf(row).providerItemId === expectId
@@ -287,7 +289,7 @@ export function traceKeywordSearch(
     }
   } finally {
     db.query = query;
-    internals.tierVisibleRows = visible;
+    internals.tierVisibleRowsSteps = visible;
   }
   return { corpusId: store.corpusId, runs };
 }

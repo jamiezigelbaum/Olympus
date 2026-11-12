@@ -31,6 +31,12 @@ export const DEFAULT_MAX_TABLE_SAMPLE_ROWS = 25;
 export const DEFAULT_MAX_TABLE_SAMPLE_COLUMNS = 25;
 
 export const PDF_MIME_TYPE = 'application/pdf';
+export const DOC_MIME_TYPE = 'application/msword';
+export const XLS_MIME_TYPE = 'application/vnd.ms-excel';
+export const ODT_MIME_TYPE = 'application/vnd.oasis.opendocument.text';
+export const ODS_MIME_TYPE = 'application/vnd.oasis.opendocument.spreadsheet';
+export const ODP_MIME_TYPE = 'application/vnd.oasis.opendocument.presentation';
+export const EPUB_MIME_TYPE = 'application/epub+zip';
 export const DOCX_MIME_TYPE = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 export const XLSX_MIME_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 export const PPTX_MIME_TYPE = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';

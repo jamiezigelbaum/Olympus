@@ -1081,7 +1081,7 @@ Live Telegram media as children (`scripts/telegram-telethon-reader.py`,
   message at the next pull's clearing: the current file, an earlier
   attachment's, and any download of it in progress.
 - **Read later.** One Telegram media lane (`telegram-messages/media-extraction.ts`,
-  on the shared child-reading runtime `email-source/child-extraction-runtime.ts`,
+  on the shared child-reading runtime `engine/runtime/child-extraction-runtime.ts`,
   which Gmail's attachments use too) reads a child's bytes by its locator: a
   file the helper kept, only from under the spool's media folder, handed to a
   file reader as it is; or a file an export carries, from that import's own

@@ -13,8 +13,10 @@ import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { ANSWER_PROFILE_IDS, answerProfile, applyModelChoice } from '../src/workers/chatgpt/model-choice.ts';
 import {
   createFileExtractionLocalVlmClientFromEnv,
+} from '../src/workers/engine/runtime/environment.ts';
+import {
   createSourceIndexEmbeddingProviderFromEnv,
-} from '../src/workers/engine/server.ts';
+} from '../src/workers/engine/runtime/embedding-providers.ts';
 
 const CLOUD_IDS = [
   'gpt-oss:120b-cloud',

@@ -42,7 +42,201 @@
 //
 // Source-neutral: nothing here names a source or a format.
 
-import { tierLedgerIdentityKey, type TierLedger, type TierLedgerIdentity } from '../classification/tier-ledger.ts';
+import { tierLedgerIdentityKey, type TierLedger, type TierLedgerIdentity, type LedgerRead, type TierVisibilityReads, type TierCopy } from '../classification/tier-ledger.ts';
+import { currentSourceAnswerTrace } from '../source-index/answer-latency-trace.ts';
+import { offThreadReadsSupported, releaseOffThreadReads, withOffThreadSnapshot } from './off-thread-reads.ts';
+
+/** One visibility read, shared by synchronous readers and the awaiting Ask path. */
+export interface VisibilityRead { here(): unknown; offThread(): Promise<unknown> }
+
+export function* visibilityRead<T>(here: () => T, offThread: () => Promise<T>): Generator<VisibilityRead, T, unknown> {
+  return (yield { here, offThread }) as T;
+}
+
+export function visibilityHere<T>(steps: Generator<VisibilityRead, T, unknown>): T {
+  let next = steps.next();
+  while (!next.done) {
+    let result: unknown;
+    try { result = next.value.here(); }
+    catch (error) { next = steps.throw(error); continue; }
+    next = steps.next(result);
+  }
+  return next.value;
+}
+
+// The ledger or a store changed while an awaited judgment read it. Its
+// verdicts may be stale, so the judgment is taken again, never served.
+export class VisibilityChangedError extends Error {
+  constructor() { super('Visibility changed during read'); this.name = 'VisibilityChangedError'; }
+}
+
+export async function visibilityOffThread<T>(steps: Generator<VisibilityRead, T, unknown>, lane?: ChildVisibilityLane, options: { voidOnChange?: boolean } = {}): Promise<T> {
+  const unchanged = lane ? childVisibilityUnchanged(lane) : undefined;
+  let changed = false;
+  let next = steps.next();
+  while (!next.done) {
+    let result: unknown;
+    try { result = await next.value.offThread(); }
+    catch (error) {
+      // A step may turn a failed read into a hidden verdict; a change must
+      // still void the whole judgment.
+      if (error instanceof VisibilityChangedError) changed = true;
+      next = steps.throw(error);
+      continue;
+    }
+    next = steps.next(result);
+  }
+  if ((changed && options.voidOnChange !== false) || (unchanged && !unchanged())) throw new VisibilityChangedError();
+  return next.value;
+}
+
+// How many times an awaited judgment is taken again after a write landed
+// during it. The ledger marker covers the whole ledger, and a live install
+// writes to it constantly while it judges and syncs, so one unrelated write
+// must not withhold an Ask's hits. After these, the judgment runs once here,
+// on this thread, where it is atomic: only a busy or failing pool withholds.
+export const VISIBILITY_CHANGE_RETRIES = 3;
+
+export async function judgedAwaited<T>(attempt: () => Promise<T>, here: () => T): Promise<T> {
+  for (let tries = 0; tries < VISIBILITY_CHANGE_RETRIES; tries += 1) {
+    try { return await attempt(); }
+    catch (error) { if (!(error instanceof VisibilityChangedError)) throw error; }
+  }
+  return here();
+}
+
+export function visibilityAwaited<T>(make: () => Generator<VisibilityRead, T, unknown>, lane?: ChildVisibilityLane): Promise<T> {
+  return judgedAwaited(() => visibilityOffThread(make(), lane), () => visibilityHere(make()));
+}
+
+// A request rechecks the same identities at search, hydration and release.
+// Reuse only unchanged rows within that Ask. Both local and other-connection
+// writes change the marker; no answer can inherit an earlier tier decision.
+const askReads = new WeakMap<object, Map<object, Map<string, { marker: string; rows: Map<string, unknown> }>>>();
+
+export function memoVisibilityItemsHere<K, V>(
+  owner: object, kind: string, marker: () => string, items: readonly K[], keyOf: (item: K) => string,
+  read: (missing: readonly K[]) => Map<string, V>,
+): Map<string, V> {
+  const asked = new Map(items.map(item => [keyOf(item), item]));
+  const before = marker();
+  const memo = askReadMemo(owner, kind, before);
+  const missing = [...asked].filter(([key]) => !memo?.rows.has(key)).map(([, item]) => item);
+  const fresh = missing.length > 0 ? read(missing) : new Map<string, V>();
+  if (memo) for (const item of missing) memo.rows.set(keyOf(item), fresh.get(keyOf(item)));
+  const out = new Map<string, V>();
+  for (const key of asked.keys()) {
+    const row = (memo ? memo.rows.get(key) : fresh.get(key)) as V | undefined;
+    if (row !== undefined) out.set(key, row);
+  }
+  return out;
+}
+
+function askReadMemo(owner: object, kind: string, marker: string) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace) return undefined;
+  let owners = askReads.get(trace);
+  if (!owners) askReads.set(trace, owners = new Map());
+  let kinds = owners.get(owner);
+  if (!kinds) owners.set(owner, kinds = new Map());
+  let memo = kinds.get(kind);
+  if (memo?.marker !== marker) kinds.set(kind, memo = { marker, rows: new Map() });
+  return memo;
+}
+
+export async function memoVisibilityItems<K, V>(
+  owner: object, kind: string, marker: () => string, items: readonly K[], keyOf: (item: K) => string,
+  read: (missing: readonly K[]) => Promise<Map<string, V>>,
+): Promise<Map<string, V>> {
+  const asked = new Map(items.map(item => [keyOf(item), item]));
+  const before = marker();
+  const memo = askReadMemo(owner, kind, before);
+  const missing = [...asked].filter(([key]) => !memo?.rows.has(key)).map(([, item]) => item);
+  const fresh = missing.length > 0 ? await read(missing) : new Map<string, V>();
+  if (marker() !== before) throw new VisibilityChangedError();
+  if (memo) for (const item of missing) memo.rows.set(keyOf(item), fresh.get(keyOf(item)));
+  const out = new Map<string, V>();
+  for (const key of asked.keys()) {
+    const row = (memo ? memo.rows.get(key) : fresh.get(key)) as V | undefined;
+    if (row !== undefined) out.set(key, row);
+  }
+  return out;
+}
+
+export function itemStatesOffThread(ledger: TierLedger, identities: readonly TierLedgerIdentity[]) {
+  return memoVisibilityItems(ledger, 'states', () => ledger.changeMarker(), identities, tierLedgerIdentityKey,
+    missing => ledgerReadOffThread(ledger, ledger.itemStatesSteps(missing)));
+}
+
+function* itemSecretSteps(ledger: TierLedger, identity: TierLedgerIdentity): Generator<VisibilityRead, boolean, unknown> {
+  const key = tierLedgerIdentityKey(identity);
+  const rows = yield* visibilityRead(
+    () => memoVisibilityItemsHere(ledger, 'secret', () => ledger.changeMarker(), [identity], tierLedgerIdentityKey,
+      missing => new Map(missing.map(item => [tierLedgerIdentityKey(item), ledger.itemIsSecret(item)]))),
+    () => memoVisibilityItems(ledger, 'secret', () => ledger.changeMarker(), [identity], tierLedgerIdentityKey,
+      async missing => {
+        const rows = new Map<string, boolean>();
+        for (const item of missing) rows.set(tierLedgerIdentityKey(item), await ledgerReadOffThread(ledger, ledger.itemIsSecretSteps(item)));
+        return rows;
+      }),
+  );
+  return rows.get(key) === true;
+}
+
+type CachedVisibility = { copies: TierCopy[] | undefined; routed: boolean; waiting: boolean };
+
+function visibilityRows(identities: readonly TierLedgerIdentity[], read: TierVisibilityReads): Map<string, CachedVisibility> {
+  return new Map(identities.map(identity => {
+    const key = tierLedgerIdentityKey(identity);
+    return [key, { copies: read.copies.get(key), routed: read.routedWithoutCopies.has(key), waiting: read.personalFirstWaiting.has(key) }];
+  }));
+}
+
+function visibilityFromRows(rows: ReadonlyMap<string, CachedVisibility>): TierVisibilityReads {
+  const result: TierVisibilityReads = { copies: new Map(), routedWithoutCopies: new Set(), personalFirstWaiting: new Set() };
+  for (const [key, row] of rows) {
+    if (row.copies) result.copies.set(key, row.copies);
+    if (row.routed) result.routedWithoutCopies.add(key);
+    if (row.waiting) result.personalFirstWaiting.add(key);
+  }
+  return result;
+}
+
+export function ledgerVisibilityHere(
+  ledger: TierLedger, identities: readonly TierLedgerIdentity[], options: { personalFirst?: boolean } = {},
+): TierVisibilityReads {
+  return visibilityFromRows(memoVisibilityItemsHere(ledger, options.personalFirst ? 'visibility-personal-first' : 'visibility',
+    () => ledger.changeMarker(), identities, tierLedgerIdentityKey,
+    missing => visibilityRows(missing, ledger.readSteps(ledger.visibilityReadSteps(missing, options)))));
+}
+
+export async function ledgerVisibilityOffThread(
+  ledger: TierLedger, identities: readonly TierLedgerIdentity[], options: { personalFirst?: boolean } = {},
+): Promise<TierVisibilityReads> {
+  // Copy checks recur at each Ask boundary too. Keep intent-aware copies
+  // separate from the release check's raw copies, and invalidate both on writes.
+  const rows = await memoVisibilityItems(ledger, options.personalFirst ? 'visibility-personal-first' : 'visibility',
+    () => ledger.changeMarker(), identities, tierLedgerIdentityKey,
+    async missing => visibilityRows(missing, await ledgerReadOffThread(ledger, ledger.visibilityReadSteps(missing, options))));
+  return visibilityFromRows(rows);
+}
+
+const releasing = new WeakSet<TierLedger>();
+
+// Keep the ledger independent of the worker pool. Each judgment awaits one
+// snapshot here; a busy pool must withhold rather than freeze the Ask thread.
+export async function ledgerReadOffThread<T>(ledger: TierLedger, steps: Generator<LedgerRead, T, unknown>): Promise<T> {
+  if (!offThreadReadsSupported(ledger.dbPath)) return ledger.readSteps(steps);
+  if (!releasing.has(ledger)) {
+    releasing.add(ledger);
+    ledger.onClose(() => releaseOffThreadReads(ledger.dbPath));
+  }
+  return withOffThreadSnapshot(ledger.dbPath, async (read) => {
+    let next = steps.next();
+    while (!next.done) next = steps.next(await read(next.value));
+    return next.value;
+  });
+}
 
 /** The item a child came inside, as the child's row names it. */
 export interface ParentRef {
@@ -103,7 +297,11 @@ export type ChildProbe = Pick<TierLedgerIdentity, 'provider' | 'accountScope' | 
 /** The part of a store this module reads (see `LocalConnectorStore`). */
 export interface ChildVisibilityStore {
   readonly corpusId: string;
+  childVisibilityMarker?(): string;
   parentLinksOf(identities: readonly ChildProbe[]): Map<string, ParentRef>;
+  parentLinksOfOffThread?(identities: readonly ChildProbe[]): Promise<Map<string, ParentRef>>;
+  parentStandingsOffThread?(parents: readonly ParentRef[]): Promise<ParentStandingRow[]>;
+  itemStandingsOffThread?(identities: readonly ChildProbe[]): Promise<Map<string, ParentStandingRow>>;
   parentStandings(parents: readonly ParentRef[]): ParentStandingRow[];
   /**
    * The same standing, found by an item's identity rather than by the id its
@@ -122,6 +320,22 @@ export interface ChildVisibilityStore {
 export interface ChildVisibilityLane {
   ledger(): TierLedger | undefined;
   stores(): readonly ChildVisibilityStore[];
+}
+
+// An awaited judgment spans store and ledger reads. Prove nothing changed
+// across them before serving any result; a tombstone during a pool wait must
+// hide the child just as it does for a synchronous reader.
+export function childVisibilityUnchanged(lane: ChildVisibilityLane): () => boolean {
+  const stores = lane.stores();
+  const ledger = lane.ledger();
+  const ledgerMarker = ledger?.changeMarker();
+  const markers = stores.map(store => store.childVisibilityMarker?.());
+  return () => {
+    const current = lane.stores();
+    return lane.ledger() === ledger && ledger?.changeMarker() === ledgerMarker
+      && current.length === stores.length
+      && current.every((store, index) => store === stores[index] && store.childVisibilityMarker?.() === markers[index]);
+  };
 }
 
 /** How far up the chain of parents a child is followed (a parent can be a child too). */
@@ -145,16 +359,20 @@ const HIDDEN: ParentVerdict = { visible: false, gone: false };
  * established is hidden and not gone (so nothing is removed on a guess).
  */
 export function parentVerdicts(lane: ChildVisibilityLane, parents: readonly ParentRef[]): Map<string, ParentVerdict> {
+  return visibilityHere(parentVerdictsSteps(lane, parents));
+}
+
+export function* parentVerdictsSteps(lane: ChildVisibilityLane, parents: readonly ParentRef[]): Generator<VisibilityRead, Map<string, ParentVerdict>, unknown> {
   const unique = new Map<string, ParentRef>();
   for (const parent of parents) unique.set(parentKey(parent), parent);
   try {
-    return judge(lane, [...unique.values()], 0);
+    return yield* judge(lane, [...unique.values()], 0);
   } catch {
     return new Map([...unique.keys()].map((key) => [key, HIDDEN]));
   }
 }
 
-function judge(lane: ChildVisibilityLane, parents: readonly ParentRef[], depth: number): Map<string, ParentVerdict> {
+function* judge(lane: ChildVisibilityLane, parents: readonly ParentRef[], depth: number): Generator<VisibilityRead, Map<string, ParentVerdict>, unknown> {
   const verdicts = new Map<string, ParentVerdict>();
   if (parents.length === 0) return verdicts;
   if (depth >= CHILD_PARENT_CHAIN_LIMIT) {
@@ -164,7 +382,7 @@ function judge(lane: ChildVisibilityLane, parents: readonly ParentRef[], depth: 
 
   const rows = new Map<string, Array<ParentStandingRow & { corpusId: string }>>();
   for (const store of lane.stores()) {
-    for (const row of store.parentStandings(parents)) {
+    for (const row of yield* visibilityRead(() => store.parentStandings(parents), () => store.parentStandingsOffThread?.(parents) ?? Promise.resolve(store.parentStandings(parents)))) {
       const key = parentKey(row);
       const list = rows.get(key) ?? [];
       list.push({ ...row, corpusId: store.corpusId });
@@ -178,7 +396,10 @@ function judge(lane: ChildVisibilityLane, parents: readonly ParentRef[], depth: 
   for (const list of rows.values()) {
     for (const row of list) identities.set(tierLedgerIdentityKey(row.identity), row.identity);
   }
-  const states = ledger && identities.size > 0 ? ledger.itemStatesForMany([...identities.values()]) : undefined;
+  const states = ledger && identities.size > 0 ? yield* visibilityRead(
+    () => memoVisibilityItemsHere(ledger, 'states', () => ledger.changeMarker(), [...identities.values()], tierLedgerIdentityKey, missing => ledger.itemStatesForMany(missing)),
+    () => itemStatesOffThread(ledger, [...identities.values()]),
+  ) : undefined;
 
   const climbing = new Map<string, ParentRef>();
   for (const parent of parents) {
@@ -202,7 +423,7 @@ function judge(lane: ChildVisibilityLane, parents: readonly ParentRef[], depth: 
       // Secret from before rows were kept. It is not present (nothing says it is listed), and
       // it is not gone either (a classification alone is no deletion): hidden, nothing removed,
       // until its next listing writes the row.
-      if (ledger && parent.identity && ledger.itemIsSecret(parent.identity)) {
+      if (ledger && parent.identity && (yield* itemSecretSteps(ledger, parent.identity))) {
         verdicts.set(key, HIDDEN);
       } else {
         verdicts.set(key, { visible: false, gone: true });
@@ -223,7 +444,7 @@ function judge(lane: ChildVisibilityLane, parents: readonly ParentRef[], depth: 
       // still active) is present, and its own parent still decides its children like any other
       // item's. Once every row is a tombstone and none is a location, the provider deleted it:
       // the ledger's record of what it was says nothing about whether it is there.
-      if (!visible && active.length > 0 && ledger.itemIsSecret(identity)) visible = true;
+      if (!visible && active.length > 0 && (yield* itemSecretSteps(ledger, identity))) visible = true;
     }
     if (visible) {
       const above = active.find((row) => row.grandparentLocalItemId !== undefined);
@@ -236,7 +457,7 @@ function judge(lane: ChildVisibilityLane, parents: readonly ParentRef[], depth: 
 
   // A parent that is itself a child is visible only while its own parent is.
   if (climbing.size > 0) {
-    const above = judge(lane, [...climbing.values()], depth + 1);
+    const above = yield* judge(lane, [...climbing.values()], depth + 1);
     for (const [key, grandparent] of climbing) {
       if (above.get(parentKey(grandparent))?.visible !== true) verdicts.set(key, HIDDEN);
     }
@@ -284,6 +505,10 @@ export function goneParents(lane: ChildVisibilityLane, parents: readonly ParentR
  * Never throws: whatever cannot be established is hidden and not gone.
  */
 export function itemVerdicts(lane: ChildVisibilityLane, items: readonly ChildProbe[]): Map<string, ParentVerdict> {
+  return visibilityHere(itemVerdictsSteps(lane, items));
+}
+
+export function* itemVerdictsSteps(lane: ChildVisibilityLane, items: readonly ChildProbe[]): Generator<VisibilityRead, Map<string, ParentVerdict>, unknown> {
   const asked = new Map<string, ChildProbe>();
   for (const item of items) asked.set(tierLedgerIdentityKey(item), item);
   const out = new Map<string, ParentVerdict>();
@@ -292,7 +517,7 @@ export function itemVerdicts(lane: ChildVisibilityLane, items: readonly ChildPro
     const refs = new Map<string, ParentRef>();
     const refKeyOf = new Map<string, string>();
     for (const store of lane.stores()) {
-      for (const [key, row] of store.itemStandings([...asked.values()])) {
+      for (const [key, row] of yield* visibilityRead(() => store.itemStandings([...asked.values()]), () => store.itemStandingsOffThread?.([...asked.values()]) ?? Promise.resolve(store.itemStandings([...asked.values()])))) {
         const ref: ParentRef = {
           provider: row.provider,
           accountScope: row.accountScope,
@@ -320,7 +545,7 @@ export function itemVerdicts(lane: ChildVisibilityLane, items: readonly ChildPro
       refs.set(parentKey(ref), ref);
       refKeyOf.set(key, parentKey(ref));
     }
-    const verdicts = parentVerdicts(lane, [...refs.values()]);
+    const verdicts = yield* parentVerdictsSteps(lane, [...refs.values()]);
     for (const [key, refKey] of refKeyOf) out.set(key, verdicts.get(refKey) ?? HIDDEN);
   } catch {
     for (const key of asked.keys()) out.set(key, HIDDEN);
@@ -371,9 +596,13 @@ export interface ChildWithParent {
  * verdict at all (a parent the judging could not reach) is hidden.
  */
 export function childrenWithHiddenParents(lane: ChildVisibilityLane, children: readonly ChildWithParent[]): Set<string> {
+  return visibilityHere(childrenWithHiddenParentsSteps(lane, children));
+}
+
+function* childrenWithHiddenParentsSteps(lane: ChildVisibilityLane, children: readonly ChildWithParent[]): Generator<VisibilityRead, Set<string>, unknown> {
   const hidden = new Set<string>();
   if (children.length === 0) return hidden;
-  const verdicts = parentVerdicts(lane, children.map((child) => child.parent));
+  const verdicts = yield* parentVerdictsSteps(lane, children.map((child) => child.parent));
   for (const child of children) {
     if (verdicts.get(parentKey(child.parent))?.visible !== true) hidden.add(child.key);
   }
@@ -386,11 +615,16 @@ export function childrenWithHiddenParents(lane: ChildVisibilityLane, children: r
  * store has a parent link for is not a child.
  */
 export function childLinks(lane: ChildVisibilityLane, probes: readonly ChildProbe[]): ChildWithParent[] {
+  return visibilityHere(childLinksSteps(lane, probes));
+}
+
+function* childLinksSteps(lane: ChildVisibilityLane, probes: readonly ChildProbe[]): Generator<VisibilityRead, ChildWithParent[], unknown> {
   const found = new Map<string, ParentRef>();
   let remaining = probes;
   for (const store of lane.stores()) {
     if (remaining.length === 0) break;
-    for (const [key, parent] of store.parentLinksOf(remaining)) found.set(key, parent);
+    const asked = remaining;
+    for (const [key, parent] of yield* visibilityRead(() => store.parentLinksOf(asked), () => store.parentLinksOfOffThread?.(asked) ?? Promise.resolve(store.parentLinksOf(asked)))) found.set(key, parent);
     // A child held by two stores (it moved) names the same parent in both.
     remaining = remaining.filter((probe) => !found.has(tierLedgerIdentityKey(probe)));
   }
@@ -404,12 +638,16 @@ export function childLinks(lane: ChildVisibilityLane, probes: readonly ChildProb
  * are read from the stores, so when the stores cannot be read, all of them.
  */
 export function hiddenChildKeys(lane: ChildVisibilityLane, probes: readonly ChildProbe[]): Set<string> {
+  return visibilityHere(hiddenChildKeysSteps(lane, probes));
+}
+
+export function* hiddenChildKeysSteps(lane: ChildVisibilityLane, probes: readonly ChildProbe[]): Generator<VisibilityRead, Set<string>, unknown> {
   if (probes.length === 0) return new Set();
   let links: ChildWithParent[];
   try {
-    links = childLinks(lane, probes);
+    links = yield* childLinksSteps(lane, probes);
   } catch {
     return new Set(probes.map((probe) => tierLedgerIdentityKey(probe)));
   }
-  return childrenWithHiddenParents(lane, links);
+  return yield* childrenWithHiddenParentsSteps(lane, links);
 }

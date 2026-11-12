@@ -72,7 +72,7 @@ import {
 import { placedStoreHolder, type StoreHolder } from '../src/core/store-identity.ts';
 import { deleteOlympusData, exportOlympusData } from '../src/data-lifecycle.ts';
 import { SqliteSourceDashboardHistory, defaultSourceDashboardHistoryDbPath } from '../src/workers/source-dashboard.ts';
-import { migrateAccountFoldersAtBoot } from '../src/workers/engine/server.ts';
+import { migrateAccountFoldersAtBoot } from '../src/workers/engine/runtime/boot-storage.ts';
 
 type Env = Record<string, string>;
 

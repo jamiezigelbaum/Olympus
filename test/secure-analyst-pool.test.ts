@@ -36,8 +36,8 @@ import {
   runWithSourceAnswerTrace,
   snapshotSourceAnswerTrace,
 } from '../src/workers/source-index/answer-latency-trace.ts';
-import { validateSecureVeniceAnalystProfileAtConstruction } from '../src/workers/engine/server.ts';
-import { createVeniceInboxAnswer, privateVeniceMembers, type AskDestinationState } from '../src/workers/email-source/venice-inbox-answer.ts';
+import { validateSecureVeniceAnalystProfileAtConstruction } from '../src/workers/engine/runtime/private-analysts.ts';
+import { createVeniceInboxAnswer, privateVeniceMembers, type AskDestinationState } from '../src/workers/engine/runtime/venice-inbox-answer.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 
 const SECURE_CORPUS = 'secure_local.test.pool';

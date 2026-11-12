@@ -762,3 +762,37 @@ describe('the eval report carries each store\'s keyword word audit (#1423)', () 
     expect(audit.lanes[0]).toMatchObject({ wordsLeftOut: 2, rowsRankedEstimate: 1_200, rowsRankedEveryWordEstimate: 90_000, commonCountMs: 35, commonCountWindows: 3 });
   });
 });
+
+describe('the real eval report shows the audit\'s unseen-amounts note (#1442)', () => {
+  async function prompts(draftAnswer: string): Promise<{ pack: EvidencePack; prompts: string[]; result: AnalystResult }> {
+    const { pack } = analystPromptFixture();
+    pack.candidates = pack.candidates.slice(0, 2).map((candidate, index) =>
+      index === 0 ? { ...candidate, chunks: ['Invoice total 980.00 EUR, paid in May.'] } : candidate);
+    const calls: AnalystModelRequest[] = [];
+    const draft = JSON.stringify({ answer: draftAnswer, citations: [{ evidence: 1, claim: 'Recorded.' }], unanswered: [], sufficient: true });
+    const result = await createAnalyst({ complete: async (request) => { calls.push(request); return { text: draft, modelId: 'fixture' }; } },
+      { evidenceFormat: 'compact', auditSuspiciousDrafts: true }).analyze(pack, { localOnly: true });
+    return { pack, prompts: calls.map((call) => call.prompt), result };
+  }
+
+  test('the count of amounts named to the audit and the audit prompt\'s bytes, never the amounts', async () => {
+    const run = await prompts('The invoice total was €1,240.50 and the deposit $312 [1].');
+    expect(run.prompts.length).toBe(2);
+    const audit = evalAnswerStageAudit({ expectedAnswerContains: ['980.00'] }, run.pack, run.result, run.result, run.prompts);
+    expect(audit.auditNamedAmounts).toBe(2);
+    expect(audit.auditPromptBytes).toBe(new TextEncoder().encode(run.prompts[1]!).length);
+    const report = JSON.stringify({ auditNamedAmounts: audit.auditNamedAmounts, auditPromptBytes: audit.auditPromptBytes });
+    expect(report).not.toContain('1,240.50');
+    expect(report).not.toContain('312');
+  });
+
+  test('an audit with no unseen amounts reports zero, and no audit reports nothing', async () => {
+    const clean = await prompts('The invoice total was 980.00 EUR [1].');
+    const audit = evalAnswerStageAudit({ expectedAnswerContains: ['980.00'] }, clean.pack, clean.result, clean.result, clean.prompts);
+    expect(audit.auditNamedAmounts).toBe(0);
+    expect(audit.auditPromptBytes).toBeGreaterThan(0);
+    const mainOnly = evalAnswerStageAudit({ expectedAnswerContains: ['980.00'] }, clean.pack, clean.result, clean.result, clean.prompts.slice(0, 1));
+    expect(mainOnly.auditNamedAmounts).toBeUndefined();
+    expect(mainOnly.auditPromptBytes).toBeUndefined();
+  });
+});

@@ -11,7 +11,8 @@ import { buildSourceIndexCorpusRegistry, defineSourceIndexCorpus } from '../src/
 import { routeSourceIndexSearch } from '../src/core/source-index/router.ts';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { createConnectorStoreCorpusAdapter, defineConnectorCorpus, type ConnectorStoreKeywordFtsOptions, type ConnectorStoreSearchFilters } from '../src/workers/connector-store/local-index.ts';
-import { OffThreadReadBusyError, setReadPoolClockForTests } from '../src/workers/connector-store/off-thread-reads.ts';
+import type { VisibilityRead } from '../src/workers/connector-store/child-visibility.ts';
+import { OffThreadReadBusyError, setReadPoolClockForTests, setReadPoolObserverForTests } from '../src/workers/connector-store/off-thread-reads.ts';
 import { FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, openTierFixture, tempDir, type FixtureSpec, type TierFixture } from './helpers/tier-fixtures.ts';
 
 const WORDS = ['orchard', 'invoice', 'lawyer', 'budget', 'harbour', 'lisbon', 'piano', 'dentist', 'mortgage', 'passport', 'museum', 'recipe'];
@@ -113,6 +114,20 @@ describe('connector store keyword search on the read pool', () => {
     expect((await internal.searchItemsDetailedOffThread('routed', 20)).rows).toEqual([]);
   });
 
+  test('locating the chunks of many rows is one read on the pool, not one per row (#1305)', async () => {
+    const internal = (await seeded()).stores.internal!;
+    const reads: string[] = [];
+    setReadPoolObserverForTests((_, read) => reads.push(read.sql));
+    try {
+      const pooled = await internal.searchItemsDetailedOffThread('orchard', 20);
+      const located = pooled.rows.filter((row) => row.chunk);
+      expect(located.length).toBeGreaterThan(1);
+      expect(reads.filter((sql) => /FROM chunks/.test(sql) && !/connector_store_fts/.test(sql))).toHaveLength(1);
+    } finally {
+      setReadPoolObserverForTests();
+    }
+  });
+
   test('a small limit is filled and reported saturated the same way on both paths', async () => {
     const internal = (await seeded()).stores.internal!;
     for (const limit of [1, 3]) {
@@ -203,6 +218,29 @@ describe('connector store keyword search on the read pool', () => {
   // yield (the chunk locate, the content and baseline searches). The ledger
   // can change in between, so the adapter checks every row again after its
   // last read, right before it emits hits and counts.
+  test('an unrelated ledger write during the first visibility read still returns the matches (#1452)', async () => {
+    const fixture = await seeded();
+    const internal = fixture.stores.internal!;
+    const ledgerDb = (fixture.ledger as unknown as { db: Database }).db;
+    const here = internal.searchItemsDetailed('zebra crossing', 20);
+    expect(here.rows.map((row) => row.sourceItem.localItemId)).toContain(localId('zebra'));
+    // Another item's copy is touched while the search's own ledger read is on
+    // the pool: the ledger's change marker moves, nothing the search reads does.
+    let writes = 0;
+    setReadPoolObserverForTests((_, read) => {
+      if (writes > 0 || !/FROM tier_copies/.test(read.sql)) return;
+      writes += 1;
+      ledgerDb.query(`UPDATE tier_copies SET embed_hold = embed_hold WHERE provider_item_id = ?`).run(identityOf('note-3').providerItemId);
+    }, { snapshots: true });
+    try {
+      const pooled = await internal.searchItemsDetailedOffThread('zebra crossing', 20);
+      expect(writes).toBe(1);
+      expect(pooled.rows).toEqual(here.rows);
+    } finally {
+      setReadPoolObserverForTests();
+    }
+  });
+
   test('an item routed away while a lane is still reading is not emitted, on the keyword and metadata paths', async () => {
     for (const path of ['search', 'metadataMatches'] as const) {
       const fixture = await seeded();
@@ -237,7 +275,7 @@ describe('connector store keyword search on the read pool', () => {
   });
 });
 
-/** Runs the search's reads on the store's own connection, calling `between` before each one. */
+/** Drives SQL and visibility effects synchronously; `between` runs before each search SQL read. */
 function driveByHand(
   store: object,
   query: string,
@@ -246,14 +284,24 @@ function driveByHand(
 ): ReturnType<NonNullable<TierFixture['stores']['internal']>['searchItemsDetailed']> {
   const inner = store as unknown as {
     db: Database;
-    searchItemsSteps(...args: unknown[]): Generator<{ sql: string; params: unknown[]; mode: 'get' | 'all' }, ReturnType<NonNullable<TierFixture['stores']['internal']>['searchItemsDetailed']>, unknown>;
+    searchItemsSteps(...args: unknown[]): Generator<VisibilityRead | { sql: string; params: unknown[]; mode: 'get' | 'all' }, ReturnType<NonNullable<TierFixture['stores']['internal']>['searchItemsDetailed']>, unknown>;
   };
   const steps = inner.searchItemsSteps(query, 20, undefined, undefined, options);
   let step = steps.next();
   while (!step.done) {
-    between(step.value);
-    const statement = inner.db.query(step.value.sql);
-    step = steps.next(step.value.mode === 'all' ? statement.all(...(step.value.params as never[])) : statement.get(...(step.value.params as never[])));
+    let rows: unknown;
+    try {
+      if ('here' in step.value) rows = step.value.here();
+      else {
+        between(step.value);
+        const statement = inner.db.query(step.value.sql);
+        rows = step.value.mode === 'all' ? statement.all(...(step.value.params as never[])) : statement.get(...(step.value.params as never[]));
+      }
+    } catch (error) {
+      step = steps.throw(error);
+      continue;
+    }
+    step = steps.next(rows);
   }
   return step.value;
 }

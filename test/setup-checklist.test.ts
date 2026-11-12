@@ -20,7 +20,7 @@ import { readSetupWorkerFacts, setupChecklistFromView, setupFactsFromView } from
 import type { DashboardSourceCard, SourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
 import { DASHBOARD_SETUP_AGENT_COPY } from '../src/workers/dashboard/vocabulary.ts';
 import { renderComputerHostPage, setupAgentDialog } from '../src/workers/dashboard/host-page.ts';
-import { createDashboardPanelTools } from '../src/workers/email-source/dashboard-panel-tools.ts';
+import { createDashboardPanelTools } from '../src/workers/engine/dashboard/dashboard-panel-tools.ts';
 import { COMPUTER_META_KEY, DASHBOARD_TOOL_NAME } from '../src/workers/chatgpt/dashboard-contract.ts';
 
 const RUNNING_EMPTY: SetupFacts = {

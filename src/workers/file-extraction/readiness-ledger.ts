@@ -19,6 +19,7 @@ import {
   METADATA_ONLY_EXPECTED_COUNT_KEY,
   UNREADABLE_ITEMS_COUNT_KEY,
   UNSUPPORTED_KIND_COUNT_KEY,
+  PICTURES_NOT_READ_HERE_COUNT_KEY,
 } from '../dashboard/answer-ready-coverage.ts';
 import type { SourceIndexReadinessLedger } from '../source-index/status.ts';
 import { ingestionTurn } from '../control-path-headroom.ts';
@@ -191,6 +192,7 @@ function readinessSnapshot(
       extraction_jobs_failed_actionable: readiness.failedActionableJobs,
       [UNREADABLE_ITEMS_COUNT_KEY]: readiness.unreadableItems,
       [UNSUPPORTED_KIND_COUNT_KEY]: readiness.unsupportedKindItems,
+      [PICTURES_NOT_READ_HERE_COUNT_KEY]: readiness.picturesNotReadHereItems,
       extraction_jobs_retryable_due_actionable: readiness.retryableDueJobs,
     },
     contentExtractionThroughput: {

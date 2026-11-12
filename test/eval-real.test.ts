@@ -27,6 +27,12 @@ describe('real eval runner options', () => {
     expect(() => resolveEvalAnalystProvider('cloud')).toThrow('local or venice');
   });
 
+  test('forwards copied-root isolation flags without changing legacy defaults', () => {
+    const args = parseEvalRealArgs(['--data-root', '/tmp/copy', '--forbid-root=/tmp/live', '--forbid-root', '/tmp/other', '--allow-no-fd-check'], {});
+    expect(args.isolation).toEqual({ dataRoot: '/tmp/copy', forbidRoots: ['/tmp/live', '/tmp/other'], allowNoFdCheck: true });
+    expect(() => parseEvalRealArgs(['--forbid-root', '/tmp/live'], {})).toThrow('--data-root');
+  });
+
   test('resolves an optional Dropbox path scope through the canonical codec', () => {
     expect(resolveEvalDropboxScope('personal', undefined)).toEqual({ accountScope: 'personal' });
     expect(resolveEvalDropboxScope('personal', 'dropbox.personal:/1 Projects')).toEqual({

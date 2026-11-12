@@ -27,7 +27,7 @@ import { REMOTE_OUTPUT_SCHEMAS } from '../src/core/remote-result.ts';
 import { openWaitingPrivateQuestionStore, type WaitingQuestionStore } from '../src/core/waiting-private-questions.ts';
 import { SEARCH_TOOL } from '../src/workers/chatgpt/mcp-surface.ts';
 import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
-import { createLocalPrivateAnswers } from '../src/workers/email-source/local-private-answers.ts';
+import { createLocalPrivateAnswers } from '../src/workers/engine/runtime/local-private-answers.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import {
   createInProcessOperationContext,
@@ -63,6 +63,10 @@ let searchStarted: (() => void) | undefined;
 let searchFails: Error | undefined;
 /** The tier the one Personal input has now (the search's own manifest names it). */
 let inputTier: 'public_or_personal' | 'private';
+let releaseFailure: 'sync' | 'pool' | undefined;
+/** Set: the pooled release read waits on it, after telling `releaseStarted`. */
+let releaseHeld: Promise<void> | undefined;
+let releaseStarted: (() => void) | undefined;
 let searches: Array<{ question: string; limit?: number }>;
 
 const isActive = (id: string): boolean => connections.list().some((connection) => connection.id === id && connection.revokedAt === null);
@@ -87,7 +91,18 @@ async function search(client: Client, question = QUESTION, extra: Record<string,
 function serve(options: Partial<RemoteMcpHandlerOptions> = {}, parts = partsFor()): void {
   const worker = createEmailSourceWorker({});
   const release: ReleaseCheck = {
-    inputs: (inputs) => inputs.map(() => ({ tier: inputTier, gone: false })),
+    inputs: inputs => {
+      if (releaseFailure === 'sync') throw new Error('SQLITE_BUSY');
+      return inputs.map(() => ({ tier: inputTier, gone: false }));
+    },
+    ...(releaseFailure === 'pool' ? { inputsOffThread: async () => { throw new Error('SQLITE_BUSY'); } } : {}),
+    ...(releaseHeld ? {
+      inputsOffThread: async (inputs: Parameters<ReleaseCheck['inputs']>[0]) => {
+        releaseStarted?.();
+        await releaseHeld;
+        return inputs.map(() => ({ tier: inputTier, gone: false }));
+      },
+    } : {}),
     secureDerivativeDefault: () => 'approval',
   };
   const handler = createRemoteMcpHandler({
@@ -153,6 +168,9 @@ beforeEach(() => {
   searchStarted = undefined;
   searchFails = undefined;
   inputTier = 'public_or_personal';
+  releaseFailure = undefined;
+  releaseHeld = undefined;
+  releaseStarted = undefined;
   searches = [];
   server = undefined;
 });
@@ -455,6 +473,30 @@ describe('a revoked connection gets no row and no note', () => {
       expect(JSON.stringify(result)).not.toContain('private_note');
       expect(JSON.stringify(result)).not.toContain(PERSONAL_EXCERPT);
       expect(waiting.list().questions).toEqual([]);
+    } finally {
+      await client.close().catch(() => undefined);
+    }
+  });
+});
+
+describe('a connection revoked during the pooled release read', () => {
+  test('an error, no note, no evidence', async () => {
+    let release!: () => void;
+    releaseHeld = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { releaseStarted = resolve; });
+    serve();
+    const { connection, token } = connections.create('Claude');
+    const client = await sdkClient(token);
+    try {
+      const pending = search(client);
+      await started;
+      connections.revoke(connection.id);
+      release();
+      const result = await pending;
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(result.content[0]!.text)).toMatchObject({ error: 'invalid_token' });
+      expect(JSON.stringify(result)).not.toContain(PERSONAL_EXCERPT);
+      expect(JSON.stringify(result)).not.toContain('private_note');
     } finally {
       await client.close().catch(() => undefined);
     }
@@ -771,6 +813,22 @@ describe('the tiers are read again after the probe\'s wait', () => {
     } finally {
       await client.close();
     }
+  });
+
+  test.each(['sync', 'pool'] as const)('remote search withholds evidence when the final %s release read fails', async path => {
+    releaseFailure = path;
+    serve();
+    const { token } = connections.create('Claude');
+    const client = await sdkClient(token);
+    try {
+      const result = await search(client);
+      expect(result.isError).toBeFalsy();
+      expect(JSON.stringify(result)).not.toContain(PERSONAL_EXCERPT);
+      expect(JSON.stringify(result)).not.toContain('Lease renewal');
+      expect(result.structuredContent?.evidence).toEqual([]);
+      expect((result.structuredContent as { coverage: { searchedSources: number } }).coverage.searchedSources).toBe(1);
+      expect((result.structuredContent as { private_note: string }).private_note).toMatch(NOTE_WITH_LINK);
+    } finally { await client.close(); }
   });
 
   test('unchanged evidence stays readable after the same wait', async () => {

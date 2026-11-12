@@ -8,6 +8,8 @@ import type { TieredStoreSet } from './tiered-store-set.ts';
 
 const STATE = 'automatic-superseded-prune-v1';
 const PAGE_SIZE = 200;
+/** Passes one item may fail before the sweep steps past it and walks again later (#1412). */
+const MAX_ITEM_FAILURES = 3;
 interface Pending {
   identity: TierLedgerIdentity;
   generation: number;
@@ -20,14 +22,46 @@ interface State {
   pending?: Pending;
   retry?: boolean;
   deleted?: Record<string, number>;
+  /** The item the last pass failed on, and how many passes in a row failed on it. */
+  failing?: { key: string; count: number };
+  /** Original chunk counts of receipts stepped past, so a later walk still audits what was already stripped. */
+  parked?: Record<string, Pending['copies']>;
   embeddingLedger?: NonNullable<TierMoveOptions['embeddingLedger']>;
 }
 
-/** One bounded page at worker startup/maintenance; a failed item resumes first. */
+type SweepReport = { checked: number; purged: number; kept: number; failed: number; complete: boolean };
+
+/**
+ * Bounded pages at worker startup and on maintenance ticks; a failed item
+ * resumes first. With budgetMs, pages repeat until the budget is spent, the
+ * walk ends or an item fails, so a large ledger finishes in hours, not days.
+ */
 export function sweepAutomaticSupersededCopies(set: TieredStoreSet, options: {
   limit?: number;
+  budgetMs?: number;
+  now?: () => number;
   embeddingLedger?: TierMoveOptions['embeddingLedger'];
-} = {}): { checked: number; purged: number; kept: number; failed: number; complete: boolean } {
+} = {}): SweepReport {
+  const now = options.now ?? Date.now;
+  const started = now();
+  const total = sweepPage(set, options);
+  const limit = Math.max(1, Math.min(options.limit ?? PAGE_SIZE, PAGE_SIZE));
+  let last = total.checked;
+  while ((options.budgetMs ?? 0) > 0 && !total.complete && total.failed === 0
+    && last === limit && now() - started < options.budgetMs!) {
+    const page = sweepPage(set, options);
+    total.checked += page.checked; total.purged += page.purged;
+    total.kept += page.kept; total.failed += page.failed;
+    total.complete = page.complete;
+    last = page.checked;
+  }
+  return total;
+}
+
+function sweepPage(set: TieredStoreSet, options: {
+  limit?: number;
+  embeddingLedger?: TierMoveOptions['embeddingLedger'];
+}): SweepReport {
   const ledger = set.ledger;
   const state: State = JSON.parse(ledger.readMeta(STATE) || '{}');
   const report = { checked: 0, purged: 0, kept: 0, failed: 0, complete: state.done === true };
@@ -56,12 +90,16 @@ export function sweepAutomaticSupersededCopies(set: TieredStoreSet, options: {
         report.purged++;
       }
       state.after = pending.identity;
+      if (state.parked) delete state.parked[tierLedgerIdentityKey(pending.identity)];
       delete state.pending;
+      delete state.failing;
       save();
     });
   };
+  let attempt: TierLedgerIdentity | undefined;
   try {
     if (state.pending) {
+      attempt = state.pending.identity;
       report.checked++;
       const current = ledger.getCurrent(state.pending.identity);
       if (!current || current.generation !== state.pending.generation) {
@@ -73,11 +111,12 @@ export function sweepAutomaticSupersededCopies(set: TieredStoreSet, options: {
       } else finishPending();
     }
     if (report.checked === limit) return report;
-    const rows = ledger.listItemWindow({ ...(state.after ? { after: state.after } : {}), limit: limit - report.checked });
+    const rows = ledger.listSupersededItemWindow({ ...(state.after ? { after: state.after } : {}), limit: limit - report.checked });
     for (const record of rows.slice(0, limit - report.checked)) {
       report.checked++;
       const identity: TierLedgerIdentity = { provider: record.provider, accountScope: record.accountScope,
         providerItemId: record.providerItemId, ...(record.conversationKey ? { providerConversationId: record.conversationKey } : {}) };
+      attempt = identity;
       ledger.withGenerationFence(identity, record.generation, () => {
         const now = ledger.getCurrent(identity)!;
         if (!now.routed || now.contentTier === 'secrets' || now.metadataTier === 'secrets'
@@ -99,6 +138,7 @@ export function sweepAutomaticSupersededCopies(set: TieredStoreSet, options: {
         const proof = destination?.copyContentState(identity);
         if (!proof || destination?.tierSetBinding()?.ledgerId !== ledger.ledgerId()) throw new Error('Current destination unavailable.');
         let unproven = false;
+        const parked = state.parked?.[tierLedgerIdentityKey(identity)];
         const targets = superseded.map(copy => {
           const store = set.store(copy.trustDomain);
           if (!store) throw new Error('Superseded store unavailable.');
@@ -113,7 +153,9 @@ export function sweepAutomaticSupersededCopies(set: TieredStoreSet, options: {
             const order = compareContentVersions(proof, held);
             if (order === undefined || order < 0) unproven = true;
           }
-          return { corpusId: copy.corpusId, chunks };
+          // A receipt stepped past may have stripped this copy already: keep its original count.
+          const original = parked?.find(target => target.corpusId === copy.corpusId)?.chunks ?? 0;
+          return { corpusId: copy.corpusId, chunks: Math.max(chunks, original) };
         });
         if (unproven) { report.kept++; return; }
         state.pending = { identity, generation: record.generation, copies: targets,
@@ -123,7 +165,7 @@ export function sweepAutomaticSupersededCopies(set: TieredStoreSet, options: {
         save();
       });
       if (state.pending) finishPending();
-      else { state.after = identity; save(); }
+      else { state.after = identity; delete state.failing; save(); }
     }
     if (report.checked < limit) {
       if (state.retry) { delete state.after; delete state.retry; save(); }
@@ -147,10 +189,45 @@ export function sweepAutomaticSupersededCopies(set: TieredStoreSet, options: {
         report.complete = true;
       }
     }
-  } catch {
+  } catch (error) {
     // Cursor stays before the failed item; its original counts stay durable.
     report.failed++;
     report.complete = false;
+    if (attempt) stepPastRepeatedFailure(attempt, error);
   }
   return report;
+
+  // One item that keeps failing (a store that stays unavailable, a body that
+  // cannot be verified) must not hold the rest of the ledger behind it. After
+  // MAX_ITEM_FAILURES passes the cursor moves past it and the sweep walks the
+  // ledger again later, so the item is retried and the sweep is never marked
+  // done over it. The log names the ledger and corpora, never item content.
+  function stepPastRepeatedFailure(identity: TierLedgerIdentity, error: unknown): void {
+    try {
+      // Start from what is durable: the failed attempt's ledger transaction
+      // rolled back, so its in-memory edits (deleted totals, cursor) must not be saved.
+      const durable: State = JSON.parse(ledger.readMeta(STATE) || '{}');
+      const key = tierLedgerIdentityKey(identity);
+      const count = durable.failing?.key === key ? durable.failing.count + 1 : 1;
+      const corpora = durable.pending?.copies.map(copy => copy.corpusId).join(',') || 'unknown';
+      // The error's name only: a message from below could carry a path.
+      const reason = error instanceof Error ? error.name : 'unknown';
+      console.warn(`[tier-auto-prune] ledger=${ledger.ledgerId()} corpora=${corpora} failures=${count} reason=${reason}`);
+      if (count < MAX_ITEM_FAILURES) {
+        durable.failing = { key, count };
+      } else {
+        // A pending receipt's tier-content-purged marker stays: some copies
+        // may already be stripped, so rollback stays refused for this item.
+        // Its original counts are parked for the walk that retries it.
+        if (durable.pending) (durable.parked ??= {})[key] = durable.pending.copies;
+        delete durable.pending;
+        delete durable.failing;
+        durable.after = identity;
+        durable.retry = true;
+      }
+      ledger.writeMeta(STATE, JSON.stringify(durable));
+    } catch {
+      // The ledger itself is unavailable; the next pass starts from the same place.
+    }
+  }
 }

@@ -124,6 +124,14 @@ important Private item there. Three things came out of the measurement:
   change alone re-judges nothing stands. Whether an approval should carry
   over at the next wording change is #1286, to be decided then.
 
+The built-in 4B also gains the union rule for 1.5 (lane 3, #890): full mode
+stays primary; only a Personal verdict at confidence 0.9 or above gets the
+native one-token check. P(Private) at least 0.5, or a failed check, holds the
+item Private. Other judges, including the local-server 4B's 0.15 bar, keep
+their behavior. This changes the built-in 4B judge identity, so the existing
+bounded background re-judge revisits its eligible old verdicts once, at the
+lowest queue priority. This is a judge-rule change, not a prompt-only change.
+
 No freeze date is set. 2026-11-10 16:00Z was the target for that day's push,
 not the scope freeze.
 

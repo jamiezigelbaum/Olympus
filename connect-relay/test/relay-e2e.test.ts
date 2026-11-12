@@ -963,13 +963,33 @@ describe('limits', () => {
     const controller = new AbortController();
     const slow = mcpPost(relay, token, rpc('tools/call', { name: 'slow' }), { signal: controller.signal }).catch(() => undefined);
     await until(() => worker.requests.length === 2);
-    const busy = await mcpPost(relay, token, rpc('tools/list'));
+    const busy = await mcpPost(relay, token, rpc('tools/call', { name: 'source_answer', arguments: {} }));
     expect(busy.status).toBe(503);
+    // Listing still answers while every slot is held (#1266: no "connected, 0 tools").
+    const listed = await mcpPost(relay, token, rpc('tools/list'));
+    expect(listed.status).toBe(200);
+    expect((await mcpPost(relay, token, rpc('initialize', { protocolVersion: '2025-06-18' }))).status).toBe(200);
     const dashboard = await mcpPost(relay, token, rpc('tools/call', { name: 'olympus_dashboard', arguments: {} }));
     expect(dashboard.status).toBe(200);
     expect(await dashboard.json()).toMatchObject({ worker: 'A' });
     controller.abort();
     await slow;
+  });
+
+  test('listing requests stop at the listing headroom', async () => {
+    const relay = await makeRelay({ concurrentPerInstall: 2, listingHeadroomPerInstall: 1 });
+    const worker = fakeWorker('A');
+    cleanups.push(worker.stop);
+    const a = await connectInstall(relay, worker);
+    const token = mintCredential('access', a.identity.installId);
+    expect((await mcpPost(relay, token, rpc('ping'))).status).toBe(200);
+    const controller = new AbortController();
+    // Listings the fake engine holds open ("slow" in the body): all 2 + 1 slots.
+    const held = Array.from({ length: 3 }, () => mcpPost(relay, token, rpc('tools/list', { cursor: 'slow' }), { signal: controller.signal }).catch(() => undefined));
+    await until(() => worker.requests.length === 4);
+    expect((await mcpPost(relay, token, rpc('tools/list'))).status).toBe(503);
+    controller.abort();
+    await Promise.all(held);
   });
 
   test('requests per install are rate limited', async () => {

@@ -38,6 +38,7 @@
  */
 import { DEMO_GRANT_REMOTE_TOOLS, toolCallableOn, toolsForSurface, type McpSurface } from '../shared/directory-tools.ts';
 import type { CredentialSurface } from '../shared/tokens.ts';
+import type { AdmissionPriority } from './limits.ts';
 import { appClientCopy, appResourceMeta, type McpAppClient } from '../shared/mcp-app-client.ts';
 import { OFFLINE_RETRY_AFTER_SECONDS, offlineErrorBody, offlineSentence } from '../shared/offline-result.ts';
 import { DASHBOARD_RESOURCE_URI, DASHBOARD_TOOL_NAME, notConnectedDashboard, offlineDashboard } from '../shared/dashboard-contract.ts';
@@ -262,18 +263,33 @@ function linkingChallenge(protectedResourceMetadataUrl: string): { 'mcp/www_auth
 }
 
 /**
- * Whether a JSON-RPC body is a call of the dashboard tool: those calls may use
- * the install's reserved concurrency slot, so the owner can always see why
- * their Mac is busy.
+ * The JSON-RPC methods an agent sends to learn what Olympus offers, before
+ * any tool runs. The engine answers them without doing any work, so they may
+ * use the listing headroom (limits.ts): without it, a Mac whose slots are all
+ * held by long answers refused them as busy, and the agent saw Olympus
+ * connected with no tools (#1266).
  */
-export function isDashboardCall(body: string): boolean {
-  if (body.length > 4096 || !body.includes(DASHBOARD_TOOL_NAME)) return false;
+const LISTING_METHODS: readonly string[] = ['initialize', 'notifications/initialized', 'ping', 'tools/list', 'resources/list', 'resources/templates/list'];
+
+/**
+ * Which owner-lane slots an `/mcp` request may take (limits.ts
+ * AdmissionPriority): a call of the dashboard tool may take the reserved
+ * slot, so the owner can always see why their Mac is busy, and on the default
+ * endpoint a listing request may also take the listing headroom. The
+ * directory endpoint keeps the reviewed admission unchanged.
+ */
+export function mcpRequestPriority(body: string, surface: McpSurface): AdmissionPriority {
+  if (body.length > 4096) return 'normal';
+  let message: { method?: unknown; params?: { name?: unknown } };
   try {
-    const message = JSON.parse(body) as { method?: unknown; params?: { name?: unknown } };
-    return message.method === 'tools/call' && message.params?.name === DASHBOARD_TOOL_NAME;
+    message = JSON.parse(body) as typeof message;
   } catch {
-    return false;
+    return 'normal';
   }
+  if (!message || typeof message !== 'object' || Array.isArray(message)) return 'normal';
+  if (message.method === 'tools/call' && message.params?.name === DASHBOARD_TOOL_NAME) return 'dashboard';
+  if (surface === 'default' && typeof message.method === 'string' && LISTING_METHODS.includes(message.method)) return 'listing';
+  return 'normal';
 }
 
 /** A resource URI without its `?v=<12 hex>` content version; undefined for anything else. */

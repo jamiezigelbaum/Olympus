@@ -1,7 +1,7 @@
 /**
  * Outside help: the Mac dashboard card that turns consults on (design
  * docs/design/frontier-consult-lane.md §A.9, §A.10, §A.14, stage C5). The
- * card's facts come from the worker's adapter (email-source/dashboard-consult.ts)
+ * card's facts come from the worker's adapter (engine/dashboard/dashboard-consult.ts)
  * as content-free codes and counts; this module holds the shapes, the words
  * and the inert markup. The page is served only to a reader holding the
  * local dashboard's control session (Models on pages/local.ts): the native
