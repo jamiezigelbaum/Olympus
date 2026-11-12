@@ -43,6 +43,7 @@ import {
   type RemoteTransportErrorCode,
 } from '../core/remote-result.ts';
 import { exposedOperations, shouldExposeOperation } from '../core/operation-exposure.ts';
+import { currentRemotePublicUrls } from '../core/remote-public-url.ts';
 import {
   findOperationByName,
   operationDescription,
@@ -50,7 +51,8 @@ import {
   operationToolSchema,
   type Operation,
 } from '../core/operations.ts';
-import { authenticateRemoteRequest, DEMO_GRANT_REMOTE_TOOLS, jsonResponse, remoteOperationCaller, type RemoteMcpHandlerOptions } from './remote-mcp.ts';
+import { authenticateRemoteRequest, DEMO_GRANT_REMOTE_TOOLS, jsonResponse, remoteOperationCaller, unauthorized, type RemoteMcpHandlerOptions } from './remote-mcp.ts';
+import { currentAccess, type RemoteAccessAuthorization } from './remote-access-recheck.ts';
 import { isJsonContentType, readBoundedRequestText, REMOTE_REQUEST_MAX_BODY_BYTES } from './remote-request-body.ts';
 
 export const REMOTE_OPENAPI_SPEC_PATH = '/openapi.json';
@@ -146,6 +148,15 @@ async function callTool(request: Request, name: string, options: RemoteOpenApiHa
   // probe learns nothing about which tool names exist.
   const verification = authenticateRemoteRequest(request, options);
   if (!verification.ok) return credentialFailure(verification.response);
+  const authorized: RemoteAccessAuthorization = () => {
+    const again = authenticateRemoteRequest(request, options);
+    if (again.ok) return again.connection.id === verification.connection.id ? 'active' : 'revoked';
+    return again.response.status === 503 ? 'unavailable' : 'revoked';
+  };
+  const refused = (access: Exclude<ReturnType<RemoteAccessAuthorization>, 'active'>): Promise<Response> | Response =>
+    access === 'unavailable'
+      ? failure(503, remoteSurfaceErrorOutput('remote_connections_unavailable'))
+      : credentialFailure(unauthorized('invalid_token', currentRemotePublicUrls(options.publicUrls)));
   if (request.method !== 'POST') {
     return failure(405, remoteSurfaceErrorOutput('method_not_allowed'), { Allow: 'POST' });
   }
@@ -167,6 +178,8 @@ async function callTool(request: Request, name: string, options: RemoteOpenApiHa
   }
 
   const params = await readParams(request);
+  const afterParams = currentAccess(authorized);
+  if (afterParams !== 'active') return refused(afterParams);
   if (!params.ok) return params.response;
   // A parameter the remote surface does not serve is refused by name (it is
   // one the operation declares elsewhere).
@@ -188,6 +201,8 @@ async function callTool(request: Request, name: string, options: RemoteOpenApiHa
   });
   try {
     const result = await runWithReleaseManifestSink(manifests, () => operation.handler(ctx, params.value));
+    const afterHandler = currentAccess(authorized);
+    if (afterHandler !== 'active') return refused(afterHandler);
     // The output builders note what the agent receives (core/app-release-capture.ts).
     const capture = createReleaseCapture();
     const release = () => runWithReleaseCapture(capture, () => remoteOperationOutputOffThread(operation.name, result, {
@@ -196,15 +211,23 @@ async function callTool(request: Request, name: string, options: RemoteOpenApiHa
       releaseManifests: manifests.manifests,
     }));
     const approved = await release();
+    const afterRelease = currentAccess(authorized);
+    if (afterRelease !== 'active') return refused(afterRelease);
     // Settled against the release the agent would get (slice 2's recheck included).
     const privateMayAnswer = privatePart ? await privatePart.settle(result, approved) : false;
+    const afterSettle = currentAccess(authorized);
+    if (afterSettle !== 'active') return refused(afterSettle);
     // The settle can wait on the local probe: an item reclassified meanwhile
     // (to Secret, say) is caught by checking the release again right before
     // it leaves. The note follows the output that actually leaves.
     const output = privatePart ? await release() : approved;
+    const afterFinalRelease = currentAccess(authorized);
+    if (afterFinalRelease !== 'active') return refused(afterFinalRelease);
     recordRemoteOperation({ operation: operation.name, args: params.value, caller: ctx.caller, output, capture, privateQuestion: privateMayAnswer ? privatePart?.answerRef : undefined });
     return jsonResponse(200, privateMayAnswer ? withRemotePrivateNote(output, privatePart?.answerId, privatePart?.secretMatch) : output);
   } catch (error) {
+    const afterFailure = currentAccess(authorized);
+    if (afterFailure !== 'active') return refused(afterFailure);
     return operationErrorResponse(error, declaredParams);
   }
 }

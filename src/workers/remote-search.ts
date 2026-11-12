@@ -37,11 +37,12 @@ import { createReleaseCapture, recordAppRequest, runWithReleaseCapture } from '.
 import type { OperationCaller } from '../core/operation-caller.ts';
 import { OperationError } from '../core/operations.ts';
 import type { RemotePrivatePart } from '../core/remote-private-part.ts';
-import { remoteErrorOutput, remotePrivateNote, remoteSurfaceErrorOutput } from '../core/remote-result.ts';
+import { remoteErrorOutput, remotePrivateNote } from '../core/remote-result.ts';
 import { answerReleaseWithheldReasonOffThread, createReleaseManifestSink, runWithReleaseManifestSink, type ReleaseCheck } from '../core/release-manifest.ts';
 import type { McpCallToolResult, McpListedTool, McpServerExtension } from '../mcp/server.ts';
 import { SEARCH_TOOL_NAME } from './chatgpt/dashboard-contract.ts';
 import { searchToolResult } from './chatgpt/response-builder.ts';
+import { currentAccess, refusedAccess, type RemoteAccessAuthorization } from './remote-access-recheck.ts';
 
 export interface RemoteSearchOptions {
   /** The released Public and Personal evidence for a question (the same search ChatGPT's olympus_search runs). */
@@ -114,7 +115,7 @@ export const REMOTE_SEARCH_TOOL: McpListedTool = {
 };
 
 /** This request's connection, verified again: still active, revoked (or expired), or the store could not be read. */
-export type RemoteSearchAuthorization = () => 'active' | 'revoked' | 'unavailable';
+export type RemoteSearchAuthorization = RemoteAccessAuthorization;
 
 export function remoteSearchExtension(
   options: RemoteSearchOptions,
@@ -212,19 +213,6 @@ async function runSearch(
     content: [{ type: 'text' as const, text: [first ?? '', ...rest, `Pass this on to the user as written:\n${note}`].filter((part) => part !== '').join('\n\n') }],
     structuredContent: { ...result.structuredContent, private_note: note },
   };
-}
-
-function currentAccess(authorized: RemoteSearchAuthorization): ReturnType<RemoteSearchAuthorization> {
-  try {
-    return authorized();
-  } catch {
-    return 'unavailable';
-  }
-}
-
-/** The error for a connection that is not active now: revoked or expired, or its store could not be read. */
-function refusedAccess(access: Exclude<ReturnType<RemoteSearchAuthorization>, 'active'>): McpCallToolResult {
-  return errorResult(remoteSurfaceErrorOutput(access === 'revoked' ? 'invalid_token' : 'remote_connections_unavailable'));
 }
 
 function invalidParams(param: 'question' | 'limit'): McpCallToolResult {

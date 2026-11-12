@@ -97,14 +97,23 @@ let server: ReturnType<typeof Bun.serve>;
 let ledger: SourceAnswerLatencyLedgerRecord[];
 let answered: number;
 let base: string;
+let answerHeld: Promise<void> | undefined;
+let answerStarted: (() => void) | undefined;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'olympus-remote-mcp-'));
   store = openRemoteConnectionStore(join(dir, 'state', 'remote-connections.sqlite'));
   ledger = [];
   answered = 0;
+  answerHeld = undefined;
+  answerStarted = undefined;
   const worker = createEmailSourceWorker({
-    sourceAnswer: { async answer() { answered += 1; return answerFixture(); } },
+    sourceAnswer: { async answer() {
+      answered += 1;
+      answerStarted?.();
+      if (answerHeld) await answerHeld;
+      return answerFixture();
+    } },
     sourceAnswerLatencyLog: { record(entry) { ledger.push(entry); } },
     sourceIndexStatus: { async status() { return statusFixture() as never; } },
   });
@@ -170,6 +179,32 @@ describe('remote operation surface', () => {
 });
 
 describe('remote MCP over loopback with a connection token', () => {
+  test('a connection revoked while the operation handler runs gets only a refusal', async () => {
+    const { connection, token } = store.create('Claude');
+    const client = await connectClient(token);
+    let release!: () => void;
+    answerHeld = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { answerStarted = resolve; });
+    try {
+      const pending = client.callTool({ name: 'source_answer', arguments: { question: 'what changed?' } });
+      await started;
+      store.revoke(connection.id);
+      release();
+      const result = await pending;
+      expect(result.isError).toBe(true);
+      expect(result.content).toEqual([{
+        type: 'text',
+        text: JSON.stringify({ error: 'invalid_token', message: 'The connection token is not valid or has been revoked.' }, null, 2),
+      }]);
+      expect(result.structuredContent).toBeUndefined();
+      expect(JSON.stringify(result)).not.toContain(answerFixture().answer);
+      expect(JSON.stringify(result)).not.toContain('private_note');
+    } finally {
+      release();
+      await client.close().catch(() => undefined);
+    }
+  });
+
   test('anonymous answers off are not advertised while result collection remains available', async () => {
     const { token } = store.create('Claude');
     const client = await connectClient(token);
