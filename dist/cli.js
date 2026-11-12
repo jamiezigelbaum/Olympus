@@ -77638,13 +77638,14 @@ function createEvidenceWindowPlacer(query, timers = systemTimers) {
       const allowance = Math.min(MAX_WINDOWS_PER_SEAT, MAX_WINDOWS_PER_QUESTION - submittedWindows);
       for (const chunk of eligible) {
         const text2 = source.texts[chunk];
-        const span = Math.max(0, text2.length - WINDOW_CHARS);
+        const size = Math.min(WINDOW_CHARS, chunks[chunk].length);
+        const span = Math.max(0, text2.length - size);
         const count = Math.min(Math.floor(span / WINDOW_STRIDE) + 1, allowance - windows.length);
         if (count <= 0)
           break;
         for (let n = 0;n < count; n++) {
           const start = count === 1 ? 0 : Math.round(n * span / (count - 1));
-          windows.push({ chunk, start, text: sourceIndexChunkWindow(text2, start, WINDOW_CHARS) });
+          windows.push({ chunk, start, text: sourceIndexChunkWindow(text2, start, size) });
         }
       }
       if (!windows.length)

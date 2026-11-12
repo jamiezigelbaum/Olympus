@@ -56,12 +56,14 @@ export function createEvidenceWindowPlacer(query: string, timers = systemTimers)
       // Chunks arrive best first, so the leading chunk is covered end to end before the next gets any.
       for (const chunk of eligible) {
         const text = source.texts[chunk]!;
-        const span = Math.max(0, text.length - WINDOW_CHARS);
+        // Score at the share that will be kept, so the winning text is never clipped away.
+        const size = Math.min(WINDOW_CHARS, chunks[chunk]!.length);
+        const span = Math.max(0, text.length - size);
         const count = Math.min(Math.floor(span / WINDOW_STRIDE) + 1, allowance - windows.length);
         if (count <= 0) break;
         for (let n = 0; n < count; n++) {
           const start = count === 1 ? 0 : Math.round((n * span) / (count - 1));
-          windows.push({ chunk, start, text: sourceIndexChunkWindow(text, start, WINDOW_CHARS) });
+          windows.push({ chunk, start, text: sourceIndexChunkWindow(text, start, size) });
         }
       }
       if (!windows.length) return chunks;
