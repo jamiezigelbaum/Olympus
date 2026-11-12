@@ -1,0 +1,206 @@
+// Long Personal items: how much of them the privacy judge never reads, and
+// whether the parts it skips hold anything Private.
+//
+// The judge reads one excerpt of at most SNIFFER_EXCERPT_MAX_CHARS per item
+// (tier-classifier.ts), so the rest of a long item takes the tier that excerpt
+// earned. This script measures that on a COPY of an install's data root:
+//
+//   bun eval/calibration/long-items.ts --root DATA_ROOT
+//     Counts per source family: Personal items, how many are longer than the
+//     judge reads, characters beyond it, and median and p90 length.
+//
+//   bun eval/calibration/long-items.ts --root DATA_ROOT --judge-sample 200
+//     --endpoint http://127.0.0.1:PORT --model NAME (--owner-words FILE|saved | --no-owner-words)
+//     [--seed 1] [--max-windows 25]
+//     Also picks that many long Personal items at random (seeded), cuts the
+//     text past the first SNIFFER_EXCERPT_MAX_CHARS into windows of that size,
+//     and asks the judge about each window the way production asks about an
+//     item (same input builder, screens, prompt and decision bar). Counts the
+//     items with any window judged Private.
+//
+// Every database is opened read-only and immutable (`?immutable=1`): no lock,
+// no WAL, no write. Point it at a copy, never a live install. Output is counts
+// only: no item text, names, ids or paths. Item text goes to the endpoint and
+// nowhere else, and only a loopback endpoint is accepted.
+
+import { existsSync, readFileSync } from 'node:fs';
+import { buildSnifferBatchPrompt, SNIFFER_SYSTEM_PROMPT, snifferInjectionRule, snifferMaterialCarriesSecret, snifferMaterialForModel, snifferOwnMaterial } from '../../src/workers/classification/sniffer.ts';
+import { decisionDivergence, decisionPromptShape, REPLY_TO_TIER } from '../../src/workers/classification/sniffer-decision.ts';
+import { privateChance, SNIFFER_DECISION_MIN_COVERAGE, SNIFFER_DECISION_PRIVATE_BAR, tierMass, type TokenChance } from '../../src/workers/classification/sniffer-decision-mass.ts';
+import { privacyOwnerContext } from '../../src/workers/classification/privacy-profile.ts';
+import { count, closeStores, pickLongItems, unseenWindows, WINDOW, type LongItem, type FamilyCount } from './long-item-selection.ts';
+import { storedJudgeInput, type Row } from './stored-input.ts';
+
+const argv = process.argv.slice(2);
+const flag = (name: string) => {
+  const index = argv.indexOf(name);
+  return index >= 0 ? argv[index + 1] : undefined;
+};
+
+const percentile = (sorted: number[], p: number) => sorted.length === 0 ? null : sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))]!;
+
+function report(families: Record<string, FamilyCount>) {
+  const total: FamilyCount = { personal: 0, personalNotRead: 0, longerThanJudgeReads: 0, charsBeyond: 0, noStoredText: 0, lengths: [], longLengths: [] };
+  const rows: Record<string, unknown> = {};
+  const line = (family: FamilyCount) => {
+    const lengths = [...family.lengths].sort((a, b) => a - b);
+    const longLengths = [...family.longLengths].sort((a, b) => a - b);
+    return {
+      personal: family.personal,
+      personalNotRead: family.personalNotRead,
+      noStoredText: family.noStoredText,
+      longerThanJudgeReads: family.longerThanJudgeReads,
+      charsBeyond: family.charsBeyond,
+      medianChars: percentile(lengths, 0.5),
+      p90Chars: percentile(lengths, 0.9),
+      longMedianChars: percentile(longLengths, 0.5),
+      longP90Chars: percentile(longLengths, 0.9),
+    };
+  };
+  for (const [name, family] of Object.entries(families).sort()) {
+    rows[name] = line(family);
+    total.personal += family.personal;
+    total.personalNotRead += family.personalNotRead;
+    total.noStoredText += family.noStoredText;
+    total.longerThanJudgeReads += family.longerThanJudgeReads;
+    total.charsBeyond += family.charsBeyond;
+    total.lengths.push(...family.lengths);
+    total.longLengths.push(...family.longLengths);
+  }
+  rows['ALL'] = line(total);
+  return rows;
+}
+
+// ---- judging the unseen windows ----
+
+function assertLoopback(url: string): void {
+  let host = '';
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    throw new Error('--endpoint must be a URL, such as http://127.0.0.1:8012.');
+  }
+  if (!['127.0.0.1', 'localhost', '[::1]'].includes(host)) {
+    throw new Error('--endpoint must be loopback: item text may reach no other host. Use an SSH tunnel to reach another machine.');
+  }
+}
+
+type Via = 'judge' | 'no_answer' | 'secret' | 'injection' | 'detector' | 'not_asked';
+
+async function judgeWindows(long: LongItem[], sampleSize: number) {
+  const endpoint = (flag('--endpoint') ?? '').replace(/\/+$/, '');
+  assertLoopback(endpoint);
+  const model = flag('--model');
+  if (!model) throw new Error('--model NAME is required, so the result says what produced it.');
+  const wordsFile = flag('--owner-words');
+  if (!wordsFile && !argv.includes('--no-owner-words')) throw new Error('Pass --owner-words FILE (or saved), or --no-owner-words.');
+  const ownerContext = !wordsFile ? undefined : wordsFile === 'saved' ? privacyOwnerContext() : (readFileSync(wordsFile, 'utf8').trim() || undefined);
+  const maxWindows = Number(flag('--max-windows') ?? 25);
+  const seed = Number(flag('--seed') ?? 1);
+
+  const post = async <T>(path: string, body: unknown): Promise<T> => {
+    const response = await fetch(`${endpoint}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    // Never the response body: a server error can echo the prompt.
+    if (!response.ok) throw new Error(`${path} answered ${response.status}.`);
+    return await response.json() as T;
+  };
+  const shape = await decisionPromptShape(async (material) => (await post<{ prompt: string }>('/apply-template', {
+    messages: [
+      { role: 'system', content: SNIFFER_SYSTEM_PROMPT },
+      { role: 'user', content: buildSnifferBatchPrompt('content', [{ i: 1, material }], ownerContext) },
+    ],
+    chat_template_kwargs: { enable_thinking: false },
+  })).prompt);
+  const written = await decisionDivergence(post);
+  await post('/completion', { prompt: shape.shared, n_predict: 0, cache_prompt: true });
+
+  const ask = async (row: Row, text: string, provider: string): Promise<{ via: Via; private: boolean }> => {
+    const input = storedJudgeInput(row, text, provider);
+    if (input.secret) return { via: 'secret', private: true };
+    if (input.material === undefined) return input.privateWithoutJudge ? { via: 'detector', private: true } : { via: 'not_asked', private: false };
+    const forModel = snifferMaterialForModel(input.material);
+    const own = snifferOwnMaterial(forModel);
+    if (snifferMaterialCarriesSecret(own)) return { via: 'secret', private: true };
+    if (snifferInjectionRule(own)) return { via: 'injection', private: true };
+    const reply = await post<{ completion_probabilities?: Array<{ top_logprobs?: TokenChance[] }> }>('/completion', {
+      prompt: `${shape.render(forModel)}${REPLY_TO_TIER}${written}`,
+      n_predict: 1,
+      n_probs: 40,
+      temperature: 0,
+      cache_prompt: true,
+    });
+    const mass = tierMass(reply.completion_probabilities?.[0]?.top_logprobs ?? [], written);
+    const chance = privateChance(mass);
+    // Production's fail-safe: no clear answer holds the item Private.
+    if (chance === undefined || mass.private + mass.personal < SNIFFER_DECISION_MIN_COVERAGE) return { via: 'no_answer', private: true };
+    return { via: 'judge', private: chance >= SNIFFER_DECISION_PRIVATE_BAR };
+  };
+
+  const picked = pickLongItems(long, sampleSize, seed);
+  const byFamily: Record<string, { items: number; windows: number; itemsWithPrivateWindow: number; itemsWithJudgePrivateWindow: number; cappedItems: number; openingWindowPrivate: number; privateWindowsBy: Record<string, number> }> = {};
+  const started = performance.now();
+  let windowsAsked = 0;
+  let modelCalls = 0;
+  for (const item of picked) {
+    const family = (byFamily[item.provider] ??= { items: 0, windows: 0, itemsWithPrivateWindow: 0, itemsWithJudgePrivateWindow: 0, cappedItems: 0, openingWindowPrivate: 0, privateWindowsBy: {} });
+    const row = item.store.row.get(item.pk) as Row;
+    const parts = item.store.chunks.all(item.pk) as Array<{ bounded_text: string; content_hash: string }>;
+    const text = parts.map(part => part.bounded_text).join('\n');
+    const windows = unseenWindows(parts, Infinity).map(window => window.text);
+    if (windows.length > maxWindows) family.cappedItems += 1;
+    family.items += 1;
+    // Control: the opening window, which the judge already called Personal. Private here is judge noise.
+    if ((await ask(row, text.slice(0, WINDOW), item.provider)).private) family.openingWindowPrivate += 1;
+    let anyPrivate = false;
+    let anyByJudge = false;
+    for (const window of windows.slice(0, maxWindows)) {
+      const answer = await ask(row, window, item.provider);
+      family.windows += 1;
+      windowsAsked += 1;
+      if (answer.via === 'judge' || answer.via === 'no_answer') modelCalls += 1;
+      if (answer.private) {
+        anyPrivate = true;
+        if (answer.via === 'judge') anyByJudge = true;
+        family.privateWindowsBy[answer.via] = (family.privateWindowsBy[answer.via] ?? 0) + 1;
+      }
+    }
+    if (anyPrivate) family.itemsWithPrivateWindow += 1;
+    if (anyByJudge) family.itemsWithJudgePrivateWindow += 1;
+  }
+  const minutes = (performance.now() - started) / 60_000;
+  return {
+    model,
+    ownerWords: ownerContext ? 'supplied' : 'none',
+    seed,
+    windowChars: WINDOW,
+    maxWindowsPerItem: maxWindows,
+    longPersonalItemsAvailable: long.length,
+    itemsJudged: picked.length,
+    windowsAsked,
+    modelCalls,
+    minutes: Number(minutes.toFixed(1)),
+    modelCallsPerMinute: minutes > 0 ? Number((modelCalls / minutes).toFixed(1)) : null,
+    itemsWithPrivateWindow: Object.values(byFamily).reduce((sum, family) => sum + family.itemsWithPrivateWindow, 0),
+    byFamily,
+  };
+}
+
+async function main() {
+  const root = flag('--root');
+  if (!root || !existsSync(root)) throw new Error('--root DATA_ROOT is required: a copy of an install\'s Olympus data root.');
+  const counted = count(root);
+  const out: Record<string, unknown> = {
+    judgeReadsChars: WINDOW,
+    ledgers: counted.ledgers,
+    storesWithPersonalText: counted.stores,
+    byFamily: report(counted.families),
+    // Layout file names and counts only, so a lookup that misses can be fixed.
+    ledgerDiagnostics: counted.diagnostics,
+  };
+  const sample = Number(flag('--judge-sample') ?? 0);
+  if (sample > 0) out['windowJudge'] = await judgeWindows(counted.long, sample);
+  closeStores();
+  console.log(JSON.stringify(out, null, 1));
+}
+
+await main();
