@@ -413,3 +413,34 @@ test('a read-only store reads its ledger without writing it', async () => {
   expect(ledgerDb.query("SELECT embed_hold FROM tier_copies WHERE provider_item_id = 'plain' AND corpus_id = ?").get(CORPORA.internal))
     .toEqual({ embed_hold: 1 });
 });
+
+test('a warmed read-only store answers from its built set: a later read runs no set-build step', async () => {
+  const { writer, ledgerDb, pk, openReader } = await fixtureWithEveryState();
+  const expected = sorted(probe(writer).tierHiddenItemPks());
+  await writer.saveVisibilityInTurns();
+  // Control: a cold reader builds its set on the read that first needs it.
+  const cold = openReader();
+  const coldBuild = spyOn(cold as unknown as { savedVisibilitySteps: () => unknown }, 'savedVisibilitySteps');
+  cleanups.push(() => coldBuild.mockRestore());
+  expect(sorted(probe(cold).tierHiddenItemPks())).toEqual(expected);
+  expect(coldBuild).toHaveBeenCalledTimes(1);
+
+  // The split's front warms every store before it reports ready (gate 1, ops#168).
+  const reader = openReader();
+  await reader.warmVisibilityInTurns();
+  const build = spyOn(reader as unknown as { savedVisibilitySteps: () => unknown }, 'savedVisibilitySteps');
+  cleanups.push(() => build.mockRestore());
+  const rebuilds = countFullRebuilds(probe(reader).visibilityLedger()!);
+  cleanups.push(() => rebuilds.restore());
+  expect(sorted(probe(reader).tierHiddenItemPks())).toEqual(expected);
+  // Never stale in the hidden direction: a copy hidden after the warm-up is
+  // left out by the very next read, with no refresh tick in between. Each read
+  // applies the feed past the set's cursors first (as a delta, not a build),
+  // and each returned row is checked against the current ledger as well.
+  expect(reader.searchItems('picnic', 20).map((row) => row.sourceItem.providerItemId)).toContain('plain');
+  ledgerDb.query("UPDATE tier_copies SET copy_state = 'superseded' WHERE provider_item_id = 'plain' AND corpus_id = ?").run(CORPORA.internal);
+  expect(reader.searchItems('picnic', 20).map((row) => row.sourceItem.providerItemId)).not.toContain('plain');
+  expect(probe(reader).tierHiddenItemPks().hidden).toContain(pk('plain'));
+  expect(build).not.toHaveBeenCalled();
+  expect(rebuilds.count).toBe(0);
+});

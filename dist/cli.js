@@ -41060,6 +41060,9 @@ var init_local_index = __esm(() => {
     tierLedgerHiddenItemPks() {
       return runSteps(this.tierLedgerHiddenSteps());
     }
+    async warmVisibilityInTurns() {
+      await this.tierHiddenItemPksInTurns();
+    }
     async saveVisibilityInTurns() {
       if (this.readOnly)
         return;
@@ -244056,6 +244059,27 @@ ${key2}`;
   ]);
   configuredMountStores = connectorStores;
   const readConnectorStores = connectorStores;
+  let frontVisibilityWarming = false;
+  async function warmFrontVisibility(when) {
+    if (frontVisibilityWarming || sourceRuntimeClosed)
+      return;
+    frontVisibilityWarming = true;
+    const started = performance.now();
+    try {
+      for (const store of [...connectorStores]) {
+        try {
+          await store.warmVisibilityInTurns();
+        } catch (error2) {
+          console.warn(`[olympus] front: a store's hidden-copy set could not be built yet: ${error2 instanceof Error ? error2.message : String(error2)}`);
+        }
+      }
+    } finally {
+      frontVisibilityWarming = false;
+    }
+    if (when === "before ready") {
+      console.log(`[olympus] front: built ${connectorStores.length} stores' hidden-copy sets in ${Math.round(performance.now() - started)} ms`);
+    }
+  }
   let peopleIndex = openPeopleIndexOrUndefined(engineFront ? { readOnly: true } : {});
   const peopleRefresher = !engineFront && peopleIndex ? new PeopleIndexRefresher(peopleIndex, () => connectorStores) : undefined;
   const refreshPeople = (force = false) => {
@@ -246945,6 +246969,14 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       });
     return response;
   } })) : Bun.serve({ hostname: hostname2, port, idleTimeout: 0, ...serverOptions });
+  if (engineFront) {
+    const warming = warmFrontVisibility("before ready");
+    let bound;
+    await Promise.race([warming, new Promise((resolve32) => {
+      bound = setTimeout(resolve32, FRONT_VISIBILITY_READY_BOUND_MS);
+    })]);
+    clearTimeout(bound);
+  }
   const server = !listens ? undefined : socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
   if (engineRole === "single")
     finishBootProgress();
@@ -247109,6 +247141,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   }
   const frontMountRetry = engineFront ? setInterval(refreshFrontMounts, 2000) : undefined;
   frontMountRetry?.unref?.();
+  const frontVisibilityRefresh = engineFront ? setInterval(() => {
+    warmFrontVisibility("refresh");
+  }, FRONT_VISIBILITY_REFRESH_MS) : undefined;
+  frontVisibilityRefresh?.unref?.();
   if (engineFront) {
     const judge3 = frontJudgeState(() => engineFront.status());
     classificationBusy = judge3.busy;
@@ -247334,6 +247370,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     engineBackground?.stop();
     if (frontMountRetry)
       clearInterval(frontMountRetry);
+    if (frontVisibilityRefresh)
+      clearInterval(frontVisibilityRefresh);
     engineFront?.stop();
     server?.stop();
   };
@@ -247393,7 +247431,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
 function resolveEmailSourceBindHostFromEnv(env = process.env) {
   return resolveWorkerBindHost(env, ["OLYMPUS_EMAIL_SOURCE_HOST"]);
 }
-var workerLaunch, dataOwnerLock;
+var workerLaunch, dataOwnerLock, FRONT_VISIBILITY_REFRESH_MS = 30000, FRONT_VISIBILITY_READY_BOUND_MS = 15000;
 var init_server5 = __esm(async () => {
   init_dashboard_people();
   init_people_index();
