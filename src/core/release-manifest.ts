@@ -86,6 +86,8 @@ export interface ReleaseInputVerdict {
 export interface ReleaseCheck {
   /** One verdict per input, in order, from one read of each ledger. Throws when a ledger cannot be read. */
   inputs(inputs: readonly ReleaseInput[]): readonly ReleaseInputVerdict[];
+  /** The awaiting Ask path uses the same check on the read pool. */
+  inputsOffThread?(inputs: readonly ReleaseInput[]): Promise<readonly ReleaseInputVerdict[]>;
   /** The posture for Private derivatives in force now. */
   secureDerivativeDefault(): 'allow' | 'approval';
 }
@@ -141,6 +143,21 @@ export function privateInputReleaseAllowed(
   // authorization, exactly as any Private text does: the posture may have tightened since.
   if (input.layer === 'names') return !privateNow || (input.privateAtAnswer && authorized);
   return !privateNow || authorized;
+}
+
+/** Await current tiers before release without holding the Ask thread in SQL. */
+export async function answerReleaseWithheldReasonOffThread(
+  manifests: readonly ReleaseManifest[],
+  check: ReleaseCheck,
+  ceiling: 'personal' | 'private' = 'private',
+): Promise<string | undefined> {
+  try {
+    const inputs = manifests.flatMap((manifest) => manifest.inputs);
+    const verdicts = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
+    return answerReleaseWithheldReason(manifests, { inputs: () => verdicts, secureDerivativeDefault: () => check.secureDerivativeDefault() }, ceiling);
+  } catch {
+    return ANSWER_RELEASE_UNVERIFIED;
+  }
 }
 
 export function answerReleaseWithheldReason(

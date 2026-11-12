@@ -38,7 +38,7 @@ import type { OperationCaller } from '../core/operation-caller.ts';
 import { OperationError } from '../core/operations.ts';
 import type { RemotePrivatePart } from '../core/remote-private-part.ts';
 import { remoteErrorOutput, remotePrivateNote, remoteSurfaceErrorOutput } from '../core/remote-result.ts';
-import { answerReleaseWithheldReason, createReleaseManifestSink, runWithReleaseManifestSink, type ReleaseCheck } from '../core/release-manifest.ts';
+import { answerReleaseWithheldReasonOffThread, createReleaseManifestSink, runWithReleaseManifestSink, type ReleaseCheck } from '../core/release-manifest.ts';
 import type { McpCallToolResult, McpListedTool, McpServerExtension } from '../mcp/server.ts';
 import { SEARCH_TOOL_NAME } from './chatgpt/dashboard-contract.ts';
 import { searchToolResult } from './chatgpt/response-builder.ts';
@@ -179,13 +179,16 @@ async function runSearch(
     if (afterWait !== 'active') return refusedAccess(afterWait);
     const evidence = result.structuredContent?.evidence;
     if (context.releaseCheck && Array.isArray(evidence) && evidence.length > 0
-      && answerReleaseWithheldReason(manifests.manifests, context.releaseCheck, 'personal') !== undefined) {
+      && await answerReleaseWithheldReasonOffThread(manifests.manifests, context.releaseCheck, 'personal') !== undefined) {
       // Only the evidence goes: the coverage the search reported and what it already withheld stand.
       const rawRecord = raw as Record<string, unknown>;
       const withheldBefore = typeof rawRecord.withheld === 'number' && Number.isFinite(rawRecord.withheld) && rawRecord.withheld > 0 ? rawRecord.withheld : 0;
       result = searchToolResult({ ...rawRecord, evidence: [], withheld: withheldBefore + evidence.length }, { pendingPrivacyItems: context.pendingPrivacyItems?.() });
       withheldAfter = true;
     }
+    // The release judgment above may wait on the read pool: a revocation meanwhile releases nothing.
+    const afterRelease = currentAccess(authorized);
+    if (afterRelease !== 'active') return refusedAccess(afterRelease);
     if (recorded) note = remotePrivateNote(privateCall.answerId, privateCall.secretMatch);
   }
   if (context.caller) {

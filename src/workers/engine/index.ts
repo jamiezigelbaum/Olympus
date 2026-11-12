@@ -15,7 +15,7 @@ import { type AgentAnswerReceipt, recordAgentAnswerReceipt, agentAnswerReceipt }
 import { privacyBacklogCoverageNote, withCoverageNote } from '../../core/privacy-backlog-coverage.ts';
 import {
   type ReleaseManifest,
-  answerReleaseWithheldReason,
+  answerReleaseWithheldReasonOffThread,
   createReleaseManifestSink,
   runWithReleaseManifestSink,
   recordReleaseManifest,
@@ -652,7 +652,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             : !entry
               ? 'Olympus withheld this answer because its privacy release ticket is no longer available (the engine may have restarted). Ask again.'
               : options.sourceAnswerReleaseCheck
-                ? answerReleaseWithheldReason(entry.manifests, options.sourceAnswerReleaseCheck)
+                ? await answerReleaseWithheldReasonOffThread(entry.manifests, options.sourceAnswerReleaseCheck)
                 : 'Olympus withheld this answer because the engine cannot check its current privacy classification. Update Olympus, then ask again.';
           pruneReleaseTickets();
           return json({ ...(reason ? { withheld: reason } : { allowed: true }) });

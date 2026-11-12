@@ -215,9 +215,12 @@ describe('people observations off the main thread (#1305)', () => {
     const target = candidates.find((row) => !excluded.has(row.item_pk))!;
     db.query(`UPDATE items SET sender_id = 'zed@example.com', sender_label = 'Zed Marlow' WHERE item_pk = ?`).run(target.item_pk);
 
-    // A judging backlog: every pool read sees the ledger move (held, released, held again).
+    // A judging backlog: every pooled people read sees the ledger move (held,
+    // released, held again). The hidden-child probe before each read runs on
+    // the pool too (#1452); only the people reads are the attempts counted.
     let pooled = 0;
-    setReadPoolObserverForTests(() => {
+    setReadPoolObserverForTests((_path, read) => {
+      if (!/GROUP BY/.test(read.sql)) return;
       pooled += 1;
       ledgerDb.query(`UPDATE tier_copies SET embed_hold = 1 - embed_hold WHERE provider_item_id = ? AND copy_state = 'current'`).run(target.provider_item_id);
     });

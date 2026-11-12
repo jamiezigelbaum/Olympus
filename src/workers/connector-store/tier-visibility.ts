@@ -25,8 +25,12 @@ import type { ReleaseCheck, ReleaseInputVerdict } from '../../core/release-manif
 import type { SourceIndexRoutedSearchHit, SourceIndexVisibilityGate } from '../../core/source-index/router.ts';
 import { contentHeldForJudgment } from '../classification/tier-classifier.ts';
 import { tierLedgerIdentityKey, type TierLedger, type TierLedgerIdentity, type TierVisibilityReads } from '../classification/tier-ledger.ts';
-import { hiddenChildKeys, itemVerdicts, type ChildVisibilityStore } from './child-visibility.ts';
-import { OffThreadReadBusyError, offThreadReadsSupported, releaseOffThreadReads, withOffThreadSnapshot } from './off-thread-reads.ts';
+import {
+  hiddenChildKeysSteps, itemVerdictsSteps, childVisibilityUnchanged,
+  ledgerVisibilityHere, ledgerVisibilityOffThread, itemStatesOffThread, memoVisibilityItemsHere,
+  visibilityRead, visibilityHere, visibilityOffThread, judgedAwaited, VisibilityChangedError,
+  type VisibilityRead, type ChildVisibilityStore,
+} from './child-visibility.ts';
 
 export interface TierVisibilityScope {
   ledger: TierLedger;
@@ -67,29 +71,47 @@ export function createTierVisibilityGate(
       const governed = governedBy(scope, hits);
       if (governed.length === 0) continue;
       try {
-        reads.set(scope, scope.ledger.readSteps(scope.ledger.visibilityReadSteps(governed.map((hit) => hit.sourceItem), readOptions)));
+        reads.set(scope, ledgerVisibilityHere(scope.ledger, governed.map((hit) => hit.sourceItem), readOptions));
       } catch {
         reads.set(scope, undefined);
       }
     }
-    return judgeVisibility(current, hits, reads, onHeldMatches);
+    return visibilityHere(judgeVisibility(current, hits, reads, onHeldMatches));
   };
   // The same judgment with each ledger read in one snapshot on the read pool,
   // for the search's own fan-out, which can wait for it (#1305).
   gate.offThread = async (hits) => {
+    if (scopes().length === 0 || hits.length === 0) return hits;
+    // A write during the pooled judgment takes it again, then judges here once.
+    return judgedAwaited(() => judgedOffThread(hits), () => gate(hits));
+  };
+  const judgedOffThread = async (hits: readonly SourceIndexRoutedSearchHit[]): Promise<readonly SourceIndexRoutedSearchHit[]> => {
     const current = scopes();
-    if (current.length === 0 || hits.length === 0) return hits;
     const reads = new Map<TierVisibilityScope, TierVisibilityReads | undefined>();
+    const unchanged = new Map<TierVisibilityScope, () => boolean>();
+    let changedDuringRead = false;
+    for (const scope of current) {
+      if (governedBy(scope, hits).length === 0) continue;
+      try { unchanged.set(scope, childVisibilityUnchanged({ ledger: () => scope.ledger, stores: scope.stores ?? (() => []) })); }
+      catch { unchanged.set(scope, () => false); }
+    }
     await Promise.all(current.map(async (scope) => {
       const governed = governedBy(scope, hits);
       if (governed.length === 0) return;
       try {
         reads.set(scope, await ledgerVisibilityReads(scope.ledger, governed.map((hit) => hit.sourceItem), readOptions));
-      } catch {
+      } catch (error) {
+        if (error instanceof VisibilityChangedError) changedDuringRead = true;
         reads.set(scope, undefined);
       }
     }));
-    return judgeVisibility(current, hits, reads, onHeldMatches);
+    const visible = await visibilityOffThread(judgeVisibility(current, hits, reads, onHeldMatches));
+    const changed = changedDuringRead || current.some(scope => {
+      try { return unchanged.has(scope) && !unchanged.get(scope)!(); }
+      catch { return true; }
+    });
+    if (changed) throw new VisibilityChangedError();
+    return visible;
   };
   return gate;
 }
@@ -97,41 +119,23 @@ export function createTierVisibilityGate(
 /**
  * The ledger's visibility reads in one snapshot on the read pool where it
  * can be: on a large install's copy one of these batches held the request
- * thread for 1.3 s (#1305). A pool that is busy or unavailable reads here
- * instead, so the gate never decides on less than the committed ledger.
+ * thread for 1.3 s (#1305). A busy pool withholds this scope's hits; reading
+ * here instead would put that freeze back on the Ask thread.
  */
 async function ledgerVisibilityReads(
   ledger: TierLedger,
   identities: readonly TierLedgerIdentity[],
   options: { personalFirst: boolean },
 ): Promise<TierVisibilityReads> {
-  if (identities.length > 0 && offThreadReadsSupported(ledger.dbPath)) {
-    if (!releasing.has(ledger)) {
-      releasing.add(ledger);
-      ledger.onClose(() => releaseOffThreadReads(ledger.dbPath));
-    }
-    try {
-      return await withOffThreadSnapshot(ledger.dbPath, async (read) => {
-        const steps = ledger.visibilityReadSteps(identities, options);
-        let next = steps.next();
-        while (!next.done) next = steps.next(await read(next.value));
-        return next.value;
-      });
-    } catch (error) {
-      if (!(error instanceof OffThreadReadBusyError)) throw error;
-    }
-  }
-  return ledger.readSteps(ledger.visibilityReadSteps(identities, options));
+  return ledgerVisibilityOffThread(ledger, identities, options);
 }
 
-const releasing = new WeakSet<TierLedger>();
-
-function judgeVisibility(
+function* judgeVisibility(
   current: readonly TierVisibilityScope[],
   hits: readonly SourceIndexRoutedSearchHit[],
   reads: ReadonlyMap<TierVisibilityScope, TierVisibilityReads | undefined>,
   onHeldMatches: ((identities: readonly TierLedgerIdentity[]) => void) | undefined,
-): readonly SourceIndexRoutedSearchHit[] {
+): Generator<VisibilityRead, readonly SourceIndexRoutedSearchHit[], unknown> {
   const hidden = new Set<SourceIndexRoutedSearchHit>();
   const held = new Set<SourceIndexRoutedSearchHit>();
   for (const scope of current) {
@@ -169,7 +173,7 @@ function judgeVisibility(
     // A child is served only while its parent is.
     const lane = childLane(scope);
     if (lane) {
-      const orphaned = hiddenChildKeys(lane, governed.filter((hit) => !hidden.has(hit)).map((hit) => hit.sourceItem));
+      const orphaned = yield* hiddenChildKeysSteps(lane, governed.filter((hit) => !hidden.has(hit)).map((hit) => hit.sourceItem));
       if (orphaned.size > 0) {
         for (const hit of governed) if (orphaned.has(tierLedgerIdentityKey(hit.sourceItem))) hidden.add(hit);
       }
@@ -230,76 +234,88 @@ export function createReleaseTierCheck(
   scopes: () => readonly TierVisibilityScope[],
   secureDerivativeDefault: () => 'allow' | 'approval',
 ): ReleaseCheck {
-  return {
-    secureDerivativeDefault,
-    inputs: (inputs) => {
-      const verdicts: ReleaseInputVerdict[] = inputs.map(() => ({ tier: 'legacy', gone: false }));
-      if (inputs.length === 0) return verdicts;
-      for (const scope of scopes()) {
-        const governed: Array<{ index: number; identity: TierLedgerIdentity }> = [];
-        inputs.forEach((input, index) => {
-          if (!scope.corpusIds.has(input.corpusId)) return;
-          if (!input.accountScope || !input.provider || !input.providerItemId) {
-            verdicts[index] = { tier: 'unknown', gone: false };
-            return;
-          }
-          governed.push({
-            index,
-            identity: {
-              provider: input.provider,
-              accountScope: input.accountScope,
-              providerItemId: input.providerItemId,
-              ...(input.providerConversationId ? { providerConversationId: input.providerConversationId } : {}),
-            },
-          });
-        });
-        if (governed.length === 0) continue;
-        const states = scope.ledger.itemStatesForMany(governed.map(({ identity }) => identity));
-        for (const { index, identity } of governed) {
-          const state = states.get(tierLedgerIdentityKey(identity));
-          if (!state) continue;
-          const { record, copies } = state;
-          // An input of the names layer (a child citation's parent label) is
-          // judged on the item's names alone: its content tier never limits an
-          // answer that carries only its names.
-          const namesOnly = inputs[index]!.layer === 'names';
-          const tiers = namesOnly
-            ? [record.metadataTier, record.targetMetadataTier]
-            : [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier];
-          // What waits for its model question is held Private, as placement
-          // holds it, though its recorded tier is the Personal default: an
-          // answer read from it is Private until the model says otherwise.
-          const held = record.metadataPending || (!namesOnly && contentHeldForJudgment(record));
-          verdicts[index] = {
-            tier: tiers.includes('secrets') ? 'secret' : held || tiers.includes('secure') ? 'private' : 'public_or_personal',
-            gone: record.routed && !copies.some((copy) => copy.state === 'current'
-              && (!namesOnly || copy.layers === 'both' || copy.layers === 'metadata')),
-          };
+  function* inputsSteps(inputs: Parameters<ReleaseCheck['inputs']>[0]): Generator<VisibilityRead, ReleaseInputVerdict[], unknown> {
+    const verdicts: ReleaseInputVerdict[] = inputs.map(() => ({ tier: 'legacy', gone: false }));
+    if (inputs.length === 0) return verdicts;
+    for (const scope of scopes()) {
+      const governed: Array<{ index: number; identity: TierLedgerIdentity }> = [];
+      inputs.forEach((input, index) => {
+        if (!scope.corpusIds.has(input.corpusId)) return;
+        if (!input.accountScope || !input.provider || !input.providerItemId) {
+          verdicts[index] = { tier: 'unknown', gone: false };
+          return;
         }
-        // A child whose parent is not served any more is gone, whatever its own
-        // copies say, and the answer that drew on it is withheld whole.
-        const lane = childLane(scope);
-        if (lane) {
-          const orphaned = hiddenChildKeys(lane, governed.filter(({ index }) => inputs[index]!.dependency !== 'parent_label').map(({ identity }) => identity));
-          for (const { index, identity } of governed) {
-            if (inputs[index]!.dependency !== 'parent_label' && orphaned.has(tierLedgerIdentityKey(identity))) {
-              verdicts[index] = { ...verdicts[index]!, gone: true, hiddenByParent: true };
-            }
+        governed.push({
+          index,
+          identity: {
+            provider: input.provider,
+            accountScope: input.accountScope,
+            providerItemId: input.providerItemId,
+            ...(input.providerConversationId ? { providerConversationId: input.providerConversationId } : {}),
+          },
+        });
+      });
+      if (governed.length === 0) continue;
+      // The same ledger snapshot now runs on the pool for Ask release. Deduplicate
+      // identities there so repeated citations do not reread the same rows.
+      const identities = governed.map(({ identity }) => identity);
+      const states = yield* visibilityRead(() => memoVisibilityItemsHere(scope.ledger, 'states', () => scope.ledger.changeMarker(), identities, tierLedgerIdentityKey, missing => scope.ledger.itemStatesForMany(missing)),
+        () => itemStatesOffThread(scope.ledger, identities));
+      for (const { index, identity } of governed) {
+        const state = states.get(tierLedgerIdentityKey(identity));
+        if (!state) continue;
+        const { record, copies } = state;
+        // An input of the names layer (a child citation's parent label) is
+        // judged on the item's names alone: its content tier never limits an
+        // answer that carries only its names.
+        const namesOnly = inputs[index]!.layer === 'names';
+        const tiers = namesOnly
+          ? [record.metadataTier, record.targetMetadataTier]
+          : [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier];
+        // What waits for its model question is held Private, as placement
+        // holds it, though its recorded tier is the Personal default: an
+        // answer read from it is Private until the model says otherwise.
+        const held = record.metadataPending || (!namesOnly && contentHeldForJudgment(record));
+        verdicts[index] = {
+          tier: tiers.includes('secrets') ? 'secret' : held || tiers.includes('secure') ? 'private' : 'public_or_personal',
+          gone: record.routed && !copies.some((copy) => copy.state === 'current'
+            && (!namesOnly || copy.layers === 'both' || copy.layers === 'metadata')),
+        };
+      }
+      // A child whose parent is not served any more is gone, whatever its own
+      // copies say, and the answer that drew on it is withheld whole.
+      const lane = childLane(scope);
+      if (lane) {
+        const orphaned = yield* hiddenChildKeysSteps(lane, governed.filter(({ index }) => inputs[index]!.dependency !== 'parent_label').map(({ identity }) => identity));
+        for (const { index, identity } of governed) {
+          if (inputs[index]!.dependency !== 'parent_label' && orphaned.has(tierLedgerIdentityKey(identity))) {
+            verdicts[index] = { ...verdicts[index]!, gone: true, hiddenByParent: true };
           }
-          // The parent label's names are the parent's own, so they are judged the way the parent's
-          // children are, by what its rows say now and not by its ledger copies alone: a parent
-          // tombstoned by an absence reconcile keeps its copy rows until the sync that did it ends.
-          const named = governed.filter(({ index }) => inputs[index]!.dependency === 'parent_label');
-          if (named.length > 0) {
-            const standing = itemVerdicts(lane, named.map(({ identity }) => identity));
-            for (const { index, identity } of named) {
-              if (standing.get(tierLedgerIdentityKey(identity))?.visible !== true) verdicts[index] = { ...verdicts[index]!, gone: true };
-            }
+        }
+        // The parent label's names are the parent's own, so they are judged the way the parent's
+        // children are, by what its rows say now and not by its ledger copies alone: a parent
+        // tombstoned by an absence reconcile keeps its copy rows until the sync that did it ends.
+        const named = governed.filter(({ index }) => inputs[index]!.dependency === 'parent_label');
+        if (named.length > 0) {
+          const standing = yield* itemVerdictsSteps(lane, named.map(({ identity }) => identity));
+          for (const { index, identity } of named) {
+            if (standing.get(tierLedgerIdentityKey(identity))?.visible !== true) verdicts[index] = { ...verdicts[index]!, gone: true };
           }
         }
       }
+    }
+    return verdicts;
+  }
+  return {
+    secureDerivativeDefault,
+    inputs: (inputs) => visibilityHere(inputsSteps(inputs)),
+    // A write during the pooled check takes it again, then checks here once.
+    inputsOffThread: (inputs) => judgedAwaited(async () => {
+      const unchanged = scopes().map(scope => childVisibilityUnchanged({ ledger: () => scope.ledger, stores: scope.stores ?? (() => []) }));
+      const verdicts = await visibilityOffThread(inputsSteps(inputs));
+      if (unchanged.some(check => !check())) throw new VisibilityChangedError();
       return verdicts;
-    },
+    }, () => visibilityHere(inputsSteps(inputs))),
   };
 }
 

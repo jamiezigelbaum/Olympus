@@ -31,7 +31,7 @@ import {
   remoteDeclaredParams,
   remoteErrorOutput,
   remoteRetryAfterSeconds,
-  remoteOperationOutput,
+  remoteOperationOutputOffThread,
   withRemotePrivateNote,
   remoteOutputSchema,
   remoteSurfaceErrorOutput,
@@ -190,18 +190,18 @@ async function callTool(request: Request, name: string, options: RemoteOpenApiHa
     const result = await runWithReleaseManifestSink(manifests, () => operation.handler(ctx, params.value));
     // The output builders note what the agent receives (core/app-release-capture.ts).
     const capture = createReleaseCapture();
-    const release = () => runWithReleaseCapture(capture, () => remoteOperationOutput(operation.name, result, {
+    const release = () => runWithReleaseCapture(capture, () => remoteOperationOutputOffThread(operation.name, result, {
       pendingPrivacyItems: ctx.pendingPrivacyItems?.(),
       ...(ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}),
       releaseManifests: manifests.manifests,
     }));
-    const approved = release();
+    const approved = await release();
     // Settled against the release the agent would get (slice 2's recheck included).
     const privateMayAnswer = privatePart ? await privatePart.settle(result, approved) : false;
     // The settle can wait on the local probe: an item reclassified meanwhile
     // (to Secret, say) is caught by checking the release again right before
     // it leaves. The note follows the output that actually leaves.
-    const output = privatePart ? release() : approved;
+    const output = privatePart ? await release() : approved;
     recordRemoteOperation({ operation: operation.name, args: params.value, caller: ctx.caller, output, capture, privateQuestion: privateMayAnswer ? privatePart?.answerRef : undefined });
     return jsonResponse(200, privateMayAnswer ? withRemotePrivateNote(output, privatePart?.answerId, privatePart?.secretMatch) : output);
   } catch (error) {

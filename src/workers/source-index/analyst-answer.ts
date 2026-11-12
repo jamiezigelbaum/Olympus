@@ -58,13 +58,14 @@ import {
   type StructuredEvidenceFact,
 } from '../../core/opsec.ts';
 import { parentLabelReleaseInputs, type ParentLabelResolver } from '../../core/parent-label.ts';
-import { answerReleaseWithheldReason, recordReleaseManifest, type ReleaseCheck, type ReleaseConstraints, type ReleaseInput } from '../../core/release-manifest.ts';
+import { answerReleaseWithheldReasonOffThread, recordReleaseManifest, type ReleaseCheck, type ReleaseConstraints, type ReleaseInput } from '../../core/release-manifest.ts';
 import { secretLocationCoverageNote } from '../../core/secret-location-note.ts';
 import { canonicalSourceCorpusId } from '../../core/source-corpus-registry.ts';
 import type { SourceIndexCorpusRegistry } from '../../core/source-index/corpus.ts';
 import { withCachedKeywordExpansion, type CachedKeywordExpansion } from '../../core/source-index/keyword-context.ts';
 import {
   routeSourceIndexSearch,
+  applySourceIndexVisibilityGate,
   type SourceIndexCorpusSearchAdapter,
   type SourceIndexRoutedSearchHit,
   type SourceIndexRouterAdapterMap,
@@ -503,9 +504,9 @@ export function createAnalystSourceIndexAnswerHandler(
       // Leg fitting is keyed by the candidates of the pack actually analyzed,
       // so a rebuilt pack (the private-outage fallback below) is fitted and its
       // matchCounts restated against its own candidates, never the first build's.
-      const assertDispatchAllowed = (analysisDetail: EvidencePackBuildDetail) => {
+      const assertDispatchAllowed = async (analysisDetail: EvidencePackBuildDetail) => {
         if (options.releaseCheck) {
-          const reason = answerReleaseWithheldReason([{ inputs: releaseInputs(analysisDetail), constraints: releaseConstraints }], options.releaseCheck);
+          const reason = await answerReleaseWithheldReasonOffThread([{ inputs: releaseInputs(analysisDetail), constraints: releaseConstraints }], options.releaseCheck);
           if (reason) throw new OperationError('source_index_policy_violation', reason);
         }
         if (lanes.visibilityGate) {
@@ -520,7 +521,7 @@ export function createAnalystSourceIndexAnswerHandler(
             trustTier: candidate.trustTier,
             rawExposed: false,
           }));
-          const kept = new Set(lanes.visibilityGate(hits));
+          const kept = new Set(await applySourceIndexVisibilityGate(lanes.visibilityGate, hits));
           if (hits.some((hit) => !kept.has(hit))) {
             throw new OperationError('source_index_policy_violation',
               'Olympus withheld this answer because an item changed privacy tier before analysis.');
@@ -542,8 +543,8 @@ export function createAnalystSourceIndexAnswerHandler(
         );
         const seatOf = new Map(analysisDetail.pack.candidates.map((candidate, index) => [candidate.provenance, index + 1] as const));
         const guarded = (analyst: Analyst): Analyst => ({
-          analyze: (dispatchPack, analyzeOptions) => {
-            assertDispatchAllowed(analysisDetail);
+          analyze: async (dispatchPack, analyzeOptions) => {
+            await assertDispatchAllowed(analysisDetail);
             return analyst.analyze(dispatchPack, analyzeOptions);
           },
         });
@@ -598,9 +599,9 @@ export function createAnalystSourceIndexAnswerHandler(
             throw new OperationError('source_index_policy_violation', 'Source evidence is no longer allowed.', 'Ask again under the current source policy.');
           }
           // Also repeated after a shared model-slot wait, including audits.
-          assertDispatchAllowed(analysisDetail);
+          await assertDispatchAllowed(analysisDetail);
         };
-        // Await live authorization before the synchronous release/tier check.
+        // Await live authorization and pooled release/tier reads before dispatch.
         // Repeat at every route leg too: an unqueued fallback may start after
         // a model failure, by which time the earlier pack can be disallowed.
         const live = (analyst: Analyst): Analyst => options.inferenceGuard ? {
@@ -2836,15 +2837,15 @@ const RELEASED_EXCERPT_MAX_CHARS = 1_500;
  * withheld (counted). A check that throws, or answers for the wrong number of
  * items, fails closed.
  */
-function recheckReleasedEvidence(
+async function recheckReleasedEvidence(
   evidence: readonly ReleasedEvidenceItem[],
   identities: readonly ReleaseInput[],
   check: ReleaseCheck,
-): { evidence: ReleasedEvidenceItem[]; withheld: number } {
+): Promise<{ evidence: ReleasedEvidenceItem[]; withheld: number }> {
   if (evidence.length === 0) return { evidence: [], withheld: 0 };
   let verdicts: ReturnType<ReleaseCheck['inputs']>;
   try {
-    verdicts = check.inputs(identities);
+    verdicts = await (check.inputsOffThread?.(identities) ?? check.inputs(identities));
   } catch (error) {
     console.error(`[olympus:search] release_check_failed error_message=${JSON.stringify((error instanceof Error ? error.message : String(error)).slice(0, 200))}`);
     throw new OperationError('source_index_policy_violation', 'The current tiers could not be read.');
@@ -2977,7 +2978,7 @@ export async function searchReleasedEvidence(input: {
       ...(fact.sourceInstructionFlags.length > 0 ? { source_instructions_flagged: true as const } : {}),
     }));
   });
-  const released = input.releaseCheck ? recheckReleasedEvidence(evidence, identities, input.releaseCheck) : { evidence, withheld: 0 };
+  const released = input.releaseCheck ? await recheckReleasedEvidence(evidence, identities, input.releaseCheck) : { evidence, withheld: 0 };
   recordReleaseManifest({
     inputs: identities.filter((_, index) => released.evidence.includes(evidence[index]!)),
     constraints: { secureDerivativeDefault: 'approval', includeSecureLocalContent: false },
@@ -3224,7 +3225,7 @@ export async function probePrivateMatch(input: {
     const lanes = input.lanes(request, 'private_search');
     const corpusIds = sourceAnswerCorpusIds(request);
     const excluded = lanes.excludedCorpusIds ?? new Set<string>();
-    const gate = (hits: SourceIndexRoutedSearchHit[]) => (lanes.visibilityGate ? lanes.visibilityGate(hits) : hits);
+    const gate = (hits: SourceIndexRoutedSearchHit[]) => lanes.visibilityGate ? applySourceIndexVisibilityGate(lanes.visibilityGate, hits) : Promise.resolve(hits);
     if (request.selected_items?.length) {
       let unchecked = false;
       const hits: SourceIndexRoutedSearchHit[] = [];
@@ -3251,7 +3252,7 @@ export async function probePrivateMatch(input: {
           rawExposed: false,
         });
       }
-      if (hits.length > 0 && gate(hits).length > 0) return 'match';
+      if (hits.length > 0 && (await gate(hits)).length > 0) return 'match';
       return unchecked ? 'unknown' : 'no_match';
     }
     const search = (context: { lexicalOnly?: boolean }) => routeSourceIndexSearch({
