@@ -69790,7 +69790,12 @@ function sweepPage(set, options) {
 function startSupersededSweepTicker(options = {}) {
   const finished = new WeakSet;
   const sets = options.sets ?? registeredTierSets;
-  const timer = setInterval(() => {
+  const every = options.every ?? ((tick, ms) => {
+    const timer = setInterval(tick, ms);
+    timer.unref?.();
+    return () => clearInterval(timer);
+  });
+  return every(() => {
     if (options.active && !options.active())
       return;
     for (const set of sets()) {
@@ -69800,8 +69805,6 @@ function startSupersededSweepTicker(options = {}) {
         finished.add(set);
     }
   }, options.intervalMs ?? SUPERSEDED_SWEEP_TICK_MS);
-  timer.unref?.();
-  return () => clearInterval(timer);
 }
 var STATE = "automatic-superseded-prune-v1", SUPERSEDED_SWEEP_TICK_MS = 5000, PAGE_SIZE = 200, MAX_ITEM_FAILURES = 3;
 var init_tier_auto_prune_sweep = __esm(() => {

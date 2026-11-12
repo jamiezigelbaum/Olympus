@@ -218,21 +218,21 @@ test('the background ticker sweeps without the sniffer or a sync, then leaves a 
   const ctx = await fixture();
   const slice = spyOn(ctx.f.set, 'sweepSupersededSlice');
   let active = false;
-  const stop = startSupersededSweepTicker({ intervalMs: 5, active: () => active, sets: () => [ctx.f.set] });
-  cleanup.push(stop);
-  await new Promise(resolve => setTimeout(resolve, 30));
+  let tick: (() => void) | undefined;
+  let cancelled = false;
+  const stop = startSupersededSweepTicker({ active: () => active, sets: () => [ctx.f.set],
+    every: (run, ms) => { expect(ms).toBe(5_000); tick = run; return () => { cancelled = true; }; } });
+  tick!();
   // The split's front (inactive) takes no slice.
   expect(slice).not.toHaveBeenCalled();
   active = true;
-  const deadline = Date.now() + 2_000;
-  while (!JSON.parse(ctx.f.ledger.readMeta('automatic-superseded-prune-v1') || '{}').done && Date.now() < deadline) {
-    await new Promise(resolve => setTimeout(resolve, 5));
-  }
+  for (let i = 0; i < 10 && !JSON.parse(ctx.f.ledger.readMeta('automatic-superseded-prune-v1') || '{}').done; i++) tick!();
   expect(JSON.parse(ctx.f.ledger.readMeta('automatic-superseded-prune-v1') || '{}').done).toBe(true);
   expect(ctx.f.ledger.listSupersededItemWindow({ limit: 10 }).map(record => record.providerItemId))
     .toEqual([identityOf('b').providerItemId]);
   const calls = slice.mock.calls.length;
-  await new Promise(resolve => setTimeout(resolve, 30));
+  tick!();
   expect(slice.mock.calls.length).toBe(calls);
   stop();
+  expect(cancelled).toBe(true);
 });

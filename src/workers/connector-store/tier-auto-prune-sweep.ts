@@ -244,16 +244,21 @@ export function startSupersededSweepTicker(options: {
   active?: () => boolean;
   intervalMs?: number;
   sets?: () => readonly TieredStoreSet[];
+  /** Tests drive the tick themselves; returns a cancel function. */
+  every?: (tick: () => void, ms: number) => () => void;
 } = {}): () => void {
   const finished = new WeakSet<TieredStoreSet>();
   const sets = options.sets ?? registeredTierSets;
-  const timer = setInterval(() => {
+  const every = options.every ?? ((tick, ms) => {
+    const timer = setInterval(tick, ms);
+    (timer as { unref?: () => void }).unref?.();
+    return () => clearInterval(timer);
+  });
+  return every(() => {
     if (options.active && !options.active()) return;
     for (const set of sets()) {
       if (finished.has(set)) continue;
       if (set.sweepSupersededSlice()) finished.add(set);
     }
   }, options.intervalMs ?? SUPERSEDED_SWEEP_TICK_MS);
-  (timer as { unref?: () => void }).unref?.();
-  return () => clearInterval(timer);
 }
