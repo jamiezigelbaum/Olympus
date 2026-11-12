@@ -25,13 +25,20 @@ export type RelayEvent =
   /** A demo sign-in page answered: the app, its return address (a pinned one, else a fixed word) and the status (relay.ts demoSignIn). */
   | 'demo_sign_in_page'
   /** A relay-wide budget (registrations, returning registrations, egress) ran dry; once per episode. */
-  | 'budget_exhausted';
+  | 'budget_exhausted'
+  /** One `/mcp` or `/openai/mcp` request carrying a credential: what it asked and what it got (relay.ts mcp). */
+  | 'mcp_request';
 
 export type RelayLog = (event: RelayEvent, fields?: Record<string, string | number | boolean>) => void;
 
 /** 8 hex characters of SHA-256 over the install id. */
 export function installTag(installId: string): string {
   return createHash('sha256').update(`olympus-relay-log\n${installId}`).digest('hex').slice(0, 8);
+}
+
+/** 8 hex characters naming one credential across log lines, from its SHA-256 digest (never the token). */
+export function credentialLogTag(digest: Buffer): string {
+  return createHash('sha256').update('olympus-relay-log-credential\n').update(digest).digest('hex').slice(0, 8);
 }
 
 export function jsonLineLog(write: (line: string) => void = (line) => console.log(line)): RelayLog {
