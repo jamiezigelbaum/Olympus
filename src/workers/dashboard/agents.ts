@@ -180,7 +180,7 @@ export function renderDashboardAgentsSection(input: DashboardAgentsSectionInput)
     `<div data-agent-connections-list>${connectionList(view, input.now)}</div>`,
     renderConnectionRequests(view),
     connectSheet(view.remoteAccess, host, view.privateAccess),
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 function remoteAccessRow(access: DashboardRemoteAccess, manual: string | undefined): string {

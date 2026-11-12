@@ -180292,7 +180292,7 @@ function renderDashboardAgentsSection(input) {
     `<div data-agent-connections-list>${connectionList(view4, input.now)}</div>`,
     renderConnectionRequests(view4),
     connectSheet(view4.remoteAccess, host, view4.privateAccess)
-  ].join(`
+  ].filter(Boolean).join(`
 `);
 }
 function remoteAccessRow(access, manual) {
