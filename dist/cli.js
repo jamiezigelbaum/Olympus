@@ -236886,6 +236886,40 @@ var init_remote_search = __esm(() => {
   };
 });
 
+// connect-relay/shared/mcp-log.ts
+function rpcCallNames(body) {
+  const messages = Array.isArray(body) ? body : [body];
+  return messages.slice(0, 8).map((message2) => {
+    const { method, params } = message2 && typeof message2 === "object" ? message2 : {};
+    if (typeof method !== "string" || !LOGGED_RPC_METHODS.has(method))
+      return "?";
+    if (method !== "tools/call")
+      return method;
+    return `${method}:${typeof params?.name === "string" && LOGGED_TOOL_NAME.test(params.name) ? params.name : "?"}`;
+  });
+}
+var LOGGED_RPC_METHODS, LOGGED_TOOL_NAME;
+var init_mcp_log = __esm(() => {
+  LOGGED_RPC_METHODS = new Set([
+    "initialize",
+    "ping",
+    "tools/list",
+    "tools/call",
+    "resources/list",
+    "resources/templates/list",
+    "resources/read",
+    "prompts/list",
+    "prompts/get",
+    "completion/complete",
+    "logging/setLevel",
+    "notifications/initialized",
+    "notifications/cancelled",
+    "notifications/progress",
+    "notifications/roots/list_changed"
+  ]);
+  LOGGED_TOOL_NAME = /^(?:olympus|source|ask)_[a-z_]{1,48}$/;
+});
+
 // src/workers/remote-mcp.ts
 var exports_remote_mcp = {};
 __export(exports_remote_mcp, {
@@ -237005,17 +237039,6 @@ function createRemoteMcpHandler(options) {
       });
     }
   }
-}
-function rpcCallNames(body) {
-  const messages = Array.isArray(body) ? body : [body];
-  return messages.slice(0, 8).map((message2) => {
-    const { method, params } = message2 && typeof message2 === "object" ? message2 : {};
-    if (typeof method !== "string" || !LOGGED_RPC_METHODS.has(method))
-      return "?";
-    if (method !== "tools/call")
-      return method;
-    return `${method}:${typeof params?.name === "string" && LOGGED_TOOL_NAME.test(params.name) ? params.name : "?"}`;
-  });
 }
 function remoteMcpLogLine(trace, status, ms) {
   return JSON.stringify({
@@ -237215,7 +237238,7 @@ function jsonResponse(status, body, headers = {}) {
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers }
   });
 }
-var REMOTE_MCP_PATH = "/mcp", REMOTE_DIRECTORY_MCP_PATH, IN_PROCESS_WORKER_BASE_URL = "http://olympus-worker.internal/v1", LOGGED_RPC_METHODS, LOGGED_TOOL_NAME;
+var REMOTE_MCP_PATH = "/mcp", REMOTE_DIRECTORY_MCP_PATH, IN_PROCESS_WORKER_BASE_URL = "http://olympus-worker.internal/v1";
 var init_remote_mcp = __esm(() => {
   init_webStandardStreamableHttp();
   init_delphi();
@@ -237232,28 +237255,11 @@ var init_remote_mcp = __esm(() => {
   init_remote_search();
   init_directory_tools();
   init_remote_request_body();
+  init_mcp_log();
   init_remote_result();
   init_tokens();
   init_pinned_clients();
   REMOTE_DIRECTORY_MCP_PATH = DIRECTORY_MCP_PATH;
-  LOGGED_RPC_METHODS = new Set([
-    "initialize",
-    "ping",
-    "tools/list",
-    "tools/call",
-    "resources/list",
-    "resources/templates/list",
-    "resources/read",
-    "prompts/list",
-    "prompts/get",
-    "completion/complete",
-    "logging/setLevel",
-    "notifications/initialized",
-    "notifications/cancelled",
-    "notifications/progress",
-    "notifications/roots/list_changed"
-  ]);
-  LOGGED_TOOL_NAME = /^(?:olympus|source|ask)_[a-z_]{1,48}$/;
 });
 
 // src/workers/relay-surfaces.ts

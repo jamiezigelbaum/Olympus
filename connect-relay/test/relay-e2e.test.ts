@@ -976,6 +976,29 @@ describe('limits', () => {
     await slow;
   });
 
+  test('each /mcp request with a credential logs one line: methods, status and time, never the token or body', async () => {
+    const relay = await makeRelay();
+    const worker = fakeWorker('A');
+    cleanups.push(worker.stop);
+    const a = await connectInstall(relay, worker);
+    const token = mintCredential('access', a.identity.installId);
+    logLines.length = 0;
+    expect((await mcpPost(relay, token, rpc('tools/list'))).status).toBe(200);
+    expect((await mcpPost(relay, token, rpc('tools/call', { name: 'source_answer', arguments: { question: 'secret-question-text' } }))).status).toBe(200);
+    expect((await mcpPost(relay, token, JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'alice@example.com' }))).status).toBe(200);
+    const lines = logLines.map((line) => JSON.parse(line) as Record<string, unknown>).filter((line) => line.event === 'mcp_request');
+    expect(lines.map((line) => line.calls)).toEqual(['tools/list', 'tools/call:source_answer', '?']);
+    for (const line of lines) {
+      expect(line).toMatchObject({ surface: 'default', install: installTag(a.identity.installId), status: 200 });
+      expect(String(line.credential)).toMatch(/^[0-9a-f]{8}$/);
+      expect(typeof line.ms).toBe('number');
+    }
+    // The first request is unconfirmed; the engine's mark moves the credential to the owner lane.
+    expect(lines.map((line) => line.lane)).toEqual(['unverified', 'owner', 'owner']);
+    const all = logLines.join('\n');
+    for (const leaked of [token, a.identity.installId, 'secret-question-text', 'alice@example.com']) expect(all).not.toContain(leaked);
+  });
+
   test('listing requests stop at the listing headroom', async () => {
     const relay = await makeRelay({ concurrentPerInstall: 2, listingHeadroomPerInstall: 1 });
     const worker = fakeWorker('A');
