@@ -51,7 +51,7 @@ import { runJourney, type JourneyTrace } from './journey.ts';
 import { selectJourneys, type JourneyMachine } from './journeys.ts';
 import { startUpdateStandIn, type UpdateStandIn } from './update-stand-in.ts';
 import { explore, pagesAccessibilityAudit, withPageAudits, type Accessibility, type Seed } from './explore.ts';
-import { composeSeeds, localFilesDriver, type SeedContext } from './explore-seeds.ts';
+import { composeSeeds, helpers, localFilesDriver, type SeedContext } from './explore-seeds.ts';
 import { explorePages, inboxAnswers } from './explore-pages.ts';
 import type { PageInventory } from './explore-pages-inventory.ts';
 import type { InventoryControl } from './explore-inventory.ts';
@@ -1438,7 +1438,7 @@ function exploreSeeds(config: AgentConfig): Seed[] {
   };
   return composeSeeds(readwiseSeeds(config), [
     ...(platform().os === 'linux' ? [localFilesDriver(ctx)] : []),
-  ]);
+  ], () => helpers(ctx).engineSteady());
 }
 
 /** Readwise's seeded states: the stand-in API, with the stored key accepted, rejected, or the source disconnected or emptied. */

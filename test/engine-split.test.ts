@@ -43,6 +43,7 @@ import {
   OwnerBusyMarks,
   restartAfterFront,
   DATA_EXPORT_WAIT_MS,
+  OWNER_ACTION_WAIT_MS,
   SOURCE_SYNC_WAIT_MS,
   tierCommandOnlyReads,
   waitForProcessExit,
@@ -816,6 +817,13 @@ describe('messaging capture across the split', () => {
     // A stop the background could not confirm keeps the caller from tearing the grant down.
     fail = true;
     await expect(stop('whatsapp')).rejects.toThrow('helper did not exit');
+    // It waits through a background stall longer than a minute, as one process did.
+    const waits: Array<number | undefined> = [];
+    const answered = { send: async (_command: EngineCommand, options?: { timeoutMs?: number }) => { waits.push(options?.timeoutMs); return { id: 'c', state: 'done' as const, instance_id: 'b', result: {} }; } };
+    await frontCaptureStop(answered)('telegram');
+    await frontSetItemPrivate(answered)({ locator: 'telegram:chat-1:m9', provider: 'telegram', providerItemId: 'm9' });
+    expect(waits).toEqual([OWNER_ACTION_WAIT_MS, OWNER_ACTION_WAIT_MS]);
+    expect(OWNER_ACTION_WAIT_MS).toBeGreaterThanOrEqual(2 * 78_000);
     expect(() => parseEngineCommandEnvelope({ id: 'command-0050', command: { kind: 'capture_stop', source: 'signal' } })).toThrow('telegram or whatsapp');
     // The front's route wiring uses it: the front's own supervisors are empty.
     const server = readFileSync(join(import.meta.dir, '../src/workers/engine/server.ts'), 'utf8');

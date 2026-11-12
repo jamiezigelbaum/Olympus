@@ -29,11 +29,33 @@ export function laneTimeoutGap(corpusId: string): string {
   return `Ran out of time searching ${corpusId}; it is not part of this answer, so more may be there. Ask again in a moment.`;
 }
 
+// A source's read of its newest items (the chat recency lane) that ran out of
+// time or found the store busy (#1460). Its other lanes still answered, so the
+// source is searched; only its newest items may be missing, and that is said.
+// The lane reports this token as its skip reason; the router carries it as a
+// lane_timeout degradation on that one lane.
+export const RECENT_ITEMS_CUT_SHORT = 'recent_items_cut_short';
+
+const RECENT_PREFIX = 'Ran out of time reading the newest items in ';
+
+/** The coverage gap for a source whose read of its newest items ran out of time. */
+export function recentItemsTimeoutGap(corpusId: string): string {
+  return `${RECENT_PREFIX}${corpusId}; its newest items may be missing from this search. Ask again in a moment.`;
+}
+
+function recentItemsTimeoutGapCorpus(gap: string): string | undefined {
+  if (!gap.startsWith(RECENT_PREFIX)) return undefined;
+  const end = gap.indexOf(';', RECENT_PREFIX.length);
+  return end > RECENT_PREFIX.length ? gap.slice(RECENT_PREFIX.length, end) : undefined;
+}
+
 export interface TimedOutCorpora {
   /** Lanes that ran out of time before returning anything. */
   stillSearching: string[];
   /** Searched by keyword only: the search by meaning ran out of time. */
   partlySearched: string[];
+  /** Searched, but the read of their newest items ran out of time. */
+  newestMissed: string[];
 }
 
 /** The sources a search cut short, from the evidence pack's coverage. */
@@ -49,11 +71,14 @@ export function timedOutCorpora(coverage: {
   const partlySearched = [...new Set(coverage.extractionGaps
     .map(semanticTimeoutGapCorpus)
     .filter((corpusId): corpusId is string => corpusId !== undefined && !stillSearching.includes(corpusId)))].sort();
-  return { stillSearching, partlySearched };
+  const newestMissed = [...new Set(coverage.extractionGaps
+    .map(recentItemsTimeoutGapCorpus)
+    .filter((corpusId): corpusId is string => corpusId !== undefined && !stillSearching.includes(corpusId)))].sort();
+  return { stillSearching, partlySearched, newestMissed };
 }
 
 /** One coverage note per source a search cut short, naming it by corpus. */
 export function timedOutCoverageNotes(coverage: Parameters<typeof timedOutCorpora>[0]): string[] {
-  const { stillSearching, partlySearched } = timedOutCorpora(coverage);
-  return [...stillSearching.map(laneTimeoutGap), ...partlySearched.map(semanticTimeoutGap)];
+  const { stillSearching, partlySearched, newestMissed } = timedOutCorpora(coverage);
+  return [...stillSearching.map(laneTimeoutGap), ...partlySearched.map(semanticTimeoutGap), ...newestMissed.map(recentItemsTimeoutGap)];
 }

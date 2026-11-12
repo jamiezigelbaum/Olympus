@@ -414,6 +414,9 @@ describe('an archive imported with the private model on', () => {
     ] as Array<SearchView | undefined>) {
       expect(failing(searchChecks('p', search, agentFx, 'cited'))).toEqual(['p.search']);
     }
+    // A miss carries the result's own notes, so a cut lane or skipped store shows in the report.
+    const missed = searchChecks('p', { ok: true, isError: false, evidence: [], notes: ['The keyword search of WhatsApp ran out of time.'] }, agentFx, 'cited');
+    expect(missed[0]!.detail).toContain("the result's notes: The keyword search of WhatsApp ran out of time.");
   });
 });
 

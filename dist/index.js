@@ -7619,6 +7619,12 @@ function isExecutableFile(path) {
   }
 }
 var init_openclaw_executable = () => {};
+// src/core/source-index/partial-search.ts
+var SEMANTIC_TIMEOUT_REASONS;
+var init_partial_search = __esm(() => {
+  SEMANTIC_TIMEOUT_REASONS = new Set(["vector_scan_deadline_exceeded", "vector_scan_store_busy"]);
+});
+
 // src/core/source-index/keyword-context.ts
 import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
 var context, disabled, cachedOnly, requestContext;
@@ -7658,6 +7664,7 @@ function normalizeRouterResultKey(key) {
 }
 var FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS;
 var init_router = __esm(() => {
+  init_partial_search();
   init_keyword_context();
   init_types();
   init_answer_latency_trace();
@@ -20098,6 +20105,7 @@ var init_local_index = __esm(() => {
   init_keyword_context();
   init_keyword_languages();
   init_keyword_expansion();
+  init_partial_search();
   init_control_path_headroom();
   init_off_thread_reads();
   init_provider_account_identity();
@@ -21025,12 +21033,6 @@ var init_connector_store = __esm(() => {
 var DEFAULT_ANSWER_LEASE_MS;
 var init_answer_activity = __esm(() => {
   DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
-});
-
-// src/core/source-index/partial-search.ts
-var SEMANTIC_TIMEOUT_REASONS;
-var init_partial_search = __esm(() => {
-  SEMANTIC_TIMEOUT_REASONS = new Set(["vector_scan_deadline_exceeded", "vector_scan_store_busy"]);
 });
 
 // src/core/evidence-versions.ts

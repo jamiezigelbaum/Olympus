@@ -41,7 +41,8 @@ class FakeEngine {
     this.tick();
     if (provider === 'local_files') {
       const l = this.local;
-      return { provider, connection: { state: l.connected ? (l.reading ? 'syncing' : 'synced') : 'not_connected', label: 'x' }, coverage: { indexed_items: l.items }, scope_selection: { connected: l.connected, status: l.approved ? 'approved' : 'scope_pending' }, schedule: { missing_folders: l.missing ? ['f'] : [], ...(l.missing ? { degraded_reason: 'scope_root_missing' } : {}) } };
+      // As the real engine: a disconnected source counts nothing as indexed, and its kept rows show only as stored.
+      return { provider, connection: { state: l.connected ? (l.reading ? 'syncing' : 'synced') : 'not_connected', label: 'x' }, coverage: l.connected || l.items === 0 ? { indexed_items: l.items } : { indexed_items: 0, stored_items: l.items }, scope_selection: { connected: l.connected, status: l.approved ? 'approved' : 'scope_pending' }, schedule: { missing_folders: l.missing ? ['f'] : [], ...(l.missing ? { degraded_reason: 'scope_root_missing' } : {}) } };
     }
     return { provider, connection: { state: 'not_connected' }, coverage: { indexed_items: 0 } };
   }
@@ -55,9 +56,9 @@ class FakeEngine {
       this.restart = ['up', 'down', 'down'];
       return ok({ ok: true, worker_restarting: true });
     }
-    if (method === 'GET' && path === '/dashboard.json') {
+    if (path === '/dashboard/tools/call' && body.name === 'olympus_dashboard') {
       if (this.restart.shift() === 'down') throw new Error('connection refused');
-      return ok({});
+      return ok({ structuredContent: {} });
     }
     if (path === '/dashboard/connect/this-computer') { this.local.connected = true; return ok(); }
     if (path === '/dashboard/disconnect') { this.local.connected = false; return ok(); }
@@ -129,7 +130,28 @@ describe('Files on this computer', () => {
     expect((await driver.states.disconnected!()).ok).toBe(true);
     expect((await driver.states.empty!()).ok).toBe(true);
     expect(engine.restart).toEqual([]);
-    expect(engine.calls.at(-1)).toBe('GET /dashboard.json');
+    expect(engine.calls.slice(-2)).toEqual(['POST /dashboard/tools/call olympus_dashboard', 'POST /dashboard/tools/call olympus_dashboard']);
+  });
+
+  test('a front that answers once between the two restarts of a split delete is not taken as back (run 43120046965)', async () => {
+    const engine = new FakeEngine();
+    engine.restartsOnDelete = true;
+    const driver = localFilesDriver(engine.ctx);
+    expect((await driver.states.disconnected!()).ok).toBe(true);
+    // The delete is answered; the front restarts, comes up, and goes down again while the background restarts to delete.
+    const deleteRoute = engine.ctx.call;
+    engine.ctx.call = async (method, path, body) => {
+      const reply = await deleteRoute(method, path, body);
+      if (path === '/dashboard/delete-source-data') engine.restart = ['down', 'up', 'down', 'down', 'up'];
+      return reply;
+    };
+    const steady = localFilesDriver(engine.ctx);
+    expect((await steady.states.empty!()).ok).toBe(true);
+    // Both "up"s after the second outage are read, the last two calls in a row.
+    expect(engine.restart).toEqual([]);
+    const probes = engine.calls.filter((call) => call === 'POST /dashboard/tools/call olympus_dashboard');
+    expect(probes.length).toBeGreaterThanOrEqual(6);
+    expect(engine.calls.slice(-2)).toEqual(['POST /dashboard/tools/call olympus_dashboard', 'POST /dashboard/tools/call olympus_dashboard']);
   });
 
   test('a state told to stop stops at its next call or wait, before it changes anything more', async () => {
@@ -171,7 +193,17 @@ describe('putting the sources together', () => {
     expect(asked).toBe(false);
   });
 
-  test('a state a source does not have leaves it as it is', async () => {
+  test('the page opens only after the engine answers steadily, and a seed says when it did not', async () => {
+    const order: string[] = [];
+    const steady = composeSeeds(primary(true), [driver('Fine', async () => { order.push('state'); return { ok: true, detail: 'fine' }; })], async () => { order.push('ready'); return true; });
+    const applied = await steady[0]!.apply();
+    expect(order).toEqual(['state', 'ready']);
+    expect(applied.detail).not.toContain('not answering');
+    const unsteady = composeSeeds(primary(true), [], async () => false);
+    expect((await unsteady[0]!.apply()).detail).toContain('the engine was not answering steadily when the page opened');
+  });
+
+    test('a state a source does not have leaves it as it is', async () => {
     const seeds = composeSeeds([{ id: 'failed', title: 'failed', apply: async () => ({ ok: true, detail: 'rw' }) }], [driver('OnlyPopulated', async () => ({ ok: false, detail: 'should not run' }))]);
     expect(await seeds[0]!.apply()).toEqual({ ok: true, detail: 'rw' });
   });

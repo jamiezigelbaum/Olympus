@@ -16114,7 +16114,7 @@ class TierLedger {
   static assertSchemaCanOpen(dbPath, readOnly = false) {
     if (dbPath === ":memory:" || !existsSync14(dbPath))
       return;
-    const version = readSqliteWithoutWriting(dbPath, 1e4, (db) => readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID));
+    const version = readSqliteWithoutWriting(dbPath, 1e4, (db) => readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID), readOnly);
     if (version !== undefined && (version > TIER_LEDGER_SCHEMA_VERSION || readOnly && version !== TIER_LEDGER_SCHEMA_VERSION)) {
       throw new TierLedgerSchemaError(version);
     }
@@ -18556,9 +18556,9 @@ function readStoreBindingCursor(storeDbPath, runId, connectorId) {
     return row?.cursor ?? undefined;
   });
 }
-function readSqliteWithoutWriting(dbPath, busyTimeoutMs, read) {
+function readSqliteWithoutWriting(dbPath, busyTimeoutMs, read, strictReadOnly = false) {
   for (const mode of [{ readonly: true, create: false }, { readwrite: true, create: false }]) {
-    if ("readwrite" in mode && hasUnmergedWrites(dbPath))
+    if ("readwrite" in mode && (strictReadOnly || hasUnmergedWrites(dbPath)))
       return;
     let db;
     try {
@@ -31307,25 +31307,23 @@ class LocalConnectorStore {
     const read = this.recentItemsRead(maxResults, accountScope, filters);
     return this.visibleRecentRows(this.db.query(read.sql).all(...read.params));
   }
-  async recentItemsOffThread(maxResults, accountScope, filters, deadlineAtMs) {
+  async recentItemsOffThread(maxResults, accountScope, filters, deadlineAtMs, onCutShort) {
     if (!offThreadReadsSupported(this.dbPath))
       return this.recentItems(maxResults, accountScope, filters);
     let rows;
     try {
       rows = await readOnPool(this.dbPath, this.recentItemsRead(maxResults, accountScope, filters), deadlineAtMs !== undefined ? { deadlineAtMs } : {});
     } catch (error) {
-      if (error instanceof OffThreadReadBusyError)
-        return [];
-      throw error;
-    }
-    if (this.closedForPoolReads)
+      if (!(error instanceof OffThreadReadBusyError))
+        throw error;
+      onCutShort?.();
       return [];
-    return (await visibilityAwaited(() => this.tierVisibleRowsSteps(rows, (row) => ({
-      provider: row.provider,
-      accountScope: row.account_scope,
-      providerItemId: row.provider_item_id,
-      ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
-    }), () => "content"), this.childVisibilityLane())).map((row) => searchRowFromItemRow(row));
+    }
+    if (this.closedForPoolReads) {
+      onCutShort?.();
+      return [];
+    }
+    return (await visibilityAwaited(() => this.visibleRecentRowsSteps(rows), this.childVisibilityLane())).map((row) => searchRowFromItemRow(row));
   }
   recentItemsRead(maxResults, accountScope, filters) {
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
@@ -31357,12 +31355,15 @@ class LocalConnectorStore {
     };
   }
   visibleRecentRows(rows) {
-    return this.tierVisibleRows(rows, (row) => ({
+    return visibilityHere(this.visibleRecentRowsSteps(rows)).map((row) => searchRowFromItemRow(row));
+  }
+  visibleRecentRowsSteps(rows) {
+    return this.tierVisibleRowsSteps(rows, (row) => ({
       provider: row.provider,
       accountScope: row.account_scope,
       providerItemId: row.provider_item_id,
       ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
-    }), () => "content").map((row) => searchRowFromItemRow(row));
+    }), () => "content");
   }
   privateTierRowWindow(options) {
     const after = Math.max(0, Math.floor(options.after ?? 0));

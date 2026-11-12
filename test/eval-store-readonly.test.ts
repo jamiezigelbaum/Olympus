@@ -4,14 +4,14 @@ import { readFileSync } from 'node:fs';
 // How each tool opens the store: scripts/ goes through the storage service
 // (test/store-open-guard.test.ts); eval/ is outside that guard.
 const READ_ONLY_TOOLS = {
-  'eval/run-real.ts': 'new LocalConnectorStore({',
+  'eval/retrieval.ts': 'new LocalConnectorStore({',
   'scripts/source-eval-pack-inspect.ts': 'openConnectorStore({ sourceId: DROPBOX_FILES_SOURCE_ID }, {',
 } as const;
 
 // How each tool builds its retrieval: the eval searches through the same answer
 // lanes live answers use (#707); the inspector builds its own adapter.
 const RETRIEVAL = {
-  'eval/run-real.ts': ['createSourceAnswerLanes({'],
+  'eval/retrieval.ts': ['createSourceAnswerLanes({'],
   'scripts/source-eval-pack-inspect.ts': ['createConnectorStoreCorpusAdapter({', 'createConnectorStoreContentProvider({'],
 } as const;
 

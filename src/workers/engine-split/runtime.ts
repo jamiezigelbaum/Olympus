@@ -157,6 +157,12 @@ export function createEngineFront(input: {
 export const SOURCE_SYNC_WAIT_MS = 35 * 60_000;
 /** How long the front waits for the background to write an export: a large install's copies take a while. */
 export const DATA_EXPORT_WAIT_MS = 3 * 60 * 60_000;
+// How long the front waits for the background to confirm an owner's action
+// (Unpair's capture stop, Make Private). In one process these waited without
+// a limit; the background can stall for over a minute under embedding and
+// judging load (78 s in a release check), and a 30 s wait then told the owner
+// the stop was unconfirmed while the background went on to apply it.
+export const OWNER_ACTION_WAIT_MS = 5 * 60_000;
 
 function restartingResponse(): Response {
   return Response.json({ error: { code: 'worker_restarting', message: 'Olympus is restarting; try again in a moment.' } }, { status: 503 });

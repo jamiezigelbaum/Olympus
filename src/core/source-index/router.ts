@@ -1,4 +1,5 @@
 import { isSourceIndexLaneBusyError } from './lane-busy.ts';
+import { RECENT_ITEMS_CUT_SHORT } from './partial-search.ts';
 import { withKeywordRequestScope } from './keyword-context.ts';
 import type {
   RetrievalDegradation,
@@ -603,6 +604,8 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
       const semanticLoss = semanticLaneDegradation(corpus.corpusId, retrievalState, response);
       if (semanticLoss) degradations.push(semanticLoss);
     }
+    const newestLoss = recentItemsLaneDegradation(corpus.corpusId, response);
+    if (newestLoss) degradations.push(newestLoss);
     if (contributedSecure) secureLaneAudits.push(...laneAudits.slice(corpusLaneAuditsStart));
     lanes.push({
       name: corpus.corpusId,
@@ -771,6 +774,24 @@ function laneIndex(laneOrder: ReadonlyMap<string, number>, corpusId: string): nu
  * The evidence for "ran" is a lane audit of semantic or hybrid type in the
  * adapter's own response — the adapter cannot claim a lane it did not audit.
  */
+// A lane that read a source's newest items and ran out of time (#1460): the
+// source answered from its other lanes, so it is searched, and this one lane
+// is marked so the evidence pack can say its newest items may be missing.
+function recentItemsLaneDegradation(
+  corpusId: string,
+  response: SourceIndexCorpusSearchResponse,
+): RetrievalDegradation | undefined {
+  const cut = (response.laneAudits ?? []).find((audit) => audit.skippedReason === RECENT_ITEMS_CUT_SHORT);
+  if (!cut) return undefined;
+  return {
+    laneName: `${corpusId}:recency`,
+    laneType: cut.laneType,
+    reason: 'lane_timeout',
+    detail: RECENT_ITEMS_CUT_SHORT,
+    occurrences: 1,
+  };
+}
+
 function semanticLaneDegradation(
   corpusId: string,
   state: SourceIndexRetrievalState,
