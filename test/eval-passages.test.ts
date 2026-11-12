@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test';
+import { expect, spyOn, test } from 'bun:test';
 import type { EvidencePackBuildDetail } from '../src/core/evidence-pack.ts';
 import type { EvidencePack } from '../src/core/contracts.ts';
 import { comparePassageReceipts, runPassageEval } from '../eval/run-passages.ts';
@@ -152,11 +152,16 @@ test('the question judge records whether each quote answers its question and the
 });
 test('the lane probe and question judge are not counted in retrieval timings', async () => {
   const one = { ...dataset, questions: [dataset.questions[0]!] };
-  const slow = <T>(value: T) => new Promise<T>(resolve => setTimeout(() => resolve(value), 300));
-  const receipt = await runPassageEval({ dataset: one, maxResults: 5, storeCounts: counts, gitSha: 'abc', buildPack: async () => detail(),
-    probeLanes: () => slow({ keyword: 1, vector: null }), judgeQuestion: () => slow({ answers: true, specific: true }) });
-  expect(receipt.questions![0]!.judge).toEqual({ answers: true, specific: true });
-  expect(receipt.questions![0]!.timings.totalMs).toBeLessThan(250);
+  // A fake clock: only the probe and the judge move it.
+  let now = 0;
+  const clock = spyOn(performance, 'now').mockImplementation(() => now);
+  try {
+    const receipt = await runPassageEval({ dataset: one, maxResults: 5, storeCounts: counts, gitSha: 'abc', buildPack: async () => detail(),
+      probeLanes: async () => { now += 1_000; return { keyword: 1, vector: null }; },
+      judgeQuestion: async () => { now += 1_000; return { answers: true, specific: true }; } });
+    expect(receipt.questions![0]!.judge).toEqual({ answers: true, specific: true });
+    expect(receipt.questions![0]!.timings.totalMs).toBe(0);
+  } finally { clock.mockRestore(); }
 });
 test('each row records what the reranker did, and the summary counts outcomes and time', async () => {
   const one = { ...dataset, questions: [dataset.questions[0]!, dataset.questions[1]!] };
