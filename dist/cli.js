@@ -70071,11 +70071,14 @@ var init_tier_content_purge = __esm(() => {
 function sweepAutomaticSupersededCopies(set, options = {}) {
   const now = options.now ?? Date.now;
   const started = now();
-  const total = sweepPage(set, options);
+  const budget = options.budgetMs ?? 0;
+  const spent = budget > 0 ? () => now() - started >= budget : () => false;
+  const timing = { pruneMs: 0, maxItemMs: 0, cut: false };
+  const total = sweepPage(set, options, spent, now, timing);
   const limit = Math.max(1, Math.min(options.limit ?? PAGE_SIZE, PAGE_SIZE));
   let last = total.checked;
-  while ((options.budgetMs ?? 0) > 0 && !total.complete && total.failed === 0 && last === limit && now() - started < options.budgetMs) {
-    const page2 = sweepPage(set, options);
+  while (budget > 0 && !total.complete && total.failed === 0 && !timing.cut && last === limit && !spent()) {
+    const page2 = sweepPage(set, options, spent, now, timing);
     total.checked += page2.checked;
     total.purged += page2.purged;
     total.kept += page2.kept;
@@ -70083,9 +70086,12 @@ function sweepAutomaticSupersededCopies(set, options = {}) {
     total.complete = page2.complete;
     last = page2.checked;
   }
+  if (total.purged > 0 || total.failed > 0) {
+    console.info(`[tier-auto-prune] ledger=${set.ledger.ledgerId()} slice_ms=${now() - started} prune_ms=${timing.pruneMs}` + ` max_item_ms=${timing.maxItemMs} checked=${total.checked} purged=${total.purged} complete=${total.complete}`);
+  }
   return total;
 }
-function sweepPage(set, options) {
+function sweepPage(set, options, spent, now, timing) {
   const ledger = set.ledger;
   const state = JSON.parse(ledger.readMeta(STATE) || "{}");
   const report = { checked: 0, purged: 0, kept: 0, failed: 0, complete: state.done === true };
@@ -70096,6 +70102,7 @@ function sweepPage(set, options) {
   const save = () => ledger.writeMeta(STATE, JSON.stringify(state));
   const finishPending = () => {
     const pending = state.pending;
+    const itemStarted = now();
     ledger.withGenerationFence(pending.identity, pending.generation, () => {
       const current2 = ledger.getCurrent(pending.identity);
       if (current2.state === "moving" || ledger.hasMovedMigrationProposal(pending.identity))
@@ -70108,7 +70115,9 @@ function sweepPage(set, options) {
         if (!store)
           throw new Error("Superseded store unavailable.");
         store.bindTierSet(ledger);
+        const pruneStarted = now();
         pruneSupersededStoreCopy(store, pending.identity);
+        timing.pruneMs += now() - pruneStarted;
         ledger.removeSupersededCopy(pending.identity, copy.corpusId);
         const deleted = state.deleted ??= {};
         deleted[copy.corpusId] = (deleted[copy.corpusId] ?? 0) + target.chunks;
@@ -70121,6 +70130,7 @@ function sweepPage(set, options) {
       delete state.failing;
       save();
     });
+    timing.maxItemMs = Math.max(timing.maxItemMs, now() - itemStarted);
   };
   let attempt;
   try {
@@ -70140,6 +70150,10 @@ function sweepPage(set, options) {
       return report;
     const rows = ledger.listSupersededItemWindow({ ...state.after ? { after: state.after } : {}, limit: limit - report.checked });
     for (const record of rows.slice(0, limit - report.checked)) {
+      if (report.checked > 0 && spent()) {
+        timing.cut = true;
+        break;
+      }
       report.checked++;
       const identity2 = {
         provider: record.provider,
@@ -70149,13 +70163,13 @@ function sweepPage(set, options) {
       };
       attempt = identity2;
       ledger.withGenerationFence(identity2, record.generation, () => {
-        const now = ledger.getCurrent(identity2);
-        if (!now.routed || now.contentTier === "secrets" || now.metadataTier === "secrets" || ledger.hasMovedMigrationProposal(identity2))
+        const now2 = ledger.getCurrent(identity2);
+        if (!now2.routed || now2.contentTier === "secrets" || now2.metadataTier === "secrets" || ledger.hasMovedMigrationProposal(identity2))
           return;
         const copies = ledger.copies(identity2);
         if (!copies.some((copy) => copy.state === "superseded"))
           return;
-        if (now.state === "moving") {
+        if (now2.state === "moving") {
           state.retry = true;
           return;
         }
@@ -70209,7 +70223,7 @@ function sweepPage(set, options) {
         save();
       }
     }
-    if (report.checked < limit) {
+    if (report.checked < limit && !timing.cut) {
       if (state.retry) {
         delete state.after;
         delete state.retry;
