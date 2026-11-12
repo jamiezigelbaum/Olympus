@@ -87,6 +87,10 @@ export const SHARED_DATA_FILES = {
   'backup-staging': 'backup-staging',
   // One person across sources (#1076): Private, on this computer only.
   'people-index': 'people-index.sqlite',
+  // The worker's boot progress, which the upgrade and the supervisors wait on,
+  // and the store backups taken before a schema update (core/boot-progress.ts, #1494).
+  'boot-progress': 'boot-progress.json',
+  'schema-backups': 'schema-backups.jsonl',
   models: 'models',
   'built-in-embedding': 'models/built-in-embedding',
   'built-in-reasoning': 'models/built-in-reasoning',

@@ -1,10 +1,10 @@
 import { Database } from 'bun:sqlite';
-import { expect, test } from 'bun:test';
+import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
-import { LocalConnectorStore, nextVectorDigestBackfillRows, connectorStoreCurrentEmbeddingPageQuery, connectorStoreCurrentEmbeddingRowsIterator, connectorStoreVectorDigestPageQuery, scanDigestPages } from '../src/workers/connector-store/local-index.ts';
+import { LocalConnectorStore, nextVectorDigestBackfillRows, connectorStoreCurrentEmbeddingPageQuery, connectorStoreCurrentEmbeddingRowsIterator, connectorStoreVectorDigestPageQuery, forEachPackedVectorDigest, scanDigestPages, type VectorDigestPackedPage } from '../src/workers/connector-store/local-index.ts';
 import { applyVectorDigestWindow, backfillVectorDigests, createVectorDigestSchema, vectorDigestSourceQuery, vectorDigestState, writeVectorDigest, type VectorDigestSourceRow } from '../src/workers/connector-store/vector-digest.ts';
 import { cosineSimilarity, decodeEmbedding, encodeEmbedding, type SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { encodeVectorDigest, scoreVectorDigest } from '../src/workers/source-index/vector-digest.ts';
@@ -13,6 +13,10 @@ import { waitFor } from './helpers/test-clock.ts';
 import { setReadPoolObserverForTests, setReadPoolWaitingWorkForTests } from '../src/workers/connector-store/off-thread-reads.ts';
 import { probeVectorDigest, seededVectorRandom } from '../eval/vector-digest-probe.ts';
 
+// The digest pass is opt-in while olympus-ops#151 is open; these tests cover it on.
+const digestSetting = process.env.OLYMPUS_VECTOR_DIGEST;
+beforeAll(() => { process.env.OLYMPUS_VECTOR_DIGEST = 'on'; });
+afterAll(() => { if (digestSetting === undefined) delete process.env.OLYMPUS_VECTOR_DIGEST; else process.env.OLYMPUS_VECTOR_DIGEST = digestSetting; });
 const modelId = 'digest-fixture';
 const provider: SourceEmbeddingProvider = { provider: 'built-in', backend: 'local', modelId, dimension: 3, configHash: '1', epochId: '1', async embed(inputs) { return inputs.map(() => [1, 0, 0]); } };
 const open = (dbPath = ':memory:') => new LocalConnectorStore({ dbPath, corpusId: 'internal.fixture.digest', family: 'file', trustDomain: 'internal', tierLedger: null });
@@ -405,7 +409,7 @@ test('a file store backfills on the read pool: the worker thread only writes dig
   } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('OLYMPUS_VECTOR_DIGEST=off forces the exact scan on a store with a complete digest', async () => {
+test('without OLYMPUS_VECTOR_DIGEST=on, a store with a complete digest runs the exact scan', async () => {
   const store = open();
   const saved = process.env.OLYMPUS_VECTOR_DIGEST;
   const queries: string[] = [];
@@ -414,7 +418,7 @@ test('OLYMPUS_VECTOR_DIGEST=off forces the exact scan on a store with a complete
     await store.embedChunks({ provider });
     expect(vectorDigestState(database(store), modelId).completed).toBe(true);
     const withDigest = await store.vectorSearchLane('harbor', provider, 10, 'a');
-    process.env.OLYMPUS_VECTOR_DIGEST = 'off';
+    delete process.env.OLYMPUS_VECTOR_DIGEST;
     const db = database(store);
     const query = db.query.bind(db);
     db.query = ((sql: string) => { queries.push(sql); return query(sql); }) as typeof db.query;
@@ -549,3 +553,32 @@ test('seeded clustered 768-dimensional store: top 20 items equal exact for >=99%
     expect(JSON.stringify(report)).not.toContain('digest-fixture');
   } finally { db.close(); }
 }, 120_000);
+
+test('a digest page crosses as one packed blob that unpacks byte for byte, NULs and high bytes included (olympus-ops#151)', () => {
+  const db = new Database(':memory:');
+  try {
+    db.run('CREATE TABLE chunk_vector_digest (chunk_pk INTEGER PRIMARY KEY, model_id TEXT, item_pk INTEGER, account_scope TEXT, digest BLOB)');
+    const expected = new Map<number, Uint8Array>();
+    for (let pk = 1; pk <= 10; pk++) {
+      const digest = new Uint8Array(pk === 7 ? 8 : 260).map((_, i) => (pk * 31 + i * 7) % 256);
+      digest[0] = 0; digest[digest.length - 1] = 0;
+      expected.set(pk, digest);
+      db.query('INSERT INTO chunk_vector_digest VALUES (?, ?, 1, ?, ?)').run(pk, 'm', 'a', digest);
+    }
+    const page = connectorStoreVectorDigestPageQuery({ modelId: 'm' }, 2, 6);
+    const packed = db.query(page.sql).get(...page.params) as VectorDigestPackedPage;
+    expect(packed.packed).toBeInstanceOf(Uint8Array);
+    expect([packed.n, packed.last_pk]).toEqual([6, 8]);
+    const seen: number[] = [];
+    expect(forEachPackedVectorDigest(packed, (pk, digest) => {
+      seen.push(pk);
+      expect([...digest]).toEqual([...expected.get(pk)!]);
+      return true;
+    })).toBe(true);
+    expect(seen).toEqual([3, 4, 5, 6, 7, 8]);
+    const empty = connectorStoreVectorDigestPageQuery({ modelId: 'm' }, 10);
+    const none = db.query(empty.sql).get(...empty.params) as VectorDigestPackedPage;
+    expect(none.n).toBe(0);
+    expect(forEachPackedVectorDigest(none, () => { throw new Error('no rows to visit'); })).toBe(true);
+  } finally { db.close(); }
+});

@@ -109,7 +109,8 @@ import {
   type AdmissionPriority,
   type RelayLimits,
 } from './limits.ts';
-import { installTag, type RelayLog } from './log.ts';
+import { credentialLogTag, installTag, type RelayLog } from './log.ts';
+import { rpcCallNames } from '../shared/mcp-log.ts';
 import {
   OAUTH_PATHS,
   authorizationServerMetadata,
@@ -621,7 +622,33 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
    * narrows the directory's tools itself; the relay's own answers narrow them
    * here.
    */
+  /**
+   * `/mcp` and `/openai/mcp`, with one `mcp_request` log line per request
+   * that carries a credential (log.ts): the endpoint, the install's tag, a
+   * short hash of the credential, the lane, the method names (shared/
+   * mcp-log.ts), the status and the time to the response head. Never a body,
+   * header, token or address. It is how a client that says it has no tools
+   * can be checked against what actually arrived (Olympus#1266).
+   */
   const mcp = async (request: Request, path: string, ip: string, surface: McpSurface): Promise<Response> => {
+    const started = now();
+    const trace: McpTrace = {};
+    const response = await mcpRoute(request, path, ip, surface, trace);
+    if (request.headers.get('authorization') !== null) {
+      log('mcp_request', {
+        surface,
+        ...(trace.install ? { install: trace.install } : {}),
+        ...(trace.credential ? { credential: trace.credential } : {}),
+        ...(trace.lane ? { lane: trace.lane } : {}),
+        calls: (trace.calls ?? []).join(','),
+        status: response.status,
+        ms: Math.max(0, Math.round(now() - started)),
+      });
+    }
+    return response;
+  };
+
+  const mcpRoute = async (request: Request, path: string, ip: string, surface: McpSurface, trace: McpTrace): Promise<Response> => {
     const refuse = () => unauthorized(origin, 'invalid_token', surface);
     const authorization = request.headers.get('authorization');
     // No credential at all: the relay's own not-connected surface. A caller
@@ -653,6 +680,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     const token = /^Bearer\s+(\S+)$/i.exec(authorization.trim())?.[1];
     const installId = credentialInstallId('access', token);
     if (!installId) return refuse();
+    trace.install = installTag(installId);
     // Everything decided from the headers, before any body byte is read: an
     // id that routes nowhere is refused, and a credential the install's engine
     // has not confirmed is paid for by the caller's address, not the install.
@@ -664,10 +692,13 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     const digest = credentialDigest(token!);
     const key = credentialKey(installId, digest);
     const lane: AdmissionLane = confirmed.has(key) ? 'owner' : 'unverified';
+    trace.credential = credentialLogTag(digest);
+    trace.lane = lane;
     if (lane === 'unverified' && !publicRequests.take(ip)) return tooMany();
     const read = await readBody(request, limits.maxRequestBodyBytes, ip);
     if (!read.ok) return read.response;
     const body = read.body;
+    trace.calls = rpcCallNames(parseJson(new TextDecoder().decode(body)));
     return toInstall({
       installId,
       request,
@@ -1280,4 +1311,20 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       await registry.flush();
     },
   };
+}
+
+/** What one `/mcp` request was, for its `mcp_request` log line; filled in as it is routed. */
+interface McpTrace {
+  install?: string;
+  credential?: string;
+  lane?: AdmissionLane;
+  calls?: string[];
+}
+
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
 }
