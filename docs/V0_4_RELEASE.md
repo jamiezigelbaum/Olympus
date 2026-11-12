@@ -48,6 +48,12 @@ apply (#1050; the owner chose "agent proposes, person clicks Apply" on
 
 Rules for this release:
 
+- Recent requests from AI apps (#1266): the Agents panel and
+  `olympus connections requests` show bounded relay and engine request
+  metadata, including requests answered while the engine was offline. Relay
+  forwarding is feature-negotiated and scoped to the authenticated install;
+  the directory listing and admission stay unchanged.
+
 - New or changed screens are built only after the owner signs off a mockup. A
   screen without sign-off at the freeze moves to 1.6.
 - Scope freezes when the lanes are code-complete. The five moves are the
