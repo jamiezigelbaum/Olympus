@@ -201,21 +201,25 @@ export function rerankPoolSize(reranker: EvidenceReranker, maxResults: number): 
   return Math.max(Math.floor(maxResults), Math.min(MAX_RERANK_POOL_SIZE, pool));
 }
 
-/** Whole sentences up to the window target; oversized sentences are split so no tail is lost. */
-export function rerankPassageWindows(chunks: readonly string[]): string[] {
+/**
+ * Whole sentences up to the window target; oversized sentences are split so no tail is lost.
+ * `maxChars` lowers the target so a winning window always fits the item's budget whole.
+ */
+export function rerankPassageWindows(chunks: readonly string[], maxChars = RERANK_WINDOW_CHARS): string[] {
+  const cap = Math.max(1, Math.min(RERANK_WINDOW_CHARS, Math.floor(maxChars)));
   const windows: string[] = [];
   const sentences = new Intl.Segmenter(undefined, { granularity: 'sentence' });
   for (const chunk of chunks) {
     let window = '';
     for (const { segment } of sentences.segment(chunk)) {
-      if (window && window.length + segment.length > RERANK_WINDOW_CHARS) {
+      if (window && window.length + segment.length > cap) {
         windows.push(window.trim());
         window = '';
       }
       let remaining = segment;
-      while (remaining.length > RERANK_WINDOW_CHARS) {
-        windows.push(remaining.slice(0, RERANK_WINDOW_CHARS).trim());
-        remaining = remaining.slice(RERANK_WINDOW_CHARS);
+      while (remaining.length > cap) {
+        windows.push(remaining.slice(0, cap).trim());
+        remaining = remaining.slice(cap);
       }
       window += remaining;
     }

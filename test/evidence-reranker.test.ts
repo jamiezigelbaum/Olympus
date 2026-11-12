@@ -339,6 +339,23 @@ describe('paragraph window reranking', () => {
     for (const candidate of detail.pack.candidates) expect(candidate.chunks).toEqual(shown);
   });
 
+  test('a small budget gets windows that fit it, so the winning sentence is seated whole', async () => {
+    const { input, calls } = windowInput();
+    const detail = await buildEvidencePackDetailed({ ...input, maxCharsPerCandidate: 400 });
+    expect(calls[1]!.every(text => text.length <= 400)).toBe(true);
+    expect(detail.pack.candidates[0]!.chunks[0]).toContain(answer);
+  });
+
+  test('a winning window over the byte budget is not seated, and the passages stay', async () => {
+    const { input } = windowInput();
+    const wide = 'é'.repeat(250) + ' ' + answer;
+    input.contentProviders[CORPUS] = { async fetchLocalContent() {
+      return { sensitivity: buildSourceSensitivity({ trustTier: 'S2', trustDomain: 'internal' }), chunks: original, candidatePassages: [wide] };
+    } };
+    const detail = await buildEvidencePackDetailed({ ...input, maxCharsPerCandidate: 400 });
+    for (const candidate of detail.pack.candidates) expect(candidate.chunks).toEqual(original);
+  });
+
   for (const mode of ['failed', 'timed_out', 'malformed'] as const) {
     test(`window ${mode} preserves all passages exactly`, async () => {
       const { input, fake, calls } = windowInput(mode);

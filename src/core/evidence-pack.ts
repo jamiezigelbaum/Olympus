@@ -471,7 +471,8 @@ async function buildPreparedEvidencePackDetailed(
         .filter(entry => entry.content?.candidatePassages?.length)
         .slice(0, RERANK_WINDOW_ITEMS);
       const windows = windowItems.flatMap(entry =>
-        rerankPassageWindows(entry.content!.candidatePassages!).map(text => ({ entry, text })));
+        rerankPassageWindows(entry.content!.candidatePassages!, maxCharsPerCandidate !== undefined && maxCharsPerCandidate > 0 ? maxCharsPerCandidate : undefined)
+          .map(text => ({ entry, text })));
       if (windows.length > 0) {
         // Reuse the local-only model, validation, abort and timeout path. Sorting
         // windows chooses a passage inside each item; it never reorders items.
@@ -494,8 +495,11 @@ async function buildPreparedEvidencePackDetailed(
           }
           hydrated = hydrated.map(entry => {
             const window = best.get(entry);
-            // A window the item's passages already show whole adds nothing.
-            if (window === undefined || !entry.content || entry.content.chunks.some(chunk => chunk.includes(window))) return entry;
+            // A window the item's passages already show whole adds nothing, and
+            // one larger than the item's byte budget would be clipped away.
+            if (window === undefined || !entry.content || entry.content.chunks.some(chunk => chunk.includes(window))
+              || (maxCharsPerCandidate !== undefined && maxCharsPerCandidate > 0
+                && Buffer.byteLength(window, 'utf8') > maxCharsPerCandidate)) return entry;
             let remaining = maxCharsPerCandidate !== undefined && maxCharsPerCandidate > 0
               ? maxCharsPerCandidate : Number.POSITIVE_INFINITY;
             const chunks: string[] = [];

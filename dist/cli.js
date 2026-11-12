@@ -32123,20 +32123,21 @@ function rerankPoolSize(reranker, maxResults) {
   const pool = Number.isFinite(reranker.poolSize) ? Math.floor(reranker.poolSize) : DEFAULT_RERANK_POOL_SIZE;
   return Math.max(Math.floor(maxResults), Math.min(MAX_RERANK_POOL_SIZE, pool));
 }
-function rerankPassageWindows(chunks) {
+function rerankPassageWindows(chunks, maxChars = RERANK_WINDOW_CHARS) {
+  const cap = Math.max(1, Math.min(RERANK_WINDOW_CHARS, Math.floor(maxChars)));
   const windows = [];
   const sentences = new Intl.Segmenter(undefined, { granularity: "sentence" });
   for (const chunk of chunks) {
     let window2 = "";
     for (const { segment } of sentences.segment(chunk)) {
-      if (window2 && window2.length + segment.length > RERANK_WINDOW_CHARS) {
+      if (window2 && window2.length + segment.length > cap) {
         windows.push(window2.trim());
         window2 = "";
       }
       let remaining = segment;
-      while (remaining.length > RERANK_WINDOW_CHARS) {
-        windows.push(remaining.slice(0, RERANK_WINDOW_CHARS).trim());
-        remaining = remaining.slice(RERANK_WINDOW_CHARS);
+      while (remaining.length > cap) {
+        windows.push(remaining.slice(0, cap).trim());
+        remaining = remaining.slice(cap);
       }
       window2 += remaining;
     }
@@ -77938,7 +77939,7 @@ async function buildPreparedEvidencePackDetailed(input) {
     rerank = reranked.audit;
     if (rerank.outcome === "applied") {
       const windowItems = reranked.kept.filter((entry) => entry.content?.candidatePassages?.length).slice(0, RERANK_WINDOW_ITEMS);
-      const windows = windowItems.flatMap((entry) => rerankPassageWindows(entry.content.candidatePassages).map((text2) => ({ entry, text: text2 })));
+      const windows = windowItems.flatMap((entry) => rerankPassageWindows(entry.content.candidatePassages, maxCharsPerCandidate !== undefined && maxCharsPerCandidate > 0 ? maxCharsPerCandidate : undefined).map((text2) => ({ entry, text: text2 })));
       if (windows.length > 0) {
         const scored = await rerankCandidates({
           reranker,
@@ -77960,7 +77961,7 @@ async function buildPreparedEvidencePackDetailed(input) {
           }
           hydrated = hydrated.map((entry) => {
             const window2 = best.get(entry);
-            if (window2 === undefined || !entry.content || entry.content.chunks.some((chunk) => chunk.includes(window2)))
+            if (window2 === undefined || !entry.content || entry.content.chunks.some((chunk) => chunk.includes(window2)) || maxCharsPerCandidate !== undefined && maxCharsPerCandidate > 0 && Buffer.byteLength(window2, "utf8") > maxCharsPerCandidate)
               return entry;
             let remaining = maxCharsPerCandidate !== undefined && maxCharsPerCandidate > 0 ? maxCharsPerCandidate : Number.POSITIVE_INFINITY;
             const chunks = [];
