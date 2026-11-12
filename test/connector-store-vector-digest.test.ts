@@ -1,5 +1,5 @@
 import { Database } from 'bun:sqlite';
-import { expect, test } from 'bun:test';
+import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,6 +13,10 @@ import { waitFor } from './helpers/test-clock.ts';
 import { setReadPoolObserverForTests, setReadPoolWaitingWorkForTests } from '../src/workers/connector-store/off-thread-reads.ts';
 import { probeVectorDigest, seededVectorRandom } from '../eval/vector-digest-probe.ts';
 
+// The digest pass is opt-in while olympus-ops#151 is open; these tests cover it on.
+const digestSetting = process.env.OLYMPUS_VECTOR_DIGEST;
+beforeAll(() => { process.env.OLYMPUS_VECTOR_DIGEST = 'on'; });
+afterAll(() => { if (digestSetting === undefined) delete process.env.OLYMPUS_VECTOR_DIGEST; else process.env.OLYMPUS_VECTOR_DIGEST = digestSetting; });
 const modelId = 'digest-fixture';
 const provider: SourceEmbeddingProvider = { provider: 'built-in', backend: 'local', modelId, dimension: 3, configHash: '1', epochId: '1', async embed(inputs) { return inputs.map(() => [1, 0, 0]); } };
 const open = (dbPath = ':memory:') => new LocalConnectorStore({ dbPath, corpusId: 'internal.fixture.digest', family: 'file', trustDomain: 'internal', tierLedger: null });
@@ -405,7 +409,7 @@ test('a file store backfills on the read pool: the worker thread only writes dig
   } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('OLYMPUS_VECTOR_DIGEST=off forces the exact scan on a store with a complete digest', async () => {
+test('without OLYMPUS_VECTOR_DIGEST=on, a store with a complete digest runs the exact scan', async () => {
   const store = open();
   const saved = process.env.OLYMPUS_VECTOR_DIGEST;
   const queries: string[] = [];
@@ -414,7 +418,7 @@ test('OLYMPUS_VECTOR_DIGEST=off forces the exact scan on a store with a complete
     await store.embedChunks({ provider });
     expect(vectorDigestState(database(store), modelId).completed).toBe(true);
     const withDigest = await store.vectorSearchLane('harbor', provider, 10, 'a');
-    process.env.OLYMPUS_VECTOR_DIGEST = 'off';
+    delete process.env.OLYMPUS_VECTOR_DIGEST;
     const db = database(store);
     const query = db.query.bind(db);
     db.query = ((sql: string) => { queries.push(sql); return query(sql); }) as typeof db.query;
