@@ -29,6 +29,8 @@ import type {
   EvidencePack,
   EvidenceTableBlock,
 } from './contracts.ts';
+import { registeredLimits, limitStopSubjects, type LimitStop } from './limit-stops.ts';
+import { defaultSourceCorpusRegistryConfig } from './source-corpus-registry.ts';
 import type { StructuredEvidenceFact } from './opsec.ts';
 import {
   applyParentLabels,
@@ -157,6 +159,7 @@ export const SOURCE_MODEL_POLICY_GAP_SUFFIX =
   'excluded one candidate from model use under current source policy.';
 
 export interface BuildEvidencePackInput {
+  limitStops?: readonly LimitStop[];
   question: string;
   searchQuery?: string; // retrieval query when it differs from the question
   selectedItems?: readonly SelectedEvidenceItem[];
@@ -369,6 +372,18 @@ async function buildPreparedEvidencePackDetailed(
   const candidateCorpusIds: string[] = [];
   const candidateExtractionGapIndexes: number[][] = [];
   const extractionGaps: string[] = laneCutShortGaps(routed.degradations, input);
+  const searched = new Set(routed.searchedCorpora);
+  const searchedSources = new Set(defaultSourceCorpusRegistryConfig().corpora
+    .filter((corpus) => searched.has(corpus.corpusId)).map((corpus) => corpus.sourceId));
+  const limits = registeredLimits();
+  const now = (input.now?.() ?? new Date()).getTime();
+  for (const stop of input.limitStops ?? []) {
+    const limit = limits.find((entry) => entry.id === stop.id);
+    if (limit?.scope !== 'source' || (stop.resumesAt && Date.parse(stop.resumesAt) <= now)) continue;
+    if (limitStopSubjects(stop).some((subject) => searched.has(subject) || searchedSources.has(subject))) {
+      extractionGaps.push(`${limit.label} since ${stop.since}; new items from this source may be missing from this answer`);
+    }
+  }
   const policyDeniedCoverageGaps: string[] = [];
   let policyDeniedCandidates = 0;
   const namesOnlyCandidateIndexes: number[] = [];

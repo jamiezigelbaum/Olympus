@@ -114,3 +114,12 @@ export function listOpenLimitStops(db: Database, now: Date = new Date()): LimitS
     ...(row.resumes_at ? { resumesAt: row.resumes_at } : {}),
   }));
 }
+
+/** Source stops use a source/corpus id, or the scheduler's [source, corpus, task] identity. */
+export function limitStopSubjects(stop: LimitStop): readonly string[] {
+  try {
+    const parts: unknown = JSON.parse(stop.subject);
+    if (Array.isArray(parts) && parts.length === 3 && parts.every((part) => typeof part === 'string')) return parts.slice(0, 2);
+  } catch { /* A plain source or corpus id is also a valid subject. */ }
+  return [stop.subject];
+}

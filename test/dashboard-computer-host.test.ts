@@ -644,10 +644,10 @@ describe('the panel on the computer', () => {
     expect(doc.querySelector('[data-home-status]')!.getAttribute('data-home-status')).toBe('ok');
   });
 
-  test('a cost-guard wait is In progress with its reason and resume time in local time and UTC, and no Sync now (#1044)', async () => {
+  test('a recorded limit wait is In progress with its reason, since, resume time and Sync now', async () => {
     const X = { id: 'x.bookmarks', label: 'X bookmarks', group: 'cloud', status: 'Working', lastSyncAt: ago(12 * 60 * MIN),
       primary: { label: 'Sync now', tool: 'olympus_sync_source', args: { source_id: 'x.bookmarks' } } } as DashboardViewModelV1['sources'][number];
-    const data = model({ sources: [X], waits: [{ sourceId: 'x.bookmarks', label: 'X bookmarks', reason: 'daily_budget', api: 'X', resumesAt: '2026-11-11T00:00:00.000Z' }] });
+    const data = model({ sources: [X], waits: [{ sourceId: 'x.bookmarks', label: 'X bookmarks', reason: 'limit', api: 'X', limitLabel: 'daily X API budget used', since: '2026-11-10T12:00:00.000Z', fix: X.primary!, resumesAt: '2026-11-11T00:00:00.000Z' }] });
     delete data.progress;
     const page = await onHost(COMPUTER, data);
     const doc = page.win.document;
@@ -655,10 +655,32 @@ describe('the panel on the computer', () => {
     expect(wait.closest('.home-progress')).not.toBeNull();
     const at = new Date('2026-11-11T00:00:00.000Z');
     const local = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`;
-    expect(wait.textContent).toBe(`X bookmarks · daily X API budget used · resumes at ${local} (00:00 UTC)`);
-    expect(wait.querySelector('button')).toBeNull();
-    expect(page.buttons().some((node) => node.textContent === 'Sync now')).toBe(false);
+    expect(wait.textContent).toBe(`X bookmarks · daily X API budget used · since 2026-11-10T12:00:00.000Z · resumes at ${local} (00:00 UTC)Sync now`);
+    expect(wait.querySelector('button')!.textContent).toBe('Sync now');
+    expect(doc.querySelectorAll('[data-source-wait]')).toHaveLength(1);
     expect(page.text()).not.toContain('Needs you');
+  });
+
+  test('a limit Sync now uses Checking while that source is running', async () => {
+    const source = { id: 'x.bookmarks', label: 'X bookmarks', group: 'cloud', status: 'Working',
+      lastManualSync: { at: '2026-11-10T12:00:00.000Z', outcome: 'checking' } } as DashboardViewModelV1['sources'][number];
+    const page = await onHost(COMPUTER, model({ sources: [source], waits: [{ sourceId: source.id, label: source.label,
+      reason: 'limit', api: 'X', limitLabel: 'Daily budget', since: '2026-11-10T12:00:00.000Z',
+      fix: { label: 'Sync now', tool: 'olympus_sync_source', args: { source_id: source.id } } }] }));
+    const button = page.win.document.querySelector('[data-source-wait] button')!;
+    expect(button.textContent).toBe('Checking…');
+    expect(button.getAttribute('aria-busy')).toBe('true');
+    expect(button.hasAttribute('disabled')).toBe(true);
+  });
+
+  test.each(['raise', 'refill', 'none'] as const)('a %s wait renders settings or no button', async (action) => {
+    const fix = action === 'none' ? {} : { fix: { label: 'Open settings', tool: 'olympus_dashboard', args: {},
+      href: 'https://olympusplugin.ai/open/fix/models/', openHref: true as const } };
+    const page = await onHost(COMPUTER, model({ sources: [], waits: [{ sourceId: 'x.bookmarks', label: 'X bookmarks',
+      reason: 'limit', api: 'X', limitLabel: 'Daily budget', since: '2026-11-10T12:00:00.000Z', waiting: { items: 3 }, ...fix }] }));
+    const row = page.win.document.querySelector('[data-source-wait]')!;
+    expect(row.textContent).toContain('3 items waiting');
+    expect(row.querySelector('button')?.textContent).toBe(action === 'none' ? undefined : 'Open settings');
   });
 
   test('"paused" is only an owner pause: a source idle between runs is not named on the first-index line (#1044)', async () => {

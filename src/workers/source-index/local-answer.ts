@@ -195,6 +195,7 @@ export async function answerOnThisComputer(
       ...(corpusIds ? { allowedCorpusIds: corpusIds } : {}),
     },
     ...(corpusIds ? { corpusIds } : {}),
+    limitStops: lanes.limitStops ?? [],
     registry: lanes.registry,
     adapters: lanes.adapters,
     contentProviders: lanes.contentProviders,

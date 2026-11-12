@@ -59,3 +59,11 @@ function dailyResume(since: string, notBeforeAt: string | undefined): string {
   const retry = notBeforeAt ? Date.parse(notBeforeAt) : NaN;
   return new Date(Number.isFinite(retry) && retry < midnight ? retry : midnight).toISOString();
 }
+
+// Guards adopted here through their scheduler markers (the adapter owns registration).
+// limit-adapter: src/workers/x-bookmarks/live-control.ts#XApiUsageGuardError
+// limit-adapter: src/workers/readwise/connector.ts#ReadwiseDailyRequestBudget
+// limit-adapter: src/workers/readwise/connector.ts#ReadwiseRequestBudgetError
+// limit-adapter: src/workers/google-connectors/request-budget.ts#GoogleDailyRequestBudget
+// limit-adapter: src/workers/google-connectors/request-budget.ts#GoogleRequestBudgetError
+// limit-adapter: src/workers/google-connectors/request-budget.ts#GoogleRequestBudgetRecoveryRefusal

@@ -37453,6 +37453,16 @@ var DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
 var MAX_PROMPT_BYTES = 1e5;
 var OPENCLAW_INFER_MAX_PROMPT_BYTES = MAX_PROMPT_BYTES;
 
+// src/core/limit-stops.ts
+var limits = new Map;
+function registerLimit(input) {
+  const prior = limits.get(input.id);
+  if (prior && Object.keys({ ...prior, ...input }).some((key2) => prior[key2] !== input[key2])) {
+    throw new Error(`Limit already registered differently: ${input.id}`);
+  }
+  limits.set(input.id, Object.freeze({ ...input }));
+}
+
 // src/core/source-index/router.ts
 var FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
   "body",
@@ -39797,16 +39807,6 @@ function stripDataUrlPrefix(dataUrl) {
 var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages";
 var TELEGRAM_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:telegram";
 var TELEGRAM_SPOOL_CLEARED_KEY = `${TELEGRAM_SPOOL_REDACTION_STATE_KEY}:cleared_through`;
-// src/core/limit-stops.ts
-var limits = new Map;
-function registerLimit(input) {
-  const prior = limits.get(input.id);
-  if (prior && Object.keys({ ...prior, ...input }).some((key2) => prior[key2] !== input[key2])) {
-    throw new Error(`Limit already registered differently: ${input.id}`);
-  }
-  limits.set(input.id, Object.freeze({ ...input }));
-}
-
 // src/workers/scheduler-limit-stops.ts
 var DAILY_LIMITS = new Map(Object.entries({
   daily_cost_guard: { id: "x.daily_cost", kind: "cost", label: "daily X API budget used" },
@@ -40338,6 +40338,7 @@ class SourceScheduler {
       enabled: this.enabled,
       running: this.timer !== undefined,
       generated_at: now.toISOString(),
+      limit_stops: this.stateStore?.openLimitStops?.(now) ?? [],
       selected_source_ids: this.allowedSourceIds === undefined ? this.sources.map((source) => source.sourceId) : [...this.allowedSourceIds],
       missing_selected_source_ids: [...this.missingSelectedSourceIds],
       sources: this.sources.map((source) => this.sourceStatus(source, now)),
