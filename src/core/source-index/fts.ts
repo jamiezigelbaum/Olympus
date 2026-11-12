@@ -82,6 +82,8 @@ export interface SourceIndexFtsQueryOptions {
    * tokenizer still supplies ordinary inflectional matching.
    */
   prefix?: boolean;
+  /** Terms left out of the match (a store's very common words). */
+  excludedTerms?: ReadonlySet<string>;
 }
 
 export interface SourceIndexFtsTermGroupOptions {
@@ -97,7 +99,7 @@ export function sourceIndexFtsQuery(
   query: string,
   options: SourceIndexFtsQueryOptions = {},
 ): string {
-  const terms = sourceIndexFtsTerms(query);
+  const terms = sourceIndexFtsTerms(query).filter((term) => !options.excludedTerms?.has(term));
   if (terms.length === 0) return '';
   const suffix = options.prefix === false ? '' : '*';
   const exact = queryInitialisms(query);
@@ -259,8 +261,12 @@ export function sourceIndexFtsTermGroups(
 
 // `exact` terms (the query's initialisms) match whole tokens only: "loi" is
 // the file named "LOI_…", not every word that starts with it.
-export function sourceIndexFtsGroupQuery(group: readonly string[], exact: ReadonlyMap<string, unknown> | ReadonlySet<string> = new Set()): string {
-  return group.map((term) => `"${escapeFtsPhrase(term)}"${exact.has(term) ? '' : '*'}`).join(' OR ');
+export function sourceIndexFtsGroupQuery(
+  group: readonly string[],
+  exact: ReadonlyMap<string, unknown> | ReadonlySet<string> = new Set(),
+  prefix = true,
+): string {
+  return group.map((term) => `"${escapeFtsPhrase(term)}"${exact.has(term) || !prefix ? '' : '*'}`).join(' OR ');
 }
 
 export function runBoundedFtsTokenizerMigration(

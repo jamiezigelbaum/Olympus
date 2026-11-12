@@ -750,6 +750,19 @@ describe('evalPromptLayout', () => {
   });
 });
 
+describe('the eval report carries each store\'s keyword word audit (#1423)', () => {
+  test('words left out and rows ranked, estimated, pass through per lane', () => {
+    const lane = {
+      laneName: 'store:connector_store_fts', laneType: 'keyword', candidateCount: 3, returnedCount: 3,
+      wordsLeftOut: 2, rowsRankedEstimate: 1_200, rowsRankedEveryWordEstimate: 90_000, commonCountMs: 35, commonCountWindows: 3, localOnly: true, rawExposed: false,
+    };
+    const audit = evalRetrievalAudit({
+      pack: { candidates: [] }, candidateCorpusIds: [], laneAudits: [lane], skippedCorpora: [], degradations: [],
+    } as never);
+    expect(audit.lanes[0]).toMatchObject({ wordsLeftOut: 2, rowsRankedEstimate: 1_200, rowsRankedEveryWordEstimate: 90_000, commonCountMs: 35, commonCountWindows: 3 });
+  });
+});
+
 describe('the real eval report shows the audit\'s unseen-amounts note (#1442)', () => {
   async function prompts(draftAnswer: string): Promise<{ pack: EvidencePack; prompts: string[]; result: AnalystResult }> {
     const { pack } = analystPromptFixture();

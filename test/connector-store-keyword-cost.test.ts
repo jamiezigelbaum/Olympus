@@ -6,7 +6,7 @@
 // alternatives), and counted each concept's matches store-wide again on
 // every search. These pin the cheaper shape with
 // synthetic data: the work done, not wall time.
-import { afterEach, expect, test } from 'bun:test';
+import { afterAll, afterEach, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { join } from 'node:path';
 import {
@@ -16,6 +16,7 @@ import {
 } from '../src/workers/connector-store/index.ts';
 import { DROPBOX_TIER_CORPUS_IDS } from '../src/workers/dropbox-files/connector-store.ts';
 import { traceKeywordSearch } from '../eval/store-probe.ts';
+import { keywordCountWindows, keywordShareSettled } from '../src/workers/connector-store/local-index.ts';
 import { fixtureConnector, tempDir } from './helpers/tier-fixtures.ts';
 
 // The store's bm25 title weight (local-index.ts).
@@ -149,3 +150,235 @@ test('ties at the bound read only the rows tied with it or better, with the full
   expect(expected[0]).toBe('best');
   expect(rows.map((row) => row.sourceItem.providerItemId)).toEqual(expected);
 });
+
+// A word found in over a fifth of a store's FTS rows ranks almost every row
+// and says little about which one answers (the Expert Agents keyword rule).
+// On Sparta's largest stores (2026-11-11, olympus-ops#151) leaving such words
+// out of the match cut the ranking from 8.4 to 2.1 s on the Private Dropbox
+// store, keeping most of the top 10. The words still count toward a
+// candidate's concepts; they only stop deciding which rows are ranked.
+function rankedMatches(store: LocalConnectorStore, run: () => void): string[] {
+  const db = (store as unknown as { db: { query: (sql: string) => { all: (...params: unknown[]) => unknown[] } } }).db;
+  const query = db.query;
+  const matches: string[] = [];
+  db.query = function (sql: string) {
+    const statement = query.call(db, sql);
+    if (!sql.includes('LIMIT ? OFFSET ?')) return statement;
+    return { ...statement, all: (...params: unknown[]) => { matches.push(String(params[0])); return statement.all(...params); } };
+  };
+  try { run(); } finally { db.query = query; }
+  return matches;
+}
+
+// About 5,200 FTS rows (a name row and a text row per item): over the size
+// below which every word is matched.
+const COMMON_ITEMS = [
+  { id: 'answer', name: 'answer.txt', text: 'Kestrel boatyard notes from the harbour visit.' },
+  ...Array.from({ length: 1300 }, (_, n) => ({ id: `note-${n}`, name: `note-${n}.txt`, text: `${n < 1170 ? 'Weekly' : 'Monthly'} notes ${n} about the garden and the fence.` })),
+  ...Array.from({ length: 1300 }, (_, n) => ({ id: `other-${n}`, name: `other-${n}.txt`, text: `Shopping list ${n}: tomatoes, bread, coffee.` })),
+];
+
+// One large store for the tests below: syncing it takes seconds.
+let commonStore: Promise<LocalConnectorStore> | undefined;
+const sharedCleanups: Array<() => void> = [];
+afterAll(() => { while (sharedCleanups.length) sharedCleanups.pop()!(); });
+function largeCommonStore(): Promise<LocalConnectorStore> {
+  return commonStore ??= (async () => {
+    const { dir, cleanup } = tempDir('olympus-keyword-common-');
+    const store = new LocalConnectorStore({
+      dbPath: join(dir, 'internal.sqlite'),
+      corpusId: DROPBOX_TIER_CORPUS_IDS.internal!,
+      family: 'file',
+      trustDomain: 'internal',
+      tierLedger: null,
+    });
+    sharedCleanups.push(cleanup, () => store.close());
+    await store.syncFromConnector(fixtureConnector(() => COMMON_ITEMS), { fetchContent: true });
+    return store;
+  })();
+}
+
+test('a small store matches every word of the question', async () => {
+  const store = await openStoreWith(COMMON_ITEMS.slice(0, 81));
+  const matches = rankedMatches(store, () => { store.searchItemsDetailed('kestrel boatyard notes', 10); });
+  for (const match of matches) for (const word of ['kestrel', 'boatyard', 'notes']) expect(match).toContain(`"${word}"`);
+});
+
+test('a word in over a fifth of the rows is left out of the match, and the answer still leads', async () => {
+  const store = await largeCommonStore();
+  let rows: Array<{ sourceItem: { providerItemId: string } }> = [];
+  const matches = rankedMatches(store, () => { rows = store.searchItemsDetailed('kestrel boatyard notes', 10).rows; });
+  expect(matches.length).toBeGreaterThan(0);
+  for (const match of matches) {
+    expect(match).toContain('"kestrel"');
+    expect(match).not.toContain('"notes"');
+  }
+  expect(rows[0]?.sourceItem.providerItemId).toBe('answer');
+}, 60_000);
+
+test('when every word is common, the rarest one is kept', async () => {
+  // Each item has a name row and a text row: "notes" is in about half the
+  // rows, "shopping" in a quarter, "weekly" in a little over a fifth.
+  const store = await largeCommonStore();
+  // The rarest word is kept wherever it stands in the question.
+  for (const question of ['weekly notes shopping', 'notes shopping weekly', 'shopping weekly notes']) {
+    const matches = rankedMatches(store, () => { store.searchItemsDetailed(question, 10); });
+    expect(matches.length).toBeGreaterThan(0);
+    for (const match of matches) {
+      expect(match).toContain('"weekly"');
+      expect(match).not.toContain('"notes"');
+      expect(match).not.toContain('"shopping"');
+    }
+  }
+}, 60_000);
+
+test('shares are counted on exact words: a rare word whose completions are common stays, whatever the search mode', async () => {
+  // "week*" reaches every "weekly" row; "week" itself is in none. A prefix
+  // count reads every completion's doclist (FTS5 merges them), which cost
+  // more than the windows save (2026-11-11, #1423), so the count reads the
+  // exact word: a prefix search may keep a word it could have left out, and
+  // never leaves out a rare one.
+  const store = await largeCommonStore();
+  for (const options of [undefined, { prefix: false }]) {
+    const matches = rankedMatches(store, () => { store.searchItemsDetailed('kestrel week', 10, undefined, undefined, options); });
+    expect(matches.length).toBeGreaterThan(0);
+    for (const match of matches) expect(match).toContain('"week"');
+  }
+}, 60_000);
+
+test('a question of rare words matches as before', async () => {
+  const store = await largeCommonStore();
+  const matches = rankedMatches(store, () => { store.searchItemsDetailed('kestrel boatyard harbour', 10); });
+  for (const match of matches) for (const word of ['kestrel', 'boatyard', 'harbour']) expect(match).toContain(`"${word}"`);
+}, 60_000);
+
+// Counting how often a word appears read its whole doclist: on a 1M-row store
+// cold, up to 9 s for one question (2026-11-11, #1423). A count over a few
+// rowid windows estimates the share for a fraction of that.
+test('a large store estimates a word\'s share from a few bounded rowid windows', () => {
+  expect(keywordCountWindows(5_200)).toEqual([[1, 5_200]]);
+  const windows = keywordCountWindows(1_000_000);
+  // Many small windows: a word that clusters in one stretch of the store
+  // (a month, a project) moves the estimate less than with a few large ones.
+  expect(windows.length).toBeGreaterThanOrEqual(8);
+  expect(windows.reduce((sum, [from, to]) => sum + to - from + 1, 0)).toBeLessThanOrEqual(20_000);
+  expect(windows[0]![0]).toBe(1);
+  expect(windows.at(-1)![1]).toBeLessThanOrEqual(1_000_000);
+  expect(windows.at(-1)![0]).toBeGreaterThan(500_000);
+  // In the order they are read: any first few spread over the whole store, so
+  // a count that stops early still samples it end to end.
+  const starts = windows.map(([from]) => from);
+  expect(new Set(starts).size).toBe(windows.length);
+  expect(Math.abs(starts[1]! - starts[0]!)).toBeGreaterThanOrEqual(400_000);
+  expect(Math.max(...starts.slice(0, 4)) - Math.min(...starts.slice(0, 4))).toBeGreaterThanOrEqual(700_000);
+});
+
+// Most words of a question are far from the one-fifth line, so one window
+// settles them and the count stops there (#1423 timing pair: counting every
+// window cost more than the words left out saved).
+test('a word clearly rare or clearly common is settled by its first window', () => {
+  expect(keywordShareSettled(0, 1_250)).toBe(true);
+  expect(keywordShareSettled(40, 1_250)).toBe(true);
+  expect(keywordShareSettled(700, 1_250)).toBe(true);
+  expect(keywordShareSettled(250, 1_250)).toBe(false);
+  expect(keywordShareSettled(280, 1_250)).toBe(false);
+  // More rows sampled, a narrower band left unsettled.
+  expect(keywordShareSettled(4_600, 20_000)).toBe(true);
+});
+
+test('word shares are counted over rowid windows, never by reading a word\'s whole doclist', async () => {
+  const store = await largeCommonStore();
+  const db = (store as unknown as { db: { query: (sql: string) => unknown } }).db;
+  const query = db.query;
+  const counts: string[] = [];
+  db.query = function (sql: string) {
+    if (/SELECT COUNT\(\*\) FROM connector_store_fts WHERE connector_store_fts MATCH \?/.test(sql)) counts.push(sql);
+    return query.call(db, sql);
+  };
+  try { store.searchItemsDetailed('notes about tomatoes and bread', 10); } finally { db.query = query; }
+  expect(counts.length).toBeGreaterThan(0);
+  // Each count in the read is bounded by its window.
+  for (const sql of counts) expect(sql.split('MATCH ?').length - 1).toBe(sql.split('rowid BETWEEN ? AND ?').length - 1);
+}, 60_000);
+
+// On Sparta's stores each count was its own read through the store's read
+// pool, 5 to 15 windows a word, so counting cost 0.4 to 5.2 s a store while
+// the SQL itself takes milliseconds (#1423 diagnosis, olympus-ops#151,
+// 2026-11-12). Every window of every word is one read.
+test('a search counts every word\'s windows in one read of the store', async () => {
+  const store = await largeCommonStore();
+  (store as unknown as { conceptCountMemo?: unknown }).conceptCountMemo = undefined;
+  const db = (store as unknown as { db: { query: (sql: string) => unknown } }).db;
+  const query = db.query;
+  let countReads = 0;
+  db.query = function (sql: string) {
+    if (sql.includes('rowid BETWEEN')) countReads++;
+    return query.call(db, sql);
+  };
+  try { store.searchItemsDetailed('notes about tomatoes bread coffee', 10); } finally { db.query = query; }
+  expect(countReads).toBe(1);
+}, 60_000);
+
+// A word left out as common was then counted again store-wide, on its whole
+// doclist with every completion, whenever the candidates its absence ranked
+// missed a concept: the concept weights read it (#1423 diagnosis: the stage
+// still 2 to 4 times main's with counting removed). Its sampled share stands
+// in for that count.
+test('a word left out as common is never counted store-wide for the concept weights', async () => {
+  const store = await largeCommonStore();
+  (store as unknown as { conceptCountMemo?: unknown }).conceptCountMemo = undefined;
+  const db = (store as unknown as { db: { query: (sql: string) => { get: (...params: unknown[]) => unknown } } }).db;
+  const query = db.query;
+  const counted: string[] = [];
+  db.query = function (sql: string) {
+    const statement = query.call(db, sql);
+    if (!sql.includes('COUNT(DISTINCT r.item_pk)')) return statement;
+    return { ...statement, get: (...params: unknown[]) => { counted.push(String(params[0])); return statement.get(...params); } };
+  };
+  let rows: Array<{ sourceItem: { providerItemId: string } }> = [];
+  // "weekly" and "notes" are common; the answer holds "kestrel" and "notes"
+  // but not "weekly", so it misses a concept and the weights are read.
+  try { rows = store.searchItemsDetailed('kestrel weekly notes', 10).rows; } finally { db.query = query; }
+  expect(counted.length).toBeGreaterThan(0);
+  for (const groupQuery of counted) {
+    expect(groupQuery).not.toContain('"notes"');
+    expect(groupQuery).not.toContain('"weekly"');
+  }
+  expect(rows[0]?.sourceItem.providerItemId).toBe('answer');
+}, 60_000);
+
+// The eval report reads these from the lane audit (#1423): how many words a
+// store left out and the rows its match ranks, so a timing run can be read
+// per store.
+test('the keyword lane audit says how many words it left out and the rows ranked, estimated', async () => {
+  const store = await largeCommonStore();
+  const adapter = createConnectorStoreCorpusAdapter({ store, retrievalMode: 'keyword' });
+  const search = (query: string) => adapter({
+    query,
+    maxResults: 5,
+    corpus: defineConnectorCorpus({ corpusId: store.corpusId, family: store.family, trustDomain: store.trustDomain }),
+    context: { allowedTrustDomains: [store.trustDomain] },
+  });
+  const keywordAudit = async (query: string) => (await search(query)).laneAudits?.find((lane) => lane.laneType === 'keyword');
+  // Counts earlier tests left in the store's memory would hide the counting.
+  (store as unknown as { conceptCountMemo?: unknown }).conceptCountMemo = undefined;
+  const dropped = await keywordAudit('kestrel boatyard notes');
+  expect(dropped?.wordsLeftOut).toBe(1);
+  // What the counting itself cost, so a timing run can weigh it against the rows saved.
+  expect(dropped?.commonCountMs).toBeGreaterThanOrEqual(0);
+  expect(dropped?.commonCountWindows).toBeGreaterThanOrEqual(1);
+  // The same words again are remembered: nothing is counted.
+  expect((await keywordAudit('kestrel boatyard notes'))?.commonCountWindows).toBe(0);
+  expect(dropped!.rowsRankedEstimate!).toBeLessThan(dropped!.rowsRankedEveryWordEstimate!);
+  const kept = await keywordAudit('kestrel boatyard harbour');
+  expect(kept?.wordsLeftOut).toBe(0);
+  expect(kept?.rowsRankedEstimate).toBe(kept?.rowsRankedEveryWordEstimate);
+  const small = await openStoreWith(COMMON_ITEMS.slice(0, 81));
+  const smallAudit = (await createConnectorStoreCorpusAdapter({ store: small, retrievalMode: 'keyword' })({
+    query: 'kestrel boatyard notes',
+    maxResults: 5,
+    corpus: defineConnectorCorpus({ corpusId: small.corpusId, family: small.family, trustDomain: small.trustDomain }),
+    context: { allowedTrustDomains: [small.trustDomain] },
+  })).laneAudits?.find((lane) => lane.laneType === 'keyword');
+  expect(smallAudit?.wordsLeftOut).toBeUndefined();
+}, 60_000);

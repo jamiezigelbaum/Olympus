@@ -18853,7 +18853,7 @@ function sourceIndexQueryLanguage(query) {
   return keywordQueryLanguage(query, 30, FTS_QUERY_STOPWORDS);
 }
 function sourceIndexFtsQuery(query, options = {}) {
-  const terms = sourceIndexFtsTerms(query);
+  const terms = sourceIndexFtsTerms(query).filter((term) => !options.excludedTerms?.has(term));
   if (terms.length === 0)
     return "";
   const suffix = options.prefix === false ? "" : "*";
@@ -18985,8 +18985,8 @@ function sourceIndexFtsTermGroups(query, options = {}) {
   }
   return groups;
 }
-function sourceIndexFtsGroupQuery(group, exact = new Set) {
-  return group.map((term) => `"${escapeFtsPhrase(term)}"${exact.has(term) ? "" : "*"}`).join(" OR ");
+function sourceIndexFtsGroupQuery(group, exact = new Set, prefix = true) {
+  return group.map((term) => `"${escapeFtsPhrase(term)}"${exact.has(term) || !prefix ? "" : "*"}`).join(" OR ");
 }
 function runBoundedFtsTokenizerMigration(db, spec) {
   const indexedRows = readCount(db, spec.indexedRowCountSql);
@@ -36273,6 +36273,22 @@ import { createHash as createHash24, randomUUID as randomUUID8 } from "node:cryp
 import { existsSync as existsSync32, lstatSync as lstatSync19, mkdirSync as mkdirSync20, statSync as statSync14 } from "node:fs";
 import { dirname as dirname37 } from "node:path";
 import { Database as Database9 } from "bun:sqlite";
+function keywordCountWindows(rows) {
+  if (rows <= KEYWORD_COMMON_WINDOWS * KEYWORD_COMMON_WINDOW_ROWS)
+    return [[1, rows]];
+  const bits = Math.log2(KEYWORD_COMMON_WINDOWS);
+  const reversed = (index) => parseInt(index.toString(2).padStart(bits, "0").split("").reverse().join(""), 2);
+  return Array.from({ length: KEYWORD_COMMON_WINDOWS }, (_, index) => {
+    const from = Math.floor(reversed(index) * rows / KEYWORD_COMMON_WINDOWS) + 1;
+    return [from, Math.min(rows, from + KEYWORD_COMMON_WINDOW_ROWS - 1)];
+  });
+}
+function keywordShareSettled(count, sampled) {
+  if (sampled <= 0)
+    return false;
+  const margin = KEYWORD_COMMON_SETTLE_SIGMAS * Math.sqrt(KEYWORD_COMMON_ROW_SHARE * (1 - KEYWORD_COMMON_ROW_SHARE) / sampled);
+  return Math.abs(count / sampled - KEYWORD_COMMON_ROW_SHARE) > margin;
+}
 function semanticRelevanceBarFor(modelId, adapterBar) {
   return adapterBar ?? CALIBRATED_SEMANTIC_RELEVANCE_BARS.get(modelId);
 }
@@ -37072,6 +37088,7 @@ function createConnectorStoreCorpusAdapter(options) {
             latencyMs: Date.now() - startedAt,
             laneAudits: [{
               ...connectorStoreKeywordLaneAudit(store.corpusId, rows.length, hits2.length),
+              ...keywordLane.commonWords ?? {},
               ...semanticSkippedReason ? { skippedReason: semanticSkippedReason, modelId: embeddingProvider.modelId } : {}
             }, ...recencyCut ? [connectorStoreRecencyLaneAudit(store.corpusId, 0, true)] : []],
             matchCount: keywordLane.matchCount,
@@ -37107,6 +37124,7 @@ function createConnectorStoreCorpusAdapter(options) {
           laneAudits: [
             {
               ...connectorStoreKeywordLaneAudit(store.corpusId, rows.length, rows.length),
+              ...keywordLane.commonWords ?? {},
               ...semanticSkippedReason ? { skippedReason: semanticSkippedReason, modelId: embeddingProvider.modelId } : {}
             },
             connectorStoreRecencyLaneAudit(store.corpusId, recencyRows.length)
@@ -37368,7 +37386,11 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
     storeRelevance: connectorStoreRelevance(keywordLane, vettedMargin),
     latencyMs: Date.now() - startedAt,
     laneAudits: [
-      { ...connectorStoreKeywordLaneAudit(store.corpusId, keywordRows.length, keywordRows.length), elapsedMs: keywordElapsedMs },
+      {
+        ...connectorStoreKeywordLaneAudit(store.corpusId, keywordRows.length, keywordRows.length),
+        elapsedMs: keywordElapsedMs,
+        ...keywordLane.commonWords ?? {}
+      },
       {
         laneName: `${store.corpusId}:connector_store_vector`,
         laneType: "semantic",
@@ -37496,7 +37518,8 @@ async function connectorStoreKeywordLaneRows(store, query, limit, accountScope, 
     completeItemIds: new Set([...complete, ...baseline?.completeItemIds ?? []]),
     ...(baseline?.nameLeaderItemId ?? nameLeader) !== undefined ? { nameLeaderItemId: baseline?.nameLeaderItemId ?? nameLeader } : {},
     conceptShare: new Map([...baseline?.conceptShare ?? [], ...conceptShare].map(([id, share]) => [id, Math.max(share, baseline?.conceptShare?.get(id) ?? 0)])),
-    ...baseline ? { baseline } : {}
+    ...baseline ? { baseline } : {},
+    ...plain.commonWords ? { commonWords: plain.commonWords } : {}
   };
 }
 function withKeywordLeaderSignals(hits, lane) {
@@ -37541,7 +37564,8 @@ async function revalidateKeywordLane(store, lane) {
       contentMatchedItems: allRows.filter(connectorStoreRowHasContent).length,
       saturated: lane.matchCount.saturated,
       secureMatchedItems: allRows.filter(connectorStoreRowIsSecureTier).length
-    }
+    },
+    ...lane.commonWords ? { commonWords: lane.commonWords } : {}
   };
 }
 async function relaxEmptyLocalKeywordLane(store, query, limit, accountScope, filters, strict, enabled, ftsOptions = {}, deadlineAtMs) {
@@ -39723,7 +39747,7 @@ function fileIdentity(path) {
     return;
   }
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 500, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, KEYWORD_COMMON_ROW_SHARE = 0.2, KEYWORD_COMMON_MIN_ROWS = 5000, KEYWORD_COMMON_WINDOWS = 16, KEYWORD_COMMON_WINDOW_ROWS = 1250, KEYWORD_COMMON_SETTLE_SIGMAS = 3, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 500, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -46285,12 +46309,15 @@ var init_local_index = __esm(() => {
       const selectedFilters = connectorStoreFilterSql(filters);
       const selectedFtsScope = connectorStoreFtsScopeSql(filters);
       const conceptScope = connectorStoreFtsScopeSql(filters, "r.chunk_pk");
-      const terms = ftsOptions.relaxed ? ftsOptions.privatePrecision ? yield* this.privateRelaxedFtsQuerySteps(query) : toRelaxedLocalFtsQuery(query) : toFtsQuery(query, ftsOptions);
-      if (!terms)
-        return { rows: [], saturated: false, concepts: { total: 0, matched: new Map } };
-      const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
       const groups = ftsOptions.relaxed ? [] : sourceIndexFtsTermGroups(query);
       const exact = queryInitialisms(query);
+      const common = ftsOptions.relaxed ? undefined : yield* this.commonConceptTermsSteps(groups, exact);
+      const commonTerms = common?.excluded;
+      const commonWords = common?.audit;
+      const terms = ftsOptions.relaxed ? ftsOptions.privatePrecision ? yield* this.privateRelaxedFtsQuerySteps(query) : toRelaxedLocalFtsQuery(query) : sourceIndexFtsQuery(query, { ...ftsOptions.prefix !== undefined ? { prefix: ftsOptions.prefix } : {}, ...commonTerms ? { excludedTerms: commonTerms } : {} });
+      if (!terms)
+        return { rows: [], saturated: false, concepts: { total: 0, matched: new Map }, ...commonWords ? { commonWords } : {} };
+      const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
       const minimumSignal = groups.length >= 2;
       const fetchLimit = minimumSignal ? Math.min(limit * 3, MAX_SEARCH_RESULTS) : limit;
       const selectedAccount = normalizeOptionalAccountScope(accountScope);
@@ -46380,7 +46407,7 @@ var init_local_index = __esm(() => {
             }
           }
           const enough = (row) => (matchedGroups.get(row.item_pk) ?? 0) >= required;
-          const weights = rows.every(enough) ? undefined : conceptWeights ??= yield* this.conceptWeightsSteps(groups, exact);
+          const weights = rows.every(enough) ? undefined : conceptWeights ??= yield* this.conceptWeightsSteps(groups, exact, common?.commonShares);
           const literalTopics = new Set(sourceIndexTopicTokens(query).filter((term) => term.length >= 3));
           const uniqueTerms = weights && weights.population >= 10 ? groups.flatMap((group, index) => weights.counts[index] === 1 ? group.filter((term) => literalTopics.has(term)) : []) : [];
           const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : yield* this.conceptHitsSteps(rows, sourceIndexFtsGroupQuery(uniqueTerms, exact), conceptScope, ftsOptions.conceptHitMemo));
@@ -46434,7 +46461,8 @@ var init_local_index = __esm(() => {
             row.local_item_id,
             minimumSignal ? matchedGroups.get(row.item_pk) ?? 0 : groups.length
           ]))
-        }
+        },
+        ...commonWords ? { commonWords } : {}
       };
     }
     *conceptHitsSteps(rows, groupQuery, scope, memo) {
@@ -46491,7 +46519,77 @@ var init_local_index = __esm(() => {
       }
       return alternatives.join(" OR ");
     }
-    *conceptWeightsSteps(groups, exact) {
+    *commonConceptTermsSteps(groups, exact) {
+      if (groups.length < 2)
+        return;
+      const memo = this.conceptCountMemo ??= new Map;
+      const remembered = (key2) => {
+        const entry = memo.get(key2);
+        return entry && Date.now() - entry.at < CONCEPT_COUNT_MAX_AGE_MS ? entry.count : undefined;
+      };
+      const remember = (key2, count) => {
+        if (memo.size >= CONCEPT_COUNT_MEMO_LIMIT)
+          memo.clear();
+        memo.set(key2, { count, at: Date.now() });
+      };
+      const ROWS = "\x00fts-rows";
+      let rows = remembered(ROWS);
+      if (rows === undefined) {
+        rows = (yield { mode: "get", sql: "SELECT COALESCE(MAX(rowid), 0) AS count FROM connector_store_fts", params: [] }).count;
+        remember(ROWS, rows);
+      }
+      if (rows < KEYWORD_COMMON_MIN_ROWS)
+        return;
+      const windows = keywordCountWindows(rows);
+      const groupQueries = groups.map((group) => sourceIndexFtsGroupQuery(group, exact, false));
+      const keys = groupQueries.map((groupQuery) => `\x01common:${rows}:${groupQuery}`);
+      const shares = keys.map((key2) => remembered(key2));
+      const tally = groups.map(() => ({ count: 0, sampled: 0 }));
+      const countStarted = Date.now();
+      let windowsRead = 0;
+      for (const round of [windows.slice(0, 1), windows.slice(1)]) {
+        const counts = groups.flatMap((_, index) => shares[index] === undefined ? round.map((window2) => ({ index, window: window2 })) : []);
+        if (counts.length === 0 || round.length === 0)
+          continue;
+        const row = yield {
+          mode: "get",
+          sql: `SELECT ${counts.map((_, at) => `(SELECT COUNT(*) FROM connector_store_fts WHERE connector_store_fts MATCH ? AND rowid BETWEEN ? AND ?) AS c${at}`).join(", ")}`,
+          params: counts.flatMap(({ index, window: [from, to] }) => [groupQueries[index], from, to])
+        };
+        for (const [at, { index, window: [from, to] }] of counts.entries()) {
+          tally[index].count += row[`c${at}`] ?? 0;
+          tally[index].sampled += to - from + 1;
+        }
+        windowsRead += counts.length;
+        for (const [index, { count, sampled }] of tally.entries()) {
+          if (shares[index] !== undefined || sampled === 0)
+            continue;
+          if (sampled >= windows.reduce((sum, [from, to]) => sum + to - from + 1, 0) || keywordShareSettled(count, sampled)) {
+            shares[index] = count / sampled;
+            remember(keys[index], shares[index]);
+          }
+        }
+      }
+      const commonCountMs = Date.now() - countStarted;
+      const share = shares;
+      const common = share.map((value) => value > KEYWORD_COMMON_ROW_SHARE);
+      if (common.every(Boolean))
+        common[share.indexOf(Math.min(...share))] = false;
+      const kept = new Set(groups.filter((_, index) => !common[index]).flat());
+      const excluded = new Set(groups.filter((_, index) => common[index]).flat().filter((term) => !kept.has(term)));
+      const estimate = (keep) => Math.round(Math.min(rows, share.reduce((sum, value, index) => sum + (keep(index) ? value * rows : 0), 0)));
+      return {
+        ...excluded.size > 0 ? { excluded, commonShares: new Map(share.flatMap((value, index) => common[index] ? [[index, value]] : [])) } : {},
+        audit: {
+          wordsLeftOut: excluded.size,
+          rowsRankedEstimate: estimate((index) => !common[index]),
+          rowsRankedEveryWordEstimate: estimate(() => true),
+          commonCountMs,
+          commonCountWindows: windowsRead
+        }
+      };
+    }
+    *conceptWeightsSteps(groups, exact, sampled) {
       const memo = this.conceptCountMemo ??= new Map;
       const remembered = (key2) => {
         const entry = memo.get(key2);
@@ -46509,7 +46607,12 @@ var init_local_index = __esm(() => {
         remember(POPULATION, items);
       }
       const counts = [];
-      for (const group of groups) {
+      for (const [index, group] of groups.entries()) {
+        const share = sampled?.get(index);
+        if (share !== undefined) {
+          counts.push(Math.round(Math.min(1, share) * items));
+          continue;
+        }
         const groupQuery = sourceIndexFtsGroupQuery(group, exact);
         let count = remembered(groupQuery);
         if (count === undefined) {

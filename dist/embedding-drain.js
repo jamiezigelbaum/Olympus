@@ -9027,7 +9027,7 @@ var SOURCE_INDEX_SYNONYMS = Object.freeze({
   retainer: ["engagement", "agreement", "deposit"]
 });
 function sourceIndexFtsQuery(query, options = {}) {
-  const terms = sourceIndexFtsTerms(query);
+  const terms = sourceIndexFtsTerms(query).filter((term) => !options.excludedTerms?.has(term));
   if (terms.length === 0)
     return "";
   const suffix = options.prefix === false ? "" : "*";
@@ -9161,8 +9161,8 @@ function sourceIndexFtsTermGroups(query, options = {}) {
   }
   return groups;
 }
-function sourceIndexFtsGroupQuery(group, exact = new Set) {
-  return group.map((term) => `"${escapeFtsPhrase(term)}"${exact.has(term) ? "" : "*"}`).join(" OR ");
+function sourceIndexFtsGroupQuery(group, exact = new Set, prefix = true) {
+  return group.map((term) => `"${escapeFtsPhrase(term)}"${exact.has(term) || !prefix ? "" : "*"}`).join(" OR ");
 }
 function runBoundedFtsTokenizerMigration(db, spec) {
   const indexedRows = readCount(db, spec.indexedRowCountSql);
@@ -23943,6 +23943,27 @@ var MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100;
 var MIN_VECTOR_SCORE = 0.18;
 var MAX_REQUIRED_CONCEPTS = 3;
 var RARE_CONCEPT_WEIGHT_SHARE = 0.6;
+var KEYWORD_COMMON_ROW_SHARE = 0.2;
+var KEYWORD_COMMON_MIN_ROWS = 5000;
+var KEYWORD_COMMON_WINDOWS = 16;
+var KEYWORD_COMMON_WINDOW_ROWS = 1250;
+var KEYWORD_COMMON_SETTLE_SIGMAS = 3;
+function keywordCountWindows(rows) {
+  if (rows <= KEYWORD_COMMON_WINDOWS * KEYWORD_COMMON_WINDOW_ROWS)
+    return [[1, rows]];
+  const bits = Math.log2(KEYWORD_COMMON_WINDOWS);
+  const reversed = (index) => parseInt(index.toString(2).padStart(bits, "0").split("").reverse().join(""), 2);
+  return Array.from({ length: KEYWORD_COMMON_WINDOWS }, (_, index) => {
+    const from = Math.floor(reversed(index) * rows / KEYWORD_COMMON_WINDOWS) + 1;
+    return [from, Math.min(rows, from + KEYWORD_COMMON_WINDOW_ROWS - 1)];
+  });
+}
+function keywordShareSettled(count, sampled) {
+  if (sampled <= 0)
+    return false;
+  const margin = KEYWORD_COMMON_SETTLE_SIGMAS * Math.sqrt(KEYWORD_COMMON_ROW_SHARE * (1 - KEYWORD_COMMON_ROW_SHARE) / sampled);
+  return Math.abs(count / sampled - KEYWORD_COMMON_ROW_SHARE) > margin;
+}
 var READ_RESULT_PROJECTION_LOCATOR_URI = Symbol("connector-store-result-projection-locator-uri");
 var DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62;
 var CALIBRATED_CONTENT_PREFERENCE_BARS = new Map([
@@ -31062,12 +31083,15 @@ class LocalConnectorStore {
     const selectedFilters = connectorStoreFilterSql(filters);
     const selectedFtsScope = connectorStoreFtsScopeSql(filters);
     const conceptScope = connectorStoreFtsScopeSql(filters, "r.chunk_pk");
-    const terms = ftsOptions.relaxed ? ftsOptions.privatePrecision ? yield* this.privateRelaxedFtsQuerySteps(query) : toRelaxedLocalFtsQuery(query) : toFtsQuery(query, ftsOptions);
-    if (!terms)
-      return { rows: [], saturated: false, concepts: { total: 0, matched: new Map } };
-    const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
     const groups = ftsOptions.relaxed ? [] : sourceIndexFtsTermGroups(query);
     const exact = queryInitialisms(query);
+    const common = ftsOptions.relaxed ? undefined : yield* this.commonConceptTermsSteps(groups, exact);
+    const commonTerms = common?.excluded;
+    const commonWords = common?.audit;
+    const terms = ftsOptions.relaxed ? ftsOptions.privatePrecision ? yield* this.privateRelaxedFtsQuerySteps(query) : toRelaxedLocalFtsQuery(query) : sourceIndexFtsQuery(query, { ...ftsOptions.prefix !== undefined ? { prefix: ftsOptions.prefix } : {}, ...commonTerms ? { excludedTerms: commonTerms } : {} });
+    if (!terms)
+      return { rows: [], saturated: false, concepts: { total: 0, matched: new Map }, ...commonWords ? { commonWords } : {} };
+    const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
     const minimumSignal = groups.length >= 2;
     const fetchLimit = minimumSignal ? Math.min(limit * 3, MAX_SEARCH_RESULTS) : limit;
     const selectedAccount = normalizeOptionalAccountScope(accountScope);
@@ -31157,7 +31181,7 @@ class LocalConnectorStore {
           }
         }
         const enough = (row) => (matchedGroups.get(row.item_pk) ?? 0) >= required;
-        const weights = rows.every(enough) ? undefined : conceptWeights ??= yield* this.conceptWeightsSteps(groups, exact);
+        const weights = rows.every(enough) ? undefined : conceptWeights ??= yield* this.conceptWeightsSteps(groups, exact, common?.commonShares);
         const literalTopics = new Set(sourceIndexTopicTokens(query).filter((term) => term.length >= 3));
         const uniqueTerms = weights && weights.population >= 10 ? groups.flatMap((group, index) => weights.counts[index] === 1 ? group.filter((term) => literalTopics.has(term)) : []) : [];
         const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : yield* this.conceptHitsSteps(rows, sourceIndexFtsGroupQuery(uniqueTerms, exact), conceptScope, ftsOptions.conceptHitMemo));
@@ -31211,7 +31235,8 @@ class LocalConnectorStore {
           row.local_item_id,
           minimumSignal ? matchedGroups.get(row.item_pk) ?? 0 : groups.length
         ]))
-      }
+      },
+      ...commonWords ? { commonWords } : {}
     };
   }
   *conceptHitsSteps(rows, groupQuery, scope, memo) {
@@ -31268,7 +31293,77 @@ class LocalConnectorStore {
     }
     return alternatives.join(" OR ");
   }
-  *conceptWeightsSteps(groups, exact) {
+  *commonConceptTermsSteps(groups, exact) {
+    if (groups.length < 2)
+      return;
+    const memo = this.conceptCountMemo ??= new Map;
+    const remembered = (key2) => {
+      const entry = memo.get(key2);
+      return entry && Date.now() - entry.at < CONCEPT_COUNT_MAX_AGE_MS ? entry.count : undefined;
+    };
+    const remember = (key2, count) => {
+      if (memo.size >= CONCEPT_COUNT_MEMO_LIMIT)
+        memo.clear();
+      memo.set(key2, { count, at: Date.now() });
+    };
+    const ROWS = "\x00fts-rows";
+    let rows = remembered(ROWS);
+    if (rows === undefined) {
+      rows = (yield { mode: "get", sql: "SELECT COALESCE(MAX(rowid), 0) AS count FROM connector_store_fts", params: [] }).count;
+      remember(ROWS, rows);
+    }
+    if (rows < KEYWORD_COMMON_MIN_ROWS)
+      return;
+    const windows = keywordCountWindows(rows);
+    const groupQueries = groups.map((group) => sourceIndexFtsGroupQuery(group, exact, false));
+    const keys = groupQueries.map((groupQuery) => `\x01common:${rows}:${groupQuery}`);
+    const shares = keys.map((key2) => remembered(key2));
+    const tally = groups.map(() => ({ count: 0, sampled: 0 }));
+    const countStarted = Date.now();
+    let windowsRead = 0;
+    for (const round of [windows.slice(0, 1), windows.slice(1)]) {
+      const counts = groups.flatMap((_, index) => shares[index] === undefined ? round.map((window) => ({ index, window })) : []);
+      if (counts.length === 0 || round.length === 0)
+        continue;
+      const row = yield {
+        mode: "get",
+        sql: `SELECT ${counts.map((_, at) => `(SELECT COUNT(*) FROM connector_store_fts WHERE connector_store_fts MATCH ? AND rowid BETWEEN ? AND ?) AS c${at}`).join(", ")}`,
+        params: counts.flatMap(({ index, window: [from, to] }) => [groupQueries[index], from, to])
+      };
+      for (const [at, { index, window: [from, to] }] of counts.entries()) {
+        tally[index].count += row[`c${at}`] ?? 0;
+        tally[index].sampled += to - from + 1;
+      }
+      windowsRead += counts.length;
+      for (const [index, { count, sampled }] of tally.entries()) {
+        if (shares[index] !== undefined || sampled === 0)
+          continue;
+        if (sampled >= windows.reduce((sum, [from, to]) => sum + to - from + 1, 0) || keywordShareSettled(count, sampled)) {
+          shares[index] = count / sampled;
+          remember(keys[index], shares[index]);
+        }
+      }
+    }
+    const commonCountMs = Date.now() - countStarted;
+    const share = shares;
+    const common = share.map((value) => value > KEYWORD_COMMON_ROW_SHARE);
+    if (common.every(Boolean))
+      common[share.indexOf(Math.min(...share))] = false;
+    const kept = new Set(groups.filter((_, index) => !common[index]).flat());
+    const excluded = new Set(groups.filter((_, index) => common[index]).flat().filter((term) => !kept.has(term)));
+    const estimate = (keep) => Math.round(Math.min(rows, share.reduce((sum, value, index) => sum + (keep(index) ? value * rows : 0), 0)));
+    return {
+      ...excluded.size > 0 ? { excluded, commonShares: new Map(share.flatMap((value, index) => common[index] ? [[index, value]] : [])) } : {},
+      audit: {
+        wordsLeftOut: excluded.size,
+        rowsRankedEstimate: estimate((index) => !common[index]),
+        rowsRankedEveryWordEstimate: estimate(() => true),
+        commonCountMs,
+        commonCountWindows: windowsRead
+      }
+    };
+  }
+  *conceptWeightsSteps(groups, exact, sampled) {
     const memo = this.conceptCountMemo ??= new Map;
     const remembered = (key2) => {
       const entry = memo.get(key2);
@@ -31286,7 +31381,12 @@ class LocalConnectorStore {
       remember(POPULATION, items);
     }
     const counts = [];
-    for (const group of groups) {
+    for (const [index, group] of groups.entries()) {
+      const share = sampled?.get(index);
+      if (share !== undefined) {
+        counts.push(Math.round(Math.min(1, share) * items));
+        continue;
+      }
       const groupQuery = sourceIndexFtsGroupQuery(group, exact);
       let count = remembered(groupQuery);
       if (count === undefined) {
@@ -33910,9 +34010,6 @@ function createConnectorStoreLocatorIdentityIndex(db) {
 var LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000;
 function foldLocator(locator) {
   return locator.normalize("NFC").toLowerCase();
-}
-function toFtsQuery(query, options = {}) {
-  return sourceIndexFtsQuery(query, options);
 }
 var LOCAL_RELAXED_STOPWORDS = new Set([
   "do",

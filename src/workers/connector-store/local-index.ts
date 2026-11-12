@@ -253,6 +253,49 @@ const MIN_VECTOR_SCORE = 0.18;
 const MAX_REQUIRED_CONCEPTS = 3;
 // Or the share of the query's concept weight (IDF) a keyword match must carry.
 const RARE_CONCEPT_WEIGHT_SHARE = 0.6;
+// A concept found in more of a store's FTS rows than this share is left out
+// of the keyword match (commonConceptTermsSteps).
+const KEYWORD_COMMON_ROW_SHARE = 0.2;
+// Only in a store this large: ranking every match is what costs, and in a
+// small store nearly every word of a question is "common" (a few files on one
+// topic), so leaving words out would only lose matches.
+const KEYWORD_COMMON_MIN_ROWS = 5_000;
+// A word's share of a store's FTS rows is counted over up to this many rowid
+// windows of this many rows, spread over the store; a store with no more
+// rows than the windows hold is counted whole. Many small windows, so a word
+// that clusters in one stretch of the store moves the estimate less. On a
+// 1M-row seed (2026-11-11, #1423), an exact word's 16 windows read about
+// 0.3 MB in 4 ms, against 1.3 MB for a count bounded at the threshold. The
+// count stops at the first window that settles the word (keywordShareSettled):
+// on Sparta's stores, counting all 16 for every word cost more than the words
+// left out saved (#1423 timing pair, olympus-ops#151, 2026-11-12).
+const KEYWORD_COMMON_WINDOWS = 16;
+const KEYWORD_COMMON_WINDOW_ROWS = 1_250;
+// How many standard errors of a share at the threshold a word's sampled share
+// must sit from it to settle the word.
+const KEYWORD_COMMON_SETTLE_SIGMAS = 3;
+
+/**
+ * The rowid windows a word's share of `rows` FTS rows is counted over, in the
+ * order they are read: each next window halves the gaps the earlier ones
+ * leave (bit-reversed order), so a count that stops early still spans the store.
+ */
+export function keywordCountWindows(rows: number): Array<[number, number]> {
+  if (rows <= KEYWORD_COMMON_WINDOWS * KEYWORD_COMMON_WINDOW_ROWS) return [[1, rows]];
+  const bits = Math.log2(KEYWORD_COMMON_WINDOWS);
+  const reversed = (index: number) => parseInt(index.toString(2).padStart(bits, '0').split('').reverse().join(''), 2);
+  return Array.from({ length: KEYWORD_COMMON_WINDOWS }, (_, index) => {
+    const from = Math.floor((reversed(index) * rows) / KEYWORD_COMMON_WINDOWS) + 1;
+    return [from, Math.min(rows, from + KEYWORD_COMMON_WINDOW_ROWS - 1)];
+  });
+}
+
+/** Whether `count` matches in `sampled` rows put a word clearly on one side of the common-word share. */
+export function keywordShareSettled(count: number, sampled: number): boolean {
+  if (sampled <= 0) return false;
+  const margin = KEYWORD_COMMON_SETTLE_SIGMAS * Math.sqrt((KEYWORD_COMMON_ROW_SHARE * (1 - KEYWORD_COMMON_ROW_SHARE)) / sampled);
+  return Math.abs(count / sampled - KEYWORD_COMMON_ROW_SHARE) > margin;
+}
 const READ_RESULT_PROJECTION_LOCATOR_URI = Symbol('connector-store-result-projection-locator-uri');
 // Below this bar, semantic similarity is treated as no evidence. Calibrated
 // against the live corpus (gemini-embedding-2, 2026-07-25: off-domain
@@ -2156,6 +2199,23 @@ export interface ConnectorStoreKeywordSearch {
   rows: ConnectorStoreSearchRow[];
   saturated: boolean;
   concepts: ConnectorStoreConceptCoverage;
+  /** Present when the store is large enough to leave common words out (counts only). */
+  commonWords?: ConnectorStoreCommonWords;
+}
+
+/**
+ * What leaving a question's common words out of a store's keyword match
+ * did: how many words it left out, and the FTS rows the match ranks with and
+ * without them, estimated from the sampled word shares as the sum over the
+ * matched concepts (the match is an OR, so this is an upper bound).
+ */
+export interface ConnectorStoreCommonWords {
+  wordsLeftOut: number;
+  rowsRankedEstimate: number;
+  rowsRankedEveryWordEstimate: number;
+  /** Time the share counts took in this search, waits for the store included, and the windows they read (0 when all were remembered). */
+  commonCountMs: number;
+  commonCountWindows: number;
 }
 
 export interface ConnectorStoreConceptCoverage {
@@ -13361,11 +13421,16 @@ export class LocalConnectorStore {
     const selectedFilters = connectorStoreFilterSql(filters);
     const selectedFtsScope = connectorStoreFtsScopeSql(filters);
     const conceptScope = connectorStoreFtsScopeSql(filters, 'r.chunk_pk');
-    const terms = ftsOptions.relaxed ? (ftsOptions.privatePrecision ? yield* this.privateRelaxedFtsQuerySteps(query) : toRelaxedLocalFtsQuery(query)) : toFtsQuery(query, ftsOptions);
-    if (!terms) return { rows: [], saturated: false, concepts: { total: 0, matched: new Map() } };
-    const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
     const groups = ftsOptions.relaxed ? [] : sourceIndexFtsTermGroups(query);
     const exact = queryInitialisms(query);
+    const common = ftsOptions.relaxed ? undefined : yield* this.commonConceptTermsSteps(groups, exact);
+    const commonTerms = common?.excluded;
+    const commonWords = common?.audit;
+    const terms = ftsOptions.relaxed
+      ? (ftsOptions.privatePrecision ? yield* this.privateRelaxedFtsQuerySteps(query) : toRelaxedLocalFtsQuery(query))
+      : sourceIndexFtsQuery(query, { ...(ftsOptions.prefix !== undefined ? { prefix: ftsOptions.prefix } : {}), ...(commonTerms ? { excludedTerms: commonTerms } : {}) });
+    if (!terms) return { rows: [], saturated: false, concepts: { total: 0, matched: new Map() }, ...(commonWords ? { commonWords } : {}) };
+    const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
     const minimumSignal = groups.length >= 2;
     const fetchLimit = minimumSignal ? Math.min(limit * 3, MAX_SEARCH_RESULTS) : limit;
     const selectedAccount = normalizeOptionalAccountScope(accountScope);
@@ -13501,7 +13566,7 @@ export class LocalConnectorStore {
           }
         }
         const enough = (row: ItemRow) => (matchedGroups.get(row.item_pk) ?? 0) >= required;
-        const weights = rows.every(enough) ? undefined : (conceptWeights ??= yield* this.conceptWeightsSteps(groups, exact));
+        const weights = rows.every(enough) ? undefined : (conceptWeights ??= yield* this.conceptWeightsSteps(groups, exact, common?.commonShares));
         // One unique literal topic word can identify a record when a question
         // combines neighbouring records (#710). The shared stopwords exclude
         // scaffolding such as "my"; synonyms alone cannot earn this exception.
@@ -13586,6 +13651,7 @@ export class LocalConnectorStore {
           minimumSignal ? (matchedGroups.get(row.item_pk) ?? 0) : groups.length,
         ])),
       },
+      ...(commonWords ? { commonWords } : {}),
     };
   }
 
@@ -13663,9 +13729,111 @@ export class LocalConnectorStore {
    * weighs the most, so the question's missing words still count against a
    * partial match.
    */
+  /**
+   * The terms of a question's concepts that are very common in this store:
+   * found in over KEYWORD_COMMON_ROW_SHARE of its FTS rows. Left out of the
+   * match, they stop the ranking from reading almost every row while saying
+   * little about which one answers (Expert Agents' keyword rule; on Sparta's
+   * largest stores, 2026-11-11, olympus-ops#151, 8.4 to 2.1 s on the Private
+   * Dropbox store with most of the top 10 kept). A concept still counts toward
+   * each candidate's matched concepts. When every concept is common, the
+   * rarest is kept. A term a kept concept also holds stays. The share is
+   * counted on the exact words over rowid windows (keywordCountWindows), exactly in a
+   * store the windows cover, and remembered like the concept weights. Stores
+   * under KEYWORD_COMMON_MIN_ROWS rows match every word, as before.
+   */
+  private *commonConceptTermsSteps(
+    groups: ReadonlyArray<readonly string[]>,
+    exact: ReadonlyMap<string, unknown>,
+  ): Generator<StoreRead, { excluded?: ReadonlySet<string>; commonShares?: ReadonlyMap<number, number>; audit: ConnectorStoreCommonWords } | undefined, unknown> {
+    if (groups.length < 2) return undefined;
+    const memo = this.conceptCountMemo ??= new Map();
+    const remembered = (key: string): number | undefined => {
+      const entry = memo.get(key);
+      return entry && Date.now() - entry.at < CONCEPT_COUNT_MAX_AGE_MS ? entry.count : undefined;
+    };
+    const remember = (key: string, count: number) => {
+      if (memo.size >= CONCEPT_COUNT_MEMO_LIMIT) memo.clear();
+      memo.set(key, { count, at: Date.now() });
+    };
+    // The largest rowid stands for the row count: no table scan, and deleted
+    // rows only raise the threshold, so fewer words count as common.
+    const ROWS = '\u0000fts-rows';
+    let rows = remembered(ROWS);
+    if (rows === undefined) {
+      rows = ((yield { mode: 'get', sql: 'SELECT COALESCE(MAX(rowid), 0) AS count FROM connector_store_fts', params: [] }) as { count: number }).count;
+      remember(ROWS, rows);
+    }
+    if (rows < KEYWORD_COMMON_MIN_ROWS) return undefined;
+    const windows = keywordCountWindows(rows);
+    // Exact words, whatever the search's mode: FTS5 reads every completion's
+    // doclist for a prefix, whatever the rowid bounds (3 to 6 MB a count on
+    // the seed above). A prefix search may so keep a word its completions make
+    // common; it never leaves out a rare one.
+    const groupQueries = groups.map((group) => sourceIndexFtsGroupQuery(group, exact, false));
+    const keys = groupQueries.map((groupQuery) => `\u0001common:${rows}:${groupQuery}`);
+    // Remembered as the share: an early stop samples fewer rows.
+    const shares: Array<number | undefined> = keys.map((key) => remembered(key));
+    const tally = groups.map(() => ({ count: 0, sampled: 0 }));
+    const countStarted = Date.now();
+    let windowsRead = 0;
+    // Every count of a round is one read: through the read pool each read
+    // waits its turn, and on Sparta that wait, not the SQL, was the cost
+    // (#1423 diagnosis, olympus-ops#151, 2026-11-12). The first round reads
+    // each word's first window; the second the rest, for the words the first
+    // did not settle (keywordShareSettled).
+    for (const round of [windows.slice(0, 1), windows.slice(1)]) {
+      const counts = groups.flatMap((_, index) => shares[index] === undefined ? round.map((window) => ({ index, window })) : []);
+      if (counts.length === 0 || round.length === 0) continue;
+      const row = (yield {
+        mode: 'get',
+        sql: `SELECT ${counts.map((_, at) => `(SELECT COUNT(*) FROM connector_store_fts WHERE connector_store_fts MATCH ? AND rowid BETWEEN ? AND ?) AS c${at}`).join(', ')}`,
+        params: counts.flatMap(({ index, window: [from, to] }) => [groupQueries[index]!, from, to]),
+      }) as Record<string, number>;
+      for (const [at, { index, window: [from, to] }] of counts.entries()) {
+        tally[index]!.count += row[`c${at}`] ?? 0;
+        tally[index]!.sampled += to - from + 1;
+      }
+      windowsRead += counts.length;
+      for (const [index, { count, sampled }] of tally.entries()) {
+        if (shares[index] !== undefined || sampled === 0) continue;
+        if (sampled >= windows.reduce((sum, [from, to]) => sum + to - from + 1, 0) || keywordShareSettled(count, sampled)) {
+          shares[index] = count / sampled;
+          remember(keys[index]!, shares[index]!);
+        }
+      }
+    }
+    const commonCountMs = Date.now() - countStarted;
+    const share = shares as number[];
+    const common = share.map((value) => value > KEYWORD_COMMON_ROW_SHARE);
+    if (common.every(Boolean)) common[share.indexOf(Math.min(...share))] = false;
+    const kept = new Set(groups.filter((_, index) => !common[index]).flat());
+    const excluded = new Set(groups.filter((_, index) => common[index]).flat().filter((term) => !kept.has(term)));
+    const estimate = (keep: (index: number) => boolean) =>
+      Math.round(Math.min(rows, share.reduce((sum, value, index) => sum + (keep(index) ? value * rows : 0), 0)));
+    return {
+      ...(excluded.size > 0 ? { excluded, commonShares: new Map(share.flatMap((value, index) => common[index] ? [[index, value] as const] : [])) } : {}),
+      audit: {
+        wordsLeftOut: excluded.size,
+        rowsRankedEstimate: estimate((index) => !common[index]),
+        rowsRankedEveryWordEstimate: estimate(() => true),
+        commonCountMs,
+        commonCountWindows: windowsRead,
+      },
+    };
+  }
+
+  /**
+   * `sampled`: the share of the store's FTS rows each common concept was
+   * counted in (commonConceptTermsSteps). Those concepts are weighed from it
+   * rather than counted store-wide: a word in over a fifth of the rows weighs
+   * little either way, and its whole doclist, every completion included, is
+   * the read leaving it out of the match was meant to avoid.
+   */
   private *conceptWeightsSteps(
     groups: ReadonlyArray<readonly string[]>,
     exact: ReadonlyMap<string, unknown>,
+    sampled?: ReadonlyMap<number, number>,
   ): Generator<StoreRead, { of: number[]; total: number; counts: number[]; population: number }, unknown> {
     const memo = this.conceptCountMemo ??= new Map();
     const remembered = (key: string): number | undefined => {
@@ -13683,7 +13851,9 @@ export class LocalConnectorStore {
       remember(POPULATION, items);
     }
     const counts: number[] = [];
-    for (const group of groups) {
+    for (const [index, group] of groups.entries()) {
+      const share = sampled?.get(index);
+      if (share !== undefined) { counts.push(Math.round(Math.min(1, share) * items)); continue; }
       const groupQuery = sourceIndexFtsGroupQuery(group, exact);
       let count = remembered(groupQuery);
       if (count === undefined) {
@@ -15046,6 +15216,7 @@ export function createConnectorStoreCorpusAdapter(
           latencyMs: Date.now() - startedAt,
           laneAudits: [{
             ...connectorStoreKeywordLaneAudit(store.corpusId, rows.length, hits.length),
+            ...(keywordLane.commonWords ?? {}),
             ...(semanticSkippedReason
               ? { skippedReason: semanticSkippedReason, modelId: embeddingProvider!.modelId }
               : {}),
@@ -15090,6 +15261,7 @@ export function createConnectorStoreCorpusAdapter(
         laneAudits: [
           {
             ...connectorStoreKeywordLaneAudit(store.corpusId, rows.length, rows.length),
+            ...(keywordLane.commonWords ?? {}),
             ...(semanticSkippedReason
               ? { skippedReason: semanticSkippedReason, modelId: embeddingProvider!.modelId }
               : {}),
@@ -15532,7 +15704,11 @@ async function hybridConnectorStoreSearch(
     // same audit fields the Dropbox retrieval audit records
     // (keyword_candidates / vector_candidates / fused_candidates).
     laneAudits: [
-      { ...connectorStoreKeywordLaneAudit(store.corpusId, keywordRows.length, keywordRows.length), elapsedMs: keywordElapsedMs },
+      {
+        ...connectorStoreKeywordLaneAudit(store.corpusId, keywordRows.length, keywordRows.length),
+        elapsedMs: keywordElapsedMs,
+        ...(keywordLane.commonWords ?? {}),
+      },
       {
         laneName: `${store.corpusId}:connector_store_vector`,
         laneType: 'semantic',
@@ -15670,6 +15846,8 @@ type ConnectorStoreKeywordLane = {
   allRows: ConnectorStoreSearchRow[];
   /** The expansion-free search, when expansion changed this one. */
   baseline?: ConnectorStoreKeywordLane;
+  /** The plain search's common-word audit, when the store is large enough to have one. */
+  commonWords?: ConnectorStoreCommonWords;
 };
 
 async function connectorStoreKeywordLaneRows(
@@ -15765,6 +15943,7 @@ async function connectorStoreKeywordLaneRows(
     conceptShare: new Map([...(baseline?.conceptShare ?? []), ...conceptShare].map(([id, share]) =>
       [id, Math.max(share, baseline?.conceptShare?.get(id) ?? 0)] as const)),
     ...(baseline ? { baseline } : {}),
+    ...(plain.commonWords ? { commonWords: plain.commonWords } : {}),
   };
 }
 
@@ -15830,6 +16009,7 @@ async function revalidateKeywordLane(store: LocalConnectorStore, lane: Connector
       saturated: lane.matchCount.saturated,
       secureMatchedItems: allRows.filter(connectorStoreRowIsSecureTier).length,
     },
+    ...(lane.commonWords ? { commonWords: lane.commonWords } : {}),
   };
 }
 

@@ -436,6 +436,12 @@ export interface EvalRetrievalAudit {
     bestCosine?: number;
     suppressedBelowBar?: number;
     elapsedMs?: number;
+    /** Keyword lane on a large store: words left out of the match as common, and the FTS rows ranked (estimated) with and without them. */
+    wordsLeftOut?: number;
+    rowsRankedEstimate?: number;
+    rowsRankedEveryWordEstimate?: number;
+    commonCountMs?: number;
+    commonCountWindows?: number;
   }>;
   /** Each store's whole search: wall time, the adapter's own time, and whether it beat the deadline. */
   corpusTimings: Array<{ corpusId: string; elapsedMs: number; adapterReportedMs?: number; outcome: string }>;
@@ -508,6 +514,11 @@ export function evalRetrievalAudit(
       ...(lane.bestCosine !== undefined ? { bestCosine: lane.bestCosine } : {}),
       ...(lane.suppressedBelowBar !== undefined ? { suppressedBelowBar: lane.suppressedBelowBar } : {}),
       ...(lane.elapsedMs !== undefined ? { elapsedMs: lane.elapsedMs } : {}),
+      ...(lane.wordsLeftOut !== undefined ? { wordsLeftOut: lane.wordsLeftOut } : {}),
+      ...(lane.rowsRankedEstimate !== undefined ? { rowsRankedEstimate: lane.rowsRankedEstimate } : {}),
+      ...(lane.rowsRankedEveryWordEstimate !== undefined ? { rowsRankedEveryWordEstimate: lane.rowsRankedEveryWordEstimate } : {}),
+      ...(lane.commonCountMs !== undefined ? { commonCountMs: lane.commonCountMs } : {}),
+      ...(lane.commonCountWindows !== undefined ? { commonCountWindows: lane.commonCountWindows } : {}),
     })),
     corpusTimings: (detail.corpusTimings ?? []).map((timing) => ({
       corpusId: timing.corpusId,
