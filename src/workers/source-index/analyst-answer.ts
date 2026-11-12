@@ -124,6 +124,7 @@ import {
 } from './analyst-pool.ts';
 
 export interface AnalystAnswerLanes {
+  limitStops?: readonly import('../../core/limit-stops.ts').LimitStop[];
   registry: SourceIndexCorpusRegistry;
   adapters: SourceIndexRouterAdapterMap;
   contentProviders: LocalContentProviderMap;
@@ -451,6 +452,7 @@ export function createAnalystSourceIndexAnswerHandler(
             allowCloudQueries: includeInternal,
             ...(requestedCorpusIds ? { allowedCorpusIds: requestedCorpusIds } : {}),
           },
+          limitStops: activeLanes.limitStops ?? [],
           registry: activeLanes.registry,
           adapters: activeLanes.adapters,
           contentProviders: activeLanes.contentProviders,
@@ -2895,6 +2897,7 @@ export async function searchReleasedEvidence(input: {
     maxResults,
     // Public and Personal only: Private never enters this pack.
     searchContext: { allowedTrustDomains: ['public_safe', 'internal'], allowCloudQueries: true },
+    limitStops: lanes.limitStops ?? [],
     registry: lanes.registry,
     adapters: lanes.adapters,
     contentProviders: lanes.contentProviders,
@@ -3077,6 +3080,7 @@ export async function searchPrivateEvidence(input: {
       maxResults,
       // Private only, and no query leaves this computer.
       searchContext: { allowedTrustDomains: ['secure_local'], allowCloudQueries: false },
+      limitStops: lanes.limitStops ?? [],
       registry: lanes.registry,
       adapters,
       contentProviders: lanes.contentProviders,
@@ -3118,6 +3122,7 @@ export async function searchPrivateEvidence(input: {
     const detail = await withCachedKeywordExpansion(translation, () => buildEvidencePackDetailed({
       question, maxResults, selectedItems,
       searchContext: { allowedTrustDomains: ['internal', 'public_safe'], allowCloudQueries: false },
+      limitStops: lanes.limitStops ?? [],
       registry: lanes.registry, adapters: lanes.adapters, contentProviders: lanes.contentProviders,
       maxCharsPerCandidate: input.maxCharsPerCandidate ?? DEFAULT_MAX_CHARS_PER_CANDIDATE,
       evidenceByteBudget: input.evidenceByteBudget ?? PRIVATE_EVIDENCE_BYTE_BUDGET,

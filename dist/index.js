@@ -21606,12 +21606,28 @@ var init_analyst_openclaw_infer = __esm(() => {
 // src/core/evidence-reranker.ts
 var init_evidence_reranker = () => {};
 
+// src/core/limit-stops.ts
+function registerLimit(input) {
+  const prior = limits.get(input.id);
+  if (prior && Object.keys({ ...prior, ...input }).some((key) => prior[key] !== input[key])) {
+    throw new Error(`Limit already registered differently: ${input.id}`);
+  }
+  limits.set(input.id, Object.freeze({ ...input }));
+}
+var limits;
+var init_limit_stops = __esm(() => {
+  init_sqlite_migrations();
+  limits = new Map;
+});
+
 // src/core/evidence-pack.ts
 var utf8, CUT_SHORT_LANES;
 var init_evidence_pack = __esm(() => {
   init_keyword_context();
   init_partial_search();
   init_evidence_reranker();
+  init_limit_stops();
+  init_source_corpus_registry();
   init_parent_label();
   init_source_model_policy();
   init_router();
@@ -26000,20 +26016,6 @@ var init_this_computer = __esm(() => {
   init_atomic_file();
   init_file_lease();
   init_file_scope_sources();
-});
-
-// src/core/limit-stops.ts
-function registerLimit(input) {
-  const prior = limits.get(input.id);
-  if (prior && Object.keys({ ...prior, ...input }).some((key) => prior[key] !== input[key])) {
-    throw new Error(`Limit already registered differently: ${input.id}`);
-  }
-  limits.set(input.id, Object.freeze({ ...input }));
-}
-var limits;
-var init_limit_stops = __esm(() => {
-  init_sqlite_migrations();
-  limits = new Map;
 });
 
 // src/workers/scheduler-limit-stops.ts

@@ -250,6 +250,7 @@ export function forgetSourceSchedulerState(
 export class LocalSourceSchedulerStateStore {
   readonly dbPath: string;
   private readonly db: Database;
+  private closed = false;
 
   constructor(dbPath = defaultSourceSchedulerStateDbPath()) {
     this.dbPath = dbPath;
@@ -291,12 +292,17 @@ export class LocalSourceSchedulerStateStore {
     })();
   }
 
-  /** Open limit stops recorded in this database (core/limit-stops.ts). */
+  /**
+   * Open limit stops recorded in this database (core/limit-stops.ts). The
+   * scheduler reads its status after a tick, which can end after shutdown
+   * closed this store: a closed store has nothing to show.
+   */
   openLimitStops(now?: Date): LimitStop[] {
-    return listOpenLimitStops(this.db, now);
+    return this.closed ? [] : listOpenLimitStops(this.db, now);
   }
 
   close(): void {
+    this.closed = true;
     closeSqliteStore(this.db);
   }
 

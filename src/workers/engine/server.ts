@@ -3261,6 +3261,7 @@ export async function main(): Promise<void> {
         // is audited as skipped/no_adapter instead of silently disappearing
         // from unified fan-out.
         lanes: sourceAnswerLanes = createSourceAnswerLanes({
+          limitStops: () => sourceScheduler?.status().limit_stops ?? [],
           stores: () => { mountConfiguredSourceStores(); return readConnectorStores; },
           registry: () => buildSourceIndexCorpusRegistry(
             sourceCorpusRegistry.definitions('answer', fullCorpusDefinitions)
@@ -5716,6 +5717,7 @@ export async function main(): Promise<void> {
   const chatgptSurface = {
     privateAnswers,
     privateQuestions,
+    limitStops: () => sourceScheduler?.status().limit_stops ?? [],
     dashboardView: async (signal?: AbortSignal) => {
       const response = await worker.fetch(new Request(
         'http://olympus-worker.internal/dashboard.json',
