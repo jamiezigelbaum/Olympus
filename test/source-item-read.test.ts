@@ -343,3 +343,8 @@ test('a missing ledger row refuses before checking chunks', async () => {
   const f = await fixture(); f.ledgerDb.exec('DELETE FROM tier_items');
   refused(await f.read(), 'held_until_judged'); expect(f.calls).toHaveLength(0);
 });
+
+test('the CLI accepts `olympus source item read` before dispatch', async () => {
+  const { isV04PublicCliInvocation } = await import('../src/cli.ts');
+  expect(isV04PublicCliInvocation(['source', 'item', 'read'])).toBe(true);
+});

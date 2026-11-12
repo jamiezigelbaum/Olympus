@@ -3164,6 +3164,7 @@ var init_public_surface = __esm(() => {
     "source answer",
     "source index status",
     "source index search",
+    "source item read",
     "source extract-pdfs",
     "data export",
     "data verify",

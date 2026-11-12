@@ -212,6 +212,7 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'source answer',
   'source index status',
   'source index search',
+  'source item read',
   'source extract-pdfs',
   'data export',
   'data verify',
