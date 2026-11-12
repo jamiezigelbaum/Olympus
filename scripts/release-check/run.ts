@@ -343,12 +343,31 @@ class Run {
     try { this.add(check); } finally { this.stage = keep; }
   }
 
-  async agent(sub: string, args = '', timeoutMs = 120_000): Promise<{ result: Record<string, any> | undefined; stdout: string; stderr: string; code: number; ms: number }> {
+  async agent(sub: string, args = '', timeoutMs = 120_000): Promise<AgentCall> {
     const allowed = agentTimeoutMs(timeoutMs, this.deadline, Date.now());
     const exec = await this.machine!.exec(`${BUN_LOCATE}\n"$BUN" --no-env-file ~/rc/agent.js ${sub} ${args}\n`, { timeoutMs: allowed });
     if (stoppedByBudget(exec, allowed, timeoutMs)) this.errors.push(`${sub} was stopped when the run's time budget ran out (after ${Math.round(exec.ms / 1000)} s of its ${Math.round(timeoutMs / 1000)} s bound)`);
-    return { result: parseAgentLine(exec.stdout), stdout: exec.stdout, stderr: exec.stderr, code: exec.code, ms: exec.ms };
+    return { result: parseAgentLine(exec.stdout), stdout: exec.stdout, stderr: exec.stderr, code: exec.code, ms: exec.ms, timedOut: exec.timedOut };
   }
+}
+
+/** One in-machine agent call: its result line, if it printed one, and how its process ended. */
+export interface AgentCall { result: Record<string, any> | undefined; stdout: string; stderr: string; code: number; ms: number; timedOut: boolean }
+
+/**
+ * Why an in-machine call failed, for a check's detail: the first of the result's own reason fields that is set, else how the agent
+ * process ended. An agent that died without a result (a crash, a kill, a lost exec channel) shows its exit code, the signal behind a
+ * code above 128, and its stderr, so the report names the cause instead of an empty reason (gate 5 on d89756a6, 12 Nov 2026).
+ */
+export function agentDetail(call: Pick<AgentCall, 'result' | 'stderr' | 'code' | 'timedOut'>, ...fields: string[]): string {
+  for (const field of fields.length > 0 ? fields : ['detail']) {
+    const value = call.result?.[field];
+    if (value !== undefined && value !== null && value !== '') return String(value);
+  }
+  const tail = call.stderr.trim().slice(-200);
+  if (call.result) return tail || `the agent gave no reason (exit ${call.code})`;
+  const how = [`exit ${call.code}`, ...(call.code > 128 && call.code < 160 ? [`signal ${call.code - 128}`] : []), ...(call.timedOut ? ['timed out'] : [])].join(', ');
+  return `no result from the machine (${how})${tail ? `: ${tail}` : ', and no output'}`;
 }
 
 /**
@@ -514,7 +533,7 @@ async function setupMachine(run: Run, workDir: string, bundlePath: string, insta
     id: 'source.prepare',
     title: 'The test life is wired in (stand-in source, tier rules, engine restart)',
     status: prepare.result?.ok === true ? 'pass' : 'fail',
-    detail: prepare.result?.ok === true ? `${prepare.result.rules} tier rule(s) pinned, engine ready after ${Math.round(Number(prepare.result.engineReadyMs) / 1000)} s` : String(prepare.result?.detail ?? prepare.result?.step ?? prepare.stderr.slice(-200)),
+    detail: prepare.result?.ok === true ? `${prepare.result.rules} tier rule(s) pinned, engine ready after ${Math.round(Number(prepare.result.engineReadyMs) / 1000)} s` : agentDetail(prepare, 'detail', 'step'),
     ms: prepare.ms,
   });
   if (prepare.result?.ok !== true) return false;
@@ -525,7 +544,7 @@ async function setupMachine(run: Run, workDir: string, bundlePath: string, insta
     id: 'source.connect',
     title: 'The source connects through the dashboard\'s own route',
     status: connect.result?.ok === true ? 'pass' : 'fail',
-    detail: String(connect.result?.message ?? connect.result?.detail ?? connect.stderr.slice(-200)),
+    detail: agentDetail(connect, 'message', 'detail'),
     ms: connect.ms,
   });
   if (connect.result?.ok !== true) return false;
@@ -853,7 +872,7 @@ async function captureScreenshots(run: Run, outDir: string): Promise<void> {
   const remoteDir = '~/rc/shots';
   const shot = await run.phase('screenshots', () => run.agent('screenshots', `--out ${remoteDir}`, 240_000));
   if (shot.result?.ok !== true) {
-    run.add({ id: 'dashboard.screenshots', title: 'Dashboard screenshots at 390 and 1280 wide, light and dark', status: 'fail', detail: String(shot.result?.detail ?? shot.stderr.slice(-200)) });
+    run.add({ id: 'dashboard.screenshots', title: 'Dashboard screenshots at 390 and 1280 wide, light and dark', status: 'fail', detail: agentDetail(shot) });
     return;
   }
   const localDir = join(outDir, 'screenshots');
@@ -967,7 +986,7 @@ async function runInboxLeg(run: Run, outDir: string): Promise<void> {
   const done = await run.phase('inbox', () => run.agent('inbox-check', `--primary ${sh(primary ?? '')} --ids ${sh(others.join(','))} --wait-s 600${corruptAskEntry ? ' --fault-entry-id' : ''} --out ${remoteDir}`, 2_700_000));
   const observation = done.result as InboxObservation | undefined;
   if (!observation || typeof observation.ok !== 'boolean') {
-    run.add({ id: 'inbox.ran', title: 'The Ask page and the Inbox were driven in the owner\'s browser', status: 'fail', detail: `no result from the machine (exit ${done.code}): ${done.stderr.slice(-200)}` });
+    run.add({ id: 'inbox.ran', title: 'The Ask page and the Inbox were driven in the owner\'s browser', status: 'fail', detail: agentDetail(done) });
     return;
   }
   for (const check of evaluateInbox(observation, { scriptedId: primary, agentLinks: run.agentLinks, agentLink: linkMode, agentTools: offered })) run.add(check);
@@ -1035,7 +1054,7 @@ async function runExploreLeg(run: Run, outDir: string): Promise<void> {
   const done = await run.phase('explore', () => run.agent('explore', '--out ~/rc/explore --inventory ~/rc/explore-inventory.json --pages-inventory ~/rc/explore-pages-inventory.json', 5_100_000));
   const result = done.result;
   if (!result || result.result === undefined) {
-    run.add({ id: 'explore.ran', title: 'Every control of the Sources section was pressed', status: 'fail', detail: `no result from the machine (exit ${done.code}): ${done.stderr.slice(-200)}` });
+    run.add({ id: 'explore.ran', title: 'Every control of the Sources section was pressed', status: 'fail', detail: agentDetail(done) });
     rmSync(scratch, { recursive: true, force: true });
     return;
   }
@@ -1074,7 +1093,7 @@ async function runJourneyLeg(run: Run, outDir: string): Promise<void> {
   const done = await run.phase('journeys', () => run.agent('journeys', `--out ~/rc/journeys${only}${skip}${plants}`, 2_400_000));
   const result = done.result;
   if (!result || !Array.isArray(result.traces)) {
-    run.add({ id: 'journeys.ran', title: 'The journeys were walked in the owner\'s browser', status: 'fail', detail: `no result from the machine (exit ${done.code}): ${done.stderr.slice(-200)}` });
+    run.add({ id: 'journeys.ran', title: 'The journeys were walked in the owner\'s browser', status: 'fail', detail: agentDetail(done) });
     return;
   }
   if (result.ok !== true) run.add({ id: 'journeys.ran', title: 'The journeys were walked in the owner\'s browser', status: 'fail', detail: String(result.detail ?? 'the machine reported a problem') });
@@ -1161,7 +1180,7 @@ async function runArchiveLeg(run: Run, outDir: string, deadline: number): Promis
   const call = async <T extends object>(sub: string, args: string, timeoutS: number): Promise<T | undefined> => {
     await keepStateAtFailure();
     const done = await run.phase(sub, () => run.agent(sub, args, timeoutS * 1_000));
-    if (!done.result) run.log(`${sub}: no result from the machine (exit ${done.code}): ${done.stderr.slice(-300)}`);
+    if (!done.result) run.log(`${sub}: ${agentDetail(done)}`);
     const result = done.result as T | undefined;
     const own = (result as { traces?: JourneyTrace[] } | undefined)?.traces;
     if (Array.isArray(own)) traces.push(...own);
@@ -1340,7 +1359,7 @@ async function walkRestore(run: Run, machine: JourneyMachine, label: string, out
   const done = await run.phase(`restore-${machine}`, () => run.agent('journeys', `--out ~/rc/journeys-${machine} --machine ${machine} --skip-screens`, 1_800_000));
   const traces = Array.isArray(done.result?.traces) ? done.result!.traces as JourneyTrace[] : [];
   if (traces.length === 0) {
-    run.add({ id: `restore.${machine}`, title: `The ${label} journey was walked`, status: 'fail', detail: `no result from the machine (exit ${done.code}): ${String(done.result?.detail ?? done.stderr.slice(-200))}` });
+    run.add({ id: `restore.${machine}`, title: `The ${label} journey was walked`, status: 'fail', detail: agentDetail(done) });
     return false;
   }
   const scratch = join(outDir, `_restore-${machine}`);
@@ -1407,7 +1426,7 @@ async function takeSnapshot(run: Run, what: string): Promise<StateSnapshot | und
   // The agent waits up to a minute for tier moves to land before it reads the items.
   const out = await run.agent('snapshot-state', '', 150_000);
   if (out.result?.ok !== true || !out.result.state) {
-    run.errors.push(`the install's state could not be read ${what}: ${String(out.result?.detail ?? out.stderr.slice(-200))}`);
+    run.errors.push(`the install's state could not be read ${what}: ${agentDetail(out)}`);
     return undefined;
   }
   return out.result.state as StateSnapshot;
@@ -1438,7 +1457,7 @@ async function runUpgradeLeg(run: Run, workDir: string, bundlePath: string, judg
     id: 'baseline.setting',
     title: 'The owner changed one privacy setting before updating',
     status: setting.result?.ok === true ? 'pass' : 'fail',
-    detail: setting.result?.ok === true ? `${String(setting.result.changed)} set to ${String(setting.result.value)}` : String(setting.result?.detail ?? setting.stderr.slice(-200)),
+    detail: setting.result?.ok === true ? `${String(setting.result.changed)} set to ${String(setting.result.value)}` : agentDetail(setting),
   });
   const before = await takeSnapshot(run, 'before the update');
   if (!before) return;
@@ -1458,7 +1477,7 @@ async function runUpgradeLeg(run: Run, workDir: string, bundlePath: string, judg
     return;
   }
   const back = await run.phase('engine-restart', () => run.agent('await-engine', '--timeout-s 300', 330_000));
-  run.add({ id: 'upgrade.engine-ready', title: 'The engine came back ready (models included) after the update', status: back.result?.ok === true ? 'pass' : 'fail', detail: back.result?.ok === true ? `ready after ${Math.round(Number(back.result.readyMs) / 1000)} s` : String(back.result?.detail ?? back.stderr.slice(-200)), ms: back.ms });
+  run.add({ id: 'upgrade.engine-ready', title: 'The engine came back ready (models included) after the update', status: back.result?.ok === true ? 'pass' : 'fail', detail: back.result?.ok === true ? `ready after ${Math.round(Number(back.result.readyMs) / 1000)} s` : agentDetail(back), ms: back.ms });
   if (back.result?.ok !== true) return;
   if (options.upgradeSelftest === 'revert-policy') {
     const fault = await run.agent('upgrade-selftest', '--mode revert-policy', 60_000);
