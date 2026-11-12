@@ -411,6 +411,19 @@ dropped. Sealed receipts carry no rows, so two sealed runs compare only when
 they left out the same questions. Inspect skipped-store counts before comparing
 runs.
 
+Each answerable question also gets a funnel stage, the first place its expected
+item dropped out: `not_found` (no lane found it), `found_not_returned` (a lane
+ranked it but its store did not return it), `not_returned` (its store did not
+return it and lanes were not probed), `returned_not_packed`,
+`packed_not_fitted`, `fitted_no_passage` (seated, but the fitted body misses
+the quote) and `hit`. Rows carry the store, pack and fit ranks; summaries count
+questions per stage. `--probe-lanes` adds the expected item's rank in its own
+store's keyword and vector lanes, searched 200 deep, which separates
+`not_found` from `found_not_returned`. `--judge-questions` asks the eval's local
+Analyst model (same endpoint rules as drafting) whether each question is
+answered by its quote and is specific enough to point at one item. Rows record
+two booleans and summaries count them; no question or quote text is written.
+
 On **Sparta**, draft a private set through the local OpenAI-compatible model:
 
 ```sh
