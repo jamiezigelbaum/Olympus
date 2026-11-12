@@ -31011,19 +31011,22 @@ class LocalConnectorStore {
     const read = this.recentItemsRead(maxResults, accountScope, filters);
     return this.visibleRecentRows(this.db.query(read.sql).all(...read.params));
   }
-  async recentItemsOffThread(maxResults, accountScope, filters, deadlineAtMs) {
+  async recentItemsOffThread(maxResults, accountScope, filters, deadlineAtMs, onCutShort) {
     if (!offThreadReadsSupported(this.dbPath))
       return this.recentItems(maxResults, accountScope, filters);
     let rows;
     try {
       rows = await readOnPool(this.dbPath, this.recentItemsRead(maxResults, accountScope, filters), deadlineAtMs !== undefined ? { deadlineAtMs } : {});
     } catch (error) {
-      if (error instanceof OffThreadReadBusyError)
-        return [];
-      throw error;
-    }
-    if (this.closedForPoolReads)
+      if (!(error instanceof OffThreadReadBusyError))
+        throw error;
+      onCutShort?.();
       return [];
+    }
+    if (this.closedForPoolReads) {
+      onCutShort?.();
+      return [];
+    }
     return this.visibleRecentRows(rows);
   }
   recentItemsRead(maxResults, accountScope, filters) {
