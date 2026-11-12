@@ -25688,11 +25688,10 @@ class LocalConnectorStore {
   tierLedgerHiddenItemPks() {
     return runSteps(this.tierLedgerHiddenSteps());
   }
-  async saveVisibilityInTurns() {
-    if (this.readOnly)
-      return;
-    await runStepsInTurns(this.tierLedgerHiddenSteps());
-    await this.publishVisibility();
+  async keepVisibilityCurrentInTurns() {
+    await this.tierHiddenItemPksInTurns();
+    if (!this.readOnly)
+      await this.publishVisibility();
   }
   tierLedgerHiddenMemo;
   hiddenChildMemo;
@@ -25838,14 +25837,16 @@ class LocalConnectorStore {
     const ledgerId = this.ledgerIdOf(ledger);
     if (ledgerId === undefined)
       return;
-    const page = this.db.query(`SELECT provider, account_scope, conversation_key, provider_item_id, flags, item_pks_json
-      FROM main.tier_visibility_members
-      WHERE generation = ?1 AND (provider, account_scope, conversation_key, provider_item_id) > (?2, ?3, ?4, ?5)
-      ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ?6`);
     for (let attempt = 0;attempt < 3; attempt += 1) {
       const state = this.readVisibilityState();
       if (!state || state.corpus_id !== this.corpusId || state.ledger_id !== ledgerId)
         return;
+      if (ledger.visibilityChangesSince(state.ledger_cursor).identities === undefined || this.itemVisibilityChangesSince(state.store_cursor).identities === undefined)
+        return;
+      const page = this.db.query(`SELECT provider, account_scope, conversation_key, provider_item_id, flags, item_pks_json
+        FROM main.tier_visibility_members
+        WHERE generation = ?1 AND (provider, account_scope, conversation_key, provider_item_id) > (?2, ?3, ?4, ?5)
+        ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ?6`);
       const memo = emptyTierVisibilityMemo(ledger, ledgerId, state.ledger_cursor, state.store_cursor, 0);
       let after = ["", "", "", ""];
       for (;; ) {
@@ -37453,6 +37454,16 @@ var DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
 var MAX_PROMPT_BYTES = 1e5;
 var OPENCLAW_INFER_MAX_PROMPT_BYTES = MAX_PROMPT_BYTES;
 
+// src/core/limit-stops.ts
+var limits = new Map;
+function registerLimit(input) {
+  const prior = limits.get(input.id);
+  if (prior && Object.keys({ ...prior, ...input }).some((key2) => prior[key2] !== input[key2])) {
+    throw new Error(`Limit already registered differently: ${input.id}`);
+  }
+  limits.set(input.id, Object.freeze({ ...input }));
+}
+
 // src/core/source-index/router.ts
 var FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
   "body",
@@ -39797,16 +39808,6 @@ function stripDataUrlPrefix(dataUrl) {
 var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages";
 var TELEGRAM_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:telegram";
 var TELEGRAM_SPOOL_CLEARED_KEY = `${TELEGRAM_SPOOL_REDACTION_STATE_KEY}:cleared_through`;
-// src/core/limit-stops.ts
-var limits = new Map;
-function registerLimit(input) {
-  const prior = limits.get(input.id);
-  if (prior && Object.keys({ ...prior, ...input }).some((key2) => prior[key2] !== input[key2])) {
-    throw new Error(`Limit already registered differently: ${input.id}`);
-  }
-  limits.set(input.id, Object.freeze({ ...input }));
-}
-
 // src/workers/scheduler-limit-stops.ts
 var DAILY_LIMITS = new Map(Object.entries({
   daily_cost_guard: { id: "x.daily_cost", kind: "cost", label: "daily X API budget used" },
@@ -40338,6 +40339,7 @@ class SourceScheduler {
       enabled: this.enabled,
       running: this.timer !== undefined,
       generated_at: now.toISOString(),
+      limit_stops: this.stateStore?.openLimitStops?.(now) ?? [],
       selected_source_ids: this.allowedSourceIds === undefined ? this.sources.map((source) => source.sourceId) : [...this.allowedSourceIds],
       missing_selected_source_ids: [...this.missingSelectedSourceIds],
       sources: this.sources.map((source) => this.sourceStatus(source, now)),

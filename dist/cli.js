@@ -41248,11 +41248,10 @@ var init_local_index = __esm(() => {
     tierLedgerHiddenItemPks() {
       return runSteps(this.tierLedgerHiddenSteps());
     }
-    async saveVisibilityInTurns() {
-      if (this.readOnly)
-        return;
-      await runStepsInTurns(this.tierLedgerHiddenSteps());
-      await this.publishVisibility();
+    async keepVisibilityCurrentInTurns() {
+      await this.tierHiddenItemPksInTurns();
+      if (!this.readOnly)
+        await this.publishVisibility();
     }
     tierLedgerHiddenMemo;
     hiddenChildMemo;
@@ -41398,14 +41397,16 @@ var init_local_index = __esm(() => {
       const ledgerId = this.ledgerIdOf(ledger);
       if (ledgerId === undefined)
         return;
-      const page2 = this.db.query(`SELECT provider, account_scope, conversation_key, provider_item_id, flags, item_pks_json
-      FROM main.tier_visibility_members
-      WHERE generation = ?1 AND (provider, account_scope, conversation_key, provider_item_id) > (?2, ?3, ?4, ?5)
-      ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ?6`);
       for (let attempt = 0;attempt < 3; attempt += 1) {
         const state = this.readVisibilityState();
         if (!state || state.corpus_id !== this.corpusId || state.ledger_id !== ledgerId)
           return;
+        if (ledger.visibilityChangesSince(state.ledger_cursor).identities === undefined || this.itemVisibilityChangesSince(state.store_cursor).identities === undefined)
+          return;
+        const page2 = this.db.query(`SELECT provider, account_scope, conversation_key, provider_item_id, flags, item_pks_json
+        FROM main.tier_visibility_members
+        WHERE generation = ?1 AND (provider, account_scope, conversation_key, provider_item_id) > (?2, ?3, ?4, ?5)
+        ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ?6`);
         const memo = emptyTierVisibilityMemo(ledger, ledgerId, state.ledger_cursor, state.store_cursor, 0);
         let after = ["", "", "", ""];
         for (;; ) {
@@ -77855,6 +77856,88 @@ var init_evidence_reranker = __esm(() => {
   };
 });
 
+// src/core/limit-stops.ts
+function registerLimit(input) {
+  const prior = limits.get(input.id);
+  if (prior && Object.keys({ ...prior, ...input }).some((key2) => prior[key2] !== input[key2])) {
+    throw new Error(`Limit already registered differently: ${input.id}`);
+  }
+  limits.set(input.id, Object.freeze({ ...input }));
+}
+function registeredLimits() {
+  return [...limits.values()];
+}
+function initializeLimitStops(db) {
+  runSqliteMigrations(db, "limit-stops", [{
+    version: 1,
+    name: "create_limit_stops",
+    up(db2) {
+      db2.exec(`CREATE TABLE IF NOT EXISTS limit_stops (
+        id TEXT NOT NULL, subject TEXT NOT NULL, since TEXT NOT NULL,
+        "limit" REAL, used REAL, waiting_json TEXT, to_continue_json TEXT,
+        resumes_at TEXT, cleared_at TEXT, PRIMARY KEY (id, subject)
+      )`);
+    }
+  }]);
+}
+function reportLimitStop(input, db) {
+  if (!limits.has(input.id))
+    throw new Error(`Unregistered limit: ${input.id}`);
+  for (const value of [input.limit, input.used, ...Object.values(input.waiting ?? {}), ...Object.values(input.toContinue ?? {})]) {
+    if (value != null && (!Number.isFinite(value) || value < 0))
+      throw new TypeError("Limit amounts must be non-negative finite numbers.");
+  }
+  if (!input.subject || !Number.isFinite(Date.parse(input.since)) || input.resumesAt !== undefined && !Number.isFinite(Date.parse(input.resumesAt))) {
+    throw new TypeError("Limit stops require a subject and valid timestamps.");
+  }
+  db.query(`
+    INSERT INTO limit_stops (id, subject, since, "limit", used, waiting_json, to_continue_json, resumes_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id, subject) DO UPDATE SET
+      -- A stop still open keeps its start; a cleared or self-expired one starts again.
+      since = CASE WHEN limit_stops.cleared_at IS NULL
+        AND (limit_stops.resumes_at IS NULL OR limit_stops.resumes_at > excluded.since)
+        THEN limit_stops.since ELSE excluded.since END,
+      "limit" = excluded."limit", used = excluded.used,
+      waiting_json = excluded.waiting_json, to_continue_json = excluded.to_continue_json,
+      resumes_at = excluded.resumes_at, cleared_at = NULL
+  `).run(input.id, input.subject, input.since, input.limit, input.used, input.waiting ? JSON.stringify(input.waiting) : null, input.toContinue ? JSON.stringify(input.toContinue) : null, input.resumesAt === undefined ? null : new Date(input.resumesAt).toISOString());
+}
+function clearLimitStop(id, subject, db) {
+  db.query(`
+    UPDATE limit_stops SET cleared_at = ? WHERE id = ? AND subject = ? AND cleared_at IS NULL
+  `).run(new Date().toISOString(), id, subject);
+}
+function listOpenLimitStops(db, now = new Date) {
+  if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'limit_stops'").get())
+    return [];
+  const rows = db.query(`SELECT * FROM limit_stops WHERE cleared_at IS NULL
+    AND (resumes_at IS NULL OR resumes_at > ?) ORDER BY id, subject`).all(now.toISOString());
+  return rows.map((row) => ({
+    id: row.id,
+    subject: row.subject,
+    since: row.since,
+    limit: row.limit,
+    used: row.used,
+    ...row.waiting_json ? { waiting: JSON.parse(row.waiting_json) } : {},
+    ...row.to_continue_json ? { toContinue: JSON.parse(row.to_continue_json) } : {},
+    ...row.resumes_at ? { resumesAt: row.resumes_at } : {}
+  }));
+}
+function limitStopSubjects(stop) {
+  try {
+    const parts = JSON.parse(stop.subject);
+    if (Array.isArray(parts) && parts.length === 3 && parts.every((part) => typeof part === "string"))
+      return parts.slice(0, 2);
+  } catch {}
+  return [stop.subject];
+}
+var limits;
+var init_limit_stops = __esm(() => {
+  init_sqlite_migrations();
+  limits = new Map;
+});
+
 // src/core/parent-label.ts
 function candidateNamesCeiling(candidate) {
   if (isSecureSensitivity(candidate))
@@ -78583,6 +78666,20 @@ async function buildPreparedEvidencePackDetailed(input) {
   const candidateCorpusIds = [];
   const candidateExtractionGapIndexes = [];
   const extractionGaps = laneCutShortGaps(routed.degradations, input);
+  const searched = new Set(routed.searchedCorpora);
+  const searchedSources = new Set(defaultSourceCorpusRegistryConfig().corpora.filter((corpus) => searched.has(corpus.corpusId)).map((corpus) => corpus.sourceId));
+  const limitStopGaps = [];
+  const limits2 = registeredLimits();
+  const now = (input.now?.() ?? new Date).getTime();
+  for (const stop of input.limitStops ?? []) {
+    const limit = limits2.find((entry) => entry.id === stop.id);
+    if (limit?.scope !== "source" || stop.resumesAt && Date.parse(stop.resumesAt) <= now)
+      continue;
+    if (limitStopSubjects(stop).some((subject) => searched.has(subject) || searchedSources.has(subject))) {
+      limitStopGaps.push(`${limit.label} since ${stop.since}; new items from this source may be missing from this answer`);
+    }
+  }
+  extractionGaps.push(...limitStopGaps);
   const policyDeniedCoverageGaps = [];
   let policyDeniedCandidates = 0;
   const namesOnlyCandidateIndexes = [];
@@ -78729,6 +78826,7 @@ async function buildPreparedEvidencePackDetailed(input) {
     ...rerank ? { rerank } : {},
     ...labelled.dependencies.length > 0 ? { parentLabelDependencies: labelled.dependencies } : {},
     ...secretLocations.length > 0 ? { secretLocations } : {},
+    ...limitStopGaps.length > 0 ? { limitStopGaps } : {},
     ...classificationCoverage.length > 0 ? { classificationCoverage } : {}
   };
 }
@@ -79085,6 +79183,8 @@ var init_evidence_pack = __esm(() => {
   init_keyword_context();
   init_partial_search();
   init_evidence_reranker();
+  init_limit_stops();
+  init_source_corpus_registry();
   init_parent_label();
   init_source_model_policy();
   init_router();
@@ -79422,6 +79522,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
           allowCloudQueries: includeInternal,
           ...requestedCorpusIds ? { allowedCorpusIds: requestedCorpusIds } : {}
         },
+        limitStops: activeLanes.limitStops ?? [],
         registry: activeLanes.registry,
         adapters: activeLanes.adapters,
         contentProviders: activeLanes.contentProviders,
@@ -80941,6 +81042,7 @@ async function searchReleasedEvidence(input) {
     question,
     maxResults,
     searchContext: { allowedTrustDomains: ["public_safe", "internal"], allowCloudQueries: true },
+    limitStops: lanes.limitStops ?? [],
     registry: lanes.registry,
     adapters: lanes.adapters,
     contentProviders: lanes.contentProviders,
@@ -81067,6 +81169,7 @@ async function searchPrivateEvidence(input) {
         question,
         maxResults,
         searchContext: { allowedTrustDomains: ["secure_local"], allowCloudQueries: false },
+        limitStops: lanes.limitStops ?? [],
         registry: lanes.registry,
         adapters,
         contentProviders: lanes.contentProviders,
@@ -81106,6 +81209,7 @@ async function searchPrivateEvidence(input) {
         maxResults,
         selectedItems,
         searchContext: { allowedTrustDomains: ["internal", "public_safe"], allowCloudQueries: false },
+        limitStops: lanes.limitStops ?? [],
         registry: lanes.registry,
         adapters: lanes.adapters,
         contentProviders: lanes.contentProviders,
@@ -82960,7 +83064,7 @@ async function acquireIncremental(client, checkpoint, usage, account, config, cl
   return acquisition(posts, true, posts.length > 0, truncationDeferred ? previous : newestId ?? previous, headPageSizesUsed.length, warnings, posts.length, headPageSizesUsed, Number(truncationDeferred));
 }
 async function acquireReconciliation(client, usage, stateStore, account, providerUserId, config, startedAt, clock3, provenance, preservationFloorAuthorizationSha256, providerWindowBoundaryPolicy = X_BOOKMARKS_NO_APPROVED_WINDOW_BOUNDARY) {
-  const limits = reconcileLimits(config);
+  const limits2 = reconcileLimits(config);
   const pending = stateStore.pendingCompletedSnapshot(account, providerUserId);
   if (pending) {
     return completedReconciliationAcquisition(pending, 0, [
@@ -82970,7 +83074,7 @@ async function acquireReconciliation(client, usage, stateStore, account, provide
   let openedWarnings = [];
   let apiRequests = 0;
   try {
-    const opened = stateStore.openRun(account, limits, providerUserId, startedAt, {
+    const opened = stateStore.openRun(account, limits2, providerUserId, startedAt, {
       coverageScope: "recency_window",
       windowBoundaryAlgorithmVersion: X_BOOKMARKS_WINDOW_BOUNDARY_ALGORITHM_VERSION
     });
@@ -83031,7 +83135,7 @@ async function acquireReconciliation(client, usage, stateStore, account, provide
           ...progress.globalNextToken ? { expectedToken: progress.globalNextToken } : {},
           page: page3,
           requestedSize: providerPageSize2,
-          limits,
+          limits: limits2,
           settledAt: clock3()
         });
         continue;
@@ -83091,7 +83195,7 @@ async function acquireReconciliation(client, usage, stateStore, account, provide
           ...progress.globalVerifyNextToken ? { expectedToken: progress.globalVerifyNextToken } : {},
           page: page3,
           requestedSize: providerPageSize2,
-          limits,
+          limits: limits2,
           settledAt: clock3()
         });
         continue;
@@ -83115,7 +83219,7 @@ async function acquireReconciliation(client, usage, stateStore, account, provide
           ...progress.folderNextToken ? { expectedToken: progress.folderNextToken } : {},
           page: page3,
           requestedSize: providerPageSize2,
-          limits,
+          limits: limits2,
           settledAt: clock3()
         });
         continue;
@@ -83144,7 +83248,7 @@ async function acquireReconciliation(client, usage, stateStore, account, provide
         ...progress.membershipNextToken ? { expectedToken: progress.membershipNextToken } : {},
         page: page2,
         requestedSize: providerPageSize,
-        limits,
+        limits: limits2,
         settledAt: clock3()
       });
     }
@@ -97302,12 +97406,12 @@ function officeTableSummary(input) {
   return normalizeExtractedText(lines.join(`
 `));
 }
-function extractPdfTextLayer(bytes, limits = {}) {
-  const now = limits.now ?? (() => performance.now());
+function extractPdfTextLayer(bytes, limits2 = {}) {
+  const now = limits2.now ?? (() => performance.now());
   const budget = {
-    maxStreamBytes: limits.maxStreamBytes ?? PDF_TEXT_MAX_STREAM_BYTES,
-    maxTotalBytes: limits.maxTotalBytes ?? PDF_TEXT_MAX_TOTAL_BYTES,
-    deadline: now() + (limits.maxDecodeMs ?? PDF_TEXT_MAX_DECODE_MS),
+    maxStreamBytes: limits2.maxStreamBytes ?? PDF_TEXT_MAX_STREAM_BYTES,
+    maxTotalBytes: limits2.maxTotalBytes ?? PDF_TEXT_MAX_TOTAL_BYTES,
+    deadline: now() + (limits2.maxDecodeMs ?? PDF_TEXT_MAX_DECODE_MS),
     now,
     usedBytes: 0,
     partial: false
@@ -112185,77 +112289,6 @@ var init_source_dashboard = __esm(() => {
   DASHBOARD_TRUST_DOMAINS = ["secure_local", "internal", "public_safe"];
 });
 
-// src/core/limit-stops.ts
-function registerLimit(input) {
-  const prior = limits.get(input.id);
-  if (prior && Object.keys({ ...prior, ...input }).some((key2) => prior[key2] !== input[key2])) {
-    throw new Error(`Limit already registered differently: ${input.id}`);
-  }
-  limits.set(input.id, Object.freeze({ ...input }));
-}
-function initializeLimitStops(db) {
-  runSqliteMigrations(db, "limit-stops", [{
-    version: 1,
-    name: "create_limit_stops",
-    up(db2) {
-      db2.exec(`CREATE TABLE IF NOT EXISTS limit_stops (
-        id TEXT NOT NULL, subject TEXT NOT NULL, since TEXT NOT NULL,
-        "limit" REAL, used REAL, waiting_json TEXT, to_continue_json TEXT,
-        resumes_at TEXT, cleared_at TEXT, PRIMARY KEY (id, subject)
-      )`);
-    }
-  }]);
-}
-function reportLimitStop(input, db) {
-  if (!limits.has(input.id))
-    throw new Error(`Unregistered limit: ${input.id}`);
-  for (const value of [input.limit, input.used, ...Object.values(input.waiting ?? {}), ...Object.values(input.toContinue ?? {})]) {
-    if (value != null && (!Number.isFinite(value) || value < 0))
-      throw new TypeError("Limit amounts must be non-negative finite numbers.");
-  }
-  if (!input.subject || !Number.isFinite(Date.parse(input.since)) || input.resumesAt !== undefined && !Number.isFinite(Date.parse(input.resumesAt))) {
-    throw new TypeError("Limit stops require a subject and valid timestamps.");
-  }
-  db.query(`
-    INSERT INTO limit_stops (id, subject, since, "limit", used, waiting_json, to_continue_json, resumes_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id, subject) DO UPDATE SET
-      -- A stop still open keeps its start; a cleared or self-expired one starts again.
-      since = CASE WHEN limit_stops.cleared_at IS NULL
-        AND (limit_stops.resumes_at IS NULL OR limit_stops.resumes_at > excluded.since)
-        THEN limit_stops.since ELSE excluded.since END,
-      "limit" = excluded."limit", used = excluded.used,
-      waiting_json = excluded.waiting_json, to_continue_json = excluded.to_continue_json,
-      resumes_at = excluded.resumes_at, cleared_at = NULL
-  `).run(input.id, input.subject, input.since, input.limit, input.used, input.waiting ? JSON.stringify(input.waiting) : null, input.toContinue ? JSON.stringify(input.toContinue) : null, input.resumesAt === undefined ? null : new Date(input.resumesAt).toISOString());
-}
-function clearLimitStop(id, subject, db) {
-  db.query(`
-    UPDATE limit_stops SET cleared_at = ? WHERE id = ? AND subject = ? AND cleared_at IS NULL
-  `).run(new Date().toISOString(), id, subject);
-}
-function listOpenLimitStops(db, now = new Date) {
-  if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'limit_stops'").get())
-    return [];
-  const rows = db.query(`SELECT * FROM limit_stops WHERE cleared_at IS NULL
-    AND (resumes_at IS NULL OR resumes_at > ?) ORDER BY id, subject`).all(now.toISOString());
-  return rows.map((row) => ({
-    id: row.id,
-    subject: row.subject,
-    since: row.since,
-    limit: row.limit,
-    used: row.used,
-    ...row.waiting_json ? { waiting: JSON.parse(row.waiting_json) } : {},
-    ...row.to_continue_json ? { toContinue: JSON.parse(row.to_continue_json) } : {},
-    ...row.resumes_at ? { resumesAt: row.resumes_at } : {}
-  }));
-}
-var limits;
-var init_limit_stops = __esm(() => {
-  init_sqlite_migrations();
-  limits = new Map;
-});
-
 // src/workers/scheduler-limit-stops.ts
 function schedulerLimitSubject(state) {
   return JSON.stringify([state.sourceId, state.corpusId, state.taskId]);
@@ -112334,6 +112367,7 @@ function forgetSourceSchedulerState(dbPath, scope, options = {}) {
 class LocalSourceSchedulerStateStore {
   dbPath;
   db;
+  closed = false;
   constructor(dbPath = defaultSourceSchedulerStateDbPath()) {
     this.dbPath = dbPath;
     if (dbPath !== ":memory:") {
@@ -112362,9 +112396,10 @@ class LocalSourceSchedulerStateStore {
     })();
   }
   openLimitStops(now) {
-    return listOpenLimitStops(this.db, now);
+    return this.closed ? [] : listOpenLimitStops(this.db, now);
   }
   close() {
+    this.closed = true;
     closeSqliteStore(this.db);
   }
   get(key2) {
@@ -161439,6 +161474,7 @@ async function answerOnThisComputer(input, options) {
       ...corpusIds ? { allowedCorpusIds: corpusIds } : {}
     },
     ...corpusIds ? { corpusIds } : {},
+    limitStops: lanes.limitStops ?? [],
     registry: lanes.registry,
     adapters: lanes.adapters,
     contentProviders: lanes.contentProviders,
@@ -161515,7 +161551,7 @@ async function answerOnThisComputer(input, options) {
 
 ${secrets}` : result.answer,
     citations: result.citations,
-    unanswered: result.unanswered ?? [],
+    unanswered: [...result.unanswered ?? [], ...detail.limitStopGaps ?? []],
     leftOut,
     ...busyField,
     read,
@@ -171301,7 +171337,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const line2 = add(el("p", "row-text home-index"), el("strong", "", progress.phase === "initial" ? P.progressInitial : P.progressRefresh), facts.length ? el("span", "muted", " · " + facts.join(" · ")) : null);
     const stages = Array.isArray(progress.details) ? progress.details : [];
     const faster = indexFasterControl();
-    const row = add(el("li", "row home-line"), add(el("div", "need-body"), line2));
+    const body = add(el("div", "need-body"), line2);
+    const row = add(el("li", "row home-line"), body);
     row.setAttribute("data-home-index", progress.phase === "initial" ? "initial" : "refresh");
     if (!stages.length && !faster)
       return row;
@@ -171339,12 +171376,24 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (!wait || typeof wait.label !== "string")
       return null;
     const api2 = String(wait.api || wait.label);
-    const facts = [fill2(wait.reason === "rate_limit" ? P.home.waitRateLimit : P.home.waitBudget, { api: api2 })];
+    const facts = [wait.reason === "limit" ? String(wait.limitLabel || "") : fill2(wait.reason === "rate_limit" ? P.home.waitRateLimit : P.home.waitBudget, { api: api2 })];
+    if (wait.reason === "limit" && wait.since)
+      facts.push("since " + String(wait.since));
+    if (wait.waiting?.items !== undefined)
+      facts.push(String(wait.waiting.items) + " items waiting");
+    if (wait.waiting?.runs !== undefined)
+      facts.push(String(wait.waiting.runs) + " runs waiting");
     const when = typeof wait.resumesAt === "string" ? resumeWords(wait.resumesAt) : "";
     if (when)
       facts.push(when);
     const line2 = add(el("p", "row-text"), el("strong", "", wait.label), el("span", "muted", " · " + facts.join(" · ")));
-    const row = add(el("li", "row home-line"), add(el("div", "need-body"), line2));
+    const body = add(el("div", "need-body"), line2);
+    const row = add(el("li", "row home-line"), body);
+    if (wait.fix) {
+      const source = (state.data?.sources || []).find((entry) => entry.id === wait.sourceId);
+      const key2 = "limit:" + String(wait.sourceId);
+      add(body, add(el("div", "source-actions"), wait.fix.tool === config2.syncTool && source && syncChecking(source) ? checkingControl(key2) : fixControl(wait.fix, key2, "plain", false, { id: wait.sourceId, label: wait.label })));
+    }
     row.setAttribute("data-source-wait", String(wait.sourceId || ""));
     return row;
   }
@@ -197269,6 +197318,7 @@ class SourceScheduler {
       enabled: this.enabled,
       running: this.timer !== undefined,
       generated_at: now.toISOString(),
+      limit_stops: this.stateStore?.openLimitStops?.(now) ?? [],
       selected_source_ids: this.allowedSourceIds === undefined ? this.sources.map((source) => source.sourceId) : [...this.allowedSourceIds],
       missing_selected_source_ids: [...this.missingSelectedSourceIds],
       sources: this.sources.map((source) => this.sourceStatus(source, now)),
@@ -211066,6 +211116,7 @@ function createSourceAnswerLanes(deps) {
     const registry2 = deps.registry();
     const mounted = new Set(stores.map((store) => store.corpusId));
     return {
+      limitStops: deps.limitStops?.() ?? [],
       registry: registry2,
       unmountedCorpusIds: new Set(registry2.list().map((corpus) => corpus.corpusId).filter((corpusId) => !mounted.has(corpusId))),
       ...deps.visibilityGate ? { visibilityGate: deps.visibilityGate } : {},
@@ -221597,6 +221648,8 @@ var init_shared_status = __esm(() => {
 // src/workers/chatgpt/dashboard-view-model.ts
 function buildChatGptDashboardViewModel(view4, options = {}) {
   const now = options.now ?? new Date;
+  const stops = (options.limitStops ?? []).filter((stop) => !stop.resumesAt || Date.parse(stop.resumesAt) > now.getTime());
+  const limits2 = registeredLimits();
   const degraded = scrubDegradations(view4.degraded_credentials);
   const embedding = options.embedding ?? embeddingFromModelSetup(view4.model_setup);
   const rows = publicCards(view4.sources).map(({ definition, card }) => {
@@ -221614,7 +221667,8 @@ function buildChatGptDashboardViewModel(view4, options = {}) {
       status = "Working";
     }
     const wait = selfWait(definition, scrubbed, now);
-    if (!connecting && !credentials && imports.length === 0 && (status === "Needs you" || status === "Failing") && ownerHasNothingToDo(scrubbed, wait !== undefined, degraded)) {
+    const stopped = stops.some((stop) => limitStopSubjects(stop).includes(definition.source_id));
+    if (!connecting && !credentials && imports.length === 0 && (status === "Needs you" || status === "Failing") && ownerHasNothingToDo(scrubbed, stopped || wait !== undefined, degraded)) {
       status = "Working";
     }
     const sync = connecting || status === "Off" || card.sync_now_available !== true ? undefined : syncFix(definition, scrubbed, status, card.connection.action.kind, degraded, progress2);
@@ -221625,6 +221679,25 @@ function buildChatGptDashboardViewModel(view4, options = {}) {
     index
   })).sort((a, b) => sourceRank(a.entry) - sourceRank(b.entry) || a.index - b.index).map(({ entry }) => entry);
   const waits = rows.flatMap(({ wait }) => wait ? [wait] : []);
+  for (const stop of stops) {
+    const limit2 = limits2.find((entry) => entry.id === stop.id);
+    if (!limit2)
+      continue;
+    const row = rows.find(({ definition }) => limitStopSubjects(stop).some((subject) => subject === definition.source_id || subject === definition.primary_corpus_id || definition.corpus_source_ids.includes(subject)));
+    const fix = limit2.continue === "run_once" ? row?.sync : limit2.continue === "raise" || limit2.continue === "refill" ? helpLinkFix("Open settings", openPageUrl({ kind: "fix", section: "models" })) : undefined;
+    const label = row?.definition.label ?? { source: "Sources", judge: "Privacy check", answer: "Answers", outside_help: "Outside help", extraction: "Reading" }[limit2.scope];
+    waits.push({
+      sourceId: row?.definition.source_id ?? limit2.scope,
+      label,
+      api: label,
+      reason: "limit",
+      limitLabel: limit2.label,
+      since: stop.since,
+      ...stop.waiting ? { waiting: stop.waiting } : {},
+      ...stop.resumesAt ? { resumesAt: stop.resumesAt } : {},
+      ...fix ? { fix } : {}
+    });
+  }
   const needsYou = rows.filter(({ status }) => status === "Needs you" || status === "Failing").flatMap(({ definition, card, actionKind, connecting, progress: progress2, sync }) => card.connection.imports_attention?.length ? card.connection.imports_attention.map(importAttentionItem) : [attentionItem(definition, card, actionKind, degraded, connecting, progress2, sync)]).filter((item, index, all) => all.findIndex((other) => other.id === item.id) === index);
   if (embedding.state === "failed") {
     needsYou.push({
@@ -221726,8 +221799,7 @@ function selfWait(definition, card, now) {
     const next = isoOrUndefined(card.schedule?.next_run_at);
     return { sourceId: definition.source_id, label, reason: "rate_limit", api: api2, ...next && Date.parse(next) > now.getTime() ? { resumesAt: next } : {} };
   }
-  const midnight = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
-  return { sourceId: definition.source_id, label, reason: "daily_budget", api: api2, resumesAt: midnight.toISOString() };
+  return;
 }
 function ownerHasNothingToDo(card, waiting, degraded) {
   const parts = dashboardAttentionParts(card, degraded ? { degradedCredentials: degraded } : undefined);
@@ -222489,6 +222561,7 @@ function isoOrNow(value2, now) {
 var ANSWER_MODEL_LABELS, CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, SYNC_SOURCE_IDS, KNOWN_CONNECTION_LABELS, SYNCED_RELATIVE, ARCHIVES_IMPORTED, KNOWN_READINESS_LABELS, KNOWN_REFUSAL_CODES, KNOWN_QUEUE_LABELS, CONNECTED_STATES2, WAIT_API_NAMES, STAGE_FOR_PHASE, TRANSCRIPTION_DOWNLOADABLE, PRIVATE_MODEL_INSTALLING, IMPORT_UNREADABLE_REASONS, LIVE_PASS_ERROR_KINDS, CAPTURE_STATES, CAPTURE_SUPERVISOR_STATES, CAPTURE_SUPERVISOR_REASONS, MANUAL_SYNC_OUTCOMES;
 var init_dashboard_view_model = __esm(() => {
   init_source_failure();
+  init_limit_stops();
   init_open_targets();
   init_shared_status();
   init_phases();
@@ -226058,10 +226131,26 @@ function percent(value2) {
   return finite2(value2) ? Math.max(0, Math.min(100, Math.round(value2 * 10) / 10)) : 0;
 }
 function copyWait(wait) {
-  if (!wait || typeof wait.sourceId !== "string" || wait.reason !== "daily_budget" && wait.reason !== "rate_limit")
+  if (!wait || typeof wait.sourceId !== "string" || wait.reason !== "daily_budget" && wait.reason !== "rate_limit" && wait.reason !== "limit")
     return [];
   const resumesAt = iso3(wait.resumesAt);
-  return [{ sourceId: text5(wait.sourceId), label: text5(wait.label), reason: wait.reason, api: text5(wait.api), ...resumesAt ? { resumesAt } : {} }];
+  const fix = wait.fix ? copyFix(wait.fix) : undefined;
+  return [{
+    sourceId: text5(wait.sourceId),
+    label: text5(wait.label),
+    reason: wait.reason,
+    api: text5(wait.api),
+    ...wait.reason === "limit" ? {
+      limitLabel: text5(wait.limitLabel),
+      ...iso3(wait.since) ? { since: iso3(wait.since) } : {},
+      ...wait.waiting ? { waiting: {
+        ...finite2(wait.waiting.items) ? { items: whole(wait.waiting.items) } : {},
+        ...finite2(wait.waiting.runs) ? { runs: whole(wait.waiting.runs) } : {}
+      } } : {},
+      ...fix ? { fix } : {}
+    } : {},
+    ...resumesAt ? { resumesAt } : {}
+  }];
 }
 function iso3(value2) {
   if (typeof value2 !== "string")
@@ -227501,6 +227590,7 @@ async function dashboardViewModel(options, signal) {
     remote = undefined;
   }
   return buildChatGptDashboardViewModel(view4, {
+    limitStops: options.limitStops?.() ?? [],
     ...remote ? { remote } : {},
     ...embedding ? { embedding } : {},
     ...privacy ? { privacy } : {},
@@ -244229,6 +244319,27 @@ ${key2}`;
   ]);
   configuredMountStores = connectorStores;
   const readConnectorStores = connectorStores;
+  let visibilityKeeping = false;
+  async function keepVisibilityCurrent(when) {
+    if (visibilityKeeping || sourceRuntimeClosed)
+      return;
+    visibilityKeeping = true;
+    const started = performance.now();
+    try {
+      for (const store of [...connectorStores]) {
+        try {
+          await store.keepVisibilityCurrentInTurns();
+        } catch (error2) {
+          console.warn(`[olympus] ${engineRole}: a store's hidden-copy set could not be built yet: ${error2 instanceof Error ? error2.message : String(error2)}`);
+        }
+      }
+    } finally {
+      visibilityKeeping = false;
+    }
+    if (when !== "refresh") {
+      console.log(`[olympus] ${engineRole}: built ${connectorStores.length} stores' hidden-copy sets in ${Math.round(performance.now() - started)} ms`);
+    }
+  }
   let peopleIndex = openPeopleIndexOrUndefined(engineFront ? { readOnly: true } : {});
   const peopleRefresher = !engineFront && peopleIndex ? new PeopleIndexRefresher(peopleIndex, () => connectorStores) : undefined;
   const refreshPeople = (force = false) => {
@@ -245019,6 +245130,7 @@ ${key2}`;
       secureAnalystPoolState,
       ...secureDerivativeDefault !== undefined ? { secureDerivativeDefault } : {},
       lanes: sourceAnswerLanes = createSourceAnswerLanes({
+        limitStops: () => sourceScheduler?.status().limit_stops ?? [],
         stores: () => {
           mountConfiguredSourceStores();
           return readConnectorStores;
@@ -246936,6 +247048,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const chatgptSurface = {
     privateAnswers,
     privateQuestions,
+    limitStops: () => sourceScheduler?.status().limit_stops ?? [],
     dashboardView: async (signal) => {
       const response = await worker.fetch(new Request("http://olympus-worker.internal/dashboard.json", signal ? { signal } : {}));
       if (!response.ok)
@@ -247122,6 +247235,14 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       });
     return response;
   } })) : Bun.serve({ hostname: hostname2, port, idleTimeout: 0, ...serverOptions });
+  if (engineFront) {
+    const warming = keepVisibilityCurrent("before ready");
+    let bound;
+    await Promise.race([warming, new Promise((resolve32) => {
+      bound = setTimeout(resolve32, FRONT_VISIBILITY_READY_BOUND_MS);
+    })]);
+    clearTimeout(bound);
+  }
   const server = !listens ? undefined : socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
   if (engineRole === "single")
     finishBootProgress();
@@ -247286,6 +247407,12 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   }
   const frontMountRetry = engineFront ? setInterval(refreshFrontMounts, 2000) : undefined;
   frontMountRetry?.unref?.();
+  if (!engineFront)
+    keepVisibilityCurrent("after start");
+  const visibilityRefresh = setInterval(() => {
+    keepVisibilityCurrent("refresh");
+  }, VISIBILITY_REFRESH_MS);
+  visibilityRefresh.unref?.();
   if (engineFront) {
     const judge3 = frontJudgeState(() => engineFront.status());
     classificationBusy = judge3.busy;
@@ -247511,6 +247638,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     engineBackground?.stop();
     if (frontMountRetry)
       clearInterval(frontMountRetry);
+    clearInterval(visibilityRefresh);
     engineFront?.stop();
     server?.stop();
   };
@@ -247570,7 +247698,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
 function resolveEmailSourceBindHostFromEnv(env = process.env) {
   return resolveWorkerBindHost(env, ["OLYMPUS_EMAIL_SOURCE_HOST"]);
 }
-var workerLaunch, dataOwnerLock;
+var workerLaunch, dataOwnerLock, VISIBILITY_REFRESH_MS = 30000, FRONT_VISIBILITY_READY_BOUND_MS = 15000;
 var init_server5 = __esm(async () => {
   init_connection_requests();
   init_dashboard_people();
@@ -249656,7 +249784,8 @@ function qualifyWorkerReadiness(options, port) {
   const probe = () => options.readinessProbe ? options.readinessProbe(url) : defaultWorkerReadinessProbe(url, options.bunBin);
   const timeoutMs = validateSettleWindow(options.readinessTimeoutMs ?? options.actionSettleTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS, "Lifecycle readiness timeout", MAX_READINESS_TIMEOUT_MS);
   const pollMs = validateSettleWindow(options.actionSettlePollMs ?? DEFAULT_ACTION_SETTLE_POLL_MS, "Lifecycle readiness poll interval", 1e4);
-  const deadline = Date.now() + timeoutMs;
+  const firstDeadline = Date.now() + timeoutMs;
+  let deadline = firstDeadline;
   const readProgress = options.bootProgress ?? (() => readBootProgress(lifecycleEnv2(options)));
   const progressLine = options.progressLine ?? ((line2) => process.stderr.write(`${line2}
 `));
@@ -249666,14 +249795,15 @@ function qualifyWorkerReadiness(options, port) {
     if (inspectWorkerService(serviceActionOptions(options)).state !== "active")
       break;
     const now = Date.now();
-    if (now >= deadline) {
-      const progress = readProgress();
-      if (!bootProgressIsLive(progress, now))
-        break;
-      if (now - lastLineAt >= READINESS_PROGRESS_LINE_MS) {
+    const progress = readProgress();
+    if (bootProgressIsLive(progress, now)) {
+      if (now >= firstDeadline && now - lastLineAt >= READINESS_PROGRESS_LINE_MS) {
         progressLine(bootProgressLine(progress, now));
         lastLineAt = now;
       }
+      deadline = Math.max(deadline, now + timeoutMs);
+    } else if (now >= deadline) {
+      break;
     }
     waitForActivationSettle(Math.max(1, Math.min(pollMs, now < deadline ? deadline - now : pollMs)));
     ready = probe();

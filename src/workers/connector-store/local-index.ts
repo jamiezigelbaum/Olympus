@@ -4105,16 +4105,21 @@ export class LocalConnectorStore {
   }
 
   /**
-   * Brings this writer's visibility set up to date and saves it in the store,
-   * with a turn between steps, for read-only connections to start from. The
-   * writer also does this on its own (refreshVisibilityIfBehind); this is for
-   * a caller that wants the saved set current now. Does nothing on a
-   * read-only store.
+   * Builds, or brings up to date, this connection's hidden-copy set with a
+   * turn between steps, and on a writer saves it in the store for read-only
+   * connections to start from. The engine calls it for every store after it
+   * starts and then on a timer: the split's front before it reports ready, so
+   * an Ask never pays the first build on its own thread, and the background
+   * (or the single worker) so each store's saved set stays inside the
+   * ledger's visibility feed. A writer keeps its saved set inside the feed on
+   * its own only once it has built a set (refreshVisibilityIfBehind); a store
+   * with no import after a restart never did, and ledger-only writes (the
+   * prune sweep, judging) moved the shared feed past its stamp, so every
+   * front start rebuilt it from the ledger (gate 1, ops#151: about 59 s).
    */
-  async saveVisibilityInTurns(): Promise<void> {
-    if (this.readOnly) return;
-    await runStepsInTurns(this.tierLedgerHiddenSteps());
-    await this.publishVisibility();
+  async keepVisibilityCurrentInTurns(): Promise<void> {
+    await this.tierHiddenItemPksInTurns();
+    if (!this.readOnly) await this.publishVisibility();
   }
 
   private tierLedgerHiddenMemo: TierVisibilityMemo | undefined;
@@ -4317,13 +4322,17 @@ export class LocalConnectorStore {
   } | undefined> {
     const ledgerId = this.ledgerIdOf(ledger);
     if (ledgerId === undefined) return undefined;
-    const page = this.db.query(`SELECT provider, account_scope, conversation_key, provider_item_id, flags, item_pks_json
-      FROM main.tier_visibility_members
-      WHERE generation = ?1 AND (provider, account_scope, conversation_key, provider_item_id) > (?2, ?3, ?4, ?5)
-      ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ?6`);
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const state = this.readVisibilityState();
       if (!state || state.corpus_id !== this.corpusId || state.ledger_id !== ledgerId) return undefined;
+      // A stamp already outside either feed can't be served: give up before
+      // reading every saved row (Sparta's largest store holds about 645k).
+      if (ledger.visibilityChangesSince(state.ledger_cursor).identities === undefined
+        || this.itemVisibilityChangesSince(state.store_cursor).identities === undefined) return undefined;
+      const page = this.db.query(`SELECT provider, account_scope, conversation_key, provider_item_id, flags, item_pks_json
+        FROM main.tier_visibility_members
+        WHERE generation = ?1 AND (provider, account_scope, conversation_key, provider_item_id) > (?2, ?3, ?4, ?5)
+        ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ?6`);
       const memo = emptyTierVisibilityMemo(ledger, ledgerId, state.ledger_cursor, state.store_cursor, 0);
       let after: [string, string, string, string] = ['', '', '', ''];
       for (;;) {

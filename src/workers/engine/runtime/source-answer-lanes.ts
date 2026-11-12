@@ -50,6 +50,7 @@ export type SourceAnswerRequestScope =
   | Readonly<{ kind: 'skip'; reason: string }>;
 
 export interface SourceAnswerLaneDependencies {
+  limitStops?: () => readonly import('../../../core/limit-stops.ts').LimitStop[];
   /** The mounted stores, read at each request (a tier leg may join later). */
   stores: () => readonly LocalConnectorStore[];
   /** The answer-capable corpora registered now. */
@@ -156,6 +157,7 @@ export function createSourceAnswerLanes(
     const registry = deps.registry();
     const mounted = new Set(stores.map((store) => store.corpusId));
     return {
+      limitStops: deps.limitStops?.() ?? [],
       registry,
       unmountedCorpusIds: new Set(registry.list().map((corpus) => corpus.corpusId).filter((corpusId) => !mounted.has(corpusId))),
       ...(deps.visibilityGate ? { visibilityGate: deps.visibilityGate } : {}),

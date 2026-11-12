@@ -63,6 +63,7 @@ import {
 import { CHATGPT_ZKAPI_TOOL_ACCOUNT_SENTENCE } from './zkapi-copy.ts';
 
 export interface ChatGptSurfaceOptions {
+  limitStops?: () => readonly import('../../core/limit-stops.ts').LimitStop[];
   /** Host presentation only; absent preserves the ChatGPT wire format. */
   appClient?: McpAppClient;
   /** The engine's dashboard view (the `/dashboard.json` object). */
@@ -963,6 +964,7 @@ export async function dashboardViewModel(options: ChatGptSurfaceOptions, signal?
     remote = undefined;
   }
   return buildChatGptDashboardViewModel(view, {
+    limitStops: options.limitStops?.() ?? [],
     ...(remote ? { remote } : {}),
     ...(embedding ? { embedding } : {}),
     ...(privacy ? { privacy } : {}),
