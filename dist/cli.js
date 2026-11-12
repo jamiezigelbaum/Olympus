@@ -40107,6 +40107,15 @@ function validateConnectorStoreV6Schema(db) {
   validateConnectorStoreSchemaShape(db, CONNECTOR_STORE_V5_ITEM_COLUMNS, true, "v6");
   validateConnectorStoreFtsOwnership(db, "v6");
 }
+function validateConnectorStoreRows(db, versionLabel) {
+  if (readSqliteSchemaVersion(db, SQLITE_STORE_ID) < 6)
+    return;
+  const counts = db.query(`SELECT (SELECT COUNT(*) FROM connector_store_fts) AS fts_rows,
+    (SELECT COUNT(*) FROM connector_store_fts_rows) AS mapped_rows`).get();
+  if (Number(counts.fts_rows) !== Number(counts.mapped_rows)) {
+    throw new Error(`Connector store schema ${versionLabel} FTS row ownership map is incomplete.`);
+  }
+}
 function validateVectorDigestSchema(db) {
   assertExactTableColumns(db, "chunk_vector_digest", ["chunk_pk", "model_id", "item_pk", "account_scope", "digest"], false, "v16");
   assertExactTableColumns(db, "chunk_vector_digest_meta", ["model_id", "cursor_rowid", "completed"], false, "v16");
@@ -40116,7 +40125,6 @@ function validateVectorDigestSchema(db) {
 function validateConnectorStoreSchema(db) {
   validateConnectorStoreV12Schema(db, "v15", CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
   validateVectorDigestSchema(db);
-  validateConnectorStoreForeignKeys(db);
   assertIndexColumns(db, "idx_connector_store_items_parent", ["parent_local_item_id"], "v15");
   assertExactTableColumns(db, "chunk_media_releases", ["media_sha256", "media_path"], false, "v13");
   assertExactTableColumns(db, "chunk_media_failures", ["media_sha256", "reason", "failed_at", "attempts"], false, "v13");
@@ -40176,11 +40184,6 @@ function validateConnectorStoreItemSchema(db, itemColumns, versionLabel, chunkCo
 function validateConnectorStoreFtsOwnership(db, versionLabel) {
   assertExactTableColumns(db, "connector_store_fts_rows", ["fts_rowid", "item_pk", "chunk_pk"], false, versionLabel);
   assertIndexColumns(db, "idx_connector_store_fts_rows_item", ["item_pk"], versionLabel);
-  const counts = db.query(`SELECT (SELECT COUNT(*) FROM connector_store_fts) AS fts_rows,
-    (SELECT COUNT(*) FROM connector_store_fts_rows) AS mapped_rows`).get();
-  if (Number(counts.fts_rows) !== Number(counts.mapped_rows)) {
-    throw new Error("Connector store schema FTS row ownership map is incomplete.");
-  }
 }
 function validateConnectorStoreForeignKeys(db) {
   const foreignKeyErrors = db.query("PRAGMA foreign_key_check").all();
@@ -40842,7 +40845,11 @@ var init_local_index = __esm(() => {
       try {
         this.db.exec(options.readOnly === true ? "PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;" : "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
         assertSqliteSchemaCanOpen(this.db, SQLITE_STORE_ID, CONNECTOR_STORE_SQLITE_SCHEMA_VERSION);
+        const versionAtOpen = readSqliteSchemaVersion(this.db, SQLITE_STORE_ID);
+        const migrating = options.readOnly !== true && versionAtOpen < CONNECTOR_STORE_SQLITE_SCHEMA_VERSION;
         validateCurrentConnectorStoreSchemaBeforeMigration(this.db);
+        if (migrating)
+          validateConnectorStoreRows(this.db, `v${versionAtOpen}`);
         if (options.readOnly === true) {
           const version = readSqliteSchemaVersion(this.db, SQLITE_STORE_ID);
           if (version < READ_ONLY_MIN_SCHEMA_VERSION) {
@@ -40858,6 +40865,10 @@ var init_local_index = __esm(() => {
           createConnectorStoreVisibilityTables(this.db);
           createConnectorStorePeopleIndex(this.db);
           validateConnectorStoreSchema(this.db);
+          if (migrating) {
+            validateConnectorStoreRows(this.db, "v15");
+            validateConnectorStoreForeignKeys(this.db);
+          }
         }
         if (options.readOnly !== true)
           this.createVisibilityJournal();
