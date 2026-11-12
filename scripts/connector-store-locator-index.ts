@@ -5,6 +5,7 @@
 // filename, item identity, or source content is emitted.
 
 import { Database } from 'bun:sqlite';
+import { connectorStoreMigrations } from '../src/workers/connector-store/local-index.ts';
 import { lstatSync } from 'node:fs';
 import type { ConnectorStoreLocatorIdentityIndexStatus } from '../src/workers/connector-store/index.ts';
 import { withDataOwnerLock } from '../src/core/data-owner-lock.ts';
@@ -12,7 +13,7 @@ import { openConnectorStore, storageAccountForCorpus } from '../src/core/source-
 import { resolveConnectorStoreOptions } from './connector-store-embed.ts';
 
 const STORE_ID = 'connector-store';
-const CURRENT_SCHEMA_VERSION = 15;
+const CURRENT_SCHEMA_VERSION = Math.max(...connectorStoreMigrations().map(migration => migration.version));
 const DEFAULT_BATCH_ITEMS = 1_000;
 const USAGE = 'Usage: bun run connector-store:locator-index --db <path> '
   + '[--max-items N] [--corpus-id <id> --family <family> --trust-domain <domain>] [--execute]';

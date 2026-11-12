@@ -177,7 +177,7 @@ describe('child items: the v15 migration changes nothing that exists', () => {
 
     const db = new Database(dbPath, { readonly: true });
     try {
-      expect(db.query("SELECT version FROM schema_version WHERE store_id = 'connector-store'").get()).toEqual({ version: 15 });
+      expect(db.query("SELECT version FROM schema_version WHERE store_id = 'connector-store'").get()).toEqual({ version: 16 });
       expect(db.query(`
         SELECT COUNT(*) AS rows,
           SUM(parent_local_item_id IS NULL) AS no_parent, SUM(deferred_locator IS NULL) AS no_locator,

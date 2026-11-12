@@ -370,18 +370,18 @@ test('a read-only open of a store from before the saved set keeps the older full
   expect(sorted(probe(openReader()).tierHiddenItemPks())).toEqual(expected);
 });
 
-test('the previous build still opens a store this build wrote, and its item writes reach the feed', async () => {
+test('schema v16 fences older builds while legacy TEMP journals still coexist with the feed', async () => {
   const { f, writer, storeDb, pk, addChild, openReader } = await fixtureWithEveryState();
   await writer.saveVisibilityInTurns();
   const reader = openReader();
   const rebuilds = countFullRebuilds(probe(reader).visibilityLedger()!);
   cleanups.push(() => rebuilds.restore());
   probe(reader).tierHiddenItemPks();
-  // The feed and the saved set are additive: the schema version the previous
-  // build (1.4.x) checks is unchanged, so rolling the binary back still opens it.
-  expect(storeDb.query("SELECT version FROM schema_version WHERE store_id = 'connector-store'").get()).toEqual({ version: 15 });
-  expect(() => assertSqliteSchemaCanOpen(storeDb, 'connector-store', 15)).not.toThrow();
-  // The previous build's writer opens with its own TEMP change journal, whose
+  // The digest changes the versioned store schema. A v15 binary must refuse
+  // it; the additive visibility feed still coexists with legacy journal SQL.
+  expect(storeDb.query("SELECT version FROM schema_version WHERE store_id = 'connector-store'").get()).toEqual({ version: 16 });
+  expect(() => assertSqliteSchemaCanOpen(storeDb, 'connector-store', 15)).toThrow(/only knows schema_version 15/);
+  // Legacy writer SQL uses its own TEMP change journal, whose
   // table and triggers shadow names in main for that connection.
   storeDb.exec(`CREATE TEMP TABLE tier_visibility_pks (flag TEXT, item_pk INTEGER, PRIMARY KEY (flag, item_pk));
     CREATE TEMP TABLE item_visibility_changes (seq INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT, account_scope TEXT,
@@ -391,7 +391,7 @@ test('the previous build still opens a store this build wrote, and its item writ
         VALUES (NEW.provider, NEW.account_scope, NEW.normalized_conversation, NEW.provider_item_id);
       DELETE FROM item_visibility_changes WHERE seq <= (SELECT MAX(seq) - 8192 FROM item_visibility_changes);
     END;`);
-  // That build writes an item that changes the set: another child of the hidden parent.
+  // The legacy journal observes an item that changes the set: a hidden parent's child.
   addChild('hid', 'hid#child:scan');
   expect(probe(reader).tierHiddenItemPks().hidden).toContain(pk('hid#child:scan'));
   const again = new LocalConnectorStore({ dbPath: f.paths.internal, corpusId: CORPORA.internal, family: 'file', trustDomain: 'internal', tierLedger: f.ledger });
