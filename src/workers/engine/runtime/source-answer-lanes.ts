@@ -53,6 +53,16 @@ export function createOwnerQuestionActivity(relay?: { busy(resource: string): vo
       scope.active = true;
       if (++inFlight === 1) relay?.busy(OWNER_QUESTION_RESOURCE);
     },
+    /** A lease held outside an async scope (a claimed panel job), released exactly once. */
+    begin(): () => void {
+      if (++inFlight === 1) relay?.busy(OWNER_QUESTION_RESOURCE);
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        if (--inFlight === 0) relay?.idle(OWNER_QUESTION_RESOURCE);
+      };
+    },
     async run<T>(work: () => Promise<T>, kind: 'owner' | 'background' = 'owner'): Promise<T> {
       if (kind === 'background') return context.run(undefined, work);
       const current = context.getStore();

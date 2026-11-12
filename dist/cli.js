@@ -211095,6 +211095,18 @@ function createOwnerQuestionActivity(relay) {
       if (++inFlight === 1)
         relay?.busy(OWNER_QUESTION_RESOURCE);
     },
+    begin() {
+      if (++inFlight === 1)
+        relay?.busy(OWNER_QUESTION_RESOURCE);
+      let released = false;
+      return () => {
+        if (released)
+          return;
+        released = true;
+        if (--inFlight === 0)
+          relay?.idle(OWNER_QUESTION_RESOURCE);
+      };
+    },
     async run(work, kind = "owner") {
       if (kind === "background")
         return context2.run(undefined, work);
@@ -246632,7 +246644,17 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     model: () => privateAnswerModel,
     eligible: privateEvidenceEligible,
     installId: () => remotePublicUrls()?.installId,
-    activity: answerActivity,
+    activity: {
+      begin: () => {
+        const releaseAnswer = answerActivity.begin();
+        const releaseQuestion = ownerQuestions.begin();
+        return () => {
+          releaseQuestion();
+          releaseAnswer();
+        };
+      },
+      end: () => answerActivity.end()
+    },
     acknowledge: (ref) => {
       const store = waitingQuestionStore();
       if (!store)

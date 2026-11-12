@@ -240,5 +240,27 @@ describe('owner questions pause the superseded-copy sweep', () => {
     expect(server.match(/ownerQuestions.run\(\(\) => searchReleasedEvidence\(/g)).toHaveLength(2);
     expect(server).toContain('ownerQuestions.run(() => searchPrivateEvidence(');
     expect(server).toContain('active: () => !engineFront && !ownerQuestions.busy && !remoteOwnerBusy(OWNER_QUESTION_RESOURCE)');
+    // A claimed Private panel answer holds a question lease until it settles.
+    expect(server).toMatch(/activity: \{\s*begin: \(\) => \{\s*const releaseAnswer = answerActivity\.begin\(\);\s*const releaseQuestion = ownerQuestions\.begin\(\);/);
+  });
+
+  test('a claimed panel job holds the lease until its release, and a second release does nothing', async () => {
+    const w = world();
+    try {
+      const release = w.questions.begin();
+      expect(w.questions.busy).toBe(true);
+      expect(kinds(w.sent)).toEqual(['owner_busy']);
+      const ask = w.ask();
+      w.pending[0]!.resolve();
+      await ask;
+      // The Ask settled; the claimed job still holds the sweep back.
+      expect(w.questions.busy).toBe(true);
+      await w.clock.advance(SUPERSEDED_SWEEP_TICK_MS * 2);
+      expect(w.slices()).toBe(0);
+      release();
+      release();
+      expect(w.questions.busy).toBe(false);
+      expect(kinds(w.sent)).toEqual(['owner_busy', 'owner_idle']);
+    } finally { w.close(); }
   });
 });

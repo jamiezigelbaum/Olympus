@@ -5200,8 +5200,19 @@ export async function main(): Promise<void> {
     eligible: privateEvidenceEligible,
     installId: () => remotePublicUrls()?.installId,
     // While an analysis runs (from the search) and from a claim to
-    // ready/failed, the sniffer stays off the shared model.
-    activity: answerActivity,
+    // ready/failed, the sniffer stays off the shared model, and the copy
+    // sweep waits as for any owner question.
+    activity: {
+      begin: () => {
+        const releaseAnswer = answerActivity.begin();
+        const releaseQuestion = ownerQuestions.begin();
+        return () => {
+          releaseQuestion();
+          releaseAnswer();
+        };
+      },
+      end: () => answerActivity.end(),
+    },
     // The panel's seen ack clears the waiting question it answered (same
     // id, generation and connection; a re-asked question survives).
     acknowledge: (ref) => {
