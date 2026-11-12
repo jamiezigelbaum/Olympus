@@ -2,18 +2,22 @@
 // background. The front's completions travel over the background's command
 // socket (switch-on Mac check, 2026-11-12: a second server in the front made
 // a private answer miss its deadline). This test runs both ends in-process.
+import { AsyncResource } from 'node:async_hooks';
 import { expect, test } from 'bun:test';
 import type { AnalystModelRequest } from '../src/core/analyst.ts';
 import { OperationError } from '../src/core/operation-error.ts';
 import { createEngineCommandHandler, EngineCommandLedger, parseEngineCommandEnvelope } from '../src/workers/engine-split/commands.ts';
 import { completeModelInBackground } from '../src/workers/engine-split/runtime.ts';
+import { currentLocalInferencePriority, runBackgroundInference, runClassificationInference } from '../src/workers/answer-activity.ts';
 
 const TOKEN = 'engine-split-model-token';
 
 function background(modelComplete?: (request: AnalystModelRequest) => Promise<{ text: string; modelId: string }>) {
   const ledger = new EngineCommandLedger({ instanceId: 'background-1', handlers: {} });
   const handler = createEngineCommandHandler({ authToken: TOKEN, ledger, ready: () => true, ...(modelComplete ? { modelComplete } : {}) });
-  return ((input: RequestInfo | URL, init?: RequestInit) => handler(new Request(input, init))) as typeof fetch;
+  // A socket carries no async context: the background answers from its own.
+  const socket = new AsyncResource('engine-background-socket');
+  return ((input: RequestInfo | URL, init?: RequestInit) => socket.runInAsyncScope(() => handler(new Request(input, init)))) as typeof fetch;
 }
 
 test('a front completion runs on the background model with the same request and comes back whole', async () => {
@@ -57,4 +61,25 @@ test('without a model, a wrong token or a malformed request the background runs 
 
 test('model_prepare is a command the background accepts', () => {
   expect(parseEngineCommandEnvelope({ id: 'a'.repeat(32), command: { kind: 'model_prepare' } }).command).toEqual({ kind: 'model_prepare' });
+});
+
+// Switch-on Mac check, 2026-11-12 (run 43193951592): the front's queued private
+// answers reached the background as the owner's calls, so the judge never took
+// its fair turn and four items stayed held for 15 minutes.
+test('a front call keeps its priority in the background: background answers stay background', async () => {
+  const seen: string[] = [];
+  const fetchBackground = background(async () => {
+    seen.push(currentLocalInferencePriority());
+    return { text: 'ok', modelId: 'm' };
+  });
+  const request = { system: 's', prompt: 'p', localOnly: true };
+  await completeModelInBackground(fetchBackground, TOKEN, request);
+  await runBackgroundInference(() => completeModelInBackground(fetchBackground, TOKEN, request));
+  await runClassificationInference(() => completeModelInBackground(fetchBackground, TOKEN, request));
+  expect(seen).toEqual(['owner', 'background', 'maintenance']);
+  const unknown = await fetchBackground('http://olympus-background/engine/model/complete', {
+    method: 'POST', headers: { Authorization: `Bearer ${TOKEN}` }, body: JSON.stringify({ ...request, priority: 'urgent' }),
+  });
+  expect(unknown.status).toBe(400);
+  expect(seen).toHaveLength(3);
 });
