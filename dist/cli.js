@@ -74382,7 +74382,6 @@ class TieredStoreSet {
   repairLowerContent(options = {}) {
     if (this.lowerContentRepair)
       return this.lowerContentRepair;
-    this.sweepSupersededSlice(options);
     const now = options.nowMs ?? Date.now();
     if (now - this.lastLowerContentRepairAt < LOWER_CONTENT_REPAIR_INTERVAL_MS)
       return Promise.resolve();
@@ -211080,8 +211079,54 @@ var init_open_target2 = __esm(() => {
 });
 
 // src/workers/engine/runtime/source-answer-lanes.ts
+import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
+function createOwnerQuestionActivity(relay) {
+  const context2 = new AsyncLocalStorage9;
+  let inFlight = 0;
+  return {
+    get busy() {
+      return inFlight > 0;
+    },
+    retrieving() {
+      const scope = context2.getStore();
+      if (!scope || scope.active || scope.settled)
+        return;
+      scope.active = true;
+      if (++inFlight === 1)
+        relay?.busy(OWNER_QUESTION_RESOURCE);
+    },
+    begin() {
+      if (++inFlight === 1)
+        relay?.busy(OWNER_QUESTION_RESOURCE);
+      let released = false;
+      return () => {
+        if (released)
+          return;
+        released = true;
+        if (--inFlight === 0)
+          relay?.idle(OWNER_QUESTION_RESOURCE);
+      };
+    },
+    async run(work, kind = "owner") {
+      if (kind === "background")
+        return context2.run(undefined, work);
+      const current3 = context2.getStore();
+      if (current3 && !current3.settled)
+        return work();
+      const scope = { active: false, settled: false };
+      try {
+        return await context2.run(scope, work);
+      } finally {
+        scope.settled = true;
+        if (scope.active && --inFlight === 0)
+          relay?.idle(OWNER_QUESTION_RESOURCE);
+      }
+    }
+  };
+}
 function createSourceAnswerLanes(deps) {
   return (request, mode) => {
+    deps.ownerQuestions?.retrieving();
     const searchScopes = new Map;
     const requestEmbeddings = new Map;
     const requestEmbedding = (store) => {
@@ -211175,6 +211220,7 @@ function createSourceAnswerLanes(deps) {
     };
   };
 }
+var OWNER_QUESTION_RESOURCE = "owner_question";
 var init_source_answer_lanes = __esm(() => {
   init_analyst_answer();
   init_embeddings();
@@ -217063,7 +217109,7 @@ var init_snapshot = __esm(() => {
 });
 
 // src/workers/engine-split/runtime.ts
-import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage10 } from "node:async_hooks";
 import { randomUUID as randomUUID38 } from "node:crypto";
 import { lstatSync as lstatSync52 } from "node:fs";
 function engineBackgroundSocketFromEnv(env) {
@@ -217184,7 +217230,7 @@ function restartingResponse() {
 function createFrontGate() {
   let open7 = true;
   let generation = 0;
-  const current3 = new AsyncLocalStorage9;
+  const current3 = new AsyncLocalStorage10;
   return {
     isOpen: () => open7,
     close() {
@@ -243280,6 +243326,9 @@ async function main() {
     ownerContext: privacyOwnerWords
   });
   const secureAnalystPoolState = new SecureAnalystPoolState;
+  const ownerQuestions = createOwnerQuestionActivity(engineFront?.ownerBusy);
+  const remoteOwnerMarks = new OwnerBusyMarks;
+  const remoteOwnerBusy = (resource) => remoteOwnerMarks.busy(resource);
   const answerActivity = createAnswerActivity(() => {
     return;
   }, {
@@ -245140,6 +245189,7 @@ ${key2}`;
       secureAnalystPoolState,
       ...secureDerivativeDefault !== undefined ? { secureDerivativeDefault } : {},
       lanes: sourceAnswerLanes = createSourceAnswerLanes({
+        ownerQuestions,
         limitStops: () => sourceScheduler?.status().limit_stops ?? [],
         stores: () => {
           mountConfiguredSourceStores();
@@ -245171,7 +245221,7 @@ ${key2}`;
   const sourceAnswer = analystSourceAnswer ? {
     async answer(request, local) {
       const kind = request.caller?.surface === "remote" && isBackgroundConnection(request.caller.connection_id) ? "background" : "owner";
-      return answerActivity.run(() => analystSourceAnswer.answer(request, local), kind);
+      return ownerQuestions.run(() => answerActivity.run(() => analystSourceAnswer.answer(request, local), kind), kind);
     }
   } : undefined;
   const sourceWatchStore = engineFront ? new LocalSourceWatchStore(undefined, { readOnly: true }) : new LocalSourceWatchStore;
@@ -246594,7 +246644,17 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     model: () => privateAnswerModel,
     eligible: privateEvidenceEligible,
     installId: () => remotePublicUrls()?.installId,
-    activity: answerActivity,
+    activity: {
+      begin: () => {
+        const releaseAnswer = answerActivity.begin();
+        const releaseQuestion = ownerQuestions.begin();
+        return () => {
+          releaseQuestion();
+          releaseAnswer();
+        };
+      },
+      end: () => answerActivity.end()
+    },
     acknowledge: (ref) => {
       const store = waitingQuestionStore();
       if (!store)
@@ -246664,7 +246724,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       ...veniceAnswer ? { veniceAnswer } : {},
       localConnectionId: "@local:You",
       anonymousAsk: localAnonymousAsk,
-      answer: (input) => answerActivity.run(() => local.answer(input)),
+      answer: (input) => ownerQuestions.run(() => answerActivity.run(() => local.answer(input))),
       backgroundAnswer: (input) => runBackgroundInference(() => answerActivity.run(() => local.answer(input), "background")),
       interactiveBusy: () => answerActivity.interactiveInFlight > 0,
       backgroundBusy: () => classificationBusy(),
@@ -247005,21 +247065,21 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     });
   };
   const chatgptEvidenceSearch = sourceAnswerLanes ? async (input) => {
-    return searchReleasedEvidence({
+    return ownerQuestions.run(() => searchReleasedEvidence({
       lanes: sourceAnswerLanes,
       question: input.question,
       ...input.limit ? { maxResults: input.limit } : {},
       releaseCheck: remoteReleaseCheck
-    });
+    }));
   } : undefined;
-  const remoteEvidenceSearch = sourceAnswerLanes ? async (input) => searchReleasedEvidence({
+  const remoteEvidenceSearch = sourceAnswerLanes ? async (input) => ownerQuestions.run(() => searchReleasedEvidence({
     lanes: sourceAnswerLanes,
     question: input.question,
     ...input.limit ? { maxResults: input.limit } : {},
     releaseCheck: remoteReleaseCheck
-  }) : undefined;
+  })) : undefined;
   const chatgptPrivateMatchProbe = sourceAnswerLanes ? async (question, _ctx, originalMatches) => {
-    const result = await searchPrivateEvidence({ lanes: sourceAnswerLanes, question, ...originalMatches ? { originalMatches } : {} });
+    const result = await ownerQuestions.run(() => searchPrivateEvidence({ lanes: sourceAnswerLanes, question, ...originalMatches ? { originalMatches } : {} }));
     return { count: result.matched, evidence: result.candidates, ...result.secretMatch ? { secretMatch: true } : {} };
   } : undefined;
   const chatgptPrivateModelState = () => {
@@ -247333,7 +247393,9 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       reconcileCaptures();
   }, 1e4);
   captureTick.unref?.();
-  const stopSupersededSweep = startSupersededSweepTicker({ active: () => !engineFront });
+  const stopSupersededSweep = startSupersededSweepTicker({
+    active: () => !engineFront && !ownerQuestions.busy && !remoteOwnerBusy(OWNER_QUESTION_RESOURCE)
+  });
   const snifferEnv = tierSnifferServiceEnv(process.env);
   const rawSnifferModel = !snifferEnv.enabled || snifferRuntime.source === "off" ? undefined : snifferRuntime.source === "built_in" ? snifferRuntime.builtIn.model : createTierSnifferModel({ lane: snifferRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[snifferRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => {
     requestModelReload();
@@ -247342,8 +247404,6 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const localDecisionBar = snifferLane ? snifferDecisionBar(snifferLane) : undefined;
   const snifferModel = rawSnifferModel && snifferLane?.kind === "local" ? observedJudge(rawSnifferModel, judgeObservations, localDecisionBar) : rawSnifferModel;
   const snifferResource = snifferRuntime.source === "built_in" ? "built_in" : snifferLane?.kind === "local" ? localModelResourceKey(snifferLane.profile) : undefined;
-  const remoteOwnerMarks = new OwnerBusyMarks;
-  const remoteOwnerBusy = (resource) => remoteOwnerMarks.busy(resource);
   const judgeChoice = judgeSpending.status();
   const secondRoundVenice = !engineFront && snifferModel && snifferLane?.kind === "local" && judgeChoice.choice === "local-then-venice" && !judgeChoice.stop && (judgeChoice.uncapped === true || judgeChoice.remainingDollars > 0) && cloudJudgeRuntime.source !== "off" && isClassifierApproved((await readClassificationLedger(resolveClassificationLedgerPath(process.env))).entries, {
     lane: cloudJudgeRuntime.lane.kind,
