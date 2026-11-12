@@ -543,6 +543,9 @@ describe('settled names copies', () => {
     expect(lane.stores.internal!.status().counts.contentElsewhereItems ?? 0).toBe(0);
     await lane.sink.accept(request(NEW[1]!.id, NEW[1]!.body));
     expect(lane.stores.internal!.status().counts.contentElsewhereItems).toBe(1);
+    expect(lane.stores.internal!.status({}).counts.scopeMetadataOnlyFiles).toBe(0);
+    expect(lane.stores.internal!.status({ contentAllowed: false }).counts.scopeMetadataOnlyFiles).toBe(1);
+    expect(lane.stores.internal!.status({ contentFilters: { provider: 'outside-approval' } }).counts.scopeMetadataOnlyFiles).toBe(1);
     const db = new Database(lane.ledger.dbPath);
     db.exec("UPDATE tier_copies SET copy_state = 'superseded' WHERE layers = 'content'");
     db.close();

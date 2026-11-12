@@ -14022,23 +14022,24 @@ export class LocalConnectorStore {
 
   /**
    * Builds, a turn at a time, what a status snapshot reuses (the hidden-copy
-   * set and the settled-unreadable count) when it has not been built yet, so
+   * set and the settled-unreadable count), so
    * the snapshot's `status(..., { countsMaxAgeMs })` that follows finds both
    * and does not rebuild them in one go. The first status after a start did,
    * about a tenth of the sampled freezes on Sparta (2026-11-05, b826b19).
    */
   async prepareStatusCounts(scope?: ConnectorStoreStatusScope): Promise<void> {
-    if (!this.tierHiddenCountsMemo) await this.refreshTierHiddenCountsInTurns();
+    // Called when the enclosing status snapshot needs new counts. Reusing an
+    // expired projection here lets statusSteps return it while its refresh
+    // runs, then caches that old result for another complete status window.
+    await this.refreshTierHiddenCountsInTurns();
     const key = JSON.stringify(scope ?? null);
-    if (!this.settledUnreadableCountMemo?.has(key)) {
-      try {
-        const counts = this.unreadHoldCounts(await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
-        const memos = this.settledUnreadableCountMemo ??= new Map();
-        if (memos.size > 32) memos.clear();
-        memos.set(key, { at: Date.now(), ...counts });
-      } catch {
-        // A closed or busy store: the status read counts it itself.
-      }
+    try {
+      const counts = this.unreadHoldCounts(await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
+      const memos = this.settledUnreadableCountMemo ??= new Map();
+      if (memos.size > 32) memos.clear();
+      memos.set(key, { at: Date.now(), ...counts });
+    } catch {
+      // A closed or busy store: the status read counts it itself.
     }
   }
 
@@ -14310,6 +14311,10 @@ export class LocalConnectorStore {
       ${contentFilters.sql}
       ${hiddenNotIn}
       ${namesOnlyNotIn}`;
+    const approvedContentWhere = `${scope?.contentAllowed === false ? 'AND 0' : ''}
+      ${accountScope ? 'AND i.account_scope = ?' : ''}
+      ${contentFilters.sql}
+      ${hiddenNotIn}`;
     const parityWhere = `${contentWhere}
       ${heldNotIn}`;
     // Which files the scope asks to be read. A names copy whose text no copy
@@ -14371,6 +14376,7 @@ export class LocalConnectorStore {
           (1 ${itemWhere}) AS in_items,
           (1 ${hiddenNotIn}) AS stored,
           i.item_pk IN (SELECT value FROM json_each(?)) AS elsewhere,
+          (1 ${approvedContentWhere}) AS in_content_scope,
           (1 ${fileScopeWhere}) AS in_file_scope
         FROM items i
       )
@@ -14378,6 +14384,7 @@ export class LocalConnectorStore {
         COALESCE(SUM(t = 0 AND in_items), 0) AS items,
         COALESCE(SUM(t = 0 AND stored), 0) AS stored_items,
         COALESCE(SUM(t = 0 AND in_items AND elsewhere), 0) AS content_elsewhere_items,
+        COALESCE(SUM(t = 0 AND in_items AND NOT dir AND elsewhere AND in_content_scope), 0) AS content_elsewhere_in_scope_files,
         COALESCE(SUM(t = 0 AND in_items AND NOT dir), 0) AS files,
         COALESCE(SUM(t = 0 AND in_items AND dir), 0) AS folders,
         COALESCE(SUM(t = 1 AND in_items), 0) AS tombstoned_items,
@@ -14387,11 +14394,15 @@ export class LocalConnectorStore {
       ...itemParams,
       ...jsonList(tier.hidden),
       JSON.stringify(keptNamesOnlyPks),
+      ...(accountScope ? [accountScope] : []),
+      ...contentFilters.params,
+      ...jsonList(tier.hidden),
       ...fileScopeParams,
     ], mode: 'get' }) as {
       items: number;
       stored_items: number;
       content_elsewhere_items: number;
+      content_elsewhere_in_scope_files: number;
       files: number;
       folders: number;
       tombstoned_items: number;
@@ -14537,7 +14548,9 @@ export class LocalConnectorStore {
               files: counts.files,
               folders: counts.folders,
               fullIngestionFiles: counts.full_ingestion_files,
-              scopeMetadataOnlyFiles: Math.max(0, counts.files - counts.full_ingestion_files),
+              // A names copy whose approved text lives in another tier is
+              // counted there. It is not an instruction to keep names only.
+              scopeMetadataOnlyFiles: Math.max(0, counts.files - counts.full_ingestion_files - counts.content_elsewhere_in_scope_files),
               contentEligibleItems: Math.max(
                 0,
                 counts.full_ingestion_files - policyDeferredItems - outsideContentWindowItems,
