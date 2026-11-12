@@ -627,6 +627,8 @@ export interface EvalRetrievalAudit {
     wordsLeftOut?: number;
     rowsRankedEstimate?: number;
     rowsRankedEveryWordEstimate?: number;
+    commonCountMs?: number;
+    commonCountWindows?: number;
   }>;
   /** Each store's whole search: wall time, the adapter's own time, and whether it beat the deadline. */
   corpusTimings: Array<{ corpusId: string; elapsedMs: number; adapterReportedMs?: number; outcome: string }>;
@@ -702,6 +704,8 @@ export function evalRetrievalAudit(
       ...(lane.wordsLeftOut !== undefined ? { wordsLeftOut: lane.wordsLeftOut } : {}),
       ...(lane.rowsRankedEstimate !== undefined ? { rowsRankedEstimate: lane.rowsRankedEstimate } : {}),
       ...(lane.rowsRankedEveryWordEstimate !== undefined ? { rowsRankedEveryWordEstimate: lane.rowsRankedEveryWordEstimate } : {}),
+      ...(lane.commonCountMs !== undefined ? { commonCountMs: lane.commonCountMs } : {}),
+      ...(lane.commonCountWindows !== undefined ? { commonCountWindows: lane.commonCountWindows } : {}),
     })),
     corpusTimings: (detail.corpusTimings ?? []).map((timing) => ({
       corpusId: timing.corpusId,

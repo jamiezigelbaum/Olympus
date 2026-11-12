@@ -16,7 +16,7 @@ import {
 } from '../src/workers/connector-store/index.ts';
 import { DROPBOX_TIER_CORPUS_IDS } from '../src/workers/dropbox-files/connector-store.ts';
 import { traceKeywordSearch } from '../eval/store-probe.ts';
-import { keywordCountWindows } from '../src/workers/connector-store/local-index.ts';
+import { keywordCountWindows, keywordShareSettled } from '../src/workers/connector-store/local-index.ts';
 import { fixtureConnector, tempDir } from './helpers/tier-fixtures.ts';
 
 // The store's bm25 title weight (local-index.ts).
@@ -265,7 +265,25 @@ test('a large store estimates a word\'s share from a few bounded rowid windows',
   expect(windows[0]![0]).toBe(1);
   expect(windows.at(-1)![1]).toBeLessThanOrEqual(1_000_000);
   expect(windows.at(-1)![0]).toBeGreaterThan(500_000);
-  for (let index = 1; index < windows.length; index += 1) expect(windows[index]![0]).toBeGreaterThan(windows[index - 1]![1]);
+  // In the order they are read: any first few spread over the whole store, so
+  // a count that stops early still samples it end to end.
+  const starts = windows.map(([from]) => from);
+  expect(new Set(starts).size).toBe(windows.length);
+  expect(Math.abs(starts[1]! - starts[0]!)).toBeGreaterThanOrEqual(400_000);
+  expect(Math.max(...starts.slice(0, 4)) - Math.min(...starts.slice(0, 4))).toBeGreaterThanOrEqual(700_000);
+});
+
+// Most words of a question are far from the one-fifth line, so one window
+// settles them and the count stops there (#1423 timing pair: counting every
+// window cost more than the words left out saved).
+test('a word clearly rare or clearly common is settled by its first window', () => {
+  expect(keywordShareSettled(0, 1_250)).toBe(true);
+  expect(keywordShareSettled(40, 1_250)).toBe(true);
+  expect(keywordShareSettled(700, 1_250)).toBe(true);
+  expect(keywordShareSettled(250, 1_250)).toBe(false);
+  expect(keywordShareSettled(280, 1_250)).toBe(false);
+  // More rows sampled, a narrower band left unsettled.
+  expect(keywordShareSettled(4_600, 20_000)).toBe(true);
 });
 
 test('word shares are counted over rowid windows, never by reading a word\'s whole doclist', async () => {
@@ -295,8 +313,15 @@ test('the keyword lane audit says how many words it left out and the rows ranked
     context: { allowedTrustDomains: [store.trustDomain] },
   });
   const keywordAudit = async (query: string) => (await search(query)).laneAudits?.find((lane) => lane.laneType === 'keyword');
+  // Counts earlier tests left in the store's memory would hide the counting.
+  (store as unknown as { conceptCountMemo?: unknown }).conceptCountMemo = undefined;
   const dropped = await keywordAudit('kestrel boatyard notes');
   expect(dropped?.wordsLeftOut).toBe(1);
+  // What the counting itself cost, so a timing run can weigh it against the rows saved.
+  expect(dropped?.commonCountMs).toBeGreaterThanOrEqual(0);
+  expect(dropped?.commonCountWindows).toBeGreaterThanOrEqual(1);
+  // The same words again are remembered: nothing is counted.
+  expect((await keywordAudit('kestrel boatyard notes'))?.commonCountWindows).toBe(0);
   expect(dropped!.rowsRankedEstimate!).toBeLessThan(dropped!.rowsRankedEveryWordEstimate!);
   const kept = await keywordAudit('kestrel boatyard harbour');
   expect(kept?.wordsLeftOut).toBe(0);

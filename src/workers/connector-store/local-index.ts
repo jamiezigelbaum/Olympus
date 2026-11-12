@@ -244,22 +244,41 @@ const KEYWORD_COMMON_ROW_SHARE = 0.2;
 // small store nearly every word of a question is "common" (a few files on one
 // topic), so leaving words out would only lose matches.
 const KEYWORD_COMMON_MIN_ROWS = 5_000;
-// A word's share of a store's FTS rows is counted over this many rowid
+// A word's share of a store's FTS rows is counted over up to this many rowid
 // windows of this many rows, spread over the store; a store with no more
 // rows than the windows hold is counted whole. Many small windows, so a word
 // that clusters in one stretch of the store moves the estimate less. On a
 // 1M-row seed (2026-11-11, #1423), an exact word's 16 windows read about
-// 0.3 MB in 4 ms, against 1.3 MB for a count bounded at the threshold.
+// 0.3 MB in 4 ms, against 1.3 MB for a count bounded at the threshold. The
+// count stops at the first window that settles the word (keywordShareSettled):
+// on Sparta's stores, counting all 16 for every word cost more than the words
+// left out saved (#1423 timing pair, olympus-ops#151, 2026-11-12).
 const KEYWORD_COMMON_WINDOWS = 16;
 const KEYWORD_COMMON_WINDOW_ROWS = 1_250;
+// How many standard errors of a share at the threshold a word's sampled share
+// must sit from it to settle the word.
+const KEYWORD_COMMON_SETTLE_SIGMAS = 3;
 
-/** The rowid windows a word's share of `rows` FTS rows is counted over. */
+/**
+ * The rowid windows a word's share of `rows` FTS rows is counted over, in the
+ * order they are read: each next window halves the gaps the earlier ones
+ * leave (bit-reversed order), so a count that stops early still spans the store.
+ */
 export function keywordCountWindows(rows: number): Array<[number, number]> {
   if (rows <= KEYWORD_COMMON_WINDOWS * KEYWORD_COMMON_WINDOW_ROWS) return [[1, rows]];
+  const bits = Math.log2(KEYWORD_COMMON_WINDOWS);
+  const reversed = (index: number) => parseInt(index.toString(2).padStart(bits, '0').split('').reverse().join(''), 2);
   return Array.from({ length: KEYWORD_COMMON_WINDOWS }, (_, index) => {
-    const from = Math.floor((index * rows) / KEYWORD_COMMON_WINDOWS) + 1;
+    const from = Math.floor((reversed(index) * rows) / KEYWORD_COMMON_WINDOWS) + 1;
     return [from, Math.min(rows, from + KEYWORD_COMMON_WINDOW_ROWS - 1)];
   });
+}
+
+/** Whether `count` matches in `sampled` rows put a word clearly on one side of the common-word share. */
+export function keywordShareSettled(count: number, sampled: number): boolean {
+  if (sampled <= 0) return false;
+  const margin = KEYWORD_COMMON_SETTLE_SIGMAS * Math.sqrt((KEYWORD_COMMON_ROW_SHARE * (1 - KEYWORD_COMMON_ROW_SHARE)) / sampled);
+  return Math.abs(count / sampled - KEYWORD_COMMON_ROW_SHARE) > margin;
 }
 const READ_RESULT_PROJECTION_LOCATOR_URI = Symbol('connector-store-result-projection-locator-uri');
 // Below this bar, semantic similarity is treated as no evidence. Calibrated
@@ -2160,6 +2179,9 @@ export interface ConnectorStoreCommonWords {
   wordsLeftOut: number;
   rowsRankedEstimate: number;
   rowsRankedEveryWordEstimate: number;
+  /** Time the share counts took in this search, waits for the store included, and the windows they read (0 when all were remembered). */
+  commonCountMs: number;
+  commonCountWindows: number;
 }
 
 export interface ConnectorStoreConceptCoverage {
@@ -13459,8 +13481,9 @@ export class LocalConnectorStore {
     }
     if (rows < KEYWORD_COMMON_MIN_ROWS) return undefined;
     const windows = keywordCountWindows(rows);
-    const sampled = windows.reduce((sum, [from, to]) => sum + to - from + 1, 0);
     const shares: number[] = [];
+    const countStarted = Date.now();
+    let windowsRead = 0;
     for (const group of groups) {
       // Exact words, whatever the search's mode: FTS5 reads every
       // completion's doclist for a prefix, whatever the rowid bounds (3 to 6
@@ -13468,20 +13491,27 @@ export class LocalConnectorStore {
       // completions make common; it never leaves out a rare one.
       const groupQuery = sourceIndexFtsGroupQuery(group, exact, false);
       const key = `\u0001common:${rows}:${groupQuery}`;
-      let count = remembered(key);
-      if (count === undefined) {
-        count = 0;
+      // Remembered as the share: an early stop samples fewer rows.
+      let share = remembered(key);
+      if (share === undefined) {
+        let count = 0;
+        let sampled = 0;
         for (const [from, to] of windows) {
           count += ((yield {
             mode: 'get',
             sql: 'SELECT COUNT(*) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ? AND rowid BETWEEN ? AND ?',
             params: [groupQuery, from, to],
           }) as { count: number }).count;
+          sampled += to - from + 1;
+          windowsRead += 1;
+          if (keywordShareSettled(count, sampled)) break;
         }
-        remember(key, count);
+        share = count / sampled;
+        remember(key, share);
       }
-      shares.push(count / sampled);
+      shares.push(share);
     }
+    const commonCountMs = Date.now() - countStarted;
     const common = shares.map((share) => share > KEYWORD_COMMON_ROW_SHARE);
     if (common.every(Boolean)) common[shares.indexOf(Math.min(...shares))] = false;
     const kept = new Set(groups.filter((_, index) => !common[index]).flat());
@@ -13494,6 +13524,8 @@ export class LocalConnectorStore {
         wordsLeftOut: excluded.size,
         rowsRankedEstimate: estimate((index) => !common[index]),
         rowsRankedEveryWordEstimate: estimate(() => true),
+        commonCountMs,
+        commonCountWindows: windowsRead,
       },
     };
   }

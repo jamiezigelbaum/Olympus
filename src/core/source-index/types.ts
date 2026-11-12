@@ -170,6 +170,9 @@ export interface RetrievalLaneAudit {
   rowsRankedEstimate?: number;
   /** Keyword lane on a large store: the same estimate had every word been matched. */
   rowsRankedEveryWordEstimate?: number;
+  /** Keyword lane on a large store: time the common-word counts took, and the rowid windows they read. */
+  commonCountMs?: number;
+  commonCountWindows?: number;
   modelId?: string;
   backend?: string;
   localOnly: boolean;
