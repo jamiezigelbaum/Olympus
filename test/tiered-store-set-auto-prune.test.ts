@@ -274,3 +274,14 @@ test('a sweep page reads only identities holding a superseded copy, never a walk
   expect(plan.some(detail => /USING (COVERING )?INDEX tier_copies_superseded_walk/.test(detail))).toBe(true);
   expect(plan.some(detail => /^SCAN i\b/.test(detail))).toBe(false);
 });
+
+test('superseded copies whose item row is gone do not use up a page and end the sweep early', async () => {
+  const ctx = await fixture();
+  const db = (ctx.f.ledger as unknown as { db: import('bun:sqlite').Database }).db;
+  const a = identityOf('a');
+  // An archive removal deletes the item row first and keeps its superseded copies until it finishes.
+  db.query('DELETE FROM tier_items WHERE provider = ? AND account_scope = ? AND provider_item_id = ?')
+    .run(a.provider, a.accountScope, a.providerItemId);
+  expect(ctx.f.ledger.listSupersededItemWindow({ limit: 1 }).map(record => record.providerItemId))
+    .toEqual([identityOf('b').providerItemId]);
+});

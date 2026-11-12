@@ -24469,15 +24469,13 @@ class TierLedger {
   }
   listSupersededItemWindow(options) {
     const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : [];
-    const rows = this.db.query(`SELECT i.* FROM (
-        SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id
-        FROM tier_copies INDEXED BY tier_copies_superseded_walk
-        WHERE copy_state = 'superseded'
-          ${after.length ? "AND (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)" : ""}
-        ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ?) s
-      JOIN tier_items i ON i.provider = s.provider AND i.account_scope = s.account_scope
-        AND i.conversation_key = s.conversation_key AND i.provider_item_id = s.provider_item_id
-      ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id`).all(...after, Math.max(1, Math.min(options.limit, 500)));
+    const rows = this.db.query(`SELECT i.* FROM tier_copies c INDEXED BY tier_copies_superseded_walk
+      JOIN tier_items i ON i.provider = c.provider AND i.account_scope = c.account_scope
+        AND i.conversation_key = c.conversation_key AND i.provider_item_id = c.provider_item_id
+      WHERE c.copy_state = 'superseded'
+        ${after.length ? "AND (c.provider, c.account_scope, c.conversation_key, c.provider_item_id) > (?, ?, ?, ?)" : ""}
+      GROUP BY c.provider, c.account_scope, c.conversation_key, c.provider_item_id
+      ORDER BY c.provider, c.account_scope, c.conversation_key, c.provider_item_id LIMIT ?`).all(...after, Math.max(1, Math.min(options.limit, 500)));
     return rows.map(recordFromRow);
   }
   listLowerContentLeftovers(options) {
