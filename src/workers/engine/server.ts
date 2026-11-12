@@ -575,6 +575,11 @@ export async function startWorkerWithLaunch(launch: WorkerLaunch): Promise<void>
  */
 let dataOwnerLock: HeldDataOwnerLock | undefined;
 
+/** How often the split's front brings each store's hidden-copy set up to date between Asks. */
+const FRONT_VISIBILITY_REFRESH_MS = 30_000;
+/** The longest the front waits on those sets before it listens; the rest finishes after. */
+const FRONT_VISIBILITY_READY_BOUND_MS = 60_000;
+
 export async function main(): Promise<void> {
   // First, before anything mounts or opens a store: this worker owns the data
   // root. A second worker on it waits a short while (restarts overlap), then
@@ -2137,6 +2142,27 @@ export async function main(): Promise<void> {
   ]);
   configuredMountStores = connectorStores;
   const readConnectorStores = connectorStores;
+  // The front builds every store's hidden-copy set before it reports ready,
+  // then keeps each one current on a timer, so an Ask (the first included)
+  // applies a small delta at most instead of building a set on its thread.
+  // A store mounted later is built on the next tick.
+  let frontVisibilityWarming = false;
+  async function warmFrontVisibility(when: string): Promise<void> {
+    if (frontVisibilityWarming || sourceRuntimeClosed) return;
+    frontVisibilityWarming = true;
+    const started = performance.now();
+    try {
+      for (const store of [...connectorStores]) {
+        try { await store.warmVisibilityInTurns(); }
+        catch (error) { console.warn(`[olympus] front: a store's hidden-copy set could not be built yet: ${error instanceof Error ? error.message : String(error)}`); }
+      }
+    } finally {
+      frontVisibilityWarming = false;
+    }
+    if (when === 'before ready') {
+      console.log(`[olympus] front: built ${connectorStores.length} stores' hidden-copy sets in ${Math.round(performance.now() - started)} ms`);
+    }
+  }
   // One person across sources (#1076): the shared people index, Private and
   // on this computer, rebuilt from every authored store's senders. Without
   // it, answers keep each item's own sender label and filters match labels.
@@ -5946,6 +5972,14 @@ export async function main(): Promise<void> {
         return response;
       } }))
     : Bun.serve({ hostname, port, idleTimeout: 0, ...serverOptions });
+  // Bounded: a set that has to be rebuilt from the ledger (a retention gap)
+  // finishes after the front listens, in turns, rather than hold readiness.
+  if (engineFront) {
+    const warming = warmFrontVisibility('before ready');
+    let bound: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([warming, new Promise<void>((resolve) => { bound = setTimeout(resolve, FRONT_VISIBILITY_READY_BOUND_MS); })]);
+    clearTimeout(bound);
+  }
   const server = !listens ? undefined : socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
   // The single worker's boot work ends when it listens; the background's when it is ready on its socket.
   if (engineRole === 'single') finishBootProgress();
@@ -6120,6 +6154,9 @@ export async function main(): Promise<void> {
   // store, on its first item) is opened here too.
   const frontMountRetry = engineFront ? setInterval(refreshFrontMounts, 2_000) : undefined;
   frontMountRetry?.unref?.();
+  // Keeps each store's set current between Asks; see warmFrontVisibility.
+  const frontVisibilityRefresh = engineFront ? setInterval(() => { void warmFrontVisibility('refresh'); }, FRONT_VISIBILITY_REFRESH_MS) : undefined;
+  frontVisibilityRefresh?.unref?.();
   if (engineFront) {
     // The judge runs in the background: the front shows what it last published.
     const judge = frontJudgeState(() => engineFront!.status());
@@ -6357,6 +6394,7 @@ export async function main(): Promise<void> {
     fileExtractionRuntime?.close();
     engineBackground?.stop();
     if (frontMountRetry) clearInterval(frontMountRetry);
+    if (frontVisibilityRefresh) clearInterval(frontVisibilityRefresh);
     engineFront?.stop();
     void server?.stop();
     // The data owner lock stays held: the teardown above is still running, and

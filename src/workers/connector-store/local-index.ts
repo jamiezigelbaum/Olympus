@@ -4105,6 +4105,17 @@ export class LocalConnectorStore {
   }
 
   /**
+   * Builds, or brings up to date, this connection's hidden-copy set with a
+   * turn between steps, read-only stores included. The split's front calls it
+   * for every store before it reports ready and then on a timer, so an Ask
+   * never pays the first build (from the saved set, or from the ledger) on its
+   * own thread (gate 1, ops#168: about 7.6 s on Sparta's first Ask).
+   */
+  async warmVisibilityInTurns(): Promise<void> {
+    await this.tierHiddenItemPksInTurns();
+  }
+
+  /**
    * Brings this writer's visibility set up to date and saves it in the store,
    * with a turn between steps, for read-only connections to start from. The
    * writer also does this on its own (refreshVisibilityIfBehind); this is for

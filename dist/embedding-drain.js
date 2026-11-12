@@ -25688,6 +25688,9 @@ class LocalConnectorStore {
   tierLedgerHiddenItemPks() {
     return runSteps(this.tierLedgerHiddenSteps());
   }
+  async warmVisibilityInTurns() {
+    await this.tierHiddenItemPksInTurns();
+  }
   async saveVisibilityInTurns() {
     if (this.readOnly)
       return;
