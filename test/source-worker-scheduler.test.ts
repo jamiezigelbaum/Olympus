@@ -107,6 +107,36 @@ describe('source worker scheduler', () => {
     });
   }
 
+  test('after a restart an advisory reason on a cadence deadline does not hold wakes off', async () => {
+    const T0 = Date.parse('2026-11-12T12:00:00.000Z');
+    const clock = { now: T0 };
+    const stateStore = new LocalSourceSchedulerStateStore(':memory:');
+    let runs = 0;
+    const source: SourceSchedulerSource = {
+      sourceId: 'files.fixture', corpusId: 'c', cadence: 'continuous', intervalMs: 30 * 60_000, freshnessThresholdHours: 26,
+      tasks: [{
+        id: 'sync', kind: 'sync', writer: true,
+        run: async () => {
+          runs += 1;
+          return { status: 'progress', retryAt: { at: new Date(T0 + 60 * 60_000).toISOString(), degradedReason: 'traversal_not_advancing' } };
+        },
+      }],
+    };
+    const make = () => new SourceScheduler({
+      enabled: true, tickMs: 60_000, errorBackoffMs: 60_000, maxTransientRetries: 1,
+      now: () => new Date(clock.now), sources: [source], stateStore,
+    });
+    try {
+      await make().runDueTasks(new Date(clock.now));
+      expect(runs).toBe(1);
+      const restarted = make();
+      clock.now = T0 + 60_000;
+      expect(restarted.wakeTasksOfKind('sync')).toBe(1);
+      await restarted.runDueTasks(new Date(clock.now));
+      expect(runs).toBe(2);
+    } finally { stateStore.close(); }
+  });
+
   test('a guarded unpark request permits exactly one immediate task attempt without changing cadence', async () => {
     await withSchedulerStateFixture(async (path) => {
       const key = {

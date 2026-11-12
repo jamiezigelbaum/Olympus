@@ -137,6 +137,28 @@ describe('importing the archived X bookmarks set', () => {
     expect(() => readArchivedXBookmarks(path)).toThrow(XBookmarksArchiveImportError);
   });
 
+  test('a bookmark the lane already holds keeps its live record', async () => {
+    const path = await earlierInstallStore([
+      post('601', 'zebrastripe archived', '2026-09-20T00:00:00.000Z'),
+      post('602', 'archive only marker', '2026-09-19T00:00:00.000Z'),
+    ]);
+    const store = laneStore();
+    await store.syncFromConnector(createXBookmarksSourceConnector({
+      account: ACCOUNT,
+      posts: [{ ...post('601', 'quokkasmile live', '2026-09-20T00:00:00.000Z'), sourceVersion: 'live-v' }],
+      foldersByPostId: new Map([['601', [{ id: 'folder-1', name: 'Reading list' }]]]),
+    }), { fetchContent: true });
+    const { handler, usage } = handlerFor(store, NO_API);
+    const result = await handler.importArchive!({ archive_path: path });
+    expect(result.counts).toMatchObject({ items_seen: 2, archive_posts_already_held: 1 });
+    expect(store.searchItems('quokkasmile', 5)[0]?.sourceItem.providerItemId).toBe('601');
+    expect(store.searchItems('zebrastripe', 5)).toHaveLength(0);
+    expect(store.searchItems('Reading list', 5)[0]?.sourceItem.providerItemId).toBe('601');
+    expect(store.searchItems('archive only', 5)[0]?.sourceItem.providerItemId).toBe('602');
+    usage.close();
+    store.close();
+  });
+
   test('imports through the archive connector with no API call, once, and the head stops at it', async () => {
     const path = await earlierInstallStore([
       post('401', 'archived alpha marker', '2026-09-20T00:00:00.000Z'),
@@ -168,7 +190,10 @@ describe('importing the archived X bookmarks set', () => {
     // Keyed by post id: a second import adds no item and no chunk.
     const itemsBefore = store.status().counts.items;
     const again = await handler.importArchive!({ archive_path: path });
-    expect(again.counts).toMatchObject({ api_requests: 0, items_seen: 3, chunks_indexed: 0, chunks_embedded: 0 });
+    expect(again.counts).toMatchObject({
+      api_requests: 0, items_seen: 3, items_indexed: 0, archive_posts_already_held: 3, chunks_indexed: 0,
+    });
+    expect(again.status).toBe('idle');
     expect(store.status().counts.items).toBe(itemsBefore);
     expect(itemsBefore).toBe(3);
     usage.close();

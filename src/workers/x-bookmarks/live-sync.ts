@@ -45,7 +45,8 @@ import {
   createXBookmarksSourceConnector,
   xBookmarkLocalItemId,
 } from './connector.ts';
-import { readArchivedXBookmarks } from './archive-import.ts';
+import { XBookmarksArchiveImportError, readArchivedXBookmarks } from './archive-import.ts';
+import { resolve } from 'node:path';
 import {
   runXBookmarksWindowDiagnostic,
   type XBookmarksWindowDiagnosticResult,
@@ -663,9 +664,19 @@ export function createXBookmarksConnectorStoreSyncHandler(
     // writes nothing new. The head lane then stops at the first imported id.
     async importArchive(request: XBookmarksArchiveImportRequest): Promise<XBookmarksLiveSyncResult> {
       const archived = readArchivedXBookmarks(request.archive_path);
+      if (options.store.dbPath !== ':memory:' && resolve(request.archive_path) === resolve(options.store.dbPath)) {
+        throw new XBookmarksArchiveImportError('The archive path is this install\'s own X store.');
+      }
+      // Fill only what is missing. A bookmark any tier store already holds
+      // keeps its record: the archive has no folders, author id or source
+      // version, and writing it again would overwrite the live ones.
+      const missing = archived.posts.filter((post) => !tierSet.anyLegHasRow({
+        family: 'x', provider: X_BOOKMARKS_PROVIDER, accountScope: account,
+        providerItemId: post.id, localItemId: xBookmarkLocalItemId(account, post.id),
+      }));
       const connector = createXBookmarksSourceConnector({
         account,
-        posts: archived.posts,
+        posts: missing,
         connectorId: X_BOOKMARKS_ARCHIVE_CONNECTOR_ID,
         fetchedAt: now().toISOString(),
       });
@@ -673,7 +684,7 @@ export function createXBookmarksConnectorStoreSyncHandler(
         placement: X_BOOKMARKS_STORE_PLACEMENT,
         fetchContent: true,
         ownershipKind: 'preservation',
-        maxItems: Math.max(1, archived.posts.length),
+        maxItems: Math.max(1, missing.length),
       }, false);
       return withGuard({
         status: run.sync.itemsIndexed > 0 ? 'progress' : 'idle',
@@ -682,6 +693,7 @@ export function createXBookmarksConnectorStoreSyncHandler(
           archive_rows_read: archived.rowsRead,
           archive_rows_skipped: archived.rowsSkipped,
           archive_posts_with_text: archived.postsWithText,
+          archive_posts_already_held: archived.posts.length - missing.length,
           items_seen: archived.posts.length,
           items_indexed: run.sync.itemsIndexed,
           chunks_indexed: run.sync.chunksIndexed,

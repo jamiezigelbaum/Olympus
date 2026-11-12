@@ -1413,7 +1413,11 @@ export class SourceScheduler {
     state: SchedulerTaskState,
     persisted: PersistedSourceSchedulerTaskState,
   ): void {
+    // Only a limit park holds wakes off after a restart. Advisory reasons on
+    // an ordinary cadence (traversal_not_advancing, an embedding outage) must
+    // still let new work wake the task.
     state.retryNotBeforeAt = persisted.degradedReason && persisted.notBeforeAt
+      && SCHEDULER_PARK_REASONS.has(persisted.degradedReason)
       ? Math.min(Date.parse(persisted.notBeforeAt), this.now().getTime() + SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS)
       : undefined;
     state.consecutiveFailures = persisted.consecutiveFailures;
@@ -2972,6 +2976,14 @@ const UTC_DAY_SCOPED_DEGRADED_REASONS: ReadonlySet<string> = new Set([
   READWISE_DAILY_REQUEST_GUARD_REASON,
   GMAIL_DAILY_REQUEST_GUARD_REASON,
   GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON,
+]);
+
+// The reasons a SourceSchedulerTaskDeferral parks a task with: the daily
+// limits above and a provider's rate limit.
+const SCHEDULER_PARK_REASONS: ReadonlySet<string> = new Set([
+  ...UTC_DAY_SCOPED_DEGRADED_REASONS,
+  'provider_rate_limit',
+  'provider_rate_limited',
 ]);
 
 /**

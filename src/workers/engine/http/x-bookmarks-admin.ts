@@ -63,6 +63,7 @@ export function xBookmarksLiveAdminResult(
     'archive_rows_read',
     'archive_rows_skipped',
     'archive_posts_with_text',
+    'archive_posts_already_held',
   ]);
   for (let index = 0; index < 8; index += 1) {
     allowedCountKeys.add(`traversal_digest_word_${index}`);

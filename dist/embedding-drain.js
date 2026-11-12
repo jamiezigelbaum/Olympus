@@ -40327,7 +40327,7 @@ ${request.taskId}`);
     return state;
   }
   applyPersistedState(state, persisted) {
-    state.retryNotBeforeAt = persisted.degradedReason && persisted.notBeforeAt ? Math.min(Date.parse(persisted.notBeforeAt), this.now().getTime() + SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS) : undefined;
+    state.retryNotBeforeAt = persisted.degradedReason && persisted.notBeforeAt && SCHEDULER_PARK_REASONS.has(persisted.degradedReason) ? Math.min(Date.parse(persisted.notBeforeAt), this.now().getTime() + SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS) : undefined;
     state.consecutiveFailures = persisted.consecutiveFailures;
     if (persisted.checkpoint)
       state.checkpoint = persisted.checkpoint;
@@ -40617,6 +40617,11 @@ var UTC_DAY_SCOPED_DEGRADED_REASONS = new Set([
   READWISE_DAILY_REQUEST_GUARD_REASON,
   GMAIL_DAILY_REQUEST_GUARD_REASON,
   GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON
+]);
+var SCHEDULER_PARK_REASONS = new Set([
+  ...UTC_DAY_SCOPED_DEGRADED_REASONS,
+  "provider_rate_limit",
+  "provider_rate_limited"
 ]);
 function reportedDegradedReason(degradedReason, lastCompletedAt, now) {
   if (!degradedReason || !UTC_DAY_SCOPED_DEGRADED_REASONS.has(degradedReason))
