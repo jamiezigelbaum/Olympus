@@ -419,7 +419,7 @@ function serveSnapshotWaiters(): void {
  * while this is true, so owner-visible reads go first.
  */
 export function readPoolHasWaitingWork(): boolean {
-  return waitingWorkForTests?.() ?? (snapshotWaiters.length > 0 || queues.size > 0);
+  return waitingWorkForTests?.() ?? (snapshotWaiters.length > 0 || [...queues.values()].some((waiting) => waiting.length > 0));
 }
 
 let waitingWorkForTests: (() => boolean) | undefined;

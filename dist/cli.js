@@ -31822,7 +31822,7 @@ function serveSnapshotWaiters() {
   }
 }
 function readPoolHasWaitingWork() {
-  return waitingWorkForTests?.() ?? (snapshotWaiters.length > 0 || queues.size > 0);
+  return waitingWorkForTests?.() ?? (snapshotWaiters.length > 0 || [...queues.values()].some((waiting) => waiting.length > 0));
 }
 function readOnPool(dbPath, read, options = {}) {
   const deadlineAtMs = options.deadlineAtMs ?? clock2.now() + OFF_THREAD_READ_TIMEOUT_MS;

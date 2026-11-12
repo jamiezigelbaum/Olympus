@@ -22121,7 +22121,7 @@ function serveSnapshotWaiters() {
   }
 }
 function readPoolHasWaitingWork() {
-  return waitingWorkForTests?.() ?? (snapshotWaiters.length > 0 || queues.size > 0);
+  return waitingWorkForTests?.() ?? (snapshotWaiters.length > 0 || [...queues.values()].some((waiting) => waiting.length > 0));
 }
 var waitingWorkForTests;
 function readOnPool(dbPath, read, options = {}) {
