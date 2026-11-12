@@ -317,6 +317,18 @@ test('lowering slices stop before starting another item, and yield between bound
   expect(lines.every(line => !line.includes('synthetic-') && !line.includes(body))).toBe(true);
 });
 
+test('automatic moves skip a set while one of its stores is being reclaimed, and run after', async () => {
+  const f = await fixture(4);
+  const { service } = serviceFor(f.f);
+  const store = f.f.stores.internal!;
+  Object.defineProperty(store, 'reclaiming', { configurable: true, get: () => true });
+  try { await service.runOnce(); } finally { delete (store as { reclaiming?: boolean }).reclaiming; }
+  expect(store.reclaiming).toBe(false);
+  expect(f.f.ledger.listMoving({ limit: 100 }).length).toBe(4);
+  await service.runOnce();
+  expect(f.f.ledger.listMoving({ limit: 100 }).length).toBe(0);
+});
+
 test('a lowering deadline expires without consuming the next queued item', async () => {
   const f = await fixture();
   let stop = false;

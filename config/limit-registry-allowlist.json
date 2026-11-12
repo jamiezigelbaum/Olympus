@@ -450,6 +450,24 @@
     "retire_when": "Remove when the resumable pacing/retry boundary MEDIA_JUDGE_MAX_PER_PASS is retired or adopted."
   },
   {
+    "path": "src/workers/connector-store/local-index.ts",
+    "symbol": "RECLAIM_MAX_PAGES_PER_STEP",
+    "reason": "pacing",
+    "retire_when": "Remove when superseded-copy reclamation no longer uses RECLAIM_MAX_PAGES_PER_STEP."
+  },
+  {
+    "path": "src/workers/connector-store/tier-auto-prune-sweep.ts",
+    "symbol": "RECLAIM_MAX_RETAINED_FREE_BYTES",
+    "reason": "pacing",
+    "retire_when": "Remove when superseded-copy reclamation no longer uses RECLAIM_MAX_RETAINED_FREE_BYTES."
+  },
+  {
+    "path": "src/workers/connector-store/tier-auto-prune-sweep.ts",
+    "symbol": "RECLAIM_MAX_RETAINED_FREE_RATIO",
+    "reason": "pacing",
+    "retire_when": "Remove when superseded-copy reclamation no longer uses RECLAIM_MAX_RETAINED_FREE_RATIO."
+  },
+  {
     "path": "src/workers/credential-health.ts",
     "symbol": "CREDENTIAL_HEALTH_MAX_FUTURE_SKEW_MS",
     "reason": "pacing",

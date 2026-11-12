@@ -336,7 +336,7 @@ async function acquireFileLease(targetPath, options) {
   const deadline = Date.now() + options.acquireTimeoutMs;
   await mkdir(dirname3(lockPath), { recursive: true, mode: 448 });
   while (true) {
-    const lock = tryKernelLock(lockPath);
+    const lock = tryKernelLock(lockPath, options.mode);
     if (lock)
       return new AsyncFileLeaseOwner(targetPath, lockPath, lock);
     if (Date.now() >= deadline)
@@ -349,7 +349,7 @@ function acquireFileLeaseSync(targetPath, options) {
   const deadline = Date.now() + options.acquireTimeoutMs;
   mkdirSync2(dirname3(lockPath), { recursive: true, mode: 448 });
   while (true) {
-    const lock = tryKernelLock(lockPath);
+    const lock = tryKernelLock(lockPath, options.mode);
     if (lock)
       return new SyncFileLeaseOwner(targetPath, lockPath, lock);
     if (Date.now() >= deadline)
@@ -369,7 +369,7 @@ function openSqlite(path) {
   connection.exec("PRAGMA busy_timeout = 0");
   return connection;
 }
-function tryKernelLock(lockPath) {
+function tryKernelLock(lockPath, mode) {
   if (!existsSync2(lockPath)) {
     try {
       closeSync2(openSync2(lockPath, "wx", 384));
@@ -380,7 +380,7 @@ function tryKernelLock(lockPath) {
   }
   const connection = openSqlite(lockPath);
   try {
-    connection.exec("BEGIN EXCLUSIVE");
+    connection.exec(mode === "shared" ? "BEGIN; SELECT count(*) FROM sqlite_master;" : "BEGIN EXCLUSIVE");
   } catch (error) {
     closeQuietly(connection);
     if (isSqliteBusy(error))
@@ -553,6 +553,7 @@ function lockPathFor(targetPath) {
 }
 function normalizeOptions(options) {
   return {
+    mode: options.mode ?? "exclusive",
     acquireTimeoutMs: positiveInteger(options.acquireTimeoutMs, DEFAULT_OPTIONS.acquireTimeoutMs),
     pollIntervalMs: positiveInteger(options.pollIntervalMs, DEFAULT_OPTIONS.pollIntervalMs)
   };
@@ -8016,10 +8017,17 @@ var init_keyword_context = __esm(() => {
   cachedOnly = new AsyncLocalStorage2;
   requestContext = new AsyncLocalStorage2;
 });
+// src/core/store-reclaim-admission.ts
+var init_store_reclaim_admission = __esm(() => {
+  init_file_lease();
+  init_olympus_layout();
+});
+
 // src/workers/source-index/answer-latency-trace.ts
 import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
 var storage2, laneStorage, CONTENT_FREE_ERROR_CLASSES;
 var init_answer_latency_trace = __esm(() => {
+  init_store_reclaim_admission();
   storage2 = new AsyncLocalStorage3;
   laneStorage = new AsyncLocalStorage3;
   CONTENT_FREE_ERROR_CLASSES = new Set([
@@ -20393,6 +20401,7 @@ var CONCEPT_COUNT_MAX_AGE_MS, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANT
 var init_local_index = __esm(() => {
   init_vector_digest();
   init_main_thread_sql_trace();
+  init_store_reclaim_admission();
   init_store_write_guard();
   init_unreadable_files();
   init_job_names();
@@ -20789,11 +20798,15 @@ var init_tier_content_purge = __esm(() => {
 });
 
 // src/workers/connector-store/tier-auto-prune-sweep.ts
+var RECLAIM_MAX_RETAINED_FREE_BYTES;
 var init_tier_auto_prune_sweep = __esm(() => {
   init_tier_ledger();
   init_embedding_ledger();
   init_tier_move();
   init_tier_content_purge();
+  init_store_reclaim_admission();
+  init_tiered_store_set();
+  RECLAIM_MAX_RETAINED_FREE_BYTES = 64 * 1024 * 1024;
 });
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { spawn as spawn4 } from "node:child_process";
