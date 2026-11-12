@@ -347,7 +347,7 @@ describe('Linux runtime pins and rendering', () => {
     const rendered = renderLinuxInstallScript(LINUX_TEMPLATE, PINS, LINUX_RUNTIME);
     expect(rendered).not.toMatch(/@[A-Z][A-Z0-9_]*@/i);
     expect(rendered).toMatch(/^OLYMPUS_VERSION=1\.0\.0-rc\.1$/m);
-    expect(rendered).toMatch(/^BUN_VERSION=1\.3\.14$/m);
+    expect(rendered).toContain(`\nBUN_VERSION=${LINUX_RUNTIME.bun.version}\n`);
     expect(rendered).toContain(`BUN_URL=${LINUX_RUNTIME.bun.url}`);
     expect(rendered).toContain(`BUN_ENTRY=${LINUX_RUNTIME.bun.entry}`);
     expect(rendered).toContain(`BUN_EXE_SHA256=${LINUX_RUNTIME.bun.executableSha256}`);

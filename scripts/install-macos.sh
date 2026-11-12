@@ -93,14 +93,14 @@ MACOS_HELPER_TEAM_ID=@MACOS_HELPER_TEAM_ID@
 
 # Bun, pinned by version and by the SHA-256 and size of its Apple-silicon
 # release archive (from Bun's published SHASUMS256.txt and GitHub's asset
-# digest for bun-v1.3.14, which agree), and by the SHA-256 of the bun program
+# digest for bun-v1.4.4, which agree), and by the SHA-256 of the bun program
 # inside that archive, which an already-installed Bun must match before it
 # runs (`bun scripts/publish-release-to-site.ts --pin-bun <zip>` computes it
-# from the pinned archive). Bun 1.3.14 needs macOS 13 or later.
-BUN_VERSION=1.3.14
-BUN_SHA256_DARWIN_AARCH64=d8b96221828ad6f97ac7ac0ab7e95872341af763001e8803e8267652c2652620
-BUN_BYTES_DARWIN_AARCH64=23586433
-BUN_EXE_SHA256_DARWIN_AARCH64=e0c90ec15d33363e6b70713d56bc3b2c7585c17f40a0fe0f8fd9305901d4e233
+# from the pinned archive). Bun 1.4.4 needs macOS 13 or later.
+BUN_VERSION=1.4.4
+BUN_SHA256_DARWIN_AARCH64=c240d7f0ccb90c263a849fcdb09b7ee62630d921348ed6aafda86b9d577bc510
+BUN_BYTES_DARWIN_AARCH64=40323673
+BUN_EXE_SHA256_DARWIN_AARCH64=0a2237cdcfa0d16ef501d9acca9f0026309ef348bea7393a64e8d1e3609565cc
 BUN_BASE=https://github.com/oven-sh/bun/releases/download
 MACOS_MIN_MAJOR=13
 

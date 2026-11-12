@@ -42,6 +42,8 @@ import { V0_4_PUBLIC_PACKAGE_FILES } from '../src/core/public-surface.ts';
 const REPO = resolve(import.meta.dir, '..');
 const TEMPLATE = join(REPO, 'scripts', 'install-macos.sh');
 const UNINSTALL = join(REPO, 'site', 'uninstall.sh');
+/** The Bun version the installer template pins. */
+const BUN_PIN = /^BUN_VERSION=(\S+)$/m.exec(readFileSync(TEMPLATE, 'utf8'))![1]!;
 const has = (tool: string): boolean => spawnSync('/bin/sh', ['-c', `command -v ${tool}`]).status === 0;
 const shellTest = has('zip') && has('unzip') && has('shasum') ? test : test.skip;
 const darwinE2E = process.platform === 'darwin' && has('openssl') && has('zip') ? test : test.skip;
@@ -177,7 +179,7 @@ function harness(shell = '/bin/sh'): Harness {
 
   // The Bun the installer downloads: --version answers, anything else runs as sh.
   const fakeBun = join(root, 'fake-bun');
-  writeExecutable(fakeBun, '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "${FAKE_BUN_VERSION:-1.3.14}"; exit 0; fi\nexec /bin/sh "$@"\n');
+  writeExecutable(fakeBun, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "\${FAKE_BUN_VERSION:-${BUN_PIN}}"; exit 0; fi\nexec /bin/sh "$@"\n`);
   const bunZip = zipBun(root, fakeBun);
 
   writeExecutable(join(bin, 'curl'), `#!/bin/sh
@@ -196,7 +198,7 @@ case "$url" in
   https://releases.test/*)
     case "$url" in *olympus-engine-helper-*) [ -z "$FAKE_HELPER_DOWNLOAD_FAIL" ] || exit 22 ;; esac
     cp "${tarballs}/\${url##*/}" "$out" ;;
-  https://bun.test/bun-v1.3.14/bun-darwin-aarch64.zip)
+  https://bun.test/bun-v${BUN_PIN}/bun-darwin-aarch64.zip)
     if [ -n "$FAKE_BUN_CORRUPT" ]; then printf 'not the real bun' > "$out"; else cp "${bunZip}" "$out"; fi ;;
   *) exit 22 ;;
 esac
@@ -373,7 +375,7 @@ describe.each(SHELLS)('install.sh under %s', (shell) => {
     expect(readFileSync(h.runtimeBun, 'utf8')).toContain('FAKE_BUN_VERSION');
     expect(h.logLines()).toEqual([`${V1} engine install --bun ${h.runtimeBun} --restart`]);
     expect(h.curlCalls()).toEqual([
-      'https://bun.test/bun-v1.3.14/bun-darwin-aarch64.zip',
+      `https://bun.test/bun-v${BUN_PIN}/bun-darwin-aarch64.zip`,
       `https://releases.test/${V1}/olympus-${V1}.tgz`,
     ]);
     expect(result.stdout).toContain('Olympus is installed and running in the background on this Mac.');
@@ -746,7 +748,7 @@ describe.each(SHELLS)('install.sh under %s', (shell) => {
     const h = harness(shell);
     expectSucceeded(h.run(V1));
     const ran = join(h.root, 'tampered-bun-ran');
-    writeExecutable(h.runtimeBun, `#!/bin/sh\n: > "${ran}"\necho 1.3.14\n`);
+    writeExecutable(h.runtimeBun, `#!/bin/sh\n: > "${ran}"\necho ${BUN_PIN}\n`);
     expectSucceeded(h.run(V2));
     expect(existsSync(ran)).toBe(false);
     expect(readFileSync(h.runtimeBun, 'utf8')).toContain('FAKE_BUN_VERSION');
@@ -767,7 +769,7 @@ describe.each(SHELLS)('install.sh under %s', (shell) => {
   shellTest('an Apple-silicon Mac whose Terminal runs under Rosetta installs the Apple-silicon build', () => {
     const h = harness(shell);
     expectSucceeded(h.run(V1, { FAKE_UNAME_M: 'x86_64', FAKE_TRANSLATED: '1' }));
-    expect(h.curlCalls()[0]).toBe('https://bun.test/bun-v1.3.14/bun-darwin-aarch64.zip');
+    expect(h.curlCalls()[0]).toBe(`https://bun.test/bun-v${BUN_PIN}/bun-darwin-aarch64.zip`);
   });
 
   shellTest('macOS older than 13 is refused before anything is downloaded', () => {
@@ -832,7 +834,7 @@ describe('install.sh template', () => {
 
   test('pins Bun by version, archive SHA-256 and size, and program SHA-256, and takes no download location or checksum from the environment', () => {
     const text = readFileSync(TEMPLATE, 'utf8');
-    expect(text).toMatch(/^BUN_VERSION=1\.3\.14$/m);
+    expect(text).toMatch(/^BUN_VERSION=[0-9]+\.[0-9]+\.[0-9]+$/m);
     expect(text).toMatch(/^BUN_SHA256_DARWIN_AARCH64=[0-9a-f]{64}$/m);
     expect(text).toMatch(/^BUN_BYTES_DARWIN_AARCH64=[0-9]+$/m);
     expect(text).toMatch(/^BUN_EXE_SHA256_DARWIN_AARCH64=[0-9a-f]{64}$/m);
@@ -1070,8 +1072,8 @@ describe('install.sh end to end', () => {
 
     // The Bun the installer downloads is this test's own Bun.
     const bunZip = zipBun(root, process.execPath);
-    mkdirSync(join(served, 'bun', 'bun-v1.3.14'), { recursive: true });
-    copyFileSync(bunZip, join(served, 'bun', 'bun-v1.3.14', 'bun-darwin-aarch64.zip'));
+    mkdirSync(join(served, 'bun', `bun-v${BUN_PIN}`), { recursive: true });
+    copyFileSync(bunZip, join(served, 'bun', `bun-v${BUN_PIN}`, 'bun-darwin-aarch64.zip'));
 
     // Release tarballs built from this checkout's package files, except that
     // OLYMPUS_INSTALL_E2E_TARBALL may name a real release tarball for V1 (for
