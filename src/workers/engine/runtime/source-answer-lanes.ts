@@ -42,10 +42,15 @@ export const OWNER_QUESTION_RESOURCE = 'owner_question';
  * failures and cancellation, and count overlapping questions independently.
  * Watches and eligibility reads outside a question scope acquire no lease.
  */
-export function createOwnerQuestionActivity(relay?: { busy(resource: string): void; idle(resource: string): void }) {
+export function createOwnerQuestionActivity(relay?: { busy(resource: string): void; idle(resource: string): void }, now: () => number = Date.now) {
   const context = new AsyncLocalStorage<{ active: boolean; settled: boolean } | undefined>();
   let inFlight = 0;
+  let lastEndedAt: number | undefined;
+  const release = () => {
+    if (--inFlight === 0) { lastEndedAt = now(); relay?.idle(OWNER_QUESTION_RESOURCE); }
+  };
   return {
+    get lastEndedAt(): number | undefined { return lastEndedAt; },
     get busy(): boolean { return inFlight > 0; },
     retrieving(): void {
       const scope = context.getStore();
@@ -60,7 +65,7 @@ export function createOwnerQuestionActivity(relay?: { busy(resource: string): vo
       return () => {
         if (released) return;
         released = true;
-        if (--inFlight === 0) relay?.idle(OWNER_QUESTION_RESOURCE);
+        release();
       };
     },
     async run<T>(work: () => Promise<T>, kind: 'owner' | 'background' = 'owner'): Promise<T> {
@@ -72,7 +77,7 @@ export function createOwnerQuestionActivity(relay?: { busy(resource: string): vo
         return await context.run(scope, work);
       } finally {
         scope.settled = true;
-        if (scope.active && --inFlight === 0) relay?.idle(OWNER_QUESTION_RESOURCE);
+        if (scope.active) release();
       }
     },
   };

@@ -130,7 +130,7 @@ import { automaticTierMoveOptions, automaticTierMovesAllowed } from './tier-auto
 
 export const LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60_000;
 /** Time the one-time superseded-copy sweep may take on each maintenance call. */
-export const SUPERSEDED_SWEEP_SLICE_MS = 250;
+export const SUPERSEDED_SWEEP_SLICE_MS = 100;
 import { rehomePrivateTierRows, type TierRowRehomeReport } from './tier-row-rehome.ts';
 import { sweepOwnerRuleRaises } from './tier-rules-sweep.ts';
 import { applyOwnerOverrides } from './tier-override-settle.ts';
@@ -618,8 +618,7 @@ export class TieredStoreSet {
 
   /**
    * One time-boxed slice of the one-time superseded-copy sweep. Only the
-   * engine background's ticker takes them (startSupersededSweepTicker), every
-   * few seconds and never while an owner question is in flight. True once
+   * engine background's adaptive ticker takes them (startSupersededSweepTicker) and never while an owner question is in flight. True once
    * the sweep is done for this ledger.
    */
   sweepSupersededSlice(options: { embeddingLedger?: TierMoveOptions['embeddingLedger'] } = {}): boolean {

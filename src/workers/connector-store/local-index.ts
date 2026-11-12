@@ -3416,6 +3416,8 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
 const RECLAIM_MAX_PAGES_PER_STEP = 128;
 /** Effective conversion throughput, about 3x the file in I/O at ~45 MB/s; replace with a measurement. */
 const RECLAIM_CONVERSION_BYTES_PER_MS = 15_000;
+/** File releases include filesystem work: admit one picture per prune step. */
+const SUPERSEDED_PRUNE_MEDIA_ROWS = 1;
 
 export class LocalConnectorStore {
   readonly dbPath: string;
@@ -6858,6 +6860,68 @@ export class LocalConnectorStore {
     }
   }
 
+  /**
+   * One resumable superseded-copy step. The sweep's durable pending receipt
+   * owns authorization; remaining rows ARE the cursor. Delete vectors before
+   * chunks so ON DELETE CASCADE cannot hide an unbounded vector fan-out.
+   * FTS ownership is indexed, and is removed with its text in the same commit.
+   */
+  pruneSupersededCopyStep(
+    identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+    options: { rowLimit: number; connectorId: string },
+  ): boolean {
+    if (this.reclaimProcess) throw new Error('Superseded store is reclaiming; retry cleanup later.');
+    const limit = Math.max(1, Math.floor(options.rowLimit));
+    const previousWait = (this.db.query('PRAGMA busy_timeout').get() as { timeout: number }).timeout;
+    this.db.exec('PRAGMA busy_timeout = 0');
+    try {
+      return this.db.transaction(() => {
+        const row = this.db.query(`SELECT item_pk, family, local_item_id, tombstoned FROM items
+          WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?`)
+          .get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId) as
+          { item_pk: number; family: SourceItemIdentity['family']; local_item_id: string; tombstoned: number } | null;
+        let remaining = limit;
+        if (row) {
+          remaining -= this.db.query(`DELETE FROM chunk_embeddings WHERE rowid IN
+            (SELECT rowid FROM chunk_embeddings WHERE item_pk = ? LIMIT ?)`).run(row.item_pk, remaining).changes;
+          if (this.db.query('SELECT 1 FROM chunk_embeddings WHERE item_pk = ? LIMIT 1').get(row.item_pk)) return false;
+          const fts = this.db.query(`SELECT fts_rowid FROM connector_store_fts_rows WHERE item_pk = ? LIMIT ?`)
+            .all(row.item_pk, remaining) as Array<{ fts_rowid: number }>;
+          for (const held of fts) {
+            this.db.query('DELETE FROM connector_store_fts WHERE rowid = ?').run(held.fts_rowid);
+            this.db.query('DELETE FROM connector_store_fts_rows WHERE fts_rowid = ?').run(held.fts_rowid);
+          }
+          remaining -= fts.length;
+          if (this.db.query('SELECT 1 FROM connector_store_fts_rows WHERE item_pk = ? LIMIT 1').get(row.item_pk)) return false;
+          remaining -= this.db.query(`DELETE FROM chunks WHERE chunk_pk IN
+            (SELECT chunk_pk FROM chunks WHERE item_pk = ? LIMIT ?)`).run(row.item_pk, remaining).changes;
+          if (this.db.query('SELECT 1 FROM chunks WHERE item_pk = ? LIMIT 1').get(row.item_pk)) return false;
+          // At most one version row per item; it shares the same row allowance.
+          if (!remaining && this.db.query('SELECT 1 FROM item_text_versions WHERE item_pk = ?').get(row.item_pk)) return false;
+          remaining -= this.db.query('DELETE FROM item_text_versions WHERE item_pk = ?').run(row.item_pk).changes;
+        }
+        const mediaPending = this.db.query('SELECT 1 FROM chunk_media_releases LIMIT 1').get();
+        if (mediaPending) {
+          // Commit chunk deletions BEFORE releasing files. A rollback must
+          // never restore a chunk whose picture was already removed. On the
+          // next step all children are durably empty, and the queued releases
+          // (including judgments) can share this step's transaction safely.
+          if (remaining !== limit) return false;
+          if (!this.releaseUnreferencedChunkMedia(SUPERSEDED_PRUNE_MEDIA_ROWS)) return false;
+        }
+        if (!row) return true;
+        this.db.query(`UPDATE items SET title = NULL, search_text = NULL, locator_uri = NULL,
+          sender_id = NULL, sender_label = NULL, sender_is_owner = NULL, reactions_json = NULL, authored_at = NULL, updated_at = NULL
+          WHERE item_pk = ?`).run(row.item_pk);
+        // No version is stamped: exactly the existing withdrawal semantics.
+        // Empty children make tombstoneCopy's deletes bounded. Its media
+        // cleanup is deferred because we are inside the store transaction.
+        if (!row.tombstoned) this.tombstoneCopy({ ...identity, family: row.family, localItemId: row.local_item_id }, { connectorId: options.connectorId });
+        return true;
+      }).immediate();
+    } finally { this.db.exec(`PRAGMA busy_timeout = ${previousWait}`); }
+  }
+
   private stripCopyContentHeld(
     identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
     options: { keepMetadata?: boolean } = {},
@@ -9017,15 +9081,16 @@ export class LocalConnectorStore {
    * goes. Best effort and cheap when nothing changed: a failure only keeps a
    * file longer.
    */
-  private releaseUnreferencedChunkMedia(): void {
-    if (!this.chunkMediaColumnsPresent || this.reclaimProcess) return;
+  private releaseUnreferencedChunkMedia(limit?: number): boolean {
+    if (!this.chunkMediaColumnsPresent) return true;
+    if (this.reclaimProcess) return false;
     try {
       // Page by page until the queue is empty: a bulk purge or strip can queue
       // far more than one page, and the store may be deleted right after.
       for (;;) {
-      const queued = this.db.query('SELECT media_sha256, media_path FROM chunk_media_releases LIMIT 1000')
-        .all() as Array<{ media_sha256: string; media_path: string }>;
-      if (queued.length === 0) break;
+      const queued = this.db.query('SELECT media_sha256, media_path FROM chunk_media_releases LIMIT ?')
+        .all(limit ?? 1000) as Array<{ media_sha256: string; media_path: string }>;
+      if (queued.length === 0) return true;
       for (const entry of queued) {
         const referenced = this.db.query('SELECT 1 AS present FROM chunks WHERE media_sha256 = ? LIMIT 1')
           .get(entry.media_sha256) as { present: number } | null;
@@ -9039,9 +9104,13 @@ export class LocalConnectorStore {
         }
         this.db.query('DELETE FROM chunk_media_releases WHERE media_sha256 = ?').run(entry.media_sha256);
       }
+      if (limit !== undefined) return !this.db.query('SELECT 1 FROM chunk_media_releases LIMIT 1').get();
       }
-    } catch {
+    } catch (error) {
+      // A bounded caller must report failure, rather than spin on the same page.
+      if (limit !== undefined) throw error;
       // Kept longer, never lost: the queue row stays for the next pass.
+      return false;
     }
   }
 

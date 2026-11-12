@@ -7,12 +7,16 @@ import { compareContentVersions } from './tier-content-purge.ts';
 import type { LocalConnectorStore } from './local-index.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 import { registeredTierSets } from './tier-set-registry.ts';
+import { withMainThreadSqlTiming } from './main-thread-sql-trace.ts';
 import { withIdleStoreReclaim } from '../../core/store-reclaim-admission.ts';
 import { SUPERSEDED_SWEEP_SLICE_MS, TIER_DOMAIN_ORDER } from './tiered-store-set.ts';
 
 const STATE = 'automatic-superseded-prune-v1';
-/** How often the engine's background takes a slice of each unfinished sweep: a 250 ms slice every 5 s. */
 export const SUPERSEDED_SWEEP_TICK_MS = 5_000;
+export const SUPERSEDED_SWEEP_IDLE_TICK_MS = 250;
+export const SUPERSEDED_SWEEP_IDLE_AFTER_MS = 60_000;
+/** The assumed Ask bar: a slice whose longest statement reaches it is always logged. */
+const SWEEP_LOG_STATEMENT_MS = 250;
 const PAGE_SIZE = 200;
 /** Passes one item may fail before the sweep steps past it and walks again later (#1412). */
 const MAX_ITEM_FAILURES = 3;
@@ -88,8 +92,8 @@ export async function reclaimAutomaticSupersededCopies(set: TieredStoreSet, recl
 }
 
 type SweepReport = { checked: number; purged: number; kept: number; failed: number; complete: boolean };
-/** Where one call's time went, for its log line. */
-type SliceTiming = { pruneMs: number; maxItemMs: number; cut: boolean };
+/** maxItemMs covers one generation-fenced bounded prune attempt, including its commits. */
+type SliceTiming = { pruneMs: number; maxItemMs: number; maxStatementMs: number; cut: boolean };
 
 /**
  * Bounded pages at worker startup and on maintenance ticks; a failed item
@@ -102,29 +106,33 @@ export function sweepAutomaticSupersededCopies(set: TieredStoreSet, options: {
   now?: () => number;
   embeddingLedger?: TierMoveOptions['embeddingLedger'];
 } = {}): SweepReport {
-  const now = options.now ?? Date.now;
-  const started = now();
-  const budget = options.budgetMs ?? 0;
-  // A budget is checked between items, not only between pages: one page of
-  // large items must not hold the thread for seconds.
-  const spent = budget > 0 ? () => now() - started >= budget : () => false;
-  const timing: SliceTiming = { pruneMs: 0, maxItemMs: 0, cut: false };
-  const total = sweepPage(set, options, spent, now, timing);
-  const limit = Math.max(1, Math.min(options.limit ?? PAGE_SIZE, PAGE_SIZE));
-  let last = total.checked;
-  while (budget > 0 && !total.complete && total.failed === 0 && !timing.cut
-    && last === limit && !spent()) {
-    const page = sweepPage(set, options, spent, now, timing);
-    total.checked += page.checked; total.purged += page.purged;
-    total.kept += page.kept; total.failed += page.failed;
-    total.complete = page.complete;
-    last = page.checked;
-  }
-  if (total.purged > 0 || total.failed > 0) {
-    console.info(`[tier-auto-prune] ledger=${set.ledger.ledgerId()} slice_ms=${now() - started} prune_ms=${timing.pruneMs}`
-      + ` max_item_ms=${timing.maxItemMs} checked=${total.checked} purged=${total.purged} complete=${total.complete}`);
-  }
-  return total;
+  const timing: SliceTiming = { pruneMs: 0, maxItemMs: 0, maxStatementMs: 0, cut: false };
+  return withMainThreadSqlTiming(timing, () => set.ledger.withoutBusyWait(() => {
+    const now = options.now ?? (() => performance.now());
+    const started = now();
+    const budget = options.budgetMs ?? 0;
+    // A budget is checked between items, not only between pages: one page of
+    // large items must not hold the thread for seconds.
+    const spent = budget > 0 ? () => now() - started >= budget : () => false;
+    const total = sweepPage(set, options, spent, now, timing);
+    const limit = Math.max(1, Math.min(options.limit ?? PAGE_SIZE, PAGE_SIZE));
+    let last = total.checked;
+    while (budget > 0 && !total.complete && total.failed === 0 && !timing.cut
+      && last === limit && !spent()) {
+      const page = sweepPage(set, options, spent, now, timing);
+      total.checked += page.checked; total.purged += page.purged;
+      total.kept += page.kept; total.failed += page.failed;
+      total.complete = page.complete;
+      last = page.checked;
+    }
+    // Fast idle ticks run four slices a second: log only slices that changed
+    // something (pruned, even part of an item) or crossed the Ask bar.
+    if (timing.pruneMs > 0 || total.purged > 0 || total.failed > 0 || timing.maxStatementMs >= SWEEP_LOG_STATEMENT_MS) {
+      console.info(`[tier-auto-prune] ledger=${set.ledger.ledgerId()} slice_ms=${now() - started} prune_ms=${timing.pruneMs}`
+        + ` max_item_ms=${timing.maxItemMs} checked=${total.checked} purged=${total.purged} complete=${total.complete} max_statement_ms=${timing.maxStatementMs.toFixed(3)}`);
+    }
+    return total;
+  }));
 }
 
 function sweepPage(set: TieredStoreSet, options: {
@@ -142,32 +150,41 @@ function sweepPage(set: TieredStoreSet, options: {
   const finishPending = (): void => {
     const pending = state.pending!;
     const itemStarted = now();
-    ledger.withGenerationFence(pending.identity, pending.generation, () => {
-      const current = ledger.getCurrent(pending.identity)!;
-      if (current.state === 'moving' || ledger.hasMovedMigrationProposal(pending.identity)) throw new Error('Placement or migration changed; retry cleanup later.');
-      for (const target of pending.copies) {
-        const copy = ledger.copies(pending.identity).find(copy => copy.corpusId === target.corpusId);
-        if (copy?.state !== 'superseded') continue;
-        const store = set.store(copy.trustDomain);
-        if (!store) throw new Error('Superseded store unavailable.');
-        store.bindTierSet(ledger);
-        // The receipt's original count survives a death after this separate
-        // store commit but before the ledger transaction below commits.
-        const pruneStarted = now();
-        pruneSupersededStoreCopy(store, pending.identity);
-        timing.pruneMs += now() - pruneStarted;
-        ledger.removeSupersededCopy(pending.identity, copy.corpusId);
-        const deleted = state.deleted ??= {};
-        deleted[copy.corpusId] = (deleted[copy.corpusId] ?? 0) + target.chunks;
-        report.purged++;
-      }
-      state.after = pending.identity;
-      if (state.parked) delete state.parked[tierLedgerIdentityKey(pending.identity)];
-      delete state.pending;
-      delete state.failing;
-      save();
-    });
-    timing.maxItemMs = Math.max(timing.maxItemMs, now() - itemStarted);
+    try {
+      ledger.withGenerationFence(pending.identity, pending.generation, () => {
+        const current = ledger.getCurrent(pending.identity)!;
+        if (current.state === 'moving' || ledger.hasMovedMigrationProposal(pending.identity)) throw new Error('Placement or migration changed; retry cleanup later.');
+        let stepped = false;
+        for (const target of pending.copies) {
+          const copy = ledger.copies(pending.identity).find(copy => copy.corpusId === target.corpusId);
+          if (copy?.state !== 'superseded') continue;
+          if (stepped && spent()) { save(); return; }
+          const store = set.store(copy.trustDomain);
+          if (!store) throw new Error('Superseded store unavailable.');
+          store.bindTierSet(ledger);
+          // The receipt's original count survives a death after this separate
+          // store commit but before the ledger transaction below commits.
+          const pruneStarted = now();
+          const done = pruneSupersededStoreCopy(store, pending.identity, { bounded: true });
+          timing.pruneMs += now() - pruneStarted;
+          stepped = true;
+          if (!done) { save(); return; }
+          ledger.removeSupersededCopy(pending.identity, copy.corpusId);
+          const deleted = state.deleted ??= {};
+          deleted[copy.corpusId] = (deleted[copy.corpusId] ?? 0) + target.chunks;
+          report.purged++;
+        }
+        state.after = pending.identity;
+        if (state.parked) delete state.parked[tierLedgerIdentityKey(pending.identity)];
+        delete state.pending;
+        delete state.failing;
+        save();
+      });
+    } finally { timing.maxItemMs = Math.max(timing.maxItemMs, now() - itemStarted); }
+  };
+  const drainPending = (): void => {
+    do { finishPending(); } while (state.pending && !spent());
+    if (state.pending) timing.cut = true;
   };
   let attempt: TierLedgerIdentity | undefined;
   try {
@@ -181,7 +198,8 @@ function sweepPage(set: TieredStoreSet, options: {
         state.after = state.pending.identity;
         delete state.pending;
         save();
-      } else finishPending();
+      } else drainPending();
+      if (timing.cut) return report;
     }
     if (report.checked === limit) return report;
     const rows = ledger.listSupersededItemWindow({ ...(state.after ? { after: state.after } : {}), limit: limit - report.checked });
@@ -239,8 +257,9 @@ function sweepPage(set: TieredStoreSet, options: {
         ledger.writeMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`, String(record.generation));
         save();
       });
-      if (state.pending) finishPending();
+      if (state.pending) drainPending();
       else { state.after = identity; delete state.failing; save(); }
+      if (timing.cut) break;
     }
     if (report.checked < limit && !timing.cut) {
       if (state.retry) { delete state.after; delete state.retry; save(); }
@@ -317,10 +336,17 @@ export function startSupersededSweepTicker(options: {
   active?: () => boolean;
   reclaimStore?: ReclaimStore;
   intervalMs?: number;
+  ownerQuestionEndedAt?: () => number | undefined;
+  now?: () => number;
   sets?: () => readonly TieredStoreSet[];
   /** Tests drive the tick themselves; returns a cancel function. */
   every?: (tick: () => void, ms: number) => () => void;
 } = {}): () => void {
+  const now = options.now ?? Date.now;
+  const started = now();
+  let interval = options.intervalMs ?? SUPERSEDED_SWEEP_TICK_MS;
+  let nextSet = 0;
+  let stopped = false;
   const finished = new WeakSet<TieredStoreSet>();
   const reclaiming = new WeakSet<TieredStoreSet>();
   const sets = options.sets ?? registeredTierSets;
@@ -329,17 +355,38 @@ export function startSupersededSweepTicker(options: {
     (timer as { unref?: () => void }).unref?.();
     return () => clearInterval(timer);
   });
-  return every(() => {
-    if (options.active && !options.active()) return;
-    for (const set of sets()) {
+  let cancel: () => void;
+  const tick = () => {
+    if (stopped) return;
+    const active = !options.active || options.active();
+    const idleSince = Math.max(started, options.ownerQuestionEndedAt?.() ?? started);
+    const cadence = options.intervalMs ?? (active && now() - idleSince >= SUPERSEDED_SWEEP_IDLE_AFTER_MS
+      ? SUPERSEDED_SWEEP_IDLE_TICK_MS : SUPERSEDED_SWEEP_TICK_MS);
+    if (cadence !== interval) {
+      cancel();
+      interval = cadence;
+      cancel = every(tick, interval);
+      // A new Ask may have begun and ended between fast ticks. Its end mark
+      // slows us immediately, without admitting an extra fast slice.
+      if (cadence === SUPERSEDED_SWEEP_TICK_MS) return;
+    }
+    if (!active) return;
+    const all = sets();
+    // One set per callback: several synchronous slices must not stack up in
+    // front of an Ask queued on the event loop. Round-robin prevents starvation.
+    for (let checked = 0; checked < all.length; checked++) {
+      const set = all[nextSet++ % all.length]!;
       if (finished.has(set) || reclaiming.has(set)) continue;
-      if (!set.sweepSupersededSlice()) continue;
+      if (!set.sweepSupersededSlice()) return;
       reclaiming.add(set);
       void reclaimAutomaticSupersededCopies(set, options.reclaimStore).then(done => {
         if (done) finished.add(set);
       }).catch(() => {
         // A closed/busy store or interrupted worker retains its durable intent.
       }).finally(() => { reclaiming.delete(set); });
+      return;
     }
-  }, options.intervalMs ?? SUPERSEDED_SWEEP_TICK_MS);
+  };
+  cancel = every(tick, interval);
+  return () => { stopped = true; cancel(); };
 }

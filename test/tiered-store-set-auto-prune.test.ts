@@ -4,7 +4,7 @@ import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { TierLedgerPurgedRollbackRefusedError } from '../src/workers/classification/tier-ledger.ts';
-import { moveTieredItem, flushTierMoveNotes } from '../src/workers/connector-store/tier-move.ts';
+import { moveTieredItem, flushTierMoveNotes, pruneSupersededStoreCopy, SUPERSEDED_PRUNE_STEP_ROWS } from '../src/workers/connector-store/tier-move.ts';
 import { reclaimAutomaticSupersededCopies, startSupersededSweepTicker, sweepAutomaticSupersededCopies } from '../src/workers/connector-store/tier-auto-prune-sweep.ts';
 import { withStoreReadPriority, storeOwnerIdleMs } from '../src/core/store-reclaim-admission.ts';
 import { SourceScheduler } from '../src/workers/source-scheduler.ts';
@@ -13,6 +13,7 @@ import { SUPERSEDED_SWEEP_SLICE_MS } from '../src/workers/connector-store/tiered
 import { createSourceAnswerTrace, runWithSourceAnswerTrace } from '../src/workers/source-index/answer-latency-trace.ts';
 import { readEmbeddingLedger } from '../src/workers/embedding-ledger.ts';
 import { createTestClock, flushMicrotasks, waitFor } from './helpers/test-clock.ts';
+import { createOwnerQuestionActivity } from '../src/workers/engine/runtime/source-answer-lanes.ts';
 import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
 
 const cleanup: Array<() => void> = [];
@@ -72,14 +73,14 @@ test('bounded sweep resumes its cursor, protects moved proposals, audits per cor
 
 test('interrupted sweep keeps original chunk counts and resumes on worker startup without duplicate invalidations', async () => {
   const ctx = await fixture();
-  const original = ctx.f.stores.secure_local!.stripCopyContent.bind(ctx.f.stores.secure_local!);
-  const failure = spyOn(ctx.f.stores.secure_local!, 'stripCopyContent').mockImplementation((...args) => {
+  const original = ctx.f.stores.secure_local!.pruneSupersededCopyStep.bind(ctx.f.stores.secure_local!);
+  const failure = spyOn(ctx.f.stores.secure_local!, 'pruneSupersededCopyStep').mockImplementation((...args) => {
     original(...args); throw new Error('crash after store commit');
   });
   try {
     expect(sweepAutomaticSupersededCopies(ctx.f.set, { limit: 1, embeddingLedger: ctx.embeddingLedger })).toMatchObject({ failed: 1, complete: false });
   } finally { failure.mockRestore(); }
-  expect(ctx.f.stores.secure_local!.copyContentState(identityOf('a'))?.chunks).toBe(0);
+  expect(ctx.f.stores.secure_local!.copyContentState(identityOf('a'))).toBeUndefined();
   ctx.reopen();
   // Maintenance no longer takes sweep slices (they run only on the ticker, which waits for owner questions).
   await ctx.f.set.repairLowerContent();
@@ -164,8 +165,8 @@ test('a receipt stepped past after repeated failures keeps its original chunk co
   const ctx = await fixture();
   const sweep = () => sweepAutomaticSupersededCopies(ctx.f.set, { limit: 1, embeddingLedger: ctx.embeddingLedger });
   const store = ctx.f.stores.secure_local!;
-  const original = store.stripCopyContent.bind(store);
-  const failure = spyOn(store, 'stripCopyContent').mockImplementation((...args) => {
+  const original = store.pruneSupersededCopyStep.bind(store);
+  const failure = spyOn(store, 'pruneSupersededCopyStep').mockImplementation((...args) => {
     original(...args); throw new Error('store commit then crash');
   });
   const warn = spyOn(console, 'warn').mockImplementation(() => {});
@@ -582,4 +583,183 @@ test('visibility publication, media release and digest backfill stand back durin
   const resumed = spyOn(internal, 'visibilityWrite');
   try { await internal.publishVisibility(); expect(resumed).toHaveBeenCalled(); }
   finally { resumed.mockRestore(); }
+});
+
+
+/** Many vectors per chunk exercise the otherwise unbounded ON DELETE CASCADE. */
+function fillLargeCopy(ctx: Awaited<ReturnType<typeof fixture>>, id: string, count: number): void {
+  const store = ctx.f.stores.secure_local!;
+  const internal = store as unknown as { db: Database; insertFtsRow(title: string, text: string, item: number, chunk: number): void };
+  const db = internal.db;
+  const row = db.query('SELECT item_pk FROM items WHERE provider_item_id = ?').get(id) as { item_pk: number };
+  db.transaction(() => {
+    const chunk = db.query(`INSERT INTO chunks(item_pk, chunk_index, bounded_text, content_hash, indexed_at, media_sha256, media_path)
+      VALUES (?, ?, ?, 'synthetic', '2026-11-12', ?, ?)`);
+    const vector = db.query(`INSERT INTO chunk_embeddings(chunk_pk, model_id, item_pk, content_hash, embedding, embedded_at)
+      VALUES (?, ?, ?, 'synthetic', zeroblob(3072), '2026-11-12')`);
+    for (let i = 1; i <= count; i++) {
+      const sha = `${id}${Math.floor(i / 32).toString(16).padStart(63, '0')}`;
+      const inserted = chunk.run(row.item_pk, i, text, sha, `/tmp/synthetic-cache/${sha}.jpg`);
+      const pk = Number(inserted.lastInsertRowid);
+      for (let model = 0; model < 3; model++) vector.run(pk, `synthetic-${model}`, row.item_pk);
+      internal.insertFtsRow('Orchard', text, row.item_pk, pk);
+      db.query(`INSERT INTO chunk_vector_digest(chunk_pk, model_id, item_pk, account_scope, digest) VALUES (?, 'synthetic-0', ?, 'personal', zeroblob(64))`).run(pk, row.item_pk);
+      db.query(`INSERT OR IGNORE INTO media_judgments(media_sha256, verdict, judge_id, judged_at) VALUES (?, 'ordinary', 'synthetic', '2026-11-12')`).run(sha);
+    }
+    db.query(`INSERT INTO item_text_versions(item_pk, source_version, recorded_at) VALUES (?, 'v1', '2026-11-12')`).run(row.item_pk);
+  })();
+}
+
+function copyRows(ctx: Awaited<ReturnType<typeof fixture>>, id: string): Record<string, number> {
+  const db = (ctx.f.stores.secure_local! as unknown as { db: Database }).db;
+  const item = (db.query('SELECT item_pk FROM items WHERE provider_item_id = ?').get(id) as { item_pk: number }).item_pk;
+  return { ...Object.fromEntries(['chunks', 'chunk_embeddings', 'chunk_vector_digest', 'connector_store_fts_rows', 'item_text_versions']
+    .map(table => [table, (db.query(`SELECT COUNT(*) AS n FROM ${table} WHERE item_pk = ?`).get(item) as { n: number }).n])),
+    media_judgments: (db.query('SELECT COUNT(*) AS n FROM media_judgments').get() as { n: number }).n,
+    chunk_media_releases: (db.query('SELECT COUNT(*) AS n FROM chunk_media_releases').get() as { n: number }).n,
+  };
+}
+
+test('a large copy is bounded per step, resumes its durable pending receipt after restart, and matches the original prune', async () => {
+  const ctx = await fixture();
+  const size = SUPERSEDED_PRUNE_STEP_ROWS * 4 + 7;
+  fillLargeCopy(ctx, 'a', size);
+  fillLargeCopy(ctx, 'c', size);
+  // The original all-at-once path supplies the final-state reference.
+  pruneSupersededStoreCopy(ctx.f.stores.secure_local!, identityOf('c'));
+  const info = spyOn(console, 'info').mockImplementation(() => {});
+  let steps = 0;
+  let slices = 0;
+  const slice = () => {
+    const store = ctx.f.stores.secure_local!;
+    const original = store.pruneSupersededCopyStep.bind(store);
+    const step = spyOn(store, 'pruneSupersededCopyStep').mockImplementation((identity, options) => {
+      expect(options.rowLimit).toBe(SUPERSEDED_PRUNE_STEP_ROWS);
+      const before = copyRows(ctx, 'a');
+      const done = original(identity, options);
+      const after = copyRows(ctx, 'a');
+      for (const table of Object.keys(before)) expect(before[table]! - after[table]!).toBeLessThanOrEqual(
+        table === 'media_judgments' || table === 'chunk_media_releases' ? 1 : SUPERSEDED_PRUNE_STEP_ROWS);
+      steps++;
+      ctx.clock.set(ctx.clock.now() + SUPERSEDED_SWEEP_SLICE_MS);
+      return done;
+    });
+    try {
+      slices++;
+      return sweepAutomaticSupersededCopies(ctx.f.set, { budgetMs: SUPERSEDED_SWEEP_SLICE_MS, now: ctx.clock.now, embeddingLedger: ctx.embeddingLedger });
+    } finally { step.mockRestore(); }
+  };
+  try {
+    expect(slice()).toMatchObject({ checked: 1, purged: 0, failed: 0, complete: false });
+    const pending = JSON.parse(ctx.f.ledger.readMeta('automatic-superseded-prune-v1')!).pending;
+    expect(pending.identity.providerItemId).toBe('a');
+    expect(pending.copies[0].chunks).toBe(size + 1);
+    expect(ctx.f.ledger.copies(identityOf('a')).some(copy => copy.state === 'superseded')).toBe(true);
+    ctx.reopen();
+    expect(JSON.parse(ctx.f.ledger.readMeta('automatic-superseded-prune-v1')!).pending).toEqual(pending);
+    while (ctx.f.ledger.copies(identityOf('a')).some(copy => copy.state === 'superseded')) {
+      expect(slices).toBeLessThan(100);
+      expect(slice().failed).toBe(0);
+    }
+    expect(steps).toBeGreaterThan(4);
+    expect(slices).toBe(steps);
+    expect(copyRows(ctx, 'a')).toEqual(copyRows(ctx, 'c'));
+    const db = (ctx.f.stores.secure_local! as unknown as { db: Database }).db;
+    const final = (id: string) => db.query(`SELECT tombstoned, title, search_text, locator_uri, sender_id, sender_label,
+      sender_is_owner, reactions_json, authored_at, updated_at, source_version, trust_tier FROM items WHERE provider_item_id = ?`).get(id);
+    expect(final('a')).toEqual(final('c'));
+    expect(db.query('SELECT 1 FROM chunk_media_releases LIMIT 1').get()).toBeNull();
+    expect(db.query('SELECT 1 FROM media_judgments LIMIT 1').get()).toBeNull();
+    expect(db.query('PRAGMA foreign_key_check').all()).toEqual([]);
+    expect(db.query('PRAGMA quick_check').get()).toEqual({ quick_check: 'ok' });
+    const lines = info.mock.calls.map(([line]) => String(line));
+    expect(lines.filter(line => line.includes('max_statement_ms=')).length).toBe(slices);
+    expect(lines.every(line => /slice_ms=100 .*max_item_ms=100 .*max_statement_ms=[0-9.]+/.test(line))).toBe(true);
+    expect(sweepAutomaticSupersededCopies(ctx.f.set, { embeddingLedger: ctx.embeddingLedger }).complete).toBe(true);
+    await flushTierMoveNotes(ctx.f.ledger);
+    const audit = (await readEmbeddingLedger(ctx.embeddingLedger.path)).entries.filter(entry => entry.entry_id?.startsWith('automatic-superseded-prune:'));
+    expect(audit).toHaveLength(1);
+    expect(audit[0]?.scope?.chunks?.[CORPORA.secure_local]).toBe(size + 1);
+  } finally { info.mockRestore(); }
+}, 150_000);
+
+test('an Ask queued mid-slice waits only for the budget plus one bounded step', async () => {
+  const ctx = await fixture();
+  fillLargeCopy(ctx, 'a', SUPERSEDED_PRUNE_STEP_ROWS * 4);
+  const clock = createTestClock();
+  const owner = createOwnerQuestionActivity(undefined, clock.now);
+  const store = ctx.f.stores.secure_local!;
+  const original = store.pruneSupersededCopyStep.bind(store);
+  let steps = 0;
+  const step = spyOn(store, 'pruneSupersededCopyStep').mockImplementation((...args) => {
+    const result = original(...args);
+    steps++;
+    clock.set(clock.now() + 75);
+    return result;
+  });
+  const started = clock.now();
+  let admittedAt = 0;
+  let release: (() => void) | undefined;
+  let result: ReturnType<typeof sweepAutomaticSupersededCopies> | undefined;
+  clock.setTimeout(() => { result = sweepAutomaticSupersededCopies(ctx.f.set, {
+    budgetMs: SUPERSEDED_SWEEP_SLICE_MS, now: clock.now, embeddingLedger: ctx.embeddingLedger,
+  }); }, 0);
+  clock.setTimeout(() => { admittedAt = clock.now(); release = owner.begin(); }, 1);
+  try {
+    await clock.advanceToNext(); // synchronous slice finishes before the queued Ask can run
+    expect(steps).toBe(2);
+    expect(result).toMatchObject({ complete: false, purged: 0, failed: 0 });
+    await clock.advanceToNext();
+    expect(admittedAt - started).toBe(150);
+    expect(admittedAt - (started + 1)).toBeLessThan(250);
+    expect(owner.busy).toBe(true);
+    expect(JSON.parse(ctx.f.ledger.readMeta('automatic-superseded-prune-v1')!).pending).toBeDefined();
+  } finally { release?.(); step.mockRestore(); }
+}, 150_000);
+
+
+test('partial cleanup of a second superseded copy persists the first copy audit across restart', async () => {
+  const ctx = await fixture();
+  const identity = identityOf('a');
+  await moveTieredItem({ set: ctx.f.set, identity, decision: { ...low, metadataTier: 'public', contentTier: 'public' } });
+  const copies = ctx.f.ledger.copies(identity).filter(copy => copy.state === 'superseded');
+  expect(copies).toHaveLength(2);
+  const second = ctx.f.set.store(copies[1]!.trustDomain)!;
+  const unfinished = spyOn(second, 'pruneSupersededCopyStep').mockImplementation(() => {
+    ctx.clock.set(ctx.clock.now() + SUPERSEDED_SWEEP_SLICE_MS);
+    return false;
+  });
+  try {
+    expect(sweepAutomaticSupersededCopies(ctx.f.set, { budgetMs: SUPERSEDED_SWEEP_SLICE_MS, now: ctx.clock.now,
+      embeddingLedger: ctx.embeddingLedger })).toMatchObject({ purged: 1, complete: false, failed: 0 });
+    const state = JSON.parse(ctx.f.ledger.readMeta('automatic-superseded-prune-v1')!);
+    expect(state.pending.identity.providerItemId).toBe('a');
+    expect(state.deleted[copies[0]!.corpusId]).toBe(1);
+    expect(ctx.f.ledger.copies(identity).some(copy => copy.corpusId === copies[0]!.corpusId)).toBe(false);
+  } finally { unfinished.mockRestore(); }
+  ctx.reopen();
+  expect(sweepAutomaticSupersededCopies(ctx.f.set, { embeddingLedger: ctx.embeddingLedger }).complete).toBe(true);
+  await flushTierMoveNotes(ctx.f.ledger);
+  const audit = (await readEmbeddingLedger(ctx.embeddingLedger.path)).entries.filter(entry => entry.entry_id?.startsWith('automatic-superseded-prune:'));
+  expect(audit).toHaveLength(2);
+  const counts = Object.assign({}, ...audit.map(entry => entry.scope?.chunks));
+  expect(counts).toEqual({ [CORPORA.internal]: 1, [CORPORA.secure_local]: 2 });
+});
+
+test('sweep ledger and store lock contention retry without busy waits and restore connection settings', async () => {
+  const ctx = await fixture();
+  const ledgerDb = (ctx.f.ledger as unknown as { db: Database }).db;
+  const storeDb = (ctx.f.stores.secure_local! as unknown as { db: Database }).db;
+  for (const path of [ctx.f.ledger.dbPath, ctx.f.paths.secure_local]) {
+    const blocker = new Database(path);
+    blocker.exec('PRAGMA busy_timeout = 0; BEGIN IMMEDIATE;');
+    try {
+      expect(sweepAutomaticSupersededCopies(ctx.f.set, { embeddingLedger: ctx.embeddingLedger }))
+        .toMatchObject({ failed: 1, complete: false, purged: 0 });
+      expect(ctx.f.stores.secure_local!.copyContentState(identityOf('a'))?.chunks).toBe(1);
+      expect(ledgerDb.query('PRAGMA busy_timeout').get()).toEqual({ timeout: 10000 });
+      expect(storeDb.query('PRAGMA busy_timeout').get()).toEqual({ timeout: 10000 });
+    } finally { blocker.exec('ROLLBACK'); blocker.close(); }
+  }
+  expect(sweepAutomaticSupersededCopies(ctx.f.set, { embeddingLedger: ctx.embeddingLedger }).complete).toBe(true);
 });

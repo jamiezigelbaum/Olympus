@@ -21264,6 +21264,7 @@ var init_tier_auto_prune_sweep = __esm(() => {
   init_embedding_ledger();
   init_tier_move();
   init_tier_content_purge();
+  init_main_thread_sql_trace();
   init_store_reclaim_admission();
   init_tiered_store_set();
   RECLAIM_MAX_RETAINED_FREE_BYTES = 64 * 1024 * 1024;

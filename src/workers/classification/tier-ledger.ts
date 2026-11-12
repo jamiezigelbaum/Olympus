@@ -2325,6 +2325,14 @@ export class TierLedger {
       .all(prefix, `${prefix}\uffff`, options.after ?? '', options.limit ?? -1) as Array<{ key: string; value: string }>;
   }
 
+  /** Background cleanup retries lock contention on its next slice, without stalling an Ask. */
+  withoutBusyWait<T>(work: () => T): T {
+    const previous = (this.db.query('PRAGMA busy_timeout').get() as { timeout: number }).timeout;
+    this.db.exec('PRAGMA busy_timeout = 0');
+    try { return work(); }
+    finally { this.db.exec(`PRAGMA busy_timeout = ${previous}`); }
+  }
+
   /** Hold the ledger write lock across a synchronous cross-store cleanup.
    * The generation check and deletions cannot race a new routing decision.
    */

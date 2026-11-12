@@ -18,11 +18,28 @@ const TIMED = '__olympusMainThreadSqlTimed';
 const STATEMENT_METHODS = ['all', 'get', 'run', 'values'] as const;
 const SITE_FRAMES = 3;
 let installed = false;
+let sliceTiming: { maxStatementMs: number } | undefined;
+
+/** Synchronous scope: also measures ledger, proof reads and store commits in a sweep. */
+export function withMainThreadSqlTiming<T>(timing: { maxStatementMs: number }, work: () => T): T {
+  installMainThreadSqlTrace();
+  const previous = sliceTiming;
+  sliceTiming = timing;
+  try { return work(); }
+  finally { sliceTiming = previous; }
+}
 
 /** Instruments Database statements on this thread once; a no-op on a worker thread. */
 export function installMainThreadSqlTrace(): void {
   if (installed || !isMainThread) return;
   installed = true;
+  const exec = Database.prototype.exec;
+  Database.prototype.exec = function (...args: Parameters<typeof exec>) {
+    if (!sliceTiming) return exec.apply(this, args);
+    const started = performance.now();
+    try { return exec.apply(this, args); }
+    finally { sliceTiming.maxStatementMs = Math.max(sliceTiming.maxStatementMs, performance.now() - started); }
+  };
   for (const name of ['query', 'prepare'] as const) {
     const original = Database.prototype[name] as (this: Database, ...args: unknown[]) => unknown;
     (Database.prototype as unknown as Record<string, unknown>)[name] = function (this: Database, ...args: unknown[]) {
@@ -38,12 +55,15 @@ function timeStatement<T>(statement: T): T {
     const call = held[method];
     if (typeof call !== 'function') continue;
     held[method] = function (this: unknown, ...args: unknown[]) {
-      if (!sourceAnswerTraceActive()) return call.apply(this, args);
+      const answer = sourceAnswerTraceActive();
+      if (!answer && !sliceTiming) return call.apply(this, args);
       const started = performance.now();
       try {
         return call.apply(this, args);
       } finally {
-        recordSourceAnswerMainThreadSql(performance.now() - started, callSite);
+        const ms = performance.now() - started;
+        if (sliceTiming) sliceTiming.maxStatementMs = Math.max(sliceTiming.maxStatementMs, ms);
+        if (answer) recordSourceAnswerMainThreadSql(ms, callSite);
       }
     };
   }
