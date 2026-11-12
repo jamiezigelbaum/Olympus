@@ -298,9 +298,9 @@ function acquireFileLeaseSync(targetPath, options) {
 function openSqlite(path) {
   if (typeof globalThis.Bun !== "undefined") {
     const { Database } = runtimeRequire("bun:sqlite");
-    const connection2 = new Database(path);
-    connection2.exec("PRAGMA busy_timeout = 0");
-    return connection2;
+    const connection = new Database(path);
+    connection.exec("PRAGMA busy_timeout = 0");
+    return connection;
   }
   const { DatabaseSync } = runtimeRequire("node:sqlite");
   const connection = new DatabaseSync(path);
@@ -717,8 +717,8 @@ class ControlPathHeadroom {
     this.lagRestThresholdMs = options.lagRestThresholdMs ?? CONTROL_PATH_LAG_REST_THRESHOLD_MS;
     this.restMs = options.restMs ?? CONTROL_PATH_REST_MS;
     this.now = options.now ?? (() => performance.now());
-    this.turn = options.turn ?? ((ms) => new Promise((resolve4) => {
-      setTimeout(resolve4, ms);
+    this.turn = options.turn ?? ((ms) => new Promise((resolve) => {
+      setTimeout(resolve, ms);
     }));
     this.log = options.log ?? ((line) => console.error(line));
     this.freezeLogMs = options.freezeLogMs ?? CONTROL_PATH_FREEZE_LOG_MS;
@@ -932,7 +932,7 @@ async function downloadPinnedFile(options) {
         controller.abort();
       }
       if (retry)
-        await new Promise((resolve4) => setTimeout(resolve4, RETRY_DELAY_MS * 2 ** (retries - 1)));
+        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS * 2 ** (retries - 1)));
     }
     close();
     if (received !== expectedBytes || hash.digest(encoding) !== options.digest) {
@@ -1046,7 +1046,7 @@ class ModelThread {
     if (options.signal?.aborted)
       return Promise.reject(cancelled());
     const id = this.nextId++;
-    return new Promise((resolve4, reject) => {
+    return new Promise((resolve, reject) => {
       const abort = () => this.worker.postMessage({ cancel: id });
       const timer = setTimeout(() => {
         abort();
@@ -1061,7 +1061,7 @@ class ModelThread {
         options.signal?.removeEventListener("abort", abort);
       };
       options.signal?.addEventListener("abort", abort, { once: true });
-      this.pending.set(id, { resolve: (result) => resolve4(result), reject, cleanup, progress: options.progress, log: options.log });
+      this.pending.set(id, { resolve: (result) => resolve(result), reject, cleanup, progress: options.progress, log: options.log });
       this.worker.ref();
       try {
         this.worker.postMessage({ id, request });
@@ -1246,8 +1246,8 @@ var SERVER_BINARY = "llama-server";
 class BuiltInReasoningInstallError extends Error {
   reason;
   shortfall;
-  constructor(reason, message2, shortfall) {
-    super(message2);
+  constructor(reason, message, shortfall) {
+    super(message);
     this.name = "BuiltInReasoningInstallError";
     this.reason = reason;
     this.shortfall = shortfall;
@@ -1500,7 +1500,7 @@ async function installRuntime(fetchImpl, runtimeDir, archive, reporter, extract,
   }
 }
 function extractWithTar(archivePath, targetDir) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve, reject) => {
     const child = spawn("tar", ["-xzf", archivePath, "-C", targetDir], { stdio: ["ignore", "ignore", "pipe"] });
     let stderr = "";
     child.stderr?.on("data", (chunk) => {
@@ -1518,7 +1518,7 @@ function extractWithTar(archivePath, targetDir) {
     child.on("close", (status, signal) => {
       clearTimeout(timer);
       if (status === 0)
-        resolve4();
+        resolve();
       else
         reject(new Error(stderr.trim() || `tar exited with ${status ?? signal}`));
     });
@@ -1532,10 +1532,10 @@ function locateFile(root, name, depth = 0, prefix = "") {
     return;
   }
   if (entries.includes(name)) {
-    const relative4 = prefix ? `${prefix}/${name}` : name;
+    const relative = prefix ? `${prefix}/${name}` : name;
     try {
-      if (statSync2(join6(root, relative4)).isFile())
-        return relative4;
+      if (statSync2(join6(root, relative)).isFile())
+        return relative;
     } catch {}
   }
   if (depth >= 2)
@@ -1568,7 +1568,7 @@ async function downloadVerified(fetchImpl, url, target, expectedBytes, expectedS
     stallMs,
     verifyTimeoutMs: VERIFY_TIMEOUT_MS,
     keepPartial: true,
-    error: (reason, message2) => new BuiltInReasoningInstallError(reason, message2),
+    error: (reason, message) => new BuiltInReasoningInstallError(reason, message),
     diskError: (error) => isNoSpaceError(error) ? spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname7(target)) ?? 0, "the disk filled up during the download") : new BuiltInReasoningInstallError("disk_write_failed", `Could not write the download: ${String(error)}`),
     write: space.write,
     onStart: () => reporter.set("downloading", label),
@@ -1576,7 +1576,7 @@ async function downloadVerified(fetchImpl, url, target, expectedBytes, expectedS
   });
 }
 function hashInto(path, hash, timeoutMs, onProgress) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve, reject) => {
     let done = 0;
     let settled = false;
     const stream = createReadStream2(path);
@@ -1589,7 +1589,7 @@ function hashInto(path, hash, timeoutMs, onProgress) {
         stream.destroy();
         reject(error);
       } else {
-        resolve4();
+        resolve();
       }
     };
     const timer = setTimeout(() => finish(new BuiltInReasoningInstallError("checksum_mismatch", `Checking ${path} did not finish within ${Math.round(timeoutMs / 60000)} min.`)), timeoutMs);
@@ -1614,7 +1614,7 @@ async function withInstallLock(lockPath, waitMs, refreshMs, noun, run) {
     if (Date.now() > deadline) {
       throw new BuiltInReasoningInstallError("download_failed", `Another Olympus process is still installing the ${noun}.`);
     }
-    await new Promise((resolve4) => setTimeout(resolve4, LOCK_POLL_MS));
+    await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS));
   }
   const refresh = setInterval(() => refreshLock(lockPath, token), refreshMs);
   refresh.unref?.();
@@ -1731,12 +1731,12 @@ class ProgressReporter {
     this.status = { ...rest, state, label, percent };
     this.emit(true);
   }
-  fail(reason, message2, shortfall) {
+  fail(reason, message, shortfall) {
     this.status = {
       ...this.status,
       state: "failed",
       label: reason === "insufficient_space" ? `Waiting for free disk space to download the ${this.noun}` : `The ${this.noun} could not be installed`,
-      failure: { reason, message: message2, ...shortfall ?? {} }
+      failure: { reason, message, ...shortfall ?? {} }
     };
     this.emit(true);
   }
@@ -1863,12 +1863,12 @@ function readOwnerConfigFile(path) {
   }
   return { status: "ok", text, stamp };
 }
-function stampOf(stat2) {
-  return `${stat2.ino}:${stat2.size}:${stat2.mtimeMs}:${stat2.ctimeMs}`;
+function stampOf(stat) {
+  return `${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
 }
-function ownedByThisUser(stat2) {
+function ownedByThisUser(stat) {
   const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
-  return uid === undefined || stat2.uid === uid;
+  return uid === undefined || stat.uid === uid;
 }
 
 // src/core/zkapi-consult-settings.ts
@@ -1880,8 +1880,8 @@ import { isIP } from "node:net";
 class OperationError extends Error {
   code;
   suggestion;
-  constructor(code, message2, suggestion) {
-    super(message2);
+  constructor(code, message, suggestion) {
+    super(message);
     this.name = "OperationError";
     this.code = code;
     this.suggestion = suggestion;
@@ -1945,8 +1945,8 @@ function refreshZkapiPortsFromPolicyFile(env = process.env) {
   }
   let stamp;
   try {
-    const stat2 = statSync4(path);
-    stamp = `${path}:${stat2.dev}:${stat2.ino}:${stat2.size}:${stat2.mtimeMs}:${stat2.ctimeMs}`;
+    const stat = statSync4(path);
+    stamp = `${path}:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
   } catch (error) {
     if (error.code === "ENOENT") {
       policyFile.seen = `${path}:absent`;
@@ -2057,8 +2057,8 @@ async function defaultLookupAll(hostname) {
 
 class ZkapiDaemonEndpointRefusal extends OperationError {
   reason;
-  constructor(reason, message2, policyPath) {
-    super("config_error", message2, refusalSuggestion(reason, policyPath));
+  constructor(reason, message, policyPath) {
+    super("config_error", message, refusalSuggestion(reason, policyPath));
     this.name = "ZkapiDaemonEndpointRefusal";
     this.reason = reason;
   }
@@ -2164,9 +2164,9 @@ function isRedirectResponse(response) {
 }
 function discardBody(response) {
   try {
-    const cancelled2 = response.body?.cancel();
-    if (cancelled2 && typeof cancelled2.catch === "function") {
-      cancelled2.catch(() => {
+    const cancelled = response.body?.cancel();
+    if (cancelled && typeof cancelled.catch === "function") {
+      cancelled.catch(() => {
         return;
       });
     }
@@ -2186,22 +2186,22 @@ function isFetchRedirectRefusal(error) {
 
 // src/workers/source-index/built-in-reasoning/server.ts
 class LlamaServerStartError extends Error {
-  constructor(message2) {
-    super(message2);
+  constructor(message) {
+    super(message);
     this.name = "LlamaServerStartError";
   }
 }
 
 class LlamaServerStillExitingError extends LlamaServerStartError {
-  constructor(message2) {
-    super(message2);
+  constructor(message) {
+    super(message);
     this.name = "LlamaServerStillExitingError";
   }
 }
 
 class LlamaServerStopError extends Error {
-  constructor(message2) {
-    super(message2);
+  constructor(message) {
+    super(message);
     this.name = "LlamaServerStopError";
   }
 }
@@ -2469,7 +2469,7 @@ function createLlamaServerHandle(launch, options = {}) {
       if (Date.now() > deadline) {
         fail(new LlamaServerStartError(`The built-in model server did not load within ${Math.round(launch.startupTimeoutMs / 1000)}s.`));
       }
-      await new Promise((resolve4) => setTimeout(resolve4, HEALTH_POLL_MS));
+      await new Promise((resolve) => setTimeout(resolve, HEALTH_POLL_MS));
     }
     if (current !== spawned || spawned.exited) {
       throw new LlamaServerStartError(STOPPED_WHILE_STARTING);
@@ -2489,9 +2489,9 @@ function createLlamaServerHandle(launch, options = {}) {
         return endpoint;
       const callerGeneration = generation;
       while (starting?.controller.signal.aborted) {
-        const cancelled2 = starting;
+        const cancelled = starting;
         try {
-          await abortable(cancelled2.promise.then(() => {
+          await abortable(cancelled.promise.then(() => {
             return;
           }, () => {
             return;
@@ -2501,39 +2501,39 @@ function createLlamaServerHandle(launch, options = {}) {
         }
         if (generation !== callerGeneration)
           throw new LlamaServerStartError(STOPPED_WHILE_STARTING);
-        if (starting === cancelled2)
+        if (starting === cancelled)
           starting = undefined;
         if (endpoint && current && !current.exited)
           return endpoint;
       }
       if (!starting) {
         const controller = new AbortController;
-        const shared3 = {
+        const shared = {
           controller,
           waiters: 0,
           promise: start(generation, controller.signal).finally(() => {
-            if (starting === shared3)
+            if (starting === shared)
               starting = undefined;
           })
         };
-        shared3.promise.catch(() => {
+        shared.promise.catch(() => {
           return;
         });
-        starting = shared3;
+        starting = shared;
       }
-      const shared2 = starting;
+      const shared = starting;
       if (!signal) {
-        shared2.waiters = Number.POSITIVE_INFINITY;
-        return shared2.promise;
+        shared.waiters = Number.POSITIVE_INFINITY;
+        return shared.promise;
       }
-      shared2.waiters += 1;
+      shared.waiters += 1;
       try {
-        return await abortable(shared2.promise, signal);
+        return await abortable(shared.promise, signal);
       } catch (error) {
         if (signal.aborted) {
-          shared2.waiters -= 1;
-          if (shared2.waiters <= 0)
-            shared2.controller.abort(signal.reason);
+          shared.waiters -= 1;
+          if (shared.waiters <= 0)
+            shared.controller.abort(signal.reason);
           throw callerCancelled(signal.reason);
         }
         throw error;
@@ -2580,11 +2580,11 @@ function trackServerProcess(child, tokenDir, onExit) {
     waitExit(timeoutMs) {
       if (exited)
         return Promise.resolve(true);
-      return new Promise((resolve4) => {
+      return new Promise((resolve) => {
         const settle = (value) => {
           clearTimeout(timer);
           exitWaiters.delete(onExited);
-          resolve4(value);
+          resolve(value);
         };
         const onExited = () => settle(true);
         const timer = setTimeout(() => settle(false), timeoutMs);
@@ -2627,12 +2627,12 @@ function abortable(promise, signal) {
     return promise;
   if (signal.aborted)
     return Promise.reject(signal.reason);
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve, reject) => {
     const onAbort = () => reject(signal.reason);
     signal.addEventListener("abort", onAbort, { once: true });
     promise.then((value) => {
       signal.removeEventListener("abort", onAbort);
-      resolve4(value);
+      resolve(value);
     }, (error) => {
       signal.removeEventListener("abort", onAbort);
       reject(error);
@@ -2669,14 +2669,14 @@ async function servesAlias(fetchImpl, baseUrl, token, alias) {
   }
 }
 function freeLoopbackPort() {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve, reject) => {
     const server = createServer();
     server.unref();
     server.on("error", reject);
     server.listen(0, "127.0.0.1", () => {
       const address = server.address();
       const port = typeof address === "object" && address ? address.port : 0;
-      server.close(() => port > 0 ? resolve4(port) : reject(new LlamaServerStartError("No free loopback port.")));
+      server.close(() => port > 0 ? resolve(port) : reject(new LlamaServerStartError("No free loopback port.")));
     });
   });
 }
@@ -2691,8 +2691,8 @@ var port = parentPort;
 var handles = new Map;
 var controllers = new Map;
 var send = (reply) => port.postMessage(reply);
-port.on("message", async (message2) => {
-  if (message2.shutdown) {
+port.on("message", async (message) => {
+  if (message.shutdown) {
     try {
       await Promise.all([...handles.values()].map((handle) => handle.stop()));
     } finally {
@@ -2701,11 +2701,11 @@ port.on("message", async (message2) => {
     }
     return;
   }
-  if (message2.cancel !== undefined) {
-    controllers.get(message2.cancel)?.abort();
+  if (message.cancel !== undefined) {
+    controllers.get(message.cancel)?.abort();
     return;
   }
-  const { id, request } = message2;
+  const { id, request } = message;
   const controller = new AbortController;
   controllers.set(id, controller);
   try {
