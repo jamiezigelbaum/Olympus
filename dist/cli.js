@@ -36199,7 +36199,7 @@ function sourceIndexChunkTermScore(text2, termGroups) {
   const normalized = text2.toLowerCase();
   return termGroups.reduce((score, group) => score + Math.max(0, ...group.map((term) => termOccurrences(normalized, term.toLowerCase()).length)), 0);
 }
-function boundedSourceIndexChunks(texts, maxChars, termGroups) {
+function boundedSourceIndexChunks(texts, maxChars, termGroups, preferredStarts) {
   const distinctTexts = [...new Set(texts.map((text2) => text2.trim()).filter(Boolean))];
   const chunks = [];
   let remaining = maxChars !== undefined && maxChars > 0 ? maxChars : Number.POSITIVE_INFINITY;
@@ -36209,7 +36209,7 @@ function boundedSourceIndexChunks(texts, maxChars, termGroups) {
       return { chunks, truncated: true };
     const text2 = distinctTexts[index];
     const fairShare = Number.isFinite(remaining) ? Math.max(1, Math.floor(remaining / (distinctTexts.length - index))) : undefined;
-    const snippet = sourceIndexChunkSnippet(text2, termGroups, fairShare);
+    const snippet = sourceIndexChunkSnippet(text2, termGroups, fairShare, preferredStarts?.[index]);
     if (!snippet)
       continue;
     const included = snippet.length > remaining ? snippet.slice(0, remaining) : snippet;
@@ -36220,9 +36220,11 @@ function boundedSourceIndexChunks(texts, maxChars, termGroups) {
   }
   return { chunks, truncated };
 }
-function sourceIndexChunkSnippet(text2, termGroups, maxChars) {
+function sourceIndexChunkSnippet(text2, termGroups, maxChars, preferredStart) {
   if (maxChars === undefined || maxChars <= 0 || text2.length <= maxChars)
     return text2;
+  if (preferredStart !== undefined && Number.isFinite(preferredStart))
+    return sourceIndexChunkWindow(text2, preferredStart, maxChars);
   const lower = text2.toLowerCase();
   const normalizedGroups = termGroups.map((group) => [...new Set(group.map((term) => term.toLowerCase()).filter(Boolean))]).filter((group) => group.length > 0);
   const occurrences = normalizedGroups.flatMap((group) => group.flatMap((term) => termOccurrences(lower, term)));
@@ -36263,6 +36265,17 @@ function compactPassageWhitespace(text2) {
 `).replace(/[^\S\n]{2,}/g, " ").replace(/\n{3,}/g, `
 
 `);
+}
+function sourceIndexChunkWindow(text2, preferredStart, maxChars) {
+  let start = Math.min(Math.max(0, Math.floor(preferredStart)), Math.max(0, text2.length - maxChars));
+  const low = (index) => text2.charCodeAt(index) >= 56320 && text2.charCodeAt(index) <= 57343;
+  if (low(start))
+    start++;
+  let end = Math.min(text2.length, start + Math.max(0, Math.floor(maxChars)));
+  const last = text2.charCodeAt(end - 1);
+  if (end > start && last >= 55296 && last <= 56319)
+    end--;
+  return text2.slice(start, end);
 }
 var CHUNK_WINDOW_PROSE_TERMS;
 var init_chunk_selection = __esm(() => {
@@ -38462,9 +38475,30 @@ function createConnectorStoreContentProvider(options) {
         }
         const metadataOnlyRuleId = content.storedChunks === 0 ? store.metadataOnlyRuleForLocator(content.locatorUri) : undefined;
         const coverageGaps = connectorStoreCoverageGaps(content, metadataOnlyRuleId);
+        let windowPlacement;
+        if (content.truncated && content.windowTexts && content.windowTexts.length > 1) {
+          const privateProvider = embeddingProvider && isApprovedSecureSourceEmbeddingProvider(embeddingProvider) && (store.trustDomain !== "secure_local" || embeddingProvider.backend === "local") ? embeddingProvider : undefined;
+          const scoreWindows = privateProvider ? async (query, windows, signal) => {
+            assertConnectorStoreEmbeddingProvider(store.trustDomain, privateProvider);
+            privateProvider.assertBindingCurrent?.();
+            const queryEmbedding = vector ?? (await privateProvider.embed([{ text: query }], { taskType: "RETRIEVAL_QUERY" }))[0];
+            if (signal.aborted)
+              throw new Error("Window placement deadline");
+            if (!queryEmbedding || queryEmbedding.length !== privateProvider.dimension || !queryEmbedding.every(Number.isFinite)) {
+              throw new Error("Invalid query embedding");
+            }
+            const embeddings = await privateProvider.embed(windows.map((text2) => ({ text: text2 })), { taskType: "RETRIEVAL_DOCUMENT" });
+            if (embeddings.length !== windows.length || embeddings.some((value) => value.length !== queryEmbedding.length || !value.every(Number.isFinite))) {
+              throw new Error("Invalid window embeddings");
+            }
+            return embeddings.map((value) => cosineSimilarity(queryEmbedding, value));
+          } : undefined;
+          windowPlacement = { texts: content.windowTexts, ...scoreWindows ? { scoreWindows } : {} };
+        }
         return {
           sensitivity: buildSourceSensitivity({ trustTier: content.trustTier, trustDomain: store.trustDomain }),
           chunks: content.chunks,
+          ...windowPlacement ? { windowPlacement } : {},
           ...content.truncated ? { truncated: true } : {},
           ...coverageGaps.length > 0 ? { coverageGaps } : {},
           ...metadataOnlyRuleId !== undefined ? { namesOnly: true } : {},
@@ -39005,7 +39039,11 @@ function selectEvidencePassages(chunks, maxChars, focus, context2 = {}) {
       ...scored.map((entry) => entry.index)
     ].slice(0, Math.max(1, Math.floor(focus.maxPassages ?? MAX_PASSAGES_PER_CANDIDATE)));
     const bounded = boundedSourceIndexChunks(picked.sort((left, right) => left - right).map((index) => chunks[index]), maxChars, termGroups);
-    return { chunks: bounded.chunks, truncated: picked.length < chunks.length || bounded.truncated };
+    return {
+      chunks: bounded.chunks,
+      truncated: picked.length < chunks.length || bounded.truncated,
+      windowTexts: [...new Set(picked.map((index) => chunks[index].trim()).filter(Boolean))].slice(0, bounded.chunks.length)
+    };
   }
   const ranked = chunks.map((_, index) => index).sort((left, right) => (left === anchor ? -1 : right === anchor ? 1 : 0) || relevance(right) - relevance(left) || left - right);
   const kept = new Map;
@@ -39033,6 +39071,7 @@ function selectEvidencePassages(chunks, maxChars, focus, context2 = {}) {
   const ordered = [...kept.entries()].sort(([left], [right]) => left - right);
   return {
     chunks: ordered.map(([, text2]) => text2),
+    windowTexts: ordered.map(([index]) => chunks[index]),
     truncated: ordered.length < chunks.length || ordered.some(([index, text2]) => text2.length < chunks[index].length)
   };
 }
@@ -47749,12 +47788,13 @@ ${parentKey(ref)}`, { ref, origin });
         const vector = decodeEmbedding(chunk.embedding);
         return vector.length === queryVector.length ? cosineSimilarity(queryVector, vector) : undefined;
       }) : undefined;
-      const { chunks, truncated } = selectEvidencePassages(chunkRows.map((chunk) => compactPassageWhitespace(chunk.bounded_text)), maxChars, passageFocus, { title: row.title, ...relevance ? { relevance } : {} });
+      const { chunks, truncated, windowTexts } = selectEvidencePassages(chunkRows.map((chunk) => compactPassageWhitespace(chunk.bounded_text)), maxChars, passageFocus, { title: row.title, ...relevance ? { relevance } : {} });
       const reactionLine = servesContent ? renderSourceReactionLine(parseStoredSourceReactions(row.reactions_json)) : undefined;
       return {
         trustTier: trustTierFromRow(row.trust_tier),
         chunks: reactionLine ? [reactionLine, ...chunks] : chunks,
         truncated,
+        ...windowTexts && windowTexts.length > 1 ? { windowTexts: reactionLine ? [reactionLine, ...windowTexts] : windowTexts } : {},
         storedChunks: chunkRows.length,
         mimeType: row.mime_type,
         ...row.locator_uri ? { locatorUri: row.locator_uri } : {},
@@ -77572,9 +77612,101 @@ var init_analyst_openclaw_infer = __esm(() => {
   };
 });
 
+// src/core/evidence-window-placement.ts
+function createEvidenceWindowPlacer(query, timers = systemTimers) {
+  const audit = { seats: 0, windowsScored: 0, scorer: "none", elapsedMs: 0, timedOut: false };
+  let startedAt;
+  let submittedWindows = 0;
+  return {
+    audit,
+    async place(chunks, source, reranker) {
+      const score = reranker ?? source.scoreWindows;
+      if (!score || submittedWindows >= MAX_WINDOWS_PER_QUESTION || audit.timedOut)
+        return chunks;
+      startedAt ??= timers.now();
+      const remaining = WINDOW_PLACEMENT_BUDGET_MS - (timers.now() - startedAt);
+      if (remaining <= 0) {
+        audit.timedOut = true;
+        audit.elapsedMs = timers.now() - startedAt;
+        return chunks;
+      }
+      const windows = [];
+      const eligible = chunks.flatMap((chunk, index) => {
+        const text2 = source.texts[index];
+        return text2 && text2.length > chunk.length ? [index] : [];
+      });
+      const allowance = Math.min(MAX_WINDOWS_PER_SEAT, MAX_WINDOWS_PER_QUESTION - submittedWindows);
+      for (const chunk of eligible) {
+        const text2 = source.texts[chunk];
+        const span = Math.max(0, text2.length - WINDOW_CHARS);
+        const count = Math.min(Math.floor(span / WINDOW_STRIDE) + 1, allowance - windows.length);
+        if (count <= 0)
+          break;
+        for (let n = 0;n < count; n++) {
+          const start = count === 1 ? 0 : Math.round(n * span / (count - 1));
+          windows.push({ chunk, start, text: sourceIndexChunkWindow(text2, start, WINDOW_CHARS) });
+        }
+      }
+      if (!windows.length)
+        return chunks;
+      audit.seats++;
+      submittedWindows += windows.length;
+      audit.scorer = reranker ? "reranker" : "embedding";
+      const controller = new AbortController;
+      let timer;
+      const expired = Symbol("expired");
+      const timeout = new Promise((resolve15) => {
+        timer = timers.setTimeout(() => {
+          resolve15(expired);
+          controller.abort();
+        }, remaining);
+      });
+      try {
+        const scores = await Promise.race([Promise.resolve().then(() => score(query, windows.map((window2) => window2.text), controller.signal)), timeout]);
+        if (scores === expired || timers.now() - startedAt >= WINDOW_PLACEMENT_BUDGET_MS) {
+          audit.timedOut = true;
+          controller.abort();
+          return chunks;
+        }
+        if (scores.length !== windows.length || scores.some((value) => !Number.isFinite(value)))
+          return chunks;
+        audit.windowsScored += windows.length;
+        const best = new Map;
+        windows.forEach((window2, index) => {
+          const previous = best.get(window2.chunk);
+          if (previous === undefined || scores[index] > scores[previous])
+            best.set(window2.chunk, index);
+        });
+        return chunks.map((chunk, index) => {
+          const picked = best.get(index);
+          return picked === undefined ? chunk : sourceIndexChunkWindow(source.texts[index], windows[picked].start, chunk.length);
+        });
+      } catch {
+        if (timers.now() - startedAt >= WINDOW_PLACEMENT_BUDGET_MS) {
+          audit.timedOut = true;
+          controller.abort();
+        }
+        return chunks;
+      } finally {
+        timers.clearTimeout(timer);
+        audit.elapsedMs = Math.max(0, timers.now() - startedAt);
+      }
+    }
+  };
+}
+var WINDOW_PLACEMENT_BUDGET_MS = 1500, WINDOW_CHARS = 600, WINDOW_STRIDE = 300, MAX_WINDOWS_PER_SEAT = 8, MAX_WINDOWS_PER_QUESTION = 24, systemTimers;
+var init_evidence_window_placement = __esm(() => {
+  init_chunk_selection();
+  systemTimers = {
+    now: () => performance.now(),
+    setTimeout: (callback, ms) => setTimeout(callback, ms),
+    clearTimeout: (handle) => clearTimeout(handle)
+  };
+});
+
 // src/core/evidence-reranker.ts
 async function rerankCandidates(options) {
-  const timers = options.timers ?? systemTimers;
+  const timers = options.timers ?? systemTimers2;
   const keep = Math.max(0, Math.floor(options.keep));
   const startedAt = timers.now();
   const passages = options.items.map((item) => clipPassage(options.passageOf(item)));
@@ -77659,9 +77791,9 @@ function rerankPoolSize(reranker, maxResults) {
   const pool = Number.isFinite(reranker.poolSize) ? Math.floor(reranker.poolSize) : DEFAULT_RERANK_POOL_SIZE;
   return Math.max(Math.floor(maxResults), Math.min(MAX_RERANK_POOL_SIZE, pool));
 }
-var RERANK_PASSAGE_CHARS = 2000, DEFAULT_RERANK_TIMEOUT_MS = 5000, DEFAULT_RERANK_POOL_SIZE = 30, MAX_RERANK_POOL_SIZE = 400, systemTimers;
+var RERANK_PASSAGE_CHARS = 2000, DEFAULT_RERANK_TIMEOUT_MS = 5000, DEFAULT_RERANK_POOL_SIZE = 30, MAX_RERANK_POOL_SIZE = 400, systemTimers2;
 var init_evidence_reranker = __esm(() => {
-  systemTimers = {
+  systemTimers2 = {
     now: () => Date.now(),
     setTimeout: (callback, ms) => setTimeout(callback, ms),
     clearTimeout: (handle) => clearTimeout(handle)
@@ -78459,6 +78591,8 @@ async function buildPreparedEvidencePackDetailed(input) {
     hydrated = [...denied, ...reranked.kept];
     rerank = reranked.audit;
   }
+  const windowPlacer = createEvidenceWindowPlacer(input.question, input.windowPlacementTimers);
+  const scoreWindows = reranker ? (query, passages, signal) => reranker.score({ query, passages, signal }) : undefined;
   for (const { hit, provenance, provider, content, policyDenied } of hydrated) {
     if (policyDenied) {
       encounteredSecureLocal = true;
@@ -78489,6 +78623,10 @@ async function buildPreparedEvidencePackDetailed(input) {
       if (input.excludeSecureSensitivity)
         continue;
       encounteredSecureLocal = true;
+    }
+    if (candidates.length < 3 && content?.truncated && content.chunks.length > 1 && content.windowPlacement) {
+      const placed = await windowPlacer.place(content.chunks, content.windowPlacement, scoreWindows);
+      candidate.chunks = input.evidenceByteBudget !== undefined && maxBytesPerCandidate !== undefined ? clipChunksToUtf8Bytes(placed, maxBytesPerCandidate) : placed;
     }
     if (content?.namesOnly === true)
       namesOnlyCandidateIndexes.push(candidates.length);
@@ -78540,6 +78678,7 @@ async function buildPreparedEvidencePackDetailed(input) {
     unreadCandidates,
     encounteredSecureLocal,
     ...rerank ? { rerank } : {},
+    windowPlacement: windowPlacer.audit,
     ...labelled.dependencies.length > 0 ? { parentLabelDependencies: labelled.dependencies } : {},
     ...secretLocations.length > 0 ? { secretLocations } : {},
     ...classificationCoverage.length > 0 ? { classificationCoverage } : {}
@@ -78895,6 +79034,7 @@ function trustDomainRank2(trustDomain) {
 }
 var SOURCE_MODEL_POLICY_GAP_SUFFIX = "excluded one candidate from model use under current source policy.", MIN_BYTES_PER_CANDIDATE = 400, utf8, MAX_SEARCH_QUERIES = 3, MIN_EXPANSION_BUDGET_MS = 1000, CUT_SHORT_LANES;
 var init_evidence_pack = __esm(() => {
+  init_evidence_window_placement();
   init_keyword_context();
   init_partial_search();
   init_evidence_reranker();

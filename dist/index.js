@@ -21603,12 +21603,18 @@ var init_analyst_openclaw_infer = __esm(() => {
   OPENCLAW_INFER_MAX_PROMPT_BYTES = MAX_PROMPT_BYTES;
 });
 
+// src/core/evidence-window-placement.ts
+var init_evidence_window_placement = __esm(() => {
+  init_chunk_selection();
+});
+
 // src/core/evidence-reranker.ts
 var init_evidence_reranker = () => {};
 
 // src/core/evidence-pack.ts
 var utf8, CUT_SHORT_LANES;
 var init_evidence_pack = __esm(() => {
+  init_evidence_window_placement();
   init_keyword_context();
   init_partial_search();
   init_evidence_reranker();

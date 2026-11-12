@@ -1,3 +1,4 @@
+import { createEvidenceWindowPlacer, type EvidenceWindowSource, type WindowPlacementAudit, type WindowScorer } from './evidence-window-placement.ts';
 import { withKeywordRequestScope } from './source-index/keyword-context.ts';
 import { RECENT_ITEMS_CUT_SHORT, VISIBILITY_CHECK_CUT_SHORT, recentItemsTimeoutGap, semanticSearchTimedOut, semanticTimeoutGap, visibilityCheckTimeoutGap } from './source-index/partial-search.ts';
 import {
@@ -98,6 +99,8 @@ export interface LocalContentRequest {
 }
 
 export interface LocalContentBlock {
+  // Internal snapshot of already selected passages, for post-rank window placement.
+  windowPlacement?: EvidenceWindowSource;
   sensitivity: SourceSensitivity;
   chunks: readonly string[];
   tables?: readonly EvidenceTableBlock[];
@@ -227,6 +230,7 @@ export interface BuildEvidencePackInput {
    */
   reranker?: EvidenceReranker;
   rerankTimers?: RerankTimers;
+  windowPlacementTimers?: RerankTimers;
   now?: () => Date;
 }
 
@@ -331,6 +335,7 @@ export interface EvidencePackBuildDetail {
   // Counts only: whether the reranker ran and what it changed. Absent when no
   // reranker was configured or it did not apply to this build.
   rerank?: EvidenceRerankAudit;
+  windowPlacement?: WindowPlacementAudit;
 }
 
 export async function buildEvidencePack(input: BuildEvidencePackInput): Promise<EvidencePack> {
@@ -460,6 +465,9 @@ async function buildPreparedEvidencePackDetailed(
     rerank = reranked.audit;
   }
 
+  const windowPlacer = createEvidenceWindowPlacer(input.question, input.windowPlacementTimers);
+  const scoreWindows: WindowScorer | undefined = reranker
+    ? (query, passages, signal) => reranker.score({ query, passages, signal }) : undefined;
   for (const { hit, provenance, provider, content, policyDenied } of hydrated) {
     if (policyDenied) {
       encounteredSecureLocal = true;
@@ -503,6 +511,11 @@ async function buildPreparedEvidencePackDetailed(
     if (isSecureSensitivity(candidate)) {
       if (input.excludeSecureSensitivity) continue;
       encounteredSecureLocal = true;
+    }
+    if (candidates.length < 3 && content?.truncated && content.chunks.length > 1 && content.windowPlacement) {
+      const placed = await windowPlacer.place(content.chunks, content.windowPlacement, scoreWindows);
+      candidate.chunks = input.evidenceByteBudget !== undefined && maxBytesPerCandidate !== undefined
+        ? clipChunksToUtf8Bytes(placed, maxBytesPerCandidate) : placed;
     }
     if (content?.namesOnly === true) namesOnlyCandidateIndexes.push(candidates.length);
     else if (content?.contentPrivate === true) contentPrivateCandidateIndexes.push(candidates.length);
@@ -580,6 +593,7 @@ async function buildPreparedEvidencePackDetailed(
     unreadCandidates,
     encounteredSecureLocal,
     ...(rerank ? { rerank } : {}),
+    windowPlacement: windowPlacer.audit,
     ...(labelled.dependencies.length > 0 ? { parentLabelDependencies: labelled.dependencies } : {}),
     ...(secretLocations.length > 0 ? { secretLocations } : {}),
     ...(classificationCoverage.length > 0 ? { classificationCoverage } : {}),

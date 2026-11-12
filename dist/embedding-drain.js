@@ -9302,7 +9302,7 @@ function sourceIndexChunkTermScore(text2, termGroups) {
   const normalized = text2.toLowerCase();
   return termGroups.reduce((score, group) => score + Math.max(0, ...group.map((term) => termOccurrences(normalized, term.toLowerCase()).length)), 0);
 }
-function boundedSourceIndexChunks(texts, maxChars, termGroups) {
+function boundedSourceIndexChunks(texts, maxChars, termGroups, preferredStarts) {
   const distinctTexts = [...new Set(texts.map((text2) => text2.trim()).filter(Boolean))];
   const chunks = [];
   let remaining = maxChars !== undefined && maxChars > 0 ? maxChars : Number.POSITIVE_INFINITY;
@@ -9312,7 +9312,7 @@ function boundedSourceIndexChunks(texts, maxChars, termGroups) {
       return { chunks, truncated: true };
     const text2 = distinctTexts[index];
     const fairShare = Number.isFinite(remaining) ? Math.max(1, Math.floor(remaining / (distinctTexts.length - index))) : undefined;
-    const snippet = sourceIndexChunkSnippet(text2, termGroups, fairShare);
+    const snippet = sourceIndexChunkSnippet(text2, termGroups, fairShare, preferredStarts?.[index]);
     if (!snippet)
       continue;
     const included = snippet.length > remaining ? snippet.slice(0, remaining) : snippet;
@@ -9323,9 +9323,11 @@ function boundedSourceIndexChunks(texts, maxChars, termGroups) {
   }
   return { chunks, truncated };
 }
-function sourceIndexChunkSnippet(text2, termGroups, maxChars) {
+function sourceIndexChunkSnippet(text2, termGroups, maxChars, preferredStart) {
   if (maxChars === undefined || maxChars <= 0 || text2.length <= maxChars)
     return text2;
+  if (preferredStart !== undefined && Number.isFinite(preferredStart))
+    return sourceIndexChunkWindow(text2, preferredStart, maxChars);
   const lower = text2.toLowerCase();
   const normalizedGroups = termGroups.map((group) => [...new Set(group.map((term) => term.toLowerCase()).filter(Boolean))]).filter((group) => group.length > 0);
   const occurrences = normalizedGroups.flatMap((group) => group.flatMap((term) => termOccurrences(lower, term)));
@@ -9366,6 +9368,17 @@ function compactPassageWhitespace(text2) {
 `).replace(/[^\S\n]{2,}/g, " ").replace(/\n{3,}/g, `
 
 `);
+}
+function sourceIndexChunkWindow(text2, preferredStart, maxChars) {
+  let start = Math.min(Math.max(0, Math.floor(preferredStart)), Math.max(0, text2.length - maxChars));
+  const low = (index) => text2.charCodeAt(index) >= 56320 && text2.charCodeAt(index) <= 57343;
+  if (low(start))
+    start++;
+  let end = Math.min(text2.length, start + Math.max(0, Math.floor(maxChars)));
+  const last = text2.charCodeAt(end - 1);
+  if (end > start && last >= 55296 && last <= 56319)
+    end--;
+  return text2.slice(start, end);
 }
 
 // src/core/source-index/partial-search.ts
@@ -32377,12 +32390,13 @@ ${parentKey(ref)}`, { ref, origin });
       const vector = decodeEmbedding(chunk.embedding);
       return vector.length === queryVector.length ? cosineSimilarity(queryVector, vector) : undefined;
     }) : undefined;
-    const { chunks, truncated } = selectEvidencePassages(chunkRows.map((chunk) => compactPassageWhitespace(chunk.bounded_text)), maxChars, passageFocus, { title: row.title, ...relevance ? { relevance } : {} });
+    const { chunks, truncated, windowTexts } = selectEvidencePassages(chunkRows.map((chunk) => compactPassageWhitespace(chunk.bounded_text)), maxChars, passageFocus, { title: row.title, ...relevance ? { relevance } : {} });
     const reactionLine = servesContent ? renderSourceReactionLine(parseStoredSourceReactions(row.reactions_json)) : undefined;
     return {
       trustTier: trustTierFromRow(row.trust_tier),
       chunks: reactionLine ? [reactionLine, ...chunks] : chunks,
       truncated,
+      ...windowTexts && windowTexts.length > 1 ? { windowTexts: reactionLine ? [reactionLine, ...windowTexts] : windowTexts } : {},
       storedChunks: chunkRows.length,
       mimeType: row.mime_type,
       ...row.locator_uri ? { locatorUri: row.locator_uri } : {},
@@ -33412,7 +33426,11 @@ function selectEvidencePassages(chunks, maxChars, focus, context2 = {}) {
       ...scored.map((entry) => entry.index)
     ].slice(0, Math.max(1, Math.floor(focus.maxPassages ?? MAX_PASSAGES_PER_CANDIDATE)));
     const bounded = boundedSourceIndexChunks(picked.sort((left, right) => left - right).map((index) => chunks[index]), maxChars, termGroups);
-    return { chunks: bounded.chunks, truncated: picked.length < chunks.length || bounded.truncated };
+    return {
+      chunks: bounded.chunks,
+      truncated: picked.length < chunks.length || bounded.truncated,
+      windowTexts: [...new Set(picked.map((index) => chunks[index].trim()).filter(Boolean))].slice(0, bounded.chunks.length)
+    };
   }
   const ranked = chunks.map((_, index) => index).sort((left, right) => (left === anchor ? -1 : right === anchor ? 1 : 0) || relevance(right) - relevance(left) || left - right);
   const kept = new Map;
@@ -33440,6 +33458,7 @@ function selectEvidencePassages(chunks, maxChars, focus, context2 = {}) {
   const ordered = [...kept.entries()].sort(([left], [right]) => left - right);
   return {
     chunks: ordered.map(([, text2]) => text2),
+    windowTexts: ordered.map(([index]) => chunks[index]),
     truncated: ordered.length < chunks.length || ordered.some(([index, text2]) => text2.length < chunks[index].length)
   };
 }

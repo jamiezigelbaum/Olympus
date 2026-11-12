@@ -1,3 +1,4 @@
+import type { EvidenceWindowSource, WindowScorer } from '../../core/evidence-window-placement.ts';
 import { createVectorDigestSchema, writeVectorDigest, backfillVectorDigests, vectorDigestState, vectorDigestSourceQuery, applyVectorDigestWindow, type VectorDigestSourceRow } from './vector-digest.ts';
 import { encodeVectorDigest, scoreVectorDigest, VectorDigestHeap } from '../source-index/vector-digest.ts';
 import { iterateRows } from '../../core/sqlite-rows.ts';
@@ -2674,6 +2675,8 @@ export function connectorStoreCurrentEmbeddingModelId(
 }
 
 export interface ConnectorStoreLocalContent {
+  // Full text of only the selected passages, index-aligned with chunks.
+  windowTexts?: readonly string[];
   trustTier: SourceTrustTier;
   chunks: readonly string[];
   truncated: boolean;
@@ -14568,7 +14571,7 @@ export class LocalConnectorStore {
           return vector.length === queryVector.length ? cosineSimilarity(queryVector, vector) : undefined;
         })
       : undefined;
-    const { chunks, truncated } = selectEvidencePassages(
+    const { chunks, truncated, windowTexts } = selectEvidencePassages(
       // Layout padding (OCR and PDF text keep column alignment as runs of
       // spaces) is not evidence; dropping it lets the same budget carry
       // several times the text (2026-10-02 live Private store: 36% padding
@@ -14592,6 +14595,7 @@ export class LocalConnectorStore {
       trustTier: trustTierFromRow(row.trust_tier),
       chunks: reactionLine ? [reactionLine, ...chunks] : chunks,
       truncated,
+      ...(windowTexts && windowTexts.length > 1 ? { windowTexts: reactionLine ? [reactionLine, ...windowTexts] : windowTexts } : {}),
       storedChunks: chunkRows.length,
       mimeType: row.mime_type,
       ...(row.locator_uri ? { locatorUri: row.locator_uri } : {}),
@@ -16671,8 +16675,8 @@ export const CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP =
   "the owner set this item's folder to Names only; its name is searchable and its contents are not read.";
 
 // LocalContentProvider over the store: bounded chunks, the item's stored
-// sensitivity, and the stored locator uri. Local by construction — every read
-// goes to the store's sqlite file; nothing here touches the network.
+// sensitivity, and the stored locator uri. Reads stay synchronous in sqlite;
+// the optional window scorer uses only an allowed private embedding provider.
 /**
  * A connector store's content provider, plus `contentServable`: whether it
  * would serve an item's content now under this provider's scope, answered
@@ -16783,9 +16787,35 @@ export function createConnectorStoreContentProvider(
         ? store.metadataOnlyRuleForLocator(content.locatorUri)
         : undefined;
       const coverageGaps = connectorStoreCoverageGaps(content, metadataOnlyRuleId);
+      let windowPlacement: EvidenceWindowSource | undefined;
+      if (content.truncated && content.windowTexts && content.windowTexts.length > 1) {
+        // This new text-scoring lane is private-only. secure_local windows
+        // additionally require the local backend, even where the existing
+        // vector lane permits Venice. No broader query-vector policy changes.
+        const privateProvider = embeddingProvider && isApprovedSecureSourceEmbeddingProvider(embeddingProvider)
+          && (store.trustDomain !== 'secure_local' || embeddingProvider.backend === 'local')
+          ? embeddingProvider : undefined;
+        const scoreWindows: WindowScorer | undefined = privateProvider ? async (query, windows, signal) => {
+          assertConnectorStoreEmbeddingProvider(store.trustDomain, privateProvider);
+          privateProvider.assertBindingCurrent?.();
+          const queryEmbedding = vector ?? (await privateProvider.embed([{ text: query }], { taskType: 'RETRIEVAL_QUERY' }))[0];
+          if (signal.aborted) throw new Error('Window placement deadline');
+          if (!queryEmbedding || queryEmbedding.length !== privateProvider.dimension || !queryEmbedding.every(Number.isFinite)) {
+            throw new Error('Invalid query embedding');
+          }
+          const embeddings = await privateProvider.embed(windows.map(text => ({ text })), { taskType: 'RETRIEVAL_DOCUMENT' });
+          if (embeddings.length !== windows.length || embeddings.some(value => value.length !== queryEmbedding.length || !value.every(Number.isFinite))) {
+            throw new Error('Invalid window embeddings');
+          }
+          return embeddings.map(value => cosineSimilarity(queryEmbedding, value));
+        } : undefined;
+        windowPlacement = { texts: content.windowTexts, ...(scoreWindows ? { scoreWindows } : {}) };
+      }
+
       return {
         sensitivity: buildSourceSensitivity({ trustTier: content.trustTier, trustDomain: store.trustDomain }),
         chunks: content.chunks,
+        ...(windowPlacement ? { windowPlacement } : {}),
         ...(content.truncated ? { truncated: true } : {}),
         ...(coverageGaps.length > 0 ? { coverageGaps } : {}),
         ...(metadataOnlyRuleId !== undefined ? { namesOnly: true } : {}),
@@ -17777,7 +17807,7 @@ function selectEvidencePassages(
   maxChars: number | undefined,
   focus: ConnectorStorePassageFocus | undefined,
   context: { title?: string | null; relevance?: readonly (number | undefined)[] } = {},
-): { chunks: readonly string[]; truncated: boolean } {
+): { chunks: readonly string[]; truncated: boolean; windowTexts?: readonly string[] } {
   if (maxChars === undefined || maxChars <= 0) return budgetChunks(chunks, maxChars);
   const totalChars = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
   if (totalChars <= maxChars || !focus) return budgetChunks(chunks, maxChars);
@@ -17813,7 +17843,8 @@ function selectEvidencePassages(
       maxChars,
       termGroups,
     );
-    return { chunks: bounded.chunks, truncated: picked.length < chunks.length || bounded.truncated };
+    return { chunks: bounded.chunks, truncated: picked.length < chunks.length || bounded.truncated,
+      windowTexts: [...new Set(picked.map(index => chunks[index]!.trim()).filter(Boolean))].slice(0, bounded.chunks.length) };
   }
   // Most relevant first (the anchor, then by embedding), filled whole until
   // the budget runs out, then read in document order. Chunks within
@@ -17856,6 +17887,7 @@ function selectEvidencePassages(
   const ordered = [...kept.entries()].sort(([left], [right]) => left - right);
   return {
     chunks: ordered.map(([, text]) => text),
+    windowTexts: ordered.map(([index]) => chunks[index]!),
     truncated: ordered.length < chunks.length || ordered.some(([index, text]) => text.length < chunks[index]!.length),
   };
 }
