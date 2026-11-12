@@ -245,11 +245,13 @@ describe('OpenAPI document', () => {
     }
   });
 
-  test('lists exactly the remote surface, with stable operationIds and bearer security', async () => {
+  test('lists exactly the REST-served remote operations, with stable operationIds and bearer security', async () => {
     const spec = await getSpec();
     const config = { ...defaultConfig(), sourceIndex: { ...defaultConfig().sourceIndex, enabled: true } };
-    const remote = exposedOperations(operations, { config, surface: 'remote' }).map((op) => op.name);
-    expect(remote).toEqual([...V0_4_PUBLIC_REMOTE_MCP_TOOLS]);
+    const allRemote = exposedOperations(operations, { config, surface: 'remote' }).map((op) => op.name);
+    expect([...allRemote].sort()).toEqual([...V0_4_PUBLIC_REMOTE_MCP_TOOLS].sort());
+    const remote = allRemote.filter(name => name !== 'source_item_read');
+    expect(spec.paths['/api/v1/tools/source_item_read']).toBeUndefined();
     expect(Object.keys(spec.paths).sort()).toEqual(remote.map((name) => `/api/v1/tools/${name}`).sort());
     expect(Object.values(spec.paths as Record<string, any>).map((item) => Object.keys(item))).toEqual(remote.map(() => ['post']));
     expect(Object.values(spec.paths as Record<string, any>).map((item) => item.post.operationId).sort()).toEqual([...remote].sort());

@@ -1431,7 +1431,10 @@ var init_public_surface = __esm(() => {
     "source_index_status",
     "ask_anonymously"
   ];
-  V0_4_PUBLIC_REMOTE_MCP_TOOLS = V0_4_HERMES_MCP_TOOLS;
+  V0_4_PUBLIC_REMOTE_MCP_TOOLS = [
+    ...V0_4_HERMES_MCP_TOOLS,
+    "source_item_read"
+  ];
   V0_4_PUBLIC_SOURCE_IDS = [
     "gmail.email",
     "google_drive.docs",
@@ -8520,6 +8523,7 @@ var init_remote_result = __esm(() => {
   CLEANUPS = Object.freeze(["as_written", "light_cleanup", "custom"]);
   OUTCOMES = Object.freeze(["not_sent", "sent_failed", "unknown"]);
   REMOTE_DESCRIPTIONS = {
+    source_item_read: "Read more of a found Personal item. Pass its read_handle from olympus_search or source_answer. Handles expire after 30 minutes and work only on this connection. Each page is judged before release.",
     source_index_status: [
       "Inspect source-index corpus status: each corpus's refresh status and aggregate counts.",
       "Read-only: it never returns item metadata, sender counts, ledgers, source text, vectors or credentials.",
@@ -8584,6 +8588,7 @@ var init_remote_result = __esm(() => {
     required: ["label"],
     properties: {
       label: { type: "string", enum: [...REMOTE_SOURCE_LABELS] },
+      read_handle: { type: "string", pattern: "^rh_[A-Za-z0-9_-]{22,}$" },
       title: { type: "string", maxLength: MAX_TITLE },
       date: { type: "string", format: "date" }
     }

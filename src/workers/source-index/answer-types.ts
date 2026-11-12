@@ -178,6 +178,8 @@ export interface SourceIndexAnalystFallback {
 }
 
 export interface SourceIndexAnswerEvidence {
+  // Internal read identity; remote output builders never serialize this field.
+  local_item_id?: string;
   corpus_id: string;
   trust_domain: SourceTrustDomain;
   family: string;

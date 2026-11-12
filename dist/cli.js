@@ -3085,7 +3085,10 @@ var init_public_surface = __esm(() => {
     "source_index_status",
     "ask_anonymously"
   ];
-  V0_4_PUBLIC_REMOTE_MCP_TOOLS = V0_4_HERMES_MCP_TOOLS;
+  V0_4_PUBLIC_REMOTE_MCP_TOOLS = [
+    ...V0_4_HERMES_MCP_TOOLS,
+    "source_item_read"
+  ];
   V0_4_PUBLIC_CONNECT_SOURCES = [
     "google",
     "gmail",
@@ -34551,6 +34554,8 @@ function withheldParams(operation) {
   return Object.prototype.hasOwnProperty.call(REMOTE_WITHHELD_PARAMS, operation) ? REMOTE_WITHHELD_PARAMS[operation] ?? [] : [];
 }
 function remoteDeclaredParams(operation, declared) {
+  if (operation === "source_item_read")
+    return ["read_handle", "page", "pages"];
   const withheld = withheldParams(operation);
   return declared.filter((name) => !withheld.includes(name));
 }
@@ -34558,6 +34563,17 @@ function remoteToolDescription(operation, description) {
   return Object.prototype.hasOwnProperty.call(REMOTE_DESCRIPTIONS, operation) ? REMOTE_DESCRIPTIONS[operation] ?? description : description;
 }
 function remoteToolSchema(operation, schema) {
+  if (operation === "source_item_read")
+    return {
+      type: "object",
+      additionalProperties: false,
+      required: ["read_handle"],
+      properties: {
+        read_handle: { type: "string", description: "The read_handle returned for this item on this connection." },
+        page: { type: "integer", minimum: 1, description: "Page to read (default 1)." },
+        pages: { type: "integer", minimum: 1, maximum: 3, description: "Number of pages (default 1)." }
+      }
+    };
   const withheld = withheldParams(operation);
   if (withheld.length === 0)
     return schema;
@@ -34677,7 +34693,7 @@ function sourceAnswerOutput(raw, options) {
   evidence.forEach((entry, index) => {
     if (dropped.has(index) || citations.length >= MAX_CITATIONS)
       return;
-    const citation = citationOutput(entry);
+    const citation = citationOutput(entry, options);
     citations.push(citation);
     released.push(releasedItemFromEvidence(entry, String(citation.label), typeof citation.title === "string" ? citation.title : undefined));
   });
@@ -34750,13 +34766,15 @@ function recheckRelease(evidence, manifests, check) {
 function citesInput(entry, input) {
   return input.dependency !== "parent_label" && entry.corpus_id === input.corpusId && entry.provider === input.provider && entry.provider_item_id === input.providerItemId && (typeof entry.provider_conversation_id === "string" && entry.provider_conversation_id ? entry.provider_conversation_id : undefined) === input.providerConversationId;
 }
-function citationOutput(entry) {
+function citationOutput(entry, options) {
+  const readHandle = options.issueReadHandle?.(entry);
   const title = scannedText(entry.title, MAX_TITLE, "line");
   const date = dateOnly(entry.authored_at) ?? dateOnly(entry.updated_at);
   const parent = keptText(entry.parent_label, PARENT_LABEL_MAX_CHARS, "line");
   const composed = title.secret ? { secret: true } : scannedText(citationTitleWithParent(title.text, parent), MAX_TITLE, "line");
   return {
     label: sourceLabel(entry.provider, entry.family),
+    ...readHandle ? { read_handle: readHandle } : {},
     ...composed.text && !composed.secret ? { title: composed.text } : {},
     ...date ? { date } : {}
   };
@@ -35092,6 +35110,7 @@ var init_remote_result = __esm(() => {
   CLEANUPS = Object.freeze(["as_written", "light_cleanup", "custom"]);
   OUTCOMES = Object.freeze(["not_sent", "sent_failed", "unknown"]);
   REMOTE_WITHHELD_PARAMS = {
+    source_item_read: ["selected_item"],
     source_index_status: [
       "conversation_id",
       "include_sender_aggregation",
@@ -35104,6 +35123,7 @@ var init_remote_result = __esm(() => {
     ]
   };
   REMOTE_DESCRIPTIONS = {
+    source_item_read: "Read more of a found Personal item. Pass its read_handle from olympus_search or source_answer. Handles expire after 30 minutes and work only on this connection. Each page is judged before release.",
     source_index_status: [
       "Inspect source-index corpus status: each corpus's refresh status and aggregate counts.",
       "Read-only: it never returns item metadata, sender counts, ledgers, source text, vectors or credentials.",
@@ -35171,6 +35191,7 @@ var init_remote_result = __esm(() => {
     required: ["label"],
     properties: {
       label: { type: "string", enum: [...REMOTE_SOURCE_LABELS] },
+      read_handle: { type: "string", pattern: "^rh_[A-Za-z0-9_-]{22,}$" },
       title: { type: "string", maxLength: MAX_TITLE },
       date: { type: "string", format: "date" }
     }
@@ -82542,6 +82563,7 @@ function evidenceFromCitations(citations, detail) {
       provider: item.provider,
       ...item.accountScope ? { account_scope: item.accountScope } : {},
       provider_item_id: item.providerItemId,
+      local_item_id: item.localItemId,
       ...item.providerThreadId ? { provider_thread_id: item.providerThreadId } : {},
       ...item.providerConversationId ? { provider_conversation_id: item.providerConversationId } : {},
       ...item.providerFileId ? { provider_file_id: item.providerFileId } : {},
@@ -82610,6 +82632,7 @@ function appendUnreadableMatchedEvidence(evidence, detail, releaseSecureContent)
       provider: item.provider,
       ...item.accountScope ? { account_scope: item.accountScope } : {},
       provider_item_id: item.providerItemId,
+      local_item_id: item.localItemId,
       ...item.providerThreadId ? { provider_thread_id: item.providerThreadId } : {},
       ...item.providerConversationId ? { provider_conversation_id: item.providerConversationId } : {},
       ...item.providerFileId ? { provider_file_id: item.providerFileId } : {},
@@ -82785,6 +82808,7 @@ async function searchReleasedEvidence(input) {
       provider: item.provider,
       ...item.accountScope ? { account_scope: item.accountScope } : {},
       provider_item_id: item.providerItemId,
+      local_item_id: item.localItemId,
       ...item.providerConversationId ? { provider_conversation_id: item.providerConversationId } : {},
       ...cite?.title ? { title: cite.title } : {},
       ...cite?.sourceLabel ? { source_label: cite.sourceLabel } : {},
@@ -156316,8 +156340,9 @@ var init_source_answer_jobs = __esm(() => {
 });
 
 // src/mcp/tools.ts
-function listMcpTools(config2, surface = "mcp") {
-  return exposedOperations(operations, { config: config2, surface }).map((operation) => ({
+function listMcpTools(config2, surface = "mcp", options = {}) {
+  const listed = exposedOperations(operations, { config: config2, surface }).filter((operation) => surface !== "remote" || operation.name !== "source_item_read" || options.remoteReadHandles === true);
+  return listed.map((operation) => ({
     name: operation.name,
     description: surface === "remote" ? remoteToolDescription(operation.name, operationDescription(operation, { config: config2 })) : operationDescription(operation, { config: config2 }),
     inputSchema: surface === "remote" ? remoteToolSchema(operation.name, operationToolSchema(operation, { config: config2 })) : operationToolSchema(operation, { config: config2 }),
@@ -156342,9 +156367,9 @@ __export(exports_server, {
   handleMcpCallTool: () => handleMcpCallTool,
   createOlympusMcpServer: () => createOlympusMcpServer
 });
-async function handleMcpCallTool(request, makeOperationContext = makeContext, surface = "mcp", authorized) {
+async function handleMcpCallTool(request, makeOperationContext = makeContext, surface = "mcp", authorized, readHandles) {
   if (surface === "remote")
-    return handleRemoteCallTool(request, makeOperationContext, authorized);
+    return handleRemoteCallTool(request, makeOperationContext, authorized, readHandles);
   const operation = findOperationByName(request.params.name);
   if (!operation) {
     throw new OperationError("invalid_params", `Unknown Olympus operation: ${request.params.name}`);
@@ -156363,7 +156388,7 @@ async function handleMcpCallTool(request, makeOperationContext = makeContext, su
     ]
   };
 }
-async function handleRemoteCallTool(request, makeOperationContext, authorized = () => "active") {
+async function handleRemoteCallTool(request, makeOperationContext, authorized = () => "active", readHandles) {
   const text3 = (value2) => [{ type: "text", text: JSON.stringify(value2, null, 2) }];
   const operation = findOperationByName(request.params.name);
   if (!operation || !isV04PublicOperation("remote", operation.name)) {
@@ -156373,7 +156398,7 @@ async function handleRemoteCallTool(request, makeOperationContext, authorized = 
   if (!shouldExposeOperation(operation, { config: ctx.config, surface: "remote" })) {
     return { content: text3(remoteSurfaceErrorOutput("operation_unavailable")), isError: true };
   }
-  const args = request.params.arguments ?? {};
+  let args = request.params.arguments ?? {};
   const withheld = remoteWithheldParam(operation.name, args);
   if (withheld)
     return { content: text3(remoteWithheldParamOutput(withheld)), isError: true };
@@ -156384,6 +156409,16 @@ async function handleRemoteCallTool(request, makeOperationContext, authorized = 
     ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}
   });
   try {
+    if (operation.name === "source_item_read") {
+      const access = currentAccess(authorized);
+      if (access !== "active")
+        return refusedAccess(access);
+      const selected = readHandles?.resolveReadHandle(args.read_handle);
+      if (!selected || Object.keys(args).some((key2) => !declaredParams.includes(key2))) {
+        throw new OperationError("invalid_params", "Invalid read handle.");
+      }
+      args = { selected_item: selected, page: args.page, pages: args.pages };
+    }
     const result = await runWithReleaseManifestSink(manifests, () => withRemoteReadAuthorization(authorized, () => operation.handler(ctx, args)));
     const afterHandler = currentAccess(authorized);
     if (afterHandler !== "active")
@@ -156391,6 +156426,7 @@ async function handleRemoteCallTool(request, makeOperationContext, authorized = 
     const capture = createReleaseCapture();
     const release = () => runWithReleaseCapture(capture, () => remoteOperationOutputOffThread(operation.name, result, {
       pendingPrivacyItems: ctx.pendingPrivacyItems?.(),
+      ...readHandles ? { issueReadHandle: readHandles.issueReadHandle } : {},
       ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {},
       releaseManifests: manifests.manifests
     }));
@@ -156453,14 +156489,14 @@ async function normalizedJsonRpcErrorResponse(response) {
   headers.delete("Content-Length");
   return new Response(JSON.stringify(normalized), { status: response.status, statusText: response.statusText, headers });
 }
-function createOlympusMcpServer(surface, makeOperationContext, extension, authorized) {
+function createOlympusMcpServer(surface, makeOperationContext, extension, authorized, readHandles) {
   const server = new Server({ name: "olympus", version: VERSION }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => {
-    const listed = listMcpTools(makeOperationContext().config, surface);
+    const listed = listMcpTools(makeOperationContext().config, surface, { remoteReadHandles: readHandles !== undefined });
     return { tools: extension ? extension.tools(listed) : listed };
   });
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-    const next = () => handleMcpCallTool(request, makeOperationContext, surface, authorized);
+    const next = () => handleMcpCallTool(request, makeOperationContext, surface, authorized, readHandles);
     return extension ? extension.call(request, next, extra.signal) : next();
   });
   if (surface === "remote") {
@@ -222906,6 +222942,73 @@ var init_ingestion_dispositions = __esm(() => {
   ];
 });
 
+// src/core/remote-read-handles.ts
+import { randomBytes as randomBytes34 } from "node:crypto";
+
+class RemoteReadHandleStore {
+  entries = new Map;
+  now;
+  maxEntries;
+  constructor(options = {}) {
+    this.now = options.now ?? Date.now;
+    this.maxEntries = options.maxEntries ?? 5000;
+    if (!Number.isSafeInteger(this.maxEntries) || this.maxEntries < 1)
+      throw new Error("Invalid read handle capacity.");
+  }
+  forConnection(connectionId) {
+    return {
+      issueReadHandle: (item) => {
+        if (item.trust_domain !== "internal" && item.trust_domain !== "public_safe")
+          return;
+        let selected;
+        try {
+          selected = sourceItemReadSelectedItem({
+            corpus_id: item.corpus_id,
+            family: item.family,
+            provider: item.provider,
+            account_scope: item.account_scope,
+            provider_item_id: item.provider_item_id,
+            local_item_id: item.local_item_id,
+            ...item.provider_conversation_id ? { provider_conversation_id: item.provider_conversation_id } : {}
+          });
+        } catch {
+          return;
+        }
+        const now = this.now();
+        for (const [handle2, entry] of this.entries) {
+          if (entry.expiresAt <= now)
+            this.entries.delete(handle2);
+        }
+        while (this.entries.size >= this.maxEntries)
+          this.entries.delete(this.entries.keys().next().value);
+        const handle = `rh_${randomBytes34(24).toString("base64url")}`;
+        this.entries.set(handle, { ...selected, connectionId, expiresAt: now + TTL_MS });
+        return handle;
+      },
+      resolveReadHandle: (handle) => {
+        if (typeof handle !== "string")
+          return;
+        const entry = this.entries.get(handle);
+        if (!entry)
+          return;
+        if (entry.expiresAt <= this.now()) {
+          this.entries.delete(handle);
+          return;
+        }
+        if (entry.connectionId !== connectionId)
+          return;
+        const { connectionId: _connectionId, expiresAt: _expiresAt, ...selected } = entry;
+        return selected;
+      }
+    };
+  }
+}
+var TTL_MS;
+var init_remote_read_handles = __esm(() => {
+  init_selected_items();
+  TTL_MS = 30 * 60 * 1000;
+});
+
 // node_modules/@modelcontextprotocol/sdk/dist/esm/server/webStandardStreamableHttp.js
 class WebStandardStreamableHTTPServerTransport {
   constructor(options = {}) {
@@ -227460,6 +227563,7 @@ function searchToolResult(raw, options = {}) {
     if (item.source_instructions_flagged === true)
       flagged = true;
     evidence.push(entry);
+    options.onKeptEvidence?.(item, entry.id);
     released.push(releasedItemFromEvidence(item, source, entry.title));
   }
   const coverageRecord = asRecord20(record8.coverage) ?? {};
@@ -239132,7 +239236,7 @@ var init_directory_surface = __esm(() => {
 // src/workers/remote-search.ts
 function remoteSearchExtension(options, authorized, request = {}) {
   return {
-    tools: (listed) => [REMOTE_SEARCH_TOOL, ...listed],
+    tools: (listed) => [request.issueReadHandle ? { ...REMOTE_SEARCH_TOOL, description: `${REMOTE_SEARCH_TOOL.description} Pass an item's read_handle to source_item_read to read more of it.` } : REMOTE_SEARCH_TOOL, ...listed],
     call: async (call, next, signal) => {
       if (call.params.name === REMOTE_SEARCH_TOOL.name) {
         const signals = [signal, request.signal].filter((one) => one !== undefined);
@@ -239171,7 +239275,17 @@ async function runSearch(args, options, authorized, context3, signal) {
     return errorResult(remoteErrorOutput(new OperationError("source_index_error", "unexpected search shape")));
   }
   const capture = createReleaseCapture();
-  let result = runWithReleaseCapture(capture, () => searchToolResult(raw, { pendingPrivacyItems: context3.pendingPrivacyItems?.() }));
+  const kept = new Map;
+  const buildResult = (value2) => {
+    kept.clear();
+    return runWithReleaseCapture(capture, () => searchToolResult(value2, {
+      pendingPrivacyItems: context3.pendingPrivacyItems?.(),
+      onKeptEvidence: (item, id) => {
+        kept.set(id, item);
+      }
+    }));
+  };
+  let result = buildResult(raw);
   let withheldAfter = false;
   let note;
   if (privateCall) {
@@ -239184,12 +239298,21 @@ async function runSearch(args, options, authorized, context3, signal) {
   }
   const checked2 = await recheckSearchEvidence(raw, manifests.manifests, context3.releaseCheck);
   if (checked2.withheldAfter) {
-    result = runWithReleaseCapture(capture, () => searchToolResult(checked2.raw, { pendingPrivacyItems: context3.pendingPrivacyItems?.() }));
+    result = buildResult(checked2.raw);
     withheldAfter = Array.isArray(checked2.raw.evidence) && checked2.raw.evidence.length === 0;
   }
   const afterRelease = currentAccess(authorized);
   if (afterRelease !== "active")
     return refusedAccess(afterRelease);
+  const evidence = result.structuredContent?.evidence;
+  if (context3.issueReadHandle && Array.isArray(evidence)) {
+    for (const entry of evidence) {
+      const item = kept.get(entry.id);
+      const handle = item ? context3.issueReadHandle(item) : undefined;
+      if (handle)
+        entry.read_handle = handle;
+    }
+  }
   if (context3.caller) {
     recordAppRequest({
       caller: context3.caller,
@@ -239299,6 +239422,7 @@ function withRemoteMcpRoute(remoteMcp, rest) {
   return (request) => isRemoteMcpRequest(request) ? remoteMcp(request) : rest(request);
 }
 function createRemoteMcpHandler(options) {
+  const readHandles = new RemoteReadHandleStore(options.readHandleNow ? { now: options.readHandleNow } : {});
   const isRelayed = options.isRelayed ?? isRelayedRequest;
   const log = options.log ?? ((line2) => console.log(line2));
   return async (request) => {
@@ -239363,6 +239487,7 @@ function createRemoteMcpHandler(options) {
     const caller = remoteOperationCaller(verification.connection);
     const ctx = options.makeOperationContext(caller, request.signal);
     const selected = appSurface(request, verification.connection, surface);
+    const readScope = options.search ? readHandles.forConnection(verification.connection.id) : undefined;
     const urls = currentRemotePublicUrls(options.publicUrls);
     const chatgpt = selected !== "remote" && options.chatgpt ? {
       ...options.chatgpt,
@@ -239380,8 +239505,9 @@ function createRemoteMcpHandler(options) {
       ...!demo && ctx.remotePrivatePart ? { privatePart: ctx.remotePrivatePart } : {},
       ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {},
       signal: request.signal,
-      caller
-    }) : undefined)), authorized);
+      caller,
+      ...readScope ? { issueReadHandle: readScope.issueReadHandle } : {}
+    }) : undefined)), authorized, readScope);
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     try {
       await server.connect(transport);
@@ -239597,6 +239723,7 @@ function jsonResponse(status, body, headers = {}) {
 }
 var REMOTE_MCP_PATH = "/mcp", REMOTE_DIRECTORY_MCP_PATH, IN_PROCESS_WORKER_BASE_URL = "http://olympus-worker.internal/v1";
 var init_remote_mcp = __esm(() => {
+  init_remote_read_handles();
   init_connection_requests();
   init_webStandardStreamableHttp();
   init_delphi();
@@ -239824,7 +239951,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash114, randomBytes as randomBytes34, timingSafeEqual as timingSafeEqual11 } from "node:crypto";
+import { createHash as createHash114, randomBytes as randomBytes35, timingSafeEqual as timingSafeEqual11 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -239964,8 +240091,8 @@ function createRemoteOAuthHandler(options) {
       }
     }
     admitPending();
-    const requestId = randomBytes34(16).toString("hex");
-    const csrf = randomBytes34(32).toString("base64url");
+    const requestId = randomBytes35(16).toString("hex");
+    const csrf = randomBytes35(32).toString("base64url");
     const entry = {
       transaction,
       client,
@@ -239997,7 +240124,7 @@ function createRemoteOAuthHandler(options) {
   const issueCode = (requestId, entry, u) => {
     if (codes.size >= MAX_LIVE_CODES)
       sweep();
-    const code = u.installId ? mintCredential("code", u.installId) : randomBytes34(32).toString("base64url");
+    const code = u.installId ? mintCredential("code", u.installId) : randomBytes35(32).toString("base64url");
     codes.set(sha25613(code), {
       ...entry.demo ? {} : { receipt: requestId },
       clientId: entry.client.clientId,
@@ -240942,7 +241069,7 @@ __export(exports_private_answer_jobs, {
   PRIVATE_ANSWER_CLAIM_COLLECT_MS: () => PRIVATE_ANSWER_CLAIM_COLLECT_MS,
   PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS: () => PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS
 });
-import { randomBytes as randomBytes35, timingSafeEqual as timingSafeEqual12 } from "node:crypto";
+import { randomBytes as randomBytes36, timingSafeEqual as timingSafeEqual12 } from "node:crypto";
 import { lstatSync as lstatSync54 } from "node:fs";
 function formatAnalysisTiming(timing) {
   const fields = [`outcome=${timing.outcome}`];
@@ -241102,7 +241229,7 @@ class PrivateAnswerJobs {
         break;
       this.drop(oldest);
     }
-    const id = `oly2p.${installId}.${randomBytes35(32).toString("base64url")}`;
+    const id = `oly2p.${installId}.${randomBytes36(32).toString("base64url")}`;
     const at = this.now();
     const job = {
       id,
@@ -241292,7 +241419,7 @@ class PrivateAnswerJobs {
       return { remote };
     if (!job.waiting)
       return {};
-    job.inboxHandle ??= randomBytes35(16).toString("base64url");
+    job.inboxHandle ??= randomBytes36(16).toString("base64url");
     return { handle: job.inboxHandle };
   }
   sweep(at = this.now()) {
@@ -241644,7 +241771,7 @@ class PrivateAnswerJobs {
           settle2({ kind: "failed" }, "no_evidence");
           return;
         }
-        const ack = randomBytes35(32).toString("base64url");
+        const ack = randomBytes36(32).toString("base64url");
         const plaintext = { v: 1, answer: REMOTE_SECRET_NOTE, citations: [], ack, secretInbox: this.secretInbox(job) };
         const sealed = await sealPrivateAnswer(job.id, panelKey, padPrivateAnswerPlaintext(serializePrivateAnswerPlaintext(plaintext)));
         if (settled)
@@ -241705,7 +241832,7 @@ class PrivateAnswerJobs {
         if (result && (!precomputed || stillEligible(result.usedKeys, current4)) && await stillReadable()) {
           if (settled)
             return;
-          const ack = randomBytes35(32).toString("base64url");
+          const ack = randomBytes36(32).toString("base64url");
           const plaintext = { ...this.withOpenTokens(job, result.plaintext, result.localPaths), ack };
           if (job.preserveWaiting) {
             plaintext.answer = `${REMOTE_SECRET_NOTE}
@@ -241820,7 +241947,7 @@ ${plaintext.answer}`;
       const path = localPaths[index];
       if (!path)
         return citation;
-      const token = randomBytes35(32).toString("base64url");
+      const token = randomBytes36(32).toString("base64url");
       opens.set(token, path);
       return { ...citation, open: { kind: "mac", token } };
     });
@@ -242051,7 +242178,7 @@ __export(exports_private_question_jobs, {
   PrivateQuestionJobs: () => PrivateQuestionJobs,
   PRIVATE_QUESTION_DAILY_LIMIT_REFUSALS: () => PRIVATE_QUESTION_DAILY_LIMIT_REFUSALS
 });
-import { randomBytes as randomBytes36 } from "node:crypto";
+import { randomBytes as randomBytes37 } from "node:crypto";
 function gone2() {
   return { status: 410, body: { status: "gone" } };
 }
@@ -242090,7 +242217,7 @@ class PrivateQuestionJobs {
     const engine = await generateEngineKeyPair();
     const at = this.now();
     const job = {
-      id: `oly2p.${installId}.${randomBytes36(32).toString("base64url")}`,
+      id: `oly2p.${installId}.${randomBytes37(32).toString("base64url")}`,
       createdAt: at,
       expiresAt: at + this.ttlMs,
       enginePrivateKey: engine.privateKey,
@@ -242865,7 +242992,7 @@ async function callTool(request, name, options) {
   const ctx = options.makeOperationContext(remoteOperationCaller(verification.connection), request.signal);
   const operation = findOperationByName(name);
   const demoRefused = options.demoGrant?.(verification.connection) === true && !DEMO_GRANT_REMOTE_TOOLS.includes(name);
-  if (demoRefused || !operation || !shouldExposeOperation(operation, { config: neutralSpecConfig(), surface: "remote" })) {
+  if (name === "source_item_read" || demoRefused || !operation || !shouldExposeOperation(operation, { config: neutralSpecConfig(), surface: "remote" })) {
     return failure2(404, remoteSurfaceErrorOutput("unknown_operation"));
   }
   if (!shouldExposeOperation(operation, { config: ctx.config, surface: "remote" })) {
@@ -242986,7 +243113,7 @@ function publicServerUrl(publicBaseUrl) {
 }
 function buildRemoteOpenApiSpec(options = {}) {
   const rendering = neutralSpecConfig();
-  const exposed = exposedOperations(operations, { config: rendering, surface: "remote" });
+  const exposed = exposedOperations(operations, { config: rendering, surface: "remote" }).filter((operation) => operation.name !== "source_item_read");
   const paths = Object.fromEntries(exposed.map((operation) => [
     `${REMOTE_OPENAPI_TOOLS_PREFIX}${operation.name}`,
     { post: openApiOperation(operation, rendering) }
@@ -250260,7 +250387,7 @@ init_package_root();
 init_messaging_pairing();
 init_messaging_capture();
 init_config();
-import { randomBytes as randomBytes37 } from "node:crypto";
+import { randomBytes as randomBytes38 } from "node:crypto";
 import { existsSync as existsSync123, readFileSync as readFileSync104, openSync as openSync35, closeSync as closeSync36, writeSync as writeSync10 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
@@ -254803,7 +254930,7 @@ function withWorkerInstallAuth(options) {
   };
 }
 function generateWorkerAuthToken() {
-  return randomBytes37(32).toString("base64url");
+  return randomBytes38(32).toString("base64url");
 }
 function parseWorkerActionArgs(args) {
   const options = {};

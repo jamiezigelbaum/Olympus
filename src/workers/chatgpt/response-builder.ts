@@ -856,7 +856,10 @@ export const SEARCH_COVERAGE_INSTRUCTION = 'Mention coverage only if the user as
  * answer panel is answering, and one terse line otherwise; the Names-only
  * hint appears only when Names-only matches are why nothing was answered.
  */
-export function searchToolResult(raw: unknown, options: AnswerResultOptions = {}): ChatGptToolResult {
+export function searchToolResult(raw: unknown, options: AnswerResultOptions & {
+  /** Internal observer: the raw items kept, paired with their final evidence ids. */
+  onKeptEvidence?: (item: Record<string, unknown>, id: string) => void;
+} = {}): ChatGptToolResult {
   const record = asRecord(raw);
   if (!record || !Array.isArray(record.evidence)) {
     return errorToolResult(new OperationError('source_index_error', 'unexpected search shape'));
@@ -889,6 +892,7 @@ export function searchToolResult(raw: unknown, options: AnswerResultOptions = {}
     }
     if (item.source_instructions_flagged === true) flagged = true;
     evidence.push(entry);
+    options.onKeptEvidence?.(item, entry.id);
     released.push(releasedItemFromEvidence(item, source, entry.title));
   }
   const coverageRecord = asRecord(record.coverage) ?? {};

@@ -1,3 +1,4 @@
+import type { RemoteReadHandleScope } from './remote-read-handles.ts';
 import { parseSourceItemReadResult, SOURCE_ITEM_READ_REFUSALS } from './source-item-read.ts';
 /**
  * What a remote agent receives: the output boundary of the `remote` operation
@@ -44,6 +45,8 @@ import { privacyBacklogCoverageNote } from './privacy-backlog-coverage.ts';
 export type RemoteOperationName = 'source_answer' | 'source_answer_result' | 'source_index_status' | 'ask_anonymously' | 'source_item_read';
 
 export interface RemoteOutputOptions {
+  /** Present only on non-ChatGPT remote MCP; never on remote OpenAPI. */
+  issueReadHandle?: RemoteReadHandleScope['issueReadHandle'];
   /** Global count of items awaiting privacy judgment; never item metadata. */
   pendingPrivacyItems?: number | undefined;
   /**
@@ -203,6 +206,7 @@ function oneOf(value: unknown, allowed: readonly string[]): string | undefined {
  * output (sender counts, ledgers, item listings) never reaches a remote agent.
  */
 export const REMOTE_WITHHELD_PARAMS: Readonly<Partial<Record<RemoteOperationName, readonly string[]>>> = {
+  source_item_read: ['selected_item'],
   source_index_status: [
     'conversation_id',
     'include_sender_aggregation',
@@ -216,6 +220,7 @@ export const REMOTE_WITHHELD_PARAMS: Readonly<Partial<Record<RemoteOperationName
 };
 
 const REMOTE_DESCRIPTIONS: Readonly<Partial<Record<RemoteOperationName, string>>> = {
+  source_item_read: 'Read more of a found Personal item. Pass its read_handle from olympus_search or source_answer. Handles expire after 30 minutes and work only on this connection. Each page is judged before release.',
   source_index_status: [
     'Inspect source-index corpus status: each corpus\'s refresh status and aggregate counts.',
     'Read-only: it never returns item metadata, sender counts, ledgers, source text, vectors or credentials.',
@@ -231,6 +236,7 @@ function withheldParams(operation: string): readonly string[] {
 
 /** The parameters an operation declares on the remote surface. */
 export function remoteDeclaredParams(operation: string, declared: readonly string[]): string[] {
+  if (operation === 'source_item_read') return ['read_handle', 'page', 'pages'];
   const withheld = withheldParams(operation);
   return declared.filter((name) => !withheld.includes(name));
 }
@@ -244,6 +250,14 @@ export function remoteToolDescription(operation: string, description: string): s
 
 /** An operation's input schema on the remote surface: withheld parameters removed. */
 export function remoteToolSchema(operation: string, schema: Record<string, unknown>): Record<string, unknown> {
+  if (operation === 'source_item_read') return {
+    type: 'object', additionalProperties: false, required: ['read_handle'],
+    properties: {
+      read_handle: { type: 'string', description: 'The read_handle returned for this item on this connection.' },
+      page: { type: 'integer', minimum: 1, description: 'Page to read (default 1).' },
+      pages: { type: 'integer', minimum: 1, maximum: 3, description: 'Number of pages (default 1).' },
+    },
+  };
   const withheld = withheldParams(operation);
   if (withheld.length === 0) return schema;
   const properties = asRecord(schema.properties) ?? {};
@@ -383,7 +397,7 @@ function sourceAnswerOutput(raw: unknown, options: RemoteOutputOptions): Record<
   const released: ReleasedItem[] = [];
   evidence.forEach((entry, index) => {
     if (dropped.has(index) || citations.length >= MAX_CITATIONS) return;
-    const citation = citationOutput(entry);
+    const citation = citationOutput(entry, options);
     citations.push(citation);
     released.push(releasedItemFromEvidence(entry, String(citation.label), typeof citation.title === 'string' ? citation.title : undefined));
   });
@@ -489,8 +503,9 @@ function citesInput(entry: Record<string, unknown>, input: ReleaseInput): boolea
       === input.providerConversationId;
 }
 
-/** Label, title and date only: no provider identifiers, URIs, spans or trust fields. */
-function citationOutput(entry: Record<string, unknown>): Record<string, unknown> {
+/** Allowlisted citation fields, with an optional opaque MCP read handle. */
+function citationOutput(entry: Record<string, unknown>, options: RemoteOutputOptions): Record<string, unknown> {
+  const readHandle = options.issueReadHandle?.(entry);
   const title = scannedText(entry.title, MAX_TITLE, 'line');
   const date = dateOnly(entry.authored_at) ?? dateOnly(entry.updated_at);
   // A child's parent rides in the title text ("lease.pdf, in 'Flat' from Alice"), scanned and capped
@@ -501,6 +516,7 @@ function citationOutput(entry: Record<string, unknown>): Record<string, unknown>
     : scannedText(citationTitleWithParent(title.text, parent), MAX_TITLE, 'line');
   return {
     label: sourceLabel(entry.provider, entry.family),
+    ...(readHandle ? { read_handle: readHandle } : {}),
     ...(composed.text && !composed.secret ? { title: composed.text } : {}),
     ...(date ? { date } : {}),
   };
@@ -793,6 +809,7 @@ const CITATION_SCHEMA = {
   required: ['label'],
   properties: {
     label: { type: 'string', enum: [...REMOTE_SOURCE_LABELS] },
+    read_handle: { type: 'string', pattern: '^rh_[A-Za-z0-9_-]{22,}$' },
     title: { type: 'string', maxLength: MAX_TITLE },
     date: { type: 'string', format: 'date' },
   },
