@@ -710,7 +710,8 @@ describe('versioned Olympus worker lifecycle', () => {
       const t0 = Date.now();
       const startedAt = new Date(t0 - 60_000).toISOString();
       // The background migrates past the 300 ms window, then writes done; the
-      // front mounts its stores and answers 150 ms after that.
+      // front mounts its stores and answers 250 ms after that, later than what
+      // was left of a window restarted only when the first one ran out.
       const doneAt = t0 + 450;
       const result = runWorkerLifecycle('upgrade', {
         platform: 'linux', homeDir: home, artifactPath: artifact.path,
@@ -721,7 +722,7 @@ describe('versioned Olympus worker lifecycle', () => {
           ...(Date.now() < doneAt ? { phase: 'migrating' as const, storeId: 'tier-ledger' } : { phase: 'done' as const }),
         }),
         progressLine: () => {},
-        readinessProbe: () => Date.now() >= doneAt + 150,
+        readinessProbe: () => Date.now() >= doneAt + 250,
       });
       expect(result).toMatchObject({ ok: true, readiness: { status: 'ready' } });
     } finally {
