@@ -134,3 +134,108 @@ test('a negative whose retrieval came back incomplete is kept only as unchecked,
     expect(result.counts).toMatchObject({ negativesKept: 5, negativesDropped: 0, negativesUnchecked: 1 });
   } finally { server.stop(true); opened.close(); }
 });
+// A real copy has chat and mail stores of mostly non-ASCII chunks. The
+// alternates search once read every such chunk again for each drafted
+// question, so 60 questions took hours on a 25 GB copy (2026-11-12).
+test('alternates read each store once per run, however many questions are drafted', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'eval-draft-scan-')); dirs.push(root);
+  const size = 1_500;
+  const path = join(root, 'chat-internal.sqlite');
+  const store = new LocalConnectorStore({ dbPath: path, corpusId: 'internal.fixture.chat', family: 'file', trustDomain: 'internal', tierLedger: null });
+  await store.syncFromConnector(fixtureConnector(() => Array.from({ length: size }, (_, i) => ({ id: String(i), name: 'Synthetic', text: `Olá, café às três. The Kestrel invoice total is forty seven dollars payable Tuesday. Entrée ${i}.` }))), { fetchContent: true });
+  store.close();
+  const ledger = new TierLedger({ dbPath: tierLedgerPathForStore(path) });
+  for (let i = 0; i < size; i++) ledger.recordDecision({ provider: 'fixture', accountScope: 'personal', providerItemId: String(i), family: 'file' }, {
+    metadataTier: 'private', contentTier: 'private', metadataPending: false, contentPending: false, metadataForced: false, metadataFlagged: false, contentRead: true,
+    state: 'current', snifferId: 'synthetic', decidedBy: 'sniffer', reasons: [], engineVersion: 'fixture', mapRevision: 'fixture',
+  });
+  ledger.close();
+  Bun.gc(true);
+  const opened = openEvalDataRoot({ dataRoot: root });
+  const server = Bun.serve({ port: 0, hostname: '127.0.0.1', async fetch(request) {
+    const prompt = ((await request.json()) as { messages: { content: string }[] }).messages.at(-1)!.content;
+    const result = prompt.includes('UNANSWERABLE')
+      ? { questions: Array.from({ length: 5 }, (_, i) => `Where are the nonexistent orchid records number ${i}?`) }
+      : { question: 'Which day is the bill due?', quote: 'The Kestrel invoice total is forty seven dollars payable Tuesday' };
+    return Response.json({ choices: [{ message: { content: JSON.stringify(result) } }] });
+  } });
+  const query = Database.prototype.query;
+  let chunkReads = 0;
+  Database.prototype.query = function (this: Database, sql: string) {
+    if (/\bFROM chunks\b/.test(sql)) chunkReads++;
+    return query.call(this, sql);
+  } as typeof query;
+  try {
+    const model = localDraftModel({ baseUrl: `http://127.0.0.1:${server.port}/v1`, model: 'synthetic' });
+    const reads = async (count: number) => {
+      chunkReads = 0;
+      const result = await draftPassageQuestions({ opened, count, seed: 'scan', model });
+      return { reads: chunkReads, alternates: result.dataset.questions.filter(q => q.expectedEvidence).map(q => q.expectedEvidence![0]!.alternates?.length ?? 0) };
+    };
+    const two = await reads(2);
+    const six = await reads(6);
+    expect(two.alternates.length).toBeGreaterThan(0);
+    // Every other copy of the quoted sentence is still found.
+    expect(six.alternates.every(n => n === size - 1)).toBe(true);
+    expect(six.reads).toBe(two.reads);
+  } finally { Database.prototype.query = query; server.stop(true); opened.close(); }
+});
+test('a resumed run reuses the drafts already made and asks the model only for the rest', async () => {
+  const opened = await world();
+  let drafts = 0;
+  const server = Bun.serve({ port: 0, hostname: '127.0.0.1', async fetch(request) {
+    const prompt = ((await request.json()) as { messages: { content: string }[] }).messages.at(-1)!.content;
+    if (!prompt.includes('UNANSWERABLE')) drafts++;
+    const result = prompt.includes('UNANSWERABLE')
+      ? { questions: Array.from({ length: 5 }, (_, i) => `Where are the nonexistent orchid records number ${i}?`) }
+      : { question: 'Which day is the bill due?', quote: 'The Kestrel invoice total is forty seven dollars payable Tuesday' };
+    return Response.json({ choices: [{ message: { content: JSON.stringify(result) } }] });
+  } });
+  try {
+    const model = localDraftModel({ baseUrl: `http://127.0.0.1:${server.port}/v1`, model: 'synthetic' });
+    let saved: import('../eval/draft-passage-questions.ts').DraftCheckpoint | undefined;
+    const lines: string[] = [];
+    const first = await draftPassageQuestions({ opened, count: 4, seed: 'resume', model, progress: line => lines.push(line),
+      checkpoint: { load: () => undefined, save: state => { saved = structuredClone(state); } } });
+    expect(drafts).toBe(4);
+    expect(saved?.drafted).toHaveLength(4);
+    // Progress names stages and counts only.
+    expect(lines.some(line => line.startsWith('alternates: store'))).toBe(true);
+    expect(lines.every(line => !line.includes('Kestrel') && !line.includes('bill'))).toBe(true);
+    drafts = 0;
+    const partial = { ...saved!, drafted: saved!.drafted.slice(0, 3) };
+    const resumed = await draftPassageQuestions({ opened, count: 4, seed: 'resume', model, checkpoint: { load: () => partial, save: () => {} } });
+    expect(drafts).toBe(1);
+    expect(resumed.dataset).toEqual(first.dataset);
+  } finally { server.stop(true); opened.close(); }
+});
+test('a resumed draft is reused only for the same sampled item, and a failed request is counted so its drafts are kept', async () => {
+  const opened = await world();
+  let drafts = 0; let failNext = false;
+  const server = Bun.serve({ port: 0, hostname: '127.0.0.1', async fetch(request) {
+    const prompt = ((await request.json()) as { messages: { content: string }[] }).messages.at(-1)!.content;
+    if (!prompt.includes('UNANSWERABLE')) {
+      drafts++;
+      if (failNext) { failNext = false; return new Response('busy', { status: 503 }); }
+    }
+    const result = prompt.includes('UNANSWERABLE')
+      ? { questions: Array.from({ length: 5 }, (_, i) => `Where are the nonexistent orchid records number ${i}?`) }
+      : { question: 'Which day is the bill due?', quote: 'The Kestrel invoice total is forty seven dollars payable Tuesday' };
+    return Response.json({ choices: [{ message: { content: JSON.stringify(result) } }] });
+  } });
+  try {
+    const model = localDraftModel({ baseUrl: `http://127.0.0.1:${server.port}/v1`, model: 'synthetic' });
+    let saved: import('../eval/draft-passage-questions.ts').DraftCheckpoint | undefined;
+    failNext = true;
+    const first = await draftPassageQuestions({ opened, count: 4, seed: 'bind', model, checkpoint: { load: () => undefined, save: state => { saved = structuredClone(state); } } });
+    expect(first.counts.requestsFailed).toBe(1);
+    expect(saved!.drafted).toHaveLength(3);
+    // A checkpoint from another copy: its first entry names an item this sample does not hold.
+    const moved = { ...saved!, drafted: saved!.drafted.map((entry, at) => at === 0 ? { ...entry, providerItemId: 'not-sampled' } : entry) };
+    drafts = 0;
+    const resumed = await draftPassageQuestions({ opened, count: 4, seed: 'bind', model, checkpoint: { load: () => moved, save: () => {} } });
+    // The moved entry and the failed one are drafted again; the other two are reused.
+    expect(drafts).toBe(2);
+    expect(resumed.counts.requestsFailed).toBe(0);
+  } finally { server.stop(true); opened.close(); }
+});

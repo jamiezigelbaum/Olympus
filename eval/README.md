@@ -425,10 +425,16 @@ loopback/private addresses (or `localhost`/`sparta` resolving entirely to them)
 are accepted, with redirects refused. Requests run sequentially. Sampling uses
 seeded reservoirs balanced across family/tier strata and only active, judged,
 unheld items with served text. Half the requests ask for a paraphrase with no
-quote content words. Invalid quotes and paraphrases are discarded; rare-word
-FTS phrase candidates are checked with the same passage rule for alternates.
-One third of the resulting questions are deterministically sealed. The private
-output file contains the drafts; stdout contains counts only.
+quote content words. Invalid quotes and paraphrases are discarded. Alternates
+for every kept quote are found in one read of each store after drafting: each
+item's words are split once and tested against all quotes with the same passage
+rule. One third of the resulting questions are deterministically sealed. The
+private output file contains the drafts; stdout contains counts only, and
+stderr a counts-only progress line per stage and every 10 questions. Each draft
+is kept in `<output>.drafts.json` (0600) as it is made; after a stop, the same
+command with `--resume` (same seed and count) asks the model only for the rest.
+A saved draft is reused only for the same sampled item while its quote is still
+in that item. The file is removed once the set is written with no failed request.
 
 No one reads the drafts, because their text stays on Sparta. A local check
 replaces that review for the 5–10 proposed negative questions. Each negative is
