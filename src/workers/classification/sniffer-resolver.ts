@@ -81,6 +81,7 @@ const MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2;
 const OUTPUT_CHARS_PER_ITEM = 110;
 
 export interface SnifferTarget {
+  onDemandRead?: (question: SnifferQuestion) => boolean;
   ledger: TierLedger;
   sniffer: TierSnifferStore;
   /**
@@ -806,6 +807,8 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       } finally {
         turnCallMs = Math.max(0, monotonicNow() - callStarted);
         report.callMs += turnCallMs;
+        const onDemandCount = group.filter((item) => item.question.pass === 'content' && item.target.onDemandRead?.(item.question)).length;
+        if (onDemandCount > 0) console.info(`[olympus:on-demand] step=judge count=${onDemandCount} ms=${Math.max(0, turnCallMs - Math.min(slotWaitMs, turnCallMs))}`);
         // A wait can never be longer than the call that reported it.
         const waited = Math.min(slotWaitMs, turnCallMs);
         report.timing.slotWaitMs += waited;

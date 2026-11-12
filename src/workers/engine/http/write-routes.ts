@@ -32,6 +32,7 @@ const WORKER_POST_PATHS: readonly string[] = [
   '/source/index/sync',
   '/source/index/files/extract',
   '/source/index/files/plan',
+  '/source/index/files/read-on-demand',
   '/source/index/files/transcribe',
   '/source/index/files/recycle-leases',
   '/source/index/files/janitor-requeue',

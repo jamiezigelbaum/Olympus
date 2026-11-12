@@ -85,7 +85,12 @@ function buildMatcher(
   options: FileLaneIngestionMatcherOptions,
 ): SourceExclusionMatcher {
   const standing = options.standing(env);
-  const policyRules = policy.rules.filter((rule) => rule.action !== 'full_extract');
+  const policyRules: SourceIngestionRule[] = [
+    ...policy.rules.filter((rule) => rule.action !== 'full_extract'),
+    ...policy.roots.filter((root) => root.default_action !== 'full_extract').map((root) => ({
+      match: { path_prefixes: [root.path] }, action: root.default_action, reason: 'folder_names_only',
+    })),
+  ];
   const policyCriteria = policyRules.flatMap((rule, index) =>
     criteriaOf(rule, index, options.ruleIdPrefix)
   );
@@ -102,8 +107,16 @@ function buildMatcher(
     const standingDecision = standing.evaluateItem(facts);
     if (standingDecision.disposition === 'exclude') return standingDecision;
     const policyDecision = decide(policyRules, facts, options.ruleIdPrefix);
-    return standingDecision.disposition === 'metadata_only'
-      ? standingDecision
+    if (standingDecision.disposition === 'metadata_only') return standingDecision;
+    const path = typeof facts.path === 'string' ? normalizeSourceExclusionPath(facts.path) : undefined;
+    const root = path === undefined ? undefined : [...policy.roots]
+      .sort((left, right) => right.path.length - left.path.length)
+      .find((entry) => {
+        const prefix = normalizePolicyPrefix(entry.path);
+        return prefix !== undefined && (prefix === '/' || path === prefix || path.startsWith(`${prefix}/`));
+      });
+    return root?.default_action === 'on_demand'
+      ? { ...policyDecision, disposition: 'metadata_only', readOnDemand: true }
       : policyDecision;
   };
 
@@ -128,7 +141,7 @@ const POLICY_ADMITTED: SourceExclusionDecision = Object.freeze({
 
 function criteriaOf(rule: SourceIngestionRule, index: number, ruleIdPrefix: string): SourceExclusionCriterion[] {
   const ruleId = `${ruleIdPrefix}-${index + 1}`;
-  const mode = 'metadata_only' as const;
+  const mode = rule.action === 'on_demand' ? 'on_demand' as const : 'metadata_only' as const;
   const pathCriteria: SourceExclusionCriterion[] = (rule.match.path_prefixes ?? []).map((path) => ({
     ruleId,
     reason: rule.reason,
@@ -194,6 +207,7 @@ function decide(
       return {
         excluded: false,
         disposition: 'metadata_only',
+        ...(rule.action === 'on_demand' ? { readOnDemand: true } : {}),
         outcome: 'metadata_only_unevaluable',
         ruleId,
         reason: rule.reason,
@@ -219,6 +233,7 @@ function decide(
     return {
       excluded: false,
       disposition: 'metadata_only',
+      ...(rule.action === 'on_demand' ? { readOnDemand: true } : {}),
       outcome: pathMatchesPrefix || pathMatchesContains
         ? 'metadata_only_path_prefix'
         : 'metadata_only_media',
