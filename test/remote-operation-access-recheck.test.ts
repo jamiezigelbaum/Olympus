@@ -35,7 +35,7 @@ for (const surface of ['MCP', 'OpenAPI'] as const) {
           let unavailable = false;
           let releases = 0;
           let settles = 0;
-          const pause = async (at: typeof stage) => {
+          const holdAt = async (at: typeof stage) => {
             if (stage !== at) return;
             reached();
             await held;
@@ -51,14 +51,14 @@ for (const surface of ['MCP', 'OpenAPI'] as const) {
               inputs: () => [],
               inputsOffThread: async () => {
                 releases += 1;
-                await pause(releases === 1 ? 'release' : 'final release');
+                await holdAt(releases === 1 ? 'release' : 'final release');
                 return [];
               },
               secureDerivativeDefault: () => 'approval',
             },
             remotePrivatePart: { start: () => ({ settle: async () => {
               settles += 1;
-              await pause('settle');
+              await holdAt('settle');
               return false;
             } }) },
           };
