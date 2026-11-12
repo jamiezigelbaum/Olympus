@@ -13,7 +13,7 @@ import { lastKeywordLanguages, storeKeywordLanguages, storeKeywordLanguagesWith 
 import { expandSourceIndexKeywords, KEYWORD_PREPARE_WAIT_MS, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
 import { RECENT_ITEMS_CUT_SHORT } from '../../core/source-index/partial-search.ts';
 import { controlPathHeadroom, ingestionTurn, type ControlPathHeadroom } from '../control-path-headroom.ts';
-import { OffThreadReadBusyError, offThreadReadsSupported, readOnPool, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
+import { OffThreadReadBusyError, offThreadReadsSupported, readOnPool, readPoolHasWaitingWork, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
 // The shared connector ingest spine: ONE generic local store that turns any
 // Contract 1 SourceConnector into a searchable, analyst-served corpus with
 // zero new storage code.
@@ -2376,6 +2376,12 @@ const VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128;
 const VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8;
 const VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25;
 const VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250;
+/**
+ * A store that opens with an incomplete digest waits this long before its
+ * first turn: on upgrade every store opens at once, and the backfills must
+ * not compete with the cold reads of startup (#1487).
+ */
+const VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS = 60_000;
 
 /** Halve after a long turn, double back after a short one, within bounds. */
 export function nextVectorDigestBackfillRows(rows: number, turnMs: number): number {
@@ -3461,7 +3467,7 @@ export class LocalConnectorStore {
       // backfill timer at open; an empty or finished store keeps none pending.
       if (!this.readOnly) {
         const model = (this.db.query('SELECT model_id FROM chunk_embeddings ORDER BY rowid DESC LIMIT 1').get() as { model_id: string } | null)?.model_id;
-        if (model && !vectorDigestState(this.db, model).completed) this.scheduleVectorDigestBackfill(model);
+        if (model && !vectorDigestState(this.db, model).completed) this.scheduleVectorDigestBackfill(model, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS);
       }
     } catch (error) {
       closeSqliteStore(this.db, { checkpoint: !this.readOnly });
@@ -3488,8 +3494,9 @@ export class LocalConnectorStore {
       // overlapping old and new models never oscillate.
       const model = this.vectorDigestBackfillModel;
       if (!model) return;
-      // An Ask in flight on this store goes first.
-      if (this.vectorLanesInFlight > 0) { this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS); return; }
+      // An Ask in flight on this store, or any owner-visible read waiting
+      // for the pool (a status count, another store's lane), goes first.
+      if (this.vectorLanesInFlight > 0 || (offThreadReadsSupported(this.dbPath) && readPoolHasWaitingWork())) { this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS); return; }
       if (offThreadReadsSupported(this.dbPath)) { void this.backfillVectorDigestTurnOnPool(model); return; }
       try {
         const started = performance.now();
@@ -3518,9 +3525,11 @@ export class LocalConnectorStore {
       const state = vectorDigestState(this.db, model);
       if (state.completed) return;
       const rows = this.vectorDigestBackfillRows;
-      const started = performance.now();
       const source = await readOnPool(this.dbPath, { mode: 'all', ...vectorDigestSourceQuery(state.cursorRowid, rows) }) as VectorDigestSourceRow[];
       if (this.closedForPoolReads) return;
+      // Only the write runs on this thread, so only its time sizes the turn:
+      // a slow pool read stalls nothing here (#1487).
+      const started = performance.now();
       const applied = applyVectorDigestWindow(this.db, model, state.cursorRowid, source, rows);
       this.vectorDigestBackfillRows = nextVectorDigestBackfillRows(rows, performance.now() - started);
       if (!applied.completed) next = 0;

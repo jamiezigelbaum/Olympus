@@ -417,6 +417,21 @@ function serveSnapshotWaiters(): void {
 }
 
 /**
+ * Whether any store's pool work is waiting for a thread: a queued read or a
+ * snapshot (a status count, an Ask lane). Background maintenance stands back
+ * while this is true, so owner-visible reads go first.
+ */
+export function readPoolHasWaitingWork(): boolean {
+  return waitingWorkForTests?.() ?? (snapshotWaiters.length > 0 || [...queues.values()].some((waiting) => waiting.length > 0));
+}
+
+let waitingWorkForTests: (() => boolean) | undefined;
+/** Tests only: what readPoolHasWaitingWork answers. Left out, the pool's own state. */
+export function setReadPoolWaitingWorkForTests(waiting?: () => boolean): void {
+  waitingWorkForTests = waiting;
+}
+
+/**
  * Reads one query of `dbPath` on the pool, in its own read transaction.
  * Rejects with OffThreadReadBusyError when the store's queue is full, or
  * when `deadlineAtMs` (on the pool's clock) passes before the rows are back.

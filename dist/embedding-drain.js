@@ -22140,6 +22140,10 @@ function serveSnapshotWaiters() {
     waiter.resolve(reader);
   }
 }
+function readPoolHasWaitingWork() {
+  return waitingWorkForTests?.() ?? (snapshotWaiters.length > 0 || [...queues.values()].some((waiting) => waiting.length > 0));
+}
+var waitingWorkForTests;
 function readOnPool(dbPath, read, options = {}) {
   const deadlineAtMs = options.deadlineAtMs ?? clock2.now() + OFF_THREAD_READ_TIMEOUT_MS;
   const waiting = queues.get(dbPath) ?? [];
@@ -24858,6 +24862,7 @@ var VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128;
 var VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8;
 var VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25;
 var VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250;
+var VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS = 60000;
 function nextVectorDigestBackfillRows(rows, turnMs) {
   if (turnMs > VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS)
     return Math.max(VECTOR_DIGEST_BACKFILL_MIN_ROWS, Math.floor(rows / 2));
@@ -25111,7 +25116,7 @@ class LocalConnectorStore {
       if (!this.readOnly) {
         const model = this.db.query("SELECT model_id FROM chunk_embeddings ORDER BY rowid DESC LIMIT 1").get()?.model_id;
         if (model && !vectorDigestState(this.db, model).completed)
-          this.scheduleVectorDigestBackfill(model);
+          this.scheduleVectorDigestBackfill(model, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS);
       }
     } catch (error) {
       closeSqliteStore(this.db, { checkpoint: !this.readOnly });
@@ -25134,7 +25139,7 @@ class LocalConnectorStore {
       const model = this.vectorDigestBackfillModel;
       if (!model)
         return;
-      if (this.vectorLanesInFlight > 0) {
+      if (this.vectorLanesInFlight > 0 || offThreadReadsSupported(this.dbPath) && readPoolHasWaitingWork()) {
         this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS);
         return;
       }
@@ -25163,10 +25168,10 @@ class LocalConnectorStore {
       if (state.completed)
         return;
       const rows = this.vectorDigestBackfillRows;
-      const started = performance.now();
       const source = await readOnPool(this.dbPath, { mode: "all", ...vectorDigestSourceQuery(state.cursorRowid, rows) });
       if (this.closedForPoolReads)
         return;
+      const started = performance.now();
       const applied = applyVectorDigestWindow(this.db, model, state.cursorRowid, source, rows);
       this.vectorDigestBackfillRows = nextVectorDigestBackfillRows(rows, performance.now() - started);
       if (!applied.completed)
