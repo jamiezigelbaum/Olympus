@@ -1,3 +1,4 @@
+import type { EvidenceWindowSource, WindowScorer } from '../../core/evidence-window-placement.ts';
 import { createVectorDigestSchema, writeVectorDigest, backfillVectorDigests, vectorDigestState, vectorDigestSourceQuery, applyVectorDigestWindow, type VectorDigestSourceRow } from './vector-digest.ts';
 import { encodeVectorDigest, scoreVectorDigest, VectorDigestHeap } from '../source-index/vector-digest.ts';
 import { iterateRows } from '../../core/sqlite-rows.ts';
@@ -13,7 +14,7 @@ import { lastKeywordLanguages, storeKeywordLanguages, storeKeywordLanguagesWith 
 import { expandSourceIndexKeywords, KEYWORD_PREPARE_WAIT_MS, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
 import { RECENT_ITEMS_CUT_SHORT } from '../../core/source-index/partial-search.ts';
 import { controlPathHeadroom, ingestionTurn, type ControlPathHeadroom } from '../control-path-headroom.ts';
-import { OffThreadReadBusyError, offThreadReadsSupported, readOnPool, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
+import { OffThreadReadBusyError, offThreadReadsSupported, readOnPool, readPoolHasWaitingWork, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
 // The shared connector ingest spine: ONE generic local store that turns any
 // Contract 1 SourceConnector into a searchable, analyst-served corpus with
 // zero new storage code.
@@ -118,6 +119,8 @@ import {
   visibilityAwaited,
   judgedAwaited,
   parentVerdictsSteps,
+  CHILD_PARENT_CHAIN_LIMIT,
+  childVisibilityUnchanged,
   hiddenChildKeysSteps,
   ledgerVisibilityOffThread,
   ledgerVisibilityHere,
@@ -1129,6 +1132,24 @@ class MutablePkList {
 }
 
 const VISIBILITY_PK_FLAGS = ['hidden', 'held', 'heldForJudgment', 'metadataLayer', 'metadataLayerContentUnread'] as const;
+
+interface HiddenChildParent {
+  ref: ParentRef;
+  children: Map<string, number[]>;
+  dependencies: Set<string>;
+  hidden: boolean;
+}
+
+interface HiddenChildMemo {
+  ledger: TierLedger;
+  ledgerCursor: number;
+  storeCursors: Map<LocalConnectorStore, number>;
+  parents: Map<string, HiddenChildParent>;
+  childParents: Map<string, string>;
+  /** Identity and local-parent keys, including every ancestor consulted. */
+  dependents: Map<string, Set<string>>;
+  hiddenParents: Map<string, number[]>;
+}
 
 interface TierVisibilityMemo {
   ledger: TierLedger;
@@ -2337,8 +2358,10 @@ async function scanVectorPages(
   const after = embeddingAuthorityFromRow(await read(authority) as EmbeddingAuthorityRow | null, provider);
   if (after.skippedReason) return { skippedReason: after.skippedReason };
   if (after.token !== beforeToken) return { skippedReason: 'embedding_authority_changed_during_query' };
-  // Old/read-only schemas and incomplete backfills retain the exact scan.
-  const digestTable = await read({ mode: 'get', sql: "SELECT 1 FROM sqlite_master WHERE name = 'chunk_vector_digest_meta'", params: [] });
+  // Old/read-only schemas and incomplete backfills retain the exact scan, as
+  // does every store unless OLYMPUS_VECTOR_DIGEST=on (see
+  // vectorDigestSearchDisabled).
+  const digestTable = !vectorDigestSearchDisabled() && await read({ mode: 'get', sql: "SELECT 1 FROM sqlite_master WHERE name = 'chunk_vector_digest_meta'", params: [] });
   const digestReady = digestTable && await read({ mode: 'get', sql: 'SELECT 1 FROM chunk_vector_digest_meta WHERE model_id = ? AND completed = 1', params: [pageOptions.modelId] });
   if (digestReady) return scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit);
   const bestByItem = new Map<number, { bestCosine: number; bestChunkPk: number; localItemId: string }>();
@@ -2371,11 +2394,27 @@ async function scanVectorPages(
   return { bestByItem, dimensionMismatches };
 }
 
+/**
+ * The digest pass is off by default until an intermittent Bun memory fault
+ * seen with it on a 608K-row store under concurrent reads is understood
+ * (olympus-ops#151): OLYMPUS_VECTOR_DIGEST=on turns it on. Off, every vector
+ * lane runs the exact scan; the digest is still written and backfilled.
+ */
+export function vectorDigestSearchDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.OLYMPUS_VECTOR_DIGEST?.trim().toLowerCase() !== 'on';
+}
+
 /** Backfill turns stay short on the worker thread (plan ruling on #1444). */
 const VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128;
 const VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8;
 const VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25;
 const VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250;
+/**
+ * A store that opens with an incomplete digest waits this long before its
+ * first turn: on upgrade every store opens at once, and the backfills must
+ * not compete with the cold reads of startup (#1487).
+ */
+const VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS = 60_000;
 
 /** Halve after a long turn, double back after a short one, within bounds. */
 export function nextVectorDigestBackfillRows(rows: number, turnMs: number): number {
@@ -2401,14 +2440,15 @@ export async function scanDigestPages(
   while (true) {
     if (expired()) return cut;
     const page = connectorStoreVectorDigestPageQuery(options, afterChunkPk);
-    const rows = await read({ mode: 'all', ...page }) as Array<{ chunk_pk: number; digest: Uint8Array }>;
-    for (let index = 0; index < rows.length; index++) {
-      if ((index & 31) === 0 && expired()) return cut;
-      const row = rows[index]!;
-      heap.append(row.chunk_pk, scoreVectorDigest(query, row.digest));
-    }
-    if (rows.length < 4096) break;
-    afterChunkPk = rows.at(-1)!.chunk_pk;
+    const packed = await read({ mode: 'get', ...page }) as VectorDigestPackedPage;
+    const finished = forEachPackedVectorDigest(packed, (chunkPk, digest, index) => {
+      if ((index & 31) === 0 && expired()) return false;
+      heap.append(chunkPk, scoreVectorDigest(query, digest));
+      return true;
+    });
+    if (!finished) return cut;
+    if (packed.n < VECTOR_DIGEST_PAGE_ROWS) break;
+    afterChunkPk = packed.last_pk;
     // Same cadence as the exact scan: a timer tick per page costs more than the page.
     if (digestPages++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0) await yieldConnectorStoreVectorScan();
   }
@@ -2452,15 +2492,49 @@ export async function scanDigestPages(
   return expired() ? cut : { bestByItem, dimensionMismatches, exhausted: heap.length === 0 };
 }
 
+const VECTOR_DIGEST_PAGE_ROWS = 4096;
+
+/**
+ * One page of digests as ONE row: the digests concatenated into a single
+ * blob, with their keys and byte lengths alongside in the same aggregate
+ * pass, so the three always line up. A page crosses the read-pool thread as
+ * one buffer and two strings instead of 4,096 small typed arrays; per-row
+ * blobs were the shape under the Bun memory fault on large stores
+ * (olympus-ops#151).
+ */
+export type VectorDigestPackedPage = { n: number; last_pk: number; pks: string; lengths: string; packed: Uint8Array };
+
+/** Visits each digest as a view into the page's blob; false from `visit` stops early. */
+export function forEachPackedVectorDigest(
+  page: VectorDigestPackedPage, visit: (chunkPk: number, digest: Uint8Array, index: number) => boolean,
+): boolean {
+  if (page.n === 0) return true;
+  const pks = JSON.parse(page.pks) as number[];
+  const lengths = JSON.parse(page.lengths) as number[];
+  const total = lengths.reduce((sum, length) => sum + length, 0);
+  if (pks.length !== page.n || lengths.length !== page.n || total !== page.packed.byteLength) {
+    throw new Error('vector digest page does not unpack: key, length and byte counts disagree');
+  }
+  let offset = 0;
+  for (let index = 0; index < page.n; index++) {
+    const length = lengths[index]!;
+    if (!visit(pks[index]!, page.packed.subarray(offset, offset + length), index)) return false;
+    offset += length;
+  }
+  return true;
+}
+
 /** INTEGER PRIMARY KEY is the rowid: no secondary index, joins, or blob sort. */
 export function connectorStoreVectorDigestPageQuery(
-  options: { modelId: string; accountScope?: string }, afterChunkPk: number, limit = 4096,
+  options: { modelId: string; accountScope?: string }, afterChunkPk: number, limit = VECTOR_DIGEST_PAGE_ROWS,
 ): { sql: string; params: Array<string | number> } {
   const account = normalizeOptionalAccountScope(options.accountScope);
   return {
-    sql: `SELECT chunk_pk, digest FROM chunk_vector_digest
-      WHERE chunk_pk > ? AND model_id = ? ${account ? 'AND account_scope = ?' : ''}
-      ORDER BY chunk_pk LIMIT ?`,
+    sql: `SELECT count(*) AS n, max(chunk_pk) AS last_pk, json_group_array(chunk_pk) AS pks,
+        json_group_array(length(digest)) AS lengths, CAST(coalesce(group_concat(digest, ''), x'') AS BLOB) AS packed
+      FROM (SELECT chunk_pk, digest FROM chunk_vector_digest
+        WHERE chunk_pk > ? AND model_id = ? ${account ? 'AND account_scope = ?' : ''}
+        ORDER BY chunk_pk LIMIT ?)`,
     params: [afterChunkPk, options.modelId, ...(account ? [account] : []), limit],
   };
 }
@@ -2601,6 +2675,8 @@ export function connectorStoreCurrentEmbeddingModelId(
 }
 
 export interface ConnectorStoreLocalContent {
+  // Full text of only the selected passages, index-aligned with chunks.
+  windowTexts?: readonly string[];
   trustTier: SourceTrustTier;
   chunks: readonly string[];
   truncated: boolean;
@@ -3461,7 +3537,7 @@ export class LocalConnectorStore {
       // backfill timer at open; an empty or finished store keeps none pending.
       if (!this.readOnly) {
         const model = (this.db.query('SELECT model_id FROM chunk_embeddings ORDER BY rowid DESC LIMIT 1').get() as { model_id: string } | null)?.model_id;
-        if (model && !vectorDigestState(this.db, model).completed) this.scheduleVectorDigestBackfill(model);
+        if (model && !vectorDigestState(this.db, model).completed) this.scheduleVectorDigestBackfill(model, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS);
       }
     } catch (error) {
       closeSqliteStore(this.db, { checkpoint: !this.readOnly });
@@ -3488,8 +3564,9 @@ export class LocalConnectorStore {
       // overlapping old and new models never oscillate.
       const model = this.vectorDigestBackfillModel;
       if (!model) return;
-      // An Ask in flight on this store goes first.
-      if (this.vectorLanesInFlight > 0) { this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS); return; }
+      // An Ask in flight on this store, or any owner-visible read waiting
+      // for the pool (a status count, another store's lane), goes first.
+      if (this.vectorLanesInFlight > 0 || (offThreadReadsSupported(this.dbPath) && readPoolHasWaitingWork())) { this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS); return; }
       if (offThreadReadsSupported(this.dbPath)) { void this.backfillVectorDigestTurnOnPool(model); return; }
       try {
         const started = performance.now();
@@ -3518,9 +3595,11 @@ export class LocalConnectorStore {
       const state = vectorDigestState(this.db, model);
       if (state.completed) return;
       const rows = this.vectorDigestBackfillRows;
-      const started = performance.now();
       const source = await readOnPool(this.dbPath, { mode: 'all', ...vectorDigestSourceQuery(state.cursorRowid, rows) }) as VectorDigestSourceRow[];
       if (this.closedForPoolReads) return;
+      // Only the write runs on this thread, so only its time sizes the turn:
+      // a slow pool read stalls nothing here (#1487).
+      const started = performance.now();
       const applied = applyVectorDigestWindow(this.db, model, state.cursorRowid, source, rows);
       this.vectorDigestBackfillRows = nextVectorDigestBackfillRows(rows, performance.now() - started);
       if (!applied.completed) next = 0;
@@ -4043,6 +4122,7 @@ export class LocalConnectorStore {
   }
 
   private tierLedgerHiddenMemo: TierVisibilityMemo | undefined;
+  private hiddenChildMemo: HiddenChildMemo | undefined;
   private visibilityJournal = false;
   private visibilityFeedPresent = false;
   private visibilitySqlMemo: TierVisibilityMemo | undefined;
@@ -4094,7 +4174,8 @@ export class LocalConnectorStore {
         .get() as { first: number | null; last: number | null; issued: number | null };
       // AUTOINCREMENT never reuses a number, so an emptied feed still knows its last one.
       const cursor = bounds.last ?? bounds.issued ?? 0;
-      if (after === undefined || after > cursor || (bounds.first !== null && after < bounds.first - 1)) return { cursor };
+      if (after === undefined || after > cursor || (bounds.first !== null && after < bounds.first - 1)
+        || (bounds.first === null && after < cursor)) return { cursor };
       const rows = this.db.query(`SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id
         FROM main.item_visibility_feed WHERE seq > ?`).all(after) as Array<{
           provider: string; account_scope: string; conversation_key: string; provider_item_id: string;
@@ -5193,7 +5274,193 @@ export class LocalConnectorStore {
     return next.value;
   }
 
+  /**
+   * Both runners use this memo. A missing feed or changed lane rebuilds using
+   * the original parent walk; a yielded build never publishes a stale stamp.
+   */
   private *hiddenChildReadSteps(): Generator<VisibilityRead, number[], unknown> {
+    if (!this.childItemColumnsPresent) return [];
+    const lane = this.childVisibilityLane();
+    const prior = this.hiddenChildMemo;
+    let ledger: TierLedger | undefined;
+    let stores: LocalConnectorStore[] = [];
+    let ledgerChanges: { cursor: number; identities?: TierLedgerIdentity[] } | undefined;
+    const storeChanges = new Map<LocalConnectorStore, { cursor: number; identities?: TierLedgerIdentity[] }>();
+    try {
+      ledger = lane.ledger();
+      const members = lane.stores();
+      if (!ledger || this.visibilityLedger() !== ledger
+        || !members.includes(this) || !members.every(store => store instanceof LocalConnectorStore && store.visibilityFeedPresent)) {
+        this.hiddenChildMemo = undefined;
+        return yield* this.hiddenChildFullReadSteps();
+      }
+      stores = members as LocalConnectorStore[];
+      const same = prior?.ledger === ledger && prior.storeCursors.size === stores.length
+        && stores.every(store => prior.storeCursors.has(store));
+      ledgerChanges = ledger.visibilityChangesSince(same ? prior.ledgerCursor : undefined);
+      for (const store of stores) storeChanges.set(store, store.itemVisibilityChangesSince(same ? prior.storeCursors.get(store) : undefined));
+    } catch {
+      this.hiddenChildMemo = undefined;
+      return yield* this.hiddenChildFullReadSteps();
+    }
+    const incremental = prior?.ledger === ledger && prior.storeCursors.size === stores.length
+      && stores.every(store => prior.storeCursors.has(store) && storeChanges.get(store)!.identities !== undefined)
+      && ledgerChanges.identities !== undefined;
+    // Never leave an invalid memo available to a reader while a full build yields.
+    if (!incremental) this.hiddenChildMemo = undefined;
+    const expected = this.hiddenChildMemo;
+    const updates = new Map<string, HiddenChildParent>();
+    let full: number[] | undefined;
+    if (!incremental) {
+      full = yield* this.hiddenChildFullReadSteps(updates);
+    } else {
+      // Most lanes have no children. Keep their refresh index-only even
+      // when an import changed thousands of otherwise unrelated identities.
+      const hasChildren = prior.parents.size > 0 || (yield* this.visibilityStoreRead({
+        sql: 'SELECT 1 AS present FROM items WHERE parent_local_item_id IS NOT NULL LIMIT 1', params: [], mode: 'get',
+      }));
+      if (hasChildren) {
+        const changed = [...new Map([...(ledgerChanges.identities ?? []), ...[...storeChanges.values()].flatMap(change => change.identities!)]
+          .map(identity => [tierLedgerIdentityKey(identity), identity])).values()];
+        const affected = new Map<string, ParentRef>();
+        const affect = (dependency: string) => {
+          for (const key of prior.dependents.get(dependency) ?? []) affected.set(key, prior.parents.get(key)!.ref);
+        };
+        for (const identity of changed) {
+          const key = tierLedgerIdentityKey(identity);
+          affect(`i:${key}`);
+          const oldParent = prior.childParents.get(key);
+          if (oldParent) affected.set(oldParent, prior.parents.get(oldParent)!.ref);
+        }
+        // Current links cover new children and reparenting. Current standings
+        // also find newly inserted ancestors previously known only by local id.
+        for (let offset = 0; offset < changed.length; offset += HIDDEN_CHILD_PARENT_SLICE) {
+          const batch = changed.slice(offset, offset + HIDDEN_CHILD_PARENT_SLICE);
+          const links = yield* visibilityRead(() => this.parentLinksOf(batch), () => this.parentLinksOfOffThread(batch));
+          for (const ref of links.values()) affected.set(parentKey(ref), ref);
+          for (const store of stores) {
+            const rows = yield* visibilityRead(() => store.itemStandings(batch), () => store.itemStandingsOffThread(batch));
+            for (const row of rows.values()) affect(`p:${parentKey(row)}`);
+          }
+        }
+        const parents = [...affected.values()];
+        for (let offset = 0; offset < parents.length; offset += HIDDEN_CHILD_PARENT_SLICE) {
+          const slice = parents.slice(offset, offset + HIDDEN_CHILD_PARENT_SLICE);
+          const verdicts = yield* parentVerdictsSteps(lane, slice);
+          for (const [key, value] of yield* this.hiddenChildParentEntriesSteps(lane, slice, verdicts)) updates.set(key, value);
+        }
+      }
+    }
+    // Another reader may have advanced the shared memo while this one awaited
+    // SQL. Redo against that reader's state, never overwrite it with this delta.
+    if (this.hiddenChildMemo !== expected) return yield* this.hiddenChildReadSteps();
+    let stable = false;
+    try {
+      const current = lane.stores();
+      stable = lane.ledger() === ledger && this.visibilityLedger() === ledger
+        && ledger.visibilityChangesSince().cursor === ledgerChanges.cursor
+        && current.length === stores.length && stores.every(store => current.includes(store)
+          && store.visibilityFeedPresent && store.itemVisibilityChangesSince().cursor === storeChanges.get(store)!.cursor);
+    } catch { /* An unverifiable build is never installed. */ }
+    if (!stable) {
+      // Counts retain their start-of-build semantics. The next read consumes
+      // every intervening change; off-thread people reads check the lane marker.
+      if (full) return full;
+      const hidden = new Map(prior!.hiddenParents);
+      for (const [key, entry] of updates) {
+        if (entry.hidden) hidden.set(key, [...entry.children.values()].flat()); else hidden.delete(key);
+      }
+      return [...hidden.values()].flat();
+    }
+    const memo: HiddenChildMemo = incremental ? prior! : {
+      ledger, ledgerCursor: ledgerChanges.cursor, storeCursors: new Map(), parents: new Map(),
+      childParents: new Map(), dependents: new Map(), hiddenParents: new Map(),
+    };
+    // Everything below is synchronous: apply prepared deltas and swap the
+    // generation together, so no reader sees a partially applied parent.
+    for (const [key, entry] of updates) {
+      const old = memo.parents.get(key);
+      if (old) {
+        for (const child of old.children.keys()) memo.childParents.delete(child);
+        for (const dependency of old.dependencies) {
+          const keys = memo.dependents.get(dependency)!;
+          keys.delete(key);
+          if (keys.size === 0) memo.dependents.delete(dependency);
+        }
+      }
+      memo.parents.delete(key);
+      memo.hiddenParents.delete(key);
+    }
+    for (const [key, entry] of updates) {
+      if (entry.children.size === 0) continue;
+      memo.parents.set(key, entry);
+      for (const child of entry.children.keys()) memo.childParents.set(child, key);
+      for (const dependency of entry.dependencies) {
+        const keys = memo.dependents.get(dependency) ?? new Set<string>();
+        keys.add(key);
+        memo.dependents.set(dependency, keys);
+      }
+      if (entry.hidden) memo.hiddenParents.set(key, [...entry.children.values()].flat());
+    }
+    this.hiddenChildMemo = { ...memo, ledgerCursor: ledgerChanges.cursor,
+      storeCursors: new Map(stores.map(store => [store, storeChanges.get(store)!.cursor])) };
+    return [...memo.hiddenParents.values()].flat();
+  }
+
+  /** Collect only the changed parents' children and ancestor dependencies. */
+  private *hiddenChildParentEntriesSteps(
+    lane: ChildVisibilityLane, parents: readonly ParentRef[], verdicts: ReadonlyMap<string, { visible: boolean }>,
+  ): Generator<VisibilityRead, Map<string, HiddenChildParent>, unknown> {
+    const entries = new Map(parents.map(ref => [parentKey(ref), {
+      ref, hidden: verdicts.get(parentKey(ref))?.visible !== true,
+      children: new Map<string, number[]>(), dependencies: new Set<string>(),
+    }]));
+    const rows = (yield* this.visibilityStoreRead({ sql: `
+      SELECT item_pk, provider, account_scope, provider_item_id, provider_conversation_id, parent_local_item_id
+      FROM items WHERE tombstoned = 0 AND parent_local_item_id IN (SELECT value FROM json_each(?))
+    `, params: [JSON.stringify(parents.map(parent => parent.parentLocalItemId))], mode: 'all' })) as Array<{
+      item_pk: number; provider: string; account_scope: string; provider_item_id: string;
+      provider_conversation_id: string | null; parent_local_item_id: string;
+    }>;
+    for (const row of rows) {
+      const entry = entries.get(parentKey({ provider: row.provider, accountScope: row.account_scope, parentLocalItemId: row.parent_local_item_id }));
+      if (!entry) continue;
+      const key = tierLedgerIdentityKey({ provider: row.provider, accountScope: row.account_scope,
+        providerItemId: row.provider_item_id, ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}) });
+      const pks = entry.children.get(key) ?? [];
+      pks.push(row.item_pk);
+      entry.children.set(key, pks);
+    }
+    let climbing = parents.map(ref => ({ ref, origin: parentKey(ref) }));
+    for (let depth = 0; depth < CHILD_PARENT_CHAIN_LIMIT && climbing.length > 0; depth++) {
+      const origins = new Map<string, Set<string>>();
+      for (const { ref, origin } of climbing) {
+        const dependencies = entries.get(origin)!.dependencies;
+        dependencies.add(`p:${parentKey(ref)}`);
+        if (ref.identity) dependencies.add(`i:${tierLedgerIdentityKey(ref.identity)}`);
+        const keys = origins.get(parentKey(ref)) ?? new Set<string>();
+        keys.add(origin);
+        origins.set(parentKey(ref), keys);
+      }
+      const refs = [...new Map(climbing.map(({ ref }) => [parentKey(ref), ref])).values()];
+      const next = new Map<string, { ref: ParentRef; origin: string }>();
+      for (const store of lane.stores()) {
+        const standings = yield* visibilityRead(() => store.parentStandings(refs),
+          () => store.parentStandingsOffThread?.(refs) ?? Promise.resolve(store.parentStandings(refs)));
+        for (const row of standings) for (const origin of origins.get(parentKey(row)) ?? []) {
+          entries.get(origin)!.dependencies.add(`i:${tierLedgerIdentityKey(row.identity)}`);
+          if (row.grandparentLocalItemId !== undefined) {
+            const ref: ParentRef = { provider: row.provider, accountScope: row.accountScope, parentLocalItemId: row.grandparentLocalItemId };
+            next.set(`${origin}\n${parentKey(ref)}`, { ref, origin });
+          }
+        }
+      }
+      climbing = [...next.values()];
+    }
+    return entries;
+  }
+
+  private *hiddenChildFullReadSteps(entries?: Map<string, HiddenChildParent>): Generator<VisibilityRead, number[], unknown> {
     if (!this.childItemColumnsPresent) return [];
     const present = yield* this.visibilityStoreRead({ sql: 'SELECT 1 AS present FROM items WHERE parent_local_item_id IS NOT NULL LIMIT 1', params: [], mode: 'get' });
     if (!present) return [];
@@ -5238,6 +5505,7 @@ export class LocalConnectorStore {
         }),
       }));
       const verdicts = yield* parentVerdictsSteps(lane, slice);
+      if (entries) for (const [key, value] of yield* this.hiddenChildParentEntriesSteps(lane, slice, verdicts)) entries.set(key, value);
       for (const parent of slice) if (verdicts.get(parentKey(parent))?.visible !== true) hiddenParents.push(parent);
       if (window.length < HIDDEN_CHILD_PARENT_SLICE) break;
       from = window[window.length - 1]!;
@@ -6685,9 +6953,9 @@ export class LocalConnectorStore {
 
   /**
    * Moves when this store's tier visibility may have changed: the tier
-   * ledger's visibility feed and this store's own item-visibility feed. Both
-   * are cursors on bounded change tables, so reading them is cheap; neither
-   * moves for embedding, status or other bookkeeping writes.
+   * ledger's visibility feed and the item markers across its child-visibility
+   * lane. Feed cursors are cheap to read and do not move for embedding,
+   * status or other bookkeeping writes.
    */
   visibilityMarker(): string {
     const ledger = this.visibilityLedger();
@@ -6696,7 +6964,8 @@ export class LocalConnectorStore {
     const storeCursor = this.visibilityJournal
       ? String(this.itemVisibilityChangesSince().cursor)
       : `v${(this.db.query('PRAGMA data_version').get() as { data_version: number }).data_version}`;
-    return `${ledgerCursor}:${storeCursor}`;
+    const laneStores = this.childVisibilityLane().stores();
+    return JSON.stringify([ledgerCursor, storeCursor, laneStores.map(store => [store.corpusId, store.childVisibilityMarker?.()])]);
   }
 
   peopleObservations(): PeopleSenderObservation[] {
@@ -6726,11 +6995,12 @@ export class LocalConnectorStore {
     if (!offThreadReadsSupported(this.dbPath)) return this.peopleObservations();
     for (let attempt = 0; attempt < PEOPLE_OFF_THREAD_READ_ATTEMPTS; attempt += 1) {
       const marker = this.visibilityMarker();
+      const unchanged = childVisibilityUnchanged(this.childVisibilityLane());
       const tierHidden = await this.tierHiddenItemPksInTurns();
       const steps = this.peopleObservationSteps(tierHidden);
       let step = steps.next();
       while (!step.done) step = steps.next(await readOnPool(this.dbPath, step.value));
-      if (this.visibilityMarker() === marker) return this.peopleObservationsFromRows(step.value);
+      if (this.visibilityMarker() === marker && unchanged()) return this.peopleObservationsFromRows(step.value);
     }
     return this.peopleObservations();
   }
@@ -14301,7 +14571,7 @@ export class LocalConnectorStore {
           return vector.length === queryVector.length ? cosineSimilarity(queryVector, vector) : undefined;
         })
       : undefined;
-    const { chunks, truncated } = selectEvidencePassages(
+    const { chunks, truncated, windowTexts } = selectEvidencePassages(
       // Layout padding (OCR and PDF text keep column alignment as runs of
       // spaces) is not evidence; dropping it lets the same budget carry
       // several times the text (2026-10-02 live Private store: 36% padding
@@ -14325,6 +14595,9 @@ export class LocalConnectorStore {
       trustTier: trustTierFromRow(row.trust_tier),
       chunks: reactionLine ? [reactionLine, ...chunks] : chunks,
       truncated,
+      ...(windowTexts && windowTexts.length > 1 ? {
+        windowTexts: reactionLine ? [reactionLine, ...windowTexts] : windowTexts,
+      } : {}),
       storedChunks: chunkRows.length,
       mimeType: row.mime_type,
       ...(row.locator_uri ? { locatorUri: row.locator_uri } : {}),
@@ -16404,8 +16677,8 @@ export const CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP =
   "the owner set this item's folder to Names only; its name is searchable and its contents are not read.";
 
 // LocalContentProvider over the store: bounded chunks, the item's stored
-// sensitivity, and the stored locator uri. Local by construction — every read
-// goes to the store's sqlite file; nothing here touches the network.
+// sensitivity, and the stored locator uri. Reads stay synchronous in sqlite;
+// the optional window scorer uses only an allowed private embedding provider.
 /**
  * A connector store's content provider, plus `contentServable`: whether it
  * would serve an item's content now under this provider's scope, answered
@@ -16516,9 +16789,35 @@ export function createConnectorStoreContentProvider(
         ? store.metadataOnlyRuleForLocator(content.locatorUri)
         : undefined;
       const coverageGaps = connectorStoreCoverageGaps(content, metadataOnlyRuleId);
+      let windowPlacement: EvidenceWindowSource | undefined;
+      if (content.truncated && content.windowTexts && content.windowTexts.length > 1) {
+        // This new text-scoring lane is private-only. secure_local windows
+        // additionally require the local backend, even where the existing
+        // vector lane permits Venice. No broader query-vector policy changes.
+        const privateProvider = embeddingProvider && isApprovedSecureSourceEmbeddingProvider(embeddingProvider)
+          && (store.trustDomain !== 'secure_local' || embeddingProvider.backend === 'local')
+          ? embeddingProvider : undefined;
+        const scoreWindows: WindowScorer | undefined = privateProvider ? async (query, windows, signal) => {
+          assertConnectorStoreEmbeddingProvider(store.trustDomain, privateProvider);
+          privateProvider.assertBindingCurrent?.();
+          const queryEmbedding = vector ?? (await privateProvider.embed([{ text: query }], { taskType: 'RETRIEVAL_QUERY' }))[0];
+          if (signal.aborted) throw new Error('Window placement deadline');
+          if (!queryEmbedding || queryEmbedding.length !== privateProvider.dimension || !queryEmbedding.every(Number.isFinite)) {
+            throw new Error('Invalid query embedding');
+          }
+          const embeddings = await privateProvider.embed(windows.map(text => ({ text })), { taskType: 'RETRIEVAL_DOCUMENT' });
+          if (embeddings.length !== windows.length || embeddings.some(value => value.length !== queryEmbedding.length || !value.every(Number.isFinite))) {
+            throw new Error('Invalid window embeddings');
+          }
+          return embeddings.map(value => cosineSimilarity(queryEmbedding, value));
+        } : undefined;
+        windowPlacement = { texts: content.windowTexts, ...(scoreWindows ? { scoreWindows } : {}) };
+      }
+
       return {
         sensitivity: buildSourceSensitivity({ trustTier: content.trustTier, trustDomain: store.trustDomain }),
         chunks: content.chunks,
+        ...(windowPlacement ? { windowPlacement } : {}),
         ...(content.truncated ? { truncated: true } : {}),
         ...(coverageGaps.length > 0 ? { coverageGaps } : {}),
         ...(metadataOnlyRuleId !== undefined ? { namesOnly: true } : {}),
@@ -17511,7 +17810,7 @@ function selectEvidencePassages(
   maxChars: number | undefined,
   focus: ConnectorStorePassageFocus | undefined,
   context: { title?: string | null; relevance?: readonly (number | undefined)[] } = {},
-): { chunks: readonly string[]; truncated: boolean } {
+): { chunks: readonly string[]; truncated: boolean; windowTexts?: readonly string[] } {
   if (maxChars === undefined || maxChars <= 0) return budgetChunks(chunks, maxChars);
   const totalChars = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
   if (totalChars <= maxChars || !focus) return budgetChunks(chunks, maxChars);
@@ -17580,10 +17879,12 @@ function selectEvidencePassages(
       : { chunks: [], truncated: others.length > 0 };
     const read = new Map(others.map((index, position) => [index, bounded.chunks[position]]));
     if (similarPick !== undefined && similarRead?.chunks[0]) read.set(similarPick, similarRead.chunks[0]);
-    const ordered = byPriority(picked, relevance, anchor, lexical).flatMap((index) => read.get(index) ?? []);
+    const ordered = byPriority(picked, relevance, anchor, lexical).filter((index) => read.get(index));
     return {
-      chunks: ordered,
+      chunks: ordered.map((index) => read.get(index)!),
       truncated: picked.length < chunks.length || bounded.truncated || similarRead?.truncated === true,
+      // Passages come best first, so window placement covers them in this order.
+      windowTexts: ordered.map((index) => chunks[index]!),
     };
   }
   // Most relevant first (the anchor, then by embedding), filled whole until
@@ -17627,6 +17928,7 @@ function selectEvidencePassages(
   const ordered = ranked.filter((index) => kept.has(index)).map((index) => [index, kept.get(index)!] as const);
   return {
     chunks: ordered.map(([, text]) => text),
+    windowTexts: ordered.map(([index]) => chunks[index]!),
     truncated: ordered.length < chunks.length || ordered.some(([index, text]) => text.length < chunks[index]!.length),
   };
 }

@@ -1,4 +1,4 @@
-// Retrieval-only eval: no Analyst or query planner is constructed or called.
+// Passage retrieval eval, with optional deterministic grading of local Analyst answers.
 import { createHash } from 'node:crypto';
 import { Database } from 'bun:sqlite';
 import { execFileSync } from 'node:child_process';
@@ -6,16 +6,21 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { EvidencePackBuildDetail } from '../src/core/evidence-pack.ts';
 import type { EvidenceRerankOutcome } from '../src/core/evidence-reranker.ts';
-import { loadConfig } from '../src/core/config.ts';
+import { loadConfig, parseLane, parseModelProfile } from '../src/core/config.ts';
+import { createAnalyst, withPromptBudget } from '../src/core/analyst.ts';
+import { createDelphiAnalystModel } from '../src/core/analyst-delphi.ts';
+import { DelphiClient } from '../src/core/delphi.ts';
 import { fitPackToPromptBytes, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, DEFAULT_MAX_CHARS_PER_CANDIDATE } from '../src/workers/source-index/analyst-answer.ts';
 import { prepareBuiltInRerankerFromEnv } from '../src/workers/source-index/built-in-reranker.ts';
 import { openEvalDataRoot, type EvalStoreCount, type EvalSkippedStore } from './data-root.ts';
 import { parseDataRootArgs } from './data-root-args.ts';
 import { buildEvalPack, createEvalSourceLanes, configuredEvalEmbedding, prepareEvalEmbedding, type EvalStoreSearch } from './retrieval.ts';
-import { passageContainsQuote, PASSAGE_MATCH_RULE } from './passage-match.ts';
+import { passageContainsQuote, passageWords, PASSAGE_MATCH_RULE } from './passage-match.ts';
+import { resolveCitationCorpusId } from './grade.ts';
 import { validatePassageDataset, type EvalDataset, type EvalQuestion } from './types.ts';
 import { localEvalModel, type DraftModel } from './local-model.ts';
-import { enterStage, runEvalCli, type EvalStage } from './cli-failure.ts';
+import { enterStage, failureCode, runEvalCli, type EvalStage } from './cli-failure.ts';
+import type { AnalystResult, EvidencePack } from '../src/core/contracts.ts';
 import type { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import type { SourceTrustDomain } from '../src/core/source-index/types.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
@@ -45,6 +50,9 @@ export interface FunnelRow {
 }
 export interface LaneProbe { keyword: number | null; vector: number | null }
 export interface QuestionJudgement { answers: boolean | null; specific: boolean | null }
+export interface PassageAnswer {
+  outcome: 'answered' | 'failed'; cited?: boolean; coverage?: number; right?: boolean; answerMs?: number; code?: string;
+}
 export interface PassageSummary {
   /** Questions scored; a degraded question is counted in `degraded` instead. */
   questions: number; answerable: number; unanswerable: number; negativeSeats: number; degraded: number;
@@ -53,6 +61,8 @@ export interface PassageSummary {
   funnel: Partial<Record<FunnelStage, number>>;
   /** The question judge's counts, when it ran. */
   judged?: { answers: number; notAnswers: number; specific: number; generic: number; unclear: number };
+  /** All answer attempts; median and nearest-rank p90 use successful calls only (zero when none succeeded). */
+  answer?: { asked: number; right: number; cited: number; failed: number; medianMs: number; p90Ms: number };
   timings: { buildPackMs: number; fitMs: number; totalMs: number; storeSearchMs: number };
   /** Answerable questions whose item got at least this far: found by a lane or returned, returned by its store, seated in the pack, kept by the fit, with the exact passage. */
   reach: { found: number; returned: number; seated: number; fitted: number; passage: number };
@@ -63,6 +73,7 @@ export interface PassageRow {
   questionId: string; shape: string; families: string[]; tiers: string[];
   seatsFilled: number; answerable: boolean; object: HitScore; passage: HitScore;
   funnel?: FunnelRow; judge?: QuestionJudgement;
+  answer?: PassageAnswer;
   rerank?: { outcome: EvidenceRerankOutcome; scored: number; promoted: number; elapsedMs: number };
   /** Present when a store's search was cut short: which store and lane, and why (codes only). Left out of the metrics. */
   degraded?: Degradation[];
@@ -98,6 +109,9 @@ function summarize(all: readonly PassageRow[], ks: readonly number[]): PassageSu
   const judgedRows = positives.filter(row => row.judge);
   const reached = (stages: readonly FunnelStage[]) => positives.filter(row => row.funnel && stages.includes(row.funnel.stage)).length;
   const reranked = rows.filter(row => row.rerank);
+  const answers = all.flatMap(row => row.answer ? [row.answer] : []);
+  const answerTimes = answers.flatMap(answer => answer.outcome === 'answered' && answer.answerMs !== undefined ? [answer.answerMs] : []).sort((a, b) => a - b);
+  const middle = Math.floor(answerTimes.length / 2);
   return {
     funnel,
     reach: {
@@ -114,6 +128,15 @@ function summarize(all: readonly PassageRow[], ks: readonly number[]): PassageSu
       generic: judgedRows.filter(row => row.judge!.specific === false).length,
       unclear: judgedRows.filter(row => row.judge!.answers === null || row.judge!.specific === null).length,
     } } : {}),
+    ...(answers.length ? { answer: {
+      asked: answers.length,
+      right: answers.filter(answer => answer.right).length,
+      cited: answers.filter(answer => answer.cited).length,
+      failed: answers.filter(answer => answer.outcome === 'failed').length,
+      medianMs: answerTimes.length ? (answerTimes[middle]! + answerTimes[answerTimes.length % 2 ? middle : middle - 1]!) / 2 : 0,
+      // Nearest-rank p90; failed calls have no latency sample.
+      p90Ms: answerTimes[Math.ceil(answerTimes.length * 0.9) - 1] ?? 0,
+    } } : {}),
     ...(reranked.length ? { rerank: {
       applied: reranked.filter(row => row.rerank!.outcome === 'applied').length,
       timedOut: reranked.filter(row => row.rerank!.outcome === 'timed_out').length,
@@ -127,6 +150,24 @@ function summarize(all: readonly PassageRow[], ks: readonly number[]): PassageSu
     object: metric('object'), passage: metric('passage'),
     timings: Object.fromEntries(['buildPackMs', 'fitMs', 'totalMs', 'storeSearchMs'].map(key => [key, rows.reduce((n, row) => n + row.timings[key as keyof PassageRow['timings']], 0)])) as PassageSummary['timings'],
   };
+}
+
+const ANSWER_STOP_WORDS = new Set(['the', 'and', 'for', 'with', 'from', 'this', 'that', 'these', 'those', 'are', 'was', 'were', 'has', 'had', 'have', 'been', 'being', 'but', 'not', 'you', 'your', 'our', 'its', 'into', 'than', 'then', 'they', 'their', 'there', 'will', 'would', 'can', 'could', 'should']);
+
+/** Alternative evidence items follow the retrieval metric: any one can answer the question. */
+function gradePassageAnswer(question: EvalQuestion, result: AnalystResult, detail: EvidencePackBuildDetail): Pick<PassageAnswer, 'cited' | 'coverage' | 'right'> {
+  const expected = question.expectedEvidence ?? [];
+  const cited = result.citations.some(citation => {
+    const corpusId = resolveCitationCorpusId(citation.provenance, detail.pack.candidates, detail.candidateCorpusIds);
+    return expected.some(item => [item, ...(item.alternates ?? [])].some(identity =>
+      identity.corpusId === corpusId && identity.providerItemId === citation.provenance.sourceItem.providerItemId));
+  });
+  const words = new Set(passageWords(result.answer));
+  const coverage = Math.max(0, ...expected.map(item => {
+    const content = passageWords(item.quote ?? '').filter(word => /^\p{L}{3,}$/u.test(word) && !ANSWER_STOP_WORDS.has(word));
+    return content.length ? content.filter(word => words.has(word)).length / content.length : 0;
+  }));
+  return { cited, coverage, right: cited && coverage >= 0.8 };
 }
 function grouped(rows: readonly PassageRow[], ks: readonly number[], groups: (row: PassageRow) => string[]): Record<string, PassageSummary> {
   const buckets = new Map<string, PassageRow[]>();
@@ -143,10 +184,12 @@ export async function runPassageEval(input: {
   probeLanes?: (question: EvalQuestion, items: ReadonlyArray<{ corpusId: string; providerItemId?: string }>) => Promise<LaneProbe>;
   /** Whether a question's pinned quote answers it, and whether it is specific enough to pick its item out. */
   judgeQuestion?: (question: string, quote: string) => Promise<QuestionJudgement>;
+  /** Answer the exact fitted pack; only deterministic scores enter the receipt. */
+  answer?: (question: EvalQuestion, pack: EvidencePack) => Promise<AnalystResult>;
   /** How many chunks an item has in its store (undefined when unknown). */
   itemChunks?: (corpusId: string, providerItemId: string) => number | undefined;
   /** Called as each question enters a step (1-based index; step names only). */
-  onProgress?: (index: number, total: number, step: 'build_pack' | 'fit' | 'probe_lanes' | 'judge') => void;
+  onProgress?: (index: number, total: number, step: 'build_pack' | 'fit' | 'answer' | 'probe_lanes' | 'judge') => void;
 }): Promise<PassageReceipt> {
   validatePassageDataset(input.dataset);
   const split = input.split ?? 'open';
@@ -162,7 +205,7 @@ export async function runPassageEval(input: {
     return known.length ? { chunks: Math.max(...known) } : {};
   };
   for (const [position, question] of questions.entries()) {
-    const step = (name: 'build_pack' | 'fit' | 'probe_lanes' | 'judge') => input.onProgress?.(position + 1, questions.length, name);
+    const step = (name: 'build_pack' | 'fit' | 'answer' | 'probe_lanes' | 'judge') => input.onProgress?.(position + 1, questions.length, name);
     const started = performance.now();
     step('build_pack');
     const detail = await input.buildPack(question);
@@ -191,8 +234,18 @@ export async function runPassageEval(input: {
         if (expected.quote && passageContainsQuote([...seat.chunks, ...(seat.facts ?? []).map(fact => fact.claim), ...(seat.tables ?? []).flatMap(table => [table.caption ?? '', ...table.columns, ...table.rows.map(row => row.join(' '))])].join('\n'), expected.quote)) passageRank ??= index + 1;
       }
     }
-    // Retrieval and fitting end here; the lane probe and question judge below are diagnostics, outside the timings.
+    // Retrieval and fitting end here; answer and diagnostic calls have separate timings.
     const finished = performance.now();
+    let answer: PassageAnswer | undefined;
+    if (input.answer) {
+      step('answer');
+      const answerStarted = performance.now();
+      try {
+        const result = await input.answer(question, pack);
+        const answerMs = performance.now() - answerStarted;
+        answer = { outcome: 'answered', ...gradePassageAnswer(question, result, detail), answerMs };
+      } catch (error) { answer = { outcome: 'failed', code: failureCode(error) ?? 'UNKNOWN' }; }
+    }
     const expectedStores = (question.expectedEvidence ?? []).map(e => stores.get(e.corpusId));
     const answerable = question.shape !== 'coverage_negative';
     const identities = (question.expectedEvidence ?? []).flatMap(expected => [expected, ...(expected.alternates ?? [])]);
@@ -219,6 +272,7 @@ export async function runPassageEval(input: {
       tiers: expectedStores.length ? [...new Set(expectedStores.map((store, i) => store?.tier ?? question.expectedEvidence![i]!.corpusId.split('.')[0]!))] : ['unknown'],
       seatsFilled: pack.candidates.length, answerable, object: score(objectRank, ks), passage: score(passageRank, ks),
       ...(funnel ? { funnel } : {}), ...(judge ? { judge } : {}),
+      ...(answer ? { answer } : {}),
       ...(detail.rerank ? { rerank: { outcome: detail.rerank.outcome, scored: detail.rerank.scored, promoted: detail.rerank.promoted, elapsedMs: detail.rerank.elapsedMs } } : {}),
       ...(degraded.length ? { degraded } : {}),
       timings: { buildPackMs: builtAt - started, fitMs: finished - builtAt, totalMs: finished - started, storeSearchMs: (detail.corpusTimings ?? []).reduce((n, t) => n + t.elapsedMs, 0) },
@@ -346,7 +400,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     const arg = rest[index]!;
     if (arg.startsWith('--')) {
       const [key, inline] = arg.split('=', 2);
-      if (key === '--probe-lanes' || key === '--judge-questions') { if (inline !== undefined) throw new Error(`${key} takes no value.`); values.set(key, 'yes'); continue; }
+      if (key === '--probe-lanes' || key === '--judge-questions' || key === '--answer') { if (inline !== undefined) throw new Error(`${key} takes no value.`); values.set(key, 'yes'); continue; }
       if (!['--split', '--compare', '--output', '--max-results', '--max-chars-per-candidate', '--analyst-provider', '--prompt-bytes'].includes(key!)) throw new Error('Unsupported passage eval option.');
       const value = inline ?? rest[++index];
       if (!value || value.startsWith('--')) throw new Error('Passage eval option requires a value.');
@@ -357,29 +411,50 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
   if (split !== 'open' && split !== 'sealed') throw new Error('Split must be open or sealed.');
   const provider = values.get('--analyst-provider') ?? process.env.OLYMPUS_EVAL_ANALYST_PROVIDER ?? 'local';
   if (provider !== 'local' && provider !== 'venice') throw new Error('Analyst provider must be local or venice.');
+  if (values.has('--answer') && provider !== 'local') throw Object.assign(new Error('--answer requires a local Analyst.'), { code: 'LOCAL_MODEL_REQUIRED' });
   const dataset: unknown = JSON.parse(readFileSync(datasetPath ?? 'eval/private/passage-questions.json', 'utf8'));
   validatePassageDataset(dataset);
   const maxResults = positiveInteger(values.get('--max-results') ?? process.env.OLYMPUS_EVAL_MAX_RESULTS, 5);
   const maxCharsPerCandidate = positiveInteger(values.get('--max-chars-per-candidate') ?? process.env.OLYMPUS_EVAL_MAX_CHARS_PER_CANDIDATE, DEFAULT_MAX_CHARS_PER_CANDIDATE);
+  const promptBytes = provider === 'local' ? positiveInteger(values.get('--prompt-bytes') ?? process.env.OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES) : undefined;
   enter('open_data_root');
   const opened = openEvalDataRoot(isolation);
   const cleanups: Array<() => void> = [];
   try {
+    const config = loadConfig();
+    let answer: ((question: EvalQuestion, pack: EvidencePack) => Promise<AnalystResult>) | undefined;
+    if (values.has('--answer')) {
+      enter('load_analyst');
+      // Same local profile/lane selection as eval:real; no separate model override.
+      const lane = process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE?.trim() ? parseLane(process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE) : undefined;
+      const profile = process.env.OLYMPUS_SOURCE_INDEX_ANALYST_PROFILE?.trim() ? parseModelProfile(process.env.OLYMPUS_SOURCE_INDEX_ANALYST_PROFILE) : 'source_answer';
+      const delphi = new DelphiClient(config);
+      // Run before the row-level failure boundary, even for an empty pack/set:
+      // an unavailable local model must fail the CLI, not look like a bad score.
+      try {
+        const signal = AbortSignal.timeout(5_000);
+        const models = lane ? await delphi.listModels(lane, signal) : await delphi.listModelsForProfile(profile, signal);
+        if (!models.length) throw new Error('No local models available.');
+      } catch (error) {
+        throw Object.assign(new Error('Local Analyst is unavailable.'), { code: failureCode(error) ?? 'LOCAL_MODEL_UNAVAILABLE' });
+      }
+      const analyst = createAnalyst(createDelphiAnalystModel(delphi, lane ? { lane } : { profile }), { auditSuspiciousDrafts: true, evidenceFormat: 'compact' });
+      answer = (_question, pack) => analyst.analyze(withPromptBudget(pack, promptBytes!), { localOnly: true });
+    }
     enter('load_embedding');
-    const embedding = await prepareEvalEmbedding({ configured: await configuredEvalEmbedding(loadConfig(), process.env) });
+    const embedding = await prepareEvalEmbedding({ configured: await configuredEvalEmbedding(config, process.env) });
     enter('load_reranker');
     const reranker = await prepareBuiltInRerankerFromEnv();
     // Each store search's returned ids, for the funnel's store rank.
     let searches: EvalStoreSearch[] = [];
     const lanes = createEvalSourceLanes({ ...opened, embeddingFor: embedding.embeddingFor, onStoreSearch: search => { searches.push(search); } });
-    const config = loadConfig();
     const judge = values.has('--judge-questions') ? questionJudge(localEvalModel(config)) : undefined;
     const probe = values.has('--probe-lanes') ? laneProbe(opened.stores, embedding.embeddingFor) : undefined;
     const itemChunks = storedChunkCounter(opened.stores);
     cleanups.push(itemChunks.close);
     const receipt = await runPassageEval({ dataset, split, maxResults, storeCounts: opened.storeCounts, skippedStores: opened.skipped,
       gitSha: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
-      ...(provider === 'local' ? { promptBytes: positiveInteger(values.get('--prompt-bytes') ?? process.env.OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES) } : {}),
+      ...(promptBytes !== undefined ? { promptBytes } : {}),
       buildPack: async q => {
         searches = [];
         const built = await buildEvalPack({ question: q.question, lanes, maxResults, maxCharsPerCandidate, ...(reranker ? { reranker } : {}) });
@@ -387,6 +462,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
       },
       ...(probe ? { probeLanes: probe } : {}),
       ...(judge ? { judgeQuestion: judge } : {}),
+      ...(answer ? { answer } : {}),
       itemChunks: itemChunks.count,
       onProgress: (index, total, step) => enter(`question ${index}/${total}: ${step}`),
     });

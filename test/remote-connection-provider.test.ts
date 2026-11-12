@@ -226,7 +226,8 @@ describe('existing connections migrate', () => {
       err: await new Response(child.stderr).text(),
     })));
     for (const result of results) {
-      expect(result.err).toBe('');
+      // The one that migrates says so on stderr; nothing else may appear there.
+      expect(result.err.split('\n').filter((line) => line && !line.startsWith('[storage] remote-connections schema 2 to 4: '))).toEqual([]);
       expect(result.code).toBe(0);
       expect(Object.fromEntries(JSON.parse(result.out) as Array<[string, string]>)).toEqual(LEGACY_EXPECTED);
     }

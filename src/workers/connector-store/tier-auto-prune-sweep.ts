@@ -33,6 +33,8 @@ interface State {
 }
 
 type SweepReport = { checked: number; purged: number; kept: number; failed: number; complete: boolean };
+/** Where one call's time went, for its log line. */
+type SliceTiming = { pruneMs: number; maxItemMs: number; cut: boolean };
 
 /**
  * Bounded pages at worker startup and on maintenance ticks; a failed item
@@ -47,16 +49,25 @@ export function sweepAutomaticSupersededCopies(set: TieredStoreSet, options: {
 } = {}): SweepReport {
   const now = options.now ?? Date.now;
   const started = now();
-  const total = sweepPage(set, options);
+  const budget = options.budgetMs ?? 0;
+  // A budget is checked between items, not only between pages: one page of
+  // large items must not hold the thread for seconds.
+  const spent = budget > 0 ? () => now() - started >= budget : () => false;
+  const timing: SliceTiming = { pruneMs: 0, maxItemMs: 0, cut: false };
+  const total = sweepPage(set, options, spent, now, timing);
   const limit = Math.max(1, Math.min(options.limit ?? PAGE_SIZE, PAGE_SIZE));
   let last = total.checked;
-  while ((options.budgetMs ?? 0) > 0 && !total.complete && total.failed === 0
-    && last === limit && now() - started < options.budgetMs!) {
-    const page = sweepPage(set, options);
+  while (budget > 0 && !total.complete && total.failed === 0 && !timing.cut
+    && last === limit && !spent()) {
+    const page = sweepPage(set, options, spent, now, timing);
     total.checked += page.checked; total.purged += page.purged;
     total.kept += page.kept; total.failed += page.failed;
     total.complete = page.complete;
     last = page.checked;
+  }
+  if (total.purged > 0 || total.failed > 0) {
+    console.info(`[tier-auto-prune] ledger=${set.ledger.ledgerId()} slice_ms=${now() - started} prune_ms=${timing.pruneMs}`
+      + ` max_item_ms=${timing.maxItemMs} checked=${total.checked} purged=${total.purged} complete=${total.complete}`);
   }
   return total;
 }
@@ -64,7 +75,7 @@ export function sweepAutomaticSupersededCopies(set: TieredStoreSet, options: {
 function sweepPage(set: TieredStoreSet, options: {
   limit?: number;
   embeddingLedger?: TierMoveOptions['embeddingLedger'];
-}): SweepReport {
+}, spent: () => boolean, now: () => number, timing: SliceTiming): SweepReport {
   const ledger = set.ledger;
   const state: State = JSON.parse(ledger.readMeta(STATE) || '{}');
   const report = { checked: 0, purged: 0, kept: 0, failed: 0, complete: state.done === true };
@@ -75,6 +86,7 @@ function sweepPage(set: TieredStoreSet, options: {
   const save = () => ledger.writeMeta(STATE, JSON.stringify(state));
   const finishPending = (): void => {
     const pending = state.pending!;
+    const itemStarted = now();
     ledger.withGenerationFence(pending.identity, pending.generation, () => {
       const current = ledger.getCurrent(pending.identity)!;
       if (current.state === 'moving' || ledger.hasMovedMigrationProposal(pending.identity)) throw new Error('Placement or migration changed; retry cleanup later.');
@@ -86,7 +98,9 @@ function sweepPage(set: TieredStoreSet, options: {
         store.bindTierSet(ledger);
         // The receipt's original count survives a death after this separate
         // store commit but before the ledger transaction below commits.
+        const pruneStarted = now();
         pruneSupersededStoreCopy(store, pending.identity);
+        timing.pruneMs += now() - pruneStarted;
         ledger.removeSupersededCopy(pending.identity, copy.corpusId);
         const deleted = state.deleted ??= {};
         deleted[copy.corpusId] = (deleted[copy.corpusId] ?? 0) + target.chunks;
@@ -98,6 +112,7 @@ function sweepPage(set: TieredStoreSet, options: {
       delete state.failing;
       save();
     });
+    timing.maxItemMs = Math.max(timing.maxItemMs, now() - itemStarted);
   };
   let attempt: TierLedgerIdentity | undefined;
   try {
@@ -116,6 +131,8 @@ function sweepPage(set: TieredStoreSet, options: {
     if (report.checked === limit) return report;
     const rows = ledger.listSupersededItemWindow({ ...(state.after ? { after: state.after } : {}), limit: limit - report.checked });
     for (const record of rows.slice(0, limit - report.checked)) {
+      // At least one item per call, then stop as soon as the budget is spent.
+      if (report.checked > 0 && spent()) { timing.cut = true; break; }
       report.checked++;
       const identity: TierLedgerIdentity = { provider: record.provider, accountScope: record.accountScope,
         providerItemId: record.providerItemId, ...(record.conversationKey ? { providerConversationId: record.conversationKey } : {}) };
@@ -170,7 +187,7 @@ function sweepPage(set: TieredStoreSet, options: {
       if (state.pending) finishPending();
       else { state.after = identity; delete state.failing; save(); }
     }
-    if (report.checked < limit) {
+    if (report.checked < limit && !timing.cut) {
       if (state.retry) { delete state.after; delete state.retry; save(); }
       else {
         // Totals and the completion watermark commit with one durable audit

@@ -1,3 +1,4 @@
+import { preSchemaBackupsOf } from './core/boot-progress.ts';
 import { PEOPLE_INDEX_STORE_ID, peopleIndexPath } from './core/people-index.ts';
 import { MAC_ENGINE_DAEMON_PLIST, authorizeMacServerMode, macEngineManager } from './core/mac-engine-daemon.ts';
 import { APP_RELEASE_LOG_STORE_ID, appReleaseLogDbPath } from './core/app-release-log.ts';
@@ -1726,6 +1727,16 @@ function sqliteDeleteTargets(
       allowRecursive: false,
       externalSourcePath,
     },
+    // The store as it was before a schema update (core/boot-progress.ts):
+    // a full copy of what is being deleted.
+    ...preSchemaBackupsOf(sqlitePath).map((path) => ({
+      path,
+      kind: 'source_sqlite_sidecar' as const,
+      sqliteStoreId,
+      sqlitePrimaryPath: sqlitePath,
+      allowRecursive: false,
+      externalSourcePath,
+    })),
   ];
 }
 

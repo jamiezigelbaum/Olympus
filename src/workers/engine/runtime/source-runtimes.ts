@@ -17,6 +17,7 @@ import {
   createXBookmarksConnectorStore,
   createXBookmarksConnectorStoreSyncHandler,
   createXBookmarksContentRecoveryHandler,
+  type XBookmarksArchiveImportRequest,
   type XBookmarksConnectorStoreSyncHandler,
   type XBookmarksContentRecoveryHandler,
 } from '../../x-bookmarks/index.ts';
@@ -88,6 +89,9 @@ export function accountCheckedXBookmarksRuntime(
     sync: {
       syncHead: (request) => checked(() => sync.syncHead(request)),
       reconcile: (request) => checked(() => sync.reconcile(request)),
+      ...(sync.importArchive
+        ? { importArchive: (request: XBookmarksArchiveImportRequest) => checked(() => sync.importArchive!(request)) }
+        : {}),
       ...(sync.diagnoseWindow ? { diagnoseWindow: sync.diagnoseWindow.bind(sync) } : {}),
       lastCompleteReconcileAt: () => sync.lastCompleteReconcileAt(),
       completeReconcileWatermark: () => sync.completeReconcileWatermark(),

@@ -78,6 +78,7 @@ export function boundedSourceIndexChunks(
   texts: readonly string[],
   maxChars: number | undefined,
   termGroups: ReadonlyArray<readonly string[]>,
+  preferredStarts?: readonly (number | undefined)[],
 ): { chunks: string[]; truncated: boolean } {
   const distinctTexts = [...new Set(texts.map((text) => text.trim()).filter(Boolean))];
   const chunks: string[] = [];
@@ -89,7 +90,7 @@ export function boundedSourceIndexChunks(
     const fairShare = Number.isFinite(remaining)
       ? Math.max(1, Math.floor(remaining / (distinctTexts.length - index)))
       : undefined;
-    const snippet = sourceIndexChunkSnippet(text, termGroups, fairShare);
+    const snippet = sourceIndexChunkSnippet(text, termGroups, fairShare, preferredStarts?.[index]);
     if (!snippet) continue;
     const included = snippet.length > remaining ? snippet.slice(0, remaining) : snippet;
     chunks.push(included);
@@ -103,8 +104,10 @@ function sourceIndexChunkSnippet(
   text: string,
   termGroups: ReadonlyArray<readonly string[]>,
   maxChars: number | undefined,
+  preferredStart?: number,
 ): string {
   if (maxChars === undefined || maxChars <= 0 || text.length <= maxChars) return text;
+  if (preferredStart !== undefined && Number.isFinite(preferredStart)) return sourceIndexChunkWindow(text, preferredStart, maxChars);
   const lower = text.toLowerCase();
   const normalizedGroups = termGroups
     .map((group) => [...new Set(group.map((term) => term.toLowerCase()).filter(Boolean))])
@@ -167,4 +170,15 @@ export function compactPassageWhitespace(text: string): string {
     .replace(/[^\S\n]+\n/g, '\n')
     .replace(/[^\S\n]{2,}/g, ' ')
     .replace(/\n{3,}/g, '\n\n');
+}
+
+/** A bounded window whose edges never split a UTF-16 surrogate pair. */
+export function sourceIndexChunkWindow(text: string, preferredStart: number, maxChars: number): string {
+  let start = Math.min(Math.max(0, Math.floor(preferredStart)), Math.max(0, text.length - maxChars));
+  const low = (index: number) => text.charCodeAt(index) >= 0xdc00 && text.charCodeAt(index) <= 0xdfff;
+  if (low(start)) start++;
+  let end = Math.min(text.length, start + Math.max(0, Math.floor(maxChars)));
+  const last = text.charCodeAt(end - 1);
+  if (end > start && last >= 0xd800 && last <= 0xdbff) end--;
+  return text.slice(start, end);
 }

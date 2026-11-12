@@ -15,6 +15,7 @@ import {
   OffThreadReadBusyError,
   READ_POOL_SIZE,
   readOnPool,
+  readPoolDiagnostics,
   readPoolThreadsForTests,
   releaseOffThreadReads,
   setReadPoolClockForTests,
@@ -160,6 +161,26 @@ describe('read pool', () => {
     expect(openOn()).toBeGreaterThan(1);
     store.close();
     await waitFor(() => openOn() === 0, { description: 'every connection to the closed store released' });
+  });
+
+  test('snapshots reuse their thread\'s connections instead of opening and closing one each, and still see each commit and a replaced file (olympus-ops#151)', async () => {
+    const path = storeFile();
+    const writer = new Database(path);
+    try {
+      for (let n = 0; n < 20; n++) {
+        writer.run('INSERT INTO items VALUES (?)', [100 + n]);
+        const seen = await withOffThreadSnapshot(path, async (read) => (await read(COUNT) as { c: number }).c);
+        expect(seen).toBe(4 + n);
+      }
+    } finally { writer.close(); }
+    // One query connection plus idle snapshot connections, not one per snapshot.
+    expect(readPoolDiagnostics().stores[path]!.opens).toBeLessThanOrEqual(READ_POOL_SIZE * 3);
+    const replacement = storeFile();
+    rmSync(path);
+    const moved = new Database(replacement);
+    moved.exec('VACUUM INTO ' + "'" + path.replaceAll("'", "''") + "'");
+    moved.close();
+    expect(await withOffThreadSnapshot(path, async (read) => (await read(COUNT) as { c: number }).c)).toBe(3);
   });
 
   test('a status snapshot waits for a thread no search runs on: a search past its deadline does not take the snapshot down with it', async () => {
