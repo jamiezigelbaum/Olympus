@@ -1,5 +1,5 @@
 import { withKeywordRequestScope } from './source-index/keyword-context.ts';
-import { semanticSearchTimedOut, semanticTimeoutGap } from './source-index/partial-search.ts';
+import { RECENT_ITEMS_CUT_SHORT, recentItemsTimeoutGap, semanticSearchTimedOut, semanticTimeoutGap } from './source-index/partial-search.ts';
 import {
   rerankCandidates,
   rerankPassage,
@@ -368,7 +368,7 @@ async function buildPreparedEvidencePackDetailed(
   const candidates: EvidenceCandidate[] = [];
   const candidateCorpusIds: string[] = [];
   const candidateExtractionGapIndexes: number[][] = [];
-  const extractionGaps: string[] = semanticLaneSkippedGaps(routed.degradations, input);
+  const extractionGaps: string[] = laneCutShortGaps(routed.degradations, input);
   const policyDeniedCoverageGaps: string[] = [];
   let policyDeniedCandidates = 0;
   const namesOnlyCandidateIndexes: number[] = [];
@@ -1075,22 +1075,27 @@ export function semanticLaneSkippedGap(corpusId: string, detail: string | undefi
     + `${detail ? ` (${detail})` : ''}; only keyword matches were searched, so related items may be missing.`;
 }
 
-function semanticLaneSkippedGaps(
+function laneCutShortGaps(
   degradations: readonly RetrievalDegradation[],
   input: BuildEvidencePackInput,
 ): string[] {
   const gaps: string[] = [];
   const seen = new Set<string>();
+  const newestSeen = new Set<string>();
   for (const degradation of degradations) {
-    if (degradation.reason !== 'semantic_lane_skipped') continue;
-    const corpusId = degradation.laneName.endsWith(':semantic')
-      ? degradation.laneName.slice(0, -':semantic'.length)
+    const newest = degradation.reason === 'lane_timeout' && degradation.detail === RECENT_ITEMS_CUT_SHORT;
+    if (degradation.reason !== 'semantic_lane_skipped' && !newest) continue;
+    const suffix = newest ? ':recency' : ':semantic';
+    const corpusId = degradation.laneName.endsWith(suffix)
+      ? degradation.laneName.slice(0, -suffix.length)
       : degradation.laneName;
     // A rebuild that leaves secure content out leaves its lanes' notes out too.
     if (input.excludeSecureSensitivity && input.registry.get(corpusId)?.trustDomain === 'secure_local') continue;
-    if (seen.has(corpusId)) continue;
-    seen.add(corpusId);
-    gaps.push(semanticLaneSkippedGap(corpusId, degradation.detail));
+    // A source whose read of its newest items ran out of time is named too (#1460).
+    const named = newest ? newestSeen : seen;
+    if (named.has(corpusId)) continue;
+    named.add(corpusId);
+    gaps.push(newest ? recentItemsTimeoutGap(corpusId) : semanticLaneSkippedGap(corpusId, degradation.detail));
   }
   return gaps;
 }

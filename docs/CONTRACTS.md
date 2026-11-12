@@ -1064,3 +1064,10 @@ per-item hold (`holdContentUntilJudged`); see the change log.
   privacy judge configured, or one whose queue cannot open, every read item
   is still asked (`NO_JUDGE_TIER_SNIFFER`) and its text held until a judge
   answers; the dashboard says new items wait and counts each held item once.
+- 2026-11-12 (no version change, #1460): a source whose read of its newest
+  items (the chat recency lane) ran out of time or found its store busy adds
+  one `coverage.extractionGaps` entry naming the corpus, as a cut semantic
+  lane does (#1172). Its other lanes still answered, so it stays searched; the
+  router records the one lane as a `lane_timeout` degradation with detail
+  `recent_items_cut_short`. Search results carry every such note too, beside
+  the answers that already did (#1459). No frozen interface changed shape.

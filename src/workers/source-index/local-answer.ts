@@ -32,7 +32,7 @@
  * can reach the output: the items read and the other versions the answer's
  * version note names (the model's `used`).
  */
-import { semanticSearchTimedOut } from '../../core/source-index/partial-search.ts';
+import { RECENT_ITEMS_CUT_SHORT, semanticSearchTimedOut } from '../../core/source-index/partial-search.ts';
 import { buildEvidencePackDetailed, type LocalContentProvider, type SecretLocationNote } from '../../core/evidence-pack.ts';
 import { providerSourceLabel } from '../../core/remote-result.ts';
 import { secretLocationAnswer } from '../../core/secret-location-note.ts';
@@ -305,12 +305,13 @@ function secretWhere(location: SecretLocationNote): string {
  * Corpora searched by keyword alone because their search by meaning ran out
  * of time (a held thread spends the vector scan's own deadline even when the
  * lane is given a grace, #1091 review). What they would have matched by
- * meaning is unknown, so they count as busy: asking again can find more.
+ * meaning is unknown, so they count as busy: asking again can find more. So
+ * do corpora whose read of their newest items ran out of time (#1460).
  */
 function cutShortCorpora(audits: readonly { laneName: string; skippedReason?: string }[]): { corpusId: string; reason: string }[] {
   const corpora = new Set<string>();
   for (const audit of audits) {
-    if (!semanticSearchTimedOut(audit.skippedReason)) continue;
+    if (!semanticSearchTimedOut(audit.skippedReason) && audit.skippedReason !== RECENT_ITEMS_CUT_SHORT) continue;
     const corpusId = audit.laneName.split(':')[0];
     if (corpusId) corpora.add(corpusId);
   }
