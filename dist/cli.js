@@ -156455,7 +156455,8 @@ async function handleRemoteCallTool(request, makeOperationContext, authorized = 
     const afterFailure = currentAccess(authorized);
     if (afterFailure !== "active")
       return refusedAccess(afterFailure);
-    return { content: text3(remoteErrorOutput(error2, { declaredParams })), isError: true };
+    const refusal2 = operation.name === "source_item_read" && error2 instanceof OperationError && error2.code === "not_personal" ? new OperationError("invalid_params", "Invalid read handle.") : error2;
+    return { content: text3(remoteErrorOutput(refusal2, { declaredParams })), isError: true };
   }
 }
 function normalizeRemoteTransportErrors(transport) {

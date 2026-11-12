@@ -171,7 +171,11 @@ async function handleRemoteCallTool(
   } catch (error) {
     const afterFailure = currentAccess(authorized);
     if (afterFailure !== 'active') return refusedAccess(afterFailure);
-    return { content: text(remoteErrorOutput(error, { declaredParams })), isError: true };
+    // A read handle whose item is now Private gets the unknown-handle refusal,
+    // so the app learns nothing about the item's label (#1551).
+    const refusal = operation.name === 'source_item_read' && error instanceof OperationError && error.code === 'not_personal'
+      ? new OperationError('invalid_params', 'Invalid read handle.') : error;
+    return { content: text(remoteErrorOutput(refusal, { declaredParams })), isError: true };
   }
 }
 
