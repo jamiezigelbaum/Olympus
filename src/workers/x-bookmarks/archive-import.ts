@@ -12,8 +12,14 @@ import { Database } from 'bun:sqlite';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import { existsSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
+import type { SourceConnector } from '../../core/contracts.ts';
+import { holdingItems } from '../archive-import/source-input.ts';
 import type { XBookmarkPost } from './api.ts';
-import { X_BOOKMARKS_PROVIDER } from './connector.ts';
+import {
+  X_BOOKMARKS_ARCHIVE_CONNECTOR_ID,
+  X_BOOKMARKS_PROVIDER,
+  createXBookmarksSourceConnector,
+} from './connector.ts';
 
 export interface ArchivedXBookmarks {
   /** Newest post first. The archive kept no bookmark order, only post time. */
@@ -27,6 +33,24 @@ export interface ArchivedXBookmarks {
 }
 
 const HANDLE_TITLE = /^@([A-Za-z0-9_]{1,15}) on X$/;
+
+/**
+ * The archive connector for imported bookmarks. Like every archive input, each
+ * item is held until it has been judged, whatever the judge setup is, so no
+ * imported text reaches a cloud embedder before its privacy is decided.
+ */
+export function archivedXBookmarksConnector(
+  account: string,
+  posts: readonly XBookmarkPost[],
+  fetchedAt: string,
+): SourceConnector {
+  return holdingItems(createXBookmarksSourceConnector({
+    account,
+    posts,
+    connectorId: X_BOOKMARKS_ARCHIVE_CONNECTOR_ID,
+    fetchedAt,
+  }));
+}
 
 export class XBookmarksArchiveImportError extends Error {
   constructor(message: string) {

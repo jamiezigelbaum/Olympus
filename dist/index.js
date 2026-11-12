@@ -21806,8 +21806,18 @@ var init_api_connector = __esm(() => {
   X_BOOKMARKS_RECONCILE_PAGE_SIZE_LADDER = Object.freeze([80, 50, 20]);
 });
 
+// src/core/source-inputs.ts
+var init_source_inputs = () => {};
+
+// src/workers/archive-import/source-input.ts
+var init_source_input = __esm(() => {
+  init_archive_formats();
+  init_source_inputs();
+});
+
 // src/workers/x-bookmarks/archive-import.ts
 var init_archive_import = __esm(() => {
+  init_source_input();
   init_connector2();
 });
 
@@ -22491,9 +22501,6 @@ var init_corpus_adapter4 = __esm(() => {
   init_source_corpus_registry();
   init_corpus();
 });
-// src/core/source-inputs.ts
-var init_source_inputs = () => {};
-
 // src/workers/connector-store/capture-spool-secrets.ts
 var SPOOL_SCAN_CHUNK_BYTES, SPOOL_MAX_LINE_BYTES;
 var init_capture_spool_secrets = __esm(() => {
@@ -22811,12 +22818,6 @@ var init_json_stream = __esm(() => {
   init_stop_errors();
   EMPTY_FRAME = Object.freeze({});
   MAX_SAFE_DIGITS = String(Number.MAX_SAFE_INTEGER);
-});
-
-// src/workers/archive-import/source-input.ts
-var init_source_input = __esm(() => {
-  init_archive_formats();
-  init_source_inputs();
 });
 // src/workers/archive-import/telegram/account.ts
 var ACCOUNT_SECTIONS;

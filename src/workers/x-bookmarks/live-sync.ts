@@ -42,10 +42,9 @@ import {
   X_BOOKMARKS_ARCHIVE_CONNECTOR_ID,
   X_BOOKMARKS_PROVIDER,
   X_BOOKMARKS_STORE_PLACEMENT,
-  createXBookmarksSourceConnector,
   xBookmarkLocalItemId,
 } from './connector.ts';
-import { XBookmarksArchiveImportError, readArchivedXBookmarks } from './archive-import.ts';
+import { XBookmarksArchiveImportError, archivedXBookmarksConnector, readArchivedXBookmarks } from './archive-import.ts';
 import { resolve } from 'node:path';
 import {
   runXBookmarksWindowDiagnostic,
@@ -674,12 +673,7 @@ export function createXBookmarksConnectorStoreSyncHandler(
         family: 'x', provider: X_BOOKMARKS_PROVIDER, accountScope: account,
         providerItemId: post.id, localItemId: xBookmarkLocalItemId(account, post.id),
       }));
-      const connector = createXBookmarksSourceConnector({
-        account,
-        posts: missing,
-        connectorId: X_BOOKMARKS_ARCHIVE_CONNECTOR_ID,
-        fetchedAt: now().toISOString(),
-      });
+      const connector = archivedXBookmarksConnector(account, missing, now().toISOString());
       const run = await runLane(connector, {
         placement: X_BOOKMARKS_STORE_PLACEMENT,
         fetchContent: true,
@@ -687,7 +681,7 @@ export function createXBookmarksConnectorStoreSyncHandler(
         maxItems: Math.max(1, missing.length),
       }, false);
       return withGuard({
-        status: run.sync.itemsIndexed > 0 ? 'progress' : 'idle',
+        status: missing.length > 0 ? 'progress' : 'idle',
         counts: {
           api_requests: 0,
           archive_rows_read: archived.rowsRead,

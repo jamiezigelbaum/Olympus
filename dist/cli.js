@@ -82961,10 +82961,303 @@ var init_api_connector = __esm(() => {
   X_BOOKMARKS_RECONCILE_PAGE_SIZE_LADDER = Object.freeze([80, 50, 20]);
 });
 
+// src/core/source-inputs.ts
+function decideIntake(args) {
+  const { stored } = args;
+  if (!stored)
+    return "apply";
+  const order = stored.version === undefined ? undefined : args.version === undefined ? 0 : args.compareVersions(args.version, stored.version);
+  if (stored.tombstoned === true) {
+    if (order !== undefined && order > 0)
+      return "apply";
+    if (args.input === "live" && order === undefined)
+      return "apply";
+    return order !== undefined && order < 0 ? "skip_older" : "skip_same";
+  }
+  if (order === undefined)
+    return "apply";
+  if (args.deletes === true && order >= 0)
+    return "apply";
+  if (order > 0)
+    return "apply";
+  if (order < 0)
+    return stored.incomplete === true && stored.owedBodyVersion !== undefined && args.bringsContent && args.version !== undefined && args.compareVersions(args.version, stored.owedBodyVersion) >= 0 ? "apply" : "skip_older";
+  if (stored.incomplete === true)
+    return "apply";
+  if (!args.bringsContent)
+    return "skip_same";
+  if (!stored.hasContent)
+    return "apply";
+  return args.input === "live" ? "apply" : "skip_same";
+}
+function encodeResume(point) {
+  return `${RESUME_PREFIX}${point.records}~${point.entries}~${point.inner ?? ""}`;
+}
+function decodeResume(cursor) {
+  if (cursor === undefined)
+    return { inner: undefined, records: 0, entries: 0 };
+  const found = RESUME_PATTERN.exec(cursor);
+  if (!found)
+    return { inner: cursor, records: 0, entries: 0 };
+  return { inner: found[3] ? found[3] : undefined, records: Number(found[1]), entries: Number(found[2]) };
+}
+function inputConnector(builder, input) {
+  const connector = {
+    id: input.inputId,
+    family: builder.family,
+    authenticate: () => builder.authenticate?.() ?? Promise.resolve(),
+    fetchItem: (localItemId, options) => builder.fetchItem(localItemId, options),
+    classificationSignals: (item) => builder.classificationSignals(item),
+    listItems(options = {}) {
+      const lookup3 = options.storedItem;
+      const budget = options.limit;
+      return async function* () {
+        const thisPass = new Map;
+        const stateOf = (identity2) => thisPass.get(identity2.localItemId) ?? lookup3?.(identity2, builder.compareVersions);
+        const resume = decodeResume(options.cursor);
+        let base = resume.inner;
+        let offset = 0;
+        let recordsToSkip = resume.records;
+        let entriesToSkip = resume.entries;
+        let yielded = 0;
+        const pages = input.records({
+          ...base !== undefined ? { cursor: base } : {},
+          ...options.limit !== undefined ? { limit: options.limit } : {}
+        });
+        for await (const page2 of pages) {
+          let units = [];
+          const outcomes = [];
+          const outcomeOf = new Map;
+          for (const [position, record] of page2.records.entries()) {
+            const skipped = () => {
+              outcomes.push({ localItemId: "", decision: "skip_same", alreadyThere: false });
+            };
+            if (recordsToSkip > 0) {
+              recordsToSkip -= 1;
+              skipped();
+              continue;
+            }
+            const entries = builder.entriesOf(record);
+            const from = Math.min(entriesToSkip, entries.length);
+            entriesToSkip = 0;
+            if (entries.length === 0) {
+              skipped();
+              continue;
+            }
+            const wanted = new Set;
+            entries.forEach((entry, index) => {
+              if (index < from)
+                return;
+              const stored = stateOf(entry.identity);
+              const decision = decideIntake({
+                input: input.kind,
+                version: entry.identity.sourceVersion,
+                bringsContent: entry.bringsContent,
+                ...entry.deletes === true ? { deletes: true } : {},
+                stored,
+                compareVersions: builder.compareVersions
+              });
+              if (decision === "apply")
+                wanted.add(entry.identity.localItemId);
+              if (index === 0) {
+                outcomeOf.set(offset + position, outcomes.length);
+                outcomes.push({
+                  localItemId: entry.identity.localItemId,
+                  decision,
+                  alreadyThere: stored !== undefined && stored.tombstoned !== true,
+                  ...entry.authoredAt !== undefined ? { authoredAt: entry.authoredAt } : {}
+                });
+              }
+            });
+            if (from > 0)
+              skipped();
+            if (wanted.size === 0)
+              continue;
+            const built = new Map;
+            for (const item of await builder.build(record, wanted)) {
+              if (wanted.has(item.identity.localItemId))
+                built.set(item.identity.localItemId, item);
+            }
+            entries.forEach((entry, index) => {
+              const built1 = built.get(entry.identity.localItemId);
+              if (!built1 || index < from)
+                return;
+              const known = stateOf(built1.identity)?.version;
+              const owedBody = stateOf(built1.identity);
+              const owedOlder = owedBody?.incomplete === true && owedBody.version !== undefined && built1.identity.sourceVersion !== undefined && builder.compareVersions(built1.identity.sourceVersion, owedBody.version) < 0 && hasContent(built1);
+              const item = owedOlder ? { ...built1, identity: { ...built1.identity, sourceVersion: owedBody.version }, metadata: { ...built1.metadata, contentVersion: built1.identity.sourceVersion } } : built1.identity.sourceVersion === undefined && known !== undefined ? { ...built1, identity: { ...built1.identity, sourceVersion: known } } : built1;
+              const deleted = item.metadata["deleted"] === true;
+              const before = stateOf(item.identity);
+              thisPass.set(item.identity.localItemId, {
+                ...item.identity.sourceVersion !== undefined ? { version: item.identity.sourceVersion } : {},
+                hasContent: hasContent(item) ? !(item.content.kind === "text" && item.content.text.trim() === "") : !deleted && before?.hasContent === true && before.tombstoned !== true,
+                ...deleted || before?.tombstoned === true && (!hasContent(item) || item.content.kind === "text" && item.content.text.trim() === "") ? { tombstoned: true } : {},
+                ...before?.incomplete === true && (before.version === item.identity.sourceVersion || !hasContent(item) && !deleted) ? { incomplete: true } : {},
+                ...before?.incomplete === true && before.owedBodyVersion !== undefined && !hasContent(item) && !deleted ? { owedBodyVersion: before.owedBodyVersion } : {}
+              });
+              units.push({ record: offset + position, entry: index, parent: entries[0].identity.localItemId, item });
+            });
+          }
+          const winner = new Map;
+          const isDeleted = (unit) => unit.item.metadata["deleted"] === true;
+          units.forEach((unit, at) => {
+            const id = unit.item.identity.localItemId;
+            const best = winner.get(id);
+            if (best === undefined) {
+              winner.set(id, at);
+              return;
+            }
+            const held2 = units[best];
+            const a = unit.item.identity.sourceVersion;
+            const b = held2.item.identity.sourceVersion;
+            const order = a === undefined || b === undefined ? 0 : builder.compareVersions(a, b);
+            if (order > 0 || order === 0 && !(isDeleted(held2) && !isDeleted(unit)))
+              winner.set(id, at);
+          });
+          if (winner.size !== units.length) {
+            for (const [id, at] of winner) {
+              const won = units[at];
+              if (isDeleted(won) || hasContent(won.item))
+                continue;
+              let older;
+              let deletion;
+              units.forEach((unit, from) => {
+                if (unit.item.identity.localItemId !== id || from >= at)
+                  return;
+                if (isDeleted(unit)) {
+                  older = undefined;
+                  deletion = unit;
+                } else if (hasContent(unit.item)) {
+                  older = unit;
+                  deletion = undefined;
+                }
+              });
+              if (older)
+                units[at] = { record: older.record, entry: older.entry, parent: older.parent, item: { ...won.item, content: older.item.content, metadata: { ...won.item.metadata, ...older.item.metadata["contentVersion"] !== undefined ? { contentVersion: older.item.metadata["contentVersion"] } : older.item.identity.sourceVersion !== undefined && older.item.identity.sourceVersion !== won.item.identity.sourceVersion ? { contentVersion: older.item.identity.sourceVersion } : {} } } };
+              else if (deletion)
+                units[at] = { record: deletion.record, entry: deletion.entry, parent: deletion.parent, item: { ...deletion.item, identity: { ...deletion.item.identity, ...won.item.identity.sourceVersion !== undefined ? { sourceVersion: won.item.identity.sourceVersion } : {} } } };
+            }
+            const kept = new Set(winner.values());
+            for (const [at, unit] of units.entries()) {
+              if (unit.entry !== 0 || kept.has(at))
+                continue;
+              const told = outcomeOf.get(unit.record);
+              if (told !== undefined)
+                outcomes[told] = { ...outcomes[told], decision: "skip_older" };
+            }
+            units = units.filter((_, at) => kept.has(at));
+          }
+          const ordered = [];
+          const held = new Map;
+          units.forEach((unit, at) => {
+            const parentLater = unit.entry !== 0 && units.some((other, later) => later > at && other.entry === 0 && other.item.identity.localItemId === unit.parent);
+            if (parentLater) {
+              held.set(unit.parent, [...held.get(unit.parent) ?? [], unit]);
+              return;
+            }
+            ordered.push(unit);
+            if (unit.entry === 0)
+              ordered.push(...held.get(unit.item.identity.localItemId) ?? []);
+          });
+          units = ordered;
+          input.observeIntake?.(outcomes);
+          const room = budget === undefined ? Number.POSITIVE_INFINITY : budget - yielded;
+          if (units.length > room) {
+            if (room <= 0)
+              return;
+            const next = units.slice(room).reduce((first, unit) => unit.record < first.record || unit.record === first.record && unit.entry < first.entry ? unit : first);
+            yield {
+              items: units.slice(0, room).map((unit) => unit.item),
+              nextCursor: encodeResume({ inner: base, records: next.record, entries: next.entry }),
+              done: false,
+              truncated: true
+            };
+            return;
+          }
+          const items = units.map((unit) => unit.item);
+          yielded += items.length;
+          if (page2.nextCursor !== undefined) {
+            base = page2.nextCursor;
+            offset = 0;
+          } else {
+            offset += page2.records.length;
+          }
+          yield page2.truncated === true ? { items, ...page2.nextCursor !== undefined ? { nextCursor: page2.nextCursor } : {}, done: false, truncated: true } : { items, ...page2.nextCursor !== undefined ? { nextCursor: page2.nextCursor } : {}, done: page2.done };
+        }
+      }();
+    }
+  };
+  return connector;
+}
+var hasContent = (item) => item.content.kind !== "metadata_only", RESUME_PREFIX = "~in1~", RESUME_PATTERN;
+var init_source_inputs = __esm(() => {
+  RESUME_PATTERN = /^~in1~(\d+)~(\d+)~([\s\S]*)$/u;
+});
+
+// src/workers/archive-import/source-input.ts
+function bindInputToFiles(input, manifestSha256) {
+  const prefix = `${manifestSha256}|`;
+  return {
+    inputId: input.inputId,
+    kind: input.kind,
+    records(options) {
+      let inner;
+      if (options?.cursor !== undefined) {
+        if (!options.cursor.startsWith(prefix)) {
+          throw new ArchiveImportStoppedError("resume_point_invalid", "This import's resume point does not belong to its files.");
+        }
+        inner = options.cursor.slice(prefix.length);
+      }
+      const pages = input.records({
+        ...inner !== undefined ? { cursor: inner } : {},
+        ...options?.limit !== undefined ? { limit: options.limit } : {}
+      });
+      return async function* () {
+        for await (const page2 of pages) {
+          yield page2.nextCursor !== undefined ? { ...page2, nextCursor: `${prefix}${page2.nextCursor}` } : page2;
+        }
+      }();
+    }
+  };
+}
+function withInputs(connector, builder) {
+  const withMethod = Object.create(connector);
+  withMethod.forInput = (input) => inputConnector(builder, input);
+  return withMethod;
+}
+function observingIntake(input, observe) {
+  return { inputId: input.inputId, kind: input.kind, records: (options) => input.records(options), observeIntake: observe };
+}
+function holdingItems(connector) {
+  const held = Object.create(connector);
+  held.listItems = (options) => {
+    const pages = connector.listItems(options);
+    return async function* () {
+      for await (const page2 of pages) {
+        yield { ...page2, items: page2.items.map((item) => ({ ...item, holdContentUntilJudged: true })) };
+      }
+    }();
+  };
+  held.fetchItem = async (localItemId, options) => ({ ...await connector.fetchItem(localItemId, options), holdContentUntilJudged: true });
+  return held;
+}
+var init_source_input = __esm(() => {
+  init_archive_formats();
+  init_source_inputs();
+});
+
 // src/workers/x-bookmarks/archive-import.ts
 import { Database as Database18 } from "bun:sqlite";
 import { existsSync as existsSync55 } from "node:fs";
 import { isAbsolute as isAbsolute24 } from "node:path";
+function archivedXBookmarksConnector(account, posts, fetchedAt) {
+  return holdingItems(createXBookmarksSourceConnector({
+    account,
+    posts,
+    connectorId: X_BOOKMARKS_ARCHIVE_CONNECTOR_ID,
+    fetchedAt
+  }));
+}
 function readArchivedXBookmarks(archivePath) {
   const path = archivePath.trim();
   if (!path || !isAbsolute24(path) || !path.endsWith(".sqlite")) {
@@ -83062,6 +83355,7 @@ function newestFirst2(left, right) {
 }
 var HANDLE_TITLE, XBookmarksArchiveImportError;
 var init_archive_import = __esm(() => {
+  init_source_input();
   init_connector();
   HANDLE_TITLE = /^@([A-Za-z0-9_]{1,15}) on X$/;
   XBookmarksArchiveImportError = class XBookmarksArchiveImportError extends Error {
@@ -83711,12 +84005,7 @@ function createXBookmarksConnectorStoreSyncHandler(options) {
         providerItemId: post.id,
         localItemId: xBookmarkLocalItemId(account, post.id)
       }));
-      const connector = createXBookmarksSourceConnector({
-        account,
-        posts: missing,
-        connectorId: X_BOOKMARKS_ARCHIVE_CONNECTOR_ID,
-        fetchedAt: now().toISOString()
-      });
+      const connector = archivedXBookmarksConnector(account, missing, now().toISOString());
       const run = await runLane(connector, {
         placement: X_BOOKMARKS_STORE_PLACEMENT,
         fetchContent: true,
@@ -83724,7 +84013,7 @@ function createXBookmarksConnectorStoreSyncHandler(options) {
         maxItems: Math.max(1, missing.length)
       }, false);
       return withGuard({
-        status: run.sync.itemsIndexed > 0 ? "progress" : "idle",
+        status: missing.length > 0 ? "progress" : "idle",
         counts: {
           api_requests: 0,
           archive_rows_read: archived.rowsRead,
@@ -86737,239 +87026,6 @@ var init_corpus_adapter4 = __esm(() => {
   init_corpus();
   LEGACY_SECURE_LOCAL_TELEGRAM_MESSAGES_CORPUS_ID = LEGACY_TELEGRAM_MESSAGES_CORPUS_ID;
 });
-// src/core/source-inputs.ts
-function decideIntake(args) {
-  const { stored } = args;
-  if (!stored)
-    return "apply";
-  const order = stored.version === undefined ? undefined : args.version === undefined ? 0 : args.compareVersions(args.version, stored.version);
-  if (stored.tombstoned === true) {
-    if (order !== undefined && order > 0)
-      return "apply";
-    if (args.input === "live" && order === undefined)
-      return "apply";
-    return order !== undefined && order < 0 ? "skip_older" : "skip_same";
-  }
-  if (order === undefined)
-    return "apply";
-  if (args.deletes === true && order >= 0)
-    return "apply";
-  if (order > 0)
-    return "apply";
-  if (order < 0)
-    return stored.incomplete === true && stored.owedBodyVersion !== undefined && args.bringsContent && args.version !== undefined && args.compareVersions(args.version, stored.owedBodyVersion) >= 0 ? "apply" : "skip_older";
-  if (stored.incomplete === true)
-    return "apply";
-  if (!args.bringsContent)
-    return "skip_same";
-  if (!stored.hasContent)
-    return "apply";
-  return args.input === "live" ? "apply" : "skip_same";
-}
-function encodeResume(point) {
-  return `${RESUME_PREFIX}${point.records}~${point.entries}~${point.inner ?? ""}`;
-}
-function decodeResume(cursor) {
-  if (cursor === undefined)
-    return { inner: undefined, records: 0, entries: 0 };
-  const found = RESUME_PATTERN.exec(cursor);
-  if (!found)
-    return { inner: cursor, records: 0, entries: 0 };
-  return { inner: found[3] ? found[3] : undefined, records: Number(found[1]), entries: Number(found[2]) };
-}
-function inputConnector(builder, input) {
-  const connector = {
-    id: input.inputId,
-    family: builder.family,
-    authenticate: () => builder.authenticate?.() ?? Promise.resolve(),
-    fetchItem: (localItemId, options) => builder.fetchItem(localItemId, options),
-    classificationSignals: (item) => builder.classificationSignals(item),
-    listItems(options = {}) {
-      const lookup3 = options.storedItem;
-      const budget = options.limit;
-      return async function* () {
-        const thisPass = new Map;
-        const stateOf = (identity2) => thisPass.get(identity2.localItemId) ?? lookup3?.(identity2, builder.compareVersions);
-        const resume = decodeResume(options.cursor);
-        let base = resume.inner;
-        let offset = 0;
-        let recordsToSkip = resume.records;
-        let entriesToSkip = resume.entries;
-        let yielded = 0;
-        const pages = input.records({
-          ...base !== undefined ? { cursor: base } : {},
-          ...options.limit !== undefined ? { limit: options.limit } : {}
-        });
-        for await (const page2 of pages) {
-          let units = [];
-          const outcomes = [];
-          const outcomeOf = new Map;
-          for (const [position, record] of page2.records.entries()) {
-            const skipped = () => {
-              outcomes.push({ localItemId: "", decision: "skip_same", alreadyThere: false });
-            };
-            if (recordsToSkip > 0) {
-              recordsToSkip -= 1;
-              skipped();
-              continue;
-            }
-            const entries = builder.entriesOf(record);
-            const from = Math.min(entriesToSkip, entries.length);
-            entriesToSkip = 0;
-            if (entries.length === 0) {
-              skipped();
-              continue;
-            }
-            const wanted = new Set;
-            entries.forEach((entry, index) => {
-              if (index < from)
-                return;
-              const stored = stateOf(entry.identity);
-              const decision = decideIntake({
-                input: input.kind,
-                version: entry.identity.sourceVersion,
-                bringsContent: entry.bringsContent,
-                ...entry.deletes === true ? { deletes: true } : {},
-                stored,
-                compareVersions: builder.compareVersions
-              });
-              if (decision === "apply")
-                wanted.add(entry.identity.localItemId);
-              if (index === 0) {
-                outcomeOf.set(offset + position, outcomes.length);
-                outcomes.push({
-                  localItemId: entry.identity.localItemId,
-                  decision,
-                  alreadyThere: stored !== undefined && stored.tombstoned !== true,
-                  ...entry.authoredAt !== undefined ? { authoredAt: entry.authoredAt } : {}
-                });
-              }
-            });
-            if (from > 0)
-              skipped();
-            if (wanted.size === 0)
-              continue;
-            const built = new Map;
-            for (const item of await builder.build(record, wanted)) {
-              if (wanted.has(item.identity.localItemId))
-                built.set(item.identity.localItemId, item);
-            }
-            entries.forEach((entry, index) => {
-              const built1 = built.get(entry.identity.localItemId);
-              if (!built1 || index < from)
-                return;
-              const known = stateOf(built1.identity)?.version;
-              const owedBody = stateOf(built1.identity);
-              const owedOlder = owedBody?.incomplete === true && owedBody.version !== undefined && built1.identity.sourceVersion !== undefined && builder.compareVersions(built1.identity.sourceVersion, owedBody.version) < 0 && hasContent(built1);
-              const item = owedOlder ? { ...built1, identity: { ...built1.identity, sourceVersion: owedBody.version }, metadata: { ...built1.metadata, contentVersion: built1.identity.sourceVersion } } : built1.identity.sourceVersion === undefined && known !== undefined ? { ...built1, identity: { ...built1.identity, sourceVersion: known } } : built1;
-              const deleted = item.metadata["deleted"] === true;
-              const before = stateOf(item.identity);
-              thisPass.set(item.identity.localItemId, {
-                ...item.identity.sourceVersion !== undefined ? { version: item.identity.sourceVersion } : {},
-                hasContent: hasContent(item) ? !(item.content.kind === "text" && item.content.text.trim() === "") : !deleted && before?.hasContent === true && before.tombstoned !== true,
-                ...deleted || before?.tombstoned === true && (!hasContent(item) || item.content.kind === "text" && item.content.text.trim() === "") ? { tombstoned: true } : {},
-                ...before?.incomplete === true && (before.version === item.identity.sourceVersion || !hasContent(item) && !deleted) ? { incomplete: true } : {},
-                ...before?.incomplete === true && before.owedBodyVersion !== undefined && !hasContent(item) && !deleted ? { owedBodyVersion: before.owedBodyVersion } : {}
-              });
-              units.push({ record: offset + position, entry: index, parent: entries[0].identity.localItemId, item });
-            });
-          }
-          const winner = new Map;
-          const isDeleted = (unit) => unit.item.metadata["deleted"] === true;
-          units.forEach((unit, at) => {
-            const id = unit.item.identity.localItemId;
-            const best = winner.get(id);
-            if (best === undefined) {
-              winner.set(id, at);
-              return;
-            }
-            const held2 = units[best];
-            const a = unit.item.identity.sourceVersion;
-            const b = held2.item.identity.sourceVersion;
-            const order = a === undefined || b === undefined ? 0 : builder.compareVersions(a, b);
-            if (order > 0 || order === 0 && !(isDeleted(held2) && !isDeleted(unit)))
-              winner.set(id, at);
-          });
-          if (winner.size !== units.length) {
-            for (const [id, at] of winner) {
-              const won = units[at];
-              if (isDeleted(won) || hasContent(won.item))
-                continue;
-              let older;
-              let deletion;
-              units.forEach((unit, from) => {
-                if (unit.item.identity.localItemId !== id || from >= at)
-                  return;
-                if (isDeleted(unit)) {
-                  older = undefined;
-                  deletion = unit;
-                } else if (hasContent(unit.item)) {
-                  older = unit;
-                  deletion = undefined;
-                }
-              });
-              if (older)
-                units[at] = { record: older.record, entry: older.entry, parent: older.parent, item: { ...won.item, content: older.item.content, metadata: { ...won.item.metadata, ...older.item.metadata["contentVersion"] !== undefined ? { contentVersion: older.item.metadata["contentVersion"] } : older.item.identity.sourceVersion !== undefined && older.item.identity.sourceVersion !== won.item.identity.sourceVersion ? { contentVersion: older.item.identity.sourceVersion } : {} } } };
-              else if (deletion)
-                units[at] = { record: deletion.record, entry: deletion.entry, parent: deletion.parent, item: { ...deletion.item, identity: { ...deletion.item.identity, ...won.item.identity.sourceVersion !== undefined ? { sourceVersion: won.item.identity.sourceVersion } : {} } } };
-            }
-            const kept = new Set(winner.values());
-            for (const [at, unit] of units.entries()) {
-              if (unit.entry !== 0 || kept.has(at))
-                continue;
-              const told = outcomeOf.get(unit.record);
-              if (told !== undefined)
-                outcomes[told] = { ...outcomes[told], decision: "skip_older" };
-            }
-            units = units.filter((_, at) => kept.has(at));
-          }
-          const ordered = [];
-          const held = new Map;
-          units.forEach((unit, at) => {
-            const parentLater = unit.entry !== 0 && units.some((other, later) => later > at && other.entry === 0 && other.item.identity.localItemId === unit.parent);
-            if (parentLater) {
-              held.set(unit.parent, [...held.get(unit.parent) ?? [], unit]);
-              return;
-            }
-            ordered.push(unit);
-            if (unit.entry === 0)
-              ordered.push(...held.get(unit.item.identity.localItemId) ?? []);
-          });
-          units = ordered;
-          input.observeIntake?.(outcomes);
-          const room = budget === undefined ? Number.POSITIVE_INFINITY : budget - yielded;
-          if (units.length > room) {
-            if (room <= 0)
-              return;
-            const next = units.slice(room).reduce((first, unit) => unit.record < first.record || unit.record === first.record && unit.entry < first.entry ? unit : first);
-            yield {
-              items: units.slice(0, room).map((unit) => unit.item),
-              nextCursor: encodeResume({ inner: base, records: next.record, entries: next.entry }),
-              done: false,
-              truncated: true
-            };
-            return;
-          }
-          const items = units.map((unit) => unit.item);
-          yielded += items.length;
-          if (page2.nextCursor !== undefined) {
-            base = page2.nextCursor;
-            offset = 0;
-          } else {
-            offset += page2.records.length;
-          }
-          yield page2.truncated === true ? { items, ...page2.nextCursor !== undefined ? { nextCursor: page2.nextCursor } : {}, done: false, truncated: true } : { items, ...page2.nextCursor !== undefined ? { nextCursor: page2.nextCursor } : {}, done: page2.done };
-        }
-      }();
-    }
-  };
-  return connector;
-}
-var hasContent = (item) => item.content.kind !== "metadata_only", RESUME_PREFIX = "~in1~", RESUME_PATTERN;
-var init_source_inputs = __esm(() => {
-  RESUME_PATTERN = /^~in1~(\d+)~(\d+)~([\s\S]*)$/u;
-});
-
 // src/workers/connector-store/capture-spool-secrets.ts
 import { createHash as createHash54 } from "node:crypto";
 import { closeSync as closeSync16, fsyncSync as fsyncSync3, lstatSync as lstatSync29, openSync as openSync16, readSync as readSync3, writeSync as writeSync4 } from "node:fs";
@@ -88761,58 +88817,6 @@ var init_capture_spool_connector = __esm(() => {
     "boosts",
     "inviter"
   ]);
-});
-
-// src/workers/archive-import/source-input.ts
-function bindInputToFiles(input, manifestSha256) {
-  const prefix = `${manifestSha256}|`;
-  return {
-    inputId: input.inputId,
-    kind: input.kind,
-    records(options) {
-      let inner;
-      if (options?.cursor !== undefined) {
-        if (!options.cursor.startsWith(prefix)) {
-          throw new ArchiveImportStoppedError("resume_point_invalid", "This import's resume point does not belong to its files.");
-        }
-        inner = options.cursor.slice(prefix.length);
-      }
-      const pages = input.records({
-        ...inner !== undefined ? { cursor: inner } : {},
-        ...options?.limit !== undefined ? { limit: options.limit } : {}
-      });
-      return async function* () {
-        for await (const page2 of pages) {
-          yield page2.nextCursor !== undefined ? { ...page2, nextCursor: `${prefix}${page2.nextCursor}` } : page2;
-        }
-      }();
-    }
-  };
-}
-function withInputs(connector, builder) {
-  const withMethod = Object.create(connector);
-  withMethod.forInput = (input) => inputConnector(builder, input);
-  return withMethod;
-}
-function observingIntake(input, observe) {
-  return { inputId: input.inputId, kind: input.kind, records: (options) => input.records(options), observeIntake: observe };
-}
-function holdingItems(connector) {
-  const held = Object.create(connector);
-  held.listItems = (options) => {
-    const pages = connector.listItems(options);
-    return async function* () {
-      for await (const page2 of pages) {
-        yield { ...page2, items: page2.items.map((item) => ({ ...item, holdContentUntilJudged: true })) };
-      }
-    }();
-  };
-  held.fetchItem = async (localItemId, options) => ({ ...await connector.fetchItem(localItemId, options), holdContentUntilJudged: true });
-  return held;
-}
-var init_source_input = __esm(() => {
-  init_archive_formats();
-  init_source_inputs();
 });
 
 // src/workers/archive-import/telegram/json-repair.ts

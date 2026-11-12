@@ -8,6 +8,7 @@ import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import {
   LocalXBookmarksApiUsageStore,
   XBookmarksArchiveImportError,
+  archivedXBookmarksConnector,
   X_BOOKMARKS_ARCHIVE_CONNECTOR_ID,
   X_BOOKMARKS_PROVIDER,
   createXBookmarksConnectorStoreSyncHandler,
@@ -137,6 +138,17 @@ describe('importing the archived X bookmarks set', () => {
     expect(() => readArchivedXBookmarks(path)).toThrow(XBookmarksArchiveImportError);
   });
 
+  test('every imported bookmark is held until it has been judged', async () => {
+    const connector = archivedXBookmarksConnector(ACCOUNT, [
+      post('701', 'held marker', '2026-09-20T00:00:00.000Z'),
+    ], '2026-11-12T12:00:00.000Z');
+    expect(connector.id).toBe(X_BOOKMARKS_ARCHIVE_CONNECTOR_ID);
+    for await (const page of connector.listItems()) {
+      for (const item of page.items) expect(item.holdContentUntilJudged).toBe(true);
+    }
+    expect((await connector.fetchItem(`${ACCOUNT}:701`)).holdContentUntilJudged).toBe(true);
+  });
+
   test('a bookmark the lane already holds keeps its live record', async () => {
     const path = await earlierInstallStore([
       post('601', 'zebrastripe archived', '2026-09-20T00:00:00.000Z'),
@@ -154,7 +166,10 @@ describe('importing the archived X bookmarks set', () => {
     expect(store.searchItems('quokkasmile', 5)[0]?.sourceItem.providerItemId).toBe('601');
     expect(store.searchItems('zebrastripe', 5)).toHaveLength(0);
     expect(store.searchItems('Reading list', 5)[0]?.sourceItem.providerItemId).toBe('601');
-    expect(store.searchItems('archive only', 5)[0]?.sourceItem.providerItemId).toBe('602');
+    expect(store.itemOwnerPresent({
+      family: 'x', provider: X_BOOKMARKS_PROVIDER, accountScope: ACCOUNT,
+      providerItemId: '602', localItemId: `${ACCOUNT}:602`,
+    }, X_BOOKMARKS_ARCHIVE_CONNECTOR_ID, 'preservation')).toBe(true);
     usage.close();
     store.close();
   });
@@ -177,11 +192,11 @@ describe('importing the archived X bookmarks set', () => {
     };
     const { handler, usage } = handlerFor(store, NO_API);
     const first = await handler.importArchive!({ archive_path: path });
+    // Stored, held until judged: nothing reaches the embedder before then.
     expect(first).toMatchObject({
       status: 'progress',
-      counts: { api_requests: 0, archive_rows_read: 3, items_seen: 3, items_indexed: 3 },
+      counts: { api_requests: 0, archive_rows_read: 3, items_seen: 3, tier_pending_items: 3, chunks_embedded: 0 },
     });
-    expect(store.searchItems('archived beta', 5)[0]?.sourceItem.providerItemId).toBe('402');
     expect(store.itemOwnerPresent({
       family: 'x', provider: X_BOOKMARKS_PROVIDER, accountScope: ACCOUNT,
       providerItemId: '402', localItemId: `${ACCOUNT}:402`,
