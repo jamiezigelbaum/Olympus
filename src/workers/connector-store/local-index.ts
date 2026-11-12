@@ -9,6 +9,7 @@ import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
 import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled, withKeywordExpansionDisabled } from '../../core/source-index/keyword-context.ts';
 import { lastKeywordLanguages, storeKeywordLanguages, storeKeywordLanguagesWith } from '../../core/source-index/keyword-languages.ts';
 import { expandSourceIndexKeywords, KEYWORD_PREPARE_WAIT_MS, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
+import { RECENT_ITEMS_CUT_SHORT } from '../../core/source-index/partial-search.ts';
 import { controlPathHeadroom, ingestionTurn, type ControlPathHeadroom } from '../control-path-headroom.ts';
 import { OffThreadReadBusyError, offThreadReadsSupported, readOnPool, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
 // The shared connector ingest spine: ONE generic local store that turns any
@@ -13667,23 +13668,28 @@ export class LocalConnectorStore {
    * recentItems with its read on the store's read-pool thread (#1305): the
    * newest-first order has no index, so on a large chat store the read sorts
    * every item, seconds of the request thread. The lane is optional: a busy
-   * store gives no recency rows.
+   * store gives no recency rows, and says it was cut short (#1460).
    */
   async recentItemsOffThread(
     maxResults: number,
     accountScope?: string,
     filters?: ConnectorStoreSearchFilters,
     deadlineAtMs?: number,
+    onCutShort?: () => void,
   ): Promise<ConnectorStoreSearchRow[]> {
     if (!offThreadReadsSupported(this.dbPath)) return this.recentItems(maxResults, accountScope, filters);
     let rows: ItemRow[];
     try {
       rows = await readOnPool(this.dbPath, this.recentItemsRead(maxResults, accountScope, filters), deadlineAtMs !== undefined ? { deadlineAtMs } : {}) as ItemRow[];
     } catch (error) {
-      if (error instanceof OffThreadReadBusyError) return [];
-      throw error;
+      if (!(error instanceof OffThreadReadBusyError)) throw error;
+      onCutShort?.();
+      return [];
     }
-    if (this.closedForPoolReads) return [];
+    if (this.closedForPoolReads) {
+      onCutShort?.();
+      return [];
+    }
     return this.visibleRecentRows(rows);
   }
 
@@ -14866,7 +14872,8 @@ export function createConnectorStoreCorpusAdapter(
         await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, {}, request.deadlineAtMs),
         options.localKeywordFallback, {}, request.deadlineAtMs));
       const rows = keywordLane.rows;
-      const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters, request.deadlineAtMs);
+      let recencyCut = false;
+      const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters, request.deadlineAtMs, () => { recencyCut = true; });
       if (recencyRows.length === 0) {
         const hits = withKeywordLeaderSignals(rows.map((row) => connectorStoreHitFromRow(
           store,
@@ -14883,7 +14890,7 @@ export function createConnectorStoreCorpusAdapter(
             ...(semanticSkippedReason
               ? { skippedReason: semanticSkippedReason, modelId: embeddingProvider!.modelId }
               : {}),
-          }],
+          }, ...(recencyCut ? [connectorStoreRecencyLaneAudit(store.corpusId, 0, true)] : [])],
           matchCount: keywordLane.matchCount,
           rawExposed: false,
         };
@@ -15127,6 +15134,7 @@ async function chatRecencyLaneRows(
   accountScope?: string,
   filters?: ConnectorStoreSearchFilters,
   deadlineAtMs?: number,
+  onCutShort?: () => void,
 ): Promise<ConnectorStoreSearchRow[]> {
   if (store.family !== 'chat') return [];
   // Full lane depth regardless of maxResults: the lane feeds FUSION, not the
@@ -15134,8 +15142,9 @@ async function chatRecencyLaneRows(
   // items deep minutes after it arrived (2026-07-05 probe). It reads last, so
   // it keeps the lane's deadline: queued behind a busy store's vector pages
   // without one, it held the whole lane past the router's cut and the keyword
-  // rows already read were dropped with it (#1305). Busy, it is left out.
-  return store.recentItemsOffThread(CHAT_RECENCY_LANE_LIMIT, accountScope, filters, deadlineAtMs);
+  // rows already read were dropped with it (#1305). Busy, it is left out and
+  // its audit says so, so the answer names the source (#1460).
+  return store.recentItemsOffThread(CHAT_RECENCY_LANE_LIMIT, accountScope, filters, deadlineAtMs, onCutShort);
 }
 
 function connectorStoreHitFromRow(
@@ -15209,7 +15218,7 @@ function withPinnedNewestChatHits(input: {
   return result;
 }
 
-function connectorStoreRecencyLaneAudit(corpusId: string, candidateCount: number): RetrievalLaneAudit {
+function connectorStoreRecencyLaneAudit(corpusId: string, candidateCount: number, cutShort = false): RetrievalLaneAudit {
   return {
     laneName: `${corpusId}:connector_store_recency`,
     laneType: 'metadata',
@@ -15218,6 +15227,7 @@ function connectorStoreRecencyLaneAudit(corpusId: string, candidateCount: number
     backend: 'sqlite',
     localOnly: true,
     rawExposed: false,
+    ...(cutShort ? { skippedReason: RECENT_ITEMS_CUT_SHORT } : {}),
   };
 }
 
@@ -15304,7 +15314,8 @@ async function hybridConnectorStoreSearch(
   const bestCosine = scoredVectorRows.length > 0
     ? roundCosine(Math.max(...scoredVectorRows.map((row) => row.bestCosine)))
     : undefined;
-  const recencyRows = await chatRecencyLaneRows(store, accountScope, filters, request.deadlineAtMs);
+  let recencyCut = false;
+  const recencyRows = await chatRecencyLaneRows(store, accountScope, filters, request.deadlineAtMs, () => { recencyCut = true; });
   const contentBar = relevanceBar ?? CALIBRATED_CONTENT_PREFERENCE_BARS.get(provider.modelId);
   const vettedVectorItemIds = new Set(contentBar === undefined
     ? []
@@ -15378,8 +15389,8 @@ async function hybridConnectorStoreSearch(
         localOnly: true,
         rawExposed: false,
       },
-      ...(recencyRows.length > 0
-        ? [connectorStoreRecencyLaneAudit(store.corpusId, recencyRows.length)]
+      ...(recencyRows.length > 0 || recencyCut
+        ? [connectorStoreRecencyLaneAudit(store.corpusId, recencyRows.length, recencyCut)]
         : []),
       {
         laneName: `${store.corpusId}:hybrid`,
