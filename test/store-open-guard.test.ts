@@ -62,7 +62,7 @@ const ALLOWED: Record<string, string> = {
   'src/workers/source-index/status.ts': 'counts secret locations beside a mounted Private store, read-only',
   // Release testing, on a machine kept for it.
   'scripts/release-check/machine-agent.ts':
-    'the release check\'s agent on a test machine: reads its stand-in Readwise and archive stores and ledger, read-only, at the paths the resolvers give, to compare an upgrade; it runs beside the engine under test by design, so it takes no owner lock',
+    'the release check\'s agent on a test machine: reads its stand-in Readwise and archive stores and ledger, read-only, at the paths the resolvers give, to compare an upgrade and verify scale imports (dates and completed provider traversals); it runs beside the engine under test by design, so it takes no owner lock',
   'scripts/release-check/on-demand-probe.ts':
     'the release check\'s read-on-demand timing probe on an accounts test machine: opens the extraction job queue read-only to bracket one read and reads bounded log slices; it runs beside the engine under test by design, so it takes no owner lock',
   // Operator scripts on a database named on their command line; each holds
