@@ -36793,7 +36793,7 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit) 
         await yieldConnectorStoreVectorScan();
     }
   }
-  return expired() ? cut : { bestByItem, dimensionMismatches };
+  return expired() ? cut : { bestByItem, dimensionMismatches, exhausted: heap.length === 0 };
 }
 function connectorStoreVectorDigestPageQuery(options, afterChunkPk, limit = 4096) {
   const account = normalizeOptionalAccountScope(options.accountScope);
@@ -45958,20 +45958,31 @@ var init_local_index = __esm(() => {
         ...selectedAccount ? { accountScope: selectedAccount } : {},
         ...filters ? { filters } : {}
       };
-      const scanned = offThreadReadsSupported(this.dbPath) ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit);
-      if ("skippedReason" in scanned)
-        return { rows: [], skippedReason: scanned.skippedReason };
-      const { bestByItem, dimensionMismatches } = scanned;
-      const candidates = Array.from(bestByItem.entries()).filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE).sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]);
-      const rankedItems = [];
-      let candidateOffset = 0;
-      while (rankedItems.length < limit && candidateOffset < candidates.length) {
-        const batch = candidates.slice(candidateOffset, candidateOffset + Math.min(200, limit - rankedItems.length));
-        const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters);
-        for (const candidate of batch)
-          if (visible.has(candidate[0]))
-            rankedItems.push(candidate);
-        candidateOffset += batch.length;
+      let wanted = limit;
+      let rankedItems = [];
+      let dimensionMismatches = 0;
+      for (;; ) {
+        const scanned = offThreadReadsSupported(this.dbPath) ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, wanted) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, wanted);
+        if ("skippedReason" in scanned)
+          return { rows: [], skippedReason: scanned.skippedReason };
+        const { bestByItem } = scanned;
+        dimensionMismatches = scanned.dimensionMismatches;
+        const candidates = Array.from(bestByItem.entries()).filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE).sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]);
+        rankedItems = [];
+        let candidateOffset = 0;
+        while (rankedItems.length < limit && candidateOffset < candidates.length) {
+          const batch = candidates.slice(candidateOffset, candidateOffset + Math.min(200, limit - rankedItems.length));
+          const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters);
+          for (const candidate of batch)
+            if (visible.has(candidate[0]))
+              rankedItems.push(candidate);
+          candidateOffset += batch.length;
+        }
+        if (rankedItems.length >= limit || scanned.exhausted !== false)
+          break;
+        if (connectorStoreVectorDeadlineExpired(deadlineAtMs))
+          break;
+        wanted *= 8;
       }
       const searchRows = this.searchRowsByItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters);
       const winnersByLocalItemId = new Map(rankedItems.map(([, candidate]) => [candidate.localItemId, candidate]));

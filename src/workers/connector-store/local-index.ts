@@ -2274,7 +2274,12 @@ export function* connectorStoreCurrentEmbeddingRowsIterator(
 }
 
 type VectorScan =
-  | { bestByItem: Map<number, { bestCosine: number; bestChunkPk: number; localItemId: string }>; dimensionMismatches: number }
+  | {
+    bestByItem: Map<number, { bestCosine: number; bestChunkPk: number; localItemId: string }>;
+    dimensionMismatches: number;
+    /** False when the digest pass stopped with candidates left unread. */
+    exhausted?: boolean;
+  }
   | { skippedReason: string };
 
 type VectorScoreRow = { item_pk: number; chunk_pk: number; local_item_id: string; embedding: unknown };
@@ -2430,7 +2435,7 @@ export async function scanDigestPages(
       if (rePages++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0) await yieldConnectorStoreVectorScan();
     }
   }
-  return expired() ? cut : { bestByItem, dimensionMismatches };
+  return expired() ? cut : { bestByItem, dimensionMismatches, exhausted: heap.length === 0 };
 }
 
 /** INTEGER PRIMARY KEY is the rowid: no secondary index, joins, or blob sort. */
@@ -13006,37 +13011,50 @@ export class LocalConnectorStore {
       ...(selectedAccount ? { accountScope: selectedAccount } : {}),
       ...(filters ? { filters } : {}),
     };
-    // A file store's pages are read on its read-pool thread inside one
-    // snapshot (#1305): run on the request thread they held it for tens of
-    // seconds on a large store, and every other lane and request waited.
-    const scanned = offThreadReadsSupported(this.dbPath)
-      ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit)
-      : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit);
-    if ('skippedReason' in scanned) return { rows: [], skippedReason: scanned.skippedReason };
-    const { bestByItem, dimensionMismatches } = scanned;
+    // The digest pass reads only enough candidates for `wanted` SQL-eligible
+    // items. When ledger visibility below then leaves too few (staged-away
+    // copies, held items), the scan runs again wider, up to the whole store.
+    let wanted = limit;
+    let rankedItems: Array<[number, { bestCosine: number; bestChunkPk: number; localItemId: string }]> = [];
+    let dimensionMismatches = 0;
+    for (;;) {
+      // A file store's pages are read on its read-pool thread inside one
+      // snapshot (#1305): run on the request thread they held it for tens of
+      // seconds on a large store, and every other lane and request waited.
+      const scanned = offThreadReadsSupported(this.dbPath)
+        ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, wanted)
+        : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, wanted);
+      if ('skippedReason' in scanned) return { rows: [], skippedReason: scanned.skippedReason };
+      const { bestByItem } = scanned;
+      dimensionMismatches = scanned.dimensionMismatches;
 
-    // Ties break on item_pk, explicitly.
-    //
-    // This sort is stable, so the previous code inherited its tie order from
-    // Map insertion order, which came from the scan's ORDER BY item_pk. The
-    // scan no longer sorts (see connectorStoreCurrentEmbeddingRowsIterator), so
-    // that implicit order is gone — and exactly-equal cosines are not rare in a
-    // real corpus, where duplicated and forwarded content is normal. Naming the
-    // tiebreak here keeps the ranking identical to the ordered scan's and, more
-    // importantly, makes it independent of whatever plan SQLite chooses.
-    // Validate in rank order after the scan's last yield. Only candidates
-    // needed to fill the result limit touch the live tier ledger; hidden
-    // winners are skipped so they cannot crowd out an eligible match.
-    const candidates = Array.from(bestByItem.entries())
-      .filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE)
-      .sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]);
-    const rankedItems: typeof candidates = [];
-    let candidateOffset = 0;
-    while (rankedItems.length < limit && candidateOffset < candidates.length) {
-      const batch = candidates.slice(candidateOffset, candidateOffset + Math.min(200, limit - rankedItems.length));
-      const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters);
-      for (const candidate of batch) if (visible.has(candidate[0])) rankedItems.push(candidate);
-      candidateOffset += batch.length;
+      // Ties break on item_pk, explicitly.
+      //
+      // This sort is stable, so the previous code inherited its tie order from
+      // Map insertion order, which came from the scan's ORDER BY item_pk. The
+      // scan no longer sorts (see connectorStoreCurrentEmbeddingRowsIterator), so
+      // that implicit order is gone — and exactly-equal cosines are not rare in a
+      // real corpus, where duplicated and forwarded content is normal. Naming the
+      // tiebreak here keeps the ranking identical to the ordered scan's and, more
+      // importantly, makes it independent of whatever plan SQLite chooses.
+      // Validate in rank order after the scan's last yield. Only candidates
+      // needed to fill the result limit touch the live tier ledger; hidden
+      // winners are skipped so they cannot crowd out an eligible match.
+      const candidates = Array.from(bestByItem.entries())
+        .filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE)
+        .sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]);
+      rankedItems = [];
+      let candidateOffset = 0;
+      while (rankedItems.length < limit && candidateOffset < candidates.length) {
+        const batch = candidates.slice(candidateOffset, candidateOffset + Math.min(200, limit - rankedItems.length));
+        const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters);
+        for (const candidate of batch) if (visible.has(candidate[0])) rankedItems.push(candidate);
+        candidateOffset += batch.length;
+      }
+      if (rankedItems.length >= limit || scanned.exhausted !== false) break;
+      // Out of time: answer with the visible winners already found.
+      if (connectorStoreVectorDeadlineExpired(deadlineAtMs)) break;
+      wanted *= 8;
     }
     const searchRows = this.searchRowsByItemPks(
       rankedItems.map(([itemPk]) => itemPk),

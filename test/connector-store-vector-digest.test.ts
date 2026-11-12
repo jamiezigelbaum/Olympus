@@ -372,6 +372,21 @@ test('many winning chunks of one item cannot fill the item budget: the pass expa
   } finally { db.close(); }
 });
 
+test('when ledger visibility hides every first-pass candidate, the lane scans wider and still returns visible matches', async () => {
+  const store = open();
+  try {
+    await store.syncFromConnector(connector(600), { fetchContent: true });
+    await store.embedChunks({ provider });
+    const db = database(store);
+    expect(vectorDigestState(db, modelId).completed).toBe(true);
+    const hidden = new Set((db.query('SELECT item_pk FROM items ORDER BY item_pk LIMIT 500').all() as Array<{ item_pk: number }>).map((row) => row.item_pk));
+    const lane = store as unknown as { visibleVectorItemPks(pks: readonly number[]): Set<number> };
+    lane.visibleVectorItemPks = (pks) => new Set(pks.filter((pk) => !hidden.has(pk)));
+    const result = await store.vectorSearchLane('harbor note', provider, 2);
+    expect(result.rows).toHaveLength(2);
+  } finally { store.close(); }
+});
+
 test('a competing writer rolls back the backfill slice and restores the normal lock timeout', () => {
   const dir = mkdtempSync(join(tmpdir(), 'vector-digest-lock-'));
   const path = join(dir, 'store.sqlite');
