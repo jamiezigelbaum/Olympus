@@ -25749,6 +25749,7 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
   }
 };`;
 var RECLAIM_MAX_PAGES_PER_STEP = 128;
+var RECLAIM_CONVERSION_BYTES_PER_MS = 15000;
 
 class LocalConnectorStore {
   dbPath;
@@ -25990,6 +25991,19 @@ class LocalConnectorStore {
   get reclaiming() {
     return this.reclaimProcess !== undefined;
   }
+  reclaimPreempt;
+  preemptReclaim() {
+    this.reclaimPreempt?.();
+  }
+  reclaimQuietWindowMs() {
+    try {
+      if (this.db.query("PRAGMA auto_vacuum").get().auto_vacuum !== 0)
+        return 0;
+      return Math.ceil(statSync14(this.dbPath).size / RECLAIM_CONVERSION_BYTES_PER_MS);
+    } catch {
+      return 0;
+    }
+  }
   reclaimablePages() {
     if (this.readOnly || this.dbPath === ":memory:" || this.closedForPoolReads || this.fileReplacedOrRemoved())
       return;
@@ -26039,12 +26053,17 @@ class LocalConnectorStore {
     });
     this.reclaimProcess = child;
     let preempted = false;
+    const preempt = () => {
+      if (!preempted) {
+        preempted = true;
+        child.kill("SIGKILL");
+      }
+    };
+    this.reclaimPreempt = preempt;
     const interrupt = setInterval(() => {
       try {
-        if (storeReadHasPriority() && !preempted) {
-          preempted = true;
-          child.kill("SIGKILL");
-        }
+        if (storeReadHasPriority())
+          preempt();
       } catch {
         child.kill("SIGKILL");
       }
@@ -26079,6 +26098,7 @@ class LocalConnectorStore {
       clearInterval(interrupt);
       child.stdin.end();
       this.reclaimProcess = undefined;
+      this.reclaimPreempt = undefined;
       if (converting && preempted)
         this.reclaimKilledAttempts++;
       if (!this.closedForPoolReads) {
@@ -41211,13 +41231,15 @@ class SourceScheduler {
     return false;
   }
   storeReclaims = new Set;
-  async withIdleTasks(work) {
+  async withIdleTasks(work, options = {}) {
     if (this.anyTaskRunning || this.storeReclaims.size > 0)
       return;
+    if ((options.quietForMs ?? 0) > 0 && this.continuousTaskDueBy(this.now().getTime() + options.quietForMs))
+      return;
     let release;
-    const hold = new Promise((resolve11) => {
+    const hold = { done: new Promise((resolve11) => {
       release = resolve11;
-    });
+    }), ...options.preempt ? { preempt: options.preempt } : {} };
     this.storeReclaims.add(hold);
     try {
       return await work();
@@ -41225,6 +41247,11 @@ class SourceScheduler {
       this.storeReclaims.delete(hold);
       release();
     }
+  }
+  continuousTaskDueBy(at) {
+    if (!this.enabled)
+      return false;
+    return this.states.some((state) => taskCadence(state.source, state.task) === "continuous" && state.nextRunAt <= at);
   }
   status(now = this.now()) {
     return {
@@ -41362,8 +41389,10 @@ class SourceScheduler {
         break;
       state.waitReason = "store_reclaim";
       console.info(`[olympus:source-scheduler] task_wait source_id=${state.source.sourceId} task_id=${state.task.id} reason=store_reclaim`);
+      for (const hold of holds)
+        hold.preempt?.();
       try {
-        await Promise.all(holds);
+        await Promise.all(holds.map((hold) => hold.done));
       } finally {
         delete state.waitReason;
       }

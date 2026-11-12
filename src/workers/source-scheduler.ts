@@ -886,22 +886,32 @@ export class SourceScheduler {
     return false;
   }
 
-  private readonly storeReclaims = new Set<Promise<void>>();
+  private readonly storeReclaims = new Set<{ done: Promise<void>; preempt?: () => void }>();
 
   /**
    * Store maintenance holds every task, not only the store's own sources:
    * writers reach a store through other sources too (an archive import into
    * an existing source, tier moves), and any of them would block the engine
-   * thread on the store's write lock. Skips while any task is executing;
-   * tasks that come due wait, with no attempt or failure recorded.
+   * thread on the store's write lock. Skips while any task is executing, or
+   * when a continuous task falls due within `quietForMs`. Ingest comes first:
+   * a task that comes due during the hold calls `preempt` (the maintenance
+   * stops at once) and runs as soon as the hold ends, with no attempt or
+   * failure recorded.
    */
-  async withIdleTasks<T>(work: () => Promise<T>): Promise<T | undefined> {
+  async withIdleTasks<T>(work: () => Promise<T>, options: { quietForMs?: number; preempt?: () => void } = {}): Promise<T | undefined> {
     if (this.anyTaskRunning || this.storeReclaims.size > 0) return undefined;
+    if ((options.quietForMs ?? 0) > 0 && this.continuousTaskDueBy(this.now().getTime() + options.quietForMs!)) return undefined;
     let release!: () => void;
-    const hold = new Promise<void>(resolve => { release = resolve; });
+    const hold = { done: new Promise<void>(resolve => { release = resolve; }), ...(options.preempt ? { preempt: options.preempt } : {}) };
     this.storeReclaims.add(hold);
     try { return await work(); }
     finally { this.storeReclaims.delete(hold); release(); }
+  }
+
+  /** Whether an enabled continuous task is due at or before `at`. */
+  private continuousTaskDueBy(at: number): boolean {
+    if (!this.enabled) return false;
+    return this.states.some(state => taskCadence(state.source, state.task) === 'continuous' && state.nextRunAt <= at);
   }
 
   status(now: Date = this.now()): SourceSchedulerStatus {
@@ -1073,7 +1083,8 @@ export class SourceScheduler {
       if (holds.length === 0) break;
       state.waitReason = 'store_reclaim';
       console.info(`[olympus:source-scheduler] task_wait source_id=${state.source.sourceId} task_id=${state.task.id} reason=store_reclaim`);
-      try { await Promise.all(holds); }
+      for (const hold of holds) hold.preempt?.();
+      try { await Promise.all(holds.map(hold => hold.done)); }
       finally { delete state.waitReason; }
       if (this.stops !== stops) return;
     }
