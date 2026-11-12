@@ -287,6 +287,23 @@ describe('similarity inside a long item with word hits', () => {
     expect(content.chunks).toEqual([chunks[0]!, chunks[1]!, chunks[2]!]);
   });
 
+  test('duplicate word chunks keep the similar pick in document order', async () => {
+    // Chunks 0 and 1 carry the same text; the store's reader keeps one copy,
+    // and the later word pick must still come after the similar chunk.
+    const twin = chunks[1]!;
+    const texts = [twin, twin, chunks[2]!, chunks[3]!, chunks[4]!, `Closing. ${'coverage '.repeat(5)}`.padEnd(4_000, '.')];
+    let content: ReturnType<Store['localContent']>;
+    await withStore([{ ...item, text: texts.join('') }], async (store) => {
+      const provider = chunkCosineProvider({ 'Dense.': 0.4, 'Runner.': 0.95, 'Lesser.': 0.4, 'Paraphrase.': 0.4, 'Closing.': 0.4 });
+      await store.embedChunks({ provider });
+      content = store.localContent(`${ACCOUNT}:policy`, 12_000, {
+        query: 'coverage', maxPassages: 4,
+        queryVector: [1, 0], queryVectorModelId: provider.modelId,
+      });
+    });
+    expect(content!.chunks.map((chunk) => chunk.split('.')[0])).toEqual(['Dense', 'Runner', 'Closing']);
+  });
+
   test('at a candidate-sized budget the most similar chunk is read for half of it, not a third', async () => {
     // The paraphrase answers past its first thousand characters. Three equal
     // shares of 3,000 cut it at about 1,000; similarity's own vote reads it

@@ -17562,7 +17562,15 @@ function selectEvidencePassages(
     const similarRead = similarPick !== undefined
       ? boundedSourceIndexChunks([chunks[similarPick]!], Math.floor(maxChars / 2), termGroups)
       : undefined;
-    const others = picked.filter((index) => index !== similarPick);
+    // One index per distinct non-empty text, as the bounded reader keeps
+    // them, so its passages map back to the chunks they came from.
+    const seen = new Set(similarPick !== undefined ? [chunks[similarPick]!.trim()] : []);
+    const others = picked.filter((index) => {
+      const text = chunks[index]!.trim();
+      if (index === similarPick || !text || seen.has(text)) return false;
+      seen.add(text);
+      return true;
+    });
     const bounded = boundedSourceIndexChunks(
       others.map((index) => chunks[index]!),
       maxChars - (similarRead?.chunks.join('').length ?? 0),

@@ -38662,7 +38662,14 @@ function selectEvidencePassages(chunks, maxChars, focus, context2 = {}) {
     ])].slice(0, maxPassages).sort((left, right) => left - right);
     const similarPick = mostSimilar !== undefined && picked.length > 1 && picked.includes(mostSimilar) ? mostSimilar : undefined;
     const similarRead = similarPick !== undefined ? boundedSourceIndexChunks([chunks[similarPick]], Math.floor(maxChars / 2), termGroups) : undefined;
-    const others = picked.filter((index) => index !== similarPick);
+    const seen = new Set(similarPick !== undefined ? [chunks[similarPick].trim()] : []);
+    const others = picked.filter((index) => {
+      const text2 = chunks[index].trim();
+      if (index === similarPick || !text2 || seen.has(text2))
+        return false;
+      seen.add(text2);
+      return true;
+    });
     const bounded = boundedSourceIndexChunks(others.map((index) => chunks[index]), maxChars - (similarRead?.chunks.join("").length ?? 0), termGroups);
     const read = new Map(others.map((index, position) => [index, bounded.chunks[position]]));
     if (similarPick !== undefined && similarRead?.chunks[0])
