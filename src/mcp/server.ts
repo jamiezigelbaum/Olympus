@@ -1,5 +1,6 @@
+import type { RemoteReadHandleScope } from '../core/remote-read-handles.ts';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { createReleaseCapture, recordRemoteOperation, runWithReleaseCapture } from '../core/app-release-capture.ts';
+import { createReleaseCapture, recordAppRequest, recordRemoteOperation, releasedItemFromEvidence, runWithReleaseCapture } from '../core/app-release-capture.ts';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import {
@@ -23,6 +24,7 @@ import {
   remoteSurfaceErrorOutput,
   remoteWithheldParam,
   remoteWithheldParamOutput,
+  sourceLabel,
 } from '../core/remote-result.ts';
 import { SourceAnswerJobRegistry, sourceAnswerJobLimitsFromEnv, sourceAnswerJobOwner } from '../core/source-answer-jobs.ts';
 import type { OperationContext } from '../core/operations.ts';
@@ -63,8 +65,9 @@ export async function handleMcpCallTool(
   makeOperationContext: () => OperationContext = makeContext,
   surface: McpSurface = 'mcp',
   authorized?: RemoteAccessAuthorization,
+  readHandles?: RemoteReadHandleScope,
 ): Promise<McpCallToolResult> {
-  if (surface === 'remote') return handleRemoteCallTool(request, makeOperationContext, authorized);
+  if (surface === 'remote') return handleRemoteCallTool(request, makeOperationContext, authorized, readHandles);
   const operation = findOperationByName(request.params.name);
   if (!operation) {
     throw new OperationError('invalid_params', `Unknown Olympus operation: ${request.params.name}`);
@@ -102,6 +105,7 @@ async function handleRemoteCallTool(
   request: McpCallToolRequest,
   makeOperationContext: () => OperationContext,
   authorized: RemoteAccessAuthorization = () => 'active',
+  readHandles?: RemoteReadHandleScope,
 ): Promise<McpCallToolResult> {
   const text = (value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }];
   const operation = findOperationByName(request.params.name);
@@ -112,7 +116,7 @@ async function handleRemoteCallTool(
   if (!shouldExposeOperation(operation, { config: ctx.config, surface: 'remote' })) {
     return { content: text(remoteSurfaceErrorOutput('operation_unavailable')), isError: true };
   }
-  const args = request.params.arguments ?? {};
+  let args = request.params.arguments ?? {};
   const withheld = remoteWithheldParam(operation.name, args);
   if (withheld) return { content: text(remoteWithheldParamOutput(withheld)), isError: true };
   const declaredParams = remoteDeclaredParams(operation.name, Object.keys(operation.params));
@@ -123,6 +127,16 @@ async function handleRemoteCallTool(
     ...(ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}),
   });
   try {
+    if (operation.name === 'source_item_read') {
+      const access = currentAccess(authorized);
+      if (access !== 'active') return refusedAccess(access);
+      // Resolve only server-minted identities; raw client selectors are refused above.
+      const selected = readHandles?.resolveReadHandle(args.read_handle);
+      if (!selected || Object.keys(args).some(key => !declaredParams.includes(key))) {
+        throw new OperationError('invalid_params', 'Invalid read handle.');
+      }
+      args = { selected_item: selected, page: args.page, pages: args.pages };
+    }
     const result = await runWithReleaseManifestSink(manifests, () => withRemoteReadAuthorization(authorized, () => operation.handler(ctx, args)));
     const afterHandler = currentAccess(authorized);
     if (afterHandler !== 'active') return refusedAccess(afterHandler);
@@ -130,6 +144,7 @@ async function handleRemoteCallTool(
     const capture = createReleaseCapture();
     const release = () => runWithReleaseCapture(capture, () => remoteOperationOutputOffThread(operation.name, result, {
       pendingPrivacyItems: ctx.pendingPrivacyItems?.(),
+      ...(readHandles ? { issueReadHandle: readHandles.issueReadHandle } : {}),
       ...(ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}),
       releaseManifests: manifests.manifests,
     }));
@@ -150,6 +165,7 @@ async function handleRemoteCallTool(
     if (operation.name === 'source_item_read') output = remoteOperationOutput(operation.name, result, {
       ...(ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}), releaseManifests: manifests.manifests,
     });
+    if (operation.name === 'source_item_read') recordRemoteItemRead(ctx.caller, args.selected_item, output);
     recordRemoteOperation({ operation: operation.name, args, caller: ctx.caller, output, capture, privateQuestion: privateMayAnswer ? privatePart?.answerRef : undefined });
     return { content: text(privateMayAnswer ? withRemotePrivateNote(output, privatePart?.answerId, privatePart?.secretMatch) : output) };
   } catch (error) {
@@ -216,22 +232,40 @@ async function normalizedJsonRpcErrorResponse(response: Response): Promise<Respo
  * remote endpoint builds one per HTTP request, with the connection's caller
  * identity already on the context.
  */
+/**
+ * Released pages of one item go on the owner's list of what each app received,
+ * by identity and source name only. Pages leave only at Public or Personal.
+ */
+function recordRemoteItemRead(caller: OperationContext['caller'], selected: unknown, output: Record<string, unknown>): void {
+  const pages = Array.isArray(output.pages) ? output.pages as Array<{ page?: unknown }> : [];
+  if (pages.length === 0 || !selected || typeof selected !== 'object') return;
+  const identity = selected as Record<string, unknown>;
+  const numbers = pages.map((page) => page.page).filter((n): n is number => typeof n === 'number');
+  const span = numbers.length > 1 ? `pages ${numbers[0]}-${numbers[numbers.length - 1]}` : `page ${numbers[0] ?? 1}`;
+  recordAppRequest({
+    caller,
+    question: `Read ${span} of a found item`,
+    capture: { items: [releasedItemFromEvidence({ ...identity, trust_domain: 'internal' }, sourceLabel(identity.provider, identity.family))], heldBack: 0 },
+  });
+}
+
 export function createOlympusMcpServer(
   surface: McpSurface,
   makeOperationContext: () => OperationContext,
   extension?: McpServerExtension,
   authorized?: RemoteAccessAuthorization,
+  readHandles?: RemoteReadHandleScope,
 ): Server {
   const server = new Server(
     { name: 'olympus', version: VERSION },
     { capabilities: { tools: {} } },
   );
   server.setRequestHandler(ListToolsRequestSchema, async () => {
-    const listed = listMcpTools(makeOperationContext().config, surface);
+    const listed = listMcpTools(makeOperationContext().config, surface, { remoteReadHandles: readHandles !== undefined });
     return { tools: extension ? extension.tools(listed) : listed };
   });
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-    const next = () => handleMcpCallTool(request, makeOperationContext, surface, authorized);
+    const next = () => handleMcpCallTool(request, makeOperationContext, surface, authorized, readHandles);
     return extension ? extension.call(request, next, extra.signal) : next();
   });
   if (surface === 'remote') {

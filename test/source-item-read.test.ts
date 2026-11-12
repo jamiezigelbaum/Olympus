@@ -322,9 +322,9 @@ test('the CLI accepts `olympus source item read` before dispatch', async () => {
   expect(isV04PublicCliInvocation(['source', 'item', 'read'])).toBe(true);
 });
 
-test('source_item_read stays off the remote surface until remote callers get a read handle', async () => {
+test('source_item_read is available remotely with a read handle', async () => {
   const { V0_4_PUBLIC_REMOTE_MCP_TOOLS } = await import('../src/core/public-surface.ts');
-  expect(V0_4_PUBLIC_REMOTE_MCP_TOOLS as readonly string[]).not.toContain('source_item_read');
+  expect(V0_4_PUBLIC_REMOTE_MCP_TOOLS as readonly string[]).toContain('source_item_read');
 });
 
 test('a names-only item asks for an on-demand read and reports its state without text', async () => {
