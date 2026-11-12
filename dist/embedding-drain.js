@@ -31976,6 +31976,7 @@ class LocalConnectorStore {
       trustTier: trustTierFromRow(row.trust_tier),
       chunks: reactionLine ? [reactionLine, ...chunks] : chunks,
       ...candidatePassages ? { candidatePassages } : {},
+      ...reactionLine ? { leadingContext: 1 } : {},
       truncated,
       storedChunks: chunkRows.length,
       mimeType: row.mime_type,

@@ -38242,6 +38242,7 @@ function createConnectorStoreContentProvider(options) {
           sensitivity: buildSourceSensitivity({ trustTier: content.trustTier, trustDomain: store.trustDomain }),
           chunks: content.chunks,
           ...content.candidatePassages ? { candidatePassages: content.candidatePassages } : {},
+          ...content.leadingContext ? { leadingContext: content.leadingContext } : {},
           ...content.truncated ? { truncated: true } : {},
           ...coverageGaps.length > 0 ? { coverageGaps } : {},
           ...metadataOnlyRuleId !== undefined ? { namesOnly: true } : {},
@@ -47343,6 +47344,7 @@ var init_local_index = __esm(() => {
         trustTier: trustTierFromRow(row.trust_tier),
         chunks: reactionLine ? [reactionLine, ...chunks] : chunks,
         ...candidatePassages ? { candidatePassages } : {},
+        ...reactionLine ? { leadingContext: 1 } : {},
         truncated,
         storedChunks: chunkRows.length,
         mimeType: row.mime_type,
@@ -77964,8 +77966,9 @@ async function buildPreparedEvidencePackDetailed(input) {
             if (window2 === undefined || !entry.content || entry.content.chunks.some((chunk) => chunk.includes(window2)) || maxCharsPerCandidate !== undefined && maxCharsPerCandidate > 0 && Buffer.byteLength(window2, "utf8") > maxCharsPerCandidate)
               return entry;
             let remaining = maxCharsPerCandidate !== undefined && maxCharsPerCandidate > 0 ? maxCharsPerCandidate : Number.POSITIVE_INFINITY;
-            const chunks = [];
-            for (const passage of [window2, ...entry.content.chunks]) {
+            const leading = entry.content.chunks.slice(0, entry.content.leadingContext ?? 0);
+            const chunks = [...leading];
+            for (const passage of [window2, ...entry.content.chunks.slice(leading.length)]) {
               if (remaining <= 0)
                 break;
               const included = passage.slice(0, remaining);

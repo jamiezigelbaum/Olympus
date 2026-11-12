@@ -356,6 +356,19 @@ describe('paragraph window reranking', () => {
     for (const candidate of detail.pack.candidates) expect(candidate.chunks).toEqual(original);
   });
 
+  test('an item\'s reaction line stays first and whole when a window is seated', async () => {
+    const { input } = windowInput();
+    const reaction = 'Reactions: 👍 ×2 (Ana, Ben)';
+    input.contentProviders[CORPUS] = { async fetchLocalContent() {
+      return { sensitivity: buildSourceSensitivity({ trustTier: 'S2', trustDomain: 'internal' }),
+        chunks: [reaction, ...original], candidatePassages: candidates, leadingContext: 1 };
+    } };
+    const detail = await buildEvidencePackDetailed(input);
+    const first = detail.pack.candidates[0]!.chunks;
+    expect(first[0]).toBe(reaction);
+    expect(first[1]).toContain(answer);
+  });
+
   for (const mode of ['failed', 'timed_out', 'malformed'] as const) {
     test(`window ${mode} preserves all passages exactly`, async () => {
       const { input, fake, calls } = windowInput(mode);

@@ -107,6 +107,8 @@ export interface LocalContentBlock {
   chunks: readonly string[];
   // Local-only alternatives, gated exactly like chunks; never copied onto the pack.
   candidatePassages?: readonly string[];
+  // Leading chunks that are item context (a reaction line), kept ahead of any re-seated passage.
+  leadingContext?: number;
   tables?: readonly EvidenceTableBlock[];
   facts?: readonly StructuredEvidenceFact[];
   truncated?: boolean;
@@ -502,8 +504,9 @@ async function buildPreparedEvidencePackDetailed(
                 && Buffer.byteLength(window, 'utf8') > maxCharsPerCandidate)) return entry;
             let remaining = maxCharsPerCandidate !== undefined && maxCharsPerCandidate > 0
               ? maxCharsPerCandidate : Number.POSITIVE_INFINITY;
-            const chunks: string[] = [];
-            for (const passage of [window, ...entry.content.chunks]) {
+            const leading = entry.content.chunks.slice(0, entry.content.leadingContext ?? 0);
+            const chunks: string[] = [...leading];
+            for (const passage of [window, ...entry.content.chunks.slice(leading.length)]) {
               if (remaining <= 0) break;
               const included = passage.slice(0, remaining);
               chunks.push(included);

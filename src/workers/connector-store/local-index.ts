@@ -2605,6 +2605,8 @@ export interface ConnectorStoreLocalContent {
   trustTier: SourceTrustTier;
   chunks: readonly string[];
   candidatePassages?: readonly string[];
+  /** Leading chunks that are item context (the reaction line), not passages. */
+  leadingContext?: number;
   truncated: boolean;
   locatorUri?: string;
   /**
@@ -14327,6 +14329,7 @@ export class LocalConnectorStore {
       trustTier: trustTierFromRow(row.trust_tier),
       chunks: reactionLine ? [reactionLine, ...chunks] : chunks,
       ...(candidatePassages ? { candidatePassages } : {}),
+      ...(reactionLine ? { leadingContext: 1 } : {}),
       truncated,
       storedChunks: chunkRows.length,
       mimeType: row.mime_type,
@@ -16524,6 +16527,7 @@ export function createConnectorStoreContentProvider(
         sensitivity: buildSourceSensitivity({ trustTier: content.trustTier, trustDomain: store.trustDomain }),
         chunks: content.chunks,
         ...(content.candidatePassages ? { candidatePassages: content.candidatePassages } : {}),
+        ...(content.leadingContext ? { leadingContext: content.leadingContext } : {}),
         ...(content.truncated ? { truncated: true } : {}),
         ...(coverageGaps.length > 0 ? { coverageGaps } : {}),
         ...(metadataOnlyRuleId !== undefined ? { namesOnly: true } : {}),
