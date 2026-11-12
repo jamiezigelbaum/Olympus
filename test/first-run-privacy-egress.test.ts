@@ -182,7 +182,9 @@ async function sourcePaths(i: ReturnType<typeof install>) {
     releaseCheck: createReleaseTierCheck(scopes, () => 'approval'),
     relevanceEmbedding: () => builtInEmbeddingOnly(providers.get('secure_local'), loadedBuiltInEmbedding),
   });
-  return { engine, fixture, providers, lanes, builtIn, local, embeddingCalls };
+  // Every remote search runs with the release check, as the engine wires it.
+  const releaseCheck = createReleaseTierCheck(scopes, () => 'approval');
+  return { engine, fixture, providers, lanes, builtIn, local, embeddingCalls, releaseCheck };
 }
 
 for (const choice of ['pending', 'local-first', 'local-only'] as const) {
@@ -210,7 +212,7 @@ for (const choice of ['pending', 'local-first', 'local-only'] as const) {
     if (choice === 'local-first') expect(secretRefs.length).toBeGreaterThan(0);
     expect(attempts).toEqual([]);
 
-    const search = await searchReleasedEvidence({ lanes: p.lanes, question: 'orchard pruning' });
+    const search = await searchReleasedEvidence({ lanes: p.lanes, question: 'orchard pruning', releaseCheck: p.releaseCheck });
     expect(JSON.stringify(search.evidence)).toContain(PERSONAL_TEXT);
     expect(JSON.stringify(search.evidence)).not.toContain(PRIVATE_TEXT);
     expect(attempts).toEqual([]);

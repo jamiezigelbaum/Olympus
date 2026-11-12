@@ -1,3 +1,4 @@
+import { recordScriptedSearch, scriptedSearchReleaseCheck } from './helpers/scripted-search-release.ts';
 // Remote MCP endpoint with bearer connections (hosted agents slice 2).
 //
 // Assembled exactly the way the worker server assembles it: `/mcp` goes to the
@@ -700,27 +701,30 @@ describe('remote evidence search', () => {
       createRemoteMcpHandler({
         connections: () => store,
         anonymousAnswersEnabled: () => anonymousEnabled,
-        makeOperationContext: (caller, signal) => createInProcessOperationContext({
-          config: defaultConfig(),
-          sourceIndexReadEnabled: true,
-          workerFetch: worker.fetch,
-          caller,
-          signal,
+        makeOperationContext: (caller, signal) => ({
+          ...createInProcessOperationContext({
+            config: defaultConfig(),
+            sourceIndexReadEnabled: true,
+            workerFetch: worker.fetch,
+            caller,
+            signal,
+          }),
+          releaseCheck: scriptedSearchReleaseCheck,
         }),
         search: {
           evidenceSearch: async (input) => {
             searches.push(input);
             searchStarted?.();
             if (pauseSearch) await pauseSearch;
-            return {
+            return recordScriptedSearch({
               evidence: [
-                { trust_domain: 'internal', provider: 'test-mail', family: 'email', title: 'Lease renewal', excerpt: 'The lease renews on 1 March.', authored_at: '2026-09-01T10:00:00Z' },
+                { corpus_id: 'internal.test-mail', provider_item_id: 'lease', account_scope: 'scripted-account', trust_domain: 'internal', provider: 'test-mail', family: 'email', title: 'Lease renewal', excerpt: 'The lease renews on 1 March.', authored_at: '2026-09-01T10:00:00Z' },
                 // Never released to this surface: dropped even if a search returned it.
                 { trust_domain: 'secure_local', provider: 'test-mail', family: 'email', title: 'Private note', excerpt: 'private text' },
               ],
               withheld: 0,
               coverage: { searched_corpora: 1 },
-            };
+            });
           },
           answerModelAvailable: () => answerModel,
         },

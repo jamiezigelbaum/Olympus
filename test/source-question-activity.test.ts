@@ -10,6 +10,7 @@ import type { TieredStoreSet } from '../src/workers/connector-store/tiered-store
 import { createAnalystSourceIndexAnswerHandler, searchReleasedEvidence } from '../src/workers/source-index/analyst-answer.ts';
 import { createAnalyst } from '../src/core/analyst.ts';
 import { createTestClock } from './helpers/test-clock.ts';
+import { provedReleaseCheck } from './helpers/scripted-search-release.ts';
 
 function deferred() {
   let resolve!: () => void;
@@ -65,7 +66,7 @@ function world(split = true) {
     analyst: createAnalyst({ complete: async () => { throw new Error('empty evidence never calls a model'); } }),
   });
   const ask = () => questions.run(() => handler.answer({ question: 'What do my sources say?', retrieval_mode: 'keyword' }));
-  const search = () => questions.run(() => searchReleasedEvidence({ lanes, question: 'What do my sources say?' }));
+  const search = () => questions.run(() => searchReleasedEvidence({ lanes, question: 'What do my sources say?', releaseCheck: provedReleaseCheck }));
   let slices = 0;
   const stopTicker = startSupersededSweepTicker({
     active: () => split ? !marks.busy(OWNER_QUESTION_RESOURCE) : !questions.busy,

@@ -3,7 +3,7 @@
  * recorded where its result leaves, by name only; the list is kept like
  * Private data and served only to the local dashboard's unlocked session.
  */
-import { recordScriptedSearch, scriptedSearchReleaseCheck } from './helpers/scripted-search-release.ts';
+import { provedChunks, recordScriptedSearch, scriptedSearchReleaseCheck } from './helpers/scripted-search-release.ts';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
 import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs';
@@ -371,7 +371,11 @@ describe('the per-item override, bound to the recorded item', () => {
       adapters: { [store.corpusId]: createConnectorStoreCorpusAdapter({ store }) },
       contentProviders: { [store.corpusId]: createConnectorStoreContentProvider({ store }) },
     });
-    const raw = await searchReleasedEvidence({ lanes: lanes as never, question: 'violet turnips Saturday' });
+    const raw = await searchReleasedEvidence({ lanes: lanes as never, question: 'violet turnips Saturday', releaseCheck: {
+      inputs: (inputs) => inputs.map(() => ({ tier: 'public_or_personal' as const, gone: false })),
+      chunks: provedChunks,
+      secureDerivativeDefault: () => 'allow' as const,
+    } });
     expect(raw.evidence[0]).toMatchObject({ provider_item_id: 'msg-7', provider_conversation_id: 'chat-3', account_scope: 'personal' });
     const noted = createReleaseCapture();
     runWithReleaseCapture(noted, () => searchToolResult(raw));

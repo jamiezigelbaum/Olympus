@@ -1,3 +1,5 @@
+import { provedReleaseCheck } from './helpers/scripted-search-release.ts';
+import { recordReleaseManifest } from '../src/core/release-manifest.ts';
 // OpenAPI view of the remote surface (hosted agents slice 3, for Muse).
 //
 // Assembled the way the worker server assembles it: the OpenAPI routes, then
@@ -115,6 +117,8 @@ function startServer(): void {
         answered += 1;
         answerStarted?.();
         if (answerHeld) await answerHeld;
+        // The answer read nothing, so its release manifest names no input.
+        recordReleaseManifest({ inputs: [], constraints: { secureDerivativeDefault: 'allow', includeSecureLocalContent: false } });
         return answerFixture();
       },
     },
@@ -123,14 +127,16 @@ function startServer(): void {
   });
   const remote = {
     connections: () => store,
-    makeOperationContext: (caller: Parameters<typeof createInProcessOperationContext>[0]['caller'], signal: AbortSignal) =>
-      createInProcessOperationContext({
+    makeOperationContext: (caller: Parameters<typeof createInProcessOperationContext>[0]['caller'], signal: AbortSignal) => ({
+      ...createInProcessOperationContext({
         config: ownerConfig(),
         sourceIndexReadEnabled,
         workerFetch: worker.fetch,
         caller,
         signal,
       }),
+      releaseCheck: provedReleaseCheck,
+    }),
   };
   const fetch = withRemoteOpenApiRoutes(
     createRemoteOpenApiHandler(remote),
