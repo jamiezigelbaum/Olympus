@@ -77307,7 +77307,7 @@ async function recheckSearchEvidence(raw, manifests, check) {
   const cleared = (index) => {
     const input = inputs[index];
     const verdict = verdicts[index];
-    return !!verdict && !verdict.gone && ["public_or_personal", "legacy"].includes(verdict.tier) && (input.layer === "names" || report?.ungoverned?.[index] === true || !!input.chunkHashes?.length && input.chunkHashes.every((hash) => report?.allowed[index]?.includes(hash)));
+    return !!verdict && !verdict.gone && ["public_or_personal", "legacy"].includes(verdict.tier) && (input.layer === "names" || !!input.chunkHashes?.length && input.chunkHashes.every((hash) => report?.allowed[index]?.includes(hash)));
   };
   const parentsCleared = inputs.every((input, index) => input.dependency !== "parent_label" || cleared(index));
   const kept = evidence.filter((value) => {
@@ -79319,7 +79319,7 @@ async function checkedRemotePack(pack, corpusOf, check) {
   const inputs = pack.candidates.map((candidate) => candidateReleaseInput(candidate, corpusOf(candidate)));
   const report = await checkReleaseChunks(check, inputs);
   const candidates = pack.candidates.flatMap((candidate, index) => {
-    if (inputs[index].layer === "names" || report.ungoverned?.[index] === true)
+    if (inputs[index].layer === "names")
       return [candidate];
     const allowed = new Set(report.allowed[index]);
     const chunks = candidate.chunks.filter((text2) => {
@@ -212124,7 +212124,7 @@ async function releaseChunks(inputs, scopes, check, options = {}) {
   const allowed = cached3.allowed.map((hashes) => [...hashes]);
   const pending = inputs.flatMap((input, index) => {
     const hashes = (input.chunkHashes ?? []).filter((hash2) => !allowed[index].includes(hash2));
-    return input.layer === "names" || !hashes.length || !governedBy(scopes)(input) ? [] : [{ index, item: {
+    return input.layer === "names" || !hashes.length ? [] : [{ index, item: {
       provider: input.provider,
       accountScope: input.accountScope,
       providerItemId: input.providerItemId,
@@ -212148,7 +212148,7 @@ async function releaseChunks(inputs, scopes, check, options = {}) {
     } catch {}
   }
   const final = await inspectChunks(inputs, scopes, check, { ...options, readOnly: true });
-  const result = chunkResult(inputs, allowed.map((hashes, index) => hashes.filter((hash2) => final.allowed[index]?.includes(hash2))), governedBy(scopes));
+  const result = chunkResult(inputs, allowed.map((hashes, index) => hashes.filter((hash2) => final.allowed[index]?.includes(hash2))));
   const rest = pending.filter(({ index, item }) => item.chunkHashes.some((hash2) => !result.allowed[index]?.includes(hash2)));
   for (let offset = 0;offset < rest.length; offset += ENGINE_JUDGE_BOOST_MAX_IDS) {
     try {
@@ -212312,28 +212312,21 @@ async function inspectChunks(inputs, scopes, check, options = {}) {
     if (!status || status.gone || !["public_or_personal", "legacy"].includes(status.tier) || blockedItems.has(tierLedgerIdentityKey(input)) || snapshots.get(index)?.() !== true)
       allowed[index] = [];
   });
-  return chunkResult(inputs, allowed, governedBy(scopes));
+  return chunkResult(inputs, allowed);
 }
-function governedBy(scopes) {
-  return (input) => scopes.some((scope) => scope.corpusIds.has(input.corpusId));
-}
-function chunkResult(inputs, allowed, governed) {
+function chunkResult(inputs, allowed) {
   let withheldPassages = 0;
   const withheldDocuments = new Set;
   inputs.forEach((input, index) => {
     if (input.layer === "names")
       return;
-    if (!governed(input)) {
-      allowed[index] = [...new Set(input.chunkHashes ?? [])];
-      return;
-    }
     const count = Math.max(1, new Set(input.chunkHashes ?? []).size) - allowed[index].length;
     if (count > 0) {
       withheldPassages += count;
       withheldDocuments.add(tierLedgerIdentityKey(input));
     }
   });
-  return { allowed, ungoverned: inputs.map((input) => input.layer !== "names" && !governed(input)), withheldPassages, withheldDocuments: withheldDocuments.size };
+  return { allowed, withheldPassages, withheldDocuments: withheldDocuments.size };
 }
 function normalize5(text5) {
   return text5.replace(/\s+/g, " ").trim();
@@ -212384,7 +212377,7 @@ function childLane(scope) {
 }
 function createTierVisibilityGate(scopes, onHeldMatches) {
   const readOptions = { personalFirst: onHeldMatches !== undefined };
-  const governedBy2 = (scope, hits) => hits.filter((hit) => scope.corpusIds.has(hit.corpusId));
+  const governedBy = (scope, hits) => hits.filter((hit) => scope.corpusIds.has(hit.corpusId));
   const unreadCorpora = (governed, unread) => {
     for (const hit of governed)
       unread.add(hit.corpusId);
@@ -212400,7 +212393,7 @@ function createTierVisibilityGate(scopes, onHeldMatches) {
     const reads = new Map;
     const unread = new Set;
     for (const scope of current2) {
-      const governed = governedBy2(scope, hits);
+      const governed = governedBy(scope, hits);
       if (governed.length === 0)
         continue;
       try {
@@ -212426,7 +212419,7 @@ function createTierVisibilityGate(scopes, onHeldMatches) {
     const unchanged = new Map;
     let changedDuringRead = false;
     for (const scope of current2) {
-      if (governedBy2(scope, hits).length === 0)
+      if (governedBy(scope, hits).length === 0)
         continue;
       try {
         unchanged.set(scope, childVisibilityUnchanged({ ledger: () => scope.ledger, stores: scope.stores ?? (() => []) }));
@@ -212435,7 +212428,7 @@ function createTierVisibilityGate(scopes, onHeldMatches) {
       }
     }
     await Promise.all(current2.map(async (scope) => {
-      const governed = governedBy2(scope, hits);
+      const governed = governedBy(scope, hits);
       if (governed.length === 0)
         return;
       try {

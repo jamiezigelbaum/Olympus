@@ -513,12 +513,9 @@ test('remote search adds held passage counts to withheld and keeps cleared hits'
   expect(result.raw.coverage).toEqual({ cut_short: ["2 passages from 1 documents are still being checked for privacy and weren't shared. Ask again in a minute."] });
 });
 
-test('an input from a corpus no tier ledger governs is left to its item tier: never held or counted by the chunk gate', async () => {
+test('an input from a corpus no tier ledger governs yet is held and counted, never released on its item tier', async () => {
   const check = { inputs: (inputs: readonly ReleaseInput[]) => inputs.map(() => ({ tier: 'legacy' as const, gone: false })), secureDerivativeDefault: () => 'allow' as const };
-  const ungoverned: ReleaseInput = { corpusId: 'ungoverned-notes', provider: 'notes', accountScope: 'me', providerItemId: 'a', privateAtAnswer: false, chunkHashes: [] };
-  const withHashes: ReleaseInput = { ...ungoverned, providerItemId: 'b', chunkHashes: ['h1', 'h2'] };
-  let asked = 0;
-  const result = await releaseChunks([ungoverned, withHashes], [], check, { judgeNow: async () => { asked += 1; return undefined; } });
-  expect(result).toEqual({ allowed: [[], ['h1', 'h2']], ungoverned: [true, true], withheldPassages: 0, withheldDocuments: 0 });
-  expect(asked).toBe(0);
+  const waiting: ReleaseInput = { corpusId: 'mount-waiting-for-its-ledger', provider: 'notes', accountScope: 'me', providerItemId: 'a', privateAtAnswer: false, chunkHashes: ['h1', 'h2'] };
+  const result = await releaseChunks([waiting], [], check, { judgeNow: async () => undefined });
+  expect(result).toEqual({ allowed: [[]], withheldPassages: 2, withheldDocuments: 1 });
 });

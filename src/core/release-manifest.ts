@@ -99,12 +99,6 @@ export interface ReleaseCheck {
 export interface ChunkReleaseResult {
   /** Allowed hashes per input, in request order. */
   allowed: readonly (readonly string[])[];
-  /**
-   * Per input: true when no tier ledger governs its corpus, so there is no
-   * judge and the item-tier check alone decides it (its corpus's tier).
-   * Absent or false: the input's text leaves only as `allowed` proves it read.
-   */
-  ungoverned?: readonly boolean[];
   withheldPassages: number;
   withheldDocuments: number;
 }
@@ -150,7 +144,7 @@ export async function recheckSearchEvidence(
     const input = inputs[index]!;
     const verdict = verdicts[index];
     return !!verdict && !verdict.gone && ['public_or_personal', 'legacy'].includes(verdict.tier)
-      && (input.layer === 'names' || report?.ungoverned?.[index] === true || (!!input.chunkHashes?.length
+      && (input.layer === 'names' || (!!input.chunkHashes?.length
         && input.chunkHashes.every(hash => report?.allowed[index]?.includes(hash))));
   };
   const parentsCleared = inputs.every((input, index) => input.dependency !== 'parent_label' || cleared(index));

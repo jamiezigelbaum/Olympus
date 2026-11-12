@@ -35,7 +35,7 @@ export async function releaseChunks(
   const allowed = cached.allowed.map(hashes => [...hashes]);
   const pending = inputs.flatMap((input, index) => {
     const hashes = (input.chunkHashes ?? []).filter(hash => !allowed[index]!.includes(hash));
-    return input.layer === 'names' || !hashes.length || !governedBy(scopes)(input) ? [] : [{ index, item: {
+    return input.layer === 'names' || !hashes.length ? [] : [{ index, item: {
       provider: input.provider, accountScope: input.accountScope, providerItemId: input.providerItemId,
       ...(input.providerConversationId ? { providerConversationId: input.providerConversationId } : {}),
       corpusId: input.corpusId, chunkHashes: [...new Set(hashes)],
@@ -55,7 +55,7 @@ export async function releaseChunks(
   }
   // Repeat the read after every await: names, model, content and item tiers may have changed.
   const final = await inspectChunks(inputs, scopes, check, { ...options, readOnly: true });
-  const result = chunkResult(inputs, allowed.map((hashes, index) => hashes.filter(hash => final.allowed[index]?.includes(hash))), governedBy(scopes));
+  const result = chunkResult(inputs, allowed.map((hashes, index) => hashes.filter(hash => final.allowed[index]?.includes(hash))));
   const rest = pending.filter(({ index, item }) => item.chunkHashes.some(hash => !result.allowed[index]?.includes(hash)));
   for (let offset = 0; offset < rest.length; offset += ENGINE_JUDGE_BOOST_MAX_IDS) {
     try { options.boost?.(rest.slice(offset, offset + ENGINE_JUDGE_BOOST_MAX_IDS).map(entry => entry.item)); }
@@ -200,29 +200,24 @@ async function inspectChunks(
     if (!status || status.gone || !['public_or_personal', 'legacy'].includes(status.tier)
       || blockedItems.has(tierLedgerIdentityKey(input)) || snapshots.get(index)?.() !== true) allowed[index] = [];
   });
-  return chunkResult(inputs, allowed, governedBy(scopes));
+  return chunkResult(inputs, allowed);
 }
 
 /**
- * A corpus no tier ledger governs has no judge and no per-item tier: its items
- * keep their corpus's tier, as createReleaseTierCheck reports them (`legacy`).
- * The chunk gate proves reading for judged items only, so it neither holds nor
- * counts an ungoverned input; the item-tier check alone decides it, as before.
+ * Every content input must be proved read, whatever its corpus. A store no
+ * ledger governs yet (a mount waiting for its ledger, one whose ledger can't
+ * be opened) has no judge, so its passages are held and counted, as #1316
+ * holds every source's text until it is judged.
  */
-function governedBy(scopes: readonly TierVisibilityScope[]): (input: ReleaseInput) => boolean {
-  return input => scopes.some(scope => scope.corpusIds.has(input.corpusId));
-}
-
-function chunkResult(inputs: readonly ReleaseInput[], allowed: string[][], governed: (input: ReleaseInput) => boolean): ChunkReleaseResult {
+function chunkResult(inputs: readonly ReleaseInput[], allowed: string[][]): ChunkReleaseResult {
   let withheldPassages = 0;
   const withheldDocuments = new Set<string>();
   inputs.forEach((input, index) => {
     if (input.layer === 'names') return;
-    if (!governed(input)) { allowed[index] = [...new Set(input.chunkHashes ?? [])]; return; }
     const count = Math.max(1, new Set(input.chunkHashes ?? []).size) - allowed[index]!.length;
     if (count > 0) { withheldPassages += count; withheldDocuments.add(tierLedgerIdentityKey(input)); }
   });
-  return { allowed, ungoverned: inputs.map(input => input.layer !== 'names' && !governed(input)), withheldPassages, withheldDocuments: withheldDocuments.size };
+  return { allowed, withheldPassages, withheldDocuments: withheldDocuments.size };
 }
 
 function normalize(text: string): string { return text.replace(/\s+/g, ' ').trim(); }

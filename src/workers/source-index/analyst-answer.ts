@@ -859,8 +859,7 @@ async function checkedRemotePack(pack: EvidencePack, corpusOf: (candidate: Evide
   const inputs = pack.candidates.map(candidate => candidateReleaseInput(candidate, corpusOf(candidate)));
   const report = await checkReleaseChunks(check, inputs);
   const candidates = pack.candidates.flatMap((candidate, index) => {
-    // Names alone, or a corpus no tier ledger governs (its corpus's tier decides it, as before).
-    if (inputs[index]!.layer === 'names' || report.ungoverned?.[index] === true) return [candidate];
+    if (inputs[index]!.layer === 'names') return [candidate];
     const allowed = new Set(report.allowed[index]);
     const chunks = candidate.chunks.filter(text => {
       const hashes = releasePassageHashes(candidate.provenance, text);
