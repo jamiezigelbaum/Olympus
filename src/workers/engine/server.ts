@@ -470,6 +470,7 @@ import { engineRssRestartsFrom, startEngineRssRestart } from '../engine-split/rs
 import { createFrontScheduler } from '../engine-split/front-scheduler.ts';
 import { createFrontDashboardHistory, openWritableDashboardHistory } from '../engine-split/front-history.ts';
 import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
+import { startSupersededSweepTicker } from '../connector-store/tier-auto-prune-sweep.ts';
 import { remoteAccessFromStatus, type DashboardAgentConnectionsBackend } from '../agent-connections.ts';
 import { applyPendingRestoreAtBoot, createBackupService, defaultBackupServicePaths } from '../backup-service.ts';
 import { createDashboardRemoteAccessControl, createGatewayRemoteAccessConfigWriter, createStandaloneRemoteAccessControl, createDashboardEngineRestart } from '../remote-access-control.ts';
@@ -5991,6 +5992,8 @@ export async function main(): Promise<void> {
   if (!engineFront) await reconcileCaptures();
   const captureTick = setInterval(() => { if (!engineFront) void reconcileCaptures(); }, 10_000);
   captureTick.unref?.();
+  // The one-time superseded-copy sweep's own clock; the split's front runs none.
+  const stopSupersededSweep = startSupersededSweepTicker({ active: () => !engineFront });
 
   // The privacy-safe sniffer's bounded background pass over pending items.
   const snifferEnv = tierSnifferServiceEnv(process.env);
@@ -6311,6 +6314,7 @@ export async function main(): Promise<void> {
     desktopPollingClosed = true;
     if (desktopPoll) clearInterval(desktopPoll);
     clearInterval(captureTick);
+    stopSupersededSweep();
     stopCpuSampleLog?.();
     tierSniffer?.stop();
     localPacer.stop();

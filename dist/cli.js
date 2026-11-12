@@ -68116,6 +68116,9 @@ function registerTierSetForLedger(ledgerPath, set) {
 function tierSetForLedger(ledgerPath) {
   return tierSets?.get(ledgerPath);
 }
+function registeredTierSets() {
+  return [...tierSets?.values() ?? []];
+}
 var tierSets;
 
 // src/workers/connector-store/stored-names.ts
@@ -69784,7 +69787,26 @@ function sweepPage(set, options) {
     } catch {}
   }
 }
-var STATE = "automatic-superseded-prune-v1", PAGE_SIZE = 200, MAX_ITEM_FAILURES = 3;
+function startSupersededSweepTicker(options = {}) {
+  const finished = new WeakSet;
+  const sets = options.sets ?? registeredTierSets;
+  const every = options.every ?? ((tick, ms) => {
+    const timer = setInterval(tick, ms);
+    timer.unref?.();
+    return () => clearInterval(timer);
+  });
+  return every(() => {
+    if (options.active && !options.active())
+      return;
+    for (const set of sets()) {
+      if (finished.has(set))
+        continue;
+      if (set.sweepSupersededSlice())
+        finished.add(set);
+    }
+  }, options.intervalMs ?? SUPERSEDED_SWEEP_TICK_MS);
+}
+var STATE = "automatic-superseded-prune-v1", SUPERSEDED_SWEEP_TICK_MS = 5000, PAGE_SIZE = 200, MAX_ITEM_FAILURES = 3;
 var init_tier_auto_prune_sweep = __esm(() => {
   init_tier_ledger();
   init_embedding_ledger();
@@ -73073,12 +73095,7 @@ class TieredStoreSet {
   repairLowerContent(options = {}) {
     if (this.lowerContentRepair)
       return this.lowerContentRepair;
-    try {
-      sweepAutomaticSupersededCopies(this, {
-        budgetMs: SUPERSEDED_SWEEP_SLICE_MS,
-        ...options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {}
-      });
-    } catch {}
+    this.sweepSupersededSlice(options);
     const now = options.nowMs ?? Date.now();
     if (now - this.lastLowerContentRepairAt < LOWER_CONTENT_REPAIR_INTERVAL_MS)
       return Promise.resolve();
@@ -73099,6 +73116,18 @@ class TieredStoreSet {
       return pending;
     } catch {
       return Promise.resolve();
+    }
+  }
+  sweepSupersededSlice(options = {}) {
+    if (writableStoreOpensForbidden())
+      return true;
+    try {
+      return sweepAutomaticSupersededCopies(this, {
+        budgetMs: SUPERSEDED_SWEEP_SLICE_MS,
+        ...options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {}
+      }).complete;
+    } catch {
+      return false;
     }
   }
   openStores() {
@@ -245196,6 +245225,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       reconcileCaptures();
   }, 1e4);
   captureTick.unref?.();
+  const stopSupersededSweep = startSupersededSweepTicker({ active: () => !engineFront });
   const snifferEnv = tierSnifferServiceEnv(process.env);
   const rawSnifferModel = !snifferEnv.enabled || snifferRuntime.source === "off" ? undefined : snifferRuntime.source === "built_in" ? snifferRuntime.builtIn.model : createTierSnifferModel({ lane: snifferRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[snifferRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => {
     requestModelReload();
@@ -245474,6 +245504,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     if (desktopPoll)
       clearInterval(desktopPoll);
     clearInterval(captureTick);
+    stopSupersededSweep();
     stopCpuSampleLog?.();
     tierSniffer?.stop();
     localPacer.stop();
@@ -245738,6 +245769,7 @@ var init_server5 = __esm(async () => {
   init_rss_restart();
   init_front_scheduler();
   init_front_history();
+  init_tier_auto_prune_sweep();
   init_agent_connections();
   init_backup_service();
   init_remote_access_control();
