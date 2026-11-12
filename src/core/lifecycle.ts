@@ -960,9 +960,12 @@ function qualifyWorkerReadiness(
     'Lifecycle readiness poll interval',
     10_000,
   );
-  const deadline = Date.now() + timeoutMs;
+  let deadline = Date.now() + timeoutMs;
   // Past the deadline, a worker still doing boot work (store updates, a slow
-  // cold start) is waited for while its unit stays active (#1494).
+  // cold start) is waited for while its unit stays active (#1494). Each time
+  // that work is seen, the full window starts again: when it ends (phase
+  // done), the split's front still mounts its stores and starts listening,
+  // and gets the same window to answer as a worker that did no boot work.
   const readProgress = options.bootProgress ?? (() => readBootProgress(lifecycleEnv(options)));
   const progressLine = options.progressLine ?? ((line: string) => process.stderr.write(`${line}\n`));
   let lastLineAt = 0;
@@ -973,6 +976,7 @@ function qualifyWorkerReadiness(
     if (now >= deadline) {
       const progress = readProgress();
       if (!bootProgressIsLive(progress, now)) break;
+      deadline = now + timeoutMs;
       if (now - lastLineAt >= READINESS_PROGRESS_LINE_MS) {
         progressLine(bootProgressLine(progress!, now));
         lastLineAt = now;

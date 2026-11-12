@@ -701,6 +701,35 @@ describe('versioned Olympus worker lifecycle', () => {
     }
   }, 30_000);
 
+  test('after boot work ends past the readiness timeout, the split front still gets the whole window to answer (#1494)', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-boot-done-'));
+    const manager = linuxManager('active');
+    try {
+      const artifact = createUpgradeArtifact(home, '0.4.3');
+      installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: '/opt/olympus-old', bunBin: process.execPath, authToken: 'old-token' });
+      const t0 = Date.now();
+      const startedAt = new Date(t0 - 60_000).toISOString();
+      // The background migrates past the 300 ms window, then writes done; the
+      // front mounts its stores and answers 150 ms after that.
+      const doneAt = t0 + 450;
+      const result = runWorkerLifecycle('upgrade', {
+        platform: 'linux', homeDir: home, artifactPath: artifact.path,
+        bunBin: process.execPath, exec: manager.exec, activationSettleMs: 0,
+        readinessTimeoutMs: 300, actionSettlePollMs: 5,
+        bootProgress: () => ({
+          schema: 'olympus.boot-progress.v1', pid: process.pid, startedAt, updatedAt: new Date().toISOString(), completedStores: 2,
+          ...(Date.now() < doneAt ? { phase: 'migrating' as const, storeId: 'tier-ledger' } : { phase: 'done' as const }),
+        }),
+        progressLine: () => {},
+        readinessProbe: () => Date.now() >= doneAt + 150,
+      });
+      expect(result).toMatchObject({ ok: true, readiness: { status: 'ready' } });
+    } finally {
+      makeTreeWritable(home);
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test('a failed upgrade puts back the stores its worker updated before the previous worker starts (#1494)', () => {
     const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-store-restore-'));
     const manager = linuxManager('active');

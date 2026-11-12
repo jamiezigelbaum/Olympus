@@ -249386,7 +249386,7 @@ function qualifyWorkerReadiness(options, port) {
   const probe = () => options.readinessProbe ? options.readinessProbe(url) : defaultWorkerReadinessProbe(url, options.bunBin);
   const timeoutMs = validateSettleWindow(options.readinessTimeoutMs ?? options.actionSettleTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS, "Lifecycle readiness timeout", MAX_READINESS_TIMEOUT_MS);
   const pollMs = validateSettleWindow(options.actionSettlePollMs ?? DEFAULT_ACTION_SETTLE_POLL_MS, "Lifecycle readiness poll interval", 1e4);
-  const deadline = Date.now() + timeoutMs;
+  let deadline = Date.now() + timeoutMs;
   const readProgress = options.bootProgress ?? (() => readBootProgress(lifecycleEnv2(options)));
   const progressLine = options.progressLine ?? ((line2) => process.stderr.write(`${line2}
 `));
@@ -249400,6 +249400,7 @@ function qualifyWorkerReadiness(options, port) {
       const progress = readProgress();
       if (!bootProgressIsLive(progress, now))
         break;
+      deadline = now + timeoutMs;
       if (now - lastLineAt >= READINESS_PROGRESS_LINE_MS) {
         progressLine(bootProgressLine(progress, now));
         lastLineAt = now;
