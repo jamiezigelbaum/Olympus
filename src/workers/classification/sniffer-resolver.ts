@@ -1,3 +1,4 @@
+import { raiseReadWindowTier } from '../connector-store/tier-rejudge.ts';
 import type { SnifferModel, SnifferModelRequest, SnifferModelCompletion } from './sniffer-decision.ts';
 // The sniffer's background pass (design section 2.2): resolve pending items.
 //
@@ -414,6 +415,19 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     if (sameQuestion(item.target, item.question) && stillOpen(item.target, item.question, false)
       && !screenQuestion(item.target, item.question)) return;
     const { tier, code } = snifferVerdictTier(verdict, options.lane, item.question.flags);
+    // Window questions prove only these exact bytes. Personal answers must
+    // never replace the item's whole-content receipt or lower its tier.
+    if (item.question.flags.includes('content:read_window')) {
+      if (!sameQuestion(item.target, item.question) || !stillOpen(item.target, item.question, false)) return;
+      if (tier === 'secure') {
+        const row = item.target.ledger.getCurrent(item.question)!;
+        raiseReadWindowTier(undefined, item.target.ledger, row, tier, id);
+      }
+      item.target.sniffer.deleteQuestion(item.question, item.question.pass, item.question.materialHash);
+      report.verdictsApplied += 1;
+      if (tier === 'private') report.resolvedPersonal += 1; else report.resolvedPrivate += 1;
+      return;
+    }
     const applied = item.target.ledger.applySnifferVerdict(item.question, {
       pass: item.question.pass,
       tier,
@@ -492,6 +506,15 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   // decision's map revision.
   const stillOpen = (target: SnifferTarget, question: SnifferQuestion, rekey = true): boolean => {
     const row = target.ledger.getCurrent(question);
+    if (question.flags.includes('content:read_window')) {
+      const override = target.ledger.getOverride(question);
+      return row !== undefined && row.state === 'current' && !row.metadataPending && !row.contentPending
+        && row.contentTier === 'private' && row.metadataTier !== 'secure' && row.metadataTier !== 'secrets'
+        && !target.ledger.rejudgeQuestion(question)
+        && (!override || override.kind !== 'tier' || override.tier === 'private')
+        && question.flags.includes(`read_window:generation:${row.generation}`)
+        && row.mapRevision === question.mapRevision;
+    }
     if (row === undefined || row.decidedBy === 'override') return false;
     // The queued secret is the durable retry marker if copy cleanup failed
     // after the ledger hid the item. Do not discard it as a stale verdict.

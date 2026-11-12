@@ -11,6 +11,7 @@ triggers:
 tools:
   - source_answer
   - source_index_search
+  - source_item_read
   - source_index_status
 mutating: false
 ---
@@ -70,6 +71,9 @@ Use Olympus source tools, not raw stores.
   workspace memory, web search, or web browsing to answer ordinary source
   questions or to rediscover how source tools work. If the user asks what
   sources say, call the Olympus source tools directly.
+After a search, read a long hit with `source_item_read` before answering from it, passing its `selected_item` and following `nextPage` as needed.
+For a Private hit, ask `source_answer` with `selected_items` instead.
+
 - `source_index_search` is for safe result cards, locator lookups, and
   diagnostics. It must not return secure-local source text. Internal X
   connector-store bookmark results may return bounded bookmark passages and

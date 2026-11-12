@@ -18,6 +18,7 @@ import {
   remoteDeclaredParams,
   remoteErrorOutput,
   remoteOperationOutputOffThread,
+  remoteOperationOutput,
   withRemotePrivateNote,
   remoteSurfaceErrorOutput,
   remoteWithheldParam,
@@ -26,7 +27,7 @@ import {
 import { SourceAnswerJobRegistry, sourceAnswerJobLimitsFromEnv, sourceAnswerJobOwner } from '../core/source-answer-jobs.ts';
 import type { OperationContext } from '../core/operations.ts';
 import { VERSION } from '../version.ts';
-import { currentAccess, refusedAccess, type RemoteAccessAuthorization } from '../workers/remote-access-recheck.ts';
+import { currentAccess, refusedAccess, withRemoteReadAuthorization, type RemoteAccessAuthorization } from '../workers/remote-access-recheck.ts';
 import { listMcpTools } from './tools.ts';
 
 type McpSurface = Extract<OperationSurface, 'mcp' | 'remote'>;
@@ -122,7 +123,7 @@ async function handleRemoteCallTool(
     ...(ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}),
   });
   try {
-    const result = await runWithReleaseManifestSink(manifests, () => operation.handler(ctx, args));
+    const result = await runWithReleaseManifestSink(manifests, () => withRemoteReadAuthorization(authorized, () => operation.handler(ctx, args)));
     const afterHandler = currentAccess(authorized);
     if (afterHandler !== 'active') return refusedAccess(afterHandler);
     // The output builders note what the agent receives (core/app-release-capture.ts).
@@ -142,9 +143,13 @@ async function handleRemoteCallTool(
     // The settle can wait on the local probe: an item reclassified meanwhile
     // (to Secret, say) is caught by checking the release again right before
     // it leaves. The note follows the output that actually leaves.
-    const output = privatePart ? await release() : approved;
+    let output = privatePart ? await release() : approved;
     const afterFinalRelease = currentAccess(authorized);
     if (afterFinalRelease !== 'active') return refusedAccess(afterFinalRelease);
+    // No await may separate this raw-text privacy check from serialization.
+    if (operation.name === 'source_item_read') output = remoteOperationOutput(operation.name, result, {
+      ...(ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}), releaseManifests: manifests.manifests,
+    });
     recordRemoteOperation({ operation: operation.name, args, caller: ctx.caller, output, capture, privateQuestion: privateMayAnswer ? privatePart?.answerRef : undefined });
     return { content: text(privateMayAnswer ? withRemotePrivateNote(output, privatePart?.answerId, privatePart?.secretMatch) : output) };
   } catch (error) {

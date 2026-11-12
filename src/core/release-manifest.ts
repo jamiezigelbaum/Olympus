@@ -33,6 +33,8 @@ export interface ReleaseInput {
   providerConversationId?: string;
   /** Private (secure_local, or an S4 item) when the answer was written. */
   privateAtAnswer: boolean;
+  /** Raw Personal pages require a settled Personal row, including the live owner override. */
+  personalContent?: true;
   /**
    * Absent: the item itself was read. `names`: only the item's NAMES were in
    * front of a model, as a child citation's parent label (core/parent-label.ts).

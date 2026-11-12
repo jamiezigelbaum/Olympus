@@ -67,6 +67,8 @@ export const ENGINE_FORWARDED_ROUTES = {
     '/dashboard/messaging/cancel', '/dashboard/messaging/chats', '/dashboard/messaging/scope',
   ],
   embed_chunks: ['/v1/source/index/embed'],
+  // Reading can queue a window judgment or raise a tier: the writer owns both.
+  source_item_read: ['/v1/source/item/read'],
   // The CLI's export (and so its backup): the background takes the snapshots
   // on the writer's own loop, between its writes (#1224).
   data_export: ['/v1/cli/data-export'],
@@ -373,6 +375,7 @@ export function parseEngineCommandEnvelope(value: unknown): EngineCommandEnvelop
     case 'storage_registry':
     case 'capture':
     case 'embed_chunks':
+    case 'source_item_read':
     case 'source_watch':
     case 'extraction_queue':
     case 'people':
