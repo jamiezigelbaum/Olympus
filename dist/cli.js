@@ -38675,7 +38675,8 @@ function selectEvidencePassages(chunks, maxChars, focus, context2 = {}) {
     const read = new Map(others.map((index, position) => [index, bounded.chunks[position]]));
     if (similarPick !== undefined && similarRead?.chunks[0])
       read.set(similarPick, similarRead.chunks[0]);
-    const ordered2 = picked.flatMap((index) => read.get(index) ?? []);
+    const best2 = similarPick ?? anchor ?? scored[0]?.index;
+    const ordered2 = bestFirst(picked, best2).flatMap((index) => read.get(index) ?? []);
     return {
       chunks: ordered2,
       truncated: picked.length < chunks.length || bounded.truncated || similarRead?.truncated === true
@@ -38704,11 +38705,16 @@ function selectEvidencePassages(chunks, maxChars, focus, context2 = {}) {
     kept.set(index, included);
     remaining -= included.length;
   }
-  const ordered = [...kept.entries()].sort(([left], [right]) => left - right);
+  const ordered = bestFirst([...kept.keys()].sort((left, right) => left - right), ranked[0]).map((index) => [index, kept.get(index)]);
   return {
     chunks: ordered.map(([, text2]) => text2),
     truncated: ordered.length < chunks.length || ordered.some(([index, text2]) => text2.length < chunks[index].length)
   };
+}
+function bestFirst(indexes, best) {
+  if (best === undefined || !indexes.includes(best))
+    return [...indexes];
+  return [best, ...indexes.filter((index) => index !== best)];
 }
 function withoutNameTerms(termGroups, title) {
   if (!title)

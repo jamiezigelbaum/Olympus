@@ -20,6 +20,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
+import { clipChunksToUtf8Bytes } from '../src/core/evidence-pack.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
 import { sourceIndexFtsTerms } from '../src/core/source-index/fts.ts';
 import {
@@ -256,9 +257,9 @@ describe('similarity inside a long item with word hits', () => {
     return result!;
   }
 
-  test('keeps the anchor, the most similar chunk and the densest chunk in document order', async () => {
+  test('keeps the anchor, the most similar chunk and the densest chunk, the most similar first', async () => {
     const content = await read({ similarIndex: 4, anchorChunkIndex: 0 });
-    expect(content.chunks).toEqual([chunks[0]!, chunks[1]!, chunks[4]!]);
+    expect(content.chunks).toEqual([chunks[4]!, chunks[0]!, chunks[1]!]);
     expect(content.truncated).toBe(true);
   });
 
@@ -284,7 +285,29 @@ describe('similarity inside a long item with word hits', () => {
 
   test('when similarity picks the densest chunk it is included only once', async () => {
     const content = await read({ similarIndex: 1, anchorChunkIndex: 0 });
-    expect(content.chunks).toEqual([chunks[0]!, chunks[1]!, chunks[2]!]);
+    expect(content.chunks).toEqual([chunks[1]!, chunks[0]!, chunks[2]!]);
+  });
+
+  test('a fit with room for two passages keeps the best one when it sits third in the document', async () => {
+    // Three picks: the anchor (0), the densest (1) and the most similar (4),
+    // which answers. A later cut by position with room for about two
+    // passages must still hold it.
+    const answer = 'Diabetes care is covered at the full rate.';
+    const texts = [...chunks];
+    texts[4] = `Paraphrase. ${answer}`.padEnd(4_000, '.');
+    let content: ReturnType<Store['localContent']>;
+    await withStore([{ ...item, text: texts.join('') }], async (store) => {
+      const provider = chunkCosineProvider(Object.fromEntries(openings.map((opening, index) =>
+        [`${opening}.`, index === 4 ? 0.95 : 0.4])));
+      await store.embedChunks({ provider });
+      content = store.localContent(`${ACCOUNT}:policy`, 3_000, {
+        query: 'coverage', anchorChunkIndex: 0, anchorLane: 'keyword',
+        queryVector: [1, 0], queryVectorModelId: provider.modelId,
+      });
+    });
+    const twoPassages = content!.chunks.slice(0, 2).reduce((sum, chunk) => sum + chunk.length, 0);
+    expect(content!.chunks).toHaveLength(3);
+    expect(clipChunksToUtf8Bytes(content!.chunks, twoPassages).join('')).toContain(answer);
   });
 
   test('a one-character budget returns at most one character', async () => {
@@ -302,7 +325,7 @@ describe('similarity inside a long item with word hits', () => {
     expect(content!.truncated).toBe(true);
   });
 
-  test('duplicate word chunks keep the similar pick in document order', async () => {
+  test('duplicate word chunks keep the rest in document order after the similar pick', async () => {
     // Chunks 0 and 1 carry the same text; the store's reader keeps one copy,
     // and the later word pick must still come after the similar chunk.
     const twin = chunks[1]!;
@@ -316,7 +339,7 @@ describe('similarity inside a long item with word hits', () => {
         queryVector: [1, 0], queryVectorModelId: provider.modelId,
       });
     });
-    expect(content!.chunks.map((chunk) => chunk.split('.')[0])).toEqual(['Dense', 'Runner', 'Closing']);
+    expect(content!.chunks.map((chunk) => chunk.split('.')[0])).toEqual(['Runner', 'Dense', 'Closing']);
   });
 
   test('at a candidate-sized budget the most similar chunk is read for half of it, not a third', async () => {
@@ -338,7 +361,7 @@ describe('similarity inside a long item with word hits', () => {
       });
     });
     expect(content!.chunks).toHaveLength(3);
-    expect(content!.chunks[2]).toContain(answer);
+    expect(content!.chunks[0]).toContain(answer);
     expect(content!.chunks.join('').length).toBeLessThanOrEqual(3_000);
   });
 });
