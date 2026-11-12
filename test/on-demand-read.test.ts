@@ -17,6 +17,8 @@ import { createAnalystSourceIndexAnswerHandler } from '../src/workers/source-ind
 import { LocalConnectorStore, createConnectorStoreContentProvider } from '../src/workers/connector-store/index.ts';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import { createConnectorStoreExtractionSink } from '../src/workers/file-extraction/store-sink.ts';
+import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
+import { Database } from 'bun:sqlite';
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const close of cleanup.splice(0).reverse()) close(); });
@@ -226,6 +228,63 @@ describe('read on demand', () => {
     expect(store.contentServedNow('a')).toBe(false);
     expect(store.localContent('a')?.chunks ?? []).toEqual([]);
     expect(store.readOnDemand('a', 'v2')).toBe(false);
+  });
+
+  test.each(['path', 'folder'] as const)('metadata-only %s scopes allow body search only with a current-version grant', async scope => {
+    const dir = mkdtempSync(join(tmpdir(), 'on-demand-search-'));
+    const dbPath = join(dir, 'store.sqlite');
+    let store = new LocalConnectorStore({ dbPath, corpusId: 'internal.fixture.files', family: 'file', trustDomain: 'internal' });
+    cleanup.push(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
+    // Retained text/vectors must obey the current folder policy, even when
+    // the store previously ingested the whole folder.
+    const items: RawItem[] = ['current', 'unread', 'stale', 'excluded', 'unversioned', 'held'].map(id => ({
+      identity: { family: 'file', provider: 'fixture', accountScope: 'one', providerItemId: id, localItemId: id,
+        ...(id === 'unversioned' ? {} : { sourceVersion: 'v2' }) },
+      mimeType: 'text/plain', content: { kind: 'text', text: 'quartzneedle body contents' },
+      metadata: { name: `${id}.txt`, locatorUri: `/Names/${id === 'excluded' ? 'Excluded/' : ''}${id}.txt` },
+      fetchedAt: '2026-11-12T00:00:00Z',
+    }));
+    const connector: SourceConnector = { id: 'fixture', family: 'file', async authenticate() {}, async *listItems() { yield { items, done: true }; }, async fetchItem(id) { return items.find(item => item.identity.localItemId === id)!; }, classificationSignals() { return {}; } };
+    await store.syncFromConnector(connector, { fetchContent: true, tierClassification: { holdContentUntilJudged: true }, sourceScopeObservation: item => ({
+      accountGeneration: 'a'.repeat(64), scopeRevision: '00000000-0000-4000-8000-000000000001',
+      folderKeys: ['names', ...(item.identity.localItemId === 'excluded' ? ['excluded'] : [])],
+    }) });
+    const provider: SourceEmbeddingProvider = { provider: 'built-in', backend: 'local', modelId: 'on-demand-fixture', dimension: 2, configHash: '1', epochId: '1',
+      async embed(inputs) { return inputs.map(() => [1, 0]); } };
+    for (const item of items.filter(item => item.identity.localItemId !== 'held')) {
+      store.tierLedger()!.recordContentDecision(item.identity, classifyContentTier({
+        text: 'quartzneedle body contents', metadataTier: 'private', metadataForced: false, metadataFlagged: false, holdUntilJudged: true,
+      }, { sniffer: { id: 'test-judge', judge: () => ({ verdict: 'decided', tier: 'private', code: 'ordinary:0.99' }) } }));
+    }
+    await store.embedChunks({ provider });
+    store.grantOnDemandRead('current', 'v2');
+    store.grantOnDemandRead('stale', 'v1');
+    store.grantOnDemandRead('excluded', 'v2');
+    store.grantOnDemandRead('unversioned');
+    store.grantOnDemandRead('held', 'v2');
+    expect(store.contentServedNow('current')).toBe(true);
+    expect(store.contentServedNow('held')).toBe(false);
+    const filters = scope === 'path'
+      ? { metadataOnlyLocatorPathScopes: ['/Names'], locatorPathExcludedScopes: ['/Names/Excluded'] }
+      : { metadataOnlySourceScopeFolderKeys: ['names'], sourceScopeFolderNoneKeys: ['excluded'] };
+    const assertSearch = async (expected: string[]) => {
+      expect(store.searchItems('quartzneedle', 10, 'one', filters).map(row => row.sourceItem.localItemId).sort()).toEqual(expected);
+      expect((await store.searchItemsDetailedOffThread('quartzneedle', 10, 'one', filters)).rows.map(row => row.sourceItem.localItemId).sort()).toEqual(expected);
+      expect((await store.vectorSearchItems('quartzneedle', provider, 10, 'one', filters)).map(row => row.sourceItem.localItemId).sort()).toEqual(expected);
+    };
+    await assertSearch(['current', 'unversioned']);
+    // Also exercise the exact scan used when the digest is unavailable.
+    const db = new Database(dbPath);
+    db.exec('UPDATE chunk_vector_digest_meta SET completed = 0');
+    await assertSearch(['current', 'unversioned']);
+    // Older read-only stores have no grant table: both lanes fail closed
+    // for body matches while names remain searchable.
+    store.close();
+    db.exec('DROP TABLE on_demand_item_reads');
+    db.close();
+    store = new LocalConnectorStore({ dbPath, corpusId: 'internal.fixture.files', family: 'file', trustDomain: 'internal', readOnly: true });
+    await assertSearch([]);
+    expect(store.searchItems('unread', 10, 'one', filters).map(row => row.sourceItem.localItemId)).toEqual(['unread']);
   });
 });
 

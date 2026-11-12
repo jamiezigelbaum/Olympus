@@ -2222,6 +2222,8 @@ interface ConnectorStoreCurrentEmbeddingRowsOptions {
   accountScope?: string;
   filters?: ConnectorStoreSearchFilters;
   chunkPks?: readonly number[];
+  /** Set only after checking sqlite_master on the scan's read snapshot. */
+  onDemandReadsTablePresent?: boolean;
 }
 
 const CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
@@ -2251,6 +2253,7 @@ function connectorStoreCurrentEmbeddingRowsQuery(
   const modelId = requireNonEmpty(options.modelId, 'Connector store embedding model id');
   const accountScope = normalizeOptionalAccountScope(options.accountScope);
   const selectedFilters = connectorStoreFilterSql(options.filters);
+  const metadataOnly = connectorStoreMetadataOnlySql(options.filters, options.onDemandReadsTablePresent);
   return {
     sql: `
       SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding
@@ -2261,6 +2264,7 @@ function connectorStoreCurrentEmbeddingRowsQuery(
         ${options.chunkPks ? 'AND emb.chunk_pk IN (SELECT value FROM json_each(?))' : ''}
         ${accountScope ? 'AND i.account_scope = ?' : ''}
         ${selectedFilters.sql}
+        ${metadataOnly.sql ? `AND NOT ${metadataOnly.sql}` : ''}
       ${page ? 'ORDER BY emb.chunk_pk ASC LIMIT ?' : ordered ? 'ORDER BY emb.item_pk ASC, emb.chunk_pk ASC' : ''}
     `,
     params: [
@@ -2269,6 +2273,7 @@ function connectorStoreCurrentEmbeddingRowsQuery(
       ...(options.chunkPks ? [JSON.stringify(options.chunkPks)] : []),
       ...(accountScope ? [accountScope] : []),
       ...selectedFilters.params,
+      ...metadataOnly.params,
       ...(page ? [Math.max(1, Math.floor(page.limit))] : []),
     ],
   };
@@ -2357,6 +2362,10 @@ async function scanVectorPages(
   const after = embeddingAuthorityFromRow(await read(authority) as EmbeddingAuthorityRow | null, provider);
   if (after.skippedReason) return { skippedReason: after.skippedReason };
   if (after.token !== beforeToken) return { skippedReason: 'embedding_authority_changed_during_query' };
+  if (pageOptions.filters?.metadataOnlyLocatorPathScopes?.length || pageOptions.filters?.metadataOnlySourceScopeFolderKeys?.length) {
+    pageOptions = { ...pageOptions, onDemandReadsTablePresent: Boolean(await read({ mode: 'get',
+      sql: "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'", params: [] })) };
+  }
   // Old/read-only schemas and incomplete backfills retain the exact scan, as
   // does every store when OLYMPUS_VECTOR_DIGEST=off: the fallback an owner or
   // an eval can force without touching the store.
@@ -13390,7 +13399,7 @@ export class LocalConnectorStore {
     laneOptions: { locate?: boolean } = {},
   ): Promise<{ rows: ConnectorStoreScoredSearchRow[]; skippedReason?: string }> {
     assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
-    const vectorFilters = connectorStoreVectorScopeFilters(filters);
+    const vectorFilters = normalizeConnectorStoreSearchFilters(filters);
     const trimmed = query.trim();
     if (!trimmed) return { rows: [] };
     const before = this.embeddingReadAuthority(provider);
@@ -13906,8 +13915,10 @@ export class LocalConnectorStore {
     ftsOptions: ConnectorStoreKeywordFtsOptions,
   ): Generator<StoreRead | VisibilityRead, ConnectorStoreKeywordSearch, unknown> {
     const selectedFilters = connectorStoreFilterSql(filters);
-    const selectedFtsScope = connectorStoreFtsScopeSql(filters);
-    const conceptScope = connectorStoreFtsScopeSql(filters, 'r.chunk_pk');
+    const onDemandReadsTablePresent = Boolean((filters?.metadataOnlyLocatorPathScopes?.length || filters?.metadataOnlySourceScopeFolderKeys?.length)
+      && (yield { mode: 'get', sql: "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'", params: [] }));
+    const selectedFtsScope = connectorStoreFtsScopeSql(filters, onDemandReadsTablePresent);
+    const conceptScope = connectorStoreFtsScopeSql(filters, onDemandReadsTablePresent, 'r.chunk_pk');
     const terms = ftsOptions.relaxed ? (ftsOptions.privatePrecision ? yield* this.privateRelaxedFtsQuerySteps(query) : toRelaxedLocalFtsQuery(query)) : toFtsQuery(query, ftsOptions);
     if (!terms) return { rows: [], saturated: false, concepts: { total: 0, matched: new Map() } };
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
@@ -18457,16 +18468,13 @@ function connectorStoreConceptHitRead(
   };
 }
 
-function connectorStoreFtsScopeSql(filters: ConnectorStoreSearchFilters | undefined, chunkColumn = 'connector_store_fts.chunk_pk'): {
-  sql: string;
-  params: string[];
-} {
+/** A folder's names-only restriction lifts only for a grant to this item version. */
+function connectorStoreMetadataOnlySql(
+  filters: ConnectorStoreSearchFilters | undefined,
+  onDemandReadsTablePresent = false,
+): { sql: string; params: string[] } {
   const normalized = normalizeConnectorStoreSearchFilters(filters);
-  const contentRow = `(
-    ${chunkColumn} IS NOT NULL
-    OR NOT EXISTS (SELECT 1 FROM chunks scope_chunk WHERE scope_chunk.item_pk = i.item_pk)
-  )`;
-  if (!normalized) return { sql: `AND ${contentRow}`, params: [] };
+  if (!normalized) return { sql: '', params: [] };
   const metadataOnly: string[] = [];
   const params: string[] = [];
   for (const locatorPath of normalized.metadataOnlyLocatorPathScopes ?? []) {
@@ -18484,33 +18492,34 @@ function connectorStoreFtsScopeSql(filters: ConnectorStoreSearchFilters | undefi
     )`);
     params.push(...normalized.metadataOnlySourceScopeFolderKeys);
   }
-  if (metadataOnly.length === 0) return { sql: `AND ${contentRow}`, params: [] };
-  const metadataExpression = `(${metadataOnly.join(' OR ')})`;
-  return {
-    sql: `AND (
-      (${metadataExpression} AND ${chunkColumn} IS NULL)
-      OR (NOT ${metadataExpression} AND ${contentRow})
-    )`,
-    params: [...params, ...params],
-  };
+  if (metadataOnly.length === 0) return { sql: '', params: [] };
+  // Read-only stores may predate the grant table. Never name it in their SQL.
+  const notGranted = onDemandReadsTablePresent ? ` AND NOT EXISTS (
+    SELECT 1 FROM on_demand_item_reads on_demand
+    WHERE on_demand.local_item_id = i.local_item_id
+      AND on_demand.source_version = COALESCE(i.source_version, '')
+  )` : '';
+  return { sql: `((${metadataOnly.join(' OR ')})${notGranted})`, params };
 }
 
-function connectorStoreVectorScopeFilters(
+function connectorStoreFtsScopeSql(
   filters: ConnectorStoreSearchFilters | undefined,
-): ConnectorStoreSearchFilters | undefined {
-  const normalized = normalizeConnectorStoreSearchFilters(filters);
-  if (!normalized) return undefined;
-  return normalizeConnectorStoreSearchFilters({
-    ...normalized,
-    locatorPathExcludedScopes: [
-      ...(normalized.locatorPathExcludedScopes ?? []),
-      ...(normalized.metadataOnlyLocatorPathScopes ?? []),
-    ],
-    sourceScopeFolderNoneKeys: [
-      ...(normalized.sourceScopeFolderNoneKeys ?? []),
-      ...(normalized.metadataOnlySourceScopeFolderKeys ?? []),
-    ],
-  });
+  onDemandReadsTablePresent: boolean,
+  chunkColumn = 'connector_store_fts.chunk_pk',
+): { sql: string; params: string[] } {
+  const contentRow = `(
+    ${chunkColumn} IS NOT NULL
+    OR NOT EXISTS (SELECT 1 FROM chunks scope_chunk WHERE scope_chunk.item_pk = i.item_pk)
+  )`;
+  const metadataOnly = connectorStoreMetadataOnlySql(filters, onDemandReadsTablePresent);
+  if (!metadataOnly.sql) return { sql: `AND ${contentRow}`, params: [] };
+  return {
+    sql: `AND (
+      (${metadataOnly.sql} AND ${chunkColumn} IS NULL)
+      OR (NOT ${metadataOnly.sql} AND ${contentRow})
+    )`,
+    params: [...metadataOnly.params, ...metadataOnly.params],
+  };
 }
 
 function normalizeScopePaths(values: readonly string[] | undefined): string[] {
