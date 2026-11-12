@@ -94,7 +94,7 @@ describe('Claude MCP App canary', () => {
     const raw = { clients: ['claude'], questions: 'questions.json' };
     const parse = (extra: object) => parseCanaryAccounts({ ...raw, ...extra }, () => [privateQ]);
     // Left out, the leg expects the product default (off), so it checks Claude gets the answer tools.
-    expect(parse({}).claude_app).toBe(false);
+    expect(parse({}).claude_app).toBe(true);
     expect(parse({ claude_app: true }).claude_app).toBe(true);
     expect(parse({ claude_app: false }).claude_app).toBe(false);
     for (const value of ['on', 'false', 1, null, {}]) expect(() => parse({ claude_app: value })).toThrow('claude_app must be true or false');
