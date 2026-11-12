@@ -646,11 +646,12 @@ describe('Secrets floor: linear-time on adversarial input', () => {
     ['recovery code then a long hyphen run', `Recovery code: ${'a1-'.repeat(N / 3)}`],
     ['recovery code then blank lines', `Recovery code:${'\n'.repeat(N)}1234-5678`],
   ];
-  // Both sizes sit above ~125K characters: Bun 1.4's regex engine switches to
-  // a slower (still linear) path there, so a 100K/200K pair straddles the step
-  // and reads as superlinear on a slow runner.
-  const small = casesAt(200_000);
-  const large = casesAt(400_000);
+  // Both sizes sit above every step measured: Bun 1.4's regex engine switches
+  // to a slower (still linear) path once an input passes 125K to 250K
+  // characters, depending on the pattern, so a pair that straddles the step
+  // reads as superlinear on a slow runner.
+  const small = casesAt(400_000);
+  const large = casesAt(800_000);
   const time = (text: string): number => {
     const started = performance.now();
     scanDropboxContentPolicyText({ text });
