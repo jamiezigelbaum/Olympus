@@ -25503,6 +25503,9 @@ class LocalConnectorStore {
   }
   reclaimProcess;
   reclaimKilledAttempts = 0;
+  get reclaiming() {
+    return this.reclaimProcess !== undefined;
+  }
   reclaimablePages() {
     if (this.readOnly || this.dbPath === ":memory:" || this.closedForPoolReads || this.fileReplacedOrRemoved())
       return;

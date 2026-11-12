@@ -3718,6 +3718,9 @@ export class LocalConnectorStore {
   private reclaimProcess: ReturnType<typeof Bun.spawn> | undefined;
   private reclaimKilledAttempts = 0;
 
+  /** A conversion child holds this store's write lock; other writers defer instead of blocking. */
+  get reclaiming(): boolean { return this.reclaimProcess !== undefined; }
+
   /** Cheap header introspection for the ticker's eligibility check. */
   reclaimablePages(): { pages: number; free: number; pageBytes: number; bytes: number } | undefined {
     if (this.readOnly || this.dbPath === ':memory:' || this.closedForPoolReads || this.fileReplacedOrRemoved()) return undefined;

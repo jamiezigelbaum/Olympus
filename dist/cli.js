@@ -41095,6 +41095,9 @@ var init_local_index = __esm(() => {
     }
     reclaimProcess;
     reclaimKilledAttempts = 0;
+    get reclaiming() {
+      return this.reclaimProcess !== undefined;
+    }
     reclaimablePages() {
       if (this.readOnly || this.dbPath === ":memory:" || this.closedForPoolReads || this.fileReplacedOrRemoved())
         return;
@@ -216506,6 +216509,8 @@ class TierSnifferService {
         break;
       const set2 = tierSetForLedger(ledgerPath);
       if (!set2)
+        continue;
+      if (set2.openStores().some((store) => store.reclaiming))
         continue;
       const queued = set2.ledger.listMoving({ limit: budget, direction }).filter(isAutoMoveCandidate);
       if (!setEmbedsWithBuiltInOnly(set2)) {

@@ -1805,6 +1805,10 @@ export class TierSnifferService {
       if (budget === 0 || shouldStop()) break;
       const set = tierSetForLedger(ledgerPath);
       if (!set) continue;
+      // A batch takes a write transaction on every open store; one being
+      // reclaimed would block this thread on its busy timeout. Moves stay
+      // queued for the next pass.
+      if (set.openStores().some(store => store.reclaiming)) continue;
       const queued = set.ledger.listMoving({ limit: budget, direction })
         .filter(isAutoMoveCandidate);
       if (!setEmbedsWithBuiltInOnly(set)) { report.notEligible += queued.length; continue; }
