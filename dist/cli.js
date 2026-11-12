@@ -31635,6 +31635,38 @@ var init_partial_search = __esm(() => {
   SEMANTIC_TIMEOUT_REASONS = new Set(["vector_scan_deadline_exceeded", "vector_scan_store_busy"]);
 });
 
+// src/core/log-redaction.ts
+function redactLogLine(line) {
+  return line.replace(/\b(Bearer|token|api[_-]?key|secret|password)([=:\s]+)\S+/gi, "$1$2[redacted]").replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[redacted]");
+}
+function boundedLogErrorMessage(error) {
+  const message2 = error instanceof Error ? error.message : String(error);
+  const oneLine = message2.replace(/\s+/g, " ").trim();
+  return JSON.stringify(redactLogLine(oneLine).slice(0, LOG_ERROR_MESSAGE_MAX_CHARS));
+}
+function logErrorOrigin(error) {
+  if (!(error instanceof Error))
+    return JSON.stringify(typeof error);
+  const frame = errorFirstFrame(error);
+  return JSON.stringify(redactLogLine(frame ? `${error.name} at ${frame}` : error.name).slice(0, LOG_ERROR_MESSAGE_MAX_CHARS));
+}
+function errorFirstFrame(error) {
+  const line = error.stack?.split(`
+`).map((entry) => entry.trim()).find((entry) => entry.startsWith("at "));
+  if (!line)
+    return;
+  return line.slice(3).replace(/(?:[A-Za-z]:)?[^\s()]*[\\/]([^\\/\s()]+:\d+(?::\d+)?)/g, "$1").slice(0, 160);
+}
+function errorFromBoundary(message2, name, frame, where) {
+  const error = new Error(message2);
+  if (name)
+    error.name = name;
+  error.stack = `${error.name}: ${message2}
+    at ${frame ?? "unknown"} (${where})`;
+  return error;
+}
+var LOG_ERROR_MESSAGE_MAX_CHARS = 200;
+
 // src/core/source-index/lane-busy.ts
 function isSourceIndexLaneBusyError(error) {
   return typeof error === "object" && error !== null && error.code === SOURCE_INDEX_LANE_BUSY_CODE;
@@ -31687,7 +31719,7 @@ function startThread(store) {
       if (message2.ok)
         waiting.resolve(message2.rows ?? null);
       else
-        waiting.reject(new Error(message2.error ?? "off-thread read failed"));
+        waiting.reject(errorFromBoundary(message2.error ?? "off-thread read failed", message2.errorName, message2.errorFrame, `read pool ${message2.op ?? "read"}${message2.sqlHead ? `: ${message2.sqlHead}` : ""}`));
     };
     worker.onerror = (event) => {
       retire(started, new Error(event.message || "off-thread reader stopped"));
@@ -31999,7 +32031,8 @@ self.onmessage = (event) => {
       postMessage({ id, ok: true, rows, ms: performance.now() - started });
     }
   } catch (error) {
-    postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error) });
+    const frame = error instanceof Error && error.stack ? error.stack.split('\\n').map((line) => line.trim()).find((line) => line.startsWith('at ')) : undefined;
+    postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error), errorName: error instanceof Error ? error.name : undefined, errorFrame: frame ? frame.slice(3) : undefined, op, sqlHead: typeof sql === 'string' ? sql.replace(/\\s+/g, ' ').trim().slice(0, 80) : undefined });
   }
 };
 `, threads, nextId = 1, counters, startedStores, storeOpens, queues, turns, snapshotWaiters, releases;
@@ -62189,17 +62222,6 @@ var init_scheduler_markers = __esm(() => {
     "provider_rate_limit"
   ]);
 });
-
-// src/core/log-redaction.ts
-function redactLogLine(line) {
-  return line.replace(/\b(Bearer|token|api[_-]?key|secret|password)([=:\s]+)\S+/gi, "$1$2[redacted]").replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[redacted]");
-}
-function boundedLogErrorMessage(error) {
-  const message2 = error instanceof Error ? error.message : String(error);
-  const oneLine = message2.replace(/\s+/g, " ").trim();
-  return JSON.stringify(redactLogLine(oneLine).slice(0, LOG_ERROR_MESSAGE_MAX_CHARS));
-}
-var LOG_ERROR_MESSAGE_MAX_CHARS = 200;
 
 // src/workers/dashboard/source-failure.ts
 function isSourceFailureKind(value) {
@@ -116746,7 +116768,7 @@ function remoteErrorOutput(error, options = {}) {
     return { error: code, message: REMOTE_ERROR_TEXT[code] };
   const ref = mintErrorRef();
   const errorClass2 = error instanceof Error ? error.name : typeof error;
-  console.error(`[olympus:remote] tool_error code=${code} ref=${ref} class=${JSON.stringify(errorClass2)} error_message=${boundedLogErrorMessage(error)}`);
+  console.error(`[olympus:remote] tool_error code=${code} ref=${ref} class=${JSON.stringify(errorClass2)} error_message=${boundedLogErrorMessage(error)} origin=${logErrorOrigin(error)}`);
   return { error: code, message: REMOTE_ERROR_TEXT[code], ref };
 }
 function remoteSurfaceErrorOutput(code) {
@@ -215365,6 +215387,7 @@ class EngineCommandLedger {
     } catch (error2) {
       entry.receipt.state = "failed";
       entry.receipt.error = error2 instanceof Error ? error2.message : "The command failed.";
+      console.warn(`[engine-split] ${command2.kind} failed: error_message=${boundedLogErrorMessage(error2)} origin=${logErrorOrigin(error2)}`);
     }
     entry.settledAt = this.now();
   }
@@ -215430,6 +215453,7 @@ function createEngineCommandHandler(options) {
       } catch (error2) {
         if (error2 instanceof OperationError)
           return Response.json({ operation_error: error2.toJSON() }, { status: 503 });
+        console.warn(`[engine-split] model completion failed: error_message=${boundedLogErrorMessage(error2)} origin=${logErrorOrigin(error2)}`);
         return Response.json({ error: "model_failed", message: error2 instanceof Error ? error2.message : "unknown error" }, { status: 500 });
       }
     }
@@ -224741,7 +224765,7 @@ function errorToolResult(error2, client) {
   }
   const ref = mintErrorRef2();
   const errorClass2 = error2 instanceof Error ? error2.name : typeof error2;
-  console.error(`[olympus:chatgpt] tool_error code=${code} ref=${ref} class=${JSON.stringify(errorClass2)} error_message=${boundedLogErrorMessage(error2)}`);
+  console.error(`[olympus:chatgpt] tool_error code=${code} ref=${ref} class=${JSON.stringify(errorClass2)} error_message=${boundedLogErrorMessage(error2)} origin=${logErrorOrigin(error2)}`);
   return {
     content: [{ type: "text", text: `${appClientCopy(ERROR_TEXT[code], client)} ${errorReferenceSentence(ref)}` }],
     structuredContent: { error: code, ref },
