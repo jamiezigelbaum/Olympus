@@ -331,6 +331,9 @@ test('once a translation has outlasted the wait, later searches start at once on
     setSystemTime(start + 5_000);
     finishers[0]!(reply(['asteroide']));
     await new Promise<void>((resolve) => setImmediate(resolve));
+    // A store whose language profile read is slow must not hold the search up either.
+    const unread = await withKeywordRequestScope(() => expandSourceIndexKeywords('nebula notary', () => new Promise<readonly string[]>(() => {}), {}, { waitMs: 4_000 }));
+    expect(unread.get('nebula')).toBeUndefined();
     // A new question would wait 4 s (past this test's 2 s limit) if it waited at all: it must not.
     const skipped = await withKeywordRequestScope(() => expandSourceIndexKeywords('comet notary', ['spa'], {}, { waitMs: 4_000 }));
     expect(skipped.get('comet')).toBeUndefined();

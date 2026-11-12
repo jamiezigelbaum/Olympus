@@ -31957,7 +31957,7 @@ async function expandSourceIndexKeywords(query, profile, owner, options = {}) {
   const builtIn = registeredBuiltInPrivateModel();
   const lastMs = builtIn ? lastTranslationMs.get(builtIn.model) : undefined;
   if (lastMs !== undefined && lastMs > (options.waitMs ?? 0)) {
-    const alternatives2 = await expandCachedSourceIndexKeywords(query, once, { missing: false });
+    const alternatives2 = await expandCachedSourceIndexKeywords(query, languages ?? [], { missing: false });
     pinKeywordAlternatives(owner, query, alternatives2);
     return alternatives2;
   }

@@ -67,7 +67,8 @@ export async function expandSourceIndexKeywords(
   const lastMs = builtIn ? lastTranslationMs.get(builtIn.model) : undefined;
   if (lastMs !== undefined && lastMs > (options.waitMs ?? 0)) {
     // A finished translation of this question is still used; otherwise the static equivalents.
-    const alternatives = await expandCachedSourceIndexKeywords(query, once, { missing: false });
+    // Languages already read, as the timeout fallback below: a slow profile read must not hold it up.
+    const alternatives = await expandCachedSourceIndexKeywords(query, languages ?? [], { missing: false });
     pinKeywordAlternatives(owner, query, alternatives);
     return alternatives;
   }
