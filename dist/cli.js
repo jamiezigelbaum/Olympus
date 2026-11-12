@@ -42158,7 +42158,7 @@ var init_local_index = __esm(() => {
       }
     }
     peopleNames;
-    peopleVisibilityMarker() {
+    visibilityMarker() {
       const ledger = this.visibilityLedger();
       const ledgerCursor = ledger ? ledger.visibilityChangesSince().cursor : 0;
       const storeCursor = this.visibilityJournal ? String(this.itemVisibilityChangesSince().cursor) : `v${this.db.query("PRAGMA data_version").get().data_version}`;
@@ -42172,13 +42172,13 @@ var init_local_index = __esm(() => {
       if (!offThreadReadsSupported(this.dbPath))
         return this.peopleObservations();
       for (let attempt = 0;attempt < PEOPLE_OFF_THREAD_READ_ATTEMPTS; attempt += 1) {
-        const marker = this.peopleVisibilityMarker();
+        const marker = this.visibilityMarker();
         const tierHidden = await this.tierHiddenItemPksInTurns();
         const steps = this.peopleObservationSteps(tierHidden);
         let step = steps.next();
         while (!step.done)
           step = steps.next(await readOnPool(this.dbPath, step.value));
-        if (this.peopleVisibilityMarker() === marker)
+        if (this.visibilityMarker() === marker)
           return this.peopleObservationsFromRows(step.value);
       }
       return this.peopleObservations();
@@ -51333,7 +51333,7 @@ function fingerprintParts(stores) {
       sync = "";
     }
     try {
-      visibility = store.peopleVisibilityMarker?.() ?? "";
+      visibility = store.visibilityMarker?.() ?? "";
     } catch {
       return `${sync}${UNREADABLE_VISIBILITY}`;
     }
@@ -107437,10 +107437,22 @@ function createSourceIndexStatusHandler(options = {}) {
   const storeStatusCache = new Map;
   const nowMs = options.nowMs ?? Date.now;
   const storeStatusKey = (store, statusScope) => JSON.stringify([store.corpusId, statusScope ?? null]);
+  const visibilityMarker = (store) => {
+    try {
+      return store.visibilityMarker?.();
+    } catch {
+      return;
+    }
+  };
   const storeStatusFresh = (store, statusScope, countsMaxAgeMs) => {
     const reuseMs = Math.min(countsMaxAgeMs, STORE_STATUS_REUSE_MS);
     const cached2 = reuseMs > 0 ? storeStatusCache.get(storeStatusKey(store, statusScope)) : undefined;
-    return cached2 !== undefined && nowMs() - cached2.recordedAtMs <= reuseMs;
+    if (!cached2)
+      return false;
+    const age = nowMs() - cached2.recordedAtMs;
+    if (age > reuseMs)
+      return false;
+    return age <= Math.min(reuseMs, STORE_STATUS_CHANGED_REUSE_MS) || cached2.marker === visibilityMarker(store);
   };
   const storeStatus = (store, statusScope, countsMaxAgeMs) => {
     const reuseMs = Math.min(countsMaxAgeMs, STORE_STATUS_REUSE_MS);
@@ -107448,10 +107460,11 @@ function createSourceIndexStatusHandler(options = {}) {
       return store.status(statusScope, { countsMaxAgeMs: 0 });
     const key2 = storeStatusKey(store, statusScope);
     const cached2 = storeStatusCache.get(key2);
-    if (cached2 && nowMs() - cached2.recordedAtMs <= reuseMs)
+    if (cached2 && storeStatusFresh(store, statusScope, countsMaxAgeMs))
       return cached2.status;
+    const marker = visibilityMarker(store);
     const status = store.status(statusScope, { countsMaxAgeMs });
-    storeStatusCache.set(key2, { recordedAtMs: nowMs(), status });
+    storeStatusCache.set(key2, { recordedAtMs: nowMs(), marker, status });
     return status;
   };
   const storeStatusRefreshing = new Map;
@@ -107462,8 +107475,9 @@ function createSourceIndexStatusHandler(options = {}) {
       return running;
     const refresh = (async () => {
       try {
+        const marker = visibilityMarker(store);
         const status = await store.statusOffThread(statusScope, { countsMaxAgeMs });
-        storeStatusCache.set(key2, { recordedAtMs: nowMs(), status });
+        storeStatusCache.set(key2, { recordedAtMs: nowMs(), marker, status });
       } catch {} finally {
         storeStatusRefreshing.delete(key2);
       }
@@ -107851,7 +107865,7 @@ function providerFromCorpusId(corpusId) {
   }
   return parts[0] || "unknown";
 }
-var ITEMS_EMBEDDED_COUNT_KEY = "items_embedded", DASHBOARD_READINESS_LEDGER_MAX_AGE_MS = 120000, STORE_STATUS_REUSE_MS, FALLBACK_PDF_EXTRACTED_CHARS = 50000;
+var ITEMS_EMBEDDED_COUNT_KEY = "items_embedded", DASHBOARD_READINESS_LEDGER_MAX_AGE_MS = 120000, STORE_STATUS_REUSE_MS, STORE_STATUS_CHANGED_REUSE_MS = 30000, FALLBACK_PDF_EXTRACTED_CHARS = 50000;
 var init_status = __esm(() => {
   init_corpus();
   init_embedding_cost_estimates();

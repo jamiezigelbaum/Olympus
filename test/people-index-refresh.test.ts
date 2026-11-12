@@ -33,7 +33,7 @@ describe('people index refresh on a visibility change', () => {
     const store: PeopleObservationSource = {
       family: 'email',
       peopleObservations: () => observations,
-      peopleVisibilityMarker: () => marker,
+      visibilityMarker: () => marker,
     };
     const refresher = new PeopleIndexRefresher(index, () => [store], { now: () => clock.now() });
     await refresher.refresh();
@@ -67,15 +67,15 @@ describe('people index refresh on a visibility change', () => {
     const specs: FixtureSpec[] = [{ id: 'note-1', name: 'note-1.txt', text: 'a note' }];
     await fixture.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
     const internal = fixture.stores.internal!;
-    const before = internal.peopleVisibilityMarker();
+    const before = internal.visibilityMarker();
     const unchanged = internal.repairSenderMetadata({ records: [] });
     expect(unchanged.counts.itemsRepaired).toBe(0);
-    expect(internal.peopleVisibilityMarker()).toBe(before);
+    expect(internal.visibilityMarker()).toBe(before);
     const repaired = internal.repairSenderMetadata({
       records: [{ sourceItem: fixtureItem(specs[0]!).identity, senderId: 'quinn@example.com', senderLabel: 'Quinn Holloway' }],
     });
     expect(repaired.counts.itemsRepaired).toBe(1);
-    expect(internal.peopleVisibilityMarker()).not.toBe(before);
+    expect(internal.visibilityMarker()).not.toBe(before);
     expect(internal.peopleObservations().map((o) => o.senderId)).toEqual(['quinn@example.com']);
   });
 
@@ -90,11 +90,11 @@ describe('people index refresh on a visibility change', () => {
     const connector: SourceConnector = fixtureConnector(() => specs);
     await fixture.set.sync(connector, { fetchContent: true, placement: FIXTURE_PLACEMENT });
     const internal = fixture.stores.internal!;
-    const before = internal.peopleVisibilityMarker();
+    const before = internal.visibilityMarker();
     internal.peopleObservations();
-    expect(internal.peopleVisibilityMarker()).toBe(before);
+    expect(internal.visibilityMarker()).toBe(before);
     await moveTieredItem({ set: fixture.set, identity: identityOf('note-1'), target: { metadataTier: 'secure', contentTier: 'secure' } });
-    expect(internal.peopleVisibilityMarker()).not.toBe(before);
+    expect(internal.visibilityMarker()).not.toBe(before);
   });
 });
 
@@ -113,7 +113,7 @@ function countingStore(provider: string, sender: string) {
       return state.observations;
     },
     lastSyncRun: () => ({ syncRunId: state.syncRun, status: 'completed', completedAt: state.syncRun }),
-    peopleVisibilityMarker: () => 'v1',
+    visibilityMarker: () => 'v1',
   };
   return { store, state };
 }

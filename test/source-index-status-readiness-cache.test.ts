@@ -12,6 +12,7 @@ import {
 } from '../src/workers/source-scope-runtime.ts';
 import {
   DASHBOARD_READINESS_LEDGER_MAX_AGE_MS,
+  STORE_STATUS_CHANGED_REUSE_MS,
   STORE_STATUS_REUSE_MS,
   createSourceIndexStatusHandler,
   resolveStatusRetrievalAvailability,
@@ -76,6 +77,33 @@ describe('connector-store status readiness', () => {
       await handler.status({ include_items: false });
       expect(reads).toBe(4);
       expect(prepared).toBe(2);
+    } finally { store.close(); }
+  });
+
+  test('reused counts are read again once the store\'s visibility moved, and kept while it has not', async () => {
+    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
+    let reads = 0;
+    const read = store.status.bind(store);
+    store.status = ((...args: Parameters<typeof store.status>) => { reads += 1; return read(...args); }) as typeof store.status;
+    let now = 1_000_000;
+    try {
+      await store.syncFromConnector(connector([file('first.txt', 'synthetic text')]), { fetchContent: true });
+      const handler = createSourceIndexStatusHandler({ corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store], nowMs: () => now });
+      const indexed = async () => ((await handler.status({ include_items: false }, { countsMaxAgeMs: 300_000 })).corpora[0] as { counts: Record<string, number> }).counts.indexed_items;
+      expect(await indexed()).toBe(1);
+      now += STORE_STATUS_CHANGED_REUSE_MS + 1;
+      expect(await indexed()).toBe(1);
+      expect(reads).toBe(1);
+      await store.syncFromConnector(connector([file('first.txt', 'synthetic text'), file('second.txt', 'more synthetic text')]), { fetchContent: true });
+      expect(await indexed()).toBe(2);
+      expect(reads).toBe(2);
+      // Within the short window a change waits, so a busy store is not counted on every poll.
+      await store.syncFromConnector(connector([file('first.txt', 'synthetic text'), file('second.txt', 'more synthetic text'), file('third.txt', 'still synthetic')]), { fetchContent: true });
+      now += 1_000;
+      expect(await indexed()).toBe(2);
+      now += STORE_STATUS_CHANGED_REUSE_MS;
+      expect(await indexed()).toBe(3);
+      expect(reads).toBe(3);
     } finally { store.close(); }
   });
 
