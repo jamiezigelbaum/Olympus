@@ -913,6 +913,10 @@ export function searchToolResult(raw: unknown, options: AnswerResultOptions = {}
   if (!panelActive && nothingRead && coverage.namesOnlyItems > 0) notes.push(namesOnlyCoverageNote(coverage.namesOnlyItems));
   if (!panelActive && whole(record.withheld) > 0) notes.push(HELD_BACK_NOTE);
   if (flagged) notes.push(FLAGGED_NOTE);
+  // A source the search cut short is named, so a thinner list is never read as a full search.
+  if (Array.isArray(coverageRecord.cut_short)) {
+    for (const note of coverageRecord.cut_short) if (typeof note === 'string' && note.trim()) notes.push(text(note));
+  }
   // Readable Public or Personal evidence: the model answers from it as well (not only "see the panel").
   const privateNote = privateMatchNote(options.privateMatch, whole(coverageRecord.content_private_items), !nothingRead);
   if (privateNote) notes.push(privateNote);

@@ -79262,6 +79262,7 @@ async function searchReleasedEvidence(input) {
   });
   withheld += released.withheld;
   const coverage = detail.pack.coverage;
+  const cutShort = timedOutCoverageNotes(coverage);
   return {
     evidence: released.evidence,
     withheld,
@@ -79273,6 +79274,7 @@ async function searchReleasedEvidence(input) {
       content_private_items: detail.contentPrivateCandidateIndexes?.length ?? 0,
       partially_read_items: (detail.corpusReadabilityGaps ?? []).reduce((sum, gap) => sum + gap.partialDocuments, 0),
       unclassified_items: (detail.classificationCoverage ?? []).reduce((sum, note) => sum + note.pendingClassificationItems, 0),
+      ...cutShort.length > 0 ? { cut_short: cutShort } : {},
       matches: (coverage.matchCounts ?? []).map((count) => ({
         family: count.family,
         matched_items: count.matchedItems,
@@ -223104,6 +223106,11 @@ function searchToolResult(raw, options = {}) {
     notes.push(HELD_BACK_NOTE);
   if (flagged)
     notes.push(FLAGGED_NOTE);
+  if (Array.isArray(coverageRecord.cut_short)) {
+    for (const note of coverageRecord.cut_short)
+      if (typeof note === "string" && note.trim())
+        notes.push(text5(note));
+  }
   const privateNote = privateMatchNote(options.privateMatch, whole(coverageRecord.content_private_items), !nothingRead);
   if (privateNote)
     notes.push(privateNote);
