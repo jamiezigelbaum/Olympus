@@ -111982,7 +111982,10 @@ function reportLimitStop(input, db) {
     INSERT INTO limit_stops (id, subject, since, "limit", used, waiting_json, to_continue_json, resumes_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id, subject) DO UPDATE SET
-      since = CASE WHEN limit_stops.cleared_at IS NULL THEN limit_stops.since ELSE excluded.since END,
+      -- A stop still open keeps its start; a cleared or self-expired one starts again.
+      since = CASE WHEN limit_stops.cleared_at IS NULL
+        AND (limit_stops.resumes_at IS NULL OR limit_stops.resumes_at > excluded.since)
+        THEN limit_stops.since ELSE excluded.since END,
       "limit" = excluded."limit", used = excluded.used,
       waiting_json = excluded.waiting_json, to_continue_json = excluded.to_continue_json,
       resumes_at = excluded.resumes_at, cleared_at = NULL
@@ -112050,6 +112053,9 @@ var init_scheduler_limit_stops = __esm(() => {
     daily_cost_guard: { id: "x.daily_cost", kind: "cost", label: "daily X API budget used" },
     daily_api_request_guard: { id: "x.daily_requests", kind: "requests", label: "daily X API budget used" },
     daily_resource_read_guard: { id: "x.daily_resource_reads", kind: "requests", label: "daily X API budget used" },
+    head_api_request_reserve_guard: { id: "x.head_reserve_requests", kind: "requests", label: "daily X API budget used" },
+    head_resource_read_reserve_guard: { id: "x.head_reserve_reads", kind: "requests", label: "daily X API budget used" },
+    head_cost_reserve_guard: { id: "x.head_reserve_cost", kind: "cost", label: "daily X API budget used" },
     readwise_daily_api_request_guard: { id: "readwise.daily_requests", kind: "requests", label: "daily Readwise API budget used" },
     gmail_daily_api_request_guard: { id: "gmail.daily_requests", kind: "requests", label: "daily Gmail API budget used" },
     google_drive_daily_api_request_guard: { id: "drive.daily_requests", kind: "requests", label: "daily Google Drive API budget used" }

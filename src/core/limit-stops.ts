@@ -78,7 +78,10 @@ export function reportLimitStop(input: LimitStop, db: Database): void {
     INSERT INTO limit_stops (id, subject, since, "limit", used, waiting_json, to_continue_json, resumes_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id, subject) DO UPDATE SET
-      since = CASE WHEN limit_stops.cleared_at IS NULL THEN limit_stops.since ELSE excluded.since END,
+      -- A stop still open keeps its start; a cleared or self-expired one starts again.
+      since = CASE WHEN limit_stops.cleared_at IS NULL
+        AND (limit_stops.resumes_at IS NULL OR limit_stops.resumes_at > excluded.since)
+        THEN limit_stops.since ELSE excluded.since END,
       "limit" = excluded."limit", used = excluded.used,
       waiting_json = excluded.waiting_json, to_continue_json = excluded.to_continue_json,
       resumes_at = excluded.resumes_at, cleared_at = NULL

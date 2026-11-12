@@ -138,6 +138,9 @@ describe('limit stops', () => {
     ['readwise_daily_api_request_guard', 'readwise.daily_requests'],
     ['gmail_daily_api_request_guard', 'gmail.daily_requests'],
     ['google_drive_daily_api_request_guard', 'drive.daily_requests'],
+    ['head_api_request_reserve_guard', 'x.head_reserve_requests'],
+    ['head_resource_read_reserve_guard', 'x.head_reserve_reads'],
+    ['head_cost_reserve_guard', 'x.head_reserve_cost'],
   ])('scheduler marker %s reports and clears %s atomically', (reason, id) => {
     const path = databasePath();
     const store = new LocalSourceSchedulerStateStore(path);
@@ -215,5 +218,24 @@ describe('limit stops', () => {
     // Reopening backfills the expired marker, but it still does not list as open.
     const reopened = new LocalSourceSchedulerStateStore(path);
     try { expect(reopened.openLimitStops(new Date('2026-11-13T09:00:00.000Z'))).toEqual([]); } finally { reopened.close(); }
+  });
+
+  test('the same limit hit again the next day starts a new stop', () => {
+    const path = databasePath();
+    const store = new LocalSourceSchedulerStateStore(path);
+    const key = { sourceId: 'source', corpusId: 'corpus', taskId: 'pull' };
+    const park = (completedAt: string) => store.recordFailure({
+      ...key, completedAt, notBeforeAt: '2026-11-20T00:00:00.000Z', degradedReason: 'daily_cost_guard',
+      errorKind: 'api_request_guard', errorHash: '0123456789abcdef',
+    });
+    try {
+      park('2026-11-12T12:00:00.000Z');
+      park('2026-11-12T18:00:00.000Z');
+      expect(listAt(path, new Date('2026-11-12T19:00:00.000Z'))[0]?.since).toBe('2026-11-12T12:00:00.000Z');
+      park('2026-11-13T09:00:00.000Z');
+      const [next] = listAt(path, new Date('2026-11-13T10:00:00.000Z'));
+      expect(next?.since).toBe('2026-11-13T09:00:00.000Z');
+      expect(next?.resumesAt).toBe('2026-11-14T00:00:00.000Z');
+    } finally { store.close(); }
   });
 });
