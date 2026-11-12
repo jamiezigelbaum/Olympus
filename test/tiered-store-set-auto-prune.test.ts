@@ -73,8 +73,12 @@ test('interrupted sweep keeps original chunk counts and resumes on worker startu
     expect(sweepAutomaticSupersededCopies(ctx.f.set, { limit: 1, embeddingLedger: ctx.embeddingLedger })).toMatchObject({ failed: 1, complete: false });
   } finally { failure.mockRestore(); }
   expect(ctx.f.stores.secure_local!.copyContentState(identityOf('a'))?.chunks).toBe(0);
-  ctx.reopen(); // constructor maintenance resumes the pending receipt
+  ctx.reopen();
+  // Maintenance no longer takes sweep slices (they run only on the ticker, which waits for owner questions).
   await ctx.f.set.repairLowerContent();
+  expect(ctx.f.ledger.copies(identityOf('a')).some(copy => copy.state === 'superseded')).toBe(true);
+  // The ticker's next slice resumes the pending receipt.
+  ctx.f.set.sweepSupersededSlice({ embeddingLedger: ctx.embeddingLedger });
   await flushTierMoveNotes(ctx.f.ledger);
   expect(ctx.f.ledger.copies(identityOf('a')).some(copy => copy.state === 'superseded')).toBe(false);
   const entries = (await readEmbeddingLedger(ctx.embeddingLedger.path)).entries.filter(entry => entry.entry_id?.startsWith('automatic-superseded-prune:'));
@@ -251,4 +255,37 @@ test('a time budget stops a page between items, keeps the cursor, and does not e
   // The next call carries on from the cursor and finishes.
   expect(sweepAutomaticSupersededCopies(ctx.f.set, { budgetMs: 60_000, now: () => 0,
     embeddingLedger: ctx.embeddingLedger })).toMatchObject({ purged: 1, complete: true });
+});
+
+test('a sweep page reads only identities holding a superseded copy, never a walk of tier_items (olympus-ops#151)', async () => {
+  const ctx = await fixture();
+  const db = (ctx.f.ledger as unknown as { db: import('bun:sqlite').Database }).db;
+  const issued: string[] = [];
+  const original = db.query.bind(db);
+  db.query = ((sql: string) => {
+    if (/tier_copies_superseded_walk/.test(sql)) issued.push(sql);
+    return original(sql);
+  }) as typeof db.query;
+  try {
+    ctx.f.ledger.listSupersededItemWindow({ after: identityOf('a'), limit: 10 });
+  } finally {
+    db.query = original;
+  }
+  expect(issued).toHaveLength(1);
+  const after = identityOf('a');
+  const plan = (original(`EXPLAIN QUERY PLAN ${issued[0]}`).all(after.provider, after.accountScope,
+    after.providerConversationId ?? '', after.providerItemId, 10) as Array<{ detail: string }>).map(row => row.detail);
+  expect(plan.some(detail => /USING (COVERING )?INDEX tier_copies_superseded_walk/.test(detail))).toBe(true);
+  expect(plan.some(detail => /^SCAN i\b/.test(detail))).toBe(false);
+});
+
+test('superseded copies whose item row is gone do not use up a page and end the sweep early', async () => {
+  const ctx = await fixture();
+  const db = (ctx.f.ledger as unknown as { db: import('bun:sqlite').Database }).db;
+  const a = identityOf('a');
+  // An archive removal deletes the item row first and keeps its superseded copies until it finishes.
+  db.query('DELETE FROM tier_items WHERE provider = ? AND account_scope = ? AND provider_item_id = ?')
+    .run(a.provider, a.accountScope, a.providerItemId);
+  expect(ctx.f.ledger.listSupersededItemWindow({ limit: 1 }).map(record => record.providerItemId))
+    .toEqual([identityOf('b').providerItemId]);
 });

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { engineStatePaths } from '../scripts/release-check/machine-agent.ts';
-import { AGENT_PAST_BUDGET_MS, agentTimeoutMs, defaultBudgetMs, stoppedByBudget } from '../scripts/release-check/run.ts';
+import { AGENT_PAST_BUDGET_MS, agentDetail, agentTimeoutMs, defaultBudgetMs, stoppedByBudget } from '../scripts/release-check/run.ts';
 
 describe('release-check time budget (olympus-ops#156)', () => {
   test('an in-machine call keeps its own bound while the budget has room', () => {
@@ -38,5 +38,24 @@ describe('the engine state a report keeps', () => {
     const paths = engineStatePaths({ HOME: home, XDG_DATA_HOME: `${home}/.local/share`, XDG_STATE_HOME: `${home}/.local/state` });
     expect(paths.map((path) => path.split('/').pop())).toEqual(['engine-background-status.json', 'archive-imports.json', 'archive-import-requests.json']);
     for (const path of paths) expect(path.startsWith(`${home}/`)).toBe(true);
+  });
+});
+
+describe('why an in-machine call failed', () => {
+  const call = (over: Partial<Parameters<typeof agentDetail>[0]>) => ({ result: undefined, stderr: '', code: 1, timedOut: false, ...over });
+
+  test('the agent\'s own reason wins, in the order the check names its fields', () => {
+    expect(agentDetail(call({ result: { ok: false, step: 'engine-restart' } }), 'detail', 'step')).toBe('engine-restart');
+    expect(agentDetail(call({ result: { ok: false, detail: 'not ready', step: 'x' } }), 'detail', 'step')).toBe('not ready');
+  });
+
+  test('an agent that died without a word shows its exit code and signal, never an empty reason', () => {
+    expect(agentDetail(call({ code: 137 }))).toBe('no result from the machine (exit 137, signal 9), and no output');
+    expect(agentDetail(call({ code: 124, timedOut: true, stderr: 'still waiting\n' }))).toBe('no result from the machine (exit 124, timed out): still waiting');
+  });
+
+  test('a result with no reason falls back to stderr, then to the exit code', () => {
+    expect(agentDetail(call({ result: { ok: false }, stderr: 'boom' }))).toBe('boom');
+    expect(agentDetail(call({ result: { ok: false }, code: 3 }))).toBe('the agent gave no reason (exit 3)');
   });
 });

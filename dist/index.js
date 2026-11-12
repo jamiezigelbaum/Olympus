@@ -4714,8 +4714,8 @@ function applyOpenClawPluginRemote(config, env) {
 }
 function parseRemoteConfig(remote) {
   const parsed = { enabled: remote.enabled === true };
-  if (remote.claudeAppEnabled !== undefined)
-    parsed.claudeAppEnabled = remote.claudeAppEnabled === true;
+  if (typeof remote.claudeAppEnabled === "boolean")
+    parsed.claudeAppEnabled = remote.claudeAppEnabled;
   for (const key of ["relayHost", "publicBaseUrl"]) {
     const value = remote[key];
     if (typeof value === "string" && value.trim())
@@ -21607,6 +21607,20 @@ var init_analyst_openclaw_infer = __esm(() => {
 // src/core/evidence-reranker.ts
 var init_evidence_reranker = () => {};
 
+// src/core/limit-stops.ts
+function registerLimit(input) {
+  const prior = limits.get(input.id);
+  if (prior && Object.keys({ ...prior, ...input }).some((key) => prior[key] !== input[key])) {
+    throw new Error(`Limit already registered differently: ${input.id}`);
+  }
+  limits.set(input.id, Object.freeze({ ...input }));
+}
+var limits;
+var init_limit_stops = __esm(() => {
+  init_sqlite_migrations();
+  limits = new Map;
+});
+
 // src/core/evidence-pack.ts
 var utf8, CUT_SHORT_LANES;
 var init_evidence_pack = __esm(() => {
@@ -21614,6 +21628,8 @@ var init_evidence_pack = __esm(() => {
   init_release_manifest();
   init_partial_search();
   init_evidence_reranker();
+  init_limit_stops();
+  init_source_corpus_registry();
   init_parent_label();
   init_source_model_policy();
   init_router();
@@ -25797,6 +25813,38 @@ var init_google_connectors = __esm(() => {
   init_corpora();
 });
 
+// connect-relay/shared/mcp-log.ts
+var LOGGED_RPC_METHODS;
+var init_mcp_log = __esm(() => {
+  LOGGED_RPC_METHODS = new Set([
+    "initialize",
+    "ping",
+    "tools/list",
+    "tools/call",
+    "resources/list",
+    "resources/templates/list",
+    "resources/read",
+    "prompts/list",
+    "prompts/get",
+    "completion/complete",
+    "logging/setLevel",
+    "notifications/initialized",
+    "notifications/cancelled",
+    "notifications/progress",
+    "notifications/roots/list_changed"
+  ]);
+});
+
+// connect-relay/shared/request-log.ts
+var init_request_log = __esm(() => {
+  init_mcp_log();
+});
+
+// src/core/connection-requests.ts
+var init_connection_requests = __esm(() => {
+  init_request_log();
+});
+
 // src/core/pairing-session-paths.ts
 var init_pairing_session_paths = __esm(() => {
   init_olympus_layout();
@@ -26004,20 +26052,6 @@ var init_this_computer = __esm(() => {
   init_file_scope_sources();
 });
 
-// src/core/limit-stops.ts
-function registerLimit(input) {
-  const prior = limits.get(input.id);
-  if (prior && Object.keys({ ...prior, ...input }).some((key) => prior[key] !== input[key])) {
-    throw new Error(`Limit already registered differently: ${input.id}`);
-  }
-  limits.set(input.id, Object.freeze({ ...input }));
-}
-var limits;
-var init_limit_stops = __esm(() => {
-  init_sqlite_migrations();
-  limits = new Map;
-});
-
 // src/workers/scheduler-limit-stops.ts
 var DAILY_LIMITS;
 var init_scheduler_limit_stops = __esm(() => {
@@ -26127,6 +26161,7 @@ var init_source_dispositions = __esm(() => {
 // src/data-lifecycle.ts
 var backgroundTrashRemovals;
 var init_data_lifecycle = __esm(() => {
+  init_connection_requests();
   init_boot_progress();
   init_people_index();
   init_mac_engine_daemon();

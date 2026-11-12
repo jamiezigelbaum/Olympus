@@ -16,6 +16,8 @@
 //   the Gateway bearer or ChatGPT, and ChatGPT's dashboard text is unchanged.
 
 import { Database } from 'bun:sqlite';
+import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
+import { initializeLimitStops, listOpenLimitStops, registerLimit, reportLimitStop } from '../src/core/limit-stops.ts';
 import * as poolReads from '../src/workers/connector-store/off-thread-reads.ts';
 import { waitFor } from './helpers/test-clock.ts';
 import type { TierLedger } from '../src/workers/classification/tier-ledger.ts';
@@ -855,6 +857,34 @@ describe('an Ask whose searches ran out of time', () => {
   test('a source that timed out is named as busy beside a real not found', async () => {
     const result = await ask({ [CHATS]: never, [MAIL]: empty });
     expect(result).toEqual({ status: 'not_found', leftOut: [], busy: ['WhatsApp'] });
+  });
+});
+
+describe('an answer from a source a limit stopped', () => {
+  const MAIL = 'internal.fixture.mail';
+  test('says beside the answer that new items from the stopped source may be missing', async () => {
+    const db = new Database(':memory:');
+    initializeLimitStops(db);
+    registerLimit({ id: 'local-answer.limit', kind: 'requests', scope: 'source', label: 'Daily requests used', unit: 'requests', continue: 'run_once' });
+    const stop = { id: 'local-answer.limit', subject: MAIL, since: '2026-11-12T12:00:00.000Z', limit: 1, used: 1 };
+    try {
+      reportLimitStop(stop, db);
+      const item = { family: 'email' as const, provider: 'gmail', accountScope: 'personal', providerItemId: 'mail-1', localItemId: 'mail-1' };
+      const result = await answerOnThisComputer({ question: 'when is the lease up?' }, {
+        lanes: () => ({
+          registry: buildSourceIndexCorpusRegistry([defineConnectorCorpus({ corpusId: MAIL, family: 'email', trustDomain: 'internal' })]),
+          adapters: { [MAIL]: () => ({ hits: [{ sourceItem: item, provenance: { sourceItem: item, citation: { title: 'Lease' } }, score: 1, rawExposed: false as const }], latencyMs: 1, rawExposed: false as const }) },
+          contentProviders: { [MAIL]: { fetchLocalContent: async () => ({ sensitivity: buildSourceSensitivity({ trustTier: 'S2', trustDomain: 'internal' }), chunks: ['The lease ends in May.'] }) } } as AnalystAnswerLanes['contentProviders'],
+          excludedCorpusIds: new Set(),
+          unmountedCorpusIds: new Set(),
+          limitStops: listOpenLimitStops(db),
+        }),
+        model: { status: () => ({ state: 'ready' }), answerPrivately: async () => ({ answer: 'In May.', citations: [], unanswered: [] }) } as unknown as PrivateAnswerModel,
+        eligible: async (items) => items.map(() => true),
+      });
+      expect(result).toMatchObject({ status: 'answered', answer: 'In May.',
+        unanswered: [`Daily requests used since ${stop.since}; new items from this source may be missing from this answer`] });
+    } finally { db.close(); }
   });
 });
 

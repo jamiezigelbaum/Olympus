@@ -1,0 +1,674 @@
+[
+  {
+    "path": "src/core/analyst.ts",
+    "symbol": "FOLDED_ANSWER_SENTENCE_BUDGET",
+    "reason": "internal",
+    "retire_when": "Remove when FOLDED_ANSWER_SENTENCE_BUDGET in src/core/analyst.ts is removed or registered."
+  },
+  {
+    "path": "src/core/consult-ask.ts",
+    "symbol": "CONSULT_ASK_MAX_CHARS",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp CONSULT_ASK_MAX_CHARS is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/core/consult-gate.ts",
+    "symbol": "CONSULT_GATE_ASKED_WORDS_MAX_BYTES",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp CONSULT_GATE_ASKED_WORDS_MAX_BYTES is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/core/consult-gate.ts",
+    "symbol": "CONSULT_GATE_ASKED_WORDS_MAX_FIGURE_RUN_DIGITS",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp CONSULT_GATE_ASKED_WORDS_MAX_FIGURE_RUN_DIGITS is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/core/consult-gate.ts",
+    "symbol": "CONSULT_GATE_ASKED_WORDS_MAX_TEXTS",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp CONSULT_GATE_ASKED_WORDS_MAX_TEXTS is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/core/consult-gate.ts",
+    "symbol": "CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp CONSULT_GATE_MAX_CONTENT_WORDS_PER_QUESTION is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/core/consult-gate.ts",
+    "symbol": "CONSULT_GATE_MAX_DIGITS_IN_SEQUENCE",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp CONSULT_GATE_MAX_DIGITS_IN_SEQUENCE is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/core/consult-gate.ts",
+    "symbol": "CONSULT_GATE_MAX_RECENT_CONSULTS",
+    "reason": "internal",
+    "retire_when": "Remove when CONSULT_GATE_MAX_RECENT_CONSULTS in src/core/consult-gate.ts is removed or registered."
+  },
+  {
+    "path": "src/core/consult-gate.ts",
+    "symbol": "CONSULT_GATE_MAX_SUB_QUESTIONS",
+    "reason": "internal",
+    "retire_when": "Remove when CONSULT_GATE_MAX_SUB_QUESTIONS in src/core/consult-gate.ts is removed or registered."
+  },
+  {
+    "path": "src/core/consult-gate.ts",
+    "symbol": "CONSULT_GATE_MAX_WRITER_CONTEXT_BYTES",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp CONSULT_GATE_MAX_WRITER_CONTEXT_BYTES is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/core/consult-gate.ts",
+    "symbol": "CONSULT_GATE_MAX_WRITER_CONTEXT_ENTRIES",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp CONSULT_GATE_MAX_WRITER_CONTEXT_ENTRIES is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/core/consult-gate.ts",
+    "symbol": "CONSULT_GATE_MAX_WRITER_CONTEXT_NODES",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp CONSULT_GATE_MAX_WRITER_CONTEXT_NODES is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/core/consult-gate.ts",
+    "symbol": "CONSULT_GATE_STANDARD_MAX_QUESTION_BYTES",
+    "reason": "internal",
+    "retire_when": "Remove when CONSULT_GATE_STANDARD_MAX_QUESTION_BYTES in src/core/consult-gate.ts is removed or registered."
+  },
+  {
+    "path": "src/core/consult-gate.ts",
+    "symbol": "CONSULT_GATE_UNNAMED_MAX_RULE_FIGURE_DIGITS",
+    "reason": "internal",
+    "retire_when": "Remove when CONSULT_GATE_UNNAMED_MAX_RULE_FIGURE_DIGITS in src/core/consult-gate.ts is removed or registered."
+  },
+  {
+    "path": "src/core/consult-gate.ts",
+    "symbol": "CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES",
+    "reason": "internal",
+    "retire_when": "Remove when CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES in src/core/consult-gate.ts is removed or registered."
+  },
+  {
+    "path": "src/core/consult-gate.ts",
+    "symbol": "CONSULT_VOCABULARY_MAX_USER_PACKS",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp CONSULT_VOCABULARY_MAX_USER_PACKS is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/core/consult-gate.ts",
+    "symbol": "CONSULT_VOCABULARY_MAX_WORD_BYTES",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp CONSULT_VOCABULARY_MAX_WORD_BYTES is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/core/consult-settings.ts",
+    "symbol": "CONSULT_SETTINGS_MAX_BYTES",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp CONSULT_SETTINGS_MAX_BYTES is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/core/consult-settings.ts",
+    "symbol": "CONSULT_STANDARD_INSTRUCTION_MAX_CHARS",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp CONSULT_STANDARD_INSTRUCTION_MAX_CHARS is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/core/consult-transport-zkapi.ts",
+    "symbol": "reserveZkapiRequest",
+    "reason": "pending",
+    "retire_when": "The zkAPI daily-cap adopter reports and clears reserveZkapiRequest request/spend stops, with a raise control."
+  },
+  {
+    "path": "src/core/control-ui-gateway.ts",
+    "symbol": "DASHBOARD_TOOL_REQUEST_MAX_BYTES",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp DASHBOARD_TOOL_REQUEST_MAX_BYTES is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/core/control-ui-gateway.ts",
+    "symbol": "OAUTH_CALLBACK_RATE_LIMIT_MAX_BUCKETS",
+    "reason": "internal",
+    "retire_when": "Remove when OAUTH_CALLBACK_RATE_LIMIT_MAX_BUCKETS in src/core/control-ui-gateway.ts is removed or registered."
+  },
+  {
+    "path": "src/core/control-ui-gateway.ts",
+    "symbol": "OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW",
+    "reason": "internal",
+    "retire_when": "Remove when OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW in src/core/control-ui-gateway.ts is removed or registered."
+  },
+  {
+    "path": "src/core/control-ui-gateway.ts",
+    "symbol": "OAUTH_CALLBACK_URL_MAX_BYTES",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp OAUTH_CALLBACK_URL_MAX_BYTES is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/core/evidence-pack.ts",
+    "symbol": "MIN_EXPANSION_BUDGET_MS",
+    "reason": "pacing",
+    "retire_when": "Remove when the resumable pacing/retry boundary MIN_EXPANSION_BUDGET_MS is retired or adopted."
+  },
+  {
+    "path": "src/core/interactive-secret.ts",
+    "symbol": "SECRET_MAX_BYTES",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp SECRET_MAX_BYTES is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/core/oauth-relay.ts",
+    "symbol": "OAUTH_RELAY_MAX_STATE_LENGTH",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp OAUTH_RELAY_MAX_STATE_LENGTH is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/core/open-targets.ts",
+    "symbol": "OPEN_URL_MAX_LENGTH",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp OPEN_URL_MAX_LENGTH is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/core/parent-label.ts",
+    "symbol": "PARENT_LABEL_MAX_CHARS",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp PARENT_LABEL_MAX_CHARS is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/core/provider-credit-status.ts",
+    "symbol": "reconcileProviderPauseFile",
+    "reason": "pending",
+    "retire_when": "The Venice credit-marker adopter reports and clears stops from reconcileProviderPauseFile, with a refill control."
+  },
+  {
+    "path": "src/core/release-signing.ts",
+    "symbol": "RELEASE_MANIFEST_MAX_BYTES",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp RELEASE_MANIFEST_MAX_BYTES is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/core/remote-oauth-store.ts",
+    "symbol": "REMOTE_OAUTH_MAX_REGISTERED_CLIENTS",
+    "reason": "internal",
+    "retire_when": "Remove when REMOTE_OAUTH_MAX_REGISTERED_CLIENTS in src/core/remote-oauth-store.ts is removed or registered."
+  },
+  {
+    "path": "src/core/scope-safe-fs.ts",
+    "symbol": "SCOPE_FILE_MAX_RANGE_BYTES",
+    "reason": "internal",
+    "retire_when": "Remove when SCOPE_FILE_MAX_RANGE_BYTES in src/core/scope-safe-fs.ts is removed or registered."
+  },
+  {
+    "path": "src/core/secret-patterns.ts",
+    "symbol": "BLOCK_SCALAR_MAX_LINES",
+    "reason": "internal",
+    "retire_when": "Remove when BLOCK_SCALAR_MAX_LINES in src/core/secret-patterns.ts is removed or registered."
+  },
+  {
+    "path": "src/core/source-account-migration.ts",
+    "symbol": "ACCOUNT_LOG_MAX_BYTES",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp ACCOUNT_LOG_MAX_BYTES is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/core/source-watch.ts",
+    "symbol": "SOURCE_WATCH_MAX_QUERY_LENGTH",
+    "reason": "internal",
+    "retire_when": "Remove when SOURCE_WATCH_MAX_QUERY_LENGTH in src/core/source-watch.ts is removed or registered."
+  },
+  {
+    "path": "src/core/update-check.ts",
+    "symbol": "UPDATE_MAX_BYTES",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp UPDATE_MAX_BYTES is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/data-backup.ts",
+    "symbol": "USTAR_MAX_SIZE",
+    "reason": "internal",
+    "retire_when": "Remove when USTAR_MAX_SIZE in src/data-backup.ts is removed or registered."
+  },
+  {
+    "path": "src/workers/archive-import/evernote/connector.ts",
+    "symbol": "EVERNOTE_MAX_UNITS_PER_PAGE",
+    "reason": "pacing",
+    "retire_when": "Remove when the resumable pacing/retry boundary EVERNOTE_MAX_UNITS_PER_PAGE is retired or adopted."
+  },
+  {
+    "path": "src/workers/archive-import/json-stream.ts",
+    "symbol": "JSON_STREAM_MAX_DEPTH",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp JSON_STREAM_MAX_DEPTH is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/workers/archive-import/json-stream.ts",
+    "symbol": "JSON_STREAM_MAX_FRAME_KEYS",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp JSON_STREAM_MAX_FRAME_KEYS is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/workers/archive-import/json-stream.ts",
+    "symbol": "JSON_STREAM_MAX_FRAME_VALUE_CHARS",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp JSON_STREAM_MAX_FRAME_VALUE_CHARS is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/workers/archive-import/json-stream.ts",
+    "symbol": "JSON_STREAM_MAX_KEY_CHARS",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp JSON_STREAM_MAX_KEY_CHARS is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/workers/archive-import/json-stream.ts",
+    "symbol": "JSON_STREAM_MAX_QUEUED_EVENTS",
+    "reason": "internal",
+    "retire_when": "Remove when JSON_STREAM_MAX_QUEUED_EVENTS in src/workers/archive-import/json-stream.ts is removed or registered."
+  },
+  {
+    "path": "src/workers/archive-import/notes/archive.ts",
+    "symbol": "MARKDOWN_MAX_BYTES",
+    "reason": "pending",
+    "retire_when": "The limits adopter for src/workers/archive-import/notes/archive.ts must register/report/clear MARKDOWN_MAX_BYTES and expose its continue action."
+  },
+  {
+    "path": "src/workers/archive-import/notes/archive.ts",
+    "symbol": "NOTES_MAX_UNITS_PER_PAGE",
+    "reason": "pacing",
+    "retire_when": "Remove when the resumable pacing/retry boundary NOTES_MAX_UNITS_PER_PAGE is retired or adopted."
+  },
+  {
+    "path": "src/workers/archive-import/record-probe.ts",
+    "symbol": "RECORD_PROBE_MAX_KEYS",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp RECORD_PROBE_MAX_KEYS is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/workers/archive-import/staging.ts",
+    "symbol": "ARCHIVE_UPLOAD_MAX_CHUNK_BYTES",
+    "reason": "pending",
+    "retire_when": "The limits adopter for src/workers/archive-import/staging.ts must register/report/clear ARCHIVE_UPLOAD_MAX_CHUNK_BYTES and expose its continue action."
+  },
+  {
+    "path": "src/workers/archive-import/telegram/connector.ts",
+    "symbol": "TELEGRAM_MAX_MESSAGE_BYTES",
+    "reason": "pending",
+    "retire_when": "The limits adopter for src/workers/archive-import/telegram/connector.ts must register/report/clear TELEGRAM_MAX_MESSAGE_BYTES and expose its continue action."
+  },
+  {
+    "path": "src/workers/archive-import/whatsapp/grammar.ts",
+    "symbol": "WHATSAPP_MAX_SENDER_CHARS",
+    "reason": "internal",
+    "retire_when": "Remove when WHATSAPP_MAX_SENDER_CHARS in src/workers/archive-import/whatsapp/grammar.ts is removed or registered."
+  },
+  {
+    "path": "src/workers/archive-import/whatsapp/place.ts",
+    "symbol": "WHATSAPP_WINDOW_MAX_KEYS",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp WHATSAPP_WINDOW_MAX_KEYS is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/workers/archive-import/xml-stream.ts",
+    "symbol": "XML_STREAM_MAX_DEPTH",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp XML_STREAM_MAX_DEPTH is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/workers/archive-import/xml-stream.ts",
+    "symbol": "XML_STREAM_MAX_MARKUP_BYTES",
+    "reason": "internal",
+    "retire_when": "Remove when XML_STREAM_MAX_MARKUP_BYTES in src/workers/archive-import/xml-stream.ts is removed or registered."
+  },
+  {
+    "path": "src/workers/archive-import/zip-reader.ts",
+    "symbol": "ZIP_CONTINUATION_MAX_PENDING_BYTES",
+    "reason": "internal",
+    "retire_when": "Remove when ZIP_CONTINUATION_MAX_PENDING_BYTES in src/workers/archive-import/zip-reader.ts is removed or registered."
+  },
+  {
+    "path": "src/workers/archive-import/zip-reader.ts",
+    "symbol": "ZIP_MAX_NAMED_OVERLAPS",
+    "reason": "internal",
+    "retire_when": "Remove when ZIP_MAX_NAMED_OVERLAPS in src/workers/archive-import/zip-reader.ts is removed or registered."
+  },
+  {
+    "path": "src/workers/archive-import/zip-reader.ts",
+    "symbol": "ZIP_OVERLAP_SORT_MAX_ENTRIES",
+    "reason": "internal",
+    "retire_when": "Remove when ZIP_OVERLAP_SORT_MAX_ENTRIES in src/workers/archive-import/zip-reader.ts is removed or registered."
+  },
+  {
+    "path": "src/workers/chatgpt/dashboard-contract.ts",
+    "symbol": "UNREADABLE_NAME_MAX_CHARS",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp UNREADABLE_NAME_MAX_CHARS is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/workers/chatgpt/mcp-surface.ts",
+    "symbol": "PRIVATE_MATCH_MAX_JOBS",
+    "reason": "internal",
+    "retire_when": "Remove when PRIVATE_MATCH_MAX_JOBS in src/workers/chatgpt/mcp-surface.ts is removed or registered."
+  },
+  {
+    "path": "src/workers/classification/engine.ts",
+    "symbol": "SECRET_SCAN_MEMO_MAX_ENTRIES",
+    "reason": "internal",
+    "retire_when": "Remove when SECRET_SCAN_MEMO_MAX_ENTRIES in src/workers/classification/engine.ts is removed or registered."
+  },
+  {
+    "path": "src/workers/classification/judge-boost.ts",
+    "symbol": "JUDGE_BOOST_MAX_ITEMS",
+    "reason": "internal",
+    "retire_when": "Remove when JUDGE_BOOST_MAX_ITEMS in src/workers/classification/judge-boost.ts is removed or registered."
+  },
+  {
+    "path": "src/workers/classification/judge-check.ts",
+    "symbol": "JUDGE_CHECK_MAX_PAGES",
+    "reason": "pacing",
+    "retire_when": "Remove when the resumable pacing/retry boundary JUDGE_CHECK_MAX_PAGES is retired or adopted."
+  },
+  {
+    "path": "src/workers/classification/judge-spending.ts",
+    "symbol": "JudgeSpending",
+    "reason": "pending",
+    "retire_when": "The judge-spending adopter reports and clears JudgeSpending cap/payment stops, with raise/refill controls."
+  },
+  {
+    "path": "src/workers/classification/privacy-profile.ts",
+    "symbol": "PRIVACY_DESCRIPTION_MAX_CHARS",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp PRIVACY_DESCRIPTION_MAX_CHARS is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/workers/classification/privacy-profile.ts",
+    "symbol": "PRIVACY_DISPLAY_MAX_CHARS",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp PRIVACY_DISPLAY_MAX_CHARS is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/workers/classification/privacy-profile.ts",
+    "symbol": "PRIVACY_KEY_MAX_CHARS",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp PRIVACY_KEY_MAX_CHARS is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/workers/classification/sniffer-resolver.ts",
+    "symbol": "SnifferCallBudget",
+    "reason": "pending",
+    "retire_when": "The sniffer daily-call adopter reports and clears stops from SnifferCallBudget.tryConsume, with a continue control."
+  },
+  {
+    "path": "src/workers/classification/sniffer-service.ts",
+    "symbol": "DEFAULT_TIER_SNIFFER_MAX_PASS_MS",
+    "reason": "pacing",
+    "retire_when": "Remove when the resumable pacing/retry boundary DEFAULT_TIER_SNIFFER_MAX_PASS_MS is retired or adopted."
+  },
+  {
+    "path": "src/workers/classification/tier-classifier.ts",
+    "symbol": "SNIFFER_EXCERPT_MAX_CHARS",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp SNIFFER_EXCERPT_MAX_CHARS is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/workers/cli-operations.ts",
+    "symbol": "TIER_ARG_MAX_LENGTH",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp TIER_ARG_MAX_LENGTH is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/workers/connector-store/capture-spool-secrets.ts",
+    "symbol": "SPOOL_MAX_LINE_BYTES",
+    "reason": "pending",
+    "retire_when": "The limits adopter for src/workers/connector-store/capture-spool-secrets.ts must register/report/clear SPOOL_MAX_LINE_BYTES and expose its continue action."
+  },
+  {
+    "path": "src/workers/connector-store/local-index.ts",
+    "symbol": "CHUNK_MEDIA_MAX_ATTEMPTS",
+    "reason": "pending",
+    "retire_when": "The limits adopter for src/workers/connector-store/local-index.ts must register/report/clear CHUNK_MEDIA_MAX_ATTEMPTS and expose its continue action."
+  },
+  {
+    "path": "src/workers/connector-store/local-index.ts",
+    "symbol": "CONCEPT_COUNT_MAX_AGE_MS",
+    "reason": "pacing",
+    "retire_when": "Remove when the resumable pacing/retry boundary CONCEPT_COUNT_MAX_AGE_MS is retired or adopted."
+  },
+  {
+    "path": "src/workers/connector-store/local-index.ts",
+    "symbol": "KEYWORD_CANDIDATE_SCAN_CAP",
+    "reason": "internal",
+    "retire_when": "Remove when KEYWORD_CANDIDATE_SCAN_CAP in src/workers/connector-store/local-index.ts is removed or registered."
+  },
+  {
+    "path": "src/workers/connector-store/local-index.ts",
+    "symbol": "MEDIA_JUDGE_MAX_ATTEMPTS",
+    "reason": "pending",
+    "retire_when": "The limits adopter for src/workers/connector-store/local-index.ts must register/report/clear MEDIA_JUDGE_MAX_ATTEMPTS and expose its continue action."
+  },
+  {
+    "path": "src/workers/connector-store/local-index.ts",
+    "symbol": "MEDIA_JUDGE_MAX_PER_PASS",
+    "reason": "pacing",
+    "retire_when": "Remove when the resumable pacing/retry boundary MEDIA_JUDGE_MAX_PER_PASS is retired or adopted."
+  },
+  {
+    "path": "src/workers/credential-health.ts",
+    "symbol": "CREDENTIAL_HEALTH_MAX_FUTURE_SKEW_MS",
+    "reason": "pacing",
+    "retire_when": "Remove when the resumable pacing/retry boundary CREDENTIAL_HEALTH_MAX_FUTURE_SKEW_MS is retired or adopted."
+  },
+  {
+    "path": "src/workers/credential-health.ts",
+    "symbol": "CREDENTIAL_HEALTH_REPORT_MAX_AGE_MS",
+    "reason": "pacing",
+    "retire_when": "Remove when the resumable pacing/retry boundary CREDENTIAL_HEALTH_REPORT_MAX_AGE_MS is retired or adopted."
+  },
+  {
+    "path": "src/workers/credential-health.ts",
+    "symbol": "PASSIVE_EVIDENCE_MAX_AGE_MS",
+    "reason": "pacing",
+    "retire_when": "Remove when the resumable pacing/retry boundary PASSIVE_EVIDENCE_MAX_AGE_MS is retired or adopted."
+  },
+  {
+    "path": "src/workers/dashboard/embedding-runtime.ts",
+    "symbol": "REPORT_MAX_FUTURE_SKEW_MS",
+    "reason": "pacing",
+    "retire_when": "Remove when the resumable pacing/retry boundary REPORT_MAX_FUTURE_SKEW_MS is retired or adopted."
+  },
+  {
+    "path": "src/workers/email-source/ingest-filter.ts",
+    "symbol": "OTP_BODY_MAX_CHARS",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp OTP_BODY_MAX_CHARS is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/workers/engine-split/commands.ts",
+    "symbol": "ENGINE_BODY_MAX_BYTES",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp ENGINE_BODY_MAX_BYTES is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/workers/engine-split/commands.ts",
+    "symbol": "ENGINE_JUDGE_BOOST_MAX_IDS",
+    "reason": "internal",
+    "retire_when": "Remove when ENGINE_JUDGE_BOOST_MAX_IDS in src/workers/engine-split/commands.ts is removed or registered."
+  },
+  {
+    "path": "src/workers/engine-split/rss-restart.ts",
+    "symbol": "ENGINE_RSS_RESTART_MAX_WAIT_MS",
+    "reason": "pacing",
+    "retire_when": "Remove when the resumable pacing/retry boundary ENGINE_RSS_RESTART_MAX_WAIT_MS is retired or adopted."
+  },
+  {
+    "path": "src/workers/engine/http/dashboard-dispositions.ts",
+    "symbol": "DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS",
+    "reason": "pacing",
+    "retire_when": "Remove when the resumable pacing/retry boundary DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS is retired or adopted."
+  },
+  {
+    "path": "src/workers/engine/http/dashboard-oauth-attempts.ts",
+    "symbol": "DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW",
+    "reason": "internal",
+    "retire_when": "Remove when DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW in src/workers/engine/http/dashboard-oauth-attempts.ts is removed or registered."
+  },
+  {
+    "path": "src/workers/evernote/listing.ts",
+    "symbol": "EVERNOTE_SEARCH_CAP",
+    "reason": "pending",
+    "retire_when": "The limits adopter for src/workers/evernote/listing.ts must register/report/clear EVERNOTE_SEARCH_CAP and expose its continue action."
+  },
+  {
+    "path": "src/workers/file-extraction/extractors/document-formats.ts",
+    "symbol": "XLSX_MAX_COLUMNS",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp XLSX_MAX_COLUMNS is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/workers/google-connectors/drive.ts",
+    "symbol": "DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES",
+    "reason": "pending",
+    "retire_when": "The Drive text-size adopter reports reads clipped at the 128 KB boundary in drive.ts, with a continue control."
+  },
+  {
+    "path": "src/workers/google-connectors/gmail-import-allowance.ts",
+    "symbol": "GMAIL_IMPORT_MIN_DAILY_BUDGET",
+    "reason": "pending",
+    "retire_when": "The limits adopter for src/workers/google-connectors/gmail-import-allowance.ts must register/report/clear GMAIL_IMPORT_MIN_DAILY_BUDGET and expose its continue action."
+  },
+  {
+    "path": "src/workers/google-connectors/gmail-import-allowance.ts",
+    "symbol": "GmailImportWaitError",
+    "reason": "pending",
+    "retire_when": "The limits adopter for src/workers/google-connectors/gmail-import-allowance.ts must register/report/clear GmailImportWaitError and expose its continue action."
+  },
+  {
+    "path": "src/workers/google-connectors/gmail-mail-record.ts",
+    "symbol": "GMAIL_CHILD_MAX_DEPTH",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp GMAIL_CHILD_MAX_DEPTH is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/workers/google-connectors/gmail.ts",
+    "symbol": "GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS",
+    "reason": "internal",
+    "retire_when": "Remove when GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS in src/workers/google-connectors/gmail.ts is removed or registered."
+  },
+  {
+    "path": "src/workers/google-connectors/request-budget.ts",
+    "symbol": "GOOGLE_REQUEST_BUDGET_STATE_VERSION",
+    "reason": "internal",
+    "retire_when": "Remove when GOOGLE_REQUEST_BUDGET_STATE_VERSION in src/workers/google-connectors/request-budget.ts is removed or registered."
+  },
+  {
+    "path": "src/workers/http.ts",
+    "symbol": "AGENT_MINT_MAX_KEYS",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp AGENT_MINT_MAX_KEYS is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/workers/local-files/connector.ts",
+    "symbol": "DELETED_DESCENDANT_MAX_BATCHES",
+    "reason": "pacing",
+    "retire_when": "Remove when the resumable pacing/retry boundary DELETED_DESCENDANT_MAX_BATCHES is retired or adopted."
+  },
+  {
+    "path": "src/workers/readwise/connector.ts",
+    "symbol": "READWISE_REQUEST_BUDGET_STATE_VERSION",
+    "reason": "internal",
+    "retire_when": "Remove when READWISE_REQUEST_BUDGET_STATE_VERSION in src/workers/readwise/connector.ts is removed or registered."
+  },
+  {
+    "path": "src/workers/remote-oauth/handler.ts",
+    "symbol": "CONSENT_MAX_ATTEMPTS",
+    "reason": "pacing",
+    "retire_when": "Remove when the resumable pacing/retry boundary CONSENT_MAX_ATTEMPTS is retired or adopted."
+  },
+  {
+    "path": "src/workers/remote-oauth/handler.ts",
+    "symbol": "PAIRING_MAX_HELD_MS",
+    "reason": "pacing",
+    "retire_when": "Remove when the resumable pacing/retry boundary PAIRING_MAX_HELD_MS is retired or adopted."
+  },
+  {
+    "path": "src/workers/source-checkpoint.ts",
+    "symbol": "SOURCE_CHECKPOINT_MAX_LENGTH",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp SOURCE_CHECKPOINT_MAX_LENGTH is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/workers/source-eval-shard/dropbox.ts",
+    "symbol": "EVAL_SHARD_MAX_COUNT",
+    "reason": "internal",
+    "retire_when": "Remove when EVAL_SHARD_MAX_COUNT in src/workers/source-eval-shard/dropbox.ts is removed or registered."
+  },
+  {
+    "path": "src/workers/source-index/analyst-answer.ts",
+    "symbol": "DEFAULT_EVIDENCE_BYTE_BUDGET",
+    "reason": "pending",
+    "retire_when": "The released-evidence budget adopter reports omitted evidence from searchReleasedEvidence and the Analyst build, with a continue control."
+  },
+  {
+    "path": "src/workers/source-index/analyst-answer.ts",
+    "symbol": "PRIVATE_EVIDENCE_BYTE_BUDGET",
+    "reason": "pending",
+    "retire_when": "The private-evidence budget adopter reports omitted evidence from searchPrivateEvidence, with a continue control."
+  },
+  {
+    "path": "src/workers/source-index/analyst-answer.ts",
+    "symbol": "readPrivateEvidenceItem",
+    "reason": "pending",
+    "retire_when": "The item-read cap adopter reports clipped reads from readPrivateEvidenceItem, with a continue control."
+  },
+  {
+    "path": "src/workers/source-scheduler.ts",
+    "symbol": "SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS",
+    "reason": "pacing",
+    "retire_when": "Remove when the resumable pacing/retry boundary SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS is retired or adopted."
+  },
+  {
+    "path": "src/workers/telegram-messages/media-child.ts",
+    "symbol": "LIVE_MEDIA_MAX_READ_BYTES",
+    "reason": "pending",
+    "retire_when": "The limits adopter for src/workers/telegram-messages/media-child.ts must register/report/clear LIVE_MEDIA_MAX_READ_BYTES and expose its continue action."
+  },
+  {
+    "path": "src/workers/whatsapp/archive-input.ts",
+    "symbol": "SLOT_CAP",
+    "reason": "internal",
+    "retire_when": "Remove when SLOT_CAP in src/workers/whatsapp/archive-input.ts is removed or registered."
+  },
+  {
+    "path": "src/workers/whatsapp/live-connector.ts",
+    "symbol": "MEDIA_TEMP_MAX_AGE_MS",
+    "reason": "pacing",
+    "retire_when": "Remove when the resumable pacing/retry boundary MEDIA_TEMP_MAX_AGE_MS is retired or adopted."
+  },
+  {
+    "path": "src/workers/whatsapp/media-fetch.ts",
+    "symbol": "ANSWER_HEAD_MAX_BYTES",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp ANSWER_HEAD_MAX_BYTES is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/workers/whatsapp/spool-reader.ts",
+    "symbol": "CAPTURE_STATUS_MAX_BYTES",
+    "reason": "clamp",
+    "retire_when": "Remove when the bounded input/output clamp CAPTURE_STATUS_MAX_BYTES is removed or becomes a registered work stop."
+  },
+  {
+    "path": "src/workers/whatsapp/spool-reader.ts",
+    "symbol": "WHATSAPP_SPOOL_MAX_RECORD_BYTES",
+    "reason": "pending",
+    "retire_when": "The limits adopter for src/workers/whatsapp/spool-reader.ts must register/report/clear WHATSAPP_SPOOL_MAX_RECORD_BYTES and expose its continue action."
+  },
+  {
+    "path": "src/workers/x-bookmarks/api-connector.ts",
+    "symbol": "X_BOOKMARKS_FOLDER_PROVIDER_MAX_ATTEMPTS",
+    "reason": "pacing",
+    "retire_when": "Remove when the resumable pacing/retry boundary X_BOOKMARKS_FOLDER_PROVIDER_MAX_ATTEMPTS is retired or adopted."
+  },
+  {
+    "path": "src/workers/x-bookmarks/live-control.ts",
+    "symbol": "X_BOOKMARKS_HEAD_MAX_LADDER_PAGES",
+    "reason": "pacing",
+    "retire_when": "Remove when the resumable pacing/retry boundary X_BOOKMARKS_HEAD_MAX_LADDER_PAGES is retired or adopted."
+  }
+]

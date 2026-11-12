@@ -26,6 +26,7 @@ import {
   PROTOCOL_VERSION,
   PowCancelledError,
   RELAY_FEATURE_SURFACES,
+  RELAY_FEATURE_REQUEST_LOG,
   chunks,
   decodeBodyFrame,
   encodeBodyFrame,
@@ -39,6 +40,7 @@ import {
 } from '../shared/protocol.ts';
 import { FORWARDED_METHODS, forwardPath, forwardRequestHeaders, forwardResponseHeaders } from './forward.ts';
 import type { InstallIdentity } from './identity.ts';
+import { parseRequestLogEntry, type RequestLogEntry } from '../shared/request-log.ts';
 
 export type RelayClientStatus =
   | { state: 'connecting' }
@@ -61,6 +63,7 @@ export interface RelayClientOptions {
   /** Per-boot secret sent as `x-olympus-relay` on every forwarded request. */
   readonly relaySecret: string;
   readonly onStatus?: (status: RelayClientStatus) => void;
+  readonly onRequestLog?: (entry: RequestLogEntry) => void;
   readonly heartbeatMs?: number;
   /**
    * Time a connection has to be authenticated (`ready`) before it is given up
@@ -192,6 +195,7 @@ export class RelayClient {
     let replaced = false;
     let revoked = false;
     let ready = false;
+    let requestLogEnabled = false;
     const { identity } = this.options;
     let handshakeTimer: ReturnType<typeof setTimeout> | undefined;
     // One challenge per handshake, answered with one scheme; its proof of
@@ -307,7 +311,9 @@ export class RelayClient {
             signal: handshake.signal,
           }).then(
             (auth) => {
-              if (this.socket === socket && !handshake.signal.aborted) this.send(auth);
+              if (this.socket === socket && !handshake.signal.aborted) this.send({ ...auth,
+                ...(this.options.onRequestLog ? { features: [RELAY_FEATURE_REQUEST_LOG] } : {}),
+              });
             },
             (error) => {
               if (error instanceof PowCancelledError || handshake.signal.aborted) return;
@@ -323,6 +329,7 @@ export class RelayClient {
             return;
           }
           ready = true;
+          requestLogEnabled = !!this.options.onRequestLog && Array.isArray(message.features) && message.features.includes(RELAY_FEATURE_REQUEST_LOG);
           clearTimeout(handshakeTimer);
           this.failures = 0;
           this.register = false;
@@ -330,6 +337,13 @@ export class RelayClient {
           if (Array.isArray(message.features) && message.features.includes(RELAY_FEATURE_SURFACES)) this.startSurfaceSync();
           this.options.onStatus?.({ state: 'online', installId: identity.installId, connectedAt: Date.now() });
           return;
+        case 'request-log': {
+          const entry = ready && requestLogEnabled ? parseRequestLogEntry(message) : undefined;
+          if (entry) {
+            try { this.options.onRequestLog?.(entry); } catch { /* Diagnostics cannot interrupt the session. */ }
+          }
+          return;
+        }
         case 'pong':
           this.lastPongAt = Date.now();
           return;

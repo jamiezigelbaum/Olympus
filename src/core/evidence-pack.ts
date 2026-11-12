@@ -30,6 +30,8 @@ import type {
   EvidencePack,
   EvidenceTableBlock,
 } from './contracts.ts';
+import { registeredLimits, limitStopSubjects, type LimitStop } from './limit-stops.ts';
+import { defaultSourceCorpusRegistryConfig } from './source-corpus-registry.ts';
 import type { StructuredEvidenceFact } from './opsec.ts';
 import {
   applyParentLabels,
@@ -160,6 +162,7 @@ export const SOURCE_MODEL_POLICY_GAP_SUFFIX =
   'excluded one candidate from model use under current source policy.';
 
 export interface BuildEvidencePackInput {
+  limitStops?: readonly LimitStop[];
   question: string;
   searchQuery?: string; // retrieval query when it differs from the question
   selectedItems?: readonly SelectedEvidenceItem[];
@@ -319,6 +322,9 @@ export interface EvidencePackBuildDetail {
   // searched items whose tier is not final yet. Neither enters the pack, so
   // neither reaches the Analyst.
   secretLocations?: readonly SecretLocationNote[];
+  // The limit-stop notices also in coverage.extractionGaps, so an answer path
+  // that does not hand the pack to the Analyst can still say them.
+  limitStopGaps?: readonly string[];
   classificationCoverage?: readonly ClassificationCoverageNote[];
   // True when this build met secure material anywhere (isSecureSensitivity):
   // in any routed run of the build, before its visibility gate, budget or
@@ -372,6 +378,20 @@ async function buildPreparedEvidencePackDetailed(
   const candidateCorpusIds: string[] = [];
   const candidateExtractionGapIndexes: number[][] = [];
   const extractionGaps: string[] = laneCutShortGaps(routed.degradations, input);
+  const searched = new Set(routed.searchedCorpora);
+  const searchedSources = new Set(defaultSourceCorpusRegistryConfig().corpora
+    .filter((corpus) => searched.has(corpus.corpusId)).map((corpus) => corpus.sourceId));
+  const limitStopGaps: string[] = [];
+  const limits = registeredLimits();
+  const now = (input.now?.() ?? new Date()).getTime();
+  for (const stop of input.limitStops ?? []) {
+    const limit = limits.find((entry) => entry.id === stop.id);
+    if (limit?.scope !== 'source' || (stop.resumesAt && Date.parse(stop.resumesAt) <= now)) continue;
+    if (limitStopSubjects(stop).some((subject) => searched.has(subject) || searchedSources.has(subject))) {
+      limitStopGaps.push(`${limit.label} since ${stop.since}; new items from this source may be missing from this answer`);
+    }
+  }
+  extractionGaps.push(...limitStopGaps);
   const policyDeniedCoverageGaps: string[] = [];
   let policyDeniedCandidates = 0;
   const namesOnlyCandidateIndexes: number[] = [];
@@ -587,6 +607,7 @@ async function buildPreparedEvidencePackDetailed(
     ...(rerank ? { rerank } : {}),
     ...(labelled.dependencies.length > 0 ? { parentLabelDependencies: labelled.dependencies } : {}),
     ...(secretLocations.length > 0 ? { secretLocations } : {}),
+    ...(limitStopGaps.length > 0 ? { limitStopGaps } : {}),
     ...(classificationCoverage.length > 0 ? { classificationCoverage } : {}),
   };
 }

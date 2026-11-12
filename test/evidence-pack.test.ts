@@ -1,3 +1,5 @@
+import { Database } from 'bun:sqlite';
+import { registerLimit, initializeLimitStops, reportLimitStop, clearLimitStop, listOpenLimitStops } from '../src/core/limit-stops.ts';
 import { describe, expect, test } from 'bun:test';
 import { createAnalyst, type AnalystModel } from '../src/core/analyst.ts';
 import {
@@ -510,3 +512,27 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
   }
   throw new Error('condition was not met');
 }
+
+ test('source limit gaps follow searched corpora, including another tier, and disappear on clear', async () => {
+  const db = new Database(':memory:');
+  initializeLimitStops(db);
+  registerLimit({ id: 'coverage.limit', kind: 'requests', scope: 'source', label: 'Daily requests used', unit: 'requests', continue: 'run_once' });
+  const stop = { id: 'coverage.limit', subject: JSON.stringify(['dropbox.files', 'public_safe.dropbox.files', 'pull']),
+    since: '2026-11-12T12:00:00.000Z', limit: 1, used: 1 };
+  const build = (corpusIds: string[]) => buildEvidencePack({
+    question: 'project records', maxResults: 5, searchContext: allowAll, corpusIds,
+    registry: buildSourceIndexCorpusRegistry([defineSourceIndexCorpus({ corpusId: INTERNAL, family: 'file', trustDomain: 'internal' }),
+      defineSourceIndexCorpus({ corpusId: 'internal.email', family: 'email', trustDomain: 'internal' })]),
+    adapters: { [INTERNAL]: adapterReturning([]), 'internal.email': adapterReturning([]) }, contentProviders: {},
+    limitStops: listOpenLimitStops(db),
+  });
+  try {
+    reportLimitStop(stop, db);
+    const gap = `Daily requests used since ${stop.since}; new items from this source may be missing from this answer`;
+    expect((await build([INTERNAL])).coverage.extractionGaps).toContain(gap);
+    // A different source was the only one searched.
+    expect((await build(['internal.email'])).coverage.extractionGaps).not.toContain(gap);
+    clearLimitStop(stop.id, stop.subject, db);
+    expect((await build([INTERNAL])).coverage.extractionGaps).not.toContain(gap);
+  } finally { db.close(); }
+});

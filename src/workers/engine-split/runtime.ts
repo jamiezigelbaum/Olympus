@@ -364,12 +364,12 @@ export async function waitForProcessExit(pid: number, options: {
 }
 
 /**
- * The background's record of the owner's own calls on a shared local model.
+ * The background's record of owner questions and calls on shared local models.
  * Busy and idle travel as separate commands that can be retried or delayed,
  * so each carries its front and a sequence number: a change older than the
  * last one applied for that resource is ignored. A new front (a restart)
  * supersedes the old one's marks. A busy mark lapses after `lapseMs`, so a
- * front that died mid-call cannot hold the judge back for good.
+ * front that died mid-call cannot hold background work back for good.
  */
 export class OwnerBusyMarks {
   private readonly marks = new Map<string, { front: string; seq: number; busyUntil: number }>();
