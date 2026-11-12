@@ -3,6 +3,9 @@
  * Models on this computer names the model that really answers Private
  * questions (#1043).
  */
+import { Database } from 'bun:sqlite';
+import { registerLimit, initializeLimitStops, reportLimitStop, clearLimitStop, listOpenLimitStops } from '../src/core/limit-stops.ts';
+import '../src/workers/scheduler-limit-stops.ts';
 import { describe, expect, test } from 'bun:test';
 import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
 import { copyDashboardViewModel } from '../src/workers/chatgpt/response-builder.ts';
@@ -37,19 +40,39 @@ function xCard(overrides: Partial<DashboardSourceCard> = {}): DashboardSourceCar
   } as DashboardSourceCard;
 }
 
-function viewOf(card: DashboardSourceCard) {
+function viewOf(card: DashboardSourceCard, limitStops: import('../src/core/limit-stops.ts').LimitStop[] = []) {
   const view = { sources: [card], generated_at: NOW.toISOString() } as unknown as SourceDashboardViewModel;
-  return copyDashboardViewModel(buildChatGptDashboardViewModel(view, { now: NOW }));
+  return copyDashboardViewModel(buildChatGptDashboardViewModel(view, { now: NOW, limitStops }));
 }
 
 describe('Needs you holds only what the owner must act on (#1044)', () => {
-  test('X parked on its daily cost guard is not Needs you: it waits, with the reason and 00:00 UTC, and no Sync now', () => {
-    for (const reason of ['daily_cost_guard', 'head_cost_reserve_guard', 'daily_api_request_guard']) {
-      const view = viewOf(xCard({ schedule: { running: false, consecutive_failures: 0, last_error_kind: 'api_request_guard', degraded_reason: reason } }));
+  test('an open daily stop makes one row from the record, with Sync now; clearing removes it', () => {
+    const db = new Database(':memory:');
+    initializeLimitStops(db);
+    const stop = { id: 'x.daily_cost', subject: JSON.stringify(['x.bookmarks', 'internal.x.bookmarks', 'pull']),
+      since: NOW.toISOString(), limit: 1, used: 1, waiting: { items: 5 }, resumesAt: '2026-11-11T00:00:00.000Z' };
+    const card = xCard({ schedule: { running: false, consecutive_failures: 0, degraded_reason: 'daily_cost_guard' } });
+    try {
+      expect(viewOf(card).waits).toBeUndefined(); // A marker alone is not a record.
+      reportLimitStop(stop, db);
+      const view = viewOf(card, listOpenLimitStops(db, NOW));
       expect(view.needsYou).toEqual([]);
-      expect(view.waits).toEqual([{ sourceId: 'x.bookmarks', label: 'X bookmarks', reason: 'daily_budget', api: 'X', resumesAt: '2026-11-11T00:00:00.000Z' }]);
-      expect(view.sources[0]!.status).not.toBe('Needs you');
-    }
+      expect(view.waits).toEqual([{ sourceId: 'x.bookmarks', label: 'X bookmarks', api: 'X bookmarks', reason: 'limit',
+        limitLabel: 'daily X API budget used', since: stop.since, waiting: stop.waiting, resumesAt: stop.resumesAt,
+        fix: { label: 'Sync now', tool: 'olympus_sync_source', args: { source_id: 'x.bookmarks' } } }]);
+      clearLimitStop(stop.id, stop.subject, db);
+      expect(viewOf(card, listOpenLimitStops(db, NOW)).waits).toBeUndefined();
+    } finally { db.close(); }
+  });
+
+  test.each(['raise', 'refill', 'none'] as const)('%s uses settings or has no button', (action) => {
+    const id = 'home.' + action;
+    registerLimit({ id, scope: 'judge', kind: 'cost', label: 'Source budget', unit: 'usd', continue: action });
+    const wait = viewOf(xCard(), [{ id, subject: 'judge', since: NOW.toISOString(), limit: 1, used: 1 }]).waits![0]!;
+    expect(wait.limitLabel).toBe('Source budget');
+    expect(wait.sourceId).toBe('judge');
+    if (action === 'none') expect(wait.fix).toBeUndefined();
+    else expect(wait.fix).toMatchObject({ label: 'Open settings', openHref: true, href: 'https://olympusplugin.ai/open/fix/models/' });
   });
 
   test('a sync retrying on its own is not Needs you', () => {

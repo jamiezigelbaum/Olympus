@@ -124,6 +124,7 @@ import {
 } from './analyst-pool.ts';
 
 export interface AnalystAnswerLanes {
+  limitStops?: readonly import('../../core/limit-stops.ts').LimitStop[];
   registry: SourceIndexCorpusRegistry;
   adapters: SourceIndexRouterAdapterMap;
   contentProviders: LocalContentProviderMap;
@@ -451,6 +452,7 @@ export function createAnalystSourceIndexAnswerHandler(
             allowCloudQueries: includeInternal,
             ...(requestedCorpusIds ? { allowedCorpusIds: requestedCorpusIds } : {}),
           },
+          limitStops: activeLanes.limitStops ?? [],
           registry: activeLanes.registry,
           adapters: activeLanes.adapters,
           contentProviders: activeLanes.contentProviders,
@@ -555,9 +557,12 @@ export function createAnalystSourceIndexAnswerHandler(
               if (note) chunkHoldNotes.add(note);
             }
             await assertDispatchAllowed(analysisDetail);
+            const result = await analyst.analyze(dispatchPack, analyzeOptions);
+            // Only a leg that answered can shape the answer: a failed Private
+            // route must not hold back the ordinary fallback that replaced it.
             analyzedInputs.push(...dispatchPack.candidates.map(candidate => candidateReleaseInput(candidate,
               candidateCorpus.get(candidate) ?? analysisDetail.candidateCorpusIds[analysisDetail.pack.candidates.findIndex(original => original.provenance === candidate.provenance)] ?? '')));
-            return analyst.analyze(dispatchPack, analyzeOptions);
+            return result;
           },
         });
         return {
@@ -729,7 +734,11 @@ export function createAnalystSourceIndexAnswerHandler(
       };
       recordSourceAnswerPhaseTimings(phaseTimings);
       // Every item the analysed pack held, cited or not.
-      recordReleaseManifest({ inputs: [...analyzedInputs, ...parentLabelReleaseInputs(detail.parentLabelDependencies ?? [])], constraints: releaseConstraints });
+      recordReleaseManifest({ inputs: [
+        ...analyzedInputs,
+        ...unreadableMatchedReleaseInputs(detail, releaseSecureContent),
+        ...parentLabelReleaseInputs(detail.parentLabelDependencies ?? []),
+      ], constraints: releaseConstraints });
       return {
         answer,
         evidence: released
@@ -2744,6 +2753,20 @@ function appendUnreadableMatchedEvidence(
   return evidence;
 }
 
+/**
+ * The unreadable matches appendUnreadableMatchedEvidence cites by name. A leg
+ * may never have read them (prompt fitting left them out), but their names
+ * are released beside the answer, so the manifest judges them on that layer.
+ */
+function unreadableMatchedReleaseInputs(detail: EvidencePackBuildDetail, releaseSecureContent: boolean): ReleaseInput[] {
+  return unreadableMatchedCandidateIndexes(detail).flatMap((index) => {
+    const candidate = detail.pack.candidates[index]!;
+    if (isSecureSensitivity(candidate) && !releaseSecureContent) return [];
+    const { chunkHashes: _hashes, ...input } = candidateReleaseInput(candidate, detail.candidateCorpusIds[index] ?? '');
+    return [{ ...input, layer: 'names' as const }];
+  });
+}
+
 function unreadableMatchedCandidateIndexes(detail: EvidencePackBuildDetail): number[] {
   if (detail.pack.coverage.extractionGaps.length === 0) return [];
   // Contents tiered Private are not unreadable: they are answered from their
@@ -2929,6 +2952,7 @@ export async function searchReleasedEvidence(input: {
     maxResults,
     // Public and Personal only: Private never enters this pack.
     searchContext: { allowedTrustDomains: ['public_safe', 'internal'], allowCloudQueries: true },
+    limitStops: lanes.limitStops ?? [],
     registry: lanes.registry,
     adapters: lanes.adapters,
     contentProviders: lanes.contentProviders,
@@ -3112,6 +3136,7 @@ export async function searchPrivateEvidence(input: {
       maxResults,
       // Private only, and no query leaves this computer.
       searchContext: { allowedTrustDomains: ['secure_local'], allowCloudQueries: false },
+      limitStops: lanes.limitStops ?? [],
       registry: lanes.registry,
       adapters,
       contentProviders: lanes.contentProviders,
@@ -3153,6 +3178,7 @@ export async function searchPrivateEvidence(input: {
     const detail = await withCachedKeywordExpansion(translation, () => buildEvidencePackDetailed({
       question, maxResults, selectedItems,
       searchContext: { allowedTrustDomains: ['internal', 'public_safe'], allowCloudQueries: false },
+      limitStops: lanes.limitStops ?? [],
       registry: lanes.registry, adapters: lanes.adapters, contentProviders: lanes.contentProviders,
       maxCharsPerCandidate: input.maxCharsPerCandidate ?? DEFAULT_MAX_CHARS_PER_CANDIDATE,
       evidenceByteBudget: input.evidenceByteBudget ?? PRIVATE_EVIDENCE_BYTE_BUDGET,

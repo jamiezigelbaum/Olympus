@@ -2,6 +2,7 @@ import { createVectorDigestSchema, writeVectorDigest, backfillVectorDigests, vec
 import { encodeVectorDigest, scoreVectorDigest, VectorDigestHeap } from '../source-index/vector-digest.ts';
 import { iterateRows } from '../../core/sqlite-rows.ts';
 import { installMainThreadSqlTrace } from './main-thread-sql-trace.ts';
+import { storeOwnerIdleMs, storeReadHasPriority } from '../../core/store-reclaim-admission.ts';
 import { assertWritableStoreOpenAllowed, writableStoreOpensForbidden } from '../../core/store-write-guard.ts';
 import type { PeopleCitationName, PeopleSenderIdentity, PeopleSenderObservation } from '../../core/people-index.ts';
 import { unreadHoldDisposition, type UnreadHoldDisposition } from '../file-extraction/unreadable-files.ts';
@@ -12,7 +13,7 @@ import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled,
 import { lastKeywordLanguages, storeKeywordLanguages, storeKeywordLanguagesWith } from '../../core/source-index/keyword-languages.ts';
 import { expandSourceIndexKeywords, KEYWORD_PREPARE_WAIT_MS, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
 import { RECENT_ITEMS_CUT_SHORT } from '../../core/source-index/partial-search.ts';
-import { controlPathHeadroom, ingestionTurn, type ControlPathHeadroom } from '../control-path-headroom.ts';
+import { CONTROL_PATH_SLICE_MS, controlPathHeadroom, ingestionTurn, type ControlPathHeadroom } from '../control-path-headroom.ts';
 import { OffThreadReadBusyError, offThreadReadsSupported, readOnPool, readPoolHasWaitingWork, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
 // The shared connector ingest spine: ONE generic local store that turns any
 // Contract 1 SourceConnector into a searchable, analyst-served corpus with
@@ -43,7 +44,7 @@ import { OffThreadReadBusyError, offThreadReadsSupported, readOnPool, readPoolHa
 
 import { compareProviderAccounts } from '../../core/provider-account-identity.ts';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, statSync, statfsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { Database, type SQLQueryBindings } from 'bun:sqlite';
 import type {
@@ -122,7 +123,6 @@ import {
   judgedAwaited,
   parentVerdictsSteps,
   CHILD_PARENT_CHAIN_LIMIT,
-  childVisibilityUnchanged,
   hiddenChildKeysSteps,
   ledgerVisibilityOffThread,
   ledgerVisibilityHere,
@@ -3359,6 +3359,51 @@ export function connectorStoreReadableNow(dbPath: string): boolean {
   }
 }
 
+/** The store's own maintenance opener, like its read-pool opener, on an isolated Bun process. */
+const CONNECTOR_RECLAIM_WORKER_SOURCE = `
+import { Database } from 'bun:sqlite';
+import { statSync } from 'node:fs';
+// core/sqlite-store.ts closeSqliteStore, inlined: this source runs in its own
+// process and cannot import it. Checkpoint first so no WAL is left for a reap.
+const closeSqliteStore = (db) => { try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch {} db.close(); };
+self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
+  // This is the mounted store's own maintenance connection. Never create a missing store.
+  const db = new Database(path, { create: false, strict: true });
+  db.exec('PRAGMA busy_timeout = 0; PRAGMA foreign_keys = ON;');
+  try {
+    postMessage({ started: true });
+    const mode = db.query('PRAGMA auto_vacuum').get().auto_vacuum;
+    if (mode !== 2) {
+      db.exec('PRAGMA auto_vacuum = INCREMENTAL;');
+      // NONE needs one transactional rebuild. A killed conversion leaves the
+      // original database usable; there is no rename or half-swapped file.
+      if (mode === 0) {
+        // VACUUM may renumber rowids in the composite-key embedding table.
+        // Restart unfinished physical backfills before that can happen.
+        db.exec('UPDATE chunk_vector_digest_meta SET cursor_rowid = 0 WHERE completed = 0;');
+        db.exec('VACUUM;');
+      }
+    }
+    const started = performance.now();
+    let free = db.query('PRAGMA freelist_count').get().freelist_count;
+    while (free > 0 && performance.now() - started < budgetMs) {
+      db.exec('PRAGMA incremental_vacuum(' + pagesPerStep + ')');
+      free = db.query('PRAGMA freelist_count').get().freelist_count;
+    }
+    // WAL truncation is part of reclaim, not a blocking close-time courtesy.
+    // A status snapshot may still own old pages: retry on the next tick.
+    const checkpoint = db.query('PRAGMA wal_checkpoint(TRUNCATE)').get();
+    postMessage({ done: free === 0 && checkpoint.busy === 0, bytes: statSync(path).size });
+  } catch {
+    postMessage({ failed: true });
+  } finally {
+    closeSqliteStore(db);
+  }
+};`;
+
+/** Pages per statement; the worker also stops at the existing sweep slice budget. */
+const RECLAIM_MAX_PAGES_PER_STEP = 128;
+
 export class LocalConnectorStore {
   readonly dbPath: string;
   /** The file this store opened, so a later delete or replace of it is seen. */
@@ -3483,6 +3528,7 @@ export class LocalConnectorStore {
       assertWritableStoreOpenAllowed('connector store', this.dbPath);
       if (this.dbPath !== ':memory:') mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
     }
+    const creatingFile = this.dbPath === ':memory:' || !existsSync(this.dbPath);
     this.db = new Database(this.dbPath, options.readOnly === true
       ? { readonly: true, create: false, strict: true }
       : { create: true });
@@ -3490,9 +3536,21 @@ export class LocalConnectorStore {
     try {
       this.db.exec(options.readOnly === true
         ? 'PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;'
+        : creatingFile
+        ? 'PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL; PRAGMA journal_mode = WAL;'
         : 'PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;');
+      // New stores need no conversion. Existing stores are converted only by
+      // background reclaim, after the sweep, never by opening a request's store.
       assertSqliteSchemaCanOpen(this.db, SQLITE_STORE_ID, CONNECTOR_STORE_SQLITE_SCHEMA_VERSION);
+      const versionAtOpen = readSqliteSchemaVersion(this.db, SQLITE_STORE_ID);
+      // A store already at this build's schema is checked by shape only. The
+      // checks that read every row (the text index's ownership count, every
+      // foreign key) run only when this open migrates: on Sparta they read
+      // about 22 GB per plain restart across both engine processes, most of
+      // each one's 6 minutes to ready (ops#151, 2026-11-12).
+      const migrating = options.readOnly !== true && versionAtOpen < CONNECTOR_STORE_SQLITE_SCHEMA_VERSION;
       validateCurrentConnectorStoreSchemaBeforeMigration(this.db);
+      if (migrating) validateConnectorStoreRows(this.db, `v${versionAtOpen}`);
       if (options.readOnly === true) {
         const version = readSqliteSchemaVersion(this.db, SQLITE_STORE_ID);
         // Anything newer than this build already failed
@@ -3510,6 +3568,10 @@ export class LocalConnectorStore {
         createConnectorStoreVisibilityTables(this.db);
         createConnectorStorePeopleIndex(this.db);
         validateConnectorStoreSchema(this.db);
+        if (migrating) {
+          validateConnectorStoreRows(this.db, 'v15');
+          validateConnectorStoreForeignKeys(this.db);
+        }
       }
       if (options.readOnly !== true) this.createVisibilityJournal();
       // A read-only open of a store no writer of this build has opened has no
@@ -3567,7 +3629,7 @@ export class LocalConnectorStore {
       if (!model) return;
       // An Ask in flight on this store, or any owner-visible read waiting
       // for the pool (a status count, another store's lane), goes first.
-      if (this.vectorLanesInFlight > 0 || (offThreadReadsSupported(this.dbPath) && readPoolHasWaitingWork())) { this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS); return; }
+      if (this.reclaimProcess || this.vectorLanesInFlight > 0 || (offThreadReadsSupported(this.dbPath) && readPoolHasWaitingWork())) { this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS); return; }
       if (offThreadReadsSupported(this.dbPath)) { void this.backfillVectorDigestTurnOnPool(model); return; }
       try {
         const started = performance.now();
@@ -3639,10 +3701,14 @@ export class LocalConnectorStore {
   }
 
   close(): void {
+    const reclaiming = this.reclaimProcess !== undefined;
+    this.reclaimProcess?.kill('SIGKILL');
     clearTimeout(this.vectorDigestBackfillTimer);
     this.stopVisibilityPublisher();
     try {
-      if (!this.readOnly) this.releaseUnreferencedChunkMedia();
+      // SIGKILL releases the worker's write lock asynchronously. Media cleanup
+      // can retry on a later close; close must not race it with another write.
+      if (!this.readOnly && !reclaiming) this.releaseUnreferencedChunkMedia();
       if (this.tierLedgerOwned === true) this.tierLedgerHandle?.close();
       this.boundLedgerHandle?.close();
       this.boundLedgerHandle = undefined;
@@ -3653,6 +3719,100 @@ export class LocalConnectorStore {
       this.closedForPoolReads = true;
       if (offThreadReadsSupported(this.dbPath)) releaseOffThreadReads(this.dbPath);
       closeSqliteStore(this.db, { checkpoint: !this.readOnly });
+    }
+  }
+
+  private reclaimProcess: ReturnType<typeof Bun.spawn> | undefined;
+  private reclaimKilledAttempts = 0;
+
+  /** A conversion child holds this store's write lock; other writers defer instead of blocking. */
+  get reclaiming(): boolean { return this.reclaimProcess !== undefined; }
+
+  /** Cheap header introspection for the ticker's eligibility check. */
+  reclaimablePages(): { pages: number; free: number; pageBytes: number; bytes: number } | undefined {
+    if (this.readOnly || this.dbPath === ':memory:' || this.closedForPoolReads || this.fileReplacedOrRemoved()) return undefined;
+    return {
+      pages: (this.db.query('PRAGMA page_count').get() as { page_count: number }).page_count,
+      free: (this.db.query('PRAGMA freelist_count').get() as { freelist_count: number }).freelist_count,
+      pageBytes: (this.db.query('PRAGMA page_size').get() as { page_size: number }).page_size,
+      bytes: statSync(this.dbPath).size,
+    };
+  }
+
+  /** Called under Ask admission and the scheduler source hold, from the ticker only. */
+  async reclaimFreePages(budgetMs: number, options: { pagesPerStep?: number; onStarted?: () => void; statfs?: (path: string) => Pick<ReturnType<typeof statfsSync>, 'bavail' | 'bsize'> } = {}): Promise<{ done: boolean; bytes: number } | undefined> {
+    // Publisher/backfill promises span turns: let any existing write finish;
+    // new turns see reclaimProcess and defer until the child releases its lock.
+    if (this.reclaimProcess || this.vectorDigestBackfillReading || this.visibilityPublishing
+      || storeReadHasPriority() || !this.reclaimablePages()) return undefined;
+    const converting = (this.db.query('PRAGMA auto_vacuum').get() as { auto_vacuum: number }).auto_vacuum === 0;
+    if (converting) {
+      if (this.reclaimKilledAttempts >= 3 && storeOwnerIdleMs(this.now().getTime()) < 10 * 60_000) return undefined;
+      const neededBytes = 2 * statSync(this.dbPath).size + 1024 ** 3;
+      const disk = (options.statfs ?? statfsSync)(dirname(this.dbPath));
+      const availableBytes = Number(disk.bavail) * Number(disk.bsize);
+      if (!Number.isFinite(availableBytes) || availableBytes < neededBytes) {
+        console.info(`[store-reclaim] conversion_skipped reason=disk_space needed_bytes=${neededBytes} available_bytes=${availableBytes}`);
+        return undefined;
+      }
+    }
+    let pagesPerStep = options.pagesPerStep ?? RECLAIM_MAX_PAGES_PER_STEP;
+    if (pagesPerStep > RECLAIM_MAX_PAGES_PER_STEP) pagesPerStep = RECLAIM_MAX_PAGES_PER_STEP;
+    pagesPerStep = Math.max(1, Math.floor(pagesPerStep));
+    assertWritableStoreOpenAllowed('connector store reclaim', this.dbPath);
+    assertStoreTierLedgerCanOpen(this.dbPath);
+    // A separate process is essential: Bun Worker.terminate() cannot interrupt
+    // an executing SQLite statement. SIGKILL can, and SQLite rolls it back.
+    // Its main thread watches our stdin even while its worker runs VACUUM:
+    // parent death closes the pipe and kills the child, releasing every lock.
+    const supervisor = `
+      const worker = new Worker(URL.createObjectURL(new Blob([${JSON.stringify(CONNECTOR_RECLAIM_WORKER_SOURCE)}], {type:'text/javascript'})));
+      process.stdin.resume();
+      process.stdin.on('end', () => process.kill(process.pid, 'SIGKILL'));
+      worker.onmessage = ({data}) => {
+        console.log(JSON.stringify(data));
+        if (!data.started) process.exit(0);
+      };
+      worker.onerror = () => process.exit(1);
+      worker.postMessage(JSON.parse(process.argv[1]));`;
+    const child = Bun.spawn([process.execPath, '-e', supervisor, JSON.stringify([this.dbPath, budgetMs, pagesPerStep])],
+      { stdin: 'pipe', stdout: 'pipe', stderr: 'ignore',
+        env: { ...process.env, SQLITE_TMPDIR: dirname(this.dbPath), TMPDIR: dirname(this.dbPath) } });
+    this.reclaimProcess = child;
+    let preempted = false;
+    const interrupt = setInterval(() => {
+      try { if (storeReadHasPriority() && !preempted) { preempted = true; child.kill('SIGKILL'); } }
+      catch { child.kill('SIGKILL'); } // fail closed if admission cannot be checked
+    }, CONTROL_PATH_SLICE_MS);
+    try {
+      let result: { failed?: boolean; done: boolean; bytes: number } | undefined;
+      const output = (async () => {
+        const decoder = new TextDecoder();
+        let buffer = '';
+        for await (const chunk of child.stdout) {
+          buffer += decoder.decode(chunk, { stream: true });
+          let newline: number;
+          while ((newline = buffer.indexOf('\n')) >= 0) {
+            const message = JSON.parse(buffer.slice(0, newline));
+            buffer = buffer.slice(newline + 1);
+            if (message.started) options.onStarted?.();
+            else result = message;
+          }
+        }
+      })();
+      const code = await child.exited;
+      await output;
+      if (code !== 0 || this.closedForPoolReads) return undefined;
+      if (!result?.failed) this.reclaimKilledAttempts = 0;
+      return result?.failed ? undefined : result;
+    } finally {
+      clearInterval(interrupt);
+      child.stdin.end();
+      this.reclaimProcess = undefined;
+      if (converting && preempted) this.reclaimKilledAttempts++;
+      if (!this.closedForPoolReads) {
+        if (this.visibilityPending) this.scheduleVisibilityPublish(0);
+      }
     }
   }
 
@@ -4110,16 +4270,21 @@ export class LocalConnectorStore {
   }
 
   /**
-   * Brings this writer's visibility set up to date and saves it in the store,
-   * with a turn between steps, for read-only connections to start from. The
-   * writer also does this on its own (refreshVisibilityIfBehind); this is for
-   * a caller that wants the saved set current now. Does nothing on a
-   * read-only store.
+   * Builds, or brings up to date, this connection's hidden-copy set with a
+   * turn between steps, and on a writer saves it in the store for read-only
+   * connections to start from. The engine calls it for every store after it
+   * starts and then on a timer: the split's front before it reports ready, so
+   * an Ask never pays the first build on its own thread, and the background
+   * (or the single worker) so each store's saved set stays inside the
+   * ledger's visibility feed. A writer keeps its saved set inside the feed on
+   * its own only once it has built a set (refreshVisibilityIfBehind); a store
+   * with no import after a restart never did, and ledger-only writes (the
+   * prune sweep, judging) moved the shared feed past its stamp, so every
+   * front start rebuilt it from the ledger (gate 1, ops#151: about 59 s).
    */
-  async saveVisibilityInTurns(): Promise<void> {
-    if (this.readOnly) return;
-    await runStepsInTurns(this.tierLedgerHiddenSteps());
-    await this.publishVisibility();
+  async keepVisibilityCurrentInTurns(): Promise<void> {
+    await this.tierHiddenItemPksInTurns();
+    if (!this.readOnly) await this.publishVisibility();
   }
 
   private tierLedgerHiddenMemo: TierVisibilityMemo | undefined;
@@ -4322,13 +4487,17 @@ export class LocalConnectorStore {
   } | undefined> {
     const ledgerId = this.ledgerIdOf(ledger);
     if (ledgerId === undefined) return undefined;
-    const page = this.db.query(`SELECT provider, account_scope, conversation_key, provider_item_id, flags, item_pks_json
-      FROM main.tier_visibility_members
-      WHERE generation = ?1 AND (provider, account_scope, conversation_key, provider_item_id) > (?2, ?3, ?4, ?5)
-      ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ?6`);
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const state = this.readVisibilityState();
       if (!state || state.corpus_id !== this.corpusId || state.ledger_id !== ledgerId) return undefined;
+      // A stamp already outside either feed can't be served: give up before
+      // reading every saved row (Sparta's largest store holds about 645k).
+      if (ledger.visibilityChangesSince(state.ledger_cursor).identities === undefined
+        || this.itemVisibilityChangesSince(state.store_cursor).identities === undefined) return undefined;
+      const page = this.db.query(`SELECT provider, account_scope, conversation_key, provider_item_id, flags, item_pks_json
+        FROM main.tier_visibility_members
+        WHERE generation = ?1 AND (provider, account_scope, conversation_key, provider_item_id) > (?2, ?3, ?4, ?5)
+        ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ?6`);
       const memo = emptyTierVisibilityMemo(ledger, ledgerId, state.ledger_cursor, state.store_cursor, 0);
       let after: [string, string, string, string] = ['', '', '', ''];
       for (;;) {
@@ -4414,6 +4583,7 @@ export class LocalConnectorStore {
     }
     if (this.visibilityPublishing) return this.visibilityPublishing;
     if (!this.visibilityPending || this.visibilityClosed) return Promise.resolve();
+    if (this.reclaimProcess) { this.scheduleVisibilityPublish(VISIBILITY_RETRY_MIN_MS); return Promise.resolve(); }
     let publishing: Promise<void> | undefined;
     publishing = (async () => {
       try {
@@ -4465,6 +4635,7 @@ export class LocalConnectorStore {
 
   /** Lets the next publisher (here or on another connection) start at once. */
   private releaseVisibilityLease(): void {
+    if (this.reclaimProcess) return; // close may interrupt a conversion; its lease expires on its own
     try {
       this.db.exec('PRAGMA busy_timeout = 0');
       this.db.query('DELETE FROM main.tier_visibility_lease WHERE id = 1 AND owner = ?').run(this.visibilityOwner);
@@ -6995,13 +7166,16 @@ export class LocalConnectorStore {
   async peopleObservationsOffThread(): Promise<PeopleSenderObservation[]> {
     if (!offThreadReadsSupported(this.dbPath)) return this.peopleObservations();
     for (let attempt = 0; attempt < PEOPLE_OFF_THREAD_READ_ATTEMPTS; attempt += 1) {
+      // The marker covers the ledger's visibility feed and every lane store's
+      // item feed. Never the ledger's whole change marker: the sweep and the
+      // judge write the ledger every few seconds, and every attempt would then
+      // fall back to the synchronous walk on this thread (gate 1, ops#168).
       const marker = this.visibilityMarker();
-      const unchanged = childVisibilityUnchanged(this.childVisibilityLane());
       const tierHidden = await this.tierHiddenItemPksInTurns();
       const steps = this.peopleObservationSteps(tierHidden);
       let step = steps.next();
       while (!step.done) step = steps.next(await readOnPool(this.dbPath, step.value));
-      if (this.visibilityMarker() === marker && unchanged()) return this.peopleObservationsFromRows(step.value);
+      if (this.visibilityMarker() === marker) return this.peopleObservationsFromRows(step.value);
     }
     return this.peopleObservations();
   }
@@ -8740,7 +8914,7 @@ export class LocalConnectorStore {
    * file longer.
    */
   private releaseUnreferencedChunkMedia(): void {
-    if (!this.chunkMediaColumnsPresent) return;
+    if (!this.chunkMediaColumnsPresent || this.reclaimProcess) return;
     try {
       // Page by page until the queue is empty: a bulk purge or strip can queue
       // far more than one page, and the store may be deleted right after.
@@ -19253,6 +19427,21 @@ function validateConnectorStoreV6Schema(db: Database): void {
   validateConnectorStoreFtsOwnership(db, 'v6');
 }
 
+/**
+ * The checks that read every row of the text index (its ownership map is
+ * complete), for an open that migrates. Version 6 and later; earlier stores
+ * have no ownership map.
+ */
+function validateConnectorStoreRows(db: Database, versionLabel: string): void {
+  if (readSqliteSchemaVersion(db, SQLITE_STORE_ID) < 6) return;
+  // One statement, so one snapshot.
+  const counts = db.query(`SELECT (SELECT COUNT(*) FROM connector_store_fts) AS fts_rows,
+    (SELECT COUNT(*) FROM connector_store_fts_rows) AS mapped_rows`).get() as { fts_rows: number; mapped_rows: number };
+  if (Number(counts.fts_rows) !== Number(counts.mapped_rows)) {
+    throw new Error(`Connector store schema ${versionLabel} FTS row ownership map is incomplete.`);
+  }
+}
+
 function validateVectorDigestSchema(db: Database): void {
   assertExactTableColumns(db, 'chunk_vector_digest', ['chunk_pk', 'model_id', 'item_pk', 'account_scope', 'digest'], false, 'v16');
   assertExactTableColumns(db, 'chunk_vector_digest_meta', ['model_id', 'cursor_rowid', 'completed'], false, 'v16');
@@ -19263,7 +19452,6 @@ function validateVectorDigestSchema(db: Database): void {
 function validateConnectorStoreSchema(db: Database): void {
   validateConnectorStoreV12Schema(db, 'v15', CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
   validateVectorDigestSchema(db);
-  validateConnectorStoreForeignKeys(db);
   assertIndexColumns(db, 'idx_connector_store_items_parent', ['parent_local_item_id'], 'v15');
   assertExactTableColumns(db, 'chunk_media_releases', ['media_sha256', 'media_path'], false, 'v13');
   assertExactTableColumns(db, 'chunk_media_failures', ['media_sha256', 'reason', 'failed_at', 'attempts'], false, 'v13');
@@ -19404,18 +19592,11 @@ function validateConnectorStoreFtsOwnership(db: Database, versionLabel: string):
     versionLabel,
   );
   assertIndexColumns(db, 'idx_connector_store_fts_rows_item', ['item_pk'], versionLabel);
-  // One statement, so one snapshot: a read-only open runs beside the writer,
-  // and two separate counts let its commit land between them.
-  const counts = db.query(`SELECT (SELECT COUNT(*) FROM connector_store_fts) AS fts_rows,
-    (SELECT COUNT(*) FROM connector_store_fts_rows) AS mapped_rows`).get() as { fts_rows: number; mapped_rows: number };
-  if (Number(counts.fts_rows) !== Number(counts.mapped_rows)) {
-    throw new Error('Connector store schema FTS row ownership map is incomplete.');
-  }
 }
 
 // Walks every foreign key in the file: most of a large store's open time
-// (13 to 15 s cold on Sparta, 2026-11-10, #1242). Only the writer's open runs
-// it, after its migrations; a read-only open migrates nothing.
+// (13 to 15 s cold on Sparta, 2026-11-10, #1242). Only a writer's open that
+// migrates runs it, after its migrations.
 function validateConnectorStoreForeignKeys(db: Database): void {
   const foreignKeyErrors = db.query('PRAGMA foreign_key_check').all();
   if (foreignKeyErrors.length > 0) {

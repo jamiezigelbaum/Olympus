@@ -5,6 +5,8 @@ import { createRequire } from 'node:module';
 import { dirname } from 'node:path';
 
 export interface FileLeaseOptions {
+  /** Readers may coexist; an exclusive maintenance lease excludes all readers. */
+  mode?: 'shared' | 'exclusive';
   acquireTimeoutMs?: number;
   pollIntervalMs?: number;
   /** Accepted for compatibility and ignored: the kernel releases a dead holder's lock, so nothing is ever judged stale. */
@@ -14,6 +16,7 @@ export interface FileLeaseOptions {
 }
 
 interface NormalizedFileLeaseOptions {
+  mode?: 'shared' | 'exclusive';
   acquireTimeoutMs: number;
   pollIntervalMs: number;
 }
@@ -80,7 +83,7 @@ export interface SyncFileLease {
 /**
  * Serialize a cross-process mutation with a lock the operating system holds.
  *
- * The lease is an exclusive SQLite lock (`BEGIN EXCLUSIVE`) on `<target>.lock.db`,
+ * By default the lease is an exclusive SQLite lock (`BEGIN EXCLUSIVE`) on `<target>.lock.db`,
  * taken on an open connection and kept until release. SQLite takes it with the
  * kernel's advisory file locks, which the kernel drops the instant the holder
  * dies (SIGKILL included). So there is no owner record, no process-liveness
@@ -88,6 +91,8 @@ export interface SyncFileLease {
  * its holder is alive and has not released it, and a contender is either given
  * it or told it is busy. Because ownership cannot be taken away, lease.commit()
  * only has to confirm the lease has not been released before it writes.
+ * `mode: 'shared'` instead holds a read transaction: other readers coexist,
+ * while exclusive maintenance still excludes them, including across processes.
  *
  * The lock file is empty and persists between uses; never delete it while a
  * lease may be held (a new file would be a different lock). SQLite is used
@@ -199,7 +204,7 @@ async function acquireFileLease(
   const deadline = Date.now() + options.acquireTimeoutMs;
   await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
   while (true) {
-    const lock = tryKernelLock(lockPath);
+    const lock = tryKernelLock(lockPath, options.mode);
     if (lock) return new AsyncFileLeaseOwner(targetPath, lockPath, lock);
     if (Date.now() >= deadline) throw new FileLeaseBusyError(targetPath);
     await sleep(options.pollIntervalMs);
@@ -214,7 +219,7 @@ function acquireFileLeaseSync(
   const deadline = Date.now() + options.acquireTimeoutMs;
   mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 });
   while (true) {
-    const lock = tryKernelLock(lockPath);
+    const lock = tryKernelLock(lockPath, options.mode);
     if (lock) return new SyncFileLeaseOwner(targetPath, lockPath, lock);
     if (Date.now() >= deadline) throw new FileLeaseBusyError(targetPath);
     sleepSync(options.pollIntervalMs);
@@ -247,7 +252,7 @@ function openSqlite(path: string): SqliteConnection {
  * has open on a file drops that process's POSIX locks on it, so a lock file
  * is created only if absent and is otherwise opened solely by SQLite.
  */
-function tryKernelLock(lockPath: string): KernelLock | undefined {
+function tryKernelLock(lockPath: string, mode: FileLeaseOptions['mode']): KernelLock | undefined {
   if (!existsSync(lockPath)) {
     try {
       closeSync(openSync(lockPath, 'wx', 0o600));
@@ -257,7 +262,8 @@ function tryKernelLock(lockPath: string): KernelLock | undefined {
   }
   const connection = openSqlite(lockPath);
   try {
-    connection.exec('BEGIN EXCLUSIVE');
+    // BEGIN alone is deferred: read the schema to actually take SHARED.
+    connection.exec(mode === 'shared' ? 'BEGIN; SELECT count(*) FROM sqlite_master;' : 'BEGIN EXCLUSIVE');
   } catch (error) {
     closeQuietly(connection);
     if (isSqliteBusy(error)) return undefined;
@@ -609,6 +615,7 @@ function lockPathFor(targetPath: string): string {
 
 function normalizeOptions(options: FileLeaseOptions): NormalizedFileLeaseOptions {
   return {
+    mode: options.mode ?? 'exclusive',
     acquireTimeoutMs: positiveInteger(options.acquireTimeoutMs, DEFAULT_OPTIONS.acquireTimeoutMs),
     pollIntervalMs: positiveInteger(options.pollIntervalMs, DEFAULT_OPTIONS.pollIntervalMs),
   };

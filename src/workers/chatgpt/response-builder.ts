@@ -1644,9 +1644,17 @@ function percent(value: unknown): number {
 
 /** A source waiting on a budget or a rate limit (#1044): closed words, a label and a time only. */
 function copyWait(wait: DashboardSourceWait): DashboardSourceWait[] {
-  if (!wait || typeof wait.sourceId !== 'string' || (wait.reason !== 'daily_budget' && wait.reason !== 'rate_limit')) return [];
+  if (!wait || typeof wait.sourceId !== 'string' || (wait.reason !== 'daily_budget' && wait.reason !== 'rate_limit' && wait.reason !== 'limit')) return [];
   const resumesAt = iso(wait.resumesAt);
-  return [{ sourceId: text(wait.sourceId), label: text(wait.label), reason: wait.reason, api: text(wait.api), ...(resumesAt ? { resumesAt } : {}) }];
+  const fix = wait.fix ? copyFix(wait.fix) : undefined;
+  return [{ sourceId: text(wait.sourceId), label: text(wait.label), reason: wait.reason, api: text(wait.api),
+    ...(wait.reason === 'limit' ? {
+      limitLabel: text(wait.limitLabel), ...(iso(wait.since) ? { since: iso(wait.since)! } : {}),
+      ...(wait.waiting ? { waiting: {
+        ...(finite(wait.waiting.items) ? { items: whole(wait.waiting.items) } : {}),
+        ...(finite(wait.waiting.runs) ? { runs: whole(wait.waiting.runs) } : {}),
+      } } : {}), ...(fix ? { fix } : {}),
+    } : {}), ...(resumesAt ? { resumesAt } : {}) }];
 }
 
 function iso(value: unknown): string | undefined {
