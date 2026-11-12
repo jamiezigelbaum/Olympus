@@ -99,6 +99,7 @@ let answered: number;
 let base: string;
 let answerHeld: Promise<void> | undefined;
 let answerStarted: (() => void) | undefined;
+let logLines: string[];
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'olympus-remote-mcp-'));
@@ -107,6 +108,7 @@ beforeEach(() => {
   answered = 0;
   answerHeld = undefined;
   answerStarted = undefined;
+  logLines = [];
   const worker = createEmailSourceWorker({
     sourceAnswer: { async answer() {
       answered += 1;
@@ -120,6 +122,7 @@ beforeEach(() => {
   const fetch = withRemoteMcpRoute(
     createRemoteMcpHandler({
       connections: () => store,
+      log: (line) => logLines.push(line),
       // The relay child's per-boot secret, as the worker reads it from its 0600 file.
       isRelayed: (request) => request.headers.get('x-olympus-relay') === 'per-boot-secret',
       makeOperationContext: (caller, signal) => createInProcessOperationContext({
@@ -242,6 +245,29 @@ describe('remote MCP over loopback with a connection token', () => {
       await client.close();
     }
     expect(store.list()[0]!.lastUsedAt).not.toBeNull();
+  });
+
+  test('each request logs one line: methods, status and time, never the token, arguments or connection id', async () => {
+    const { connection, token } = store.create('Claude');
+    const client = await connectClient(token);
+    try {
+      await client.listTools();
+      await client.callTool({ name: 'source_answer', arguments: { question: 'secret-question-text' } });
+    } finally {
+      await client.close();
+    }
+    expect((await mcpInitialize('Bearer not-a-connection-token')).status).toBe(401);
+    const lines = logLines.map((line) => JSON.parse(line) as { event: string; calls: string[]; status: number; ms: number; connection?: string; surface: string; relayed: boolean });
+    expect(lines.every((line) => line.event === 'remote_mcp' && line.surface === 'default' && line.relayed === false && line.ms >= 0)).toBe(true);
+    const calls = lines.flatMap((line) => line.calls);
+    expect(calls).toContain('initialize');
+    expect(calls).toContain('tools/list');
+    expect(calls).toContain('tools/call:source_answer');
+    expect(lines.filter((line) => line.calls.includes('tools/list')).every((line) => line.status === 200 && /^[0-9a-f]{8}$/.test(line.connection ?? ''))).toBe(true);
+    expect(lines.at(-1)).toMatchObject({ status: 401, calls: [] });
+    expect(lines.at(-1)!.connection).toBeUndefined();
+    const all = logLines.join('\n');
+    for (const leaked of [token, connection.id, 'secret-question-text', 'Claude']) expect(all).not.toContain(leaked);
   });
 
   test('missing, malformed, unknown, and revoked tokens get 401 with a Bearer challenge', async () => {

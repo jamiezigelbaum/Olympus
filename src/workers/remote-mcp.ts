@@ -33,6 +33,7 @@
  * The connection's identity is set as the caller by the worker, never taken
  * from the client, and lands on the answer's audit ledger entry.
  */
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import type { OlympusConfig } from '../core/config.ts';
@@ -116,6 +117,11 @@ export interface RemoteMcpHandlerOptions {
   demoGrant?: (connection: RemoteMcpConnection) => boolean;
   /** Builds the directory endpoint's server (default createChatGptDirectoryMcpServer; tests narrow its allowlist). */
   directoryServer?: typeof createChatGptDirectoryMcpServer;
+  /**
+   * Where the one line per request goes (remoteMcpLogLine); default stdout,
+   * the worker's journal. Tests capture it.
+   */
+  log?: (line: string) => void;
 }
 
 /** The verified connection behind a remote request; `clientId` for OAuth grants, `provider` as stored. */
@@ -149,23 +155,34 @@ export function withRemoteMcpRoute(
 
 export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (request: Request) => Promise<Response> {
   const isRelayed = options.isRelayed ?? isRelayedRequest;
+  const log = options.log ?? ((line: string) => console.log(line));
   return async (request: Request): Promise<Response> => {
+    const started = performance.now();
+    const trace: RemoteMcpTrace = { surface: remoteMcpSurface(request) ?? 'default', relayed: isRelayed(request) };
+    const response = await handle(request, trace);
+    log(remoteMcpLogLine(trace, response.status, performance.now() - started));
+    return response;
+  };
+
+  async function handle(request: Request, trace: RemoteMcpTrace): Promise<Response> {
     try {
-      const surface = remoteMcpSurface(request) ?? 'default';
+      const surface = trace.surface;
       const verification = authenticateRemoteRequest(request, options, surface);
       if (!verification.ok) return verification.response;
-      const response = await serveAuthenticated(request, verification, surface);
+      trace.connection = verification.connection.id;
+      const response = await serveAuthenticated(request, verification, surface, trace);
       // Only the relay reads the mark; a direct caller never sees it.
-      if (!isRelayed(request)) return response;
+      if (!trace.relayed) return response;
       return markAuthenticated(response, appSurface(request, verification.connection, surface));
     } catch (error) {
       // Anything thrown before or around the MCP transport (building the
       // operation context, the surface choice, the transport itself) is a
       // fixed JSON error, never the runtime's default page with the exception
       // in it, and never carries the relay's authenticated mark.
+      trace.failed = true;
       return remoteFailureResponse(error);
     }
-  };
+  }
 
   function appSurface(request: Request, connection: RemoteMcpConnection, surface: McpSurface): CredentialSurface {
     if (options.chatgpt?.servesRequest(request, connection)) return 'chatgpt';
@@ -178,6 +195,7 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
     request: Request,
     verification: { connection: RemoteMcpConnection },
     surface: McpSurface,
+    trace: RemoteMcpTrace,
   ): Promise<Response> {
     if (request.method !== 'POST') {
       // Stateless server: no standalone SSE stream (GET) and no session to end
@@ -197,6 +215,7 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
     } catch {
       // Left undefined: the transport then answers its own JSON-RPC parse error.
     }
+    trace.calls = rpcCallNames(parsedBody);
     const caller = remoteOperationCaller(verification.connection);
     const ctx = options.makeOperationContext(caller, request.signal);
     const selected = appSurface(request, verification.connection, surface);
@@ -240,6 +259,55 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
       await server.close().catch(() => undefined);
     }
   }
+}
+
+/** What one remote MCP request was, for its log line; filled in as it is served. */
+interface RemoteMcpTrace {
+  surface: McpSurface;
+  relayed: boolean;
+  connection?: string;
+  calls?: string[];
+  failed?: boolean;
+}
+
+/**
+ * The JSON-RPC methods a body carries, a tool call as `tools/call:<name>`;
+ * nothing else from the body (no arguments, ids or text). At most 8.
+ */
+function rpcCallNames(body: unknown): string[] {
+  const messages = Array.isArray(body) ? body : [body];
+  const names: string[] = [];
+  for (const message of messages.slice(0, 8)) {
+    const { method, params } = (message && typeof message === 'object' ? message : {}) as { method?: unknown; params?: { name?: unknown } };
+    if (typeof method !== 'string' || method.length > 64) {
+      names.push('?');
+      continue;
+    }
+    const tool = method === 'tools/call' && typeof params?.name === 'string' && /^[a-z0-9_]{1,64}$/.test(params.name) ? `:${params.name}` : '';
+    names.push(`${method}${tool}`);
+  }
+  return names;
+}
+
+/**
+ * One JSON line per remote MCP request (#1266: whether an agent fetched the
+ * tool list, and what it got back, while it said it had no tools). It names
+ * the methods, the status, the time taken, the endpoint, whether the relay
+ * carried it, and the connection only as a short hash: never a body, an
+ * argument, a token or an address.
+ */
+export function remoteMcpLogLine(trace: RemoteMcpTrace, status: number, ms: number): string {
+  return JSON.stringify({
+    at: new Date().toISOString(),
+    event: 'remote_mcp',
+    surface: trace.surface,
+    relayed: trace.relayed,
+    calls: trace.calls ?? [],
+    status,
+    ms: Math.round(ms),
+    ...(trace.connection ? { connection: createHash('sha256').update(`olympus-remote-log\n${trace.connection}`).digest('hex').slice(0, 8) } : {}),
+    ...(trace.failed ? { failed: true } : {}),
+  });
 }
 
 function anonymousListing(enabled: (() => boolean) | undefined, inner: McpServerExtension | undefined): McpServerExtension {
