@@ -242,7 +242,9 @@ function summaries(rows: readonly PassageRow[], ks: readonly number[]): PassageR
 
 /** Which stores and lanes a question's search lost, by code; never the detail text. */
 export function degradationsOf(detail: EvidencePackBuildDetail): Degradation[] {
-  const lanes = detail.degradations.map(({ laneName, reason }) => {
+  // lane_budget_cut means a store searched fine but the seat budget filled
+  // first (source-index/types.ts): a pack-size outcome, not a search cut short.
+  const lanes = detail.degradations.filter(({ reason }) => reason !== 'lane_budget_cut').map(({ laneName, reason }) => {
     const split = laneName.indexOf(':');
     return split < 0 ? { corpusId: laneName, reason } : { corpusId: laneName.slice(0, split), lane: laneName.slice(split + 1), reason };
   });

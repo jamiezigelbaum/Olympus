@@ -193,3 +193,11 @@ test('rows carry the expected item chunk count; summaries count each funnel reac
   expect(Object.keys(receipt.summary.byLength).sort()).toEqual(['1_chunk', '4+_chunks']);
   expect(receipt.summary.byLength['4+_chunks']!.answerable).toBe(1);
 });
+
+test('a store left without a seat by the seat budget is not a degraded search', async () => {
+  const one = { ...dataset, questions: [dataset.questions[0]!] };
+  const receipt = await runPassageEval({ dataset: one, maxResults: 5, storeCounts: counts, gitSha: 'abc',
+    buildPack: async () => ({ ...detail(), degradations: [{ laneName: 'internal.other.mail', laneType: 'keyword', reason: 'lane_budget_cut', occurrences: 1 }] }) });
+  expect(receipt.questions![0]!.degraded).toBeUndefined();
+  expect(receipt.degradedIds).toEqual([]);
+});

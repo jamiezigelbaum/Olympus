@@ -466,7 +466,10 @@ unheld items with served text; stderr gives each store's eligible count. Half
 the requests ask for a paraphrase with no quote content words. Invalid quotes
 and paraphrases are discarded and counted by reason in `rejectedBy`
 (`not_json`, `missing_fields`, `quote_length`, `quote_not_in_item`,
-`question_repeats_quote`). A reply that is not a JSON object counts as
+`question_repeats_quote`, `generic`). A valid draft that the question judge
+(the passage eval's `--judge-questions` check) calls generic is redrafted once
+with an instruction to name what sets the item apart; `redrafted` counts the
+ones kept that way, and a second generic draft is rejected as `generic`. A reply that is not a JSON object counts as
 `not_json`, not as a failed request. Alternates
 for every kept quote are found in one read of each store after drafting: each
 item's words are split once and tested against all quotes with the same passage
