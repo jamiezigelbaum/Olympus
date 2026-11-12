@@ -718,7 +718,7 @@ export function rowProblems(row: RowView, expect: ArchiveExpectation, via: 'requ
   // An agent's request names a place on the computer; a dropped upload has none to name (it is read from Olympus's own copy).
   if (via === 'request' && !row.facts.includes(FIXTURE_FOLDER)) problems.push(`the folder ${FIXTURE_FOLDER} is not on the facts line ("${row.facts.slice(0, 80)}")`);
   if (!row.facts.includes(datesWord(expect))) problems.push(`the days are not "${datesWord(expect)}" (facts line: "${row.facts.slice(0, 80)}")`);
-  if (!row.text.includes(messagesWord(expect.messages, expect.family))) problems.push(`the row does not say "${messagesWord(expect.messages, expect.family)}"`);
+  if (!row.text.includes(messagesWord(expect.messages, expect.family))) problems.push(`the row does not say "${messagesWord(expect.messages, expect.family)}" (it reads "${row.text.slice(0, 160)}")`);
   const expected = expectedLists(expect);
   const hasLines = expected.notImported.length + expected.howRead.length > 0;
   const see = expectedSeeLabel(expect);
