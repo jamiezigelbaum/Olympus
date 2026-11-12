@@ -19512,7 +19512,6 @@ function backUpBeforeUpdate(db, storeId, fromVersion, env, report, freeBytes = d
   const file = db.filename;
   const backup = preSchemaBackupPath(file, fromVersion);
   const started = performance.now();
-  rmSync9(backup, { force: true });
   const needed = schemaUpdateSpaceNeeded(statSync12(file).size);
   const free = freeBytes(dirname26(file));
   if (free < needed) {
