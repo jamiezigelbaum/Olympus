@@ -14480,12 +14480,37 @@ var GMAIL_STORE_PULL_FRESHNESS_THRESHOLD_MS = 2 * 60 * 60000;
 var GMAIL_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
 var GMAIL_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
 var GMAIL_DAILY_REQUEST_GUARD_REASON = "gmail_daily_api_request_guard";
+// src/core/engine-split.ts
+var ENGINE_ROLE_ENV = "OLYMPUS_WORKER_ENGINE_ROLE";
+function engineRoleFromEnv(env = process.env) {
+  const value = env[ENGINE_ROLE_ENV]?.trim();
+  if (!value)
+    return "single";
+  if (value === "background" || value === "front")
+    return value;
+  throw new Error(`${ENGINE_ROLE_ENV} must be background or front.`);
+}
+
 // src/workers/control-path-headroom.ts
 var CONTROL_PATH_SLICE_MS = 20;
 var CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200;
 var CONTROL_PATH_REST_MS = 25;
 var HEARTBEAT_MS = 50;
 var CONTROL_PATH_FREEZE_LOG_MS = 2000;
+function controlPathFreezeSubject(role) {
+  if (role === "front")
+    return "the front process could not answer requests";
+  if (role === "background")
+    return "the background process was blocked";
+  return "the worker could not answer requests";
+}
+function roleFromEnv() {
+  try {
+    return engineRoleFromEnv();
+  } catch {
+    return "single";
+  }
+}
 
 class ControlPathHeadroom {
   sliceMs;
@@ -14504,6 +14529,7 @@ class ControlPathHeadroom {
   active = new Map;
   log;
   freezeLogMs;
+  freezeSubject;
   constructor(options = {}) {
     this.sliceMs = options.sliceMs ?? CONTROL_PATH_SLICE_MS;
     this.lagRestThresholdMs = options.lagRestThresholdMs ?? CONTROL_PATH_LAG_REST_THRESHOLD_MS;
@@ -14514,6 +14540,7 @@ class ControlPathHeadroom {
     }));
     this.log = options.log ?? ((line) => console.error(line));
     this.freezeLogMs = options.freezeLogMs ?? CONTROL_PATH_FREEZE_LOG_MS;
+    this.freezeSubject = controlPathFreezeSubject(options.role ?? roleFromEnv());
     this.lastTurnAt = this.now();
   }
   enter(label) {
@@ -14568,7 +14595,7 @@ class ControlPathHeadroom {
       if (this.lastLagMs >= this.freezeLogMs) {
         this.freezes += 1;
         const running = [...this.active.keys()].sort().join(",") || "none";
-        this.log(`${new Date().toISOString()} [olympus:control-path] the worker could not answer requests for ${Math.round(this.lastLagMs)} ms; background work running: ${running}`);
+        this.log(`${new Date().toISOString()} [olympus:control-path] ${this.freezeSubject} for ${Math.round(this.lastLagMs)} ms; background work running: ${running}`);
       }
     }, HEARTBEAT_MS);
     this.heartbeat.unref?.();

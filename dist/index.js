@@ -817,6 +817,159 @@ var init_linux_engine_layout = __esm(() => {
   ];
 });
 
+// src/core/worker-transport.ts
+import { lstatSync as lstatSync3, mkdirSync as mkdirSync4, realpathSync as realpathSync2, chmodSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { request as httpRequest } from "node:http";
+import { Readable } from "node:stream";
+import { dirname as dirname5, isAbsolute as isAbsolute4, join as join4, normalize, parse } from "node:path";
+function ownerId(options) {
+  const uid = options.uid ?? process.getuid?.();
+  if (uid === undefined)
+    throw new Error("Worker socket requires a Unix owner.");
+  return uid;
+}
+function validateDirectory(path, uid, privateMode) {
+  if (!isAbsolute4(path) || normalize(path) !== path || /[\x00-\x1f\x7f]/.test(path))
+    throw new Error("Unsafe worker socket directory.");
+  let current = parse(path).root;
+  for (const part of path.slice(current.length).split("/").filter(Boolean)) {
+    current = join4(current, part);
+    const stat3 = lstatSync3(current);
+    if (!stat3.isDirectory() || stat3.isSymbolicLink() || stat3.uid !== uid && stat3.uid !== 0)
+      throw new Error("Unsafe worker socket ancestor.");
+    if (stat3.mode & 18 && !(stat3.uid === 0 && stat3.mode & 512))
+      throw new Error("Writable worker socket ancestor.");
+  }
+  const stat2 = lstatSync3(path);
+  if (privateMode && (stat2.uid !== uid || (stat2.mode & 511) !== 448))
+    throw new Error("Worker runtime directory must be owner-owned and 0700.");
+  if (realpathSync2(path) !== path)
+    throw new Error("Worker socket directory must not contain symlinks.");
+}
+function workerSocketPath(options = {}) {
+  if ((options.platform ?? process.platform) !== "linux")
+    return;
+  const layout = resolveLinuxEngineLayout(options.env ?? process.env);
+  const runtime = layout.runtimeHome;
+  if (!runtime)
+    throw new Error("Linux requires an owner-owned 0700 XDG_RUNTIME_DIR from the user session.");
+  validateDirectory(runtime, ownerId(options), true);
+  if (!/^\/[A-Za-z0-9_./-]+$/.test(runtime))
+    throw new Error("XDG_RUNTIME_DIR must be a shell-safe absolute path for SSH socket forwarding.");
+  const path = layout.workerSocketPath;
+  if (Buffer.byteLength(path) > 107)
+    throw new Error("Worker Unix socket path exceeds the Linux limit.");
+  return path;
+}
+function validateWorkerSocketDirectory(options = {}) {
+  const path = workerSocketPath(options);
+  if (!path)
+    return;
+  validateDirectory(dirname5(path), ownerId(options), true);
+  return path;
+}
+function validateWorkerSocket(options = {}) {
+  const path = validateWorkerSocketDirectory(options);
+  if (!path)
+    return;
+  const uid = ownerId(options);
+  const stat2 = lstatSync3(path);
+  if (!stat2.isSocket() || stat2.uid !== uid || (stat2.mode & 511) !== 384)
+    throw new Error("Worker socket must be owner-owned and 0600.");
+  return path;
+}
+function workerSocketListenerStopped(path) {
+  const result = spawnSync(process.execPath, ["-e", `const s=Bun.connect({unix:process.argv[1],socket:{data(){},open(s){s.end();process.exit(1)},error(){process.exit(2)}}});s.catch(e=>process.exit(['ENOENT','ECONNREFUSED'].includes(e.code)?0:2));setTimeout(()=>process.exit(2),1500);`, path], { timeout: 2000 });
+  return result.status === 0 ? true : result.status === 1 ? false : undefined;
+}
+function removeReleasedWorkerSocket(options, custody) {
+  const path = workerSocketPath(options);
+  if (!path)
+    return false;
+  try {
+    lstatSync3(path);
+  } catch (error) {
+    if (error.code === "ENOENT")
+      return false;
+    throw error;
+  }
+  if (!custody.previousWorkerReleased)
+    throw new Error("Previous worker process custody is not released; the socket was retained.");
+  validateWorkerSocket(options);
+  if (workerSocketListenerStopped(path) !== true)
+    throw new Error("Worker socket listener custody is live or unknown; the socket was retained.");
+  removeFileDurablySync(path);
+  return true;
+}
+function createWorkerFetch(options = {}, fetchImpl = globalThis.fetch) {
+  if ((options.platform ?? process.platform) !== "linux")
+    return fetchImpl;
+  return (input, init) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (url.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) || url.username || url.password) {
+      throw new Error("Linux worker requests require a loopback HTTP origin over the owner socket.");
+    }
+    const unix = validateWorkerSocket(options);
+    if (typeof Bun === "undefined")
+      return nodeWorkerFetch(unix, input, init, options);
+    return fetchImpl(input, { ...init, unix, redirect: init?.redirect === "manual" ? "manual" : "error" });
+  };
+}
+function createUnixSocketFetch(socketPath, validate = () => {}) {
+  return (input, init) => {
+    validate();
+    if (typeof Bun === "undefined")
+      return nodeWorkerFetch(socketPath, input, init, validate);
+    return globalThis.fetch(input, { ...init, unix: socketPath, redirect: "error" });
+  };
+}
+async function nodeWorkerFetch(unix, input, init, options) {
+  const request = new Request(input, init);
+  const body = request.body ? Buffer.from(await request.arrayBuffer()) : undefined;
+  const url = new URL(request.url);
+  if (typeof options === "function")
+    options();
+  else
+    validateWorkerSocket(options);
+  return new Promise((resolve3, reject) => {
+    const outgoing = httpRequest(url, {
+      socketPath: unix,
+      method: request.method,
+      headers: Object.fromEntries(request.headers),
+      signal: request.signal,
+      agent: false
+    }, (incoming) => {
+      const status = incoming.statusCode ?? 500;
+      if (status >= 300 && status < 400 && init?.redirect !== "manual") {
+        incoming.destroy();
+        reject(new TypeError("Worker request redirect refused."));
+        return;
+      }
+      const headers = new Headers;
+      for (let i = 0;i < incoming.rawHeaders.length; i += 2)
+        headers.append(incoming.rawHeaders[i], incoming.rawHeaders[i + 1]);
+      const noBody = request.method === "HEAD" || [204, 205, 304].includes(status);
+      const response = new Response(noBody ? null : Readable.toWeb(incoming), {
+        status,
+        statusText: incoming.statusMessage ?? "",
+        headers
+      });
+      if (noBody)
+        incoming.resume();
+      Object.defineProperty(response, "url", { value: request.url });
+      resolve3(response);
+    });
+    outgoing.on("error", reject);
+    outgoing.end(body);
+  });
+}
+var workerFetch = (input, init) => createWorkerFetch()(input, init);
+var init_worker_transport = __esm(() => {
+  init_linux_engine_layout();
+  init_atomic_file();
+});
+
 // src/core/operation-error.ts
 function sourceAnswerJobNotFound() {
   return new OperationError("source_answer_job_not_found", "No Olympus answer with that job_id is available to this connection. It may have expired or Olympus may have restarted.", "Ask the question again with source_answer.");
@@ -6776,6 +6929,59 @@ var init_data_owner_lock = __esm(() => {
   init_olympus_layout();
   runtimeRequire2 = createRequire3(import.meta.url);
   O_CLOEXEC = process.platform === "darwin" ? 16777216 : 524288;
+});
+
+// src/core/engine-split.ts
+import { mkdirSync as mkdirSync9 } from "node:fs";
+import { dirname as dirname16, join as join19 } from "node:path";
+function engineRoleFromEnv(env = process.env) {
+  const value = env[ENGINE_ROLE_ENV]?.trim();
+  if (!value)
+    return "single";
+  if (value === "background" || value === "front")
+    return value;
+  throw new Error(`${ENGINE_ROLE_ENV} must be background or front.`);
+}
+function engineBackgroundSocketPath(options = {}) {
+  const workerSocket = workerSocketPath(options);
+  const path = workerSocket ? join19(dirname16(workerSocket), "background.sock") : join19(sharedDataPath("engine-run", options.env ?? process.env), "background.sock");
+  if (Buffer.byteLength(path) > 103)
+    throw new Error("Engine background socket path is too long for a unix socket.");
+  return path;
+}
+function prepareEngineBackgroundSocketDirectory(socketPath) {
+  mkdirSync9(dirname16(socketPath), { recursive: true, mode: 448 });
+}
+async function probeEngineBackground(fetchBackground, authToken, instanceId, timeoutMs) {
+  const controller = new AbortController;
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  timeout.unref?.();
+  try {
+    const response = await fetchBackground(ENGINE_BACKGROUND_ORIGIN + ENGINE_READY_PATH, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${authToken}` },
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {
+        return;
+      });
+      return false;
+    }
+    const body = await response.json().catch(() => {
+      return;
+    });
+    return body?.ready === true && body.schema_current === true && (instanceId === undefined || body.instance_id === instanceId);
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+var ENGINE_ROLE_ENV = "OLYMPUS_WORKER_ENGINE_ROLE", ENGINE_BACKGROUND_SOCKET_ENV = "OLYMPUS_ENGINE_BACKGROUND_SOCKET", ENGINE_BACKGROUND_ORIGIN = "http://olympus-background", ENGINE_READY_PATH = "/engine/ready";
+var init_engine_split = __esm(() => {
+  init_olympus_layout();
+  init_worker_transport();
 });
 
 // src/workers/classification/tier-ledger-path.ts
@@ -19692,6 +19898,21 @@ var init_keyword_expansion = __esm(() => {
 });
 
 // src/workers/control-path-headroom.ts
+function controlPathFreezeSubject(role) {
+  if (role === "front")
+    return "the front process could not answer requests";
+  if (role === "background")
+    return "the background process was blocked";
+  return "the worker could not answer requests";
+}
+function roleFromEnv() {
+  try {
+    return engineRoleFromEnv();
+  } catch {
+    return "single";
+  }
+}
+
 class ControlPathHeadroom {
   sliceMs;
   lagRestThresholdMs;
@@ -19709,6 +19930,7 @@ class ControlPathHeadroom {
   active = new Map;
   log;
   freezeLogMs;
+  freezeSubject;
   constructor(options = {}) {
     this.sliceMs = options.sliceMs ?? CONTROL_PATH_SLICE_MS;
     this.lagRestThresholdMs = options.lagRestThresholdMs ?? CONTROL_PATH_LAG_REST_THRESHOLD_MS;
@@ -19719,6 +19941,7 @@ class ControlPathHeadroom {
     }));
     this.log = options.log ?? ((line) => console.error(line));
     this.freezeLogMs = options.freezeLogMs ?? CONTROL_PATH_FREEZE_LOG_MS;
+    this.freezeSubject = controlPathFreezeSubject(options.role ?? roleFromEnv());
     this.lastTurnAt = this.now();
   }
   enter(label) {
@@ -19773,7 +19996,7 @@ class ControlPathHeadroom {
       if (this.lastLagMs >= this.freezeLogMs) {
         this.freezes += 1;
         const running = [...this.active.keys()].sort().join(",") || "none";
-        this.log(`${new Date().toISOString()} [olympus:control-path] the worker could not answer requests for ${Math.round(this.lastLagMs)} ms; background work running: ${running}`);
+        this.log(`${new Date().toISOString()} [olympus:control-path] ${this.freezeSubject} for ${Math.round(this.lastLagMs)} ms; background work running: ${running}`);
       }
     }, HEARTBEAT_MS);
     this.heartbeat.unref?.();
@@ -19781,6 +20004,7 @@ class ControlPathHeadroom {
 }
 var CONTROL_PATH_SLICE_MS = 20, CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200, CONTROL_PATH_REST_MS = 25, HEARTBEAT_MS = 50, CONTROL_PATH_FREEZE_LOG_MS = 2000, controlPathHeadroom;
 var init_control_path_headroom = __esm(() => {
+  init_engine_split();
   controlPathHeadroom = new ControlPathHeadroom;
 });
 
@@ -26416,158 +26640,11 @@ var init_source_ingestion_ledger = __esm(() => {
   corpusPopulations = new WeakMap;
 });
 
-// src/core/worker-transport.ts
-init_linux_engine_layout();
-init_atomic_file();
-import { lstatSync as lstatSync3, mkdirSync as mkdirSync4, realpathSync as realpathSync2, chmodSync } from "node:fs";
-import { spawnSync } from "node:child_process";
-import { request as httpRequest } from "node:http";
-import { Readable } from "node:stream";
-import { dirname as dirname5, isAbsolute as isAbsolute4, join as join4, normalize, parse } from "node:path";
-function ownerId(options) {
-  const uid = options.uid ?? process.getuid?.();
-  if (uid === undefined)
-    throw new Error("Worker socket requires a Unix owner.");
-  return uid;
-}
-function validateDirectory(path, uid, privateMode) {
-  if (!isAbsolute4(path) || normalize(path) !== path || /[\x00-\x1f\x7f]/.test(path))
-    throw new Error("Unsafe worker socket directory.");
-  let current = parse(path).root;
-  for (const part of path.slice(current.length).split("/").filter(Boolean)) {
-    current = join4(current, part);
-    const stat3 = lstatSync3(current);
-    if (!stat3.isDirectory() || stat3.isSymbolicLink() || stat3.uid !== uid && stat3.uid !== 0)
-      throw new Error("Unsafe worker socket ancestor.");
-    if (stat3.mode & 18 && !(stat3.uid === 0 && stat3.mode & 512))
-      throw new Error("Writable worker socket ancestor.");
-  }
-  const stat2 = lstatSync3(path);
-  if (privateMode && (stat2.uid !== uid || (stat2.mode & 511) !== 448))
-    throw new Error("Worker runtime directory must be owner-owned and 0700.");
-  if (realpathSync2(path) !== path)
-    throw new Error("Worker socket directory must not contain symlinks.");
-}
-function workerSocketPath(options = {}) {
-  if ((options.platform ?? process.platform) !== "linux")
-    return;
-  const layout = resolveLinuxEngineLayout(options.env ?? process.env);
-  const runtime = layout.runtimeHome;
-  if (!runtime)
-    throw new Error("Linux requires an owner-owned 0700 XDG_RUNTIME_DIR from the user session.");
-  validateDirectory(runtime, ownerId(options), true);
-  if (!/^\/[A-Za-z0-9_./-]+$/.test(runtime))
-    throw new Error("XDG_RUNTIME_DIR must be a shell-safe absolute path for SSH socket forwarding.");
-  const path = layout.workerSocketPath;
-  if (Buffer.byteLength(path) > 107)
-    throw new Error("Worker Unix socket path exceeds the Linux limit.");
-  return path;
-}
-function validateWorkerSocketDirectory(options = {}) {
-  const path = workerSocketPath(options);
-  if (!path)
-    return;
-  validateDirectory(dirname5(path), ownerId(options), true);
-  return path;
-}
-function validateWorkerSocket(options = {}) {
-  const path = validateWorkerSocketDirectory(options);
-  if (!path)
-    return;
-  const uid = ownerId(options);
-  const stat2 = lstatSync3(path);
-  if (!stat2.isSocket() || stat2.uid !== uid || (stat2.mode & 511) !== 384)
-    throw new Error("Worker socket must be owner-owned and 0600.");
-  return path;
-}
-function workerSocketListenerStopped(path) {
-  const result = spawnSync(process.execPath, ["-e", `const s=Bun.connect({unix:process.argv[1],socket:{data(){},open(s){s.end();process.exit(1)},error(){process.exit(2)}}});s.catch(e=>process.exit(['ENOENT','ECONNREFUSED'].includes(e.code)?0:2));setTimeout(()=>process.exit(2),1500);`, path], { timeout: 2000 });
-  return result.status === 0 ? true : result.status === 1 ? false : undefined;
-}
-function removeReleasedWorkerSocket(options, custody) {
-  const path = workerSocketPath(options);
-  if (!path)
-    return false;
-  try {
-    lstatSync3(path);
-  } catch (error) {
-    if (error.code === "ENOENT")
-      return false;
-    throw error;
-  }
-  if (!custody.previousWorkerReleased)
-    throw new Error("Previous worker process custody is not released; the socket was retained.");
-  validateWorkerSocket(options);
-  if (workerSocketListenerStopped(path) !== true)
-    throw new Error("Worker socket listener custody is live or unknown; the socket was retained.");
-  removeFileDurablySync(path);
-  return true;
-}
-function createWorkerFetch(options = {}, fetchImpl = globalThis.fetch) {
-  if ((options.platform ?? process.platform) !== "linux")
-    return fetchImpl;
-  return (input, init) => {
-    const url = new URL(input instanceof Request ? input.url : String(input));
-    if (url.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) || url.username || url.password) {
-      throw new Error("Linux worker requests require a loopback HTTP origin over the owner socket.");
-    }
-    const unix = validateWorkerSocket(options);
-    if (typeof Bun === "undefined")
-      return nodeWorkerFetch(unix, input, init, options);
-    return fetchImpl(input, { ...init, unix, redirect: init?.redirect === "manual" ? "manual" : "error" });
-  };
-}
-function createUnixSocketFetch(socketPath, validate = () => {}) {
-  return (input, init) => {
-    validate();
-    if (typeof Bun === "undefined")
-      return nodeWorkerFetch(socketPath, input, init, validate);
-    return globalThis.fetch(input, { ...init, unix: socketPath, redirect: "error" });
-  };
-}
-async function nodeWorkerFetch(unix, input, init, options) {
-  const request = new Request(input, init);
-  const body = request.body ? Buffer.from(await request.arrayBuffer()) : undefined;
-  const url = new URL(request.url);
-  if (typeof options === "function")
-    options();
-  else
-    validateWorkerSocket(options);
-  return new Promise((resolve3, reject) => {
-    const outgoing = httpRequest(url, {
-      socketPath: unix,
-      method: request.method,
-      headers: Object.fromEntries(request.headers),
-      signal: request.signal,
-      agent: false
-    }, (incoming) => {
-      const status = incoming.statusCode ?? 500;
-      if (status >= 300 && status < 400 && init?.redirect !== "manual") {
-        incoming.destroy();
-        reject(new TypeError("Worker request redirect refused."));
-        return;
-      }
-      const headers = new Headers;
-      for (let i = 0;i < incoming.rawHeaders.length; i += 2)
-        headers.append(incoming.rawHeaders[i], incoming.rawHeaders[i + 1]);
-      const noBody = request.method === "HEAD" || [204, 205, 304].includes(status);
-      const response = new Response(noBody ? null : Readable.toWeb(incoming), {
-        status,
-        statusText: incoming.statusMessage ?? "",
-        headers
-      });
-      if (noBody)
-        incoming.resume();
-      Object.defineProperty(response, "url", { value: request.url });
-      resolve3(response);
-    });
-    outgoing.on("error", reject);
-    outgoing.end(body);
-  });
-}
-var workerFetch = (input, init) => createWorkerFetch()(input, init);
+// src/core/remote-open-tool.ts
+init_worker_transport();
 
 // src/core/dashboard-opening.ts
+init_worker_transport();
 import { accessSync, constants as fsConstants, statSync } from "node:fs";
 import { join as join5 } from "node:path";
 
@@ -27355,6 +27432,7 @@ async function openLinuxOwnerTicketFile(path, dependencies = {}) {
 }
 
 // src/core/remote-open.ts
+init_worker_transport();
 var SERVER_MODE_ENV = "OLYMPUS_SERVER_MODE";
 var SERVER_SSH_TARGET_ENV = "OLYMPUS_SERVER_SSH_TARGET";
 var SERVER_AGENT_ROUTE_ENV = "OLYMPUS_SERVER_AGENT_ROUTE";
@@ -28559,6 +28637,7 @@ function argusTimeoutError(lane, url, timeoutMs) {
 
 // src/core/email.ts
 init_release_manifest();
+init_worker_transport();
 init_config();
 
 // src/core/email-policy.ts
@@ -29713,6 +29792,7 @@ import { homedir as homedir8 } from "node:os";
 import { createHmac, createHash as createHash2, randomBytes as randomBytes4, timingSafeEqual } from "node:crypto";
 import { closeSync as closeSync4, openSync as openSync4, writeFileSync as writeFileSync5, unlinkSync as unlinkSync2 } from "node:fs";
 import { dirname as dirname15, join as join18 } from "node:path";
+init_worker_transport();
 
 // src/workers/remote-request-body.ts
 init_http_timeout();
@@ -30410,54 +30490,12 @@ class LinuxOwnerBridge {
 }
 
 // src/core/linux-owner-bridge-host.ts
+init_worker_transport();
 var OWNER_BRIDGE_HOST_ENV = "OLYMPUS_OWNER_BRIDGE_HOST_SOCKET";
 
-// src/core/engine-split.ts
-init_olympus_layout();
-import { mkdirSync as mkdirSync9 } from "node:fs";
-import { dirname as dirname16, join as join19 } from "node:path";
-var ENGINE_ROLE_ENV = "OLYMPUS_WORKER_ENGINE_ROLE";
-var ENGINE_BACKGROUND_SOCKET_ENV = "OLYMPUS_ENGINE_BACKGROUND_SOCKET";
-var ENGINE_BACKGROUND_ORIGIN = "http://olympus-background";
-var ENGINE_READY_PATH = "/engine/ready";
-function engineBackgroundSocketPath(options = {}) {
-  const workerSocket = workerSocketPath(options);
-  const path = workerSocket ? join19(dirname16(workerSocket), "background.sock") : join19(sharedDataPath("engine-run", options.env ?? process.env), "background.sock");
-  if (Buffer.byteLength(path) > 103)
-    throw new Error("Engine background socket path is too long for a unix socket.");
-  return path;
-}
-function prepareEngineBackgroundSocketDirectory(socketPath) {
-  mkdirSync9(dirname16(socketPath), { recursive: true, mode: 448 });
-}
-async function probeEngineBackground(fetchBackground, authToken, instanceId, timeoutMs) {
-  const controller = new AbortController;
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  timeout.unref?.();
-  try {
-    const response = await fetchBackground(ENGINE_BACKGROUND_ORIGIN + ENGINE_READY_PATH, {
-      method: "GET",
-      headers: { Authorization: `Bearer ${authToken}` },
-      signal: controller.signal
-    });
-    if (!response.ok) {
-      await response.body?.cancel().catch(() => {
-        return;
-      });
-      return false;
-    }
-    const body = await response.json().catch(() => {
-      return;
-    });
-    return body?.ready === true && body.schema_current === true && (instanceId === undefined || body.instance_id === instanceId);
-  } catch {
-    return false;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
 // src/core/native-worker-service.ts
+init_worker_transport();
+init_engine_split();
 init_descendant_groups();
 init_config();
 init_native_process_service();
@@ -32233,6 +32271,7 @@ init_linux_desktop_entry();
 init_engine_maintenance();
 init_file_lease();
 init_linux_engine_layout();
+init_worker_transport();
 
 // src/core/update-check.ts
 import { readFileSync as readFileSync24 } from "node:fs";
@@ -32613,6 +32652,7 @@ function absolute2(value, label) {
 
 // src/core/linux-engine-service.ts
 init_linux_secret_backend();
+init_worker_transport();
 var SYSTEMD_ENGINE_UNIT = "olympus-engine.service";
 function linuxEngineExec(command, args) {
   const r = spawnSync7(command, args, { encoding: "utf8", timeout: 35000, env: { ...process.env, SYSTEMD_PAGER: "", SYSTEMD_COLORS: "0" } });
@@ -32744,6 +32784,7 @@ function linuxEngineCustody(l, facts, options = {}) {
 
 // src/core/doctor.ts
 init_linux_engine_layout();
+init_worker_transport();
 init_model_transport();
 init_config();
 import { spawnSync as spawnSync8 } from "node:child_process";
@@ -36575,6 +36616,7 @@ init_data_owner_lock();
 init_olympus_layout();
 init_operation_error();
 init_worker_auth();
+init_worker_transport();
 import { realpathSync as realpathSync8 } from "node:fs";
 import { resolve as resolve11 } from "node:path";
 var WORKER_CLI_ROUTE_PREFIX = "/cli/";
@@ -37882,6 +37924,7 @@ async function revalidateStdioSourceAnswer(ctx, result) {
 }
 
 // src/core/control-ui-gateway.ts
+init_worker_transport();
 init_http_timeout();
 
 // src/control-ui-contract.ts

@@ -24,6 +24,8 @@
  * one lane has.
  */
 
+import { engineRoleFromEnv, type EngineRole } from '../core/engine-split.ts';
+
 export const CONTROL_PATH_SLICE_MS = 20;
 /** How late a heartbeat may fire before ingestion rests for the control path. */
 export const CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200;
@@ -31,6 +33,21 @@ export const CONTROL_PATH_REST_MS = 25;
 const HEARTBEAT_MS = 50;
 /** A freeze this long is logged, with what was running, so the next one is named. */
 export const CONTROL_PATH_FREEZE_LOG_MS = 2_000;
+
+/**
+ * Who a freeze held up. With the engine split on, the front and the
+ * background both log to the same stream, and only the front answers
+ * requests, so each line names its process.
+ */
+export function controlPathFreezeSubject(role: EngineRole): string {
+  if (role === 'front') return 'the front process could not answer requests';
+  if (role === 'background') return 'the background process was blocked';
+  return 'the worker could not answer requests';
+}
+
+function roleFromEnv(): EngineRole {
+  try { return engineRoleFromEnv(); } catch { return 'single'; }
+}
 
 export interface ControlPathHeadroomOptions {
   sliceMs?: number;
@@ -41,6 +58,8 @@ export interface ControlPathHeadroomOptions {
   turn?: (ms: number) => Promise<void>;
   log?: (line: string) => void;
   freezeLogMs?: number;
+  /** Which process this is, for the freeze log; defaults to the worker's own role. */
+  role?: EngineRole;
 }
 
 export class ControlPathHeadroom {
@@ -60,6 +79,7 @@ export class ControlPathHeadroom {
   private readonly active = new Map<string, number>();
   private readonly log: (line: string) => void;
   private readonly freezeLogMs: number;
+  private readonly freezeSubject: string;
 
   constructor(options: ControlPathHeadroomOptions = {}) {
     this.sliceMs = options.sliceMs ?? CONTROL_PATH_SLICE_MS;
@@ -69,6 +89,7 @@ export class ControlPathHeadroom {
     this.turn = options.turn ?? ((ms) => new Promise<void>((resolve) => { setTimeout(resolve, ms); }));
     this.log = options.log ?? ((line) => console.error(line));
     this.freezeLogMs = options.freezeLogMs ?? CONTROL_PATH_FREEZE_LOG_MS;
+    this.freezeSubject = controlPathFreezeSubject(options.role ?? roleFromEnv());
     this.lastTurnAt = this.now();
   }
 
@@ -138,7 +159,7 @@ export class ControlPathHeadroom {
       if (this.lastLagMs >= this.freezeLogMs) {
         this.freezes += 1;
         const running = [...this.active.keys()].sort().join(',') || 'none';
-        this.log(`${new Date().toISOString()} [olympus:control-path] the worker could not answer requests for ${Math.round(this.lastLagMs)} ms; background work running: ${running}`);
+        this.log(`${new Date().toISOString()} [olympus:control-path] ${this.freezeSubject} for ${Math.round(this.lastLagMs)} ms; background work running: ${running}`);
       }
     }, HEARTBEAT_MS);
     this.heartbeat.unref?.();
