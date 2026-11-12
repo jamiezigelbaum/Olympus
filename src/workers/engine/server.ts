@@ -1,3 +1,4 @@
+import { ConnectionRequestStore, connectionRequestsPath, requestCredentialTag } from '../../core/connection-requests.ts';
 import { createDashboardPeople } from './dashboard/dashboard-people.ts';
 import { PeopleIndexRefresher } from '../../core/people-index.ts';
 import { adoptExistingCloudApproval, carryCloudJudgeApproval, createJudgeSetup } from '../classification/judge-setup.ts';
@@ -4560,6 +4561,7 @@ export async function main(): Promise<void> {
   // page's agent panel reads the very store handle `/mcp` and OAuth use.
   let privateAgentListeners: import('../private-agent-listeners.ts').PrivateAgentListeners | undefined;
   let dashboardAgentStore: DashboardAgentConnectionsBackend['store'] | undefined;
+  let connectionRequests: ConnectionRequestStore | undefined;
   let dashboardRemoteAccess: DashboardAgentConnectionsBackend['remoteAccess'] = () => ({ state: 'off' });
   let dashboardRemoteAccessControl: DashboardAgentConnectionsBackend['remoteAccessControl'];
   // Where a sign-in started from ChatGPT returns (the relay's origin and this
@@ -4621,6 +4623,7 @@ export async function main(): Promise<void> {
     ...(process.platform === 'linux' ? { localModelReadiness: () => linuxModelReadiness(process.env) } : {}),
     agentConnectHost: agentApprovalHost,
     agentConnections: {
+      requests: () => connectionRequests?.list() ?? [],
       store: (options) => dashboardAgentStore?.(options),
       get privateListeners() { return privateAgentListeners; },
       ...(process.platform === 'linux' ? { relayInstallId: () => remotePublicUrls()?.installId } : {}),
@@ -4932,6 +4935,10 @@ export async function main(): Promise<void> {
     openRemoteConnectionStore,
   );
   dashboardAgentStore = remoteConnections;
+  if (engineRole !== 'background') connectionRequests = new ConnectionRequestStore(
+    connectionRequestsPath(resolveRemoteConnectionsDbPath(process.env)),
+    tag => remoteConnections()?.requestLogCredentials().find(row => requestCredentialTag(row.tokenHash) === tag)?.displayName,
+  );
   // Questions waiting on a Private answer (core/waiting-private-questions.ts):
   // beside the connection store, owner-only, opened on first use (retried a
   // minute after a failed open). The connection store is the authority on
@@ -5809,6 +5816,7 @@ export async function main(): Promise<void> {
 
   const sharedRemoteMcpOptions = {
     ...remoteAgentOptions,
+    onRequestLog: (entry: import('../../../connect-relay/shared/request-log.ts').RequestLogEntry, app?: string, relayed?: boolean) => connectionRequests?.record(entry, 'engine', app, relayed),
     anonymousAnswersEnabled: () => {
       const read = readConsultSettings();
       return read.state === 'valid' && read.settings.enabled;
@@ -5855,6 +5863,7 @@ export async function main(): Promise<void> {
     // The relay child reads the offline tool-list mapping it keeps the relay
     // in step with (workers/relay-surfaces.ts), by its per-boot secret.
     fetch: withRequestPeer(withFirstRunPrivacyGate(withRelaySurfacesRoute(createRelaySurfacesHandler({
+      requestLog: entry => connectionRequests?.record(entry, 'relay'),
       connections: () => remoteConnections(),
       publicUrls: remotePublicUrls,
       claudeAppEnabled: () => claudeAppEnabled(olympusConfig),

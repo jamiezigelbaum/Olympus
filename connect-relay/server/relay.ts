@@ -59,6 +59,7 @@ import {
   INSTALL_ID_PATTERN,
   PROTOCOL_VERSION,
   RELAY_FEATURE_SURFACES,
+  RELAY_FEATURE_REQUEST_LOG,
   decodeBodyFrame,
   installIdForPublicKey,
   newNonce,
@@ -110,6 +111,8 @@ import {
   type RelayLimits,
 } from './limits.ts';
 import { credentialLogTag, installTag, type RelayLog } from './log.ts';
+import { OfflineRequestLog } from './request-log.ts';
+import type { RequestLogEntry } from '../shared/request-log.ts';
 import { rpcCallNames } from '../shared/mcp-log.ts';
 import {
   OAUTH_PATHS,
@@ -316,6 +319,8 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     demo: config.demoInstallId !== undefined || demoInstallsByClient.size > 0,
   };
   const sessions = new Map<string, InstallSession>();
+  const requestLogSessions = new WeakSet<InstallSession>();
+  const offlineRequestLog = new OfflineRequestLog(now);
   const admission = createInstallAdmission(limits, now);
   const registrationsPerIp = new KeyedTokenBuckets(limits.registrationsPerIp, now);
   const registrationsGlobal = new KeyedTokenBuckets(limits.registrationsGlobal, now);
@@ -635,7 +640,8 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     const trace: McpTrace = {};
     const response = await mcpRoute(request, path, ip, surface, trace);
     if (request.headers.get('authorization') !== null) {
-      log('mcp_request', {
+      const entry: RequestLogEntry = {
+        at: new Date(now()).toISOString(),
         surface,
         ...(trace.install ? { install: trace.install } : {}),
         ...(trace.credential ? { credential: trace.credential } : {}),
@@ -643,7 +649,14 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
         calls: (trace.calls ?? []).join(','),
         status: response.status,
         ms: Math.max(0, Math.round(now() - started)),
-      });
+      };
+      log('mcp_request', { ...entry });
+      if (trace.installId) {
+        const session = sessions.get(trace.installId);
+        if (session?.open) {
+          if (requestLogSessions.has(session)) session.send({ type: 'request-log', ...entry });
+        } else offlineRequestLog.push(trace.installId, entry);
+      }
     }
     return response;
   };
@@ -690,6 +703,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       return refuse();
     }
     const digest = credentialDigest(token!);
+    trace.installId = installId;
     const key = credentialKey(installId, digest);
     const lane: AdmissionLane = confirmed.has(key) ? 'owner' : 'unverified';
     trace.credential = credentialLogTag(digest);
@@ -1045,7 +1059,10 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     usage.tick();
     registry.seen(installId);
     usage.active(installId);
-    session.send({ type: 'ready', installId, features: [RELAY_FEATURE_SURFACES] });
+    const requestLog = Array.isArray(message.features) && message.features.includes(RELAY_FEATURE_REQUEST_LOG);
+    if (requestLog) requestLogSessions.add(session);
+    session.send({ type: 'ready', installId, features: [RELAY_FEATURE_SURFACES, RELAY_FEATURE_REQUEST_LOG] });
+    if (requestLog) for (const entry of offlineRequestLog.take(installId)) session.send({ type: 'request-log', ...entry });
     // `legacy_auth` sessions are what the legacy window still serves: the
     // operator closes it once none appear (docs/design/chatgpt-plugin.md).
     log('session_ready', { install: installTag(installId), ...(scheme === AUTH_LEGACY ? { legacy_auth: true } : {}) });
@@ -1239,6 +1256,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
       if (!internal.has(installId)) usage.removed(installId);
     }
     surfaceMap.sweep();
+    offlineRequestLog.sweep();
     return expired;
   };
   const sweepTimer = setInterval(() => sweep(), config.sweepIntervalMs ?? 60 * 60_000);
@@ -1315,6 +1333,8 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
 
 /** What one `/mcp` request was, for its `mcp_request` log line; filled in as it is routed. */
 interface McpTrace {
+  /** Routing only; never serialized into the journal or request-log frame. */
+  installId?: string;
   install?: string;
   credential?: string;
   lane?: AdmissionLane;

@@ -25795,6 +25795,38 @@ var init_google_connectors = __esm(() => {
   init_corpora();
 });
 
+// connect-relay/shared/mcp-log.ts
+var LOGGED_RPC_METHODS;
+var init_mcp_log = __esm(() => {
+  LOGGED_RPC_METHODS = new Set([
+    "initialize",
+    "ping",
+    "tools/list",
+    "tools/call",
+    "resources/list",
+    "resources/templates/list",
+    "resources/read",
+    "prompts/list",
+    "prompts/get",
+    "completion/complete",
+    "logging/setLevel",
+    "notifications/initialized",
+    "notifications/cancelled",
+    "notifications/progress",
+    "notifications/roots/list_changed"
+  ]);
+});
+
+// connect-relay/shared/request-log.ts
+var init_request_log = __esm(() => {
+  init_mcp_log();
+});
+
+// src/core/connection-requests.ts
+var init_connection_requests = __esm(() => {
+  init_request_log();
+});
+
 // src/core/pairing-session-paths.ts
 var init_pairing_session_paths = __esm(() => {
   init_olympus_layout();
@@ -26125,6 +26157,7 @@ var init_source_dispositions = __esm(() => {
 // src/data-lifecycle.ts
 var backgroundTrashRemovals;
 var init_data_lifecycle = __esm(() => {
+  init_connection_requests();
   init_boot_progress();
   init_people_index();
   init_mac_engine_daemon();
