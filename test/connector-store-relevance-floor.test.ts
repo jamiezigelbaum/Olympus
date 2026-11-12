@@ -287,6 +287,21 @@ describe('similarity inside a long item with word hits', () => {
     expect(content.chunks).toEqual([chunks[0]!, chunks[1]!, chunks[2]!]);
   });
 
+  test('a one-character budget returns at most one character', async () => {
+    let content: ReturnType<Store['localContent']>;
+    await withStore([item], async (store) => {
+      const provider = chunkCosineProvider(Object.fromEntries(openings.map((opening, index) =>
+        [`${opening}.`, index === 4 ? 0.95 : 0.4])));
+      await store.embedChunks({ provider });
+      content = store.localContent(`${ACCOUNT}:policy`, 1, {
+        query: 'coverage', anchorChunkIndex: 0, anchorLane: 'keyword',
+        queryVector: [1, 0], queryVectorModelId: provider.modelId,
+      });
+    });
+    expect(content!.chunks.join('').length).toBeLessThanOrEqual(1);
+    expect(content!.truncated).toBe(true);
+  });
+
   test('duplicate word chunks keep the similar pick in document order', async () => {
     // Chunks 0 and 1 carry the same text; the store's reader keeps one copy,
     // and the later word pick must still come after the similar chunk.

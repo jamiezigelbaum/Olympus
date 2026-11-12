@@ -17560,7 +17560,7 @@ function selectEvidencePassages(
       ? mostSimilar
       : undefined;
     const similarRead = similarPick !== undefined
-      ? boundedSourceIndexChunks([chunks[similarPick]!], Math.floor(maxChars / 2), termGroups)
+      ? boundedSourceIndexChunks([chunks[similarPick]!], Math.max(1, Math.floor(maxChars / 2)), termGroups)
       : undefined;
     // One index per distinct non-empty text, as the bounded reader keeps
     // them, so its passages map back to the chunks they came from.
@@ -17571,11 +17571,12 @@ function selectEvidencePassages(
       seen.add(text);
       return true;
     });
-    const bounded = boundedSourceIndexChunks(
-      others.map((index) => chunks[index]!),
-      maxChars - (similarRead?.chunks.join('').length ?? 0),
-      termGroups,
-    );
+    // The bounded reader treats a non-positive budget as unlimited, so a
+    // budget the similar pick used up reads nothing more.
+    const othersBudget = maxChars - (similarRead?.chunks.join('').length ?? 0);
+    const bounded = othersBudget > 0
+      ? boundedSourceIndexChunks(others.map((index) => chunks[index]!), othersBudget, termGroups)
+      : { chunks: [], truncated: others.length > 0 };
     const read = new Map(others.map((index, position) => [index, bounded.chunks[position]]));
     if (similarPick !== undefined && similarRead?.chunks[0]) read.set(similarPick, similarRead.chunks[0]);
     const ordered = picked.flatMap((index) => read.get(index) ?? []);
