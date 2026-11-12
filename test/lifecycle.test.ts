@@ -704,7 +704,8 @@ describe('versioned Olympus worker lifecycle', () => {
   test('a failed upgrade puts back the stores its worker updated before the previous worker starts (#1494)', () => {
     const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-store-restore-'));
     const manager = linuxManager('active');
-    const env = { HOME: home, XDG_DATA_HOME: join(home, '.local', 'share') };
+    // The worker's environment file moves its data root: the rollback must look there.
+    const env = { HOME: home, XDG_DATA_HOME: join(home, 'worker-data') };
     const dbPath = join(home, 'ledger.sqlite');
     const migrations = [
       { version: 1, name: 'create', up: (db: Database) => db.exec('CREATE TABLE items (id INTEGER PRIMARY KEY)') },
@@ -736,6 +737,7 @@ describe('versioned Olympus worker lifecycle', () => {
           bunBin: process.execPath, exec, activationSettleMs: 0, actionSettleTimeoutMs: 0,
           bootProgress: () => undefined,
           readinessProbe: () => {
+            writeFileSync(workerServicePaths('linux', home).envPath, `${readFileSync(workerServicePaths('linux', home).envPath, 'utf8')}XDG_DATA_HOME=${env.XDG_DATA_HOME}\n`);
             // The new worker updates the store, leaving a -wal, and never answers.
             const db = new Database(dbPath);
             runSqliteMigrations(db, 'tier-ledger', migrations, { env, log: () => {} });

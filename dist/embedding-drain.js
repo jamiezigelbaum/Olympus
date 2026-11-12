@@ -13273,7 +13273,7 @@ function metadataStringArray(metadata, key2) {
 }
 
 // src/core/sqlite-migrations.ts
-import { chmodSync as chmodSync3, existsSync as existsSync15, renameSync as renameSync6, rmSync as rmSync7, statfsSync, statSync as statSync9 } from "node:fs";
+import { chmodSync as chmodSync3, closeSync as closeSync7, existsSync as existsSync15, openSync as openSync7, renameSync as renameSync6, rmSync as rmSync7, statfsSync, statSync as statSync9 } from "node:fs";
 import { dirname as dirname19 } from "node:path";
 
 // src/core/boot-progress.ts
@@ -13423,7 +13423,9 @@ function backUpBeforeUpdate(db, storeId, fromVersion, env, report, freeBytes = d
   report({ phase: "backing_up", storeId });
   const partial = `${backup}.${process.pid}.partial`;
   rmSync7(partial, { force: true });
+  recordSchemaBackup(env, { storeId, dbPath: file, backupPath: backup });
   try {
+    closeSync7(openSync7(partial, "wx", 384));
     db.query("VACUUM INTO ?").run(partial);
     chmodSync3(partial, 384);
     if (copyVersion(db, partial, storeId) !== fromVersion) {
@@ -13435,7 +13437,6 @@ function backUpBeforeUpdate(db, storeId, fromVersion, env, report, freeBytes = d
     rmSync7(partial, { force: true });
     throw error;
   }
-  recordSchemaBackup(env, { storeId, dbPath: file, backupPath: backup });
   return Math.round(performance.now() - started);
 }
 function copyVersion(db, path, storeId) {
@@ -16062,7 +16063,7 @@ function slug(value) {
 // src/workers/classification/tier-ledger.ts
 import { Database } from "bun:sqlite";
 import { randomUUID as randomUUID8 } from "node:crypto";
-import { chmodSync as chmodSync4, closeSync as closeSync7, existsSync as existsSync16, mkdirSync as mkdirSync11, openSync as openSync7, statSync as statSync10 } from "node:fs";
+import { chmodSync as chmodSync4, closeSync as closeSync8, existsSync as existsSync16, mkdirSync as mkdirSync11, openSync as openSync8, statSync as statSync10 } from "node:fs";
 import { dirname as dirname20 } from "node:path";
 var TIER_LEDGER_SCHEMA_VERSION = 15;
 var RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided";
@@ -16252,7 +16253,7 @@ class TierLedger {
     if (onDisk && !this.readOnly) {
       mkdirSync11(dirname20(this.dbPath), { recursive: true, mode: 448 });
       if (!existsSync16(this.dbPath))
-        closeSync7(openSync7(this.dbPath, "a", 384));
+        closeSync8(openSync8(this.dbPath, "a", 384));
       restrictLedgerFiles(this.dbPath);
     }
     let db;
@@ -22450,12 +22451,12 @@ import { Database as Database6 } from "bun:sqlite";
 import { createHash as createHash15, randomUUID as randomUUID9 } from "node:crypto";
 import {
   chmodSync as chmodSync6,
-  closeSync as closeSync8,
+  closeSync as closeSync9,
   existsSync as existsSync20,
   fsyncSync as fsyncSync2,
   mkdirSync as mkdirSync13,
   lstatSync as lstatSync8,
-  openSync as openSync8,
+  openSync as openSync9,
   readFileSync as readFileSync20,
   readdirSync as readdirSync3,
   realpathSync as realpathSync5,
@@ -22875,11 +22876,11 @@ function addStoreMarker(refs, holder) {
     rmSync8(join22(refs, name), { force: true });
 }
 function flushMarker(marker, refs) {
-  const descriptor = openSync8(marker, "r");
+  const descriptor = openSync9(marker, "r");
   try {
     fsyncSync2(descriptor);
   } finally {
-    closeSync8(descriptor);
+    closeSync9(descriptor);
   }
   syncDirectorySync(refs);
 }
@@ -34924,7 +34925,7 @@ import { dirname as dirname29, join as join27 } from "node:path";
 
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { spawn } from "node:child_process";
-import { closeSync as closeSync9, constants as constants4, existsSync as existsSync25, fstatSync as fstatSync2, openSync as openSync9, readdirSync as readdirSync4, statSync as statSync14 } from "node:fs";
+import { closeSync as closeSync10, constants as constants4, existsSync as existsSync25, fstatSync as fstatSync2, openSync as openSync10, readdirSync as readdirSync4, statSync as statSync14 } from "node:fs";
 import { homedir as homedir12 } from "node:os";
 import { delimiter as delimiter2, dirname as dirname28, isAbsolute as isAbsolute14, join as join25 } from "node:path";
 import { createInterface } from "node:readline";
@@ -35163,13 +35164,13 @@ function linuxGpuAvailable(deviceDirectory = "/dev/dri") {
         return false;
       let fd;
       try {
-        fd = openSync9(join25(deviceDirectory, name), constants4.O_RDWR | constants4.O_NONBLOCK);
+        fd = openSync10(join25(deviceDirectory, name), constants4.O_RDWR | constants4.O_NONBLOCK);
         return fstatSync2(fd).isCharacterDevice();
       } catch {
         return false;
       } finally {
         if (fd !== undefined)
-          closeSync9(fd);
+          closeSync10(fd);
       }
     });
   } catch {

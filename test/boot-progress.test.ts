@@ -18,6 +18,8 @@ import {
   readBootProgress,
   reportBootStep,
   preSchemaBackupsOf,
+  recordSchemaBackup,
+  removeAllSchemaBackups,
   removeSchemaBackupsSince,
   restoreSchemaBackupsSince,
   type BootProgress,
@@ -183,6 +185,20 @@ describe('schema updates back up the store first', () => {
     const copy = new Database(`${path}.pre-schema-1.bak`, { readonly: true });
     expect(readSqliteSchemaVersion(copy, 'fixture')).toBe(1);
     copy.close();
+  });
+
+  test('a copy a crash left part way is found by a delete and removed by a forget', () => {
+    const env = home();
+    const path = join(env.HOME!, 'shared.sqlite');
+    writeFileSync(path, '');
+    const partial = `${path}.pre-schema-4.bak.12345.partial`;
+    writeFileSync(partial, 'rows');
+    recordSchemaBackup(env, { storeId: 'shared', dbPath: path, backupPath: `${path}.pre-schema-4.bak` });
+    expect(preSchemaBackupsOf(path)).toEqual([partial]);
+    expect(removeAllSchemaBackups(env, true)).toBe(1);
+    expect(existsSync(partial)).toBe(true);
+    expect(removeAllSchemaBackups(env, false)).toBe(1);
+    expect(existsSync(partial)).toBe(false);
   });
 
   test('a restore puts the copy back and removes the -wal and -shm', () => {

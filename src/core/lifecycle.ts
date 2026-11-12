@@ -658,16 +658,27 @@ function removeUpgradeBackups(options: WorkerLifecycleOptions & { homeDir: strin
 }
 
 /**
- * The environment the worker resolves its data root in, for this home: the
- * same rule as data-lifecycle.ts `envForContext`.
+ * The environment the worker resolves its data root in: the home's defaults
+ * (data-lifecycle.ts `envForContext`), then what the worker's own environment
+ * file sets, since the service manager loads it into the worker.
  */
-function lifecycleEnv(options: { homeDir: string }): Record<string, string | undefined> {
-  if (options.homeDir === process.env.HOME) return process.env;
-  return {
+function lifecycleEnv(options: WorkerLifecycleOptions & { homeDir: string }): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = options.homeDir === process.env.HOME ? { ...process.env } : {
     HOME: options.homeDir,
     XDG_DATA_HOME: join(options.homeDir, '.local', 'share'),
     XDG_STATE_HOME: join(options.homeDir, '.local', 'state'),
   };
+  const envPath = options.envPath ?? workerServicePaths(options.platform ?? 'linux', options.homeDir).envPath;
+  try {
+    const text = readFileSync(envPath, 'utf8');
+    for (const name of ['HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME']) {
+      const value = new RegExp(`^${name}=(.*)$`, 'm').exec(text)?.[1];
+      if (value !== undefined && unquoteEnvValue(value).trim()) env[name] = unquoteEnvValue(value).trim();
+    }
+  } catch {
+    // No environment file: the home's defaults.
+  }
+  return env;
 }
 
 function quiesceAttemptedWorker(

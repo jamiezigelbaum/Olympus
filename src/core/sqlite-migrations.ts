@@ -1,5 +1,5 @@
 import type { Database } from 'bun:sqlite';
-import { chmodSync, existsSync, renameSync, rmSync, statfsSync, statSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, openSync, renameSync, rmSync, statfsSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { preSchemaBackupPath, recordSchemaBackup, reportBootStep, type BootStepEvent } from './boot-progress.ts';
 import type { LayoutEnv } from './olympus-layout.ts';
@@ -193,7 +193,11 @@ function backUpBeforeUpdate(
   // Written beside the backup and renamed into place: a backup that exists is whole.
   const partial = `${backup}.${process.pid}.partial`;
   rmSync(partial, { force: true });
+  // Recorded before the copy starts, so a delete or forget finds a copy a crash left part way.
+  recordSchemaBackup(env, { storeId, dbPath: file, backupPath: backup });
   try {
+    // Created empty and owner-only first: SQLite would create it with the umask's mode.
+    closeSync(openSync(partial, 'wx', 0o600));
     db.query('VACUUM INTO ?').run(partial);
     chmodSync(partial, 0o600);
     // Another opener may have finished the update first: its backup stands,
@@ -207,7 +211,6 @@ function backUpBeforeUpdate(
     rmSync(partial, { force: true });
     throw error;
   }
-  recordSchemaBackup(env, { storeId, dbPath: file, backupPath: backup });
   return Math.round(performance.now() - started);
 }
 

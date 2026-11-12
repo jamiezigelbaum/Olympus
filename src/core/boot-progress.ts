@@ -162,12 +162,12 @@ export function preSchemaBackupPath(dbPath: string, version: number): string {
   return `${dbPath}.pre-schema-${version}.bak`;
 }
 
-/** Every pre-update copy of the store at `dbPath` on disk. */
+/** Every pre-update copy of the store at `dbPath` on disk, a copy a crash left part way included. */
 export function preSchemaBackupsOf(dbPath: string): string[] {
   const prefix = `${basename(dbPath)}.pre-schema-`;
   try {
     return readdirSync(dirname(dbPath))
-      .filter((name) => name.startsWith(prefix) && /^\d+\.bak$/.test(name.slice(prefix.length)))
+      .filter((name) => name.startsWith(prefix) && /^\d+\.bak(?:\.\d+\.partial)?$/.test(name.slice(prefix.length)))
       .map((name) => join(dirname(dbPath), name));
   } catch {
     return [];
@@ -184,7 +184,7 @@ export function recordSchemaBackup(env: LayoutEnv, entry: { storeId: string; dbP
   appendFileSync(path, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
 }
 
-export interface SchemaBackupEntry { storeId: string; dbPath: string; backupPath: string }
+interface SchemaBackupEntry { storeId: string; dbPath: string; backupPath: string }
 
 function schemaBackups(env: LayoutEnv): SchemaBackupEntry[] {
   let text: string;
@@ -206,11 +206,6 @@ function schemaBackups(env: LayoutEnv): SchemaBackupEntry[] {
     }
   }
   return [...entries.values()];
-}
-
-/** The recorded backups still on disk, written at or after `sinceMs`. */
-export function schemaBackupsSince(env: LayoutEnv, sinceMs: number): SchemaBackupEntry[] {
-  return backupsSince(env, sinceMs);
 }
 
 function backupsSince(env: LayoutEnv, sinceMs: number): SchemaBackupEntry[] {
@@ -246,6 +241,19 @@ export function removeSchemaBackupsSince(env: LayoutEnv, sinceMs: number): numbe
   for (const entry of removed) rmSync(entry.backupPath, { force: true });
   pruneSchemaBackupRecord(env);
   return removed.length;
+}
+
+/**
+ * Every copy of every recorded store, part-way copies included: a forget's,
+ * since each copy of a shared store still holds the forgotten rows. Returns
+ * how many there are; a dry run removes nothing.
+ */
+export function removeAllSchemaBackups(env: LayoutEnv, dryRun: boolean): number {
+  const copies = [...new Set(schemaBackups(env).flatMap((entry) => preSchemaBackupsOf(entry.dbPath)))];
+  if (dryRun) return copies.length;
+  for (const copy of copies) rmSync(copy, { force: true });
+  pruneSchemaBackupRecord(env);
+  return copies.length;
 }
 
 function pruneSchemaBackupRecord(env: LayoutEnv): void {

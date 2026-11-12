@@ -14,7 +14,7 @@
  * `test/store-open-guard.test.ts` ties the two lists to the code: a module that
  * opens a shared SQLite file must own a step or a kept entry.
  */
-import { removeSchemaBackupsSince, schemaBackupsSince } from './boot-progress.ts';
+import { removeAllSchemaBackups } from './boot-progress.ts';
 import { appReleaseLogDbPath, forgetAppReleaseItems } from './app-release-log.ts';
 import type { LayoutEnv } from './olympus-layout.ts';
 import { OperationError } from './operation-error.ts';
@@ -539,7 +539,7 @@ export const KEPT_SHARED_FILES: readonly KeptSharedFile[] = [
  * after this has no copy to restore and keeps the updated stores.
  */
 function forgetSchemaBackups(env: LayoutEnv, dryRun: boolean): string[] {
-  const count = dryRun ? schemaBackupsSince(env, 0).length : removeSchemaBackupsSince(env, 0);
+  const count = removeAllSchemaBackups(env, dryRun);
   if (count === 0) return [];
   return [`${dryRun ? 'Would remove' : 'Removed'} ${count} store ${count === 1 ? 'copy' : 'copies'} taken before a schema update.`];
 }
