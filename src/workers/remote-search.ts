@@ -186,6 +186,9 @@ async function runSearch(
       result = searchToolResult({ ...rawRecord, evidence: [], withheld: withheldBefore + evidence.length }, { pendingPrivacyItems: context.pendingPrivacyItems?.() });
       withheldAfter = true;
     }
+    // The release judgment above may wait on the read pool: a revocation meanwhile releases nothing.
+    const afterRelease = currentAccess(authorized);
+    if (afterRelease !== 'active') return refusedAccess(afterRelease);
     if (recorded) note = remotePrivateNote(privateCall.answerId, privateCall.secretMatch);
   }
   if (context.caller) {

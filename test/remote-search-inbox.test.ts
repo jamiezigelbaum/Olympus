@@ -64,6 +64,9 @@ let searchFails: Error | undefined;
 /** The tier the one Personal input has now (the search's own manifest names it). */
 let inputTier: 'public_or_personal' | 'private';
 let releaseFailure: 'sync' | 'pool' | undefined;
+/** Set: the pooled release read waits on it, after telling `releaseStarted`. */
+let releaseHeld: Promise<void> | undefined;
+let releaseStarted: (() => void) | undefined;
 let searches: Array<{ question: string; limit?: number }>;
 
 const isActive = (id: string): boolean => connections.list().some((connection) => connection.id === id && connection.revokedAt === null);
@@ -93,6 +96,13 @@ function serve(options: Partial<RemoteMcpHandlerOptions> = {}, parts = partsFor(
       return inputs.map(() => ({ tier: inputTier, gone: false }));
     },
     ...(releaseFailure === 'pool' ? { inputsOffThread: async () => { throw new Error('SQLITE_BUSY'); } } : {}),
+    ...(releaseHeld ? {
+      inputsOffThread: async (inputs: Parameters<ReleaseCheck['inputs']>[0]) => {
+        releaseStarted?.();
+        await releaseHeld;
+        return inputs.map(() => ({ tier: inputTier, gone: false }));
+      },
+    } : {}),
     secureDerivativeDefault: () => 'approval',
   };
   const handler = createRemoteMcpHandler({
@@ -159,6 +169,8 @@ beforeEach(() => {
   searchFails = undefined;
   inputTier = 'public_or_personal';
   releaseFailure = undefined;
+  releaseHeld = undefined;
+  releaseStarted = undefined;
   searches = [];
   server = undefined;
 });
@@ -461,6 +473,30 @@ describe('a revoked connection gets no row and no note', () => {
       expect(JSON.stringify(result)).not.toContain('private_note');
       expect(JSON.stringify(result)).not.toContain(PERSONAL_EXCERPT);
       expect(waiting.list().questions).toEqual([]);
+    } finally {
+      await client.close().catch(() => undefined);
+    }
+  });
+});
+
+describe('a connection revoked during the pooled release read', () => {
+  test('an error, no note, no evidence', async () => {
+    let release!: () => void;
+    releaseHeld = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { releaseStarted = resolve; });
+    serve();
+    const { connection, token } = connections.create('Claude');
+    const client = await sdkClient(token);
+    try {
+      const pending = search(client);
+      await started;
+      connections.revoke(connection.id);
+      release();
+      const result = await pending;
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(result.content[0]!.text)).toMatchObject({ error: 'invalid_token' });
+      expect(JSON.stringify(result)).not.toContain(PERSONAL_EXCERPT);
+      expect(JSON.stringify(result)).not.toContain('private_note');
     } finally {
       await client.close().catch(() => undefined);
     }

@@ -24597,6 +24597,9 @@ function embeddingAuthorityFromRow(row, provider) {
 }
 var PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3;
 var READ_ONLY_MIN_SCHEMA_VERSION = 7;
+function visibilityStepAwaited(read) {
+  return judgedAwaited(() => read.offThread(), () => read.here());
+}
 class LocalConnectorStore {
   dbPath;
   openedFile;
@@ -30950,7 +30953,7 @@ class LocalConnectorStore {
         throw new OffThreadReadBusyError;
       let result;
       try {
-        result = "offThread" in step.value ? await step.value.offThread() : await readOnPool(this.dbPath, step.value, pool.deadlineAtMs !== undefined ? { deadlineAtMs: pool.deadlineAtMs } : {});
+        result = "offThread" in step.value ? await visibilityStepAwaited(step.value) : await readOnPool(this.dbPath, step.value, pool.deadlineAtMs !== undefined ? { deadlineAtMs: pool.deadlineAtMs } : {});
       } catch (error) {
         step = steps.throw(error);
         continue;
@@ -31006,7 +31009,7 @@ class LocalConnectorStore {
         throw new OffThreadReadBusyError;
       let result;
       try {
-        result = "offThread" in next.value ? await next.value.offThread() : await readOnPool(this.dbPath, next.value);
+        result = "offThread" in next.value ? await visibilityStepAwaited(next.value) : await readOnPool(this.dbPath, next.value);
       } catch (error) {
         next = steps.throw(error);
         continue;

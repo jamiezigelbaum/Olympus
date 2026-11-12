@@ -218,6 +218,29 @@ describe('connector store keyword search on the read pool', () => {
   // yield (the chunk locate, the content and baseline searches). The ledger
   // can change in between, so the adapter checks every row again after its
   // last read, right before it emits hits and counts.
+  test('an unrelated ledger write during the first visibility read still returns the matches (#1452)', async () => {
+    const fixture = await seeded();
+    const internal = fixture.stores.internal!;
+    const ledgerDb = (fixture.ledger as unknown as { db: Database }).db;
+    const here = internal.searchItemsDetailed('zebra crossing', 20);
+    expect(here.rows.map((row) => row.sourceItem.localItemId)).toContain(localId('zebra'));
+    // Another item's copy is touched while the search's own ledger read is on
+    // the pool: the ledger's change marker moves, nothing the search reads does.
+    let writes = 0;
+    setReadPoolObserverForTests((_, read) => {
+      if (writes > 0 || !/FROM tier_copies/.test(read.sql)) return;
+      writes += 1;
+      ledgerDb.query(`UPDATE tier_copies SET embed_hold = embed_hold WHERE provider_item_id = ?`).run(identityOf('note-3').providerItemId);
+    }, { snapshots: true });
+    try {
+      const pooled = await internal.searchItemsDetailedOffThread('zebra crossing', 20);
+      expect(writes).toBe(1);
+      expect(pooled.rows).toEqual(here.rows);
+    } finally {
+      setReadPoolObserverForTests();
+    }
+  });
+
   test('an item routed away while a lane is still reading is not emitted, on the keyword and metadata paths', async () => {
     for (const path of ['search', 'metadataMatches'] as const) {
       const fixture = await seeded();

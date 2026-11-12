@@ -113,6 +113,7 @@ import {
   visibilityHere,
   visibilityOffThread,
   visibilityAwaited,
+  judgedAwaited,
   parentVerdictsSteps,
   hiddenChildKeysSteps,
   ledgerVisibilityOffThread,
@@ -3136,6 +3137,15 @@ interface SyncRunRow {
 // Read-only opens cannot migrate, so they accept every schema from the v7
 // filter columns forward.
 const READ_ONLY_MIN_SCHEMA_VERSION = 7;
+
+
+// One visibility read inside a store's read generator. A write landing during
+// it (anywhere in the ledger, so usually unrelated) makes it read again, as a
+// whole judgment does (judgedAwaited), never a hidden or empty result: the
+// generator's own catch would otherwise turn the change into no rows.
+function visibilityStepAwaited(read: VisibilityRead): Promise<unknown> {
+  return judgedAwaited(() => read.offThread(), () => read.here());
+}
 
 /**
  * Whether a read-only open of the store at `dbPath` would find a schema now:
@@ -13256,7 +13266,7 @@ export class LocalConnectorStore {
       // to it are released, and no later read may open one again.
       if (this.closedForPoolReads) throw new OffThreadReadBusyError();
       let result: unknown;
-      try { result = 'offThread' in step.value ? await step.value.offThread()
+      try { result = 'offThread' in step.value ? await visibilityStepAwaited(step.value)
         : await readOnPool(this.dbPath, step.value, pool.deadlineAtMs !== undefined ? { deadlineAtMs: pool.deadlineAtMs } : {}); }
       catch (error) { step = steps.throw(error); continue; }
       step = steps.next(result);
@@ -13328,7 +13338,7 @@ export class LocalConnectorStore {
     while (!next.done) {
       if (this.closedForPoolReads) throw new OffThreadReadBusyError();
       let result: unknown;
-      try { result = 'offThread' in next.value ? await next.value.offThread() : await readOnPool(this.dbPath, next.value); }
+      try { result = 'offThread' in next.value ? await visibilityStepAwaited(next.value) : await readOnPool(this.dbPath, next.value); }
       catch (error) { next = steps.throw(error); continue; }
       next = steps.next(result);
     }

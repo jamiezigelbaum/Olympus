@@ -36815,6 +36815,9 @@ function embeddingAuthorityFromRow(row, provider) {
   }
   return { token };
 }
+function visibilityStepAwaited(read) {
+  return judgedAwaited(() => read.offThread(), () => read.here());
+}
 function connectorStoreReadableNow(dbPath) {
   let db;
   try {
@@ -46056,7 +46059,7 @@ var init_local_index = __esm(() => {
           throw new OffThreadReadBusyError;
         let result;
         try {
-          result = "offThread" in step.value ? await step.value.offThread() : await readOnPool(this.dbPath, step.value, pool.deadlineAtMs !== undefined ? { deadlineAtMs: pool.deadlineAtMs } : {});
+          result = "offThread" in step.value ? await visibilityStepAwaited(step.value) : await readOnPool(this.dbPath, step.value, pool.deadlineAtMs !== undefined ? { deadlineAtMs: pool.deadlineAtMs } : {});
         } catch (error) {
           step = steps.throw(error);
           continue;
@@ -46112,7 +46115,7 @@ var init_local_index = __esm(() => {
           throw new OffThreadReadBusyError;
         let result;
         try {
-          result = "offThread" in next.value ? await next.value.offThread() : await readOnPool(this.dbPath, next.value);
+          result = "offThread" in next.value ? await visibilityStepAwaited(next.value) : await readOnPool(this.dbPath, next.value);
         } catch (error) {
           next = steps.throw(error);
           continue;
@@ -235127,6 +235130,9 @@ async function runSearch(args, options, authorized, context3, signal) {
       result = searchToolResult({ ...rawRecord, evidence: [], withheld: withheldBefore + evidence.length }, { pendingPrivacyItems: context3.pendingPrivacyItems?.() });
       withheldAfter = true;
     }
+    const afterRelease = currentAccess2(authorized);
+    if (afterRelease !== "active")
+      return refusedAccess(afterRelease);
     if (recorded)
       note = remotePrivateNote(privateCall.answerId, privateCall.secretMatch);
   }
