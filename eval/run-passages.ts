@@ -147,6 +147,8 @@ export async function runPassageEval(input: {
         if (expected.quote && passageContainsQuote([...seat.chunks, ...(seat.facts ?? []).map(fact => fact.claim), ...(seat.tables ?? []).flatMap(table => [table.caption ?? '', ...table.columns, ...table.rows.map(row => row.join(' '))])].join('\n'), expected.quote)) passageRank ??= index + 1;
       }
     }
+    // Retrieval and fitting end here; the lane probe and question judge below are diagnostics, outside the timings.
+    const finished = performance.now();
     const expectedStores = (question.expectedEvidence ?? []).map(e => stores.get(e.corpusId));
     const answerable = question.shape !== 'coverage_negative';
     const identities = (question.expectedEvidence ?? []).flatMap(expected => [expected, ...(expected.alternates ?? [])]);
@@ -166,7 +168,6 @@ export async function runPassageEval(input: {
     }
     const quoted = question.expectedEvidence?.find(expected => expected.quote)?.quote;
     const judge = answerable && quoted && input.judgeQuestion ? await input.judgeQuestion(question.question, quoted) : undefined;
-    const finished = performance.now();
     rows.push({ questionId: question.id, shape: question.shape,
       families: expectedStores.length ? [...new Set(expectedStores.map(store => store?.family ?? 'unknown'))] : ['unknown'],
       tiers: expectedStores.length ? [...new Set(expectedStores.map((store, i) => store?.tier ?? question.expectedEvidence![i]!.corpusId.split('.')[0]!))] : ['unknown'],
@@ -229,8 +230,10 @@ export function positiveInteger(value: string | undefined, fallback: number): nu
   if (!Number.isInteger(number) || number < 1) throw new Error('Expected a positive integer option.');
   return number;
 }
-// How deep the funnel's lane probe reads each lane of an expected item's store.
-const LANE_PROBE_DEPTH = 200;
+// How deep the funnel's lane probe reads each lane of an expected item's store:
+// the store's own search cap (MAX_SEARCH_RESULTS in local-index.ts), so an item
+// ranked below 50 in both lanes reads as not_found.
+const LANE_PROBE_DEPTH = 50;
 
 /**
  * Best rank of any expected item in a deep keyword and vector search of its
