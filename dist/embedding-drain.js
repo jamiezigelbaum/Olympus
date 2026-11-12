@@ -17230,14 +17230,7 @@ class TierLedger {
       SELECT override_json FROM tier_overrides
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
     `).get(...idParams(identity));
-    if (!row)
-      return;
-    const parsed = JSON.parse(row.override_json);
-    if (parsed.kind === "tier" && TIER_KEYS.includes(parsed.tier))
-      return parsed;
-    if (parsed.kind === "not_secret")
-      return parsed;
-    return;
+    return row ? overrideFromJson(row.override_json) : undefined;
   }
   conversationlessOverrides(provider) {
     return this.db.query(`
@@ -17808,6 +17801,18 @@ class TierLedger {
       };
       for (const row of copies)
         result.get(tierLedgerIdentityKey(identityFromRow(row)))?.copies.push(copyFromRow(row));
+      const overrides = yield {
+        sql: `SELECT provider, account_scope, conversation_key, provider_item_id, override_json FROM tier_overrides
+          WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})`,
+        params,
+        mode: "all"
+      };
+      for (const row of overrides) {
+        const state = result.get(tierLedgerIdentityKey(identityFromRow(row)));
+        const override = overrideFromJson(row.override_json);
+        if (state && override)
+          state.override = override;
+      }
     }
     return result;
   }
@@ -19681,6 +19686,14 @@ function tierLedgerMigrations() {
       }
     }
   ];
+}
+function overrideFromJson(json) {
+  const parsed = JSON.parse(json);
+  if (parsed.kind === "tier" && TIER_KEYS.includes(parsed.tier))
+    return parsed;
+  if (parsed.kind === "not_secret")
+    return parsed;
+  return;
 }
 
 // src/workers/source-index/embeddings.ts

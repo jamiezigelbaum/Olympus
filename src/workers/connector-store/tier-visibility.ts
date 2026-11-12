@@ -285,7 +285,7 @@ export function createReleaseTierCheck(
       for (const { index, identity } of governed) {
         const state = states.get(tierLedgerIdentityKey(identity));
         if (!state) continue;
-        const { record, copies } = state;
+        const { record, copies, override } = state;
         // An input of the names layer (a child citation's parent label) is
         // judged on the item's names alone: its content tier never limits an
         // answer that carries only its names.
@@ -293,6 +293,8 @@ export function createReleaseTierCheck(
         const tiers = namesOnly
           ? [record.metadataTier, record.targetMetadataTier]
           : [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier];
+        // Owner edits take effect before their queued placement settles.
+        if (override?.kind === 'tier') tiers.push(override.tier);
         // What waits for its model question is held Private, as placement
         // holds it, though its recorded tier is the Personal default: an
         // answer read from it is Private until the model says otherwise.
