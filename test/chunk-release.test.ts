@@ -11,7 +11,7 @@ import { Database } from 'bun:sqlite';
 import { join } from 'node:path';
 import type { TierVisibilityScope } from '../src/workers/connector-store/tier-visibility.ts';
 import type { EvidencePack } from '../src/core/contracts.ts';
-import { createReleaseManifestSink, recheckSearchEvidence, runWithReleaseManifestSink, type ReleaseInput } from '../src/core/release-manifest.ts';
+import { answerReleaseWithheldReasonOffThread, ANSWER_BECAME_PRIVATE, ANSWER_RELEASE_UNVERIFIED, createReleaseManifestSink, bindReleaseChunks, passagesWithheldAtReleasableTiers, recheckSearchEvidence, releaseCandidateHashes, releasedTextDigest, runWithReleaseManifestSink, type ReleaseInput } from '../src/core/release-manifest.ts';
 import { remoteOperationOutputOffThread } from '../src/core/remote-result.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
 import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
@@ -444,7 +444,7 @@ function unreadTransportFixture() {
     },
   }) });
   const scopes = [{ corpusIds: new Set([CORPORA.internal]),
-    ledger: { dbPath: '/tmp/olympus-virtual-transport-ledger.sqlite', getCurrent: () => ({ reasons: [] }) },
+    ledger: { dbPath: '/tmp/olympus-virtual-transport-ledger.sqlite', getCurrent: () => ({ reasons: [] }), getOverride: () => undefined },
     stores: () => [{ corpusId: CORPORA.internal, releaseItemChunks: () => ({ title: 'garden.txt',
       chunks: [{ contentHash: 'transport-hash', text: 'violet turnips garden. '.repeat(410) }] }) }],
   }] as unknown as TierVisibilityScope[];
@@ -518,4 +518,106 @@ test('an input from a corpus no tier ledger governs yet is held and counted, nev
   const waiting: ReleaseInput = { corpusId: 'mount-waiting-for-its-ledger', provider: 'notes', accountScope: 'me', providerItemId: 'a', privateAtAnswer: false, chunkHashes: ['h1', 'h2'] };
   const result = await releaseChunks([waiting], [], check, { judgeNow: async () => undefined });
   expect(result).toEqual({ allowed: [[]], withheldPassages: 2, withheldDocuments: 1 });
+});
+
+test('a delayed answer reads item tiers after chunk judging settles, so an item raised meanwhile is withheld', async () => {
+  const input: ReleaseInput = { corpusId: 'internal.files', provider: 'files', accountScope: 'a', providerItemId: 'doc', providerConversationId: '', privateAtAnswer: false, chunkHashes: ['h1'] };
+  let tier: 'public_or_personal' | 'private' = 'public_or_personal';
+  const check = {
+    inputs: (inputs: readonly ReleaseInput[]) => inputs.map(() => ({ tier, gone: false })),
+    // The judge finds a Private window and the background raises the whole item.
+    chunks: async (inputs: readonly ReleaseInput[]) => { tier = 'private'; return { allowed: inputs.map(() => []), withheldPassages: 1, withheldDocuments: 1 }; },
+    secureDerivativeDefault: () => 'approval' as const,
+  };
+  const reason = await answerReleaseWithheldReasonOffThread([{ inputs: [input], constraints: { includeSecureLocalContent: false } }] as never, check, 'private', { chunks: true });
+  expect(reason).toBe(ANSWER_BECAME_PRIVATE);
+});
+
+test('an authorized Private derivative is not held for passage proof; Personal passages still are', () => {
+  const base = { corpusId: 'internal.files', provider: 'files', accountScope: 'a', providerConversationId: '' };
+  const priv: ReleaseInput = { ...base, providerItemId: 'p', chunkHashes: ['a', 'b'], privateAtAnswer: true };
+  const personal: ReleaseInput = { ...base, providerItemId: 'q', chunkHashes: ['c', 'd'], privateAtAnswer: false };
+  const report = { allowed: [[], ['c']] };
+  expect(passagesWithheldAtReleasableTiers([priv, personal], [{ tier: 'private', gone: false }, { tier: 'public_or_personal', gone: false }], report)).toBe(1);
+  expect(passagesWithheldAtReleasableTiers([priv], [{ tier: 'legacy', gone: false }], { allowed: [[]] })).toBe(0);
+  expect(passagesWithheldAtReleasableTiers([personal], [{ tier: 'legacy', gone: false }], { allowed: [[]] })).toBe(2);
+  // A hash the input never named cannot stand in for one it did.
+  expect(passagesWithheldAtReleasableTiers([personal], [{ tier: 'public_or_personal', gone: false }], { allowed: [['c', 'zz']] })).toBe(1);
+});
+
+test('remote output keeps an authorized Private answer whose passages the judge has not proved', async () => {
+  const input: ReleaseInput = { corpusId: 'internal.files', provider: 'files', accountScope: 'a', providerItemId: 'p', providerConversationId: '', chunkHashes: ['a'], privateAtAnswer: true };
+  const check = {
+    inputs: (inputs: readonly ReleaseInput[]) => inputs.map(() => ({ tier: 'private' as const, gone: false })),
+    chunks: async (inputs: readonly ReleaseInput[]) => ({ allowed: inputs.map(() => []), withheldPassages: 1, withheldDocuments: 1 }),
+    secureDerivativeDefault: () => 'allow' as const,
+  };
+  const raw = { answer: 'The policy covers it.', evidence: [], coverage: {} };
+  const output = await remoteOperationOutputOffThread('source_answer', raw, {
+    releaseCheck: check, releaseManifests: [{ inputs: [input], constraints: { includeSecureLocalContent: false } }] as never,
+  });
+  expect(output.status).toBe('answered');
+});
+
+test('a search hit leaves only with the excerpt its proved passages made; a names-only hit carries no text', async () => {
+  const constraints = { secureDerivativeDefault: 'approval' as const, includeSecureLocalContent: false };
+  const base = { corpusId: 'internal.files', provider: 'files', accountScope: 'a', privateAtAnswer: false };
+  const proved: ReleaseInput = { ...base, providerItemId: 'proved', chunkHashes: ['h1'], releasedTextDigest: releasedTextDigest('the proved text') };
+  const swapped: ReleaseInput = { ...base, providerItemId: 'swapped', chunkHashes: ['h2'], releasedTextDigest: releasedTextDigest('what was proved') };
+  const names: ReleaseInput = { ...base, providerItemId: 'names', layer: 'names' };
+  const hit = (input: ReleaseInput, excerpt?: string) => ({ corpus_id: input.corpusId, provider: input.provider,
+    account_scope: input.accountScope, provider_item_id: input.providerItemId, ...(excerpt ? { excerpt } : {}) });
+  const evidence = [hit(proved, 'the proved text'), hit(swapped, 'some other text'), hit(names, 'text a names-only hit never had'), hit(names)];
+  const check = { inputs: (inputs: readonly ReleaseInput[]) => inputs.map(() => ({ tier: 'public_or_personal' as const, gone: false })),
+    chunks: async (inputs: readonly ReleaseInput[]) => ({ allowed: inputs.map(input => input.chunkHashes ?? []), withheldPassages: 0, withheldDocuments: 0 }),
+    secureDerivativeDefault: () => 'approval' as const };
+  const result = await recheckSearchEvidence({ evidence, withheld: 0 }, [{ inputs: [proved, swapped, names], constraints }], check);
+  expect(result.raw.evidence).toEqual([evidence[0]!, evidence[3]!]);
+  // Each hit dropped for its text counts once.
+  expect(result.raw.withheld).toBe(2);
+});
+
+test('withheld counts held passages and every hit dropped for another reason, without double counting', async () => {
+  const base = { corpusId: 'internal.files', provider: 'files', accountScope: 'a', privateAtAnswer: false };
+  const held: ReleaseInput = { ...base, providerItemId: 'held', chunkHashes: ['a', 'b', 'c'] };
+  const evidence = [{ corpus_id: 'internal.files', provider: 'files', account_scope: 'a', provider_item_id: 'held' },
+    { corpus_id: 'internal.files', provider: 'files', account_scope: 'a', provider_item_id: 'unlisted' }];
+  const result = await recheckSearchEvidence({ evidence, withheld: 0 }, [{ inputs: [held], constraints: { secureDerivativeDefault: 'approval', includeSecureLocalContent: false } }], {
+    inputs: inputs => inputs.map(() => ({ tier: 'public_or_personal', gone: false })),
+    chunks: async () => ({ allowed: [[]], withheldPassages: 3, withheldDocuments: 1 }),
+    secureDerivativeDefault: () => 'approval',
+  });
+  expect(result.raw.evidence).toEqual([]);
+  expect(result.raw.withheld).toBe(4);
+});
+
+test('text a model read with no stored chunk behind it holds the derivative; a passage filter leaves it out instead', () => {
+  const provenance = {};
+  bindReleaseChunks(provenance, ['the body text'], [['body-hash']]);
+  const candidate = { provenance, chunks: ['Reactions: 👍 ×2 (Sam)', 'the body text'], tables: [{}], facts: [] };
+  const held = releaseCandidateHashes(candidate, { holdUnmapped: true });
+  expect(held).toEqual(['body-hash', 'unproved:0', 'unproved:1']);
+  expect(releaseCandidateHashes(candidate)).toEqual(['body-hash']);
+  const input: ReleaseInput = { corpusId: 'internal.chat', provider: 'chat', accountScope: 'a', providerItemId: 'm', privateAtAnswer: false, chunkHashes: held };
+  // The body is proved; the reaction line and table never can be.
+  expect(passagesWithheldAtReleasableTiers([input], [{ tier: 'public_or_personal', gone: false }], { allowed: [['body-hash']] })).toBe(2);
+  // Nothing proved at all already holds the input; no marker is added.
+  expect(releaseCandidateHashes({ provenance: {}, chunks: ['unbound'] }, { holdUnmapped: true })).toEqual([]);
+});
+
+test('a ledger removed while windows are judged no longer vouches for what it read', async () => {
+  const w = await world('violet turnips garden.');
+  // Judging awaits the pool; the ledger is unset meanwhile, so the item now reads as legacy.
+  let current = w.scopes();
+  const live = createReleaseTierCheck(() => current, () => 'allow');
+  const check = { ...live, chunks: async (inputs: readonly ReleaseInput[], options?: { budgetMs?: number }) => {
+    const report = await live.chunks!(inputs, options);
+    current = [];
+    return report;
+  } };
+  const manifest = [{ inputs: [w.input()], constraints: { secureDerivativeDefault: 'allow' as const, includeSecureLocalContent: false } }];
+  expect(await answerReleaseWithheldReasonOffThread(manifest, check, 'private', { chunks: true })).toBe(ANSWER_RELEASE_UNVERIFIED);
+  // With the ledger still there, the same short item is proved and released.
+  current = w.scopes();
+  expect(await answerReleaseWithheldReasonOffThread(manifest, live, 'private', { chunks: true })).toBeUndefined();
 });

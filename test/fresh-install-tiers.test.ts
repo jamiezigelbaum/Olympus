@@ -1,3 +1,4 @@
+import { laneReleaseCheck } from './helpers/lane-release-check.ts';
 // A fresh, clean install (owner rulings 2026-09-23 and 2026-10-01): Personal,
 // Private and Secret only.
 //
@@ -151,6 +152,7 @@ type Install = Awaited<ReturnType<typeof freshInstall>>;
 async function olympusSearch(install: Install, question: string) {
   const raw = await searchReleasedEvidence({
     question,
+    releaseCheck: laneReleaseCheck(install.lane.ledger, () => install.lane.set.openStores()),
     lanes: () => {
       const stores = install.lane.set.openStores();
       return {
