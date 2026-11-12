@@ -210,6 +210,10 @@ export interface XBookmarksApiSourceConnectorOptions {
   attemptedAt: Date;
   /** Who initiated this run; anything but 'operator' fails closed to 'scheduled'. */
   provenance?: XApiInvocationProvenance;
+  /**
+   * Confirmed inventory across all tier stores, excluding an unverified head prefix.
+   */
+  hasStoredBookmark?(postId: string): boolean;
   now?: () => Date;
   usageStore: LocalXBookmarksApiUsageStore;
   /** Optional test/repair injection. Production derives an owner-private DB from the usage-store path. */
@@ -270,10 +274,6 @@ export function createXBookmarksApiSourceConnector(
   const credentialHandle = options.credentialHandle?.trim()
     || env.OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CREDENTIAL_HANDLE?.trim()
     || 'x.bookmarks.personal';
-  const broker = options.credentialBroker ?? createEnvCredentialBroker({
-    env,
-    ...(options.fetch ? { fetch: options.fetch } : {}),
-  });
   let client: XBookmarksLiveSourceClient | undefined = options.sourceClient;
   let snapshot: SourceConnector | undefined;
   let acquired = false;
@@ -290,6 +290,10 @@ export function createXBookmarksApiSourceConnector(
     async authenticate(): Promise<void> {
       if (client) return;
       if (!userId) throw new Error('X bookmarks connector requires OLYMPUS_SOURCE_INDEX_X_USER_ID.');
+      const broker = options.credentialBroker ?? createEnvCredentialBroker({
+        env,
+        ...(options.fetch ? { fetch: options.fetch } : {}),
+      });
       const session = await issueGrantFencedXSession({
         broker,
         credentialHandle,
@@ -312,7 +316,7 @@ export function createXBookmarksApiSourceConnector(
       const provenance = xApiInvocationProvenance(options.provenance);
       const acquisition = options.mode === 'incremental'
         ? await acquireIncremental(
-            client!, cursor, options.usageStore, account, config, clock, provenance,
+            client!, cursor, options.usageStore, account, config, clock, provenance, options.hasStoredBookmark,
           )
         : await withReconcileStateStore(options, env, (stateStore) => acquireReconciliation(
             client!, options.usageStore, stateStore, account,
@@ -428,6 +432,7 @@ async function acquireIncremental(
   config: XBookmarksLiveSyncConfig,
   clock: () => Date,
   provenance: XApiInvocationProvenance,
+  hasStoredBookmark?: (postId: string) => boolean,
 ): Promise<Acquisition> {
   const previous = usage.headCheckpoint(account) || checkpoint?.trim();
   const catchupItemLimit = config.maxCatchupItems;
@@ -479,10 +484,21 @@ async function acquireIncremental(
     );
     headPageSizesUsed.push(providerPageSize);
     newestId ??= page.posts[0]?.id;
+    // X returns bookmark-time order. Never sort by post id or creation time:
+    // an old post saved today belongs at the head. Inspect two more rows of
+    // this already-paid page after stored overlap, without buying history.
+    let overlapRemaining: number | undefined;
     for (const post of page.posts) {
+      if (overlapRemaining === 0) break;
+      if (overlapRemaining !== undefined) overlapRemaining -= 1;
       if (previous && post.id === previous) {
         foundPrevious = true;
         break;
+      }
+      if (hasStoredBookmark?.(post.id)) {
+        foundPrevious = true;
+        overlapRemaining ??= 2;
+        continue;
       }
       posts.push(post);
       if (posts.length >= catchupItemLimit) break;
@@ -493,8 +509,8 @@ async function acquireIncremental(
     // requested size is not credible as an end of list. Reconciliation pays for
     // a smaller-page retry because it is the completeness authority; the head
     // lane defers instead — it spends nothing extra now, preserves the
-    // checkpoint so the next hourly run re-attempts the same traversal, and
-    // records the deferral in counts-only telemetry. The weekly reconciliation
+    // checkpoint so the next head run re-attempts the same traversal, and
+    // records the deferral in counts-only telemetry. The daily reconciliation
     // rewrites the head checkpoint from its own snapshot, so a provider that
     // stays stuck cannot strand the head lane past one reconcile cadence.
     if (previous && !foundPrevious && !nextToken

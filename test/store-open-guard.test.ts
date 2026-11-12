@@ -26,6 +26,8 @@ const ALLOWED: Record<string, string> = {
   'src/workers/classification/sniffer-store.ts': 'the sniffer store class opening its own database',
   'src/core/file-lease.ts': 'the lock databases themselves',
   'src/workers/apple-messages/connector.ts': 'reads the macOS Messages chat.db, never an Olympus store',
+  'src/workers/x-bookmarks/archive-import.ts':
+    'reads, read-only, an earlier install\'s X bookmarks store at the path the owner names, to import it through the X lane; the X sync refuses this install\'s own store',
   'src/core/messaging-pairing.ts': 'copies and writes the Telegram login a pairing proves (telegram.session), never an Olympus store',
   // X's state outside the stores.
   'src/workers/x-bookmarks/reconcile-state.ts':

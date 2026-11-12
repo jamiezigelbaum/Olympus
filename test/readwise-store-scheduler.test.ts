@@ -233,16 +233,16 @@ describe('Readwise dark store: bounded slices, resume, reconcile, and the daily 
       expect(harness.calls).toHaveLength(1);
       const parked = stateStore.get(PULL_TASK)!;
       expect(parked.degradedReason).toBe('readwise_daily_api_request_guard');
-      // The refusal is typed, not laundered through the untyped task_failed:
-      // the health monitor classifies it from the kind alone.
-      expect(parked.lastErrorKind).toBe('readwise_daily_api_request_guard');
+      expect(parked.lastErrorKind).toBeUndefined();
+      expect(parked.lastResultStatus).toBe('idle');
       expect(parked.notBeforeAt).toBe('2026-07-27T00:00:00.000Z');
-      expect(parked.consecutiveFailures).toBe(1);
+      expect(parked.consecutiveFailures).toBe(0);
       const pullStatus = scheduler.status().sources[0]!.tasks
         .find((task) => task.id === PULL_TASK.taskId);
       expect(pullStatus).toMatchObject({
         degraded_reason: 'readwise_daily_api_request_guard',
-        last_error_kind: 'readwise_daily_api_request_guard',
+        consecutive_failures: 0,
+        last_result: { status: 'idle' },
         next_run_at: '2026-07-27T00:00:00.000Z',
       });
 

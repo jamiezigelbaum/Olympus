@@ -347,7 +347,7 @@ model output local; only aggregate replay counts belong in the PR.
 
 ## Passage retrieval eval (question set version 2, receipt schema 3)
 
-`eval:passages` scores retrieval without constructing an Analyst or a query
+`eval:passages` scores retrieval; by default it constructs no Analyst or query
 planner. The answer eval above remains the release gate. Work on a complete
 copy of an install's data folder, including each tier set's ledger:
 
@@ -434,6 +434,16 @@ as far as each step: `found` (by a probed lane or its store), `returned`,
 copied store, and `summary.byLength` groups questions by it (`1_chunk`,
 `2-3_chunks`, `4+_chunks`): an item over three chunks can never be passed
 whole, so long documents show up as their own group.
+
+Add `--answer` to ask the local `source_answer` Analyst with the same fitted
+pack and `--prompt-bytes` budget; existing profile/lane environment overrides
+apply, and an unavailable local model fails the CLI. An answer is right when
+it cites an expected item or alternate and contains at least 80% of a quote's
+normalized letter tokens of three or more letters, excluding `ANSWER_STOP_WORDS`
+in `run-passages.ts`. The best alternative quote counts; no content words means
+zero coverage. Receipts contain only scores, safe failure codes and timings,
+with counts and successful-call median/p90 times per family and item length,
+never answer or quote text.
 
 With `OLYMPUS_SOURCE_RERANKER=built-in`, each row also records the reranker's
 outcome (`applied`, `timed_out` or `failed`), how many candidates it scored and
