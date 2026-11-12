@@ -359,3 +359,13 @@ test('the word clip is always a candidate and keeps its place on a tie, so a sma
     scoreWindows: async (_query, windows) => windows.map(() => 0) });
   expect(flat[0]).toBe(original);
 });
+
+test('a winning window near the end survives being widened to the share and byte-clipped', async () => {
+  const answer = 'FOUNTAIN';
+  const full = ('漢'.repeat(3900) + answer).padEnd(4000, '漢');
+  const placer = createEvidenceWindowPlacer(QUESTION);
+  const placed = await placer.place(['k'.repeat(1500)], { texts: [full], scoreWindows: async (_query, windows) =>
+    windows.map(window => (window.includes(answer) ? 1 : 0)) }, undefined, [3000]);
+  expect(utf8ByteLength(placed[0]!)).toBeLessThanOrEqual(3000);
+  expect(placed[0]).toContain(answer);
+});

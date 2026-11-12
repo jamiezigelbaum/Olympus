@@ -109,7 +109,12 @@ export function createEvidenceWindowPlacer(query: string, timers = systemTimers)
         return chunks.map((chunk, index) => {
           const picked = best.get(index);
           const start = picked === undefined ? KEEP_ORIGINAL : windows[picked]!.start;
-          return start === KEEP_ORIGINAL ? chunk : cut(sourceIndexChunkWindow(source.texts[index]!, start, chunk.length), index);
+          if (start === KEEP_ORIGINAL) return chunk;
+          // Widening to the share can pull a late window's start back, and the
+          // byte clip then keeps the front; keep the scored window itself then.
+          const widened = cut(sourceIndexChunkWindow(source.texts[index]!, start, chunk.length), index);
+          const scored = windows[picked!]!.text;
+          return widened.includes(scored) ? widened : scored;
         });
       } catch {
         if (timers.now() - startedAt >= WINDOW_PLACEMENT_BUDGET_MS) {
