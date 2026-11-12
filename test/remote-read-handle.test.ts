@@ -105,7 +105,10 @@ test('a handle does not cache privacy: an item re-judged Private after search is
   const f = await fixture(); const handle = (await f.search()).structuredContent.evidence[0].read_handle;
   f.ledgerDb.exec("UPDATE tier_items SET content_tier = 'secure'");
   const result = await f.read(handle);
-  expect(result.isError).toBe(true); expect(JSON.stringify(result)).toContain('not_personal');
+  expect(result.isError).toBe(true);
+  // The same refusal as an unknown handle: nothing tells the app the item is now Private.
+  expect(result).toEqual(await f.read(`rh_${'0'.repeat(32)}`));
+  expect(JSON.stringify(result)).not.toContain('not_personal');
   expect(JSON.stringify(result)).not.toContain('orchard');
 });
 
