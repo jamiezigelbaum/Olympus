@@ -156359,7 +156359,7 @@ function view3(row, state, context2) {
     ...record4?.state === "moving" && record4.targetContentTier ? { moving_to: tierDisplayName(record4.targetContentTier) } : {},
     decided_by: record4?.decidedBy ?? null,
     owner_set: state.ownerSet,
-    ...state.ownerTier && (!record4 || record4.contentTier !== state.ownerTier && record4.targetContentTier !== state.ownerTier) ? { owner_choice: tierDisplayName(state.ownerTier) } : {},
+    ...state.ownerTier && (!record4 || record4.contentTier !== state.ownerTier) ? { owner_choice: tierDisplayName(state.ownerTier) } : {},
     judge_reason: judgeReason(record4),
     ...record4?.state === "pending" && (record4.contentPending || record4.metadataPending) || hold?.kind === "waiting" ? { waiting_for_judge: true } : {},
     ...hold?.kind === "by_choice" ? { not_read: { kind: "by_choice" } } : hold?.kind === "cannot_read" ? { not_read: { kind: "cannot_read", reason: hold.reason } } : {},
