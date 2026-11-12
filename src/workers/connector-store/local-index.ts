@@ -17476,8 +17476,8 @@ export interface ConnectorStorePassageFocus {
   anchorLane?: 'keyword' | 'semantic';
   /**
    * The query's embedding, with the model it was made by. Present, each chunk
-   * holding a current vector of that model is scored by cosine, which picks
-   * the item's most query-like passages when no query term singles one out.
+   * holding a current vector of that model is scored by cosine, which gives
+   * the item's most query-like chunk a seat beside the word-dense passages.
    */
   queryVector?: readonly number[];
   queryVectorModelId?: string;
@@ -17494,8 +17494,8 @@ const PASSAGE_TIE_MARGIN = 0.03;
 
 // An item that fits its budget is returned whole, exactly as before. A longer
 // one yields its best passages instead of its first ones: the chunk a
-// retrieval lane matched, then the chunks densest in query terms, kept in
-// document order and clipped around their term windows.
+// retrieval lane matched, then its most similar chunk, then the chunks densest
+// in query terms, kept in document order and clipped around their term windows.
 //
 // Only terms that discriminate WITHIN the item count. A term the item's own
 // name carries explains why the item matched, not which passage answers: a
@@ -17530,17 +17530,26 @@ function selectEvidencePassages(
   const anchor = anchorIndex !== undefined && (focus.anchorLane !== 'keyword' || lexical[anchorIndex]! > 0)
     ? anchorIndex
     : undefined;
+  const maxPassages = Math.max(1, Math.floor(focus.maxPassages ?? MAX_PASSAGES_PER_CANDIDATE));
   if (lexical.some((score) => score > 0)) {
+    let mostSimilar: number | undefined;
+    for (let index = 0; index < chunks.length; index += 1) {
+      if (Number.isFinite(relevance(index))
+        && (mostSimilar === undefined || relevance(index) > relevance(mostSimilar))) {
+        mostSimilar = index;
+      }
+    }
     const scored = lexical
       .map((score, index) => ({ index, score }))
       .filter((entry) => entry.score > 0 && entry.index !== anchor)
       .sort((left, right) => right.score - left.score
         || relevance(right.index) - relevance(left.index)
         || left.index - right.index);
-    const picked = [
+    const picked = [...new Set([
       ...(anchor !== undefined ? [anchor] : []),
+      ...(mostSimilar !== undefined ? [mostSimilar] : []),
       ...scored.map((entry) => entry.index),
-    ].slice(0, Math.max(1, Math.floor(focus.maxPassages ?? MAX_PASSAGES_PER_CANDIDATE)));
+    ])].slice(0, maxPassages);
     const bounded = boundedSourceIndexChunks(
       picked.sort((left, right) => left - right).map((index) => chunks[index]!),
       maxChars,
@@ -17568,7 +17577,7 @@ function selectEvidencePassages(
   const tied = Number.isFinite(best)
     ? ranked
       .filter((index) => index === anchor || relevance(index) >= best - PASSAGE_TIE_MARGIN)
-      .slice(0, Math.max(1, Math.floor(focus.maxPassages ?? MAX_PASSAGES_PER_CANDIDATE)))
+      .slice(0, maxPassages)
     : [];
   if (tied.length > 1) {
     const byLength = [...tied].sort((left, right) => chunks[left]!.length - chunks[right]!.length || left - right);

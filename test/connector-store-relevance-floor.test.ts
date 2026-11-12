@@ -220,6 +220,74 @@ describe('the private match floor', () => {
   });
 });
 
+describe('similarity inside a long item with word hits', () => {
+  // Six exact store windows. Word density favours 1 then 2; similarity
+  // favours 4, whose paraphrase has no query word. Chunk 0 is the anchor.
+  const openings = ['Opening', 'Dense', 'Runner', 'Lesser', 'Paraphrase', 'Closing'];
+  const wordHits = [1, 4, 3, 2, 0, 0];
+  const chunks = openings.map((opening, index) =>
+    `${opening}. ${'coverage '.repeat(wordHits[index]!)}`.padEnd(4_000, '.'));
+  const item: FixtureItem = { id: 'policy', name: 'handbook.pdf', text: chunks.join('') };
+
+  async function read(options: { similarIndex?: number; anchorChunkIndex?: number; maxPassages?: number }) {
+    let result: ReturnType<Store['localContent']>;
+    await withStore([item], async (store) => {
+      const provider = chunkCosineProvider(Object.fromEntries(openings.map((opening, index) =>
+        [`${opening}.`, index === options.similarIndex ? 0.95 : 0.4])));
+      if (options.similarIndex !== undefined) await store.embedChunks({ provider });
+      const focus = {
+        query: 'coverage',
+        ...(options.anchorChunkIndex !== undefined ? { anchorChunkIndex: options.anchorChunkIndex } : {}),
+        anchorLane: 'keyword' as const,
+        ...(options.maxPassages !== undefined ? { maxPassages: options.maxPassages } : {}),
+      };
+      // No vectors in the store must work both with a query vector and with
+      // no embedding lane at all, returning exactly the same stored bytes.
+      if (options.similarIndex === undefined) {
+        const withoutVector = store.localContent(`${ACCOUNT}:policy`, 12_000, focus);
+        expect(withoutVector?.chunks).toEqual([chunks[0]!, chunks[1]!, chunks[2]!]);
+      }
+      result = store.localContent(`${ACCOUNT}:policy`, 12_000, {
+        ...focus,
+        queryVector: [1, 0],
+        queryVectorModelId: provider.modelId,
+      });
+    });
+    return result!;
+  }
+
+  test('keeps the anchor, the most similar chunk and the densest chunk in document order', async () => {
+    const content = await read({ similarIndex: 4, anchorChunkIndex: 0 });
+    expect(content.chunks).toEqual([chunks[0]!, chunks[1]!, chunks[4]!]);
+    expect(content.truncated).toBe(true);
+  });
+
+  test('without stored vectors returns exactly the existing word-only passages', async () => {
+    const content = await read({ anchorChunkIndex: 0 });
+    expect(content.chunks).toEqual([chunks[0]!, chunks[1]!, chunks[2]!]);
+  });
+
+  test('when similarity picks the anchor, word density fills the remaining seats without duplicates', async () => {
+    const content = await read({ similarIndex: 0, anchorChunkIndex: 0 });
+    expect(content.chunks).toEqual([chunks[0]!, chunks[1]!, chunks[2]!]);
+  });
+
+  test('a one-passage limit keeps the anchor', async () => {
+    const content = await read({ similarIndex: 4, anchorChunkIndex: 0, maxPassages: 1 });
+    expect(content.chunks).toEqual([chunks[0]!]);
+  });
+
+  test('a one-passage limit with no anchor keeps the most similar chunk', async () => {
+    const content = await read({ similarIndex: 4, maxPassages: 1 });
+    expect(content.chunks).toEqual([chunks[4]!]);
+  });
+
+  test('when similarity picks the densest chunk it is included only once', async () => {
+    const content = await read({ similarIndex: 1, anchorChunkIndex: 0 });
+    expect(content.chunks).toEqual([chunks[0]!, chunks[1]!, chunks[2]!]);
+  });
+});
+
 describe('passages of a document in another language', () => {
   // 2026-10-10 live: the panel read the owner's Spanish letter of intent for
   // "what does it say about the notary", but only its opening: no English
