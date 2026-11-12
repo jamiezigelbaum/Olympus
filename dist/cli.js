@@ -49755,7 +49755,7 @@ ${parentKey(ref)}`, { ref, origin });
           return "held_until_judged";
         if (this.contentHeldPrivate(localItemId))
           return "content_private";
-        if (scope?.contentAllowed === false || this.metadataOnlyRuleForLocator(now.locatorUri) !== undefined || scope?.contentFilters && !this.itemMatchesSearchFilters(localItemId, scope.accountScope, scope.contentFilters))
+        if (!this.readOnDemand(localItemId) && (scope?.contentAllowed === false || this.metadataOnlyRuleForLocator(now.locatorUri) !== undefined || scope?.contentFilters && !this.itemMatchesSearchFilters(localItemId, scope.accountScope, scope.contentFilters)))
           return "names_only";
         if (!this.contentServedNow(localItemId, true))
           return "extraction_pending";
@@ -253601,6 +253601,18 @@ function doctorFailureSummary(result) {
     "Fix the failed checks and run olympus doctor again; the JSON above carries each check's detail and hint."
   ];
 }
+function parseCliObject(value2, key2) {
+  let parsed;
+  try {
+    parsed = JSON.parse(value2);
+  } catch {
+    parsed = undefined;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new OperationError("invalid_params", `--${key2.replace(/_/g, "-")} must be a JSON object.`);
+  }
+  return parsed;
+}
 function parseArgs(operation, args) {
   const params = {};
   const positional = operation.cliHints.positional ?? [];
@@ -253630,7 +253642,7 @@ function parseArgs(operation, args) {
         if (value2 === undefined) {
           throw new OperationError("invalid_params", `Missing value for --${key2.replace(/_/g, "-")}.`);
         }
-        params[key2] = definition?.type === "number" ? Number(value2) : value2;
+        params[key2] = definition?.type === "number" ? Number(value2) : definition?.type === "object" ? parseCliObject(value2, key2) : value2;
         if (inlineValue === undefined)
           index += 1;
       }

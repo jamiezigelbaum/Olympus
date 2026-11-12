@@ -33143,7 +33143,7 @@ ${parentKey(ref)}`, { ref, origin });
         return "held_until_judged";
       if (this.contentHeldPrivate(localItemId))
         return "content_private";
-      if (scope?.contentAllowed === false || this.metadataOnlyRuleForLocator(now.locatorUri) !== undefined || scope?.contentFilters && !this.itemMatchesSearchFilters(localItemId, scope.accountScope, scope.contentFilters))
+      if (!this.readOnDemand(localItemId) && (scope?.contentAllowed === false || this.metadataOnlyRuleForLocator(now.locatorUri) !== undefined || scope?.contentFilters && !this.itemMatchesSearchFilters(localItemId, scope.accountScope, scope.contentFilters)))
         return "names_only";
       if (!this.contentServedNow(localItemId, true))
         return "extraction_pending";

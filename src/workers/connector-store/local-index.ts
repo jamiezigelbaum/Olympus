@@ -14809,8 +14809,10 @@ export class LocalConnectorStore {
         || ledger!.rejudgeQuestion(identity) || heldUntilJudged(row.reasons)) return 'held_until_judged';
       if (generation !== undefined && (row.generation !== generation || JSON.stringify(override) !== initialOverride)) return 'held_until_judged';
       if (this.contentHeldPrivate(localItemId)) return 'content_private';
-      if (scope?.contentAllowed === false || this.metadataOnlyRuleForLocator(now.locatorUri) !== undefined
-        || (scope?.contentFilters && !this.itemMatchesSearchFilters(localItemId, scope.accountScope, scope.contentFilters))) return 'names_only';
+      // A version-bound on-demand grant lifts the names-only layer only; the
+      // metadata scope above still applies, as in the extraction scope guard.
+      if (!this.readOnDemand(localItemId) && (scope?.contentAllowed === false || this.metadataOnlyRuleForLocator(now.locatorUri) !== undefined
+        || (scope?.contentFilters && !this.itemMatchesSearchFilters(localItemId, scope.accountScope, scope.contentFilters)))) return 'names_only';
       if (!this.contentServedNow(localItemId, true)) return 'extraction_pending';
       return undefined;
     };

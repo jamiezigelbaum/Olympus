@@ -366,3 +366,28 @@ test('a names-only refusal stays names_only when no on-demand reader is wired or
   const email = new EmailClient(config(), new DirectHttpEmailTransport(async (url, init) => worker.fetch(new Request(url, init))));
   expect((await email.sourceItemRead({ selectedItem: selected(f) })).couldNotRead).toEqual(['names_only']);
 });
+
+test('the CLI decodes --selected-item JSON into the object the handler reads', async () => {
+  const { parseArgs } = await import('../src/cli.ts');
+  const f = await fixture('Personal orchard text.'); const email = client(f);
+  const op = operations.find(o => o.name === 'source_item_read')!;
+  const params = parseArgs(op, ['--selected-item', JSON.stringify(selected(f)), '--pages', '2']);
+  expect(params).toEqual({ selected_item: selected(f), pages: 2 });
+  const result = await op.handler({ config: config(), email, delphi: {} } as OperationContext, params);
+  expect(result).toMatchObject({ pages: [{ page: 1, text: 'Personal orchard text.' }] });
+  for (const bad of ['not json', '[1]', '"text"', 'null']) {
+    expect(() => parseArgs(op, [`--selected-item=${bad}`])).toThrow(expect.objectContaining({ code: 'invalid_params' }));
+  }
+});
+
+test('a version-bound on-demand grant lifts names-only scope but not the metadata scope', async () => {
+  const f = await fixture('Personal orchard text.');
+  const namesOnly = () => ({ allowed: true, contentAllowed: false, contentFilters: { provider: 'other' } });
+  refused(await f.read(undefined, { scope: namesOnly }), 'names_only');
+  const version = (f.db.query('SELECT source_version FROM items WHERE local_item_id = ?').get(f.item.identity.localItemId) as { source_version: string | null }).source_version ?? '';
+  f.store.grantOnDemandRead(f.item.identity.localItemId, version);
+  expect((await f.read(undefined, { scope: namesOnly })).pages).toEqual([{ page: 1, text: 'Personal orchard text.' }]);
+  refused(await f.read(undefined, { scope: () => ({ ...namesOnly(), filters: { provider: 'other' } }) }), 'not_in_scope');
+  f.db.exec(`UPDATE on_demand_item_reads SET source_version = 'stale'`);
+  refused(await f.read(undefined, { scope: namesOnly }), 'names_only');
+});
