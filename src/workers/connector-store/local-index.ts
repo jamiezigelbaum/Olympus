@@ -183,6 +183,7 @@ import type {
   SourceIndexCorpusMatchCount,
   SourceIndexCorpusSearchResponse,
   SourceIndexSearchHit,
+  SourceIndexStoreRelevance,
 } from '../../core/source-index/router.ts';
 import {
   buildSourceIndexStorageProfile,
@@ -14884,6 +14885,7 @@ export function createConnectorStoreCorpusAdapter(
         )), keywordLane);
         return {
           hits,
+          storeRelevance: connectorStoreRelevance(keywordLane),
           latencyMs: Date.now() - startedAt,
           laneAudits: [{
             ...connectorStoreKeywordLaneAudit(store.corpusId, rows.length, hits.length),
@@ -14926,6 +14928,7 @@ export function createConnectorStoreCorpusAdapter(
       }), keywordLane);
       return {
         hits,
+        storeRelevance: connectorStoreRelevance(keywordLane),
         latencyMs: Date.now() - startedAt,
         laneAudits: [
           {
@@ -15323,6 +15326,11 @@ async function hybridConnectorStoreSearch(
       .filter((row) => row.bestCosine >= contentBar)
       .map((row) => row.sourceItem.localItemId));
   const contentPreference = connectorStoreContentPreference(vettedVectorItemIds);
+  // The store's best vetted cosine over its own bar: comparable across stores
+  // whose models score on different scales (#1354).
+  const vettedMargin = contentBar === undefined || vettedVectorItemIds.size === 0
+    ? undefined
+    : Math.max(...vectorRows.filter((row) => vettedVectorItemIds.has(row.sourceItem.localItemId)).map((row) => row.bestCosine)) - contentBar;
 
   const lanes = [
     { name: 'keyword', items: keywordRows },
@@ -15361,6 +15369,7 @@ async function hybridConnectorStoreSearch(
 
   return {
     hits,
+    storeRelevance: connectorStoreRelevance(keywordLane, vettedMargin),
     latencyMs: Date.now() - startedAt,
     // Per-lane candidate counts: keyword, vector, and the fused cut — the
     // same audit fields the Dropbox retrieval audit records
@@ -15622,6 +15631,18 @@ function withKeywordLeaderSignals<H extends SourceIndexSearchHit>(hits: H[], lan
   });
 }
 
+/**
+ * How well this store's best hit answers the question, in terms the router
+ * compares across stores to order them within each turn of the pack (#1354):
+ * the best keyword row's share of the question's concepts, and the best
+ * vetted cosine's margin over this store's relevance bar.
+ */
+function connectorStoreRelevance(lane: ConnectorStoreKeywordLane, vectorMargin?: number): SourceIndexStoreRelevance {
+  let conceptShare = 0;
+  for (const share of lane.conceptShare?.values() ?? []) if (share > conceptShare) conceptShare = share;
+  return { conceptShare, ...(vectorMargin !== undefined ? { vectorMargin } : {}) };
+}
+
 /** Whether keyword expansion changes the SQL a keyword search would run for this question. */
 function keywordExpansionChangesSearch(query: string, ftsOptions: ConnectorStoreKeywordFtsOptions): boolean {
   const shape = () => JSON.stringify([toFtsQuery(query, ftsOptions), sourceIndexFtsTermGroups(query), sourceIndexTopicTokens(query)]);
@@ -15642,6 +15663,10 @@ function revalidateKeywordLane(store: LocalConnectorStore, lane: ConnectorStoreK
     allRows,
     matchedItemIds: served,
     completeItemIds: new Set([...lane.completeItemIds].filter((id) => served.has(id))),
+    // The leaders and concept shares the router reads stay with the rows
+    // still served (#1350, #1354).
+    ...(lane.nameLeaderItemId !== undefined && served.has(lane.nameLeaderItemId) ? { nameLeaderItemId: lane.nameLeaderItemId } : {}),
+    ...(lane.conceptShare ? { conceptShare: new Map([...lane.conceptShare].filter(([id]) => served.has(id))) } : {}),
     matchCount: {
       matchedItems: allRows.length,
       contentMatchedItems: allRows.filter(connectorStoreRowHasContent).length,

@@ -633,6 +633,50 @@ describe('source-index router per-lane retrieval deadline', () => {
   });
 });
 
+// Stores take turns in the pack, and inside a turn they went in config order
+// for every question, so on a many-store install a local Analyst read the
+// same first stores whatever was asked (#1354). Within a turn, stores now go
+// by how well their best hit answers this question.
+describe('stores in a pack follow relevance, not config order', () => {
+  const corpora = Array.from({ length: 8 }, (_, index) => defineSourceIndexCorpus({
+    corpusId: `internal.store.${index}`,
+    family: 'file',
+    trustDomain: 'internal',
+  }));
+  const adapter = (corpusId: string, relevance?: SourceIndexCorpusSearchResponse['storeRelevance']): SourceIndexCorpusSearchAdapter =>
+    async (): Promise<SourceIndexCorpusSearchResponse> => ({
+      hits: [1, 2, 3].map((rank) => ({ sourceItem: sourceItem('file', `${corpusId}-${rank}`), rawExposed: false as const })),
+      latencyMs: 1,
+      ...(relevance ? { storeRelevance: relevance } : {}),
+      rawExposed: false,
+    });
+  const route = (relevance: Record<number, SourceIndexCorpusSearchResponse['storeRelevance']>, maxResults: number) => routeSourceIndexSearch({
+    registry: buildSourceIndexCorpusRegistry(corpora),
+    adapters: Object.fromEntries(corpora.map((corpus, index) => [corpus.corpusId, adapter(corpus.corpusId, relevance[index])])),
+    request: { query: 'q', maxResults, context: { allowedTrustDomains: ['internal'], allowCloudQueries: false } },
+  });
+  const stores = (result: Awaited<ReturnType<typeof route>>) => result.hits.map((hit) => hit.corpusId.replace('internal.store.', ''));
+
+  test('a late store whose best hit matches the question leads each turn', async () => {
+    const weak = { conceptShare: 0.25 };
+    const result = await route({ 0: weak, 1: weak, 2: weak, 3: weak, 4: weak, 5: weak, 6: { conceptShare: 1 }, 7: { conceptShare: 0, vectorMargin: 0.08 } }, 3);
+    // The keyword match first, then the paraphrase match (a vetted cosine
+    // above its store's bar), then config order. A share under half the
+    // question's concepts counts as no keyword match.
+    expect(stores(result)).toEqual(['6', '7', '0']);
+  });
+
+  test('every turn keeps the same store order', async () => {
+    const result = await route({ 3: { conceptShare: 0.8 }, 5: { conceptShare: 0.6 } }, 16);
+    expect(stores(result)).toEqual(['3', '5', '0', '1', '2', '4', '6', '7', '3', '5', '0', '1', '2', '4', '6', '7']);
+  });
+
+  test('stores with no signal keep config order', async () => {
+    const result = await route({}, 8);
+    expect(stores(result)).toEqual(['0', '1', '2', '3', '4', '5', '6', '7']);
+  });
+});
+
 function fixtureCorpora(): SourceIndexCorpusDefinition[] {
   return [
     defineSourceIndexCorpus({

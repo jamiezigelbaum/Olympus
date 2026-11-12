@@ -151,14 +151,22 @@ describe('recency seats never cost a store its seat in the pack', () => {
     corpusId, id, ...(newestInStore ? { newestInStore } : {}), ...(at ? { provenance: { citation: { authoredAt: at } } } : {}),
   });
 
-  test('with more stores than seats, a cut pinned message takes no seat', () => {
+  test('with more stores than seats, a pinned message takes the least relevant store\'s only seat (#1354)', () => {
+    // Stores sit in turn by relevance, so the last seat is the least relevant
+    // store's; it is reported as cut.
     const stores = ['s1', 's2', 's3', 's4', 's5'];
     const pool = [...stores.map((store) => hit(store, `${store}-first`)), hit('chat', 'new', '2026-11-11T08:00:00.000Z', 1)];
-    const budgeted = { hits: pool.slice(0, 5), degradations: [] };
-    expect(withReservedRecencySeats(budgeted, pool, 5)).toMatchObject({ hits: budgeted.hits, recencySeats: 0 });
+    const budgeted = {
+      hits: pool.slice(0, 5),
+      degradations: [{ laneName: 'chat', laneType: 'keyword' as const, reason: 'lane_budget_cut' as const, occurrences: 1 }],
+    };
+    const result = withReservedRecencySeats(budgeted, pool, 5);
+    expect(result.hits.map((h) => h.id)).toEqual(['s1-first', 's2-first', 's3-first', 'new', 's4-first']);
+    expect(result.recencySeats).toBe(1);
+    expect(result.degradations.map((d) => d.laneName)).toEqual(['s5']);
   });
 
-  test('it drops a store\'s later result, never its only one', () => {
+  test('it drops a store\'s later result before any store\'s only one', () => {
     const pool = [hit('a', 'a1'), hit('b', 'b1'), hit('c', 'c1'), hit('a', 'a2'), hit('d', 'd1'), hit('chat', 'new', '2026-11-11T08:00:00.000Z', 1)];
     const budgeted = { hits: pool.slice(0, 5), degradations: [] };
     const result = withReservedRecencySeats(budgeted, pool, 5);
