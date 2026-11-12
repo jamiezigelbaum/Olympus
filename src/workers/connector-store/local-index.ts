@@ -2337,8 +2337,10 @@ async function scanVectorPages(
   const after = embeddingAuthorityFromRow(await read(authority) as EmbeddingAuthorityRow | null, provider);
   if (after.skippedReason) return { skippedReason: after.skippedReason };
   if (after.token !== beforeToken) return { skippedReason: 'embedding_authority_changed_during_query' };
-  // Old/read-only schemas and incomplete backfills retain the exact scan.
-  const digestTable = await read({ mode: 'get', sql: "SELECT 1 FROM sqlite_master WHERE name = 'chunk_vector_digest_meta'", params: [] });
+  // Old/read-only schemas and incomplete backfills retain the exact scan, as
+  // does every store when OLYMPUS_VECTOR_DIGEST=off: the fallback an owner or
+  // an eval can force without touching the store.
+  const digestTable = !vectorDigestSearchDisabled() && await read({ mode: 'get', sql: "SELECT 1 FROM sqlite_master WHERE name = 'chunk_vector_digest_meta'", params: [] });
   const digestReady = digestTable && await read({ mode: 'get', sql: 'SELECT 1 FROM chunk_vector_digest_meta WHERE model_id = ? AND completed = 1', params: [pageOptions.modelId] });
   if (digestReady) return scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit);
   const bestByItem = new Map<number, { bestCosine: number; bestChunkPk: number; localItemId: string }>();
@@ -2369,6 +2371,11 @@ async function scanVectorPages(
     if (pagesScanned++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0) await yieldConnectorStoreVectorScan();
   }
   return { bestByItem, dimensionMismatches };
+}
+
+/** OLYMPUS_VECTOR_DIGEST=off: every vector lane runs the exact scan; the digest is still kept. */
+export function vectorDigestSearchDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.OLYMPUS_VECTOR_DIGEST?.trim().toLowerCase() === 'off';
 }
 
 /** Backfill turns stay short on the worker thread (plan ruling on #1444). */

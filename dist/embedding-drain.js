@@ -24829,7 +24829,7 @@ async function scanVectorPages(read, provider, beforeToken, queryVector, pageOpt
     return { skippedReason: after.skippedReason };
   if (after.token !== beforeToken)
     return { skippedReason: "embedding_authority_changed_during_query" };
-  const digestTable = await read({ mode: "get", sql: "SELECT 1 FROM sqlite_master WHERE name = 'chunk_vector_digest_meta'", params: [] });
+  const digestTable = !vectorDigestSearchDisabled() && await read({ mode: "get", sql: "SELECT 1 FROM sqlite_master WHERE name = 'chunk_vector_digest_meta'", params: [] });
   const digestReady = digestTable && await read({ mode: "get", sql: "SELECT 1 FROM chunk_vector_digest_meta WHERE model_id = ? AND completed = 1", params: [pageOptions.modelId] });
   if (digestReady)
     return scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit);
@@ -24857,6 +24857,9 @@ async function scanVectorPages(read, provider, beforeToken, queryVector, pageOpt
       await yieldConnectorStoreVectorScan();
   }
   return { bestByItem, dimensionMismatches };
+}
+function vectorDigestSearchDisabled(env = process.env) {
+  return env.OLYMPUS_VECTOR_DIGEST?.trim().toLowerCase() === "off";
 }
 var VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128;
 var VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8;

@@ -405,6 +405,28 @@ test('a file store backfills on the read pool: the worker thread only writes dig
   } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('OLYMPUS_VECTOR_DIGEST=off forces the exact scan on a store with a complete digest', async () => {
+  const store = open();
+  const saved = process.env.OLYMPUS_VECTOR_DIGEST;
+  const queries: string[] = [];
+  try {
+    await store.syncFromConnector(connector(30), { fetchContent: true });
+    await store.embedChunks({ provider });
+    expect(vectorDigestState(database(store), modelId).completed).toBe(true);
+    const withDigest = await store.vectorSearchLane('harbor', provider, 10, 'a');
+    process.env.OLYMPUS_VECTOR_DIGEST = 'off';
+    const db = database(store);
+    const query = db.query.bind(db);
+    db.query = ((sql: string) => { queries.push(sql); return query(sql); }) as typeof db.query;
+    const exact = await store.vectorSearchLane('harbor', provider, 10, 'a');
+    expect(queries.some(sql => sql.includes('chunk_vector_digest'))).toBe(false);
+    expect(exact).toEqual(withDigest);
+  } finally {
+    if (saved === undefined) delete process.env.OLYMPUS_VECTOR_DIGEST; else process.env.OLYMPUS_VECTOR_DIGEST = saved;
+    store.close();
+  }
+});
+
 test('a file store backfill stands back while owner-visible reads wait for the pool (#1487)', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'vector-digest-pool-wait-'));
   const store = open(join(dir, 'store.sqlite'));
