@@ -102,7 +102,8 @@ export function runSqliteMigrations(
 
   const env = options.env ?? process.env;
   const report = options.report ?? ((event: BootStepEvent) => reportBootStep(env, event));
-  const log = options.log ?? ((line: string) => console.log(line));
+  // Progress goes to stderr: a CLI command's stdout may be JSON for another program.
+  const log = options.log ?? ((line: string) => console.error(line));
   // Every writable open passes here: a heartbeat for the boot that opens it.
   report({ phase: 'starting', storeId });
   ensureSchemaVersionTable(db);

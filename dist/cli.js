@@ -19465,7 +19465,7 @@ function runSqliteMigrations(db, storeId, migrations = currentStoreMigrations(),
   }
   const env = options.env ?? process.env;
   const report = options.report ?? ((event) => reportBootStep(env, event));
-  const log = options.log ?? ((line) => console.log(line));
+  const log = options.log ?? ((line) => console.error(line));
   report({ phase: "starting", storeId });
   ensureSchemaVersionTable(db);
   const applied = [];
