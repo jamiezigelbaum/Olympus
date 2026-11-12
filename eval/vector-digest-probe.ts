@@ -2,7 +2,7 @@
 // OS cache eviction is deliberately left to the operator.
 // bun eval/vector-digest-probe.ts --store /path/store.sqlite --model MODEL --queries 20 [--account SCOPE]
 import { Database } from 'bun:sqlite';
-import { connectorStoreCurrentEmbeddingRowsIterator, connectorStoreVectorDigestPageQuery, scanDigestPages } from '../src/workers/connector-store/local-index.ts';
+import { connectorStoreCurrentEmbeddingRowsIterator, connectorStoreVectorDigestPageQuery, forEachPackedVectorDigest, scanDigestPages, type VectorDigestPackedPage } from '../src/workers/connector-store/local-index.ts';
 import { cosineSimilarity, decodeEmbedding } from '../src/workers/source-index/embeddings.ts';
 import { encodeVectorDigest, scoreVectorDigest } from '../src/workers/source-index/vector-digest.ts';
 import type { StoreRead } from '../src/workers/connector-store/off-thread-reads.ts';
@@ -29,11 +29,11 @@ export async function probeVectorDigest(db: Database, options: { modelId: string
       let after = 0, vectors = 0, checksum = 0;
       while (true) {
         const page = connectorStoreVectorDigestPageQuery(options, after);
-        const rows = db.query(page.sql).all(...page.params) as Array<{ chunk_pk: number; digest: Uint8Array }>;
-        for (const row of rows) checksum += scoreVectorDigest(query, row.digest);
-        vectors += rows.length;
-        if (rows.length < 4096) break;
-        after = rows.at(-1)!.chunk_pk;
+        const packed = db.query(page.sql).get(...page.params) as VectorDigestPackedPage;
+        forEachPackedVectorDigest(packed, (_pk, digest) => { checksum += scoreVectorDigest(query, digest); return true; });
+        vectors += packed.n;
+        if (packed.n < 4096) break;
+        after = packed.last_pk;
       }
       if (!Number.isFinite(checksum)) throw new Error('Invalid digest dimensions');
       return { ms: performance.now() - start, vectors };
