@@ -41,7 +41,6 @@ import { CommandDriver, type Machine } from './machine.ts';
 import { escapeHtml, renderOnDemandTiming, type CheckResult, type CheckStatus } from './report.ts';
 import { openEngineMcp, runLiveAccounts, type LiveSourceSpec } from './live-accounts.ts';
 import { parseTimingAccounts, parseTimingSeedConfig, realTimingSeeds, type TimingAccounts } from './on-demand-seeds.ts';
-import { openBrowserTimingSeeds } from './on-demand-browser.ts';
 import { runOnDemandTiming, type OnDemandTimingResult } from './on-demand-timing.ts';
 import { openTimingDashboard, openTimingDiagnostics } from './on-demand-machine.ts';
 import { isInconclusive, openForSignIn, parseClientQuestions, runWebClients, WEB_CLIENT_IDS, type ClientQuestion, type WebClientId } from './web-clients.ts';
@@ -216,7 +215,9 @@ export async function runCanary(machine: Machine, options: CanaryOptions): Promi
             diagnostics = await openTimingDiagnostics(machine);
             // Verify the running split before provider mutations or dashboard saves.
             await diagnostics.preflight();
-            seeds = accounts.on_demand_timing ? await realTimingSeeds(parseTimingAccounts(accounts.on_demand_timing)) : await openBrowserTimingSeeds(machine, options.cdp ?? '127.0.0.1:9333');
+            // Browser seeds keep their names and revisions, so only a fresh store gives them a cold read; this leg keeps its store.
+            if (!accounts.on_demand_timing) throw new Error('an accounts leg needs on_demand_timing token commands (new revisions each run); browser seeding is for the fresh-install leg');
+            seeds = await realTimingSeeds(parseTimingAccounts(accounts.on_demand_timing));
             dashboard = await openTimingDashboard(machine, options.cdp ?? '127.0.0.1:9333', options.bridgeAgent);
             onDemandTiming = await runOnDemandTiming(engine, seeds, dashboard, diagnostics);
           } catch (error) {
