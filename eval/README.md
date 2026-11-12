@@ -433,6 +433,12 @@ rerank time, and the receipt names the reranker (its model folder) or `off`. A
 timed-out or failed rerank keeps the fused order, so check `timedOut` before
 reading a pool's hits.
 
+Both passage CLIs print each stage to stderr as it starts (`open_data_root`,
+`load_embedding`, `load_reranker`, `question 3/19: build_pack`, and so on), so a
+run that hangs shows where it stopped. A failure prints the stage, the error's
+class and its code (such as `SQLITE_BUSY` or `ENOMEM`), never its message, and
+exits 1.
+
 On **Sparta**, draft a private set through the local OpenAI-compatible model:
 
 ```sh

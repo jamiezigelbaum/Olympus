@@ -175,3 +175,10 @@ test('each row records what the reranker did, and the summary counts outcomes an
   expect(receipt.summary.overall.rerank).toEqual({ applied: 1, timedOut: 1, failed: 0, elapsedMs: 5900, maxElapsedMs: 5000 });
   expect(receipt.reranker).toBe('cross-encoder:model');
 });
+test('each question reports its steps in order, by number only', async () => {
+  const steps: string[] = [];
+  await runPassageEval({ dataset: { ...dataset, questions: [dataset.questions[0]!, dataset.questions[1]!] }, maxResults: 5, storeCounts: counts, gitSha: 'abc',
+    buildPack: async () => detail(), probeLanes: async () => ({ keyword: 1, vector: null }), judgeQuestion: async () => ({ answers: true, specific: true }),
+    onProgress: (index, total, step) => { steps.push(`${index}/${total} ${step}`); } });
+  expect(steps).toEqual(['1/2 build_pack', '1/2 fit', '1/2 probe_lanes', '1/2 judge', '2/2 build_pack', '2/2 fit']);
+});
