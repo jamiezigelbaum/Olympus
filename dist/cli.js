@@ -197593,13 +197593,13 @@ class SourceScheduler {
     return false;
   }
   storeReclaims = new Set;
-  async withIdleSources(sourceIds, work) {
-    if (this.hasExecutingTask(sourceIds) || [...this.storeReclaims].some((hold2) => [...sourceIds].some((id) => hold2.sourceIds.has(id))))
+  async withIdleTasks(work) {
+    if (this.anyTaskRunning || this.storeReclaims.size > 0)
       return;
     let release2;
-    const hold = { sourceIds, done: new Promise((resolve31) => {
+    const hold = new Promise((resolve31) => {
       release2 = resolve31;
-    }) };
+    });
     this.storeReclaims.add(hold);
     try {
       return await work();
@@ -197739,13 +197739,13 @@ class SourceScheduler {
   async runTaskSharingThread(state, dueAt, provenance) {
     const stops = this.stops;
     for (;; ) {
-      const holds2 = [...this.storeReclaims].filter((hold) => hold.sourceIds.has(state.source.sourceId) || hold.sourceIds.has(state.source.corpusId));
+      const holds2 = [...this.storeReclaims];
       if (holds2.length === 0)
         break;
       state.waitReason = "store_reclaim";
       console.info(`[olympus:source-scheduler] task_wait source_id=${state.source.sourceId} task_id=${state.task.id} reason=store_reclaim`);
       try {
-        await Promise.all(holds2.map((hold) => hold.done));
+        await Promise.all(holds2);
       } finally {
         delete state.waitReason;
       }
@@ -247699,11 +247699,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   captureTick.unref?.();
   const stopSupersededSweep = startSupersededSweepTicker({
     active: () => !engineFront && !ownerQuestions.busy && !remoteOwnerBusy(OWNER_QUESTION_RESOURCE),
-    reclaimStore: (store, work) => {
-      const sourceIds = new Set(sourceCorpusRegistry2.list().filter((corpus) => corpus.corpusId === store.corpusId).map((corpus) => corpus.sourceId));
-      sourceIds.add(store.corpusId);
-      return sourceScheduler ? sourceScheduler.withIdleSources(sourceIds, work) : work();
-    }
+    reclaimStore: (_store, work) => sourceScheduler ? sourceScheduler.withIdleTasks(work) : work()
   });
   const snifferEnv = tierSnifferServiceEnv(process.env);
   const rawSnifferModel = !snifferEnv.enabled || snifferRuntime.source === "off" ? undefined : snifferRuntime.source === "built_in" ? snifferRuntime.builtIn.model : createTierSnifferModel({ lane: snifferRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[snifferRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => {

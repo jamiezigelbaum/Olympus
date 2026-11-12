@@ -886,14 +886,19 @@ export class SourceScheduler {
     return false;
   }
 
-  private readonly storeReclaims = new Set<{ sourceIds: ReadonlySet<string>; done: Promise<void> }>();
+  private readonly storeReclaims = new Set<Promise<void>>();
 
-  /** Atomically exclude source tasks for this store; ready work waits only for this reclaim. */
-  async withIdleSources<T>(sourceIds: ReadonlySet<string>, work: () => Promise<T>): Promise<T | undefined> {
-    if (this.hasExecutingTask(sourceIds) || [...this.storeReclaims].some(hold =>
-      [...sourceIds].some(id => hold.sourceIds.has(id)))) return undefined;
+  /**
+   * Store maintenance holds every task, not only the store's own sources:
+   * writers reach a store through other sources too (an archive import into
+   * an existing source, tier moves), and any of them would block the engine
+   * thread on the store's write lock. Skips while any task is executing;
+   * tasks that come due wait, with no attempt or failure recorded.
+   */
+  async withIdleTasks<T>(work: () => Promise<T>): Promise<T | undefined> {
+    if (this.anyTaskRunning || this.storeReclaims.size > 0) return undefined;
     let release!: () => void;
-    const hold = { sourceIds, done: new Promise<void>(resolve => { release = resolve; }) };
+    const hold = new Promise<void>(resolve => { release = resolve; });
     this.storeReclaims.add(hold);
     try { return await work(); }
     finally { this.storeReclaims.delete(hold); release(); }
@@ -1064,12 +1069,11 @@ export class SourceScheduler {
   ): Promise<void> {
     const stops = this.stops;
     for (;;) {
-      const holds = [...this.storeReclaims].filter(hold => hold.sourceIds.has(state.source.sourceId)
-        || hold.sourceIds.has(state.source.corpusId));
+      const holds = [...this.storeReclaims];
       if (holds.length === 0) break;
       state.waitReason = 'store_reclaim';
       console.info(`[olympus:source-scheduler] task_wait source_id=${state.source.sourceId} task_id=${state.task.id} reason=store_reclaim`);
-      try { await Promise.all(holds.map(hold => hold.done)); }
+      try { await Promise.all(holds); }
       finally { delete state.waitReason; }
       if (this.stops !== stops) return;
     }

@@ -6088,12 +6088,7 @@ export async function main(): Promise<void> {
   // The combined engine uses its local count; the split background uses the relayed mark.
   const stopSupersededSweep = startSupersededSweepTicker({
     active: () => !engineFront && !ownerQuestions.busy && !remoteOwnerBusy(OWNER_QUESTION_RESOURCE),
-    reclaimStore: (store, work) => {
-      const sourceIds = new Set(sourceCorpusRegistry.list()
-        .filter(corpus => corpus.corpusId === store.corpusId).map(corpus => corpus.sourceId));
-      sourceIds.add(store.corpusId);
-      return sourceScheduler ? sourceScheduler.withIdleSources(sourceIds, work) : work();
-    },
+    reclaimStore: (_store, work) => sourceScheduler ? sourceScheduler.withIdleTasks(work) : work(),
   });
 
   // The privacy-safe sniffer's bounded background pass over pending items.

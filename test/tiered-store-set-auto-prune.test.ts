@@ -484,7 +484,7 @@ test('an ingest scheduled during conversion waits visibly, runs immediately afte
     expect((store as unknown as { db: Database }).db.query('PRAGMA busy_timeout').get()).toEqual({ timeout: 10000 });
   } }));
   try {
-    await reclaimAutomaticSupersededCopies(ctx.f.set, (_store, work) => scheduler.withIdleSources(new Set(['fixture']), work));
+    await reclaimAutomaticSupersededCopies(ctx.f.set, (_store, work) => scheduler.withIdleTasks(work));
     expect(ingest).toBeDefined();
     await ingest;
     expect(ran).toBe(true);

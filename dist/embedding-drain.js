@@ -40538,13 +40538,13 @@ class SourceScheduler {
     return false;
   }
   storeReclaims = new Set;
-  async withIdleSources(sourceIds, work) {
-    if (this.hasExecutingTask(sourceIds) || [...this.storeReclaims].some((hold2) => [...sourceIds].some((id) => hold2.sourceIds.has(id))))
+  async withIdleTasks(work) {
+    if (this.anyTaskRunning || this.storeReclaims.size > 0)
       return;
     let release;
-    const hold = { sourceIds, done: new Promise((resolve11) => {
+    const hold = new Promise((resolve11) => {
       release = resolve11;
-    }) };
+    });
     this.storeReclaims.add(hold);
     try {
       return await work();
@@ -40684,13 +40684,13 @@ class SourceScheduler {
   async runTaskSharingThread(state, dueAt, provenance) {
     const stops = this.stops;
     for (;; ) {
-      const holds = [...this.storeReclaims].filter((hold) => hold.sourceIds.has(state.source.sourceId) || hold.sourceIds.has(state.source.corpusId));
+      const holds = [...this.storeReclaims];
       if (holds.length === 0)
         break;
       state.waitReason = "store_reclaim";
       console.info(`[olympus:source-scheduler] task_wait source_id=${state.source.sourceId} task_id=${state.task.id} reason=store_reclaim`);
       try {
-        await Promise.all(holds.map((hold) => hold.done));
+        await Promise.all(holds);
       } finally {
         delete state.waitReason;
       }
