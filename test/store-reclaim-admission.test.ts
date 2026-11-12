@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { join } from 'node:path';
-import { withIdleStoreReclaim, withStoreReadPriority } from '../src/core/store-reclaim-admission.ts';
+import { withIdleStoreReclaim, withStoreReadPriority, storeOwnerIdleMs } from '../src/core/store-reclaim-admission.ts';
 import { waitFor } from './helpers/test-clock.ts';
 
 test('a nested read keeps its own priority when it outlives the request that started it', async () => {
@@ -35,6 +35,8 @@ test('the split front holds Ask priority across processes, while another Ask can
   const output = (async () => { for await (const chunk of child.stdout) reading ||= new TextDecoder().decode(chunk).includes('reading'); })();
   try {
     await waitFor(() => reading, { description: 'front holds Ask priority' });
+    expect(storeOwnerIdleMs()).toBeLessThan(10_000);
+    expect(storeOwnerIdleMs(Date.now() + 10 * 60_000)).toBeGreaterThanOrEqual(10 * 60_000);
     expect(child.exitCode).toBeNull();
     let reclaimed = false;
     expect(await withIdleStoreReclaim(async () => { reclaimed = true; })).toBeUndefined();

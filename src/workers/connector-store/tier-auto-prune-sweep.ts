@@ -4,6 +4,7 @@ import { copyServingLayer, tierLedgerIdentityKey, trustDomainRank, type TierLedg
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 import { pruneSupersededStoreCopy, queueTierLedgerEntry, type TierMoveOptions } from './tier-move.ts';
 import { compareContentVersions } from './tier-content-purge.ts';
+import type { LocalConnectorStore } from './local-index.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 import { registeredTierSets } from './tier-set-registry.ts';
 import { withIdleStoreReclaim } from '../../core/store-reclaim-admission.ts';
@@ -40,12 +41,14 @@ interface State {
 const RECLAIM_MAX_RETAINED_FREE_BYTES = 64 * 1024 * 1024;
 const RECLAIM_MAX_RETAINED_FREE_RATIO = 0.1;
 
+type ReclaimStore = (store: LocalConnectorStore, work: () => ReturnType<LocalConnectorStore['reclaimFreePages']>) => ReturnType<LocalConnectorStore['reclaimFreePages']>;
+
 /**
  * One store per background tick, AFTER pruning is durably done. Old completed
  * v1 ledgers also enter here: their deleted totals identify exactly which
  * stores were pruned. Request/startup maintenance never calls this function.
  */
-export async function reclaimAutomaticSupersededCopies(set: TieredStoreSet): Promise<boolean> {
+export async function reclaimAutomaticSupersededCopies(set: TieredStoreSet, reclaimStore: ReclaimStore = (_store, work) => work()): Promise<boolean> {
   return await withIdleStoreReclaim(async () => {
     const ledger = set.ledger;
     const state: State = JSON.parse(ledger.readMeta(STATE) || '{}');
@@ -69,7 +72,7 @@ export async function reclaimAutomaticSupersededCopies(set: TieredStoreSet): Pro
         save(); // durable intent before any file changes; retries ignore the thresholds
       }
       if (!receipt.done) {
-        const result = await store.reclaimFreePages(SUPERSEDED_SWEEP_SLICE_MS);
+        const result = await reclaimStore(store, () => store.reclaimFreePages(SUPERSEDED_SWEEP_SLICE_MS));
         if (!result?.done) return false;
         receipt.done = true;
         receipt.bytesAfter = result.bytes;
@@ -312,6 +315,7 @@ function sweepPage(set: TieredStoreSet, options: {
  */
 export function startSupersededSweepTicker(options: {
   active?: () => boolean;
+  reclaimStore?: ReclaimStore;
   intervalMs?: number;
   sets?: () => readonly TieredStoreSet[];
   /** Tests drive the tick themselves; returns a cancel function. */
@@ -331,7 +335,7 @@ export function startSupersededSweepTicker(options: {
       if (finished.has(set) || reclaiming.has(set)) continue;
       if (!set.sweepSupersededSlice()) continue;
       reclaiming.add(set);
-      void reclaimAutomaticSupersededCopies(set).then(done => {
+      void reclaimAutomaticSupersededCopies(set, options.reclaimStore).then(done => {
         if (done) finished.add(set);
       }).catch(() => {
         // A closed/busy store or interrupted worker retains its durable intent.

@@ -6067,7 +6067,14 @@ export async function main(): Promise<void> {
   const captureTick = setInterval(() => { if (!engineFront) void reconcileCaptures(); }, 10_000);
   captureTick.unref?.();
   // The one-time superseded-copy sweep's own clock; the split's front runs none.
-  const stopSupersededSweep = startSupersededSweepTicker({ active: () => !engineFront });
+  const stopSupersededSweep = startSupersededSweepTicker({ active: () => !engineFront,
+    reclaimStore: (store, work) => {
+      const sourceIds = new Set(sourceCorpusRegistry.list()
+        .filter(corpus => corpus.corpusId === store.corpusId).map(corpus => corpus.sourceId));
+      sourceIds.add(store.corpusId);
+      return sourceScheduler ? sourceScheduler.withIdleSources(sourceIds, work) : work();
+    },
+  });
 
   // The privacy-safe sniffer's bounded background pass over pending items.
   const snifferEnv = tierSnifferServiceEnv(process.env);

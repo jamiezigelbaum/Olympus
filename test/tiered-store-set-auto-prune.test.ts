@@ -6,6 +6,9 @@ import { classifyItemTiers } from '../src/workers/classification/tier-classifier
 import { TierLedgerPurgedRollbackRefusedError } from '../src/workers/classification/tier-ledger.ts';
 import { moveTieredItem, flushTierMoveNotes } from '../src/workers/connector-store/tier-move.ts';
 import { reclaimAutomaticSupersededCopies, startSupersededSweepTicker, sweepAutomaticSupersededCopies } from '../src/workers/connector-store/tier-auto-prune-sweep.ts';
+import { withStoreReadPriority, storeOwnerIdleMs } from '../src/core/store-reclaim-admission.ts';
+import { SourceScheduler } from '../src/workers/source-scheduler.ts';
+import { LocalSourceSchedulerStateStore } from '../src/workers/source-scheduler-state.ts';
 import { SUPERSEDED_SWEEP_SLICE_MS } from '../src/workers/connector-store/tiered-store-set.ts';
 import { createSourceAnswerTrace, runWithSourceAnswerTrace } from '../src/workers/source-index/answer-latency-trace.ts';
 import { readEmbeddingLedger } from '../src/workers/embedding-ledger.ts';
@@ -422,4 +425,157 @@ test('superseded copies whose item row is gone do not use up a page and end the 
     .run(a.provider, a.accountScope, a.providerItemId);
   expect(ctx.f.ledger.listSupersededItemWindow({ limit: 1 }).map(record => record.providerItemId))
     .toEqual([identityOf('b').providerItemId]);
+});
+
+
+test('conversion checks its own filesystem headroom and puts SQLite temporary files beside the store', async () => {
+  const ctx = await fixture();
+  const store = ctx.f.stores.secure_local!;
+  const db = (store as unknown as { db: Database }).db;
+  db.exec('PRAGMA auto_vacuum=NONE; VACUUM; PRAGMA wal_checkpoint(TRUNCATE)');
+  const needed = 2 * statSync(store.dbPath).size + 1024 ** 3;
+  const spawn = spyOn(Bun, 'spawn');
+  const info = spyOn(console, 'info').mockImplementation(() => {});
+  try {
+    const statfs = (path: string) => {
+      expect(path).toBe(join(store.dbPath, '..'));
+      return { bavail: needed - 1, bsize: 1 };
+    };
+    expect(await store.reclaimFreePages(250, { statfs })).toBeUndefined();
+    expect(spawn).not.toHaveBeenCalled();
+    expect(info.mock.calls).toEqual([[`[store-reclaim] conversion_skipped reason=disk_space needed_bytes=${needed} available_bytes=${needed - 1}`]]);
+    expect(db.query('PRAGMA auto_vacuum').get()).toEqual({ auto_vacuum: 0 });
+    expect(await store.reclaimFreePages(250, { statfs: () => ({ bavail: needed, bsize: 1 }) })).toMatchObject({ done: true });
+    const env = (spawn.mock.calls[0]![1] as { env: Record<string, string> }).env;
+    expect(env.SQLITE_TMPDIR).toBe(join(store.dbPath, '..'));
+    expect(env.TMPDIR).toBe(join(store.dbPath, '..'));
+    expect(db.query('PRAGMA busy_timeout').get()).toEqual({ timeout: 10000 });
+  } finally { spawn.mockRestore(); info.mockRestore(); }
+});
+
+test('an ingest scheduled during conversion waits visibly, runs immediately after it, and records no failure', async () => {
+  const ctx = await fixture();
+  fillReclaimFixture(ctx, true);
+  expect(sweepAutomaticSupersededCopies(ctx.f.set, { embeddingLedger: ctx.embeddingLedger }).complete).toBe(true);
+  const store = ctx.f.stores.secure_local!;
+  const stateStore = new LocalSourceSchedulerStateStore(':memory:');
+  const failure = spyOn(stateStore, 'recordFailure');
+  let ran = false;
+  const scheduler = new SourceScheduler({ enabled: true, tickMs: 60_000, errorBackoffMs: 5_000, maxTransientRetries: 1,
+    now: ctx.clock.date, stateStore, sources: [{ sourceId: 'fixture', corpusId: store.corpusId,
+      cadence: 'continuous', intervalMs: 60_000, freshnessThresholdHours: 1,
+      tasks: [{ id: 'ingest', kind: 'sync', writer: true, async run() {
+        expect((store as unknown as { reclaimProcess?: unknown }).reclaimProcess).toBeUndefined();
+        await store.syncFromConnector(fixtureConnector(() => [{ id: 'after', name: 'After', text }]), { fetchContent: true });
+        ran = true;
+        return { status: 'progress' };
+      } }],
+    }] });
+  let ingest: Promise<unknown> | undefined;
+  const original = store.reclaimFreePages.bind(store);
+  const observe = spyOn(store, 'reclaimFreePages').mockImplementation(budget => original(budget, { onStarted: () => {
+    ingest = scheduler.runSource('fixture');
+    expect(scheduler.status().sources[0]!.tasks[0]!.wait_reason).toBe('store_reclaim');
+    expect(ran).toBe(false);
+    expect((store as unknown as { db: Database }).db.query('PRAGMA busy_timeout').get()).toEqual({ timeout: 10000 });
+  } }));
+  try {
+    await reclaimAutomaticSupersededCopies(ctx.f.set, (_store, work) => scheduler.withIdleSources(new Set(['fixture']), work));
+    expect(ingest).toBeDefined();
+    await ingest;
+    expect(ran).toBe(true);
+    expect(store.localContent(localId('after'))?.chunks.join('')).toBe(text);
+    expect(failure).not.toHaveBeenCalled();
+    expect(scheduler.status().sources[0]!.tasks[0]).toMatchObject({ consecutive_failures: 0, last_result: { status: 'progress' } });
+    expect(scheduler.status().sources[0]!.tasks[0]!.wait_reason).toBeUndefined();
+  } finally { observe.mockRestore(); failure.mockRestore(); scheduler.stop(); stateStore.close(); }
+}, 150_000);
+
+test('after three Ask kills a store waits for ten minutes since the last admitted Ask, with each new Ask resetting the idle interval', async () => {
+  const ctx = await fixture();
+  fillReclaimFixture(ctx, true);
+  const store = ctx.f.stores.secure_local!;
+  // The shared fixture injects its clock into the ledger only.
+  (store as unknown as { now: () => Date }).now = ctx.clock.date;
+  const original = store.reclaimFreePages.bind(store);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let ask: Promise<unknown> | undefined;
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    try {
+      expect(await original(250, { onStarted: () => {
+        ask = withStoreReadPriority(() => held);
+      } })).toBeUndefined();
+      expect(ask).toBeDefined();
+    } finally { release(); await ask; }
+  }
+  const spawn = spyOn(Bun, 'spawn');
+  try {
+    ctx.clock.set(Date.now());
+    expect(await original(250)).toBeUndefined();
+    expect(spawn).not.toHaveBeenCalled();
+    // No wall-clock sleep: ask admission's timestamp is shared on disk; move
+    // this store's clock to just before and then just past the idle boundary.
+    const lastAsk = ctx.clock.now() - storeOwnerIdleMs(ctx.clock.now());
+    ctx.clock.set(lastAsk + 10 * 60_000 - 1);
+    expect(await original(250)).toBeUndefined();
+    expect(spawn).not.toHaveBeenCalled();
+    // Another Ask resets the whole quiet interval, even after the old one expires.
+    await withStoreReadPriority(() => {});
+    const newestAsk = Date.now() - storeOwnerIdleMs();
+    ctx.clock.set(newestAsk + 10 * 60_000 - 1);
+    expect(await original(250)).toBeUndefined();
+    expect(spawn).not.toHaveBeenCalled();
+    ctx.clock.set(newestAsk + 10 * 60_000 + 1);
+    await waitFor(async () => (await original(250)) !== undefined,
+      { description: 'idle conversion retries transient SQLite contention' });
+    expect(spawn.mock.calls.length).toBeGreaterThanOrEqual(1);
+    // SQLite caches auto_vacuum on an already-open connection until it reads
+    // the changed header. Each real ticker pass starts with this same probe.
+    store.reclaimablePages();
+    expect((store as unknown as { db: Database }).db.query('PRAGMA auto_vacuum').get()).toEqual({ auto_vacuum: 2 });
+  } finally { spawn.mockRestore(); }
+}, 150_000);
+
+
+test('visibility publication, media release and digest backfill stand back during reclaim', async () => {
+  const ctx = await fixture();
+  const store = ctx.f.stores.secure_local!;
+  const internal = store as unknown as {
+    db: Database; reclaimProcess?: unknown; visibilityPublishing?: Promise<void> | undefined;
+    publishVisibility(): Promise<void>; releaseUnreferencedChunkMedia(): void;
+    visibilityWrite(write: () => unknown): unknown;
+    scheduleVectorDigestBackfill(model?: string, delay?: number): void;
+  };
+  // An already-started publisher excludes the conversion too, across turns.
+  const spawn = spyOn(Bun, 'spawn');
+  internal.visibilityPublishing = Promise.resolve();
+  try { expect(await store.reclaimFreePages(250)).toBeUndefined(); expect(spawn).not.toHaveBeenCalled(); }
+  finally { internal.visibilityPublishing = undefined; spawn.mockRestore(); }
+  const publish = spyOn(internal, 'visibilityWrite');
+  const query = spyOn(internal.db, 'query');
+  const backfill = spyOn(store, 'backfillVectorDigest');
+  const schedule = internal.scheduleVectorDigestBackfill.bind(store);
+  let backedOff = false;
+  const scheduling = spyOn(internal, 'scheduleVectorDigestBackfill').mockImplementation((model, delay) => {
+    if (delay === 250) backedOff = true;
+    schedule(model, delay);
+  });
+  internal.reclaimProcess = {};
+  try {
+    await store.keepVisibilityCurrentInTurns();
+    internal.releaseUnreferencedChunkMedia();
+    expect(publish).not.toHaveBeenCalled();
+    expect(query.mock.calls.some(([sql]) => sql.includes('FROM chunk_media_releases'))).toBe(false);
+    internal.scheduleVectorDigestBackfill('fixture-reclaim');
+    await waitFor(() => backedOff, { description: 'digest backfill defers to reclaim' });
+    expect(backfill).not.toHaveBeenCalled();
+  } finally {
+    internal.reclaimProcess = undefined;
+    publish.mockRestore(); query.mockRestore(); backfill.mockRestore(); scheduling.mockRestore();
+  }
+  // The pending visibility build was kept, and publishes on the first release.
+  const resumed = spyOn(internal, 'visibilityWrite');
+  try { await internal.publishVisibility(); expect(resumed).toHaveBeenCalled(); }
+  finally { resumed.mockRestore(); }
 });
