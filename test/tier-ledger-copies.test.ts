@@ -16,6 +16,7 @@ import {
   TierLedgerRaiseAbandonRefusedError,
   TierLedgerSecretsRollbackRefusedError,
   placementIsRaise,
+  tierLedgerIdentityKey,
   type TierPlacementPlan,
 } from '../src/workers/classification/tier-ledger.ts';
 
@@ -38,6 +39,105 @@ function whole(target: { corpusId: string; trustDomain: 'public_safe' | 'interna
 }
 
 describe('tier ledger copies (P1b)', () => {
+  test('undo carries the original verdict past a replanned landing, isolated by conversation', () => {
+    const store = ledger();
+    try {
+      const other = { ...ITEM, providerConversationId: 'other' };
+      const personal = decision({ decidedBy: 'sniffer', reasons: ['content:sniffer:test:personal'] });
+      store.recordRoutedPlacement(ITEM, personal, whole(INTERNAL));
+      store.recordRoutedPlacement(other, personal, whole(INTERNAL));
+      store.setOverride(ITEM, { kind: 'tier', tier: 'secure' });
+      store.queueOwnerRaise(ITEM, decision({ metadataTier: 'secure', contentTier: 'secure', decidedBy: 'override', reasons: ['override:tier:secure'] }), 'secure_local');
+      expect(store.clearOverride(ITEM)).toBe(true);
+      const request = store.overrideRestoreRequest(ITEM)!;
+      expect(request.decision).toMatchObject({ metadataTier: 'private', contentTier: 'private', decidedBy: 'sniffer' });
+      expect(store.overrideRestoreRequest(other)).toBeUndefined();
+      expect(store.listClearedOverrideRows()).toEqual([]);
+      const moving = store.getCurrent(ITEM)!;
+      store.stageMove(ITEM, { expectedGeneration: moving.generation, target: { metadataTier: 'secure', contentTier: 'secure' }, destination: whole(SECURE).copies, hideSource: true });
+      store.completeMove(ITEM, { expectedGeneration: moving.generation, destination: whole(SECURE).copies, decidedBy: 'sniffer' });
+      expect(store.getCurrent(ITEM)).toMatchObject({ state: 'current', contentTier: 'secure', decidedBy: 'sniffer' });
+      expect(store.listClearedOverrideRows().map(row => row.providerItemId)).toEqual([ITEM.providerItemId]);
+      expect(store.settledDecisionBeforeOverride(ITEM)).toEqual(request.decision);
+
+      store.setOverride(ITEM, { kind: 'tier', tier: 'secure' });
+      expect(store.overrideRestoreRequest(ITEM)).toBeUndefined();
+      store.clearOverride(ITEM);
+      const newer = store.overrideRestoreRequest(ITEM)!;
+      expect(newer.receipt).not.toBe(request.receipt);
+      store.completeOverrideRestore(ITEM, request.receipt);
+      expect(store.overrideRestoreRequest(ITEM)).toEqual(newer);
+      store.recordRoutedPlacement(ITEM, decision({ metadataTier: 'secrets', contentTier: 'secrets' }), { copies: [], embedHold: false });
+      expect(store.overrideRestoreRequest(ITEM)).toBeUndefined();
+      expect(store.listClearedOverrideRows()).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('an undo request stays owed across the restore pass\'s own write, and only a later decision voids it', () => {
+    const store = ledger();
+    try {
+      store.recordRoutedPlacement(ITEM, decision({ decidedBy: 'sniffer' }), whole(INTERNAL));
+      store.setOverride(ITEM, { kind: 'tier', tier: 'secure' });
+      store.recordRoutedPlacement(ITEM, decision({ metadataTier: 'secure', contentTier: 'secure', decidedBy: 'override', reasons: ['override:tier:secure'] }), whole(SECURE), { staleCopiesGone: true });
+      store.clearOverride(ITEM);
+      const request = store.overrideRestoreRequest(ITEM)!;
+      expect(store.overrideRestoreStillCurrent(ITEM, request)).toBe(true);
+      // The pass's own write (a renamed item held while its re-judge could not be queued).
+      store.recordRoutedPlacement(ITEM, decision({ metadataTier: 'secure', contentTier: 'secure', decidedBy: 'sniffer', reasons: ['content:held'] }), whole(SECURE), { staleCopiesGone: true });
+      expect(store.overrideRestoreStillCurrent(ITEM, request)).toBe(false);
+      store.advanceOverrideRestore(ITEM, request.receipt);
+      const owed = store.overrideRestoreRequest(ITEM)!;
+      expect(owed.decision).toEqual(request.decision);
+      expect(store.overrideRestoreStillCurrent(ITEM, owed)).toBe(true);
+      expect(store.listClearedOverrideRows().map(row => row.providerItemId)).toEqual([ITEM.providerItemId]);
+      // A decision recorded after that point is newer: the request no longer applies.
+      store.recordRoutedPlacement(ITEM, decision({ metadataTier: 'secure', contentTier: 'secure', decidedBy: 'sniffer', reasons: ['content:newer'] }), whole(SECURE), { staleCopiesGone: true });
+      expect(store.overrideRestoreStillCurrent(ITEM, owed)).toBe(false);
+      // A stale receipt never rewrites a newer request.
+      store.advanceOverrideRestore(ITEM, request.receipt);
+      expect(store.overrideRestoreRequest(ITEM)).toEqual(owed);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('undo of a cancelled lowering still restores tiers held above the original verdict', () => {
+    const store = ledger();
+    try {
+      const personal = decision({ decidedBy: 'sniffer' });
+      store.recordRoutedPlacement(ITEM, personal, whole(INTERNAL));
+      store.setOverride(ITEM, { kind: 'tier', tier: 'secure' });
+      const raised = decision({ metadataTier: 'secure', contentTier: 'secure', decidedBy: 'override', reasons: ['override:tier:secure'] });
+      // The first owner's raise already landed.
+      store.recordRoutedPlacement(ITEM, raised, whole(SECURE), { staleCopiesGone: true });
+      store.setOverride(ITEM, { kind: 'tier', tier: 'public' });
+      store.recordRoutedPlacement(ITEM, decision({ metadataTier: 'public', contentTier: 'public', decidedBy: 'override', reasons: ['override:tier:public'] }), whole(PUBLIC));
+      store.clearOverride(ITEM);
+      expect(store.getCurrent(ITEM)).toMatchObject({ state: 'current', contentTier: 'secure' });
+      expect(store.settledDecisionBeforeOverride(ITEM)).toMatchObject({ contentTier: 'private', decidedBy: 'sniffer' });
+      expect(store.listClearedOverrideRows()).toHaveLength(1);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('a corrupt undo request fails closed instead of using a newer history decision', () => {
+    const store = ledger();
+    try {
+      store.recordRoutedPlacement(ITEM, decision({ decidedBy: 'sniffer' }), whole(SECURE));
+      const key = `tier-owner-restore:${tierLedgerIdentityKey(ITEM)}`;
+      for (const value of ['{', '{}', JSON.stringify({ id: 'bad', decision: { metadataTier: 'private', contentTier: 'private', decidedBy: 'sniffer', reasons: 'bad' } })]) {
+        store.writeMeta(key, value);
+        expect(() => store.settledDecisionBeforeOverride(ITEM)).toThrow();
+        expect(store.listClearedOverrideRows()).toHaveLength(1);
+      }
+    } finally {
+      store.close();
+    }
+  });
+
   test('only a moved migration proposal protects its exact identity across plans and conversations', () => {
     const store = ledger();
     const identity = { ...ITEM, providerConversationId: 'conversation-a' };

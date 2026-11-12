@@ -420,10 +420,11 @@ describe('one item, Private -> Personal -> Private', () => {
     expect(ownerItems().set({ itemId, choice: 'judge', allowLower: true })).toMatchObject({ ok: false, code: 'not_owner_set' });
   });
 
-  test('undo after the file was renamed while the owner\'s word stood: it stays Private and is asked about under its new name', async () => {
+  test('undo after the file was renamed while the owner\'s word stood: only the judge on its new name releases it', async () => {
     const install = await judged();
     const [garden] = ownerItems().find({ query: 'orchard-plan' }).items;
     expect(garden).toMatchObject({ tier: 'Personal' });
+    const oldNames = install.lane.ledger.getCurrent(gardenIdentity)!.reasons.find(reason => reason.startsWith('content:names:'))!;
     expect(ownerItems().set({ itemId: garden!.item_id, choice: 'private', allowLower: true })).toMatchObject({ ok: true, changed: 'set' });
     await install.service.runOnce();
     expect(install.lane.ledger.getCurrent(gardenIdentity)).toMatchObject({ state: 'current', contentTier: 'secure', decidedBy: 'override' });
@@ -438,12 +439,97 @@ describe('one item, Private -> Personal -> Private', () => {
     expect(restored).toMatchObject({ contentTier: 'secure' });
     expect(restored.decidedBy).not.toBe('override');
     expect(restored.reasons.some((reason) => reason.startsWith('content:names:'))).toBe(false);
+    expect(await search(install, 'pruning plan')).not.toContain('Orchard pruning plan');
+    expect(await search(install, 'orchard-plan-2027')).not.toContain('orchard-plan-2027.pdf');
+    expect(ownerItems().find({ query: 'orchard-plan-2027', personalNamesOnly: true }).items).toEqual([]);
+    expect(install.lane.ledger.rejudgeQuestion(gardenIdentity)?.decision).toMatchObject({ metadataPending: true, contentPending: true });
+    // Even an answer clearing the new names alone leaves both layers held
+    // until the judge has also answered about the text under those names.
+    expect(install.lane.ledger.applySnifferVerdict(gardenIdentity, {
+      pass: 'metadata', tier: 'private', modelId: 'built_in',
+      reason: `metadata:sniffer:${install.lane.set.classification()!.sniffer!.id}:ordinary:0.97`,
+    }, { placementFor: decision => install.lane.set.placementFor(decision) })?.outcome).toBe('updated');
+    expect(install.lane.ledger.getCurrent(gardenIdentity)).toMatchObject({ metadataTier: 'secure', contentTier: 'secure' });
+    expect(await search(install, 'pruning plan')).not.toContain('Orchard pruning plan');
+    expect(await search(install, 'orchard-plan-2027')).not.toContain('orchard-plan-2027.pdf');
     // The judge's question is asked again with the new name; nothing lowers it on the old one.
     for (let pass = 0; pass < 4; pass += 1) await install.service.runOnce();
     const judgedAgain = install.lane.ledger.getCurrent(gardenIdentity)!;
-    expect(judgedAgain).toMatchObject({ state: 'current', contentTier: 'secure' });
+    expect(judgedAgain).toMatchObject({ state: 'current', metadataTier: 'private', contentTier: 'private' });
     expect(judgedAgain.decidedBy).not.toBe('override');
+    expect(judgedAgain.reasons.some(reason => reason.startsWith('content:sniffer:') && reason.includes(':ordinary:'))).toBe(true);
+    expect(judgedAgain.reasons.some(reason => reason.startsWith('content:judge_verdict:private:'))).toBe(true);
     expect(judgedAgain.reasons.some((reason) => reason.startsWith('content:names:'))).toBe(true);
+    expect(judgedAgain.reasons).not.toContain(oldNames);
+    expect(await search(install, 'pruning plan')).toContain('Orchard pruning plan');
+    expect(await search(install, 'orchard-plan-2027')).toContain('orchard-plan-2027.pdf');
+  });
+
+  test('undo before the owner\'s raise lands preserves the judge\'s Personal decision (#1170)', async () => {
+    let install = await judged();
+    const gardenId = ownerItems().find({ query: 'orchard-plan' }).items[0]!.item_id;
+    expect(await search(install, 'pruning plan')).toContain('Orchard pruning plan');
+    ownerItems().set({ itemId: gardenId, choice: 'private', allowLower: true });
+    const raising = install.lane.ledger.getCurrent(gardenIdentity)!;
+    expect(raising).toMatchObject({ state: 'moving', targetContentTier: 'secure', decidedBy: 'override' });
+    expect(await search(install, 'pruning plan')).not.toContain('Orchard pruning plan');
+    expect(await search(install, 'orchard-plan')).not.toContain('orchard-plan.pdf');
+
+    ownerItems().set({ itemId: gardenId, choice: 'judge', allowLower: true });
+    expect(install.lane.ledger.getCurrent(gardenIdentity)).toMatchObject({ state: 'moving', targetContentTier: 'secure' });
+    expect(install.lane.ledger.getCurrent(gardenIdentity)!.generation).toBeGreaterThan(raising.generation);
+    expect(await search(install, 'pruning plan')).not.toContain('Orchard pruning plan');
+    expect(await search(install, 'orchard-plan')).not.toContain('orchard-plan.pdf');
+    expect(applyOwnerOverrides({ set: install.lane.set })).toMatchObject({ restored: 0 });
+
+    // The restore survives reopening the ledger, and must not borrow the
+    // replanned move's eventual Private landing as the pre-override verdict.
+    closeAll();
+    clearInstalledTierClassification();
+    install = await start({ extract: false });
+    expect(await search(install, 'pruning plan')).not.toContain('Orchard pruning plan');
+    for (let pass = 0; pass < 4; pass += 1) {
+      const before = install.lane.ledger.getCurrent(gardenIdentity)!;
+      if (before.state === 'moving') {
+        expect(await search(install, 'pruning plan')).not.toContain('Orchard pruning plan');
+        expect(await search(install, 'orchard-plan')).not.toContain('orchard-plan.pdf');
+      }
+      await install.service.runOnce();
+    }
+    const restored = install.lane.ledger.getCurrent(gardenIdentity)!;
+    expect(restored).toMatchObject({ state: 'current', metadataTier: 'private', contentTier: 'private' });
+    expect(restored.decidedBy).not.toBe('override');
+    expect(restored.reasons.some(reason => reason.startsWith('content:sniffer:') && reason.includes(':ordinary:'))).toBe(true);
+    expect(restored.reasons.some(reason => reason.startsWith('content:judge_verdict:private:'))).toBe(true);
+    expect(install.lane.ledger.overrideRestoreRequest(gardenIdentity)).toBeUndefined();
+    expect(await search(install, 'pruning plan')).toContain('Orchard pruning plan');
+    expect(applyOwnerOverrides({ set: install.lane.set })).toMatchObject({ restored: 0 });
+  });
+
+  test('a judgment recorded after the undo stands: the saved older verdict never replaces it', async () => {
+    const install = await judged();
+    const gardenId = ownerItems().find({ query: 'orchard-plan' }).items[0]!.item_id;
+    ownerItems().set({ itemId: gardenId, choice: 'private', allowLower: true });
+    await install.service.runOnce();
+    expect(install.lane.ledger.getCurrent(gardenIdentity)).toMatchObject({ state: 'current', contentTier: 'secure', decidedBy: 'override' });
+    ownerItems().set({ itemId: gardenId, choice: 'judge', allowLower: true });
+    expect(install.lane.ledger.overrideRestoreRequest(gardenIdentity)).toBeDefined();
+
+    // Before the override pass runs, the judge decides again: Private now.
+    const held = install.lane.ledger.getCurrent(gardenIdentity)!;
+    const ledger = install.lane.ledger;
+    const newer = {
+      metadataTier: 'secure', contentTier: 'secure', decidedBy: 'sniffer', reasons: ['content:sniffer:test:private'],
+      state: 'current', contentRead: true, metadataPending: false, contentPending: false,
+      metadataForced: false, metadataFlagged: false, engineVersion: held.engineVersion, mapRevision: held.mapRevision, snifferId: '',
+    } as unknown as Parameters<typeof ledger.recordRoutedPlacement>[1];
+    ledger.recordRoutedPlacement(gardenIdentity, newer, install.lane.set.placementFor(newer));
+
+    expect(applyOwnerOverrides({ set: install.lane.set })).toMatchObject({ restored: 0 });
+    expect(ledger.overrideRestoreRequest(gardenIdentity)).toBeUndefined();
+    for (let pass = 0; pass < 2; pass += 1) await install.service.runOnce();
+    expect(ledger.getCurrent(gardenIdentity)).toMatchObject({ contentTier: 'secure' });
+    expect(await search(install, 'pruning plan')).not.toContain('Orchard pruning plan');
   });
 
   test('undo under an always-Private rule added while the owner\'s word stood: the rule holds, across a restart', async () => {

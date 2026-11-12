@@ -310,8 +310,11 @@ export function rejudgeStoredContent(
      * names are judged again by the model whatever judged them before, and
      * may come out lower when the stored names cover the recorded input.
      * The owner's rules decide first.
+     * `namesChanged` is an owner undo on renamed names: the old verdict
+     * cannot floor the new names question. Provider floors still stand, and
+     * the existing placement stays protected until both questions settle.
      */
-    recheck?: { rules: readonly OwnerTierRule[] };
+    recheck?: { rules: readonly OwnerTierRule[]; namesChanged?: true };
   },
 ): void {
   const { report, key, autoMoves } = options;
@@ -484,7 +487,7 @@ function rejudgeMetadata(
   subject: TierLedgerIdentity,
   holdUntilJudged = false,
   parentContext?: string,
-  recheck?: { rules: readonly OwnerTierRule[] },
+  recheck?: { rules: readonly OwnerTierRule[]; namesChanged?: true },
 ): Pick<TierDecision, 'metadataTier' | 'metadataForced' | 'metadataFlagged' | 'metadataPending' | 'reasons'> {
   const previous = { ...record, reasons: record.reasons.filter(reason => !reason.startsWith('content:')) };
   // Names resting on a retired whole-source prior were never judged at all:
@@ -494,7 +497,7 @@ function rejudgeMetadata(
   const judgedAgain = (reason: string) => reason.startsWith('metadata:sniffer:')
     && (recheck !== undefined || !reason.startsWith(`metadata:sniffer:${sniffer?.id}:`));
   if (!sniffer || record.state !== 'current' || record.metadataForced || namesDecidedByOwner(record.reasons)
-    || (!retiredPrior && !record.reasons.some(judgedAgain))) return previous;
+    || (!retiredPrior && !recheck?.namesChanged && !record.reasons.some(judgedAgain))) return previous;
   const signals = {
     ...(names.title ? { title: names.title } : {}),
     ...(names.path ? { path: names.path } : {}),
@@ -519,9 +522,12 @@ function rejudgeMetadata(
   // Owner re-checks use the automatic pass's floor unless a receipt proves
   // these names include the original input. Old rows without receipts fail
   // safe. Provider facts are not stored, so their floors still apply.
+  // An undo on renamed names must judge the new input, not inherit the old
+  // model verdict's floor. The fresh baseline is carried only in the question;
+  // the held row and its copies stay in place until the answers authorize it.
   // A retired whole-source prior never floors names, owner re-check or not.
   const mayLower = retiredPrior || (recheck !== undefined
-    ? providerReasons.length === 0 && namesInputCovered(record.reasons, signals, parentContext)
+    ? providerReasons.length === 0 && (recheck.namesChanged === true || namesInputCovered(record.reasons, signals, parentContext))
     : fromStoredNames);
   const baseline = mayLower ? fresh.metadataTier : maxTier(fresh.metadataTier, record.metadataTier);
   if (baseline === 'secrets') return { ...previous, metadataTier: baseline, metadataPending: false, reasons: fresh.reasons };

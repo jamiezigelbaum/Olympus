@@ -47,7 +47,7 @@ import type { SourceTrustDomain } from '../../core/source-index/types.ts';
 import { forgetSecretInSideStores, retireSecretRedactions, retrySecretSideStoreDebts, secretsDisposition } from './secrets-disposition.ts';
 import { parentNamesContext } from './parent-context.ts';
 import { storedCopyOf, storedSignals } from './stored-names.ts';
-import { settleRoutedSecrets } from './tier-rejudge.ts';
+import { emptyTierRejudgeReport, rejudgeStoredContent, settleRoutedSecrets } from './tier-rejudge.ts';
 import { reopenLabelRuleSweep } from './tier-rules-sweep.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
@@ -149,6 +149,14 @@ function isVerdictReceipt(reason: string): boolean {
 function restoreClearedOverride(set: TieredStoreSet, record: TierLedgerRecord): boolean {
   const ledger = set.ledger;
   const identity = identityOf(record);
+  const request = ledger.overrideRestoreRequest(identity);
+  if (request && !ledger.overrideRestoreStillCurrent(identity, request)) {
+    // A decision recorded after the undo (a sync, a re-judge, or this pass's
+    // own move landing) is newer than the one the undo saved: it stands.
+    ledger.completeOverrideRestore(identity, request.receipt);
+    return false;
+  }
+  if (ledger.rejudgeQuestion(identity)) return false;
   const before = ledger.settledDecisionBeforeOverride(identity);
   if (!before || before.metadataTier === 'secrets' || before.contentTier === 'secrets') return false;
   // Rules that cannot be trusted now: wait, rather than restore without them.
@@ -202,11 +210,12 @@ function restoreClearedOverride(set: TieredStoreSet, record: TierLedgerRecord): 
     reasons: byRule
       ? [...ruleReasons, ...before.reasons.filter((reason) => reason.startsWith('content:') && (!namesChanged || !isVerdictReceipt(reason)))]
       : before.reasons.filter((reason) => !namesChanged || !isVerdictReceipt(reason)),
-    // Renamed: held for its text question, which the judge asks again with the new names.
-    state: namesChanged ? 'pending' : 'current',
+    // Renamed: these are the held tiers, not a baseline for the new verdict.
+    // A durable re-judge question below keeps this placement until answered.
+    state: 'current',
     contentRead: before.reasons.some((reason) => reason.startsWith('content:')),
     metadataPending: false,
-    contentPending: namesChanged,
+    contentPending: false,
     metadataForced: before.reasons.some((reason) => reason.startsWith('metadata:') && reason.endsWith(':force'))
       || (byRule && matched.some((rule) => rule.strength === 'force')),
     metadataFlagged: before.reasons.some((reason) => reason.startsWith('metadata:possibly_private:')),
@@ -223,6 +232,7 @@ function restoreClearedOverride(set: TieredStoreSet, record: TierLedgerRecord): 
     const settled = exported !== undefined
       && settleRoutedSecrets(set, identity, decision, exported, { findingKinds: ['owner_marked_secret'] }, { guard });
     if (settled) askProvider();
+    if (settled && request) ledger.completeOverrideRestore(identity, request.receipt);
     return settled;
   }
   const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), {
@@ -230,6 +240,29 @@ function restoreClearedOverride(set: TieredStoreSet, record: TierLedgerRecord): 
     staleCopiesGone: set.routedWithoutAnyCopy(identity),
   });
   if (recorded.outcome !== 'unchanged') askProvider();
+  // Not finished here: the undo stays owed across this pass's own write, so a
+  // later pass retries it (a re-judge that could not be queued, a move still
+  // landing) instead of reading that write as a newer decision.
+  const keepOwed = () => { if (request) ledger.advanceOverrideRestore(identity, request.receipt); };
+  if (namesChanged) {
+    if (recorded.record.state !== 'current' || !classification.sniffer) { keepOwed(); return recorded.outcome !== 'unchanged'; }
+    const report = emptyTierRejudgeReport();
+    // Re-read both names and text through the shared re-judge path. Its
+    // question carries the fresh baseline beside the held row, so a pending
+    // answer never publishes names or text in a less private store.
+    rejudgeStoredContent(set, recorded.record, {
+      sniffer: classification.sniffer,
+      ...(classification.retirePublic ? { retirePublic: true } : {}),
+      report,
+      autoMoves: true,
+      recheck: { rules, namesChanged: true },
+    });
+    if (request && (report.asked > 0 || report.updated > 0 || report.movesQueued > 0 || report.secrets > 0)) {
+      ledger.completeOverrideRestore(identity, request.receipt);
+    } else keepOwed();
+  } else if (request && recorded.outcome !== 'held_moving') {
+    ledger.completeOverrideRestore(identity, request.receipt);
+  } else keepOwed();
   return recorded.outcome !== 'unchanged';
 }
 

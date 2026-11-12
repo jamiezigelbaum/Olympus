@@ -15938,6 +15938,7 @@ function slug(value) {
 
 // src/workers/classification/tier-ledger.ts
 import { Database } from "bun:sqlite";
+import { randomUUID as randomUUID8 } from "node:crypto";
 import { chmodSync as chmodSync3, closeSync as closeSync7, existsSync as existsSync14, mkdirSync as mkdirSync10, openSync as openSync7, statSync as statSync8 } from "node:fs";
 import { dirname as dirname18 } from "node:path";
 var TIER_LEDGER_SCHEMA_VERSION = 15;
@@ -16052,6 +16053,9 @@ function* routedWithoutCopiesSteps(list) {
       result.add(tierLedgerIdentityKey(identityOfRow(row)));
   }
   return result;
+}
+function overrideRestoreKey(identity) {
+  return `tier-owner-restore:${tierLedgerIdentityKey(identity)}`;
 }
 var DEFAULT_REJUDGE_SCAN_ROWS = 2000;
 var REJUDGE_UNAVAILABLE_RETRY_MS = 60 * 60 * 1000;
@@ -16971,6 +16975,7 @@ class TierLedger {
     if (override.kind === "tier")
       assertTier(override.tier);
     this.db.transaction(() => {
+      this.writeMeta(overrideRestoreKey(identity), "");
       this.db.query(`
         INSERT INTO tier_overrides (provider, account_scope, conversation_key, provider_item_id, override_json, set_at)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -17141,10 +17146,22 @@ class TierLedger {
   clearOverride(identity) {
     let cleared = false;
     this.db.transaction(() => {
+      const before = this.settledDecisionBeforeOverride(identity);
       cleared = this.db.query(`
         DELETE FROM tier_overrides WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
       `).run(...idParams(identity)).changes > 0;
       this.settleRevokedOwnerMove(identity);
+      const settled = this.readRow(identity);
+      if (cleared && before && settled && !this.itemIsSecret(identity) && before.metadataTier !== "secrets" && before.contentTier !== "secrets") {
+        const generation = settled.state === "moving" ? settled.generation + 1 : settled.generation;
+        this.writeMeta(overrideRestoreKey(identity), JSON.stringify({
+          id: randomUUID8(),
+          generation,
+          landing: settled.state === "moving",
+          historyPk: this.latestHistoryPk(identity),
+          decision: before
+        }));
+      }
     })();
     return cleared;
   }
@@ -17704,7 +17721,14 @@ class TierLedger {
   listClearedOverrideRows(limit = 100, after) {
     const rows = this.db.query(`
       SELECT i.* FROM tier_items i
-      WHERE i.routed = 1 AND i.state = 'current' AND i.decided_by = 'override'
+      WHERE i.routed = 1 AND i.state = 'current'
+        AND i.metadata_tier <> 'secrets' AND i.content_tier <> 'secrets'
+        AND (i.decided_by = 'override' OR EXISTS (
+          SELECT 1 FROM tier_ledger_meta m
+          WHERE m.key = 'tier-owner-restore:' || i.provider || char(0) || i.account_scope || char(0)
+            || i.conversation_key || char(0) || i.provider_item_id
+            AND m.value <> ''
+        ))
         AND (? IS NULL OR (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) > (?, ?, ?, ?))
         AND NOT EXISTS (
           SELECT 1 FROM tier_overrides o
@@ -17717,6 +17741,9 @@ class TierLedger {
     return rows.map(recordFromRow);
   }
   settledDecisionBeforeOverride(identity) {
+    const requested = this.overrideRestoreRequest(identity);
+    if (requested)
+      return requested.decision;
     const row = this.db.query(`
       SELECT metadata_tier, content_tier, decided_by, reasons_json FROM tier_history
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
@@ -17734,6 +17761,61 @@ class TierLedger {
       reasons = [];
     }
     return { metadataTier: row.metadata_tier, contentTier: row.content_tier, decidedBy: row.decided_by, reasons };
+  }
+  overrideRestoreRequest(identity) {
+    const receipt = this.readMeta(overrideRestoreKey(identity));
+    if (!receipt)
+      return;
+    const parsed = JSON.parse(receipt);
+    const decision = parsed?.decision;
+    if (typeof parsed?.id !== "string" || !Number.isInteger(parsed.generation) || typeof parsed.landing !== "boolean" || !Number.isInteger(parsed.historyPk) || !decision || !TIER_KEYS.includes(decision.metadataTier) || !TIER_KEYS.includes(decision.contentTier) || typeof decision.decidedBy !== "string" || decision.decidedBy === "override" || !Array.isArray(decision.reasons) || !decision.reasons.every((reason) => typeof reason === "string") || decision.reasons.some((reason) => reason.startsWith("override:"))) {
+      throw new Error("Invalid owner undo decision.");
+    }
+    return {
+      receipt,
+      generation: parsed.generation,
+      landing: parsed.landing,
+      historyPk: parsed.historyPk,
+      decision
+    };
+  }
+  overrideRestoreStillCurrent(identity, request) {
+    const row = this.readRow(identity);
+    if (!row || row.generation !== request.generation)
+      return false;
+    const since = this.db.query(`
+      SELECT COUNT(*) AS n FROM tier_history
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND history_pk > ?
+    `).get(...idParams(identity), request.historyPk);
+    return since.n === (request.landing ? 1 : 0);
+  }
+  latestHistoryPk(identity) {
+    const row = this.db.query(`
+      SELECT MAX(history_pk) AS pk FROM tier_history
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(...idParams(identity));
+    return row.pk ?? 0;
+  }
+  advanceOverrideRestore(identity, receipt) {
+    this.db.transaction(() => {
+      const row = this.readRow(identity);
+      if (!row || this.getOverride(identity) || this.readMeta(overrideRestoreKey(identity)) !== receipt)
+        return;
+      const parsed = JSON.parse(receipt);
+      this.writeMeta(overrideRestoreKey(identity), JSON.stringify({
+        ...parsed,
+        generation: row.state === "moving" ? row.generation + 1 : row.generation,
+        landing: row.state === "moving",
+        historyPk: this.latestHistoryPk(identity)
+      }));
+    })();
+  }
+  completeOverrideRestore(identity, receipt) {
+    this.db.transaction(() => {
+      if (!this.getOverride(identity) && this.readMeta(overrideRestoreKey(identity)) === receipt) {
+        this.writeMeta(overrideRestoreKey(identity), "");
+      }
+    })();
   }
   queueMoveRow(identity, existing, decision, options) {
     const reasonsJson = JSON.stringify(decision.reasons);
@@ -18578,6 +18660,8 @@ class TierLedger {
     return row ? recordFromRow(row) : undefined;
   }
   appendHistory(identity, generation, metadataTier, contentTier, decidedBy, reasonsJson, state, decidedAt) {
+    if (metadataTier === "secrets" || contentTier === "secrets")
+      this.writeMeta(overrideRestoreKey(identity), "");
     this.db.query(`
       INSERT INTO tier_history (
         provider, account_scope, conversation_key, provider_item_id, generation,
@@ -22214,13 +22298,13 @@ function hasImmutableAccountLabel(id) {
 }
 
 // src/workers/connector-store/local-index.ts
-import { createHash as createHash16, randomUUID as randomUUID9 } from "node:crypto";
+import { createHash as createHash16, randomUUID as randomUUID10 } from "node:crypto";
 import { existsSync as existsSync22, lstatSync as lstatSync10, mkdirSync as mkdirSync14, statSync as statSync11 } from "node:fs";
 import { dirname as dirname25 } from "node:path";
 import { Database as Database6 } from "bun:sqlite";
 
 // src/core/media-cache.ts
-import { createHash as createHash15, randomUUID as randomUUID8 } from "node:crypto";
+import { createHash as createHash15, randomUUID as randomUUID9 } from "node:crypto";
 import {
   chmodSync as chmodSync5,
   closeSync as closeSync8,
@@ -24928,7 +25012,7 @@ class LocalConnectorStore {
   embeddingDeferral;
   constructor(options) {
     installMainThreadSqlTrace();
-    this.visibilityOwner = randomUUID9();
+    this.visibilityOwner = randomUUID10();
     this.visibilityNow = () => Date.now();
     this.visibilityPublishChunk = VISIBILITY_PUBLISH_CHUNK;
     this.visibilityTimers = {
@@ -24940,7 +25024,7 @@ class LocalConnectorStore {
     this.readOnly = options.readOnly === true;
     this.corpusId = requireNonEmpty(options.corpusId, "Connector store corpus id");
     this.dbPath = requireNonEmpty(options.dbPath, "Connector store db path");
-    this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID9()}` : options.mediaHolder ?? this.dbPath;
+    this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID10()}` : options.mediaHolder ?? this.dbPath;
     const configuredFormats = options.stillImagesRead === undefined ? undefined : resolveStillImageFormats(options.stillImagesRead);
     this.stillImageFormatsRead = configuredFormats ? () => configuredFormats : () => readyStillImageFormats();
     this.family = options.family;
@@ -26402,7 +26486,7 @@ class LocalConnectorStore {
     this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, nowIso(), "provider_listing");
   }
   tombstoneCopy(identity, options) {
-    const syncRunId = `connector-tier-copy-${randomUUID9()}`;
+    const syncRunId = `connector-tier-copy-${randomUUID10()}`;
     const startedAt = nowIso();
     try {
       return this.db.transaction(() => {
@@ -26435,7 +26519,7 @@ class LocalConnectorStore {
         return "held";
       if (!row && options.record !== true)
         return "none";
-      const syncRunId = `connector-secret-retired-${randomUUID9()}`;
+      const syncRunId = `connector-secret-retired-${randomUUID10()}`;
       const now = nowIso();
       this.db.query(`
         INSERT INTO sync_runs (
@@ -26522,7 +26606,7 @@ class LocalConnectorStore {
         }
         if (writeClaim && !this.acceptItemWriteClaim(existing.item_pk, writeClaim))
           return "stale_claim";
-        const syncRunId = `connector-secrets-extraction-${randomUUID9()}`;
+        const syncRunId = `connector-secrets-extraction-${randomUUID10()}`;
         const startedAt = nowIso();
         this.db.query(`
           INSERT INTO sync_runs (
@@ -26630,7 +26714,7 @@ class LocalConnectorStore {
     if (options.vectorProvider) {
       assertConnectorStoreEmbeddingBackend(this.trustDomain, options.vectorProvider);
     }
-    const syncRunId = `connector-tier-move-${randomUUID9()}`;
+    const syncRunId = `connector-tier-move-${randomUUID10()}`;
     const now = nowIso();
     const imported = this.db.transaction(() => {
       this.db.query(`
@@ -27060,7 +27144,7 @@ class LocalConnectorStore {
           INSERT INTO sync_runs (
             sync_run_id, corpus_id, connector_id, status, cursor, items_seen, items_indexed, started_at, completed_at
           ) VALUES (?, ?, ?, 'completed', NULL, ?, 0, ?, ?)
-        `).run(`image-content-private-only-${randomUUID9()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
+        `).run(`image-content-private-only-${randomUUID10()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
       }
     } finally {
       this.releaseUnreferencedChunkMedia();
@@ -28254,7 +28338,7 @@ class LocalConnectorStore {
     }
     const tierLedgerForWrite = this.visibilityLedger();
     const summary = this.db.transaction(() => {
-      const syncRunId = `connector-representation-restore-${randomUUID9()}`;
+      const syncRunId = `connector-representation-restore-${randomUUID10()}`;
       const startedAt = this.now().toISOString();
       this.db.query(`
         INSERT INTO sync_runs (
@@ -28599,7 +28683,7 @@ class LocalConnectorStore {
         };
       }
       const now = this.now().toISOString();
-      const syncRunId = `connector-relinquish-${randomUUID9()}`;
+      const syncRunId = `connector-relinquish-${randomUUID10()}`;
       this.db.query(`
         INSERT INTO sync_runs (
           sync_run_id, corpus_id, connector_id, status, cursor,
@@ -28738,7 +28822,7 @@ class LocalConnectorStore {
         sync_run_id, corpus_id, connector_id, status, cursor,
         items_seen, items_indexed, started_at, completed_at
       ) VALUES (?, ?, ?, 'completed', ?, ?, 0, ?, ?)
-    `).run(`trust-reconcile-${randomUUID9()}`, this.corpusId, reconcileConnectorId, `${complete ? "complete:" : ""}stricter-item-pk:${cursorItemPk}`, identitiesScanned, now, now);
+    `).run(`trust-reconcile-${randomUUID10()}`, this.corpusId, reconcileConnectorId, `${complete ? "complete:" : ""}stricter-item-pk:${cursorItemPk}`, identitiesScanned, now, now);
     if (complete)
       (this.trustReconciliationReadyCursors ??= new Map).set(reconcileConnectorId, cursorItemPk);
   }
@@ -29412,7 +29496,7 @@ class LocalConnectorStore {
       windowRemovedLocalItemIds: reconcileWindowRemovedLocalItemIds
     });
     await connector.authenticate();
-    const syncRunId = `connector-sync-${randomUUID9()}`;
+    const syncRunId = `connector-sync-${randomUUID10()}`;
     const startedAt = nowIso();
     this.db.query(`
       INSERT INTO sync_runs (
@@ -40650,7 +40734,7 @@ import { statSync as statSync13 } from "node:fs";
 // src/core/this-computer.ts
 import { spawnSync as spawnSync3 } from "node:child_process";
 import { existsSync as existsSync26, readFileSync as readFileSync23 } from "node:fs";
-import { createHash as createHash21, randomUUID as randomUUID10 } from "node:crypto";
+import { createHash as createHash21, randomUUID as randomUUID11 } from "node:crypto";
 import { dirname as dirname29, join as join29 } from "node:path";
 var MACHINE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 var cachedSystemHostIdentity;

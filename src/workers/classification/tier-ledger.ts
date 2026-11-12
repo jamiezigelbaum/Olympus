@@ -420,6 +420,12 @@ type QueuedMoveDecision = Pick<
 /** The decision an owner override took a row over from (`owner_prior_json`). */
 type OwnerPriorDecision = Omit<QueuedMoveDecision, 'metadataTier' | 'contentTier'>;
 
+type OverrideRestoreDecision = Pick<TierLedgerRecord, 'metadataTier' | 'contentTier' | 'decidedBy' | 'reasons'>;
+
+function overrideRestoreKey(identity: TierLedgerIdentity): string {
+  return `tier-owner-restore:${tierLedgerIdentityKey(identity)}`;
+}
+
 export interface TierLedgerOptions {
   dbPath: string;
   /** Inspection only: no migrations, repairs, permissions or checkpoint on close. */
@@ -1811,6 +1817,7 @@ export class TierLedger {
   setOverride(identity: TierLedgerIdentity, override: ItemTierOverride): void {
     if (override.kind === 'tier') assertTier(override.tier);
     this.db.transaction(() => {
+      this.writeMeta(overrideRestoreKey(identity), '');
       this.db.query(`
         INSERT INTO tier_overrides (provider, account_scope, conversation_key, provider_item_id, override_json, set_at)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -2035,7 +2042,8 @@ export class TierLedger {
   }
 
   /**
-   * Remove the owner's per-item override. In the same write, a move it
+   * Remove the owner's per-item override and carry its preceding decision
+   * in meta until restoration finishes. In the same write, a move it
    * queued is cancelled or replanned (`settleRevokedOwnerMove`): it no longer
    * has the owner's authority to land, and left as it is every retry would be
    * refused while its hidden sources keep the item out of search.
@@ -2043,10 +2051,28 @@ export class TierLedger {
   clearOverride(identity: TierLedgerIdentity): boolean {
     let cleared = false;
     this.db.transaction(() => {
+      // Capture this BEFORE settlement appends non-override history at the
+      // held tiers. That landing is not the decision the owner is undoing to.
+      const before = this.settledDecisionBeforeOverride(identity);
       cleared = this.db.query(`
         DELETE FROM tier_overrides WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
       `).run(...idParams(identity)).changes > 0;
       this.settleRevokedOwnerMove(identity);
+      const settled = this.readRow(identity);
+      if (cleared && before && settled && !this.itemIsSecret(identity)
+        && before.metadataTier !== 'secrets' && before.contentTier !== 'secrets') {
+        // Bound to where this undo leads: the row as it is now, or the landing
+        // of the move still in flight (`completeMove` and `abandonMove` advance
+        // the generation by one and record one history row). Any other
+        // decision recorded before the restore pass, even one that keeps the
+        // tiers and generation, adds history and voids the request
+        // (`overrideRestoreStillCurrent`), so a newer judgment is never
+        // replaced by this older one.
+        const generation = settled.state === 'moving' ? settled.generation + 1 : settled.generation;
+        this.writeMeta(overrideRestoreKey(identity), JSON.stringify({
+          id: randomUUID(), generation, landing: settled.state === 'moving', historyPk: this.latestHistoryPk(identity), decision: before,
+        }));
+      }
     })();
     return cleared;
   }
@@ -2924,7 +2950,8 @@ export class TierLedger {
   /**
    * Routed items still resting on an owner override that has since been
    * cleared (the owner's "undo"): settled at the override's tiers, decided by
-   * `override`, with no override row left. The set's override pass puts each
+   * `override`, or carrying an undo request across a revoked move's landing,
+   * with no override row left. The set's override pass puts each
    * back to the decision the override took it over from
    * (`settledDecisionBeforeOverride`).
    */
@@ -2932,7 +2959,14 @@ export class TierLedger {
     // `after` pages past rows a pass could not restore, so they never block the rest.
     const rows = this.db.query(`
       SELECT i.* FROM tier_items i
-      WHERE i.routed = 1 AND i.state = 'current' AND i.decided_by = 'override'
+      WHERE i.routed = 1 AND i.state = 'current'
+        AND i.metadata_tier <> 'secrets' AND i.content_tier <> 'secrets'
+        AND (i.decided_by = 'override' OR EXISTS (
+          SELECT 1 FROM tier_ledger_meta m
+          WHERE m.key = 'tier-owner-restore:' || i.provider || char(0) || i.account_scope || char(0)
+            || i.conversation_key || char(0) || i.provider_item_id
+            AND m.value <> ''
+        ))
         AND (? IS NULL OR (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) > (?, ?, ?, ?))
         AND NOT EXISTS (
           SELECT 1 FROM tier_overrides o
@@ -2951,11 +2985,14 @@ export class TierLedger {
 
   /**
    * The newest settled decision in the item's history that no owner override
-   * made: what the judge (or the item's other automatic steps) decided before
+   * made, or the decision a pending undo saved before a revoked move could
+   * append history: what the judge (or the item's other automatic steps) decided before
    * the owner changed it. Undefined when the owner set the item before any
    * such decision was recorded.
    */
-  settledDecisionBeforeOverride(identity: TierLedgerIdentity): { metadataTier: TierKey; contentTier: TierKey; decidedBy: string; reasons: string[] } | undefined {
+  settledDecisionBeforeOverride(identity: TierLedgerIdentity): OverrideRestoreDecision | undefined {
+    const requested = this.overrideRestoreRequest(identity);
+    if (requested) return requested.decision;
     const row = this.db.query(`
       SELECT metadata_tier, content_tier, decided_by, reasons_json FROM tier_history
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
@@ -2972,6 +3009,80 @@ export class TierLedger {
       reasons = [];
     }
     return { metadataTier: row.metadata_tier, contentTier: row.content_tier, decidedBy: row.decided_by, reasons };
+  }
+
+  /** A carried undo decision. Invalid state fails closed rather than borrowing a later landing. */
+  overrideRestoreRequest(identity: TierLedgerIdentity): { receipt: string; generation: number; landing: boolean; historyPk: number; decision: OverrideRestoreDecision } | undefined {
+    const receipt = this.readMeta(overrideRestoreKey(identity));
+    if (!receipt) return undefined;
+    const parsed = JSON.parse(receipt) as { id?: unknown; generation?: unknown; landing?: unknown; historyPk?: unknown; decision?: Partial<OverrideRestoreDecision> };
+    const decision = parsed?.decision;
+    if (typeof parsed?.id !== 'string' || !Number.isInteger(parsed.generation) || typeof parsed.landing !== 'boolean'
+      || !Number.isInteger(parsed.historyPk) || !decision
+      || !TIER_KEYS.includes(decision.metadataTier!) || !TIER_KEYS.includes(decision.contentTier!)
+      || typeof decision.decidedBy !== 'string' || decision.decidedBy === 'override'
+      || !Array.isArray(decision.reasons) || !decision.reasons.every(reason => typeof reason === 'string')
+      || decision.reasons.some(reason => reason.startsWith('override:'))) {
+      throw new Error('Invalid owner undo decision.');
+    }
+    return {
+      receipt, generation: parsed.generation as number, landing: parsed.landing as boolean,
+      historyPk: parsed.historyPk as number, decision: decision as OverrideRestoreDecision,
+    };
+  }
+
+  /**
+   * Whether nothing but the undo's own move landing has been recorded since
+   * the undo: the row is at the generation it led to, and the item's history
+   * holds exactly that landing (or nothing) after the undo's last row.
+   */
+  overrideRestoreStillCurrent(
+    identity: TierLedgerIdentity,
+    request: { generation: number; landing: boolean; historyPk: number },
+  ): boolean {
+    const row = this.readRow(identity);
+    if (!row || row.generation !== request.generation) return false;
+    const since = this.db.query(`
+      SELECT COUNT(*) AS n FROM tier_history
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND history_pk > ?
+    `).get(...idParams(identity), request.historyPk) as { n: number };
+    return since.n === (request.landing ? 1 : 0);
+  }
+
+  private latestHistoryPk(identity: TierLedgerIdentity): number {
+    const row = this.db.query(`
+      SELECT MAX(history_pk) AS pk FROM tier_history
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(...idParams(identity)) as { pk: number | null };
+    return row.pk ?? 0;
+  }
+
+  /**
+   * Keep the request read by this pass owed across the pass's own write: it
+   * is rebound to where the row is now (or its move's landing), so only a
+   * decision recorded after this point voids it. A later owner action wins.
+   */
+  advanceOverrideRestore(identity: TierLedgerIdentity, receipt: string): void {
+    this.db.transaction(() => {
+      const row = this.readRow(identity);
+      if (!row || this.getOverride(identity) || this.readMeta(overrideRestoreKey(identity)) !== receipt) return;
+      const parsed = JSON.parse(receipt) as Record<string, unknown>;
+      this.writeMeta(overrideRestoreKey(identity), JSON.stringify({
+        ...parsed,
+        generation: row.state === 'moving' ? row.generation + 1 : row.generation,
+        landing: row.state === 'moving',
+        historyPk: this.latestHistoryPk(identity),
+      }));
+    })();
+  }
+
+  /** Acknowledge only the request read by this pass; a later owner action wins. */
+  completeOverrideRestore(identity: TierLedgerIdentity, receipt: string): void {
+    this.db.transaction(() => {
+      if (!this.getOverride(identity) && this.readMeta(overrideRestoreKey(identity)) === receipt) {
+        this.writeMeta(overrideRestoreKey(identity), '');
+      }
+    })();
   }
 
   /**
@@ -4312,6 +4423,7 @@ export class TierLedger {
     state: TierLedgerState,
     decidedAt: string,
   ): void {
+    if (metadataTier === 'secrets' || contentTier === 'secrets') this.writeMeta(overrideRestoreKey(identity), '');
     this.db.query(`
       INSERT INTO tier_history (
         provider, account_scope, conversation_key, provider_item_id, generation,
