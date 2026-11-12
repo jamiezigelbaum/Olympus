@@ -323,6 +323,8 @@ export interface SearchView {
   evidence: Array<{ source: string; hasToken: boolean }>;
   /** The result said Olympus is still checking new items for privacy (the privacy-backlog note). */
   stillChecking?: boolean;
+  /** The result's own notes (lanes cut, stores skipped), shown when the word is missing so the cause is in the report. */
+  notes?: string[];
   error?: string;
 }
 
@@ -745,6 +747,11 @@ export function agentViewProblems(view: AgentArchiveView | undefined, expect: Ar
   return problems;
 }
 
+function searchNotes(search: SearchView): string {
+  const notes = (search.notes ?? []).join(' | ');
+  return notes ? `; the result's notes: ${notes.length > 600 ? `${notes.slice(0, 600)}…` : notes}` : '';
+}
+
 export function searchChecks(
   prefix: string,
   search: SearchView | undefined,
@@ -762,7 +769,7 @@ export function searchChecks(
     return [check(`${prefix}.search`, title, withToken.length > 0,
       withToken.length > 0
         ? `${withToken.length} cited item(s) carry the word, labelled "${fx.expect.citationLabel}" (${search.evidence.length} item(s) in all)`
-        : `${search.evidence.length} item(s) came back, ${hits.length} labelled "${fx.expect.citationLabel}", none carrying the word: ${search.evidence.map((item) => item.source).join(', ') || 'no evidence'}${search.stillChecking ? ' (the result said items were still being checked for privacy)' : ''}`)];
+        : `${search.evidence.length} item(s) came back, ${hits.length} labelled "${fx.expect.citationLabel}", none carrying the word: ${search.evidence.map((item) => item.source).join(', ') || 'no evidence'}${search.stillChecking ? ' (the result said items were still being checked for privacy)' : ''}${searchNotes(search)}`)];
   }
   const leaked = search.evidence.filter((item) => item.hasToken);
   return [check(`${prefix}.search`, title, leaked.length === 0,

@@ -333,7 +333,8 @@ async function searchFor(host: ArchiveHost, fx: LegFixture): Promise<SearchView>
     source: typeof entry?.source === 'string' ? entry.source : '',
     hasToken: [entry?.excerpt, entry?.title].some((field) => typeof field === 'string' && field.includes(fx.token)),
   }));
-  return { ok: answer.ok && !answer.isError, isError: answer.isError, evidence, ...(stillChecking ? { stillChecking } : {}), ...(answer.error ? { error: answer.error } : {}) };
+  const notes = Array.isArray(record.notes) ? record.notes.filter((note): note is string => typeof note === 'string') : [];
+  return { ok: answer.ok && !answer.isError, isError: answer.isError, evidence, ...(stillChecking ? { stillChecking } : {}), ...(notes.length > 0 ? { notes } : {}), ...(answer.error ? { error: answer.error } : {}) };
 }
 
 /** How long a search right after the drain may wait while the engine says it is still checking items. */
