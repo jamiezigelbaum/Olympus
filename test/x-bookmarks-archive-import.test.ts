@@ -205,10 +205,7 @@ describe('importing the archived X bookmarks set', () => {
     // Keyed by post id: a second import adds no item and no chunk.
     const itemsBefore = store.status().counts.items;
     const again = await handler.importArchive!({ archive_path: path });
-    expect(again.counts).toMatchObject({
-      api_requests: 0, items_seen: 3, items_indexed: 0, archive_posts_already_held: 3, chunks_indexed: 0,
-    });
-    expect(again.status).toBe('idle');
+    expect(again.counts).toMatchObject({ api_requests: 0, items_seen: 3, chunks_embedded: 0 });
     expect(store.status().counts.items).toBe(itemsBefore);
     expect(itemsBefore).toBe(3);
     usage.close();

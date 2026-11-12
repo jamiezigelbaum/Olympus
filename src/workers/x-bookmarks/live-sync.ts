@@ -40,6 +40,7 @@ import type { LocalXBookmarksReconcileStateStore } from './reconcile-state.ts';
 import { LocalXBookmarksReconcileStateStore as XBookmarksReconcileStateStore } from './reconcile-state.ts';
 import {
   X_BOOKMARKS_ARCHIVE_CONNECTOR_ID,
+  X_BOOKMARKS_LIVE_CONNECTOR_ID,
   X_BOOKMARKS_PROVIDER,
   X_BOOKMARKS_STORE_PLACEMENT,
   xBookmarkLocalItemId,
@@ -666,13 +667,24 @@ export function createXBookmarksConnectorStoreSyncHandler(
       if (options.store.dbPath !== ':memory:' && resolve(request.archive_path) === resolve(options.store.dbPath)) {
         throw new XBookmarksArchiveImportError('The archive path is this install\'s own X store.');
       }
-      // Fill only what is missing. A bookmark any tier store already holds
+      // Fill only what is missing. A bookmark the live lane already holds
       // keeps its record: the archive has no folders, author id or source
-      // version, and writing it again would overwrite the live ones.
-      const missing = archived.posts.filter((post) => !tierSet.anyLegHasRow({
-        family: 'x', provider: X_BOOKMARKS_PROVIDER, accountScope: account,
-        providerItemId: post.id, localItemId: xBookmarkLocalItemId(account, post.id),
-      }));
+      // version, and writing it again would overwrite the live ones. A row an
+      // earlier import wrote is written again, so an import cut off between
+      // its store legs completes on the retry; unchanged content is not
+      // re-embedded.
+      const missing = archived.posts.filter((post) => {
+        const identity = {
+          family: 'x' as const, provider: X_BOOKMARKS_PROVIDER, accountScope: account,
+          providerItemId: post.id, localItemId: xBookmarkLocalItemId(account, post.id),
+        };
+        if (!tierSet.anyLegHasRow(identity)) return true;
+        return tierSet.openStores().some((store) => store.itemOwnerPresent(
+          identity, X_BOOKMARKS_ARCHIVE_CONNECTOR_ID, 'preservation',
+        )) && !tierSet.openStores().some((store) => store.itemOwnerPresent(
+          identity, X_BOOKMARKS_LIVE_CONNECTOR_ID, 'observed',
+        ));
+      });
       const connector = archivedXBookmarksConnector(account, missing, now().toISOString());
       const run = await runLane(connector, {
         placement: X_BOOKMARKS_STORE_PLACEMENT,
@@ -681,7 +693,7 @@ export function createXBookmarksConnectorStoreSyncHandler(
         maxItems: Math.max(1, missing.length),
       }, false);
       return withGuard({
-        status: missing.length > 0 ? 'progress' : 'idle',
+        status: run.sync.itemsIndexed > 0 ? 'progress' : 'idle',
         counts: {
           api_requests: 0,
           archive_rows_read: archived.rowsRead,
