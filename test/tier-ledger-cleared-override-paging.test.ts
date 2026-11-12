@@ -15,7 +15,16 @@ const decision: TierDecision = {
 test('cleared overrides page past earlier rows', () => {
   const ledger = new TierLedger({ dbPath: ':memory:' });
   for (const id of ['a', 'b', 'c']) {
-    ledger.recordRoutedPlacement({ provider: 'gmail', accountScope: 'acct', providerItemId: id }, decision, placement);
+    const identity = { provider: 'gmail', accountScope: 'acct', providerItemId: id };
+    if (id === 'b') {
+      // A carried restore request is paged among ordinary cleared overrides,
+      // even though its current decider is no longer the override.
+      ledger.recordRoutedPlacement(identity, { ...decision, decidedBy: 'sniffer', reasons: ['content:sniffer:test:personal'] }, placement);
+      ledger.setOverride(identity, { kind: 'tier', tier: 'secure' });
+      ledger.clearOverride(identity);
+    } else {
+      ledger.recordRoutedPlacement(identity, decision, placement);
+    }
   }
   const first = ledger.listClearedOverrideRows(2);
   expect(first.map((row) => row.providerItemId)).toEqual(['a', 'b']);
