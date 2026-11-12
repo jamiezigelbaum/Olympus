@@ -3535,7 +3535,15 @@ export class LocalConnectorStore {
       // New stores need no conversion. Existing stores are converted only by
       // background reclaim, after the sweep, never by opening a request's store.
       assertSqliteSchemaCanOpen(this.db, SQLITE_STORE_ID, CONNECTOR_STORE_SQLITE_SCHEMA_VERSION);
+      const versionAtOpen = readSqliteSchemaVersion(this.db, SQLITE_STORE_ID);
+      // A store already at this build's schema is checked by shape only. The
+      // checks that read every row (the text index's ownership count, every
+      // foreign key) run only when this open migrates: on Sparta they read
+      // about 22 GB per plain restart across both engine processes, most of
+      // each one's 6 minutes to ready (ops#151, 2026-11-12).
+      const migrating = options.readOnly !== true && versionAtOpen < CONNECTOR_STORE_SQLITE_SCHEMA_VERSION;
       validateCurrentConnectorStoreSchemaBeforeMigration(this.db);
+      if (migrating) validateConnectorStoreRows(this.db, `v${versionAtOpen}`);
       if (options.readOnly === true) {
         const version = readSqliteSchemaVersion(this.db, SQLITE_STORE_ID);
         // Anything newer than this build already failed
@@ -3553,6 +3561,10 @@ export class LocalConnectorStore {
         createConnectorStoreVisibilityTables(this.db);
         createConnectorStorePeopleIndex(this.db);
         validateConnectorStoreSchema(this.db);
+        if (migrating) {
+          validateConnectorStoreRows(this.db, 'v15');
+          validateConnectorStoreForeignKeys(this.db);
+        }
       }
       if (options.readOnly !== true) this.createVisibilityJournal();
       // A read-only open of a store no writer of this build has opened has no
@@ -19302,6 +19314,21 @@ function validateConnectorStoreV6Schema(db: Database): void {
   validateConnectorStoreFtsOwnership(db, 'v6');
 }
 
+/**
+ * The checks that read every row of the text index (its ownership map is
+ * complete), for an open that migrates. Version 6 and later; earlier stores
+ * have no ownership map.
+ */
+function validateConnectorStoreRows(db: Database, versionLabel: string): void {
+  if (readSqliteSchemaVersion(db, SQLITE_STORE_ID) < 6) return;
+  // One statement, so one snapshot.
+  const counts = db.query(`SELECT (SELECT COUNT(*) FROM connector_store_fts) AS fts_rows,
+    (SELECT COUNT(*) FROM connector_store_fts_rows) AS mapped_rows`).get() as { fts_rows: number; mapped_rows: number };
+  if (Number(counts.fts_rows) !== Number(counts.mapped_rows)) {
+    throw new Error(`Connector store schema ${versionLabel} FTS row ownership map is incomplete.`);
+  }
+}
+
 function validateVectorDigestSchema(db: Database): void {
   assertExactTableColumns(db, 'chunk_vector_digest', ['chunk_pk', 'model_id', 'item_pk', 'account_scope', 'digest'], false, 'v16');
   assertExactTableColumns(db, 'chunk_vector_digest_meta', ['model_id', 'cursor_rowid', 'completed'], false, 'v16');
@@ -19312,7 +19339,6 @@ function validateVectorDigestSchema(db: Database): void {
 function validateConnectorStoreSchema(db: Database): void {
   validateConnectorStoreV12Schema(db, 'v15', CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
   validateVectorDigestSchema(db);
-  validateConnectorStoreForeignKeys(db);
   assertIndexColumns(db, 'idx_connector_store_items_parent', ['parent_local_item_id'], 'v15');
   assertExactTableColumns(db, 'chunk_media_releases', ['media_sha256', 'media_path'], false, 'v13');
   assertExactTableColumns(db, 'chunk_media_failures', ['media_sha256', 'reason', 'failed_at', 'attempts'], false, 'v13');
@@ -19453,18 +19479,11 @@ function validateConnectorStoreFtsOwnership(db: Database, versionLabel: string):
     versionLabel,
   );
   assertIndexColumns(db, 'idx_connector_store_fts_rows_item', ['item_pk'], versionLabel);
-  // One statement, so one snapshot: a read-only open runs beside the writer,
-  // and two separate counts let its commit land between them.
-  const counts = db.query(`SELECT (SELECT COUNT(*) FROM connector_store_fts) AS fts_rows,
-    (SELECT COUNT(*) FROM connector_store_fts_rows) AS mapped_rows`).get() as { fts_rows: number; mapped_rows: number };
-  if (Number(counts.fts_rows) !== Number(counts.mapped_rows)) {
-    throw new Error('Connector store schema FTS row ownership map is incomplete.');
-  }
 }
 
 // Walks every foreign key in the file: most of a large store's open time
-// (13 to 15 s cold on Sparta, 2026-11-10, #1242). Only the writer's open runs
-// it, after its migrations; a read-only open migrates nothing.
+// (13 to 15 s cold on Sparta, 2026-11-10, #1242). Only a writer's open that
+// migrates runs it, after its migrations.
 function validateConnectorStoreForeignKeys(db: Database): void {
   const foreignKeyErrors = db.query('PRAGMA foreign_key_check').all();
   if (foreignKeyErrors.length > 0) {

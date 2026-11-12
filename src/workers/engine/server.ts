@@ -246,7 +246,7 @@ import {
   type ConnectorStoreSearchFilters,
 } from '../connector-store/index.ts';
 import { canonicalConnectorStoreChatPrincipal } from '../connector-store/principal.ts';
-import { createSourceAnswerLanes } from './runtime/source-answer-lanes.ts';
+import { createOwnerQuestionActivity, createSourceAnswerLanes, OWNER_QUESTION_RESOURCE } from './runtime/source-answer-lanes.ts';
 import type { ConnectorStoreStatusScope } from '../connector-store/local-index.ts';
 import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
 import { gmailInternalStoreStatusScope, gmailPrivateStoreStatusScope } from '../email-source/gmail-status-scope.ts';
@@ -759,6 +759,11 @@ export async function main(): Promise<void> {
   // Shared with the answer handler so the sniffer reads the private pool's
   // breakers, and counts answers in flight so it never competes with one.
   const secureAnalystPoolState = new SecureAnalystPoolState();
+  // Questions pause copy cleanup independently of which model they use.
+  const ownerQuestions = createOwnerQuestionActivity(engineFront?.ownerBusy);
+  // Busy marks from the split's front lapse after ten minutes without renewal.
+  const remoteOwnerMarks = new OwnerBusyMarks();
+  const remoteOwnerBusy = (resource: string): boolean => remoteOwnerMarks.busy(resource);
   // UI answer leases coordinate owner/background jobs. Actual local model
   // dispatches have separate leases; cloud searches never preempt sorting.
   const answerActivity = createAnswerActivity(() => undefined, {
@@ -3303,6 +3308,7 @@ export async function main(): Promise<void> {
         // is audited as skipped/no_adapter instead of silently disappearing
         // from unified fan-out.
         lanes: sourceAnswerLanes = createSourceAnswerLanes({
+          ownerQuestions,
           limitStops: () => sourceScheduler?.status().limit_stops ?? [],
           stores: () => { mountConfiguredSourceStores(); return readConnectorStores; },
           registry: () => buildSourceIndexCorpusRegistry(
@@ -3340,7 +3346,7 @@ export async function main(): Promise<void> {
           // A background agent's answer does not hold back queued background
           // answers the way the owner's own work does (core/source-answer-jobs.ts).
           const kind = request.caller?.surface === 'remote' && isBackgroundConnection(request.caller.connection_id) ? 'background' : 'owner';
-          return withStoreReadPriority(() => answerActivity.run(() => analystSourceAnswer.answer(request, local), kind));
+          return withStoreReadPriority(() => ownerQuestions.run(() => answerActivity.run(() => analystSourceAnswer.answer(request, local), kind), kind));
         },
       }
     : undefined;
@@ -5195,8 +5201,19 @@ export async function main(): Promise<void> {
     eligible: privateEvidenceEligible,
     installId: () => remotePublicUrls()?.installId,
     // While an analysis runs (from the search) and from a claim to
-    // ready/failed, the sniffer stays off the shared model.
-    activity: answerActivity,
+    // ready/failed, the sniffer stays off the shared model, and the copy
+    // sweep waits as for any owner question.
+    activity: {
+      begin: () => {
+        const releaseAnswer = answerActivity.begin();
+        const releaseQuestion = ownerQuestions.begin();
+        return () => {
+          releaseQuestion();
+          releaseAnswer();
+        };
+      },
+      end: () => answerActivity.end(),
+    },
     // The panel's seen ack clears the waiting question it answered (same
     // id, generation and connection; a re-asked question survives).
     acknowledge: (ref) => {
@@ -5276,7 +5293,7 @@ export async function main(): Promise<void> {
       localConnectionId: '@local:You',
       anonymousAsk: localAnonymousAsk,
       // The built-in model serves one question at once: an answer preempts the sniffer.
-      answer: (input) => withStoreReadPriority(() => answerActivity.run(() => local.answer(input))),
+      answer: (input) => withStoreReadPriority(() => ownerQuestions.run(() => answerActivity.run(() => local.answer(input)))),
       backgroundAnswer: (input) => withStoreReadPriority(() => runBackgroundInference(() => answerActivity.run(() => local.answer(input), 'background'))),
       interactiveBusy: () => answerActivity.interactiveInFlight > 0,
       backgroundBusy: () => classificationBusy(),
@@ -5685,27 +5702,28 @@ export async function main(): Promise<void> {
   };
   const chatgptEvidenceSearch = sourceAnswerLanes
     ? async (input: { question: string; limit?: number }) => {
-        // Not an answer: no answerActivity lease, so it never preempts the
-        // sniffer. It does ask the built-in model, once per new wording, to
-        // translate the question's words (core/source-index/keyword-expansion.ts),
+        // A question lease pauses the copy sweep without a model-activity
+        // lease that would preempt the sniffer. It asks the built-in model,
+        // once per new wording, to translate the question's words
+        // (core/source-index/keyword-expansion.ts),
         // on the model directly, so that call queues behind what the model runs.
-        return withStoreReadPriority(() => searchReleasedEvidence({
+        return withStoreReadPriority(() => ownerQuestions.run(() => searchReleasedEvidence({
           lanes: sourceAnswerLanes!,
           question: input.question,
           ...(input.limit ? { maxResults: input.limit } : {}),
           releaseCheck: remoteReleaseCheck,
-        }));
+        })));
       }
     : undefined;
   // The same search for every other remote agent, with the tiers read once
   // more right before the result leaves (workers/remote-search.ts).
   const remoteEvidenceSearch = sourceAnswerLanes
-    ? async (input: { question: string; limit?: number }) => withStoreReadPriority(() => searchReleasedEvidence({
+    ? async (input: { question: string; limit?: number }) => withStoreReadPriority(() => ownerQuestions.run(() => searchReleasedEvidence({
         lanes: sourceAnswerLanes!,
         question: input.question,
         ...(input.limit ? { maxResults: input.limit } : {}),
         releaseCheck: remoteReleaseCheck,
-      }))
+      })))
     : undefined;
   // Which Private items match, for the private answer panel: the shared
   // EvidencePack build over Private corpora only, so each item carries its
@@ -5715,7 +5733,7 @@ export async function main(): Promise<void> {
   // that have moved to a lower tier; those still go only to the private job.
   const chatgptPrivateMatchProbe = sourceAnswerLanes
     ? async (question: string, _ctx: import('../../core/operations.ts').OperationContext, originalMatches?: readonly Readonly<Record<string, unknown>>[]) => {
-        const result = await withStoreReadPriority(() => searchPrivateEvidence({ lanes: sourceAnswerLanes!, question, ...(originalMatches ? { originalMatches } : {}) }));
+        const result = await withStoreReadPriority(() => ownerQuestions.run(() => searchPrivateEvidence({ lanes: sourceAnswerLanes!, question, ...(originalMatches ? { originalMatches } : {}) })));
         return { count: result.matched, evidence: result.candidates as unknown as readonly Record<string, unknown>[], ...(result.secretMatch ? { secretMatch: true as const } : {}) };
       }
     : undefined;
@@ -6066,8 +6084,10 @@ export async function main(): Promise<void> {
   if (!engineFront) await reconcileCaptures();
   const captureTick = setInterval(() => { if (!engineFront) void reconcileCaptures(); }, 10_000);
   captureTick.unref?.();
-  // The one-time superseded-copy sweep's own clock; the split's front runs none.
-  const stopSupersededSweep = startSupersededSweepTicker({ active: () => !engineFront,
+  // A running slice finishes; the next tick waits until the owner's question settles.
+  // The combined engine uses its local count; the split background uses the relayed mark.
+  const stopSupersededSweep = startSupersededSweepTicker({
+    active: () => !engineFront && !ownerQuestions.busy && !remoteOwnerBusy(OWNER_QUESTION_RESOURCE),
     reclaimStore: (store, work) => {
       const sourceIds = new Set(sourceCorpusRegistry.list()
         .filter(corpus => corpus.corpusId === store.corpusId).map(corpus => corpus.sourceId));
@@ -6089,10 +6109,6 @@ export async function main(): Promise<void> {
   const snifferModel: SnifferModel | undefined = rawSnifferModel && snifferLane?.kind === 'local' ? observedJudge(rawSnifferModel, judgeObservations, localDecisionBar) : rawSnifferModel;
   const snifferResource = snifferRuntime.source === 'built_in' ? 'built_in'
     : snifferLane?.kind === 'local' ? localModelResourceKey(snifferLane.profile) : undefined;
-  // The owner's own call on the shared model, as the split's front reported it
-  // (owner_busy / owner_idle), until it says idle or ten minutes pass.
-  const remoteOwnerMarks = new OwnerBusyMarks();
-  const remoteOwnerBusy = (resource: string): boolean => remoteOwnerMarks.busy(resource);
   // This computer, then Venice double-checks (#891): the local judge sorts everything, and
   // Venice re-reads only what it held Private, on the same lane, consent and spending limit.
   const judgeChoice = judgeSpending.status();

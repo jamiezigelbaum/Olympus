@@ -2850,8 +2850,8 @@
           },
           "claudeAppEnabled": {
             "type": "boolean",
-            "default": false,
-            "description": "Show the Olympus dashboard and private answer panels inside Claude on the web and desktop. Claude's phone apps show answers as text. Leave off to give Claude only the answer tools. Restart Olympus after changing this setting."
+            "default": true,
+            "description": "Show the Olympus dashboard and private answer panels inside Claude on the web and desktop. Claude's phone apps show answers as text. Turn off to give Claude only the answer tools. Restart Olympus after changing this setting."
           },
           "demoConsent": {
             "type": "object",

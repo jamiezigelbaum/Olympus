@@ -5914,8 +5914,8 @@ function applyOpenClawPluginRemote(config, env) {
 }
 function parseRemoteConfig(remote) {
   const parsed = { enabled: remote.enabled === true };
-  if (remote.claudeAppEnabled !== undefined)
-    parsed.claudeAppEnabled = remote.claudeAppEnabled === true;
+  if (typeof remote.claudeAppEnabled === "boolean")
+    parsed.claudeAppEnabled = remote.claudeAppEnabled;
   for (const key of ["relayHost", "publicBaseUrl"]) {
     const value = remote[key];
     if (typeof value === "string" && value.trim())
@@ -20813,6 +20813,7 @@ import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
 
 // src/core/store-reclaim-admission.ts
 import { join as join21 } from "node:path";
+import { closeSync as closeSync9, openSync as openSync9, futimesSync, statSync as statSync11 } from "node:fs";
 var probe = { acquireTimeoutMs: 1, pollIntervalMs: 1 };
 var target = (name) => join21(sharedDataPath("engine-run"), `store-reclaim-${name}`);
 function storeReadHasPriority() {
@@ -20821,6 +20822,15 @@ function storeReadHasPriority() {
   } catch (error) {
     if (error instanceof FileLeaseBusyError)
       return true;
+    throw error;
+  }
+}
+function storeOwnerIdleMs(now = Date.now()) {
+  try {
+    return Math.max(0, now - statSync11(target("last-ask")).mtimeMs);
+  } catch (error) {
+    if (error.code === "ENOENT")
+      return Number.POSITIVE_INFINITY;
     throw error;
   }
 }
@@ -22511,7 +22521,7 @@ function hasImmutableAccountLabel(id) {
 
 // src/workers/connector-store/local-index.ts
 import { createHash as createHash16, randomUUID as randomUUID10 } from "node:crypto";
-import { existsSync as existsSync24, lstatSync as lstatSync10, mkdirSync as mkdirSync15, statSync as statSync13 } from "node:fs";
+import { existsSync as existsSync24, lstatSync as lstatSync10, mkdirSync as mkdirSync15, statSync as statSync14, statfsSync as statfsSync2 } from "node:fs";
 import { dirname as dirname27 } from "node:path";
 import { Database as Database6 } from "bun:sqlite";
 
@@ -22519,19 +22529,19 @@ import { Database as Database6 } from "bun:sqlite";
 import { createHash as createHash15, randomUUID as randomUUID9 } from "node:crypto";
 import {
   chmodSync as chmodSync6,
-  closeSync as closeSync9,
+  closeSync as closeSync10,
   existsSync as existsSync20,
   fsyncSync as fsyncSync2,
   mkdirSync as mkdirSync13,
   lstatSync as lstatSync8,
-  openSync as openSync9,
+  openSync as openSync10,
   readFileSync as readFileSync20,
   readdirSync as readdirSync3,
   realpathSync as realpathSync5,
   renameSync as renameSync7,
   rmSync as rmSync8,
   rmdirSync,
-  statSync as statSync12,
+  statSync as statSync13,
   writeFileSync as writeFileSync5
 } from "node:fs";
 import { basename as basename5, dirname as dirname23, isAbsolute as isAbsolute11, join as join23, resolve as resolve8 } from "node:path";
@@ -22577,7 +22587,7 @@ function olympusDataDir(env = process.env) {
 }
 
 // src/core/store-identity.ts
-import { existsSync as existsSync19, realpathSync as realpathSync4, statSync as statSync11 } from "node:fs";
+import { existsSync as existsSync19, realpathSync as realpathSync4, statSync as statSync12 } from "node:fs";
 import { basename as basename4, dirname as dirname22, isAbsolute as isAbsolute10, join as join22, relative as relative5, resolve as resolve7, sep as sep5 } from "node:path";
 var LAYOUTS2 = ["folder", "legacy"];
 function layoutPath(identity, layout, env) {
@@ -22788,7 +22798,7 @@ function isEarlier(held, current3) {
 }
 function isMissing(path) {
   try {
-    statSync11(path);
+    statSync12(path);
     return false;
   } catch (error) {
     const code = error?.code;
@@ -22876,7 +22886,7 @@ function sweepMediaCache(dir, options = {}) {
   const placement = storePlacementView(options.env ?? process.env);
   const old = (path) => {
     try {
-      return now - statSync12(path).mtimeMs > maxAgeMs;
+      return now - statSync13(path).mtimeMs > maxAgeMs;
     } catch {
       return false;
     }
@@ -22944,11 +22954,11 @@ function addStoreMarker(refs, holder) {
     rmSync8(join23(refs, name), { force: true });
 }
 function flushMarker(marker, refs) {
-  const descriptor = openSync9(marker, "r");
+  const descriptor = openSync10(marker, "r");
   try {
     fsyncSync2(descriptor);
   } finally {
-    closeSync9(descriptor);
+    closeSync10(descriptor);
   }
   syncDirectorySync(refs);
 }
@@ -25338,7 +25348,11 @@ class LocalConnectorStore {
     try {
       this.db.exec(options.readOnly === true ? "PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;" : creatingFile ? "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL; PRAGMA journal_mode = WAL;" : "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
       assertSqliteSchemaCanOpen(this.db, SQLITE_STORE_ID, CONNECTOR_STORE_SQLITE_SCHEMA_VERSION);
+      const versionAtOpen = readSqliteSchemaVersion(this.db, SQLITE_STORE_ID);
+      const migrating = options.readOnly !== true && versionAtOpen < CONNECTOR_STORE_SQLITE_SCHEMA_VERSION;
       validateCurrentConnectorStoreSchemaBeforeMigration(this.db);
+      if (migrating)
+        validateConnectorStoreRows(this.db, `v${versionAtOpen}`);
       if (options.readOnly === true) {
         const version = readSqliteSchemaVersion(this.db, SQLITE_STORE_ID);
         if (version < READ_ONLY_MIN_SCHEMA_VERSION) {
@@ -25354,6 +25368,10 @@ class LocalConnectorStore {
         createConnectorStoreVisibilityTables(this.db);
         createConnectorStorePeopleIndex(this.db);
         validateConnectorStoreSchema(this.db);
+        if (migrating) {
+          validateConnectorStoreRows(this.db, "v15");
+          validateConnectorStoreForeignKeys(this.db);
+        }
       }
       if (options.readOnly !== true)
         this.createVisibilityJournal();
@@ -25484,6 +25502,7 @@ class LocalConnectorStore {
     }
   }
   reclaimProcess;
+  reclaimKilledAttempts = 0;
   reclaimablePages() {
     if (this.readOnly || this.dbPath === ":memory:" || this.closedForPoolReads || this.fileReplacedOrRemoved())
       return;
@@ -25491,12 +25510,24 @@ class LocalConnectorStore {
       pages: this.db.query("PRAGMA page_count").get().page_count,
       free: this.db.query("PRAGMA freelist_count").get().freelist_count,
       pageBytes: this.db.query("PRAGMA page_size").get().page_size,
-      bytes: statSync13(this.dbPath).size
+      bytes: statSync14(this.dbPath).size
     };
   }
   async reclaimFreePages(budgetMs, options = {}) {
-    if (!this.reclaimablePages() || this.reclaimProcess || this.vectorDigestBackfillReading || storeReadHasPriority())
+    if (this.reclaimProcess || this.vectorDigestBackfillReading || this.visibilityPublishing || storeReadHasPriority() || !this.reclaimablePages())
       return;
+    const converting = this.db.query("PRAGMA auto_vacuum").get().auto_vacuum === 0;
+    if (converting) {
+      if (this.reclaimKilledAttempts >= 3 && storeOwnerIdleMs(this.now().getTime()) < 10 * 60000)
+        return;
+      const neededBytes = 2 * statSync14(this.dbPath).size + 1024 ** 3;
+      const disk = (options.statfs ?? statfsSync2)(dirname27(this.dbPath));
+      const availableBytes = Number(disk.bavail) * Number(disk.bsize);
+      if (!Number.isFinite(availableBytes) || availableBytes < neededBytes) {
+        console.info(`[store-reclaim] conversion_skipped reason=disk_space needed_bytes=${neededBytes} available_bytes=${availableBytes}`);
+        return;
+      }
+    }
     let pagesPerStep = options.pagesPerStep ?? RECLAIM_MAX_PAGES_PER_STEP;
     if (pagesPerStep > RECLAIM_MAX_PAGES_PER_STEP)
       pagesPerStep = RECLAIM_MAX_PAGES_PER_STEP;
@@ -25513,14 +25544,20 @@ class LocalConnectorStore {
       };
       worker.onerror = () => process.exit(1);
       worker.postMessage(JSON.parse(process.argv[1]));`;
-    const child = Bun.spawn([process.execPath, "-e", supervisor, JSON.stringify([this.dbPath, budgetMs, pagesPerStep])], { stdin: "pipe", stdout: "pipe", stderr: "ignore" });
+    const child = Bun.spawn([process.execPath, "-e", supervisor, JSON.stringify([this.dbPath, budgetMs, pagesPerStep])], {
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "ignore",
+      env: { ...process.env, SQLITE_TMPDIR: dirname27(this.dbPath), TMPDIR: dirname27(this.dbPath) }
+    });
     this.reclaimProcess = child;
-    const timeout = this.db.query("PRAGMA busy_timeout").get().timeout;
-    this.db.exec("PRAGMA busy_timeout = 0;");
+    let preempted = false;
     const interrupt = setInterval(() => {
       try {
-        if (storeReadHasPriority())
+        if (storeReadHasPriority() && !preempted) {
+          preempted = true;
           child.kill("SIGKILL");
+        }
       } catch {
         child.kill("SIGKILL");
       }
@@ -25548,13 +25585,19 @@ class LocalConnectorStore {
       await output;
       if (code !== 0 || this.closedForPoolReads)
         return;
+      if (!result?.failed)
+        this.reclaimKilledAttempts = 0;
       return result?.failed ? undefined : result;
     } finally {
       clearInterval(interrupt);
       child.stdin.end();
       this.reclaimProcess = undefined;
-      if (!this.closedForPoolReads)
-        this.db.exec(`PRAGMA busy_timeout = ${timeout};`);
+      if (converting && preempted)
+        this.reclaimKilledAttempts++;
+      if (!this.closedForPoolReads) {
+        if (this.visibilityPending)
+          this.scheduleVisibilityPublish(0);
+      }
     }
   }
   tierLedgerPathInUse() {
@@ -26070,6 +26113,10 @@ class LocalConnectorStore {
       return this.visibilityPublishing;
     if (!this.visibilityPending || this.visibilityClosed)
       return Promise.resolve();
+    if (this.reclaimProcess) {
+      this.scheduleVisibilityPublish(VISIBILITY_RETRY_MIN_MS);
+      return Promise.resolve();
+    }
     let publishing;
     publishing = (async () => {
       try {
@@ -26109,6 +26156,8 @@ class LocalConnectorStore {
     }
   }
   releaseVisibilityLease() {
+    if (this.reclaimProcess)
+      return;
     try {
       this.db.exec("PRAGMA busy_timeout = 0");
       this.db.query("DELETE FROM main.tier_visibility_lease WHERE id = 1 AND owner = ?").run(this.visibilityOwner);
@@ -29053,7 +29102,7 @@ ${parentKey(ref)}`, { ref, origin });
     } catch {}
   }
   releaseUnreferencedChunkMedia() {
-    if (!this.chunkMediaColumnsPresent)
+    if (!this.chunkMediaColumnsPresent || this.reclaimProcess)
       return;
     try {
       for (;; ) {
@@ -29300,8 +29349,8 @@ ${parentKey(ref)}`, { ref, origin });
       throw new Error("Connector store trust reconciliation requires two distinct stores.");
     }
     if (this.dbPath !== ":memory:" && options.stricter.dbPath !== ":memory:") {
-      const looserFile = statSync13(this.dbPath);
-      const stricterFile = statSync13(options.stricter.dbPath);
+      const looserFile = statSync14(this.dbPath);
+      const stricterFile = statSync14(options.stricter.dbPath);
       if (looserFile.dev === stricterFile.dev && looserFile.ino === stricterFile.ino) {
         throw new Error("Connector store trust reconciliation refuses one database as both stores.");
       }
@@ -34625,6 +34674,15 @@ function validateConnectorStoreV6Schema(db) {
   validateConnectorStoreSchemaShape(db, CONNECTOR_STORE_V5_ITEM_COLUMNS, true, "v6");
   validateConnectorStoreFtsOwnership(db, "v6");
 }
+function validateConnectorStoreRows(db, versionLabel) {
+  if (readSqliteSchemaVersion(db, SQLITE_STORE_ID) < 6)
+    return;
+  const counts = db.query(`SELECT (SELECT COUNT(*) FROM connector_store_fts) AS fts_rows,
+    (SELECT COUNT(*) FROM connector_store_fts_rows) AS mapped_rows`).get();
+  if (Number(counts.fts_rows) !== Number(counts.mapped_rows)) {
+    throw new Error(`Connector store schema ${versionLabel} FTS row ownership map is incomplete.`);
+  }
+}
 function validateVectorDigestSchema(db) {
   assertExactTableColumns(db, "chunk_vector_digest", ["chunk_pk", "model_id", "item_pk", "account_scope", "digest"], false, "v16");
   assertExactTableColumns(db, "chunk_vector_digest_meta", ["model_id", "cursor_rowid", "completed"], false, "v16");
@@ -34634,7 +34692,6 @@ function validateVectorDigestSchema(db) {
 function validateConnectorStoreSchema(db) {
   validateConnectorStoreV12Schema(db, "v15", CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
   validateVectorDigestSchema(db);
-  validateConnectorStoreForeignKeys(db);
   assertIndexColumns(db, "idx_connector_store_items_parent", ["parent_local_item_id"], "v15");
   assertExactTableColumns(db, "chunk_media_releases", ["media_sha256", "media_path"], false, "v13");
   assertExactTableColumns(db, "chunk_media_failures", ["media_sha256", "reason", "failed_at", "attempts"], false, "v13");
@@ -34707,11 +34764,6 @@ function validateConnectorStoreItemSchema(db, itemColumns, versionLabel, chunkCo
 function validateConnectorStoreFtsOwnership(db, versionLabel) {
   assertExactTableColumns(db, "connector_store_fts_rows", ["fts_rowid", "item_pk", "chunk_pk"], false, versionLabel);
   assertIndexColumns(db, "idx_connector_store_fts_rows_item", ["item_pk"], versionLabel);
-  const counts = db.query(`SELECT (SELECT COUNT(*) FROM connector_store_fts) AS fts_rows,
-    (SELECT COUNT(*) FROM connector_store_fts_rows) AS mapped_rows`).get();
-  if (Number(counts.fts_rows) !== Number(counts.mapped_rows)) {
-    throw new Error("Connector store schema FTS row ownership map is incomplete.");
-  }
 }
 function validateConnectorStoreForeignKeys(db) {
   const foreignKeyErrors = db.query("PRAGMA foreign_key_check").all();
@@ -35194,7 +35246,7 @@ function fileIdentity(path) {
   if (path === ":memory:" || path === "")
     return;
   try {
-    const stat2 = statSync13(path);
+    const stat2 = statSync14(path);
     return { dev: stat2.dev, ino: stat2.ino };
   } catch {
     return;
@@ -35337,7 +35389,7 @@ import { dirname as dirname29, join as join28 } from "node:path";
 
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { spawn } from "node:child_process";
-import { closeSync as closeSync10, constants as constants4, existsSync as existsSync25, fstatSync as fstatSync2, openSync as openSync10, readdirSync as readdirSync4, statSync as statSync14 } from "node:fs";
+import { closeSync as closeSync11, constants as constants4, existsSync as existsSync25, fstatSync as fstatSync2, openSync as openSync11, readdirSync as readdirSync4, statSync as statSync15 } from "node:fs";
 import { homedir as homedir12 } from "node:os";
 import { delimiter as delimiter2, dirname as dirname28, isAbsolute as isAbsolute14, join as join26 } from "node:path";
 import { createInterface } from "node:readline";
@@ -35576,13 +35628,13 @@ function linuxGpuAvailable(deviceDirectory = "/dev/dri") {
         return false;
       let fd;
       try {
-        fd = openSync10(join26(deviceDirectory, name), constants4.O_RDWR | constants4.O_NONBLOCK);
+        fd = openSync11(join26(deviceDirectory, name), constants4.O_RDWR | constants4.O_NONBLOCK);
         return fstatSync2(fd).isCharacterDevice();
       } catch {
         return false;
       } finally {
         if (fd !== undefined)
-          closeSync10(fd);
+          closeSync11(fd);
       }
     });
   } catch {
@@ -35610,7 +35662,7 @@ function resolveBun() {
     if (!candidate || !isAbsolute14(candidate))
       continue;
     try {
-      if (statSync14(candidate).isFile())
+      if (statSync15(candidate).isFile())
         return candidate;
     } catch {}
   }
@@ -40479,6 +40531,22 @@ class SourceScheduler {
     }
     return false;
   }
+  storeReclaims = new Set;
+  async withIdleSources(sourceIds, work) {
+    if (this.hasExecutingTask(sourceIds) || [...this.storeReclaims].some((hold2) => [...sourceIds].some((id) => hold2.sourceIds.has(id))))
+      return;
+    let release;
+    const hold = { sourceIds, done: new Promise((resolve11) => {
+      release = resolve11;
+    }) };
+    this.storeReclaims.add(hold);
+    try {
+      return await work();
+    } finally {
+      this.storeReclaims.delete(hold);
+      release();
+    }
+  }
   status(now = this.now()) {
     return {
       kind: "source_scheduler_status",
@@ -40570,7 +40638,6 @@ class SourceScheduler {
           if (state.running)
             continue;
           state.running = true;
-          this.executingStates.add(state);
           try {
             await this.runTaskSharingThread(state, dueAt, provenance);
           } finally {
@@ -40593,7 +40660,6 @@ class SourceScheduler {
               this.busyConcurrencyKeys.add(ownKey);
             }
             state.running = true;
-            this.executingStates.add(state);
             try {
               await this.runTaskSharingThread(state, state.nextRunAt, provenance);
             } finally {
@@ -40610,6 +40676,22 @@ class SourceScheduler {
     }));
   }
   async runTaskSharingThread(state, dueAt, provenance) {
+    const stops = this.stops;
+    for (;; ) {
+      const holds = [...this.storeReclaims].filter((hold) => hold.sourceIds.has(state.source.sourceId) || hold.sourceIds.has(state.source.corpusId));
+      if (holds.length === 0)
+        break;
+      state.waitReason = "store_reclaim";
+      console.info(`[olympus:source-scheduler] task_wait source_id=${state.source.sourceId} task_id=${state.task.id} reason=store_reclaim`);
+      try {
+        await Promise.all(holds.map((hold) => hold.done));
+      } finally {
+        delete state.waitReason;
+      }
+      if (this.stops !== stops)
+        return;
+    }
+    this.executingStates.add(state);
     const leave = controlPathHeadroom.enter(`${state.source.sourceId}/${state.task.kind}`);
     try {
       await this.runTask(state, dueAt, provenance);
@@ -40993,6 +41075,7 @@ ${request.taskId}`);
       stale_anomaly: taskCadence(state.source, state.task) === "continuous" && (freshnessMs === undefined || freshnessMs > freshnessThresholdMs),
       ...state.nextRunAt > 0 ? { next_run_at: new Date(state.nextRunAt).toISOString() } : {},
       running: state.running,
+      ...state.waitReason ? { wait_reason: state.waitReason } : {},
       consecutive_failures: state.consecutiveFailures,
       ...state.lastSuccessAt ? { last_success_at: state.lastSuccessAt } : {},
       ...state.lastAttemptAt ? { last_attempt_at: state.lastAttemptAt } : {},
@@ -41333,7 +41416,7 @@ ${task.id}`;
 }
 
 // src/workers/source-scope-runtime.ts
-import { statSync as statSync15 } from "node:fs";
+import { statSync as statSync16 } from "node:fs";
 
 // src/core/this-computer.ts
 import { spawnSync as spawnSync3 } from "node:child_process";
@@ -41561,7 +41644,7 @@ class FileSourceScopeAuthority {
       return;
     try {
       const files = [this.registryPath, defaultThisComputerStatePath(this.registryPath), this.statePath].map((path) => {
-        const stat3 = statSync15(path, { throwIfNoEntry: false });
+        const stat3 = statSync16(path, { throwIfNoEntry: false });
         return stat3 ? [stat3.ino, stat3.mtimeMs, stat3.size] : null;
       });
       return JSON.stringify([ref.accountGeneration, ref.revision, files]);

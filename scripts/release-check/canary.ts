@@ -156,7 +156,7 @@ export interface CanaryAccounts {
   sources: LiveSourceSpec[];
   clients: WebClientId[];
   questions: ClientQuestion[];
-  /** Expected Claude MCP Apps switch (`remote.claudeAppEnabled`); left out, the product default, which is off. */
+  /** Expected Claude MCP Apps switch (`remote.claudeAppEnabled`); left out, the product default, which is on. */
   claude_app?: boolean;
 }
 
@@ -176,7 +176,7 @@ export function parseCanaryAccounts(raw: unknown, readQuestions: (path: string) 
   // A client no question applies to would pass having been asked nothing.
   const unasked = clients.filter((client) => !questions.some((q) => !q.clients || q.clients.includes(client as WebClientId)));
   if (unasked.length > 0) throw new Error(`no question applies to ${unasked.join(', ')}`);
-  return { sources, clients: clients as WebClientId[], questions, claude_app: (record.claude_app as boolean | undefined) ?? false };
+  return { sources, clients: clients as WebClientId[], questions, claude_app: (record.claude_app as boolean | undefined) ?? true };
 }
 
 /** Runs the canary's checks on one machine. Never throws for a product problem: every failure is a check. */
@@ -198,7 +198,7 @@ export async function runCanary(machine: Machine, options: CanaryOptions): Promi
     }
   }
   if (accounts.clients.length > 0) {
-    const web = await runWebClients(machine, { clients: accounts.clients, questions: accounts.questions, claudeApp: accounts.claude_app ?? false, os: options.os, screensDir: options.screensDir, ...(options.bridgeAgent ? { bridgeAgent: options.bridgeAgent } : {}) });
+    const web = await runWebClients(machine, { clients: accounts.clients, questions: accounts.questions, claudeApp: accounts.claude_app ?? true, os: options.os, screensDir: options.screensDir, ...(options.bridgeAgent ? { bridgeAgent: options.bridgeAgent } : {}) });
     checks.push(...web.checks);
     screens.push(...web.screens);
   }

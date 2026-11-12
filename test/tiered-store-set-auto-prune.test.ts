@@ -80,8 +80,12 @@ test('interrupted sweep keeps original chunk counts and resumes on worker startu
     expect(sweepAutomaticSupersededCopies(ctx.f.set, { limit: 1, embeddingLedger: ctx.embeddingLedger })).toMatchObject({ failed: 1, complete: false });
   } finally { failure.mockRestore(); }
   expect(ctx.f.stores.secure_local!.copyContentState(identityOf('a'))?.chunks).toBe(0);
-  ctx.reopen(); // constructor maintenance resumes the pending receipt
+  ctx.reopen();
+  // Maintenance no longer takes sweep slices (they run only on the ticker, which waits for owner questions).
   await ctx.f.set.repairLowerContent();
+  expect(ctx.f.ledger.copies(identityOf('a')).some(copy => copy.state === 'superseded')).toBe(true);
+  // The ticker's next slice resumes the pending receipt.
+  ctx.f.set.sweepSupersededSlice({ embeddingLedger: ctx.embeddingLedger });
   await flushTierMoveNotes(ctx.f.ledger);
   expect(ctx.f.ledger.copies(identityOf('a')).some(copy => copy.state === 'superseded')).toBe(false);
   const entries = (await readEmbeddingLedger(ctx.embeddingLedger.path)).entries.filter(entry => entry.entry_id?.startsWith('automatic-superseded-prune:'));

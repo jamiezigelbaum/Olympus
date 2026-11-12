@@ -1552,7 +1552,7 @@ function printHelp(): void {
   console.log('  olympus --tools-json');
 }
 
-const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
+export const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   setup: 'olympus setup --preset <preset> --yes',
   'sovereignty init': 'olympus sovereignty init --preset <preset> [--path <path>]',
   'worker install': 'olympus worker install [--platform darwin|linux] [--dry-run]',
