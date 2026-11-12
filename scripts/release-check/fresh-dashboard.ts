@@ -266,7 +266,7 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
         if (!view) throw new Error(`source cards unreadable: HTTP ${status}`);
         const c = sourceCard(view, s.id);
         if (connected(c)) return 'connected';
-        return await panel<boolean>(`(() => {const row=[...document.querySelectorAll('.source')].find(e=>e.querySelector('.source-name')?.textContent?.trim()===${JSON.stringify(s.label)});return !!row && [...row.querySelectorAll('button')].some(e=>/^Connect$/.test(e.textContent.trim()));})()`, value => typeof value === 'boolean') ? 'web' : 'unavailable';
+        return await panel<boolean>(`(() => {const row=[...document.querySelectorAll('.source')].find(e=>e.querySelector('.source-name')?.textContent?.trim()===${JSON.stringify(s.label)});if(!row)return null;return [...row.querySelectorAll('button')].some(e=>/^Connect$/.test(e.textContent.trim()));})()`, value => typeof value === 'boolean') ? 'web' : 'unavailable';
       },
       connect: async s => {
         // Say which precondition failed, from the dashboard's own JSON: provider names and states only.
