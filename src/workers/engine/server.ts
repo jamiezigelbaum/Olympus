@@ -6162,7 +6162,10 @@ export async function main(): Promise<void> {
   // The combined engine uses its local count; the split background uses the relayed mark.
   const stopSupersededSweep = startSupersededSweepTicker({
     active: () => !engineFront && !ownerQuestions.busy && !remoteOwnerBusy(OWNER_QUESTION_RESOURCE),
-    reclaimStore: (_store, work) => sourceScheduler ? sourceScheduler.withIdleTasks(work) : work(),
+    // Ingest first: a conversion starts only in a quiet window and stops when a task comes due.
+    reclaimStore: (store, work) => sourceScheduler
+      ? sourceScheduler.withIdleTasks(work, { quietForMs: store.reclaimQuietWindowMs(), preempt: () => store.preemptReclaim() })
+      : work(),
   });
 
   // The privacy-safe sniffer's bounded background pass over pending items.

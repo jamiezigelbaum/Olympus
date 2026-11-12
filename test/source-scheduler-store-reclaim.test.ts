@@ -60,3 +60,29 @@ test('a failed reclaim releases waiting scheduled work without changing its cade
   expect(scheduler.status().sources[0]!.tasks[0]).toMatchObject({ consecutive_failures: 0, interval_seconds: 60 });
   scheduler.stop();
 });
+
+test('ingest comes first: a conversion starts only in a quiet window, and a task that comes due preempts it', async () => {
+  const clock = createTestClock();
+  let ran = 0;
+  const scheduler = new SourceScheduler({ enabled: true, tickMs: 60_000, errorBackoffMs: 5_000, maxTransientRetries: 1,
+    now: clock.date, sources: [{ sourceId: 'source', corpusId: 'store', cadence: 'continuous', intervalMs: 60_000, freshnessThresholdHours: 1,
+      tasks: [{ id: 'ingest', kind: 'sync', writer: true, async run() { ran++; return { status: 'idle' }; } }] }] });
+  try {
+    // A continuous task is due now: no window long enough for a conversion.
+    expect(await scheduler.withIdleTasks(async () => { throw new Error('must not start'); }, { quietForMs: 30_000 })).toBeUndefined();
+    await scheduler.runDueTasks();
+    expect(ran).toBe(1);
+    // Next run is a minute away: a 30 s conversion fits, a 2 min one does not.
+    expect(await scheduler.withIdleTasks(async () => { throw new Error('must not start'); }, { quietForMs: 120_000 })).toBeUndefined();
+    let preempted = 0, finish!: () => void;
+    const conversion = new Promise<void>(resolve => { finish = resolve; });
+    const reclaim = scheduler.withIdleTasks(() => conversion, { quietForMs: 30_000, preempt: () => { preempted++; finish(); } });
+    await clock.advance(60_000);
+    const due = scheduler.runDueTasks();
+    await flushMicrotasks();
+    expect(preempted).toBe(1);
+    await reclaim; await due;
+    expect(ran).toBe(2);
+    expect(scheduler.status().sources[0]!.tasks[0]).toMatchObject({ consecutive_failures: 0 });
+  } finally { scheduler.stop(); }
+});

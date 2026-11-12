@@ -3414,6 +3414,8 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
 
 /** Pages per statement; the worker also stops at the existing sweep slice budget. */
 const RECLAIM_MAX_PAGES_PER_STEP = 128;
+/** Effective conversion throughput, about 3x the file in I/O at ~45 MB/s; replace with a measurement. */
+const RECLAIM_CONVERSION_BYTES_PER_MS = 15_000;
 
 export class LocalConnectorStore {
   readonly dbPath: string;
@@ -3742,6 +3744,23 @@ export class LocalConnectorStore {
   /** A conversion child holds this store's write lock; other writers defer instead of blocking. */
   get reclaiming(): boolean { return this.reclaimProcess !== undefined; }
 
+  private reclaimPreempt: (() => void) | undefined;
+
+  /** Stops a running reclaim child at once (ingest or an Ask comes first). A no-op when none runs. */
+  preemptReclaim(): void { this.reclaimPreempt?.(); }
+
+  /**
+   * How long the one-time conversion is expected to run, so it starts only in
+   * a quiet window; 0 once the store reclaims incrementally (drains are short).
+   * Unmeasured: assumes about 3x the file in I/O at RECLAIM_CONVERSION_BYTES_PER_MS.
+   */
+  reclaimQuietWindowMs(): number {
+    try {
+      if ((this.db.query('PRAGMA auto_vacuum').get() as { auto_vacuum: number }).auto_vacuum !== 0) return 0;
+      return Math.ceil(statSync(this.dbPath).size / RECLAIM_CONVERSION_BYTES_PER_MS);
+    } catch { return 0; }
+  }
+
   /** Cheap header introspection for the ticker's eligibility check. */
   reclaimablePages(): { pages: number; free: number; pageBytes: number; bytes: number } | undefined {
     if (this.readOnly || this.dbPath === ':memory:' || this.closedForPoolReads || this.fileReplacedOrRemoved()) return undefined;
@@ -3794,8 +3813,10 @@ export class LocalConnectorStore {
         env: { ...process.env, SQLITE_TMPDIR: dirname(this.dbPath), TMPDIR: dirname(this.dbPath) } });
     this.reclaimProcess = child;
     let preempted = false;
+    const preempt = () => { if (!preempted) { preempted = true; child.kill('SIGKILL'); } };
+    this.reclaimPreempt = preempt;
     const interrupt = setInterval(() => {
-      try { if (storeReadHasPriority() && !preempted) { preempted = true; child.kill('SIGKILL'); } }
+      try { if (storeReadHasPriority()) preempt(); }
       catch { child.kill('SIGKILL'); } // fail closed if admission cannot be checked
     }, CONTROL_PATH_SLICE_MS);
     try {
@@ -3823,6 +3844,7 @@ export class LocalConnectorStore {
       clearInterval(interrupt);
       child.stdin.end();
       this.reclaimProcess = undefined;
+      this.reclaimPreempt = undefined;
       if (converting && preempted) this.reclaimKilledAttempts++;
       if (!this.closedForPoolReads) {
         if (this.visibilityPending) this.scheduleVisibilityPublish(0);

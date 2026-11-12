@@ -42240,7 +42240,7 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
   } finally {
     closeSqliteStore(db);
   }
-};`, RECLAIM_MAX_PAGES_PER_STEP = 128, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, VECTOR_SCAN_RESERVE_MIN_MS = 1000, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+};`, RECLAIM_MAX_PAGES_PER_STEP = 128, RECLAIM_CONVERSION_BYTES_PER_MS = 15000, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, VECTOR_SCAN_RESERVE_MIN_MS = 1000, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_vector_digest();
   init_main_thread_sql_trace();
@@ -42618,6 +42618,19 @@ var init_local_index = __esm(() => {
     get reclaiming() {
       return this.reclaimProcess !== undefined;
     }
+    reclaimPreempt;
+    preemptReclaim() {
+      this.reclaimPreempt?.();
+    }
+    reclaimQuietWindowMs() {
+      try {
+        if (this.db.query("PRAGMA auto_vacuum").get().auto_vacuum !== 0)
+          return 0;
+        return Math.ceil(statSync17(this.dbPath).size / RECLAIM_CONVERSION_BYTES_PER_MS);
+      } catch {
+        return 0;
+      }
+    }
     reclaimablePages() {
       if (this.readOnly || this.dbPath === ":memory:" || this.closedForPoolReads || this.fileReplacedOrRemoved())
         return;
@@ -42667,12 +42680,17 @@ var init_local_index = __esm(() => {
       });
       this.reclaimProcess = child;
       let preempted = false;
+      const preempt = () => {
+        if (!preempted) {
+          preempted = true;
+          child.kill("SIGKILL");
+        }
+      };
+      this.reclaimPreempt = preempt;
       const interrupt = setInterval(() => {
         try {
-          if (storeReadHasPriority() && !preempted) {
-            preempted = true;
-            child.kill("SIGKILL");
-          }
+          if (storeReadHasPriority())
+            preempt();
         } catch {
           child.kill("SIGKILL");
         }
@@ -42707,6 +42725,7 @@ var init_local_index = __esm(() => {
         clearInterval(interrupt);
         child.stdin.end();
         this.reclaimProcess = undefined;
+        this.reclaimPreempt = undefined;
         if (converting && preempted)
           this.reclaimKilledAttempts++;
         if (!this.closedForPoolReads) {
@@ -199109,13 +199128,15 @@ class SourceScheduler {
     return false;
   }
   storeReclaims = new Set;
-  async withIdleTasks(work) {
+  async withIdleTasks(work, options = {}) {
     if (this.anyTaskRunning || this.storeReclaims.size > 0)
       return;
+    if ((options.quietForMs ?? 0) > 0 && this.continuousTaskDueBy(this.now().getTime() + options.quietForMs))
+      return;
     let release2;
-    const hold = new Promise((resolve31) => {
+    const hold = { done: new Promise((resolve31) => {
       release2 = resolve31;
-    });
+    }), ...options.preempt ? { preempt: options.preempt } : {} };
     this.storeReclaims.add(hold);
     try {
       return await work();
@@ -199123,6 +199144,11 @@ class SourceScheduler {
       this.storeReclaims.delete(hold);
       release2();
     }
+  }
+  continuousTaskDueBy(at) {
+    if (!this.enabled)
+      return false;
+    return this.states.some((state) => taskCadence(state.source, state.task) === "continuous" && state.nextRunAt <= at);
   }
   status(now = this.now()) {
     return {
@@ -199260,8 +199286,10 @@ class SourceScheduler {
         break;
       state.waitReason = "store_reclaim";
       console.info(`[olympus:source-scheduler] task_wait source_id=${state.source.sourceId} task_id=${state.task.id} reason=store_reclaim`);
+      for (const hold of holds2)
+        hold.preempt?.();
       try {
-        await Promise.all(holds2);
+        await Promise.all(holds2.map((hold) => hold.done));
       } finally {
         delete state.waitReason;
       }
@@ -249409,7 +249437,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   captureTick.unref?.();
   const stopSupersededSweep = startSupersededSweepTicker({
     active: () => !engineFront && !ownerQuestions.busy && !remoteOwnerBusy(OWNER_QUESTION_RESOURCE),
-    reclaimStore: (_store, work) => sourceScheduler ? sourceScheduler.withIdleTasks(work) : work()
+    reclaimStore: (store, work) => sourceScheduler ? sourceScheduler.withIdleTasks(work, { quietForMs: store.reclaimQuietWindowMs(), preempt: () => store.preemptReclaim() }) : work()
   });
   const snifferEnv = tierSnifferServiceEnv(process.env);
   const rawSnifferModel = !snifferEnv.enabled || snifferRuntime.source === "off" ? undefined : snifferRuntime.source === "built_in" ? snifferRuntime.builtIn.model : createTierSnifferModel({ lane: snifferRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[snifferRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => {
