@@ -65,28 +65,25 @@ function ledgers(root: string): string[] {
 }
 
 /**
- * The stores a ledger tiers: the store it sits beside, and that store set's
- * Personal store (`internal`, by the name each layout gives it). When neither
- * sibling name is found, every store in the same folder is a candidate.
+ * The stores a ledger may tier: every connector store in the ledger's folder
+ * (`.sqlite` or `.db`; layouts name a set's tiers differently, and messaging
+ * stores are `.db`). Items are matched by their full identity, provider
+ * included, so a store of another source in the same folder never matches.
  */
 function storesFor(ledgerPath: string): string[] {
-  const base = ledgerPath.slice(0, -TIER_LEDGER_FILE_SUFFIX.length);
-  const dir = dirname(base);
-  const name = basename(base);
-  const named = [
-    `${name}.sqlite`,
-    name.includes('secure_local') ? `${name.replace('secure_local', 'internal')}.sqlite` : '',
-    name.endsWith('-connector-store') ? `${name.replace(/-connector-store$/, '-internal-connector-store')}.sqlite` : '',
-  ].filter(Boolean).map((file) => join(dir, file)).filter(existsSync);
-  if (named.length >= 2) return named;
-  const all = readdirSync(dir).filter((file) => file.endsWith('.sqlite') && !/\.(tier-ledger|tier-sniffer|secret-locations)\.sqlite$/.test(file)).map((file) => join(dir, file));
-  return [...new Set([...named, ...all])];
+  const dir = dirname(ledgerPath);
+  return readdirSync(dir)
+    .filter((file) => /\.(sqlite|db)$/.test(file) && !/\.(tier-ledger|tier-sniffer|secret-locations)\.sqlite$/.test(file))
+    .map((file) => join(dir, file))
+    .sort();
 }
 
 interface Store {
   db: Database;
   /** item key -> { pk, chars } */
   items: Map<string, { pk: number; chars: number }>;
+  /** provider + item id only: shows an identity mismatch (scope or conversation) in the diagnostics. */
+  byId: Set<string>;
   row: ReturnType<Database['query']>;
   chunks: ReturnType<Database['query']>;
 }
@@ -94,6 +91,7 @@ interface Store {
 const keyOf = (provider: string, scope: string, conversation: string, id: string) => JSON.stringify([provider, scope, conversation, id]);
 
 const openStores = new Map<string, Store | null>();
+const storeErrors = new Map<string, string>();
 function store(path: string): Store | null {
   if (openStores.has(path)) return openStores.get(path)!;
   let opened: Store | null = null;
@@ -102,24 +100,28 @@ function store(path: string): Store | null {
     if (hasTable(db, 'items') && hasTable(db, 'chunks')) {
       const conversation = columns(db, 'items').has('normalized_conversation') ? 'normalized_conversation' : "''";
       const items = new Map<string, { pk: number; chars: number }>();
+      const byId = new Set<string>();
       const rows = db.query(`SELECT i.item_pk AS pk, i.provider, i.account_scope, ${conversation === "''" ? "''" : `i.${conversation}`} AS conversation, i.provider_item_id,
           COALESCE((SELECT SUM(LENGTH(c.bounded_text)) + COUNT(*) - 1 FROM chunks c WHERE c.item_pk = i.item_pk), 0) AS chars
         FROM items i WHERE i.tombstoned = 0`).all() as Array<{ pk: number; provider: string; account_scope: string; conversation: string | null; provider_item_id: string; chars: number }>;
       for (const row of rows) {
         const key = keyOf(row.provider, row.account_scope, row.conversation ?? '', row.provider_item_id);
+        byId.add(JSON.stringify([row.provider, row.provider_item_id]));
         const prior = items.get(key);
         if (!prior || row.chars > prior.chars) items.set(key, { pk: row.pk, chars: row.chars });
       }
       opened = {
         db,
         items,
+        byId,
         row: db.query('SELECT * FROM items WHERE item_pk = ?'),
         chunks: db.query('SELECT bounded_text FROM chunks WHERE item_pk = ? ORDER BY chunk_index'),
       };
     } else {
       db.close();
     }
-  } catch {
+  } catch (error) {
+    storeErrors.set(path, error instanceof Error ? error.message.slice(0, 120) : 'unreadable');
     opened = null;
   }
   openStores.set(path, opened);
@@ -140,7 +142,18 @@ interface FamilyCount {
 
 const percentile = (sorted: number[], p: number) => (sorted.length === 0 ? null : sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))]!);
 
-function count(root: string): { families: Record<string, FamilyCount>; long: LongItem[]; ledgers: number; stores: number } {
+interface LedgerDiagnostic {
+  ledger: string;
+  stores: Record<string, number | string>;
+  personal: number;
+  noItem: number;
+  idMatchOnly: number;
+  zeroText: number;
+}
+
+function count(root: string): { families: Record<string, FamilyCount>; long: LongItem[]; ledgers: number; stores: number; diagnostics: LedgerDiagnostic[] } {
+  const diagnostics: LedgerDiagnostic[] = [];
+  const rel = (path: string) => path.slice(root.replace(/\/+$/, '').length + 1);
   const families: Record<string, FamilyCount> = {};
   const long: LongItem[] = [];
   const found = ledgers(root);
@@ -150,12 +163,23 @@ function count(root: string): { families: Record<string, FamilyCount>; long: Lon
     try {
       if (!hasTable(ledger, 'tier_items')) continue;
       const hasConversation = columns(ledger, 'tier_items').has('conversation_key');
-      const candidates = storesFor(ledgerPath).map((path) => ({ path, opened: store(path) })).filter((entry) => entry.opened !== null);
+      const all = storesFor(ledgerPath).map((path) => ({ path, opened: store(path) }));
+      const candidates = all.filter((entry) => entry.opened !== null);
+      const diagnostic: LedgerDiagnostic = {
+        ledger: rel(ledgerPath),
+        stores: Object.fromEntries(all.map((entry) => [basename(entry.path), entry.opened ? entry.opened.items.size : (storeErrors.get(entry.path) ?? 'no items/chunks tables')])),
+        personal: 0,
+        noItem: 0,
+        idMatchOnly: 0,
+        zeroText: 0,
+      };
+      diagnostics.push(diagnostic);
       const rows = ledger.query(`SELECT provider, account_scope, ${hasConversation ? 'conversation_key' : "''"} AS conversation_key, provider_item_id, content_read
         FROM tier_items WHERE content_tier = 'private' AND state != 'moving'`).all() as Array<{ provider: string; account_scope: string; conversation_key: string; provider_item_id: string; content_read: number }>;
       for (const row of rows) {
         const family = (families[row.provider] ??= { personal: 0, personalNotRead: 0, longerThanJudgeReads: 0, charsBeyond: 0, noStoredText: 0, lengths: [], longLengths: [] });
         family.personal += 1;
+        diagnostic.personal += 1;
         if (row.content_read !== 1) family.personalNotRead += 1;
         const key = keyOf(row.provider, row.account_scope, row.conversation_key, row.provider_item_id);
         let best: { store: Store; path: string; pk: number; chars: number } | undefined;
@@ -163,6 +187,11 @@ function count(root: string): { families: Record<string, FamilyCount>; long: Lon
           const hit = candidate.opened!.items.get(key);
           if (hit && (!best || hit.chars > best.chars)) best = { store: candidate.opened!, path: candidate.path, pk: hit.pk, chars: hit.chars };
         }
+        if (!best) {
+          diagnostic.noItem += 1;
+          const id = JSON.stringify([row.provider, row.provider_item_id]);
+          if (candidates.some((candidate) => candidate.opened!.byId.has(id))) diagnostic.idMatchOnly += 1;
+        } else if (best.chars === 0) diagnostic.zeroText += 1;
         if (!best || best.chars === 0) { family.noStoredText += 1; continue; }
         usedStores.add(best.path);
         family.lengths.push(best.chars);
@@ -177,7 +206,7 @@ function count(root: string): { families: Record<string, FamilyCount>; long: Lon
       ledger.close();
     }
   }
-  return { families, long, ledgers: found.length, stores: usedStores.size };
+  return { families, long, ledgers: found.length, stores: usedStores.size, diagnostics };
 }
 
 function report(families: Record<string, FamilyCount>) {
@@ -335,6 +364,8 @@ async function main() {
     ledgers: counted.ledgers,
     storesWithPersonalText: counted.stores,
     byFamily: report(counted.families),
+    // Layout file names and counts only, so a lookup that misses can be fixed.
+    ledgerDiagnostics: counted.diagnostics,
   };
   const sample = Number(flag('--judge-sample') ?? 0);
   if (sample > 0) out['windowJudge'] = await judgeWindows(counted.long, sample);
