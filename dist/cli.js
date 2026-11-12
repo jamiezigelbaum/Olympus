@@ -77654,9 +77654,10 @@ function createEvidenceWindowPlacer(query, timers = systemTimers) {
         const text2 = source.texts[chunk];
         const size = Math.min(WINDOW_CHARS, chunks[chunk].length);
         const span = Math.max(0, text2.length - size);
-        const count = Math.min(Math.ceil(span / WINDOW_STRIDE) + 1, allowance - windows.length);
+        const count = Math.min(Math.ceil(span / WINDOW_STRIDE) + 1, allowance - windows.length - 1);
         if (count <= 0)
           break;
+        windows.push({ chunk, start: KEEP_ORIGINAL, text: cut(chunks[chunk], chunk) });
         for (let n = 0;n < count; n++) {
           const start = count === 1 ? 0 : Math.round(n * span / (count - 1));
           windows.push({ chunk, start, text: cut(sourceIndexChunkWindow(text2, start, size), chunk) });
@@ -77694,7 +77695,8 @@ function createEvidenceWindowPlacer(query, timers = systemTimers) {
         });
         return chunks.map((chunk, index) => {
           const picked = best.get(index);
-          return picked === undefined ? chunk : cut(sourceIndexChunkWindow(source.texts[index], windows[picked].start, chunk.length), index);
+          const start = picked === undefined ? KEEP_ORIGINAL : windows[picked].start;
+          return start === KEEP_ORIGINAL ? chunk : cut(sourceIndexChunkWindow(source.texts[index], start, chunk.length), index);
         });
       } catch {
         if (timers.now() - startedAt >= WINDOW_PLACEMENT_BUDGET_MS) {
@@ -77721,7 +77723,7 @@ function utf8Prefix(text2, maxBytes) {
   }
   return text2.slice(0, end);
 }
-var WINDOW_PLACEMENT_BUDGET_MS = 1500, WINDOW_CHARS = 600, WINDOW_STRIDE = 300, MAX_WINDOWS_PER_SEAT = 8, MAX_WINDOWS_PER_QUESTION = 24, systemTimers;
+var WINDOW_PLACEMENT_BUDGET_MS = 1500, WINDOW_CHARS = 600, WINDOW_STRIDE = 300, MAX_WINDOWS_PER_SEAT = 8, MAX_WINDOWS_PER_QUESTION = 24, KEEP_ORIGINAL = -1, systemTimers;
 var init_evidence_window_placement = __esm(() => {
   init_chunk_selection();
   systemTimers = {

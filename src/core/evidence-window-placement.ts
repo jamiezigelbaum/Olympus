@@ -9,6 +9,7 @@ const WINDOW_STRIDE = 300;
 // first seat cannot take the question's whole allowance from the next two.
 const MAX_WINDOWS_PER_SEAT = 8;
 const MAX_WINDOWS_PER_QUESTION = 24;
+const KEEP_ORIGINAL = -1;
 
 export type WindowScorer = (query: string, windows: readonly string[], signal: AbortSignal) => Promise<readonly number[]>;
 
@@ -70,8 +71,11 @@ export function createEvidenceWindowPlacer(query: string, timers = systemTimers)
         const size = Math.min(WINDOW_CHARS, chunks[chunk]!.length);
         const span = Math.max(0, text.length - size);
         // Round up so the last window always ends at the chunk's end.
-        const count = Math.min(Math.ceil(span / WINDOW_STRIDE) + 1, allowance - windows.length);
+        const count = Math.min(Math.ceil(span / WINDOW_STRIDE) + 1, allowance - windows.length - 1);
         if (count <= 0) break;
+        // Today's word clip is scored first and wins ties, so placement never
+        // drops evidence it did not evaluate.
+        windows.push({ chunk, start: KEEP_ORIGINAL, text: cut(chunks[chunk]!, chunk) });
         for (let n = 0; n < count; n++) {
           const start = count === 1 ? 0 : Math.round((n * span) / (count - 1));
           windows.push({ chunk, start, text: cut(sourceIndexChunkWindow(text, start, size), chunk) });
@@ -104,7 +108,8 @@ export function createEvidenceWindowPlacer(query: string, timers = systemTimers)
         });
         return chunks.map((chunk, index) => {
           const picked = best.get(index);
-          return picked === undefined ? chunk : cut(sourceIndexChunkWindow(source.texts[index]!, windows[picked]!.start, chunk.length), index);
+          const start = picked === undefined ? KEEP_ORIGINAL : windows[picked]!.start;
+          return start === KEEP_ORIGINAL ? chunk : cut(sourceIndexChunkWindow(source.texts[index]!, start, chunk.length), index);
         });
       } catch {
         if (timers.now() - startedAt >= WINDOW_PLACEMENT_BUDGET_MS) {

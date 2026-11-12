@@ -231,34 +231,31 @@ test('selected-item and recency builds never invoke the otherwise configured rer
   }
 }, 20_000);
 
-test('each seat scores at most eight 600-character windows, best chunk first and spread over its whole length, 24 per question', async () => {
+test('each seat scores at most eight windows (its word clip plus seven spread over the whole chunk), 24 per question', async () => {
   const full = 'x'.repeat(4000);
   const placer = createEvidenceWindowPlacer(QUESTION);
-  const sizes: number[] = [];
-  const scoreWindows = async (_query: string, windows: readonly string[]) => {
-    sizes.push(windows.length);
-    expect(windows.every(window => window.length === 600)).toBe(true);
-    return windows.map(() => 0);
-  };
+  const batches: string[][] = [];
+  const scoreWindows = async (_query: string, windows: readonly string[]) => { batches.push([...windows]); return windows.map(() => 0); };
   const source = { texts: [full, full, full], scoreWindows };
   for (let seat = 0; seat < 5; seat++) await placer.place(['k'.repeat(600), 'k'.repeat(600), 'k'.repeat(600)], source);
   // The leading chunk takes the seat's eight windows; the question's 24 run out at the fourth seat.
-  expect(sizes).toEqual([8, 8, 8]);
+  expect(batches.map(batch => batch.length)).toEqual([8, 8, 8]);
+  expect(batches.flat().every(window => window.length === 600)).toBe(true);
   expect(placer.audit.windowsScored).toBe(24);
-  // One long chunk: eight windows from its start to its end, evenly spaced, never closer than 300.
+  // One long chunk: the word clip, then seven windows from its start to its end, evenly spaced.
   const labelled = Array.from({ length: 4000 }, (_, index) => String.fromCharCode(0x1000 + index)).join('');
-  const positions = createEvidenceWindowPlacer(QUESTION);
-  await positions.place(['k'.repeat(600), 'whole'], { texts: [labelled, 'whole'], scoreWindows: async (_query, windows) => {
-    const starts = [0, 486, 971, 1457, 1943, 2429, 2914, 3400];
-    expect(windows).toEqual(starts.map(start => labelled.slice(start, start + 600)));
-    return windows.map(() => 0);
+  const original = labelled.slice(1000, 1600);
+  const seen: string[][] = [];
+  await createEvidenceWindowPlacer(QUESTION).place([original, 'whole'], { texts: [labelled, 'whole'], scoreWindows: async (_query, windows) => {
+    seen.push([...windows]); return windows.map(() => 0);
   } });
-  const short = createEvidenceWindowPlacer(QUESTION);
+  expect(seen).toEqual([[original, ...[0, 567, 1133, 1700, 2267, 2833, 3400].map(start => labelled.slice(start, start + 600))]]);
   const twelveHundred = labelled.slice(0, 1200);
-  await short.place(['k'.repeat(600)], { texts: [twelveHundred], scoreWindows: async (_query, windows) => {
-    expect(windows).toEqual([0, 300, 600].map(start => twelveHundred.slice(start, start + 600)));
-    return windows.map(() => 0);
+  const short: string[][] = [];
+  await createEvidenceWindowPlacer(QUESTION).place([twelveHundred.slice(300, 900)], { texts: [twelveHundred], scoreWindows: async (_query, windows) => {
+    short.push([...windows]); return windows.map(() => 0);
   } });
+  expect(short).toEqual([[twelveHundred.slice(300, 900), ...[0, 300, 600].map(start => twelveHundred.slice(start, start + 600))]]);
 });
 
 test('an answer near the end of a long chunk is reachable', async () => {
@@ -289,7 +286,8 @@ test('the deadline is shared across seats and a completed placement survives a l
 
 test('windows are scored at the share that is kept, so the winning text survives the clip', async () => {
   const answer = 'FOUNTAIN';
-  const full = ('x'.repeat(550) + answer).padEnd(4000, 'y');
+  // Windows start at 0, 574, …: the one at 574 holds the answer in its first 555 characters.
+  const full = ('x'.repeat(580) + answer).padEnd(4000, 'y');
   const placer = createEvidenceWindowPlacer(QUESTION);
   const seen: number[] = [];
   const placed = await placer.place(['k'.repeat(555)], { texts: [full], scoreWindows: async (_query, windows) => {
@@ -328,10 +326,10 @@ test('windows go to the most relevant passage first even when it comes later in 
 
 test('windows are scored and kept inside each passage\'s UTF-8 byte share', async () => {
   const answer = 'FOUNTAIN';
-  // A window starts at 1,457. Its 600 characters hold both cues; its 600 bytes
+  // A window starts at 1,133. Its 600 characters hold both cues; its 600 bytes
   // hold only the near one, so the far one must not be what wins.
   const far = 'FARCUE';
-  const full = ('x'.repeat(1457) + '漢'.repeat(60) + answer + '漢'.repeat(200) + far).padEnd(4000, 'y');
+  const full = ('x'.repeat(1133) + '漢'.repeat(60) + answer + '漢'.repeat(200) + far).padEnd(4000, 'y');
   const placer = createEvidenceWindowPlacer(QUESTION);
   const scored: string[] = [];
   const placed = await placer.place(['k'.repeat(600)], { texts: [full], scoreWindows: async (_query, windows) => {
@@ -342,4 +340,22 @@ test('windows are scored and kept inside each passage\'s UTF-8 byte share', asyn
   expect(scored.every(window => utf8ByteLength(window) <= 600)).toBe(true);
   expect(utf8ByteLength(placed[0]!)).toBeLessThanOrEqual(600);
   expect(placed[0]).toContain(answer);
+});
+
+test('the word clip is always a candidate and keeps its place on a tie, so a small share never loses it', async () => {
+  const answer = 'FOUNTAIN';
+  const full = ('x'.repeat(250) + answer).padEnd(4000, 'y');
+  const original = full.slice(200, 333);
+  const placer = createEvidenceWindowPlacer(QUESTION);
+  const scored: string[] = [];
+  const placed = await placer.place([original, 'whole'], { texts: [full, 'whole'], scoreWindows: async (_query, windows) => {
+    scored.push(...windows);
+    return windows.map(window => (window.includes(answer) ? 1 : 0));
+  } });
+  expect(scored).toContain(original);
+  expect(scored.length).toBeLessThanOrEqual(8);
+  expect(placed[0]).toBe(original);
+  const flat = await createEvidenceWindowPlacer(QUESTION).place([original, 'whole'], { texts: [full, 'whole'],
+    scoreWindows: async (_query, windows) => windows.map(() => 0) });
+  expect(flat[0]).toBe(original);
 });
