@@ -23,6 +23,7 @@ import { tierSnifferPathForLedger } from './tier-ledger-path.ts';
 import {
   registerInstalledTierClassification,
   type InstalledStoreTierClassification,
+  type AutomaticTierMoveContext,
   type InstalledTierClassificationProvider,
 } from './installed-tier-classification-registry.ts';
 
@@ -43,6 +44,8 @@ export const NO_JUDGE_TIER_SNIFFER: TierSniffer = {
 };
 
 export interface InstalledTierClassificationOptions {
+  /** Shared with the sniffer executor and inherited by sets opened in this engine. */
+  automaticMoveContext?: AutomaticTierMoveContext;
   env?: Record<string, string | undefined>;
   /** The resolved privacy-safe lane. Absent: no judge; every read item stays pending, held (NO_JUDGE_TIER_SNIFFER). */
   lane?: SnifferLaneIdentity;
@@ -61,6 +64,7 @@ export interface InstalledTierClassificationOptions {
 
 export class InstalledTierClassification implements InstalledTierClassificationProvider {
   readonly lane: SnifferLaneIdentity | undefined;
+  readonly automaticMoveContext: AutomaticTierMoveContext | undefined;
   readonly retirePublic: boolean;
   private readonly ownerContext: (() => string | undefined) | undefined;
   private readonly env: Record<string, string | undefined>;
@@ -73,6 +77,7 @@ export class InstalledTierClassification implements InstalledTierClassificationP
 
   constructor(options: InstalledTierClassificationOptions = {}) {
     this.env = options.env ?? process.env;
+    this.automaticMoveContext = options.automaticMoveContext;
     this.lane = options.lane;
     this.retirePublic = options.retirePublic === true;
     this.ownerContext = options.ownerContext;

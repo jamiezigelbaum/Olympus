@@ -241,6 +241,10 @@ const SOURCE_AGNOSTIC_SHARED_FILES = [
   'src/workers/file-extraction/extractors/command-runner.ts',
   'src/workers/file-extraction/extractors/document-formats.ts',
   'src/workers/file-extraction/extractors/rtf.ts',
+  'src/workers/file-extraction/extractors/compound-file.ts',
+  'src/workers/file-extraction/extractors/legacy-word.ts',
+  'src/workers/file-extraction/extractors/legacy-workbook.ts',
+  'src/workers/file-extraction/extractors/package-documents.ts',
   'src/workers/file-extraction/extractors/image-prepare.ts',
   'src/workers/file-extraction/extractors/image-preparers.ts',
   'src/workers/file-extraction/extractors/input-limits.ts',
@@ -361,6 +365,10 @@ const ALLOWED_SHARED_REGEX_FUNCTIONS = new Map<string, Set<string>>([
     'clampAnswer',
     'compactSourceText',
     'stripCodeFences',
+    // Reads written number shapes (digits, separators, a currency sign) to
+    // compare a draft's amounts by value with its evidence; no question semantics.
+    'amountReadings',
+    'amountsMissingFrom',
   ])],
   ['src/core/evidence-pack.ts', new Set([
     'hasTemporalIntent',
@@ -425,6 +433,10 @@ const ALLOWED_SHARED_REGEX_FUNCTIONS = new Map<string, Set<string>>([
   ['src/workers/file-extraction/extractors/bounded-text.ts', new Set([
     'normalizeExtractedText',
     'sanitizeErrorDetail',
+  ])],
+  ['src/workers/file-extraction/extractors/package-documents.ts', new Set([
+    'parseMarkup',
+    'decodeEntities',
   ])],
   ['src/workers/file-extraction/extractors/document-formats.ts', new Set([
     'parseDelimitedRows',
@@ -1002,14 +1014,21 @@ describe('architecture guard: capability, not per-source/per-question code', () 
   });
 
   test('the email source stays a source module, not a second engine (#1068)', () => {
-    // The worker entry and HTTP routes moved to src/workers/engine/ (#1403,
-    // #1425). An entry point or an engine import here would make the email
-    // source the engine again.
+    // The worker entry, routes, runtimes and dashboard backends moved to
+    // src/workers/engine/ (#1068). Only email modules belong here; an entry
+    // point or an engine import would make the email source the engine again.
     const dir = join(repoRoot, 'src', 'workers', 'email-source');
     const modules = readdirSync(dir, { recursive: true })
       .map(String)
       .filter((name) => name.endsWith('.ts'));
     expect(modules.length).toBeGreaterThan(0);
+    const allowedModules = new Set([
+      'email-connector.ts',
+      'gogcli.ts',
+      'gmail-status-scope.ts',
+      'ingest-filter.ts',
+    ]);
+    expect(modules.filter((name) => !allowedModules.has(name))).toEqual([]);
     expect(modules.filter((name) => name === 'server.ts' || name === 'index.ts')).toEqual([]);
     const engineImport = /\bfrom\s+['"](?:\.\.\/)+(?:workers\/)?engine(?:\/|['"])|\bimport\(\s*['"](?:\.\.\/)+(?:workers\/)?engine(?:\/|['"])/;
     expect(engineImport.test("import { x } from '../engine/http/routes.ts';")).toBe(true);

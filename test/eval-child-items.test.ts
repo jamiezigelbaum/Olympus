@@ -24,7 +24,7 @@ import { defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
 import { createParentLabelResolver } from '../src/workers/connector-store/parent-label.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
-import { createSourceAnswerLanes } from '../src/workers/email-source/source-answer-lanes.ts';
+import { createSourceAnswerLanes } from '../src/workers/engine/runtime/source-answer-lanes.ts';
 import { releaseAnalystAnswer } from '../src/workers/source-index/analyst-answer.ts';
 import { runEval } from '../eval/run.ts';
 import type { EvalDataset } from '../eval/types.ts';

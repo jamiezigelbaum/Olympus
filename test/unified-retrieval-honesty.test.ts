@@ -38,6 +38,7 @@ import {
   type SourceIndexRouterAdapterMap,
 } from '../src/core/source-index/router.ts';
 import { mergeRetrievalDegradations } from '../src/core/source-index/retrieval.ts';
+import { laneTimeoutGap } from '../src/core/source-index/partial-search.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import {
   LocalConnectorStore,
@@ -281,6 +282,31 @@ describe('unified retrieval reports every dropped lane', () => {
     expect(result.audit.skipped_corpora).toEqual(expect.arrayContaining([
       expect.objectContaining({ corpus_id: CORPUS, reason: 'lane_timeout' }),
     ]));
+  });
+
+  // #1305: a grounded answer from Private or internal sources folds its other
+  // coverage gaps into a count, and the source that ran out of time went with
+  // them, so a cut search read as a full one. It is named on its own.
+  test('a grounded answer names the source that ran out of time', async () => {
+    const slow = 'internal.slow.docs';
+    const lanes = () => ({
+      registry: buildSourceIndexCorpusRegistry([
+        defineSourceIndexCorpus({ corpusId: CORPUS, family: 'file', trustDomain: 'internal' }),
+        defineSourceIndexCorpus({ corpusId: slow, family: 'file', trustDomain: 'internal' }),
+      ]),
+      adapters: {
+        [CORPUS]: keywordAdapter(['doc-1']),
+        [slow]: stallingAdapter(80),
+      } as SourceIndexRouterAdapterMap,
+      contentProviders: contentProviders([CORPUS, slow]),
+    });
+    const handler = createAnalystSourceIndexAnswerHandler({ analyst: citingFirstCandidate(), lanes });
+
+    const result = await withLaneTimeout(10, () => handler.answer({ question: 'what did the retro decide?' }));
+
+    expect(result.evidence.length).toBeGreaterThan(0);
+    expect(result.answer).toContain(laneTimeoutGap(slow));
+    expect(result.answer).not.toContain(laneTimeoutGap(CORPUS));
   });
 
   test('a self-heal rebuild keeps the default hybrid retrieval mode', async () => {

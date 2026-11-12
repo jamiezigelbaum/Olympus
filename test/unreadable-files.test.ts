@@ -37,7 +37,7 @@ import {
   UNREADABLE_FILES_PAGE_TOOL_NAME,
 } from '../src/workers/chatgpt/dashboard-contract.ts';
 import { CHATGPT_TOOLS } from '../src/workers/chatgpt/mcp-surface.ts';
-import { computerUnreadableEntries, createDashboardPanelTools } from '../src/workers/email-source/dashboard-panel-tools.ts';
+import { computerUnreadableEntries, createDashboardPanelTools } from '../src/workers/engine/dashboard/dashboard-panel-tools.ts';
 import { LocalFileExtractionJobStore, type ExtractionUnreadableItem } from '../src/workers/file-extraction/job-store.ts';
 import { createExtractionReadinessLedger } from '../src/workers/file-extraction/readiness-ledger.ts';
 import type { ExtractionItemRef } from '../src/workers/file-extraction/types.ts';

@@ -54,10 +54,13 @@ import {
   SNIFFER_NAMES_MAX_CHARS,
   snifferFolderKeyNames,
   tierSnifferInputHash,
+  contentDigestReason,
   maxTier,
   hasCredentialUrl,
   namesWithParentContext,
   namesDecidedByOwner,
+  namesInputCovered,
+  NAMES_INPUT_REASON_PREFIX,
   RETIRED_SOURCE_PRIOR_REASON,
   restsOnRetiredSourcePrior,
   TIER_CLASSIFIER_VERSION,
@@ -305,7 +308,8 @@ export function rejudgeStoredContent(
     /**
      * The owner asked to check this item's chat or source again (#638): its
      * names are judged again by the model whatever judged them before, and
-     * may come out lower. The owner's rules decide first.
+     * may come out lower when the stored names cover the recorded input.
+     * The owner's rules decide first.
      */
     recheck?: { rules: readonly OwnerTierRule[] };
   },
@@ -391,6 +395,11 @@ export function rejudgeStoredContent(
     reasons: [
       ...metadata.reasons,
       ...content.reasons,
+      // Stored names omit some connector signals and may use the citation
+      // locator as the path. Keep the listing's names receipt for these same
+      // bytes: a later unchanged listing must still recognize its verdict.
+      ...(record.reasons.includes(contentDigestReason(text))
+        ? record.reasons.filter(reason => reason.startsWith('content:names:') && !content.reasons.includes(reason)) : []),
     ],
     state: metadata.metadataPending || content.contentPending ? 'pending' : 'current',
     contentRead: true,
@@ -492,7 +501,7 @@ function rejudgeMetadata(
     ...(names.sender ? { sender: names.sender } : {}),
     folderKeys: names.folderKeys,
   };
-  const fresh = classifyItemTiers({ signals, namesOnly: true });
+  const fresh = classifyItemTiers({ signals, namesOnly: true, ...(parentContext ? { parentContext } : {}) });
   // An owner rule that matches the names now decides them, not this re-check:
   // the owner-rule sweep (tier-rules-sweep.ts) applies it.
   if (recheck && recheck.rules.length > 0) {
@@ -501,19 +510,20 @@ function rejudgeMetadata(
   }
   // The store retains scope folder keys but not labels (nor all provider
   // facts). An old model verdict may have relied on those missing signals.
-  // Re-judging may raise it, but only a connector relist with complete signals
-  // can lower the names and therefore their content floor.
+  // Re-judging may raise it; lowering needs proof that no names were lost.
   const providerReasons = previous.reasons.filter(reason => /^metadata:(floor|prior):/.test(reason) && !reason.startsWith(RETIRED_SOURCE_PRIOR_REASON));
   // A verdict an earlier re-judge made from these same stored names lacked
   // nothing this one has, so a better prompt may lower it (1.2.1 canary: names
   // a re-judge held Private by mistake otherwise stayed Private for good).
   const fromStoredNames = record.reasons.includes(STORED_NAMES_REASON);
-  // The owner's re-check may lower names a model held higher (#638: a chat held
-  // Private by verdicts of builds that read its numeric id as an identity).
-  // A provider floor or prior recorded on the names is a fact the store does
-  // not keep the tier of, so names resting on one are never lowered here.
-  const ownerRecheck = recheck !== undefined && providerReasons.length === 0;
-  const baseline = retiredPrior || fromStoredNames || ownerRecheck ? fresh.metadataTier : maxTier(fresh.metadataTier, record.metadataTier);
+  // Owner re-checks use the automatic pass's floor unless a receipt proves
+  // these names include the original input. Old rows without receipts fail
+  // safe. Provider facts are not stored, so their floors still apply.
+  // A retired whole-source prior never floors names, owner re-check or not.
+  const mayLower = retiredPrior || (recheck !== undefined
+    ? providerReasons.length === 0 && namesInputCovered(record.reasons, signals, parentContext)
+    : fromStoredNames);
+  const baseline = mayLower ? fresh.metadataTier : maxTier(fresh.metadataTier, record.metadataTier);
   if (baseline === 'secrets') return { ...previous, metadataTier: baseline, metadataPending: false, reasons: fresh.reasons };
   const material = [names.title, names.path, ...snifferFolderKeyNames(names.folderKeys), names.sender].filter(Boolean).join(' | ').slice(0, SNIFFER_NAMES_MAX_CHARS);
   const verdict = sniffer.judge({ pass: 'metadata', material: namesWithParentContext(material, parentContext), flags: ['names:rejudge'], subject,
@@ -527,7 +537,12 @@ function rejudgeMetadata(
     metadataFlagged: pending || fresh.metadataFlagged,
     metadataPending: pending,
     reasons: [
-      ...fresh.reasons.filter(reason => reason.startsWith('metadata:') && !reason.startsWith('metadata:sniffer:') && !reason.startsWith('metadata:possibly_private:')),
+      ...fresh.reasons.filter(reason => reason.startsWith('metadata:') && !reason.startsWith('metadata:sniffer:') && !reason.startsWith('metadata:possibly_private:')
+        && (mayLower || !reason.startsWith(NAMES_INPUT_REASON_PREFIX))),
+      // Keeping an inherited tier must also keep its original (possibly
+      // absent) receipt; a second re-check must not mistake partial names
+      // for the input that established that tier.
+      ...(!mayLower ? record.reasons.filter(reason => reason.startsWith(NAMES_INPUT_REASON_PREFIX)) : []),
       ...providerReasons,
       `metadata:sniffer:${sniffer.id}:${pending ? 'undecided' : verdict.code}`,
       // Mark only a raise this stored-names verdict made. A tier held at the

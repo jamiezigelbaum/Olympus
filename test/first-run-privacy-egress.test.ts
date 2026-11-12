@@ -26,8 +26,8 @@ import {
 } from '../src/workers/engine/runtime/private-analysts.ts';
 import { WorkerBootSecretResolver } from '../src/workers/credential-degradation.ts';
 import { loadConfig } from '../src/core/config.ts';
-import { createSourceAnswerLanes } from '../src/workers/email-source/source-answer-lanes.ts';
-import { createLocalAnswerPath, createLocalPrivateAnswers } from '../src/workers/email-source/local-private-answers.ts';
+import { createSourceAnswerLanes } from '../src/workers/engine/runtime/source-answer-lanes.ts';
+import { createLocalAnswerPath, createLocalPrivateAnswers } from '../src/workers/engine/runtime/local-private-answers.ts';
 import { defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
 import { createReleaseTierCheck, createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import { clearInstalledTierClassification, configureInstalledTierClassification } from '../src/workers/classification/installed-tier-classification.ts';

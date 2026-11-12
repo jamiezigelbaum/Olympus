@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from 'bun:test';
 import { join } from 'node:path';
 import { openTierFixture, tempDir, fixtureConnector, FIXTURE_PLACEMENT, CORPORA, PROVIDER, ACCOUNT, identityOf } from './helpers/tier-fixtures.ts';
-import { createFileExtractionRuntime } from '../src/workers/email-source/file-extraction-runtime.ts';
+import { createFileExtractionRuntime } from '../src/workers/engine/runtime/file-extraction-runtime.ts';
 import { runTierSet } from '../src/workers/classification/tier-cli.ts';
 import { tieredExtractionView } from '../src/workers/connector-store/tiered-extraction.ts';
 

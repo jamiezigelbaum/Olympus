@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { OlympusConfig } from '../src/core/config.ts';
 import { createWhatsAppSchedulerSource } from '../src/workers/source-scheduler.ts';
-import { createFileExtractionRuntime } from '../src/workers/email-source/file-extraction-runtime.ts';
+import { createFileExtractionRuntime } from '../src/workers/engine/runtime/file-extraction-runtime.ts';
 import { createWhatsAppLiveSourceConnector } from '../src/workers/whatsapp/live-connector.ts';
 import {
   WHATSAPP_EXTRACTION_SCOPE_KEY,

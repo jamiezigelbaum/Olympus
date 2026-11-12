@@ -399,4 +399,30 @@ describe('evidence pack query-planner trace counters', () => {
     expect(serialized).not.toContain(EXPANSION);
     expect(serialized).not.toContain('content for');
   });
+
+  test('a spent search budget answers from the literal run without starting an expansion', async () => {
+    const calls: string[] = [];
+    const slowLiteral = adapterByQuery({ [QUESTION]: ['doc-a'], [EXPANSION]: ['doc-b'] }, calls);
+    const startedAt = Date.now();
+    const detail = await buildEvidencePackDetailed({
+      question: QUESTION,
+      queryPlanner: async () => [EXPANSION],
+      maxResults: 4,
+      searchContext: allowAll,
+      registry: registry(),
+      // The lane allows far longer; the whole-search budget is what binds.
+      laneTimeoutMs: 60_000,
+      searchBudgetMs: 150,
+      adapters: {
+        // The literal lane never answers; only the search budget can end it.
+        [CORPUS]: (request) => (request.query === QUESTION ? new Promise(() => {}) : slowLiteral(request)),
+      } as SourceIndexRouterAdapterMap,
+      contentProviders: providers(),
+    });
+    // The literal lane was cut at the budget, not the 60 s lane deadline, and
+    // no expansion ran once the budget was spent.
+    expect(Date.now() - startedAt).toBeLessThan(30_000);
+    expect(calls).toEqual([]);
+    expect(detail.pack.candidates).toEqual([]);
+  });
 });

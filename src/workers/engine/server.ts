@@ -1,4 +1,4 @@
-import { createDashboardPeople } from '../email-source/dashboard-people.ts';
+import { createDashboardPeople } from './dashboard/dashboard-people.ts';
 import { PeopleIndexRefresher } from '../../core/people-index.ts';
 import { adoptExistingCloudApproval, carryCloudJudgeApproval, createJudgeSetup } from '../classification/judge-setup.ts';
 import { createOwnerTierItems, getOwnerTierItem, type OwnerTierItemsContext } from '../classification/tier-owner-items.ts';
@@ -20,7 +20,7 @@ import { saveFirstRunPrivacyChoice, savePrivateAnswerMode } from '../../core/fir
 import { createSpoolChangeSubscription } from '../messaging-spool-wake.ts';
 import { resolvedStorePath, retiredPathSettings } from '../../core/source-placement.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_COPY as PRIVATE_ANSWERS_COPY } from '../dashboard/vocabulary.ts';
-import { anonymousInboxConnectionId, localInboxLabel, askWithAnonymousInbox } from '../email-source/local-private-answers.ts';
+import { anonymousInboxConnectionId, localInboxLabel, askWithAnonymousInbox } from './runtime/local-private-answers.ts';
 import { installWorkerShutdownSignals } from '../../core/worker-shutdown.ts';
 import { connectLinuxOwnerBridgeHost, OWNER_BRIDGE_HOST_ENV } from '../../core/linux-owner-bridge-host.ts';
 import { createUpdateChecker, runningOlympusVersion } from '../../core/update-check.ts';
@@ -40,7 +40,7 @@ import {
   type MessagingCaptureStatus,
 } from '../../core/messaging-capture.ts';
 import { whatsappBridgePathForPackage } from '../../core/messaging-pairing.ts';
-import { unlinkHelper } from '../email-source/dashboard-messaging-service.ts';
+import { unlinkHelper } from './dashboard/dashboard-messaging-service.ts';
 import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } from '../../core/model-setup.ts';
 import { workerRestartsItself, type ModelKeyReloadRequest, type WorkerLaunch } from '../../core/model-key-reload.ts';
 import { connectGeminiApiKey, connectPublicApiKeySource } from '../../core/connect.ts';
@@ -57,7 +57,7 @@ import {
   fileExtractionCorporaRoster,
   connectorStoreExtractionCandidateReader,
   parseFileExtractionCorporaEnv,
-} from '../email-source/file-extraction-runtime.ts';
+} from './runtime/file-extraction-runtime.ts';
 import { createExtractionReadinessLedger } from '../file-extraction/readiness-ledger.ts';
 import { NO_EXTRACTION_JOB_OUTCOME, createUnreadableFiles, createUnreadableVerdict } from '../file-extraction/unreadable-files.ts';
 import { VeniceVlmClient } from '../file-extraction/extractors/venice-client.ts';
@@ -118,7 +118,7 @@ import {
 } from '../../core/venice-model-catalog.ts';
 import { builtInModelEnvValue, readModelChoices, resolveVeniceStrongest } from '../../core/model-choices.ts';
 import { CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT } from '../../core/consult-settings.ts';
-import { createModelChoicesBackend, LOCAL_PROFILE_ID, VENICE_PROFILE_ID } from '../email-source/model-choices-backend.ts';
+import { createModelChoicesBackend, LOCAL_PROFILE_ID, VENICE_PROFILE_ID } from './runtime/model-choices-backend.ts';
 import { createAnalystQueryPlanner } from '../../core/query-planner.ts';
 import {
   claudeAppEnabled,
@@ -245,7 +245,7 @@ import {
   type ConnectorStoreSearchFilters,
 } from '../connector-store/index.ts';
 import { canonicalConnectorStoreChatPrincipal } from '../connector-store/principal.ts';
-import { createSourceAnswerLanes } from '../email-source/source-answer-lanes.ts';
+import { createSourceAnswerLanes } from './runtime/source-answer-lanes.ts';
 import type { ConnectorStoreStatusScope } from '../connector-store/local-index.ts';
 import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
 import { gmailInternalStoreStatusScope, gmailPrivateStoreStatusScope } from '../email-source/gmail-status-scope.ts';
@@ -352,7 +352,7 @@ import {
   telegramMediaLanes,
 } from '../telegram-messages/media-extraction.ts';
 import { defaultSourceDashboardHistoryDbPath, type SourceDashboardViewModel } from '../source-dashboard.ts';
-import type { DashboardPanelTools } from '../email-source/dashboard-panel-tools.ts';
+import type { DashboardPanelTools } from './dashboard/dashboard-panel-tools.ts';
 import { readEmbeddingRuntime } from '../dashboard/embedding-runtime.ts';
 import {
   SqliteSourceIngestionLedgerStore,
@@ -710,7 +710,15 @@ export async function main(): Promise<void> {
   // A policy with no Public tier (fresh installs): Public verdicts are Personal.
   const publicTierRetired = isPublicTierRetired(sovereigntyEngine.config);
   const privacyOwnerWords = (): string | undefined => privacyOwnerContext({ env: process.env });
+  const automaticMoveContext = {
+    localEmbeddingsOnly: () => (['public_safe', 'internal', 'secure_local'] as const).every((domain) => {
+      const resolved = sovereigntyEngine.resolveEmbeddingProfile(domain);
+      return resolved === undefined || resolved.profile.provider === 'built-in';
+    }),
+    embeddingLedgerPath: resolveEmbeddingLedgerPath(process.env),
+  };
   const installedTierClassification = configureInstalledTierClassification({
+    automaticMoveContext,
     env: process.env,
     ...(snifferLane ? { lane: snifferLane } : {}),
     ...(publicTierRetired ? { retirePublic: true } : {}),
@@ -3256,7 +3264,7 @@ export async function main(): Promise<void> {
           parentLabels: parentLabelResolver,
           secretLocations: tierSecretLocations,
           checkSecretLocations: checkTierSecretLocations,
-          heldItems: (corpusId) => tierLanes.find((candidate) => candidate.corpusIds.has(corpusId))?.ledger.corpusCopyCounts(corpusId).held ?? 0,
+          heldItems: (corpusId) => tierLanes.find((candidate) => candidate.corpusIds.has(corpusId))?.ledger.corpusHeldCopyCount(corpusId) ?? 0,
         }),
       });
     })()
@@ -4544,7 +4552,7 @@ export async function main(): Promise<void> {
   let setupStatusNow: (() => Promise<import('../../core/setup-checklist.ts').SetupChecklist>) | undefined;
   // Private answers on this computer (local-private-answers.ts); built below,
   // beside the waiting-question store and the built-in model.
-  let localPrivateAnswers: import('../email-source/local-private-answers.ts').LocalPrivateAnswers | undefined;
+  let localPrivateAnswers: import('./runtime/local-private-answers.ts').LocalPrivateAnswers | undefined;
   // What AI apps received (apps-received.ts); built below, beside the waiting questions.
   let appsReceived: import('../apps-received.ts').AppsReceived | undefined;
   let desktopBridge: ReturnType<typeof manageLinuxOwnerBridge> | ReturnType<typeof connectLinuxOwnerBridgeHost> | undefined;
@@ -5145,8 +5153,8 @@ export async function main(): Promise<void> {
   // embedding model, synthesis by the built-in model; no connector query, no
   // cloud route, and never zkAPI.
   if (sourceAnswerLanes) {
-    const { createLocalAnswerPath, createLocalPrivateAnswers } = await import('../email-source/local-private-answers.ts');
-    const { privateVeniceMembers, createVeniceInboxAnswer } = await import('../email-source/venice-inbox-answer.ts');
+    const { createLocalAnswerPath, createLocalPrivateAnswers } = await import('./runtime/local-private-answers.ts');
+    const { privateVeniceMembers, createVeniceInboxAnswer } = await import('./runtime/venice-inbox-answer.ts');
     const { DASHBOARD_SUPPORTED_SOURCES } = await import('../source-dashboard.ts');
     // "Left out: Gmail": a corpus named by the dashboard card it belongs to.
     const sourceName = (corpusId: string): string | undefined => {
@@ -5169,8 +5177,8 @@ export async function main(): Promise<void> {
       },
       sourceName,
     });
-    const destinations = (): import('../email-source/venice-inbox-answer.ts').AskDestinationStates => {
-      let venice: import('../email-source/venice-inbox-answer.ts').AskDestinationState = 'not_allowed';
+    const destinations = (): import('./runtime/venice-inbox-answer.ts').AskDestinationStates => {
+      let venice: import('./runtime/venice-inbox-answer.ts').AskDestinationState = 'not_allowed';
       let veniceModel: string | undefined;
       try {
         const members = privateVeniceMembers(loadSourceWorkerSovereignty(olympusConfig, process.env));
@@ -5222,7 +5230,7 @@ export async function main(): Promise<void> {
     });
     if (frontOwnsPrivateAnswerQueue) localPrivateAnswers.start();
   } else {
-    const { createLocalPrivateAnswers } = await import('../email-source/local-private-answers.ts');
+    const { createLocalPrivateAnswers } = await import('./runtime/local-private-answers.ts');
     localPrivateAnswers = createLocalPrivateAnswers({
       destinations: () => ({ computer: 'not_set_up', venice: 'not_set_up' }),
       store: waitingQuestionStore, isActive: connectionActive,
@@ -5530,7 +5538,7 @@ export async function main(): Promise<void> {
   // outside-help settings writer. Wired here at the composition root so the
   // worker module itself never imports the writer; its routes are served
   // only inside an authenticated local control session (workers/http.ts).
-  const { createDashboardConsultAdapter } = await import('../email-source/dashboard-consult.ts');
+  const { createDashboardConsultAdapter } = await import('./dashboard/dashboard-consult.ts');
   const consultRouteKey = (secretRef: string | undefined): string | undefined => {
     if (!secretRef) return undefined;
     try {
@@ -5731,7 +5739,7 @@ export async function main(): Promise<void> {
   };
   const { withEngineBriefRoute } = await import('../engine-brief-route.ts');
   const { dashboardViewModel: engineBriefView } = await import('../chatgpt/mcp-surface.ts');
-  const { createDashboardPanelTools } = await import('../email-source/dashboard-panel-tools.ts');
+  const { createDashboardPanelTools } = await import('./dashboard/dashboard-panel-tools.ts');
   const { readSetupWorkerFacts, setupChecklistFromView } = await import('../setup-status.ts');
   const setupWorkerFacts = () => readSetupWorkerFacts({
     version: runningOlympusVersion(),
@@ -6068,13 +6076,7 @@ export async function main(): Promise<void> {
         // for the sniffer by default, and a Personal verdict's queued move
         // runs at once while every embedding is the built-in local model.
         ...(snifferRuntime.source === 'built_in' ? { autoApproveBuiltIn: true } : {}),
-        autoMoves: {
-          localEmbeddingsOnly: () => (['public_safe', 'internal', 'secure_local'] as const).every((domain) => {
-            const resolved = sovereigntyEngine.resolveEmbeddingProfile(domain);
-            return resolved === undefined || resolved.profile.provider === 'built-in';
-          }),
-          embeddingLedgerPath: resolveEmbeddingLedgerPath(process.env),
-        },
+        autoMoves: automaticMoveContext,
       })
     : undefined;
   if (tierSniffer && snifferResource) {

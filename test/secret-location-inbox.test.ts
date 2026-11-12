@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openWaitingPrivateQuestionStore } from '../src/core/waiting-private-questions.ts';
-import { createLocalPrivateAnswers } from '../src/workers/email-source/local-private-answers.ts';
+import { createLocalPrivateAnswers } from '../src/workers/engine/runtime/local-private-answers.ts';
 
 test('saved Secret locations are rechecked and old answers fail closed', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'secret-inbox-'));
@@ -65,7 +65,7 @@ test('local Secret Inbox resolves the exact question and opens only its current 
 });
 
 test('source lookup returns just the saved matching Secrets through existing open adapters', async () => {
-  const { createLocalAnswerPath } = await import('../src/workers/email-source/local-private-answers.ts');
+  const { createLocalAnswerPath } = await import('../src/workers/engine/runtime/local-private-answers.ts');
   const { createReleaseTierCheck } = await import('../src/workers/connector-store/tier-visibility.ts');
   const { buildSourceIndexCorpusRegistry } = await import('../src/core/source-index/corpus.ts');
   let eligible = true;
@@ -101,7 +101,7 @@ for (const state of ['no_model', 'model_downloading'] as const) test(`Secret-onl
 
 
 test('background Inbox saves a Secret-only answer on its first attempt with no installed model', async () => {
-  const { createLocalAnswerPath } = await import('../src/workers/email-source/local-private-answers.ts');
+  const { createLocalAnswerPath } = await import('../src/workers/engine/runtime/local-private-answers.ts');
   const { createReleaseTierCheck } = await import('../src/workers/connector-store/tier-visibility.ts');
   const { buildSourceIndexCorpusRegistry } = await import('../src/core/source-index/corpus.ts');
   const dir = mkdtempSync(join(tmpdir(), 'secret-model-free-'));
@@ -127,7 +127,7 @@ test('background Inbox saves a Secret-only answer on its first attempt with no i
 });
 
 for (const explicitQuery of [false, true]) test(`Secret Open sources honor the saved query and human labels (query=${explicitQuery})`, async () => {
-  const { createLocalAnswerPath } = await import('../src/workers/email-source/local-private-answers.ts');
+  const { createLocalAnswerPath } = await import('../src/workers/engine/runtime/local-private-answers.ts');
   const { createReleaseTierCheck } = await import('../src/workers/connector-store/tier-visibility.ts');
   const { buildSourceIndexCorpusRegistry } = await import('../src/core/source-index/corpus.ts');
   const locations = [

@@ -6,7 +6,7 @@ import { expandSourceIndexKeywords, parseKeywordExpansion, withExpandedSourceInd
 import { registerBuiltInPrivateModel } from '../src/workers/classification/built-in-sniffer.ts';
 import type { AnalystModelRequest } from '../src/core/analyst.ts';
 import { Database } from 'bun:sqlite';
-import { storeKeywordLanguages } from '../src/core/source-index/keyword-languages.ts';
+import { lastKeywordLanguages, storeKeywordLanguages, storeKeywordLanguagesWith, type KeywordLanguageRead } from '../src/core/source-index/keyword-languages.ts';
 
 afterEach(() => registerBuiltInPrivateModel(undefined));
 
@@ -213,4 +213,106 @@ test('bounded backup budget preserves single words before extra phrases', () => 
   expect(parsed.get('deposit')).toEqual(['arras', 'sinal']);
   expect(parsed.get('buyer')).toEqual(['comprador', 'adquirente']);
   expect([...parsed.values()].flat()).toHaveLength(8);
+});
+
+test("a large store's language profile is reused across writes for a while, not resampled before every Ask (#1305)", () => {
+  const db = new Database(':memory:');
+  db.exec('CREATE TABLE items(item_pk INTEGER PRIMARY KEY, tombstoned INTEGER); CREATE TABLE chunks(item_pk INTEGER, bounded_text TEXT, content_hash TEXT); INSERT INTO items VALUES(1,0)');
+  const spanish = 'La escritura pública se firmará ante el notario y los gastos correspondientes serán abonados por el comprador, conforme a las condiciones pactadas.';
+  const insert = db.query("INSERT INTO chunks VALUES(1, ?, ?)");
+  db.transaction(() => { for (let n = 0; n < 3000; n++) insert.run(spanish, `h${n}`); })();
+  expect(storeKeywordLanguages(db)).toEqual(['spa']);
+  let reads = 0;
+  const query = db.query.bind(db);
+  db.query = ((sql: string) => { if (sql.includes('rowid IN')) reads += 1; return query(sql); }) as typeof db.query;
+  insert.run(spanish, 'after');
+  expect(storeKeywordLanguages(db)).toEqual(['spa']);
+  expect(reads).toBe(0);
+  db.close();
+});
+
+// Codex review on #1329: evenly spaced rowids on 4,096 chunks alternating English and Spanish picked only every fourth
+// rowid, all Spanish, and English was left out of the profile.
+test("a large store's sample does not miss a language its chunks alternate with", () => {
+  const db = new Database(':memory:');
+  db.exec('CREATE TABLE items(item_pk INTEGER PRIMARY KEY, tombstoned INTEGER); CREATE TABLE chunks(item_pk INTEGER, bounded_text TEXT, content_hash TEXT); INSERT INTO items VALUES(1,0)');
+  const english = 'The deed will be signed before the notary and the related costs will be paid by the buyer, under the agreed conditions.';
+  const spanish = 'La escritura pública se firmará ante el notario y los gastos correspondientes serán abonados por el comprador, conforme a las condiciones pactadas.';
+  const insert = db.query('INSERT INTO chunks VALUES(1, ?, ?)');
+  db.transaction(() => { for (let n = 1; n <= 4096; n++) insert.run(n % 2 === 0 ? spanish : english, `h${n}`); })();
+  expect([...storeKeywordLanguages(db)].sort()).toEqual(['eng', 'spa']);
+  db.close();
+});
+
+test('a language sample can be read elsewhere, one sample at a time, and a current profile needs no read (#1305)', async () => {
+  const db = new Database(':memory:');
+  db.exec('CREATE TABLE items(item_pk INTEGER PRIMARY KEY, tombstoned INTEGER); CREATE TABLE chunks(item_pk INTEGER, bounded_text TEXT, content_hash TEXT); INSERT INTO items VALUES(1,0)');
+  const spanish = 'La escritura pública se firmará ante el notario y los gastos correspondientes serán abonados por el comprador, conforme a las condiciones pactadas.';
+  db.query("INSERT INTO chunks VALUES(1, ?, 'h1')").run(spanish);
+  const reads: string[] = [];
+  const read = async (query: KeywordLanguageRead) => {
+    reads.push(query.sql);
+    await Promise.resolve();
+    const statement = db.query(query.sql);
+    return query.mode === 'get' ? statement.get(...(query.params as never[])) : statement.all(...(query.params as never[]));
+  };
+  const [first, second] = await Promise.all([storeKeywordLanguagesWith(db, read), storeKeywordLanguagesWith(db, read)]);
+  expect(first).toEqual(['spa']);
+  expect(second).toEqual(['spa']);
+  const sampled = reads.length;
+  expect(sampled).toBeGreaterThan(0);
+  expect(await storeKeywordLanguagesWith(db, read)).toEqual(['spa']);
+  expect(reads.length).toBe(sampled);
+  expect(lastKeywordLanguages(db)).toEqual(['spa']);
+  db.close();
+});
+
+test('a corpus prepares its keywords and its query embedding at once, and the query records its stages (#1305)', async () => {
+  const {routeSourceIndexSearch} = await import('../src/core/source-index/router.ts');
+  const {buildSourceIndexCorpusRegistry, defineSourceIndexCorpus} = await import('../src/core/source-index/corpus.ts');
+  const trace = await import('../src/workers/source-index/answer-latency-trace.ts');
+  const corpus = defineSourceIndexCorpus({corpusId:'internal.prepared.notes',family:'note',trustDomain:'internal',activationMode:'hybrid_primary'});
+  const started: string[] = [];
+  let releaseKeywords!: () => void;
+  const keywordsWait = new Promise<void>((resolve) => { releaseKeywords = resolve; });
+  const adapter = Object.assign(() => ({hits:[],latencyMs:0,rawExposed:false as const}), {
+    hybridAvailability: () => ({servable: true, modelId: 'm1', backend: 'local'}),
+    prepareKeywords: async () => { started.push('keywords'); await keywordsWait; },
+    // The query embedding only finishes once it has started alongside the translation.
+    prepareSemantic: async () => { started.push('semantic'); releaseKeywords(); },
+  });
+  const t = trace.createSourceAnswerTrace();
+  const snapshot = await trace.runWithSourceAnswerTrace(t, () => trace.observeSourceAnswerRetrievalAttempt('hybrid', () =>
+    trace.observeSourceAnswerRoutedQuery(1, () => routeSourceIndexSearch({
+      registry: buildSourceIndexCorpusRegistry([corpus]), adapters: {[corpus.corpusId]: adapter},
+      request: {query:'notary',maxResults:4,context:{allowedTrustDomains:['internal']}}, laneTimeoutMs: 1000,
+    })))).then(() => trace.snapshotSourceAnswerTrace(t));
+  expect(started).toEqual(['keywords', 'semantic']);
+  const stages = snapshot.retrievalAttempts[0]?.queries[0]?.stages;
+  expect(stages).toBeDefined();
+  expect(Object.keys(stages!).sort()).toEqual(['after_lanes_ms', 'lanes_ms', 'prepare_keywords_max_ms', 'prepare_ms', 'prepare_semantic_max_ms']);
+});
+
+test('a search stops waiting for a slow translation, uses the static equivalents, and the translation is cached for later (#1305)', async () => {
+  let finish!: (text: string) => void;
+  let calls = 0;
+  registerBuiltInPrivateModel({ available: () => true, model: { async complete() {
+    calls++;
+    return { text: await new Promise<string>((resolve) => { finish = resolve; }) } as never;
+  } } });
+  const owner = {};
+  await withKeywordRequestScope(async () => {
+    const quick = await expandSourceIndexKeywords('asteroid notary', ['spa'], owner, { waitMs: 0 });
+    expect(quick.get('asteroid')).toBeUndefined();
+    // Pinned for this request: the lanes do not wait either.
+    expect(await expandSourceIndexKeywords('asteroid notary', ['spa'], owner)).toBe(quick);
+  });
+  expect(calls).toBe(1);
+  finish(reply(['asteroide']));
+  await Promise.resolve();
+  await withKeywordRequestScope(async () => {
+    const later = await expandSourceIndexKeywords('asteroid notary', ['spa'], {}, { waitMs: 0 });
+    expect(later.get('asteroid')).toContain('asteroide');
+  });
+  expect(calls).toBe(1);
 });

@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createFileExtractionRuntime, createRefreshableFileExtractionRuntime } from '../src/workers/email-source/file-extraction-runtime.ts';
+import { createFileExtractionRuntime, createRefreshableFileExtractionRuntime } from '../src/workers/engine/runtime/file-extraction-runtime.ts';
 
 test('closed extraction cannot open another queue when a source appears after shutdown', () => {
   const dir = mkdtempSync(join(tmpdir(), 'extraction-close-'));

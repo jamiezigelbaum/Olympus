@@ -29,6 +29,9 @@ import type {
   ExtractorOutput,
   ExtractorRereadPolicy,
 } from '../types.ts';
+import { readLegacyWord } from './legacy-word.ts';
+import { readLegacyWorkbook } from './legacy-workbook.ts';
+import { readEpub, readOpenDocument, type PackageDocument } from './package-documents.ts';
 import { RTF_MIME_TYPES, hasRtfSignature, rtfSourceFromBytes, rtfToText } from './rtf.ts';
 import {
   BOUNDED_TEXT_TRUNCATED_WARNING,
@@ -36,6 +39,12 @@ import {
   DEFAULT_MAX_BOUNDED_TEXT_CHARS,
   DEFAULT_MAX_TABLE_SAMPLE_COLUMNS,
   DEFAULT_MAX_TABLE_SAMPLE_ROWS,
+  DOC_MIME_TYPE,
+  XLS_MIME_TYPE,
+  ODT_MIME_TYPE,
+  ODS_MIME_TYPE,
+  ODP_MIME_TYPE,
+  EPUB_MIME_TYPE,
   DOCX_MIME_TYPE,
   IMAGE_MIME_TYPES,
   PDF_MIME_TYPE,
@@ -106,6 +115,10 @@ export const DEFAULT_PDF_TEXT_TIMEOUT_MS = 120_000;
 
 const TEMP_DIR_PREFIX = 'olympus-extraction-pdf-text-';
 const DOCUMENT_BODY_LABEL = 'document body';
+const ADDITIONAL_DOCUMENT_MIME_TYPES: ReadonlySet<string> = new Set([
+  DOC_MIME_TYPE, XLS_MIME_TYPE, ODT_MIME_TYPE, ODS_MIME_TYPE, ODP_MIME_TYPE, EPUB_MIME_TYPE,
+]);
+const ADDITIONAL_DOCUMENT_VERSION_SUFFIX = '.document-readers-2026-11-11';
 
 export interface TextExtractorOptions {
   kind?: string;
@@ -209,25 +222,20 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
     kind,
     version,
     input: { kind: 'bytes', maxInputBytes: DOCUMENT_READER_MAX_INPUT_BYTES },
-    // Pictures read for media search are a new reading of an image: an image
-    // read before (names only, or OCR text) is queued once more under this.
-    // Only for a format this machine can prepare: one it cannot keeps the
-    // version it had, so it is queued under the suffix when it becomes
-    // preparable, and not before.
-    ...(imagePreparation || imageOcrVersion
-      ? {
-        versionFor(mimeType: string | undefined): string {
-          const normalized = normalizeMimeType(mimeType);
-          if (!normalized || !IMAGE_MIME_TYPES.has(normalized)) return version;
-          if (imagePreparation) {
-            return (imagePreparation.ready?.(normalized) ?? true)
-              ? `${version}${IMAGE_MEDIA_VERSION_SUFFIX}`
-              : version;
-          }
-          return imageOcrVersion ? `${version}${IMAGE_OCR_VERSION_SUFFIX}` : version;
-        },
+    // New readers replan only their formats; image capability keeps its own suffix.
+    versionFor(mimeType: string | undefined): string {
+      const normalized = normalizeMimeType(mimeType);
+      if (normalized && ADDITIONAL_DOCUMENT_MIME_TYPES.has(normalized)) {
+        return `${version}${ADDITIONAL_DOCUMENT_VERSION_SUFFIX}`;
       }
-      : {}),
+      if (!normalized || !IMAGE_MIME_TYPES.has(normalized)) return version;
+      if (imagePreparation) {
+        return (imagePreparation.ready?.(normalized) ?? true)
+          ? `${version}${IMAGE_MEDIA_VERSION_SUFFIX}`
+          : version;
+      }
+      return imageOcrVersion ? `${version}${IMAGE_OCR_VERSION_SUFFIX}` : version;
+    },
     // Pictures left unread for want of an image decoder are read again when
     // the decoder appears (see `imageDecoderUnavailableWarning`).
     ...(imagePreparation?.rereadPolicy ? { extraReread: [imagePreparation.rereadPolicy] } : {}),
@@ -250,6 +258,9 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
         maxTableSampleRows,
         maxTableSampleColumns,
       };
+      if (mimeType && ADDITIONAL_DOCUMENT_MIME_TYPES.has(mimeType)) {
+        return structuredExtractionOrFailure(() => extractAdditionalDocument(context));
+      }
       if (mimeType === DOCX_MIME_TYPE) {
         return structuredExtractionOrFailure(() => extractDocx(context));
       }
@@ -469,6 +480,7 @@ export function textLaneAccepts(mimeType: string | undefined): boolean {
   const normalized = normalizeMimeType(mimeType);
   if (!normalized) return false;
   return normalized === PDF_MIME_TYPE
+    || ADDITIONAL_DOCUMENT_MIME_TYPES.has(normalized)
     || normalized === DOCX_MIME_TYPE
     || normalized === XLSX_MIME_TYPE
     || normalized === PPTX_MIME_TYPE
@@ -986,4 +998,45 @@ function extractDelimitedText(input: {
       ? { warnings: appendBoundedTextWarnings(undefined, bounded) }
       : {}),
   };
+}
+
+function extractAdditionalDocument(context: FormatContext): ExtractorOutput {
+  let document: PackageDocument;
+  let format: string;
+  switch (context.mimeType) {
+    case DOC_MIME_TYPE: document = { text: readLegacyWord(context.bytes) }; format = 'DOC'; break;
+    case XLS_MIME_TYPE: document = { sheets: readLegacyWorkbook(context.bytes) }; format = 'XLS'; break;
+    case ODT_MIME_TYPE: document = readOpenDocument(context.bytes, 'odt'); format = 'ODT'; break;
+    case ODS_MIME_TYPE: document = readOpenDocument(context.bytes, 'ods'); format = 'ODS'; break;
+    case ODP_MIME_TYPE: document = readOpenDocument(context.bytes, 'odp'); format = 'ODP'; break;
+    default: document = readEpub(context.bytes); format = 'EPUB';
+  }
+  const slices: DerivedSlice[] = [];
+  const addText = (text: string, label: string, kind: 'whole_file' | 'section' | 'slide' | 'sheet', index?: number, warnings: string[] = []): void => {
+    const bounded = boundText(normalizeExtractedText(text), context.maxBoundedTextChars);
+    if (!bounded.text) return;
+    slices.push({ text: bounded.text, label, derivation: buildDerivation({
+      artifact: kind === 'sheet' ? 'sheet' : kind === 'slide' ? 'slide' : 'text',
+      structural: { kind, label, ...(index !== undefined ? { index } : {}) }, bounded, warnings,
+    }) });
+  };
+  if (document.text !== undefined) addText(document.text, DOCUMENT_BODY_LABEL, 'whole_file');
+  for (const [index, section] of (document.sections ?? []).entries()) {
+    addText(section.text, section.name, format === 'ODP' ? 'slide' : 'section', index + 1);
+  }
+  for (const [index, sheet] of (document.sheets ?? []).entries()) {
+    const rows = sheet.rows.filter((row) => row.some((cell) => cell.trim()));
+    const columns = rows.reduce((max, row) => Math.max(max, row.length), 0);
+    const warnings: string[] = [];
+    if (rows.length > context.maxTableSampleRows) warnings.push('row_sample_truncated');
+    if (columns > context.maxTableSampleColumns) warnings.push('column_sample_truncated');
+    addText(officeTableSummary({ label: `${format} ${sheet.name}`, rows,
+      maxRows: context.maxTableSampleRows, maxColumns: context.maxTableSampleColumns,
+    }), sheet.name, 'sheet', index + 1, warnings);
+  }
+  const output = joinedOutput(slices, slices.map((slice) => slice.text).join('\n\n'), context.maxBoundedTextChars);
+  if (output.status !== 'indexed') return output;
+  const warnings = new Set(output.warnings ?? []);
+  for (const slice of slices) for (const warning of slice.derivation.warnings ?? []) warnings.add(warning);
+  return { ...output, ...(warnings.size ? { warnings: [...warnings] } : {}) };
 }

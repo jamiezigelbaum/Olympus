@@ -41,7 +41,8 @@ class FakeEngine {
     this.tick();
     if (provider === 'local_files') {
       const l = this.local;
-      return { provider, connection: { state: l.connected ? (l.reading ? 'syncing' : 'synced') : 'not_connected', label: 'x' }, coverage: { indexed_items: l.items }, scope_selection: { connected: l.connected, status: l.approved ? 'approved' : 'scope_pending' }, schedule: { missing_folders: l.missing ? ['f'] : [], ...(l.missing ? { degraded_reason: 'scope_root_missing' } : {}) } };
+      // As the real engine: a disconnected source counts nothing as indexed, and its kept rows show only as stored.
+      return { provider, connection: { state: l.connected ? (l.reading ? 'syncing' : 'synced') : 'not_connected', label: 'x' }, coverage: l.connected || l.items === 0 ? { indexed_items: l.items } : { indexed_items: 0, stored_items: l.items }, scope_selection: { connected: l.connected, status: l.approved ? 'approved' : 'scope_pending' }, schedule: { missing_folders: l.missing ? ['f'] : [], ...(l.missing ? { degraded_reason: 'scope_root_missing' } : {}) } };
     }
     return { provider, connection: { state: 'not_connected' }, coverage: { indexed_items: 0 } };
   }

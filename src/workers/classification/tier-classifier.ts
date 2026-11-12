@@ -222,6 +222,8 @@ export interface TierSniffer {
   readonly rejudgeReady?: boolean;
   /** An eligible final verdict for this item's unchanged content and names. */
   readonly recordedContentVerdict?: { readonly tier: 'private' | 'secure'; readonly code: string; readonly mapRevision: string };
+  /** Same checks as judge, but a cache miss never queues a question. */
+  cachedVerdict?(request: TierSnifferRequest): TierSnifferVerdict;
   judge(request: TierSnifferRequest): TierSnifferVerdict;
 }
 
@@ -305,8 +307,9 @@ export function contentJudgeVerdictReason(reason: string, tier: TierKey, digest:
  * was made with (title, path, sender) and the parent's context. A listing
  * reuses a recorded verdict only while both are unchanged, so a renamed or
  * moved item (into a records folder, under a new title) is judged again.
- * Labels and folder keys are left out: a re-judge reads names back from the
- * stored copy, which keeps only these, and must record the same digest.
+ * Labels and folder keys are left out. A re-judge reads names back from the
+ * stored copy; when that representation differs, it retains the listing's
+ * receipt beside its own only while the complete-text digest still matches.
  */
 export function contentNamesReason(
   names: { readonly title?: string | undefined; readonly path?: string | undefined; readonly sender?: string | undefined },
@@ -384,6 +387,31 @@ export function tierSnifferInputHash(
     // Appended only when present, so every item without a parent hashes as it always did.
     ...(context ? [context] : []),
   ])).digest('hex');
+}
+
+export const NAMES_INPUT_REASON_PREFIX = 'metadata:names_input:';
+const NAMES_INPUT_KEYS = ['title', 'path', 'folderKeys', 'labels', 'sender'] as const;
+
+/** Content-free receipt of the names read, in existing reasons (no schema change).
+ * Keep the signal kinds so a stored copy with additional names can still cover
+ * the original input. The digest also binds their values and parent context. */
+export function namesInputReason(signals: SourceClassificationSignals, parentContext?: string): string {
+  const keys = NAMES_INPUT_KEYS.filter(key => {
+    const value = signals[key];
+    return Array.isArray(value) ? value.length > 0 : value !== undefined;
+  });
+  return `${NAMES_INPUT_REASON_PREFIX}${keys.join(',')}:${tierSnifferInputHash('metadata', signals, undefined, parentContext)}`;
+}
+
+/** Missing/unknown receipts cannot authorize lowering from a partial copy. */
+export function namesInputCovered(reasons: readonly string[], signals: SourceClassificationSignals, parentContext?: string): boolean {
+  const receipts = reasons.filter(reason => reason.startsWith(NAMES_INPUT_REASON_PREFIX));
+  return receipts.length > 0 && receipts.every(reason => {
+    const keys = reason.slice(NAMES_INPUT_REASON_PREFIX.length).split(':')[0]!.split(',').filter(Boolean);
+    if (keys.some(key => !NAMES_INPUT_KEYS.some(known => known === key))) return false;
+    const original = Object.fromEntries(keys.map(key => [key, signals[key as typeof NAMES_INPUT_KEYS[number]]]));
+    return namesInputReason(original, parentContext) === reason;
+  });
 }
 
 /** Conservative capability check; no source identities or group privacy decisions. */
@@ -610,6 +638,7 @@ export function classifyItemTiers(
   options: TierClassificationOptions = {},
 ): TierDecision {
   const decision = classifyItemTiersWithPublic(input, options);
+  if (decision.contentTier !== 'secrets') decision.reasons.push(namesInputReason(input.signals, input.parentContext));
   if (input.text !== undefined && decision.contentTier !== 'secrets') {
     if (input.hasNonTextContent !== true && textOnlyMime(input.mimeType)) decision.reasons.push('content:text_only');
     decision.reasons.push(contentDigestReason(input.text), contentNamesReason(input.signals, input.parentContext));

@@ -23,7 +23,7 @@ import { recordReleaseManifest, type ReleaseCheck } from '../src/core/release-ma
 import { REMOTE_ANSWER_CHANGED, REMOTE_OUTPUT_SCHEMAS, REMOTE_PRIVATE_NOTE, remoteOperationOutput, withRemotePrivateNote } from '../src/core/remote-result.ts';
 import { SourceAnswerJobRegistry } from '../src/core/source-answer-jobs.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
-import { createLocalPrivateAnswers } from '../src/workers/email-source/local-private-answers.ts';
+import { createLocalPrivateAnswers } from '../src/workers/engine/runtime/local-private-answers.ts';
 import { openWaitingPrivateQuestionStore, type WaitingQuestionStore } from '../src/core/waiting-private-questions.ts';
 import { callChatGptTool, OPEN_PRIVATE_QUESTION_TOOL, SEARCH_TOOL, SOURCE_ANSWER_RESULT_TOOL, SOURCE_ANSWER_TOOL, type ChatGptSurfaceOptions } from '../src/workers/chatgpt/mcp-surface.ts';
 import { PRIVATE_ANSWER_META_KEY, type PrivateAnswerModel } from '../src/workers/chatgpt/private-answer-contract.ts';

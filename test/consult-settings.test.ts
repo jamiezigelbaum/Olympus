@@ -393,7 +393,7 @@ describe('the settings module stays off the hosted surfaces', () => {
     // The C5 Outside help adapter reads the settings for the card's state;
     // it is also the writer's one caller (test/consult-settings-writer.test.ts
     // holds that the adapter is reachable only from the composition root).
-    'src/workers/email-source/dashboard-consult.ts',
+    'src/workers/engine/dashboard/dashboard-consult.ts',
     // `olympus zkapi test-writer` reads the saved writer, level and
     // languages to run the writer check; it only reads.
     'src/cli.ts',

@@ -27,8 +27,9 @@ import type {
   SourceAnswerTracePoolReads,
   SourceAnswerTraceRouteStep,
   SourceAnswerTraceSnapshot,
+  SourceAnswerTraceMainThreadSql,
 } from './answer-latency-trace.ts';
-import { sourceAnswerTraceErrorClass } from './answer-latency-trace.ts';
+import { copyQueryStages, sourceAnswerTraceErrorClass } from './answer-latency-trace.ts';
 import type { OperationCallerWire } from '../../core/operation-caller.ts';
 
 export interface SourceAnswerLatencyRecord {
@@ -97,6 +98,8 @@ export interface SourceAnswerLatencyTraceRecord {
     fits: Array<{ lane: 'local' | 'cloud'; kept_seats: number[] }>;
   };
   caller?: OperationCallerWire;
+  // Synchronous SQLite the Ask ran on the request thread (#1305).
+  main_thread_sql?: SourceAnswerTraceMainThreadSql;
   phase_ms: {
     lane_setup_ms: number;
     bulk_gate_ms: number;
@@ -281,6 +284,21 @@ export function buildSourceAnswerLatencyTraceRecord(input: {
       }
       : {}),
     ...(input.caller ? { caller: copyCaller(input.caller) } : {}),
+    ...(input.trace.mainThreadSql
+      ? {
+          main_thread_sql: {
+            statements: Math.max(0, Math.floor(input.trace.mainThreadSql.statements)),
+            total_ms: nonNegativeMs(input.trace.mainThreadSql.total_ms),
+            max_ms: nonNegativeMs(input.trace.mainThreadSql.max_ms),
+            slow: input.trace.mainThreadSql.slow.map((entry) => ({ ms: nonNegativeMs(entry.ms), site: entry.site })),
+            by_site: (input.trace.mainThreadSql.by_site ?? []).map((entry) => ({
+              site: entry.site,
+              statements: Math.max(0, Math.floor(entry.statements)),
+              ms: nonNegativeMs(entry.ms),
+            })),
+          },
+        }
+      : {}),
     phase_ms: {
       ...fittedPhases,
       unattributed_ms: unattributedMs,
@@ -420,6 +438,7 @@ function copyRetrievalAttempt(
         ...(timing.error_class ? { error_class: timing.error_class } : {}),
         ...(timing.pool ? { pool: copyPoolReads(timing.pool) } : {}),
       })),
+      ...(query.stages ? { stages: copyQueryStages(query.stages) } : {}),
     })),
   };
 }
@@ -432,6 +451,10 @@ function copyPoolReads(pool: SourceAnswerTracePoolReads): SourceAnswerTracePoolR
     queue_wait_max_ms: nonNegativeMs(pool.queue_wait_max_ms),
     run_ms: nonNegativeMs(pool.run_ms),
     run_max_ms: nonNegativeMs(pool.run_max_ms),
+    sql_ms: nonNegativeMs(pool.sql_ms ?? 0),
+    sql_max_ms: nonNegativeMs(pool.sql_max_ms ?? 0),
+    snapshot_reads: count(pool.snapshot_reads ?? 0),
+    snapshot_sql_ms: nonNegativeMs(pool.snapshot_sql_ms ?? 0),
     refused: count(pool.refused),
     dropped_queued: count(pool.dropped_queued),
     past_deadline_running: count(pool.past_deadline_running),

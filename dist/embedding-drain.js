@@ -9237,6 +9237,9 @@ function compactPassageWhitespace(text2) {
 `);
 }
 
+// src/core/source-index/partial-search.ts
+var SEMANTIC_TIMEOUT_REASONS = new Set(["vector_scan_deadline_exceeded", "vector_scan_store_busy"]);
+
 // src/core/evidence-versions.ts
 var DOCUMENT_FAMILIES = new Set(["file", "note"]);
 
@@ -15287,6 +15290,15 @@ function tierSnifferInputHash(pass, signals, text2, parentContext) {
     ...context2 ? [context2] : []
   ])).digest("hex");
 }
+var NAMES_INPUT_REASON_PREFIX = "metadata:names_input:";
+var NAMES_INPUT_KEYS = ["title", "path", "folderKeys", "labels", "sender"];
+function namesInputReason(signals, parentContext) {
+  const keys = NAMES_INPUT_KEYS.filter((key2) => {
+    const value = signals[key2];
+    return Array.isArray(value) ? value.length > 0 : value !== undefined;
+  });
+  return `${NAMES_INPUT_REASON_PREFIX}${keys.join(",")}:${tierSnifferInputHash("metadata", signals, undefined, parentContext)}`;
+}
 function itemHasNonTextContent(item) {
   if (item.metadata.textComplete !== true || item.content.kind !== "text" || item.deferredBytes || item.identity.parent || item.identity.providerFileId || !textOnlyMime(item.mimeType))
     return true;
@@ -15333,6 +15345,8 @@ function withPublicRetired(decision) {
 }
 function classifyItemTiers(input, options = {}) {
   const decision = classifyItemTiersWithPublic(input, options);
+  if (decision.contentTier !== "secrets")
+    decision.reasons.push(namesInputReason(input.signals, input.parentContext));
   if (input.text !== undefined && decision.contentTier !== "secrets") {
     if (input.hasNonTextContent !== true && textOnlyMime(input.mimeType))
       decision.reasons.push("content:text_only");
@@ -15914,6 +15928,91 @@ function writeIntentFromRow(row) {
 function idParams(identity) {
   return [identity.provider, identity.accountScope, tierLedgerConversationKey(identity), identity.providerItemId];
 }
+var IDENTITY_BATCH = 200;
+function uniqueIdentities(identities) {
+  const unique = new Map;
+  for (const identity of identities)
+    unique.set(tierLedgerIdentityKey(identity), identity);
+  return [...unique.values()];
+}
+function identityValues(batch) {
+  return { values: batch.map(() => "(?, ?, ?, ?)").join(", "), params: batch.flatMap((identity) => [...idParams(identity)]) };
+}
+function* copiesSteps(list) {
+  const result = new Map;
+  for (let offset = 0;offset < list.length; offset += IDENTITY_BATCH) {
+    const { values, params } = identityValues(list.slice(offset, offset + IDENTITY_BATCH));
+    const rows = yield {
+      sql: `SELECT * FROM tier_copies
+        WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
+        ORDER BY corpus_id`,
+      params,
+      mode: "all"
+    };
+    for (const row of rows) {
+      const key2 = tierLedgerIdentityKey(identityFromRow(row));
+      const existing = result.get(key2);
+      if (existing)
+        existing.push(copyFromRow(row));
+      else
+        result.set(key2, [copyFromRow(row)]);
+    }
+    const pending = yield {
+      sql: `SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_write_intents
+        WHERE kind IN ('deletion', 'secret')
+          AND (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})`,
+      params,
+      mode: "all"
+    };
+    for (const row of pending) {
+      const hidden = result.get(tierLedgerIdentityKey(identityFromRow(row)));
+      if (hidden) {
+        for (const copy of hidden)
+          if (copy.state !== "superseded")
+            copy.state = "superseded";
+      }
+    }
+  }
+  return result;
+}
+function* personalFirstWaitingSteps(list) {
+  const result = new Set;
+  for (let offset = 0;offset < list.length; offset += IDENTITY_BATCH) {
+    const { values, params } = identityValues(list.slice(offset, offset + IDENTITY_BATCH));
+    const rows = yield {
+      sql: `SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_items
+        WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
+          AND content_pending = 1
+          AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value = ?)`,
+      params: [...params, PERSONAL_FIRST_REASON],
+      mode: "all"
+    };
+    for (const row of rows)
+      result.add(tierLedgerIdentityKey(identityOfRow(row)));
+  }
+  return result;
+}
+function* routedWithoutCopiesSteps(list) {
+  const result = new Set;
+  for (let offset = 0;offset < list.length; offset += IDENTITY_BATCH) {
+    const { values, params } = identityValues(list.slice(offset, offset + IDENTITY_BATCH));
+    const rows = yield {
+      sql: `SELECT i.provider, i.account_scope, i.conversation_key, i.provider_item_id FROM tier_items i
+        WHERE i.routed = 1
+          AND (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) IN (VALUES ${values})
+          AND NOT EXISTS (
+            SELECT 1 FROM tier_copies c
+            WHERE c.provider = i.provider AND c.account_scope = i.account_scope
+              AND c.conversation_key = i.conversation_key AND c.provider_item_id = i.provider_item_id
+          )`,
+      params,
+      mode: "all"
+    };
+    for (const row of rows)
+      result.add(tierLedgerIdentityKey(identityOfRow(row)));
+  }
+  return result;
+}
 var DEFAULT_REJUDGE_SCAN_ROWS = 2000;
 var REJUDGE_UNAVAILABLE_RETRY_MS = 60 * 60 * 1000;
 var REJUDGE_UNAVAILABLE_MAX_RETRY_MS = 24 * 60 * 60 * 1000;
@@ -16015,7 +16114,7 @@ class TierLedger {
   static assertSchemaCanOpen(dbPath, readOnly = false) {
     if (dbPath === ":memory:" || !existsSync14(dbPath))
       return;
-    const version = readSqliteWithoutWriting(dbPath, 1e4, (db) => readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID));
+    const version = readSqliteWithoutWriting(dbPath, 1e4, (db) => readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID), readOnly);
     if (version !== undefined && (version > TIER_LEDGER_SCHEMA_VERSION || readOnly && version !== TIER_LEDGER_SCHEMA_VERSION)) {
       throw new TierLedgerSchemaError(version);
     }
@@ -17198,6 +17297,16 @@ class TierLedger {
       ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ?`).all(...after, Math.max(1, Math.min(options.limit, 500)));
     return rows.map(recordFromRow);
   }
+  listSupersededItemWindow(options) {
+    const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : [];
+    const rows = this.db.query(`SELECT * FROM tier_items i
+      WHERE ${after.length ? "(i.provider, i.account_scope, i.conversation_key, i.provider_item_id) > (?, ?, ?, ?) AND" : ""}
+        EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = i.provider AND c.account_scope = i.account_scope
+          AND c.conversation_key = i.conversation_key AND c.provider_item_id = i.provider_item_id
+          AND c.copy_state = 'superseded')
+      ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id LIMIT ?`).all(...after, Math.max(1, Math.min(options.limit, 500)));
+    return rows.map(recordFromRow);
+  }
   listLowerContentLeftovers(options) {
     const attached = [];
     try {
@@ -17271,45 +17380,32 @@ class TierLedger {
     `).all(...idParams(identity)).map(copyFromRow);
   }
   copiesForMany(identities) {
-    const result = new Map;
-    if (identities.length === 0)
-      return result;
-    const unique = new Map;
-    for (const identity of identities)
-      unique.set(tierLedgerIdentityKey(identity), identity);
-    const list = [...unique.values()];
-    this.db.transaction(() => {
-      for (let offset = 0;offset < list.length; offset += 200) {
-        const batch = list.slice(offset, offset + 200);
-        const rows = this.db.query(`
-          SELECT * FROM tier_copies
-          WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${batch.map(() => "(?, ?, ?, ?)").join(", ")})
-          ORDER BY corpus_id
-        `).all(...batch.flatMap((identity) => [...idParams(identity)]));
-        for (const row of rows) {
-          const key2 = tierLedgerIdentityKey(identityFromRow(row));
-          const existing = result.get(key2);
-          if (existing)
-            existing.push(copyFromRow(row));
-          else
-            result.set(key2, [copyFromRow(row)]);
-        }
-        const pending = this.db.query(`
-          SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_write_intents
-          WHERE kind IN ('deletion', 'secret')
-            AND (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${batch.map(() => "(?, ?, ?, ?)").join(", ")})
-        `).all(...batch.flatMap((identity) => [...idParams(identity)]));
-        for (const row of pending) {
-          const hidden = result.get(tierLedgerIdentityKey(identityFromRow(row)));
-          if (hidden) {
-            for (const copy of hidden)
-              if (copy.state !== "superseded")
-                copy.state = "superseded";
-          }
-        }
+    return this.readSteps(copiesSteps(uniqueIdentities(identities)));
+  }
+  *visibilityReadSteps(identities, options = {}) {
+    const list = uniqueIdentities(identities);
+    const copies = yield* copiesSteps(list);
+    const copyless = list.filter((identity) => (copies.get(tierLedgerIdentityKey(identity))?.length ?? 0) === 0);
+    const routedWithoutCopies = yield* routedWithoutCopiesSteps(copyless);
+    if (!options.personalFirst)
+      return { copies, routedWithoutCopies, personalFirstWaiting: new Set };
+    const unheld = list.filter((identity) => !copies.get(tierLedgerIdentityKey(identity))?.some((copy) => copy.state === "current" && copy.embedHold));
+    return { copies, routedWithoutCopies, personalFirstWaiting: yield* personalFirstWaitingSteps(unheld) };
+  }
+  onClose(listener) {
+    (this.closeListeners ??= []).push(listener);
+  }
+  closeListeners;
+  readSteps(steps) {
+    return this.db.transaction(() => {
+      let next = steps.next();
+      while (!next.done) {
+        const statement = this.db.query(next.value.sql);
+        const params = next.value.params;
+        next = steps.next(next.value.mode === "get" ? statement.get(...params) : statement.all(...params));
       }
+      return next.value;
     })();
-    return result;
   }
   recordRoutedPlacement(identity, decision, plan, options = {}) {
     const decidedAt = this.now().toISOString();
@@ -17479,31 +17575,7 @@ class TierLedger {
     }
   }
   routedWithoutCopies(identities) {
-    const result = new Set;
-    if (identities.length === 0)
-      return result;
-    const unique = new Map;
-    for (const identity of identities)
-      unique.set(tierLedgerIdentityKey(identity), identity);
-    const list = [...unique.values()];
-    this.db.transaction(() => {
-      for (let offset = 0;offset < list.length; offset += 200) {
-        const batch = list.slice(offset, offset + 200);
-        const rows = this.db.query(`
-          SELECT i.provider, i.account_scope, i.conversation_key, i.provider_item_id FROM tier_items i
-          WHERE i.routed = 1
-            AND (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) IN (VALUES ${batch.map(() => "(?, ?, ?, ?)").join(", ")})
-            AND NOT EXISTS (
-              SELECT 1 FROM tier_copies c
-              WHERE c.provider = i.provider AND c.account_scope = i.account_scope
-                AND c.conversation_key = i.conversation_key AND c.provider_item_id = i.provider_item_id
-            )
-        `).all(...batch.flatMap((identity) => [...idParams(identity)]));
-        for (const row of rows)
-          result.add(tierLedgerIdentityKey(identityOfRow(row)));
-      }
-    })();
-    return result;
+    return this.readSteps(routedWithoutCopiesSteps(uniqueIdentities(identities)));
   }
   itemStatesForMany(identities) {
     const result = new Map;
@@ -18315,6 +18387,12 @@ class TierLedger {
             AND c.corpus_id IN (SELECT value FROM json_each(?)))
     `).get(JSON.stringify(corpusIds)).n;
   }
+  corpusHeldCopyCount(corpusId) {
+    return this.db.query(`
+      SELECT COUNT(*) AS n FROM tier_copies
+      WHERE corpus_id = ? AND copy_state = 'current' AND embed_hold = 1
+    `).get(corpusId).n;
+  }
   corpusCopyCounts(corpusId) {
     const rows = this.db.query(`
       SELECT copy_state, embed_hold, COUNT(*) AS n FROM tier_copies
@@ -18378,21 +18456,6 @@ class TierLedger {
       mode: "get"
     };
     return { items: row.items, awaitingJudgment: row.awaiting };
-  }
-  onClose(listener) {
-    (this.closeListeners ??= []).push(listener);
-  }
-  closeListeners;
-  readSteps(steps) {
-    return this.db.transaction(() => {
-      let next = steps.next();
-      while (!next.done) {
-        const statement = this.db.query(next.value.sql);
-        const params = next.value.params;
-        next = steps.next(next.value.mode === "get" ? statement.get(...params) : statement.all(...params));
-      }
-      return next.value;
-    })();
   }
   withdrawAccountScope(provider, accountScope) {
     return this.db.transaction(() => {
@@ -18483,9 +18546,9 @@ function readStoreBindingCursor(storeDbPath, runId, connectorId) {
     return row?.cursor ?? undefined;
   });
 }
-function readSqliteWithoutWriting(dbPath, busyTimeoutMs, read) {
+function readSqliteWithoutWriting(dbPath, busyTimeoutMs, read, strictReadOnly = false) {
   for (const mode of [{ readonly: true, create: false }, { readwrite: true, create: false }]) {
-    if ("readwrite" in mode && hasUnmergedWrites(dbPath))
+    if ("readwrite" in mode && (strictReadOnly || hasUnmergedWrites(dbPath)))
       return;
     let db;
     try {
@@ -19360,6 +19423,175 @@ function* iterateRows(db, sql, ...params) {
   }
 }
 
+// src/workers/connector-store/main-thread-sql-trace.ts
+import { Database as Database2 } from "bun:sqlite";
+import { isMainThread } from "node:worker_threads";
+
+// src/workers/source-index/answer-latency-trace.ts
+import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+var SLOW_MAIN_THREAD_SQL_MS = 250;
+var SLOW_MAIN_THREAD_SQL_KEPT = 20;
+var SITE_TALLY_MS = 25;
+var storage = new AsyncLocalStorage3;
+var laneStorage = new AsyncLocalStorage3;
+function beginSourceAnswerPoolRead() {
+  const query = currentSourceAnswerTrace()?.activeQuery;
+  const corpusId = laneStorage.getStore();
+  if (!query || corpusId === undefined)
+    return;
+  return ({ queueWaitMs, runMs, sqlMs, outcome, snapshot }) => {
+    let reads = query.poolByCorpus.get(corpusId);
+    if (!reads) {
+      reads = {
+        reads: 0,
+        queue_wait_ms: 0,
+        queue_wait_max_ms: 0,
+        run_ms: 0,
+        run_max_ms: 0,
+        sql_ms: 0,
+        sql_max_ms: 0,
+        snapshot_reads: 0,
+        snapshot_sql_ms: 0,
+        refused: 0,
+        dropped_queued: 0,
+        past_deadline_running: 0,
+        errors: 0
+      };
+      query.poolByCorpus.set(corpusId, reads);
+    }
+    const wait = unroundedMs(queueWaitMs);
+    const ran = unroundedMs(runMs);
+    reads.reads += 1;
+    reads.queue_wait_ms += wait;
+    reads.queue_wait_max_ms = Math.max(reads.queue_wait_max_ms, wait);
+    reads.run_ms += ran;
+    reads.run_max_ms = Math.max(reads.run_max_ms, ran);
+    const sql = unroundedMs(sqlMs);
+    reads.sql_ms += sql;
+    reads.sql_max_ms = Math.max(reads.sql_max_ms, sql);
+    if (snapshot) {
+      reads.snapshot_reads += 1;
+      reads.snapshot_sql_ms += sql;
+    }
+    if (outcome === "refused")
+      reads.refused += 1;
+    else if (outcome === "dropped_queued")
+      reads.dropped_queued += 1;
+    else if (outcome === "past_deadline_running")
+      reads.past_deadline_running += 1;
+    else if (outcome === "error")
+      reads.errors += 1;
+  };
+}
+var CONTENT_FREE_ERROR_CLASSES = new Set([
+  "AbortError",
+  "AnalystUnavailable",
+  "AnalystCircuitOpen",
+  "EmailSourceWorkerError",
+  "Error",
+  "LocalTrustProviderMismatch",
+  "OperationError",
+  "RangeError",
+  "SourceModelPolicyDeniedError",
+  "SecureEvidencePolicySkip",
+  "SecureAnalystPoolE2EEGateError",
+  "SyntaxError",
+  "TrustedAnalystTimeoutError",
+  "TypeError"
+]);
+function currentSourceAnswerTrace() {
+  return storage.getStore();
+}
+function sourceAnswerTraceActive() {
+  return storage.getStore() !== undefined;
+}
+function recordSourceAnswerMainThreadSql(elapsedMs, site) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  const ms = unroundedMs(elapsedMs);
+  const sql = trace.mainThreadSql;
+  sql.statements += 1;
+  sql.total_ms += ms;
+  sql.max_ms = Math.max(sql.max_ms, ms);
+  if (ms < SITE_TALLY_MS)
+    return;
+  const where = site();
+  const tally = sql.by_site.find((entry) => entry.site === where);
+  if (tally) {
+    tally.statements += 1;
+    tally.ms += ms;
+  } else {
+    sql.by_site.push({ site: where, statements: 1, ms });
+  }
+  if (ms < SLOW_MAIN_THREAD_SQL_MS)
+    return;
+  sql.slow.push({ ms: nonNegativeMs(ms), site: where });
+  if (sql.slow.length > SLOW_MAIN_THREAD_SQL_KEPT) {
+    sql.slow.sort((left, right) => right.ms - left.ms);
+    sql.slow.length = SLOW_MAIN_THREAD_SQL_KEPT;
+  }
+}
+function unroundedMs(value) {
+  return Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+function nonNegativeMs(value) {
+  return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+}
+
+// src/workers/connector-store/main-thread-sql-trace.ts
+var TIMED = "__olympusMainThreadSqlTimed";
+var STATEMENT_METHODS = ["all", "get", "run", "values"];
+var SITE_FRAMES = 3;
+var installed = false;
+function installMainThreadSqlTrace() {
+  if (installed || !isMainThread)
+    return;
+  installed = true;
+  for (const name of ["query", "prepare"]) {
+    const original = Database2.prototype[name];
+    Database2.prototype[name] = function(...args) {
+      return timeStatement(original.apply(this, args));
+    };
+  }
+}
+function timeStatement(statement) {
+  const held = statement;
+  if (!statement || held[TIMED])
+    return statement;
+  for (const method of STATEMENT_METHODS) {
+    const call = held[method];
+    if (typeof call !== "function")
+      continue;
+    held[method] = function(...args) {
+      if (!sourceAnswerTraceActive())
+        return call.apply(this, args);
+      const started = performance.now();
+      try {
+        return call.apply(this, args);
+      } finally {
+        recordSourceAnswerMainThreadSql(performance.now() - started, callSite);
+      }
+    };
+  }
+  held[TIMED] = true;
+  return statement;
+}
+function callSite() {
+  const frames = (new Error().stack ?? "").split(`
+`).slice(1).map((line) => line.trim()).map((line) => line.startsWith("at ") ? line.slice(3) : line).filter((line) => line.length > 0);
+  const recorder = frames.findIndex((frame) => frame.startsWith("recordSourceAnswerMainThreadSql"));
+  const caller = recorder >= 0 ? recorder + 2 : 3;
+  return frames.slice(caller, caller + SITE_FRAMES).map(shortFrame).join(" < ");
+}
+function shortFrame(frame) {
+  const open2 = frame.lastIndexOf("(");
+  const name = open2 > 0 ? frame.slice(0, open2).trim() : "<anonymous>";
+  const where = (open2 > 0 ? frame.slice(open2 + 1, frame.lastIndexOf(")")) : frame).split("/").at(-1) ?? "";
+  const [file, line] = where.split(":");
+  return `${name} ${file}${line ? `:${line}` : ""}`;
+}
+
 // src/workers/file-extraction/unreadable-files.ts
 var UNREAD_PRIVACY_CHECK_MISSING_KIND = "privacy_check_missing";
 function unreadableFileReason(errorKind) {
@@ -19410,7 +19642,7 @@ var CURSOR_TIME_ALPHABET = new Set("0123456789TZ:.+-");
 
 // src/workers/file-extraction/job-names.ts
 import { existsSync as existsSync15 } from "node:fs";
-import { Database as Database2 } from "bun:sqlite";
+import { Database as Database3 } from "bun:sqlite";
 var CLEAR_NAMES_BUSY_TIMEOUT_MS = 1e4;
 function defaultFileExtractionJobsDbPath(env = process.env) {
   return sharedDataPath("file-extraction-jobs", env);
@@ -19435,7 +19667,7 @@ function jobLedgerPathsToVisit(recorded, env = process.env) {
 function clearExtractionJobNames(dbPath, item, options = {}) {
   if (dbPath === ":memory:" || !existsSync15(dbPath))
     return { cleared: 0, durable: true };
-  const db = new Database2(dbPath, { readwrite: true, create: false });
+  const db = new Database3(dbPath, { readwrite: true, create: false });
   try {
     db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
     const table = db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_jobs'`).get();
@@ -19483,7 +19715,7 @@ function clearExtractionJobNames(dbPath, item, options = {}) {
 function retireExtractionJobRedaction(dbPath, item, claimant, stillSecret) {
   if (dbPath === ":memory:" || !existsSync15(dbPath))
     return { retired: 0, stillSecret: false };
-  const db = new Database2(dbPath, { readwrite: true, create: false });
+  const db = new Database3(dbPath, { readwrite: true, create: false });
   try {
     db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
     if (!redactionsTableExists(db))
@@ -19529,7 +19761,7 @@ function artifactsTableExists(db) {
 function oweExtractionRereadAfterRevive(dbPath, item) {
   if (dbPath === ":memory:" || !existsSync15(dbPath))
     return 0;
-  const db = new Database2(dbPath, { readwrite: true, create: false });
+  const db = new Database3(dbPath, { readwrite: true, create: false });
   try {
     db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
     if (!rereadsTableExists(db) || !rereadsHaveReason(db))
@@ -19559,34 +19791,92 @@ function redactionsTableExists(db) {
 
 // src/core/source-index/keyword-languages.ts
 var profiles = new WeakMap;
+var SAMPLE_TARGET = 1024;
+var SAMPLE_LIMIT = 2048;
+var READ_BATCH = 500;
+var PROFILE_REUSE_MS = 10 * 60000;
 function storeKeywordLanguages(db) {
+  const steps = profileSteps(db);
+  let next = steps.next();
+  while (!next.done) {
+    const read = next.value;
+    const statement = db.query(read.sql);
+    next = steps.next(read.mode === "get" ? statement.get(...read.params) : statement.all(...read.params));
+  }
+  return next.value;
+}
+var sampling = new WeakMap;
+function storeKeywordLanguagesWith(db, read) {
+  const steps = profileSteps(db);
+  const first = steps.next();
+  if (first.done)
+    return Promise.resolve(first.value);
+  const pending = sampling.get(db);
+  if (pending)
+    return pending;
+  const run = (async () => {
+    let next = first;
+    while (!next.done)
+      next = steps.next(await read(next.value));
+    return next.value;
+  })().finally(() => sampling.delete(db));
+  sampling.set(db, run);
+  return run;
+}
+function lastKeywordLanguages(db) {
+  return profiles.get(db)?.languages ?? [];
+}
+function* profileSteps(db) {
   const revision = JSON.stringify([db.query("PRAGMA data_version").get(), db.query("SELECT total_changes() AS n").get()]);
   const cached2 = profiles.get(db);
   if (cached2?.revision === revision)
     return cached2.languages;
-  const total = db.query("SELECT count(*) AS n FROM chunks c JOIN items i ON i.item_pk = c.item_pk WHERE i.tombstoned = 0").get().n;
-  const threshold = Math.floor(Math.min(1, 1024 / Math.max(1, total)) * 4294967296);
-  const rows = db.query(`SELECT c.rowid AS pk, c.content_hash AS hash FROM chunks c
-    JOIN items i ON i.item_pk = c.item_pk WHERE i.tombstoned = 0
-      AND ((c.rowid * 2654435761) % 4294967296) < ? ORDER BY c.rowid LIMIT 2048`).all(threshold);
+  if (cached2 && cached2.large && Date.now() - cached2.sampledAtMs < PROFILE_REUSE_MS)
+    return cached2.languages;
+  const maxRowid = (yield { sql: "SELECT max(rowid) AS n FROM chunks", params: [], mode: "get" })?.n ?? 0;
+  const large = maxRowid > SAMPLE_LIMIT;
+  if (large && cached2 && Date.now() - cached2.sampledAtMs < PROFILE_REUSE_MS)
+    return cached2.languages;
+  const live = `SELECT c.rowid AS pk, c.content_hash AS hash FROM chunks c
+    JOIN items i ON i.item_pk = c.item_pk WHERE i.tombstoned = 0`;
+  let rows;
+  if (!large) {
+    rows = yield { sql: `${live} ORDER BY c.rowid LIMIT ${SAMPLE_LIMIT}`, params: [], mode: "all" };
+  } else {
+    const step = maxRowid / SAMPLE_TARGET;
+    const ids = Array.from({ length: SAMPLE_TARGET }, (_, k) => Math.min(maxRowid, Math.max(1, Math.floor(k * step + k * 0.6180339887 % 1 * step) + 1)));
+    rows = [];
+    for (let at = 0;at < ids.length; at += READ_BATCH) {
+      const batch = ids.slice(at, at + READ_BATCH);
+      rows.push(...yield { sql: `${live} AND c.rowid IN (${batch.map(() => "?").join(",")}) ORDER BY c.rowid`, params: batch, mode: "all" });
+    }
+  }
   const signature = JSON.stringify(rows);
   if (cached2?.signature === signature) {
-    cached2.revision = revision;
+    profiles.set(db, { ...cached2, revision, large, sampledAtMs: Date.now() });
     return cached2.languages;
   }
   const detected = new Map;
-  const counts = new Map;
-  const textFor = db.query("SELECT substr(bounded_text, 1, 1000) AS text FROM chunks WHERE rowid = ?");
   for (const row of rows) {
-    let language = detected.get(row.hash) ?? cached2?.detected.get(row.hash);
-    if (language === undefined)
-      language = franc(textFor.get(row.pk).text, { minLength: 40 });
-    detected.set(row.hash, language);
+    const known = cached2?.detected.get(row.hash);
+    if (known !== undefined)
+      detected.set(row.hash, known);
+  }
+  const unread = [...new Map(rows.filter((row) => !detected.has(row.hash)).map((row) => [row.hash, row.pk])).values()];
+  for (let at = 0;at < unread.length; at += READ_BATCH) {
+    const batch = unread.slice(at, at + READ_BATCH);
+    const texts = yield { sql: `SELECT c.rowid AS pk, c.content_hash AS hash, substr(c.bounded_text, 1, 1000) AS text FROM chunks c WHERE c.rowid IN (${batch.map(() => "?").join(",")})`, params: batch, mode: "all" };
+    for (const text2 of texts)
+      detected.set(text2.hash, franc(text2.text ?? "", { minLength: 40 }));
+  }
+  const counts = new Map;
+  for (const row of rows) {
+    const language = detected.get(row.hash) ?? "und";
     if (language !== "und")
       counts.set(language, (counts.get(language) ?? 0) + 1);
   }
   const languages = [...counts].filter(([, count]) => count / Math.max(1, rows.length) >= 0.05).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 6).map(([language]) => language).sort();
-  profiles.set(db, { revision, signature, languages, detected });
+  profiles.set(db, { revision, signature, languages, detected, sampledAtMs: Date.now(), large });
   return languages;
 }
 // src/workers/classification/sniffer.ts
@@ -19723,7 +20013,7 @@ var SCORER_SYSTEM_PROMPT = [
 `);
 
 // src/workers/classification/sniffer-store.ts
-import { Database as Database3 } from "bun:sqlite";
+import { Database as Database4 } from "bun:sqlite";
 import { createHash as createHash12 } from "node:crypto";
 import { chmodSync as chmodSync4, existsSync as existsSync16, mkdirSync as mkdirSync11 } from "node:fs";
 import { dirname as dirname19 } from "node:path";
@@ -19745,7 +20035,7 @@ class TierSnifferStore {
     this.dbPath = options.dbPath;
     this.now = options.now ?? (() => new Date);
     if (options.readOnly === true) {
-      this.db = new Database3(this.dbPath, { readonly: true, create: false });
+      this.db = new Database4(this.dbPath, { readonly: true, create: false });
       this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
       this.readOnly = true;
       return;
@@ -19758,7 +20048,7 @@ class TierSnifferStore {
     const previousUmask = onDisk ? process.umask(63) : undefined;
     let db;
     try {
-      db = new Database3(this.dbPath, { create: true });
+      db = new Database4(this.dbPath, { create: true });
       db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
       runSqliteMigrations(db, TIER_SNIFFER_SQLITE_STORE_ID, snifferMigrations());
       if (onDisk)
@@ -20327,73 +20617,8 @@ var SYSTEM = "Translate only the INDIVIDUAL content words in concepts, never the
 // src/core/source-index/lane-busy.ts
 var SOURCE_INDEX_LANE_BUSY_CODE = "source_index_lane_busy";
 
-// src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
-var storage = new AsyncLocalStorage3;
-var laneStorage = new AsyncLocalStorage3;
-function beginSourceAnswerPoolRead() {
-  const query = currentSourceAnswerTrace()?.activeQuery;
-  const corpusId = laneStorage.getStore();
-  if (!query || corpusId === undefined)
-    return;
-  return ({ queueWaitMs, runMs, outcome }) => {
-    let reads = query.poolByCorpus.get(corpusId);
-    if (!reads) {
-      reads = {
-        reads: 0,
-        queue_wait_ms: 0,
-        queue_wait_max_ms: 0,
-        run_ms: 0,
-        run_max_ms: 0,
-        refused: 0,
-        dropped_queued: 0,
-        past_deadline_running: 0,
-        errors: 0
-      };
-      query.poolByCorpus.set(corpusId, reads);
-    }
-    const wait = nonNegativeMs(queueWaitMs);
-    const ran = nonNegativeMs(runMs);
-    reads.reads += 1;
-    reads.queue_wait_ms += wait;
-    reads.queue_wait_max_ms = Math.max(reads.queue_wait_max_ms, wait);
-    reads.run_ms += ran;
-    reads.run_max_ms = Math.max(reads.run_max_ms, ran);
-    if (outcome === "refused")
-      reads.refused += 1;
-    else if (outcome === "dropped_queued")
-      reads.dropped_queued += 1;
-    else if (outcome === "past_deadline_running")
-      reads.past_deadline_running += 1;
-    else if (outcome === "error")
-      reads.errors += 1;
-  };
-}
-var CONTENT_FREE_ERROR_CLASSES = new Set([
-  "AbortError",
-  "AnalystUnavailable",
-  "AnalystCircuitOpen",
-  "EmailSourceWorkerError",
-  "Error",
-  "LocalTrustProviderMismatch",
-  "OperationError",
-  "RangeError",
-  "SourceModelPolicyDeniedError",
-  "SecureEvidencePolicySkip",
-  "SecureAnalystPoolE2EEGateError",
-  "SyntaxError",
-  "TrustedAnalystTimeoutError",
-  "TypeError"
-]);
-function currentSourceAnswerTrace() {
-  return storage.getStore();
-}
-function nonNegativeMs(value) {
-  return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
-}
-
 // src/workers/connector-store/off-thread-reads.ts
-var READ_POOL_SIZE = 2;
+var READ_POOL_SIZE = 1;
 var READ_POOL_QUEUE_PER_STORE = 8;
 var OFF_THREAD_READ_TIMEOUT_MS = 120000;
 
@@ -20411,6 +20636,7 @@ var REAL_CLOCK = {
 };
 var clock2 = REAL_CLOCK;
 var observer;
+var observeSnapshots = false;
 var workerFactory = (url) => new Worker(url);
 var WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
@@ -20418,8 +20644,10 @@ import { statSync } from 'node:fs';
 const snapshots = new Map();
 const connections = new Map();
 const open = (path) => {
+  const started = performance.now();
   const db = new Database(path, { readonly: true });
   db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON');
+  postMessage({ diagnostic: 'open', path, ms: performance.now() - started });
   return db;
 };
 const connection = (path) => {
@@ -20456,9 +20684,10 @@ self.onmessage = (event) => {
     } else {
       const db = op === 'query' ? connection(path) : snapshots.get(snapshot);
       if (!db) throw new Error('unknown snapshot');
+      const started = performance.now();
       const query = db.query(sql);
       const rows = mode === 'all' ? query.all(...params) : query.get(...params);
-      postMessage({ id, ok: true, rows });
+      postMessage({ id, ok: true, rows, ms: performance.now() - started });
     }
   } catch (error) {
     postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error) });
@@ -20467,6 +20696,9 @@ self.onmessage = (event) => {
 `;
 var threads = [];
 var nextId = 1;
+var counters = { starts: 0, terminations: 0, restarts: 0, opens: 0, openMs: 0 };
+var startedStores = new Set;
+var storeOpens = new Map;
 var queues = new Map;
 var turns = [];
 function live() {
@@ -20478,22 +20710,39 @@ function busy(reader) {
 function runtimeHasWorkers() {
   return typeof Worker === "function" && typeof Blob === "function" && Boolean(globalThis.Bun);
 }
-function startThread() {
-  if (threads.length >= READ_POOL_SIZE || !runtimeHasWorkers())
+function startThread(store) {
+  if (threads.filter((reader) => reader.store === store).length >= READ_POOL_SIZE || !runtimeHasWorkers())
     return;
   try {
     const url = URL.createObjectURL(new Blob([WORKER_SOURCE], { type: "application/javascript" }));
     const worker = workerFactory(url);
     worker.unref?.();
-    const started = { worker, pending: new Map, snapshots: 0 };
+    counters.starts += 1;
+    if (startedStores.has(store))
+      counters.restarts += 1;
+    startedStores.add(store);
+    const started = { store, worker, pending: new Map, snapshots: 0 };
     worker.onmessage = (event) => {
       const message2 = event.data;
+      const diagnostic = message2;
+      if (diagnostic.diagnostic === "open") {
+        counters.opens += 1;
+        counters.openMs += diagnostic.ms;
+        const held = storeOpens.get(diagnostic.path) ?? { opens: 0, openMs: 0 };
+        held.opens += 1;
+        held.openMs += diagnostic.ms;
+        storeOpens.set(diagnostic.path, held);
+        return;
+      }
+      started.executingStore = undefined;
       const waiting = started.pending.get(message2.id);
       if (!waiting)
         return;
       started.pending.delete(message2.id);
       if (waiting.timer !== undefined)
-        clearTimeout(waiting.timer);
+        clock2.clearTimeout(waiting.timer);
+      if (typeof message2.ms === "number")
+        waiting.sqlMs?.(message2.ms);
       if (message2.ok)
         waiting.resolve(message2.rows ?? null);
       else
@@ -20520,9 +20769,10 @@ function retire(stopped, error) {
   if (stopped.retired)
     return;
   stopped.retired = true;
+  counters.terminations += 1;
   for (const waiting of stopped.pending.values()) {
     if (waiting.timer !== undefined)
-      clearTimeout(waiting.timer);
+      clock2.clearTimeout(waiting.timer);
     waiting.reject(error);
   }
   stopped.pending.clear();
@@ -20533,21 +20783,21 @@ function retire(stopped, error) {
 function offThreadReadsSupported(dbPath) {
   return dbPath !== ":memory:" && !dbPath.startsWith("file::memory:") && runtimeHasWorkers();
 }
-function send(reader, message2, timeoutMs = OFF_THREAD_READ_TIMEOUT_MS) {
+function send(reader, message2, timeoutMs = OFF_THREAD_READ_TIMEOUT_MS, sqlMs) {
   if (reader.retired)
     return Promise.reject(new Error("off-thread reader stopped"));
   const id = nextId++;
   return new Promise((resolve7, reject) => {
-    const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
+    const timer = timeoutMs === null ? undefined : clock2.setTimeout(() => {
       retire(reader, new Error("off-thread read timed out"));
     }, timeoutMs);
-    reader.pending.set(id, { resolve: resolve7, reject, ...timer !== undefined ? { timer } : {} });
+    reader.pending.set(id, { resolve: resolve7, reject, ...timer !== undefined ? { timer } : {}, ...sqlMs ? { sqlMs } : {} });
     try {
       reader.worker.postMessage({ ...message2, id });
     } catch (error) {
       reader.pending.delete(id);
       if (timer !== undefined)
-        clearTimeout(timer);
+        clock2.clearTimeout(timer);
       reject(error instanceof Error ? error : new Error(String(error)));
     }
   });
@@ -20566,7 +20816,25 @@ async function withOffThreadSnapshot(dbPath, work) {
   try {
     await send(reader, { op: "open", snapshot, path: dbPath });
     try {
-      return await work((query) => send(reader, { op: "read", snapshot, sql: query.sql, params: query.params, mode: query.mode }));
+      return await work(async (query) => {
+        if (observeSnapshots)
+          observer?.(dbPath, query);
+        const report = beginSourceAnswerPoolRead();
+        const sentAtMs = clock2.now();
+        let sqlMs = 0;
+        try {
+          const rows = await send(reader, { op: "read", snapshot, sql: query.sql, params: query.params, mode: query.mode }, undefined, (ms) => {
+            sqlMs = ms;
+          });
+          report?.({ queueWaitMs: 0, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "rows", snapshot: true });
+          return rows;
+        } catch (error) {
+          report?.({ queueWaitMs: 0, runMs: clock2.now() - sentAtMs, sqlMs, outcome: "error", snapshot: true });
+          throw error;
+        } finally {
+          dispatch();
+        }
+      });
     } finally {
       await send(reader, { op: "close", snapshot }).catch(() => {
         return;
@@ -20579,14 +20847,11 @@ async function withOffThreadSnapshot(dbPath, work) {
 }
 var snapshotWaiters = [];
 var releases = new Map;
-function snapshotThreadNow() {
-  const best = live().filter((reader) => !reader.job).reduce((least, reader) => !least || busy(reader) < busy(least) ? reader : least, undefined);
-  if (best && busy(best) === 0)
-    return best;
-  return startThread() ?? best;
+function snapshotThreadNow(store) {
+  return live().find((reader) => reader.store === store && !reader.releaseWhenIdle && !reader.job) ?? startThread(store);
 }
 function snapshotThread(store) {
-  const reader = snapshotThreadNow();
+  const reader = snapshotThreadNow(store);
   if (reader) {
     reader.snapshots += 1;
     return Promise.resolve(reader);
@@ -20607,11 +20872,11 @@ function snapshotThread(store) {
   });
 }
 function serveSnapshotWaiters() {
-  while (snapshotWaiters.length > 0) {
-    const reader = snapshotThreadNow();
+  for (const waiter of [...snapshotWaiters]) {
+    const reader = snapshotThreadNow(waiter.store);
     if (!reader)
-      return;
-    const waiter = snapshotWaiters.shift();
+      continue;
+    snapshotWaiters.splice(snapshotWaiters.indexOf(waiter), 1);
     clearTimeout(waiter.timer);
     reader.snapshots += 1;
     waiter.resolve(reader);
@@ -20622,7 +20887,7 @@ function readOnPool(dbPath, read, options = {}) {
   const waiting = queues.get(dbPath) ?? [];
   const report = beginSourceAnswerPoolRead();
   if (waiting.length >= READ_POOL_QUEUE_PER_STORE || clock2.now() >= deadlineAtMs) {
-    report?.({ queueWaitMs: 0, runMs: 0, outcome: "refused" });
+    report?.({ queueWaitMs: 0, runMs: 0, sqlMs: 0, outcome: "refused" });
     return Promise.reject(new OffThreadReadBusyError);
   }
   return new Promise((resolve7, reject) => {
@@ -20652,11 +20917,12 @@ function releaseOffThreadReads(dbPath) {
     for (const job of waiting)
       settle(job, { error: new OffThreadReadBusyError });
   }
-  for (const reader of live()) {
-    try {
-      reader.worker.postMessage({ op: "release", path: dbPath });
-    } catch {}
+  for (const reader of live().filter((reader2) => reader2.store === dbPath)) {
+    reader.releaseWhenIdle = true;
+    if (reader.job)
+      settle(reader.job, { error: new OffThreadReadBusyError });
   }
+  dispatch();
 }
 function settle(job, outcome) {
   if (job.settled)
@@ -20678,6 +20944,7 @@ function settle(job, outcome) {
     job.report({
       queueWaitMs: (sentAtMs ?? now) - job.enqueuedAtMs,
       runMs: sentAtMs === undefined ? 0 : now - sentAtMs,
+      sqlMs: job.sqlMs ?? 0,
       outcome: ended
     });
   }
@@ -20691,7 +20958,6 @@ function missedDeadline(job) {
     return;
   settle(job, { error: new OffThreadReadBusyError });
   if (job.thread) {
-    retire(job.thread, new OffThreadReadBusyError);
     return;
   }
   const waiting = queues.get(job.store);
@@ -20699,41 +20965,43 @@ function missedDeadline(job) {
   if (waiting && at >= 0)
     waiting.splice(at, 1);
 }
-function freeThread() {
-  return live().find((reader) => !reader.job && reader.pending.size === 0 && reader.snapshots === 0) ?? startThread();
+function freeThread(store) {
+  return live().find((reader) => reader.store === store && !reader.releaseWhenIdle && !reader.job && reader.pending.size === 0) ?? startThread(store);
 }
-function nextJob() {
-  while (turns.length > 0) {
+function dispatch() {
+  for (const reader of live()) {
+    if (reader.releaseWhenIdle && busy(reader) === 0)
+      retire(reader, new OffThreadReadBusyError);
+  }
+  serveSnapshotWaiters();
+  for (let remaining = turns.length;remaining > 0; remaining -= 1) {
     const store = turns.shift();
     const waiting = queues.get(store);
-    let job = waiting?.shift();
-    while (job && clock2.now() >= job.deadlineAtMs) {
-      settle(job, { error: new OffThreadReadBusyError });
-      job = waiting?.shift();
+    while (waiting.length && clock2.now() >= waiting[0].deadlineAtMs) {
+      settle(waiting.shift(), { error: new OffThreadReadBusyError });
     }
-    if (waiting && waiting.length > 0)
+    if (!waiting.length) {
+      queues.delete(store);
+      continue;
+    }
+    const reader = freeThread(store);
+    if (!reader) {
+      turns.push(store);
+      continue;
+    }
+    const job = waiting.shift();
+    if (waiting.length)
       turns.push(store);
     else
       queues.delete(store);
-    if (job)
-      return job;
-  }
-  return;
-}
-function dispatch() {
-  serveSnapshotWaiters();
-  while (turns.length > 0) {
-    const reader = freeThread();
-    if (!reader)
-      return;
-    const job = nextJob();
-    if (!job)
-      return;
     job.thread = reader;
     job.sentAtMs = clock2.now();
     reader.job = job;
+    reader.executingStore = job.store;
     observer?.(job.store, job.read);
-    send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, undefined).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => settle(job, { error: reader.retired ? new OffThreadReadBusyError : error })).finally(() => {
+    send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, null, (ms) => {
+      job.sqlMs = ms;
+    }).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => settle(job, { error: reader.retired ? new OffThreadReadBusyError : error })).finally(() => {
       if (reader.job === job)
         reader.job = undefined;
       dispatch();
@@ -20795,7 +21063,7 @@ function hasImmutableAccountLabel(id) {
 import { createHash as createHash16, randomUUID as randomUUID9 } from "node:crypto";
 import { existsSync as existsSync22, lstatSync as lstatSync10, mkdirSync as mkdirSync14, statSync as statSync11 } from "node:fs";
 import { dirname as dirname25 } from "node:path";
-import { Database as Database5 } from "bun:sqlite";
+import { Database as Database6 } from "bun:sqlite";
 
 // src/core/media-cache.ts
 import { createHash as createHash14, randomUUID as randomUUID8 } from "node:crypto";
@@ -21418,15 +21686,15 @@ function registeredInstalledTierClassification() {
 
 // src/workers/connector-store/tier-placement.ts
 function resolveStoreTierClassification(explicit, ledgerPath) {
-  const installed = registeredInstalledTierClassification()?.forLedger(ledgerPath);
-  if (!installed)
+  const installed2 = registeredInstalledTierClassification()?.forLedger(ledgerPath);
+  if (!installed2)
     return explicit;
   if (!explicit)
-    return installed;
-  const rules = [...explicit.rules ?? [], ...installed.rules ?? []];
-  const sniffer = explicit.sniffer ?? installed.sniffer;
-  const unavailableReason = installed.unavailableReason ?? explicit.unavailableReason;
-  const retirePublic = installed.retirePublic === true || explicit.retirePublic === true;
+    return installed2;
+  const rules = [...explicit.rules ?? [], ...installed2.rules ?? []];
+  const sniffer = explicit.sniffer ?? installed2.sniffer;
+  const unavailableReason = installed2.unavailableReason ?? explicit.unavailableReason;
+  const retirePublic = installed2.retirePublic === true || explicit.retirePublic === true;
   return {
     ...rules.length > 0 ? { rules } : {},
     ...sniffer ? { sniffer } : {},
@@ -21476,7 +21744,28 @@ function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
   const fenced = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh }) : options?.sniffer;
   const signals = connector.classificationSignals(item);
   const parentContext = item.identity.parent ? options?.parentNamesContext?.(item.identity, item.identity.parent.localItemId) : undefined;
-  const sniffer = fenced && conversationOrderedSniffer(recordedContentVerdictSniffer(fenced, recorded, text2, contentNamesReason(signals, parentContext)), item.metadata);
+  const namesReceipt = contentNamesReason(signals, parentContext);
+  const cacheAware = fenced && {
+    id: fenced.id,
+    judge(request) {
+      if (!fenced.cachedVerdict || request.pass !== "content" || text2 === undefined || !recorded || recorded.state === "moving" || recorded.engineVersion !== TIER_CLASSIFIER_VERSION || recorded.mapRevision !== (request.mapRevision ?? "none") || !recorded.reasons.includes(namesReceipt))
+        return fenced.judge(request);
+      const verdict = fenced.cachedVerdict(request);
+      if (verdict.verdict === "decided")
+        return verdict;
+      const storedNames = extra.storedContentNames?.();
+      if (storedNames) {
+        const cached2 = fenced.cachedVerdict({
+          ...request,
+          materialHash: tierSnifferInputHash("content", storedNames, text2, parentContext)
+        });
+        if (cached2.verdict === "decided")
+          return cached2;
+      }
+      return fenced.judge(request);
+    }
+  };
+  const sniffer = cacheAware && conversationOrderedSniffer(recordedContentVerdictSniffer(cacheAware, recorded, text2, namesReceipt), item.metadata);
   const holdUntilJudged = options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true || heldUntilJudged(recorded?.reasons);
   return classifyItemTiers({
     signals,
@@ -21523,14 +21812,18 @@ function secretFencedSniffer(sniffer, ledger, identity, read, options = {}) {
       return true;
     return options.mayAskSecret === true && read.secret && JSON.stringify(read.override ?? null) === JSON.stringify(now.override ?? null);
   };
-  return { id: sniffer.id, judge: (request) => sniffer.judge({ ...request, stillAsk }) };
+  return {
+    id: sniffer.id,
+    ...sniffer.cachedVerdict ? { cachedVerdict: (request) => sniffer.cachedVerdict({ ...request, stillAsk }) } : {},
+    judge: (request) => sniffer.judge({ ...request, stillAsk })
+  };
 }
 
 // src/workers/connector-store/secrets-disposition.ts
 import { existsSync as existsSync21 } from "node:fs";
 
 // src/core/app-release-log.ts
-import { Database as Database4 } from "bun:sqlite";
+import { Database as Database5 } from "bun:sqlite";
 import { randomBytes as randomBytes2 } from "node:crypto";
 import { chmodSync as chmodSync6, existsSync as existsSync20, lstatSync as lstatSync9, mkdirSync as mkdirSync13 } from "node:fs";
 import { homedir as homedir11 } from "node:os";
@@ -21624,7 +21917,7 @@ function isAppReleaseRetentionDays(value) {
 function openAppReleaseLog(dbPath, options = {}) {
   const now = options.now ?? Date.now;
   hardenPrivatePath(dbPath);
-  const db = new Database4(dbPath, { create: true });
+  const db = new Database5(dbPath, { create: true });
   try {
     chmodSync6(dbPath, 384);
     db.exec("PRAGMA busy_timeout = 5000; PRAGMA secure_delete = ON; PRAGMA journal_mode = DELETE; PRAGMA foreign_keys = ON;");
@@ -23875,7 +24168,7 @@ function runSteps(steps) {
 var EXTRACTION_CANDIDATE_WINDOW = 500;
 var EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000;
 var SETTLED_UNREADABLE_ITEMS_SLICE = 500;
-var HIDDEN_CHILD_PARENT_SLICE = 2000;
+var HIDDEN_CHILD_PARENT_SLICE = 500;
 async function runStepsInTurns(steps) {
   await ingestionTurn();
   let step = steps.next();
@@ -23971,6 +24264,9 @@ var RESTORED_SCOPE_RUN_ID = "restored-source-scope";
 var RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope";
 var TIER_MOVE_CONNECTOR_ID = "olympus_tier_move";
 var NON_SYNC_RUN_CONNECTORS_SQL = `('connector_store_embedding_write_authority', '${TIER_SET_BINDING_CONNECTOR_ID}', '${TIER_MOVE_CONNECTOR_ID}', '${RESTORED_SCOPE_CONNECTOR_ID}')`;
+var LAST_SYNC_RUN_SQL = `SELECT * FROM sync_runs
+  WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
+  ORDER BY started_at DESC, rowid DESC LIMIT 1`;
 
 class ConnectorStoreLocatorIdentityIndexNotReadyError extends Error {
   constructor() {
@@ -23981,6 +24277,7 @@ class ConnectorStoreLocatorIdentityIndexNotReadyError extends Error {
 var CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding";
 var CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000;
 var CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256;
+var CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512;
 var CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
@@ -23988,15 +24285,67 @@ var CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
 `;
-function connectorStoreCurrentEmbeddingRowsPage(db, options, afterChunkPk, limit = CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE) {
-  const { sql, params } = connectorStoreCurrentEmbeddingPageQuery(options, afterChunkPk, limit);
-  const rows = db.query(sql).all(...params);
-  return rows.map((row) => ({
-    itemPk: row.item_pk,
-    chunkPk: row.chunk_pk,
-    localItemId: row.local_item_id,
-    embedding: row.embedding
-  }));
+async function scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, pageSize) {
+  const authority = embeddingAuthorityRead(provider);
+  const after = embeddingAuthorityFromRow(await read(authority), provider);
+  if (after.skippedReason)
+    return { skippedReason: after.skippedReason };
+  if (after.token !== beforeToken)
+    return { skippedReason: "embedding_authority_changed_during_query" };
+  const bestByItem = new Map;
+  let dimensionMismatches = 0;
+  let afterChunkPk = 0;
+  let pagesScanned = 0;
+  while (true) {
+    if (connectorStoreVectorDeadlineExpired(deadlineAtMs))
+      return { skippedReason: "vector_scan_deadline_exceeded" };
+    const { sql, params } = connectorStoreCurrentEmbeddingPageQuery(pageOptions, afterChunkPk, pageSize);
+    const page = await read({ mode: "all", sql, params });
+    if (page.length === 0)
+      break;
+    for (const [index, row] of page.entries()) {
+      if ((index & 31) === 0 && connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
+        return { skippedReason: "vector_scan_deadline_exceeded" };
+      }
+      const documentVector = decodeEmbedding(row.embedding);
+      if (documentVector.length !== queryVector.length) {
+        dimensionMismatches += 1;
+        continue;
+      }
+      const score = cosineSimilarity(queryVector, documentVector);
+      const existing = bestByItem.get(row.item_pk);
+      if (existing === undefined || score > existing.bestCosine) {
+        bestByItem.set(row.item_pk, { bestCosine: score, bestChunkPk: row.chunk_pk, localItemId: row.local_item_id });
+      }
+    }
+    afterChunkPk = page.at(-1).chunk_pk;
+    if (page.length < pageSize)
+      break;
+    if (pagesScanned++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0)
+      await yieldConnectorStoreVectorScan();
+  }
+  return { bestByItem, dimensionMismatches };
+}
+async function scanVectorPagesOnPool(dbPath, provider, beforeToken, queryVector, pageOptions, deadlineAtMs) {
+  const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE)).catch((error) => {
+    if (error instanceof OffThreadReadBusyError)
+      return { skippedReason: "vector_scan_store_busy" };
+    throw error;
+  });
+  if (deadlineAtMs === undefined || !Number.isFinite(deadlineAtMs))
+    return scan;
+  let timer;
+  const deadline = new Promise((resolve10) => {
+    timer = setTimeout(() => resolve10({ skippedReason: "vector_scan_deadline_exceeded" }), Math.max(0, deadlineAtMs - Date.now()));
+  });
+  try {
+    return await Promise.race([scan, deadline]);
+  } finally {
+    clearTimeout(timer);
+    scan.catch(() => {
+      return;
+    });
+  }
 }
 function connectorStoreCurrentEmbeddingPageQuery(options, afterChunkPk, limit = CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE) {
   const modelId = requireNonEmpty(options.modelId, "Connector store embedding model id");
@@ -24027,6 +24376,36 @@ function connectorStoreCurrentEmbeddingPageQuery(options, afterChunkPk, limit = 
       pageLimit
     ]
   };
+}
+function embeddingAuthorityRead(provider) {
+  return {
+    mode: "get",
+    sql: `SELECT status, cursor, audit_receipt_sha256
+      FROM sync_runs
+      WHERE sync_run_id = ? AND connector_id = ?`,
+    params: [connectorStoreEmbeddingWriteAuthorityId(provider.modelId), "connector_store_embedding_write_authority"]
+  };
+}
+function embeddingAuthorityFromRow(row, provider) {
+  if (!row)
+    return { token: "no_embedding_write_authority" };
+  if (row.status !== "running" || row.audit_receipt_sha256 !== hashString4(row.cursor ?? "")) {
+    return { token: "corrupt", skippedReason: "embedding_authority_corrupt" };
+  }
+  let record;
+  try {
+    record = parseConnectorStoreEmbeddingWriteAuthority(row.cursor);
+  } catch {
+    return { token: "unreadable", skippedReason: "embedding_authority_unreadable" };
+  }
+  const token = row.audit_receipt_sha256 ?? "";
+  if (!connectorStoreEmbeddingWriteAuthorityMatches(record, provider)) {
+    return { token, skippedReason: "embedding_authority_provider_mismatch" };
+  }
+  if (record.currencyRebuildPending) {
+    return { token, skippedReason: "embedding_currency_rebuild_pending" };
+  }
+  return { token };
 }
 var PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3;
 var READ_ONLY_MIN_SCHEMA_VERSION = 7;
@@ -24060,6 +24439,7 @@ class LocalConnectorStore {
   embeddingFailureState;
   embeddingDeferral;
   constructor(options) {
+    installMainThreadSqlTrace();
     this.visibilityOwner = randomUUID9();
     this.visibilityNow = () => Date.now();
     this.visibilityPublishChunk = VISIBILITY_PUBLISH_CHUNK;
@@ -24102,7 +24482,7 @@ class LocalConnectorStore {
       if (this.dbPath !== ":memory:")
         mkdirSync14(dirname25(this.dbPath), { recursive: true, mode: 448 });
     }
-    this.db = new Database5(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
+    this.db = new Database6(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
     this.openedFile = fileIdentity(this.dbPath);
     try {
       this.db.exec(options.readOnly === true ? "PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;" : "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
@@ -25109,6 +25489,19 @@ class LocalConnectorStore {
       ...sender ? { sender } : {},
       ...row.authored_at ? { authoredAt: row.authored_at } : {}
     };
+  }
+  contentJudgmentNames(identity) {
+    const row = this.db.query(`
+      SELECT title, locator_uri, sender_label FROM items
+      WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+        AND tombstoned = 0
+    `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+    if (!row)
+      return;
+    const title = row.title?.trim();
+    const path = row.locator_uri?.trim();
+    const sender = row.sender_label?.trim();
+    return { ...title ? { title } : {}, ...path ? { path } : {}, ...sender ? { sender } : {} };
   }
   useChildVisibility(lane) {
     this.childLane = lane;
@@ -28273,6 +28666,13 @@ class LocalConnectorStore {
         error TEXT,
         audit_receipt_sha256 TEXT
       );
+      -- lastSyncRun's order, over real syncs only: every tier move and
+      -- binding also writes a run, and sorting hundreds of thousands of them
+      -- held the request thread for seconds on each status or people check
+      -- (#1305). The WHERE must stay identical to lastSyncRun's for SQLite
+      -- to use it.
+      CREATE INDEX IF NOT EXISTS idx_sync_runs_last_sync ON sync_runs(started_at)
+        WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL};
     `);
     createConversationScopedItemsTable(this.db, "items", true);
     this.db.exec(`
@@ -30066,7 +30466,7 @@ class LocalConnectorStore {
       this.refreshTierHiddenCountsInTurns();
       return this.anyCurrentEmbedding(modelId);
     }
-    const servable = this.hasEmbeddings(modelId, { countsMaxAgeMs: SEARCH_VECTOR_LANE_MEMO_MS });
+    const servable = this.hasEmbeddings(modelId, { countsMaxAgeMs: Number.POSITIVE_INFINITY });
     if (servable)
       (this.vectorLaneMemo ??= new Map).set(modelId, Date.now());
     else
@@ -30135,66 +30535,15 @@ class LocalConnectorStore {
     }
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
     const selectedAccount = normalizeOptionalAccountScope(accountScope);
-    const scanDb = this.dbPath === ":memory:" ? this.db : new Database5(this.dbPath, { readonly: true, create: false, strict: true });
-    const ownsScanDb = scanDb !== this.db;
-    const bestByItem = new Map;
-    let dimensionMismatches = 0;
-    let afterChunkPk = 0;
-    let pagesScanned = 0;
-    try {
-      if (ownsScanDb) {
-        scanDb.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;");
-      }
-      scanDb.exec("BEGIN DEFERRED TRANSACTION;");
-      const after = this.embeddingReadAuthority(provider, scanDb);
-      if (after.skippedReason)
-        return { rows: [], skippedReason: after.skippedReason };
-      if (after.token !== input.beforeToken) {
-        return { rows: [], skippedReason: "embedding_authority_changed_during_query" };
-      }
-      while (true) {
-        if (connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
-          return { rows: [], skippedReason: "vector_scan_deadline_exceeded" };
-        }
-        const page = connectorStoreCurrentEmbeddingRowsPage(scanDb, {
-          modelId: provider.modelId,
-          ...selectedAccount ? { accountScope: selectedAccount } : {},
-          ...filters ? { filters } : {}
-        }, afterChunkPk);
-        if (page.length === 0)
-          break;
-        for (const [index, row] of page.entries()) {
-          if ((index & 31) === 0 && connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
-            return { rows: [], skippedReason: "vector_scan_deadline_exceeded" };
-          }
-          const documentVector = decodeEmbedding(row.embedding);
-          if (documentVector.length !== queryVector.length) {
-            dimensionMismatches += 1;
-            continue;
-          }
-          const score = cosineSimilarity(queryVector, documentVector);
-          const existing = bestByItem.get(row.itemPk);
-          if (existing === undefined || score > existing.bestCosine) {
-            bestByItem.set(row.itemPk, {
-              bestCosine: score,
-              bestChunkPk: row.chunkPk,
-              localItemId: row.localItemId
-            });
-          }
-        }
-        afterChunkPk = page.at(-1).chunkPk;
-        if (page.length < CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE)
-          break;
-        if (pagesScanned++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0)
-          await yieldConnectorStoreVectorScan();
-      }
-    } finally {
-      try {
-        scanDb.exec("ROLLBACK;");
-      } catch {}
-      if (ownsScanDb)
-        closeSqliteStore(scanDb);
-    }
+    const pageOptions = {
+      modelId: provider.modelId,
+      ...selectedAccount ? { accountScope: selectedAccount } : {},
+      ...filters ? { filters } : {}
+    };
+    const scanned = offThreadReadsSupported(this.dbPath) ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs);
+    if ("skippedReason" in scanned)
+      return { rows: [], skippedReason: scanned.skippedReason };
+    const { bestByItem, dimensionMismatches } = scanned;
     const candidates = Array.from(bestByItem.entries()).filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE).sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]);
     const rankedItems = [];
     let candidateOffset = 0;
@@ -30222,31 +30571,31 @@ class LocalConnectorStore {
       ...laneRows.length === 0 && dimensionMismatches > 0 ? { skippedReason: "embedding_stored_dimension_mismatch" } : {}
     };
   }
-  embeddingReadAuthority(provider, db = this.db) {
-    const row = db.query(`
-      SELECT status, cursor, audit_receipt_sha256
-      FROM sync_runs
-      WHERE sync_run_id = ? AND connector_id = ?
-    `).get(connectorStoreEmbeddingWriteAuthorityId(provider.modelId), "connector_store_embedding_write_authority");
-    if (!row)
-      return { token: "no_embedding_write_authority" };
-    if (row.status !== "running" || row.audit_receipt_sha256 !== hashString4(row.cursor ?? "")) {
-      return { token: "corrupt", skippedReason: "embedding_authority_corrupt" };
-    }
-    let record;
+  async scanVectorPagesInThread(provider, beforeToken, queryVector, pageOptions, deadlineAtMs) {
+    const scanDb = this.dbPath === ":memory:" ? this.db : new Database6(this.dbPath, { readonly: true, create: false, strict: true });
+    const ownsScanDb = scanDb !== this.db;
     try {
-      record = parseConnectorStoreEmbeddingWriteAuthority(row.cursor);
-    } catch {
-      return { token: "unreadable", skippedReason: "embedding_authority_unreadable" };
+      if (ownsScanDb) {
+        scanDb.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;");
+      }
+      scanDb.exec("BEGIN DEFERRED TRANSACTION;");
+      const read = async (query) => {
+        const statement = scanDb.query(query.sql);
+        const params = query.params;
+        return query.mode === "all" ? statement.all(...params) : statement.get(...params);
+      };
+      return await scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE);
+    } finally {
+      try {
+        scanDb.exec("ROLLBACK;");
+      } catch {}
+      if (ownsScanDb)
+        closeSqliteStore(scanDb);
     }
-    const token = row.audit_receipt_sha256 ?? "";
-    if (!connectorStoreEmbeddingWriteAuthorityMatches(record, provider)) {
-      return { token, skippedReason: "embedding_authority_provider_mismatch" };
-    }
-    if (record.currencyRebuildPending) {
-      return { token, skippedReason: "embedding_currency_rebuild_pending" };
-    }
-    return { token };
+  }
+  embeddingReadAuthority(provider, db = this.db) {
+    const read = embeddingAuthorityRead(provider);
+    return embeddingAuthorityFromRow(db.query(read.sql).get(...read.params), provider);
   }
   embeddingSourceRows(localItemIds, accountScope, filters, tierHidden, allowHeld = false) {
     const selectedLocalItemIds = normalizeEmbedLocalItemIds(localItemIds);
@@ -30325,8 +30674,16 @@ class LocalConnectorStore {
       return row ? [searchRowFromItemRow(row)] : [];
     });
   }
-  keywordLanguages() {
-    return storeKeywordLanguages(this.db);
+  async keywordLanguages() {
+    if (!offThreadReadsSupported(this.dbPath))
+      return storeKeywordLanguages(this.db);
+    try {
+      return await storeKeywordLanguagesWith(this.db, (read) => readOnPool(this.dbPath, read));
+    } catch (error) {
+      if (error instanceof OffThreadReadBusyError || this.closedForPoolReads)
+        return lastKeywordLanguages(this.db);
+      throw error;
+    }
   }
   searchItems(query, maxResults, accountScope, filters, ftsOptions = {}) {
     return this.searchItemsDetailed(query, maxResults, accountScope, filters, ftsOptions).rows;
@@ -30495,14 +30852,15 @@ class LocalConnectorStore {
     const kept = selected.slice(0, limit);
     const located = [];
     const locatedRows = [];
-    for (const row of kept) {
+    const chunks = ftsOptions.locate === false ? new Map : yield* this.keywordChunkMatchesSteps(kept, spanTerms);
+    for (const [index, row] of kept.entries()) {
       const base = searchRowFromItemRow(row);
       if (ftsOptions.locate === false || row.chunk_pk === null || row.chunk_pk === undefined) {
         located.push(row.chunk_pk === null || row.chunk_pk === undefined || ftsOptions.locate !== false ? base : { ...base, contentMatched: true });
         locatedRows.push(row);
         continue;
       }
-      const chunk = yield* this.keywordChunkMatchSteps(row, row.chunk_pk, spanTerms);
+      const chunk = chunks.get(index);
       if (!chunk)
         continue;
       located.push({ ...base, chunk });
@@ -30616,27 +30974,65 @@ class LocalConnectorStore {
     const itemOffset = priorRows.reduce((sum, prior) => sum + prior.bounded_text.length, 0);
     return chunkMatchFromRows(chunkPk, row, itemOffset, lane, queryTerms);
   }
-  *keywordChunkMatchSteps(item, chunkPk, queryTerms) {
-    const rows = yield {
+  *keywordChunkMatchesSteps(rows, queryTerms) {
+    const wanted = [...rows.entries()].filter(([, row]) => row.chunk_pk !== null && row.chunk_pk !== undefined);
+    const matches = new Map;
+    if (wanted.length === 0)
+      return matches;
+    const found = yield {
       mode: "all",
-      sql: `SELECT c.chunk_pk, c.chunk_index, c.content_hash, c.bounded_text
-        FROM chunks c JOIN items i ON i.item_pk = c.item_pk
-        WHERE c.item_pk = ? AND i.local_item_id = ? AND i.source_version IS ? AND i.tombstoned = 0
-          AND c.chunk_index <= (SELECT t.chunk_index FROM chunks t WHERE t.chunk_pk = ? AND t.item_pk = ?)
-        ORDER BY c.chunk_index`,
-      params: [item.item_pk, item.local_item_id, item.source_version ?? null, chunkPk, item.item_pk]
+      sql: `WITH want(ordinal, item_pk, local_item_id, source_version, chunk_pk) AS (VALUES ${wanted.map(() => "(?, ?, ?, ?, ?)").join(", ")})
+        SELECT w.ordinal, w.chunk_pk AS want_chunk_pk, c.chunk_pk, c.chunk_index, c.content_hash, c.bounded_text
+        FROM want w
+        JOIN items i ON i.item_pk = w.item_pk AND i.local_item_id = w.local_item_id AND i.source_version IS w.source_version AND i.tombstoned = 0
+        JOIN chunks c ON c.item_pk = w.item_pk
+          AND c.chunk_index <= (SELECT t.chunk_index FROM chunks t WHERE t.chunk_pk = w.chunk_pk AND t.item_pk = w.item_pk)
+        ORDER BY w.ordinal, c.chunk_index`,
+      params: wanted.flatMap(([index, row]) => [index, row.item_pk, row.local_item_id, row.source_version ?? null, row.chunk_pk])
     };
-    const row = rows.at(-1);
-    if (!row || row.chunk_pk !== chunkPk)
-      return;
-    const itemOffset = rows.slice(0, -1).reduce((sum, prior) => sum + prior.bounded_text.length, 0);
-    return chunkMatchFromRows(chunkPk, row, itemOffset, "keyword", queryTerms);
+    const byOrdinal = new Map;
+    for (const row of found) {
+      const held = byOrdinal.get(row.ordinal);
+      if (held)
+        held.push(row);
+      else
+        byOrdinal.set(row.ordinal, [row]);
+    }
+    for (const [ordinal, chunks] of byOrdinal) {
+      const row = chunks.at(-1);
+      if (row.chunk_pk !== row.want_chunk_pk)
+        continue;
+      const itemOffset = chunks.slice(0, -1).reduce((sum, prior) => sum + prior.bounded_text.length, 0);
+      matches.set(ordinal, chunkMatchFromRows(row.chunk_pk, row, itemOffset, "keyword", queryTerms));
+    }
+    return matches;
   }
   recentItems(maxResults, accountScope, filters) {
+    const read = this.recentItemsRead(maxResults, accountScope, filters);
+    return this.visibleRecentRows(this.db.query(read.sql).all(...read.params));
+  }
+  async recentItemsOffThread(maxResults, accountScope, filters, deadlineAtMs) {
+    if (!offThreadReadsSupported(this.dbPath))
+      return this.recentItems(maxResults, accountScope, filters);
+    let rows;
+    try {
+      rows = await readOnPool(this.dbPath, this.recentItemsRead(maxResults, accountScope, filters), deadlineAtMs !== undefined ? { deadlineAtMs } : {});
+    } catch (error) {
+      if (error instanceof OffThreadReadBusyError)
+        return [];
+      throw error;
+    }
+    if (this.closedForPoolReads)
+      return [];
+    return this.visibleRecentRows(rows);
+  }
+  recentItemsRead(maxResults, accountScope, filters) {
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
     const selectedAccount = normalizeOptionalAccountScope(accountScope);
     const selectedFilters = connectorStoreFilterSql(filters);
-    const rows = this.db.query(`
+    return {
+      mode: "all",
+      sql: `
       SELECT
         i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
         i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
@@ -30651,7 +31047,15 @@ class LocalConnectorStore {
         AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
       ORDER BY COALESCE(i.authored_at, i.updated_at, i.indexed_at) DESC, i.item_pk DESC
       LIMIT ?
-    `).all(...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params, limit);
+    `,
+      params: [
+        ...selectedAccount ? [selectedAccount] : [],
+        ...selectedFilters.params,
+        limit
+      ]
+    };
+  }
+  visibleRecentRows(rows) {
     return this.tierVisibleRows(rows, (row) => ({
       provider: row.provider,
       accountScope: row.account_scope,
@@ -31214,9 +31618,7 @@ class LocalConnectorStore {
     };
   }
   lastSyncRun() {
-    const last = this.db.query(`SELECT * FROM sync_runs
-       WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
-       ORDER BY started_at DESC, rowid DESC LIMIT 1`).get();
+    const last = this.db.query(LAST_SYNC_RUN_SQL).get();
     return last ? syncRunFromRow(last) : undefined;
   }
   syncRun(syncRunId) {
@@ -34206,7 +34608,7 @@ class BuiltInSourceEmbeddingProvider {
     this.dimension = this.spec.dimension;
     this.threads = resolveThreads(options.threads, this.env);
     this.device = resolveDevice(this.env);
-    this.runtimeFactory = options.runtime ?? ((installed) => onnxRuntimeFromDirectory(installed.runtimeDir));
+    this.runtimeFactory = options.runtime ?? ((installed2) => onnxRuntimeFromDirectory(installed2.runtimeDir));
     this.liteRtFactory = options.liteRt ?? startLiteRtEmbedder;
     this.install = options.install ?? installBuiltInEmbedding;
     this.installerOptions = options.installerOptions ?? {};
@@ -34351,9 +34753,9 @@ class BuiltInSourceEmbeddingProvider {
       ...this.installerOptions.now ? { now: this.installerOptions.now } : {},
       ...this.installerOptions.onProgress ? { onProgress: this.installerOptions.onProgress } : {}
     };
-    let installed;
+    let installed2;
     try {
-      installed = await this.install({ ...this.installerOptions, env: this.env, model: this.spec });
+      installed2 = await this.install({ ...this.installerOptions, env: this.env, model: this.spec });
     } catch (error) {
       throw builtInEmbeddingOperationError(error);
     }
@@ -34361,12 +34763,12 @@ class BuiltInSourceEmbeddingProvider {
       reportBuiltInEmbeddingState(reporterOptions, "loading");
       let model;
       if (this.spec.runtime === "litert") {
-        if (!installed.libraryPath)
+        if (!installed2.libraryPath)
           throw new Error("the LiteRT-LM runtime is not installed.");
         const settings = {
-          library: installed.libraryPath,
-          model: installed.modelPath,
-          cacheDir: join26(dirname27(installed.modelPath), "cache"),
+          library: installed2.libraryPath,
+          model: installed2.modelPath,
+          cacheDir: join26(dirname27(installed2.modelPath), "cache"),
           threads: this.threads,
           device: this.device,
           maxInputTokens: this.spec.maxTokens,
@@ -34386,13 +34788,13 @@ class BuiltInSourceEmbeddingProvider {
         if (this.spec.vision)
           reportBuiltInEmbeddingVision(embedder.vision, { env: this.env, model: this.spec });
       } else {
-        if (!installed.vocabularyPath)
+        if (!installed2.vocabularyPath)
           throw new Error("the model vocabulary is not installed.");
-        const tokenizer = loadTokenizer(installed.vocabularyPath);
-        const session = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
+        const tokenizer = loadTokenizer(installed2.vocabularyPath);
+        const session = await this.runtimeFactory(installed2).createSession(installed2.modelPath, { threads: this.threads });
         model = { kind: "onnx", session, tokenizer };
         try {
-          const querySession = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
+          const querySession = await this.runtimeFactory(installed2).createSession(installed2.modelPath, { threads: this.threads });
           this.priorityLoaded = { kind: "onnx", session: querySession, tokenizer };
         } catch (error) {
           await session.release?.().catch(() => {
@@ -35411,6 +35813,12 @@ var MIME_BY_EXTENSION = Object.freeze({
   html: "text/html",
   htm: "text/html",
   rtf: "application/rtf",
+  doc: "application/msword",
+  xls: "application/vnd.ms-excel",
+  odt: "application/vnd.oasis.opendocument.text",
+  ods: "application/vnd.oasis.opendocument.spreadsheet",
+  odp: "application/vnd.oasis.opendocument.presentation",
+  epub: "application/epub+zip",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -35964,6 +36372,12 @@ function nonNegativeInteger(value, fallback) {
 // src/workers/source-index/analyst-answer.ts
 var CLOUD_ANALYST_PROMPT_BYTES = OPENCLAW_INFER_MAX_PROMPT_BYTES - 1e4;
 // src/workers/file-extraction/extractors/bounded-text.ts
+var DOC_MIME_TYPE = "application/msword";
+var XLS_MIME_TYPE = "application/vnd.ms-excel";
+var ODT_MIME_TYPE = "application/vnd.oasis.opendocument.text";
+var ODS_MIME_TYPE = "application/vnd.oasis.opendocument.spreadsheet";
+var ODP_MIME_TYPE = "application/vnd.oasis.opendocument.presentation";
+var EPUB_MIME_TYPE = "application/epub+zip";
 var TEXT_MIME_TYPES = new Set([
   "application/json",
   "application/x-ndjson",
@@ -37022,6 +37436,282 @@ var DEFAULT_INSTALL_RETRY_MS = 15 * 60000;
 var DEFAULT_INSTALL_RETRY_CEILING_MS = 24 * 60 * 60000;
 var DEFAULT_VERIFY_WAIT_MS = 5 * 60000;
 
+// src/workers/file-extraction/extractors/compound-file.ts
+var MAX_READ_BYTES = 64 * 1024 * 1024;
+
+// src/workers/file-extraction/extractors/package-documents.ts
+var VOID_ELEMENTS = new Set([
+  "area",
+  "base",
+  "br",
+  "col",
+  "embed",
+  "hr",
+  "img",
+  "input",
+  "link",
+  "meta",
+  "param",
+  "source",
+  "track",
+  "wbr"
+]);
+var MARKUP_ENTITIES = Object.freeze({
+  AElig: "Æ",
+  Aacute: "Á",
+  Acirc: "Â",
+  Agrave: "À",
+  Alpha: "Α",
+  Aring: "Å",
+  Atilde: "Ã",
+  Auml: "Ä",
+  Beta: "Β",
+  Ccedil: "Ç",
+  Chi: "Χ",
+  Dagger: "‡",
+  Delta: "Δ",
+  ETH: "Ð",
+  Eacute: "É",
+  Ecirc: "Ê",
+  Egrave: "È",
+  Epsilon: "Ε",
+  Eta: "Η",
+  Euml: "Ë",
+  Gamma: "Γ",
+  Iacute: "Í",
+  Icirc: "Î",
+  Igrave: "Ì",
+  Iota: "Ι",
+  Iuml: "Ï",
+  Kappa: "Κ",
+  Lambda: "Λ",
+  Mu: "Μ",
+  Ntilde: "Ñ",
+  Nu: "Ν",
+  OElig: "Œ",
+  Oacute: "Ó",
+  Ocirc: "Ô",
+  Ograve: "Ò",
+  Omega: "Ω",
+  Omicron: "Ο",
+  Oslash: "Ø",
+  Otilde: "Õ",
+  Ouml: "Ö",
+  Phi: "Φ",
+  Pi: "Π",
+  Prime: "″",
+  Psi: "Ψ",
+  Rho: "Ρ",
+  Scaron: "Š",
+  Sigma: "Σ",
+  THORN: "Þ",
+  Tau: "Τ",
+  Theta: "Θ",
+  Uacute: "Ú",
+  Ucirc: "Û",
+  Ugrave: "Ù",
+  Upsilon: "Υ",
+  Uuml: "Ü",
+  Xi: "Ξ",
+  Yacute: "Ý",
+  Yuml: "Ÿ",
+  Zeta: "Ζ",
+  aacute: "á",
+  acirc: "â",
+  acute: "´",
+  aelig: "æ",
+  agrave: "à",
+  alefsym: "ℵ",
+  alpha: "α",
+  amp: "&",
+  and: "∧",
+  ang: "∠",
+  aring: "å",
+  asymp: "≈",
+  atilde: "ã",
+  auml: "ä",
+  bdquo: "„",
+  beta: "β",
+  brvbar: "¦",
+  bull: "•",
+  cap: "∩",
+  ccedil: "ç",
+  cedil: "¸",
+  cent: "¢",
+  chi: "χ",
+  circ: "ˆ",
+  clubs: "♣",
+  cong: "≅",
+  copy: "©",
+  crarr: "↵",
+  cup: "∪",
+  curren: "¤",
+  dArr: "⇓",
+  dagger: "†",
+  darr: "↓",
+  deg: "°",
+  delta: "δ",
+  diams: "♦",
+  divide: "÷",
+  eacute: "é",
+  ecirc: "ê",
+  egrave: "è",
+  empty: "∅",
+  emsp: " ",
+  ensp: " ",
+  epsilon: "ε",
+  equiv: "≡",
+  eta: "η",
+  eth: "ð",
+  euml: "ë",
+  euro: "€",
+  exist: "∃",
+  fnof: "ƒ",
+  forall: "∀",
+  frac12: "½",
+  frac14: "¼",
+  frac34: "¾",
+  frasl: "⁄",
+  gamma: "γ",
+  ge: "≥",
+  gt: ">",
+  hArr: "⇔",
+  harr: "↔",
+  hearts: "♥",
+  hellip: "…",
+  iacute: "í",
+  icirc: "î",
+  iexcl: "¡",
+  igrave: "ì",
+  image: "ℑ",
+  infin: "∞",
+  int: "∫",
+  iota: "ι",
+  iquest: "¿",
+  isin: "∈",
+  iuml: "ï",
+  kappa: "κ",
+  lArr: "⇐",
+  lambda: "λ",
+  lang: "〈",
+  laquo: "«",
+  larr: "←",
+  lceil: "⌈",
+  ldquo: "“",
+  le: "≤",
+  lfloor: "⌊",
+  lowast: "∗",
+  loz: "◊",
+  lrm: "‎",
+  lsaquo: "‹",
+  lsquo: "‘",
+  lt: "<",
+  macr: "¯",
+  mdash: "—",
+  micro: "µ",
+  middot: "·",
+  minus: "−",
+  mu: "μ",
+  nabla: "∇",
+  nbsp: " ",
+  ndash: "–",
+  ne: "≠",
+  ni: "∋",
+  not: "¬",
+  notin: "∉",
+  nsub: "⊄",
+  ntilde: "ñ",
+  nu: "ν",
+  oacute: "ó",
+  ocirc: "ô",
+  oelig: "œ",
+  ograve: "ò",
+  oline: "‾",
+  omega: "ω",
+  omicron: "ο",
+  oplus: "⊕",
+  or: "∨",
+  ordf: "ª",
+  ordm: "º",
+  oslash: "ø",
+  otilde: "õ",
+  otimes: "⊗",
+  ouml: "ö",
+  para: "¶",
+  part: "∂",
+  permil: "‰",
+  perp: "⊥",
+  phi: "φ",
+  pi: "π",
+  piv: "ϖ",
+  plusmn: "±",
+  pound: "£",
+  prime: "′",
+  prod: "∏",
+  prop: "∝",
+  psi: "ψ",
+  quot: '"',
+  rArr: "⇒",
+  radic: "√",
+  rang: "〉",
+  raquo: "»",
+  rarr: "→",
+  rceil: "⌉",
+  rdquo: "”",
+  real: "ℜ",
+  reg: "®",
+  rfloor: "⌋",
+  rho: "ρ",
+  rlm: "‏",
+  rsaquo: "›",
+  rsquo: "’",
+  sbquo: "‚",
+  scaron: "š",
+  sdot: "⋅",
+  sect: "§",
+  shy: "­",
+  sigma: "σ",
+  sigmaf: "ς",
+  sim: "∼",
+  spades: "♠",
+  sub: "⊂",
+  sube: "⊆",
+  sum: "∑",
+  sup: "⊃",
+  sup1: "¹",
+  sup2: "²",
+  sup3: "³",
+  supe: "⊇",
+  szlig: "ß",
+  tau: "τ",
+  there4: "∴",
+  theta: "θ",
+  thetasym: "ϑ",
+  thinsp: " ",
+  thorn: "þ",
+  tilde: "˜",
+  times: "×",
+  trade: "™",
+  uArr: "⇑",
+  uacute: "ú",
+  uarr: "↑",
+  ucirc: "û",
+  ugrave: "ù",
+  uml: "¨",
+  upsih: "ϒ",
+  upsilon: "υ",
+  uuml: "ü",
+  weierp: "℘",
+  xi: "ξ",
+  yacute: "ý",
+  yen: "¥",
+  yuml: "ÿ",
+  zeta: "ζ",
+  zwj: "‍",
+  zwnj: "‌",
+  apos: "'"
+});
+
 // src/workers/file-extraction/extractors/rtf.ts
 var RTF_MIME_TYPES = new Set(["application/rtf", "text/rtf"]);
 var SKIPPED_DESTINATIONS = new Set([
@@ -37161,6 +37851,16 @@ var IMAGE_READER_MAX_INPUT_BYTES = 64 * 1024 * 1024;
 // src/workers/file-extraction/extractors/ocr.ts
 var OCR_PDF_TIMEOUT_BYTES_PER_STEP = 5 * 1024 * 1024;
 var OCR_PDF_MAX_TIMEOUT_MS = 12 * 60000;
+
+// src/workers/file-extraction/extractors/text.ts
+var ADDITIONAL_DOCUMENT_MIME_TYPES = new Set([
+  DOC_MIME_TYPE,
+  XLS_MIME_TYPE,
+  ODT_MIME_TYPE,
+  ODS_MIME_TYPE,
+  ODP_MIME_TYPE,
+  EPUB_MIME_TYPE
+]);
 // src/workers/telegram-messages/spool-lines.ts
 var CHUNK_BYTES2 = 1 << 20;
 var hints = new Map;
@@ -37202,7 +37902,7 @@ var TELEGRAM_CAPTURE_CONNECTOR_IDS = {
 };
 var TELEGRAM_TRUST_EVICTION_CONNECTOR_ID = `${TELEGRAM_CAPTURE_CONNECTOR_ID}_trust_eviction`;
 var TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID = `${TELEGRAM_CAPTURE_CONNECTOR_ID}_trust_reconciliation`;
-var MAX_READ_BYTES = 64 * 1024 * 1024;
+var MAX_READ_BYTES2 = 64 * 1024 * 1024;
 var MAX_RECORD_BYTES = 32 * 1024 * 1024;
 var MAX_TAIL_SCAN_BYTES = 16 * 1024 * 1024;
 var SERVICE_FIELDS = new Set([

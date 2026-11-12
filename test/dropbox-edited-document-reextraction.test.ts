@@ -31,7 +31,7 @@ import {
   DropboxExtractionSource,
   type DropboxExtractionFetch,
 } from '../src/workers/dropbox-files/extraction-source.ts';
-import { connectorStoreExtractionCandidateReader } from '../src/workers/email-source/file-extraction-runtime.ts';
+import { connectorStoreExtractionCandidateReader } from '../src/workers/engine/runtime/file-extraction-runtime.ts';
 import { LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
 import { buildExtractorRegistry } from '../src/workers/file-extraction/registry.ts';
 import { createFileExtractionRunner } from '../src/workers/file-extraction/runner.ts';

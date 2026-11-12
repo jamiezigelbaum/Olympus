@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { expect, test } from 'bun:test';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { setReadPoolObserverForTests } from '../src/workers/connector-store/off-thread-reads.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 
 test('the vector lane pages by primary key without sorting the model\'s rows', async () => {
@@ -19,7 +20,6 @@ test('the vector lane pages by primary key without sorting the model\'s rows', a
   const dbPath = join(dir, 'store.sqlite');
   const store = new LocalConnectorStore({ dbPath, corpusId: 'internal.fake.scan', family: 'file', trustDomain: 'internal', tierLedger: null });
   const pageQueries: string[] = [];
-  const query = Database.prototype.query;
   try {
     const items: RawItem[] = Array.from({ length: 40 }, (_, index) => ({
       identity: { family: 'file', provider: 'fake', accountScope: 'personal', providerItemId: `f${index}`, providerFileId: `f${index}`, localItemId: `personal:f${index}`, sourceVersion: 'v1' },
@@ -43,12 +43,12 @@ test('the vector lane pages by primary key without sorting the model\'s rows', a
     // A second model's vectors make the model filter selective, as after a model switch.
     await store.embedChunks({ provider: { ...provider, modelId: 'scan-plan-v2', epochId: '2' } });
 
-    Database.prototype.query = function (this: Database, sql: string) {
-      if (/FROM chunk_embeddings emb/.test(sql) && /emb\.chunk_pk > \?/.test(sql)) pageQueries.push(sql);
-      return query.call(this, sql);
-    } as typeof query;
+    // The pages are read on the store's read-pool thread (#1305).
+    setReadPoolObserverForTests((_, read) => {
+      if (/FROM chunk_embeddings emb/.test(read.sql) && /emb\.chunk_pk > \?/.test(read.sql)) pageQueries.push(read.sql);
+    }, { snapshots: true });
     const lane = await store.vectorSearchLane('harbor', provider, 10, 'personal');
-    Database.prototype.query = query;
+    setReadPoolObserverForTests();
     expect(lane.rows.length).toBeGreaterThan(0);
     expect(pageQueries.length).toBeGreaterThan(0);
 
@@ -62,7 +62,7 @@ test('the vector lane pages by primary key without sorting the model\'s rows', a
       db.close();
     }
   } finally {
-    Database.prototype.query = query;
+    setReadPoolObserverForTests();
     store.close();
     rmSync(dir, { recursive: true, force: true });
   }

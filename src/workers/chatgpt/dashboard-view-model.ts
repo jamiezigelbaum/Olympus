@@ -1487,6 +1487,9 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
       ...(finite(card.coverage.unsupported_kind_items)
         ? { unsupported_kind_items: count(card.coverage.unsupported_kind_items) }
         : {}),
+      ...(finite(card.coverage.pictures_not_read_here_items)
+        ? { pictures_not_read_here_items: count(card.coverage.pictures_not_read_here_items) }
+        : {}),
       ...(finite(card.coverage.stored_items) ? { stored_items: count(card.coverage.stored_items) } : {}),
     },
     ingestion_health: {
