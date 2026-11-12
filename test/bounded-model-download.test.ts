@@ -203,3 +203,23 @@ test(`a ${status} chunk already written can be freed while the next read is stil
   expect(retained).toBe(false);
   expect(statSync(target).size).toBe(size);
 });
+
+test('a download hands the thread back between chunks, so the worker keeps answering requests', async () => {
+  const f = fixture(16 * block.length);
+  mkdirSync(join(f.target, '..'), { recursive: true });
+  let turns = 0;
+  let chunks = 0;
+  await downloadPinnedFile({
+    fetchImpl: (async () => f.response(0, 16 * block.length - 1, { status: 200 })) as unknown as typeof fetch,
+    url: 'https://test/model', target: f.target, partial: `${f.target}.partial`, expectedBytes: 16 * block.length,
+    algorithm: 'sha256', digest: digest(16 * block.length), encoding: 'hex', noun: 'test model',
+    stallMs: 60_000, verifyTimeoutMs: 60_000, keepPartial: true,
+    error: (_reason, message) => new Error(message),
+    onStart: () => {}, onProgress: () => { chunks += 1; },
+    turn: () => { turns += 1; return Promise.resolve(); },
+  });
+  expect(chunks).toBe(16);
+  // Every chunk offers the event loop a turn; the shared headroom decides when to take it.
+  expect(turns).toBe(16);
+  expect(statSync(f.target).size).toBe(16 * block.length);
+});
