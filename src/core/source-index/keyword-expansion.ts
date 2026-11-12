@@ -31,6 +31,15 @@ export type KeywordLanguageProfile = readonly string[] | (() => readonly string[
  * for the answer's later reads and the next Ask.
  */
 export const KEYWORD_PREPARE_WAIT_MS = 4_000;
+/**
+ * How long the built-in model's last finished translation took. A model whose
+ * translations outlast the wait (on a large install it is busy judging) made
+ * every Ask wait the whole 4 s for nothing (two warm Asks on a large copy,
+ * 2026-11-12: keyword preparation 4,012 and 4,009 ms). While the last one ran
+ * past the wait, a search starts at once; its translation still runs, and a
+ * quick one brings the wait back.
+ */
+const lastTranslationMs = new WeakMap<AnalystModel, number>();
 
 export async function expandSourceIndexKeywords(
   query: string,
@@ -54,6 +63,14 @@ export async function expandSourceIndexKeywords(
     : profile;
   const full = expandCachedSourceIndexKeywords(query, once, cachedKeywordExpansion());
   full.catch(() => {});
+  const builtIn = registeredBuiltInPrivateModel();
+  const lastMs = builtIn ? lastTranslationMs.get(builtIn.model) : undefined;
+  if (lastMs !== undefined && lastMs > (options.waitMs ?? 0)) {
+    // A finished translation of this question is still used; otherwise the static equivalents.
+    const alternatives = await expandCachedSourceIndexKeywords(query, once, { missing: false });
+    pinKeywordAlternatives(owner, query, alternatives);
+    return alternatives;
+  }
   let timer: ReturnType<typeof setTimeout> | undefined;
   const waited = await Promise.race([
     full.then((value) => ({ value })),
@@ -103,7 +120,10 @@ async function expandCachedSourceIndexKeywords(query: string, profile: KeywordLa
     return fallback;
   }
   if (existing && existing.expires > Date.now()) return existing.pending;
+  const startedAt = Date.now();
   const pending = translate();
+  const model = builtIn.model;
+  pending.finally(() => { lastTranslationMs.set(model, Date.now() - startedAt); }).catch(() => {});
   const entry: CachedExpansion = {pending, expires: Date.now() + 5 * 60_000};
   cache.set(key, entry);
   pending.then(value => { entry.value = value; }, () => {});

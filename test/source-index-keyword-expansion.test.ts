@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from 'bun:test';
+import { afterEach, expect, setSystemTime, test } from 'bun:test';
 import { sourceIndexFtsQuery, sourceIndexFtsTermGroups } from '../src/core/source-index/fts.ts';
 import { sourceIndexChunkQueryTerms } from '../src/core/source-index/chunk-selection.ts';
 import { withKeywordAlternatives, withKeywordRequestScope } from '../src/core/source-index/keyword-context.ts';
@@ -316,3 +316,34 @@ test('a search stops waiting for a slow translation, uses the static equivalents
   });
   expect(calls).toBe(1);
 });
+
+test('once a translation has outlasted the wait, later searches start at once on the static equivalents; a quick one restores the wait', async () => {
+  const finishers: Array<(text: string) => void> = [];
+  registerBuiltInPrivateModel({ available: () => true, model: { async complete() {
+    return { text: await new Promise<string>((resolve) => { finishers.push(resolve); }) } as never;
+  } } });
+  const start = Date.parse('2026-11-12T23:00:00Z');
+  try {
+    setSystemTime(start);
+    // First question: no history, so the search waits (a short wait here) and the translation runs on.
+    await withKeywordRequestScope(() => expandSourceIndexKeywords('asteroid notary', ['spa'], {}, { waitMs: 1 }));
+    // It lands 5 s later, past a 4 s wait.
+    setSystemTime(start + 5_000);
+    finishers[0]!(reply(['asteroide']));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    // A new question would wait 4 s (past this test's 2 s limit) if it waited at all: it must not.
+    const skipped = await withKeywordRequestScope(() => expandSourceIndexKeywords('comet notary', ['spa'], {}, { waitMs: 4_000 }));
+    expect(skipped.get('comet')).toBeUndefined();
+    expect(finishers.length).toBe(2); // the translation still started, for the answer's later reads and the next Ask
+    // That translation comes back in 1 s, inside a 4 s wait: the next search waits again and gets its translation.
+    setSystemTime(start + 6_000);
+    finishers[1]!(reply(['cometa']));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const waiting = withKeywordRequestScope(() => expandSourceIndexKeywords('meteor notary', ['spa'], {}, { waitMs: 4_000 }));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    finishers[2]!(reply(['meteoro']));
+    expect((await waiting).get('meteor')).toContain('meteoro');
+  } finally {
+    setSystemTime();
+  }
+}, 2_000);
