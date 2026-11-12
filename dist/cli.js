@@ -66652,6 +66652,16 @@ function gmailCursorIsMidTraversal(value) {
     return false;
   }
 }
+function gmailCursorHasBacklog(value) {
+  if (!value)
+    return false;
+  try {
+    const cursor = decodeGmailCursor(value);
+    return cursor.pageToken !== undefined || cursor.phase === "metadata" || cursor.childOf !== undefined || cursor.after !== undefined;
+  } catch {
+    return false;
+  }
+}
 function createGmailDailyRequestBudget(options = {}) {
   const env = options.env ?? process.env;
   return new GoogleDailyRequestBudget({
@@ -106625,7 +106635,7 @@ function createGmailConnectorStoreSyncHandler(options) {
         head = await runBothStores({ connector, maxItems });
       }
       const headCheckpoint = head.internal.sync.cursor;
-      return taskOutcome2({
+      const outcome = taskOutcome2({
         kind: GMAIL_STORE_PULL_RECEIPT_KIND,
         head,
         traversal: connector.traversalStatus(),
@@ -106637,6 +106647,7 @@ function createGmailConnectorStoreSyncHandler(options) {
         }),
         warnings
       });
+      return gmailCursorHasBacklog(headCheckpoint) ? { ...outcome, backlog: true } : outcome;
     },
     async reconcile(request = {}) {
       const connector = buildConnector({
@@ -197626,7 +197637,8 @@ function gmailStoreProgress(outcome) {
     status: outcome.receipt.status,
     counts: outcome.receipt.counts,
     ...outcome.receipt.warnings ? { warnings: outcome.receipt.warnings } : {},
-    checkpoint: outcome.checkpoint
+    checkpoint: outcome.checkpoint,
+    ...outcome.backlog ? { continueSoon: true } : {}
   };
 }
 function gmailSchedulerFailure(error2) {

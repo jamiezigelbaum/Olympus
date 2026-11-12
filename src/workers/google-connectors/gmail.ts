@@ -964,6 +964,23 @@ export function gmailCursorIsMidTraversal(value: string | undefined): boolean {
   }
 }
 
+/**
+ * True when this cursor stops partway through a traversal: more of the same
+ * walk is ready now (a new window's history, a page the item bound cut
+ * short, a message's remaining attachments). A watermark-only cursor is a
+ * finished walk waiting for new mail.
+ */
+export function gmailCursorHasBacklog(value: string | undefined): boolean {
+  if (!value) return false;
+  try {
+    const cursor = decodeGmailCursor(value);
+    return cursor.pageToken !== undefined || cursor.phase === 'metadata'
+      || cursor.childOf !== undefined || cursor.after !== undefined;
+  } catch {
+    return false;
+  }
+}
+
 export function createGmailDailyRequestBudget(options: {
   env?: Record<string, string | undefined>;
   statePath?: string;
