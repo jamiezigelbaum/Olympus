@@ -52,7 +52,7 @@ function rig(failAt?: string, inconclusive = false) {
     listTools: async () => ['olympus_search', 'source_answer', 'source_answer_result', 'source_index_status'],
     close: () => step('engine.close'),
   };
-  return { events, commands, machine, options: { sources, dashboard: async () => dashboard, engine: async () => engine, sleep: async () => {} } };
+  return { events, commands, machine, dashboard, engine, options: { sources, dashboard: async () => dashboard, engine: async () => engine, sleep: async () => {} } };
 }
 
 describe('fresh install canary', () => {
@@ -81,6 +81,43 @@ describe('fresh install canary', () => {
       expect(syntax.status).toBe(0);
     }
   }, 30_000);
+  for (const splitFails of [false, true]) test(`fresh timing is wired after connect and restores zig (split failure: ${splitFails})`, async () => {
+    const r = rig();
+    const { browserSeedPlan } = await import('../scripts/release-check/on-demand-seeds.ts');
+    const file = browserSeedPlan('dropbox')[0]!;
+    let atTiming = false;
+    Object.assign(r.dashboard, {
+      connection: async () => 'connected', folderMode: async () => '',
+      setFolderMode: async () => {}, sync: async () => {}, prepareRead: async () => async () => 'Reading.',
+    });
+    const call = r.engine.call;
+    r.engine.call = async (...args) => atTiming ? response({ answer: file.fact, citations: [{ title: file.name }] }) : call(...args);
+    const result = await runFreshInstall(r.machine, { ...r.options, onDemandTiming: {
+      diagnostics: async target => {
+        await target.exec('timing-probe-test');
+        return {
+          enableSplit: async () => { atTiming = true; r.events.push('split'); if (splitFails) throw new Error('restart failed'); },
+          preflight: async () => 'engine split on; healthy front and background',
+          resolve: async f => ({ ...f, providerItemId: 'provider-id', version: 'source-version' }), begin: async () => {},
+          finish: async () => ({ indexed: true, jobIds: ['job'], attribution: 'single read in log interval', log: ['fetch', 'extract', 'judge', 'embed'].map(step => `[olympus:on-demand] step=${step} count=1 ms=1`).join('\n') }),
+          close: async () => { r.events.push('probe.close'); },
+        };
+      },
+      seeds: async (target, endpoint) => {
+        expect(target).toBe(r.machine); // Upload files belong to zig's signed-in browser, while the probe runs as olyfresh.
+        expect(endpoint).toBe('127.0.0.1:9334');
+        return { folders: async () => [{ source: 'dropbox', id: 'seed' }], upload: async () => [file] };
+      },
+    } });
+    expect(result.onDemandTiming?.rows).toHaveLength(splitFails ? 0 : 1);
+    expect(result.onDemandTiming?.preflight?.includes('split on') ?? false).toBe(!splitFails);
+    expect(result.checks.findIndex(c => c.id === 'fresh.dropbox.scope-absence')).toBeLessThan(result.checks.findIndex(c => c.id.startsWith('ondemand.')));
+    expect(r.commands.find(c => c.includes('timing-probe-test'))).toContain('sudo -n -u olyfresh');
+    expect(r.events.indexOf('split')).toBeGreaterThan(r.events.indexOf('dropbox.first-items'));
+    expect(r.events.indexOf('probe.close')).toBeLessThan(r.events.lastIndexOf('restore'));
+    expect(result.checks.at(-1)).toMatchObject({ id: 'fresh.restore-zig', status: 'pass' });
+    expect(canaryVerdict(result.checks)).toBe(splitFails ? 'fail' : 'pass');
+  });
   test('Ask without a model must explain setup; a real answer fails that check without stopping the leg', async () => {
     const r = rig();
     const { checks } = await runFreshInstall(r.machine, { ...r.options, engine: async () => ({

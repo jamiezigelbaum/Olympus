@@ -11,7 +11,7 @@ import type { VisualResult } from './visual.ts';
 import type { ExploreResult } from './explore.ts';
 import type { PagesResult } from './explore-pages.ts';
 import type { ReviewResult } from './reviewer.ts';
-import type { OnDemandTimingRow } from './on-demand-timing.ts';
+import type { OnDemandNotRun, OnDemandTimingRow } from './on-demand-timing.ts';
 
 export type CheckStatus = 'pass' | 'fail' | 'warn' | 'skip';
 
@@ -28,8 +28,9 @@ export interface CheckResult {
 }
 
 /** The same table is used by the real-accounts canary and release reports. Values are observations, including failures. */
-export function renderOnDemandTiming(rows: readonly OnDemandTimingRow[] | undefined): string {
-  if (!rows?.length) return '';
+export function renderOnDemandTiming(rows: readonly OnDemandTimingRow[] | undefined, notRun?: readonly OnDemandNotRun[]): string {
+  const skipped = notRun?.length ? '<h3>Not run</h3><ul>' + notRun.map(file => `<li>${escapeHtml(file.file)} (${escapeHtml(file.source)}): ${escapeHtml(file.reason)}</li>`).join('') + '</ul>' : '';
+  if (!rows?.length) return skipped;
   const yes = (value: boolean) => value ? 'yes' : 'no';
   const body = rows.map(row => {
     const first = row.replies[0];
@@ -41,7 +42,7 @@ export function renderOnDemandTiming(rows: readonly OnDemandTimingRow[] | undefi
     return `<tr>${values.map(value => `<td>${escapeHtml(value)}</td>`).join('')}<td><details><summary>Replies and engine timings</summary><pre>${escapeHtml(JSON.stringify(row.replies, null, 2))}</pre><pre>${escapeHtml(row.timingLog)}</pre>${row.error ? escapeHtml(row.error) : ''}</details></td></tr>`;
   }).join('');
   const headings = ['File', 'Source', 'Action', 't0', 'Found file', 'Read (job indexed)', 'Found paragraph (fact, cited)', 'Seconds to answer', 'Asks', 'First reply names file', 'First reply says reading', 'First reply', 'Wait message shown', 'Fetch ms', 'Extract ms', 'Judge ms', 'Embed ms', 'Timing attribution', 'Read jobs', 'Evidence'];
-  return `<h2>Names with read on demand</h2><div style="overflow-x:auto"><table><thead><tr>${headings.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table></div>`;
+  return `<h2>Names with read on demand</h2><div style="overflow-x:auto"><table><thead><tr>${headings.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table></div>${skipped}`;
 }
 
 /** The tested run a result was kept from. */

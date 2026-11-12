@@ -1,12 +1,12 @@
 /** Real test-account fixtures. Credentials stay in memory; provider failures never echo response bodies. */
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { deflateSync } from 'node:zlib';
 import { readAgentKey } from './agents.ts';
 
 export const ON_DEMAND_FOLDER = 'Olympus RC on demand';
 export type TimingSource = 'dropbox' | 'google_drive';
 /** Made-up topics, one per seeded file; no real people or places. */
-const SEED_TOPICS: Record<'dropbox' | 'google_drive', Record<string, string>> = {
+export const SEED_TOPICS: Record<'dropbox' | 'google_drive', Record<string, string>> = {
   dropbox: { text: 'the Ostrander greenhouse lease', long: 'the Vellmar ferry maintenance plan', scan: 'the Brask harbor mooring permit', owner: 'the Teodane bakery supply invoice' },
   google_drive: { text: 'the Quillon orchard survey', long: 'the Marrowind cooperative bylaws', native: 'the Halvik choir rehearsal schedule', scan: 'the Pellisan well inspection report' },
 };
@@ -33,6 +33,57 @@ export function parseTimingAccounts(raw: unknown): TimingAccounts {
     }
   }
   return accounts!;
+}
+
+/** No command means browser seeding. A partially configured token path is an error, never a fallback. */
+export function parseTimingSeedConfig(raw: unknown): TimingAccounts | undefined {
+  if (raw === undefined) return undefined;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('on_demand_timing must be an object');
+  const accounts = raw as Partial<TimingAccounts>;
+  if (accounts.dropbox?.tokenCommand !== undefined || accounts.drive?.tokenCommand !== undefined) return parseTimingAccounts(raw);
+  return undefined;
+}
+
+/** Browser fixtures survive runs; the fresh store supplies the cold-read boundary. Never rotate this seed in place. */
+export const BROWSER_SEED = 'olympus-rc-on-demand-browser-v1';
+export interface BrowserSeedFile extends TimingFile { kind: string; sentence: string }
+export function browserSeedPlan(source: TimingSource): BrowserSeedFile[] {
+  return Object.entries(SEED_TOPICS[source]).map(([kind, topic]) => {
+    const fact = `ZUL${createHash('sha256').update(`${BROWSER_SEED}:${source}:${kind}`).digest('hex').slice(0, 12).toUpperCase()}`;
+    return { id: `${source}-${kind}`, source, kind,
+      name: `${topic.replace(/^the /, '').replace(/^./, c => c.toUpperCase())}${kind === 'native' ? '' : '.pdf'}`,
+      fact, sentence: `The reference code for ${topic} is ${fact}.`, question: `What is the reference code for ${topic}?`,
+      providerItemId: '', version: '', ...(kind === 'owner' ? { owner: true } : {}) };
+  });
+}
+export interface BrowserSeedUi {
+  folder(source: TimingSource, name: string): Promise<SeedFolder>;
+  names(folder: SeedFolder): Promise<string[]>;
+  upload(folder: SeedFolder, file: BrowserSeedFile, bytes: Buffer): Promise<void>;
+  native(folder: SeedFolder, file: BrowserSeedFile): Promise<void>;
+  close(): Promise<void>;
+}
+export function browserTimingSeeds(ui: BrowserSeedUi, sources: readonly TimingSource[] = ['dropbox', 'google_drive']): TimingSeeds & { close(): Promise<void> } {
+  return {
+    folders: async () => {
+      const folders: SeedFolder[] = [];
+      for (const source of sources) folders.push(await ui.folder(source, ON_DEMAND_FOLDER));
+      return folders;
+    },
+    upload: async folder => {
+      const names = await ui.names(folder);
+      const files = browserSeedPlan(folder.source);
+      for (const file of files) {
+        const matches = names.filter(name => name === file.name);
+        if (matches.length > 1) throw new Error(`duplicate seed file: ${file.name}`);
+        if (matches.length) continue;
+        if (file.kind === 'native') await ui.native(folder, file);
+        else await ui.upload(folder, file, file.kind === 'scan' ? scannedPdf(file.sentence) : textPdf(file.sentence, file.kind === 'long' ? 200 : 1));
+      }
+      return files;
+    },
+    close: () => ui.close(),
+  };
 }
 
 /** A small valid PDF writer; streams may contain binary data. */

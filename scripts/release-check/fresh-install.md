@@ -6,17 +6,17 @@ Run with the existing SSH driver config and report destination:
 bun scripts/release-check/canary.ts \
   --config <driver.json> --machine test-omarchy --os linux --out <reports-dir> \
   --fresh-install --accounts <canary-accounts.json> \
-  --candidate <olympus-version.tgz> --cdp 127.0.0.1:9333
+  --candidate <olympus-version.tgz> --cdp 127.0.0.1:9334
 ```
 
 Without `--candidate`, install the published release. A candidate is a tarball,
 not the upgrade mode's bundle directory. The site's Linux bundle builder renders
 the same checksum-pinned non-interactive installer for that tarball in the run's
 report folder. Runtime downloads still use the site's pinned Bun release.
-`--cdp` defaults to `127.0.0.1:9333`; loopback endpoints use the driver's tunnel,
-other hosts must be reachable from the runner. Chromium must already be running
+`--cdp` defaults to `127.0.0.1:9334`; loopback endpoints use the driver's tunnel,
+other hosts must be reachable from the runner. The freshBrowser Brave profile must already be running
 as zig with the single Google and Dropbox test accounts signed in. This mode
-never launches a browser, types a password, or changes a provider's grant.
+never launches a browser or types a password; it only accepts the provider's connect consent in an already signed-in account.
 
 Add `fresh` to each existing `sources` entry for `gmail` and `dropbox`:
 
@@ -73,7 +73,7 @@ each source's connect/consent/callback/scope/first items, known answers and scop
 absence, and restoration. Exit codes remain 0 pass, 1 product failure, 2 invalid
 invocation, 3 inconclusive. Password, verification, signed-out and ambiguous
 account pages identify which browser sign-in to renew. No consent screenshots,
-OAuth URLs, answers, cookies or tokens are included in the fresh report.
+OAuth URLs, ordinary account answers, cookies or tokens are included in the fresh report.
 
 The dedicated `olyfresh` account gets linger and a clean home each run. Zig's
 engine is stopped before installation. Engine readiness uses olyfresh's worker
@@ -96,3 +96,50 @@ The fresh install and its private install log remain for post-mortem. Provider
 grants are retained. A failed restore leaves
 `~zig/.olympus-canary/fresh-run/guard.log` and blocks another run until inspected;
 never remove an active run's lease directory to start a competing canary.
+
+Add `--on-demand-timing` to run read-on-demand timing after the fresh Gmail and
+Dropbox checks succeed. This mode uses `freshBrowser` (Brave on test-omarchy,
+CDP `127.0.0.1:9334`, the fresh leg's default) signed in to
+`jamiez.olympus@gmail.com` on Google and Dropbox. No provider write tokens or
+`on_demand_timing` account section are required. If token commands are supplied,
+the existing API seeder is used instead; both commands and pinned account IDs
+are required together.
+
+The stage turns on `worker.engineSplit` in the config path reported by
+`olympus engine status`, preserves the other settings, and runs
+`olympus engine restart`. It waits for healthy front/background services and
+records that proof and the installed build in `onDemandTiming.preflight` in
+JSON and HTML. The existing fresh MCP connection survives this restart.
+
+Drive connects through its dashboard Connect/consent/callback flow, using the
+same signed-in Google account as Gmail. A Drive connection already established
+by Google consent is reused. If the candidate has no Drive web connect control,
+the four Drive cases are listed under `onDemandTiming.notRun` and in HTML with
+`product has no web connect for Drive`; they have no timing rows and no passing
+read checks. Unreadable dashboard state or a failed connection is a failure,
+not evidence that Drive lacks web connect.
+
+The browser creates or reuses `/Olympus RC on demand` on Dropbox and a Google
+Drive folder with the same name. PDFs upload through each provider's web file
+chooser; the native Google Doc is created in that folder with Google Docs and
+its text is typed into the editor. Existing fixture names are skipped without
+rewriting them. Their made-up facts are fixed by a versioned seed, so this mode
+needs the fresh leg's empty store on every run. Do not edit those fixtures in
+place: an old or altered fixture fails the expected-fact check. No account-wide
+privacy rule is installed.
+
+The seed folders are added through the dashboard as **Names with read on
+demand**, preserving the other scope selections. Before each timed read, the
+stage waits for the file's name in Your items and requires its Read this file
+control to be available. The probe resolves its actual provider identity and
+source version from names-only metadata; it does not read its body. The shared
+accounts-stage timing table, 30-second bound, wait-wording checks and four step
+timings are used unchanged. The additional Dropbox owner case temporarily uses
+Names only and presses Read this file.
+
+The normal fresh-leg cleanup restores zig even if setup or timing fails.
+Seeded provider files remain in the test accounts for reuse. Browser upload
+scratch, probe bundles and their local counterparts use `/tmp` and are removed
+when the stage closes. The fresh install's existing diagnostic files remain as
+before. Timing replies and logs contain the synthetic fixtures and are included
+in the report; ordinary fresh account answers and OAuth pages remain excluded.

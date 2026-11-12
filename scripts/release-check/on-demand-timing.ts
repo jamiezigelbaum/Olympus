@@ -13,6 +13,8 @@ export interface TimingDashboard {
 }
 export interface TimingDiagnostics {
   preflight(): Promise<string>;
+  enableSplit?(): Promise<void>;
+  resolve?(file: TimingFile): Promise<TimingFile>;
   begin(file: TimingFile): Promise<void>;
   finish(file: TimingFile): Promise<{ indexed: boolean; jobIds: string[]; log: string; attribution: string }>;
   close(): Promise<void>;
@@ -27,7 +29,8 @@ export interface OnDemandTimingRow {
   jobIds: string[]; steps: Partial<Record<'fetch' | 'extract' | 'judge' | 'embed', number>>;
   timingLog: string; attribution: string; error?: string;
 }
-export interface OnDemandTimingResult { rows: OnDemandTimingRow[]; checks: CheckResult[]; preflight?: string }
+export interface OnDemandNotRun { id: string; file: string; source: string; reason: string }
+export interface OnDemandTimingResult { notRun?: OnDemandNotRun[]; rows: OnDemandTimingRow[]; checks: CheckResult[]; preflight?: string }
 export interface TimingClock { now(): number; sleep(ms: number): Promise<void> }
 const realClock: TimingClock = { now: Date.now, sleep: ms => new Promise(resolve => setTimeout(resolve, ms)) };
 const folded = (text: string) => text.toLowerCase().replace(/\s+/g, ' ');
@@ -122,7 +125,7 @@ export async function timeOnDemandFile(file: TimingFile, engine: EngineMcp, diag
 }
 
 export async function runOnDemandTiming(engine: EngineMcp, seeds: TimingSeeds, dashboard: TimingDashboard,
-  diagnostics: TimingDiagnostics, clock: TimingClock = realClock): Promise<OnDemandTimingResult> {
+  diagnostics: TimingDiagnostics, clock: TimingClock = realClock, requireUnread = false): Promise<OnDemandTimingResult> {
   const result: OnDemandTimingResult = { rows: [], checks: [] };
   const restore: Array<{ folder: SeedFolder; mode: FolderMode }> = [];
   try {
@@ -136,12 +139,21 @@ export async function runOnDemandTiming(engine: EngineMcp, seeds: TimingSeeds, d
       files.push(...await seeds.upload(folder));
       await dashboard.sync(folder);
     }
+    // On a fresh store, finish listing the entire seed set before the first question can request a read.
+    const unavailable = new Map<string, unknown>();
+    if (requireUnread) for (const file of files) {
+      try { await dashboard.prepareRead(file.name, true); }
+      catch (error) { unavailable.set(file.id, error); }
+    }
     for (const file of files) {
       try {
-        // An existing read must not silently turn this into a warm-answer benchmark. New revisions are seeded each run.
+        if (unavailable.has(file.id)) throw unavailable.get(file.id);
+        // Require an unread row: token seeds have new revisions; browser seeds use a new store.
         if (file.owner) await dashboard.setFolderMode(folders.find(folder => folder.source === file.source)!, 'metadata_only');
-        const action = await dashboard.prepareRead(file.name, file.owner === true);
-        const row = await timeOnDemandFile(file, engine, diagnostics, file.owner ? action : undefined, clock);
+        const action = await dashboard.prepareRead(file.name, requireUnread || file.owner === true);
+        const resolved = file.providerItemId ? file : await diagnostics.resolve?.(file);
+        if (!resolved?.providerItemId || !resolved.version) throw new Error('seed metadata has no provider identity/version');
+        const row = await timeOnDemandFile(resolved, engine, diagnostics, file.owner ? action : undefined, clock);
         result.rows.push(row); result.checks.push(...onDemandChecks(row));
         if (file.owner) await dashboard.setFolderMode(folders.find(folder => folder.source === file.source)!, 'on_demand');
       } catch (error) {
