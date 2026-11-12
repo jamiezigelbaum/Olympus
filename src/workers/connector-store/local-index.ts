@@ -2442,14 +2442,15 @@ export async function scanDigestPages(
   while (true) {
     if (expired()) return cut;
     const page = connectorStoreVectorDigestPageQuery(options, afterChunkPk);
-    const rows = await read({ mode: 'all', ...page }) as Array<{ chunk_pk: number; digest: Uint8Array }>;
-    for (let index = 0; index < rows.length; index++) {
-      if ((index & 31) === 0 && expired()) return cut;
-      const row = rows[index]!;
-      heap.append(row.chunk_pk, scoreVectorDigest(query, row.digest));
-    }
-    if (rows.length < 4096) break;
-    afterChunkPk = rows.at(-1)!.chunk_pk;
+    const packed = await read({ mode: 'get', ...page }) as VectorDigestPackedPage;
+    const finished = forEachPackedVectorDigest(packed, (chunkPk, digest, index) => {
+      if ((index & 31) === 0 && expired()) return false;
+      heap.append(chunkPk, scoreVectorDigest(query, digest));
+      return true;
+    });
+    if (!finished) return cut;
+    if (packed.n < VECTOR_DIGEST_PAGE_ROWS) break;
+    afterChunkPk = packed.last_pk;
     // Same cadence as the exact scan: a timer tick per page costs more than the page.
     if (digestPages++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0) await yieldConnectorStoreVectorScan();
   }
@@ -2493,15 +2494,49 @@ export async function scanDigestPages(
   return expired() ? cut : { bestByItem, dimensionMismatches, exhausted: heap.length === 0 };
 }
 
+const VECTOR_DIGEST_PAGE_ROWS = 4096;
+
+/**
+ * One page of digests as ONE row: the digests concatenated into a single
+ * blob, with their keys and byte lengths alongside in the same aggregate
+ * pass, so the three always line up. A page crosses the read-pool thread as
+ * one buffer and two strings instead of 4,096 small typed arrays; per-row
+ * blobs were the shape under the Bun memory fault on large stores
+ * (olympus-ops#151).
+ */
+export type VectorDigestPackedPage = { n: number; last_pk: number; pks: string; lengths: string; packed: Uint8Array };
+
+/** Visits each digest as a view into the page's blob; false from `visit` stops early. */
+export function forEachPackedVectorDigest(
+  page: VectorDigestPackedPage, visit: (chunkPk: number, digest: Uint8Array, index: number) => boolean,
+): boolean {
+  if (page.n === 0) return true;
+  const pks = JSON.parse(page.pks) as number[];
+  const lengths = JSON.parse(page.lengths) as number[];
+  const total = lengths.reduce((sum, length) => sum + length, 0);
+  if (pks.length !== page.n || lengths.length !== page.n || total !== page.packed.byteLength) {
+    throw new Error('vector digest page does not unpack: key, length and byte counts disagree');
+  }
+  let offset = 0;
+  for (let index = 0; index < page.n; index++) {
+    const length = lengths[index]!;
+    if (!visit(pks[index]!, page.packed.subarray(offset, offset + length), index)) return false;
+    offset += length;
+  }
+  return true;
+}
+
 /** INTEGER PRIMARY KEY is the rowid: no secondary index, joins, or blob sort. */
 export function connectorStoreVectorDigestPageQuery(
-  options: { modelId: string; accountScope?: string }, afterChunkPk: number, limit = 4096,
+  options: { modelId: string; accountScope?: string }, afterChunkPk: number, limit = VECTOR_DIGEST_PAGE_ROWS,
 ): { sql: string; params: Array<string | number> } {
   const account = normalizeOptionalAccountScope(options.accountScope);
   return {
-    sql: `SELECT chunk_pk, digest FROM chunk_vector_digest
-      WHERE chunk_pk > ? AND model_id = ? ${account ? 'AND account_scope = ?' : ''}
-      ORDER BY chunk_pk LIMIT ?`,
+    sql: `SELECT count(*) AS n, max(chunk_pk) AS last_pk, json_group_array(chunk_pk) AS pks,
+        json_group_array(length(digest)) AS lengths, CAST(coalesce(group_concat(digest, ''), x'') AS BLOB) AS packed
+      FROM (SELECT chunk_pk, digest FROM chunk_vector_digest
+        WHERE chunk_pk > ? AND model_id = ? ${account ? 'AND account_scope = ?' : ''}
+        ORDER BY chunk_pk LIMIT ?)`,
     params: [afterChunkPk, options.modelId, ...(account ? [account] : []), limit],
   };
 }

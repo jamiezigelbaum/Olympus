@@ -290,12 +290,9 @@ export function createReleaseTierCheck(
         // judged on the item's names alone: its content tier never limits an
         // answer that carries only its names.
         const namesOnly = inputs[index]!.layer === 'names';
-        // Owner edits take effect before their queued placement settles.
-        const override = scope.ledger.getOverride(identity);
         const tiers = namesOnly
           ? [record.metadataTier, record.targetMetadataTier]
           : [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier];
-        if (override?.kind === 'tier') tiers.push(override.tier);
         // What waits for its model question is held Private, as placement
         // holds it, though its recorded tier is the Personal default: an
         // answer read from it is Private until the model says otherwise.

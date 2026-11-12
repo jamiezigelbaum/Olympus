@@ -32282,6 +32282,27 @@ const open = (path) => {
   postMessage({ diagnostic: 'open', path, ms: performance.now() - started });
   return db;
 };
+// Snapshot connections are kept for the next snapshot instead of closed:
+// Bun 1.3.x corrupts its heap when pool threads open and close SQLite
+// connections concurrently (olympus-ops#151), and a store's searches would
+// otherwise open one connection per snapshot.
+const IDLE_SNAPSHOT_CONNECTIONS = 8;
+const idleSnapshots = new Map();
+const snapshotConnection = (path) => {
+  const stat = statSync(path);
+  const file = stat.dev + ':' + stat.ino;
+  const idle = idleSnapshots.get(path) ?? [];
+  while (idle.length > 0) {
+    const held = idle.pop();
+    if (held.file === file) {
+      // A snapshot may have changed its connection's settings; the next starts from the defaults.
+      held.db.exec('PRAGMA busy_timeout = 10000');
+      return held;
+    }
+    try { held.db.close(); } catch {}
+  }
+  return { db: open(path), file, path };
+};
 const connection = (path) => {
   const stat = statSync(path);
   const file = stat.dev + ':' + stat.ino;
@@ -32298,23 +32319,31 @@ self.onmessage = (event) => {
     const held = connections.get(path);
     connections.delete(path);
     try { held?.db.close(); } catch {}
+    for (const idle of idleSnapshots.get(path) ?? []) { try { idle.db.close(); } catch {} }
+    idleSnapshots.delete(path);
+    // A snapshot still open on the released store closes, rather than idles, when it ends.
+    for (const open of snapshots.values()) if (open.path === path) open.discard = true;
     return;
   }
   try {
     if (op === 'open') {
-      const db = open(path);
-      db.exec('BEGIN');
-      snapshots.set(snapshot, db);
+      const held = snapshotConnection(path);
+      try { held.db.exec('BEGIN'); } catch (error) { held.db.close(); throw error; }
+      snapshots.set(snapshot, held);
       postMessage({ id, ok: true, rows: null });
     } else if (op === 'close') {
-      const db = snapshots.get(snapshot);
+      const held = snapshots.get(snapshot);
       snapshots.delete(snapshot);
-      if (db) {
-        try { db.exec('COMMIT'); } finally { db.close(); }
+      if (held) {
+        let reusable = false;
+        try { held.db.exec('COMMIT'); reusable = true; } finally {
+          const idle = idleSnapshots.get(held.path) ?? [];
+          if (reusable && !held.discard && idle.length < IDLE_SNAPSHOT_CONNECTIONS) { idle.push(held); idleSnapshots.set(held.path, idle); } else held.db.close();
+        }
       }
       postMessage({ id, ok: true, rows: null });
     } else {
-      const db = op === 'query' ? connection(path) : snapshots.get(snapshot);
+      const db = op === 'query' ? connection(path) : snapshots.get(snapshot)?.db;
       if (!db) throw new Error('unknown snapshot');
       const started = performance.now();
       const query = db.query(sql);
@@ -38938,16 +38967,18 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit) 
     if (expired())
       return cut;
     const page2 = connectorStoreVectorDigestPageQuery(options, afterChunkPk);
-    const rows = await read({ mode: "all", ...page2 });
-    for (let index = 0;index < rows.length; index++) {
+    const packed = await read({ mode: "get", ...page2 });
+    const finished = forEachPackedVectorDigest(packed, (chunkPk, digest3, index) => {
       if ((index & 31) === 0 && expired())
-        return cut;
-      const row = rows[index];
-      heap.append(row.chunk_pk, scoreVectorDigest(query, row.digest));
-    }
-    if (rows.length < 4096)
+        return false;
+      heap.append(chunkPk, scoreVectorDigest(query, digest3));
+      return true;
+    });
+    if (!finished)
+      return cut;
+    if (packed.n < VECTOR_DIGEST_PAGE_ROWS)
       break;
-    afterChunkPk = rows.at(-1).chunk_pk;
+    afterChunkPk = packed.last_pk;
     if (digestPages++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0)
       await yieldConnectorStoreVectorScan();
   }
@@ -38995,12 +39026,32 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit) 
   }
   return expired() ? cut : { bestByItem, dimensionMismatches, exhausted: heap.length === 0 };
 }
-function connectorStoreVectorDigestPageQuery(options, afterChunkPk, limit = 4096) {
+function forEachPackedVectorDigest(page2, visit) {
+  if (page2.n === 0)
+    return true;
+  const pks = JSON.parse(page2.pks);
+  const lengths = JSON.parse(page2.lengths);
+  const total = lengths.reduce((sum, length) => sum + length, 0);
+  if (pks.length !== page2.n || lengths.length !== page2.n || total !== page2.packed.byteLength) {
+    throw new Error("vector digest page does not unpack: key, length and byte counts disagree");
+  }
+  let offset = 0;
+  for (let index = 0;index < page2.n; index++) {
+    const length = lengths[index];
+    if (!visit(pks[index], page2.packed.subarray(offset, offset + length), index))
+      return false;
+    offset += length;
+  }
+  return true;
+}
+function connectorStoreVectorDigestPageQuery(options, afterChunkPk, limit = VECTOR_DIGEST_PAGE_ROWS) {
   const account = normalizeOptionalAccountScope(options.accountScope);
   return {
-    sql: `SELECT chunk_pk, digest FROM chunk_vector_digest
-      WHERE chunk_pk > ? AND model_id = ? ${account ? "AND account_scope = ?" : ""}
-      ORDER BY chunk_pk LIMIT ?`,
+    sql: `SELECT count(*) AS n, max(chunk_pk) AS last_pk, json_group_array(chunk_pk) AS pks,
+        json_group_array(length(digest)) AS lengths, CAST(coalesce(group_concat(digest, ''), x'') AS BLOB) AS packed
+      FROM (SELECT chunk_pk, digest FROM chunk_vector_digest
+        WHERE chunk_pk > ? AND model_id = ? ${account ? "AND account_scope = ?" : ""}
+        ORDER BY chunk_pk LIMIT ?)`,
     params: [afterChunkPk, options.modelId, ...account ? [account] : [], limit]
   };
 }
@@ -41846,7 +41897,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128, VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8, VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS = 60000, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, VECTOR_SCAN_RESERVE_MIN_MS = 1000, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128, VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8, VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS = 60000, VECTOR_DIGEST_PAGE_ROWS = 4096, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, VECTOR_SCAN_RESERVE_MIN_MS = 1000, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_vector_digest();
   init_main_thread_sql_trace();
@@ -113159,6 +113210,124 @@ var init_source_dashboard = __esm(() => {
   DASHBOARD_TRUST_DOMAINS = ["secure_local", "internal", "public_safe"];
 });
 
+// src/core/limit-stops.ts
+function registerLimit(input) {
+  const prior = limits.get(input.id);
+  if (prior && Object.keys({ ...prior, ...input }).some((key2) => prior[key2] !== input[key2])) {
+    throw new Error(`Limit already registered differently: ${input.id}`);
+  }
+  limits.set(input.id, Object.freeze({ ...input }));
+}
+function initializeLimitStops(db) {
+  runSqliteMigrations(db, "limit-stops", [{
+    version: 1,
+    name: "create_limit_stops",
+    up(db2) {
+      db2.exec(`CREATE TABLE IF NOT EXISTS limit_stops (
+        id TEXT NOT NULL, subject TEXT NOT NULL, since TEXT NOT NULL,
+        "limit" REAL, used REAL, waiting_json TEXT, to_continue_json TEXT,
+        resumes_at TEXT, cleared_at TEXT, PRIMARY KEY (id, subject)
+      )`);
+    }
+  }]);
+}
+function reportLimitStop(input, db) {
+  if (!limits.has(input.id))
+    throw new Error(`Unregistered limit: ${input.id}`);
+  for (const value of [input.limit, input.used, ...Object.values(input.waiting ?? {}), ...Object.values(input.toContinue ?? {})]) {
+    if (value != null && (!Number.isFinite(value) || value < 0))
+      throw new TypeError("Limit amounts must be non-negative finite numbers.");
+  }
+  if (!input.subject || !Number.isFinite(Date.parse(input.since)) || input.resumesAt !== undefined && !Number.isFinite(Date.parse(input.resumesAt))) {
+    throw new TypeError("Limit stops require a subject and valid timestamps.");
+  }
+  db.query(`
+    INSERT INTO limit_stops (id, subject, since, "limit", used, waiting_json, to_continue_json, resumes_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id, subject) DO UPDATE SET
+      -- A stop still open keeps its start; a cleared or self-expired one starts again.
+      since = CASE WHEN limit_stops.cleared_at IS NULL
+        AND (limit_stops.resumes_at IS NULL OR limit_stops.resumes_at > excluded.since)
+        THEN limit_stops.since ELSE excluded.since END,
+      "limit" = excluded."limit", used = excluded.used,
+      waiting_json = excluded.waiting_json, to_continue_json = excluded.to_continue_json,
+      resumes_at = excluded.resumes_at, cleared_at = NULL
+  `).run(input.id, input.subject, input.since, input.limit, input.used, input.waiting ? JSON.stringify(input.waiting) : null, input.toContinue ? JSON.stringify(input.toContinue) : null, input.resumesAt === undefined ? null : new Date(input.resumesAt).toISOString());
+}
+function clearLimitStop(id, subject, db) {
+  db.query(`
+    UPDATE limit_stops SET cleared_at = ? WHERE id = ? AND subject = ? AND cleared_at IS NULL
+  `).run(new Date().toISOString(), id, subject);
+}
+function listOpenLimitStops(db, now = new Date) {
+  if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'limit_stops'").get())
+    return [];
+  const rows = db.query(`SELECT * FROM limit_stops WHERE cleared_at IS NULL
+    AND (resumes_at IS NULL OR resumes_at > ?) ORDER BY id, subject`).all(now.toISOString());
+  return rows.map((row) => ({
+    id: row.id,
+    subject: row.subject,
+    since: row.since,
+    limit: row.limit,
+    used: row.used,
+    ...row.waiting_json ? { waiting: JSON.parse(row.waiting_json) } : {},
+    ...row.to_continue_json ? { toContinue: JSON.parse(row.to_continue_json) } : {},
+    ...row.resumes_at ? { resumesAt: row.resumes_at } : {}
+  }));
+}
+var limits;
+var init_limit_stops = __esm(() => {
+  init_sqlite_migrations();
+  limits = new Map;
+});
+
+// src/workers/scheduler-limit-stops.ts
+function schedulerLimitSubject(state) {
+  return JSON.stringify([state.sourceId, state.corpusId, state.taskId]);
+}
+function syncSchedulerLimitStop(db, previousReason, state) {
+  const previous = previousReason ? DAILY_LIMITS.get(previousReason) : undefined;
+  const current3 = state.degradedReason ? DAILY_LIMITS.get(state.degradedReason) : undefined;
+  if (!previous && !current3)
+    return;
+  const subject = schedulerLimitSubject(state);
+  if (previous && previous.id !== current3?.id)
+    clearLimitStop(previous.id, subject, db);
+  if (current3)
+    reportLimitStop({
+      id: current3.id,
+      subject,
+      since: state.updatedAt,
+      limit: null,
+      used: null,
+      resumesAt: dailyResume(state.updatedAt, state.notBeforeAt)
+    }, db);
+}
+function dailyResume(since, notBeforeAt) {
+  const day = new Date(since);
+  const midnight = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate() + 1);
+  const retry = notBeforeAt ? Date.parse(notBeforeAt) : NaN;
+  return new Date(Number.isFinite(retry) && retry < midnight ? retry : midnight).toISOString();
+}
+var DAILY_LIMITS;
+var init_scheduler_limit_stops = __esm(() => {
+  init_limit_stops();
+  DAILY_LIMITS = new Map(Object.entries({
+    daily_cost_guard: { id: "x.daily_cost", kind: "cost", label: "daily X API budget used" },
+    daily_api_request_guard: { id: "x.daily_requests", kind: "requests", label: "daily X API budget used" },
+    daily_resource_read_guard: { id: "x.daily_resource_reads", kind: "requests", label: "daily X API budget used" },
+    head_api_request_reserve_guard: { id: "x.head_reserve_requests", kind: "requests", label: "daily X API budget used" },
+    head_resource_read_reserve_guard: { id: "x.head_reserve_reads", kind: "requests", label: "daily X API budget used" },
+    head_cost_reserve_guard: { id: "x.head_reserve_cost", kind: "cost", label: "daily X API budget used" },
+    readwise_daily_api_request_guard: { id: "readwise.daily_requests", kind: "requests", label: "daily Readwise API budget used" },
+    gmail_daily_api_request_guard: { id: "gmail.daily_requests", kind: "requests", label: "daily Gmail API budget used" },
+    google_drive_daily_api_request_guard: { id: "drive.daily_requests", kind: "requests", label: "daily Google Drive API budget used" }
+  }));
+  for (const limit of DAILY_LIMITS.values()) {
+    registerLimit({ ...limit, scope: "source", unit: limit.kind === "cost" ? "usd" : "requests", continue: "run_once" });
+  }
+});
+
 // src/workers/source-scheduler-state.ts
 import { chmodSync as chmodSync28, existsSync as existsSync72, mkdirSync as mkdirSync45 } from "node:fs";
 import { dirname as dirname77 } from "node:path";
@@ -113176,7 +113345,11 @@ function forgetSourceSchedulerState(dbPath, scope, options = {}) {
     db.exec("PRAGMA busy_timeout = 10000;");
     return forgetSqliteRows(db, [
       ...filterFor("source_scheduler_task_state", keys),
-      ...filterFor("source_scheduler_unpark_request", keys)
+      ...filterFor("source_scheduler_unpark_request", keys),
+      ...filterFor("limit_stops", [
+        ["CASE WHEN json_valid(subject) THEN json_extract(subject, '$[0]') END", scope.sourceIds],
+        ["CASE WHEN json_valid(subject) THEN json_extract(subject, '$[1]') END", scope.corpusIds]
+      ])
     ], dryRun).reduce((sum2, count) => sum2 + count, 0);
   } finally {
     closeSqliteStore(db);
@@ -113197,6 +113370,24 @@ class LocalSourceSchedulerStateStore {
     this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
     assertSqliteSchemaCanOpen(this.db, SOURCE_SCHEDULER_STATE_STORE_ID, SOURCE_SCHEDULER_STATE_SCHEMA_VERSION);
     runSqliteMigrations(this.db, SOURCE_SCHEDULER_STATE_STORE_ID, sourceSchedulerStateMigrations());
+    initializeLimitStops(this.db);
+    this.backfillLimitStops();
+  }
+  backfillLimitStops() {
+    this.db.transaction(() => {
+      const keys = this.db.query(`
+        SELECT source_id, corpus_id, task_id FROM source_scheduler_task_state
+        WHERE degraded_reason IS NOT NULL
+      `).all();
+      for (const key2 of keys) {
+        const state = this.get({ sourceId: key2.source_id, corpusId: key2.corpus_id, taskId: key2.task_id });
+        if (state)
+          syncSchedulerLimitStop(this.db, undefined, state);
+      }
+    })();
+  }
+  openLimitStops(now) {
+    return listOpenLimitStops(this.db, now);
   }
   close() {
     closeSqliteStore(this.db);
@@ -113516,7 +113707,7 @@ class LocalSourceSchedulerStateStore {
   writeCurrentVersion(key2, write2) {
     return this.db.transaction(() => {
       const existing = this.db.query(`
-        SELECT state_version
+        SELECT state_version, degraded_reason
         FROM source_scheduler_task_state
         WHERE source_id = ? AND corpus_id = ? AND task_id = ?
       `).get(key2.sourceId, key2.corpusId, key2.taskId);
@@ -113527,6 +113718,7 @@ class LocalSourceSchedulerStateStore {
       const state = this.get(key2);
       if (!state)
         throw new Error("Source scheduler task state could not be read after its atomic update.");
+      syncSchedulerLimitStop(this.db, existing?.degraded_reason, state);
       return state;
     })();
   }
@@ -113740,6 +113932,8 @@ var SOURCE_SCHEDULER_STATE_STORE_ID = "source-scheduler-state", SOURCE_SCHEDULER
 var init_source_scheduler_state = __esm(() => {
   init_olympus_layout();
   init_sqlite_migrations();
+  init_limit_stops();
+  init_scheduler_limit_stops();
   SAFE_STATE_TOKEN = /^[a-z0-9][a-z0-9._:-]{0,127}$/;
   SAFE_KEY_PART2 = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/;
   SAFE_HASH3 = /^[a-f0-9]{16,128}$/;
@@ -122194,14 +122388,14 @@ function zkapiDailyLimitState(settings, statePath, now) {
     return "reached";
   return "available";
 }
-function reserveZkapiRequest(path, limits, now, fence = { scope: "default", configDir: "unknown" }, allowanceMicroUsd = ZKAPI_MAX_ALLOWANCE_MICRO_USD) {
+function reserveZkapiRequest(path, limits2, now, fence = { scope: "default", configDir: "unknown" }, allowanceMicroUsd = ZKAPI_MAX_ALLOWANCE_MICRO_USD) {
   let refusal2;
   updateState(path, now, (state) => {
-    if (limits.requestCap !== undefined && state.count >= limits.requestCap) {
+    if (limits2.requestCap !== undefined && state.count >= limits2.requestCap) {
       refusal2 = "daily_cap_reached";
       return;
     }
-    if (limits.spendCapMicroUsd !== undefined && state.reservedMicroUsd + allowanceMicroUsd > limits.spendCapMicroUsd) {
+    if (limits2.spendCapMicroUsd !== undefined && state.reservedMicroUsd + allowanceMicroUsd > limits2.spendCapMicroUsd) {
       refusal2 = "spend_cap_reached";
       return;
     }
@@ -127754,15 +127948,15 @@ function consultWriterContextFromPack(pack, options = {}) {
   }
   return Object.freeze({ entries: Object.freeze(entries), overflow: state.overflow, malformed: state.malformed });
 }
-function evaluateConsultRequest(subQuestions, context2, limits = {}, history = {}, options = {}) {
+function evaluateConsultRequest(subQuestions, context2, limits2 = {}, history = {}, options = {}) {
   try {
-    return evaluateCheckedRequest(subQuestions, context2, limits, history, options);
+    return evaluateCheckedRequest(subQuestions, context2, limits2, history, options);
   } catch {
     return refuse2(["gate_internal_error"]);
   }
 }
-function evaluateCheckedRequest(subQuestions, context2, limits, history, options) {
-  const effective = clampLimits(limits ?? {});
+function evaluateCheckedRequest(subQuestions, context2, limits2, history, options) {
+  const effective = clampLimits(limits2 ?? {});
   const recent = history?.recentApprovedQuestions ?? [];
   if (!context2 || typeof context2 !== "object" || Array.isArray(context2) || !Array.isArray(context2.entries)) {
     return refuse2(["writer_context_malformed"]);
@@ -127876,13 +128070,13 @@ function secretsOnly(subQuestions, context2) {
 function refuse2(reasons) {
   return Object.freeze({ decision: "refuse", reasons: Object.freeze([...new Set(reasons)]) });
 }
-function clampLimits(limits) {
+function clampLimits(limits2) {
   const pick = (value2, ceiling) => typeof value2 === "number" && Number.isFinite(value2) && value2 >= 0 ? Math.min(value2, ceiling) : ceiling;
   return {
-    maxQuestionBytes: pick(limits.maxQuestionBytes, DEFAULT_CONSULT_GATE_LIMITS.maxQuestionBytes),
-    maxQuestionTokens: pick(limits.maxQuestionTokens, DEFAULT_CONSULT_GATE_LIMITS.maxQuestionTokens),
-    maxWriterContextBytes: pick(limits.maxWriterContextBytes, DEFAULT_CONSULT_GATE_LIMITS.maxWriterContextBytes),
-    maxWriterContextEntries: pick(limits.maxWriterContextEntries, DEFAULT_CONSULT_GATE_LIMITS.maxWriterContextEntries)
+    maxQuestionBytes: pick(limits2.maxQuestionBytes, DEFAULT_CONSULT_GATE_LIMITS.maxQuestionBytes),
+    maxQuestionTokens: pick(limits2.maxQuestionTokens, DEFAULT_CONSULT_GATE_LIMITS.maxQuestionTokens),
+    maxWriterContextBytes: pick(limits2.maxWriterContextBytes, DEFAULT_CONSULT_GATE_LIMITS.maxWriterContextBytes),
+    maxWriterContextEntries: pick(limits2.maxWriterContextEntries, DEFAULT_CONSULT_GATE_LIMITS.maxWriterContextEntries)
   };
 }
 function writerContextShapeValid(context2) {
@@ -127901,15 +128095,15 @@ function writerContextShapeValid(context2) {
   }
   return true;
 }
-function writerContextWithinLimits(context2, limits) {
-  if (context2.entries.length > limits.maxWriterContextEntries)
+function writerContextWithinLimits(context2, limits2) {
+  if (context2.entries.length > limits2.maxWriterContextEntries)
     return false;
   let bytes = 0;
   for (const entry of context2.entries) {
     if (typeof entry.text !== "string")
       return false;
     bytes += utf8Bytes(entry.text);
-    if (bytes > limits.maxWriterContextBytes)
+    if (bytes > limits2.maxWriterContextBytes)
       return false;
   }
   return true;
@@ -154555,7 +154749,7 @@ class SourceAnswerJobRegistry {
   runningTotal = 0;
   priority;
   constructor(options = {}) {
-    const limits = {
+    const limits2 = {
       handoffMs: SOURCE_ANSWER_HANDOFF_DEFAULT_MS,
       resultWaitMs: SOURCE_ANSWER_RESULT_WAIT_DEFAULT_MS,
       ttlMs: SOURCE_ANSWER_JOB_TTL_MS,
@@ -154566,8 +154760,8 @@ class SourceAnswerJobRegistry {
       maxResultBytes: SOURCE_ANSWER_MAX_RESULT_BYTES,
       ...options.limits
     };
-    limits.maxRunningPerOwner = Math.min(limits.maxRunningPerOwner, limits.maxRunningGlobal);
-    this.limits = limits;
+    limits2.maxRunningPerOwner = Math.min(limits2.maxRunningPerOwner, limits2.maxRunningGlobal);
+    this.limits = limits2;
     this.now = options.now ?? Date.now;
     this.isOwnerRevoked = options.isOwnerRevoked;
     const priority = options.priority;
@@ -160881,7 +161075,7 @@ __export(exports_private_answer_model, {
 });
 function createBuiltInPrivateAnswerModel(options) {
   const { model } = options;
-  const limits = { ...PANEL_ANSWER_LIMITS, ...options.limits };
+  const limits2 = { ...PANEL_ANSWER_LIMITS, ...options.limits };
   return {
     status() {
       if (!model)
@@ -160903,7 +161097,7 @@ function createBuiltInPrivateAnswerModel(options) {
       const full = request?.detail === "full";
       if (!model)
         throw new Error("no private answer model");
-      const read = privateEvidence(evidence, limits.maxPassageChars);
+      const read = privateEvidence(evidence, limits2.maxPassageChars);
       let unreadable2 = read.unreadable;
       const readableHits = new Set(read.sources);
       const unreadableHits = evidence.filter((hit, index) => !readableHits.has(index) && hit.neighbour !== true);
@@ -160944,7 +161138,7 @@ function createBuiltInPrivateAnswerModel(options) {
         items: live2.map((index) => read.items[index]),
         neighbours: live2.map((index) => hitOf(index).neighbour === true)
       };
-      const selection = await panelSelection(question, liveRead, limits, scores ? async () => scores : undefined, signal);
+      const selection = await panelSelection(question, liveRead, limits2, scores ? async () => scores : undefined, signal);
       let picked = selection.items.map((position) => live2[position]);
       const deepItems = new Map;
       let pickedRevoked = false;
@@ -160952,7 +161146,7 @@ function createBuiltInPrivateAnswerModel(options) {
         const before = picked.length;
         picked = await admit(picked);
         pickedRevoked = picked.length < before;
-        const deep = await readInDepth(question, picked.map((index) => read.items[index]), picked.map(hitOf), full ? limits.deepEvidenceChars : selection.leading ? limits.leadingEvidenceChars : limits.summaryEvidenceChars, options.readItem, signal);
+        const deep = await readInDepth(question, picked.map((index) => read.items[index]), picked.map(hitOf), full ? limits2.deepEvidenceChars : selection.leading ? limits2.leadingEvidenceChars : limits2.summaryEvidenceChars, options.readItem, signal);
         const kept = deep.flatMap((item, position) => item ? [{ item, index: picked[position] }] : []);
         picked = kept.map((entry) => entry.index);
         for (const entry of kept)
@@ -161014,9 +161208,9 @@ function createBuiltInPrivateAnswerModel(options) {
       try {
         result = await options.answer(question, items, {
           model: guarded,
-          maxPromptBytes: full ? limits.deepPromptBytes : limits.maxPromptBytes,
-          maxAnswerChars: full ? limits.deepAnswerChars : limits.maxAnswerChars,
-          audit: limits.audit,
+          maxPromptBytes: full ? limits2.deepPromptBytes : limits2.maxPromptBytes,
+          maxAnswerChars: full ? limits2.deepAnswerChars : limits2.maxAnswerChars,
+          audit: limits2.audit,
           evidenceFormat: "compact",
           ...observe?.modelCall ? { onModelCall: (call) => observe.modelCall?.(call) } : {},
           ...signal ? { signal } : {}
@@ -161152,12 +161346,12 @@ function privateEvidence(hits, maxPassageChars = MAX_PASSAGE_CHARS) {
   });
   return { items, unreadable: unreadable2, sources };
 }
-async function panelItems(question, read, limits, relevance, signal) {
-  return (await panelSelection(question, read, limits, relevance, signal)).items;
+async function panelItems(question, read, limits2, relevance, signal) {
+  return (await panelSelection(question, read, limits2, relevance, signal)).items;
 }
-async function panelSelection(question, read, limits, relevance, signal) {
-  const max2 = Math.max(1, limits.maxItems);
-  const maxLeading = Math.max(0, Math.floor(limits.maxLeadingItems ?? 0));
+async function panelSelection(question, read, limits2, relevance, signal) {
+  const max2 = Math.max(1, limits2.maxItems);
+  const maxLeading = Math.max(0, Math.floor(limits2.maxLeadingItems ?? 0));
   const isNeighbour = (index) => read.neighbours?.[index] === true;
   const all = read.items.map((_, index) => index);
   const matches3 = all.filter((index) => !isNeighbour(index));
@@ -161221,9 +161415,9 @@ async function panelSelection(question, read, limits, relevance, signal) {
   const order = all.filter((index) => !isNeighbour(index) || scores[index] >= bestMatch);
   const ranked = units([...order].sort((a, b) => scores[b] - scores[a] || a - b));
   const unitScore = (unit) => scores[unit[0]];
-  const floor = unitScore(ranked[0]) - Math.max(0, limits.relevanceMargin);
+  const floor = unitScore(ranked[0]) - Math.max(0, limits2.relevanceMargin);
   const picked = ranked.filter((unit) => unitScore(unit) >= floor).slice(0, max2);
-  const leading = leadingCount(ranked.map(unitScore), Math.min(maxLeading, picked.length), limits.leadGap ?? 0);
+  const leading = leadingCount(ranked.map(unitScore), Math.min(maxLeading, picked.length), limits2.leadGap ?? 0);
   return leading > 0 ? { items: flatten(picked.slice(0, leading)), leading: true } : { items: flatten(picked), leading: false };
 }
 function leadingCount(sorted, maxLeading, gap) {
@@ -200119,18 +200313,18 @@ class MimeNode {
   constructor(options) {
     this.options = options;
     this.postalMime = options.postalMime;
-    const limits = this.postalMime.limits;
+    const limits2 = this.postalMime.limits;
     this.postalMime.counters.partCount++;
-    if (this.postalMime.counters.partCount > limits.maxPartCount) {
-      throw createError("EMAXPARTCOUNT", `Maximum MIME part count of ${limits.maxPartCount} parts exceeded`);
+    if (this.postalMime.counters.partCount > limits2.maxPartCount) {
+      throw createError("EMAXPARTCOUNT", `Maximum MIME part count of ${limits2.maxPartCount} parts exceeded`);
     }
     this.childNodes = [];
     this.finalizedChildCount = 0;
     if (options.parentNode) {
       this.parentNode = options.parentNode;
       this.depth = this.parentNode.depth + 1;
-      if (this.depth > limits.maxNestingDepth) {
-        throw createError("EMAXNESTINGDEPTH", `Maximum MIME nesting depth of ${limits.maxNestingDepth} levels exceeded`);
+      if (this.depth > limits2.maxNestingDepth) {
+        throw createError("EMAXNESTINGDEPTH", `Maximum MIME nesting depth of ${limits2.maxNestingDepth} levels exceeded`);
       }
       options.parentNode.childNodes.push(this);
     } else {
@@ -206341,7 +206535,7 @@ function createNoteArchiveConnector(input, spec) {
     }
     return false;
   };
-  const readJsonUnit = (unit, unitCursor, fileIndex, relPath, limits, segment, savedAt) => {
+  const readJsonUnit = (unit, unitCursor, fileIndex, relPath, limits2, segment, savedAt) => {
     if (source.kind !== "json")
       return "ended";
     const damaged2 = (offset) => report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", fileIndex, unit.posOf(offset));
@@ -206393,7 +206587,7 @@ function createNoteArchiveConnector(input, spec) {
         segment.position = here;
         return "paused";
       }
-      if (segment.bytes >= limits.bytes && (stepped || segment.consumed > 0 || limits.started)) {
+      if (segment.bytes >= limits2.bytes && (stepped || segment.consumed > 0 || limits2.started)) {
         segment.budgetHit = true;
         unit.park();
         segment.next = unitCursor;
@@ -206451,10 +206645,10 @@ function createNoteArchiveConnector(input, spec) {
         segment.stopped = true;
         return pause();
       }
-      if (segment.items.length >= limits.items || segment.consumed >= limits.units)
+      if (segment.items.length >= limits2.items || segment.consumed >= limits2.units)
         return pause();
       const spent = segment.bytes + (last ? last.end - unitCursor.offset : 0);
-      if (spent >= limits.bytes && (last !== undefined || segment.consumed > 0 || limits.started)) {
+      if (spent >= limits2.bytes && (last !== undefined || segment.consumed > 0 || limits2.started)) {
         segment.budgetHit = true;
         return pause();
       }
@@ -206554,7 +206748,7 @@ function createNoteArchiveConnector(input, spec) {
     }
     return { text: new TextDecoder("utf-8").decode(joined), end: member.end };
   };
-  const readMarkdownZip = (archive, fileIndex, cursor, limits, segment, savedAt) => {
+  const readMarkdownZip = (archive, fileIndex, cursor, limits2, segment, savedAt) => {
     if (source.kind !== "markdown")
       return;
     const from = Math.max(0, cursor.member);
@@ -206567,12 +206761,12 @@ function createNoteArchiveConnector(input, spec) {
         segment.next = here;
         return;
       }
-      if (segment.items.length >= limits.items || segment.consumed >= limits.units) {
+      if (segment.items.length >= limits2.items || segment.consumed >= limits2.units) {
         segment.next = here;
         segment.position = { fileIndex, offset: entry.localHeaderOffset };
         return;
       }
-      if (segment.bytes + entry.uncompressedSize > limits.bytes && (segment.consumed > 0 || limits.started)) {
+      if (segment.bytes + entry.uncompressedSize > limits2.bytes && (segment.consumed > 0 || limits2.started)) {
         segment.budgetHit = true;
         segment.next = here;
         segment.position = { fileIndex, offset: entry.localHeaderOffset };
@@ -206645,7 +206839,7 @@ function createNoteArchiveConnector(input, spec) {
       throw error2;
     }
   };
-  const readJsonZip = (archive, file2, fileIndex, cursor, limits, segment, savedAt) => {
+  const readJsonZip = (archive, file2, fileIndex, cursor, limits2, segment, savedAt) => {
     if (source.kind !== "json")
       return;
     const from = Math.max(0, cursor.member);
@@ -206663,12 +206857,12 @@ function createNoteArchiveConnector(input, spec) {
           segment.next = unitCursor;
           return;
         }
-        if (segment.items.length >= limits.items || segment.consumed >= limits.units) {
+        if (segment.items.length >= limits2.items || segment.consumed >= limits2.units) {
           segment.next = unitCursor;
           segment.position = { fileIndex, offset: entry.localHeaderOffset };
           return;
         }
-        if (segment.bytes >= limits.bytes && (segment.consumed > 0 || limits.started)) {
+        if (segment.bytes >= limits2.bytes && (segment.consumed > 0 || limits2.started)) {
           segment.budgetHit = true;
           segment.next = unitCursor;
           segment.position = { fileIndex, offset: entry.localHeaderOffset };
@@ -206689,7 +206883,7 @@ function createNoteArchiveConnector(input, spec) {
         }
       }
       const unit = zipUnit(archive, entry, fileIndex, segment);
-      const result = readJsonUnit(unit, unitCursor, fileIndex, file2.relPath, limits, segment, savedAt);
+      const result = readJsonUnit(unit, unitCursor, fileIndex, file2.relPath, limits2, segment, savedAt);
       if (result === "paused")
         return;
       segment.next = { file: fileIndex, member: entry.index + 1, offset: 0, done: false };
@@ -206712,7 +206906,7 @@ function createNoteArchiveConnector(input, spec) {
     if (other > 0)
       report(ARCHIVE_COMMON_FINDINGS.mediaNotImported, "gap", fileIndex, zipFindingOffset(archive.entryCount, 0), other);
   };
-  const readSegment = (cursor, limits) => {
+  const readSegment = (cursor, limits2) => {
     const file2 = input.files[cursor.file];
     const segment = { items: [], next: cursor, consumed: 0, bytes: 0, stopped: false, budgetHit: false };
     let reader;
@@ -206743,9 +206937,9 @@ function createNoteArchiveConnector(input, spec) {
         reportZipOverlap(archive, cursor.file, (finding) => input.report(finding));
         try {
           if (source.kind === "json")
-            readJsonZip(archive, file2, cursor.file, cursor, limits, segment, savedAt);
+            readJsonZip(archive, file2, cursor.file, cursor, limits2, segment, savedAt);
           else
-            readMarkdownZip(archive, cursor.file, cursor, limits, segment, savedAt);
+            readMarkdownZip(archive, cursor.file, cursor, limits2, segment, savedAt);
         } catch (error2) {
           if (error2 instanceof ZipFormatError) {
             report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", cursor.file, zipFindingOffset(archive.entryCount, 0));
@@ -206755,7 +206949,7 @@ function createNoteArchiveConnector(input, spec) {
           }
         }
       } else if (source.kind === "json") {
-        const result = readJsonUnit(plainUnit(reader), cursor, cursor.file, file2.relPath, limits, segment, savedAt);
+        const result = readJsonUnit(plainUnit(reader), cursor, cursor.file, file2.relPath, limits2, segment, savedAt);
         if (result === "ended")
           segment.next = startOfFile(cursor.file + 1);
       } else {
@@ -211224,9 +211418,9 @@ function bareAddress(value2) {
   const inner = /<([^<>\s]+)>/.exec(value2)?.[1] ?? value2.trim();
   return /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(inner) ? inner.toLowerCase() : undefined;
 }
-function identifyGmailExport(root, files, limits = {}) {
-  const MAX_MESSAGES = limits.maxMessages ?? DEFAULT_MAX_MESSAGES;
-  const MAX_BYTES = limits.maxBytes ?? DEFAULT_MAX_BYTES;
+function identifyGmailExport(root, files, limits2 = {}) {
+  const MAX_MESSAGES = limits2.maxMessages ?? DEFAULT_MAX_MESSAGES;
+  const MAX_BYTES = limits2.maxBytes ?? DEFAULT_MAX_BYTES;
   const addresses = new Set;
   let messages = 0;
   let bytes = 0;
@@ -213233,10 +213427,7 @@ function createReleaseTierCheck(scopes, secureDerivativeDefault, chunkOptions = 
           continue;
         const { record: record8, copies } = state;
         const namesOnly = inputs[index].layer === "names";
-        const override = scope.ledger.getOverride(identity2);
         const tiers = namesOnly ? [record8.metadataTier, record8.targetMetadataTier] : [record8.metadataTier, record8.contentTier, record8.targetMetadataTier, record8.targetContentTier];
-        if (override?.kind === "tier")
-          tiers.push(override.tier);
         const held = record8.metadataPending || !namesOnly && contentHeldForJudgment(record8);
         verdicts[index] = {
           tier: tiers.includes("secrets") ? "secret" : held || tiers.includes("secure") ? "private" : "public_or_personal",
@@ -237807,6 +237998,40 @@ var init_remote_search = __esm(() => {
   };
 });
 
+// connect-relay/shared/mcp-log.ts
+function rpcCallNames(body) {
+  const messages = Array.isArray(body) ? body : [body];
+  return messages.slice(0, 8).map((message2) => {
+    const { method, params } = message2 && typeof message2 === "object" ? message2 : {};
+    if (typeof method !== "string" || !LOGGED_RPC_METHODS.has(method))
+      return "?";
+    if (method !== "tools/call")
+      return method;
+    return `${method}:${typeof params?.name === "string" && LOGGED_TOOL_NAME.test(params.name) ? params.name : "?"}`;
+  });
+}
+var LOGGED_RPC_METHODS, LOGGED_TOOL_NAME;
+var init_mcp_log = __esm(() => {
+  LOGGED_RPC_METHODS = new Set([
+    "initialize",
+    "ping",
+    "tools/list",
+    "tools/call",
+    "resources/list",
+    "resources/templates/list",
+    "resources/read",
+    "prompts/list",
+    "prompts/get",
+    "completion/complete",
+    "logging/setLevel",
+    "notifications/initialized",
+    "notifications/cancelled",
+    "notifications/progress",
+    "notifications/roots/list_changed"
+  ]);
+  LOGGED_TOOL_NAME = /^(?:olympus|source|ask)_[a-z_]{1,48}$/;
+});
+
 // src/workers/remote-mcp.ts
 var exports_remote_mcp = {};
 __export(exports_remote_mcp, {
@@ -237926,17 +238151,6 @@ function createRemoteMcpHandler(options) {
       });
     }
   }
-}
-function rpcCallNames(body) {
-  const messages = Array.isArray(body) ? body : [body];
-  return messages.slice(0, 8).map((message2) => {
-    const { method, params } = message2 && typeof message2 === "object" ? message2 : {};
-    if (typeof method !== "string" || !LOGGED_RPC_METHODS.has(method))
-      return "?";
-    if (method !== "tools/call")
-      return method;
-    return `${method}:${typeof params?.name === "string" && LOGGED_TOOL_NAME.test(params.name) ? params.name : "?"}`;
-  });
 }
 function remoteMcpLogLine(trace, status, ms) {
   return JSON.stringify({
@@ -238136,7 +238350,7 @@ function jsonResponse(status, body, headers = {}) {
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers }
   });
 }
-var REMOTE_MCP_PATH = "/mcp", REMOTE_DIRECTORY_MCP_PATH, IN_PROCESS_WORKER_BASE_URL = "http://olympus-worker.internal/v1", LOGGED_RPC_METHODS, LOGGED_TOOL_NAME;
+var REMOTE_MCP_PATH = "/mcp", REMOTE_DIRECTORY_MCP_PATH, IN_PROCESS_WORKER_BASE_URL = "http://olympus-worker.internal/v1";
 var init_remote_mcp = __esm(() => {
   init_webStandardStreamableHttp();
   init_delphi();
@@ -238153,28 +238367,11 @@ var init_remote_mcp = __esm(() => {
   init_remote_search();
   init_directory_tools();
   init_remote_request_body();
+  init_mcp_log();
   init_remote_result();
   init_tokens();
   init_pinned_clients();
   REMOTE_DIRECTORY_MCP_PATH = DIRECTORY_MCP_PATH;
-  LOGGED_RPC_METHODS = new Set([
-    "initialize",
-    "ping",
-    "tools/list",
-    "tools/call",
-    "resources/list",
-    "resources/templates/list",
-    "resources/read",
-    "prompts/list",
-    "prompts/get",
-    "completion/complete",
-    "logging/setLevel",
-    "notifications/initialized",
-    "notifications/cancelled",
-    "notifications/progress",
-    "notifications/roots/list_changed"
-  ]);
-  LOGGED_TOOL_NAME = /^(?:olympus|source|ask)_[a-z_]{1,48}$/;
 });
 
 // src/workers/relay-surfaces.ts
@@ -239331,19 +239528,19 @@ function fitJsonString(text6, budget) {
   return { text: kept + CUT_MARK, cut: true };
 }
 function preparePrivateAnswer(result) {
-  const limits = PRIVATE_ANSWER_PAYLOAD_LIMITS;
+  const limits2 = PRIVATE_ANSWER_PAYLOAD_LIMITS;
   const citations = [];
   const localPaths = [];
   for (const value2 of Array.isArray(result.citations) ? result.citations : []) {
-    if (citations.length >= limits.citations)
+    if (citations.length >= limits2.citations)
       break;
     if (typeof value2 !== "object" || value2 === null)
       continue;
     const record8 = value2;
     const citation = {};
-    const title = cleanTextField(record8.title, limits.citationTextUnits);
-    const source = cleanTextField(record8.source, limits.citationTextUnits);
-    const date5 = cleanTextField(record8.date, limits.dateUnits);
+    const title = cleanTextField(record8.title, limits2.citationTextUnits);
+    const source = cleanTextField(record8.source, limits2.citationTextUnits);
+    const date5 = cleanTextField(record8.date, limits2.dateUnits);
     const url2 = httpsUrl2(record8.url);
     if (title)
       citation.title = title;
@@ -239360,20 +239557,20 @@ function preparePrivateAnswer(result) {
   }
   const unanswered = [];
   for (const value2 of Array.isArray(result.unanswered) ? result.unanswered : []) {
-    if (unanswered.length >= limits.gaps)
+    if (unanswered.length >= limits2.gaps)
       break;
-    const line2 = cleanTextField(value2, limits.gapUnits);
+    const line2 = cleanTextField(value2, limits2.gapUnits);
     if (line2)
       unanswered.push(line2);
   }
   return { answer: cleanAnswerText(result.answer), citations, unanswered, localPaths };
 }
 function fitCitation(citation) {
-  const limits = PRIVATE_ANSWER_PAYLOAD_LIMITS;
+  const limits2 = PRIVATE_ANSWER_PAYLOAD_LIMITS;
   const out = {};
-  const title = cleanTextField(citation.title, limits.citationTextUnits);
-  const source = cleanTextField(citation.source, limits.citationTextUnits);
-  const date5 = cleanTextField(citation.date, limits.dateUnits);
+  const title = cleanTextField(citation.title, limits2.citationTextUnits);
+  const source = cleanTextField(citation.source, limits2.citationTextUnits);
+  const date5 = cleanTextField(citation.date, limits2.dateUnits);
   if (title)
     out.title = title;
   if (source)
@@ -239417,10 +239614,10 @@ function fitCitation(citation) {
   return out;
 }
 function fitFirstAnswer(answer) {
-  const limits = PRIVATE_ANSWER_PAYLOAD_LIMITS;
+  const limits2 = PRIVATE_ANSWER_PAYLOAD_LIMITS;
   const text6 = fitJsonString(cleanAnswerText(answer.answer), PRIVATE_ANSWER_BYTE_BUDGETS.answer).text;
-  const citations = (Array.isArray(answer.citations) ? answer.citations : []).filter((citation) => typeof citation === "object" && citation !== null).slice(0, limits.citations).map(fitCitation).filter((citation) => Object.keys(citation).length > 0);
-  const unanswered = (answer.unanswered ?? []).slice(0, limits.gaps).map((line2) => cleanTextField(line2, limits.gapUnits)).filter((line2) => line2 !== undefined).map((line2) => fitJsonString(line2, PRIVATE_ANSWER_BYTE_BUDGETS.gap).text).filter(Boolean);
+  const citations = (Array.isArray(answer.citations) ? answer.citations : []).filter((citation) => typeof citation === "object" && citation !== null).slice(0, limits2.citations).map(fitCitation).filter((citation) => Object.keys(citation).length > 0);
+  const unanswered = (answer.unanswered ?? []).slice(0, limits2.gaps).map((line2) => cleanTextField(line2, limits2.gapUnits)).filter((line2) => line2 !== undefined).map((line2) => fitJsonString(line2, PRIVATE_ANSWER_BYTE_BUDGETS.gap).text).filter(Boolean);
   return { answer: text6, citations, ...unanswered.length > 0 ? { unanswered } : {} };
 }
 function serializePrivateAnswerPlaintext(plaintext) {
