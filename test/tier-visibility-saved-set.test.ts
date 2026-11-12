@@ -433,8 +433,13 @@ test('a warmed read-only store answers from its built set: a later read runs no 
   const rebuilds = countFullRebuilds(probe(reader).visibilityLedger()!);
   cleanups.push(() => rebuilds.restore());
   expect(sorted(probe(reader).tierHiddenItemPks())).toEqual(expected);
-  // A writer commit after the warm-up is applied as a delta, not a new build.
+  // Never stale in the hidden direction: a copy hidden after the warm-up is
+  // left out by the very next read, with no refresh tick in between. Each read
+  // applies the feed past the set's cursors first (as a delta, not a build),
+  // and each returned row is checked against the current ledger as well.
+  expect(reader.searchItems('picnic', 20).map((row) => row.sourceItem.providerItemId)).toContain('plain');
   ledgerDb.query("UPDATE tier_copies SET copy_state = 'superseded' WHERE provider_item_id = 'plain' AND corpus_id = ?").run(CORPORA.internal);
+  expect(reader.searchItems('picnic', 20).map((row) => row.sourceItem.providerItemId)).not.toContain('plain');
   expect(probe(reader).tierHiddenItemPks().hidden).toContain(pk('plain'));
   expect(build).not.toHaveBeenCalled();
   expect(rebuilds.count).toBe(0);
