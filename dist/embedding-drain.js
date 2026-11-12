@@ -1701,6 +1701,7 @@ var V0_4_PUBLIC_CLI_OPERATIONS = [
   "argus_complete",
   "source_answer",
   "source_index_status",
+  "source_item_read",
   "source_index_search",
   "olympus_doctor",
   "olympus_setup_status",
@@ -23743,7 +23744,7 @@ function raiseReadWindowTier(store, ledger, record, tier, snifferId) {
     if (!set)
       throw new Error("The item read cannot raise a routed item without its tier set.");
     if (tier === "secrets") {
-      const exported = store?.exportItemCopy(identity);
+      const exported = store?.exportItemCopy?.(identity);
       if (!exported)
         throw new Error("The item read cannot settle a missing Secret copy.");
       settleRoutedSecrets(set, identity, decision, exported, { findingKinds: ["sniffer_secret_refusal"] }, { guard: { generation: record.generation, override } });
@@ -23751,10 +23752,10 @@ function raiseReadWindowTier(store, ledger, record, tier, snifferId) {
       ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), { guard: { generation: record.generation, override } });
     }
   } else {
-    const exported = tier === "secrets" ? store?.exportItemCopy(identity) : undefined;
+    const exported = tier === "secrets" ? store?.exportItemCopy?.(identity) : undefined;
     ledger.recordDecision(identity, decision);
     if (exported)
-      store?.tombstoneCopy(exported.identity, { connectorId: TIER_REJUDGE_CONNECTOR_ID, trustTier: "S5" });
+      store?.tombstoneCopy?.(exported.identity, { connectorId: TIER_REJUDGE_CONNECTOR_ID, trustTier: "S5" });
   }
 }
 

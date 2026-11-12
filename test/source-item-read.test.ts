@@ -15,6 +15,7 @@ import { CachedTierSniffer } from '../src/workers/classification/sniffer.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
 import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
 import { runSnifferPass } from '../src/workers/classification/sniffer-resolver.ts';
+import { raiseReadWindowTier } from '../src/workers/connector-store/tier-rejudge.ts';
 import { readFileSync } from 'node:fs';
 import { createReleaseTierCheck } from '../src/workers/connector-store/tier-visibility.ts';
 import { openTierFixture, FIXTURE_PLACEMENT } from './helpers/tier-fixtures.ts';
@@ -263,9 +264,16 @@ test('real queued Private verdict raises before a retry and never credits a whol
   const sniffer = new CachedTierSniffer(queue, BUILT_IN_SNIFFER_LANE);
   registerInstalledTierClassification({ forLedger: () => ({ sniffer }) });
   refused(await f.store.readItemPages(f.item.identity.localItemId, { page: 1, pages: 1 }), 'window_judging');
-  await runSnifferPass({ targets: [{ ledger: f.ledger, sniffer: queue }], lane: BUILT_IN_SNIFFER_LANE, model: { async complete() {
+  const model = { async complete() {
     return { modelId: BUILT_IN_SNIFFER_LANE.modelId, text: JSON.stringify({ verdicts: [{ i: 1, tier: 'private', category: 'health', ownRecord: true, privateKind: 'health', confidence: 0.99 }] }) };
-  } } });
+  } };
+  // Without the store's raise hook the item isn't raised, and the read still refuses with no text.
+  await runSnifferPass({ targets: [{ ledger: f.ledger, sniffer: queue }], lane: BUILT_IN_SNIFFER_LANE, model });
+  expect(f.ledger.getCurrent(f.item.identity)!.contentTier).toBe(original.contentTier);
+  refused(await f.store.readItemPages(f.item.identity.localItemId, { page: 1, pages: 1 }), 'not_personal');
+  await runSnifferPass({ targets: [{ ledger: f.ledger, sniffer: queue,
+    raiseReadWindow: (current, tier, snifferId) => raiseReadWindowTier(f.store, f.ledger, current, tier, snifferId) }],
+  lane: BUILT_IN_SNIFFER_LANE, model });
   const row = f.ledger.getCurrent(f.item.identity)!;
   expect(row.contentTier).toBe('secure'); expect(row.metadataTier).toBe(original.metadataTier);
   refused(await f.store.readItemPages(f.item.identity.localItemId, { page: 1, pages: 1 }), 'not_personal');

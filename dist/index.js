@@ -1415,6 +1415,7 @@ var init_public_surface = __esm(() => {
     "argus_complete",
     "source_answer",
     "source_index_status",
+    "source_item_read",
     "source_index_search",
     "olympus_doctor",
     "olympus_setup_status",

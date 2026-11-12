@@ -669,7 +669,7 @@ function storedFolderKeys(value: string | number | null | undefined): string[] {
 
 /** A read window can only raise the item's existing decision, using the re-judge placement path. */
 export function raiseReadWindowTier(
-  store: LocalConnectorStore | undefined,
+  store: Partial<Pick<LocalConnectorStore, 'exportItemCopy' | 'tombstoneCopy'>> | undefined,
   ledger: TierLedger,
   record: TierLedgerRecord,
   tier: 'secure' | 'secrets',
@@ -689,7 +689,7 @@ export function raiseReadWindowTier(
   if (record.routed) {
     if (!set) throw new Error('The item read cannot raise a routed item without its tier set.');
     if (tier === 'secrets') {
-      const exported = store?.exportItemCopy(identity);
+      const exported = store?.exportItemCopy?.(identity);
       if (!exported) throw new Error('The item read cannot settle a missing Secret copy.');
       settleRoutedSecrets(set, identity, decision, exported, { findingKinds: ['sniffer_secret_refusal'] },
         { guard: { generation: record.generation, override } });
@@ -698,8 +698,8 @@ export function raiseReadWindowTier(
         { guard: { generation: record.generation, override } });
     }
   } else {
-    const exported = tier === 'secrets' ? store?.exportItemCopy(identity) : undefined;
+    const exported = tier === 'secrets' ? store?.exportItemCopy?.(identity) : undefined;
     ledger.recordDecision(identity, decision);
-    if (exported) store?.tombstoneCopy(exported.identity, { connectorId: TIER_REJUDGE_CONNECTOR_ID, trustTier: 'S5' });
+    if (exported) store?.tombstoneCopy?.(exported.identity, { connectorId: TIER_REJUDGE_CONNECTOR_ID, trustTier: 'S5' });
   }
 }

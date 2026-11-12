@@ -17,6 +17,7 @@ import {
   readClassificationLedger,
 } from '../classification-ledger.ts';
 import { settleSecretsCopies } from '../connector-store/secrets-disposition.ts';
+import { raiseReadWindowTier } from '../connector-store/tier-rejudge.ts';
 import { moveTieredItem, TierMoveContentChangedError } from '../connector-store/tier-move.ts';
 import type { LocalConnectorStore } from '../connector-store/local-index.ts';
 import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
@@ -1166,6 +1167,12 @@ export class TierSnifferService {
         ledger,
         sniffer: this.options.installed.snifferStoreForLedger(ledgerPath),
         ...(planner ? { placementFor: planner } : {}),
+        raiseReadWindow: (row, tier, snifferId) => {
+          const set = tierSetForLedger(ledgerPath);
+          const store = (set?.openStores() ?? this.options.stores().filter(candidate =>
+            (candidate.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(candidate.dbPath)) === ledgerPath))[0];
+          raiseReadWindowTier(store, ledger, row, tier, snifferId);
+        },
         screenStoredQuestion: question => {
           const row = ledger.getCurrent(question);
           // Routed rows have the full-copy rejudge path. Unread names have

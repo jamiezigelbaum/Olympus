@@ -1,4 +1,3 @@
-import { raiseReadWindowTier } from '../connector-store/tier-rejudge.ts';
 import type { SnifferModel, SnifferModelRequest, SnifferModelCompletion } from './sniffer-decision.ts';
 // The sniffer's background pass (design section 2.2): resolve pending items.
 //
@@ -93,6 +92,12 @@ export interface SnifferTarget {
   screenStoredQuestion?: (question: SnifferQuestion) => 'clean' | 'secrets' | 'unreadable';
   /** Uses the set's existing Secrets disposition; false keeps the question for retry. */
   settleSecrets?: (question: SnifferQuestion, decision: TierDecision) => boolean;
+  /**
+   * Raises an item whose read window was judged Private, through the store's
+   * re-judge placement. Without it a Private window verdict stays queued, so
+   * the read keeps refusing that page.
+   */
+  raiseReadWindow?: (row: TierLedgerRecord, tier: 'secure', snifferId: string) => void;
 }
 
 /**
@@ -420,8 +425,8 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     if (item.question.flags.includes('content:read_window')) {
       if (!sameQuestion(item.target, item.question) || !stillOpen(item.target, item.question, false)) return;
       if (tier === 'secure') {
-        const row = item.target.ledger.getCurrent(item.question)!;
-        raiseReadWindowTier(undefined, item.target.ledger, row, tier, id);
+        if (!item.target.raiseReadWindow) return;
+        item.target.raiseReadWindow(item.target.ledger.getCurrent(item.question)!, tier, id);
       }
       item.target.sniffer.deleteQuestion(item.question, item.question.pass, item.question.materialHash);
       report.verdictsApplied += 1;

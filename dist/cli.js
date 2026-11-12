@@ -2887,6 +2887,7 @@ var init_public_surface = __esm(() => {
     "argus_complete",
     "source_answer",
     "source_index_status",
+    "source_item_read",
     "source_index_search",
     "olympus_doctor",
     "olympus_setup_status",
@@ -36204,7 +36205,7 @@ function raiseReadWindowTier(store, ledger, record, tier, snifferId2) {
     if (!set)
       throw new Error("The item read cannot raise a routed item without its tier set.");
     if (tier === "secrets") {
-      const exported = store?.exportItemCopy(identity2);
+      const exported = store?.exportItemCopy?.(identity2);
       if (!exported)
         throw new Error("The item read cannot settle a missing Secret copy.");
       settleRoutedSecrets(set, identity2, decision, exported, { findingKinds: ["sniffer_secret_refusal"] }, { guard: { generation: record.generation, override } });
@@ -36212,10 +36213,10 @@ function raiseReadWindowTier(store, ledger, record, tier, snifferId2) {
       ledger.recordRoutedPlacement(identity2, decision, set.placementFor(decision), { guard: { generation: record.generation, override } });
     }
   } else {
-    const exported = tier === "secrets" ? store?.exportItemCopy(identity2) : undefined;
+    const exported = tier === "secrets" ? store?.exportItemCopy?.(identity2) : undefined;
     ledger.recordDecision(identity2, decision);
     if (exported)
-      store?.tombstoneCopy(exported.identity, { connectorId: TIER_REJUDGE_CONNECTOR_ID, trustTier: "S5" });
+      store?.tombstoneCopy?.(exported.identity, { connectorId: TIER_REJUDGE_CONNECTOR_ID, trustTier: "S5" });
   }
 }
 var DEFAULT_TIER_REJUDGE_PER_PASS = 100, TIER_REJUDGE_CONNECTOR_ID = "olympus_tier_rejudge", CAUSE_FIELD;
@@ -213673,8 +213674,9 @@ async function runSnifferPass(options) {
       if (!sameQuestion(item.target, item.question) || !stillOpen(item.target, item.question, false))
         return;
       if (tier === "secure") {
-        const row = item.target.ledger.getCurrent(item.question);
-        raiseReadWindowTier(undefined, item.target.ledger, row, tier, id);
+        if (!item.target.raiseReadWindow)
+          return;
+        item.target.raiseReadWindow(item.target.ledger.getCurrent(item.question), tier, id);
       }
       item.target.sniffer.deleteQuestion(item.question, item.question.pass, item.question.materialHash);
       report.verdictsApplied += 1;
@@ -214080,7 +214082,6 @@ function finish(report, monotonicNow, passStarted) {
 }
 var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000, DEFAULT_DECISION_SNIFFER_MAX_CALLS_PER_DAY = 250000, DEFAULT_SNIFFER_PASS_TIME_MS = 30000, SNIFFER_MAX_CONCURRENT_CALLS = 8, SNIFFER_MAX_CONCURRENT_CLOUD_CALLS = 32, MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2, OUTPUT_CHARS_PER_ITEM = 110, failedSlotWaits, SECRET_SCREEN_CACHE_LIMIT = 20000, secretScreenCache;
 var init_sniffer_resolver = __esm(() => {
-  init_tier_rejudge();
   init_answer_activity();
   init_atomic_file();
   init_sniffer();
@@ -214749,6 +214750,11 @@ class TierSnifferService {
         ledger,
         sniffer: this.options.installed.snifferStoreForLedger(ledgerPath),
         ...planner ? { placementFor: planner } : {},
+        raiseReadWindow: (row, tier, snifferId2) => {
+          const set2 = tierSetForLedger(ledgerPath);
+          const store = (set2?.openStores() ?? this.options.stores().filter((candidate2) => (candidate2.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(candidate2.dbPath)) === ledgerPath))[0];
+          raiseReadWindowTier(store, ledger, row, tier, snifferId2);
+        },
         screenStoredQuestion: (question) => {
           const row = ledger.getCurrent(question);
           if (!row || row.routed || !row.contentRead)
@@ -215471,6 +215477,7 @@ var init_sniffer_service = __esm(() => {
   init_secret_locations();
   init_classification_ledger();
   init_secrets_disposition();
+  init_tier_rejudge();
   init_tier_move();
   init_tier_auto_move();
   init_built_in_sniffer();
