@@ -57,12 +57,21 @@ export function stopBuiltInModelOnShutdown(model: Pick<BuiltInAnalystModel, 'sto
  * model service is down.
  */
 const BUILT_IN_MODEL_RETRY_MS = 10 * 60_000;
+// How often an install another process finished is verified again here.
+const BUILT_IN_MODEL_REVERIFY_MS = 30_000;
 
 export function createWorkerSharedBuiltInModel(
   env: Record<string, string | undefined>,
 ): { model: BuiltInAnalystModel; available: () => boolean; startIfIdle: () => void } | undefined {
   const base = createWorkerBuiltInAnalystModel(env);
-  if (!base) return undefined;
+  return base ? sharedBuiltInModel(base) : undefined;
+}
+
+/** `createWorkerSharedBuiltInModel` around a given model (exported for tests). */
+export function sharedBuiltInModel(
+  base: BuiltInAnalystModel,
+  nowMs: () => number = Date.now,
+): { model: BuiltInAnalystModel; available: () => boolean; startIfIdle: () => void } {
   let prepared = false;
   const installedOnDisk = (): boolean => {
     try {
@@ -92,16 +101,30 @@ export function createWorkerSharedBuiltInModel(
   // to start is re-armed too, at most once per BUILT_IN_MODEL_RETRY_MS:
   // otherwise `failed` would keep the sniffer and the private panel off this
   // model until the engine restarts. A failed install is never re-run here.
+  // With the engine split, the front and the background share one models
+  // directory and one status file, and both can install the model at once.
+  // This process's prepare() can end while the other's install still reads
+  // downloading or verifying, so it stays unprepared after the status turns
+  // ready, and the judge waits forever on "not available (ready)" (switch-on
+  // release check, 2026-11-12). An install that reads ready here but was not
+  // prepared here is verified again, at most once per BUILT_IN_MODEL_REVERIFY_MS.
   let lastRetryMs = 0;
+  let lastReverifyMs = Number.NEGATIVE_INFINITY;
   const startIfIdle = (): void => {
     const status = base.status();
     if (status.state === 'not_started') {
       void model.prepare();
       return;
     }
+    if (!prepared && (status.state === 'ready' || status.state === 'loading')
+      && nowMs() - lastReverifyMs >= BUILT_IN_MODEL_REVERIFY_MS) {
+      lastReverifyMs = nowMs();
+      void model.prepare();
+      return;
+    }
     if (prepared && status.state === 'failed' && status.failure?.reason === 'runtime_load_failed'
-      && Date.now() - lastRetryMs >= BUILT_IN_MODEL_RETRY_MS) {
-      lastRetryMs = Date.now();
+      && nowMs() - lastRetryMs >= BUILT_IN_MODEL_RETRY_MS) {
+      lastRetryMs = nowMs();
       void model.prepare();
     }
   };

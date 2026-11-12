@@ -217569,8 +217569,9 @@ function stopBuiltInModelOnShutdown(model) {
 }
 function createWorkerSharedBuiltInModel(env) {
   const base = createWorkerBuiltInAnalystModel(env);
-  if (!base)
-    return;
+  return base ? sharedBuiltInModel(base) : undefined;
+}
+function sharedBuiltInModel(base, nowMs = Date.now) {
   let prepared = false;
   const installedOnDisk = () => {
     try {
@@ -217590,14 +217591,20 @@ function createWorkerSharedBuiltInModel(env) {
   if (base.status().state !== "not_started")
     model.prepare();
   let lastRetryMs = 0;
+  let lastReverifyMs = Number.NEGATIVE_INFINITY;
   const startIfIdle = () => {
     const status = base.status();
     if (status.state === "not_started") {
       model.prepare();
       return;
     }
-    if (prepared && status.state === "failed" && status.failure?.reason === "runtime_load_failed" && Date.now() - lastRetryMs >= BUILT_IN_MODEL_RETRY_MS) {
-      lastRetryMs = Date.now();
+    if (!prepared && (status.state === "ready" || status.state === "loading") && nowMs() - lastReverifyMs >= BUILT_IN_MODEL_REVERIFY_MS) {
+      lastReverifyMs = nowMs();
+      model.prepare();
+      return;
+    }
+    if (prepared && status.state === "failed" && status.failure?.reason === "runtime_load_failed" && nowMs() - lastRetryMs >= BUILT_IN_MODEL_RETRY_MS) {
+      lastRetryMs = nowMs();
       model.prepare();
     }
   };
@@ -217646,7 +217653,7 @@ function createTierSnifferModel(input) {
   }
   return;
 }
-var BUILT_IN_MODEL_RETRY_MS;
+var BUILT_IN_MODEL_RETRY_MS, BUILT_IN_MODEL_REVERIFY_MS = 30000;
 var init_judging_models = __esm(() => {
   init_judge_spending();
   init_judge_pacing();
