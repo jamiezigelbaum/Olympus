@@ -84,6 +84,7 @@ interface Store {
   items: Map<string, { pk: number; chars: number }>;
   /** provider + item id only: shows an identity mismatch (scope or conversation) in the diagnostics. */
   byId: Set<string>;
+  byScopeId: Set<string>;
   row: ReturnType<Database['query']>;
   chunks: ReturnType<Database['query']>;
 }
@@ -98,22 +99,31 @@ function store(path: string): Store | null {
   try {
     const db = openImmutable(path);
     if (hasTable(db, 'items') && hasTable(db, 'chunks')) {
-      const conversation = columns(db, 'items').has('normalized_conversation') ? 'normalized_conversation' : "''";
+      // The ledger keys an item by its raw provider conversation id (tier-ledger.ts), while
+      // older stores key it by the normalized one. Index both, so either matches.
+      const itemColumns = columns(db, 'items');
+      const raw = itemColumns.has('provider_conversation_id') ? 'i.provider_conversation_id' : "''";
+      const normalized = itemColumns.has('normalized_conversation') ? 'i.normalized_conversation' : "''";
       const items = new Map<string, { pk: number; chars: number }>();
       const byId = new Set<string>();
-      const rows = db.query(`SELECT i.item_pk AS pk, i.provider, i.account_scope, ${conversation === "''" ? "''" : `i.${conversation}`} AS conversation, i.provider_item_id,
+      const byScopeId = new Set<string>();
+      const rows = db.query(`SELECT i.item_pk AS pk, i.provider, i.account_scope, ${raw} AS raw, ${normalized} AS normalized, i.provider_item_id,
           COALESCE((SELECT SUM(LENGTH(c.bounded_text)) + COUNT(*) - 1 FROM chunks c WHERE c.item_pk = i.item_pk), 0) AS chars
-        FROM items i WHERE i.tombstoned = 0`).all() as Array<{ pk: number; provider: string; account_scope: string; conversation: string | null; provider_item_id: string; chars: number }>;
+        FROM items i WHERE i.tombstoned = 0`).all() as Array<{ pk: number; provider: string; account_scope: string; raw: string | null; normalized: string | null; provider_item_id: string; chars: number }>;
       for (const row of rows) {
-        const key = keyOf(row.provider, row.account_scope, row.conversation ?? '', row.provider_item_id);
         byId.add(JSON.stringify([row.provider, row.provider_item_id]));
-        const prior = items.get(key);
-        if (!prior || row.chars > prior.chars) items.set(key, { pk: row.pk, chars: row.chars });
+        byScopeId.add(JSON.stringify([row.provider, row.account_scope, row.provider_item_id]));
+        for (const conversation of new Set([row.raw ?? '', row.normalized ?? ''])) {
+          const key = keyOf(row.provider, row.account_scope, conversation, row.provider_item_id);
+          const prior = items.get(key);
+          if (!prior || row.chars > prior.chars) items.set(key, { pk: row.pk, chars: row.chars });
+        }
       }
       opened = {
         db,
         items,
         byId,
+        byScopeId,
         row: db.query('SELECT * FROM items WHERE item_pk = ?'),
         chunks: db.query('SELECT bounded_text FROM chunks WHERE item_pk = ? ORDER BY chunk_index'),
       };
@@ -148,6 +158,8 @@ interface LedgerDiagnostic {
   personal: number;
   noItem: number;
   idMatchOnly: number;
+  /** Of those, also the same account scope: the conversation key differs. */
+  scopeAndIdMatch: number;
   zeroText: number;
 }
 
@@ -171,6 +183,7 @@ function count(root: string): { families: Record<string, FamilyCount>; long: Lon
         personal: 0,
         noItem: 0,
         idMatchOnly: 0,
+        scopeAndIdMatch: 0,
         zeroText: 0,
       };
       diagnostics.push(diagnostic);
@@ -191,6 +204,8 @@ function count(root: string): { families: Record<string, FamilyCount>; long: Lon
           diagnostic.noItem += 1;
           const id = JSON.stringify([row.provider, row.provider_item_id]);
           if (candidates.some((candidate) => candidate.opened!.byId.has(id))) diagnostic.idMatchOnly += 1;
+          const scoped = JSON.stringify([row.provider, row.account_scope, row.provider_item_id]);
+          if (candidates.some((candidate) => candidate.opened!.byScopeId.has(scoped))) diagnostic.scopeAndIdMatch += 1;
         } else if (best.chars === 0) diagnostic.zeroText += 1;
         if (!best || best.chars === 0) { family.noStoredText += 1; continue; }
         usedStores.add(best.path);
