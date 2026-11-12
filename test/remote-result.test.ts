@@ -237,7 +237,11 @@ function expectNothingInternal(text: string): void {
 
 /** A release check that judges every input as given. */
 function fixedCheck(tier: 'legacy' | 'public_or_personal' | 'private' | 'secret' | 'unknown', posture: 'allow' | 'approval' = 'allow'): ReleaseCheck {
-  return { inputs: (inputs) => inputs.map(() => ({ tier, gone: false })), secureDerivativeDefault: () => posture };
+  // Tier-lifetime fixtures assume passage reading was already proved; chunk
+  // coverage and unavailable judges are exercised in chunk-release.test.ts.
+  return { inputs: (inputs) => inputs.map(() => ({ tier, gone: false })),
+    chunks: async inputs => ({ allowed: inputs.map(input => input.chunkHashes ?? []), withheldPassages: 0, withheldDocuments: 0 }),
+    secureDerivativeDefault: () => posture };
 }
 
 describe('remote output allowlists, per operation and result family', () => {
@@ -721,8 +725,8 @@ describe('the analyst handler records every input it read', () => {
     expect(result.evidence.map((entry) => entry.provider_item_id)).toEqual(['first']);
     expect(sink.manifests).toEqual([{
       inputs: [
-        { corpusId: NOTES, provider: 'fixture', accountScope: 'work', providerItemId: 'first', privateAtAnswer: false },
-        { corpusId: NOTES, provider: 'fixture', accountScope: 'work', providerItemId: 'second', privateAtAnswer: false },
+        { corpusId: NOTES, provider: 'fixture', accountScope: 'work', providerItemId: 'first', privateAtAnswer: false, chunkHashes: [] },
+        { corpusId: NOTES, provider: 'fixture', accountScope: 'work', providerItemId: 'second', privateAtAnswer: false, chunkHashes: [] },
       ],
       constraints: { secureDerivativeDefault: 'approval', includeSecureLocalContent: false },
     }]);
@@ -766,7 +770,7 @@ describe('over the wire', () => {
     answer = async () => answered();
     consult = async () => NEEDS_CHOICE_RAW;
     consultCallers = [];
-    releaseCheck = undefined;
+    releaseCheck = fixedCheck('public_or_personal');
     contextFails = false;
     verifyFails = false;
     relayed = false;

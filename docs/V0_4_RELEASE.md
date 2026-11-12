@@ -97,6 +97,17 @@ Owner decisions on 2026-11-10 that change the Privacy accuracy lane:
   they are a judgment call even for the owner). The gate is the first bullet:
   more than 75% agreement and no important Private item missed.
 
+Lane 3, long-item reading (2026-11-12): remote evidence and the ordinary cloud
+Analyst may receive a stored chunk only after every consecutive judge-sized
+window has a below-Private verdict. The item excerpt alone covers only whole
+short items. Window receipts bind the item, stored chunk hash, names, prompt,
+and judge identity; changed hashes and prompts need fresh coverage. Release
+uses a provisional 8,000 ms judging budget and reports withheld passages and
+documents. A Private window raises the item through automatic re-judging and
+placement; local Private models keep their existing access. The implementation
+proof is `test/chunk-release.test.ts`; the release's independent Critical review
+and owner-data qualification remain required.
+
 Measured on the fresh sample (#883; 200 whole items labelled by the owner on
 2026-11-10: 145 Personal, 21 important Private, 34 minor Private; counts on
 the issue). On the test half (92 items) all three default judges meet the

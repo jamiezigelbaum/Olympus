@@ -2603,6 +2603,7 @@ export function connectorStoreCurrentEmbeddingModelId(
 export interface ConnectorStoreLocalContent {
   trustTier: SourceTrustTier;
   chunks: readonly string[];
+  chunkHashes?: readonly (readonly string[])[];
   truncated: boolean;
   locatorUri?: string;
   /**
@@ -14282,15 +14283,15 @@ export class LocalConnectorStore {
     const chunkRows = servesContent
       ? (scoreByVector
         ? this.db.query(`
-          SELECT c.bounded_text, e.embedding
+          SELECT c.bounded_text, c.content_hash, e.embedding
           FROM chunks c
           LEFT JOIN chunk_embeddings e
             ON e.chunk_pk = c.chunk_pk AND e.model_id = ? AND e.content_hash = c.embedding_input_hash
           WHERE c.item_pk = ? ORDER BY c.chunk_index
         `).all(vectorModelId, row.item_pk)
         : this.db.query(
-          'SELECT bounded_text, NULL AS embedding FROM chunks WHERE item_pk = ? ORDER BY chunk_index',
-        ).all(row.item_pk)) as Array<{ bounded_text: string; embedding: unknown }>
+          'SELECT bounded_text, content_hash, NULL AS embedding FROM chunks WHERE item_pk = ? ORDER BY chunk_index',
+        ).all(row.item_pk)) as Array<{ bounded_text: string; content_hash: string; embedding: unknown }>
       : [];
     // Cosine of each chunk's current vector to the query; undefined where the
     // chunk has none (or one of another width), so it ranks after the rest.
@@ -14324,12 +14325,31 @@ export class LocalConnectorStore {
     return {
       trustTier: trustTierFromRow(row.trust_tier),
       chunks: reactionLine ? [reactionLine, ...chunks] : chunks,
+      // Selection only clips contiguous passages. Include every matching stored
+      // chunk when duplicate text makes its origin ambiguous; never guess a hash.
+      chunkHashes: [
+        ...(reactionLine ? [[]] : []),
+        ...chunks.map(text => chunkRows.filter(chunk => compactPassageWhitespace(chunk.bounded_text).includes(text)).map(chunk => chunk.content_hash)),
+      ],
       truncated,
       storedChunks: chunkRows.length,
       mimeType: row.mime_type,
       ...(row.locator_uri ? { locatorUri: row.locator_uri } : {}),
       ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
     };
+  }
+
+  /** Local privacy judging reads stored text without exporting vectors or copy history. */
+  releaseItemChunks(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): {
+    title: string; path: string; sender: string; chunks: Array<{ text: string; contentHash: string }>;
+  } | undefined {
+    const row = this.db.query(`SELECT item_pk, title, locator_uri, sender_label FROM items
+      WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0`)
+      .get(identity.provider, identity.accountScope ?? '', normalizeConversationId(identity.providerConversationId), identity.providerItemId) as { item_pk: number; title: string | null; locator_uri: string | null; sender_label: string | null } | null;
+    if (!row || !this.copyServable(identity)) return undefined;
+    const chunks = this.db.query('SELECT bounded_text AS text, content_hash AS contentHash FROM chunks WHERE item_pk = ? ORDER BY chunk_index')
+      .all(row.item_pk) as Array<{ text: string; contentHash: string }>;
+    return { title: row.title ?? '', path: row.locator_uri ?? '', sender: row.sender_label ?? '', chunks };
   }
 
   // The stored reaction aggregate for one item. Content-tier data, like the
@@ -16519,6 +16539,7 @@ export function createConnectorStoreContentProvider(
       return {
         sensitivity: buildSourceSensitivity({ trustTier: content.trustTier, trustDomain: store.trustDomain }),
         chunks: content.chunks,
+        ...(content.chunkHashes ? { chunkHashes: content.chunkHashes } : {}),
         ...(content.truncated ? { truncated: true } : {}),
         ...(coverageGaps.length > 0 ? { coverageGaps } : {}),
         ...(metadataOnlyRuleId !== undefined ? { namesOnly: true } : {}),

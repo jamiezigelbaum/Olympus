@@ -178,20 +178,19 @@ async function runSearch(
     const recorded = await privateCall.settle(raw, undefined);
     const afterWait = currentAccess(authorized);
     if (afterWait !== 'active') return refusedAccess(afterWait);
-    const evidence = result.structuredContent?.evidence;
-    if (context.releaseCheck && Array.isArray(evidence) && evidence.length > 0
-      && await answerReleaseWithheldReasonOffThread(manifests.manifests, context.releaseCheck, 'personal') !== undefined) {
-      // Only the evidence goes: the coverage the search reported and what it already withheld stand.
-      const rawRecord = raw as Record<string, unknown>;
-      const withheldBefore = typeof rawRecord.withheld === 'number' && Number.isFinite(rawRecord.withheld) && rawRecord.withheld > 0 ? rawRecord.withheld : 0;
-      result = searchToolResult({ ...rawRecord, evidence: [], withheld: withheldBefore + evidence.length }, { pendingPrivacyItems: context.pendingPrivacyItems?.() });
-      withheldAfter = true;
-    }
-    // The release judgment above may wait on the read pool: a revocation meanwhile releases nothing.
-    const afterRelease = currentAccess(authorized);
-    if (afterRelease !== 'active') return refusedAccess(afterRelease);
     if (recorded) note = remotePrivateNote(privateCall.answerId, privateCall.secretMatch);
   }
+  const evidence = result.structuredContent?.evidence;
+  if (Array.isArray(evidence) && evidence.length > 0
+    && (!context.releaseCheck || await answerReleaseWithheldReasonOffThread(manifests.manifests, context.releaseCheck, 'personal', { chunks: true }) !== undefined)) {
+    const rawRecord = raw as Record<string, unknown>;
+    const withheldBefore = typeof rawRecord.withheld === 'number' && Number.isFinite(rawRecord.withheld) && rawRecord.withheld > 0 ? rawRecord.withheld : 0;
+    result = searchToolResult({ ...rawRecord, evidence: [], withheld: withheldBefore + evidence.length }, { pendingPrivacyItems: context.pendingPrivacyItems?.() });
+    withheldAfter = true;
+  }
+  // The release judgment can await the pool or judge; recheck the connection afterward.
+  const afterRelease = currentAccess(authorized);
+  if (afterRelease !== 'active') return refusedAccess(afterRelease);
   if (context.caller) {
     recordAppRequest({
       caller: context.caller,

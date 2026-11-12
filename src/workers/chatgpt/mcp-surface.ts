@@ -452,7 +452,7 @@ export async function callChatGptTool(
   if (name === SEARCH_TOOL_NAME && Array.isArray(result.structuredContent?.evidence)
       && result.structuredContent.evidence.length > 0) {
     const reason = ctx.releaseCheck
-      ? await answerReleaseWithheldReasonOffThread(manifests.manifests, ctx.releaseCheck, 'personal')
+      ? await answerReleaseWithheldReasonOffThread(manifests.manifests, ctx.releaseCheck, 'personal', { chunks: true })
       : ANSWER_RELEASE_UNVERIFIED;
     if (reason) return record(searchToolResult({ evidence: [], withheld: result.structuredContent.evidence.length, notes: [reason] }, { pendingPrivacyItems: ctx.pendingPrivacyItems?.() }), true);
   }
@@ -460,7 +460,7 @@ export async function callChatGptTool(
       && (result.structuredContent as { status?: string } | undefined)?.status === 'answered'
       && !(result.structuredContent && 'anonymous' in result.structuredContent)) {
     const reason = ctx.releaseCheck
-      ? await answerReleaseWithheldReasonOffThread(manifests.manifests, ctx.releaseCheck, 'personal')
+      ? await answerReleaseWithheldReasonOffThread(manifests.manifests, ctx.releaseCheck, 'personal', { chunks: true })
       : ANSWER_RELEASE_UNVERIFIED;
     if (reason) return record(withPrivateAnswerOutcome(answerToolResult(withheldSourceAnswer(reason), { pendingPrivacyItems: ctx.pendingPrivacyItems?.() })), true);
   }

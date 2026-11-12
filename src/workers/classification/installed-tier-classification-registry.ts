@@ -5,6 +5,16 @@
 
 import type { OwnerTierRule, TierDecision, TierSniffer } from './tier-classifier.ts';
 import type { TierPlacementPlan } from './tier-ledger.ts';
+import type { ChunkWindowKey } from './sniffer-store.ts';
+import type { TierSnifferRequest, TierSnifferVerdict } from './tier-classifier.ts';
+
+export interface ReleaseWindowJudge {
+  modelId: string;
+  promptVersion: string;
+  read(key: ChunkWindowKey): 'private' | 'secure' | 'secrets' | undefined;
+  record(key: ChunkWindowKey, tier: 'private' | 'secure' | 'secrets'): void;
+  resolve(request: TierSnifferRequest, signal: AbortSignal): Promise<TierSnifferVerdict>;
+}
 
 export interface AutomaticTierMoveContext {
   /** The embedding ledger each automatic move is recorded in. */
@@ -16,6 +26,7 @@ export interface AutomaticTierMoveContext {
 export interface InstalledStoreTierClassification {
   rules?: readonly OwnerTierRule[];
   sniffer?: TierSniffer;
+  releaseJudge?: ReleaseWindowJudge;
   /** This install has no Public tier: Public verdicts are lifted to Personal. */
   retirePublic?: boolean;
   /** Set when the inputs cannot be trusted (an invalid rules file): record nothing. */
