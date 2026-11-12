@@ -577,8 +577,13 @@ let dataOwnerLock: HeldDataOwnerLock | undefined;
 
 /** How often the split's front brings each store's hidden-copy set up to date between Asks. */
 const FRONT_VISIBILITY_REFRESH_MS = 30_000;
-/** The longest the front waits on those sets before it listens; the rest finishes after. */
-const FRONT_VISIBILITY_READY_BOUND_MS = 60_000;
+/**
+ * The longest the front waits on those sets before it listens; the rest
+ * finishes after, in turns. Well inside the verified install's 60 s health
+ * deadline (engine-service.ts ENGINE_HEALTH_TIMEOUT_MS), which also covers the
+ * background's start. Sparta's cold build: about 7.6 s (gate 1, ops#151).
+ */
+const FRONT_VISIBILITY_READY_BOUND_MS = 15_000;
 
 export async function main(): Promise<void> {
   // First, before anything mounts or opens a store: this worker owns the data

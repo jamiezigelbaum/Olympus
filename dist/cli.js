@@ -247340,7 +247340,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
 function resolveEmailSourceBindHostFromEnv(env = process.env) {
   return resolveWorkerBindHost(env, ["OLYMPUS_EMAIL_SOURCE_HOST"]);
 }
-var workerLaunch, dataOwnerLock, FRONT_VISIBILITY_REFRESH_MS = 30000, FRONT_VISIBILITY_READY_BOUND_MS = 60000;
+var workerLaunch, dataOwnerLock, FRONT_VISIBILITY_REFRESH_MS = 30000, FRONT_VISIBILITY_READY_BOUND_MS = 15000;
 var init_server5 = __esm(async () => {
   init_dashboard_people();
   init_people_index();
