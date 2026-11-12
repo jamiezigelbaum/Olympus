@@ -32028,6 +32028,132 @@ var init_off_thread_reads = __esm(() => {
   releases = new Map;
 });
 
+// src/core/evidence-reranker.ts
+async function rerankCandidates(options) {
+  const timers = options.timers ?? systemTimers;
+  const keep = Math.max(0, Math.floor(options.keep));
+  const startedAt = timers.now();
+  const passages = options.items.map((item) => clipPassage(options.passageOf(item)));
+  const scoredIndexes = passages.flatMap((passage, index) => passage ? [index] : []);
+  const fusedCut = (outcome, scored) => ({
+    kept: options.items.slice(0, keep),
+    audit: {
+      rerankerId: options.reranker.id,
+      outcome,
+      scored,
+      kept: Math.min(keep, options.items.length),
+      promoted: 0,
+      elapsedMs: timers.now() - startedAt,
+      windowsScored: 0,
+      windowItems: 0,
+      windowOutcome: "skipped",
+      windowElapsedMs: 0
+    }
+  });
+  if (scoredIndexes.length === 0)
+    return fusedCut("applied", 0);
+  const controller = new AbortController;
+  let timer;
+  const timedOut = new Promise((resolve11) => {
+    timer = timers.setTimeout(() => {
+      resolve11("timed_out");
+      controller.abort();
+    }, options.timeoutMs ?? DEFAULT_RERANK_TIMEOUT_MS);
+  });
+  let scores;
+  try {
+    const scoring = options.reranker.score({
+      query: options.query,
+      passages: scoredIndexes.map((index) => passages[index]),
+      signal: controller.signal
+    });
+    scoring.catch(() => {
+      return;
+    });
+    scores = await Promise.race([scoring, timedOut]);
+  } catch {
+    return fusedCut("failed", 0);
+  } finally {
+    timers.clearTimeout(timer);
+  }
+  if (scores === "timed_out")
+    return fusedCut("timed_out", 0);
+  if (scores.length !== scoredIndexes.length || scores.some((score) => typeof score !== "number" || Number.isNaN(score))) {
+    return fusedCut("failed", 0);
+  }
+  const scoreByIndex = new Map(scoredIndexes.map((index, position) => [index, scores[position]]));
+  const order = options.items.map((_, index) => index).sort((left, right) => {
+    const leftScore = scoreByIndex.get(left);
+    const rightScore = scoreByIndex.get(right);
+    if (leftScore !== undefined && rightScore !== undefined && leftScore !== rightScore)
+      return rightScore - leftScore;
+    if (leftScore === undefined && rightScore !== undefined)
+      return 1;
+    if (leftScore !== undefined && rightScore === undefined)
+      return -1;
+    return left - right;
+  });
+  const keptOrder = order.slice(0, keep);
+  return {
+    kept: keptOrder.map((index) => options.items[index]),
+    audit: {
+      rerankerId: options.reranker.id,
+      outcome: "applied",
+      scored: scoredIndexes.length,
+      kept: keptOrder.length,
+      promoted: keptOrder.filter((index) => index >= keep).length,
+      elapsedMs: timers.now() - startedAt,
+      windowsScored: 0,
+      windowItems: 0,
+      windowOutcome: "skipped",
+      windowElapsedMs: 0
+    }
+  };
+}
+function rerankPassage(title, chunks) {
+  const parts = [title?.trim() ?? "", ...chunks.map((chunk) => chunk.trim())].filter(Boolean);
+  return clipPassage(parts.join(`
+`));
+}
+function clipPassage(text2) {
+  const collapsed = text2.replace(/\s+/g, " ").trim();
+  return collapsed.length > RERANK_PASSAGE_CHARS ? collapsed.slice(0, RERANK_PASSAGE_CHARS) : collapsed;
+}
+function rerankPoolSize(reranker, maxResults) {
+  const pool = Number.isFinite(reranker.poolSize) ? Math.floor(reranker.poolSize) : DEFAULT_RERANK_POOL_SIZE;
+  return Math.max(Math.floor(maxResults), Math.min(MAX_RERANK_POOL_SIZE, pool));
+}
+function rerankPassageWindows(chunks) {
+  const windows = [];
+  const sentences = new Intl.Segmenter(undefined, { granularity: "sentence" });
+  for (const chunk of chunks) {
+    let window2 = "";
+    for (const { segment } of sentences.segment(chunk)) {
+      if (window2 && window2.length + segment.length > RERANK_WINDOW_CHARS) {
+        windows.push(window2.trim());
+        window2 = "";
+      }
+      let remaining = segment;
+      while (remaining.length > RERANK_WINDOW_CHARS) {
+        windows.push(remaining.slice(0, RERANK_WINDOW_CHARS).trim());
+        remaining = remaining.slice(RERANK_WINDOW_CHARS);
+      }
+      window2 += remaining;
+    }
+    if (window2.trim())
+      windows.push(window2.trim());
+  }
+  return windows.filter(Boolean);
+}
+var RERANK_PASSAGE_CHARS = 2000, DEFAULT_RERANK_TIMEOUT_MS = 5000, RERANK_WINDOW_ITEMS = 3, RERANK_WINDOW_CHARS = 500, MAX_CANDIDATE_PASSAGES = 6, DEFAULT_RERANK_POOL_SIZE = 30, MAX_RERANK_POOL_SIZE = 400, systemTimers;
+var init_evidence_reranker = __esm(() => {
+  systemTimers = {
+    now: () => Date.now(),
+    setTimeout: (callback, ms) => setTimeout(callback, ms),
+    clearTimeout: (handle) => clearTimeout(handle)
+  };
+});
+
 // src/core/classification-signals.ts
 function namesOnlyContentScopeMetadata() {
   return { [CONTENT_SCOPE_METADATA_KEY]: CONTENT_SCOPE_NAMES_ONLY };
@@ -38093,6 +38219,7 @@ function createConnectorStoreContentProvider(options) {
         const content = store.localContent(localItemId, request.maxChars, {
           ...request.query?.trim() ? { query: request.query } : {},
           ...request.maxPassages !== undefined ? { maxPassages: request.maxPassages } : {},
+          ...request.candidatePassages !== undefined ? { candidatePassages: request.candidatePassages } : {},
           ...anchorChunkIndex !== undefined ? { anchorChunkIndex } : {},
           ...anchorLane === "keyword" || anchorLane === "semantic" ? { anchorLane } : {},
           ...vector && embeddingProvider ? { queryVector: vector, queryVectorModelId: embeddingProvider.modelId } : {}
@@ -38113,6 +38240,7 @@ function createConnectorStoreContentProvider(options) {
         return {
           sensitivity: buildSourceSensitivity({ trustTier: content.trustTier, trustDomain: store.trustDomain }),
           chunks: content.chunks,
+          ...content.candidatePassages ? { candidatePassages: content.candidatePassages } : {},
           ...content.truncated ? { truncated: true } : {},
           ...coverageGaps.length > 0 ? { coverageGaps } : {},
           ...metadataOnlyRuleId !== undefined ? { namesOnly: true } : {},
@@ -38646,6 +38774,13 @@ function selectEvidencePassages(chunks, maxChars, focus, context2 = {}) {
   const relevance = (index) => context2.relevance?.[index] ?? Number.NEGATIVE_INFINITY;
   const anchorIndex = focus.anchorChunkIndex !== undefined && focus.anchorChunkIndex >= 0 && focus.anchorChunkIndex < chunks.length ? focus.anchorChunkIndex : undefined;
   const anchor = anchorIndex !== undefined && (focus.anchorLane !== "keyword" || lexical[anchorIndex] > 0) ? anchorIndex : undefined;
+  const candidateLimit = Number.isFinite(focus.candidatePassages) ? Math.max(0, Math.min(MAX_CANDIDATE_PASSAGES, Math.floor(focus.candidatePassages))) : 0;
+  const candidateIndexes = candidateLimit > 0 ? [...new Set([
+    ...anchorIndex !== undefined ? [anchorIndex] : [],
+    ...lexical.map((score, index) => ({ score, index })).sort((left, right) => right.score - left.score || left.index - right.index).slice(0, 3).map((entry) => entry.index),
+    ...chunks.map((_, index) => index).filter((index) => Number.isFinite(relevance(index))).sort((left, right) => relevance(right) - relevance(left) || left - right).slice(0, 3)
+  ])].slice(0, candidateLimit).sort((left, right) => left - right) : [];
+  const candidates = candidateIndexes.length > 0 ? { candidatePassages: candidateIndexes.map((index) => chunks[index]) } : {};
   if (lexical.some((score) => score > 0)) {
     const scored = lexical.map((score, index) => ({ index, score })).filter((entry) => entry.score > 0 && entry.index !== anchor).sort((left, right) => right.score - left.score || relevance(right.index) - relevance(left.index) || left.index - right.index);
     const picked = [
@@ -38653,7 +38788,7 @@ function selectEvidencePassages(chunks, maxChars, focus, context2 = {}) {
       ...scored.map((entry) => entry.index)
     ].slice(0, Math.max(1, Math.floor(focus.maxPassages ?? MAX_PASSAGES_PER_CANDIDATE)));
     const bounded = boundedSourceIndexChunks(picked.sort((left, right) => left - right).map((index) => chunks[index]), maxChars, termGroups);
-    return { chunks: bounded.chunks, truncated: picked.length < chunks.length || bounded.truncated };
+    return { chunks: bounded.chunks, truncated: picked.length < chunks.length || bounded.truncated, ...candidates };
   }
   const ranked = chunks.map((_, index) => index).sort((left, right) => (left === anchor ? -1 : right === anchor ? 1 : 0) || relevance(right) - relevance(left) || left - right);
   const kept = new Map;
@@ -38681,6 +38816,7 @@ function selectEvidencePassages(chunks, maxChars, focus, context2 = {}) {
   const ordered = [...kept.entries()].sort(([left], [right]) => left - right);
   return {
     chunks: ordered.map(([, text2]) => text2),
+    ...candidates,
     truncated: ordered.length < chunks.length || ordered.some(([index, text2]) => text2.length < chunks[index].length)
   };
 }
@@ -40092,6 +40228,7 @@ var init_local_index = __esm(() => {
   init_control_path_headroom();
   init_off_thread_reads();
   init_provider_account_identity();
+  init_evidence_reranker();
   init_operation_error();
   init_media_cache();
   init_still_image_readiness();
@@ -47199,11 +47336,12 @@ var init_local_index = __esm(() => {
         const vector = decodeEmbedding(chunk.embedding);
         return vector.length === queryVector.length ? cosineSimilarity(queryVector, vector) : undefined;
       }) : undefined;
-      const { chunks, truncated } = selectEvidencePassages(chunkRows.map((chunk) => compactPassageWhitespace(chunk.bounded_text)), maxChars, passageFocus, { title: row.title, ...relevance ? { relevance } : {} });
+      const { chunks, truncated, candidatePassages } = selectEvidencePassages(chunkRows.map((chunk) => compactPassageWhitespace(chunk.bounded_text)), maxChars, passageFocus, { title: row.title, ...relevance ? { relevance } : {} });
       const reactionLine = servesContent ? renderSourceReactionLine(parseStoredSourceReactions(row.reactions_json)) : undefined;
       return {
         trustTier: trustTierFromRow(row.trust_tier),
         chunks: reactionLine ? [reactionLine, ...chunks] : chunks,
+        ...candidatePassages ? { candidatePassages } : {},
         truncated,
         storedChunks: chunkRows.length,
         mimeType: row.mime_type,
@@ -77007,102 +77145,6 @@ var init_analyst_openclaw_infer = __esm(() => {
   };
 });
 
-// src/core/evidence-reranker.ts
-async function rerankCandidates(options) {
-  const timers = options.timers ?? systemTimers;
-  const keep = Math.max(0, Math.floor(options.keep));
-  const startedAt = timers.now();
-  const passages = options.items.map((item) => clipPassage(options.passageOf(item)));
-  const scoredIndexes = passages.flatMap((passage, index) => passage ? [index] : []);
-  const fusedCut = (outcome, scored) => ({
-    kept: options.items.slice(0, keep),
-    audit: {
-      rerankerId: options.reranker.id,
-      outcome,
-      scored,
-      kept: Math.min(keep, options.items.length),
-      promoted: 0,
-      elapsedMs: timers.now() - startedAt
-    }
-  });
-  if (scoredIndexes.length === 0)
-    return fusedCut("applied", 0);
-  const controller = new AbortController;
-  let timer;
-  const timedOut = new Promise((resolve15) => {
-    timer = timers.setTimeout(() => {
-      resolve15("timed_out");
-      controller.abort();
-    }, options.timeoutMs ?? DEFAULT_RERANK_TIMEOUT_MS);
-  });
-  let scores;
-  try {
-    const scoring = options.reranker.score({
-      query: options.query,
-      passages: scoredIndexes.map((index) => passages[index]),
-      signal: controller.signal
-    });
-    scoring.catch(() => {
-      return;
-    });
-    scores = await Promise.race([scoring, timedOut]);
-  } catch {
-    return fusedCut("failed", 0);
-  } finally {
-    timers.clearTimeout(timer);
-  }
-  if (scores === "timed_out")
-    return fusedCut("timed_out", 0);
-  if (scores.length !== scoredIndexes.length || scores.some((score) => typeof score !== "number" || Number.isNaN(score))) {
-    return fusedCut("failed", 0);
-  }
-  const scoreByIndex = new Map(scoredIndexes.map((index, position) => [index, scores[position]]));
-  const order = options.items.map((_, index) => index).sort((left, right) => {
-    const leftScore = scoreByIndex.get(left);
-    const rightScore = scoreByIndex.get(right);
-    if (leftScore !== undefined && rightScore !== undefined && leftScore !== rightScore)
-      return rightScore - leftScore;
-    if (leftScore === undefined && rightScore !== undefined)
-      return 1;
-    if (leftScore !== undefined && rightScore === undefined)
-      return -1;
-    return left - right;
-  });
-  const keptOrder = order.slice(0, keep);
-  return {
-    kept: keptOrder.map((index) => options.items[index]),
-    audit: {
-      rerankerId: options.reranker.id,
-      outcome: "applied",
-      scored: scoredIndexes.length,
-      kept: keptOrder.length,
-      promoted: keptOrder.filter((index) => index >= keep).length,
-      elapsedMs: timers.now() - startedAt
-    }
-  };
-}
-function rerankPassage(title, chunks) {
-  const parts = [title?.trim() ?? "", ...chunks.map((chunk) => chunk.trim())].filter(Boolean);
-  return clipPassage(parts.join(`
-`));
-}
-function clipPassage(text2) {
-  const collapsed = text2.replace(/\s+/g, " ").trim();
-  return collapsed.length > RERANK_PASSAGE_CHARS ? collapsed.slice(0, RERANK_PASSAGE_CHARS) : collapsed;
-}
-function rerankPoolSize(reranker, maxResults) {
-  const pool = Number.isFinite(reranker.poolSize) ? Math.floor(reranker.poolSize) : DEFAULT_RERANK_POOL_SIZE;
-  return Math.max(Math.floor(maxResults), Math.min(MAX_RERANK_POOL_SIZE, pool));
-}
-var RERANK_PASSAGE_CHARS = 2000, DEFAULT_RERANK_TIMEOUT_MS = 5000, DEFAULT_RERANK_POOL_SIZE = 30, MAX_RERANK_POOL_SIZE = 400, systemTimers;
-var init_evidence_reranker = __esm(() => {
-  systemTimers = {
-    now: () => Date.now(),
-    setTimeout: (callback, ms) => setTimeout(callback, ms),
-    clearTimeout: (handle) => clearTimeout(handle)
-  };
-});
-
 // src/core/parent-label.ts
 function candidateNamesCeiling(candidate) {
   if (isSecureSensitivity(candidate))
@@ -77850,7 +77892,8 @@ async function buildPreparedEvidencePackDetailed(input) {
         provenance,
         trustDomain: hit.trustDomain,
         ...maxCharsPerCandidate !== undefined ? { maxChars: maxCharsPerCandidate } : {},
-        query: input.searchQuery ?? input.question
+        query: input.searchQuery ?? input.question,
+        ...reranker ? { candidatePassages: MAX_CANDIDATE_PASSAGES } : {}
       }) : undefined;
     } catch (error) {
       if (!(error instanceof SourceModelPolicyDeniedError))
@@ -77893,6 +77936,46 @@ async function buildPreparedEvidencePackDetailed(input) {
     });
     hydrated = [...denied, ...reranked.kept];
     rerank = reranked.audit;
+    if (rerank.outcome === "applied") {
+      const windowItems = reranked.kept.filter((entry) => entry.content?.candidatePassages?.length).slice(0, RERANK_WINDOW_ITEMS);
+      const windows = windowItems.flatMap((entry) => rerankPassageWindows(entry.content.candidatePassages).map((text2) => ({ entry, text: text2 })));
+      if (windows.length > 0) {
+        const scored = await rerankCandidates({
+          reranker,
+          query: input.question,
+          items: windows,
+          passageOf: (window2) => window2.text,
+          keep: windows.length,
+          ...input.rerankTimers ? { timers: input.rerankTimers } : {}
+        });
+        rerank.windowsScored = scored.audit.scored;
+        rerank.windowItems = new Set(windows.map((window2) => window2.entry)).size;
+        rerank.windowOutcome = scored.audit.outcome;
+        rerank.windowElapsedMs = scored.audit.elapsedMs;
+        if (scored.audit.outcome === "applied") {
+          const best = new Map;
+          for (const window2 of scored.kept) {
+            if (!best.has(window2.entry))
+              best.set(window2.entry, window2.text);
+          }
+          hydrated = hydrated.map((entry) => {
+            const window2 = best.get(entry);
+            if (window2 === undefined || !entry.content || entry.content.chunks.some((chunk) => chunk.includes(window2)))
+              return entry;
+            let remaining = maxCharsPerCandidate !== undefined && maxCharsPerCandidate > 0 ? maxCharsPerCandidate : Number.POSITIVE_INFINITY;
+            const chunks = [];
+            for (const passage of [window2, ...entry.content.chunks]) {
+              if (remaining <= 0)
+                break;
+              const included = passage.slice(0, remaining);
+              chunks.push(included);
+              remaining -= included.length;
+            }
+            return { ...entry, content: { ...entry.content, chunks } };
+          });
+        }
+      }
+    }
   }
   for (const { hit, provenance, provider, content, policyDenied } of hydrated) {
     if (policyDenied) {

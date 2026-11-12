@@ -4,6 +4,9 @@ import {
   rerankCandidates,
   rerankPassage,
   rerankPoolSize,
+  rerankPassageWindows,
+  RERANK_WINDOW_ITEMS,
+  MAX_CANDIDATE_PASSAGES,
   type EvidenceRerankAudit,
   type EvidenceReranker,
   type RerankTimers,
@@ -95,11 +98,15 @@ export interface LocalContentRequest {
    * in depth raises it so the budget is filled with the item's text.
    */
   maxPassages?: number;
+  // Optional whole chunks for local window scoring when the item exceeds maxChars.
+  candidatePassages?: number;
 }
 
 export interface LocalContentBlock {
   sensitivity: SourceSensitivity;
   chunks: readonly string[];
+  // Local-only alternatives, gated exactly like chunks; never copied onto the pack.
+  candidatePassages?: readonly string[];
   tables?: readonly EvidenceTableBlock[];
   facts?: readonly StructuredEvidenceFact[];
   truncated?: boolean;
@@ -403,6 +410,7 @@ async function buildPreparedEvidencePackDetailed(
             trustDomain: hit.trustDomain,
             ...(maxCharsPerCandidate !== undefined ? { maxChars: maxCharsPerCandidate } : {}),
             query: input.searchQuery ?? input.question,
+            ...(reranker ? { candidatePassages: MAX_CANDIDATE_PASSAGES } : {}),
           })
         : undefined;
     } catch (error) {
@@ -458,6 +466,50 @@ async function buildPreparedEvidencePackDetailed(
     // policy gap and the content-free lane audits do not depend on the cut.
     hydrated = [...denied, ...reranked.kept];
     rerank = reranked.audit;
+    if (rerank.outcome === 'applied') {
+      const windowItems = reranked.kept
+        .filter(entry => entry.content?.candidatePassages?.length)
+        .slice(0, RERANK_WINDOW_ITEMS);
+      const windows = windowItems.flatMap(entry =>
+        rerankPassageWindows(entry.content!.candidatePassages!).map(text => ({ entry, text })));
+      if (windows.length > 0) {
+        // Reuse the local-only model, validation, abort and timeout path. Sorting
+        // windows chooses a passage inside each item; it never reorders items.
+        const scored = await rerankCandidates({
+          reranker,
+          query: input.question,
+          items: windows,
+          passageOf: window => window.text,
+          keep: windows.length,
+          ...(input.rerankTimers ? { timers: input.rerankTimers } : {}),
+        });
+        rerank.windowsScored = scored.audit.scored;
+        rerank.windowItems = new Set(windows.map(window => window.entry)).size;
+        rerank.windowOutcome = scored.audit.outcome;
+        rerank.windowElapsedMs = scored.audit.elapsedMs;
+        if (scored.audit.outcome === 'applied') {
+          const best = new Map<(typeof pool)[number], string>();
+          for (const window of scored.kept) {
+            if (!best.has(window.entry)) best.set(window.entry, window.text);
+          }
+          hydrated = hydrated.map(entry => {
+            const window = best.get(entry);
+            // A window the item's passages already show whole adds nothing.
+            if (window === undefined || !entry.content || entry.content.chunks.some(chunk => chunk.includes(window))) return entry;
+            let remaining = maxCharsPerCandidate !== undefined && maxCharsPerCandidate > 0
+              ? maxCharsPerCandidate : Number.POSITIVE_INFINITY;
+            const chunks: string[] = [];
+            for (const passage of [window, ...entry.content.chunks]) {
+              if (remaining <= 0) break;
+              const included = passage.slice(0, remaining);
+              chunks.push(included);
+              remaining -= included.length;
+            }
+            return { ...entry, content: { ...entry.content, chunks } };
+          });
+        }
+      }
+    }
   }
 
   for (const { hit, provenance, provider, content, policyDenied } of hydrated) {

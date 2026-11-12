@@ -20114,6 +20114,9 @@ var init_off_thread_reads = __esm(() => {
   releases = new Map;
 });
 
+// src/core/evidence-reranker.ts
+var init_evidence_reranker = () => {};
+
 // src/core/store-identity.ts
 var init_store_identity = __esm(() => {
   init_archive_formats();
@@ -20345,6 +20348,7 @@ var init_local_index = __esm(() => {
   init_control_path_headroom();
   init_off_thread_reads();
   init_provider_account_identity();
+  init_evidence_reranker();
   init_operation_error();
   init_media_cache();
   init_still_image_readiness();
@@ -21544,9 +21548,6 @@ var init_analyst_openclaw_infer = __esm(() => {
   init_analyst();
   OPENCLAW_INFER_MAX_PROMPT_BYTES = MAX_PROMPT_BYTES;
 });
-
-// src/core/evidence-reranker.ts
-var init_evidence_reranker = () => {};
 
 // src/core/evidence-pack.ts
 var utf8, CUT_SHORT_LANES;

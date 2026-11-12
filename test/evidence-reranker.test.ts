@@ -7,6 +7,9 @@ import {
   rerankCandidates,
   rerankPoolSize,
   MAX_RERANK_POOL_SIZE,
+  DEFAULT_RERANK_TIMEOUT_MS,
+  rerankPassageWindows,
+  RERANK_WINDOW_CHARS,
   type EvidenceReranker,
   type RerankTimers,
 } from '../src/core/evidence-reranker.ts';
@@ -17,7 +20,8 @@ import { createCrossEncoderReranker } from '../src/workers/source-index/built-in
 import { WordPieceTokenizer } from '../src/workers/source-index/built-in-embedding/wordpiece.ts';
 import type { EmbeddingBatch } from '../src/workers/source-index/built-in-embedding/runtime.ts';
 import { SourceModelPolicyDeniedError } from '../src/core/source-model-policy.ts';
-import { createTestClock } from './helpers/test-clock.ts';
+import { createAnalyst, redactPackForEscalation } from '../src/core/analyst.ts';
+import { createTestClock, flushMicrotasks } from './helpers/test-clock.ts';
 
 // A reranker that scores a passage by how many of the query's words it holds:
 // a stand-in with a known answer, so the tests check the stage, not a model.
@@ -170,7 +174,8 @@ describe('buildEvidencePackDetailed with a reranker', () => {
     expect(calls[0]).toHaveLength(10);
     expect(detail.pack.candidates).toHaveLength(3);
     expect(packIds(detail)[0]).toBe('doc-9');
-    expect(detail.rerank).toMatchObject({ rerankerId: 'fixture-overlap', outcome: 'applied', scored: 10, kept: 3, promoted: 1 });
+    expect(detail.rerank).toMatchObject({ rerankerId: 'fixture-overlap', outcome: 'applied', scored: 10, kept: 3, promoted: 1, windowOutcome: 'skipped', windowItems: 0, windowsScored: 0, windowElapsedMs: 0 });
+    expect(calls).toHaveLength(1);
   });
 
   test('S5 content anywhere in the pool hard-stops the build before the reranker reads any text', async () => {
@@ -264,5 +269,163 @@ describe('WordPieceTokenizer.encodePair', () => {
     expect(pair.ids).toEqual([2, 4, 4, 3, 5, 5, 5, 3]);
     expect(pair.typeIds).toEqual([0, 0, 0, 0, 1, 1, 1, 1]);
     expect(pair.truncated).toBe(true);
+  });
+});
+
+describe('paragraph window reranking', () => {
+  test('sentence windows preserve all text, chunk boundaries, and the tail of an oversized sentence', () => {
+    const first = 'A complete sentence. '.repeat(60).trim();
+    const oversized = 'x'.repeat(1_201) + '.';
+    const windows = rerankPassageWindows([first, oversized]);
+    expect(windows.every(text => text.length <= RERANK_WINDOW_CHARS)).toBe(true);
+    expect(windows.filter(text => text.startsWith('A')).every(text => text.endsWith('.'))).toBe(true);
+    expect(windows.join('').replaceAll(' ', '')).toBe((first + oversized).replaceAll(' ', ''));
+  });
+
+  const answer = 'The invoice total is due on 3 March.';
+  const original = ['Opening passage without the answer.', 'Existing supporting passage.'];
+  const candidates = ['Background sentence. '.repeat(35) + answer + ' Closing sentence.'];
+  function windowInput(mode: 'applied' | 'failed' | 'timed_out' | 'malformed' = 'applied') {
+    const calls: string[][] = [];
+    const fake = timers();
+    const reranker: EvidenceReranker = {
+      id: 'window-fixture', localOnly: true, poolSize: 10,
+      async score({ passages, signal }) {
+        calls.push([...passages]);
+        if (calls.length === 1) return passages.map((_, index) => index);
+        if (mode === 'failed') throw new Error('window model failed');
+        if (mode === 'malformed') return [1];
+        if (mode === 'timed_out') return new Promise((_, reject) => {
+          signal.addEventListener('abort', () => reject(new Error('aborted')));
+        });
+        return passages.map(text => text.includes(answer) ? 100 : 0);
+      },
+    };
+    const input = {
+      ...packInput(reranker, [], undefined, () => ({
+        sensitivity: buildSourceSensitivity({ trustTier: 'S2', trustDomain: 'internal' }),
+        chunks: original, candidatePassages: candidates,
+      })),
+      maxResults: 4, maxCharsPerCandidate: 600, rerankTimers: fake,
+    };
+    return { input, calls, fake };
+  }
+
+  test('finds a missed answering sentence, keeps item order, and only windows the top three kept long items', async () => {
+    const { input, calls } = windowInput();
+    const detail = await buildEvidencePackDetailed(input);
+    expect(packIds(detail)).toEqual(['doc-9', 'doc-8', 'doc-7', 'doc-6']);
+    expect(calls).toHaveLength(2);
+    expect(calls[0]!.join(' ')).not.toContain(answer);
+    expect(calls[1]!.filter(text => text.includes(answer))).toHaveLength(3);
+    for (const candidate of detail.pack.candidates.slice(0, 3)) {
+      expect(candidate.chunks[0]).toContain(answer);
+      expect(candidate.chunks.slice(1)).toEqual(original);
+      expect(candidate.chunks.join('').length).toBeLessThanOrEqual(600);
+    }
+    expect(detail.pack.candidates[3]!.chunks).toEqual(original);
+    expect(detail.rerank).toMatchObject({ windowOutcome: 'applied', windowItems: 3, windowsScored: calls[1]!.length, windowElapsedMs: 0 });
+    expect(JSON.stringify(detail.rerank)).not.toContain(answer);
+  });
+
+  test('a best window the item already shows whole is not seated twice', async () => {
+    const { input } = windowInput();
+    const shown = ['Opening passage. ' + answer, 'Existing supporting passage.'];
+    input.contentProviders[CORPUS] = { async fetchLocalContent() {
+      return { sensitivity: buildSourceSensitivity({ trustTier: 'S2', trustDomain: 'internal' }), chunks: shown, candidatePassages: [answer] };
+    } };
+    const detail = await buildEvidencePackDetailed(input);
+    expect(detail.rerank).toMatchObject({ windowOutcome: 'applied' });
+    for (const candidate of detail.pack.candidates) expect(candidate.chunks).toEqual(shown);
+  });
+
+  for (const mode of ['failed', 'timed_out', 'malformed'] as const) {
+    test(`window ${mode} preserves all passages exactly`, async () => {
+      const { input, fake, calls } = windowInput(mode);
+      const pending = buildEvidencePackDetailed(input);
+      await flushMicrotasks(100);
+      expect(calls).toHaveLength(2);
+      if (mode === 'timed_out') await fake.clock.advance(DEFAULT_RERANK_TIMEOUT_MS);
+      const detail = await pending;
+      expect(packIds(detail)).toEqual(['doc-9', 'doc-8', 'doc-7', 'doc-6']);
+      for (const candidate of detail.pack.candidates) expect(candidate.chunks).toEqual(original);
+      expect(detail.rerank).toMatchObject({ windowOutcome: mode === 'malformed' ? 'failed' : mode, windowItems: 3, windowsScored: 0,
+        windowElapsedMs: mode === 'timed_out' ? DEFAULT_RERANK_TIMEOUT_MS : 0 });
+      expect(fake.clock.pendingTimers()).toBe(0);
+    });
+  }
+
+  test('does not window after an item-stage failure', async () => {
+    const { input, calls } = windowInput();
+    input.reranker!.score = async ({ passages }) => { calls.push([...passages]); throw new Error('item failure'); };
+    const detail = await buildEvidencePackDetailed(input);
+    expect(calls).toHaveLength(1);
+    expect(detail.rerank).toMatchObject({ outcome: 'failed', windowOutcome: 'skipped', windowsScored: 0, windowItems: 0 });
+    for (const candidate of detail.pack.candidates) expect(candidate.chunks).toEqual(original);
+  });
+
+  test('an item-stage timeout skips window scoring', async () => {
+    const { input, calls, fake } = windowInput();
+    input.reranker!.score = async ({ passages }) => {
+      calls.push([...passages]);
+      return new Promise(() => {});
+    };
+    const pending = buildEvidencePackDetailed(input);
+    await flushMicrotasks(100);
+    await fake.clock.advance(DEFAULT_RERANK_TIMEOUT_MS);
+    const detail = await pending;
+    expect(calls).toHaveLength(1);
+    expect(detail.rerank).toMatchObject({ outcome: 'timed_out', windowOutcome: 'skipped', windowsScored: 0, windowItems: 0 });
+    for (const candidate of detail.pack.candidates) expect(candidate.chunks).toEqual(original);
+  });
+
+  test('windows are scored against the question even when retrieval uses a search query', async () => {
+    const { input } = windowInput();
+    const questions: string[] = [];
+    const score = input.reranker!.score;
+    input.reranker!.score = request => { questions.push(request.query); return score(request); };
+    await buildEvidencePackDetailed({ ...input, searchQuery: 'invoice' });
+    expect(questions).toEqual(['invoice', input.question]);
+  });
+
+  test('candidate passages have no effect without a reranker and are never requested', async () => {
+    const now = () => new Date('2026-01-01T00:00:00Z');
+    const baseline = await buildEvidencePackDetailed({ ...packInput(undefined, []), now });
+    const input = { ...packInput(undefined, []), now };
+    const provider = input.contentProviders[CORPUS]!;
+    input.contentProviders[CORPUS] = { async fetchLocalContent(request) {
+      expect(request).not.toHaveProperty('candidatePassages');
+      return { ...(await provider.fetchLocalContent(request))!, candidatePassages: candidates };
+    } };
+    const result = await buildEvidencePackDetailed(input);
+    expect(JSON.stringify(result.pack)).toBe(JSON.stringify(baseline.pack));
+    expect(result.rerank).toBeUndefined();
+  });
+
+  test('Private windows use the local reranker and remain local for the analyst and escalation', async () => {
+    const { input, calls } = windowInput();
+    const originalProvider = input.contentProviders[CORPUS]!;
+    input.contentProviders[CORPUS] = { async fetchLocalContent(request) {
+      const block = await originalProvider.fetchLocalContent(request);
+      return { ...block!, sensitivity: buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' }) };
+    } };
+    const detail = await buildEvidencePackDetailed(input);
+    expect(calls[1]!.join(' ')).toContain(answer);
+    expect(detail.encounteredSecureLocal).toBe(true);
+    let localCalls = 0;
+    await createAnalyst({ async complete(request) {
+      expect(request.localOnly).toBe(true);
+      expect(request.prompt).toContain(answer);
+      localCalls++;
+      return { modelId: 'fixture', text: JSON.stringify({ answer: 'No answer.', citations: [], unanswered: [], sufficient: false }) };
+    } }).analyze(detail.pack, { localOnly: false });
+    expect(localCalls).toBeGreaterThan(0);
+    const escalation = JSON.stringify(redactPackForEscalation(detail.pack));
+    expect(escalation).not.toContain(answer);
+    expect(escalation).not.toContain(candidates[0]!);
+    for (const candidate of detail.pack.candidates) expect(candidate).not.toHaveProperty('candidatePassages');
+    const excluded = await buildEvidencePackDetailed({ ...input, excludeSecureSensitivity: true });
+    expect(excluded.pack.candidates).toHaveLength(0);
+    expect(calls).toHaveLength(2);
   });
 });

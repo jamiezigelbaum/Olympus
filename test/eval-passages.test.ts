@@ -168,8 +168,8 @@ test('each row records what the reranker did, and the summary counts outcomes an
   let call = 0;
   const receipt = await runPassageEval({ dataset: one, maxResults: 5, storeCounts: counts, gitSha: 'abc',
     buildPack: async () => ({ ...detail(), rerank: call++ === 0
-      ? { rerankerId: 'cross-encoder:model', outcome: 'applied', scored: 24, kept: 5, promoted: 2, elapsedMs: 900 }
-      : { rerankerId: 'cross-encoder:model', outcome: 'timed_out', scored: 0, kept: 5, promoted: 0, elapsedMs: 5000 } }) });
+      ? { rerankerId: 'cross-encoder:model', outcome: 'applied', scored: 24, kept: 5, promoted: 2, elapsedMs: 900, windowsScored: 0, windowItems: 0, windowOutcome: 'skipped', windowElapsedMs: 0 }
+      : { rerankerId: 'cross-encoder:model', outcome: 'timed_out', scored: 0, kept: 5, promoted: 0, elapsedMs: 5000, windowsScored: 0, windowItems: 0, windowOutcome: 'skipped', windowElapsedMs: 0 } }) });
   expect(receipt.questions![0]!.rerank).toEqual({ outcome: 'applied', scored: 24, promoted: 2, elapsedMs: 900 });
   expect(receipt.questions![1]!.rerank).toEqual({ outcome: 'timed_out', scored: 0, promoted: 0, elapsedMs: 5000 });
   expect(receipt.summary.overall.rerank).toEqual({ applied: 1, timedOut: 1, failed: 0, elapsedMs: 5900, maxElapsedMs: 5000 });

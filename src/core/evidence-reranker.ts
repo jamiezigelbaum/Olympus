@@ -51,12 +51,22 @@ export interface EvidenceRerankAudit {
   /** Kept candidates that were below the cut in the fused order. */
   promoted: number;
   elapsedMs: number;
+  windowsScored: number;
+  windowItems: number;
+  windowOutcome: EvidenceRerankOutcome | 'skipped';
+  windowElapsedMs: number;
 }
 
 /** Characters of one candidate's text the reranker reads (a 512-token window holds about this much). */
 export const RERANK_PASSAGE_CHARS = 2_000;
 /** A reranker that has not answered by then is abandoned and the fused order stands. */
 export const DEFAULT_RERANK_TIMEOUT_MS = 5_000;
+// Bound the second scoring pass to the leading items where better passages matter most.
+export const RERANK_WINDOW_ITEMS = 3;
+// Sentence-sized context keeps each window focused enough for the cross-encoder.
+export const RERANK_WINDOW_CHARS = 500;
+// Bound whole-chunk expansion so window scoring never becomes a full-document read.
+export const MAX_CANDIDATE_PASSAGES = 6;
 export const DEFAULT_RERANK_POOL_SIZE = 30;
 // Sparta scores 360 candidates of 128 tokens in 4 s with MiniLM int8 (#921).
 export const MAX_RERANK_POOL_SIZE = 400;
@@ -110,6 +120,10 @@ export async function rerankCandidates<T>(options: RerankCandidatesOptions<T>): 
       kept: Math.min(keep, options.items.length),
       promoted: 0,
       elapsedMs: timers.now() - startedAt,
+      windowsScored: 0,
+      windowItems: 0,
+      windowOutcome: 'skipped',
+      windowElapsedMs: 0,
     },
   });
   if (scoredIndexes.length === 0) return fusedCut('applied', 0);
@@ -162,6 +176,10 @@ export async function rerankCandidates<T>(options: RerankCandidatesOptions<T>): 
       kept: keptOrder.length,
       promoted: keptOrder.filter((index) => index >= keep).length,
       elapsedMs: timers.now() - startedAt,
+      windowsScored: 0,
+      windowItems: 0,
+      windowOutcome: 'skipped',
+      windowElapsedMs: 0,
     },
   };
 }
@@ -181,4 +199,27 @@ function clipPassage(text: string): string {
 export function rerankPoolSize(reranker: EvidenceReranker, maxResults: number): number {
   const pool = Number.isFinite(reranker.poolSize) ? Math.floor(reranker.poolSize) : DEFAULT_RERANK_POOL_SIZE;
   return Math.max(Math.floor(maxResults), Math.min(MAX_RERANK_POOL_SIZE, pool));
+}
+
+/** Whole sentences up to the window target; oversized sentences are split so no tail is lost. */
+export function rerankPassageWindows(chunks: readonly string[]): string[] {
+  const windows: string[] = [];
+  const sentences = new Intl.Segmenter(undefined, { granularity: 'sentence' });
+  for (const chunk of chunks) {
+    let window = '';
+    for (const { segment } of sentences.segment(chunk)) {
+      if (window && window.length + segment.length > RERANK_WINDOW_CHARS) {
+        windows.push(window.trim());
+        window = '';
+      }
+      let remaining = segment;
+      while (remaining.length > RERANK_WINDOW_CHARS) {
+        windows.push(remaining.slice(0, RERANK_WINDOW_CHARS).trim());
+        remaining = remaining.slice(RERANK_WINDOW_CHARS);
+      }
+      window += remaining;
+    }
+    if (window.trim()) windows.push(window.trim());
+  }
+  return windows.filter(Boolean);
 }

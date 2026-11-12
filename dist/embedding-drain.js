@@ -22303,6 +22303,9 @@ import { existsSync as existsSync22, lstatSync as lstatSync10, mkdirSync as mkdi
 import { dirname as dirname25 } from "node:path";
 import { Database as Database6 } from "bun:sqlite";
 
+// src/core/evidence-reranker.ts
+var MAX_CANDIDATE_PASSAGES = 6;
+
 // src/core/media-cache.ts
 import { createHash as createHash15, randomUUID as randomUUID9 } from "node:crypto";
 import {
@@ -31967,11 +31970,12 @@ class LocalConnectorStore {
       const vector = decodeEmbedding(chunk.embedding);
       return vector.length === queryVector.length ? cosineSimilarity(queryVector, vector) : undefined;
     }) : undefined;
-    const { chunks, truncated } = selectEvidencePassages(chunkRows.map((chunk) => compactPassageWhitespace(chunk.bounded_text)), maxChars, passageFocus, { title: row.title, ...relevance ? { relevance } : {} });
+    const { chunks, truncated, candidatePassages } = selectEvidencePassages(chunkRows.map((chunk) => compactPassageWhitespace(chunk.bounded_text)), maxChars, passageFocus, { title: row.title, ...relevance ? { relevance } : {} });
     const reactionLine = servesContent ? renderSourceReactionLine(parseStoredSourceReactions(row.reactions_json)) : undefined;
     return {
       trustTier: trustTierFromRow(row.trust_tier),
       chunks: reactionLine ? [reactionLine, ...chunks] : chunks,
+      ...candidatePassages ? { candidatePassages } : {},
       truncated,
       storedChunks: chunkRows.length,
       mimeType: row.mime_type,
@@ -32995,6 +32999,13 @@ function selectEvidencePassages(chunks, maxChars, focus, context2 = {}) {
   const relevance = (index) => context2.relevance?.[index] ?? Number.NEGATIVE_INFINITY;
   const anchorIndex = focus.anchorChunkIndex !== undefined && focus.anchorChunkIndex >= 0 && focus.anchorChunkIndex < chunks.length ? focus.anchorChunkIndex : undefined;
   const anchor = anchorIndex !== undefined && (focus.anchorLane !== "keyword" || lexical[anchorIndex] > 0) ? anchorIndex : undefined;
+  const candidateLimit = Number.isFinite(focus.candidatePassages) ? Math.max(0, Math.min(MAX_CANDIDATE_PASSAGES, Math.floor(focus.candidatePassages))) : 0;
+  const candidateIndexes = candidateLimit > 0 ? [...new Set([
+    ...anchorIndex !== undefined ? [anchorIndex] : [],
+    ...lexical.map((score, index) => ({ score, index })).sort((left, right) => right.score - left.score || left.index - right.index).slice(0, 3).map((entry) => entry.index),
+    ...chunks.map((_, index) => index).filter((index) => Number.isFinite(relevance(index))).sort((left, right) => relevance(right) - relevance(left) || left - right).slice(0, 3)
+  ])].slice(0, candidateLimit).sort((left, right) => left - right) : [];
+  const candidates = candidateIndexes.length > 0 ? { candidatePassages: candidateIndexes.map((index) => chunks[index]) } : {};
   if (lexical.some((score) => score > 0)) {
     const scored = lexical.map((score, index) => ({ index, score })).filter((entry) => entry.score > 0 && entry.index !== anchor).sort((left, right) => right.score - left.score || relevance(right.index) - relevance(left.index) || left.index - right.index);
     const picked = [
@@ -33002,7 +33013,7 @@ function selectEvidencePassages(chunks, maxChars, focus, context2 = {}) {
       ...scored.map((entry) => entry.index)
     ].slice(0, Math.max(1, Math.floor(focus.maxPassages ?? MAX_PASSAGES_PER_CANDIDATE)));
     const bounded = boundedSourceIndexChunks(picked.sort((left, right) => left - right).map((index) => chunks[index]), maxChars, termGroups);
-    return { chunks: bounded.chunks, truncated: picked.length < chunks.length || bounded.truncated };
+    return { chunks: bounded.chunks, truncated: picked.length < chunks.length || bounded.truncated, ...candidates };
   }
   const ranked = chunks.map((_, index) => index).sort((left, right) => (left === anchor ? -1 : right === anchor ? 1 : 0) || relevance(right) - relevance(left) || left - right);
   const kept = new Map;
@@ -33030,6 +33041,7 @@ function selectEvidencePassages(chunks, maxChars, focus, context2 = {}) {
   const ordered = [...kept.entries()].sort(([left], [right]) => left - right);
   return {
     chunks: ordered.map(([, text2]) => text2),
+    ...candidates,
     truncated: ordered.length < chunks.length || ordered.some(([index, text2]) => text2.length < chunks[index].length)
   };
 }

@@ -53,6 +53,7 @@ import type {
   SourceConnectorListOptions,
   SourceConnectorListPage,
 } from '../../core/contracts.ts';
+import { MAX_CANDIDATE_PASSAGES } from '../../core/evidence-reranker.ts';
 import type {
   LocalContentBlock,
   LocalContentProvider,
@@ -2603,6 +2604,7 @@ export function connectorStoreCurrentEmbeddingModelId(
 export interface ConnectorStoreLocalContent {
   trustTier: SourceTrustTier;
   chunks: readonly string[];
+  candidatePassages?: readonly string[];
   truncated: boolean;
   locatorUri?: string;
   /**
@@ -14301,7 +14303,7 @@ export class LocalConnectorStore {
           return vector.length === queryVector.length ? cosineSimilarity(queryVector, vector) : undefined;
         })
       : undefined;
-    const { chunks, truncated } = selectEvidencePassages(
+    const { chunks, truncated, candidatePassages } = selectEvidencePassages(
       // Layout padding (OCR and PDF text keep column alignment as runs of
       // spaces) is not evidence; dropping it lets the same budget carry
       // several times the text (2026-10-02 live Private store: 36% padding
@@ -14324,6 +14326,7 @@ export class LocalConnectorStore {
     return {
       trustTier: trustTierFromRow(row.trust_tier),
       chunks: reactionLine ? [reactionLine, ...chunks] : chunks,
+      ...(candidatePassages ? { candidatePassages } : {}),
       truncated,
       storedChunks: chunkRows.length,
       mimeType: row.mime_type,
@@ -16492,6 +16495,7 @@ export function createConnectorStoreContentProvider(
       const content = store.localContent(localItemId, request.maxChars, {
         ...(request.query?.trim() ? { query: request.query } : {}),
         ...(request.maxPassages !== undefined ? { maxPassages: request.maxPassages } : {}),
+        ...(request.candidatePassages !== undefined ? { candidatePassages: request.candidatePassages } : {}),
         ...(anchorChunkIndex !== undefined ? { anchorChunkIndex } : {}),
         ...(anchorLane === 'keyword' || anchorLane === 'semantic' ? { anchorLane } : {}),
         ...(vector && embeddingProvider ? { queryVector: vector, queryVectorModelId: embeddingProvider.modelId } : {}),
@@ -16519,6 +16523,7 @@ export function createConnectorStoreContentProvider(
       return {
         sensitivity: buildSourceSensitivity({ trustTier: content.trustTier, trustDomain: store.trustDomain }),
         chunks: content.chunks,
+        ...(content.candidatePassages ? { candidatePassages: content.candidatePassages } : {}),
         ...(content.truncated ? { truncated: true } : {}),
         ...(coverageGaps.length > 0 ? { coverageGaps } : {}),
         ...(metadataOnlyRuleId !== undefined ? { namesOnly: true } : {}),
@@ -17483,6 +17488,8 @@ export interface ConnectorStorePassageFocus {
   queryVectorModelId?: string;
   /** At most this many passages (MAX_PASSAGES_PER_CANDIDATE by default). */
   maxPassages?: number;
+  /** Whole chunks for the optional local reranker window pass. */
+  candidatePassages?: number;
 }
 
 // At most this many passages from one item, so a long document contributes
@@ -17510,7 +17517,7 @@ function selectEvidencePassages(
   maxChars: number | undefined,
   focus: ConnectorStorePassageFocus | undefined,
   context: { title?: string | null; relevance?: readonly (number | undefined)[] } = {},
-): { chunks: readonly string[]; truncated: boolean } {
+): { chunks: readonly string[]; truncated: boolean; candidatePassages?: readonly string[] } {
   if (maxChars === undefined || maxChars <= 0) return budgetChunks(chunks, maxChars);
   const totalChars = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
   if (totalChars <= maxChars || !focus) return budgetChunks(chunks, maxChars);
@@ -17530,6 +17537,23 @@ function selectEvidencePassages(
   const anchor = anchorIndex !== undefined && (focus.anchorLane !== 'keyword' || lexical[anchorIndex]! > 0)
     ? anchorIndex
     : undefined;
+  // Take the anchor, then the lexical and vector leaders, deduplicate before
+  // the cap, and restore document order. These are whole chunks from the SAME
+  // gated read as chunks, never a second read around visibility or scope.
+  const candidateLimit = Number.isFinite(focus.candidatePassages)
+    ? Math.max(0, Math.min(MAX_CANDIDATE_PASSAGES, Math.floor(focus.candidatePassages!))) : 0;
+  const candidateIndexes = candidateLimit > 0 ? [...new Set([
+    ...(anchorIndex !== undefined ? [anchorIndex] : []),
+    ...lexical.map((score, index) => ({ score, index }))
+      .sort((left, right) => right.score - left.score || left.index - right.index)
+      .slice(0, 3).map(entry => entry.index),
+    ...chunks.map((_, index) => index)
+      .filter(index => Number.isFinite(relevance(index)))
+      .sort((left, right) => relevance(right) - relevance(left) || left - right)
+      .slice(0, 3),
+  ])].slice(0, candidateLimit).sort((left, right) => left - right) : [];
+  const candidates = candidateIndexes.length > 0
+    ? { candidatePassages: candidateIndexes.map(index => chunks[index]!) } : {};
   if (lexical.some((score) => score > 0)) {
     const scored = lexical
       .map((score, index) => ({ index, score }))
@@ -17546,7 +17570,7 @@ function selectEvidencePassages(
       maxChars,
       termGroups,
     );
-    return { chunks: bounded.chunks, truncated: picked.length < chunks.length || bounded.truncated };
+    return { chunks: bounded.chunks, truncated: picked.length < chunks.length || bounded.truncated, ...candidates };
   }
   // Most relevant first (the anchor, then by embedding), filled whole until
   // the budget runs out, then read in document order. Chunks within
@@ -17589,6 +17613,7 @@ function selectEvidencePassages(
   const ordered = [...kept.entries()].sort(([left], [right]) => left - right);
   return {
     chunks: ordered.map(([, text]) => text),
+    ...candidates,
     truncated: ordered.length < chunks.length || ordered.some(([index, text]) => text.length < chunks[index]!.length),
   };
 }
