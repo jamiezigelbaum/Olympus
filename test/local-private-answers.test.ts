@@ -1421,14 +1421,20 @@ describe('the Private answers page', () => {
       OLYMPUS_BUILT_IN_REASONING_DIR: join(dir, 'reasoning'),
     };
     const completions: string[] = [];
+    const unexpected: string[] = [];
+    const answerErrors: string[] = [];
     // No socket is opened. The two loopback endpoints model an absent user
     // server and the installed built-in runtime; every other transport is denied.
     const network = denyNetwork(async (url, init) => {
       if (url.port === '28090' && url.pathname.endsWith('/models')) {
         throw new Error('ECONNREFUSED: no user model server on this standalone install');
       }
-      expect(url.href).toBe('http://127.0.0.1:40123/v1/chat/completions');
-      expect(init?.method).toBe('POST');
+      // An expect thrown here would surface only as the answer's bare
+      // `failed` status (#1387); record the request and assert it below.
+      if (url.href !== 'http://127.0.0.1:40123/v1/chat/completions' || init?.method !== 'POST') {
+        unexpected.push(`${init?.method ?? 'GET'} ${url.href}`);
+        return new Response('unexpected loopback request', { status: 500 });
+      }
       completions.push(String(init?.body));
       return Response.json({ choices: [{ message: { content: ANSWER_JSON } }] });
     });
@@ -1459,9 +1465,17 @@ describe('the Private answers page', () => {
     expect(network.loopbackRequests).toContain('http://127.0.0.1:28090/v1/models');
     if (choice === 'local-first') expect(ready.cards.find(card => card.id === 'venice')).toMatchObject({ required: false, state: 'not_configured' });
 
-    const local = await localFixture({ model, specs: [SPECS[0]!], privateIds: ['lease'] });
+    // The answer path turns a model error into a bare `failed`; keep the reason (#1387).
+    const watched: typeof model = { ...model, async complete(request) {
+      try { return await model.complete(request); } catch (error) { answerErrors.push(String(error)); throw error; }
+    } };
+    const local = await localFixture({ model: watched, specs: [SPECS[0]!], privateIds: ['lease'] });
     const store = waitingStore();
-    const controller = createLocalPrivateAnswers({ answer: local.answer, eligible: local.eligible, store: () => store });
+    // The controller turns a thrown answer into a bare `failed`; keep the reason for the assertion below (#1387).
+    const answer: typeof local.answer = async request => {
+      try { return await local.answer(request); } catch (error) { answerErrors.push(String(error)); throw error; }
+    };
+    const controller = createLocalPrivateAnswers({ answer, eligible: local.eligible, store: () => store });
     cleanups.push(() => controller.close());
     const replies: Array<Record<string, unknown>> = [];
     const page = renderAndRun(async body => {
@@ -1473,6 +1487,7 @@ describe('the Private answers page', () => {
     (page.document.querySelector('textarea') as unknown as { value: string }).value = question;
     page.document.querySelector('form[data-pa-ask]')!.dispatchEvent(new page.document.defaultView!.Event('submit', { cancelable: true }));
     for (let turn = 0; turn < 100 && !page.document.querySelector('.paanswer'); turn++) await page.settle();
+    expect({ unexpected, answerErrors, attempts: network.attempts }).toEqual({ unexpected: [], answerErrors: [], attempts: [] });
     expect(replies[0]).toMatchObject({ ok: true, status: 'answered', answer: 'The orchard flat lease ends on 31 May 2027.' });
     expect(replies[0]!.citations).toMatchObject([{ title: 'orchard-lease.txt' }]);
     expect(page.document.querySelector('.paanswer')?.textContent).toBe('The orchard flat lease ends on 31 May 2027.');
