@@ -15,8 +15,8 @@ import { probeVectorDigest, seededVectorRandom } from '../eval/vector-digest-pro
 
 // The digest pass is opt-in while olympus-ops#151 is open; these tests cover it on.
 const digestSetting = process.env.OLYMPUS_VECTOR_DIGEST;
-beforeAll(() => { process.env.OLYMPUS_VECTOR_DIGEST = 'on'; });
-afterAll(() => { if (digestSetting === undefined) delete process.env.OLYMPUS_VECTOR_DIGEST; else process.env.OLYMPUS_VECTOR_DIGEST = digestSetting; });
+beforeAll(() => { delete process.env.OLYMPUS_VECTOR_DIGEST; });
+afterAll(() => { if (digestSetting !== undefined) process.env.OLYMPUS_VECTOR_DIGEST = digestSetting; });
 const modelId = 'digest-fixture';
 const provider: SourceEmbeddingProvider = { provider: 'built-in', backend: 'local', modelId, dimension: 3, configHash: '1', epochId: '1', async embed(inputs) { return inputs.map(() => [1, 0, 0]); } };
 const open = (dbPath = ':memory:') => new LocalConnectorStore({ dbPath, corpusId: 'internal.fixture.digest', family: 'file', trustDomain: 'internal', tierLedger: null });
@@ -409,7 +409,7 @@ test('a file store backfills on the read pool: the worker thread only writes dig
   } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('without OLYMPUS_VECTOR_DIGEST=on, a store with a complete digest runs the exact scan', async () => {
+test('with OLYMPUS_VECTOR_DIGEST=off, a store with a complete digest runs the exact scan', async () => {
   const store = open();
   const saved = process.env.OLYMPUS_VECTOR_DIGEST;
   const queries: string[] = [];
@@ -418,7 +418,7 @@ test('without OLYMPUS_VECTOR_DIGEST=on, a store with a complete digest runs the 
     await store.embedChunks({ provider });
     expect(vectorDigestState(database(store), modelId).completed).toBe(true);
     const withDigest = await store.vectorSearchLane('harbor', provider, 10, 'a');
-    delete process.env.OLYMPUS_VECTOR_DIGEST;
+    process.env.OLYMPUS_VECTOR_DIGEST = 'off';
     const db = database(store);
     const query = db.query.bind(db);
     db.query = ((sql: string) => { queries.push(sql); return query(sql); }) as typeof db.query;

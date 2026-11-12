@@ -25020,7 +25020,7 @@ async function scanVectorPages(read, provider, beforeToken, queryVector, pageOpt
   return { bestByItem, dimensionMismatches };
 }
 function vectorDigestSearchDisabled(env = process.env) {
-  return env.OLYMPUS_VECTOR_DIGEST?.trim().toLowerCase() !== "on";
+  return env.OLYMPUS_VECTOR_DIGEST?.trim().toLowerCase() === "off";
 }
 var VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128;
 var VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8;

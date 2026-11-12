@@ -37481,7 +37481,7 @@ async function scanVectorPages(read, provider, beforeToken, queryVector, pageOpt
   return { bestByItem, dimensionMismatches };
 }
 function vectorDigestSearchDisabled(env = process.env) {
-  return env.OLYMPUS_VECTOR_DIGEST?.trim().toLowerCase() !== "on";
+  return env.OLYMPUS_VECTOR_DIGEST?.trim().toLowerCase() === "off";
 }
 function nextVectorDigestBackfillRows(rows, turnMs) {
   if (turnMs > VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS)
