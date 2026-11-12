@@ -29,7 +29,7 @@ import { noteReleasedItems, releasedItemFromEvidence, type ReleasedItem } from '
  */
 import { isValidPort, isValidSshTarget, isSshWorkerSocketPath } from '../../core/remote-open.ts';
 import { OperationError, type OperationErrorCode } from '../../core/operation-error.ts';
-import { boundedLogErrorMessage } from '../../core/log-redaction.ts';
+import { boundedLogErrorMessage, logErrorOrigin } from '../../core/log-redaction.ts';
 import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
 import { privacyBacklogCoverageNote } from '../../core/privacy-backlog-coverage.ts';
 import { citationTitleWithParent } from '../../core/parent-label.ts';
@@ -1500,7 +1500,7 @@ export function errorToolResult(error: unknown, client?: McpAppClient): ChatGptT
   }
   const ref = mintErrorRef();
   const errorClass = error instanceof Error ? error.name : typeof error;
-  console.error(`[olympus:chatgpt] tool_error code=${code} ref=${ref} class=${JSON.stringify(errorClass)} error_message=${boundedLogErrorMessage(error)}`);
+  console.error(`[olympus:chatgpt] tool_error code=${code} ref=${ref} class=${JSON.stringify(errorClass)} error_message=${boundedLogErrorMessage(error)} origin=${logErrorOrigin(error)}`);
   return {
     content: [{ type: 'text', text: `${appClientCopy(ERROR_TEXT[code], client)} ${errorReferenceSentence(ref)}` }],
     structuredContent: { error: code, ref },

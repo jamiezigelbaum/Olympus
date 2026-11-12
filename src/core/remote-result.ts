@@ -32,7 +32,7 @@ import { parseSourceItemReadResult, SOURCE_ITEM_READ_REFUSALS } from './source-i
  * use this module; their output is unchanged.
  */
 import { noteReleasedItems, releasedItemFromEvidence, type ReleasedItem } from './app-release-capture.ts';
-import { boundedLogErrorMessage } from './log-redaction.ts';
+import { boundedLogErrorMessage, logErrorOrigin } from './log-redaction.ts';
 import { OperationError, type OperationErrorCode } from './operation-error.ts';
 import { secretLabelsInText } from './opsec.ts';
 import { citationTitleWithParent, PARENT_LABEL_MAX_CHARS } from './parent-label.ts';
@@ -718,7 +718,7 @@ export function remoteErrorOutput(error: unknown, options: RemoteErrorOptions = 
   if (!REFERENCED_ERROR_CODES.has(code)) return { error: code, message: REMOTE_ERROR_TEXT[code] };
   const ref = mintErrorRef();
   const errorClass = error instanceof Error ? error.name : typeof error;
-  console.error(`[olympus:remote] tool_error code=${code} ref=${ref} class=${JSON.stringify(errorClass)} error_message=${boundedLogErrorMessage(error)}`);
+  console.error(`[olympus:remote] tool_error code=${code} ref=${ref} class=${JSON.stringify(errorClass)} error_message=${boundedLogErrorMessage(error)} origin=${logErrorOrigin(error)}`);
   return { error: code, message: REMOTE_ERROR_TEXT[code], ref };
 }
 

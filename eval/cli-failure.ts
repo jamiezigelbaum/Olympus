@@ -7,10 +7,16 @@ const CODE = /^[A-Z][A-Z0-9_]{1,63}$/;
 
 export interface EvalStage { name: string }
 
+/** Only bounded machine codes may cross the content-free receipt/log boundary. */
+export function failureCode(error: unknown): string | undefined {
+  const code = error instanceof Error ? (error as { code?: unknown }).code : undefined;
+  return typeof code === 'string' && CODE.test(code) ? code : undefined;
+}
+
 export function failureLine(label: string, stage: string, error: unknown): string {
   const kind = error instanceof Error ? (error.constructor?.name || error.name || 'Error') : typeof error;
-  const code = error instanceof Error ? (error as { code?: unknown }).code : undefined;
-  return `${label} failed at ${stage}: ${kind}${typeof code === 'string' && CODE.test(code) ? ` (${code})` : ''}; no content is logged.`;
+  const code = failureCode(error);
+  return `${label} failed at ${stage}: ${kind}${code ? ` (${code})` : ''}; no content is logged.`;
 }
 
 /** Run a CLI's main with a shared stage, then exit: 0 on success, 1 with the failure line. */

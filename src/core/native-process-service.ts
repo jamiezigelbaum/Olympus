@@ -118,6 +118,12 @@ export interface NativeProcessStartSettings {
   readinessProbe(child: ChildProcess): Promise<boolean>;
   /** Safe, categorical startup diagnosis from a child exit (never stderr). */
   startupFailure?(child: ChildProcess): NativeProcessRetryableStartError | undefined;
+  /**
+   * Whether this child is still doing boot work (store updates, a slow cold
+   * start) when its deadline passes. While true, the deadline extends by
+   * another startup timeout (#1494). An exit still fails at once.
+   */
+  startupInProgress?(child: ChildProcess): boolean;
 }
 
 export interface NativeProcessStartInput<TSettings extends NativeProcessStartSettings> {
@@ -704,9 +710,14 @@ async function waitForChildReadiness<TSettings extends NativeProcessStartSetting
   restartOnCleanExit: boolean;
   spawnFailed(): boolean;
 }): Promise<'ready' | 'cleanCompletion'> {
-  const deadline = Date.now() + input.startupTimeoutMs;
+  let deadline = Date.now() + input.startupTimeoutMs;
   const acceptsCleanExit = !input.restartOnCleanExit;
-  while (Date.now() < deadline) {
+  for (;;) {
+    if (Date.now() >= deadline) {
+      if (!startupStillInProgress(input.settings, input.child)) break;
+      deadline = Date.now() + input.startupTimeoutMs;
+      console.log(`[native-process] startup still in progress past ${Math.round(input.startupTimeoutMs / 1000)} s; waiting`);
+    }
     if (!input.isCurrent(input.lifetime)) throw new NativeProcessServiceStoppedError();
     if (input.spawnFailed()) throw new Error('Child exited during startup.');
     if (childExited(input.child)) {
@@ -729,6 +740,14 @@ async function waitForChildReadiness<TSettings extends NativeProcessStartSetting
     await delay(input.readinessPollMs);
   }
   throw new Error('Child readiness timed out.');
+}
+
+function startupStillInProgress(settings: NativeProcessStartSettings, child: ChildProcess): boolean {
+  try {
+    return settings.startupInProgress?.(child) === true;
+  } catch {
+    return false;
+  }
 }
 
 /**

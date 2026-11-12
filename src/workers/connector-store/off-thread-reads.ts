@@ -18,6 +18,7 @@
 // a keyword read wait for all of it (#1305). The worker runs one statement at
 // a time either way; the snapshot's transaction is on its own connection.
 
+import { errorFromBoundary } from '../../core/log-redaction.ts';
 import { SOURCE_INDEX_LANE_BUSY_CODE } from '../../core/source-index/lane-busy.ts';
 import { beginSourceAnswerPoolRead, type SourceAnswerPoolReadOutcome } from '../source-index/answer-latency-trace.ts';
 
@@ -140,7 +141,8 @@ self.onmessage = (event) => {
       postMessage({ id, ok: true, rows, ms: performance.now() - started });
     }
   } catch (error) {
-    postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error) });
+    const frame = error instanceof Error && error.stack ? error.stack.split('\\n').map((line) => line.trim()).find((line) => line.startsWith('at ')) : undefined;
+    postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error), errorName: error instanceof Error ? error.name : undefined, errorFrame: frame ? frame.slice(3) : undefined, op, sqlHead: typeof sql === 'string' ? sql.replace(/\\s+/g, ' ').trim().slice(0, 80) : undefined });
   }
 };
 `;
@@ -228,7 +230,7 @@ function startThread(store: string): ReaderThread | undefined {
     if (startedStores.has(store)) counters.restarts += 1;
     startedStores.add(store);
     const started: ReaderThread = { store, worker, pending: new Map(), snapshots: 0 };
-    worker.onmessage = (event: MessageEvent<{ id: number; ok: boolean; rows?: unknown; error?: string; ms?: number }>) => {
+    worker.onmessage = (event: MessageEvent<{ id: number; ok: boolean; rows?: unknown; error?: string; errorName?: string; errorFrame?: string; op?: string; sqlHead?: string; ms?: number }>) => {
       const message = event.data;
       const diagnostic = message as unknown as { diagnostic?: string; path: string; ms: number };
       if (diagnostic.diagnostic === 'open') {
@@ -247,7 +249,8 @@ function startThread(store: string): ReaderThread | undefined {
       if (waiting.timer !== undefined) clock.clearTimeout(waiting.timer);
       if (typeof message.ms === 'number') waiting.sqlMs?.(message.ms);
       if (message.ok) waiting.resolve(message.rows ?? null);
-      else waiting.reject(new Error(message.error ?? 'off-thread read failed'));
+      // The class and frame from the reader thread, and what it ran (SQL text only, never its values): #1502.
+      else waiting.reject(errorFromBoundary(message.error ?? 'off-thread read failed', message.errorName, message.errorFrame, `read pool ${message.op ?? 'read'}${message.sqlHead ? `: ${message.sqlHead}` : ''}`));
     };
     worker.onerror = (event: ErrorEvent) => {
       retire(started, new Error(event.message || 'off-thread reader stopped'));
@@ -411,6 +414,21 @@ function serveSnapshotWaiters(): void {
     reader.snapshots += 1;
     waiter.resolve(reader);
   }
+}
+
+/**
+ * Whether any store's pool work is waiting for a thread: a queued read or a
+ * snapshot (a status count, an Ask lane). Background maintenance stands back
+ * while this is true, so owner-visible reads go first.
+ */
+export function readPoolHasWaitingWork(): boolean {
+  return waitingWorkForTests?.() ?? (snapshotWaiters.length > 0 || [...queues.values()].some((waiting) => waiting.length > 0));
+}
+
+let waitingWorkForTests: (() => boolean) | undefined;
+/** Tests only: what readPoolHasWaitingWork answers. Left out, the pool's own state. */
+export function setReadPoolWaitingWorkForTests(waiting?: () => boolean): void {
+  waitingWorkForTests = waiting;
 }
 
 /**

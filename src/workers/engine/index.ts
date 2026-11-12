@@ -74,6 +74,7 @@ import { DASHBOARD_READINESS_LEDGER_MAX_AGE_MS } from '../source-index/status.ts
 import { READWISE_LIBRARY_CORPUS_ID } from '../readwise/index.ts';
 import {
   X_BOOKMARKS_CORPUS_ID,
+  XBookmarksArchiveImportError,
   XBookmarksLiveSyncError,
   defaultXBookmarksLiveSyncConfig,
 } from '../x-bookmarks/index.ts';
@@ -3138,16 +3139,23 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           }
           if (corpusId === X_BOOKMARKS_CORPUS_ID) {
             const mode = asOptionalString(record.mode) ?? 'reconcile';
-            if (mode !== 'head' && mode !== 'reconcile' && mode !== 'window_diagnostic') {
+            if (mode !== 'head' && mode !== 'reconcile' && mode !== 'window_diagnostic' && mode !== 'import_archive') {
               throw new EmailSourceWorkerError(
                 400,
                 'invalid_request',
-                'mode must be head, reconcile, or window_diagnostic for X bookmarks sync.',
+                'mode must be head, reconcile, window_diagnostic, or import_archive for X bookmarks sync.',
               );
+            }
+            const archivePath = asOptionalString(record.archive_path);
+            if (mode === 'import_archive' && !archivePath) {
+              throw new EmailSourceWorkerError(400, 'invalid_request', 'archive_path is required to import archived X bookmarks.');
             }
             const xSync = currentXBookmarksRuntime()?.sync;
             if (!xSync) {
               throw new EmailSourceWorkerError(501, 'source_index_sync_not_supported', 'X bookmarks connector-store sync is not configured.');
+            }
+            if (mode === 'import_archive' && !xSync.importArchive) {
+              throw new EmailSourceWorkerError(501, 'source_index_sync_not_supported', 'X bookmarks archive import is not configured.');
             }
             if (mode === 'window_diagnostic' && !xSync.diagnoseWindow) {
               throw new EmailSourceWorkerError(501, 'source_index_sync_not_supported', 'X bookmarks window diagnostics are not configured.');
@@ -3157,11 +3165,16 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 ? await xSync.syncHead({ provenance: 'operator' })
                 : mode === 'reconcile'
                   ? await xSync.reconcile({ provenance: 'operator' })
-                  : await xSync.diagnoseWindow!({ provenance: 'operator' });
+                  : mode === 'import_archive'
+                    ? await xSync.importArchive!({ archive_path: archivePath! })
+                    : await xSync.diagnoseWindow!({ provenance: 'operator' });
               const safeResult = xBookmarksLiveAdminResult(mode, result);
               assertNoRawEmailFields(safeResult);
               return json(safeResult);
             } catch (error) {
+              if (error instanceof XBookmarksArchiveImportError) {
+                throw new EmailSourceWorkerError(400, 'invalid_request', error.message);
+              }
               if (!(error instanceof XBookmarksLiveSyncError)) throw error;
               const safeError = xBookmarksLiveAdminResult(mode, {
                 status: 'idle',
