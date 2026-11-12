@@ -8,6 +8,7 @@ import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { tierLedgerPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { fixtureConnector } from './helpers/tier-fixtures.ts';
 import { openEvalDataRoot } from '../eval/data-root.ts';
+import { storedChunkCounter } from '../eval/run-passages.ts';
 import { degradedLabel, draftPassageQuestions, localDraftModel, parseMinimums, sampleDraftItems, writeDraftQuestionSet } from '../eval/draft-passage-questions.ts';
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
@@ -392,4 +393,13 @@ test('resuming a growth run that wrote over its own input grows from the origina
     // A file that lost questions the run grew from is refused.
     await expect(draftPassageQuestions({ opened, count: 3, seed: 'grow', model, existing: { ...base, questions: base.questions.slice(1) }, checkpoint: { load: () => saved, save: () => {} } })).rejects.toThrow('grew from');
   } finally { server.stop(true); opened.close(); }
+});
+test('the funnel counts an item’s stored chunks read-only from the copied store', async () => {
+  const opened = await world();
+  const counter = storedChunkCounter(opened.stores);
+  try {
+    expect(counter.count('internal.fixture.file', '0')).toBe(1);
+    expect(counter.count('internal.fixture.file', 'no-such-item')).toBeUndefined();
+    expect(counter.count('internal.no.store', '0')).toBeUndefined();
+  } finally { counter.close(); opened.close(); }
 });

@@ -182,3 +182,14 @@ test('each question reports its steps in order, by number only', async () => {
     onProgress: (index, total, step) => { steps.push(`${index}/${total} ${step}`); } });
   expect(steps).toEqual(['1/2 build_pack', '1/2 fit', '1/2 probe_lanes', '1/2 judge', '2/2 build_pack', '2/2 fit']);
 });
+test('rows carry the expected item chunk count; summaries count each funnel reach and group by item length', async () => {
+  const two = { ...dataset, questions: [dataset.questions[0]!, { ...dataset.questions[0]!, id: 'q9', expectedEvidence: [{ corpusId: 'internal.fixture.file', providerItemId: 'missing', quote, hint: '' }] }] };
+  const receipt = await runPassageEval({ dataset: two, maxResults: 5, storeCounts: counts, gitSha: 'abc', buildPack: async () => ({ ...detail(), storeSearches: [] }),
+    itemChunks: (_corpusId, providerItemId) => (providerItemId === 'missing' ? 6 : 1) });
+  // q1's alternate 'copy' is seated with the passage; q9's item is nowhere.
+  expect(receipt.questions![0]!.funnel!.chunks).toBe(1);
+  expect(receipt.questions![1]!.funnel!.chunks).toBe(6);
+  expect(receipt.summary.overall.reach).toEqual({ found: 1, returned: 1, seated: 1, fitted: 1, passage: 1 });
+  expect(Object.keys(receipt.summary.byLength).sort()).toEqual(['1_chunk', '4+_chunks']);
+  expect(receipt.summary.byLength['4+_chunks']!.answerable).toBe(1);
+});
