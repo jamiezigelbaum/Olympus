@@ -25,7 +25,7 @@ import { previewDashboardToolResult } from '../scripts/dashboard-preview.ts';
 import { FIXTURE_FOLDER, legFixture, type LegFixture } from '../scripts/release-check/archive-fixtures.ts';
 import {
   ARCHIVE_BOUNDS, ARCHIVE_PANEL_PROBE, agentImportJourney, agentViewProblems, changedChecks, datesWord, drainBoundS, drainChecks, expectedGapLines, expectedHeadings, expectedLists, expectedSeeLabel,
-  gapSentence, heldOffChecks, heldSentenceOf, importChecks, judgedLineOf, messagesWord, modelChecks, panelArchivesOf, pickerImportJourney, removalLabel, removeChecks,
+  COUNT_HEAL_WAIT_MS, gapSentence, heldOffChecks, heldSentenceOf, importChecks, judgedLineOf, messagesWord, modelChecks, panelArchivesOf, pickerImportJourney, removalLabel, removeChecks,
   removeJourney, rowNamed, rowProblems, searchChecks, startViewOf, statusViewOf, stoppedJourney,
   type AgentArchiveView, type ChangedObservation, type DrainView, type ImportObservation, type ModelObservation, type RemoveObservation, type RowView,
   type SearchView, type StatusView, type StoreView,
@@ -114,6 +114,16 @@ describe('the words the leg expects', () => {
       const asMail: SearchView = { ok: true, isError: false, evidence: [{ source: 'Imported mail', hasToken: true }] };
       expect(failing(importChecks(goodImport(fx, 'request', { search: asMail }), fx, 'macos'))).toEqual([`archive.agent.${format}.search`]);
     }
+  });
+
+  test('a row still counting fails its dashboard check and says whether the count came by itself, and when', () => {
+    const fx = legFixture('agent', SEED, 'whatsapp_chat');
+    const counting = goodRow(fx, { text: goodRow(fx).text.replace(messagesWord(fx.expect.messages, fx.expect.family), A.counting) });
+    const detail = (countHealMs: number | null): string | undefined =>
+      importChecks(goodImport(fx, 'request', { row: counting, countHealMs }), fx, 'macos').find((check) => check.id === `archive.agent.whatsapp_chat.dashboard`)?.detail;
+    expect(detail(30_000)).toContain('the row showed its count 30 s later');
+    expect(detail(null)).toContain(`the row was still counting ${COUNT_HEAL_WAIT_MS / 1000} s later`);
+    expect(failing(importChecks(goodImport(fx, 'request', { row: counting, countHealMs: 30_000 }), fx, 'macos'))).toEqual(['archive.agent.whatsapp_chat.dashboard']);
   });
 
   test('the judged line and the reason messages wait are read back out of the product\'s own text', () => {
