@@ -298,3 +298,32 @@ async function exerciseAsk(analyst: ReturnType<typeof createAnalyst>, cloud = fa
     }),
   }).answer({ question: pack.question, include_internal: true, include_internal_content: true, include_secure_local: !cloud, include_secure_local_content: !cloud, max_results: 24 });
 }
+
+describe('the first three seats read twice as far', () => {
+  test('at the local budget a top seat keeps a second passage a later seat would lose', () => {
+    const { pack, corpusIds } = analystPromptFixture();
+    // Each seat has its best passage, then a second one. The top seats are the
+    // ones a long document's second passage most often answers from.
+    pack.candidates = pack.candidates.map((candidate, index) => ({
+      ...candidate,
+      chunks: [`Best ${index}. ${'harbor survey '.repeat(70)}`, `Second ${index}. ${'next steps '.repeat(80)}`],
+    }));
+    const corpora = new Map(pack.candidates.map((candidate, index) => [candidate, corpusIds[index]!]));
+    const fitted = fitPackToPromptBytes(pack, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, corpora, { localOnly: true }, 0, 'compact');
+    expect(analystPromptBytes(fitted, { localOnly: true }, 'compact')).toBeLessThanOrEqual(DEFAULT_LOCAL_ANALYST_PROMPT_BYTES);
+    expect(fitted.candidates.length).toBeGreaterThan(3);
+    const sent = (index: number) => bytes(fitted.candidates[index]!.chunks.join(''));
+    for (const head of [0, 1, 2]) {
+      expect(fitted.candidates[head]!.chunks.some((chunk) => chunk.startsWith(`Second ${head}.`))).toBe(true);
+      expect(sent(head)).toBeGreaterThanOrEqual(Math.min(bytes(pack.candidates[head]!.chunks.join('')), 2 * sent(fitted.candidates.length - 1) - 2));
+    }
+  });
+
+  test('a top seat with one passage takes one share, so the pack keeps its seats', () => {
+    const { pack, corpusIds } = analystPromptFixture();
+    const corpora = new Map(pack.candidates.map((candidate, index) => [candidate, corpusIds[index]!]));
+    const fitted = fitPackToPromptBytes(pack, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, corpora, { localOnly: true }, 0, 'compact');
+    const sent = fitted.candidates.map((candidate) => bytes(candidate.chunks.join('')));
+    expect(Math.max(...sent) - Math.min(...sent)).toBeLessThanOrEqual(8);
+  });
+});

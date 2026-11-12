@@ -310,6 +310,20 @@ describe('similarity inside a long item with word hits', () => {
     expect(clipChunksToUtf8Bytes(content!.chunks, twoPassages).join('')).toContain(answer);
   });
 
+  test('picks after the best follow similarity, so a tight cut keeps the second most similar next', async () => {
+    // Anchor 0, densest 1, and 4 then 2 by similarity: 2 is only the third word pick.
+    let content: ReturnType<Store['localContent']>;
+    await withStore([item], async (store) => {
+      const provider = chunkCosineProvider({ 'Opening.': 0.5, 'Dense.': 0.3, 'Runner.': 0.8, 'Lesser.': 0.2, 'Paraphrase.': 0.95, 'Closing.': 0.1 });
+      await store.embedChunks({ provider });
+      content = store.localContent(`${ACCOUNT}:policy`, 12_000, {
+        query: 'coverage', anchorChunkIndex: 0, anchorLane: 'keyword', maxPassages: 4,
+        queryVector: [1, 0], queryVectorModelId: provider.modelId,
+      });
+    });
+    expect(content!.chunks.map((chunk) => chunk.split('.')[0])).toEqual(['Paraphrase', 'Runner', 'Opening', 'Dense']);
+  });
+
   test('a one-character budget returns at most one character', async () => {
     let content: ReturnType<Store['localContent']>;
     await withStore([item], async (store) => {
@@ -325,9 +339,9 @@ describe('similarity inside a long item with word hits', () => {
     expect(content!.truncated).toBe(true);
   });
 
-  test('duplicate word chunks keep the rest in document order after the similar pick', async () => {
+  test('duplicate word chunks are read once and the rest follow the similar pick by priority', async () => {
     // Chunks 0 and 1 carry the same text; the store's reader keeps one copy,
-    // and the later word pick must still come after the similar chunk.
+    // and each passage stays mapped to its own chunk.
     const twin = chunks[1]!;
     const texts = [twin, twin, chunks[2]!, chunks[3]!, chunks[4]!, `Closing. ${'coverage '.repeat(5)}`.padEnd(4_000, '.')];
     let content: ReturnType<Store['localContent']>;
@@ -339,7 +353,7 @@ describe('similarity inside a long item with word hits', () => {
         queryVector: [1, 0], queryVectorModelId: provider.modelId,
       });
     });
-    expect(content!.chunks.map((chunk) => chunk.split('.')[0])).toEqual(['Runner', 'Dense', 'Closing']);
+    expect(content!.chunks.map((chunk) => chunk.split('.')[0])).toEqual(['Runner', 'Closing', 'Dense']);
   });
 
   test('at a candidate-sized budget the most similar chunk is read for half of it, not a third', async () => {

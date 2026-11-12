@@ -38675,8 +38675,7 @@ function selectEvidencePassages(chunks, maxChars, focus, context2 = {}) {
     const read = new Map(others.map((index, position) => [index, bounded.chunks[position]]));
     if (similarPick !== undefined && similarRead?.chunks[0])
       read.set(similarPick, similarRead.chunks[0]);
-    const best2 = similarPick ?? anchor ?? scored[0]?.index;
-    const ordered2 = bestFirst(picked, best2).flatMap((index) => read.get(index) ?? []);
+    const ordered2 = byPriority(picked, relevance, anchor, lexical).flatMap((index) => read.get(index) ?? []);
     return {
       chunks: ordered2,
       truncated: picked.length < chunks.length || bounded.truncated || similarRead?.truncated === true
@@ -38705,16 +38704,14 @@ function selectEvidencePassages(chunks, maxChars, focus, context2 = {}) {
     kept.set(index, included);
     remaining -= included.length;
   }
-  const ordered = bestFirst([...kept.keys()].sort((left, right) => left - right), ranked[0]).map((index) => [index, kept.get(index)]);
+  const ordered = ranked.filter((index) => kept.has(index)).map((index) => [index, kept.get(index)]);
   return {
     chunks: ordered.map(([, text2]) => text2),
     truncated: ordered.length < chunks.length || ordered.some(([index, text2]) => text2.length < chunks[index].length)
   };
 }
-function bestFirst(indexes, best) {
-  if (best === undefined || !indexes.includes(best))
-    return [...indexes];
-  return [best, ...indexes.filter((index) => index !== best)];
+function byPriority(indexes, relevance, anchor, lexical) {
+  return [...indexes].sort((left, right) => relevance(right) - relevance(left) || Number(right === anchor) - Number(left === anchor) || lexical[right] - lexical[left] || left - right);
 }
 function withoutNameTerms(termGroups, title) {
   if (!title)
@@ -79096,23 +79093,31 @@ function fitPackPassagesToPromptBytes(pack, maxPromptBytes, candidateCorpus, ana
     ...roundRobinCandidates(pack.candidates.slice(headSeats), candidateCorpus)
   ];
   let fallback;
-  const minimumShare = minimumPack ? Math.max(0, ...minimumPack.candidates.map((candidate) => candidate.chunks.reduce((sum, chunk) => sum + utf8ByteLength(chunk), 0))) : 0;
+  const headSet = new Set(pack.candidates.slice(0, RESERVED_HEAD_SEATS).map((candidate) => candidate.provenance));
+  const headShares = (candidate) => headSet.has(candidate.provenance) && candidate.chunks.length > 1 ? HEAD_SEAT_SHARES : 1;
+  const modes = [headShares, () => 1];
   for (let keep = order.length;keep >= (minimumPack ? order.length : 1); keep -= 1) {
     const kept = new Set(order.slice(0, keep));
     const base = pack.candidates.filter((candidate) => kept.has(candidate));
     const overhead = analystPromptBytes(restatePack(pack, base.map((candidate) => ({ ...candidate, chunks: [] })), candidateCorpus), analyzeOptions, evidenceFormat);
     if (overhead >= maxPromptBytes)
       continue;
-    let share = Math.max(minimumShare, Math.floor((maxPromptBytes - overhead) / keep));
-    for (let attempt = 0;attempt < 6; attempt += 1) {
-      if (!minimumPack && share < MIN_FITTED_BYTES_PER_CANDIDATE && keep > 1)
+    for (const [mode, shares] of modes.entries()) {
+      if (mode > 0 && base.every((candidate) => headShares(candidate) === 1))
         break;
-      const fitted = restatePack(pack, base.map((candidate) => ({ ...candidate, chunks: clipChunksToUtf8Bytes(candidate.chunks, Math.max(0, share)) })), candidateCorpus);
-      const bytes = analystPromptBytes(fitted, analyzeOptions, evidenceFormat);
-      if (bytes <= maxPromptBytes)
-        return fitted;
-      fallback = fitted;
-      share = Math.max(minimumShare, Math.floor(share * (maxPromptBytes - overhead) / Math.max(1, bytes - overhead)) - 1);
+      const minimumShare = minimumPack ? Math.max(0, ...minimumPack.candidates.map((candidate) => Math.ceil(candidate.chunks.reduce((sum, chunk) => sum + utf8ByteLength(chunk), 0) / shares(candidate)))) : 0;
+      const totalShares = base.reduce((sum, candidate) => sum + shares(candidate), 0);
+      let share = Math.max(minimumShare, Math.floor((maxPromptBytes - overhead) / totalShares));
+      for (let attempt = 0;attempt < 6; attempt += 1) {
+        if (!minimumPack && share < MIN_FITTED_BYTES_PER_CANDIDATE && keep > 1)
+          break;
+        const fitted = restatePack(pack, base.map((candidate) => ({ ...candidate, chunks: clipChunksToUtf8Bytes(candidate.chunks, Math.max(0, share * shares(candidate))) })), candidateCorpus);
+        const bytes = analystPromptBytes(fitted, analyzeOptions, evidenceFormat);
+        if (bytes <= maxPromptBytes)
+          return fitted;
+        fallback = fitted;
+        share = Math.max(minimumShare, Math.floor(share * (maxPromptBytes - overhead) / Math.max(1, bytes - overhead)) - 1);
+      }
     }
   }
   return minimumPack ?? fallback ?? restatePack(pack, order.slice(0, 1).map((candidate) => ({ ...candidate, chunks: [] })), candidateCorpus);
@@ -80628,7 +80633,7 @@ async function readPrivateEvidenceItem(input) {
     return;
   return content.chunks;
 }
-var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES = 13500, CLOUD_ANALYST_PROMPT_BYTES, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 20000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 600000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 120000, DEFAULT_SELF_HEAL_MAX_MS = 20000, MIN_FITTED_BYTES_PER_CANDIDATE = 600, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS, RELEASED_EXCERPT_MAX_CHARS = 1500, PRIVATE_EVIDENCE_MAX_RESULTS = 12, PRIVATE_DEPTH_MAX_PASSAGES = 24, PRIVATE_EVIDENCE_BYTE_BUDGET = 20000, PRIVATE_NEIGHBOURS_MAX = 4;
+var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES = 13500, CLOUD_ANALYST_PROMPT_BYTES, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 20000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 600000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 120000, DEFAULT_SELF_HEAL_MAX_MS = 20000, MIN_FITTED_BYTES_PER_CANDIDATE = 600, HEAD_SEAT_SHARES = 2, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS, RELEASED_EXCERPT_MAX_CHARS = 1500, PRIVATE_EVIDENCE_MAX_RESULTS = 12, PRIVATE_DEPTH_MAX_PASSAGES = 24, PRIVATE_EVIDENCE_BYTE_BUDGET = 20000, PRIVATE_NEIGHBOURS_MAX = 4;
 var init_analyst_answer = __esm(() => {
   init_embeddings();
   init_answer_activity();

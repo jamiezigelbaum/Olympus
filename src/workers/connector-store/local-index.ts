@@ -17495,9 +17495,8 @@ const PASSAGE_TIE_MARGIN = 0.03;
 // An item that fits its budget is returned whole, exactly as before. A longer
 // one yields its best passages instead of its first ones: the chunk a
 // retrieval lane matched, then its most similar chunk, then the chunks densest
-// in query terms, clipped around their term windows. The most similar chunk
-// (else the matched one, else the densest) leads and the rest follow in
-// document order (see bestFirst).
+// in query terms, clipped around their term windows, and returned most likely
+// to answer first (see byPriority).
 //
 // Only terms that discriminate WITHIN the item count. A term the item's own
 // name carries explains why the item matched, not which passage answers: a
@@ -17581,15 +17580,14 @@ function selectEvidencePassages(
       : { chunks: [], truncated: others.length > 0 };
     const read = new Map(others.map((index, position) => [index, bounded.chunks[position]]));
     if (similarPick !== undefined && similarRead?.chunks[0]) read.set(similarPick, similarRead.chunks[0]);
-    const best = similarPick ?? anchor ?? scored[0]?.index;
-    const ordered = bestFirst(picked, best).flatMap((index) => read.get(index) ?? []);
+    const ordered = byPriority(picked, relevance, anchor, lexical).flatMap((index) => read.get(index) ?? []);
     return {
       chunks: ordered,
       truncated: picked.length < chunks.length || bounded.truncated || similarRead?.truncated === true,
     };
   }
   // Most relevant first (the anchor, then by embedding), filled whole until
-  // the budget runs out, then read best first and the rest in document order. Chunks within
+  // the budget runs out, and returned in that order. Chunks within
   // PASSAGE_TIE_MARGIN of the best by embedding are a near-tie: they share
   // the budget (the shorter whole, the rest an equal share from their start)
   // rather than the first taking it all. A question in one language over a
@@ -17626,22 +17624,30 @@ function selectEvidencePassages(
     kept.set(index, included);
     remaining -= included.length;
   }
-  const ordered = bestFirst([...kept.keys()].sort((left, right) => left - right), ranked[0])
-    .map((index) => [index, kept.get(index)!] as const);
+  const ordered = ranked.filter((index) => kept.has(index)).map((index) => [index, kept.get(index)!] as const);
   return {
     chunks: ordered.map(([, text]) => text),
     truncated: ordered.length < chunks.length || ordered.some(([index, text]) => text.length < chunks[index]!.length),
   };
 }
 
-// The item's best passage first, the rest in document order. Every later
-// cut is by position (the per-candidate byte clip and the prompt fit keep a
-// candidate's leading passages), so the passage that most likely answers must
-// lead or a tight fit drops it (2026-11-12 grown passage set: at 13,500 B two
-// long files packed the expected chunk third, and the fit kept the first two).
-function bestFirst(indexes: readonly number[], best: number | undefined): number[] {
-  if (best === undefined || !indexes.includes(best)) return [...indexes];
-  return [best, ...indexes.filter((index) => index !== best)];
+// An item's passages most likely to answer first: by similarity to the
+// question, then the matched (anchor) chunk, then word density, then document
+// order. Every later cut is by position (the per-candidate byte clip and the
+// prompt fit keep a candidate's leading passages), so a tight fit keeps the
+// best passage and then the next best (2026-11-12 grown passage set: at
+// 13,500 B two long files packed the expected chunk third and the fit kept
+// the first two; a third had it second most similar).
+function byPriority(
+  indexes: readonly number[],
+  relevance: (index: number) => number,
+  anchor: number | undefined,
+  lexical: readonly number[],
+): number[] {
+  return [...indexes].sort((left, right) => relevance(right) - relevance(left)
+    || Number(right === anchor) - Number(left === anchor)
+    || lexical[right]! - lexical[left]!
+    || left - right);
 }
 
 // Query term groups minus those the item's name carries (see above).
