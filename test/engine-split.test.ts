@@ -17,6 +17,7 @@ import { SecretLocationsIndex as SecretLocations } from '../src/workers/classifi
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
 import { createExistingStoreTierLane, createLaneTieredStoreSet, createTieredLaneSet, tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
+import { frontJudgeNow } from '../src/workers/classification/chunk-release.ts';
 import { EngineCommandClient, EngineCommandUnavailableError, OwnerBusyRelay } from '../src/workers/engine-split/client.ts';
 import {
   createEngineCommandHandler,
@@ -240,6 +241,42 @@ describe('commands from the front to the background', () => {
     await flushMicrotasks();
     expect(bodyOutcome).toBeInstanceOf(EngineCommandUnavailableError);
     expect(stalledSignals.every((signal) => signal.aborted)).toBe(true);
+    expect(clock.pendingTimers()).toBe(0);
+  });
+
+  test('judge_now caps items and budget, and validates chunk identities', () => {
+    const item = { provider: 'p', accountScope: 'a', providerItemId: 'i', corpusId: 'internal.test', chunkHashes: ['hash'] };
+    const parse = (items: unknown[], budgetMs: unknown = 8000) => parseEngineCommandEnvelope({ id: 'command-0088', command: { kind: 'judge_now', items, budgetMs } }).command;
+    expect(parse(Array.from({ length: 20 }, () => item), 99_000)).toMatchObject({ kind: 'judge_now', budgetMs: 8000 });
+    expect(() => parse(Array.from({ length: 21 }, () => item))).toThrow('1 to 20');
+    expect(() => parse([])).toThrow('1 to 20');
+    expect(() => parse([{ ...item, chunkHashes: [] }])).toThrow('chunk hashes');
+    expect(() => parse([{ ...item, corpusId: '' }])).toThrow('corpusId');
+    expect(() => parse([item], -1)).toThrow('budgetMs');
+  });
+
+  test('judge_now POST returns completed verdicts, while a stalled judge returns no clearance', async () => {
+    const clock = createTestClock();
+    const item = { provider: 'p', accountScope: 'a', providerItemId: 'i', corpusId: 'internal.test', chunkHashes: ['hash'] };
+    const verdicts = { allowed: [['hash']], withheldPassages: 0, withheldDocuments: 0 };
+    let finish: (() => void) | undefined;
+    let stall = false;
+    const ledger = new EngineCommandLedger({ instanceId: 'background', handlers: { judge_now: async () => {
+      if (stall) await new Promise<void>(resolve => { finish = resolve; });
+      return verdicts;
+    } } });
+    const handler = createEngineCommandHandler({ ledger, authToken: TOKEN, ready: () => true,
+      setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout as (timer: unknown) => void });
+    const client = new EngineCommandClient({ authToken: TOKEN, fetch: ((url: string, init: RequestInit) => handler(new Request(url, init))) as typeof fetch,
+      setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout as (timer: unknown) => void, now: clock.now, sleep: clock.sleep });
+    expect(await frontJudgeNow(client)([item], 8000)).toEqual(verdicts);
+    stall = true;
+    const pending = frontJudgeNow(client)([item], 8000);
+    await flushMicrotasks();
+    await clock.advance(8100);
+    expect(await pending).toBeUndefined();
+    finish!();
+    await flushMicrotasks();
     expect(clock.pendingTimers()).toBe(0);
   });
 

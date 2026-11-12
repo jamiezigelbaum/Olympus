@@ -38,7 +38,7 @@ import type { OperationCaller } from '../core/operation-caller.ts';
 import { OperationError } from '../core/operations.ts';
 import type { RemotePrivatePart } from '../core/remote-private-part.ts';
 import { remoteErrorOutput, remotePrivateNote } from '../core/remote-result.ts';
-import { answerReleaseWithheldReasonOffThread, createReleaseManifestSink, runWithReleaseManifestSink, type ReleaseCheck } from '../core/release-manifest.ts';
+import { recheckSearchEvidence, createReleaseManifestSink, runWithReleaseManifestSink, type ReleaseCheck } from '../core/release-manifest.ts';
 import type { McpCallToolResult, McpListedTool, McpServerExtension } from '../mcp/server.ts';
 import { SEARCH_TOOL_NAME } from './chatgpt/dashboard-contract.ts';
 import { searchToolResult } from './chatgpt/response-builder.ts';
@@ -180,13 +180,11 @@ async function runSearch(
     if (afterWait !== 'active') return refusedAccess(afterWait);
     if (recorded) note = remotePrivateNote(privateCall.answerId, privateCall.secretMatch);
   }
-  const evidence = result.structuredContent?.evidence;
-  if (Array.isArray(evidence) && evidence.length > 0
-    && (!context.releaseCheck || await answerReleaseWithheldReasonOffThread(manifests.manifests, context.releaseCheck, 'personal', { chunks: true }) !== undefined)) {
-    const rawRecord = raw as Record<string, unknown>;
-    const withheldBefore = typeof rawRecord.withheld === 'number' && Number.isFinite(rawRecord.withheld) && rawRecord.withheld > 0 ? rawRecord.withheld : 0;
-    result = searchToolResult({ ...rawRecord, evidence: [], withheld: withheldBefore + evidence.length }, { pendingPrivacyItems: context.pendingPrivacyItems?.() });
-    withheldAfter = true;
+  const checked = await recheckSearchEvidence(raw as Record<string, unknown>, manifests.manifests, context.releaseCheck);
+  if (checked.withheldAfter) {
+    // Rebuild capture from only what is actually leaving the computer.
+    result = runWithReleaseCapture(capture, () => searchToolResult(checked.raw, { pendingPrivacyItems: context.pendingPrivacyItems?.() }));
+    withheldAfter = Array.isArray(checked.raw.evidence) && checked.raw.evidence.length === 0;
   }
   // The release judgment can await the pool or judge; recheck the connection afterward.
   const afterRelease = currentAccess(authorized);

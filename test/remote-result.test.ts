@@ -987,7 +987,9 @@ describe('over the wire', () => {
         { id: 'orchard', name: 'orchard-plan.txt', text: 'Orchard notes.' },
         { id: 'meadow', name: 'meadow-plan.txt', text: 'Meadow notes.' },
       ]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
-      releaseCheck = createReleaseTierCheck(() => [{ ledger: fixture.ledger, corpusIds: new Set(Object.values(CORPORA)) }], () => 'allow');
+      // Real item tiers; passage reading is taken as proved here (chunk-release.test.ts covers it).
+      releaseCheck = { ...createReleaseTierCheck(() => [{ ledger: fixture.ledger, corpusIds: new Set(Object.values(CORPORA)) }], () => 'allow'),
+        chunks: async (inputs) => ({ allowed: inputs.map((entry) => entry.chunkHashes ?? []), withheldPassages: 0, withheldDocuments: 0 }) };
       // One connection of each kind, each with its own uncited input.
       for (const [[kind, token], uncited] of tokens().map((entry, index) => [entry, index === 0 ? 'orchard' : 'meadow'] as const)) {
         let release!: () => void;

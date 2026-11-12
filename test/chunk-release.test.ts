@@ -1,8 +1,17 @@
 import { afterEach, expect, test } from 'bun:test';
+import { setAppReleaseRecorder, type AppRequestRecord } from '../src/core/app-release-capture.ts';
+import { readFileSync } from 'node:fs';
+import { forbidWritableStoreOpens, resetStoreWriteGuardForTests } from '../src/core/store-write-guard.ts';
+import { currentLocalInferencePriority, runClassificationInference } from '../src/workers/answer-activity.ts';
+import { EngineCommandClient } from '../src/workers/engine-split/client.ts';
+import { frontJudgeNow, judgeNow } from '../src/workers/classification/chunk-release.ts';
+import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
+import { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
 import { Database } from 'bun:sqlite';
 import { join } from 'node:path';
+import type { TierVisibilityScope } from '../src/workers/connector-store/tier-visibility.ts';
 import type { EvidencePack } from '../src/core/contracts.ts';
-import { createReleaseManifestSink, runWithReleaseManifestSink, type ReleaseInput } from '../src/core/release-manifest.ts';
+import { createReleaseManifestSink, recheckSearchEvidence, runWithReleaseManifestSink, type ReleaseInput } from '../src/core/release-manifest.ts';
 import { remoteOperationOutputOffThread } from '../src/core/remote-result.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
 import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
@@ -24,7 +33,7 @@ import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, openTierFixtu
 import { createTestClock, flushMicrotasks } from './helpers/test-clock.ts';
 
 const cleanup: Array<() => void> = [];
-afterEach(() => { registerInstalledTierClassification(undefined); while (cleanup.length) cleanup.pop()!(); });
+afterEach(() => { setAppReleaseRecorder(undefined); resetStoreWriteGuardForTests(); registerInstalledTierClassification(undefined); while (cleanup.length) cleanup.pop()!(); });
 const longText = 'violet turnips garden. '.repeat(410) + 'LAST-PASSAGE violet turnips garden.';
 
 async function world(text = longText) {
@@ -37,6 +46,9 @@ async function world(text = longText) {
   const materials: string[] = [];
   const requests: TierSnifferRequest[] = [];
   let available = true;
+  let missingJudge = false;
+  let unavailableReason: string | undefined;
+  let rejudgeReady = true;
   let privateText = '';
   let malformed = false;
   let onCall: (() => void) | undefined;
@@ -52,7 +64,7 @@ async function world(text = longText) {
       category: 'ordinary', confidence: 0.99, ownRecord: false, privateKind: 'none' }] }) };
   } };
   const budget = new SnifferCallBudget();
-  const sniffer = (): TierSniffer => ({ id: snifferId(lane, promptVersion),
+  const sniffer = (): TierSniffer => ({ id: snifferId(lane, promptVersion), rejudgeReady,
     // Initial item verdict models today's production excerpt-only ingest.
     judge: () => ({ verdict: 'decided', tier: 'private', code: 'ordinary:0.99', origin: 'model' }) });
   const judge = (): ReleaseWindowJudge => ({
@@ -64,7 +76,7 @@ async function world(text = longText) {
   });
   registerInstalledTierClassification({
     automaticMoveContext: { embeddingLedgerPath: join(dir.dir, 'embedding-ledger.jsonl'), localEmbeddingsOnly: () => true },
-    forLedger: () => ({ sniffer: sniffer(), releaseJudge: judge() }),
+    forLedger: () => ({ sniffer: sniffer(), releaseWindows: judge(), ...(missingJudge ? {} : { releaseJudge: judge() }), ...(unavailableReason ? { unavailableReason } : {}) }),
   });
   const fixture = openTierFixture(dir.dir, { embed: false });
   cleanup.push(() => fixture.close());
@@ -85,7 +97,10 @@ async function world(text = longText) {
       contentProviders: Object.fromEntries(stores.map(store => [store.corpusId, createConnectorStoreContentProvider({ store })])),
     };
   };
-  return { fixture, input, check, scopes, lanes, materials, requests, snapshot,
+  return { fixture, lane,
+    noReleaseJudge: () => { missingJudge = true; },
+    classificationUnavailable: () => { unavailableReason = 'fixture_unavailable'; },
+    rejudgeNotReady: () => { rejudgeReady = false; }, input, check, scopes, lanes, materials, requests, snapshot,
     unavailable: () => { available = false; }, privateOn: (text: string) => { privateText = text; },
     malformed: () => { malformed = true; }, onCall: (fn: () => void) => { onCall = fn; },
     edit: async (text: string) => { specs = [{ ...specs[0]!, text, version: 'v2' }]; await sync(); },
@@ -147,7 +162,7 @@ test('unread last chunk is withheld and counted when the judge is unavailable', 
   const raw = await searchReleasedEvidence({ lanes: w.lanes, question: 'violet turnips garden', releaseCheck: w.check, maxCharsPerCandidate: 16000 });
   expect(JSON.stringify(raw.evidence)).not.toContain('LAST-PASSAGE');
   expect(raw.evidence[0]?.excerpt).toContain('violet turnips');
-  expect(raw.coverage.cut_short?.join(' ')).toContain('1 passages from 1 documents were held until they are checked');
+  expect(raw.coverage.cut_short?.join(' ')).toContain("1 passages from 1 documents are still being checked for privacy and weren't shared. Ask again in a minute.");
   const remote = remoteSearchExtension({ evidenceSearch: input => searchReleasedEvidence({ lanes: w.lanes,
     question: input.question, releaseCheck: w.check, maxCharsPerCandidate: 16000 }) }, () => 'active', { releaseCheck: w.check });
   const resultAtApp = await remote.call({ params: { name: 'olympus_search', arguments: { question: 'violet turnips garden' } } },
@@ -311,4 +326,199 @@ test('an unapproved installed judge cannot be asked by the release path', async 
   await w.installService(false);
   expect((await w.check.chunks!([w.input()])).allowed[0]).toEqual([]);
   expect(w.materials).toHaveLength(0);
+});
+
+
+test.each(['noReleaseJudge', 'classificationUnavailable', 'rejudgeNotReady'] as const)(
+  'short judged items release with %s', async state => {
+    const w = await world('violet turnips garden.');
+    w[state]();
+    expect((await w.check.chunks!([w.input()])).withheldPassages).toBe(0);
+    expect(w.materials).toHaveLength(0);
+  },
+);
+
+test.each(['noReleaseJudge', 'classificationUnavailable', 'rejudgeNotReady'] as const)(
+  'recorded windows release with %s; unread windows still wait', async state => {
+    const w = await world();
+    const hashes = w.input().chunkHashes!;
+    await w.check.chunks!([w.input(hashes.slice(0, -1))]);
+    const calls = w.materials.length;
+    w[state]();
+    const result = await w.check.chunks!([w.input()]);
+    expect(result.allowed[0]).toEqual(hashes.slice(0, -1));
+    expect(result.withheldPassages).toBe(1);
+    expect(w.materials).toHaveLength(calls);
+  },
+);
+
+test('split front opens its caches read-only, posts judge_now, and holds/counts a timeout', async () => {
+  const w = await world();
+  await w.installService();
+  const input = w.input();
+  await w.check.chunks!([w.input(input.chunkHashes!.slice(0, -1))]);
+  const calls = w.materials.length;
+  forbidWritableStoreOpens();
+  const installed = new InstalledTierClassification({ lane: w.lane, readOnly: true });
+  registerInstalledTierClassification(installed);
+  cleanup.push(() => installed.close());
+  const ledger = new TierLedger({ dbPath: w.fixture.ledger.dbPath, readOnly: true });
+  cleanup.push(() => ledger.close());
+  const store = new LocalConnectorStore({ dbPath: w.fixture.paths.internal, corpusId: CORPORA.internal,
+    family: 'file', trustDomain: 'internal', readOnly: true, tierLedger: ledger });
+  cleanup.push(() => store.close());
+  const commands: unknown[] = [];
+  const boosted: unknown[] = [];
+  const check = createReleaseTierCheck(() => [{ ledger, corpusIds: new Set(Object.values(CORPORA)), stores: () => [store] }], () => 'allow', {
+    judgeNow: frontJudgeNow({ post: async (command, options) => {
+      commands.push(command);
+      expect(command.kind).toBe('judge_now');
+      if (command.kind === 'judge_now') expect(options?.timeoutMs).toBe(command.budgetMs + 500);
+      throw new Error('background sweep stalled');
+    } }),
+    boost: items => { boosted.push(...items); },
+  });
+  const result = await check.chunks!([input]);
+  expect(commands).toHaveLength(1);
+  expect(result.allowed[0]).toEqual(input.chunkHashes!.slice(0, -1));
+  expect(result.withheldPassages).toBe(1);
+  expect(result.withheldDocuments).toBe(1);
+  expect(boosted).toHaveLength(1);
+  expect(w.materials).toHaveLength(calls);
+  const server = readFileSync(new URL('../src/workers/engine/server.ts', import.meta.url), 'utf8');
+  expect(server).toContain('judgeNow: engineFront ? frontJudgeNow(engineFront.client) : runChunkJudgment');
+  expect(server).toContain('judge_now: ({ items, budgetMs }) => runChunkJudgment(items, budgetMs)');
+});
+
+test('single-process judge_now preserves owner priority through classification dispatch', async () => {
+  const w = await world();
+  const priorities: string[] = [];
+  w.onCall(() => { void runClassificationInference(async () => { priorities.push(currentLocalInferencePriority()); }); });
+  const input = w.input();
+  await runClassificationInference(() => judgeNow([{ ...input, chunkHashes: [...input.chunkHashes!] }], w.scopes(), w.check));
+  expect(priorities.length).toBeGreaterThan(0);
+  expect(priorities.every(priority => priority === 'owner')).toBe(true);
+});
+
+test('remote search drops one newly unread hit and keeps the other hits', async () => {
+  const records: AppRequestRecord[] = [];
+  setAppReleaseRecorder(record => { records.push(record); });
+  const w = await world('violet turnips garden.');
+  const second = { id: 'second', name: 'second.txt', text: 'violet turnips elsewhere.' };
+  await w.fixture.set.sync(fixtureConnector(() => [second]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  const base = w.check;
+  let finalCheck = false;
+  const check = { ...base, chunks: async (inputs: readonly ReleaseInput[]) => {
+    const result = await base.chunks!(inputs);
+    return finalCheck ? { ...result, allowed: inputs.map((input, index) => input.providerItemId === 'garden' ? [] : result.allowed[index]!),
+      withheldPassages: 1, withheldDocuments: 1 } : result;
+  } };
+  const remote = remoteSearchExtension({ evidenceSearch: async input => {
+    const raw = await searchReleasedEvidence({ lanes: w.lanes, question: input.question, releaseCheck: check });
+    expect(raw.evidence).toHaveLength(2);
+    finalCheck = true;
+    return raw;
+  } }, () => 'active', { releaseCheck: check, caller: { surface: 'remote', displayName: 'Fixture app', connectionId: 'fixture' } });
+  const result = await remote.call({ params: { name: 'olympus_search', arguments: { question: 'violet turnips' } } },
+    async () => { throw new Error('unexpected tool'); });
+  expect(result.structuredContent?.evidence).toHaveLength(1);
+  expect(records).toHaveLength(1);
+  expect(records[0]!.items).toHaveLength(1);
+  expect(records[0]!.heldBack).toBe(1);
+  expect(JSON.stringify(result)).toContain('second.txt');
+  expect(JSON.stringify(result)).not.toContain('garden-notes.txt');
+  expect(JSON.stringify(result)).toContain("1 passages from 1 documents are still being checked for privacy and weren't shared. Ask again in a minute.");
+});
+
+
+// Transport tests use a fixed read snapshot: socket deadlines need no disk setup.
+function unreadTransportFixture() {
+  const input: ReleaseInput = { ...identityOf('transport'), corpusId: CORPORA.internal,
+    privateAtAnswer: false, chunkHashes: ['transport-hash'] };
+  let localCalls = 0;
+  registerInstalledTierClassification({ forLedger: () => ({
+    sniffer: { id: 'transport-judge', judge: () => ({ verdict: 'undecided' }) },
+    releaseJudge: { modelId: 'transport-judge', promptVersion: 'fixture', read: () => undefined,
+      record: () => { throw new Error('transport front must never write'); },
+      resolve: async () => { localCalls++; return { verdict: 'undecided' }; },
+    },
+  }) });
+  const scopes = [{ corpusIds: new Set([CORPORA.internal]),
+    ledger: { dbPath: '/tmp/olympus-virtual-transport-ledger.sqlite', getCurrent: () => ({ reasons: [] }) },
+    stores: () => [{ corpusId: CORPORA.internal, releaseItemChunks: () => ({ title: 'garden.txt',
+      chunks: [{ contentHash: 'transport-hash', text: 'violet turnips garden. '.repeat(410) }] }) }],
+  }] as unknown as TierVisibilityScope[];
+  const check = { inputs: (inputs: readonly ReleaseInput[]) => inputs.map(() => ({ tier: 'public_or_personal' as const, gone: false })),
+    secureDerivativeDefault: () => 'allow' as const };
+  return { input, scopes, check, localCalls: () => localCalls };
+}
+
+test('a judge_now transport timeout holds and counts without reaching the app as an error', async () => {
+  const fixture = unreadTransportFixture();
+  const clock = createTestClock(0);
+  const commands: unknown[] = [];
+  const client = new EngineCommandClient({ authToken: 'fixture-token', now: clock.now, sleep: clock.sleep,
+    setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout as (timer: unknown) => void,
+    fetch: ((_url: unknown, init: RequestInit) => {
+      commands.push(JSON.parse(init.body as string).command);
+      return new Promise<Response>(() => {});
+    }) as typeof fetch,
+  });
+  const boosted: unknown[] = [];
+  const pending = releaseChunks([fixture.input], fixture.scopes, fixture.check, { now: clock.now,
+    judgeNow: frontJudgeNow(client), boost: items => { boosted.push(...items); } });
+  await flushMicrotasks();
+  expect(commands).toHaveLength(1);
+  expect(commands[0]).toMatchObject({ kind: 'judge_now', budgetMs: 8000 });
+  await clock.advance(8500);
+  const result = await pending;
+  expect(result.allowed[0]).toEqual([]);
+  expect(result.withheldPassages).toBe(1);
+  expect(result.withheldDocuments).toBe(1);
+  expect(boosted).toHaveLength(1);
+  expect(fixture.localCalls()).toBe(0);
+});
+
+test('the front batches judge_now and boosts every remaining item in commands of at most 20', async () => {
+  const fixture = unreadTransportFixture();
+  const commands: number[] = [];
+  const boosts: number[] = [];
+  const result = await releaseChunks(Array.from({ length: 21 }, () => fixture.input), fixture.scopes, fixture.check, {
+    now: () => 0,
+    judgeNow: frontJudgeNow({ post: async command => {
+      if (command.kind === 'judge_now') commands.push(command.items.length);
+      return { id: 'fixture', instance_id: 'background', state: 'received' };
+    } }),
+    boost: items => { boosts.push(items.length); },
+  });
+  expect(commands).toEqual([20, 1]);
+  expect(boosts).toEqual([20, 1]);
+  expect(result.withheldPassages).toBe(21);
+  expect(fixture.localCalls()).toBe(0);
+});
+
+
+test('remote search adds held passage counts to withheld and keeps cleared hits', async () => {
+  const fixture = unreadTransportFixture();
+  const inputs = [{ ...fixture.input, chunkHashes: ['held-one', 'held-two'] },
+    { ...fixture.input, providerItemId: 'cleared', chunkHashes: ['cleared'] }];
+  const evidence = inputs.map(input => ({ corpus_id: input.corpusId, provider: input.provider,
+    account_scope: input.accountScope, provider_item_id: input.providerItemId }));
+  const result = await recheckSearchEvidence({ evidence, withheld: 4 }, [{ inputs,
+    constraints: { secureDerivativeDefault: 'approval', includeSecureLocalContent: false } }], {
+    ...fixture.check, chunks: async () => ({ allowed: [[], ['cleared']], withheldPassages: 2, withheldDocuments: 1 }),
+  });
+  expect(result.raw.evidence).toEqual([evidence[1]!]);
+  expect(result.raw.withheld).toBe(6);
+  expect(result.raw.coverage).toEqual({ cut_short: ["2 passages from 1 documents are still being checked for privacy and weren't shared. Ask again in a minute."] });
+});
+
+test('an input from a corpus no tier ledger governs is left to its item tier: never held or counted by the chunk gate', async () => {
+  const check = { inputs: (inputs: readonly ReleaseInput[]) => inputs.map(() => ({ tier: 'legacy' as const, gone: false })), secureDerivativeDefault: () => 'allow' as const };
+  const ungoverned: ReleaseInput = { corpusId: 'ungoverned-notes', provider: 'notes', accountScope: 'me', providerItemId: 'a', privateAtAnswer: false, chunkHashes: [] };
+  const withHashes: ReleaseInput = { ...ungoverned, providerItemId: 'b', chunkHashes: ['h1', 'h2'] };
+  let asked = 0;
+  const result = await releaseChunks([ungoverned, withHashes], [], check, { judgeNow: async () => { asked += 1; return undefined; } });
+  expect(result).toEqual({ allowed: [[], ['h1', 'h2']], ungoverned: [true, true], withheldPassages: 0, withheldDocuments: 0 });
+  expect(asked).toBe(0);
 });

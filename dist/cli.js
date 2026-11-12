@@ -21528,6 +21528,7 @@ function classifyContentTier(input, options = {}) {
       ...input.sender ? { sender: input.sender } : {}
     },
     text: text2,
+    ...input.requireModelRead ? { requireModelRead: true } : {},
     textOnly: input.hasNonTextContent !== true && textOnlyMime(input.mimeType),
     titleIsConversation: input.titleIsConversation === true,
     ...input.heldSecret ? { heldSecret: true } : {},
@@ -21733,7 +21734,7 @@ function contentPass(args) {
       pending: false
     };
   }
-  const rule = args.textOnly && !args.heldSecret && (args.titleIsConversation === true || !args.signals.title?.trim()) ? trivialContentRule(text2, args.parentContext) : undefined;
+  const rule = !args.requireModelRead && args.textOnly && !args.heldSecret && (args.titleIsConversation === true || !args.signals.title?.trim()) ? trivialContentRule(text2, args.parentContext) : undefined;
   if (rule) {
     return {
       tier: maxTier(metadata.tier, "private"),
@@ -22386,6 +22387,15 @@ class TierSnifferStore {
         restrictFiles(this.dbPath);
     }
   }
+  chunkWindowVerdict(key2) {
+    return this.db.query(`SELECT tier FROM chunk_window_verdicts WHERE subject_key = ? AND content_hash = ?
+      AND model_id = ? AND prompt_version = ? AND material_hash = ? AND window_index = ?`).get(snifferSubjectKey(key2.subject), key2.contentHash, key2.modelId, key2.promptVersion, key2.materialHash, key2.windowIndex)?.tier;
+  }
+  recordChunkWindow(key2, tier) {
+    this.db.query(`INSERT OR REPLACE INTO chunk_window_verdicts
+      (subject_key, content_hash, model_id, prompt_version, material_hash, window_index, tier)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`).run(snifferSubjectKey(key2.subject), key2.contentHash, key2.modelId, key2.promptVersion, key2.materialHash, key2.windowIndex, tier);
+  }
   getVerdict(key2) {
     const row = this.db.query(`
       SELECT tier, category, confidence, fail_safe, decided_at, content_hash, model_subject FROM sniffer_verdicts
@@ -22781,6 +22791,19 @@ function snifferMigrations() {
       up(db) {
         db.exec(`CREATE INDEX sniffer_training_subject ON sniffer_verdicts(model_subject, model_id, decided_at DESC)
           WHERE fail_safe = 0 AND model_subject IS NOT NULL;`);
+      }
+    },
+    {
+      version: 8,
+      name: "chunk_window_verdicts",
+      up(db) {
+        db.exec(`CREATE TABLE chunk_window_verdicts (
+          subject_key TEXT NOT NULL, content_hash TEXT NOT NULL,
+          model_id TEXT NOT NULL, prompt_version TEXT NOT NULL,
+          material_hash TEXT NOT NULL, window_index INTEGER NOT NULL,
+          tier TEXT NOT NULL CHECK (tier IN ('private', 'secure', 'secrets')),
+          PRIMARY KEY (subject_key, content_hash, model_id, prompt_version, material_hash, window_index)
+        );`);
       }
     }
   ];
@@ -30418,7 +30441,7 @@ function stripCodeFences(text2) {
   const withoutOpen = text2.replace(/^```[a-zA-Z]*\s*\n?/, "");
   return withoutOpen.replace(/\n?```\s*$/, "").trim();
 }
-var SCORER_SYSTEM_PROMPT;
+var DEFAULT_EXCERPT_LIMIT = 2000, SCORER_SYSTEM_PROMPT;
 var init_delphi_scorer = __esm(() => {
   SCORER_SYSTEM_PROMPT = [
     "You are a privacy tier scorer for a personal email index.",
@@ -38113,6 +38136,7 @@ function createConnectorStoreContentProvider(options) {
         return {
           sensitivity: buildSourceSensitivity({ trustTier: content.trustTier, trustDomain: store.trustDomain }),
           chunks: content.chunks,
+          ...content.chunkHashes ? { chunkHashes: content.chunkHashes } : {},
           ...content.truncated ? { truncated: true } : {},
           ...coverageGaps.length > 0 ? { coverageGaps } : {},
           ...metadataOnlyRuleId !== undefined ? { namesOnly: true } : {},
@@ -47187,12 +47211,12 @@ var init_local_index = __esm(() => {
       const vectorModelId = passageFocus?.queryVectorModelId;
       const scoreByVector = queryVector !== undefined && queryVector.length > 0 && vectorModelId !== undefined;
       const chunkRows = servesContent ? scoreByVector ? this.db.query(`
-          SELECT c.bounded_text, e.embedding
+          SELECT c.bounded_text, c.content_hash, e.embedding
           FROM chunks c
           LEFT JOIN chunk_embeddings e
             ON e.chunk_pk = c.chunk_pk AND e.model_id = ? AND e.content_hash = c.embedding_input_hash
           WHERE c.item_pk = ? ORDER BY c.chunk_index
-        `).all(vectorModelId, row.item_pk) : this.db.query("SELECT bounded_text, NULL AS embedding FROM chunks WHERE item_pk = ? ORDER BY chunk_index").all(row.item_pk) : [];
+        `).all(vectorModelId, row.item_pk) : this.db.query("SELECT bounded_text, content_hash, NULL AS embedding FROM chunks WHERE item_pk = ? ORDER BY chunk_index").all(row.item_pk) : [];
       const relevance = scoreByVector ? chunkRows.map((chunk) => {
         if (chunk.embedding === null || chunk.embedding === undefined)
           return;
@@ -47204,12 +47228,24 @@ var init_local_index = __esm(() => {
       return {
         trustTier: trustTierFromRow(row.trust_tier),
         chunks: reactionLine ? [reactionLine, ...chunks] : chunks,
+        chunkHashes: [
+          ...reactionLine ? [[]] : [],
+          ...chunks.map((text2) => chunkRows.filter((chunk) => compactPassageWhitespace(chunk.bounded_text).includes(text2)).map((chunk) => chunk.content_hash))
+        ],
         truncated,
         storedChunks: chunkRows.length,
         mimeType: row.mime_type,
         ...row.locator_uri ? { locatorUri: row.locator_uri } : {},
         ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
       };
+    }
+    releaseItemChunks(identity2) {
+      const row = this.db.query(`SELECT item_pk, title, locator_uri, sender_label FROM items
+      WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0`).get(identity2.provider, identity2.accountScope ?? "", normalizeConversationId(identity2.providerConversationId), identity2.providerItemId);
+      if (!row || !this.copyServable(identity2))
+        return;
+      const chunks = this.db.query("SELECT bounded_text AS text, content_hash AS contentHash FROM chunks WHERE item_pk = ? ORDER BY chunk_index").all(row.item_pk);
+      return { title: row.title ?? "", path: row.locator_uri ?? "", sender: row.sender_label ?? "", chunks };
     }
     itemReactions(localItemId) {
       if (!this.reactionsColumnPresent)
@@ -72212,7 +72248,7 @@ function rejudgeStoredContent(set, record, options) {
   const sniffer = counting && secretFencedSniffer(counting, ledger, identity2, read);
   const holdUntilJudged = set.holdsContentUntilJudged() || heldUntilJudged(record.reasons);
   const parentContext = sniffer ? parentNamesContext(set, identity2) : undefined;
-  const metadata = rejudgeMetadata(record, sniffer, { title, path, sender, folderKeys }, identity2, holdUntilJudged, parentContext, options.recheck);
+  const metadata = rejudgeMetadata(record, options.preserveMetadata ? undefined : sniffer, { title, path, sender, folderKeys }, identity2, holdUntilJudged, parentContext, options.recheck);
   const content = classifyContentTier({
     text: text2,
     hasNonTextContent: !record.reasons.includes("content:text_only"),
@@ -75150,6 +75186,11 @@ function namesOnlyCoverageNote(count) {
 
 // src/workers/answer-activity.ts
 import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+function runPrivacyReleaseInference(work) {
+  privacyReleaseInference ??= new AsyncLocalStorage5;
+  localInferencePriority ??= new AsyncLocalStorage5;
+  return privacyReleaseInference.run(true, () => localInferencePriority.run("owner", work));
+}
 function runWithLocalInferenceGuard(guard, work) {
   localInferenceGuards ??= new AsyncLocalStorage5;
   return localInferenceGuards.run([...localInferenceGuards?.getStore() ?? [], guard], work);
@@ -75160,7 +75201,7 @@ function runBackgroundInference(work) {
 }
 function runClassificationInference(work) {
   localInferencePriority ??= new AsyncLocalStorage5;
-  return localInferencePriority.run("maintenance", work);
+  return localInferencePriority.run(privacyReleaseInference?.getStore() ? "owner" : "maintenance", work);
 }
 function currentLocalInferencePriority() {
   return localInferencePriority?.getStore() ?? "owner";
@@ -75387,7 +75428,7 @@ function createLocalModelActivity() {
     }
   };
 }
-var localInferencePriority, localInferenceGuards, DEFAULT_ANSWER_LEASE_MS, MAINTENANCE_AGING_MS = 60000;
+var localInferencePriority, privacyReleaseInference, localInferenceGuards, DEFAULT_ANSWER_LEASE_MS, MAINTENANCE_AGING_MS = 60000;
 var init_answer_activity = __esm(() => {
   DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
 });
@@ -76993,6 +77034,158 @@ var init_analyst_openclaw_infer = __esm(() => {
   };
 });
 
+// src/core/release-manifest.ts
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
+function chunkCoverageNote(result) {
+  return result.withheldPassages > 0 ? `${result.withheldPassages} passages from ${result.withheldDocuments} documents are still being checked for privacy and weren't shared. Ask again in a minute.` : undefined;
+}
+async function checkReleaseChunks(check, inputs, options) {
+  try {
+    const result = await check?.chunks?.(inputs, options);
+    if (result && result.allowed.length === inputs.length)
+      return result;
+  } catch {}
+  return {
+    allowed: inputs.map(() => []),
+    withheldPassages: inputs.reduce((n, input) => n + (input.layer === "names" ? 0 : Math.max(1, input.chunkHashes?.length ?? 0)), 0),
+    withheldDocuments: inputs.filter((input) => input.layer !== "names").length
+  };
+}
+async function recheckSearchEvidence(raw, manifests, check) {
+  const evidence = Array.isArray(raw.evidence) ? raw.evidence : [];
+  if (!evidence.length)
+    return { raw, withheldAfter: false };
+  const inputs = manifests.flatMap((manifest) => manifest.inputs);
+  let report;
+  let verdicts = [];
+  try {
+    if (check && manifests.length) {
+      report = await checkReleaseChunks(check, inputs);
+      verdicts = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
+    }
+  } catch {}
+  const cleared = (index) => {
+    const input = inputs[index];
+    const verdict = verdicts[index];
+    return !!verdict && !verdict.gone && ["public_or_personal", "legacy"].includes(verdict.tier) && (input.layer === "names" || report?.ungoverned?.[index] === true || !!input.chunkHashes?.length && input.chunkHashes.every((hash) => report?.allowed[index]?.includes(hash)));
+  };
+  const parentsCleared = inputs.every((input, index) => input.dependency !== "parent_label" || cleared(index));
+  const kept = evidence.filter((value) => {
+    if (!parentsCleared || !value || typeof value !== "object")
+      return false;
+    const hit = value;
+    const matches = inputs.flatMap((input, index) => input.dependency !== "parent_label" && input.corpusId === hit.corpus_id && input.provider === hit.provider && input.accountScope === hit.account_scope && input.providerItemId === hit.provider_item_id && input.providerConversationId === hit.provider_conversation_id ? [index] : []);
+    return matches.length > 0 && matches.every(cleared);
+  });
+  const dropped = evidence.length - kept.length;
+  if (!dropped)
+    return { raw, withheldAfter: false };
+  const coverage = raw.coverage && typeof raw.coverage === "object" ? raw.coverage : {};
+  const note = report && chunkCoverageNote(report);
+  const priorNotes = Array.isArray(coverage.cut_short) ? coverage.cut_short : [];
+  const withheld = typeof raw.withheld === "number" && Number.isFinite(raw.withheld) ? Math.max(0, raw.withheld) : 0;
+  return { raw: {
+    ...raw,
+    evidence: kept,
+    withheld: withheld + Math.max(dropped, report?.withheldPassages ?? 0),
+    ...note ? { coverage: { ...coverage, cut_short: [...new Set([...priorNotes, note])] } } : {}
+  }, withheldAfter: true };
+}
+function bindReleaseChunks(provenance, chunks, hashes) {
+  chunkProvenance.set(provenance, chunks.map((text2, index) => ({ text: text2, hashes: hashes[index] ?? [] })));
+}
+function copyReleaseChunks(from, into) {
+  const chunks = chunkProvenance.get(from);
+  if (chunks)
+    chunkProvenance.set(into, chunks);
+}
+function releasePassageHashes(provenance, text2) {
+  return [...new Set((chunkProvenance.get(provenance) ?? []).filter((entry) => entry.text.includes(text2)).flatMap((entry) => entry.hashes))];
+}
+function releaseCandidateHashes(candidate) {
+  return [...new Set(candidate.chunks.flatMap((text2) => releasePassageHashes(candidate.provenance, text2)))];
+}
+function createReleaseManifestSink() {
+  return { manifests: [] };
+}
+function runWithReleaseManifestSink(sink, fn) {
+  return storage3.run(sink, fn);
+}
+function currentReleaseManifestSink() {
+  return storage3.getStore();
+}
+function recordReleaseManifest(manifest) {
+  storage3.getStore()?.manifests.push({
+    inputs: manifest.inputs.map((input) => ({ ...input, ...input.chunkHashes ? { chunkHashes: [...input.chunkHashes] } : {} })),
+    constraints: { ...manifest.constraints }
+  });
+}
+function adoptReleaseManifests(into, from) {
+  into.manifests.push(...from.manifests);
+}
+function privateInputReleaseAllowed(input, verdict, constraints, postureNow) {
+  const privateNow = verdict.tier === "private" || verdict.tier === "legacy" && input.privateAtAnswer;
+  const authorized = constraints.includeSecureLocalContent || postureNow === "allow";
+  if (input.layer === "names")
+    return !privateNow || input.privateAtAnswer && authorized;
+  return !privateNow || authorized;
+}
+async function answerReleaseWithheldReasonOffThread(manifests, check, ceiling = "private", options = {}) {
+  try {
+    const inputs = manifests.flatMap((manifest) => manifest.inputs);
+    const verdicts = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
+    const reason = answerReleaseWithheldReason(manifests, { inputs: () => verdicts, secureDerivativeDefault: () => check.secureDerivativeDefault() }, ceiling);
+    if (reason)
+      return reason;
+    if (options.chunks && (await checkReleaseChunks(check, inputs)).withheldPassages > 0)
+      return ANSWER_RELEASE_UNVERIFIED;
+    return;
+  } catch {
+    return ANSWER_RELEASE_UNVERIFIED;
+  }
+}
+function answerReleaseWithheldReason(manifests, check, ceiling = "private") {
+  if (manifests.length === 0)
+    return ANSWER_RELEASE_UNVERIFIED;
+  const entries = manifests.flatMap((manifest) => manifest.inputs.map((input) => ({ input, constraints: manifest.constraints })));
+  const inputs = entries.map(({ input }) => input);
+  try {
+    const verdicts = check.inputs(inputs);
+    if (verdicts.length !== inputs.length)
+      return ANSWER_RELEASE_UNVERIFIED;
+    const postureNow = check.secureDerivativeDefault();
+    for (const [index, verdict] of verdicts.entries()) {
+      if (verdict.tier === "unknown" || verdict.gone)
+        return ANSWER_RELEASE_UNVERIFIED;
+      if (verdict.tier === "secret")
+        return ANSWER_RELEASE_UNVERIFIED;
+      const { input, constraints } = entries[index];
+      if (verdict.tier === "private" && (ceiling === "personal" || !input.privateAtAnswer))
+        return ANSWER_BECAME_PRIVATE;
+      if (!privateInputReleaseAllowed(input, verdict, constraints, postureNow)) {
+        return "Olympus withheld this answer because current settings require approval for Private content.";
+      }
+    }
+  } catch {
+    return ANSWER_RELEASE_UNVERIFIED;
+  }
+  return;
+}
+function isWithheldSourceAnswer(result) {
+  return withheldAnswers.has(result);
+}
+function withheldSourceAnswer(reason) {
+  const result = { answer: reason, evidence: [] };
+  withheldAnswers.add(result);
+  return result;
+}
+var RELEASE_CHUNK_JUDGE_BUDGET_MS = 8000, chunkProvenance, storage3, ANSWER_BECAME_PRIVATE = "Olympus withheld this answer because an item became Private.", ANSWER_RELEASE_UNVERIFIED = "Olympus withheld this answer because its current privacy classification could not be verified.", withheldAnswers;
+var init_release_manifest = __esm(() => {
+  chunkProvenance = new WeakMap;
+  storage3 = new AsyncLocalStorage7;
+  withheldAnswers = new WeakSet;
+});
+
 // src/core/evidence-reranker.ts
 async function rerankCandidates(options) {
   const timers = options.timers ?? systemTimers;
@@ -77905,6 +78098,7 @@ async function buildPreparedEvidencePackDetailed(input) {
       ...content?.facts ? { facts: content.facts } : {},
       ...hit.score !== undefined ? { score: hit.score } : {}
     };
+    bindReleaseChunks(candidate.provenance, chunks, content?.chunkHashes ?? []);
     assertEvidenceCandidateModelEligible(candidate);
     if (isSecureSensitivity(candidate)) {
       if (input.excludeSecureSensitivity)
@@ -77939,6 +78133,7 @@ async function buildPreparedEvidencePackDetailed(input) {
     ...input.searchContext.allowedCorpusIds ? { allowedCorpusIds: input.searchContext.allowedCorpusIds } : {},
     domainOf: (corpusId) => Object.hasOwn(input.adapters, corpusId) ? input.registry.get(corpusId)?.trustDomain : undefined
   });
+  labelled.candidates.forEach((candidate, index) => copyReleaseChunks(candidates[index].provenance, candidate.provenance));
   const builtAt = (input.now ?? (() => new Date))().toISOString();
   const laneAudits = policyDeniedCandidates > 0 ? contentFreePolicyLaneAudits(routed.laneAudits) : routed.laneAudits;
   const secureRouted = new Set(routed.secureLaneAudits);
@@ -78317,6 +78512,7 @@ function trustDomainRank2(trustDomain) {
 var SOURCE_MODEL_POLICY_GAP_SUFFIX = "excluded one candidate from model use under current source policy.", MIN_BYTES_PER_CANDIDATE = 400, utf8, MAX_SEARCH_QUERIES = 3, MIN_EXPANSION_BUDGET_MS = 1000, CUT_SHORT_LANES;
 var init_evidence_pack = __esm(() => {
   init_keyword_context();
+  init_release_manifest();
   init_partial_search();
   init_evidence_reranker();
   init_parent_label();
@@ -78329,83 +78525,6 @@ var init_evidence_pack = __esm(() => {
     [RECENT_ITEMS_CUT_SHORT, { suffix: ":recency", gap: recentItemsTimeoutGap }],
     [VISIBILITY_CHECK_CUT_SHORT, { suffix: ":visibility", gap: visibilityCheckTimeoutGap }]
   ]);
-});
-
-// src/core/release-manifest.ts
-import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
-function createReleaseManifestSink() {
-  return { manifests: [] };
-}
-function runWithReleaseManifestSink(sink, fn) {
-  return storage3.run(sink, fn);
-}
-function currentReleaseManifestSink() {
-  return storage3.getStore();
-}
-function recordReleaseManifest(manifest) {
-  storage3.getStore()?.manifests.push({
-    inputs: manifest.inputs.map((input) => ({ ...input })),
-    constraints: { ...manifest.constraints }
-  });
-}
-function adoptReleaseManifests(into, from) {
-  into.manifests.push(...from.manifests);
-}
-function privateInputReleaseAllowed(input, verdict, constraints, postureNow) {
-  const privateNow = verdict.tier === "private" || verdict.tier === "legacy" && input.privateAtAnswer;
-  const authorized = constraints.includeSecureLocalContent || postureNow === "allow";
-  if (input.layer === "names")
-    return !privateNow || input.privateAtAnswer && authorized;
-  return !privateNow || authorized;
-}
-async function answerReleaseWithheldReasonOffThread(manifests, check, ceiling = "private") {
-  try {
-    const inputs = manifests.flatMap((manifest) => manifest.inputs);
-    const verdicts = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
-    return answerReleaseWithheldReason(manifests, { inputs: () => verdicts, secureDerivativeDefault: () => check.secureDerivativeDefault() }, ceiling);
-  } catch {
-    return ANSWER_RELEASE_UNVERIFIED;
-  }
-}
-function answerReleaseWithheldReason(manifests, check, ceiling = "private") {
-  if (manifests.length === 0)
-    return ANSWER_RELEASE_UNVERIFIED;
-  const entries = manifests.flatMap((manifest) => manifest.inputs.map((input) => ({ input, constraints: manifest.constraints })));
-  const inputs = entries.map(({ input }) => input);
-  try {
-    const verdicts = check.inputs(inputs);
-    if (verdicts.length !== inputs.length)
-      return ANSWER_RELEASE_UNVERIFIED;
-    const postureNow = check.secureDerivativeDefault();
-    for (const [index, verdict] of verdicts.entries()) {
-      if (verdict.tier === "unknown" || verdict.gone)
-        return ANSWER_RELEASE_UNVERIFIED;
-      if (verdict.tier === "secret")
-        return ANSWER_RELEASE_UNVERIFIED;
-      const { input, constraints } = entries[index];
-      if (verdict.tier === "private" && (ceiling === "personal" || !input.privateAtAnswer))
-        return ANSWER_BECAME_PRIVATE;
-      if (!privateInputReleaseAllowed(input, verdict, constraints, postureNow)) {
-        return "Olympus withheld this answer because current settings require approval for Private content.";
-      }
-    }
-  } catch {
-    return ANSWER_RELEASE_UNVERIFIED;
-  }
-  return;
-}
-function isWithheldSourceAnswer(result) {
-  return withheldAnswers.has(result);
-}
-function withheldSourceAnswer(reason) {
-  const result = { answer: reason, evidence: [] };
-  withheldAnswers.add(result);
-  return result;
-}
-var storage3, ANSWER_BECAME_PRIVATE = "Olympus withheld this answer because an item became Private.", ANSWER_RELEASE_UNVERIFIED = "Olympus withheld this answer because its current privacy classification could not be verified.", withheldAnswers;
-var init_release_manifest = __esm(() => {
-  storage3 = new AsyncLocalStorage7;
-  withheldAnswers = new WeakSet;
 });
 
 // src/core/secret-location-note.ts
@@ -78699,6 +78818,8 @@ function createAnalystSourceIndexAnswerHandler(options) {
         detail = withSecureLocalExclusionReason(detail, secureLocalChoice.exclusion);
       }
       let pack = detail.pack;
+      const analyzedInputs = [];
+      const chunkHoldNotes = new Set;
       const localPromptBytes = options.localAnalystPromptByteBudget ?? DEFAULT_LOCAL_ANALYST_PROMPT_BYTES;
       const assertDispatchAllowed = async (analysisDetail) => {
         if (options.releaseCheck) {
@@ -78733,15 +78854,23 @@ function createAnalystSourceIndexAnswerHandler(options) {
         ]));
         recordSourceAnswerPackSeats(analysisDetail.pack.candidates.map((_, index) => analysisDetail.candidateCorpusIds[index] ?? ""), analysisDetail.recencySeats ?? 0, analysisDetail.pack.candidates.map((candidate) => candidate.provenance.sourceItem.localItemId));
         const seatOf = new Map(analysisDetail.pack.candidates.map((candidate, index) => [candidate.provenance, index + 1]));
-        const guarded = (analyst) => ({
+        const guarded = (analyst, remote = false) => ({
           analyze: async (dispatchPack, analyzeOptions) => {
+            if (remote) {
+              const checked = await checkedRemotePack(dispatchPack, (candidate) => candidateCorpus.get(candidate) ?? analysisDetail.candidateCorpusIds[analysisDetail.pack.candidates.findIndex((original) => original.provenance === candidate.provenance)] ?? "", options.releaseCheck);
+              dispatchPack = checked.pack;
+              const note = chunkCoverageNote(checked.report);
+              if (note)
+                chunkHoldNotes.add(note);
+            }
             await assertDispatchAllowed(analysisDetail);
+            analyzedInputs.push(...dispatchPack.candidates.map((candidate) => candidateReleaseInput(candidate, candidateCorpus.get(candidate) ?? analysisDetail.candidateCorpusIds[analysisDetail.pack.candidates.findIndex((original) => original.provenance === candidate.provenance)] ?? "")));
             return analyst.analyze(dispatchPack, analyzeOptions);
           }
         });
         return {
           localLeg: (analyst) => promptBudgetedAnalyst(guarded(analyst), localPromptBytes, candidateCorpus, analysisDetail.recencySeats, "local", seatOf, analystEvidenceFormat(analyst), candidateGaps),
-          cloudLeg: (analyst) => promptBudgetedAnalyst(guarded(analyst), CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus, analysisDetail.recencySeats, "cloud", seatOf, analystEvidenceFormat(analyst), candidateGaps),
+          cloudLeg: (analyst) => promptBudgetedAnalyst(guarded(analyst, true), CLOUD_ANALYST_PROMPT_BYTES, candidateCorpus, analysisDetail.recencySeats, "cloud", seatOf, analystEvidenceFormat(analyst), candidateGaps),
           trustedLeg: (analyst) => guarded({ analyze: (dispatchPack, analyzeOptions) => {
             const skip = new Set([...analysisDetail.namesOnlyCandidateIndexes ?? [], ...analysisDetail.contentPrivateCandidateIndexes ?? []]);
             const omitted = new Set(analysisDetail.pack.candidates.filter((_, index) => skip.has(index)));
@@ -78842,12 +78971,15 @@ function createAnalystSourceIndexAnswerHandler(options) {
       } = routedAnalysis;
       const analystMs = Date.now() - analystStartedAt;
       const releaseGateStartedAt = Date.now();
-      const { decision, facts, opsec, answer } = releaseAnalystAnswer({
+      const { decision, facts, opsec, answer: releasedAnswer } = releaseAnalystAnswer({
         detail,
         result: analystResult,
         releaseSecureContent,
         ...synthesizedGap ? { synthesizedGap } : {}
       });
+      const answer = [releasedAnswer, ...[...chunkHoldNotes].filter((note) => !releasedAnswer.includes(note))].join(`
+
+`);
       const releaseGateMs = Date.now() - releaseGateStartedAt;
       recordSourceAnswerReleaseDecision(decision.decision);
       const released = decision.decision === "allow" || decision.decision === "redact";
@@ -78862,7 +78994,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
         total_ms: totalLatencyMs
       };
       recordSourceAnswerPhaseTimings(phaseTimings);
-      recordReleaseManifest({ inputs: releaseInputs(detail), constraints: releaseConstraints });
+      recordReleaseManifest({ inputs: [...analyzedInputs, ...parentLabelReleaseInputs(detail.parentLabelDependencies ?? [])], constraints: releaseConstraints });
       return {
         answer,
         evidence: released ? releasedEvidence(analystResult.citations, detail, releaseSecureContent) : [],
@@ -78927,20 +79059,40 @@ function createAnalystSourceIndexAnswerHandler(options) {
   };
 }
 function releaseInputs(detail) {
-  const namesOnly = new Set(detail.pack.candidates.flatMap((candidate, index) => candidate.chunks.length === 0 && !candidate.tables?.length && !candidate.facts?.length ? [index] : []));
-  const items = detail.pack.candidates.map((candidate, index) => {
-    const item = candidate.provenance.sourceItem;
-    return {
-      corpusId: detail.candidateCorpusIds[index] ?? "",
-      provider: item.provider,
-      accountScope: item.accountScope ?? "",
-      providerItemId: item.providerItemId,
-      ...item.providerConversationId ? { providerConversationId: item.providerConversationId } : {},
-      privateAtAnswer: isSecureSensitivity(candidate),
-      ...namesOnly.has(index) ? { layer: "names" } : {}
-    };
-  });
+  const items = detail.pack.candidates.map((candidate, index) => candidateReleaseInput(candidate, detail.candidateCorpusIds[index] ?? ""));
   return [...items, ...parentLabelReleaseInputs(detail.parentLabelDependencies ?? [])];
+}
+function candidateReleaseInput(candidate, corpusId) {
+  const item = candidate.provenance.sourceItem;
+  const namesOnly = candidate.chunks.length === 0 && !candidate.tables?.length && !candidate.facts?.length;
+  return {
+    corpusId,
+    provider: item.provider,
+    accountScope: item.accountScope ?? "",
+    providerItemId: item.providerItemId,
+    ...item.providerConversationId ? { providerConversationId: item.providerConversationId } : {},
+    privateAtAnswer: isSecureSensitivity(candidate),
+    ...namesOnly ? { layer: "names" } : { chunkHashes: releaseCandidateHashes(candidate) }
+  };
+}
+async function checkedRemotePack(pack, corpusOf, check) {
+  const inputs = pack.candidates.map((candidate) => candidateReleaseInput(candidate, corpusOf(candidate)));
+  const report = await checkReleaseChunks(check, inputs);
+  const candidates = pack.candidates.flatMap((candidate, index) => {
+    if (inputs[index].layer === "names" || report.ungoverned?.[index] === true)
+      return [candidate];
+    const allowed = new Set(report.allowed[index]);
+    const chunks = candidate.chunks.filter((text2) => {
+      const hashes = releasePassageHashes(candidate.provenance, text2);
+      return hashes.length > 0 && hashes.every((hash) => allowed.has(hash));
+    });
+    return chunks.length > 0 ? [{ ...candidate, chunks, tables: [], facts: [] }] : [];
+  });
+  const note = chunkCoverageNote(report);
+  return { pack: { ...pack, candidates, coverage: {
+    ...pack.coverage,
+    extractionGaps: [...pack.coverage.extractionGaps, ...note ? [note] : []]
+  } }, report };
 }
 function sourceAnswerCorpusIds(request) {
   const ids = request.corpus_ids?.length ? [...request.corpus_ids] : [];
@@ -80139,6 +80291,16 @@ function sourceItemsEqual(left, right) {
 async function recheckReleasedEvidence(evidence, identities, check) {
   if (evidence.length === 0)
     return { evidence: [], withheld: 0 };
+  const verdicts = await evidenceTierVerdicts(identities, check);
+  const kept = [];
+  evidence.forEach((item, index) => {
+    const verdict = verdicts[index];
+    if (!verdict.gone && (verdict.tier === "public_or_personal" || verdict.tier === "legacy"))
+      kept.push(item);
+  });
+  return { evidence: kept, withheld: evidence.length - kept.length };
+}
+async function evidenceTierVerdicts(identities, check) {
   let verdicts;
   try {
     verdicts = await (check.inputsOffThread?.(identities) ?? check.inputs(identities));
@@ -80149,13 +80311,7 @@ async function recheckReleasedEvidence(evidence, identities, check) {
   if (verdicts.length !== identities.length) {
     throw new OperationError("source_index_policy_violation", "The tier check answered for the wrong number of items.");
   }
-  const kept = [];
-  evidence.forEach((item, index) => {
-    const verdict = verdicts[index];
-    if (!verdict.gone && (verdict.tier === "public_or_personal" || verdict.tier === "legacy"))
-      kept.push(item);
-  });
-  return { evidence: kept, withheld: evidence.length - kept.length };
+  return verdicts;
 }
 async function searchReleasedEvidence(input) {
   const question = input.question.trim();
@@ -80185,14 +80341,22 @@ async function searchReleasedEvidence(input) {
     ...lanes.classificationCoverage ? { classificationCoverage: lanes.classificationCoverage } : {}
   });
   assertEvidencePackModelEligible(detail.pack);
+  if (input.releaseCheck)
+    await evidenceTierVerdicts(releaseInputs(detail), input.releaseCheck);
+  const remotePack = await checkedRemotePack(detail.pack, (candidate) => detail.candidateCorpusIds[detail.pack.candidates.indexOf(candidate)] ?? "", input.releaseCheck);
+  const permittedCandidates = new Map(remotePack.pack.candidates.map((candidate) => [candidate.provenance, candidate]));
   const evidence = [];
   const identities = [];
-  let withheld = 0;
+  let withheld = remotePack.report.withheldPassages;
   const seen = new Set;
   const contentPrivate = new Set(detail.contentPrivateCandidateIndexes ?? []);
   detail.pack.candidates.forEach((candidate, index) => {
     if (contentPrivate.has(index))
       return;
+    const permitted = permittedCandidates.get(candidate.provenance);
+    if (!permitted)
+      return;
+    candidate = permitted;
     if (isSecureSensitivity(candidate) || candidate.trustDomain !== "public_safe" && candidate.trustDomain !== "internal") {
       withheld += 1;
       return;
@@ -80226,14 +80390,7 @@ async function searchReleasedEvidence(input) {
       withheld += 1;
       return;
     }
-    identities.push({
-      corpusId,
-      provider: item.provider,
-      accountScope: item.accountScope ?? "",
-      providerItemId: item.providerItemId,
-      ...item.providerConversationId ? { providerConversationId: item.providerConversationId } : {},
-      privateAtAnswer: false
-    });
+    identities.push(candidateReleaseInput(candidate, corpusId));
     evidence.push(withoutSecretLikeLabels({
       corpus_id: corpusId,
       trust_domain: candidate.trustDomain,
@@ -80259,6 +80416,9 @@ async function searchReleasedEvidence(input) {
   withheld += released.withheld;
   const coverage = detail.pack.coverage;
   const cutShort = timedOutCoverageNotes(coverage);
+  const heldPassages = chunkCoverageNote(remotePack.report);
+  if (heldPassages)
+    cutShort.push(heldPassages);
   return {
     evidence: released.evidence,
     withheld,
@@ -116455,21 +116615,34 @@ function remoteWithheldParam(operation, args) {
 }
 async function remoteOperationOutputOffThread(operation, raw, options = {}) {
   const check = options.releaseCheck;
-  if (!check?.inputsOffThread || !["source_answer", "source_answer_result"].includes(operation) || pendingOutput(raw) || isAnonymousAnswerResult(raw)) {
+  if (!["source_answer", "source_answer_result"].includes(operation) || pendingOutput(raw) || isAnonymousAnswerResult(raw)) {
     return remoteOperationOutput(operation, raw, options);
   }
+  if (!check)
+    return remoteOperationOutput(operation, raw, { ...options, releaseCheck: {
+      inputs: (inputs) => inputs.map(() => ({ tier: "unknown", gone: false })),
+      secureDerivativeDefault: () => "approval"
+    } });
   let verdicts;
   try {
-    verdicts = await check.inputsOffThread((options.releaseManifests ?? []).flatMap((manifest) => manifest.inputs));
+    const inputs = (options.releaseManifests ?? []).flatMap((manifest) => manifest.inputs);
+    const chunks = await checkReleaseChunks(check, inputs);
+    verdicts = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
+    if (chunks.withheldPassages > 0)
+      verdicts = inputs.map((input, index) => {
+        const tier = verdicts[index];
+        return tier?.tier === "secret" ? tier : { tier: "unknown", gone: false };
+      });
   } catch {}
-  return remoteOperationOutput(operation, raw, { ...options, releaseCheck: {
+  const verified = {
     inputs: () => {
       if (!verdicts)
         throw new Error("Release unavailable");
       return verdicts;
     },
     secureDerivativeDefault: () => check.secureDerivativeDefault()
-  } });
+  };
+  return remoteOperationOutput(operation, raw, { ...options, releaseCheck: verified });
 }
 function remoteOperationOutput(operation, raw, options = {}) {
   const pending = pendingOutput(raw);
@@ -210991,6 +211164,731 @@ var init_unreadable_locators = __esm(() => {
   init_parent_label2();
 });
 
+// src/workers/engine-split/commands.ts
+import { randomUUID as randomUUID36 } from "node:crypto";
+function newEngineCommandId() {
+  return randomUUID36();
+}
+function asRecord19(value2) {
+  return value2 && typeof value2 === "object" && !Array.isArray(value2) ? value2 : undefined;
+}
+function boundedString2(value2, max2 = 512) {
+  return typeof value2 === "string" && value2.length > 0 && value2.length <= max2 ? value2 : undefined;
+}
+function dashboardSample(value2) {
+  const sample = asRecord19(value2);
+  if (!sample)
+    return false;
+  for (const [key2, entry] of Object.entries(sample)) {
+    if (key2 === "source_id" || key2 === "corpus_id" || key2 === "sampled_at") {
+      if (!boundedString2(entry, 200))
+        return false;
+    } else if (typeof entry === "number") {
+      if (!Number.isFinite(entry))
+        return false;
+    } else if (typeof entry !== "boolean") {
+      return false;
+    }
+  }
+  return typeof sample.corpus_id === "string" && typeof sample.source_id === "string";
+}
+function forwardedRequest(kind, value2) {
+  const request = asRecord19(value2);
+  const path = request?.path;
+  if (typeof path !== "string" || !ENGINE_FORWARDED_ROUTES[kind].includes(path)) {
+    throw new EngineCommandError(400, `${kind} does not carry that route.`);
+  }
+  const headers = asRecord19(request.headers);
+  if (!headers || Object.values(headers).some((entry) => typeof entry !== "string"))
+    throw new EngineCommandError(400, "Forwarded headers must be strings.");
+  const body = request.body;
+  if (typeof body !== "string")
+    throw new EngineCommandError(400, "A forwarded body is text.");
+  if (body.length > ENGINE_BODY_MAX_BYTES)
+    throw new EngineCommandError(413, "The command body is too large.");
+  return { path, headers, body };
+}
+function forwardedRequestToRequest(origin, forwarded) {
+  return new Request(origin + forwarded.path, { method: "POST", headers: forwarded.headers, body: forwarded.body });
+}
+function tagForwardedRequest(request, commandId) {
+  forwardedRecordIds.set(request, `engine-${commandId}`);
+  return request;
+}
+function forwardedRecordId(request) {
+  return forwardedRecordIds.get(request);
+}
+async function requestToForwarded(request) {
+  const headers = {};
+  request.headers.forEach((value2, name) => {
+    if (!HOP_HEADERS.has(name.toLowerCase()))
+      headers[name] = value2;
+  });
+  return { path: new URL(request.url).pathname, headers, body: await request.text() };
+}
+async function responseToForwarded(response) {
+  const headers = {};
+  response.headers.forEach((value2, name) => {
+    if (!HOP_HEADERS.has(name.toLowerCase()) && name.toLowerCase() !== "set-cookie")
+      headers[name] = value2;
+  });
+  return { status: response.status, headers, body: await response.text() };
+}
+function parseEngineCommandEnvelope(value2) {
+  const record8 = asRecord19(value2);
+  const id = record8?.id;
+  if (typeof id !== "string" || !ID3.test(id))
+    throw new EngineCommandError(400, "A command needs an id.");
+  const command2 = asRecord19(record8?.command);
+  const kind = command2?.kind;
+  const fail = (message2) => {
+    throw new EngineCommandError(400, message2);
+  };
+  switch (kind) {
+    case "reload": {
+      const target = command2.target;
+      if (!ENGINE_RELOAD_KINDS.includes(target))
+        fail("reload needs a known kind.");
+      const corpora = command2.corpora;
+      if (corpora !== undefined && (!Array.isArray(corpora) || corpora.length > 200 || corpora.some((entry) => typeof entry !== "string" || !SOURCE.test(entry)))) {
+        fail("reload corpora must be corpus ids.");
+      }
+      const frontPid = command2.frontPid;
+      if (frontPid !== undefined && (target !== "models" || !Number.isSafeInteger(frontPid) || frontPid <= 0))
+        fail("frontPid is a process id, carried by a models reload.");
+      return { id, command: {
+        kind,
+        target,
+        ...Array.isArray(corpora) ? { corpora } : {},
+        ...frontPid !== undefined ? { frontPid } : {}
+      } };
+    }
+    case "archive_changed":
+    case "model_prepare":
+      return { id, command: { kind } };
+    case "dashboard_samples": {
+      const samples = command2.samples;
+      if (!Array.isArray(samples) || samples.length > ENGINE_DASHBOARD_SAMPLES_MAX || samples.some((sample) => !dashboardSample(sample))) {
+        fail("dashboard_samples takes count samples only.");
+      }
+      return { id, command: { kind, samples } };
+    }
+    case "delete_source_data":
+    case "tier_override":
+    case "storage_registry":
+    case "capture":
+    case "embed_chunks":
+    case "source_watch":
+    case "extraction_queue":
+    case "people":
+    case "source_sync":
+    case "data_export": {
+      const frontPid = command2.frontPid;
+      if (frontPid !== undefined && (kind !== "delete_source_data" || !Number.isSafeInteger(frontPid) || frontPid <= 0))
+        fail("frontPid is a process id, carried by a delete.");
+      return { id, command: { kind, request: forwardedRequest(kind, command2.request), ...frontPid !== undefined ? { frontPid } : {} } };
+    }
+    case "sync_now":
+    case "start_approved": {
+      const source = command2.source;
+      if (typeof source !== "string" || !SOURCE.test(source))
+        fail(`${kind} needs a source.`);
+      if (kind === "start_approved")
+        return { id, command: { kind, source } };
+      return { id, command: { kind, source, manual: command2.manual === true } };
+    }
+    case "tier_set_recorded": {
+      const locator = boundedString2(command2.locator, 2048);
+      const expected = asRecord19(command2.expected);
+      const provider = boundedString2(expected?.provider, 64);
+      const providerItemId = boundedString2(expected?.providerItemId);
+      const conversation = expected?.providerConversationId;
+      if (!locator || !provider || !providerItemId || conversation !== undefined && !boundedString2(conversation)) {
+        fail("tier_set_recorded needs a locator and the recorded provider and item.");
+      }
+      return { id, command: { kind, locator, expected: {
+        provider,
+        providerItemId,
+        ...typeof conversation === "string" ? { providerConversationId: conversation } : {}
+      } } };
+    }
+    case "export_data": {
+      const destination = boundedString2(command2.destination, 4096);
+      if (!destination || !destination.startsWith("/"))
+        fail("export_data needs an absolute destination.");
+      return { id, command: { kind, destination } };
+    }
+    case "capture_stop": {
+      const source = command2.source;
+      if (source !== "telegram" && source !== "whatsapp")
+        fail("capture_stop needs telegram or whatsapp.");
+      return { id, command: { kind, source } };
+    }
+    case "owner_busy":
+    case "owner_idle": {
+      const resource = command2.resource;
+      if (typeof resource !== "string" || !RESOURCE.test(resource))
+        fail(`${kind} needs a resource.`);
+      const front = boundedString2(command2.front, 64);
+      const seq = command2.seq;
+      if (!front || !Number.isSafeInteger(seq) || seq < 1)
+        fail(`${kind} needs its front and a sequence number.`);
+      return { id, command: { kind, resource, front, seq } };
+    }
+    case "judge_boost":
+    case "judge_now": {
+      const raw = kind === "judge_now" ? command2.items : command2.identities;
+      if (!Array.isArray(raw) || raw.length === 0 || raw.length > ENGINE_JUDGE_BOOST_MAX_IDS) {
+        fail(`${kind} takes 1 to ${ENGINE_JUDGE_BOOST_MAX_IDS} items.`);
+      }
+      const identities = raw.map((entry) => {
+        const item = asRecord19(entry);
+        const provider = boundedString2(item?.provider, 64);
+        const accountScope = boundedString2(item?.accountScope);
+        const providerItemId = boundedString2(item?.providerItemId);
+        const conversation = item?.providerConversationId;
+        if (!provider || !accountScope || !providerItemId || conversation !== undefined && !boundedString2(conversation)) {
+          fail(`${kind} items need provider, accountScope and providerItemId.`);
+        }
+        let chunks2;
+        if (kind === "judge_now") {
+          const corpusId = boundedString2(item?.corpusId);
+          const hashes = item?.chunkHashes;
+          if (!corpusId || !Array.isArray(hashes) || !hashes.length || hashes.length > 1024 || hashes.some((hash2) => !boundedString2(hash2, 256)))
+            fail("judge_now items need a corpusId and chunk hashes.");
+          chunks2 = { corpusId, chunkHashes: [...new Set(hashes)] };
+        }
+        return {
+          ...chunks2,
+          provider,
+          accountScope,
+          providerItemId,
+          ...typeof conversation === "string" ? { providerConversationId: conversation } : {}
+        };
+      });
+      if (kind === "judge_now") {
+        const budgetMs = command2.budgetMs;
+        if (typeof budgetMs !== "number" || !Number.isFinite(budgetMs) || budgetMs < 0)
+          fail("judge_now needs a nonnegative budgetMs.");
+        return { id, command: { kind, items: identities, budgetMs: Math.min(budgetMs, ENGINE_JUDGE_NOW_MAX_BUDGET_MS) } };
+      }
+      return { id, command: { kind, identities } };
+    }
+    default:
+      return fail("Unknown command.");
+  }
+}
+function orderKey(command2) {
+  return "source" in command2 ? `source:${command2.source}` : `kind:${command2.kind}`;
+}
+
+class EngineCommandLedger {
+  options;
+  entries = new Map;
+  chains = new Map;
+  now;
+  maxSettled;
+  retentionMs;
+  constructor(options) {
+    this.options = options;
+    this.now = options.now ?? (() => Date.now());
+    this.maxSettled = options.maxSettled ?? 1000;
+    this.retentionMs = options.retentionMs ?? 60 * 60000;
+  }
+  get instanceId() {
+    return this.options.instanceId;
+  }
+  submit(envelope) {
+    this.prune();
+    const body = JSON.stringify(envelope.command);
+    const existing = this.entries.get(envelope.id);
+    if (existing) {
+      if (existing.body !== body)
+        throw new EngineCommandError(409, "That command id was used for a different command.");
+      return { ...existing.receipt };
+    }
+    const receipt = { id: envelope.id, state: "received", instance_id: this.options.instanceId };
+    const key2 = orderKey(envelope.command);
+    const previous = this.chains.get(key2) ?? Promise.resolve();
+    const entry = { body, receipt, settled: Promise.resolve() };
+    const settled = previous.then(() => this.apply(entry, envelope.command));
+    entry.settled = settled;
+    this.entries.set(envelope.id, entry);
+    this.chains.set(key2, settled);
+    settled.then(() => {
+      if (this.chains.get(key2) === settled)
+        this.chains.delete(key2);
+    });
+    return { ...receipt };
+  }
+  get(id) {
+    const entry = this.entries.get(id);
+    return entry ? { ...entry.receipt } : undefined;
+  }
+  async settled(id, wait) {
+    const entry = this.entries.get(id);
+    if (!entry)
+      return;
+    await Promise.race([entry.settled, wait]);
+    return { ...entry.receipt };
+  }
+  async apply(entry, command2) {
+    const handler = this.options.handlers[command2.kind];
+    try {
+      if (!handler)
+        throw new Error(`${command2.kind} is not handled by this background.`);
+      const result = await handler(command2, { id: entry.receipt.id });
+      entry.receipt.state = "done";
+      if (result !== undefined)
+        entry.receipt.result = result;
+    } catch (error2) {
+      entry.receipt.state = "failed";
+      entry.receipt.error = error2 instanceof Error ? error2.message : "The command failed.";
+    }
+    entry.settledAt = this.now();
+  }
+  prune() {
+    const cutoff = this.now() - this.retentionMs;
+    let settled = 0;
+    for (const entry of this.entries.values())
+      if (entry.settledAt !== undefined)
+        settled += 1;
+    for (const [id, entry] of this.entries) {
+      if (entry.settledAt === undefined)
+        continue;
+      if (entry.settledAt >= cutoff && settled <= this.maxSettled)
+        break;
+      this.entries.delete(id);
+      settled -= 1;
+    }
+  }
+}
+function createEngineCommandHandler(options) {
+  const maxWaitMs = options.maxWaitMs ?? 30000;
+  const setTimer = options.setTimeout ?? ((callback, ms) => setTimeout(callback, ms));
+  const clearTimer = options.clearTimeout ?? ((timer) => clearTimeout(timer));
+  return async (request) => {
+    if (!hasValidWorkerBearerToken(request.headers.get("authorization"), options.authToken)) {
+      return Response.json({ error: "unauthorized" }, { status: 401 });
+    }
+    const url2 = new URL(request.url);
+    if (url2.pathname === ENGINE_READY_PATH && request.method === "GET") {
+      const ready = options.ready();
+      const body = { ready, instance_id: options.ledger.instanceId, schema_current: ready };
+      return Response.json(body, { status: ready ? 200 : 503 });
+    }
+    if (url2.pathname === ENGINE_COMMANDS_PATH && request.method === "POST") {
+      if (!options.ready())
+        return Response.json({ error: "starting", instance_id: options.ledger.instanceId }, { status: 503 });
+      try {
+        const envelope = parseEngineCommandEnvelope(await request.json().catch(() => {
+          return;
+        }));
+        let receipt = options.ledger.submit(envelope);
+        if (envelope.command.kind === "judge_now" && receipt.state === "received") {
+          const waitMs = envelope.command.budgetMs + 100;
+          let timer;
+          const wait = new Promise((resolve30) => {
+            timer = setTimer(resolve30, waitMs);
+          });
+          try {
+            receipt = await options.ledger.settled(envelope.id, wait) ?? receipt;
+          } finally {
+            clearTimer(timer);
+          }
+        }
+        return Response.json(receipt, { status: receipt.state === "received" ? 202 : 200 });
+      } catch (error2) {
+        if (error2 instanceof EngineCommandError)
+          return Response.json({ error: error2.message }, { status: error2.status });
+        throw error2;
+      }
+    }
+    if (url2.pathname === ENGINE_MODEL_COMPLETE_PATH && request.method === "POST") {
+      if (!options.ready() || !options.modelComplete)
+        return Response.json({ error: "model_unavailable" }, { status: 503 });
+      const body = await request.json().catch(() => {
+        return;
+      });
+      const parsed = parseModelRequest(body);
+      const priority = parseModelPriority(asRecord19(body)?.priority);
+      if (!parsed || !priority)
+        return Response.json({ error: "invalid_model_request" }, { status: 400 });
+      const modelComplete = options.modelComplete;
+      try {
+        const completion = await runAtLocalInferencePriority(priority, () => modelComplete({ ...parsed, signal: request.signal }));
+        return Response.json(completion);
+      } catch (error2) {
+        if (error2 instanceof OperationError)
+          return Response.json({ operation_error: error2.toJSON() }, { status: 503 });
+        return Response.json({ error: "model_failed", message: error2 instanceof Error ? error2.message : "unknown error" }, { status: 500 });
+      }
+    }
+    if (url2.pathname.startsWith(`${ENGINE_COMMANDS_PATH}/`) && request.method === "GET") {
+      const id = decodeURIComponent(url2.pathname.slice(ENGINE_COMMANDS_PATH.length + 1));
+      if (!ID3.test(id))
+        return Response.json({ error: "not_found" }, { status: 404 });
+      const waitMs = Math.max(0, Math.min(maxWaitMs, Number(url2.searchParams.get("wait") ?? 0) || 0));
+      let timer;
+      const wait = new Promise((resolve30) => {
+        timer = setTimer(resolve30, waitMs);
+      });
+      try {
+        const receipt = waitMs > 0 ? await options.ledger.settled(id, wait) : options.ledger.get(id);
+        if (!receipt)
+          return Response.json({ error: "not_found", instance_id: options.ledger.instanceId }, { status: 404 });
+        return Response.json(receipt);
+      } finally {
+        clearTimer(timer);
+      }
+    }
+    return Response.json({ error: "not_found" }, { status: 404 });
+  };
+}
+function parseModelPriority(value2) {
+  if (value2 === undefined)
+    return "owner";
+  return MODEL_PRIORITIES.find((priority) => priority === value2);
+}
+function parseModelRequest(value2) {
+  const record8 = asRecord19(value2);
+  if (!record8)
+    return;
+  const { system, prompt, localOnly, maxOutputChars, responseSchema } = record8;
+  if (typeof system !== "string" || typeof prompt !== "string" || typeof localOnly !== "boolean")
+    return;
+  if (maxOutputChars !== undefined && (!Number.isSafeInteger(maxOutputChars) || maxOutputChars < 1))
+    return;
+  if (responseSchema !== undefined && !asRecord19(responseSchema))
+    return;
+  return {
+    system,
+    prompt,
+    localOnly,
+    ...maxOutputChars !== undefined ? { maxOutputChars } : {},
+    ...responseSchema !== undefined ? { responseSchema } : {}
+  };
+}
+var ENGINE_RELOAD_KINDS, ENGINE_JUDGE_BOOST_MAX_IDS = 20, ENGINE_JUDGE_BOOST_TTL_MS, ENGINE_JUDGE_NOW_MAX_BUDGET_MS, ENGINE_FORWARDED_ROUTES, ENGINE_BODY_MAX_BYTES, ENGINE_DASHBOARD_SAMPLES_MAX = 500, EngineCommandError, ID3, SOURCE, RESOURCE, forwardedRecordIds, HOP_HEADERS, MODEL_PRIORITIES;
+var init_commands = __esm(() => {
+  init_release_manifest();
+  init_engine_split();
+  init_operation_error();
+  init_http();
+  init_answer_activity();
+  ENGINE_RELOAD_KINDS = ["sources", "scope", "exclusions", "embedding", "models", "archive", "extraction", "pacing"];
+  ENGINE_JUDGE_BOOST_TTL_MS = 15 * 60000;
+  ENGINE_JUDGE_NOW_MAX_BUDGET_MS = RELEASE_CHUNK_JUDGE_BUDGET_MS;
+  ENGINE_FORWARDED_ROUTES = {
+    delete_source_data: ["/dashboard/delete-source-data", "/v1/cli/data-delete"],
+    tier_override: ["/v1/cli/tier", "/dashboard/privacy/items/set", "/v1/privacy-item/raise", "/dashboard/privacy/judge-check"],
+    people: ["/dashboard/people"],
+    source_sync: ["/v1/source/index/sync", "/v1/source/index/x-bookmarks/content/recover"],
+    storage_registry: ["/v1/cli/pairing-placement", "/v1/cli/pairing-account"],
+    capture: [
+      "/dashboard/messaging/start",
+      "/dashboard/messaging/status",
+      "/dashboard/messaging/respond",
+      "/dashboard/messaging/cancel",
+      "/dashboard/messaging/chats",
+      "/dashboard/messaging/scope"
+    ],
+    embed_chunks: ["/v1/source/index/embed"],
+    data_export: ["/v1/cli/data-export"],
+    source_watch: ["/v1/source/watch/create", "/v1/source/watch/cancel"],
+    extraction_queue: [
+      "/v1/source/index/files/plan",
+      "/v1/source/index/files/transcribe",
+      "/v1/source/index/files/recycle-leases",
+      "/v1/source/index/files/janitor-requeue",
+      "/v1/source/index/files/extract-pdfs",
+      "/v1/source/index/files/extract",
+      "/v1/source/index/dropbox/content/plan",
+      "/v1/source/index/dropbox/content/recycle-leases",
+      "/v1/source/index/dropbox/content/janitor-requeue",
+      "/v1/source/index/dropbox/content/extract",
+      "/v1/source/index/dropbox/transcribe"
+    ]
+  };
+  ENGINE_BODY_MAX_BYTES = 16 * 1024 * 1024;
+  EngineCommandError = class EngineCommandError extends Error {
+    status;
+    constructor(status, message2) {
+      super(message2);
+      this.status = status;
+      this.name = "EngineCommandError";
+    }
+  };
+  ID3 = /^[A-Za-z0-9_-]{8,64}$/;
+  SOURCE = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,199}$/;
+  RESOURCE = /^[\x21-\x7e]{1,200}$/;
+  forwardedRecordIds = new WeakMap;
+  HOP_HEADERS = new Set(["host", "content-length", "connection", "transfer-encoding", "keep-alive", "upgrade"]);
+  MODEL_PRIORITIES = ["owner", "background", "maintenance"];
+});
+
+// src/workers/classification/chunk-release.ts
+async function releaseChunks(inputs, scopes, check, options = {}) {
+  const now = options.now ?? (() => performance.now());
+  const budgetMs = Math.min(ENGINE_JUDGE_NOW_MAX_BUDGET_MS, Math.max(0, options.budgetMs ?? RELEASE_CHUNK_JUDGE_BUDGET_MS));
+  const deadline = now() + budgetMs;
+  const cached3 = await inspectChunks(inputs, scopes, check, { ...options, readOnly: true });
+  const allowed = cached3.allowed.map((hashes) => [...hashes]);
+  const pending = inputs.flatMap((input, index) => {
+    const hashes = (input.chunkHashes ?? []).filter((hash2) => !allowed[index].includes(hash2));
+    return input.layer === "names" || !hashes.length || !governedBy(scopes)(input) ? [] : [{ index, item: {
+      provider: input.provider,
+      accountScope: input.accountScope,
+      providerItemId: input.providerItemId,
+      ...input.providerConversationId ? { providerConversationId: input.providerConversationId } : {},
+      corpusId: input.corpusId,
+      chunkHashes: [...new Set(hashes)]
+    } }];
+  });
+  if (!pending.length)
+    return cached3;
+  const judge3 = options.judgeNow ?? ((items, ms) => judgeNow(items, scopes, check, { ...options, budgetMs: ms }));
+  for (let offset = 0;offset < pending.length && now() < deadline; offset += ENGINE_JUDGE_BOOST_MAX_IDS) {
+    const batch = pending.slice(offset, offset + ENGINE_JUDGE_BOOST_MAX_IDS);
+    try {
+      const reached = await judge3(batch.map((entry) => entry.item), Math.max(0, deadline - now()));
+      if (!reached || reached.allowed.length !== batch.length)
+        continue;
+      batch.forEach(({ index, item }, at) => {
+        allowed[index].push(...item.chunkHashes.filter((hash2) => reached.allowed[at]?.includes(hash2)));
+      });
+    } catch {}
+  }
+  const final = await inspectChunks(inputs, scopes, check, { ...options, readOnly: true });
+  const result = chunkResult(inputs, allowed.map((hashes, index) => hashes.filter((hash2) => final.allowed[index]?.includes(hash2))), governedBy(scopes));
+  const rest = pending.filter(({ index, item }) => item.chunkHashes.some((hash2) => !result.allowed[index]?.includes(hash2)));
+  for (let offset = 0;offset < rest.length; offset += ENGINE_JUDGE_BOOST_MAX_IDS) {
+    try {
+      options.boost?.(rest.slice(offset, offset + ENGINE_JUDGE_BOOST_MAX_IDS).map((entry) => entry.item));
+    } catch {}
+  }
+  return result;
+}
+function judgeNow(items, scopes, check, options = {}) {
+  const inputs = items.map((item) => ({ ...item, privateAtAnswer: false }));
+  return runPrivacyReleaseInference(() => inspectChunks(inputs, scopes, check, { ...options, readOnly: writableStoreOpensForbidden() }));
+}
+function frontJudgeNow(client) {
+  return async (items, budgetMs) => {
+    const receipt = await client.post({ kind: "judge_now", items, budgetMs }, { timeoutMs: budgetMs + 500 });
+    return receipt.state === "done" ? receipt.result : undefined;
+  };
+}
+async function inspectChunks(inputs, scopes, check, options = {}) {
+  const now = options.now ?? (() => performance.now());
+  const deadline = now() + Math.max(0, options.budgetMs ?? RELEASE_CHUNK_JUDGE_BUDGET_MS);
+  const allowed = inputs.map(() => []);
+  const blockedItems = new Set;
+  const initial = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
+  const snapshots = new Map;
+  for (const [index, input] of inputs.entries()) {
+    if (input.layer === "names")
+      continue;
+    const status = initial[index];
+    if (!status || status.gone || !["public_or_personal", "legacy"].includes(status.tier))
+      continue;
+    const scope = scopes.find((scope2) => scope2.corpusIds.has(input.corpusId));
+    if (!scope || !input.accountScope)
+      continue;
+    const classification = registeredInstalledTierClassification()?.forLedger(scope.ledger.dbPath);
+    const judge3 = classification?.releaseJudge;
+    const reader = classification?.releaseWindows ?? judge3;
+    const sniffer = classification?.sniffer;
+    const set2 = tierSetForLedger(scope.ledger.dbPath);
+    const store = scope.stores?.().find((store2) => store2.corpusId === input.corpusId) ?? set2?.openStores().find((store2) => store2.corpusId === input.corpusId);
+    const snapshot = store?.releaseItemChunks?.(input);
+    const record8 = scope.ledger.getCurrent(input);
+    if (!snapshot || !record8)
+      continue;
+    const names = JSON.stringify([snapshot.title, snapshot.path, snapshot.sender]);
+    const parentContext = set2 ? parentNamesContext(set2, input) : undefined;
+    snapshots.set(index, () => {
+      const current2 = store?.releaseItemChunks?.(input);
+      const currentClassification = registeredInstalledTierClassification()?.forLedger(scope.ledger.dbPath);
+      const currentReader = currentClassification?.releaseWindows ?? currentClassification?.releaseJudge;
+      return !!current2 && JSON.stringify([current2.title, current2.path, current2.sender]) === names && (!set2 || parentNamesContext(set2, input) === parentContext) && currentReader?.modelId === reader?.modelId && currentReader?.promptVersion === reader?.promptVersion && allowed[index].every((hash2) => current2.chunks.some((chunk) => chunk.contentHash === hash2));
+    });
+    const fullText = snapshot.chunks.map((chunk) => chunk.text).join("");
+    const shortRead = normalize5(fullText).length <= SNIFFER_EXCERPT_MAX_CHARS && record8.reasons.includes(contentDigestReason(fullText)) && record8.reasons.some((reason) => reason.startsWith(sniffer && sniffer.id !== "no_judge" ? `content:sniffer:${sniffer.id}:` : "content:sniffer:") && !reason.endsWith(":undecided"));
+    for (const hash2 of new Set(input.chunkHashes ?? [])) {
+      const chunk = snapshot.chunks.find((chunk2) => chunk2.contentHash === hash2);
+      if (!chunk)
+        continue;
+      if (shortRead) {
+        allowed[index].push(hash2);
+        continue;
+      }
+      const text5 = chunk.text;
+      if (!text5.trim())
+        continue;
+      let complete = true;
+      for (let offset = 0, windowIndex = 0;offset < text5.length; windowIndex++) {
+        let end = Math.min(text5.length, offset + SNIFFER_EXCERPT_MAX_CHARS);
+        if (end < text5.length && text5.charCodeAt(end - 1) >= 55296 && text5.charCodeAt(end - 1) <= 56319 && text5.charCodeAt(end) >= 56320 && text5.charCodeAt(end) <= 57343)
+          end--;
+        const window2 = text5.slice(offset, end);
+        offset = end;
+        let request;
+        const decision = classifyContentTier({
+          text: window2,
+          requireModelRead: true,
+          metadataTier: "private",
+          metadataForced: false,
+          metadataFlagged: false,
+          title: snapshot.title,
+          path: snapshot.path,
+          sender: snapshot.sender,
+          subject: input,
+          mimeType: "text/plain",
+          holdUntilJudged: true,
+          ...parentContext ? { parentContext } : {}
+        }, { sniffer: { id: sniffer?.id ?? "no_judge", judge: (question) => {
+          request = question;
+          return { verdict: "undecided" };
+        } } });
+        let verdict = { verdict: "undecided" };
+        if (decision.contentTier === "secure" || decision.contentTier === "secrets") {
+          verdict = { verdict: "decided", tier: decision.contentTier, code: "window_screen" };
+        } else if (reader && request?.material && request.material.length <= DEFAULT_EXCERPT_LIMIT) {
+          request.stillAsk = () => {
+            const status2 = check.inputs([input])[0];
+            return !!status2 && !status2.gone && ["public_or_personal", "legacy"].includes(status2.tier);
+          };
+          const key2 = {
+            subject: input,
+            contentHash: hash2,
+            modelId: reader.modelId,
+            promptVersion: reader.promptVersion,
+            materialHash: `${request.materialHash}:${TIER_CLASSIFIER_VERSION}`,
+            windowIndex
+          };
+          const cached3 = reader.read(key2);
+          if (cached3)
+            verdict = { verdict: "decided", tier: cached3, code: "window_cached" };
+          else if (judge3 && !options.readOnly && !classification?.unavailableReason && sniffer?.rejudgeReady !== false && now() < deadline) {
+            verdict = await withinBudget((signal) => judge3.resolve(request, signal), deadline - now(), options.schedule);
+            if (verdict.verdict === "decided")
+              judge3.record(key2, verdict.tier);
+          }
+        }
+        if (verdict.verdict === "undecided") {
+          complete = false;
+          break;
+        }
+        if (verdict.tier !== "private") {
+          complete = false;
+          blockedItems.add(tierLedgerIdentityKey(input));
+          if (set2 && !options.readOnly) {
+            const current2 = scope.ledger.getCurrent(input);
+            if (current2)
+              rejudgeStoredContent(set2, current2, {
+                sniffer: { id: sniffer?.id ?? "no_judge", judge: () => verdict },
+                report: emptyTierRejudgeReport(),
+                autoMoves: true,
+                hideRaises: true,
+                preserveMetadata: true
+              });
+            const context2 = set2.automaticMoveContext;
+            const moving = scope.ledger.getCurrent(input);
+            if (context2 && automaticTierMovesAllowed(set2, context2) && moving?.state === "moving") {
+              try {
+                await moveTieredItem({
+                  set: set2,
+                  identity: input,
+                  target: { metadataTier: moving.targetMetadataTier, contentTier: moving.targetContentTier },
+                  expectedGeneration: moving.generation,
+                  ...automaticTierMoveOptions(set2, context2)
+                });
+              } catch {}
+            }
+          }
+          break;
+        }
+      }
+      if (complete)
+        allowed[index].push(hash2);
+      if (blockedItems.has(tierLedgerIdentityKey(input)))
+        break;
+    }
+  }
+  const final = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
+  inputs.forEach((input, index) => {
+    if (input.layer === "names")
+      return;
+    const status = final[index];
+    if (!status || status.gone || !["public_or_personal", "legacy"].includes(status.tier) || blockedItems.has(tierLedgerIdentityKey(input)) || snapshots.get(index)?.() !== true)
+      allowed[index] = [];
+  });
+  return chunkResult(inputs, allowed, governedBy(scopes));
+}
+function governedBy(scopes) {
+  return (input) => scopes.some((scope) => scope.corpusIds.has(input.corpusId));
+}
+function chunkResult(inputs, allowed, governed) {
+  let withheldPassages = 0;
+  const withheldDocuments = new Set;
+  inputs.forEach((input, index) => {
+    if (input.layer === "names")
+      return;
+    if (!governed(input)) {
+      allowed[index] = [...new Set(input.chunkHashes ?? [])];
+      return;
+    }
+    const count = Math.max(1, new Set(input.chunkHashes ?? []).size) - allowed[index].length;
+    if (count > 0) {
+      withheldPassages += count;
+      withheldDocuments.add(tierLedgerIdentityKey(input));
+    }
+  });
+  return { allowed, ungoverned: inputs.map((input) => input.layer !== "names" && !governed(input)), withheldPassages, withheldDocuments: withheldDocuments.size };
+}
+function normalize5(text5) {
+  return text5.replace(/\s+/g, " ").trim();
+}
+async function withinBudget(ask, ms, schedule = (callback, ms2) => {
+  const timer = setTimeout(callback, ms2);
+  return () => clearTimeout(timer);
+}) {
+  if (ms <= 0)
+    return { verdict: "undecided" };
+  const controller = new AbortController;
+  let cancel;
+  try {
+    return await Promise.race([
+      ask(controller.signal),
+      new Promise((resolve30) => {
+        cancel = schedule(() => {
+          controller.abort();
+          resolve30({ verdict: "undecided" });
+        }, ms);
+      })
+    ]);
+  } catch {
+    return { verdict: "undecided" };
+  } finally {
+    cancel?.();
+    controller.abort();
+  }
+}
+var init_chunk_release = __esm(() => {
+  init_release_manifest();
+  init_tier_classifier();
+  init_delphi_scorer();
+  init_tier_ledger();
+  init_tier_rejudge();
+  init_tier_auto_move();
+  init_tier_move();
+  init_store_write_guard();
+  init_answer_activity();
+  init_commands();
+  init_parent_context();
+});
+
 // src/workers/connector-store/tier-visibility.ts
 function childLane(scope) {
   const stores = scope.stores;
@@ -210998,7 +211896,7 @@ function childLane(scope) {
 }
 function createTierVisibilityGate(scopes, onHeldMatches) {
   const readOptions = { personalFirst: onHeldMatches !== undefined };
-  const governedBy = (scope, hits) => hits.filter((hit) => scope.corpusIds.has(hit.corpusId));
+  const governedBy2 = (scope, hits) => hits.filter((hit) => scope.corpusIds.has(hit.corpusId));
   const unreadCorpora = (governed, unread) => {
     for (const hit of governed)
       unread.add(hit.corpusId);
@@ -211014,7 +211912,7 @@ function createTierVisibilityGate(scopes, onHeldMatches) {
     const reads = new Map;
     const unread = new Set;
     for (const scope of current2) {
-      const governed = governedBy(scope, hits);
+      const governed = governedBy2(scope, hits);
       if (governed.length === 0)
         continue;
       try {
@@ -211040,7 +211938,7 @@ function createTierVisibilityGate(scopes, onHeldMatches) {
     const unchanged = new Map;
     let changedDuringRead = false;
     for (const scope of current2) {
-      if (governedBy(scope, hits).length === 0)
+      if (governedBy2(scope, hits).length === 0)
         continue;
       try {
         unchanged.set(scope, childVisibilityUnchanged({ ledger: () => scope.ledger, stores: scope.stores ?? (() => []) }));
@@ -211049,7 +211947,7 @@ function createTierVisibilityGate(scopes, onHeldMatches) {
       }
     }
     await Promise.all(current2.map(async (scope) => {
-      const governed = governedBy(scope, hits);
+      const governed = governedBy2(scope, hits);
       if (governed.length === 0)
         return;
       try {
@@ -211151,7 +212049,7 @@ function interleaveByCorpus(hits) {
   }
   return ordered;
 }
-function createReleaseTierCheck(scopes, secureDerivativeDefault) {
+function createReleaseTierCheck(scopes, secureDerivativeDefault, chunkOptions = {}) {
   function* inputsSteps(inputs) {
     const verdicts = inputs.map(() => ({ tier: "legacy", gone: false }));
     if (inputs.length === 0)
@@ -211212,17 +212110,19 @@ function createReleaseTierCheck(scopes, secureDerivativeDefault) {
     }
     return verdicts;
   }
-  return {
+  const check = {
     secureDerivativeDefault,
+    chunks: (inputs, options) => releaseChunks(inputs, scopes(), check, { ...chunkOptions, ...options }),
     inputs: (inputs) => visibilityHere(inputsSteps(inputs)),
     inputsOffThread: (inputs) => judgedAwaited(async () => {
       const unchanged = scopes().map((scope) => childVisibilityUnchanged({ ledger: () => scope.ledger, stores: scope.stores ?? (() => []) }));
       const verdicts = await visibilityOffThread(inputsSteps(inputs));
-      if (unchanged.some((check) => !check()))
+      if (unchanged.some((check2) => !check2()))
         throw new VisibilityChangedError;
       return verdicts;
     }, () => visibilityHere(inputsSteps(inputs)))
   };
+  return check;
 }
 function registerGovernedStore(lanes, store, newLane, log = () => {}) {
   if (lanes.some((lane) => lane.corpusIds.has(store.corpusId)))
@@ -211263,6 +212163,7 @@ function createPendingGovernance(lanes, newLane, log = () => {}) {
   };
 }
 var init_tier_visibility = __esm(() => {
+  init_chunk_release();
   init_tier_classifier();
   init_tier_ledger();
   init_child_visibility();
@@ -213020,6 +213921,7 @@ var init_source_account_guard = __esm(() => {
 
 // src/workers/classification/installed-tier-classification.ts
 class InstalledTierClassification {
+  readOnly;
   lane;
   automaticMoveContext;
   retirePublic;
@@ -213030,7 +213932,12 @@ class InstalledTierClassification {
   rulesStamp;
   rules = [];
   rulesInvalid = false;
+  releaseResolver;
+  setReleaseWindowResolver(resolve30) {
+    this.releaseResolver = resolve30;
+  }
   constructor(options = {}) {
+    this.readOnly = options.readOnly === true;
     this.env = options.env ?? process.env;
     this.automaticMoveContext = options.automaticMoveContext;
     this.lane = options.lane;
@@ -213041,19 +213948,32 @@ class InstalledTierClassification {
   forLedger(ledgerPath) {
     const rules = this.currentRules();
     const unavailableReason = this.rulesInvalid ? "tier_rules_invalid" : undefined;
+    const promptVersion = snifferPromptVersions(this.ownerContext?.()).cache;
     let sniffer;
     if (this.lane && ledgerPath !== ":memory:") {
       try {
-        sniffer = new CachedTierSniffer(this.snifferStoreForLedger(ledgerPath), this.lane, snifferPromptVersions(this.ownerContext?.()).cache);
+        sniffer = new CachedTierSniffer(this.snifferStoreForLedger(ledgerPath), this.lane, promptVersion);
       } catch {
         sniffer = NO_JUDGE_TIER_SNIFFER;
       }
     } else if (!this.lane && ledgerPath !== ":memory:") {
       sniffer = NO_JUDGE_TIER_SNIFFER;
     }
+    const judgeId = sniffer?.id;
+    const releaseWindows = this.lane && sniffer && ledgerPath !== ":memory:" ? {
+      modelId: `${snifferCacheModelId(this.lane)}:${judgeId}`,
+      promptVersion,
+      read: (key2) => this.snifferStoreForLedger(ledgerPath).chunkWindowVerdict(key2)
+    } : undefined;
     return {
       ...rules.length > 0 ? { rules } : {},
       ...sniffer ? { sniffer } : {},
+      ...releaseWindows ? { releaseWindows } : {},
+      ...releaseWindows && !this.readOnly && !unavailableReason ? { releaseJudge: {
+        ...releaseWindows,
+        record: (key2, tier) => this.snifferStoreForLedger(ledgerPath).recordChunkWindow(key2, tier),
+        resolve: (request, signal) => this.releaseResolver?.(ledgerPath, request, signal, { promptVersion, snifferId: judgeId }) ?? Promise.resolve({ verdict: "undecided" })
+      } } : {},
       ...this.retirePublic ? { retirePublic: true } : {},
       ...unavailableReason ? { unavailableReason } : {}
     };
@@ -213062,7 +213982,7 @@ class InstalledTierClassification {
     const path = tierSnifferPathForLedger(ledgerPath);
     let store = this.snifferStores.get(path);
     if (!store) {
-      store = new TierSnifferStore({ dbPath: path, ...this.now ? { now: this.now } : {} });
+      store = new TierSnifferStore({ dbPath: path, readOnly: this.readOnly, ...this.now ? { now: this.now } : {} });
       this.snifferStores.set(path, store);
     }
     return store;
@@ -213229,6 +214149,58 @@ async function completeSnifferQuestion(model, options) {
     snifferItem: { pass: options.pass, material, ownerContext: options.ownerContext }
   };
   return await model.complete(request);
+}
+async function resolveReleaseWindow(options) {
+  const { request, store, lane, signal } = options;
+  const stillAsk = () => !signal.aborted && request.stillAsk?.() !== false;
+  if (!stillAsk())
+    return { verdict: "undecided" };
+  const sniffer = new CachedTierSniffer(store, lane, options.promptVersion);
+  const id = sniffer.id;
+  let verdict = sniffer.cachedVerdict(request);
+  if (verdict.verdict === "decided" || !request.material || signal.aborted)
+    return verdict;
+  assertSnifferProfileAllowed(lane.profileId, lane.profile);
+  if (await prepareSnifferModel({ model: options.model, signal }))
+    return { verdict: "undecided" };
+  if (id !== sniffer.id || !stillAsk())
+    return { verdict: "undecided" };
+  const material = snifferMaterialForModel(request.material);
+  const key2 = {
+    materialHash: request.materialHash ?? snifferMaterialHash(request.pass, material),
+    modelId: snifferCacheModelId(lane),
+    promptVersion: options.promptVersion,
+    mapRevision: request.mapRevision ?? "none"
+  };
+  for (let attempt = 0;attempt < SNIFFER_MAX_ATTEMPTS && !signal.aborted; attempt++) {
+    if (!stillAsk())
+      break;
+    if (!options.budget.tryConsume(lane.snifferMode === "decision"))
+      break;
+    let completion;
+    try {
+      completion = await completeSnifferQuestion(options.model, { pass: request.pass, material, ownerContext: options.ownerContext, signal });
+    } catch {
+      return { verdict: "undecided" };
+    }
+    if (signal.aborted)
+      break;
+    const stored = snifferCompletionVerdict(completion);
+    if (stored)
+      store.putVerdict(key2, stored, request.subject);
+    else if (attempt === SNIFFER_MAX_ATTEMPTS - 1) {
+      store.putVerdict(key2, { tier: "private", category: "other", confidence: 0, failSafe: true });
+      return { verdict: "decided", tier: "secure", code: "fail_safe", origin: "rule", rule: "fail_safe" };
+    }
+    verdict = sniffer.cachedVerdict(request);
+    if (verdict.verdict === "decided")
+      return verdict;
+  }
+  return { verdict: "undecided" };
+}
+function snifferCompletionVerdict(completion) {
+  const verdict = completion.decisionVerdict ?? parseSnifferBatchResponse(completion.text, new Set([1])).get(1);
+  return verdict ? { ...verdict, failSafe: completion.decisionVerdict?.failSafe ?? false } : undefined;
 }
 async function runSnifferPass(options) {
   const promptVersion = options.promptVersion ?? SNIFFER_PROMPT_VERSION;
@@ -213595,12 +214567,12 @@ async function runSnifferPass(options) {
         }
         consecutiveTransportFailures = 0;
         report.responseChars += text5.length;
-        const verdicts = parseSnifferBatchResponse(text5, new Set(batch.map((_, index) => index + 1)));
+        const decoded2 = snifferCompletionVerdict({ text: text5, decisionVerdict });
         for (const [index, group2] of batch.entries()) {
-          const verdict = decisionVerdict ?? verdicts.get(index + 1);
+          const verdict = index === 0 ? decoded2 : undefined;
           const key2 = keyOf2(group2[0].question);
           if (verdict) {
-            const stored = { ...verdict, failSafe: decisionVerdict?.failSafe ?? false };
+            const stored = verdict;
             group2[0].target.sniffer.putVerdict(key2, stored, group2[0].question);
             for (const item of group2) {
               if (item.target !== group2[0].target)
@@ -213742,6 +214714,30 @@ class TierSnifferService {
       ...options.maxCallsPerDay !== undefined ? { maxCallsPerDay: options.maxCallsPerDay } : {},
       ...options.now ? { now: options.now } : {},
       ...options.budgetStatePath ? { statePath: options.budgetStatePath } : {}
+    });
+    options.installed.setReleaseWindowResolver(async (ledgerPath, request, signal, expected) => {
+      const lane = options.lane;
+      if (this.stopped || signal.aborted || options.modelAvailable?.() === false || options.breakerOpen?.() || lane.rejudgeReady === false)
+        return { verdict: "undecided" };
+      const ownerContext = options.ownerContext?.();
+      const versions2 = snifferPromptVersions(ownerContext);
+      if (versions2.cache !== expected.promptVersion || snifferId(lane, versions2.cache) !== expected.snifferId)
+        return { verdict: "undecided" };
+      const ledger = await readClassificationLedger(options.classificationLedgerPath);
+      const key2 = { lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: versions2.approval };
+      const builtInDefault = options.autoApproveBuiltIn === true && isBuiltInLane(lane);
+      if (!isClassifierApproved(ledger.entries, key2, { builtInDefault }))
+        return { verdict: "undecided" };
+      return resolveReleaseWindow({
+        store: options.installed.snifferStoreForLedger(ledgerPath),
+        lane,
+        model: options.model,
+        request,
+        promptVersion: versions2.cache,
+        ...ownerContext ? { ownerContext } : {},
+        signal,
+        budget: this.budget
+      });
     });
   }
   timers() {
@@ -215085,439 +216081,6 @@ var init_sniffer_service = __esm(() => {
   EXTRACTION_ENQUEUE_GRACE_MS = 15 * 60000;
   DEFAULT_TIER_SNIFFER_ABANDON_MS = 2 * 60000;
   DEFAULT_STALE_MOVE_MS = 60 * 60000;
-});
-
-// src/workers/engine-split/commands.ts
-import { randomUUID as randomUUID36 } from "node:crypto";
-function newEngineCommandId() {
-  return randomUUID36();
-}
-function asRecord19(value2) {
-  return value2 && typeof value2 === "object" && !Array.isArray(value2) ? value2 : undefined;
-}
-function boundedString2(value2, max2 = 512) {
-  return typeof value2 === "string" && value2.length > 0 && value2.length <= max2 ? value2 : undefined;
-}
-function dashboardSample(value2) {
-  const sample = asRecord19(value2);
-  if (!sample)
-    return false;
-  for (const [key2, entry] of Object.entries(sample)) {
-    if (key2 === "source_id" || key2 === "corpus_id" || key2 === "sampled_at") {
-      if (!boundedString2(entry, 200))
-        return false;
-    } else if (typeof entry === "number") {
-      if (!Number.isFinite(entry))
-        return false;
-    } else if (typeof entry !== "boolean") {
-      return false;
-    }
-  }
-  return typeof sample.corpus_id === "string" && typeof sample.source_id === "string";
-}
-function forwardedRequest(kind, value2) {
-  const request = asRecord19(value2);
-  const path = request?.path;
-  if (typeof path !== "string" || !ENGINE_FORWARDED_ROUTES[kind].includes(path)) {
-    throw new EngineCommandError(400, `${kind} does not carry that route.`);
-  }
-  const headers = asRecord19(request.headers);
-  if (!headers || Object.values(headers).some((entry) => typeof entry !== "string"))
-    throw new EngineCommandError(400, "Forwarded headers must be strings.");
-  const body = request.body;
-  if (typeof body !== "string")
-    throw new EngineCommandError(400, "A forwarded body is text.");
-  if (body.length > ENGINE_BODY_MAX_BYTES)
-    throw new EngineCommandError(413, "The command body is too large.");
-  return { path, headers, body };
-}
-function forwardedRequestToRequest(origin, forwarded) {
-  return new Request(origin + forwarded.path, { method: "POST", headers: forwarded.headers, body: forwarded.body });
-}
-function tagForwardedRequest(request, commandId) {
-  forwardedRecordIds.set(request, `engine-${commandId}`);
-  return request;
-}
-function forwardedRecordId(request) {
-  return forwardedRecordIds.get(request);
-}
-async function requestToForwarded(request) {
-  const headers = {};
-  request.headers.forEach((value2, name) => {
-    if (!HOP_HEADERS.has(name.toLowerCase()))
-      headers[name] = value2;
-  });
-  return { path: new URL(request.url).pathname, headers, body: await request.text() };
-}
-async function responseToForwarded(response) {
-  const headers = {};
-  response.headers.forEach((value2, name) => {
-    if (!HOP_HEADERS.has(name.toLowerCase()) && name.toLowerCase() !== "set-cookie")
-      headers[name] = value2;
-  });
-  return { status: response.status, headers, body: await response.text() };
-}
-function parseEngineCommandEnvelope(value2) {
-  const record8 = asRecord19(value2);
-  const id = record8?.id;
-  if (typeof id !== "string" || !ID3.test(id))
-    throw new EngineCommandError(400, "A command needs an id.");
-  const command2 = asRecord19(record8?.command);
-  const kind = command2?.kind;
-  const fail = (message2) => {
-    throw new EngineCommandError(400, message2);
-  };
-  switch (kind) {
-    case "reload": {
-      const target = command2.target;
-      if (!ENGINE_RELOAD_KINDS.includes(target))
-        fail("reload needs a known kind.");
-      const corpora = command2.corpora;
-      if (corpora !== undefined && (!Array.isArray(corpora) || corpora.length > 200 || corpora.some((entry) => typeof entry !== "string" || !SOURCE.test(entry)))) {
-        fail("reload corpora must be corpus ids.");
-      }
-      const frontPid = command2.frontPid;
-      if (frontPid !== undefined && (target !== "models" || !Number.isSafeInteger(frontPid) || frontPid <= 0))
-        fail("frontPid is a process id, carried by a models reload.");
-      return { id, command: {
-        kind,
-        target,
-        ...Array.isArray(corpora) ? { corpora } : {},
-        ...frontPid !== undefined ? { frontPid } : {}
-      } };
-    }
-    case "archive_changed":
-    case "model_prepare":
-      return { id, command: { kind } };
-    case "dashboard_samples": {
-      const samples = command2.samples;
-      if (!Array.isArray(samples) || samples.length > ENGINE_DASHBOARD_SAMPLES_MAX || samples.some((sample) => !dashboardSample(sample))) {
-        fail("dashboard_samples takes count samples only.");
-      }
-      return { id, command: { kind, samples } };
-    }
-    case "delete_source_data":
-    case "tier_override":
-    case "storage_registry":
-    case "capture":
-    case "embed_chunks":
-    case "source_watch":
-    case "extraction_queue":
-    case "people":
-    case "source_sync":
-    case "data_export": {
-      const frontPid = command2.frontPid;
-      if (frontPid !== undefined && (kind !== "delete_source_data" || !Number.isSafeInteger(frontPid) || frontPid <= 0))
-        fail("frontPid is a process id, carried by a delete.");
-      return { id, command: { kind, request: forwardedRequest(kind, command2.request), ...frontPid !== undefined ? { frontPid } : {} } };
-    }
-    case "sync_now":
-    case "start_approved": {
-      const source = command2.source;
-      if (typeof source !== "string" || !SOURCE.test(source))
-        fail(`${kind} needs a source.`);
-      if (kind === "start_approved")
-        return { id, command: { kind, source } };
-      return { id, command: { kind, source, manual: command2.manual === true } };
-    }
-    case "tier_set_recorded": {
-      const locator = boundedString2(command2.locator, 2048);
-      const expected = asRecord19(command2.expected);
-      const provider = boundedString2(expected?.provider, 64);
-      const providerItemId = boundedString2(expected?.providerItemId);
-      const conversation = expected?.providerConversationId;
-      if (!locator || !provider || !providerItemId || conversation !== undefined && !boundedString2(conversation)) {
-        fail("tier_set_recorded needs a locator and the recorded provider and item.");
-      }
-      return { id, command: { kind, locator, expected: {
-        provider,
-        providerItemId,
-        ...typeof conversation === "string" ? { providerConversationId: conversation } : {}
-      } } };
-    }
-    case "export_data": {
-      const destination = boundedString2(command2.destination, 4096);
-      if (!destination || !destination.startsWith("/"))
-        fail("export_data needs an absolute destination.");
-      return { id, command: { kind, destination } };
-    }
-    case "capture_stop": {
-      const source = command2.source;
-      if (source !== "telegram" && source !== "whatsapp")
-        fail("capture_stop needs telegram or whatsapp.");
-      return { id, command: { kind, source } };
-    }
-    case "owner_busy":
-    case "owner_idle": {
-      const resource = command2.resource;
-      if (typeof resource !== "string" || !RESOURCE.test(resource))
-        fail(`${kind} needs a resource.`);
-      const front = boundedString2(command2.front, 64);
-      const seq = command2.seq;
-      if (!front || !Number.isSafeInteger(seq) || seq < 1)
-        fail(`${kind} needs its front and a sequence number.`);
-      return { id, command: { kind, resource, front, seq } };
-    }
-    case "judge_boost": {
-      const raw = command2.identities;
-      if (!Array.isArray(raw) || raw.length === 0 || raw.length > ENGINE_JUDGE_BOOST_MAX_IDS) {
-        fail(`judge_boost takes 1 to ${ENGINE_JUDGE_BOOST_MAX_IDS} items.`);
-      }
-      const identities = raw.map((entry) => {
-        const item = asRecord19(entry);
-        const provider = boundedString2(item?.provider, 64);
-        const accountScope = boundedString2(item?.accountScope);
-        const providerItemId = boundedString2(item?.providerItemId);
-        const conversation = item?.providerConversationId;
-        if (!provider || !accountScope || !providerItemId || conversation !== undefined && !boundedString2(conversation)) {
-          fail("judge_boost items need provider, accountScope and providerItemId.");
-        }
-        return {
-          provider,
-          accountScope,
-          providerItemId,
-          ...typeof conversation === "string" ? { providerConversationId: conversation } : {}
-        };
-      });
-      return { id, command: { kind, identities } };
-    }
-    default:
-      return fail("Unknown command.");
-  }
-}
-function orderKey(command2) {
-  return "source" in command2 ? `source:${command2.source}` : `kind:${command2.kind}`;
-}
-
-class EngineCommandLedger {
-  options;
-  entries = new Map;
-  chains = new Map;
-  now;
-  maxSettled;
-  retentionMs;
-  constructor(options) {
-    this.options = options;
-    this.now = options.now ?? (() => Date.now());
-    this.maxSettled = options.maxSettled ?? 1000;
-    this.retentionMs = options.retentionMs ?? 60 * 60000;
-  }
-  get instanceId() {
-    return this.options.instanceId;
-  }
-  submit(envelope) {
-    this.prune();
-    const body = JSON.stringify(envelope.command);
-    const existing = this.entries.get(envelope.id);
-    if (existing) {
-      if (existing.body !== body)
-        throw new EngineCommandError(409, "That command id was used for a different command.");
-      return { ...existing.receipt };
-    }
-    const receipt = { id: envelope.id, state: "received", instance_id: this.options.instanceId };
-    const key2 = orderKey(envelope.command);
-    const previous = this.chains.get(key2) ?? Promise.resolve();
-    const entry = { body, receipt, settled: Promise.resolve() };
-    const settled = previous.then(() => this.apply(entry, envelope.command));
-    entry.settled = settled;
-    this.entries.set(envelope.id, entry);
-    this.chains.set(key2, settled);
-    settled.then(() => {
-      if (this.chains.get(key2) === settled)
-        this.chains.delete(key2);
-    });
-    return { ...receipt };
-  }
-  get(id) {
-    const entry = this.entries.get(id);
-    return entry ? { ...entry.receipt } : undefined;
-  }
-  async settled(id, wait) {
-    const entry = this.entries.get(id);
-    if (!entry)
-      return;
-    await Promise.race([entry.settled, wait]);
-    return { ...entry.receipt };
-  }
-  async apply(entry, command2) {
-    const handler = this.options.handlers[command2.kind];
-    try {
-      if (!handler)
-        throw new Error(`${command2.kind} is not handled by this background.`);
-      const result = await handler(command2, { id: entry.receipt.id });
-      entry.receipt.state = "done";
-      if (result !== undefined)
-        entry.receipt.result = result;
-    } catch (error2) {
-      entry.receipt.state = "failed";
-      entry.receipt.error = error2 instanceof Error ? error2.message : "The command failed.";
-    }
-    entry.settledAt = this.now();
-  }
-  prune() {
-    const cutoff = this.now() - this.retentionMs;
-    let settled = 0;
-    for (const entry of this.entries.values())
-      if (entry.settledAt !== undefined)
-        settled += 1;
-    for (const [id, entry] of this.entries) {
-      if (entry.settledAt === undefined)
-        continue;
-      if (entry.settledAt >= cutoff && settled <= this.maxSettled)
-        break;
-      this.entries.delete(id);
-      settled -= 1;
-    }
-  }
-}
-function createEngineCommandHandler(options) {
-  const maxWaitMs = options.maxWaitMs ?? 30000;
-  const setTimer = options.setTimeout ?? ((callback, ms) => setTimeout(callback, ms));
-  const clearTimer = options.clearTimeout ?? ((timer) => clearTimeout(timer));
-  return async (request) => {
-    if (!hasValidWorkerBearerToken(request.headers.get("authorization"), options.authToken)) {
-      return Response.json({ error: "unauthorized" }, { status: 401 });
-    }
-    const url2 = new URL(request.url);
-    if (url2.pathname === ENGINE_READY_PATH && request.method === "GET") {
-      const ready = options.ready();
-      const body = { ready, instance_id: options.ledger.instanceId, schema_current: ready };
-      return Response.json(body, { status: ready ? 200 : 503 });
-    }
-    if (url2.pathname === ENGINE_COMMANDS_PATH && request.method === "POST") {
-      if (!options.ready())
-        return Response.json({ error: "starting", instance_id: options.ledger.instanceId }, { status: 503 });
-      try {
-        const envelope = parseEngineCommandEnvelope(await request.json().catch(() => {
-          return;
-        }));
-        const receipt = options.ledger.submit(envelope);
-        return Response.json(receipt, { status: receipt.state === "received" ? 202 : 200 });
-      } catch (error2) {
-        if (error2 instanceof EngineCommandError)
-          return Response.json({ error: error2.message }, { status: error2.status });
-        throw error2;
-      }
-    }
-    if (url2.pathname === ENGINE_MODEL_COMPLETE_PATH && request.method === "POST") {
-      if (!options.ready() || !options.modelComplete)
-        return Response.json({ error: "model_unavailable" }, { status: 503 });
-      const body = await request.json().catch(() => {
-        return;
-      });
-      const parsed = parseModelRequest(body);
-      const priority = parseModelPriority(asRecord19(body)?.priority);
-      if (!parsed || !priority)
-        return Response.json({ error: "invalid_model_request" }, { status: 400 });
-      const modelComplete = options.modelComplete;
-      try {
-        const completion = await runAtLocalInferencePriority(priority, () => modelComplete({ ...parsed, signal: request.signal }));
-        return Response.json(completion);
-      } catch (error2) {
-        if (error2 instanceof OperationError)
-          return Response.json({ operation_error: error2.toJSON() }, { status: 503 });
-        return Response.json({ error: "model_failed", message: error2 instanceof Error ? error2.message : "unknown error" }, { status: 500 });
-      }
-    }
-    if (url2.pathname.startsWith(`${ENGINE_COMMANDS_PATH}/`) && request.method === "GET") {
-      const id = decodeURIComponent(url2.pathname.slice(ENGINE_COMMANDS_PATH.length + 1));
-      if (!ID3.test(id))
-        return Response.json({ error: "not_found" }, { status: 404 });
-      const waitMs = Math.max(0, Math.min(maxWaitMs, Number(url2.searchParams.get("wait") ?? 0) || 0));
-      let timer;
-      const wait = new Promise((resolve30) => {
-        timer = setTimer(resolve30, waitMs);
-      });
-      try {
-        const receipt = waitMs > 0 ? await options.ledger.settled(id, wait) : options.ledger.get(id);
-        if (!receipt)
-          return Response.json({ error: "not_found", instance_id: options.ledger.instanceId }, { status: 404 });
-        return Response.json(receipt);
-      } finally {
-        clearTimer(timer);
-      }
-    }
-    return Response.json({ error: "not_found" }, { status: 404 });
-  };
-}
-function parseModelPriority(value2) {
-  if (value2 === undefined)
-    return "owner";
-  return MODEL_PRIORITIES.find((priority) => priority === value2);
-}
-function parseModelRequest(value2) {
-  const record8 = asRecord19(value2);
-  if (!record8)
-    return;
-  const { system, prompt, localOnly, maxOutputChars, responseSchema } = record8;
-  if (typeof system !== "string" || typeof prompt !== "string" || typeof localOnly !== "boolean")
-    return;
-  if (maxOutputChars !== undefined && (!Number.isSafeInteger(maxOutputChars) || maxOutputChars < 1))
-    return;
-  if (responseSchema !== undefined && !asRecord19(responseSchema))
-    return;
-  return {
-    system,
-    prompt,
-    localOnly,
-    ...maxOutputChars !== undefined ? { maxOutputChars } : {},
-    ...responseSchema !== undefined ? { responseSchema } : {}
-  };
-}
-var ENGINE_RELOAD_KINDS, ENGINE_JUDGE_BOOST_MAX_IDS = 20, ENGINE_JUDGE_BOOST_TTL_MS, ENGINE_FORWARDED_ROUTES, ENGINE_BODY_MAX_BYTES, ENGINE_DASHBOARD_SAMPLES_MAX = 500, EngineCommandError, ID3, SOURCE, RESOURCE, forwardedRecordIds, HOP_HEADERS, MODEL_PRIORITIES;
-var init_commands = __esm(() => {
-  init_engine_split();
-  init_operation_error();
-  init_http();
-  init_answer_activity();
-  ENGINE_RELOAD_KINDS = ["sources", "scope", "exclusions", "embedding", "models", "archive", "extraction", "pacing"];
-  ENGINE_JUDGE_BOOST_TTL_MS = 15 * 60000;
-  ENGINE_FORWARDED_ROUTES = {
-    delete_source_data: ["/dashboard/delete-source-data", "/v1/cli/data-delete"],
-    tier_override: ["/v1/cli/tier", "/dashboard/privacy/items/set", "/v1/privacy-item/raise", "/dashboard/privacy/judge-check"],
-    people: ["/dashboard/people"],
-    source_sync: ["/v1/source/index/sync", "/v1/source/index/x-bookmarks/content/recover"],
-    storage_registry: ["/v1/cli/pairing-placement", "/v1/cli/pairing-account"],
-    capture: [
-      "/dashboard/messaging/start",
-      "/dashboard/messaging/status",
-      "/dashboard/messaging/respond",
-      "/dashboard/messaging/cancel",
-      "/dashboard/messaging/chats",
-      "/dashboard/messaging/scope"
-    ],
-    embed_chunks: ["/v1/source/index/embed"],
-    data_export: ["/v1/cli/data-export"],
-    source_watch: ["/v1/source/watch/create", "/v1/source/watch/cancel"],
-    extraction_queue: [
-      "/v1/source/index/files/plan",
-      "/v1/source/index/files/transcribe",
-      "/v1/source/index/files/recycle-leases",
-      "/v1/source/index/files/janitor-requeue",
-      "/v1/source/index/files/extract-pdfs",
-      "/v1/source/index/files/extract",
-      "/v1/source/index/dropbox/content/plan",
-      "/v1/source/index/dropbox/content/recycle-leases",
-      "/v1/source/index/dropbox/content/janitor-requeue",
-      "/v1/source/index/dropbox/content/extract",
-      "/v1/source/index/dropbox/transcribe"
-    ]
-  };
-  ENGINE_BODY_MAX_BYTES = 16 * 1024 * 1024;
-  EngineCommandError = class EngineCommandError extends Error {
-    status;
-    constructor(status, message2) {
-      super(message2);
-      this.status = status;
-      this.name = "EngineCommandError";
-    }
-  };
-  ID3 = /^[A-Za-z0-9_-]{8,64}$/;
-  SOURCE = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,199}$/;
-  RESOURCE = /^[\x21-\x7e]{1,200}$/;
-  forwardedRecordIds = new WeakMap;
-  HOP_HEADERS = new Set(["host", "content-length", "connection", "transfer-encoding", "keep-alive", "upgrade"]);
-  MODEL_PRIORITIES = ["owner", "background", "maintenance"];
 });
 
 // src/workers/engine-split/client.ts
@@ -225871,12 +226434,12 @@ async function callChatGptTool(name, args, ctx, options, signal, detachedContext
     return final;
   };
   if (name === SEARCH_TOOL_NAME && Array.isArray(result.structuredContent?.evidence) && result.structuredContent.evidence.length > 0) {
-    const reason = ctx.releaseCheck ? await answerReleaseWithheldReasonOffThread(manifests.manifests, ctx.releaseCheck, "personal") : ANSWER_RELEASE_UNVERIFIED;
+    const reason = ctx.releaseCheck ? await answerReleaseWithheldReasonOffThread(manifests.manifests, ctx.releaseCheck, "personal", { chunks: true }) : ANSWER_RELEASE_UNVERIFIED;
     if (reason)
       return record8(searchToolResult({ evidence: [], withheld: result.structuredContent.evidence.length, notes: [reason] }, { pendingPrivacyItems: ctx.pendingPrivacyItems?.() }), true);
   }
   if ((name === "source_answer" || name === "source_answer_result") && result.structuredContent?.status === "answered" && !(result.structuredContent && ("anonymous" in result.structuredContent))) {
-    const reason = ctx.releaseCheck ? await answerReleaseWithheldReasonOffThread(manifests.manifests, ctx.releaseCheck, "personal") : ANSWER_RELEASE_UNVERIFIED;
+    const reason = ctx.releaseCheck ? await answerReleaseWithheldReasonOffThread(manifests.manifests, ctx.releaseCheck, "personal", { chunks: true }) : ANSWER_RELEASE_UNVERIFIED;
     if (reason)
       return record8(withPrivateAnswerOutcome(answerToolResult(withheldSourceAnswer(reason), { pendingPrivacyItems: ctx.pendingPrivacyItems?.() })), true);
   }
@@ -236005,19 +236568,17 @@ async function runSearch(args, options, authorized, context3, signal) {
     const afterWait = currentAccess(authorized);
     if (afterWait !== "active")
       return refusedAccess(afterWait);
-    const evidence = result.structuredContent?.evidence;
-    if (context3.releaseCheck && Array.isArray(evidence) && evidence.length > 0 && await answerReleaseWithheldReasonOffThread(manifests.manifests, context3.releaseCheck, "personal") !== undefined) {
-      const rawRecord = raw;
-      const withheldBefore = typeof rawRecord.withheld === "number" && Number.isFinite(rawRecord.withheld) && rawRecord.withheld > 0 ? rawRecord.withheld : 0;
-      result = searchToolResult({ ...rawRecord, evidence: [], withheld: withheldBefore + evidence.length }, { pendingPrivacyItems: context3.pendingPrivacyItems?.() });
-      withheldAfter = true;
-    }
-    const afterRelease = currentAccess(authorized);
-    if (afterRelease !== "active")
-      return refusedAccess(afterRelease);
     if (recorded)
       note = remotePrivateNote(privateCall.answerId, privateCall.secretMatch);
   }
+  const checked2 = await recheckSearchEvidence(raw, manifests.manifests, context3.releaseCheck);
+  if (checked2.withheldAfter) {
+    result = runWithReleaseCapture(capture, () => searchToolResult(checked2.raw, { pendingPrivacyItems: context3.pendingPrivacyItems?.() }));
+    withheldAfter = Array.isArray(checked2.raw.evidence) && checked2.raw.evidence.length === 0;
+  }
+  const afterRelease = currentAccess(authorized);
+  if (afterRelease !== "active")
+    return refusedAccess(afterRelease);
   if (context3.caller) {
     recordAppRequest({
       caller: context3.caller,
@@ -241855,6 +242416,7 @@ async function main() {
   };
   const installedTierClassification = configureInstalledTierClassification({
     automaticMoveContext,
+    readOnly: !!engineFront,
     env: process.env,
     ...snifferLane ? { lane: snifferLane } : {},
     ...publicTierRetired ? { retirePublic: true } : {},
@@ -242268,6 +242830,21 @@ async function main() {
     stores: () => connectorStores.filter((store) => lane.corpusIds.has(store.corpusId))
   }));
   const raiseJudgeBoosts = engineFront ? frontJudgeBoost(engineFront.client) : (identities) => judgeBoosts.raise(identities);
+  let chunkJudgmentsInFlight = 0;
+  const runChunkJudgment = async (items, budgetMs) => {
+    chunkJudgmentsInFlight++;
+    tierSniffer?.preempt();
+    try {
+      return await judgeNow(items, tierScopes(), createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? "allow"), { budgetMs });
+    } finally {
+      chunkJudgmentsInFlight--;
+      tierSniffer?.wake();
+    }
+  };
+  const chunkReleaseOptions = {
+    judgeNow: engineFront ? frontJudgeNow(engineFront.client) : runChunkJudgment,
+    boost: raiseJudgeBoosts
+  };
   const tierVisibilityGate = createTierVisibilityGate(tierScopes, (identities) => raiseJudgeBoosts(identities));
   const parentLabelResolver = createParentLabelResolver({
     stores: () => connectorStores,
@@ -243663,7 +244240,7 @@ ${key2}`;
     return createAnalystSourceIndexAnswerHandler({
       inferenceGuard: (pack, request, corpusIds) => guardSourceAnswerEvidence({ lanes: sourceAnswerLanes, pack, request, corpusIds }),
       analyst: defaultLocalAnalyst,
-      releaseCheck: createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? "allow"),
+      releaseCheck: createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? "allow", chunkReleaseOptions),
       queryPlanner: createAnalystQueryPlanner(localSourceAnswerModel),
       ...sourceReranker ? { reranker: sourceReranker } : {},
       ...cloudAnalyst ? { cloudAnalyst } : {},
@@ -244713,7 +245290,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     },
     ...connector ? { connector } : {},
     ...sourceAnswer ? { sourceAnswer } : {},
-    sourceAnswerReleaseCheck: createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? "allow"),
+    sourceAnswerReleaseCheck: createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? "allow", chunkReleaseOptions),
     pendingPrivacyItems: () => tierSnifferBacklog?.().pendingItems,
     archiveImportAgent: archiveImportDashboard.agent,
     ownerTierItems: ownerTierItemsEngine,
@@ -245160,7 +245737,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     },
     ...openCitedFile ? { openFile: openCitedFile } : {}
   });
-  const remoteReleaseCheck = createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? "allow");
+  const remoteReleaseCheck = createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? "allow", chunkReleaseOptions);
   if (sourceAnswerLanes) {
     const { createLocalAnswerPath: createLocalAnswerPath2, createLocalPrivateAnswers: createLocalPrivateAnswers2 } = await Promise.resolve().then(() => (init_local_private_answers(), exports_local_private_answers));
     const { privateVeniceMembers: privateVeniceMembers2, createVeniceInboxAnswer: createVeniceInboxAnswer2 } = await Promise.resolve().then(() => (init_venice_inbox_answer(), exports_venice_inbox_answer));
@@ -245941,7 +246518,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     ...snifferEnv.maxCallsPerDay !== undefined ? { maxCallsPerDay: snifferEnv.maxCallsPerDay } : snifferLane.kind === "venice" && !judgeSpending.status().uncapped ? { maxCallsPerDay: Number.MAX_SAFE_INTEGER } : {},
     answersInFlight: () => snifferResource !== undefined && (localModelActivity.busyExcept(snifferResource, "tier_sniffer") || remoteOwnerBusy(snifferResource)),
     ownerInFlight: () => snifferResource !== undefined && (localModelActivity.ownerInFlight(snifferResource) || remoteOwnerBusy(snifferResource)),
-    shouldYield: () => localPrivateAnswers?.overdue() ?? false,
+    shouldYield: () => chunkJudgmentsInFlight > 0 || (localPrivateAnswers?.overdue() ?? false),
     pacing: localPacer,
     breakerOpen: () => secureAnalystPoolState.isBreakerOpen("secure_local", snifferLane.profileId),
     log: (line2) => console.log(line2),
@@ -246087,6 +246664,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         people: ({ request }) => runForwarded(request),
         source_sync: ({ request }) => runForwarded(request),
         data_export: ({ request }) => runForwarded(request),
+        judge_now: ({ items, budgetMs }) => runChunkJudgment(items, budgetMs),
         judge_boost: ({ identities }) => {
           judgeBoosts.raise(identities);
           return { applied: true, raised: identities.length };
@@ -246406,6 +246984,7 @@ var init_server5 = __esm(async () => {
   init_gmail();
   init_mail_source_scope();
   init_source_scope_browser();
+  init_chunk_release();
   init_installed_tier_classification();
   init_built_in_sniffer();
   init_answer_activity();

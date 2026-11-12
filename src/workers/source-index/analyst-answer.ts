@@ -859,7 +859,8 @@ async function checkedRemotePack(pack: EvidencePack, corpusOf: (candidate: Evide
   const inputs = pack.candidates.map(candidate => candidateReleaseInput(candidate, corpusOf(candidate)));
   const report = await checkReleaseChunks(check, inputs);
   const candidates = pack.candidates.flatMap((candidate, index) => {
-    if (inputs[index]!.layer === 'names') return [candidate];
+    // Names alone, or a corpus no tier ledger governs (its corpus's tier decides it, as before).
+    if (inputs[index]!.layer === 'names' || report.ungoverned?.[index] === true) return [candidate];
     const allowed = new Set(report.allowed[index]);
     const chunks = candidate.chunks.filter(text => {
       const hashes = releasePassageHashes(candidate.provenance, text);
@@ -2944,7 +2945,7 @@ export async function searchReleasedEvidence(input: {
   const evidence: ReleasedEvidenceItem[] = [];
   // Each listed item's identity, account included, for the final tier check.
   const identities: ReleaseInput[] = [];
-  let withheld = 0;
+  let withheld = remotePack.report.withheldPassages;
   const seen = new Set<string>();
   // A match whose name is Personal but whose contents are tiered Private is
   // answered from its Private copy (the private answer panel); here it would
@@ -2955,7 +2956,7 @@ export async function searchReleasedEvidence(input: {
   detail.pack.candidates.forEach((candidate, index) => {
     if (contentPrivate.has(index)) return;
     const permitted = permittedCandidates.get(candidate.provenance);
-    if (!permitted) { withheld += 1; return; }
+    if (!permitted) return;
     candidate = permitted;
     // Secure by domain or by tier (an S4 item in a Personal corpus) is
     // withheld like any Private item: counted, never listed.
