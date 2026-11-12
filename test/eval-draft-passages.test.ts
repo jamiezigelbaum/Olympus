@@ -363,3 +363,33 @@ test('minimums parse as name=N, across repeated options', () => {
   expect(() => parseMinimums(['chat=0'])).toThrow('name=N');
   expect(() => parseMinimums(['chat'])).toThrow('name=N');
 });
+
+test('resuming a growth run that wrote over its own input grows from the original set, not the partial one', async () => {
+  const opened = await world();
+  let failNext = false; let drafts = 0;
+  const server = Bun.serve({ port: 0, hostname: '127.0.0.1', async fetch(request) {
+    const prompt = ((await request.json()) as { messages: { content: string }[] }).messages.at(-1)!.content;
+    if (!prompt.includes('UNANSWERABLE')) { drafts++; if (failNext) { failNext = false; return new Response('busy', { status: 503 }); } }
+    const result = prompt.includes('UNANSWERABLE')
+      ? { questions: Array.from({ length: 5 }, (_, i) => `Where are the nonexistent orchid records number ${i}?`) }
+      : { question: 'Which day is the bill due?', quote: 'The Kestrel invoice total is forty seven dollars payable Tuesday' };
+    return Response.json({ choices: [{ message: { content: JSON.stringify(result) } }] });
+  } });
+  try {
+    const model = localDraftModel({ baseUrl: `http://127.0.0.1:${server.port}/v1`, model: 'synthetic' });
+    const strip = (set: Awaited<ReturnType<typeof draftPassageQuestions>>['dataset']) => ({ ...set, questions: set.questions.map(q => q.expectedEvidence ? { ...q, expectedEvidence: q.expectedEvidence.map(({ alternates: _, ...e }) => e) } : q) });
+    const base = strip((await draftPassageQuestions({ opened, count: 2, seed: 'base', model })).dataset);
+    let saved: import('../eval/draft-passage-questions.ts').DraftCheckpoint | undefined;
+    failNext = true;
+    const partial = await draftPassageQuestions({ opened, count: 3, seed: 'grow', model, existing: base, checkpoint: { load: () => undefined, save: state => { saved = structuredClone(state); } } });
+    expect(partial.counts.requestsFailed).toBe(1);
+    // --output was the --append file: the resumed run reads the partly grown set.
+    drafts = 0;
+    const resumed = await draftPassageQuestions({ opened, count: 3, seed: 'grow', model, existing: strip(partial.dataset), checkpoint: { load: () => saved, save: () => {} } });
+    expect(drafts).toBe(1);
+    expect(resumed.counts.existing).toBe(base.questions.length);
+    expect(resumed.counts.kept).toBe(3);
+    // A file that lost questions the run grew from is refused.
+    await expect(draftPassageQuestions({ opened, count: 3, seed: 'grow', model, existing: { ...base, questions: base.questions.slice(1) }, checkpoint: { load: () => saved, save: () => {} } })).rejects.toThrow('grew from');
+  } finally { server.stop(true); opened.close(); }
+});

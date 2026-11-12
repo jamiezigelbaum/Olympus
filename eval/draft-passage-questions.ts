@@ -203,6 +203,11 @@ export type DraftRejectReason = 'not_json' | 'missing_fields' | 'quote_length' |
 /** The drafts a run has made so far, by draft index: what --resume reads back. */
 export interface DraftCheckpoint {
   seed: string; count: number;
+  /**
+   * The ids of the set a growth run started from. A run whose --output is its
+   * --append file writes over that set, so a resume grows from these ids only.
+   */
+  baseIds?: string[];
   /** Each entry names the item it was drafted from, so a resumed run reuses it only for the same sample. */
   drafted: Array<({ question: string; quote: string } | { rejected: true; reason?: DraftRejectReason }) & { index: number; corpusId: string; providerItemId: string }>;
 }
@@ -269,7 +274,14 @@ export async function draftPassageQuestions(input: {
   const count = input.count ?? 60;
   if (!Number.isInteger(count) || count < 1) throw new Error('Count must be a positive integer.');
   const progress = input.progress ?? (() => {});
-  const existing = input.existing?.questions ?? [];
+  const loaded = input.checkpoint?.load();
+  const checkpoint: DraftCheckpoint = loaded && loaded.seed === input.seed && loaded.count === count ? loaded : { seed: input.seed, count, drafted: [] };
+  let existing = input.existing?.questions ?? [];
+  if (checkpoint.baseIds) {
+    const base = new Set(checkpoint.baseIds);
+    if (existing.filter(q => base.has(q.id)).length !== base.size) throw new Error('The set to grow lacks questions the checkpointed run grew from.');
+    existing = existing.filter(q => base.has(q.id));
+  } else if (input.existing) checkpoint.baseIds = existing.map(q => q.id);
   const minimums = input.minimums ?? {};
   const familyOf = new Map(input.opened.stores.map(store => [store.corpusId, store.family]));
   const keptBy = { store: new Map<string, number>(), family: new Map<string, number>() };
@@ -293,8 +305,6 @@ export async function draftPassageQuestions(input: {
   const byFamily: Record<string, number> = {}; const byTier: Record<string, number> = {};
   const rejectedBy: Partial<Record<DraftRejectReason, number>> = {};
   let rejected = 0; let alternatesCount = 0; let sampled = 0;
-  const loaded = input.checkpoint?.load();
-  const checkpoint: DraftCheckpoint = loaded && loaded.seed === input.seed && loaded.count === count ? loaded : { seed: input.seed, count, drafted: [] };
   const resumed = new Map(checkpoint.drafted.map(entry => [entry.index, entry]));
   if (resumed.size) progress(`drafting: resuming with ${resumed.size} of ${count} already drafted`);
   const kept: Array<{ index: number; item: DraftItem; question: string; quote: string; paraphrase: boolean }> = [];

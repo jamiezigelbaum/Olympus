@@ -450,7 +450,9 @@ the set is not added twice. `--min-store <corpus>=N` and `--min-family
 <family>=N` (comma lists or repeated) set the least kept per store or family,
 counting the set being grown. Drafting goes to a store, then a family, still
 short of its minimum before taking stores in turn. `unmetMinimums` reports any
-shortfall left when the count ran out or a store had no more eligible items;
+shortfall left when the count ran out or a store had no more eligible items.
+The checkpoint records which questions the run grew from, so `--resume` after
+a failed request grows from that set even when `--output` overwrote it;
 `existing` and `total` give the set's size before and after.
 
 ```sh
