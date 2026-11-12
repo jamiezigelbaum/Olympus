@@ -1,3 +1,4 @@
+import { currentRemoteReadAccess } from '../remote-access-recheck.ts';
 import { sourceItemReadSelectedItem, sourceItemReadPage } from '../../core/source-index/selected-items.ts';
 import { assertNoSourceIndexOperationalLeakFields } from '../../core/email.ts';
 import { JUDGE_CHOICES, type JudgeChoice } from '../classification/judge-spending.ts';
@@ -3452,7 +3453,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             || identity.providerItemId !== selected.provider_item_id
             || identity.providerConversationId !== selected.provider_conversation_id) return json(refused);
           const result = await store.readItemPages(selected.local_item_id, {
-            page, pages,
+            page, pages, releaseCheck: options.sourceAnswerReleaseCheck,
             scope: () => {
               const scope = connectorStoreReadScope?.(store);
               if (scope?.allowed === false) return scope;
@@ -3463,6 +3464,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               };
             },
           });
+          if (currentRemoteReadAccess() !== 'active') return json(refused);
           if (result.couldNotRead.includes('not_personal')) throw new EmailSourceWorkerError(403, 'not_personal', 'Private item: ask with source_answer');
           assertNoRawEmailFields(result);
           assertNoSourceIndexOperationalLeakFields(result);

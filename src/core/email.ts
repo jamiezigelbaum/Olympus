@@ -767,7 +767,7 @@ export class EmailClient {
       inputs: [{ corpusId: selected.corpus_id, provider: selected.provider, accountScope: selected.account_scope,
         providerItemId: selected.provider_item_id,
         ...(selected.provider_conversation_id ? { providerConversationId: selected.provider_conversation_id } : {}),
-        privateAtAnswer: false, personalContent: true }],
+        privateAtAnswer: false }],
       constraints: { secureDerivativeDefault: 'approval', includeSecureLocalContent: false },
     });
     return result;

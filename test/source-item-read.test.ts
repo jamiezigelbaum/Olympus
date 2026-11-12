@@ -1,8 +1,10 @@
 import { afterEach, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
+import { createHash } from 'node:crypto';
 import { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
-import { contentDigestReason, type TierSniffer, type TierSnifferRequest, type TierSnifferVerdict } from '../src/workers/classification/tier-classifier.ts';
+import type { OwnerTierRule } from '../src/workers/classification/tier-classifier.ts';
+import type { ReleaseCheck, ReleaseInput } from '../src/core/release-manifest.ts';
 import { registerInstalledTierClassification } from '../src/workers/classification/installed-tier-classification-registry.ts';
 import { fixtureConnector, fixtureItem, tempDir } from './helpers/tier-fixtures.ts';
 import { defaultConfig } from '../src/core/config.ts';
@@ -11,90 +13,107 @@ import { operations, type OperationContext } from '../src/core/operations.ts';
 import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { handleMcpCallTool } from '../src/mcp/server.ts';
 import { listMcpTools } from '../src/mcp/tools.ts';
-import { CachedTierSniffer } from '../src/workers/classification/sniffer.ts';
-import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
-import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
-import { runSnifferPass } from '../src/workers/classification/sniffer-resolver.ts';
-import { raiseReadWindowTier } from '../src/workers/connector-store/tier-rejudge.ts';
 import { readFileSync } from 'node:fs';
 import { createReleaseTierCheck } from '../src/workers/connector-store/tier-visibility.ts';
-import { openTierFixture, FIXTURE_PLACEMENT } from './helpers/tier-fixtures.ts';
 
 const cleanup: (() => void)[] = [];
 afterEach(() => { registerInstalledTierClassification(undefined); cleanup.splice(0).reverse().forEach(fn => fn()); });
-async function fixture(text = 'An ordinary orchard note. ', domain: 'internal' | 'secure_local' = 'internal') {
+async function fixture(text = 'An ordinary orchard note. ', domain: 'internal' | 'secure_local' = 'internal', rules: OwnerTierRule[] = []) {
   const tmp = tempDir('item-read-'); cleanup.push(tmp.cleanup);
   const ledger = new TierLedger({ dbPath: `${tmp.dir}/ledger.sqlite` }); cleanup.push(() => ledger.close());
   const store = new LocalConnectorStore({ dbPath: `${tmp.dir}/store.sqlite`, corpusId: `${domain}.fixture.files`, family: 'file', trustDomain: domain, tierLedger: ledger }); cleanup.push(() => store.close());
   const item = fixtureItem({ id: 'note', name: 'Orchard note', text });
   await store.syncFromConnector(fixtureConnector(() => [{ id: 'note', name: 'Orchard note', text }]), {
-    fetchContent: true, tierClassification: { sniffer: { id: 'initial', judge: () => ({ verdict: 'decided', tier: 'private', code: 'ordinary' }) } },
+    fetchContent: true, tierClassification: { rules, sniffer: { id: 'initial', judge: () => ({ verdict: 'decided', tier: 'private', code: 'ordinary' }) } },
   });
-  const calls: TierSnifferRequest[] = [];
-  const cache = new Map<string, TierSnifferVerdict>();
-  let judge: (request: TierSnifferRequest) => TierSnifferVerdict = () => ({ verdict: 'decided', tier: 'private', code: 'ordinary' });
-  const sniffer: TierSniffer = { id: 'windows', cachedVerdict: r => cache.get(r.materialHash!) ?? { verdict: 'undecided' }, judge(r) {
-    calls.push(r); const verdict = judge(r); if (verdict.verdict === 'decided') cache.set(r.materialHash!, verdict); return verdict;
-  } };
-  registerInstalledTierClassification({ forLedger: () => ({ sniffer }) });
+  const calls: Array<{ inputs: readonly ReleaseInput[]; budgetMs: number | undefined }> = [];
+  let allowed: (hash: string) => boolean = () => true;
+  let onCheck: () => void = () => {};
+  const check: ReleaseCheck = {
+    inputs: inputs => inputs.map(() => ({ tier: 'public_or_personal', gone: false })),
+    secureDerivativeDefault: () => 'allow',
+    async chunks(inputs, options) {
+      calls.push({ inputs, budgetMs: options?.budgetMs });
+      onCheck();
+      const cleared = inputs.map(input => (input.chunkHashes ?? []).filter(allowed));
+      const withheldPassages = inputs.reduce((n, input, i) => n + (input.chunkHashes?.length ?? 0) - cleared[i]!.length, 0);
+      return { allowed: cleared, withheldPassages, withheldDocuments: withheldPassages ? 1 : 0 };
+    },
+  };
   const db = new Database(store.dbPath); cleanup.push(() => db.close());
   const ledgerDb = new Database(ledger.dbPath); cleanup.push(() => ledgerDb.close());
-  return { store, ledger, item, calls, db, ledgerDb, judge: (fn: typeof judge) => { judge = fn; } };
+  const read = (id = item.identity.localItemId, options: Parameters<LocalConnectorStore['readItemPages']>[1] = {}) => store.readItemPages(id, { releaseCheck: check, ...options });
+  return { store, ledger, item, calls, db, ledgerDb, check, read,
+    allow: (fn: typeof allowed) => { allowed = fn; }, onCheck: (fn: typeof onCheck) => { onCheck = fn; } };
 }
 function refused(result: Awaited<ReturnType<LocalConnectorStore['readItemPages']>>, code: import('../src/core/source-item-read.ts').SourceItemReadRefusal) {
   expect(result.pages).toEqual([]); expect(result.couldNotRead).toContain(code);
   expect(JSON.stringify(result)).not.toContain('orchard');
 }
 
-test('sentence pages preserve all ordered chunks, resume, cap pages and characters; windows cache', async () => {
-  const text = 'An ordinary orchard sentence. '.repeat(2600).trim();
-  const f = await fixture(text);
-  const first = await f.store.readItemPages(f.item.identity.localItemId, { page: 1, pages: 99 });
-  expect(first.pages).toHaveLength(3); expect(first.nextPage).toBe(4); expect(first.totalChars).toBe(text.length);
-  const rest = await f.store.readItemPages(f.item.identity.localItemId, { page: 4, pages: 3 });
-  const tail = rest.nextPage ? await f.store.readItemPages(f.item.identity.localItemId, { page: rest.nextPage, pages: 3 }) : { pages: [] };
-  const all = [...first.pages, ...rest.pages, ...tail.pages];
-  expect(all.map(p => p.text).join('')).toBe(text);
-  expect(all.every(p => p.text.length <= 12000 && p.text.trimEnd().endsWith('.'))).toBe(true);
-  expect(f.calls.every(c => c.pass === 'content' && c.material!.length <= 1200)).toBe(true);
-  const count = f.calls.length;
-  await f.store.readItemPages(f.item.identity.localItemId, { page: 1, pages: 3 });
-  expect(f.calls).toHaveLength(count);
-});
-
-test('a sentence longer than a page is hard cut without gaps', async () => {
-  const f = await fixture('x'.repeat(25001));
-  const r = await f.store.readItemPages(f.item.identity.localItemId, { page: 1, pages: 3 });
-  expect(r.pages.map(p => p.text.length)).toEqual([12000, 12000, 1001]);
-});
-
-test('Private in the second window raises the item before refusing all text', async () => {
-  const f = await fixture('An ordinary orchard note. '.repeat(100));
-  f.judge(() => ({ verdict: 'decided', tier: f.calls.length === 2 ? 'secure' : 'private', code: 'synthetic' }));
-  refused(await f.store.readItemPages(f.item.identity.localItemId, { page: 1, pages: 1 }), 'not_personal');
-  expect(f.calls).toHaveLength(2); expect(f.ledger.getCurrent(f.item.identity)?.contentTier).toBe('secure');
-});
-
-test('Secret window raises the item and refuses text', async () => {
-  const f = await fixture(); f.judge(() => ({ verdict: 'decided', tier: 'secrets', code: 'synthetic_secret' }));
-  refused(await f.store.readItemPages(f.item.identity.localItemId, { page: 1, pages: 1 }), 'not_personal');
-  expect(f.ledger.getCurrent(f.item.identity)?.contentTier).toBe('secrets');
-});
-
-test('pending window holds page and resumes there', async () => {
-  const f = await fixture(); f.judge(() => ({ verdict: 'undecided', queued: true }));
-  const r = await f.store.readItemPages(f.item.identity.localItemId, { page: 1, pages: 1 });
-  refused(r, 'window_judging'); expect(r.nextPage).toBe(1);
-});
-
-test('changed text cannot use original excerpt clearance', async () => {
+test('allowed pages contain whole stored chunks in order, with bounded pages and resumable reads', async () => {
   const f = await fixture();
-  expect(f.ledger.getCurrent(f.item.identity)?.reasons).toContain(contentDigestReason('An ordinary orchard note. '));
-  f.db.query('UPDATE chunks SET bounded_text = ?').run('Changed orchard text.');
-  f.judge(() => ({ verdict: 'undecided' }));
-  refused(await f.store.readItemPages(f.item.identity.localItemId, { page: 1, pages: 1 }), 'window_judging');
-  expect(f.calls[0]?.material).toBe('Changed orchard text.');
+  // Seed exact stored boundaries: this proof exercises reading, independently of extraction.
+  f.db.transaction(() => {
+    const item = f.db.query('SELECT item_pk FROM items').get() as { item_pk: number };
+    f.db.exec('DELETE FROM chunks');
+    const insert = f.db.query('INSERT INTO chunks (item_pk, chunk_index, bounded_text, content_hash, indexed_at) VALUES (?, ?, ?, ?, ?)');
+    [6000, 6000, 1, 12000, 3000, 9001, 1000].forEach((length, index) => {
+      const text = String(index).repeat(length);
+      insert.run(item.item_pk, index, text, createHash('sha256').update(text).digest('hex'), '2026-11-12T00:00:00.000Z');
+    });
+  })();
+  const chunks = f.db.query('SELECT bounded_text, content_hash FROM chunks ORDER BY chunk_index').all() as Array<{ bounded_text: string; content_hash: string }>;
+  const all: Array<{ page: number; text: string }> = [];
+  let page: number | undefined = 1;
+  do {
+    const r = await f.read(f.item.identity.localItemId, { page, pages: 99 });
+    expect(r.pages.length).toBeGreaterThan(0);
+    expect(r.pages.length).toBeLessThanOrEqual(3);
+    all.push(...r.pages); page = r.nextPage;
+  } while (page);
+  expect(all.map(p => p.text).join('')).toBe(chunks.map(c => c.bounded_text).join(''));
+  expect(all.every(p => p.text.length <= 12000)).toBe(true);
+  let offset = 0;
+  for (const page of all) {
+    let text = '';
+    while (text.length < page.text.length) text += chunks[offset++]!.bounded_text;
+    expect(page.text).toBe(text);
+  }
+  expect(f.calls.flatMap(c => c.inputs.flatMap(i => i.chunkHashes ?? []))).toEqual(chunks.map(c => c.content_hash));
+  expect(f.calls.every(c => c.budgetMs === 8000)).toBe(true);
 });
+
+for (const verdict of ['unread', 'Private'] as const) {
+  test(`a page with one ${verdict} chunk withholds its entire text and counts held passages`, async () => {
+    const f = await fixture('An ordinary orchard note. '.repeat(200));
+    const chunks = f.db.query('SELECT content_hash FROM chunks ORDER BY chunk_index').all() as Array<{ content_hash: string }>;
+    expect(chunks.length).toBeGreaterThan(1);
+    f.allow(hash => hash !== chunks[1]!.content_hash);
+    // Private receipts use the actual shared gate; the read owns no tier raise.
+    if (verdict === 'Private') registerInstalledTierClassification({ forLedger: () => ({
+      releaseWindows: { modelId: 'fixture-judge', promptVersion: 'fixture',
+        read: key => key.contentHash === chunks[1]!.content_hash ? 'secure' : 'private' },
+    }) });
+    const releaseCheck = verdict === 'Private' ? createReleaseTierCheck(() => [{ ledger: f.ledger,
+      corpusIds: new Set([f.store.corpusId]), stores: () => [f.store] }], () => 'allow') : f.check;
+    const r = await f.read(f.item.identity.localItemId, { releaseCheck, budgetMs: 0 });
+    refused(r, 'window_judging'); expect(r.nextPage).toBe(1);
+    const withheld = verdict === 'Private' ? new Set(chunks.map(chunk => chunk.content_hash)).size : 1;
+    expect(r.coverageNote).toBe(`${withheld} passages from 1 documents are still being checked for privacy and weren't shared. Ask again in a minute.`);
+  });
+}
+
+for (const failure of ['missing', 'unsupported', 'failing'] as const) {
+  test(`${failure} release check withholds and counts all requested chunks`, async () => {
+    const f = await fixture();
+    const { chunks, ...withoutChunks } = f.check;
+    const check = failure === 'missing' ? undefined : failure === 'unsupported' ? withoutChunks
+      : { ...f.check, chunks: async () => { throw new Error('fixture unavailable'); } };
+    const r = await f.read(f.item.identity.localItemId, { releaseCheck: check });
+    refused(r, 'window_judging'); expect(r.nextPage).toBe(1); expect(r.coverageNote).toContain('1 passages from 1 documents');
+  });
+}
 
 for (const state of ['moving', 'pending', 'metadataPending', 'contentPending', 'rejudge'] as const) {
   test(`refuses unstable ledger: ${state}`, async () => {
@@ -104,41 +123,40 @@ for (const state of ['moving', 'pending', 'metadataPending', 'contentPending', '
       const row = f.ledger.getCurrent(f.item.identity)!;
       f.ledger.openRejudgeQuestion(f.item.identity, { expectedGeneration: row.generation, decision: { ...row, state: 'pending', decidedBy: 'sniffer', snifferId: 'windows', contentPending: true }, keepVisible: false });
     } else f.ledgerDb.query('UPDATE tier_items SET state = ?').run(state);
-    refused(await f.store.readItemPages(f.item.identity.localItemId, { page: 1, pages: 1 }), 'held_until_judged');
+    refused(await f.read(f.item.identity.localItemId, { page: 1, pages: 1 }), 'held_until_judged');
     expect(f.calls).toHaveLength(0);
   });
 }
 
 for (const change of ['tier', 'override'] as const) {
-  test(`rechecks ${change} during judge await`, async () => {
+  test(`rechecks ${change} during release await`, async () => {
     const f = await fixture();
-    f.judge(() => {
+    f.onCheck(() => {
       queueMicrotask(() => {
         if (change === 'tier') f.ledgerDb.exec("UPDATE tier_items SET content_tier = 'secure'");
         else f.ledger.setOverride(f.item.identity, { kind: 'tier', tier: 'secure' });
       });
-      return { verdict: 'decided', tier: 'private', code: 'ordinary' };
     });
-    refused(await f.store.readItemPages(f.item.identity.localItemId, { page: 1, pages: 1 }), 'not_personal');
+    refused(await f.read(f.item.identity.localItemId, { page: 1, pages: 1 }), 'not_personal');
   });
 }
 
 test('Private item in internal refused; Personal item in secure-local readable', async () => {
   const f = await fixture(); f.ledgerDb.exec("UPDATE tier_items SET content_tier = 'secure'");
-  refused(await f.store.readItemPages(f.item.identity.localItemId, { page: 1, pages: 1 }), 'not_personal');
+  refused(await f.read(f.item.identity.localItemId, { page: 1, pages: 1 }), 'not_personal');
   const p = await fixture('Personal orchard text.', 'secure_local');
-  expect((await p.store.readItemPages(p.item.identity.localItemId, { page: 1, pages: 1 })).pages[0]?.text).toBe('Personal orchard text.');
+  expect((await p.read(p.item.identity.localItemId, { page: 1, pages: 1 })).pages[0]?.text).toBe('Personal orchard text.');
 });
 
 test('scope, names-only, content-private and extraction refusals contain codes only', async () => {
   const f = await fixture();
-  refused(await f.store.readItemPages('missing', { page: 1, pages: 1 }), 'not_in_scope');
-  refused(await f.store.readItemPages(f.item.identity.localItemId, { page: 1, pages: 1, scope: () => ({ allowed: false }) }), 'not_in_scope');
-  refused(await f.store.readItemPages(f.item.identity.localItemId, { page: 1, pages: 1, scope: () => ({ allowed: true, contentAllowed: false }) }), 'names_only');
+  refused(await f.read('missing', { page: 1, pages: 1 }), 'not_in_scope');
+  refused(await f.read(f.item.identity.localItemId, { page: 1, pages: 1, scope: () => ({ allowed: false }) }), 'not_in_scope');
+  refused(await f.read(f.item.identity.localItemId, { page: 1, pages: 1, scope: () => ({ allowed: true, contentAllowed: false }) }), 'names_only');
   const original = f.store.contentHeldPrivate.bind(f.store); f.store.contentHeldPrivate = () => true;
-  refused(await f.store.readItemPages(f.item.identity.localItemId, { page: 1, pages: 1 }), 'content_private'); f.store.contentHeldPrivate = original;
+  refused(await f.read(f.item.identity.localItemId, { page: 1, pages: 1 }), 'content_private'); f.store.contentHeldPrivate = original;
   f.db.exec('DELETE FROM chunks');
-  refused(await f.store.readItemPages(f.item.identity.localItemId, { page: 1, pages: 1 }), 'extraction_pending');
+  refused(await f.read(f.item.identity.localItemId, { page: 1, pages: 1 }), 'extraction_pending');
 });
 
 
@@ -149,7 +167,7 @@ function config() {
   const c = defaultConfig(); c.sourceIndex.enabled = true; c.email.enabled = true; c.email.baseUrl = 'http://worker.test/v1'; return c;
 }
 function client(f: Awaited<ReturnType<typeof fixture>>, scope?: NonNullable<Parameters<typeof createEmailSourceWorker>[0]>['connectorStoreReadScope']) {
-  const worker = createEmailSourceWorker({ connectorStores: [f.store], ...(scope ? { connectorStoreReadScope: scope } : {}) });
+  const worker = createEmailSourceWorker({ connectorStores: [f.store], sourceAnswerReleaseCheck: f.check, ...(scope ? { connectorStoreReadScope: scope } : {}) });
   return new EmailClient(config(), new DirectHttpEmailTransport(async (url, init) => worker.fetch(new Request(url, init))));
 }
 
@@ -189,33 +207,15 @@ test('client permits pages text while rejecting raw and operational fields', asy
   }
 });
 
-test('MCP connection revoked during a window read receives only the fixed refusal', async () => {
+test('MCP connection revoked during a chunk release receives only the fixed refusal', async () => {
   const f = await fixture('Personal orchard.'); let active = true;
-  f.judge(() => { queueMicrotask(() => { active = false; }); return { verdict: 'decided', tier: 'private', code: 'ordinary' }; });
+  f.onCheck(() => { queueMicrotask(() => { active = false; }); });
   const ctx = { config: config(), email: client(f), delphi: {} } as OperationContext;
   const result = await handleMcpCallTool({ params: { name: 'source_item_read', arguments: { selected_item: selected(f) } } }, () => ctx, 'remote', () => active ? 'active' : 'revoked');
   expect(active).toBe(false); expect(result.isError).toBe(true);
   expect(JSON.stringify(result)).toContain('invalid_token'); expect(JSON.stringify(result)).not.toContain('orchard');
 });
 
-
-test('real queue resolves settled-item window questions, caches each once, and resumes', async () => {
-  const f = await fixture('Personal orchard text.');
-  const queue = new TierSnifferStore({ dbPath: ':memory:' }); cleanup.push(() => queue.close());
-  const sniffer = new CachedTierSniffer(queue, BUILT_IN_SNIFFER_LANE);
-  registerInstalledTierClassification({ forLedger: () => ({ sniffer }) });
-  const first = await f.store.readItemPages(f.item.identity.localItemId, { page: 1, pages: 1 });
-  refused(first, 'window_judging');
-  let modelCalls = 0;
-  await runSnifferPass({ targets: [{ ledger: f.ledger, sniffer: queue }], lane: BUILT_IN_SNIFFER_LANE, model: { async complete() {
-    modelCalls++;
-    return { modelId: BUILT_IN_SNIFFER_LANE.modelId, text: JSON.stringify({ verdicts: [{ i: 1, tier: 'personal', category: 'ordinary', ownRecord: false, privateKind: 'none', confidence: 0.99 }] }) };
-  } } });
-  expect(modelCalls).toBe(1);
-  expect((await f.store.readItemPages(f.item.identity.localItemId, { page: 1, pages: 1 })).pages).toHaveLength(1);
-  expect((await f.store.readItemPages(f.item.identity.localItemId, { page: 1, pages: 1 })).pages).toHaveLength(1);
-  expect(modelCalls).toBe(1);
-});
 
 test('search skill directs long-hit reads and Private selected-item answers', () => {
   const skill = readFileSync(new URL('../skills/ask-sources/SKILL.md', import.meta.url), 'utf8');
@@ -240,75 +240,34 @@ test('remote pages are withheld if the owner overrides the item during release a
 });
 
 
-test('routed window raises hide copies through normal queued moves and Secrets disposition', async () => {
-  for (const tier of ['secure', 'secrets'] as const) {
-    const tmp = tempDir('read-window-routed-'); cleanup.push(tmp.cleanup);
-    const f = openTierFixture(tmp.dir, { embed: false }); cleanup.push(f.close);
-    let reading = false;
-    const sniffer: TierSniffer = { id: 'routed-fixture', judge: () => ({ verdict: 'decided', tier: reading ? tier : 'private', code: 'synthetic' }) };
-    registerInstalledTierClassification({ forLedger: () => ({ sniffer }) });
-    await f.set.sync(fixtureConnector(() => [{ id: 'note', name: 'Orchard note', text: 'Personal orchard.' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });
-    reading = true;
-    const identity = fixtureItem({ id: 'note', name: 'Orchard note' }).identity;
-    refused(await f.stores.internal!.readItemPages(identity.localItemId, { page: 1, pages: 1 }), 'not_personal');
-    const row = f.ledger.getCurrent(identity)!;
-    expect(tier === 'secure' ? row.targetContentTier : row.contentTier).toBe(tier);
-    expect(f.stores.internal!.localContent(identity.localItemId)?.chunks ?? []).toEqual([]);
-  }
-});
-
-test('real queued Private verdict raises before a retry and never credits a whole-item Personal verdict', async () => {
-  const f = await fixture('Personal orchard text.');
-  const original = f.ledger.getCurrent(f.item.identity)!;
-  const queue = new TierSnifferStore({ dbPath: ':memory:' }); cleanup.push(() => queue.close());
-  const sniffer = new CachedTierSniffer(queue, BUILT_IN_SNIFFER_LANE);
-  registerInstalledTierClassification({ forLedger: () => ({ sniffer }) });
-  refused(await f.store.readItemPages(f.item.identity.localItemId, { page: 1, pages: 1 }), 'window_judging');
-  const model = { async complete() {
-    return { modelId: BUILT_IN_SNIFFER_LANE.modelId, text: JSON.stringify({ verdicts: [{ i: 1, tier: 'private', category: 'health', ownRecord: true, privateKind: 'health', confidence: 0.99 }] }) };
-  } };
-  // Without the store's raise hook the item isn't raised, and the read still refuses with no text.
-  await runSnifferPass({ targets: [{ ledger: f.ledger, sniffer: queue }], lane: BUILT_IN_SNIFFER_LANE, model });
-  expect(f.ledger.getCurrent(f.item.identity)!.contentTier).toBe(original.contentTier);
-  refused(await f.store.readItemPages(f.item.identity.localItemId, { page: 1, pages: 1 }), 'not_personal');
-  await runSnifferPass({ targets: [{ ledger: f.ledger, sniffer: queue,
-    raiseReadWindow: (current, tier, snifferId) => raiseReadWindowTier(f.store, f.ledger, current, tier, snifferId) }],
-  lane: BUILT_IN_SNIFFER_LANE, model });
-  const row = f.ledger.getCurrent(f.item.identity)!;
-  expect(row.contentTier).toBe('secure'); expect(row.metadataTier).toBe(original.metadataTier);
-  refused(await f.store.readItemPages(f.item.identity.localItemId, { page: 1, pages: 1 }), 'not_personal');
-});
-
 test('stored hold reason and live account/filter boundaries refuse without text', async () => {
   const f = await fixture();
-  refused(await f.store.readItemPages(f.item.identity.localItemId, { scope: () => ({ allowed: true, accountScope: 'other' }) }), 'not_in_scope');
-  refused(await f.store.readItemPages(f.item.identity.localItemId, { scope: () => ({ allowed: true, filters: { provider: 'other' } }) }), 'not_in_scope');
-  refused(await f.store.readItemPages(f.item.identity.localItemId, { scope: () => ({ allowed: true, contentFilters: { provider: 'other' } }) }), 'names_only');
+  refused(await f.read(f.item.identity.localItemId, { scope: () => ({ allowed: true, accountScope: 'other' }) }), 'not_in_scope');
+  refused(await f.read(f.item.identity.localItemId, { scope: () => ({ allowed: true, filters: { provider: 'other' } }) }), 'not_in_scope');
+  refused(await f.read(f.item.identity.localItemId, { scope: () => ({ allowed: true, contentFilters: { provider: 'other' } }) }), 'names_only');
   const row = f.ledger.getCurrent(f.item.identity)!;
   f.ledgerDb.query('UPDATE tier_items SET reasons_json = ?').run(JSON.stringify([...row.reasons, 'content:held_until_judged']));
-  refused(await f.store.readItemPages(f.item.identity.localItemId), 'held_until_judged');
+  refused(await f.read(f.item.identity.localItemId), 'held_until_judged');
 });
 
 for (const change of ['scope', 'text', 'pending'] as const) {
-  test(`rechecks ${change} after a window await`, async () => {
+  test(`rechecks ${change} after a release await`, async () => {
     const f = await fixture(); let allowed = true;
-    f.judge(() => {
+    f.onCheck(() => {
       queueMicrotask(() => {
         if (change === 'scope') allowed = false;
         if (change === 'text') f.db.query('UPDATE chunks SET bounded_text = ?').run('Changed orchard text.');
         if (change === 'pending') f.ledgerDb.exec('UPDATE tier_items SET content_pending = 1');
       });
-      return { verdict: 'decided', tier: 'private', code: 'ordinary' };
     });
-    refused(await f.store.readItemPages(f.item.identity.localItemId, { scope: () => ({ allowed }) }), change === 'scope' ? 'not_in_scope' : 'held_until_judged');
+    refused(await f.read(f.item.identity.localItemId, { scope: () => ({ allowed }) }), change === 'scope' ? 'not_in_scope' : 'held_until_judged');
   });
 }
 
-test('a Private window raises even when the original item had a Personal override', async () => {
+test('an owner Personal override still uses the shared release check', async () => {
   const f = await fixture(); f.ledger.setOverride(f.item.identity, { kind: 'tier', tier: 'private' });
-  f.judge(() => ({ verdict: 'decided', tier: 'secure', code: 'synthetic' }));
-  refused(await f.store.readItemPages(f.item.identity.localItemId), 'not_personal');
-  expect(f.ledger.getCurrent(f.item.identity)?.contentTier).toBe('secure');
+  expect((await f.read()).pages).toHaveLength(1);
+  expect(f.calls).toHaveLength(1);
 });
 
 test('engine Private refusal carries the fixed code and message with no item text', async () => {
@@ -319,4 +278,68 @@ test('engine Private refusal carries the fixed code and message with no item tex
   expect(response.status).toBe(403);
   expect(result).toMatchObject({ error: { code: 'not_personal', message: 'Private item: ask with source_answer' } });
   expect(JSON.stringify(result)).not.toContain('orchard');
+});
+
+
+test('a held later page keeps cleared pages, resumes at the held page and carries coverage through the client', async () => {
+  const f = await fixture(Array.from({ length: 2000 }, (_, i) => `Orchard note ${i}. `).join(''));
+  const first = await f.read();
+  const hashes = f.calls[0]!.inputs[0]!.chunkHashes!;
+  f.allow(hash => hashes.includes(hash));
+  const result = await client(f).sourceItemRead({ selectedItem: selected(f), pages: 3 });
+  expect(result.pages).toEqual(first.pages);
+  expect(result.couldNotRead).toEqual(['window_judging']);
+  expect(result.nextPage).toBe(2);
+  expect(result.coverageNote).toContain('from 1 documents');
+  expect(JSON.stringify(result)).not.toContain('Orchard note 1999.');
+  f.allow(() => true);
+  const resumed = await f.read(f.item.identity.localItemId, { page: result.nextPage! });
+  expect(resumed.pages[0]?.page).toBe(2);
+  expect(resumed.couldNotRead).toEqual([]);
+});
+
+test('an oversized stored chunk is withheld whole', async () => {
+  const f = await fixture(); f.db.query('UPDATE chunks SET bounded_text = ?').run('orchard'.repeat(2000));
+  refused(await f.read(), 'extraction_pending');
+  expect(f.calls).toHaveLength(0);
+});
+
+test('engine withholds when its release check is missing', async () => {
+  const f = await fixture();
+  const worker = createEmailSourceWorker({ connectorStores: [f.store] });
+  const response = await worker.fetch(new Request('http://worker.test/v1/source/item/read', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ selected_item: selected(f) }) }));
+  const result = await response.json() as Awaited<ReturnType<typeof f.read>>;
+  refused(result, 'window_judging'); expect(result.coverageNote).toContain('1 passages from 1 documents');
+});
+
+
+for (const ownerDecision of ['override', 'owner_rule'] as const) {
+  test(`the shared check credits an owner's ${ownerDecision} for long content without a model read`, async () => {
+    const rules: OwnerTierRule[] = ownerDecision === 'owner_rule' ? [{ id: 'orchard-notes', match: { kind: 'pathPrefix', value: '/Files/' }, tier: 'private', strength: 'force' }] : [];
+    const f = await fixture('An ordinary orchard note. '.repeat(200), 'internal', rules);
+    if (ownerDecision === 'override') f.ledger.setOverride(f.item.identity, { kind: 'tier', tier: 'private' });
+    const check = createReleaseTierCheck(() => [{ ledger: f.ledger, corpusIds: new Set([f.store.corpusId]), stores: () => [f.store] }], () => 'allow');
+    const result = await f.read(f.item.identity.localItemId, { releaseCheck: check, budgetMs: 0 });
+    expect(result.pages).toHaveLength(1);
+    expect(result.couldNotRead).toEqual([]);
+  });
+}
+
+
+test('revoking a Personal owner override during the release await withholds all text', async () => {
+  const f = await fixture(); f.ledger.setOverride(f.item.identity, { kind: 'tier', tier: 'private' });
+  f.onCheck(() => { queueMicrotask(() => f.ledger.clearOverride(f.item.identity)); });
+  refused(await f.read(), 'held_until_judged');
+});
+
+test('an unread Personal item in a secure-local corpus is held and counted', async () => {
+  const f = await fixture('An ordinary orchard note. ', 'secure_local');
+  f.allow(() => false);
+  const result = await f.read();
+  refused(result, 'window_judging'); expect(result.coverageNote).toContain('1 passages from 1 documents');
+});
+
+test('a missing ledger row refuses before checking chunks', async () => {
+  const f = await fixture(); f.ledgerDb.exec('DELETE FROM tier_items');
+  refused(await f.read(), 'held_until_judged'); expect(f.calls).toHaveLength(0);
 });

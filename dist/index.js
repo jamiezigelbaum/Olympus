@@ -6977,13 +6977,16 @@ function parseSourceItemReadResult(value) {
     return { page: integer(entry.page, 1), text: entry.text };
   });
   const couldNotRead = r.couldNotRead.map((code) => typeof code === "string" && SOURCE_ITEM_READ_REFUSALS.includes(code) ? code : fail());
-  if (couldNotRead.length > 0 && pages.length > 0)
+  if (couldNotRead.some((code) => code !== "window_judging") && pages.length > 0)
+    return fail();
+  if (r.coverageNote !== undefined && typeof r.coverageNote !== "string")
     return fail();
   return {
     pages,
     totalPages: integer(r.totalPages, 0),
     totalChars: integer(r.totalChars, 0),
     couldNotRead,
+    ...r.coverageNote === undefined ? {} : { coverageNote: r.coverageNote },
     ...r.nextPage === undefined ? {} : { nextPage: integer(r.nextPage, 1) }
   };
 }
@@ -20628,35 +20631,20 @@ var init_media_cache = __esm(() => {
   MEDIA_CACHE_ORPHAN_AGE_MS = 24 * 60 * 60000;
   MEDIA_CACHE_DIR_NAMES = new Set(["media-cache", "olympus-media"]);
 });
-// src/workers/source-index/media-judge.ts
-var MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES, MEDIA_JUDGE_PROMPTS, MEDIA_JUDGE_THRESHOLDS, promptVectorCache;
-var init_media_judge = __esm(() => {
-  MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES = new Set(["medical_document"]);
-  MEDIA_JUDGE_PROMPTS = Object.freeze({
-    id_document: "a photo of a passport, national identity card or driving licence",
-    bank_card: "a photo of a credit card, debit card or bank card",
-    financial_document: "a bank statement, payslip or document showing account numbers",
-    medical_document: "a medical report or lab test results document",
-    intimate: "a nude, intimate or sexually explicit photo",
-    ordinary: "an ordinary photo of a place, a room, food, a landscape or people"
-  });
-  MEDIA_JUDGE_THRESHOLDS = Object.freeze({
-    margin: 0.04,
-    intimateMargin: 0.025
-  });
-  promptVectorCache = new Map;
-});
 
-// src/workers/connector-store/stored-names.ts
-var init_stored_names = __esm(() => {
-  init_tier_ledger();
+// src/workers/remote-access-recheck.ts
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
+var readAuthorization;
+var init_remote_access_recheck = __esm(() => {
+  init_remote_result();
+  readAuthorization = new AsyncLocalStorage6;
 });
-
-// src/workers/connector-store/parent-context.ts
-var init_parent_context = __esm(() => {
-  init_sniffer();
+// src/workers/connector-store/tier-placement.ts
+var init_tier_placement = __esm(() => {
+  init_types();
+  init_engine();
   init_tier_classifier();
-  init_stored_names();
+  init_tier_ledger();
 });
 
 // connect-relay/shared/tokens.ts
@@ -20744,40 +20732,6 @@ var init_secrets_disposition = __esm(() => {
   init_tier_ledger_path();
   init_job_names();
 });
-// src/workers/connector-store/tier-placement.ts
-var init_tier_placement = __esm(() => {
-  init_types();
-  init_engine();
-  init_tier_classifier();
-  init_tier_ledger();
-});
-
-// src/workers/classification/secret-scan-off-thread.ts
-var init_secret_scan_off_thread = __esm(() => {
-  init_engine();
-});
-
-// src/workers/connector-store/tier-rejudge.ts
-var init_tier_rejudge = __esm(() => {
-  init_sniffer();
-  init_media_judge();
-  init_parent_context();
-  init_stored_names();
-  init_tier_classifier();
-  init_tier_ledger();
-  init_secrets_disposition();
-  init_tier_placement();
-  init_secret_scan_off_thread();
-  init_engine();
-});
-
-// src/workers/remote-access-recheck.ts
-import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
-var readAuthorization;
-var init_remote_access_recheck = __esm(() => {
-  init_remote_result();
-  readAuthorization = new AsyncLocalStorage6;
-});
 
 // src/workers/connector-store/child-visibility.ts
 var askReads, releasing;
@@ -20839,6 +20793,25 @@ var init_chunk_selection = __esm(() => {
 // src/core/source-index/reactions.ts
 var init_reactions = () => {};
 
+// src/workers/source-index/media-judge.ts
+var MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES, MEDIA_JUDGE_PROMPTS, MEDIA_JUDGE_THRESHOLDS, promptVectorCache;
+var init_media_judge = __esm(() => {
+  MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES = new Set(["medical_document"]);
+  MEDIA_JUDGE_PROMPTS = Object.freeze({
+    id_document: "a photo of a passport, national identity card or driving licence",
+    bank_card: "a photo of a credit card, debit card or bank card",
+    financial_document: "a bank statement, payslip or document showing account numbers",
+    medical_document: "a medical report or lab test results document",
+    intimate: "a nude, intimate or sexually explicit photo",
+    ordinary: "an ordinary photo of a place, a room, food, a landscape or people"
+  });
+  MEDIA_JUDGE_THRESHOLDS = Object.freeze({
+    margin: 0.04,
+    intimateMargin: 0.025
+  });
+  promptVectorCache = new Map;
+});
+
 // src/workers/connector-store/local-index.ts
 class MutablePkList {
   values = [];
@@ -20888,9 +20861,7 @@ var init_local_index = __esm(() => {
   init_engine();
   init_tier_ledger();
   init_tier_classifier();
-  init_tier_classifier();
-  init_source_item_read();
-  init_tier_rejudge();
+  init_release_manifest();
   init_remote_access_recheck();
   init_secret_locations();
   init_tier_set_binding();
@@ -21098,6 +21069,17 @@ var init_live_control = __esm(() => {
   READWISE_STORE_PULL_FRESHNESS_THRESHOLD_MS = 60 * 60000;
   READWISE_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
   READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
+});
+// src/workers/connector-store/stored-names.ts
+var init_stored_names = __esm(() => {
+  init_tier_ledger();
+});
+
+// src/workers/connector-store/parent-context.ts
+var init_parent_context = __esm(() => {
+  init_sniffer();
+  init_tier_classifier();
+  init_stored_names();
 });
 
 // src/workers/connector-store/tier-names-only-settle.ts
@@ -21636,6 +21618,25 @@ var init_tier_row_rehome = __esm(() => {
   init_embedding_ledger();
   init_tier_move();
   MOVE_WHY = "Automatic re-home of a Private row found in a Personal or Public store: the owner approved on 2026-10-07 " + "that moved items are re-embedded by the local Private embedder (the move itself makes no provider call).";
+});
+
+// src/workers/classification/secret-scan-off-thread.ts
+var init_secret_scan_off_thread = __esm(() => {
+  init_engine();
+});
+
+// src/workers/connector-store/tier-rejudge.ts
+var init_tier_rejudge = __esm(() => {
+  init_sniffer();
+  init_media_judge();
+  init_parent_context();
+  init_stored_names();
+  init_tier_classifier();
+  init_tier_ledger();
+  init_secrets_disposition();
+  init_tier_placement();
+  init_secret_scan_off_thread();
+  init_engine();
 });
 
 // src/workers/connector-store/tier-override-settle.ts
@@ -29623,8 +29624,7 @@ class EmailClient {
           accountScope: selected.account_scope,
           providerItemId: selected.provider_item_id,
           ...selected.provider_conversation_id ? { providerConversationId: selected.provider_conversation_id } : {},
-          privateAtAnswer: false,
-          personalContent: true
+          privateAtAnswer: false
         }],
         constraints: { secureDerivativeDefault: "approval", includeSecureLocalContent: false }
       });

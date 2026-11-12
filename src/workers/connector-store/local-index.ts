@@ -97,10 +97,8 @@ import {
   type TierSearchLayer,
 } from '../classification/tier-ledger.ts';
 import { conversationOrderedSniffer, itemHasNonTextContent, classifyContentTier, heldUntilJudged, isImageMediaType, namesDecidedByOwner, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
-import { SNIFFER_EXCERPT_MAX_CHARS } from '../classification/tier-classifier.ts';
-import { itemTextPages, type SourceItemReadResult, type SourceItemReadRefusal } from '../../core/source-item-read.ts';
-import { tierSetForLedger } from './tier-set-registry.ts';
-import { raiseReadWindowTier } from './tier-rejudge.ts';
+import type { SourceItemReadResult, SourceItemReadRefusal } from '../../core/source-item-read.ts';
+import { checkReleaseChunks, chunkCoverageNote, RELEASE_CHUNK_JUDGE_BUDGET_MS, type ReleaseCheck, type ReleaseInput } from '../../core/release-manifest.ts';
 import { currentRemoteReadAccess } from '../remote-access-recheck.ts';
 import { screenedSecretLocator } from '../classification/secret-locations.ts';
 import { assertStoreTierLedgerCanOpen, findTierSetLedger } from '../classification/tier-set-binding.ts';
@@ -14470,15 +14468,15 @@ export class LocalConnectorStore {
     return this.tierVisibleRows([identity], (entry) => entry, () => 'content', throwOnUnavailable).length > 0;
   }
 
-  /** Read Personal content only, with a fresh per-item gate around every judge yield. */
+  /** Read Personal content only, with a fresh per-item gate around the shared release check. */
   async readItemPages(localItemId: string, options: {
-    page?: number; pages?: number; pageChars?: number;
+    page?: number; pages?: number; releaseCheck?: ReleaseCheck | undefined; budgetMs?: number;
     scope?: () => { allowed: boolean; accountScope?: string; filters?: ConnectorStoreSearchFilters;
       contentAllowed?: boolean; contentFilters?: ConnectorStoreSearchFilters };
   } = {}): Promise<SourceItemReadResult> {
     const page = Math.max(1, Math.trunc(options.page ?? 1));
     const count = Math.min(3, Math.max(1, Math.trunc(options.pages ?? 1)));
-    const cap = Math.min(12_000, Math.max(1, Math.trunc(options.pageChars ?? 12_000)));
+    const cap = 12_000;
     let totalPages = 0; let totalChars = 0;
     const refuse = (reason: SourceItemReadRefusal, nextPage?: number): SourceItemReadResult => ({
       pages: [], totalPages, totalChars, couldNotRead: [reason], ...(nextPage ? { nextPage } : {}),
@@ -14513,46 +14511,41 @@ export class LocalConnectorStore {
     const initial = gate(); if (initial) return refuse(initial);
     generation = ledger!.getCurrent(identity)!.generation;
     initialOverride = JSON.stringify(ledger!.getOverride(identity));
-    const readText = () => (this.db.query(`SELECT c.bounded_text FROM chunks c JOIN items i ON i.item_pk = c.item_pk
-      WHERE i.local_item_id = ? AND i.tombstoned = 0 ORDER BY c.chunk_index`).all(localItemId) as { bounded_text: string }[])
-      .map(chunk => chunk.bounded_text).join('');
-    const text = readText();
-    if (!text) return refuse('extraction_pending');
-    const split = itemTextPages(text, cap); totalPages = split.length; totalChars = text.length;
-    const result: SourceItemReadResult = { pages: [], totalPages, totalChars, couldNotRead: [] };
-    for (let index = page - 1; index < Math.min(split.length, page - 1 + count); index++) {
-      const material = split[index]!;
-      // The original sniffer excerpt can contain noncontiguous focus excerpts.
-      // Never infer window coverage from that verdict, even with a matching
-      // content:sha256 receipt: each exact window has its own cached proof.
-      for (const window of itemTextPages(material, SNIFFER_EXCERPT_MAX_CHARS)) {
-        const before = gate(); if (before) return refuse(before);
-        const inputs = tierSetForLedger(ledger!.dbPath)?.classification()
-          ?? resolveStoreTierClassification(undefined, this.tierLedgerPathInUse());
-        const sniffer = inputs?.sniffer;
-        if (!sniffer || inputs?.unavailableReason) return refuse('window_judging', index + 1);
-        const record = ledger!.getCurrent(identity)!;
-        const request = { pass: 'content' as const, material: window,
-          materialHash: hashString(`source_item_read:window:v1:${window}`),
-          mapRevision: record.mapRevision, flags: ['content:read_window', `read_window:generation:${record.generation}`], subject: identity,
-          stillAsk: () => gate() === undefined };
-        // Cache hits do not enqueue or call the judge again. A miss uses the
-        // item's normal queue and priority. Only one question per item/pass
-        // fits in that queue: stop at the first pending window.
-        const cached = sniffer.cachedVerdict?.(request);
-        const verdict = await Promise.resolve(cached?.verdict === 'decided' ? cached : sniffer.judge(request));
-        const after = gate(); if (after) return refuse(after);
-        if (readText() !== text) return refuse('held_until_judged');
-        if (verdict.verdict === 'undecided') return refuse('window_judging', index + 1);
-        if (verdict.tier !== 'private') {
-          raiseReadWindowTier(this, ledger!, record, verdict.tier, sniffer.id);
-          return refuse('not_personal');
-        }
-      }
-      const after = gate(); if (after) return refuse(after);
-      result.pages.push({ page: index + 1, text: material });
+    const readChunks = () => this.db.query(`SELECT c.bounded_text AS text, c.content_hash AS hash
+      FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+      WHERE i.local_item_id = ? AND i.tombstoned = 0 ORDER BY c.chunk_index`).all(localItemId) as Array<{ text: string; hash: string }>;
+    const chunks = readChunks();
+    totalChars = chunks.reduce((n, chunk) => n + chunk.text.length, 0);
+    if (!totalChars || chunks.some(chunk => chunk.text.length > cap)) return refuse('extraction_pending');
+    const split: Array<typeof chunks> = [];
+    let size = 0;
+    for (const chunk of chunks) {
+      if (!split.length || size + chunk.text.length > cap) { split.push([]); size = 0; }
+      split[split.length - 1]!.push(chunk); size += chunk.text.length;
     }
+    totalPages = split.length;
+    const selected = split.slice(page - 1, page - 1 + count);
+    const result: SourceItemReadResult = { pages: [], totalPages, totalChars, couldNotRead: [] };
+    if (!selected.length) return result;
+    const inputs: ReleaseInput[] = [{
+      corpusId: this.corpusId, provider: identity.provider, accountScope: identity.accountScope ?? '',
+      providerItemId: identity.providerItemId,
+      ...(identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}),
+      privateAtAnswer: false, chunkHashes: [...new Set(selected.flatMap(chunks => chunks.map(chunk => chunk.hash)))],
+    }];
+    const report = await checkReleaseChunks(options.releaseCheck, inputs, { budgetMs: options.budgetMs ?? RELEASE_CHUNK_JUDGE_BUDGET_MS });
     const after = gate(); if (after) return refuse(after);
+    if (JSON.stringify(readChunks()) !== JSON.stringify(chunks)) return refuse('held_until_judged');
+    const coverageNote = chunkCoverageNote(report);
+    if (coverageNote) result.coverageNote = coverageNote;
+    for (const [index, chunks] of selected.entries()) {
+      if (chunks.some(chunk => !report.allowed[0]?.includes(chunk.hash))) {
+        result.couldNotRead.push('window_judging');
+        result.nextPage = page + index;
+        return result;
+      }
+      result.pages.push({ page: page + index, text: chunks.map(chunk => chunk.text).join('') });
+    }
     const next = page + result.pages.length;
     if (next <= totalPages) result.nextPage = next;
     return result;

@@ -322,7 +322,7 @@ export function remoteOperationOutput(
       const result = parseSourceItemReadResult(raw);
       if (result.pages.length > 0) {
         const inputs = (options.releaseManifests ?? []).flatMap(manifest => manifest.inputs);
-        if (inputs.length !== 1 || !inputs[0]!.personalContent || !options.releaseCheck) {
+        if (inputs.length !== 1 || inputs[0]!.layer === 'names' || !options.releaseCheck) {
           throw new OperationError('email_policy_violation', 'Current item privacy could not be verified.');
         }
         const verdicts = options.releaseCheck.inputs(inputs);

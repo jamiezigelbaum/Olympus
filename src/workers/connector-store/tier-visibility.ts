@@ -25,7 +25,7 @@ import type { ReleaseCheck, ReleaseInputVerdict } from '../../core/release-manif
 import { releaseChunks, type ChunkReleaseOptions } from '../classification/chunk-release.ts';
 import type { LocalConnectorStore } from './local-index.ts';
 import type { SourceIndexRoutedSearchHit, SourceIndexVisibilityGate, SourceIndexVisibilityGateReport } from '../../core/source-index/router.ts';
-import { contentHeldForJudgment, heldUntilJudged } from '../classification/tier-classifier.ts';
+import { contentHeldForJudgment } from '../classification/tier-classifier.ts';
 import { tierLedgerIdentityKey, type TierLedger, type TierLedgerIdentity, type TierVisibilityReads } from '../classification/tier-ledger.ts';
 import {
   hiddenChildKeysSteps, itemVerdictsSteps, childVisibilityUnchanged,
@@ -286,18 +286,6 @@ export function createReleaseTierCheck(
         const state = states.get(tierLedgerIdentityKey(identity));
         if (!state) continue;
         const { record, copies } = state;
-        if (inputs[index]!.personalContent) {
-          // A raw-page release cannot inherit permission for Private derivatives.
-          // Use live reads here too: an override need not have settled its row yet.
-          const now = scope.ledger.getCurrent(identity);
-          const override = scope.ledger.getOverride(identity);
-          const personal = now?.state === 'current' && !now.metadataPending && !now.contentPending
-            && now.contentTier === 'private' && now.metadataTier !== 'secure' && now.metadataTier !== 'secrets'
-            && !scope.ledger.rejudgeQuestion(identity) && !heldUntilJudged(now.reasons)
-            && (!override || override.kind !== 'tier' || override.tier === 'private');
-          if (!personal) { verdicts[index] = { tier: 'unknown', gone: false }; continue; }
-        }
-
         // An input of the names layer (a child citation's parent label) is
         // judged on the item's names alone: its content tier never limits an
         // answer that carries only its names.

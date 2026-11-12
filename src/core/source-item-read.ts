@@ -8,26 +8,10 @@ export type SourceItemReadRefusal = typeof SOURCE_ITEM_READ_REFUSALS[number];
 export interface SourceItemReadResult {
   pages: Array<{ page: number; text: string }>;
   nextPage?: number;
+  coverageNote?: string;
   totalPages: number;
   totalChars: number;
   couldNotRead: SourceItemReadRefusal[];
-}
-
-/** Contiguous slices: retain whitespace, prefer a sentence boundary, never exceed the cap. */
-export function itemTextPages(text: string, cap: number): string[] {
-  const result: string[] = [];
-  for (let start = 0; start < text.length;) {
-    let end = Math.min(start + cap, text.length);
-    if (end < text.length) {
-      const slice = text.slice(start, end);
-      const boundaries = slice.matchAll(/[.!?。！？](?:["'”’»)\]]*)(?:\s+|$)/gu);
-      let boundary = 0;
-      for (const match of boundaries) boundary = match.index! + match[0].length;
-      if (boundary > 0) end = start + boundary;
-    }
-    result.push(text.slice(start, end)); start = end;
-  }
-  return result;
 }
 
 /** Construct the exact payload; unknown worker fields never become a tool result. */
@@ -44,7 +28,9 @@ export function parseSourceItemReadResult(value: unknown): SourceItemReadResult 
     return { page: integer(entry.page, 1), text: entry.text };
   });
   const couldNotRead = r.couldNotRead.map((code: unknown) => typeof code === 'string' && SOURCE_ITEM_READ_REFUSALS.includes(code as SourceItemReadRefusal) ? code as SourceItemReadRefusal : fail());
-  if (couldNotRead.length > 0 && pages.length > 0) return fail();
+  if (couldNotRead.some(code => code !== 'window_judging') && pages.length > 0) return fail();
+  if (r.coverageNote !== undefined && typeof r.coverageNote !== 'string') return fail();
   return { pages, totalPages: integer(r.totalPages, 0), totalChars: integer(r.totalChars, 0), couldNotRead,
+    ...(r.coverageNote === undefined ? {} : { coverageNote: r.coverageNote as string }),
     ...(r.nextPage === undefined ? {} : { nextPage: integer(r.nextPage, 1) }) };
 }

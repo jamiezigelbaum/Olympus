@@ -82,7 +82,6 @@ import {
 } from '../classification/tier-ledger.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
 import type { LocalConnectorStore, ConnectorStoreItemCopy } from './local-index.ts';
-import { tierSetForLedger } from './tier-set-registry.ts';
 import { settleSecretsCopies } from './secrets-disposition.ts';
 import { secretFencedSniffer } from './tier-placement.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
@@ -666,42 +665,5 @@ function storedFolderKeys(value: string | number | null | undefined): string[] {
     return Array.isArray(parsed) ? parsed.filter((key): key is string => typeof key === 'string') : [];
   } catch {
     return [];
-  }
-}
-
-/** A read window can only raise the item's existing decision, using the re-judge placement path. */
-export function raiseReadWindowTier(
-  store: Partial<Pick<LocalConnectorStore, 'exportItemCopy' | 'tombstoneCopy'>> | undefined,
-  ledger: TierLedger,
-  record: TierLedgerRecord,
-  tier: 'secure' | 'secrets',
-  snifferId: string,
-): void {
-  const identity = identityOf(record);
-  // An owner edit or a newer generation owns the item now; the read will refuse it.
-  const override = ledger.getOverride(identity);
-  if (ledger.getCurrent(identity)?.generation !== record.generation
-    || (override?.kind === 'tier' && override.tier !== 'private')) return;
-  const decision: TierDecision = {
-    ...record, state: 'current', contentRead: true, contentPending: false,
-    contentTier: maxTier(record.contentTier, tier), decidedBy: 'sniffer', snifferId,
-    reasons: [...record.reasons, `content:sniffer:${snifferId}:read_window_${tier}`],
-  };
-  const set = tierSetForLedger(ledger.dbPath);
-  if (record.routed) {
-    if (!set) throw new Error('The item read cannot raise a routed item without its tier set.');
-    if (tier === 'secrets') {
-      const exported = store?.exportItemCopy?.(identity);
-      if (!exported) throw new Error('The item read cannot settle a missing Secret copy.');
-      settleRoutedSecrets(set, identity, decision, exported, { findingKinds: ['sniffer_secret_refusal'] },
-        { guard: { generation: record.generation, override } });
-    } else {
-      ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision),
-        { guard: { generation: record.generation, override } });
-    }
-  } else {
-    const exported = tier === 'secrets' ? store?.exportItemCopy?.(identity) : undefined;
-    ledger.recordDecision(identity, decision);
-    if (exported) store?.tombstoneCopy?.(exported.identity, { connectorId: TIER_REJUDGE_CONNECTOR_ID, trustTier: 'S5' });
   }
 }

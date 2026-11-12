@@ -23009,6 +23009,31 @@ function ensureOwnerOnlyDir(dir) {
   chmodSync6(dir, 448);
 }
 
+// src/core/release-manifest.ts
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+var RELEASE_CHUNK_JUDGE_BUDGET_MS = 8000;
+function chunkCoverageNote(result) {
+  return result.withheldPassages > 0 ? `${result.withheldPassages} passages from ${result.withheldDocuments} documents are still being checked for privacy and weren't shared. Ask again in a minute.` : undefined;
+}
+async function checkReleaseChunks(check, inputs, options) {
+  try {
+    const result = await check?.chunks?.(inputs, options);
+    if (result && result.allowed.length === inputs.length)
+      return result;
+  } catch {}
+  return {
+    allowed: inputs.map(() => []),
+    withheldPassages: inputs.reduce((n, input) => n + (input.layer === "names" ? 0 : Math.max(1, input.chunkHashes?.length ?? 0)), 0),
+    withheldDocuments: inputs.filter((input) => input.layer !== "names").length
+  };
+}
+var chunkProvenance = new WeakMap;
+var storage2 = new AsyncLocalStorage5;
+var withheldAnswers = new WeakSet;
+
+// src/workers/remote-access-recheck.ts
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
+
 // src/core/source-item-read.ts
 var SOURCE_ITEM_READ_REFUSALS = [
   "held_until_judged",
@@ -23019,933 +23044,13 @@ var SOURCE_ITEM_READ_REFUSALS = [
   "window_judging",
   "not_personal"
 ];
-function itemTextPages(text2, cap) {
-  const result = [];
-  for (let start = 0;start < text2.length; ) {
-    let end = Math.min(start + cap, text2.length);
-    if (end < text2.length) {
-      const slice = text2.slice(start, end);
-      const boundaries = slice.matchAll(/[.!?。！？](?:["'”’»)\]]*)(?:\s+|$)/gu);
-      let boundary = 0;
-      for (const match of boundaries)
-        boundary = match.index + match[0].length;
-      if (boundary > 0)
-        end = start + boundary;
-    }
-    result.push(text2.slice(start, end));
-    start = end;
-  }
-  return result;
-}
-
-// src/workers/connector-store/tier-set-registry.ts
-var tierSets;
-function tierSetForLedger(ledgerPath) {
-  return tierSets?.get(ledgerPath);
-}
-
-// src/workers/source-index/media-judge.ts
-var MEDIA_JUDGE_SENSITIVE_CATEGORIES = [
-  "id_document",
-  "bank_card",
-  "financial_document",
-  "medical_document",
-  "intimate"
-];
-var MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES = new Set(["medical_document"]);
-var MEDIA_JUDGE_TEXT_DECIDES = "text_decides";
-var MEDIA_JUDGE_PROMPT_SET = "photo-judge-2026-10-29";
-var MEDIA_JUDGE_PROMPTS = Object.freeze({
-  id_document: "a photo of a passport, national identity card or driving licence",
-  bank_card: "a photo of a credit card, debit card or bank card",
-  financial_document: "a bank statement, payslip or document showing account numbers",
-  medical_document: "a medical report or lab test results document",
-  intimate: "a nude, intimate or sexually explicit photo",
-  ordinary: "an ordinary photo of a place, a room, food, a landscape or people"
-});
-var MEDIA_JUDGE_PROMPT_PREFIX = "task: classification | query: ";
-var MEDIA_JUDGE_THRESHOLDS = Object.freeze({
-  margin: 0.04,
-  intimateMargin: 0.025
-});
-function mediaJudgeId(provider, thresholds = MEDIA_JUDGE_THRESHOLDS) {
-  return `${MEDIA_JUDGE_PROMPT_SET}:m${thresholds.margin}:i${thresholds.intimateMargin}:${provider.modelId}:${provider.configHash.slice(0, 12)}`;
-}
-function dot(left, right) {
-  let sum = 0;
-  const length = Math.min(left.length, right.length);
-  for (let index = 0;index < length; index += 1)
-    sum += left[index] * right[index];
-  return sum;
-}
-function rounded(value) {
-  return Math.round(value * 1e4) / 1e4;
-}
-function judgeMediaScores(scores, judgeId, thresholds = MEDIA_JUDGE_THRESHOLDS) {
-  const ordinary = scores.ordinary;
-  const sensitive = MEDIA_JUDGE_SENSITIVE_CATEGORIES.map((category) => [category, scores[category]]);
-  if (typeof ordinary !== "number" || !Number.isFinite(ordinary) || sensitive.some(([, score]) => typeof score !== "number" || !Number.isFinite(score))) {
-    return { verdict: "unjudged", judgeId, reason: "scores_unavailable" };
-  }
-  let top = sensitive[0][0];
-  let topScore = -Infinity;
-  for (const [category, score] of sensitive) {
-    if (score > topScore) {
-      top = category;
-      topScore = score;
-    }
-  }
-  const margin = topScore - ordinary;
-  const intimateMargin = scores.intimate - ordinary;
-  const kept = Object.fromEntries(Object.entries(scores).map(([key2, value]) => [key2, rounded(value)]));
-  if (margin >= thresholds.margin && !MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES.has(top)) {
-    return { verdict: "sensitive", category: top, margin: rounded(margin), scores: kept, judgeId };
-  }
-  let pictureTop;
-  for (const [category, score] of sensitive) {
-    if (MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES.has(category) || score - ordinary < thresholds.margin)
-      continue;
-    if (!pictureTop || score > scores[pictureTop])
-      pictureTop = category;
-  }
-  if (pictureTop) {
-    return { verdict: "sensitive", category: pictureTop, margin: rounded(scores[pictureTop] - ordinary), scores: kept, judgeId };
-  }
-  if (intimateMargin >= thresholds.intimateMargin) {
-    return { verdict: "sensitive", category: "intimate", margin: rounded(margin), scores: kept, judgeId };
-  }
-  if (margin >= thresholds.margin) {
-    return { verdict: "ordinary", category: top, margin: rounded(margin), scores: kept, judgeId, reason: MEDIA_JUDGE_TEXT_DECIDES };
-  }
-  return { verdict: "ordinary", category: top, margin: rounded(margin), scores: kept, judgeId };
-}
-function judgeImageVector(imageVector, promptVectors, judgeId, thresholds = MEDIA_JUDGE_THRESHOLDS) {
-  if (!imageVector || imageVector.length === 0)
-    return { verdict: "unjudged", judgeId, reason: "image_unreadable" };
-  if (Math.hypot(...imageVector) < 0.000001)
-    return { verdict: "unjudged", judgeId, reason: "image_unreadable" };
-  const scores = {};
-  for (const category of Object.keys(MEDIA_JUDGE_PROMPTS)) {
-    scores[category] = dot(imageVector, promptVectors[category]);
-  }
-  return judgeMediaScores(scores, judgeId, thresholds);
-}
-function canJudgeMedia(provider) {
-  return typeof provider.embedPromptTexts === "function" && typeof provider.embedImageVectors === "function";
-}
-var promptVectorCache = new Map;
-function mediaJudgePromptVectors(provider) {
-  const key2 = `${provider.provider}\x00${provider.modelId}\x00${provider.configHash}`;
-  let cached2 = promptVectorCache.get(key2);
-  if (!cached2) {
-    const categories = Object.keys(MEDIA_JUDGE_PROMPTS);
-    cached2 = provider.embedPromptTexts(categories.map((category) => `${MEDIA_JUDGE_PROMPT_PREFIX}${MEDIA_JUDGE_PROMPTS[category]}`)).then((vectors) => {
-      if (vectors.length !== categories.length || vectors.some((vector) => vector.length === 0)) {
-        throw new Error("The photo judge's descriptions could not be embedded.");
-      }
-      return Object.fromEntries(categories.map((category, index) => [category, vectors[index]]));
-    });
-    promptVectorCache.set(key2, cached2);
-    cached2.catch(() => promptVectorCache.delete(key2));
-  }
-  return cached2;
-}
-async function judgeMediaImages(provider, images, thresholds = MEDIA_JUDGE_THRESHOLDS) {
-  if (images.length === 0)
-    return [];
-  const prompts = await mediaJudgePromptVectors(provider);
-  const vectors = await provider.embedImageVectors([...images]);
-  const judgeId = mediaJudgeId(provider, thresholds);
-  return images.map((_, index) => judgeImageVector(vectors[index], prompts, judgeId, thresholds));
-}
-async function judgeReturnedImageVectors(provider, vectors, thresholds = MEDIA_JUDGE_THRESHOLDS) {
-  const prompts = await mediaJudgePromptVectors(provider);
-  const judgeId = mediaJudgeId(provider, thresholds);
-  return vectors.map((vector) => judgeImageVector(vector, prompts, judgeId, thresholds));
-}
-
-// src/workers/connector-store/secrets-disposition.ts
-import { existsSync as existsSync22 } from "node:fs";
-
-// src/core/app-release-log.ts
-import { Database as Database5 } from "bun:sqlite";
-import { randomBytes as randomBytes2 } from "node:crypto";
-import { chmodSync as chmodSync7, existsSync as existsSync21, lstatSync as lstatSync9, mkdirSync as mkdirSync14 } from "node:fs";
-import { homedir as homedir11 } from "node:os";
-import { dirname as dirname25, isAbsolute as isAbsolute13, join as join23 } from "node:path";
-
-// src/core/remote-connections.ts
-import { dirname as dirname24, isAbsolute as isAbsolute12 } from "node:path";
-
-// src/core/operation-caller.ts
-var inProcessRemoteRequests = new WeakSet;
-
-// connect-relay/shared/tokens.ts
-var SECRET = "[A-Za-z0-9_-]{43}";
-var INSTALL = "[a-z2-7]{32}";
-var PATTERN = {
-  access: new RegExp(`^oly2\\.(${INSTALL})\\.${SECRET}$`),
-  refresh: new RegExp(`^oly2r\\.(${INSTALL})\\.${SECRET}$`),
-  code: new RegExp(`^oly2c\\.(${INSTALL})\\.${SECRET}$`),
-  handoff: new RegExp(`^oly2g\\.(${INSTALL})\\.${SECRET}$`),
-  private: new RegExp(`^oly2p\\.(${INSTALL})\\.${SECRET}$`)
-};
-
-// src/workers/remote-oauth/pinned-clients.ts
-var GROK_REDIRECT_URIS = Object.freeze([
-  "https://grok.com/connectors-oauth-exchange-code/",
-  "https://console.x.ai/connectors-oauth-exchange-code/"
-]);
-var CURSOR_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback";
-var CURSOR_REDIRECT_URIS = Object.freeze([
-  CURSOR_REDIRECT_URI,
-  "https://www.cursor.com/bot/mcp/oauth/callback",
-  "https://grok.com/connectors-oauth-exchange-code/"
-]);
-
-// src/core/remote-oauth-store.ts
-var REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 3600;
-var REMOTE_PAIRING_CODE_TTL_MS = 10 * 60000;
-var PAIRING_SELECTOR_LENGTH = 4;
-var PAIRING_SECRET_LENGTH = 8;
-var PAIRING_CODE_LENGTH = PAIRING_SELECTOR_LENGTH + PAIRING_SECRET_LENGTH;
-var UNUSED_CLIENT_PRUNE_AGE_MS = 24 * 3600000;
 
 // src/core/app-release-capture.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
-var storage2 = new AsyncLocalStorage5;
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
+var storage3 = new AsyncLocalStorage6;
 var completedPrivateAnswers = new Set;
 var JOB_QUESTION_TTL_MS = 30 * 60000;
 var jobQuestions = new Map;
-
-// src/core/waiting-private-questions.ts
-var WAITING_QUESTION_LIMITS = Object.freeze({
-  questionBytes: 2048,
-  localQuestionBytes: 8 * 1024,
-  selectorBytes: 4096,
-  answerBytes: 128 * 1024,
-  ttlMs: 7 * 24 * 60 * 60000,
-  reanswerAfterMs: 10 * 60000
-});
-
-// src/core/remote-connections.ts
-function resolveRemoteConnectionsDbPath(env = process.env) {
-  return defaultRemoteConnectionsDbPath(env);
-}
-function defaultRemoteConnectionsDbPath(env = process.env) {
-  const path = sharedDataPath("remote-connections", env);
-  if (!isAbsolute12(path)) {
-    throw new TypeError("Remote connections XDG_DATA_HOME must be an absolute private data root.");
-  }
-  return path;
-}
-
-// src/core/app-release-log.ts
-var APP_RELEASE_LOG_STORE_ID = "app-release-log";
-var APP_RELEASE_LOG_SCHEMA_VERSION = 3;
-var APP_RELEASE_RETENTION_DAYS = [7, 30, 90, 0];
-var APP_RELEASE_DEFAULT_RETENTION_DAYS = 30;
-var MAX_ITEMS_PER_REQUEST = 48;
-var LIST_LIMIT = 200;
-var DAY_MS = 24 * 60 * 60000;
-var RETENTION_KEY = "retention_days";
-function appReleaseLogDbPath(remoteConnectionsDbPath) {
-  return join23(dirname25(remoteConnectionsDbPath), SHARED_DATA_FILES["app-release-log"]);
-}
-var openLogPaths = new Map;
-function appReleaseLogDbPaths(env = process.env) {
-  return [...new Set([appReleaseLogDbPath(resolveRemoteConnectionsDbPath(env)), ...openLogPaths.keys()])];
-}
-function isAppReleaseRetentionDays(value) {
-  return typeof value === "number" && APP_RELEASE_RETENTION_DAYS.includes(value);
-}
-function openAppReleaseLog(dbPath, options = {}) {
-  const now = options.now ?? Date.now;
-  hardenPrivatePath(dbPath);
-  const db = new Database5(dbPath, { create: true });
-  try {
-    chmodSync7(dbPath, 384);
-    db.exec("PRAGMA busy_timeout = 5000; PRAGMA secure_delete = ON; PRAGMA journal_mode = DELETE; PRAGMA foreign_keys = ON;");
-    db.transaction(() => {
-      assertSqliteSchemaCanOpen(db, APP_RELEASE_LOG_STORE_ID, APP_RELEASE_LOG_SCHEMA_VERSION);
-      runSqliteMigrations(db, APP_RELEASE_LOG_STORE_ID, migrations());
-    }).immediate();
-  } catch (error) {
-    closeSqliteStore(db);
-    throw error;
-  }
-  openLogPaths.set(dbPath, (openLogPaths.get(dbPath) ?? 0) + 1);
-  let registered = true;
-  const retentionDays = () => {
-    const row = db.query("SELECT value FROM app_release_meta WHERE key = ?").get(RETENTION_KEY);
-    const days = row ? Number(row.value) : APP_RELEASE_DEFAULT_RETENTION_DAYS;
-    return isAppReleaseRetentionDays(days) ? days : APP_RELEASE_DEFAULT_RETENTION_DAYS;
-  };
-  const clear = () => db.transaction(() => {
-    db.query("DELETE FROM app_release_items").run();
-    return db.query("DELETE FROM app_release_requests").run().changes;
-  })();
-  const expire = () => {
-    const days = retentionDays();
-    if (days === 0) {
-      clear();
-      return;
-    }
-    const before = now() - days * DAY_MS;
-    db.transaction(() => {
-      db.query("DELETE FROM app_release_items WHERE request_id IN (SELECT id FROM app_release_requests WHERE at < ?)").run(before);
-      db.query("DELETE FROM app_release_requests WHERE at < ?").run(before);
-    })();
-  };
-  return {
-    record(record) {
-      if (retentionDays() === 0)
-        return;
-      const id = `apr_${randomBytes2(12).toString("base64url")}`;
-      db.transaction(() => {
-        db.query(`INSERT INTO app_release_requests (id, at, connection_id, connection_name, connection_kind, question, held_back, answered_privately, withheld, private_question_id)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, record.at, record.connection.id ?? null, record.connection.name.slice(0, 80), record.connection.kind, record.question.slice(0, 2000), Math.max(0, Math.floor(record.heldBack)), record.answeredPrivately ? 1 : 0, record.withheld ? 1 : 0, record.privateQuestionKey ?? null);
-        const insert = db.query(`INSERT INTO app_release_items (request_id, position, source, title, tier, corpus_id, provider, account_scope, provider_item_id, provider_conversation_id, locator)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-        const secret = db.query(`SELECT 1 FROM app_release_secret_items
-          WHERE provider = ? AND provider_item_id = ? AND (provider_conversation_id = '' OR ? = '' OR provider_conversation_id = ?) LIMIT 1`);
-        record.items.slice(0, MAX_ITEMS_PER_REQUEST).forEach((item, position) => {
-          const named = !(item.provider && item.providerItemId && secret.get(item.provider, item.providerItemId, item.providerConversationId ?? "", item.providerConversationId ?? ""));
-          insert.run(id, position, item.source, named ? item.title ?? null : null, item.tier, item.corpusId ?? null, item.provider ?? null, item.accountScope ?? null, item.providerItemId ?? null, item.providerConversationId ?? null, named ? item.locator ?? null : null);
-        });
-      })();
-      expire();
-      return id;
-    },
-    list() {
-      expire();
-      const requests = db.query(`SELECT id, at, connection_name, connection_kind, question, held_back, answered_privately, withheld
-        FROM app_release_requests ORDER BY at DESC, rowid DESC LIMIT ?`).all(LIST_LIMIT);
-      const items = db.query("SELECT position, source, title, tier, made_private FROM app_release_items WHERE request_id = ? ORDER BY position");
-      return requests.map((row) => ({
-        id: row.id,
-        at: row.at,
-        connection: { name: row.connection_name, kind: row.connection_kind === "agent" ? "agent" : "app" },
-        question: row.question,
-        heldBack: row.held_back,
-        answeredPrivately: row.answered_privately === 1,
-        withheld: row.withheld === 1,
-        items: items.all(row.id).map((item) => ({
-          position: item.position,
-          source: item.source,
-          ...item.title ? { title: item.title } : {},
-          tier: item.tier === "public" || item.tier === "personal" ? item.tier : "private",
-          madePrivate: item.made_private === 1
-        }))
-      }));
-    },
-    retentionDays,
-    setRetentionDays(days) {
-      if (!isAppReleaseRetentionDays(days))
-        throw new TypeError("Retention must be 7, 30, 90 or 0 days.");
-      db.query("INSERT INTO app_release_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(RETENTION_KEY, String(days));
-      expire();
-    },
-    clear,
-    item(requestId, position) {
-      const row = db.query(`SELECT source, title, tier, corpus_id, provider, provider_item_id, provider_conversation_id, locator, made_private
-        FROM app_release_items WHERE request_id = ? AND position = ?`).get(requestId, position);
-      if (!row)
-        return;
-      return {
-        source: row.source,
-        ...row.title ? { title: row.title } : {},
-        tier: row.tier === "public" || row.tier === "personal" ? row.tier : "private",
-        ...row.corpus_id ? { corpusId: row.corpus_id } : {},
-        ...row.provider ? { provider: row.provider } : {},
-        ...row.provider_item_id ? { providerItemId: row.provider_item_id } : {},
-        ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {},
-        ...row.locator ? { locator: row.locator } : {},
-        madePrivate: row.made_private === 1
-      };
-    },
-    markMadePrivate(requestId, position) {
-      db.query("UPDATE app_release_items SET made_private = 1 WHERE request_id = ? AND position = ?").run(requestId, position);
-    },
-    markAnsweredPrivately(privateQuestionKey) {
-      return db.query("UPDATE app_release_requests SET answered_privately = 1 WHERE private_question_id = ? AND answered_privately = 0").run(privateQuestionKey).changes;
-    },
-    forgetCorpora(corpusIds, dryRun, accountScopes) {
-      if (corpusIds.length === 0 || accountScopes?.length === 0)
-        return 0;
-      const marks = (values) => values.map(() => "?").join(", ");
-      const where = `corpus_id IN (${marks(corpusIds)})${accountScopes ? ` AND account_scope IN (${marks(accountScopes)})` : ""}`;
-      const params = [...corpusIds, ...accountScopes ?? []];
-      if (dryRun)
-        return db.query(`SELECT COUNT(*) AS n FROM app_release_items WHERE ${where}`).get(...params).n;
-      return db.query(`DELETE FROM app_release_items WHERE ${where}`).run(...params).changes;
-    },
-    forgetSecretItem(item, options2 = {}) {
-      const conversation = item.providerConversationId ?? "";
-      return db.transaction(() => {
-        if (options2.proceed && !options2.proceed())
-          return 0;
-        db.query(`INSERT OR IGNORE INTO app_release_secret_items (provider, provider_item_id, provider_conversation_id, redacted_at)
-          VALUES (?, ?, ?, ?)`).run(item.provider, item.providerItemId, conversation, now());
-        return db.query(`UPDATE app_release_items SET title = NULL, locator = NULL
-          WHERE provider = ? AND provider_item_id = ? AND (? = '' OR provider_conversation_id IS NULL OR provider_conversation_id = ?)
-            AND (title IS NOT NULL OR locator IS NOT NULL)`).run(item.provider, item.providerItemId, conversation, conversation).changes;
-      }).immediate();
-    },
-    retireSecretItem(item, options2 = {}) {
-      db.transaction(() => {
-        if (options2.stillSecret?.())
-          return;
-        db.query("DELETE FROM app_release_secret_items WHERE provider = ? AND provider_item_id = ?").run(item.provider, item.providerItemId);
-      }).immediate();
-    },
-    close() {
-      if (registered) {
-        registered = false;
-        const count = (openLogPaths.get(dbPath) ?? 1) - 1;
-        if (count > 0)
-          openLogPaths.set(dbPath, count);
-        else
-          openLogPaths.delete(dbPath);
-      }
-      closeSqliteStore(db);
-    }
-  };
-}
-function forgetSecretAppReleaseItem(dbPath, item, options = {}) {
-  if (!existsSync21(dbPath))
-    return 0;
-  const store = openAppReleaseLog(dbPath);
-  try {
-    return store.forgetSecretItem(item, options);
-  } finally {
-    store.close();
-  }
-}
-function retireSecretAppReleaseItem(dbPath, item, options = {}) {
-  if (!existsSync21(dbPath))
-    return;
-  const store = openAppReleaseLog(dbPath);
-  try {
-    store.retireSecretItem(item, options);
-  } finally {
-    store.close();
-  }
-}
-function migrations() {
-  return [{
-    version: 1,
-    name: "app_release_log",
-    up(db) {
-      db.exec(`
-        CREATE TABLE app_release_requests (
-          id TEXT PRIMARY KEY,
-          at INTEGER NOT NULL,
-          connection_id TEXT,
-          connection_name TEXT NOT NULL,
-          connection_kind TEXT NOT NULL,
-          question TEXT NOT NULL,
-          held_back INTEGER NOT NULL DEFAULT 0,
-          answered_privately INTEGER NOT NULL DEFAULT 0,
-          withheld INTEGER NOT NULL DEFAULT 0,
-          private_question_id TEXT
-        );
-        CREATE INDEX app_release_requests_private_question ON app_release_requests (private_question_id);
-        CREATE INDEX app_release_requests_at ON app_release_requests (at);
-        CREATE TABLE app_release_items (
-          request_id TEXT NOT NULL,
-          position INTEGER NOT NULL,
-          source TEXT NOT NULL,
-          title TEXT,
-          tier TEXT NOT NULL,
-          corpus_id TEXT,
-          provider TEXT,
-          provider_item_id TEXT,
-          provider_conversation_id TEXT,
-          locator TEXT,
-          made_private INTEGER NOT NULL DEFAULT 0,
-          PRIMARY KEY (request_id, position)
-        );
-        CREATE INDEX app_release_items_corpus ON app_release_items (corpus_id);
-        CREATE TABLE app_release_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-      `);
-    }
-  }, {
-    version: 2,
-    name: "app_release_secret_items",
-    up(db) {
-      db.exec(`
-        CREATE TABLE app_release_secret_items (
-          provider TEXT NOT NULL,
-          provider_item_id TEXT NOT NULL,
-          provider_conversation_id TEXT NOT NULL DEFAULT '',
-          redacted_at INTEGER NOT NULL,
-          PRIMARY KEY (provider, provider_item_id, provider_conversation_id)
-        );
-        CREATE INDEX app_release_items_provider_item ON app_release_items (provider, provider_item_id);
-      `);
-    }
-  }, {
-    version: 3,
-    name: "app_release_items_account_scope",
-    up(db) {
-      db.exec(`
-        ALTER TABLE app_release_items ADD COLUMN account_scope TEXT;
-        CREATE INDEX app_release_items_corpus_scope ON app_release_items (corpus_id, account_scope);
-      `);
-    }
-  }];
-}
-function hardenPrivatePath(dbPath) {
-  if (!isAbsolute13(dbPath))
-    throw new TypeError("The AI apps log path must be absolute.");
-  const leafDir = dirname25(dbPath);
-  if (new Set(["/", "/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp", homedir11()]).has(leafDir)) {
-    throw new Error("The AI apps log must live inside a dedicated private directory.");
-  }
-  mkdirSync14(leafDir, { recursive: true, mode: 448 });
-  const dirStat = lstatSync9(leafDir);
-  if (dirStat.isSymbolicLink() || !dirStat.isDirectory())
-    throw new Error("The AI apps log must live in a real private directory.");
-  chmodSync7(leafDir, 448);
-  if (existsSync21(dbPath)) {
-    const fileStat = lstatSync9(dbPath);
-    if (fileStat.isSymbolicLink() || !fileStat.isFile())
-      throw new Error("The AI apps log must be a regular file, not a symlink.");
-  }
-}
-
-// src/workers/connector-store/secrets-disposition.ts
-var SECRETS_DISPOSITION = "tombstone_now";
-function secretsDisposition() {
-  return SECRETS_DISPOSITION;
-}
-function settleSecretsCopies(options) {
-  const disposition = options.disposition ?? secretsDisposition();
-  const chunks = {};
-  const identity = {
-    family: options.identity.family ?? "file",
-    provider: options.identity.provider,
-    accountScope: options.identity.accountScope,
-    providerItemId: options.identity.providerItemId,
-    localItemId: options.identity.localItemId,
-    ...options.identity.providerConversationId ? { providerConversationId: options.identity.providerConversationId } : {}
-  };
-  for (const copy of options.copies) {
-    const store = options.storeFor(copy.corpusId);
-    if (!store)
-      continue;
-    chunks[copy.corpusId] = (chunks[copy.corpusId] ?? 0) + (store.itemStoredContent(identity)?.chunkCount ?? 0);
-    if (disposition === "tombstone_now") {
-      const trustTier = "S5";
-      store.tombstoneCopy(identity, { connectorId: options.connectorId, trustTier });
-    }
-  }
-  const sideStores = forgetSecretInSideStores({ ledger: options.ledger, identity });
-  if (disposition === "tombstone_now")
-    options.ledger.removeCopies(options.identity);
-  return { disposition, chunks, sideStores };
-}
-function forgetSecretInSideStores(options) {
-  const result = { snifferQuestions: 0, extractionJobNames: 0, appReleaseTitles: 0, failed: 0, notDurable: 0 };
-  const { identity, ledger } = options;
-  const owedJobLedgers = [];
-  const stillOwed = () => ledger.hasSecretSideStoreDebt(identity);
-  if (options.onlyWhileOwed) {
-    try {
-      if (!stillOwed())
-        return result;
-    } catch {
-      result.failed += 1;
-      return result;
-    }
-  }
-  let claimant;
-  try {
-    claimant = ledger.ledgerId();
-  } catch {}
-  let mark;
-  try {
-    mark = ledger.noteSecretScrub(identity);
-  } catch {
-    result.failed += 1;
-  }
-  const snifferPath = tierSnifferPathForLedger(ledger.dbPath);
-  if (snifferPath !== ":memory:" && existsSync22(snifferPath)) {
-    try {
-      const sniffer = new TierSnifferStore({ dbPath: snifferPath });
-      try {
-        result.snifferQuestions = sniffer.deleteItemQuestions({
-          provider: identity.provider,
-          accountScope: identity.accountScope,
-          providerItemId: identity.providerItemId,
-          ...identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}
-        });
-      } finally {
-        sniffer.close();
-      }
-    } catch {
-      result.failed += 1;
-    }
-  }
-  for (const logPath of appReleaseLogDbPaths()) {
-    try {
-      result.appReleaseTitles += forgetSecretAppReleaseItem(logPath, {
-        provider: identity.provider,
-        providerItemId: identity.providerItemId,
-        ...identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}
-      }, options.onlyWhileOwed ? { proceed: stillOwed } : {});
-    } catch {
-      result.failed += 1;
-    }
-  }
-  let owedBefore = [];
-  let known = [];
-  try {
-    owedBefore = ledger.secretSideStoreDebtJobLedgerPaths(identity);
-    known = ledger.knownJobLedgerPaths();
-  } catch {}
-  const { visit: jobLedgers, outside } = jobLedgerPathsToVisit([...known, ...owedBefore, ...options.jobLedgerPaths ?? []]);
-  for (const jobsPath of jobLedgers) {
-    try {
-      const cleared = clearExtractionJobNames(jobsPath, {
-        provider: identity.provider,
-        accountScope: identity.accountScope,
-        providerItemId: identity.providerItemId,
-        ...identity.localItemId ? { localItemId: identity.localItemId } : {}
-      }, {
-        ...claimant !== undefined ? { claimant } : {},
-        ...options.onlyWhileOwed ? { proceed: stillOwed } : {}
-      });
-      result.extractionJobNames += cleared.cleared;
-      if (!cleared.durable) {
-        result.notDurable += 1;
-        owedJobLedgers.push(jobsPath);
-      }
-    } catch {
-      result.failed += 1;
-      owedJobLedgers.push(jobsPath);
-    }
-  }
-  try {
-    ledger.noteJobLedgerPaths(jobLedgers.filter((path) => path !== ":memory:" && existsSync22(path)));
-  } catch {}
-  try {
-    if (result.failed > 0 || result.notDurable > 0 || options.confirmInWorker) {
-      ledger.recordSecretSideStoreDebt(identity, owedJobLedgers, { onlyIfOwed: options.onlyWhileOwed === true });
-    } else {
-      ledger.clearSecretSideStoreDebt(identity, [...jobLedgers, ...outside]);
-      if (mark)
-        ledger.markSecretSideStoresCleared(identity, mark);
-    }
-  } catch {}
-  if (result.failed > 0)
-    console.warn(`[tier] secrets: ${result.failed} side store(s) could not forget an item; retried at the next tier tick.`);
-  return result;
-}
-function retireSecretRedactions(ledger, options = {}) {
-  let pending;
-  try {
-    pending = ledger.secretRedactionRetirements(options);
-  } catch {
-    return 0;
-  }
-  let claimant;
-  try {
-    claimant = ledger.ledgerId();
-  } catch {
-    return 0;
-  }
-  let knownJobLedgers = [];
-  try {
-    knownJobLedgers = ledger.knownJobLedgerPaths();
-  } catch {}
-  let retired = 0;
-  for (const retirement of pending) {
-    const item = { provider: retirement.provider, accountScope: retirement.accountScope, providerItemId: retirement.providerItemId };
-    const stillSecret = () => ledger.providerItemIsSecret(item);
-    let failed = 0;
-    let secret = false;
-    try {
-      secret = stillSecret();
-    } catch {
-      failed += 1;
-    }
-    if (!secret && failed === 0) {
-      for (const jobsPath of jobLedgerPathsToVisit([...knownJobLedgers, ...retirement.jobLedgerPaths]).visit) {
-        try {
-          if (retireExtractionJobRedaction(jobsPath, item, claimant, stillSecret).stillSecret)
-            secret = true;
-        } catch {
-          failed += 1;
-        }
-      }
-      for (const logPath of appReleaseLogDbPaths()) {
-        try {
-          retireSecretAppReleaseItem(logPath, { provider: item.provider, providerItemId: item.providerItemId }, { stillSecret });
-        } catch {
-          failed += 1;
-        }
-      }
-    }
-    if (failed > 0 && !secret)
-      continue;
-    try {
-      ledger.settleSecretRedactionRetirement(retirement.id);
-      if (!secret)
-        retired += 1;
-    } catch {}
-  }
-  return retired;
-}
-
-// src/workers/classification/installed-tier-classification-registry.ts
-var registered;
-function registeredInstalledTierClassification() {
-  return registered;
-}
-
-// src/workers/connector-store/tier-placement.ts
-function resolveStoreTierClassification(explicit, ledgerPath) {
-  const installed2 = registeredInstalledTierClassification()?.forLedger(ledgerPath);
-  if (!installed2)
-    return explicit;
-  if (!explicit)
-    return installed2;
-  const rules = [...explicit.rules ?? [], ...installed2.rules ?? []];
-  const sniffer = explicit.sniffer ?? installed2.sniffer;
-  const unavailableReason = installed2.unavailableReason ?? explicit.unavailableReason;
-  const retirePublic = installed2.retirePublic === true || explicit.retirePublic === true;
-  return {
-    ...rules.length > 0 ? { rules } : {},
-    ...sniffer ? { sniffer } : {},
-    ...retirePublic ? { retirePublic: true } : {},
-    ...unavailableReason ? { unavailableReason } : {},
-    ...explicit.holdContentUntilJudged === true ? { holdContentUntilJudged: true } : {}
-  };
-}
-var DEFAULT_TIER_FOR_DOMAIN = {
-  public_safe: "S0",
-  internal: "S3",
-  secure_local: "S4"
-};
-function defaultStoreTrustTier(trustDomain) {
-  return DEFAULT_TIER_FOR_DOMAIN[trustDomain] ?? "S4";
-}
-function placeInExistingStore(item, placement, storeTrustDomain) {
-  if (typeof placement === "function")
-    return placement(item);
-  const trustDomain = placement?.trustDomain ?? storeTrustDomain;
-  const trustTier = placement?.trustTier ?? defaultStoreTrustTier(trustDomain);
-  if (placement?.secretsInContent === true) {
-    const text2 = textualContentOf(item);
-    if (text2 !== undefined && detectSecretFindingKinds(text2).length > 0) {
-      return buildSourceSensitivity({ trustTier: "S5", trustDomain: "secure_local" });
-    }
-  }
-  return buildSourceSensitivity({ trustTier, trustDomain });
-}
-function textualContentOf(item) {
-  if (item.content.kind === "text")
-    return item.content.text;
-  if (item.content.kind === "bytes" && isTextualMimeType(item.content.mimeType)) {
-    return new TextDecoder("utf-8", { fatal: false }).decode(item.content.bytes);
-  }
-  return;
-}
-function isTextualMimeType(mimeType) {
-  const normalized = mimeType.split(";")[0]?.trim().toLowerCase() ?? "";
-  return normalized.startsWith("text/") || normalized === "application/json" || normalized === "application/xml" || normalized.endsWith("+json") || normalized.endsWith("+xml");
-}
-function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
-  const read = ledger?.classificationRead(item.identity);
-  const override = read?.override;
-  const fresh = text2?.trim() ? extra.contentFetchFailed !== true : false;
-  const recorded = ledger?.getCurrent(item.identity);
-  const fenced = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh }) : options?.sniffer;
-  const signals = connector.classificationSignals(item);
-  const parentContext = item.identity.parent ? options?.parentNamesContext?.(item.identity, item.identity.parent.localItemId) : undefined;
-  const namesReceipt = contentNamesReason(signals, parentContext);
-  const cacheAware = fenced && {
-    id: fenced.id,
-    judge(request) {
-      if (!fenced.cachedVerdict || request.pass !== "content" || text2 === undefined || !recorded || recorded.state === "moving" || recorded.engineVersion !== TIER_CLASSIFIER_VERSION || recorded.mapRevision !== (request.mapRevision ?? "none") || !recorded.reasons.includes(namesReceipt))
-        return fenced.judge(request);
-      const verdict = fenced.cachedVerdict(request);
-      if (verdict.verdict === "decided")
-        return verdict;
-      const storedNames = extra.storedContentNames?.();
-      if (storedNames) {
-        const cached2 = fenced.cachedVerdict({
-          ...request,
-          materialHash: tierSnifferInputHash("content", storedNames, text2, parentContext)
-        });
-        if (cached2.verdict === "decided")
-          return cached2;
-      }
-      return fenced.judge(request);
-    }
-  };
-  const sniffer = cacheAware && conversationOrderedSniffer(recordedContentVerdictSniffer(cacheAware, recorded, text2, namesReceipt), item.metadata);
-  const holdUntilJudged = options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true || heldUntilJudged(recorded?.reasons);
-  return classifyItemTiers({
-    signals,
-    locators: ["locatorUri", "url", "pathDisplay"].map((key2) => item.metadata[key2]).filter((value) => typeof value === "string"),
-    provider: item.identity.provider,
-    ...text2 !== undefined ? { text: text2 } : {},
-    ...extra.namesOnly ? { namesOnly: true } : {},
-    ...holdUntilJudged ? { holdUntilJudged: true } : {},
-    ...parentContext ? { parentContext } : {},
-    mimeType: item.mimeType,
-    hasNonTextContent: itemHasNonTextContent(item),
-    titleIsConversation: item.metadata.titleIsConversation === true,
-    ...read?.secret ? { heldSecret: true } : {},
-    subject: item.identity
-  }, {
-    ...options?.rules ? { rules: options.rules } : {},
-    ...sniffer ? { sniffer } : {},
-    ...override ? { override } : {},
-    ...options?.retirePublic ? { retirePublic: true } : {}
-  });
-}
-function recordedContentVerdictSniffer(sniffer, recorded, text2, names) {
-  if (!recorded || !text2?.trim() || recorded.state !== "current" || recorded.contentPending || !recorded.contentRead)
-    return sniffer;
-  if (recorded.engineVersion !== TIER_CLASSIFIER_VERSION || !recorded.reasons.includes(contentDigestReason(text2)) || !recorded.reasons.includes(names))
-    return sniffer;
-  const tier = recorded.contentTier;
-  const prefix = `content:sniffer:${sniffer.id}:`;
-  const code = recorded.reasons.find((reason) => reason.startsWith(prefix))?.slice(prefix.length);
-  if (tier !== "private" && tier !== "secure" || !code || code === "undecided" || isFailSafeMissingContentQuestion(`${prefix}${code}`))
-    return sniffer;
-  return {
-    id: sniffer.id,
-    recordedContentVerdict: { tier, code, mapRevision: recorded.mapRevision },
-    judge: (request) => request.pass === "content" && (request.mapRevision ?? "none") === recorded.mapRevision ? { verdict: "decided", tier, code } : sniffer.judge(request)
-  };
-}
-function secretFencedSniffer(sniffer, ledger, identity, read, options = {}) {
-  const stillAsk = () => {
-    const now = ledger.classificationRead(identity);
-    if (now.scrubRevision !== read.scrubRevision)
-      return false;
-    if (!now.secret)
-      return true;
-    return options.mayAskSecret === true && read.secret && JSON.stringify(read.override ?? null) === JSON.stringify(now.override ?? null);
-  };
-  return {
-    id: sniffer.id,
-    ...sniffer.cachedVerdict ? { cachedVerdict: (request) => sniffer.cachedVerdict({ ...request, stillAsk }) } : {},
-    judge: (request) => sniffer.judge({ ...request, stillAsk })
-  };
-}
-
-// src/workers/connector-store/tier-rejudge.ts
-var TIER_REJUDGE_CONNECTOR_ID = "olympus_tier_rejudge";
-function settleRoutedSecrets(set, identity, decision, exported, finding, placement = {}) {
-  const ledger = set.ledger;
-  const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), {
-    ...placement.guard ? { guard: placement.guard } : {}
-  });
-  if (recorded.outcome !== "secrets")
-    return false;
-  const locations = set.secrets();
-  if (locations)
-    recordSecretLocation(locations, decision, exported, finding);
-  settleSecretsCopies({
-    ledger,
-    identity: exported.identity,
-    copies: recorded.previousCopies,
-    storeFor: (corpusId) => {
-      const domain = set.domainForCorpus(corpusId);
-      return domain ? set.store(domain) : undefined;
-    },
-    connectorId: TIER_REJUDGE_CONNECTOR_ID
-  });
-  return true;
-}
-function recordSecretLocation(locations, decision, exported, finding) {
-  const locator = columnString(exported.columns["locator_uri"]);
-  const title = columnString(exported.columns["title"]);
-  const namesReleasable = decision.metadataTier === "public" || decision.metadataTier === "private";
-  const folderKeys = storedFolderKeys(exported.columns["source_scope_folder_keys_json"]);
-  const scopeGeneration = columnString(exported.columns["source_scope_generation"]);
-  const scopeRevision = columnString(exported.columns["source_scope_revision"]);
-  locations.record({
-    identity: exported.identity,
-    ...locator && !hasCredentialUrl(locator) ? { locator } : {},
-    ...title && namesReleasable ? { title } : {},
-    namesReleasable,
-    ...folderKeys.length > 0 ? { folderKeys } : {},
-    ...scopeGeneration && scopeRevision ? { scopeGeneration, scopeRevision } : {},
-    findingKinds: finding.findingKinds.length > 0 ? finding.findingKinds : ["owner_marked_secret"],
-    ...finding.text !== undefined ? { text: finding.text } : {}
-  });
-}
-function identityOf2(record) {
-  return {
-    provider: record.provider,
-    accountScope: record.accountScope,
-    providerItemId: record.providerItemId,
-    ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
-  };
-}
-function columnString(value) {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-function storedFolderKeys(value) {
-  if (typeof value !== "string" || !value.trim())
-    return [];
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed.filter((key2) => typeof key2 === "string") : [];
-  } catch {
-    return [];
-  }
-}
-function raiseReadWindowTier(store, ledger, record, tier, snifferId) {
-  const identity = identityOf2(record);
-  const override = ledger.getOverride(identity);
-  if (ledger.getCurrent(identity)?.generation !== record.generation || override?.kind === "tier" && override.tier !== "private")
-    return;
-  const decision = {
-    ...record,
-    state: "current",
-    contentRead: true,
-    contentPending: false,
-    contentTier: maxTier(record.contentTier, tier),
-    decidedBy: "sniffer",
-    snifferId,
-    reasons: [...record.reasons, `content:sniffer:${snifferId}:read_window_${tier}`]
-  };
-  const set = tierSetForLedger(ledger.dbPath);
-  if (record.routed) {
-    if (!set)
-      throw new Error("The item read cannot raise a routed item without its tier set.");
-    if (tier === "secrets") {
-      const exported = store?.exportItemCopy?.(identity);
-      if (!exported)
-        throw new Error("The item read cannot settle a missing Secret copy.");
-      settleRoutedSecrets(set, identity, decision, exported, { findingKinds: ["sniffer_secret_refusal"] }, { guard: { generation: record.generation, override } });
-    } else {
-      ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), { guard: { generation: record.generation, override } });
-    }
-  } else {
-    const exported = tier === "secrets" ? store?.exportItemCopy?.(identity) : undefined;
-    ledger.recordDecision(identity, decision);
-    if (exported)
-      store?.tombstoneCopy?.(exported.identity, { connectorId: TIER_REJUDGE_CONNECTOR_ID, trustTier: "S5" });
-  }
-}
-
-// src/workers/remote-access-recheck.ts
-import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
-
-// src/core/release-manifest.ts
-import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
-var chunkProvenance = new WeakMap;
-var storage3 = new AsyncLocalStorage6;
-var withheldAnswers = new WeakSet;
 
 // src/core/remote-result.ts
 var MAX_ANSWER = 64 * 1024;
@@ -24375,11 +23480,11 @@ var STOP_WORDS2 = new Set([
 ]);
 
 // src/workers/classification/tier-set-binding.ts
-import { existsSync as existsSync23 } from "node:fs";
-import { basename as basename6, dirname as dirname26, join as join24, resolve as resolve9 } from "node:path";
+import { existsSync as existsSync21 } from "node:fs";
+import { basename as basename6, dirname as dirname24, join as join23, resolve as resolve9 } from "node:path";
 function tierStoreDataRoot(storeDbPath) {
-  const folder = dirname26(resolve9(storeDbPath));
-  return accountSiblingStorePath(storeDbPath, "secure_local") ? dirname26(dirname26(dirname26(dirname26(folder)))) : folder;
+  const folder = dirname24(resolve9(storeDbPath));
+  return accountSiblingStorePath(storeDbPath, "secure_local") ? dirname24(dirname24(dirname24(dirname24(folder)))) : folder;
 }
 var tierLedgerIsWithin = pathResolvesWithin;
 function readTierSetBinding(storeDbPath) {
@@ -24406,18 +23511,657 @@ function tierSetLedgerCandidates(storeDbPath, recordedLedgerPath) {
   const secure = accountSiblingStorePath(storeDbPath, "secure_local");
   if (secure)
     candidates.push(tierLedgerPathForStore(secure));
-  candidates.push(join24(dirname26(storeDbPath), basename6(recordedLedgerPath)));
+  candidates.push(join23(dirname24(storeDbPath), basename6(recordedLedgerPath)));
   candidates.push(recordedLedgerPath);
   return [...new Set(candidates)].filter((path) => tierLedgerIsWithin(tierStoreDataRoot(storeDbPath), path));
 }
 function findTierSetLedger(storeDbPath, binding) {
   for (const candidate of tierSetLedgerCandidates(storeDbPath, binding.ledgerPath)) {
-    if (candidate === ":memory:" || !existsSync23(candidate))
+    if (candidate === ":memory:" || !existsSync21(candidate))
       continue;
     if (TierLedger.readLedgerId(candidate) === binding.ledgerId)
       return candidate;
   }
   return;
+}
+
+// src/workers/classification/installed-tier-classification-registry.ts
+var registered;
+function registeredInstalledTierClassification() {
+  return registered;
+}
+
+// src/workers/connector-store/tier-placement.ts
+function resolveStoreTierClassification(explicit, ledgerPath) {
+  const installed2 = registeredInstalledTierClassification()?.forLedger(ledgerPath);
+  if (!installed2)
+    return explicit;
+  if (!explicit)
+    return installed2;
+  const rules = [...explicit.rules ?? [], ...installed2.rules ?? []];
+  const sniffer = explicit.sniffer ?? installed2.sniffer;
+  const unavailableReason = installed2.unavailableReason ?? explicit.unavailableReason;
+  const retirePublic = installed2.retirePublic === true || explicit.retirePublic === true;
+  return {
+    ...rules.length > 0 ? { rules } : {},
+    ...sniffer ? { sniffer } : {},
+    ...retirePublic ? { retirePublic: true } : {},
+    ...unavailableReason ? { unavailableReason } : {},
+    ...explicit.holdContentUntilJudged === true ? { holdContentUntilJudged: true } : {}
+  };
+}
+var DEFAULT_TIER_FOR_DOMAIN = {
+  public_safe: "S0",
+  internal: "S3",
+  secure_local: "S4"
+};
+function defaultStoreTrustTier(trustDomain) {
+  return DEFAULT_TIER_FOR_DOMAIN[trustDomain] ?? "S4";
+}
+function placeInExistingStore(item, placement, storeTrustDomain) {
+  if (typeof placement === "function")
+    return placement(item);
+  const trustDomain = placement?.trustDomain ?? storeTrustDomain;
+  const trustTier = placement?.trustTier ?? defaultStoreTrustTier(trustDomain);
+  if (placement?.secretsInContent === true) {
+    const text2 = textualContentOf(item);
+    if (text2 !== undefined && detectSecretFindingKinds(text2).length > 0) {
+      return buildSourceSensitivity({ trustTier: "S5", trustDomain: "secure_local" });
+    }
+  }
+  return buildSourceSensitivity({ trustTier, trustDomain });
+}
+function textualContentOf(item) {
+  if (item.content.kind === "text")
+    return item.content.text;
+  if (item.content.kind === "bytes" && isTextualMimeType(item.content.mimeType)) {
+    return new TextDecoder("utf-8", { fatal: false }).decode(item.content.bytes);
+  }
+  return;
+}
+function isTextualMimeType(mimeType) {
+  const normalized = mimeType.split(";")[0]?.trim().toLowerCase() ?? "";
+  return normalized.startsWith("text/") || normalized === "application/json" || normalized === "application/xml" || normalized.endsWith("+json") || normalized.endsWith("+xml");
+}
+function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
+  const read = ledger?.classificationRead(item.identity);
+  const override = read?.override;
+  const fresh = text2?.trim() ? extra.contentFetchFailed !== true : false;
+  const recorded = ledger?.getCurrent(item.identity);
+  const fenced = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh }) : options?.sniffer;
+  const signals = connector.classificationSignals(item);
+  const parentContext = item.identity.parent ? options?.parentNamesContext?.(item.identity, item.identity.parent.localItemId) : undefined;
+  const namesReceipt = contentNamesReason(signals, parentContext);
+  const cacheAware = fenced && {
+    id: fenced.id,
+    judge(request) {
+      if (!fenced.cachedVerdict || request.pass !== "content" || text2 === undefined || !recorded || recorded.state === "moving" || recorded.engineVersion !== TIER_CLASSIFIER_VERSION || recorded.mapRevision !== (request.mapRevision ?? "none") || !recorded.reasons.includes(namesReceipt))
+        return fenced.judge(request);
+      const verdict = fenced.cachedVerdict(request);
+      if (verdict.verdict === "decided")
+        return verdict;
+      const storedNames = extra.storedContentNames?.();
+      if (storedNames) {
+        const cached2 = fenced.cachedVerdict({
+          ...request,
+          materialHash: tierSnifferInputHash("content", storedNames, text2, parentContext)
+        });
+        if (cached2.verdict === "decided")
+          return cached2;
+      }
+      return fenced.judge(request);
+    }
+  };
+  const sniffer = cacheAware && conversationOrderedSniffer(recordedContentVerdictSniffer(cacheAware, recorded, text2, namesReceipt), item.metadata);
+  const holdUntilJudged = options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true || heldUntilJudged(recorded?.reasons);
+  return classifyItemTiers({
+    signals,
+    locators: ["locatorUri", "url", "pathDisplay"].map((key2) => item.metadata[key2]).filter((value) => typeof value === "string"),
+    provider: item.identity.provider,
+    ...text2 !== undefined ? { text: text2 } : {},
+    ...extra.namesOnly ? { namesOnly: true } : {},
+    ...holdUntilJudged ? { holdUntilJudged: true } : {},
+    ...parentContext ? { parentContext } : {},
+    mimeType: item.mimeType,
+    hasNonTextContent: itemHasNonTextContent(item),
+    titleIsConversation: item.metadata.titleIsConversation === true,
+    ...read?.secret ? { heldSecret: true } : {},
+    subject: item.identity
+  }, {
+    ...options?.rules ? { rules: options.rules } : {},
+    ...sniffer ? { sniffer } : {},
+    ...override ? { override } : {},
+    ...options?.retirePublic ? { retirePublic: true } : {}
+  });
+}
+function recordedContentVerdictSniffer(sniffer, recorded, text2, names) {
+  if (!recorded || !text2?.trim() || recorded.state !== "current" || recorded.contentPending || !recorded.contentRead)
+    return sniffer;
+  if (recorded.engineVersion !== TIER_CLASSIFIER_VERSION || !recorded.reasons.includes(contentDigestReason(text2)) || !recorded.reasons.includes(names))
+    return sniffer;
+  const tier = recorded.contentTier;
+  const prefix = `content:sniffer:${sniffer.id}:`;
+  const code = recorded.reasons.find((reason) => reason.startsWith(prefix))?.slice(prefix.length);
+  if (tier !== "private" && tier !== "secure" || !code || code === "undecided" || isFailSafeMissingContentQuestion(`${prefix}${code}`))
+    return sniffer;
+  return {
+    id: sniffer.id,
+    recordedContentVerdict: { tier, code, mapRevision: recorded.mapRevision },
+    judge: (request) => request.pass === "content" && (request.mapRevision ?? "none") === recorded.mapRevision ? { verdict: "decided", tier, code } : sniffer.judge(request)
+  };
+}
+function secretFencedSniffer(sniffer, ledger, identity, read, options = {}) {
+  const stillAsk = () => {
+    const now = ledger.classificationRead(identity);
+    if (now.scrubRevision !== read.scrubRevision)
+      return false;
+    if (!now.secret)
+      return true;
+    return options.mayAskSecret === true && read.secret && JSON.stringify(read.override ?? null) === JSON.stringify(now.override ?? null);
+  };
+  return {
+    id: sniffer.id,
+    ...sniffer.cachedVerdict ? { cachedVerdict: (request) => sniffer.cachedVerdict({ ...request, stillAsk }) } : {},
+    judge: (request) => sniffer.judge({ ...request, stillAsk })
+  };
+}
+
+// src/workers/connector-store/secrets-disposition.ts
+import { existsSync as existsSync23 } from "node:fs";
+
+// src/core/app-release-log.ts
+import { Database as Database5 } from "bun:sqlite";
+import { randomBytes as randomBytes2 } from "node:crypto";
+import { chmodSync as chmodSync7, existsSync as existsSync22, lstatSync as lstatSync9, mkdirSync as mkdirSync14 } from "node:fs";
+import { homedir as homedir11 } from "node:os";
+import { dirname as dirname26, isAbsolute as isAbsolute13, join as join24 } from "node:path";
+
+// src/core/remote-connections.ts
+import { dirname as dirname25, isAbsolute as isAbsolute12 } from "node:path";
+
+// src/core/operation-caller.ts
+var inProcessRemoteRequests = new WeakSet;
+
+// connect-relay/shared/tokens.ts
+var SECRET = "[A-Za-z0-9_-]{43}";
+var INSTALL = "[a-z2-7]{32}";
+var PATTERN = {
+  access: new RegExp(`^oly2\\.(${INSTALL})\\.${SECRET}$`),
+  refresh: new RegExp(`^oly2r\\.(${INSTALL})\\.${SECRET}$`),
+  code: new RegExp(`^oly2c\\.(${INSTALL})\\.${SECRET}$`),
+  handoff: new RegExp(`^oly2g\\.(${INSTALL})\\.${SECRET}$`),
+  private: new RegExp(`^oly2p\\.(${INSTALL})\\.${SECRET}$`)
+};
+
+// src/workers/remote-oauth/pinned-clients.ts
+var GROK_REDIRECT_URIS = Object.freeze([
+  "https://grok.com/connectors-oauth-exchange-code/",
+  "https://console.x.ai/connectors-oauth-exchange-code/"
+]);
+var CURSOR_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback";
+var CURSOR_REDIRECT_URIS = Object.freeze([
+  CURSOR_REDIRECT_URI,
+  "https://www.cursor.com/bot/mcp/oauth/callback",
+  "https://grok.com/connectors-oauth-exchange-code/"
+]);
+
+// src/core/remote-oauth-store.ts
+var REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 3600;
+var REMOTE_PAIRING_CODE_TTL_MS = 10 * 60000;
+var PAIRING_SELECTOR_LENGTH = 4;
+var PAIRING_SECRET_LENGTH = 8;
+var PAIRING_CODE_LENGTH = PAIRING_SELECTOR_LENGTH + PAIRING_SECRET_LENGTH;
+var UNUSED_CLIENT_PRUNE_AGE_MS = 24 * 3600000;
+
+// src/core/waiting-private-questions.ts
+var WAITING_QUESTION_LIMITS = Object.freeze({
+  questionBytes: 2048,
+  localQuestionBytes: 8 * 1024,
+  selectorBytes: 4096,
+  answerBytes: 128 * 1024,
+  ttlMs: 7 * 24 * 60 * 60000,
+  reanswerAfterMs: 10 * 60000
+});
+
+// src/core/remote-connections.ts
+function resolveRemoteConnectionsDbPath(env = process.env) {
+  return defaultRemoteConnectionsDbPath(env);
+}
+function defaultRemoteConnectionsDbPath(env = process.env) {
+  const path = sharedDataPath("remote-connections", env);
+  if (!isAbsolute12(path)) {
+    throw new TypeError("Remote connections XDG_DATA_HOME must be an absolute private data root.");
+  }
+  return path;
+}
+
+// src/core/app-release-log.ts
+var APP_RELEASE_LOG_STORE_ID = "app-release-log";
+var APP_RELEASE_LOG_SCHEMA_VERSION = 3;
+var APP_RELEASE_RETENTION_DAYS = [7, 30, 90, 0];
+var APP_RELEASE_DEFAULT_RETENTION_DAYS = 30;
+var MAX_ITEMS_PER_REQUEST = 48;
+var LIST_LIMIT = 200;
+var DAY_MS = 24 * 60 * 60000;
+var RETENTION_KEY = "retention_days";
+function appReleaseLogDbPath(remoteConnectionsDbPath) {
+  return join24(dirname26(remoteConnectionsDbPath), SHARED_DATA_FILES["app-release-log"]);
+}
+var openLogPaths = new Map;
+function appReleaseLogDbPaths(env = process.env) {
+  return [...new Set([appReleaseLogDbPath(resolveRemoteConnectionsDbPath(env)), ...openLogPaths.keys()])];
+}
+function isAppReleaseRetentionDays(value) {
+  return typeof value === "number" && APP_RELEASE_RETENTION_DAYS.includes(value);
+}
+function openAppReleaseLog(dbPath, options = {}) {
+  const now = options.now ?? Date.now;
+  hardenPrivatePath(dbPath);
+  const db = new Database5(dbPath, { create: true });
+  try {
+    chmodSync7(dbPath, 384);
+    db.exec("PRAGMA busy_timeout = 5000; PRAGMA secure_delete = ON; PRAGMA journal_mode = DELETE; PRAGMA foreign_keys = ON;");
+    db.transaction(() => {
+      assertSqliteSchemaCanOpen(db, APP_RELEASE_LOG_STORE_ID, APP_RELEASE_LOG_SCHEMA_VERSION);
+      runSqliteMigrations(db, APP_RELEASE_LOG_STORE_ID, migrations());
+    }).immediate();
+  } catch (error) {
+    closeSqliteStore(db);
+    throw error;
+  }
+  openLogPaths.set(dbPath, (openLogPaths.get(dbPath) ?? 0) + 1);
+  let registered2 = true;
+  const retentionDays = () => {
+    const row = db.query("SELECT value FROM app_release_meta WHERE key = ?").get(RETENTION_KEY);
+    const days = row ? Number(row.value) : APP_RELEASE_DEFAULT_RETENTION_DAYS;
+    return isAppReleaseRetentionDays(days) ? days : APP_RELEASE_DEFAULT_RETENTION_DAYS;
+  };
+  const clear = () => db.transaction(() => {
+    db.query("DELETE FROM app_release_items").run();
+    return db.query("DELETE FROM app_release_requests").run().changes;
+  })();
+  const expire = () => {
+    const days = retentionDays();
+    if (days === 0) {
+      clear();
+      return;
+    }
+    const before = now() - days * DAY_MS;
+    db.transaction(() => {
+      db.query("DELETE FROM app_release_items WHERE request_id IN (SELECT id FROM app_release_requests WHERE at < ?)").run(before);
+      db.query("DELETE FROM app_release_requests WHERE at < ?").run(before);
+    })();
+  };
+  return {
+    record(record) {
+      if (retentionDays() === 0)
+        return;
+      const id = `apr_${randomBytes2(12).toString("base64url")}`;
+      db.transaction(() => {
+        db.query(`INSERT INTO app_release_requests (id, at, connection_id, connection_name, connection_kind, question, held_back, answered_privately, withheld, private_question_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, record.at, record.connection.id ?? null, record.connection.name.slice(0, 80), record.connection.kind, record.question.slice(0, 2000), Math.max(0, Math.floor(record.heldBack)), record.answeredPrivately ? 1 : 0, record.withheld ? 1 : 0, record.privateQuestionKey ?? null);
+        const insert = db.query(`INSERT INTO app_release_items (request_id, position, source, title, tier, corpus_id, provider, account_scope, provider_item_id, provider_conversation_id, locator)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+        const secret = db.query(`SELECT 1 FROM app_release_secret_items
+          WHERE provider = ? AND provider_item_id = ? AND (provider_conversation_id = '' OR ? = '' OR provider_conversation_id = ?) LIMIT 1`);
+        record.items.slice(0, MAX_ITEMS_PER_REQUEST).forEach((item, position) => {
+          const named = !(item.provider && item.providerItemId && secret.get(item.provider, item.providerItemId, item.providerConversationId ?? "", item.providerConversationId ?? ""));
+          insert.run(id, position, item.source, named ? item.title ?? null : null, item.tier, item.corpusId ?? null, item.provider ?? null, item.accountScope ?? null, item.providerItemId ?? null, item.providerConversationId ?? null, named ? item.locator ?? null : null);
+        });
+      })();
+      expire();
+      return id;
+    },
+    list() {
+      expire();
+      const requests = db.query(`SELECT id, at, connection_name, connection_kind, question, held_back, answered_privately, withheld
+        FROM app_release_requests ORDER BY at DESC, rowid DESC LIMIT ?`).all(LIST_LIMIT);
+      const items = db.query("SELECT position, source, title, tier, made_private FROM app_release_items WHERE request_id = ? ORDER BY position");
+      return requests.map((row) => ({
+        id: row.id,
+        at: row.at,
+        connection: { name: row.connection_name, kind: row.connection_kind === "agent" ? "agent" : "app" },
+        question: row.question,
+        heldBack: row.held_back,
+        answeredPrivately: row.answered_privately === 1,
+        withheld: row.withheld === 1,
+        items: items.all(row.id).map((item) => ({
+          position: item.position,
+          source: item.source,
+          ...item.title ? { title: item.title } : {},
+          tier: item.tier === "public" || item.tier === "personal" ? item.tier : "private",
+          madePrivate: item.made_private === 1
+        }))
+      }));
+    },
+    retentionDays,
+    setRetentionDays(days) {
+      if (!isAppReleaseRetentionDays(days))
+        throw new TypeError("Retention must be 7, 30, 90 or 0 days.");
+      db.query("INSERT INTO app_release_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(RETENTION_KEY, String(days));
+      expire();
+    },
+    clear,
+    item(requestId, position) {
+      const row = db.query(`SELECT source, title, tier, corpus_id, provider, provider_item_id, provider_conversation_id, locator, made_private
+        FROM app_release_items WHERE request_id = ? AND position = ?`).get(requestId, position);
+      if (!row)
+        return;
+      return {
+        source: row.source,
+        ...row.title ? { title: row.title } : {},
+        tier: row.tier === "public" || row.tier === "personal" ? row.tier : "private",
+        ...row.corpus_id ? { corpusId: row.corpus_id } : {},
+        ...row.provider ? { provider: row.provider } : {},
+        ...row.provider_item_id ? { providerItemId: row.provider_item_id } : {},
+        ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {},
+        ...row.locator ? { locator: row.locator } : {},
+        madePrivate: row.made_private === 1
+      };
+    },
+    markMadePrivate(requestId, position) {
+      db.query("UPDATE app_release_items SET made_private = 1 WHERE request_id = ? AND position = ?").run(requestId, position);
+    },
+    markAnsweredPrivately(privateQuestionKey) {
+      return db.query("UPDATE app_release_requests SET answered_privately = 1 WHERE private_question_id = ? AND answered_privately = 0").run(privateQuestionKey).changes;
+    },
+    forgetCorpora(corpusIds, dryRun, accountScopes) {
+      if (corpusIds.length === 0 || accountScopes?.length === 0)
+        return 0;
+      const marks = (values) => values.map(() => "?").join(", ");
+      const where = `corpus_id IN (${marks(corpusIds)})${accountScopes ? ` AND account_scope IN (${marks(accountScopes)})` : ""}`;
+      const params = [...corpusIds, ...accountScopes ?? []];
+      if (dryRun)
+        return db.query(`SELECT COUNT(*) AS n FROM app_release_items WHERE ${where}`).get(...params).n;
+      return db.query(`DELETE FROM app_release_items WHERE ${where}`).run(...params).changes;
+    },
+    forgetSecretItem(item, options2 = {}) {
+      const conversation = item.providerConversationId ?? "";
+      return db.transaction(() => {
+        if (options2.proceed && !options2.proceed())
+          return 0;
+        db.query(`INSERT OR IGNORE INTO app_release_secret_items (provider, provider_item_id, provider_conversation_id, redacted_at)
+          VALUES (?, ?, ?, ?)`).run(item.provider, item.providerItemId, conversation, now());
+        return db.query(`UPDATE app_release_items SET title = NULL, locator = NULL
+          WHERE provider = ? AND provider_item_id = ? AND (? = '' OR provider_conversation_id IS NULL OR provider_conversation_id = ?)
+            AND (title IS NOT NULL OR locator IS NOT NULL)`).run(item.provider, item.providerItemId, conversation, conversation).changes;
+      }).immediate();
+    },
+    retireSecretItem(item, options2 = {}) {
+      db.transaction(() => {
+        if (options2.stillSecret?.())
+          return;
+        db.query("DELETE FROM app_release_secret_items WHERE provider = ? AND provider_item_id = ?").run(item.provider, item.providerItemId);
+      }).immediate();
+    },
+    close() {
+      if (registered2) {
+        registered2 = false;
+        const count = (openLogPaths.get(dbPath) ?? 1) - 1;
+        if (count > 0)
+          openLogPaths.set(dbPath, count);
+        else
+          openLogPaths.delete(dbPath);
+      }
+      closeSqliteStore(db);
+    }
+  };
+}
+function forgetSecretAppReleaseItem(dbPath, item, options = {}) {
+  if (!existsSync22(dbPath))
+    return 0;
+  const store = openAppReleaseLog(dbPath);
+  try {
+    return store.forgetSecretItem(item, options);
+  } finally {
+    store.close();
+  }
+}
+function retireSecretAppReleaseItem(dbPath, item, options = {}) {
+  if (!existsSync22(dbPath))
+    return;
+  const store = openAppReleaseLog(dbPath);
+  try {
+    store.retireSecretItem(item, options);
+  } finally {
+    store.close();
+  }
+}
+function migrations() {
+  return [{
+    version: 1,
+    name: "app_release_log",
+    up(db) {
+      db.exec(`
+        CREATE TABLE app_release_requests (
+          id TEXT PRIMARY KEY,
+          at INTEGER NOT NULL,
+          connection_id TEXT,
+          connection_name TEXT NOT NULL,
+          connection_kind TEXT NOT NULL,
+          question TEXT NOT NULL,
+          held_back INTEGER NOT NULL DEFAULT 0,
+          answered_privately INTEGER NOT NULL DEFAULT 0,
+          withheld INTEGER NOT NULL DEFAULT 0,
+          private_question_id TEXT
+        );
+        CREATE INDEX app_release_requests_private_question ON app_release_requests (private_question_id);
+        CREATE INDEX app_release_requests_at ON app_release_requests (at);
+        CREATE TABLE app_release_items (
+          request_id TEXT NOT NULL,
+          position INTEGER NOT NULL,
+          source TEXT NOT NULL,
+          title TEXT,
+          tier TEXT NOT NULL,
+          corpus_id TEXT,
+          provider TEXT,
+          provider_item_id TEXT,
+          provider_conversation_id TEXT,
+          locator TEXT,
+          made_private INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (request_id, position)
+        );
+        CREATE INDEX app_release_items_corpus ON app_release_items (corpus_id);
+        CREATE TABLE app_release_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      `);
+    }
+  }, {
+    version: 2,
+    name: "app_release_secret_items",
+    up(db) {
+      db.exec(`
+        CREATE TABLE app_release_secret_items (
+          provider TEXT NOT NULL,
+          provider_item_id TEXT NOT NULL,
+          provider_conversation_id TEXT NOT NULL DEFAULT '',
+          redacted_at INTEGER NOT NULL,
+          PRIMARY KEY (provider, provider_item_id, provider_conversation_id)
+        );
+        CREATE INDEX app_release_items_provider_item ON app_release_items (provider, provider_item_id);
+      `);
+    }
+  }, {
+    version: 3,
+    name: "app_release_items_account_scope",
+    up(db) {
+      db.exec(`
+        ALTER TABLE app_release_items ADD COLUMN account_scope TEXT;
+        CREATE INDEX app_release_items_corpus_scope ON app_release_items (corpus_id, account_scope);
+      `);
+    }
+  }];
+}
+function hardenPrivatePath(dbPath) {
+  if (!isAbsolute13(dbPath))
+    throw new TypeError("The AI apps log path must be absolute.");
+  const leafDir = dirname26(dbPath);
+  if (new Set(["/", "/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp", homedir11()]).has(leafDir)) {
+    throw new Error("The AI apps log must live inside a dedicated private directory.");
+  }
+  mkdirSync14(leafDir, { recursive: true, mode: 448 });
+  const dirStat = lstatSync9(leafDir);
+  if (dirStat.isSymbolicLink() || !dirStat.isDirectory())
+    throw new Error("The AI apps log must live in a real private directory.");
+  chmodSync7(leafDir, 448);
+  if (existsSync22(dbPath)) {
+    const fileStat = lstatSync9(dbPath);
+    if (fileStat.isSymbolicLink() || !fileStat.isFile())
+      throw new Error("The AI apps log must be a regular file, not a symlink.");
+  }
+}
+
+// src/workers/connector-store/secrets-disposition.ts
+function forgetSecretInSideStores(options) {
+  const result = { snifferQuestions: 0, extractionJobNames: 0, appReleaseTitles: 0, failed: 0, notDurable: 0 };
+  const { identity, ledger } = options;
+  const owedJobLedgers = [];
+  const stillOwed = () => ledger.hasSecretSideStoreDebt(identity);
+  if (options.onlyWhileOwed) {
+    try {
+      if (!stillOwed())
+        return result;
+    } catch {
+      result.failed += 1;
+      return result;
+    }
+  }
+  let claimant;
+  try {
+    claimant = ledger.ledgerId();
+  } catch {}
+  let mark;
+  try {
+    mark = ledger.noteSecretScrub(identity);
+  } catch {
+    result.failed += 1;
+  }
+  const snifferPath = tierSnifferPathForLedger(ledger.dbPath);
+  if (snifferPath !== ":memory:" && existsSync23(snifferPath)) {
+    try {
+      const sniffer = new TierSnifferStore({ dbPath: snifferPath });
+      try {
+        result.snifferQuestions = sniffer.deleteItemQuestions({
+          provider: identity.provider,
+          accountScope: identity.accountScope,
+          providerItemId: identity.providerItemId,
+          ...identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}
+        });
+      } finally {
+        sniffer.close();
+      }
+    } catch {
+      result.failed += 1;
+    }
+  }
+  for (const logPath of appReleaseLogDbPaths()) {
+    try {
+      result.appReleaseTitles += forgetSecretAppReleaseItem(logPath, {
+        provider: identity.provider,
+        providerItemId: identity.providerItemId,
+        ...identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}
+      }, options.onlyWhileOwed ? { proceed: stillOwed } : {});
+    } catch {
+      result.failed += 1;
+    }
+  }
+  let owedBefore = [];
+  let known = [];
+  try {
+    owedBefore = ledger.secretSideStoreDebtJobLedgerPaths(identity);
+    known = ledger.knownJobLedgerPaths();
+  } catch {}
+  const { visit: jobLedgers, outside } = jobLedgerPathsToVisit([...known, ...owedBefore, ...options.jobLedgerPaths ?? []]);
+  for (const jobsPath of jobLedgers) {
+    try {
+      const cleared = clearExtractionJobNames(jobsPath, {
+        provider: identity.provider,
+        accountScope: identity.accountScope,
+        providerItemId: identity.providerItemId,
+        ...identity.localItemId ? { localItemId: identity.localItemId } : {}
+      }, {
+        ...claimant !== undefined ? { claimant } : {},
+        ...options.onlyWhileOwed ? { proceed: stillOwed } : {}
+      });
+      result.extractionJobNames += cleared.cleared;
+      if (!cleared.durable) {
+        result.notDurable += 1;
+        owedJobLedgers.push(jobsPath);
+      }
+    } catch {
+      result.failed += 1;
+      owedJobLedgers.push(jobsPath);
+    }
+  }
+  try {
+    ledger.noteJobLedgerPaths(jobLedgers.filter((path) => path !== ":memory:" && existsSync23(path)));
+  } catch {}
+  try {
+    if (result.failed > 0 || result.notDurable > 0 || options.confirmInWorker) {
+      ledger.recordSecretSideStoreDebt(identity, owedJobLedgers, { onlyIfOwed: options.onlyWhileOwed === true });
+    } else {
+      ledger.clearSecretSideStoreDebt(identity, [...jobLedgers, ...outside]);
+      if (mark)
+        ledger.markSecretSideStoresCleared(identity, mark);
+    }
+  } catch {}
+  if (result.failed > 0)
+    console.warn(`[tier] secrets: ${result.failed} side store(s) could not forget an item; retried at the next tier tick.`);
+  return result;
+}
+function retireSecretRedactions(ledger, options = {}) {
+  let pending;
+  try {
+    pending = ledger.secretRedactionRetirements(options);
+  } catch {
+    return 0;
+  }
+  let claimant;
+  try {
+    claimant = ledger.ledgerId();
+  } catch {
+    return 0;
+  }
+  let knownJobLedgers = [];
+  try {
+    knownJobLedgers = ledger.knownJobLedgerPaths();
+  } catch {}
+  let retired = 0;
+  for (const retirement of pending) {
+    const item = { provider: retirement.provider, accountScope: retirement.accountScope, providerItemId: retirement.providerItemId };
+    const stillSecret = () => ledger.providerItemIsSecret(item);
+    let failed = 0;
+    let secret = false;
+    try {
+      secret = stillSecret();
+    } catch {
+      failed += 1;
+    }
+    if (!secret && failed === 0) {
+      for (const jobsPath of jobLedgerPathsToVisit([...knownJobLedgers, ...retirement.jobLedgerPaths]).visit) {
+        try {
+          if (retireExtractionJobRedaction(jobsPath, item, claimant, stillSecret).stillSecret)
+            secret = true;
+        } catch {
+          failed += 1;
+        }
+      }
+      for (const logPath of appReleaseLogDbPaths()) {
+        try {
+          retireSecretAppReleaseItem(logPath, { provider: item.provider, providerItemId: item.providerItemId }, { stillSecret });
+        } catch {
+          failed += 1;
+        }
+      }
+    }
+    if (failed > 0 && !secret)
+      continue;
+    try {
+      ledger.settleSecretRedactionRetirement(retirement.id);
+      if (!secret)
+        retired += 1;
+    } catch {}
+  }
+  return retired;
 }
 
 // src/workers/connector-store/child-visibility.ts
@@ -24903,6 +24647,126 @@ function compareStrings(left, right) {
   if (left === right)
     return 0;
   return left < right ? -1 : 1;
+}
+
+// src/workers/source-index/media-judge.ts
+var MEDIA_JUDGE_SENSITIVE_CATEGORIES = [
+  "id_document",
+  "bank_card",
+  "financial_document",
+  "medical_document",
+  "intimate"
+];
+var MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES = new Set(["medical_document"]);
+var MEDIA_JUDGE_TEXT_DECIDES = "text_decides";
+var MEDIA_JUDGE_PROMPT_SET = "photo-judge-2026-10-29";
+var MEDIA_JUDGE_PROMPTS = Object.freeze({
+  id_document: "a photo of a passport, national identity card or driving licence",
+  bank_card: "a photo of a credit card, debit card or bank card",
+  financial_document: "a bank statement, payslip or document showing account numbers",
+  medical_document: "a medical report or lab test results document",
+  intimate: "a nude, intimate or sexually explicit photo",
+  ordinary: "an ordinary photo of a place, a room, food, a landscape or people"
+});
+var MEDIA_JUDGE_PROMPT_PREFIX = "task: classification | query: ";
+var MEDIA_JUDGE_THRESHOLDS = Object.freeze({
+  margin: 0.04,
+  intimateMargin: 0.025
+});
+function mediaJudgeId(provider, thresholds = MEDIA_JUDGE_THRESHOLDS) {
+  return `${MEDIA_JUDGE_PROMPT_SET}:m${thresholds.margin}:i${thresholds.intimateMargin}:${provider.modelId}:${provider.configHash.slice(0, 12)}`;
+}
+function dot(left, right) {
+  let sum = 0;
+  const length = Math.min(left.length, right.length);
+  for (let index = 0;index < length; index += 1)
+    sum += left[index] * right[index];
+  return sum;
+}
+function rounded(value) {
+  return Math.round(value * 1e4) / 1e4;
+}
+function judgeMediaScores(scores, judgeId, thresholds = MEDIA_JUDGE_THRESHOLDS) {
+  const ordinary = scores.ordinary;
+  const sensitive = MEDIA_JUDGE_SENSITIVE_CATEGORIES.map((category) => [category, scores[category]]);
+  if (typeof ordinary !== "number" || !Number.isFinite(ordinary) || sensitive.some(([, score]) => typeof score !== "number" || !Number.isFinite(score))) {
+    return { verdict: "unjudged", judgeId, reason: "scores_unavailable" };
+  }
+  let top = sensitive[0][0];
+  let topScore = -Infinity;
+  for (const [category, score] of sensitive) {
+    if (score > topScore) {
+      top = category;
+      topScore = score;
+    }
+  }
+  const margin = topScore - ordinary;
+  const intimateMargin = scores.intimate - ordinary;
+  const kept = Object.fromEntries(Object.entries(scores).map(([key2, value]) => [key2, rounded(value)]));
+  if (margin >= thresholds.margin && !MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES.has(top)) {
+    return { verdict: "sensitive", category: top, margin: rounded(margin), scores: kept, judgeId };
+  }
+  let pictureTop;
+  for (const [category, score] of sensitive) {
+    if (MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES.has(category) || score - ordinary < thresholds.margin)
+      continue;
+    if (!pictureTop || score > scores[pictureTop])
+      pictureTop = category;
+  }
+  if (pictureTop) {
+    return { verdict: "sensitive", category: pictureTop, margin: rounded(scores[pictureTop] - ordinary), scores: kept, judgeId };
+  }
+  if (intimateMargin >= thresholds.intimateMargin) {
+    return { verdict: "sensitive", category: "intimate", margin: rounded(margin), scores: kept, judgeId };
+  }
+  if (margin >= thresholds.margin) {
+    return { verdict: "ordinary", category: top, margin: rounded(margin), scores: kept, judgeId, reason: MEDIA_JUDGE_TEXT_DECIDES };
+  }
+  return { verdict: "ordinary", category: top, margin: rounded(margin), scores: kept, judgeId };
+}
+function judgeImageVector(imageVector, promptVectors, judgeId, thresholds = MEDIA_JUDGE_THRESHOLDS) {
+  if (!imageVector || imageVector.length === 0)
+    return { verdict: "unjudged", judgeId, reason: "image_unreadable" };
+  if (Math.hypot(...imageVector) < 0.000001)
+    return { verdict: "unjudged", judgeId, reason: "image_unreadable" };
+  const scores = {};
+  for (const category of Object.keys(MEDIA_JUDGE_PROMPTS)) {
+    scores[category] = dot(imageVector, promptVectors[category]);
+  }
+  return judgeMediaScores(scores, judgeId, thresholds);
+}
+function canJudgeMedia(provider) {
+  return typeof provider.embedPromptTexts === "function" && typeof provider.embedImageVectors === "function";
+}
+var promptVectorCache = new Map;
+function mediaJudgePromptVectors(provider) {
+  const key2 = `${provider.provider}\x00${provider.modelId}\x00${provider.configHash}`;
+  let cached2 = promptVectorCache.get(key2);
+  if (!cached2) {
+    const categories = Object.keys(MEDIA_JUDGE_PROMPTS);
+    cached2 = provider.embedPromptTexts(categories.map((category) => `${MEDIA_JUDGE_PROMPT_PREFIX}${MEDIA_JUDGE_PROMPTS[category]}`)).then((vectors) => {
+      if (vectors.length !== categories.length || vectors.some((vector) => vector.length === 0)) {
+        throw new Error("The photo judge's descriptions could not be embedded.");
+      }
+      return Object.fromEntries(categories.map((category, index) => [category, vectors[index]]));
+    });
+    promptVectorCache.set(key2, cached2);
+    cached2.catch(() => promptVectorCache.delete(key2));
+  }
+  return cached2;
+}
+async function judgeMediaImages(provider, images, thresholds = MEDIA_JUDGE_THRESHOLDS) {
+  if (images.length === 0)
+    return [];
+  const prompts = await mediaJudgePromptVectors(provider);
+  const vectors = await provider.embedImageVectors([...images]);
+  const judgeId = mediaJudgeId(provider, thresholds);
+  return images.map((_, index) => judgeImageVector(vectors[index], prompts, judgeId, thresholds));
+}
+async function judgeReturnedImageVectors(provider, vectors, thresholds = MEDIA_JUDGE_THRESHOLDS) {
+  const prompts = await mediaJudgePromptVectors(provider);
+  const judgeId = mediaJudgeId(provider, thresholds);
+  return vectors.map((vector) => judgeImageVector(vector, prompts, judgeId, thresholds));
 }
 
 // src/workers/connector-store/local-index.ts
@@ -26160,28 +26024,28 @@ class LocalConnectorStore {
     }
     return hidden;
   }
-  tierVisibleRows(rows, identityOf3, layerOf, throwOnUnavailable = false, copiesAllowed) {
-    return visibilityHere(this.tierVisibleRowsSteps(rows, identityOf3, layerOf, throwOnUnavailable, copiesAllowed));
+  tierVisibleRows(rows, identityOf2, layerOf, throwOnUnavailable = false, copiesAllowed) {
+    return visibilityHere(this.tierVisibleRowsSteps(rows, identityOf2, layerOf, throwOnUnavailable, copiesAllowed));
   }
-  *tierVisibleRowsSteps(rows, identityOf3, layerOf, throwOnUnavailable = false, copiesAllowed) {
+  *tierVisibleRowsSteps(rows, identityOf2, layerOf, throwOnUnavailable = false, copiesAllowed) {
     if (rows.length === 0)
       return [];
     let copies;
     try {
       const ledger = this.visibilityLedger();
       if (ledger && ledger.corpusHasCopies(this.corpusId))
-        copies = yield* visibilityRead(() => ledgerVisibilityHere(ledger, rows.map(identityOf3)).copies, () => ledgerVisibilityOffThread(ledger, rows.map(identityOf3)).then((read) => read.copies));
+        copies = yield* visibilityRead(() => ledgerVisibilityHere(ledger, rows.map(identityOf2)).copies, () => ledgerVisibilityOffThread(ledger, rows.map(identityOf2)).then((read) => read.copies));
     } catch (error) {
       if (throwOnUnavailable)
         throw error;
       return [];
     }
     const served = copies ? rows.filter((row) => {
-      const here = copies.get(tierLedgerIdentityKey(identityOf3(row)));
+      const here = copies.get(tierLedgerIdentityKey(identityOf2(row)));
       return tierRowVisible(here, this.corpusId, layerOf(row)) && (copiesAllowed?.(here ?? []) ?? true);
     }) : [...rows];
-    const hidden = yield* hiddenChildKeysSteps(this.childVisibilityLane(), served.map(identityOf3));
-    return served.filter((row) => !hidden.has(tierLedgerIdentityKey(identityOf3(row))));
+    const hidden = yield* hiddenChildKeysSteps(this.childVisibilityLane(), served.map(identityOf2));
+    return served.filter((row) => !hidden.has(tierLedgerIdentityKey(identityOf2(row))));
   }
   tierHiddenItemPks(options = {}) {
     const maxAgeMs = options.countsMaxAgeMs ?? 0;
@@ -31507,7 +31371,7 @@ ${parentKey(ref)}`, { ref, origin });
     const hidden = new Set;
     if (rows.length === 0)
       return hidden;
-    const identityOf3 = (row) => ({
+    const identityOf2 = (row) => ({
       provider: row.provider,
       accountScope: row.account_scope,
       providerItemId: row.provider_item_id,
@@ -31515,10 +31379,10 @@ ${parentKey(ref)}`, { ref, origin });
     });
     const ledger = this.visibilityLedger();
     if (ledger && ledger.corpusHasCopies(this.corpusId)) {
-      const copies = ledger.copiesForMany(rows.map(identityOf3));
+      const copies = ledger.copiesForMany(rows.map(identityOf2));
       for (const row of rows) {
-        const here = (copies.get(tierLedgerIdentityKey(identityOf3(row))) ?? []).filter((copy) => copy.corpusId === this.corpusId);
-        const identity = identityOf3(row);
+        const here = (copies.get(tierLedgerIdentityKey(identityOf2(row))) ?? []).filter((copy) => copy.corpusId === this.corpusId);
+        const identity = identityOf2(row);
         const intent = ledger.writeIntent(identity);
         const decision = allowHeld ? ledger.getCurrent(identity) : undefined;
         const pendingJudgment = decision?.state === "pending" && decision.contentRead && (decision.metadataPending || decision.contentPending);
@@ -31527,10 +31391,10 @@ ${parentKey(ref)}`, { ref, origin });
         }
       }
     }
-    const children = hiddenChildKeys(this.childVisibilityLane(), rows.map(identityOf3));
+    const children = hiddenChildKeys(this.childVisibilityLane(), rows.map(identityOf2));
     if (children.size > 0) {
       for (const row of rows)
-        if (children.has(tierLedgerIdentityKey(identityOf3(row))))
+        if (children.has(tierLedgerIdentityKey(identityOf2(row))))
           hidden.add(row.item_pk);
     }
     return hidden;
@@ -32875,7 +32739,7 @@ ${parentKey(ref)}`, { ref, origin });
   async readItemPages(localItemId, options = {}) {
     const page = Math.max(1, Math.trunc(options.page ?? 1));
     const count = Math.min(3, Math.max(1, Math.trunc(options.pages ?? 1)));
-    const cap = Math.min(12000, Math.max(1, Math.trunc(options.pageChars ?? 12000)));
+    const cap = 12000;
     let totalPages = 0;
     let totalChars = 0;
     const refuse = (reason, nextPage) => ({
@@ -32924,57 +32788,54 @@ ${parentKey(ref)}`, { ref, origin });
       return refuse(initial);
     generation = ledger.getCurrent(identity).generation;
     initialOverride = JSON.stringify(ledger.getOverride(identity));
-    const readText = () => this.db.query(`SELECT c.bounded_text FROM chunks c JOIN items i ON i.item_pk = c.item_pk
-      WHERE i.local_item_id = ? AND i.tombstoned = 0 ORDER BY c.chunk_index`).all(localItemId).map((chunk) => chunk.bounded_text).join("");
-    const text2 = readText();
-    if (!text2)
+    const readChunks = () => this.db.query(`SELECT c.bounded_text AS text, c.content_hash AS hash
+      FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+      WHERE i.local_item_id = ? AND i.tombstoned = 0 ORDER BY c.chunk_index`).all(localItemId);
+    const chunks = readChunks();
+    totalChars = chunks.reduce((n, chunk) => n + chunk.text.length, 0);
+    if (!totalChars || chunks.some((chunk) => chunk.text.length > cap))
       return refuse("extraction_pending");
-    const split = itemTextPages(text2, cap);
-    totalPages = split.length;
-    totalChars = text2.length;
-    const result = { pages: [], totalPages, totalChars, couldNotRead: [] };
-    for (let index = page - 1;index < Math.min(split.length, page - 1 + count); index++) {
-      const material = split[index];
-      for (const window of itemTextPages(material, SNIFFER_EXCERPT_MAX_CHARS)) {
-        const before = gate();
-        if (before)
-          return refuse(before);
-        const inputs = tierSetForLedger(ledger.dbPath)?.classification() ?? resolveStoreTierClassification(undefined, this.tierLedgerPathInUse());
-        const sniffer = inputs?.sniffer;
-        if (!sniffer || inputs?.unavailableReason)
-          return refuse("window_judging", index + 1);
-        const record = ledger.getCurrent(identity);
-        const request = {
-          pass: "content",
-          material: window,
-          materialHash: hashString4(`source_item_read:window:v1:${window}`),
-          mapRevision: record.mapRevision,
-          flags: ["content:read_window", `read_window:generation:${record.generation}`],
-          subject: identity,
-          stillAsk: () => gate() === undefined
-        };
-        const cached2 = sniffer.cachedVerdict?.(request);
-        const verdict = await Promise.resolve(cached2?.verdict === "decided" ? cached2 : sniffer.judge(request));
-        const after3 = gate();
-        if (after3)
-          return refuse(after3);
-        if (readText() !== text2)
-          return refuse("held_until_judged");
-        if (verdict.verdict === "undecided")
-          return refuse("window_judging", index + 1);
-        if (verdict.tier !== "private") {
-          raiseReadWindowTier(this, ledger, record, verdict.tier, sniffer.id);
-          return refuse("not_personal");
-        }
+    const split = [];
+    let size = 0;
+    for (const chunk of chunks) {
+      if (!split.length || size + chunk.text.length > cap) {
+        split.push([]);
+        size = 0;
       }
-      const after2 = gate();
-      if (after2)
-        return refuse(after2);
-      result.pages.push({ page: index + 1, text: material });
+      split[split.length - 1].push(chunk);
+      size += chunk.text.length;
     }
+    totalPages = split.length;
+    const selected = split.slice(page - 1, page - 1 + count);
+    const result = { pages: [], totalPages, totalChars, couldNotRead: [] };
+    if (!selected.length)
+      return result;
+    const inputs = [{
+      corpusId: this.corpusId,
+      provider: identity.provider,
+      accountScope: identity.accountScope ?? "",
+      providerItemId: identity.providerItemId,
+      ...identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {},
+      privateAtAnswer: false,
+      chunkHashes: [...new Set(selected.flatMap((chunks2) => chunks2.map((chunk) => chunk.hash)))]
+    }];
+    const report = await checkReleaseChunks(options.releaseCheck, inputs, { budgetMs: options.budgetMs ?? RELEASE_CHUNK_JUDGE_BUDGET_MS });
     const after = gate();
     if (after)
       return refuse(after);
+    if (JSON.stringify(readChunks()) !== JSON.stringify(chunks))
+      return refuse("held_until_judged");
+    const coverageNote = chunkCoverageNote(report);
+    if (coverageNote)
+      result.coverageNote = coverageNote;
+    for (const [index, chunks2] of selected.entries()) {
+      if (chunks2.some((chunk) => !report.allowed[0]?.includes(chunk.hash))) {
+        result.couldNotRead.push("window_judging");
+        result.nextPage = page + index;
+        return result;
+      }
+      result.pages.push({ page: page + index, text: chunks2.map((chunk) => chunk.text).join("") });
+    }
     const next = page + result.pages.length;
     if (next <= totalPages)
       result.nextPage = next;
