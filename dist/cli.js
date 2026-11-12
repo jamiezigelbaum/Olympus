@@ -77640,7 +77640,7 @@ function createEvidenceWindowPlacer(query, timers = systemTimers) {
         const text2 = source.texts[chunk];
         const size = Math.min(WINDOW_CHARS, chunks[chunk].length);
         const span = Math.max(0, text2.length - size);
-        const count = Math.min(Math.floor(span / WINDOW_STRIDE) + 1, allowance - windows.length);
+        const count = Math.min(Math.ceil(span / WINDOW_STRIDE) + 1, allowance - windows.length);
         if (count <= 0)
           break;
         for (let n = 0;n < count; n++) {

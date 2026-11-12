@@ -300,3 +300,12 @@ test('windows are scored at the share that is kept, so the winning text survives
   expect(placed[0]).toHaveLength(555);
   expect(placed[0]).toContain(answer);
 });
+
+test('a chunk less than one stride longer than its share still scores its tail', async () => {
+  const answer = 'FOUNTAIN';
+  const full = ('x'.repeat(750) + answer).padEnd(850, 'y');
+  const placer = createEvidenceWindowPlacer(QUESTION);
+  const placed = await placer.place(['k'.repeat(600)], { texts: [full], scoreWindows: async (_query, windows) =>
+    windows.map(window => (window.includes(answer) ? 1 : 0)) });
+  expect(placed[0]).toContain(answer);
+});
