@@ -7005,7 +7005,7 @@ var init_source_item_read = __esm(() => {
 import { AsyncLocalStorage } from "node:async_hooks";
 function recordReleaseManifest(manifest) {
   storage.getStore()?.manifests.push({
-    inputs: manifest.inputs.map((input) => ({ ...input })),
+    inputs: manifest.inputs.map((input) => ({ ...input, ...input.chunkHashes ? { chunkHashes: [...input.chunkHashes] } : {} })),
     constraints: { ...manifest.constraints }
   });
 }

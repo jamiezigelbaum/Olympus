@@ -2846,7 +2846,7 @@ function isV04PublicOperation(surface, operationName) {
 function isV04PublicDashboardRoute(method, pathname) {
   return V0_4_PUBLIC_DASHBOARD_ROUTES.some((route) => route.method === method && (route.prefix === true ? pathname.startsWith(route.path) : pathname === route.path));
 }
-var V0_4_PUBLIC_NATIVE_TOOLS, V0_4_PUBLIC_MCP_TOOLS, V0_4_PUBLIC_CLI_OPERATIONS, V0_4_HERMES_MCP_TOOLS, V0_4_PUBLIC_REMOTE_MCP_TOOLS, V0_4_PUBLIC_CONNECT_SOURCES, V0_4_PUBLIC_SOURCE_IDS, V0_4_PUBLIC_CLI_COMMANDS, V0_4_PUBLIC_CLI_GLOBALS, V0_4_PACKAGE_INTERNAL_CLI_HELPERS, V0_4_PUBLIC_DASHBOARD_ROUTES, PUBLIC_OPERATION_NAMES;
+var V0_4_PUBLIC_NATIVE_TOOLS, V0_4_PUBLIC_MCP_TOOLS, V0_4_PUBLIC_CLI_OPERATIONS, V0_4_PUBLIC_REMOTE_MCP_TOOLS, V0_4_PUBLIC_CONNECT_SOURCES, V0_4_PUBLIC_SOURCE_IDS, V0_4_PUBLIC_CLI_COMMANDS, V0_4_PUBLIC_CLI_GLOBALS, V0_4_PACKAGE_INTERNAL_CLI_HELPERS, V0_4_PUBLIC_DASHBOARD_ROUTES, PUBLIC_OPERATION_NAMES;
 var init_public_surface = __esm(() => {
   V0_4_PUBLIC_NATIVE_TOOLS = [
     "argus_ping",
@@ -2854,6 +2854,7 @@ var init_public_surface = __esm(() => {
     "argus_complete",
     "source_answer",
     "source_index_status",
+    "source_item_read",
     "source_index_search",
     "source_watch_create",
     "source_watches",
@@ -2873,6 +2874,7 @@ var init_public_surface = __esm(() => {
     "source_answer",
     "source_answer_result",
     "source_index_status",
+    "source_item_read",
     "source_index_search",
     "olympus_doctor",
     "olympus_setup_status",
@@ -2887,6 +2889,7 @@ var init_public_surface = __esm(() => {
     "argus_complete",
     "source_answer",
     "source_index_status",
+    "source_item_read",
     "source_index_search",
     "olympus_doctor",
     "olympus_setup_status",
@@ -2895,13 +2898,13 @@ var init_public_surface = __esm(() => {
     "privacy_item_find",
     "privacy_item_set"
   ];
-  V0_4_HERMES_MCP_TOOLS = [
+  V0_4_PUBLIC_REMOTE_MCP_TOOLS = [
     "source_answer",
     "source_answer_result",
     "source_index_status",
+    "source_item_read",
     "ask_anonymously"
   ];
-  V0_4_PUBLIC_REMOTE_MCP_TOOLS = V0_4_HERMES_MCP_TOOLS;
   V0_4_PUBLIC_CONNECT_SOURCES = [
     "google",
     "gmail",
@@ -33453,161 +33456,290 @@ var init_media_cache = __esm(() => {
   MEDIA_CACHE_DIR_NAMES = new Set(["media-cache", "olympus-media"]);
 });
 
-// src/workers/classification/installed-tier-classification-registry.ts
-function registerInstalledTierClassification(provider) {
-  registered2 = provider;
+// src/core/source-item-read.ts
+function itemTextPages(text2, cap) {
+  const result = [];
+  for (let start = 0;start < text2.length; ) {
+    let end = Math.min(start + cap, text2.length);
+    if (end < text2.length) {
+      const slice = text2.slice(start, end);
+      const boundaries = slice.matchAll(/[.!?。！？](?:["'”’»)\]]*)(?:\s+|$)/gu);
+      let boundary = 0;
+      for (const match of boundaries)
+        boundary = match.index + match[0].length;
+      if (boundary > 0)
+        end = start + boundary;
+    }
+    result.push(text2.slice(start, end));
+    start = end;
+  }
+  return result;
 }
-function registeredInstalledTierClassification() {
-  return registered2;
-}
-function registerTierSetPlanner(ledgerPath, planner) {
-  (tierSetPlanners ??= new Map).set(ledgerPath, planner);
-}
-function tierSetPlannerForLedger(ledgerPath) {
-  return tierSetPlanners?.get(ledgerPath);
-}
-var registered2, tierSetPlanners;
-
-// src/workers/connector-store/tier-placement.ts
-function resolveStoreTierClassification(explicit, ledgerPath) {
-  const installed2 = registeredInstalledTierClassification()?.forLedger(ledgerPath);
-  if (!installed2)
-    return explicit;
-  if (!explicit)
-    return installed2;
-  const rules = [...explicit.rules ?? [], ...installed2.rules ?? []];
-  const sniffer = explicit.sniffer ?? installed2.sniffer;
-  const unavailableReason = installed2.unavailableReason ?? explicit.unavailableReason;
-  const retirePublic = installed2.retirePublic === true || explicit.retirePublic === true;
+function parseSourceItemReadResult(value) {
+  const fail = () => {
+    throw new OperationError("source_index_error", "Invalid source item read result.");
+  };
+  if (!value || typeof value !== "object")
+    return fail();
+  const r = value;
+  const integer = (n, min) => typeof n === "number" && Number.isSafeInteger(n) && n >= min ? n : fail();
+  if (!Array.isArray(r.pages) || r.pages.length > 3 || !Array.isArray(r.couldNotRead))
+    return fail();
+  const pages = r.pages.map((p) => {
+    if (!p || typeof p !== "object")
+      return fail();
+    const entry = p;
+    if (typeof entry.text !== "string" || entry.text.length > 12000)
+      return fail();
+    return { page: integer(entry.page, 1), text: entry.text };
+  });
+  const couldNotRead = r.couldNotRead.map((code) => typeof code === "string" && SOURCE_ITEM_READ_REFUSALS.includes(code) ? code : fail());
+  if (couldNotRead.length > 0 && pages.length > 0)
+    return fail();
   return {
-    ...rules.length > 0 ? { rules } : {},
-    ...sniffer ? { sniffer } : {},
-    ...retirePublic ? { retirePublic: true } : {},
-    ...unavailableReason ? { unavailableReason } : {},
-    ...explicit.holdContentUntilJudged === true ? { holdContentUntilJudged: true } : {}
+    pages,
+    totalPages: integer(r.totalPages, 0),
+    totalChars: integer(r.totalChars, 0),
+    couldNotRead,
+    ...r.nextPage === undefined ? {} : { nextPage: integer(r.nextPage, 1) }
   };
 }
-function defaultStoreTrustTier(trustDomain) {
-  return DEFAULT_TIER_FOR_DOMAIN[trustDomain] ?? "S4";
+var SOURCE_ITEM_READ_REFUSALS;
+var init_source_item_read = __esm(() => {
+  init_operation_error();
+  SOURCE_ITEM_READ_REFUSALS = [
+    "held_until_judged",
+    "content_private",
+    "names_only",
+    "not_in_scope",
+    "extraction_pending",
+    "window_judging",
+    "not_personal"
+  ];
+});
+
+// src/workers/connector-store/tier-set-registry.ts
+function registerTierSetForLedger(ledgerPath, set) {
+  (tierSets ??= new Map).set(ledgerPath, set);
 }
-function placeInExistingStore(item, placement, storeTrustDomain) {
-  if (typeof placement === "function")
-    return placement(item);
-  const trustDomain = placement?.trustDomain ?? storeTrustDomain;
-  const trustTier = placement?.trustTier ?? defaultStoreTrustTier(trustDomain);
-  if (placement?.secretsInContent === true) {
-    const text2 = textualContentOf(item);
-    if (text2 !== undefined && detectSecretFindingKinds(text2).length > 0) {
-      return buildSourceSensitivity({ trustTier: "S5", trustDomain: "secure_local" });
+function tierSetForLedger(ledgerPath) {
+  return tierSets?.get(ledgerPath);
+}
+function registeredTierSets() {
+  return [...tierSets?.values() ?? []];
+}
+var tierSets;
+
+// src/workers/source-index/media-judge.ts
+function imageJudgmentSignal(judgment) {
+  return {
+    verdict: judgment.verdict,
+    ...judgment.category ? { category: judgment.category } : {},
+    ...judgment.verdict === "ordinary" && judgment.reason === MEDIA_JUDGE_TEXT_DECIDES ? { textDecides: true } : {}
+  };
+}
+function mediaJudgeId(provider, thresholds = MEDIA_JUDGE_THRESHOLDS) {
+  return `${MEDIA_JUDGE_PROMPT_SET}:m${thresholds.margin}:i${thresholds.intimateMargin}:${provider.modelId}:${provider.configHash.slice(0, 12)}`;
+}
+function dot(left, right) {
+  let sum = 0;
+  const length = Math.min(left.length, right.length);
+  for (let index = 0;index < length; index += 1)
+    sum += left[index] * right[index];
+  return sum;
+}
+function rounded(value) {
+  return Math.round(value * 1e4) / 1e4;
+}
+function judgeMediaScores(scores, judgeId, thresholds = MEDIA_JUDGE_THRESHOLDS) {
+  const ordinary = scores.ordinary;
+  const sensitive = MEDIA_JUDGE_SENSITIVE_CATEGORIES.map((category) => [category, scores[category]]);
+  if (typeof ordinary !== "number" || !Number.isFinite(ordinary) || sensitive.some(([, score]) => typeof score !== "number" || !Number.isFinite(score))) {
+    return { verdict: "unjudged", judgeId, reason: "scores_unavailable" };
+  }
+  let top = sensitive[0][0];
+  let topScore = -Infinity;
+  for (const [category, score] of sensitive) {
+    if (score > topScore) {
+      top = category;
+      topScore = score;
     }
   }
-  return buildSourceSensitivity({ trustTier, trustDomain });
+  const margin = topScore - ordinary;
+  const intimateMargin = scores.intimate - ordinary;
+  const kept = Object.fromEntries(Object.entries(scores).map(([key2, value]) => [key2, rounded(value)]));
+  if (margin >= thresholds.margin && !MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES.has(top)) {
+    return { verdict: "sensitive", category: top, margin: rounded(margin), scores: kept, judgeId };
+  }
+  let pictureTop;
+  for (const [category, score] of sensitive) {
+    if (MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES.has(category) || score - ordinary < thresholds.margin)
+      continue;
+    if (!pictureTop || score > scores[pictureTop])
+      pictureTop = category;
+  }
+  if (pictureTop) {
+    return { verdict: "sensitive", category: pictureTop, margin: rounded(scores[pictureTop] - ordinary), scores: kept, judgeId };
+  }
+  if (intimateMargin >= thresholds.intimateMargin) {
+    return { verdict: "sensitive", category: "intimate", margin: rounded(margin), scores: kept, judgeId };
+  }
+  if (margin >= thresholds.margin) {
+    return { verdict: "ordinary", category: top, margin: rounded(margin), scores: kept, judgeId, reason: MEDIA_JUDGE_TEXT_DECIDES };
+  }
+  return { verdict: "ordinary", category: top, margin: rounded(margin), scores: kept, judgeId };
 }
-function textualContentOf(item) {
-  if (item.content.kind === "text")
-    return item.content.text;
-  if (item.content.kind === "bytes" && isTextualMimeType(item.content.mimeType)) {
-    return new TextDecoder("utf-8", { fatal: false }).decode(item.content.bytes);
+function judgeImageVector(imageVector, promptVectors, judgeId, thresholds = MEDIA_JUDGE_THRESHOLDS) {
+  if (!imageVector || imageVector.length === 0)
+    return { verdict: "unjudged", judgeId, reason: "image_unreadable" };
+  if (Math.hypot(...imageVector) < 0.000001)
+    return { verdict: "unjudged", judgeId, reason: "image_unreadable" };
+  const scores = {};
+  for (const category of Object.keys(MEDIA_JUDGE_PROMPTS)) {
+    scores[category] = dot(imageVector, promptVectors[category]);
+  }
+  return judgeMediaScores(scores, judgeId, thresholds);
+}
+function canJudgeMedia(provider) {
+  return typeof provider.embedPromptTexts === "function" && typeof provider.embedImageVectors === "function";
+}
+function mediaJudgePromptVectors(provider) {
+  const key2 = `${provider.provider}\x00${provider.modelId}\x00${provider.configHash}`;
+  let cached2 = promptVectorCache.get(key2);
+  if (!cached2) {
+    const categories = Object.keys(MEDIA_JUDGE_PROMPTS);
+    cached2 = provider.embedPromptTexts(categories.map((category) => `${MEDIA_JUDGE_PROMPT_PREFIX}${MEDIA_JUDGE_PROMPTS[category]}`)).then((vectors) => {
+      if (vectors.length !== categories.length || vectors.some((vector) => vector.length === 0)) {
+        throw new Error("The photo judge's descriptions could not be embedded.");
+      }
+      return Object.fromEntries(categories.map((category, index) => [category, vectors[index]]));
+    });
+    promptVectorCache.set(key2, cached2);
+    cached2.catch(() => promptVectorCache.delete(key2));
+  }
+  return cached2;
+}
+async function judgeMediaImages(provider, images, thresholds = MEDIA_JUDGE_THRESHOLDS) {
+  if (images.length === 0)
+    return [];
+  const prompts = await mediaJudgePromptVectors(provider);
+  const vectors = await provider.embedImageVectors([...images]);
+  const judgeId = mediaJudgeId(provider, thresholds);
+  return images.map((_, index) => judgeImageVector(vectors[index], prompts, judgeId, thresholds));
+}
+async function judgeReturnedImageVectors(provider, vectors, thresholds = MEDIA_JUDGE_THRESHOLDS) {
+  const prompts = await mediaJudgePromptVectors(provider);
+  const judgeId = mediaJudgeId(provider, thresholds);
+  return vectors.map((vector) => judgeImageVector(vector, prompts, judgeId, thresholds));
+}
+var MEDIA_JUDGE_SENSITIVE_CATEGORIES, MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES, MEDIA_JUDGE_TEXT_DECIDES = "text_decides", MEDIA_JUDGE_PROMPT_SET = "photo-judge-2026-10-29", MEDIA_JUDGE_PROMPTS, MEDIA_JUDGE_PROMPT_PREFIX = "task: classification | query: ", MEDIA_JUDGE_THRESHOLDS, promptVectorCache;
+var init_media_judge = __esm(() => {
+  MEDIA_JUDGE_SENSITIVE_CATEGORIES = [
+    "id_document",
+    "bank_card",
+    "financial_document",
+    "medical_document",
+    "intimate"
+  ];
+  MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES = new Set(["medical_document"]);
+  MEDIA_JUDGE_PROMPTS = Object.freeze({
+    id_document: "a photo of a passport, national identity card or driving licence",
+    bank_card: "a photo of a credit card, debit card or bank card",
+    financial_document: "a bank statement, payslip or document showing account numbers",
+    medical_document: "a medical report or lab test results document",
+    intimate: "a nude, intimate or sexually explicit photo",
+    ordinary: "an ordinary photo of a place, a room, food, a landscape or people"
+  });
+  MEDIA_JUDGE_THRESHOLDS = Object.freeze({
+    margin: 0.04,
+    intimateMargin: 0.025
+  });
+  promptVectorCache = new Map;
+});
+
+// src/workers/connector-store/stored-names.ts
+function storedCopyOf(set, identity2, copies) {
+  const names = copyServingLayer(copies.filter((copy) => copy.state === "current"), "metadata");
+  const ordered = [
+    ...names ? [names] : [],
+    ...copies.filter((copy) => copy !== names).sort((left, right) => Number(right.state === "current") - Number(left.state === "current"))
+  ];
+  for (const copy of ordered) {
+    const domain = set.domainForCorpus(copy.corpusId);
+    const exported = domain ? set.store(domain)?.exportItemCopy(identity2) : undefined;
+    if (exported)
+      return exported;
   }
   return;
 }
-function isTextualMimeType(mimeType) {
-  const normalized = mimeType.split(";")[0]?.trim().toLowerCase() ?? "";
-  return normalized.startsWith("text/") || normalized === "application/json" || normalized === "application/xml" || normalized.endsWith("+json") || normalized.endsWith("+xml");
-}
-function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
-  const read = ledger?.classificationRead(item.identity);
-  const override = read?.override;
-  const fresh = text2?.trim() ? extra.contentFetchFailed !== true : false;
-  const recorded = ledger?.getCurrent(item.identity);
-  const fenced = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh }) : options?.sniffer;
-  const signals = connector.classificationSignals(item);
-  const parentContext = item.identity.parent ? options?.parentNamesContext?.(item.identity, item.identity.parent.localItemId) : undefined;
-  const namesReceipt = contentNamesReason(signals, parentContext);
-  const cacheAware = fenced && {
-    id: fenced.id,
-    judge(request) {
-      if (!fenced.cachedVerdict || request.pass !== "content" || text2 === undefined || !recorded || recorded.state === "moving" || recorded.engineVersion !== TIER_CLASSIFIER_VERSION || recorded.mapRevision !== (request.mapRevision ?? "none") || !recorded.reasons.includes(namesReceipt))
-        return fenced.judge(request);
-      const verdict = fenced.cachedVerdict(request);
-      if (verdict.verdict === "decided")
-        return verdict;
-      const storedNames = extra.storedContentNames?.();
-      if (storedNames) {
-        const cached2 = fenced.cachedVerdict({
-          ...request,
-          materialHash: tierSnifferInputHash("content", storedNames, text2, parentContext)
-        });
-        if (cached2.verdict === "decided")
-          return cached2;
-      }
-      return fenced.judge(request);
+function storedSignals(copy) {
+  const text2 = (value) => typeof value === "string" && value.trim() ? value.trim() : undefined;
+  const title = text2(copy.columns["title"]);
+  const locator = text2(copy.columns["locator_uri"]);
+  const path = locator?.startsWith("/") ? locator : undefined;
+  const sender = text2(copy.columns["sender_label"]) ?? text2(copy.columns["sender_id"]);
+  let folderKeys = [];
+  const keysJson = text2(copy.columns["source_scope_folder_keys_json"]);
+  if (keysJson) {
+    try {
+      const parsed = JSON.parse(keysJson);
+      if (Array.isArray(parsed))
+        folderKeys = parsed.filter((key2) => typeof key2 === "string");
+    } catch {
+      folderKeys = [];
     }
-  };
-  const sniffer = cacheAware && conversationOrderedSniffer(recordedContentVerdictSniffer(cacheAware, recorded, text2, namesReceipt), item.metadata);
-  const holdUntilJudged = options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true || heldUntilJudged(recorded?.reasons);
-  return classifyItemTiers({
-    signals,
-    locators: ["locatorUri", "url", "pathDisplay"].map((key2) => item.metadata[key2]).filter((value) => typeof value === "string"),
-    provider: item.identity.provider,
-    ...text2 !== undefined ? { text: text2 } : {},
-    ...extra.namesOnly ? { namesOnly: true } : {},
-    ...holdUntilJudged ? { holdUntilJudged: true } : {},
-    ...parentContext ? { parentContext } : {},
-    mimeType: item.mimeType,
-    hasNonTextContent: itemHasNonTextContent(item),
-    titleIsConversation: item.metadata.titleIsConversation === true,
-    ...read?.secret ? { heldSecret: true } : {},
-    subject: item.identity
-  }, {
-    ...options?.rules ? { rules: options.rules } : {},
-    ...sniffer ? { sniffer } : {},
-    ...override ? { override } : {},
-    ...options?.retirePublic ? { retirePublic: true } : {}
-  });
-}
-function recordedContentVerdictSniffer(sniffer, recorded, text2, names) {
-  if (!recorded || !text2?.trim() || recorded.state !== "current" || recorded.contentPending || !recorded.contentRead)
-    return sniffer;
-  if (recorded.engineVersion !== TIER_CLASSIFIER_VERSION || !recorded.reasons.includes(contentDigestReason(text2)) || !recorded.reasons.includes(names))
-    return sniffer;
-  const tier = recorded.contentTier;
-  const prefix = `content:sniffer:${sniffer.id}:`;
-  const code = recorded.reasons.find((reason) => reason.startsWith(prefix))?.slice(prefix.length);
-  if (tier !== "private" && tier !== "secure" || !code || code === "undecided" || isFailSafeMissingContentQuestion(`${prefix}${code}`))
-    return sniffer;
+  }
+  if (copy.identity.providerConversationId)
+    folderKeys.push(copy.identity.providerConversationId);
   return {
-    id: sniffer.id,
-    recordedContentVerdict: { tier, code, mapRevision: recorded.mapRevision },
-    judge: (request) => request.pass === "content" && (request.mapRevision ?? "none") === recorded.mapRevision ? { verdict: "decided", tier, code } : sniffer.judge(request)
+    ...title ? { title } : {},
+    ...path ? { path } : {},
+    ...folderKeys.length > 0 ? { folderKeys } : {},
+    ...sender ? { sender } : {}
   };
 }
-function secretFencedSniffer(sniffer, ledger, identity2, read, options = {}) {
-  const stillAsk = () => {
-    const now = ledger.classificationRead(identity2);
-    if (now.scrubRevision !== read.scrubRevision)
-      return false;
-    if (!now.secret)
-      return true;
-    return options.mayAskSecret === true && read.secret && JSON.stringify(read.override ?? null) === JSON.stringify(now.override ?? null);
-  };
-  return {
-    id: sniffer.id,
-    ...sniffer.cachedVerdict ? { cachedVerdict: (request) => sniffer.cachedVerdict({ ...request, stillAsk }) } : {},
-    judge: (request) => sniffer.judge({ ...request, stillAsk })
-  };
-}
-var DEFAULT_TIER_FOR_DOMAIN;
-var init_tier_placement = __esm(() => {
-  init_types();
-  init_engine();
-  init_tier_classifier();
+var init_stored_names = __esm(() => {
   init_tier_ledger();
-  DEFAULT_TIER_FOR_DOMAIN = {
-    public_safe: "S0",
-    internal: "S3",
-    secure_local: "S4"
-  };
+});
+
+// src/workers/connector-store/parent-context.ts
+function parentNamesContext(set, child, parentLink) {
+  const stores = set.openStores();
+  let parentLocalItemId = parentLink;
+  for (const store of stores) {
+    if (parentLocalItemId)
+      break;
+    parentLocalItemId = store.parentLocalItemIdOf(child);
+  }
+  if (!parentLocalItemId)
+    return;
+  let parent;
+  for (const store of stores) {
+    const row = store.activeLocalItemRow(parentLocalItemId);
+    if (row) {
+      parent = row.identity;
+      break;
+    }
+  }
+  if (!parent)
+    return;
+  const ledger = set.ledger;
+  const record = ledger.getCurrent(parent);
+  if (!record || record.metadataTier === "secrets" || record.contentTier === "secrets" || ledger.itemIsSecret(parent))
+    return;
+  const exported = storedCopyOf(set, parent, ledger.copies(parent));
+  if (!exported)
+    return;
+  const signals = storedSignals(exported);
+  const text2 = [signals.title, signals.sender].filter((part) => typeof part === "string" && part.trim().length > 0).map((part) => part.replace(/\s+/g, " ").trim()).join(" | ").slice(0, PARENT_CONTEXT_MAX_CHARS);
+  if (!text2)
+    return;
+  return snifferParentContextAllowed(text2) ? text2 : undefined;
+}
+var init_parent_context = __esm(() => {
+  init_sniffer();
+  init_tier_classifier();
+  init_stored_names();
 });
 
 // src/core/operation-caller.ts
@@ -35208,7 +35340,7 @@ function openAppReleaseLog(dbPath, options = {}) {
     throw error;
   }
   openLogPaths.set(dbPath, (openLogPaths.get(dbPath) ?? 0) + 1);
-  let registered3 = true;
+  let registered2 = true;
   const retentionDays = () => {
     const row = db.query("SELECT value FROM app_release_meta WHERE key = ?").get(RETENTION_KEY);
     const days = row ? Number(row.value) : APP_RELEASE_DEFAULT_RETENTION_DAYS;
@@ -35333,8 +35465,8 @@ function openAppReleaseLog(dbPath, options = {}) {
       }).immediate();
     },
     close() {
-      if (registered3) {
-        registered3 = false;
+      if (registered2) {
+        registered2 = false;
         const count = (openLogPaths.get(dbPath) ?? 1) - 1;
         if (count > 0)
           openLogPaths.set(dbPath, count);
@@ -35756,6 +35888,2035 @@ var init_secrets_disposition = __esm(() => {
   init_sniffer_store();
   init_tier_ledger_path();
   init_job_names();
+});
+
+// src/workers/classification/installed-tier-classification-registry.ts
+function registerInstalledTierClassification(provider) {
+  registered2 = provider;
+}
+function registeredInstalledTierClassification() {
+  return registered2;
+}
+function registerTierSetPlanner(ledgerPath, planner) {
+  (tierSetPlanners ??= new Map).set(ledgerPath, planner);
+}
+function tierSetPlannerForLedger(ledgerPath) {
+  return tierSetPlanners?.get(ledgerPath);
+}
+var registered2, tierSetPlanners;
+
+// src/workers/connector-store/tier-placement.ts
+function resolveStoreTierClassification(explicit, ledgerPath) {
+  const installed2 = registeredInstalledTierClassification()?.forLedger(ledgerPath);
+  if (!installed2)
+    return explicit;
+  if (!explicit)
+    return installed2;
+  const rules = [...explicit.rules ?? [], ...installed2.rules ?? []];
+  const sniffer = explicit.sniffer ?? installed2.sniffer;
+  const unavailableReason = installed2.unavailableReason ?? explicit.unavailableReason;
+  const retirePublic = installed2.retirePublic === true || explicit.retirePublic === true;
+  return {
+    ...rules.length > 0 ? { rules } : {},
+    ...sniffer ? { sniffer } : {},
+    ...retirePublic ? { retirePublic: true } : {},
+    ...unavailableReason ? { unavailableReason } : {},
+    ...explicit.holdContentUntilJudged === true ? { holdContentUntilJudged: true } : {}
+  };
+}
+function defaultStoreTrustTier(trustDomain) {
+  return DEFAULT_TIER_FOR_DOMAIN[trustDomain] ?? "S4";
+}
+function placeInExistingStore(item, placement, storeTrustDomain) {
+  if (typeof placement === "function")
+    return placement(item);
+  const trustDomain = placement?.trustDomain ?? storeTrustDomain;
+  const trustTier = placement?.trustTier ?? defaultStoreTrustTier(trustDomain);
+  if (placement?.secretsInContent === true) {
+    const text2 = textualContentOf(item);
+    if (text2 !== undefined && detectSecretFindingKinds(text2).length > 0) {
+      return buildSourceSensitivity({ trustTier: "S5", trustDomain: "secure_local" });
+    }
+  }
+  return buildSourceSensitivity({ trustTier, trustDomain });
+}
+function textualContentOf(item) {
+  if (item.content.kind === "text")
+    return item.content.text;
+  if (item.content.kind === "bytes" && isTextualMimeType(item.content.mimeType)) {
+    return new TextDecoder("utf-8", { fatal: false }).decode(item.content.bytes);
+  }
+  return;
+}
+function isTextualMimeType(mimeType) {
+  const normalized = mimeType.split(";")[0]?.trim().toLowerCase() ?? "";
+  return normalized.startsWith("text/") || normalized === "application/json" || normalized === "application/xml" || normalized.endsWith("+json") || normalized.endsWith("+xml");
+}
+function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
+  const read = ledger?.classificationRead(item.identity);
+  const override = read?.override;
+  const fresh = text2?.trim() ? extra.contentFetchFailed !== true : false;
+  const recorded = ledger?.getCurrent(item.identity);
+  const fenced = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh }) : options?.sniffer;
+  const signals = connector.classificationSignals(item);
+  const parentContext = item.identity.parent ? options?.parentNamesContext?.(item.identity, item.identity.parent.localItemId) : undefined;
+  const namesReceipt = contentNamesReason(signals, parentContext);
+  const cacheAware = fenced && {
+    id: fenced.id,
+    judge(request) {
+      if (!fenced.cachedVerdict || request.pass !== "content" || text2 === undefined || !recorded || recorded.state === "moving" || recorded.engineVersion !== TIER_CLASSIFIER_VERSION || recorded.mapRevision !== (request.mapRevision ?? "none") || !recorded.reasons.includes(namesReceipt))
+        return fenced.judge(request);
+      const verdict = fenced.cachedVerdict(request);
+      if (verdict.verdict === "decided")
+        return verdict;
+      const storedNames = extra.storedContentNames?.();
+      if (storedNames) {
+        const cached2 = fenced.cachedVerdict({
+          ...request,
+          materialHash: tierSnifferInputHash("content", storedNames, text2, parentContext)
+        });
+        if (cached2.verdict === "decided")
+          return cached2;
+      }
+      return fenced.judge(request);
+    }
+  };
+  const sniffer = cacheAware && conversationOrderedSniffer(recordedContentVerdictSniffer(cacheAware, recorded, text2, namesReceipt), item.metadata);
+  const holdUntilJudged = options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true || heldUntilJudged(recorded?.reasons);
+  return classifyItemTiers({
+    signals,
+    locators: ["locatorUri", "url", "pathDisplay"].map((key2) => item.metadata[key2]).filter((value) => typeof value === "string"),
+    provider: item.identity.provider,
+    ...text2 !== undefined ? { text: text2 } : {},
+    ...extra.namesOnly ? { namesOnly: true } : {},
+    ...holdUntilJudged ? { holdUntilJudged: true } : {},
+    ...parentContext ? { parentContext } : {},
+    mimeType: item.mimeType,
+    hasNonTextContent: itemHasNonTextContent(item),
+    titleIsConversation: item.metadata.titleIsConversation === true,
+    ...read?.secret ? { heldSecret: true } : {},
+    subject: item.identity
+  }, {
+    ...options?.rules ? { rules: options.rules } : {},
+    ...sniffer ? { sniffer } : {},
+    ...override ? { override } : {},
+    ...options?.retirePublic ? { retirePublic: true } : {}
+  });
+}
+function recordedContentVerdictSniffer(sniffer, recorded, text2, names) {
+  if (!recorded || !text2?.trim() || recorded.state !== "current" || recorded.contentPending || !recorded.contentRead)
+    return sniffer;
+  if (recorded.engineVersion !== TIER_CLASSIFIER_VERSION || !recorded.reasons.includes(contentDigestReason(text2)) || !recorded.reasons.includes(names))
+    return sniffer;
+  const tier = recorded.contentTier;
+  const prefix = `content:sniffer:${sniffer.id}:`;
+  const code = recorded.reasons.find((reason) => reason.startsWith(prefix))?.slice(prefix.length);
+  if (tier !== "private" && tier !== "secure" || !code || code === "undecided" || isFailSafeMissingContentQuestion(`${prefix}${code}`))
+    return sniffer;
+  return {
+    id: sniffer.id,
+    recordedContentVerdict: { tier, code, mapRevision: recorded.mapRevision },
+    judge: (request) => request.pass === "content" && (request.mapRevision ?? "none") === recorded.mapRevision ? { verdict: "decided", tier, code } : sniffer.judge(request)
+  };
+}
+function secretFencedSniffer(sniffer, ledger, identity2, read, options = {}) {
+  const stillAsk = () => {
+    const now = ledger.classificationRead(identity2);
+    if (now.scrubRevision !== read.scrubRevision)
+      return false;
+    if (!now.secret)
+      return true;
+    return options.mayAskSecret === true && read.secret && JSON.stringify(read.override ?? null) === JSON.stringify(now.override ?? null);
+  };
+  return {
+    id: sniffer.id,
+    ...sniffer.cachedVerdict ? { cachedVerdict: (request) => sniffer.cachedVerdict({ ...request, stillAsk }) } : {},
+    judge: (request) => sniffer.judge({ ...request, stillAsk })
+  };
+}
+var DEFAULT_TIER_FOR_DOMAIN;
+var init_tier_placement = __esm(() => {
+  init_types();
+  init_engine();
+  init_tier_classifier();
+  init_tier_ledger();
+  DEFAULT_TIER_FOR_DOMAIN = {
+    public_safe: "S0",
+    internal: "S3",
+    secure_local: "S4"
+  };
+});
+
+// src/workers/classification/secret-scan-off-thread.ts
+import { existsSync as existsSync34 } from "node:fs";
+import { dirname as dirname39, join as join40 } from "node:path";
+import { fileURLToPath as fileURLToPath4 } from "node:url";
+function workerPath() {
+  const here = dirname39(fileURLToPath4(import.meta.url));
+  for (const name of ["secret-scan-worker.js", "secret-scan-worker.ts"]) {
+    const candidate = join40(here, name);
+    if (existsSync34(candidate))
+      return candidate;
+  }
+  return;
+}
+function scanThread() {
+  if (thread)
+    return thread;
+  if (unavailable)
+    return;
+  try {
+    const path = typeof Worker === "function" && globalThis.Bun ? workerPath() : undefined;
+    if (!path) {
+      unavailable = true;
+      return;
+    }
+    const worker = new Worker(path);
+    worker.unref?.();
+    const started = { worker, pending: new Map };
+    worker.onmessage = (event) => {
+      const message2 = event.data;
+      const waiting = started.pending.get(message2.id);
+      if (!waiting)
+        return;
+      started.pending.delete(message2.id);
+      clearTimeout(waiting.timer);
+      if (message2.ok && Array.isArray(message2.kinds))
+        waiting.resolve(message2.kinds);
+      else
+        waiting.reject(new Error(message2.error ?? "off-thread secret scan failed"));
+    };
+    worker.onerror = (event) => retire2(started, new Error(event.message || "secret scan thread stopped"));
+    thread = started;
+    return started;
+  } catch {
+    unavailable = true;
+    return;
+  }
+}
+function retire2(stopped, error) {
+  if (thread === stopped)
+    thread = undefined;
+  for (const waiting of stopped.pending.values()) {
+    clearTimeout(waiting.timer);
+    waiting.reject(error);
+  }
+  stopped.pending.clear();
+  try {
+    stopped.worker.terminate();
+  } catch {}
+}
+async function scanSecretsAhead(text2) {
+  if (!secretScanReusable(text2) || secretScanRemembered(text2))
+    return;
+  const scanner = scanThread();
+  if (!scanner)
+    return;
+  const id = nextId2++;
+  try {
+    const kinds = await new Promise((resolve13, reject) => {
+      const timer = setTimeout(() => retire2(scanner, new Error("off-thread secret scan timed out")), OFF_THREAD_SCAN_TIMEOUT_MS);
+      scanner.pending.set(id, { resolve: resolve13, reject, timer });
+      scanner.worker.postMessage({ id, text: text2 });
+    });
+    rememberSecretFindingKinds(text2, kinds);
+  } catch {
+    scanner.pending.delete(id);
+  }
+}
+var OFF_THREAD_SCAN_TIMEOUT_MS = 120000, thread, unavailable = false, nextId2 = 1;
+var init_secret_scan_off_thread = __esm(() => {
+  init_engine();
+});
+
+// src/workers/connector-store/tier-rejudge.ts
+function emptyTierRejudgeReport() {
+  return {
+    heldLowering: 0,
+    seen: 0,
+    updated: 0,
+    movesQueued: 0,
+    asked: 0,
+    secrets: 0,
+    skipped: 0,
+    failed: 0,
+    causeHeld: 0,
+    causeRetiredPrior: 0,
+    causeMissingQuestion: 0,
+    causeClassifier: 0,
+    causeOwnerWords: 0,
+    causeJudgeModel: 0,
+    causeNamesPrompt: 0,
+    causeContentPrompt: 0,
+    builtinPromptSkipped: 0,
+    rechecked: 0
+  };
+}
+async function rejudgeRoutedItemsInTurns(options) {
+  const steps = rejudgeSteps(options);
+  let step = steps.next();
+  while (!step.done) {
+    await options.turn();
+    const text2 = step.value === undefined ? undefined : storedContentText(options.set, step.value);
+    if (text2 !== undefined && secretScanReusable(text2))
+      await scanSecretsAhead(text2);
+    step = steps.next();
+  }
+  return step.value;
+}
+function storedContentText(set, record) {
+  try {
+    const identity2 = identityOf(record);
+    const current3 = set.ledger.copies(identity2).filter((copy) => copy.state === "current");
+    const serving = copyServingLayer(current3, "content");
+    const domain = serving ? set.domainForCorpus(serving.corpusId) : undefined;
+    const exported = domain ? set.store(domain)?.exportItemCopy(identity2) : undefined;
+    return exported?.chunks.map((chunk) => chunk.boundedText).join("");
+  } catch {
+    return;
+  }
+}
+function* rejudgeSteps(options) {
+  const report = emptyTierRejudgeReport();
+  const { set } = options;
+  const classification = set.classification();
+  if (!classification?.sniffer || classification.unavailableReason || classification.sniffer.rejudgeReady === false)
+    return { report };
+  const ledger = set.ledger;
+  const limit = Math.max(1, options.limit ?? DEFAULT_TIER_REJUDGE_PER_PASS);
+  const key2 = { engineVersion: TIER_CLASSIFIER_VERSION, snifferId: classification.sniffer.id };
+  const recheck = { rules: classification.rules ?? [] };
+  let budget = limit;
+  for (const request of ledger.recheckRequests()) {
+    if (budget <= 0)
+      break;
+    const scoped = ledger.recheckScopePage(request.scope, { ...request.after ? { after: request.after } : {}, limit: budget });
+    for (const record of scoped.records) {
+      yield record;
+      budget -= 1;
+      if (!rechecks(record)) {
+        report.skipped += 1;
+        continue;
+      }
+      report.rechecked += 1;
+      try {
+        rejudgeStoredContent(set, record, {
+          sniffer: classification.sniffer,
+          ...classification.retirePublic ? { retirePublic: true } : {},
+          report,
+          key: key2,
+          autoMoves: options.autoMoves === true,
+          recheck
+        });
+      } catch {
+        report.failed += 1;
+      }
+    }
+    ledger.advanceRecheck(request, scoped.next);
+  }
+  if (budget <= 0)
+    return { report, ...options.after ? { next: options.after } : {} };
+  const page2 = ledger.rejudgeCandidatePage({
+    ...key2,
+    ...options.after ? { after: options.after } : {},
+    limit: budget
+  });
+  report.builtinPromptSkipped = page2.builtinPromptSkipped;
+  for (const [index, record] of page2.records.entries()) {
+    yield record;
+    report.seen += 1;
+    const cause = page2.causes[index];
+    if (cause)
+      report[CAUSE_FIELD[cause]] += 1;
+    try {
+      rejudgeStoredContent(set, record, {
+        sniffer: classification.sniffer,
+        ...classification.retirePublic ? { retirePublic: true } : {},
+        report,
+        key: key2,
+        autoMoves: options.autoMoves === true
+      });
+    } catch {
+      report.failed += 1;
+    }
+  }
+  return { report, ...page2.next ? { next: page2.next } : {} };
+}
+function rechecks(record) {
+  return record.routed && record.contentRead && record.state === "current" && record.contentTier !== "secrets" && record.decidedBy !== "override";
+}
+function rejudgeStoredContent(set, record, options) {
+  const { report, key: key2, autoMoves } = options;
+  const ledger = set.ledger;
+  const identity2 = identityOf(record);
+  const read = ledger.classificationRead(identity2);
+  if (read.override) {
+    if (key2)
+      ledger.markRejudged(identity2, key2);
+    report.skipped += 1;
+    return;
+  }
+  const current3 = ledger.copies(identity2).filter((copy) => copy.state === "current");
+  const serving = copyServingLayer(current3, "content");
+  const domain = serving ? set.domainForCorpus(serving.corpusId) : undefined;
+  const exported = domain ? set.store(domain)?.exportItemCopy(identity2) : undefined;
+  const text2 = exported?.chunks.map((chunk) => chunk.boundedText).join("") ?? "";
+  if (!exported || !text2.trim()) {
+    if (key2)
+      ledger.markRejudgeUnavailable(record, key2);
+    report.skipped += 1;
+    return;
+  }
+  const imageJudgment = exported.chunks.find((chunk) => chunk.mediaJudgment)?.mediaJudgment;
+  const title = columnString(exported.columns["title"]);
+  const path = columnString(exported.columns["locator_uri"]);
+  const sender = columnString(exported.columns["sender_label"]);
+  const mimeType = columnString(exported.columns["mime_type"]);
+  const folderKeys = [...storedSignals(exported).folderKeys ?? []];
+  let questionNotQueued = false;
+  const counting = options.sniffer && {
+    id: options.sniffer.id,
+    judge(request) {
+      const upgrade = !options.recheck && key2 && isSnifferUnionUpgrade(record.reasons, key2.snifferId);
+      const verdict = options.sniffer.judge(upgrade ? { ...request, priority: HELD_UNTIL_JUDGED_PRIORITY } : request);
+      if (verdict.verdict === "undecided" && verdict.queued !== true)
+        questionNotQueued = true;
+      return verdict;
+    }
+  };
+  const sniffer = counting && secretFencedSniffer(counting, ledger, identity2, read);
+  const holdUntilJudged = set.holdsContentUntilJudged() || heldUntilJudged(record.reasons);
+  const parentContext = sniffer ? parentNamesContext(set, identity2) : undefined;
+  const metadata = rejudgeMetadata(record, options.preserveMetadata ? undefined : sniffer, { title, path, sender, folderKeys }, identity2, holdUntilJudged, parentContext, options.recheck);
+  const content = classifyContentTier({
+    text: text2,
+    hasNonTextContent: !record.reasons.includes("content:text_only"),
+    metadataTier: metadata.metadataTier,
+    metadataForced: metadata.metadataForced,
+    metadataFlagged: metadata.metadataFlagged,
+    metadataOwnerDecided: namesDecidedByOwner(record.reasons),
+    ...title ? { title } : {},
+    ...path ? { path } : {},
+    ...sender ? { sender } : {},
+    ...mimeType ? { mimeType } : {},
+    ...holdUntilJudged ? { holdUntilJudged: true } : {},
+    ...imageJudgment ? { imageJudgment: imageJudgmentSignal(imageJudgment) } : {},
+    ...parentContext ? { parentContext } : {},
+    subject: identity2
+  }, {
+    ...sniffer ? { sniffer } : {},
+    ...options.retirePublic ? { retirePublic: true } : {}
+  });
+  const decision = {
+    metadataTier: metadata.metadataTier,
+    contentTier: maxTier(content.contentTier, metadata.metadataTier),
+    decidedBy: content.decidedBy,
+    reasons: [
+      ...metadata.reasons,
+      ...content.reasons,
+      ...record.reasons.includes(contentDigestReason(text2)) ? record.reasons.filter((reason) => reason.startsWith("content:names:") && !content.reasons.includes(reason)) : []
+    ],
+    state: metadata.metadataPending || content.contentPending ? "pending" : "current",
+    contentRead: true,
+    metadataPending: metadata.metadataPending,
+    contentPending: content.contentPending,
+    metadataForced: metadata.metadataForced,
+    metadataFlagged: metadata.metadataFlagged,
+    engineVersion: content.engineVersion,
+    mapRevision: content.mapRevision,
+    snifferId: content.snifferId
+  };
+  if (content.contentTier === "secrets") {
+    settleRoutedSecrets(set, identity2, decision, exported, {
+      text: text2,
+      findingKinds: content.reasons.filter((reason) => reason.startsWith("content:secret:")).map((reason) => reason.slice("content:secret:".length))
+    });
+    report.secrets += 1;
+    return;
+  }
+  if (questionNotQueued) {
+    report.failed += 1;
+    return;
+  }
+  if (content.contentPending && record.state === "pending") {
+    const retiredClearance = record.reasons.includes(RETIRED_EMBEDDING_CLEARANCE_REASON);
+    ledger.recordRoutedPlacement(identity2, {
+      ...decision,
+      metadataTier: retiredClearance ? record.metadataTier : decision.metadataTier,
+      contentTier: retiredClearance ? record.contentTier : decision.contentTier,
+      reasons: retiredClearance ? [...decision.reasons, RETIRED_EMBEDDING_CLEARANCE_REASON] : decision.reasons
+    }, {
+      copies: current3,
+      embedHold: current3.some((copy) => copy.embedHold)
+    }, { guard: { generation: record.generation, override: undefined } });
+    if (key2)
+      ledger.markHeldRejudged(ledger.getCurrent(identity2), key2);
+    report.asked += 1;
+    return;
+  }
+  if (content.contentPending || metadata.metadataPending) {
+    if (ledger.openRejudgeQuestion(identity2, {
+      expectedGeneration: record.generation,
+      decision,
+      keepVisible: !autoMoves
+    }))
+      report.asked += 1;
+    else
+      report.skipped += 1;
+    return;
+  }
+  if (holdSnifferLowering(record, decision)) {
+    report.heldLowering += 1;
+    return;
+  }
+  const recorded = ledger.recordRoutedPlacement(identity2, decision, set.placementFor(decision), {
+    ...autoMoves || options.hideRaises === true ? {} : { queueWithoutHiding: true },
+    guard: { generation: record.generation, override: undefined }
+  });
+  if (key2)
+    ledger.markRejudged(identity2, key2);
+  if (recorded.outcome === "queued_move")
+    report.movesQueued += 1;
+  else
+    report.updated += 1;
+}
+function rejudgeMetadata(record, sniffer, names, subject, holdUntilJudged = false, parentContext, recheck) {
+  const previous = { ...record, reasons: record.reasons.filter((reason) => !reason.startsWith("content:")) };
+  const retiredPrior = restsOnRetiredSourcePrior(record.reasons);
+  const judgedAgain = (reason) => reason.startsWith("metadata:sniffer:") && (recheck !== undefined || !reason.startsWith(`metadata:sniffer:${sniffer?.id}:`));
+  if (!sniffer || record.state !== "current" || record.metadataForced || namesDecidedByOwner(record.reasons) || !retiredPrior && !recheck?.namesChanged && !record.reasons.some(judgedAgain))
+    return previous;
+  const signals = {
+    ...names.title ? { title: names.title } : {},
+    ...names.path ? { path: names.path } : {},
+    ...names.sender ? { sender: names.sender } : {},
+    folderKeys: names.folderKeys
+  };
+  const fresh = classifyItemTiers({ signals, namesOnly: true, ...parentContext ? { parentContext } : {} });
+  if (recheck && recheck.rules.length > 0) {
+    const ruled = classifyItemTiers({ signals, namesOnly: true, provider: subject.provider }, { rules: recheck.rules });
+    if (ruled.metadataForced || namesDecidedByOwner(ruled.reasons))
+      return previous;
+  }
+  const providerReasons = previous.reasons.filter((reason) => /^metadata:(floor|prior):/.test(reason) && !reason.startsWith(RETIRED_SOURCE_PRIOR_REASON));
+  const fromStoredNames = record.reasons.includes(STORED_NAMES_REASON);
+  const mayLower = retiredPrior || (recheck !== undefined ? providerReasons.length === 0 && (recheck.namesChanged === true || namesInputCovered(record.reasons, signals, parentContext)) : fromStoredNames);
+  const baseline = mayLower ? fresh.metadataTier : maxTier(fresh.metadataTier, record.metadataTier);
+  if (baseline === "secrets")
+    return { ...previous, metadataTier: baseline, metadataPending: false, reasons: fresh.reasons };
+  const material = [names.title, names.path, ...snifferFolderKeyNames(names.folderKeys), names.sender].filter(Boolean).join(" | ").slice(0, SNIFFER_NAMES_MAX_CHARS);
+  const verdict = sniffer.judge({
+    pass: "metadata",
+    material: namesWithParentContext(material, parentContext),
+    flags: ["names:rejudge"],
+    subject,
+    materialHash: tierSnifferInputHash("metadata", signals, undefined, parentContext),
+    mapRevision: fresh.mapRevision,
+    priority: holdUntilJudged ? HELD_UNTIL_JUDGED_PRIORITY : HELD_RECORD_PRIORITY
+  });
+  const pending = verdict.verdict === "undecided";
+  const metadataTier = pending ? baseline : maxTier(baseline, verdict.tier);
+  return {
+    metadataTier,
+    metadataForced: false,
+    metadataFlagged: pending || fresh.metadataFlagged,
+    metadataPending: pending,
+    reasons: [
+      ...fresh.reasons.filter((reason) => reason.startsWith("metadata:") && !reason.startsWith("metadata:sniffer:") && !reason.startsWith("metadata:possibly_private:") && (mayLower || !reason.startsWith(NAMES_INPUT_REASON_PREFIX))),
+      ...!mayLower ? record.reasons.filter((reason) => reason.startsWith(NAMES_INPUT_REASON_PREFIX)) : [],
+      ...providerReasons,
+      `metadata:sniffer:${sniffer.id}:${pending ? "undecided" : verdict.code}`,
+      ...pending ? [STORED_NAMES_ASKED_REASON] : metadataTier !== baseline ? [STORED_NAMES_REASON] : []
+    ]
+  };
+}
+function settleLegacySecrets(options) {
+  const copies = options.stores.flatMap((store) => {
+    const exported = store.exportItemCopy(options.identity);
+    return exported ? [{ store, exported }] : [];
+  });
+  if (copies.length === 0 && !options.locations.get(options.identity)?.findingKinds.includes("sniffer_secret_refusal"))
+    return false;
+  for (const { exported } of copies)
+    recordSecretLocation(options.locations, options.decision, exported, { findingKinds: ["sniffer_secret_refusal"] });
+  for (const { store, exported } of copies) {
+    store.tombstoneCopy(exported.identity, { connectorId: TIER_REJUDGE_CONNECTOR_ID, trustTier: "S5" });
+  }
+  options.ledger.recordDecision(options.identity, options.decision);
+  return true;
+}
+function settleRoutedSecrets(set, identity2, decision, exported, finding, placement = {}) {
+  const ledger = set.ledger;
+  const recorded = ledger.recordRoutedPlacement(identity2, decision, set.placementFor(decision), {
+    ...placement.guard ? { guard: placement.guard } : {}
+  });
+  if (recorded.outcome !== "secrets")
+    return false;
+  const locations = set.secrets();
+  if (locations)
+    recordSecretLocation(locations, decision, exported, finding);
+  settleSecretsCopies({
+    ledger,
+    identity: exported.identity,
+    copies: recorded.previousCopies,
+    storeFor: (corpusId) => {
+      const domain = set.domainForCorpus(corpusId);
+      return domain ? set.store(domain) : undefined;
+    },
+    connectorId: TIER_REJUDGE_CONNECTOR_ID
+  });
+  return true;
+}
+function recordSecretLocation(locations, decision, exported, finding) {
+  const locator = columnString(exported.columns["locator_uri"]);
+  const title = columnString(exported.columns["title"]);
+  const namesReleasable = decision.metadataTier === "public" || decision.metadataTier === "private";
+  const folderKeys = storedFolderKeys(exported.columns["source_scope_folder_keys_json"]);
+  const scopeGeneration = columnString(exported.columns["source_scope_generation"]);
+  const scopeRevision = columnString(exported.columns["source_scope_revision"]);
+  locations.record({
+    identity: exported.identity,
+    ...locator && !hasCredentialUrl(locator) ? { locator } : {},
+    ...title && namesReleasable ? { title } : {},
+    namesReleasable,
+    ...folderKeys.length > 0 ? { folderKeys } : {},
+    ...scopeGeneration && scopeRevision ? { scopeGeneration, scopeRevision } : {},
+    findingKinds: finding.findingKinds.length > 0 ? finding.findingKinds : ["owner_marked_secret"],
+    ...finding.text !== undefined ? { text: finding.text } : {}
+  });
+}
+function identityOf(record) {
+  return {
+    provider: record.provider,
+    accountScope: record.accountScope,
+    providerItemId: record.providerItemId,
+    ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
+  };
+}
+function columnString(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+function storedFolderKeys(value) {
+  if (typeof value !== "string" || !value.trim())
+    return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((key2) => typeof key2 === "string") : [];
+  } catch {
+    return [];
+  }
+}
+function raiseReadWindowTier(store, ledger, record, tier, snifferId2) {
+  const identity2 = identityOf(record);
+  const override = ledger.getOverride(identity2);
+  if (ledger.getCurrent(identity2)?.generation !== record.generation || override?.kind === "tier" && override.tier !== "private")
+    return;
+  const decision = {
+    ...record,
+    state: "current",
+    contentRead: true,
+    contentPending: false,
+    contentTier: maxTier(record.contentTier, tier),
+    decidedBy: "sniffer",
+    snifferId: snifferId2,
+    reasons: [...record.reasons, `content:sniffer:${snifferId2}:read_window_${tier}`]
+  };
+  const set = tierSetForLedger(ledger.dbPath);
+  if (record.routed) {
+    if (!set)
+      throw new Error("The item read cannot raise a routed item without its tier set.");
+    if (tier === "secrets") {
+      const exported = store?.exportItemCopy?.(identity2);
+      if (!exported)
+        throw new Error("The item read cannot settle a missing Secret copy.");
+      settleRoutedSecrets(set, identity2, decision, exported, { findingKinds: ["sniffer_secret_refusal"] }, { guard: { generation: record.generation, override } });
+    } else {
+      ledger.recordRoutedPlacement(identity2, decision, set.placementFor(decision), { guard: { generation: record.generation, override } });
+    }
+  } else {
+    const exported = tier === "secrets" ? store?.exportItemCopy?.(identity2) : undefined;
+    ledger.recordDecision(identity2, decision);
+    if (exported)
+      store?.tombstoneCopy?.(exported.identity, { connectorId: TIER_REJUDGE_CONNECTOR_ID, trustTier: "S5" });
+  }
+}
+var DEFAULT_TIER_REJUDGE_PER_PASS = 100, TIER_REJUDGE_CONNECTOR_ID = "olympus_tier_rejudge", CAUSE_FIELD;
+var init_tier_rejudge = __esm(() => {
+  init_sniffer();
+  init_media_judge();
+  init_parent_context();
+  init_stored_names();
+  init_tier_classifier();
+  init_tier_ledger();
+  init_secrets_disposition();
+  init_tier_placement();
+  init_secret_scan_off_thread();
+  init_engine();
+  CAUSE_FIELD = {
+    held: "causeHeld",
+    retired_prior: "causeRetiredPrior",
+    missing_question: "causeMissingQuestion",
+    classifier: "causeClassifier",
+    owner_words: "causeOwnerWords",
+    judge_model: "causeJudgeModel",
+    names_prompt: "causeNamesPrompt",
+    content_prompt: "causeContentPrompt"
+  };
+});
+
+// src/core/opsec.ts
+function createStructuredEvidenceFact(input) {
+  const factId = input.factId.trim();
+  const claim = input.claim.trim();
+  if (!factId)
+    throw new Error("Structured evidence facts require a factId.");
+  if (!claim)
+    throw new Error("Structured evidence facts require a claim.");
+  if (input.sourceProvenance.length === 0) {
+    throw new Error("Structured evidence facts require source provenance.");
+  }
+  return {
+    factId,
+    claim,
+    sourceProvenance: [...input.sourceProvenance],
+    sensitivity: input.sensitivity,
+    confidence: input.confidence,
+    extractionKind: input.extractionKind,
+    sourceInstructionFlags: detectSourceInstructionFlags(claim),
+    releaseSurface: input.releaseSurface ?? defaultReleaseSurfaceForSensitivity(input.sensitivity)
+  };
+}
+function evaluateReleaseGate(input) {
+  const reasons = new Set;
+  const redactions = [];
+  if (input.action !== "read" && input.action !== "answer") {
+    return {
+      decision: "needs_approval",
+      reasons: ["high_impact_action_requires_approval"],
+      requiredApproval: input.action === "send" || input.action === "write" || input.action === "delete" ? "write_action" : "user_review"
+    };
+  }
+  const secretLabels = secretLabelsInText([
+    input.draftAnswer,
+    ...input.facts.map((fact) => fact.claim)
+  ].join(`
+`));
+  for (const label of secretLabels) {
+    redactions.push({ label, reason: "s5_like_secret_detected" });
+  }
+  if (secretLabels.length > 0 || input.facts.some((fact) => fact.sensitivity.trustTier === "S5")) {
+    return {
+      decision: "deny",
+      reasons: ["s5_secret_denied_from_ordinary_output"],
+      ...redactions.length > 0 ? { redactions } : {},
+      requiredApproval: "s5_secret_use"
+    };
+  }
+  const allInstructionFlags = new Set(input.facts.flatMap((fact) => [...fact.sourceInstructionFlags]));
+  if (allInstructionFlags.size > 0) {
+    reasons.add("hostile_source_instruction_treated_as_data");
+  }
+  const crossingToCallingAgent = isCallingAgentDestination(input.destination);
+  const secureFacts = input.facts.filter((fact) => isSecureSensitivity(fact.sensitivity));
+  if (crossingToCallingAgent && secureFacts.some((fact) => fact.releaseSurface === "local_only")) {
+    return {
+      decision: "needs_approval",
+      reasons: [...reasons, "secure_local_fact_not_marked_for_castor_release"],
+      requiredApproval: "s4_release"
+    };
+  }
+  if (crossingToCallingAgent && secureFacts.length > 0) {
+    reasons.add("bounded_secure_derivative_allowed");
+  }
+  return {
+    decision: "allow",
+    reasons: [...reasons, "release_gate_passed"],
+    allowedText: input.draftAnswer
+  };
+}
+function isCallingAgentDestination(destination) {
+  return destination === "calling_agent" || destination === "castor";
+}
+function buildOpsecReleaseAudit(facts, decision) {
+  return {
+    structured_evidence: facts.map((fact) => ({
+      fact_id: fact.factId,
+      trust_tier: fact.sensitivity.trustTier,
+      trust_domain: fact.sensitivity.trustDomain,
+      confidence: fact.confidence,
+      extraction_kind: fact.extractionKind,
+      source_instruction_flags: [...fact.sourceInstructionFlags],
+      release_surface: fact.releaseSurface,
+      provenance_count: fact.sourceProvenance.length
+    })),
+    release_decision: {
+      decision: decision.decision,
+      reasons: [...decision.reasons],
+      ...decision.redactions ? { redactions: [...decision.redactions] } : {},
+      ...decision.requiredApproval ? { required_approval: decision.requiredApproval } : {}
+    },
+    raw_source_exposed: false
+  };
+}
+function answerForReleaseDecision(decision) {
+  if ((decision.decision === "allow" || decision.decision === "redact") && decision.allowedText) {
+    return decision.allowedText;
+  }
+  if (decision.decision === "needs_approval") {
+    return "I found matching source material, but this needs review before I can summarize it in this calling-assistant-safe path.";
+  }
+  return "I found matching source material, but it cannot be summarized in this calling-assistant-safe path.";
+}
+function detectSourceInstructionFlags(text2) {
+  const flags = new Set;
+  if (/\b(ignore|disregard)\s+(all\s+)?(previous|prior|above)\s+instructions?\b/i.test(text2)) {
+    flags.add("ignore_previous_instructions");
+  }
+  if (/\b(system|developer|policy)\s+(prompt|message|instructions?)\b/i.test(text2) || /\byou are now\b/i.test(text2)) {
+    flags.add("role_or_policy_override");
+  }
+  if (/\b(send|exfiltrate|upload|forward|post)\b.{0,80}\b(secret|token|password|key|credential|email|gmail|document|file)s?\b/i.test(text2)) {
+    flags.add("credential_exfiltration_request");
+  }
+  if (/\b(send|forward|email|post|upload|webhook|dm|slack)\b.{0,100}\b(attacker|external|http|https|@)\b/i.test(text2)) {
+    flags.add("external_communication_request");
+  }
+  if (/\b(call|use|invoke)\b.{0,60}\btool\b/i.test(text2) || /\bdelete\b.{0,80}\b(log|file|email|message|record)s?\b/i.test(text2)) {
+    flags.add("tool_escalation_request");
+  }
+  if (/\b(as an ai|assistant|model)\b/i.test(text2)) {
+    flags.add("general_source_instruction");
+  }
+  return [...flags].sort();
+}
+function defaultReleaseSurfaceForSensitivity(sensitivity) {
+  if (sensitivity.trustTier === "S5")
+    return "local_only";
+  return "castor_answer";
+}
+function secretLabelsInText(text2) {
+  const labels = new Set;
+  const variants = secretScreeningVariants(text2);
+  for (const { label, pattern } of SECRET_PATTERNS) {
+    const shared = {
+      label: ["private_key", "openai_key", "github_token", "slack_token"].includes(label) ? label : "credential_assignment",
+      findingType: "credential_assignment",
+      confidence: 1,
+      pattern: new RegExp(pattern.source, `${pattern.flags}g`)
+    };
+    if (hasSecretPatternHit(text2, shared, variants))
+      labels.add(label);
+  }
+  for (const shared of SHARED_SECRET_PATTERNS) {
+    if (hasSecretPatternHit(text2, shared, variants))
+      labels.add(shared.label);
+  }
+  return [...labels];
+}
+var SECRET_PATTERNS;
+var init_opsec = __esm(() => {
+  init_secret_patterns();
+  init_types();
+  SECRET_PATTERNS = [
+    { label: "private_key", pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/i },
+    { label: "oauth_refresh_token", pattern: /\brefresh[_ -]?token\s*[:=]\s*["']?[A-Za-z0-9._~+/=-]{8,}/i },
+    { label: "client_secret", pattern: /\bclient[_ -]?secret\s*[:=]\s*["']?[A-Za-z0-9._~+/=-]{8,}/i },
+    { label: "api_key", pattern: /\bapi[_ -]?key\s*[:=]\s*["']?[A-Za-z0-9._~+/=-]{12,}/i },
+    { label: "password", pattern: /\bpassword\s*[:=]\s*["']?\S{8,}/i },
+    { label: "openai_key", pattern: /\bsk-[A-Za-z0-9_-]{16,}\b/ },
+    { label: "github_token", pattern: /\b(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]{16,}\b/ },
+    { label: "slack_token", pattern: /\bxox[abp]-[A-Za-z0-9-]{16,}\b/ }
+  ];
+});
+
+// src/core/parent-label.ts
+function candidateNamesCeiling(candidate) {
+  if (isSecureSensitivity(candidate))
+    return "private";
+  return candidate.trustDomain === "public_safe" ? "public" : "personal";
+}
+function parentNamesMayTravel(names, ceiling) {
+  return TIER_RANK2[names] <= TIER_RANK2[ceiling];
+}
+function flattened(value, max) {
+  if (typeof value !== "string")
+    return;
+  let text2 = "";
+  let pendingSpace = false;
+  for (const char of value) {
+    const code = char.codePointAt(0);
+    const blank = code <= 32 || code >= 127 && code <= 160 || code === 8232 || code === 8233;
+    if (blank) {
+      pendingSpace = text2.length > 0;
+      continue;
+    }
+    if (pendingSpace)
+      text2 += " ";
+    pendingSpace = false;
+    text2 += char;
+  }
+  if (!text2)
+    return;
+  return text2.length > max ? `${text2.slice(0, max - 1).trimEnd()}…` : text2;
+}
+function labelDate(value) {
+  if (typeof value !== "string")
+    return;
+  const at = Date.parse(value);
+  if (!Number.isFinite(at))
+    return;
+  const date = new Date(at);
+  return `${date.getUTCDate()} ${MONTHS2[date.getUTCMonth()]} ${date.getUTCFullYear()}`;
+}
+function parentLabelText(names) {
+  const subject = flattened(names.subject, SUBJECT_MAX_CHARS);
+  const sender = flattened(names.sender, SENDER_MAX_CHARS);
+  const date = labelDate(names.authoredAt);
+  const who = [subject ? `'${subject}'` : undefined, sender ? `from ${sender}` : undefined].filter(Boolean).join(" ");
+  const label = date ? who ? `${who}, ${date}` : date : who;
+  if (!label)
+    return;
+  return label.length > PARENT_LABEL_MAX_CHARS ? `${label.slice(0, PARENT_LABEL_MAX_CHARS - 1).trimEnd()}…` : label;
+}
+function citationTitleWithParent(title, parentLabel) {
+  const label = flattened(parentLabel, PARENT_LABEL_MAX_CHARS);
+  const own3 = title?.trim();
+  if (!label)
+    return own3 || undefined;
+  return own3 ? `${own3}, in ${label}` : `In ${label}`;
+}
+function applyParentLabels(candidates, corpusIds, resolver, scope) {
+  const unchanged = { candidates: [...candidates], dependencies: [] };
+  if (!resolver || candidates.length === 0)
+    return unchanged;
+  let parents;
+  try {
+    parents = resolver(candidates.map((candidate, index) => ({
+      corpusId: corpusIds[index] ?? "",
+      sourceItem: candidate.provenance.sourceItem
+    })));
+  } catch {
+    return unchanged;
+  }
+  if (parents.length !== candidates.length)
+    return unchanged;
+  const dependencies = [];
+  const labelled = candidates.map((candidate, index) => {
+    const parent = parents[index];
+    if (!parent)
+      return candidate;
+    if (!parentNamesMayTravel(parent.tier, candidateNamesCeiling(candidate)))
+      return candidate;
+    if (!namesCorpusInScope(parent.corpusId, scope))
+      return candidate;
+    const label = parentLabelText(parent);
+    if (!label)
+      return candidate;
+    dependencies.push({
+      candidateIndex: index,
+      corpusId: parent.corpusId,
+      parent: parent.identity,
+      private: parent.tier === "private"
+    });
+    return {
+      ...candidate,
+      provenance: {
+        ...candidate.provenance,
+        citation: { ...candidate.provenance.citation, parentLabel: label }
+      }
+    };
+  });
+  return { candidates: labelled, dependencies };
+}
+function namesCorpusInScope(corpusId, scope) {
+  if (!corpusId || scope.excludedCorpusIds?.has(corpusId))
+    return false;
+  if (scope.allowedCorpusIds && !scope.allowedCorpusIds.includes(corpusId))
+    return false;
+  const domain = scope.domainOf(corpusId);
+  return domain !== undefined && scope.allowedTrustDomains.includes(domain);
+}
+function parentLabelReleaseInputs(dependencies) {
+  const seen = new Map;
+  for (const dependency of dependencies) {
+    const { parent } = dependency;
+    const key2 = JSON.stringify([dependency.corpusId, parent.provider, parent.accountScope, parent.providerConversationId ?? "", parent.providerItemId]);
+    const existing = seen.get(key2);
+    if (existing) {
+      if (dependency.private)
+        existing.privateAtAnswer = true;
+      continue;
+    }
+    seen.set(key2, {
+      corpusId: dependency.corpusId,
+      provider: parent.provider,
+      accountScope: parent.accountScope,
+      providerItemId: parent.providerItemId,
+      ...parent.providerConversationId ? { providerConversationId: parent.providerConversationId } : {},
+      privateAtAnswer: dependency.private,
+      layer: "names",
+      dependency: "parent_label"
+    });
+  }
+  return [...seen.values()];
+}
+var TIER_RANK2, PARENT_LABEL_MAX_CHARS = 160, SUBJECT_MAX_CHARS = 90, SENDER_MAX_CHARS = 40, MONTHS2;
+var init_parent_label = __esm(() => {
+  init_types();
+  TIER_RANK2 = { public: 0, personal: 1, private: 2 };
+  MONTHS2 = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December"
+  ];
+});
+
+// src/core/release-manifest.ts
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+function chunkCoverageNote(result) {
+  return result.withheldPassages > 0 ? `${result.withheldPassages} passages from ${result.withheldDocuments} documents are still being checked for privacy and weren't shared. Ask again in a minute.` : undefined;
+}
+async function checkReleaseChunks(check, inputs, options) {
+  try {
+    const result = await check?.chunks?.(inputs, options);
+    if (result && result.allowed.length === inputs.length)
+      return result;
+  } catch {}
+  return {
+    allowed: inputs.map(() => []),
+    withheldPassages: inputs.reduce((n, input) => n + (input.layer === "names" ? 0 : Math.max(1, input.chunkHashes?.length ?? 0)), 0),
+    withheldDocuments: inputs.filter((input) => input.layer !== "names").length
+  };
+}
+async function recheckSearchEvidence(raw, manifests, check) {
+  const evidence = Array.isArray(raw.evidence) ? raw.evidence : [];
+  if (!evidence.length)
+    return { raw, withheldAfter: false };
+  const inputs = manifests.flatMap((manifest) => manifest.inputs);
+  let report;
+  let verdicts = [];
+  try {
+    if (check && manifests.length) {
+      report = await checkReleaseChunks(check, inputs);
+      verdicts = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
+    }
+  } catch {}
+  const cleared = (index) => {
+    const input = inputs[index];
+    const verdict = verdicts[index];
+    return !!verdict && !verdict.gone && ["public_or_personal", "legacy"].includes(verdict.tier) && (input.layer === "names" || !!input.chunkHashes?.length && input.chunkHashes.every((hash) => report?.allowed[index]?.includes(hash)));
+  };
+  const parentsCleared = inputs.every((input, index) => input.dependency !== "parent_label" || cleared(index));
+  const kept = evidence.filter((value) => {
+    if (!parentsCleared || !value || typeof value !== "object")
+      return false;
+    const hit = value;
+    const matches = inputs.flatMap((input, index) => input.dependency !== "parent_label" && input.corpusId === hit.corpus_id && input.provider === hit.provider && input.accountScope === hit.account_scope && input.providerItemId === hit.provider_item_id && input.providerConversationId === hit.provider_conversation_id ? [index] : []);
+    return matches.length > 0 && matches.every(cleared);
+  });
+  const dropped = evidence.length - kept.length;
+  if (!dropped)
+    return { raw, withheldAfter: false };
+  const coverage = raw.coverage && typeof raw.coverage === "object" ? raw.coverage : {};
+  const note = report && chunkCoverageNote(report);
+  const priorNotes = Array.isArray(coverage.cut_short) ? coverage.cut_short : [];
+  const withheld = typeof raw.withheld === "number" && Number.isFinite(raw.withheld) ? Math.max(0, raw.withheld) : 0;
+  return { raw: {
+    ...raw,
+    evidence: kept,
+    withheld: withheld + Math.max(dropped, report?.withheldPassages ?? 0),
+    ...note ? { coverage: { ...coverage, cut_short: [...new Set([...priorNotes, note])] } } : {}
+  }, withheldAfter: true };
+}
+function bindReleaseChunks(provenance, chunks, hashes) {
+  chunkProvenance.set(provenance, chunks.map((text2, index) => ({ text: text2, hashes: hashes[index] ?? [] })));
+}
+function copyReleaseChunks(from, into) {
+  const chunks = chunkProvenance.get(from);
+  if (chunks)
+    chunkProvenance.set(into, chunks);
+}
+function releasePassageHashes(provenance, text2) {
+  return [...new Set((chunkProvenance.get(provenance) ?? []).filter((entry) => entry.text.includes(text2)).flatMap((entry) => entry.hashes))];
+}
+function releaseCandidateHashes(candidate) {
+  return [...new Set(candidate.chunks.flatMap((text2) => releasePassageHashes(candidate.provenance, text2)))];
+}
+function createReleaseManifestSink() {
+  return { manifests: [] };
+}
+function runWithReleaseManifestSink(sink, fn) {
+  return storage3.run(sink, fn);
+}
+function currentReleaseManifestSink() {
+  return storage3.getStore();
+}
+function recordReleaseManifest(manifest) {
+  storage3.getStore()?.manifests.push({
+    inputs: manifest.inputs.map((input) => ({ ...input, ...input.chunkHashes ? { chunkHashes: [...input.chunkHashes] } : {} })),
+    constraints: { ...manifest.constraints }
+  });
+}
+function adoptReleaseManifests(into, from) {
+  into.manifests.push(...from.manifests);
+}
+function privateInputReleaseAllowed(input, verdict, constraints, postureNow) {
+  const privateNow = verdict.tier === "private" || verdict.tier === "legacy" && input.privateAtAnswer;
+  const authorized = constraints.includeSecureLocalContent || postureNow === "allow";
+  if (input.layer === "names")
+    return !privateNow || input.privateAtAnswer && authorized;
+  return !privateNow || authorized;
+}
+async function answerReleaseWithheldReasonOffThread(manifests, check, ceiling = "private", options = {}) {
+  try {
+    const inputs = manifests.flatMap((manifest) => manifest.inputs);
+    const verdicts = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
+    const reason = answerReleaseWithheldReason(manifests, { inputs: () => verdicts, secureDerivativeDefault: () => check.secureDerivativeDefault() }, ceiling);
+    if (reason)
+      return reason;
+    if (options.chunks && (await checkReleaseChunks(check, inputs)).withheldPassages > 0)
+      return ANSWER_RELEASE_UNVERIFIED;
+    return;
+  } catch {
+    return ANSWER_RELEASE_UNVERIFIED;
+  }
+}
+function answerReleaseWithheldReason(manifests, check, ceiling = "private") {
+  if (manifests.length === 0)
+    return ANSWER_RELEASE_UNVERIFIED;
+  const entries = manifests.flatMap((manifest) => manifest.inputs.map((input) => ({ input, constraints: manifest.constraints })));
+  const inputs = entries.map(({ input }) => input);
+  try {
+    const verdicts = check.inputs(inputs);
+    if (verdicts.length !== inputs.length)
+      return ANSWER_RELEASE_UNVERIFIED;
+    const postureNow = check.secureDerivativeDefault();
+    for (const [index, verdict] of verdicts.entries()) {
+      if (verdict.tier === "unknown" || verdict.gone)
+        return ANSWER_RELEASE_UNVERIFIED;
+      if (verdict.tier === "secret")
+        return ANSWER_RELEASE_UNVERIFIED;
+      const { input, constraints } = entries[index];
+      if (verdict.tier === "private" && (ceiling === "personal" || !input.privateAtAnswer))
+        return ANSWER_BECAME_PRIVATE;
+      if (!privateInputReleaseAllowed(input, verdict, constraints, postureNow)) {
+        return "Olympus withheld this answer because current settings require approval for Private content.";
+      }
+    }
+  } catch {
+    return ANSWER_RELEASE_UNVERIFIED;
+  }
+  return;
+}
+function isWithheldSourceAnswer(result) {
+  return withheldAnswers.has(result);
+}
+function withheldSourceAnswer(reason) {
+  const result = { answer: reason, evidence: [] };
+  withheldAnswers.add(result);
+  return result;
+}
+var RELEASE_CHUNK_JUDGE_BUDGET_MS = 8000, chunkProvenance, storage3, ANSWER_BECAME_PRIVATE = "Olympus withheld this answer because an item became Private.", ANSWER_RELEASE_UNVERIFIED = "Olympus withheld this answer because its current privacy classification could not be verified.", withheldAnswers;
+var init_release_manifest = __esm(() => {
+  chunkProvenance = new WeakMap;
+  storage3 = new AsyncLocalStorage5;
+  withheldAnswers = new WeakSet;
+});
+
+// src/core/secret-location-note.ts
+function secretLocationCoverageNote(count) {
+  return `${count} Secret(s) matched by location only; their contents are never read into an answer.`;
+}
+function secretLocationAnswer(locations) {
+  if (locations.length === 0)
+    return "";
+  const lead = locations.length === 1 ? "A matching item is stored as a Secret, so Olympus never shows it to an AI, this one included. Open it on this Mac:" : `${locations.length} matching items are stored as Secrets, so Olympus never shows them to an AI, this one included. Open them on this Mac:`;
+  return [lead, ...locations.map((location) => `- ${location.where}`)].join(`
+`);
+}
+function withoutSecretLocationCoverageNotes(answer) {
+  const lines = answer.split(`
+`);
+  if (!lines.some((line) => NOTE_LINE.test(line)))
+    return answer;
+  const kept = lines.filter((line) => !NOTE_LINE.test(line));
+  const heading = kept.lastIndexOf(NOTES_HEADING);
+  if (heading !== -1 && kept.slice(heading + 1).every((line) => !line.startsWith("- "))) {
+    const start = heading > 0 && kept[heading - 1] === "" ? heading - 1 : heading;
+    kept.splice(start, heading + 1 - start);
+  }
+  return kept.join(`
+`).replace(/\s+$/, "");
+}
+var NOTE_LINE, NOTES_HEADING = "Coverage notes:";
+var init_secret_location_note = __esm(() => {
+  NOTE_LINE = /^- \d+ Secret\(s\) matched by location only; their contents are never read into an answer\.$/;
+});
+
+// src/core/privacy-backlog-coverage.ts
+function privacyBacklogCoverageNote(pendingItems, audience = "remote") {
+  if (pendingItems === undefined || !Number.isSafeInteger(pendingItems) || pendingItems <= 0)
+    return;
+  const one = pendingItems === 1;
+  if (audience === "local") {
+    return `Olympus is still checking ${pendingItems} new item${one ? "" : "s"} for privacy. ` + `Until then ${one ? "it is" : "they are"} found by exact words only, not by meaning. ` + "This can take a while on this computer.";
+  }
+  return `Olympus is still checking ${pendingItems} new item${one ? "" : "s"} for privacy before ${one ? "it" : "they"} can be searched. ` + "This can take a while on this computer.";
+}
+function withCoverageNote(answer, note) {
+  if (!note)
+    return answer;
+  if (/\n\nCoverage notes:\n(- [^\n]*\n?)+$/.test(answer))
+    return `${answer.replace(/\s+$/, "")}
+- ${note}`;
+  return `${answer.replace(/\s+$/, "")}
+
+Coverage notes:
+- ${note}`;
+}
+
+// src/core/remote-result.ts
+function providerSourceLabel(provider) {
+  return Object.prototype.hasOwnProperty.call(PROVIDER_LABELS, provider) ? PROVIDER_LABELS[provider] : undefined;
+}
+function sourceLabel(provider, family) {
+  if (typeof provider === "string" && Object.prototype.hasOwnProperty.call(PROVIDER_LABELS, provider))
+    return PROVIDER_LABELS[provider];
+  if (typeof family === "string" && Object.prototype.hasOwnProperty.call(FAMILY_LABELS, family))
+    return FAMILY_LABELS[family];
+  return OTHER_SOURCE_LABEL;
+}
+function oneOf(value, allowed) {
+  return typeof value === "string" && allowed.includes(value) ? value : undefined;
+}
+function withheldParams(operation) {
+  return Object.prototype.hasOwnProperty.call(REMOTE_WITHHELD_PARAMS, operation) ? REMOTE_WITHHELD_PARAMS[operation] ?? [] : [];
+}
+function remoteDeclaredParams(operation, declared) {
+  const withheld = withheldParams(operation);
+  return declared.filter((name) => !withheld.includes(name));
+}
+function remoteToolDescription(operation, description) {
+  return Object.prototype.hasOwnProperty.call(REMOTE_DESCRIPTIONS, operation) ? REMOTE_DESCRIPTIONS[operation] ?? description : description;
+}
+function remoteToolSchema(operation, schema) {
+  const withheld = withheldParams(operation);
+  if (withheld.length === 0)
+    return schema;
+  const properties = asRecord7(schema.properties) ?? {};
+  const required = Array.isArray(schema.required) ? schema.required : [];
+  return {
+    ...schema,
+    properties: Object.fromEntries(Object.entries(properties).filter(([name]) => !withheld.includes(name))),
+    required: required.filter((name) => typeof name === "string" && !withheld.includes(name))
+  };
+}
+function remoteWithheldParam(operation, args) {
+  const withheld = withheldParams(operation);
+  return Object.keys(args).filter((name) => withheld.includes(name)).sort()[0];
+}
+async function remoteOperationOutputOffThread(operation, raw, options = {}) {
+  const check = options.releaseCheck;
+  if (!["source_answer", "source_answer_result"].includes(operation) || pendingOutput(raw) || isAnonymousAnswerResult(raw)) {
+    return remoteOperationOutput(operation, raw, options);
+  }
+  if (!check)
+    return remoteOperationOutput(operation, raw, { ...options, releaseCheck: {
+      inputs: (inputs) => inputs.map(() => ({ tier: "unknown", gone: false })),
+      secureDerivativeDefault: () => "approval"
+    } });
+  let verdicts;
+  try {
+    const inputs = (options.releaseManifests ?? []).flatMap((manifest) => manifest.inputs);
+    const chunks = await checkReleaseChunks(check, inputs);
+    verdicts = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
+    if (chunks.withheldPassages > 0)
+      verdicts = inputs.map((input, index) => {
+        const tier = verdicts[index];
+        return tier?.tier === "secret" ? tier : { tier: "unknown", gone: false };
+      });
+  } catch {}
+  const verified = {
+    inputs: () => {
+      if (!verdicts)
+        throw new Error("Release unavailable");
+      return verdicts;
+    },
+    secureDerivativeDefault: () => check.secureDerivativeDefault()
+  };
+  return remoteOperationOutput(operation, raw, { ...options, releaseCheck: verified });
+}
+function remoteOperationOutput(operation, raw, options = {}) {
+  const pending = pendingOutput(raw);
+  switch (operation) {
+    case "source_answer":
+      return pending ?? sourceAnswerOutput(raw, options);
+    case "ask_anonymously":
+      return pending ?? anonymousAnswerOutput(raw);
+    case "source_answer_result":
+      return pending ?? (isAnonymousAnswerResult(raw) ? anonymousAnswerOutput(raw) : sourceAnswerOutput(raw, options));
+    case "source_item_read": {
+      const result = parseSourceItemReadResult(raw);
+      if (result.pages.length > 0) {
+        const inputs = (options.releaseManifests ?? []).flatMap((manifest) => manifest.inputs);
+        if (inputs.length !== 1 || !inputs[0].personalContent || !options.releaseCheck) {
+          throw new OperationError("email_policy_violation", "Current item privacy could not be verified.");
+        }
+        const verdicts = options.releaseCheck.inputs(inputs);
+        if (verdicts.length !== 1 || verdicts[0].gone || verdicts[0].tier !== "public_or_personal") {
+          throw new OperationError("not_personal", "Private item: ask with source_answer");
+        }
+      }
+      if (result.pages.some((page2) => secretLabelsInText(page2.text).length > 0))
+        throw new OperationError("email_policy_violation", "Item text withheld.");
+      return { ...result };
+    }
+    case "source_index_status":
+      return sourceIndexStatusOutput(raw);
+    default:
+      throw new OperationError("invalid_request", `No remote output for operation ${operation}.`);
+  }
+}
+function isAnonymousAnswerResult(raw) {
+  const record = asRecord7(raw);
+  return record !== undefined && typeof record.ok === "boolean" && typeof record.answer !== "string";
+}
+function pendingOutput(raw) {
+  const record = asRecord7(raw);
+  if (record?.status !== "working")
+    return;
+  if (typeof record.job_id !== "string" || !JOB_ID.test(record.job_id) || isSecretLike(record.job_id)) {
+    throw new OperationError("source_index_error", "unexpected pending shape");
+  }
+  return {
+    status: "working",
+    job_id: record.job_id,
+    elapsed_ms: wholeNumber(record.elapsed_ms),
+    next_tool: "source_answer_result",
+    message: REMOTE_PENDING_MESSAGE
+  };
+}
+function sourceAnswerOutput(raw, options) {
+  const record = asRecord7(raw);
+  if (!record || typeof record.answer !== "string" || !Array.isArray(record.evidence)) {
+    throw new OperationError("source_index_error", "unexpected answer shape");
+  }
+  const evidence = record.evidence.map(asRecord7).filter((entry) => entry !== undefined);
+  let dropped = new Set;
+  if (options.releaseCheck) {
+    const recheck = recheckRelease(evidence, options.releaseManifests ?? [], options.releaseCheck);
+    if ("withhold" in recheck)
+      return withheldAnswer(recheck.withhold, evidence.length);
+    dropped = recheck.dropped;
+  }
+  if (isSecretLike(record.answer))
+    return withheldAnswer(REMOTE_ANSWER_WITHHELD, evidence.length);
+  const answer = scannedText(withoutSecretLocationCoverageNotes(record.answer), MAX_ANSWER, "multiline");
+  if (answer.secret)
+    return withheldAnswer(REMOTE_ANSWER_WITHHELD, evidence.length);
+  const citations = [];
+  const released = [];
+  evidence.forEach((entry, index) => {
+    if (dropped.has(index) || citations.length >= MAX_CITATIONS)
+      return;
+    const citation = citationOutput(entry);
+    citations.push(citation);
+    released.push(releasedItemFromEvidence(entry, String(citation.label), typeof citation.title === "string" ? citation.title : undefined));
+  });
+  noteReleasedItems(released);
+  const privacyCoverage = privacyBacklogCoverageNote(options.pendingPrivacyItems);
+  const coverageSuffix = privacyCoverage ? `
+
+Coverage notes:
+- ${privacyCoverage}` : "";
+  return {
+    kind: "source_answer",
+    status: "answered",
+    answer: (answer.text ?? "").slice(0, MAX_ANSWER - coverageSuffix.length) + coverageSuffix,
+    citations
+  };
+}
+function withRemotePrivateNote(output, answerId, secretMatch = false) {
+  return output.kind === "source_answer" && output.status === "answered" ? { ...output, private_note: remotePrivateNote(answerId, secretMatch) } : output;
+}
+function remotePrivateNote(answerId, secretMatch = false) {
+  const pointer = answerId && PRIVATE_ANSWER_ID.test(answerId) ? `${REMOTE_PRIVATE_NOTE} [Open answer](olympus://open/private/${answerId})` : REMOTE_PRIVATE_NOTE;
+  return secretMatch ? `${pointer} ${REMOTE_SECRET_NOTE}` : pointer;
+}
+function withheldAnswer(message2, heldBack = 0) {
+  noteReleasedItems([], heldBack, true);
+  return { kind: "source_answer", status: "withheld", answer: message2, citations: [] };
+}
+function recheckRelease(evidence, manifests, check) {
+  if (manifests.length === 0) {
+    console.error("[olympus:remote] release_manifest_missing");
+    return { withhold: REMOTE_ANSWER_UNVERIFIED };
+  }
+  const inputs = manifests.flatMap((manifest) => manifest.inputs.map((input) => ({ input, manifest })));
+  let verdicts;
+  let postureNow;
+  try {
+    verdicts = check.inputs(inputs.map(({ input }) => input));
+    if (verdicts.length !== inputs.length)
+      throw new Error("release check returned the wrong number of verdicts");
+    postureNow = check.secureDerivativeDefault();
+  } catch (error) {
+    console.error(`[olympus:remote] release_check_failed error_message=${boundedLogErrorMessage(error)}`);
+    return { withhold: REMOTE_ANSWER_UNVERIFIED };
+  }
+  if (verdicts.some((verdict) => verdict.tier === "secret"))
+    return { withhold: REMOTE_ANSWER_CHANGED };
+  if (verdicts.some((verdict) => verdict.tier === "unknown"))
+    return { withhold: REMOTE_ANSWER_UNVERIFIED };
+  if (verdicts.some((verdict) => verdict.hiddenByParent === true))
+    return { withhold: REMOTE_ANSWER_UNVERIFIED };
+  for (const [index, { input, manifest }] of inputs.entries()) {
+    const verdict = verdicts[index];
+    if (input.dependency === "parent_label" && verdict.gone)
+      return { withhold: REMOTE_ANSWER_UNVERIFIED };
+    if (!privateInputReleaseAllowed(input, verdict, manifest.constraints, postureNow))
+      return { withhold: input.privateAtAnswer ? REMOTE_ANSWER_WITHHELD : REMOTE_ANSWER_CHANGED };
+  }
+  const dropped = new Set;
+  for (const [index, entry] of evidence.entries()) {
+    const matches = inputs.flatMap(({ input }, position) => citesInput(entry, input) ? [verdicts[position]] : []);
+    if (matches.length === 0) {
+      console.error("[olympus:remote] release_manifest_incomplete");
+      return { withhold: REMOTE_ANSWER_UNVERIFIED };
+    }
+    if (matches.some((verdict) => verdict.gone))
+      dropped.add(index);
+  }
+  return { dropped };
+}
+function citesInput(entry, input) {
+  return input.dependency !== "parent_label" && entry.corpus_id === input.corpusId && entry.provider === input.provider && entry.provider_item_id === input.providerItemId && (typeof entry.provider_conversation_id === "string" && entry.provider_conversation_id ? entry.provider_conversation_id : undefined) === input.providerConversationId;
+}
+function citationOutput(entry) {
+  const title = scannedText(entry.title, MAX_TITLE, "line");
+  const date = dateOnly(entry.authored_at) ?? dateOnly(entry.updated_at);
+  const parent = keptText(entry.parent_label, PARENT_LABEL_MAX_CHARS, "line");
+  const composed = title.secret ? { secret: true } : scannedText(citationTitleWithParent(title.text, parent), MAX_TITLE, "line");
+  return {
+    label: sourceLabel(entry.provider, entry.family),
+    ...composed.text && !composed.secret ? { title: composed.text } : {},
+    ...date ? { date } : {}
+  };
+}
+function anonymousAnswerOutput(raw) {
+  const record = asRecord7(raw);
+  if (!record || typeof record.ok !== "boolean") {
+    throw new OperationError("email_error", "unexpected anonymous answer shape");
+  }
+  if (record.ok) {
+    if (typeof record.reply !== "string")
+      throw new OperationError("email_error", "unexpected anonymous answer shape");
+    const reply = scannedText(record.reply, MAX_ANSWER, "multiline");
+    const sent2 = keptText(record.sent, MAX_SENT, "multiline");
+    const route = keptText(record.route, MAX_ROUTE, "line");
+    const note = keptText(record.note, MAX_MESSAGE, "line");
+    const model = typeof record.model === "string" && MODEL_ID.test(record.model) && !isSecretLike(record.model) ? record.model : undefined;
+    const cleanup = oneOf(record.cleanup, CLEANUPS);
+    return {
+      kind: "anonymous_answer",
+      status: "answered",
+      reply: reply.secret ? REMOTE_REPLY_WITHHELD : reply.text ?? "",
+      level: record.level === "strict" ? "strict" : "standard",
+      rewritten: record.rewritten === true,
+      remembered: record.remembered === true,
+      network_identity: oneOf(record.networkIdentity, NETWORK_IDENTITIES) ?? "not_verified",
+      ...cleanup ? { cleanup } : {},
+      ...model ? { model } : {},
+      ...route ? { route } : {},
+      ...sent2 ? { sent: sent2 } : {},
+      ...note ? { note } : {},
+      ...typeof record.providerNote === "string" ? { provider_note: REMOTE_PROVIDER_UNKNOWN_NOTE } : {}
+    };
+  }
+  if (record.code === "needs_choice") {
+    const options = asRecord7(record.options);
+    return {
+      kind: "anonymous_answer",
+      status: "needs_choice",
+      message: REMOTE_NEEDS_CHOICE_MESSAGE,
+      options: {
+        suggested_level: options?.suggestedLevel === "strict" ? "strict" : "standard",
+        suggested_cleanup: oneOf(options?.suggestedCleanup, CLEANUPS) ?? "as_written",
+        custom_instruction: options?.customInstruction === true
+      }
+    };
+  }
+  const sent = keptText(record.sent, MAX_SENT, "multiline");
+  const outcome = oneOf(record.outcome, OUTCOMES);
+  const daemonCode = oneOf(record.daemonCode, REMOTE_DAEMON_CODES);
+  return {
+    kind: "anonymous_answer",
+    status: "refused",
+    code: oneOf(record.code, REMOTE_REFUSAL_CODES) ?? "refused",
+    message: keptText(record.message, MAX_MESSAGE, "line") ?? REMOTE_REFUSAL_FALLBACK,
+    ...outcome ? { outcome } : {},
+    ...daemonCode ? { daemon_code: daemonCode } : {},
+    ...sent ? { sent } : {}
+  };
+}
+function sourceIndexStatusOutput(raw) {
+  const record = asRecord7(raw);
+  if (!record || record.kind !== "source_index_status" || !Array.isArray(record.corpora)) {
+    throw new OperationError("source_index_error", "unexpected status shape");
+  }
+  const generatedAt = iso(record.generated_at);
+  const corpora = [];
+  for (const value of record.corpora) {
+    if (corpora.length >= MAX_CORPORA)
+      break;
+    const corpus = asRecord7(value);
+    if (!corpus || typeof corpus.corpus_id !== "string" || corpus.corpus_id.length > 128 || !CORPUS_ID.test(corpus.corpus_id) || isSecretLike(corpus.corpus_id))
+      continue;
+    const retrieval = asRecord7(corpus.retrieval);
+    const mode = oneOf(retrieval?.servable_mode, RETRIEVAL_MODES);
+    const state = oneOf(retrieval?.state, RETRIEVAL_STATES);
+    const refresh = asRecord7(corpus.last_refresh);
+    const refreshStatus = oneOf(refresh?.status, REFRESH_STATUSES);
+    const completedAt = iso(refresh?.completed_at);
+    const counts = asRecord7(corpus.counts);
+    const trustDomain = oneOf(corpus.trust_domain, TRUST_DOMAINS);
+    corpora.push({
+      corpus_id: corpus.corpus_id,
+      label: sourceLabel(corpus.provider, corpus.family),
+      ...trustDomain ? { trust_domain: trustDomain } : {},
+      configured: corpus.configured === true,
+      ...mode && state ? { retrieval: { mode, state } } : {},
+      ...refreshStatus ? { last_refresh: { status: refreshStatus, ...completedAt ? { completed_at: completedAt } : {} } } : {},
+      ...counts ? {
+        counts: {
+          indexed_items: wholeNumber(counts.indexed_items),
+          chunks: wholeNumber(counts.chunks),
+          embedded_chunks: wholeNumber(counts.embedded_chunks)
+        }
+      } : {}
+    });
+  }
+  return { kind: "source_index_status", ...generatedAt ? { generated_at: generatedAt } : {}, corpora };
+}
+function remoteRetryAfterSeconds(body) {
+  if (!body || typeof body !== "object")
+    return;
+  const value = body.retry_after_seconds;
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 86400 ? value : undefined;
+}
+function remoteErrorCode(error) {
+  if (error instanceof OperationError && Object.prototype.hasOwnProperty.call(REMOTE_ERROR_TEXT, error.code))
+    return error.code;
+  return "internal_error";
+}
+function remoteErrorOutput(error, options = {}) {
+  const code = remoteErrorCode(error);
+  if (code === "invalid_params" && options.declaredParams && error instanceof OperationError) {
+    const param = namedParam(error.message, options.declaredParams);
+    if (param)
+      return { error: code, message: invalidParamMessage(param), param };
+  }
+  const retryAfter = RETRY_AFTER_SECONDS[code];
+  if (retryAfter !== undefined)
+    return { error: code, message: REMOTE_ERROR_TEXT[code], retry_after_seconds: retryAfter };
+  if (!REFERENCED_ERROR_CODES.has(code))
+    return { error: code, message: REMOTE_ERROR_TEXT[code] };
+  const ref = mintErrorRef();
+  const errorClass2 = error instanceof Error ? error.name : typeof error;
+  console.error(`[olympus:remote] tool_error code=${code} ref=${ref} class=${JSON.stringify(errorClass2)} error_message=${boundedLogErrorMessage(error)} origin=${logErrorOrigin(error)}`);
+  return { error: code, message: REMOTE_ERROR_TEXT[code], ref };
+}
+function remoteSurfaceErrorOutput(code) {
+  return { error: code, message: REMOTE_ERROR_TEXT[code] };
+}
+function remoteWithheldParamOutput(param) {
+  if (!PARAM_NAME.test(param))
+    return { error: "invalid_params", message: REMOTE_ERROR_TEXT.invalid_params };
+  return {
+    error: "invalid_params",
+    message: `The ${param} argument is not available to remote agents. Remove it and try again.`,
+    param
+  };
+}
+function invalidParamMessage(param) {
+  return `The ${param} argument was not valid. Check it against the tool's schema and try again.`;
+}
+function namedParam(message2, declared) {
+  let best;
+  for (const name of declared) {
+    if (!PARAM_NAME.test(name))
+      continue;
+    const match = new RegExp(`(?<![A-Za-z0-9_])${name}(?![A-Za-z0-9_])`).exec(message2);
+    if (match && (!best || match.index < best.at))
+      best = { name, at: match.index };
+  }
+  return best?.name;
+}
+function mintErrorRef() {
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+function remoteOutputSchema(operation) {
+  return Object.prototype.hasOwnProperty.call(REMOTE_OUTPUT_SCHEMAS, operation) ? REMOTE_OUTPUT_SCHEMAS[operation] : undefined;
+}
+function isSecretLike(text2) {
+  return secretLabelsInText(text2).length > 0;
+}
+function scannedText(value, max, mode) {
+  if (typeof value !== "string")
+    return { secret: false };
+  if (isSecretLike(value))
+    return { secret: true };
+  const normalized = mode === "line" ? value.replace(UNSAFE_CHARS, " ").replace(/\s+/g, " ").trim() : value.replace(UNSAFE_CHARS, "");
+  if (isSecretLike(normalized))
+    return { secret: true };
+  const emitted = mode === "line" ? normalized.slice(0, max).trim() : normalized.slice(0, max);
+  if (isSecretLike(emitted))
+    return { secret: true };
+  return emitted ? { text: emitted, secret: false } : { secret: false };
+}
+function keptText(value, max, mode) {
+  const scanned = scannedText(value, max, mode);
+  const text2 = mode === "multiline" ? scanned.text?.trim() : scanned.text;
+  return text2 && !scanned.secret ? text2 : undefined;
+}
+function wholeNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+}
+function iso(value) {
+  if (typeof value !== "string")
+    return;
+  const at = Date.parse(value);
+  return Number.isFinite(at) ? new Date(at).toISOString() : undefined;
+}
+function dateOnly(value) {
+  return iso(value)?.slice(0, 10);
+}
+function asRecord7(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
+}
+var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CITATIONS = 50, MAX_CORPORA = 200, JOB_ID, PARAM_NAME, CORPUS_ID, MODEL_ID, UNSAFE_CHARS, REMOTE_PENDING_MESSAGE, REMOTE_ANSWER_CHANGED = "Olympus withheld this answer because an item it drew on has changed privacy level since the answer was written. Ask the question again.", REMOTE_ANSWER_UNVERIFIED = "Olympus withheld this answer because it could not confirm the items it drew on may still be shared. Ask the question again.", REMOTE_PRIVATE_NOTE = "Your answer is in Olympus on your computer.", REMOTE_SECRET_NOTE = "A matching item is a Secret. Open it in Olympus on your computer.", REMOTE_PRIVATE_NOTE_PATTERN = "^Your answer is in Olympus on your computer\\.(?: \\[Open answer\\]\\(olympus://open/private/[A-Za-z0-9_-]{22}\\))?(?: A matching item is a Secret\\. Open it in Olympus on your computer\\.)?$", PRIVATE_ANSWER_ID, REMOTE_ANSWER_WITHHELD = "Olympus withheld this answer under the owner's privacy rules.", REMOTE_REPLY_WITHHELD = "Olympus withheld the reply because it looked like it contained a password, key or token.", REMOTE_REFUSAL_FALLBACK = "Olympus could not ask anonymously.", REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.", REMOTE_NEEDS_CHOICE_MESSAGE = "Nothing was sent. Ask the user once: Strict (their model rewrites it into general questions first) or Standard (their words, prepared as they choose: as written, light cleanup, or their own instruction). Then call again with level, and remember=true to keep it.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, REMOTE_REFUSAL_CODES, REMOTE_DAEMON_CODES, REFRESH_STATUSES, TRUST_DOMAINS, RETRIEVAL_MODES, RETRIEVAL_STATES, NETWORK_IDENTITIES, CLEANUPS, OUTCOMES, REMOTE_WITHHELD_PARAMS, REMOTE_DESCRIPTIONS, REMOTE_ERROR_TEXT, SOURCE_ANSWER_BUSY_RETRY_AFTER_SECONDS = 30, RETRY_AFTER_SECONDS, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA, REMOTE_OUTPUT_SCHEMAS;
+var init_remote_result = __esm(() => {
+  init_source_item_read();
+  init_app_release_capture();
+  init_operation_error();
+  init_opsec();
+  init_parent_label();
+  init_release_manifest();
+  init_secret_location_note();
+  MAX_ANSWER = 64 * 1024;
+  MAX_SENT = 16 * 1024;
+  JOB_ID = /^saj_[A-Za-z0-9_-]{43}$/;
+  PARAM_NAME = /^[a-z][a-z0-9_]{0,63}$/;
+  CORPUS_ID = /^[a-z0-9_]+(\.[a-z0-9_-]+)+$/i;
+  MODEL_ID = /^[A-Za-z0-9._:/-]{1,128}$/;
+  UNSAFE_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g;
+  REMOTE_PENDING_MESSAGE = "Olympus is still working on this and it keeps running. " + "Call source_answer_result with this job_id to get the result; repeat while it says working. Do not ask again.";
+  PRIVATE_ANSWER_ID = /^[A-Za-z0-9_-]{22}$/;
+  PROVIDER_LABELS = {
+    gmail: "Gmail",
+    google_drive: "Google Drive",
+    "google-drive": "Google Drive",
+    google_calendar: "Google Calendar",
+    dropbox: "Dropbox",
+    x: "X bookmarks",
+    readwise: "Readwise",
+    telegram: "Telegram",
+    whatsapp: "WhatsApp",
+    whatsapp_personal: "WhatsApp",
+    whatsapp_business: "WhatsApp",
+    apple_messages: "Apple Messages",
+    signal: "Signal",
+    reflect: "Reflect",
+    roam: "Roam",
+    evernote: "Evernote",
+    local_files: "Files on this computer"
+  };
+  FAMILY_LABELS = {
+    email: "Mail",
+    file: "Files",
+    chat: "Messages",
+    note: "Notes",
+    x: "X bookmarks",
+    readwise: "Readwise"
+  };
+  REMOTE_SOURCE_LABELS = Object.freeze([...new Set([
+    ...Object.values(PROVIDER_LABELS),
+    ...Object.values(FAMILY_LABELS),
+    OTHER_SOURCE_LABEL
+  ])].sort());
+  REMOTE_REFUSAL_CODES = Object.freeze([
+    "refused",
+    "anonymous_answers_off",
+    "cancelled",
+    "gate_refused",
+    "internal_error",
+    "invalid_params",
+    "model_same_provider",
+    "question_empty",
+    "question_too_long",
+    "route_not_configured",
+    "secret_detected",
+    "settings_invalid",
+    "settings_stale",
+    "writer_declined",
+    "writer_failed",
+    "invalid_question",
+    "busy",
+    "acknowledgements_incomplete",
+    "funding_date_missing",
+    "funding_date_invalid",
+    "note_expired",
+    "daemon_api_key_missing",
+    "daemon_not_found",
+    "tor_not_found",
+    "unresolved_session",
+    "unresolved_session_other_wallet",
+    "no_unresolved_session",
+    "stranded_processes",
+    "daemon_already_running",
+    "tor_port_busy",
+    "tor_bootstrap_failed",
+    "daemon_start_failed",
+    "daemon_version_unsupported",
+    "daemon_supervisor_unsupported",
+    "relay_mismatch",
+    "key_reuse_on",
+    "key_reuse_unverified",
+    "daemon_keyless",
+    "daemon_identity_failed",
+    "daemon_api_key_rejected",
+    "session_process_exited",
+    "confinement_self_test_failed",
+    "confinement_unavailable",
+    "policy_unavailable",
+    "model_unavailable",
+    "daily_cap_reached",
+    "spend_cap_reached",
+    "state_unavailable",
+    "timeout",
+    "aborted",
+    "redirect_refused",
+    "response_too_large",
+    "invalid_response",
+    "daemon_error",
+    "transport_failed",
+    "teardown_incomplete",
+    "authorization_refused",
+    "session_spent"
+  ].filter((code, index, all) => all.indexOf(code) === index));
+  REMOTE_DAEMON_CODES = Object.freeze([
+    "busy",
+    "request_cancelled",
+    "funding_required",
+    "model_budget_unavailable",
+    "model_policy_unavailable",
+    "invalid_model",
+    "anonymous_access_failed",
+    "upstream_error",
+    "invalid_upstream_response",
+    "withdrawal_pending",
+    "wallet_conflict",
+    "invalid_request_error",
+    "invalid_body",
+    "testnet_password_required",
+    "invalid_api_key",
+    "local_connection_required",
+    "browser_origin_denied",
+    "unrecognized"
+  ]);
+  REFRESH_STATUSES = Object.freeze(["running", "completed", "failed"]);
+  TRUST_DOMAINS = Object.freeze(["public_safe", "internal", "secure_local"]);
+  RETRIEVAL_MODES = Object.freeze(["keyword", "hybrid"]);
+  RETRIEVAL_STATES = Object.freeze(["ready", "degraded"]);
+  NETWORK_IDENTITIES = Object.freeze(["hidden", "visible", "not_verified"]);
+  CLEANUPS = Object.freeze(["as_written", "light_cleanup", "custom"]);
+  OUTCOMES = Object.freeze(["not_sent", "sent_failed", "unknown"]);
+  REMOTE_WITHHELD_PARAMS = {
+    source_index_status: [
+      "conversation_id",
+      "include_sender_aggregation",
+      "max_senders",
+      "include_readiness_ledger",
+      "include_ingestion_ledger",
+      "include_items",
+      "max_items",
+      "query"
+    ]
+  };
+  REMOTE_DESCRIPTIONS = {
+    source_index_status: [
+      "Inspect source-index corpus status: each corpus's refresh status and aggregate counts.",
+      "Read-only: it never returns item metadata, sender counts, ledgers, source text, vectors or credentials.",
+      "Legacy extraction filter fields are refused on the connector-store status surface rather than silently returning whole-corpus counts."
+    ].join(" ")
+  };
+  REMOTE_ERROR_TEXT = {
+    not_personal: "Private item: ask with source_answer",
+    invalid_params: "The request was not valid. Check the arguments against the tool's schema and try again.",
+    invalid_request: "The request was not valid. Check the arguments against the tool's schema and try again.",
+    unsupported_filter: "That filter is not supported here.",
+    config_error: "Olympus on the computer needs setup before it can answer.",
+    argus_unreachable: "Olympus could not reach its private analyst. Try again later.",
+    argus_error: "Olympus's private analyst could not answer. Try again later.",
+    email_not_configured: "Olympus on the computer needs setup before it can answer.",
+    email_unreachable: "Olympus could not reach its source worker in time. Try again later.",
+    email_error: "Olympus could not complete this request.",
+    email_policy_violation: "Olympus withheld this result under the owner's privacy rules.",
+    source_index_not_enabled: "Searching sources is not turned on in Olympus on the computer.",
+    source_index_policy_violation: "Olympus withheld this result under the owner's privacy rules.",
+    source_index_error: "Olympus could not complete this request.",
+    source_answer_busy: "Olympus is already answering as many questions as it can at once. Wait for the answers in progress (call source_answer_result with their job ids), then ask again.",
+    source_answer_job_not_found: "No Olympus answer with that job_id is available to this connection. It may have expired or Olympus may have restarted. Ask the question again with source_answer.",
+    source_answer_deadline: "The answer did not finish within Olympus's time limit and was stopped. Ask a narrower question, or try again later.",
+    source_answer_too_large: "The finished answer was too large for Olympus to return. Ask a narrower question.",
+    internal_error: "Olympus could not complete this request.",
+    unknown_operation: "Olympus has no operation with that name here.",
+    operation_unavailable: "That operation is not enabled on this Olympus install.",
+    unauthorized: "A connection token is required.",
+    invalid_token: "The connection token is not valid or has been revoked.",
+    remote_connections_unavailable: "Olympus could not check the connection token. Try again later.",
+    not_found: "There is nothing at this path.",
+    method_not_allowed: "That HTTP method is not allowed here.",
+    unsupported_media_type: "The request body must be JSON (Content-Type: application/json).",
+    payload_too_large: "The request body is too large.",
+    olympus_offline: "Olympus is off; try again later."
+  };
+  RETRY_AFTER_SECONDS = {
+    source_answer_busy: SOURCE_ANSWER_BUSY_RETRY_AFTER_SECONDS
+  };
+  REMOTE_ERROR_CODES = Object.freeze(Object.keys(REMOTE_ERROR_TEXT));
+  REFERENCED_ERROR_CODES = new Set([
+    "internal_error",
+    "email_error",
+    "source_index_error",
+    "argus_error",
+    "config_error"
+  ]);
+  PENDING_SCHEMA = {
+    type: "object",
+    description: "Still working: call source_answer_result with job_id, again while it says working.",
+    additionalProperties: false,
+    required: ["status", "job_id", "elapsed_ms", "next_tool", "message"],
+    properties: {
+      status: { const: "working" },
+      job_id: { type: "string", pattern: JOB_ID.source },
+      elapsed_ms: { type: "integer", minimum: 0 },
+      next_tool: { const: "source_answer_result" },
+      message: { type: "string" }
+    }
+  };
+  CITATION_SCHEMA = {
+    type: "object",
+    additionalProperties: false,
+    required: ["label"],
+    properties: {
+      label: { type: "string", enum: [...REMOTE_SOURCE_LABELS] },
+      title: { type: "string", maxLength: MAX_TITLE },
+      date: { type: "string", format: "date" }
+    }
+  };
+  SOURCE_ANSWER_SCHEMA = {
+    type: "object",
+    description: 'A source answer: give the answer with its citations. "withheld" carries a fixed sentence to pass on instead. When private_note is present, pass it on as written.',
+    additionalProperties: false,
+    required: ["kind", "status", "answer", "citations"],
+    properties: {
+      kind: { const: "source_answer" },
+      status: { enum: ["answered", "withheld"] },
+      answer: { type: "string", maxLength: MAX_ANSWER },
+      citations: { type: "array", maxItems: MAX_CITATIONS, items: CITATION_SCHEMA },
+      private_note: { type: "string", pattern: REMOTE_PRIVATE_NOTE_PATTERN }
+    }
+  };
+  ANONYMOUS_ANSWERED_SCHEMA = {
+    type: "object",
+    description: 'The anonymous reply. When rewritten is true, say the question was rewritten first and offer to show "sent". When provider_note is present, pass it on as written.',
+    additionalProperties: false,
+    required: ["kind", "status", "reply", "level", "rewritten", "remembered", "network_identity"],
+    properties: {
+      kind: { const: "anonymous_answer" },
+      status: { const: "answered" },
+      reply: { type: "string", maxLength: MAX_ANSWER },
+      level: { enum: ["strict", "standard"] },
+      rewritten: { type: "boolean" },
+      remembered: { type: "boolean" },
+      network_identity: { enum: [...NETWORK_IDENTITIES] },
+      cleanup: { enum: [...CLEANUPS] },
+      model: { type: "string", pattern: MODEL_ID.source },
+      route: { type: "string", maxLength: MAX_ROUTE },
+      sent: { type: "string", maxLength: MAX_SENT },
+      note: { type: "string", maxLength: MAX_MESSAGE },
+      provider_note: { const: REMOTE_PROVIDER_UNKNOWN_NOTE }
+    }
+  };
+  ANONYMOUS_NEEDS_CHOICE_SCHEMA = {
+    type: "object",
+    description: "Nothing was sent: ask the user once, Strict or Standard, then call again with level (and remember=true to keep it).",
+    additionalProperties: false,
+    required: ["kind", "status", "message", "options"],
+    properties: {
+      kind: { const: "anonymous_answer" },
+      status: { const: "needs_choice" },
+      message: { type: "string" },
+      options: {
+        type: "object",
+        additionalProperties: false,
+        required: ["suggested_level", "suggested_cleanup", "custom_instruction"],
+        properties: {
+          suggested_level: { enum: ["strict", "standard"] },
+          suggested_cleanup: { enum: [...CLEANUPS] },
+          custom_instruction: { type: "boolean" }
+        }
+      }
+    }
+  };
+  ANONYMOUS_REFUSED_SCHEMA = {
+    type: "object",
+    description: "Not answered: tell the user the message in those words. outcome says whether the question left (absent: never handed to the transport).",
+    additionalProperties: false,
+    required: ["kind", "status", "code", "message"],
+    properties: {
+      kind: { const: "anonymous_answer" },
+      status: { const: "refused" },
+      code: { enum: [...REMOTE_REFUSAL_CODES] },
+      message: { type: "string", maxLength: MAX_MESSAGE },
+      outcome: { enum: [...OUTCOMES] },
+      daemon_code: { enum: [...REMOTE_DAEMON_CODES] },
+      sent: { type: "string", maxLength: MAX_SENT }
+    }
+  };
+  SOURCE_INDEX_STATUS_SCHEMA = {
+    type: "object",
+    description: "Per-corpus status and counts.",
+    additionalProperties: false,
+    required: ["kind", "corpora"],
+    properties: {
+      kind: { const: "source_index_status" },
+      generated_at: { type: "string", format: "date-time" },
+      corpora: {
+        type: "array",
+        maxItems: MAX_CORPORA,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["corpus_id", "label", "configured"],
+          properties: {
+            corpus_id: { type: "string", pattern: CORPUS_ID.source, maxLength: 128 },
+            label: { type: "string", enum: [...REMOTE_SOURCE_LABELS] },
+            trust_domain: { enum: [...TRUST_DOMAINS] },
+            configured: { type: "boolean" },
+            retrieval: {
+              type: "object",
+              additionalProperties: false,
+              required: ["mode", "state"],
+              properties: {
+                mode: { enum: [...RETRIEVAL_MODES] },
+                state: { enum: [...RETRIEVAL_STATES] }
+              }
+            },
+            last_refresh: {
+              type: "object",
+              additionalProperties: false,
+              required: ["status"],
+              properties: {
+                status: { enum: [...REFRESH_STATUSES] },
+                completed_at: { type: "string", format: "date-time" }
+              }
+            },
+            counts: {
+              type: "object",
+              additionalProperties: false,
+              required: ["indexed_items", "chunks", "embedded_chunks"],
+              properties: {
+                indexed_items: { type: "integer", minimum: 0 },
+                chunks: { type: "integer", minimum: 0 },
+                embedded_chunks: { type: "integer", minimum: 0 }
+              }
+            }
+          }
+        }
+      }
+    }
+  };
+  REMOTE_ERROR_SCHEMA = {
+    type: "object",
+    additionalProperties: false,
+    required: ["error", "message"],
+    properties: {
+      error: { enum: [...REMOTE_ERROR_CODES], description: "A stable error code." },
+      message: { type: "string", description: "A fixed sentence for this code." },
+      ref: { type: "string", pattern: "^[0-9a-f]{16}$", description: "Where the owner finds this failure in Olympus's log on the computer." },
+      param: { type: "string", pattern: PARAM_NAME.source, description: "The argument at fault, when it is one the operation declares." },
+      retry_after_seconds: {
+        type: "integer",
+        minimum: 1,
+        maximum: 86400,
+        description: "Seconds to wait before trying again, when Olympus is busy or offline; also sent as the HTTP Retry-After header."
+      }
+    }
+  };
+  REMOTE_OUTPUT_SCHEMAS = {
+    source_answer: { oneOf: [SOURCE_ANSWER_SCHEMA, PENDING_SCHEMA] },
+    source_answer_result: {
+      oneOf: [SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, PENDING_SCHEMA]
+    },
+    ask_anonymously: { oneOf: [ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, PENDING_SCHEMA] },
+    source_index_status: SOURCE_INDEX_STATUS_SCHEMA,
+    source_item_read: {
+      type: "object",
+      additionalProperties: false,
+      required: ["pages", "totalPages", "totalChars", "couldNotRead"],
+      properties: {
+        pages: { type: "array", maxItems: 3, items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["page", "text"],
+          properties: { page: { type: "integer", minimum: 1 }, text: { type: "string", maxLength: 12000 } }
+        } },
+        nextPage: { type: "integer", minimum: 1 },
+        totalPages: { type: "integer", minimum: 0 },
+        totalChars: { type: "integer", minimum: 0 },
+        couldNotRead: { type: "array", items: { type: "string", enum: [...SOURCE_ITEM_READ_REFUSALS] } }
+      }
+    }
+  };
+});
+
+// src/workers/remote-access-recheck.ts
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
+function currentAccess(authorized) {
+  try {
+    return authorized();
+  } catch {
+    return "unavailable";
+  }
+}
+function refusedAccess(access) {
+  const body = remoteSurfaceErrorOutput(access === "revoked" ? "invalid_token" : "remote_connections_unavailable");
+  return { content: [{ type: "text", text: JSON.stringify(body, null, 2) }], isError: true };
+}
+function withRemoteReadAuthorization(authorized, fn) {
+  return readAuthorization.run(authorized, fn);
+}
+function currentRemoteReadAccess() {
+  const authorized = readAuthorization.getStore();
+  return authorized ? currentAccess(authorized) : "active";
+}
+var readAuthorization;
+var init_remote_access_recheck = __esm(() => {
+  init_remote_result();
+  readAuthorization = new AsyncLocalStorage6;
 });
 
 // src/workers/connector-store/child-visibility.ts
@@ -36706,137 +38867,10 @@ var init_reactions = __esm(() => {
   };
 });
 
-// src/workers/source-index/media-judge.ts
-function imageJudgmentSignal(judgment) {
-  return {
-    verdict: judgment.verdict,
-    ...judgment.category ? { category: judgment.category } : {},
-    ...judgment.verdict === "ordinary" && judgment.reason === MEDIA_JUDGE_TEXT_DECIDES ? { textDecides: true } : {}
-  };
-}
-function mediaJudgeId(provider, thresholds = MEDIA_JUDGE_THRESHOLDS) {
-  return `${MEDIA_JUDGE_PROMPT_SET}:m${thresholds.margin}:i${thresholds.intimateMargin}:${provider.modelId}:${provider.configHash.slice(0, 12)}`;
-}
-function dot(left, right) {
-  let sum = 0;
-  const length = Math.min(left.length, right.length);
-  for (let index = 0;index < length; index += 1)
-    sum += left[index] * right[index];
-  return sum;
-}
-function rounded(value) {
-  return Math.round(value * 1e4) / 1e4;
-}
-function judgeMediaScores(scores, judgeId, thresholds = MEDIA_JUDGE_THRESHOLDS) {
-  const ordinary = scores.ordinary;
-  const sensitive = MEDIA_JUDGE_SENSITIVE_CATEGORIES.map((category) => [category, scores[category]]);
-  if (typeof ordinary !== "number" || !Number.isFinite(ordinary) || sensitive.some(([, score]) => typeof score !== "number" || !Number.isFinite(score))) {
-    return { verdict: "unjudged", judgeId, reason: "scores_unavailable" };
-  }
-  let top = sensitive[0][0];
-  let topScore = -Infinity;
-  for (const [category, score] of sensitive) {
-    if (score > topScore) {
-      top = category;
-      topScore = score;
-    }
-  }
-  const margin = topScore - ordinary;
-  const intimateMargin = scores.intimate - ordinary;
-  const kept = Object.fromEntries(Object.entries(scores).map(([key2, value]) => [key2, rounded(value)]));
-  if (margin >= thresholds.margin && !MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES.has(top)) {
-    return { verdict: "sensitive", category: top, margin: rounded(margin), scores: kept, judgeId };
-  }
-  let pictureTop;
-  for (const [category, score] of sensitive) {
-    if (MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES.has(category) || score - ordinary < thresholds.margin)
-      continue;
-    if (!pictureTop || score > scores[pictureTop])
-      pictureTop = category;
-  }
-  if (pictureTop) {
-    return { verdict: "sensitive", category: pictureTop, margin: rounded(scores[pictureTop] - ordinary), scores: kept, judgeId };
-  }
-  if (intimateMargin >= thresholds.intimateMargin) {
-    return { verdict: "sensitive", category: "intimate", margin: rounded(margin), scores: kept, judgeId };
-  }
-  if (margin >= thresholds.margin) {
-    return { verdict: "ordinary", category: top, margin: rounded(margin), scores: kept, judgeId, reason: MEDIA_JUDGE_TEXT_DECIDES };
-  }
-  return { verdict: "ordinary", category: top, margin: rounded(margin), scores: kept, judgeId };
-}
-function judgeImageVector(imageVector, promptVectors, judgeId, thresholds = MEDIA_JUDGE_THRESHOLDS) {
-  if (!imageVector || imageVector.length === 0)
-    return { verdict: "unjudged", judgeId, reason: "image_unreadable" };
-  if (Math.hypot(...imageVector) < 0.000001)
-    return { verdict: "unjudged", judgeId, reason: "image_unreadable" };
-  const scores = {};
-  for (const category of Object.keys(MEDIA_JUDGE_PROMPTS)) {
-    scores[category] = dot(imageVector, promptVectors[category]);
-  }
-  return judgeMediaScores(scores, judgeId, thresholds);
-}
-function canJudgeMedia(provider) {
-  return typeof provider.embedPromptTexts === "function" && typeof provider.embedImageVectors === "function";
-}
-function mediaJudgePromptVectors(provider) {
-  const key2 = `${provider.provider}\x00${provider.modelId}\x00${provider.configHash}`;
-  let cached2 = promptVectorCache.get(key2);
-  if (!cached2) {
-    const categories = Object.keys(MEDIA_JUDGE_PROMPTS);
-    cached2 = provider.embedPromptTexts(categories.map((category) => `${MEDIA_JUDGE_PROMPT_PREFIX}${MEDIA_JUDGE_PROMPTS[category]}`)).then((vectors) => {
-      if (vectors.length !== categories.length || vectors.some((vector) => vector.length === 0)) {
-        throw new Error("The photo judge's descriptions could not be embedded.");
-      }
-      return Object.fromEntries(categories.map((category, index) => [category, vectors[index]]));
-    });
-    promptVectorCache.set(key2, cached2);
-    cached2.catch(() => promptVectorCache.delete(key2));
-  }
-  return cached2;
-}
-async function judgeMediaImages(provider, images, thresholds = MEDIA_JUDGE_THRESHOLDS) {
-  if (images.length === 0)
-    return [];
-  const prompts = await mediaJudgePromptVectors(provider);
-  const vectors = await provider.embedImageVectors([...images]);
-  const judgeId = mediaJudgeId(provider, thresholds);
-  return images.map((_, index) => judgeImageVector(vectors[index], prompts, judgeId, thresholds));
-}
-async function judgeReturnedImageVectors(provider, vectors, thresholds = MEDIA_JUDGE_THRESHOLDS) {
-  const prompts = await mediaJudgePromptVectors(provider);
-  const judgeId = mediaJudgeId(provider, thresholds);
-  return vectors.map((vector) => judgeImageVector(vector, prompts, judgeId, thresholds));
-}
-var MEDIA_JUDGE_SENSITIVE_CATEGORIES, MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES, MEDIA_JUDGE_TEXT_DECIDES = "text_decides", MEDIA_JUDGE_PROMPT_SET = "photo-judge-2026-10-29", MEDIA_JUDGE_PROMPTS, MEDIA_JUDGE_PROMPT_PREFIX = "task: classification | query: ", MEDIA_JUDGE_THRESHOLDS, promptVectorCache;
-var init_media_judge = __esm(() => {
-  MEDIA_JUDGE_SENSITIVE_CATEGORIES = [
-    "id_document",
-    "bank_card",
-    "financial_document",
-    "medical_document",
-    "intimate"
-  ];
-  MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES = new Set(["medical_document"]);
-  MEDIA_JUDGE_PROMPTS = Object.freeze({
-    id_document: "a photo of a passport, national identity card or driving licence",
-    bank_card: "a photo of a credit card, debit card or bank card",
-    financial_document: "a bank statement, payslip or document showing account numbers",
-    medical_document: "a medical report or lab test results document",
-    intimate: "a nude, intimate or sexually explicit photo",
-    ordinary: "an ordinary photo of a place, a room, food, a landscape or people"
-  });
-  MEDIA_JUDGE_THRESHOLDS = Object.freeze({
-    margin: 0.04,
-    intimateMargin: 0.025
-  });
-  promptVectorCache = new Map;
-});
-
 // src/workers/connector-store/local-index.ts
 import { createHash as createHash24, randomUUID as randomUUID9 } from "node:crypto";
-import { existsSync as existsSync34, lstatSync as lstatSync19, mkdirSync as mkdirSync21, statSync as statSync16 } from "node:fs";
-import { dirname as dirname39 } from "node:path";
+import { existsSync as existsSync35, lstatSync as lstatSync19, mkdirSync as mkdirSync21, statSync as statSync16 } from "node:fs";
+import { dirname as dirname40 } from "node:path";
 import { Database as Database9 } from "bun:sqlite";
 function semanticRelevanceBarFor(modelId, adapterBar) {
   return adapterBar ?? CALIBRATED_SEMANTIC_RELEVANCE_BARS.get(modelId);
@@ -40427,6 +42461,10 @@ var init_local_index = __esm(() => {
   init_engine();
   init_tier_ledger();
   init_tier_classifier();
+  init_tier_classifier();
+  init_source_item_read();
+  init_tier_rejudge();
+  init_remote_access_recheck();
   init_secret_locations();
   init_tier_set_binding();
   init_tier_placement();
@@ -40609,7 +42647,7 @@ var init_local_index = __esm(() => {
         assertStoreTierLedgerCanOpen(this.dbPath);
         assertWritableStoreOpenAllowed("connector store", this.dbPath);
         if (this.dbPath !== ":memory:")
-          mkdirSync21(dirname39(this.dbPath), { recursive: true, mode: 448 });
+          mkdirSync21(dirname40(this.dbPath), { recursive: true, mode: 448 });
       }
       this.db = new Database9(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
       this.openedFile = fileIdentity(this.dbPath);
@@ -40770,7 +42808,7 @@ var init_local_index = __esm(() => {
         return;
       if (!this.tierLedgerHandle) {
         const path = tierLedgerPathForStore(this.dbPath);
-        if (this.readOnly && (path === ":memory:" || !existsSync34(path)))
+        if (this.readOnly && (path === ":memory:" || !existsSync35(path)))
           return;
         this.tierLedgerHandle = new TierLedger({ dbPath: path, now: this.now, ...this.readOnly ? { readOnly: true } : {} });
         this.tierLedgerOwned = true;
@@ -40862,7 +42900,7 @@ var init_local_index = __esm(() => {
       if (this.tierLedgerDisabled === true)
         return;
       const path = tierLedgerPathForStore(this.dbPath);
-      if (path === ":memory:" || !existsSync34(path))
+      if (path === ":memory:" || !existsSync35(path))
         return;
       return this.tierLedger();
     }
@@ -40975,28 +43013,28 @@ var init_local_index = __esm(() => {
       }
       return hidden;
     }
-    tierVisibleRows(rows, identityOf, layerOf, throwOnUnavailable = false, copiesAllowed) {
-      return visibilityHere(this.tierVisibleRowsSteps(rows, identityOf, layerOf, throwOnUnavailable, copiesAllowed));
+    tierVisibleRows(rows, identityOf2, layerOf, throwOnUnavailable = false, copiesAllowed) {
+      return visibilityHere(this.tierVisibleRowsSteps(rows, identityOf2, layerOf, throwOnUnavailable, copiesAllowed));
     }
-    *tierVisibleRowsSteps(rows, identityOf, layerOf, throwOnUnavailable = false, copiesAllowed) {
+    *tierVisibleRowsSteps(rows, identityOf2, layerOf, throwOnUnavailable = false, copiesAllowed) {
       if (rows.length === 0)
         return [];
       let copies;
       try {
         const ledger = this.visibilityLedger();
         if (ledger && ledger.corpusHasCopies(this.corpusId))
-          copies = yield* visibilityRead(() => ledgerVisibilityHere(ledger, rows.map(identityOf)).copies, () => ledgerVisibilityOffThread(ledger, rows.map(identityOf)).then((read) => read.copies));
+          copies = yield* visibilityRead(() => ledgerVisibilityHere(ledger, rows.map(identityOf2)).copies, () => ledgerVisibilityOffThread(ledger, rows.map(identityOf2)).then((read) => read.copies));
       } catch (error) {
         if (throwOnUnavailable)
           throw error;
         return [];
       }
       const served = copies ? rows.filter((row) => {
-        const here = copies.get(tierLedgerIdentityKey(identityOf(row)));
+        const here = copies.get(tierLedgerIdentityKey(identityOf2(row)));
         return tierRowVisible(here, this.corpusId, layerOf(row)) && (copiesAllowed?.(here ?? []) ?? true);
       }) : [...rows];
-      const hidden = yield* hiddenChildKeysSteps(this.childVisibilityLane(), served.map(identityOf));
-      return served.filter((row) => !hidden.has(tierLedgerIdentityKey(identityOf(row))));
+      const hidden = yield* hiddenChildKeysSteps(this.childVisibilityLane(), served.map(identityOf2));
+      return served.filter((row) => !hidden.has(tierLedgerIdentityKey(identityOf2(row))));
     }
     tierHiddenItemPks(options = {}) {
       const maxAgeMs = options.countsMaxAgeMs ?? 0;
@@ -42665,7 +44703,7 @@ ${parentKey(ref)}`, { ref, origin });
         seen.add(sha);
         if (this.mediaJudgmentSettled(sha, judgeId) || this.chunkMediaBackingOff(sha))
           continue;
-        if (!isMediaCachePath(row.media_path, sha) || !existsSync34(row.media_path))
+        if (!isMediaCachePath(row.media_path, sha) || !existsSync35(row.media_path))
           continue;
         images.push({ path: row.media_path, sha256: sha, mimeType: "image/jpeg" });
       }
@@ -44248,7 +46286,7 @@ ${parentKey(ref)}`, { ref, origin });
         WHERE media_path IS NOT NULL AND media_sha256 IS NOT NULL
       `).all();
         for (const row of rows) {
-          if (existsSync34(row.media_path))
+          if (existsSync35(row.media_path))
             retainMediaCacheFile(row.media_path, row.media_sha256, this.mediaHolder);
         }
         reassertedMediaHolders.add(holderKey);
@@ -46322,7 +48360,7 @@ ${parentKey(ref)}`, { ref, origin });
       const hidden = new Set;
       if (rows.length === 0)
         return hidden;
-      const identityOf = (row) => ({
+      const identityOf2 = (row) => ({
         provider: row.provider,
         accountScope: row.account_scope,
         providerItemId: row.provider_item_id,
@@ -46330,10 +48368,10 @@ ${parentKey(ref)}`, { ref, origin });
       });
       const ledger = this.visibilityLedger();
       if (ledger && ledger.corpusHasCopies(this.corpusId)) {
-        const copies = ledger.copiesForMany(rows.map(identityOf));
+        const copies = ledger.copiesForMany(rows.map(identityOf2));
         for (const row of rows) {
-          const here = (copies.get(tierLedgerIdentityKey(identityOf(row))) ?? []).filter((copy) => copy.corpusId === this.corpusId);
-          const identity2 = identityOf(row);
+          const here = (copies.get(tierLedgerIdentityKey(identityOf2(row))) ?? []).filter((copy) => copy.corpusId === this.corpusId);
+          const identity2 = identityOf2(row);
           const intent = ledger.writeIntent(identity2);
           const decision = allowHeld ? ledger.getCurrent(identity2) : undefined;
           const pendingJudgment = decision?.state === "pending" && decision.contentRead && (decision.metadataPending || decision.contentPending);
@@ -46342,10 +48380,10 @@ ${parentKey(ref)}`, { ref, origin });
           }
         }
       }
-      const children = hiddenChildKeys(this.childVisibilityLane(), rows.map(identityOf));
+      const children = hiddenChildKeys(this.childVisibilityLane(), rows.map(identityOf2));
       if (children.size > 0) {
         for (const row of rows)
-          if (children.has(tierLedgerIdentityKey(identityOf(row))))
+          if (children.has(tierLedgerIdentityKey(identityOf2(row))))
             hidden.add(row.item_pk);
       }
       return hidden;
@@ -46543,7 +48581,7 @@ ${parentKey(ref)}`, { ref, origin });
               continue;
             if (!readsImages || this.chunkMediaBackingOff(row.media_sha256)) {
               skip.add(row);
-            } else if (!row.media_path || !isMediaCachePath(row.media_path, row.media_sha256) || !existsSync34(row.media_path)) {
+            } else if (!row.media_path || !isMediaCachePath(row.media_path, row.media_sha256) || !existsSync35(row.media_path)) {
               this.clearChunkMedia(row.chunk_pk, row.item_pk);
               skip.add(row);
             }
@@ -47687,6 +49725,114 @@ ${parentKey(ref)}`, { ref, origin });
       };
       return this.tierVisibleRows([identity2], (entry) => entry, () => "content", throwOnUnavailable).length > 0;
     }
+    async readItemPages(localItemId, options = {}) {
+      const page2 = Math.max(1, Math.trunc(options.page ?? 1));
+      const count = Math.min(3, Math.max(1, Math.trunc(options.pages ?? 1)));
+      const cap = Math.min(12000, Math.max(1, Math.trunc(options.pageChars ?? 12000)));
+      let totalPages = 0;
+      let totalChars = 0;
+      const refuse2 = (reason, nextPage) => ({
+        pages: [],
+        totalPages,
+        totalChars,
+        couldNotRead: [reason],
+        ...nextPage ? { nextPage } : {}
+      });
+      const active = this.activeLocalItemRow(localItemId);
+      if (!active)
+        return refuse2("not_in_scope");
+      const identity2 = active.identity;
+      const ledger = this.governingTierLedger();
+      let generation;
+      let initialOverride;
+      const gate = () => {
+        if (currentRemoteReadAccess() !== "active")
+          return "not_in_scope";
+        const scope = options.scope?.();
+        if (scope?.allowed === false || !this.itemMatchesSearchFilters(localItemId, scope?.accountScope, scope?.filters))
+          return "not_in_scope";
+        const now = this.activeLocalItemRow(localItemId);
+        if (!now || tierLedgerIdentityKey(now.identity) !== tierLedgerIdentityKey(identity2))
+          return "not_in_scope";
+        const row = ledger?.getCurrent(identity2);
+        const override = ledger?.getOverride(identity2);
+        if (!row)
+          return "held_until_judged";
+        if (row.metadataTier === "secure" || row.metadataTier === "secrets" || row.contentTier !== "private" || override?.kind === "tier" && override.tier !== "private")
+          return "not_personal";
+        if (row.state !== "current" || row.metadataPending || row.contentPending || ledger.rejudgeQuestion(identity2) || heldUntilJudged(row.reasons))
+          return "held_until_judged";
+        if (generation !== undefined && (row.generation !== generation || JSON.stringify(override) !== initialOverride))
+          return "held_until_judged";
+        if (this.contentHeldPrivate(localItemId))
+          return "content_private";
+        if (scope?.contentAllowed === false || this.metadataOnlyRuleForLocator(now.locatorUri) !== undefined || scope?.contentFilters && !this.itemMatchesSearchFilters(localItemId, scope.accountScope, scope.contentFilters))
+          return "names_only";
+        if (!this.contentServedNow(localItemId, true))
+          return "extraction_pending";
+        return;
+      };
+      const initial = gate();
+      if (initial)
+        return refuse2(initial);
+      generation = ledger.getCurrent(identity2).generation;
+      initialOverride = JSON.stringify(ledger.getOverride(identity2));
+      const readText = () => this.db.query(`SELECT c.bounded_text FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+      WHERE i.local_item_id = ? AND i.tombstoned = 0 ORDER BY c.chunk_index`).all(localItemId).map((chunk) => chunk.bounded_text).join("");
+      const text2 = readText();
+      if (!text2)
+        return refuse2("extraction_pending");
+      const split = itemTextPages(text2, cap);
+      totalPages = split.length;
+      totalChars = text2.length;
+      const result = { pages: [], totalPages, totalChars, couldNotRead: [] };
+      for (let index = page2 - 1;index < Math.min(split.length, page2 - 1 + count); index++) {
+        const material = split[index];
+        for (const window2 of itemTextPages(material, SNIFFER_EXCERPT_MAX_CHARS)) {
+          const before = gate();
+          if (before)
+            return refuse2(before);
+          const inputs = tierSetForLedger(ledger.dbPath)?.classification() ?? resolveStoreTierClassification(undefined, this.tierLedgerPathInUse());
+          const sniffer = inputs?.sniffer;
+          if (!sniffer || inputs?.unavailableReason)
+            return refuse2("window_judging", index + 1);
+          const record = ledger.getCurrent(identity2);
+          const request = {
+            pass: "content",
+            material: window2,
+            materialHash: hashString2(`source_item_read:window:v1:${window2}`),
+            mapRevision: record.mapRevision,
+            flags: ["content:read_window", `read_window:generation:${record.generation}`],
+            subject: identity2,
+            stillAsk: () => gate() === undefined
+          };
+          const cached2 = sniffer.cachedVerdict?.(request);
+          const verdict = await Promise.resolve(cached2?.verdict === "decided" ? cached2 : sniffer.judge(request));
+          const after3 = gate();
+          if (after3)
+            return refuse2(after3);
+          if (readText() !== text2)
+            return refuse2("held_until_judged");
+          if (verdict.verdict === "undecided")
+            return refuse2("window_judging", index + 1);
+          if (verdict.tier !== "private") {
+            raiseReadWindowTier(this, ledger, record, verdict.tier, sniffer.id);
+            return refuse2("not_personal");
+          }
+        }
+        const after2 = gate();
+        if (after2)
+          return refuse2(after2);
+        result.pages.push({ page: index + 1, text: material });
+      }
+      const after = gate();
+      if (after)
+        return refuse2(after);
+      const next = page2 + result.pages.length;
+      if (next <= totalPages)
+        result.nextPage = next;
+      return result;
+    }
     localContent(localItemId, maxChars, passageFocus, options = {}) {
       const row = this.db.query(`
       SELECT item_pk, trust_tier, locator_uri, mime_type, provider, account_scope, provider_item_id,
@@ -48484,8 +50630,8 @@ ${parentKey(ref)}`, { ref, origin });
 
 // src/core/source-storage.ts
 import { Database as Database10 } from "bun:sqlite";
-import { existsSync as existsSync35, lstatSync as lstatSync20, mkdtempSync as mkdtempSync2, readdirSync as readdirSync6, rmSync as rmSync11, rmdirSync as rmdirSync2, statSync as statSync17 } from "node:fs";
-import { basename as basename9, join as join40, resolve as resolve13, sep as sep10 } from "node:path";
+import { existsSync as existsSync36, lstatSync as lstatSync20, mkdtempSync as mkdtempSync2, readdirSync as readdirSync6, rmSync as rmSync11, rmdirSync as rmdirSync2, statSync as statSync17 } from "node:fs";
+import { basename as basename9, join as join41, resolve as resolve13, sep as sep10 } from "node:path";
 function enableSourceRegistryAdoption() {
   adoptionEnabled = true;
 }
@@ -48612,7 +50758,7 @@ function removeClaimUnderItsLock(claim, ownLock, leaseTarget) {
       if (!names.every(ownLock))
         return false;
       for (const name of names)
-        rmSync11(join40(claim, name), { force: true });
+        rmSync11(join41(claim, name), { force: true });
       rmdirSync2(claim);
       return true;
     } catch {
@@ -48621,14 +50767,14 @@ function removeClaimUnderItsLock(claim, ownLock, leaseTarget) {
   };
   if (leaseTarget) {
     try {
-      return withFileLeaseSync(join40(claim, leaseTarget), () => remove(), { acquireTimeoutMs: 1 });
+      return withFileLeaseSync(join41(claim, leaseTarget), () => remove(), { acquireTimeoutMs: 1 });
     } catch {
       return false;
     }
   }
   let lock;
   try {
-    lock = tryHoldFileFlock(join40(claim, WHATSAPP_BRIDGE_LOCK_NAME));
+    lock = tryHoldFileFlock(join41(claim, WHATSAPP_BRIDGE_LOCK_NAME));
   } catch {
     return false;
   }
@@ -48824,7 +50970,7 @@ function hasUnmergedWrites2(path) {
     if (statSync17(`${path}-wal`).size > 0)
       return true;
   } catch {}
-  return existsSync35(`${path}-journal`);
+  return existsSync36(`${path}-journal`);
 }
 function isBusyError(error) {
   const code = String(error?.code ?? "");
@@ -49000,19 +51146,19 @@ var init_pairing_placement = __esm(() => {
 
 // src/core/whatsapp-bridge-name.ts
 import { createHash as createHash25 } from "node:crypto";
-import { existsSync as existsSync36, readdirSync as readdirSync7, readFileSync as readFileSync30 } from "node:fs";
-import { join as join41 } from "node:path";
+import { existsSync as existsSync37, readdirSync as readdirSync7, readFileSync as readFileSync30 } from "node:fs";
+import { join as join42 } from "node:path";
 function whatsappBridgeFileName(sourceDir) {
   const hash = createHash25("sha256");
   for (const name of ["main.go", "go.mod", "go.sum"]) {
-    const path = join41(sourceDir, name);
-    if (!existsSync36(path))
+    const path = join42(sourceDir, name);
+    if (!existsSync37(path))
       throw new Error(`The packaged WhatsApp bridge source is incomplete: missing ${name}.`);
     hash.update(name).update("\x00").update(readFileSync30(path)).update("\x00");
   }
   const others = readdirSync7(sourceDir).filter((name) => name.endsWith(".go") && !name.endsWith("_test.go") && name !== "main.go").sort();
   for (const name of others)
-    hash.update(name).update("\x00").update(readFileSync30(join41(sourceDir, name))).update("\x00");
+    hash.update(name).update("\x00").update(readFileSync30(join42(sourceDir, name))).update("\x00");
   return `olympus-whatsapp-bridge-${hash.digest("hex").slice(0, 16)}`;
 }
 var init_whatsapp_bridge_name = __esm(() => {
@@ -49084,15 +51230,15 @@ var init_messaging_chat_kinds = __esm(() => {
 
 // src/core/messaging-pairing.ts
 import { Database as Database11 } from "bun:sqlite";
-import { chmodSync as chmodSync14, existsSync as existsSync37, linkSync as linkSync2, lstatSync as lstatSync21, mkdirSync as mkdirSync23, renameSync as renameSync7, rmSync as rmSync12, rmdirSync as rmdirSync4, statSync as statSync18 } from "node:fs";
+import { chmodSync as chmodSync14, existsSync as existsSync38, linkSync as linkSync2, lstatSync as lstatSync21, mkdirSync as mkdirSync23, renameSync as renameSync7, rmSync as rmSync12, rmdirSync as rmdirSync4, statSync as statSync18 } from "node:fs";
 import { spawn as spawnChild } from "node:child_process";
 import { randomBytes as randomBytes13 } from "node:crypto";
 import { homedir as homedir21 } from "node:os";
-import { dirname as dirname40, join as join42, resolve as resolve14 } from "node:path";
-import { fileURLToPath as fileURLToPath4 } from "node:url";
+import { dirname as dirname41, join as join43, resolve as resolve14 } from "node:path";
+import { fileURLToPath as fileURLToPath5 } from "node:url";
 async function pairMessagingSource(options) {
   const env = { ...process.env, ...options.env ?? {} };
-  const packageRoot = resolve14(options.packageRoot ?? join42(dirname40(fileURLToPath4(import.meta.url)), "..", ".."));
+  const packageRoot = resolve14(options.packageRoot ?? join43(dirname41(fileURLToPath5(import.meta.url)), "..", ".."));
   const runner = options.runCommand ?? runPairingCommand;
   const secretStore = options.secretStore ?? createDefaultSecretStore();
   const account = { sourceId: options.source === "telegram" ? TELEGRAM_SOURCE_ID : WHATSAPP_SOURCE_ID };
@@ -49106,13 +51252,13 @@ async function pairMessagingSource(options) {
   };
   const sessionPath = options.source === "telegram" ? telegramSessionBasePath(pathContext) : whatsappStateDir(pathContext);
   if (layout === "folder") {
-    mkdirSync23(options.source === "telegram" ? dirname40(sessionPath) : sessionPath, { recursive: true, mode: 448 });
+    mkdirSync23(options.source === "telegram" ? dirname41(sessionPath) : sessionPath, { recursive: true, mode: 448 });
   }
   const pairing = async () => {
     if (options.source === "telegram")
       assertPairingPlacement(options.source, layout, registryEnv);
     const historyAccount = options.source === "telegram" ? telegramHistoryAccount(registryEnv) : undefined;
-    const sessionExisted = options.source === "telegram" && existsSync37(`${sessionPath}.session`);
+    const sessionExisted = options.source === "telegram" && existsSync38(`${sessionPath}.session`);
     const helper = await resolveHelper(options, packageRoot);
     const aside = historyAccount !== undefined ? prepareLoginAside(sessionPath) : undefined;
     const pairingPath = aside?.base ?? sessionPath;
@@ -49126,7 +51272,7 @@ async function pairMessagingSource(options) {
         OLYMPUS_WHATSAPP_PAIR_TTY_QR: options.whatsappQrMode === "artifact" ? "false" : "true"
       }
     };
-    const command = options.source === "telegram" ? [helper, options.telegramHelperPath ?? join42(packageRoot, "scripts", "telegram-pair.py")] : [helper, "--pair-only"];
+    const command = options.source === "telegram" ? [helper, options.telegramHelperPath ?? join43(packageRoot, "scripts", "telegram-pair.py")] : [helper, "--pair-only"];
     let result;
     let receipt;
     const bridgeLock = options.source === "whatsapp" ? takeWhatsAppBridgeLock(sessionPath, () => assertPairingPlacement(options.source, layout, registryEnv)) : undefined;
@@ -49283,7 +51429,7 @@ async function pairMessagingSource(options) {
 }
 function takeWhatsAppBridgeLock(stateDir, stillPlaced) {
   const made = mkdirSync23(stateDir, { recursive: true, mode: 448 }) !== undefined;
-  const lockPath = join42(stateDir, WHATSAPP_BRIDGE_LOCK_NAME);
+  const lockPath = join43(stateDir, WHATSAPP_BRIDGE_LOCK_NAME);
   const lock = tryHoldFileFlock(lockPath);
   if (!lock) {
     throw new Error("A WhatsApp bridge is already running on this session: WhatsApp capture, or another pairing. Finish or cancel the other pairing; a WhatsApp account that is paired and capturing does not need pairing again.");
@@ -49310,13 +51456,13 @@ function assertPairingPlacement(source, layout, env) {
     return;
   }
   if (entry && (sourceAccountMovePending(entry) || entry.layout !== layout)) {
-    throw new Error(`Olympus moved this ${sourceLabel(source)} account's files into its folder while it was pairing, so nothing was paired. Re-run olympus connect ${source} --pair.`);
+    throw new Error(`Olympus moved this ${sourceLabel2(source)} account's files into its folder while it was pairing, so nothing was paired. Re-run olympus connect ${source} --pair.`);
   }
 }
 async function resolveHelper(options, packageRoot) {
   if (options.source === "telegram") {
-    const script2 = options.telegramHelperPath ?? join42(packageRoot, "scripts", "telegram-pair.py");
-    if (!existsSync37(script2))
+    const script2 = options.telegramHelperPath ?? join43(packageRoot, "scripts", "telegram-pair.py");
+    if (!existsSync38(script2))
       throw new Error("The packaged Telegram pairing helper is missing. Reinstall Olympus and retry.");
     return readyTelegramPython({
       ...options,
@@ -49325,42 +51471,42 @@ async function resolveHelper(options, packageRoot) {
     });
   }
   if (options.whatsappBridgePath) {
-    if (!existsSync37(options.whatsappBridgePath))
+    if (!existsSync38(options.whatsappBridgePath))
       throw new Error("The configured WhatsApp pairing bridge does not exist.");
     return options.whatsappBridgePath;
   }
-  const sourceDir = join42(packageRoot, "tools", "whatsapp-bridge");
+  const sourceDir = join43(packageRoot, "tools", "whatsapp-bridge");
   const packaged = packagedWhatsAppBridgePath(packageRoot);
-  if (existsSync37(packaged)) {
+  if (existsSync38(packaged)) {
     assertTrustedBridge(packaged, "The installed WhatsApp bridge is not a trusted owner-controlled executable. Reinstall Olympus and retry.");
     return packaged;
   }
   const output = whatsappBridgeCachePath(packageRoot, options);
-  const cacheHome = options.env?.XDG_CACHE_HOME ?? join42(options.homeDir ?? options.env?.HOME ?? homedir21(), ".cache");
+  const cacheHome = options.env?.XDG_CACHE_HOME ?? join43(options.homeDir ?? options.env?.HOME ?? homedir21(), ".cache");
   ensurePrivateRootDirectorySync(cacheHome);
-  ensurePrivateDirectoryTreeSync(cacheHome, dirname40(output));
-  for (const directory of [cacheHome, join42(cacheHome, "olympus"), dirname40(output)]) {
+  ensurePrivateDirectoryTreeSync(cacheHome, dirname41(output));
+  for (const directory of [cacheHome, join43(cacheHome, "olympus"), dirname41(output)]) {
     const stat2 = lstatSync21(directory);
     if (!stat2.isDirectory() || stat2.isSymbolicLink() || typeof process.getuid === "function" && stat2.uid !== process.getuid() || (stat2.mode & 18) !== 0) {
       throw new Error("The Olympus bridge cache must be owned by this user and not writable by other users.");
     }
   }
-  if (existsSync37(output)) {
+  if (existsSync38(output)) {
     assertTrustedBridge(output, "The cached WhatsApp bridge is not a trusted owner-controlled executable.");
     return output;
   }
   const which = options.which ?? ((command) => Bun.which(command));
   const home = options.homeDir ?? options.env?.HOME ?? homedir21();
-  const userBins = [join42(home, ".local", "bin"), join42(home, "go", "bin"), "/usr/local/go/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"];
-  const find = (command) => which(command) ?? (options.which ? undefined : userBins.map((dir) => join42(dir, command)).find((path) => isExecutableFile2(path)));
+  const userBins = [join43(home, ".local", "bin"), join43(home, "go", "bin"), "/usr/local/go/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"];
+  const find = (command) => which(command) ?? (options.which ? undefined : userBins.map((dir) => join43(dir, command)).find((path) => isExecutableFile2(path)));
   const go = find("go");
   const compiler = find("cc") ?? find("clang") ?? find("gcc");
   if (!go || !compiler) {
     throw codedPairingError("WhatsApp pairing requires Go and a C compiler. Install Go plus cc/clang/gcc, then re-run olympus connect whatsapp --pair; Olympus will build the pinned bridge automatically.", "bridge_build_tools_missing");
   }
-  mkdirSync23(join42(output, ".."), { recursive: true, mode: 448 });
+  mkdirSync23(join43(output, ".."), { recursive: true, mode: 448 });
   const built = await (options.buildWhatsAppBridge ?? buildWhatsAppBridge)({ go, compiler, sourceDir, outputPath: output });
-  if (!built || !existsSync37(output)) {
+  if (!built || !existsSync38(output)) {
     throw codedPairingError("The pinned WhatsApp bridge could not be built. Verify Go and the C compiler, then re-run olympus connect whatsapp --pair.", "bridge_build_failed");
   }
   chmodSync14(output, 448);
@@ -49368,16 +51514,16 @@ async function resolveHelper(options, packageRoot) {
 }
 function whatsappBridgePathForPackage(packageRoot, context2 = {}) {
   const packaged = packagedWhatsAppBridgePath(packageRoot);
-  return existsSync37(packaged) ? packaged : whatsappBridgeCachePath(packageRoot, context2);
+  return existsSync38(packaged) ? packaged : whatsappBridgeCachePath(packageRoot, context2);
 }
 function packagedWhatsAppBridgePath(packageRoot) {
-  const sourceDir = join42(packageRoot, "tools", "whatsapp-bridge");
-  return join42(sourceDir, "bin", whatsappBridgeFileName(sourceDir));
+  const sourceDir = join43(packageRoot, "tools", "whatsapp-bridge");
+  return join43(sourceDir, "bin", whatsappBridgeFileName(sourceDir));
 }
 function whatsappBridgeCachePath(packageRoot, context2) {
   const home = context2.homeDir ?? context2.env?.HOME ?? homedir21();
-  const cacheHome = context2.env?.XDG_CACHE_HOME ?? join42(home, ".cache");
-  return join42(cacheHome, "olympus", "bin", whatsappBridgeFileName(join42(packageRoot, "tools", "whatsapp-bridge")));
+  const cacheHome = context2.env?.XDG_CACHE_HOME ?? join43(home, ".cache");
+  return join43(cacheHome, "olympus", "bin", whatsappBridgeFileName(join43(packageRoot, "tools", "whatsapp-bridge")));
 }
 function assertTrustedBridge(path, message2) {
   const stat2 = lstatSync21(path);
@@ -49386,7 +51532,7 @@ function assertTrustedBridge(path, message2) {
   }
 }
 function whatsappBridgeBuildEnv(input, base = process.env) {
-  const dirs = [...new Set([dirname40(input.go), dirname40(input.compiler)])];
+  const dirs = [...new Set([dirname41(input.go), dirname41(input.compiler)])];
   const path = [...dirs, ...(base.PATH ?? "").split(":").filter((dir) => dir && !dirs.includes(dir))].join(":");
   return { ...base, CGO_ENABLED: "1", CC: input.compiler, PATH: path };
 }
@@ -49420,7 +51566,7 @@ async function buildWhatsAppBridge(input) {
     rmSync12(temporary, { force: true });
     return false;
   }
-  if (result !== 0 || !existsSync37(temporary)) {
+  if (result !== 0 || !existsSync38(temporary)) {
     rmSync12(temporary, { force: true });
     return false;
   }
@@ -49460,7 +51606,7 @@ function producerLaunch(source, approval, helperExecutable, packageRoot, session
     return {
       source,
       executable: helperExecutable,
-      args: [join42(packageRoot, "scripts", "telegram-telethon-reader.py"), "--gateway"],
+      args: [join43(packageRoot, "scripts", "telegram-telethon-reader.py"), "--gateway"],
       env: {
         ...layout === "folder" ? {} : { OLYMPUS_TELEGRAM_SESSION_PATH: sessionPath },
         OLYMPUS_SOURCE_INDEX_TELEGRAM_ACCOUNT: "telegram.personal",
@@ -49500,12 +51646,12 @@ function producerLaunch(source, approval, helperExecutable, packageRoot, session
 function parseReadyReceipt(events, source) {
   const event = [...events].reverse().find((candidate) => candidate.event === "ready");
   if (!event || event.status !== "ready" || event.capture_started !== false || !isRecord2(event.proof)) {
-    throw new Error(`${sourceLabel(source)} pairing did not return a verified ready receipt.`);
+    throw new Error(`${sourceLabel2(source)} pairing did not return a verified ready receipt.`);
   }
   const proof = event.proof;
   const proved = source === "telegram" ? proof.authorized === true && proof.session_persisted === true && proof.credentials_transferred === true && typeof proof.account_ref === "string" : proof.authenticated === true && proof.device_persisted === true;
   if (!proved)
-    throw new Error(`${sourceLabel(source)} pairing readiness proof was incomplete.`);
+    throw new Error(`${sourceLabel2(source)} pairing readiness proof was incomplete.`);
   return event;
 }
 function isKindToken(value) {
@@ -49566,7 +51712,7 @@ function copyLogin(from, to) {
 function keepLoginAside(aside, base) {
   const from = `${aside.base}.session`;
   const to = `${base}.session`;
-  if (existsSync37(`${from}-journal`)) {
+  if (existsSync38(`${from}-journal`)) {
     throw new Error("Telegram pairing did not finish writing its login. Re-run olympus connect telegram --pair in your private terminal.");
   }
   if (loginIdentity(to) !== aside.admitted)
@@ -49681,16 +51827,16 @@ function pairingFailureMessage(source, code) {
     return new Error("Scan the current QR through WhatsApp Settings > Linked devices > Link a device, then wait for linking to finish.");
   }
   if (code === "pairing_cancelled")
-    return new Error(`${sourceLabel(source)} pairing was cancelled before readiness was proved.`);
+    return new Error(`${sourceLabel2(source)} pairing was cancelled before readiness was proved.`);
   if (code === "pairing_timeout")
-    return new Error(`${sourceLabel(source)} pairing timed out before readiness was proved. Re-run pairing to continue.`);
+    return new Error(`${sourceLabel2(source)} pairing timed out before readiness was proved. Re-run pairing to continue.`);
   if (source === "telegram" && code === "telethon_not_installed") {
     return new Error(`Telethon is required for Telegram pairing. ${TELEGRAM_DEPENDENCY_HINT}`);
   }
   if (source === "telegram" && code === "controlling_terminal_required") {
     return new Error("Telegram pairing needs the private controlling terminal so credentials and login codes never enter argv, logs, or chat.");
   }
-  return new Error(`${sourceLabel(source)} pairing failed safely (${code ?? "helper_failed"}). Re-run olympus connect ${source} --pair in your private terminal.`);
+  return new Error(`${sourceLabel2(source)} pairing failed safely (${code ?? "helper_failed"}). Re-run olympus connect ${source} --pair in your private terminal.`);
 }
 function safeErrorCode(stderr) {
   for (const line of stderr.split(/\r?\n/).reverse()) {
@@ -49717,7 +51863,7 @@ function isRecord2(value) {
 function uniqueNonEmpty(values) {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }
-function sourceLabel(source) {
+function sourceLabel2(source) {
   return source === "telegram" ? "Telegram" : "WhatsApp";
 }
 async function runPairingCommand(request) {
@@ -49841,10 +51987,10 @@ var init_messaging_pairing = __esm(() => {
 var WHATSAPP_UNOFFICIAL_CLIENT_NOTICE = "WhatsApp connects through an unofficial client. WhatsApp's terms don't allow third-party clients, and accounts have been restricted or banned for using them. Connect only if you accept that risk.";
 
 // src/core/messaging-capture.ts
-import { existsSync as existsSync38, mkdirSync as mkdirSync24, rmSync as rmSync13 } from "node:fs";
+import { existsSync as existsSync39, mkdirSync as mkdirSync24, rmSync as rmSync13 } from "node:fs";
 import { homedir as homedir22 } from "node:os";
-import { dirname as dirname41, join as join43 } from "node:path";
-import { fileURLToPath as fileURLToPath5 } from "node:url";
+import { dirname as dirname42, join as join44 } from "node:path";
+import { fileURLToPath as fileURLToPath6 } from "node:url";
 function defaultMessagingCaptureGrantPath(source, registryPath = defaultHandleRegistryPath()) {
   return captureGrantPathBeside(source, registryPath);
 }
@@ -50012,7 +52158,7 @@ class MessagingCaptureSupervisor {
     if (generation !== this.generation - 1)
       return { source: grant.source, state: "stopped", reason: "grant_missing" };
     const spawn3 = this.options.spawn ?? spawnCapture;
-    const lock = grant.source === "whatsapp" ? tryHoldFileFlock(join43(whatsappStateDirOf(grant, account, layoutEnv2), WHATSAPP_BRIDGE_LOCK_NAME)) : undefined;
+    const lock = grant.source === "whatsapp" ? tryHoldFileFlock(join44(whatsappStateDirOf(grant, account, layoutEnv2), WHATSAPP_BRIDGE_LOCK_NAME)) : undefined;
     if (grant.source === "whatsapp" && !lock)
       return { source: grant.source, state: "blocked", reason: "helper_running" };
     let child;
@@ -50070,11 +52216,11 @@ async function resolveCurrentLaunch(options, source, env) {
       ...options.pythonHasTelethon ? { pythonHasTelethon: options.pythonHasTelethon } : {},
       ...options.provisionTelegramPython ? { provisionTelegramPython: options.provisionTelegramPython } : {}
     });
-    const packageRoot = options.packageRoot ?? join43(dirname41(fileURLToPath5(import.meta.url)), "..", "..");
-    return { executable, args: [join43(packageRoot, "scripts", "telegram-telethon-reader.py"), "--gateway"] };
+    const packageRoot = options.packageRoot ?? join44(dirname42(fileURLToPath6(import.meta.url)), "..", "..");
+    return { executable, args: [join44(packageRoot, "scripts", "telegram-telethon-reader.py"), "--gateway"] };
   }
   return {
-    executable: options.whatsappBridgePath ?? join43(homedir22(), ".cache", "olympus", "bin", "olympus-whatsapp-bridge"),
+    executable: options.whatsappBridgePath ?? join44(homedir22(), ".cache", "olympus", "bin", "olympus-whatsapp-bridge"),
     args: ["--capture-approved"]
   };
 }
@@ -50110,10 +52256,10 @@ function whatsappStateDirOf(grant, account, env) {
 }
 function sessionExists(grant, account, env) {
   if (account.layout === "folder") {
-    return grant.source === "telegram" ? existsSync38(`${accountSessionPath(account, env)}.session`) : existsSync38(join43(accountRawPath(account, "whatsapp", env), WHATSAPP_SESSION_FILE));
+    return grant.source === "telegram" ? existsSync39(`${accountSessionPath(account, env)}.session`) : existsSync39(join44(accountRawPath(account, "whatsapp", env), WHATSAPP_SESSION_FILE));
   }
   const sessionPath = grant.sessionPath ?? "";
-  return grant.source === "telegram" ? existsSync38(`${sessionPath.replace(/\.session$/, "")}.session`) : existsSync38(join43(sessionPath, WHATSAPP_SESSION_FILE));
+  return grant.source === "telegram" ? existsSync39(`${sessionPath.replace(/\.session$/, "")}.session`) : existsSync39(join44(sessionPath, WHATSAPP_SESSION_FILE));
 }
 function spawnCapture(input) {
   const child = Bun.spawn([input.executable, ...input.args], {
@@ -50151,13 +52297,13 @@ var init_messaging_capture = __esm(() => {
 });
 
 // src/core/descendant-groups.ts
-import { existsSync as existsSync39, mkdirSync as mkdirSync25, readFileSync as readFileSync32, renameSync as renameSync8, rmSync as rmSync14, writeFileSync as writeFileSync7 } from "node:fs";
-import { dirname as dirname42, join as join44 } from "node:path";
+import { existsSync as existsSync40, mkdirSync as mkdirSync25, readFileSync as readFileSync32, renameSync as renameSync8, rmSync as rmSync14, writeFileSync as writeFileSync7 } from "node:fs";
+import { dirname as dirname43, join as join45 } from "node:path";
 function descendantGroupsSupported(platform2 = process.platform) {
   return platform2 === "linux";
 }
 function descendantGroupsPath(serviceId, env = process.env) {
-  return join44(olympusDataDir(env), "engine", `descendants-${serviceId.replace(/[^A-Za-z0-9_-]/g, "_")}.json`);
+  return join45(olympusDataDir(env), "engine", `descendants-${serviceId.replace(/[^A-Za-z0-9_-]/g, "_")}.json`);
 }
 function readProcStatFile(pid) {
   try {
@@ -50193,11 +52339,11 @@ function readRecord(path) {
 function writeRecord(path, owner, groups) {
   try {
     if (groups.length === 0 || !owner) {
-      if (existsSync39(path))
+      if (existsSync40(path))
         rmSync14(path, { force: true });
       return;
     }
-    mkdirSync25(dirname42(path), { recursive: true, mode: 448 });
+    mkdirSync25(dirname43(path), { recursive: true, mode: 448 });
     const temporary = `${path}.${process.pid}.tmp`;
     writeFileSync7(temporary, `${JSON.stringify({ schema: DESCENDANT_GROUPS_SCHEMA, owner, groups })}
 `, { mode: 384 });
@@ -50794,7 +52940,7 @@ var init_native_process_service = __esm(() => {
 // src/core/linux-owner-bridge-host.ts
 import { randomBytes as randomBytes14 } from "node:crypto";
 import { lstatSync as lstatSync22, unlinkSync as unlinkSync2 } from "node:fs";
-import { dirname as dirname43, join as join45 } from "node:path";
+import { dirname as dirname44, join as join46 } from "node:path";
 function startLinuxOwnerBridgeHost(options) {
   let closed = false, probing = false, workerProbing = false, ready = false, workerReady = false;
   const manager = manageLinuxOwnerBridge({ ...options, platform: "linux", listenerOwner: "engine-host", ready: () => !closed && ready, workerReady: () => workerReady && options.workerOwned?.() !== false });
@@ -50843,7 +52989,7 @@ function startLinuxOwnerBridgeHost(options) {
   };
   if (validateWorkerSocketDirectory(options.transport) !== options.socketPath)
     throw new Error("Owner runtime changed.");
-  const controlPath = join45(dirname43(options.socketPath), `owner-host-${process.pid}-${randomBytes14(6).toString("hex")}.sock`);
+  const controlPath = join46(dirname44(options.socketPath), `owner-host-${process.pid}-${randomBytes14(6).toString("hex")}.sock`);
   const control = bindWorkerSocket(controlPath, () => Bun.serve(workerSocketServe({ unix: controlPath, async fetch(request) {
     if (closed)
       return new Response(null, { status: 503 });
@@ -50888,9 +53034,9 @@ function connectLinuxOwnerBridgeHost(path, transport) {
   let status = { state: "unavailable", remedy: "The engine host desktop listener is unavailable. Open Olympus again after the engine starts." };
   let closed = false;
   const request = async (suffix, method = "GET") => {
-    const workerPath = validateWorkerSocketDirectory(transport);
+    const workerPath2 = validateWorkerSocketDirectory(transport);
     const stat2 = lstatSync22(path);
-    if (!workerPath || dirname43(path) !== dirname43(workerPath) || !/^owner-host-\d+-[a-f0-9]{12}\.sock$/.test(path.split("/").at(-1)) || !stat2.isSocket() || stat2.uid !== (transport?.uid ?? process.getuid?.()) || (stat2.mode & 511) !== 384)
+    if (!workerPath2 || dirname44(path) !== dirname44(workerPath2) || !/^owner-host-\d+-[a-f0-9]{12}\.sock$/.test(path.split("/").at(-1)) || !stat2.isSocket() || stat2.uid !== (transport?.uid ?? process.getuid?.()) || (stat2.mode & 511) !== 384)
       throw new Error("Unsafe owner host socket.");
     return fetch("http://localhost" + suffix, { unix: path, method, signal: AbortSignal.timeout(5000) });
   };
@@ -50935,8 +53081,8 @@ var init_linux_owner_bridge_host = __esm(() => {
 import { homedir as homedir23 } from "node:os";
 import { randomUUID as randomUUID10 } from "node:crypto";
 import { statSync as statSync19 } from "node:fs";
-import { basename as basename10, delimiter as delimiter3, isAbsolute as isAbsolute19, join as join46 } from "node:path";
-import { fileURLToPath as fileURLToPath6 } from "node:url";
+import { basename as basename10, delimiter as delimiter3, isAbsolute as isAbsolute19, join as join47 } from "node:path";
+import { fileURLToPath as fileURLToPath7 } from "node:url";
 function createNativeWorkerService(options) {
   let readyChild;
   let proofGeneration = 0;
@@ -51080,17 +53226,17 @@ async function prepareWorkerStart(input, worker) {
   };
 }
 function freshConfig(contextConfig, initialPluginConfig) {
-  const root = asRecord7(contextConfig);
-  const plugins = asRecord7(root?.plugins);
-  const entries = asRecord7(plugins?.entries);
-  const olympus = asRecord7(entries?.olympus);
+  const root = asRecord8(contextConfig);
+  const plugins = asRecord8(root?.plugins);
+  const entries = asRecord8(plugins?.entries);
+  const olympus = asRecord8(entries?.olympus);
   const livePluginConfig = olympus && Object.prototype.hasOwnProperty.call(olympus, "config") ? olympus.config : undefined;
   const directPluginConfig = root && ["worker", "email", "sourceIndex", "argus", "identity", "sovereignty"].some((key2) => Object.prototype.hasOwnProperty.call(root, key2)) ? root : undefined;
   const pluginConfig = entries ? livePluginConfig : directPluginConfig ?? initialPluginConfig;
   return { config: configFromPluginConfig(pluginConfig), pluginConfig };
 }
 function assertNativeWorkerScopeConfigSupported(pluginConfig) {
-  const sourceIndex = asRecord7(asRecord7(pluginConfig)?.sourceIndex);
+  const sourceIndex = asRecord8(asRecord8(pluginConfig)?.sourceIndex);
   const unsupported = [
     "corpusRegistry",
     "corpora",
@@ -51167,8 +53313,8 @@ function resolveBunRuntimePath(configured, env) {
     return assertExecutableFile(configured, "Bun runtime");
   const candidates = [
     process.execPath,
-    ...env.BUN_INSTALL ? [join46(env.BUN_INSTALL, "bin", process.platform === "win32" ? "bun.exe" : "bun")] : [],
-    ...(env.PATH ?? "").split(delimiter3).filter(Boolean).map((directory) => join46(directory, process.platform === "win32" ? "bun.exe" : "bun"))
+    ...env.BUN_INSTALL ? [join47(env.BUN_INSTALL, "bin", process.platform === "win32" ? "bun.exe" : "bun")] : [],
+    ...(env.PATH ?? "").split(delimiter3).filter(Boolean).map((directory) => join47(directory, process.platform === "win32" ? "bun.exe" : "bun"))
   ];
   for (const candidate of candidates) {
     if (!isAbsolute19(candidate) || !isBunExecutableName2(candidate))
@@ -51181,7 +53327,7 @@ function resolveBunRuntimePath(configured, env) {
   throw new Error("Olympus worker service could not resolve an absolute Bun runtime path.");
 }
 function resolveWorkerExecutablePath(configured, moduleUrl) {
-  const candidate = configured ?? fileURLToPath6(new URL("./cli.js", moduleUrl));
+  const candidate = configured ?? fileURLToPath7(new URL("./cli.js", moduleUrl));
   return assertExecutableFile(candidate, "worker executable");
 }
 function assertExecutableFile(path, label) {
@@ -51262,7 +53408,7 @@ function stripGatewayBootstrapSecrets(env) {
       delete env[key2];
   }
 }
-function asRecord7(value) {
+function asRecord8(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 async function waitUntil(condition, timeoutMs, pollMs) {
@@ -51464,7 +53610,7 @@ var init_worker_shutdown = () => {};
 
 // src/core/dashboard-opening.ts
 import { accessSync as accessSync5, constants as fsConstants4, statSync as statSync20 } from "node:fs";
-import { join as join47 } from "node:path";
+import { join as join48 } from "node:path";
 function olympusCommandHint(input = {}) {
   const env = input.env ?? process.env;
   const isExecutable = (path) => {
@@ -51476,7 +53622,7 @@ function olympusCommandHint(input = {}) {
     }
   };
   const dirs = (env.PATH ?? "").split(process.platform === "win32" ? ";" : ":").filter(Boolean);
-  if (dirs.some((dir) => isExecutable(join47(dir, "olympus"))))
+  if (dirs.some((dir) => isExecutable(join48(dir, "olympus"))))
     return "olympus";
   const own3 = input.pluginBin;
   if (own3 && isExecutable(own3) && !/\s/.test(own3))
@@ -51545,8 +53691,8 @@ var init_dashboard_opening = __esm(() => {
 // src/core/people-index.ts
 import { Database as Database12 } from "bun:sqlite";
 import { createHash as createHash27 } from "node:crypto";
-import { chmodSync as chmodSync15, existsSync as existsSync41, mkdirSync as mkdirSync27 } from "node:fs";
-import { dirname as dirname45 } from "node:path";
+import { chmodSync as chmodSync15, existsSync as existsSync42, mkdirSync as mkdirSync27 } from "node:fs";
+import { dirname as dirname46 } from "node:path";
 function peopleIndexMigrations() {
   return [{
     version: 1,
@@ -52038,7 +54184,7 @@ class LocalPeopleIndex {
     }
     assertWritableStoreOpenAllowed("people index", options.dbPath);
     if (options.dbPath !== ":memory:")
-      mkdirSync27(dirname45(options.dbPath), { recursive: true, mode: 448 });
+      mkdirSync27(dirname46(options.dbPath), { recursive: true, mode: 448 });
     this.db = new Database12(options.dbPath, { create: true, strict: true });
     try {
       if (options.dbPath !== ":memory:")
@@ -52368,7 +54514,7 @@ function fingerprintParts(stores) {
   });
 }
 function forgetPeopleIndexRows(dbPath, scope, options = {}) {
-  if (!existsSync41(dbPath) || scope.corpusIds.length === 0)
+  if (!existsSync42(dbPath) || scope.corpusIds.length === 0)
     return 0;
   const dryRun = options.dryRun === true;
   const db = new Database12(dbPath, dryRun ? { readonly: true } : { readwrite: true });
@@ -52575,8 +54721,8 @@ var init_mac_engine_daemon = __esm(() => {
 });
 
 // src/workers/archive-import/state.ts
-import { existsSync as existsSync42, mkdirSync as mkdirSync28, readFileSync as readFileSync35 } from "node:fs";
-import { dirname as dirname46 } from "node:path";
+import { existsSync as existsSync43, mkdirSync as mkdirSync28, readFileSync as readFileSync35 } from "node:fs";
+import { dirname as dirname47 } from "node:path";
 import { randomUUID as randomUUID12 } from "node:crypto";
 function defaultArchiveImportStatePath(env = process.env) {
   return resolvedRawPath(ARCHIVE_IMPORTS_SOURCE_ID2, "archive-imports.json", env);
@@ -52610,7 +54756,7 @@ function validRecord(value) {
   return typeof value.archive_id === "string" && isArchiveId(value.archive_id) && typeof value.format === "string" && typeof value.provider === "string" && typeof value.family === "string" && typeof value.label === "string" && typeof value.root_path === "string" && value.root_path.startsWith("/") && isRecord3(value.root_identity) && typeof value.root_identity.dev === "string" && typeof value.root_identity.ino === "string" && typeof value.chosen_rel_path === "string" && Array.isArray(value.files) && value.files.length > 0 && typeof value.manifest_sha256 === "string" && (value.status === "importing" || value.status === "imported" || value.status === "stopped" || value.status === "removing") && typeof value.created_at === "string" && typeof value.updated_at === "string" && isRecord3(value.findings) && isRecord3(value.findings.gaps) && isRecord3(value.findings.skipped) && Array.isArray(value.findings.samples) && (value.target === undefined || isRecord3(value.target) && typeof value.target.source_id === "string" && typeof value.target.slot === "string");
 }
 function readState(path) {
-  if (!existsSync42(path))
+  if (!existsSync43(path))
     return { version: 1, archives: [] };
   const parsed = JSON.parse(readFileSync35(path, "utf8"));
   if (!isRecord3(parsed) || parsed.version !== 1 || !Array.isArray(parsed.archives)) {
@@ -52805,7 +54951,7 @@ class ArchiveImportStateStore {
   }
   mutate(change) {
     recordAccountPlacement({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }, this.path, this.env);
-    mkdirSync28(dirname46(this.path), { recursive: true, mode: 448 });
+    mkdirSync28(dirname47(this.path), { recursive: true, mode: 448 });
     withFileLeaseSync(this.path, (lease) => {
       const state = readState(this.path);
       if (change(state) === false)
@@ -53448,8 +55594,8 @@ var init_scope_safe_fs = __esm(() => {
 // src/workers/archive-import/media-bindings.ts
 import { Database as Database13 } from "bun:sqlite";
 import { createHash as createHash28 } from "node:crypto";
-import { chmodSync as chmodSync16, existsSync as existsSync44, mkdirSync as mkdirSync29 } from "node:fs";
-import { dirname as dirname47 } from "node:path";
+import { chmodSync as chmodSync16, existsSync as existsSync45, mkdirSync as mkdirSync29 } from "node:fs";
+import { dirname as dirname48 } from "node:path";
 function archiveMediaBindingsPath(statePath) {
   return archiveStateSiblingPath(statePath, "archive-media-bindings.sqlite");
 }
@@ -53505,7 +55651,7 @@ class ArchiveMediaBindingStore {
     this.now = options.now ?? (() => new Date);
     if (options.path !== ":memory:") {
       recordAccountPlacement({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }, options.path, options.env ?? process.env);
-      mkdirSync29(dirname47(options.path), { recursive: true, mode: 448 });
+      mkdirSync29(dirname48(options.path), { recursive: true, mode: 448 });
     }
     this.db = new Database13(options.path, { create: true });
     if (options.path !== ":memory:")
@@ -53557,7 +55703,7 @@ function createArchiveMediaBindings(options) {
       return;
     if (store)
       return store;
-    return existsSync44(options.path) ? open3() : undefined;
+    return existsSync45(options.path) ? open3() : undefined;
   };
   return {
     path: options.path,
@@ -53957,7 +56103,7 @@ var init_connector = __esm(() => {
 // src/workers/x-bookmarks/reconcile-state.ts
 import { createHash as createHash30, randomUUID as randomUUID13 } from "node:crypto";
 import { chmodSync as chmodSync17, mkdirSync as mkdirSync30 } from "node:fs";
-import { dirname as dirname48 } from "node:path";
+import { dirname as dirname49 } from "node:path";
 import { Database as Database14 } from "bun:sqlite";
 
 class LocalXBookmarksReconcileStateStore {
@@ -53967,7 +56113,7 @@ class LocalXBookmarksReconcileStateStore {
     this.dbPath = dbPath;
     if (dbPath !== ":memory:") {
       recordAccountPlacement({ sourceId: X_BOOKMARKS_SOURCE_ID }, dbPath, env);
-      mkdirSync30(dirname48(dbPath), { recursive: true, mode: 448 });
+      mkdirSync30(dirname49(dbPath), { recursive: true, mode: 448 });
     }
     this.db = new Database14(dbPath, { create: true });
     if (dbPath !== ":memory:")
@@ -56349,7 +58495,7 @@ var init_reconcile_state = __esm(() => {
 
 // src/core/account-files.ts
 import { lstatSync as lstatSync26 } from "node:fs";
-import { join as join51 } from "node:path";
+import { join as join52 } from "node:path";
 function lifecycleSourceIds() {
   return [...new Set([...FOLDER_LAYOUT_SOURCES, ...mountedStoreSources()])];
 }
@@ -56462,19 +58608,19 @@ function legacyTelegramCaptureState(account, env) {
 function legacyWhatsAppCaptureState(account, env, pairing) {
   const stateDir = whatsappStateDir({ env, layout: account.layout });
   const transcribeStateDir = env.OLYMPUS_WHATSAPP_TRANSCRIBE_STATE_DIR?.trim();
-  const transcribeMediaDir = env.OLYMPUS_WHATSAPP_TRANSCRIBE_MEDIA_DIR?.trim() || (transcribeStateDir ? join51(transcribeStateDir, "media") : undefined);
+  const transcribeMediaDir = env.OLYMPUS_WHATSAPP_TRANSCRIBE_MEDIA_DIR?.trim() || (transcribeStateDir ? join52(transcribeStateDir, "media") : undefined);
   return [
-    env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR?.trim() || join51(stateDir, "spool"),
+    env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR?.trim() || join52(stateDir, "spool"),
     ...pairing,
-    join51(stateDir, "media"),
-    join51(stateDir, "history-pending"),
+    join52(stateDir, "media"),
+    join52(stateDir, "history-pending"),
     ...transcribeMediaDir ? [transcribeMediaDir] : []
   ];
 }
 function dropboxIngestionPolicyPath(context2) {
   if (!context2.homeDir || process.platform === "linux")
     return defaultDropboxIngestionPolicyPath(context2.env);
-  return join51(context2.homeDir, ".olympus", "sources", "dropbox.personal.ingestion.json");
+  return join52(context2.homeDir, ".olympus", "sources", "dropbox.personal.ingestion.json");
 }
 function existsOnDisk(path) {
   try {
@@ -58320,15 +60466,15 @@ var init_json_stream = __esm(() => {
       if (Number.isSafeInteger(value) || !Number.isFinite(value))
         return value;
       const digits = numberStr.startsWith("-") ? numberStr.slice(1) : numberStr;
-      let wholeNumber = digits.length > 0;
+      let wholeNumber2 = digits.length > 0;
       for (let index = 0;index < digits.length; index += 1) {
         const code = digits.charCodeAt(index);
         if (code < 48 || code > 57) {
-          wholeNumber = false;
+          wholeNumber2 = false;
           break;
         }
       }
-      if (!wholeNumber)
+      if (!wholeNumber2)
         return value;
       if (digits.length < MAX_SAFE_DIGITS.length)
         return value;
@@ -59960,14 +62106,14 @@ var init_manifest3 = __esm(() => {
 });
 
 // src/workers/archive-import/requests.ts
-import { existsSync as existsSync45, mkdirSync as mkdirSync31, readFileSync as readFileSync36 } from "node:fs";
-import { dirname as dirname49, join as join52 } from "node:path";
+import { existsSync as existsSync46, mkdirSync as mkdirSync31, readFileSync as readFileSync36 } from "node:fs";
+import { dirname as dirname50, join as join53 } from "node:path";
 import { randomUUID as randomUUID14 } from "node:crypto";
 function archiveImportRequestsPath(statePath) {
   return archiveStateSiblingPath(statePath, "archive-import-requests.json");
 }
 function withArchiveImportApprovals(statePath, run) {
-  return withFileLeaseSync(join52(dirname49(statePath), "archive-import-approvals"), () => run());
+  return withFileLeaseSync(join53(dirname50(statePath), "archive-import-approvals"), () => run());
 }
 function isRecord4(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -59991,7 +62137,7 @@ function validRequest(value) {
   return typeof value.request_id === "string" && isArchiveId(value.request_id) && (value.origin === "agent" || value.origin === "dashboard") && named && typeof value.label === "string" && typeof value.status === "string" && STATUSES.has(value.status) && (value.archive_id === undefined || typeof value.archive_id === "string" && isArchiveId(value.archive_id)) && (value.code === undefined || typeof value.code === "string") && (value.approved === undefined || validApproval(value.approved)) && typeof value.created_at === "string" && typeof value.updated_at === "string";
 }
 function readRequests(path) {
-  if (!existsSync45(path))
+  if (!existsSync46(path))
     return { version: 1, requests: [] };
   const parsed = JSON.parse(readFileSync36(path, "utf8"));
   if (!isRecord4(parsed) || parsed.version !== 1 || !Array.isArray(parsed.requests) || !parsed.requests.every(validRequest)) {
@@ -60140,7 +62286,7 @@ class ArchiveImportRequestStore {
   }
   mutate(change) {
     recordAccountPlacement({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }, this.path, this.env);
-    mkdirSync31(dirname49(this.path), { recursive: true, mode: 448 });
+    mkdirSync31(dirname50(this.path), { recursive: true, mode: 448 });
     withFileLeaseSync(this.path, (lease) => {
       const state = readRequests(this.path);
       if (change(state) === false)
@@ -60193,12 +62339,12 @@ var init_source_delete_holds = __esm(() => {
 import { createHash as createHash33, randomUUID as randomUUID15 } from "node:crypto";
 import {
   chmodSync as chmodSync18,
-  existsSync as existsSync46,
+  existsSync as existsSync47,
   lstatSync as lstatSync27,
   mkdirSync as mkdirSync32
 } from "node:fs";
 import { homedir as homedir25 } from "node:os";
-import { dirname as dirname50, isAbsolute as isAbsolute21 } from "node:path";
+import { dirname as dirname51, isAbsolute as isAbsolute21 } from "node:path";
 import { Database as Database15 } from "bun:sqlite";
 function sourceWatchAuthenticatedRouteHeaders(route) {
   const headers = new Headers({
@@ -60217,7 +62363,7 @@ function defaultSourceWatchDbPath(env = process.env) {
   return sharedDataPath("source-watches", env);
 }
 function forgetSourceWatches(dbPath, scope, options = {}) {
-  if (!existsSync46(dbPath))
+  if (!existsSync47(dbPath))
     return 0;
   const dryRun = options.dryRun === true;
   const filters = filterFor("source_watches", [["corpus_id", scope.corpusIds]]);
@@ -60942,7 +63088,7 @@ function hardenPrivateDatabasePath2(dbPath) {
   if (!isAbsolute21(dbPath)) {
     throw new TypeError("Source watch database path must be absolute.");
   }
-  const leafDir = dirname50(dbPath);
+  const leafDir = dirname51(dbPath);
   const forbiddenLeafDirs = new Set([
     "/",
     "/tmp",
@@ -60960,7 +63106,7 @@ function hardenPrivateDatabasePath2(dbPath) {
     throw new Error("Source watch database leaf must be a real private directory.");
   }
   chmodSync18(leafDir, 448);
-  if (existsSync46(dbPath)) {
+  if (existsSync47(dbPath)) {
     const dbStat = lstatSync27(dbPath);
     if (dbStat.isSymbolicLink() || !dbStat.isFile()) {
       throw new Error("Source watch database must be a regular file, not a symlink.");
@@ -61435,22 +63581,22 @@ var init_source_watch = __esm(() => {
 });
 
 // src/core/ingestion-health-state.ts
-import { existsSync as existsSync47, mkdirSync as mkdirSync33, readFileSync as readFileSync37, writeFileSync as writeFileSync9 } from "node:fs";
-import { dirname as dirname51 } from "node:path";
+import { existsSync as existsSync48, mkdirSync as mkdirSync33, readFileSync as readFileSync37, writeFileSync as writeFileSync9 } from "node:fs";
+import { dirname as dirname52 } from "node:path";
 function defaultIngestionHealthStatePath(env = process.env) {
   return sharedDataPath("ingestion-doctor-state", env);
 }
 function readIngestionHealthState(path) {
   try {
-    if (!existsSync47(path))
+    if (!existsSync48(path))
       return;
     const parsed = JSON.parse(readFileSync37(path, "utf8"));
-    const record = asRecord8(parsed);
-    const sources = asRecord8(record.sources);
+    const record = asRecord9(parsed);
+    const sources = asRecord9(record.sources);
     const normalized = {};
     for (const [sourceId, sourceValue] of Object.entries(sources)) {
-      const source = asRecord8(sourceValue);
-      const terminal = asRecord8(source.failed_terminal_by_class);
+      const source = asRecord9(sourceValue);
+      const terminal = asRecord9(source.failed_terminal_by_class);
       normalized[sourceId] = {
         actionable_stuck: asCount(source.actionable_stuck),
         failed_terminal_by_class: Object.fromEntries(Object.entries(terminal).map(([key2, value]) => [key2, asCount(value)]))
@@ -61465,7 +63611,7 @@ function readIngestionHealthState(path) {
   }
 }
 function writeIngestionHealthState(path, state) {
-  mkdirSync33(dirname51(path), { recursive: true, mode: 448 });
+  mkdirSync33(dirname52(path), { recursive: true, mode: 448 });
   writeFileSync9(path, `${JSON.stringify(state, null, 2)}
 `);
 }
@@ -61481,7 +63627,7 @@ function forgetIngestionHealthState(path, ledgerSourceIds, options = {}) {
 `);
   return doomed.length;
 }
-function asRecord8(value) {
+function asRecord9(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 function asCount(value) {
@@ -61615,13 +63761,13 @@ var init_file_scope_sources = __esm(() => {
 
 // src/core/source-scope-approval.ts
 import { createHash as createHash34, randomUUID as randomUUID16 } from "node:crypto";
-import { existsSync as existsSync48, readFileSync as readFileSync38 } from "node:fs";
-import { dirname as dirname52, join as join54 } from "node:path";
+import { existsSync as existsSync49, readFileSync as readFileSync38 } from "node:fs";
+import { dirname as dirname53, join as join55 } from "node:path";
 function defaultFileSourceScopeStatePath(handleRegistryPath) {
-  return join54(dirname52(handleRegistryPath), "file-source-scopes.json");
+  return join55(dirname53(handleRegistryPath), "file-source-scopes.json");
 }
 function forgetFileSourceScopeApproval(statePath, sourceIds, options = {}) {
-  if (!existsSync48(statePath))
+  if (!existsSync49(statePath))
     return 0;
   const dropped = (state) => state.approvals.filter((approval) => sourceIds.includes(approval.source_id));
   const first = readState2(statePath);
@@ -61834,7 +63980,7 @@ function normalizeAncestorKeys(input) {
   return [...new Set(keys)];
 }
 function readState2(path) {
-  if (!existsSync48(path))
+  if (!existsSync49(path))
     return { kind: "missing" };
   let raw;
   try {
@@ -61899,13 +64045,13 @@ var init_source_scope_approval = __esm(() => {
 
 // src/core/mail-source-scope.ts
 import { createHash as createHash35, randomUUID as randomUUID17 } from "node:crypto";
-import { existsSync as existsSync49, readFileSync as readFileSync39 } from "node:fs";
-import { dirname as dirname53, join as join55 } from "node:path";
+import { existsSync as existsSync50, readFileSync as readFileSync39 } from "node:fs";
+import { dirname as dirname54, join as join56 } from "node:path";
 function defaultMailSourceScopeStatePath(handleRegistryPath) {
-  return join55(dirname53(handleRegistryPath), "mail-source-scopes.json");
+  return join56(dirname54(handleRegistryPath), "mail-source-scopes.json");
 }
 function forgetMailSourceScopeApproval(statePath, sourceIds, options = {}) {
-  if (!existsSync49(statePath))
+  if (!existsSync50(statePath))
     return 0;
   const dropped = (state) => [
     ...state.approvals.filter((approval) => sourceIds.includes(approval.source_id)),
@@ -62270,7 +64416,7 @@ function pendingSnapshot2(revision, accountGeneration, reason) {
   };
 }
 function readState3(path) {
-  if (!existsSync49(path))
+  if (!existsSync50(path))
     return { kind: "missing" };
   let raw;
   try {
@@ -62447,11 +64593,11 @@ var init_continuation_cache = __esm(() => {
 });
 
 // src/workers/archive-import/forget.ts
-import { existsSync as existsSync50, realpathSync as realpathSync12, rmSync as rmSync16 } from "node:fs";
-import { join as join56, relative as relative8, sep as sep11 } from "node:path";
+import { existsSync as existsSync51, realpathSync as realpathSync12, rmSync as rmSync16 } from "node:fs";
+import { join as join57, relative as relative8, sep as sep11 } from "node:path";
 function forgetSourceArchiveImports(env, sourceIds, options = {}) {
   const path = defaultArchiveImportStatePath(env);
-  if (!existsSync50(path))
+  if (!existsSync51(path))
     return 0;
   const state = new ArchiveImportStateStore({ path, env });
   const doomed = state.list().filter((record) => record.target !== undefined && sourceIds.includes(record.target.source_id)).map((record) => record.archive_id);
@@ -62488,7 +64634,7 @@ function stagingCopiesOf(statePath, records) {
     const inside = relative8(root, record.root_path);
     if (inside === "" || inside.startsWith("..") || inside.startsWith(sep11))
       continue;
-    copies.add(join56(root, inside.split(sep11)[0]));
+    copies.add(join57(root, inside.split(sep11)[0]));
   }
   return copies;
 }
@@ -62501,9 +64647,9 @@ var init_forget = __esm(() => {
 
 // src/core/this-computer.ts
 import { spawnSync as spawnSync10 } from "node:child_process";
-import { existsSync as existsSync51, readFileSync as readFileSync40 } from "node:fs";
+import { existsSync as existsSync52, readFileSync as readFileSync40 } from "node:fs";
 import { createHash as createHash36, randomUUID as randomUUID18 } from "node:crypto";
-import { dirname as dirname54, join as join57 } from "node:path";
+import { dirname as dirname55, join as join58 } from "node:path";
 function hostBinding(machineId, hostIdentity) {
   const identity2 = hostIdentity();
   return identity2 ? createHash36("sha256").update(`${machineId}:${identity2}`).digest("hex") : undefined;
@@ -62518,10 +64664,10 @@ function readStateForHost(path, hostIdentity) {
   return state;
 }
 function defaultThisComputerStatePath(handleRegistryPath) {
-  return join57(dirname54(handleRegistryPath), "this-computer.json");
+  return join58(dirname55(handleRegistryPath), "this-computer.json");
 }
 function readState4(path) {
-  if (!existsSync51(path))
+  if (!existsSync52(path))
     return;
   try {
     const parsed = JSON.parse(readFileSync40(path, "utf8"));
@@ -62602,7 +64748,7 @@ function connectThisComputerSource(handleRegistryPath, sourceId, now = new Date,
 }
 function forgetThisComputerSources(handleRegistryPath, sourceIds, options = {}) {
   const path = defaultThisComputerStatePath(handleRegistryPath);
-  if (!existsSync51(path))
+  if (!existsSync52(path))
     return 0;
   const hostIdentity = options.hostIdentity ?? systemHostIdentity;
   const connected = (state) => state.sources.filter((entry) => sourceIds.includes(entry.source_id));
@@ -62626,7 +64772,7 @@ function forgetThisComputerSources(handleRegistryPath, sourceIds, options = {}) 
 }
 function disconnectThisComputerSource(handleRegistryPath, sourceId, hostIdentity = systemHostIdentity) {
   const path = defaultThisComputerStatePath(handleRegistryPath);
-  if (!existsSync51(path))
+  if (!existsSync52(path))
     return false;
   return withFileLeaseSync(path, (lease) => {
     const current3 = readStateForHost(path, hostIdentity);
@@ -62649,7 +64795,7 @@ var MACHINE_ID_PATTERN, cachedSystemHostIdentity, systemHostIdentity = () => {
       value = /"IOPlatformUUID" = "([0-9A-Fa-f-]{36})"/.exec(result.stdout ?? "")?.[1];
     } else if (process.platform === "linux") {
       for (const path of ["/etc/machine-id", "/var/lib/dbus/machine-id"]) {
-        const id = existsSync51(path) ? readFileSync40(path, "utf8").trim() : "";
+        const id = existsSync52(path) ? readFileSync40(path, "utf8").trim() : "";
         if (/^[0-9a-f]{32}$/.test(id)) {
           value = id;
           break;
@@ -65857,9 +68003,9 @@ var init_phases = __esm(() => {
 // src/workers/credential-health.ts
 import { mkdirSync as mkdirSync34, readFileSync as readFileSync41 } from "node:fs";
 import { homedir as homedir26, uptime } from "node:os";
-import { dirname as dirname55, join as join58 } from "node:path";
+import { dirname as dirname56, join as join59 } from "node:path";
 function defaultCredentialHealthReportPath() {
-  return join58(homedir26(), ".local", "state", "olympus", "credential-health", "current.json");
+  return join59(homedir26(), ".local", "state", "olympus", "credential-health", "current.json");
 }
 function readCredentialHealthReport(path = defaultCredentialHealthReportPath()) {
   let parsed;
@@ -66209,7 +68355,7 @@ function messageText(record) {
 
 `);
 }
-function identityOf(record, account) {
+function identityOf2(record, account) {
   return {
     family: "email",
     provider: GMAIL_MAIL_PROVIDER,
@@ -66251,7 +68397,7 @@ function gmailMessageItem(record, account, fetchedAt = new Date().toISOString())
   const text2 = metadataOnly ? "" : messageText(record) || (lines.length > 0 ? lines.join(`
 `) : `Subject: ${subject}`);
   return {
-    identity: identityOf(record, account),
+    identity: identityOf2(record, account),
     mimeType: "message/rfc822",
     content: !metadataOnly && text2.trim() ? { kind: "text", text: text2 } : { kind: "metadata_only" },
     metadata: Object.freeze({
@@ -66321,7 +68467,7 @@ function gmailMailItems(record, account, build = {}, wanted) {
 function gmailMailEntries(record, account, build = {}) {
   const authoredAt = parsedDate(record.headers.date) ?? internalDateIso(record.internalDate);
   return [
-    { identity: identityOf(record, account), bringsContent: !record.metadataOnly, ...authoredAt ? { authoredAt } : {} },
+    { identity: identityOf2(record, account), bringsContent: !record.metadataOnly, ...authoredAt ? { authoredAt } : {} },
     ...childrenOf(record, build).map((attachment) => ({ identity: childIdentityOf(record, account, attachment), bringsContent: false }))
   ];
 }
@@ -66344,12 +68490,12 @@ var init_gmail_mail_record = __esm(() => {
 // src/workers/google-connectors/request-budget.ts
 import {
   chmodSync as chmodSync19,
-  existsSync as existsSync52,
+  existsSync as existsSync53,
   mkdirSync as mkdirSync35,
   readFileSync as readFileSync42,
   renameSync as renameSync10
 } from "node:fs";
-import { dirname as dirname56 } from "node:path";
+import { dirname as dirname57 } from "node:path";
 import { Database as Database16 } from "bun:sqlite";
 
 class GoogleDailyRequestBudget {
@@ -66434,7 +68580,7 @@ function requestBudgetLedgerPath(statePath) {
   return statePath.endsWith(".sqlite") ? statePath : `${statePath}.sqlite`;
 }
 function initializeRequestBudgetLedger(ledgerPath, provider, now) {
-  mkdirSync35(dirname56(ledgerPath), { recursive: true, mode: 448 });
+  mkdirSync35(dirname57(ledgerPath), { recursive: true, mode: 448 });
   runBudgetLedgerOperation(ledgerPath, provider, now, () => withLedger(ledgerPath, (db) => {
     db.exec(`
         CREATE TABLE IF NOT EXISTS ${GOOGLE_REQUEST_BUDGET_LEDGER_TABLE} (
@@ -66585,7 +68731,7 @@ function isSqliteBusy3(error) {
 function hardenLedgerFiles(ledgerPath) {
   for (const path of [ledgerPath, `${ledgerPath}-wal`, `${ledgerPath}-shm`]) {
     try {
-      if (existsSync52(path))
+      if (existsSync53(path))
         chmodSync19(path, 384);
     } catch (error) {
       if (error.code !== "ENOENT")
@@ -67344,9 +69490,9 @@ class RestGmailApiClient {
     for (const labelId of request.labelIds ?? [])
       params.append("labelIds", labelId);
     const json = await this.getJson(`users/me/messages?${params.toString()}`);
-    const record = asRecord9(json, "Gmail messages list response");
+    const record = asRecord10(json, "Gmail messages list response");
     return {
-      messages: Array.isArray(record.messages) ? record.messages.map((item) => asRecord9(item, "Gmail message list item")).map((item) => ({
+      messages: Array.isArray(record.messages) ? record.messages.map((item) => asRecord10(item, "Gmail message list item")).map((item) => ({
         id: stringValue(item.id),
         threadId: stringValue(item.threadId)
       })).filter((item) => item.id) : [],
@@ -67364,22 +69510,22 @@ class RestGmailApiClient {
     return json;
   }
   async getProfile() {
-    const record = asRecord9(await this.getJson("users/me/profile"), "Gmail profile");
+    const record = asRecord10(await this.getJson("users/me/profile"), "Gmail profile");
     return { emailAddress: stringValue(record.emailAddress) };
   }
   async getAttachment(messageId, attachmentId) {
-    const record = asRecord9(await this.getJson(`users/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`), "Gmail attachment");
+    const record = asRecord10(await this.getJson(`users/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`), "Gmail attachment");
     return {
       data: stringValue(record.data),
       ...typeof record.size === "number" && Number.isSafeInteger(record.size) ? { size: record.size } : {}
     };
   }
   async listLabels() {
-    const record = asRecord9(await this.getJson("users/me/labels"), "Gmail labels list response");
-    return Array.isArray(record.labels) ? record.labels.map((item) => gmailLabelFromJson(asRecord9(item, "Gmail label"))).filter((label) => label.id) : [];
+    const record = asRecord10(await this.getJson("users/me/labels"), "Gmail labels list response");
+    return Array.isArray(record.labels) ? record.labels.map((item) => gmailLabelFromJson(asRecord10(item, "Gmail label"))).filter((label) => label.id) : [];
   }
   async getLabel(id) {
-    return gmailLabelFromJson(asRecord9(await this.getJson(`users/me/labels/${encodeURIComponent(id)}`), "Gmail label"));
+    return gmailLabelFromJson(asRecord10(await this.getJson(`users/me/labels/${encodeURIComponent(id)}`), "Gmail label"));
   }
   async getJson(path) {
     let attempt = 0;
@@ -67583,7 +69729,7 @@ function normalizeGmailMaxMessages(value) {
     return DEFAULT_GMAIL_SYNC_MAX_MESSAGES;
   return Math.max(1, Math.min(Math.floor(value), MAX_GMAIL_SYNC_MESSAGES));
 }
-function asRecord9(value, label) {
+function asRecord10(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object.`);
   }
@@ -68097,16 +70243,16 @@ class RestGoogleDriveApiClient {
     if (request.pageToken)
       params.set("pageToken", request.pageToken);
     const json = await this.getJson(`files?${params.toString()}`);
-    const record = asRecord10(json, "Google Drive files list response");
+    const record = asRecord11(json, "Google Drive files list response");
     return {
-      files: Array.isArray(record.files) ? record.files.map((item) => normalizeDriveFile(asRecord10(item, "Google Drive file"))).filter((file) => file.id) : [],
+      files: Array.isArray(record.files) ? record.files.map((item) => normalizeDriveFile(asRecord11(item, "Google Drive file"))).filter((file) => file.id) : [],
       ...optionalStringProp2(record, "nextPageToken")
     };
   }
   async getFolder(folderId) {
     const params = new URLSearchParams({ fields: "id,name,parents", supportsAllDrives: "true" });
     const json = await this.getJson(`files/${encodeURIComponent(folderId)}?${params.toString()}`);
-    const record = asRecord10(json, "Google Drive folder");
+    const record = asRecord11(json, "Google Drive folder");
     const id = typeof record.id === "string" ? record.id : folderId;
     return {
       id,
@@ -68201,7 +70347,7 @@ function normalizeDriveFile(record) {
     ...optionalStringProp2(record, "size"),
     ...optionalStringProp2(record, "md5Checksum"),
     ...Array.isArray(record.parents) ? { parents: record.parents.map(stringValue2).filter(Boolean) } : {},
-    ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord10(owner, "Google Drive owner")).map((owner) => optionalStringProp2(owner, "emailAddress")) } : {}
+    ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord11(owner, "Google Drive owner")).map((owner) => optionalStringProp2(owner, "emailAddress")) } : {}
   };
 }
 function isDownloadableTextMime(mimeType, name) {
@@ -68229,7 +70375,7 @@ function normalizeMaxTextBytes(value) {
     return DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES;
   return Math.max(1000, Math.min(Math.floor(value), 512000));
 }
-function asRecord10(value, label) {
+function asRecord11(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object.`);
   }
@@ -68567,7 +70713,7 @@ var init_corpus_adapter2 = __esm(() => {
 // src/workers/readwise/connector.ts
 import { createHash as createHash41 } from "node:crypto";
 import { mkdirSync as mkdirSync36, readFileSync as readFileSync43 } from "node:fs";
-import { dirname as dirname57 } from "node:path";
+import { dirname as dirname58 } from "node:path";
 
 class ReadwiseDailyRequestBudget {
   utcDay = "";
@@ -68662,7 +70808,7 @@ function readReadwiseRequestBudgetState(statePath) {
   return { utcDay: parsed.utcDay, requests: parsed.requests };
 }
 function writeReadwiseRequestBudgetState(statePath, state) {
-  mkdirSync36(dirname57(statePath), { recursive: true, mode: 448 });
+  mkdirSync36(dirname58(statePath), { recursive: true, mode: 448 });
   writePrivateFileAtomicSync(statePath, `${JSON.stringify({ version: READWISE_REQUEST_BUDGET_STATE_VERSION, ...state })}
 `);
 }
@@ -69135,103 +71281,6 @@ var init_live_control = __esm(() => {
   READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
 });
 
-// src/workers/connector-store/tier-set-registry.ts
-function registerTierSetForLedger(ledgerPath, set) {
-  (tierSets ??= new Map).set(ledgerPath, set);
-}
-function tierSetForLedger(ledgerPath) {
-  return tierSets?.get(ledgerPath);
-}
-function registeredTierSets() {
-  return [...tierSets?.values() ?? []];
-}
-var tierSets;
-
-// src/workers/connector-store/stored-names.ts
-function storedCopyOf(set, identity2, copies) {
-  const names = copyServingLayer(copies.filter((copy) => copy.state === "current"), "metadata");
-  const ordered = [
-    ...names ? [names] : [],
-    ...copies.filter((copy) => copy !== names).sort((left, right) => Number(right.state === "current") - Number(left.state === "current"))
-  ];
-  for (const copy of ordered) {
-    const domain = set.domainForCorpus(copy.corpusId);
-    const exported = domain ? set.store(domain)?.exportItemCopy(identity2) : undefined;
-    if (exported)
-      return exported;
-  }
-  return;
-}
-function storedSignals(copy) {
-  const text2 = (value) => typeof value === "string" && value.trim() ? value.trim() : undefined;
-  const title = text2(copy.columns["title"]);
-  const locator = text2(copy.columns["locator_uri"]);
-  const path = locator?.startsWith("/") ? locator : undefined;
-  const sender = text2(copy.columns["sender_label"]) ?? text2(copy.columns["sender_id"]);
-  let folderKeys = [];
-  const keysJson = text2(copy.columns["source_scope_folder_keys_json"]);
-  if (keysJson) {
-    try {
-      const parsed = JSON.parse(keysJson);
-      if (Array.isArray(parsed))
-        folderKeys = parsed.filter((key2) => typeof key2 === "string");
-    } catch {
-      folderKeys = [];
-    }
-  }
-  if (copy.identity.providerConversationId)
-    folderKeys.push(copy.identity.providerConversationId);
-  return {
-    ...title ? { title } : {},
-    ...path ? { path } : {},
-    ...folderKeys.length > 0 ? { folderKeys } : {},
-    ...sender ? { sender } : {}
-  };
-}
-var init_stored_names = __esm(() => {
-  init_tier_ledger();
-});
-
-// src/workers/connector-store/parent-context.ts
-function parentNamesContext(set, child, parentLink) {
-  const stores = set.openStores();
-  let parentLocalItemId = parentLink;
-  for (const store of stores) {
-    if (parentLocalItemId)
-      break;
-    parentLocalItemId = store.parentLocalItemIdOf(child);
-  }
-  if (!parentLocalItemId)
-    return;
-  let parent;
-  for (const store of stores) {
-    const row = store.activeLocalItemRow(parentLocalItemId);
-    if (row) {
-      parent = row.identity;
-      break;
-    }
-  }
-  if (!parent)
-    return;
-  const ledger = set.ledger;
-  const record = ledger.getCurrent(parent);
-  if (!record || record.metadataTier === "secrets" || record.contentTier === "secrets" || ledger.itemIsSecret(parent))
-    return;
-  const exported = storedCopyOf(set, parent, ledger.copies(parent));
-  if (!exported)
-    return;
-  const signals = storedSignals(exported);
-  const text2 = [signals.title, signals.sender].filter((part) => typeof part === "string" && part.trim().length > 0).map((part) => part.replace(/\s+/g, " ").trim()).join(" | ").slice(0, PARENT_CONTEXT_MAX_CHARS);
-  if (!text2)
-    return;
-  return snifferParentContextAllowed(text2) ? text2 : undefined;
-}
-var init_parent_context = __esm(() => {
-  init_sniffer();
-  init_tier_classifier();
-  init_stored_names();
-});
-
 // src/workers/connector-store/tier-names-only-settle.ts
 function settleNamesOnlyItems(options) {
   const report = { checked: 0, settled: 0 };
@@ -69348,7 +71397,7 @@ var init_tier_held_settle = __esm(() => {
 
 // src/workers/embedding-ledger.ts
 import { mkdir as mkdir4, open as open3, readFile as readFile3, stat as stat2 } from "node:fs/promises";
-import { dirname as dirname58 } from "node:path";
+import { dirname as dirname59 } from "node:path";
 function isOwnerApprovedEmbeddingLedgerEntry(entry) {
   return entry.approved_by === EMBEDDING_LEDGER_OWNER_APPROVAL;
 }
@@ -69364,7 +71413,7 @@ async function appendEmbeddingLedgerEntry(path, entry) {
 async function appendEmbeddingLedgerEntries(path, entries) {
   const line = entries.map((entry) => `${JSON.stringify(entry)}
 `).join("");
-  await mkdir4(dirname58(path), { recursive: true, mode: 448 });
+  await mkdir4(dirname59(path), { recursive: true, mode: 448 });
   const handle = await open3(path, "a+", 384);
   try {
     await handle.chmod(384);
@@ -70888,11 +72937,11 @@ function formatSpaceToFree(bytes) {
 
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { spawn as spawn3 } from "node:child_process";
-import { closeSync as closeSync16, constants as constants6, existsSync as existsSync53, fstatSync as fstatSync4, openSync as openSync16, readdirSync as readdirSync9, statSync as statSync22 } from "node:fs";
+import { closeSync as closeSync16, constants as constants6, existsSync as existsSync54, fstatSync as fstatSync4, openSync as openSync16, readdirSync as readdirSync9, statSync as statSync22 } from "node:fs";
 import { homedir as homedir27 } from "node:os";
-import { delimiter as delimiter4, dirname as dirname59, isAbsolute as isAbsolute22, join as join61 } from "node:path";
+import { delimiter as delimiter4, dirname as dirname60, isAbsolute as isAbsolute22, join as join62 } from "node:path";
 import { createInterface } from "node:readline";
-import { fileURLToPath as fileURLToPath7 } from "node:url";
+import { fileURLToPath as fileURLToPath8 } from "node:url";
 function helperEnvironment() {
   const env = {};
   for (const [name, value] of Object.entries(process.env)) {
@@ -71110,7 +73159,7 @@ function linuxGpuAvailable(deviceDirectory = "/dev/dri") {
         return false;
       let fd2;
       try {
-        fd2 = openSync16(join61(deviceDirectory, name), constants6.O_RDWR | constants6.O_NONBLOCK);
+        fd2 = openSync16(join62(deviceDirectory, name), constants6.O_RDWR | constants6.O_NONBLOCK);
         return fstatSync4(fd2).isCharacterDevice();
       } catch {
         return false;
@@ -71124,10 +73173,10 @@ function linuxGpuAvailable(deviceDirectory = "/dev/dri") {
   }
 }
 function helperPath() {
-  const here = dirname59(fileURLToPath7(import.meta.url));
+  const here = dirname60(fileURLToPath8(import.meta.url));
   for (const name of ["litert-helper.js", "litert-helper.ts"]) {
-    const candidate = join61(here, name);
-    if (existsSync53(candidate))
+    const candidate = join62(here, name);
+    if (existsSync54(candidate))
       return candidate;
   }
   throw new Error("The built-in search model helper is missing from this install.");
@@ -71136,9 +73185,9 @@ function resolveBun() {
   const bunName = process.platform === "win32" ? "bun.exe" : "bun";
   const candidates = [
     process.versions.bun ? process.execPath : undefined,
-    process.env.BUN_INSTALL ? join61(process.env.BUN_INSTALL, "bin", bunName) : undefined,
-    ...(process.env.PATH ?? "").split(delimiter4).filter(Boolean).map((directory) => join61(directory, bunName)),
-    join61(homedir27(), ".bun", "bin", bunName)
+    process.env.BUN_INSTALL ? join62(process.env.BUN_INSTALL, "bin", bunName) : undefined,
+    ...(process.env.PATH ?? "").split(delimiter4).filter(Boolean).map((directory) => join62(directory, bunName)),
+    join62(homedir27(), ".bun", "bin", bunName)
   ];
   for (const candidate of candidates) {
     if (!candidate || !isAbsolute22(candidate))
@@ -71285,11 +73334,11 @@ var init_remote_litert_runtime = () => {};
 
 // src/workers/source-index/built-in-embedding/runtime.ts
 import { createRequire as createRequire6 } from "node:module";
-import { join as join62 } from "node:path";
+import { join as join63 } from "node:path";
 function onnxRuntimeFromDirectory(runtimeDir) {
   return {
     async createSession(modelPath, options) {
-      const requireFromPack = createRequire6(join62(runtimeDir, "olympus-runtime.json"));
+      const requireFromPack = createRequire6(join63(runtimeDir, "olympus-runtime.json"));
       const ort = requireFromPack("onnxruntime-node");
       const session = await ort.InferenceSession.create(modelPath, {
         executionProviders: ["cpu"],
@@ -71494,7 +73543,7 @@ var init_wordpiece = __esm(() => {
 import { createHash as createHash43 } from "node:crypto";
 import { readFileSync as readFileSync45 } from "node:fs";
 import { availableParallelism } from "node:os";
-import { dirname as dirname60, join as join63 } from "node:path";
+import { dirname as dirname61, join as join64 } from "node:path";
 function loadedBuiltInEmbedding(provider) {
   return provider instanceof BuiltInSourceEmbeddingProvider ? provider.loadedOnly() : undefined;
 }
@@ -71698,7 +73747,7 @@ class BuiltInSourceEmbeddingProvider {
         const settings = {
           library: installed2.libraryPath,
           model: installed2.modelPath,
-          cacheDir: join63(dirname60(installed2.modelPath), "cache"),
+          cacheDir: join64(dirname61(installed2.modelPath), "cache"),
           threads: this.threads,
           device: this.device,
           maxInputTokens: this.spec.maxTokens,
@@ -72534,489 +74583,6 @@ var init_tier_row_rehome = __esm(() => {
   init_tier_move();
   NON_SECURE_DOMAINS = ["public_safe", "internal"];
   MOVE_WHY = "Automatic re-home of a Private row found in a Personal or Public store: the owner approved on 2026-10-07 " + "that moved items are re-embedded by the local Private embedder (the move itself makes no provider call).";
-});
-
-// src/workers/classification/secret-scan-off-thread.ts
-import { existsSync as existsSync54 } from "node:fs";
-import { dirname as dirname61, join as join64 } from "node:path";
-import { fileURLToPath as fileURLToPath8 } from "node:url";
-function workerPath() {
-  const here = dirname61(fileURLToPath8(import.meta.url));
-  for (const name of ["secret-scan-worker.js", "secret-scan-worker.ts"]) {
-    const candidate = join64(here, name);
-    if (existsSync54(candidate))
-      return candidate;
-  }
-  return;
-}
-function scanThread() {
-  if (thread)
-    return thread;
-  if (unavailable)
-    return;
-  try {
-    const path = typeof Worker === "function" && globalThis.Bun ? workerPath() : undefined;
-    if (!path) {
-      unavailable = true;
-      return;
-    }
-    const worker = new Worker(path);
-    worker.unref?.();
-    const started = { worker, pending: new Map };
-    worker.onmessage = (event) => {
-      const message2 = event.data;
-      const waiting = started.pending.get(message2.id);
-      if (!waiting)
-        return;
-      started.pending.delete(message2.id);
-      clearTimeout(waiting.timer);
-      if (message2.ok && Array.isArray(message2.kinds))
-        waiting.resolve(message2.kinds);
-      else
-        waiting.reject(new Error(message2.error ?? "off-thread secret scan failed"));
-    };
-    worker.onerror = (event) => retire2(started, new Error(event.message || "secret scan thread stopped"));
-    thread = started;
-    return started;
-  } catch {
-    unavailable = true;
-    return;
-  }
-}
-function retire2(stopped, error) {
-  if (thread === stopped)
-    thread = undefined;
-  for (const waiting of stopped.pending.values()) {
-    clearTimeout(waiting.timer);
-    waiting.reject(error);
-  }
-  stopped.pending.clear();
-  try {
-    stopped.worker.terminate();
-  } catch {}
-}
-async function scanSecretsAhead(text2) {
-  if (!secretScanReusable(text2) || secretScanRemembered(text2))
-    return;
-  const scanner = scanThread();
-  if (!scanner)
-    return;
-  const id = nextId2++;
-  try {
-    const kinds = await new Promise((resolve15, reject) => {
-      const timer = setTimeout(() => retire2(scanner, new Error("off-thread secret scan timed out")), OFF_THREAD_SCAN_TIMEOUT_MS);
-      scanner.pending.set(id, { resolve: resolve15, reject, timer });
-      scanner.worker.postMessage({ id, text: text2 });
-    });
-    rememberSecretFindingKinds(text2, kinds);
-  } catch {
-    scanner.pending.delete(id);
-  }
-}
-var OFF_THREAD_SCAN_TIMEOUT_MS = 120000, thread, unavailable = false, nextId2 = 1;
-var init_secret_scan_off_thread = __esm(() => {
-  init_engine();
-});
-
-// src/workers/connector-store/tier-rejudge.ts
-function emptyTierRejudgeReport() {
-  return {
-    heldLowering: 0,
-    seen: 0,
-    updated: 0,
-    movesQueued: 0,
-    asked: 0,
-    secrets: 0,
-    skipped: 0,
-    failed: 0,
-    causeHeld: 0,
-    causeRetiredPrior: 0,
-    causeMissingQuestion: 0,
-    causeClassifier: 0,
-    causeOwnerWords: 0,
-    causeJudgeModel: 0,
-    causeNamesPrompt: 0,
-    causeContentPrompt: 0,
-    builtinPromptSkipped: 0,
-    rechecked: 0
-  };
-}
-async function rejudgeRoutedItemsInTurns(options) {
-  const steps = rejudgeSteps(options);
-  let step = steps.next();
-  while (!step.done) {
-    await options.turn();
-    const text2 = step.value === undefined ? undefined : storedContentText(options.set, step.value);
-    if (text2 !== undefined && secretScanReusable(text2))
-      await scanSecretsAhead(text2);
-    step = steps.next();
-  }
-  return step.value;
-}
-function storedContentText(set, record) {
-  try {
-    const identity2 = identityOf2(record);
-    const current3 = set.ledger.copies(identity2).filter((copy) => copy.state === "current");
-    const serving = copyServingLayer(current3, "content");
-    const domain = serving ? set.domainForCorpus(serving.corpusId) : undefined;
-    const exported = domain ? set.store(domain)?.exportItemCopy(identity2) : undefined;
-    return exported?.chunks.map((chunk) => chunk.boundedText).join("");
-  } catch {
-    return;
-  }
-}
-function* rejudgeSteps(options) {
-  const report = emptyTierRejudgeReport();
-  const { set } = options;
-  const classification = set.classification();
-  if (!classification?.sniffer || classification.unavailableReason || classification.sniffer.rejudgeReady === false)
-    return { report };
-  const ledger = set.ledger;
-  const limit = Math.max(1, options.limit ?? DEFAULT_TIER_REJUDGE_PER_PASS);
-  const key2 = { engineVersion: TIER_CLASSIFIER_VERSION, snifferId: classification.sniffer.id };
-  const recheck = { rules: classification.rules ?? [] };
-  let budget = limit;
-  for (const request of ledger.recheckRequests()) {
-    if (budget <= 0)
-      break;
-    const scoped = ledger.recheckScopePage(request.scope, { ...request.after ? { after: request.after } : {}, limit: budget });
-    for (const record of scoped.records) {
-      yield record;
-      budget -= 1;
-      if (!rechecks(record)) {
-        report.skipped += 1;
-        continue;
-      }
-      report.rechecked += 1;
-      try {
-        rejudgeStoredContent(set, record, {
-          sniffer: classification.sniffer,
-          ...classification.retirePublic ? { retirePublic: true } : {},
-          report,
-          key: key2,
-          autoMoves: options.autoMoves === true,
-          recheck
-        });
-      } catch {
-        report.failed += 1;
-      }
-    }
-    ledger.advanceRecheck(request, scoped.next);
-  }
-  if (budget <= 0)
-    return { report, ...options.after ? { next: options.after } : {} };
-  const page2 = ledger.rejudgeCandidatePage({
-    ...key2,
-    ...options.after ? { after: options.after } : {},
-    limit: budget
-  });
-  report.builtinPromptSkipped = page2.builtinPromptSkipped;
-  for (const [index, record] of page2.records.entries()) {
-    yield record;
-    report.seen += 1;
-    const cause = page2.causes[index];
-    if (cause)
-      report[CAUSE_FIELD[cause]] += 1;
-    try {
-      rejudgeStoredContent(set, record, {
-        sniffer: classification.sniffer,
-        ...classification.retirePublic ? { retirePublic: true } : {},
-        report,
-        key: key2,
-        autoMoves: options.autoMoves === true
-      });
-    } catch {
-      report.failed += 1;
-    }
-  }
-  return { report, ...page2.next ? { next: page2.next } : {} };
-}
-function rechecks(record) {
-  return record.routed && record.contentRead && record.state === "current" && record.contentTier !== "secrets" && record.decidedBy !== "override";
-}
-function rejudgeStoredContent(set, record, options) {
-  const { report, key: key2, autoMoves } = options;
-  const ledger = set.ledger;
-  const identity2 = identityOf2(record);
-  const read = ledger.classificationRead(identity2);
-  if (read.override) {
-    if (key2)
-      ledger.markRejudged(identity2, key2);
-    report.skipped += 1;
-    return;
-  }
-  const current3 = ledger.copies(identity2).filter((copy) => copy.state === "current");
-  const serving = copyServingLayer(current3, "content");
-  const domain = serving ? set.domainForCorpus(serving.corpusId) : undefined;
-  const exported = domain ? set.store(domain)?.exportItemCopy(identity2) : undefined;
-  const text2 = exported?.chunks.map((chunk) => chunk.boundedText).join("") ?? "";
-  if (!exported || !text2.trim()) {
-    if (key2)
-      ledger.markRejudgeUnavailable(record, key2);
-    report.skipped += 1;
-    return;
-  }
-  const imageJudgment = exported.chunks.find((chunk) => chunk.mediaJudgment)?.mediaJudgment;
-  const title = columnString(exported.columns["title"]);
-  const path = columnString(exported.columns["locator_uri"]);
-  const sender = columnString(exported.columns["sender_label"]);
-  const mimeType = columnString(exported.columns["mime_type"]);
-  const folderKeys = [...storedSignals(exported).folderKeys ?? []];
-  let questionNotQueued = false;
-  const counting = options.sniffer && {
-    id: options.sniffer.id,
-    judge(request) {
-      const upgrade = !options.recheck && key2 && isSnifferUnionUpgrade(record.reasons, key2.snifferId);
-      const verdict = options.sniffer.judge(upgrade ? { ...request, priority: HELD_UNTIL_JUDGED_PRIORITY } : request);
-      if (verdict.verdict === "undecided" && verdict.queued !== true)
-        questionNotQueued = true;
-      return verdict;
-    }
-  };
-  const sniffer = counting && secretFencedSniffer(counting, ledger, identity2, read);
-  const holdUntilJudged = set.holdsContentUntilJudged() || heldUntilJudged(record.reasons);
-  const parentContext = sniffer ? parentNamesContext(set, identity2) : undefined;
-  const metadata = rejudgeMetadata(record, options.preserveMetadata ? undefined : sniffer, { title, path, sender, folderKeys }, identity2, holdUntilJudged, parentContext, options.recheck);
-  const content = classifyContentTier({
-    text: text2,
-    hasNonTextContent: !record.reasons.includes("content:text_only"),
-    metadataTier: metadata.metadataTier,
-    metadataForced: metadata.metadataForced,
-    metadataFlagged: metadata.metadataFlagged,
-    metadataOwnerDecided: namesDecidedByOwner(record.reasons),
-    ...title ? { title } : {},
-    ...path ? { path } : {},
-    ...sender ? { sender } : {},
-    ...mimeType ? { mimeType } : {},
-    ...holdUntilJudged ? { holdUntilJudged: true } : {},
-    ...imageJudgment ? { imageJudgment: imageJudgmentSignal(imageJudgment) } : {},
-    ...parentContext ? { parentContext } : {},
-    subject: identity2
-  }, {
-    ...sniffer ? { sniffer } : {},
-    ...options.retirePublic ? { retirePublic: true } : {}
-  });
-  const decision = {
-    metadataTier: metadata.metadataTier,
-    contentTier: maxTier(content.contentTier, metadata.metadataTier),
-    decidedBy: content.decidedBy,
-    reasons: [
-      ...metadata.reasons,
-      ...content.reasons,
-      ...record.reasons.includes(contentDigestReason(text2)) ? record.reasons.filter((reason) => reason.startsWith("content:names:") && !content.reasons.includes(reason)) : []
-    ],
-    state: metadata.metadataPending || content.contentPending ? "pending" : "current",
-    contentRead: true,
-    metadataPending: metadata.metadataPending,
-    contentPending: content.contentPending,
-    metadataForced: metadata.metadataForced,
-    metadataFlagged: metadata.metadataFlagged,
-    engineVersion: content.engineVersion,
-    mapRevision: content.mapRevision,
-    snifferId: content.snifferId
-  };
-  if (content.contentTier === "secrets") {
-    settleRoutedSecrets(set, identity2, decision, exported, {
-      text: text2,
-      findingKinds: content.reasons.filter((reason) => reason.startsWith("content:secret:")).map((reason) => reason.slice("content:secret:".length))
-    });
-    report.secrets += 1;
-    return;
-  }
-  if (questionNotQueued) {
-    report.failed += 1;
-    return;
-  }
-  if (content.contentPending && record.state === "pending") {
-    const retiredClearance = record.reasons.includes(RETIRED_EMBEDDING_CLEARANCE_REASON);
-    ledger.recordRoutedPlacement(identity2, {
-      ...decision,
-      metadataTier: retiredClearance ? record.metadataTier : decision.metadataTier,
-      contentTier: retiredClearance ? record.contentTier : decision.contentTier,
-      reasons: retiredClearance ? [...decision.reasons, RETIRED_EMBEDDING_CLEARANCE_REASON] : decision.reasons
-    }, {
-      copies: current3,
-      embedHold: current3.some((copy) => copy.embedHold)
-    }, { guard: { generation: record.generation, override: undefined } });
-    if (key2)
-      ledger.markHeldRejudged(ledger.getCurrent(identity2), key2);
-    report.asked += 1;
-    return;
-  }
-  if (content.contentPending || metadata.metadataPending) {
-    if (ledger.openRejudgeQuestion(identity2, {
-      expectedGeneration: record.generation,
-      decision,
-      keepVisible: !autoMoves
-    }))
-      report.asked += 1;
-    else
-      report.skipped += 1;
-    return;
-  }
-  if (holdSnifferLowering(record, decision)) {
-    report.heldLowering += 1;
-    return;
-  }
-  const recorded = ledger.recordRoutedPlacement(identity2, decision, set.placementFor(decision), {
-    ...autoMoves || options.hideRaises === true ? {} : { queueWithoutHiding: true },
-    guard: { generation: record.generation, override: undefined }
-  });
-  if (key2)
-    ledger.markRejudged(identity2, key2);
-  if (recorded.outcome === "queued_move")
-    report.movesQueued += 1;
-  else
-    report.updated += 1;
-}
-function rejudgeMetadata(record, sniffer, names, subject, holdUntilJudged = false, parentContext, recheck) {
-  const previous = { ...record, reasons: record.reasons.filter((reason) => !reason.startsWith("content:")) };
-  const retiredPrior = restsOnRetiredSourcePrior(record.reasons);
-  const judgedAgain = (reason) => reason.startsWith("metadata:sniffer:") && (recheck !== undefined || !reason.startsWith(`metadata:sniffer:${sniffer?.id}:`));
-  if (!sniffer || record.state !== "current" || record.metadataForced || namesDecidedByOwner(record.reasons) || !retiredPrior && !recheck?.namesChanged && !record.reasons.some(judgedAgain))
-    return previous;
-  const signals = {
-    ...names.title ? { title: names.title } : {},
-    ...names.path ? { path: names.path } : {},
-    ...names.sender ? { sender: names.sender } : {},
-    folderKeys: names.folderKeys
-  };
-  const fresh = classifyItemTiers({ signals, namesOnly: true, ...parentContext ? { parentContext } : {} });
-  if (recheck && recheck.rules.length > 0) {
-    const ruled = classifyItemTiers({ signals, namesOnly: true, provider: subject.provider }, { rules: recheck.rules });
-    if (ruled.metadataForced || namesDecidedByOwner(ruled.reasons))
-      return previous;
-  }
-  const providerReasons = previous.reasons.filter((reason) => /^metadata:(floor|prior):/.test(reason) && !reason.startsWith(RETIRED_SOURCE_PRIOR_REASON));
-  const fromStoredNames = record.reasons.includes(STORED_NAMES_REASON);
-  const mayLower = retiredPrior || (recheck !== undefined ? providerReasons.length === 0 && (recheck.namesChanged === true || namesInputCovered(record.reasons, signals, parentContext)) : fromStoredNames);
-  const baseline = mayLower ? fresh.metadataTier : maxTier(fresh.metadataTier, record.metadataTier);
-  if (baseline === "secrets")
-    return { ...previous, metadataTier: baseline, metadataPending: false, reasons: fresh.reasons };
-  const material = [names.title, names.path, ...snifferFolderKeyNames(names.folderKeys), names.sender].filter(Boolean).join(" | ").slice(0, SNIFFER_NAMES_MAX_CHARS);
-  const verdict = sniffer.judge({
-    pass: "metadata",
-    material: namesWithParentContext(material, parentContext),
-    flags: ["names:rejudge"],
-    subject,
-    materialHash: tierSnifferInputHash("metadata", signals, undefined, parentContext),
-    mapRevision: fresh.mapRevision,
-    priority: holdUntilJudged ? HELD_UNTIL_JUDGED_PRIORITY : HELD_RECORD_PRIORITY
-  });
-  const pending = verdict.verdict === "undecided";
-  const metadataTier = pending ? baseline : maxTier(baseline, verdict.tier);
-  return {
-    metadataTier,
-    metadataForced: false,
-    metadataFlagged: pending || fresh.metadataFlagged,
-    metadataPending: pending,
-    reasons: [
-      ...fresh.reasons.filter((reason) => reason.startsWith("metadata:") && !reason.startsWith("metadata:sniffer:") && !reason.startsWith("metadata:possibly_private:") && (mayLower || !reason.startsWith(NAMES_INPUT_REASON_PREFIX))),
-      ...!mayLower ? record.reasons.filter((reason) => reason.startsWith(NAMES_INPUT_REASON_PREFIX)) : [],
-      ...providerReasons,
-      `metadata:sniffer:${sniffer.id}:${pending ? "undecided" : verdict.code}`,
-      ...pending ? [STORED_NAMES_ASKED_REASON] : metadataTier !== baseline ? [STORED_NAMES_REASON] : []
-    ]
-  };
-}
-function settleLegacySecrets(options) {
-  const copies = options.stores.flatMap((store) => {
-    const exported = store.exportItemCopy(options.identity);
-    return exported ? [{ store, exported }] : [];
-  });
-  if (copies.length === 0 && !options.locations.get(options.identity)?.findingKinds.includes("sniffer_secret_refusal"))
-    return false;
-  for (const { exported } of copies)
-    recordSecretLocation(options.locations, options.decision, exported, { findingKinds: ["sniffer_secret_refusal"] });
-  for (const { store, exported } of copies) {
-    store.tombstoneCopy(exported.identity, { connectorId: TIER_REJUDGE_CONNECTOR_ID, trustTier: "S5" });
-  }
-  options.ledger.recordDecision(options.identity, options.decision);
-  return true;
-}
-function settleRoutedSecrets(set, identity2, decision, exported, finding, placement = {}) {
-  const ledger = set.ledger;
-  const recorded = ledger.recordRoutedPlacement(identity2, decision, set.placementFor(decision), {
-    ...placement.guard ? { guard: placement.guard } : {}
-  });
-  if (recorded.outcome !== "secrets")
-    return false;
-  const locations = set.secrets();
-  if (locations)
-    recordSecretLocation(locations, decision, exported, finding);
-  settleSecretsCopies({
-    ledger,
-    identity: exported.identity,
-    copies: recorded.previousCopies,
-    storeFor: (corpusId) => {
-      const domain = set.domainForCorpus(corpusId);
-      return domain ? set.store(domain) : undefined;
-    },
-    connectorId: TIER_REJUDGE_CONNECTOR_ID
-  });
-  return true;
-}
-function recordSecretLocation(locations, decision, exported, finding) {
-  const locator = columnString(exported.columns["locator_uri"]);
-  const title = columnString(exported.columns["title"]);
-  const namesReleasable = decision.metadataTier === "public" || decision.metadataTier === "private";
-  const folderKeys = storedFolderKeys(exported.columns["source_scope_folder_keys_json"]);
-  const scopeGeneration = columnString(exported.columns["source_scope_generation"]);
-  const scopeRevision = columnString(exported.columns["source_scope_revision"]);
-  locations.record({
-    identity: exported.identity,
-    ...locator && !hasCredentialUrl(locator) ? { locator } : {},
-    ...title && namesReleasable ? { title } : {},
-    namesReleasable,
-    ...folderKeys.length > 0 ? { folderKeys } : {},
-    ...scopeGeneration && scopeRevision ? { scopeGeneration, scopeRevision } : {},
-    findingKinds: finding.findingKinds.length > 0 ? finding.findingKinds : ["owner_marked_secret"],
-    ...finding.text !== undefined ? { text: finding.text } : {}
-  });
-}
-function identityOf2(record) {
-  return {
-    provider: record.provider,
-    accountScope: record.accountScope,
-    providerItemId: record.providerItemId,
-    ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
-  };
-}
-function columnString(value) {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-function storedFolderKeys(value) {
-  if (typeof value !== "string" || !value.trim())
-    return [];
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed.filter((key2) => typeof key2 === "string") : [];
-  } catch {
-    return [];
-  }
-}
-var DEFAULT_TIER_REJUDGE_PER_PASS = 100, TIER_REJUDGE_CONNECTOR_ID = "olympus_tier_rejudge", CAUSE_FIELD;
-var init_tier_rejudge = __esm(() => {
-  init_sniffer();
-  init_media_judge();
-  init_parent_context();
-  init_stored_names();
-  init_tier_classifier();
-  init_tier_ledger();
-  init_secrets_disposition();
-  init_tier_placement();
-  init_secret_scan_off_thread();
-  init_engine();
-  CAUSE_FIELD = {
-    held: "causeHeld",
-    retired_prior: "causeRetiredPrior",
-    missing_question: "causeMissingQuestion",
-    classifier: "causeClassifier",
-    owner_words: "causeOwnerWords",
-    judge_model: "causeJudgeModel",
-    names_prompt: "causeNamesPrompt",
-    content_prompt: "causeContentPrompt"
-  };
 });
 
 // src/workers/connector-store/tier-override-settle.ts
@@ -75713,22 +77279,22 @@ function namesOnlyCoverageNote(count) {
 }
 
 // src/workers/answer-activity.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
 function runPrivacyReleaseInference(work) {
-  privacyReleaseInference ??= new AsyncLocalStorage5;
-  localInferencePriority ??= new AsyncLocalStorage5;
+  privacyReleaseInference ??= new AsyncLocalStorage7;
+  localInferencePriority ??= new AsyncLocalStorage7;
   return privacyReleaseInference.run(true, () => localInferencePriority.run("owner", work));
 }
 function runWithLocalInferenceGuard(guard, work) {
-  localInferenceGuards ??= new AsyncLocalStorage5;
+  localInferenceGuards ??= new AsyncLocalStorage7;
   return localInferenceGuards.run([...localInferenceGuards?.getStore() ?? [], guard], work);
 }
 function runBackgroundInference(work) {
-  localInferencePriority ??= new AsyncLocalStorage5;
+  localInferencePriority ??= new AsyncLocalStorage7;
   return localInferencePriority.run("background", work);
 }
 function runClassificationInference(work) {
-  localInferencePriority ??= new AsyncLocalStorage5;
+  localInferencePriority ??= new AsyncLocalStorage7;
   return localInferencePriority.run(privacyReleaseInference?.getStore() ? "owner" : "maintenance", work);
 }
 function currentLocalInferencePriority() {
@@ -75961,171 +77527,6 @@ var init_answer_activity = __esm(() => {
   DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
 });
 
-// src/core/opsec.ts
-function createStructuredEvidenceFact(input) {
-  const factId = input.factId.trim();
-  const claim = input.claim.trim();
-  if (!factId)
-    throw new Error("Structured evidence facts require a factId.");
-  if (!claim)
-    throw new Error("Structured evidence facts require a claim.");
-  if (input.sourceProvenance.length === 0) {
-    throw new Error("Structured evidence facts require source provenance.");
-  }
-  return {
-    factId,
-    claim,
-    sourceProvenance: [...input.sourceProvenance],
-    sensitivity: input.sensitivity,
-    confidence: input.confidence,
-    extractionKind: input.extractionKind,
-    sourceInstructionFlags: detectSourceInstructionFlags(claim),
-    releaseSurface: input.releaseSurface ?? defaultReleaseSurfaceForSensitivity(input.sensitivity)
-  };
-}
-function evaluateReleaseGate(input) {
-  const reasons = new Set;
-  const redactions = [];
-  if (input.action !== "read" && input.action !== "answer") {
-    return {
-      decision: "needs_approval",
-      reasons: ["high_impact_action_requires_approval"],
-      requiredApproval: input.action === "send" || input.action === "write" || input.action === "delete" ? "write_action" : "user_review"
-    };
-  }
-  const secretLabels = secretLabelsInText([
-    input.draftAnswer,
-    ...input.facts.map((fact) => fact.claim)
-  ].join(`
-`));
-  for (const label of secretLabels) {
-    redactions.push({ label, reason: "s5_like_secret_detected" });
-  }
-  if (secretLabels.length > 0 || input.facts.some((fact) => fact.sensitivity.trustTier === "S5")) {
-    return {
-      decision: "deny",
-      reasons: ["s5_secret_denied_from_ordinary_output"],
-      ...redactions.length > 0 ? { redactions } : {},
-      requiredApproval: "s5_secret_use"
-    };
-  }
-  const allInstructionFlags = new Set(input.facts.flatMap((fact) => [...fact.sourceInstructionFlags]));
-  if (allInstructionFlags.size > 0) {
-    reasons.add("hostile_source_instruction_treated_as_data");
-  }
-  const crossingToCallingAgent = isCallingAgentDestination(input.destination);
-  const secureFacts = input.facts.filter((fact) => isSecureSensitivity(fact.sensitivity));
-  if (crossingToCallingAgent && secureFacts.some((fact) => fact.releaseSurface === "local_only")) {
-    return {
-      decision: "needs_approval",
-      reasons: [...reasons, "secure_local_fact_not_marked_for_castor_release"],
-      requiredApproval: "s4_release"
-    };
-  }
-  if (crossingToCallingAgent && secureFacts.length > 0) {
-    reasons.add("bounded_secure_derivative_allowed");
-  }
-  return {
-    decision: "allow",
-    reasons: [...reasons, "release_gate_passed"],
-    allowedText: input.draftAnswer
-  };
-}
-function isCallingAgentDestination(destination) {
-  return destination === "calling_agent" || destination === "castor";
-}
-function buildOpsecReleaseAudit(facts, decision) {
-  return {
-    structured_evidence: facts.map((fact) => ({
-      fact_id: fact.factId,
-      trust_tier: fact.sensitivity.trustTier,
-      trust_domain: fact.sensitivity.trustDomain,
-      confidence: fact.confidence,
-      extraction_kind: fact.extractionKind,
-      source_instruction_flags: [...fact.sourceInstructionFlags],
-      release_surface: fact.releaseSurface,
-      provenance_count: fact.sourceProvenance.length
-    })),
-    release_decision: {
-      decision: decision.decision,
-      reasons: [...decision.reasons],
-      ...decision.redactions ? { redactions: [...decision.redactions] } : {},
-      ...decision.requiredApproval ? { required_approval: decision.requiredApproval } : {}
-    },
-    raw_source_exposed: false
-  };
-}
-function answerForReleaseDecision(decision) {
-  if ((decision.decision === "allow" || decision.decision === "redact") && decision.allowedText) {
-    return decision.allowedText;
-  }
-  if (decision.decision === "needs_approval") {
-    return "I found matching source material, but this needs review before I can summarize it in this calling-assistant-safe path.";
-  }
-  return "I found matching source material, but it cannot be summarized in this calling-assistant-safe path.";
-}
-function detectSourceInstructionFlags(text2) {
-  const flags = new Set;
-  if (/\b(ignore|disregard)\s+(all\s+)?(previous|prior|above)\s+instructions?\b/i.test(text2)) {
-    flags.add("ignore_previous_instructions");
-  }
-  if (/\b(system|developer|policy)\s+(prompt|message|instructions?)\b/i.test(text2) || /\byou are now\b/i.test(text2)) {
-    flags.add("role_or_policy_override");
-  }
-  if (/\b(send|exfiltrate|upload|forward|post)\b.{0,80}\b(secret|token|password|key|credential|email|gmail|document|file)s?\b/i.test(text2)) {
-    flags.add("credential_exfiltration_request");
-  }
-  if (/\b(send|forward|email|post|upload|webhook|dm|slack)\b.{0,100}\b(attacker|external|http|https|@)\b/i.test(text2)) {
-    flags.add("external_communication_request");
-  }
-  if (/\b(call|use|invoke)\b.{0,60}\btool\b/i.test(text2) || /\bdelete\b.{0,80}\b(log|file|email|message|record)s?\b/i.test(text2)) {
-    flags.add("tool_escalation_request");
-  }
-  if (/\b(as an ai|assistant|model)\b/i.test(text2)) {
-    flags.add("general_source_instruction");
-  }
-  return [...flags].sort();
-}
-function defaultReleaseSurfaceForSensitivity(sensitivity) {
-  if (sensitivity.trustTier === "S5")
-    return "local_only";
-  return "castor_answer";
-}
-function secretLabelsInText(text2) {
-  const labels = new Set;
-  const variants = secretScreeningVariants(text2);
-  for (const { label, pattern } of SECRET_PATTERNS) {
-    const shared = {
-      label: ["private_key", "openai_key", "github_token", "slack_token"].includes(label) ? label : "credential_assignment",
-      findingType: "credential_assignment",
-      confidence: 1,
-      pattern: new RegExp(pattern.source, `${pattern.flags}g`)
-    };
-    if (hasSecretPatternHit(text2, shared, variants))
-      labels.add(label);
-  }
-  for (const shared of SHARED_SECRET_PATTERNS) {
-    if (hasSecretPatternHit(text2, shared, variants))
-      labels.add(shared.label);
-  }
-  return [...labels];
-}
-var SECRET_PATTERNS;
-var init_opsec = __esm(() => {
-  init_secret_patterns();
-  init_types();
-  SECRET_PATTERNS = [
-    { label: "private_key", pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/i },
-    { label: "oauth_refresh_token", pattern: /\brefresh[_ -]?token\s*[:=]\s*["']?[A-Za-z0-9._~+/=-]{8,}/i },
-    { label: "client_secret", pattern: /\bclient[_ -]?secret\s*[:=]\s*["']?[A-Za-z0-9._~+/=-]{8,}/i },
-    { label: "api_key", pattern: /\bapi[_ -]?key\s*[:=]\s*["']?[A-Za-z0-9._~+/=-]{12,}/i },
-    { label: "password", pattern: /\bpassword\s*[:=]\s*["']?\S{8,}/i },
-    { label: "openai_key", pattern: /\bsk-[A-Za-z0-9_-]{16,}\b/ },
-    { label: "github_token", pattern: /\b(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]{16,}\b/ },
-    { label: "slack_token", pattern: /\bxox[abp]-[A-Za-z0-9-]{16,}\b/ }
-  ];
-});
-
 // src/core/evidence-versions.ts
 function evidenceVersions(items) {
   const shingles = items.map((item) => item.family === undefined || DOCUMENT_FAMILIES.has(item.family) ? shingleSet(item.text) : new Set);
@@ -76221,7 +77622,7 @@ var init_evidence_versions = __esm(() => {
 });
 
 // src/core/analyst.ts
-import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
 function refuseLocalOnlyOnOrdinaryCloud(request, providerLabel3) {
   if (!request.localOnly)
     return;
@@ -76688,8 +78089,8 @@ function versionDateLabels(dates) {
   const days = dates.map((date) => new Date(Date.parse(date)).toISOString().slice(0, 10));
   const sameDay = new Set(days).size < days.length;
   return new Map(dates.map((date) => {
-    const iso = new Date(Date.parse(date)).toISOString();
-    return [date, sameDay ? `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC` : iso.slice(0, 10)];
+    const iso2 = new Date(Date.parse(date)).toISOString();
+    return [date, sameDay ? `${iso2.slice(0, 10)} ${iso2.slice(11, 16)} UTC` : iso2.slice(0, 10)];
   }));
 }
 function candidateCitationMetadata(candidate) {
@@ -77080,7 +78481,7 @@ var init_analyst = __esm(() => {
   init_partial_search();
   init_operation_error();
   init_evidence_versions();
-  analystAbortSignalStorage = new AsyncLocalStorage6;
+  analystAbortSignalStorage = new AsyncLocalStorage8;
   ANALYST_SYSTEM = [
     "You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.",
     "Rules:",
@@ -77562,158 +78963,6 @@ var init_analyst_openclaw_infer = __esm(() => {
   };
 });
 
-// src/core/release-manifest.ts
-import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
-function chunkCoverageNote(result) {
-  return result.withheldPassages > 0 ? `${result.withheldPassages} passages from ${result.withheldDocuments} documents are still being checked for privacy and weren't shared. Ask again in a minute.` : undefined;
-}
-async function checkReleaseChunks(check, inputs, options) {
-  try {
-    const result = await check?.chunks?.(inputs, options);
-    if (result && result.allowed.length === inputs.length)
-      return result;
-  } catch {}
-  return {
-    allowed: inputs.map(() => []),
-    withheldPassages: inputs.reduce((n, input) => n + (input.layer === "names" ? 0 : Math.max(1, input.chunkHashes?.length ?? 0)), 0),
-    withheldDocuments: inputs.filter((input) => input.layer !== "names").length
-  };
-}
-async function recheckSearchEvidence(raw, manifests, check) {
-  const evidence = Array.isArray(raw.evidence) ? raw.evidence : [];
-  if (!evidence.length)
-    return { raw, withheldAfter: false };
-  const inputs = manifests.flatMap((manifest) => manifest.inputs);
-  let report;
-  let verdicts = [];
-  try {
-    if (check && manifests.length) {
-      report = await checkReleaseChunks(check, inputs);
-      verdicts = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
-    }
-  } catch {}
-  const cleared = (index) => {
-    const input = inputs[index];
-    const verdict = verdicts[index];
-    return !!verdict && !verdict.gone && ["public_or_personal", "legacy"].includes(verdict.tier) && (input.layer === "names" || !!input.chunkHashes?.length && input.chunkHashes.every((hash) => report?.allowed[index]?.includes(hash)));
-  };
-  const parentsCleared = inputs.every((input, index) => input.dependency !== "parent_label" || cleared(index));
-  const kept = evidence.filter((value) => {
-    if (!parentsCleared || !value || typeof value !== "object")
-      return false;
-    const hit = value;
-    const matches = inputs.flatMap((input, index) => input.dependency !== "parent_label" && input.corpusId === hit.corpus_id && input.provider === hit.provider && input.accountScope === hit.account_scope && input.providerItemId === hit.provider_item_id && input.providerConversationId === hit.provider_conversation_id ? [index] : []);
-    return matches.length > 0 && matches.every(cleared);
-  });
-  const dropped = evidence.length - kept.length;
-  if (!dropped)
-    return { raw, withheldAfter: false };
-  const coverage = raw.coverage && typeof raw.coverage === "object" ? raw.coverage : {};
-  const note = report && chunkCoverageNote(report);
-  const priorNotes = Array.isArray(coverage.cut_short) ? coverage.cut_short : [];
-  const withheld = typeof raw.withheld === "number" && Number.isFinite(raw.withheld) ? Math.max(0, raw.withheld) : 0;
-  return { raw: {
-    ...raw,
-    evidence: kept,
-    withheld: withheld + Math.max(dropped, report?.withheldPassages ?? 0),
-    ...note ? { coverage: { ...coverage, cut_short: [...new Set([...priorNotes, note])] } } : {}
-  }, withheldAfter: true };
-}
-function bindReleaseChunks(provenance, chunks, hashes) {
-  chunkProvenance.set(provenance, chunks.map((text2, index) => ({ text: text2, hashes: hashes[index] ?? [] })));
-}
-function copyReleaseChunks(from, into) {
-  const chunks = chunkProvenance.get(from);
-  if (chunks)
-    chunkProvenance.set(into, chunks);
-}
-function releasePassageHashes(provenance, text2) {
-  return [...new Set((chunkProvenance.get(provenance) ?? []).filter((entry) => entry.text.includes(text2)).flatMap((entry) => entry.hashes))];
-}
-function releaseCandidateHashes(candidate) {
-  return [...new Set(candidate.chunks.flatMap((text2) => releasePassageHashes(candidate.provenance, text2)))];
-}
-function createReleaseManifestSink() {
-  return { manifests: [] };
-}
-function runWithReleaseManifestSink(sink, fn) {
-  return storage3.run(sink, fn);
-}
-function currentReleaseManifestSink() {
-  return storage3.getStore();
-}
-function recordReleaseManifest(manifest) {
-  storage3.getStore()?.manifests.push({
-    inputs: manifest.inputs.map((input) => ({ ...input, ...input.chunkHashes ? { chunkHashes: [...input.chunkHashes] } : {} })),
-    constraints: { ...manifest.constraints }
-  });
-}
-function adoptReleaseManifests(into, from) {
-  into.manifests.push(...from.manifests);
-}
-function privateInputReleaseAllowed(input, verdict, constraints, postureNow) {
-  const privateNow = verdict.tier === "private" || verdict.tier === "legacy" && input.privateAtAnswer;
-  const authorized = constraints.includeSecureLocalContent || postureNow === "allow";
-  if (input.layer === "names")
-    return !privateNow || input.privateAtAnswer && authorized;
-  return !privateNow || authorized;
-}
-async function answerReleaseWithheldReasonOffThread(manifests, check, ceiling = "private", options = {}) {
-  try {
-    const inputs = manifests.flatMap((manifest) => manifest.inputs);
-    const verdicts = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
-    const reason = answerReleaseWithheldReason(manifests, { inputs: () => verdicts, secureDerivativeDefault: () => check.secureDerivativeDefault() }, ceiling);
-    if (reason)
-      return reason;
-    if (options.chunks && (await checkReleaseChunks(check, inputs)).withheldPassages > 0)
-      return ANSWER_RELEASE_UNVERIFIED;
-    return;
-  } catch {
-    return ANSWER_RELEASE_UNVERIFIED;
-  }
-}
-function answerReleaseWithheldReason(manifests, check, ceiling = "private") {
-  if (manifests.length === 0)
-    return ANSWER_RELEASE_UNVERIFIED;
-  const entries = manifests.flatMap((manifest) => manifest.inputs.map((input) => ({ input, constraints: manifest.constraints })));
-  const inputs = entries.map(({ input }) => input);
-  try {
-    const verdicts = check.inputs(inputs);
-    if (verdicts.length !== inputs.length)
-      return ANSWER_RELEASE_UNVERIFIED;
-    const postureNow = check.secureDerivativeDefault();
-    for (const [index, verdict] of verdicts.entries()) {
-      if (verdict.tier === "unknown" || verdict.gone)
-        return ANSWER_RELEASE_UNVERIFIED;
-      if (verdict.tier === "secret")
-        return ANSWER_RELEASE_UNVERIFIED;
-      const { input, constraints } = entries[index];
-      if (verdict.tier === "private" && (ceiling === "personal" || !input.privateAtAnswer))
-        return ANSWER_BECAME_PRIVATE;
-      if (!privateInputReleaseAllowed(input, verdict, constraints, postureNow)) {
-        return "Olympus withheld this answer because current settings require approval for Private content.";
-      }
-    }
-  } catch {
-    return ANSWER_RELEASE_UNVERIFIED;
-  }
-  return;
-}
-function isWithheldSourceAnswer(result) {
-  return withheldAnswers.has(result);
-}
-function withheldSourceAnswer(reason) {
-  const result = { answer: reason, evidence: [] };
-  withheldAnswers.add(result);
-  return result;
-}
-var RELEASE_CHUNK_JUDGE_BUDGET_MS = 8000, chunkProvenance, storage3, ANSWER_BECAME_PRIVATE = "Olympus withheld this answer because an item became Private.", ANSWER_RELEASE_UNVERIFIED = "Olympus withheld this answer because its current privacy classification could not be verified.", withheldAnswers;
-var init_release_manifest = __esm(() => {
-  chunkProvenance = new WeakMap;
-  storage3 = new AsyncLocalStorage7;
-  withheldAnswers = new WeakSet;
-});
-
 // src/core/evidence-reranker.ts
 async function rerankCandidates(options) {
   const timers = options.timers ?? systemTimers;
@@ -77808,157 +79057,6 @@ var init_evidence_reranker = __esm(() => {
     setTimeout: (callback, ms) => setTimeout(callback, ms),
     clearTimeout: (handle) => clearTimeout(handle)
   };
-});
-
-// src/core/parent-label.ts
-function candidateNamesCeiling(candidate) {
-  if (isSecureSensitivity(candidate))
-    return "private";
-  return candidate.trustDomain === "public_safe" ? "public" : "personal";
-}
-function parentNamesMayTravel(names, ceiling) {
-  return TIER_RANK2[names] <= TIER_RANK2[ceiling];
-}
-function flattened(value, max2) {
-  if (typeof value !== "string")
-    return;
-  let text2 = "";
-  let pendingSpace = false;
-  for (const char of value) {
-    const code = char.codePointAt(0);
-    const blank = code <= 32 || code >= 127 && code <= 160 || code === 8232 || code === 8233;
-    if (blank) {
-      pendingSpace = text2.length > 0;
-      continue;
-    }
-    if (pendingSpace)
-      text2 += " ";
-    pendingSpace = false;
-    text2 += char;
-  }
-  if (!text2)
-    return;
-  return text2.length > max2 ? `${text2.slice(0, max2 - 1).trimEnd()}…` : text2;
-}
-function labelDate(value) {
-  if (typeof value !== "string")
-    return;
-  const at = Date.parse(value);
-  if (!Number.isFinite(at))
-    return;
-  const date = new Date(at);
-  return `${date.getUTCDate()} ${MONTHS2[date.getUTCMonth()]} ${date.getUTCFullYear()}`;
-}
-function parentLabelText(names) {
-  const subject = flattened(names.subject, SUBJECT_MAX_CHARS);
-  const sender = flattened(names.sender, SENDER_MAX_CHARS);
-  const date = labelDate(names.authoredAt);
-  const who = [subject ? `'${subject}'` : undefined, sender ? `from ${sender}` : undefined].filter(Boolean).join(" ");
-  const label = date ? who ? `${who}, ${date}` : date : who;
-  if (!label)
-    return;
-  return label.length > PARENT_LABEL_MAX_CHARS ? `${label.slice(0, PARENT_LABEL_MAX_CHARS - 1).trimEnd()}…` : label;
-}
-function citationTitleWithParent(title, parentLabel) {
-  const label = flattened(parentLabel, PARENT_LABEL_MAX_CHARS);
-  const own3 = title?.trim();
-  if (!label)
-    return own3 || undefined;
-  return own3 ? `${own3}, in ${label}` : `In ${label}`;
-}
-function applyParentLabels(candidates, corpusIds, resolver, scope) {
-  const unchanged = { candidates: [...candidates], dependencies: [] };
-  if (!resolver || candidates.length === 0)
-    return unchanged;
-  let parents;
-  try {
-    parents = resolver(candidates.map((candidate, index) => ({
-      corpusId: corpusIds[index] ?? "",
-      sourceItem: candidate.provenance.sourceItem
-    })));
-  } catch {
-    return unchanged;
-  }
-  if (parents.length !== candidates.length)
-    return unchanged;
-  const dependencies = [];
-  const labelled = candidates.map((candidate, index) => {
-    const parent = parents[index];
-    if (!parent)
-      return candidate;
-    if (!parentNamesMayTravel(parent.tier, candidateNamesCeiling(candidate)))
-      return candidate;
-    if (!namesCorpusInScope(parent.corpusId, scope))
-      return candidate;
-    const label = parentLabelText(parent);
-    if (!label)
-      return candidate;
-    dependencies.push({
-      candidateIndex: index,
-      corpusId: parent.corpusId,
-      parent: parent.identity,
-      private: parent.tier === "private"
-    });
-    return {
-      ...candidate,
-      provenance: {
-        ...candidate.provenance,
-        citation: { ...candidate.provenance.citation, parentLabel: label }
-      }
-    };
-  });
-  return { candidates: labelled, dependencies };
-}
-function namesCorpusInScope(corpusId, scope) {
-  if (!corpusId || scope.excludedCorpusIds?.has(corpusId))
-    return false;
-  if (scope.allowedCorpusIds && !scope.allowedCorpusIds.includes(corpusId))
-    return false;
-  const domain = scope.domainOf(corpusId);
-  return domain !== undefined && scope.allowedTrustDomains.includes(domain);
-}
-function parentLabelReleaseInputs(dependencies) {
-  const seen = new Map;
-  for (const dependency of dependencies) {
-    const { parent } = dependency;
-    const key2 = JSON.stringify([dependency.corpusId, parent.provider, parent.accountScope, parent.providerConversationId ?? "", parent.providerItemId]);
-    const existing = seen.get(key2);
-    if (existing) {
-      if (dependency.private)
-        existing.privateAtAnswer = true;
-      continue;
-    }
-    seen.set(key2, {
-      corpusId: dependency.corpusId,
-      provider: parent.provider,
-      accountScope: parent.accountScope,
-      providerItemId: parent.providerItemId,
-      ...parent.providerConversationId ? { providerConversationId: parent.providerConversationId } : {},
-      privateAtAnswer: dependency.private,
-      layer: "names",
-      dependency: "parent_label"
-    });
-  }
-  return [...seen.values()];
-}
-var TIER_RANK2, PARENT_LABEL_MAX_CHARS = 160, SUBJECT_MAX_CHARS = 90, SENDER_MAX_CHARS = 40, MONTHS2;
-var init_parent_label = __esm(() => {
-  init_types();
-  TIER_RANK2 = { public: 0, personal: 1, private: 2 };
-  MONTHS2 = [
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December"
-  ];
 });
 
 // src/core/source-index/router.ts
@@ -79053,36 +80151,6 @@ var init_evidence_pack = __esm(() => {
     [RECENT_ITEMS_CUT_SHORT, { suffix: ":recency", gap: recentItemsTimeoutGap }],
     [VISIBILITY_CHECK_CUT_SHORT, { suffix: ":visibility", gap: visibilityCheckTimeoutGap }]
   ]);
-});
-
-// src/core/secret-location-note.ts
-function secretLocationCoverageNote(count) {
-  return `${count} Secret(s) matched by location only; their contents are never read into an answer.`;
-}
-function secretLocationAnswer(locations) {
-  if (locations.length === 0)
-    return "";
-  const lead = locations.length === 1 ? "A matching item is stored as a Secret, so Olympus never shows it to an AI, this one included. Open it on this Mac:" : `${locations.length} matching items are stored as Secrets, so Olympus never shows them to an AI, this one included. Open them on this Mac:`;
-  return [lead, ...locations.map((location) => `- ${location.where}`)].join(`
-`);
-}
-function withoutSecretLocationCoverageNotes(answer) {
-  const lines = answer.split(`
-`);
-  if (!lines.some((line) => NOTE_LINE.test(line)))
-    return answer;
-  const kept = lines.filter((line) => !NOTE_LINE.test(line));
-  const heading = kept.lastIndexOf(NOTES_HEADING);
-  if (heading !== -1 && kept.slice(heading + 1).every((line) => !line.startsWith("- "))) {
-    const start = heading > 0 && kept[heading - 1] === "" ? heading - 1 : heading;
-    kept.splice(start, heading + 1 - start);
-  }
-  return kept.join(`
-`).replace(/\s+$/, "");
-}
-var NOTE_LINE, NOTES_HEADING = "Coverage notes:";
-var init_secret_location_note = __esm(() => {
-  NOTE_LINE = /^- \d+ Secret\(s\) matched by location only; their contents are never read into an answer\.$/;
 });
 
 // src/workers/source-index/analyst-pool.ts
@@ -86621,7 +87689,7 @@ var init_provider_store_sync = __esm(() => {
 });
 
 // src/workers/connector-store/locator-path-scope-codec.ts
-function locatorPathApprovedScopeCodec(sourceLabel2) {
+function locatorPathApprovedScopeCodec(sourceLabel3) {
   const invalid2 = (expectedPrefix) => ({
     kind: "invalid",
     message: `"approved_scope_key" must exactly match "${expectedPrefix}:<rooted path>" with no surrounding whitespace.`
@@ -86638,7 +87706,7 @@ function locatorPathApprovedScopeCodec(sourceLabel2) {
       if (scopedValue.startsWith("folder_id:")) {
         return {
           kind: "invalid",
-          message: `The "approved_scope_key" folder_id form cannot be served from connector-store data because ancestor folder ids are not persisted. Use a path-form ${sourceLabel2} scope.`
+          message: `The "approved_scope_key" folder_id form cannot be served from connector-store data because ancestor folder ids are not persisted. Use a path-form ${sourceLabel3} scope.`
         };
       }
       if (!scopedValue.startsWith("/") || scopedValue !== scopedValue.trim() || scopedValue !== "/" && scopedValue.endsWith("/")) {
@@ -89635,9 +90703,9 @@ function appendFields(lines, indent, record, skip, depth) {
       const base = key2.slice(0, -"_unixtime".length);
       if (base !== "" && scalarText(record[base]) !== undefined)
         continue;
-      const iso = unixTimeText(value);
-      if (iso) {
-        lines.push(`${indent}${labelOf(base === "" ? key2 : base)}: ${iso}`);
+      const iso2 = unixTimeText(value);
+      if (iso2) {
+        lines.push(`${indent}${labelOf(base === "" ? key2 : base)}: ${iso2}`);
         continue;
       }
     }
@@ -90358,8 +91426,8 @@ function telegramExportSenderId(value) {
     return;
   return telegramPeerId(found[1], found[2]);
 }
-function liveIso(iso) {
-  return iso?.replace(/\.000Z$/, "Z");
+function liveIso(iso2) {
+  return iso2?.replace(/\.000Z$/, "Z");
 }
 function sha2565(value) {
   return createHash59("sha256").update(value).digest("hex");
@@ -110874,10 +111942,10 @@ function guidedSessionLabel(connected, reauthRequired, sessionEvidence) {
     return "Pairing required";
   return sessionEvidence === "unconfirmed" ? "Session state not surfaced" : "Session ready";
 }
-function publisherOAuthSetupInstructions(sourceLabel2, actionLabel, byo) {
+function publisherOAuthSetupInstructions(sourceLabel3, actionLabel, byo) {
   return {
-    plain_intro: publisherConnectIntro(sourceLabel2),
-    agent_prompt: `Connect ${sourceLabel2} to Olympus from the Olympus dashboard: press ${actionLabel} on the ` + `${sourceLabel2} card, approve the access in the provider tab that opens, and come back to the dashboard. ` + "Olympus uses its own registered app, so there is nothing for me to create, register, or paste. " + "Do not ask me to edit files, configuration, or code.",
+    plain_intro: publisherConnectIntro(sourceLabel3),
+    agent_prompt: `Connect ${sourceLabel3} to Olympus from the Olympus dashboard: press ${actionLabel} on the ` + `${sourceLabel3} card, approve the access in the provider tab that opens, and come back to the dashboard. ` + "Olympus uses its own registered app, so there is nothing for me to create, register, or paste. " + "Do not ask me to edit files, configuration, or code.",
     provider_console_url: byo.provider_console_url,
     ...byo.google_cloud_project_id ? { google_cloud_project_id: byo.google_cloud_project_id } : {},
     diy_summary: byo.credential_file ? "Use my own Google app" : PUBLISHER_ADVANCED_BYO_SUMMARY,
@@ -110887,8 +111955,8 @@ function publisherOAuthSetupInstructions(sourceLabel2, actionLabel, byo) {
     advanced_byo: byo
   };
 }
-function publisherConnectIntro(sourceLabel2) {
-  return `Olympus connects ${sourceLabel2} through its own registered app. ` + "Press Connect, approve it with your account, and come back to this page.";
+function publisherConnectIntro(sourceLabel3) {
+  return `Olympus connects ${sourceLabel3} through its own registered app. ` + "Press Connect, approve it with your account, and come back to this page.";
 }
 function oauthSetupInstructions(source, googleCloudProjectId, redirectBaseUrl) {
   const clientIdField = {
@@ -111193,7 +112261,7 @@ function sourceCardFromCorpus(corpus, scheduler, _history, _now) {
   return {
     corpus_id: corpus.corpus_id,
     source_id: sourceId,
-    label: sourceLabel2(provider, corpus.family, corpus.trust_domain),
+    label: sourceLabel3(provider, corpus.family, corpus.trust_domain),
     provider,
     family: corpus.family,
     trust_domain: corpus.trust_domain,
@@ -111710,7 +112778,7 @@ function providerFromCorpusId2(corpusId) {
     return parts[1] ?? "source";
   return parts[0] ?? "source";
 }
-function sourceLabel2(provider, family, trustDomain) {
+function sourceLabel3(provider, family, trustDomain) {
   const providerText = {
     gmail: "Gmail",
     dropbox: "Dropbox",
@@ -113620,7 +114688,7 @@ function validateTierRulesFile(options = {}) {
   };
 }
 function parseOwnerTierRules(raw, label = "tier rules") {
-  const root = asRecord11(raw);
+  const root = asRecord12(raw);
   if (!root)
     throw new OperationError("config_error", `${label} must be a JSON object.`);
   if (root.schemaVersion !== TIER_RULES_SCHEMA_VERSION) {
@@ -113645,7 +114713,7 @@ function parseOwnerTierRules(raw, label = "tier rules") {
   });
 }
 function parseOwnerTierRule(raw, label = "tier rule") {
-  const record = asRecord11(raw);
+  const record = asRecord12(raw);
   if (!record)
     throw new OperationError("config_error", `${label} must be an object.`);
   const unknownKeys = Object.keys(record).filter((key2) => !["id", "source", "match", "tier", "strength"].includes(key2));
@@ -113675,7 +114743,7 @@ function parseOwnerTierRule(raw, label = "tier rule") {
   return { id, ...source ? { source } : {}, match, tier, strength };
 }
 function parseMatch(raw, label) {
-  const record = asRecord11(raw);
+  const record = asRecord12(raw);
   if (!record)
     throw new OperationError("config_error", `${label} must be an object.`);
   const keys = Object.keys(record);
@@ -113769,7 +114837,7 @@ function tightenPermissions(path) {
 function tierRulesRemedy(path) {
   return `Write the rules to ${path} (schemaVersion 1), or add them with \`olympus tier rules add\`.`;
 }
-function asRecord11(value) {
+function asRecord12(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 var TIER_RULES_SCHEMA_VERSION = 1, OLYMPUS_TIER_RULES_ENV = "OLYMPUS_TIER_RULES_PATH", OWNER_TIER_RULE_MATCH_KINDS, MAX_RULES = 500, MAX_VALUE_LENGTH = 240, RULE_ID_PATTERN, SOURCE_PATTERN, SENDER_PATTERN;
@@ -113809,7 +114877,7 @@ function readPrivacyProfile(options = {}) {
   } catch {
     throw new OperationError("config_error", `The privacy profile at ${path} is not valid JSON.`);
   }
-  const record = asRecord12(raw);
+  const record = asRecord13(raw);
   if (!record || record.schemaVersion !== PRIVACY_PROFILE_SCHEMA_VERSION) {
     throw new OperationError("config_error", `The privacy profile at ${path} must have schemaVersion ${PRIVACY_PROFILE_SCHEMA_VERSION}.`);
   }
@@ -113829,7 +114897,7 @@ function privacyOwnerContext(options = {}) {
   }
 }
 function parsePrivacyProfileInput(raw) {
-  const record = asRecord12(raw);
+  const record = asRecord13(raw);
   if (!record)
     throw invalid2("The privacy settings must be an object.");
   const unknownKeys = Object.keys(record).filter((key2) => key2 !== "description" && key2 !== "rules");
@@ -113867,7 +114935,7 @@ function parsePrivacyProfileInput(raw) {
   return out;
 }
 function parsePrivacyRule(raw) {
-  const record = asRecord12(raw);
+  const record = asRecord13(raw);
   if (!record)
     throw invalid2("Each rule must be an object.");
   const unknownKeys = Object.keys(record).filter((key3) => !["kind", "source_id", "key", "value", "display"].includes(key3));
@@ -113953,7 +115021,7 @@ function writePrivacyProfile(update, options = {}) {
 function invalid2(message2) {
   return new OperationError("invalid_params", message2);
 }
-function asRecord12(value) {
+function asRecord13(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 var PRIVACY_PROFILE_SCHEMA_VERSION = 1, OLYMPUS_PRIVACY_PROFILE_ENV = "OLYMPUS_PRIVACY_PROFILE_PATH", PRIVACY_DESCRIPTION_MAX_CHARS = 2000, PRIVACY_RULES_MAX = 100, PRIVACY_DISPLAY_MAX_CHARS = 200, PRIVACY_KEY_MAX_CHARS = 1024, PRIVACY_RULE_ID_PREFIX = "privacy-", PRIVACY_RULE_KINDS, RULE_SOURCES;
@@ -116142,6 +117210,159 @@ var init_delphi = __esm(() => {
   init_secret_store();
 });
 
+// src/core/source-index/selected-item-safety.ts
+function selectedItemContentFieldPath(value) {
+  return selectedItemContentFieldPathInner(value, "selected_items");
+}
+function selectedItemContentFieldPathInner(value, path) {
+  if (!value || typeof value !== "object")
+    return;
+  if (Array.isArray(value)) {
+    for (let index = 0;index < value.length; index += 1) {
+      const nested = selectedItemContentFieldPathInner(value[index], `${path}.${index}`);
+      if (nested)
+        return nested;
+    }
+    return;
+  }
+  for (const [key2, nestedValue] of Object.entries(value)) {
+    if (FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS.has(normalizeSelectedItemField(key2))) {
+      return `${path}.${key2}`;
+    }
+    const nested = selectedItemContentFieldPathInner(nestedValue, `${path}.${key2}`);
+    if (nested)
+      return nested;
+  }
+  return;
+}
+function normalizeSelectedItemField(key2) {
+  return key2.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+var FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS;
+var init_selected_item_safety = __esm(() => {
+  FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS = new Set([
+    "body",
+    "boundedtext",
+    "chunk",
+    "chunks",
+    "content",
+    "document",
+    "html",
+    "markdown",
+    "message",
+    "messages",
+    "packet",
+    "passage",
+    "raw",
+    "rawpacket",
+    "rawsource",
+    "rawtext",
+    "snippet",
+    "sourcepacket",
+    "sourcesnippet",
+    "sourcetext",
+    "text"
+  ]);
+});
+
+// src/core/source-index/selected-items.ts
+function optionalSourceAnswerSelectedItems(value, fallbackCorpusId) {
+  if (value === undefined || value === null || value === "")
+    return;
+  if (!Array.isArray(value)) {
+    throw new OperationError("invalid_params", "selected_items must be an array.");
+  }
+  return value.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new OperationError("invalid_params", `selected_items.${index} must be an object.`);
+    }
+    const initialRecord = item;
+    const forbiddenPath = selectedItemContentFieldPath(initialRecord);
+    if (forbiddenPath) {
+      throw new OperationError("invalid_params", `selected_items.${index} must not include source content field ${forbiddenPath}.`);
+    }
+    const record = selectedItemRecord(initialRecord, fallbackCorpusId);
+    return {
+      corpus_id: requiredSelectedItemString(record.corpus_id, `selected_items.${index}.corpus_id`),
+      family: requiredSelectedItemString(record.family, `selected_items.${index}.family`),
+      provider: requiredSelectedItemString(record.provider, `selected_items.${index}.provider`),
+      account_scope: requiredSelectedItemString(record.account_scope, `selected_items.${index}.account_scope`),
+      provider_item_id: requiredSelectedItemString(record.provider_item_id, `selected_items.${index}.provider_item_id`),
+      local_item_id: requiredSelectedItemString(record.local_item_id, `selected_items.${index}.local_item_id`),
+      ...optionalSelectedItemString(record.provider_thread_id, "provider_thread_id"),
+      ...optionalSelectedItemString(record.provider_conversation_id, "provider_conversation_id"),
+      ...optionalSelectedItemString(record.provider_file_id, "provider_file_id"),
+      ...optionalSelectedItemString(record.source_version, "source_version"),
+      ...optionalSelectedItemString(record.conversation_label, "conversation_label"),
+      ...optionalSelectedItemString(record.author_label, "author_label"),
+      ...optionalSelectedItemString(record.authored_at, "authored_at")
+    };
+  });
+}
+function selectedItemRecord(record, fallbackCorpusId) {
+  const selectedItem = record.selected_item;
+  if (selectedItem && typeof selectedItem === "object" && !Array.isArray(selectedItem)) {
+    return selectedItem;
+  }
+  const sourceItem = record.sourceItem;
+  if (sourceItem && typeof sourceItem === "object" && !Array.isArray(sourceItem)) {
+    const source = sourceItem;
+    return {
+      corpus_id: record.corpus_id ?? fallbackCorpusId,
+      family: source.family,
+      provider: source.provider,
+      account_scope: source.accountScope,
+      provider_item_id: source.providerItemId,
+      local_item_id: source.localItemId,
+      provider_thread_id: source.providerThreadId,
+      provider_conversation_id: source.providerConversationId,
+      provider_file_id: source.providerFileId,
+      source_version: source.sourceVersion
+    };
+  }
+  return {
+    ...record,
+    account_scope: record.account_scope ?? record.accountScope,
+    provider_item_id: record.provider_item_id ?? record.providerItemId,
+    local_item_id: record.local_item_id ?? record.localItemId,
+    provider_thread_id: record.provider_thread_id ?? record.providerThreadId,
+    provider_conversation_id: record.provider_conversation_id ?? record.providerConversationId,
+    provider_file_id: record.provider_file_id ?? record.providerFileId,
+    source_version: record.source_version ?? record.sourceVersion
+  };
+}
+function requiredSelectedItemString(value, name) {
+  if (typeof value !== "string" || value.trim().length === 0 || value.length > 500) {
+    throw new OperationError("invalid_params", `${name} must be a non-empty safe identifier string.`);
+  }
+  return value.trim();
+}
+function optionalSelectedItemString(value, key2) {
+  if (value === undefined || value === null || value === "")
+    return {};
+  if (typeof value !== "string" || value.length > 1000) {
+    throw new OperationError("invalid_params", `selected_items.${key2} must be a safe string.`);
+  }
+  return { [key2]: value.trim() };
+}
+function sourceItemReadSelectedItem(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new OperationError("invalid_params", "selected_item is required.");
+  return optionalSourceAnswerSelectedItems([value])[0];
+}
+function sourceItemReadPage(value, name, max2 = Number.MAX_SAFE_INTEGER) {
+  if (value === undefined)
+    return 1;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > max2) {
+    throw new OperationError("invalid_params", `${name} must be an integer from 1 to ${max2}.`);
+  }
+  return value;
+}
+var init_selected_items = __esm(() => {
+  init_operation_error();
+  init_selected_item_safety();
+});
+
 // src/core/email-policy.ts
 function assertNoRawEmailFields(value) {
   assertNoRawEmailFieldsAtPath(value, []);
@@ -116183,28 +117404,6 @@ var init_email_policy = __esm(() => {
     "vectors"
   ]);
 });
-
-// src/core/privacy-backlog-coverage.ts
-function privacyBacklogCoverageNote(pendingItems, audience = "remote") {
-  if (pendingItems === undefined || !Number.isSafeInteger(pendingItems) || pendingItems <= 0)
-    return;
-  const one = pendingItems === 1;
-  if (audience === "local") {
-    return `Olympus is still checking ${pendingItems} new item${one ? "" : "s"} for privacy. ` + `Until then ${one ? "it is" : "they are"} found by exact words only, not by meaning. ` + "This can take a while on this computer.";
-  }
-  return `Olympus is still checking ${pendingItems} new item${one ? "" : "s"} for privacy before ${one ? "it" : "they"} can be searched. ` + "This can take a while on this computer.";
-}
-function withCoverageNote(answer, note) {
-  if (!note)
-    return answer;
-  if (/\n\nCoverage notes:\n(- [^\n]*\n?)+$/.test(answer))
-    return `${answer.replace(/\s+$/, "")}
-- ${note}`;
-  return `${answer.replace(/\s+$/, "")}
-
-Coverage notes:
-- ${note}`;
-}
 
 // src/core/email.ts
 class EmailClient {
@@ -116309,7 +117508,7 @@ class EmailClient {
         ...options.caller ? { caller: operationCallerToWire(options.caller) } : {}
       })
     }, options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : undefined);
-    const data2 = asRecord13(response);
+    const data2 = asRecord14(response);
     assertNoRawEmailFields(data2);
     assertNoSourceIndexOperationalLeakFields(data2);
     const ticket = data2._release_ticket;
@@ -116346,7 +117545,7 @@ class EmailClient {
     if (!ticket)
       return withheldSourceAnswer("Olympus withheld this answer because the engine did not provide a privacy release ticket. Update Olympus, then ask again.");
     try {
-      const verdict = asRecord13(await this.transport.requestJson(`${this.config.email.baseUrl}/source/answer/release`, {
+      const verdict = asRecord14(await this.transport.requestJson(`${this.config.email.baseUrl}/source/answer/release`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ticket })
@@ -116395,7 +117594,7 @@ class EmailClient {
         ...options.query ? { query: options.query } : {}
       })
     });
-    const data2 = asRecord13(response);
+    const data2 = asRecord14(response);
     assertNoRawEmailFields(data2);
     assertNoSourceIndexOperationalLeakFields(data2);
     return parseSourceIndexStatusResult(data2);
@@ -116412,7 +117611,7 @@ class EmailClient {
         ...options.maxSeconds !== undefined ? { max_seconds: options.maxSeconds } : {}
       })
     }, { timeoutMs: ((options.maxSeconds ?? 240) + 600) * 1000 });
-    const data2 = asRecord13(response);
+    const data2 = asRecord14(response);
     assertNoRawEmailFields(data2);
     return data2;
   }
@@ -116428,9 +117627,40 @@ class EmailClient {
         ...options.limit !== undefined ? { limit: options.limit } : {}
       })
     });
-    const data2 = asRecord13(response);
+    const data2 = asRecord14(response);
     assertNoRawEmailFields(data2);
     return data2;
+  }
+  async sourceItemRead(options) {
+    if (!isSourceIndexReadSurfaceEnabled(this.config))
+      throw new OperationError("source_index_not_enabled", "Source-index read is disabled.");
+    if (!this.config.email.enabled)
+      throw new OperationError("email_not_configured", "Private source worker is disabled.");
+    const selected = sourceItemReadSelectedItem(options.selectedItem);
+    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/item/read`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ selected_item: selected, page: sourceItemReadPage(options.page, "page"), pages: sourceItemReadPage(options.pages, "pages", 3) })
+    });
+    assertNoRawEmailFields(response);
+    assertNoSourceIndexOperationalLeakFields(response);
+    const result = parseSourceItemReadResult(response);
+    if (result.couldNotRead.includes("not_personal"))
+      throw new OperationError("not_personal", "Private item: ask with source_answer");
+    if (result.pages.length > 0)
+      recordReleaseManifest({
+        inputs: [{
+          corpusId: selected.corpus_id,
+          provider: selected.provider,
+          accountScope: selected.account_scope,
+          providerItemId: selected.provider_item_id,
+          ...selected.provider_conversation_id ? { providerConversationId: selected.provider_conversation_id } : {},
+          privateAtAnswer: false,
+          personalContent: true
+        }],
+        constraints: { secureDerivativeDefault: "approval", includeSecureLocalContent: false }
+      });
+    return result;
   }
   async sourceIndexSearch(options) {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) {
@@ -116468,7 +117698,7 @@ class EmailClient {
         ...options.allTiers !== undefined ? { all_tiers: options.allTiers } : {}
       })
     });
-    const data2 = asRecord13(response);
+    const data2 = asRecord14(response);
     assertNoRawEmailFields(data2);
     assertNoSourceIndexOperationalLeakFields(data2);
     return parseSourceIndexSearchResult(data2, {
@@ -116617,7 +117847,8 @@ function isAllowlistedEmailWorkerErrorResponse(status, url) {
   if (status !== 403)
     return false;
   try {
-    return new URL(url).pathname.endsWith("/source/answer");
+    const path = new URL(url).pathname;
+    return path.endsWith("/source/answer") || path.endsWith("/source/item/read");
   } catch {
     return false;
   }
@@ -116729,7 +117960,7 @@ function hasUniqueJsonObjectMembers(input) {
     return false;
   }
 }
-function asRecord13(value) {
+function asRecord14(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new OperationError("email_error", "Private email lane response was not a JSON object.");
   }
@@ -116759,8 +117990,8 @@ function parseSourceIndexAnswerResult(value) {
   if (!Array.isArray(value.evidence)) {
     throw new OperationError("email_error", "source answer evidence must be an array.");
   }
-  const audit = asRecord13(value.audit);
-  const policy = asRecord13(value.policy);
+  const audit = asRecord14(value.audit);
+  const policy = asRecord14(value.policy);
   if (audit.raw_source_exposed !== false) {
     throw new OperationError("email_error", "source answer audit must be raw-source-safe.");
   }
@@ -116804,7 +118035,7 @@ function parseSecretLocations(value) {
     throw new OperationError("email_error", "secret_locations must be an array.");
   }
   return value.map((entry) => {
-    const record = asRecord13(entry);
+    const record = asRecord14(entry);
     const allowed = new Set(["source", "ref", "locator", "title", "finding_kinds"]);
     const extra = Object.keys(record).filter((key2) => !allowed.has(key2));
     if (extra.length > 0 || typeof record.source !== "string" || typeof record.ref !== "string" || !Array.isArray(record.finding_kinds) || record.locator !== undefined && typeof record.locator !== "string" || record.title !== undefined && typeof record.title !== "string" || record.finding_kinds.some((kind) => typeof kind !== "string")) {
@@ -116820,7 +118051,7 @@ function parseSecretLocations(value) {
   });
 }
 function parseSourceAnswerSelfHealAudit(value) {
-  const audit = asRecord13(value);
+  const audit = asRecord14(value);
   const outcome = audit.outcome;
   if (outcome !== "healed" && outcome !== "in_progress" && outcome !== "failed" && outcome !== "skipped") {
     return;
@@ -116847,7 +118078,7 @@ function parseSourceAnswerSelfHealAudit(value) {
   if (typeof audit.reason === "string")
     parsed.reason = audit.reason;
   if (audit.prior_state !== undefined) {
-    const prior = asRecord13(audit.prior_state);
+    const prior = asRecord14(audit.prior_state);
     parsed.prior_state = {
       ...typeof prior.extraction_status === "string" ? { extraction_status: prior.extraction_status } : {},
       ...typeof prior.extraction_completeness === "string" ? { extraction_completeness: prior.extraction_completeness } : {}
@@ -116856,7 +118087,7 @@ function parseSourceAnswerSelfHealAudit(value) {
   return parsed;
 }
 function parseSourceAnswerPhaseTimings(value) {
-  const timings = asRecord13(value);
+  const timings = asRecord14(value);
   const parsed = {
     lane_setup_ms: requiredNonNegativeNumber(timings.lane_setup_ms, "audit.phase_timings.lane_setup_ms"),
     bulk_gate_ms: requiredNonNegativeNumber(timings.bulk_gate_ms, "audit.phase_timings.bulk_gate_ms"),
@@ -116877,7 +118108,7 @@ function parseSourceAnswerPhaseTimings(value) {
   return parsed;
 }
 function parseSourceAnswerSynthesisAudit(value) {
-  const audit = asRecord13(value);
+  const audit = asRecord14(value);
   if (audit.raw_source_exposed !== false) {
     throw new OperationError("email_error", "source answer synthesis audit must be raw-source-safe.");
   }
@@ -116896,7 +118127,7 @@ function parseSourceAnswerSynthesisAudit(value) {
   };
 }
 function parseSourceAnswerAnalystFallback(value) {
-  const fallback = asRecord13(value);
+  const fallback = asRecord14(value);
   const from = fallback.from === "venice" || fallback.from === "cloud" ? fallback.from : undefined;
   const reason = fallback.reason === "timeout" || fallback.reason === "escalation" || fallback.reason === "unavailable" || isSanitizedAnalystFallbackReason(fallback.reason) ? fallback.reason : undefined;
   if (!from || fallback.to !== "local" || !reason) {
@@ -116917,7 +118148,7 @@ function parseSourceIndexStatusResult(value) {
   if (value.kind !== "source_index_status") {
     throw new OperationError("email_error", "source index status result must have kind=source_index_status.");
   }
-  const policy = asRecord13(value.policy);
+  const policy = asRecord14(value.policy);
   if (policy.read_only !== true || policy.raw_source_exposed !== false || policy.source_packets_exposed !== false || policy.source_text_returned !== false || policy.secure_local_item_metadata_exposed !== false || policy.castor_visible !== true) {
     throw new OperationError("email_error", "source index status policy must describe a read-only calling-assistant-visible result.");
   }
@@ -116959,7 +118190,7 @@ function parseSourceIndexSearchResult(value, context2) {
   if (!corpus) {
     throw new OperationError("email_error", "source index search returned an unsupported corpus.");
   }
-  const auditRecord = asRecord13(value.audit);
+  const auditRecord = asRecord14(value.audit);
   const tierCorpora = Array.isArray(auditRecord.searched_corpora) ? auditRecord.searched_corpora.map((searchedId) => {
     const entry = typeof searchedId === "string" ? createSourceCorpusRegistry(context2.config.sourceIndex.corpusRegistry).list().find((candidate) => candidate.corpusId === searchedId) : undefined;
     if (!entry || entry.sourceId !== corpus.sourceId) {
@@ -116971,8 +118202,8 @@ function parseSourceIndexSearchResult(value, context2) {
   if (!Array.isArray(value.hits)) {
     throw new OperationError("email_error", "source index search hits must be an array.");
   }
-  const audit = asRecord13(value.audit);
-  const policy = asRecord13(value.policy);
+  const audit = asRecord14(value.audit);
+  const policy = asRecord14(value.policy);
   const sourceTextReturned = audit.source_text_returned === true || policy.source_text_returned === true;
   const sourceTextAllowed = sourceTextReturned === false || corpusId === "internal.x.bookmarks" && policy.trust_domain === "internal" && audit.raw_source_exposed === false && policy.raw_source_exposed === false;
   if (audit.raw_source_exposed !== false || policy.raw_source_exposed !== false || audit.source_text_returned !== false && audit.source_text_returned !== true || policy.source_text_returned !== false && policy.source_text_returned !== true || !sourceTextAllowed || policy.source_packets_exposed !== false || typeof policy.local_only !== "boolean" || expectedTrustDomain === "secure_local" && policy.local_only !== true || policy.trust_domain !== expectedTrustDomain) {
@@ -117059,13 +118290,13 @@ function withSourceWatchHeaders(route) {
   return headers;
 }
 function parseSourceWatchResult(value, kind) {
-  const record = asRecord13(value);
+  const record = asRecord14(value);
   assertNoRawEmailFields(record);
   assertNoSourceIndexOperationalLeakFields(record);
   if (record.kind !== kind) {
     throw new OperationError("email_error", `Source watch result must have kind=${kind}.`);
   }
-  const policy = asRecord13(record.policy);
+  const policy = asRecord14(record.policy);
   if (policy.raw_source_exposed !== false || policy.source_text_returned !== false || policy.message_bodies_returned !== false || policy.evidence_pointers_only !== true) {
     throw new OperationError("email_error", "Source watch result must be content-free and evidence-pointer-only.");
   }
@@ -117078,7 +118309,7 @@ function parseSourceWatchResult(value, kind) {
   if (kind === "source_watch") {
     return {
       kind,
-      watch: asRecord13(record.watch),
+      watch: asRecord14(record.watch),
       policy: safePolicy
     };
   }
@@ -117087,7 +118318,7 @@ function parseSourceWatchResult(value, kind) {
   }
   return {
     kind,
-    watches: record.watches.map(asRecord13),
+    watches: record.watches.map(asRecord14),
     ...typeof record.next_cursor === "string" ? { next_cursor: record.next_cursor } : {},
     policy: safePolicy
   };
@@ -117196,14 +118427,14 @@ function assertNoSourceIndexOperationalLeakFieldsAtPath(value, path) {
   }
 }
 function parseSourceAnswerOpsec(value) {
-  const opsec = asRecord13(value);
+  const opsec = asRecord14(value);
   if (opsec.raw_source_exposed !== false) {
     throw new OperationError("email_error", "source answer OPSEC audit must be raw-source-safe.");
   }
   if (!Array.isArray(opsec.structured_evidence)) {
     throw new OperationError("email_error", "source answer OPSEC audit must include structured evidence.");
   }
-  const releaseDecision = asRecord13(opsec.release_decision);
+  const releaseDecision = asRecord14(opsec.release_decision);
   if (typeof releaseDecision.decision !== "string" || !Array.isArray(releaseDecision.reasons)) {
     throw new OperationError("email_error", "source answer OPSEC audit must include a release decision.");
   }
@@ -117222,6 +118453,8 @@ async function safeText2(response) {
 }
 var MAX_EMAIL_WORKER_ERROR_MESSAGE_LENGTH = 512, MAX_EMAIL_WORKER_ERROR_BODY_LENGTH, PASSTHROUGH_EMAIL_WORKER_ERROR_CODES, CONSULT_ASK_CLIENT_TIMEOUT_MS, sourceAnswerTickets, MAX_EMAIL_REQUEST_TIMEOUT_MS = 600000, SOURCE_INDEX_LOCATOR_KEYS, DROPBOX_LOCATOR_REQUIRED_KEYS, DROPBOX_LOCATOR_OPTIONAL_KEYS, FORBIDDEN_SOURCE_INDEX_OPERATIONAL_KEYS;
 var init_email = __esm(() => {
+  init_source_item_read();
+  init_selected_items();
   init_release_manifest();
   init_worker_transport();
   init_config();
@@ -117234,6 +118467,7 @@ var init_email = __esm(() => {
   init_worker_auth();
   MAX_EMAIL_WORKER_ERROR_BODY_LENGTH = 8 * 1024;
   PASSTHROUGH_EMAIL_WORKER_ERROR_CODES = new Map([
+    ["not_personal", "not_personal"],
     ["unsupported_filter", "unsupported_filter"],
     ["invalid_request", "invalid_request"],
     ["source_index_policy_violation", "source_index_policy_violation"]
@@ -117301,780 +118535,6 @@ function shouldExposeOperation(operation, context2) {
 var init_operation_exposure = __esm(() => {
   init_config();
   init_public_surface();
-});
-
-// src/core/remote-result.ts
-function providerSourceLabel(provider) {
-  return Object.prototype.hasOwnProperty.call(PROVIDER_LABELS, provider) ? PROVIDER_LABELS[provider] : undefined;
-}
-function sourceLabel3(provider, family) {
-  if (typeof provider === "string" && Object.prototype.hasOwnProperty.call(PROVIDER_LABELS, provider))
-    return PROVIDER_LABELS[provider];
-  if (typeof family === "string" && Object.prototype.hasOwnProperty.call(FAMILY_LABELS, family))
-    return FAMILY_LABELS[family];
-  return OTHER_SOURCE_LABEL;
-}
-function oneOf(value, allowed) {
-  return typeof value === "string" && allowed.includes(value) ? value : undefined;
-}
-function withheldParams(operation) {
-  return Object.prototype.hasOwnProperty.call(REMOTE_WITHHELD_PARAMS, operation) ? REMOTE_WITHHELD_PARAMS[operation] ?? [] : [];
-}
-function remoteDeclaredParams(operation, declared) {
-  const withheld = withheldParams(operation);
-  return declared.filter((name) => !withheld.includes(name));
-}
-function remoteToolDescription(operation, description) {
-  return Object.prototype.hasOwnProperty.call(REMOTE_DESCRIPTIONS, operation) ? REMOTE_DESCRIPTIONS[operation] ?? description : description;
-}
-function remoteToolSchema(operation, schema) {
-  const withheld = withheldParams(operation);
-  if (withheld.length === 0)
-    return schema;
-  const properties = asRecord14(schema.properties) ?? {};
-  const required3 = Array.isArray(schema.required) ? schema.required : [];
-  return {
-    ...schema,
-    properties: Object.fromEntries(Object.entries(properties).filter(([name]) => !withheld.includes(name))),
-    required: required3.filter((name) => typeof name === "string" && !withheld.includes(name))
-  };
-}
-function remoteWithheldParam(operation, args) {
-  const withheld = withheldParams(operation);
-  return Object.keys(args).filter((name) => withheld.includes(name)).sort()[0];
-}
-async function remoteOperationOutputOffThread(operation, raw, options = {}) {
-  const check = options.releaseCheck;
-  if (!["source_answer", "source_answer_result"].includes(operation) || pendingOutput(raw) || isAnonymousAnswerResult(raw)) {
-    return remoteOperationOutput(operation, raw, options);
-  }
-  if (!check)
-    return remoteOperationOutput(operation, raw, { ...options, releaseCheck: {
-      inputs: (inputs) => inputs.map(() => ({ tier: "unknown", gone: false })),
-      secureDerivativeDefault: () => "approval"
-    } });
-  let verdicts;
-  try {
-    const inputs = (options.releaseManifests ?? []).flatMap((manifest) => manifest.inputs);
-    const chunks = await checkReleaseChunks(check, inputs);
-    verdicts = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
-    if (chunks.withheldPassages > 0)
-      verdicts = inputs.map((input, index) => {
-        const tier = verdicts[index];
-        return tier?.tier === "secret" ? tier : { tier: "unknown", gone: false };
-      });
-  } catch {}
-  const verified = {
-    inputs: () => {
-      if (!verdicts)
-        throw new Error("Release unavailable");
-      return verdicts;
-    },
-    secureDerivativeDefault: () => check.secureDerivativeDefault()
-  };
-  return remoteOperationOutput(operation, raw, { ...options, releaseCheck: verified });
-}
-function remoteOperationOutput(operation, raw, options = {}) {
-  const pending = pendingOutput(raw);
-  switch (operation) {
-    case "source_answer":
-      return pending ?? sourceAnswerOutput(raw, options);
-    case "ask_anonymously":
-      return pending ?? anonymousAnswerOutput(raw);
-    case "source_answer_result":
-      return pending ?? (isAnonymousAnswerResult(raw) ? anonymousAnswerOutput(raw) : sourceAnswerOutput(raw, options));
-    case "source_index_status":
-      return sourceIndexStatusOutput(raw);
-    default:
-      throw new OperationError("invalid_request", `No remote output for operation ${operation}.`);
-  }
-}
-function isAnonymousAnswerResult(raw) {
-  const record = asRecord14(raw);
-  return record !== undefined && typeof record.ok === "boolean" && typeof record.answer !== "string";
-}
-function pendingOutput(raw) {
-  const record = asRecord14(raw);
-  if (record?.status !== "working")
-    return;
-  if (typeof record.job_id !== "string" || !JOB_ID.test(record.job_id) || isSecretLike(record.job_id)) {
-    throw new OperationError("source_index_error", "unexpected pending shape");
-  }
-  return {
-    status: "working",
-    job_id: record.job_id,
-    elapsed_ms: wholeNumber(record.elapsed_ms),
-    next_tool: "source_answer_result",
-    message: REMOTE_PENDING_MESSAGE
-  };
-}
-function sourceAnswerOutput(raw, options) {
-  const record = asRecord14(raw);
-  if (!record || typeof record.answer !== "string" || !Array.isArray(record.evidence)) {
-    throw new OperationError("source_index_error", "unexpected answer shape");
-  }
-  const evidence = record.evidence.map(asRecord14).filter((entry) => entry !== undefined);
-  let dropped = new Set;
-  if (options.releaseCheck) {
-    const recheck = recheckRelease(evidence, options.releaseManifests ?? [], options.releaseCheck);
-    if ("withhold" in recheck)
-      return withheldAnswer(recheck.withhold, evidence.length);
-    dropped = recheck.dropped;
-  }
-  if (isSecretLike(record.answer))
-    return withheldAnswer(REMOTE_ANSWER_WITHHELD, evidence.length);
-  const answer = scannedText(withoutSecretLocationCoverageNotes(record.answer), MAX_ANSWER, "multiline");
-  if (answer.secret)
-    return withheldAnswer(REMOTE_ANSWER_WITHHELD, evidence.length);
-  const citations = [];
-  const released = [];
-  evidence.forEach((entry, index) => {
-    if (dropped.has(index) || citations.length >= MAX_CITATIONS)
-      return;
-    const citation = citationOutput(entry);
-    citations.push(citation);
-    released.push(releasedItemFromEvidence(entry, String(citation.label), typeof citation.title === "string" ? citation.title : undefined));
-  });
-  noteReleasedItems(released);
-  const privacyCoverage = privacyBacklogCoverageNote(options.pendingPrivacyItems);
-  const coverageSuffix = privacyCoverage ? `
-
-Coverage notes:
-- ${privacyCoverage}` : "";
-  return {
-    kind: "source_answer",
-    status: "answered",
-    answer: (answer.text ?? "").slice(0, MAX_ANSWER - coverageSuffix.length) + coverageSuffix,
-    citations
-  };
-}
-function withRemotePrivateNote(output, answerId, secretMatch = false) {
-  return output.kind === "source_answer" && output.status === "answered" ? { ...output, private_note: remotePrivateNote(answerId, secretMatch) } : output;
-}
-function remotePrivateNote(answerId, secretMatch = false) {
-  const pointer = answerId && PRIVATE_ANSWER_ID.test(answerId) ? `${REMOTE_PRIVATE_NOTE} [Open answer](olympus://open/private/${answerId})` : REMOTE_PRIVATE_NOTE;
-  return secretMatch ? `${pointer} ${REMOTE_SECRET_NOTE}` : pointer;
-}
-function withheldAnswer(message2, heldBack = 0) {
-  noteReleasedItems([], heldBack, true);
-  return { kind: "source_answer", status: "withheld", answer: message2, citations: [] };
-}
-function recheckRelease(evidence, manifests, check) {
-  if (manifests.length === 0) {
-    console.error("[olympus:remote] release_manifest_missing");
-    return { withhold: REMOTE_ANSWER_UNVERIFIED };
-  }
-  const inputs = manifests.flatMap((manifest) => manifest.inputs.map((input) => ({ input, manifest })));
-  let verdicts;
-  let postureNow;
-  try {
-    verdicts = check.inputs(inputs.map(({ input }) => input));
-    if (verdicts.length !== inputs.length)
-      throw new Error("release check returned the wrong number of verdicts");
-    postureNow = check.secureDerivativeDefault();
-  } catch (error) {
-    console.error(`[olympus:remote] release_check_failed error_message=${boundedLogErrorMessage(error)}`);
-    return { withhold: REMOTE_ANSWER_UNVERIFIED };
-  }
-  if (verdicts.some((verdict) => verdict.tier === "secret"))
-    return { withhold: REMOTE_ANSWER_CHANGED };
-  if (verdicts.some((verdict) => verdict.tier === "unknown"))
-    return { withhold: REMOTE_ANSWER_UNVERIFIED };
-  if (verdicts.some((verdict) => verdict.hiddenByParent === true))
-    return { withhold: REMOTE_ANSWER_UNVERIFIED };
-  for (const [index, { input, manifest }] of inputs.entries()) {
-    const verdict = verdicts[index];
-    if (input.dependency === "parent_label" && verdict.gone)
-      return { withhold: REMOTE_ANSWER_UNVERIFIED };
-    if (!privateInputReleaseAllowed(input, verdict, manifest.constraints, postureNow))
-      return { withhold: input.privateAtAnswer ? REMOTE_ANSWER_WITHHELD : REMOTE_ANSWER_CHANGED };
-  }
-  const dropped = new Set;
-  for (const [index, entry] of evidence.entries()) {
-    const matches = inputs.flatMap(({ input }, position) => citesInput(entry, input) ? [verdicts[position]] : []);
-    if (matches.length === 0) {
-      console.error("[olympus:remote] release_manifest_incomplete");
-      return { withhold: REMOTE_ANSWER_UNVERIFIED };
-    }
-    if (matches.some((verdict) => verdict.gone))
-      dropped.add(index);
-  }
-  return { dropped };
-}
-function citesInput(entry, input) {
-  return input.dependency !== "parent_label" && entry.corpus_id === input.corpusId && entry.provider === input.provider && entry.provider_item_id === input.providerItemId && (typeof entry.provider_conversation_id === "string" && entry.provider_conversation_id ? entry.provider_conversation_id : undefined) === input.providerConversationId;
-}
-function citationOutput(entry) {
-  const title = scannedText(entry.title, MAX_TITLE, "line");
-  const date = dateOnly(entry.authored_at) ?? dateOnly(entry.updated_at);
-  const parent = keptText(entry.parent_label, PARENT_LABEL_MAX_CHARS, "line");
-  const composed = title.secret ? { secret: true } : scannedText(citationTitleWithParent(title.text, parent), MAX_TITLE, "line");
-  return {
-    label: sourceLabel3(entry.provider, entry.family),
-    ...composed.text && !composed.secret ? { title: composed.text } : {},
-    ...date ? { date } : {}
-  };
-}
-function anonymousAnswerOutput(raw) {
-  const record = asRecord14(raw);
-  if (!record || typeof record.ok !== "boolean") {
-    throw new OperationError("email_error", "unexpected anonymous answer shape");
-  }
-  if (record.ok) {
-    if (typeof record.reply !== "string")
-      throw new OperationError("email_error", "unexpected anonymous answer shape");
-    const reply = scannedText(record.reply, MAX_ANSWER, "multiline");
-    const sent2 = keptText(record.sent, MAX_SENT, "multiline");
-    const route = keptText(record.route, MAX_ROUTE, "line");
-    const note = keptText(record.note, MAX_MESSAGE, "line");
-    const model = typeof record.model === "string" && MODEL_ID.test(record.model) && !isSecretLike(record.model) ? record.model : undefined;
-    const cleanup = oneOf(record.cleanup, CLEANUPS);
-    return {
-      kind: "anonymous_answer",
-      status: "answered",
-      reply: reply.secret ? REMOTE_REPLY_WITHHELD : reply.text ?? "",
-      level: record.level === "strict" ? "strict" : "standard",
-      rewritten: record.rewritten === true,
-      remembered: record.remembered === true,
-      network_identity: oneOf(record.networkIdentity, NETWORK_IDENTITIES) ?? "not_verified",
-      ...cleanup ? { cleanup } : {},
-      ...model ? { model } : {},
-      ...route ? { route } : {},
-      ...sent2 ? { sent: sent2 } : {},
-      ...note ? { note } : {},
-      ...typeof record.providerNote === "string" ? { provider_note: REMOTE_PROVIDER_UNKNOWN_NOTE } : {}
-    };
-  }
-  if (record.code === "needs_choice") {
-    const options = asRecord14(record.options);
-    return {
-      kind: "anonymous_answer",
-      status: "needs_choice",
-      message: REMOTE_NEEDS_CHOICE_MESSAGE,
-      options: {
-        suggested_level: options?.suggestedLevel === "strict" ? "strict" : "standard",
-        suggested_cleanup: oneOf(options?.suggestedCleanup, CLEANUPS) ?? "as_written",
-        custom_instruction: options?.customInstruction === true
-      }
-    };
-  }
-  const sent = keptText(record.sent, MAX_SENT, "multiline");
-  const outcome = oneOf(record.outcome, OUTCOMES);
-  const daemonCode = oneOf(record.daemonCode, REMOTE_DAEMON_CODES);
-  return {
-    kind: "anonymous_answer",
-    status: "refused",
-    code: oneOf(record.code, REMOTE_REFUSAL_CODES) ?? "refused",
-    message: keptText(record.message, MAX_MESSAGE, "line") ?? REMOTE_REFUSAL_FALLBACK,
-    ...outcome ? { outcome } : {},
-    ...daemonCode ? { daemon_code: daemonCode } : {},
-    ...sent ? { sent } : {}
-  };
-}
-function sourceIndexStatusOutput(raw) {
-  const record = asRecord14(raw);
-  if (!record || record.kind !== "source_index_status" || !Array.isArray(record.corpora)) {
-    throw new OperationError("source_index_error", "unexpected status shape");
-  }
-  const generatedAt = iso(record.generated_at);
-  const corpora = [];
-  for (const value of record.corpora) {
-    if (corpora.length >= MAX_CORPORA)
-      break;
-    const corpus = asRecord14(value);
-    if (!corpus || typeof corpus.corpus_id !== "string" || corpus.corpus_id.length > 128 || !CORPUS_ID.test(corpus.corpus_id) || isSecretLike(corpus.corpus_id))
-      continue;
-    const retrieval = asRecord14(corpus.retrieval);
-    const mode = oneOf(retrieval?.servable_mode, RETRIEVAL_MODES);
-    const state = oneOf(retrieval?.state, RETRIEVAL_STATES);
-    const refresh = asRecord14(corpus.last_refresh);
-    const refreshStatus = oneOf(refresh?.status, REFRESH_STATUSES);
-    const completedAt = iso(refresh?.completed_at);
-    const counts = asRecord14(corpus.counts);
-    const trustDomain = oneOf(corpus.trust_domain, TRUST_DOMAINS);
-    corpora.push({
-      corpus_id: corpus.corpus_id,
-      label: sourceLabel3(corpus.provider, corpus.family),
-      ...trustDomain ? { trust_domain: trustDomain } : {},
-      configured: corpus.configured === true,
-      ...mode && state ? { retrieval: { mode, state } } : {},
-      ...refreshStatus ? { last_refresh: { status: refreshStatus, ...completedAt ? { completed_at: completedAt } : {} } } : {},
-      ...counts ? {
-        counts: {
-          indexed_items: wholeNumber(counts.indexed_items),
-          chunks: wholeNumber(counts.chunks),
-          embedded_chunks: wholeNumber(counts.embedded_chunks)
-        }
-      } : {}
-    });
-  }
-  return { kind: "source_index_status", ...generatedAt ? { generated_at: generatedAt } : {}, corpora };
-}
-function remoteRetryAfterSeconds(body) {
-  if (!body || typeof body !== "object")
-    return;
-  const value = body.retry_after_seconds;
-  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 86400 ? value : undefined;
-}
-function remoteErrorCode(error) {
-  if (error instanceof OperationError && Object.prototype.hasOwnProperty.call(REMOTE_ERROR_TEXT, error.code))
-    return error.code;
-  return "internal_error";
-}
-function remoteErrorOutput(error, options = {}) {
-  const code = remoteErrorCode(error);
-  if (code === "invalid_params" && options.declaredParams && error instanceof OperationError) {
-    const param = namedParam(error.message, options.declaredParams);
-    if (param)
-      return { error: code, message: invalidParamMessage(param), param };
-  }
-  const retryAfter = RETRY_AFTER_SECONDS[code];
-  if (retryAfter !== undefined)
-    return { error: code, message: REMOTE_ERROR_TEXT[code], retry_after_seconds: retryAfter };
-  if (!REFERENCED_ERROR_CODES.has(code))
-    return { error: code, message: REMOTE_ERROR_TEXT[code] };
-  const ref = mintErrorRef();
-  const errorClass2 = error instanceof Error ? error.name : typeof error;
-  console.error(`[olympus:remote] tool_error code=${code} ref=${ref} class=${JSON.stringify(errorClass2)} error_message=${boundedLogErrorMessage(error)} origin=${logErrorOrigin(error)}`);
-  return { error: code, message: REMOTE_ERROR_TEXT[code], ref };
-}
-function remoteSurfaceErrorOutput(code) {
-  return { error: code, message: REMOTE_ERROR_TEXT[code] };
-}
-function remoteWithheldParamOutput(param) {
-  if (!PARAM_NAME.test(param))
-    return { error: "invalid_params", message: REMOTE_ERROR_TEXT.invalid_params };
-  return {
-    error: "invalid_params",
-    message: `The ${param} argument is not available to remote agents. Remove it and try again.`,
-    param
-  };
-}
-function invalidParamMessage(param) {
-  return `The ${param} argument was not valid. Check it against the tool's schema and try again.`;
-}
-function namedParam(message2, declared) {
-  let best;
-  for (const name of declared) {
-    if (!PARAM_NAME.test(name))
-      continue;
-    const match = new RegExp(`(?<![A-Za-z0-9_])${name}(?![A-Za-z0-9_])`).exec(message2);
-    if (match && (!best || match.index < best.at))
-      best = { name, at: match.index };
-  }
-  return best?.name;
-}
-function mintErrorRef() {
-  const bytes = new Uint8Array(8);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-function remoteOutputSchema(operation) {
-  return Object.prototype.hasOwnProperty.call(REMOTE_OUTPUT_SCHEMAS, operation) ? REMOTE_OUTPUT_SCHEMAS[operation] : undefined;
-}
-function isSecretLike(text3) {
-  return secretLabelsInText(text3).length > 0;
-}
-function scannedText(value, max2, mode) {
-  if (typeof value !== "string")
-    return { secret: false };
-  if (isSecretLike(value))
-    return { secret: true };
-  const normalized = mode === "line" ? value.replace(UNSAFE_CHARS, " ").replace(/\s+/g, " ").trim() : value.replace(UNSAFE_CHARS, "");
-  if (isSecretLike(normalized))
-    return { secret: true };
-  const emitted = mode === "line" ? normalized.slice(0, max2).trim() : normalized.slice(0, max2);
-  if (isSecretLike(emitted))
-    return { secret: true };
-  return emitted ? { text: emitted, secret: false } : { secret: false };
-}
-function keptText(value, max2, mode) {
-  const scanned = scannedText(value, max2, mode);
-  const text3 = mode === "multiline" ? scanned.text?.trim() : scanned.text;
-  return text3 && !scanned.secret ? text3 : undefined;
-}
-function wholeNumber(value) {
-  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
-}
-function iso(value) {
-  if (typeof value !== "string")
-    return;
-  const at = Date.parse(value);
-  return Number.isFinite(at) ? new Date(at).toISOString() : undefined;
-}
-function dateOnly(value) {
-  return iso(value)?.slice(0, 10);
-}
-function asRecord14(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
-}
-var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CITATIONS = 50, MAX_CORPORA = 200, JOB_ID, PARAM_NAME, CORPUS_ID, MODEL_ID, UNSAFE_CHARS, REMOTE_PENDING_MESSAGE, REMOTE_ANSWER_CHANGED = "Olympus withheld this answer because an item it drew on has changed privacy level since the answer was written. Ask the question again.", REMOTE_ANSWER_UNVERIFIED = "Olympus withheld this answer because it could not confirm the items it drew on may still be shared. Ask the question again.", REMOTE_PRIVATE_NOTE = "Your answer is in Olympus on your computer.", REMOTE_SECRET_NOTE = "A matching item is a Secret. Open it in Olympus on your computer.", REMOTE_PRIVATE_NOTE_PATTERN = "^Your answer is in Olympus on your computer\\.(?: \\[Open answer\\]\\(olympus://open/private/[A-Za-z0-9_-]{22}\\))?(?: A matching item is a Secret\\. Open it in Olympus on your computer\\.)?$", PRIVATE_ANSWER_ID, REMOTE_ANSWER_WITHHELD = "Olympus withheld this answer under the owner's privacy rules.", REMOTE_REPLY_WITHHELD = "Olympus withheld the reply because it looked like it contained a password, key or token.", REMOTE_REFUSAL_FALLBACK = "Olympus could not ask anonymously.", REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.", REMOTE_NEEDS_CHOICE_MESSAGE = "Nothing was sent. Ask the user once: Strict (their model rewrites it into general questions first) or Standard (their words, prepared as they choose: as written, light cleanup, or their own instruction). Then call again with level, and remember=true to keep it.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, REMOTE_REFUSAL_CODES, REMOTE_DAEMON_CODES, REFRESH_STATUSES, TRUST_DOMAINS, RETRIEVAL_MODES, RETRIEVAL_STATES, NETWORK_IDENTITIES, CLEANUPS, OUTCOMES, REMOTE_WITHHELD_PARAMS, REMOTE_DESCRIPTIONS, REMOTE_ERROR_TEXT, SOURCE_ANSWER_BUSY_RETRY_AFTER_SECONDS = 30, RETRY_AFTER_SECONDS, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA, REMOTE_OUTPUT_SCHEMAS;
-var init_remote_result = __esm(() => {
-  init_app_release_capture();
-  init_operation_error();
-  init_opsec();
-  init_parent_label();
-  init_release_manifest();
-  init_secret_location_note();
-  MAX_ANSWER = 64 * 1024;
-  MAX_SENT = 16 * 1024;
-  JOB_ID = /^saj_[A-Za-z0-9_-]{43}$/;
-  PARAM_NAME = /^[a-z][a-z0-9_]{0,63}$/;
-  CORPUS_ID = /^[a-z0-9_]+(\.[a-z0-9_-]+)+$/i;
-  MODEL_ID = /^[A-Za-z0-9._:/-]{1,128}$/;
-  UNSAFE_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g;
-  REMOTE_PENDING_MESSAGE = "Olympus is still working on this and it keeps running. " + "Call source_answer_result with this job_id to get the result; repeat while it says working. Do not ask again.";
-  PRIVATE_ANSWER_ID = /^[A-Za-z0-9_-]{22}$/;
-  PROVIDER_LABELS = {
-    gmail: "Gmail",
-    google_drive: "Google Drive",
-    "google-drive": "Google Drive",
-    google_calendar: "Google Calendar",
-    dropbox: "Dropbox",
-    x: "X bookmarks",
-    readwise: "Readwise",
-    telegram: "Telegram",
-    whatsapp: "WhatsApp",
-    whatsapp_personal: "WhatsApp",
-    whatsapp_business: "WhatsApp",
-    apple_messages: "Apple Messages",
-    signal: "Signal",
-    reflect: "Reflect",
-    roam: "Roam",
-    evernote: "Evernote",
-    local_files: "Files on this computer"
-  };
-  FAMILY_LABELS = {
-    email: "Mail",
-    file: "Files",
-    chat: "Messages",
-    note: "Notes",
-    x: "X bookmarks",
-    readwise: "Readwise"
-  };
-  REMOTE_SOURCE_LABELS = Object.freeze([...new Set([
-    ...Object.values(PROVIDER_LABELS),
-    ...Object.values(FAMILY_LABELS),
-    OTHER_SOURCE_LABEL
-  ])].sort());
-  REMOTE_REFUSAL_CODES = Object.freeze([
-    "refused",
-    "anonymous_answers_off",
-    "cancelled",
-    "gate_refused",
-    "internal_error",
-    "invalid_params",
-    "model_same_provider",
-    "question_empty",
-    "question_too_long",
-    "route_not_configured",
-    "secret_detected",
-    "settings_invalid",
-    "settings_stale",
-    "writer_declined",
-    "writer_failed",
-    "invalid_question",
-    "busy",
-    "acknowledgements_incomplete",
-    "funding_date_missing",
-    "funding_date_invalid",
-    "note_expired",
-    "daemon_api_key_missing",
-    "daemon_not_found",
-    "tor_not_found",
-    "unresolved_session",
-    "unresolved_session_other_wallet",
-    "no_unresolved_session",
-    "stranded_processes",
-    "daemon_already_running",
-    "tor_port_busy",
-    "tor_bootstrap_failed",
-    "daemon_start_failed",
-    "daemon_version_unsupported",
-    "daemon_supervisor_unsupported",
-    "relay_mismatch",
-    "key_reuse_on",
-    "key_reuse_unverified",
-    "daemon_keyless",
-    "daemon_identity_failed",
-    "daemon_api_key_rejected",
-    "session_process_exited",
-    "confinement_self_test_failed",
-    "confinement_unavailable",
-    "policy_unavailable",
-    "model_unavailable",
-    "daily_cap_reached",
-    "spend_cap_reached",
-    "state_unavailable",
-    "timeout",
-    "aborted",
-    "redirect_refused",
-    "response_too_large",
-    "invalid_response",
-    "daemon_error",
-    "transport_failed",
-    "teardown_incomplete",
-    "authorization_refused",
-    "session_spent"
-  ].filter((code, index, all) => all.indexOf(code) === index));
-  REMOTE_DAEMON_CODES = Object.freeze([
-    "busy",
-    "request_cancelled",
-    "funding_required",
-    "model_budget_unavailable",
-    "model_policy_unavailable",
-    "invalid_model",
-    "anonymous_access_failed",
-    "upstream_error",
-    "invalid_upstream_response",
-    "withdrawal_pending",
-    "wallet_conflict",
-    "invalid_request_error",
-    "invalid_body",
-    "testnet_password_required",
-    "invalid_api_key",
-    "local_connection_required",
-    "browser_origin_denied",
-    "unrecognized"
-  ]);
-  REFRESH_STATUSES = Object.freeze(["running", "completed", "failed"]);
-  TRUST_DOMAINS = Object.freeze(["public_safe", "internal", "secure_local"]);
-  RETRIEVAL_MODES = Object.freeze(["keyword", "hybrid"]);
-  RETRIEVAL_STATES = Object.freeze(["ready", "degraded"]);
-  NETWORK_IDENTITIES = Object.freeze(["hidden", "visible", "not_verified"]);
-  CLEANUPS = Object.freeze(["as_written", "light_cleanup", "custom"]);
-  OUTCOMES = Object.freeze(["not_sent", "sent_failed", "unknown"]);
-  REMOTE_WITHHELD_PARAMS = {
-    source_index_status: [
-      "conversation_id",
-      "include_sender_aggregation",
-      "max_senders",
-      "include_readiness_ledger",
-      "include_ingestion_ledger",
-      "include_items",
-      "max_items",
-      "query"
-    ]
-  };
-  REMOTE_DESCRIPTIONS = {
-    source_index_status: [
-      "Inspect source-index corpus status: each corpus's refresh status and aggregate counts.",
-      "Read-only: it never returns item metadata, sender counts, ledgers, source text, vectors or credentials.",
-      "Legacy extraction filter fields are refused on the connector-store status surface rather than silently returning whole-corpus counts."
-    ].join(" ")
-  };
-  REMOTE_ERROR_TEXT = {
-    invalid_params: "The request was not valid. Check the arguments against the tool's schema and try again.",
-    invalid_request: "The request was not valid. Check the arguments against the tool's schema and try again.",
-    unsupported_filter: "That filter is not supported here.",
-    config_error: "Olympus on the computer needs setup before it can answer.",
-    argus_unreachable: "Olympus could not reach its private analyst. Try again later.",
-    argus_error: "Olympus's private analyst could not answer. Try again later.",
-    email_not_configured: "Olympus on the computer needs setup before it can answer.",
-    email_unreachable: "Olympus could not reach its source worker in time. Try again later.",
-    email_error: "Olympus could not complete this request.",
-    email_policy_violation: "Olympus withheld this result under the owner's privacy rules.",
-    source_index_not_enabled: "Searching sources is not turned on in Olympus on the computer.",
-    source_index_policy_violation: "Olympus withheld this result under the owner's privacy rules.",
-    source_index_error: "Olympus could not complete this request.",
-    source_answer_busy: "Olympus is already answering as many questions as it can at once. Wait for the answers in progress (call source_answer_result with their job ids), then ask again.",
-    source_answer_job_not_found: "No Olympus answer with that job_id is available to this connection. It may have expired or Olympus may have restarted. Ask the question again with source_answer.",
-    source_answer_deadline: "The answer did not finish within Olympus's time limit and was stopped. Ask a narrower question, or try again later.",
-    source_answer_too_large: "The finished answer was too large for Olympus to return. Ask a narrower question.",
-    internal_error: "Olympus could not complete this request.",
-    unknown_operation: "Olympus has no operation with that name here.",
-    operation_unavailable: "That operation is not enabled on this Olympus install.",
-    unauthorized: "A connection token is required.",
-    invalid_token: "The connection token is not valid or has been revoked.",
-    remote_connections_unavailable: "Olympus could not check the connection token. Try again later.",
-    not_found: "There is nothing at this path.",
-    method_not_allowed: "That HTTP method is not allowed here.",
-    unsupported_media_type: "The request body must be JSON (Content-Type: application/json).",
-    payload_too_large: "The request body is too large.",
-    olympus_offline: "Olympus is off; try again later."
-  };
-  RETRY_AFTER_SECONDS = {
-    source_answer_busy: SOURCE_ANSWER_BUSY_RETRY_AFTER_SECONDS
-  };
-  REMOTE_ERROR_CODES = Object.freeze(Object.keys(REMOTE_ERROR_TEXT));
-  REFERENCED_ERROR_CODES = new Set([
-    "internal_error",
-    "email_error",
-    "source_index_error",
-    "argus_error",
-    "config_error"
-  ]);
-  PENDING_SCHEMA = {
-    type: "object",
-    description: "Still working: call source_answer_result with job_id, again while it says working.",
-    additionalProperties: false,
-    required: ["status", "job_id", "elapsed_ms", "next_tool", "message"],
-    properties: {
-      status: { const: "working" },
-      job_id: { type: "string", pattern: JOB_ID.source },
-      elapsed_ms: { type: "integer", minimum: 0 },
-      next_tool: { const: "source_answer_result" },
-      message: { type: "string" }
-    }
-  };
-  CITATION_SCHEMA = {
-    type: "object",
-    additionalProperties: false,
-    required: ["label"],
-    properties: {
-      label: { type: "string", enum: [...REMOTE_SOURCE_LABELS] },
-      title: { type: "string", maxLength: MAX_TITLE },
-      date: { type: "string", format: "date" }
-    }
-  };
-  SOURCE_ANSWER_SCHEMA = {
-    type: "object",
-    description: 'A source answer: give the answer with its citations. "withheld" carries a fixed sentence to pass on instead. When private_note is present, pass it on as written.',
-    additionalProperties: false,
-    required: ["kind", "status", "answer", "citations"],
-    properties: {
-      kind: { const: "source_answer" },
-      status: { enum: ["answered", "withheld"] },
-      answer: { type: "string", maxLength: MAX_ANSWER },
-      citations: { type: "array", maxItems: MAX_CITATIONS, items: CITATION_SCHEMA },
-      private_note: { type: "string", pattern: REMOTE_PRIVATE_NOTE_PATTERN }
-    }
-  };
-  ANONYMOUS_ANSWERED_SCHEMA = {
-    type: "object",
-    description: 'The anonymous reply. When rewritten is true, say the question was rewritten first and offer to show "sent". When provider_note is present, pass it on as written.',
-    additionalProperties: false,
-    required: ["kind", "status", "reply", "level", "rewritten", "remembered", "network_identity"],
-    properties: {
-      kind: { const: "anonymous_answer" },
-      status: { const: "answered" },
-      reply: { type: "string", maxLength: MAX_ANSWER },
-      level: { enum: ["strict", "standard"] },
-      rewritten: { type: "boolean" },
-      remembered: { type: "boolean" },
-      network_identity: { enum: [...NETWORK_IDENTITIES] },
-      cleanup: { enum: [...CLEANUPS] },
-      model: { type: "string", pattern: MODEL_ID.source },
-      route: { type: "string", maxLength: MAX_ROUTE },
-      sent: { type: "string", maxLength: MAX_SENT },
-      note: { type: "string", maxLength: MAX_MESSAGE },
-      provider_note: { const: REMOTE_PROVIDER_UNKNOWN_NOTE }
-    }
-  };
-  ANONYMOUS_NEEDS_CHOICE_SCHEMA = {
-    type: "object",
-    description: "Nothing was sent: ask the user once, Strict or Standard, then call again with level (and remember=true to keep it).",
-    additionalProperties: false,
-    required: ["kind", "status", "message", "options"],
-    properties: {
-      kind: { const: "anonymous_answer" },
-      status: { const: "needs_choice" },
-      message: { type: "string" },
-      options: {
-        type: "object",
-        additionalProperties: false,
-        required: ["suggested_level", "suggested_cleanup", "custom_instruction"],
-        properties: {
-          suggested_level: { enum: ["strict", "standard"] },
-          suggested_cleanup: { enum: [...CLEANUPS] },
-          custom_instruction: { type: "boolean" }
-        }
-      }
-    }
-  };
-  ANONYMOUS_REFUSED_SCHEMA = {
-    type: "object",
-    description: "Not answered: tell the user the message in those words. outcome says whether the question left (absent: never handed to the transport).",
-    additionalProperties: false,
-    required: ["kind", "status", "code", "message"],
-    properties: {
-      kind: { const: "anonymous_answer" },
-      status: { const: "refused" },
-      code: { enum: [...REMOTE_REFUSAL_CODES] },
-      message: { type: "string", maxLength: MAX_MESSAGE },
-      outcome: { enum: [...OUTCOMES] },
-      daemon_code: { enum: [...REMOTE_DAEMON_CODES] },
-      sent: { type: "string", maxLength: MAX_SENT }
-    }
-  };
-  SOURCE_INDEX_STATUS_SCHEMA = {
-    type: "object",
-    description: "Per-corpus status and counts.",
-    additionalProperties: false,
-    required: ["kind", "corpora"],
-    properties: {
-      kind: { const: "source_index_status" },
-      generated_at: { type: "string", format: "date-time" },
-      corpora: {
-        type: "array",
-        maxItems: MAX_CORPORA,
-        items: {
-          type: "object",
-          additionalProperties: false,
-          required: ["corpus_id", "label", "configured"],
-          properties: {
-            corpus_id: { type: "string", pattern: CORPUS_ID.source, maxLength: 128 },
-            label: { type: "string", enum: [...REMOTE_SOURCE_LABELS] },
-            trust_domain: { enum: [...TRUST_DOMAINS] },
-            configured: { type: "boolean" },
-            retrieval: {
-              type: "object",
-              additionalProperties: false,
-              required: ["mode", "state"],
-              properties: {
-                mode: { enum: [...RETRIEVAL_MODES] },
-                state: { enum: [...RETRIEVAL_STATES] }
-              }
-            },
-            last_refresh: {
-              type: "object",
-              additionalProperties: false,
-              required: ["status"],
-              properties: {
-                status: { enum: [...REFRESH_STATUSES] },
-                completed_at: { type: "string", format: "date-time" }
-              }
-            },
-            counts: {
-              type: "object",
-              additionalProperties: false,
-              required: ["indexed_items", "chunks", "embedded_chunks"],
-              properties: {
-                indexed_items: { type: "integer", minimum: 0 },
-                chunks: { type: "integer", minimum: 0 },
-                embedded_chunks: { type: "integer", minimum: 0 }
-              }
-            }
-          }
-        }
-      }
-    }
-  };
-  REMOTE_ERROR_SCHEMA = {
-    type: "object",
-    additionalProperties: false,
-    required: ["error", "message"],
-    properties: {
-      error: { enum: [...REMOTE_ERROR_CODES], description: "A stable error code." },
-      message: { type: "string", description: "A fixed sentence for this code." },
-      ref: { type: "string", pattern: "^[0-9a-f]{16}$", description: "Where the owner finds this failure in Olympus's log on the computer." },
-      param: { type: "string", pattern: PARAM_NAME.source, description: "The argument at fault, when it is one the operation declares." },
-      retry_after_seconds: {
-        type: "integer",
-        minimum: 1,
-        maximum: 86400,
-        description: "Seconds to wait before trying again, when Olympus is busy or offline; also sent as the HTTP Retry-After header."
-      }
-    }
-  };
-  REMOTE_OUTPUT_SCHEMAS = {
-    source_answer: { oneOf: [SOURCE_ANSWER_SCHEMA, PENDING_SCHEMA] },
-    source_answer_result: {
-      oneOf: [SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, PENDING_SCHEMA]
-    },
-    ask_anonymously: { oneOf: [ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, PENDING_SCHEMA] },
-    source_index_status: SOURCE_INDEX_STATUS_SCHEMA
-  };
 });
 
 // src/core/app-release-agent.ts
@@ -132247,61 +132707,6 @@ var init_ocr_readiness = __esm(() => {
   FEDORA_IDS2 = ["fedora", "rhel", "centos", "rocky", "almalinux", "ol", "nobara"];
 });
 
-// src/core/source-index/selected-item-safety.ts
-function selectedItemContentFieldPath(value2) {
-  return selectedItemContentFieldPathInner(value2, "selected_items");
-}
-function selectedItemContentFieldPathInner(value2, path) {
-  if (!value2 || typeof value2 !== "object")
-    return;
-  if (Array.isArray(value2)) {
-    for (let index = 0;index < value2.length; index += 1) {
-      const nested = selectedItemContentFieldPathInner(value2[index], `${path}.${index}`);
-      if (nested)
-        return nested;
-    }
-    return;
-  }
-  for (const [key2, nestedValue] of Object.entries(value2)) {
-    if (FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS.has(normalizeSelectedItemField(key2))) {
-      return `${path}.${key2}`;
-    }
-    const nested = selectedItemContentFieldPathInner(nestedValue, `${path}.${key2}`);
-    if (nested)
-      return nested;
-  }
-  return;
-}
-function normalizeSelectedItemField(key2) {
-  return key2.toLowerCase().replace(/[^a-z0-9]/g, "");
-}
-var FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS;
-var init_selected_item_safety = __esm(() => {
-  FORBIDDEN_SELECTED_ITEM_CONTENT_FIELDS = new Set([
-    "body",
-    "boundedtext",
-    "chunk",
-    "chunks",
-    "content",
-    "document",
-    "html",
-    "markdown",
-    "message",
-    "messages",
-    "packet",
-    "passage",
-    "raw",
-    "rawpacket",
-    "rawsource",
-    "rawtext",
-    "snippet",
-    "sourcepacket",
-    "sourcesnippet",
-    "sourcetext",
-    "text"
-  ]);
-});
-
 // src/core/setup-checklist.ts
 var exports_setup_checklist = {};
 __export(exports_setup_checklist, {
@@ -133063,85 +133468,6 @@ function optionalSourceAnswerAnalystProvider(value2) {
     return value2;
   throw new OperationError("invalid_params", "analyst_provider must be default, local, venice, or cloud.");
 }
-function optionalSourceAnswerSelectedItems(value2, fallbackCorpusId) {
-  if (value2 === undefined || value2 === null || value2 === "")
-    return;
-  if (!Array.isArray(value2)) {
-    throw new OperationError("invalid_params", "selected_items must be an array.");
-  }
-  return value2.map((item, index) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) {
-      throw new OperationError("invalid_params", `selected_items.${index} must be an object.`);
-    }
-    const initialRecord = item;
-    const forbiddenPath = selectedItemContentFieldPath(initialRecord);
-    if (forbiddenPath) {
-      throw new OperationError("invalid_params", `selected_items.${index} must not include source content field ${forbiddenPath}.`);
-    }
-    const record2 = selectedItemRecord(initialRecord, fallbackCorpusId);
-    return {
-      corpus_id: requiredSelectedItemString(record2.corpus_id, `selected_items.${index}.corpus_id`),
-      family: requiredSelectedItemString(record2.family, `selected_items.${index}.family`),
-      provider: requiredSelectedItemString(record2.provider, `selected_items.${index}.provider`),
-      account_scope: requiredSelectedItemString(record2.account_scope, `selected_items.${index}.account_scope`),
-      provider_item_id: requiredSelectedItemString(record2.provider_item_id, `selected_items.${index}.provider_item_id`),
-      local_item_id: requiredSelectedItemString(record2.local_item_id, `selected_items.${index}.local_item_id`),
-      ...optionalSelectedItemString(record2.provider_thread_id, "provider_thread_id"),
-      ...optionalSelectedItemString(record2.provider_conversation_id, "provider_conversation_id"),
-      ...optionalSelectedItemString(record2.provider_file_id, "provider_file_id"),
-      ...optionalSelectedItemString(record2.source_version, "source_version"),
-      ...optionalSelectedItemString(record2.conversation_label, "conversation_label"),
-      ...optionalSelectedItemString(record2.author_label, "author_label"),
-      ...optionalSelectedItemString(record2.authored_at, "authored_at")
-    };
-  });
-}
-function selectedItemRecord(record2, fallbackCorpusId) {
-  const selectedItem = record2.selected_item;
-  if (selectedItem && typeof selectedItem === "object" && !Array.isArray(selectedItem)) {
-    return selectedItem;
-  }
-  const sourceItem = record2.sourceItem;
-  if (sourceItem && typeof sourceItem === "object" && !Array.isArray(sourceItem)) {
-    const source = sourceItem;
-    return {
-      corpus_id: record2.corpus_id ?? fallbackCorpusId,
-      family: source.family,
-      provider: source.provider,
-      account_scope: source.accountScope,
-      provider_item_id: source.providerItemId,
-      local_item_id: source.localItemId,
-      provider_thread_id: source.providerThreadId,
-      provider_conversation_id: source.providerConversationId,
-      provider_file_id: source.providerFileId,
-      source_version: source.sourceVersion
-    };
-  }
-  return {
-    ...record2,
-    account_scope: record2.account_scope ?? record2.accountScope,
-    provider_item_id: record2.provider_item_id ?? record2.providerItemId,
-    local_item_id: record2.local_item_id ?? record2.localItemId,
-    provider_thread_id: record2.provider_thread_id ?? record2.providerThreadId,
-    provider_conversation_id: record2.provider_conversation_id ?? record2.providerConversationId,
-    provider_file_id: record2.provider_file_id ?? record2.providerFileId,
-    source_version: record2.source_version ?? record2.sourceVersion
-  };
-}
-function requiredSelectedItemString(value2, name) {
-  if (typeof value2 !== "string" || value2.trim().length === 0 || value2.length > 500) {
-    throw new OperationError("invalid_params", `${name} must be a non-empty safe identifier string.`);
-  }
-  return value2.trim();
-}
-function optionalSelectedItemString(value2, key2) {
-  if (value2 === undefined || value2 === null || value2 === "")
-    return {};
-  if (typeof value2 !== "string" || value2.length > 1000) {
-    throw new OperationError("invalid_params", `selected_items.${key2} must be a safe string.`);
-  }
-  return { [key2]: value2.trim() };
-}
 function optionalAnalystModel(value2, name, analystProvider) {
   const model = optionalString10(value2)?.trim();
   if (model === undefined)
@@ -133174,7 +133500,7 @@ var init_operations = __esm(() => {
   init_config();
   init_config();
   init_operation_error();
-  init_selected_item_safety();
+  init_selected_items();
   init_source_corpus_registry();
   init_venice_models();
   init_public_surface();
@@ -133519,6 +133845,23 @@ var init_operations = __esm(() => {
           ...query !== undefined ? { query } : {}
         });
       }
+    },
+    {
+      name: "source_item_read",
+      cliHints: { name: "source item read" },
+      description: "Read more of a found Personal item. Pass its exact selected_item from source_index_search. Each page is judged before release. For Private items ask source_answer with selected_items instead.",
+      params: {
+        selected_item: { type: "object", required: true, description: "The selected_item returned by source_index_search; identifiers only." },
+        page: { type: "number", description: "Page to read, starting at 1 (default 1)." },
+        pages: { type: "number", description: "Number of pages to read, 1 to 3 (default 1)." }
+      },
+      mutating: false,
+      nativeExposure: "sourceIndexEnabledOnly",
+      handler: async (ctx, params) => ctx.email.sourceItemRead({
+        selectedItem: sourceItemReadSelectedItem(params.selected_item),
+        page: sourceItemReadPage(params.page, "page"),
+        pages: sourceItemReadPage(params.pages, "pages", 3)
+      })
     },
     {
       name: "source_index_search",
@@ -154797,22 +155140,6 @@ var init_source_answer_jobs = __esm(() => {
   JOB_ID_PATTERN = /^saj_[A-Za-z0-9_-]{43}$/;
 });
 
-// src/workers/remote-access-recheck.ts
-function currentAccess(authorized) {
-  try {
-    return authorized();
-  } catch {
-    return "unavailable";
-  }
-}
-function refusedAccess(access) {
-  const body = remoteSurfaceErrorOutput(access === "revoked" ? "invalid_token" : "remote_connections_unavailable");
-  return { content: [{ type: "text", text: JSON.stringify(body, null, 2) }], isError: true };
-}
-var init_remote_access_recheck = __esm(() => {
-  init_remote_result();
-});
-
 // src/mcp/tools.ts
 function listMcpTools(config2, surface = "mcp") {
   return exposedOperations(operations, { config: config2, surface }).map((operation) => ({
@@ -154882,7 +155209,7 @@ async function handleRemoteCallTool(request, makeOperationContext, authorized = 
     ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}
   });
   try {
-    const result = await runWithReleaseManifestSink(manifests, () => operation.handler(ctx, args));
+    const result = await runWithReleaseManifestSink(manifests, () => withRemoteReadAuthorization(authorized, () => operation.handler(ctx, args)));
     const afterHandler = currentAccess(authorized);
     if (afterHandler !== "active")
       return refusedAccess(afterHandler);
@@ -154900,10 +155227,15 @@ async function handleRemoteCallTool(request, makeOperationContext, authorized = 
     const afterSettle = currentAccess(authorized);
     if (afterSettle !== "active")
       return refusedAccess(afterSettle);
-    const output = privatePart ? await release() : approved;
+    let output = privatePart ? await release() : approved;
     const afterFinalRelease = currentAccess(authorized);
     if (afterFinalRelease !== "active")
       return refusedAccess(afterFinalRelease);
+    if (operation.name === "source_item_read")
+      output = remoteOperationOutput(operation.name, result, {
+        ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {},
+        releaseManifests: manifests.manifests
+      });
     recordRemoteOperation({ operation: operation.name, args, caller: ctx.caller, output, capture, privateQuestion: privateMayAnswer ? privatePart?.answerRef : undefined });
     return { content: text3(privateMayAnswer ? withRemotePrivateNote(output, privatePart?.answerId, privatePart?.secretMatch) : output) };
   } catch (error2) {
@@ -159924,7 +160256,7 @@ var init_built_in_reranker = __esm(() => {
 });
 
 // src/workers/classification/judge-pacing.ts
-import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
 import { createHash as createHash88 } from "node:crypto";
 function header(response, name) {
   const raw = response.headers.get(name);
@@ -159941,7 +160273,7 @@ class JudgeRateLimitPacer {
   lastSeq = 0;
   reportSeq = 0;
   blockedUntil = 0;
-  calls = new AsyncLocalStorage8;
+  calls = new AsyncLocalStorage9;
   constructor(clock3 = realClock) {
     this.clock = clock3;
   }
@@ -178702,6 +179034,7 @@ var init_write_routes = __esm(() => {
     "/source/index/files/status",
     "/source/index/dropbox/content/export-eval-shard",
     "/source/index/search",
+    "/source/item/read",
     "/source/index/embed",
     "/source/index/dropbox/content/extract",
     "/source/index/dropbox/content/plan",
@@ -194147,6 +194480,40 @@ function createEmailSourceWorker(options = {}) {
           assertNoRawEmailFields(result);
           return json(result);
         }
+        if (request.method === "POST" && url2.pathname === `${basePath}/source/item/read`) {
+          const record8 = await parseObjectBody(request);
+          const selected = sourceItemReadSelectedItem(record8.selected_item);
+          const page2 = sourceItemReadPage(record8.page, "page");
+          const pages = sourceItemReadPage(record8.pages, "pages", 3);
+          const store = connectorStoresByCorpusId.get(selected.corpus_id);
+          const refused3 = { pages: [], totalPages: 0, totalChars: 0, couldNotRead: ["not_in_scope"] };
+          if (!store || selected.family !== store.family)
+            return json(refused3);
+          const identity2 = store.activeLocalItemRow(selected.local_item_id)?.identity;
+          if (!identity2 || identity2.provider !== selected.provider || identity2.accountScope !== selected.account_scope || identity2.providerItemId !== selected.provider_item_id || identity2.providerConversationId !== selected.provider_conversation_id)
+            return json(refused3);
+          const result = await store.readItemPages(selected.local_item_id, {
+            page: page2,
+            pages,
+            scope: () => {
+              const scope = connectorStoreReadScope?.(store);
+              if (scope?.allowed === false)
+                return scope;
+              const principal = connectorStorePrincipals.get(store.corpusId);
+              return {
+                allowed: true,
+                ...scope,
+                accountScope: scope?.accountScope ?? connectorStoreAccountScopes.get(store.corpusId) ?? principal?.accountScope,
+                ...principal ? { filters: { ...scope?.filters, provider: principal.provider } } : {}
+              };
+            }
+          });
+          if (result.couldNotRead.includes("not_personal"))
+            throw new EmailSourceWorkerError(403, "not_personal", "Private item: ask with source_answer");
+          assertNoRawEmailFields(result);
+          assertNoSourceIndexOperationalLeakFields(result);
+          return json(result);
+        }
         if (request.method === "POST" && url2.pathname === `${basePath}/source/index/search`) {
           const record8 = await parseObjectBody(request);
           assertSourceIndexSearchQuery(record8.query);
@@ -194632,6 +194999,8 @@ function createEmailSourceWorker(options = {}) {
   }
 }
 var init_engine2 = __esm(() => {
+  init_selected_items();
+  init_email();
   init_judge_spending();
   init_people();
   init_models_on_computer();
@@ -212070,6 +212439,7 @@ function parseEngineCommandEnvelope(value2) {
     case "storage_registry":
     case "capture":
     case "embed_chunks":
+    case "source_item_read":
     case "source_watch":
     case "extraction_queue":
     case "people":
@@ -212388,6 +212758,7 @@ var init_commands = __esm(() => {
       "/dashboard/messaging/scope"
     ],
     embed_chunks: ["/v1/source/index/embed"],
+    source_item_read: ["/v1/source/item/read"],
     data_export: ["/v1/cli/data-export"],
     source_watch: ["/v1/source/watch/create", "/v1/source/watch/cancel"],
     extraction_queue: [
@@ -212502,10 +212873,10 @@ async function inspectChunks(inputs, scopes, check, options = {}) {
     const names = JSON.stringify([snapshot.title, snapshot.path, snapshot.sender]);
     const parentContext = set2 ? parentNamesContext(set2, input) : undefined;
     snapshots.set(index, () => {
-      const current2 = store?.releaseItemChunks?.(input);
+      const current3 = store?.releaseItemChunks?.(input);
       const currentClassification = registeredInstalledTierClassification()?.forLedger(scope.ledger.dbPath);
       const currentReader = currentClassification?.releaseWindows ?? currentClassification?.releaseJudge;
-      return !!current2 && JSON.stringify([current2.title, current2.path, current2.sender]) === names && (!set2 || parentNamesContext(set2, input) === parentContext) && currentReader?.modelId === reader?.modelId && currentReader?.promptVersion === reader?.promptVersion && allowed[index].every((hash2) => current2.chunks.some((chunk) => chunk.contentHash === hash2));
+      return !!current3 && JSON.stringify([current3.title, current3.path, current3.sender]) === names && (!set2 || parentNamesContext(set2, input) === parentContext) && currentReader?.modelId === reader?.modelId && currentReader?.promptVersion === reader?.promptVersion && allowed[index].every((hash2) => current3.chunks.some((chunk) => chunk.contentHash === hash2));
     });
     const fullText = snapshot.chunks.map((chunk) => chunk.text).join("");
     const shortRead = normalize5(fullText).length <= SNIFFER_EXCERPT_MAX_CHARS && record8.reasons.includes(contentDigestReason(fullText)) && record8.reasons.some((reason) => reason.startsWith(sniffer && sniffer.id !== "no_judge" ? `content:sniffer:${sniffer.id}:` : "content:sniffer:") && !reason.endsWith(":undecided"));
@@ -212578,9 +212949,9 @@ async function inspectChunks(inputs, scopes, check, options = {}) {
           complete = false;
           blockedItems.add(tierLedgerIdentityKey(input));
           if (set2 && !options.readOnly) {
-            const current2 = scope.ledger.getCurrent(input);
-            if (current2)
-              rejudgeStoredContent(set2, current2, {
+            const current3 = scope.ledger.getCurrent(input);
+            if (current3)
+              rejudgeStoredContent(set2, current3, {
                 sniffer: { id: sniffer?.id ?? "no_judge", judge: () => verdict },
                 report: emptyTierRejudgeReport(),
                 autoMoves: true,
@@ -212869,6 +213240,15 @@ function createReleaseTierCheck(scopes, secureDerivativeDefault, chunkOptions = 
         if (!state)
           continue;
         const { record: record8, copies } = state;
+        if (inputs[index].personalContent) {
+          const now = scope.ledger.getCurrent(identity2);
+          const override = scope.ledger.getOverride(identity2);
+          const personal = now?.state === "current" && !now.metadataPending && !now.contentPending && now.contentTier === "private" && now.metadataTier !== "secure" && now.metadataTier !== "secrets" && !scope.ledger.rejudgeQuestion(identity2) && !heldUntilJudged(now.reasons) && (!override || override.kind !== "tier" || override.tier === "private");
+          if (!personal) {
+            verdicts[index] = { tier: "unknown", gone: false };
+            continue;
+          }
+        }
         const namesOnly = inputs[index].layer === "names";
         const tiers = namesOnly ? [record8.metadataTier, record8.targetMetadataTier] : [record8.metadataTier, record8.contentTier, record8.targetMetadataTier, record8.targetContentTier];
         const held = record8.metadataPending || !namesOnly && contentHeldForJudgment(record8);
@@ -215037,6 +215417,22 @@ async function runSnifferPass(options) {
     if (sameQuestion(item.target, item.question) && stillOpen(item.target, item.question, false) && !screenQuestion(item.target, item.question))
       return;
     const { tier, code } = snifferVerdictTier(verdict, options.lane, item.question.flags);
+    if (item.question.flags.includes("content:read_window")) {
+      if (!sameQuestion(item.target, item.question) || !stillOpen(item.target, item.question, false))
+        return;
+      if (tier === "secure") {
+        if (!item.target.raiseReadWindow)
+          return;
+        item.target.raiseReadWindow(item.target.ledger.getCurrent(item.question), tier, id);
+      }
+      item.target.sniffer.deleteQuestion(item.question, item.question.pass, item.question.materialHash);
+      report.verdictsApplied += 1;
+      if (tier === "private")
+        report.resolvedPersonal += 1;
+      else
+        report.resolvedPrivate += 1;
+      return;
+    }
     const applied = item.target.ledger.applySnifferVerdict(item.question, {
       pass: item.question.pass,
       tier,
@@ -215098,6 +215494,10 @@ async function runSnifferPass(options) {
   };
   const stillOpen = (target, question, rekey = true) => {
     const row = target.ledger.getCurrent(question);
+    if (question.flags.includes("content:read_window")) {
+      const override = target.ledger.getOverride(question);
+      return row !== undefined && row.state === "current" && !row.metadataPending && !row.contentPending && row.contentTier === "private" && row.metadataTier !== "secure" && row.metadataTier !== "secrets" && !target.ledger.rejudgeQuestion(question) && (!override || override.kind !== "tier" || override.tier === "private") && question.flags.includes(`read_window:generation:${row.generation}`) && row.mapRevision === question.mapRevision;
+    }
     if (row === undefined || row.decidedBy === "override")
       return false;
     if (row.contentTier === "secrets" && row.reasons.includes("metadata:secret:sniffer_refused") && snifferMaterialCarriesSecret(snifferOwnMaterial(question.material)))
@@ -216121,6 +216521,11 @@ class TierSnifferService {
         ledger,
         sniffer: this.options.installed.snifferStoreForLedger(ledgerPath),
         ...planner ? { placementFor: planner } : {},
+        raiseReadWindow: (row, tier, snifferId2) => {
+          const set2 = tierSetForLedger(ledgerPath);
+          const store = (set2?.openStores() ?? this.options.stores().filter((candidate2) => (candidate2.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(candidate2.dbPath)) === ledgerPath))[0];
+          raiseReadWindowTier(store, ledger, row, tier, snifferId2);
+        },
         screenStoredQuestion: (question) => {
           const row = ledger.getCurrent(question);
           if (!row || row.routed || !row.contentRead)
@@ -216843,6 +217248,7 @@ var init_sniffer_service = __esm(() => {
   init_secret_locations();
   init_classification_ledger();
   init_secrets_disposition();
+  init_tier_rejudge();
   init_tier_move();
   init_tier_auto_move();
   init_built_in_sniffer();
@@ -217111,7 +217517,7 @@ var init_snapshot = __esm(() => {
 });
 
 // src/workers/engine-split/runtime.ts
-import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage10 } from "node:async_hooks";
 import { randomUUID as randomUUID38 } from "node:crypto";
 import { lstatSync as lstatSync52 } from "node:fs";
 function engineBackgroundSocketFromEnv(env) {
@@ -217232,7 +217638,7 @@ function restartingResponse() {
 function createFrontGate() {
   let open7 = true;
   let generation = 0;
-  const current3 = new AsyncLocalStorage9;
+  const current3 = new AsyncLocalStorage10;
   return {
     isOpen: () => open7,
     close() {
@@ -226295,6 +226701,7 @@ var init_response_builder = __esm(() => {
   MAIL_WINDOWS = new Set(["6m", "1y", "2y", "5y", "all"]);
   MAIL_CATEGORIES = new Set(["primary", "social", "promotions", "updates", "forums"]);
   ERROR_TEXT = {
+    not_personal: "Private item: ask with source_answer",
     invalid_params: "The request was not valid. Check the arguments and try again.",
     invalid_request: "The request was not valid. Check the arguments and try again.",
     unsupported_filter: "That filter is not supported here.",
@@ -241056,7 +241463,7 @@ async function callTool(request, name, options) {
     ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}
   });
   try {
-    const result = await runWithReleaseManifestSink(manifests, () => operation.handler(ctx, params.value));
+    const result = await runWithReleaseManifestSink(manifests, () => withRemoteReadAuthorization(authorized, () => operation.handler(ctx, params.value)));
     const afterHandler = currentAccess(authorized);
     if (afterHandler !== "active")
       return refused3(afterHandler);
@@ -241074,10 +241481,15 @@ async function callTool(request, name, options) {
     const afterSettle = currentAccess(authorized);
     if (afterSettle !== "active")
       return refused3(afterSettle);
-    const output = privatePart ? await release2() : approved;
+    let output = privatePart ? await release2() : approved;
     const afterFinalRelease = currentAccess(authorized);
     if (afterFinalRelease !== "active")
       return refused3(afterFinalRelease);
+    if (operation.name === "source_item_read")
+      output = remoteOperationOutput(operation.name, result, {
+        ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {},
+        releaseManifests: manifests.manifests
+      });
     recordRemoteOperation({ operation: operation.name, args: params.value, caller: ctx.caller, output, capture, privateQuestion: privateMayAnswer ? privatePart?.answerRef : undefined });
     return jsonResponse(200, privateMayAnswer ? withRemotePrivateNote(output, privatePart?.answerId, privatePart?.secretMatch) : output);
   } catch (error2) {
@@ -241254,7 +241666,8 @@ var init_remote_openapi = __esm(() => {
     source_answer_busy: 429,
     source_answer_job_not_found: 404,
     source_answer_deadline: 504,
-    source_answer_too_large: 502
+    source_answer_too_large: 502,
+    not_personal: 403
   };
 });
 
@@ -248426,9 +248839,9 @@ init_open_targets();
 init_package_root();
 init_linux_engine_layout();
 import { spawnSync as spawnSync9 } from "node:child_process";
-import { existsSync as existsSync40, lstatSync as lstatSync23, mkdirSync as mkdirSync26, readFileSync as readFileSync33, renameSync as renameSync9, rmSync as rmSync15, statSync as statSync21, writeFileSync as writeFileSync8 } from "node:fs";
+import { existsSync as existsSync41, lstatSync as lstatSync23, mkdirSync as mkdirSync26, readFileSync as readFileSync33, renameSync as renameSync9, rmSync as rmSync15, statSync as statSync21, writeFileSync as writeFileSync8 } from "node:fs";
 import { homedir as homedir24, platform as osPlatform2 } from "node:os";
-import { dirname as dirname44, isAbsolute as isAbsolute20, join as join48 } from "node:path";
+import { dirname as dirname45, isAbsolute as isAbsolute20, join as join49 } from "node:path";
 var OPEN_HANDLER_BUNDLE_ID = "ai.olympusplugin.open";
 var OPEN_HANDLER_DESKTOP_ID = `${OPEN_HANDLER_BUNDLE_ID}.desktop`;
 var OPEN_HANDLER_MIME_TYPE = `x-scheme-handler/${OLYMPUS_URL_SCHEME}`;
@@ -248436,7 +248849,7 @@ var OPEN_HANDLER_MARK = "Written by olympus open-handler install";
 var LSREGISTER_PATH = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
 function openHandlerPaths(platform2, homeDir, env = {}) {
   if (platform2 === "darwin") {
-    return { handlerPath: join48(homeDir, "Library", "Application Support", "Olympus", "Olympus.app") };
+    return { handlerPath: join49(homeDir, "Library", "Application Support", "Olympus", "Olympus.app") };
   }
   const layout = resolveLinuxEngineLayout({ ...env, HOME: homeDir });
   return {
@@ -248473,7 +248886,7 @@ function renderMacOpenHandlerScript(program) {
 }
 function renderLinuxDesktopEntry2(program, launcherPath) {
   assertProgram(program);
-  const workDir = launcherPath ? dirname44(launcherPath) : programWorkingDirectory(program);
+  const workDir = launcherPath ? dirname45(launcherPath) : programWorkingDirectory(program);
   for (const path of [program.runtimePath, program.entryPath, workDir, ...launcherPath ? [launcherPath] : []]) {
     if (!isAbsolute20(path) || /[\x00-\x1f\x7f"`$\\%]/.test(path))
       throw new Error(`The path ${path} cannot be written into a desktop entry.`);
@@ -248537,14 +248950,14 @@ function installMac(options) {
   const exec = options.exec ?? defaultExec;
   const program = options.program ?? defaultProgram();
   const { handlerPath } = openHandlerPaths("darwin", home(options));
-  if (existsSync40(handlerPath) && !ownedHandler("darwin", handlerPath)) {
+  if (existsSync41(handlerPath) && !ownedHandler("darwin", handlerPath)) {
     return { ok: false, platform: "darwin", action: "failed", path: handlerPath, detail: `${handlerPath} is not the Olympus link handler, so it was left alone.` };
   }
   const script2 = renderMacOpenHandlerScript(program);
-  const support = dirname44(handlerPath);
+  const support = dirname45(handlerPath);
   mkdirSync26(support, { recursive: true, mode: 448 });
-  const staging = join48(support, ".Olympus-next.app");
-  const scriptPath = join48(support, ".open-handler.applescript");
+  const staging = join49(support, ".Olympus-next.app");
+  const scriptPath = join49(support, ".open-handler.applescript");
   rmSync15(staging, { recursive: true, force: true });
   writeFileSync8(scriptPath, script2, { mode: 384 });
   try {
@@ -248552,7 +248965,7 @@ function installMac(options) {
   } finally {
     rmSync15(scriptPath, { force: true });
   }
-  const plist = join48(staging, "Contents", "Info.plist");
+  const plist = join49(staging, "Contents", "Info.plist");
   must(exec("/usr/bin/plutil", ["-replace", "CFBundleIdentifier", "-string", OPEN_HANDLER_BUNDLE_ID, plist]), "name the link handler");
   must(exec("/usr/bin/plutil", ["-replace", "CFBundleName", "-string", "Olympus", plist]), "name the link handler");
   must(exec("/usr/bin/plutil", ["-replace", "LSUIElement", "-bool", "YES", plist]), "hide the link handler from the Dock");
@@ -248564,7 +248977,7 @@ function installMac(options) {
     plist
   ]), "claim olympus:// links");
   must(exec("/usr/bin/codesign", ["--force", "--sign", "-", staging]), "sign the link handler");
-  if (existsSync40(handlerPath)) {
+  if (existsSync41(handlerPath)) {
     exec(LSREGISTER_PATH, ["-u", handlerPath]);
     rmSync15(handlerPath, { recursive: true, force: true });
   }
@@ -248582,9 +248995,9 @@ function installMac(options) {
 function uninstallMac(options) {
   const exec = options.exec ?? defaultExec;
   const { handlerPath } = openHandlerPaths("darwin", home(options));
-  const staging = join48(dirname44(handlerPath), ".Olympus-next.app");
+  const staging = join49(dirname45(handlerPath), ".Olympus-next.app");
   rmSync15(staging, { recursive: true, force: true });
-  if (!existsSync40(handlerPath))
+  if (!existsSync41(handlerPath))
     return { ok: true, platform: "darwin", action: "absent", path: handlerPath };
   if (!ownedHandler("darwin", handlerPath)) {
     return { ok: false, platform: "darwin", action: "failed", path: handlerPath, detail: `${handlerPath} is not the Olympus link handler, so it was left alone.` };
@@ -248599,13 +249012,13 @@ function installLinux(options) {
   const program = options.program ?? defaultProgram();
   const { handlerPath } = openHandlerPaths("linux", home(options), options.env ?? process.env);
   const entry = renderLinuxDesktopEntry2(program, readLinuxEngineReceipt(layout.receiptPath) ? layout.launcherPath : undefined);
-  if (existsSync40(handlerPath) && !ownedHandler("linux", handlerPath)) {
+  if (existsSync41(handlerPath) && !ownedHandler("linux", handlerPath)) {
     return { ok: false, platform: "linux", action: "failed", path: handlerPath, detail: `${handlerPath} was not written by Olympus, so it was left alone.` };
   }
-  mkdirSync26(dirname44(handlerPath), { recursive: true, mode: 448 });
+  mkdirSync26(dirname45(handlerPath), { recursive: true, mode: 448 });
   writeAtomic(handlerPath, entry, 420);
   const registered3 = exec("xdg-mime", ["default", OPEN_HANDLER_DESKTOP_ID, OPEN_HANDLER_MIME_TYPE]).status === 0;
-  exec("update-desktop-database", [dirname44(handlerPath)]);
+  exec("update-desktop-database", [dirname45(handlerPath)]);
   return {
     ok: registered3,
     platform: "linux",
@@ -248620,17 +249033,17 @@ function uninstallLinux(options) {
   const { handlerPath, mimeappsPath } = openHandlerPaths("linux", home(options), options.env ?? process.env);
   if (mimeappsPath)
     forgetLinuxDefault(mimeappsPath);
-  if (!existsSync40(handlerPath))
+  if (!existsSync41(handlerPath))
     return { ok: true, platform: "linux", action: "absent", path: handlerPath };
   if (!ownedHandler("linux", handlerPath)) {
     return { ok: false, platform: "linux", action: "failed", path: handlerPath, detail: `${handlerPath} was not written by Olympus, so it was left alone.` };
   }
   rmSync15(handlerPath, { force: true });
-  exec("update-desktop-database", [dirname44(handlerPath)]);
+  exec("update-desktop-database", [dirname45(handlerPath)]);
   return { ok: true, platform: "linux", action: "removed", path: handlerPath };
 }
 function forgetLinuxDefault(mimeappsPath) {
-  if (!existsSync40(mimeappsPath))
+  if (!existsSync41(mimeappsPath))
     return false;
   const stat2 = lstatSync23(mimeappsPath);
   if (!stat2.isFile() || stat2.isSymbolicLink())
@@ -248657,7 +249070,7 @@ function forgetLinuxDefault(mimeappsPath) {
 function ownedHandler(platform2, handlerPath) {
   try {
     if (platform2 === "darwin") {
-      const plist = join48(handlerPath, "Contents", "Info.plist");
+      const plist = join49(handlerPath, "Contents", "Info.plist");
       return lstatSync23(handlerPath).isDirectory() && readFileSync33(plist, "utf8").includes(OPEN_HANDLER_BUNDLE_ID);
     }
     const stat2 = lstatSync23(handlerPath);
@@ -248668,10 +249081,10 @@ function ownedHandler(platform2, handlerPath) {
 }
 function defaultProgram() {
   const root = olympusPackageRoot();
-  return { runtimePath: process.execPath, entryPath: join48(root, "dist", "cli.js"), workingDirectory: root };
+  return { runtimePath: process.execPath, entryPath: join49(root, "dist", "cli.js"), workingDirectory: root };
 }
 function programWorkingDirectory(program) {
-  return program.workingDirectory ?? dirname44(dirname44(program.entryPath));
+  return program.workingDirectory ?? dirname45(dirname45(program.entryPath));
 }
 function refuseForeignUser(platform2, options) {
   if (platform2 !== "darwin" && platform2 !== "linux")

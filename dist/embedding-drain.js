@@ -1668,6 +1668,7 @@ var V0_4_PUBLIC_NATIVE_TOOLS = [
   "argus_complete",
   "source_answer",
   "source_index_status",
+  "source_item_read",
   "source_index_search",
   "source_watch_create",
   "source_watches",
@@ -1687,6 +1688,7 @@ var V0_4_PUBLIC_MCP_TOOLS = [
   "source_answer",
   "source_answer_result",
   "source_index_status",
+  "source_item_read",
   "source_index_search",
   "olympus_doctor",
   "olympus_setup_status",
@@ -1701,6 +1703,7 @@ var V0_4_PUBLIC_CLI_OPERATIONS = [
   "argus_complete",
   "source_answer",
   "source_index_status",
+  "source_item_read",
   "source_index_search",
   "olympus_doctor",
   "olympus_setup_status",
@@ -1709,13 +1712,13 @@ var V0_4_PUBLIC_CLI_OPERATIONS = [
   "privacy_item_find",
   "privacy_item_set"
 ];
-var V0_4_HERMES_MCP_TOOLS = [
+var V0_4_PUBLIC_REMOTE_MCP_TOOLS = [
   "source_answer",
   "source_answer_result",
   "source_index_status",
+  "source_item_read",
   "ask_anonymously"
 ];
-var V0_4_PUBLIC_REMOTE_MCP_TOOLS = V0_4_HERMES_MCP_TOOLS;
 var V0_4_PUBLIC_SOURCE_IDS = [
   "gmail.email",
   "google_drive.docs",
@@ -23006,93 +23009,694 @@ function ensureOwnerOnlyDir(dir) {
   chmodSync6(dir, 448);
 }
 
-// src/workers/classification/secret-locations.ts
-function screenedSecretLocator(locator) {
-  return locator?.trim() && !hasCredentialUrl(locator) && detectSecretFindingKinds(locator).length === 0 ? locator.trim().slice(0, 1000) : null;
+// src/core/source-item-read.ts
+var SOURCE_ITEM_READ_REFUSALS = [
+  "held_until_judged",
+  "content_private",
+  "names_only",
+  "not_in_scope",
+  "extraction_pending",
+  "window_judging",
+  "not_personal"
+];
+function itemTextPages(text2, cap) {
+  const result = [];
+  for (let start = 0;start < text2.length; ) {
+    let end = Math.min(start + cap, text2.length);
+    if (end < text2.length) {
+      const slice = text2.slice(start, end);
+      const boundaries = slice.matchAll(/[.!?。！？](?:["'”’»)\]]*)(?:\s+|$)/gu);
+      let boundary = 0;
+      for (const match of boundaries)
+        boundary = match.index + match[0].length;
+      if (boundary > 0)
+        end = start + boundary;
+    }
+    result.push(text2.slice(start, end));
+    start = end;
+  }
+  return result;
 }
-var STOP_WORDS2 = new Set([
-  "a",
-  "an",
-  "and",
-  "are",
-  "did",
-  "do",
-  "does",
-  "find",
-  "for",
-  "have",
-  "i",
-  "in",
-  "is",
-  "it",
-  "kept",
-  "keep",
-  "me",
-  "my",
-  "of",
-  "olympus",
-  "on",
-  "or",
-  "put",
-  "record",
-  "records",
-  "saved",
-  "show",
-  "stored",
-  "the",
-  "there",
-  "to",
-  "what",
-  "where",
-  "which",
-  "who",
-  "with"
+
+// src/workers/connector-store/tier-set-registry.ts
+var tierSets;
+function tierSetForLedger(ledgerPath) {
+  return tierSets?.get(ledgerPath);
+}
+
+// src/workers/source-index/media-judge.ts
+var MEDIA_JUDGE_SENSITIVE_CATEGORIES = [
+  "id_document",
+  "bank_card",
+  "financial_document",
+  "medical_document",
+  "intimate"
+];
+var MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES = new Set(["medical_document"]);
+var MEDIA_JUDGE_TEXT_DECIDES = "text_decides";
+var MEDIA_JUDGE_PROMPT_SET = "photo-judge-2026-10-29";
+var MEDIA_JUDGE_PROMPTS = Object.freeze({
+  id_document: "a photo of a passport, national identity card or driving licence",
+  bank_card: "a photo of a credit card, debit card or bank card",
+  financial_document: "a bank statement, payslip or document showing account numbers",
+  medical_document: "a medical report or lab test results document",
+  intimate: "a nude, intimate or sexually explicit photo",
+  ordinary: "an ordinary photo of a place, a room, food, a landscape or people"
+});
+var MEDIA_JUDGE_PROMPT_PREFIX = "task: classification | query: ";
+var MEDIA_JUDGE_THRESHOLDS = Object.freeze({
+  margin: 0.04,
+  intimateMargin: 0.025
+});
+function mediaJudgeId(provider, thresholds = MEDIA_JUDGE_THRESHOLDS) {
+  return `${MEDIA_JUDGE_PROMPT_SET}:m${thresholds.margin}:i${thresholds.intimateMargin}:${provider.modelId}:${provider.configHash.slice(0, 12)}`;
+}
+function dot(left, right) {
+  let sum = 0;
+  const length = Math.min(left.length, right.length);
+  for (let index = 0;index < length; index += 1)
+    sum += left[index] * right[index];
+  return sum;
+}
+function rounded(value) {
+  return Math.round(value * 1e4) / 1e4;
+}
+function judgeMediaScores(scores, judgeId, thresholds = MEDIA_JUDGE_THRESHOLDS) {
+  const ordinary = scores.ordinary;
+  const sensitive = MEDIA_JUDGE_SENSITIVE_CATEGORIES.map((category) => [category, scores[category]]);
+  if (typeof ordinary !== "number" || !Number.isFinite(ordinary) || sensitive.some(([, score]) => typeof score !== "number" || !Number.isFinite(score))) {
+    return { verdict: "unjudged", judgeId, reason: "scores_unavailable" };
+  }
+  let top = sensitive[0][0];
+  let topScore = -Infinity;
+  for (const [category, score] of sensitive) {
+    if (score > topScore) {
+      top = category;
+      topScore = score;
+    }
+  }
+  const margin = topScore - ordinary;
+  const intimateMargin = scores.intimate - ordinary;
+  const kept = Object.fromEntries(Object.entries(scores).map(([key2, value]) => [key2, rounded(value)]));
+  if (margin >= thresholds.margin && !MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES.has(top)) {
+    return { verdict: "sensitive", category: top, margin: rounded(margin), scores: kept, judgeId };
+  }
+  let pictureTop;
+  for (const [category, score] of sensitive) {
+    if (MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES.has(category) || score - ordinary < thresholds.margin)
+      continue;
+    if (!pictureTop || score > scores[pictureTop])
+      pictureTop = category;
+  }
+  if (pictureTop) {
+    return { verdict: "sensitive", category: pictureTop, margin: rounded(scores[pictureTop] - ordinary), scores: kept, judgeId };
+  }
+  if (intimateMargin >= thresholds.intimateMargin) {
+    return { verdict: "sensitive", category: "intimate", margin: rounded(margin), scores: kept, judgeId };
+  }
+  if (margin >= thresholds.margin) {
+    return { verdict: "ordinary", category: top, margin: rounded(margin), scores: kept, judgeId, reason: MEDIA_JUDGE_TEXT_DECIDES };
+  }
+  return { verdict: "ordinary", category: top, margin: rounded(margin), scores: kept, judgeId };
+}
+function judgeImageVector(imageVector, promptVectors, judgeId, thresholds = MEDIA_JUDGE_THRESHOLDS) {
+  if (!imageVector || imageVector.length === 0)
+    return { verdict: "unjudged", judgeId, reason: "image_unreadable" };
+  if (Math.hypot(...imageVector) < 0.000001)
+    return { verdict: "unjudged", judgeId, reason: "image_unreadable" };
+  const scores = {};
+  for (const category of Object.keys(MEDIA_JUDGE_PROMPTS)) {
+    scores[category] = dot(imageVector, promptVectors[category]);
+  }
+  return judgeMediaScores(scores, judgeId, thresholds);
+}
+function canJudgeMedia(provider) {
+  return typeof provider.embedPromptTexts === "function" && typeof provider.embedImageVectors === "function";
+}
+var promptVectorCache = new Map;
+function mediaJudgePromptVectors(provider) {
+  const key2 = `${provider.provider}\x00${provider.modelId}\x00${provider.configHash}`;
+  let cached2 = promptVectorCache.get(key2);
+  if (!cached2) {
+    const categories = Object.keys(MEDIA_JUDGE_PROMPTS);
+    cached2 = provider.embedPromptTexts(categories.map((category) => `${MEDIA_JUDGE_PROMPT_PREFIX}${MEDIA_JUDGE_PROMPTS[category]}`)).then((vectors) => {
+      if (vectors.length !== categories.length || vectors.some((vector) => vector.length === 0)) {
+        throw new Error("The photo judge's descriptions could not be embedded.");
+      }
+      return Object.fromEntries(categories.map((category, index) => [category, vectors[index]]));
+    });
+    promptVectorCache.set(key2, cached2);
+    cached2.catch(() => promptVectorCache.delete(key2));
+  }
+  return cached2;
+}
+async function judgeMediaImages(provider, images, thresholds = MEDIA_JUDGE_THRESHOLDS) {
+  if (images.length === 0)
+    return [];
+  const prompts = await mediaJudgePromptVectors(provider);
+  const vectors = await provider.embedImageVectors([...images]);
+  const judgeId = mediaJudgeId(provider, thresholds);
+  return images.map((_, index) => judgeImageVector(vectors[index], prompts, judgeId, thresholds));
+}
+async function judgeReturnedImageVectors(provider, vectors, thresholds = MEDIA_JUDGE_THRESHOLDS) {
+  const prompts = await mediaJudgePromptVectors(provider);
+  const judgeId = mediaJudgeId(provider, thresholds);
+  return vectors.map((vector) => judgeImageVector(vector, prompts, judgeId, thresholds));
+}
+
+// src/workers/connector-store/secrets-disposition.ts
+import { existsSync as existsSync22 } from "node:fs";
+
+// src/core/app-release-log.ts
+import { Database as Database5 } from "bun:sqlite";
+import { randomBytes as randomBytes2 } from "node:crypto";
+import { chmodSync as chmodSync7, existsSync as existsSync21, lstatSync as lstatSync9, mkdirSync as mkdirSync14 } from "node:fs";
+import { homedir as homedir11 } from "node:os";
+import { dirname as dirname25, isAbsolute as isAbsolute13, join as join23 } from "node:path";
+
+// src/core/remote-connections.ts
+import { dirname as dirname24, isAbsolute as isAbsolute12 } from "node:path";
+
+// src/core/operation-caller.ts
+var inProcessRemoteRequests = new WeakSet;
+
+// connect-relay/shared/tokens.ts
+var SECRET = "[A-Za-z0-9_-]{43}";
+var INSTALL = "[a-z2-7]{32}";
+var PATTERN = {
+  access: new RegExp(`^oly2\\.(${INSTALL})\\.${SECRET}$`),
+  refresh: new RegExp(`^oly2r\\.(${INSTALL})\\.${SECRET}$`),
+  code: new RegExp(`^oly2c\\.(${INSTALL})\\.${SECRET}$`),
+  handoff: new RegExp(`^oly2g\\.(${INSTALL})\\.${SECRET}$`),
+  private: new RegExp(`^oly2p\\.(${INSTALL})\\.${SECRET}$`)
+};
+
+// src/workers/remote-oauth/pinned-clients.ts
+var GROK_REDIRECT_URIS = Object.freeze([
+  "https://grok.com/connectors-oauth-exchange-code/",
+  "https://console.x.ai/connectors-oauth-exchange-code/"
+]);
+var CURSOR_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback";
+var CURSOR_REDIRECT_URIS = Object.freeze([
+  CURSOR_REDIRECT_URI,
+  "https://www.cursor.com/bot/mcp/oauth/callback",
+  "https://grok.com/connectors-oauth-exchange-code/"
 ]);
 
-// src/workers/classification/tier-set-binding.ts
-import { existsSync as existsSync21 } from "node:fs";
-import { basename as basename6, dirname as dirname24, join as join23, resolve as resolve9 } from "node:path";
-function tierStoreDataRoot(storeDbPath) {
-  const folder = dirname24(resolve9(storeDbPath));
-  return accountSiblingStorePath(storeDbPath, "secure_local") ? dirname24(dirname24(dirname24(dirname24(folder)))) : folder;
+// src/core/remote-oauth-store.ts
+var REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 3600;
+var REMOTE_PAIRING_CODE_TTL_MS = 10 * 60000;
+var PAIRING_SELECTOR_LENGTH = 4;
+var PAIRING_SECRET_LENGTH = 8;
+var PAIRING_CODE_LENGTH = PAIRING_SELECTOR_LENGTH + PAIRING_SECRET_LENGTH;
+var UNUSED_CLIENT_PRUNE_AGE_MS = 24 * 3600000;
+
+// src/core/app-release-capture.ts
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+var storage2 = new AsyncLocalStorage5;
+var completedPrivateAnswers = new Set;
+var JOB_QUESTION_TTL_MS = 30 * 60000;
+var jobQuestions = new Map;
+
+// src/core/waiting-private-questions.ts
+var WAITING_QUESTION_LIMITS = Object.freeze({
+  questionBytes: 2048,
+  localQuestionBytes: 8 * 1024,
+  selectorBytes: 4096,
+  answerBytes: 128 * 1024,
+  ttlMs: 7 * 24 * 60 * 60000,
+  reanswerAfterMs: 10 * 60000
+});
+
+// src/core/remote-connections.ts
+function resolveRemoteConnectionsDbPath(env = process.env) {
+  return defaultRemoteConnectionsDbPath(env);
 }
-var tierLedgerIsWithin = pathResolvesWithin;
-function readTierSetBinding(storeDbPath) {
-  const cursor = readStoreBindingCursor(storeDbPath, "tiered-store-set-binding", "tiered_store_set_binding");
-  if (!cursor)
-    return;
-  const binding = JSON.parse(cursor);
-  if (typeof binding.ledgerId !== "string" || typeof binding.ledgerPath !== "string")
-    throw new Error("Invalid privacy ledger binding.");
-  return binding;
-}
-function assertStoreTierLedgerCanOpen(storeDbPath, readOnly = false) {
-  const binding = readTierSetBinding(storeDbPath);
-  const path = binding ? findTierSetLedger(storeDbPath, binding) : tierLedgerPathForStore(storeDbPath);
-  if (binding && !path)
-    throw new Error(`The privacy ledger governing ${storeDbPath} is missing or outside this install. Restore the set ledger before opening the store.`);
-  if (path)
-    TierLedger.assertSchemaCanOpen(path, readOnly);
-}
-function tierSetLedgerCandidates(storeDbPath, recordedLedgerPath) {
-  if (storeDbPath === ":memory:" || recordedLedgerPath === ":memory:")
-    return [recordedLedgerPath];
-  const candidates = [];
-  const secure = accountSiblingStorePath(storeDbPath, "secure_local");
-  if (secure)
-    candidates.push(tierLedgerPathForStore(secure));
-  candidates.push(join23(dirname24(storeDbPath), basename6(recordedLedgerPath)));
-  candidates.push(recordedLedgerPath);
-  return [...new Set(candidates)].filter((path) => tierLedgerIsWithin(tierStoreDataRoot(storeDbPath), path));
-}
-function findTierSetLedger(storeDbPath, binding) {
-  for (const candidate of tierSetLedgerCandidates(storeDbPath, binding.ledgerPath)) {
-    if (candidate === ":memory:" || !existsSync21(candidate))
-      continue;
-    if (TierLedger.readLedgerId(candidate) === binding.ledgerId)
-      return candidate;
+function defaultRemoteConnectionsDbPath(env = process.env) {
+  const path = sharedDataPath("remote-connections", env);
+  if (!isAbsolute12(path)) {
+    throw new TypeError("Remote connections XDG_DATA_HOME must be an absolute private data root.");
   }
-  return;
+  return path;
+}
+
+// src/core/app-release-log.ts
+var APP_RELEASE_LOG_STORE_ID = "app-release-log";
+var APP_RELEASE_LOG_SCHEMA_VERSION = 3;
+var APP_RELEASE_RETENTION_DAYS = [7, 30, 90, 0];
+var APP_RELEASE_DEFAULT_RETENTION_DAYS = 30;
+var MAX_ITEMS_PER_REQUEST = 48;
+var LIST_LIMIT = 200;
+var DAY_MS = 24 * 60 * 60000;
+var RETENTION_KEY = "retention_days";
+function appReleaseLogDbPath(remoteConnectionsDbPath) {
+  return join23(dirname25(remoteConnectionsDbPath), SHARED_DATA_FILES["app-release-log"]);
+}
+var openLogPaths = new Map;
+function appReleaseLogDbPaths(env = process.env) {
+  return [...new Set([appReleaseLogDbPath(resolveRemoteConnectionsDbPath(env)), ...openLogPaths.keys()])];
+}
+function isAppReleaseRetentionDays(value) {
+  return typeof value === "number" && APP_RELEASE_RETENTION_DAYS.includes(value);
+}
+function openAppReleaseLog(dbPath, options = {}) {
+  const now = options.now ?? Date.now;
+  hardenPrivatePath(dbPath);
+  const db = new Database5(dbPath, { create: true });
+  try {
+    chmodSync7(dbPath, 384);
+    db.exec("PRAGMA busy_timeout = 5000; PRAGMA secure_delete = ON; PRAGMA journal_mode = DELETE; PRAGMA foreign_keys = ON;");
+    db.transaction(() => {
+      assertSqliteSchemaCanOpen(db, APP_RELEASE_LOG_STORE_ID, APP_RELEASE_LOG_SCHEMA_VERSION);
+      runSqliteMigrations(db, APP_RELEASE_LOG_STORE_ID, migrations());
+    }).immediate();
+  } catch (error) {
+    closeSqliteStore(db);
+    throw error;
+  }
+  openLogPaths.set(dbPath, (openLogPaths.get(dbPath) ?? 0) + 1);
+  let registered = true;
+  const retentionDays = () => {
+    const row = db.query("SELECT value FROM app_release_meta WHERE key = ?").get(RETENTION_KEY);
+    const days = row ? Number(row.value) : APP_RELEASE_DEFAULT_RETENTION_DAYS;
+    return isAppReleaseRetentionDays(days) ? days : APP_RELEASE_DEFAULT_RETENTION_DAYS;
+  };
+  const clear = () => db.transaction(() => {
+    db.query("DELETE FROM app_release_items").run();
+    return db.query("DELETE FROM app_release_requests").run().changes;
+  })();
+  const expire = () => {
+    const days = retentionDays();
+    if (days === 0) {
+      clear();
+      return;
+    }
+    const before = now() - days * DAY_MS;
+    db.transaction(() => {
+      db.query("DELETE FROM app_release_items WHERE request_id IN (SELECT id FROM app_release_requests WHERE at < ?)").run(before);
+      db.query("DELETE FROM app_release_requests WHERE at < ?").run(before);
+    })();
+  };
+  return {
+    record(record) {
+      if (retentionDays() === 0)
+        return;
+      const id = `apr_${randomBytes2(12).toString("base64url")}`;
+      db.transaction(() => {
+        db.query(`INSERT INTO app_release_requests (id, at, connection_id, connection_name, connection_kind, question, held_back, answered_privately, withheld, private_question_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, record.at, record.connection.id ?? null, record.connection.name.slice(0, 80), record.connection.kind, record.question.slice(0, 2000), Math.max(0, Math.floor(record.heldBack)), record.answeredPrivately ? 1 : 0, record.withheld ? 1 : 0, record.privateQuestionKey ?? null);
+        const insert = db.query(`INSERT INTO app_release_items (request_id, position, source, title, tier, corpus_id, provider, account_scope, provider_item_id, provider_conversation_id, locator)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+        const secret = db.query(`SELECT 1 FROM app_release_secret_items
+          WHERE provider = ? AND provider_item_id = ? AND (provider_conversation_id = '' OR ? = '' OR provider_conversation_id = ?) LIMIT 1`);
+        record.items.slice(0, MAX_ITEMS_PER_REQUEST).forEach((item, position) => {
+          const named = !(item.provider && item.providerItemId && secret.get(item.provider, item.providerItemId, item.providerConversationId ?? "", item.providerConversationId ?? ""));
+          insert.run(id, position, item.source, named ? item.title ?? null : null, item.tier, item.corpusId ?? null, item.provider ?? null, item.accountScope ?? null, item.providerItemId ?? null, item.providerConversationId ?? null, named ? item.locator ?? null : null);
+        });
+      })();
+      expire();
+      return id;
+    },
+    list() {
+      expire();
+      const requests = db.query(`SELECT id, at, connection_name, connection_kind, question, held_back, answered_privately, withheld
+        FROM app_release_requests ORDER BY at DESC, rowid DESC LIMIT ?`).all(LIST_LIMIT);
+      const items = db.query("SELECT position, source, title, tier, made_private FROM app_release_items WHERE request_id = ? ORDER BY position");
+      return requests.map((row) => ({
+        id: row.id,
+        at: row.at,
+        connection: { name: row.connection_name, kind: row.connection_kind === "agent" ? "agent" : "app" },
+        question: row.question,
+        heldBack: row.held_back,
+        answeredPrivately: row.answered_privately === 1,
+        withheld: row.withheld === 1,
+        items: items.all(row.id).map((item) => ({
+          position: item.position,
+          source: item.source,
+          ...item.title ? { title: item.title } : {},
+          tier: item.tier === "public" || item.tier === "personal" ? item.tier : "private",
+          madePrivate: item.made_private === 1
+        }))
+      }));
+    },
+    retentionDays,
+    setRetentionDays(days) {
+      if (!isAppReleaseRetentionDays(days))
+        throw new TypeError("Retention must be 7, 30, 90 or 0 days.");
+      db.query("INSERT INTO app_release_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(RETENTION_KEY, String(days));
+      expire();
+    },
+    clear,
+    item(requestId, position) {
+      const row = db.query(`SELECT source, title, tier, corpus_id, provider, provider_item_id, provider_conversation_id, locator, made_private
+        FROM app_release_items WHERE request_id = ? AND position = ?`).get(requestId, position);
+      if (!row)
+        return;
+      return {
+        source: row.source,
+        ...row.title ? { title: row.title } : {},
+        tier: row.tier === "public" || row.tier === "personal" ? row.tier : "private",
+        ...row.corpus_id ? { corpusId: row.corpus_id } : {},
+        ...row.provider ? { provider: row.provider } : {},
+        ...row.provider_item_id ? { providerItemId: row.provider_item_id } : {},
+        ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {},
+        ...row.locator ? { locator: row.locator } : {},
+        madePrivate: row.made_private === 1
+      };
+    },
+    markMadePrivate(requestId, position) {
+      db.query("UPDATE app_release_items SET made_private = 1 WHERE request_id = ? AND position = ?").run(requestId, position);
+    },
+    markAnsweredPrivately(privateQuestionKey) {
+      return db.query("UPDATE app_release_requests SET answered_privately = 1 WHERE private_question_id = ? AND answered_privately = 0").run(privateQuestionKey).changes;
+    },
+    forgetCorpora(corpusIds, dryRun, accountScopes) {
+      if (corpusIds.length === 0 || accountScopes?.length === 0)
+        return 0;
+      const marks = (values) => values.map(() => "?").join(", ");
+      const where = `corpus_id IN (${marks(corpusIds)})${accountScopes ? ` AND account_scope IN (${marks(accountScopes)})` : ""}`;
+      const params = [...corpusIds, ...accountScopes ?? []];
+      if (dryRun)
+        return db.query(`SELECT COUNT(*) AS n FROM app_release_items WHERE ${where}`).get(...params).n;
+      return db.query(`DELETE FROM app_release_items WHERE ${where}`).run(...params).changes;
+    },
+    forgetSecretItem(item, options2 = {}) {
+      const conversation = item.providerConversationId ?? "";
+      return db.transaction(() => {
+        if (options2.proceed && !options2.proceed())
+          return 0;
+        db.query(`INSERT OR IGNORE INTO app_release_secret_items (provider, provider_item_id, provider_conversation_id, redacted_at)
+          VALUES (?, ?, ?, ?)`).run(item.provider, item.providerItemId, conversation, now());
+        return db.query(`UPDATE app_release_items SET title = NULL, locator = NULL
+          WHERE provider = ? AND provider_item_id = ? AND (? = '' OR provider_conversation_id IS NULL OR provider_conversation_id = ?)
+            AND (title IS NOT NULL OR locator IS NOT NULL)`).run(item.provider, item.providerItemId, conversation, conversation).changes;
+      }).immediate();
+    },
+    retireSecretItem(item, options2 = {}) {
+      db.transaction(() => {
+        if (options2.stillSecret?.())
+          return;
+        db.query("DELETE FROM app_release_secret_items WHERE provider = ? AND provider_item_id = ?").run(item.provider, item.providerItemId);
+      }).immediate();
+    },
+    close() {
+      if (registered) {
+        registered = false;
+        const count = (openLogPaths.get(dbPath) ?? 1) - 1;
+        if (count > 0)
+          openLogPaths.set(dbPath, count);
+        else
+          openLogPaths.delete(dbPath);
+      }
+      closeSqliteStore(db);
+    }
+  };
+}
+function forgetSecretAppReleaseItem(dbPath, item, options = {}) {
+  if (!existsSync21(dbPath))
+    return 0;
+  const store = openAppReleaseLog(dbPath);
+  try {
+    return store.forgetSecretItem(item, options);
+  } finally {
+    store.close();
+  }
+}
+function retireSecretAppReleaseItem(dbPath, item, options = {}) {
+  if (!existsSync21(dbPath))
+    return;
+  const store = openAppReleaseLog(dbPath);
+  try {
+    store.retireSecretItem(item, options);
+  } finally {
+    store.close();
+  }
+}
+function migrations() {
+  return [{
+    version: 1,
+    name: "app_release_log",
+    up(db) {
+      db.exec(`
+        CREATE TABLE app_release_requests (
+          id TEXT PRIMARY KEY,
+          at INTEGER NOT NULL,
+          connection_id TEXT,
+          connection_name TEXT NOT NULL,
+          connection_kind TEXT NOT NULL,
+          question TEXT NOT NULL,
+          held_back INTEGER NOT NULL DEFAULT 0,
+          answered_privately INTEGER NOT NULL DEFAULT 0,
+          withheld INTEGER NOT NULL DEFAULT 0,
+          private_question_id TEXT
+        );
+        CREATE INDEX app_release_requests_private_question ON app_release_requests (private_question_id);
+        CREATE INDEX app_release_requests_at ON app_release_requests (at);
+        CREATE TABLE app_release_items (
+          request_id TEXT NOT NULL,
+          position INTEGER NOT NULL,
+          source TEXT NOT NULL,
+          title TEXT,
+          tier TEXT NOT NULL,
+          corpus_id TEXT,
+          provider TEXT,
+          provider_item_id TEXT,
+          provider_conversation_id TEXT,
+          locator TEXT,
+          made_private INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (request_id, position)
+        );
+        CREATE INDEX app_release_items_corpus ON app_release_items (corpus_id);
+        CREATE TABLE app_release_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      `);
+    }
+  }, {
+    version: 2,
+    name: "app_release_secret_items",
+    up(db) {
+      db.exec(`
+        CREATE TABLE app_release_secret_items (
+          provider TEXT NOT NULL,
+          provider_item_id TEXT NOT NULL,
+          provider_conversation_id TEXT NOT NULL DEFAULT '',
+          redacted_at INTEGER NOT NULL,
+          PRIMARY KEY (provider, provider_item_id, provider_conversation_id)
+        );
+        CREATE INDEX app_release_items_provider_item ON app_release_items (provider, provider_item_id);
+      `);
+    }
+  }, {
+    version: 3,
+    name: "app_release_items_account_scope",
+    up(db) {
+      db.exec(`
+        ALTER TABLE app_release_items ADD COLUMN account_scope TEXT;
+        CREATE INDEX app_release_items_corpus_scope ON app_release_items (corpus_id, account_scope);
+      `);
+    }
+  }];
+}
+function hardenPrivatePath(dbPath) {
+  if (!isAbsolute13(dbPath))
+    throw new TypeError("The AI apps log path must be absolute.");
+  const leafDir = dirname25(dbPath);
+  if (new Set(["/", "/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp", homedir11()]).has(leafDir)) {
+    throw new Error("The AI apps log must live inside a dedicated private directory.");
+  }
+  mkdirSync14(leafDir, { recursive: true, mode: 448 });
+  const dirStat = lstatSync9(leafDir);
+  if (dirStat.isSymbolicLink() || !dirStat.isDirectory())
+    throw new Error("The AI apps log must live in a real private directory.");
+  chmodSync7(leafDir, 448);
+  if (existsSync21(dbPath)) {
+    const fileStat = lstatSync9(dbPath);
+    if (fileStat.isSymbolicLink() || !fileStat.isFile())
+      throw new Error("The AI apps log must be a regular file, not a symlink.");
+  }
+}
+
+// src/workers/connector-store/secrets-disposition.ts
+var SECRETS_DISPOSITION = "tombstone_now";
+function secretsDisposition() {
+  return SECRETS_DISPOSITION;
+}
+function settleSecretsCopies(options) {
+  const disposition = options.disposition ?? secretsDisposition();
+  const chunks = {};
+  const identity = {
+    family: options.identity.family ?? "file",
+    provider: options.identity.provider,
+    accountScope: options.identity.accountScope,
+    providerItemId: options.identity.providerItemId,
+    localItemId: options.identity.localItemId,
+    ...options.identity.providerConversationId ? { providerConversationId: options.identity.providerConversationId } : {}
+  };
+  for (const copy of options.copies) {
+    const store = options.storeFor(copy.corpusId);
+    if (!store)
+      continue;
+    chunks[copy.corpusId] = (chunks[copy.corpusId] ?? 0) + (store.itemStoredContent(identity)?.chunkCount ?? 0);
+    if (disposition === "tombstone_now") {
+      const trustTier = "S5";
+      store.tombstoneCopy(identity, { connectorId: options.connectorId, trustTier });
+    }
+  }
+  const sideStores = forgetSecretInSideStores({ ledger: options.ledger, identity });
+  if (disposition === "tombstone_now")
+    options.ledger.removeCopies(options.identity);
+  return { disposition, chunks, sideStores };
+}
+function forgetSecretInSideStores(options) {
+  const result = { snifferQuestions: 0, extractionJobNames: 0, appReleaseTitles: 0, failed: 0, notDurable: 0 };
+  const { identity, ledger } = options;
+  const owedJobLedgers = [];
+  const stillOwed = () => ledger.hasSecretSideStoreDebt(identity);
+  if (options.onlyWhileOwed) {
+    try {
+      if (!stillOwed())
+        return result;
+    } catch {
+      result.failed += 1;
+      return result;
+    }
+  }
+  let claimant;
+  try {
+    claimant = ledger.ledgerId();
+  } catch {}
+  let mark;
+  try {
+    mark = ledger.noteSecretScrub(identity);
+  } catch {
+    result.failed += 1;
+  }
+  const snifferPath = tierSnifferPathForLedger(ledger.dbPath);
+  if (snifferPath !== ":memory:" && existsSync22(snifferPath)) {
+    try {
+      const sniffer = new TierSnifferStore({ dbPath: snifferPath });
+      try {
+        result.snifferQuestions = sniffer.deleteItemQuestions({
+          provider: identity.provider,
+          accountScope: identity.accountScope,
+          providerItemId: identity.providerItemId,
+          ...identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}
+        });
+      } finally {
+        sniffer.close();
+      }
+    } catch {
+      result.failed += 1;
+    }
+  }
+  for (const logPath of appReleaseLogDbPaths()) {
+    try {
+      result.appReleaseTitles += forgetSecretAppReleaseItem(logPath, {
+        provider: identity.provider,
+        providerItemId: identity.providerItemId,
+        ...identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}
+      }, options.onlyWhileOwed ? { proceed: stillOwed } : {});
+    } catch {
+      result.failed += 1;
+    }
+  }
+  let owedBefore = [];
+  let known = [];
+  try {
+    owedBefore = ledger.secretSideStoreDebtJobLedgerPaths(identity);
+    known = ledger.knownJobLedgerPaths();
+  } catch {}
+  const { visit: jobLedgers, outside } = jobLedgerPathsToVisit([...known, ...owedBefore, ...options.jobLedgerPaths ?? []]);
+  for (const jobsPath of jobLedgers) {
+    try {
+      const cleared = clearExtractionJobNames(jobsPath, {
+        provider: identity.provider,
+        accountScope: identity.accountScope,
+        providerItemId: identity.providerItemId,
+        ...identity.localItemId ? { localItemId: identity.localItemId } : {}
+      }, {
+        ...claimant !== undefined ? { claimant } : {},
+        ...options.onlyWhileOwed ? { proceed: stillOwed } : {}
+      });
+      result.extractionJobNames += cleared.cleared;
+      if (!cleared.durable) {
+        result.notDurable += 1;
+        owedJobLedgers.push(jobsPath);
+      }
+    } catch {
+      result.failed += 1;
+      owedJobLedgers.push(jobsPath);
+    }
+  }
+  try {
+    ledger.noteJobLedgerPaths(jobLedgers.filter((path) => path !== ":memory:" && existsSync22(path)));
+  } catch {}
+  try {
+    if (result.failed > 0 || result.notDurable > 0 || options.confirmInWorker) {
+      ledger.recordSecretSideStoreDebt(identity, owedJobLedgers, { onlyIfOwed: options.onlyWhileOwed === true });
+    } else {
+      ledger.clearSecretSideStoreDebt(identity, [...jobLedgers, ...outside]);
+      if (mark)
+        ledger.markSecretSideStoresCleared(identity, mark);
+    }
+  } catch {}
+  if (result.failed > 0)
+    console.warn(`[tier] secrets: ${result.failed} side store(s) could not forget an item; retried at the next tier tick.`);
+  return result;
+}
+function retireSecretRedactions(ledger, options = {}) {
+  let pending;
+  try {
+    pending = ledger.secretRedactionRetirements(options);
+  } catch {
+    return 0;
+  }
+  let claimant;
+  try {
+    claimant = ledger.ledgerId();
+  } catch {
+    return 0;
+  }
+  let knownJobLedgers = [];
+  try {
+    knownJobLedgers = ledger.knownJobLedgerPaths();
+  } catch {}
+  let retired = 0;
+  for (const retirement of pending) {
+    const item = { provider: retirement.provider, accountScope: retirement.accountScope, providerItemId: retirement.providerItemId };
+    const stillSecret = () => ledger.providerItemIsSecret(item);
+    let failed = 0;
+    let secret = false;
+    try {
+      secret = stillSecret();
+    } catch {
+      failed += 1;
+    }
+    if (!secret && failed === 0) {
+      for (const jobsPath of jobLedgerPathsToVisit([...knownJobLedgers, ...retirement.jobLedgerPaths]).visit) {
+        try {
+          if (retireExtractionJobRedaction(jobsPath, item, claimant, stillSecret).stillSecret)
+            secret = true;
+        } catch {
+          failed += 1;
+        }
+      }
+      for (const logPath of appReleaseLogDbPaths()) {
+        try {
+          retireSecretAppReleaseItem(logPath, { provider: item.provider, providerItemId: item.providerItemId }, { stillSecret });
+        } catch {
+          failed += 1;
+        }
+      }
+    }
+    if (failed > 0 && !secret)
+      continue;
+    try {
+      ledger.settleSecretRedactionRetirement(retirement.id);
+      if (!secret)
+        retired += 1;
+    } catch {}
+  }
+  return retired;
 }
 
 // src/workers/classification/installed-tier-classification-registry.ts
@@ -23236,509 +23840,584 @@ function secretFencedSniffer(sniffer, ledger, identity, read, options = {}) {
   };
 }
 
-// src/workers/connector-store/secrets-disposition.ts
-import { existsSync as existsSync23 } from "node:fs";
+// src/workers/connector-store/tier-rejudge.ts
+var TIER_REJUDGE_CONNECTOR_ID = "olympus_tier_rejudge";
+function settleRoutedSecrets(set, identity, decision, exported, finding, placement = {}) {
+  const ledger = set.ledger;
+  const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), {
+    ...placement.guard ? { guard: placement.guard } : {}
+  });
+  if (recorded.outcome !== "secrets")
+    return false;
+  const locations = set.secrets();
+  if (locations)
+    recordSecretLocation(locations, decision, exported, finding);
+  settleSecretsCopies({
+    ledger,
+    identity: exported.identity,
+    copies: recorded.previousCopies,
+    storeFor: (corpusId) => {
+      const domain = set.domainForCorpus(corpusId);
+      return domain ? set.store(domain) : undefined;
+    },
+    connectorId: TIER_REJUDGE_CONNECTOR_ID
+  });
+  return true;
+}
+function recordSecretLocation(locations, decision, exported, finding) {
+  const locator = columnString(exported.columns["locator_uri"]);
+  const title = columnString(exported.columns["title"]);
+  const namesReleasable = decision.metadataTier === "public" || decision.metadataTier === "private";
+  const folderKeys = storedFolderKeys(exported.columns["source_scope_folder_keys_json"]);
+  const scopeGeneration = columnString(exported.columns["source_scope_generation"]);
+  const scopeRevision = columnString(exported.columns["source_scope_revision"]);
+  locations.record({
+    identity: exported.identity,
+    ...locator && !hasCredentialUrl(locator) ? { locator } : {},
+    ...title && namesReleasable ? { title } : {},
+    namesReleasable,
+    ...folderKeys.length > 0 ? { folderKeys } : {},
+    ...scopeGeneration && scopeRevision ? { scopeGeneration, scopeRevision } : {},
+    findingKinds: finding.findingKinds.length > 0 ? finding.findingKinds : ["owner_marked_secret"],
+    ...finding.text !== undefined ? { text: finding.text } : {}
+  });
+}
+function identityOf2(record) {
+  return {
+    provider: record.provider,
+    accountScope: record.accountScope,
+    providerItemId: record.providerItemId,
+    ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
+  };
+}
+function columnString(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+function storedFolderKeys(value) {
+  if (typeof value !== "string" || !value.trim())
+    return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((key2) => typeof key2 === "string") : [];
+  } catch {
+    return [];
+  }
+}
+function raiseReadWindowTier(store, ledger, record, tier, snifferId) {
+  const identity = identityOf2(record);
+  const override = ledger.getOverride(identity);
+  if (ledger.getCurrent(identity)?.generation !== record.generation || override?.kind === "tier" && override.tier !== "private")
+    return;
+  const decision = {
+    ...record,
+    state: "current",
+    contentRead: true,
+    contentPending: false,
+    contentTier: maxTier(record.contentTier, tier),
+    decidedBy: "sniffer",
+    snifferId,
+    reasons: [...record.reasons, `content:sniffer:${snifferId}:read_window_${tier}`]
+  };
+  const set = tierSetForLedger(ledger.dbPath);
+  if (record.routed) {
+    if (!set)
+      throw new Error("The item read cannot raise a routed item without its tier set.");
+    if (tier === "secrets") {
+      const exported = store?.exportItemCopy?.(identity);
+      if (!exported)
+        throw new Error("The item read cannot settle a missing Secret copy.");
+      settleRoutedSecrets(set, identity, decision, exported, { findingKinds: ["sniffer_secret_refusal"] }, { guard: { generation: record.generation, override } });
+    } else {
+      ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), { guard: { generation: record.generation, override } });
+    }
+  } else {
+    const exported = tier === "secrets" ? store?.exportItemCopy?.(identity) : undefined;
+    ledger.recordDecision(identity, decision);
+    if (exported)
+      store?.tombstoneCopy?.(exported.identity, { connectorId: TIER_REJUDGE_CONNECTOR_ID, trustTier: "S5" });
+  }
+}
 
-// src/core/app-release-log.ts
-import { Database as Database5 } from "bun:sqlite";
-import { randomBytes as randomBytes2 } from "node:crypto";
-import { chmodSync as chmodSync7, existsSync as existsSync22, lstatSync as lstatSync9, mkdirSync as mkdirSync14 } from "node:fs";
-import { homedir as homedir11 } from "node:os";
-import { dirname as dirname26, isAbsolute as isAbsolute13, join as join24 } from "node:path";
+// src/workers/remote-access-recheck.ts
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
 
-// src/core/remote-connections.ts
-import { dirname as dirname25, isAbsolute as isAbsolute12 } from "node:path";
+// src/core/release-manifest.ts
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
+var chunkProvenance = new WeakMap;
+var storage3 = new AsyncLocalStorage6;
+var withheldAnswers = new WeakSet;
 
-// src/core/operation-caller.ts
-var inProcessRemoteRequests = new WeakSet;
-
-// connect-relay/shared/tokens.ts
-var SECRET = "[A-Za-z0-9_-]{43}";
-var INSTALL = "[a-z2-7]{32}";
-var PATTERN = {
-  access: new RegExp(`^oly2\\.(${INSTALL})\\.${SECRET}$`),
-  refresh: new RegExp(`^oly2r\\.(${INSTALL})\\.${SECRET}$`),
-  code: new RegExp(`^oly2c\\.(${INSTALL})\\.${SECRET}$`),
-  handoff: new RegExp(`^oly2g\\.(${INSTALL})\\.${SECRET}$`),
-  private: new RegExp(`^oly2p\\.(${INSTALL})\\.${SECRET}$`)
+// src/core/remote-result.ts
+var MAX_ANSWER = 64 * 1024;
+var MAX_SENT = 16 * 1024;
+var MAX_TITLE = 400;
+var MAX_ROUTE = 300;
+var MAX_MESSAGE = 2000;
+var MAX_CITATIONS = 50;
+var MAX_CORPORA = 200;
+var JOB_ID = /^saj_[A-Za-z0-9_-]{43}$/;
+var PARAM_NAME = /^[a-z][a-z0-9_]{0,63}$/;
+var CORPUS_ID = /^[a-z0-9_]+(\.[a-z0-9_-]+)+$/i;
+var MODEL_ID = /^[A-Za-z0-9._:/-]{1,128}$/;
+var REMOTE_PENDING_MESSAGE = "Olympus is still working on this and it keeps running. " + "Call source_answer_result with this job_id to get the result; repeat while it says working. Do not ask again.";
+var REMOTE_PRIVATE_NOTE_PATTERN = "^Your answer is in Olympus on your computer\\.(?: \\[Open answer\\]\\(olympus://open/private/[A-Za-z0-9_-]{22}\\))?(?: A matching item is a Secret\\. Open it in Olympus on your computer\\.)?$";
+var REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.";
+var PROVIDER_LABELS = {
+  gmail: "Gmail",
+  google_drive: "Google Drive",
+  "google-drive": "Google Drive",
+  google_calendar: "Google Calendar",
+  dropbox: "Dropbox",
+  x: "X bookmarks",
+  readwise: "Readwise",
+  telegram: "Telegram",
+  whatsapp: "WhatsApp",
+  whatsapp_personal: "WhatsApp",
+  whatsapp_business: "WhatsApp",
+  apple_messages: "Apple Messages",
+  signal: "Signal",
+  reflect: "Reflect",
+  roam: "Roam",
+  evernote: "Evernote",
+  local_files: "Files on this computer"
+};
+var FAMILY_LABELS = {
+  email: "Mail",
+  file: "Files",
+  chat: "Messages",
+  note: "Notes",
+  x: "X bookmarks",
+  readwise: "Readwise"
+};
+var OTHER_SOURCE_LABEL = "Other source";
+var REMOTE_SOURCE_LABELS = Object.freeze([...new Set([
+  ...Object.values(PROVIDER_LABELS),
+  ...Object.values(FAMILY_LABELS),
+  OTHER_SOURCE_LABEL
+])].sort());
+var REMOTE_REFUSAL_CODES = Object.freeze([
+  "refused",
+  "anonymous_answers_off",
+  "cancelled",
+  "gate_refused",
+  "internal_error",
+  "invalid_params",
+  "model_same_provider",
+  "question_empty",
+  "question_too_long",
+  "route_not_configured",
+  "secret_detected",
+  "settings_invalid",
+  "settings_stale",
+  "writer_declined",
+  "writer_failed",
+  "invalid_question",
+  "busy",
+  "acknowledgements_incomplete",
+  "funding_date_missing",
+  "funding_date_invalid",
+  "note_expired",
+  "daemon_api_key_missing",
+  "daemon_not_found",
+  "tor_not_found",
+  "unresolved_session",
+  "unresolved_session_other_wallet",
+  "no_unresolved_session",
+  "stranded_processes",
+  "daemon_already_running",
+  "tor_port_busy",
+  "tor_bootstrap_failed",
+  "daemon_start_failed",
+  "daemon_version_unsupported",
+  "daemon_supervisor_unsupported",
+  "relay_mismatch",
+  "key_reuse_on",
+  "key_reuse_unverified",
+  "daemon_keyless",
+  "daemon_identity_failed",
+  "daemon_api_key_rejected",
+  "session_process_exited",
+  "confinement_self_test_failed",
+  "confinement_unavailable",
+  "policy_unavailable",
+  "model_unavailable",
+  "daily_cap_reached",
+  "spend_cap_reached",
+  "state_unavailable",
+  "timeout",
+  "aborted",
+  "redirect_refused",
+  "response_too_large",
+  "invalid_response",
+  "daemon_error",
+  "transport_failed",
+  "teardown_incomplete",
+  "authorization_refused",
+  "session_spent"
+].filter((code, index, all) => all.indexOf(code) === index));
+var REMOTE_DAEMON_CODES = Object.freeze([
+  "busy",
+  "request_cancelled",
+  "funding_required",
+  "model_budget_unavailable",
+  "model_policy_unavailable",
+  "invalid_model",
+  "anonymous_access_failed",
+  "upstream_error",
+  "invalid_upstream_response",
+  "withdrawal_pending",
+  "wallet_conflict",
+  "invalid_request_error",
+  "invalid_body",
+  "testnet_password_required",
+  "invalid_api_key",
+  "local_connection_required",
+  "browser_origin_denied",
+  "unrecognized"
+]);
+var REFRESH_STATUSES = Object.freeze(["running", "completed", "failed"]);
+var TRUST_DOMAINS = Object.freeze(["public_safe", "internal", "secure_local"]);
+var RETRIEVAL_MODES = Object.freeze(["keyword", "hybrid"]);
+var RETRIEVAL_STATES = Object.freeze(["ready", "degraded"]);
+var NETWORK_IDENTITIES = Object.freeze(["hidden", "visible", "not_verified"]);
+var CLEANUPS = Object.freeze(["as_written", "light_cleanup", "custom"]);
+var OUTCOMES = Object.freeze(["not_sent", "sent_failed", "unknown"]);
+var REMOTE_DESCRIPTIONS = {
+  source_index_status: [
+    "Inspect source-index corpus status: each corpus's refresh status and aggregate counts.",
+    "Read-only: it never returns item metadata, sender counts, ledgers, source text, vectors or credentials.",
+    "Legacy extraction filter fields are refused on the connector-store status surface rather than silently returning whole-corpus counts."
+  ].join(" ")
+};
+var REMOTE_ERROR_TEXT = {
+  not_personal: "Private item: ask with source_answer",
+  invalid_params: "The request was not valid. Check the arguments against the tool's schema and try again.",
+  invalid_request: "The request was not valid. Check the arguments against the tool's schema and try again.",
+  unsupported_filter: "That filter is not supported here.",
+  config_error: "Olympus on the computer needs setup before it can answer.",
+  argus_unreachable: "Olympus could not reach its private analyst. Try again later.",
+  argus_error: "Olympus's private analyst could not answer. Try again later.",
+  email_not_configured: "Olympus on the computer needs setup before it can answer.",
+  email_unreachable: "Olympus could not reach its source worker in time. Try again later.",
+  email_error: "Olympus could not complete this request.",
+  email_policy_violation: "Olympus withheld this result under the owner's privacy rules.",
+  source_index_not_enabled: "Searching sources is not turned on in Olympus on the computer.",
+  source_index_policy_violation: "Olympus withheld this result under the owner's privacy rules.",
+  source_index_error: "Olympus could not complete this request.",
+  source_answer_busy: "Olympus is already answering as many questions as it can at once. Wait for the answers in progress (call source_answer_result with their job ids), then ask again.",
+  source_answer_job_not_found: "No Olympus answer with that job_id is available to this connection. It may have expired or Olympus may have restarted. Ask the question again with source_answer.",
+  source_answer_deadline: "The answer did not finish within Olympus's time limit and was stopped. Ask a narrower question, or try again later.",
+  source_answer_too_large: "The finished answer was too large for Olympus to return. Ask a narrower question.",
+  internal_error: "Olympus could not complete this request.",
+  unknown_operation: "Olympus has no operation with that name here.",
+  operation_unavailable: "That operation is not enabled on this Olympus install.",
+  unauthorized: "A connection token is required.",
+  invalid_token: "The connection token is not valid or has been revoked.",
+  remote_connections_unavailable: "Olympus could not check the connection token. Try again later.",
+  not_found: "There is nothing at this path.",
+  method_not_allowed: "That HTTP method is not allowed here.",
+  unsupported_media_type: "The request body must be JSON (Content-Type: application/json).",
+  payload_too_large: "The request body is too large.",
+  olympus_offline: "Olympus is off; try again later."
+};
+var REMOTE_ERROR_CODES = Object.freeze(Object.keys(REMOTE_ERROR_TEXT));
+var REFERENCED_ERROR_CODES = new Set([
+  "internal_error",
+  "email_error",
+  "source_index_error",
+  "argus_error",
+  "config_error"
+]);
+var PENDING_SCHEMA = {
+  type: "object",
+  description: "Still working: call source_answer_result with job_id, again while it says working.",
+  additionalProperties: false,
+  required: ["status", "job_id", "elapsed_ms", "next_tool", "message"],
+  properties: {
+    status: { const: "working" },
+    job_id: { type: "string", pattern: JOB_ID.source },
+    elapsed_ms: { type: "integer", minimum: 0 },
+    next_tool: { const: "source_answer_result" },
+    message: { type: "string" }
+  }
+};
+var CITATION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["label"],
+  properties: {
+    label: { type: "string", enum: [...REMOTE_SOURCE_LABELS] },
+    title: { type: "string", maxLength: MAX_TITLE },
+    date: { type: "string", format: "date" }
+  }
+};
+var SOURCE_ANSWER_SCHEMA = {
+  type: "object",
+  description: 'A source answer: give the answer with its citations. "withheld" carries a fixed sentence to pass on instead. When private_note is present, pass it on as written.',
+  additionalProperties: false,
+  required: ["kind", "status", "answer", "citations"],
+  properties: {
+    kind: { const: "source_answer" },
+    status: { enum: ["answered", "withheld"] },
+    answer: { type: "string", maxLength: MAX_ANSWER },
+    citations: { type: "array", maxItems: MAX_CITATIONS, items: CITATION_SCHEMA },
+    private_note: { type: "string", pattern: REMOTE_PRIVATE_NOTE_PATTERN }
+  }
+};
+var ANONYMOUS_ANSWERED_SCHEMA = {
+  type: "object",
+  description: 'The anonymous reply. When rewritten is true, say the question was rewritten first and offer to show "sent". When provider_note is present, pass it on as written.',
+  additionalProperties: false,
+  required: ["kind", "status", "reply", "level", "rewritten", "remembered", "network_identity"],
+  properties: {
+    kind: { const: "anonymous_answer" },
+    status: { const: "answered" },
+    reply: { type: "string", maxLength: MAX_ANSWER },
+    level: { enum: ["strict", "standard"] },
+    rewritten: { type: "boolean" },
+    remembered: { type: "boolean" },
+    network_identity: { enum: [...NETWORK_IDENTITIES] },
+    cleanup: { enum: [...CLEANUPS] },
+    model: { type: "string", pattern: MODEL_ID.source },
+    route: { type: "string", maxLength: MAX_ROUTE },
+    sent: { type: "string", maxLength: MAX_SENT },
+    note: { type: "string", maxLength: MAX_MESSAGE },
+    provider_note: { const: REMOTE_PROVIDER_UNKNOWN_NOTE }
+  }
+};
+var ANONYMOUS_NEEDS_CHOICE_SCHEMA = {
+  type: "object",
+  description: "Nothing was sent: ask the user once, Strict or Standard, then call again with level (and remember=true to keep it).",
+  additionalProperties: false,
+  required: ["kind", "status", "message", "options"],
+  properties: {
+    kind: { const: "anonymous_answer" },
+    status: { const: "needs_choice" },
+    message: { type: "string" },
+    options: {
+      type: "object",
+      additionalProperties: false,
+      required: ["suggested_level", "suggested_cleanup", "custom_instruction"],
+      properties: {
+        suggested_level: { enum: ["strict", "standard"] },
+        suggested_cleanup: { enum: [...CLEANUPS] },
+        custom_instruction: { type: "boolean" }
+      }
+    }
+  }
+};
+var ANONYMOUS_REFUSED_SCHEMA = {
+  type: "object",
+  description: "Not answered: tell the user the message in those words. outcome says whether the question left (absent: never handed to the transport).",
+  additionalProperties: false,
+  required: ["kind", "status", "code", "message"],
+  properties: {
+    kind: { const: "anonymous_answer" },
+    status: { const: "refused" },
+    code: { enum: [...REMOTE_REFUSAL_CODES] },
+    message: { type: "string", maxLength: MAX_MESSAGE },
+    outcome: { enum: [...OUTCOMES] },
+    daemon_code: { enum: [...REMOTE_DAEMON_CODES] },
+    sent: { type: "string", maxLength: MAX_SENT }
+  }
+};
+var SOURCE_INDEX_STATUS_SCHEMA = {
+  type: "object",
+  description: "Per-corpus status and counts.",
+  additionalProperties: false,
+  required: ["kind", "corpora"],
+  properties: {
+    kind: { const: "source_index_status" },
+    generated_at: { type: "string", format: "date-time" },
+    corpora: {
+      type: "array",
+      maxItems: MAX_CORPORA,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["corpus_id", "label", "configured"],
+        properties: {
+          corpus_id: { type: "string", pattern: CORPUS_ID.source, maxLength: 128 },
+          label: { type: "string", enum: [...REMOTE_SOURCE_LABELS] },
+          trust_domain: { enum: [...TRUST_DOMAINS] },
+          configured: { type: "boolean" },
+          retrieval: {
+            type: "object",
+            additionalProperties: false,
+            required: ["mode", "state"],
+            properties: {
+              mode: { enum: [...RETRIEVAL_MODES] },
+              state: { enum: [...RETRIEVAL_STATES] }
+            }
+          },
+          last_refresh: {
+            type: "object",
+            additionalProperties: false,
+            required: ["status"],
+            properties: {
+              status: { enum: [...REFRESH_STATUSES] },
+              completed_at: { type: "string", format: "date-time" }
+            }
+          },
+          counts: {
+            type: "object",
+            additionalProperties: false,
+            required: ["indexed_items", "chunks", "embedded_chunks"],
+            properties: {
+              indexed_items: { type: "integer", minimum: 0 },
+              chunks: { type: "integer", minimum: 0 },
+              embedded_chunks: { type: "integer", minimum: 0 }
+            }
+          }
+        }
+      }
+    }
+  }
+};
+var REMOTE_ERROR_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["error", "message"],
+  properties: {
+    error: { enum: [...REMOTE_ERROR_CODES], description: "A stable error code." },
+    message: { type: "string", description: "A fixed sentence for this code." },
+    ref: { type: "string", pattern: "^[0-9a-f]{16}$", description: "Where the owner finds this failure in Olympus's log on the computer." },
+    param: { type: "string", pattern: PARAM_NAME.source, description: "The argument at fault, when it is one the operation declares." },
+    retry_after_seconds: {
+      type: "integer",
+      minimum: 1,
+      maximum: 86400,
+      description: "Seconds to wait before trying again, when Olympus is busy or offline; also sent as the HTTP Retry-After header."
+    }
+  }
+};
+var REMOTE_OUTPUT_SCHEMAS = {
+  source_answer: { oneOf: [SOURCE_ANSWER_SCHEMA, PENDING_SCHEMA] },
+  source_answer_result: {
+    oneOf: [SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, PENDING_SCHEMA]
+  },
+  ask_anonymously: { oneOf: [ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, PENDING_SCHEMA] },
+  source_index_status: SOURCE_INDEX_STATUS_SCHEMA,
+  source_item_read: {
+    type: "object",
+    additionalProperties: false,
+    required: ["pages", "totalPages", "totalChars", "couldNotRead"],
+    properties: {
+      pages: { type: "array", maxItems: 3, items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["page", "text"],
+        properties: { page: { type: "integer", minimum: 1 }, text: { type: "string", maxLength: 12000 } }
+      } },
+      nextPage: { type: "integer", minimum: 1 },
+      totalPages: { type: "integer", minimum: 0 },
+      totalChars: { type: "integer", minimum: 0 },
+      couldNotRead: { type: "array", items: { type: "string", enum: [...SOURCE_ITEM_READ_REFUSALS] } }
+    }
+  }
 };
 
-// src/workers/remote-oauth/pinned-clients.ts
-var GROK_REDIRECT_URIS = Object.freeze([
-  "https://grok.com/connectors-oauth-exchange-code/",
-  "https://console.x.ai/connectors-oauth-exchange-code/"
-]);
-var CURSOR_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback";
-var CURSOR_REDIRECT_URIS = Object.freeze([
-  CURSOR_REDIRECT_URI,
-  "https://www.cursor.com/bot/mcp/oauth/callback",
-  "https://grok.com/connectors-oauth-exchange-code/"
-]);
-
-// src/core/remote-oauth-store.ts
-var REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 3600;
-var REMOTE_PAIRING_CODE_TTL_MS = 10 * 60000;
-var PAIRING_SELECTOR_LENGTH = 4;
-var PAIRING_SECRET_LENGTH = 8;
-var PAIRING_CODE_LENGTH = PAIRING_SELECTOR_LENGTH + PAIRING_SECRET_LENGTH;
-var UNUSED_CLIENT_PRUNE_AGE_MS = 24 * 3600000;
-
-// src/core/app-release-capture.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
-var storage2 = new AsyncLocalStorage5;
-var completedPrivateAnswers = new Set;
-var JOB_QUESTION_TTL_MS = 30 * 60000;
-var jobQuestions = new Map;
-
-// src/core/waiting-private-questions.ts
-var WAITING_QUESTION_LIMITS = Object.freeze({
-  questionBytes: 2048,
-  localQuestionBytes: 8 * 1024,
-  selectorBytes: 4096,
-  answerBytes: 128 * 1024,
-  ttlMs: 7 * 24 * 60 * 60000,
-  reanswerAfterMs: 10 * 60000
-});
-
-// src/core/remote-connections.ts
-function resolveRemoteConnectionsDbPath(env = process.env) {
-  return defaultRemoteConnectionsDbPath(env);
-}
-function defaultRemoteConnectionsDbPath(env = process.env) {
-  const path = sharedDataPath("remote-connections", env);
-  if (!isAbsolute12(path)) {
-    throw new TypeError("Remote connections XDG_DATA_HOME must be an absolute private data root.");
-  }
-  return path;
-}
-
-// src/core/app-release-log.ts
-var APP_RELEASE_LOG_STORE_ID = "app-release-log";
-var APP_RELEASE_LOG_SCHEMA_VERSION = 3;
-var APP_RELEASE_RETENTION_DAYS = [7, 30, 90, 0];
-var APP_RELEASE_DEFAULT_RETENTION_DAYS = 30;
-var MAX_ITEMS_PER_REQUEST = 48;
-var LIST_LIMIT = 200;
-var DAY_MS = 24 * 60 * 60000;
-var RETENTION_KEY = "retention_days";
-function appReleaseLogDbPath(remoteConnectionsDbPath) {
-  return join24(dirname26(remoteConnectionsDbPath), SHARED_DATA_FILES["app-release-log"]);
-}
-var openLogPaths = new Map;
-function appReleaseLogDbPaths(env = process.env) {
-  return [...new Set([appReleaseLogDbPath(resolveRemoteConnectionsDbPath(env)), ...openLogPaths.keys()])];
-}
-function isAppReleaseRetentionDays(value) {
-  return typeof value === "number" && APP_RELEASE_RETENTION_DAYS.includes(value);
-}
-function openAppReleaseLog(dbPath, options = {}) {
-  const now = options.now ?? Date.now;
-  hardenPrivatePath(dbPath);
-  const db = new Database5(dbPath, { create: true });
+// src/workers/remote-access-recheck.ts
+function currentAccess(authorized) {
   try {
-    chmodSync7(dbPath, 384);
-    db.exec("PRAGMA busy_timeout = 5000; PRAGMA secure_delete = ON; PRAGMA journal_mode = DELETE; PRAGMA foreign_keys = ON;");
-    db.transaction(() => {
-      assertSqliteSchemaCanOpen(db, APP_RELEASE_LOG_STORE_ID, APP_RELEASE_LOG_SCHEMA_VERSION);
-      runSqliteMigrations(db, APP_RELEASE_LOG_STORE_ID, migrations());
-    }).immediate();
-  } catch (error) {
-    closeSqliteStore(db);
-    throw error;
-  }
-  openLogPaths.set(dbPath, (openLogPaths.get(dbPath) ?? 0) + 1);
-  let registered2 = true;
-  const retentionDays = () => {
-    const row = db.query("SELECT value FROM app_release_meta WHERE key = ?").get(RETENTION_KEY);
-    const days = row ? Number(row.value) : APP_RELEASE_DEFAULT_RETENTION_DAYS;
-    return isAppReleaseRetentionDays(days) ? days : APP_RELEASE_DEFAULT_RETENTION_DAYS;
-  };
-  const clear = () => db.transaction(() => {
-    db.query("DELETE FROM app_release_items").run();
-    return db.query("DELETE FROM app_release_requests").run().changes;
-  })();
-  const expire = () => {
-    const days = retentionDays();
-    if (days === 0) {
-      clear();
-      return;
-    }
-    const before = now() - days * DAY_MS;
-    db.transaction(() => {
-      db.query("DELETE FROM app_release_items WHERE request_id IN (SELECT id FROM app_release_requests WHERE at < ?)").run(before);
-      db.query("DELETE FROM app_release_requests WHERE at < ?").run(before);
-    })();
-  };
-  return {
-    record(record) {
-      if (retentionDays() === 0)
-        return;
-      const id = `apr_${randomBytes2(12).toString("base64url")}`;
-      db.transaction(() => {
-        db.query(`INSERT INTO app_release_requests (id, at, connection_id, connection_name, connection_kind, question, held_back, answered_privately, withheld, private_question_id)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, record.at, record.connection.id ?? null, record.connection.name.slice(0, 80), record.connection.kind, record.question.slice(0, 2000), Math.max(0, Math.floor(record.heldBack)), record.answeredPrivately ? 1 : 0, record.withheld ? 1 : 0, record.privateQuestionKey ?? null);
-        const insert = db.query(`INSERT INTO app_release_items (request_id, position, source, title, tier, corpus_id, provider, account_scope, provider_item_id, provider_conversation_id, locator)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-        const secret = db.query(`SELECT 1 FROM app_release_secret_items
-          WHERE provider = ? AND provider_item_id = ? AND (provider_conversation_id = '' OR ? = '' OR provider_conversation_id = ?) LIMIT 1`);
-        record.items.slice(0, MAX_ITEMS_PER_REQUEST).forEach((item, position) => {
-          const named = !(item.provider && item.providerItemId && secret.get(item.provider, item.providerItemId, item.providerConversationId ?? "", item.providerConversationId ?? ""));
-          insert.run(id, position, item.source, named ? item.title ?? null : null, item.tier, item.corpusId ?? null, item.provider ?? null, item.accountScope ?? null, item.providerItemId ?? null, item.providerConversationId ?? null, named ? item.locator ?? null : null);
-        });
-      })();
-      expire();
-      return id;
-    },
-    list() {
-      expire();
-      const requests = db.query(`SELECT id, at, connection_name, connection_kind, question, held_back, answered_privately, withheld
-        FROM app_release_requests ORDER BY at DESC, rowid DESC LIMIT ?`).all(LIST_LIMIT);
-      const items = db.query("SELECT position, source, title, tier, made_private FROM app_release_items WHERE request_id = ? ORDER BY position");
-      return requests.map((row) => ({
-        id: row.id,
-        at: row.at,
-        connection: { name: row.connection_name, kind: row.connection_kind === "agent" ? "agent" : "app" },
-        question: row.question,
-        heldBack: row.held_back,
-        answeredPrivately: row.answered_privately === 1,
-        withheld: row.withheld === 1,
-        items: items.all(row.id).map((item) => ({
-          position: item.position,
-          source: item.source,
-          ...item.title ? { title: item.title } : {},
-          tier: item.tier === "public" || item.tier === "personal" ? item.tier : "private",
-          madePrivate: item.made_private === 1
-        }))
-      }));
-    },
-    retentionDays,
-    setRetentionDays(days) {
-      if (!isAppReleaseRetentionDays(days))
-        throw new TypeError("Retention must be 7, 30, 90 or 0 days.");
-      db.query("INSERT INTO app_release_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(RETENTION_KEY, String(days));
-      expire();
-    },
-    clear,
-    item(requestId, position) {
-      const row = db.query(`SELECT source, title, tier, corpus_id, provider, provider_item_id, provider_conversation_id, locator, made_private
-        FROM app_release_items WHERE request_id = ? AND position = ?`).get(requestId, position);
-      if (!row)
-        return;
-      return {
-        source: row.source,
-        ...row.title ? { title: row.title } : {},
-        tier: row.tier === "public" || row.tier === "personal" ? row.tier : "private",
-        ...row.corpus_id ? { corpusId: row.corpus_id } : {},
-        ...row.provider ? { provider: row.provider } : {},
-        ...row.provider_item_id ? { providerItemId: row.provider_item_id } : {},
-        ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {},
-        ...row.locator ? { locator: row.locator } : {},
-        madePrivate: row.made_private === 1
-      };
-    },
-    markMadePrivate(requestId, position) {
-      db.query("UPDATE app_release_items SET made_private = 1 WHERE request_id = ? AND position = ?").run(requestId, position);
-    },
-    markAnsweredPrivately(privateQuestionKey) {
-      return db.query("UPDATE app_release_requests SET answered_privately = 1 WHERE private_question_id = ? AND answered_privately = 0").run(privateQuestionKey).changes;
-    },
-    forgetCorpora(corpusIds, dryRun, accountScopes) {
-      if (corpusIds.length === 0 || accountScopes?.length === 0)
-        return 0;
-      const marks = (values) => values.map(() => "?").join(", ");
-      const where = `corpus_id IN (${marks(corpusIds)})${accountScopes ? ` AND account_scope IN (${marks(accountScopes)})` : ""}`;
-      const params = [...corpusIds, ...accountScopes ?? []];
-      if (dryRun)
-        return db.query(`SELECT COUNT(*) AS n FROM app_release_items WHERE ${where}`).get(...params).n;
-      return db.query(`DELETE FROM app_release_items WHERE ${where}`).run(...params).changes;
-    },
-    forgetSecretItem(item, options2 = {}) {
-      const conversation = item.providerConversationId ?? "";
-      return db.transaction(() => {
-        if (options2.proceed && !options2.proceed())
-          return 0;
-        db.query(`INSERT OR IGNORE INTO app_release_secret_items (provider, provider_item_id, provider_conversation_id, redacted_at)
-          VALUES (?, ?, ?, ?)`).run(item.provider, item.providerItemId, conversation, now());
-        return db.query(`UPDATE app_release_items SET title = NULL, locator = NULL
-          WHERE provider = ? AND provider_item_id = ? AND (? = '' OR provider_conversation_id IS NULL OR provider_conversation_id = ?)
-            AND (title IS NOT NULL OR locator IS NOT NULL)`).run(item.provider, item.providerItemId, conversation, conversation).changes;
-      }).immediate();
-    },
-    retireSecretItem(item, options2 = {}) {
-      db.transaction(() => {
-        if (options2.stillSecret?.())
-          return;
-        db.query("DELETE FROM app_release_secret_items WHERE provider = ? AND provider_item_id = ?").run(item.provider, item.providerItemId);
-      }).immediate();
-    },
-    close() {
-      if (registered2) {
-        registered2 = false;
-        const count = (openLogPaths.get(dbPath) ?? 1) - 1;
-        if (count > 0)
-          openLogPaths.set(dbPath, count);
-        else
-          openLogPaths.delete(dbPath);
-      }
-      closeSqliteStore(db);
-    }
-  };
-}
-function forgetSecretAppReleaseItem(dbPath, item, options = {}) {
-  if (!existsSync22(dbPath))
-    return 0;
-  const store = openAppReleaseLog(dbPath);
-  try {
-    return store.forgetSecretItem(item, options);
-  } finally {
-    store.close();
+    return authorized();
+  } catch {
+    return "unavailable";
   }
 }
-function retireSecretAppReleaseItem(dbPath, item, options = {}) {
-  if (!existsSync22(dbPath))
+var readAuthorization = new AsyncLocalStorage7;
+function currentRemoteReadAccess() {
+  const authorized = readAuthorization.getStore();
+  return authorized ? currentAccess(authorized) : "active";
+}
+
+// src/workers/classification/secret-locations.ts
+function screenedSecretLocator(locator) {
+  return locator?.trim() && !hasCredentialUrl(locator) && detectSecretFindingKinds(locator).length === 0 ? locator.trim().slice(0, 1000) : null;
+}
+var STOP_WORDS2 = new Set([
+  "a",
+  "an",
+  "and",
+  "are",
+  "did",
+  "do",
+  "does",
+  "find",
+  "for",
+  "have",
+  "i",
+  "in",
+  "is",
+  "it",
+  "kept",
+  "keep",
+  "me",
+  "my",
+  "of",
+  "olympus",
+  "on",
+  "or",
+  "put",
+  "record",
+  "records",
+  "saved",
+  "show",
+  "stored",
+  "the",
+  "there",
+  "to",
+  "what",
+  "where",
+  "which",
+  "who",
+  "with"
+]);
+
+// src/workers/classification/tier-set-binding.ts
+import { existsSync as existsSync23 } from "node:fs";
+import { basename as basename6, dirname as dirname26, join as join24, resolve as resolve9 } from "node:path";
+function tierStoreDataRoot(storeDbPath) {
+  const folder = dirname26(resolve9(storeDbPath));
+  return accountSiblingStorePath(storeDbPath, "secure_local") ? dirname26(dirname26(dirname26(dirname26(folder)))) : folder;
+}
+var tierLedgerIsWithin = pathResolvesWithin;
+function readTierSetBinding(storeDbPath) {
+  const cursor = readStoreBindingCursor(storeDbPath, "tiered-store-set-binding", "tiered_store_set_binding");
+  if (!cursor)
     return;
-  const store = openAppReleaseLog(dbPath);
-  try {
-    store.retireSecretItem(item, options);
-  } finally {
-    store.close();
-  }
+  const binding = JSON.parse(cursor);
+  if (typeof binding.ledgerId !== "string" || typeof binding.ledgerPath !== "string")
+    throw new Error("Invalid privacy ledger binding.");
+  return binding;
 }
-function migrations() {
-  return [{
-    version: 1,
-    name: "app_release_log",
-    up(db) {
-      db.exec(`
-        CREATE TABLE app_release_requests (
-          id TEXT PRIMARY KEY,
-          at INTEGER NOT NULL,
-          connection_id TEXT,
-          connection_name TEXT NOT NULL,
-          connection_kind TEXT NOT NULL,
-          question TEXT NOT NULL,
-          held_back INTEGER NOT NULL DEFAULT 0,
-          answered_privately INTEGER NOT NULL DEFAULT 0,
-          withheld INTEGER NOT NULL DEFAULT 0,
-          private_question_id TEXT
-        );
-        CREATE INDEX app_release_requests_private_question ON app_release_requests (private_question_id);
-        CREATE INDEX app_release_requests_at ON app_release_requests (at);
-        CREATE TABLE app_release_items (
-          request_id TEXT NOT NULL,
-          position INTEGER NOT NULL,
-          source TEXT NOT NULL,
-          title TEXT,
-          tier TEXT NOT NULL,
-          corpus_id TEXT,
-          provider TEXT,
-          provider_item_id TEXT,
-          provider_conversation_id TEXT,
-          locator TEXT,
-          made_private INTEGER NOT NULL DEFAULT 0,
-          PRIMARY KEY (request_id, position)
-        );
-        CREATE INDEX app_release_items_corpus ON app_release_items (corpus_id);
-        CREATE TABLE app_release_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-      `);
-    }
-  }, {
-    version: 2,
-    name: "app_release_secret_items",
-    up(db) {
-      db.exec(`
-        CREATE TABLE app_release_secret_items (
-          provider TEXT NOT NULL,
-          provider_item_id TEXT NOT NULL,
-          provider_conversation_id TEXT NOT NULL DEFAULT '',
-          redacted_at INTEGER NOT NULL,
-          PRIMARY KEY (provider, provider_item_id, provider_conversation_id)
-        );
-        CREATE INDEX app_release_items_provider_item ON app_release_items (provider, provider_item_id);
-      `);
-    }
-  }, {
-    version: 3,
-    name: "app_release_items_account_scope",
-    up(db) {
-      db.exec(`
-        ALTER TABLE app_release_items ADD COLUMN account_scope TEXT;
-        CREATE INDEX app_release_items_corpus_scope ON app_release_items (corpus_id, account_scope);
-      `);
-    }
-  }];
+function assertStoreTierLedgerCanOpen(storeDbPath, readOnly = false) {
+  const binding = readTierSetBinding(storeDbPath);
+  const path = binding ? findTierSetLedger(storeDbPath, binding) : tierLedgerPathForStore(storeDbPath);
+  if (binding && !path)
+    throw new Error(`The privacy ledger governing ${storeDbPath} is missing or outside this install. Restore the set ledger before opening the store.`);
+  if (path)
+    TierLedger.assertSchemaCanOpen(path, readOnly);
 }
-function hardenPrivatePath(dbPath) {
-  if (!isAbsolute13(dbPath))
-    throw new TypeError("The AI apps log path must be absolute.");
-  const leafDir = dirname26(dbPath);
-  if (new Set(["/", "/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp", homedir11()]).has(leafDir)) {
-    throw new Error("The AI apps log must live inside a dedicated private directory.");
-  }
-  mkdirSync14(leafDir, { recursive: true, mode: 448 });
-  const dirStat = lstatSync9(leafDir);
-  if (dirStat.isSymbolicLink() || !dirStat.isDirectory())
-    throw new Error("The AI apps log must live in a real private directory.");
-  chmodSync7(leafDir, 448);
-  if (existsSync22(dbPath)) {
-    const fileStat = lstatSync9(dbPath);
-    if (fileStat.isSymbolicLink() || !fileStat.isFile())
-      throw new Error("The AI apps log must be a regular file, not a symlink.");
-  }
+function tierSetLedgerCandidates(storeDbPath, recordedLedgerPath) {
+  if (storeDbPath === ":memory:" || recordedLedgerPath === ":memory:")
+    return [recordedLedgerPath];
+  const candidates = [];
+  const secure = accountSiblingStorePath(storeDbPath, "secure_local");
+  if (secure)
+    candidates.push(tierLedgerPathForStore(secure));
+  candidates.push(join24(dirname26(storeDbPath), basename6(recordedLedgerPath)));
+  candidates.push(recordedLedgerPath);
+  return [...new Set(candidates)].filter((path) => tierLedgerIsWithin(tierStoreDataRoot(storeDbPath), path));
 }
-
-// src/workers/connector-store/secrets-disposition.ts
-function forgetSecretInSideStores(options) {
-  const result = { snifferQuestions: 0, extractionJobNames: 0, appReleaseTitles: 0, failed: 0, notDurable: 0 };
-  const { identity, ledger } = options;
-  const owedJobLedgers = [];
-  const stillOwed = () => ledger.hasSecretSideStoreDebt(identity);
-  if (options.onlyWhileOwed) {
-    try {
-      if (!stillOwed())
-        return result;
-    } catch {
-      result.failed += 1;
-      return result;
-    }
-  }
-  let claimant;
-  try {
-    claimant = ledger.ledgerId();
-  } catch {}
-  let mark;
-  try {
-    mark = ledger.noteSecretScrub(identity);
-  } catch {
-    result.failed += 1;
-  }
-  const snifferPath = tierSnifferPathForLedger(ledger.dbPath);
-  if (snifferPath !== ":memory:" && existsSync23(snifferPath)) {
-    try {
-      const sniffer = new TierSnifferStore({ dbPath: snifferPath });
-      try {
-        result.snifferQuestions = sniffer.deleteItemQuestions({
-          provider: identity.provider,
-          accountScope: identity.accountScope,
-          providerItemId: identity.providerItemId,
-          ...identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}
-        });
-      } finally {
-        sniffer.close();
-      }
-    } catch {
-      result.failed += 1;
-    }
-  }
-  for (const logPath of appReleaseLogDbPaths()) {
-    try {
-      result.appReleaseTitles += forgetSecretAppReleaseItem(logPath, {
-        provider: identity.provider,
-        providerItemId: identity.providerItemId,
-        ...identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}
-      }, options.onlyWhileOwed ? { proceed: stillOwed } : {});
-    } catch {
-      result.failed += 1;
-    }
-  }
-  let owedBefore = [];
-  let known = [];
-  try {
-    owedBefore = ledger.secretSideStoreDebtJobLedgerPaths(identity);
-    known = ledger.knownJobLedgerPaths();
-  } catch {}
-  const { visit: jobLedgers, outside } = jobLedgerPathsToVisit([...known, ...owedBefore, ...options.jobLedgerPaths ?? []]);
-  for (const jobsPath of jobLedgers) {
-    try {
-      const cleared = clearExtractionJobNames(jobsPath, {
-        provider: identity.provider,
-        accountScope: identity.accountScope,
-        providerItemId: identity.providerItemId,
-        ...identity.localItemId ? { localItemId: identity.localItemId } : {}
-      }, {
-        ...claimant !== undefined ? { claimant } : {},
-        ...options.onlyWhileOwed ? { proceed: stillOwed } : {}
-      });
-      result.extractionJobNames += cleared.cleared;
-      if (!cleared.durable) {
-        result.notDurable += 1;
-        owedJobLedgers.push(jobsPath);
-      }
-    } catch {
-      result.failed += 1;
-      owedJobLedgers.push(jobsPath);
-    }
-  }
-  try {
-    ledger.noteJobLedgerPaths(jobLedgers.filter((path) => path !== ":memory:" && existsSync23(path)));
-  } catch {}
-  try {
-    if (result.failed > 0 || result.notDurable > 0 || options.confirmInWorker) {
-      ledger.recordSecretSideStoreDebt(identity, owedJobLedgers, { onlyIfOwed: options.onlyWhileOwed === true });
-    } else {
-      ledger.clearSecretSideStoreDebt(identity, [...jobLedgers, ...outside]);
-      if (mark)
-        ledger.markSecretSideStoresCleared(identity, mark);
-    }
-  } catch {}
-  if (result.failed > 0)
-    console.warn(`[tier] secrets: ${result.failed} side store(s) could not forget an item; retried at the next tier tick.`);
-  return result;
-}
-function retireSecretRedactions(ledger, options = {}) {
-  let pending;
-  try {
-    pending = ledger.secretRedactionRetirements(options);
-  } catch {
-    return 0;
-  }
-  let claimant;
-  try {
-    claimant = ledger.ledgerId();
-  } catch {
-    return 0;
-  }
-  let knownJobLedgers = [];
-  try {
-    knownJobLedgers = ledger.knownJobLedgerPaths();
-  } catch {}
-  let retired = 0;
-  for (const retirement of pending) {
-    const item = { provider: retirement.provider, accountScope: retirement.accountScope, providerItemId: retirement.providerItemId };
-    const stillSecret = () => ledger.providerItemIsSecret(item);
-    let failed = 0;
-    let secret = false;
-    try {
-      secret = stillSecret();
-    } catch {
-      failed += 1;
-    }
-    if (!secret && failed === 0) {
-      for (const jobsPath of jobLedgerPathsToVisit([...knownJobLedgers, ...retirement.jobLedgerPaths]).visit) {
-        try {
-          if (retireExtractionJobRedaction(jobsPath, item, claimant, stillSecret).stillSecret)
-            secret = true;
-        } catch {
-          failed += 1;
-        }
-      }
-      for (const logPath of appReleaseLogDbPaths()) {
-        try {
-          retireSecretAppReleaseItem(logPath, { provider: item.provider, providerItemId: item.providerItemId }, { stillSecret });
-        } catch {
-          failed += 1;
-        }
-      }
-    }
-    if (failed > 0 && !secret)
+function findTierSetLedger(storeDbPath, binding) {
+  for (const candidate of tierSetLedgerCandidates(storeDbPath, binding.ledgerPath)) {
+    if (candidate === ":memory:" || !existsSync23(candidate))
       continue;
-    try {
-      ledger.settleSecretRedactionRetirement(retirement.id);
-      if (!secret)
-        retired += 1;
-    } catch {}
+    if (TierLedger.readLedgerId(candidate) === binding.ledgerId)
+      return candidate;
   }
-  return retired;
+  return;
 }
 
 // src/workers/connector-store/child-visibility.ts
@@ -24224,126 +24903,6 @@ function compareStrings(left, right) {
   if (left === right)
     return 0;
   return left < right ? -1 : 1;
-}
-
-// src/workers/source-index/media-judge.ts
-var MEDIA_JUDGE_SENSITIVE_CATEGORIES = [
-  "id_document",
-  "bank_card",
-  "financial_document",
-  "medical_document",
-  "intimate"
-];
-var MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES = new Set(["medical_document"]);
-var MEDIA_JUDGE_TEXT_DECIDES = "text_decides";
-var MEDIA_JUDGE_PROMPT_SET = "photo-judge-2026-10-29";
-var MEDIA_JUDGE_PROMPTS = Object.freeze({
-  id_document: "a photo of a passport, national identity card or driving licence",
-  bank_card: "a photo of a credit card, debit card or bank card",
-  financial_document: "a bank statement, payslip or document showing account numbers",
-  medical_document: "a medical report or lab test results document",
-  intimate: "a nude, intimate or sexually explicit photo",
-  ordinary: "an ordinary photo of a place, a room, food, a landscape or people"
-});
-var MEDIA_JUDGE_PROMPT_PREFIX = "task: classification | query: ";
-var MEDIA_JUDGE_THRESHOLDS = Object.freeze({
-  margin: 0.04,
-  intimateMargin: 0.025
-});
-function mediaJudgeId(provider, thresholds = MEDIA_JUDGE_THRESHOLDS) {
-  return `${MEDIA_JUDGE_PROMPT_SET}:m${thresholds.margin}:i${thresholds.intimateMargin}:${provider.modelId}:${provider.configHash.slice(0, 12)}`;
-}
-function dot(left, right) {
-  let sum = 0;
-  const length = Math.min(left.length, right.length);
-  for (let index = 0;index < length; index += 1)
-    sum += left[index] * right[index];
-  return sum;
-}
-function rounded(value) {
-  return Math.round(value * 1e4) / 1e4;
-}
-function judgeMediaScores(scores, judgeId, thresholds = MEDIA_JUDGE_THRESHOLDS) {
-  const ordinary = scores.ordinary;
-  const sensitive = MEDIA_JUDGE_SENSITIVE_CATEGORIES.map((category) => [category, scores[category]]);
-  if (typeof ordinary !== "number" || !Number.isFinite(ordinary) || sensitive.some(([, score]) => typeof score !== "number" || !Number.isFinite(score))) {
-    return { verdict: "unjudged", judgeId, reason: "scores_unavailable" };
-  }
-  let top = sensitive[0][0];
-  let topScore = -Infinity;
-  for (const [category, score] of sensitive) {
-    if (score > topScore) {
-      top = category;
-      topScore = score;
-    }
-  }
-  const margin = topScore - ordinary;
-  const intimateMargin = scores.intimate - ordinary;
-  const kept = Object.fromEntries(Object.entries(scores).map(([key2, value]) => [key2, rounded(value)]));
-  if (margin >= thresholds.margin && !MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES.has(top)) {
-    return { verdict: "sensitive", category: top, margin: rounded(margin), scores: kept, judgeId };
-  }
-  let pictureTop;
-  for (const [category, score] of sensitive) {
-    if (MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES.has(category) || score - ordinary < thresholds.margin)
-      continue;
-    if (!pictureTop || score > scores[pictureTop])
-      pictureTop = category;
-  }
-  if (pictureTop) {
-    return { verdict: "sensitive", category: pictureTop, margin: rounded(scores[pictureTop] - ordinary), scores: kept, judgeId };
-  }
-  if (intimateMargin >= thresholds.intimateMargin) {
-    return { verdict: "sensitive", category: "intimate", margin: rounded(margin), scores: kept, judgeId };
-  }
-  if (margin >= thresholds.margin) {
-    return { verdict: "ordinary", category: top, margin: rounded(margin), scores: kept, judgeId, reason: MEDIA_JUDGE_TEXT_DECIDES };
-  }
-  return { verdict: "ordinary", category: top, margin: rounded(margin), scores: kept, judgeId };
-}
-function judgeImageVector(imageVector, promptVectors, judgeId, thresholds = MEDIA_JUDGE_THRESHOLDS) {
-  if (!imageVector || imageVector.length === 0)
-    return { verdict: "unjudged", judgeId, reason: "image_unreadable" };
-  if (Math.hypot(...imageVector) < 0.000001)
-    return { verdict: "unjudged", judgeId, reason: "image_unreadable" };
-  const scores = {};
-  for (const category of Object.keys(MEDIA_JUDGE_PROMPTS)) {
-    scores[category] = dot(imageVector, promptVectors[category]);
-  }
-  return judgeMediaScores(scores, judgeId, thresholds);
-}
-function canJudgeMedia(provider) {
-  return typeof provider.embedPromptTexts === "function" && typeof provider.embedImageVectors === "function";
-}
-var promptVectorCache = new Map;
-function mediaJudgePromptVectors(provider) {
-  const key2 = `${provider.provider}\x00${provider.modelId}\x00${provider.configHash}`;
-  let cached2 = promptVectorCache.get(key2);
-  if (!cached2) {
-    const categories = Object.keys(MEDIA_JUDGE_PROMPTS);
-    cached2 = provider.embedPromptTexts(categories.map((category) => `${MEDIA_JUDGE_PROMPT_PREFIX}${MEDIA_JUDGE_PROMPTS[category]}`)).then((vectors) => {
-      if (vectors.length !== categories.length || vectors.some((vector) => vector.length === 0)) {
-        throw new Error("The photo judge's descriptions could not be embedded.");
-      }
-      return Object.fromEntries(categories.map((category, index) => [category, vectors[index]]));
-    });
-    promptVectorCache.set(key2, cached2);
-    cached2.catch(() => promptVectorCache.delete(key2));
-  }
-  return cached2;
-}
-async function judgeMediaImages(provider, images, thresholds = MEDIA_JUDGE_THRESHOLDS) {
-  if (images.length === 0)
-    return [];
-  const prompts = await mediaJudgePromptVectors(provider);
-  const vectors = await provider.embedImageVectors([...images]);
-  const judgeId = mediaJudgeId(provider, thresholds);
-  return images.map((_, index) => judgeImageVector(vectors[index], prompts, judgeId, thresholds));
-}
-async function judgeReturnedImageVectors(provider, vectors, thresholds = MEDIA_JUDGE_THRESHOLDS) {
-  const prompts = await mediaJudgePromptVectors(provider);
-  const judgeId = mediaJudgeId(provider, thresholds);
-  return vectors.map((vector) => judgeImageVector(vector, prompts, judgeId, thresholds));
 }
 
 // src/workers/connector-store/local-index.ts
@@ -25601,28 +26160,28 @@ class LocalConnectorStore {
     }
     return hidden;
   }
-  tierVisibleRows(rows, identityOf2, layerOf, throwOnUnavailable = false, copiesAllowed) {
-    return visibilityHere(this.tierVisibleRowsSteps(rows, identityOf2, layerOf, throwOnUnavailable, copiesAllowed));
+  tierVisibleRows(rows, identityOf3, layerOf, throwOnUnavailable = false, copiesAllowed) {
+    return visibilityHere(this.tierVisibleRowsSteps(rows, identityOf3, layerOf, throwOnUnavailable, copiesAllowed));
   }
-  *tierVisibleRowsSteps(rows, identityOf2, layerOf, throwOnUnavailable = false, copiesAllowed) {
+  *tierVisibleRowsSteps(rows, identityOf3, layerOf, throwOnUnavailable = false, copiesAllowed) {
     if (rows.length === 0)
       return [];
     let copies;
     try {
       const ledger = this.visibilityLedger();
       if (ledger && ledger.corpusHasCopies(this.corpusId))
-        copies = yield* visibilityRead(() => ledgerVisibilityHere(ledger, rows.map(identityOf2)).copies, () => ledgerVisibilityOffThread(ledger, rows.map(identityOf2)).then((read) => read.copies));
+        copies = yield* visibilityRead(() => ledgerVisibilityHere(ledger, rows.map(identityOf3)).copies, () => ledgerVisibilityOffThread(ledger, rows.map(identityOf3)).then((read) => read.copies));
     } catch (error) {
       if (throwOnUnavailable)
         throw error;
       return [];
     }
     const served = copies ? rows.filter((row) => {
-      const here = copies.get(tierLedgerIdentityKey(identityOf2(row)));
+      const here = copies.get(tierLedgerIdentityKey(identityOf3(row)));
       return tierRowVisible(here, this.corpusId, layerOf(row)) && (copiesAllowed?.(here ?? []) ?? true);
     }) : [...rows];
-    const hidden = yield* hiddenChildKeysSteps(this.childVisibilityLane(), served.map(identityOf2));
-    return served.filter((row) => !hidden.has(tierLedgerIdentityKey(identityOf2(row))));
+    const hidden = yield* hiddenChildKeysSteps(this.childVisibilityLane(), served.map(identityOf3));
+    return served.filter((row) => !hidden.has(tierLedgerIdentityKey(identityOf3(row))));
   }
   tierHiddenItemPks(options = {}) {
     const maxAgeMs = options.countsMaxAgeMs ?? 0;
@@ -30948,7 +31507,7 @@ ${parentKey(ref)}`, { ref, origin });
     const hidden = new Set;
     if (rows.length === 0)
       return hidden;
-    const identityOf2 = (row) => ({
+    const identityOf3 = (row) => ({
       provider: row.provider,
       accountScope: row.account_scope,
       providerItemId: row.provider_item_id,
@@ -30956,10 +31515,10 @@ ${parentKey(ref)}`, { ref, origin });
     });
     const ledger = this.visibilityLedger();
     if (ledger && ledger.corpusHasCopies(this.corpusId)) {
-      const copies = ledger.copiesForMany(rows.map(identityOf2));
+      const copies = ledger.copiesForMany(rows.map(identityOf3));
       for (const row of rows) {
-        const here = (copies.get(tierLedgerIdentityKey(identityOf2(row))) ?? []).filter((copy) => copy.corpusId === this.corpusId);
-        const identity = identityOf2(row);
+        const here = (copies.get(tierLedgerIdentityKey(identityOf3(row))) ?? []).filter((copy) => copy.corpusId === this.corpusId);
+        const identity = identityOf3(row);
         const intent = ledger.writeIntent(identity);
         const decision = allowHeld ? ledger.getCurrent(identity) : undefined;
         const pendingJudgment = decision?.state === "pending" && decision.contentRead && (decision.metadataPending || decision.contentPending);
@@ -30968,10 +31527,10 @@ ${parentKey(ref)}`, { ref, origin });
         }
       }
     }
-    const children = hiddenChildKeys(this.childVisibilityLane(), rows.map(identityOf2));
+    const children = hiddenChildKeys(this.childVisibilityLane(), rows.map(identityOf3));
     if (children.size > 0) {
       for (const row of rows)
-        if (children.has(tierLedgerIdentityKey(identityOf2(row))))
+        if (children.has(tierLedgerIdentityKey(identityOf3(row))))
           hidden.add(row.item_pk);
     }
     return hidden;
@@ -32312,6 +32871,114 @@ ${parentKey(ref)}`, { ref, origin });
       ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
     };
     return this.tierVisibleRows([identity], (entry) => entry, () => "content", throwOnUnavailable).length > 0;
+  }
+  async readItemPages(localItemId, options = {}) {
+    const page = Math.max(1, Math.trunc(options.page ?? 1));
+    const count = Math.min(3, Math.max(1, Math.trunc(options.pages ?? 1)));
+    const cap = Math.min(12000, Math.max(1, Math.trunc(options.pageChars ?? 12000)));
+    let totalPages = 0;
+    let totalChars = 0;
+    const refuse = (reason, nextPage) => ({
+      pages: [],
+      totalPages,
+      totalChars,
+      couldNotRead: [reason],
+      ...nextPage ? { nextPage } : {}
+    });
+    const active = this.activeLocalItemRow(localItemId);
+    if (!active)
+      return refuse("not_in_scope");
+    const identity = active.identity;
+    const ledger = this.governingTierLedger();
+    let generation;
+    let initialOverride;
+    const gate = () => {
+      if (currentRemoteReadAccess() !== "active")
+        return "not_in_scope";
+      const scope = options.scope?.();
+      if (scope?.allowed === false || !this.itemMatchesSearchFilters(localItemId, scope?.accountScope, scope?.filters))
+        return "not_in_scope";
+      const now = this.activeLocalItemRow(localItemId);
+      if (!now || tierLedgerIdentityKey(now.identity) !== tierLedgerIdentityKey(identity))
+        return "not_in_scope";
+      const row = ledger?.getCurrent(identity);
+      const override = ledger?.getOverride(identity);
+      if (!row)
+        return "held_until_judged";
+      if (row.metadataTier === "secure" || row.metadataTier === "secrets" || row.contentTier !== "private" || override?.kind === "tier" && override.tier !== "private")
+        return "not_personal";
+      if (row.state !== "current" || row.metadataPending || row.contentPending || ledger.rejudgeQuestion(identity) || heldUntilJudged(row.reasons))
+        return "held_until_judged";
+      if (generation !== undefined && (row.generation !== generation || JSON.stringify(override) !== initialOverride))
+        return "held_until_judged";
+      if (this.contentHeldPrivate(localItemId))
+        return "content_private";
+      if (scope?.contentAllowed === false || this.metadataOnlyRuleForLocator(now.locatorUri) !== undefined || scope?.contentFilters && !this.itemMatchesSearchFilters(localItemId, scope.accountScope, scope.contentFilters))
+        return "names_only";
+      if (!this.contentServedNow(localItemId, true))
+        return "extraction_pending";
+      return;
+    };
+    const initial = gate();
+    if (initial)
+      return refuse(initial);
+    generation = ledger.getCurrent(identity).generation;
+    initialOverride = JSON.stringify(ledger.getOverride(identity));
+    const readText = () => this.db.query(`SELECT c.bounded_text FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+      WHERE i.local_item_id = ? AND i.tombstoned = 0 ORDER BY c.chunk_index`).all(localItemId).map((chunk) => chunk.bounded_text).join("");
+    const text2 = readText();
+    if (!text2)
+      return refuse("extraction_pending");
+    const split = itemTextPages(text2, cap);
+    totalPages = split.length;
+    totalChars = text2.length;
+    const result = { pages: [], totalPages, totalChars, couldNotRead: [] };
+    for (let index = page - 1;index < Math.min(split.length, page - 1 + count); index++) {
+      const material = split[index];
+      for (const window of itemTextPages(material, SNIFFER_EXCERPT_MAX_CHARS)) {
+        const before = gate();
+        if (before)
+          return refuse(before);
+        const inputs = tierSetForLedger(ledger.dbPath)?.classification() ?? resolveStoreTierClassification(undefined, this.tierLedgerPathInUse());
+        const sniffer = inputs?.sniffer;
+        if (!sniffer || inputs?.unavailableReason)
+          return refuse("window_judging", index + 1);
+        const record = ledger.getCurrent(identity);
+        const request = {
+          pass: "content",
+          material: window,
+          materialHash: hashString4(`source_item_read:window:v1:${window}`),
+          mapRevision: record.mapRevision,
+          flags: ["content:read_window", `read_window:generation:${record.generation}`],
+          subject: identity,
+          stillAsk: () => gate() === undefined
+        };
+        const cached2 = sniffer.cachedVerdict?.(request);
+        const verdict = await Promise.resolve(cached2?.verdict === "decided" ? cached2 : sniffer.judge(request));
+        const after3 = gate();
+        if (after3)
+          return refuse(after3);
+        if (readText() !== text2)
+          return refuse("held_until_judged");
+        if (verdict.verdict === "undecided")
+          return refuse("window_judging", index + 1);
+        if (verdict.tier !== "private") {
+          raiseReadWindowTier(this, ledger, record, verdict.tier, sniffer.id);
+          return refuse("not_personal");
+        }
+      }
+      const after2 = gate();
+      if (after2)
+        return refuse(after2);
+      result.pages.push({ page: index + 1, text: material });
+    }
+    const after = gate();
+    if (after)
+      return refuse(after);
+    const next = page + result.pages.length;
+    if (next <= totalPages)
+      result.nextPage = next;
+    return result;
   }
   localContent(localItemId, maxChars, passageFocus, options = {}) {
     const row = this.db.query(`
@@ -37436,12 +38103,6 @@ var DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
 // src/core/analyst-openclaw-infer.ts
 var MAX_PROMPT_BYTES = 1e5;
 var OPENCLAW_INFER_MAX_PROMPT_BYTES = MAX_PROMPT_BYTES;
-
-// src/core/release-manifest.ts
-import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
-var chunkProvenance = new WeakMap;
-var storage3 = new AsyncLocalStorage6;
-var withheldAnswers = new WeakSet;
 
 // src/core/source-index/router.ts
 var FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
