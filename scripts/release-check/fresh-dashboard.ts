@@ -10,6 +10,7 @@ import type { FolderMode, TimingDashboard } from './on-demand-timing.ts';
 
 export interface FreshDashboard {
   privacyChoice(): Promise<string>;
+  connection?(source: LiveSourceSpec): Promise<'connected' | 'web' | 'unavailable'>;
   connect(source: LiveSourceSpec): Promise<void>;
   consent(source: LiveSourceSpec): Promise<void>;
   callback(source: LiveSourceSpec): Promise<void>;
@@ -259,6 +260,14 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
         await reload();
         return `${recommended.label} (${recommended.id}, Recommended) saved and verified after reload`;
       },
+      connection: async s => {
+        await reload('/dashboard?connect', `!!document.querySelector('.srcrows')`);
+        const { status, view } = await dashboardView();
+        if (!view) throw new Error(`source cards unreadable: HTTP ${status}`);
+        const c = sourceCard(view, s.id);
+        if (connected(c)) return 'connected';
+        return await panel<boolean>(`(() => {const row=[...document.querySelectorAll('.source')].find(e=>e.querySelector('.source-name')?.textContent?.trim()===${JSON.stringify(s.label)});if(!row)return null;return [...row.querySelectorAll('button')].some(e=>/^Connect$/.test(e.textContent.trim()));})()`, value => typeof value === 'boolean') ? 'web' : 'unavailable';
+      },
       connect: async s => {
         // Say which precondition failed, from the dashboard's own JSON: provider names and states only.
         const { status, view } = await dashboardView();
@@ -266,6 +275,7 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
         if (!view) throw new Error(`fresh source card unreadable: /dashboard.json answered ${status || 'nothing'}`);
         if (!before) throw new Error(`no ${s.id} source card; the dashboard lists: ${(view.sources ?? []).map((c: any) => String(c.provider)).join(', ') || 'none'}`);
         if (connected(before)) throw new Error(`${s.id} is already connected (${String(before.connection?.state)}) on a fresh install`);
+        await reload('/dashboard?connect', `!!document.querySelector('.srcrows')`);
         baseline.clear();
         for (const t of (await browser!.send('Target.getTargets')).targetInfos) baseline.add(t.targetId);
         windowOffered = false;
@@ -296,7 +306,7 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
             const snap = await evalIn<ConsentSnapshot>(sid, `(()=>{const v=${visible}; const text=document.body?.innerText||''; return {url:location.href,text,password:[...document.querySelectorAll('input[type=password]')].some(v),accounts:[...document.querySelectorAll('[data-identifier]')].filter(v).length,signedOut:[...document.querySelectorAll('input[type=email],input[name=login_email]')].some(v)};})()`).catch(() => undefined);
             if (!snap) continue;
             const blocked = consentBlock(snap);
-            if (blocked) throw new FreshInconclusive(`renew ${s.id === 'gmail' ? 'Google' : 'Dropbox'} sign-in in zig’s canary Chromium: ${blocked}`);
+            if (blocked) throw new FreshInconclusive(`renew ${s.id === 'gmail' || s.id === 'google_drive' ? 'Google' : 'Dropbox'} sign-in in zig’s canary Chromium: ${blocked}`);
             await evalIn(sid, `(()=>{const v=${visible};const controls=[...document.querySelectorAll('button,a,[role=button]')].filter(v);const e=controls.find(e=>/^(Advanced|Go to .+\\(unsafe\\)|Continue|Allow|Agree|Accept)$/i.test(e.textContent.trim())) || ( ${snap.accounts === 1} ? document.querySelector('[data-identifier]') : null); if(e&&!e.disabled)e.click();})()`).catch(() => {});
           }
           if (providerSeen && connected(await card(s).catch(() => null))) return;
@@ -310,7 +320,7 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
         await until(async () => {
           const { targetInfos } = await browser!.send('Target.getTargets');
           for (const t of targetInfos) if (owned.has(t.targetId)) observeCallback(t.url);
-          return (callbacks.has(s.id) || s.id === 'gmail' && callbacks.has('google')) && connected(await card(s));
+          return (callbacks.has(s.id) || s.id === 'google_drive' && callbacks.has('google-drive') || ['gmail', 'google_drive'].includes(s.id) && callbacks.has('google')) && connected(await card(s));
         }, 'OAuth callback did not land and leave a connected source card');
       },
       scope: async s => {

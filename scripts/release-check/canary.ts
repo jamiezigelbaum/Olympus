@@ -40,7 +40,7 @@ import { dirname, join, resolve } from 'node:path';
 import { CommandDriver, type Machine } from './machine.ts';
 import { escapeHtml, renderOnDemandTiming, type CheckResult, type CheckStatus } from './report.ts';
 import { openEngineMcp, runLiveAccounts, type LiveSourceSpec } from './live-accounts.ts';
-import { parseTimingAccounts, realTimingSeeds, type TimingAccounts } from './on-demand-seeds.ts';
+import { parseTimingAccounts, parseTimingSeedConfig, realTimingSeeds, type TimingAccounts } from './on-demand-seeds.ts';
 import { runOnDemandTiming, type OnDemandTimingResult } from './on-demand-timing.ts';
 import { openTimingDashboard, openTimingDiagnostics } from './on-demand-machine.ts';
 import { isInconclusive, openForSignIn, parseClientQuestions, runWebClients, WEB_CLIENT_IDS, type ClientQuestion, type WebClientId } from './web-clients.ts';
@@ -184,8 +184,9 @@ export function parseCanaryAccounts(raw: unknown, readQuestions: (path: string) 
   // A client no question applies to would pass having been asked nothing.
   const unasked = clients.filter((client) => !questions.some((q) => !q.clients || q.clients.includes(client as WebClientId)));
   if (unasked.length > 0) throw new Error(`no question applies to ${unasked.join(', ')}`);
+  const timing = parseTimingSeedConfig(record.on_demand_timing);
   return { sources, clients: clients as WebClientId[], questions, claude_app: (record.claude_app as boolean | undefined) ?? true,
-    ...(record.on_demand_timing === undefined ? {} : { on_demand_timing: parseTimingAccounts(record.on_demand_timing) }) };
+    ...(timing ? { on_demand_timing: timing } : {}) };
 }
 
 /** Runs the canary's checks on one machine. Never throws for a product problem: every failure is a check. */
@@ -209,19 +210,21 @@ export async function runCanary(machine: Machine, options: CanaryOptions): Promi
         if (options.onDemandTiming) {
           let dashboard;
           let diagnostics;
+          let seeds: import('./on-demand-seeds.ts').TimingSeeds & { close?(): Promise<void> } | undefined;
           try {
-            const seedAccounts = parseTimingAccounts(accounts.on_demand_timing);
             diagnostics = await openTimingDiagnostics(machine);
             // Verify the running split before provider mutations or dashboard saves.
             await diagnostics.preflight();
-            const seeds = await realTimingSeeds(seedAccounts);
+            // Browser seeds keep their names and revisions, so only a fresh store gives them a cold read; this leg keeps its store.
+            if (!accounts.on_demand_timing) throw new Error('an accounts leg needs on_demand_timing token commands (new revisions each run); browser seeding is for the fresh-install leg');
+            seeds = await realTimingSeeds(parseTimingAccounts(accounts.on_demand_timing));
             dashboard = await openTimingDashboard(machine, options.cdp ?? '127.0.0.1:9333', options.bridgeAgent);
             onDemandTiming = await runOnDemandTiming(engine, seeds, dashboard, diagnostics);
           } catch (error) {
             onDemandTiming = { rows: [], checks: [{ id: 'ondemand.setup', title: 'Read-on-demand timing setup', status: 'fail', detail: String(error) }] };
           } finally {
-            for (const resource of [dashboard, diagnostics]) {
-              try { await resource?.close(); } catch (error) { checks.push({ id: 'ondemand.cleanup', title: 'Timing resources closed', status: 'fail', detail: String(error) }); }
+            for (const resource of [dashboard, diagnostics, seeds]) {
+              try { await resource?.close?.(); } catch (error) { checks.push({ id: 'ondemand.cleanup', title: 'Timing resources closed', status: 'fail', detail: String(error) }); }
             }
           }
           checks.push(...onDemandTiming.checks);
@@ -498,10 +501,18 @@ export function renderCanaryHtml(report: CanaryReport, relative: (path: string) 
 <p>${escapeHtml(report.candidate.label)}${report.candidate.version ? ` (${escapeHtml(report.candidate.version)})` : ''}, ${escapeHtml(report.candidate.source)} &middot; ${escapeHtml(report.startedAt)} to ${escapeHtml(report.finishedAt)}</p>
 ${renewals(report.checks).length > 0 ? `<h2>To renew before the next run</h2><ul>${renewals(report.checks).map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>` : ''}
 <table>${rows}</table>
-${renderOnDemandTiming(report.onDemandTiming?.rows)}
+${report.onDemandTiming?.preflight ? `<p>${escapeHtml(report.onDemandTiming.preflight)}</p>` : ''}
+${renderOnDemandTiming(report.onDemandTiming?.rows, report.onDemandTiming?.notRun)}
 ${pictures}
 </body></html>
 `;
+}
+
+/** Shared CLI validation, kept executable without spawning a machine. */
+export function validateCanaryTimingMode(mode: { enabled: boolean; accounts: boolean; freshInstall: boolean; webSignIn: boolean; os: string }): void {
+  if (!mode.enabled) return;
+  if (!mode.accounts || mode.webSignIn) throw new Error('--on-demand-timing requires --accounts and cannot combine with --web-sign-in');
+  if (mode.freshInstall && mode.os !== 'linux') throw new Error('--fresh-install requires Linux');
 }
 
 if (import.meta.main) {
@@ -509,7 +520,7 @@ if (import.meta.main) {
   const option = (name: string): string | undefined => { const at = argv.indexOf(name); return at >= 0 ? argv[at + 1] : undefined; };
   const usage = 'usage: bun scripts/release-check/canary.ts --config <file> --machine <handle> --os linux|macos --out <reports dir> [--candidate <bundle dir> | --published <site base URL>] [--accounts <file> [--claude-app on|off] [--on-demand-timing [--cdp <host:port>]] [--accounts-only | --fresh-install [--cdp <host:port>]]] [--label <text>] [--sha <commit>] [--harness-commit <commit>]\n       bun scripts/release-check/canary.ts --config <file> --machine <handle> --os linux|macos --accounts <file> --web-sign-in\n       fresh mode: --fresh-install --accounts <file> [--candidate <tgz>] [--cdp <host:port>] (same --config, --machine, --os and --out)';
   const freshInstall = argv.includes('--fresh-install');
-  const cdp = option('--cdp') ?? '127.0.0.1:9333';
+  const cdp = option('--cdp') ?? (freshInstall ? '127.0.0.1:9334' : '127.0.0.1:9333');
   if (freshInstall || argv.includes('--on-demand-timing')) {
     try { parseCdpEndpoint(cdp); } catch { console.error('--cdp must be host:port'); process.exit(2); }
   }
@@ -530,9 +541,8 @@ if (import.meta.main) {
   }
   const accountsPath = option('--accounts');
   const onDemandTimingEnabled = argv.includes('--on-demand-timing');
-  if (onDemandTimingEnabled && (!accountsPath || freshInstall || argv.includes('--web-sign-in'))) {
-    console.error('--on-demand-timing requires --accounts on an accounts leg; it cannot combine with --fresh-install or --web-sign-in'); process.exit(2);
-  }
+  try { validateCanaryTimingMode({ enabled: onDemandTimingEnabled, accounts: !!accountsPath, freshInstall, webSignIn: argv.includes('--web-sign-in'), os }); }
+  catch (error) { console.error((error as Error).message); process.exit(2); }
   let accounts: CanaryAccounts | undefined;
   if (accountsPath) {
     try {
@@ -549,9 +559,6 @@ if (import.meta.main) {
       console.error('--claude-app requires --accounts and on or off'); process.exit(2);
     }
     accounts.claude_app = mode === 'on';
-  }
-  if (onDemandTimingEnabled && !accounts?.on_demand_timing) {
-    console.error('--on-demand-timing needs on_demand_timing in the accounts file (test-account token commands and identities)'); process.exit(2);
   }
   if ((argv.includes('--accounts-only') || argv.includes('--web-sign-in')) && !accounts) {
     console.error(usage);
@@ -585,6 +592,7 @@ if (import.meta.main) {
   if (bundle) expectVersion = bundle.version;
   const { checks, screens, ...extras } = freshInstall ? await runFreshInstall(machine, {
     sources: accounts!.sources, cdp,
+    ...(onDemandTimingEnabled ? { onDemandTiming: { ...(accounts!.on_demand_timing ? { accounts: accounts!.on_demand_timing } : {}) } } : {}),
     bridgeAgent: await bundleAgent(runDir),
     ...(bundle ? { bundle: { installer: join(bundle.directory, 'install-linux.sh'), tarball: join(bundle.directory, `olympus-${bundle.version}.tgz`) } } : {}),
   }) : await runCanary(machine, {

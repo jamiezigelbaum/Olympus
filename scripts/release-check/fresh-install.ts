@@ -3,6 +3,8 @@ import type { Machine } from './machine.ts';
 import type { CheckResult } from './report.ts';
 import { openEngineMcp, runLiveAccounts, type EngineMcp, type LiveSourceSpec } from './live-accounts.ts';
 import { openFreshDashboard, type FreshDashboard } from './fresh-dashboard.ts';
+import { runFreshOnDemand, type FreshTimingOptions } from './fresh-on-demand.ts';
+import type { OnDemandTimingResult } from './on-demand-timing.ts';
 import { ANSWER_MODEL_REQUIRED_TEXT } from '../../src/workers/answer-model-required.ts';
 
 export const FRESH_LEG = 'canary-test-omarchy-fresh';
@@ -87,6 +89,7 @@ export interface FreshOptions {
   /** Local installer/tarball prepared by the site's Linux bundle builder; absent uses the published installer. */
   bundle?: { installer: string; tarball: string };
   cdp?: string;
+  onDemandTiming?: FreshTimingOptions;
   /** Current harness bundle, copied to the fresh user's home for the existing owner-bridge command. */
   bridgeAgent?: string;
   /** Test seam: real implementation uses only dashboard controls and persisted reads. */
@@ -95,11 +98,12 @@ export interface FreshOptions {
   sleep?: (ms: number) => Promise<void>;
 }
 
-export async function runFreshInstall(machine: Machine, options: FreshOptions): Promise<{ checks: CheckResult[]; screens: [] }> {
+export async function runFreshInstall(machine: Machine, options: FreshOptions): Promise<{ checks: CheckResult[]; screens: []; onDemandTiming?: OnDemandTimingResult }> {
   const sources = validateFreshSources(options.sources);
   if (machine.os !== 'linux') throw new Error('fresh install requires Linux');
   if (!options.dashboard && !options.bridgeAgent) throw new Error('fresh install needs the machine-agent bundle');
   const checks: CheckResult[] = [];
+  let onDemandTiming: OnDemandTimingResult | undefined;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)));
   let current = 'install';
   let interrupted = false;
@@ -188,7 +192,7 @@ done; exit 1`), 200_000);
       if (interrupted) throw error;
       checks.push({ id: 'fresh.ask-without-model', title: 'ask-without-model', status: 'fail', detail: `check failed: ${error instanceof Error ? redactFreshDetail(error.message) : 'unexpected failure'}` });
     }
-    await checked('dashboard-opens', async () => { dashboard = await (options.dashboard ?? openFreshDashboard)(fresh, options.cdp ?? '127.0.0.1:9333'); });
+    await checked('dashboard-opens', async () => { dashboard = await (options.dashboard ?? openFreshDashboard)(fresh, options.cdp ?? '127.0.0.1:9334'); });
     await checked('privacy-choice', () => dashboard!.privacyChoice());
     for (const source of sources) {
       await checked(`${source.id}.connect`, () => dashboard!.connect(source));
@@ -231,6 +235,12 @@ done; exit 1`), 200_000);
         if (!scopeAbsent(source, answer, search)) throw new Error('outside-scope item leaked, or answer/search could not be verified');
       });
     }
+    if (options.onDemandTiming) {
+      current = 'on-demand-timing';
+      onDemandTiming = await runFreshOnDemand(fresh, options.cdp ?? '127.0.0.1:9334', engine!, dashboard!, options.onDemandTiming,
+        async ms => { if (interrupted) throw new Error('run interrupted'); await sleep(ms); }, machine);
+      checks.push(...onDemandTiming.checks);
+    }
   } catch (error) {
     checks.push({ id: `fresh.${current}`, title: current, status: error instanceof FreshInconclusive ? 'skip' : 'fail', detail: error instanceof FreshInconclusive ? `Inconclusive: ${error.message}` : `check failed: ${error instanceof Error ? redactFreshDetail(error.message) : 'unexpected failure'}` });
   } finally {
@@ -252,7 +262,7 @@ done; exit 1`, 130_000);
   }
   process.removeListener('SIGINT', onInterrupt);
   process.removeListener('SIGTERM', onInterrupt);
-  return { checks, screens: [] };
+  return { checks, screens: [], ...(onDemandTiming ? { onDemandTiming } : {}) };
 }
 
 async function ask(engine: EngineMcp, question: string, sleep: (ms: number) => Promise<void>) {
