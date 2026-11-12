@@ -734,7 +734,11 @@ export function createAnalystSourceIndexAnswerHandler(
       };
       recordSourceAnswerPhaseTimings(phaseTimings);
       // Every item the analysed pack held, cited or not.
-      recordReleaseManifest({ inputs: [...analyzedInputs, ...parentLabelReleaseInputs(detail.parentLabelDependencies ?? [])], constraints: releaseConstraints });
+      recordReleaseManifest({ inputs: [
+        ...analyzedInputs,
+        ...unreadableMatchedReleaseInputs(detail, releaseSecureContent),
+        ...parentLabelReleaseInputs(detail.parentLabelDependencies ?? []),
+      ], constraints: releaseConstraints });
       return {
         answer,
         evidence: released
@@ -2747,6 +2751,20 @@ function appendUnreadableMatchedEvidence(
     evidence.push(entry);
   }
   return evidence;
+}
+
+/**
+ * The unreadable matches appendUnreadableMatchedEvidence cites by name. A leg
+ * may never have read them (prompt fitting left them out), but their names
+ * are released beside the answer, so the manifest judges them on that layer.
+ */
+function unreadableMatchedReleaseInputs(detail: EvidencePackBuildDetail, releaseSecureContent: boolean): ReleaseInput[] {
+  return unreadableMatchedCandidateIndexes(detail).flatMap((index) => {
+    const candidate = detail.pack.candidates[index]!;
+    if (isSecureSensitivity(candidate) && !releaseSecureContent) return [];
+    const { chunkHashes: _hashes, ...input } = candidateReleaseInput(candidate, detail.candidateCorpusIds[index] ?? '');
+    return [{ ...input, layer: 'names' as const }];
+  });
 }
 
 function unreadableMatchedCandidateIndexes(detail: EvidencePackBuildDetail): number[] {

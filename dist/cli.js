@@ -80193,7 +80193,11 @@ function createAnalystSourceIndexAnswerHandler(options) {
         total_ms: totalLatencyMs
       };
       recordSourceAnswerPhaseTimings(phaseTimings);
-      recordReleaseManifest({ inputs: [...analyzedInputs, ...parentLabelReleaseInputs(detail.parentLabelDependencies ?? [])], constraints: releaseConstraints });
+      recordReleaseManifest({ inputs: [
+        ...analyzedInputs,
+        ...unreadableMatchedReleaseInputs(detail, releaseSecureContent),
+        ...parentLabelReleaseInputs(detail.parentLabelDependencies ?? [])
+      ], constraints: releaseConstraints });
       return {
         answer,
         evidence: released ? releasedEvidence(analystResult.citations, detail, releaseSecureContent) : [],
@@ -81452,6 +81456,15 @@ function appendUnreadableMatchedEvidence(evidence, detail, releaseSecureContent)
     evidence.push(entry);
   }
   return evidence;
+}
+function unreadableMatchedReleaseInputs(detail, releaseSecureContent) {
+  return unreadableMatchedCandidateIndexes(detail).flatMap((index) => {
+    const candidate = detail.pack.candidates[index];
+    if (isSecureSensitivity(candidate) && !releaseSecureContent)
+      return [];
+    const { chunkHashes: _hashes, ...input } = candidateReleaseInput(candidate, detail.candidateCorpusIds[index] ?? "");
+    return [{ ...input, layer: "names" }];
+  });
 }
 function unreadableMatchedCandidateIndexes(detail) {
   if (detail.pack.coverage.extractionGaps.length === 0)
