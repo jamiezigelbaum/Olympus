@@ -336,7 +336,7 @@ async function acquireFileLease(targetPath, options) {
   const deadline = Date.now() + options.acquireTimeoutMs;
   await mkdir(dirname3(lockPath), { recursive: true, mode: 448 });
   while (true) {
-    const lock = tryKernelLock(lockPath);
+    const lock = tryKernelLock(lockPath, options.mode);
     if (lock)
       return new AsyncFileLeaseOwner(targetPath, lockPath, lock);
     if (Date.now() >= deadline)
@@ -349,7 +349,7 @@ function acquireFileLeaseSync(targetPath, options) {
   const deadline = Date.now() + options.acquireTimeoutMs;
   mkdirSync2(dirname3(lockPath), { recursive: true, mode: 448 });
   while (true) {
-    const lock = tryKernelLock(lockPath);
+    const lock = tryKernelLock(lockPath, options.mode);
     if (lock)
       return new SyncFileLeaseOwner(targetPath, lockPath, lock);
     if (Date.now() >= deadline)
@@ -369,7 +369,7 @@ function openSqlite(path) {
   connection.exec("PRAGMA busy_timeout = 0");
   return connection;
 }
-function tryKernelLock(lockPath) {
+function tryKernelLock(lockPath, mode) {
   if (!existsSync2(lockPath)) {
     try {
       closeSync2(openSync2(lockPath, "wx", 384));
@@ -380,7 +380,7 @@ function tryKernelLock(lockPath) {
   }
   const connection = openSqlite(lockPath);
   try {
-    connection.exec("BEGIN EXCLUSIVE");
+    connection.exec(mode === "shared" ? "BEGIN; SELECT count(*) FROM sqlite_master;" : "BEGIN EXCLUSIVE");
   } catch (error) {
     closeQuietly(connection);
     if (isSqliteBusy(error))
@@ -553,6 +553,7 @@ function lockPathFor(targetPath) {
 }
 function normalizeOptions(options) {
   return {
+    mode: options.mode ?? "exclusive",
     acquireTimeoutMs: positiveInteger(options.acquireTimeoutMs, DEFAULT_OPTIONS.acquireTimeoutMs),
     pollIntervalMs: positiveInteger(options.pollIntervalMs, DEFAULT_OPTIONS.pollIntervalMs)
   };
@@ -4714,8 +4715,8 @@ function applyOpenClawPluginRemote(config, env) {
 }
 function parseRemoteConfig(remote) {
   const parsed = { enabled: remote.enabled === true };
-  if (remote.claudeAppEnabled !== undefined)
-    parsed.claudeAppEnabled = remote.claudeAppEnabled === true;
+  if (typeof remote.claudeAppEnabled === "boolean")
+    parsed.claudeAppEnabled = remote.claudeAppEnabled;
   for (const key of ["relayHost", "publicBaseUrl"]) {
     const value = remote[key];
     if (typeof value === "string" && value.trim())
@@ -6964,8 +6965,9 @@ function withheldSourceAnswer(reason) {
   withheldAnswers.add(result);
   return result;
 }
-var storage, ANSWER_RELEASE_UNVERIFIED = "Olympus withheld this answer because its current privacy classification could not be verified.", withheldAnswers;
+var chunkProvenance, storage, ANSWER_RELEASE_UNVERIFIED = "Olympus withheld this answer because its current privacy classification could not be verified.", withheldAnswers;
 var init_release_manifest = __esm(() => {
+  chunkProvenance = new WeakMap;
   storage = new AsyncLocalStorage;
   withheldAnswers = new WeakSet;
 });
@@ -8016,10 +8018,17 @@ var init_keyword_context = __esm(() => {
   cachedOnly = new AsyncLocalStorage2;
   requestContext = new AsyncLocalStorage2;
 });
+// src/core/store-reclaim-admission.ts
+var init_store_reclaim_admission = __esm(() => {
+  init_file_lease();
+  init_olympus_layout();
+});
+
 // src/workers/source-index/answer-latency-trace.ts
 import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
 var storage2, laneStorage, CONTENT_FREE_ERROR_CLASSES;
 var init_answer_latency_trace = __esm(() => {
+  init_store_reclaim_admission();
   storage2 = new AsyncLocalStorage3;
   laneStorage = new AsyncLocalStorage3;
   CONTENT_FREE_ERROR_CLASSES = new Set([
@@ -20393,6 +20402,7 @@ var CONCEPT_COUNT_MAX_AGE_MS, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANT
 var init_local_index = __esm(() => {
   init_vector_digest();
   init_main_thread_sql_trace();
+  init_store_reclaim_admission();
   init_store_write_guard();
   init_unreadable_files();
   init_job_names();
@@ -20789,11 +20799,15 @@ var init_tier_content_purge = __esm(() => {
 });
 
 // src/workers/connector-store/tier-auto-prune-sweep.ts
+var RECLAIM_MAX_RETAINED_FREE_BYTES;
 var init_tier_auto_prune_sweep = __esm(() => {
   init_tier_ledger();
   init_embedding_ledger();
   init_tier_move();
   init_tier_content_purge();
+  init_store_reclaim_admission();
+  init_tiered_store_set();
+  RECLAIM_MAX_RETAINED_FREE_BYTES = 64 * 1024 * 1024;
 });
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { spawn as spawn4 } from "node:child_process";
@@ -21606,12 +21620,29 @@ var init_analyst_openclaw_infer = __esm(() => {
 // src/core/evidence-reranker.ts
 var init_evidence_reranker = () => {};
 
+// src/core/limit-stops.ts
+function registerLimit(input) {
+  const prior = limits.get(input.id);
+  if (prior && Object.keys({ ...prior, ...input }).some((key) => prior[key] !== input[key])) {
+    throw new Error(`Limit already registered differently: ${input.id}`);
+  }
+  limits.set(input.id, Object.freeze({ ...input }));
+}
+var limits;
+var init_limit_stops = __esm(() => {
+  init_sqlite_migrations();
+  limits = new Map;
+});
+
 // src/core/evidence-pack.ts
 var utf8, CUT_SHORT_LANES;
 var init_evidence_pack = __esm(() => {
   init_keyword_context();
+  init_release_manifest();
   init_partial_search();
   init_evidence_reranker();
+  init_limit_stops();
+  init_source_corpus_registry();
   init_parent_label();
   init_source_model_policy();
   init_router();
@@ -25799,6 +25830,38 @@ var init_google_connectors = __esm(() => {
   init_corpora();
 });
 
+// connect-relay/shared/mcp-log.ts
+var LOGGED_RPC_METHODS;
+var init_mcp_log = __esm(() => {
+  LOGGED_RPC_METHODS = new Set([
+    "initialize",
+    "ping",
+    "tools/list",
+    "tools/call",
+    "resources/list",
+    "resources/templates/list",
+    "resources/read",
+    "prompts/list",
+    "prompts/get",
+    "completion/complete",
+    "logging/setLevel",
+    "notifications/initialized",
+    "notifications/cancelled",
+    "notifications/progress",
+    "notifications/roots/list_changed"
+  ]);
+});
+
+// connect-relay/shared/request-log.ts
+var init_request_log = __esm(() => {
+  init_mcp_log();
+});
+
+// src/core/connection-requests.ts
+var init_connection_requests = __esm(() => {
+  init_request_log();
+});
+
 // src/core/pairing-session-paths.ts
 var init_pairing_session_paths = __esm(() => {
   init_olympus_layout();
@@ -26006,10 +26069,32 @@ var init_this_computer = __esm(() => {
   init_file_scope_sources();
 });
 
+// src/workers/scheduler-limit-stops.ts
+var DAILY_LIMITS;
+var init_scheduler_limit_stops = __esm(() => {
+  init_limit_stops();
+  DAILY_LIMITS = new Map(Object.entries({
+    daily_cost_guard: { id: "x.daily_cost", kind: "cost", label: "daily X API budget used" },
+    daily_api_request_guard: { id: "x.daily_requests", kind: "requests", label: "daily X API budget used" },
+    daily_resource_read_guard: { id: "x.daily_resource_reads", kind: "requests", label: "daily X API budget used" },
+    head_api_request_reserve_guard: { id: "x.head_reserve_requests", kind: "requests", label: "daily X API budget used" },
+    head_resource_read_reserve_guard: { id: "x.head_reserve_reads", kind: "requests", label: "daily X API budget used" },
+    head_cost_reserve_guard: { id: "x.head_reserve_cost", kind: "cost", label: "daily X API budget used" },
+    readwise_daily_api_request_guard: { id: "readwise.daily_requests", kind: "requests", label: "daily Readwise API budget used" },
+    gmail_daily_api_request_guard: { id: "gmail.daily_requests", kind: "requests", label: "daily Gmail API budget used" },
+    google_drive_daily_api_request_guard: { id: "drive.daily_requests", kind: "requests", label: "daily Google Drive API budget used" }
+  }));
+  for (const limit of DAILY_LIMITS.values()) {
+    registerLimit({ ...limit, scope: "source", unit: limit.kind === "cost" ? "usd" : "requests", continue: "run_once" });
+  }
+});
+
 // src/workers/source-scheduler-state.ts
 var init_source_scheduler_state = __esm(() => {
   init_olympus_layout();
   init_sqlite_migrations();
+  init_limit_stops();
+  init_scheduler_limit_stops();
 });
 
 // src/workers/classification/judge-check.ts
@@ -26093,6 +26178,7 @@ var init_source_dispositions = __esm(() => {
 // src/data-lifecycle.ts
 var backgroundTrashRemovals;
 var init_data_lifecycle = __esm(() => {
+  init_connection_requests();
   init_boot_progress();
   init_people_index();
   init_mac_engine_daemon();
@@ -38383,12 +38469,12 @@ async function handleOAuthCallback(input) {
 }
 function validOAuthCallbackQuery(search) {
   const known = new Set(["code", "state", "error", "error_description"]);
-  const limits = { code: 8192, state: 4096, error: 256, error_description: 2048 };
+  const limits2 = { code: 8192, state: 4096, error: 256, error_description: 2048 };
   const seen = new Set;
   for (const [key, value] of search) {
     if (!known.has(key))
       continue;
-    if (seen.has(key) || value.length === 0 || value.length > (limits[key] ?? 0))
+    if (seen.has(key) || value.length === 0 || value.length > (limits2[key] ?? 0))
       return false;
     seen.add(key);
   }

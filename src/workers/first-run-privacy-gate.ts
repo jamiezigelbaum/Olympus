@@ -1,3 +1,4 @@
+import { RELAY_REQUEST_LOG_PATH } from '../core/connection-requests.ts';
 import { RELAY_SURFACES_PATH } from '../core/remote-access.ts';
 import { isLoopbackAddress, requestPeerAddress, requestFromOwnerSocket } from '../core/request-peer.ts';
 import { readBoundedRequestText } from './remote-request-body.ts';
@@ -35,7 +36,7 @@ export function withFirstRunPrivacyGate(
       return Response.json({ reachable: true, status: 'ok', privacy_choice_pending: true, dependency_check: 'not_run' });
     }
     if (path.startsWith('/.well-known/') || path.startsWith('/connect/')
-      || path === RELAY_SURFACES_PATH || path === '/openapi.json'
+      || path === RELAY_SURFACES_PATH || path === RELAY_REQUEST_LOG_PATH || path === '/openapi.json'
       || ['/dashboard/launch', '/dashboard/control/launch', '/dashboard/control/launch/redeem', '/dashboard/control/session', '/dashboard/control/session/local'].includes(path)
       || (request.method === 'GET' && path === '/v1/service/readiness')
       // Reading and proposing settings (#1050) carry no source data, and the

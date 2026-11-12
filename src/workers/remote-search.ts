@@ -38,7 +38,7 @@ import type { OperationCaller } from '../core/operation-caller.ts';
 import { OperationError } from '../core/operations.ts';
 import type { RemotePrivatePart } from '../core/remote-private-part.ts';
 import { remoteErrorOutput, remotePrivateNote } from '../core/remote-result.ts';
-import { answerReleaseWithheldReasonOffThread, createReleaseManifestSink, runWithReleaseManifestSink, type ReleaseCheck } from '../core/release-manifest.ts';
+import { recheckSearchEvidence, createReleaseManifestSink, runWithReleaseManifestSink, type ReleaseCheck } from '../core/release-manifest.ts';
 import type { McpCallToolResult, McpListedTool, McpServerExtension } from '../mcp/server.ts';
 import { SEARCH_TOOL_NAME } from './chatgpt/dashboard-contract.ts';
 import { searchToolResult } from './chatgpt/response-builder.ts';
@@ -178,20 +178,17 @@ async function runSearch(
     const recorded = await privateCall.settle(raw, undefined);
     const afterWait = currentAccess(authorized);
     if (afterWait !== 'active') return refusedAccess(afterWait);
-    const evidence = result.structuredContent?.evidence;
-    if (context.releaseCheck && Array.isArray(evidence) && evidence.length > 0
-      && await answerReleaseWithheldReasonOffThread(manifests.manifests, context.releaseCheck, 'personal') !== undefined) {
-      // Only the evidence goes: the coverage the search reported and what it already withheld stand.
-      const rawRecord = raw as Record<string, unknown>;
-      const withheldBefore = typeof rawRecord.withheld === 'number' && Number.isFinite(rawRecord.withheld) && rawRecord.withheld > 0 ? rawRecord.withheld : 0;
-      result = searchToolResult({ ...rawRecord, evidence: [], withheld: withheldBefore + evidence.length }, { pendingPrivacyItems: context.pendingPrivacyItems?.() });
-      withheldAfter = true;
-    }
-    // The release judgment above may wait on the read pool: a revocation meanwhile releases nothing.
-    const afterRelease = currentAccess(authorized);
-    if (afterRelease !== 'active') return refusedAccess(afterRelease);
     if (recorded) note = remotePrivateNote(privateCall.answerId, privateCall.secretMatch);
   }
+  const checked = await recheckSearchEvidence(raw as Record<string, unknown>, manifests.manifests, context.releaseCheck);
+  if (checked.withheldAfter) {
+    // Rebuild capture from only what is actually leaving the computer.
+    result = runWithReleaseCapture(capture, () => searchToolResult(checked.raw, { pendingPrivacyItems: context.pendingPrivacyItems?.() }));
+    withheldAfter = Array.isArray(checked.raw.evidence) && checked.raw.evidence.length === 0;
+  }
+  // The release judgment can await the pool or judge; recheck the connection afterward.
+  const afterRelease = currentAccess(authorized);
+  if (afterRelease !== 'active') return refusedAccess(afterRelease);
   if (context.caller) {
     recordAppRequest({
       caller: context.caller,

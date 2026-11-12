@@ -167,7 +167,7 @@ const REFUSED_RAW = { ok: false, code: 'daily_cap_reached', message: 'The daily 
 
 /** One item the analyst read: a `fixture` item in the internal fixture corpus, account `personal`. */
 function input(id: string, overrides: Partial<ReleaseInput> = {}): ReleaseInput {
-  return { corpusId: CORPORA.internal, provider: 'fixture', accountScope: ACCOUNT, providerItemId: id, privateAtAnswer: false, ...overrides };
+  return { corpusId: CORPORA.internal, provider: 'fixture', accountScope: ACCOUNT, providerItemId: id, privateAtAnswer: false, chunkHashes: [`${id}-chunk`], ...overrides };
 }
 
 function manifest(inputs: ReleaseInput[], constraints: Partial<ReleaseConstraints> = {}): ReleaseManifest {
@@ -237,7 +237,11 @@ function expectNothingInternal(text: string): void {
 
 /** A release check that judges every input as given. */
 function fixedCheck(tier: 'legacy' | 'public_or_personal' | 'private' | 'secret' | 'unknown', posture: 'allow' | 'approval' = 'allow'): ReleaseCheck {
-  return { inputs: (inputs) => inputs.map(() => ({ tier, gone: false })), secureDerivativeDefault: () => posture };
+  // Tier-lifetime fixtures assume passage reading was already proved; chunk
+  // coverage and unavailable judges are exercised in chunk-release.test.ts.
+  return { inputs: (inputs) => inputs.map(() => ({ tier, gone: false })),
+    chunks: async inputs => ({ allowed: inputs.map(input => input.chunkHashes ?? []), withheldPassages: 0, withheldDocuments: 0 }),
+    secureDerivativeDefault: () => posture };
 }
 
 describe('remote output allowlists, per operation and result family', () => {
@@ -721,8 +725,8 @@ describe('the analyst handler records every input it read', () => {
     expect(result.evidence.map((entry) => entry.provider_item_id)).toEqual(['first']);
     expect(sink.manifests).toEqual([{
       inputs: [
-        { corpusId: NOTES, provider: 'fixture', accountScope: 'work', providerItemId: 'first', privateAtAnswer: false },
-        { corpusId: NOTES, provider: 'fixture', accountScope: 'work', providerItemId: 'second', privateAtAnswer: false },
+        { corpusId: NOTES, provider: 'fixture', accountScope: 'work', providerItemId: 'first', privateAtAnswer: false, chunkHashes: [] },
+        { corpusId: NOTES, provider: 'fixture', accountScope: 'work', providerItemId: 'second', privateAtAnswer: false, chunkHashes: [] },
       ],
       constraints: { secureDerivativeDefault: 'approval', includeSecureLocalContent: false },
     }]);
@@ -766,7 +770,7 @@ describe('over the wire', () => {
     answer = async () => answered();
     consult = async () => NEEDS_CHOICE_RAW;
     consultCallers = [];
-    releaseCheck = undefined;
+    releaseCheck = fixedCheck('public_or_personal');
     contextFails = false;
     verifyFails = false;
     relayed = false;
@@ -983,7 +987,9 @@ describe('over the wire', () => {
         { id: 'orchard', name: 'orchard-plan.txt', text: 'Orchard notes.' },
         { id: 'meadow', name: 'meadow-plan.txt', text: 'Meadow notes.' },
       ]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
-      releaseCheck = createReleaseTierCheck(() => [{ ledger: fixture.ledger, corpusIds: new Set(Object.values(CORPORA)) }], () => 'allow');
+      // Real item tiers; passage reading is taken as proved here (chunk-release.test.ts covers it).
+      releaseCheck = { ...createReleaseTierCheck(() => [{ ledger: fixture.ledger, corpusIds: new Set(Object.values(CORPORA)) }], () => 'allow'),
+        chunks: async (inputs) => ({ allowed: inputs.map((entry) => entry.chunkHashes ?? []), withheldPassages: 0, withheldDocuments: 0 }) };
       // One connection of each kind, each with its own uncited input.
       for (const [[kind, token], uncited] of tokens().map((entry, index) => [entry, index === 0 ? 'orchard' : 'meadow'] as const)) {
         let release!: () => void;

@@ -31,6 +31,7 @@ import type { RemoteConnectionRecord, RemoteConnectionRoute, RemoteConnectionSto
 import type { RemoteConnectionProvider } from '../core/remote-oauth-store.ts';
 import type { RemotePublicUrls } from '../core/remote-public-url.ts';
 import type { RemoteAccessStatusView } from '../core/remote-access.ts';
+import { connectionRequestsView, type ConnectionRequest } from '../core/connection-requests.ts';
 import { sanitizeCallerDisplayName } from '../core/operation-caller.ts';
 
 export const DASHBOARD_AGENT_PAIRING_CODE_PATH = '/dashboard/agents/pairing-code';
@@ -115,6 +116,7 @@ export interface DashboardAgentConnection {
 
 /** What the Setup page renders. Revoked connections are not listed. */
 export interface DashboardAgentsView {
+  requests?: ReturnType<typeof connectionRequestsView>;
   remoteAccess: DashboardRemoteAccess;
   connections: DashboardAgentConnection[];
   privateAccess?: PrivateAgentListenersView;
@@ -125,6 +127,7 @@ export interface DashboardAgentsView {
 }
 
 export interface DashboardAgentConnectionsBackend {
+  requests?: () => ConnectionRequest[];
   /** Only workers that own the private listeners advertise these routes. */
   privateListeners?: Pick<PrivateAgentListeners, 'view' | 'refresh'> | undefined;
   /** Linux relay keys bind to the engine's current outbound registration. */
@@ -218,6 +221,7 @@ export function dashboardAgentsView(backend: DashboardAgentConnectionsBackend): 
   }
   return {
     remoteAccess,
+    ...(backend.requests ? { requests: connectionRequestsView(backend.requests(), records.filter(record => record.revokedAt === null).map(record => record.displayName)) } : {}),
     ...manual,
     ...privateAccess,
     connections: records

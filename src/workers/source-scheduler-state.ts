@@ -10,6 +10,8 @@ import {
 import { closeSqliteStore } from '../core/sqlite-store.ts';
 import { filterFor, forgetSqliteRows } from '../core/sqlite-forget.ts';
 import { isBoundedSourceCheckpoint } from './source-checkpoint.ts';
+import { initializeLimitStops, listOpenLimitStops, type LimitStop } from '../core/limit-stops.ts';
+import { syncSchedulerLimitStop } from './scheduler-limit-stops.ts';
 
 export { SOURCE_CHECKPOINT_MAX_LENGTH } from './source-checkpoint.ts';
 
@@ -227,6 +229,11 @@ export function forgetSourceSchedulerState(
     return forgetSqliteRows(db, [
       ...filterFor('source_scheduler_task_state', keys),
       ...filterFor('source_scheduler_unpark_request', keys),
+      // A scheduler stop's subject is [source_id, corpus_id, task_id].
+      ...filterFor('limit_stops', [
+        ["CASE WHEN json_valid(subject) THEN json_extract(subject, '$[0]') END", scope.sourceIds],
+        ["CASE WHEN json_valid(subject) THEN json_extract(subject, '$[1]') END", scope.corpusIds],
+      ]),
     ], dryRun).reduce((sum, count) => sum + count, 0);
   } finally {
     closeSqliteStore(db);
@@ -243,6 +250,7 @@ export function forgetSourceSchedulerState(
 export class LocalSourceSchedulerStateStore {
   readonly dbPath: string;
   private readonly db: Database;
+  private closed = false;
 
   constructor(dbPath = defaultSourceSchedulerStateDbPath()) {
     this.dbPath = dbPath;
@@ -262,9 +270,39 @@ export class LocalSourceSchedulerStateStore {
       SOURCE_SCHEDULER_STATE_STORE_ID,
       sourceSchedulerStateMigrations(),
     );
+    initializeLimitStops(this.db);
+    this.backfillLimitStops();
+  }
+
+  /**
+   * Tasks parked behind a daily budget before the stop record existed (or
+   * across a crash) get their stop now, so none waits unseen until its next
+   * state write. Idempotent: an open stop keeps its own `since`.
+   */
+  private backfillLimitStops(): void {
+    this.db.transaction(() => {
+      const keys = this.db.query(`
+        SELECT source_id, corpus_id, task_id FROM source_scheduler_task_state
+        WHERE degraded_reason IS NOT NULL
+      `).all() as Array<{ source_id: string; corpus_id: string; task_id: string }>;
+      for (const key of keys) {
+        const state = this.get({ sourceId: key.source_id, corpusId: key.corpus_id, taskId: key.task_id });
+        if (state) syncSchedulerLimitStop(this.db, undefined, state);
+      }
+    })();
+  }
+
+  /**
+   * Open limit stops recorded in this database (core/limit-stops.ts). The
+   * scheduler reads its status after a tick, which can end after shutdown
+   * closed this store: a closed store has nothing to show.
+   */
+  openLimitStops(now?: Date): LimitStop[] {
+    return this.closed ? [] : listOpenLimitStops(this.db, now);
   }
 
   close(): void {
+    this.closed = true;
     closeSqliteStore(this.db);
   }
 
@@ -755,16 +793,17 @@ export class LocalSourceSchedulerStateStore {
   ): PersistedSourceSchedulerTaskState {
     return this.db.transaction(() => {
       const existing = this.db.query(`
-        SELECT state_version
+        SELECT state_version, degraded_reason
         FROM source_scheduler_task_state
         WHERE source_id = ? AND corpus_id = ? AND task_id = ?
-      `).get(key.sourceId, key.corpusId, key.taskId) as { state_version?: number } | null;
+      `).get(key.sourceId, key.corpusId, key.taskId) as { state_version?: number; degraded_reason?: string } | null;
       if (existing && existing.state_version !== SOURCE_SCHEDULER_TASK_STATE_VERSION) {
         throw new Error('Source scheduler task state uses an unsupported state_version.');
       }
       write();
       const state = this.get(key);
       if (!state) throw new Error('Source scheduler task state could not be read after its atomic update.');
+      syncSchedulerLimitStop(this.db, existing?.degraded_reason, state);
       return state;
     })();
   }

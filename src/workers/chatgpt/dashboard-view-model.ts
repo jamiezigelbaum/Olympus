@@ -17,6 +17,7 @@ import { sourceSupportDetails } from '../dashboard/source-failure.ts';
  * passes the allowlisted response builder (response-builder.ts) before it
  * leaves the engine.
  */
+import { registeredLimits, limitStopSubjects, type LimitStop } from '../../core/limit-stops.ts';
 import type { ModelSetupView } from '../../core/model-setup.ts';
 import { formatSpaceToFree, modelInstallSpaceToFree } from '../../core/model-install-failure.ts';
 import {
@@ -193,6 +194,7 @@ const KNOWN_REFUSAL_CODES = new Set(['access_denied', 'redirect_uri_mismatch', '
 const KNOWN_QUEUE_LABELS = new Set(['Needs attention', 'Working now', 'Waiting to catch up', 'Caught up']);
 
 export interface ChatGptDashboardOptions {
+  limitStops?: readonly LimitStop[];
   now?: Date;
   /**
    * The built-in embedding model's state, from the embeddings lane. Absent
@@ -245,6 +247,8 @@ export function buildChatGptDashboardViewModel(
   options: ChatGptDashboardOptions = {},
 ): DashboardViewModelV1 {
   const now = options.now ?? new Date();
+  const stops = (options.limitStops ?? []).filter((stop) => !stop.resumesAt || Date.parse(stop.resumesAt) > now.getTime());
+  const limits = registeredLimits();
   const degraded = scrubDegradations(view.degraded_credentials);
   const embedding = options.embedding ?? embeddingFromModelSetup(view.model_setup);
   const rows = publicCards(view.sources).map(({ definition, card }) => {
@@ -289,8 +293,9 @@ export function buildChatGptDashboardViewModel(
     // or a sync is retrying on its own (#1044): nothing for the owner to do,
     // so not Needs you; a parked source shows its wait under In progress.
     const wait = selfWait(definition, scrubbed, now);
+    const stopped = stops.some((stop) => limitStopSubjects(stop).includes(definition.source_id));
     if (!connecting && !credentials && imports.length === 0 && (status === 'Needs you' || status === 'Failing')
-      && ownerHasNothingToDo(scrubbed, wait !== undefined, degraded)) {
+      && ownerHasNothingToDo(scrubbed, stopped || wait !== undefined, degraded)) {
       status = 'Working';
     }
     // Whether this worker can sync the source at all: the raw card's own
@@ -312,6 +317,20 @@ export function buildChatGptDashboardViewModel(
     .map(({ entry }) => entry);
 
   const waits: DashboardSourceWait[] = rows.flatMap(({ wait }) => (wait ? [wait] : []));
+  for (const stop of stops) {
+    const limit = limits.find((entry) => entry.id === stop.id);
+    if (!limit) continue;
+    const row = rows.find(({ definition }) => limitStopSubjects(stop).some((subject) =>
+      subject === definition.source_id || subject === definition.primary_corpus_id || definition.corpus_source_ids.includes(subject)));
+    const fix = limit.continue === 'run_once' ? row?.sync
+      : limit.continue === 'raise' || limit.continue === 'refill'
+        ? helpLinkFix('Open settings', openPageUrl({ kind: 'fix', section: 'models' })) : undefined;
+    const label = row?.definition.label ?? ({ source: 'Sources', judge: 'Privacy check', answer: 'Answers', outside_help: 'Outside help', extraction: 'Reading' } as const)[limit.scope];
+    waits.push({ sourceId: row?.definition.source_id ?? limit.scope, label, api: label,
+      reason: 'limit', limitLabel: limit.label, since: stop.since,
+      ...(stop.waiting ? { waiting: stop.waiting } : {}),
+      ...(stop.resumesAt ? { resumesAt: stop.resumesAt } : {}), ...(fix ? { fix } : {}) });
+  }
 
   const needsYou: DashboardItem[] = rows
     .filter(({ status }) => status === 'Needs you' || status === 'Failing')
@@ -462,9 +481,8 @@ const WAIT_API_NAMES: Readonly<Record<string, string>> = {
 };
 
 /**
- * A source Olympus parked itself (#1044): a daily API budget, which resets at
- * the next 00:00 UTC, or a provider's rate limit, which clears at the next
- * run. Only while connected: a signed-out source is the owner's.
+ * Provider rate-limit waits still come from scheduler state. Budget waits
+ * come only from the owning store's limit-stop records. Only while connected.
  */
 function selfWait(definition: DashboardSupportedSourceDefinition, card: DashboardSourceCard, now: Date): DashboardSourceWait | undefined {
   const reason = card.schedule?.degraded_reason;
@@ -475,8 +493,7 @@ function selfWait(definition: DashboardSupportedSourceDefinition, card: Dashboar
     const next = isoOrUndefined(card.schedule?.next_run_at);
     return { sourceId: definition.source_id, label, reason: 'rate_limit', api, ...(next && Date.parse(next) > now.getTime() ? { resumesAt: next } : {}) };
   }
-  const midnight = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
-  return { sourceId: definition.source_id, label, reason: 'daily_budget', api, resumesAt: midnight.toISOString() };
+  return undefined;
 }
 
 /**

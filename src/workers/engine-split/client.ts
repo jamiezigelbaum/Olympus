@@ -8,7 +8,7 @@
  * The front never waits on the background to answer a page: callers that
  * only need the wake delivered use `post` (receipt only).
  *
- * OwnerBusyRelay carries the owner-busy signal for the shared local model
+ * OwnerBusyRelay carries owner-busy signals for questions and shared local models
  * (`localModelActivity.onBusy → tierSniffer.preempt()`, server.ts) across the
  * split, and sends it again when a new background instance appears.
  */
@@ -147,8 +147,8 @@ export class EngineCommandClient {
 }
 
 /**
- * The owner's own call on a shared local model, carried to the background.
- * busy()/idle() follow the front's localModelActivity for that resource;
+ * The owner's own question or call on a shared model, carried to the background.
+ * busy()/idle() follow the front's activity for that resource;
  * the relay sends the change, and when it learns of a new background
  * instance (a restart) while busy, sends owner_busy again so the new
  * judge steps aside too.
@@ -166,7 +166,7 @@ export class OwnerBusyRelay {
 
   /**
    * The background lets an owner-busy mark lapse after 10 minutes, so a front
-   * that died mid-call cannot hold the judge back for good. While an owner
+   * that died mid-call cannot hold background work back for good. While an owner
    * call is still running the front says busy again every `renewEveryMs`
    * (3 minutes), so a long call keeps the judge preempted to its end.
    */

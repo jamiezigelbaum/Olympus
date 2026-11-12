@@ -1,4 +1,5 @@
 import './core/sqlite-statement-cache.ts';
+import { connectionRequestsPath, connectionRequestsView, readConnectionRequests } from './core/connection-requests.ts';
 import { PRIVATE_ANSWER_OPTIONS } from './core/privacy-language.ts';
 import { resolvedRawPath } from './core/source-placement.ts';
 import { DESKTOP_OWNER_OPEN_PATH } from './core/linux-owner-bridge.ts';
@@ -1534,6 +1535,7 @@ function printHelp(): void {
   console.log('  olympus connections list');
   console.log('  olympus connections revoke <id>');
   console.log('  olympus connections status');
+  console.log('  olympus connections requests');
   console.log('  olympus data export --output <dir> [--source <id>]');
   console.log('  olympus data verify --input <dir>');
   console.log('  olympus data backup --output <folder> [--passphrase-stdin]');
@@ -1550,7 +1552,7 @@ function printHelp(): void {
   console.log('  olympus --tools-json');
 }
 
-const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
+export const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   setup: 'olympus setup --preset <preset> --yes',
   'sovereignty init': 'olympus sovereignty init --preset <preset> [--path <path>]',
   'worker install': 'olympus worker install [--platform darwin|linux] [--dry-run]',
@@ -1579,6 +1581,7 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'connections list': 'olympus connections list',
   'connections revoke': 'olympus connections revoke <id>',
   'connections status': 'olympus connections status',
+  'connections requests': 'olympus connections requests',
   dashboard: 'olympus dashboard [--read-only] [--no-open] [--target <place>] [--port <n>]',
   open: 'olympus open olympus://open/<target>',
   'open-handler install': 'olympus open-handler install',
@@ -1693,6 +1696,7 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     '  olympus connections list',
     '  olympus connections revoke <id>',
     '  olympus connections status          Remote access: relay session and public URLs',
+    '  olympus connections requests        Recent requests from your AI apps',
   ],
   data: [
     'Usage: olympus data <command>',
@@ -3193,6 +3197,18 @@ export function runConnectionsCommand(
     if (rest.length !== 0) throw new OperationError('invalid_params', 'Usage: olympus connections status');
     return runConnectionsStatus(env);
   }
+  if (command === 'requests') {
+    if (rest.length !== 0) throw new OperationError('invalid_params', 'Usage: olympus connections requests');
+    const dbPath = resolveRemoteConnectionsDbPathForCli(env);
+    let apps: string[] = [];
+    if (existsSync(dbPath)) {
+      let store: ReturnType<typeof openRemoteConnectionStore> | undefined;
+      try { store = openRemoteConnectionStore(dbPath); apps = store.list().filter(connection => connection.revokedAt === null).map(connection => connection.displayName); }
+      catch { /* The history stays readable if the connection database is busy. */ }
+      finally { store?.close(); }
+    }
+    return { kind: 'connection_requests', ...connectionRequestsView(readConnectionRequests(connectionRequestsPath(dbPath)), apps) };
+  }
   // The worker's database, resolved from worker.env on a managed install.
   const store = openRemoteConnectionStore(resolveRemoteConnectionsDbPathForCli(env));
   try {
@@ -3385,7 +3401,7 @@ function runConnectionsStatus(env: Record<string, string | undefined>): Record<s
     status,
     configuredWorkerBaseUrl: loadConfig(layeredEnv).email.baseUrl,
   });
-  return { ...remoteAccessStatusView({ urls, status }) };
+  return { ...remoteAccessStatusView({ urls, status }), recent_requests: connectionRequestsView(readConnectionRequests(connectionRequestsPath(resolveRemoteConnectionsDbPathForCli(env)))).summary };
 }
 
 function remoteConnectionView(connection: RemoteConnectionRecord): Record<string, unknown> {

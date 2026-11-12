@@ -22,7 +22,17 @@ import { iterateRows } from '../../core/sqlite-rows.ts';
 import { HELD_UNTIL_JUDGED_PRIORITY, type TierSnifferSubject } from './tier-classifier.ts';
 import { TIER_SNIFFER_SQLITE_STORE_ID } from './tier-ledger-path.ts';
 
-export const TIER_SNIFFER_SCHEMA_VERSION = 7;
+export const TIER_SNIFFER_SCHEMA_VERSION = 8;
+
+export interface ChunkWindowKey {
+  subject: TierSnifferSubject;
+  contentHash: string;
+  modelId: string;
+  promptVersion: string;
+  /** Also binds the stored names and classifier input, not just the chunk. */
+  materialHash: string;
+  windowIndex: number;
+}
 
 export type SnifferPass = 'metadata' | 'content';
 export type SnifferTier = 'personal' | 'private';
@@ -133,6 +143,19 @@ export class TierSnifferStore {
     } finally {
       if (this.dbPath !== ':memory:' && !this.readOnly) restrictFiles(this.dbPath);
     }
+  }
+
+  chunkWindowVerdict(key: ChunkWindowKey): 'private' | 'secure' | 'secrets' | undefined {
+    return (this.db.query(`SELECT tier FROM chunk_window_verdicts WHERE subject_key = ? AND content_hash = ?
+      AND model_id = ? AND prompt_version = ? AND material_hash = ? AND window_index = ?`)
+      .get(snifferSubjectKey(key.subject), key.contentHash, key.modelId, key.promptVersion, key.materialHash, key.windowIndex) as { tier: 'private' | 'secure' | 'secrets' } | null)?.tier;
+  }
+
+  recordChunkWindow(key: ChunkWindowKey, tier: 'private' | 'secure' | 'secrets'): void {
+    this.db.query(`INSERT OR REPLACE INTO chunk_window_verdicts
+      (subject_key, content_hash, model_id, prompt_version, material_hash, window_index, tier)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(snifferSubjectKey(key.subject), key.contentHash, key.modelId, key.promptVersion, key.materialHash, key.windowIndex, tier);
   }
 
   getVerdict(key: SnifferVerdictKey): StoredSnifferVerdict | undefined {
@@ -672,6 +695,19 @@ function snifferMigrations(): SqliteMigration[] {
       up(db) {
         db.exec(`CREATE INDEX sniffer_training_subject ON sniffer_verdicts(model_subject, model_id, decided_at DESC)
           WHERE fail_safe = 0 AND model_subject IS NOT NULL;`);
+      },
+    },
+    {
+      version: 8,
+      name: 'chunk_window_verdicts',
+      up(db) {
+        db.exec(`CREATE TABLE chunk_window_verdicts (
+          subject_key TEXT NOT NULL, content_hash TEXT NOT NULL,
+          model_id TEXT NOT NULL, prompt_version TEXT NOT NULL,
+          material_hash TEXT NOT NULL, window_index INTEGER NOT NULL,
+          tier TEXT NOT NULL CHECK (tier IN ('private', 'secure', 'secrets')),
+          PRIMARY KEY (subject_key, content_hash, model_id, prompt_version, material_hash, window_index)
+        );`);
       },
     },
   ];

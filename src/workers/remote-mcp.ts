@@ -34,6 +34,7 @@
  * from the client, and lands on the answer's audit ledger entry.
  */
 import { createHash } from 'node:crypto';
+import { requestCredentialTag } from '../core/connection-requests.ts';
 import { existsSync } from 'node:fs';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import type { OlympusConfig } from '../core/config.ts';
@@ -56,6 +57,7 @@ import { createChatGptDirectoryMcpServer } from './chatgpt/directory-surface.ts'
 import { remoteSearchExtension, type RemoteSearchOptions } from './remote-search.ts';
 import { DEMO_GRANT_REMOTE_TOOLS, DIRECTORY_MCP_PATH, type McpSurface } from '../../connect-relay/shared/directory-tools.ts';
 import { readBoundedRequestText } from './remote-request-body.ts';
+import { rpcCallNames } from '../../connect-relay/shared/mcp-log.ts';
 import { remoteErrorOutput, remoteRetryAfterSeconds, remoteSurfaceErrorOutput } from '../core/remote-result.ts';
 import { AUTHENTICATED_RESPONSE_HEADER, SURFACE_RESPONSE_HEADER, credentialInstallId, type CredentialSurface } from '../../connect-relay/shared/tokens.ts';
 import { grantMcpSurface } from './remote-oauth/pinned-clients.ts';
@@ -68,6 +70,7 @@ export const REMOTE_DIRECTORY_MCP_PATH = DIRECTORY_MCP_PATH;
 const IN_PROCESS_WORKER_BASE_URL = 'http://olympus-worker.internal/v1';
 
 export interface RemoteMcpHandlerOptions {
+  onRequestLog?: (entry: import('../../connect-relay/shared/request-log.ts').RequestLogEntry, app?: string, relayed?: boolean) => void;
   /**
    * Opened lazily so an unreadable store never blocks worker boot. Returns
    * undefined when no connection database exists yet: an install that never
@@ -160,7 +163,14 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
     const started = performance.now();
     const trace: RemoteMcpTrace = { surface: remoteMcpSurface(request) ?? 'default', relayed: isRelayed(request) };
     const response = await handle(request, trace);
-    log(remoteMcpLogLine(trace, response.status, performance.now() - started));
+    const line = remoteMcpLogLine(trace, response.status, performance.now() - started);
+    log(line);
+    const recorded = JSON.parse(line) as { at: string; ms: number };
+    try {
+      options.onRequestLog?.({ at: recorded.at, surface: trace.surface, calls: (trace.calls ?? []).join(','), status: response.status, ms: Math.max(0, recorded.ms),
+        ...(trace.credential ? { credential: trace.credential } : {}),
+      }, trace.app, trace.relayed);
+    } catch { /* Observing a request cannot change its response. */ }
     return response;
   };
 
@@ -170,6 +180,9 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
       const verification = authenticateRemoteRequest(request, options, surface);
       if (!verification.ok) return verification.response;
       trace.connection = verification.connection.id;
+      trace.app = verification.connection.displayName;
+      const bearer = /^Bearer\s+(\S+)$/i.exec(request.headers.get('authorization')?.trim() ?? '')?.[1];
+      if (bearer) trace.credential = requestCredentialTag(createHash('sha256').update(bearer).digest());
       const response = await serveAuthenticated(request, verification, surface, trace);
       // Only the relay reads the mark; a direct caller never sees it.
       if (!trace.relayed) return response;
@@ -263,36 +276,13 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
 
 /** What one remote MCP request was, for its log line; filled in as it is served. */
 interface RemoteMcpTrace {
+  credential?: string;
+  app?: string;
   surface: McpSurface;
   relayed: boolean;
   connection?: string;
   calls?: string[];
   failed?: boolean;
-}
-
-/** The MCP methods a log line may name; any other method is logged as `?`. */
-const LOGGED_RPC_METHODS: ReadonlySet<string> = new Set([
-  'initialize', 'ping', 'tools/list', 'tools/call', 'resources/list', 'resources/templates/list', 'resources/read',
-  'prompts/list', 'prompts/get', 'completion/complete', 'logging/setLevel',
-  'notifications/initialized', 'notifications/cancelled', 'notifications/progress', 'notifications/roots/list_changed',
-]);
-
-/** Olympus's own tool-name shapes; any other name is logged as `?`. */
-const LOGGED_TOOL_NAME = /^(?:olympus|source|ask)_[a-z_]{1,48}$/;
-
-/**
- * The JSON-RPC methods a body carries, a tool call as `tools/call:<name>`,
- * each only from a fixed list or shape (anything else is `?`), so no
- * client-written text reaches the journal. At most 8.
- */
-function rpcCallNames(body: unknown): string[] {
-  const messages = Array.isArray(body) ? body : [body];
-  return messages.slice(0, 8).map((message) => {
-    const { method, params } = (message && typeof message === 'object' ? message : {}) as { method?: unknown; params?: { name?: unknown } };
-    if (typeof method !== 'string' || !LOGGED_RPC_METHODS.has(method)) return '?';
-    if (method !== 'tools/call') return method;
-    return `${method}:${typeof params?.name === 'string' && LOGGED_TOOL_NAME.test(params.name) ? params.name : '?'}`;
-  });
 }
 
 /**

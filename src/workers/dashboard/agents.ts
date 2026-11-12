@@ -178,8 +178,9 @@ export function renderDashboardAgentsSection(input: DashboardAgentsSectionInput)
     // Connect an agent button lives with the list (owner, 2026-11-03: not a
     // row and a button saying the same thing).
     `<div data-agent-connections-list>${connectionList(view, input.now)}</div>`,
+    renderConnectionRequests(view),
     connectSheet(view.remoteAccess, host, view.privateAccess),
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 function remoteAccessRow(access: DashboardRemoteAccess, manual: string | undefined): string {
@@ -504,4 +505,12 @@ function hostOf(url: string): string {
   } catch {
     return url;
   }
+}
+
+function renderConnectionRequests(view: DashboardAgentsView): string {
+  const history = view.requests;
+  if (!history) return '';
+  const readings = history.readings.map(line => `<p class="pnote">${escapeHtml(line)}</p>`).join('');
+  const rows = history.requests.map(entry => `<div class="attncard plain"><div class="grow"><span class="name">${escapeHtml(entry.app)}</span><div class="why"><time datetime="${escapeHtml(entry.at)}">${escapeHtml(new Date(entry.at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }))}</time> · ${escapeHtml(entry.asked)} · ${escapeHtml(entry.result)}</div></div></div>`).join('');
+  return `<section data-connection-requests><div class="sect">${escapeHtml(history.title)}</div>${readings}${rows || '<p class="pnote">No requests recorded yet.</p>'}<p class="foot">Showing retained history only. Relay and engine observations appear separately; a relay line alone does not show that the request reached this computer.</p></section>`;
 }

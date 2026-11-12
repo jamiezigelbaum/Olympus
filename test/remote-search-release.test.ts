@@ -16,15 +16,25 @@ import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { createReleaseTierCheck, createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import { searchReleasedEvidence } from '../src/workers/source-index/analyst-answer.ts';
 import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
+import { JUDGED_PERSONAL_SNIFFER } from './helpers/tier-fixtures.ts';
+import { registerInstalledTierClassification } from '../src/workers/classification/installed-tier-classification-registry.ts';
 
 const SENTENCE = 'The garden contains violet turnips.';
 const cleanups: Array<() => void> = [];
 
 afterEach(() => {
+  registerInstalledTierClassification(undefined);
   while (cleanups.length > 0) cleanups.pop()!();
 });
 
 async function gardenLane() {
+  // These short fixtures already have whole-item judgments. No new window
+  // record or model call is needed to exercise the later tier-change race.
+  registerInstalledTierClassification({ forLedger: () => ({ sniffer: JUDGED_PERSONAL_SNIFFER, releaseJudge: {
+    modelId: 'fixture', promptVersion: 'fixture', read: () => undefined,
+    record: () => { throw new Error('short items need no window records'); },
+    resolve: async () => { throw new Error('short items need no new calls'); },
+  } }) });
   const { dir, cleanup } = tempDir();
   const fixture = openTierFixture(dir, { embed: false });
   cleanups.push(() => {

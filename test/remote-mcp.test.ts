@@ -1,9 +1,11 @@
+import { recordScriptedSearch, scriptedSearchReleaseCheck } from './helpers/scripted-search-release.ts';
 // Remote MCP endpoint with bearer connections (hosted agents slice 2).
 //
 // Assembled exactly the way the worker server assembles it: `/mcp` goes to the
 // connection-token handler, every other route to the worker-bearer wrapper.
 // A real MCP SDK client talks Streamable HTTP to it over loopback.
 
+import { connectionRequestsPath } from '../src/core/connection-requests.ts';
 import { ANSWER_MODEL_REQUIRED_TEXT } from '../src/workers/answer-model-required.ts';
 import { AUTHENTICATED_RESPONSE_HEADER, SURFACE_RESPONSE_HEADER } from '../connect-relay/shared/tokens.ts';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
@@ -100,6 +102,7 @@ let base: string;
 let answerHeld: Promise<void> | undefined;
 let answerStarted: (() => void) | undefined;
 let logLines: string[];
+let observations: Array<{ entry: import('../connect-relay/shared/request-log.ts').RequestLogEntry; app?: string; relayed?: boolean }>;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'olympus-remote-mcp-'));
@@ -109,6 +112,7 @@ beforeEach(() => {
   answerHeld = undefined;
   answerStarted = undefined;
   logLines = [];
+  observations = [];
   const worker = createEmailSourceWorker({
     sourceAnswer: { async answer() {
       answered += 1;
@@ -123,6 +127,7 @@ beforeEach(() => {
     createRemoteMcpHandler({
       connections: () => store,
       log: (line) => logLines.push(line),
+      onRequestLog: (entry, app, relayed) => observations.push({ entry, ...(app ? { app } : {}), ...(relayed === undefined ? {} : { relayed }) }),
       // The relay child's per-boot secret, as the worker reads it from its 0600 file.
       isRelayed: (request) => request.headers.get('x-olympus-relay') === 'per-boot-secret',
       makeOperationContext: (caller, signal) => createInProcessOperationContext({
@@ -257,6 +262,9 @@ describe('remote MCP over loopback with a connection token', () => {
       await client.close();
     }
     expect((await mcpInitialize('Bearer not-a-connection-token')).status).toBe(401);
+    expect(observations).toHaveLength(logLines.length);
+    expect(observations.filter(o => o.entry.calls === 'tools/list')[0]).toMatchObject({ app: 'Claude', relayed: false, entry: { status: 200, surface: 'default' } });
+    expect(observations.at(-1)).not.toHaveProperty('app');
     const lines = logLines.map((line) => JSON.parse(line) as { event: string; calls: string[]; status: number; ms: number; connection?: string; surface: string; relayed: boolean });
     expect(lines.every((line) => line.event === 'remote_mcp' && line.surface === 'default' && line.relayed === false && line.ms >= 0)).toBe(true);
     const calls = lines.flatMap((line) => line.calls);
@@ -503,15 +511,20 @@ describe('review fixes', () => {
     const outside = openRemoteConnectionStore(dbPath);
     const { token } = outside.create('Muse');
     outside.close();
+    const requestsPath = connectionRequestsPath(dbPath);
+    writeFileSync(requestsPath, '[]', { mode: 0o600 });
 
     const exported = exportOlympusData({ destination: join(dir, 'export'), homeDir: home, env });
     expect(exported.skipped).toContain(dbPath);
+    expect(exported.skipped).toContain(requestsPath);
     expect(JSON.stringify(exported.files)).not.toContain('remote-connections');
 
     const preview = deleteOlympusData({ all: true, dryRun: true, homeDir: home, env });
     expect(preview.removed).toContain(dbPath);
+    expect(preview.removed).toContain(requestsPath);
     deleteOlympusData({ all: true, homeDir: home, env });
     expect(existsSync(dbPath)).toBe(false);
+    expect(existsSync(requestsPath)).toBe(false);
     const reopened = openRemoteConnectionStore(dbPath);
     try {
       expect(reopened.verifyToken(token)).toEqual({ ok: false, reason: 'unknown' });
@@ -688,27 +701,30 @@ describe('remote evidence search', () => {
       createRemoteMcpHandler({
         connections: () => store,
         anonymousAnswersEnabled: () => anonymousEnabled,
-        makeOperationContext: (caller, signal) => createInProcessOperationContext({
-          config: defaultConfig(),
-          sourceIndexReadEnabled: true,
-          workerFetch: worker.fetch,
-          caller,
-          signal,
+        makeOperationContext: (caller, signal) => ({
+          ...createInProcessOperationContext({
+            config: defaultConfig(),
+            sourceIndexReadEnabled: true,
+            workerFetch: worker.fetch,
+            caller,
+            signal,
+          }),
+          releaseCheck: scriptedSearchReleaseCheck,
         }),
         search: {
           evidenceSearch: async (input) => {
             searches.push(input);
             searchStarted?.();
             if (pauseSearch) await pauseSearch;
-            return {
+            return recordScriptedSearch({
               evidence: [
-                { trust_domain: 'internal', provider: 'test-mail', family: 'email', title: 'Lease renewal', excerpt: 'The lease renews on 1 March.', authored_at: '2026-09-01T10:00:00Z' },
+                { corpus_id: 'internal.test-mail', provider_item_id: 'lease', account_scope: 'scripted-account', trust_domain: 'internal', provider: 'test-mail', family: 'email', title: 'Lease renewal', excerpt: 'The lease renews on 1 March.', authored_at: '2026-09-01T10:00:00Z' },
                 // Never released to this surface: dropped even if a search returned it.
                 { trust_domain: 'secure_local', provider: 'test-mail', family: 'email', title: 'Private note', excerpt: 'private text' },
               ],
               withheld: 0,
               coverage: { searched_corpora: 1 },
-            };
+            });
           },
           answerModelAvailable: () => answerModel,
         },

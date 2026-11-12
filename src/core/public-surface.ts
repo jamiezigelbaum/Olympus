@@ -190,6 +190,7 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'connections list',
   'connections revoke',
   'connections status',
+  'connections requests',
   'dashboard',
   'open',
   'open-handler install',

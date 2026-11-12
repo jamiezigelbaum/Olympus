@@ -63,6 +63,7 @@ import {
 import { CHATGPT_ZKAPI_TOOL_ACCOUNT_SENTENCE } from './zkapi-copy.ts';
 
 export interface ChatGptSurfaceOptions {
+  limitStops?: () => readonly import('../../core/limit-stops.ts').LimitStop[];
   /** Host presentation only; absent preserves the ChatGPT wire format. */
   appClient?: McpAppClient;
   /** The engine's dashboard view (the `/dashboard.json` object). */
@@ -452,7 +453,7 @@ export async function callChatGptTool(
   if (name === SEARCH_TOOL_NAME && Array.isArray(result.structuredContent?.evidence)
       && result.structuredContent.evidence.length > 0) {
     const reason = ctx.releaseCheck
-      ? await answerReleaseWithheldReasonOffThread(manifests.manifests, ctx.releaseCheck, 'personal')
+      ? await answerReleaseWithheldReasonOffThread(manifests.manifests, ctx.releaseCheck, 'personal', { chunks: true })
       : ANSWER_RELEASE_UNVERIFIED;
     if (reason) return record(searchToolResult({ evidence: [], withheld: result.structuredContent.evidence.length, notes: [reason] }, { pendingPrivacyItems: ctx.pendingPrivacyItems?.() }), true);
   }
@@ -460,7 +461,7 @@ export async function callChatGptTool(
       && (result.structuredContent as { status?: string } | undefined)?.status === 'answered'
       && !(result.structuredContent && 'anonymous' in result.structuredContent)) {
     const reason = ctx.releaseCheck
-      ? await answerReleaseWithheldReasonOffThread(manifests.manifests, ctx.releaseCheck, 'personal')
+      ? await answerReleaseWithheldReasonOffThread(manifests.manifests, ctx.releaseCheck, 'personal', { chunks: true })
       : ANSWER_RELEASE_UNVERIFIED;
     if (reason) return record(withPrivateAnswerOutcome(answerToolResult(withheldSourceAnswer(reason), { pendingPrivacyItems: ctx.pendingPrivacyItems?.() })), true);
   }
@@ -963,6 +964,7 @@ export async function dashboardViewModel(options: ChatGptSurfaceOptions, signal?
     remote = undefined;
   }
   return buildChatGptDashboardViewModel(view, {
+    limitStops: options.limitStops?.() ?? [],
     ...(remote ? { remote } : {}),
     ...(embedding ? { embedding } : {}),
     ...(privacy ? { privacy } : {}),

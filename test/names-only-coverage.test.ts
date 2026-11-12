@@ -1,3 +1,4 @@
+import { provedReleaseCheck } from './helpers/scripted-search-release.ts';
 // Names only is the owner's choice, not a failed read.
 //
 // A folder set to Names only in the folder picker keeps its items' names
@@ -116,6 +117,7 @@ describe('Names-only matches are counted apart from unreadable ones', () => {
   test('olympus_search says Names only in its own sentence and keeps "could not read" for real failures', async () => {
     const store = await storeWith([BOOK, BOOK_2, NOTE, SCAN]);
     const raw = await searchReleasedEvidence({
+      releaseCheck: provedReleaseCheck,
       question: 'orchard',
       maxResults: 10,
       lanes: () => ({

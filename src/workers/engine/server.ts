@@ -1,6 +1,7 @@
 import { parseOwnerTierItemId } from '../classification/tier-owner-items.ts';
 import { fileSourceScopeOnDemandFilters } from '../source-scope-runtime.ts';
 import type { OnDemandReadRequest, OnDemandReadResult } from '../file-extraction/on-demand-read.ts';
+import { ConnectionRequestStore, connectionRequestsPath, requestCredentialTag } from '../../core/connection-requests.ts';
 import { createDashboardPeople } from './dashboard/dashboard-people.ts';
 import { PeopleIndexRefresher } from '../../core/people-index.ts';
 import { adoptExistingCloudApproval, carryCloudJudgeApproval, createJudgeSetup } from '../classification/judge-setup.ts';
@@ -249,7 +250,7 @@ import {
   type ConnectorStoreSearchFilters,
 } from '../connector-store/index.ts';
 import { canonicalConnectorStoreChatPrincipal } from '../connector-store/principal.ts';
-import { createSourceAnswerLanes } from './runtime/source-answer-lanes.ts';
+import { createOwnerQuestionActivity, createSourceAnswerLanes, OWNER_QUESTION_RESOURCE } from './runtime/source-answer-lanes.ts';
 import type { ConnectorStoreStatusScope } from '../connector-store/local-index.ts';
 import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
 import { gmailInternalStoreStatusScope, gmailPrivateStoreStatusScope } from '../email-source/gmail-status-scope.ts';
@@ -435,6 +436,7 @@ import {
   unregisterFileScopeBrowserFactory,
   type SourceFolderScopeBrowser,
 } from '../source-scope-browser.ts';
+import { frontJudgeNow, judgeNow } from '../classification/chunk-release.ts';
 import { configureInstalledTierClassification } from '../classification/installed-tier-classification.ts';
 import { type SnifferLane } from '../classification/sniffer-lane.ts';
 import { registerBuiltInPrivateModel, registeredBuiltInPrivateModel, resolveJudgeChoiceRuntime } from '../classification/built-in-sniffer.ts';
@@ -476,6 +478,7 @@ import { createFrontScheduler } from '../engine-split/front-scheduler.ts';
 import { createFrontDashboardHistory, openWritableDashboardHistory } from '../engine-split/front-history.ts';
 import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
 import { startSupersededSweepTicker } from '../connector-store/tier-auto-prune-sweep.ts';
+import { withStoreReadPriority } from '../../core/store-reclaim-admission.ts';
 import { remoteAccessFromStatus, type DashboardAgentConnectionsBackend } from '../agent-connections.ts';
 import { applyPendingRestoreAtBoot, createBackupService, defaultBackupServicePaths } from '../backup-service.ts';
 import { createDashboardRemoteAccessControl, createGatewayRemoteAccessConfigWriter, createStandaloneRemoteAccessControl, createDashboardEngineRestart } from '../remote-access-control.ts';
@@ -578,6 +581,23 @@ export async function startWorkerWithLaunch(launch: WorkerLaunch): Promise<void>
  * would close its connection and let go.
  */
 let dataOwnerLock: HeldDataOwnerLock | undefined;
+
+/**
+ * How often every engine role brings each store's hidden-copy set up to date:
+ * the front between Asks, and the background (or the single worker) so the
+ * set it saves stays within this much of the ledger's visibility feed, and a
+ * front start applies a small delta instead of rebuilding.
+ */
+const VISIBILITY_REFRESH_MS = 30_000;
+/**
+ * The longest the front waits on those sets before it listens; the rest
+ * finishes after, in turns. Well inside the verified install's 60 s health
+ * deadline (engine-service.ts ENGINE_HEALTH_TIMEOUT_MS), which also covers the
+ * background's start. A rebuild from the ledger took about 59 s on Sparta
+ * (gate 1, ops#151); from a saved set the background keeps current, a start
+ * applies a delta of at most a refresh period.
+ */
+const FRONT_VISIBILITY_READY_BOUND_MS = 15_000;
 
 export async function main(): Promise<void> {
   // First, before anything mounts or opens a store: this worker owns the data
@@ -736,6 +756,7 @@ export async function main(): Promise<void> {
   };
   const installedTierClassification = configureInstalledTierClassification({
     automaticMoveContext,
+    readOnly: !!engineFront,
     env: process.env,
     ...(snifferLane ? { lane: snifferLane } : {}),
     ...(publicTierRetired ? { retirePublic: true } : {}),
@@ -744,6 +765,11 @@ export async function main(): Promise<void> {
   // Shared with the answer handler so the sniffer reads the private pool's
   // breakers, and counts answers in flight so it never competes with one.
   const secureAnalystPoolState = new SecureAnalystPoolState();
+  // Questions pause copy cleanup independently of which model they use.
+  const ownerQuestions = createOwnerQuestionActivity(engineFront?.ownerBusy);
+  // Busy marks from the split's front lapse after ten minutes without renewal.
+  const remoteOwnerMarks = new OwnerBusyMarks();
+  const remoteOwnerBusy = (resource: string): boolean => remoteOwnerMarks.busy(resource);
   // UI answer leases coordinate owner/background jobs. Actual local model
   // dispatches have separate leases; cloud searches never preempt sorting.
   const answerActivity = createAnswerActivity(() => undefined, {
@@ -1318,6 +1344,17 @@ export async function main(): Promise<void> {
   // A query's matches still waiting for their privacy judgment are judged next (#1062).
   // The judge runs in the background in the split: raise its boosts there.
   const raiseJudgeBoosts = engineFront ? frontJudgeBoost(engineFront.client) : (identities: Parameters<typeof judgeBoosts.raise>[0]) => judgeBoosts.raise(identities);
+  let chunkJudgmentsInFlight = 0;
+  const runChunkJudgment: NonNullable<import('../classification/chunk-release.ts').ChunkReleaseOptions['judgeNow']> = async (items, budgetMs) => {
+    chunkJudgmentsInFlight++;
+    tierSniffer?.preempt();
+    try { return await judgeNow(items, tierScopes(), createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? 'allow'), { budgetMs }); }
+    finally { chunkJudgmentsInFlight--; tierSniffer?.wake(); }
+  };
+  const chunkReleaseOptions = {
+    judgeNow: engineFront ? frontJudgeNow(engineFront.client) : runChunkJudgment,
+    boost: raiseJudgeBoosts,
+  };
   const tierVisibilityGate = createTierVisibilityGate(tierScopes, (identities) => raiseJudgeBoosts(identities));
   // A child item's parent: its names, judged against the ledger that governs its lane (answers and the unreadable list).
   const parentLabelResolver = createParentLabelResolver({
@@ -2141,6 +2178,29 @@ export async function main(): Promise<void> {
   ]);
   configuredMountStores = connectorStores;
   const readConnectorStores = connectorStores;
+  // Every store's hidden-copy set, built and then kept current on a timer.
+  // The front does it before it reports ready, so an Ask (the first included)
+  // applies a small delta at most instead of building a set on its thread.
+  // The background (or the single worker) does it after it starts and saves
+  // each set, so the front's start reads from a saved set inside the ledger's
+  // feed. A store mounted later is built on the next tick.
+  let visibilityKeeping = false;
+  async function keepVisibilityCurrent(when: string): Promise<void> {
+    if (visibilityKeeping || sourceRuntimeClosed) return;
+    visibilityKeeping = true;
+    const started = performance.now();
+    try {
+      for (const store of [...connectorStores]) {
+        try { await store.keepVisibilityCurrentInTurns(); }
+        catch (error) { console.warn(`[olympus] ${engineRole}: a store's hidden-copy set could not be built yet: ${error instanceof Error ? error.message : String(error)}`); }
+      }
+    } finally {
+      visibilityKeeping = false;
+    }
+    if (when !== 'refresh') {
+      console.log(`[olympus] ${engineRole}: built ${connectorStores.length} stores' hidden-copy sets in ${Math.round(performance.now() - started)} ms`);
+    }
+  }
   // One person across sources (#1076): the shared people index, Private and
   // on this computer, rebuilt from every authored store's senders. Without
   // it, answers keep each item's own sender label and filters match labels.
@@ -3252,6 +3312,7 @@ export async function main(): Promise<void> {
         releaseCheck: createReleaseTierCheck(
           tierScopes,
           () => secureDerivativeDefault ?? 'allow',
+          chunkReleaseOptions,
         ),
         queryPlanner: createAnalystQueryPlanner(localSourceAnswerModel),
         ...(sourceReranker ? { reranker: sourceReranker } : {}),
@@ -3308,6 +3369,8 @@ export async function main(): Promise<void> {
         // is audited as skipped/no_adapter instead of silently disappearing
         // from unified fan-out.
         lanes: sourceAnswerLanes = createSourceAnswerLanes({
+          ownerQuestions,
+          limitStops: () => sourceScheduler?.status().limit_stops ?? [],
           stores: () => { mountConfiguredSourceStores(); return readConnectorStores; },
           registry: () => buildSourceIndexCorpusRegistry(
             sourceCorpusRegistry.definitions('answer', fullCorpusDefinitions)
@@ -3344,7 +3407,7 @@ export async function main(): Promise<void> {
           // A background agent's answer does not hold back queued background
           // answers the way the owner's own work does (core/source-answer-jobs.ts).
           const kind = request.caller?.surface === 'remote' && isBackgroundConnection(request.caller.connection_id) ? 'background' : 'owner';
-          return answerActivity.run(() => analystSourceAnswer.answer(request, local), kind);
+          return withStoreReadPriority(() => ownerQuestions.run(() => answerActivity.run(() => analystSourceAnswer.answer(request, local), kind), kind));
         },
       }
     : undefined;
@@ -4607,6 +4670,7 @@ export async function main(): Promise<void> {
   // page's agent panel reads the very store handle `/mcp` and OAuth use.
   let privateAgentListeners: import('../private-agent-listeners.ts').PrivateAgentListeners | undefined;
   let dashboardAgentStore: DashboardAgentConnectionsBackend['store'] | undefined;
+  let connectionRequests: ConnectionRequestStore | undefined;
   let dashboardRemoteAccess: DashboardAgentConnectionsBackend['remoteAccess'] = () => ({ state: 'off' });
   let dashboardRemoteAccessControl: DashboardAgentConnectionsBackend['remoteAccessControl'];
   // Where a sign-in started from ChatGPT returns (the relay's origin and this
@@ -4668,6 +4732,7 @@ export async function main(): Promise<void> {
     ...(process.platform === 'linux' ? { localModelReadiness: () => linuxModelReadiness(process.env) } : {}),
     agentConnectHost: agentApprovalHost,
     agentConnections: {
+      requests: () => connectionRequests?.list() ?? [],
       store: (options) => dashboardAgentStore?.(options),
       get privateListeners() { return privateAgentListeners; },
       ...(process.platform === 'linux' ? { relayInstallId: () => remotePublicUrls()?.installId } : {}),
@@ -4679,6 +4744,7 @@ export async function main(): Promise<void> {
     sourceAnswerReleaseCheck: createReleaseTierCheck(
       tierScopes,
       () => secureDerivativeDefault ?? 'allow',
+      chunkReleaseOptions,
     ),
     // Local callers read Private, so only items still waiting for their
     // judgment (found by words, not yet by meaning) are counted for them.
@@ -4990,6 +5056,10 @@ export async function main(): Promise<void> {
     openRemoteConnectionStore,
   );
   dashboardAgentStore = remoteConnections;
+  if (engineRole !== 'background') connectionRequests = new ConnectionRequestStore(
+    connectionRequestsPath(resolveRemoteConnectionsDbPath(process.env)),
+    tag => remoteConnections()?.requestLogCredentials().find(row => requestCredentialTag(row.tokenHash) === tag)?.displayName,
+  );
   // Questions waiting on a Private answer (core/waiting-private-questions.ts):
   // beside the connection store, owner-only, opened on first use (retried a
   // minute after a failed open). The connection store is the authority on
@@ -5204,8 +5274,19 @@ export async function main(): Promise<void> {
     eligible: privateEvidenceEligible,
     installId: () => remotePublicUrls()?.installId,
     // While an analysis runs (from the search) and from a claim to
-    // ready/failed, the sniffer stays off the shared model.
-    activity: answerActivity,
+    // ready/failed, the sniffer stays off the shared model, and the copy
+    // sweep waits as for any owner question.
+    activity: {
+      begin: () => {
+        const releaseAnswer = answerActivity.begin();
+        const releaseQuestion = ownerQuestions.begin();
+        return () => {
+          releaseQuestion();
+          releaseAnswer();
+        };
+      },
+      end: () => answerActivity.end(),
+    },
     // The panel's seen ack clears the waiting question it answered (same
     // id, generation and connection; a re-asked question survives).
     acknowledge: (ref) => {
@@ -5225,6 +5306,7 @@ export async function main(): Promise<void> {
   const remoteReleaseCheck = createReleaseTierCheck(
     tierScopes,
     () => secureDerivativeDefault ?? 'allow',
+    chunkReleaseOptions,
   );
   // Private answers on this computer (design background-agents.md, section
   // B): Ask privately, and Answer on a question waiting here. Planning none,
@@ -5285,8 +5367,8 @@ export async function main(): Promise<void> {
       localConnectionId: '@local:You',
       anonymousAsk: localAnonymousAsk,
       // The built-in model serves one question at once: an answer preempts the sniffer.
-      answer: (input) => answerActivity.run(() => local.answer(input)),
-      backgroundAnswer: (input) => runBackgroundInference(() => answerActivity.run(() => local.answer(input), 'background')),
+      answer: (input) => withStoreReadPriority(() => ownerQuestions.run(() => answerActivity.run(() => local.answer(input)))),
+      backgroundAnswer: (input) => withStoreReadPriority(() => runBackgroundInference(() => answerActivity.run(() => local.answer(input), 'background'))),
       interactiveBusy: () => answerActivity.interactiveInFlight > 0,
       backgroundBusy: () => classificationBusy(),
       panelClaimed: (ref) => privateAnswers.hasClaimedWaiting(ref),
@@ -5486,9 +5568,9 @@ export async function main(): Promise<void> {
   // "Couldn't check yet" records are re-probed here every ten minutes.
   const { createRemotePrivateParts } = await import('../../core/remote-private-part.ts');
   const remotePrivateParts = createRemotePrivateParts({
-    probe: (request, timeoutMs) => (sourceAnswerLanes
+    probe: (request, timeoutMs) => withStoreReadPriority(() => (sourceAnswerLanes
       ? probePrivateMatch({ lanes: sourceAnswerLanes, request: request as unknown as SourceIndexAnswerRequest, timeoutMs, distinguishSecret: true })
-      : Promise.resolve('unknown' as const)),
+      : Promise.resolve('unknown' as const))),
     store: waitingQuestionStore,
     isActive: connectionActive,
     // The re-check is background work: it waits on the model's keyword
@@ -5694,27 +5776,28 @@ export async function main(): Promise<void> {
   };
   const chatgptEvidenceSearch = sourceAnswerLanes
     ? async (input: { question: string; limit?: number }) => {
-        // Not an answer: no answerActivity lease, so it never preempts the
-        // sniffer. It does ask the built-in model, once per new wording, to
-        // translate the question's words (core/source-index/keyword-expansion.ts),
+        // A question lease pauses the copy sweep without a model-activity
+        // lease that would preempt the sniffer. It asks the built-in model,
+        // once per new wording, to translate the question's words
+        // (core/source-index/keyword-expansion.ts),
         // on the model directly, so that call queues behind what the model runs.
-        return searchReleasedEvidence({
+        return withStoreReadPriority(() => ownerQuestions.run(() => searchReleasedEvidence({
           lanes: sourceAnswerLanes!,
           question: input.question,
           ...(input.limit ? { maxResults: input.limit } : {}),
           releaseCheck: remoteReleaseCheck,
-        });
+        })));
       }
     : undefined;
   // The same search for every other remote agent, with the tiers read once
   // more right before the result leaves (workers/remote-search.ts).
   const remoteEvidenceSearch = sourceAnswerLanes
-    ? async (input: { question: string; limit?: number }) => searchReleasedEvidence({
+    ? async (input: { question: string; limit?: number }) => withStoreReadPriority(() => ownerQuestions.run(() => searchReleasedEvidence({
         lanes: sourceAnswerLanes!,
         question: input.question,
         ...(input.limit ? { maxResults: input.limit } : {}),
         releaseCheck: remoteReleaseCheck,
-      })
+      })))
     : undefined;
   // Which Private items match, for the private answer panel: the shared
   // EvidencePack build over Private corpora only, so each item carries its
@@ -5724,7 +5807,7 @@ export async function main(): Promise<void> {
   // that have moved to a lower tier; those still go only to the private job.
   const chatgptPrivateMatchProbe = sourceAnswerLanes
     ? async (question: string, _ctx: import('../../core/operations.ts').OperationContext, originalMatches?: readonly Readonly<Record<string, unknown>>[]) => {
-        const result = await searchPrivateEvidence({ lanes: sourceAnswerLanes!, question, ...(originalMatches ? { originalMatches } : {}) });
+        const result = await withStoreReadPriority(() => ownerQuestions.run(() => searchPrivateEvidence({ lanes: sourceAnswerLanes!, question, ...(originalMatches ? { originalMatches } : {}) })));
         return { count: result.matched, evidence: result.candidates as unknown as readonly Record<string, unknown>[], ...(result.secretMatch ? { secretMatch: true as const } : {}) };
       }
     : undefined;
@@ -5774,6 +5857,7 @@ export async function main(): Promise<void> {
   const chatgptSurface = {
     privateAnswers,
     privateQuestions,
+    limitStops: () => sourceScheduler?.status().limit_stops ?? [],
     dashboardView: async (signal?: AbortSignal) => {
       const response = await worker.fetch(new Request(
         'http://olympus-worker.internal/dashboard.json',
@@ -5867,6 +5951,7 @@ export async function main(): Promise<void> {
 
   const sharedRemoteMcpOptions = {
     ...remoteAgentOptions,
+    onRequestLog: (entry: import('../../../connect-relay/shared/request-log.ts').RequestLogEntry, app?: string, relayed?: boolean) => connectionRequests?.record(entry, 'engine', app, relayed),
     anonymousAnswersEnabled: () => {
       const read = readConsultSettings();
       return read.state === 'valid' && read.settings.enabled;
@@ -5913,6 +5998,7 @@ export async function main(): Promise<void> {
     // The relay child reads the offline tool-list mapping it keeps the relay
     // in step with (workers/relay-surfaces.ts), by its per-boot secret.
     fetch: withRequestPeer(withFirstRunPrivacyGate(withRelaySurfacesRoute(createRelaySurfacesHandler({
+      requestLog: entry => connectionRequests?.record(entry, 'relay'),
       connections: () => remoteConnections(),
       publicUrls: remotePublicUrls,
       claudeAppEnabled: () => claudeAppEnabled(olympusConfig),
@@ -6004,6 +6090,14 @@ export async function main(): Promise<void> {
         return response;
       } }))
     : Bun.serve({ hostname, port, idleTimeout: 0, ...serverOptions });
+  // Bounded: a set that has to be rebuilt from the ledger (a retention gap)
+  // finishes after the front listens, in turns, rather than hold readiness.
+  if (engineFront) {
+    const warming = keepVisibilityCurrent('before ready');
+    let bound: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([warming, new Promise<void>((resolve) => { bound = setTimeout(resolve, FRONT_VISIBILITY_READY_BOUND_MS); })]);
+    clearTimeout(bound);
+  }
   const server = !listens ? undefined : socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
   // The single worker's boot work ends when it listens; the background's when it is ready on its socket.
   if (engineRole === 'single') finishBootProgress();
@@ -6064,8 +6158,12 @@ export async function main(): Promise<void> {
   if (!engineFront) await reconcileCaptures();
   const captureTick = setInterval(() => { if (!engineFront) void reconcileCaptures(); }, 10_000);
   captureTick.unref?.();
-  // The one-time superseded-copy sweep's own clock; the split's front runs none.
-  const stopSupersededSweep = startSupersededSweepTicker({ active: () => !engineFront });
+  // A running slice finishes; the next tick waits until the owner's question settles.
+  // The combined engine uses its local count; the split background uses the relayed mark.
+  const stopSupersededSweep = startSupersededSweepTicker({
+    active: () => !engineFront && !ownerQuestions.busy && !remoteOwnerBusy(OWNER_QUESTION_RESOURCE),
+    reclaimStore: (_store, work) => sourceScheduler ? sourceScheduler.withIdleTasks(work) : work(),
+  });
 
   // The privacy-safe sniffer's bounded background pass over pending items.
   const snifferEnv = tierSnifferServiceEnv(process.env);
@@ -6080,10 +6178,6 @@ export async function main(): Promise<void> {
   const snifferModel: SnifferModel | undefined = rawSnifferModel && snifferLane?.kind === 'local' ? observedJudge(rawSnifferModel, judgeObservations, localDecisionBar) : rawSnifferModel;
   const snifferResource = snifferRuntime.source === 'built_in' ? 'built_in'
     : snifferLane?.kind === 'local' ? localModelResourceKey(snifferLane.profile) : undefined;
-  // The owner's own call on the shared model, as the split's front reported it
-  // (owner_busy / owner_idle), until it says idle or ten minutes pass.
-  const remoteOwnerMarks = new OwnerBusyMarks();
-  const remoteOwnerBusy = (resource: string): boolean => remoteOwnerMarks.busy(resource);
   // This computer, then Venice double-checks (#891): the local judge sorts everything, and
   // Venice re-reads only what it held Private, on the same lane, consent and spending limit.
   const judgeChoice = judgeSpending.status();
@@ -6150,7 +6244,7 @@ export async function main(): Promise<void> {
         answersInFlight: () => snifferResource !== undefined && (localModelActivity.busyExcept(snifferResource, 'tier_sniffer') || remoteOwnerBusy(snifferResource)),
         ownerInFlight: () => snifferResource !== undefined && (localModelActivity.ownerInFlight(snifferResource) || remoteOwnerBusy(snifferResource)),
         // A ready Inbox question stops the pass, so its answer runs, then classification resumes.
-        shouldYield: () => localPrivateAnswers?.overdue() ?? false,
+        shouldYield: () => chunkJudgmentsInFlight > 0 || (localPrivateAnswers?.overdue() ?? false),
         // The service applies it to the built-in judge only, never Venice or a remote judge.
         pacing: localPacer,
         breakerOpen: () => secureAnalystPoolState.isBreakerOpen('secure_local', snifferLane.profileId),
@@ -6178,6 +6272,10 @@ export async function main(): Promise<void> {
   // store, on its first item) is opened here too.
   const frontMountRetry = engineFront ? setInterval(refreshFrontMounts, 2_000) : undefined;
   frontMountRetry?.unref?.();
+  // Keeps each store's set current, and saved by a writer; see keepVisibilityCurrent.
+  if (!engineFront) void keepVisibilityCurrent('after start');
+  const visibilityRefresh = setInterval(() => { void keepVisibilityCurrent('refresh'); }, VISIBILITY_REFRESH_MS);
+  visibilityRefresh.unref?.();
   if (engineFront) {
     // The judge runs in the background: the front shows what it last published.
     const judge = frontJudgeState(() => engineFront!.status());
@@ -6314,6 +6412,7 @@ export async function main(): Promise<void> {
         data_export: ({ request }) => runForwarded(request),
         // Matched-first judging (#1062, PR #1115) is not in this build yet.
         // A question the front answered matched these pending items: the judge here asks about them first.
+        judge_now: ({ items, budgetMs }) => runChunkJudgment(items, budgetMs),
         judge_boost: ({ identities }) => {
           judgeBoosts.raise(identities);
           return { applied: true, raised: identities.length };
@@ -6415,6 +6514,7 @@ export async function main(): Promise<void> {
     fileExtractionRuntime?.close();
     engineBackground?.stop();
     if (frontMountRetry) clearInterval(frontMountRetry);
+    clearInterval(visibilityRefresh);
     engineFront?.stop();
     void server?.stop();
     // The data owner lock stays held: the teardown above is still running, and

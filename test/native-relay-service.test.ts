@@ -11,6 +11,7 @@ import http, { type IncomingHttpHeaders } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { RELAY_REQUEST_LOG_PATH } from '../src/core/connection-requests.ts';
 import { createNativeRelayService } from '../src/core/native-relay-service.ts';
 import type { NativeProcessServiceDefinition } from '../src/core/native-process-service.ts';
 import {
@@ -167,10 +168,12 @@ describe('native relay service', () => {
       body: '{}',
     });
     expect(response.status).toBe(200);
-    const seen = workerRequests.at(-1)!;
+    const seen = workerRequests.filter(req => req.url === '/mcp').at(-1)!;
     expect(seen.url).toBe('/mcp');
     expect(seen.headers['x-olympus-relay']).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(seen.headers['x-forwarded-for']).toBeUndefined();
+    const logRequest = await until(() => workerRequests.filter(req => req.url === RELAY_REQUEST_LOG_PATH).at(-1), () => true);
+    expect(logRequest.headers['x-olympus-relay']).toBe(seen.headers['x-olympus-relay']);
 
     // Stop clears the public URL: the worker stops advertising OAuth.
     await service.stop();
@@ -355,7 +358,7 @@ describe('native relay service', () => {
         body: '{}',
       });
       expect(response.status).toBe(200);
-      expect(workerRequests.at(-1)?.url).toBe('/mcp');
+      expect(await response.json()).toMatchObject({ path: '/mcp' });
     } finally {
       await current.close();
     }
