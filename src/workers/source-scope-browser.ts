@@ -39,14 +39,14 @@ export interface SourceFolderScopeBrowser {
   sourceId: OlympusFolderScopeSourceId;
   browse(request: SourceFolderScopeBrowseRequest): Promise<SourceFolderScopeBrowsePage>;
   validateSelections(
-    selections: readonly { key: string; state: 'ingest' | 'metadata_only' | 'exclude' }[],
+    selections: readonly { key: string; state: 'ingest' | 'metadata_only' | 'on_demand' | 'exclude' }[],
   ): Promise<Array<{
     key: string;
-    state: 'ingest' | 'metadata_only' | 'exclude';
+    state: 'ingest' | 'metadata_only' | 'on_demand' | 'exclude';
     ancestorKeys: string[];
   }>>;
   /** Called before a choice is saved; throws to refuse it (for a source whose computer cannot read some places yet). */
-  checkApproval?(input: { selections: readonly { key: string; state: 'ingest' | 'metadata_only' | 'exclude' }[]; wholeAccount: boolean }): void;
+  checkApproval?(input: { selections: readonly { key: string; state: 'ingest' | 'metadata_only' | 'on_demand' | 'exclude' }[]; wholeAccount: boolean }): void;
   /** Called once a choice is saved, for a source whose computer wants something done then (never required). */
   afterApproval?(input: { wholeAccount: boolean }): Promise<void>;
 }
@@ -193,11 +193,11 @@ export function createDropboxFolderScopeBrowser(options: {
 }
 
 export function effectiveSelections(
-  selections: readonly { key: string; state: 'ingest' | 'metadata_only' | 'exclude' }[],
+  selections: readonly { key: string; state: 'ingest' | 'metadata_only' | 'on_demand' | 'exclude' }[],
   ancestorsFor: (key: string) => readonly string[],
 ): Array<{
   key: string;
-  state: 'ingest' | 'metadata_only' | 'exclude';
+  state: 'ingest' | 'metadata_only' | 'on_demand' | 'exclude';
   ancestorKeys: string[];
 }> {
   const states = new Map(selections.map((selection) => [selection.key, selection.state]));
@@ -205,12 +205,12 @@ export function effectiveSelections(
     const ancestorKeys = [...ancestorsFor(selection.key)];
     const ancestorStates = ancestorKeys
       .map((key) => states.get(key))
-      .filter((state): state is 'ingest' | 'metadata_only' | 'exclude' => state !== undefined);
+      .filter((state): state is 'ingest' | 'metadata_only' | 'on_demand' | 'exclude' => state !== undefined);
     const state = ancestorStates.includes('exclude')
       ? 'exclude' as const
-      : ancestorStates.includes('metadata_only') && selection.state === 'ingest'
+      : ancestorStates.includes('metadata_only') && (selection.state === 'ingest' || selection.state === 'on_demand')
         ? 'metadata_only' as const
-        : selection.state;
+        : ancestorStates.includes('on_demand') && selection.state === 'ingest' ? 'on_demand' as const : selection.state;
     return { key: selection.key, state, ancestorKeys };
   });
 }

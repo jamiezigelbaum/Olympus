@@ -2684,6 +2684,8 @@ export interface ConnectorStoreActiveLocatorItem {
  * already inside it in a second time.
  */
 export interface ConnectorStoreItemMetadataSnapshot {
+  read_on_demand?: true;
+  sizeBytes?: number;
   sourceVersion?: string;
   contentHash?: string;
   mimeType?: string;
@@ -3465,6 +3467,9 @@ export class LocalConnectorStore {
         createConnectorStoreItemTextVersions(this.db);
         createConnectorStoreVisibilityTables(this.db);
         createConnectorStorePeopleIndex(this.db);
+        this.db.exec(`CREATE TABLE IF NOT EXISTS on_demand_item_reads (
+          local_item_id TEXT PRIMARY KEY, source_version TEXT NOT NULL, read_on_demand INTEGER NOT NULL DEFAULT 1
+        );`);
         validateConnectorStoreSchema(this.db);
       }
       if (options.readOnly !== true) this.createVisibilityJournal();
@@ -3675,6 +3680,7 @@ export class LocalConnectorStore {
       };
       const title = metadataString(['title', 'name', 'subject']);
       const path = metadataString(['locatorUri', 'pathDisplay']);
+      const judgeStarted = Date.now();
       const content = classifyContentTier(
         {
           text,
@@ -3689,7 +3695,7 @@ export class LocalConnectorStore {
           titleIsConversation: item.metadata.titleIsConversation === true,
           ...(read?.secret ? { heldSecret: true } : {}),
           // The lane's hold, or the one its listing-time decision recorded.
-          ...(inputs?.holdContentUntilJudged === true || heldUntilJudged(existing.reasons) ? { holdUntilJudged: true } : {}),
+          ...(inputs?.holdContentUntilJudged === true || heldUntilJudged(existing.reasons) || this.readOnDemand(item.identity.localItemId, item.identity.sourceVersion ?? '') ? { holdUntilJudged: true } : {}),
           subject: item.identity,
         },
         {
@@ -3698,6 +3704,9 @@ export class LocalConnectorStore {
           ...(inputs?.retirePublic ? { retirePublic: true } : {}),
         },
       );
+      if (!content.contentPending && this.readOnDemand(item.identity.localItemId, item.identity.sourceVersion ?? '')) {
+        console.info(`[olympus:on-demand] step=judge count=1 ms=${Math.max(0, Date.now() - judgeStarted)}`);
+      }
       const recorded = ledger.recordContentDecision(item.identity, content);
       // Secrets as recorded (a newer Secrets decision is kept as the floor):
       // the side stores forget its names and excerpt too.
@@ -3970,6 +3979,7 @@ export class LocalConnectorStore {
     throwOnUnavailable = false,
     copiesAllowed?: (copies: readonly TierCopy[]) => boolean,
   ): Generator<VisibilityRead, T[], unknown> {
+    rows = rows.filter((row) => layerOf(row) !== 'content' || !this.onDemandContentHeld(identityOf(row)));
     if (rows.length === 0) return [];
     let copies: Map<string, TierCopy[]> | undefined;
     try {
@@ -5776,7 +5786,7 @@ export class LocalConnectorStore {
         // The restore's own refusals, in its order: an excluded or
         // metadata-only item takes no text, so there is no text to settle and
         // its names stay exactly as policy keeps them.
-        const disposition = this.exclusions.evaluateMetadata(options.metadata);
+        const disposition = this.extractionDisposition({ metadata: options.metadata, identity });
         if (disposition.excluded) return 'excluded';
         if (disposition.disposition === 'metadata_only') return 'metadata_only';
         const existing = this.db.query(`
@@ -7831,6 +7841,65 @@ export class LocalConnectorStore {
     };
   }
 
+  /** A grant is engine-owned state, never a flag accepted from source metadata. */
+  grantOnDemandRead(localItemId: string, sourceVersion = ''): void {
+    this.db.query(`INSERT INTO on_demand_item_reads(local_item_id, source_version) VALUES (?, ?)
+      ON CONFLICT(local_item_id) DO UPDATE SET source_version = excluded.source_version`).run(localItemId, sourceVersion);
+  }
+
+  onDemandContentHeld(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): boolean {
+    if (!this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'").get()) return false;
+    const granted = this.db.query(`SELECT 1 FROM on_demand_item_reads r JOIN items i ON i.local_item_id = r.local_item_id
+      AND COALESCE(i.source_version, '') = r.source_version WHERE i.provider = ? AND i.account_scope = ?
+      AND i.provider_item_id = ? AND i.normalized_conversation = ? AND i.tombstoned = 0 LIMIT 1`)
+      .get(identity.provider, identity.accountScope, identity.providerItemId, normalizeConversationId(identity.providerConversationId));
+    if (!granted) return false;
+    try {
+      const record = this.visibilityLedger()?.getCurrent(identity);
+      return !record || !record.contentRead || record.contentPending || record.metadataPending
+        || record.state !== 'current' || record.contentTier === 'secrets'
+        || (record.contentTier === 'secure' && this.trustDomain !== 'secure_local')
+        || (record.contentTier === 'private' && this.trustDomain === 'public_safe');
+    } catch { return true; }
+  }
+
+  onDemandReadForLocator(locator: string): boolean {
+    const row = this.db.query('SELECT local_item_id FROM items WHERE locator_uri = ? AND tombstoned = 0 LIMIT 1')
+      .get(locator) as { local_item_id: string } | null;
+    return Boolean(row && this.readOnDemand(row.local_item_id));
+  }
+
+  readOnDemand(localItemId: string, sourceVersion?: string): boolean {
+    if (!this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'").get()) return false;
+    const grant = this.db.query('SELECT source_version FROM on_demand_item_reads WHERE local_item_id = ?')
+      .get(localItemId) as { source_version: string } | null;
+    if (!grant) return false;
+    const version = sourceVersion ?? (this.db.query('SELECT source_version FROM items WHERE local_item_id = ? AND tombstoned = 0')
+      .get(localItemId) as { source_version: string | null } | null)?.source_version ?? '';
+    return grant.source_version === version;
+  }
+
+  onDemandReadCandidate(providerItemId: string): { identity: SourceItemIdentity; metadata: ConnectorStoreItemMetadataSnapshot; readableOnRequest: boolean } | undefined {
+    const rows = this.db.query('SELECT local_item_id FROM items WHERE provider_item_id = ? AND tombstoned = 0 LIMIT 2')
+      .all(providerItemId) as Array<{ local_item_id: string }>;
+    if (rows.length !== 1) return undefined;
+    const row = this.activeLocalItemRow(rows[0]!.local_item_id);
+    if (!row || row.trustTier === 'S5') return undefined;
+    const identity: SourceItemIdentity = { ...row.identity, localItemId: rows[0]!.local_item_id, family: this.family };
+    try { if (this.visibilityLedger()?.itemIsSecret(identity)) return undefined; } catch { return undefined; }
+    const metadata = this.itemMetadataSnapshot(identity);
+    if (!metadata) return undefined;
+    const decision = this.exclusions.evaluateItem({ path: metadata.locatorUri, name: metadata.name, mimeType: metadata.mimeType });
+    if (decision.excluded || sourceExclusionOutcomeIsUnevaluable(decision.outcome)) return undefined;
+    return { identity, metadata, readableOnRequest: decision.readOnDemand === true };
+  }
+
+  private extractionDisposition(item: Pick<RawItem, 'identity' | 'metadata'>) {
+    const decision = this.exclusions.evaluateMetadata(item.metadata);
+    return decision.disposition === 'metadata_only' && this.readOnDemand(item.identity.localItemId, item.identity.sourceVersion)
+      ? { ...decision, disposition: 'admit' as const } : decision;
+  }
+
   /**
    * The live row's preservable metadata, or undefined when the identity has no
    * active row. See ConnectorStoreItemMetadataSnapshot for why a caller that
@@ -7839,6 +7908,7 @@ export class LocalConnectorStore {
   itemMetadataSnapshot(identity: SourceItemIdentity): ConnectorStoreItemMetadataSnapshot | undefined {
     const row = this.db.query(`
       SELECT source_version, content_hash, mime_type, title, locator_uri,
+             ${this.childItemColumnsPresent ? 'size_bytes' : 'NULL AS size_bytes'},
              authored_at, updated_at, tombstoned
       FROM items
       WHERE provider = ? AND account_scope = ?
@@ -7858,9 +7928,12 @@ export class LocalConnectorStore {
       authored_at: string | null;
       updated_at: string | null;
       tombstoned: number;
+      size_bytes: number | null;
     } | null;
     if (!row || row.tombstoned === 1) return undefined;
     return {
+      ...(row.size_bytes !== null ? { sizeBytes: row.size_bytes } : {}),
+      ...(this.readOnDemand(identity.localItemId, row.source_version ?? '') ? { read_on_demand: true as const } : {}),
       ...(row.source_version ? { sourceVersion: row.source_version } : {}),
       ...(row.content_hash ? { contentHash: row.content_hash } : {}),
       ...(row.mime_type ? { mimeType: row.mime_type } : {}),
@@ -8484,7 +8557,7 @@ export class LocalConnectorStore {
         // lookup: an excluded item is counted and skipped rather than raising
         // the "targeted store item is missing" error the gate would otherwise
         // produce, which would read as corruption instead of policy.
-        const disposition = this.exclusions.evaluateMetadata(item.metadata);
+        const disposition = this.extractionDisposition(item);
         if (disposition.excluded) {
           itemsExcluded += 1;
           skippedProviderItemIds.push(item.identity.providerItemId);
@@ -9473,6 +9546,8 @@ export class LocalConnectorStore {
       for (const row of rows) {
         const decision = this.exclusions.evaluatePath(row.locator_uri);
         if (decision.disposition !== 'metadata_only') continue;
+        const granted = this.db.query('SELECT local_item_id FROM items WHERE item_pk = ?').get(row.item_pk) as { local_item_id: string };
+        if (this.readOnDemand(granted.local_item_id)) continue;
         tallyExclusion(tally, decision);
         if (sourceExclusionOutcomeIsUnevaluable(decision.outcome) && options.stripUnevaluable !== true) {
           itemsUnevaluableKept += 1;
@@ -9524,7 +9599,8 @@ export class LocalConnectorStore {
    * means the same thing to the only caller: this row's missing text is not
    * explained by a metadata-only rule, so do not claim it is.
    */
-  metadataOnlyRuleForLocator(locatorUri: string | undefined): string | undefined {
+  metadataOnlyRuleForLocator(locatorUri: string | undefined, localItemId?: string): string | undefined {
+    if (localItemId && this.readOnDemand(localItemId)) return undefined;
     if (!this.exclusions.active) return undefined;
     const decision = this.exclusions.evaluatePath(locatorUri);
     return decision.disposition === 'metadata_only' ? decision.ruleId : undefined;
@@ -10384,7 +10460,8 @@ export class LocalConnectorStore {
           }
           const routedLayer = route.kind === 'store' ? route.layer : undefined;
           const sensitivity = route.kind === 'store' ? route.sensitivity : legacySensitivity;
-          if (route.kind === 'legacy' && itemForStorage.metadata['deleted'] !== true) {
+          if (route.kind === 'legacy' && itemForStorage.metadata['deleted'] !== true
+            && !this.readOnDemand(itemForStorage.identity.localItemId, itemForStorage.identity.sourceVersion ?? '')) {
             this.recordTierDecision(
               connector, itemForStorage, sensitivity, tierClassification, tierRun,
               metadataOnly || itemContentKeptNamesOnly(itemForStorage),
@@ -10913,7 +10990,7 @@ export class LocalConnectorStore {
       identity.parent?.localItemId ?? null,
       item.deferredBytes?.locator ?? null,
       item.deferredBytes === undefined ? null : Number(item.deferredBytes.available),
-      item.deferredBytes?.sizeBytes ?? null,
+      item.deferredBytes?.sizeBytes ?? (Number.isSafeInteger(meta['sizeBytes']) && Number(meta['sizeBytes']) >= 0 ? Number(meta['sizeBytes']) : null),
       sender.senderId ?? null,
       sender.senderLabel ?? null,
       sender.senderIsOwner === undefined ? null : Number(sender.senderIsOwner),
@@ -11528,7 +11605,7 @@ export class LocalConnectorStore {
     // gate that has to be remembered is a gate that is eventually forgotten,
     // and forgetting it means an owner's private folder quietly acquiring
     // full-text search a year after they asked for titles only.
-    const disposition = this.exclusions.evaluateMetadata(item.metadata);
+    const disposition = this.extractionDisposition(item);
     if (disposition.disposition === 'metadata_only') {
       throw new ConnectorStoreMetadataOnlyViolationError(disposition.ruleId);
     }
@@ -12129,6 +12206,10 @@ export class LocalConnectorStore {
     provider_conversation_id: string | null;
   }>, allowHeld = false): Set<number> {
     const hidden = new Set<number>();
+    for (const row of rows) {
+      if (this.onDemandContentHeld({ provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id,
+        ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}) })) hidden.add(row.item_pk);
+    }
     if (rows.length === 0) return hidden;
     const identityOf = (row: (typeof rows)[number]) => ({
       provider: row.provider,
@@ -12566,6 +12647,7 @@ export class LocalConnectorStore {
           : {}),
       }));
       let vectors: number[][];
+      const embedStarted = Date.now();
       // Pictures not yet judged are judged from the same model call: the
       // provider hands back each picture's image-only vector too.
       const judgeNow = readsImages === true && judging !== undefined && judging.embedWithImageVectors !== undefined
@@ -12619,6 +12701,10 @@ export class LocalConnectorStore {
         if (batch.length === 0) continue;
         vectors = await provider.embed(inputsFor(batch), { taskType: 'RETRIEVAL_DOCUMENT' });
       }
+      const onDemandItems = this.db.query(`SELECT COUNT(*) AS n FROM items i JOIN on_demand_item_reads r ON r.local_item_id = i.local_item_id
+        AND r.source_version = COALESCE(i.source_version, '') WHERE i.item_pk IN (SELECT value FROM json_each(?))`)
+        .get(JSON.stringify([...new Set(batch.map((row) => row.item_pk))])) as { n: number };
+      if (onDemandItems.n > 0) console.info(`[olympus:on-demand] step=embed count=${onDemandItems.n} ms=${Math.max(0, Date.now() - embedStarted)}`);
       if (vectors.length !== batch.length) {
         throw new Error('Connector store embedding provider returned the wrong number of vectors.');
       }
@@ -14447,7 +14533,7 @@ export class LocalConnectorStore {
     } catch {
       return false;
     }
-    if (this.metadataOnlyRuleForLocator(row.locator_uri ?? undefined) !== undefined) return false;
+    if (this.metadataOnlyRuleForLocator(row.locator_uri ?? undefined, localItemId) !== undefined) return false;
     const hasText = this.db.query('SELECT EXISTS (SELECT 1 FROM chunks WHERE item_pk = ?) AS present').get(row.item_pk) as { present: number } | null;
     if (!hasText?.present) return false;
     const identity = {
@@ -16671,8 +16757,9 @@ export function createConnectorStoreContentProvider(
     contentServable(request) {
       if (request.trustDomain !== store.trustDomain) return false;
       const localItemId = request.provenance.sourceItem.localItemId.trim();
-      if (!localItemId || options.contentAllowed === false) return false;
-      if (!store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters)) return false;
+      if (!localItemId) return false;
+      if (!(options.contentAllowed !== false && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters))
+        && !(options.metadataFilters !== undefined && store.readOnDemand(localItemId) && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.metadataFilters))) return false;
       return store.contentServedNow(localItemId, request.throwOnUnavailable);
     },
     async fetchLocalContent(request: LocalContentRequest): Promise<LocalContentBlock | undefined> {
@@ -16685,8 +16772,9 @@ export function createConnectorStoreContentProvider(
       return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), async () => {
       const localItemId = request.provenance.sourceItem.localItemId.trim();
       if (!localItemId) return undefined;
-      const contentInScope = options.contentAllowed !== false
-        && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters);
+      const contentInScope = (options.contentAllowed !== false
+        && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters))
+        || (options.metadataFilters !== undefined && store.readOnDemand(localItemId) && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.metadataFilters));
       if (!contentInScope) {
         if (!options.metadataFilters
           || !store.itemMatchesSearchFilters(localItemId, options.accountScope, options.metadataFilters)) {
@@ -16740,7 +16828,7 @@ export function createConnectorStoreContentProvider(
       // is what tells them apart; without it every metadata-only item in the
       // owner's 64k would report a stall forever.
       const metadataOnlyRuleId = content.storedChunks === 0
-        ? store.metadataOnlyRuleForLocator(content.locatorUri)
+        ? store.metadataOnlyRuleForLocator(content.locatorUri, localItemId)
         : undefined;
       const coverageGaps = connectorStoreCoverageGaps(content, metadataOnlyRuleId);
       return {

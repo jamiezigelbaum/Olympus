@@ -75,6 +75,7 @@ export const ENGINE_FORWARDED_ROUTES = {
   source_watch: ['/v1/source/watch/create', '/v1/source/watch/cancel'],
   // The extraction queue's writes, under the generic path or a family's alias.
   extraction_queue: [
+    '/v1/source/index/files/read-on-demand', '/dashboard/privacy/items/read',
     '/v1/source/index/files/plan', '/v1/source/index/files/transcribe', '/v1/source/index/files/recycle-leases',
     '/v1/source/index/files/janitor-requeue', '/v1/source/index/files/extract-pdfs', '/v1/source/index/files/extract',
     '/v1/source/index/dropbox/content/plan', '/v1/source/index/dropbox/content/recycle-leases',

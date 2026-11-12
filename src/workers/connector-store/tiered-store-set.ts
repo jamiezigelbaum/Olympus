@@ -1924,7 +1924,8 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     // container's (a folder has no text of its own), so no extraction will
     // ever answer a question about it.
     const deferred = this.set.readsContentLater(item);
-    const namesOnly = deferred
+    const promoted = TIER_DOMAIN_ORDER.some(domain => this.set.store(domain)?.readOnDemand(item.identity.localItemId, item.identity.sourceVersion ?? ''));
+    const namesOnly = deferred && !promoted
       && (input.metadataOnly || CONTAINER_MIME_TYPES.includes(item.mimeType?.trim().toLowerCase() ?? '')
         || this.set.ownerKeepsNamesOnly(pathOf(sourceExclusionFactsFromMetadata(item.metadata).path)));
     const text = namesOnly ? undefined : connectorStoreItemText(item);

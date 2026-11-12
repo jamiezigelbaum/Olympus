@@ -3021,6 +3021,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               withPreview: true,
             }), ...(ownerTierItems.counts ? { counts: ownerTierItems.counts() } : {}) });
           }
+          if (url.pathname === '/dashboard/privacy/items/read') {
+            const itemId = asOptionalString(record.item_id);
+            if (!itemId) throw new EmailSourceWorkerError(400, 'invalid_request', 'item_id is required.');
+            if (!options.readOwnerItem) throw new EmailSourceWorkerError(501, 'read_unavailable', 'Reading this file is not available.');
+            return json({ ok: true, ...await options.readOwnerItem(itemId) });
+          }
           if (url.pathname === '/dashboard/privacy/items/set') {
             const itemId = asOptionalString(record.item_id);
             const tier = asOptionalString(record.tier);
@@ -3219,6 +3225,20 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const body = fileExtractionRunBody(result);
           assertNoRawEmailFields(body);
           return json(body);
+        }
+
+        if (request.method === 'POST' && url.pathname === `${basePath}/source/index/files/read-on-demand`) {
+          const record = await parseObjectBody(request);
+          const item = record.itemRef as Record<string, unknown> | undefined;
+          const corpusId = item && asOptionalString(item.corpusId);
+          const providerItemId = item && asOptionalString(item.providerItemId);
+          const questionId = asOptionalString(record.questionId);
+          const requester = record.requester;
+          if (!corpusId || !providerItemId || (requester !== 'analyst' && requester !== 'remote_app')) {
+            throw new EmailSourceWorkerError(400, 'invalid_request', 'A read requires an item reference and an analyst or remote_app requester.');
+          }
+          if (!options.requestOnDemandRead) return json({ state: 'refused', reason: 'read_unavailable' });
+          return json(await options.requestOnDemandRead({ itemRef: { corpusId, providerItemId }, requester, ...(questionId ? { questionId } : {}) }));
         }
 
         if (request.method === 'POST' && url.pathname === `${basePath}/source/index/files/plan`) {

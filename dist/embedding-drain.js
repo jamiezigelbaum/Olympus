@@ -4453,8 +4453,8 @@ var SOURCE_INGESTION_DISPOSITION_RANK = {
   metadata_only: 1,
   exclude: 2
 };
-var SOURCE_INGESTION_RULE_MODES = ["exclude", "metadata_only"];
-var SOURCE_INGESTION_DISPOSITION_ORDER = [...SOURCE_INGESTION_RULE_MODES].sort((left, right) => SOURCE_INGESTION_DISPOSITION_RANK[right] - SOURCE_INGESTION_DISPOSITION_RANK[left]);
+var SOURCE_INGESTION_RULE_MODES = ["exclude", "metadata_only", "on_demand"];
+var SOURCE_INGESTION_DISPOSITION_ORDER = [...SOURCE_INGESTION_RULE_MODES].sort((left, right) => (right === "on_demand" ? 0.5 : SOURCE_INGESTION_DISPOSITION_RANK[right]) - (left === "on_demand" ? 0.5 : SOURCE_INGESTION_DISPOSITION_RANK[left]));
 function sourceExclusionOutcomeIsUnevaluable(outcome) {
   switch (outcome) {
     case "excluded_path_unevaluable":
@@ -4655,7 +4655,8 @@ function createSourceExclusionMatcherFromPrefixes(prefixes, unenforceableRuleIds
   const active = pathActive || identityActive || mediaActive;
   const matched = (entry, outcome) => ({
     excluded: entry.mode === "exclude",
-    disposition: entry.mode,
+    disposition: entry.mode === "on_demand" ? "metadata_only" : entry.mode,
+    ...entry.mode === "on_demand" ? { readOnDemand: true } : {},
     outcome,
     ruleId: entry.ruleId,
     reason: entry.reason,
@@ -10354,7 +10355,7 @@ function normalizeSelections(input) {
     const key2 = selection.key.trim();
     if (!key2 || key2.length > 1024)
       throw new OperationError("invalid_request", "Every selected folder requires a valid key.");
-    if (!["ingest", "metadata_only", "exclude"].includes(selection.state)) {
+    if (!["ingest", "metadata_only", "on_demand", "exclude"].includes(selection.state)) {
       throw new OperationError("invalid_request", "Every selected folder requires a valid disposition.");
     }
     if (byKey.has(key2))
@@ -25234,6 +25235,9 @@ class LocalConnectorStore {
         createConnectorStoreItemTextVersions(this.db);
         createConnectorStoreVisibilityTables(this.db);
         createConnectorStorePeopleIndex(this.db);
+        this.db.exec(`CREATE TABLE IF NOT EXISTS on_demand_item_reads (
+          local_item_id TEXT PRIMARY KEY, source_version TEXT NOT NULL, read_on_demand INTEGER NOT NULL DEFAULT 1
+        );`);
         validateConnectorStoreSchema(this.db);
       }
       if (options.readOnly !== true)
@@ -25403,6 +25407,7 @@ class LocalConnectorStore {
       };
       const title = metadataString2(["title", "name", "subject"]);
       const path = metadataString2(["locatorUri", "pathDisplay"]);
+      const judgeStarted = Date.now();
       const content = classifyContentTier({
         text: text2,
         metadataTier: existing.metadataTier,
@@ -25415,13 +25420,16 @@ class LocalConnectorStore {
         hasNonTextContent: itemHasNonTextContent(item),
         titleIsConversation: item.metadata.titleIsConversation === true,
         ...read?.secret ? { heldSecret: true } : {},
-        ...inputs?.holdContentUntilJudged === true || heldUntilJudged(existing.reasons) ? { holdUntilJudged: true } : {},
+        ...inputs?.holdContentUntilJudged === true || heldUntilJudged(existing.reasons) || this.readOnDemand(item.identity.localItemId, item.identity.sourceVersion ?? "") ? { holdUntilJudged: true } : {},
         subject: item.identity
       }, {
         ...inputs?.sniffer ? { sniffer: conversationOrderedSniffer(secretFencedSniffer(inputs.sniffer, ledger, item.identity, read), item.metadata) } : {},
         ...override ? { override } : {},
         ...inputs?.retirePublic ? { retirePublic: true } : {}
       });
+      if (!content.contentPending && this.readOnDemand(item.identity.localItemId, item.identity.sourceVersion ?? "")) {
+        console.info(`[olympus:on-demand] step=judge count=1 ms=${Math.max(0, Date.now() - judgeStarted)}`);
+      }
       const recorded = ledger.recordContentDecision(item.identity, content);
       if (recorded && (recorded.record.contentTier === "secrets" || recorded.record.metadataTier === "secrets")) {
         forgetSecretInSideStores({ ledger, identity: item.identity });
@@ -25582,6 +25590,7 @@ class LocalConnectorStore {
     return visibilityHere(this.tierVisibleRowsSteps(rows, identityOf2, layerOf, throwOnUnavailable, copiesAllowed));
   }
   *tierVisibleRowsSteps(rows, identityOf2, layerOf, throwOnUnavailable = false, copiesAllowed) {
+    rows = rows.filter((row) => layerOf(row) !== "content" || !this.onDemandContentHeld(identityOf2(row)));
     if (rows.length === 0)
       return [];
     let copies;
@@ -26930,7 +26939,7 @@ ${parentKey(ref)}`, { ref, origin });
     const writeClaim = options.writeClaim ? normalizeConnectorStoreItemWriteClaim(options.writeClaim) : undefined;
     try {
       return this.db.transaction(() => {
-        const disposition = this.exclusions.evaluateMetadata(options.metadata);
+        const disposition = this.extractionDisposition({ metadata: options.metadata, identity });
         if (disposition.excluded)
           return "excluded";
         if (disposition.disposition === "metadata_only")
@@ -28320,9 +28329,68 @@ ${parentKey(ref)}`, { ref, origin });
       ...row.source_version ? { sourceVersion: row.source_version } : {}
     };
   }
+  grantOnDemandRead(localItemId, sourceVersion = "") {
+    this.db.query(`INSERT INTO on_demand_item_reads(local_item_id, source_version) VALUES (?, ?)
+      ON CONFLICT(local_item_id) DO UPDATE SET source_version = excluded.source_version`).run(localItemId, sourceVersion);
+  }
+  onDemandContentHeld(identity) {
+    if (!this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'").get())
+      return false;
+    const granted = this.db.query(`SELECT 1 FROM on_demand_item_reads r JOIN items i ON i.local_item_id = r.local_item_id
+      AND COALESCE(i.source_version, '') = r.source_version WHERE i.provider = ? AND i.account_scope = ?
+      AND i.provider_item_id = ? AND i.normalized_conversation = ? AND i.tombstoned = 0 LIMIT 1`).get(identity.provider, identity.accountScope, identity.providerItemId, normalizeConversationId(identity.providerConversationId));
+    if (!granted)
+      return false;
+    try {
+      const record = this.visibilityLedger()?.getCurrent(identity);
+      return !record || !record.contentRead || record.contentPending || record.metadataPending || record.state !== "current" || record.contentTier === "secrets" || record.contentTier === "secure" && this.trustDomain !== "secure_local" || record.contentTier === "private" && this.trustDomain === "public_safe";
+    } catch {
+      return true;
+    }
+  }
+  onDemandReadForLocator(locator) {
+    const row = this.db.query("SELECT local_item_id FROM items WHERE locator_uri = ? AND tombstoned = 0 LIMIT 1").get(locator);
+    return Boolean(row && this.readOnDemand(row.local_item_id));
+  }
+  readOnDemand(localItemId, sourceVersion) {
+    if (!this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'").get())
+      return false;
+    const grant = this.db.query("SELECT source_version FROM on_demand_item_reads WHERE local_item_id = ?").get(localItemId);
+    if (!grant)
+      return false;
+    const version = sourceVersion ?? this.db.query("SELECT source_version FROM items WHERE local_item_id = ? AND tombstoned = 0").get(localItemId)?.source_version ?? "";
+    return grant.source_version === version;
+  }
+  onDemandReadCandidate(providerItemId) {
+    const rows = this.db.query("SELECT local_item_id FROM items WHERE provider_item_id = ? AND tombstoned = 0 LIMIT 2").all(providerItemId);
+    if (rows.length !== 1)
+      return;
+    const row = this.activeLocalItemRow(rows[0].local_item_id);
+    if (!row || row.trustTier === "S5")
+      return;
+    const identity = { ...row.identity, localItemId: rows[0].local_item_id, family: this.family };
+    try {
+      if (this.visibilityLedger()?.itemIsSecret(identity))
+        return;
+    } catch {
+      return;
+    }
+    const metadata = this.itemMetadataSnapshot(identity);
+    if (!metadata)
+      return;
+    const decision = this.exclusions.evaluateItem({ path: metadata.locatorUri, name: metadata.name, mimeType: metadata.mimeType });
+    if (decision.excluded || sourceExclusionOutcomeIsUnevaluable(decision.outcome))
+      return;
+    return { identity, metadata, readableOnRequest: decision.readOnDemand === true };
+  }
+  extractionDisposition(item) {
+    const decision = this.exclusions.evaluateMetadata(item.metadata);
+    return decision.disposition === "metadata_only" && this.readOnDemand(item.identity.localItemId, item.identity.sourceVersion) ? { ...decision, disposition: "admit" } : decision;
+  }
   itemMetadataSnapshot(identity) {
     const row = this.db.query(`
       SELECT source_version, content_hash, mime_type, title, locator_uri,
+             ${this.childItemColumnsPresent ? "size_bytes" : "NULL AS size_bytes"},
              authored_at, updated_at, tombstoned
       FROM items
       WHERE provider = ? AND account_scope = ?
@@ -28332,6 +28400,8 @@ ${parentKey(ref)}`, { ref, origin });
     if (!row || row.tombstoned === 1)
       return;
     return {
+      ...row.size_bytes !== null ? { sizeBytes: row.size_bytes } : {},
+      ...this.readOnDemand(identity.localItemId, row.source_version ?? "") ? { read_on_demand: true } : {},
       ...row.source_version ? { sourceVersion: row.source_version } : {},
       ...row.content_hash ? { contentHash: row.content_hash } : {},
       ...row.mime_type ? { mimeType: row.mime_type } : {},
@@ -28722,7 +28792,7 @@ ${parentKey(ref)}`, { ref, origin });
           skippedProviderItemIds.push(item.identity.providerItemId);
           continue;
         }
-        const disposition = this.exclusions.evaluateMetadata(item.metadata);
+        const disposition = this.extractionDisposition(item);
         if (disposition.excluded) {
           itemsExcluded += 1;
           skippedProviderItemIds.push(item.identity.providerItemId);
@@ -29329,6 +29399,9 @@ ${parentKey(ref)}`, { ref, origin });
         const decision = this.exclusions.evaluatePath(row.locator_uri);
         if (decision.disposition !== "metadata_only")
           continue;
+        const granted = this.db.query("SELECT local_item_id FROM items WHERE item_pk = ?").get(row.item_pk);
+        if (this.readOnDemand(granted.local_item_id))
+          continue;
         tallyExclusion(tally, decision);
         if (sourceExclusionOutcomeIsUnevaluable(decision.outcome) && options.stripUnevaluable !== true) {
           itemsUnevaluableKept += 1;
@@ -29366,7 +29439,9 @@ ${parentKey(ref)}`, { ref, origin });
       };
     })();
   }
-  metadataOnlyRuleForLocator(locatorUri) {
+  metadataOnlyRuleForLocator(locatorUri, localItemId) {
+    if (localItemId && this.readOnDemand(localItemId))
+      return;
     if (!this.exclusions.active)
       return;
     const decision = this.exclusions.evaluatePath(locatorUri);
@@ -29969,7 +30044,7 @@ ${parentKey(ref)}`, { ref, origin });
           }
           const routedLayer = route.kind === "store" ? route.layer : undefined;
           const sensitivity = route.kind === "store" ? route.sensitivity : legacySensitivity;
-          if (route.kind === "legacy" && itemForStorage.metadata["deleted"] !== true) {
+          if (route.kind === "legacy" && itemForStorage.metadata["deleted"] !== true && !this.readOnDemand(itemForStorage.identity.localItemId, itemForStorage.identity.sourceVersion ?? "")) {
             this.recordTierDecision(connector, itemForStorage, sensitivity, tierClassification, tierRun, metadataOnly || itemContentKeptNamesOnly(itemForStorage));
           }
           if (routedLayer === "metadata") {
@@ -30239,7 +30314,7 @@ ${parentKey(ref)}`, { ref, origin });
         tombstoned = 0,
         deleted_at = NULL,
         sync_run_id = excluded.sync_run_id
-    `).run(identity.provider, identity.family, identity.accountScope, identity.providerItemId, identity.providerThreadId ?? null, identity.providerConversationId ?? null, identity.providerFileId ?? null, identity.providerEventId ?? null, identity.localItemId, identity.sourceVersion ?? null, title ?? null, searchText ?? null, reactionsJson, sourceScopeGeneration ?? null, sourceScopeRevision ?? null, sourceScopeFolderKeysJson ?? null, identity.parent?.localItemId ?? null, item.deferredBytes?.locator ?? null, item.deferredBytes === undefined ? null : Number(item.deferredBytes.available), item.deferredBytes?.sizeBytes ?? null, sender.senderId ?? null, sender.senderLabel ?? null, sender.senderIsOwner === undefined ? null : Number(sender.senderIsOwner), locatorUri ?? null, item.mimeType, authoredAt ?? null, updatedAt ?? null, item.fetchedAt, now, contentHash ?? null, sensitivity.trustTier, syncRunId);
+    `).run(identity.provider, identity.family, identity.accountScope, identity.providerItemId, identity.providerThreadId ?? null, identity.providerConversationId ?? null, identity.providerFileId ?? null, identity.providerEventId ?? null, identity.localItemId, identity.sourceVersion ?? null, title ?? null, searchText ?? null, reactionsJson, sourceScopeGeneration ?? null, sourceScopeRevision ?? null, sourceScopeFolderKeysJson ?? null, identity.parent?.localItemId ?? null, item.deferredBytes?.locator ?? null, item.deferredBytes === undefined ? null : Number(item.deferredBytes.available), item.deferredBytes?.sizeBytes ?? (Number.isSafeInteger(meta["sizeBytes"]) && Number(meta["sizeBytes"]) >= 0 ? Number(meta["sizeBytes"]) : null), sender.senderId ?? null, sender.senderLabel ?? null, sender.senderIsOwner === undefined ? null : Number(sender.senderIsOwner), locatorUri ?? null, item.mimeType, authoredAt ?? null, updatedAt ?? null, item.fetchedAt, now, contentHash ?? null, sensitivity.trustTier, syncRunId);
     const itemPk = existing?.item_pk ?? Number(applied.lastInsertRowid);
     const ftsMetadataChanged = existing === null || existing.tombstoned === 1 || existing.title !== (title ?? null) || existing.search_text !== (searchText ?? null);
     return {
@@ -30558,7 +30633,7 @@ ${parentKey(ref)}`, { ref, origin });
     }).immediate();
   }
   indexItemTextHeld(item, itemPk, maxChunkChars, text2, media) {
-    const disposition = this.exclusions.evaluateMetadata(item.metadata);
+    const disposition = this.extractionDisposition(item);
     if (disposition.disposition === "metadata_only") {
       throw new ConnectorStoreMetadataOnlyViolationError(disposition.ruleId);
     }
@@ -30923,6 +30998,15 @@ ${parentKey(ref)}`, { ref, origin });
   }
   embeddingHiddenAmong(rows, allowHeld = false) {
     const hidden = new Set;
+    for (const row of rows) {
+      if (this.onDemandContentHeld({
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+      }))
+        hidden.add(row.item_pk);
+    }
     if (rows.length === 0)
       return hidden;
     const identityOf2 = (row) => ({
@@ -31172,6 +31256,7 @@ ${parentKey(ref)}`, { ref, origin });
         ...row.media_path && row.media_sha256 ? { image: { path: row.media_path, sha256: row.media_sha256, mimeType: "image/jpeg" } } : {}
       }));
       let vectors;
+      const embedStarted = Date.now();
       const judgeNow = readsImages === true && judging !== undefined && judging.embedWithImageVectors !== undefined && batch.some((row) => row.media_sha256 && !this.mediaJudgmentSettled(row.media_sha256, mediaJudgeId(judging)));
       let judgedBatch;
       try {
@@ -31219,6 +31304,10 @@ ${parentKey(ref)}`, { ref, origin });
           continue;
         vectors = await provider.embed(inputsFor(batch), { taskType: "RETRIEVAL_DOCUMENT" });
       }
+      const onDemandItems = this.db.query(`SELECT COUNT(*) AS n FROM items i JOIN on_demand_item_reads r ON r.local_item_id = i.local_item_id
+        AND r.source_version = COALESCE(i.source_version, '') WHERE i.item_pk IN (SELECT value FROM json_each(?))`).get(JSON.stringify([...new Set(batch.map((row) => row.item_pk))]));
+      if (onDemandItems.n > 0)
+        console.info(`[olympus:on-demand] step=embed count=${onDemandItems.n} ms=${Math.max(0, Date.now() - embedStarted)}`);
       if (vectors.length !== batch.length) {
         throw new Error("Connector store embedding provider returned the wrong number of vectors.");
       }
@@ -32277,7 +32366,7 @@ ${parentKey(ref)}`, { ref, origin });
     } catch {
       return false;
     }
-    if (this.metadataOnlyRuleForLocator(row.locator_uri ?? undefined) !== undefined)
+    if (this.metadataOnlyRuleForLocator(row.locator_uri ?? undefined, localItemId) !== undefined)
       return false;
     const hasText = this.db.query("SELECT EXISTS (SELECT 1 FROM chunks WHERE item_pk = ?) AS present").get(row.item_pk);
     if (!hasText?.present)

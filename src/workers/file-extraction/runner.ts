@@ -1091,6 +1091,10 @@ async function settleOneJob(input: SettleOneJobInput): Promise<JobOutcome> {
 
 async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: ExtractedMedia; file?: FetchedFile }): Promise<JobOutcome> {
   const { job, extractor, corpus } = input;
+  const onDemand = input.jobs.onDemandJob(job.jobId);
+  const timing = (step: string, started: number) => {
+    if (onDemand) console.info(`[olympus:on-demand] step=${step} count=1 ms=${Math.max(0, Date.now() - started)}`);
+  };
   if (!extractor) {
     return { status: 'failed_terminal', errorKind: EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR };
   }
@@ -1139,6 +1143,7 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
     }
     // The reader's own bound and the job's, whichever is smaller; a source enforces it while reading.
     const maxBytes = boundedByReader(job.maxBytesPerFile, extractor);
+    const fetchStarted = Date.now();
     try {
       if (extractor.input.kind === 'file' && source.fetchFile && input.spoolDir !== undefined) {
         fetchedFile = await source.fetchFile(job.ref, {
@@ -1167,6 +1172,12 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
         };
       }
       return retryable(EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED, error);
+    } finally {
+      timing('fetch', fetchStarted);
+    }
+    if (onDemand) {
+      const bytes = fetched?.bytes.byteLength ?? fetchedFile?.sizeBytes;
+      if (bytes !== undefined) input.jobs.recordOnDemandFetchedBytes(job.jobId, bytes);
     }
     if (fetched && job.ref.contentHash !== undefined && source.verifyBytes) {
       let verified = true;
@@ -1217,6 +1228,7 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
   if (!(await extractionAuthorizationCurrent(corpus, job.ref))) {
     return { status: 'blocked_policy', errorKind: EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED };
   }
+  const extractStarted = Date.now();
   try {
     output = await extractor.extract(extractorInput);
     if (output.status === 'indexed' && output.media) staged.media = output.media;
@@ -1231,6 +1243,8 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
     return error instanceof ExtractionCommandTimeoutError
       ? retryable(EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT, error)
       : retryable(EXTRACTION_ERROR_KIND_EXTRACTOR_THREW, error);
+  } finally {
+    timing('extract', extractStarted);
   }
 
   if (output.status !== 'indexed') {

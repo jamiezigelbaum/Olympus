@@ -46,6 +46,14 @@ time (#1045, #1046, #1047, #1074), and agent-proposed settings with one-click
 apply (#1050; the owner chose "agent proposes, person clicks Apply" on
 2026-11-10).
 
+Lane 5 also includes the on-demand reading decision approved on 2026-11-12:
+folders have Full, Names only, and Names with read on demand modes. Defaults
+stay Names only. Only the owner can read individual files in a plain Names only
+folder; remote apps and the Analyst can request reads in the third mode, with
+three files and 25 MB per question. Every read goes through the shared
+extraction queue and stays out of evidence until judged. Lane 2 uses its existing
+`source_item_read` surface; lane 7 owns the visible limit setting.
+
 Rules for this release:
 
 - New or changed screens are built only after the owner signs off a mockup. A

@@ -1,3 +1,6 @@
+import { randomUUID } from 'node:crypto';
+import type { RequestOnDemandRead, OnDemandReadLimit } from '../file-extraction/on-demand-read.ts';
+import { onDemandReadingCoverageNote, onDemandCappedCoverageNote, onDemandFailedCoverageNote } from '../../core/names-only-coverage.ts';
 import { withPriorityQueryEmbedding } from './embeddings.ts';
 // Analyst-backed source answer handler (Lane B of the execution plan).
 //
@@ -159,6 +162,7 @@ export interface AnalystAnswerLanes {
 }
 
 export interface AnalystSourceIndexAnswerHandlerOptions {
+  requestOnDemandRead?: RequestOnDemandRead;
   // Live authorization repeated after a shared model-slot wait, for synthesis and audit.
   inferenceGuard?: (pack: EvidencePack, request: SourceIndexAnswerRequest, corpusIds: readonly string[]) => Promise<void>;
   // The local analyst (Argus on Delphi/local models).
@@ -693,10 +697,38 @@ export function createAnalystSourceIndexAnswerHandler(
       } = routedAnalysis;
       const analystMs = Date.now() - analystStartedAt;
 
+      const onDemandNotes: string[] = [];
+      const onDemandLimits: OnDemandReadLimit[] = [];
+      if (options.requestOnDemandRead && analystResult.unanswered.length > 0) {
+        const questionId = randomUUID();
+        let reading = 0;
+        let failed = 0;
+        const requested = new Set<string>();
+        for (const index of detail.namesOnlyCandidateIndexes ?? []) {
+          if (index >= 3) continue;
+          const candidate = detail.pack.candidates[index];
+          if (!candidate) continue;
+          const identity = candidate.provenance.sourceItem;
+          const key = JSON.stringify([identity.provider, identity.accountScope, identity.providerConversationId, identity.providerItemId]);
+          if (requested.has(key)) continue;
+          requested.add(key);
+          const outcome = await options.requestOnDemandRead({
+            itemRef: { corpusId: detail.candidateCorpusIds[index] ?? '', providerItemId: candidate.provenance.sourceItem.providerItemId },
+            requester: 'analyst', questionId,
+          }).catch(() => { failed++; return undefined; });
+          if (!outcome) continue;
+          if (outcome.state === 'queued' || outcome.state === 'reading') reading++;
+          if (outcome.state === 'capped' && typeof outcome.reason === 'object') onDemandLimits[0] = outcome.reason;
+        }
+        if (failed > 0) onDemandNotes.push(onDemandFailedCoverageNote(failed));
+        if (reading > 0) onDemandNotes.push(onDemandReadingCoverageNote(reading));
+        if (onDemandLimits.length > 0) onDemandNotes.push(onDemandCappedCoverageNote());
+      }
       const releaseGateStartedAt = Date.now();
       const { decision, facts, opsec, answer } = releaseAnalystAnswer({
         detail,
         result: analystResult,
+        onDemandNotes,
         releaseSecureContent,
         ...(synthesizedGap ? { synthesizedGap } : {}),
       });
@@ -789,6 +821,7 @@ export function createAnalystSourceIndexAnswerHandler(
             raw_source_exposed: false,
           },
           latency_ms: totalLatencyMs,
+          ...(onDemandLimits.length > 0 ? { on_demand_limits: onDemandLimits } : {}),
           phase_timings: phaseTimings,
           raw_source_exposed: false,
         },
@@ -2131,6 +2164,7 @@ function providerErrorReason(
 // escalations never release source content; local insufficiency becomes a
 // coverage gap, while real approval/secret escalations stay gated.
 export interface AnalystReleaseInput {
+  onDemandNotes?: readonly string[];
   detail: EvidencePackBuildDetail;
   result: AnalystResult;
   releaseSecureContent: boolean;
@@ -2175,6 +2209,7 @@ export function releaseAnalystAnswer(input: AnalystReleaseInput): AnalystRelease
   const releasedUnanswered = appendUniqueCoverageNotes(
     sanitizeReleasedCoverageNotes(input.result.unanswered, input.detail, nonPublicPack),
     [
+      ...(input.onDemandNotes ?? []),
       ...unreadableMatchedGaps,
       ...(input.result.unanswered.length === 0 && releasedEvidenceCount === 0
         ? zeroEvidenceCoverageNotes(input.detail.pack)
@@ -2198,7 +2233,7 @@ export function releaseAnalystAnswer(input: AnalystReleaseInput): AnalystRelease
   );
   const safeUnsupportedAnswer = 'I found matching source material, but I could not extract a cited bounded answer from it in this pass.';
   const unsupportedNoContent = uncitedNonPublicAnswer && isUnsupportedNoContentAnswer(input.result);
-  const safeUnsupportedGaps = safeUnsupportedCoverageGaps(input.detail.pack, nonPublicPack);
+  const safeUnsupportedGaps = [...safeUnsupportedCoverageGaps(input.detail.pack, nonPublicPack), ...(input.onDemandNotes ?? [])];
   const safeUnsupportedDraft = composeReleasedAnswer(safeUnsupportedAnswer, safeUnsupportedGaps);
   const finalDraftAnswer = composeReleasedAnswer(
     unsupportedNoContent ? safeUnsupportedDraft : input.result.answer,
@@ -2676,7 +2711,9 @@ function appendUnreadableMatchedEvidence(
   releaseSecureContent: boolean,
 ): SourceIndexAnswerEvidence[] {
   const seen = new Set(evidence.map(evidenceKey));
+  const namesOnly = new Set(detail.namesOnlyCandidateIndexes ?? []);
   for (const index of unreadableMatchedCandidateIndexes(detail)) {
+    if (namesOnly.has(index)) continue;
     const candidate = detail.pack.candidates[index]!;
     if (isSecureSensitivity(candidate) && !releaseSecureContent) continue;
     const item = candidate.provenance.sourceItem;

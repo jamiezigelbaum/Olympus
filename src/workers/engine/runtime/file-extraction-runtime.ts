@@ -1,3 +1,4 @@
+import { requestOnDemandRead, type RequestOnDemandRead } from '../../file-extraction/on-demand-read.ts';
 /**
  * Wiring for the source-neutral extraction factory.
  *
@@ -136,6 +137,7 @@ export interface FileExtractionCorpusConfig {
   ownerConnectorId?: string;
   /** The account a lane of this corpus is keyed by, when its scope key does not say. */
   resolveAccountScope?: () => string;
+  resolveReadScopes?: () => readonly string[];
   maxTrustTierForRemote?: 'S3' | 'S4';
   allowDefaultDeferred?: boolean;
   /**
@@ -198,6 +200,7 @@ export interface FileExtractionRuntimeOptions {
    */
   credentialBroker?: CredentialBroker;
   /** Rechecked before candidate enumeration and immediately before bytes. */
+  onDemandPolicy?: (store: LocalConnectorStore, localItemId: string) => { allowed: boolean; readableOnRequest: boolean };
   scopeGuard?: {
     assertAuthorized(input: { config: FileExtractionCorpusConfig; store: LocalConnectorStore }): void;
     allowsRef(input: {
@@ -219,6 +222,8 @@ export interface FileExtractionRuntimeOptions {
 }
 
 export interface FileExtractionRuntime {
+  requestOnDemandRead: RequestOnDemandRead;
+  stopOnDemandRecovery?(): void;
   runner: FileExtractionRunner;
   jobs: LocalFileExtractionJobStore;
   corpusIds: readonly string[];
@@ -250,7 +255,7 @@ export function createRefreshableFileExtractionRuntime(options: {
     const nextGeneration = options.generation();
     if (generation !== nextGeneration) {
       const next = options.build();
-      if (next) runtimes.push(next);
+      if (next) { runtimes.at(-1)?.stopOnDemandRecovery?.(); runtimes.push(next); }
       generation = nextGeneration;
     }
     return runtimes.at(-1)!;
@@ -268,6 +273,7 @@ export function createRefreshableFileExtractionRuntime(options: {
       },
     }),
     locateItem: (ref) => current()?.locateItem(ref),
+    requestOnDemandRead: (request) => current()?.requestOnDemandRead(request) ?? Promise.resolve({ state: 'refused', reason: 'read_unavailable' }),
     // Earlier runners stay alive for reads already in flight on their shared durable queue.
     close() {
       if (closed) return;
@@ -409,7 +415,7 @@ export function createFileExtractionRuntime(
       ...(spoolDir && placement.anchor !== undefined ? { spoolAnchor: placement.anchor } : {}),
       source: async () => {
         options.scopeGuard?.assertAuthorized({ config, store });
-        const source = await buildSource({ config, store, ...(view ? { view } : {}) });
+        const source = await buildSource({ config: config.resolveReadScopes ? { ...config, resolveScopes: config.resolveReadScopes } : config, store, ...(view ? { view } : {}) });
         if (!guardsRefs) return source;
         return {
           id: source.id,
@@ -530,9 +536,89 @@ export function createFileExtractionRuntime(
     ...(workerId ? { workerId } : {}),
   });
 
+  let closed = false;
+  const activeReads = new Set<string>();
+  const runRead = (ref: ExtractionItemRef) => {
+    const key = `${ref.corpusId}\0${ref.providerItemId}`;
+    if (closed || activeReads.has(key)) return;
+    activeReads.add(key);
+    void runner.run({ ...ref, providerItemIds: [ref.providerItemId], limit: 1, reclassify: false })
+      .catch(() => console.warn('[olympus:on-demand] run_failed count=1'))
+      .finally(() => activeReads.delete(key));
+  };
+  // Durable jobs in names-only scopes have no bulk extraction pass. Resume
+  // them through this same runner after a restart or an ordinary retry backoff.
+  const resumeReads = () => {
+    if (closed || options.readOnly) return;
+    try {
+      for (const ref of jobs.pendingOnDemandReads()) {
+        if (corpora.some((corpus) => corpus.corpusId === ref.corpusId)) runRead(ref);
+      }
+    } catch { console.warn('[olympus:on-demand] resume_failed count=1'); }
+  };
+  const recoveryTimer = options.readOnly ? undefined : setInterval(resumeReads, 5_000);
+  recoveryTimer?.unref?.();
+  void Promise.resolve().then(resumeReads);
+
   return {
     runner,
     jobs,
+    requestOnDemandRead: async (request) => {
+      let promoted: ExtractionItemRef | undefined;
+      const result = await requestOnDemandRead(request, {
+        jobs,
+        limits: {
+          files: Number(env.OLYMPUS_ON_DEMAND_FILES_PER_QUESTION ?? 3),
+          bytes: Number(env.OLYMPUS_ON_DEMAND_BYTES_PER_QUESTION ?? 25 * 1024 * 1024),
+        },
+        resolve: (read) => {
+          const lane = roster.find((config) => config.corpusId === read.itemRef.corpusId
+            || itemStores.get(config.corpusId)?.().some((holder) => holder.corpusId === read.itemRef.corpusId));
+          if (!lane || !corpora.some((corpus) => corpus.corpusId === lane.corpusId)) return undefined;
+          for (const holder of itemStores.get(lane.corpusId)?.() ?? []) {
+            const candidate = holder.onDemandReadCandidate(read.itemRef.providerItemId);
+            if (!candidate) continue;
+            const { identity, metadata } = candidate;
+            const policy = options.onDemandPolicy?.(holder, identity.localItemId);
+            if (policy && !policy.allowed) return undefined;
+            if (lane.accountScopeCurrent && !lane.accountScopeCurrent(identity.accountScope)) return undefined;
+            const scopes = lane.resolveReadScopes?.() ?? lane.resolveScopes?.() ?? lane.scopes;
+            // Prefer the deepest path scope; non-path keys stay opaque to this layer.
+            // The source verifies the exact item and its scope again before fetching.
+            const approvedScopeKey = [...scopes].sort((a, b) => b.length - a.length).find((key) => {
+              const path = key.slice(key.indexOf(':') + 1).toLowerCase();
+              const locator = metadata.locatorUri?.toLowerCase();
+              return locator && path.startsWith('/') && (path === '/' || locator === path || locator.startsWith(`${path}/`));
+            }) ?? scopes[0];
+            if (!approvedScopeKey) return undefined;
+            const ref: ExtractionItemRef = {
+              corpusId: lane.corpusId, provider: identity.provider, accountScope: identity.accountScope,
+              providerItemId: identity.providerItemId, localItemId: identity.localItemId, approvedScopeKey,
+              ...(metadata.sizeBytes !== undefined ? { sizeBytes: metadata.sizeBytes } : {}),
+              ...(metadata.sourceVersion ? { sourceVersion: metadata.sourceVersion } : {}),
+              ...(metadata.contentHash ? { contentHash: metadata.contentHash } : {}),
+              ...(metadata.name ? { name: metadata.name } : {}),
+              ...(metadata.mimeType ? { mimeType: metadata.mimeType } : {}),
+            };
+            const extractor = registry.select(ref);
+            if (!extractor) return undefined;
+            return {
+              readableOnRequest: policy?.readableOnRequest ?? candidate.readableOnRequest,
+              job: { refs: [ref], extractorKind: extractor.kind, extractorVersion: extractor.versionFor?.(ref.mimeType) ?? extractor.version,
+                policyDecision: 'index_allowed' as const },
+              grant: () => {
+                promoted = ref;
+                for (const leg of itemStores.get(lane.corpusId)?.() ?? []) leg.grantOnDemandRead(identity.localItemId, metadata.sourceVersion);
+              },
+            };
+          }
+          return undefined;
+        },
+      });
+      if (promoted) runRead(promoted);
+      return result;
+    },
+    stopOnDemandRecovery() { if (recoveryTimer) clearInterval(recoveryTimer); },
     corpusIds: corpora.map((corpus) => corpus.corpusId),
     terminalRetryPaths: terminalRetryPaths(registry, reclassificationRules),
     locateItem(ref) {
@@ -547,6 +633,8 @@ export function createFileExtractionRuntime(
       return undefined;
     },
     close() {
+      closed = true;
+      if (recoveryTimer) clearInterval(recoveryTimer);
       jobs.close();
     },
   };
@@ -575,12 +663,14 @@ export function fileExtractionCorporaRoster(input: {
   dropbox?: {
     extractionScopes: readonly string[];
     resolveExtractionScopes?: () => readonly string[];
+    resolveReadScopes?: () => readonly string[];
     resolveCandidateFilters?: () => import('../../connector-store/index.ts').ConnectorStoreSearchFilters | undefined;
     resolveCredentialHandle: () => string | undefined;
   };
   /** Present when the local files connector store exists. */
   localFiles?: {
     resolveExtractionScopes: () => readonly string[];
+    resolveReadScopes?: () => readonly string[];
     resolveCandidateFilters?: () => import('../../connector-store/index.ts').ConnectorStoreSearchFilters | undefined;
   };
   /** True when the WhatsApp connector store exists. */
@@ -634,6 +724,7 @@ export function fileExtractionCorporaRoster(input: {
       provider: LOCAL_FILES_PROVIDER,
       scopes: [],
       resolveScopes: input.localFiles.resolveExtractionScopes,
+      ...(input.localFiles.resolveReadScopes ? { resolveReadScopes: input.localFiles.resolveReadScopes } : {}),
       ...(input.localFiles.resolveCandidateFilters
         ? { resolveCandidateFilters: input.localFiles.resolveCandidateFilters }
         : {}),
@@ -780,7 +871,7 @@ function defaultSourceFactories(
         // candidates first, exactly as before, then new files' names copies.
         candidates: connectorStoreExtractionCandidateReader(
           input.view ?? input.store,
-          input.config.resolveCandidateFilters?.(),
+          input.config.resolveCandidateFilters,
         ),
         locators: input.view ?? input.store,
         scopes: (input.config.resolveScopes?.() ?? input.config.scopes)

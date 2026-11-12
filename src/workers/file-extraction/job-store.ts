@@ -1,3 +1,4 @@
+import type { OnDemandReadRequest, OnDemandReadResult } from './on-demand-read.ts';
 /**
  * The generic extraction job side database.
  *
@@ -368,6 +369,9 @@ export interface RequeueUnreadExtractionJobsResult {
 }
 
 export interface ExtractionJobRecord {
+  reason?: 'on_demand';
+  requester?: OnDemandReadRequest['requester'];
+  questionId?: string;
   jobId: string;
   ref: ExtractionItemRef;
   extractorKind: string;
@@ -673,6 +677,18 @@ export class LocalFileExtractionJobStore {
     assertSqliteSchemaCanOpen(this.db, FILE_EXTRACTION_JOBS_STORE_ID, FILE_EXTRACTION_JOBS_SCHEMA_VERSION);
     if (!this.readonly) {
       runSqliteMigrations(this.db, FILE_EXTRACTION_JOBS_STORE_ID, fileExtractionJobMigrations());
+
+      this.db.exec(`CREATE TABLE IF NOT EXISTS on_demand_reads (
+        corpus_id TEXT NOT NULL, provider_item_id TEXT NOT NULL, job_id TEXT PRIMARY KEY REFERENCES extraction_jobs(job_id) ON DELETE CASCADE,
+        reason TEXT NOT NULL DEFAULT 'on_demand', requester TEXT NOT NULL, question_id TEXT,
+        reserved_bytes INTEGER NOT NULL, created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS on_demand_question ON on_demand_reads(question_id);
+      CREATE INDEX IF NOT EXISTS on_demand_item ON on_demand_reads(corpus_id, provider_item_id);
+      CREATE TABLE IF NOT EXISTS on_demand_waiting (
+        question_id TEXT NOT NULL, corpus_id TEXT NOT NULL, provider_item_id TEXT NOT NULL,
+        PRIMARY KEY(question_id, corpus_id, provider_item_id)
+      );`);
       createUnroutableItemsTable(this.db);
       // The Secrets disposition clears names in every ledger this process writes.
       this.unregisterPath = registerExtractionJobsDbPath(dbPath);
@@ -736,6 +752,65 @@ export class LocalFileExtractionJobStore {
    * enumerating source produced these refs, so there is no local table to look
    * them up in and nothing to fail to find.
    */
+  enqueueOnDemandRead(
+    request: OnDemandReadRequest,
+    job: EnqueueExtractionJobsRequest,
+    grant: () => void,
+    limits = { files: 3, bytes: 25 * 1024 * 1024 },
+  ): OnDemandReadResult {
+    this.assertWritable('on_demand');
+    if (!Number.isSafeInteger(limits.files) || limits.files < 1 || !Number.isSafeInteger(limits.bytes) || limits.bytes < 1) {
+      throw new TypeError('Invalid on-demand limits.');
+    }
+    if (job.refs.length !== 1) throw new TypeError('On-demand reads require one ref.');
+    return this.db.transaction((): OnDemandReadResult => {
+      const previous = this.db.query(`SELECT j.status, j.source_version FROM on_demand_reads r
+        JOIN extraction_jobs j ON j.job_id = r.job_id
+        WHERE r.corpus_id = ? AND r.provider_item_id = ? ORDER BY r.rowid DESC LIMIT 1`).get(request.itemRef.corpusId, request.itemRef.providerItemId) as { status: string; source_version: string | null } | null;
+      if (previous) {
+        if (previous.status === 'leased' || (previous.status === 'indexed' && (previous.source_version ?? '') === (job.refs[0]!.sourceVersion ?? ''))) return { state: 'reading', etaSeconds: 60 };
+        if (previous.status === 'queued' || previous.status === 'failed_retryable') return { state: 'queued', etaSeconds: 60 };
+        if ((previous.source_version ?? '') === (job.refs[0]!.sourceVersion ?? '')) return { state: 'refused', reason: 'read_failed' };
+      }
+      const size = job.refs[0]!.sizeBytes;
+      // An unknown size reserves the remaining byte allowance and is bounded while fetching.
+      const used = this.db.query(`SELECT COUNT(*) AS files, COALESCE(SUM(reserved_bytes), 0) AS bytes
+        FROM on_demand_reads WHERE question_id = ? AND requester != 'owner'`).get(request.questionId ?? null) as { files: number; bytes: number };
+      const bytes = size ?? Math.max(0, limits.bytes - used.bytes);
+      if (request.requester !== 'owner' && (used.files >= limits.files || bytes < 1 || used.bytes + bytes > limits.bytes)) {
+        this.db.query(`INSERT OR IGNORE INTO on_demand_waiting VALUES (?, ?, ?)`).run(request.questionId ?? '', request.itemRef.corpusId, request.itemRef.providerItemId);
+        const waiting = this.db.query('SELECT COUNT(*) AS n FROM on_demand_waiting WHERE question_id = ?').get(request.questionId ?? '') as { n: number };
+        return { state: 'capped', reason: { id: 'on_demand_reads_per_question', limit: limits, used,
+          waiting_names_count: waiting.n, resumes: 'never' } };
+      }
+      grant();
+      this.db.query('DELETE FROM on_demand_waiting WHERE corpus_id = ? AND provider_item_id = ?').run(request.itemRef.corpusId, request.itemRef.providerItemId);
+      const queued = this.enqueue({ ...job, force: true, priority: 100,
+        ...(request.requester !== 'owner' ? { maxBytesPerFile: Math.max(1, bytes) } : {}) });
+      const ref = queued.jobRefs[0]!;
+      this.db.query(`INSERT INTO on_demand_reads
+        (corpus_id, provider_item_id, job_id, requester, question_id, reserved_bytes, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`).run(request.itemRef.corpusId, request.itemRef.providerItemId,
+          ref.jobId, request.requester, request.questionId ?? null, bytes, nowIso());
+      return { state: 'queued', etaSeconds: 60 };
+    }).immediate();
+  }
+
+  pendingOnDemandReads(): ExtractionItemRef[] {
+    return (this.db.query(`SELECT j.* FROM on_demand_reads r CROSS JOIN extraction_jobs j ON j.job_id = r.job_id
+      WHERE j.status = 'queued' OR (j.status = 'failed_retryable' AND (j.next_retry_at IS NULL OR j.next_retry_at <= ?))
+        OR (j.status = 'leased' AND j.leased_until <= ?) ORDER BY r.rowid LIMIT 100`).all(nowIso(), nowIso()) as ExtractionJobSqlRow[])
+      .map((row) => recordFromRow(row).ref);
+  }
+
+  recordOnDemandFetchedBytes(jobId: string, bytes: number): void {
+    this.db.query('UPDATE on_demand_reads SET reserved_bytes = ? WHERE job_id = ?').run(bytes, jobId);
+  }
+
+  onDemandJob(jobId: string): boolean {
+    return this.db.query('SELECT 1 FROM on_demand_reads WHERE job_id = ?').get(jobId) !== null;
+  }
+
   enqueue(request: EnqueueExtractionJobsRequest): EnqueueExtractionJobsResult {
     this.assertWritable('enqueue');
     const extractorKind = requireToken(request.extractorKind, 'extractorKind');
@@ -1599,7 +1674,13 @@ export class LocalFileExtractionJobStore {
 
   get(jobId: string): ExtractionJobRecord | undefined {
     const row = this.jobRow(requireKeyPart(jobId, 'jobId'));
-    return row ? recordFromRow(row) : undefined;
+    if (!row) return undefined;
+    const record = recordFromRow(row);
+    if (!this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_reads'").get()) return record;
+    const read = this.db.query('SELECT requester, question_id FROM on_demand_reads WHERE job_id = ?').get(row.job_id) as {
+      requester: OnDemandReadRequest['requester']; question_id: string | null;
+    } | null;
+    return read ? { ...record, reason: 'on_demand', requester: read.requester, ...(read.question_id ? { questionId: read.question_id } : {}) } : record;
   }
 
   /**
