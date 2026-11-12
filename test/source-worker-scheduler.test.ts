@@ -17,6 +17,7 @@ import {
   type SourceSchedulerSource,
   type SourceSchedulerTaskRunResult,
 } from '../src/workers/source-scheduler.ts';
+import { createTestClock } from './helpers/test-clock.ts';
 import { LocalSourceSchedulerStateStore } from '../src/workers/source-scheduler-state.ts';
 import { CredentialBrokerError } from '../src/workers/credential-broker/index.ts';
 import { OperationError } from '../src/core/operation-error.ts';
@@ -48,6 +49,64 @@ import type {
 import { XBookmarksLiveSyncError } from '../src/workers/x-bookmarks/index.ts';
 
 describe('source worker scheduler', () => {
+  for (const durable of [false, true]) {
+    test(`X usage guards park both tasks without a failure streak (durable=${durable})`, async () => {
+      const clock = createTestClock(Date.parse('2026-11-12T12:00:00.000Z'));
+      const stateStore = durable ? new LocalSourceSchedulerStateStore(':memory:') : undefined;
+      let calls = 0;
+      const refuse = async () => {
+        calls += 1;
+        if (clock.now() >= Date.parse('2026-11-13T00:00:00.000Z')) return { status: 'idle' as const, counts: {}, api_usage: usageStatus() };
+        throw new XBookmarksLiveSyncError({
+          errorKind: 'api_request_guard', message: 'Daily budget spent.',
+          retryAt: '2026-11-13T00:00:00.000Z', degradedReason: 'daily_cost_guard',
+        });
+      };
+      const lane = createXBookmarksSchedulerSource({ config: schedulerConfig(), liveSync: {
+        syncHead: refuse, reconcile: refuse,
+        lastCompleteReconcileAt: () => undefined,
+        completeReconcileWatermark: () => undefined,
+      } as unknown as XBookmarksConnectorStoreSyncHandler })!;
+      const makeScheduler = () => new SourceScheduler({
+        enabled: true, tickMs: 1_000, errorBackoffMs: 5_000, maxTransientRetries: 3,
+        now: clock.date, sleep: clock.sleep, sources: [lane], ...(stateStore ? { stateStore } : {}),
+      });
+      if (stateStore) {
+        for (const task of lane.tasks) {
+          const key = { sourceId: lane.sourceId, corpusId: lane.corpusId, taskId: task.id };
+          stateStore.recordSuccess({ ...key, completedAt: '2026-11-11T12:00:00.000Z', resultStatus: 'progress', checkpoint: 'kept-head' });
+          for (let refusal = 0; refusal < 16; refusal += 1) stateStore.recordFailure({
+            ...key, completedAt: '2026-11-12T11:59:00.000Z', notBeforeAt: clock.date().toISOString(),
+            errorKind: 'api_request_guard', errorHash: '0123456789abcdef',
+          });
+        }
+      }
+      let scheduler = makeScheduler();
+      try {
+        const status = await scheduler.runDueTasks();
+        expect(calls).toBe(2);
+        for (const task of status.sources[0]!.tasks) {
+          expect(task).toMatchObject({
+            consecutive_failures: 0, last_result: { status: 'idle' },
+            degraded_reason: 'daily_cost_guard', next_run_at: '2026-11-13T00:00:00.000Z',
+          });
+          expect(task.last_error_kind).toBeUndefined();
+          expect(task.last_error_hash).toBeUndefined();
+          if (stateStore) expect(stateStore.get({ sourceId: lane.sourceId, corpusId: lane.corpusId, taskId: task.id })?.checkpoint).toBe('kept-head');
+        }
+        if (durable) scheduler = makeScheduler();
+        await clock.advance(60_000);
+        // Automatic change/backlog wakes must respect the park even though no failure is counted.
+        scheduler.wakeTasksOfKind('sync');
+        await scheduler.runDueTasks();
+        expect(calls).toBe(2);
+        await clock.advance(Date.parse('2026-11-13T00:00:00.000Z') - clock.now());
+        await scheduler.runDueTasks();
+        expect(calls).toBe(4);
+      } finally { stateStore?.close(); }
+    });
+  }
+
   test('a guarded unpark request permits exactly one immediate task attempt without changing cadence', async () => {
     await withSchedulerStateFixture(async (path) => {
       const key = {
@@ -173,12 +232,12 @@ describe('source worker scheduler', () => {
       );
       expect(errorKinds).toContain('config_missing_folder_argument');
       expect(errorKinds).toContain('credential_session_latched');
-      expect(errorKinds).toContain('gmail_daily_api_request_guard');
-      expect(lines).toEqual(expect.arrayContaining([
-        expect.stringContaining(
-          'error_kind=gmail_daily_api_request_guard retry_at=2026-07-30T00:00:00.000Z degraded_reason=gmail_daily_api_request_guard',
-        ),
-      ]));
+      expect(errorKinds).not.toContain('gmail_daily_api_request_guard');
+      expect(status.sources.find((entry) => entry.source_id === 'gmail.email')?.tasks[0]).toMatchObject({
+        consecutive_failures: 0, degraded_reason: 'gmail_daily_api_request_guard',
+        next_run_at: '2026-07-30T00:00:00.000Z', last_result: { status: 'idle' },
+      });
+      expect(lines.join('\n')).not.toContain('gmail_daily_api_request_guard');
       expect(lines.join('\n')).toContain('retry_at=');
       expect(lines.join('\n')).toContain('degraded_reason=');
       expect(lines.join('\n')).not.toContain('private folder path');
@@ -448,7 +507,7 @@ describe('source worker scheduler', () => {
     };
     const source = createXBookmarksSchedulerSource({ config: schedulerConfig(), liveSync })!;
     expect(source.tasks.map((entry) => ({ id: entry.id, intervalMs: entry.intervalMs }))).toEqual([
-      { id: 'x.bookmarks_head', intervalMs: 30_000 },
+      { id: 'x.bookmarks_head', intervalMs: 900_000 },
       { id: 'x.bookmarks_reconcile', intervalMs: 86_400_000 },
     ]);
     expect(source.tasks[1]?.bootstrapLastSuccessAt?.()).toBe('2026-07-17T12:00:00.000Z');
@@ -1902,7 +1961,10 @@ describe('source worker scheduler', () => {
     expect(pull).toMatchObject({
       next_run_at: '2026-07-08T00:00:00.000Z',
       degraded_reason: 'gmail_daily_api_request_guard',
+      consecutive_failures: 0,
+      last_result: { status: 'idle' },
     });
+    expect(pull?.last_error_kind).toBeUndefined();
   });
 
   test('Gmail future-day clock regression has its own honest categorical kind', async () => {
@@ -2044,7 +2106,10 @@ describe('source worker scheduler', () => {
     expect(pull).toMatchObject({
       next_run_at: '2026-07-08T00:00:00.000Z',
       degraded_reason: 'google_drive_daily_api_request_guard',
+      consecutive_failures: 0,
+      last_result: { status: 'idle' },
     });
+    expect(pull?.last_error_kind).toBeUndefined();
   });
 });
 

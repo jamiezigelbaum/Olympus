@@ -37371,7 +37371,8 @@ var X_BOOKMARKS_STORE_PLACEMENT = Object.freeze({
   trustDomain: "internal"
 });
 // src/workers/x-bookmarks/live-control.ts
-var X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS = 5 * 60000;
+var X_BOOKMARKS_HEAD_INTERVAL_MS = 15 * 60000;
+var X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS = 2 * X_BOOKMARKS_HEAD_INTERVAL_MS + 5 * 60000;
 var X_BOOKMARKS_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
 var X_BOOKMARKS_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
 var EMPTY_SHA256 = "0".repeat(64);
@@ -39596,6 +39597,19 @@ var SCHEDULER_SOURCE_IDS = {
   evernote: "evernote.notes"
 };
 var SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS = 500;
+class SourceSchedulerTaskDeferral extends Error {
+  retryAt;
+  counts;
+  warnings;
+  constructor(message2, retryAt, counts, warnings) {
+    super(message2);
+    this.retryAt = retryAt;
+    this.counts = counts;
+    this.warnings = warnings;
+    this.name = "SourceSchedulerTaskDeferral";
+  }
+}
+
 class SourceSchedulerTaskFailure extends Error {
   errorKind;
   warnings;
@@ -39783,6 +39797,8 @@ class SourceScheduler {
         continue;
       if (taskCadence(state.source, state.task) !== "continuous")
         continue;
+      if ((state.retryNotBeforeAt ?? 0) > at)
+        continue;
       if (state.running) {
         state.wakeAfterRun = true;
         continue;
@@ -39820,7 +39836,7 @@ class SourceScheduler {
         continue;
       if (sibling.nextRunAt <= at)
         continue;
-      if (sibling.consecutiveFailures > 0)
+      if (sibling.consecutiveFailures > 0 || (sibling.retryNotBeforeAt ?? 0) > at)
         continue;
       sibling.nextRunAt = at;
       woke = true;
@@ -39834,6 +39850,8 @@ class SourceScheduler {
       if (state.task.kind !== kind || state.consecutiveFailures > 0)
         continue;
       if (taskCadence(state.source, state.task) !== "continuous")
+        continue;
+      if ((state.retryNotBeforeAt ?? 0) > at)
         continue;
       if (state.running) {
         state.wakeAfterRun = true;
@@ -40116,6 +40134,7 @@ class SourceScheduler {
         }
       }
       state.nextRunAt = nextRunAt;
+      state.retryNotBeforeAt = retryAt ? nextRunAt : undefined;
       for (const { counts, ...store } of result.embeddingSweep ?? []) {
         console.info(`[olympus:embedding-sweep] ${JSON.stringify({
           ...store,
@@ -40227,6 +40246,14 @@ ${request.taskId}`);
           ...reportedDegradedReason(state.degradedReason, state.lastCompletedAt, new Date(attemptedAt)) ? { degradedReason: state.degradedReason } : {}
         });
       } catch (error) {
+        if (error instanceof SourceSchedulerTaskDeferral) {
+          return {
+            status: "idle",
+            retryAt: error.retryAt,
+            ...error.counts ? { counts: error.counts } : {},
+            ...error.warnings?.length ? { warnings: error.warnings } : {}
+          };
+        }
         lastError = error;
         if (safeSchedulerRetryAt(error) || !isTransientError(error) || attempt >= this.maxTransientRetries)
           break;
@@ -40300,6 +40327,7 @@ ${request.taskId}`);
     return state;
   }
   applyPersistedState(state, persisted) {
+    state.retryNotBeforeAt = persisted.degradedReason && persisted.notBeforeAt ? Math.min(Date.parse(persisted.notBeforeAt), this.now().getTime() + SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS) : undefined;
     state.consecutiveFailures = persisted.consecutiveFailures;
     if (persisted.checkpoint)
       state.checkpoint = persisted.checkpoint;

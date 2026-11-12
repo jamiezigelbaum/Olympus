@@ -60,9 +60,12 @@ export {
   type XBookmarksProviderWindowBoundaryPolicy,
 } from './api-connector.ts';
 
+export { XBookmarksArchiveImportError, readArchivedXBookmarks } from './archive-import.ts';
+
 export {
   XBookmarksLiveSyncError,
   createXBookmarksConnectorStoreSyncHandler,
+  type XBookmarksArchiveImportRequest,
   type XBookmarksConnectorStoreSyncHandler,
   type XBookmarksConnectorStoreSyncHandlerOptions,
   type XBookmarksHeadSyncRequest,
