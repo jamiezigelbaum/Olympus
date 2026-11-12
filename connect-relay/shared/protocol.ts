@@ -1,4 +1,5 @@
 import { credentialSurface, type CredentialSurface } from './tokens.ts';
+import type { RequestLogEntry } from './request-log.ts';
 /**
  * Olympus connect-relay wire protocol, version 2.
  *
@@ -57,6 +58,13 @@ import { credentialSurface, type CredentialSurface } from './tokens.ts';
  *                    relay held for this install, so a rotated token appears
  *                    and a revoked or expired one disappears. Content-free:
  *                    no name, provider, connection id or question.
+ *
+ *   `request-log`    relay -> install   request-log {at, surface, install?,
+ *                    credential?, lane?, calls, status, ms} (text).
+ *                    Offered in hello/register.features; used only when also
+ *                    advertised in ready.features. The install field is a
+ *                    short log tag, never an install id. Offline history is
+ *                    memory-only: 100 per install, 20,000 total, 24 hours.
  */
 import { createHash, createPublicKey, randomBytes, sign, verify, type KeyObject } from 'node:crypto';
 
@@ -89,8 +97,8 @@ export const INSTALL_ID_PATTERN = /^[a-z2-7]{32}$/;
  */
 export type ChallengeMessage = { type: 'challenge'; v: number; nonce: string; pow: number; auth?: number };
 /** `auth` is present for scheme 3 and absent for scheme 2 (the legacy wire form, byte for byte). */
-export type HelloMessage = { type: 'hello'; v: number; installId: string; sig: string; auth?: number };
-export type RegisterMessage = { type: 'register'; v: number; installId: string; publicKey: string; sig: string; pow?: string; auth?: number };
+export type HelloMessage = { type: 'hello'; v: number; installId: string; sig: string; auth?: number; features?: string[] };
+export type RegisterMessage = { type: 'register'; v: number; installId: string; publicKey: string; sig: string; pow?: string; auth?: number; features?: string[] };
 /** `features`: the optional features this relay speaks (absent from relays that predate them). */
 export type ReadyMessage = { type: 'ready'; installId: string; features?: string[] };
 export type PingMessage = { type: 'ping' };
@@ -121,11 +129,13 @@ export type RelayErrorCode =
   | 'revoked';
 
 export type ClientAuthMessage = HelloMessage | RegisterMessage;
-export type RelayToClientMessage = ChallengeMessage | ReadyMessage | PongMessage | ErrorMessage | RequestMessage | EndMessage | CancelMessage;
+export type RelayToClientMessage = ChallengeMessage | ReadyMessage | PongMessage | ErrorMessage | RequestMessage | EndMessage | CancelMessage | ({ type: 'request-log' } & RequestLogEntry);
 export type ClientToRelayMessage = ClientAuthMessage | PingMessage | ResponseHeadMessage | EndMessage | AbortMessage | SurfacesMessage;
 
 /** The `surfaces` feature (above). */
 export const RELAY_FEATURE_SURFACES = 'surfaces';
+/** Relay -> install, offered in hello/register and advertised in ready. */
+export const RELAY_FEATURE_REQUEST_LOG = 'request-log';
 /** Entries one install may hold at the relay; an engine sends at most this many (the latest-expiring). */
 export const MAX_SURFACE_ENTRIES = 32;
 /** Which MCP endpoint a mapping is for (shared/directory-tools.ts McpSurface). */
