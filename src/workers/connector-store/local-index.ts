@@ -119,7 +119,6 @@ import {
   judgedAwaited,
   parentVerdictsSteps,
   CHILD_PARENT_CHAIN_LIMIT,
-  childVisibilityUnchanged,
   hiddenChildKeysSteps,
   ledgerVisibilityOffThread,
   ledgerVisibilityHere,
@@ -6991,13 +6990,16 @@ export class LocalConnectorStore {
   async peopleObservationsOffThread(): Promise<PeopleSenderObservation[]> {
     if (!offThreadReadsSupported(this.dbPath)) return this.peopleObservations();
     for (let attempt = 0; attempt < PEOPLE_OFF_THREAD_READ_ATTEMPTS; attempt += 1) {
+      // The marker covers the ledger's visibility feed and every lane store's
+      // item feed. Never the ledger's whole change marker: the sweep and the
+      // judge write the ledger every few seconds, and every attempt would then
+      // fall back to the synchronous walk on this thread (gate 1, ops#168).
       const marker = this.visibilityMarker();
-      const unchanged = childVisibilityUnchanged(this.childVisibilityLane());
       const tierHidden = await this.tierHiddenItemPksInTurns();
       const steps = this.peopleObservationSteps(tierHidden);
       let step = steps.next();
       while (!step.done) step = steps.next(await readOnPool(this.dbPath, step.value));
-      if (this.visibilityMarker() === marker && unchanged()) return this.peopleObservationsFromRows(step.value);
+      if (this.visibilityMarker() === marker) return this.peopleObservationsFromRows(step.value);
     }
     return this.peopleObservations();
   }
