@@ -94,7 +94,7 @@ import {
   withWorkerBearerAuth,
   workerAuthTokenFromEnv,
 } from '../http.ts';
-import { createAnalyst } from '../../core/analyst.ts';
+import { createAnalyst, type AnalystModelRequest } from '../../core/analyst.ts';
 import {
   builtInTranscriptionDashboardState,
   builtInTranscriptionEnabled,
@@ -664,7 +664,12 @@ export async function main(): Promise<void> {
     const builtInChoice = builtInModelEnvValue(process.env, readModelChoices(sovereigntyEngine.path));
     if (builtInChoice) process.env[BUILT_IN_ANALYST_MODEL_ENV] = builtInChoice;
   }
-  const workerBuiltInModel = createWorkerSharedBuiltInModel(process.env);
+  // With the engine split, only the background holds the built-in model (one
+  // server per computer); the front's completions run there (judging-models.ts).
+  const workerBuiltInModel = createWorkerSharedBuiltInModel(process.env, engineFront ? {
+    complete: (request) => engineFront!.completeModel(request),
+    prepare: () => { void engineFront!.client.post({ kind: 'model_prepare' }).catch(() => undefined); },
+  } : undefined);
   const answerBuiltInModel = workerBuiltInModel
     ? localModelActivity.track('built_in', workerBuiltInModel.model) : undefined;
   registerBuiltInPrivateModel(workerBuiltInModel
@@ -6143,7 +6148,14 @@ export async function main(): Promise<void> {
       ...((process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID || process.env[ENGINE_BACKGROUND_INSTANCE_ENV])
         ? { instanceId: (process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID || process.env[ENGINE_BACKGROUND_INSTANCE_ENV])! } : {}),
       log: (line) => console.warn(line),
+      // The front's built-in model completions, tracked like this process's
+      // own answers so the judge steps aside for them on the one server.
+      ...(answerBuiltInModel ? { modelComplete: (request: AnalystModelRequest) => answerBuiltInModel.complete(request) } : {}),
       handlers: {
+        model_prepare: () => {
+          if (workerBuiltInModel) void workerBuiltInModel.model.prepare();
+          return { preparing: workerBuiltInModel !== undefined };
+        },
         // A config file the front wrote: re-read it and wake what it governs.
         reload: ({ target, corpora, frontPid }) => {
           // A model, judge or policy change: this process read them at boot, so

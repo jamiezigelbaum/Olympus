@@ -7,7 +7,7 @@
 
 import { expect, test } from 'bun:test';
 import type { BuiltInAnalystModel } from '../src/core/analyst-built-in.ts';
-import { sharedBuiltInModel } from '../src/workers/engine/runtime/judging-models.ts';
+import { frontBuiltInModel, sharedBuiltInModel } from '../src/workers/engine/runtime/judging-models.ts';
 
 function fakeBase(initial: string) {
   let state = initial;
@@ -71,4 +71,58 @@ test('a fresh install still starts its download, and a missing model is never pr
   await settle();
   expect(fake.prepares()).toBe(1);
   expect(shared.available()).toBe(false);
+});
+
+// The engine split's front: the background holds the one model server, and
+// the front never downloads the model or starts a server of its own.
+// Switch-on Mac check, 2026-11-12: two servers ran at once and a private
+// answer hit its deadline.
+function fakeBackground() {
+  const requests: unknown[] = [];
+  let prepares = 0;
+  return {
+    background: {
+      complete: async (request: unknown) => { requests.push(request); return { text: 'from the background', modelId: 'built-in' }; },
+      prepare: () => { prepares += 1; },
+    },
+    requests,
+    prepares: () => prepares,
+  };
+}
+
+test('the front asks the background to install a missing model, and never downloads it itself', async () => {
+  const fake = fakeBase('not_started');
+  const bg = fakeBackground();
+  let now = 0;
+  const front = frontBuiltInModel(fake.base, bg.background, () => now);
+  await settle();
+  expect(fake.prepares()).toBe(0);
+  expect(front.available()).toBe(false);
+  front.startIfIdle();
+  front.startIfIdle();
+  await front.model.prepare();
+  expect(fake.prepares()).toBe(0);
+  // One wake per throttle window from the ticks; an explicit prepare (Try again) always asks.
+  expect(bg.prepares()).toBe(2);
+  now += 30_000;
+  front.startIfIdle();
+  expect(bg.prepares()).toBe(3);
+});
+
+test('the front verifies an install the background finished, once, and then answers through the background', async () => {
+  const fake = fakeBase('ready');
+  const bg = fakeBackground();
+  const front = frontBuiltInModel(fake.base, bg.background, () => 0);
+  await settle();
+  expect(fake.prepares()).toBe(1);
+  expect(front.available()).toBe(true);
+  front.startIfIdle();
+  await settle();
+  expect(fake.prepares()).toBe(1);
+  const answer = await front.model.complete({ system: 's', prompt: 'p', localOnly: true });
+  expect(answer.text).toBe('from the background');
+  expect(bg.requests).toHaveLength(1);
+  expect(bg.prepares()).toBe(0);
+  fake.setState('failed');
+  expect(front.available()).toBe(false);
 });

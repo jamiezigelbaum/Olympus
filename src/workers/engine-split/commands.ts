@@ -19,7 +19,9 @@
  * or a state the background re-derives).
  */
 import { randomUUID } from 'node:crypto';
-import { ENGINE_COMMANDS_PATH, ENGINE_READY_PATH, type EngineReadyBody } from '../../core/engine-split.ts';
+import { ENGINE_COMMANDS_PATH, ENGINE_MODEL_COMPLETE_PATH, ENGINE_READY_PATH, type EngineReadyBody } from '../../core/engine-split.ts';
+import type { AnalystModelCompletion, AnalystModelRequest } from '../../core/analyst.ts';
+import { OperationError } from '../../core/operation-error.ts';
 import { hasValidWorkerBearerToken } from '../http.ts';
 
 /** Config files the front writes and the background re-reads (design, "Writes the front still needs", B). */
@@ -190,6 +192,8 @@ export type EngineCommand =
   /** frontPid (models only): the background restarts once that front has ended, so its answer gets through. */
   | { kind: 'reload'; target: EngineReloadKind; corpora?: string[]; frontPid?: number }
   | { kind: 'archive_changed' }
+  /** Install or re-arm the built-in private model: only the background installs it (a wake). */
+  | { kind: 'model_prepare' }
   | { kind: 'dashboard_samples'; samples: Record<string, unknown>[] }
   | { kind: EngineForwardedKind; request: EngineForwardedRequest; frontPid?: number }
   | { kind: 'sync_now'; source: string; manual: boolean }
@@ -354,6 +358,7 @@ export function parseEngineCommandEnvelope(value: unknown): EngineCommandEnvelop
       } };
     }
     case 'archive_changed':
+    case 'model_prepare':
       return { id, command: { kind } };
     case 'dashboard_samples': {
       const samples = command!.samples;
@@ -561,6 +566,8 @@ export interface EngineCommandServerOptions {
   ready: () => boolean;
   /** Longest a result request may wait for the command to settle. */
   maxWaitMs?: number;
+  /** The built-in private model's completion, run by the one process that holds the model. */
+  modelComplete?: (request: AnalystModelRequest) => Promise<AnalystModelCompletion>;
   /** Timer seam for the wait. */
   setTimeout?: (callback: () => void, ms: number) => unknown;
   clearTimeout?: (timer: unknown) => void;
@@ -573,6 +580,9 @@ export interface EngineCommandServerOptions {
  *   the settled record for an id already applied.
  * - `GET /engine/commands/<id>?wait=<ms>`: the record, waiting up to `wait`
  *   for it to settle; 404 for an id this process does not hold.
+ * - `POST /engine/model/complete`: one built-in model completion, answered
+ *   when it ends. It is not a command: nothing is recorded, and the front
+ *   does not retry it. Closing the request aborts the model call.
  * Every route needs the worker bearer token.
  */
 export function createEngineCommandHandler(options: EngineCommandServerOptions): (request: Request) => Promise<Response> {
@@ -600,6 +610,20 @@ export function createEngineCommandHandler(options: EngineCommandServerOptions):
         throw error;
       }
     }
+    if (url.pathname === ENGINE_MODEL_COMPLETE_PATH && request.method === 'POST') {
+      if (!options.ready() || !options.modelComplete) return Response.json({ error: 'model_unavailable' }, { status: 503 });
+      const parsed = parseModelRequest(await request.json().catch(() => undefined));
+      if (!parsed) return Response.json({ error: 'invalid_model_request' }, { status: 400 });
+      try {
+        const completion = await options.modelComplete({ ...parsed, signal: request.signal });
+        return Response.json(completion);
+      } catch (error) {
+        // The model's own answer, typed as it would be in one process: a
+        // download still running or a server that failed to start.
+        if (error instanceof OperationError) return Response.json({ operation_error: error.toJSON() }, { status: 503 });
+        return Response.json({ error: 'model_failed', message: error instanceof Error ? error.message : 'unknown error' }, { status: 500 });
+      }
+    }
     if (url.pathname.startsWith(`${ENGINE_COMMANDS_PATH}/`) && request.method === 'GET') {
       const id = decodeURIComponent(url.pathname.slice(ENGINE_COMMANDS_PATH.length + 1));
       if (!ID.test(id)) return Response.json({ error: 'not_found' }, { status: 404 });
@@ -615,5 +639,20 @@ export function createEngineCommandHandler(options: EngineCommandServerOptions):
       }
     }
     return Response.json({ error: 'not_found' }, { status: 404 });
+  };
+}
+
+/** A completion request from the wire: the fields AnalystModelRequest carries, nothing coerced. */
+export function parseModelRequest(value: unknown): Omit<AnalystModelRequest, 'signal'> | undefined {
+  const record = asRecord(value);
+  if (!record) return undefined;
+  const { system, prompt, localOnly, maxOutputChars, responseSchema } = record;
+  if (typeof system !== 'string' || typeof prompt !== 'string' || typeof localOnly !== 'boolean') return undefined;
+  if (maxOutputChars !== undefined && (!Number.isSafeInteger(maxOutputChars) || (maxOutputChars as number) < 1)) return undefined;
+  if (responseSchema !== undefined && !asRecord(responseSchema)) return undefined;
+  return {
+    system, prompt, localOnly,
+    ...(maxOutputChars !== undefined ? { maxOutputChars: maxOutputChars as number } : {}),
+    ...(responseSchema !== undefined ? { responseSchema: responseSchema as Record<string, unknown> } : {}),
   };
 }
