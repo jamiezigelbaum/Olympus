@@ -236225,17 +236225,14 @@ function createRemoteMcpHandler(options) {
 }
 function rpcCallNames(body) {
   const messages = Array.isArray(body) ? body : [body];
-  const names = [];
-  for (const message2 of messages.slice(0, 8)) {
+  return messages.slice(0, 8).map((message2) => {
     const { method, params } = message2 && typeof message2 === "object" ? message2 : {};
-    if (typeof method !== "string" || method.length > 64) {
-      names.push("?");
-      continue;
-    }
-    const tool = method === "tools/call" && typeof params?.name === "string" && /^[a-z0-9_]{1,64}$/.test(params.name) ? `:${params.name}` : "";
-    names.push(`${method}${tool}`);
-  }
-  return names;
+    if (typeof method !== "string" || !LOGGED_RPC_METHODS.has(method))
+      return "?";
+    if (method !== "tools/call")
+      return method;
+    return `${method}:${typeof params?.name === "string" && LOGGED_TOOL_NAME.test(params.name) ? params.name : "?"}`;
+  });
 }
 function remoteMcpLogLine(trace, status, ms) {
   return JSON.stringify({
@@ -236435,7 +236432,7 @@ function jsonResponse(status, body, headers = {}) {
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers }
   });
 }
-var REMOTE_MCP_PATH = "/mcp", REMOTE_DIRECTORY_MCP_PATH, IN_PROCESS_WORKER_BASE_URL = "http://olympus-worker.internal/v1";
+var REMOTE_MCP_PATH = "/mcp", REMOTE_DIRECTORY_MCP_PATH, IN_PROCESS_WORKER_BASE_URL = "http://olympus-worker.internal/v1", LOGGED_RPC_METHODS, LOGGED_TOOL_NAME;
 var init_remote_mcp = __esm(() => {
   init_webStandardStreamableHttp();
   init_delphi();
@@ -236456,6 +236453,24 @@ var init_remote_mcp = __esm(() => {
   init_tokens();
   init_pinned_clients();
   REMOTE_DIRECTORY_MCP_PATH = DIRECTORY_MCP_PATH;
+  LOGGED_RPC_METHODS = new Set([
+    "initialize",
+    "ping",
+    "tools/list",
+    "tools/call",
+    "resources/list",
+    "resources/templates/list",
+    "resources/read",
+    "prompts/list",
+    "prompts/get",
+    "completion/complete",
+    "logging/setLevel",
+    "notifications/initialized",
+    "notifications/cancelled",
+    "notifications/progress",
+    "notifications/roots/list_changed"
+  ]);
+  LOGGED_TOOL_NAME = /^(?:olympus|source|ask)_[a-z_]{1,48}$/;
 });
 
 // src/workers/relay-surfaces.ts

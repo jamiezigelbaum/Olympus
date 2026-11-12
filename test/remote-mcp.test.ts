@@ -268,6 +268,11 @@ describe('remote MCP over loopback with a connection token', () => {
     expect(lines.at(-1)!.connection).toBeUndefined();
     const all = logLines.join('\n');
     for (const leaked of [token, connection.id, 'secret-question-text', 'Claude']) expect(all).not.toContain(leaked);
+    // Client-written text never reaches the journal through a method or tool name.
+    for (const body of [{ jsonrpc: '2.0', id: 9, method: 'alice@example.com' }, { jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'alice_example', arguments: {} } }]) {
+      await fetch(`${base}/mcp`, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', Authorization: `Bearer ${token}` }, body: JSON.stringify(body) });
+    }
+    expect(logLines.slice(-2).map((line) => (JSON.parse(line) as { calls: string[] }).calls)).toEqual([['?'], ['tools/call:?']]);
   });
 
   test('missing, malformed, unknown, and revoked tokens get 401 with a Bearer challenge', async () => {
