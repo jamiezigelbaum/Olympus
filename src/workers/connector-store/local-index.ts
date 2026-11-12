@@ -13287,7 +13287,7 @@ export class LocalConnectorStore {
           }
         }
         const enough = (row: ItemRow) => (matchedGroups.get(row.item_pk) ?? 0) >= required;
-        const weights = rows.every(enough) ? undefined : (conceptWeights ??= yield* this.conceptWeightsSteps(groups, exact));
+        const weights = rows.every(enough) ? undefined : (conceptWeights ??= yield* this.conceptWeightsSteps(groups, exact, common?.commonShares));
         // One unique literal topic word can identify a record when a question
         // combines neighbouring records (#710). The shared stopwords exclude
         // scaffolding such as "my"; synonyms alone cannot earn this exception.
@@ -13460,7 +13460,7 @@ export class LocalConnectorStore {
   private *commonConceptTermsSteps(
     groups: ReadonlyArray<readonly string[]>,
     exact: ReadonlyMap<string, unknown>,
-  ): Generator<StoreRead, { excluded?: ReadonlySet<string>; audit: ConnectorStoreCommonWords } | undefined, unknown> {
+  ): Generator<StoreRead, { excluded?: ReadonlySet<string>; commonShares?: ReadonlyMap<number, number>; audit: ConnectorStoreCommonWords } | undefined, unknown> {
     if (groups.length < 2) return undefined;
     const memo = this.conceptCountMemo ??= new Map();
     const remembered = (key: string): number | undefined => {
@@ -13481,45 +13481,53 @@ export class LocalConnectorStore {
     }
     if (rows < KEYWORD_COMMON_MIN_ROWS) return undefined;
     const windows = keywordCountWindows(rows);
-    const shares: number[] = [];
+    // Exact words, whatever the search's mode: FTS5 reads every completion's
+    // doclist for a prefix, whatever the rowid bounds (3 to 6 MB a count on
+    // the seed above). A prefix search may so keep a word its completions make
+    // common; it never leaves out a rare one.
+    const groupQueries = groups.map((group) => sourceIndexFtsGroupQuery(group, exact, false));
+    const keys = groupQueries.map((groupQuery) => `\u0001common:${rows}:${groupQuery}`);
+    // Remembered as the share: an early stop samples fewer rows.
+    const shares: Array<number | undefined> = keys.map((key) => remembered(key));
+    const tally = groups.map(() => ({ count: 0, sampled: 0 }));
     const countStarted = Date.now();
     let windowsRead = 0;
-    for (const group of groups) {
-      // Exact words, whatever the search's mode: FTS5 reads every
-      // completion's doclist for a prefix, whatever the rowid bounds (3 to 6
-      // MB a count on the seed above). A prefix search may so keep a word its
-      // completions make common; it never leaves out a rare one.
-      const groupQuery = sourceIndexFtsGroupQuery(group, exact, false);
-      const key = `\u0001common:${rows}:${groupQuery}`;
-      // Remembered as the share: an early stop samples fewer rows.
-      let share = remembered(key);
-      if (share === undefined) {
-        let count = 0;
-        let sampled = 0;
-        for (const [from, to] of windows) {
-          count += ((yield {
-            mode: 'get',
-            sql: 'SELECT COUNT(*) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ? AND rowid BETWEEN ? AND ?',
-            params: [groupQuery, from, to],
-          }) as { count: number }).count;
-          sampled += to - from + 1;
-          windowsRead += 1;
-          if (keywordShareSettled(count, sampled)) break;
-        }
-        share = count / sampled;
-        remember(key, share);
+    // Every count of a round is one read: through the read pool each read
+    // waits its turn, and on Sparta that wait, not the SQL, was the cost
+    // (#1423 diagnosis, olympus-ops#151, 2026-11-12). The first round reads
+    // each word's first window; the second the rest, for the words the first
+    // did not settle (keywordShareSettled).
+    for (const round of [windows.slice(0, 1), windows.slice(1)]) {
+      const counts = groups.flatMap((_, index) => shares[index] === undefined ? round.map((window) => ({ index, window })) : []);
+      if (counts.length === 0 || round.length === 0) continue;
+      const row = (yield {
+        mode: 'get',
+        sql: `SELECT ${counts.map((_, at) => `(SELECT COUNT(*) FROM connector_store_fts WHERE connector_store_fts MATCH ? AND rowid BETWEEN ? AND ?) AS c${at}`).join(', ')}`,
+        params: counts.flatMap(({ index, window: [from, to] }) => [groupQueries[index]!, from, to]),
+      }) as Record<string, number>;
+      for (const [at, { index, window: [from, to] }] of counts.entries()) {
+        tally[index]!.count += row[`c${at}`] ?? 0;
+        tally[index]!.sampled += to - from + 1;
       }
-      shares.push(share);
+      windowsRead += counts.length;
+      for (const [index, { count, sampled }] of tally.entries()) {
+        if (shares[index] !== undefined || sampled === 0) continue;
+        if (sampled >= windows.reduce((sum, [from, to]) => sum + to - from + 1, 0) || keywordShareSettled(count, sampled)) {
+          shares[index] = count / sampled;
+          remember(keys[index]!, shares[index]!);
+        }
+      }
     }
     const commonCountMs = Date.now() - countStarted;
-    const common = shares.map((share) => share > KEYWORD_COMMON_ROW_SHARE);
-    if (common.every(Boolean)) common[shares.indexOf(Math.min(...shares))] = false;
+    const share = shares as number[];
+    const common = share.map((value) => value > KEYWORD_COMMON_ROW_SHARE);
+    if (common.every(Boolean)) common[share.indexOf(Math.min(...share))] = false;
     const kept = new Set(groups.filter((_, index) => !common[index]).flat());
     const excluded = new Set(groups.filter((_, index) => common[index]).flat().filter((term) => !kept.has(term)));
     const estimate = (keep: (index: number) => boolean) =>
-      Math.round(Math.min(rows, shares.reduce((sum, share, index) => sum + (keep(index) ? share * rows : 0), 0)));
+      Math.round(Math.min(rows, share.reduce((sum, value, index) => sum + (keep(index) ? value * rows : 0), 0)));
     return {
-      ...(excluded.size > 0 ? { excluded } : {}),
+      ...(excluded.size > 0 ? { excluded, commonShares: new Map(share.flatMap((value, index) => common[index] ? [[index, value] as const] : [])) } : {}),
       audit: {
         wordsLeftOut: excluded.size,
         rowsRankedEstimate: estimate((index) => !common[index]),
@@ -13530,9 +13538,17 @@ export class LocalConnectorStore {
     };
   }
 
+  /**
+   * `sampled`: the share of the store's FTS rows each common concept was
+   * counted in (commonConceptTermsSteps). Those concepts are weighed from it
+   * rather than counted store-wide: a word in over a fifth of the rows weighs
+   * little either way, and its whole doclist, every completion included, is
+   * the read leaving it out of the match was meant to avoid.
+   */
   private *conceptWeightsSteps(
     groups: ReadonlyArray<readonly string[]>,
     exact: ReadonlyMap<string, unknown>,
+    sampled?: ReadonlyMap<number, number>,
   ): Generator<StoreRead, { of: number[]; total: number; counts: number[]; population: number }, unknown> {
     const memo = this.conceptCountMemo ??= new Map();
     const remembered = (key: string): number | undefined => {
@@ -13550,7 +13566,9 @@ export class LocalConnectorStore {
       remember(POPULATION, items);
     }
     const counts: number[] = [];
-    for (const group of groups) {
+    for (const [index, group] of groups.entries()) {
+      const share = sampled?.get(index);
+      if (share !== undefined) { counts.push(Math.round(Math.min(1, share) * items)); continue; }
       const groupQuery = sourceIndexFtsGroupQuery(group, exact);
       let count = remembered(groupQuery);
       if (count === undefined) {

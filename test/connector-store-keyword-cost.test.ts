@@ -292,12 +292,59 @@ test('word shares are counted over rowid windows, never by reading a word\'s who
   const query = db.query;
   const counts: string[] = [];
   db.query = function (sql: string) {
-    if (/^\s*SELECT COUNT\(\*\)/.test(sql) && sql.includes('connector_store_fts MATCH ?')) counts.push(sql);
+    if (/SELECT COUNT\(\*\) FROM connector_store_fts WHERE connector_store_fts MATCH \?/.test(sql)) counts.push(sql);
     return query.call(db, sql);
   };
   try { store.searchItemsDetailed('notes about tomatoes and bread', 10); } finally { db.query = query; }
   expect(counts.length).toBeGreaterThan(0);
-  for (const sql of counts) expect(sql).toContain('rowid BETWEEN ? AND ?');
+  // Each count in the read is bounded by its window.
+  for (const sql of counts) expect(sql.split('MATCH ?').length - 1).toBe(sql.split('rowid BETWEEN ? AND ?').length - 1);
+}, 60_000);
+
+// On Sparta's stores each count was its own read through the store's read
+// pool, 5 to 15 windows a word, so counting cost 0.4 to 5.2 s a store while
+// the SQL itself takes milliseconds (#1423 diagnosis, olympus-ops#151,
+// 2026-11-12). Every window of every word is one read.
+test('a search counts every word\'s windows in one read of the store', async () => {
+  const store = await largeCommonStore();
+  (store as unknown as { conceptCountMemo?: unknown }).conceptCountMemo = undefined;
+  const db = (store as unknown as { db: { query: (sql: string) => unknown } }).db;
+  const query = db.query;
+  let countReads = 0;
+  db.query = function (sql: string) {
+    if (sql.includes('rowid BETWEEN')) countReads++;
+    return query.call(db, sql);
+  };
+  try { store.searchItemsDetailed('notes about tomatoes bread coffee', 10); } finally { db.query = query; }
+  expect(countReads).toBe(1);
+}, 60_000);
+
+// A word left out as common was then counted again store-wide, on its whole
+// doclist with every completion, whenever the candidates its absence ranked
+// missed a concept: the concept weights read it (#1423 diagnosis: the stage
+// still 2 to 4 times main's with counting removed). Its sampled share stands
+// in for that count.
+test('a word left out as common is never counted store-wide for the concept weights', async () => {
+  const store = await largeCommonStore();
+  (store as unknown as { conceptCountMemo?: unknown }).conceptCountMemo = undefined;
+  const db = (store as unknown as { db: { query: (sql: string) => { get: (...params: unknown[]) => unknown } } }).db;
+  const query = db.query;
+  const counted: string[] = [];
+  db.query = function (sql: string) {
+    const statement = query.call(db, sql);
+    if (!sql.includes('COUNT(DISTINCT r.item_pk)')) return statement;
+    return { ...statement, get: (...params: unknown[]) => { counted.push(String(params[0])); return statement.get(...params); } };
+  };
+  let rows: Array<{ sourceItem: { providerItemId: string } }> = [];
+  // "weekly" and "notes" are common; the answer holds "kestrel" and "notes"
+  // but not "weekly", so it misses a concept and the weights are read.
+  try { rows = store.searchItemsDetailed('kestrel weekly notes', 10).rows; } finally { db.query = query; }
+  expect(counted.length).toBeGreaterThan(0);
+  for (const groupQuery of counted) {
+    expect(groupQuery).not.toContain('"notes"');
+    expect(groupQuery).not.toContain('"weekly"');
+  }
+  expect(rows[0]?.sourceItem.providerItemId).toBe('answer');
 }, 60_000);
 
 // The eval report reads these from the lane audit (#1423): how many words a
