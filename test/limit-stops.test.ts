@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -16,6 +16,11 @@ function databasePath(): string {
   return join(root, 'state.sqlite');
 }
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+function withDb<T>(path: string, action: (db: Database) => T): T {
+  const db = new Database(path);
+  try { return action(db); } finally { db.close(); }
+}
+const listAt = (path: string): LimitStop[] => withDb(path, listOpenLimitStops);
 
 const registration = {
   id: 'test.limit', kind: 'cost', scope: 'answer', label: 'Daily cost', unit: 'usd', continue: 'raise',
@@ -65,27 +70,28 @@ describe('limit stops', () => {
     db.close();
     const reader = new Database(path, { readonly: true });
     try { expect(listOpenLimitStops(reader)).toEqual([stop]); } finally { reader.close(); }
-    clearLimitStop(stop.id, stop.subject, path);
-    expect(listOpenLimitStops(path)).toEqual([]);
-    reportLimitStop(stop, path);
-    expect(listOpenLimitStops(path)).toEqual([stop]);
+    withDb(path, (db) => clearLimitStop(stop.id, stop.subject, db));
+    expect(listAt(path)).toEqual([]);
+    withDb(path, (db) => reportLimitStop(stop, db));
+    expect(listAt(path)).toEqual([stop]);
   });
 
-  test('reads do not create a database or migrate an older one', () => {
+  test('reads do not migrate an older database', () => {
     const path = databasePath();
-    expect(listOpenLimitStops(path)).toEqual([]);
-    expect(existsSync(path)).toBe(false);
     const db = new Database(path);
     db.close();
-    expect(listOpenLimitStops(path)).toEqual([]);
+    expect(listAt(path)).toEqual([]);
     const reader = new Database(path, { readonly: true });
     try { expect(reader.query('SELECT name FROM sqlite_master').all()).toEqual([]); } finally { reader.close(); }
   });
 
-  test('unregistered ids throw before opening storage', () => {
-    const path = databasePath();
-    expect(() => reportLimitStop({ ...stop, id: 'test.unknown' }, path)).toThrow('Unregistered limit');
-    expect(existsSync(path)).toBe(false);
+  test('unregistered ids throw and write nothing', () => {
+    const db = new Database(':memory:');
+    try {
+      initializeLimitStops(db);
+      expect(() => reportLimitStop({ ...stop, id: 'test.unknown' }, db)).toThrow('Unregistered limit');
+      expect(listOpenLimitStops(db)).toEqual([]);
+    } finally { db.close(); }
   });
 
   test('overrun margins are bounded and unknown prices never qualify', () => {
@@ -111,16 +117,16 @@ describe('limit stops', () => {
     };
     try {
       store.recordFailure({ ...failure, degradedReason: 'daily_cost_guard' });
-      expect(listOpenLimitStops(path).map((row) => row.id)).toEqual(['x.daily_cost']);
+      expect(listAt(path).map((row) => row.id)).toEqual(['x.daily_cost']);
       store.recordFailure({ ...failure, degradedReason: 'daily_api_request_guard' });
-      expect(listOpenLimitStops(path).map((row) => row.id)).toEqual(['x.daily_requests']);
+      expect(listAt(path).map((row) => row.id)).toEqual(['x.daily_requests']);
       db.exec(`CREATE TRIGGER refuse_stop BEFORE INSERT ON limit_stops
         BEGIN SELECT RAISE(ABORT, 'report failed'); END`);
       expect(() => store.recordFailure({ ...failure, degradedReason: 'daily_cost_guard' })).toThrow('report failed');
       expect(store.get(key)?.degradedReason).toBe('daily_api_request_guard');
-      expect(listOpenLimitStops(path).map((row) => row.id)).toEqual(['x.daily_requests']);
+      expect(listAt(path).map((row) => row.id)).toEqual(['x.daily_requests']);
       store.recordSuccess({ ...key, completedAt: stop.since, resultStatus: 'idle', degradedReason: 'embedding_items_failed' });
-      expect(listOpenLimitStops(path)).toEqual([]);
+      expect(listAt(path)).toEqual([]);
     } finally { db.close(); store.close(); }
   });
 
@@ -138,15 +144,15 @@ describe('limit stops', () => {
     const parked = { ...key, completedAt, resultStatus: 'idle' as const, degradedReason: reason, notBeforeAt: stop.resumesAt };
     try {
       store.recordSuccess(parked);
-      expect(listOpenLimitStops(path)).toEqual([{
+      expect(listAt(path)).toEqual([{
         id, subject: JSON.stringify(['source', 'corpus', 'pull']), since: completedAt,
         limit: null, used: null, resumesAt: stop.resumesAt,
       }]);
       store.recordSuccess({ ...parked, taskId: 'reconcile' });
       store.recordSuccess({ ...key, completedAt, resultStatus: 'idle' });
-      expect(listOpenLimitStops(path)).toHaveLength(1);
+      expect(listAt(path)).toHaveLength(1);
       store.adoptExternalSuccess({ ...key, taskId: 'reconcile', completedAt: '2026-11-12T13:00:00.000Z', resultStatus: 'idle' });
-      expect(listOpenLimitStops(path)).toEqual([]);
+      expect(listAt(path)).toEqual([]);
     } finally { store.close(); }
   });
 
@@ -160,15 +166,15 @@ describe('limit stops', () => {
     const raw = new Database(path);
     raw.exec('DELETE FROM limit_stops');
     raw.close();
-    expect(listOpenLimitStops(path)).toEqual([]);
+    expect(listAt(path)).toEqual([]);
     const reopened = new LocalSourceSchedulerStateStore(path);
     try {
-      expect(listOpenLimitStops(path).map((row) => [row.id, row.subject, row.resumesAt])).toEqual([
+      expect(listAt(path).map((row) => [row.id, row.subject, row.resumesAt])).toEqual([
         ['x.daily_cost', JSON.stringify(['source', 'corpus', 'pull']), stop.resumesAt],
       ]);
     } finally { reopened.close(); }
     const again = new LocalSourceSchedulerStateStore(path);
-    try { expect(listOpenLimitStops(path)).toHaveLength(1); } finally { again.close(); }
+    try { expect(listAt(path)).toHaveLength(1); } finally { again.close(); }
   });
 
   test('forgetting a source removes its stops and keeps other sources and non-scheduler subjects', () => {
@@ -180,14 +186,14 @@ describe('limit stops', () => {
     try {
       parked('gone', 'gone-corpus');
       parked('kept', 'kept-corpus');
-      reportLimitStop(stop, path);
+      withDb(path, (db) => reportLimitStop(stop, db));
     } finally { store.close(); }
     expect(forgetSourceSchedulerState(path, { sourceIds: ['gone'], corpusIds: [] }, { dryRun: true })).toBeGreaterThanOrEqual(2);
-    expect(listOpenLimitStops(path)).toHaveLength(3);
+    expect(listAt(path)).toHaveLength(3);
     forgetSourceSchedulerState(path, { sourceIds: ['gone'], corpusIds: [] });
-    expect(listOpenLimitStops(path).map((row) => row.subject).sort()).toEqual(
+    expect(listAt(path).map((row) => row.subject).sort()).toEqual(
       [JSON.stringify(['kept', 'kept-corpus', 'pull']), stop.subject].sort());
     forgetSourceSchedulerState(path, { sourceIds: [], corpusIds: ['kept-corpus'] });
-    expect(listOpenLimitStops(path).map((row) => row.subject)).toEqual([stop.subject]);
+    expect(listAt(path).map((row) => row.subject)).toEqual([stop.subject]);
   });
 });

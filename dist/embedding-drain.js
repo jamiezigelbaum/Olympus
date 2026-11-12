@@ -39756,7 +39756,7 @@ function registerLimit(input) {
   limits.set(input.id, Object.freeze({ ...input }));
 }
 
-// src/workers/dashboard/scheduler-markers.ts
+// src/workers/scheduler-limit-stops.ts
 var DAILY_LIMITS = new Map(Object.entries({
   daily_cost_guard: { id: "x.daily_cost", kind: "cost", label: "daily X API budget used" },
   daily_api_request_guard: { id: "x.daily_requests", kind: "requests", label: "daily X API budget used" },
@@ -39768,18 +39768,6 @@ var DAILY_LIMITS = new Map(Object.entries({
 for (const limit of DAILY_LIMITS.values()) {
   registerLimit({ ...limit, scope: "source", unit: limit.kind === "cost" ? "usd" : "requests", continue: "run_once" });
 }
-var OPERATOR_PAUSED_SCHEDULER_MARKERS = new Set([
-  "daily_api_request_guard",
-  "daily_resource_read_guard",
-  "daily_cost_guard",
-  "readwise_daily_api_request_guard",
-  "gmail_daily_api_request_guard",
-  "google_drive_daily_api_request_guard",
-  "head_api_request_reserve_guard",
-  "head_resource_read_reserve_guard",
-  "head_cost_reserve_guard",
-  "provider_rate_limit"
-]);
 // src/workers/local-pacing.ts
 import { execFile, spawn as spawn2 } from "node:child_process";
 import { existsSync as existsSync27, readdirSync as readdirSync5, readFileSync as readFileSync23 } from "node:fs";
