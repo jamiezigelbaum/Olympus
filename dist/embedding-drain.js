@@ -17570,6 +17570,27 @@ const open = (path) => {
   postMessage({ diagnostic: 'open', path, ms: performance.now() - started });
   return db;
 };
+// Snapshot connections are kept for the next snapshot instead of closed:
+// Bun 1.3.x corrupts its heap when pool threads open and close SQLite
+// connections concurrently (olympus-ops#151), and a store's searches would
+// otherwise open one connection per snapshot.
+const IDLE_SNAPSHOT_CONNECTIONS = 8;
+const idleSnapshots = new Map();
+const snapshotConnection = (path) => {
+  const stat = statSync(path);
+  const file = stat.dev + ':' + stat.ino;
+  const idle = idleSnapshots.get(path) ?? [];
+  while (idle.length > 0) {
+    const held = idle.pop();
+    if (held.file === file) {
+      // A snapshot may have changed its connection's settings; the next starts from the defaults.
+      held.db.exec('PRAGMA busy_timeout = 10000');
+      return held;
+    }
+    try { held.db.close(); } catch {}
+  }
+  return { db: open(path), file, path };
+};
 const connection = (path) => {
   const stat = statSync(path);
   const file = stat.dev + ':' + stat.ino;
@@ -17586,23 +17607,31 @@ self.onmessage = (event) => {
     const held = connections.get(path);
     connections.delete(path);
     try { held?.db.close(); } catch {}
+    for (const idle of idleSnapshots.get(path) ?? []) { try { idle.db.close(); } catch {} }
+    idleSnapshots.delete(path);
+    // A snapshot still open on the released store closes, rather than idles, when it ends.
+    for (const open of snapshots.values()) if (open.path === path) open.discard = true;
     return;
   }
   try {
     if (op === 'open') {
-      const db = open(path);
-      db.exec('BEGIN');
-      snapshots.set(snapshot, db);
+      const held = snapshotConnection(path);
+      try { held.db.exec('BEGIN'); } catch (error) { held.db.close(); throw error; }
+      snapshots.set(snapshot, held);
       postMessage({ id, ok: true, rows: null });
     } else if (op === 'close') {
-      const db = snapshots.get(snapshot);
+      const held = snapshots.get(snapshot);
       snapshots.delete(snapshot);
-      if (db) {
-        try { db.exec('COMMIT'); } finally { db.close(); }
+      if (held) {
+        let reusable = false;
+        try { held.db.exec('COMMIT'); reusable = true; } finally {
+          const idle = idleSnapshots.get(held.path) ?? [];
+          if (reusable && !held.discard && idle.length < IDLE_SNAPSHOT_CONNECTIONS) { idle.push(held); idleSnapshots.set(held.path, idle); } else held.db.close();
+        }
       }
       postMessage({ id, ok: true, rows: null });
     } else {
-      const db = op === 'query' ? connection(path) : snapshots.get(snapshot);
+      const db = op === 'query' ? connection(path) : snapshots.get(snapshot)?.db;
       if (!db) throw new Error('unknown snapshot');
       const started = performance.now();
       const query = db.query(sql);
@@ -20547,16 +20576,18 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit) 
     if (expired())
       return cut;
     const page = connectorStoreVectorDigestPageQuery(options, afterChunkPk);
-    const rows = await read({ mode: "all", ...page });
-    for (let index = 0;index < rows.length; index++) {
+    const packed = await read({ mode: "get", ...page });
+    const finished = forEachPackedVectorDigest(packed, (chunkPk, digest, index) => {
       if ((index & 31) === 0 && expired())
-        return cut;
-      const row = rows[index];
-      heap.append(row.chunk_pk, scoreVectorDigest(query, row.digest));
-    }
-    if (rows.length < 4096)
+        return false;
+      heap.append(chunkPk, scoreVectorDigest(query, digest));
+      return true;
+    });
+    if (!finished)
+      return cut;
+    if (packed.n < VECTOR_DIGEST_PAGE_ROWS)
       break;
-    afterChunkPk = rows.at(-1).chunk_pk;
+    afterChunkPk = packed.last_pk;
     if (digestPages++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0)
       await yieldConnectorStoreVectorScan();
   }
@@ -20604,12 +20635,33 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit) 
   }
   return expired() ? cut : { bestByItem, dimensionMismatches, exhausted: heap.length === 0 };
 }
-function connectorStoreVectorDigestPageQuery(options, afterChunkPk, limit = 4096) {
+var VECTOR_DIGEST_PAGE_ROWS = 4096;
+function forEachPackedVectorDigest(page, visit) {
+  if (page.n === 0)
+    return true;
+  const pks = JSON.parse(page.pks);
+  const lengths = JSON.parse(page.lengths);
+  const total = lengths.reduce((sum, length) => sum + length, 0);
+  if (pks.length !== page.n || lengths.length !== page.n || total !== page.packed.byteLength) {
+    throw new Error("vector digest page does not unpack: key, length and byte counts disagree");
+  }
+  let offset = 0;
+  for (let index = 0;index < page.n; index++) {
+    const length = lengths[index];
+    if (!visit(pks[index], page.packed.subarray(offset, offset + length), index))
+      return false;
+    offset += length;
+  }
+  return true;
+}
+function connectorStoreVectorDigestPageQuery(options, afterChunkPk, limit = VECTOR_DIGEST_PAGE_ROWS) {
   const account = normalizeOptionalAccountScope(options.accountScope);
   return {
-    sql: `SELECT chunk_pk, digest FROM chunk_vector_digest
-      WHERE chunk_pk > ? AND model_id = ? ${account ? "AND account_scope = ?" : ""}
-      ORDER BY chunk_pk LIMIT ?`,
+    sql: `SELECT count(*) AS n, max(chunk_pk) AS last_pk, json_group_array(chunk_pk) AS pks,
+        json_group_array(length(digest)) AS lengths, CAST(coalesce(group_concat(digest, ''), x'') AS BLOB) AS packed
+      FROM (SELECT chunk_pk, digest FROM chunk_vector_digest
+        WHERE chunk_pk > ? AND model_id = ? ${account ? "AND account_scope = ?" : ""}
+        ORDER BY chunk_pk LIMIT ?)`,
     params: [afterChunkPk, options.modelId, ...account ? [account] : [], limit]
   };
 }
@@ -33401,6 +33453,31 @@ function stripDataUrlPrefix(dataUrl) {
 var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages";
 var TELEGRAM_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:telegram";
 var TELEGRAM_SPOOL_CLEARED_KEY = `${TELEGRAM_SPOOL_REDACTION_STATE_KEY}:cleared_through`;
+// src/core/limit-stops.ts
+var limits = new Map;
+function registerLimit(input) {
+  const prior = limits.get(input.id);
+  if (prior && Object.keys({ ...prior, ...input }).some((key) => prior[key] !== input[key])) {
+    throw new Error(`Limit already registered differently: ${input.id}`);
+  }
+  limits.set(input.id, Object.freeze({ ...input }));
+}
+
+// src/workers/scheduler-limit-stops.ts
+var DAILY_LIMITS = new Map(Object.entries({
+  daily_cost_guard: { id: "x.daily_cost", kind: "cost", label: "daily X API budget used" },
+  daily_api_request_guard: { id: "x.daily_requests", kind: "requests", label: "daily X API budget used" },
+  daily_resource_read_guard: { id: "x.daily_resource_reads", kind: "requests", label: "daily X API budget used" },
+  head_api_request_reserve_guard: { id: "x.head_reserve_requests", kind: "requests", label: "daily X API budget used" },
+  head_resource_read_reserve_guard: { id: "x.head_reserve_reads", kind: "requests", label: "daily X API budget used" },
+  head_cost_reserve_guard: { id: "x.head_reserve_cost", kind: "cost", label: "daily X API budget used" },
+  readwise_daily_api_request_guard: { id: "readwise.daily_requests", kind: "requests", label: "daily Readwise API budget used" },
+  gmail_daily_api_request_guard: { id: "gmail.daily_requests", kind: "requests", label: "daily Gmail API budget used" },
+  google_drive_daily_api_request_guard: { id: "drive.daily_requests", kind: "requests", label: "daily Google Drive API budget used" }
+}));
+for (const limit of DAILY_LIMITS.values()) {
+  registerLimit({ ...limit, scope: "source", unit: limit.kind === "cost" ? "usd" : "requests", continue: "run_once" });
+}
 // src/workers/local-pacing.ts
 var GO_EASY_IDLE_FULL_SPEED_MS = 5 * 60000;
 var GO_EASY_LOCAL_WORK_RECENT_MS = 3 * 60000;

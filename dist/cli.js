@@ -32187,6 +32187,27 @@ const open = (path) => {
   postMessage({ diagnostic: 'open', path, ms: performance.now() - started });
   return db;
 };
+// Snapshot connections are kept for the next snapshot instead of closed:
+// Bun 1.3.x corrupts its heap when pool threads open and close SQLite
+// connections concurrently (olympus-ops#151), and a store's searches would
+// otherwise open one connection per snapshot.
+const IDLE_SNAPSHOT_CONNECTIONS = 8;
+const idleSnapshots = new Map();
+const snapshotConnection = (path) => {
+  const stat = statSync(path);
+  const file = stat.dev + ':' + stat.ino;
+  const idle = idleSnapshots.get(path) ?? [];
+  while (idle.length > 0) {
+    const held = idle.pop();
+    if (held.file === file) {
+      // A snapshot may have changed its connection's settings; the next starts from the defaults.
+      held.db.exec('PRAGMA busy_timeout = 10000');
+      return held;
+    }
+    try { held.db.close(); } catch {}
+  }
+  return { db: open(path), file, path };
+};
 const connection = (path) => {
   const stat = statSync(path);
   const file = stat.dev + ':' + stat.ino;
@@ -32203,23 +32224,31 @@ self.onmessage = (event) => {
     const held = connections.get(path);
     connections.delete(path);
     try { held?.db.close(); } catch {}
+    for (const idle of idleSnapshots.get(path) ?? []) { try { idle.db.close(); } catch {} }
+    idleSnapshots.delete(path);
+    // A snapshot still open on the released store closes, rather than idles, when it ends.
+    for (const open of snapshots.values()) if (open.path === path) open.discard = true;
     return;
   }
   try {
     if (op === 'open') {
-      const db = open(path);
-      db.exec('BEGIN');
-      snapshots.set(snapshot, db);
+      const held = snapshotConnection(path);
+      try { held.db.exec('BEGIN'); } catch (error) { held.db.close(); throw error; }
+      snapshots.set(snapshot, held);
       postMessage({ id, ok: true, rows: null });
     } else if (op === 'close') {
-      const db = snapshots.get(snapshot);
+      const held = snapshots.get(snapshot);
       snapshots.delete(snapshot);
-      if (db) {
-        try { db.exec('COMMIT'); } finally { db.close(); }
+      if (held) {
+        let reusable = false;
+        try { held.db.exec('COMMIT'); reusable = true; } finally {
+          const idle = idleSnapshots.get(held.path) ?? [];
+          if (reusable && !held.discard && idle.length < IDLE_SNAPSHOT_CONNECTIONS) { idle.push(held); idleSnapshots.set(held.path, idle); } else held.db.close();
+        }
       }
       postMessage({ id, ok: true, rows: null });
     } else {
-      const db = op === 'query' ? connection(path) : snapshots.get(snapshot);
+      const db = op === 'query' ? connection(path) : snapshots.get(snapshot)?.db;
       if (!db) throw new Error('unknown snapshot');
       const started = performance.now();
       const query = db.query(sql);
@@ -37293,16 +37322,18 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit) 
     if (expired())
       return cut;
     const page = connectorStoreVectorDigestPageQuery(options, afterChunkPk);
-    const rows = await read({ mode: "all", ...page });
-    for (let index = 0;index < rows.length; index++) {
+    const packed = await read({ mode: "get", ...page });
+    const finished = forEachPackedVectorDigest(packed, (chunkPk, digest, index) => {
       if ((index & 31) === 0 && expired())
-        return cut;
-      const row = rows[index];
-      heap.append(row.chunk_pk, scoreVectorDigest(query, row.digest));
-    }
-    if (rows.length < 4096)
+        return false;
+      heap.append(chunkPk, scoreVectorDigest(query, digest));
+      return true;
+    });
+    if (!finished)
+      return cut;
+    if (packed.n < VECTOR_DIGEST_PAGE_ROWS)
       break;
-    afterChunkPk = rows.at(-1).chunk_pk;
+    afterChunkPk = packed.last_pk;
     if (digestPages++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0)
       await yieldConnectorStoreVectorScan();
   }
@@ -37350,12 +37381,32 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit) 
   }
   return expired() ? cut : { bestByItem, dimensionMismatches, exhausted: heap.length === 0 };
 }
-function connectorStoreVectorDigestPageQuery(options, afterChunkPk, limit = 4096) {
+function forEachPackedVectorDigest(page, visit) {
+  if (page.n === 0)
+    return true;
+  const pks = JSON.parse(page.pks);
+  const lengths = JSON.parse(page.lengths);
+  const total = lengths.reduce((sum, length) => sum + length, 0);
+  if (pks.length !== page.n || lengths.length !== page.n || total !== page.packed.byteLength) {
+    throw new Error("vector digest page does not unpack: key, length and byte counts disagree");
+  }
+  let offset = 0;
+  for (let index = 0;index < page.n; index++) {
+    const length = lengths[index];
+    if (!visit(pks[index], page.packed.subarray(offset, offset + length), index))
+      return false;
+    offset += length;
+  }
+  return true;
+}
+function connectorStoreVectorDigestPageQuery(options, afterChunkPk, limit = VECTOR_DIGEST_PAGE_ROWS) {
   const account = normalizeOptionalAccountScope(options.accountScope);
   return {
-    sql: `SELECT chunk_pk, digest FROM chunk_vector_digest
-      WHERE chunk_pk > ? AND model_id = ? ${account ? "AND account_scope = ?" : ""}
-      ORDER BY chunk_pk LIMIT ?`,
+    sql: `SELECT count(*) AS n, max(chunk_pk) AS last_pk, json_group_array(chunk_pk) AS pks,
+        json_group_array(length(digest)) AS lengths, CAST(coalesce(group_concat(digest, ''), x'') AS BLOB) AS packed
+      FROM (SELECT chunk_pk, digest FROM chunk_vector_digest
+        WHERE chunk_pk > ? AND model_id = ? ${account ? "AND account_scope = ?" : ""}
+        ORDER BY chunk_pk LIMIT ?)`,
     params: [afterChunkPk, options.modelId, ...account ? [account] : [], limit]
   };
 }
@@ -40200,7 +40251,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128, VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8, VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS = 60000, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, VECTOR_SCAN_RESERVE_MIN_MS = 1000, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128, VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8, VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS = 60000, VECTOR_DIGEST_PAGE_ROWS = 4096, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, VECTOR_SCAN_RESERVE_MIN_MS = 1000, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_vector_digest();
   init_main_thread_sql_trace();
@@ -111721,6 +111772,124 @@ var init_source_dashboard = __esm(() => {
   DASHBOARD_TRUST_DOMAINS = ["secure_local", "internal", "public_safe"];
 });
 
+// src/core/limit-stops.ts
+function registerLimit(input) {
+  const prior = limits.get(input.id);
+  if (prior && Object.keys({ ...prior, ...input }).some((key) => prior[key] !== input[key])) {
+    throw new Error(`Limit already registered differently: ${input.id}`);
+  }
+  limits.set(input.id, Object.freeze({ ...input }));
+}
+function initializeLimitStops(db) {
+  runSqliteMigrations(db, "limit-stops", [{
+    version: 1,
+    name: "create_limit_stops",
+    up(db) {
+      db.exec(`CREATE TABLE IF NOT EXISTS limit_stops (
+        id TEXT NOT NULL, subject TEXT NOT NULL, since TEXT NOT NULL,
+        "limit" REAL, used REAL, waiting_json TEXT, to_continue_json TEXT,
+        resumes_at TEXT, cleared_at TEXT, PRIMARY KEY (id, subject)
+      )`);
+    }
+  }]);
+}
+function reportLimitStop(input, db) {
+  if (!limits.has(input.id))
+    throw new Error(`Unregistered limit: ${input.id}`);
+  for (const value of [input.limit, input.used, ...Object.values(input.waiting ?? {}), ...Object.values(input.toContinue ?? {})]) {
+    if (value != null && (!Number.isFinite(value) || value < 0))
+      throw new TypeError("Limit amounts must be non-negative finite numbers.");
+  }
+  if (!input.subject || !Number.isFinite(Date.parse(input.since)) || input.resumesAt !== undefined && !Number.isFinite(Date.parse(input.resumesAt))) {
+    throw new TypeError("Limit stops require a subject and valid timestamps.");
+  }
+  db.query(`
+    INSERT INTO limit_stops (id, subject, since, "limit", used, waiting_json, to_continue_json, resumes_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id, subject) DO UPDATE SET
+      -- A stop still open keeps its start; a cleared or self-expired one starts again.
+      since = CASE WHEN limit_stops.cleared_at IS NULL
+        AND (limit_stops.resumes_at IS NULL OR limit_stops.resumes_at > excluded.since)
+        THEN limit_stops.since ELSE excluded.since END,
+      "limit" = excluded."limit", used = excluded.used,
+      waiting_json = excluded.waiting_json, to_continue_json = excluded.to_continue_json,
+      resumes_at = excluded.resumes_at, cleared_at = NULL
+  `).run(input.id, input.subject, input.since, input.limit, input.used, input.waiting ? JSON.stringify(input.waiting) : null, input.toContinue ? JSON.stringify(input.toContinue) : null, input.resumesAt === undefined ? null : new Date(input.resumesAt).toISOString());
+}
+function clearLimitStop(id, subject, db) {
+  db.query(`
+    UPDATE limit_stops SET cleared_at = ? WHERE id = ? AND subject = ? AND cleared_at IS NULL
+  `).run(new Date().toISOString(), id, subject);
+}
+function listOpenLimitStops(db, now = new Date) {
+  if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'limit_stops'").get())
+    return [];
+  const rows = db.query(`SELECT * FROM limit_stops WHERE cleared_at IS NULL
+    AND (resumes_at IS NULL OR resumes_at > ?) ORDER BY id, subject`).all(now.toISOString());
+  return rows.map((row) => ({
+    id: row.id,
+    subject: row.subject,
+    since: row.since,
+    limit: row.limit,
+    used: row.used,
+    ...row.waiting_json ? { waiting: JSON.parse(row.waiting_json) } : {},
+    ...row.to_continue_json ? { toContinue: JSON.parse(row.to_continue_json) } : {},
+    ...row.resumes_at ? { resumesAt: row.resumes_at } : {}
+  }));
+}
+var limits;
+var init_limit_stops = __esm(() => {
+  init_sqlite_migrations();
+  limits = new Map;
+});
+
+// src/workers/scheduler-limit-stops.ts
+function schedulerLimitSubject(state) {
+  return JSON.stringify([state.sourceId, state.corpusId, state.taskId]);
+}
+function syncSchedulerLimitStop(db, previousReason, state) {
+  const previous = previousReason ? DAILY_LIMITS.get(previousReason) : undefined;
+  const current = state.degradedReason ? DAILY_LIMITS.get(state.degradedReason) : undefined;
+  if (!previous && !current)
+    return;
+  const subject = schedulerLimitSubject(state);
+  if (previous && previous.id !== current?.id)
+    clearLimitStop(previous.id, subject, db);
+  if (current)
+    reportLimitStop({
+      id: current.id,
+      subject,
+      since: state.updatedAt,
+      limit: null,
+      used: null,
+      resumesAt: dailyResume(state.updatedAt, state.notBeforeAt)
+    }, db);
+}
+function dailyResume(since, notBeforeAt) {
+  const day = new Date(since);
+  const midnight = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate() + 1);
+  const retry = notBeforeAt ? Date.parse(notBeforeAt) : NaN;
+  return new Date(Number.isFinite(retry) && retry < midnight ? retry : midnight).toISOString();
+}
+var DAILY_LIMITS;
+var init_scheduler_limit_stops = __esm(() => {
+  init_limit_stops();
+  DAILY_LIMITS = new Map(Object.entries({
+    daily_cost_guard: { id: "x.daily_cost", kind: "cost", label: "daily X API budget used" },
+    daily_api_request_guard: { id: "x.daily_requests", kind: "requests", label: "daily X API budget used" },
+    daily_resource_read_guard: { id: "x.daily_resource_reads", kind: "requests", label: "daily X API budget used" },
+    head_api_request_reserve_guard: { id: "x.head_reserve_requests", kind: "requests", label: "daily X API budget used" },
+    head_resource_read_reserve_guard: { id: "x.head_reserve_reads", kind: "requests", label: "daily X API budget used" },
+    head_cost_reserve_guard: { id: "x.head_reserve_cost", kind: "cost", label: "daily X API budget used" },
+    readwise_daily_api_request_guard: { id: "readwise.daily_requests", kind: "requests", label: "daily Readwise API budget used" },
+    gmail_daily_api_request_guard: { id: "gmail.daily_requests", kind: "requests", label: "daily Gmail API budget used" },
+    google_drive_daily_api_request_guard: { id: "drive.daily_requests", kind: "requests", label: "daily Google Drive API budget used" }
+  }));
+  for (const limit of DAILY_LIMITS.values()) {
+    registerLimit({ ...limit, scope: "source", unit: limit.kind === "cost" ? "usd" : "requests", continue: "run_once" });
+  }
+});
+
 // src/workers/source-scheduler-state.ts
 import { chmodSync as chmodSync28, existsSync as existsSync72, mkdirSync as mkdirSync45 } from "node:fs";
 import { dirname as dirname77 } from "node:path";
@@ -111738,7 +111907,11 @@ function forgetSourceSchedulerState(dbPath, scope, options = {}) {
     db.exec("PRAGMA busy_timeout = 10000;");
     return forgetSqliteRows(db, [
       ...filterFor("source_scheduler_task_state", keys),
-      ...filterFor("source_scheduler_unpark_request", keys)
+      ...filterFor("source_scheduler_unpark_request", keys),
+      ...filterFor("limit_stops", [
+        ["CASE WHEN json_valid(subject) THEN json_extract(subject, '$[0]') END", scope.sourceIds],
+        ["CASE WHEN json_valid(subject) THEN json_extract(subject, '$[1]') END", scope.corpusIds]
+      ])
     ], dryRun).reduce((sum, count) => sum + count, 0);
   } finally {
     closeSqliteStore(db);
@@ -111759,6 +111932,24 @@ class LocalSourceSchedulerStateStore {
     this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
     assertSqliteSchemaCanOpen(this.db, SOURCE_SCHEDULER_STATE_STORE_ID, SOURCE_SCHEDULER_STATE_SCHEMA_VERSION);
     runSqliteMigrations(this.db, SOURCE_SCHEDULER_STATE_STORE_ID, sourceSchedulerStateMigrations());
+    initializeLimitStops(this.db);
+    this.backfillLimitStops();
+  }
+  backfillLimitStops() {
+    this.db.transaction(() => {
+      const keys = this.db.query(`
+        SELECT source_id, corpus_id, task_id FROM source_scheduler_task_state
+        WHERE degraded_reason IS NOT NULL
+      `).all();
+      for (const key of keys) {
+        const state = this.get({ sourceId: key.source_id, corpusId: key.corpus_id, taskId: key.task_id });
+        if (state)
+          syncSchedulerLimitStop(this.db, undefined, state);
+      }
+    })();
+  }
+  openLimitStops(now) {
+    return listOpenLimitStops(this.db, now);
   }
   close() {
     closeSqliteStore(this.db);
@@ -112078,7 +112269,7 @@ class LocalSourceSchedulerStateStore {
   writeCurrentVersion(key, write) {
     return this.db.transaction(() => {
       const existing = this.db.query(`
-        SELECT state_version
+        SELECT state_version, degraded_reason
         FROM source_scheduler_task_state
         WHERE source_id = ? AND corpus_id = ? AND task_id = ?
       `).get(key.sourceId, key.corpusId, key.taskId);
@@ -112089,6 +112280,7 @@ class LocalSourceSchedulerStateStore {
       const state = this.get(key);
       if (!state)
         throw new Error("Source scheduler task state could not be read after its atomic update.");
+      syncSchedulerLimitStop(this.db, existing?.degraded_reason, state);
       return state;
     })();
   }
@@ -112302,6 +112494,8 @@ var SOURCE_SCHEDULER_STATE_STORE_ID = "source-scheduler-state", SOURCE_SCHEDULER
 var init_source_scheduler_state = __esm(() => {
   init_olympus_layout();
   init_sqlite_migrations();
+  init_limit_stops();
+  init_scheduler_limit_stops();
   SAFE_STATE_TOKEN = /^[a-z0-9][a-z0-9._:-]{0,127}$/;
   SAFE_KEY_PART2 = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/;
   SAFE_HASH3 = /^[a-f0-9]{16,128}$/;
