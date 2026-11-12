@@ -39746,6 +39746,31 @@ function stripDataUrlPrefix(dataUrl) {
 var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages";
 var TELEGRAM_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:telegram";
 var TELEGRAM_SPOOL_CLEARED_KEY = `${TELEGRAM_SPOOL_REDACTION_STATE_KEY}:cleared_through`;
+// src/core/limit-stops.ts
+var limits = new Map;
+function registerLimit(input) {
+  const prior = limits.get(input.id);
+  if (prior && Object.keys({ ...prior, ...input }).some((key2) => prior[key2] !== input[key2])) {
+    throw new Error(`Limit already registered differently: ${input.id}`);
+  }
+  limits.set(input.id, Object.freeze({ ...input }));
+}
+
+// src/workers/scheduler-limit-stops.ts
+var DAILY_LIMITS = new Map(Object.entries({
+  daily_cost_guard: { id: "x.daily_cost", kind: "cost", label: "daily X API budget used" },
+  daily_api_request_guard: { id: "x.daily_requests", kind: "requests", label: "daily X API budget used" },
+  daily_resource_read_guard: { id: "x.daily_resource_reads", kind: "requests", label: "daily X API budget used" },
+  head_api_request_reserve_guard: { id: "x.head_reserve_requests", kind: "requests", label: "daily X API budget used" },
+  head_resource_read_reserve_guard: { id: "x.head_reserve_reads", kind: "requests", label: "daily X API budget used" },
+  head_cost_reserve_guard: { id: "x.head_reserve_cost", kind: "cost", label: "daily X API budget used" },
+  readwise_daily_api_request_guard: { id: "readwise.daily_requests", kind: "requests", label: "daily Readwise API budget used" },
+  gmail_daily_api_request_guard: { id: "gmail.daily_requests", kind: "requests", label: "daily Gmail API budget used" },
+  google_drive_daily_api_request_guard: { id: "drive.daily_requests", kind: "requests", label: "daily Google Drive API budget used" }
+}));
+for (const limit of DAILY_LIMITS.values()) {
+  registerLimit({ ...limit, scope: "source", unit: limit.kind === "cost" ? "usd" : "requests", continue: "run_once" });
+}
 // src/workers/local-pacing.ts
 import { execFile, spawn as spawn2 } from "node:child_process";
 import { existsSync as existsSync27, readdirSync as readdirSync5, readFileSync as readFileSync23 } from "node:fs";
