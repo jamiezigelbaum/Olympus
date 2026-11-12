@@ -25511,6 +25511,7 @@ class LocalConnectorStore {
     await this.publishVisibility();
   }
   tierLedgerHiddenMemo;
+  hiddenChildMemo;
   visibilityJournal = false;
   visibilityFeedPresent = false;
   visibilitySqlMemo;
@@ -25538,7 +25539,7 @@ class LocalConnectorStore {
         (SELECT MAX(seq) FROM main.item_visibility_feed) AS last,
         (SELECT seq FROM main.sqlite_sequence WHERE name = 'item_visibility_feed') AS issued`).get();
       const cursor = bounds.last ?? bounds.issued ?? 0;
-      if (after === undefined || after > cursor || bounds.first !== null && after < bounds.first - 1)
+      if (after === undefined || after > cursor || bounds.first !== null && after < bounds.first - 1 || bounds.first === null && after < cursor)
         return { cursor };
       const rows = this.db.query(`SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id
         FROM main.item_visibility_feed WHERE seq > ?`).all(after);
@@ -26387,6 +26388,198 @@ class LocalConnectorStore {
   *hiddenChildReadSteps() {
     if (!this.childItemColumnsPresent)
       return [];
+    const lane = this.childVisibilityLane();
+    const prior = this.hiddenChildMemo;
+    let ledger;
+    let stores = [];
+    let ledgerChanges;
+    const storeChanges = new Map;
+    try {
+      ledger = lane.ledger();
+      const members = lane.stores();
+      if (!ledger || this.visibilityLedger() !== ledger || !members.includes(this) || !members.every((store) => store instanceof LocalConnectorStore && store.visibilityFeedPresent)) {
+        this.hiddenChildMemo = undefined;
+        return yield* this.hiddenChildFullReadSteps();
+      }
+      stores = members;
+      const same = prior?.ledger === ledger && prior.storeCursors.size === stores.length && stores.every((store) => prior.storeCursors.has(store));
+      ledgerChanges = ledger.visibilityChangesSince(same ? prior.ledgerCursor : undefined);
+      for (const store of stores)
+        storeChanges.set(store, store.itemVisibilityChangesSince(same ? prior.storeCursors.get(store) : undefined));
+    } catch {
+      this.hiddenChildMemo = undefined;
+      return yield* this.hiddenChildFullReadSteps();
+    }
+    const incremental = prior?.ledger === ledger && prior.storeCursors.size === stores.length && stores.every((store) => prior.storeCursors.has(store) && storeChanges.get(store).identities !== undefined) && ledgerChanges.identities !== undefined;
+    if (!incremental)
+      this.hiddenChildMemo = undefined;
+    const expected = this.hiddenChildMemo;
+    const updates = new Map;
+    let full;
+    if (!incremental) {
+      full = yield* this.hiddenChildFullReadSteps(updates);
+    } else {
+      const hasChildren = prior.parents.size > 0 || (yield* this.visibilityStoreRead({
+        sql: "SELECT 1 AS present FROM items WHERE parent_local_item_id IS NOT NULL LIMIT 1",
+        params: [],
+        mode: "get"
+      }));
+      if (hasChildren) {
+        const changed = [...new Map([...ledgerChanges.identities ?? [], ...[...storeChanges.values()].flatMap((change) => change.identities)].map((identity) => [tierLedgerIdentityKey(identity), identity])).values()];
+        const affected = new Map;
+        const affect = (dependency) => {
+          for (const key2 of prior.dependents.get(dependency) ?? [])
+            affected.set(key2, prior.parents.get(key2).ref);
+        };
+        for (const identity of changed) {
+          const key2 = tierLedgerIdentityKey(identity);
+          affect(`i:${key2}`);
+          const oldParent = prior.childParents.get(key2);
+          if (oldParent)
+            affected.set(oldParent, prior.parents.get(oldParent).ref);
+        }
+        for (let offset = 0;offset < changed.length; offset += HIDDEN_CHILD_PARENT_SLICE) {
+          const batch = changed.slice(offset, offset + HIDDEN_CHILD_PARENT_SLICE);
+          const links = yield* visibilityRead(() => this.parentLinksOf(batch), () => this.parentLinksOfOffThread(batch));
+          for (const ref of links.values())
+            affected.set(parentKey(ref), ref);
+          for (const store of stores) {
+            const rows = yield* visibilityRead(() => store.itemStandings(batch), () => store.itemStandingsOffThread(batch));
+            for (const row of rows.values())
+              affect(`p:${parentKey(row)}`);
+          }
+        }
+        const parents = [...affected.values()];
+        for (let offset = 0;offset < parents.length; offset += HIDDEN_CHILD_PARENT_SLICE) {
+          const slice = parents.slice(offset, offset + HIDDEN_CHILD_PARENT_SLICE);
+          const verdicts = yield* parentVerdictsSteps(lane, slice);
+          for (const [key2, value] of yield* this.hiddenChildParentEntriesSteps(lane, slice, verdicts))
+            updates.set(key2, value);
+        }
+      }
+    }
+    if (this.hiddenChildMemo !== expected)
+      return yield* this.hiddenChildReadSteps();
+    let stable = false;
+    try {
+      const current2 = lane.stores();
+      stable = lane.ledger() === ledger && this.visibilityLedger() === ledger && ledger.visibilityChangesSince().cursor === ledgerChanges.cursor && current2.length === stores.length && stores.every((store) => current2.includes(store) && store.visibilityFeedPresent && store.itemVisibilityChangesSince().cursor === storeChanges.get(store).cursor);
+    } catch {}
+    if (!stable) {
+      if (full)
+        return full;
+      const hidden = new Map(prior.hiddenParents);
+      for (const [key2, entry] of updates) {
+        if (entry.hidden)
+          hidden.set(key2, [...entry.children.values()].flat());
+        else
+          hidden.delete(key2);
+      }
+      return [...hidden.values()].flat();
+    }
+    const memo = incremental ? prior : {
+      ledger,
+      ledgerCursor: ledgerChanges.cursor,
+      storeCursors: new Map,
+      parents: new Map,
+      childParents: new Map,
+      dependents: new Map,
+      hiddenParents: new Map
+    };
+    for (const [key2, entry] of updates) {
+      const old = memo.parents.get(key2);
+      if (old) {
+        for (const child of old.children.keys())
+          memo.childParents.delete(child);
+        for (const dependency of old.dependencies) {
+          const keys = memo.dependents.get(dependency);
+          keys.delete(key2);
+          if (keys.size === 0)
+            memo.dependents.delete(dependency);
+        }
+      }
+      memo.parents.delete(key2);
+      memo.hiddenParents.delete(key2);
+    }
+    for (const [key2, entry] of updates) {
+      if (entry.children.size === 0)
+        continue;
+      memo.parents.set(key2, entry);
+      for (const child of entry.children.keys())
+        memo.childParents.set(child, key2);
+      for (const dependency of entry.dependencies) {
+        const keys = memo.dependents.get(dependency) ?? new Set;
+        keys.add(key2);
+        memo.dependents.set(dependency, keys);
+      }
+      if (entry.hidden)
+        memo.hiddenParents.set(key2, [...entry.children.values()].flat());
+    }
+    this.hiddenChildMemo = {
+      ...memo,
+      ledgerCursor: ledgerChanges.cursor,
+      storeCursors: new Map(stores.map((store) => [store, storeChanges.get(store).cursor]))
+    };
+    return [...memo.hiddenParents.values()].flat();
+  }
+  *hiddenChildParentEntriesSteps(lane, parents, verdicts) {
+    const entries = new Map(parents.map((ref) => [parentKey(ref), {
+      ref,
+      hidden: verdicts.get(parentKey(ref))?.visible !== true,
+      children: new Map,
+      dependencies: new Set
+    }]));
+    const rows = yield* this.visibilityStoreRead({ sql: `
+      SELECT item_pk, provider, account_scope, provider_item_id, provider_conversation_id, parent_local_item_id
+      FROM items WHERE tombstoned = 0 AND parent_local_item_id IN (SELECT value FROM json_each(?))
+    `, params: [JSON.stringify(parents.map((parent) => parent.parentLocalItemId))], mode: "all" });
+    for (const row of rows) {
+      const entry = entries.get(parentKey({ provider: row.provider, accountScope: row.account_scope, parentLocalItemId: row.parent_local_item_id }));
+      if (!entry)
+        continue;
+      const key2 = tierLedgerIdentityKey({
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+      });
+      const pks = entry.children.get(key2) ?? [];
+      pks.push(row.item_pk);
+      entry.children.set(key2, pks);
+    }
+    let climbing = parents.map((ref) => ({ ref, origin: parentKey(ref) }));
+    for (let depth = 0;depth < CHILD_PARENT_CHAIN_LIMIT && climbing.length > 0; depth++) {
+      const origins = new Map;
+      for (const { ref, origin } of climbing) {
+        const dependencies = entries.get(origin).dependencies;
+        dependencies.add(`p:${parentKey(ref)}`);
+        if (ref.identity)
+          dependencies.add(`i:${tierLedgerIdentityKey(ref.identity)}`);
+        const keys = origins.get(parentKey(ref)) ?? new Set;
+        keys.add(origin);
+        origins.set(parentKey(ref), keys);
+      }
+      const refs = [...new Map(climbing.map(({ ref }) => [parentKey(ref), ref])).values()];
+      const next = new Map;
+      for (const store of lane.stores()) {
+        const standings = yield* visibilityRead(() => store.parentStandings(refs), () => store.parentStandingsOffThread?.(refs) ?? Promise.resolve(store.parentStandings(refs)));
+        for (const row of standings)
+          for (const origin of origins.get(parentKey(row)) ?? []) {
+            entries.get(origin).dependencies.add(`i:${tierLedgerIdentityKey(row.identity)}`);
+            if (row.grandparentLocalItemId !== undefined) {
+              const ref = { provider: row.provider, accountScope: row.accountScope, parentLocalItemId: row.grandparentLocalItemId };
+              next.set(`${origin}
+${parentKey(ref)}`, { ref, origin });
+            }
+          }
+      }
+      climbing = [...next.values()];
+    }
+    return entries;
+  }
+  *hiddenChildFullReadSteps(entries) {
+    if (!this.childItemColumnsPresent)
+      return [];
     const present = yield* this.visibilityStoreRead({ sql: "SELECT 1 AS present FROM items WHERE parent_local_item_id IS NOT NULL LIMIT 1", params: [], mode: "get" });
     if (!present)
       return [];
@@ -26419,6 +26612,9 @@ class LocalConnectorStore {
         })
       }));
       const verdicts = yield* parentVerdictsSteps(lane, slice);
+      if (entries)
+        for (const [key2, value] of yield* this.hiddenChildParentEntriesSteps(lane, slice, verdicts))
+          entries.set(key2, value);
       for (const parent of slice)
         if (verdicts.get(parentKey(parent))?.visible !== true)
           hiddenParents.push(parent);
@@ -27403,7 +27599,8 @@ class LocalConnectorStore {
     const ledger = this.visibilityLedger();
     const ledgerCursor = ledger ? ledger.visibilityChangesSince().cursor : 0;
     const storeCursor = this.visibilityJournal ? String(this.itemVisibilityChangesSince().cursor) : `v${this.db.query("PRAGMA data_version").get().data_version}`;
-    return `${ledgerCursor}:${storeCursor}`;
+    const laneStores = this.childVisibilityLane().stores();
+    return JSON.stringify([ledgerCursor, storeCursor, laneStores.map((store) => [store.corpusId, store.childVisibilityMarker?.()])]);
   }
   peopleObservations() {
     const tierHidden = this.tierHiddenItemPks();
@@ -27414,12 +27611,13 @@ class LocalConnectorStore {
       return this.peopleObservations();
     for (let attempt = 0;attempt < PEOPLE_OFF_THREAD_READ_ATTEMPTS; attempt += 1) {
       const marker = this.visibilityMarker();
+      const unchanged = childVisibilityUnchanged(this.childVisibilityLane());
       const tierHidden = await this.tierHiddenItemPksInTurns();
       const steps = this.peopleObservationSteps(tierHidden);
       let step = steps.next();
       while (!step.done)
         step = steps.next(await readOnPool(this.dbPath, step.value));
-      if (this.visibilityMarker() === marker)
+      if (this.visibilityMarker() === marker && unchanged())
         return this.peopleObservationsFromRows(step.value);
     }
     return this.peopleObservations();
