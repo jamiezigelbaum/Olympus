@@ -21762,12 +21762,13 @@ var init_grant_fence = __esm(() => {
 });
 
 // src/workers/x-bookmarks/live-control.ts
-var X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS, X_BOOKMARKS_RECONCILE_INTERVAL_MS, X_BOOKMARKS_RECONCILE_FRESHNESS_THRESHOLD_MS, EMPTY_SHA256, UNDISPATCHED_RESERVATION_LEASE_MS, IN_FLIGHT_RESERVATION_LEASE_MS, DEFAULT_X_HEAD_PAGE_SIZE_LADDER;
+var X_BOOKMARKS_HEAD_INTERVAL_MS, X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS, X_BOOKMARKS_RECONCILE_INTERVAL_MS, X_BOOKMARKS_RECONCILE_FRESHNESS_THRESHOLD_MS, EMPTY_SHA256, UNDISPATCHED_RESERVATION_LEASE_MS, IN_FLIGHT_RESERVATION_LEASE_MS, DEFAULT_X_HEAD_PAGE_SIZE_LADDER;
 var init_live_control2 = __esm(() => {
   init_olympus_layout();
   init_sqlite_migrations();
   init_connector2();
-  X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS = 5 * 60000;
+  X_BOOKMARKS_HEAD_INTERVAL_MS = 15 * 60000;
+  X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS = 2 * X_BOOKMARKS_HEAD_INTERVAL_MS + 5 * 60000;
   X_BOOKMARKS_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
   X_BOOKMARKS_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
   EMPTY_SHA256 = "0".repeat(64);
@@ -21805,6 +21806,21 @@ var init_api_connector = __esm(() => {
   X_BOOKMARKS_RECONCILE_PAGE_SIZE_LADDER = Object.freeze([80, 50, 20]);
 });
 
+// src/core/source-inputs.ts
+var init_source_inputs = () => {};
+
+// src/workers/archive-import/source-input.ts
+var init_source_input = __esm(() => {
+  init_archive_formats();
+  init_source_inputs();
+});
+
+// src/workers/x-bookmarks/archive-import.ts
+var init_archive_import = __esm(() => {
+  init_source_input();
+  init_connector2();
+});
+
 // src/workers/x-bookmarks/window-diagnostic.ts
 var init_window_diagnostic = __esm(() => {
   init_credential_broker();
@@ -21820,6 +21836,7 @@ var init_live_sync2 = __esm(() => {
   init_live_control2();
   init_reconcile_state();
   init_connector2();
+  init_archive_import();
   init_window_diagnostic();
   init_api_connector();
 });
@@ -21844,6 +21861,7 @@ var init_x_bookmarks = __esm(() => {
   init_connector2();
   init_folder_facets();
   init_api_connector();
+  init_archive_import();
   init_live_sync2();
   init_window_diagnostic();
   init_content_recovery();
@@ -22483,9 +22501,6 @@ var init_corpus_adapter4 = __esm(() => {
   init_source_corpus_registry();
   init_corpus();
 });
-// src/core/source-inputs.ts
-var init_source_inputs = () => {};
-
 // src/workers/connector-store/capture-spool-secrets.ts
 var SPOOL_SCAN_CHUNK_BYTES, SPOOL_MAX_LINE_BYTES;
 var init_capture_spool_secrets = __esm(() => {
@@ -22803,12 +22818,6 @@ var init_json_stream = __esm(() => {
   init_stop_errors();
   EMPTY_FRAME = Object.freeze({});
   MAX_SAFE_DIGITS = String(Number.MAX_SAFE_INTEGER);
-});
-
-// src/workers/archive-import/source-input.ts
-var init_source_input = __esm(() => {
-  init_archive_formats();
-  init_source_inputs();
 });
 // src/workers/archive-import/telegram/account.ts
 var ACCOUNT_SECTIONS;

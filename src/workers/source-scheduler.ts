@@ -483,6 +483,7 @@ interface SchedulerTaskState {
   source: SourceSchedulerSource;
   running: boolean;
   nextRunAt: number;
+  retryNotBeforeAt?: number | undefined;
   bootstrapLastSuccessAt?: string;
   checkpoint?: string;
   consecutiveFailures: number;
@@ -497,6 +498,22 @@ interface SchedulerTaskState {
   pendingUnpark?: PendingSourceSchedulerUnpark;
   /** Woken while running: run again within seconds of completing. */
   wakeAfterRun?: boolean;
+}
+
+/**
+ * A task that could not start more work until a known reset. The common run
+ * path turns this into an idle result, preserving its checkpoint and reason.
+ */
+class SourceSchedulerTaskDeferral extends Error {
+  constructor(
+    message: string,
+    readonly retryAt: SourceSchedulerRetryAt,
+    readonly counts?: Record<string, number>,
+    readonly warnings?: string[],
+  ) {
+    super(message);
+    this.name = 'SourceSchedulerTaskDeferral';
+  }
 }
 
 export class SourceSchedulerTaskFailure extends Error {
@@ -729,6 +746,7 @@ export class SourceScheduler {
     for (const state of this.states) {
       if (state.source.sourceId !== sourceId || state.consecutiveFailures > 0) continue;
       if (taskCadence(state.source, state.task) !== 'continuous') continue;
+      if ((state.retryNotBeforeAt ?? 0) > at) continue;
       if (state.running) {
         state.wakeAfterRun = true;
         continue;
@@ -772,7 +790,7 @@ export class SourceScheduler {
       if (!downstream.has(sibling.task.kind)) continue;
       if (sibling.nextRunAt <= at) continue;
       // A failure backoff stays a backoff.
-      if (sibling.consecutiveFailures > 0) continue;
+      if (sibling.consecutiveFailures > 0 || (sibling.retryNotBeforeAt ?? 0) > at) continue;
       sibling.nextRunAt = at;
       woke = true;
     }
@@ -793,6 +811,7 @@ export class SourceScheduler {
     for (const state of this.states) {
       if (state.task.kind !== kind || state.consecutiveFailures > 0) continue;
       if (taskCadence(state.source, state.task) !== 'continuous') continue;
+      if ((state.retryNotBeforeAt ?? 0) > at) continue;
       if (state.running) {
         state.wakeAfterRun = true;
         woke += 1;
@@ -1146,6 +1165,7 @@ export class SourceScheduler {
         }
       }
       state.nextRunAt = nextRunAt;
+      state.retryNotBeforeAt = retryAt ? nextRunAt : undefined;
       for (const { counts, ...store } of result.embeddingSweep ?? []) {
         console.info(`[olympus:embedding-sweep] ${JSON.stringify({
           ...store, ...counts,
@@ -1300,6 +1320,13 @@ export class SourceScheduler {
             : {}),
         });
       } catch (error) {
+        if (error instanceof SourceSchedulerTaskDeferral) {
+          return {
+            status: 'idle', retryAt: error.retryAt,
+            ...(error.counts ? { counts: error.counts } : {}),
+            ...(error.warnings?.length ? { warnings: error.warnings } : {}),
+          };
+        }
         lastError = error;
         if (safeSchedulerRetryAt(error) || !isTransientError(error) || attempt >= this.maxTransientRetries) break;
         // A stopped scheduler starts no new attempt.
@@ -1386,6 +1413,13 @@ export class SourceScheduler {
     state: SchedulerTaskState,
     persisted: PersistedSourceSchedulerTaskState,
   ): void {
+    // Only a limit park holds wakes off after a restart. Advisory reasons on
+    // an ordinary cadence (traversal_not_advancing, an embedding outage) must
+    // still let new work wake the task.
+    state.retryNotBeforeAt = persisted.degradedReason && persisted.notBeforeAt
+      && SCHEDULER_PARK_REASONS.has(persisted.degradedReason)
+      ? Math.min(Date.parse(persisted.notBeforeAt), this.now().getTime() + SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS)
+      : undefined;
     state.consecutiveFailures = persisted.consecutiveFailures;
     if (persisted.checkpoint) state.checkpoint = persisted.checkpoint;
     else delete state.checkpoint;
@@ -2505,14 +2539,11 @@ function readwiseStoreProgress(
  * to a structured deferral so the scheduler waits for the UTC rollover instead
  * of fail-looping the lane at the error backoff all day.
  */
-function readwiseSchedulerFailure(error: unknown): SourceSchedulerTaskFailure | unknown {
+function readwiseSchedulerFailure(error: unknown): unknown {
   if (!(error instanceof ReadwiseRequestBudgetError)) return error;
-  return new SourceSchedulerTaskFailure(error.message, {
-    errorKind: READWISE_DAILY_REQUEST_GUARD_REASON,
-    retryAt: {
-      at: error.retryAt,
-      degradedReason: READWISE_DAILY_REQUEST_GUARD_REASON,
-    },
+  return new SourceSchedulerTaskDeferral(error.message, {
+    at: error.retryAt,
+    degradedReason: READWISE_DAILY_REQUEST_GUARD_REASON,
   });
 }
 
@@ -2538,6 +2569,13 @@ function xBookmarksSchedulerFailure(
   config: XBookmarksLiveSyncConfig,
 ): SourceSchedulerTaskFailure | unknown {
   if (!(error instanceof XBookmarksLiveSyncError)) return error;
+  if ((error.errorKind === 'api_request_guard' || error.errorKind === 'provider_rate_limited') && error.retryAt) {
+    return new SourceSchedulerTaskDeferral(error.message, {
+      at: error.retryAt,
+      effectiveIntervalMs: config.degradedIntervalMs,
+      degradedReason: error.degradedReason ?? error.errorKind,
+    }, error.counts, error.warnings);
+  }
   return new SourceSchedulerTaskFailure(error.message, {
     errorKind: error.errorKind,
     ...(error.warnings.length > 0 ? { warnings: error.warnings } : {}),
@@ -2573,8 +2611,13 @@ function gmailStoreProgress(
  * to a structured deferral so the scheduler waits for the UTC rollover instead
  * of fail-looping the lane at the error backoff all day.
  */
-function gmailSchedulerFailure(error: unknown): SourceSchedulerTaskFailure | unknown {
+function gmailSchedulerFailure(error: unknown): unknown {
   if (!(error instanceof GoogleRequestBudgetError)) return error;
+  if (error.reason === 'daily_api_request_guard') {
+    return new SourceSchedulerTaskDeferral(error.message, {
+      at: error.retryAt, degradedReason: GMAIL_DAILY_REQUEST_GUARD_REASON,
+    });
+  }
   const errorKind = error.reason === 'future_utc_day'
     ? GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION
     : error.reason === 'ledger_busy'
@@ -2607,8 +2650,13 @@ function googleDriveStoreProgress(
  * to a structured deferral so the scheduler waits for the UTC rollover instead
  * of fail-looping the lane at the error backoff all day.
  */
-function googleDriveSchedulerFailure(error: unknown): SourceSchedulerTaskFailure | unknown {
+function googleDriveSchedulerFailure(error: unknown): unknown {
   if (!(error instanceof GoogleRequestBudgetError)) return error;
+  if (error.reason === 'daily_api_request_guard') {
+    return new SourceSchedulerTaskDeferral(error.message, {
+      at: error.retryAt, degradedReason: GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON,
+    });
+  }
   const errorKind = error.reason === 'future_utc_day'
     ? GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION
     : error.reason === 'ledger_busy'
@@ -2928,6 +2976,14 @@ const UTC_DAY_SCOPED_DEGRADED_REASONS: ReadonlySet<string> = new Set([
   READWISE_DAILY_REQUEST_GUARD_REASON,
   GMAIL_DAILY_REQUEST_GUARD_REASON,
   GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON,
+]);
+
+// The reasons a SourceSchedulerTaskDeferral parks a task with: the daily
+// limits above and a provider's rate limit.
+const SCHEDULER_PARK_REASONS: ReadonlySet<string> = new Set([
+  ...UTC_DAY_SCOPED_DEGRADED_REASONS,
+  'provider_rate_limit',
+  'provider_rate_limited',
 ]);
 
 /**

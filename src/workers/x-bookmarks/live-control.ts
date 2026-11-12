@@ -12,8 +12,13 @@ import type { XApiRateLimit } from './api.ts';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import { X_BOOKMARKS_SOURCE_ID } from './connector.ts';
 
-export const X_BOOKMARKS_HEAD_INTERVAL_MS = 30_000;
-export const X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS = 5 * 60_000;
+// The bookmarks API has no since_id, so every head poll pays for its whole
+// first page even when nothing is new. At 30 seconds that came to about
+// $28.80 a day at the default unit cost, and the $2 daily guard parked the
+// source by about 01:00 UTC every day (#1203). Every 15 minutes is 96 polls,
+// about $0.96 a day, which leaves the rest of the day's budget for top-ups.
+export const X_BOOKMARKS_HEAD_INTERVAL_MS = 15 * 60_000;
+export const X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS = 2 * X_BOOKMARKS_HEAD_INTERVAL_MS + 5 * 60_000;
 export const X_BOOKMARKS_RECONCILE_INTERVAL_MS = 24 * 60 * 60_000;
 export const X_BOOKMARKS_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60_000;
 export const X_BOOKMARKS_FOLDER_PROVIDER_OUTAGE_WARNING =
@@ -236,7 +241,10 @@ interface ReservationRow {
 export function defaultXBookmarksLiveSyncConfig(
   env: Record<string, string | undefined> = process.env,
 ): XBookmarksLiveSyncConfig {
-  const headIntervalMs = positiveIntegerEnv(env.OLYMPUS_SOURCE_INDEX_X_HEAD_INTERVAL_SECONDS, 30) * 1_000;
+  const headIntervalMs = positiveIntegerEnv(
+    env.OLYMPUS_SOURCE_INDEX_X_HEAD_INTERVAL_SECONDS,
+    X_BOOKMARKS_HEAD_INTERVAL_MS / 1_000,
+  ) * 1_000;
   const dailyHeadPolls = Math.ceil((24 * 60 * 60_000) / headIntervalMs);
   const unitCostUsd = positiveNumberEnv(env.OLYMPUS_SOURCE_INDEX_X_ESTIMATED_UNIT_COST_USD, 0.001);
   const spendBudgetUsd = positiveNumberEnv(env.OLYMPUS_SOURCE_INDEX_X_DAILY_ESTIMATED_SPEND_BUDGET_USD, 2);
@@ -246,7 +254,10 @@ export function defaultXBookmarksLiveSyncConfig(
   );
   return {
     headIntervalMs,
-    headFreshnessThresholdMs: positiveIntegerEnv(env.OLYMPUS_SOURCE_INDEX_X_HEAD_STALE_SECONDS, 300) * 1_000,
+    headFreshnessThresholdMs: positiveIntegerEnv(
+      env.OLYMPUS_SOURCE_INDEX_X_HEAD_STALE_SECONDS,
+      X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS / 1_000,
+    ) * 1_000,
     reconcileIntervalMs: positiveIntegerEnv(env.OLYMPUS_SOURCE_INDEX_X_RECONCILE_INTERVAL_SECONDS, 86_400) * 1_000,
     reconcileFreshnessThresholdMs: positiveIntegerEnv(env.OLYMPUS_SOURCE_INDEX_X_RECONCILE_STALE_SECONDS, 93_600) * 1_000,
     maxCatchupItems: boundedPositiveIntegerEnv(env.OLYMPUS_SOURCE_INDEX_X_HEAD_MAX_CATCHUP_ITEMS, 100, 1, 1_000),

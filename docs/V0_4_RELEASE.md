@@ -287,6 +287,23 @@ unmerged until the owner answers). Cost: with the built-in judge on a
 laptop, about 80 minutes before 1,000 new items can be cited by a cloud
 answer; a Private answer route can read them meanwhile.
 
+X bookmarks and daily limits (owner, 2026-11-12, #1203): X bookmarks come
+from the set an earlier install already stored, and the X API only fills in
+what is missing. The X sync's `import_archive` mode reads an earlier X
+bookmarks store read-only and writes it through the archive connector, as
+preserved items. It makes no API call, judges and embeds the bookmarks like
+fetched ones, and adds nothing on a second run. The head check then stops at
+the first bookmark it already holds, so it pays only for the page it reads.
+It now runs every 15 minutes instead of every 30 seconds. The bookmarks API
+has no `since_id`, so each check paid for its whole first page: about $28.80 a
+day against the $2 guard, which parked the source by about 01:00 UTC every day.
+A daily limit (X, Readwise, Gmail, Drive) or a provider rate limit now parks
+the source until its reset instead of counting as a failed sync. That is why
+the sixteen stops showed as failures with no wait row: a failed run never
+stamps a completion, and the daily wait marker is reported only on the day of
+the last completion. Lane 7's shared limits record (Continue once, Raise, the
+small-overrun rule) builds on these parks.
+
 Claude dashboard (owner decision 2026-11-10, #1266): Claude connectors may
 show the Olympus dashboard as an MCP App, not only the four remote tools, on
 the condition that a privacy proof passes on each Claude client. The proof

@@ -486,6 +486,46 @@ describe('X bookmarks thin connector', () => {
 });
 
 describe('X bookmarks two-speed connector-store sync', () => {
+  for (const checkpoint of [undefined, 'old-head']) {
+    test(`head top-up stops at imported inventory with two rows of overlap (checkpoint=${checkpoint})`, async () => {
+      const store = xStore();
+      const usage = new LocalXBookmarksApiUsageStore(':memory:');
+      const embedding = fakeEmbeddingProvider();
+      const held = bookmark('held-import', 'held import marker');
+      await store.syncFromConnector(createXBookmarksSourceConnector({
+        account: ACCOUNT, posts: [held], connectorId: X_BOOKMARKS_ARCHIVE_CONNECTOR_ID,
+      }), { fetchContent: true, ownershipKind: 'preservation' });
+      if (checkpoint) usage.recordHeadCheckpoint(ACCOUNT, checkpoint, new Date('2026-07-18T11:00:00.000Z'));
+      const requests: number[] = [];
+      const handler = createXBookmarksConnectorStoreSyncHandler({
+        store, tierSet: xBookmarksTestTierSet(store, { embeddingProvider: embedding }),
+        usageStore: usage, embeddingProvider: embedding, account: ACCOUNT, config: testConfig(),
+        now: () => new Date('2026-07-18T12:00:00.000Z'),
+        sourceClient: {
+          async fetchBookmarks(request = {}) {
+            requests.push(request.maxResults ?? 0);
+            return { posts: [
+              // Old posts newly bookmarked must keep the provider's bookmark order.
+              { ...bookmark('new-save', 'new save marker'), createdAt: '2020-01-01T00:00:00.000Z' },
+              held, bookmark('overlap-new', 'overlap new marker'), held,
+              bookmark('past-overlap', 'past overlap marker'),
+            ], nextToken: 'expensive-history' };
+          },
+          async fetchBookmarkFolders() { return { folders: [] }; },
+          async fetchBookmarksInFolder() { return { posts: [] }; },
+        },
+      });
+      try {
+        const result = await handler.syncHead();
+        expect(requests).toEqual([10]);
+        expect(result.counts.items_indexed).toBe(2);
+        expect(result.counts.head_truncation_deferrals).toBe(0);
+        expect(usage.headCheckpoint(ACCOUNT)).toBe('new-save');
+        expect(store.searchItems('past overlap marker', 5)).toHaveLength(0);
+      } finally { usage.close(); store.close(); }
+    });
+  }
+
   test('head-checks ten items, catches up only before overlap, embeds new items, and no-ops', async () => {
     const store = xStore();
     const usage = new LocalXBookmarksApiUsageStore(':memory:');
@@ -1515,15 +1555,15 @@ describe('X bookmarks API usage and response controls', () => {
     }
   });
 
-  test('keeps the product cadences at 30 seconds and 24 hours with independent stale alarms', () => {
+  test('keeps the product cadences at 15 minutes and 24 hours with independent stale alarms', () => {
     const config = defaultXBookmarksLiveSyncConfig({});
     expect(config).toMatchObject({
-      headIntervalMs: 30_000,
-      headFreshnessThresholdMs: 300_000,
+      headIntervalMs: 900_000,
+      headFreshnessThresholdMs: 2_100_000,
       reconcileIntervalMs: 86_400_000,
       reconcileFreshnessThresholdMs: 93_600_000,
-      headApiRequestReserve: 3_000,
-      headResourceReadReserve: 3_200,
+      headApiRequestReserve: 216,
+      headResourceReadReserve: 416,
       headEstimatedSpendReserveMicrousd: 250_000,
       richResourceExpansionMultiplier: 6,
     });

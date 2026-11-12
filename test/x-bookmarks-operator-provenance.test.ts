@@ -418,7 +418,7 @@ describe('X usage guard invocation provenance', () => {
     // The head lane is due again one cadence later; its tick must not inherit
     // the earlier manual run's provenance.
     requests.length = 0;
-    await scheduler.runDueTasks(new Date(NOON.getTime() + 5 * 60_000));
+    await scheduler.runDueTasks(new Date(NOON.getTime() + 16 * 60_000));
     for (const entry of requests) expect(entry.provenance).not.toBe('operator');
     expect(requests.length).toBeGreaterThan(0);
   });
