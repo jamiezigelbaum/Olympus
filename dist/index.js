@@ -6995,7 +6995,7 @@ var init_operation_caller = __esm(() => {
 });
 
 // src/core/boot-progress.ts
-import { appendFileSync, existsSync as existsSync9, mkdirSync as mkdirSync10, readFileSync as readFileSync15, renameSync as renameSync4, rmSync as rmSync5, statSync as statSync7 } from "node:fs";
+import { appendFileSync, existsSync as existsSync9, mkdirSync as mkdirSync10, readdirSync as readdirSync2, readFileSync as readFileSync15, renameSync as renameSync4, rmSync as rmSync5, statSync as statSync7 } from "node:fs";
 function readBootProgress(env = process.env) {
   try {
     const value = JSON.parse(readFileSync15(bootProgressPath(env), "utf8"));
@@ -9345,7 +9345,7 @@ import {
   lstatSync as lstatSync11,
   mkdirSync as mkdirSync14,
   readFileSync as readFileSync27,
-  readdirSync as readdirSync2,
+  readdirSync as readdirSync3,
   realpathSync as realpathSync4,
   renameSync as renameSync5,
   rmSync as rmSync7,
@@ -10174,7 +10174,7 @@ var init_zkapi_confine_fetch = __esm(() => {
 
 // src/core/zkapi-confine-selftest.ts
 import { randomBytes as randomBytes7 } from "node:crypto";
-import { chmodSync as chmodSync6, readFileSync as readFileSync28, readlinkSync, readdirSync as readdirSync3, rmSync as rmSync8, writeFileSync as writeFileSync7 } from "node:fs";
+import { chmodSync as chmodSync6, readFileSync as readFileSync28, readlinkSync, readdirSync as readdirSync4, rmSync as rmSync8, writeFileSync as writeFileSync7 } from "node:fs";
 import { createServer, createConnection as createConnection2 } from "node:net";
 import { createSocket } from "node:dgram";
 import { networkInterfaces } from "node:os";
@@ -10272,7 +10272,7 @@ function connected(options) {
 function processGone(pgid) {
   if (process.platform === "linux") {
     try {
-      for (const name of readdirSync3("/proc")) {
+      for (const name of readdirSync4("/proc")) {
         if (!/^\d+$/.test(name))
           continue;
         try {
@@ -10990,7 +10990,7 @@ import { execFile as execFile2 } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile, stat as fileStat } from "node:fs/promises";
 import { createHash as createHash4 } from "node:crypto";
-import { lstatSync as lstatSync12, readFileSync as readFileSync29, readlinkSync as readlinkSync2, readdirSync as readdirSync4, realpathSync as realpathSync5 } from "node:fs";
+import { lstatSync as lstatSync12, readFileSync as readFileSync29, readlinkSync as readlinkSync2, readdirSync as readdirSync5, realpathSync as realpathSync5 } from "node:fs";
 import { dirname as dirname26, join as join35 } from "node:path";
 function record(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
@@ -11330,7 +11330,7 @@ var init_zkapi_confinement_linux = __esm(() => {
   init_managed_tools();
   init_zkapi_confine_fetch();
   init_zkapi_confine_selftest();
-  realProc = { read: (p) => readFileSync29(p, "utf8"), link: readlinkSync2, list: (p) => readdirSync4(p) };
+  realProc = { read: (p) => readFileSync29(p, "utf8"), link: readlinkSync2, list: (p) => readdirSync5(p) };
   execFileAsync = promisify(execFile2);
   hostChecks = new Map;
   injectedChecks = new WeakMap;
@@ -11384,7 +11384,7 @@ __export(exports_consult_transport_zkapi, {
 });
 import { spawn as spawn2, execFileSync as execFileSync2 } from "node:child_process";
 import { createHash as createHash5, randomUUID as randomUUID9 } from "node:crypto";
-import { accessSync as accessSync8, chmodSync as chmodSync7, closeSync as closeSync6, constants as constants5, existsSync as existsSync13, mkdirSync as mkdirSync15, mkdtempSync as mkdtempSync2, readdirSync as readdirSync5, readFileSync as readFileSync30, readlinkSync as readlinkSync3, realpathSync as realpathSync6, rmSync as rmSync9, statSync as statSync15, writeFileSync as writeFileSync8 } from "node:fs";
+import { accessSync as accessSync8, chmodSync as chmodSync7, closeSync as closeSync6, constants as constants5, existsSync as existsSync13, mkdirSync as mkdirSync15, mkdtempSync as mkdtempSync2, readdirSync as readdirSync6, readFileSync as readFileSync30, readlinkSync as readlinkSync3, realpathSync as realpathSync6, rmSync as rmSync9, statSync as statSync15, writeFileSync as writeFileSync8 } from "node:fs";
 import { createConnection as createConnection3, createServer as createServer2 } from "node:net";
 import { homedir as homedir13, tmpdir as tmpdir3 } from "node:os";
 import { delimiter as delimiter5, dirname as dirname27, isAbsolute as isAbsolute19, join as join36, resolve as resolvePath } from "node:path";
@@ -12309,7 +12309,7 @@ function linuxListenerPids(port) {
     return { kind: "not_visible" };
   let entries;
   try {
-    entries = readdirSync5("/proc").filter((name) => /^\d+$/.test(name));
+    entries = readdirSync6("/proc").filter((name) => /^\d+$/.test(name));
   } catch {
     return { kind: "unavailable" };
   }
@@ -12318,7 +12318,7 @@ function linuxListenerPids(port) {
   for (const pid of entries) {
     let fds;
     try {
-      fds = readdirSync5(`/proc/${pid}/fd`);
+      fds = readdirSync6(`/proc/${pid}/fd`);
     } catch {
       continue;
     }
@@ -20797,7 +20797,7 @@ var init_tier_auto_prune_sweep = __esm(() => {
 });
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { spawn as spawn4 } from "node:child_process";
-import { closeSync as closeSync8, constants as constants7, existsSync as existsSync19, fstatSync as fstatSync3, openSync as openSync7, readdirSync as readdirSync8, statSync as statSync18 } from "node:fs";
+import { closeSync as closeSync8, constants as constants7, existsSync as existsSync19, fstatSync as fstatSync3, openSync as openSync7, readdirSync as readdirSync9, statSync as statSync18 } from "node:fs";
 import { homedir as homedir17 } from "node:os";
 import { delimiter as delimiter6, dirname as dirname34, isAbsolute as isAbsolute21, join as join42 } from "node:path";
 import { createInterface } from "node:readline";
@@ -26021,6 +26021,7 @@ var init_tier_migration_reports = __esm(() => {
 
 // src/core/source-forget-registry.ts
 var init_source_forget_registry = __esm(() => {
+  init_boot_progress();
   init_app_release_log();
   init_operation_error();
   init_remote_connections();
@@ -26079,6 +26080,7 @@ var init_source_dispositions = __esm(() => {
 // src/data-lifecycle.ts
 var backgroundTrashRemovals;
 var init_data_lifecycle = __esm(() => {
+  init_boot_progress();
   init_people_index();
   init_mac_engine_daemon();
   init_app_release_log();
@@ -32318,7 +32320,7 @@ init_file_lease();
 init_worker_auth();
 init_linux_desktop_entry();
 import { spawnSync as spawnSync7 } from "node:child_process";
-import { chmodSync as chmodSync8, closeSync as closeSync7, constants as constants6, copyFileSync, existsSync as existsSync15, fstatSync as fstatSync2, fsyncSync as fsyncSync2, ftruncateSync, lstatSync as lstatSync14, linkSync as linkSync2, mkdirSync as mkdirSync16, openSync as openSync6, readFileSync as readFileSync32, readlinkSync as readlinkSync4, readdirSync as readdirSync7, realpathSync as realpathSync7, renameSync as renameSync7, rmSync as rmSync11, rmdirSync, statSync as statSync17, symlinkSync as symlinkSync2, writeFileSync as writeFileSync9 } from "node:fs";
+import { chmodSync as chmodSync8, closeSync as closeSync7, constants as constants6, copyFileSync, existsSync as existsSync15, fstatSync as fstatSync2, fsyncSync as fsyncSync2, ftruncateSync, lstatSync as lstatSync14, linkSync as linkSync2, mkdirSync as mkdirSync16, openSync as openSync6, readFileSync as readFileSync32, readlinkSync as readlinkSync4, readdirSync as readdirSync8, realpathSync as realpathSync7, renameSync as renameSync7, rmSync as rmSync11, rmdirSync, statSync as statSync17, symlinkSync as symlinkSync2, writeFileSync as writeFileSync9 } from "node:fs";
 import { createRequire as createRequire4 } from "node:module";
 import { basename as basename6, dirname as dirname29, join as join38, relative as relative5, resolve as resolve9, sep as sep6 } from "node:path";
 init_linux_engine_layout();
@@ -32378,7 +32380,7 @@ function runningOlympusVersion() {
 // src/core/engine-service.ts
 import { spawn as spawn3, spawnSync as spawnSync6 } from "node:child_process";
 init_atomic_file();
-import { existsSync as existsSync14, lstatSync as lstatSync13, readdirSync as readdirSync6, readFileSync as readFileSync31, renameSync as renameSync6, rmSync as rmSync10, statSync as statSync16 } from "node:fs";
+import { existsSync as existsSync14, lstatSync as lstatSync13, readdirSync as readdirSync7, readFileSync as readFileSync31, renameSync as renameSync6, rmSync as rmSync10, statSync as statSync16 } from "node:fs";
 import { homedir as homedir14, platform as osPlatform } from "node:os";
 import { basename as basename5, dirname as dirname28, isAbsolute as isAbsolute20, join as join37, resolve as resolvePath2 } from "node:path";
 

@@ -358,9 +358,10 @@ function installOrUpgradeLifecycle(
       );
     }
     const readiness = readinessPort === undefined ? undefined : qualifyWorkerReadiness(effective, readinessPort);
-    // The stores the new worker updated are kept; their pre-update copies go.
-    removeUpgradeBackups(effective);
     markTransactionCommitReady(effective);
+    // Committed first: a crash from here on never rolls back onto stores whose
+    // copies are gone. The stores the new worker updated are kept.
+    removeUpgradeBackups(effective);
     clearTransaction(effective);
     return {
       schema_version: OLYMPUS_LIFECYCLE_SCHEMA_VERSION,

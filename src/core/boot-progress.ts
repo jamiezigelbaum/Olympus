@@ -11,8 +11,8 @@
 // The store backups each schema update takes are recorded beside it, so a
 // failed upgrade can put them back before the previous version starts.
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import { sharedDataPath, type LayoutEnv } from './olympus-layout.ts';
 
@@ -160,6 +160,18 @@ function bootProgressPath(env: LayoutEnv): string {
 /** `<db file>.pre-schema-<version>.bak`: a store as it was before its schema update. */
 export function preSchemaBackupPath(dbPath: string, version: number): string {
   return `${dbPath}.pre-schema-${version}.bak`;
+}
+
+/** Every pre-update copy of the store at `dbPath` on disk. */
+export function preSchemaBackupsOf(dbPath: string): string[] {
+  const prefix = `${basename(dbPath)}.pre-schema-`;
+  try {
+    return readdirSync(dirname(dbPath))
+      .filter((name) => name.startsWith(prefix) && /^\d+\.bak$/.test(name.slice(prefix.length)))
+      .map((name) => join(dirname(dbPath), name));
+  } catch {
+    return [];
+  }
 }
 
 /**

@@ -17,6 +17,8 @@ import {
   finishBootProgress,
   readBootProgress,
   reportBootStep,
+  preSchemaBackupsOf,
+  removeSchemaBackupsSince,
   restoreSchemaBackupsSince,
   type BootProgress,
   type BootStepEvent,
@@ -153,6 +155,17 @@ describe('schema updates back up the store first', () => {
     expect(readSqliteSchemaVersion(copy, 'fixture')).toBe(1);
     expect(copy.query('SELECT body FROM items').get()).toEqual({ body: 'kept' });
     copy.close();
+  });
+
+  test('a delete finds every copy of a store, and a forget removes the recorded copies', () => {
+    const env = home();
+    const { path, db } = storeAtVersion1(env);
+    runSqliteMigrations(db, 'fixture', MIGRATIONS, { env, log: () => {} });
+    db.close();
+    writeFileSync(join(env.HOME!, 'store.sqlite.pre-schema-x.bak'), 'not a copy');
+    expect(preSchemaBackupsOf(path)).toEqual([`${path}.pre-schema-1.bak`]);
+    expect(removeSchemaBackupsSince(env, 0)).toBe(1);
+    expect(preSchemaBackupsOf(path)).toEqual([]);
   });
 
   test('a restore puts the copy back and removes the -wal and -shm', () => {
