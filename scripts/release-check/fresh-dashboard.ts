@@ -5,6 +5,8 @@ import { connectBrowser, startOwnerBridge, type BrowserSession } from './web-cli
 import type { LiveSourceSpec } from './live-accounts.ts';
 import { consentBlock, FRESH_BRIDGE_PID, FreshInconclusive, type ConsentSnapshot } from './fresh-install.ts';
 import { PRIVATE_ANSWER_OPTIONS } from '../../src/core/privacy-language.ts';
+import { ON_DEMAND_FOLDER, type SeedFolder } from './on-demand-seeds.ts';
+import type { FolderMode, TimingDashboard } from './on-demand-timing.ts';
 
 export interface FreshDashboard {
   privacyChoice(): Promise<string>;
@@ -32,7 +34,8 @@ export const DASHBOARD_JSON = `curl -sS --max-time 10 -w '\\n%{http_code}' --uni
 Authorization: Bearer $("$HOME/.local/bin/olympus" dashboard token)
 EOF`;
 
-export async function openFreshDashboard(machine: Machine, endpoint: string, timings: { timeoutMs?: number; pollMs?: number } = {}): Promise<FreshDashboard> {
+export async function openFreshDashboard(machine: Machine, endpoint: string, timings: { timeoutMs?: number; pollMs?: number;
+  bridge?: { agentPath: string; pidFile: string; logTemplate: string } } = {}): Promise<FreshDashboard & TimingDashboard> {
   const { host, port } = parseCdpEndpoint(endpoint);
   let tunnel: Tunnel | undefined;
   let browser: BrowserSession | undefined;
@@ -131,7 +134,7 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
       await click(`(()=>{const row=${row}; if(!row)return null; const e=[...row.querySelectorAll('button')].find(e=>/${pattern}/i.test(e.textContent.trim())); const menu=row.querySelector('details');if(e && menu && menu.contains(e) && !menu.open)menu.querySelector('summary').click();return e;})()`);
     };
     const folderRow = (name: string) => `(()=>{
-      const row=[...document.querySelectorAll('.frow')].find(e=>e.querySelector('.fname-text')?.textContent===${JSON.stringify(name)});
+      const row=[...document.querySelectorAll('.frow:not(.jump)')].find(e=>e.querySelector('.fname-text')?.textContent===${JSON.stringify(name)});
       if(!row){ const more=[...document.querySelectorAll('[data-key^="picker:more:"]')].find(e=>!e.disabled&&(${visible})(e));if(more)more.click(); }
       return row;
     })()`;
@@ -139,12 +142,12 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
     const url = /http:\/\/(?:127\.0\.0\.1|localhost):8010\/[^\s"<>]*/.exec(minted.stdout)?.[0];
     if (minted.code !== 0 || !url) throw new Error('CLI dashboard link unavailable');
     // The browser and OAuth callbacks run on the canary host. CDP alone only forwards browser control.
-    stopBridge = await startOwnerBridge(machine, Number(new URL(url).port), FRESH_BRIDGE_PID);
+    if (machine.os === 'linux') stopBridge = await startOwnerBridge(machine, Number(new URL(url).port), timings.bridge?.pidFile ?? FRESH_BRIDGE_PID, timings.bridge ?? {});
     dash = (await browser.send('Target.createTarget', { url: 'about:blank' })).targetId;
     owned.add(dash);
     const session = await attach(dash);
     await browser.send('Page.navigate', { url }, session);
-    await until(async () => !!await panel<boolean>(`!!document.querySelector('.source-name')`, Boolean), 'dashboard did not open from the CLI link');
+    await until(async () => !!await panel<boolean>(`!!document.querySelector('.source-name, [data-home-status]')`, Boolean), 'dashboard did not open from the CLI link');
     const dashboardView = async (): Promise<{ status: number; view: any }> => {
       const read = await machine.exec(DASHBOARD_JSON, { timeoutMs: 30_000 });
       const lines = read.stdout.trimEnd().split('\n');
@@ -165,7 +168,69 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
       if (!await navigate(path)) throw new Error('dashboard navigation failed');
       await until(async () => !!await panel<boolean>(ready, Boolean), 'dashboard reload failed');
     };
+    const timingSource = (folder: SeedFolder): LiveSourceSpec => ({ id: folder.source, label: folder.source === 'dropbox' ? 'Dropbox' : 'Google Drive' });
+    const openTimingFolder = async (folder: SeedFolder) => {
+      await reload('/dashboard?connect', `!!document.querySelector('.srcrows')`);
+      await sourceAction(timingSource(folder), 'Choose folders|Scope|Edit scope');
+      await until(async () => !!await panel<boolean>(`!!${folderRow(ON_DEMAND_FOLDER)}`, Boolean), 'seed folder did not appear in the dashboard picker');
+    };
+    const pressedMode = async (): Promise<FolderMode> => {
+      const mode = await panel<string>(`(() => {const row=${folderRow(ON_DEMAND_FOLDER)}; return row ? (row.querySelector('[aria-pressed=true][data-key^="picker:seg:"]')?.getAttribute('data-key')?.split(':').pop() || '') : null;})()`, value => typeof value === 'string');
+      if (mode === undefined) throw new Error('folder mode could not be read');
+      return mode as FolderMode;
+    };
     return {
+      folderMode: async folder => {
+        await openTimingFolder(folder);
+        const mode = await pressedMode();
+        await click(byKey('picker:cancel'));
+        return mode;
+      },
+      setFolderMode: async (folder, mode) => {
+        await openTimingFolder(folder);
+        const before = await pressedMode();
+        if (before === mode) { await click(byKey('picker:cancel')); return; }
+        // The selected segment toggles off to restore an inherited choice exactly.
+        await click(`${folderRow(ON_DEMAND_FOLDER)}?.querySelector('[data-key$=":${mode || before}"]')`);
+        await click(byKey('picker:save'));
+        await until(async () => {
+          await panel<boolean>(`(() => {const e=document.querySelector('[data-unlock-here]'); if(e && !e.disabled && (${visible})(e)){e.click();return true;}return false;})()`, Boolean);
+          return !!await panel<boolean>(`!document.querySelector('[data-key="picker:save"]') && !!document.querySelector('.srcrows')`, Boolean);
+        }, 'folder mode was not saved');
+        await openTimingFolder(folder);
+        const saved = await pressedMode();
+        await click(byKey('picker:cancel'));
+        if (saved !== mode) throw new Error(`folder mode did not persist: expected ${mode || 'inherited'}, saw ${saved || 'inherited'}`);
+      },
+      sync: async folder => {
+        await reload('/dashboard?connect', `!!document.querySelector('.srcrows')`);
+        await sourceAction(timingSource(folder), '^Sync now$');
+        // Sync now acknowledges immediately. Wait for its disabled Checking control to settle before timing archive reads.
+        await until(async () => !!await panel<boolean>(`(() => {const row=[...document.querySelectorAll('.source')].find(e=>e.querySelector('.source-name')?.textContent?.trim()===${JSON.stringify(timingSource(folder).label)});return !!row && !row.querySelector('button[aria-busy=true]') && [...row.querySelectorAll('button')].some(e=>/^Sync now$/.test(e.textContent.trim()));})()`, Boolean), 'seed metadata sync did not finish');
+      },
+      prepareRead: async (name, requireUnread = true) => {
+        await reload('/dashboard?privacy-items', `!!document.querySelector('[data-privacy-items]')`);
+        await until(async () => {
+          if (await panel<boolean>(`!!document.querySelector('[data-pi-search]')`, Boolean)) return true;
+          await panel<boolean>(`(() => {const e=document.querySelector('form[data-pi-unlock] button'); if(e && !e.disabled){e.click();return true;}return false;})()`, Boolean);
+          return false;
+        }, 'Your items did not unlock');
+        await until(async () => !!await panel<boolean>(`(() => {
+          const row=[...document.querySelectorAll('[data-pi-item]')].find(e=>e.querySelector('.pititle')?.textContent?.trim()===${JSON.stringify(name)});
+          if(row){row.click();return true;}
+          const e=document.querySelector('[data-pi-search]'); if(e){e.value=${JSON.stringify(name)}; e.dispatchEvent(new Event('input',{bubbles:true}));}return false;
+        })()`, Boolean), 'seed file did not appear in Your items');
+        if (requireUnread) await until(async () => !!await panel<boolean>(`!!document.querySelector('[data-pi-detail] [data-pi-read]:not(:disabled)')`, Boolean), 'file is not names-only (Read this file unavailable)');
+        return async () => {
+          await click(`document.querySelector('[data-pi-detail] [data-pi-read]')`);
+          let said = '';
+          await until(async () => {
+            said = await panel<string>(`document.querySelector('[data-pi-detail] [data-pi-read]')?.textContent || ''`, value => typeof value === 'string' && value !== 'Read this file') ?? '';
+            return !!said;
+          }, 'Read this file returned no message');
+          return said;
+        };
+      },
       privacyChoice: async () => {
         const recommended = PRIVATE_ANSWER_OPTIONS.find(option => option.recommended)!;
         await reload('/dashboard?keys', `!!document.querySelector('form[data-first-run-privacy]')`);

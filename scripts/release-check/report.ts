@@ -11,6 +11,7 @@ import type { VisualResult } from './visual.ts';
 import type { ExploreResult } from './explore.ts';
 import type { PagesResult } from './explore-pages.ts';
 import type { ReviewResult } from './reviewer.ts';
+import type { OnDemandTimingRow } from './on-demand-timing.ts';
 
 export type CheckStatus = 'pass' | 'fail' | 'warn' | 'skip';
 
@@ -24,6 +25,23 @@ export interface CheckResult {
   carried?: CarriedFrom;
   /** The leg that produced it (run.ts inLeg); absent for the install and setup checks every run makes. */
   leg?: string;
+}
+
+/** The same table is used by the real-accounts canary and release reports. Values are observations, including failures. */
+export function renderOnDemandTiming(rows: readonly OnDemandTimingRow[] | undefined): string {
+  if (!rows?.length) return '';
+  const yes = (value: boolean) => value ? 'yes' : 'no';
+  const body = rows.map(row => {
+    const first = row.replies[0];
+    const values = [row.file, row.source, row.action, row.t0, yes(row.foundFile), yes(row.indexed), yes(row.foundParagraph),
+      row.secondsToAnswer === null ? `not answered (${row.elapsedSeconds.toFixed(1)} s observed)` : row.secondsToAnswer.toFixed(1),
+      String(row.asks), yes(first?.namesFile ?? false), yes(first?.reading ?? false), row.firstReply, row.waitMessage || '(none)',
+      ...(['fetch', 'extract', 'judge', 'embed'] as const).map(step => row.steps[step] === undefined ? 'missing' : String(row.steps[step])),
+      row.attribution, row.jobIds.join(', ') || '(none)'];
+    return `<tr>${values.map(value => `<td>${escapeHtml(value)}</td>`).join('')}<td><details><summary>Replies and engine timings</summary><pre>${escapeHtml(JSON.stringify(row.replies, null, 2))}</pre><pre>${escapeHtml(row.timingLog)}</pre>${row.error ? escapeHtml(row.error) : ''}</details></td></tr>`;
+  }).join('');
+  const headings = ['File', 'Source', 'Action', 't0', 'Found file', 'Read (job indexed)', 'Found paragraph (fact, cited)', 'Seconds to answer', 'Asks', 'First reply names file', 'First reply says reading', 'First reply', 'Wait message shown', 'Fetch ms', 'Extract ms', 'Judge ms', 'Embed ms', 'Timing attribution', 'Read jobs', 'Evidence'];
+  return `<h2>Names with read on demand</h2><div style="overflow-x:auto"><table><thead><tr>${headings.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table></div>`;
 }
 
 /** The tested run a result was kept from. */

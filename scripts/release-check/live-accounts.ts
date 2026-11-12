@@ -39,7 +39,7 @@ export interface SearchEvidence { source: string; title: string; excerpt: string
 
 /** Talks to the engine's MCP endpoint on the machine, as a connected agent does. */
 export interface EngineMcp {
-  call(tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; text: string; structured: unknown; error?: string }>;
+  call(tool: string, args: Record<string, unknown>, options?: { timeoutMs: number }): Promise<{ ok: boolean; text: string; structured: unknown; error?: string }>;
   /** The names `tools/list` returns, as a connected client discovers them. */
   listTools?(): Promise<string[]>;
   close(): Promise<void>;
@@ -52,13 +52,13 @@ const fold = (text: string): string => text.replace(/[  \s]+/g, ' ').toLowerC
  * One MCP request on the machine: initialize, then the call, with the run's connection token. macOS: the engine's loopback
  * port; Linux: the worker's owner socket (the engine listens on no port there). Prints the call's raw response body.
  */
-export function mcpCallScript(os: 'linux' | 'macos', tokenPath: string, body: unknown): string {
+export function mcpCallScript(os: 'linux' | 'macos', tokenPath: string, body: unknown, timeoutMs = 120_000): string {
   const via = os === 'linux' ? '--unix-socket "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/olympus/worker.sock"' : '';
   const init = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'release-canary', version: '1' } } };
   return `set -euo pipefail
 token="$(cat "$HOME/${tokenPath}")"
 h="$(mktemp)"; trap 'rm -f "$h"' EXIT
-post() { curl -sS --max-time 120 ${via} -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H "authorization: Bearer $token" "$@" http://127.0.0.1:8010/mcp; }
+post() { curl -sS --max-time ${Math.max(1, Math.ceil(timeoutMs / 1000))} ${via} -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H "authorization: Bearer $token" "$@" http://127.0.0.1:8010/mcp; }
 post -D "$h" -o /dev/null --data ${shellQuote(JSON.stringify(init))}
 # The endpoint is stateless today and issues no session; one that does gets it back. (The guarded expansion keeps macOS's
 # bash 3.2 from calling an empty array unbound.)
@@ -90,8 +90,8 @@ printf '%s' "$out" | tr -d '\\n' | sed -n 's/.*"connection": *{[^}]*"id": *"\\([
   const connectionId = made.stdout.trim();
   let nextId = 2;
   return {
-    call: async (tool, args) => {
-      const result = await machine.exec(mcpCallScript(machine.os, TOKEN_PATH, { jsonrpc: '2.0', id: nextId++, method: 'tools/call', params: { name: tool, arguments: args } }), { timeoutMs: 180_000 });
+    call: async (tool, args, options) => {
+      const result = await machine.exec(mcpCallScript(machine.os, TOKEN_PATH, { jsonrpc: '2.0', id: nextId++, method: 'tools/call', params: { name: tool, arguments: args } }, options?.timeoutMs), { timeoutMs: options?.timeoutMs ?? 180_000 });
       if (result.code !== 0) return { ok: false, text: '', structured: null, error: (result.stderr.trim() || `exit ${result.code}`).slice(0, 300) };
       let message: any;
       try { message = parseRpc(result.stdout); } catch { return { ok: false, text: '', structured: null, error: `the engine answered something that is not JSON: ${result.stdout.slice(0, 160)}` }; }
