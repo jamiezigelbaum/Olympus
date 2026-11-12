@@ -33,7 +33,7 @@ export async function openTimingDiagnostics(machine: Machine): Promise<TimingDia
   let cursor: ReadCursor | undefined;
   const call = async (input: unknown): Promise<any> => {
     const result = await machine.exec(`set -euo pipefail
-rc_bun=$(command -v bun 2>/dev/null || ls -d ~/.local/share/olympus-engine/generations/*/runtime/bun "$HOME/Library/Application Support/Olympus/runtime/bun" 2>/dev/null | tail -1)
+rc_bun=$(command -v bun 2>/dev/null || { ls -d ~/.local/share/olympus-engine/generations/*/runtime/bun "$HOME/Library/Application Support/Olympus/runtime/bun" 2>/dev/null || true; } | tail -1)
 [ -n "$rc_bun" ]
 printf '%s' ${quote(JSON.stringify(input))} | "$rc_bun" --no-env-file ${quote(remote)}`, { timeoutMs: 60_000 });
     if (result.code !== 0) throw new Error(`timing diagnostics failed: ${result.stderr.slice(-400)}`);
