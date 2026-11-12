@@ -95524,7 +95524,8 @@ class LocalFileExtractionJobStore {
           return { state: "reading", etaSeconds: 60 };
         if (previous.status === "queued" || previous.status === "failed_retryable")
           return { state: "queued", etaSeconds: 60 };
-        if ((previous.source_version ?? "") === (job.refs[0].sourceVersion ?? ""))
+        const ownerRetry = request.requester === "owner" && previous.status === "skipped_too_large";
+        if (!ownerRetry && (previous.source_version ?? "") === (job.refs[0].sourceVersion ?? ""))
           return { state: "refused", reason: "read_failed" };
       }
       const size = job.refs[0].sizeBytes;
@@ -95553,7 +95554,9 @@ class LocalFileExtractionJobStore {
       const ref = queued.jobRefs[0];
       this.db.query(`INSERT INTO on_demand_reads
         (corpus_id, provider_item_id, job_id, requester, question_id, reserved_bytes, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`).run(request.itemRef.corpusId, request.itemRef.providerItemId, ref.jobId, request.requester, request.questionId ?? null, bytes, nowIso4());
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(job_id) DO UPDATE SET requester = excluded.requester, question_id = excluded.question_id,
+          reserved_bytes = excluded.reserved_bytes, created_at = excluded.created_at`).run(request.itemRef.corpusId, request.itemRef.providerItemId, ref.jobId, request.requester, request.questionId ?? null, bytes, nowIso4());
       return { state: "queued", etaSeconds: 60 };
     }).immediate();
   }

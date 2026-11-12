@@ -86,6 +86,18 @@ describe('read on demand', () => {
     expect(f.grants()).toBe(1);
   });
 
+  test('the owner can read a file a question allowance stopped', async () => {
+    const f = fixture();
+    expect(await requestOnDemandRead(req('item'), f.context)).toMatchObject({ state: 'queued' });
+    const lane = { corpusId: 'internal.fixture.files', provider: 'fixture', accountScope: 'one', approvedScopeKey: 'scope' };
+    const leased = f.context.jobs.lease({ ...lane, workerId: 'w' });
+    expect(leased.leasedJobs).toHaveLength(1);
+    f.context.jobs.record({ jobId: leased.leasedJobs[0]!.jobId, workerId: 'w', leaseToken: leased.leasedJobs[0]!.leaseToken, status: 'skipped_too_large' });
+    expect(await requestOnDemandRead(req('item', 'remote_app', 'q2'), f.context)).toEqual({ state: 'refused', reason: 'read_failed' });
+    expect(await requestOnDemandRead({ itemRef: req('item').itemRef, requester: 'owner' }, f.context)).toMatchObject({ state: 'queued' });
+    expect(f.context.jobs.get(leased.leasedJobs[0]!.jobId)?.status).toBe('queued');
+  });
+
   test('concurrent retries and a restart keep one forced job and its active lease', async () => {
     const f = fixture();
     expect((await Promise.all([requestOnDemandRead(req(), f.context), requestOnDemandRead(req(), f.context)])).map(r => r.state)).toEqual(['queued', 'queued']);
