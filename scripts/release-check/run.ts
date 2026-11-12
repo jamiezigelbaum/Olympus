@@ -42,6 +42,11 @@
  * archive, and a file changed during an import stops it visibly (archive-leg.ts, archive-stages.ts). Each later format adds one entry to
  * ARCHIVE_FORMATS in archive-fixtures.ts and nothing here.
  *
+ * Opt-in archive scale (`--archive-scale`, or RC_ARCHIVE_SCALE=1 in this harness): after the archive leg, import seeded synthetic
+ * mbox, Roam, both Reflect shapes and paginated Readwise at realistic size, then remove them. Forces worker.engineSplit on; adds
+ * count/date/gap/held/progress/idempotency checks and wall-time, throughput, engine RSS and front-latency measurements to the report.
+ * --skip-archive skips the ordinary archive leg independently. Normal runs never generate scale fixtures or call scale stages.
+ *
  * Restore leg (1.5, on by default for a fresh install; `--skip-restore` leaves it out for a candidate with no backup and restore): near
  * the end, the journey `backup-for-restore` makes a passphrase backup on the run's machine, a second machine is provisioned fresh with the same
  * candidate, the backup is put on it, and `restore-clean-machine` restores it into that empty install and looks for the sources and the
@@ -560,7 +565,7 @@ async function setupMachine(run: Run, workDir: string, bundlePath: string, insta
   return (await settleIngest(run)).settled;
 }
 
-/** What prepare-source saw of the engine split after its restart: the roles' process counts, or null where it cannot read them (macOS). */
+/** What prepare-source saw of the engine split after its restart: the roles' process counts, or null if the OS cannot expose them. */
 export function engineSplitCheck(roles: unknown): CheckResult {
   const id = 'engine.split';
   const title = 'The engine split is on (worker.engineSplit): a front and a background are running';
@@ -1620,7 +1625,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
         if (Date.now() < deadline) await run.inLeg('inbox', () => runInboxLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the Ask page and Inbox leg');
         if (Date.now() < deadline) await run.inLeg('journeys', () => runJourneyLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the journeys');
         if (Date.now() < deadline) await run.inLeg('archive', () => runArchiveLeg(run, options.outDir, deadline)); else run.errors.push('the run exceeded its time budget before the archive-import leg');
-        await run.inLeg('archive', () => runArchiveScaleLeg(run, options.outDir, deadline));
+        if (options.archiveScale) await run.inLeg('archive', () => runArchiveScaleLeg(run, options.outDir, deadline));
         // The backup is made before the control exploration, which ends with Readwise disconnected and its data deleted (its
         // `empty` state): a backup made after it holds no source to restore (#1323, run 42936532388).
         // The restore leg's second machine comes only after the first is done and gone: both drivers run one machine at a time

@@ -523,7 +523,7 @@ const settleStep = (fx: LegFixture, settleS: number): Journey['steps'][number] =
 });
 
 /** The See button, opened with a real press, and the two lists' headings and every line the fixture must leave there. */
-const gapsStep = (fx: LegFixture): Journey['steps'][number] => ({
+export const gapsStep = (fx: LegFixture): Journey['steps'][number] => ({
   name: `Open ${expectedSeeLabel(fx.expect)}`,
   do: { click: { role: 'button', name: expectedSeeLabel(fx.expect), within: rowTarget(fx.fileName) }, frame: 'panel' },
   expect: [

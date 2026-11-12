@@ -47,7 +47,8 @@ export function scaleMbox(token: string): Uint8Array {
     let headerDate = date.toUTCString().replace('GMT', zone);
     if (i % 4 === 0) headerDate = headerDate.replace(String(date.getUTCFullYear()), String(date.getUTCFullYear()).slice(-2));
     const id = i >= 300 && i < 320 ? `pair-${Math.floor((i - 300) / 2)}` : String(i);
-    const word = `=?${encoding.charset}?B?${encoding.bytes.toString('base64')}?=`;
+    const word = i % 2 === 0 ? `=?${encoding.charset}?B?${encoding.bytes.toString('base64')}?=`
+      : `=?${encoding.charset}?Q?${qp(encoding.bytes).replaceAll('=\n', '')}?=`;
     const text = [separator, ...(i >= 200 && i < 220 ? [] : [`Message-ID: <${token}-${id}@example.test>`]),
       `From: ${word} <vexli@example.test>`, 'To: Nuvlo Zemi <nuvlo@example.test>', `Subject: ${word} log ${i}`,
       ...(i >= 100 && i < 105 ? [] : [`Date: ${headerDate}`]), 'MIME-Version: 1.0',
@@ -70,7 +71,10 @@ export function scaleFixture(format: Exclude<ScaleFormat, 'readwise'>, seed: str
     productFormat = 'roam-json'; label = 'Roam notes (JSON)';
     bytes = utf8(roamJson(Array.from({ length: count }, (_, i) => {
       const at = Date.parse(scaleDate(i, count));
-      return { title: i % 10 === 0 ? new Date(at).toLocaleDateString('en-US', { timeZone: 'UTC', month: 'long', day: 'numeric', year: 'numeric' }).replace(/(\d+),/, '$1th,') : `Zorava field page ${i}`, uid: `${token}-${i}`,
+      const date = new Date(at);
+      const day = date.getUTCDate();
+      const ordinal = day % 100 >= 11 && day % 100 <= 13 ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' } as Record<number, string>)[day % 10] ?? 'th';
+      return { title: i % 10 === 0 ? `${date.toLocaleString('en-US', { month: 'long', timeZone: 'UTC' })} ${day}${ordinal}, ${date.getUTCFullYear()}` : `Zorava field page ${i}`, uid: `${token}-${i}`,
         'create-time': at, 'edit-time': at + 3_600_000,
         children: [{ string: `Vexli Numo packs a tent for Zorava. ${token} entry ${i}.`, uid: `${token}-${i}-a`, 'create-time': at + 60_000,
           children: [{ string: `Nested ferry detail ${i}`, uid: `${token}-${i}-b`, 'edit-time': at + 3_600_000 }] }] };

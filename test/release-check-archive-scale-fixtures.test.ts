@@ -10,7 +10,7 @@ import { registerArchiveFormatConnectors } from '../src/workers/archive-import/f
 import { archiveFileEntries, archiveManifestSha256, buildArchiveManifest, probeArchivePath } from '../src/workers/archive-import/manifest.ts';
 import { detectArchiveFormat } from '../src/core/archive-formats.ts';
 import { FIXTURE_FOLDER, writeFixture } from '../scripts/release-check/archive-fixtures.ts';
-import { SCALE_ENCODINGS, SCALE_FIRST, SCALE_LAST, scaleFixture, scaleReadwise } from '../scripts/release-check/archive-scale-fixtures.ts';
+import { SCALE_COUNTS, SCALE_ENCODINGS, SCALE_FIRST, SCALE_LAST, scaleDate, scaleFixture, scaleReadwise } from '../scripts/release-check/archive-scale-fixtures.ts';
 import { startFakeReadwise, type FakeReadwise } from '../scripts/release-check/readwise-fake.ts';
 import { ReadwiseApiClient, ReadwiseApiError } from '../src/workers/readwise/api.ts';
 
@@ -53,7 +53,19 @@ for (const format of ['mbox', 'roam', 'reflect-json', 'reflect-markdown'] as con
           if (!item.metadata.messageId) noId++;
           else messageIds.set(String(item.metadata.messageId), (messageIds.get(String(item.metadata.messageId)) ?? 0) + 1);
           const text = item.content.kind === 'text' ? item.content.text : '';
-          for (const encoding of SCALE_ENCODINGS) if (text.includes(encoding.decoded)) decoded.add(encoding.charset);
+          const index = count - 1;
+          const encoding = SCALE_ENCODINGS[index % SCALE_ENCODINGS.length]!;
+          const bodyText = index % 3 === 0 ? 'Vexli Numo' : encoding.decoded;
+          expect(text).toContain(`Bring bread and a blue tent. ${bodyText}`);
+          expect(item.metadata.title).toBe(`${encoding.decoded} log ${index}`);
+          expect(item.metadata.from).toContain(encoding.decoded);
+          if (text.includes(`Bring bread and a blue tent. ${encoding.decoded}`)) decoded.add(encoding.charset);
+          if (index >= 100 && index < 105) expect(date).toBeUndefined();
+          else expect(date).toBe(new Date(Date.parse(scaleDate(index, SCALE_COUNTS.mbox - 5)) + (index % 3 === 0 ? 5 * 3_600_000 : 0)).toISOString());
+          if (index % 3 === 0) {
+            expect(text).toContain('\nFrom a remembered ferry log');
+            expect(text).toContain('\n>From an older log');
+          }
         }
       }
       expect(count).toBe(fx.expect.messages);
@@ -70,7 +82,7 @@ for (const format of ['mbox', 'roam', 'reflect-json', 'reflect-markdown'] as con
         expect([...messageIds.values()].filter(n => n === 2)).toHaveLength(10);
         expect(decoded.size).toBe(SCALE_ENCODINGS.length);
         const raw = Buffer.from(fx.bytes).toString('utf8');
-        for (const text of ['quoted-printable', 'base64', 'Shift_JIS', 'ISO-8859-1', 'windows-1252', 'UTF-8', '>From ', '>>From ', '\r\n', ' EST', ' GMT', ' -0000']) expect(raw).toContain(text);
+        for (const text of ['quoted-printable', 'base64', 'Shift_JIS', 'ISO-8859-1', 'windows-1252', 'UTF-8', '>From ', '>>From ', '?Q?', '?B?', '\r\n', ' EST', ' GMT', ' -0000']) expect(raw).toContain(text);
         expect(raw).toMatch(/Date: [^\n]* 94 12:00:00/);
       }
     } finally { root.close(); }
@@ -84,21 +96,21 @@ test('scaled Readwise serves every book and document across real API cursors, wi
   expect(scaled.books).toHaveLength(1_500);
   expect(scaled.documents).toHaveLength(800);
   expect(scaled.items).toBe(3_800);
-  fake = startFakeReadwise({ port: 0, token: 'scale-token', ...scaled, pageSize: 100, retryOnce: true });
+  fake = startFakeReadwise({ port: 0, ...scaled, token: 'scale-token', pageSize: 100, retryOnce: true });
   const base = `http://127.0.0.1:${fake.port}`;
   const api = new ReadwiseApiClient({ token: 'scale-token', apiV2BaseUrl: `${base}/api/v2/`, readerApiV3BaseUrl: `${base}/api/v3/` });
   const documents = await api.fetchReaderDocuments({});
   expect(documents.documents).toEqual(scaled.documents);
-  expect(documents.requestCount).toBeGreaterThan(1);
-  try { await api.fetchExportBooks({}); throw new Error('expected 429'); }
+  expect(documents.requestCount).toBe(8);
+  try { await api.fetchExportBooks({ maxPages: 20 }); throw new Error('expected 429'); }
   catch (error) {
     expect(error).toBeInstanceOf(ReadwiseApiError);
     expect((error as ReadwiseApiError).status).toBe(429);
     expect((error as ReadwiseApiError).retryAfter).toBe('1');
   }
-  const books = await api.fetchExportBooks({});
+  const books = await api.fetchExportBooks({ maxPages: 20 });
   expect(books.books).toEqual(scaled.books);
   expect(books.requestCount).toBe(15);
-  const second = await api.fetchExportBooks({});
+  const second = await api.fetchExportBooks({ maxPages: 20 });
   expect(second.books).toEqual(scaled.books);
 });

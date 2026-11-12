@@ -4,12 +4,11 @@ import { join } from 'node:path';
 import { writeFixture, type LegFixture } from './archive-fixtures.ts';
 import { SCALE_FIRST, SCALE_LAST, scaleFixture, scaleReadwise, type ScaleFormat } from './archive-scale-fixtures.ts';
 import {
-  ALL_SOURCES_PATH, ARCHIVE_PANEL_PROBE, approveRequestSteps, datesWord, expectedLists, judgedLineOf, messagesWord,
+  ARCHIVE_PANEL_PROBE, approveRequestSteps, datesWord, gapSentence, gapsStep, judgedLineOf, messagesWord,
   panelArchivesOf, removeJourney, rowNamed, shownPath, startViewOf, statusViewOf,
   type AgentArchiveView, type RowView,
 } from './archive-leg.ts';
-import type { ArchiveHost } from './archive-stages.ts';
-import { OPEN_ALL_SOURCES } from './journeys.ts';
+import type { ArchiveHost, CliAnswer } from './archive-stages.ts';
 import { runJourney, type JourneyDriver, type JourneyTrace } from './journey.ts';
 import type { ArchiveScaleMeasurement, CheckResult } from './report.ts';
 
@@ -26,8 +25,11 @@ export interface ReadwiseScaleSnapshot {
   /** A completed provider traversal, including the export lane, rather than a quiet partial pass. */
   complete: boolean;
   run: string;
+  running: boolean;
 }
 export interface ScaleHost extends ArchiveHost {
+  /** Async CLI so status polling cannot block the front latency sampler. */
+  scaleCli(args: string[]): Promise<CliAnswer>;
   /** An asynchronous status read of the front, including its response body. */
   frontStatus(): Promise<boolean>;
   /** Sum of RSS for the front and background processes, bytes, or null if unavailable. */
@@ -47,12 +49,14 @@ export interface ScaleObservation {
   ok: boolean;
   detail?: string;
   expected: number;
-  archive?: AgentArchiveView;
-  row?: RowView;
-  gaps?: Record<string, number>;
+  archive?: AgentArchiveView | undefined;
+  row?: RowView | undefined;
+  gaps?: Record<string, number> | undefined;
+  sourceRow?: string;
   samples: ScaleSample[];
+  boundS?: number;
   drained: boolean;
-  held?: number;
+  held?: number | undefined;
   repeat?: { already: boolean; added: number | null };
   renamed?: { already: boolean; added: number | null };
   removed: boolean;
@@ -76,8 +80,9 @@ async function measured<T>(host: ScaleHost, obs: ScaleObservation, work: () => P
     while (active) {
       const at = host.now();
       try { const rss = host.engineRss(); if (rss !== null) peak = Math.max(peak ?? 0, rss); } catch { /* measurement unavailable */ }
+      const requestAt = host.now();
       try { if (!await host.frontStatus()) failures++; } catch { failures++; }
-      latencies.push(host.now() - at);
+      latencies.push(host.now() - requestAt);
       if (active) await host.sleep(Math.max(1, 2_000 - (host.now() - at)));
     }
   })();
@@ -97,7 +102,7 @@ const empty = (format: ScaleFormat, expected: number): ScaleObservation => ({ fo
 const errorText = (error: unknown): string => error instanceof Error ? error.message : String(error);
 const panelRow = async (driver: JourneyDriver, name: string): Promise<RowView | undefined> => rowNamed(panelArchivesOf(await driver.probe('panel', ARCHIVE_PANEL_PROBE)), name);
 /** Parse a total shown on the row, never substitute the agent's count for a missing UI count. */
-export function scaleRowCount(row: RowView | undefined): number | null {
+export function scaleRowCount(row: Pick<RowView, 'text'> | undefined): number | null {
   if (!row || row.text.includes('Counting')) return null;
   const found = /\b([\d,]+) (?:messages?|notes?|items?)\b/.exec(row.text);
   if (found) return Number(found[1]!.replaceAll(',', ''));
@@ -107,9 +112,9 @@ export function scaleRowCount(row: RowView | undefined): number | null {
 
 /** Approval without waiting for completion, so 10 s dashboard samples include the running import. */
 async function approve(host: ScaleHost, driver: JourneyDriver, fx: LegFixture, path: string, obs: ScaleObservation, repeat = false): Promise<string> {
-  const answer = host.cli(['start', '--path', path]);
+  const answer = await host.scaleCli(['start', '--path', path]);
   const start = startViewOf(answer.json, fx.token);
-  if (answer.code !== 0 || start.code !== 'needs_approval' || !start.requestId) throw new Error(`archive start: ${start.code || answer.stderr}`);
+  if (start.code !== 'needs_approval' || !start.requestId) throw new Error(`archive start: ${start.code || answer.stderr}`);
   const steps = approveRequestSteps(fx, shownPath(host.home, path));
   // A duplicate must end in an already-imported request, without a row for the renamed copy.
   if (repeat) steps[steps.length - 1] = { ...steps[steps.length - 1]!, expect: [] };
@@ -120,7 +125,7 @@ async function approve(host: ScaleHost, driver: JourneyDriver, fx: LegFixture, p
 }
 
 async function repeatImport(host: ScaleHost, driver: JourneyDriver, fx: LegFixture, path: string, obs: ScaleObservation, boundS: number): Promise<{ already: boolean; added: number | null }> {
-  const before = host.cli(['status']);
+  const before = await host.scaleCli(['status']);
   const previous = statusViewOf(before.json, fx.token);
   if (before.code !== 0 || !previous.ok || previous.archives.some(a => a.messages === undefined)) throw new Error('cannot count archives before re-import');
   const count = previous.archives.reduce((sum, archive) => sum + archive.messages!, 0);
@@ -129,7 +134,7 @@ async function repeatImport(host: ScaleHost, driver: JourneyDriver, fx: LegFixtu
   let already = false;
   let after: ReturnType<typeof statusViewOf> | undefined;
   for (;;) {
-    const answer = host.cli(['status']);
+    const answer = await host.scaleCli(['status']);
     const raw = answer.json as { requests?: Array<{ request_id: string; state: string }> } | undefined;
     const state = raw?.requests?.find(r => r.request_id === requestId)?.state;
     if (answer.code === 0) {
@@ -146,6 +151,7 @@ async function repeatImport(host: ScaleHost, driver: JourneyDriver, fx: LegFixtu
 export async function scaleArchiveStage(host: ScaleHost, format: Exclude<ScaleFormat, 'readwise'>, seed: string, bounds: { importS?: number; repeatS?: number; removeS?: number } = {}): Promise<ScaleObservation> {
   const fx = scaleFixture(format, seed);
   const obs = empty(format, fx.expect.messages);
+  obs.boundS = bounds.importS ?? SCALE_BOUND_S;
   const path = writeFixture(host.home, fx);
   const renamedName = `rc-scale-renamed-${fx.fileName}`;
   const renamedPath = join(host.home, 'rc-archives', renamedName);
@@ -154,34 +160,47 @@ export async function scaleArchiveStage(host: ScaleHost, format: Exclude<ScaleFo
       try {
         await measured(host, obs, async () => {
           const started = host.now();
-          const deadline = started + (bounds.importS ?? SCALE_BOUND_S) * 1_000;
+          const deadline = started + obs.boundS! * 1_000;
           await approve(host, driver, fx, path, obs);
           for (;;) {
+            const sampledAt = host.now();
             obs.row = await panelRow(driver, fx.fileName);
             obs.samples.push({ ms: host.now() - started, items: scaleRowCount(obs.row), status: obs.row?.status ?? 'missing' });
-            const answer = host.cli(['status']);
+            const answer = await host.scaleCli(['status']);
             const status = statusViewOf(answer.json, fx.token);
             obs.archive = answer.code === 0 && status.ok ? status.archives.find(a => a.name === fx.fileName) : undefined;
             obs.held = obs.archive?.waiting;
-            obs.drained = obs.archive?.status === 'imported' && obs.held === 0 && judgedLineOf(obs.row?.text ?? '')?.held === 0;
-            if (obs.drained || obs.archive?.status === 'stopped' || host.now() >= deadline) break;
-            await host.sleep(Math.min(10_000, Math.max(1, deadline - host.now())));
+            obs.drained = host.now() <= deadline && obs.archive?.status === 'imported' && obs.held === 0 && judgedLineOf(obs.row?.text ?? '')?.held === 0;
+            if ((obs.drained && obs.row?.status === 'imported' && scaleRowCount(obs.row) === obs.archive?.messages) || obs.archive?.status === 'stopped' || host.now() >= deadline) break;
+            await host.sleep(Math.max(1, Math.min(sampledAt + 10_000, deadline) - host.now()));
           }
           if (obs.archive) obs.gaps = host.archiveGaps(obs.archive.id);
         });
+        if (obs.row?.status === 'imported' && fx.expect.notImported.length > 0) {
+          const trace = await runJourney(driver, { id: `archive-scale-${format}-reasons`, title: 'Open the reasons for the designed failures', source: 'archive scale', steps: [gapsStep(fx)] });
+          obs.traces.push(trace);
+          obs.row = await panelRow(driver, fx.fileName);
+        }
         if (obs.archive?.status === 'imported') {
           obs.repeat = await repeatImport(host, driver, fx, path, obs, bounds.repeatS ?? SCALE_REPEAT_S);
           copyFileSync(path, renamedPath);
           obs.renamed = await repeatImport(host, driver, { ...fx, fileName: renamedName }, renamedPath, obs, bounds.repeatS ?? SCALE_REPEAT_S);
         }
-        obs.ok = true;
+        obs.ok = obs.traces.every(trace => trace.ok);
       } finally {
-        const trace = await runJourney(driver, removeJourney(`scale-${format}`, fx.fileName, bounds.removeS ?? SCALE_REMOVE_S));
-        obs.traces.push(trace);
-        const answer = host.cli(['status']);
+        const before = await host.scaleCli(['status']);
+        const listed = statusViewOf(before.json, fx.token);
+        let removed = before.code === 0 && listed.ok;
+        for (const name of [renamedName, fx.fileName]) {
+          if (!listed.archives.some(a => a.name === name)) continue;
+          const trace = await runJourney(driver, removeJourney(`scale-${format}-${name}`, name, bounds.removeS ?? SCALE_REMOVE_S));
+          obs.traces.push(trace);
+          removed = removed && trace.ok;
+        }
+        const answer = await host.scaleCli(['status']);
         const view = statusViewOf(answer.json, fx.token);
         const stores = host.readStores({ family: fx.expect.family, provider: format === 'roam' ? 'roam' : format === 'mbox' ? 'mbox' : 'reflect' }, obs.archive?.id, fx.token);
-        obs.removed = trace.ok && answer.code === 0 && view.ok && !view.archives.some(a => a.name === fx.fileName || a.name === renamedName)
+        obs.removed = removed && answer.code === 0 && view.ok && !view.archives.some(a => a.name === fx.fileName || a.name === renamedName)
           && stores.every(store => !store.error && store.live === 0 && store.tokenRows === 0);
       }
     });
@@ -199,27 +218,32 @@ export const READWISE_SCALE_ROW = String.raw`(() => {
 export async function scaleReadwiseStage(host: ScaleHost, seed: string, boundS = SCALE_BOUND_S): Promise<ScaleObservation> {
   const expected = scaleReadwise(seed).items;
   const obs = empty('readwise', expected);
+  obs.boundS = boundS;
   try {
     await host.withBrowser(async ({ driver }) => {
       await measured(host, obs, async () => {
         // Start sampling before connecting so the first visible count may be zero.
-        await driver.go(ALL_SOURCES_PATH);
-        const opened = await runJourney(driver, { id: 'archive-scale-readwise-open', title: 'Open Readwise progress', source: 'archive scale', mutates: false, steps: [OPEN_ALL_SOURCES] });
+        const opened = await runJourney(driver, { id: 'archive-scale-readwise-open', title: 'Open Readwise progress', source: 'archive scale', mutates: false, steps: [{ name: 'Open the Sources tab', do: { go: '/dashboard?connect' }, expect: [{ present: { css: '.srcrows' }, frame: 'host' }] }] });
+        if (!opened.ok) throw new Error('Readwise Sources page did not open');
         obs.traces.push(opened);
         const started = host.now();
         await host.beginReadwise(seed);
         const deadline = started + boundS * 1_000;
         for (;;) {
+          const sampledAt = host.now();
           const snapshot = await host.readwiseSnapshot();
           const text = await driver.probe('host', READWISE_SCALE_ROW);
+          if (typeof text === 'string') obs.sourceRow = text;
           const match = typeof text === 'string' ? /\b([\d,]+) (?:items?|documents?|highlights?)\b/.exec(text) : null;
           obs.samples.push({ ms: host.now() - started, items: match ? Number(match[1]!.replaceAll(',', '')) : null, status: snapshot.complete ? 'imported' : 'importing' });
           obs.archive = { id: 'readwise.library', name: 'Readwise', format: 'readwise', status: snapshot.complete ? 'imported' : 'importing', messages: snapshot.items,
             ...(snapshot.earliest ? { earliest: snapshot.earliest } : {}), ...(snapshot.latest ? { latest: snapshot.latest } : {}), waiting: snapshot.held, notImported: [], howRead: [] };
           obs.held = snapshot.held; obs.gaps = snapshot.gaps;
-          obs.drained = snapshot.complete && snapshot.held === 0;
-          if (obs.drained || host.now() >= deadline) break;
-          await host.sleep(Math.min(10_000, Math.max(1, deadline - host.now())));
+          obs.drained = host.now() <= deadline && snapshot.complete && snapshot.held === 0;
+          if ((obs.drained && scaleRowCount(typeof text === 'string' ? { text } : undefined) === snapshot.items) || host.now() >= deadline) break;
+          // The product owns its retry and manual-sync rate limits. Retry only when no pass is running.
+          if (!snapshot.running && !snapshot.complete) await host.syncReadwise();
+          await host.sleep(Math.max(1, Math.min(sampledAt + 10_000, deadline) - host.now()));
         }
       });
       if (obs.archive?.status === 'imported') {
@@ -233,7 +257,8 @@ export async function scaleReadwiseStage(host: ScaleHost, seed: string, boundS =
             break;
           }
           if (host.now() >= deadline) break;
-          await host.sleep(2_000);
+          if (!after.running) await host.syncReadwise();
+          await host.sleep(10_000);
         }
       }
       obs.ok = true;
@@ -250,22 +275,23 @@ const exact = (got: Record<string, number> | undefined, expected: Record<string,
   && Object.keys(got).length === Object.keys(expected).length && Object.entries(expected).every(([kind, count]) => got[kind] === count);
 export function scaleChecks(format: ScaleFormat, obs: ScaleObservation | undefined): CheckResult[] {
   const check = (what: string, title: string, pass: boolean, detail: string): CheckResult => ({ id: `archive.scale.${format}.${what}`, title, status: pass ? 'pass' : 'fail', detail });
-  if (!obs) return [check('ran', 'The scale import ran', false, 'no result from the machine')];
+  if (!obs || !Array.isArray(obs.samples) || !obs.measurement) return [check('ran', 'The scale import ran', false, obs?.detail ?? 'no complete result from the machine')];
   const row = obs.archive;
   const gaps = format === 'mbox' ? { message_unreadable: 5 } : {};
   const visible = obs.samples.filter((s): s is ScaleSample & { items: number } => s.items !== null);
   const rising = visible.some((s, i) => i > 0 && visible.slice(0, i).some(previous => previous.items < s.items));
-  const expectedLines = format === 'readwise' ? [] : expectedLists({ notImported: Object.entries(gaps).map(([kind, count]) => ({ kind, count })), howRead: [] } as LegFixture['expect']).notImported;
+  const expectedLines = format === 'readwise' ? [] : Object.entries(gaps).map(([kind, count]) => gapSentence(kind, count));
   return [
-    check('ran', 'The scale import ran through the product', obs.ok, obs.detail ?? 'agent request and dashboard approval'),
+    check('ran', 'The scale import ran through the product', obs.ok, obs.detail ?? (format === 'readwise' ? 'Readwise source connected to the synthetic paginated provider' : 'agent request and dashboard approval')),
     check('items', 'Imported items equal the designed count', row?.status === 'imported' && row.messages === obs.expected, `${row?.messages ?? 'unknown'} imported; expected ${obs.expected}; state ${row?.status ?? 'missing'}`),
     check('dates', 'Oldest and newest dates are preserved', row?.earliest?.slice(0, 10) === SCALE_FIRST && row?.latest?.slice(0, 10) === SCALE_LAST,
       `${row?.earliest ?? 'unknown'} to ${row?.latest ?? 'unknown'}; expected ${SCALE_FIRST} to ${SCALE_LAST}`),
-    check('held', 'Held and awaiting judgement reach zero within the bound', obs.drained && obs.held === 0, `${obs.held ?? 'unknown'} still held; ${Math.round(obs.measurement.wallMs / 1_000)} s observed (bound ${SCALE_BOUND_S} s)`),
+    check('held', 'Held and awaiting judgement reach zero within the bound', obs.drained && obs.held === 0, `${obs.held ?? 'unknown'} still held; ${Math.round(obs.measurement.wallMs / 1_000)} s observed (bound ${obs.boundS ?? SCALE_BOUND_S} s)`),
     check('gaps', 'Only the designed gaps occur, with exact kinds', exact(obs.gaps, gaps), `observed ${JSON.stringify(obs.gaps ?? null)}; expected ${JSON.stringify(gaps)}`),
     check('progress', 'The dashboard shows a rising imported count in 10 s samples', rising, `${obs.samples.length} samples: ${obs.samples.map(s => `${Math.round(s.ms / 1_000)}s:${s.items ?? 'unreadable'}`).join(', ')}`),
-    ...(format === 'readwise' ? [] : [check('dashboard', 'The final dashboard row shows the count, dates and exact failure reasons',
-      obs.row?.status === 'imported' && obs.row.text.includes(messagesWord(obs.expected, format === 'mbox' ? 'email' : 'note'))
+    ...(format === 'readwise' ? [check('dashboard', 'The final dashboard row shows the imported count',
+      scaleRowCount(obs.sourceRow ? { text: obs.sourceRow } : undefined) === obs.expected, obs.sourceRow ?? 'row missing')] : [check('dashboard', 'The final dashboard row shows the count, dates and exact failure reasons',
+      obs.row?.status === 'imported' && (expectedLines.length === 0 || obs.row.whyOpen === true) && obs.row.text.includes(messagesWord(obs.expected, format === 'mbox' ? 'email' : 'note'))
         && obs.row.facts.includes(datesWord({ earliest: SCALE_FIRST, latest: SCALE_LAST }))
         && JSON.stringify([...(obs.row.notImported ?? [])].sort()) === JSON.stringify([...expectedLines].sort()),
       obs.row ? `${obs.row.facts}; ${obs.row.notImported.join('; ') || 'no failed items'}` : 'row missing')]),

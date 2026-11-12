@@ -61,6 +61,7 @@ import { besideLiveStage, changedStage, drainStage, importStage, modelStage, rem
 import { openingLinkOrThrow } from './opening-link.ts';
 import { liveSeedHook } from './archive-live-seeds.ts';
 import './archive-live-seed-hooks.ts';
+import { READWISE_CONNECTOR_ID, readwiseCursorIsSweepBoundary } from '../../src/workers/readwise/connector.ts';
 import { scaleArchiveStage, scaleReadwiseStage, type ScaleHost } from './archive-scale.ts';
 import { scaleReadwise, SCALE_FORMATS, type ScaleFormat } from './archive-scale-fixtures.ts';
 
@@ -404,8 +405,8 @@ async function prepareSource(): Promise<never> {
   if (restart.code !== 0) emit({ ok: false, step: 'engine-restart', detail: restart.stderr.slice(0, 300) });
   const readyMs = await waitForEngine(300_000);
   // With the switch on, the restarted engine must run as a front and a background. Linux reads the roles from /proc;
-  // macOS has no reader here, so it reports the roles as unread (null) and run.ts says so.
-  const engineSplit = config.engineSplit ? (p.os === 'linux' ? ownEngineRoles() : null) : undefined;
+  // macOS reads them from ps environments, or reports null when ps cannot expose them.
+  const engineSplit = config.engineSplit ? ownEngineRoles() : undefined;
   emit({ ok: true, rules: config.tierRules.length, engineReadyMs: readyMs, ...(engineSplit !== undefined ? { engineSplit } : {}) });
 }
 
@@ -435,7 +436,20 @@ export function engineRolesIn(environs: readonly string[]): { front: number; bac
   return roles;
 }
 
-function ownEngineRoles(): { front: number; background: number } {
+/** macOS ps exposes environment entries separated by spaces, one process per line. Never retain its output. */
+export function engineRolesInPs(output: string): { front: number; background: number } {
+  const role = new RegExp(`(?:^|\\s)${ENGINE_ROLE_ENV}=(front|background)(?:\\s|$)`);
+  return engineRolesIn(output.split('\n').map(line => {
+    const match = role.exec(line);
+    return match ? `${ENGINE_ROLE_ENV}=${match[1]}` : '';
+  }));
+}
+
+function ownEngineRoles(): { front: number; background: number } | null {
+  if (process.platform !== 'linux') {
+    const ps = spawnSync('ps', ['eww', '-axo', 'command='], { encoding: 'utf8', timeout: 5_000 });
+    return ps.status === 0 ? engineRolesInPs(ps.stdout) : null;
+  }
   const environs: string[] = [];
   for (const pid of readdirSync('/proc').filter((name) => /^\d+$/.test(name))) {
     try { environs.push(readFileSync(`/proc/${pid}/environ`, 'latin1')); } catch { /* gone, or not ours */ }
@@ -1822,9 +1836,9 @@ const SCALE_READWISE_MARKER = join(WORKDIR, 'archive-scale-readwise.json');
 
 /** The normal test source is restored after isolation; the marker survives a killed scale command. */
 async function clearScaleReadwise(): Promise<void> {
-  const disconnected = await disconnectReadwise();
-  if (disconnected.status !== 200) throw new Error(`Readwise disconnect: ${disconnected.status}`);
   const session = await ownerSession();
+  const disconnected = await disconnectReadwise(session);
+  if (disconnected.status !== 200) throw new Error(`Readwise disconnect: ${disconnected.status}`);
   const deleted = await session.call('POST', '/dashboard/delete-source-data', { source_id: 'readwise.library', acknowledge: true });
   if (deleted.status !== 200 || deleted.json?.ok !== true) throw new Error(`Readwise delete: ${deleted.status}`);
   const gone = await until(async () => {
@@ -1837,9 +1851,14 @@ async function clearScaleReadwise(): Promise<void> {
 const SCALE_REMOVE_MS = 900_000;
 
 async function scaleHost(): Promise<ScaleHost> {
-  const session = await ownerSession();
+  let session = await ownerSession();
   return {
     ...archiveHost(),
+    async scaleCli(args) {
+      const child = Bun.spawn([platform().olympusBin, 'archive', ...args], { stdout: 'pipe', stderr: 'pipe', timeout: 120_000 });
+      const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+      return { code, json: jsonFrom(stdout, stderr), stderr };
+    },
     async frontStatus() {
       const response = await session.call('GET', '/dashboard.json', undefined, AbortSignal.timeout(30_000));
       return response.status === 200;
@@ -1851,6 +1870,9 @@ async function scaleHost(): Promise<ScaleHost> {
       // Record intent before the first mutation, so an outer cleanup can restore even after a timeout.
       writeFileSync(SCALE_READWISE_MARKER, JSON.stringify({ seed }), { mode: 0o600 });
       await clearScaleReadwise();
+      const ready = await until(async () => ownerSession(), 120_000);
+      if (!ready) throw new Error('engine did not return after Readwise deletion');
+      session = ready;
       await startFakeWith(config, config.fakeToken, seed);
       const connected = await session.call('POST', '/dashboard/connect/api-key', { source: 'readwise', api_key: config.fakeToken });
       if (connected.status !== 200 || connected.json?.ok !== true) throw new Error(`scale Readwise connect: ${connected.status}`);
@@ -1863,11 +1885,14 @@ async function scaleHost(): Promise<ScaleHost> {
       if (response.status !== 200 || !card || typeof card.coverage?.indexed_items !== 'number') throw new Error('Readwise dashboard counts unavailable');
       let earliest: string | undefined;
       let latest: string | undefined;
+      const runs: Array<{ id: string; complete: boolean }> = [];
       for (const { path } of readwiseStorePaths()) {
         if (!existsSync(path)) continue;
         const db = new Database(path, { readonly: true });
         try {
           db.exec('PRAGMA busy_timeout = 10000;');
+          const run = db.query('select sync_run_id, status, cursor from sync_runs where connector_id = ? order by started_at desc, rowid desc limit 1').get(READWISE_CONNECTOR_ID) as { sync_run_id: string; status: string; cursor: string | null } | null;
+          runs.push({ id: run?.sync_run_id ?? '', complete: run?.status === 'completed' && readwiseCursorIsSweepBoundary(run.cursor ?? undefined) });
           const row = db.query('select min(authored_at) as earliest, max(authored_at) as latest from items where tombstoned = 0').get() as { earliest: string | null; latest: string | null };
           if (row.earliest && (!earliest || row.earliest < earliest)) earliest = row.earliest;
           if (row.latest && (!latest || row.latest > latest)) latest = row.latest;
@@ -1879,20 +1904,23 @@ async function scaleHost(): Promise<ScaleHost> {
         if (card.coverage[key] > 0) gaps[key] = card.coverage[key];
       }
       if (card.tier_classification?.secrets_located > 0) gaps.secrets_located = card.tier_classification.secrets_located;
-      const run = card.last_run;
+      const running = card.schedule?.running === true || card.last_manual_sync?.outcome === 'checking';
       return { items: card.coverage.indexed_items, held: Number(card.tier_classification?.pending_classification_items ?? 0),
         ...(earliest ? { earliest } : {}), ...(latest ? { latest } : {}), gaps,
-        complete: run?.traversal_complete === true && !card.schedule?.running && !card.connection?.provider_refusal,
-        run: `${run?.started_at ?? ''}/${run?.completed_at ?? ''}` };
+        complete: runs.length > 0 && runs.every(run => run.complete) && !running && !card.connection?.provider_refusal,
+        running, run: runs.map(run => run.id).join('/') };
     },
     async syncReadwise() {
       const response = await session.call('POST', '/dashboard/sync-now', { source: 'readwise' });
-      if (response.status !== 200 || response.json?.ok === false) throw new Error(`second Readwise sync: ${response.status}`);
+      if (response.status !== 200 || response.json?.ok === false) throw new Error(`Readwise sync: ${response.status}`);
     },
     async endReadwise() {
       if (!existsSync(SCALE_READWISE_MARKER)) return true;
       const config = readConfig();
       await clearScaleReadwise();
+      const ready = await until(async () => ownerSession(), 120_000);
+      if (!ready) throw new Error('engine did not return after Readwise deletion');
+      session = ready;
       await startFakeWith(config, config.fakeToken);
       const connected = await session.call('POST', '/dashboard/connect/api-key', { source: 'readwise', api_key: config.fakeToken });
       if (connected.status !== 200 || connected.json?.ok !== true) return false;
@@ -1908,6 +1936,8 @@ async function scaleHost(): Promise<ScaleHost> {
 }
 
 async function archiveScaleCommand(format: string, seed: string): Promise<never> {
+  const roles = ownEngineRoles();
+  if (!roles || roles.front < 1 || roles.background < 1) throw new Error('archive scale needs both split-engine processes running');
   if (!(SCALE_FORMATS as readonly string[]).includes(format)) throw new Error('unknown archive scale format');
   const host = await scaleHost();
   const observation = format === 'readwise' ? await scaleReadwiseStage(host, seed) : await scaleArchiveStage(host, format as Exclude<ScaleFormat, 'readwise'>, seed);
@@ -2335,10 +2365,11 @@ async function main(): Promise<void> {
     case 'archive-scale': return await archiveScaleCommand(flag('--format'), flag('--seed'));
     case 'archive-scale-cleanup': {
       const host = await scaleHost();
-      const restored = await host.endReadwise();
+      let restoreError: string | undefined;
+      const restored = await host.endReadwise().catch(error => { restoreError = error instanceof Error ? error.message : String(error); return false; });
       const removed = await removeAllStage(host);
       if (removed.ok) rmSync(join(homedir(), FIXTURE_FOLDER), { recursive: true, force: true });
-      emit({ ...removed, ok: restored && removed.ok, readwiseRestored: restored });
+      emit({ ...removed, ok: restored && removed.ok, readwiseRestored: restored, ...(restoreError ? { detail: [removed.detail, `Readwise restore: ${restoreError}`].filter(Boolean).join('; ') } : {}) });
     }
     case 'archive-cleanup': return await archiveCleanupCommand();
     case 'archive-collect': return archiveCollectCommand();
