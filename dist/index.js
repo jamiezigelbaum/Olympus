@@ -7017,8 +7017,9 @@ function withheldSourceAnswer(reason) {
   withheldAnswers.add(result);
   return result;
 }
-var storage, ANSWER_RELEASE_UNVERIFIED = "Olympus withheld this answer because its current privacy classification could not be verified.", withheldAnswers;
+var chunkProvenance, storage, ANSWER_RELEASE_UNVERIFIED = "Olympus withheld this answer because its current privacy classification could not be verified.", withheldAnswers;
 var init_release_manifest = __esm(() => {
+  chunkProvenance = new WeakMap;
   storage = new AsyncLocalStorage;
   withheldAnswers = new WeakSet;
 });
@@ -22058,6 +22059,7 @@ var init_evidence_reranker = () => {};
 var utf8, CUT_SHORT_LANES;
 var init_evidence_pack = __esm(() => {
   init_keyword_context();
+  init_release_manifest();
   init_partial_search();
   init_evidence_reranker();
   init_parent_label();

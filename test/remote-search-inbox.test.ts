@@ -103,6 +103,8 @@ function serve(options: Partial<RemoteMcpHandlerOptions> = {}, parts = partsFor(
         return inputs.map(() => ({ tier: inputTier, gone: false }));
       },
     } : {}),
+    // The fixture's one passage has already been read by the privacy judge.
+    chunks: async inputs => ({ allowed: inputs.map(input => [...(input.chunkHashes ?? [])]), withheldPassages: 0, withheldDocuments: 0 }),
     secureDerivativeDefault: () => 'approval',
   };
   const handler = createRemoteMcpHandler({
@@ -122,11 +124,11 @@ function serve(options: Partial<RemoteMcpHandlerOptions> = {}, parts = partsFor(
         events.push('search-end');
         // As searchReleasedEvidence does: the one Personal item it released is named in a manifest.
         recordReleaseManifest({
-          inputs: [{ corpusId: 'personal.fixture.mail', provider: 'fixture_mail', accountScope: 'personal', providerItemId: 'lease', privateAtAnswer: false }],
+          inputs: [{ corpusId: 'personal.fixture.mail', provider: 'test-mail', accountScope: 'personal', providerItemId: 'lease', privateAtAnswer: false, chunkHashes: ['lease-chunk'] }],
           constraints: { secureDerivativeDefault: 'approval', includeSecureLocalContent: false },
         });
         return {
-          evidence: [{ trust_domain: 'internal', provider: 'test-mail', family: 'email', title: 'Lease renewal', excerpt: PERSONAL_EXCERPT, authored_at: '2026-09-01T10:00:00Z' }],
+          evidence: [{ corpus_id: 'personal.fixture.mail', account_scope: 'personal', provider_item_id: 'lease', trust_domain: 'internal', provider: 'test-mail', family: 'email', title: 'Lease renewal', excerpt: PERSONAL_EXCERPT, authored_at: '2026-09-01T10:00:00Z' }],
           withheld: 0,
           coverage: { searched_corpora: 1 },
         };

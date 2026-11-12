@@ -15637,6 +15637,7 @@ function classifyContentTier(input, options = {}) {
       ...input.sender ? { sender: input.sender } : {}
     },
     text: text2,
+    ...input.requireModelRead ? { requireModelRead: true } : {},
     textOnly: input.hasNonTextContent !== true && textOnlyMime(input.mimeType),
     titleIsConversation: input.titleIsConversation === true,
     ...input.heldSecret ? { heldSecret: true } : {},
@@ -15839,7 +15840,7 @@ function contentPass(args) {
       pending: false
     };
   }
-  const rule = args.textOnly && !args.heldSecret && (args.titleIsConversation === true || !args.signals.title?.trim()) ? trivialContentRule(text2, args.parentContext) : undefined;
+  const rule = !args.requireModelRead && args.textOnly && !args.heldSecret && (args.titleIsConversation === true || !args.signals.title?.trim()) ? trivialContentRule(text2, args.parentContext) : undefined;
   if (rule) {
     return {
       tier: maxTier(metadata.tier, "private"),
@@ -21441,6 +21442,15 @@ class TierSnifferStore {
         restrictFiles(this.dbPath);
     }
   }
+  chunkWindowVerdict(key2) {
+    return this.db.query(`SELECT tier FROM chunk_window_verdicts WHERE subject_key = ? AND content_hash = ?
+      AND model_id = ? AND prompt_version = ? AND material_hash = ? AND window_index = ?`).get(snifferSubjectKey(key2.subject), key2.contentHash, key2.modelId, key2.promptVersion, key2.materialHash, key2.windowIndex)?.tier;
+  }
+  recordChunkWindow(key2, tier) {
+    this.db.query(`INSERT OR REPLACE INTO chunk_window_verdicts
+      (subject_key, content_hash, model_id, prompt_version, material_hash, window_index, tier)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`).run(snifferSubjectKey(key2.subject), key2.contentHash, key2.modelId, key2.promptVersion, key2.materialHash, key2.windowIndex, tier);
+  }
   getVerdict(key2) {
     const row = this.db.query(`
       SELECT tier, category, confidence, fail_safe, decided_at, content_hash, model_subject FROM sniffer_verdicts
@@ -21836,6 +21846,19 @@ function snifferMigrations() {
       up(db) {
         db.exec(`CREATE INDEX sniffer_training_subject ON sniffer_verdicts(model_subject, model_id, decided_at DESC)
           WHERE fail_safe = 0 AND model_subject IS NOT NULL;`);
+      }
+    },
+    {
+      version: 8,
+      name: "chunk_window_verdicts",
+      up(db) {
+        db.exec(`CREATE TABLE chunk_window_verdicts (
+          subject_key TEXT NOT NULL, content_hash TEXT NOT NULL,
+          model_id TEXT NOT NULL, prompt_version TEXT NOT NULL,
+          material_hash TEXT NOT NULL, window_index INTEGER NOT NULL,
+          tier TEXT NOT NULL CHECK (tier IN ('private', 'secure', 'secrets')),
+          PRIMARY KEY (subject_key, content_hash, model_id, prompt_version, material_hash, window_index)
+        );`);
       }
     }
   ];
@@ -32313,12 +32336,12 @@ ${parentKey(ref)}`, { ref, origin });
     const vectorModelId = passageFocus?.queryVectorModelId;
     const scoreByVector = queryVector !== undefined && queryVector.length > 0 && vectorModelId !== undefined;
     const chunkRows = servesContent ? scoreByVector ? this.db.query(`
-          SELECT c.bounded_text, e.embedding
+          SELECT c.bounded_text, c.content_hash, e.embedding
           FROM chunks c
           LEFT JOIN chunk_embeddings e
             ON e.chunk_pk = c.chunk_pk AND e.model_id = ? AND e.content_hash = c.embedding_input_hash
           WHERE c.item_pk = ? ORDER BY c.chunk_index
-        `).all(vectorModelId, row.item_pk) : this.db.query("SELECT bounded_text, NULL AS embedding FROM chunks WHERE item_pk = ? ORDER BY chunk_index").all(row.item_pk) : [];
+        `).all(vectorModelId, row.item_pk) : this.db.query("SELECT bounded_text, content_hash, NULL AS embedding FROM chunks WHERE item_pk = ? ORDER BY chunk_index").all(row.item_pk) : [];
     const relevance = scoreByVector ? chunkRows.map((chunk) => {
       if (chunk.embedding === null || chunk.embedding === undefined)
         return;
@@ -32330,12 +32353,24 @@ ${parentKey(ref)}`, { ref, origin });
     return {
       trustTier: trustTierFromRow(row.trust_tier),
       chunks: reactionLine ? [reactionLine, ...chunks] : chunks,
+      chunkHashes: [
+        ...reactionLine ? [[]] : [],
+        ...chunks.map((text2) => chunkRows.filter((chunk) => compactPassageWhitespace(chunk.bounded_text).includes(text2)).map((chunk) => chunk.content_hash))
+      ],
       truncated,
       storedChunks: chunkRows.length,
       mimeType: row.mime_type,
       ...row.locator_uri ? { locatorUri: row.locator_uri } : {},
       ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
     };
+  }
+  releaseItemChunks(identity) {
+    const row = this.db.query(`SELECT item_pk, title, locator_uri, sender_label FROM items
+      WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0`).get(identity.provider, identity.accountScope ?? "", normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+    if (!row || !this.copyServable(identity))
+      return;
+    const chunks = this.db.query("SELECT bounded_text AS text, content_hash AS contentHash FROM chunks WHERE item_pk = ? ORDER BY chunk_index").all(row.item_pk);
+    return { title: row.title ?? "", path: row.locator_uri ?? "", sender: row.sender_label ?? "", chunks };
   }
   itemReactions(localItemId) {
     if (!this.reactionsColumnPresent)
@@ -37402,6 +37437,12 @@ var DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
 var MAX_PROMPT_BYTES = 1e5;
 var OPENCLAW_INFER_MAX_PROMPT_BYTES = MAX_PROMPT_BYTES;
 
+// src/core/release-manifest.ts
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
+var chunkProvenance = new WeakMap;
+var storage3 = new AsyncLocalStorage6;
+var withheldAnswers = new WeakSet;
+
 // src/core/source-index/router.ts
 var FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
   "body",
@@ -37445,11 +37486,6 @@ var CUT_SHORT_LANES = new Map([
   [RECENT_ITEMS_CUT_SHORT, { suffix: ":recency", gap: recentItemsTimeoutGap }],
   [VISIBILITY_CHECK_CUT_SHORT, { suffix: ":visibility", gap: visibilityCheckTimeoutGap }]
 ]);
-
-// src/core/release-manifest.ts
-import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
-var storage3 = new AsyncLocalStorage6;
-var withheldAnswers = new WeakSet;
 
 // src/workers/source-index/analyst-pool.ts
 var DEFAULT_SECURE_ANALYST_POOL_FAILURE_THRESHOLD = 2;

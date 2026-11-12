@@ -36,7 +36,7 @@ import { boundedLogErrorMessage, logErrorOrigin } from './log-redaction.ts';
 import { OperationError, type OperationErrorCode } from './operation-error.ts';
 import { secretLabelsInText } from './opsec.ts';
 import { citationTitleWithParent, PARENT_LABEL_MAX_CHARS } from './parent-label.ts';
-import { privateInputReleaseAllowed, type ReleaseCheck, type ReleaseInput, type ReleaseInputVerdict, type ReleaseManifest } from './release-manifest.ts';
+import { checkReleaseChunks, privateInputReleaseAllowed, type ReleaseCheck, type ReleaseInput, type ReleaseInputVerdict, type ReleaseManifest } from './release-manifest.ts';
 import { withoutSecretLocationCoverageNotes } from './secret-location-note.ts';
 import { privacyBacklogCoverageNote } from './privacy-backlog-coverage.ts';
 
@@ -278,21 +278,32 @@ export async function remoteOperationOutputOffThread(
   options: RemoteOutputOptions = {},
 ): Promise<Record<string, unknown>> {
   const check = options.releaseCheck;
-  if (!check?.inputsOffThread || !['source_answer', 'source_answer_result'].includes(operation) || pendingOutput(raw) || isAnonymousAnswerResult(raw)) {
+  if (!['source_answer', 'source_answer_result'].includes(operation) || pendingOutput(raw) || isAnonymousAnswerResult(raw)) {
     return remoteOperationOutput(operation, raw, options);
   }
+  if (!check) return remoteOperationOutput(operation, raw, { ...options, releaseCheck: {
+    inputs: inputs => inputs.map(() => ({ tier: 'unknown', gone: false })), secureDerivativeDefault: () => 'approval',
+  } });
   let verdicts: readonly ReleaseInputVerdict[] | undefined;
   try {
-    verdicts = await check.inputsOffThread((options.releaseManifests ?? []).flatMap(manifest => manifest.inputs));
+    const inputs = (options.releaseManifests ?? []).flatMap(manifest => manifest.inputs);
+    const chunks = await checkReleaseChunks(check, inputs);
+    verdicts = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
+    if (chunks.withheldPassages > 0) verdicts = inputs.map((input, index) => {
+      const tier = verdicts![index];
+      return tier?.tier === 'secret' ? tier : { tier: 'unknown', gone: false };
+    });
   } catch {
     // The synchronous formatter already withholds on an unreadable check.
   }
-  return remoteOperationOutput(operation, raw, { ...options, releaseCheck: {
+  const verified: ReleaseCheck = {
     inputs: () => { if (!verdicts) throw new Error('Release unavailable'); return verdicts; },
     secureDerivativeDefault: () => check.secureDerivativeDefault(),
-  } });
+  };
+  return remoteOperationOutput(operation, raw, { ...options, releaseCheck: verified });
 }
 
+/** Pure synchronous formatting. Every remote transport uses remoteOperationOutputOffThread. */
 export function remoteOperationOutput(
   operation: string,
   raw: unknown,

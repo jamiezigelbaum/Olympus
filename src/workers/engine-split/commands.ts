@@ -18,6 +18,7 @@
  * new process, which is safe for every command in this set (each is a wake
  * or a state the background re-derives).
  */
+import { RELEASE_CHUNK_JUDGE_BUDGET_MS } from '../../core/release-manifest.ts';
 import { randomUUID } from 'node:crypto';
 import { ENGINE_COMMANDS_PATH, ENGINE_MODEL_COMPLETE_PATH, ENGINE_READY_PATH, type EngineReadyBody } from '../../core/engine-split.ts';
 import type { AnalystModelCompletion, AnalystModelRequest } from '../../core/analyst.ts';
@@ -34,6 +35,13 @@ export type EngineReloadKind = typeof ENGINE_RELOAD_KINDS[number];
 export const ENGINE_JUDGE_BOOST_MAX_IDS = 20;
 /** As judge-boost.ts: a raise lasts this long. */
 export const ENGINE_JUDGE_BOOST_TTL_MS = 15 * 60_000;
+
+/** One owner request never monopolizes the judge beyond the release budget. */
+export const ENGINE_JUDGE_NOW_MAX_BUDGET_MS = RELEASE_CHUNK_JUDGE_BUDGET_MS;
+export interface EngineJudgeNowItem extends EngineItemIdentity {
+  corpusId: string;
+  chunkHashes: string[];
+}
 
 export interface EngineItemIdentity {
   provider: string;
@@ -214,6 +222,7 @@ export type EngineCommand =
   /** Stop a messaging capture before Disconnect or Unpair tears down its grant; done means stopped. */
   | { kind: 'capture_stop'; source: 'telegram' | 'whatsapp' }
   | { kind: 'judge_boost'; identities: EngineItemIdentity[] }
+  | { kind: 'judge_now'; items: EngineJudgeNowItem[]; budgetMs: number }
   /**
    * A backup's export, written by the background into the front's staging
    * folder: the snapshots are taken between the background's writes, so the
@@ -427,10 +436,11 @@ export function parseEngineCommandEnvelope(value: unknown): EngineCommandEnvelop
       if (!front || !Number.isSafeInteger(seq) || (seq as number) < 1) fail(`${kind} needs its front and a sequence number.`);
       return { id, command: { kind, resource: resource as string, front: front!, seq: seq as number } };
     }
-    case 'judge_boost': {
-      const raw = command!.identities;
+    case 'judge_boost':
+    case 'judge_now': {
+      const raw = kind === 'judge_now' ? command!.items : command!.identities;
       if (!Array.isArray(raw) || raw.length === 0 || raw.length > ENGINE_JUDGE_BOOST_MAX_IDS) {
-        fail(`judge_boost takes 1 to ${ENGINE_JUDGE_BOOST_MAX_IDS} items.`);
+        fail(`${kind} takes 1 to ${ENGINE_JUDGE_BOOST_MAX_IDS} items.`);
       }
       const identities = (raw as unknown[]).map((entry) => {
         const item = asRecord(entry);
@@ -439,13 +449,27 @@ export function parseEngineCommandEnvelope(value: unknown): EngineCommandEnvelop
         const providerItemId = boundedString(item?.providerItemId);
         const conversation = item?.providerConversationId;
         if (!provider || !accountScope || !providerItemId || (conversation !== undefined && !boundedString(conversation))) {
-          fail('judge_boost items need provider, accountScope and providerItemId.');
+          fail(`${kind} items need provider, accountScope and providerItemId.`);
+        }
+        let chunks: { corpusId: string; chunkHashes: string[] } | undefined;
+        if (kind === 'judge_now') {
+          const corpusId = boundedString(item?.corpusId);
+          const hashes = item?.chunkHashes;
+          if (!corpusId || !Array.isArray(hashes) || !hashes.length || hashes.length > 1024
+            || hashes.some(hash => !boundedString(hash, 256))) fail('judge_now items need a corpusId and chunk hashes.');
+          chunks = { corpusId: corpusId!, chunkHashes: [...new Set(hashes as string[])] };
         }
         return {
+          ...chunks,
           provider: provider!, accountScope: accountScope!, providerItemId: providerItemId!,
           ...(typeof conversation === 'string' ? { providerConversationId: conversation } : {}),
         };
       });
+      if (kind === 'judge_now') {
+        const budgetMs = command!.budgetMs;
+        if (typeof budgetMs !== 'number' || !Number.isFinite(budgetMs) || budgetMs < 0) fail('judge_now needs a nonnegative budgetMs.');
+        return { id, command: { kind, items: identities as EngineJudgeNowItem[], budgetMs: Math.min(budgetMs as number, ENGINE_JUDGE_NOW_MAX_BUDGET_MS) } };
+      }
       return { id, command: { kind, identities } };
     }
     default:
@@ -610,7 +634,15 @@ export function createEngineCommandHandler(options: EngineCommandServerOptions):
       if (!options.ready()) return Response.json({ error: 'starting', instance_id: options.ledger.instanceId }, { status: 503 });
       try {
         const envelope = parseEngineCommandEnvelope(await request.json().catch(() => undefined));
-        const receipt = options.ledger.submit(envelope);
+        let receipt = options.ledger.submit(envelope);
+        // Unlike a wake, judge_now returns the verdicts reached in its bounded turn.
+        if (envelope.command.kind === 'judge_now' && receipt.state === 'received') {
+          const waitMs = envelope.command.budgetMs + 100;
+          let timer: unknown;
+          const wait = new Promise<void>(resolve => { timer = setTimer(resolve, waitMs); });
+          try { receipt = await options.ledger.settled(envelope.id, wait) ?? receipt; }
+          finally { clearTimer(timer); }
+        }
         return Response.json(receipt, { status: receipt.state === 'received' ? 202 : 200 });
       } catch (error) {
         if (error instanceof EngineCommandError) return Response.json({ error: error.message }, { status: error.status });

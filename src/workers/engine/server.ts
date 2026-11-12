@@ -431,6 +431,7 @@ import {
   unregisterFileScopeBrowserFactory,
   type SourceFolderScopeBrowser,
 } from '../source-scope-browser.ts';
+import { frontJudgeNow, judgeNow } from '../classification/chunk-release.ts';
 import { configureInstalledTierClassification } from '../classification/installed-tier-classification.ts';
 import { type SnifferLane } from '../classification/sniffer-lane.ts';
 import { registerBuiltInPrivateModel, registeredBuiltInPrivateModel, resolveJudgeChoiceRuntime } from '../classification/built-in-sniffer.ts';
@@ -732,6 +733,7 @@ export async function main(): Promise<void> {
   };
   const installedTierClassification = configureInstalledTierClassification({
     automaticMoveContext,
+    readOnly: !!engineFront,
     env: process.env,
     ...(snifferLane ? { lane: snifferLane } : {}),
     ...(publicTierRetired ? { retirePublic: true } : {}),
@@ -1314,6 +1316,17 @@ export async function main(): Promise<void> {
   // A query's matches still waiting for their privacy judgment are judged next (#1062).
   // The judge runs in the background in the split: raise its boosts there.
   const raiseJudgeBoosts = engineFront ? frontJudgeBoost(engineFront.client) : (identities: Parameters<typeof judgeBoosts.raise>[0]) => judgeBoosts.raise(identities);
+  let chunkJudgmentsInFlight = 0;
+  const runChunkJudgment: NonNullable<import('../classification/chunk-release.ts').ChunkReleaseOptions['judgeNow']> = async (items, budgetMs) => {
+    chunkJudgmentsInFlight++;
+    tierSniffer?.preempt();
+    try { return await judgeNow(items, tierScopes(), createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? 'allow'), { budgetMs }); }
+    finally { chunkJudgmentsInFlight--; tierSniffer?.wake(); }
+  };
+  const chunkReleaseOptions = {
+    judgeNow: engineFront ? frontJudgeNow(engineFront.client) : runChunkJudgment,
+    boost: raiseJudgeBoosts,
+  };
   const tierVisibilityGate = createTierVisibilityGate(tierScopes, (identities) => raiseJudgeBoosts(identities));
   // A child item's parent: its names, judged against the ledger that governs its lane (answers and the unreadable list).
   const parentLabelResolver = createParentLabelResolver({
@@ -3205,6 +3218,7 @@ export async function main(): Promise<void> {
         releaseCheck: createReleaseTierCheck(
           tierScopes,
           () => secureDerivativeDefault ?? 'allow',
+          chunkReleaseOptions,
         ),
         queryPlanner: createAnalystQueryPlanner(localSourceAnswerModel),
         ...(sourceReranker ? { reranker: sourceReranker } : {}),
@@ -4632,6 +4646,7 @@ export async function main(): Promise<void> {
     sourceAnswerReleaseCheck: createReleaseTierCheck(
       tierScopes,
       () => secureDerivativeDefault ?? 'allow',
+      chunkReleaseOptions,
     ),
     // Local callers read Private, so only items still waiting for their
     // judgment (found by words, not yet by meaning) are counted for them.
@@ -5167,6 +5182,7 @@ export async function main(): Promise<void> {
   const remoteReleaseCheck = createReleaseTierCheck(
     tierScopes,
     () => secureDerivativeDefault ?? 'allow',
+    chunkReleaseOptions,
   );
   // Private answers on this computer (design background-agents.md, section
   // B): Ask privately, and Answer on a question waiting here. Planning none,
@@ -6092,7 +6108,7 @@ export async function main(): Promise<void> {
         answersInFlight: () => snifferResource !== undefined && (localModelActivity.busyExcept(snifferResource, 'tier_sniffer') || remoteOwnerBusy(snifferResource)),
         ownerInFlight: () => snifferResource !== undefined && (localModelActivity.ownerInFlight(snifferResource) || remoteOwnerBusy(snifferResource)),
         // A ready Inbox question stops the pass, so its answer runs, then classification resumes.
-        shouldYield: () => localPrivateAnswers?.overdue() ?? false,
+        shouldYield: () => chunkJudgmentsInFlight > 0 || (localPrivateAnswers?.overdue() ?? false),
         // The service applies it to the built-in judge only, never Venice or a remote judge.
         pacing: localPacer,
         breakerOpen: () => secureAnalystPoolState.isBreakerOpen('secure_local', snifferLane.profileId),
@@ -6256,6 +6272,7 @@ export async function main(): Promise<void> {
         data_export: ({ request }) => runForwarded(request),
         // Matched-first judging (#1062, PR #1115) is not in this build yet.
         // A question the front answered matched these pending items: the judge here asks about them first.
+        judge_now: ({ items, budgetMs }) => runChunkJudgment(items, budgetMs),
         judge_boost: ({ identities }) => {
           judgeBoosts.raise(identities);
           return { applied: true, raised: identities.length };

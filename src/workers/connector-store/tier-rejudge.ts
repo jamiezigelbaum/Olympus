@@ -306,6 +306,8 @@ export function rejudgeStoredContent(
      * holds must not stay visible outside Private).
      */
     hideRaises?: boolean;
+    /** A content-window verdict says nothing new about the item's names. */
+    preserveMetadata?: boolean;
     /**
      * The owner asked to check this item's chat or source again (#638): its
      * names are judged again by the model whatever judged them before, and
@@ -369,7 +371,7 @@ export function rejudgeStoredContent(
   const holdUntilJudged = set.holdsContentUntilJudged() || heldUntilJudged(record.reasons);
   // A child is judged again with its parent's names as context, as it was at listing and landing.
   const parentContext = sniffer ? parentNamesContext(set, identity) : undefined;
-  const metadata = rejudgeMetadata(record, sniffer, { title, path, sender, folderKeys }, identity, holdUntilJudged, parentContext, options.recheck);
+  const metadata = rejudgeMetadata(record, options.preserveMetadata ? undefined : sniffer, { title, path, sender, folderKeys }, identity, holdUntilJudged, parentContext, options.recheck);
   const content = classifyContentTier(
     {
       text,

@@ -33,6 +33,7 @@ import {
   runSnifferPass,
   DEFAULT_SNIFFER_PASS_TIME_MS,
   prepareSnifferModel,
+  resolveReleaseWindow,
   type SnifferPassReport,
   type SnifferTarget,
 } from './sniffer-resolver.ts';
@@ -483,6 +484,22 @@ export class TierSnifferService {
       ...(options.maxCallsPerDay !== undefined ? { maxCallsPerDay: options.maxCallsPerDay } : {}),
       ...(options.now ? { now: options.now } : {}),
       ...(options.budgetStatePath ? { statePath: options.budgetStatePath } : {}),
+    });
+    options.installed.setReleaseWindowResolver(async (ledgerPath, request, signal, expected) => {
+      const lane = options.lane;
+      if (this.stopped || signal.aborted || options.modelAvailable?.() === false || options.breakerOpen?.()
+        || lane.rejudgeReady === false) return { verdict: 'undecided' };
+      const ownerContext = options.ownerContext?.();
+      const versions = snifferPromptVersions(ownerContext);
+      if (versions.cache !== expected.promptVersion || snifferId(lane, versions.cache) !== expected.snifferId) return { verdict: 'undecided' };
+      const ledger = await readClassificationLedger(options.classificationLedgerPath);
+      const key = { lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: versions.approval };
+      const builtInDefault = options.autoApproveBuiltIn === true && isBuiltInLane(lane);
+      if (!isClassifierApproved(ledger.entries, key, { builtInDefault })) return { verdict: 'undecided' };
+      return resolveReleaseWindow({
+        store: options.installed.snifferStoreForLedger(ledgerPath), lane, model: options.model,
+        request, promptVersion: versions.cache, ...(ownerContext ? { ownerContext } : {}), signal, budget: this.budget,
+      });
     });
   }
 
