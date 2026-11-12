@@ -326,3 +326,43 @@ test('source_item_read stays off the remote surface until remote callers get a r
   const { V0_4_PUBLIC_REMOTE_MCP_TOOLS } = await import('../src/core/public-surface.ts');
   expect(V0_4_PUBLIC_REMOTE_MCP_TOOLS as readonly string[]).not.toContain('source_item_read');
 });
+
+test('a names-only item asks for an on-demand read and reports its state without text', async () => {
+  const f = await fixture('Personal orchard text.');
+  const requests: unknown[] = [];
+  let next: import('../src/workers/file-extraction/on-demand-read.ts').OnDemandReadResult = { state: 'queued', etaSeconds: 40 };
+  const worker = createEmailSourceWorker({ connectorStores: [f.store], sourceAnswerReleaseCheck: f.check,
+    connectorStoreReadScope: () => ({ allowed: true, contentAllowed: false }),
+    requestOnDemandRead: async (request) => { requests.push(request); return next; } });
+  const email = new EmailClient(config(), new DirectHttpEmailTransport(async (url, init) => worker.fetch(new Request(url, init))));
+  const outcomes: Array<[typeof next, string, number | undefined]> = [
+    [{ state: 'queued', etaSeconds: 40 }, 'reading_on_demand', 40],
+    [{ state: 'reading', etaSeconds: 5 }, 'reading_on_demand', 5],
+    [{ state: 'capped', reason: { id: 'on_demand_reads_per_question', limit: { files: 3, bytes: 1 }, used: { files: 3, bytes: 1 }, waiting_names_count: 2, resumes: 'never' } }, 'on_demand_capped', undefined],
+    [{ state: 'refused', reason: 'names_only' }, 'names_only', undefined],
+  ];
+  for (const [outcome, code, eta] of outcomes) {
+    next = outcome;
+    const result = await email.sourceItemRead({ selectedItem: selected(f) });
+    refused(result, code as never);
+    expect(result.couldNotRead).toEqual([code as never]);
+    expect(result.etaSeconds).toBe(eta);
+    expect(JSON.stringify(result)).not.toContain('waiting_names_count');
+  }
+  expect(requests).toHaveLength(4);
+  for (const request of requests) {
+    expect(request).toEqual({ itemRef: { corpusId: f.store.corpusId, providerItemId: 'note' }, requester: 'remote_app', questionId: (requests[0] as { questionId: string }).questionId });
+  }
+  expect((requests[0] as { questionId: string }).questionId).not.toContain('note');
+});
+
+test('a names-only refusal stays names_only when no on-demand reader is wired or it fails', async () => {
+  const f = await fixture('Personal orchard text.');
+  const plain = client(f, () => ({ allowed: true, contentAllowed: false }));
+  expect((await plain.sourceItemRead({ selectedItem: selected(f) })).couldNotRead).toEqual(['names_only']);
+  const worker = createEmailSourceWorker({ connectorStores: [f.store], sourceAnswerReleaseCheck: f.check,
+    connectorStoreReadScope: () => ({ allowed: true, contentAllowed: false }),
+    requestOnDemandRead: async () => { throw new Error('queue down'); } });
+  const email = new EmailClient(config(), new DirectHttpEmailTransport(async (url, init) => worker.fetch(new Request(url, init))));
+  expect((await email.sourceItemRead({ selectedItem: selected(f) })).couldNotRead).toEqual(['names_only']);
+});

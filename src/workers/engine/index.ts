@@ -1,5 +1,6 @@
 import { currentRemoteReadAccess } from '../remote-access-recheck.ts';
 import { sourceItemReadSelectedItem, sourceItemReadPage } from '../../core/source-index/selected-items.ts';
+import { itemReadOnDemand } from '../file-extraction/on-demand-read.ts';
 import { assertNoSourceIndexOperationalLeakFields } from '../../core/email.ts';
 import { JUDGE_CHOICES, type JudgeChoice } from '../classification/judge-spending.ts';
 import { type DashboardPeopleView, DASHBOARD_PEOPLE_PATH } from '../dashboard/pages/people.ts';
@@ -3485,6 +3486,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             },
           });
           if (currentRemoteReadAccess() !== 'active') return json(refused);
+          if (result.couldNotRead.length === 1 && result.couldNotRead[0] === 'names_only' && options.requestOnDemandRead) {
+            Object.assign(result, await itemReadOnDemand(options.requestOnDemandRead, store.corpusId, selected.provider_item_id));
+          }
           if (result.couldNotRead.includes('not_personal')) throw new EmailSourceWorkerError(403, 'not_personal', 'Private item: ask with source_answer');
           assertNoRawEmailFields(result);
           assertNoSourceIndexOperationalLeakFields(result);

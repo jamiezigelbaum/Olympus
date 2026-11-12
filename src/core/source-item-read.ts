@@ -3,6 +3,8 @@ import { OperationError } from './operation-error.ts';
 export const SOURCE_ITEM_READ_REFUSALS = [
   'held_until_judged', 'content_private', 'names_only', 'not_in_scope',
   'extraction_pending', 'window_judging', 'not_personal',
+  // A names-only file the owner allows reading on request: queued or capped.
+  'reading_on_demand', 'on_demand_capped',
 ] as const;
 export type SourceItemReadRefusal = typeof SOURCE_ITEM_READ_REFUSALS[number];
 export interface SourceItemReadResult {
@@ -12,6 +14,8 @@ export interface SourceItemReadResult {
   totalPages: number;
   totalChars: number;
   couldNotRead: SourceItemReadRefusal[];
+  /** With `reading_on_demand`: the reader's estimate until the text is indexed. */
+  etaSeconds?: number;
 }
 
 /** Construct the exact payload; unknown worker fields never become a tool result. */
@@ -32,5 +36,6 @@ export function parseSourceItemReadResult(value: unknown): SourceItemReadResult 
   if (r.coverageNote !== undefined && typeof r.coverageNote !== 'string') return fail();
   return { pages, totalPages: integer(r.totalPages, 0), totalChars: integer(r.totalChars, 0), couldNotRead,
     ...(r.coverageNote === undefined ? {} : { coverageNote: r.coverageNote as string }),
-    ...(r.nextPage === undefined ? {} : { nextPage: integer(r.nextPage, 1) }) };
+    ...(r.nextPage === undefined ? {} : { nextPage: integer(r.nextPage, 1) }),
+    ...(r.etaSeconds === undefined ? {} : { etaSeconds: integer(r.etaSeconds, 0) }) };
 }

@@ -6988,7 +6988,8 @@ function parseSourceItemReadResult(value) {
     totalChars: integer(r.totalChars, 0),
     couldNotRead,
     ...r.coverageNote === undefined ? {} : { coverageNote: r.coverageNote },
-    ...r.nextPage === undefined ? {} : { nextPage: integer(r.nextPage, 1) }
+    ...r.nextPage === undefined ? {} : { nextPage: integer(r.nextPage, 1) },
+    ...r.etaSeconds === undefined ? {} : { etaSeconds: integer(r.etaSeconds, 0) }
   };
 }
 var SOURCE_ITEM_READ_REFUSALS;
@@ -7001,7 +7002,9 @@ var init_source_item_read = __esm(() => {
     "not_in_scope",
     "extraction_pending",
     "window_judging",
-    "not_personal"
+    "not_personal",
+    "reading_on_demand",
+    "on_demand_capped"
   ];
 });
 
@@ -8746,7 +8749,8 @@ var init_remote_result = __esm(() => {
         nextPage: { type: "integer", minimum: 1 },
         totalPages: { type: "integer", minimum: 0 },
         totalChars: { type: "integer", minimum: 0 },
-        couldNotRead: { type: "array", items: { type: "string", enum: [...SOURCE_ITEM_READ_REFUSALS] } }
+        couldNotRead: { type: "array", items: { type: "string", enum: [...SOURCE_ITEM_READ_REFUSALS] } },
+        etaSeconds: { type: "integer", minimum: 0 }
       }
     }
   };

@@ -960,6 +960,7 @@ export const REMOTE_OUTPUT_SCHEMAS: Readonly<Record<RemoteOperationName, Record<
         properties: { page: { type: 'integer', minimum: 1 }, text: { type: 'string', maxLength: 12000 } } } },
       nextPage: { type: 'integer', minimum: 1 }, totalPages: { type: 'integer', minimum: 0 }, totalChars: { type: 'integer', minimum: 0 },
       couldNotRead: { type: 'array', items: { type: 'string', enum: [...SOURCE_ITEM_READ_REFUSALS] } },
+      etaSeconds: { type: 'integer', minimum: 0 },
     },
   },
 };
