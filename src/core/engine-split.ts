@@ -43,6 +43,8 @@ export function engineRoleFromEnv(env: Record<string, string | undefined> = proc
 export const ENGINE_BACKGROUND_ORIGIN = 'http://olympus-background';
 export const ENGINE_READY_PATH = '/engine/ready';
 export const ENGINE_COMMANDS_PATH = '/engine/commands';
+/** The built-in private model's completions: the background holds the model; the front asks it here. */
+export const ENGINE_MODEL_COMPLETE_PATH = '/engine/model/complete';
 
 /**
  * The background's command socket. On Linux it sits beside the worker socket

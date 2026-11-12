@@ -269,6 +269,29 @@ export function remoteWithheldParam(operation: string, args: Readonly<Record<str
  * OperationError when the raw result is not a shape this boundary knows; the
  * caller turns it into a fixed error like any other.
  */
+// Remote Ask collection can await the ledger. Keep the formatter synchronous
+// once these fresh verdicts arrive, including its existing fail-closed path.
+export async function remoteOperationOutputOffThread(
+  operation: string,
+  raw: unknown,
+  options: RemoteOutputOptions = {},
+): Promise<Record<string, unknown>> {
+  const check = options.releaseCheck;
+  if (!check?.inputsOffThread || !['source_answer', 'source_answer_result'].includes(operation) || pendingOutput(raw) || isAnonymousAnswerResult(raw)) {
+    return remoteOperationOutput(operation, raw, options);
+  }
+  let verdicts: readonly ReleaseInputVerdict[] | undefined;
+  try {
+    verdicts = await check.inputsOffThread((options.releaseManifests ?? []).flatMap(manifest => manifest.inputs));
+  } catch {
+    // The synchronous formatter already withholds on an unreadable check.
+  }
+  return remoteOperationOutput(operation, raw, { ...options, releaseCheck: {
+    inputs: () => { if (!verdicts) throw new Error('Release unavailable'); return verdicts; },
+    secureDerivativeDefault: () => check.secureDerivativeDefault(),
+  } });
+}
+
 export function remoteOperationOutput(
   operation: string,
   raw: unknown,

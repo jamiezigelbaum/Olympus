@@ -94,8 +94,10 @@ export interface SourceAnswerLatencyTraceRecord {
   // kept (#1354). Ids and counts only.
   evidence_seats?: {
     pack_corpora: string[];
+    // Short one-way hash of store and item per seat; never the item id.
+    item_hashes?: string[];
     recency_seats: number;
-    fits: Array<{ lane: 'local' | 'cloud'; kept_seats: number[] }>;
+    fits: Array<{ lane: 'local' | 'cloud'; kept_seats: number[]; prompt_bytes?: number }>;
   };
   caller?: OperationCallerWire;
   // Synchronous SQLite the Ask ran on the request thread (#1305).
@@ -275,10 +277,14 @@ export function buildSourceAnswerLatencyTraceRecord(input: {
       ? {
         evidence_seats: {
           pack_corpora: input.trace.evidenceSeats.packCorpora.map(String),
+          ...(input.trace.evidenceSeats.itemHashes
+            ? { item_hashes: input.trace.evidenceSeats.itemHashes.map(String) }
+            : {}),
           recency_seats: Math.max(0, Math.floor(input.trace.evidenceSeats.recencySeats)),
           fits: input.trace.evidenceSeats.fits.map((fit) => ({
             lane: fit.lane,
             kept_seats: fit.keptSeats.map((seat) => Math.max(0, Math.floor(seat))),
+            ...(fit.promptBytes === undefined ? {} : { prompt_bytes: Math.max(0, Math.floor(fit.promptBytes)) }),
           })),
         },
       }

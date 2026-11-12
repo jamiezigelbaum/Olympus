@@ -5,8 +5,11 @@ import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 import { pruneSupersededStoreCopy, queueTierLedgerEntry, type TierMoveOptions } from './tier-move.ts';
 import { compareContentVersions } from './tier-content-purge.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
+import { registeredTierSets } from './tier-set-registry.ts';
 
 const STATE = 'automatic-superseded-prune-v1';
+/** How often the engine's background takes a slice of each unfinished sweep: a 250 ms slice every 5 s. */
+export const SUPERSEDED_SWEEP_TICK_MS = 5_000;
 const PAGE_SIZE = 200;
 /** Passes one item may fail before the sweep steps past it and walks again later (#1412). */
 const MAX_ITEM_FAILURES = 3;
@@ -230,4 +233,32 @@ function sweepPage(set: TieredStoreSet, options: {
       // The ledger itself is unavailable; the next pass starts from the same place.
     }
   }
+}
+
+/**
+ * Drives every registered set's sweep on its own clock, so a large ledger is
+ * walked in hours whether or not the sniffer or a sync is running. Sets that
+ * report done are skipped; the timer never keeps the process alive.
+ */
+export function startSupersededSweepTicker(options: {
+  active?: () => boolean;
+  intervalMs?: number;
+  sets?: () => readonly TieredStoreSet[];
+  /** Tests drive the tick themselves; returns a cancel function. */
+  every?: (tick: () => void, ms: number) => () => void;
+} = {}): () => void {
+  const finished = new WeakSet<TieredStoreSet>();
+  const sets = options.sets ?? registeredTierSets;
+  const every = options.every ?? ((tick, ms) => {
+    const timer = setInterval(tick, ms);
+    (timer as { unref?: () => void }).unref?.();
+    return () => clearInterval(timer);
+  });
+  return every(() => {
+    if (options.active && !options.active()) return;
+    for (const set of sets()) {
+      if (finished.has(set)) continue;
+      if (set.sweepSupersededSlice()) finished.add(set);
+    }
+  }, options.intervalMs ?? SUPERSEDED_SWEEP_TICK_MS);
 }

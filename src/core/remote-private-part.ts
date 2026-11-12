@@ -55,7 +55,7 @@
  * pass in flight and any settle still waiting.
  */
 import type { PrivateQuestionRef } from './app-release-capture.ts';
-import { remoteOperationOutput } from './remote-result.ts';
+import { remoteOperationOutputOffThread } from './remote-result.ts';
 import type { ReleaseCheck } from './release-manifest.ts';
 import type { SourceAnswerJobScope } from './source-answer-jobs.ts';
 import type { WaitingQuestionRef, WaitingQuestionStore, WaitingQuestionTicket } from './waiting-private-questions.ts';
@@ -406,7 +406,7 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
       let released: Record<string, unknown> | undefined;
       try {
         // The release the agent would be handed now: slice 2's recheck may withhold it.
-        released = remoteOperationOutput('source_answer', outcome.value, {
+        released = await remoteOperationOutputOffThread('source_answer', outcome.value, {
           ...(releaseCheck ? { releaseCheck } : {}),
           releaseManifests: outcome.releaseManifests,
         });

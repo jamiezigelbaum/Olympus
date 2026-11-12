@@ -15,3 +15,8 @@ export function registerTierSetForLedger(ledgerPath: string, set: TieredStoreSet
 export function tierSetForLedger(ledgerPath: string): TieredStoreSet | undefined {
   return tierSets?.get(ledgerPath);
 }
+
+/** Every set built in this process, for background passes that visit each ledger. */
+export function registeredTierSets(): TieredStoreSet[] {
+  return [...(tierSets?.values() ?? [])];
+}

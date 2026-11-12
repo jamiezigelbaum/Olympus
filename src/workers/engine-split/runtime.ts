@@ -7,7 +7,9 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { lstatSync } from 'node:fs';
-import { ENGINE_BACKGROUND_SOCKET_ENV, prepareEngineBackgroundSocketDirectory, probeEngineBackground } from '../../core/engine-split.ts';
+import { ENGINE_BACKGROUND_ORIGIN, ENGINE_BACKGROUND_SOCKET_ENV, ENGINE_MODEL_COMPLETE_PATH, prepareEngineBackgroundSocketDirectory, probeEngineBackground } from '../../core/engine-split.ts';
+import type { AnalystModelCompletion, AnalystModelRequest } from '../../core/analyst.ts';
+import { OperationError, type OperationErrorCode } from '../../core/operation-error.ts';
 import { sharedDataPath } from '../../core/olympus-layout.ts';
 import { removeFileDurablySync } from '../../core/atomic-file.ts';
 import { bindWorkerSocket, createUnixSocketFetch, workerSocketListenerStopped, workerSocketServe } from '../../core/worker-transport.ts';
@@ -35,6 +37,8 @@ export function startEngineBackgroundServer(input: {
   socketPath: string;
   authToken: string;
   handlers: EngineCommandHandlers;
+  /** The built-in private model's completions, for the front (commands.ts). */
+  modelComplete?: (request: AnalystModelRequest) => Promise<AnalystModelCompletion>;
   instanceId?: string;
   log?: (line: string) => void;
 }): { instanceId: string; markReady(): void; markStopping(): void; stop(): void; ledger: EngineCommandLedger } {
@@ -50,7 +54,7 @@ export function startEngineBackgroundServer(input: {
   }
   let ready = false;
   const ledger = new EngineCommandLedger({ instanceId, handlers: input.handlers });
-  const handler = createEngineCommandHandler({ authToken: input.authToken, ledger, ready: () => ready });
+  const handler = createEngineCommandHandler({ authToken: input.authToken, ledger, ready: () => ready, ...(input.modelComplete ? { modelComplete: input.modelComplete } : {}) });
   const server = bindWorkerSocket(input.socketPath, () => Bun.serve(workerSocketServe({
     unix: input.socketPath,
     fetch: (request: Request) => handler(request),
@@ -104,6 +108,8 @@ export interface EngineFront {
   ownerBusy: OwnerBusyRelay;
   /** The background's last status snapshot and its age; read from disk at most once a second. */
   status(): EngineStatusRead | undefined;
+  /** One built-in model completion, run by the background, which holds the model. */
+  completeModel(request: AnalystModelRequest): Promise<AnalystModelCompletion>;
   stop(): void;
 }
 
@@ -115,6 +121,7 @@ export function createEngineFront(input: {
   now?: () => number;
 }): EngineFront {
   const now = input.now ?? (() => Date.now());
+  const fetchBackground = input.fetch ?? createUnixSocketFetch(input.socketPath);
   let relay: OwnerBusyRelay | undefined;
   // The background instance that last answered a command: a snapshot another
   // instance wrote is not about the background running now.
@@ -122,7 +129,7 @@ export function createEngineFront(input: {
   // its successor (the background restarted): it becomes the instance now.
   let answering: { instance: string; at: number } | undefined;
   const client = new EngineCommandClient({
-    fetch: input.fetch ?? createUnixSocketFetch(input.socketPath),
+    fetch: fetchBackground,
     authToken: input.authToken,
     onInstance: (instanceId) => { answering = { instance: instanceId, at: now() }; relay?.observeInstance(instanceId); },
   });
@@ -150,7 +157,8 @@ export function createEngineFront(input: {
   // owner-busy signal reaches the new judge.
   const poll = setInterval(() => { status(); }, 2_000);
   poll.unref?.();
-  return { client, ownerBusy: relay, status, stop: () => { clearInterval(poll); relay?.stop(); } };
+  const completeModel = (request: AnalystModelRequest) => completeModelInBackground(fetchBackground, input.authToken, request);
+  return { client, ownerBusy: relay, status, completeModel, stop: () => { clearInterval(poll); relay?.stop(); } };
 }
 
 /** A forwarded sync answers when its pass ends, as the route did in one process: up to a long pass. */
@@ -402,4 +410,37 @@ export function restartAfterFront(input: {
     input.restart();
   });
   return true;
+}
+
+/**
+ * One completion from the background's built-in model. Its typed refusals
+ * (still downloading, failed to start) come back as the same OperationError
+ * the model raises in one process; a background that does not answer is
+ * unavailable. The caller's signal closes the request, which stops the call.
+ */
+export async function completeModelInBackground(
+  fetchBackground: typeof fetch,
+  authToken: string,
+  request: AnalystModelRequest,
+): Promise<AnalystModelCompletion> {
+  const { signal, ...body } = request;
+  let response: Response;
+  try {
+    response = await fetchBackground(`${ENGINE_BACKGROUND_ORIGIN}${ENGINE_MODEL_COMPLETE_PATH}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Authorization: `Bearer ${authToken}` },
+      body: JSON.stringify(body),
+      ...(signal ? { signal } : {}),
+    });
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    throw new OperationError('argus_unreachable', 'The built-in private model is not answering: the background engine is not reachable.', 'Try again in a moment.');
+  }
+  const payload = await response.json().catch(() => undefined) as Record<string, unknown> | undefined;
+  if (response.ok && payload && typeof payload.text === 'string' && typeof payload.modelId === 'string') return payload as unknown as AnalystModelCompletion;
+  const typed = payload?.operation_error as { error?: unknown; message?: unknown; suggestion?: unknown } | undefined;
+  if (typed && typeof typed.error === 'string' && typeof typed.message === 'string') {
+    throw new OperationError(typed.error as OperationErrorCode, typed.message, typeof typed.suggestion === 'string' ? typed.suggestion : undefined);
+  }
+  throw new OperationError('argus_unreachable', `The built-in private model did not answer (HTTP ${response.status}).`, 'Try again in a moment.');
 }

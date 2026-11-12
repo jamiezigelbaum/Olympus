@@ -1937,11 +1937,22 @@ export class TierLedger {
 
   /** Whether the item is Secrets here: decided, moving there, or set so by the owner. */
   itemIsSecret(identity: TierLedgerIdentity): boolean {
-    const override = this.getOverride(identity);
+    return this.readSteps(this.itemIsSecretSteps(identity));
+  }
+
+  // A missing or moving parent still needs its Secret override checked, on
+  // the same read connection as the rest of an asynchronous parent judgment.
+  *itemIsSecretSteps(identity: TierLedgerIdentity): Generator<LedgerRead, boolean, unknown> {
+    const row = (yield { sql: `SELECT override_json FROM tier_overrides
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`,
+      params: idParams(identity), mode: 'get' }) as { override_json: string } | null;
+    const override = row ? JSON.parse(row.override_json) as ItemTierOverride : undefined;
     if (override?.kind === 'tier' && override.tier === 'secrets') return true;
-    const record = this.getCurrent(identity);
-    if (!record) return false;
-    return [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier].includes('secrets');
+    const item = (yield { sql: `SELECT * FROM tier_items
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`,
+      params: idParams(identity), mode: 'get' }) as TierItemRow | null;
+    const record = item ? recordFromRow(item) : undefined;
+    return record !== undefined && [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier].includes('secrets');
   }
 
   getOverride(identity: TierLedgerIdentity): ItemTierOverride | undefined {
@@ -2818,31 +2829,32 @@ export class TierLedger {
   itemStatesForMany(
     identities: readonly TierLedgerIdentity[],
   ): Map<string, { record: TierLedgerRecord; copies: TierCopy[] }> {
+    return this.readSteps(this.itemStatesSteps(identities));
+  }
+
+  // Release and parent checks can await these reads on the pool; a cold ledger
+  // must not make the Ask read every governed item on the request thread.
+  *itemStatesSteps(
+    identities: readonly TierLedgerIdentity[],
+  ): Generator<LedgerRead, Map<string, { record: TierLedgerRecord; copies: TierCopy[] }>, unknown> {
     const result = new Map<string, { record: TierLedgerRecord; copies: TierCopy[] }>();
-    if (identities.length === 0) return result;
-    const unique = new Map<string, TierLedgerIdentity>();
-    for (const identity of identities) unique.set(tierLedgerIdentityKey(identity), identity);
-    const list = [...unique.values()];
-    this.db.transaction(() => {
-      for (let offset = 0; offset < list.length; offset += 200) {
-        const batch = list.slice(offset, offset + 200);
-        const values = batch.map(() => '(?, ?, ?, ?)').join(', ');
-        const params = batch.flatMap((identity) => [...idParams(identity)]);
-        const rows = this.db.query(`
-          SELECT * FROM tier_items
+    const list = uniqueIdentities(identities);
+    for (let offset = 0; offset < list.length; offset += IDENTITY_BATCH) {
+      const { values, params } = identityValues(list.slice(offset, offset + IDENTITY_BATCH));
+      const rows = (yield {
+        sql: `SELECT * FROM tier_items
+          WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})`,
+        params, mode: 'all',
+      }) as TierItemRow[];
+      for (const row of rows) result.set(tierLedgerIdentityKey(identityOfRow(row)), { record: recordFromRow(row), copies: [] });
+      const copies = (yield {
+        sql: `SELECT * FROM tier_copies
           WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
-        `).all(...params) as TierItemRow[];
-        for (const row of rows) {
-          result.set(tierLedgerIdentityKey(identityOfRow(row)), { record: recordFromRow(row), copies: [] });
-        }
-        const copies = this.db.query(`
-          SELECT * FROM tier_copies
-          WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
-          ORDER BY corpus_id
-        `).all(...params) as TierCopyRow[];
-        for (const row of copies) result.get(tierLedgerIdentityKey(identityFromRow(row)))?.copies.push(copyFromRow(row));
-      }
-    })();
+          ORDER BY corpus_id`,
+        params, mode: 'all',
+      }) as TierCopyRow[];
+      for (const row of copies) result.get(tierLedgerIdentityKey(identityFromRow(row)))?.copies.push(copyFromRow(row));
+    }
     return result;
   }
 

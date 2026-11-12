@@ -1,4 +1,5 @@
 import { isSourceIndexLaneBusyError } from './lane-busy.ts';
+import { RECENT_ITEMS_CUT_SHORT, VISIBILITY_CHECK_CUT_SHORT } from './partial-search.ts';
 import { withKeywordRequestScope } from './keyword-context.ts';
 import type {
   RetrievalDegradation,
@@ -18,6 +19,7 @@ import type {
 } from './corpus.ts';
 import {
   applyPerCorpusResultBudget,
+  RESERVED_LEADER_MIN_CONCEPT_SHARE,
   withReservedLeaderSeats,
   withReservedRecencySeats,
   assessSourceIndexRetrievalState,
@@ -140,7 +142,21 @@ export interface SourceIndexCorpusSearchResponse {
    * lane audits.
    */
   incomplete?: boolean;
+  /**
+   * Internal: how well this store's best hit answers the question, in terms
+   * that compare across stores. The router orders stores within each turn by
+   * it (#1354). Search routes never return it.
+   */
+  storeRelevance?: SourceIndexStoreRelevance;
   rawExposed: false;
+}
+
+export interface SourceIndexStoreRelevance {
+  // The best hit's share of the question's concepts, 0 to 1.
+  conceptShare: number;
+  // The best vetted cosine minus this store's own relevance bar. Raw cosines
+  // do not compare across models, a margin over each store's bar does.
+  vectorMargin?: number;
 }
 
 /**
@@ -306,18 +322,30 @@ export interface SourceIndexRoutedCorpusTiming {
  */
 export type SourceIndexVisibilityGate = ((
   hits: readonly SourceIndexRoutedSearchHit[],
+  report?: SourceIndexVisibilityGateReport,
 ) => readonly SourceIndexRoutedSearchHit[]) & {
   // The same judgment with its reads off the request thread, for a caller
   // that can wait (#1305).
-  offThread?: (hits: readonly SourceIndexRoutedSearchHit[]) => Promise<readonly SourceIndexRoutedSearchHit[]>;
+  offThread?: (hits: readonly SourceIndexRoutedSearchHit[], report?: SourceIndexVisibilityGateReport) => Promise<readonly SourceIndexRoutedSearchHit[]>;
 };
+
+/**
+ * What a gate tells its caller besides the hits it keeps (#1460): the corpora
+ * whose hits it left out because it could not read their visibility (a busy
+ * read pool, an unreadable ledger), so the search names them instead of
+ * returning a silently thinner list. Called once per judgment that stands.
+ */
+export interface SourceIndexVisibilityGateReport {
+  onUnchecked?: (corpusIds: readonly string[]) => void;
+}
 
 // Applies the gate off the request thread where it can be.
 export function applySourceIndexVisibilityGate(
   gate: SourceIndexVisibilityGate,
   hits: readonly SourceIndexRoutedSearchHit[],
+  report?: SourceIndexVisibilityGateReport,
 ): Promise<readonly SourceIndexRoutedSearchHit[]> {
-  return gate.offThread ? gate.offThread(hits) : Promise.resolve(gate(hits));
+  return gate.offThread ? gate.offThread(hits, report) : Promise.resolve(gate(hits, report));
 }
 
 export interface RouteSourceIndexSearchOptions {
@@ -449,7 +477,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
   const laneAudits: RetrievalLaneAudit[] = [];
   const degradations: RetrievalDegradation[] = [];
   const corpusTimings: SourceIndexRoutedCorpusTiming[] = [];
-  const lanes: Array<{ name: string; items: SourceIndexRoutedSearchHit[] }> = [];
+  const lanes: Array<{ name: string; items: SourceIndexRoutedSearchHit[]; relevance?: SourceIndexStoreRelevance }> = [];
   const matchCounts: SourceIndexRoutedMatchCount[] = [];
   const incompleteCorpora: string[] = [];
   let encounteredSecureLocal = false;
@@ -603,9 +631,12 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
       const semanticLoss = semanticLaneDegradation(corpus.corpusId, retrievalState, response);
       if (semanticLoss) degradations.push(semanticLoss);
     }
+    const newestLoss = recentItemsLaneDegradation(corpus.corpusId, response);
+    if (newestLoss) degradations.push(newestLoss);
     if (contributedSecure) secureLaneAudits.push(...laneAudits.slice(corpusLaneAuditsStart));
     lanes.push({
       name: corpus.corpusId,
+      ...(response.storeRelevance ? { relevance: response.storeRelevance } : {}),
       items: response.hits.map((hit) => ({
         ...hit,
         corpusId: corpus.corpusId,
@@ -617,15 +648,21 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
   const lanesSettledAt = Date.now();
   if (options.visibilityGate) {
     // One call for every lane's hits: one snapshot decides them all.
-    const kept = new Set(await applySourceIndexVisibilityGate(options.visibilityGate, lanes.flatMap((lane) => lane.items)));
+    const unchecked = new Set<string>();
+    const kept = new Set(await applySourceIndexVisibilityGate(options.visibilityGate, lanes.flatMap((lane) => lane.items), {
+      onUnchecked: (corpusIds) => { for (const corpusId of corpusIds) unchecked.add(corpusId); },
+    }));
     for (const lane of lanes) lane.items = lane.items.filter((hit) => kept.has(hit));
+    // A source whose hits the gate could not judge is named, never thinner in silence (#1460).
+    for (const corpusId of [...unchecked].sort()) degradations.push(visibilityCheckDegradation(corpusId));
   }
 
-  // Lane declaration order — registry.list() preserves the order the corpora
-  // were registered in, which deliberately interleaves trust domains. It is the
-  // one ordering available here that is neither adapter-scale-derived nor
-  // spelling-derived, so it is what the tie-break falls back on.
-  const laneOrder = new Map(lanes.map((lane, index) => [lane.name, index] as const));
+  // Store order within each turn: how well each store's best hit answers
+  // this question (storeOrderForQuestion), then lane declaration order.
+  // registry.list() preserves the order the corpora were registered in, which
+  // deliberately interleaves trust domains, and it is neither adapter-scale-
+  // derived nor spelling-derived, so it is the last tie-break.
+  const laneOrder = storeOrderForQuestion(lanes);
   const fusedAll = fuseRankedCandidateLanes({
     lanes,
     getId: routedHitCandidateId,
@@ -703,6 +740,38 @@ function corpusContributedSecure(
   return positiveCount && (count.secureMatchedItems === undefined || count.secureMatchedItems > 0);
 }
 
+// Below half the question's concepts a store's best keyword hit counts as no
+// keyword match, so one shared common word does not lead a turn (the same
+// floor as the reserved leader seats).
+const STORE_ORDER_MIN_CONCEPT_SHARE = RESERVED_LEADER_MIN_CONCEPT_SHARE;
+
+/**
+ * Store order within each turn of the pack (#1354). Every store's rank k ties
+ * in the fusion, so this order decides which stores' best hits the pack and a
+ * local Analyst's fitted prompt read first. It was config order for every
+ * question, so on an install with many stores a local answer read the same
+ * few stores whatever was asked. Now: a store whose best hit matches at least
+ * half the question's concepts first, by that share; then a store whose best
+ * hit is a vetted semantic match, by its margin over the store's own bar (a
+ * paraphrase with no word in common); then config order. Order only: which
+ * items may reach which Analyst is decided elsewhere and is unchanged.
+ */
+function storeOrderForQuestion(
+  lanes: ReadonlyArray<{ name: string; relevance?: SourceIndexStoreRelevance }>,
+): ReadonlyMap<string, number> {
+  const keyword = (lane: (typeof lanes)[number]) => {
+    const share = lane.relevance?.conceptShare ?? 0;
+    return share >= STORE_ORDER_MIN_CONCEPT_SHARE ? share : 0;
+  };
+  const vector = (lane: (typeof lanes)[number]) => lane.relevance?.vectorMargin ?? Number.NEGATIVE_INFINITY;
+  const ordered = lanes
+    .map((lane, index) => ({ lane, index }))
+    .sort((left, right) => (keyword(right.lane) - keyword(left.lane))
+      || (vector(right.lane) === vector(left.lane) ? 0 : vector(right.lane) > vector(left.lane) ? 1 : -1)
+      || left.index - right.index);
+  return new Map(ordered.map(({ lane }, index) => [lane.name, index] as const));
+}
+
 /**
  * Order two candidates the RRF sum could not separate.
  *
@@ -771,6 +840,34 @@ function laneIndex(laneOrder: ReadonlyMap<string, number>, corpusId: string): nu
  * The evidence for "ran" is a lane audit of semantic or hybrid type in the
  * adapter's own response — the adapter cannot claim a lane it did not audit.
  */
+// A lane that read a source's newest items and ran out of time (#1460): the
+// source answered from its other lanes, so it is searched, and this one lane
+// is marked so the evidence pack can say its newest items may be missing.
+function recentItemsLaneDegradation(
+  corpusId: string,
+  response: SourceIndexCorpusSearchResponse,
+): RetrievalDegradation | undefined {
+  const cut = (response.laneAudits ?? []).find((audit) => audit.skippedReason === RECENT_ITEMS_CUT_SHORT);
+  if (!cut) return undefined;
+  return {
+    laneName: `${corpusId}:recency`,
+    laneType: cut.laneType,
+    reason: 'lane_timeout',
+    detail: RECENT_ITEMS_CUT_SHORT,
+    occurrences: 1,
+  };
+}
+
+function visibilityCheckDegradation(corpusId: string): RetrievalDegradation {
+  return {
+    laneName: `${corpusId}:visibility`,
+    laneType: 'keyword',
+    reason: 'lane_timeout',
+    detail: VISIBILITY_CHECK_CUT_SHORT,
+    occurrences: 1,
+  };
+}
+
 function semanticLaneDegradation(
   corpusId: string,
   state: SourceIndexRetrievalState,

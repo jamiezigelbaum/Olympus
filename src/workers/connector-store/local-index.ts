@@ -11,6 +11,7 @@ import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
 import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled, withKeywordExpansionDisabled } from '../../core/source-index/keyword-context.ts';
 import { lastKeywordLanguages, storeKeywordLanguages, storeKeywordLanguagesWith } from '../../core/source-index/keyword-languages.ts';
 import { expandSourceIndexKeywords, KEYWORD_PREPARE_WAIT_MS, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
+import { RECENT_ITEMS_CUT_SHORT } from '../../core/source-index/partial-search.ts';
 import { controlPathHeadroom, ingestionTurn, type ControlPathHeadroom } from '../control-path-headroom.ts';
 import { OffThreadReadBusyError, offThreadReadsSupported, readOnPool, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
 // The shared connector ingest spine: ONE generic local store that turns any
@@ -109,6 +110,18 @@ import {
 import { forgetSecretInSideStores, retireSecretRedactions } from './secrets-disposition.ts';
 import {
   hiddenChildKeys,
+  memoVisibilityItems,
+  memoVisibilityItemsHere,
+  visibilityRead,
+  visibilityHere,
+  visibilityOffThread,
+  visibilityAwaited,
+  judgedAwaited,
+  parentVerdictsSteps,
+  hiddenChildKeysSteps,
+  ledgerVisibilityOffThread,
+  ledgerVisibilityHere,
+  type VisibilityRead,
   parentIdentityField,
   parentKey,
   parentVerdicts,
@@ -184,6 +197,7 @@ import type {
   SourceIndexCorpusMatchCount,
   SourceIndexCorpusSearchResponse,
   SourceIndexSearchHit,
+  SourceIndexStoreRelevance,
 } from '../../core/source-index/router.ts';
 import {
   buildSourceIndexStorageProfile,
@@ -3237,6 +3251,15 @@ interface SyncRunRow {
 // filter columns forward.
 const READ_ONLY_MIN_SCHEMA_VERSION = 7;
 
+
+// One visibility read inside a store's read generator. A write landing during
+// it (anywhere in the ledger, so usually unrelated) makes it read again, as a
+// whole judgment does (judgedAwaited), never a hidden or empty result: the
+// generator's own catch would otherwise turn the change into no rows.
+function visibilityStepAwaited(read: VisibilityRead): Promise<unknown> {
+  return judgedAwaited(() => read.offThread(), () => read.here());
+}
+
 /**
  * Whether a read-only open of the store at `dbPath` would find a schema now:
  * the file exists as a regular file and its writer has recorded a schema a
@@ -3901,11 +3924,22 @@ export class LocalConnectorStore {
     throwOnUnavailable = false,
     copiesAllowed?: (copies: readonly TierCopy[]) => boolean,
   ): T[] {
+    return visibilityHere(this.tierVisibleRowsSteps(rows, identityOf, layerOf, throwOnUnavailable, copiesAllowed));
+  }
+
+  private *tierVisibleRowsSteps<T>(
+    rows: readonly T[],
+    identityOf: (row: T) => { provider: string; accountScope: string; providerItemId: string; providerConversationId?: string },
+    layerOf: (row: T) => TierSearchLayer,
+    throwOnUnavailable = false,
+    copiesAllowed?: (copies: readonly TierCopy[]) => boolean,
+  ): Generator<VisibilityRead, T[], unknown> {
     if (rows.length === 0) return [];
     let copies: Map<string, TierCopy[]> | undefined;
     try {
       const ledger = this.visibilityLedger();
-      if (ledger && ledger.corpusHasCopies(this.corpusId)) copies = ledger.copiesForMany(rows.map(identityOf));
+      if (ledger && ledger.corpusHasCopies(this.corpusId)) copies = yield* visibilityRead(() => ledgerVisibilityHere(ledger, rows.map(identityOf)).copies,
+        () => ledgerVisibilityOffThread(ledger, rows.map(identityOf)).then(read => read.copies));
     } catch (error) {
       if (throwOnUnavailable) throw error;
       return [];
@@ -3916,24 +3950,10 @@ export class LocalConnectorStore {
         return tierRowVisible(here, this.corpusId, layerOf(row)) && (copiesAllowed?.(here ?? []) ?? true);
       })
       : [...rows];
-    return this.withoutChildrenOfHiddenParents(served, identityOf);
-  }
-
-  /**
-   * A child is served only while its parent is (child-visibility.ts): the same
-   * rule at the same place as the copy filter above, so every read that honors
-   * a hidden copy honors this. The parent is looked for in the tier set this
-   * store belongs to; whatever cannot be established hides the child.
-   */
-  private withoutChildrenOfHiddenParents<T>(
-    rows: T[],
-    identityOf: (row: T) => { provider: string; accountScope: string; providerItemId: string; providerConversationId?: string },
-  ): T[] {
-    if (rows.length === 0) return rows;
-    // The link is looked for in every store of the set, not this one alone: a
-    // copy written for its text may be a row that does not say whose child it is.
-    const hidden = hiddenChildKeys(this.childVisibilityLane(), rows.map(identityOf));
-    return hidden.size === 0 ? rows : rows.filter((row) => !hidden.has(tierLedgerIdentityKey(identityOf(row))));
+    // The Ask driver awaits parent links, standings and ledger states too;
+    // pooling only the FTS statement still left these reads on its thread.
+    const hidden = yield* hiddenChildKeysSteps(this.childVisibilityLane(), served.map(identityOf));
+    return served.filter(row => !hidden.has(tierLedgerIdentityKey(identityOf(row))));
   }
 
   /**
@@ -3997,7 +4017,12 @@ export class LocalConnectorStore {
    */
   private async tierHiddenItemPksInTurns(): Promise<TierLedgerHiddenItemPks> {
     const base = await runStepsInTurns(this.tierLedgerHiddenSteps());
-    return this.withHiddenChildren(base, await runStepsInTurns(this.hiddenChildSteps()));
+    // Keep the counts' start-of-build semantics during continuous intake.
+    // Search and embedding recheck served rows; requiring the whole lane to
+    // stay unchanged across this full scan would prevent its memo ever filling.
+    // Not voided on a change: this set keeps its start-of-build semantics (above),
+    // and a change met inside one step is that step's to fail or hide.
+    return this.withHiddenChildren(base, await visibilityOffThread(this.hiddenChildReadSteps(), undefined, { voidOnChange: false }));
   }
 
   private tierLedgerHiddenItemPks(): TierLedgerHiddenItemPks {
@@ -4931,20 +4956,41 @@ export class LocalConnectorStore {
    * tombstoned: the question is whose child it is, not whether it is served.
    */
   parentLinksOf(identities: readonly ChildProbe[]): Map<string, ParentRef> {
+    return memoVisibilityItemsHere(this, 'parentLinksOf', () => this.childVisibilityMarker(), identities, tierLedgerIdentityKey,
+      missing => this.readHere(this.parentLinksOfSteps(missing)));
+  }
+
+  // Parent visibility is part of Ask search and release. Await its row reads
+  // on the store's pool, including cold lookups on a million-item store.
+  parentLinksOfOffThread(identities: readonly ChildProbe[]): Promise<Map<string, ParentRef>> {
+    return memoVisibilityItems(this, 'parentLinksOf', () => this.childVisibilityMarker(), identities, tierLedgerIdentityKey,
+      missing => this.readOffThread(this.parentLinksOfSteps(missing)));
+  }
+
+  childVisibilityMarker(): string {
+    // Publishing saved sets and writing temp tables do not change a child's
+    // standing. Use the same item feed as the hidden-set caches when present.
+    if (this.visibilityFeedPresent) return String(this.itemVisibilityChangesSince().cursor);
+    const changes = this.db.query('SELECT total_changes() AS changes').get() as { changes: number };
+    const version = this.db.query('PRAGMA data_version').get() as { data_version: number };
+    return `${version.data_version}:${changes.changes}`;
+  }
+
+  private *parentLinksOfSteps(identities: readonly ChildProbe[]): Generator<StoreRead, Map<string, ParentRef>, unknown> {
     const links = new Map<string, ParentRef>();
-    if (identities.length === 0 || !this.hasChildItems()) return links;
+    if (identities.length === 0 || !this.childItemColumnsPresent) return links;
     for (let offset = 0; offset < identities.length; offset += 200) {
       const batch = identities.slice(offset, offset + 200);
-      const rows = this.db.query(`
+      const rows = (yield { sql: `
         SELECT provider, account_scope, provider_conversation_id, provider_item_id, parent_local_item_id FROM items
         WHERE parent_local_item_id IS NOT NULL
           AND (provider, account_scope, normalized_conversation, provider_item_id) IN (VALUES ${batch.map(() => '(?, ?, ?, ?)').join(', ')})
-      `).all(...batch.flatMap((identity) => [
+      `, mode: 'all', params: batch.flatMap((identity) => [
         identity.provider,
         identity.accountScope,
         normalizeConversationId(identity.providerConversationId),
         identity.providerItemId,
-      ])) as Array<{
+      ]) }) as Array<{
         provider: string;
         account_scope: string;
         provider_conversation_id: string | null;
@@ -4980,16 +5026,43 @@ export class LocalConnectorStore {
    * has no row for is absent from the result.
    */
   parentStandings(parents: readonly ParentRef[]): ParentStandingRow[] {
+    const rows = memoVisibilityItemsHere(this, 'parentStandings', () => this.childVisibilityMarker(), parents, parentKey,
+      missing => this.parentStandingGroups(this.readHere(this.parentStandingsSteps(missing))));
+    return [...rows.values()].flat();
+  }
+
+  // Parent visibility is part of Ask search and release. Await its row reads
+  // on the store's pool, including cold lookups on a million-item store.
+  async parentStandingsOffThread(parents: readonly ParentRef[]): Promise<ParentStandingRow[]> {
+    const rows = await memoVisibilityItems(this, 'parentStandings', () => this.childVisibilityMarker(), parents, parentKey,
+      async missing => {
+        return this.parentStandingGroups(await this.readOffThread(this.parentStandingsSteps(missing)));
+      });
+    return [...rows.values()].flat();
+  }
+
+  private parentStandingGroups(rows: readonly ParentStandingRow[]): Map<string, ParentStandingRow[]> {
+    const groups = new Map<string, ParentStandingRow[]>();
+    for (const row of rows) {
+      const key = parentKey(row);
+      const list = groups.get(key) ?? [];
+      list.push(row);
+      groups.set(key, list);
+    }
+    return groups;
+  }
+
+  private *parentStandingsSteps(parents: readonly ParentRef[]): Generator<StoreRead, ParentStandingRow[], unknown> {
     if (parents.length === 0) return [];
     const wanted = new Set(parents.map((parent) => parentKey(parent)));
     const ids = [...new Set(parents.map((parent) => parent.parentLocalItemId))];
     const out: ParentStandingRow[] = [];
-    for (let offset = 0; offset < ids.length; offset += 20_000) {
-      const rows = this.db.query(`
+    for (let offset = 0; offset < ids.length; offset += 500) {
+      const rows = (yield { sql: `
         SELECT provider, account_scope, provider_item_id, provider_conversation_id, local_item_id, tombstoned, trust_tier,
           ${this.childItemColumnsPresent ? 'parent_local_item_id' : 'NULL AS parent_local_item_id'}
         FROM items WHERE local_item_id IN (SELECT value FROM json_each(?))
-      `).all(JSON.stringify(ids.slice(offset, offset + 20_000))) as Array<{
+      `, mode: 'all', params: [JSON.stringify(ids.slice(offset, offset + 500))] }) as Array<{
         provider: string;
         account_scope: string;
         provider_item_id: string;
@@ -5026,21 +5099,33 @@ export class LocalConnectorStore {
    * `tierLedgerIdentityKey`; an item with no row here is absent.
    */
   itemStandings(identities: readonly ChildProbe[]): Map<string, ParentStandingRow> {
+    return memoVisibilityItemsHere(this, 'itemStandings', () => this.childVisibilityMarker(), identities, tierLedgerIdentityKey,
+      missing => this.readHere(this.itemStandingsSteps(missing)));
+  }
+
+  // Parent visibility is part of Ask search and release. Await its row reads
+  // on the store's pool, including cold lookups on a million-item store.
+  itemStandingsOffThread(identities: readonly ChildProbe[]): Promise<Map<string, ParentStandingRow>> {
+    return memoVisibilityItems(this, 'itemStandings', () => this.childVisibilityMarker(), identities, tierLedgerIdentityKey,
+      missing => this.readOffThread(this.itemStandingsSteps(missing)));
+  }
+
+  private *itemStandingsSteps(identities: readonly ChildProbe[]): Generator<StoreRead, Map<string, ParentStandingRow>, unknown> {
     const out = new Map<string, ParentStandingRow>();
     if (identities.length === 0) return out;
     for (let offset = 0; offset < identities.length; offset += 200) {
       const batch = identities.slice(offset, offset + 200);
-      const rows = this.db.query(`
+      const rows = (yield { sql: `
         SELECT provider, account_scope, provider_item_id, provider_conversation_id, normalized_conversation, local_item_id, tombstoned, trust_tier,
           ${this.childItemColumnsPresent ? 'parent_local_item_id' : 'NULL AS parent_local_item_id'}
         FROM items
         WHERE (provider, account_scope, normalized_conversation, provider_item_id) IN (VALUES ${batch.map(() => '(?, ?, ?, ?)').join(', ')})
-      `).all(...batch.flatMap((identity) => [
+      `, mode: 'all', params: batch.flatMap((identity) => [
         identity.provider,
         identity.accountScope,
         normalizeConversationId(identity.providerConversationId),
         identity.providerItemId,
-      ])) as Array<{
+      ]) }) as Array<{
         provider: string;
         account_scope: string;
         provider_item_id: string;
@@ -5087,9 +5172,31 @@ export class LocalConnectorStore {
     return runSteps(this.hiddenChildSteps());
   }
 
-  /** `hiddenChildItemPks` with a step between bounded slices of parents, for the builds that run in turns. */
+  // A cold Ask starts a hidden-set refresh from vectorLaneServable. Even a
+  // bounded parent slice exceeded 250 ms; await its store reads on the pool.
+  private *visibilityStoreRead(read: StoreRead): Generator<VisibilityRead, unknown, unknown> {
+    return yield* visibilityRead(() => this.readHere((function* () { return yield read; })()),
+      () => this.readOffThread((function* () { return yield read; })()));
+  }
+
+  /** The synchronous build still exposes a turn between bounded reads. */
   private *hiddenChildSteps(): Generator<void, number[]> {
-    if (!this.hasChildItems()) return [];
+    const steps = this.hiddenChildReadSteps();
+    let next = steps.next();
+    while (!next.done) {
+      yield;
+      let result: unknown;
+      try { result = next.value.here(); }
+      catch (error) { next = steps.throw(error); continue; }
+      next = steps.next(result);
+    }
+    return next.value;
+  }
+
+  private *hiddenChildReadSteps(): Generator<VisibilityRead, number[], unknown> {
+    if (!this.childItemColumnsPresent) return [];
+    const present = yield* this.visibilityStoreRead({ sql: 'SELECT 1 AS present FROM items WHERE parent_local_item_id IS NOT NULL LIMIT 1', params: [], mode: 'get' });
+    if (!present) return [];
     // Parents are judged independently, so a window at a time gives the same
     // set. The parent ids come off the parent index HIDDEN_CHILD_PARENT_SLICE
     // at a time and only the children under them are grouped, one window per
@@ -5102,18 +5209,17 @@ export class LocalConnectorStore {
     let from = '';
     let inclusive = true;
     while (true) {
-      yield;
-      const window = (this.db.query(`
+      const window = ((yield* this.visibilityStoreRead({ sql: `
         SELECT parent_local_item_id AS parent FROM items
         WHERE parent_local_item_id IS NOT NULL AND parent_local_item_id ${inclusive ? '>=' : '>'} ?
         GROUP BY parent_local_item_id ORDER BY parent_local_item_id LIMIT ?
-      `).all(from, HIDDEN_CHILD_PARENT_SLICE) as Array<{ parent: string }>).map((row) => row.parent);
+      `, params: [from, HIDDEN_CHILD_PARENT_SLICE], mode: 'all' })) as Array<{ parent: string }>).map((row) => row.parent);
       if (window.length === 0) break;
-      const groups = this.db.query(`
+      const groups = (yield* this.visibilityStoreRead({ sql: `
         SELECT provider, account_scope, parent_local_item_id, MIN(provider_item_id) AS child_item_id, provider_conversation_id FROM items
         WHERE parent_local_item_id IN (SELECT value FROM json_each(?)) AND tombstoned = 0
         GROUP BY provider, account_scope, parent_local_item_id
-      `).all(JSON.stringify(window)) as Array<{
+      `, params: [JSON.stringify(window)], mode: 'all' })) as Array<{
         provider: string;
         account_scope: string;
         parent_local_item_id: string;
@@ -5131,7 +5237,7 @@ export class LocalConnectorStore {
           ...(group.provider_conversation_id ? { providerConversationId: group.provider_conversation_id } : {}),
         }),
       }));
-      const verdicts = parentVerdicts(lane, slice);
+      const verdicts = yield* parentVerdictsSteps(lane, slice);
       for (const parent of slice) if (verdicts.get(parentKey(parent))?.visible !== true) hiddenParents.push(parent);
       if (window.length < HIDDEN_CHILD_PARENT_SLICE) break;
       from = window[window.length - 1]!;
@@ -5139,15 +5245,14 @@ export class LocalConnectorStore {
     }
     const pks: number[] = [];
     for (let offset = 0; offset < hiddenParents.length; offset += 20_000) {
-      yield;
-      const rows = this.db.query(`
+      const rows = (yield* this.visibilityStoreRead({ sql: `
         SELECT item_pk FROM items
         WHERE tombstoned = 0 AND parent_local_item_id IS NOT NULL
           AND (provider, account_scope, parent_local_item_id) IN (
             SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'), json_extract(value, '$[2]') FROM json_each(?)
           )
-      `).all(JSON.stringify(hiddenParents.slice(offset, offset + 20_000)
-        .map((parent) => [parent.provider, parent.accountScope, parent.parentLocalItemId]))) as Array<{ item_pk: number }>;
+      `, params: [JSON.stringify(hiddenParents.slice(offset, offset + 20_000)
+        .map((parent) => [parent.provider, parent.accountScope, parent.parentLocalItemId]))], mode: 'all' })) as Array<{ item_pk: number }>;
       for (const row of rows) pks.push(row.item_pk);
     }
     return pks;
@@ -6584,7 +6689,7 @@ export class LocalConnectorStore {
    * are cursors on bounded change tables, so reading them is cheap; neither
    * moves for embedding, status or other bookkeeping writes.
    */
-  peopleVisibilityMarker(): string {
+  visibilityMarker(): string {
     const ledger = this.visibilityLedger();
     const ledgerCursor = ledger ? ledger.visibilityChangesSince().cursor : 0;
     // A handle without the journal (read-only) sees other connections' writes by data_version.
@@ -6620,12 +6725,12 @@ export class LocalConnectorStore {
   async peopleObservationsOffThread(): Promise<PeopleSenderObservation[]> {
     if (!offThreadReadsSupported(this.dbPath)) return this.peopleObservations();
     for (let attempt = 0; attempt < PEOPLE_OFF_THREAD_READ_ATTEMPTS; attempt += 1) {
-      const marker = this.peopleVisibilityMarker();
+      const marker = this.visibilityMarker();
       const tierHidden = await this.tierHiddenItemPksInTurns();
       const steps = this.peopleObservationSteps(tierHidden);
       let step = steps.next();
       while (!step.done) step = steps.next(await readOnPool(this.dbPath, step.value));
-      if (this.peopleVisibilityMarker() === marker) return this.peopleObservationsFromRows(step.value);
+      if (this.visibilityMarker() === marker) return this.peopleObservationsFromRows(step.value);
     }
     return this.peopleObservations();
   }
@@ -13396,7 +13501,11 @@ export class LocalConnectorStore {
       // A store closed while its search was reading: the pool's connections
       // to it are released, and no later read may open one again.
       if (this.closedForPoolReads) throw new OffThreadReadBusyError();
-      step = steps.next(await readOnPool(this.dbPath, step.value, pool.deadlineAtMs !== undefined ? { deadlineAtMs: pool.deadlineAtMs } : {}));
+      let result: unknown;
+      try { result = 'offThread' in step.value ? await visibilityStepAwaited(step.value)
+        : await readOnPool(this.dbPath, step.value, pool.deadlineAtMs !== undefined ? { deadlineAtMs: pool.deadlineAtMs } : {}); }
+      catch (error) { step = steps.throw(error); continue; }
+      step = steps.next(result);
     }
     return step.value;
   }
@@ -13424,33 +13533,65 @@ export class LocalConnectorStore {
     );
   }
 
+  async stillVisibleSearchRowsOffThread<T extends Pick<ConnectorStoreSearchRow, 'sourceItem' | 'chunk' | 'contentMatched'>>(rows: readonly T[]): Promise<T[]> {
+    return visibilityAwaited(() => this.tierVisibleRowsSteps(
+      rows,
+      (row) => ({
+        provider: row.sourceItem.provider,
+        accountScope: row.sourceItem.accountScope,
+        providerItemId: row.sourceItem.providerItemId,
+        ...(row.sourceItem.providerConversationId ? { providerConversationId: row.sourceItem.providerConversationId } : {}),
+      }),
+      (row) => (row.chunk !== undefined || row.contentMatched === true ? 'content' : 'metadata'),
+    ), this.childVisibilityLane());
+  }
+
   private closedForPoolReads = false;
   // Created on first use: a field initializer that constructs an object
   // keeps this class in bundles that never use it (dist/index.js).
   private conceptCountMemo?: Map<string, { count: number; at: number }>;
 
   /** Drives a read generator on this store's own connection. */
-  private readHere<T>(steps: Generator<StoreRead, T, unknown>): T {
+  private readHere<T>(steps: Generator<StoreRead | VisibilityRead, T, unknown>): T {
     let step = steps.next();
     while (!step.done) {
       const read = step.value;
+      if ('here' in read) {
+        let result: unknown;
+        try { result = read.here(); } catch (error) { step = steps.throw(error); continue; }
+        step = steps.next(result);
+        continue;
+      }
       const statement = this.db.query(read.sql);
       step = steps.next(read.mode === 'all' ? statement.all(...(read.params as SQLQueryBindings[])) : statement.get(...(read.params as SQLQueryBindings[])));
     }
     return step.value;
   }
 
+  private async readOffThread<T>(steps: Generator<StoreRead | VisibilityRead, T, unknown>): Promise<T> {
+    if (!offThreadReadsSupported(this.dbPath)) return this.readHere(steps);
+    let next = steps.next();
+    while (!next.done) {
+      if (this.closedForPoolReads) throw new OffThreadReadBusyError();
+      let result: unknown;
+      try { result = 'offThread' in next.value ? await visibilityStepAwaited(next.value) : await readOnPool(this.dbPath, next.value); }
+      catch (error) { next = steps.throw(error); continue; }
+      next = steps.next(result);
+    }
+    return next.value;
+  }
+
   // The keyword search as the reads it needs: each query is yielded and its
   // rows come back, so one body serves this thread and the read pool. The
-  // tier filter is not a read: it runs here, on this thread, against the
-  // current ledger, whichever connection returned the rows.
+  // visibility effects yield their store and ledger reads too, so the Ask
+  // driver can await them without changing the filter.
   private *searchItemsSteps(
     query: string,
     maxResults: number,
     accountScope: string | undefined,
     filters: ConnectorStoreSearchFilters | undefined,
     ftsOptions: ConnectorStoreKeywordFtsOptions,
-  ): Generator<StoreRead, ConnectorStoreKeywordSearch, unknown> {
+  ): Generator<StoreRead | VisibilityRead, ConnectorStoreKeywordSearch, unknown> {
     const selectedFilters = connectorStoreFilterSql(filters);
     const selectedFtsScope = connectorStoreFtsScopeSql(filters);
     const conceptScope = connectorStoreFtsScopeSql(filters, 'r.chunk_pk');
@@ -13621,7 +13762,7 @@ export class LocalConnectorStore {
           return weights.total > 0 && matched / weights.total >= RARE_CONCEPT_WEIGHT_SHARE;
         });
       }
-      const visible = this.tierVisibleRows(
+      const visible = yield* this.tierVisibleRowsSteps(
         signalled,
         (row) => ({
           provider: row.provider,
@@ -13901,24 +14042,29 @@ export class LocalConnectorStore {
    * recentItems with its read on the store's read-pool thread (#1305): the
    * newest-first order has no index, so on a large chat store the read sorts
    * every item, seconds of the request thread. The lane is optional: a busy
-   * store gives no recency rows.
+   * store gives no recency rows, and says it was cut short (#1460).
    */
   async recentItemsOffThread(
     maxResults: number,
     accountScope?: string,
     filters?: ConnectorStoreSearchFilters,
     deadlineAtMs?: number,
+    onCutShort?: () => void,
   ): Promise<ConnectorStoreSearchRow[]> {
     if (!offThreadReadsSupported(this.dbPath)) return this.recentItems(maxResults, accountScope, filters);
     let rows: ItemRow[];
     try {
       rows = await readOnPool(this.dbPath, this.recentItemsRead(maxResults, accountScope, filters), deadlineAtMs !== undefined ? { deadlineAtMs } : {}) as ItemRow[];
     } catch (error) {
-      if (error instanceof OffThreadReadBusyError) return [];
-      throw error;
+      if (!(error instanceof OffThreadReadBusyError)) throw error;
+      onCutShort?.();
+      return [];
     }
-    if (this.closedForPoolReads) return [];
-    return this.visibleRecentRows(rows);
+    if (this.closedForPoolReads) {
+      onCutShort?.();
+      return [];
+    }
+    return (await visibilityAwaited(() => this.visibleRecentRowsSteps(rows), this.childVisibilityLane())).map(row => searchRowFromItemRow(row));
   }
 
   private recentItemsRead(
@@ -13956,7 +14102,12 @@ export class LocalConnectorStore {
   }
 
   private visibleRecentRows(rows: ItemRow[]): ConnectorStoreSearchRow[] {
-    return this.tierVisibleRows(
+    return visibilityHere(this.visibleRecentRowsSteps(rows)).map((row) => searchRowFromItemRow(row));
+  }
+
+  // The recency lane's tier filter, for this thread and the awaited path alike.
+  private visibleRecentRowsSteps(rows: ItemRow[]): Generator<VisibilityRead, ItemRow[], unknown> {
+    return this.tierVisibleRowsSteps(
       rows,
       (row) => ({
         provider: row.provider,
@@ -13965,7 +14116,7 @@ export class LocalConnectorStore {
         ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
       }),
       () => 'content',
-    ).map((row) => searchRowFromItemRow(row));
+    );
   }
 
   /**
@@ -14256,23 +14407,24 @@ export class LocalConnectorStore {
 
   /**
    * Builds, a turn at a time, what a status snapshot reuses (the hidden-copy
-   * set and the settled-unreadable count) when it has not been built yet, so
+   * set and the settled-unreadable count), so
    * the snapshot's `status(..., { countsMaxAgeMs })` that follows finds both
    * and does not rebuild them in one go. The first status after a start did,
    * about a tenth of the sampled freezes on Sparta (2026-11-05, b826b19).
    */
   async prepareStatusCounts(scope?: ConnectorStoreStatusScope): Promise<void> {
-    if (!this.tierHiddenCountsMemo) await this.refreshTierHiddenCountsInTurns();
+    // Called when the enclosing status snapshot needs new counts. Reusing an
+    // expired projection here lets statusSteps return it while its refresh
+    // runs, then caches that old result for another complete status window.
+    await this.refreshTierHiddenCountsInTurns();
     const key = JSON.stringify(scope ?? null);
-    if (!this.settledUnreadableCountMemo?.has(key)) {
-      try {
-        const counts = this.unreadHoldCounts(await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
-        const memos = this.settledUnreadableCountMemo ??= new Map();
-        if (memos.size > 32) memos.clear();
-        memos.set(key, { at: Date.now(), ...counts });
-      } catch {
-        // A closed or busy store: the status read counts it itself.
-      }
+    try {
+      const counts = this.unreadHoldCounts(await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
+      const memos = this.settledUnreadableCountMemo ??= new Map();
+      if (memos.size > 32) memos.clear();
+      memos.set(key, { at: Date.now(), ...counts });
+    } catch {
+      // A closed or busy store: the status read counts it itself.
     }
   }
 
@@ -14544,6 +14696,10 @@ export class LocalConnectorStore {
       ${contentFilters.sql}
       ${hiddenNotIn}
       ${namesOnlyNotIn}`;
+    const approvedContentWhere = `${scope?.contentAllowed === false ? 'AND 0' : ''}
+      ${accountScope ? 'AND i.account_scope = ?' : ''}
+      ${contentFilters.sql}
+      ${hiddenNotIn}`;
     const parityWhere = `${contentWhere}
       ${heldNotIn}`;
     // Which files the scope asks to be read. A names copy whose text no copy
@@ -14605,6 +14761,7 @@ export class LocalConnectorStore {
           (1 ${itemWhere}) AS in_items,
           (1 ${hiddenNotIn}) AS stored,
           i.item_pk IN (SELECT value FROM json_each(?)) AS elsewhere,
+          (1 ${approvedContentWhere}) AS in_content_scope,
           (1 ${fileScopeWhere}) AS in_file_scope
         FROM items i
       )
@@ -14612,6 +14769,7 @@ export class LocalConnectorStore {
         COALESCE(SUM(t = 0 AND in_items), 0) AS items,
         COALESCE(SUM(t = 0 AND stored), 0) AS stored_items,
         COALESCE(SUM(t = 0 AND in_items AND elsewhere), 0) AS content_elsewhere_items,
+        COALESCE(SUM(t = 0 AND in_items AND NOT dir AND elsewhere AND in_content_scope), 0) AS content_elsewhere_in_scope_files,
         COALESCE(SUM(t = 0 AND in_items AND NOT dir), 0) AS files,
         COALESCE(SUM(t = 0 AND in_items AND dir), 0) AS folders,
         COALESCE(SUM(t = 1 AND in_items), 0) AS tombstoned_items,
@@ -14621,11 +14779,15 @@ export class LocalConnectorStore {
       ...itemParams,
       ...jsonList(tier.hidden),
       JSON.stringify(keptNamesOnlyPks),
+      ...(accountScope ? [accountScope] : []),
+      ...contentFilters.params,
+      ...jsonList(tier.hidden),
       ...fileScopeParams,
     ], mode: 'get' }) as {
       items: number;
       stored_items: number;
       content_elsewhere_items: number;
+      content_elsewhere_in_scope_files: number;
       files: number;
       folders: number;
       tombstoned_items: number;
@@ -14782,7 +14944,9 @@ export class LocalConnectorStore {
               files: counts.files,
               folders: counts.folders,
               fullIngestionFiles: counts.full_ingestion_files,
-              scopeMetadataOnlyFiles: Math.max(0, counts.files - counts.full_ingestion_files),
+              // A names copy whose approved text lives in another tier is
+              // counted there. It is not an instruction to keep names only.
+              scopeMetadataOnlyFiles: Math.max(0, counts.files - counts.full_ingestion_files - counts.content_elsewhere_in_scope_files),
               contentEligibleItems: Math.max(
                 0,
                 counts.full_ingestion_files - policyDeferredItems - outsideContentWindowItems,
@@ -15108,11 +15272,12 @@ export function createConnectorStoreCorpusAdapter(
     }
 
     if (!embeddingProvider || useHybrid !== 'hybrid' || semanticSkippedReason) return (async (): Promise<SourceIndexCorpusSearchResponse> => {
-      const keywordLane = revalidateKeywordLane(store, await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters,
+      const keywordLane = await revalidateKeywordLane(store, await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters,
         await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, {}, request.deadlineAtMs),
         options.localKeywordFallback, {}, request.deadlineAtMs));
       const rows = keywordLane.rows;
-      const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters, request.deadlineAtMs);
+      let recencyCut = false;
+      const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters, request.deadlineAtMs, () => { recencyCut = true; });
       if (recencyRows.length === 0) {
         const hits = withKeywordLeaderSignals(rows.map((row) => connectorStoreHitFromRow(
           store,
@@ -15123,13 +15288,14 @@ export function createConnectorStoreCorpusAdapter(
         )), keywordLane);
         return {
           hits,
+          storeRelevance: connectorStoreRelevance(keywordLane),
           latencyMs: Date.now() - startedAt,
           laneAudits: [{
             ...connectorStoreKeywordLaneAudit(store.corpusId, rows.length, hits.length),
             ...(semanticSkippedReason
               ? { skippedReason: semanticSkippedReason, modelId: embeddingProvider!.modelId }
               : {}),
-          }],
+          }, ...(recencyCut ? [connectorStoreRecencyLaneAudit(store.corpusId, 0, true)] : [])],
           matchCount: keywordLane.matchCount,
           rawExposed: false,
         };
@@ -15165,6 +15331,7 @@ export function createConnectorStoreCorpusAdapter(
       }), keywordLane);
       return {
         hits,
+        storeRelevance: connectorStoreRelevance(keywordLane),
         latencyMs: Date.now() - startedAt,
         laneAudits: [
           {
@@ -15310,8 +15477,8 @@ export function createConnectorStoreCorpusAdapter(
       }
     }
     // Checked again after the last read, right before the hits and counts go out.
-    const keywordLane = revalidateKeywordLane(store, readKeywordLane);
-    const visibleSemanticRows = store.stillVisibleSearchRows(semanticRows);
+    const keywordLane = await revalidateKeywordLane(store, readKeywordLane);
+    const visibleSemanticRows = await store.stillVisibleSearchRowsOffThread(semanticRows);
     const rows: ConnectorStoreSearchRow[] = [...keywordLane.rows, ...visibleSemanticRows];
     const semanticOnly = visibleSemanticRows.length;
     return {
@@ -15373,6 +15540,7 @@ async function chatRecencyLaneRows(
   accountScope?: string,
   filters?: ConnectorStoreSearchFilters,
   deadlineAtMs?: number,
+  onCutShort?: () => void,
 ): Promise<ConnectorStoreSearchRow[]> {
   if (store.family !== 'chat') return [];
   // Full lane depth regardless of maxResults: the lane feeds FUSION, not the
@@ -15380,8 +15548,9 @@ async function chatRecencyLaneRows(
   // items deep minutes after it arrived (2026-07-05 probe). It reads last, so
   // it keeps the lane's deadline: queued behind a busy store's vector pages
   // without one, it held the whole lane past the router's cut and the keyword
-  // rows already read were dropped with it (#1305). Busy, it is left out.
-  return store.recentItemsOffThread(CHAT_RECENCY_LANE_LIMIT, accountScope, filters, deadlineAtMs);
+  // rows already read were dropped with it (#1305). Busy, it is left out and
+  // its audit says so, so the answer names the source (#1460).
+  return store.recentItemsOffThread(CHAT_RECENCY_LANE_LIMIT, accountScope, filters, deadlineAtMs, onCutShort);
 }
 
 function connectorStoreHitFromRow(
@@ -15455,7 +15624,7 @@ function withPinnedNewestChatHits(input: {
   return result;
 }
 
-function connectorStoreRecencyLaneAudit(corpusId: string, candidateCount: number): RetrievalLaneAudit {
+function connectorStoreRecencyLaneAudit(corpusId: string, candidateCount: number, cutShort = false): RetrievalLaneAudit {
   return {
     laneName: `${corpusId}:connector_store_recency`,
     laneType: 'metadata',
@@ -15464,6 +15633,7 @@ function connectorStoreRecencyLaneAudit(corpusId: string, candidateCount: number
     backend: 'sqlite',
     localOnly: true,
     rawExposed: false,
+    ...(cutShort ? { skippedReason: RECENT_ITEMS_CUT_SHORT } : {}),
   };
 }
 
@@ -15542,15 +15712,16 @@ async function hybridConnectorStoreSearch(
   keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback, {}, request.deadlineAtMs);
   keywordElapsedMs += Date.now() - relaxStartedAt;
   // Every candidate is checked again after the last read, right before fusion emits hits and counts (#1079).
-  keywordLane = revalidateKeywordLane(store, keywordLane);
-  scoredVectorRows = store.stillVisibleSearchRows(scoredVectorRows);
-  vectorRows = store.stillVisibleSearchRows(vectorRows);
+  keywordLane = await revalidateKeywordLane(store, keywordLane);
+  scoredVectorRows = await store.stillVisibleSearchRowsOffThread(scoredVectorRows);
+  vectorRows = await store.stillVisibleSearchRowsOffThread(vectorRows);
   const keywordRows = keywordLane.rows;
   const suppressedBelowBar = scoredVectorRows.length - vectorRows.length;
   const bestCosine = scoredVectorRows.length > 0
     ? roundCosine(Math.max(...scoredVectorRows.map((row) => row.bestCosine)))
     : undefined;
-  const recencyRows = await chatRecencyLaneRows(store, accountScope, filters, request.deadlineAtMs);
+  let recencyCut = false;
+  const recencyRows = await chatRecencyLaneRows(store, accountScope, filters, request.deadlineAtMs, () => { recencyCut = true; });
   const contentBar = relevanceBar ?? CALIBRATED_CONTENT_PREFERENCE_BARS.get(provider.modelId);
   const vettedVectorItemIds = new Set(contentBar === undefined
     ? []
@@ -15558,6 +15729,11 @@ async function hybridConnectorStoreSearch(
       .filter((row) => row.bestCosine >= contentBar)
       .map((row) => row.sourceItem.localItemId));
   const contentPreference = connectorStoreContentPreference(vettedVectorItemIds);
+  // The store's best vetted cosine over its own bar: comparable across stores
+  // whose models score on different scales (#1354).
+  const vettedMargin = contentBar === undefined || vettedVectorItemIds.size === 0
+    ? undefined
+    : Math.max(...vectorRows.filter((row) => vettedVectorItemIds.has(row.sourceItem.localItemId)).map((row) => row.bestCosine)) - contentBar;
 
   const lanes = [
     { name: 'keyword', items: keywordRows },
@@ -15596,6 +15772,7 @@ async function hybridConnectorStoreSearch(
 
   return {
     hits,
+    storeRelevance: connectorStoreRelevance(keywordLane, vettedMargin),
     latencyMs: Date.now() - startedAt,
     // Per-lane candidate counts: keyword, vector, and the fused cut — the
     // same audit fields the Dropbox retrieval audit records
@@ -15624,8 +15801,8 @@ async function hybridConnectorStoreSearch(
         localOnly: true,
         rawExposed: false,
       },
-      ...(recencyRows.length > 0
-        ? [connectorStoreRecencyLaneAudit(store.corpusId, recencyRows.length)]
+      ...(recencyRows.length > 0 || recencyCut
+        ? [connectorStoreRecencyLaneAudit(store.corpusId, recencyRows.length, recencyCut)]
         : []),
       {
         laneName: `${store.corpusId}:hybrid`,
@@ -15857,6 +16034,18 @@ function withKeywordLeaderSignals<H extends SourceIndexSearchHit>(hits: H[], lan
   });
 }
 
+/**
+ * How well this store's best hit answers the question, in terms the router
+ * compares across stores to order them within each turn of the pack (#1354):
+ * the best keyword row's share of the question's concepts, and the best
+ * vetted cosine's margin over this store's relevance bar.
+ */
+function connectorStoreRelevance(lane: ConnectorStoreKeywordLane, vectorMargin?: number): SourceIndexStoreRelevance {
+  let conceptShare = 0;
+  for (const share of lane.conceptShare?.values() ?? []) if (share > conceptShare) conceptShare = share;
+  return { conceptShare, ...(vectorMargin !== undefined ? { vectorMargin } : {}) };
+}
+
 /** Whether keyword expansion changes the SQL a keyword search would run for this question. */
 function keywordExpansionChangesSearch(query: string, ftsOptions: ConnectorStoreKeywordFtsOptions): boolean {
   const shape = () => JSON.stringify([toFtsQuery(query, ftsOptions), sourceIndexFtsTermGroups(query), sourceIndexTopicTokens(query)]);
@@ -15868,8 +16057,8 @@ function keywordExpansionChangesSearch(query: string, ftsOptions: ConnectorStore
  * its counts recounted (stillVisibleSearchRows). Unchanged when every row is
  * still served.
  */
-function revalidateKeywordLane(store: LocalConnectorStore, lane: ConnectorStoreKeywordLane): ConnectorStoreKeywordLane {
-  const allRows = store.stillVisibleSearchRows(lane.allRows);
+async function revalidateKeywordLane(store: LocalConnectorStore, lane: ConnectorStoreKeywordLane): Promise<ConnectorStoreKeywordLane> {
+  const allRows = await store.stillVisibleSearchRowsOffThread(lane.allRows);
   if (allRows.length === lane.allRows.length) return lane;
   const served = new Set(allRows.map((row) => row.sourceItem.localItemId));
   return {
@@ -15877,6 +16066,10 @@ function revalidateKeywordLane(store: LocalConnectorStore, lane: ConnectorStoreK
     allRows,
     matchedItemIds: served,
     completeItemIds: new Set([...lane.completeItemIds].filter((id) => served.has(id))),
+    // The leaders and concept shares the router reads stay with the rows
+    // still served (#1350, #1354).
+    ...(lane.nameLeaderItemId !== undefined && served.has(lane.nameLeaderItemId) ? { nameLeaderItemId: lane.nameLeaderItemId } : {}),
+    ...(lane.conceptShare ? { conceptShare: new Map([...lane.conceptShare].filter(([id]) => served.has(id))) } : {}),
     matchCount: {
       matchedItems: allRows.length,
       contentMatchedItems: allRows.filter(connectorStoreRowHasContent).length,

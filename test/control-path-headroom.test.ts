@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { ControlPathHeadroom, summarizeCpuSamples, tracesInStalls } from '../src/workers/control-path-headroom.ts';
+import { ControlPathHeadroom, controlPathFreezeSubject, summarizeCpuSamples, tracesInStalls } from '../src/workers/control-path-headroom.ts';
 
 const busy = (ms: number) => {
   const end = performance.now() + ms;
@@ -63,6 +63,14 @@ describe('control path headroom', () => {
     expect(lines).toHaveLength(1);
     expect(lines[0]).toMatch(/^\d{4}-\d\d-\d\dT[\d:.]+Z \[olympus:control-path\] the worker could not answer requests for \d+ ms; background work running: dropbox\.files\/sync$/);
     expect(headroom.snapshot().freezes).toBe(1);
+  });
+});
+
+describe('freeze log under the engine split', () => {
+  test('each process names itself, since both write to one log and only the front answers requests', () => {
+    expect(controlPathFreezeSubject('single')).toBe('the worker could not answer requests');
+    expect(controlPathFreezeSubject('front')).toBe('the front process could not answer requests');
+    expect(controlPathFreezeSubject('background')).toBe('the background process was blocked');
   });
 });
 

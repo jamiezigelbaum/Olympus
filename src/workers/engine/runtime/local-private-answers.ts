@@ -190,7 +190,7 @@ export function createLocalAnswerPath(options: LocalAnswerPathOptions): {
     });
     // Read once outside the fail-closed release formatter: unavailable state
     // must hide a retained answer without treating it as definitely withdrawn.
-    const verdicts = options.releaseCheck.inputs(inputs);
+    const verdicts = await (options.releaseCheck.inputsOffThread?.(inputs) ?? options.releaseCheck.inputs(inputs));
     if (verdicts.length !== inputs.length || verdicts.some(v => v.tier === 'unknown')) throw new Error('Eligibility unavailable');
     const posture = options.releaseCheck.secureDerivativeDefault();
     const reason = answerReleaseWithheldReason([{ inputs, constraints: { secureDerivativeDefault: 'approval', includeSecureLocalContent: true } }], { inputs: () => verdicts, secureDerivativeDefault: () => posture });

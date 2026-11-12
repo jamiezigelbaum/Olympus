@@ -304,10 +304,11 @@ export const RESERVED_HEAD_SEATS = 3;
 // A pinned message already seated at or above its seat keeps its place; one
 // seated lower moves up; one cut by the budget takes the seat, and the last
 // seat that is neither reserved nor its store's only seat leaves the pack.
-// When every such seat is a store's only one, the message takes no seat: a
-// recency seat never costs a reserved leader or a store its place. Packs of
-// three seats or fewer have none. Questions without temporal intent never
-// call this.
+// When every such seat is a store's only one (more stores than seats), the
+// last seat leaves: stores sit in turn by relevance (#1354), so that is the
+// least relevant store's, and it is reported as cut. A recency seat never
+// costs a reserved leader its place. Packs of three seats or fewer have none.
+// Questions without temporal intent never call this.
 export const RESERVED_RECENCY_SEATS = 2;
 
 export function withReservedRecencySeats<T extends {
@@ -340,11 +341,15 @@ export function withReservedRecencySeats<T extends {
     if (at >= 0 && at <= seat) { reserved.add(hit); taken += 1; continue; }
     if (at > seat) hits.splice(at, 1);
     else if (hits.length >= budget) {
-      let drop = -1;
-      for (let index = hits.length - 1; index >= RESERVED_HEAD_SEATS; index -= 1) {
-        const candidate = hits[index]!;
-        if (!reserved.has(candidate) && storeSeats(candidate.corpusId) > 1) { drop = index; break; }
-      }
+      const droppable = (onlySeatToo: boolean) => {
+        for (let index = hits.length - 1; index >= RESERVED_HEAD_SEATS; index -= 1) {
+          const candidate = hits[index]!;
+          if (!reserved.has(candidate) && (onlySeatToo || storeSeats(candidate.corpusId) > 1)) return index;
+        }
+        return -1;
+      };
+      const laterResult = droppable(false);
+      const drop = laterResult >= 0 ? laterResult : droppable(true);
       if (drop < 0) break;
       hits.splice(drop, 1);
     }

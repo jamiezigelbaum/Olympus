@@ -94,7 +94,7 @@ import {
   withWorkerBearerAuth,
   workerAuthTokenFromEnv,
 } from '../http.ts';
-import { createAnalyst } from '../../core/analyst.ts';
+import { createAnalyst, type AnalystModelRequest } from '../../core/analyst.ts';
 import {
   builtInTranscriptionDashboardState,
   builtInTranscriptionEnabled,
@@ -470,6 +470,7 @@ import { engineRssRestartsFrom, startEngineRssRestart } from '../engine-split/rs
 import { createFrontScheduler } from '../engine-split/front-scheduler.ts';
 import { createFrontDashboardHistory, openWritableDashboardHistory } from '../engine-split/front-history.ts';
 import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
+import { startSupersededSweepTicker } from '../connector-store/tier-auto-prune-sweep.ts';
 import { remoteAccessFromStatus, type DashboardAgentConnectionsBackend } from '../agent-connections.ts';
 import { applyPendingRestoreAtBoot, createBackupService, defaultBackupServicePaths } from '../backup-service.ts';
 import { createDashboardRemoteAccessControl, createGatewayRemoteAccessConfigWriter, createStandaloneRemoteAccessControl, createDashboardEngineRestart } from '../remote-access-control.ts';
@@ -663,7 +664,12 @@ export async function main(): Promise<void> {
     const builtInChoice = builtInModelEnvValue(process.env, readModelChoices(sovereigntyEngine.path));
     if (builtInChoice) process.env[BUILT_IN_ANALYST_MODEL_ENV] = builtInChoice;
   }
-  const workerBuiltInModel = createWorkerSharedBuiltInModel(process.env);
+  // With the engine split, only the background holds the built-in model (one
+  // server per computer); the front's completions run there (judging-models.ts).
+  const workerBuiltInModel = createWorkerSharedBuiltInModel(process.env, engineFront ? {
+    complete: (request) => engineFront!.completeModel(request),
+    prepare: () => { void engineFront!.client.post({ kind: 'model_prepare' }).catch(() => undefined); },
+  } : undefined);
   const answerBuiltInModel = workerBuiltInModel
     ? localModelActivity.track('built_in', workerBuiltInModel.model) : undefined;
   registerBuiltInPrivateModel(workerBuiltInModel
@@ -1136,11 +1142,19 @@ export async function main(): Promise<void> {
   let registerTierLegStore: (...registration: TierLegRegistration) => void = (...registration) => {
     tierLegsOpenedEarly.push(registration);
   };
+  // Which SQLite failure it was (busy, cannot open, corrupt): the name alone left a
+  // release check unable to tell a lock from a missing file. SQLite's own codes
+  // and messages name no path and no content.
+  const sqliteFailure = (error: unknown): string => {
+    if (!(error instanceof Error)) return 'error';
+    const code = (error as { code?: unknown }).code;
+    return `${error.name}${typeof code === 'string' ? ` ${code}` : ''}: ${error.message.slice(0, 120)}`;
+  };
   const openTierSecretLocations = (account: StorageAccount, secureDbPath: string, label: string): SecretLocationsIndex | undefined => {
     try {
       return openSecretLocations(account, { dbPath: secretLocationsPathForStore(secureDbPath) });
     } catch (error) {
-      console.warn(`[tier] secret-locations index unavailable for ${label}: ${error instanceof Error ? error.name : 'error'}`);
+      console.warn(`[tier] secret-locations index unavailable for ${label}: ${sqliteFailure(error)}`);
       return undefined;
     }
   };
@@ -1215,7 +1229,7 @@ export async function main(): Promise<void> {
       secrets = openSecretLocations(input.account, { dbPath: secretLocationsPathForStore(input.secure.dbPath) });
     } catch (error) {
       if (engineFront) throw error;
-      console.warn(`[tier] secret-locations index unavailable for ${input.secure.corpusId}: ${error instanceof Error ? error.name : 'error'}`);
+      console.warn(`[tier] secret-locations index unavailable for ${input.secure.corpusId}: ${sqliteFailure(error)}`);
     }
     input.internal.useTierLedger(ledger);
     const lane = {
@@ -5983,6 +5997,8 @@ export async function main(): Promise<void> {
   if (!engineFront) await reconcileCaptures();
   const captureTick = setInterval(() => { if (!engineFront) void reconcileCaptures(); }, 10_000);
   captureTick.unref?.();
+  // The one-time superseded-copy sweep's own clock; the split's front runs none.
+  const stopSupersededSweep = startSupersededSweepTicker({ active: () => !engineFront });
 
   // The privacy-safe sniffer's bounded background pass over pending items.
   const snifferEnv = tierSnifferServiceEnv(process.env);
@@ -6132,7 +6148,14 @@ export async function main(): Promise<void> {
       ...((process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID || process.env[ENGINE_BACKGROUND_INSTANCE_ENV])
         ? { instanceId: (process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID || process.env[ENGINE_BACKGROUND_INSTANCE_ENV])! } : {}),
       log: (line) => console.warn(line),
+      // The front's built-in model completions, tracked like this process's
+      // own answers so the judge steps aside for them on the one server.
+      ...(answerBuiltInModel ? { modelComplete: (request: AnalystModelRequest) => answerBuiltInModel.complete(request) } : {}),
       handlers: {
+        model_prepare: () => {
+          if (workerBuiltInModel) void workerBuiltInModel.model.prepare();
+          return { preparing: workerBuiltInModel !== undefined };
+        },
         // A config file the front wrote: re-read it and wake what it governs.
         reload: ({ target, corpora, frontPid }) => {
           // A model, judge or policy change: this process read them at boot, so
@@ -6303,6 +6326,7 @@ export async function main(): Promise<void> {
     desktopPollingClosed = true;
     if (desktopPoll) clearInterval(desktopPoll);
     clearInterval(captureTick);
+    stopSupersededSweep();
     stopCpuSampleLog?.();
     tierSniffer?.stop();
     localPacer.stop();

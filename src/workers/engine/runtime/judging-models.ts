@@ -20,7 +20,7 @@ import {
   WorkerBootSecretResolver,
 } from '../../credential-degradation.ts';
 import { type SnifferLane } from '../../classification/sniffer-lane.ts';
-import type { AnalystModel } from '../../../core/analyst.ts';
+import type { AnalystModel, AnalystModelCompletion, AnalystModelRequest } from '../../../core/analyst.ts';
 import { resolveSecretRefSync, bootSecretOptions } from './environment.ts';
 
 /**
@@ -57,12 +57,30 @@ export function stopBuiltInModelOnShutdown(model: Pick<BuiltInAnalystModel, 'sto
  * model service is down.
  */
 const BUILT_IN_MODEL_RETRY_MS = 10 * 60_000;
+// How often an install another process finished is verified again here.
+const BUILT_IN_MODEL_REVERIFY_MS = 30_000;
+
+/** How the engine split's front reaches the model the background holds. */
+export interface BackgroundBuiltInModel {
+  complete(request: AnalystModelRequest): Promise<AnalystModelCompletion>;
+  /** Ask the background to install or re-arm the model (a wake, no answer awaited). */
+  prepare(): void;
+}
 
 export function createWorkerSharedBuiltInModel(
   env: Record<string, string | undefined>,
+  background?: BackgroundBuiltInModel,
 ): { model: BuiltInAnalystModel; available: () => boolean; startIfIdle: () => void } | undefined {
   const base = createWorkerBuiltInAnalystModel(env);
   if (!base) return undefined;
+  return background ? frontBuiltInModel(base, background) : sharedBuiltInModel(base);
+}
+
+/** `createWorkerSharedBuiltInModel` around a given model (exported for tests). */
+export function sharedBuiltInModel(
+  base: BuiltInAnalystModel,
+  nowMs: () => number = Date.now,
+): { model: BuiltInAnalystModel; available: () => boolean; startIfIdle: () => void } {
   let prepared = false;
   const installedOnDisk = (): boolean => {
     try {
@@ -92,20 +110,92 @@ export function createWorkerSharedBuiltInModel(
   // to start is re-armed too, at most once per BUILT_IN_MODEL_RETRY_MS:
   // otherwise `failed` would keep the sniffer and the private panel off this
   // model until the engine restarts. A failed install is never re-run here.
+  // With the engine split, the front and the background share one models
+  // directory and one status file, and both can install the model at once.
+  // This process's prepare() can end while the other's install still reads
+  // downloading or verifying, so it stays unprepared after the status turns
+  // ready, and the judge waits forever on "not available (ready)" (switch-on
+  // release check, 2026-11-12). An install that reads ready here but was not
+  // prepared here is verified again, at most once per BUILT_IN_MODEL_REVERIFY_MS.
   let lastRetryMs = 0;
+  let lastReverifyMs = Number.NEGATIVE_INFINITY;
   const startIfIdle = (): void => {
     const status = base.status();
     if (status.state === 'not_started') {
       void model.prepare();
       return;
     }
+    if (!prepared && (status.state === 'ready' || status.state === 'loading')
+      && nowMs() - lastReverifyMs >= BUILT_IN_MODEL_REVERIFY_MS) {
+      lastReverifyMs = nowMs();
+      void model.prepare();
+      return;
+    }
     if (prepared && status.state === 'failed' && status.failure?.reason === 'runtime_load_failed'
-      && Date.now() - lastRetryMs >= BUILT_IN_MODEL_RETRY_MS) {
-      lastRetryMs = Date.now();
+      && nowMs() - lastRetryMs >= BUILT_IN_MODEL_RETRY_MS) {
+      lastRetryMs = nowMs();
       void model.prepare();
     }
   };
   return { model, available: () => prepared && installedOnDisk(), startIfIdle };
+}
+
+/**
+ * The engine split's front: one built-in model server per computer, held by
+ * the background. Two (the front answering, the background judging) ran at
+ * once on the switch-on Mac check, each too slow, and a private answer hit
+ * its deadline (2026-11-12); both also downloaded the model (#1471).
+ *
+ * The front's completions run in the background, where the judge sees them
+ * as answers and shares the one server slot. The front never downloads: a
+ * missing or failed install is the background's to start. It does verify an
+ * install the background finished, once, for the files other features here
+ * read (`installedRuntime`, the consult writer). Available means the shared
+ * status file reads loading or ready, as the background last wrote it.
+ * Exported for tests.
+ */
+export function frontBuiltInModel(
+  base: BuiltInAnalystModel,
+  background: BackgroundBuiltInModel,
+  nowMs: () => number = Date.now,
+): { model: BuiltInAnalystModel; available: () => boolean; startIfIdle: () => void } {
+  const installed = (): boolean => {
+    try {
+      const state = base.status().state;
+      return state === 'loading' || state === 'ready';
+    } catch {
+      return false;
+    }
+  };
+  let verified = false;
+  let lastVerifyMs = Number.NEGATIVE_INFINITY;
+  let lastAskMs = Number.NEGATIVE_INFINITY;
+  const verify = async (): Promise<void> => {
+    lastVerifyMs = nowMs();
+    await base.prepare();
+    verified = installed();
+  };
+  const model: BuiltInAnalystModel = {
+    ...base,
+    async prepare() {
+      if (installed()) await verify();
+      else background.prepare();
+    },
+    // The front never starts a model server, so it has none to stop.
+    async stop() {},
+    complete: (request) => background.complete(request),
+  };
+  if (installed()) void verify();
+  const startIfIdle = (): void => {
+    if (installed()) {
+      if (!verified && nowMs() - lastVerifyMs >= BUILT_IN_MODEL_REVERIFY_MS) void verify();
+      return;
+    }
+    if (nowMs() - lastAskMs < BUILT_IN_MODEL_REVERIFY_MS) return;
+    lastAskMs = nowMs();
+    background.prepare();
+  };
+  return { model, available: installed, startIfIdle };
 }
 
 /**

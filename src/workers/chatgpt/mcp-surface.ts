@@ -1,7 +1,7 @@
 import { answerModelRequiredResult } from '../answer-model-required.ts';
 import { appClientCopy, type McpAppClient } from '../../../connect-relay/shared/mcp-app-client.ts';
 import { createReleaseCapture, notePrivateQuestion, recordAppRequest, runWithReleaseCapture, sourceAnswerQuestion } from '../../core/app-release-capture.ts';
-import { createReleaseManifestSink, runWithReleaseManifestSink, answerReleaseWithheldReason, ANSWER_RELEASE_UNVERIFIED, withheldSourceAnswer } from '../../core/release-manifest.ts';
+import { createReleaseManifestSink, runWithReleaseManifestSink, answerReleaseWithheldReasonOffThread, ANSWER_RELEASE_UNVERIFIED, withheldSourceAnswer } from '../../core/release-manifest.ts';
 /**
  * The MCP surface ChatGPT reaches through the relay: Olympus's search and
  * answer tools, the dashboard tool and its MCP Apps resource, and the setup
@@ -452,7 +452,7 @@ export async function callChatGptTool(
   if (name === SEARCH_TOOL_NAME && Array.isArray(result.structuredContent?.evidence)
       && result.structuredContent.evidence.length > 0) {
     const reason = ctx.releaseCheck
-      ? answerReleaseWithheldReason(manifests.manifests, ctx.releaseCheck, 'personal')
+      ? await answerReleaseWithheldReasonOffThread(manifests.manifests, ctx.releaseCheck, 'personal')
       : ANSWER_RELEASE_UNVERIFIED;
     if (reason) return record(searchToolResult({ evidence: [], withheld: result.structuredContent.evidence.length, notes: [reason] }, { pendingPrivacyItems: ctx.pendingPrivacyItems?.() }), true);
   }
@@ -460,7 +460,7 @@ export async function callChatGptTool(
       && (result.structuredContent as { status?: string } | undefined)?.status === 'answered'
       && !(result.structuredContent && 'anonymous' in result.structuredContent)) {
     const reason = ctx.releaseCheck
-      ? answerReleaseWithheldReason(manifests.manifests, ctx.releaseCheck, 'personal')
+      ? await answerReleaseWithheldReasonOffThread(manifests.manifests, ctx.releaseCheck, 'personal')
       : ANSWER_RELEASE_UNVERIFIED;
     if (reason) return record(withPrivateAnswerOutcome(answerToolResult(withheldSourceAnswer(reason), { pendingPrivacyItems: ctx.pendingPrivacyItems?.() })), true);
   }

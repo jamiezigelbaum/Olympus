@@ -100,9 +100,14 @@ async function readPanel(driver: JourneyDriver): Promise<PanelArchives | undefin
   }
 }
 
-/** The row for a file, read again for a short while: the page may be redrawing. */
-/** The row as the page shows it once its counts are in: a row still "Counting…" is read again (the tally lands on the next refresh). */
-async function rowNow(host: ArchiveHost, driver: JourneyDriver, fileName: string, waitMs = 15_000): Promise<RowView | undefined> {
+/**
+ * The row as the page shows it once its counts are in: a row still "Counting…" is read again (the tally lands on the next refresh).
+ * The count is read off the request thread, so a busy machine can take longer than one refresh (run 43167272440 read the row before
+ * its tally landed), and the wait gives it several.
+ */
+const ROW_COUNTED_WAIT_MS = 45_000;
+
+async function rowNow(host: ArchiveHost, driver: JourneyDriver, fileName: string, waitMs = ROW_COUNTED_WAIT_MS): Promise<RowView | undefined> {
   let last: RowView | undefined;
   const counted = await until(host, async () => {
     last = rowNamed(await readPanel(driver), fileName) ?? last;
@@ -174,7 +179,7 @@ export async function importStage(host: ArchiveHost, args: ImportArgs): Promise<
         obs.settleMs = settle.ms;
         host.say(`${journey.id}: ${trace.ok ? 'ok' : 'FAILED'} (${Math.round(trace.ms / 1000)} s)`);
         // The row as the journey left it (See what was not read open, when the fixture has gaps).
-        obs.row = await rowNow(host, driver, fx.fileName, 15_000);
+        obs.row = await rowNow(host, driver, fx.fileName);
         const status = await statusNow(host, fx.token, 30_000);
         if (status) {
           obs.status = status;
@@ -247,7 +252,7 @@ export async function besideLiveStage(host: ArchiveHost, args: { format: string;
       obs.settled = settle.ok;
       obs.settleMs = settle.ms;
       host.say(`${journey.id}: ${trace.ok ? 'ok' : 'FAILED'} (${Math.round(trace.ms / 1000)} s)`);
-      obs.row = await rowNow(host, driver, fx.fileName, 15_000);
+      obs.row = await rowNow(host, driver, fx.fileName);
       // An imported record is held Private until the private model has judged it, so the search waits for that, within
       // the leg's own drain bound for this machine, as the agent path's import does before its search. No source keeps its
       // records Private wholesale: each record is judged by its content, so an ordinary one is cited.
@@ -333,7 +338,8 @@ async function searchFor(host: ArchiveHost, fx: LegFixture): Promise<SearchView>
     source: typeof entry?.source === 'string' ? entry.source : '',
     hasToken: [entry?.excerpt, entry?.title].some((field) => typeof field === 'string' && field.includes(fx.token)),
   }));
-  return { ok: answer.ok && !answer.isError, isError: answer.isError, evidence, ...(stillChecking ? { stillChecking } : {}), ...(answer.error ? { error: answer.error } : {}) };
+  const notes = Array.isArray(record.notes) ? record.notes.filter((note): note is string => typeof note === 'string') : [];
+  return { ok: answer.ok && !answer.isError, isError: answer.isError, evidence, ...(stillChecking ? { stillChecking } : {}), ...(notes.length > 0 ? { notes } : {}), ...(answer.error ? { error: answer.error } : {}) };
 }
 
 /** How long a search right after the drain may wait while the engine says it is still checking items. */

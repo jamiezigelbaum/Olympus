@@ -2339,7 +2339,7 @@ import { dirname as dirname30, isAbsolute as isAbsolute15 } from "node:path";
 // src/core/config.ts
 import { existsSync as existsSync8, readFileSync as readFileSync12 } from "node:fs";
 import { homedir as homedir7 } from "node:os";
-import { isAbsolute as isAbsolutePath2, join as join13, resolve as resolve6 } from "node:path";
+import { isAbsolute as isAbsolutePath2, join as join14, resolve as resolve6 } from "node:path";
 
 // src/core/owner-config-read.ts
 import { chmodSync, linkSync, readFileSync as readFileSync6, statSync as statSync2, lstatSync as lstatSync5 } from "node:fs";
@@ -2450,7 +2450,7 @@ function ownedByThisUser(stat2) {
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync as readFileSync9, rmSync as rmSync4, writeFileSync as writeFileSync3 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join as join10 } from "node:path";
+import { join as join11 } from "node:path";
 
 // src/workers/file-extraction/extractors/image-preparers.ts
 import { accessSync as accessSync2, constants as fsConstants, existsSync as existsSync4, readFileSync as readFileSync7, statSync as statSync3 } from "node:fs";
@@ -3058,6 +3058,248 @@ async function readBoundedText(response, limitBytes, controller, onReader) {
   }
 }
 
+// src/core/worker-transport.ts
+import { lstatSync as lstatSync6, mkdirSync as mkdirSync4, realpathSync as realpathSync3, chmodSync as chmodSync2 } from "node:fs";
+import { request as httpRequest } from "node:http";
+import { Readable } from "node:stream";
+import { dirname as dirname8, isAbsolute as isAbsolute6, join as join9, normalize, parse } from "node:path";
+function ownerId(options) {
+  const uid = options.uid ?? process.getuid?.();
+  if (uid === undefined)
+    throw new Error("Worker socket requires a Unix owner.");
+  return uid;
+}
+function validateDirectory(path, uid, privateMode) {
+  if (!isAbsolute6(path) || normalize(path) !== path || /[\x00-\x1f\x7f]/.test(path))
+    throw new Error("Unsafe worker socket directory.");
+  let current = parse(path).root;
+  for (const part of path.slice(current.length).split("/").filter(Boolean)) {
+    current = join9(current, part);
+    const stat3 = lstatSync6(current);
+    if (!stat3.isDirectory() || stat3.isSymbolicLink() || stat3.uid !== uid && stat3.uid !== 0)
+      throw new Error("Unsafe worker socket ancestor.");
+    if (stat3.mode & 18 && !(stat3.uid === 0 && stat3.mode & 512))
+      throw new Error("Writable worker socket ancestor.");
+  }
+  const stat2 = lstatSync6(path);
+  if (privateMode && (stat2.uid !== uid || (stat2.mode & 511) !== 448))
+    throw new Error("Worker runtime directory must be owner-owned and 0700.");
+  if (realpathSync3(path) !== path)
+    throw new Error("Worker socket directory must not contain symlinks.");
+}
+function workerSocketPath(options = {}) {
+  if ((options.platform ?? process.platform) !== "linux")
+    return;
+  const layout = resolveLinuxEngineLayout(options.env ?? process.env);
+  const runtime = layout.runtimeHome;
+  if (!runtime)
+    throw new Error("Linux requires an owner-owned 0700 XDG_RUNTIME_DIR from the user session.");
+  validateDirectory(runtime, ownerId(options), true);
+  if (!/^\/[A-Za-z0-9_./-]+$/.test(runtime))
+    throw new Error("XDG_RUNTIME_DIR must be a shell-safe absolute path for SSH socket forwarding.");
+  const path = layout.workerSocketPath;
+  if (Buffer.byteLength(path) > 107)
+    throw new Error("Worker Unix socket path exceeds the Linux limit.");
+  return path;
+}
+function validateWorkerSocketDirectory(options = {}) {
+  const path = workerSocketPath(options);
+  if (!path)
+    return;
+  validateDirectory(dirname8(path), ownerId(options), true);
+  return path;
+}
+function validateWorkerSocket(options = {}) {
+  const path = validateWorkerSocketDirectory(options);
+  if (!path)
+    return;
+  const uid = ownerId(options);
+  const stat2 = lstatSync6(path);
+  if (!stat2.isSocket() || stat2.uid !== uid || (stat2.mode & 511) !== 384)
+    throw new Error("Worker socket must be owner-owned and 0600.");
+  return path;
+}
+function createWorkerFetch(options = {}, fetchImpl = globalThis.fetch) {
+  if ((options.platform ?? process.platform) !== "linux")
+    return fetchImpl;
+  return (input, init) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (url.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) || url.username || url.password) {
+      throw new Error("Linux worker requests require a loopback HTTP origin over the owner socket.");
+    }
+    const unix = validateWorkerSocket(options);
+    if (typeof Bun === "undefined")
+      return nodeWorkerFetch(unix, input, init, options);
+    return fetchImpl(input, { ...init, unix, redirect: init?.redirect === "manual" ? "manual" : "error" });
+  };
+}
+async function nodeWorkerFetch(unix, input, init, options) {
+  const request = new Request(input, init);
+  const body = request.body ? Buffer.from(await request.arrayBuffer()) : undefined;
+  const url = new URL(request.url);
+  if (typeof options === "function")
+    options();
+  else
+    validateWorkerSocket(options);
+  return new Promise((resolve5, reject) => {
+    const outgoing = httpRequest(url, {
+      socketPath: unix,
+      method: request.method,
+      headers: Object.fromEntries(request.headers),
+      signal: request.signal,
+      agent: false
+    }, (incoming) => {
+      const status = incoming.statusCode ?? 500;
+      if (status >= 300 && status < 400 && init?.redirect !== "manual") {
+        incoming.destroy();
+        reject(new TypeError("Worker request redirect refused."));
+        return;
+      }
+      const headers = new Headers;
+      for (let i = 0;i < incoming.rawHeaders.length; i += 2)
+        headers.append(incoming.rawHeaders[i], incoming.rawHeaders[i + 1]);
+      const noBody = request.method === "HEAD" || [204, 205, 304].includes(status);
+      const response = new Response(noBody ? null : Readable.toWeb(incoming), {
+        status,
+        statusText: incoming.statusMessage ?? "",
+        headers
+      });
+      if (noBody)
+        incoming.resume();
+      Object.defineProperty(response, "url", { value: request.url });
+      resolve5(response);
+    });
+    outgoing.on("error", reject);
+    outgoing.end(body);
+  });
+}
+
+// src/core/engine-split.ts
+var ENGINE_ROLE_ENV = "OLYMPUS_WORKER_ENGINE_ROLE";
+function engineRoleFromEnv(env = process.env) {
+  const value = env[ENGINE_ROLE_ENV]?.trim();
+  if (!value)
+    return "single";
+  if (value === "background" || value === "front")
+    return value;
+  throw new Error(`${ENGINE_ROLE_ENV} must be background or front.`);
+}
+
+// src/workers/control-path-headroom.ts
+var CONTROL_PATH_SLICE_MS = 20;
+var CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200;
+var CONTROL_PATH_REST_MS = 25;
+var HEARTBEAT_MS = 50;
+var CONTROL_PATH_FREEZE_LOG_MS = 2000;
+function controlPathFreezeSubject(role) {
+  if (role === "front")
+    return "the front process could not answer requests";
+  if (role === "background")
+    return "the background process was blocked";
+  return "the worker could not answer requests";
+}
+function roleFromEnv() {
+  try {
+    return engineRoleFromEnv();
+  } catch {
+    return "single";
+  }
+}
+
+class ControlPathHeadroom {
+  sliceMs;
+  lagRestThresholdMs;
+  restMs;
+  now;
+  turn;
+  lastTurnAt;
+  pendingTurn;
+  lastLagMs = 0;
+  heartbeat;
+  expectedBeatAt = 0;
+  turns = 0;
+  rests = 0;
+  freezes = 0;
+  active = new Map;
+  log;
+  freezeLogMs;
+  freezeSubject;
+  constructor(options = {}) {
+    this.sliceMs = options.sliceMs ?? CONTROL_PATH_SLICE_MS;
+    this.lagRestThresholdMs = options.lagRestThresholdMs ?? CONTROL_PATH_LAG_REST_THRESHOLD_MS;
+    this.restMs = options.restMs ?? CONTROL_PATH_REST_MS;
+    this.now = options.now ?? (() => performance.now());
+    this.turn = options.turn ?? ((ms) => new Promise((resolve5) => {
+      setTimeout(resolve5, ms);
+    }));
+    this.log = options.log ?? ((line) => console.error(line));
+    this.freezeLogMs = options.freezeLogMs ?? CONTROL_PATH_FREEZE_LOG_MS;
+    this.freezeSubject = controlPathFreezeSubject(options.role ?? roleFromEnv());
+    this.lastTurnAt = this.now();
+  }
+  enter(label) {
+    this.ensureHeartbeat();
+    this.active.set(label, (this.active.get(label) ?? 0) + 1);
+    let left = false;
+    return () => {
+      if (left)
+        return;
+      left = true;
+      const count = (this.active.get(label) ?? 1) - 1;
+      if (count <= 0)
+        this.active.delete(label);
+      else
+        this.active.set(label, count);
+    };
+  }
+  ingestionTurn() {
+    this.ensureHeartbeat();
+    if (this.pendingTurn)
+      return this.pendingTurn;
+    const now = this.now();
+    if (now - this.lastTurnAt < this.sliceMs)
+      return;
+    const rest = this.lastLagMs >= this.lagRestThresholdMs;
+    if (rest)
+      this.rests += 1;
+    this.turns += 1;
+    const pending = this.turn(rest ? this.restMs : 0).then(() => {
+      this.pendingTurn = undefined;
+      this.lastTurnAt = this.now();
+    });
+    this.pendingTurn = pending;
+    return pending;
+  }
+  snapshot() {
+    return { turns: this.turns, rests: this.rests, freezes: this.freezes, lagMs: Math.round(this.lastLagMs) };
+  }
+  stop() {
+    if (this.heartbeat)
+      clearInterval(this.heartbeat);
+    this.heartbeat = undefined;
+  }
+  ensureHeartbeat() {
+    if (this.heartbeat)
+      return;
+    this.expectedBeatAt = this.now() + HEARTBEAT_MS;
+    this.heartbeat = setInterval(() => {
+      const now = this.now();
+      this.lastLagMs = Math.max(0, now - this.expectedBeatAt);
+      this.expectedBeatAt = now + HEARTBEAT_MS;
+      if (this.lastLagMs >= this.freezeLogMs) {
+        this.freezes += 1;
+        const running = [...this.active.keys()].sort().join(",") || "none";
+        this.log(`${new Date().toISOString()} [olympus:control-path] ${this.freezeSubject} for ${Math.round(this.lastLagMs)} ms; background work running: ${running}`);
+      }
+    }, HEARTBEAT_MS);
+    this.heartbeat.unref?.();
+  }
+}
+var controlPathHeadroom = new ControlPathHeadroom;
+function ingestionTurn() {
+  return controlPathHeadroom.ingestionTurn();
+}
+
 // src/workers/source-index/pinned-download.ts
 import { closeSync as closeSync4, createReadStream, existsSync as existsSync5, openSync as openSync4, renameSync as renameSync2, rmSync as rmSync2, statSync as statSync4, writeSync } from "node:fs";
 var REQUEST_BYTES = 256 * 1024 ** 2;
@@ -3174,6 +3416,9 @@ async function downloadPinnedFile(options) {
           hash.update(part.value);
           received += part.value.byteLength;
           options.onProgress(part.value.byteLength);
+          const turn = (options.turn ?? ingestionTurn)();
+          if (turn)
+            await turn;
         }
         if (received !== responseEnd + 1)
           throw mismatch(`${url} did not match its pinned size; nothing was installed.`);
@@ -3243,7 +3488,7 @@ import {
   closeSync as closeSync5,
   createReadStream as createReadStream2,
   existsSync as existsSync6,
-  mkdirSync as mkdirSync4,
+  mkdirSync as mkdirSync5,
   openSync as openSync5,
   readFileSync as readFileSync8,
   renameSync as renameSync3,
@@ -3252,7 +3497,7 @@ import {
   writeFileSync as writeFileSync2,
   writeSync as writeSync2
 } from "node:fs";
-import { basename as basename2, dirname as dirname8, isAbsolute as isAbsolute6, join as join9 } from "node:path";
+import { basename as basename2, dirname as dirname9, isAbsolute as isAbsolute7, join as join10 } from "node:path";
 
 // src/workers/source-index/built-in-embedding/manifest.ts
 var ARCTIC_M_REVISION = "e58a8f756156a1293d763f17e3aae643474e9b8a";
@@ -3497,23 +3742,23 @@ class BuiltInEmbeddingInstallError extends Error {
 function builtInEmbeddingPaths(env = process.env, model = BUILT_IN_EMBEDDING_MODEL, runtime = ONNX_RUNTIME_PACK, platform = currentPlatform(), liteRtRuntime = LITERT_RUNTIME_PACK) {
   const configured = env[BUILT_IN_EMBEDDING_DIR_ENV]?.trim();
   const root = configured || sharedDataPath("built-in-embedding", env);
-  if (!isAbsolute6(root))
+  if (!isAbsolute7(root))
     throw new TypeError("The built-in embedding directory must be an absolute path.");
   return {
     root,
-    modelDir: join9(root, model.modelId),
-    runtimeDir: model.runtime === "litert" ? join9(root, `litert-lm-${liteRtRuntime.version}-${platform}`) : join9(root, `onnxruntime-${runtime.version}-${platform}`),
-    statusPath: join9(root, "status.json"),
-    lockPath: join9(root, "install.lock")
+    modelDir: join10(root, model.modelId),
+    runtimeDir: model.runtime === "litert" ? join10(root, `litert-lm-${liteRtRuntime.version}-${platform}`) : join10(root, `onnxruntime-${runtime.version}-${platform}`),
+    statusPath: join10(root, "status.json"),
+    lockPath: join10(root, "install.lock")
   };
 }
 function installedBuiltInEmbedding(paths, model = BUILT_IN_EMBEDDING_MODEL, platform = currentPlatform(), liteRtRuntime = LITERT_RUNTIME_PACK) {
   const liteRt = model.runtime === "litert" ? liteRtRuntime.platforms[platform] : undefined;
   return {
-    modelPath: join9(paths.modelDir, model.model.name),
-    ...model.vocabulary ? { vocabularyPath: join9(paths.modelDir, model.vocabulary.name) } : {},
+    modelPath: join10(paths.modelDir, model.model.name),
+    ...model.vocabulary ? { vocabularyPath: join10(paths.modelDir, model.vocabulary.name) } : {},
     runtimeDir: paths.runtimeDir,
-    ...liteRt ? { libraryPath: join9(paths.runtimeDir, basename2(liteRt.library)) } : {}
+    ...liteRt ? { libraryPath: join10(paths.runtimeDir, basename2(liteRt.library)) } : {}
   };
 }
 function currentPlatform() {
@@ -3540,7 +3785,7 @@ function readBuiltInEmbeddingVision(env = process.env, model = BUILT_IN_EMBEDDIN
   if (!model.vision)
     return "unknown";
   try {
-    const parsed = JSON.parse(readFileSync8(join9(builtInEmbeddingPaths(env, model).root, "vision.json"), "utf8"));
+    const parsed = JSON.parse(readFileSync8(join10(builtInEmbeddingPaths(env, model).root, "vision.json"), "utf8"));
     if (parsed.modelId !== model.modelId || typeof parsed.vision !== "boolean")
       return "unknown";
     return parsed.vision ? "ready" : "unavailable";
@@ -3555,8 +3800,8 @@ function reportBuiltInEmbeddingVision(vision, options = {}) {
   let temporary;
   try {
     const root = builtInEmbeddingPaths(options.env, model).root;
-    mkdirSync4(root, { recursive: true, mode: 448 });
-    const path = join9(root, "vision.json");
+    mkdirSync5(root, { recursive: true, mode: 448 });
+    const path = join10(root, "vision.json");
     temporary = `${path}.${process.pid}.tmp`;
     writeFileSync2(temporary, `${JSON.stringify({
       modelId: model.modelId,
@@ -3596,14 +3841,14 @@ async function installBuiltInEmbedding(options = {}) {
       const fetchImpl = options.fetchImpl ?? fetch;
       const stallMs = options.downloadStallMs ?? DOWNLOAD_STALL_MS;
       const pending = [
-        ...modelFiles.filter((file) => !existsSync6(join9(paths.modelDir, file.name)))
+        ...modelFiles.filter((file) => !existsSync6(join10(paths.modelDir, file.name)))
       ];
       const pendingPackages = runtimePackages.length > 0 && !runtimeInstalled(paths.runtimeDir, runtimePackages) ? runtimePackages : [];
       const bytesTotal = pending.reduce((sum, file) => sum + file.bytes, 0) + pendingPackages.reduce((sum, pack) => sum + pack.bytes, 0);
       reporter.begin(bytesTotal);
       ensureDirectory(paths.modelDir);
       for (const file of pending) {
-        await downloadVerified(fetchImpl, file.url, join9(paths.modelDir, file.name), file.bytes, {
+        await downloadVerified(fetchImpl, file.url, join10(paths.modelDir, file.name), file.bytes, {
           kind: "sha256",
           expected: file.sha256
         }, reporter, labelFor(file), stallMs);
@@ -3636,19 +3881,19 @@ async function installLiteRt(options, model, paths, platform, reporter, installe
     if (wantsRuntime && liteRtInstalled(paths.runtimeDir, wheel) && !await liteRtLibraryIntact(paths.runtimeDir, wheel)) {
       rmSync3(paths.runtimeDir, { recursive: true, force: true });
     }
-    const complete = () => modelFiles.every((file) => existsSync6(join9(paths.modelDir, file.name))) && (!wantsRuntime || liteRtInstalled(paths.runtimeDir, wheel));
+    const complete = () => modelFiles.every((file) => existsSync6(join10(paths.modelDir, file.name))) && (!wantsRuntime || liteRtInstalled(paths.runtimeDir, wheel));
     if (!complete()) {
       await withInstallLock(paths.lockPath, options.lockWaitMs ?? STALE_LOCK_MS, async () => {
         if (complete())
           return;
         const fetchImpl = options.fetchImpl ?? fetch;
         const stallMs = options.downloadStallMs ?? DOWNLOAD_STALL_MS;
-        const pending = modelFiles.filter((file) => !existsSync6(join9(paths.modelDir, file.name)));
+        const pending = modelFiles.filter((file) => !existsSync6(join10(paths.modelDir, file.name)));
         const runtimePending = wantsRuntime && !liteRtInstalled(paths.runtimeDir, wheel);
         reporter.begin(pending.reduce((sum, file) => sum + file.bytes, 0) + (runtimePending ? wheel.bytes : 0));
         ensureDirectory(paths.modelDir);
         for (const file of pending) {
-          await downloadVerified(fetchImpl, file.url, join9(paths.modelDir, file.name), file.bytes, {
+          await downloadVerified(fetchImpl, file.url, join10(paths.modelDir, file.name), file.bytes, {
             kind: "sha256",
             expected: file.sha256
           }, reporter, "Downloading the built-in search model", stallMs);
@@ -3670,24 +3915,24 @@ async function installLiteRt(options, model, paths, platform, reporter, installe
 }
 function readLiteRtMarker(runtimeDir) {
   try {
-    return JSON.parse(readFileSync8(join9(runtimeDir, RUNTIME_MARKER), "utf8"));
+    return JSON.parse(readFileSync8(join10(runtimeDir, RUNTIME_MARKER), "utf8"));
   } catch {
     return;
   }
 }
 function liteRtInstalled(runtimeDir, wheel) {
   const marker = readLiteRtMarker(runtimeDir);
-  return marker?.sha256 === wheel.sha256 && /^[0-9a-f]{64}$/.test(marker.librarySha256 ?? "") && existsSync6(join9(runtimeDir, basename2(wheel.library)));
+  return marker?.sha256 === wheel.sha256 && /^[0-9a-f]{64}$/.test(marker.librarySha256 ?? "") && existsSync6(join10(runtimeDir, basename2(wheel.library)));
 }
 async function liteRtLibraryIntact(runtimeDir, wheel) {
   const expected = readLiteRtMarker(runtimeDir)?.librarySha256;
-  return expected !== undefined && await sha256File(join9(runtimeDir, basename2(wheel.library))) === expected;
+  return expected !== undefined && await sha256File(join10(runtimeDir, basename2(wheel.library))) === expected;
 }
 async function installLiteRtRuntime(fetchImpl, runtimeDir, wheel, reporter, stallMs) {
   const staging = `${runtimeDir}.staging-${randomUUID3()}`;
   ensureDirectory(staging);
   try {
-    const archivePath = join9(staging, wheel.name);
+    const archivePath = join10(staging, wheel.name);
     await downloadVerified(fetchImpl, wheel.url, archivePath, wheel.bytes, {
       kind: "sha256",
       expected: wheel.sha256
@@ -3696,14 +3941,14 @@ async function installLiteRtRuntime(fetchImpl, runtimeDir, wheel, reporter, stal
     const library = readZipEntry(readFileSync8(archivePath), wheel.library);
     if (!library)
       throw new BuiltInEmbeddingInstallError("runtime_load_failed", `${wheel.name} has no ${wheel.library}.`);
-    writeFileSync2(join9(staging, basename2(wheel.library)), library, { mode: 493 });
+    writeFileSync2(join10(staging, basename2(wheel.library)), library, { mode: 493 });
     rmSync3(archivePath, { force: true });
     const marker = {
       wheel: wheel.name,
       sha256: wheel.sha256,
       librarySha256: createHash2("sha256").update(library).digest("hex")
     };
-    writeFileSync2(join9(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
+    writeFileSync2(join10(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
 `);
     rmSync3(runtimeDir, { recursive: true, force: true });
     renameSync3(staging, runtimeDir);
@@ -3725,12 +3970,12 @@ function labelFor(file) {
   return file.name.endsWith(".onnx") ? "Downloading the built-in search model" : "Downloading the model vocabulary";
 }
 function installComplete(paths, modelFiles, runtimePackages) {
-  return modelFiles.every((file) => existsSync6(join9(paths.modelDir, file.name))) && (runtimePackages.length === 0 || runtimeInstalled(paths.runtimeDir, runtimePackages));
+  return modelFiles.every((file) => existsSync6(join10(paths.modelDir, file.name))) && (runtimePackages.length === 0 || runtimeInstalled(paths.runtimeDir, runtimePackages));
 }
 var verifiedThisProcess;
 async function verifyModelFiles(dir, files, reporter) {
   for (const file of files) {
-    const path = join9(dir, file.name);
+    const path = join10(dir, file.name);
     const key = `${path}:${file.sha256}`;
     verifiedThisProcess ??= new Set;
     if (verifiedThisProcess.has(key))
@@ -3748,7 +3993,7 @@ async function verifyModelFiles(dir, files, reporter) {
 var RUNTIME_MARKER = "olympus-runtime.json";
 function runtimeInstalled(runtimeDir, packages) {
   try {
-    const marker = JSON.parse(readFileSync8(join9(runtimeDir, RUNTIME_MARKER), "utf8"));
+    const marker = JSON.parse(readFileSync8(join10(runtimeDir, RUNTIME_MARKER), "utf8"));
     return packages.every((pack) => marker.packages.some((entry) => entry.name === pack.name && entry.integrity === pack.integrity));
   } catch {
     return false;
@@ -3759,7 +4004,7 @@ async function installRuntime(fetchImpl, runtimeDir, packages, platform, reporte
   ensureDirectory(staging);
   try {
     for (const pack of packages) {
-      const archivePath = join9(staging, `${pack.name}.tgz`);
+      const archivePath = join10(staging, `${pack.name}.tgz`);
       await downloadVerified(fetchImpl, pack.url, archivePath, pack.bytes, {
         kind: "integrity",
         expected: pack.integrity
@@ -3771,8 +4016,8 @@ async function installRuntime(fetchImpl, runtimeDir, packages, platform, reporte
         throw new BuiltInEmbeddingInstallError("runtime_load_failed", `${pack.name} had no files for ${platform}.`);
       }
       for (const file of files) {
-        const target = join9(staging, "node_modules", pack.name, file.path.replace(/^package\//, ""));
-        ensureDirectory(dirname8(target));
+        const target = join10(staging, "node_modules", pack.name, file.path.replace(/^package\//, ""));
+        ensureDirectory(dirname9(target));
         writeFileSync2(target, file.data, { mode: file.mode & 493 || 420 });
       }
       rmSync3(archivePath, { force: true });
@@ -3780,7 +4025,7 @@ async function installRuntime(fetchImpl, runtimeDir, packages, platform, reporte
     const marker = {
       packages: packages.map((pack) => ({ name: pack.name, integrity: pack.integrity }))
     };
-    writeFileSync2(join9(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
+    writeFileSync2(join10(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
 `);
     rmSync3(runtimeDir, { recursive: true, force: true });
     renameSync3(staging, runtimeDir);
@@ -3901,7 +4146,7 @@ function lockIsStale(lockPath) {
 }
 function ensureDirectory(path) {
   try {
-    mkdirSync4(path, { recursive: true, mode: 448 });
+    mkdirSync5(path, { recursive: true, mode: 448 });
   } catch (error) {
     throw new BuiltInEmbeddingInstallError("disk_write_failed", `Could not create ${path}: ${String(error)}`);
   }
@@ -3972,7 +4217,7 @@ class ProgressReporter {
       return;
     this.lastWriteMs = nowMs;
     try {
-      mkdirSync4(dirname8(this.statusPath), { recursive: true, mode: 448 });
+      mkdirSync5(dirname9(this.statusPath), { recursive: true, mode: 448 });
       const temporary = `${this.statusPath}.${process.pid}.tmp`;
       writeFileSync2(temporary, `${JSON.stringify(this.status)}
 `, { mode: 384 });
@@ -4023,10 +4268,10 @@ function probeStillImageReadiness(options = {}) {
   const decoded = {};
   let directory;
   try {
-    directory = mkdtempSync(join10(tmpdir(), "olympus-image-probe-"));
+    directory = mkdtempSync(join11(tmpdir(), "olympus-image-probe-"));
     for (const format of STILL_IMAGE_FORMATS) {
-      const inputPath = join10(directory, `probe-${format}${stillImageFileExtension(format)}`);
-      const outputPath = join10(directory, `probe-${format}.jpg`);
+      const inputPath = join11(directory, `probe-${format}${stillImageFileExtension(format)}`);
+      const outputPath = join11(directory, `probe-${format}.jpg`);
       try {
         writeFileSync3(inputPath, Buffer.from(fixtures[format], "base64"), { mode: 384 });
         const result = run(preparer.command, preparer.decodeArgs(inputPath, outputPath), timeoutMs);
@@ -4764,13 +5009,13 @@ except Exception as error:
 // src/core/secret-store.ts
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
-import { existsSync as existsSync7, mkdirSync as mkdirSync5, readFileSync as readFileSync11 } from "node:fs";
+import { existsSync as existsSync7, mkdirSync as mkdirSync6, readFileSync as readFileSync11 } from "node:fs";
 import { homedir as homedir6, platform } from "node:os";
-import { dirname as dirname10, join as join12 } from "node:path";
+import { dirname as dirname11, join as join13 } from "node:path";
 
 // src/core/linux-secret-backend.ts
-import { lstatSync as lstatSync6, readFileSync as readFileSync10 } from "node:fs";
-import { dirname as dirname9, isAbsolute as isAbsolute7, join as join11, resolve as resolve5 } from "node:path";
+import { lstatSync as lstatSync7, readFileSync as readFileSync10 } from "node:fs";
+import { dirname as dirname10, isAbsolute as isAbsolute8, join as join12, resolve as resolve5 } from "node:path";
 class SecretStoreError extends Error {
   code;
   constructor(code, message2) {
@@ -4799,11 +5044,11 @@ function resolveLinuxSecretPaths(env, paths = {}) {
   const encryptedFilePath = paths.encryptedFilePath ?? layout.secretsPath;
   const result = {
     encryptedFilePath,
-    keyFilePath: paths.keyFilePath ?? join11(dirname9(encryptedFilePath), "secrets.key"),
-    backendFilePath: paths.backendFilePath ?? join11(dirname9(encryptedFilePath), "secret-backend.json")
+    keyFilePath: paths.keyFilePath ?? join12(dirname10(encryptedFilePath), "secrets.key"),
+    backendFilePath: paths.backendFilePath ?? join12(dirname10(encryptedFilePath), "secret-backend.json")
   };
   for (const path of Object.values(result)) {
-    if (!isAbsolute7(path) || /[\0\r\n]/.test(path))
+    if (!isAbsolute8(path) || /[\0\r\n]/.test(path))
       throw new SecretStoreError("configuration", "secret paths must be absolute.");
   }
   if (new Set(Object.values(result).map((path) => resolve5(path))).size !== 3) {
@@ -4826,7 +5071,7 @@ function assertLinuxSecretPath(path) {
   let privateParent = false;
   while (true) {
     try {
-      const stat2 = lstatSync6(current2);
+      const stat2 = lstatSync7(current2);
       if (stat2.isSymbolicLink() || (leaf ? !stat2.isFile() : !stat2.isDirectory())) {
         throw new SecretStoreError("permission", "managed paths must be real files and directories.");
       }
@@ -4842,7 +5087,7 @@ function assertLinuxSecretPath(path) {
       if (error.code !== "ENOENT")
         throw secretStoreFailure(error);
     }
-    const parent = dirname9(current2);
+    const parent = dirname10(current2);
     if (parent === current2)
       break;
     privateParent = leaf;
@@ -4856,7 +5101,7 @@ function selectLinuxSecretBackend(paths, requested) {
       throw new SecretStoreError("configuration", "unsupported Linux backend.");
     for (const path of Object.values(paths))
       assertLinuxSecretPath(path);
-    ensurePrivateRootDirectorySync(dirname9(paths.backendFilePath));
+    ensurePrivateRootDirectorySync(dirname10(paths.backendFilePath));
     return withFileLeaseSync(paths.backendFilePath, (lease) => {
       for (const path of Object.values(paths))
         assertLinuxSecretPath(path);
@@ -4897,13 +5142,13 @@ var STORE_VERSION = 1;
 function defaultOlympusConfigDir(env = process.env, targetPlatform = process.platform) {
   if (targetPlatform === "linux")
     return resolveLinuxEngineLayout(env).configDir;
-  return join12(homedir6(), ".config", "olympus");
+  return join13(homedir6(), ".config", "olympus");
 }
 function defaultEncryptedSecretsPath() {
-  return join12(defaultOlympusConfigDir(), "secrets.enc");
+  return join13(defaultOlympusConfigDir(), "secrets.enc");
 }
 function defaultEncryptedSecretsKeyPath() {
-  return join12(defaultOlympusConfigDir(), "secrets.key");
+  return join13(defaultOlympusConfigDir(), "secrets.key");
 }
 function normalizeSecretRef(ref) {
   const trimmed = ref.trim();
@@ -5070,7 +5315,7 @@ class EncryptedFileSecretStore {
         tag: cipher.getAuthTag().toString("base64"),
         ciphertext: ciphertext.toString("base64")
       };
-      mkdirSync5(dirname10(this.encryptedFilePath), { recursive: true, mode: 448 });
+      mkdirSync6(dirname11(this.encryptedFilePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.encryptedFilePath, JSON.stringify(encrypted, null, 2));
     } finally {
       key.fill(0);
@@ -5104,7 +5349,7 @@ class EncryptedFileSecretStore {
     if (this.strictLinux && readSecretFile(this.keyFilePath) === undefined && readSecretFile(this.encryptedFilePath) !== undefined) {
       throw new SecretStoreError("corrupt", "wrapping key is lost; restore the original key. No replacement was generated.");
     }
-    mkdirSync5(dirname10(this.keyFilePath), { recursive: true, mode: 448 });
+    mkdirSync6(dirname11(this.keyFilePath), { recursive: true, mode: 448 });
     if (!existsSync7(this.keyFilePath)) {
       writePrivateFileAtomicSync(this.keyFilePath, randomBytes(32).toString("base64"));
     }
@@ -5493,7 +5738,7 @@ function loadConfig(env = process.env, options = {}) {
     return config2;
   }
   const config = defaultConfig();
-  const configPath = env.OLYMPUS_CONFIG ?? join13(env.HOME?.trim() || homedir7(), ".olympus", "config.json");
+  const configPath = env.OLYMPUS_CONFIG ?? join14(env.HOME?.trim() || homedir7(), ".olympus", "config.json");
   if (existsSync8(configPath)) {
     const raw = JSON.parse(readFileSync12(configPath, "utf8"));
     mergeConfig(config, raw);
@@ -5509,8 +5754,8 @@ function installedEngineConfig(env) {
   const receipt = layout ? readLinuxEngineReceipt(layout.receiptPath) : undefined;
   if (receipt && receipt.installationState !== "installed")
     return;
-  const enginePath = receipt ? layout.configPath : join13(home, ".olympus", "engine.json");
-  const agentPath = receipt ? layout.unitPath : join13(home, "Library", "LaunchAgents", "ai.olympusplugin.engine.plist");
+  const enginePath = receipt ? layout.configPath : join14(home, ".olympus", "engine.json");
+  const agentPath = receipt ? layout.unitPath : join14(home, "Library", "LaunchAgents", "ai.olympusplugin.engine.plist");
   if (env.OLYMPUS_ENGINE_HOST !== "1" && !existsSync8(agentPath))
     return;
   if (!existsSync8(enginePath))
@@ -6446,10 +6691,10 @@ function asRecord5(value) {
 }
 
 // src/core/data-owner-lock.ts
-import { closeSync as closeSync6, constants as constants3, existsSync as existsSync9, mkdirSync as mkdirSync6, openSync as openSync6 } from "node:fs";
+import { closeSync as closeSync6, constants as constants3, existsSync as existsSync9, mkdirSync as mkdirSync7, openSync as openSync6 } from "node:fs";
 import { createRequire as createRequire4 } from "node:module";
 import { constants as osConstants } from "node:os";
-import { dirname as dirname11 } from "node:path";
+import { dirname as dirname12 } from "node:path";
 var runtimeRequire2 = createRequire4(import.meta.url);
 var LOCK_EX = 2;
 var LOCK_NB = 4;
@@ -6472,8 +6717,8 @@ function dataOwnerLockPath(env = process.env) {
 function holdDataOwnerLock(env = process.env, options = {}) {
   const lockPath = dataOwnerLockPath(env);
   const deadline = Date.now() + Math.max(0, options.waitMs ?? 0);
-  if (!existsSync9(dirname11(lockPath)))
-    mkdirSync6(dirname11(lockPath), { recursive: true, mode: 448 });
+  if (!existsSync9(dirname12(lockPath)))
+    mkdirSync7(dirname12(lockPath), { recursive: true, mode: 448 });
   while (true) {
     const fd = tryFlock(lockPath);
     if (fd !== undefined) {
@@ -6556,7 +6801,7 @@ function isPromiseLike(value) {
 // src/core/worker-auth.ts
 import { readFileSync as readFileSync13, statSync as statSync6 } from "node:fs";
 import { homedir as homedir8 } from "node:os";
-import { join as join14 } from "node:path";
+import { join as join15 } from "node:path";
 function workerAuthTokenFromConfig(config, options = {}) {
   if (config.worker.authTokenSecretRefUnresolved)
     return;
@@ -6593,7 +6838,7 @@ function workerSetupEnvPath(options = {}) {
     return options.workerEnvPath;
   if (process.platform === "linux")
     return resolveLinuxEngineLayout({ ...env, HOME: options.homeDir ?? env.HOME }).workerEnvPath;
-  return join14(options.homeDir ?? optionalToken(env.HOME) ?? homedir8(), ".config", "olympus", "worker.env");
+  return join15(options.homeDir ?? optionalToken(env.HOME) ?? homedir8(), ".config", "olympus", "worker.env");
 }
 function isWorkerAuthTokenPlaceholder(value) {
   const normalized = value?.trim().toLowerCase();
@@ -6627,122 +6872,6 @@ function unquoteEnvValue(value) {
     return trimmed.slice(1, -1);
   }
   return trimmed;
-}
-
-// src/core/worker-transport.ts
-import { lstatSync as lstatSync7, mkdirSync as mkdirSync7, realpathSync as realpathSync3, chmodSync as chmodSync2 } from "node:fs";
-import { request as httpRequest } from "node:http";
-import { Readable } from "node:stream";
-import { dirname as dirname12, isAbsolute as isAbsolute8, join as join15, normalize, parse } from "node:path";
-function ownerId(options) {
-  const uid = options.uid ?? process.getuid?.();
-  if (uid === undefined)
-    throw new Error("Worker socket requires a Unix owner.");
-  return uid;
-}
-function validateDirectory(path, uid, privateMode) {
-  if (!isAbsolute8(path) || normalize(path) !== path || /[\x00-\x1f\x7f]/.test(path))
-    throw new Error("Unsafe worker socket directory.");
-  let current2 = parse(path).root;
-  for (const part of path.slice(current2.length).split("/").filter(Boolean)) {
-    current2 = join15(current2, part);
-    const stat3 = lstatSync7(current2);
-    if (!stat3.isDirectory() || stat3.isSymbolicLink() || stat3.uid !== uid && stat3.uid !== 0)
-      throw new Error("Unsafe worker socket ancestor.");
-    if (stat3.mode & 18 && !(stat3.uid === 0 && stat3.mode & 512))
-      throw new Error("Writable worker socket ancestor.");
-  }
-  const stat2 = lstatSync7(path);
-  if (privateMode && (stat2.uid !== uid || (stat2.mode & 511) !== 448))
-    throw new Error("Worker runtime directory must be owner-owned and 0700.");
-  if (realpathSync3(path) !== path)
-    throw new Error("Worker socket directory must not contain symlinks.");
-}
-function workerSocketPath(options = {}) {
-  if ((options.platform ?? process.platform) !== "linux")
-    return;
-  const layout = resolveLinuxEngineLayout(options.env ?? process.env);
-  const runtime = layout.runtimeHome;
-  if (!runtime)
-    throw new Error("Linux requires an owner-owned 0700 XDG_RUNTIME_DIR from the user session.");
-  validateDirectory(runtime, ownerId(options), true);
-  if (!/^\/[A-Za-z0-9_./-]+$/.test(runtime))
-    throw new Error("XDG_RUNTIME_DIR must be a shell-safe absolute path for SSH socket forwarding.");
-  const path = layout.workerSocketPath;
-  if (Buffer.byteLength(path) > 107)
-    throw new Error("Worker Unix socket path exceeds the Linux limit.");
-  return path;
-}
-function validateWorkerSocketDirectory(options = {}) {
-  const path = workerSocketPath(options);
-  if (!path)
-    return;
-  validateDirectory(dirname12(path), ownerId(options), true);
-  return path;
-}
-function validateWorkerSocket(options = {}) {
-  const path = validateWorkerSocketDirectory(options);
-  if (!path)
-    return;
-  const uid = ownerId(options);
-  const stat2 = lstatSync7(path);
-  if (!stat2.isSocket() || stat2.uid !== uid || (stat2.mode & 511) !== 384)
-    throw new Error("Worker socket must be owner-owned and 0600.");
-  return path;
-}
-function createWorkerFetch(options = {}, fetchImpl = globalThis.fetch) {
-  if ((options.platform ?? process.platform) !== "linux")
-    return fetchImpl;
-  return (input, init) => {
-    const url = new URL(input instanceof Request ? input.url : String(input));
-    if (url.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) || url.username || url.password) {
-      throw new Error("Linux worker requests require a loopback HTTP origin over the owner socket.");
-    }
-    const unix = validateWorkerSocket(options);
-    if (typeof Bun === "undefined")
-      return nodeWorkerFetch(unix, input, init, options);
-    return fetchImpl(input, { ...init, unix, redirect: init?.redirect === "manual" ? "manual" : "error" });
-  };
-}
-async function nodeWorkerFetch(unix, input, init, options) {
-  const request = new Request(input, init);
-  const body = request.body ? Buffer.from(await request.arrayBuffer()) : undefined;
-  const url = new URL(request.url);
-  if (typeof options === "function")
-    options();
-  else
-    validateWorkerSocket(options);
-  return new Promise((resolve7, reject) => {
-    const outgoing = httpRequest(url, {
-      socketPath: unix,
-      method: request.method,
-      headers: Object.fromEntries(request.headers),
-      signal: request.signal,
-      agent: false
-    }, (incoming) => {
-      const status = incoming.statusCode ?? 500;
-      if (status >= 300 && status < 400 && init?.redirect !== "manual") {
-        incoming.destroy();
-        reject(new TypeError("Worker request redirect refused."));
-        return;
-      }
-      const headers = new Headers;
-      for (let i = 0;i < incoming.rawHeaders.length; i += 2)
-        headers.append(incoming.rawHeaders[i], incoming.rawHeaders[i + 1]);
-      const noBody = request.method === "HEAD" || [204, 205, 304].includes(status);
-      const response = new Response(noBody ? null : Readable.toWeb(incoming), {
-        status,
-        statusText: incoming.statusMessage ?? "",
-        headers
-      });
-      if (noBody)
-        incoming.resume();
-      Object.defineProperty(response, "url", { value: request.url });
-      resolve7(response);
-    });
-    outgoing.on("error", reject);
-    outgoing.end(body);
-  });
 }
 
 // src/core/zkapi-consult-settings.ts
@@ -9239,6 +9368,16 @@ function compactPassageWhitespace(text2) {
 
 // src/core/source-index/partial-search.ts
 var SEMANTIC_TIMEOUT_REASONS = new Set(["vector_scan_deadline_exceeded", "vector_scan_store_busy"]);
+var RECENT_ITEMS_CUT_SHORT = "recent_items_cut_short";
+var RECENT_PREFIX = "Ran out of time reading the newest items in ";
+function recentItemsTimeoutGap(corpusId) {
+  return `${RECENT_PREFIX}${corpusId}; its newest items may be missing from this search. Ask again in a moment.`;
+}
+var VISIBILITY_CHECK_CUT_SHORT = "visibility_check_cut_short";
+var UNCHECKED_PREFIX = "Ran out of time checking the privacy of matches in ";
+function visibilityCheckTimeoutGap(corpusId) {
+  return `${UNCHECKED_PREFIX}${corpusId}; they were left out of this search. Ask again in a moment.`;
+}
 
 // src/core/evidence-versions.ts
 var DOCUMENT_FAMILIES = new Set(["file", "note"]);
@@ -13395,7 +13534,7 @@ function fingerprintParts(stores) {
       sync = "";
     }
     try {
-      visibility = store.peopleVisibilityMarker?.() ?? "";
+      visibility = store.visibilityMarker?.() ?? "";
     } catch {
       return `${sync}${UNREADABLE_VISIBILITY}`;
     }
@@ -14470,105 +14609,6 @@ var GMAIL_STORE_PULL_FRESHNESS_THRESHOLD_MS = 2 * 60 * 60000;
 var GMAIL_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
 var GMAIL_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
 var GMAIL_DAILY_REQUEST_GUARD_REASON = "gmail_daily_api_request_guard";
-// src/workers/control-path-headroom.ts
-var CONTROL_PATH_SLICE_MS = 20;
-var CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200;
-var CONTROL_PATH_REST_MS = 25;
-var HEARTBEAT_MS = 50;
-var CONTROL_PATH_FREEZE_LOG_MS = 2000;
-
-class ControlPathHeadroom {
-  sliceMs;
-  lagRestThresholdMs;
-  restMs;
-  now;
-  turn;
-  lastTurnAt;
-  pendingTurn;
-  lastLagMs = 0;
-  heartbeat;
-  expectedBeatAt = 0;
-  turns = 0;
-  rests = 0;
-  freezes = 0;
-  active = new Map;
-  log;
-  freezeLogMs;
-  constructor(options = {}) {
-    this.sliceMs = options.sliceMs ?? CONTROL_PATH_SLICE_MS;
-    this.lagRestThresholdMs = options.lagRestThresholdMs ?? CONTROL_PATH_LAG_REST_THRESHOLD_MS;
-    this.restMs = options.restMs ?? CONTROL_PATH_REST_MS;
-    this.now = options.now ?? (() => performance.now());
-    this.turn = options.turn ?? ((ms) => new Promise((resolve7) => {
-      setTimeout(resolve7, ms);
-    }));
-    this.log = options.log ?? ((line) => console.error(line));
-    this.freezeLogMs = options.freezeLogMs ?? CONTROL_PATH_FREEZE_LOG_MS;
-    this.lastTurnAt = this.now();
-  }
-  enter(label) {
-    this.ensureHeartbeat();
-    this.active.set(label, (this.active.get(label) ?? 0) + 1);
-    let left = false;
-    return () => {
-      if (left)
-        return;
-      left = true;
-      const count = (this.active.get(label) ?? 1) - 1;
-      if (count <= 0)
-        this.active.delete(label);
-      else
-        this.active.set(label, count);
-    };
-  }
-  ingestionTurn() {
-    this.ensureHeartbeat();
-    if (this.pendingTurn)
-      return this.pendingTurn;
-    const now = this.now();
-    if (now - this.lastTurnAt < this.sliceMs)
-      return;
-    const rest = this.lastLagMs >= this.lagRestThresholdMs;
-    if (rest)
-      this.rests += 1;
-    this.turns += 1;
-    const pending = this.turn(rest ? this.restMs : 0).then(() => {
-      this.pendingTurn = undefined;
-      this.lastTurnAt = this.now();
-    });
-    this.pendingTurn = pending;
-    return pending;
-  }
-  snapshot() {
-    return { turns: this.turns, rests: this.rests, freezes: this.freezes, lagMs: Math.round(this.lastLagMs) };
-  }
-  stop() {
-    if (this.heartbeat)
-      clearInterval(this.heartbeat);
-    this.heartbeat = undefined;
-  }
-  ensureHeartbeat() {
-    if (this.heartbeat)
-      return;
-    this.expectedBeatAt = this.now() + HEARTBEAT_MS;
-    this.heartbeat = setInterval(() => {
-      const now = this.now();
-      this.lastLagMs = Math.max(0, now - this.expectedBeatAt);
-      this.expectedBeatAt = now + HEARTBEAT_MS;
-      if (this.lastLagMs >= this.freezeLogMs) {
-        this.freezes += 1;
-        const running = [...this.active.keys()].sort().join(",") || "none";
-        this.log(`${new Date().toISOString()} [olympus:control-path] the worker could not answer requests for ${Math.round(this.lastLagMs)} ms; background work running: ${running}`);
-      }
-    }, HEARTBEAT_MS);
-    this.heartbeat.unref?.();
-  }
-}
-var controlPathHeadroom = new ControlPathHeadroom;
-function ingestionTurn() {
-  return controlPathHeadroom.ingestionTurn();
-}
-
 // src/workers/classification/engine.ts
 import { createHash as createHash10 } from "node:crypto";
 
@@ -17023,13 +17063,26 @@ class TierLedger {
     return row?.revision ?? 0;
   }
   itemIsSecret(identity) {
-    const override = this.getOverride(identity);
+    return this.readSteps(this.itemIsSecretSteps(identity));
+  }
+  *itemIsSecretSteps(identity) {
+    const row = yield {
+      sql: `SELECT override_json FROM tier_overrides
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`,
+      params: idParams(identity),
+      mode: "get"
+    };
+    const override = row ? JSON.parse(row.override_json) : undefined;
     if (override?.kind === "tier" && override.tier === "secrets")
       return true;
-    const record = this.getCurrent(identity);
-    if (!record)
-      return false;
-    return [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier].includes("secrets");
+    const item = yield {
+      sql: `SELECT * FROM tier_items
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`,
+      params: idParams(identity),
+      mode: "get"
+    };
+    const record = item ? recordFromRow(item) : undefined;
+    return record !== undefined && [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier].includes("secrets");
   }
   getOverride(identity) {
     const row = this.db.query(`
@@ -17578,34 +17631,31 @@ class TierLedger {
     return this.readSteps(routedWithoutCopiesSteps(uniqueIdentities(identities)));
   }
   itemStatesForMany(identities) {
+    return this.readSteps(this.itemStatesSteps(identities));
+  }
+  *itemStatesSteps(identities) {
     const result = new Map;
-    if (identities.length === 0)
-      return result;
-    const unique = new Map;
-    for (const identity of identities)
-      unique.set(tierLedgerIdentityKey(identity), identity);
-    const list = [...unique.values()];
-    this.db.transaction(() => {
-      for (let offset = 0;offset < list.length; offset += 200) {
-        const batch = list.slice(offset, offset + 200);
-        const values = batch.map(() => "(?, ?, ?, ?)").join(", ");
-        const params = batch.flatMap((identity) => [...idParams(identity)]);
-        const rows = this.db.query(`
-          SELECT * FROM tier_items
+    const list = uniqueIdentities(identities);
+    for (let offset = 0;offset < list.length; offset += IDENTITY_BATCH) {
+      const { values, params } = identityValues(list.slice(offset, offset + IDENTITY_BATCH));
+      const rows = yield {
+        sql: `SELECT * FROM tier_items
+          WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})`,
+        params,
+        mode: "all"
+      };
+      for (const row of rows)
+        result.set(tierLedgerIdentityKey(identityOfRow(row)), { record: recordFromRow(row), copies: [] });
+      const copies = yield {
+        sql: `SELECT * FROM tier_copies
           WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
-        `).all(...params);
-        for (const row of rows) {
-          result.set(tierLedgerIdentityKey(identityOfRow(row)), { record: recordFromRow(row), copies: [] });
-        }
-        const copies = this.db.query(`
-          SELECT * FROM tier_copies
-          WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})
-          ORDER BY corpus_id
-        `).all(...params);
-        for (const row of copies)
-          result.get(tierLedgerIdentityKey(identityFromRow(row)))?.copies.push(copyFromRow(row));
-      }
-    })();
+          ORDER BY corpus_id`,
+        params,
+        mode: "all"
+      };
+      for (const row of copies)
+        result.get(tierLedgerIdentityKey(identityFromRow(row)))?.copies.push(copyFromRow(row));
+    }
     return result;
   }
   listRoutedOverrides() {
@@ -23429,6 +23479,170 @@ function retireSecretRedactions(ledger, options = {}) {
 }
 
 // src/workers/connector-store/child-visibility.ts
+function* visibilityRead(here, offThread) {
+  return yield { here, offThread };
+}
+function visibilityHere(steps) {
+  let next = steps.next();
+  while (!next.done) {
+    let result;
+    try {
+      result = next.value.here();
+    } catch (error) {
+      next = steps.throw(error);
+      continue;
+    }
+    next = steps.next(result);
+  }
+  return next.value;
+}
+
+class VisibilityChangedError extends Error {
+  constructor() {
+    super("Visibility changed during read");
+    this.name = "VisibilityChangedError";
+  }
+}
+async function visibilityOffThread(steps, lane, options = {}) {
+  const unchanged = lane ? childVisibilityUnchanged(lane) : undefined;
+  let changed = false;
+  let next = steps.next();
+  while (!next.done) {
+    let result;
+    try {
+      result = await next.value.offThread();
+    } catch (error) {
+      if (error instanceof VisibilityChangedError)
+        changed = true;
+      next = steps.throw(error);
+      continue;
+    }
+    next = steps.next(result);
+  }
+  if (changed && options.voidOnChange !== false || unchanged && !unchanged())
+    throw new VisibilityChangedError;
+  return next.value;
+}
+var VISIBILITY_CHANGE_RETRIES = 3;
+async function judgedAwaited(attempt, here) {
+  for (let tries = 0;tries < VISIBILITY_CHANGE_RETRIES; tries += 1) {
+    try {
+      return await attempt();
+    } catch (error) {
+      if (!(error instanceof VisibilityChangedError))
+        throw error;
+    }
+  }
+  return here();
+}
+function visibilityAwaited(make, lane) {
+  return judgedAwaited(() => visibilityOffThread(make(), lane), () => visibilityHere(make()));
+}
+var askReads = new WeakMap;
+function memoVisibilityItemsHere(owner, kind, marker, items, keyOf, read) {
+  const asked = new Map(items.map((item) => [keyOf(item), item]));
+  const before = marker();
+  const memo = askReadMemo(owner, kind, before);
+  const missing = [...asked].filter(([key2]) => !memo?.rows.has(key2)).map(([, item]) => item);
+  const fresh = missing.length > 0 ? read(missing) : new Map;
+  if (memo)
+    for (const item of missing)
+      memo.rows.set(keyOf(item), fresh.get(keyOf(item)));
+  const out = new Map;
+  for (const key2 of asked.keys()) {
+    const row = memo ? memo.rows.get(key2) : fresh.get(key2);
+    if (row !== undefined)
+      out.set(key2, row);
+  }
+  return out;
+}
+function askReadMemo(owner, kind, marker) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  let owners = askReads.get(trace);
+  if (!owners)
+    askReads.set(trace, owners = new Map);
+  let kinds = owners.get(owner);
+  if (!kinds)
+    owners.set(owner, kinds = new Map);
+  let memo = kinds.get(kind);
+  if (memo?.marker !== marker)
+    kinds.set(kind, memo = { marker, rows: new Map });
+  return memo;
+}
+async function memoVisibilityItems(owner, kind, marker, items, keyOf, read) {
+  const asked = new Map(items.map((item) => [keyOf(item), item]));
+  const before = marker();
+  const memo = askReadMemo(owner, kind, before);
+  const missing = [...asked].filter(([key2]) => !memo?.rows.has(key2)).map(([, item]) => item);
+  const fresh = missing.length > 0 ? await read(missing) : new Map;
+  if (marker() !== before)
+    throw new VisibilityChangedError;
+  if (memo)
+    for (const item of missing)
+      memo.rows.set(keyOf(item), fresh.get(keyOf(item)));
+  const out = new Map;
+  for (const key2 of asked.keys()) {
+    const row = memo ? memo.rows.get(key2) : fresh.get(key2);
+    if (row !== undefined)
+      out.set(key2, row);
+  }
+  return out;
+}
+function itemStatesOffThread(ledger, identities) {
+  return memoVisibilityItems(ledger, "states", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => ledgerReadOffThread(ledger, ledger.itemStatesSteps(missing)));
+}
+function* itemSecretSteps(ledger, identity) {
+  const key2 = tierLedgerIdentityKey(identity);
+  const rows = yield* visibilityRead(() => memoVisibilityItemsHere(ledger, "secret", () => ledger.changeMarker(), [identity], tierLedgerIdentityKey, (missing) => new Map(missing.map((item) => [tierLedgerIdentityKey(item), ledger.itemIsSecret(item)]))), () => memoVisibilityItems(ledger, "secret", () => ledger.changeMarker(), [identity], tierLedgerIdentityKey, async (missing) => {
+    const rows2 = new Map;
+    for (const item of missing)
+      rows2.set(tierLedgerIdentityKey(item), await ledgerReadOffThread(ledger, ledger.itemIsSecretSteps(item)));
+    return rows2;
+  }));
+  return rows.get(key2) === true;
+}
+function visibilityRows(identities, read) {
+  return new Map(identities.map((identity) => {
+    const key2 = tierLedgerIdentityKey(identity);
+    return [key2, { copies: read.copies.get(key2), routed: read.routedWithoutCopies.has(key2), waiting: read.personalFirstWaiting.has(key2) }];
+  }));
+}
+function visibilityFromRows(rows) {
+  const result = { copies: new Map, routedWithoutCopies: new Set, personalFirstWaiting: new Set };
+  for (const [key2, row] of rows) {
+    if (row.copies)
+      result.copies.set(key2, row.copies);
+    if (row.routed)
+      result.routedWithoutCopies.add(key2);
+    if (row.waiting)
+      result.personalFirstWaiting.add(key2);
+  }
+  return result;
+}
+function ledgerVisibilityHere(ledger, identities, options = {}) {
+  return visibilityFromRows(memoVisibilityItemsHere(ledger, options.personalFirst ? "visibility-personal-first" : "visibility", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => visibilityRows(missing, ledger.readSteps(ledger.visibilityReadSteps(missing, options)))));
+}
+async function ledgerVisibilityOffThread(ledger, identities, options = {}) {
+  const rows = await memoVisibilityItems(ledger, options.personalFirst ? "visibility-personal-first" : "visibility", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, async (missing) => visibilityRows(missing, await ledgerReadOffThread(ledger, ledger.visibilityReadSteps(missing, options))));
+  return visibilityFromRows(rows);
+}
+var releasing = new WeakSet;
+async function ledgerReadOffThread(ledger, steps) {
+  if (!offThreadReadsSupported(ledger.dbPath))
+    return ledger.readSteps(steps);
+  if (!releasing.has(ledger)) {
+    releasing.add(ledger);
+    ledger.onClose(() => releaseOffThreadReads(ledger.dbPath));
+  }
+  return withOffThreadSnapshot(ledger.dbPath, async (read) => {
+    let next = steps.next();
+    while (!next.done)
+      next = steps.next(await read(next.value));
+    return next.value;
+  });
+}
 function parentIdentityOf(child) {
   const cut = child.providerItemId.lastIndexOf(CHILD_ITEM_ID_SEPARATOR);
   if (cut <= 0)
@@ -23444,22 +23658,32 @@ function parentIdentityField(child) {
   const identity = parentIdentityOf(child);
   return identity ? { identity } : {};
 }
+function childVisibilityUnchanged(lane) {
+  const stores = lane.stores();
+  const ledger = lane.ledger();
+  const ledgerMarker = ledger?.changeMarker();
+  const markers = stores.map((store) => store.childVisibilityMarker?.());
+  return () => {
+    const current2 = lane.stores();
+    return lane.ledger() === ledger && ledger?.changeMarker() === ledgerMarker && current2.length === stores.length && current2.every((store, index) => store === stores[index] && store.childVisibilityMarker?.() === markers[index]);
+  };
+}
 var CHILD_PARENT_CHAIN_LIMIT = 8;
 function parentKey(parent) {
   return [parent.provider, parent.accountScope, parent.parentLocalItemId].join("\x00");
 }
 var HIDDEN = { visible: false, gone: false };
-function parentVerdicts(lane, parents) {
+function* parentVerdictsSteps(lane, parents) {
   const unique = new Map;
   for (const parent of parents)
     unique.set(parentKey(parent), parent);
   try {
-    return judge(lane, [...unique.values()], 0);
+    return yield* judge(lane, [...unique.values()], 0);
   } catch {
     return new Map([...unique.keys()].map((key2) => [key2, HIDDEN]));
   }
 }
-function judge(lane, parents, depth) {
+function* judge(lane, parents, depth) {
   const verdicts = new Map;
   if (parents.length === 0)
     return verdicts;
@@ -23470,7 +23694,7 @@ function judge(lane, parents, depth) {
   }
   const rows = new Map;
   for (const store of lane.stores()) {
-    for (const row of store.parentStandings(parents)) {
+    for (const row of yield* visibilityRead(() => store.parentStandings(parents), () => store.parentStandingsOffThread?.(parents) ?? Promise.resolve(store.parentStandings(parents)))) {
       const key2 = parentKey(row);
       const list = rows.get(key2) ?? [];
       list.push({ ...row, corpusId: store.corpusId });
@@ -23483,7 +23707,7 @@ function judge(lane, parents, depth) {
     for (const row of list)
       identities.set(tierLedgerIdentityKey(row.identity), row.identity);
   }
-  const states = ledger && identities.size > 0 ? ledger.itemStatesForMany([...identities.values()]) : undefined;
+  const states = ledger && identities.size > 0 ? yield* visibilityRead(() => memoVisibilityItemsHere(ledger, "states", () => ledger.changeMarker(), [...identities.values()], tierLedgerIdentityKey, (missing) => ledger.itemStatesForMany(missing)), () => itemStatesOffThread(ledger, [...identities.values()])) : undefined;
   const climbing = new Map;
   for (const parent of parents) {
     const key2 = parentKey(parent);
@@ -23499,7 +23723,7 @@ function judge(lane, parents, depth) {
       continue;
     }
     if (!identity) {
-      if (ledger && parent.identity && ledger.itemIsSecret(parent.identity)) {
+      if (ledger && parent.identity && (yield* itemSecretSteps(ledger, parent.identity))) {
         verdicts.set(key2, HIDDEN);
       } else {
         verdicts.set(key2, { visible: false, gone: true });
@@ -23513,7 +23737,7 @@ function judge(lane, parents, depth) {
       const state = states?.get(tierLedgerIdentityKey(identity));
       const copies = state?.copies ?? [];
       visible = copies.length === 0 ? state?.record.routed !== true && active.length > 0 : copies.some((copy) => copy.state === "current" && active.some((row) => row.corpusId === copy.corpusId));
-      if (!visible && active.length > 0 && ledger.itemIsSecret(identity))
+      if (!visible && active.length > 0 && (yield* itemSecretSteps(ledger, identity)))
         visible = true;
     }
     if (visible) {
@@ -23526,7 +23750,7 @@ function judge(lane, parents, depth) {
     }
   }
   if (climbing.size > 0) {
-    const above = judge(lane, [...climbing.values()], depth + 1);
+    const above = yield* judge(lane, [...climbing.values()], depth + 1);
     for (const [key2, grandparent] of climbing) {
       if (above.get(parentKey(grandparent))?.visible !== true)
         verdicts.set(key2, HIDDEN);
@@ -23534,39 +23758,43 @@ function judge(lane, parents, depth) {
   }
   return verdicts;
 }
-function childrenWithHiddenParents(lane, children) {
+function* childrenWithHiddenParentsSteps(lane, children) {
   const hidden = new Set;
   if (children.length === 0)
     return hidden;
-  const verdicts = parentVerdicts(lane, children.map((child) => child.parent));
+  const verdicts = yield* parentVerdictsSteps(lane, children.map((child) => child.parent));
   for (const child of children) {
     if (verdicts.get(parentKey(child.parent))?.visible !== true)
       hidden.add(child.key);
   }
   return hidden;
 }
-function childLinks(lane, probes) {
+function* childLinksSteps(lane, probes) {
   const found = new Map;
   let remaining = probes;
   for (const store of lane.stores()) {
     if (remaining.length === 0)
       break;
-    for (const [key2, parent] of store.parentLinksOf(remaining))
+    const asked = remaining;
+    for (const [key2, parent] of yield* visibilityRead(() => store.parentLinksOf(asked), () => store.parentLinksOfOffThread?.(asked) ?? Promise.resolve(store.parentLinksOf(asked))))
       found.set(key2, parent);
     remaining = remaining.filter((probe) => !found.has(tierLedgerIdentityKey(probe)));
   }
   return [...found].map(([key2, parent]) => ({ key: key2, parent }));
 }
 function hiddenChildKeys(lane, probes) {
+  return visibilityHere(hiddenChildKeysSteps(lane, probes));
+}
+function* hiddenChildKeysSteps(lane, probes) {
   if (probes.length === 0)
     return new Set;
   let links;
   try {
-    links = childLinks(lane, probes);
+    links = yield* childLinksSteps(lane, probes);
   } catch {
     return new Set(probes.map((probe) => tierLedgerIdentityKey(probe)));
   }
-  return childrenWithHiddenParents(lane, links);
+  return yield* childrenWithHiddenParentsSteps(lane, links);
 }
 
 // src/core/source-index/reactions.ts
@@ -24666,6 +24894,9 @@ function embeddingAuthorityFromRow(row, provider) {
 }
 var PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3;
 var READ_ONLY_MIN_SCHEMA_VERSION = 7;
+function visibilityStepAwaited(read) {
+  return judgedAwaited(() => read.offThread(), () => read.here());
+}
 class LocalConnectorStore {
   dbPath;
   openedFile;
@@ -25104,13 +25335,16 @@ class LocalConnectorStore {
     return hidden;
   }
   tierVisibleRows(rows, identityOf2, layerOf, throwOnUnavailable = false, copiesAllowed) {
+    return visibilityHere(this.tierVisibleRowsSteps(rows, identityOf2, layerOf, throwOnUnavailable, copiesAllowed));
+  }
+  *tierVisibleRowsSteps(rows, identityOf2, layerOf, throwOnUnavailable = false, copiesAllowed) {
     if (rows.length === 0)
       return [];
     let copies;
     try {
       const ledger = this.visibilityLedger();
       if (ledger && ledger.corpusHasCopies(this.corpusId))
-        copies = ledger.copiesForMany(rows.map(identityOf2));
+        copies = yield* visibilityRead(() => ledgerVisibilityHere(ledger, rows.map(identityOf2)).copies, () => ledgerVisibilityOffThread(ledger, rows.map(identityOf2)).then((read) => read.copies));
     } catch (error) {
       if (throwOnUnavailable)
         throw error;
@@ -25120,13 +25354,8 @@ class LocalConnectorStore {
       const here = copies.get(tierLedgerIdentityKey(identityOf2(row)));
       return tierRowVisible(here, this.corpusId, layerOf(row)) && (copiesAllowed?.(here ?? []) ?? true);
     }) : [...rows];
-    return this.withoutChildrenOfHiddenParents(served, identityOf2);
-  }
-  withoutChildrenOfHiddenParents(rows, identityOf2) {
-    if (rows.length === 0)
-      return rows;
-    const hidden = hiddenChildKeys(this.childVisibilityLane(), rows.map(identityOf2));
-    return hidden.size === 0 ? rows : rows.filter((row) => !hidden.has(tierLedgerIdentityKey(identityOf2(row))));
+    const hidden = yield* hiddenChildKeysSteps(this.childVisibilityLane(), served.map(identityOf2));
+    return served.filter((row) => !hidden.has(tierLedgerIdentityKey(identityOf2(row))));
   }
   tierHiddenItemPks(options = {}) {
     const maxAgeMs = options.countsMaxAgeMs ?? 0;
@@ -25158,7 +25387,7 @@ class LocalConnectorStore {
   }
   async tierHiddenItemPksInTurns() {
     const base = await runStepsInTurns(this.tierLedgerHiddenSteps());
-    return this.withHiddenChildren(base, await runStepsInTurns(this.hiddenChildSteps()));
+    return this.withHiddenChildren(base, await visibilityOffThread(this.hiddenChildReadSteps(), undefined, { voidOnChange: false }));
   }
   tierLedgerHiddenItemPks() {
     return runSteps(this.tierLedgerHiddenSteps());
@@ -25867,21 +26096,34 @@ class LocalConnectorStore {
     return this.db.query("SELECT 1 AS present FROM items WHERE parent_local_item_id IS NOT NULL LIMIT 1").get() !== null;
   }
   parentLinksOf(identities) {
+    return memoVisibilityItemsHere(this, "parentLinksOf", () => this.childVisibilityMarker(), identities, tierLedgerIdentityKey, (missing) => this.readHere(this.parentLinksOfSteps(missing)));
+  }
+  parentLinksOfOffThread(identities) {
+    return memoVisibilityItems(this, "parentLinksOf", () => this.childVisibilityMarker(), identities, tierLedgerIdentityKey, (missing) => this.readOffThread(this.parentLinksOfSteps(missing)));
+  }
+  childVisibilityMarker() {
+    if (this.visibilityFeedPresent)
+      return String(this.itemVisibilityChangesSince().cursor);
+    const changes = this.db.query("SELECT total_changes() AS changes").get();
+    const version = this.db.query("PRAGMA data_version").get();
+    return `${version.data_version}:${changes.changes}`;
+  }
+  *parentLinksOfSteps(identities) {
     const links = new Map;
-    if (identities.length === 0 || !this.hasChildItems())
+    if (identities.length === 0 || !this.childItemColumnsPresent)
       return links;
     for (let offset = 0;offset < identities.length; offset += 200) {
       const batch = identities.slice(offset, offset + 200);
-      const rows = this.db.query(`
+      const rows = yield { sql: `
         SELECT provider, account_scope, provider_conversation_id, provider_item_id, parent_local_item_id FROM items
         WHERE parent_local_item_id IS NOT NULL
           AND (provider, account_scope, normalized_conversation, provider_item_id) IN (VALUES ${batch.map(() => "(?, ?, ?, ?)").join(", ")})
-      `).all(...batch.flatMap((identity) => [
+      `, mode: "all", params: batch.flatMap((identity) => [
         identity.provider,
         identity.accountScope,
         normalizeConversationId(identity.providerConversationId),
         identity.providerItemId
-      ]));
+      ]) };
       for (const row of rows) {
         links.set(tierLedgerIdentityKey({
           provider: row.provider,
@@ -25904,17 +26146,37 @@ class LocalConnectorStore {
     return links;
   }
   parentStandings(parents) {
+    const rows = memoVisibilityItemsHere(this, "parentStandings", () => this.childVisibilityMarker(), parents, parentKey, (missing) => this.parentStandingGroups(this.readHere(this.parentStandingsSteps(missing))));
+    return [...rows.values()].flat();
+  }
+  async parentStandingsOffThread(parents) {
+    const rows = await memoVisibilityItems(this, "parentStandings", () => this.childVisibilityMarker(), parents, parentKey, async (missing) => {
+      return this.parentStandingGroups(await this.readOffThread(this.parentStandingsSteps(missing)));
+    });
+    return [...rows.values()].flat();
+  }
+  parentStandingGroups(rows) {
+    const groups = new Map;
+    for (const row of rows) {
+      const key2 = parentKey(row);
+      const list = groups.get(key2) ?? [];
+      list.push(row);
+      groups.set(key2, list);
+    }
+    return groups;
+  }
+  *parentStandingsSteps(parents) {
     if (parents.length === 0)
       return [];
     const wanted = new Set(parents.map((parent) => parentKey(parent)));
     const ids = [...new Set(parents.map((parent) => parent.parentLocalItemId))];
     const out = [];
-    for (let offset = 0;offset < ids.length; offset += 20000) {
-      const rows = this.db.query(`
+    for (let offset = 0;offset < ids.length; offset += 500) {
+      const rows = yield { sql: `
         SELECT provider, account_scope, provider_item_id, provider_conversation_id, local_item_id, tombstoned, trust_tier,
           ${this.childItemColumnsPresent ? "parent_local_item_id" : "NULL AS parent_local_item_id"}
         FROM items WHERE local_item_id IN (SELECT value FROM json_each(?))
-      `).all(JSON.stringify(ids.slice(offset, offset + 20000)));
+      `, mode: "all", params: [JSON.stringify(ids.slice(offset, offset + 500))] };
       for (const row of rows) {
         const ref = { provider: row.provider, accountScope: row.account_scope, parentLocalItemId: row.local_item_id };
         if (!wanted.has(parentKey(ref)))
@@ -25936,22 +26198,28 @@ class LocalConnectorStore {
     return out;
   }
   itemStandings(identities) {
+    return memoVisibilityItemsHere(this, "itemStandings", () => this.childVisibilityMarker(), identities, tierLedgerIdentityKey, (missing) => this.readHere(this.itemStandingsSteps(missing)));
+  }
+  itemStandingsOffThread(identities) {
+    return memoVisibilityItems(this, "itemStandings", () => this.childVisibilityMarker(), identities, tierLedgerIdentityKey, (missing) => this.readOffThread(this.itemStandingsSteps(missing)));
+  }
+  *itemStandingsSteps(identities) {
     const out = new Map;
     if (identities.length === 0)
       return out;
     for (let offset = 0;offset < identities.length; offset += 200) {
       const batch = identities.slice(offset, offset + 200);
-      const rows = this.db.query(`
+      const rows = yield { sql: `
         SELECT provider, account_scope, provider_item_id, provider_conversation_id, normalized_conversation, local_item_id, tombstoned, trust_tier,
           ${this.childItemColumnsPresent ? "parent_local_item_id" : "NULL AS parent_local_item_id"}
         FROM items
         WHERE (provider, account_scope, normalized_conversation, provider_item_id) IN (VALUES ${batch.map(() => "(?, ?, ?, ?)").join(", ")})
-      `).all(...batch.flatMap((identity) => [
+      `, mode: "all", params: batch.flatMap((identity) => [
         identity.provider,
         identity.accountScope,
         normalizeConversationId(identity.providerConversationId),
         identity.providerItemId
-      ]));
+      ]) };
       const asked = new Map(batch.map((identity) => [
         [identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId].join("\x00"),
         identity
@@ -25981,27 +26249,52 @@ class LocalConnectorStore {
   hiddenChildItemPks() {
     return runSteps(this.hiddenChildSteps());
   }
+  *visibilityStoreRead(read) {
+    return yield* visibilityRead(() => this.readHere(function* () {
+      return yield read;
+    }()), () => this.readOffThread(function* () {
+      return yield read;
+    }()));
+  }
   *hiddenChildSteps() {
-    if (!this.hasChildItems())
+    const steps = this.hiddenChildReadSteps();
+    let next = steps.next();
+    while (!next.done) {
+      yield;
+      let result;
+      try {
+        result = next.value.here();
+      } catch (error) {
+        next = steps.throw(error);
+        continue;
+      }
+      next = steps.next(result);
+    }
+    return next.value;
+  }
+  *hiddenChildReadSteps() {
+    if (!this.childItemColumnsPresent)
+      return [];
+    const present = yield* this.visibilityStoreRead({ sql: "SELECT 1 AS present FROM items WHERE parent_local_item_id IS NOT NULL LIMIT 1", params: [], mode: "get" });
+    if (!present)
       return [];
     const lane = this.childVisibilityLane();
     const hiddenParents = [];
     let from = "";
     let inclusive = true;
     while (true) {
-      yield;
-      const window = this.db.query(`
+      const window = (yield* this.visibilityStoreRead({ sql: `
         SELECT parent_local_item_id AS parent FROM items
         WHERE parent_local_item_id IS NOT NULL AND parent_local_item_id ${inclusive ? ">=" : ">"} ?
         GROUP BY parent_local_item_id ORDER BY parent_local_item_id LIMIT ?
-      `).all(from, HIDDEN_CHILD_PARENT_SLICE).map((row) => row.parent);
+      `, params: [from, HIDDEN_CHILD_PARENT_SLICE], mode: "all" })).map((row) => row.parent);
       if (window.length === 0)
         break;
-      const groups = this.db.query(`
+      const groups = yield* this.visibilityStoreRead({ sql: `
         SELECT provider, account_scope, parent_local_item_id, MIN(provider_item_id) AS child_item_id, provider_conversation_id FROM items
         WHERE parent_local_item_id IN (SELECT value FROM json_each(?)) AND tombstoned = 0
         GROUP BY provider, account_scope, parent_local_item_id
-      `).all(JSON.stringify(window));
+      `, params: [JSON.stringify(window)], mode: "all" });
       const slice = groups.map((group) => ({
         provider: group.provider,
         accountScope: group.account_scope,
@@ -26013,7 +26306,7 @@ class LocalConnectorStore {
           ...group.provider_conversation_id ? { providerConversationId: group.provider_conversation_id } : {}
         })
       }));
-      const verdicts = parentVerdicts(lane, slice);
+      const verdicts = yield* parentVerdictsSteps(lane, slice);
       for (const parent of slice)
         if (verdicts.get(parentKey(parent))?.visible !== true)
           hiddenParents.push(parent);
@@ -26024,14 +26317,13 @@ class LocalConnectorStore {
     }
     const pks = [];
     for (let offset = 0;offset < hiddenParents.length; offset += 20000) {
-      yield;
-      const rows = this.db.query(`
+      const rows = yield* this.visibilityStoreRead({ sql: `
         SELECT item_pk FROM items
         WHERE tombstoned = 0 AND parent_local_item_id IS NOT NULL
           AND (provider, account_scope, parent_local_item_id) IN (
             SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'), json_extract(value, '$[2]') FROM json_each(?)
           )
-      `).all(JSON.stringify(hiddenParents.slice(offset, offset + 20000).map((parent) => [parent.provider, parent.accountScope, parent.parentLocalItemId])));
+      `, params: [JSON.stringify(hiddenParents.slice(offset, offset + 20000).map((parent) => [parent.provider, parent.accountScope, parent.parentLocalItemId]))], mode: "all" });
       for (const row of rows)
         pks.push(row.item_pk);
     }
@@ -26995,7 +27287,7 @@ class LocalConnectorStore {
     }
   }
   peopleNames;
-  peopleVisibilityMarker() {
+  visibilityMarker() {
     const ledger = this.visibilityLedger();
     const ledgerCursor = ledger ? ledger.visibilityChangesSince().cursor : 0;
     const storeCursor = this.visibilityJournal ? String(this.itemVisibilityChangesSince().cursor) : `v${this.db.query("PRAGMA data_version").get().data_version}`;
@@ -27009,13 +27301,13 @@ class LocalConnectorStore {
     if (!offThreadReadsSupported(this.dbPath))
       return this.peopleObservations();
     for (let attempt = 0;attempt < PEOPLE_OFF_THREAD_READ_ATTEMPTS; attempt += 1) {
-      const marker = this.peopleVisibilityMarker();
+      const marker = this.visibilityMarker();
       const tierHidden = await this.tierHiddenItemPksInTurns();
       const steps = this.peopleObservationSteps(tierHidden);
       let step = steps.next();
       while (!step.done)
         step = steps.next(await readOnPool(this.dbPath, step.value));
-      if (this.peopleVisibilityMarker() === marker)
+      if (this.visibilityMarker() === marker)
         return this.peopleObservationsFromRows(step.value);
     }
     return this.peopleObservations();
@@ -31073,7 +31365,14 @@ class LocalConnectorStore {
     while (!step.done) {
       if (this.closedForPoolReads)
         throw new OffThreadReadBusyError;
-      step = steps.next(await readOnPool(this.dbPath, step.value, pool.deadlineAtMs !== undefined ? { deadlineAtMs: pool.deadlineAtMs } : {}));
+      let result;
+      try {
+        result = "offThread" in step.value ? await visibilityStepAwaited(step.value) : await readOnPool(this.dbPath, step.value, pool.deadlineAtMs !== undefined ? { deadlineAtMs: pool.deadlineAtMs } : {});
+      } catch (error) {
+        step = steps.throw(error);
+        continue;
+      }
+      step = steps.next(result);
     }
     return step.value;
   }
@@ -31085,16 +31384,53 @@ class LocalConnectorStore {
       ...row.sourceItem.providerConversationId ? { providerConversationId: row.sourceItem.providerConversationId } : {}
     }), (row) => row.chunk !== undefined || row.contentMatched === true ? "content" : "metadata");
   }
+  async stillVisibleSearchRowsOffThread(rows) {
+    return visibilityAwaited(() => this.tierVisibleRowsSteps(rows, (row) => ({
+      provider: row.sourceItem.provider,
+      accountScope: row.sourceItem.accountScope,
+      providerItemId: row.sourceItem.providerItemId,
+      ...row.sourceItem.providerConversationId ? { providerConversationId: row.sourceItem.providerConversationId } : {}
+    }), (row) => row.chunk !== undefined || row.contentMatched === true ? "content" : "metadata"), this.childVisibilityLane());
+  }
   closedForPoolReads = false;
   conceptCountMemo;
   readHere(steps) {
     let step = steps.next();
     while (!step.done) {
       const read = step.value;
+      if ("here" in read) {
+        let result;
+        try {
+          result = read.here();
+        } catch (error) {
+          step = steps.throw(error);
+          continue;
+        }
+        step = steps.next(result);
+        continue;
+      }
       const statement = this.db.query(read.sql);
       step = steps.next(read.mode === "all" ? statement.all(...read.params) : statement.get(...read.params));
     }
     return step.value;
+  }
+  async readOffThread(steps) {
+    if (!offThreadReadsSupported(this.dbPath))
+      return this.readHere(steps);
+    let next = steps.next();
+    while (!next.done) {
+      if (this.closedForPoolReads)
+        throw new OffThreadReadBusyError;
+      let result;
+      try {
+        result = "offThread" in next.value ? await visibilityStepAwaited(next.value) : await readOnPool(this.dbPath, next.value);
+      } catch (error) {
+        next = steps.throw(error);
+        continue;
+      }
+      next = steps.next(result);
+    }
+    return next.value;
   }
   *searchItemsSteps(query, maxResults, accountScope, filters, ftsOptions) {
     const selectedFilters = connectorStoreFilterSql(filters);
@@ -31211,7 +31547,7 @@ class LocalConnectorStore {
           return weights.total > 0 && matched / weights.total >= RARE_CONCEPT_WEIGHT_SHARE;
         });
       }
-      const visible = this.tierVisibleRows(signalled, (row) => ({
+      const visible = yield* this.tierVisibleRowsSteps(signalled, (row) => ({
         provider: row.provider,
         accountScope: row.account_scope,
         providerItemId: row.provider_item_id,
@@ -31385,20 +31721,23 @@ class LocalConnectorStore {
     const read = this.recentItemsRead(maxResults, accountScope, filters);
     return this.visibleRecentRows(this.db.query(read.sql).all(...read.params));
   }
-  async recentItemsOffThread(maxResults, accountScope, filters, deadlineAtMs) {
+  async recentItemsOffThread(maxResults, accountScope, filters, deadlineAtMs, onCutShort) {
     if (!offThreadReadsSupported(this.dbPath))
       return this.recentItems(maxResults, accountScope, filters);
     let rows;
     try {
       rows = await readOnPool(this.dbPath, this.recentItemsRead(maxResults, accountScope, filters), deadlineAtMs !== undefined ? { deadlineAtMs } : {});
     } catch (error) {
-      if (error instanceof OffThreadReadBusyError)
-        return [];
-      throw error;
-    }
-    if (this.closedForPoolReads)
+      if (!(error instanceof OffThreadReadBusyError))
+        throw error;
+      onCutShort?.();
       return [];
-    return this.visibleRecentRows(rows);
+    }
+    if (this.closedForPoolReads) {
+      onCutShort?.();
+      return [];
+    }
+    return (await visibilityAwaited(() => this.visibleRecentRowsSteps(rows), this.childVisibilityLane())).map((row) => searchRowFromItemRow(row));
   }
   recentItemsRead(maxResults, accountScope, filters) {
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
@@ -31430,12 +31769,15 @@ class LocalConnectorStore {
     };
   }
   visibleRecentRows(rows) {
-    return this.tierVisibleRows(rows, (row) => ({
+    return visibilityHere(this.visibleRecentRowsSteps(rows)).map((row) => searchRowFromItemRow(row));
+  }
+  visibleRecentRowsSteps(rows) {
+    return this.tierVisibleRowsSteps(rows, (row) => ({
       provider: row.provider,
       accountScope: row.account_scope,
       providerItemId: row.provider_item_id,
       ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
-    }), () => "content").map((row) => searchRowFromItemRow(row));
+    }), () => "content");
   }
   privateTierRowWindow(options) {
     const after = Math.max(0, Math.floor(options.after ?? 0));
@@ -31598,18 +31940,15 @@ class LocalConnectorStore {
     return !current2 || current2.dev !== this.openedFile.dev || current2.ino !== this.openedFile.ino;
   }
   async prepareStatusCounts(scope) {
-    if (!this.tierHiddenCountsMemo)
-      await this.refreshTierHiddenCountsInTurns();
+    await this.refreshTierHiddenCountsInTurns();
     const key2 = JSON.stringify(scope ?? null);
-    if (!this.settledUnreadableCountMemo?.has(key2)) {
-      try {
-        const counts = this.unreadHoldCounts(await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
-        const memos = this.settledUnreadableCountMemo ??= new Map;
-        if (memos.size > 32)
-          memos.clear();
-        memos.set(key2, { at: Date.now(), ...counts });
-      } catch {}
-    }
+    try {
+      const counts = this.unreadHoldCounts(await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
+      const memos = this.settledUnreadableCountMemo ??= new Map;
+      if (memos.size > 32)
+        memos.clear();
+      memos.set(key2, { at: Date.now(), ...counts });
+    } catch {}
   }
   settledUnreadableCount(scope, maxAgeMs) {
     const key2 = JSON.stringify(scope ?? null);
@@ -31794,6 +32133,10 @@ class LocalConnectorStore {
       ${contentFilters.sql}
       ${hiddenNotIn}
       ${namesOnlyNotIn}`;
+    const approvedContentWhere = `${scope?.contentAllowed === false ? "AND 0" : ""}
+      ${accountScope ? "AND i.account_scope = ?" : ""}
+      ${contentFilters.sql}
+      ${hiddenNotIn}`;
     const parityWhere = `${contentWhere}
       ${heldNotIn}`;
     const unreadHolds = this.settledUnreadableCount(scope, options.countsMaxAgeMs ?? 0);
@@ -31835,6 +32178,7 @@ class LocalConnectorStore {
           (1 ${itemWhere}) AS in_items,
           (1 ${hiddenNotIn}) AS stored,
           i.item_pk IN (SELECT value FROM json_each(?)) AS elsewhere,
+          (1 ${approvedContentWhere}) AS in_content_scope,
           (1 ${fileScopeWhere}) AS in_file_scope
         FROM items i
       )
@@ -31842,6 +32186,7 @@ class LocalConnectorStore {
         COALESCE(SUM(t = 0 AND in_items), 0) AS items,
         COALESCE(SUM(t = 0 AND stored), 0) AS stored_items,
         COALESCE(SUM(t = 0 AND in_items AND elsewhere), 0) AS content_elsewhere_items,
+        COALESCE(SUM(t = 0 AND in_items AND NOT dir AND elsewhere AND in_content_scope), 0) AS content_elsewhere_in_scope_files,
         COALESCE(SUM(t = 0 AND in_items AND NOT dir), 0) AS files,
         COALESCE(SUM(t = 0 AND in_items AND dir), 0) AS folders,
         COALESCE(SUM(t = 1 AND in_items), 0) AS tombstoned_items,
@@ -31851,6 +32196,9 @@ class LocalConnectorStore {
       ...itemParams,
       ...jsonList(tier.hidden),
       JSON.stringify(keptNamesOnlyPks),
+      ...accountScope ? [accountScope] : [],
+      ...contentFilters.params,
+      ...jsonList(tier.hidden),
       ...fileScopeParams
     ], mode: "get" };
     const textCounts = yield { sql: `
@@ -31979,7 +32327,7 @@ class LocalConnectorStore {
           files: counts.files,
           folders: counts.folders,
           fullIngestionFiles: counts.full_ingestion_files,
-          scopeMetadataOnlyFiles: Math.max(0, counts.files - counts.full_ingestion_files),
+          scopeMetadataOnlyFiles: Math.max(0, counts.files - counts.full_ingestion_files - counts.content_elsewhere_in_scope_files),
           contentEligibleItems: Math.max(0, counts.full_ingestion_files - policyDeferredItems - outsideContentWindowItems),
           policyDeferredItems
         } : {},
@@ -36662,6 +37010,10 @@ function normalizeRouterResultKey(key2) {
 
 // src/core/evidence-pack.ts
 var utf8 = new TextEncoder;
+var CUT_SHORT_LANES = new Map([
+  [RECENT_ITEMS_CUT_SHORT, { suffix: ":recency", gap: recentItemsTimeoutGap }],
+  [VISIBILITY_CHECK_CUT_SHORT, { suffix: ":visibility", gap: visibilityCheckTimeoutGap }]
+]);
 
 // src/core/release-manifest.ts
 import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";

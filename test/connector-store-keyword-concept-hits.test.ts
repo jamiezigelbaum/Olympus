@@ -20,14 +20,19 @@ async function openStore(items: FixtureSpec[]) {
 
 type Internals = {
   db: Database;
-  searchItemsSteps(query: string, limit: number, account: string | undefined, filters: ConnectorStoreSearchFilters | undefined, options: ConnectorStoreKeywordFtsOptions): Generator<StoreRead, ConnectorStoreKeywordSearch, unknown>;
+  searchItemsSteps(query: string, limit: number, account: string | undefined, filters: ConnectorStoreSearchFilters | undefined, options: ConnectorStoreKeywordFtsOptions): Generator<StoreRead | { here(): unknown }, ConnectorStoreKeywordSearch, unknown>;
   conceptWeightsSteps(groups: string[][], exact: Map<string, unknown>): Generator<StoreRead, { counts: number[] }, unknown>;
 };
 function internals(store: LocalConnectorStore) { return store as unknown as Internals; }
-function drive<T>(store: LocalConnectorStore, steps: Generator<StoreRead, T, unknown>, reads: StoreRead[] = []): T {
+// The search's steps also yield its visibility judgment, which a hand driver runs here as the store's own driver does.
+function drive<T>(store: LocalConnectorStore, steps: Generator<StoreRead | { here(): unknown }, T, unknown>, reads: StoreRead[] = []): T {
   let step = steps.next();
   while (!step.done) {
     const read = step.value;
+    if ('here' in read) {
+      step = steps.next(read.here());
+      continue;
+    }
     reads.push(read);
     const statement = internals(store).db.query(read.sql);
     step = steps.next(statement[read.mode](...(read.params as SQLQueryBindings[])));
@@ -135,7 +140,7 @@ test('a lane shares positive and negative group answers with content-only and ex
     const steps = original(...args);
     let step = steps.next();
     while (!step.done) {
-      reads.push(step.value);
+      if (!('here' in step.value)) reads.push(step.value);
       step = steps.next(yield step.value);
     }
     return step.value;

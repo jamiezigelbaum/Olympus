@@ -411,6 +411,34 @@ dropped. Sealed receipts carry no rows, so two sealed runs compare only when
 they left out the same questions. Inspect skipped-store counts before comparing
 runs.
 
+Each answerable question also gets a funnel stage, the first place its expected
+item dropped out: `not_found` (no lane found it), `found_not_returned` (a lane
+ranked it but its store did not return it), `not_returned` (its store did not
+return it and lanes were not probed), `returned_not_packed`,
+`packed_not_fitted`, `fitted_no_passage` (seated, but the fitted body misses
+the quote) and `hit`. Rows carry the store, pack and fit ranks; summaries count
+questions per stage. `--probe-lanes` adds the expected item's rank in its own
+store's keyword and vector lanes, searched 50 deep (the store's search cap,
+so an item ranked lower in both reads as `not_found`), which separates
+`not_found` from `found_not_returned`. Neither diagnostic counts toward the
+row's timings. `--judge-questions` asks the eval's local
+Analyst model (same endpoint rules as drafting) whether each question is
+answered by its quote and is specific enough to point at one item. Rows record
+two booleans and summaries count them; no question or quote text is written.
+
+With `OLYMPUS_SOURCE_RERANKER=built-in`, each row also records the reranker's
+outcome (`applied`, `timed_out` or `failed`), how many candidates it scored and
+promoted, and its time. Summaries count outcomes and give total and longest
+rerank time, and the receipt names the reranker (its model folder) or `off`. A
+timed-out or failed rerank keeps the fused order, so check `timedOut` before
+reading a pool's hits.
+
+Both passage CLIs print each stage to stderr as it starts (`open_data_root`,
+`load_embedding`, `load_reranker`, `question 3/19: build_pack`, and so on), so a
+run that hangs shows where it stopped. A failure prints the stage, the error's
+class and its code (such as `SQLITE_BUSY` or `ENOMEM`), never its message, and
+exits 1.
+
 On **Sparta**, draft a private set through the local OpenAI-compatible model:
 
 ```sh
@@ -422,21 +450,62 @@ bun run eval:draft-passages -- --data-root /tmp/olympus-copy \
 
 The endpoint settings default to the eval's local Analyst profile/lane. Only
 loopback/private addresses (or `localhost`/`sparta` resolving entirely to them)
-are accepted, with redirects refused. Requests run sequentially. Sampling uses
-seeded reservoirs balanced across family/tier strata and only active, judged,
-unheld items with served text. Half the requests ask for a paraphrase with no
-quote content words. Invalid quotes and paraphrases are discarded; rare-word
-FTS phrase candidates are checked with the same passage rule for alternates.
-One third of the resulting questions are deterministically sealed. The private
-output file contains the drafts; stdout contains counts only.
+are accepted, with redirects refused. Requests run sequentially. `--count` is
+how many items the model drafts from, kept or rejected. Sampling uses a seeded
+reservoir per store, taken one store at a time in turn, over active, judged,
+unheld items with served text; stderr gives each store's eligible count. Half
+the requests ask for a paraphrase with no quote content words. Invalid quotes
+and paraphrases are discarded and counted by reason in `rejectedBy`
+(`not_json`, `missing_fields`, `quote_length`, `quote_not_in_item`,
+`question_repeats_quote`). A reply that is not a JSON object counts as
+`not_json`, not as a failed request. Alternates
+for every kept quote are found in one read of each store after drafting: each
+item's words are split once and tested against all quotes with the same passage
+rule. One third of the resulting questions are deterministically sealed. The
+private output file contains the drafts; stdout contains counts only, and
+stderr a counts-only progress line per stage and every 10 questions. Each draft
+is kept in `<output>.drafts.json` (0600) as it is made; after a stop, the same
+command with `--resume` (same seed and count) asks the model only for the rest.
+A saved draft is reused only for the same sampled item while its quote is still
+in that item. The file is removed once the set is written with no failed request.
+
+To grow a set, run again with another seed and `--append <set.json>`. It writes
+the set's questions unchanged, splits included, plus this run's questions to
+`--output`, which may be the same file. Items the set already quotes, or lists
+as alternates, are not drafted again. New ids continue after the set's highest,
+only the new questions are split (a third sealed), and a negative already in
+the set is not added twice. `--min-store <corpus>=N` and `--min-family
+<family>=N` (comma lists or repeated) set the least kept per store or family,
+counting the set being grown. Drafting goes to a store, then a family, still
+short of its minimum before taking stores in turn. `unmetMinimums` reports any
+shortfall left when the count ran out or a store had no more eligible items.
+The checkpoint records which questions the run grew from, so `--resume` after
+a failed request grows from that set even when `--output` overwrote it;
+`existing` and `total` give the set's size before and after.
+
+```sh
+bun run eval:draft-passages -- --data-root /tmp/olympus-copy \
+  --forbid-root /path/to/live/data --count 80 --seed 43 \
+  --append eval/private/passage-questions.draft.json \
+  --min-store internal.whatsapp.messages=6,secure_local.whatsapp.messages=4 \
+  --output eval/private/passage-questions.draft.json
+```
+
+Both CLIs exit once their output is written; the embedding and reranker
+helpers would otherwise keep the process open.
 
 No one reads the drafts, because their text stays on Sparta. A local check
 replaces that review for the 5–10 proposed negative questions. Each negative is
 run through the same retrieval, and the same local model is asked whether any of
 the top five passages answers it. A negative it can answer, or whose reply can't
-be read, is dropped. A negative whose retrieval came back incomplete (a store
-timed out or a lane degraded) is kept but marked `negative-unchecked`, since
-those passages can't clear it. `negativesKept`, `negativesDropped` and
-`negativesUnchecked` give the counts.
+be read, is dropped. A check whose retrieval came back incomplete (a store
+timed out or a lane degraded) is asked once more after five seconds. If it is
+incomplete again, the model still reads what came back: a negative those
+passages answer is dropped, and one they don't is kept but marked
+`negative-unchecked`, since a partial pack can't clear it. The embedding model,
+reranker and lanes load at the first check, after the alternates pass.
+`negativesKept`, `negativesDropped` and `negativesUnchecked` give the counts,
+and `negativeChecksDegraded` counts each incomplete lane as
+`store:lane:reason` (codes only; free text becomes `other`).
 Negatives count only toward negative seat counts, never toward a pass or a
 fail. Do not tune on sealed questions.

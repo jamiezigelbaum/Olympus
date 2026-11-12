@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test';
+import { expect, spyOn, test } from 'bun:test';
 import type { EvidencePackBuildDetail } from '../src/core/evidence-pack.ts';
 import type { EvidencePack } from '../src/core/contracts.ts';
 import { comparePassageReceipts, runPassageEval } from '../eval/run-passages.ts';
@@ -103,4 +103,82 @@ test('compare scores the questions both runs completed and says how many were le
   const sealedCut = await runPassageEval({ dataset, split: 'sealed', maxResults: 5, storeCounts: counts, gitSha: 'abc', buildPack: async () => cut });
   expect(() => comparePassageReceipts(sealedCut, sealedBase)).toThrow('degraded');
   expect(comparePassageReceipts(sealedBase, sealedBase).leftOut).toBe(0);
+});
+// Where each answerable question's expected item was lost (2026-11-12
+// baseline: 3 of 18 hit, and the receipt could not say whether the other 15
+// were never found or found and cut).
+test('each answerable question records where its expected item was lost, by stage, counts only', async () => {
+  const base = detail();
+  const target = base.pack.candidates[0]!;
+  const seat = (id: string) => ({ ...target, provenance: { ...target.provenance, sourceItem: { ...target.provenance.sourceItem, providerItemId: id } } });
+  const packOf = (ids: string[]) => ({ ...base, pack: { ...base.pack, candidates: ids.map(seat) }, candidateCorpusIds: ids.map(() => 'internal.fixture.file') });
+  const one = { ...dataset, questions: [dataset.questions[0]!] };
+  const run = async (built: EvidencePackBuildDetail, storeSearches: Array<{ corpusId: string; providerItemIds: string[] }>, lanes?: { keyword: number | null; vector: number | null }, promptBytes?: number) =>
+    (await runPassageEval({ dataset: one, maxResults: 12, storeCounts: counts, gitSha: 'abc', ...(promptBytes ? { promptBytes } : {}),
+      buildPack: async () => ({ ...built, storeSearches }), ...(lanes ? { probeLanes: async () => lanes } : {}) }));
+  const hit = await run(packOf(['copy']), [{ corpusId: 'internal.fixture.file', providerItemIds: ['copy'] }], { keyword: 3, vector: null });
+  expect(hit.questions![0]!.funnel).toEqual({ stage: 'hit', storeRank: 1, storeHits: 1, packRank: 1, packSize: 1, fitRank: 1, keywordRank: 3, vectorRank: null });
+  // In the pack at seat 9, but the prompt fit kept fewer seats.
+  const long = `${'unrelated filler '.repeat(300)} ${quote}`;
+  const nine = { ...packOf(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'copy']), pack: { ...packOf([]).pack, candidates: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'copy'].map(id => ({ ...seat(id), chunks: [long] })) } };
+  const cut = await run(nine, [{ corpusId: 'internal.fixture.file', providerItemIds: ['copy'] }], undefined, 6_000);
+  expect(cut.questions![0]!.funnel).toMatchObject({ stage: 'packed_not_fitted', packRank: 9, fitRank: null });
+  const notPacked = await run(packOf(['a']), [{ corpusId: 'internal.fixture.file', providerItemIds: ['a', 'b', 'original'] }]);
+  expect(notPacked.questions![0]!.funnel).toMatchObject({ stage: 'returned_not_packed', storeRank: 3, storeHits: 3, packRank: null });
+  const notReturned = await run(packOf(['a']), [{ corpusId: 'internal.fixture.file', providerItemIds: ['a'] }], { keyword: 40, vector: null });
+  expect(notReturned.questions![0]!.funnel).toMatchObject({ stage: 'found_not_returned', storeRank: null, keywordRank: 40 });
+  const lost = await run(packOf(['a']), [{ corpusId: 'internal.fixture.file', providerItemIds: ['a'] }], { keyword: null, vector: null });
+  expect(lost.questions![0]!.funnel!.stage).toBe('not_found');
+  // Without a lane probe, a miss the store never returned is only "not returned".
+  expect((await run(packOf(['a']), [{ corpusId: 'internal.fixture.file', providerItemIds: ['a'] }])).questions![0]!.funnel!.stage).toBe('not_returned');
+  const noPassage = await run(packOf(['copy']).pack.candidates.length ? { ...packOf(['copy']), pack: { ...packOf(['copy']).pack, candidates: [{ ...seat('copy'), chunks: ['unrelated text'] }] } } : base, [{ corpusId: 'internal.fixture.file', providerItemIds: ['copy'] }]);
+  expect(noPassage.questions![0]!.funnel!.stage).toBe('fitted_no_passage');
+  // The summary counts stages, overall and per family.
+  expect(lost.summary.overall.funnel).toEqual({ not_found: 1 });
+  expect(lost.summary.byFamily.file!.funnel).toEqual({ not_found: 1 });
+  expect(JSON.stringify(lost)).not.toContain(question);
+});
+test('the question judge records whether each quote answers its question and the question is specific, counts only', async () => {
+  const one = { ...dataset, questions: [dataset.questions[0]!, dataset.questions[1]!] };
+  const asked: string[] = [];
+  const receipt = await runPassageEval({ dataset: one, maxResults: 5, storeCounts: counts, gitSha: 'abc', buildPack: async () => detail(),
+    judgeQuestion: async (q, quoted) => { asked.push(`${q}|${quoted}`); return { answers: true, specific: false }; } });
+  // Only answerable questions are judged, against their pinned quote.
+  expect(asked).toEqual([`${question}|${quote}`]);
+  expect(receipt.questions![0]!.judge).toEqual({ answers: true, specific: false });
+  expect(receipt.questions![1]!.judge).toBeUndefined();
+  expect(receipt.summary.overall.judged).toEqual({ answers: 1, notAnswers: 0, specific: 0, generic: 1, unclear: 0 });
+  expect(JSON.stringify(receipt)).not.toContain(quote);
+});
+test('the lane probe and question judge are not counted in retrieval timings', async () => {
+  const one = { ...dataset, questions: [dataset.questions[0]!] };
+  // A fake clock: only the probe and the judge move it.
+  let now = 0;
+  const clock = spyOn(performance, 'now').mockImplementation(() => now);
+  try {
+    const receipt = await runPassageEval({ dataset: one, maxResults: 5, storeCounts: counts, gitSha: 'abc', buildPack: async () => detail(),
+      probeLanes: async () => { now += 1_000; return { keyword: 1, vector: null }; },
+      judgeQuestion: async () => { now += 1_000; return { answers: true, specific: true }; } });
+    expect(receipt.questions![0]!.judge).toEqual({ answers: true, specific: true });
+    expect(receipt.questions![0]!.timings.totalMs).toBe(0);
+  } finally { clock.mockRestore(); }
+});
+test('each row records what the reranker did, and the summary counts outcomes and time', async () => {
+  const one = { ...dataset, questions: [dataset.questions[0]!, dataset.questions[1]!] };
+  let call = 0;
+  const receipt = await runPassageEval({ dataset: one, maxResults: 5, storeCounts: counts, gitSha: 'abc',
+    buildPack: async () => ({ ...detail(), rerank: call++ === 0
+      ? { rerankerId: 'cross-encoder:model', outcome: 'applied', scored: 24, kept: 5, promoted: 2, elapsedMs: 900 }
+      : { rerankerId: 'cross-encoder:model', outcome: 'timed_out', scored: 0, kept: 5, promoted: 0, elapsedMs: 5000 } }) });
+  expect(receipt.questions![0]!.rerank).toEqual({ outcome: 'applied', scored: 24, promoted: 2, elapsedMs: 900 });
+  expect(receipt.questions![1]!.rerank).toEqual({ outcome: 'timed_out', scored: 0, promoted: 0, elapsedMs: 5000 });
+  expect(receipt.summary.overall.rerank).toEqual({ applied: 1, timedOut: 1, failed: 0, elapsedMs: 5900, maxElapsedMs: 5000 });
+  expect(receipt.reranker).toBe('cross-encoder:model');
+});
+test('each question reports its steps in order, by number only', async () => {
+  const steps: string[] = [];
+  await runPassageEval({ dataset: { ...dataset, questions: [dataset.questions[0]!, dataset.questions[1]!] }, maxResults: 5, storeCounts: counts, gitSha: 'abc',
+    buildPack: async () => detail(), probeLanes: async () => ({ keyword: 1, vector: null }), judgeQuestion: async () => ({ answers: true, specific: true }),
+    onProgress: (index, total, step) => { steps.push(`${index}/${total} ${step}`); } });
+  expect(steps).toEqual(['1/2 build_pack', '1/2 fit', '1/2 probe_lanes', '1/2 judge', '2/2 build_pack', '2/2 fit']);
 });

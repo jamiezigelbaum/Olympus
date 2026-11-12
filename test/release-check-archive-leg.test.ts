@@ -96,7 +96,8 @@ describe('the words the leg expects', () => {
       expect(messagesWord(fx.expect.messages, fx.expect.family)).toBe('4 notes');
       // A row that counts them as messages is not the notes\' row.
       expect(rowProblems(goodRow(fx), fx.expect)).toEqual([]);
-      expect(rowProblems(goodRow(fx, { text: goodRow(fx).text.replace('4 notes', '4 messages') }), fx.expect)).toEqual([`the row does not say "4 notes"`]);
+      const asMessages = goodRow(fx, { text: goodRow(fx).text.replace('4 notes', '4 messages') });
+      expect(rowProblems(asMessages, fx.expect)).toEqual([`the row does not say "4 notes" (it reads "${asMessages.text.slice(0, 160)}")`]);
     }
   });
 
@@ -414,6 +415,9 @@ describe('an archive imported with the private model on', () => {
     ] as Array<SearchView | undefined>) {
       expect(failing(searchChecks('p', search, agentFx, 'cited'))).toEqual(['p.search']);
     }
+    // A miss carries the result's own notes, so a cut lane or skipped store shows in the report.
+    const missed = searchChecks('p', { ok: true, isError: false, evidence: [], notes: ['The keyword search of WhatsApp ran out of time.'] }, agentFx, 'cited');
+    expect(missed[0]!.detail).toContain("the result's notes: The keyword search of WhatsApp ran out of time.");
   });
 });
 
