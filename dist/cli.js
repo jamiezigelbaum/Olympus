@@ -17347,12 +17347,12 @@ function applyOpenClawPluginRemote(config, env) {
   config.remote = parseRemoteConfig(section.remote);
 }
 function claudeAppEnabled(config) {
-  return config.remote?.claudeAppEnabled === true;
+  return config.remote?.claudeAppEnabled !== false;
 }
 function parseRemoteConfig(remote) {
   const parsed = { enabled: remote.enabled === true };
-  if (remote.claudeAppEnabled !== undefined)
-    parsed.claudeAppEnabled = remote.claudeAppEnabled === true;
+  if (typeof remote.claudeAppEnabled === "boolean")
+    parsed.claudeAppEnabled = remote.claudeAppEnabled;
   for (const key of ["relayHost", "publicBaseUrl"]) {
     const value = remote[key];
     if (typeof value === "string" && value.trim())

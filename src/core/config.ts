@@ -190,7 +190,7 @@ export interface OlympusConfig {
    */
   remote?: {
     enabled: boolean;
-    /** Show the dashboard in Claude custom connectors. Off unless set to true (claudeAppEnabled below); restart the engine after changing. */
+    /** Show the dashboard in Claude custom connectors. On unless set to false (claudeAppEnabled below); restart the engine after changing. */
     claudeAppEnabled?: boolean;
     relayHost?: string;
     publicBaseUrl?: string;
@@ -699,17 +699,18 @@ function applyOpenClawPluginRemote(config: OlympusConfig, env: Record<string, st
 
 /**
  * Whether Claude custom connectors get the dashboard and private panels (#1266).
- * Off unless set to true: with it on, Claude gave no tools in 4 of 9 release-check
- * chats (run 43006900498). It goes back on by default once the Claude leg shows no loss.
+ * On unless set to false. Claude's no-tools chats come at the same rate with it
+ * off (9 of 17) and on (10 of 18, runs 43006900498 and 43265678631), so the
+ * switch is not their cause (2026-11-12).
  */
 export function claudeAppEnabled(config: Pick<OlympusConfig, 'remote'>): boolean {
-  return config.remote?.claudeAppEnabled === true;
+  return config.remote?.claudeAppEnabled !== false;
 }
 
 /** The `remote` plugin-config section, kept to its known fields. */
 export function parseRemoteConfig(remote: Record<string, unknown>): NonNullable<OlympusConfig['remote']> {
   const parsed: NonNullable<OlympusConfig['remote']> = { enabled: remote.enabled === true };
-  if (remote.claudeAppEnabled !== undefined) parsed.claudeAppEnabled = remote.claudeAppEnabled === true;
+  if (typeof remote.claudeAppEnabled === 'boolean') parsed.claudeAppEnabled = remote.claudeAppEnabled;
   for (const key of ['relayHost', 'publicBaseUrl'] as const) {
     const value = remote[key];
     if (typeof value === 'string' && value.trim()) parsed[key] = value.trim();
