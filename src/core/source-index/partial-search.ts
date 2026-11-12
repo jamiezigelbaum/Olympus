@@ -19,9 +19,7 @@ export function semanticTimeoutGap(corpusId: string): string {
 
 /** The source a `semanticTimeoutGap` names, or undefined for any other gap. */
 export function semanticTimeoutGapCorpus(gap: string): string | undefined {
-  if (!gap.startsWith(PREFIX)) return undefined;
-  const end = gap.indexOf(';', PREFIX.length);
-  return end > PREFIX.length ? gap.slice(PREFIX.length, end) : undefined;
+  return gapCorpus(PREFIX, gap);
 }
 
 /** The coverage gap for a source whose whole lane ran out of time and was left out of the answer. */
@@ -43,10 +41,24 @@ export function recentItemsTimeoutGap(corpusId: string): string {
   return `${RECENT_PREFIX}${corpusId}; its newest items may be missing from this search. Ask again in a moment.`;
 }
 
-function recentItemsTimeoutGapCorpus(gap: string): string | undefined {
-  if (!gap.startsWith(RECENT_PREFIX)) return undefined;
-  const end = gap.indexOf(';', RECENT_PREFIX.length);
-  return end > RECENT_PREFIX.length ? gap.slice(RECENT_PREFIX.length, end) : undefined;
+// A source whose matches the visibility gate could not judge (#1460): its tier
+// ledger's read found the read pool busy or failed, so its matches were left
+// out of this search, failing closed. The gate reports the corpus; the router
+// carries it as a lane_timeout degradation on that source's visibility lane.
+export const VISIBILITY_CHECK_CUT_SHORT = 'visibility_check_cut_short';
+
+const UNCHECKED_PREFIX = 'Ran out of time checking the privacy of matches in ';
+
+/** The coverage gap for a source whose matches were left out because their privacy could not be checked in time. */
+export function visibilityCheckTimeoutGap(corpusId: string): string {
+  return `${UNCHECKED_PREFIX}${corpusId}; they were left out of this search. Ask again in a moment.`;
+}
+
+/** The corpus a gap that starts with `prefix` names, up to its first ';'. */
+function gapCorpus(prefix: string, gap: string): string | undefined {
+  if (!gap.startsWith(prefix)) return undefined;
+  const end = gap.indexOf(';', prefix.length);
+  return end > prefix.length ? gap.slice(prefix.length, end) : undefined;
 }
 
 export interface TimedOutCorpora {
@@ -56,6 +68,8 @@ export interface TimedOutCorpora {
   partlySearched: string[];
   /** Searched, but the read of their newest items ran out of time. */
   newestMissed: string[];
+  /** Searched, but some matches were left out because their privacy could not be checked in time. */
+  unchecked: string[];
 }
 
 /** The sources a search cut short, from the evidence pack's coverage. */
@@ -68,17 +82,24 @@ export function timedOutCorpora(coverage: {
   const stillSearching = [...new Set(coverage.skippedCorpora
     .filter((skip) => skip.reason === 'lane_timeout' && !searched.has(skip.corpusId))
     .map((skip) => skip.corpusId))].sort();
-  const partlySearched = [...new Set(coverage.extractionGaps
-    .map(semanticTimeoutGapCorpus)
+  const named = (corpusOf: (gap: string) => string | undefined) => [...new Set(coverage.extractionGaps
+    .map(corpusOf)
     .filter((corpusId): corpusId is string => corpusId !== undefined && !stillSearching.includes(corpusId)))].sort();
-  const newestMissed = [...new Set(coverage.extractionGaps
-    .map(recentItemsTimeoutGapCorpus)
-    .filter((corpusId): corpusId is string => corpusId !== undefined && !stillSearching.includes(corpusId)))].sort();
-  return { stillSearching, partlySearched, newestMissed };
+  return {
+    stillSearching,
+    partlySearched: named(semanticTimeoutGapCorpus),
+    newestMissed: named((gap) => gapCorpus(RECENT_PREFIX, gap)),
+    unchecked: named((gap) => gapCorpus(UNCHECKED_PREFIX, gap)),
+  };
 }
 
 /** One coverage note per source a search cut short, naming it by corpus. */
 export function timedOutCoverageNotes(coverage: Parameters<typeof timedOutCorpora>[0]): string[] {
-  const { stillSearching, partlySearched, newestMissed } = timedOutCorpora(coverage);
-  return [...stillSearching.map(laneTimeoutGap), ...partlySearched.map(semanticTimeoutGap), ...newestMissed.map(recentItemsTimeoutGap)];
+  const { stillSearching, partlySearched, newestMissed, unchecked } = timedOutCorpora(coverage);
+  return [
+    ...stillSearching.map(laneTimeoutGap),
+    ...partlySearched.map(semanticTimeoutGap),
+    ...newestMissed.map(recentItemsTimeoutGap),
+    ...unchecked.map(visibilityCheckTimeoutGap),
+  ];
 }

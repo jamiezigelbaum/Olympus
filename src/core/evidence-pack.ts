@@ -1,5 +1,5 @@
 import { withKeywordRequestScope } from './source-index/keyword-context.ts';
-import { RECENT_ITEMS_CUT_SHORT, recentItemsTimeoutGap, semanticSearchTimedOut, semanticTimeoutGap } from './source-index/partial-search.ts';
+import { RECENT_ITEMS_CUT_SHORT, VISIBILITY_CHECK_CUT_SHORT, recentItemsTimeoutGap, semanticSearchTimedOut, semanticTimeoutGap, visibilityCheckTimeoutGap } from './source-index/partial-search.ts';
 import {
   rerankCandidates,
   rerankPassage,
@@ -1075,27 +1075,36 @@ export function semanticLaneSkippedGap(corpusId: string, detail: string | undefi
     + `${detail ? ` (${detail})` : ''}; only keyword matches were searched, so related items may be missing.`;
 }
 
+// The lane timeouts that leave a source searched but cut short, by the
+// degradation detail the router gives them: the lane suffix it names and the
+// gap that says so (#1460).
+const CUT_SHORT_LANES: ReadonlyMap<string, { suffix: string; gap: (corpusId: string) => string }> = new Map([
+  [RECENT_ITEMS_CUT_SHORT, { suffix: ':recency', gap: recentItemsTimeoutGap }],
+  [VISIBILITY_CHECK_CUT_SHORT, { suffix: ':visibility', gap: visibilityCheckTimeoutGap }],
+]);
+
 function laneCutShortGaps(
   degradations: readonly RetrievalDegradation[],
   input: BuildEvidencePackInput,
 ): string[] {
   const gaps: string[] = [];
   const seen = new Set<string>();
-  const newestSeen = new Set<string>();
   for (const degradation of degradations) {
-    const newest = degradation.reason === 'lane_timeout' && degradation.detail === RECENT_ITEMS_CUT_SHORT;
-    if (degradation.reason !== 'semantic_lane_skipped' && !newest) continue;
-    const suffix = newest ? ':recency' : ':semantic';
+    const cut = degradation.reason === 'lane_timeout' && degradation.detail !== undefined
+      ? CUT_SHORT_LANES.get(degradation.detail)
+      : undefined;
+    if (degradation.reason !== 'semantic_lane_skipped' && !cut) continue;
+    const suffix = cut?.suffix ?? ':semantic';
     const corpusId = degradation.laneName.endsWith(suffix)
       ? degradation.laneName.slice(0, -suffix.length)
       : degradation.laneName;
     // A rebuild that leaves secure content out leaves its lanes' notes out too.
     if (input.excludeSecureSensitivity && input.registry.get(corpusId)?.trustDomain === 'secure_local') continue;
-    // A source whose read of its newest items ran out of time is named too (#1460).
-    const named = newest ? newestSeen : seen;
-    if (named.has(corpusId)) continue;
-    named.add(corpusId);
-    gaps.push(newest ? recentItemsTimeoutGap(corpusId) : semanticLaneSkippedGap(corpusId, degradation.detail));
+    // Each source is named once per kind of cut (#1460).
+    const key = `${suffix}\u0000${corpusId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    gaps.push(cut ? cut.gap(corpusId) : semanticLaneSkippedGap(corpusId, degradation.detail));
   }
   return gaps;
 }

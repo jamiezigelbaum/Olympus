@@ -1071,3 +1071,10 @@ per-item hold (`holdContentUntilJudged`); see the change log.
   router records the one lane as a `lane_timeout` degradation with detail
   `recent_items_cut_short`. Search results carry every such note too, beside
   the answers that already did (#1459). No frozen interface changed shape.
+- 2026-11-12 (no version change, #1460): a tiered source whose matches the
+  search's visibility gate cannot judge (its tier ledger's read finds the read
+  pool busy, or fails) still fails closed, and now adds one
+  `coverage.extractionGaps` entry naming the corpus. The gate reports those
+  corpora through an optional `report.onUnchecked` argument; the router
+  records each as a `lane_timeout` degradation on `<corpus>:visibility` with
+  detail `visibility_check_cut_short`. No frozen interface changed shape.

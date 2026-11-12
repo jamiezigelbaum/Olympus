@@ -30057,10 +30057,7 @@ function semanticTimeoutGap(corpusId) {
   return `${PREFIX}${corpusId}; only its keyword matches were searched, so related items may be missing. Ask again in a moment.`;
 }
 function semanticTimeoutGapCorpus(gap) {
-  if (!gap.startsWith(PREFIX))
-    return;
-  const end = gap.indexOf(";", PREFIX.length);
-  return end > PREFIX.length ? gap.slice(PREFIX.length, end) : undefined;
+  return gapCorpus(PREFIX, gap);
 }
 function laneTimeoutGap(corpusId) {
   return `Ran out of time searching ${corpusId}; it is not part of this answer, so more may be there. Ask again in a moment.`;
@@ -30068,24 +30065,36 @@ function laneTimeoutGap(corpusId) {
 function recentItemsTimeoutGap(corpusId) {
   return `${RECENT_PREFIX}${corpusId}; its newest items may be missing from this search. Ask again in a moment.`;
 }
-function recentItemsTimeoutGapCorpus(gap) {
-  if (!gap.startsWith(RECENT_PREFIX))
+function visibilityCheckTimeoutGap(corpusId) {
+  return `${UNCHECKED_PREFIX}${corpusId}; they were left out of this search. Ask again in a moment.`;
+}
+function gapCorpus(prefix, gap) {
+  if (!gap.startsWith(prefix))
     return;
-  const end = gap.indexOf(";", RECENT_PREFIX.length);
-  return end > RECENT_PREFIX.length ? gap.slice(RECENT_PREFIX.length, end) : undefined;
+  const end = gap.indexOf(";", prefix.length);
+  return end > prefix.length ? gap.slice(prefix.length, end) : undefined;
 }
 function timedOutCorpora(coverage) {
   const searched = new Set(coverage.searchedCorpora);
   const stillSearching = [...new Set(coverage.skippedCorpora.filter((skip) => skip.reason === "lane_timeout" && !searched.has(skip.corpusId)).map((skip) => skip.corpusId))].sort();
-  const partlySearched = [...new Set(coverage.extractionGaps.map(semanticTimeoutGapCorpus).filter((corpusId) => corpusId !== undefined && !stillSearching.includes(corpusId)))].sort();
-  const newestMissed = [...new Set(coverage.extractionGaps.map(recentItemsTimeoutGapCorpus).filter((corpusId) => corpusId !== undefined && !stillSearching.includes(corpusId)))].sort();
-  return { stillSearching, partlySearched, newestMissed };
+  const named = (corpusOf) => [...new Set(coverage.extractionGaps.map(corpusOf).filter((corpusId) => corpusId !== undefined && !stillSearching.includes(corpusId)))].sort();
+  return {
+    stillSearching,
+    partlySearched: named(semanticTimeoutGapCorpus),
+    newestMissed: named((gap) => gapCorpus(RECENT_PREFIX, gap)),
+    unchecked: named((gap) => gapCorpus(UNCHECKED_PREFIX, gap))
+  };
 }
 function timedOutCoverageNotes(coverage) {
-  const { stillSearching, partlySearched, newestMissed } = timedOutCorpora(coverage);
-  return [...stillSearching.map(laneTimeoutGap), ...partlySearched.map(semanticTimeoutGap), ...newestMissed.map(recentItemsTimeoutGap)];
+  const { stillSearching, partlySearched, newestMissed, unchecked } = timedOutCorpora(coverage);
+  return [
+    ...stillSearching.map(laneTimeoutGap),
+    ...partlySearched.map(semanticTimeoutGap),
+    ...newestMissed.map(recentItemsTimeoutGap),
+    ...unchecked.map(visibilityCheckTimeoutGap)
+  ];
 }
-var SEMANTIC_TIMEOUT_REASONS, PREFIX = "Ran out of time searching by meaning: ", RECENT_ITEMS_CUT_SHORT = "recent_items_cut_short", RECENT_PREFIX = "Ran out of time reading the newest items in ";
+var SEMANTIC_TIMEOUT_REASONS, PREFIX = "Ran out of time searching by meaning: ", RECENT_ITEMS_CUT_SHORT = "recent_items_cut_short", RECENT_PREFIX = "Ran out of time reading the newest items in ", VISIBILITY_CHECK_CUT_SHORT = "visibility_check_cut_short", UNCHECKED_PREFIX = "Ran out of time checking the privacy of matches in ";
 var init_partial_search = __esm(() => {
   SEMANTIC_TIMEOUT_REASONS = new Set(["vector_scan_deadline_exceeded", "vector_scan_store_busy"]);
 });
@@ -76646,8 +76655,8 @@ var init_parent_label = __esm(() => {
 });
 
 // src/core/source-index/router.ts
-function applySourceIndexVisibilityGate(gate, hits) {
-  return gate.offThread ? gate.offThread(hits) : Promise.resolve(gate(hits));
+function applySourceIndexVisibilityGate(gate, hits, report) {
+  return gate.offThread ? gate.offThread(hits, report) : Promise.resolve(gate(hits, report));
 }
 function laneTimeoutWithinDeadline(laneTimeoutMs, deadlineAtMs, now = Date.now()) {
   if (deadlineAtMs === undefined || !Number.isFinite(deadlineAtMs))
@@ -76813,9 +76822,17 @@ async function routePreparedSourceIndexSearch(options) {
   }
   const lanesSettledAt = Date.now();
   if (options.visibilityGate) {
-    const kept = new Set(await applySourceIndexVisibilityGate(options.visibilityGate, lanes.flatMap((lane) => lane.items)));
+    const unchecked = new Set;
+    const kept = new Set(await applySourceIndexVisibilityGate(options.visibilityGate, lanes.flatMap((lane) => lane.items), {
+      onUnchecked: (corpusIds) => {
+        for (const corpusId of corpusIds)
+          unchecked.add(corpusId);
+      }
+    }));
     for (const lane of lanes)
       lane.items = lane.items.filter((hit) => kept.has(hit));
+    for (const corpusId of [...unchecked].sort())
+      degradations.push(visibilityCheckDegradation(corpusId));
   }
   const laneOrder = storeOrderForQuestion(lanes);
   const fusedAll = fuseRankedCandidateLanes({
@@ -76910,6 +76927,15 @@ function recentItemsLaneDegradation(corpusId, response) {
     laneType: cut.laneType,
     reason: "lane_timeout",
     detail: RECENT_ITEMS_CUT_SHORT,
+    occurrences: 1
+  };
+}
+function visibilityCheckDegradation(corpusId) {
+  return {
+    laneName: `${corpusId}:visibility`,
+    laneType: "keyword",
+    reason: "lane_timeout",
+    detail: VISIBILITY_CHECK_CUT_SHORT,
     occurrences: 1
   };
 }
@@ -77637,20 +77663,19 @@ function semanticLaneSkippedGap(corpusId, detail) {
 function laneCutShortGaps(degradations, input) {
   const gaps = [];
   const seen = new Set;
-  const newestSeen = new Set;
   for (const degradation of degradations) {
-    const newest = degradation.reason === "lane_timeout" && degradation.detail === RECENT_ITEMS_CUT_SHORT;
-    if (degradation.reason !== "semantic_lane_skipped" && !newest)
+    const cut = degradation.reason === "lane_timeout" && degradation.detail !== undefined ? CUT_SHORT_LANES.get(degradation.detail) : undefined;
+    if (degradation.reason !== "semantic_lane_skipped" && !cut)
       continue;
-    const suffix = newest ? ":recency" : ":semantic";
+    const suffix = cut?.suffix ?? ":semantic";
     const corpusId = degradation.laneName.endsWith(suffix) ? degradation.laneName.slice(0, -suffix.length) : degradation.laneName;
     if (input.excludeSecureSensitivity && input.registry.get(corpusId)?.trustDomain === "secure_local")
       continue;
-    const named = newest ? newestSeen : seen;
-    if (named.has(corpusId))
+    const key2 = `${suffix}\x00${corpusId}`;
+    if (seen.has(key2))
       continue;
-    named.add(corpusId);
-    gaps.push(newest ? recentItemsTimeoutGap(corpusId) : semanticLaneSkippedGap(corpusId, degradation.detail));
+    seen.add(key2);
+    gaps.push(cut ? cut.gap(corpusId) : semanticLaneSkippedGap(corpusId, degradation.detail));
   }
   return gaps;
 }
@@ -77703,7 +77728,7 @@ function trustDomainRank2(trustDomain) {
     return 1;
   return 2;
 }
-var SOURCE_MODEL_POLICY_GAP_SUFFIX = "excluded one candidate from model use under current source policy.", MIN_BYTES_PER_CANDIDATE = 400, utf8, MAX_SEARCH_QUERIES = 3, MIN_EXPANSION_BUDGET_MS = 1000;
+var SOURCE_MODEL_POLICY_GAP_SUFFIX = "excluded one candidate from model use under current source policy.", MIN_BYTES_PER_CANDIDATE = 400, utf8, MAX_SEARCH_QUERIES = 3, MIN_EXPANSION_BUDGET_MS = 1000, CUT_SHORT_LANES;
 var init_evidence_pack = __esm(() => {
   init_keyword_context();
   init_partial_search();
@@ -77714,6 +77739,10 @@ var init_evidence_pack = __esm(() => {
   init_types();
   init_answer_latency_trace();
   utf8 = new TextEncoder;
+  CUT_SHORT_LANES = new Map([
+    [RECENT_ITEMS_CUT_SHORT, { suffix: ":recency", gap: recentItemsTimeoutGap }],
+    [VISIBILITY_CHECK_CUT_SHORT, { suffix: ":visibility", gap: visibilityCheckTimeoutGap }]
+  ]);
 });
 
 // src/core/release-manifest.ts
@@ -210336,11 +210365,20 @@ function childLane(scope) {
 function createTierVisibilityGate(scopes, onHeldMatches) {
   const readOptions = { personalFirst: onHeldMatches !== undefined };
   const governedBy = (scope, hits) => hits.filter((hit) => scope.corpusIds.has(hit.corpusId));
-  const gate = (hits) => {
+  const unreadCorpora = (governed, unread) => {
+    for (const hit of governed)
+      unread.add(hit.corpusId);
+  };
+  const reportUnread = (unread, report) => {
+    if (unread.size > 0)
+      report?.onUnchecked?.([...unread].sort());
+  };
+  const gate = (hits, report) => {
     const current2 = scopes();
     if (current2.length === 0 || hits.length === 0)
       return hits;
     const reads = new Map;
+    const unread = new Set;
     for (const scope of current2) {
       const governed = governedBy(scope, hits);
       if (governed.length === 0)
@@ -210349,16 +210387,20 @@ function createTierVisibilityGate(scopes, onHeldMatches) {
         reads.set(scope, ledgerVisibilityHere(scope.ledger, governed.map((hit) => hit.sourceItem), readOptions));
       } catch {
         reads.set(scope, undefined);
+        unreadCorpora(governed, unread);
       }
     }
-    return visibilityHere(judgeVisibility(current2, hits, reads, onHeldMatches));
+    const visible = visibilityHere(judgeVisibility(current2, hits, reads, onHeldMatches));
+    reportUnread(unread, report);
+    return visible;
   };
-  gate.offThread = async (hits) => {
+  gate.offThread = async (hits, report) => {
     if (scopes().length === 0 || hits.length === 0)
       return hits;
-    return judgedAwaited(() => judgedOffThread(hits), () => gate(hits));
+    return judgedAwaited(() => judgedOffThread(hits, report), () => gate(hits, report));
   };
-  const judgedOffThread = async (hits) => {
+  const judgedOffThread = async (hits, report) => {
+    const unread = new Set;
     const current2 = scopes();
     const reads = new Map;
     const unchanged = new Map;
@@ -210381,6 +210423,8 @@ function createTierVisibilityGate(scopes, onHeldMatches) {
       } catch (error2) {
         if (error2 instanceof VisibilityChangedError)
           changedDuringRead = true;
+        else
+          unreadCorpora(governed, unread);
         reads.set(scope, undefined);
       }
     }));
@@ -210394,6 +210438,7 @@ function createTierVisibilityGate(scopes, onHeldMatches) {
     });
     if (changed)
       throw new VisibilityChangedError;
+    reportUnread(unread, report);
     return visible;
   };
   return gate;

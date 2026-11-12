@@ -9239,6 +9239,16 @@ function compactPassageWhitespace(text2) {
 
 // src/core/source-index/partial-search.ts
 var SEMANTIC_TIMEOUT_REASONS = new Set(["vector_scan_deadline_exceeded", "vector_scan_store_busy"]);
+var RECENT_ITEMS_CUT_SHORT = "recent_items_cut_short";
+var RECENT_PREFIX = "Ran out of time reading the newest items in ";
+function recentItemsTimeoutGap(corpusId) {
+  return `${RECENT_PREFIX}${corpusId}; its newest items may be missing from this search. Ask again in a moment.`;
+}
+var VISIBILITY_CHECK_CUT_SHORT = "visibility_check_cut_short";
+var UNCHECKED_PREFIX = "Ran out of time checking the privacy of matches in ";
+function visibilityCheckTimeoutGap(corpusId) {
+  return `${UNCHECKED_PREFIX}${corpusId}; they were left out of this search. Ask again in a moment.`;
+}
 
 // src/core/evidence-versions.ts
 var DOCUMENT_FAMILIES = new Set(["file", "note"]);
@@ -36572,6 +36582,10 @@ function normalizeRouterResultKey(key2) {
 
 // src/core/evidence-pack.ts
 var utf8 = new TextEncoder;
+var CUT_SHORT_LANES = new Map([
+  [RECENT_ITEMS_CUT_SHORT, { suffix: ":recency", gap: recentItemsTimeoutGap }],
+  [VISIBILITY_CHECK_CUT_SHORT, { suffix: ":visibility", gap: visibilityCheckTimeoutGap }]
+]);
 
 // src/core/release-manifest.ts
 import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";

@@ -7620,7 +7620,13 @@ function isExecutableFile(path) {
 }
 var init_openclaw_executable = () => {};
 // src/core/source-index/partial-search.ts
-var SEMANTIC_TIMEOUT_REASONS;
+function recentItemsTimeoutGap(corpusId) {
+  return `${RECENT_PREFIX}${corpusId}; its newest items may be missing from this search. Ask again in a moment.`;
+}
+function visibilityCheckTimeoutGap(corpusId) {
+  return `${UNCHECKED_PREFIX}${corpusId}; they were left out of this search. Ask again in a moment.`;
+}
+var SEMANTIC_TIMEOUT_REASONS, RECENT_ITEMS_CUT_SHORT = "recent_items_cut_short", RECENT_PREFIX = "Ran out of time reading the newest items in ", VISIBILITY_CHECK_CUT_SHORT = "visibility_check_cut_short", UNCHECKED_PREFIX = "Ran out of time checking the privacy of matches in ";
 var init_partial_search = __esm(() => {
   SEMANTIC_TIMEOUT_REASONS = new Set(["vector_scan_deadline_exceeded", "vector_scan_store_busy"]);
 });
@@ -21313,7 +21319,7 @@ var init_analyst_openclaw_infer = __esm(() => {
 var init_evidence_reranker = () => {};
 
 // src/core/evidence-pack.ts
-var utf8;
+var utf8, CUT_SHORT_LANES;
 var init_evidence_pack = __esm(() => {
   init_keyword_context();
   init_partial_search();
@@ -21324,6 +21330,10 @@ var init_evidence_pack = __esm(() => {
   init_types();
   init_answer_latency_trace();
   utf8 = new TextEncoder;
+  CUT_SHORT_LANES = new Map([
+    [RECENT_ITEMS_CUT_SHORT, { suffix: ":recency", gap: recentItemsTimeoutGap }],
+    [VISIBILITY_CHECK_CUT_SHORT, { suffix: ":visibility", gap: visibilityCheckTimeoutGap }]
+  ]);
 });
 
 // src/workers/source-index/analyst-pool.ts
