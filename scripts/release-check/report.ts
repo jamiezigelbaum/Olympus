@@ -141,6 +141,21 @@ export interface MachineReport {
   upgrade?: UpgradeReport;
   /** The AI reviewer's findings (reviewer.ts), added after the run; advisory, so they never change the verdict. */
   review?: ReviewResult;
+  /** Observations only; these numbers never affect the verdict. */
+  archiveScale?: ArchiveScaleMeasurement[];
+}
+
+export interface ArchiveScaleMeasurement {
+  format: string;
+  wallMs: number;
+  items: number;
+  itemsPerMinute: number;
+  /** Peak sampled sum of the front and background RSS (not the harness/browser). */
+  peakRssBytes: number | null;
+  frontP50Ms: number | null;
+  frontP95Ms: number | null;
+  frontSamples: number;
+  frontFailures: number;
 }
 
 export interface ReleaseReportInput {
@@ -161,7 +176,7 @@ export interface ReleaseReportInput {
    */
   carry?: CarryRecord;
   /** Settings the run turned on in the install under test that are off by default (`run.ts --engine-split`). */
-  settings?: { engineSplit?: boolean };
+  settings?: { engineSplit?: boolean; archiveScale?: boolean };
 }
 
 export interface CarryRecord {
@@ -450,7 +465,7 @@ function machineSection(machine: MachineReport): string {
   const verdicts = phaseVerdicts(machine);
   if (!machine.upgrade) {
     return head
-      + timingsLine(machine.timings)
+      + timingsLine(machine.timings) + archiveScaleSection(machine.archiveScale)
       + `<h3>Machine checks</h3>${checkTable(machine.checks)}`
       + `<h3>Agents</h3>${machine.agents.map(agentSection).join('') || '<p class="muted">No agents.</p>'}`
       + `<h3>Dashboard screenshots</h3>${screenshotGrid(machine.screenshots)}`
@@ -471,12 +486,21 @@ function machineSection(machine: MachineReport): string {
     + `<h3>What differs across the upgrade</h3>${differencesTable(step.differences)}`
     + `<h2>3. After the upgrade: ${escapeHtml(machine.upgrade.afterLabel)} ${badge(verdicts[2]!.verdict)}</h2>`
     + `<p class="muted">${machine.upgrade.afterVersion ? `version ${escapeHtml(machine.upgrade.afterVersion)}` : ''}${machine.build ? ` · build ${escapeHtml(machine.build)}` : ''}</p>`
-    + timingsLine(machine.timings)
+    + timingsLine(machine.timings) + archiveScaleSection(machine.archiveScale)
     + `<h3>Machine checks</h3>${checkTable(machine.checks)}`
     + `<h3>Agents</h3>${machine.agents.map(agentSection).join('') || '<p class="muted">No agents.</p>'}`
     + `<h3>Dashboard screenshots</h3>${screenshotGrid(machine.screenshots)}`
     + traceSections(machine.traces) + exploreSection(machine.explore) + visualSection(machine.visual) + reviewSection(machine.review)
     + `<h3>Logs</h3>${fileLinks(from.logs)}${fileLinks(machine.logs)}</section>`;
+}
+
+function archiveScaleSection(measurements: ArchiveScaleMeasurement[] | undefined): string {
+  if (!measurements?.length) return '';
+  const ms = (value: number | null): string => value === null ? 'unavailable' : `${value.toFixed(1)} ms`;
+  return '<h3>Archive scale measurements</h3><p class="muted">Observations, without pass/fail thresholds. Front status sampled every 2 s; dashboard progress every 10 s. RSS is the peak sampled sum of engine processes.</p>'
+    + '<table><thead><tr><th>Format</th><th>Items</th><th>Wall time</th><th>Items/min</th><th>Peak engine RSS</th><th>Front p50 / p95</th><th>Requests / failed</th></tr></thead><tbody>'
+    + measurements.map(m => `<tr><td>${escapeHtml(m.format)}</td><td>${m.items}</td><td>${(m.wallMs / 1000).toFixed(1)} s</td><td>${m.itemsPerMinute.toFixed(1)}</td><td>${m.peakRssBytes === null ? 'unavailable' : `${(m.peakRssBytes / 1024 / 1024).toFixed(1)} MiB`}</td><td>${ms(m.frontP50Ms)} / ${ms(m.frontP95Ms)}</td><td>${m.frontSamples} / ${m.frontFailures}</td></tr>`).join('')
+    + '</tbody></table>';
 }
 
 const STYLE = `

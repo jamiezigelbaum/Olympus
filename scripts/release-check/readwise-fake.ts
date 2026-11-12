@@ -12,6 +12,7 @@
  *   bun readwise-fake.ts [--port 18771] [--token <value>]
  */
 import { FIXTURE_ITEMS, fixtureDocuments, type FixtureDocument } from './fixture.ts';
+import type { ReadwiseExportBook, ReadwiseReaderDocument } from '../../src/workers/readwise/api.ts';
 
 export const FAKE_READWISE_PORT = 18771;
 export const FAKE_READWISE_TOKEN = 'release-check-synthetic-token';
@@ -19,7 +20,12 @@ export const FAKE_READWISE_TOKEN = 'release-check-synthetic-token';
 export interface FakeReadwiseOptions {
   port?: number;
   token?: string;
-  documents?: readonly FixtureDocument[];
+  documents?: readonly (FixtureDocument | ReadwiseReaderDocument)[];
+  books?: readonly ReadwiseExportBook[];
+  /** Omitted for the ordinary, single-page test life. */
+  pageSize?: number;
+  /** One export request is throttled, then succeeds on retry. */
+  retryOnce?: boolean;
 }
 
 /** The request log never holds the token or any document text, only route names. */
@@ -33,6 +39,8 @@ export function startFakeReadwise(options: FakeReadwiseOptions = {}): FakeReadwi
   const token = options.token ?? FAKE_READWISE_TOKEN;
   const documents = options.documents ?? fixtureDocuments(FIXTURE_ITEMS);
   const requests: string[] = [];
+  const books = options.books ?? [];
+  let throttled = false;
   const server = Bun.serve({
     hostname: '127.0.0.1',
     port: options.port ?? FAKE_READWISE_PORT,
@@ -41,8 +49,18 @@ export function startFakeReadwise(options: FakeReadwiseOptions = {}): FakeReadwi
       requests.push(`${request.method} ${url.pathname}`);
       if (request.headers.get('authorization') !== `Token ${token}`) return new Response('unauthorized', { status: 401 });
       if (url.pathname === '/api/v2/auth/') return new Response(null, { status: 204 });
-      if (url.pathname === '/api/v3/list/') return Response.json({ count: documents.length, results: documents });
-      if (url.pathname === '/api/v2/export/') return Response.json({ count: 0, results: [] });
+      if (url.pathname === '/api/v3/list/' || url.pathname === '/api/v2/export/') {
+        if (options.retryOnce && !throttled && url.pathname === '/api/v2/export/') {
+          throttled = true;
+          return new Response('synthetic rate limit', { status: 429, headers: { 'retry-after': '1' } });
+        }
+        const rows = url.pathname === '/api/v3/list/' ? documents : books;
+        const start = Number(url.searchParams.get('pageCursor') ?? 0);
+        if (!Number.isSafeInteger(start) || start < 0 || start > rows.length) return new Response('bad cursor', { status: 400 });
+        const size = Math.max(1, Math.min(options.pageSize ?? Math.max(1, rows.length), Number(url.searchParams.get('limit')) || Infinity));
+        const end = Math.min(start + size, rows.length);
+        return Response.json({ count: rows.length, results: rows.slice(start, end), ...(end < rows.length ? { nextPageCursor: String(end) } : {}) });
+      }
       return new Response('not found', { status: 404 });
     },
   });
