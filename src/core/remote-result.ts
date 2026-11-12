@@ -1,3 +1,4 @@
+import { parseSourceItemReadResult, SOURCE_ITEM_READ_REFUSALS } from './source-item-read.ts';
 /**
  * What a remote agent receives: the output boundary of the `remote` operation
  * surface (`/mcp` for non-ChatGPT connections, and `POST /api/v1/tools/<name>`),
@@ -40,7 +41,7 @@ import { withoutSecretLocationCoverageNotes } from './secret-location-note.ts';
 import { privacyBacklogCoverageNote } from './privacy-backlog-coverage.ts';
 
 /** The operations the remote surface serves (core/public-surface.ts V0_4_PUBLIC_REMOTE_MCP_TOOLS). */
-export type RemoteOperationName = 'source_answer' | 'source_answer_result' | 'source_index_status' | 'ask_anonymously';
+export type RemoteOperationName = 'source_answer' | 'source_answer_result' | 'source_index_status' | 'ask_anonymously' | 'source_item_read';
 
 export interface RemoteOutputOptions {
   /** Global count of items awaiting privacy judgment; never item metadata. */
@@ -317,6 +318,21 @@ export function remoteOperationOutput(
     case 'source_answer_result':
       // Two families: a handed-off source_answer or a handed-off ask_anonymously.
       return pending ?? (isAnonymousAnswerResult(raw) ? anonymousAnswerOutput(raw) : sourceAnswerOutput(raw, options));
+    case 'source_item_read': {
+      const result = parseSourceItemReadResult(raw);
+      if (result.pages.length > 0) {
+        const inputs = (options.releaseManifests ?? []).flatMap(manifest => manifest.inputs);
+        if (inputs.length !== 1 || inputs[0]!.layer === 'names' || !options.releaseCheck) {
+          throw new OperationError('email_policy_violation', 'Current item privacy could not be verified.');
+        }
+        const verdicts = options.releaseCheck.inputs(inputs);
+        if (verdicts.length !== 1 || verdicts[0]!.gone || verdicts[0]!.tier !== 'public_or_personal') {
+          throw new OperationError('not_personal', 'Private item: ask with source_answer');
+        }
+      }
+      if (result.pages.some(page => secretLabelsInText(page.text).length > 0)) throw new OperationError('email_policy_violation', 'Item text withheld.');
+      return { ...result };
+    }
     case 'source_index_status':
       return sourceIndexStatusOutput(raw);
     default:
@@ -618,6 +634,7 @@ export type RemoteErrorCode =
   | 'olympus_offline';
 
 const REMOTE_ERROR_TEXT: Readonly<Record<RemoteErrorCode, string>> = {
+  not_personal: 'Private item: ask with source_answer',
   invalid_params: 'The request was not valid. Check the arguments against the tool\'s schema and try again.',
   invalid_request: 'The request was not valid. Check the arguments against the tool\'s schema and try again.',
   unsupported_filter: 'That filter is not supported here.',
@@ -936,6 +953,16 @@ export const REMOTE_OUTPUT_SCHEMAS: Readonly<Record<RemoteOperationName, Record<
   },
   ask_anonymously: { oneOf: [ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, PENDING_SCHEMA] },
   source_index_status: SOURCE_INDEX_STATUS_SCHEMA,
+  source_item_read: {
+    type: 'object', additionalProperties: false, required: ['pages', 'totalPages', 'totalChars', 'couldNotRead'],
+    properties: {
+      pages: { type: 'array', maxItems: 3, items: { type: 'object', additionalProperties: false, required: ['page', 'text'],
+        properties: { page: { type: 'integer', minimum: 1 }, text: { type: 'string', maxLength: 12000 } } } },
+      nextPage: { type: 'integer', minimum: 1 }, totalPages: { type: 'integer', minimum: 0 }, totalChars: { type: 'integer', minimum: 0 },
+      couldNotRead: { type: 'array', items: { type: 'string', enum: [...SOURCE_ITEM_READ_REFUSALS] } },
+      etaSeconds: { type: 'integer', minimum: 0 },
+    },
+  },
 };
 
 export function remoteOutputSchema(operation: string): Record<string, unknown> | undefined {

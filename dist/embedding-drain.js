@@ -1669,6 +1669,7 @@ var V0_4_PUBLIC_NATIVE_TOOLS = [
   "argus_complete",
   "source_answer",
   "source_index_status",
+  "source_item_read",
   "source_index_search",
   "source_watch_create",
   "source_watches",
@@ -1688,6 +1689,7 @@ var V0_4_PUBLIC_MCP_TOOLS = [
   "source_answer",
   "source_answer_result",
   "source_index_status",
+  "source_item_read",
   "source_index_search",
   "olympus_doctor",
   "olympus_setup_status",
@@ -1702,6 +1704,7 @@ var V0_4_PUBLIC_CLI_OPERATIONS = [
   "argus_complete",
   "source_answer",
   "source_index_status",
+  "source_item_read",
   "source_index_search",
   "olympus_doctor",
   "olympus_setup_status",
@@ -23086,6 +23089,436 @@ function ensureOwnerOnlyDir(dir) {
   chmodSync6(dir, 448);
 }
 
+// src/core/release-manifest.ts
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+var RELEASE_CHUNK_JUDGE_BUDGET_MS = 8000;
+function chunkCoverageNote(result) {
+  return result.withheldPassages > 0 ? `${result.withheldPassages} passages from ${result.withheldDocuments} documents are still being checked for privacy and weren't shared. Ask again in a minute.` : undefined;
+}
+async function checkReleaseChunks(check, inputs, options) {
+  try {
+    const result = await check?.chunks?.(inputs, options);
+    if (result && result.allowed.length === inputs.length)
+      return result;
+  } catch {}
+  return {
+    allowed: inputs.map(() => []),
+    withheldPassages: inputs.reduce((n, input) => n + (input.layer === "names" ? 0 : Math.max(1, input.chunkHashes?.length ?? 0)), 0),
+    withheldDocuments: inputs.filter((input) => input.layer !== "names").length
+  };
+}
+var chunkProvenance = new WeakMap;
+var storage2 = new AsyncLocalStorage5;
+var withheldAnswers = new WeakSet;
+
+// src/workers/remote-access-recheck.ts
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
+
+// src/core/source-item-read.ts
+var SOURCE_ITEM_READ_REFUSALS = [
+  "held_until_judged",
+  "content_private",
+  "names_only",
+  "not_in_scope",
+  "extraction_pending",
+  "window_judging",
+  "not_personal",
+  "reading_on_demand",
+  "on_demand_capped"
+];
+
+// src/core/app-release-capture.ts
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
+var storage3 = new AsyncLocalStorage6;
+var completedPrivateAnswers = new Set;
+var JOB_QUESTION_TTL_MS = 30 * 60000;
+var jobQuestions = new Map;
+
+// src/core/remote-result.ts
+var MAX_ANSWER = 64 * 1024;
+var MAX_SENT = 16 * 1024;
+var MAX_TITLE = 400;
+var MAX_ROUTE = 300;
+var MAX_MESSAGE = 2000;
+var MAX_CITATIONS = 50;
+var MAX_CORPORA = 200;
+var JOB_ID = /^saj_[A-Za-z0-9_-]{43}$/;
+var PARAM_NAME = /^[a-z][a-z0-9_]{0,63}$/;
+var CORPUS_ID = /^[a-z0-9_]+(\.[a-z0-9_-]+)+$/i;
+var MODEL_ID = /^[A-Za-z0-9._:/-]{1,128}$/;
+var REMOTE_PENDING_MESSAGE = "Olympus is still working on this and it keeps running. " + "Call source_answer_result with this job_id to get the result; repeat while it says working. Do not ask again.";
+var REMOTE_PRIVATE_NOTE_PATTERN = "^Your answer is in Olympus on your computer\\.(?: \\[Open answer\\]\\(olympus://open/private/[A-Za-z0-9_-]{22}\\))?(?: A matching item is a Secret\\. Open it in Olympus on your computer\\.)?$";
+var REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.";
+var PROVIDER_LABELS = {
+  gmail: "Gmail",
+  google_drive: "Google Drive",
+  "google-drive": "Google Drive",
+  google_calendar: "Google Calendar",
+  dropbox: "Dropbox",
+  x: "X bookmarks",
+  readwise: "Readwise",
+  telegram: "Telegram",
+  whatsapp: "WhatsApp",
+  whatsapp_personal: "WhatsApp",
+  whatsapp_business: "WhatsApp",
+  apple_messages: "Apple Messages",
+  signal: "Signal",
+  reflect: "Reflect",
+  roam: "Roam",
+  evernote: "Evernote",
+  local_files: "Files on this computer"
+};
+var FAMILY_LABELS = {
+  email: "Mail",
+  file: "Files",
+  chat: "Messages",
+  note: "Notes",
+  x: "X bookmarks",
+  readwise: "Readwise"
+};
+var OTHER_SOURCE_LABEL = "Other source";
+var REMOTE_SOURCE_LABELS = Object.freeze([...new Set([
+  ...Object.values(PROVIDER_LABELS),
+  ...Object.values(FAMILY_LABELS),
+  OTHER_SOURCE_LABEL
+])].sort());
+var REMOTE_REFUSAL_CODES = Object.freeze([
+  "refused",
+  "anonymous_answers_off",
+  "cancelled",
+  "gate_refused",
+  "internal_error",
+  "invalid_params",
+  "model_same_provider",
+  "question_empty",
+  "question_too_long",
+  "route_not_configured",
+  "secret_detected",
+  "settings_invalid",
+  "settings_stale",
+  "writer_declined",
+  "writer_failed",
+  "invalid_question",
+  "busy",
+  "acknowledgements_incomplete",
+  "funding_date_missing",
+  "funding_date_invalid",
+  "note_expired",
+  "daemon_api_key_missing",
+  "daemon_not_found",
+  "tor_not_found",
+  "unresolved_session",
+  "unresolved_session_other_wallet",
+  "no_unresolved_session",
+  "stranded_processes",
+  "daemon_already_running",
+  "tor_port_busy",
+  "tor_bootstrap_failed",
+  "daemon_start_failed",
+  "daemon_version_unsupported",
+  "daemon_supervisor_unsupported",
+  "relay_mismatch",
+  "key_reuse_on",
+  "key_reuse_unverified",
+  "daemon_keyless",
+  "daemon_identity_failed",
+  "daemon_api_key_rejected",
+  "session_process_exited",
+  "confinement_self_test_failed",
+  "confinement_unavailable",
+  "policy_unavailable",
+  "model_unavailable",
+  "daily_cap_reached",
+  "spend_cap_reached",
+  "state_unavailable",
+  "timeout",
+  "aborted",
+  "redirect_refused",
+  "response_too_large",
+  "invalid_response",
+  "daemon_error",
+  "transport_failed",
+  "teardown_incomplete",
+  "authorization_refused",
+  "session_spent"
+].filter((code, index, all) => all.indexOf(code) === index));
+var REMOTE_DAEMON_CODES = Object.freeze([
+  "busy",
+  "request_cancelled",
+  "funding_required",
+  "model_budget_unavailable",
+  "model_policy_unavailable",
+  "invalid_model",
+  "anonymous_access_failed",
+  "upstream_error",
+  "invalid_upstream_response",
+  "withdrawal_pending",
+  "wallet_conflict",
+  "invalid_request_error",
+  "invalid_body",
+  "testnet_password_required",
+  "invalid_api_key",
+  "local_connection_required",
+  "browser_origin_denied",
+  "unrecognized"
+]);
+var REFRESH_STATUSES = Object.freeze(["running", "completed", "failed"]);
+var TRUST_DOMAINS = Object.freeze(["public_safe", "internal", "secure_local"]);
+var RETRIEVAL_MODES = Object.freeze(["keyword", "hybrid"]);
+var RETRIEVAL_STATES = Object.freeze(["ready", "degraded"]);
+var NETWORK_IDENTITIES = Object.freeze(["hidden", "visible", "not_verified"]);
+var CLEANUPS = Object.freeze(["as_written", "light_cleanup", "custom"]);
+var OUTCOMES = Object.freeze(["not_sent", "sent_failed", "unknown"]);
+var REMOTE_DESCRIPTIONS = {
+  source_index_status: [
+    "Inspect source-index corpus status: each corpus's refresh status and aggregate counts.",
+    "Read-only: it never returns item metadata, sender counts, ledgers, source text, vectors or credentials.",
+    "Legacy extraction filter fields are refused on the connector-store status surface rather than silently returning whole-corpus counts."
+  ].join(" ")
+};
+var REMOTE_ERROR_TEXT = {
+  not_personal: "Private item: ask with source_answer",
+  invalid_params: "The request was not valid. Check the arguments against the tool's schema and try again.",
+  invalid_request: "The request was not valid. Check the arguments against the tool's schema and try again.",
+  unsupported_filter: "That filter is not supported here.",
+  config_error: "Olympus on the computer needs setup before it can answer.",
+  argus_unreachable: "Olympus could not reach its private analyst. Try again later.",
+  argus_error: "Olympus's private analyst could not answer. Try again later.",
+  email_not_configured: "Olympus on the computer needs setup before it can answer.",
+  email_unreachable: "Olympus could not reach its source worker in time. Try again later.",
+  email_error: "Olympus could not complete this request.",
+  email_policy_violation: "Olympus withheld this result under the owner's privacy rules.",
+  source_index_not_enabled: "Searching sources is not turned on in Olympus on the computer.",
+  source_index_policy_violation: "Olympus withheld this result under the owner's privacy rules.",
+  source_index_error: "Olympus could not complete this request.",
+  source_answer_busy: "Olympus is already answering as many questions as it can at once. Wait for the answers in progress (call source_answer_result with their job ids), then ask again.",
+  source_answer_job_not_found: "No Olympus answer with that job_id is available to this connection. It may have expired or Olympus may have restarted. Ask the question again with source_answer.",
+  source_answer_deadline: "The answer did not finish within Olympus's time limit and was stopped. Ask a narrower question, or try again later.",
+  source_answer_too_large: "The finished answer was too large for Olympus to return. Ask a narrower question.",
+  internal_error: "Olympus could not complete this request.",
+  unknown_operation: "Olympus has no operation with that name here.",
+  operation_unavailable: "That operation is not enabled on this Olympus install.",
+  unauthorized: "A connection token is required.",
+  invalid_token: "The connection token is not valid or has been revoked.",
+  remote_connections_unavailable: "Olympus could not check the connection token. Try again later.",
+  not_found: "There is nothing at this path.",
+  method_not_allowed: "That HTTP method is not allowed here.",
+  unsupported_media_type: "The request body must be JSON (Content-Type: application/json).",
+  payload_too_large: "The request body is too large.",
+  olympus_offline: "Olympus is off; try again later."
+};
+var REMOTE_ERROR_CODES = Object.freeze(Object.keys(REMOTE_ERROR_TEXT));
+var REFERENCED_ERROR_CODES = new Set([
+  "internal_error",
+  "email_error",
+  "source_index_error",
+  "argus_error",
+  "config_error"
+]);
+var PENDING_SCHEMA = {
+  type: "object",
+  description: "Still working: call source_answer_result with job_id, again while it says working.",
+  additionalProperties: false,
+  required: ["status", "job_id", "elapsed_ms", "next_tool", "message"],
+  properties: {
+    status: { const: "working" },
+    job_id: { type: "string", pattern: JOB_ID.source },
+    elapsed_ms: { type: "integer", minimum: 0 },
+    next_tool: { const: "source_answer_result" },
+    message: { type: "string" }
+  }
+};
+var CITATION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["label"],
+  properties: {
+    label: { type: "string", enum: [...REMOTE_SOURCE_LABELS] },
+    title: { type: "string", maxLength: MAX_TITLE },
+    date: { type: "string", format: "date" }
+  }
+};
+var SOURCE_ANSWER_SCHEMA = {
+  type: "object",
+  description: 'A source answer: give the answer with its citations. "withheld" carries a fixed sentence to pass on instead. When private_note is present, pass it on as written.',
+  additionalProperties: false,
+  required: ["kind", "status", "answer", "citations"],
+  properties: {
+    kind: { const: "source_answer" },
+    status: { enum: ["answered", "withheld"] },
+    answer: { type: "string", maxLength: MAX_ANSWER },
+    citations: { type: "array", maxItems: MAX_CITATIONS, items: CITATION_SCHEMA },
+    private_note: { type: "string", pattern: REMOTE_PRIVATE_NOTE_PATTERN }
+  }
+};
+var ANONYMOUS_ANSWERED_SCHEMA = {
+  type: "object",
+  description: 'The anonymous reply. When rewritten is true, say the question was rewritten first and offer to show "sent". When provider_note is present, pass it on as written.',
+  additionalProperties: false,
+  required: ["kind", "status", "reply", "level", "rewritten", "remembered", "network_identity"],
+  properties: {
+    kind: { const: "anonymous_answer" },
+    status: { const: "answered" },
+    reply: { type: "string", maxLength: MAX_ANSWER },
+    level: { enum: ["strict", "standard"] },
+    rewritten: { type: "boolean" },
+    remembered: { type: "boolean" },
+    network_identity: { enum: [...NETWORK_IDENTITIES] },
+    cleanup: { enum: [...CLEANUPS] },
+    model: { type: "string", pattern: MODEL_ID.source },
+    route: { type: "string", maxLength: MAX_ROUTE },
+    sent: { type: "string", maxLength: MAX_SENT },
+    note: { type: "string", maxLength: MAX_MESSAGE },
+    provider_note: { const: REMOTE_PROVIDER_UNKNOWN_NOTE }
+  }
+};
+var ANONYMOUS_NEEDS_CHOICE_SCHEMA = {
+  type: "object",
+  description: "Nothing was sent: ask the user once, Strict or Standard, then call again with level (and remember=true to keep it).",
+  additionalProperties: false,
+  required: ["kind", "status", "message", "options"],
+  properties: {
+    kind: { const: "anonymous_answer" },
+    status: { const: "needs_choice" },
+    message: { type: "string" },
+    options: {
+      type: "object",
+      additionalProperties: false,
+      required: ["suggested_level", "suggested_cleanup", "custom_instruction"],
+      properties: {
+        suggested_level: { enum: ["strict", "standard"] },
+        suggested_cleanup: { enum: [...CLEANUPS] },
+        custom_instruction: { type: "boolean" }
+      }
+    }
+  }
+};
+var ANONYMOUS_REFUSED_SCHEMA = {
+  type: "object",
+  description: "Not answered: tell the user the message in those words. outcome says whether the question left (absent: never handed to the transport).",
+  additionalProperties: false,
+  required: ["kind", "status", "code", "message"],
+  properties: {
+    kind: { const: "anonymous_answer" },
+    status: { const: "refused" },
+    code: { enum: [...REMOTE_REFUSAL_CODES] },
+    message: { type: "string", maxLength: MAX_MESSAGE },
+    outcome: { enum: [...OUTCOMES] },
+    daemon_code: { enum: [...REMOTE_DAEMON_CODES] },
+    sent: { type: "string", maxLength: MAX_SENT }
+  }
+};
+var SOURCE_INDEX_STATUS_SCHEMA = {
+  type: "object",
+  description: "Per-corpus status and counts.",
+  additionalProperties: false,
+  required: ["kind", "corpora"],
+  properties: {
+    kind: { const: "source_index_status" },
+    generated_at: { type: "string", format: "date-time" },
+    corpora: {
+      type: "array",
+      maxItems: MAX_CORPORA,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["corpus_id", "label", "configured"],
+        properties: {
+          corpus_id: { type: "string", pattern: CORPUS_ID.source, maxLength: 128 },
+          label: { type: "string", enum: [...REMOTE_SOURCE_LABELS] },
+          trust_domain: { enum: [...TRUST_DOMAINS] },
+          configured: { type: "boolean" },
+          retrieval: {
+            type: "object",
+            additionalProperties: false,
+            required: ["mode", "state"],
+            properties: {
+              mode: { enum: [...RETRIEVAL_MODES] },
+              state: { enum: [...RETRIEVAL_STATES] }
+            }
+          },
+          last_refresh: {
+            type: "object",
+            additionalProperties: false,
+            required: ["status"],
+            properties: {
+              status: { enum: [...REFRESH_STATUSES] },
+              completed_at: { type: "string", format: "date-time" }
+            }
+          },
+          counts: {
+            type: "object",
+            additionalProperties: false,
+            required: ["indexed_items", "chunks", "embedded_chunks"],
+            properties: {
+              indexed_items: { type: "integer", minimum: 0 },
+              chunks: { type: "integer", minimum: 0 },
+              embedded_chunks: { type: "integer", minimum: 0 }
+            }
+          }
+        }
+      }
+    }
+  }
+};
+var REMOTE_ERROR_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["error", "message"],
+  properties: {
+    error: { enum: [...REMOTE_ERROR_CODES], description: "A stable error code." },
+    message: { type: "string", description: "A fixed sentence for this code." },
+    ref: { type: "string", pattern: "^[0-9a-f]{16}$", description: "Where the owner finds this failure in Olympus's log on the computer." },
+    param: { type: "string", pattern: PARAM_NAME.source, description: "The argument at fault, when it is one the operation declares." },
+    retry_after_seconds: {
+      type: "integer",
+      minimum: 1,
+      maximum: 86400,
+      description: "Seconds to wait before trying again, when Olympus is busy or offline; also sent as the HTTP Retry-After header."
+    }
+  }
+};
+var REMOTE_OUTPUT_SCHEMAS = {
+  source_answer: { oneOf: [SOURCE_ANSWER_SCHEMA, PENDING_SCHEMA] },
+  source_answer_result: {
+    oneOf: [SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, PENDING_SCHEMA]
+  },
+  ask_anonymously: { oneOf: [ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, PENDING_SCHEMA] },
+  source_index_status: SOURCE_INDEX_STATUS_SCHEMA,
+  source_item_read: {
+    type: "object",
+    additionalProperties: false,
+    required: ["pages", "totalPages", "totalChars", "couldNotRead"],
+    properties: {
+      pages: { type: "array", maxItems: 3, items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["page", "text"],
+        properties: { page: { type: "integer", minimum: 1 }, text: { type: "string", maxLength: 12000 } }
+      } },
+      nextPage: { type: "integer", minimum: 1 },
+      totalPages: { type: "integer", minimum: 0 },
+      totalChars: { type: "integer", minimum: 0 },
+      couldNotRead: { type: "array", items: { type: "string", enum: [...SOURCE_ITEM_READ_REFUSALS] } },
+      etaSeconds: { type: "integer", minimum: 0 }
+    }
+  }
+};
+
+// src/workers/remote-access-recheck.ts
+function currentAccess(authorized) {
+  try {
+    return authorized();
+  } catch {
+    return "unavailable";
+  }
+}
+var readAuthorization = new AsyncLocalStorage7;
+function currentRemoteReadAccess() {
+  const authorized = readAuthorization.getStore();
+  return authorized ? currentAccess(authorized) : "active";
+}
+
 // src/workers/classification/secret-locations.ts
 function screenedSecretLocator(locator) {
   return locator?.trim() && !hasCredentialUrl(locator) && detectSecretFindingKinds(locator).length === 0 ? locator.trim().slice(0, 1000) : null;
@@ -23362,13 +23795,6 @@ var PAIRING_SELECTOR_LENGTH = 4;
 var PAIRING_SECRET_LENGTH = 8;
 var PAIRING_CODE_LENGTH = PAIRING_SELECTOR_LENGTH + PAIRING_SECRET_LENGTH;
 var UNUSED_CLIENT_PRUNE_AGE_MS = 24 * 3600000;
-
-// src/core/app-release-capture.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
-var storage2 = new AsyncLocalStorage5;
-var completedPrivateAnswers = new Set;
-var JOB_QUESTION_TTL_MS = 30 * 60000;
-var jobQuestions = new Map;
 
 // src/core/waiting-private-questions.ts
 var WAITING_QUESTION_LIMITS = Object.freeze({
@@ -32676,6 +33102,111 @@ ${parentKey(ref)}`, { ref, origin });
     };
     return this.tierVisibleRows([identity], (entry) => entry, () => "content", throwOnUnavailable).length > 0;
   }
+  async readItemPages(localItemId, options = {}) {
+    const page = Math.max(1, Math.trunc(options.page ?? 1));
+    const count = Math.min(3, Math.max(1, Math.trunc(options.pages ?? 1)));
+    const cap = 12000;
+    let totalPages = 0;
+    let totalChars = 0;
+    const refuse = (reason, nextPage) => ({
+      pages: [],
+      totalPages,
+      totalChars,
+      couldNotRead: [reason],
+      ...nextPage ? { nextPage } : {}
+    });
+    const active = this.activeLocalItemRow(localItemId);
+    if (!active)
+      return refuse("not_in_scope");
+    const identity = active.identity;
+    const ledger = this.governingTierLedger();
+    let generation;
+    let initialOverride;
+    const gate = () => {
+      if (currentRemoteReadAccess() !== "active")
+        return "not_in_scope";
+      const scope = options.scope?.();
+      if (scope?.allowed === false || !this.itemMatchesSearchFilters(localItemId, scope?.accountScope, scope?.filters))
+        return "not_in_scope";
+      const now = this.activeLocalItemRow(localItemId);
+      if (!now || tierLedgerIdentityKey(now.identity) !== tierLedgerIdentityKey(identity))
+        return "not_in_scope";
+      const row = ledger?.getCurrent(identity);
+      const override = ledger?.getOverride(identity);
+      if (!row)
+        return "held_until_judged";
+      if (row.metadataTier === "secure" || row.metadataTier === "secrets" || row.contentTier !== "private" || override?.kind === "tier" && override.tier !== "private")
+        return "not_personal";
+      if (row.state !== "current" || row.metadataPending || row.contentPending || ledger.rejudgeQuestion(identity) || heldUntilJudged(row.reasons))
+        return "held_until_judged";
+      if (generation !== undefined && (row.generation !== generation || JSON.stringify(override) !== initialOverride))
+        return "held_until_judged";
+      if (this.contentHeldPrivate(localItemId))
+        return "content_private";
+      if (!this.readOnDemand(localItemId) && (scope?.contentAllowed === false || this.metadataOnlyRuleForLocator(now.locatorUri) !== undefined || scope?.contentFilters && !this.itemMatchesSearchFilters(localItemId, scope.accountScope, scope.contentFilters)))
+        return "names_only";
+      if (!this.contentServedNow(localItemId, true))
+        return "extraction_pending";
+      return;
+    };
+    const initial = gate();
+    if (initial)
+      return refuse(initial);
+    generation = ledger.getCurrent(identity).generation;
+    initialOverride = JSON.stringify(ledger.getOverride(identity));
+    const readChunks = () => this.db.query(`SELECT c.bounded_text AS text, c.content_hash AS hash
+      FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+      WHERE i.local_item_id = ? AND i.tombstoned = 0 ORDER BY c.chunk_index`).all(localItemId);
+    const chunks = readChunks();
+    totalChars = chunks.reduce((n, chunk) => n + chunk.text.length, 0);
+    if (!totalChars || chunks.some((chunk) => chunk.text.length > cap))
+      return refuse("extraction_pending");
+    const split = [];
+    let size = 0;
+    for (const chunk of chunks) {
+      if (!split.length || size + chunk.text.length > cap) {
+        split.push([]);
+        size = 0;
+      }
+      split[split.length - 1].push(chunk);
+      size += chunk.text.length;
+    }
+    totalPages = split.length;
+    const selected = split.slice(page - 1, page - 1 + count);
+    const result = { pages: [], totalPages, totalChars, couldNotRead: [] };
+    if (!selected.length)
+      return result;
+    const inputs = [{
+      corpusId: this.corpusId,
+      provider: identity.provider,
+      accountScope: identity.accountScope ?? "",
+      providerItemId: identity.providerItemId,
+      ...identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {},
+      privateAtAnswer: false,
+      chunkHashes: [...new Set(selected.flatMap((chunks2) => chunks2.map((chunk) => chunk.hash)))]
+    }];
+    const report = await checkReleaseChunks(options.releaseCheck, inputs, { budgetMs: options.budgetMs ?? RELEASE_CHUNK_JUDGE_BUDGET_MS });
+    const after = gate();
+    if (after)
+      return refuse(after);
+    if (JSON.stringify(readChunks()) !== JSON.stringify(chunks))
+      return refuse("held_until_judged");
+    const coverageNote = chunkCoverageNote(report);
+    if (coverageNote)
+      result.coverageNote = coverageNote;
+    for (const [index, chunks2] of selected.entries()) {
+      if (chunks2.some((chunk) => !report.allowed[0]?.includes(chunk.hash))) {
+        result.couldNotRead.push("window_judging");
+        result.nextPage = page + index;
+        return result;
+      }
+      result.pages.push({ page: page + index, text: chunks2.map((chunk) => chunk.text).join("") });
+    }
+    const next = page + result.pages.length;
+    if (next <= totalPages)
+      result.nextPage = next;
+    return result;
+  }
   localContent(localItemId, maxChars, passageFocus, options = {}) {
     const row = this.db.query(`
       SELECT item_pk, trust_tier, locator_uri, mime_type, provider, account_scope, provider_item_id,
@@ -37799,12 +38330,6 @@ var DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
 // src/core/analyst-openclaw-infer.ts
 var MAX_PROMPT_BYTES = 1e5;
 var OPENCLAW_INFER_MAX_PROMPT_BYTES = MAX_PROMPT_BYTES;
-
-// src/core/release-manifest.ts
-import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
-var chunkProvenance = new WeakMap;
-var storage3 = new AsyncLocalStorage6;
-var withheldAnswers = new WeakSet;
 
 // src/core/limit-stops.ts
 var limits = new Map;

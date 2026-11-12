@@ -1413,6 +1413,7 @@ type SurfaceOnlyErrorCode =
   | 'delete_incomplete';
 
 const ERROR_TEXT: Record<OperationErrorCode | SurfaceOnlyErrorCode, string> = {
+  not_personal: 'Private item: ask with source_answer',
   invalid_params: 'The request was not valid. Check the arguments and try again.',
   invalid_request: 'The request was not valid. Check the arguments and try again.',
   unsupported_filter: 'That filter is not supported here.',

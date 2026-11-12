@@ -13,6 +13,7 @@ export const V0_4_PUBLIC_NATIVE_TOOLS = [
   'argus_complete',
   'source_answer',
   'source_index_status',
+  'source_item_read',
   'source_index_search',
   'source_watch_create',
   'source_watches',
@@ -50,6 +51,7 @@ export const V0_4_PUBLIC_MCP_TOOLS = [
   'source_answer',
   'source_answer_result',
   'source_index_status',
+  'source_item_read',
   'source_index_search',
   'olympus_doctor',
   'olympus_setup_status',
@@ -68,6 +70,7 @@ export const V0_4_PUBLIC_CLI_OPERATIONS = [
   'argus_complete',
   'source_answer',
   'source_index_status',
+  'source_item_read',
   'source_index_search',
   'olympus_doctor',
   'olympus_setup_status',
@@ -91,6 +94,8 @@ export const V0_4_HERMES_MCP_TOOLS = [
 // Remote MCP (`/mcp` on the worker, reached by agents outside this machine
 // through an owner-approved connection) serves the same narrowed list Hermes
 // gets. Source watches stay native-only: their delivery needs OpenClaw routing.
+// source_item_read joins it with the remote read handle (remote callers have
+// no selected_item today).
 export const V0_4_PUBLIC_REMOTE_MCP_TOOLS = V0_4_HERMES_MCP_TOOLS;
 
 export const V0_4_PUBLIC_SKILL_DIRS = [
@@ -207,6 +212,7 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'source answer',
   'source index status',
   'source index search',
+  'source item read',
   'source extract-pdfs',
   'data export',
   'data verify',
