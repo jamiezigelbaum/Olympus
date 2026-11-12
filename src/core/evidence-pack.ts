@@ -513,9 +513,13 @@ async function buildPreparedEvidencePackDetailed(
       encounteredSecureLocal = true;
     }
     if (candidates.length < 3 && content?.truncated && content.chunks.length > 1 && content.windowPlacement) {
-      const placed = await windowPlacer.place(content.chunks, content.windowPlacement, scoreWindows);
-      candidate.chunks = input.evidenceByteBudget !== undefined && maxBytesPerCandidate !== undefined
-        ? clipChunksToUtf8Bytes(placed, maxBytesPerCandidate) : placed;
+      const byteClipped = input.evidenceByteBudget !== undefined && maxBytesPerCandidate !== undefined
+        ? clipChunksToUtf8Bytes(content.chunks, maxBytesPerCandidate) : undefined;
+      // Each placed window keeps only the bytes its chunk keeps today, so the
+      // byte clip below never cuts away the text that won.
+      const byteShares = byteClipped ? content.chunks.map((_, index) => utf8ByteLength(byteClipped[index] ?? '')) : undefined;
+      const placed = await windowPlacer.place(content.chunks, content.windowPlacement, scoreWindows, byteShares);
+      candidate.chunks = byteClipped ? clipChunksToUtf8Bytes(placed, maxBytesPerCandidate!) : placed;
     }
     if (content?.namesOnly === true) namesOnlyCandidateIndexes.push(candidates.length);
     else if (content?.contentPrivate === true) contentPrivateCandidateIndexes.push(candidates.length);

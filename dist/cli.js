@@ -77630,7 +77630,8 @@ function createEvidenceWindowPlacer(query, timers = systemTimers) {
   let submittedWindows = 0;
   return {
     audit,
-    async place(chunks, source, reranker) {
+    async place(chunks, source, reranker, byteShares) {
+      const cut = (text2, index) => byteShares ? utf8Prefix(text2, byteShares[index] ?? 0) : text2;
       const score = reranker ?? source.scoreWindows;
       if (!score || submittedWindows >= MAX_WINDOWS_PER_QUESTION || audit.timedOut)
         return chunks;
@@ -77646,7 +77647,7 @@ function createEvidenceWindowPlacer(query, timers = systemTimers) {
       const eligible = order.filter((index) => {
         const text2 = source.texts[index];
         const chunk = chunks[index];
-        return chunk !== undefined && text2 !== undefined && text2.length > chunk.length;
+        return chunk !== undefined && text2 !== undefined && text2.length > chunk.length && (!byteShares || (byteShares[index] ?? 0) > 0);
       });
       const allowance = Math.min(MAX_WINDOWS_PER_SEAT, MAX_WINDOWS_PER_QUESTION - submittedWindows);
       for (const chunk of eligible) {
@@ -77658,7 +77659,7 @@ function createEvidenceWindowPlacer(query, timers = systemTimers) {
           break;
         for (let n = 0;n < count; n++) {
           const start = count === 1 ? 0 : Math.round(n * span / (count - 1));
-          windows.push({ chunk, start, text: sourceIndexChunkWindow(text2, start, size) });
+          windows.push({ chunk, start, text: cut(sourceIndexChunkWindow(text2, start, size), chunk) });
         }
       }
       if (!windows.length)
@@ -77693,7 +77694,7 @@ function createEvidenceWindowPlacer(query, timers = systemTimers) {
         });
         return chunks.map((chunk, index) => {
           const picked = best.get(index);
-          return picked === undefined ? chunk : sourceIndexChunkWindow(source.texts[index], windows[picked].start, chunk.length);
+          return picked === undefined ? chunk : cut(sourceIndexChunkWindow(source.texts[index], windows[picked].start, chunk.length), index);
         });
       } catch {
         if (timers.now() - startedAt >= WINDOW_PLACEMENT_BUDGET_MS) {
@@ -77707,6 +77708,18 @@ function createEvidenceWindowPlacer(query, timers = systemTimers) {
       }
     }
   };
+}
+function utf8Prefix(text2, maxBytes) {
+  let used = 0;
+  let end = 0;
+  for (const codePoint of text2) {
+    const size = codePoint.codePointAt(0) < 128 ? 1 : codePoint.codePointAt(0) < 2048 ? 2 : codePoint.length === 2 ? 4 : 3;
+    if (used + size > maxBytes)
+      break;
+    used += size;
+    end += codePoint.length;
+  }
+  return text2.slice(0, end);
 }
 var WINDOW_PLACEMENT_BUDGET_MS = 1500, WINDOW_CHARS = 600, WINDOW_STRIDE = 300, MAX_WINDOWS_PER_SEAT = 8, MAX_WINDOWS_PER_QUESTION = 24, systemTimers;
 var init_evidence_window_placement = __esm(() => {
@@ -78639,8 +78652,10 @@ async function buildPreparedEvidencePackDetailed(input) {
       encounteredSecureLocal = true;
     }
     if (candidates.length < 3 && content?.truncated && content.chunks.length > 1 && content.windowPlacement) {
-      const placed = await windowPlacer.place(content.chunks, content.windowPlacement, scoreWindows);
-      candidate.chunks = input.evidenceByteBudget !== undefined && maxBytesPerCandidate !== undefined ? clipChunksToUtf8Bytes(placed, maxBytesPerCandidate) : placed;
+      const byteClipped = input.evidenceByteBudget !== undefined && maxBytesPerCandidate !== undefined ? clipChunksToUtf8Bytes(content.chunks, maxBytesPerCandidate) : undefined;
+      const byteShares = byteClipped ? content.chunks.map((_, index) => utf8ByteLength(byteClipped[index] ?? "")) : undefined;
+      const placed = await windowPlacer.place(content.chunks, content.windowPlacement, scoreWindows, byteShares);
+      candidate.chunks = byteClipped ? clipChunksToUtf8Bytes(placed, maxBytesPerCandidate) : placed;
     }
     if (content?.namesOnly === true)
       namesOnlyCandidateIndexes.push(candidates.length);

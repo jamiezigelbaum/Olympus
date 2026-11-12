@@ -43,7 +43,14 @@ export function createEvidenceWindowPlacer(query: string, timers = systemTimers)
   let submittedWindows = 0;
   return {
     audit,
-    async place(chunks: readonly string[], source: EvidenceWindowSource, reranker?: WindowScorer): Promise<readonly string[]> {
+    async place(
+      chunks: readonly string[],
+      source: EvidenceWindowSource,
+      reranker?: WindowScorer,
+      /** The UTF-8 bytes each kept chunk may hold after the pack's byte clip. */
+      byteShares?: readonly number[],
+    ): Promise<readonly string[]> {
+      const cut = (text: string, index: number) => byteShares ? utf8Prefix(text, byteShares[index] ?? 0) : text;
       const score = reranker ?? source.scoreWindows;
       if (!score || submittedWindows >= MAX_WINDOWS_PER_QUESTION || audit.timedOut) return chunks;
       startedAt ??= timers.now();
@@ -54,7 +61,7 @@ export function createEvidenceWindowPlacer(query: string, timers = systemTimers)
       const eligible = order.filter((index) => {
         const text = source.texts[index];
         const chunk = chunks[index];
-        return chunk !== undefined && text !== undefined && text.length > chunk.length;
+        return chunk !== undefined && text !== undefined && text.length > chunk.length && (!byteShares || (byteShares[index] ?? 0) > 0);
       });
       const allowance = Math.min(MAX_WINDOWS_PER_SEAT, MAX_WINDOWS_PER_QUESTION - submittedWindows);
       for (const chunk of eligible) {
@@ -67,7 +74,7 @@ export function createEvidenceWindowPlacer(query: string, timers = systemTimers)
         if (count <= 0) break;
         for (let n = 0; n < count; n++) {
           const start = count === 1 ? 0 : Math.round((n * span) / (count - 1));
-          windows.push({ chunk, start, text: sourceIndexChunkWindow(text, start, size) });
+          windows.push({ chunk, start, text: cut(sourceIndexChunkWindow(text, start, size), chunk) });
         }
       }
       if (!windows.length) return chunks;
@@ -97,7 +104,7 @@ export function createEvidenceWindowPlacer(query: string, timers = systemTimers)
         });
         return chunks.map((chunk, index) => {
           const picked = best.get(index);
-          return picked === undefined ? chunk : sourceIndexChunkWindow(source.texts[index]!, windows[picked]!.start, chunk.length);
+          return picked === undefined ? chunk : cut(sourceIndexChunkWindow(source.texts[index]!, windows[picked]!.start, chunk.length), index);
         });
       } catch {
         if (timers.now() - startedAt >= WINDOW_PLACEMENT_BUDGET_MS) {
@@ -111,4 +118,17 @@ export function createEvidenceWindowPlacer(query: string, timers = systemTimers)
       }
     },
   };
+}
+
+// The longest prefix of text within maxBytes of UTF-8, never splitting a code point.
+function utf8Prefix(text: string, maxBytes: number): string {
+  let used = 0;
+  let end = 0;
+  for (const codePoint of text) {
+    const size = codePoint.codePointAt(0)! < 0x80 ? 1 : codePoint.codePointAt(0)! < 0x800 ? 2 : codePoint.length === 2 ? 4 : 3;
+    if (used + size > maxBytes) break;
+    used += size;
+    end += codePoint.length;
+  }
+  return text.slice(0, end);
 }

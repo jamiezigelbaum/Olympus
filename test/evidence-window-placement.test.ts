@@ -325,3 +325,21 @@ test('windows go to the most relevant passage first even when it comes later in 
   expect(placed[0]).toBe('e'.repeat(600));
   expect(placed[1]).toContain(answer);
 });
+
+test('windows are scored and kept inside each passage\'s UTF-8 byte share', async () => {
+  const answer = 'FOUNTAIN';
+  // A window starts at 1,457. Its 600 characters hold both cues; its 600 bytes
+  // hold only the near one, so the far one must not be what wins.
+  const far = 'FARCUE';
+  const full = ('x'.repeat(1457) + '漢'.repeat(60) + answer + '漢'.repeat(200) + far).padEnd(4000, 'y');
+  const placer = createEvidenceWindowPlacer(QUESTION);
+  const scored: string[] = [];
+  const placed = await placer.place(['k'.repeat(600)], { texts: [full], scoreWindows: async (_query, windows) => {
+    scored.push(...windows);
+    return windows.map(window => (window.includes(far) ? 2 : window.includes(answer) ? 1 : 0));
+  } }, undefined, [600]);
+  expect(scored.some(window => window.includes(far))).toBe(false);
+  expect(scored.every(window => utf8ByteLength(window) <= 600)).toBe(true);
+  expect(utf8ByteLength(placed[0]!)).toBeLessThanOrEqual(600);
+  expect(placed[0]).toContain(answer);
+});
