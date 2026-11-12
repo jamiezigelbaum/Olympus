@@ -177571,6 +177571,7 @@ var init_write_routes = __esm(() => {
 import { createHash as createHash92 } from "node:crypto";
 import { readFileSync as readFileSync89 } from "node:fs";
 import { request as httpsRequest2 } from "node:https";
+import { isIP as isIP3 } from "node:net";
 import { homedir as homedir42 } from "node:os";
 import { resolve as resolvePath3 } from "node:path";
 import { checkServerIdentity } from "node:tls";
@@ -178130,7 +178131,7 @@ function requestVerifiedHttps(urlValue, init, timeoutMs, ca) {
     headers[key] = value;
   });
   const hostname = url.hostname.startsWith("[") && url.hostname.endsWith("]") ? url.hostname.slice(1, -1) : url.hostname;
-  const servername = hostname.includes(":") ? undefined : hostname;
+  const servername = isIP3(hostname) ? undefined : hostname;
   const body = init.body;
   if (body !== undefined && typeof body !== "string" && !(body instanceof Uint8Array)) {
     throw new TypeError("Source watch HTTPS request body must be text or bytes.");
@@ -241267,16 +241268,16 @@ var init_setup_status2 = __esm(() => {
 });
 
 // src/workers/private-agent-listeners.ts
-import { isIP as isIP3 } from "node:net";
+import { isIP as isIP4 } from "node:net";
 import { networkInterfaces as networkInterfaces3 } from "node:os";
 function isPrivateAgentBindAddress(route, address) {
   if (route === "loopback")
     return address === "127.0.0.1";
-  if (isIP3(address) === 4) {
+  if (isIP4(address) === 4) {
     const octets = address.split(".").map(Number);
     return octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127;
   }
-  return isIP3(address) === 6 && /^fd7a:115c:a1e0:/i.test(address) && !address.includes("%");
+  return isIP4(address) === 6 && /^fd7a:115c:a1e0:/i.test(address) && !address.includes("%");
 }
 function isTailscaleInterfaceName(name, platform = process.platform) {
   return platform === "darwin" ? /^utun\d+$/.test(name) : /^tailscale\d+$/.test(name);
@@ -241405,7 +241406,7 @@ function createPrivateAgentListeners(options) {
     }
   };
 }
-var PRIVATE_AGENT_PORT = 17841, mcpUrl = (address, port) => `http://${isIP3(address) === 6 ? `[${address}]` : address}:${port}/mcp`;
+var PRIVATE_AGENT_PORT = 17841, mcpUrl = (address, port) => `http://${isIP4(address) === 6 ? `[${address}]` : address}:${port}/mcp`;
 var init_private_agent_listeners = __esm(() => {
   init_remote_mcp();
   init_first_run_privacy_gate();

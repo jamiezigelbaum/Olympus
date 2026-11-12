@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { request as httpsRequest } from 'node:https';
+import { isIP } from 'node:net';
 import { homedir } from 'node:os';
 import { resolve as resolvePath } from 'node:path';
 import { checkServerIdentity } from 'node:tls';
@@ -867,7 +868,8 @@ function requestVerifiedHttps(
   const hostname = url.hostname.startsWith('[') && url.hostname.endsWith(']')
     ? url.hostname.slice(1, -1)
     : url.hostname;
-  const servername = hostname.includes(':') ? undefined : hostname;
+  // SNI carries host names only: Node, and Bun from 1.4, refuse an IP address here.
+  const servername = isIP(hostname) ? undefined : hostname;
   const body = init.body;
   if (body !== undefined && typeof body !== 'string' && !(body instanceof Uint8Array)) {
     throw new TypeError('Source watch HTTPS request body must be text or bytes.');
