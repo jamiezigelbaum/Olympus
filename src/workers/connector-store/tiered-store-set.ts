@@ -593,13 +593,7 @@ export class TieredStoreSet {
    */
   repairLowerContent(options: { nowMs?: number; embeddingLedger?: TierMoveOptions['embeddingLedger'] } = {}): Promise<void> {
     if (this.lowerContentRepair) return this.lowerContentRepair;
-    try {
-      sweepAutomaticSupersededCopies(this, { budgetMs: SUPERSEDED_SWEEP_SLICE_MS,
-        ...(options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {}),
-      });
-    } catch {
-      // The sweep keeps its own cursor; the next call retries.
-    }
+    this.sweepSupersededSlice(options);
     const now = options.nowMs ?? Date.now();
     if (now - this.lastLowerContentRepairAt < LOWER_CONTENT_REPAIR_INTERVAL_MS) return Promise.resolve();
     this.lastLowerContentRepairAt = now;
@@ -618,6 +612,24 @@ export class TieredStoreSet {
     } catch {
       // Startup and sync remain available; maintenance retries the page.
       return Promise.resolve();
+    }
+  }
+
+  /**
+   * One time-boxed slice of the one-time superseded-copy sweep. Maintenance
+   * calls take one, and the engine's background takes one every few seconds
+   * (startSupersededSweepTicker) so the walk does not wait on the sniffer's
+   * cadence. True once the sweep is done for this ledger.
+   */
+  sweepSupersededSlice(options: { embeddingLedger?: TierMoveOptions['embeddingLedger'] } = {}): boolean {
+    if (writableStoreOpensForbidden()) return true;
+    try {
+      return sweepAutomaticSupersededCopies(this, { budgetMs: SUPERSEDED_SWEEP_SLICE_MS,
+        ...(options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {}),
+      }).complete;
+    } catch {
+      // The sweep keeps its own cursor; the next call retries.
+      return false;
     }
   }
 

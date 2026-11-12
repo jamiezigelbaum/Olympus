@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { TierLedgerPurgedRollbackRefusedError } from '../src/workers/classification/tier-ledger.ts';
 import { moveTieredItem, flushTierMoveNotes } from '../src/workers/connector-store/tier-move.ts';
-import { sweepAutomaticSupersededCopies } from '../src/workers/connector-store/tier-auto-prune-sweep.ts';
+import { startSupersededSweepTicker, sweepAutomaticSupersededCopies } from '../src/workers/connector-store/tier-auto-prune-sweep.ts';
 import { readEmbeddingLedger } from '../src/workers/embedding-ledger.ts';
 import { createTestClock } from './helpers/test-clock.ts';
 import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
@@ -212,4 +212,27 @@ test('with a time budget one call keeps paging until the walk ends, and the walk
   expect(ctx.f.ledger.listSupersededItemWindow({ limit: 10 }).map(record => record.providerItemId))
     .toEqual([identityOf('b').providerItemId]);
   expect(ctx.f.ledger.listItemWindow({ limit: 10 })).toHaveLength(3);
+});
+
+test('the background ticker sweeps without the sniffer or a sync, then leaves a finished set alone', async () => {
+  const ctx = await fixture();
+  const slice = spyOn(ctx.f.set, 'sweepSupersededSlice');
+  let active = false;
+  const stop = startSupersededSweepTicker({ intervalMs: 5, active: () => active, sets: () => [ctx.f.set] });
+  cleanup.push(stop);
+  await new Promise(resolve => setTimeout(resolve, 30));
+  // The split's front (inactive) takes no slice.
+  expect(slice).not.toHaveBeenCalled();
+  active = true;
+  const deadline = Date.now() + 2_000;
+  while (!JSON.parse(ctx.f.ledger.readMeta('automatic-superseded-prune-v1') || '{}').done && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  expect(JSON.parse(ctx.f.ledger.readMeta('automatic-superseded-prune-v1') || '{}').done).toBe(true);
+  expect(ctx.f.ledger.listSupersededItemWindow({ limit: 10 }).map(record => record.providerItemId))
+    .toEqual([identityOf('b').providerItemId]);
+  const calls = slice.mock.calls.length;
+  await new Promise(resolve => setTimeout(resolve, 30));
+  expect(slice.mock.calls.length).toBe(calls);
+  stop();
 });
