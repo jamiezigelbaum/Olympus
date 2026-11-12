@@ -173,6 +173,25 @@ describe('schema updates back up the store first', () => {
   });
 });
 
+describe('a long store update is not a stall', () => {
+  test('while one store updates, silent for longer than the stall limit, the boot stays in progress', () => {
+    const env = home();
+    const { db } = storeAtVersion1(env);
+    beginBootProgress(env);
+    const seen: Array<{ phase?: string; liveAfter10Min: boolean }> = [];
+    // The update writes nothing to the progress file while it runs; ten minutes later it must still read as live.
+    const slow: SqliteMigration = { version: 2, name: 'slow', up: () => {
+      seen.push({ phase: readBootProgress(env)?.phase, liveAfter10Min: bootInProgress(env, Date.now() + 10 * 60_000) });
+    } };
+    runSqliteMigrations(db, 'fixture', [MIGRATIONS[0]!, slow], { env, log: () => {} });
+    db.close();
+    expect(seen).toEqual([{ phase: 'migrating', liveAfter10Min: true }]);
+    // Between stores, the stall rule applies again.
+    expect(readBootProgress(env)?.phase).toBe('starting');
+    expect(bootInProgress(env, Date.now() + 10 * 60_000)).toBe(false);
+  });
+});
+
 describe('the supervisor waits on boot progress', () => {
   async function startWith(inProgress: boolean): Promise<string> {
     const children: ReturnType<typeof spawnProcess>[] = [];
