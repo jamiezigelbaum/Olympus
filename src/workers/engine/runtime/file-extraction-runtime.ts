@@ -421,6 +421,9 @@ export function createFileExtractionRuntime(
           id: source.id,
           corpusId: source.corpusId,
           provider: source.provider,
+          ...(source.onDemandReadFormat
+            ? { onDemandReadFormat: (ref: ExtractionItemRef) => source.onDemandReadFormat!(ref) }
+            : {}),
           async listCandidates(listOptions) {
             options.scopeGuard?.assertAuthorized({ config, store });
             const page = await source.listCandidates(listOptions);
@@ -571,7 +574,7 @@ export function createFileExtractionRuntime(
           files: Number(env.OLYMPUS_ON_DEMAND_FILES_PER_QUESTION ?? 3),
           bytes: Number(env.OLYMPUS_ON_DEMAND_BYTES_PER_QUESTION ?? 25 * 1024 * 1024),
         },
-        resolve: (read) => {
+        resolve: async (read) => {
           const lane = roster.find((config) => config.corpusId === read.itemRef.corpusId
             || itemStores.get(config.corpusId)?.().some((holder) => holder.corpusId === read.itemRef.corpusId));
           if (!lane || !corpora.some((corpus) => corpus.corpusId === lane.corpusId)) return undefined;
@@ -591,7 +594,7 @@ export function createFileExtractionRuntime(
               return locator && path.startsWith('/') && (path === '/' || locator === path || locator.startsWith(`${path}/`));
             }) ?? scopes[0];
             if (!approvedScopeKey) return undefined;
-            const ref: ExtractionItemRef = {
+            let ref: ExtractionItemRef = {
               corpusId: lane.corpusId, provider: identity.provider, accountScope: identity.accountScope,
               providerItemId: identity.providerItemId, localItemId: identity.localItemId, approvedScopeKey,
               ...(metadata.sizeBytes !== undefined ? { sizeBytes: metadata.sizeBytes } : {}),
@@ -600,11 +603,26 @@ export function createFileExtractionRuntime(
               ...(metadata.name ? { name: metadata.name } : {}),
               ...(metadata.mimeType ? { mimeType: metadata.mimeType } : {}),
             };
-            const extractor = registry.select(ref);
+            let extractionMimeType = ref.mimeType;
+            let extractor = registry.select(ref);
+            if (!extractor) {
+              const corpus = corpora.find((corpus) => corpus.corpusId === lane.corpusId)!;
+              const source = typeof corpus.source === 'function' ? await corpus.source() : corpus.source;
+              const format = source.onDemandReadFormat?.(ref);
+              if (format) {
+                // A provider's stored size need not describe its exported
+                // representation. Keep the original MIME for fetching and
+                // bind the job to the same provider version as the grant.
+                const { sizeBytes: _providerSize, ...identityRef } = ref;
+                ref = { ...identityRef, ...(format.sizeBytes !== undefined ? { sizeBytes: format.sizeBytes } : {}) };
+                extractionMimeType = format.mimeType;
+                extractor = registry.select({ ...ref, mimeType: extractionMimeType });
+              }
+            }
             if (!extractor) return undefined;
             return {
               readableOnRequest: policy?.readableOnRequest ?? candidate.readableOnRequest,
-              job: { refs: [ref], extractorKind: extractor.kind, extractorVersion: extractor.versionFor?.(ref.mimeType) ?? extractor.version,
+              job: { refs: [ref], extractorKind: extractor.kind, extractorVersion: extractor.versionFor?.(extractionMimeType) ?? extractor.version,
                 policyDecision: 'index_allowed' as const },
               grant: () => {
                 promoted = ref;

@@ -1134,10 +1134,12 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
 
   let fetched: FetchedBytes | undefined;
   let fetchedFile: FetchedFile | undefined;
+  let inputMimeType = job.ref.mimeType;
   if (extractor.input.kind !== 'none') {
     let source: FileExtractionSource;
     try {
       source = await input.resolveSource();
+      if (onDemand) inputMimeType = source.onDemandReadFormat?.(job.ref)?.mimeType ?? inputMimeType;
     } catch (error) {
       return retryable(EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED, error);
     }
@@ -1192,7 +1194,7 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
     }
   }
 
-  const resolvedMimeType = resolveExtractionMimeType(job.ref.mimeType, fetched?.mimeType ?? fetchedFile?.mimeType);
+  const resolvedMimeType = resolveExtractionMimeType(inputMimeType, fetched?.mimeType ?? fetchedFile?.mimeType);
   const resolvedSizeBytes = fetched?.sizeBytes ?? fetchedFile?.sizeBytes ?? job.ref.sizeBytes;
   const extractorInput: ExtractorInput = {
     ref: job.ref,

@@ -3,7 +3,7 @@ import { classifyContentTier } from '../src/workers/classification/tier-classifi
 import { approveFileSourceScope, readFileSourceScopeApproval, connectedFileSourceAccountGeneration, fileSourceScopeAllowsMetadata, fileSourceScopeAllowsContent } from '../src/core/source-scope-approval.ts';
 import { createFileExtractionRuntime, fileExtractionCorporaRoster } from '../src/workers/engine/runtime/file-extraction-runtime.ts';
 import { waitFor } from './helpers/test-clock.ts';
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -19,6 +19,8 @@ import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import { createConnectorStoreExtractionSink } from '../src/workers/file-extraction/store-sink.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { Database } from 'bun:sqlite';
+import { GoogleDriveExtractionSource, GOOGLE_DRIVE_EXTRACTION_SCOPE_KEY } from '../src/workers/google-connectors/drive-extraction-source.ts';
+import { createRestGoogleDriveApiClient, GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID, GOOGLE_DRIVE_PROVIDER } from '../src/workers/google-connectors/drive.ts';
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const close of cleanup.splice(0).reverse()) close(); });
@@ -43,6 +45,52 @@ function fixture() {
   return { context, grants: () => grants, restart: () => { jobs.close(); jobs = new LocalFileExtractionJobStore(path); } };
 }
 const req = (id = 'item', requester: OnDemandReadRequest['requester'] = 'analyst', questionId = 'q1'): OnDemandReadRequest => ({ itemRef: { corpusId: 'internal.fixture.files', providerItemId: id }, requester, questionId });
+
+async function driveFixture(limits: { files: number; bytes: number }, ids = ['a']) {
+  const dir = mkdtempSync(join(tmpdir(), 'on-demand-drive-'));
+  const corpusId = GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID;
+  const text = 'Café 😀 private notes';
+  const size = new TextEncoder().encode(text).byteLength;
+  const exclusions = createSourceExclusionMatcher(parseSourceIngestionExclusions({ schemaVersion: 1,
+    rules: [{ id: 'selected', mode: 'on_demand', sources: [], path_prefixes: ['/Selected'] }],
+  }), 'fixture');
+  const store = new LocalConnectorStore({ dbPath: join(dir, 'store.sqlite'), corpusId, family: 'file', trustDomain: 'internal', exclusions });
+  let runtime: ReturnType<typeof createFileExtractionRuntime>;
+  let db: Database | undefined;
+  cleanup.push(() => { runtime?.close(); db?.close(); store.close(); rmSync(dir, { recursive: true, force: true }); });
+  const items: RawItem[] = ids.map(id => ({
+    identity: { family: 'file', provider: GOOGLE_DRIVE_PROVIDER, accountScope: 'personal', providerItemId: id, localItemId: `personal:${id}`, sourceVersion: 'v1' },
+    mimeType: `application/vnd.google-apps.${id === 'sheet' ? 'spreadsheet' : id === 'slides' ? 'presentation' : 'document'}`,
+    content: { kind: 'metadata_only' },
+    // The provider's native-file size says nothing about its exported text.
+    metadata: { name: id, pathDisplay: `/Selected/${id}`, sizeBytes: 1_000_000, scopeContentDenied: true },
+    fetchedAt: '2026-11-12T00:00:00Z',
+  }));
+  await store.syncFromConnector({ id: 'drive-fixture', family: 'file', async authenticate() {}, async *listItems() { yield { items, done: true }; }, async fetchItem() { throw new Error('No inline read'); }, classificationSignals() { return {}; } },
+    { fetchContent: false, placement: { trustTier: 'S2', trustDomain: 'internal' }, tierClassification: { holdContentUntilJudged: true } });
+  expect(store.activeLocalItemRow(items[0]!.identity.localItemId)).toBeDefined();
+  const urls: string[] = [];
+  const client = createRestGoogleDriveApiClient({ token: 'test-token', baseUrl: 'https://drive.test/drive/v3', maxRetries: 0,
+    fetch: async input => { urls.push(String(input)); return new Response(text); },
+  });
+  runtime = createFileExtractionRuntime({ enabled: true, connectorStores: [store], jobsDbPath: join(dir, 'jobs.sqlite'),
+    env: { OLYMPUS_DATA_DIR: dir, OLYMPUS_ON_DEMAND_FILES_PER_QUESTION: String(limits.files), OLYMPUS_ON_DEMAND_BYTES_PER_QUESTION: String(limits.bytes) },
+    corpora: [{ corpusId, provider: GOOGLE_DRIVE_PROVIDER, scopes: [GOOGLE_DRIVE_EXTRACTION_SCOPE_KEY] }],
+    // Exercise the guarded source wrapper as well as the source itself.
+    scopeGuard: { assertAuthorized() {}, allowsRef: ({ ref }) => store.readOnDemand(ref.localItemId, ref.sourceVersion) },
+    sourceFactories: new Map([[GOOGLE_DRIVE_PROVIDER, () => new GoogleDriveExtractionSource({
+      id: 'drive-fixture', corpusId, provider: GOOGLE_DRIVE_PROVIDER, approvedScopeKey: GOOGLE_DRIVE_EXTRACTION_SCOPE_KEY,
+      candidates: { extractionCandidates() { throw new Error('An individual read must not scan a folder'); } }, client,
+    })]]),
+  });
+  db = new Database(join(dir, 'jobs.sqlite'), { readonly: true });
+  const read = (id: string, requester: OnDemandReadRequest['requester'] = 'analyst') => runtime!.requestOnDemandRead({
+    itemRef: { corpusId, providerItemId: id }, requester, questionId: 'drive-question',
+  });
+  const job = (id: string) => db!.query('SELECT status, mime_type FROM extraction_jobs WHERE provider_item_id = ?').get(id) as { status: string; mime_type: string } | null;
+  const used = () => db!.query("SELECT COUNT(*) AS files, SUM(reserved_bytes) AS bytes FROM on_demand_reads WHERE requester != 'owner'").get() as { files: number; bytes: number };
+  return { store, runtime: runtime!, items, text, size, urls, read, job, used };
+}
 
 describe('read on demand', () => {
   test('third mode parses, approves names, and does not approve bulk extraction', () => {
@@ -199,6 +247,75 @@ describe('read on demand', () => {
     expect(store.localContent('a')?.chunks ?? []).toEqual([]);
     expect(store.itemMetadataSnapshot(item.identity)).toMatchObject({ read_on_demand: true, sizeBytes: 12 });
     expect(runtime!.jobs.pendingOnDemandReads()).toEqual([]);
+  });
+
+  test.each(['owner', 'analyst'] as const)('a native Drive Doc is exported for %s and held until judged under a version-bound grant', async requester => {
+    const timing = spyOn(console, 'info').mockImplementation(() => {});
+    cleanup.push(() => timing.mockRestore());
+    const f = await driveFixture({ files: 3, bytes: requester === 'owner' ? 1 : 100 });
+    expect(f.store.onDemandReadCandidate('a')).toMatchObject({ readableOnRequest: true });
+    expect(await f.read('a', requester)).toMatchObject({ state: 'queued' });
+    await waitFor(() => f.job('a')?.status === 'indexed');
+    expect(f.urls).toEqual(['https://drive.test/drive/v3/files/a/export?mimeType=text%2Fplain']);
+    expect(f.job('a')?.mime_type).toBe('application/vnd.google-apps.document');
+    const item = f.items[0]!;
+    expect(f.store.readOnDemand(item.identity.localItemId, 'v1')).toBe(true);
+    expect(f.store.readOnDemand(item.identity.localItemId, 'v2')).toBe(false);
+    expect(f.store.tierLedger()!.getCurrent(item.identity)?.contentPending).toBe(true);
+    expect(f.store.contentServedNow(item.identity.localItemId)).toBe(false);
+    expect(f.store.localContent(item.identity.localItemId)?.chunks ?? []).toEqual([]);
+    expect(f.store.itemMetadataSnapshot(item.identity)?.read_on_demand).toBe(true);
+    for (const step of ['fetch', 'extract']) {
+      expect(timing.mock.calls.some(([line]) => String(line).includes(`[olympus:on-demand] step=${step} count=1 ms=`))).toBe(true);
+    }
+    expect(timing.mock.calls.some(([line]) => String(line).includes('step=judge'))).toBe(false);
+    expect(f.store.recordExtractedContentTier({ ...item, content: { kind: 'text', text: f.text } }, f.text, {
+      holdContentUntilJudged: true,
+      sniffer: { id: 'test-judge', judge: () => ({ verdict: 'decided', tier: 'private', code: 'ordinary:0.99' }) },
+    })).toBe(true);
+    expect(timing.mock.calls.some(([line]) => String(line).includes('[olympus:on-demand] step=judge count=1 ms='))).toBe(true);
+    expect(f.store.contentServedNow(item.identity.localItemId)).toBe(true);
+    expect(f.store.localContent(item.identity.localItemId)?.chunks).toEqual([f.text]);
+    if (requester === 'analyst') expect(f.used()).toEqual({ files: 1, bytes: f.size });
+  });
+
+  test('native Doc question caps use exported UTF-8 bytes and retain the file count limit', async () => {
+    const f = await driveFixture({ files: 3, bytes: 48 }, ['a', 'b', 'c']);
+    expect(f.size).toBe(24);
+    for (const id of ['a', 'b']) {
+      expect(await f.read(id)).toMatchObject({ state: 'queued' });
+      await waitFor(() => f.job(id)?.status === 'indexed');
+    }
+    expect(f.used()).toEqual({ files: 2, bytes: 48 });
+    expect(await f.read('c')).toMatchObject({ state: 'capped', reason: { used: { files: 2, bytes: 48 } } });
+    expect(f.store.readOnDemand('personal:c')).toBe(false);
+    expect(f.urls).toHaveLength(2);
+  });
+
+  test('native Doc reads retain the per-question file count limit', async () => {
+    const count = await driveFixture({ files: 1, bytes: 100 }, ['a', 'b']);
+    expect(await count.read('a')).toMatchObject({ state: 'queued' });
+    await waitFor(() => count.job('a')?.status === 'indexed');
+    expect(await count.read('b')).toMatchObject({ state: 'capped', reason: { used: { files: 1, bytes: count.size } } });
+    expect(count.urls).toHaveLength(1);
+  });
+
+  test('an export larger than the question allowance is refused without storing partial text', async () => {
+    const f = await driveFixture({ files: 3, bytes: 20 });
+    expect(await f.read('a')).toMatchObject({ state: 'queued' });
+    await waitFor(() => f.job('a')?.status === 'skipped_too_large');
+    expect(f.store.copyContentState(f.items[0]!.identity)?.chunks).toBe(0);
+    expect(f.store.localContent('personal:a')?.chunks ?? []).toEqual([]);
+  });
+
+  test.each(['owner', 'analyst'] as const)('native Sheets and Slides stay refused for %s with the existing reason', async requester => {
+    const f = await driveFixture({ files: 3, bytes: 100 }, ['sheet', 'slides']);
+    for (const id of ['sheet', 'slides']) {
+      expect(await f.read(id, requester)).toEqual({ state: 'refused', reason: 'names_only' });
+      expect(f.store.readOnDemand(`personal:${id}`)).toBe(false);
+      expect(f.job(id)).toBeNull();
+    }
+    expect(f.urls).toEqual([]);
   });
 
   test('promoted text is held out of evidence until content is judged; the grant is version-bound', async () => {

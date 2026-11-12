@@ -91639,6 +91639,13 @@ class GoogleDriveExtractionSource {
       throw new FileExtractionSourceError("source_item_not_found");
     const maxBytes = options.maxBytes ?? this.maxBytes;
     try {
+      if (this.onDemandReadFormat(ref)) {
+        const text3 = await this.client.exportGoogleDocText(fileId, maxBytes === undefined ? Number.MAX_SAFE_INTEGER : maxBytes + 1);
+        const bytes = new TextEncoder().encode(text3);
+        if (maxBytes !== undefined && bytes.byteLength > maxBytes)
+          throw new GoogleDriveContentTooLargeError;
+        return { bytes, mimeType: "text/plain", sizeBytes: bytes.byteLength };
+      }
       const result = await this.client.downloadFileBytes(fileId, maxBytes);
       return {
         bytes: result.bytes,
@@ -91648,6 +91655,9 @@ class GoogleDriveExtractionSource {
     } catch (error) {
       throw driveFetchFailure(error);
     }
+  }
+  onDemandReadFormat(ref) {
+    return ref.mimeType === "application/vnd.google-apps.document" ? { mimeType: "text/plain" } : undefined;
   }
   refFromRow(row) {
     const split = splitScopedLocalItemId(row.localItemId);
@@ -105091,10 +105101,13 @@ async function settleOneJobHeld(input, staged) {
   }
   let fetched;
   let fetchedFile;
+  let inputMimeType = job.ref.mimeType;
   if (extractor.input.kind !== "none") {
     let source;
     try {
       source = await input.resolveSource();
+      if (onDemand)
+        inputMimeType = source.onDemandReadFormat?.(job.ref)?.mimeType ?? inputMimeType;
     } catch (error) {
       return retryable(EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED, error);
     }
@@ -105144,7 +105157,7 @@ async function settleOneJobHeld(input, staged) {
       }
     }
   }
-  const resolvedMimeType = resolveExtractionMimeType(job.ref.mimeType, fetched?.mimeType ?? fetchedFile?.mimeType);
+  const resolvedMimeType = resolveExtractionMimeType(inputMimeType, fetched?.mimeType ?? fetchedFile?.mimeType);
   const resolvedSizeBytes = fetched?.sizeBytes ?? fetchedFile?.sizeBytes ?? job.ref.sizeBytes;
   const extractorInput = {
     ref: job.ref,
@@ -106305,6 +106318,7 @@ function createFileExtractionRuntime(options) {
           id: source.id,
           corpusId: source.corpusId,
           provider: source.provider,
+          ...source.onDemandReadFormat ? { onDemandReadFormat: (ref) => source.onDemandReadFormat(ref) } : {},
           async listCandidates(listOptions) {
             options.scopeGuard?.assertAuthorized({ config, store });
             const page2 = await source.listCandidates(listOptions);
@@ -106428,7 +106442,7 @@ function createFileExtractionRuntime(options) {
           files: Number(env.OLYMPUS_ON_DEMAND_FILES_PER_QUESTION ?? 3),
           bytes: Number(env.OLYMPUS_ON_DEMAND_BYTES_PER_QUESTION ?? 25 * 1024 * 1024)
         },
-        resolve: (read) => {
+        resolve: async (read) => {
           const lane = roster.find((config) => config.corpusId === read.itemRef.corpusId || itemStores.get(config.corpusId)?.().some((holder) => holder.corpusId === read.itemRef.corpusId));
           if (!lane || !corpora.some((corpus) => corpus.corpusId === lane.corpusId))
             return;
@@ -106450,7 +106464,7 @@ function createFileExtractionRuntime(options) {
             }) ?? scopes[0];
             if (!approvedScopeKey)
               return;
-            const ref = {
+            let ref = {
               corpusId: lane.corpusId,
               provider: identity2.provider,
               accountScope: identity2.accountScope,
@@ -106463,7 +106477,19 @@ function createFileExtractionRuntime(options) {
               ...metadata.name ? { name: metadata.name } : {},
               ...metadata.mimeType ? { mimeType: metadata.mimeType } : {}
             };
-            const extractor = registry.select(ref);
+            let extractionMimeType = ref.mimeType;
+            let extractor = registry.select(ref);
+            if (!extractor) {
+              const corpus = corpora.find((corpus2) => corpus2.corpusId === lane.corpusId);
+              const source = typeof corpus.source === "function" ? await corpus.source() : corpus.source;
+              const format = source.onDemandReadFormat?.(ref);
+              if (format) {
+                const { sizeBytes: _providerSize, ...identityRef } = ref;
+                ref = { ...identityRef, ...format.sizeBytes !== undefined ? { sizeBytes: format.sizeBytes } : {} };
+                extractionMimeType = format.mimeType;
+                extractor = registry.select({ ...ref, mimeType: extractionMimeType });
+              }
+            }
             if (!extractor)
               return;
             return {
@@ -106471,7 +106497,7 @@ function createFileExtractionRuntime(options) {
               job: {
                 refs: [ref],
                 extractorKind: extractor.kind,
-                extractorVersion: extractor.versionFor?.(ref.mimeType) ?? extractor.version,
+                extractorVersion: extractor.versionFor?.(extractionMimeType) ?? extractor.version,
                 policyDecision: "index_allowed"
               },
               grant: () => {
