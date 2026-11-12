@@ -168,6 +168,23 @@ describe('schema updates back up the store first', () => {
     expect(preSchemaBackupsOf(path)).toEqual([]);
   });
 
+  test('a second opener that copies after the first finished the update keeps the first backup', () => {
+    const env = home();
+    const { path, db } = storeAtVersion1(env);
+    // The second opener read version 1; before its copy, the first opener updates the store.
+    const freeBytes = () => {
+      const first = new Database(path);
+      runSqliteMigrations(first, 'fixture', MIGRATIONS, { env, log: () => {} });
+      first.close();
+      return Number.MAX_SAFE_INTEGER;
+    };
+    runSqliteMigrations(db, 'fixture', MIGRATIONS, { env, log: () => {}, freeBytes });
+    db.close();
+    const copy = new Database(`${path}.pre-schema-1.bak`, { readonly: true });
+    expect(readSqliteSchemaVersion(copy, 'fixture')).toBe(1);
+    copy.close();
+  });
+
   test('a restore puts the copy back and removes the -wal and -shm', () => {
     const env = home();
     const { path, db } = storeAtVersion1(env);

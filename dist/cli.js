@@ -19368,6 +19368,9 @@ function schemaBackups(env) {
   }
   return [...entries.values()];
 }
+function schemaBackupsSince(env, sinceMs) {
+  return backupsSince(env, sinceMs);
+}
 function backupsSince(env, sinceMs) {
   return schemaBackups(env).filter((entry) => {
     try {
@@ -19514,6 +19517,10 @@ function backUpBeforeUpdate(db, storeId, fromVersion, env, report, freeBytes = d
   try {
     db.query("VACUUM INTO ?").run(partial);
     chmodSync5(partial, 384);
+    if (copyVersion(db, partial, storeId) !== fromVersion) {
+      rmSync9(partial, { force: true });
+      return Math.round(performance.now() - started);
+    }
     renameSync5(partial, backup);
   } catch (error) {
     rmSync9(partial, { force: true });
@@ -19521,6 +19528,14 @@ function backUpBeforeUpdate(db, storeId, fromVersion, env, report, freeBytes = d
   }
   recordSchemaBackup(env, { storeId, dbPath: file, backupPath: backup });
   return Math.round(performance.now() - started);
+}
+function copyVersion(db, path, storeId) {
+  const copy = new db.constructor(path, { readonly: true });
+  try {
+    return readSqliteSchemaVersion(copy, storeId);
+  } finally {
+    copy.close();
+  }
 }
 function defaultFreeBytes(directory) {
   const stats = statfsSync(directory);
@@ -112726,9 +112741,11 @@ function spoolLines(account, context2, { dryRun }, accountScopes) {
   const root = accountExtractionSpoolRoot(placed, context2.env);
   return line(root, "scratch files", forgetExtractionSpool(root, { corpusIds: account.corpus_ids, ...accountScopes ? { accountScopes } : {} }, { dryRun }));
 }
-function forgetSchemaBackups(env) {
-  const removed = removeSchemaBackupsSince(env, 0);
-  return removed > 0 ? [`Removed ${removed} store ${removed === 1 ? "copy" : "copies"} taken before a schema update.`] : [];
+function forgetSchemaBackups(env, dryRun) {
+  const count = dryRun ? schemaBackupsSince(env, 0).length : removeSchemaBackupsSince(env, 0);
+  if (count === 0)
+    return [];
+  return [`${dryRun ? "Would remove" : "Removed"} ${count} store ${count === 1 ? "copy" : "copies"} taken before a schema update.`];
 }
 function runForgetSteps(account, context2, options) {
   const lines = [];
@@ -112741,7 +112758,7 @@ function runForgetSteps(account, context2, options) {
       throw new ForgetStepError(step, account, error);
     }
   }
-  return [...lines, ...forgetSchemaBackups(context2.env)];
+  return [...lines, ...forgetSchemaBackups(context2.env, options.dryRun)];
 }
 function runForgetAccountScopeSteps(account, accountScopes, context2, options) {
   const lines = [];
@@ -112754,7 +112771,7 @@ function runForgetAccountScopeSteps(account, accountScopes, context2, options) {
       throw new ForgetStepError(step, account, error);
     }
   }
-  return [...lines, ...forgetSchemaBackups(context2.env)];
+  return [...lines, ...forgetSchemaBackups(context2.env, options.dryRun)];
 }
 var ForgetStepError, line = (path, what, count) => count > 0 ? [`${path} (${what}: ${count})`] : [], sourceIdsOf = (account, context2) => [...new Set([account.source_id, ...context2.sourceAliases ?? []])], FORGET_STEPS;
 var init_source_forget_registry = __esm(() => {

@@ -13426,6 +13426,10 @@ function backUpBeforeUpdate(db, storeId, fromVersion, env, report, freeBytes = d
   try {
     db.query("VACUUM INTO ?").run(partial);
     chmodSync3(partial, 384);
+    if (copyVersion(db, partial, storeId) !== fromVersion) {
+      rmSync7(partial, { force: true });
+      return Math.round(performance.now() - started);
+    }
     renameSync6(partial, backup);
   } catch (error) {
     rmSync7(partial, { force: true });
@@ -13433,6 +13437,14 @@ function backUpBeforeUpdate(db, storeId, fromVersion, env, report, freeBytes = d
   }
   recordSchemaBackup(env, { storeId, dbPath: file, backupPath: backup });
   return Math.round(performance.now() - started);
+}
+function copyVersion(db, path, storeId) {
+  const copy = new db.constructor(path, { readonly: true });
+  try {
+    return readSqliteSchemaVersion(copy, storeId);
+  } finally {
+    copy.close();
+  }
 }
 function defaultFreeBytes(directory) {
   const stats = statfsSync(directory);

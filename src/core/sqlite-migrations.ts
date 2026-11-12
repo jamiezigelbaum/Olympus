@@ -196,6 +196,12 @@ function backUpBeforeUpdate(
   try {
     db.query('VACUUM INTO ?').run(partial);
     chmodSync(partial, 0o600);
+    // Another opener may have finished the update first: its backup stands,
+    // and a copy of the updated store must not replace it.
+    if (copyVersion(db, partial, storeId) !== fromVersion) {
+      rmSync(partial, { force: true });
+      return Math.round(performance.now() - started);
+    }
     renameSync(partial, backup);
   } catch (error) {
     rmSync(partial, { force: true });
@@ -203,6 +209,16 @@ function backUpBeforeUpdate(
   }
   recordSchemaBackup(env, { storeId, dbPath: file, backupPath: backup });
   return Math.round(performance.now() - started);
+}
+
+function copyVersion(db: Database, path: string, storeId: string): number {
+  // The open handle's own class: this module never loads bun:sqlite itself.
+  const copy = new (db.constructor as new (path: string, options: { readonly: boolean }) => Database)(path, { readonly: true });
+  try {
+    return readSqliteSchemaVersion(copy, storeId);
+  } finally {
+    copy.close();
+  }
 }
 
 function defaultFreeBytes(directory: string): number {

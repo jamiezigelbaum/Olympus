@@ -184,7 +184,7 @@ export function recordSchemaBackup(env: LayoutEnv, entry: { storeId: string; dbP
   appendFileSync(path, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
 }
 
-interface SchemaBackupEntry { storeId: string; dbPath: string; backupPath: string }
+export interface SchemaBackupEntry { storeId: string; dbPath: string; backupPath: string }
 
 function schemaBackups(env: LayoutEnv): SchemaBackupEntry[] {
   let text: string;
@@ -209,6 +209,10 @@ function schemaBackups(env: LayoutEnv): SchemaBackupEntry[] {
 }
 
 /** The recorded backups still on disk, written at or after `sinceMs`. */
+export function schemaBackupsSince(env: LayoutEnv, sinceMs: number): SchemaBackupEntry[] {
+  return backupsSince(env, sinceMs);
+}
+
 function backupsSince(env: LayoutEnv, sinceMs: number): SchemaBackupEntry[] {
   return schemaBackups(env).filter((entry) => {
     try {
