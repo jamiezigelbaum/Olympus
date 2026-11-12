@@ -150,3 +150,11 @@ test('the question judge records whether each quote answers its question and the
   expect(receipt.summary.overall.judged).toEqual({ answers: 1, notAnswers: 0, specific: 0, generic: 1, unclear: 0 });
   expect(JSON.stringify(receipt)).not.toContain(quote);
 });
+test('the lane probe and question judge are not counted in retrieval timings', async () => {
+  const one = { ...dataset, questions: [dataset.questions[0]!] };
+  const slow = <T>(value: T) => new Promise<T>(resolve => setTimeout(() => resolve(value), 300));
+  const receipt = await runPassageEval({ dataset: one, maxResults: 5, storeCounts: counts, gitSha: 'abc', buildPack: async () => detail(),
+    probeLanes: () => slow({ keyword: 1, vector: null }), judgeQuestion: () => slow({ answers: true, specific: true }) });
+  expect(receipt.questions![0]!.judge).toEqual({ answers: true, specific: true });
+  expect(receipt.questions![0]!.timings.totalMs).toBeLessThan(250);
+});
