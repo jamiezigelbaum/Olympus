@@ -2,6 +2,7 @@ import { createVectorDigestSchema, writeVectorDigest, backfillVectorDigests, vec
 import { encodeVectorDigest, scoreVectorDigest, VectorDigestHeap } from '../source-index/vector-digest.ts';
 import { iterateRows } from '../../core/sqlite-rows.ts';
 import { installMainThreadSqlTrace } from './main-thread-sql-trace.ts';
+import { storeOwnerIdleMs, storeReadHasPriority } from '../../core/store-reclaim-admission.ts';
 import { assertWritableStoreOpenAllowed, writableStoreOpensForbidden } from '../../core/store-write-guard.ts';
 import type { PeopleCitationName, PeopleSenderIdentity, PeopleSenderObservation } from '../../core/people-index.ts';
 import { unreadHoldDisposition, type UnreadHoldDisposition } from '../file-extraction/unreadable-files.ts';
@@ -12,7 +13,7 @@ import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled,
 import { lastKeywordLanguages, storeKeywordLanguages, storeKeywordLanguagesWith } from '../../core/source-index/keyword-languages.ts';
 import { expandSourceIndexKeywords, KEYWORD_PREPARE_WAIT_MS, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
 import { RECENT_ITEMS_CUT_SHORT } from '../../core/source-index/partial-search.ts';
-import { controlPathHeadroom, ingestionTurn, type ControlPathHeadroom } from '../control-path-headroom.ts';
+import { CONTROL_PATH_SLICE_MS, controlPathHeadroom, ingestionTurn, type ControlPathHeadroom } from '../control-path-headroom.ts';
 import { OffThreadReadBusyError, offThreadReadsSupported, readOnPool, readPoolHasWaitingWork, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
 // The shared connector ingest spine: ONE generic local store that turns any
 // Contract 1 SourceConnector into a searchable, analyst-served corpus with
@@ -43,7 +44,7 @@ import { OffThreadReadBusyError, offThreadReadsSupported, readOnPool, readPoolHa
 
 import { compareProviderAccounts } from '../../core/provider-account-identity.ts';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, statSync, statfsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { Database, type SQLQueryBindings } from 'bun:sqlite';
 import type {
@@ -3355,6 +3356,51 @@ export function connectorStoreReadableNow(dbPath: string): boolean {
   }
 }
 
+/** The store's own maintenance opener, like its read-pool opener, on an isolated Bun process. */
+const CONNECTOR_RECLAIM_WORKER_SOURCE = `
+import { Database } from 'bun:sqlite';
+import { statSync } from 'node:fs';
+// core/sqlite-store.ts closeSqliteStore, inlined: this source runs in its own
+// process and cannot import it. Checkpoint first so no WAL is left for a reap.
+const closeSqliteStore = (db) => { try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch {} db.close(); };
+self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
+  // This is the mounted store's own maintenance connection. Never create a missing store.
+  const db = new Database(path, { create: false, strict: true });
+  db.exec('PRAGMA busy_timeout = 0; PRAGMA foreign_keys = ON;');
+  try {
+    postMessage({ started: true });
+    const mode = db.query('PRAGMA auto_vacuum').get().auto_vacuum;
+    if (mode !== 2) {
+      db.exec('PRAGMA auto_vacuum = INCREMENTAL;');
+      // NONE needs one transactional rebuild. A killed conversion leaves the
+      // original database usable; there is no rename or half-swapped file.
+      if (mode === 0) {
+        // VACUUM may renumber rowids in the composite-key embedding table.
+        // Restart unfinished physical backfills before that can happen.
+        db.exec('UPDATE chunk_vector_digest_meta SET cursor_rowid = 0 WHERE completed = 0;');
+        db.exec('VACUUM;');
+      }
+    }
+    const started = performance.now();
+    let free = db.query('PRAGMA freelist_count').get().freelist_count;
+    while (free > 0 && performance.now() - started < budgetMs) {
+      db.exec('PRAGMA incremental_vacuum(' + pagesPerStep + ')');
+      free = db.query('PRAGMA freelist_count').get().freelist_count;
+    }
+    // WAL truncation is part of reclaim, not a blocking close-time courtesy.
+    // A status snapshot may still own old pages: retry on the next tick.
+    const checkpoint = db.query('PRAGMA wal_checkpoint(TRUNCATE)').get();
+    postMessage({ done: free === 0 && checkpoint.busy === 0, bytes: statSync(path).size });
+  } catch {
+    postMessage({ failed: true });
+  } finally {
+    closeSqliteStore(db);
+  }
+};`;
+
+/** Pages per statement; the worker also stops at the existing sweep slice budget. */
+const RECLAIM_MAX_PAGES_PER_STEP = 128;
+
 export class LocalConnectorStore {
   readonly dbPath: string;
   /** The file this store opened, so a later delete or replace of it is seen. */
@@ -3479,6 +3525,7 @@ export class LocalConnectorStore {
       assertWritableStoreOpenAllowed('connector store', this.dbPath);
       if (this.dbPath !== ':memory:') mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
     }
+    const creatingFile = this.dbPath === ':memory:' || !existsSync(this.dbPath);
     this.db = new Database(this.dbPath, options.readOnly === true
       ? { readonly: true, create: false, strict: true }
       : { create: true });
@@ -3486,7 +3533,11 @@ export class LocalConnectorStore {
     try {
       this.db.exec(options.readOnly === true
         ? 'PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;'
+        : creatingFile
+        ? 'PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL; PRAGMA journal_mode = WAL;'
         : 'PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;');
+      // New stores need no conversion. Existing stores are converted only by
+      // background reclaim, after the sweep, never by opening a request's store.
       assertSqliteSchemaCanOpen(this.db, SQLITE_STORE_ID, CONNECTOR_STORE_SQLITE_SCHEMA_VERSION);
       const versionAtOpen = readSqliteSchemaVersion(this.db, SQLITE_STORE_ID);
       // A store already at this build's schema is checked by shape only. The
@@ -3575,7 +3626,7 @@ export class LocalConnectorStore {
       if (!model) return;
       // An Ask in flight on this store, or any owner-visible read waiting
       // for the pool (a status count, another store's lane), goes first.
-      if (this.vectorLanesInFlight > 0 || (offThreadReadsSupported(this.dbPath) && readPoolHasWaitingWork())) { this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS); return; }
+      if (this.reclaimProcess || this.vectorLanesInFlight > 0 || (offThreadReadsSupported(this.dbPath) && readPoolHasWaitingWork())) { this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS); return; }
       if (offThreadReadsSupported(this.dbPath)) { void this.backfillVectorDigestTurnOnPool(model); return; }
       try {
         const started = performance.now();
@@ -3647,10 +3698,14 @@ export class LocalConnectorStore {
   }
 
   close(): void {
+    const reclaiming = this.reclaimProcess !== undefined;
+    this.reclaimProcess?.kill('SIGKILL');
     clearTimeout(this.vectorDigestBackfillTimer);
     this.stopVisibilityPublisher();
     try {
-      if (!this.readOnly) this.releaseUnreferencedChunkMedia();
+      // SIGKILL releases the worker's write lock asynchronously. Media cleanup
+      // can retry on a later close; close must not race it with another write.
+      if (!this.readOnly && !reclaiming) this.releaseUnreferencedChunkMedia();
       if (this.tierLedgerOwned === true) this.tierLedgerHandle?.close();
       this.boundLedgerHandle?.close();
       this.boundLedgerHandle = undefined;
@@ -3661,6 +3716,100 @@ export class LocalConnectorStore {
       this.closedForPoolReads = true;
       if (offThreadReadsSupported(this.dbPath)) releaseOffThreadReads(this.dbPath);
       closeSqliteStore(this.db, { checkpoint: !this.readOnly });
+    }
+  }
+
+  private reclaimProcess: ReturnType<typeof Bun.spawn> | undefined;
+  private reclaimKilledAttempts = 0;
+
+  /** A conversion child holds this store's write lock; other writers defer instead of blocking. */
+  get reclaiming(): boolean { return this.reclaimProcess !== undefined; }
+
+  /** Cheap header introspection for the ticker's eligibility check. */
+  reclaimablePages(): { pages: number; free: number; pageBytes: number; bytes: number } | undefined {
+    if (this.readOnly || this.dbPath === ':memory:' || this.closedForPoolReads || this.fileReplacedOrRemoved()) return undefined;
+    return {
+      pages: (this.db.query('PRAGMA page_count').get() as { page_count: number }).page_count,
+      free: (this.db.query('PRAGMA freelist_count').get() as { freelist_count: number }).freelist_count,
+      pageBytes: (this.db.query('PRAGMA page_size').get() as { page_size: number }).page_size,
+      bytes: statSync(this.dbPath).size,
+    };
+  }
+
+  /** Called under Ask admission and the scheduler source hold, from the ticker only. */
+  async reclaimFreePages(budgetMs: number, options: { pagesPerStep?: number; onStarted?: () => void; statfs?: (path: string) => Pick<ReturnType<typeof statfsSync>, 'bavail' | 'bsize'> } = {}): Promise<{ done: boolean; bytes: number } | undefined> {
+    // Publisher/backfill promises span turns: let any existing write finish;
+    // new turns see reclaimProcess and defer until the child releases its lock.
+    if (this.reclaimProcess || this.vectorDigestBackfillReading || this.visibilityPublishing
+      || storeReadHasPriority() || !this.reclaimablePages()) return undefined;
+    const converting = (this.db.query('PRAGMA auto_vacuum').get() as { auto_vacuum: number }).auto_vacuum === 0;
+    if (converting) {
+      if (this.reclaimKilledAttempts >= 3 && storeOwnerIdleMs(this.now().getTime()) < 10 * 60_000) return undefined;
+      const neededBytes = 2 * statSync(this.dbPath).size + 1024 ** 3;
+      const disk = (options.statfs ?? statfsSync)(dirname(this.dbPath));
+      const availableBytes = Number(disk.bavail) * Number(disk.bsize);
+      if (!Number.isFinite(availableBytes) || availableBytes < neededBytes) {
+        console.info(`[store-reclaim] conversion_skipped reason=disk_space needed_bytes=${neededBytes} available_bytes=${availableBytes}`);
+        return undefined;
+      }
+    }
+    let pagesPerStep = options.pagesPerStep ?? RECLAIM_MAX_PAGES_PER_STEP;
+    if (pagesPerStep > RECLAIM_MAX_PAGES_PER_STEP) pagesPerStep = RECLAIM_MAX_PAGES_PER_STEP;
+    pagesPerStep = Math.max(1, Math.floor(pagesPerStep));
+    assertWritableStoreOpenAllowed('connector store reclaim', this.dbPath);
+    assertStoreTierLedgerCanOpen(this.dbPath);
+    // A separate process is essential: Bun Worker.terminate() cannot interrupt
+    // an executing SQLite statement. SIGKILL can, and SQLite rolls it back.
+    // Its main thread watches our stdin even while its worker runs VACUUM:
+    // parent death closes the pipe and kills the child, releasing every lock.
+    const supervisor = `
+      const worker = new Worker(URL.createObjectURL(new Blob([${JSON.stringify(CONNECTOR_RECLAIM_WORKER_SOURCE)}], {type:'text/javascript'})));
+      process.stdin.resume();
+      process.stdin.on('end', () => process.kill(process.pid, 'SIGKILL'));
+      worker.onmessage = ({data}) => {
+        console.log(JSON.stringify(data));
+        if (!data.started) process.exit(0);
+      };
+      worker.onerror = () => process.exit(1);
+      worker.postMessage(JSON.parse(process.argv[1]));`;
+    const child = Bun.spawn([process.execPath, '-e', supervisor, JSON.stringify([this.dbPath, budgetMs, pagesPerStep])],
+      { stdin: 'pipe', stdout: 'pipe', stderr: 'ignore',
+        env: { ...process.env, SQLITE_TMPDIR: dirname(this.dbPath), TMPDIR: dirname(this.dbPath) } });
+    this.reclaimProcess = child;
+    let preempted = false;
+    const interrupt = setInterval(() => {
+      try { if (storeReadHasPriority() && !preempted) { preempted = true; child.kill('SIGKILL'); } }
+      catch { child.kill('SIGKILL'); } // fail closed if admission cannot be checked
+    }, CONTROL_PATH_SLICE_MS);
+    try {
+      let result: { failed?: boolean; done: boolean; bytes: number } | undefined;
+      const output = (async () => {
+        const decoder = new TextDecoder();
+        let buffer = '';
+        for await (const chunk of child.stdout) {
+          buffer += decoder.decode(chunk, { stream: true });
+          let newline: number;
+          while ((newline = buffer.indexOf('\n')) >= 0) {
+            const message = JSON.parse(buffer.slice(0, newline));
+            buffer = buffer.slice(newline + 1);
+            if (message.started) options.onStarted?.();
+            else result = message;
+          }
+        }
+      })();
+      const code = await child.exited;
+      await output;
+      if (code !== 0 || this.closedForPoolReads) return undefined;
+      if (!result?.failed) this.reclaimKilledAttempts = 0;
+      return result?.failed ? undefined : result;
+    } finally {
+      clearInterval(interrupt);
+      child.stdin.end();
+      this.reclaimProcess = undefined;
+      if (converting && preempted) this.reclaimKilledAttempts++;
+      if (!this.closedForPoolReads) {
+        if (this.visibilityPending) this.scheduleVisibilityPublish(0);
+      }
     }
   }
 
@@ -4431,6 +4580,7 @@ export class LocalConnectorStore {
     }
     if (this.visibilityPublishing) return this.visibilityPublishing;
     if (!this.visibilityPending || this.visibilityClosed) return Promise.resolve();
+    if (this.reclaimProcess) { this.scheduleVisibilityPublish(VISIBILITY_RETRY_MIN_MS); return Promise.resolve(); }
     let publishing: Promise<void> | undefined;
     publishing = (async () => {
       try {
@@ -4482,6 +4632,7 @@ export class LocalConnectorStore {
 
   /** Lets the next publisher (here or on another connection) start at once. */
   private releaseVisibilityLease(): void {
+    if (this.reclaimProcess) return; // close may interrupt a conversion; its lease expires on its own
     try {
       this.db.exec('PRAGMA busy_timeout = 0');
       this.db.query('DELETE FROM main.tier_visibility_lease WHERE id = 1 AND owner = ?').run(this.visibilityOwner);
@@ -8760,7 +8911,7 @@ export class LocalConnectorStore {
    * file longer.
    */
   private releaseUnreferencedChunkMedia(): void {
-    if (!this.chunkMediaColumnsPresent) return;
+    if (!this.chunkMediaColumnsPresent || this.reclaimProcess) return;
     try {
       // Page by page until the queue is empty: a bulk purge or strip can queue
       // far more than one page, and the store may be deleted right after.

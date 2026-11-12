@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
+import { withStoreReadPriority } from '../../core/store-reclaim-admission.ts';
 import type { AnalystBackend, SourceIndexAnswerPhaseTimings } from './answer-types.ts';
 
 export type SourceAnswerTraceOutcome =
@@ -312,7 +313,7 @@ export function runWithSourceAnswerTrace<T>(
   trace: MutableTrace,
   run: () => T | Promise<T>,
 ): Promise<T> {
-  return Promise.resolve(storage.run(trace, run));
+  return withStoreReadPriority(() => storage.run(trace, run));
 }
 
 export function currentSourceAnswerTrace(): MutableTrace | undefined {
