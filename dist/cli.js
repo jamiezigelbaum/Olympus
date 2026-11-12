@@ -96381,13 +96381,13 @@ class LocalFileExtractionJobStore {
       const previous = this.db.query(`SELECT j.status, j.source_version FROM on_demand_reads r
         JOIN extraction_jobs j ON j.job_id = r.job_id
         WHERE r.corpus_id = ? AND r.provider_item_id = ? ORDER BY r.rowid DESC LIMIT 1`).get(request.itemRef.corpusId, request.itemRef.providerItemId);
-      if (previous) {
-        if (previous.status === "leased" || previous.status === "indexed" && (previous.source_version ?? "") === (job.refs[0].sourceVersion ?? ""))
+      if (previous && (previous.source_version ?? "") === (job.refs[0].sourceVersion ?? "")) {
+        if (previous.status === "leased" || previous.status === "indexed")
           return { state: "reading", etaSeconds: 60 };
         if (previous.status === "queued" || previous.status === "failed_retryable")
           return { state: "queued", etaSeconds: 60 };
         const ownerRetry = request.requester === "owner" && previous.status === "skipped_too_large";
-        if (!ownerRetry && (previous.source_version ?? "") === (job.refs[0].sourceVersion ?? ""))
+        if (!ownerRetry)
           return { state: "refused", reason: "read_failed" };
       }
       const size = job.refs[0].sizeBytes;
@@ -96426,6 +96426,16 @@ class LocalFileExtractionJobStore {
     return this.db.query(`SELECT j.* FROM on_demand_reads r CROSS JOIN extraction_jobs j ON j.job_id = r.job_id
       WHERE j.status = 'queued' OR (j.status = 'failed_retryable' AND (j.next_retry_at IS NULL OR j.next_retry_at <= ?))
         OR (j.status = 'leased' AND j.leased_until <= ?) ORDER BY r.rowid LIMIT 100`).all(nowIso4(), nowIso4()).map((row) => recordFromRow2(row).ref);
+  }
+  onDemandSettledLanes() {
+    return this.db.query(`SELECT DISTINCT j.corpus_id, j.provider, j.account_scope, j.approved_scope_key
+      FROM on_demand_reads r CROSS JOIN extraction_jobs j ON j.job_id = r.job_id
+      WHERE j.status NOT IN ('queued', 'leased', 'failed_retryable', 'indexed') LIMIT 100`).all().map((row) => ({
+      corpusId: row.corpus_id,
+      provider: row.provider,
+      accountScope: row.account_scope,
+      approvedScopeKey: row.approved_scope_key
+    }));
   }
   recordOnDemandFetchedBytes(jobId, bytes) {
     this.db.query("UPDATE on_demand_reads SET reserved_bytes = ? WHERE job_id = ?").run(bytes, jobId);
@@ -105618,6 +105628,7 @@ function createFileExtractionRunner(options) {
   return {
     reclassifyTerminal,
     prepareReadersWithWaitingWork: (lanes) => prepareReadersWithWaitingWork({ lanes }),
+    rereadUnread,
     corpusIds() {
       return [...corporaById.keys()];
     },
@@ -107263,10 +107274,17 @@ function createFileExtractionRuntime(options) {
     activeReads.add(key2);
     runner.run({ ...ref, providerItemIds: [ref.providerItemId], limit: 1, reclassify: false }).catch(() => console.warn("[olympus:on-demand] run_failed count=1")).finally(() => activeReads.delete(key2));
   };
+  let resumeTicks = 0;
   const resumeReads = () => {
     if (closed || options.readOnly)
       return;
     try {
+      if (resumeTicks++ % 12 === 0) {
+        for (const lane of jobs.onDemandSettledLanes()) {
+          if (corpora.some((corpus) => corpus.corpusId === lane.corpusId))
+            runner.rereadUnread?.(lane);
+        }
+      }
       for (const ref of jobs.pendingOnDemandReads()) {
         if (corpora.some((corpus) => corpus.corpusId === ref.corpusId))
           runRead(ref);

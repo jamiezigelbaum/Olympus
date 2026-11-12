@@ -8,6 +8,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
+import { createFileExtractionRunner } from '../src/workers/file-extraction/runner.ts';
+import { buildExtractorRegistry } from '../src/workers/file-extraction/registry.ts';
+import type { Extractor } from '../src/workers/file-extraction/types.ts';
 import { requestOnDemandRead, type OnDemandReadRequest } from '../src/workers/file-extraction/on-demand-read.ts';
 import { defaultDropboxIngestionPolicy, parseSourceIngestionPolicy, dropboxPolicyApprovedScopeKeys, dropboxPolicyFullExtractionScopeKeys, dropboxPolicyExcludedPathPrefixes } from '../src/core/source-ingestion-policy.ts';
 import { createSourceExclusionMatcher, parseSourceIngestionExclusions } from '../src/core/source-ingestion-exclusions.ts';
@@ -146,6 +149,64 @@ describe('read on demand', () => {
     expect(await requestOnDemandRead(req('item', 'remote_app', 'q2'), f.context)).toEqual({ state: 'refused', reason: 'read_failed' });
     expect(await requestOnDemandRead({ itemRef: req('item').itemRef, requester: 'owner' }, f.context)).toMatchObject({ state: 'queued' });
     expect(f.context.jobs.get(leased.leasedJobs[0]!.jobId)?.status).toBe('queued');
+  });
+
+  test('a newer version of a file still being read gets its own read', async () => {
+    const f = fixture();
+    let version = 'v1';
+    const context = { ...f.context, resolve: (request: OnDemandReadRequest) => {
+      const base = f.context.resolve(request);
+      return { ...base, job: { ...base.job, refs: [{ ...base.job.refs[0]!, sourceVersion: version }] } };
+    } };
+    expect(await requestOnDemandRead(req(), context)).toMatchObject({ state: 'queued' });
+    expect(await requestOnDemandRead(req(), context)).toMatchObject({ state: 'queued' });
+    expect(f.grants()).toBe(1);
+    version = 'v2';
+    expect(await requestOnDemandRead(req(), context)).toMatchObject({ state: 'queued' });
+    expect(f.grants()).toBe(2);
+    expect(f.context.jobs.pendingOnDemandReads().map(ref => ref.sourceVersion)).toContain('v2');
+    expect(await requestOnDemandRead(req(), context)).toMatchObject({ state: 'queued' });
+    expect(f.grants()).toBe(2);
+  });
+
+  test('an on-demand read left unread for want of a reader is read again once the reader is ready', async () => {
+    const lane = { corpusId: 'internal.fixture.files', provider: 'fixture', accountScope: 'one', approvedScopeKey: 'scope' };
+    const jobs = new LocalFileExtractionJobStore(':memory:');
+    cleanup.push(() => jobs.close());
+    let ready: 'ready' | 'pending' = 'pending';
+    let reads = 0;
+    const extractor: Extractor = {
+      kind: 'local_text', version: 'v1', input: { kind: 'none' }, egress: 'local', accepts: () => true,
+      reread: { unreadWarnings: ['ocr_unavailable_pdf'], unreadTerminalErrorKinds: [], prepare: () => ready },
+      async extract() {
+        reads += 1;
+        return reads === 1
+          ? { status: 'metadata_only', warnings: ['ocr_unavailable_pdf'], derivations: [{ artifactKind: 'document', chars: 0, warnings: ['ocr_unavailable_pdf'] }] }
+          : { status: 'indexed', text: 'scanned text' };
+      },
+    };
+    const runner = createFileExtractionRunner({ jobs, registry: buildExtractorRegistry([extractor]), corpora: [{
+      corpusId: lane.corpusId, trustDomain: 'internal',
+      source: { id: 'fixture', corpusId: lane.corpusId, provider: lane.provider,
+        async listCandidates() { return { candidates: [], done: true }; },
+        async fetch() { return { bytes: new Uint8Array([1]) }; } },
+      sink: { async accept() { return { accepted: true, chunksIndexed: 1, chunksAwaitingEmbedding: 0 }; } },
+    }] });
+    const context = { jobs, limits: { files: 3, bytes: 25 }, resolve: (request: OnDemandReadRequest) => ({
+      readableOnRequest: true,
+      job: { refs: [{ ...request.itemRef, ...lane, localItemId: 'scan', sizeBytes: 8 }], extractorKind: 'local_text', extractorVersion: 'v1' },
+      grant: () => {},
+    }) };
+    expect(await requestOnDemandRead(req('scan'), context)).toMatchObject({ state: 'queued' });
+    expect((await runner.run({ ...lane, providerItemIds: ['scan'], limit: 1, reclassify: false })).counts.metadata_only).toBe(1);
+    expect(jobs.pendingOnDemandReads()).toEqual([]);
+    expect(jobs.onDemandSettledLanes()).toEqual([lane]);
+    expect(runner.rereadUnread?.(lane)).toBe(0);
+    ready = 'ready';
+    expect(runner.rereadUnread?.(lane)).toBe(1);
+    expect(jobs.pendingOnDemandReads().map(ref => ref.providerItemId)).toEqual(['scan']);
+    expect((await runner.run({ ...lane, providerItemIds: ['scan'], limit: 1, reclassify: false })).counts.indexed).toBe(1);
+    expect(jobs.onDemandSettledLanes()).toEqual([]);
   });
 
   test('concurrent retries and a restart keep one forced job and its active lease', async () => {

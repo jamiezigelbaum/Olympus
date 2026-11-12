@@ -551,9 +551,17 @@ export function createFileExtractionRuntime(
   };
   // Durable jobs in names-only scopes have no bulk extraction pass. Resume
   // them through this same runner after a restart or an ordinary retry backoff.
+  let resumeTicks = 0;
   const resumeReads = () => {
     if (closed || options.readOnly) return;
     try {
+      // A read settled unread (no reader yet) is queued again once its reader
+      // is ready. Checked about once a minute; the queue itself every tick.
+      if (resumeTicks++ % 12 === 0) {
+        for (const lane of jobs.onDemandSettledLanes()) {
+          if (corpora.some((corpus) => corpus.corpusId === lane.corpusId)) runner.rereadUnread?.(lane);
+        }
+      }
       for (const ref of jobs.pendingOnDemandReads()) {
         if (corpora.some((corpus) => corpus.corpusId === ref.corpusId)) runRead(ref);
       }

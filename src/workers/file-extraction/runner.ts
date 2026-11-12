@@ -494,6 +494,11 @@ export interface FileExtractionRunner {
    * approved never count). Returns the kinds asked.
    */
   prepareReadersWithWaitingWork?(lanes: readonly ExtractionLaneKey[]): readonly string[];
+  /**
+   * Requeues, once per job, what the lane left unread while its reader was
+   * not ready. Returns how many jobs were queued again.
+   */
+  rereadUnread?(lane: ExtractionLaneKey): number;
 }
 
 // --- the runner ------------------------------------------------------------
@@ -658,6 +663,7 @@ export function createFileExtractionRunner(
   return {
     reclassifyTerminal,
     prepareReadersWithWaitingWork: (lanes) => prepareReadersWithWaitingWork({ lanes }),
+    rereadUnread,
 
     corpusIds(): readonly string[] {
       return [...corporaById.keys()];

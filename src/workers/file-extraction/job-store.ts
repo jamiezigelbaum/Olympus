@@ -767,13 +767,14 @@ export class LocalFileExtractionJobStore {
       const previous = this.db.query(`SELECT j.status, j.source_version FROM on_demand_reads r
         JOIN extraction_jobs j ON j.job_id = r.job_id
         WHERE r.corpus_id = ? AND r.provider_item_id = ? ORDER BY r.rowid DESC LIMIT 1`).get(request.itemRef.corpusId, request.itemRef.providerItemId) as { status: string; source_version: string | null } | null;
-      if (previous) {
-        if (previous.status === 'leased' || (previous.status === 'indexed' && (previous.source_version ?? '') === (job.refs[0]!.sourceVersion ?? ''))) return { state: 'reading', etaSeconds: 60 };
+      // Every dedupe is per source version: a newer version is a new read.
+      if (previous && (previous.source_version ?? '') === (job.refs[0]!.sourceVersion ?? '')) {
+        if (previous.status === 'leased' || previous.status === 'indexed') return { state: 'reading', etaSeconds: 60 };
         if (previous.status === 'queued' || previous.status === 'failed_retryable') return { state: 'queued', etaSeconds: 60 };
         // A read stopped by a question's byte allowance is not the file's own
         // failure: the owner, who has no question caps, may read it again.
         const ownerRetry = request.requester === 'owner' && previous.status === 'skipped_too_large';
-        if (!ownerRetry && (previous.source_version ?? '') === (job.refs[0]!.sourceVersion ?? '')) return { state: 'refused', reason: 'read_failed' };
+        if (!ownerRetry) return { state: 'refused', reason: 'read_failed' };
       }
       const size = job.refs[0]!.sizeBytes;
       // An unknown size reserves the remaining byte allowance and is bounded while fetching.
@@ -806,6 +807,21 @@ export class LocalFileExtractionJobStore {
       WHERE j.status = 'queued' OR (j.status = 'failed_retryable' AND (j.next_retry_at IS NULL OR j.next_retry_at <= ?))
         OR (j.status = 'leased' AND j.leased_until <= ?) ORDER BY r.rowid LIMIT 100`).all(nowIso(), nowIso()) as ExtractionJobSqlRow[])
       .map((row) => recordFromRow(row).ref);
+  }
+
+  /**
+   * Lanes holding an on-demand read that settled without being read (for
+   * example a scanned PDF before the OCR reader was ready). Names-only and
+   * read-on-demand lanes have no bulk pass, so the runtime asks the runner to
+   * reread these lanes itself; the runner's once-per-job guard bounds it.
+   */
+  onDemandSettledLanes(): ExtractionLaneKey[] {
+    return (this.db.query(`SELECT DISTINCT j.corpus_id, j.provider, j.account_scope, j.approved_scope_key
+      FROM on_demand_reads r CROSS JOIN extraction_jobs j ON j.job_id = r.job_id
+      WHERE j.status NOT IN ('queued', 'leased', 'failed_retryable', 'indexed') LIMIT 100`).all() as Array<{
+        corpus_id: string; provider: string; account_scope: string; approved_scope_key: string }>)
+      .map((row) => ({ corpusId: row.corpus_id, provider: row.provider, accountScope: row.account_scope,
+        approvedScopeKey: row.approved_scope_key }));
   }
 
   recordOnDemandFetchedBytes(jobId: string, bytes: number): void {
