@@ -78479,6 +78479,7 @@ async function buildPreparedEvidencePackDetailed(input) {
   const extractionGaps = laneCutShortGaps(routed.degradations, input);
   const searched = new Set(routed.searchedCorpora);
   const searchedSources = new Set(defaultSourceCorpusRegistryConfig().corpora.filter((corpus) => searched.has(corpus.corpusId)).map((corpus) => corpus.sourceId));
+  const limitStopGaps = [];
   const limits2 = registeredLimits();
   const now = (input.now?.() ?? new Date).getTime();
   for (const stop of input.limitStops ?? []) {
@@ -78486,9 +78487,10 @@ async function buildPreparedEvidencePackDetailed(input) {
     if (limit?.scope !== "source" || stop.resumesAt && Date.parse(stop.resumesAt) <= now)
       continue;
     if (limitStopSubjects(stop).some((subject) => searched.has(subject) || searchedSources.has(subject))) {
-      extractionGaps.push(`${limit.label} since ${stop.since}; new items from this source may be missing from this answer`);
+      limitStopGaps.push(`${limit.label} since ${stop.since}; new items from this source may be missing from this answer`);
     }
   }
+  extractionGaps.push(...limitStopGaps);
   const policyDeniedCoverageGaps = [];
   let policyDeniedCandidates = 0;
   const namesOnlyCandidateIndexes = [];
@@ -78635,6 +78637,7 @@ async function buildPreparedEvidencePackDetailed(input) {
     ...rerank ? { rerank } : {},
     ...labelled.dependencies.length > 0 ? { parentLabelDependencies: labelled.dependencies } : {},
     ...secretLocations.length > 0 ? { secretLocations } : {},
+    ...limitStopGaps.length > 0 ? { limitStopGaps } : {},
     ...classificationCoverage.length > 0 ? { classificationCoverage } : {}
   };
 }
@@ -161302,7 +161305,7 @@ async function answerOnThisComputer(input, options) {
 
 ${secrets}` : result.answer,
     citations: result.citations,
-    unanswered: result.unanswered ?? [],
+    unanswered: [...result.unanswered ?? [], ...detail.limitStopGaps ?? []],
     leftOut,
     ...busyField,
     read,

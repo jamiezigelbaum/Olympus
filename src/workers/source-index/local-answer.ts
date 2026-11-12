@@ -287,7 +287,8 @@ export async function answerOnThisComputer(
     status: 'answered',
     answer: secrets ? `${result.answer}\n\n${secrets}` : result.answer,
     citations: result.citations,
-    unanswered: result.unanswered ?? [],
+    // A source a limit stopped may be missing new items: said beside the answer.
+    unanswered: [...(result.unanswered ?? []), ...(detail.limitStopGaps ?? [])],
     leftOut,
     ...busyField,
     read,
