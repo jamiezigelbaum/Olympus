@@ -309,3 +309,19 @@ test('a chunk less than one stride longer than its share still scores its tail',
     windows.map(window => (window.includes(answer) ? 1 : 0)) });
   expect(placed[0]).toContain(answer);
 });
+
+test('windows go to the most relevant passage first even when it comes later in the document', async () => {
+  const answer = 'FOUNTAIN';
+  const early = 'e'.repeat(4000);
+  const late = ('l'.repeat(2000) + answer).padEnd(4000, 'l');
+  const placer = createEvidenceWindowPlacer(QUESTION);
+  const scoredFrom: string[] = [];
+  const placed = await placer.place(['e'.repeat(600), 'l'.repeat(600)], { texts: [early, late], priority: [1, 0],
+    scoreWindows: async (_query, windows) => {
+      scoredFrom.push(...windows.map(window => window[0]!));
+      return windows.map(window => (window.includes(answer) ? 1 : 0));
+    } });
+  expect(scoredFrom.every(letter => letter === 'l')).toBe(true);
+  expect(placed[0]).toBe('e'.repeat(600));
+  expect(placed[1]).toContain(answer);
+});

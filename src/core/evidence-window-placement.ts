@@ -4,8 +4,8 @@ import { sourceIndexChunkWindow } from './source-index/chunk-selection.ts';
 export const WINDOW_PLACEMENT_BUDGET_MS = 1_500;
 const WINDOW_CHARS = 600;
 const WINDOW_STRIDE = 300;
-// A seat scores at most eight windows. Chunks arrive best first, so the
-// leading chunk is covered end to end before the next one gets any, and the
+// A seat scores at most eight windows. The most relevant passage is covered
+// end to end before the next one gets any, and the
 // first seat cannot take the question's whole allowance from the next two.
 const MAX_WINDOWS_PER_SEAT = 8;
 const MAX_WINDOWS_PER_QUESTION = 24;
@@ -15,6 +15,8 @@ export type WindowScorer = (query: string, windows: readonly string[], signal: A
 /** Internal hydration snapshot: full text of ONLY the passages already picked. */
 export interface EvidenceWindowSource {
   texts: readonly string[];
+  /** Indexes into texts, most relevant first. Texts arrive in document order. */
+  priority?: readonly number[];
   scoreWindows?: WindowScorer;
 }
 
@@ -48,12 +50,13 @@ export function createEvidenceWindowPlacer(query: string, timers = systemTimers)
       const remaining = WINDOW_PLACEMENT_BUDGET_MS - (timers.now() - startedAt);
       if (remaining <= 0) { audit.timedOut = true; audit.elapsedMs = timers.now() - startedAt; return chunks; }
       const windows: { chunk: number; start: number; text: string }[] = [];
-      const eligible = chunks.flatMap((chunk, index) => {
+      const order = [...new Set([...(source.priority ?? []), ...chunks.keys()])];
+      const eligible = order.filter((index) => {
         const text = source.texts[index];
-        return text && text.length > chunk.length ? [index] : [];
+        const chunk = chunks[index];
+        return chunk !== undefined && text !== undefined && text.length > chunk.length;
       });
       const allowance = Math.min(MAX_WINDOWS_PER_SEAT, MAX_WINDOWS_PER_QUESTION - submittedWindows);
-      // Chunks arrive best first, so the leading chunk is covered end to end before the next gets any.
       for (const chunk of eligible) {
         const text = source.texts[chunk]!;
         // Score at the share that will be kept, so the winning text is never clipped away.

@@ -2677,6 +2677,8 @@ export function connectorStoreCurrentEmbeddingModelId(
 export interface ConnectorStoreLocalContent {
   // Full text of only the selected passages, index-aligned with chunks.
   windowTexts?: readonly string[];
+  // Positions in windowTexts, most relevant passage first.
+  windowPriority?: readonly number[];
   trustTier: SourceTrustTier;
   chunks: readonly string[];
   truncated: boolean;
@@ -14571,7 +14573,7 @@ export class LocalConnectorStore {
           return vector.length === queryVector.length ? cosineSimilarity(queryVector, vector) : undefined;
         })
       : undefined;
-    const { chunks, truncated, windowTexts } = selectEvidencePassages(
+    const { chunks, truncated, windowTexts, windowPriority } = selectEvidencePassages(
       // Layout padding (OCR and PDF text keep column alignment as runs of
       // spaces) is not evidence; dropping it lets the same budget carry
       // several times the text (2026-10-02 live Private store: 36% padding
@@ -14595,7 +14597,10 @@ export class LocalConnectorStore {
       trustTier: trustTierFromRow(row.trust_tier),
       chunks: reactionLine ? [reactionLine, ...chunks] : chunks,
       truncated,
-      ...(windowTexts && windowTexts.length > 1 ? { windowTexts: reactionLine ? [reactionLine, ...windowTexts] : windowTexts } : {}),
+      ...(windowTexts && windowTexts.length > 1 ? {
+        windowTexts: reactionLine ? [reactionLine, ...windowTexts] : windowTexts,
+        ...(windowPriority ? { windowPriority: reactionLine ? windowPriority.map(position => position + 1) : windowPriority } : {}),
+      } : {}),
       storedChunks: chunkRows.length,
       mimeType: row.mime_type,
       ...(row.locator_uri ? { locatorUri: row.locator_uri } : {}),
@@ -16809,7 +16814,7 @@ export function createConnectorStoreContentProvider(
           }
           return embeddings.map(value => cosineSimilarity(queryEmbedding, value));
         } : undefined;
-        windowPlacement = { texts: content.windowTexts, ...(scoreWindows ? { scoreWindows } : {}) };
+        windowPlacement = { texts: content.windowTexts, ...(content.windowPriority ? { priority: content.windowPriority } : {}), ...(scoreWindows ? { scoreWindows } : {}) };
       }
 
       return {
@@ -17807,7 +17812,7 @@ function selectEvidencePassages(
   maxChars: number | undefined,
   focus: ConnectorStorePassageFocus | undefined,
   context: { title?: string | null; relevance?: readonly (number | undefined)[] } = {},
-): { chunks: readonly string[]; truncated: boolean; windowTexts?: readonly string[] } {
+): { chunks: readonly string[]; truncated: boolean; windowTexts?: readonly string[]; windowPriority?: readonly number[] } {
   if (maxChars === undefined || maxChars <= 0) return budgetChunks(chunks, maxChars);
   const totalChars = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
   if (totalChars <= maxChars || !focus) return budgetChunks(chunks, maxChars);
@@ -17834,17 +17839,15 @@ function selectEvidencePassages(
       .sort((left, right) => right.score - left.score
         || relevance(right.index) - relevance(left.index)
         || left.index - right.index);
-    const picked = [
+    const best = [
       ...(anchor !== undefined ? [anchor] : []),
       ...scored.map((entry) => entry.index),
     ].slice(0, Math.max(1, Math.floor(focus.maxPassages ?? MAX_PASSAGES_PER_CANDIDATE)));
-    const bounded = boundedSourceIndexChunks(
-      picked.sort((left, right) => left - right).map((index) => chunks[index]!),
-      maxChars,
-      termGroups,
-    );
-    return { chunks: bounded.chunks, truncated: picked.length < chunks.length || bounded.truncated,
-      windowTexts: [...new Set(picked.map(index => chunks[index]!.trim()).filter(Boolean))].slice(0, bounded.chunks.length) };
+    const picked = [...best].sort((left, right) => left - right);
+    const bounded = boundedSourceIndexChunks(picked.map((index) => chunks[index]!), maxChars, termGroups);
+    const windowTexts = [...new Set(picked.map(index => chunks[index]!.trim()).filter(Boolean))].slice(0, bounded.chunks.length);
+    return { chunks: bounded.chunks, truncated: picked.length < chunks.length || bounded.truncated, windowTexts,
+      windowPriority: passagePriority(best.map(index => windowTexts.indexOf(chunks[index]!.trim()))) };
   }
   // Most relevant first (the anchor, then by embedding), filled whole until
   // the budget runs out, then read in document order. Chunks within
@@ -17885,11 +17888,18 @@ function selectEvidencePassages(
     remaining -= included.length;
   }
   const ordered = [...kept.entries()].sort(([left], [right]) => left - right);
+  const positions = ordered.map(([index]) => index);
   return {
     chunks: ordered.map(([, text]) => text),
     windowTexts: ordered.map(([index]) => chunks[index]!),
+    windowPriority: passagePriority(ranked.map(index => positions.indexOf(index))),
     truncated: ordered.length < chunks.length || ordered.some(([index, text]) => text.length < chunks[index]!.length),
   };
+}
+
+// Positions of the returned passages, most relevant first (for window placement).
+function passagePriority(positions: readonly number[]): readonly number[] {
+  return [...new Set(positions.filter((position) => position >= 0))];
 }
 
 // Query term groups minus those the item's name carries (see above).

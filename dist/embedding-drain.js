@@ -32390,13 +32390,16 @@ ${parentKey(ref)}`, { ref, origin });
       const vector = decodeEmbedding(chunk.embedding);
       return vector.length === queryVector.length ? cosineSimilarity(queryVector, vector) : undefined;
     }) : undefined;
-    const { chunks, truncated, windowTexts } = selectEvidencePassages(chunkRows.map((chunk) => compactPassageWhitespace(chunk.bounded_text)), maxChars, passageFocus, { title: row.title, ...relevance ? { relevance } : {} });
+    const { chunks, truncated, windowTexts, windowPriority } = selectEvidencePassages(chunkRows.map((chunk) => compactPassageWhitespace(chunk.bounded_text)), maxChars, passageFocus, { title: row.title, ...relevance ? { relevance } : {} });
     const reactionLine = servesContent ? renderSourceReactionLine(parseStoredSourceReactions(row.reactions_json)) : undefined;
     return {
       trustTier: trustTierFromRow(row.trust_tier),
       chunks: reactionLine ? [reactionLine, ...chunks] : chunks,
       truncated,
-      ...windowTexts && windowTexts.length > 1 ? { windowTexts: reactionLine ? [reactionLine, ...windowTexts] : windowTexts } : {},
+      ...windowTexts && windowTexts.length > 1 ? {
+        windowTexts: reactionLine ? [reactionLine, ...windowTexts] : windowTexts,
+        ...windowPriority ? { windowPriority: reactionLine ? windowPriority.map((position) => position + 1) : windowPriority } : {}
+      } : {},
       storedChunks: chunkRows.length,
       mimeType: row.mime_type,
       ...row.locator_uri ? { locatorUri: row.locator_uri } : {},
@@ -33421,15 +33424,18 @@ function selectEvidencePassages(chunks, maxChars, focus, context2 = {}) {
   const anchor = anchorIndex !== undefined && (focus.anchorLane !== "keyword" || lexical[anchorIndex] > 0) ? anchorIndex : undefined;
   if (lexical.some((score) => score > 0)) {
     const scored = lexical.map((score, index) => ({ index, score })).filter((entry) => entry.score > 0 && entry.index !== anchor).sort((left, right) => right.score - left.score || relevance(right.index) - relevance(left.index) || left.index - right.index);
-    const picked = [
+    const best2 = [
       ...anchor !== undefined ? [anchor] : [],
       ...scored.map((entry) => entry.index)
     ].slice(0, Math.max(1, Math.floor(focus.maxPassages ?? MAX_PASSAGES_PER_CANDIDATE)));
-    const bounded = boundedSourceIndexChunks(picked.sort((left, right) => left - right).map((index) => chunks[index]), maxChars, termGroups);
+    const picked = [...best2].sort((left, right) => left - right);
+    const bounded = boundedSourceIndexChunks(picked.map((index) => chunks[index]), maxChars, termGroups);
+    const windowTexts = [...new Set(picked.map((index) => chunks[index].trim()).filter(Boolean))].slice(0, bounded.chunks.length);
     return {
       chunks: bounded.chunks,
       truncated: picked.length < chunks.length || bounded.truncated,
-      windowTexts: [...new Set(picked.map((index) => chunks[index].trim()).filter(Boolean))].slice(0, bounded.chunks.length)
+      windowTexts,
+      windowPriority: passagePriority(best2.map((index) => windowTexts.indexOf(chunks[index].trim())))
     };
   }
   const ranked = chunks.map((_, index) => index).sort((left, right) => (left === anchor ? -1 : right === anchor ? 1 : 0) || relevance(right) - relevance(left) || left - right);
@@ -33456,11 +33462,16 @@ function selectEvidencePassages(chunks, maxChars, focus, context2 = {}) {
     remaining -= included.length;
   }
   const ordered = [...kept.entries()].sort(([left], [right]) => left - right);
+  const positions = ordered.map(([index]) => index);
   return {
     chunks: ordered.map(([, text2]) => text2),
     windowTexts: ordered.map(([index]) => chunks[index]),
+    windowPriority: passagePriority(ranked.map((index) => positions.indexOf(index))),
     truncated: ordered.length < chunks.length || ordered.some(([index, text2]) => text2.length < chunks[index].length)
   };
+}
+function passagePriority(positions) {
+  return [...new Set(positions.filter((position) => position >= 0))];
 }
 function withoutNameTerms(termGroups, title) {
   if (!title)
