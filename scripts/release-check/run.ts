@@ -1719,6 +1719,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
 // CLI
 
 export function parseCli(argv: readonly string[]): RunOptions {
+  if (argv.includes('--on-demand-timing')) throw new Error('--on-demand-timing belongs to the accounts legs: use scripts/release-check/canary.ts --accounts <file> --on-demand-timing');
   const get = (name: string): string | undefined => {
     const at = argv.indexOf(name);
     return at === -1 ? undefined : argv[at + 1];

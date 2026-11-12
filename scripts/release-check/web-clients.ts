@@ -389,14 +389,14 @@ export async function openMacInbox(machine: Machine, browser: BrowserSession, t:
 }
 
 /** Reuse a desktop listener, or run machine-agent's owner-socket forward until the browser closes. */
-export async function startOwnerBridge(machine: Machine, port: number, pidFile?: string): Promise<() => Promise<void>> {
+export async function startOwnerBridge(machine: Machine, port: number, pidFile?: string, files: { agentPath?: string; logTemplate?: string } = {}): Promise<() => Promise<void>> {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('invalid owner bridge port');
   const result = await machine.exec(`set -euo pipefail
 if (echo > /dev/tcp/127.0.0.1/${port}) 2>/dev/null; then echo 'owner-bridge existing'; exit 0; fi
 BUN=$(command -v bun 2>/dev/null || ls -d ~/.local/share/olympus-engine/generations/*/runtime/bun 2>/dev/null | tail -1)
 [ -n "$BUN" ] || exit 90
-log=$(mktemp "$HOME/rc/web-bridge.XXXXXX") || exit 1
-nohup "$BUN" --no-env-file ~/rc/agent.js owner-bridge --port ${port} >"$log" 2>&1 < /dev/null &
+log=$(mktemp ${files.logTemplate ? shellQuote(files.logTemplate) : '"$HOME/rc/web-bridge.XXXXXX"'}) || exit 1
+nohup "$BUN" --no-env-file ${files.agentPath ? shellQuote(files.agentPath) : '~/rc/agent.js'} owner-bridge --port ${port} >"$log" 2>&1 < /dev/null &
 pid=$!
 ${pidFile ? `printf '%s\\n' "$pid" > ${shellQuote(pidFile)}` : ''}
 for i in $(seq 1 100); do
