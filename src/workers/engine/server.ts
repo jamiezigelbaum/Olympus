@@ -448,6 +448,7 @@ import { approveClassifier, resolveClassificationLedgerPath, readClassificationL
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 import { ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
+import { beginBootProgress, finishBootProgress, reportBootStep } from '../../core/boot-progress.ts';
 import { ENGINE_BACKGROUND_INSTANCE_ENV, engineRoleFromEnv } from '../../core/engine-split.ts';
 import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
 import {
@@ -581,6 +582,9 @@ export async function main(): Promise<void> {
   // split's front (core/engine-split.ts) takes no lock: its background holds it.
   dataOwnerLock = takeWorkerDataOwnerLock(process.env, { engineRole: engineRoleFromEnv(process.env) });
   const engineRole = engineRoleFromEnv(process.env);
+  // The waits on this boot read its progress, not a fixed ceiling (#1494). The
+  // front does not own the data root and never writes it.
+  if (engineRole !== 'front') beginBootProgress(process.env);
   const engineSocketPath = engineRole === 'single' ? undefined : engineBackgroundSocketFromEnv(process.env);
   let engineFront: EngineFront | undefined;
   if (engineRole === 'front') {
@@ -605,11 +609,14 @@ export async function main(): Promise<void> {
   }
   if (engineRole !== 'front') {
   // An account a Delete marked is removed before anything else looks at it.
+  reportBootStep(process.env, { phase: 'starting' });
   deleteMarkedAccountsAtBoot(process.env);
   // An account recorded as legacy that holds nothing is placed in a folder instead.
   replaceEmptyAccountsAtBoot(process.env);
   // With the switch on, existing accounts move into their folders; a move under way is finished or undone.
+  reportBootStep(process.env, { phase: 'starting' });
   await moveAccountsAtBoot(process.env);
+  reportBootStep(process.env, { phase: 'starting' });
   // A restore the dashboard asked for runs now: under the owner lock, before
   // any store opens (backup-service.ts, #1065).
   applyPendingRestoreAtBoot(defaultBackupServicePaths(process.env), process.env);
@@ -5940,6 +5947,8 @@ export async function main(): Promise<void> {
       } }))
     : Bun.serve({ hostname, port, idleTimeout: 0, ...serverOptions });
   const server = !listens ? undefined : socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
+  // The single worker's boot work ends when it listens; the background's when it is ready on its socket.
+  if (engineRole === 'single') finishBootProgress();
   if (listens) {
   // This Bun worker owns listener lifecycle on standalone Mac/Linux and
   // OpenClaw-hosted installs alike. Dashboard-only backends without this
@@ -6299,6 +6308,7 @@ export async function main(): Promise<void> {
       return restartAfterFront({ frontPid, markStopping: () => commands.markStopping(), restart: () => requestModelReload(request), log: (line) => console.warn(line) });
     };
     commands.markReady();
+    finishBootProgress();
     engineBackground = { stop: () => { rssRestart.stop(); status.stop(); commands.stop(); } };
     console.log('Olympus engine background ready on its private command socket.');
   }

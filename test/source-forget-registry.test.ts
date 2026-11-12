@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { recordSchemaBackup } from '../src/core/boot-progress.ts';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
@@ -198,6 +199,20 @@ describe('runForgetSteps', () => {
       expect(file.left(layout, MINE), file.stepId).toBe(0);
       expect(file.left(layout, OTHER), file.stepId).toBeGreaterThan(0);
     }
+  });
+
+  test('copies of shared stores taken before a schema update go with a forget, and a dry run keeps them', () => {
+    const root = newRoot();
+    const layout = layoutUnder(root);
+    const context = contextOf(layout);
+    const backup = join(root, 'shared.sqlite.pre-schema-3.bak');
+    writeFileSync(backup, 'rows of every account');
+    recordSchemaBackup(context.env, { storeId: 'shared', dbPath: join(root, 'shared.sqlite'), backupPath: backup });
+
+    expect(runForgetSteps(accountOf(MINE), context, { dryRun: true })).toContain('Would remove 1 store copy taken before a schema update.');
+    expect(existsSync(backup)).toBe(true);
+    expect(runForgetSteps(accountOf(MINE), context, { dryRun: false })).toContain('Removed 1 store copy taken before a schema update.');
+    expect(existsSync(backup)).toBe(false);
   });
 
   test('a dry run reports the same lines and writes nothing', () => {
