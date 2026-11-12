@@ -5109,8 +5109,8 @@ function applyOpenClawPluginRemote(config, env) {
 }
 function parseRemoteConfig(remote) {
   const parsed = { enabled: remote.enabled === true };
-  if (remote.claudeAppEnabled !== undefined)
-    parsed.claudeAppEnabled = remote.claudeAppEnabled === true;
+  if (typeof remote.claudeAppEnabled === "boolean")
+    parsed.claudeAppEnabled = remote.claudeAppEnabled;
   for (const key of ["relayHost", "publicBaseUrl"]) {
     const value = remote[key];
     if (typeof value === "string" && value.trim())
@@ -11613,7 +11613,7 @@ import { Database } from "bun:sqlite";
 import { randomUUID as randomUUID5 } from "node:crypto";
 import { chmodSync as chmodSync4, closeSync as closeSync8, existsSync as existsSync12, mkdirSync as mkdirSync9, openSync as openSync8, statSync as statSync10 } from "node:fs";
 import { dirname as dirname14 } from "node:path";
-var TIER_LEDGER_SCHEMA_VERSION = 15;
+var TIER_LEDGER_SCHEMA_VERSION = 16;
 var RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided";
 function isFailSafeMissingContentQuestion(reason) {
   return reason.startsWith("content:sniffer:") && (reason.endsWith(":fail_safe:missing_question") || reason.endsWith(":fail_safe:unread"));
@@ -13041,12 +13041,13 @@ class TierLedger {
   }
   listSupersededItemWindow(options) {
     const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : [];
-    const rows = this.db.query(`SELECT * FROM tier_items i
-      WHERE ${after.length ? "(i.provider, i.account_scope, i.conversation_key, i.provider_item_id) > (?, ?, ?, ?) AND" : ""}
-        EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = i.provider AND c.account_scope = i.account_scope
-          AND c.conversation_key = i.conversation_key AND c.provider_item_id = i.provider_item_id
-          AND c.copy_state = 'superseded')
-      ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id LIMIT ?`).all(...after, Math.max(1, Math.min(options.limit, 500)));
+    const rows = this.db.query(`SELECT i.* FROM tier_copies c INDEXED BY tier_copies_superseded_walk
+      JOIN tier_items i ON i.provider = c.provider AND i.account_scope = c.account_scope
+        AND i.conversation_key = c.conversation_key AND i.provider_item_id = c.provider_item_id
+      WHERE c.copy_state = 'superseded'
+        ${after.length ? "AND (c.provider, c.account_scope, c.conversation_key, c.provider_item_id) > (?, ?, ?, ?)" : ""}
+      GROUP BY c.provider, c.account_scope, c.conversation_key, c.provider_item_id
+      ORDER BY c.provider, c.account_scope, c.conversation_key, c.provider_item_id LIMIT ?`).all(...after, Math.max(1, Math.min(options.limit, 500)));
     return rows.map(recordFromRow);
   }
   listLowerContentLeftovers(options) {
@@ -15208,12 +15209,21 @@ function tierLedgerMigrations() {
       }
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 15,
       name: "moved_migration_identity",
       up(db) {
         db.exec(`CREATE INDEX IF NOT EXISTS tier_migration_moved_identity
           ON tier_migration_proposals (provider, account_scope, conversation_key, provider_item_id)
           WHERE status = 'moved';`);
+      }
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: "superseded_copy_walk",
+      up(db) {
+        db.exec(`CREATE INDEX IF NOT EXISTS tier_copies_superseded_walk
+          ON tier_copies (provider, account_scope, conversation_key, provider_item_id)
+          WHERE copy_state = 'superseded';`);
       }
     }
   ];
@@ -20802,7 +20812,11 @@ class LocalConnectorStore {
     try {
       this.db.exec(options.readOnly === true ? "PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;" : "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
       assertSqliteSchemaCanOpen(this.db, SQLITE_STORE_ID, CONNECTOR_STORE_SQLITE_SCHEMA_VERSION);
+      const versionAtOpen = readSqliteSchemaVersion(this.db, SQLITE_STORE_ID);
+      const migrating = options.readOnly !== true && versionAtOpen < CONNECTOR_STORE_SQLITE_SCHEMA_VERSION;
       validateCurrentConnectorStoreSchemaBeforeMigration(this.db);
+      if (migrating)
+        validateConnectorStoreRows(this.db, `v${versionAtOpen}`);
       if (options.readOnly === true) {
         const version = readSqliteSchemaVersion(this.db, SQLITE_STORE_ID);
         if (version < READ_ONLY_MIN_SCHEMA_VERSION) {
@@ -20818,6 +20832,10 @@ class LocalConnectorStore {
         createConnectorStoreVisibilityTables(this.db);
         createConnectorStorePeopleIndex(this.db);
         validateConnectorStoreSchema(this.db);
+        if (migrating) {
+          validateConnectorStoreRows(this.db, "v15");
+          validateConnectorStoreForeignKeys(this.db);
+        }
       }
       if (options.readOnly !== true)
         this.createVisibilityJournal();
@@ -21219,11 +21237,10 @@ class LocalConnectorStore {
   tierLedgerHiddenItemPks() {
     return runSteps(this.tierLedgerHiddenSteps());
   }
-  async saveVisibilityInTurns() {
-    if (this.readOnly)
-      return;
-    await runStepsInTurns(this.tierLedgerHiddenSteps());
-    await this.publishVisibility();
+  async keepVisibilityCurrentInTurns() {
+    await this.tierHiddenItemPksInTurns();
+    if (!this.readOnly)
+      await this.publishVisibility();
   }
   tierLedgerHiddenMemo;
   hiddenChildMemo;
@@ -21369,14 +21386,16 @@ class LocalConnectorStore {
     const ledgerId = this.ledgerIdOf(ledger);
     if (ledgerId === undefined)
       return;
-    const page = this.db.query(`SELECT provider, account_scope, conversation_key, provider_item_id, flags, item_pks_json
-      FROM main.tier_visibility_members
-      WHERE generation = ?1 AND (provider, account_scope, conversation_key, provider_item_id) > (?2, ?3, ?4, ?5)
-      ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ?6`);
     for (let attempt = 0;attempt < 3; attempt += 1) {
       const state = this.readVisibilityState();
       if (!state || state.corpus_id !== this.corpusId || state.ledger_id !== ledgerId)
         return;
+      if (ledger.visibilityChangesSince(state.ledger_cursor).identities === undefined || this.itemVisibilityChangesSince(state.store_cursor).identities === undefined)
+        return;
+      const page = this.db.query(`SELECT provider, account_scope, conversation_key, provider_item_id, flags, item_pks_json
+        FROM main.tier_visibility_members
+        WHERE generation = ?1 AND (provider, account_scope, conversation_key, provider_item_id) > (?2, ?3, ?4, ?5)
+        ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ?6`);
       const memo = emptyTierVisibilityMemo(ledger, ledgerId, state.ledger_cursor, state.store_cursor, 0);
       let after = ["", "", "", ""];
       for (;; ) {
@@ -23326,13 +23345,12 @@ ${parentKey(ref)}`, { ref, origin });
       return this.peopleObservations();
     for (let attempt = 0;attempt < PEOPLE_OFF_THREAD_READ_ATTEMPTS; attempt += 1) {
       const marker = this.visibilityMarker();
-      const unchanged = childVisibilityUnchanged(this.childVisibilityLane());
       const tierHidden = await this.tierHiddenItemPksInTurns();
       const steps = this.peopleObservationSteps(tierHidden);
       let step = steps.next();
       while (!step.done)
         step = steps.next(await readOnPool(this.dbPath, step.value));
-      if (this.visibilityMarker() === marker && unchanged())
+      if (this.visibilityMarker() === marker)
         return this.peopleObservationsFromRows(step.value);
     }
     return this.peopleObservations();
@@ -30013,6 +30031,15 @@ function validateConnectorStoreV6Schema(db) {
   validateConnectorStoreSchemaShape(db, CONNECTOR_STORE_V5_ITEM_COLUMNS, true, "v6");
   validateConnectorStoreFtsOwnership(db, "v6");
 }
+function validateConnectorStoreRows(db, versionLabel) {
+  if (readSqliteSchemaVersion(db, SQLITE_STORE_ID) < 6)
+    return;
+  const counts = db.query(`SELECT (SELECT COUNT(*) FROM connector_store_fts) AS fts_rows,
+    (SELECT COUNT(*) FROM connector_store_fts_rows) AS mapped_rows`).get();
+  if (Number(counts.fts_rows) !== Number(counts.mapped_rows)) {
+    throw new Error(`Connector store schema ${versionLabel} FTS row ownership map is incomplete.`);
+  }
+}
 function validateVectorDigestSchema(db) {
   assertExactTableColumns(db, "chunk_vector_digest", ["chunk_pk", "model_id", "item_pk", "account_scope", "digest"], false, "v16");
   assertExactTableColumns(db, "chunk_vector_digest_meta", ["model_id", "cursor_rowid", "completed"], false, "v16");
@@ -30022,7 +30049,6 @@ function validateVectorDigestSchema(db) {
 function validateConnectorStoreSchema(db) {
   validateConnectorStoreV12Schema(db, "v15", CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
   validateVectorDigestSchema(db);
-  validateConnectorStoreForeignKeys(db);
   assertIndexColumns(db, "idx_connector_store_items_parent", ["parent_local_item_id"], "v15");
   assertExactTableColumns(db, "chunk_media_releases", ["media_sha256", "media_path"], false, "v13");
   assertExactTableColumns(db, "chunk_media_failures", ["media_sha256", "reason", "failed_at", "attempts"], false, "v13");
@@ -30095,11 +30121,6 @@ function validateConnectorStoreItemSchema(db, itemColumns, versionLabel, chunkCo
 function validateConnectorStoreFtsOwnership(db, versionLabel) {
   assertExactTableColumns(db, "connector_store_fts_rows", ["fts_rowid", "item_pk", "chunk_pk"], false, versionLabel);
   assertIndexColumns(db, "idx_connector_store_fts_rows_item", ["item_pk"], versionLabel);
-  const counts = db.query(`SELECT (SELECT COUNT(*) FROM connector_store_fts) AS fts_rows,
-    (SELECT COUNT(*) FROM connector_store_fts_rows) AS mapped_rows`).get();
-  if (Number(counts.fts_rows) !== Number(counts.mapped_rows)) {
-    throw new Error("Connector store schema FTS row ownership map is incomplete.");
-  }
 }
 function validateConnectorStoreForeignKeys(db) {
   const foreignKeyErrors = db.query("PRAGMA foreign_key_check").all();
@@ -32376,6 +32397,16 @@ var DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
 var MAX_PROMPT_BYTES = 1e5;
 var OPENCLAW_INFER_MAX_PROMPT_BYTES = MAX_PROMPT_BYTES;
 
+// src/core/limit-stops.ts
+var limits = new Map;
+function registerLimit(input) {
+  const prior = limits.get(input.id);
+  if (prior && Object.keys({ ...prior, ...input }).some((key) => prior[key] !== input[key])) {
+    throw new Error(`Limit already registered differently: ${input.id}`);
+  }
+  limits.set(input.id, Object.freeze({ ...input }));
+}
+
 // src/core/source-index/router.ts
 var FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
   "body",
@@ -33453,16 +33484,6 @@ function stripDataUrlPrefix(dataUrl) {
 var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages";
 var TELEGRAM_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:telegram";
 var TELEGRAM_SPOOL_CLEARED_KEY = `${TELEGRAM_SPOOL_REDACTION_STATE_KEY}:cleared_through`;
-// src/core/limit-stops.ts
-var limits = new Map;
-function registerLimit(input) {
-  const prior = limits.get(input.id);
-  if (prior && Object.keys({ ...prior, ...input }).some((key) => prior[key] !== input[key])) {
-    throw new Error(`Limit already registered differently: ${input.id}`);
-  }
-  limits.set(input.id, Object.freeze({ ...input }));
-}
-
 // src/workers/scheduler-limit-stops.ts
 var DAILY_LIMITS = new Map(Object.entries({
   daily_cost_guard: { id: "x.daily_cost", kind: "cost", label: "daily X API budget used" },

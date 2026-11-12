@@ -17,6 +17,10 @@
  *
  * Tokens for the plugin directory's endpoint are not listed: the relay serves
  * that endpoint ChatGPT's directory list whatever the token.
+ *
+ * The child also posts request-log batches to /relay/request-log with this
+ * same secret. That route is never forwarded from the public relay; only the
+ * child's authenticated session supplies the content-free metadata.
  */
 import { MAX_SURFACE_ENTRIES, type SurfaceEntry } from '../../connect-relay/shared/protocol.ts';
 import { surfaceFingerprint } from '../../connect-relay/shared/tokens.ts';
@@ -24,8 +28,12 @@ import { RELAY_SURFACES_PATH } from '../core/remote-access.ts';
 import type { RemoteConnectionStore } from '../core/remote-connections.ts';
 import { currentRemotePublicUrls, remoteMcpResource, type RemotePublicUrlsSource } from '../core/remote-public-url.ts';
 import { grantMcpSurface } from './remote-oauth/pinned-clients.ts';
+import { RELAY_REQUEST_LOG_PATH } from '../core/connection-requests.ts';
+import { parseRequestLogEntry, type RequestLogEntry } from '../../connect-relay/shared/request-log.ts';
+import { readBoundedRequestText } from './remote-request-body.ts';
 
 export interface RelaySurfacesOptions {
+  requestLog?: (entry: RequestLogEntry) => void;
   /** The connection store, when one exists (never created here). */
   connections: () => RemoteConnectionStore | undefined;
   publicUrls: RemotePublicUrlsSource;
@@ -52,6 +60,18 @@ export function relaySurfaceEntries(options: Pick<RelaySurfacesOptions, 'connect
 
 export function createRelaySurfacesHandler(options: RelaySurfacesOptions): (request: Request) => Promise<Response> {
   return async (request) => {
+    if (new URL(request.url).pathname === RELAY_REQUEST_LOG_PATH) {
+      if (request.method !== 'POST' || !options.isRelayed(request) || !options.requestLog) return reply(404, { error: 'not_found' });
+      const body = await readBoundedRequestText(request, 128 * 1024, { deadlineMs: 5_000 });
+      if (!body.ok) return reply(400, { error: 'invalid_request' });
+      let raw: unknown;
+      try { raw = JSON.parse(body.text); } catch { return reply(400, { error: 'invalid_request' }); }
+      if (!Array.isArray(raw) || raw.length > 100) return reply(400, { error: 'invalid_request' });
+      const entries = raw.map(parseRequestLogEntry);
+      if (entries.some(entry => !entry)) return reply(400, { error: 'invalid_request' });
+      for (const entry of entries) options.requestLog(entry!);
+      return reply(200, { ok: true });
+    }
     // Only the relay child, by its secret; anyone else finds nothing here.
     if (request.method !== 'GET' || !options.isRelayed(request)) return reply(404, { error: 'not_found' });
     try {
@@ -68,7 +88,7 @@ export function withRelaySurfacesRoute(
   handler: (request: Request) => Promise<Response>,
   rest: (request: Request) => Promise<Response>,
 ): (request: Request) => Promise<Response> {
-  return (request) => (new URL(request.url).pathname === RELAY_SURFACES_PATH ? handler(request) : rest(request));
+  return (request) => ([RELAY_SURFACES_PATH, RELAY_REQUEST_LOG_PATH].includes(new URL(request.url).pathname) ? handler(request) : rest(request));
 }
 
 function reply(status: number, body: unknown): Response {

@@ -43,7 +43,7 @@ import {
 import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledger-path.ts';
 
 export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
-export const TIER_LEDGER_SCHEMA_VERSION = 15;
+export const TIER_LEDGER_SCHEMA_VERSION = 16;
 export const RETIRED_EMBEDDING_CLEARANCE_REASON = 'content:sniffer:retired_embedding_clearance:undecided';
 
 /** A scrub's start: the revision it took and the item's generation then. */
@@ -2392,12 +2392,17 @@ export class TierLedger {
     const after = options.after
       ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId]
       : [];
-    const rows = this.db.query(`SELECT * FROM tier_items i
-      WHERE ${after.length ? '(i.provider, i.account_scope, i.conversation_key, i.provider_item_id) > (?, ?, ?, ?) AND' : ''}
-        EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = i.provider AND c.account_scope = i.account_scope
-          AND c.conversation_key = i.conversation_key AND c.provider_item_id = i.provider_item_id
-          AND c.copy_state = 'superseded')
-      ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id LIMIT ?`)
+    // Driven from the superseded copies' own index, so a page costs its rows,
+    // not a walk over every item between two sparse leftovers. The join sits
+    // before the limit: an archive removal keeps superseded copies after their
+    // item row is gone, and those must not use up a page and end the sweep.
+    const rows = this.db.query(`SELECT i.* FROM tier_copies c INDEXED BY tier_copies_superseded_walk
+      JOIN tier_items i ON i.provider = c.provider AND i.account_scope = c.account_scope
+        AND i.conversation_key = c.conversation_key AND i.provider_item_id = c.provider_item_id
+      WHERE c.copy_state = 'superseded'
+        ${after.length ? 'AND (c.provider, c.account_scope, c.conversation_key, c.provider_item_id) > (?, ?, ?, ?)' : ''}
+      GROUP BY c.provider, c.account_scope, c.conversation_key, c.provider_item_id
+      ORDER BY c.provider, c.account_scope, c.conversation_key, c.provider_item_id LIMIT ?`)
       .all(...after, Math.max(1, Math.min(options.limit, 500))) as TierItemRow[];
     return rows.map(recordFromRow);
   }
@@ -5639,13 +5644,26 @@ function tierLedgerMigrations(): SqliteMigration[] {
       },
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 15,
       name: 'moved_migration_identity',
       up(db) {
         // The bounded automatic-copy sweep probes by identity across plans.
         db.exec(`CREATE INDEX IF NOT EXISTS tier_migration_moved_identity
           ON tier_migration_proposals (provider, account_scope, conversation_key, provider_item_id)
           WHERE status = 'moved';`);
+      },
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: 'superseded_copy_walk',
+      up(db) {
+        // The superseded-copy sweep pages identities that still hold a
+        // superseded copy. Walking tier_items for them read most of the
+        // ledger once those copies grew sparse (several seconds a page on
+        // Sparta, olympus-ops#151); this partial index holds only them.
+        db.exec(`CREATE INDEX IF NOT EXISTS tier_copies_superseded_walk
+          ON tier_copies (provider, account_scope, conversation_key, provider_item_id)
+          WHERE copy_state = 'superseded';`);
       },
     },
   ];

@@ -358,6 +358,8 @@ export interface ImportObservation {
   settled: boolean;
   settleMs: number;
   row?: RowView | undefined;
+  /** Only for a row still counting when read: ms until it showed its count, or null when it never did. */
+  countHealMs?: number | null;
   status?: StatusView;
   archiveId?: string | undefined;
   stores: StoreView[];
@@ -710,6 +712,12 @@ const secs = (ms: number): string => `${Math.round(ms / 1000)} s`;
 const sameSet = (a: readonly string[], b: readonly string[]): boolean => a.length === b.length && [...a].sort().every((line, index) => line === [...b].sort()[index]);
 const prefixOf = (fx: { role: string; format: string }): string => `archive.${fx.role}.${fx.format}`;
 
+/** What became of a row that was still counting when it was read. */
+export const countHealWords = (healMs: number | null): string =>
+  healMs === null ? `the row was still counting ${secs(COUNT_HEAL_WAIT_MS)} later` : `the row showed its count ${secs(healMs)} later`;
+/** How long a row still counting is watched after its check's read, to tell a late tally from a stuck one. */
+export const COUNT_HEAL_WAIT_MS = 120_000;
+
 /** Everything about a settled row that differs from what the fixture holds; empty when it is as expected. */
 export function rowProblems(row: RowView, expect: ArchiveExpectation, via: 'request' | 'picker' = 'request'): string[] {
   const problems: string[] = [];
@@ -804,6 +812,7 @@ function importCoreChecks(obs: ImportObservation, fx: LegFixture): CheckResult[]
     obs.settled && obs.row ? `${obs.row.name} reads ${obs.row.tag} after ${secs(obs.settleMs)}` : `the row did not read ${A.status.imported}${obs.row ? ` (it reads "${obs.row.tag || obs.row.status}")` : ''}`, obs.settleMs));
   if (obs.row) {
     const problems = rowProblems(obs.row, fx.expect, obs.via);
+    if (obs.countHealMs !== undefined) problems.push(countHealWords(obs.countHealMs));
     out.push(check(`${prefix}.dashboard`, 'The dashboard row shows the format, the messages, the days, what was not imported and how it was read', problems.length === 0,
       problems.length === 0 ? `${messagesWord(fx.expect.messages, fx.expect.family)}, ${datesWord(fx.expect)}, ${fx.expect.label}${expectedGapLines(fx.expect).length > 0 ? `, ${expectedGapLines(fx.expect).join('; ')}` : ', nothing unread'}` : problems.join('; ')));
     const view = obs.status?.archives.find((archive) => archive.name === fx.fileName);

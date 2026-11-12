@@ -411,6 +411,7 @@ export interface SourceSchedulerOptions {
 }
 
 export interface SourceSchedulerStateStore {
+  openLimitStops?(now?: Date): import('../core/limit-stops.ts').LimitStop[];
   get(key: SourceSchedulerTaskStateKey): PersistedSourceSchedulerTaskState | undefined;
   recordAttempt(input: Parameters<LocalSourceSchedulerStateStore['recordAttempt']>[0]): PersistedSourceSchedulerTaskState;
   recordSuccess(input: Parameters<LocalSourceSchedulerStateStore['recordSuccess']>[0]): PersistedSourceSchedulerTaskState;
@@ -426,6 +427,7 @@ export interface SourceSchedulerStateStore {
 }
 
 export interface SourceSchedulerStatus {
+  limit_stops?: import('../core/limit-stops.ts').LimitStop[];
   kind: 'source_scheduler_status';
   enabled: boolean;
   running: boolean;
@@ -887,6 +889,7 @@ export class SourceScheduler {
       enabled: this.enabled,
       running: this.timer !== undefined,
       generated_at: now.toISOString(),
+      limit_stops: this.stateStore?.openLimitStops?.(now) ?? [],
       selected_source_ids: this.allowedSourceIds === undefined
         ? this.sources.map((source) => source.sourceId)
         : [...this.allowedSourceIds],

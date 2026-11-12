@@ -242,6 +242,7 @@ describe('olympus connections status', () => {
     const { env, dir } = home();
     writeRemoteAccessStatus(dir, relayStatus());
     expect(runConnectionsCommand(['status'], env)).toEqual({
+      recent_requests: 'No requests recorded yet.',
       kind: 'remote_access_status',
       schema: 'olympus.remote-access.status.v2',
       remote_enabled: true,

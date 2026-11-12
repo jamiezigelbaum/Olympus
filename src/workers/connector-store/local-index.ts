@@ -119,7 +119,6 @@ import {
   judgedAwaited,
   parentVerdictsSteps,
   CHILD_PARENT_CHAIN_LIMIT,
-  childVisibilityUnchanged,
   hiddenChildKeysSteps,
   ledgerVisibilityOffThread,
   ledgerVisibilityHere,
@@ -3488,7 +3487,15 @@ export class LocalConnectorStore {
         ? 'PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;'
         : 'PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;');
       assertSqliteSchemaCanOpen(this.db, SQLITE_STORE_ID, CONNECTOR_STORE_SQLITE_SCHEMA_VERSION);
+      const versionAtOpen = readSqliteSchemaVersion(this.db, SQLITE_STORE_ID);
+      // A store already at this build's schema is checked by shape only. The
+      // checks that read every row (the text index's ownership count, every
+      // foreign key) run only when this open migrates: on Sparta they read
+      // about 22 GB per plain restart across both engine processes, most of
+      // each one's 6 minutes to ready (ops#151, 2026-11-12).
+      const migrating = options.readOnly !== true && versionAtOpen < CONNECTOR_STORE_SQLITE_SCHEMA_VERSION;
       validateCurrentConnectorStoreSchemaBeforeMigration(this.db);
+      if (migrating) validateConnectorStoreRows(this.db, `v${versionAtOpen}`);
       if (options.readOnly === true) {
         const version = readSqliteSchemaVersion(this.db, SQLITE_STORE_ID);
         // Anything newer than this build already failed
@@ -3506,6 +3513,10 @@ export class LocalConnectorStore {
         createConnectorStoreVisibilityTables(this.db);
         createConnectorStorePeopleIndex(this.db);
         validateConnectorStoreSchema(this.db);
+        if (migrating) {
+          validateConnectorStoreRows(this.db, 'v15');
+          validateConnectorStoreForeignKeys(this.db);
+        }
       }
       if (options.readOnly !== true) this.createVisibilityJournal();
       // A read-only open of a store no writer of this build has opened has no
@@ -4106,16 +4117,21 @@ export class LocalConnectorStore {
   }
 
   /**
-   * Brings this writer's visibility set up to date and saves it in the store,
-   * with a turn between steps, for read-only connections to start from. The
-   * writer also does this on its own (refreshVisibilityIfBehind); this is for
-   * a caller that wants the saved set current now. Does nothing on a
-   * read-only store.
+   * Builds, or brings up to date, this connection's hidden-copy set with a
+   * turn between steps, and on a writer saves it in the store for read-only
+   * connections to start from. The engine calls it for every store after it
+   * starts and then on a timer: the split's front before it reports ready, so
+   * an Ask never pays the first build on its own thread, and the background
+   * (or the single worker) so each store's saved set stays inside the
+   * ledger's visibility feed. A writer keeps its saved set inside the feed on
+   * its own only once it has built a set (refreshVisibilityIfBehind); a store
+   * with no import after a restart never did, and ledger-only writes (the
+   * prune sweep, judging) moved the shared feed past its stamp, so every
+   * front start rebuilt it from the ledger (gate 1, ops#151: about 59 s).
    */
-  async saveVisibilityInTurns(): Promise<void> {
-    if (this.readOnly) return;
-    await runStepsInTurns(this.tierLedgerHiddenSteps());
-    await this.publishVisibility();
+  async keepVisibilityCurrentInTurns(): Promise<void> {
+    await this.tierHiddenItemPksInTurns();
+    if (!this.readOnly) await this.publishVisibility();
   }
 
   private tierLedgerHiddenMemo: TierVisibilityMemo | undefined;
@@ -4318,13 +4334,17 @@ export class LocalConnectorStore {
   } | undefined> {
     const ledgerId = this.ledgerIdOf(ledger);
     if (ledgerId === undefined) return undefined;
-    const page = this.db.query(`SELECT provider, account_scope, conversation_key, provider_item_id, flags, item_pks_json
-      FROM main.tier_visibility_members
-      WHERE generation = ?1 AND (provider, account_scope, conversation_key, provider_item_id) > (?2, ?3, ?4, ?5)
-      ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ?6`);
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const state = this.readVisibilityState();
       if (!state || state.corpus_id !== this.corpusId || state.ledger_id !== ledgerId) return undefined;
+      // A stamp already outside either feed can't be served: give up before
+      // reading every saved row (Sparta's largest store holds about 645k).
+      if (ledger.visibilityChangesSince(state.ledger_cursor).identities === undefined
+        || this.itemVisibilityChangesSince(state.store_cursor).identities === undefined) return undefined;
+      const page = this.db.query(`SELECT provider, account_scope, conversation_key, provider_item_id, flags, item_pks_json
+        FROM main.tier_visibility_members
+        WHERE generation = ?1 AND (provider, account_scope, conversation_key, provider_item_id) > (?2, ?3, ?4, ?5)
+        ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ?6`);
       const memo = emptyTierVisibilityMemo(ledger, ledgerId, state.ledger_cursor, state.store_cursor, 0);
       let after: [string, string, string, string] = ['', '', '', ''];
       for (;;) {
@@ -6991,13 +7011,16 @@ export class LocalConnectorStore {
   async peopleObservationsOffThread(): Promise<PeopleSenderObservation[]> {
     if (!offThreadReadsSupported(this.dbPath)) return this.peopleObservations();
     for (let attempt = 0; attempt < PEOPLE_OFF_THREAD_READ_ATTEMPTS; attempt += 1) {
+      // The marker covers the ledger's visibility feed and every lane store's
+      // item feed. Never the ledger's whole change marker: the sweep and the
+      // judge write the ledger every few seconds, and every attempt would then
+      // fall back to the synchronous walk on this thread (gate 1, ops#168).
       const marker = this.visibilityMarker();
-      const unchanged = childVisibilityUnchanged(this.childVisibilityLane());
       const tierHidden = await this.tierHiddenItemPksInTurns();
       const steps = this.peopleObservationSteps(tierHidden);
       let step = steps.next();
       while (!step.done) step = steps.next(await readOnPool(this.dbPath, step.value));
-      if (this.visibilityMarker() === marker && unchanged()) return this.peopleObservationsFromRows(step.value);
+      if (this.visibilityMarker() === marker) return this.peopleObservationsFromRows(step.value);
     }
     return this.peopleObservations();
   }
@@ -19146,6 +19169,21 @@ function validateConnectorStoreV6Schema(db: Database): void {
   validateConnectorStoreFtsOwnership(db, 'v6');
 }
 
+/**
+ * The checks that read every row of the text index (its ownership map is
+ * complete), for an open that migrates. Version 6 and later; earlier stores
+ * have no ownership map.
+ */
+function validateConnectorStoreRows(db: Database, versionLabel: string): void {
+  if (readSqliteSchemaVersion(db, SQLITE_STORE_ID) < 6) return;
+  // One statement, so one snapshot.
+  const counts = db.query(`SELECT (SELECT COUNT(*) FROM connector_store_fts) AS fts_rows,
+    (SELECT COUNT(*) FROM connector_store_fts_rows) AS mapped_rows`).get() as { fts_rows: number; mapped_rows: number };
+  if (Number(counts.fts_rows) !== Number(counts.mapped_rows)) {
+    throw new Error(`Connector store schema ${versionLabel} FTS row ownership map is incomplete.`);
+  }
+}
+
 function validateVectorDigestSchema(db: Database): void {
   assertExactTableColumns(db, 'chunk_vector_digest', ['chunk_pk', 'model_id', 'item_pk', 'account_scope', 'digest'], false, 'v16');
   assertExactTableColumns(db, 'chunk_vector_digest_meta', ['model_id', 'cursor_rowid', 'completed'], false, 'v16');
@@ -19156,7 +19194,6 @@ function validateVectorDigestSchema(db: Database): void {
 function validateConnectorStoreSchema(db: Database): void {
   validateConnectorStoreV12Schema(db, 'v15', CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
   validateVectorDigestSchema(db);
-  validateConnectorStoreForeignKeys(db);
   assertIndexColumns(db, 'idx_connector_store_items_parent', ['parent_local_item_id'], 'v15');
   assertExactTableColumns(db, 'chunk_media_releases', ['media_sha256', 'media_path'], false, 'v13');
   assertExactTableColumns(db, 'chunk_media_failures', ['media_sha256', 'reason', 'failed_at', 'attempts'], false, 'v13');
@@ -19297,18 +19334,11 @@ function validateConnectorStoreFtsOwnership(db: Database, versionLabel: string):
     versionLabel,
   );
   assertIndexColumns(db, 'idx_connector_store_fts_rows_item', ['item_pk'], versionLabel);
-  // One statement, so one snapshot: a read-only open runs beside the writer,
-  // and two separate counts let its commit land between them.
-  const counts = db.query(`SELECT (SELECT COUNT(*) FROM connector_store_fts) AS fts_rows,
-    (SELECT COUNT(*) FROM connector_store_fts_rows) AS mapped_rows`).get() as { fts_rows: number; mapped_rows: number };
-  if (Number(counts.fts_rows) !== Number(counts.mapped_rows)) {
-    throw new Error('Connector store schema FTS row ownership map is incomplete.');
-  }
 }
 
 // Walks every foreign key in the file: most of a large store's open time
-// (13 to 15 s cold on Sparta, 2026-11-10, #1242). Only the writer's open runs
-// it, after its migrations; a read-only open migrates nothing.
+// (13 to 15 s cold on Sparta, 2026-11-10, #1242). Only a writer's open that
+// migrates runs it, after its migrations.
 function validateConnectorStoreForeignKeys(db: Database): void {
   const foreignKeyErrors = db.query('PRAGMA foreign_key_check').all();
   if (foreignKeyErrors.length > 0) {
