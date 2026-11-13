@@ -376,7 +376,7 @@ function options(extra: Record<string, unknown> = {}) {
   const runId = newRunId();
   // No agent asks a question here, so every run also carries the standing "no agent asked a question" problem; the checks are what is asserted.
   const config: RunConfigFile = { driver: [driverPath], agents: [], settleTimeoutS: 5 };
-  return { runId, candidateDir, upgradeFromDir: baselineDir, candidateLabel: 'upgrade test', outDir: join(dir, 'out', runId), config, skipRelay: true, skipScreenshots: true, skipInbox: true, skipJourneys: true, skipExplore: true, skipArchive: true, ...extra };
+  return { runId, candidateDir, upgradeFromDir: baselineDir, candidateLabel: 'upgrade test', outDir: join(dir, 'out', runId), config, limitsStage: async () => ({ rows: [], checks: [] }), skipRelay: true, skipScreenshots: true, skipInbox: true, skipJourneys: true, skipExplore: true, skipArchive: true, ...extra };
 }
 const checkOf = (report: Awaited<ReturnType<typeof runReleaseCheck>>, id: string) => {
   const machine = report.machines[0]!;
@@ -390,8 +390,14 @@ const failedIds = (report: Awaited<ReturnType<typeof runReleaseCheck>>): string[
 
 describe('the upgrade leg end to end, against a scripted machine', () => {
   test('the earlier release is provisioned, the candidate installs over it with the upgrade verb, and every comparison passes', async () => {
-    const opts = options();
+    let limitsRuns = 0;
+    const opts = { ...options(), limitsStage: async () => {
+      expect(driverLog().some(line => line.startsWith('upgrade '))).toBe(true);
+      limitsRuns++;
+      return { rows: [], checks: [] };
+    } };
     const report = await runReleaseCheck(opts);
+    expect(limitsRuns).toBe(1);
     // The one standing problem is that this stand-in has no model agent; nothing else fails.
     expect(failedIds(report)).toEqual([]);
     expect(report.errors.every((e) => e.includes('no agent asked a question'))).toBe(true);

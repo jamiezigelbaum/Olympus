@@ -94,6 +94,7 @@ export function gmailExportEvidence(archive: ArchiveToIdentify): ArchiveAccountE
 /** The Gmail account's lane, as the runtime has it: nothing of it is the archive layer's. */
 export interface GmailArchiveLane {
   set: TieredStoreSet;
+  reportWait?: ((reason: string) => void) | undefined;
   /** The live lane's own sync options. */
   sync: ConnectorStoreSyncOptions;
   /** The account scope live Gmail writes under (`personal` unless the handle names another). */
@@ -154,7 +155,10 @@ export function gmailArchiveTarget(options: GmailArchiveTargetOptions): ArchiveS
     identify: gmailExportEvidence,
     input(archive: ArchiveConnectorInput): SourceConnectorInput {
       const lane = current ?? laneNow();
-      return mboxGmailInput(archive, {
+      return mboxGmailInput({ ...archive, waitForProvider: (reason, detail) => {
+        lane.reportWait?.(reason);
+        archive.waitForProvider?.(reason, detail);
+      } }, {
         ...(lane.build ? { build: lane.build } : {}),
         ...(lane.match ? { match: lane.match } : {}),
         labels: () => gmailLabelLookup(lane),

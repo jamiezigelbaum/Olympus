@@ -63,6 +63,8 @@ export interface MachineInfo {
 export interface Tunnel { port: number; close(): void }
 
 export interface Machine extends MachineInfo {
+  /** Set only by provision, never by machineFor (which can address an existing owner machine). */
+  readonly disposable?: true;
   /** Updates the install on the machine with a newer build's installer bundle, the way a user does. */
   upgrade(candidateDir: string): Promise<void>;
   exec(script: string, options?: ExecOptions): Promise<ExecResult>;
@@ -187,10 +189,12 @@ export class CommandDriver {
       // A failed provision may have left a machine behind; the caller destroys it by run id.
       throw new Error(`driver provision failed (exit ${result.code}${result.timedOut ? ', timed out' : ''})`);
     }
-    return this.machineFor(parseProvisionLine(result.stdout));
+    return { ...this.machineFor(parseProvisionLine(result.stdout)), disposable: true };
   }
 
-  machineFor(info: MachineInfo): Machine {
+  machineFor(machineInfo: MachineInfo & { disposable?: unknown }): Machine {
+    // Only provision marks a machine throwaway; an addressed machine never inherits it.
+    const { disposable: _ignored, ...info } = machineInfo;
     const base = this.options.argv;
     const log = this.log;
     return {

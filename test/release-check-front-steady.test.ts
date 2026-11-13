@@ -1,6 +1,6 @@
 // The release check's split-front stage (scripts/release-check/front-steady.ts): the rc.4 install crashed its front on every
 // start (ops#151) and every leg passed, so the stage's judgment and its Gmail fixture are held here.
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
@@ -10,7 +10,7 @@ import { identifyGmailExport } from '../src/workers/archive-import/mbox/gmail-ac
 import {
   archiveStatusOf, crashLines, frontChurn, frontGmailMbox, frontSteadyChecks, type FrontSteadyObservation,
 } from '../scripts/release-check/front-steady.ts';
-import { enginePidsIn } from '../scripts/release-check/machine-agent.ts';
+import { enginePidsIn, staleAgentOnPort } from '../scripts/release-check/machine-agent.ts';
 import { OWNER_ADDRESS } from './support/archive-fixtures-gmail.ts';
 
 const steady = (over: Partial<FrontSteadyObservation> = {}): FrontSteadyObservation => ({
@@ -67,6 +67,13 @@ describe('front steadiness', () => {
     expect(check.detail).toContain('Telegram was not seeded');
   });
 
+  test('a restart before the background made the extraction job queue proves nothing, so the store set fails', () => {
+    const check = status(frontSteadyChecks(steady({ jobQueue: false })), 'front.store-set')!;
+    expect(check.status).toBe('fail');
+    expect(check.detail).toContain('never made the extraction job queue');
+    expect(status(frontSteadyChecks(steady({ jobQueue: true })), 'front.store-set')!.status).toBe('pass');
+  });
+
   test('churn counts distinct processes per role and samples without one', () => {
     expect(frontChurn([{ front: [1], background: [9] }, { front: [], background: [9] }, { front: [2], background: [9] }]))
       .toEqual({ fronts: 2, withoutFront: 1, backgrounds: 1, withoutBackground: 0 });
@@ -104,4 +111,20 @@ describe('front steadiness', () => {
       } finally { root.close(); }
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
+});
+
+describe('a browser step after an agent the run lost track of', () => {
+  test.skipIf(process.platform !== 'linux')('the earlier agent still holding the bridge port is found by its pid, and nothing else is', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rc-stale-'));
+    const port = 20_000 + Math.floor(Math.random() * 20_000);
+    mkdirSync(join(dir, 'rc'));
+    writeFileSync(join(dir, 'rc', 'agent.js'), `Bun.listen({ hostname: '127.0.0.1', port: ${port}, socket: { data() {} } }); console.log('up'); setInterval(() => {}, 1000);\n`);
+    const child = Bun.spawn([process.execPath, join(dir, 'rc', 'agent.js')], { stdout: 'pipe' });
+    try {
+      const reader = child.stdout.getReader();
+      await reader.read();
+      expect(staleAgentOnPort(port)).toBe(child.pid);
+      expect(staleAgentOnPort(port + 1)).toBeUndefined();
+    } finally { child.kill(); rmSync(dir, { recursive: true, force: true }); }
+  }, 30_000);
 });
