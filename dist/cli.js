@@ -118857,7 +118857,7 @@ class EmailClient {
         body: JSON.stringify(params)
       });
     } catch (error) {
-      if (error instanceof OperationError && (error.code === "email_unreachable" || error.code === "email_error")) {
+      if (error instanceof OperationError && (error.code === "worker_restarting" || error.code === "email_unreachable" || error.code === "email_error")) {
         throw new OperationError(error.code, error.message, "It may still go through. Run olympus limits in a moment to see whether the stop is still open.");
       }
       throw error;
@@ -229269,8 +229269,7 @@ var init_response_builder = __esm(() => {
     sign_in_failed: "Olympus couldn't open the sign-in page for this source. Try again.",
     source_not_connected: "This source isn't connected, so there is nothing to disconnect.",
     source_busy: "This source is finishing a read. Try again in a moment.",
-    limit_not_continued: "Olympus on the computer is restarting, so this stop was not lifted. It is still open; try again in a moment.",
-    limit_unconfirmed: "Olympus on the computer did not confirm this in time. It may still go through: check the stop again in a moment before trying again.",
+    limit_unconfirmed: "Olympus on the computer is restarting or busy and did not confirm this. It may still go through: check the stop again in a moment before trying again.",
     sync_unavailable: "Olympus can't check this source from here right now. It keeps checking on its own.",
     disconnect_incomplete: "Olympus couldn't finish disconnecting this source. Try again.",
     delete_needs_disconnect: "Disconnect this source first, then delete its indexed data.",
@@ -230231,9 +230230,7 @@ async function runChatGptTool(name, args, ctx, options, signal, detachedContext)
         try {
           result = await findOperationByName("olympus_limits").handler(ctx, args);
         } catch (error2) {
-          if (error2 instanceof OperationError && error2.code === "worker_restarting")
-            throw new ChatGptSurfaceError("limit_not_continued");
-          if (error2 instanceof OperationError && (error2.code === "email_unreachable" || error2.code === "email_error"))
+          if (error2 instanceof OperationError && (error2.code === "worker_restarting" || error2.code === "email_unreachable" || error2.code === "email_error"))
             throw new ChatGptSurfaceError("limit_unconfirmed");
           throw error2;
         }

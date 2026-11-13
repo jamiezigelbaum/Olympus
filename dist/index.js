@@ -29535,7 +29535,7 @@ class EmailClient {
         body: JSON.stringify(params)
       });
     } catch (error) {
-      if (error instanceof OperationError && (error.code === "email_unreachable" || error.code === "email_error")) {
+      if (error instanceof OperationError && (error.code === "worker_restarting" || error.code === "email_unreachable" || error.code === "email_error")) {
         throw new OperationError(error.code, error.message, "It may still go through. Run olympus limits in a moment to see whether the stop is still open.");
       }
       throw error;

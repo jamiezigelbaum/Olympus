@@ -1436,7 +1436,6 @@ function directSignInUrl(value: unknown): string | undefined {
 
 type SurfaceOnlyErrorCode =
   | 'unavailable'
-  | 'limit_not_continued'
   | 'limit_unconfirmed'
   | 'unknown_tool'
   | 'internal'
@@ -1491,8 +1490,7 @@ const ERROR_TEXT: Record<OperationErrorCode | SurfaceOnlyErrorCode, string> = {
   sign_in_failed: 'Olympus couldn\'t open the sign-in page for this source. Try again.',
   source_not_connected: 'This source isn\'t connected, so there is nothing to disconnect.',
   source_busy: 'This source is finishing a read. Try again in a moment.',
-  limit_not_continued: 'Olympus on the computer is restarting, so this stop was not lifted. It is still open; try again in a moment.',
-  limit_unconfirmed: 'Olympus on the computer did not confirm this in time. It may still go through: check the stop again in a moment before trying again.',
+  limit_unconfirmed: 'Olympus on the computer is restarting or busy and did not confirm this. It may still go through: check the stop again in a moment before trying again.',
   sync_unavailable: 'Olympus can\'t check this source from here right now. It keeps checking on its own.',
   disconnect_incomplete: 'Olympus couldn\'t finish disconnecting this source. Try again.',
   delete_needs_disconnect: 'Disconnect this source first, then delete its indexed data.',
