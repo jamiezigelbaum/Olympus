@@ -139,6 +139,9 @@ for (const mode of ['saves', 'loses', 'refused', 'unlock'] as const) test(`first
       await expect(dashboard.connect(gmail)).rejects.toThrow('no gmail source card; the dashboard lists: dropbox');
       dashboardJson = { status: 200, body: { sources: [{ provider: 'gmail', connection: { state: 'synced' } }] } };
       await expect(dashboard.connect(gmail)).rejects.toThrow('gmail is already connected (synced) on a fresh install');
+      // A control that never appears is named, with what the page had instead (olympus-ops#222).
+      await expect(dashboard.scope({ id: 'gmail', label: 'Gmail', fresh: { scope: 'Canary' } } as never))
+        .rejects.toThrow('Gmail row button /Choose (mail|folders)|Scope|Edit scope/ did not appear (absent); no Gmail row on the page');
     }
     expect(calls).toEqual(mode === 'unlock' ? ['save_first_run_privacy', 'save_first_run_privacy'] : ['save_first_run_privacy']);
     expect(unlocks).toBe(mode === 'unlock' ? 1 : 0);
