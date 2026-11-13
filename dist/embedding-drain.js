@@ -34880,20 +34880,46 @@ function selectEvidencePassages(chunks, maxChars, focus, context2 = {}) {
   const relevance = (index) => context2.relevance?.[index] ?? Number.NEGATIVE_INFINITY;
   const anchorIndex = focus.anchorChunkIndex !== undefined && focus.anchorChunkIndex >= 0 && focus.anchorChunkIndex < chunks.length ? focus.anchorChunkIndex : undefined;
   const anchor = anchorIndex !== undefined && (focus.anchorLane !== "keyword" || lexical[anchorIndex] > 0) ? anchorIndex : undefined;
+  const maxPassages = Math.max(1, Math.floor(focus.maxPassages ?? MAX_PASSAGES_PER_CANDIDATE));
   if (lexical.some((score) => score > 0)) {
+    let mostSimilar;
+    for (let index = 0;index < chunks.length; index += 1) {
+      if (Number.isFinite(relevance(index)) && (mostSimilar === undefined || relevance(index) > relevance(mostSimilar))) {
+        mostSimilar = index;
+      }
+    }
     const scored = lexical.map((score, index) => ({ index, score })).filter((entry) => entry.score > 0 && entry.index !== anchor).sort((left, right) => right.score - left.score || relevance(right.index) - relevance(left.index) || left.index - right.index);
-    const picked = [
+    const picked = [...new Set([
       ...anchor !== undefined ? [anchor] : [],
+      ...mostSimilar !== undefined ? [mostSimilar] : [],
       ...scored.map((entry) => entry.index)
-    ].slice(0, Math.max(1, Math.floor(focus.maxPassages ?? MAX_PASSAGES_PER_CANDIDATE)));
-    const bounded = boundedSourceIndexChunks(picked.sort((left, right) => left - right).map((index) => chunks[index]), maxChars, termGroups);
-    return { chunks: bounded.chunks, truncated: picked.length < chunks.length || bounded.truncated };
+    ])].slice(0, maxPassages).sort((left, right) => left - right);
+    const similarPick = mostSimilar !== undefined && picked.length > 1 && picked.includes(mostSimilar) ? mostSimilar : undefined;
+    const similarRead = similarPick !== undefined ? boundedSourceIndexChunks([chunks[similarPick]], Math.max(1, Math.floor(maxChars / 2)), termGroups) : undefined;
+    const seen = new Set(similarPick !== undefined ? [chunks[similarPick].trim()] : []);
+    const others = picked.filter((index) => {
+      const text2 = chunks[index].trim();
+      if (index === similarPick || !text2 || seen.has(text2))
+        return false;
+      seen.add(text2);
+      return true;
+    });
+    const othersBudget = maxChars - (similarRead?.chunks.join("").length ?? 0);
+    const bounded = othersBudget > 0 ? boundedSourceIndexChunks(others.map((index) => chunks[index]), othersBudget, termGroups) : { chunks: [], truncated: others.length > 0 };
+    const read = new Map(others.map((index, position) => [index, bounded.chunks[position]]));
+    if (similarPick !== undefined && similarRead?.chunks[0])
+      read.set(similarPick, similarRead.chunks[0]);
+    const ordered2 = byPriority(picked, relevance, anchor, lexical).flatMap((index) => read.get(index) ?? []);
+    return {
+      chunks: ordered2,
+      truncated: picked.length < chunks.length || bounded.truncated || similarRead?.truncated === true
+    };
   }
   const ranked = chunks.map((_, index) => index).sort((left, right) => (left === anchor ? -1 : right === anchor ? 1 : 0) || relevance(right) - relevance(left) || left - right);
   const kept = new Map;
   let remaining = maxChars;
   const best = Math.max(...ranked.map(relevance));
-  const tied = Number.isFinite(best) ? ranked.filter((index) => index === anchor || relevance(index) >= best - PASSAGE_TIE_MARGIN).slice(0, Math.max(1, Math.floor(focus.maxPassages ?? MAX_PASSAGES_PER_CANDIDATE))) : [];
+  const tied = Number.isFinite(best) ? ranked.filter((index) => index === anchor || relevance(index) >= best - PASSAGE_TIE_MARGIN).slice(0, maxPassages) : [];
   if (tied.length > 1) {
     const byLength = [...tied].sort((left, right) => chunks[left].length - chunks[right].length || left - right);
     byLength.forEach((index, position) => {
@@ -34912,11 +34938,14 @@ function selectEvidencePassages(chunks, maxChars, focus, context2 = {}) {
     kept.set(index, included);
     remaining -= included.length;
   }
-  const ordered = [...kept.entries()].sort(([left], [right]) => left - right);
+  const ordered = ranked.filter((index) => kept.has(index)).map((index) => [index, kept.get(index)]);
   return {
     chunks: ordered.map(([, text2]) => text2),
     truncated: ordered.length < chunks.length || ordered.some(([index, text2]) => text2.length < chunks[index].length)
   };
+}
+function byPriority(indexes, relevance, anchor, lexical) {
+  return [...indexes].sort((left, right) => relevance(right) - relevance(left) || Number(right === anchor) - Number(left === anchor) || lexical[right] - lexical[left] || left - right);
 }
 function withoutNameTerms(termGroups, title) {
   if (!title)

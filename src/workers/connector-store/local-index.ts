@@ -18219,8 +18219,8 @@ export interface ConnectorStorePassageFocus {
   anchorLane?: 'keyword' | 'semantic';
   /**
    * The query's embedding, with the model it was made by. Present, each chunk
-   * holding a current vector of that model is scored by cosine, which picks
-   * the item's most query-like passages when no query term singles one out.
+   * holding a current vector of that model is scored by cosine, which gives
+   * the item's most query-like chunk a seat beside the word-dense passages.
    */
   queryVector?: readonly number[];
   queryVectorModelId?: string;
@@ -18237,8 +18237,9 @@ const PASSAGE_TIE_MARGIN = 0.03;
 
 // An item that fits its budget is returned whole, exactly as before. A longer
 // one yields its best passages instead of its first ones: the chunk a
-// retrieval lane matched, then the chunks densest in query terms, kept in
-// document order and clipped around their term windows.
+// retrieval lane matched, then its most similar chunk, then the chunks densest
+// in query terms, clipped around their term windows, and returned most likely
+// to answer first (see byPriority).
 //
 // Only terms that discriminate WITHIN the item count. A term the item's own
 // name carries explains why the item matched, not which passage answers: a
@@ -18273,26 +18274,63 @@ function selectEvidencePassages(
   const anchor = anchorIndex !== undefined && (focus.anchorLane !== 'keyword' || lexical[anchorIndex]! > 0)
     ? anchorIndex
     : undefined;
+  const maxPassages = Math.max(1, Math.floor(focus.maxPassages ?? MAX_PASSAGES_PER_CANDIDATE));
   if (lexical.some((score) => score > 0)) {
+    let mostSimilar: number | undefined;
+    for (let index = 0; index < chunks.length; index += 1) {
+      if (Number.isFinite(relevance(index))
+        && (mostSimilar === undefined || relevance(index) > relevance(mostSimilar))) {
+        mostSimilar = index;
+      }
+    }
     const scored = lexical
       .map((score, index) => ({ index, score }))
       .filter((entry) => entry.score > 0 && entry.index !== anchor)
       .sort((left, right) => right.score - left.score
         || relevance(right.index) - relevance(left.index)
         || left.index - right.index);
-    const picked = [
+    const picked = [...new Set([
       ...(anchor !== undefined ? [anchor] : []),
+      ...(mostSimilar !== undefined ? [mostSimilar] : []),
       ...scored.map((entry) => entry.index),
-    ].slice(0, Math.max(1, Math.floor(focus.maxPassages ?? MAX_PASSAGES_PER_CANDIDATE)));
-    const bounded = boundedSourceIndexChunks(
-      picked.sort((left, right) => left - right).map((index) => chunks[index]!),
-      maxChars,
-      termGroups,
-    );
-    return { chunks: bounded.chunks, truncated: picked.length < chunks.length || bounded.truncated };
+    ])].slice(0, maxPassages).sort((left, right) => left - right);
+    // Similarity's vote is a full one: the most similar chunk reads for half
+    // the budget rather than an equal share, and the word picks share the
+    // rest. Equal thirds of a 3,000-character candidate cut a 4,000-character
+    // file chunk at its first thousand, where a paraphrase that matches no
+    // query word rarely carries the answer (2026-11-12 grown passage set:
+    // the vote changed no found passage at equal shares).
+    const similarPick = mostSimilar !== undefined && picked.length > 1 && picked.includes(mostSimilar)
+      ? mostSimilar
+      : undefined;
+    const similarRead = similarPick !== undefined
+      ? boundedSourceIndexChunks([chunks[similarPick]!], Math.max(1, Math.floor(maxChars / 2)), termGroups)
+      : undefined;
+    // One index per distinct non-empty text, as the bounded reader keeps
+    // them, so its passages map back to the chunks they came from.
+    const seen = new Set(similarPick !== undefined ? [chunks[similarPick]!.trim()] : []);
+    const others = picked.filter((index) => {
+      const text = chunks[index]!.trim();
+      if (index === similarPick || !text || seen.has(text)) return false;
+      seen.add(text);
+      return true;
+    });
+    // The bounded reader treats a non-positive budget as unlimited, so a
+    // budget the similar pick used up reads nothing more.
+    const othersBudget = maxChars - (similarRead?.chunks.join('').length ?? 0);
+    const bounded = othersBudget > 0
+      ? boundedSourceIndexChunks(others.map((index) => chunks[index]!), othersBudget, termGroups)
+      : { chunks: [], truncated: others.length > 0 };
+    const read = new Map(others.map((index, position) => [index, bounded.chunks[position]]));
+    if (similarPick !== undefined && similarRead?.chunks[0]) read.set(similarPick, similarRead.chunks[0]);
+    const ordered = byPriority(picked, relevance, anchor, lexical).flatMap((index) => read.get(index) ?? []);
+    return {
+      chunks: ordered,
+      truncated: picked.length < chunks.length || bounded.truncated || similarRead?.truncated === true,
+    };
   }
   // Most relevant first (the anchor, then by embedding), filled whole until
-  // the budget runs out, then read in document order. Chunks within
+  // the budget runs out, and returned in that order. Chunks within
   // PASSAGE_TIE_MARGIN of the best by embedding are a near-tie: they share
   // the budget (the shorter whole, the rest an equal share from their start)
   // rather than the first taking it all. A question in one language over a
@@ -18311,7 +18349,7 @@ function selectEvidencePassages(
   const tied = Number.isFinite(best)
     ? ranked
       .filter((index) => index === anchor || relevance(index) >= best - PASSAGE_TIE_MARGIN)
-      .slice(0, Math.max(1, Math.floor(focus.maxPassages ?? MAX_PASSAGES_PER_CANDIDATE)))
+      .slice(0, maxPassages)
     : [];
   if (tied.length > 1) {
     const byLength = [...tied].sort((left, right) => chunks[left]!.length - chunks[right]!.length || left - right);
@@ -18329,11 +18367,30 @@ function selectEvidencePassages(
     kept.set(index, included);
     remaining -= included.length;
   }
-  const ordered = [...kept.entries()].sort(([left], [right]) => left - right);
+  const ordered = ranked.filter((index) => kept.has(index)).map((index) => [index, kept.get(index)!] as const);
   return {
     chunks: ordered.map(([, text]) => text),
     truncated: ordered.length < chunks.length || ordered.some(([index, text]) => text.length < chunks[index]!.length),
   };
+}
+
+// An item's passages most likely to answer first: by similarity to the
+// question, then the matched (anchor) chunk, then word density, then document
+// order. Every later cut is by position (the per-candidate byte clip and the
+// prompt fit keep a candidate's leading passages), so a tight fit keeps the
+// best passage and then the next best (2026-11-12 grown passage set: at
+// 13,500 B two long files packed the expected chunk third and the fit kept
+// the first two; a third had it second most similar).
+function byPriority(
+  indexes: readonly number[],
+  relevance: (index: number) => number,
+  anchor: number | undefined,
+  lexical: readonly number[],
+): number[] {
+  return [...indexes].sort((left, right) => relevance(right) - relevance(left)
+    || Number(right === anchor) - Number(left === anchor)
+    || lexical[right]! - lexical[left]!
+    || left - right);
 }
 
 // Query term groups minus those the item's name carries (see above).

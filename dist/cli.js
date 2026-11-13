@@ -41285,20 +41285,46 @@ function selectEvidencePassages(chunks, maxChars, focus, context2 = {}) {
   const relevance = (index) => context2.relevance?.[index] ?? Number.NEGATIVE_INFINITY;
   const anchorIndex = focus.anchorChunkIndex !== undefined && focus.anchorChunkIndex >= 0 && focus.anchorChunkIndex < chunks.length ? focus.anchorChunkIndex : undefined;
   const anchor = anchorIndex !== undefined && (focus.anchorLane !== "keyword" || lexical[anchorIndex] > 0) ? anchorIndex : undefined;
+  const maxPassages = Math.max(1, Math.floor(focus.maxPassages ?? MAX_PASSAGES_PER_CANDIDATE));
   if (lexical.some((score) => score > 0)) {
+    let mostSimilar;
+    for (let index = 0;index < chunks.length; index += 1) {
+      if (Number.isFinite(relevance(index)) && (mostSimilar === undefined || relevance(index) > relevance(mostSimilar))) {
+        mostSimilar = index;
+      }
+    }
     const scored = lexical.map((score, index) => ({ index, score })).filter((entry) => entry.score > 0 && entry.index !== anchor).sort((left, right) => right.score - left.score || relevance(right.index) - relevance(left.index) || left.index - right.index);
-    const picked = [
+    const picked = [...new Set([
       ...anchor !== undefined ? [anchor] : [],
+      ...mostSimilar !== undefined ? [mostSimilar] : [],
       ...scored.map((entry) => entry.index)
-    ].slice(0, Math.max(1, Math.floor(focus.maxPassages ?? MAX_PASSAGES_PER_CANDIDATE)));
-    const bounded = boundedSourceIndexChunks(picked.sort((left, right) => left - right).map((index) => chunks[index]), maxChars, termGroups);
-    return { chunks: bounded.chunks, truncated: picked.length < chunks.length || bounded.truncated };
+    ])].slice(0, maxPassages).sort((left, right) => left - right);
+    const similarPick = mostSimilar !== undefined && picked.length > 1 && picked.includes(mostSimilar) ? mostSimilar : undefined;
+    const similarRead = similarPick !== undefined ? boundedSourceIndexChunks([chunks[similarPick]], Math.max(1, Math.floor(maxChars / 2)), termGroups) : undefined;
+    const seen = new Set(similarPick !== undefined ? [chunks[similarPick].trim()] : []);
+    const others = picked.filter((index) => {
+      const text2 = chunks[index].trim();
+      if (index === similarPick || !text2 || seen.has(text2))
+        return false;
+      seen.add(text2);
+      return true;
+    });
+    const othersBudget = maxChars - (similarRead?.chunks.join("").length ?? 0);
+    const bounded = othersBudget > 0 ? boundedSourceIndexChunks(others.map((index) => chunks[index]), othersBudget, termGroups) : { chunks: [], truncated: others.length > 0 };
+    const read = new Map(others.map((index, position) => [index, bounded.chunks[position]]));
+    if (similarPick !== undefined && similarRead?.chunks[0])
+      read.set(similarPick, similarRead.chunks[0]);
+    const ordered2 = byPriority(picked, relevance, anchor, lexical).flatMap((index) => read.get(index) ?? []);
+    return {
+      chunks: ordered2,
+      truncated: picked.length < chunks.length || bounded.truncated || similarRead?.truncated === true
+    };
   }
   const ranked = chunks.map((_, index) => index).sort((left, right) => (left === anchor ? -1 : right === anchor ? 1 : 0) || relevance(right) - relevance(left) || left - right);
   const kept = new Map;
   let remaining = maxChars;
   const best = Math.max(...ranked.map(relevance));
-  const tied = Number.isFinite(best) ? ranked.filter((index) => index === anchor || relevance(index) >= best - PASSAGE_TIE_MARGIN).slice(0, Math.max(1, Math.floor(focus.maxPassages ?? MAX_PASSAGES_PER_CANDIDATE))) : [];
+  const tied = Number.isFinite(best) ? ranked.filter((index) => index === anchor || relevance(index) >= best - PASSAGE_TIE_MARGIN).slice(0, maxPassages) : [];
   if (tied.length > 1) {
     const byLength = [...tied].sort((left, right) => chunks[left].length - chunks[right].length || left - right);
     byLength.forEach((index, position) => {
@@ -41317,11 +41343,14 @@ function selectEvidencePassages(chunks, maxChars, focus, context2 = {}) {
     kept.set(index, included);
     remaining -= included.length;
   }
-  const ordered = [...kept.entries()].sort(([left], [right]) => left - right);
+  const ordered = ranked.filter((index) => kept.has(index)).map((index) => [index, kept.get(index)]);
   return {
     chunks: ordered.map(([, text2]) => text2),
     truncated: ordered.length < chunks.length || ordered.some(([index, text2]) => text2.length < chunks[index].length)
   };
+}
+function byPriority(indexes, relevance, anchor, lexical) {
+  return [...indexes].sort((left, right) => relevance(right) - relevance(left) || Number(right === anchor) - Number(left === anchor) || lexical[right] - lexical[left] || left - right);
 }
 function withoutNameTerms(termGroups, title) {
   if (!title)
@@ -82372,23 +82401,31 @@ function fitPackPassagesToPromptBytes(pack, maxPromptBytes, candidateCorpus, ana
     ...roundRobinCandidates(pack.candidates.slice(headSeats), candidateCorpus)
   ];
   let fallback;
-  const minimumShare = minimumPack ? Math.max(0, ...minimumPack.candidates.map((candidate) => candidate.chunks.reduce((sum, chunk) => sum + utf8ByteLength(chunk), 0))) : 0;
+  const headSet = new Set(pack.candidates.slice(0, RESERVED_HEAD_SEATS).map((candidate) => candidate.provenance));
+  const headShares = (candidate) => headSet.has(candidate.provenance) && candidate.chunks.length > 1 ? HEAD_SEAT_SHARES : 1;
+  const modes = [headShares, () => 1];
   for (let keep = order.length;keep >= (minimumPack ? order.length : 1); keep -= 1) {
     const kept = new Set(order.slice(0, keep));
     const base = pack.candidates.filter((candidate) => kept.has(candidate));
     const overhead = analystPromptBytes(restatePack(pack, base.map((candidate) => ({ ...candidate, chunks: [] })), candidateCorpus), analyzeOptions, evidenceFormat);
     if (overhead >= maxPromptBytes)
       continue;
-    let share = Math.max(minimumShare, Math.floor((maxPromptBytes - overhead) / keep));
-    for (let attempt = 0;attempt < 6; attempt += 1) {
-      if (!minimumPack && share < MIN_FITTED_BYTES_PER_CANDIDATE && keep > 1)
+    for (const [mode, shares] of modes.entries()) {
+      if (mode > 0 && base.every((candidate) => headShares(candidate) === 1))
         break;
-      const fitted = restatePack(pack, base.map((candidate) => ({ ...candidate, chunks: clipChunksToUtf8Bytes(candidate.chunks, Math.max(0, share)) })), candidateCorpus);
-      const bytes = analystPromptBytes(fitted, analyzeOptions, evidenceFormat);
-      if (bytes <= maxPromptBytes)
-        return fitted;
-      fallback = fitted;
-      share = Math.max(minimumShare, Math.floor(share * (maxPromptBytes - overhead) / Math.max(1, bytes - overhead)) - 1);
+      const minimumShare = minimumPack ? Math.max(0, ...minimumPack.candidates.map((candidate) => Math.ceil(candidate.chunks.reduce((sum, chunk) => sum + utf8ByteLength(chunk), 0) / shares(candidate)))) : 0;
+      const totalShares = base.reduce((sum, candidate) => sum + shares(candidate), 0);
+      let share = Math.max(minimumShare, Math.floor((maxPromptBytes - overhead) / totalShares));
+      for (let attempt = 0;attempt < 6; attempt += 1) {
+        if (!minimumPack && share < MIN_FITTED_BYTES_PER_CANDIDATE && keep > 1)
+          break;
+        const fitted = restatePack(pack, base.map((candidate) => ({ ...candidate, chunks: clipChunksToUtf8Bytes(candidate.chunks, Math.max(0, share * shares(candidate))) })), candidateCorpus);
+        const bytes = analystPromptBytes(fitted, analyzeOptions, evidenceFormat);
+        if (bytes <= maxPromptBytes)
+          return fitted;
+        fallback = fitted;
+        share = Math.max(minimumShare, Math.floor(share * (maxPromptBytes - overhead) / Math.max(1, bytes - overhead)) - 1);
+      }
     }
   }
   return minimumPack ?? fallback ?? restatePack(pack, order.slice(0, 1).map((candidate) => ({ ...candidate, chunks: [] })), candidateCorpus);
@@ -83931,7 +83968,7 @@ async function readPrivateEvidenceItem(input) {
     return;
   return content.chunks;
 }
-var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES = 13500, CLOUD_ANALYST_PROMPT_BYTES, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 20000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 600000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 120000, DEFAULT_SELF_HEAL_MAX_MS = 20000, MIN_FITTED_BYTES_PER_CANDIDATE = 600, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS, RELEASED_EXCERPT_MAX_CHARS = 1500, PRIVATE_EVIDENCE_MAX_RESULTS = 12, PRIVATE_DEPTH_MAX_PASSAGES = 24, PRIVATE_EVIDENCE_BYTE_BUDGET = 20000, PRIVATE_NEIGHBOURS_MAX = 4;
+var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES = 13500, CLOUD_ANALYST_PROMPT_BYTES, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 20000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 600000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 120000, DEFAULT_SELF_HEAL_MAX_MS = 20000, MIN_FITTED_BYTES_PER_CANDIDATE = 600, HEAD_SEAT_SHARES = 2, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS, RELEASED_EXCERPT_MAX_CHARS = 1500, PRIVATE_EVIDENCE_MAX_RESULTS = 12, PRIVATE_DEPTH_MAX_PASSAGES = 24, PRIVATE_EVIDENCE_BYTE_BUDGET = 20000, PRIVATE_NEIGHBOURS_MAX = 4;
 var init_analyst_answer = __esm(() => {
   init_embeddings();
   init_answer_activity();
