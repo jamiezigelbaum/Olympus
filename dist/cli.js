@@ -74442,13 +74442,13 @@ class RemoteLiteRtEmbedder {
 var init_remote_litert_runtime = () => {};
 
 // src/workers/source-index/built-in-embedding/runtime.ts
+import { realpathSync as realpathSync13 } from "node:fs";
 import { createRequire as createRequire6 } from "node:module";
-import { join as join64 } from "node:path";
+import { join as join64, sep as sep12 } from "node:path";
 function onnxRuntimeFromDirectory(runtimeDir) {
   return {
     async createSession(modelPath, options) {
-      const requireFromPack = createRequire6(join64(runtimeDir, "olympus-runtime.json"));
-      const ort = requireFromPack("onnxruntime-node");
+      const ort = requireOnnxRuntimeFromPack(runtimeDir);
       const session = await ort.InferenceSession.create(modelPath, {
         executionProviders: ["cpu"],
         intraOpNumThreads: options.threads,
@@ -74489,6 +74489,21 @@ function onnxRuntimeFromDirectory(runtimeDir) {
       };
     }
   };
+}
+function requireOnnxRuntimeFromPack(runtimeDir) {
+  const missing = () => new Error(`The ONNX Runtime pack is not installed in ${runtimeDir}.`);
+  let root;
+  let resolved;
+  const requireFromPack = createRequire6(join64(runtimeDir, "olympus-runtime.json"));
+  try {
+    root = realpathSync13(join64(runtimeDir, "node_modules"));
+    resolved = realpathSync13(requireFromPack.resolve("onnxruntime-node"));
+  } catch {
+    throw missing();
+  }
+  if (!resolved.startsWith(root + sep12))
+    throw missing();
+  return requireFromPack(resolved);
 }
 var init_runtime = () => {};
 
@@ -90138,7 +90153,7 @@ var init_dropbox_files = __esm(() => {
 });
 
 // src/workers/local-files/paths.ts
-import { realpathSync as realpathSync13 } from "node:fs";
+import { realpathSync as realpathSync14 } from "node:fs";
 import { homedir as homedir28 } from "node:os";
 import { basename as basename11, dirname as dirname66, join as join71 } from "node:path";
 function normalizeScopePath(value) {
@@ -90218,7 +90233,7 @@ function scopeParentPath(path) {
 function defaultExclusionContext(env = process.env, capture = configuredCaptureLocations(env)) {
   let home2 = env.HOME?.trim() || homedir28();
   try {
-    home2 = realpathSync13.native(home2);
+    home2 = realpathSync14.native(home2);
   } catch {}
   return {
     home: home2,
@@ -90257,7 +90272,7 @@ function realPathThroughExisting(path) {
   let existing = path;
   for (;; ) {
     try {
-      return join71(realpathSync13.native(existing), ...[...rest].reverse());
+      return join71(realpathSync14.native(existing), ...[...rest].reverse());
     } catch {}
     const parent = dirname66(existing);
     if (parent === existing)
@@ -91498,7 +91513,7 @@ var init_record_builder = __esm(() => {
 
 // src/workers/telegram-messages/media-child.ts
 import { lstatSync as lstatSync30, readdirSync as readdirSync10, readFileSync as readFileSync47, rmSync as rmSync18, statfsSync as statfsSync3 } from "node:fs";
-import { join as join73, resolve as resolve17, sep as sep12 } from "node:path";
+import { join as join73, resolve as resolve17, sep as sep13 } from "node:path";
 function telegramMediaChild(parent, media, deferredBytes, options = {}) {
   const providerItemId = childProviderItemId(parent.identity.providerItemId, TELEGRAM_CHILD_KEY);
   const version = options.version ?? parent.identity.sourceVersion;
@@ -91544,7 +91559,7 @@ function telegramLiveMediaPath(spoolDir, locator) {
     return;
   const root = resolve17(spoolDir, "media");
   const path = resolve17(spoolDir, relative9);
-  if (!path.startsWith(`${root}${sep12}`))
+  if (!path.startsWith(`${root}${sep13}`))
     return;
   try {
     const stat3 = lstatSync30(path);
@@ -93998,7 +94013,7 @@ var init_on_demand_read = () => {};
 // src/workers/file-extraction/spool.ts
 import { createHash as createHash65 } from "node:crypto";
 import { chmodSync as chmodSync23, existsSync as existsSync61, mkdirSync as mkdirSync40, readdirSync as readdirSync12, rmSync as rmSync20, rmdirSync as rmdirSync5, statSync as statSync28 } from "node:fs";
-import { dirname as dirname68, isAbsolute as isAbsolute25, join as join75, relative as relative9, sep as sep13 } from "node:path";
+import { dirname as dirname68, isAbsolute as isAbsolute25, join as join75, relative as relative9, sep as sep14 } from "node:path";
 function extractionSpoolOwnerDir(root, owner) {
   return join75(root, corpusFolder(owner.corpusId), accountFolder2(owner.accountScope));
 }
@@ -94182,7 +94197,7 @@ function makeExtractionSpoolOwnerDir(ownerDir, anchor) {
   if (!anchored)
     throw new Error("The extraction spool folder is gone.");
   let path = anchor;
-  for (const level of levels.split(sep13)) {
+  for (const level of levels.split(sep14)) {
     path = join75(path, level);
     try {
       mkdirSync40(path, { mode: 448 });
@@ -94208,7 +94223,7 @@ var init_types2 = __esm(() => {
 
 // src/workers/dropbox-files/extraction-source.ts
 import { readFile as readFile5, realpath, stat as stat3 } from "node:fs/promises";
-import { relative as relative10, resolve as resolve18, sep as sep14 } from "node:path";
+import { relative as relative10, resolve as resolve18, sep as sep15 } from "node:path";
 
 class DropboxExtractionSource {
   id;
@@ -94360,7 +94375,7 @@ class DropboxExtractionSource {
       return;
     const candidatePath = resolve18(rootRealPath, relativePath);
     const relativeToRoot = relative10(rootRealPath, candidatePath);
-    if (relativeToRoot.startsWith("..") || relativeToRoot === "" || relativeToRoot.includes(`..${sep14}`)) {
+    if (relativeToRoot.startsWith("..") || relativeToRoot === "" || relativeToRoot.includes(`..${sep15}`)) {
       return;
     }
     return candidatePath;
@@ -94715,7 +94730,7 @@ var init_drive_extraction_source = __esm(() => {
 
 // src/workers/file-extraction/connector-source.ts
 import { rmSync as rmSync21, writeFileSync as writeFileSync12 } from "node:fs";
-import { basename as basename12, join as join76, resolve as resolve19, sep as sep15 } from "node:path";
+import { basename as basename12, join as join76, resolve as resolve19, sep as sep16 } from "node:path";
 function isBoundedFetchConnector(connector) {
   return typeof connector.fetchItemWithin === "function";
 }
@@ -94967,7 +94982,7 @@ function fileHandOver(path, spooled, spoolDir, tidy) {
     async dispose() {
       if (!spooled)
         return;
-      const root = resolve19(spoolDir) + sep15;
+      const root = resolve19(spoolDir) + sep16;
       const target2 = resolve19(path);
       if (!target2.startsWith(root) || basename12(target2) === "")
         return;
@@ -94984,7 +94999,7 @@ var init_connector_source = __esm(() => {
 });
 
 // src/workers/whatsapp/child-media.ts
-import { closeSync as closeSync22, constants as constants9, fstatSync as fstatSync5, openSync as openSync22, readSync as readSync7, realpathSync as realpathSync14, rmSync as rmSync22, statSync as statSync29 } from "node:fs";
+import { closeSync as closeSync22, constants as constants9, fstatSync as fstatSync5, openSync as openSync22, readSync as readSync7, realpathSync as realpathSync15, rmSync as rmSync22, statSync as statSync29 } from "node:fs";
 import { isAbsolute as isAbsolute26, join as join77, relative as relative11, resolve as resolve20 } from "node:path";
 function whatsAppMediaFileLocator(path) {
   return `${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${path}`;
@@ -95039,7 +95054,7 @@ function withConfinedFile(path, roots, maxBytes, use) {
       throw new FileExtractionSourceError("source_content_unavailable");
     let real;
     try {
-      real = realpathSync14(path);
+      real = realpathSync15(path);
     } catch {
       throw new FileExtractionSourceError("source_item_not_found");
     }
@@ -95080,7 +95095,7 @@ function insideAny(real, roots) {
   return roots.some((root) => {
     let base;
     try {
-      base = realpathSync14(resolve20(root));
+      base = realpathSync15(resolve20(root));
     } catch {
       return false;
     }
@@ -95162,7 +95177,7 @@ var init_child_media = __esm(() => {
 // src/workers/whatsapp/extraction-source.ts
 import { readFile as readFile6, realpath as realpath2, stat as stat4 } from "node:fs/promises";
 import { closeSync as closeSync23, constants as constants10, openSync as openSync23, readSync as readSync8, rmSync as rmSync23 } from "node:fs";
-import { basename as basename13, join as join78, relative as relative12, resolve as resolve21, sep as sep16 } from "node:path";
+import { basename as basename13, join as join78, relative as relative12, resolve as resolve21, sep as sep17 } from "node:path";
 
 class WhatsAppExtractionSource {
   id;
@@ -95300,7 +95315,7 @@ class WhatsAppExtractionSource {
         continue;
       }
       const fromRoot = relative12(root, path);
-      if (fromRoot === "" || !fromRoot.startsWith(`..${sep16}`) && fromRoot !== "..")
+      if (fromRoot === "" || !fromRoot.startsWith(`..${sep17}`) && fromRoot !== "..")
         return true;
     }
     return false;
@@ -96182,7 +96197,7 @@ var init_spool_reader = __esm(() => {
 // src/workers/whatsapp/live-connector.ts
 import { execFileSync as execFileSync3 } from "node:child_process";
 import { createHash as createHash67 } from "node:crypto";
-import { closeSync as closeSync25, existsSync as existsSync63, fsyncSync as fsyncSync4, lstatSync as lstatSync32, openSync as openSync25, readFileSync as readFileSync49, readdirSync as readdirSync13, realpathSync as realpathSync15, rmSync as rmSync24, statSync as statSync31 } from "node:fs";
+import { closeSync as closeSync25, existsSync as existsSync63, fsyncSync as fsyncSync4, lstatSync as lstatSync32, openSync as openSync25, readFileSync as readFileSync49, readdirSync as readdirSync13, realpathSync as realpathSync16, rmSync as rmSync24, statSync as statSync31 } from "node:fs";
 import { basename as basename14, dirname as dirname69, isAbsolute as isAbsolute27, join as join82, relative as relative13 } from "node:path";
 function emptyWhatsAppSpoolPassFindings() {
   return {
@@ -97202,7 +97217,7 @@ function deleteMediaTemps(message2, roots) {
 }
 function realPathUnlessGone(path) {
   try {
-    return realpathSync15(path);
+    return realpathSync16(path);
   } catch (error) {
     if (error.code === "ENOENT")
       return;
@@ -97211,7 +97226,7 @@ function realPathUnlessGone(path) {
 }
 function existingRealPath(path) {
   try {
-    return realpathSync15(path);
+    return realpathSync16(path);
   } catch {
     return;
   }
@@ -116279,7 +116294,7 @@ var init_judge_check = __esm(() => {
 import { Database as Database26 } from "bun:sqlite";
 import { createHash as createHash75 } from "node:crypto";
 import { chmodSync as chmodSync29, existsSync as existsSync74, readFileSync as readFileSync55, rmSync as rmSync29 } from "node:fs";
-import { dirname as dirname80, join as join101, sep as sep17 } from "node:path";
+import { dirname as dirname80, join as join101, sep as sep18 } from "node:path";
 function judgeObservationsPath(env) {
   return join101(dirname80(resolveClassificationLedgerPath(env)), "judge-observed.json");
 }
@@ -116427,7 +116442,7 @@ function forgetSecondRoundCursors(statePath, source, options = {}) {
     return 0;
   const ledgers = new Set(source.ledgerPaths);
   const folder = source.accountFolder;
-  const theirs = (path) => ledgers.has(path) || folder !== undefined && path.startsWith(`${folder}${sep17}`);
+  const theirs = (path) => ledgers.has(path) || folder !== undefined && path.startsWith(`${folder}${sep18}`);
   const cursors = {};
   let forgotten = 0;
   for (const [path, cursor] of Object.entries(state.cursors)) {
@@ -117661,14 +117676,14 @@ import {
   readSync as readSync10,
   readdirSync as readdirSync19,
   readFileSync as readFileSync58,
-  realpathSync as realpathSync16,
+  realpathSync as realpathSync17,
   renameSync as renameSync15,
   rmdirSync as rmdirSync6,
   rmSync as rmSync30,
   statSync as statSync34
 } from "node:fs";
 import { homedir as homedir29 } from "node:os";
-import { basename as basename15, dirname as dirname84, join as join103, relative as relative15, resolve as resolve22, sep as sep18 } from "node:path";
+import { basename as basename15, dirname as dirname84, join as join103, relative as relative15, resolve as resolve22, sep as sep19 } from "node:path";
 import { rm as rm10 } from "node:fs/promises";
 import { Database as Database27 } from "bun:sqlite";
 function lifecycleStoreFileOwner(env) {
@@ -118456,7 +118471,7 @@ function rmTargetKeepingOwnerLock(target2, lockPath) {
     rmSync30(target2.path, { recursive: target2.allowRecursive, force: true });
     return;
   }
-  const keep = relative15(root, lock).split(sep18);
+  const keep = relative15(root, lock).split(sep19);
   const clear = (directory, depth) => {
     const inLockDirectory = depth === keep.length - 1;
     for (const name of readdirSync19(directory)) {
@@ -118987,7 +119002,7 @@ function canonicalPath2(path) {
   const rest = [];
   for (;; ) {
     try {
-      return join103(realpathSync16(existing), ...rest.reverse());
+      return join103(realpathSync17(existing), ...rest.reverse());
     } catch {
       const parent = dirname84(existing);
       if (parent === existing)
@@ -118998,7 +119013,7 @@ function canonicalPath2(path) {
   }
 }
 function isStrictlyInside(path, root) {
-  return path !== root && path.startsWith(`${root}${sep18}`);
+  return path !== root && path.startsWith(`${root}${sep19}`);
 }
 function assertRawStateTargetsContained(targets, context2, selectedSource) {
   const stateTargets = targets.filter((target2) => target2.kind === "source_state_path" && target2.allowRecursive);
@@ -119115,7 +119130,7 @@ function isInsideRawStateRoot(path, context2) {
 function isSameOrInsidePath(path, root) {
   const absolutePath = resolve22(path);
   const absoluteRoot = resolve22(root);
-  return absolutePath === absoluteRoot || absolutePath.startsWith(`${absoluteRoot}${sep18}`);
+  return absolutePath === absoluteRoot || absolutePath.startsWith(`${absoluteRoot}${sep19}`);
 }
 function defaultSovereigntyConfigPathForHome(homeDir) {
   if (!homeDir || process.platform === "linux")
@@ -121496,7 +121511,7 @@ import {
   mkdirSync as mkdirSync53,
   readFileSync as readFileSync62,
   readdirSync as readdirSync20,
-  realpathSync as realpathSync17,
+  realpathSync as realpathSync18,
   renameSync as renameSync16,
   rmSync as rmSync31,
   statSync as statSync35,
@@ -121506,7 +121521,7 @@ import {
 } from "node:fs";
 import { open as open4 } from "node:fs/promises";
 import { homedir as homedir30 } from "node:os";
-import { dirname as dirname87, isAbsolute as isAbsolute31, join as join107, posix as posix3, sep as sep19 } from "node:path";
+import { dirname as dirname87, isAbsolute as isAbsolute31, join as join107, posix as posix3, sep as sep20 } from "node:path";
 import { gunzip } from "node:zlib";
 function zkapiAsset(url, sha2566, bytes, extra = {}) {
   return {
@@ -121574,7 +121589,7 @@ function privatelyOwned(path, uid, kind) {
   }
 }
 function within(parent, child2) {
-  return child2.startsWith(parent.endsWith(sep19) ? parent : `${parent}${sep19}`);
+  return child2.startsWith(parent.endsWith(sep20) ? parent : `${parent}${sep20}`);
 }
 function readManifest(path, uid) {
   try {
@@ -121613,13 +121628,13 @@ function managedToolExecutable(tool, host = {}) {
   if (!manifest || manifest.tool !== tool || manifest.version !== pin.version || manifest.platform !== platformKey || manifest.sha256 !== asset.sha256)
     return;
   try {
-    const realDir = realpathSync17(versionDir);
+    const realDir = realpathSync18(versionDir);
     for (const required3 of new Set([...asset.required, asset.executable])) {
       if (!trustedInside(realDir, join107(versionDir, required3), uid, versionDir))
         return;
     }
     verifyPinnedFiles(versionDir, asset, uid, pin.label, tool);
-    const real = realpathSync17(join107(versionDir, asset.executable));
+    const real = realpathSync18(join107(versionDir, asset.executable));
     accessSync9(real, constants13.X_OK);
     return real;
   } catch {
@@ -121628,7 +121643,7 @@ function managedToolExecutable(tool, host = {}) {
 }
 function trustedInside(realDir, path, uid, versionDir) {
   if (versionDir) {
-    const parts = path.slice(versionDir.length + 1).split(sep19);
+    const parts = path.slice(versionDir.length + 1).split(sep20);
     for (let index = 1;index <= parts.length; index += 1) {
       let stats;
       try {
@@ -121644,7 +121659,7 @@ function trustedInside(realDir, path, uid, versionDir) {
   }
   let real;
   try {
-    real = realpathSync17(path);
+    real = realpathSync18(path);
   } catch {
     return false;
   }
@@ -121693,7 +121708,7 @@ function earlierManagedFolders(tool, host) {
   const found = [];
   for (const [version, hashes] of Object.entries(pin.replaces)) {
     const sha2566 = hashes[platformKey];
-    if (!sha2566 || version === pin.version || version.startsWith(".") || version.includes("/") || version.includes(sep19))
+    if (!sha2566 || version === pin.version || version.startsWith(".") || version.includes("/") || version.includes(sep20))
       continue;
     const dir = join107(toolDir, version);
     let stats;
@@ -121714,13 +121729,13 @@ function earlierManagedFolders(tool, host) {
 async function adhocSignUnsigned(staging, asset, platformKey, run, label, tool) {
   if (platformKey !== "darwin-arm64" || !asset.adhocSign?.length)
     return [];
-  const realStaging = realpathSync17(staging);
+  const realStaging = realpathSync18(staging);
   const signed = [];
   for (const relative16 of asset.adhocSign) {
     const file = join107(staging, relative16);
     let real;
     try {
-      real = realpathSync17(file);
+      real = realpathSync18(file);
     } catch {
       throw new ManagedToolsError("archive_incomplete", `The ${label} download is missing ${relative16}, so nothing was installed.`, tool);
     }
@@ -122195,13 +122210,13 @@ async function extractVerifiedArchive(archivePath, staging, asset, tool) {
     mkdirs(posix3.dirname(entry.target));
     symlinkSync(entry.linkTarget, join107(staging, entry.target));
   }
-  const realStaging = realpathSync17(staging);
+  const realStaging = realpathSync18(staging);
   for (const entry of planned) {
     if (entry.type !== "symlink")
       continue;
     let real;
     try {
-      real = realpathSync17(join107(staging, entry.target));
+      real = realpathSync18(join107(staging, entry.target));
     } catch {
       throw new ManagedToolsError("unsafe_archive", `The archive has a link that leads nowhere (${entry.path}).`, tool);
     }
@@ -123734,7 +123749,7 @@ import { execFile as execFile3 } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile as readFile11, stat as fileStat } from "node:fs/promises";
 import { createHash as createHash79 } from "node:crypto";
-import { lstatSync as lstatSync38, readFileSync as readFileSync64, readlinkSync as readlinkSync2, readdirSync as readdirSync22, realpathSync as realpathSync18 } from "node:fs";
+import { lstatSync as lstatSync38, readFileSync as readFileSync64, readlinkSync as readlinkSync2, readdirSync as readdirSync22, realpathSync as realpathSync19 } from "node:fs";
 import { dirname as dirname88, join as join109 } from "node:path";
 function record(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
@@ -123899,7 +123914,7 @@ async function launcherPath(env) {
     if (!path)
       continue;
     try {
-      if (realpathSync18(path) !== path)
+      if (realpathSync19(path) !== path)
         continue;
       let current3 = path;
       while (true) {
@@ -124128,7 +124143,7 @@ __export(exports_consult_transport_zkapi, {
 });
 import { spawn as spawn7, execFileSync as execFileSync4 } from "node:child_process";
 import { createHash as createHash80, randomUUID as randomUUID28 } from "node:crypto";
-import { accessSync as accessSync10, chmodSync as chmodSync35, closeSync as closeSync29, constants as constants14, existsSync as existsSync80, mkdirSync as mkdirSync54, mkdtempSync as mkdtempSync4, readdirSync as readdirSync23, readFileSync as readFileSync65, readlinkSync as readlinkSync3, realpathSync as realpathSync19, rmSync as rmSync33, statSync as statSync36, writeFileSync as writeFileSync17 } from "node:fs";
+import { accessSync as accessSync10, chmodSync as chmodSync35, closeSync as closeSync29, constants as constants14, existsSync as existsSync80, mkdirSync as mkdirSync54, mkdtempSync as mkdtempSync4, readdirSync as readdirSync23, readFileSync as readFileSync65, readlinkSync as readlinkSync3, realpathSync as realpathSync20, rmSync as rmSync33, statSync as statSync36, writeFileSync as writeFileSync17 } from "node:fs";
 import { createConnection as createConnection4, createServer as createServer4 } from "node:net";
 import { homedir as homedir31, tmpdir as tmpdir12 } from "node:os";
 import { delimiter as delimiter7, dirname as dirname89, isAbsolute as isAbsolute32, join as join110, resolve as resolvePath } from "node:path";
@@ -124410,7 +124425,7 @@ function zkapiWalletDirectory(env) {
   const configured = env.ZKAPI_CLIENTD_CONFIG_DIR?.trim() || env.OA_CHAT_CONFIG_DIR?.trim() || (process.platform === "darwin" ? join110(home2, "Library", "Application Support", "zkapi-clientd") : join110(env.XDG_CONFIG_HOME?.trim() || join110(home2, ".config"), "zkapi-clientd"));
   const absolute2 = resolvePath(configured);
   try {
-    return realpathSync19(absolute2);
+    return realpathSync20(absolute2);
   } catch {
     return absolute2;
   }
@@ -124850,7 +124865,7 @@ function childEnvironment(env) {
 function daemonEnvironment(base, daemonExecutable) {
   let real = daemonExecutable;
   try {
-    real = realpathSync19(daemonExecutable);
+    real = realpathSync20(daemonExecutable);
   } catch {}
   const installBin = dirname89(real);
   const rest = (base.PATH ?? "").split(delimiter7).filter((entry) => entry && entry !== installBin);
@@ -126396,7 +126411,7 @@ process.stdin.on('end', () => { if (!child) process.exit(71); });
 setInterval(() => { if (process.ppid !== expectedParent) cleanup(); }, 500);
 `;
   DEFAULT_EXECUTABLE_TRUST = {
-    realpath: (path) => realpathSync19(path),
+    realpath: (path) => realpathSync20(path),
     stat: (path) => statSync36(path),
     executable: (path) => {
       try {
@@ -128026,9 +128041,9 @@ var init_engine_service = __esm(() => {
 
 // src/core/linux-engine-service.ts
 import { spawnSync as spawnSync14 } from "node:child_process";
-import { chmodSync as chmodSync36, closeSync as closeSync30, constants as constants15, copyFileSync as copyFileSync3, existsSync as existsSync82, fstatSync as fstatSync6, fsyncSync as fsyncSync7, ftruncateSync, lstatSync as lstatSync40, linkSync as linkSync3, mkdirSync as mkdirSync55, openSync as openSync29, readFileSync as readFileSync67, readlinkSync as readlinkSync4, readdirSync as readdirSync25, realpathSync as realpathSync20, renameSync as renameSync18, rmSync as rmSync35, rmdirSync as rmdirSync7, statSync as statSync38, symlinkSync as symlinkSync2, writeFileSync as writeFileSync18 } from "node:fs";
+import { chmodSync as chmodSync36, closeSync as closeSync30, constants as constants15, copyFileSync as copyFileSync3, existsSync as existsSync82, fstatSync as fstatSync6, fsyncSync as fsyncSync7, ftruncateSync, lstatSync as lstatSync40, linkSync as linkSync3, mkdirSync as mkdirSync55, openSync as openSync29, readFileSync as readFileSync67, readlinkSync as readlinkSync4, readdirSync as readdirSync25, realpathSync as realpathSync21, renameSync as renameSync18, rmSync as rmSync35, rmdirSync as rmdirSync7, statSync as statSync38, symlinkSync as symlinkSync2, writeFileSync as writeFileSync18 } from "node:fs";
 import { createRequire as createRequire7 } from "node:module";
-import { basename as basename17, dirname as dirname91, join as join112, relative as relative16, resolve as resolve23, sep as sep20 } from "node:path";
+import { basename as basename17, dirname as dirname91, join as join112, relative as relative16, resolve as resolve23, sep as sep21 } from "node:path";
 import { userInfo as userInfo2 } from "node:os";
 import { randomBytes as randomBytes20, createHash as createHash82, randomUUID as randomUUID29 } from "node:crypto";
 function linuxEngineExec(command, args) {
@@ -128099,7 +128114,7 @@ function inspectSystemdEngine(l, exec = linuxEngineExec) {
     return unknown;
   if (f.FragmentPath !== l.unitPath) {
     try {
-      if (!f.FragmentPath || realpathSync20(f.FragmentPath) !== l.unitPath)
+      if (!f.FragmentPath || realpathSync21(f.FragmentPath) !== l.unitPath)
         return { ...unknown, detail: `Conflicting unit fragment ${f.FragmentPath || "(unknown)"}; expected ${l.unitPath}. Stop its custodian before retrying.` };
     } catch {
       return { ...unknown, detail: `Cannot verify unit fragment ${f.FragmentPath || "(unknown)"}; expected ${l.unitPath}.` };
@@ -128277,7 +128292,7 @@ function inheritedUtilLinuxFlock(lockPath) {
   let pid = process.ppid;
   for (let depth2 = 0;pid > 1 && depth2 < 16; depth2 += 1) {
     try {
-      const executable = realpathSync20(`/proc/${pid}/exe`);
+      const executable = realpathSync21(`/proc/${pid}/exe`);
       const executableStat = statSync38(executable);
       const args = readFileSync67(`/proc/${pid}/cmdline`).toString("utf8").split("\x00").filter(Boolean);
       if (basename17(executable) === "flock" && executableStat.uid === 0 && (executableStat.mode & 18) === 0 && args.slice(1).some((arg) => arg.startsWith("/") && resolve23(arg) === lockPath))
@@ -128402,7 +128417,7 @@ function linuxMachineArtifactDigest(path, kind) {
   const walk = (dir) => {
     for (const name of readdirSync25(dir).sort()) {
       const full = join112(dir, name);
-      const rel = relative16(root, full).split(sep20).join("/");
+      const rel = relative16(root, full).split(sep21).join("/");
       const info = lstatSync40(full);
       const entryKind = info.isDirectory() ? "directory" : info.isFile() ? "file" : info.isSymbolicLink() ? "symlink" : undefined;
       if (!entryKind || info.isFile() && info.nlink !== 1)
@@ -128801,7 +128816,7 @@ function assertLegacySettingOverrides(layout, env) {
     const selected = resolve23(value2.trim());
     const moved = files.find((name) => {
       const source = join112(layout.home, ".olympus", name);
-      return selected === source || source.startsWith(selected + sep20);
+      return selected === source || source.startsWith(selected + sep21);
     });
     if (!moved)
       continue;
@@ -141992,7 +142007,7 @@ var init_data_restore = __esm(() => {
 import { createCipheriv as createCipheriv2, createDecipheriv as createDecipheriv2, createHash as createHash90, createHmac as createHmac5, randomBytes as randomBytes21, randomUUID as randomUUID33, scryptSync as scryptSync2, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
 import { closeSync as closeSync34, existsSync as existsSync96, lstatSync as lstatSync44, mkdirSync as mkdirSync60, openSync as openSync33, readdirSync as readdirSync27, readSync as readSync12, renameSync as renameSync22, rmSync as rmSync38, statSync as statSync42, unlinkSync as unlinkSync5, writeSync as writeSync9, chmodSync as chmodSync40, fsyncSync as fsyncSync10 } from "node:fs";
 import { open as openAsync } from "node:fs/promises";
-import { basename as basename20, dirname as dirname99, join as join122, resolve as resolve25, sep as sep21 } from "node:path";
+import { basename as basename20, dirname as dirname99, join as join122, resolve as resolve25, sep as sep22 } from "node:path";
 function normalizePassphrase(passphrase) {
   const value2 = passphrase.normalize("NFC");
   if (value2.trim().length === 0)
@@ -142274,7 +142289,7 @@ class TarExtractor {
     if (parts.length === 0 || parts.some((part) => part === "." || part === ".."))
       throw this.bad();
     const path = join122(this.root, ...parts);
-    if (!path.startsWith(this.root + sep21))
+    if (!path.startsWith(this.root + sep22))
       throw this.bad();
     return path;
   }
@@ -181699,9 +181714,9 @@ var init_top_nav = __esm(() => {
 
 // src/workers/archive-import/staging.ts
 import { randomBytes as randomBytes30 } from "node:crypto";
-import { existsSync as existsSync106, mkdirSync as mkdirSync68, readdirSync as readdirSync29, realpathSync as realpathSync21, renameSync as renameSync26, rmSync as rmSync43, statSync as statSync46, statfsSync as statfsSync6, utimesSync as utimesSync2 } from "node:fs";
+import { existsSync as existsSync106, mkdirSync as mkdirSync68, readdirSync as readdirSync29, realpathSync as realpathSync22, renameSync as renameSync26, rmSync as rmSync43, statSync as statSync46, statfsSync as statfsSync6, utimesSync as utimesSync2 } from "node:fs";
 import { open as open5, rm as rm11 } from "node:fs/promises";
-import { sep as sep22, join as join134, resolve as resolve28 } from "node:path";
+import { sep as sep23, join as join134, resolve as resolve28 } from "node:path";
 function sanitizeUploadPath(raw) {
   const bad = () => {
     throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path);
@@ -181759,10 +181774,10 @@ function createArchiveUploads(options) {
     if (rootPath)
       return rootPath;
     mkdirSync68(options.root, { recursive: true, mode: 448 });
-    rootPath = realpathSync21.native(options.root);
+    rootPath = realpathSync22.native(options.root);
     return rootPath;
   };
-  const contained = (parent, child2) => child2 === parent || child2.startsWith(parent + sep22);
+  const contained = (parent, child2) => child2 === parent || child2.startsWith(parent + sep23);
   const session = (uploadId) => {
     const found = typeof uploadId === "string" && ID2.test(uploadId) ? sessions.get(uploadId) : undefined;
     if (!found)
@@ -181838,7 +181853,7 @@ function createArchiveUploads(options) {
       const parent = join134(found.files, ...segments.slice(0, -1));
       try {
         mkdirSync68(parent, { recursive: true, mode: 448 });
-        if (!contained(realpathSync21.native(found.files), realpathSync21.native(parent)))
+        if (!contained(realpathSync22.native(found.files), realpathSync22.native(parent)))
           throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path);
       } catch (error2) {
         if (error2 instanceof ArchiveUploadError)
@@ -181998,8 +182013,8 @@ function createArchiveUploads(options) {
         throw new ArchiveUploadError("upload_closed", "Files are still arriving. Wait until the upload has finished.", 409);
       const entries = readdirSync29(found.files);
       const top = entries.length === 1 ? join134(found.files, entries[0]) : found.files;
-      const canonical2 = realpathSync21.native(top);
-      if (!contained(realpathSync21.native(found.dir), canonical2))
+      const canonical2 = realpathSync22.native(top);
+      if (!contained(realpathSync22.native(found.dir), canonical2))
         throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path);
       return canonical2;
     },
@@ -187731,7 +187746,7 @@ var init_locations = __esm(() => {
 // src/workers/local-files/volume-identity.ts
 import { createHash as createHash99 } from "node:crypto";
 import { execFileSync as execFileSync6 } from "node:child_process";
-import { existsSync as existsSync107, lstatSync as lstatSync49, readFileSync as readFileSync93, readdirSync as readdirSync30, realpathSync as realpathSync22 } from "node:fs";
+import { existsSync as existsSync107, lstatSync as lstatSync49, readFileSync as readFileSync93, readdirSync as readdirSync30, realpathSync as realpathSync23 } from "node:fs";
 import { homedir as homedir43 } from "node:os";
 
 class VolumeResolver {
@@ -187922,7 +187937,7 @@ function defaultUuidsByDevice() {
       return result;
     for (const name of readdirSync30(dir)) {
       try {
-        result.set(realpathSync22(`${dir}/${name}`), name);
+        result.set(realpathSync23(`${dir}/${name}`), name);
       } catch {}
     }
   } catch {}
@@ -188869,12 +188884,12 @@ var init_mac_settings = __esm(() => {
 });
 
 // src/workers/local-files/scope-browser.ts
-import { lstatSync as lstatSync50, readdirSync as readdirSync32, realpathSync as realpathSync23 } from "node:fs";
+import { lstatSync as lstatSync50, readdirSync as readdirSync32, realpathSync as realpathSync24 } from "node:fs";
 import { homedir as homedir45 } from "node:os";
 import { join as join138 } from "node:path";
 function safeRealpath(path) {
   try {
-    return realpathSync23.native(path);
+    return realpathSync24.native(path);
   } catch {
     return path;
   }
@@ -189040,7 +189055,7 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
         }
         if (!isFolder)
           throw new Error("A selected folder could not be verified. It may have moved.");
-        const canonical2 = realpathSync23.native(real);
+        const canonical2 = realpathSync24.native(real);
         if (canonical2 !== real) {
           if (canonical2.normalize("NFC").toLowerCase() !== real.normalize("NFC").toLowerCase()) {
             throw new Error("A selected folder is reached through a link. Choose the folder itself.");
@@ -189094,7 +189109,7 @@ function createArchivePathResolver(options = {}) {
       return refuse3("not_regular", ARCHIVE_PATH_COPY.not_regular);
     let canonical2;
     try {
-      canonical2 = realpathSync23.native(real);
+      canonical2 = realpathSync24.native(real);
     } catch {
       return refuse3("not_found", ARCHIVE_PATH_COPY.not_found);
     }
@@ -200055,7 +200070,7 @@ var init_watch_hub = __esm(() => {
 
 // src/workers/local-files/connector.ts
 import { createHash as createHash106, randomUUID as randomUUID37 } from "node:crypto";
-import { realpathSync as realpathSync24, rmSync as rmSync45, readdirSync as readdirSync33 } from "node:fs";
+import { realpathSync as realpathSync25, rmSync as rmSync45, readdirSync as readdirSync33 } from "node:fs";
 import { join as join144, posix as posix4 } from "node:path";
 function nameAsOnDisk(scopeRoot, rel) {
   let dir = "";
@@ -200134,7 +200149,7 @@ function createLocalFilesSourceConnector(options) {
       throw new LocalFilesRootMissingError(root);
     let real;
     try {
-      real = realpathSync24.native(configured);
+      real = realpathSync25.native(configured);
     } catch {
       throw new LocalFilesRootMissingError(root);
     }
@@ -200541,7 +200556,7 @@ function createLocalFilesSourceConnector(options) {
         throw new FileExtractionSourceError("source_unavailable");
       let scopeRoot;
       try {
-        scopeRoot = ScopeRoot.open(realpathSync24.native(rootReal));
+        scopeRoot = ScopeRoot.open(realpathSync25.native(rootReal));
       } catch {
         throw new FileExtractionSourceError("source_unavailable");
       }
@@ -203561,7 +203576,7 @@ var init_source_scheduler = __esm(() => {
 });
 
 // src/workers/local-files/scheduler-source.ts
-import { realpathSync as realpathSync25 } from "node:fs";
+import { realpathSync as realpathSync26 } from "node:fs";
 import { homedir as homedir48 } from "node:os";
 function retryTomorrow(context2, reason, afterMs = DAY_MS4) {
   const attempted = Date.parse(context2?.attemptedAt ?? new Date().toISOString());
@@ -203572,7 +203587,7 @@ function createLocalFilesSchedulerSource(input) {
     return;
   const roots = input.policy.roots;
   const tasks = [];
-  const macPermissions = input.macPermissions ?? new MacPermissions({ home: realpathSync25(homedir48()), memoryPath: folderAccessMemoryPath() });
+  const macPermissions = input.macPermissions ?? new MacPermissions({ home: realpathSync26(homedir48()), memoryPath: folderAccessMemoryPath() });
   const volumeResolver = input.volumes ?? input.watch?.volumes;
   const needsHelper = (scopePath) => {
     if (!macPermissions.active || macPermissions.hasHelper())
@@ -204889,16 +204904,16 @@ class MimeNode {
     for (let parts of foldedLines) {
       let rawLine = parts.join(`
 `);
-      let sep23 = rawLine.indexOf(":");
-      let rawKey = sep23 < 0 ? rawLine : rawLine.slice(0, sep23);
+      let sep24 = rawLine.indexOf(":");
+      let rawKey = sep24 < 0 ? rawLine : rawLine.slice(0, sep24);
       this.rawHeaderLines.push({
         key: rawKey.toLowerCase(),
         line: rawLine
       });
       let unfoldedLine = parts.join("");
-      sep23 = unfoldedLine.indexOf(":");
-      let key2 = sep23 < 0 ? unfoldedLine : unfoldedLine.slice(0, sep23);
-      let value2 = sep23 < 0 ? "" : trimWsp(foldLineBreaks(unfoldedLine.slice(sep23 + 1)));
+      sep24 = unfoldedLine.indexOf(":");
+      let key2 = sep24 < 0 ? unfoldedLine : unfoldedLine.slice(0, sep24);
+      let value2 = sep24 < 0 ? "" : trimWsp(foldLineBreaks(unfoldedLine.slice(sep24 + 1)));
       this.headers.push({ key: key2.toLowerCase(), originalKey: key2, value: value2 });
       const lowerKey = key2.toLowerCase();
       if (CONTENT_HEADERS.has(lowerKey) && !seenContentHeaders.has(lowerKey)) {
@@ -212993,7 +213008,7 @@ var init_source_targets = __esm(() => {
 });
 
 // src/workers/archive-import/start.ts
-import { lstatSync as lstatSync51, realpathSync as realpathSync26 } from "node:fs";
+import { lstatSync as lstatSync51, realpathSync as realpathSync27 } from "node:fs";
 import { posix as posix5 } from "node:path";
 function prepareArchiveImport(input) {
   const path = input.path;
@@ -213001,7 +213016,7 @@ function prepareArchiveImport(input) {
     return { kind: "unreadable", code: "escape" };
   let kind;
   try {
-    if (realpathSync26.native(path) !== path)
+    if (realpathSync27.native(path) !== path)
       return { kind: "unreadable", code: "escape" };
     const stat7 = lstatSync51(path);
     if (stat7.isFile())
@@ -213711,7 +213726,7 @@ var init_removal = __esm(() => {
 // src/workers/archive-import/dashboard.ts
 import { homedir as homedir49 } from "node:os";
 import { posix as posix7 } from "node:path";
-import { realpathSync as realpathSync27 } from "node:fs";
+import { realpathSync as realpathSync28 } from "node:fs";
 function archivePrivateModelFromSniffer(sniffer) {
   if (!sniffer)
     return "off";
@@ -213811,7 +213826,7 @@ function createArchiveImportDashboard(options) {
   const inStaging = (path) => {
     let canonical2 = stagingFolder;
     try {
-      canonical2 = realpathSync27.native(stagingFolder);
+      canonical2 = realpathSync28.native(stagingFolder);
     } catch {}
     return path.startsWith(`${canonical2}/`) || path.startsWith(`${stagingFolder}/`);
   };
@@ -215508,7 +215523,7 @@ var init_scheduler_source2 = __esm(() => {
 });
 
 // src/workers/local-files/open-target.ts
-import { realpathSync as realpathSync28, statSync as statSync49 } from "node:fs";
+import { realpathSync as realpathSync29, statSync as statSync49 } from "node:fs";
 function localFilesOpenRoots(volumes, approvedScopePaths) {
   const roots = [];
   for (const scopePath of approvedScopePaths()) {
@@ -215516,7 +215531,7 @@ function localFilesOpenRoots(volumes, approvedScopePaths) {
     if (!resolved)
       continue;
     try {
-      const real = realpathSync28.native(resolved);
+      const real = realpathSync29.native(resolved);
       if (statSync49(real).isDirectory() && !roots.includes(real))
         roots.push(real);
     } catch {}
@@ -215538,7 +215553,7 @@ function createLocalFilesOpenTargets(options) {
     if (!resolved)
       return;
     try {
-      const real = realpathSync28.native(resolved);
+      const real = realpathSync29.native(resolved);
       return statSync49(real).isFile() ? { localPath: real } : undefined;
     } catch {
       return;
@@ -221615,8 +221630,8 @@ var init_remote_access_control = __esm(() => {
 });
 
 // src/core/source-account-migration.ts
-import { linkSync as linkSync5, lstatSync as lstatSync53, mkdirSync as mkdirSync72, readdirSync as readdirSync35, realpathSync as realpathSync29, renameSync as renameSync27, rmdirSync as rmdirSync8, statSync as statSync50, unlinkSync as unlinkSync6 } from "node:fs";
-import { basename as basename23, dirname as dirname115, isAbsolute as isAbsolute40, join as join147, relative as relative17, resolve as resolve31, sep as sep23 } from "node:path";
+import { linkSync as linkSync5, lstatSync as lstatSync53, mkdirSync as mkdirSync72, readdirSync as readdirSync35, realpathSync as realpathSync30, renameSync as renameSync27, rmdirSync as rmdirSync8, statSync as statSync50, unlinkSync as unlinkSync6 } from "node:fs";
+import { basename as basename23, dirname as dirname115, isAbsolute as isAbsolute40, join as join147, relative as relative17, resolve as resolve31, sep as sep24 } from "node:path";
 function accountFolderMigrationEnabled(env = process.env) {
   const value2 = env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim().toLowerCase() ?? "";
   return value2 === "" || MIGRATION_ON.includes(value2);
@@ -221689,7 +221704,7 @@ function lookAt(path) {
 function rootOf(ctx, path) {
   for (const { tag, root } of ctx.roots) {
     const below = relative17(root, path);
-    if (below === ".." || below.startsWith(`..${sep23}`) || isAbsolute40(below))
+    if (below === ".." || below.startsWith(`..${sep24}`) || isAbsolute40(below))
       continue;
     return { tag, root, below };
   }
@@ -221699,7 +221714,7 @@ function relPath(ctx, path) {
   const at = rootOf(ctx, path);
   if (!at)
     throw new TypeError("A migration path must sit in a folder the layout names.");
-  const below = at.below.split(sep23).join("/");
+  const below = at.below.split(sep24).join("/");
   return at.tag ? `@${at.tag}/${below}` : below;
 }
 function absPath(ctx, rel) {
@@ -221754,7 +221769,7 @@ function storeNameForCorpus(sourceId, corpusId) {
 }
 function nearRealPath(path) {
   try {
-    return realpathSync29(path);
+    return realpathSync30(path);
   } catch {}
   const rest = [];
   let near = resolve31(path);
@@ -221765,7 +221780,7 @@ function nearRealPath(path) {
       return resolve31(path);
     near = up;
     try {
-      return join147(realpathSync29(near), ...rest);
+      return join147(realpathSync30(near), ...rest);
     } catch {}
   }
 }
@@ -221940,9 +221955,9 @@ function syncFolderChains(ctx, folders) {
     const at = rootOf(ctx, folder);
     if (!at)
       throw Object.assign(new Error("outside every root"), { code: "EINVAL" });
-    let current4 = realpathSync29(at.root);
+    let current4 = realpathSync30(at.root);
     chain.add(current4);
-    for (const part of at.below.split(sep23).filter(Boolean)) {
+    for (const part of at.below.split(sep24).filter(Boolean)) {
       current4 = join147(current4, part);
       chain.add(current4);
     }
@@ -221954,7 +221969,7 @@ function syncFolderChains(ctx, folders) {
 }
 function makeFolders(ctx, moves) {
   try {
-    const real = realpathSync29(ctx.root);
+    const real = realpathSync30(ctx.root);
     const destinations = new Set;
     for (const move of moves) {
       const destination = dirname115(absPath(ctx, move.to));
@@ -221962,7 +221977,7 @@ function makeFolders(ctx, moves) {
         throw Object.assign(new Error("link"), { code: "ELOOP" });
       destinations.add(destination);
       let current4 = real;
-      for (const part of relative17(ctx.root, destination).split(sep23).filter(Boolean)) {
+      for (const part of relative17(ctx.root, destination).split(sep24).filter(Boolean)) {
         current4 = join147(current4, part);
         const found = lookAt(current4);
         if (found.kind === "dir")
@@ -221998,7 +222013,7 @@ function removeEmptyFolders(ctx, moves) {
   const stop = accountFoldersRoot(ctx.env);
   const folders = new Set;
   for (const move of moves) {
-    for (let folder = dirname115(absPath(ctx, move.to));folder === stop || folder.startsWith(`${stop}${sep23}`); folder = dirname115(folder)) {
+    for (let folder = dirname115(absPath(ctx, move.to));folder === stop || folder.startsWith(`${stop}${sep24}`); folder = dirname115(folder)) {
       folders.add(folder);
       if (folder === stop)
         break;
