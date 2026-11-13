@@ -8,7 +8,7 @@ import type { EvidenceReranker, RerankTimers } from '../src/core/evidence-rerank
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
 import { LocalConnectorStore, createConnectorStoreContentProvider, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
-import { createEvidenceWindowPlacer } from '../src/core/evidence-window-placement.ts';
+import { createEvidenceWindowPlacer, type WindowScorer } from '../src/core/evidence-window-placement.ts';
 import { boundedSourceIndexChunks, sourceIndexChunkWindow } from '../src/core/source-index/chunk-selection.ts';
 import { createTestClock, flushMicrotasks } from './helpers/test-clock.ts';
 
@@ -67,8 +67,8 @@ test('p173: embedding windows recover the paraphrased answer inside the already 
   const detail = await buildEvidencePackDetailed(f.input);
   expect(text(detail)).toContain(ANSWER);
   expect(detail.windowPlacement).toMatchObject({ scorer: 'embedding', windowsScored: 24, timedOut: false });
-  // One batched embedding call per placed seat (three seats, eight windows each).
-  expect(f.calls.filter(call => call.length > 1).map(call => call.length)).toEqual([8, 8, 8]);
+  // All three seats share this store scorer.
+  expect(f.calls.filter(call => call.length > 1).map(call => call.length)).toEqual([24]);
 }, 20_000);
 
 test('reranker windows recover the same answer and leave seat order intact', async () => {
@@ -78,11 +78,12 @@ test('reranker windows recover the same answer and leave seat order intact', asy
     calls.push([...passages]); return passages.map(passage => passage.includes(ANSWER) ? 1 : 0);
   } };
   const detail = await buildEvidencePackDetailed({ ...f.input, reranker });
-  expect(text(detail)).toContain(ANSWER);
+  for (let seat = 0; seat < 3; seat++) expect(text(detail, seat)).toContain(ANSWER);
+  expect(f.calls).toEqual([]);
   expect(detail.pack.candidates.map(c => c.provenance.sourceItem.localItemId)).toEqual(['0', '1', '2', '3']);
   expect(detail.windowPlacement).toMatchObject({ scorer: 'reranker', windowsScored: 24, timedOut: false });
-  // The pack rerank, then one window call per placed seat.
-  expect(calls.map(call => call.length)).toEqual([4, 8, 8, 8]);
+  // The pack rerank, then one call holding every eligible seat.
+  expect(calls.map(call => call.length)).toEqual([4, 24]);
 }, 20_000);
 
 for (const providerName of ['fixture', 'venice']) test(`secure_local windows refuse cloud provider ${providerName}`, async () => {
@@ -130,7 +131,7 @@ test('all three eligible leading seats receive windows; the fourth keeps its exa
   for (let seat = 0; seat < 3; seat++) expect(text(detail, seat)).toContain(ANSWER);
   expect(text(detail, 3)).not.toContain(ANSWER);
   expect(detail.windowPlacement).toMatchObject({ seats: 3, windowsScored: 24 });
-  expect(f.calls.filter(call => call.length > 1).map(call => call.length)).toEqual([8, 8, 8]);
+  expect(f.calls.filter(call => call.length > 1).map(call => call.length)).toEqual([24]);
 }, 20_000);
 
 test('ordinary cloud embeddings also fall back without sending window text', async () => {
@@ -276,7 +277,7 @@ test('the deadline is shared across seats and a completed placement survives a l
     clock.set(clock.now() + 1000); return windows.map(window => (window.includes('PLACED') ? 1 : 0));
   } });
   expect(placed[0]).toContain('PLACED');
-  const pending = placer.place(chunks, { texts: ['y'.repeat(4000), 'whole'], scoreWindows: () => new Promise(() => {}) });
+  const pending = placer.place(chunks, { texts: ['y'.repeat(4000), 'whole'] }, () => new Promise(() => {}));
   await clock.advance(500);
   expect(await pending).toEqual(chunks);
   expect(placed[0]).toContain('PLACED');
@@ -368,4 +369,112 @@ test('a winning window near the end survives being widened to the share and byte
     windows.map(window => (window.includes(answer) ? 1 : 0)) }, undefined, [3000]);
   expect(utf8ByteLength(placed[0]!)).toBeLessThanOrEqual(3000);
   expect(placed[0]).toContain(answer);
+});
+
+function fakeTimers(clock: ReturnType<typeof createTestClock>): RerankTimers {
+  return { now: clock.now, setTimeout: clock.setTimeout,
+    clearTimeout: handle => clock.clearTimeout(handle as Parameters<typeof clock.clearTimeout>[0]) };
+}
+
+for (const kind of ['embedding', 'reranker'] as const) test(`${kind}: late completion suppresses calls until a fast in-flight call finishes`, async () => {
+  const chunks = ['o'.repeat(600)];
+  const source = { texts: ['x'.repeat(4000)] };
+  const run = (placer: ReturnType<typeof createEvidenceWindowPlacer>, scorer: WindowScorer) =>
+    kind === 'reranker' ? placer.place(chunks, source, scorer) : placer.place(chunks, { ...source, scoreWindows: scorer });
+  const clock = createTestClock();
+  let finishSlow!: (scores: number[]) => void;
+  let calls = 0;
+  const scorer = async () => { calls++; return new Promise<readonly number[]>(resolve => { finishSlow = resolve; }); };
+  const placer = createEvidenceWindowPlacer(QUESTION, fakeTimers(clock));
+  const pending = run(placer, scorer);
+  await clock.advance(1400);
+  // This second question starts before the slow completion is known.
+  let finishFast!: (scores: number[]) => void;
+  const fast = run(createEvidenceWindowPlacer(QUESTION, fakeTimers(clock)), () => new Promise(resolve => { finishFast = resolve; }));
+  await clock.advance(100);
+  expect(await pending).toEqual(chunks);
+  expect(placer.audit).toMatchObject({ windowsSubmitted: 8, calls: [{ windows: 8, ms: 1500, outcome: 'timed_out' }] });
+  await clock.advance(100);
+  finishSlow(Array(8).fill(0));
+  await flushMicrotasks();
+  const skipped = createEvidenceWindowPlacer(QUESTION, fakeTimers(clock));
+  expect(await run(skipped, scorer)).toEqual(chunks);
+  expect(calls).toBe(1);
+  expect(skipped.audit).toMatchObject({ skipped: 'slow_scorer', seats: 0, windowsSubmitted: 0, elapsedMs: 0, calls: [] });
+  await clock.advance(10);
+  finishFast(Array(8).fill(0));
+  await fast;
+  const recovered = createEvidenceWindowPlacer(QUESTION, fakeTimers(clock));
+  await run(recovered, async (_query, windows) => { calls++; return windows.map(() => 0); });
+  expect(calls).toBe(2);
+  expect(recovered.audit.windowsScored).toBe(8);
+});
+
+for (const outcome of ['scored', 'failed', 'malformed'] as const) test(`calls audit measures ${outcome} without text`, async () => {
+  const clock = createTestClock();
+  const placer = createEvidenceWindowPlacer(QUESTION, fakeTimers(clock));
+  const chunks = ['o'.repeat(600)];
+  const result = await placer.place(chunks, { texts: ['x'.repeat(4000)], scoreWindows: async (_query, windows) => {
+    clock.set(clock.now() + 25);
+    if (outcome === 'failed') throw new Error('unavailable');
+    return outcome === 'malformed' ? [NaN] : windows.map(() => 0);
+  } });
+  expect(result).toEqual(chunks);
+  expect(placer.audit).toMatchObject({ windowsSubmitted: 8, elapsedMs: 25,
+    calls: [{ windows: 8, ms: 25, outcome: outcome === 'scored' ? 'scored' : 'failed' }] });
+});
+
+
+test('embedding seats batch by scorer identity in first-seat order and keep each seat result', async () => {
+  const clock = createTestClock();
+  const calls: { store: string; windows: number }[] = [];
+  const scorer = (store: string): WindowScorer => async (_query, windows) => {
+    calls.push({ store, windows: windows.length });
+    return windows.map(window => window.includes('TAIL') ? 1 : 0);
+  };
+  const first = scorer('first');
+  const second = scorer('second');
+  const seats = [first, second, first].map((scoreWindows, index) => ({
+    chunks: ['original'.repeat(75)],
+    source: { texts: ['x'.repeat(3990) + `TAIL${index}`], scoreWindows },
+  }));
+  const placer = createEvidenceWindowPlacer(QUESTION, fakeTimers(clock));
+  const results = await placer.placeAll(seats);
+  expect(calls).toEqual([{ store: 'first', windows: 16 }, { store: 'second', windows: 8 }]);
+  for (let seat = 0; seat < 3; seat++) expect(results[seat]![0]).toContain(`TAIL${seat}`);
+  expect(placer.audit).toMatchObject({ seats: 3, windowsSubmitted: 24, windowsScored: 24,
+    calls: [{ windows: 16, ms: 0, outcome: 'scored' }, { windows: 8, ms: 0, outcome: 'scored' }] });
+});
+
+test('a failed reranker never falls back to the available embedding scorer', async () => {
+  const clock = createTestClock();
+  let embeddings = 0;
+  const seat = { chunks: ['o'.repeat(600)], source: { texts: ['x'.repeat(4000)],
+    scoreWindows: async (_query: string, windows: readonly string[]) => { embeddings++; return windows.map(() => 1); } } };
+  const placer = createEvidenceWindowPlacer(QUESTION, fakeTimers(clock));
+  expect(await placer.placeAll([seat, seat, seat], async () => { throw new Error('reranker unavailable'); }))
+    .toEqual([seat.chunks, seat.chunks, seat.chunks]);
+  expect(embeddings).toBe(0);
+  expect(placer.audit).toMatchObject({ scorer: 'reranker', calls: [{ windows: 24, ms: 0, outcome: 'failed' }] });
+});
+
+test('a scorer skipped as slow is tried again after a minute, so placement is never off for good', async () => {
+  const chunks = ['o'.repeat(600)];
+  const clock = createTestClock();
+  let calls = 0;
+  const slow: WindowScorer = (_query, windows) => { calls++; return new Promise(resolve => { clock.setTimeout(() => resolve(windows.map(() => 0)), 2_000); }); };
+  const first = createEvidenceWindowPlacer(QUESTION, fakeTimers(clock));
+  const pending = first.place(chunks, { texts: ['x'.repeat(4000)], scoreWindows: slow });
+  await clock.advance(2_000);
+  await pending;
+  await flushMicrotasks();
+  const skipped = createEvidenceWindowPlacer(QUESTION, fakeTimers(clock));
+  await skipped.place(chunks, { texts: ['x'.repeat(4000)], scoreWindows: slow });
+  expect(skipped.audit.skipped).toBe('slow_scorer');
+  expect(calls).toBe(1);
+  await clock.advance(60_000);
+  const retried = createEvidenceWindowPlacer(QUESTION, fakeTimers(clock));
+  await retried.place(chunks, { texts: ['x'.repeat(4000)], scoreWindows: async (_query, windows) => { calls++; return windows.map(() => 0); } });
+  expect(calls).toBe(2);
+  expect(retried.audit.windowsScored).toBe(8);
 });

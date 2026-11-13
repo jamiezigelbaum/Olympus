@@ -1,4 +1,4 @@
-import { createEvidenceWindowPlacer, type EvidenceWindowSource, type WindowPlacementAudit, type WindowScorer } from './evidence-window-placement.ts';
+import { createEvidenceWindowPlacer, type EvidenceWindowSeat, type EvidenceWindowSource, type WindowPlacementAudit, type WindowScorer } from './evidence-window-placement.ts';
 import { withKeywordRequestScope } from './source-index/keyword-context.ts';
 import { RECENT_ITEMS_CUT_SHORT, VISIBILITY_CHECK_CUT_SHORT, recentItemsTimeoutGap, semanticSearchTimedOut, semanticTimeoutGap, visibilityCheckTimeoutGap } from './source-index/partial-search.ts';
 import {
@@ -468,6 +468,7 @@ async function buildPreparedEvidencePackDetailed(
   const windowPlacer = createEvidenceWindowPlacer(input.question, input.windowPlacementTimers);
   const scoreWindows: WindowScorer | undefined = reranker
     ? (query, passages, signal) => reranker.score({ query, passages, signal }) : undefined;
+  const windowSeats: (EvidenceWindowSeat & { candidate: EvidenceCandidate })[] = [];
   for (const { hit, provenance, provider, content, policyDenied } of hydrated) {
     if (policyDenied) {
       encounteredSecureLocal = true;
@@ -518,8 +519,7 @@ async function buildPreparedEvidencePackDetailed(
       // Each placed window keeps only the bytes its chunk keeps today, so the
       // byte clip below never cuts away the text that won.
       const byteShares = byteClipped ? content.chunks.map((_, index) => utf8ByteLength(byteClipped[index] ?? '')) : undefined;
-      const placed = await windowPlacer.place(content.chunks, content.windowPlacement, scoreWindows, byteShares);
-      candidate.chunks = byteClipped ? clipChunksToUtf8Bytes(placed, maxBytesPerCandidate!) : placed;
+      windowSeats.push({ candidate, chunks: content.chunks, source: content.windowPlacement, ...(byteShares ? { byteShares } : {}) });
     }
     if (content?.namesOnly === true) namesOnlyCandidateIndexes.push(candidates.length);
     else if (content?.contentPrivate === true) contentPrivateCandidateIndexes.push(candidates.length);
@@ -531,6 +531,13 @@ async function buildPreparedEvidencePackDetailed(
     candidateExtractionGapIndexes.push(gap ? [extractionGaps.length] : []);
     if (gap) extractionGaps.push(gap);
   }
+
+  const placedSeats = await windowPlacer.placeAll(windowSeats, scoreWindows);
+  windowSeats.forEach(({ candidate }, index) => {
+    const placed = placedSeats[index]!;
+    candidate.chunks = input.evidenceByteBudget !== undefined && maxBytesPerCandidate !== undefined
+      ? clipChunksToUtf8Bytes(placed, maxBytesPerCandidate) : placed;
+  });
 
   const matchCounts = coverageMatchCounts(
     routed.matchCounts,

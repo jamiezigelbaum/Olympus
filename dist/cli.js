@@ -38393,6 +38393,22 @@ function connectorStoreKeywordLaneAudit(corpusId, candidateCount, returnedCount)
 function createConnectorStoreContentProvider(options) {
   const { store } = options;
   const embeddingProvider = options.embeddingProvider && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(options.embeddingProvider)) ? options.embeddingProvider : undefined;
+  const privateProvider = embeddingProvider && isApprovedSecureSourceEmbeddingProvider(embeddingProvider) && (store.trustDomain !== "secure_local" || embeddingProvider.backend === "local") ? embeddingProvider : undefined;
+  const scoreWindows = privateProvider ? async (query, windows, signal) => {
+    assertConnectorStoreEmbeddingProvider(store.trustDomain, privateProvider);
+    privateProvider.assertBindingCurrent?.();
+    const queryEmbedding = (await privateProvider.embed([{ text: query }], { taskType: "RETRIEVAL_QUERY" }))[0];
+    if (signal.aborted)
+      throw new Error("Window placement deadline");
+    if (!queryEmbedding || queryEmbedding.length !== privateProvider.dimension || !queryEmbedding.every(Number.isFinite)) {
+      throw new Error("Invalid query embedding");
+    }
+    const embeddings = await privateProvider.embed(windows.map((text2) => ({ text: text2 })), { taskType: "RETRIEVAL_DOCUMENT" });
+    if (embeddings.length !== windows.length || embeddings.some((value) => value.length !== queryEmbedding.length || !value.every(Number.isFinite))) {
+      throw new Error("Invalid window embeddings");
+    }
+    return embeddings.map((value) => cosineSimilarity(queryEmbedding, value));
+  } : undefined;
   let storeHasVectors;
   const queryVector = async (query) => {
     const text2 = query?.trim();
@@ -38477,22 +38493,6 @@ function createConnectorStoreContentProvider(options) {
         const coverageGaps = connectorStoreCoverageGaps(content, metadataOnlyRuleId);
         let windowPlacement;
         if (content.truncated && content.windowTexts && content.windowTexts.length > 1) {
-          const privateProvider = embeddingProvider && isApprovedSecureSourceEmbeddingProvider(embeddingProvider) && (store.trustDomain !== "secure_local" || embeddingProvider.backend === "local") ? embeddingProvider : undefined;
-          const scoreWindows = privateProvider ? async (query, windows, signal) => {
-            assertConnectorStoreEmbeddingProvider(store.trustDomain, privateProvider);
-            privateProvider.assertBindingCurrent?.();
-            const queryEmbedding = vector ?? (await privateProvider.embed([{ text: query }], { taskType: "RETRIEVAL_QUERY" }))[0];
-            if (signal.aborted)
-              throw new Error("Window placement deadline");
-            if (!queryEmbedding || queryEmbedding.length !== privateProvider.dimension || !queryEmbedding.every(Number.isFinite)) {
-              throw new Error("Invalid query embedding");
-            }
-            const embeddings = await privateProvider.embed(windows.map((text2) => ({ text: text2 })), { taskType: "RETRIEVAL_DOCUMENT" });
-            if (embeddings.length !== windows.length || embeddings.some((value) => value.length !== queryEmbedding.length || !value.every(Number.isFinite))) {
-              throw new Error("Invalid window embeddings");
-            }
-            return embeddings.map((value) => cosineSimilarity(queryEmbedding, value));
-          } : undefined;
           windowPlacement = { texts: content.windowTexts, ...scoreWindows ? { scoreWindows } : {} };
         }
         return {
@@ -77642,50 +77642,46 @@ var init_analyst_openclaw_infer = __esm(() => {
 
 // src/core/evidence-window-placement.ts
 function createEvidenceWindowPlacer(query, timers = systemTimers) {
-  const audit = { seats: 0, windowsScored: 0, scorer: "none", elapsedMs: 0, timedOut: false };
+  const audit = { seats: 0, windowsScored: 0, windowsSubmitted: 0, calls: [], scorer: "none", elapsedMs: 0, timedOut: false };
   let startedAt;
-  let submittedWindows = 0;
-  return {
-    audit,
-    async place(chunks, source, reranker, byteShares) {
-      const cut = (text2, index) => byteShares ? utf8Prefix(text2, byteShares[index] ?? 0) : text2;
-      const score = reranker ?? source.scoreWindows;
-      if (!score || submittedWindows >= MAX_WINDOWS_PER_QUESTION || audit.timedOut)
-        return chunks;
-      startedAt ??= timers.now();
-      const remaining = WINDOW_PLACEMENT_BUDGET_MS - (timers.now() - startedAt);
+  async function placeAll(seats, reranker) {
+    const results = seats.map((seat) => seat.chunks);
+    const groups = new Map;
+    let reserved = audit.windowsSubmitted;
+    for (const [seat, entry] of seats.entries()) {
+      const scorer = reranker ?? entry.source.scoreWindows;
+      if (!scorer || reserved >= MAX_WINDOWS_PER_QUESTION || audit.timedOut)
+        continue;
+      const windows = seatWindows(entry, Math.min(MAX_WINDOWS_PER_SEAT, MAX_WINDOWS_PER_QUESTION - reserved));
+      if (!windows.length)
+        continue;
+      reserved += windows.length;
+      const group = groups.get(scorer) ?? [];
+      group.push({ seat, windows });
+      groups.set(scorer, group);
+    }
+    for (const [score, group] of groups) {
+      if (audit.timedOut)
+        break;
+      const kind = reranker ? "reranker" : "embedding";
+      audit.scorer = kind;
+      const remaining = WINDOW_PLACEMENT_BUDGET_MS - (startedAt === undefined ? 0 : timers.now() - startedAt);
       if (remaining <= 0) {
         audit.timedOut = true;
-        audit.elapsedMs = timers.now() - startedAt;
-        return chunks;
+        break;
       }
-      const windows = [];
-      const order = [...new Set([...source.priority ?? [], ...chunks.keys()])];
-      const eligible = order.filter((index) => {
-        const text2 = source.texts[index];
-        const chunk = chunks[index];
-        return chunk !== undefined && text2 !== undefined && text2.length > chunk.length && (!byteShares || (byteShares[index] ?? 0) > 0);
-      });
-      const allowance = Math.min(MAX_WINDOWS_PER_SEAT, MAX_WINDOWS_PER_QUESTION - submittedWindows);
-      for (const chunk of eligible) {
-        const text2 = source.texts[chunk];
-        const size = Math.min(WINDOW_CHARS, chunks[chunk].length);
-        const span = Math.max(0, text2.length - size);
-        const count = Math.min(Math.ceil(span / WINDOW_STRIDE) + 1, allowance - windows.length - 1);
-        if (count <= 0)
-          break;
-        windows.push({ chunk, start: KEEP_ORIGINAL, text: cut(chunks[chunk], chunk) });
-        for (let n = 0;n < count; n++) {
-          const start = count === 1 ? 0 : Math.round(n * span / (count - 1));
-          windows.push({ chunk, start, text: cut(sourceIndexChunkWindow(text2, start, size), chunk) });
-        }
+      if (lastCallMs[kind] > remaining) {
+        audit.skipped = "slow_scorer";
+        continue;
       }
-      if (!windows.length)
-        return chunks;
-      audit.seats++;
-      submittedWindows += windows.length;
-      audit.scorer = reranker ? "reranker" : "embedding";
+      startedAt ??= timers.now();
+      const windows = group.flatMap((entry) => entry.windows);
+      audit.seats += group.length;
+      audit.windowsSubmitted += windows.length;
       const controller = new AbortController;
+      const callStartedAt = timers.now();
+      const call = { windows: windows.length, ms: 0, outcome: "failed" };
+      audit.calls.push(call);
       let timer;
       const expired = Symbol("expired");
       const timeout = new Promise((resolve15) => {
@@ -77694,43 +77690,89 @@ function createEvidenceWindowPlacer(query, timers = systemTimers) {
           controller.abort();
         }, remaining);
       });
+      const scoring = Promise.resolve().then(() => score(query, windows.map((window2) => window2.text), controller.signal)).finally(() => {
+        lastCallMs[kind] = Math.max(0, timers.now() - callStartedAt);
+      });
       try {
-        const scores = await Promise.race([Promise.resolve().then(() => score(query, windows.map((window2) => window2.text), controller.signal)), timeout]);
+        const scores = await Promise.race([scoring, timeout]);
         if (scores === expired || timers.now() - startedAt >= WINDOW_PLACEMENT_BUDGET_MS) {
           audit.timedOut = true;
+          call.outcome = "timed_out";
           controller.abort();
-          return chunks;
+          continue;
         }
         if (scores.length !== windows.length || scores.some((value) => !Number.isFinite(value)))
-          return chunks;
+          continue;
+        call.outcome = "scored";
         audit.windowsScored += windows.length;
-        const best = new Map;
-        windows.forEach((window2, index) => {
-          const previous = best.get(window2.chunk);
-          if (previous === undefined || scores[index] > scores[previous])
-            best.set(window2.chunk, index);
-        });
-        return chunks.map((chunk, index) => {
-          const picked = best.get(index);
-          const start = picked === undefined ? KEEP_ORIGINAL : windows[picked].start;
-          if (start === KEEP_ORIGINAL)
-            return chunk;
-          const widened = cut(sourceIndexChunkWindow(source.texts[index], start, chunk.length), index);
-          const scored = windows[picked].text;
-          return widened.includes(scored) ? widened : scored;
-        });
+        let offset = 0;
+        for (const entry of group) {
+          results[entry.seat] = applyWindows(seats[entry.seat], entry.windows, scores.slice(offset, offset + entry.windows.length));
+          offset += entry.windows.length;
+        }
       } catch {
         if (timers.now() - startedAt >= WINDOW_PLACEMENT_BUDGET_MS) {
           audit.timedOut = true;
+          call.outcome = "timed_out";
           controller.abort();
         }
-        return chunks;
       } finally {
         timers.clearTimeout(timer);
+        call.ms = Math.max(0, timers.now() - callStartedAt);
         audit.elapsedMs = Math.max(0, timers.now() - startedAt);
       }
     }
+    return results;
+  }
+  return {
+    audit,
+    placeAll,
+    async place(chunks, source, reranker, byteShares) {
+      return (await placeAll([{ chunks, source, ...byteShares ? { byteShares } : {} }], reranker))[0];
+    }
   };
+}
+function seatWindows({ chunks, source, byteShares }, allowance) {
+  const cut = (text2, index) => byteShares ? utf8Prefix(text2, byteShares[index] ?? 0) : text2;
+  const windows = [];
+  const order = [...new Set([...source.priority ?? [], ...chunks.keys()])];
+  const eligible = order.filter((index) => {
+    const text2 = source.texts[index];
+    const chunk = chunks[index];
+    return chunk !== undefined && text2 !== undefined && text2.length > chunk.length && (!byteShares || (byteShares[index] ?? 0) > 0);
+  });
+  for (const chunk of eligible) {
+    const text2 = source.texts[chunk];
+    const size = Math.min(WINDOW_CHARS, chunks[chunk].length);
+    const span = Math.max(0, text2.length - size);
+    const count = Math.min(Math.ceil(span / WINDOW_STRIDE) + 1, allowance - windows.length - 1);
+    if (count <= 0)
+      break;
+    windows.push({ chunk, start: KEEP_ORIGINAL, text: cut(chunks[chunk], chunk) });
+    for (let n = 0;n < count; n++) {
+      const start = count === 1 ? 0 : Math.round(n * span / (count - 1));
+      windows.push({ chunk, start, text: cut(sourceIndexChunkWindow(text2, start, size), chunk) });
+    }
+  }
+  return windows;
+}
+function applyWindows({ chunks, source, byteShares }, windows, scores) {
+  const best = new Map;
+  windows.forEach((window2, index) => {
+    const previous = best.get(window2.chunk);
+    if (previous === undefined || scores[index] > scores[previous])
+      best.set(window2.chunk, index);
+  });
+  return chunks.map((chunk, index) => {
+    const picked = best.get(index);
+    const start = picked === undefined ? KEEP_ORIGINAL : windows[picked].start;
+    if (start === KEEP_ORIGINAL)
+      return chunk;
+    const widened = sourceIndexChunkWindow(source.texts[index], start, chunk.length);
+    const kept = byteShares ? utf8Prefix(widened, byteShares[index] ?? 0) : widened;
+    const scored = windows[picked].text;
+    return kept.includes(scored) ? kept : scored;
+  });
 }
 function utf8Prefix(text2, maxBytes) {
   let used = 0;
@@ -77744,7 +77786,7 @@ function utf8Prefix(text2, maxBytes) {
   }
   return text2.slice(0, end);
 }
-var WINDOW_PLACEMENT_BUDGET_MS = 1500, WINDOW_CHARS = 600, WINDOW_STRIDE = 300, MAX_WINDOWS_PER_SEAT = 8, MAX_WINDOWS_PER_QUESTION = 24, KEEP_ORIGINAL = -1, systemTimers;
+var WINDOW_PLACEMENT_BUDGET_MS = 1500, WINDOW_CHARS = 600, WINDOW_STRIDE = 300, MAX_WINDOWS_PER_SEAT = 8, MAX_WINDOWS_PER_QUESTION = 24, KEEP_ORIGINAL = -1, systemTimers, lastCallMs;
 var init_evidence_window_placement = __esm(() => {
   init_chunk_selection();
   systemTimers = {
@@ -77752,6 +77794,7 @@ var init_evidence_window_placement = __esm(() => {
     setTimeout: (callback, ms) => setTimeout(callback, ms),
     clearTimeout: (handle) => clearTimeout(handle)
   };
+  lastCallMs = { reranker: 0, embedding: 0 };
 });
 
 // src/core/evidence-reranker.ts
@@ -78643,6 +78686,7 @@ async function buildPreparedEvidencePackDetailed(input) {
   }
   const windowPlacer = createEvidenceWindowPlacer(input.question, input.windowPlacementTimers);
   const scoreWindows = reranker ? (query, passages, signal) => reranker.score({ query, passages, signal }) : undefined;
+  const windowSeats = [];
   for (const { hit, provenance, provider, content, policyDenied } of hydrated) {
     if (policyDenied) {
       encounteredSecureLocal = true;
@@ -78677,8 +78721,7 @@ async function buildPreparedEvidencePackDetailed(input) {
     if (candidates.length < 3 && content?.truncated && content.chunks.length > 1 && content.windowPlacement) {
       const byteClipped = input.evidenceByteBudget !== undefined && maxBytesPerCandidate !== undefined ? clipChunksToUtf8Bytes(content.chunks, maxBytesPerCandidate) : undefined;
       const byteShares = byteClipped ? content.chunks.map((_, index) => utf8ByteLength(byteClipped[index] ?? "")) : undefined;
-      const placed = await windowPlacer.place(content.chunks, content.windowPlacement, scoreWindows, byteShares);
-      candidate.chunks = byteClipped ? clipChunksToUtf8Bytes(placed, maxBytesPerCandidate) : placed;
+      windowSeats.push({ candidate, chunks: content.chunks, source: content.windowPlacement, ...byteShares ? { byteShares } : {} });
     }
     if (content?.namesOnly === true)
       namesOnlyCandidateIndexes.push(candidates.length);
@@ -78693,6 +78736,11 @@ async function buildPreparedEvidencePackDetailed(input) {
     if (gap)
       extractionGaps.push(gap);
   }
+  const placedSeats = await windowPlacer.placeAll(windowSeats, scoreWindows);
+  windowSeats.forEach(({ candidate }, index) => {
+    const placed = placedSeats[index];
+    candidate.chunks = input.evidenceByteBudget !== undefined && maxBytesPerCandidate !== undefined ? clipChunksToUtf8Bytes(placed, maxBytesPerCandidate) : placed;
+  });
   const matchCounts = coverageMatchCounts(routed.matchCounts, candidateCorpusIds, candidates.some((candidate) => isSecureSensitivity(candidate)));
   const coverage = {
     searchedCorpora: routed.searchedCorpora,

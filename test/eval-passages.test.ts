@@ -335,3 +335,22 @@ test('without an answer callback the serialized receipt is byte-identical to the
     expect(createHash('sha256').update(JSON.stringify(receipt)).digest('hex')).toBe('56f12eb867b6dce832872531b0387a32ff5b3955e45b415f184184e307ec6ead');
   } finally { now.mockRestore(); }
 });
+
+
+test('every passage row carries the full placement audit and summaries count placement work including degraded questions', async () => {
+  const audits: NonNullable<EvidencePackBuildDetail['windowPlacement']>[] = [
+    { seats: 3, scorer: 'reranker', windowsSubmitted: 24, windowsScored: 24, elapsedMs: 40, timedOut: false,
+      calls: [{ windows: 24, ms: 40, outcome: 'scored' }] },
+    { seats: 1, scorer: 'embedding', windowsSubmitted: 8, windowsScored: 0, elapsedMs: 1500, timedOut: true,
+      calls: [{ windows: 8, ms: 1500, outcome: 'timed_out' }] },
+    { seats: 0, scorer: 'embedding', windowsSubmitted: 0, windowsScored: 0, elapsedMs: 0, timedOut: false,
+      skipped: 'slow_scorer', calls: [] },
+  ];
+  const three = { ...dataset, questions: audits.map((_, i) => ({ ...dataset.questions[0]!, id: `placement${i}` })) };
+  let call = 0;
+  const receipt = await runPassageEval({ dataset: three, maxResults: 5, storeCounts: counts, gitSha: 'abc',
+    buildPack: async () => ({ ...detail(), windowPlacement: audits[call++]!,
+      ...(call === 2 ? { corpusTimings: [{ corpusId: 'internal.fixture.file', elapsedMs: 9, outcome: 'timeout' as const }] } : {}) }) });
+  expect(receipt.questions!.map(row => row.windowPlacement)).toEqual(audits);
+  expect(receipt.summary.overall.windowPlacement).toEqual({ placed: 1, timedOut: 1, skipped: 1, elapsedMs: 1540, maxElapsedMs: 1500 });
+});

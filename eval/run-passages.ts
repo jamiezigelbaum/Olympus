@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { EvidencePackBuildDetail } from '../src/core/evidence-pack.ts';
+import type { WindowPlacementAudit } from '../src/core/evidence-window-placement.ts';
 import type { EvidenceRerankOutcome } from '../src/core/evidence-reranker.ts';
 import { loadConfig, parseLane, parseModelProfile } from '../src/core/config.ts';
 import { createAnalyst, withPromptBudget } from '../src/core/analyst.ts';
@@ -68,6 +69,7 @@ export interface PassageSummary {
   reach: { found: number; returned: number; seated: number; fitted: number; passage: number };
   /** Reranker outcomes and time, when one ran: a timed-out or failed rerank kept the fused order. */
   rerank?: { applied: number; timedOut: number; failed: number; elapsedMs: number; maxElapsedMs: number };
+  windowPlacement?: { placed: number; timedOut: number; skipped: number; elapsedMs: number; maxElapsedMs: number };
 }
 export interface PassageRow {
   questionId: string; shape: string; families: string[]; tiers: string[];
@@ -75,6 +77,7 @@ export interface PassageRow {
   funnel?: FunnelRow; judge?: QuestionJudgement;
   answer?: PassageAnswer;
   rerank?: { outcome: EvidenceRerankOutcome; scored: number; promoted: number; elapsedMs: number };
+  windowPlacement?: WindowPlacementAudit;
   /** Present when a store's search was cut short: which store and lane, and why (codes only). Left out of the metrics. */
   degraded?: Degradation[];
   timings: PassageSummary['timings'];
@@ -109,6 +112,7 @@ function summarize(all: readonly PassageRow[], ks: readonly number[]): PassageSu
   const judgedRows = positives.filter(row => row.judge);
   const reached = (stages: readonly FunnelStage[]) => positives.filter(row => row.funnel && stages.includes(row.funnel.stage)).length;
   const reranked = rows.filter(row => row.rerank);
+  const placements = all.flatMap(row => row.windowPlacement ? [row.windowPlacement] : []);
   const answers = all.flatMap(row => row.answer ? [row.answer] : []);
   const answerTimes = answers.flatMap(answer => answer.outcome === 'answered' && answer.answerMs !== undefined ? [answer.answerMs] : []).sort((a, b) => a - b);
   const middle = Math.floor(answerTimes.length / 2);
@@ -143,6 +147,13 @@ function summarize(all: readonly PassageRow[], ks: readonly number[]): PassageSu
       failed: reranked.filter(row => row.rerank!.outcome === 'failed').length,
       elapsedMs: reranked.reduce((n, row) => n + row.rerank!.elapsedMs, 0),
       maxElapsedMs: Math.max(...reranked.map(row => row.rerank!.elapsedMs)),
+    } } : {}),
+    ...(placements.length ? { windowPlacement: {
+      placed: placements.filter(audit => audit.windowsScored > 0).length,
+      timedOut: placements.filter(audit => audit.timedOut).length,
+      skipped: placements.filter(audit => audit.skipped).length,
+      elapsedMs: placements.reduce((sum, audit) => sum + audit.elapsedMs, 0),
+      maxElapsedMs: Math.max(...placements.map(audit => audit.elapsedMs)),
     } } : {}),
     questions: rows.length, answerable: positives.length, unanswerable: rows.length - positives.length,
     negativeSeats: rows.filter(row => !row.answerable).reduce((n, row) => n + row.seatsFilled, 0),
@@ -273,6 +284,7 @@ export async function runPassageEval(input: {
       seatsFilled: pack.candidates.length, answerable, object: score(objectRank, ks), passage: score(passageRank, ks),
       ...(funnel ? { funnel } : {}), ...(judge ? { judge } : {}),
       ...(answer ? { answer } : {}),
+      ...(detail.windowPlacement ? { windowPlacement: detail.windowPlacement } : {}),
       ...(detail.rerank ? { rerank: { outcome: detail.rerank.outcome, scored: detail.rerank.scored, promoted: detail.rerank.promoted, elapsedMs: detail.rerank.elapsedMs } } : {}),
       ...(degraded.length ? { degraded } : {}),
       timings: { buildPackMs: builtAt - started, fitMs: finished - builtAt, totalMs: finished - started, storeSearchMs: (detail.corpusTimings ?? []).reduce((n, t) => n + t.elapsedMs, 0) },

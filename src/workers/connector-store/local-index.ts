@@ -16698,6 +16698,27 @@ export function createConnectorStoreContentProvider(
     && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(options.embeddingProvider))
     ? options.embeddingProvider
     : undefined;
+  // Stable function identity lets all seats from this provider share one call.
+  // This new text-scoring lane is private-only. secure_local windows
+  // additionally require the local backend, even where the existing
+  // vector lane permits Venice. No broader query-vector policy changes.
+  const privateProvider = embeddingProvider && isApprovedSecureSourceEmbeddingProvider(embeddingProvider)
+    && (store.trustDomain !== 'secure_local' || embeddingProvider.backend === 'local')
+    ? embeddingProvider : undefined;
+  const scoreWindows: WindowScorer | undefined = privateProvider ? async (query, windows, signal) => {
+    assertConnectorStoreEmbeddingProvider(store.trustDomain, privateProvider);
+    privateProvider.assertBindingCurrent?.();
+    const queryEmbedding = (await privateProvider.embed([{ text: query }], { taskType: 'RETRIEVAL_QUERY' }))[0];
+    if (signal.aborted) throw new Error('Window placement deadline');
+    if (!queryEmbedding || queryEmbedding.length !== privateProvider.dimension || !queryEmbedding.every(Number.isFinite)) {
+      throw new Error('Invalid query embedding');
+    }
+    const embeddings = await privateProvider.embed(windows.map(text => ({ text })), { taskType: 'RETRIEVAL_DOCUMENT' });
+    if (embeddings.length !== windows.length || embeddings.some(value => value.length !== queryEmbedding.length || !value.every(Number.isFinite))) {
+      throw new Error('Invalid window embeddings');
+    }
+    return embeddings.map(value => cosineSimilarity(queryEmbedding, value));
+  } : undefined;
   // The query's vector for passage ranking, or nothing. Never fails the read:
   // without it, passages fall back to lexical and document order.
   let storeHasVectors: boolean | undefined;
@@ -16791,26 +16812,6 @@ export function createConnectorStoreContentProvider(
       const coverageGaps = connectorStoreCoverageGaps(content, metadataOnlyRuleId);
       let windowPlacement: EvidenceWindowSource | undefined;
       if (content.truncated && content.windowTexts && content.windowTexts.length > 1) {
-        // This new text-scoring lane is private-only. secure_local windows
-        // additionally require the local backend, even where the existing
-        // vector lane permits Venice. No broader query-vector policy changes.
-        const privateProvider = embeddingProvider && isApprovedSecureSourceEmbeddingProvider(embeddingProvider)
-          && (store.trustDomain !== 'secure_local' || embeddingProvider.backend === 'local')
-          ? embeddingProvider : undefined;
-        const scoreWindows: WindowScorer | undefined = privateProvider ? async (query, windows, signal) => {
-          assertConnectorStoreEmbeddingProvider(store.trustDomain, privateProvider);
-          privateProvider.assertBindingCurrent?.();
-          const queryEmbedding = vector ?? (await privateProvider.embed([{ text: query }], { taskType: 'RETRIEVAL_QUERY' }))[0];
-          if (signal.aborted) throw new Error('Window placement deadline');
-          if (!queryEmbedding || queryEmbedding.length !== privateProvider.dimension || !queryEmbedding.every(Number.isFinite)) {
-            throw new Error('Invalid query embedding');
-          }
-          const embeddings = await privateProvider.embed(windows.map(text => ({ text })), { taskType: 'RETRIEVAL_DOCUMENT' });
-          if (embeddings.length !== windows.length || embeddings.some(value => value.length !== queryEmbedding.length || !value.every(Number.isFinite))) {
-            throw new Error('Invalid window embeddings');
-          }
-          return embeddings.map(value => cosineSimilarity(queryEmbedding, value));
-        } : undefined;
         windowPlacement = { texts: content.windowTexts, ...(scoreWindows ? { scoreWindows } : {}) };
       }
 

@@ -26,6 +26,9 @@ export interface WindowPlacementAudit {
   seats: number;
   /** Windows with valid scores received before the deadline. */
   windowsScored: number;
+  windowsSubmitted: number;
+  calls: { windows: number; ms: number; outcome: 'scored' | 'timed_out' | 'failed' }[];
+  skipped?: 'slow_scorer';
   scorer: 'reranker' | 'embedding' | 'none';
   elapsedMs: number;
   timedOut: boolean;
@@ -37,97 +40,148 @@ const systemTimers: RerankTimers = {
   clearTimeout: handle => clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
 
+export interface EvidenceWindowSeat {
+  chunks: readonly string[];
+  source: EvidenceWindowSource;
+  /** The UTF-8 bytes each kept chunk may hold after the pack's byte clip. */
+  byteShares?: readonly number[];
+}
+
+type ScorerKind = 'reranker' | 'embedding';
+// Like keyword translation, late settlements still update the last duration.
+// A fast call already in flight can restore placement after an overload.
+// A slow scorer is tried again after a minute, so a skip is never permanent:
+// while skipped, no call runs that could report it fast again.
+const SLOW_SCORER_RETRY_MS = 60_000;
+const lastCall: Record<ScorerKind, { ms: number; at: number }> = { reranker: { ms: 0, at: 0 }, embedding: { ms: 0, at: 0 } };
+
 /** One shared deadline and window allowance for a whole question. Fail open. */
 export function createEvidenceWindowPlacer(query: string, timers = systemTimers) {
-  const audit: WindowPlacementAudit = { seats: 0, windowsScored: 0, scorer: 'none', elapsedMs: 0, timedOut: false };
+  const audit: WindowPlacementAudit = { seats: 0, windowsScored: 0, windowsSubmitted: 0, calls: [], scorer: 'none', elapsedMs: 0, timedOut: false };
   let startedAt: number | undefined;
-  let submittedWindows = 0;
-  return {
-    audit,
-    async place(
-      chunks: readonly string[],
-      source: EvidenceWindowSource,
-      reranker?: WindowScorer,
-      /** The UTF-8 bytes each kept chunk may hold after the pack's byte clip. */
-      byteShares?: readonly number[],
-    ): Promise<readonly string[]> {
-      const cut = (text: string, index: number) => byteShares ? utf8Prefix(text, byteShares[index] ?? 0) : text;
-      const score = reranker ?? source.scoreWindows;
-      if (!score || submittedWindows >= MAX_WINDOWS_PER_QUESTION || audit.timedOut) return chunks;
+  async function placeAll(seats: readonly EvidenceWindowSeat[], reranker?: WindowScorer): Promise<readonly (readonly string[])[]> {
+    const results = seats.map(seat => seat.chunks);
+    const groups = new Map<WindowScorer, { seat: number; windows: ReturnType<typeof seatWindows> }[]>();
+    let reserved = audit.windowsSubmitted;
+    for (const [seat, entry] of seats.entries()) {
+      const scorer = reranker ?? entry.source.scoreWindows;
+      if (!scorer || reserved >= MAX_WINDOWS_PER_QUESTION || audit.timedOut) continue;
+      const windows = seatWindows(entry, Math.min(MAX_WINDOWS_PER_SEAT, MAX_WINDOWS_PER_QUESTION - reserved));
+      if (!windows.length) continue;
+      reserved += windows.length;
+      const group = groups.get(scorer) ?? [];
+      group.push({ seat, windows });
+      groups.set(scorer, group);
+    }
+    // Map insertion order is the first seat's order, even for interleaved stores.
+    for (const [score, group] of groups) {
+      if (audit.timedOut) break;
+      const kind: ScorerKind = reranker ? 'reranker' : 'embedding';
+      audit.scorer = kind;
+      const remaining = WINDOW_PLACEMENT_BUDGET_MS - (startedAt === undefined ? 0 : timers.now() - startedAt);
+      if (remaining <= 0) { audit.timedOut = true; break; }
+      if (lastCall[kind].ms > remaining && timers.now() - lastCall[kind].at < SLOW_SCORER_RETRY_MS) { audit.skipped = 'slow_scorer'; continue; }
       startedAt ??= timers.now();
-      const remaining = WINDOW_PLACEMENT_BUDGET_MS - (timers.now() - startedAt);
-      if (remaining <= 0) { audit.timedOut = true; audit.elapsedMs = timers.now() - startedAt; return chunks; }
-      const windows: { chunk: number; start: number; text: string }[] = [];
-      const order = [...new Set([...(source.priority ?? []), ...chunks.keys()])];
-      const eligible = order.filter((index) => {
-        const text = source.texts[index];
-        const chunk = chunks[index];
-        return chunk !== undefined && text !== undefined && text.length > chunk.length && (!byteShares || (byteShares[index] ?? 0) > 0);
-      });
-      const allowance = Math.min(MAX_WINDOWS_PER_SEAT, MAX_WINDOWS_PER_QUESTION - submittedWindows);
-      for (const chunk of eligible) {
-        const text = source.texts[chunk]!;
-        // Score at the share that will be kept, so the winning text is never clipped away.
-        const size = Math.min(WINDOW_CHARS, chunks[chunk]!.length);
-        const span = Math.max(0, text.length - size);
-        // Round up so the last window always ends at the chunk's end.
-        const count = Math.min(Math.ceil(span / WINDOW_STRIDE) + 1, allowance - windows.length - 1);
-        if (count <= 0) break;
-        // Today's word clip is scored first and wins ties, so placement never
-        // drops evidence it did not evaluate.
-        windows.push({ chunk, start: KEEP_ORIGINAL, text: cut(chunks[chunk]!, chunk) });
-        for (let n = 0; n < count; n++) {
-          const start = count === 1 ? 0 : Math.round((n * span) / (count - 1));
-          windows.push({ chunk, start, text: cut(sourceIndexChunkWindow(text, start, size), chunk) });
-        }
-      }
-      if (!windows.length) return chunks;
-      audit.seats++;
-      submittedWindows += windows.length;
-      audit.scorer = reranker ? 'reranker' : 'embedding';
+      const windows = group.flatMap(entry => entry.windows);
+      audit.seats += group.length;
+      audit.windowsSubmitted += windows.length;
       const controller = new AbortController();
+      const callStartedAt = timers.now();
+      const call: WindowPlacementAudit['calls'][number] = { windows: windows.length, ms: 0, outcome: 'failed' };
+      audit.calls.push(call);
       let timer: unknown;
       const expired = Symbol('expired');
       const timeout = new Promise<typeof expired>(resolve => {
         timer = timers.setTimeout(() => { resolve(expired); controller.abort(); }, remaining);
       });
+      // Measure the underlying call, not the race: overload may only become
+      // known after this question has already returned at its deadline.
+      const scoring = Promise.resolve().then(() => score(query, windows.map(window => window.text), controller.signal))
+        .finally(() => { lastCall[kind] = { ms: Math.max(0, timers.now() - callStartedAt), at: timers.now() }; });
       try {
-        const scores = await Promise.race([Promise.resolve().then(() => score(query, windows.map(window => window.text), controller.signal)), timeout]);
+        const scores = await Promise.race([scoring, timeout]);
         // A synchronous scorer can consume the deadline before the timer runs.
         if (scores === expired || timers.now() - startedAt >= WINDOW_PLACEMENT_BUDGET_MS) {
           audit.timedOut = true;
+          call.outcome = 'timed_out';
           controller.abort();
-          return chunks;
+          continue;
         }
-        if (scores.length !== windows.length || scores.some(value => !Number.isFinite(value))) return chunks;
+        if (scores.length !== windows.length || scores.some(value => !Number.isFinite(value))) continue;
+        call.outcome = 'scored';
         audit.windowsScored += windows.length;
-        const best = new Map<number, number>();
-        windows.forEach((window, index) => {
-          const previous = best.get(window.chunk);
-          if (previous === undefined || scores[index]! > scores[previous]!) best.set(window.chunk, index);
-        });
-        return chunks.map((chunk, index) => {
-          const picked = best.get(index);
-          const start = picked === undefined ? KEEP_ORIGINAL : windows[picked]!.start;
-          if (start === KEEP_ORIGINAL) return chunk;
-          // Widening to the share can pull a late window's start back, and the
-          // byte clip then keeps the front; keep the scored window itself then.
-          const widened = cut(sourceIndexChunkWindow(source.texts[index]!, start, chunk.length), index);
-          const scored = windows[picked!]!.text;
-          return widened.includes(scored) ? widened : scored;
-        });
+        let offset = 0;
+        for (const entry of group) {
+          results[entry.seat] = applyWindows(seats[entry.seat]!, entry.windows, scores.slice(offset, offset + entry.windows.length));
+          offset += entry.windows.length;
+        }
       } catch {
         if (timers.now() - startedAt >= WINDOW_PLACEMENT_BUDGET_MS) {
           audit.timedOut = true;
+          call.outcome = 'timed_out';
           controller.abort();
         }
-        return chunks;
       } finally {
         timers.clearTimeout(timer);
+        call.ms = Math.max(0, timers.now() - callStartedAt);
         audit.elapsedMs = Math.max(0, timers.now() - startedAt);
       }
+    }
+    return results;
+  }
+  return {
+    audit,
+    placeAll,
+    async place(chunks: readonly string[], source: EvidenceWindowSource, reranker?: WindowScorer, byteShares?: readonly number[]): Promise<readonly string[]> {
+      return (await placeAll([{ chunks, source, ...(byteShares ? { byteShares } : {}) }], reranker))[0]!;
     },
   };
+}
+
+function seatWindows({ chunks, source, byteShares }: EvidenceWindowSeat, allowance: number) {
+  const cut = (text: string, index: number) => byteShares ? utf8Prefix(text, byteShares[index] ?? 0) : text;
+  const windows: { chunk: number; start: number; text: string }[] = [];
+  const order = [...new Set([...(source.priority ?? []), ...chunks.keys()])];
+  const eligible = order.filter((index) => {
+    const text = source.texts[index];
+    const chunk = chunks[index];
+    return chunk !== undefined && text !== undefined && text.length > chunk.length && (!byteShares || (byteShares[index] ?? 0) > 0);
+  });
+  for (const chunk of eligible) {
+    const text = source.texts[chunk]!;
+    // Score at the share that will be kept, so the winning text is never clipped away.
+    const size = Math.min(WINDOW_CHARS, chunks[chunk]!.length);
+    const span = Math.max(0, text.length - size);
+    // Round up so the last window always ends at the chunk's end.
+    const count = Math.min(Math.ceil(span / WINDOW_STRIDE) + 1, allowance - windows.length - 1);
+    if (count <= 0) break;
+    // The word clip is scored first and wins ties.
+    windows.push({ chunk, start: KEEP_ORIGINAL, text: cut(chunks[chunk]!, chunk) });
+    for (let n = 0; n < count; n++) {
+      const start = count === 1 ? 0 : Math.round((n * span) / (count - 1));
+      windows.push({ chunk, start, text: cut(sourceIndexChunkWindow(text, start, size), chunk) });
+    }
+  }
+  return windows;
+}
+
+function applyWindows({ chunks, source, byteShares }: EvidenceWindowSeat, windows: ReturnType<typeof seatWindows>, scores: readonly number[]): readonly string[] {
+  const best = new Map<number, number>();
+  windows.forEach((window, index) => {
+    const previous = best.get(window.chunk);
+    if (previous === undefined || scores[index]! > scores[previous]!) best.set(window.chunk, index);
+  });
+  return chunks.map((chunk, index) => {
+    const picked = best.get(index);
+    const start = picked === undefined ? KEEP_ORIGINAL : windows[picked]!.start;
+    if (start === KEEP_ORIGINAL) return chunk;
+    // Widening to the share can pull a late window's start back, and the
+    // byte clip then keeps the front; keep the scored window itself then.
+    const widened = sourceIndexChunkWindow(source.texts[index]!, start, chunk.length);
+    const kept = byteShares ? utf8Prefix(widened, byteShares[index] ?? 0) : widened;
+    const scored = windows[picked!]!.text;
+    return kept.includes(scored) ? kept : scored;
+  });
 }
 
 // The longest prefix of text within maxBytes of UTF-8, never splitting a code point.
