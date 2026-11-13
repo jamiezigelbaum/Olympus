@@ -1,9 +1,19 @@
 import './provider-credit-status.ts';
 import '../workers/classification/sniffer-resolver.ts';
 import { limitStopReference, registeredLimits } from './limit-stops.ts';
-import { withOwnerLimitStore, saveJudgeCallOverride } from './owner-limit-state.ts';
+import { withOwnerLimitStore, saveJudgeCallOverride, ownerLimitStopHooks } from './owner-limit-state.ts';
 import { recheckVeniceCredit, type FetchVeniceCreditStatusOptions } from './provider-credit-status.ts';
 import { OperationError } from './operation-error.ts';
+
+/** A run_once subject is a scheduler identity; the operator sync names the source. */
+export function limitRunOnceSource(subject: string): string {
+  let identity: unknown;
+  try { identity = JSON.parse(subject); } catch { throw new OperationError('invalid_params', 'This stop has no scheduler identity.'); }
+  if (!Array.isArray(identity) || identity.length !== 3 || !identity.every(part => typeof part === 'string')) throw new OperationError('invalid_params', 'Invalid scheduler stop subject.');
+  const source = ({ 'x.bookmarks': 'x', 'readwise.library': 'readwise', 'gmail.email': 'gmail', 'google_drive.docs': 'google-drive' } as Record<string, string>)[identity[0]!];
+  if (!source) throw new OperationError('invalid_params', 'This source has no run-once action.');
+  return source;
+}
 
 export interface OwnerLimitsDependencies {
   now?: () => Date;
@@ -12,7 +22,10 @@ export interface OwnerLimitsDependencies {
   wake?: () => void;
 }
 
-/** The one owner operation: the CLI, local MCP and Home all call this handler. */
+/**
+ * The one owner operation. It runs in the engine (Bun, beside the stores); the
+ * CLI, local MCP and Home reach it through the worker's /limits route.
+ */
 export async function ownerLimits(params: Record<string, unknown>, deps: OwnerLimitsDependencies = {}) {
   const now = deps.now?.() ?? new Date();
   const action = params.action ?? 'list';
@@ -40,7 +53,7 @@ export async function ownerLimits(params: Record<string, unknown>, deps: OwnerLi
       status_message: params.keep === true ? 'Daily call limit raised for good. Judging can continue.' : 'Call limit raised for this UTC day. Judging can continue.' };
   }
   if (registration.continue === 'refill' && stop.id === 'venice.credit') {
-    const resumed = await recheckVeniceCredit(stop.subject, deps.credit);
+    const resumed = await recheckVeniceCredit(stop.subject, deps.credit, ownerLimitStopHooks);
     if (resumed) {
       withOwnerLimitStore(store => store.clearLimitStop(stop.id, stop.subject));
       deps.wake?.();

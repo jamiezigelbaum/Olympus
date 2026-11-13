@@ -1,4 +1,3 @@
-import { ownerLimits } from './owner-limits.ts';
 import { ANSWER_RELEASE_UNVERIFIED, withheldSourceAnswer } from './release-manifest.ts';
 import { DelphiClient } from './delphi.ts';
 import { noteLocalAgentAnswer } from './app-release-agent.ts';
@@ -243,10 +242,8 @@ export const operations: Operation[] = [
     },
     mutating: true,
     cliHints: { name: 'limits', positional: ['action', 'id'] },
-    handler: async (ctx, params) => ownerLimits(params, {
-      runOnce: subject => ctx.email.limitRunOnce(subject),
-      credit: { env: { ...process.env, ...ctx.config.worker.creditMonitor.credentials } },
-    }),
+    // The stops live in the engine's Bun store, so the engine runs it (owner-limits.ts).
+    handler: async (ctx, params) => ctx.email.ownerLimits(params),
   },
   {
     name: 'argus_ping',

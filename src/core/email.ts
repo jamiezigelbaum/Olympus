@@ -44,6 +44,8 @@ const PASSTHROUGH_EMAIL_WORKER_ERROR_CODES: ReadonlyMap<string, OperationErrorCo
   ['not_personal', 'not_personal'],
   ['unsupported_filter', 'unsupported_filter'],
   ['invalid_request', 'invalid_request'],
+  // olympus_limits refusals (owner-limits.ts) carry no source content.
+  ['invalid_params', 'invalid_params'],
   ['source_index_policy_violation', 'source_index_policy_violation'],
 ]);
 
@@ -470,15 +472,17 @@ export class EmailClient {
     });
   }
 
-  /** Owner run_once uses the existing operator sync path; usage is still counted. */
-  async limitRunOnce(subject: string): Promise<unknown> {
-    let identity: unknown;
-    try { identity = JSON.parse(subject); } catch { throw new OperationError('invalid_params', 'This stop has no scheduler identity.'); }
-    if (!Array.isArray(identity) || identity.length !== 3 || !identity.every(part => typeof part === 'string')) throw new OperationError('invalid_params', 'Invalid scheduler stop subject.');
-    const source = ({ 'x.bookmarks': 'x', 'readwise.library': 'readwise', 'gmail.email': 'gmail', 'google_drive.docs': 'google-drive' } as Record<string, string>)[identity[0]!];
-    if (!source) throw new OperationError('invalid_params', 'This source has no run-once action.');
-    return this.transport.requestJson(`${this.config.email.baseUrl.replace(/\/v1\/?$/, '')}/dashboard/sync-now`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source }),
+  /**
+   * olympus_limits: the stops live in the engine's Bun store, so the engine
+   * lists and continues them (owner-limits.ts). Refusals arrive as errors.
+   */
+  async ownerLimits(params: Record<string, unknown>): Promise<unknown> {
+    if (!this.config.email.enabled) {
+      throw new OperationError('email_not_configured', 'Private source worker is disabled.',
+        'Run olympus setup, then olympus worker install, to bring the private source worker up before continuing stopped work.');
+    }
+    return this.transport.requestJson(`${this.config.email.baseUrl}/limits`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params),
     });
   }
 

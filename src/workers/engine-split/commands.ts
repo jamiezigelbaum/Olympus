@@ -81,6 +81,8 @@ export const ENGINE_FORWARDED_ROUTES = {
   // The CLI's export (and so its backup): the background takes the snapshots
   // on the writer's own loop, between its writes (#1224).
   data_export: ['/v1/cli/data-export'],
+  // olympus_limits: stops sit in the scheduler store, and a continue wakes the judge or runs a sync (owner-limits.ts).
+  owner_limits: ['/v1/limits'],
   // The background runs source watches' passes and owns their store.
   source_watch: ['/v1/source/watch/create', '/v1/source/watch/cancel'],
   // The extraction queue's writes, under the generic path or a family's alias.
@@ -392,6 +394,7 @@ export function parseEngineCommandEnvelope(value: unknown): EngineCommandEnvelop
     case 'people':
     case 'source_sync':
     case 'data_export':
+    case 'owner_limits':
     {
       const frontPid = command!.frontPid;
       if (frontPid !== undefined && (kind !== 'delete_source_data' || !Number.isSafeInteger(frontPid) || (frontPid as number) <= 0)) fail('frontPid is a process id, carried by a delete.');

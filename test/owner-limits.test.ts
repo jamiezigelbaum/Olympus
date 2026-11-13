@@ -3,10 +3,12 @@ import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { ownerLimits } from '../src/core/owner-limits.ts';
+import { ownerLimits, limitRunOnceSource } from '../src/core/owner-limits.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { ownerLimitSettingsPath, readJudgeCallOverride, saveJudgeCallOverride, withOwnerLimitStore } from '../src/core/owner-limit-state.ts';
 import { LocalSourceSchedulerStateStore } from '../src/workers/source-scheduler-state.ts';
 import { buildBalanceReport, reconcileProviderPauseFile, startVeniceCreditRecovery } from '../src/core/provider-credit-status.ts';
+import { ownerLimitStopHooks } from '../src/core/owner-limit-state.ts';
 import { SnifferCallBudget, runSnifferPass } from '../src/workers/classification/sniffer-resolver.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
@@ -42,8 +44,16 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 const stops = (now: Date) => withOwnerLimitStore(store => store.openLimitStops(now));
 const lane: SnifferLane = { kind: 'local', modelId: 'fixture', profileId: 'fixture', profile: { provider: 'local-openai-compatible', trust: 'local', baseUrl: 'http://127.0.0.1:1/v1', model: 'fixture' } };
 
+/** The plugin's EmailClient reaches a real worker route, which runs the shared handler beside the store. */
 function context() {
-  return { config: defaultConfig(), email: new EmailClient(defaultConfig()), delphi: new DelphiClient(defaultConfig()) };
+  const config = { ...defaultConfig(), email: { ...defaultConfig().email, enabled: true, baseUrl: 'http://worker.test/v1' } };
+  const worker = createEmailSourceWorker({ ownerLimits: params => ownerLimits(params) });
+  const email = new EmailClient(config, { requestJson: async (url, init) => {
+    const response = await worker.fetch(new Request(url, init));
+    if (!response.ok) throw new Error(`worker answered ${response.status}`);
+    return response.json();
+  } });
+  return { config, email, delphi: new DelphiClient(config) };
 }
 function emptyView(): SourceDashboardViewModel {
   return { kind: 'source_dashboard', sources: [], generated_at: '2026-11-12T23:59:59Z', summary: {},
@@ -119,7 +129,7 @@ test('a temporary override wins over the environment cap including decision-mode
 
 test('Venice marker -> stop -> owner refill proves billing canConsume and clears without restarting', async () => {
   const time = clock(); const path = join(scratch(), 'venice.json');
-  reconcileProviderPauseFile(path, buildBalanceReport(time.date(), { canConsume: false, balances: { usd: 100 } }));
+  reconcileProviderPauseFile(path, buildBalanceReport(time.date(), { canConsume: false, balances: { usd: 100 } }), ownerLimitStopHooks);
   expect(stops(time.date())).toHaveLength(1);
   let canConsume = false; let wakes = 0;
   const credit = { env: { VENICE_API_KEY: 'never-print-this-key' }, fetchImpl: async (url: string) => {
@@ -140,9 +150,9 @@ test('Venice marker -> stop -> owner refill proves billing canConsume and clears
 
 test('bounded automatic Venice re-check resumes an external refill, and shutdown fences late probes', async () => {
   const time = clock(); const path = join(scratch(), 'venice.json');
-  reconcileProviderPauseFile(path, buildBalanceReport(time.date(), { canConsume: false }));
+  reconcileProviderPauseFile(path, buildBalanceReport(time.date(), { canConsume: false }), ownerLimitStopHooks);
   let canConsume = false; let probes = 0; let wakes = 0;
-  const stop = startVeniceCreditRecovery({ paths: () => [path], onResume: () => wakes++,
+  const stop = startVeniceCreditRecovery({ paths: () => [path], stops: ownerLimitStopHooks, onResume: () => wakes++,
     probe: async () => { probes++; return buildBalanceReport(time.date(), { canConsume }); },
     schedule: (run, ms) => time.setTimeout(run, ms) as unknown as ReturnType<typeof setTimeout>,
     cancel: timer => time.clearTimeout(timer as unknown as ReturnType<typeof time.setTimeout>),
@@ -183,7 +193,7 @@ test('Home Raise and Refill buttons call the shared operation; local tools list 
   const time = clock();
   new SnifferCallBudget({ maxCallsPerDay: 0, now: time.date }).tryConsume();
   const path = join(scratch(), 'venice.json');
-  reconcileProviderPauseFile(path, buildBalanceReport(time.date(), { canConsume: false }));
+  reconcileProviderPauseFile(path, buildBalanceReport(time.date(), { canConsume: false }), ownerLimitStopHooks);
   const model = copyDashboardViewModel(buildChatGptDashboardViewModel(emptyView(), { now: time.date(), limitStops: stops(time.date()) }));
   const raise = model.waits!.find(row => row.fix?.args?.id === 'judge.daily_calls')!;
   const refill = model.waits!.find(row => row.fix?.args?.id === 'venice.credit')!;
@@ -223,12 +233,26 @@ test('CLI lists units, waiting work, times and actions, then continues by id wit
   expect(findOperationByName('olympus_limits')!.cliHints.name).toBe('limits');
 });
 
-test('run_once reaches the existing operator sync endpoint', async () => {
+test('the plugin reaches limits through the worker, and run_once names the operator sync source', async () => {
   let requested: string | undefined; let body: unknown;
-  const client = new EmailClient({ ...defaultConfig(), email: { ...defaultConfig().email, baseUrl: 'http://worker.test/v1' } }, { requestJson: async (url, init) => { requested = url; body = JSON.parse(String(init.body)); return { status: 'checking' }; } });
-  await client.limitRunOnce(JSON.stringify(['gmail.email', 'internal.gmail', 'pull']));
-  expect(requested).toBe('http://worker.test/dashboard/sync-now');
-  expect(body).toEqual({ source: 'gmail' });
+  const client = new EmailClient({ ...defaultConfig(), email: { ...defaultConfig().email, enabled: true, baseUrl: 'http://worker.test/v1' } }, { requestJson: async (url, init) => { requested = url; body = JSON.parse(String(init.body)); return { stops: [] }; } });
+  await client.ownerLimits({ action: 'list' });
+  expect(requested).toBe('http://worker.test/v1/limits');
+  expect(body).toEqual({ action: 'list' });
+  expect(limitRunOnceSource(JSON.stringify(['gmail.email', 'internal.gmail', 'pull']))).toBe('gmail');
+  expect(() => limitRunOnceSource(JSON.stringify(['local.files', 'internal.files', 'pull']))).toThrow('no run-once action');
+});
+
+test('a marker the Node plugin wrote alone is reported as a stop by the engine marker check', () => {
+  const time = clock(); const path = join(scratch(), 'venice.json');
+  reconcileProviderPauseFile(path, buildBalanceReport(time.date(), { canConsume: false }));
+  expect(stops(time.date())).toEqual([]);
+  const stop = startVeniceCreditRecovery({ paths: () => [], markers: () => [path], stops: ownerLimitStopHooks, markerCheckMs: 60_000,
+    schedule: (run, ms) => time.setTimeout(run, ms) as unknown as ReturnType<typeof setTimeout>,
+    cancel: timer => time.clearTimeout(timer as unknown as ReturnType<typeof time.setTimeout>),
+  });
+  expect(stops(time.date()).map(open => [open.id, open.subject])).toEqual([['venice.credit', path]]);
+  stop(); expect(time.pendingTimers()).toBe(0);
 });
 
 

@@ -1,5 +1,5 @@
 import { registerLimit } from './limit-stops.ts';
-import { clearOwnerLimitStop, recordOwnerLimitStop, withOwnerLimitStore } from './owner-limit-state.ts';
+import type { LimitStop } from './limit-stops.ts';
 
 import { fetchModelEndpoint } from './model-transport.ts';
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from 'node:fs';
@@ -547,32 +547,50 @@ function writeProviderPause(path: string, report: VeniceCreditStatusReport): voi
   }, null, 2)}\n`);
 }
 
-export function reconcileProviderPauseFile(path: string, report: VeniceCreditStatusReport): 'written' | 'cleared' | 'left' {
+/**
+ * Where reported stops are kept. The store is Bun-only, so only the engine
+ * passes these; the Node plugin's monitor writes the marker alone and the
+ * engine's marker check reports it (startVeniceCreditRecovery).
+ */
+export interface LimitStopHooks {
+  record(stop: LimitStop): void;
+  clear(id: string, subject: string): void;
+}
+
+export function veniceCreditStop(path: string, since: string): LimitStop {
+  return { id: 'venice.credit', subject: path, since, limit: null, used: null };
+}
+
+export function reconcileProviderPauseFile(path: string, report: VeniceCreditStatusReport, stops?: LimitStopHooks): 'written' | 'cleared' | 'left' {
   if (report.can_consume === false) {
     writeProviderPause(path, report);
-    recordOwnerLimitStop({ id: 'venice.credit', subject: path, since: report.generated_at, limit: null, used: null });
+    stops?.record(veniceCreditStop(path, report.generated_at));
     return 'written';
   }
   if (report.status === 'ok' && report.can_consume === true && isVeniceProviderPauseFile(path)) {
     unlinkSync(path);
-    clearOwnerLimitStop('venice.credit', path);
+    stops?.clear('venice.credit', path);
     return 'cleared';
   }
   // A crash after unlink, or an externally removed marker, must not leave a phantom stop.
-  if (report.status === 'ok' && report.can_consume === true && !existsSync(path)) clearOwnerLimitStop('venice.credit', path);
+  if (report.status === 'ok' && report.can_consume === true && !existsSync(path)) stops?.clear('venice.credit', path);
   return 'left';
 }
 
 /** A refill is proved by the official billing authority, never inferred from a balance amount. */
-export async function recheckVeniceCredit(path: string, options: FetchVeniceCreditStatusOptions = {}): Promise<boolean> {
+export async function recheckVeniceCredit(path: string, options: FetchVeniceCreditStatusOptions = {}, stops?: LimitStopHooks): Promise<boolean> {
   const report = await fetchVeniceCreditStatus({ ...options, baseUrl: VENICE_BILLING_BASE_URL, balanceOnly: true });
-  reconcileProviderPauseFile(path, report);
+  reconcileProviderPauseFile(path, report, stops);
   return report.status === 'ok' && report.can_consume === true;
 }
 
 /** Non-overlapping bounded retries; stop cancels the probe and fences late writes. */
 export function startVeniceCreditRecovery(options: {
   paths: () => string[];
+  stops?: LimitStopHooks;
+  /** Marker files another process may write; a Venice one is reported as a stop every markerCheckMs. */
+  markers?: () => string[];
+  markerCheckMs?: number;
   probe?: (signal: AbortSignal) => Promise<VeniceCreditStatusReport>;
   onResume?: () => void;
   schedule?: (run: () => void, ms: number) => ReturnType<typeof setTimeout>;
@@ -588,22 +606,27 @@ export function startVeniceCreditRecovery(options: {
       if (paths.length) {
         const report = await (options.probe?.(controller.signal) ?? fetchVeniceCreditStatus({ baseUrl: VENICE_BILLING_BASE_URL, signal: controller.signal, balanceOnly: true }));
         if (controller.signal.aborted) return;
-        for (const path of paths) reconcileProviderPauseFile(path, report);
+        for (const path of paths) reconcileProviderPauseFile(path, report, options.stops);
         if (report.can_consume === true) options.onResume?.();
       }
     } catch { /* Keep the last proved state; the next bounded tick retries. */ }
     finally { if (!controller.signal.aborted) timer = schedule(() => { void tick(); }, 15 * 60_000); }
   };
+  let markerTimer: ReturnType<typeof setTimeout> | undefined;
+  const checkMarkers = (): void => {
+    try {
+      for (const path of options.markers?.() ?? []) {
+        if (isVeniceProviderPauseFile(path)) options.stops?.record(veniceCreditStop(path, new Date().toISOString()));
+      }
+    } catch { /* The next check retries. */ }
+    finally { if (!controller.signal.aborted) markerTimer = schedule(checkMarkers, options.markerCheckMs ?? 60_000); }
+  };
+  if (options.markers && options.stops) checkMarkers();
   void tick();
-  return () => { controller.abort(); if (timer) cancel(timer); };
+  return () => { controller.abort(); if (timer) cancel(timer); if (markerTimer) cancel(markerTimer); };
 }
 
-/** Marker identities are persisted, so recovery also survives an engine restart. */
-export function openVeniceCreditPausePaths(): string[] {
-  return withOwnerLimitStore(store => store.openLimitStops().filter(stop => stop.id === 'venice.credit').map(stop => stop.subject));
-}
-
-function isVeniceProviderPauseFile(path: string): boolean {
+export function isVeniceProviderPauseFile(path: string): boolean {
   if (!existsSync(path)) return false;
   try {
     const raw = JSON.parse(readFileSync(path, 'utf8')) as { kind?: unknown };

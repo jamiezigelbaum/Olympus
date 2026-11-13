@@ -1,4 +1,4 @@
-/** Content-free owner settings and stops, shared by workers and owner surfaces. */
+/** Content-free owner settings and stops. Bun-only (the scheduler store): workers and the engine import it, the Node plugin never does. */
 import { readFileSync, mkdirSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
@@ -49,4 +49,11 @@ export function recordOwnerLimitStop(stop: LimitStop): void {
 export function clearOwnerLimitStop(id: string, subject: string): void {
   if (!existsSync(defaultSourceSchedulerStateDbPath())) return;
   withOwnerLimitStore(store => store.clearLimitStop(id, subject));
+}
+/** Worker-only: the scheduler store is Bun's, so the Node plugin never imports this module. */
+export const ownerLimitStopHooks = { record: recordOwnerLimitStop, clear: clearOwnerLimitStop };
+
+/** Marker identities are persisted, so recovery also survives an engine restart. */
+export function openVeniceCreditPausePaths(): string[] {
+  return withOwnerLimitStore(store => store.openLimitStops().filter(stop => stop.id === 'venice.credit').map(stop => stop.subject));
 }
