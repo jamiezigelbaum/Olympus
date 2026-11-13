@@ -3,6 +3,8 @@
 // a picture) and reads back vectors. One request is in flight at a time; the
 // provider already runs one forward pass at a time.
 
+import { isMainThread } from 'node:worker_threads';
+import { modelThread, modelThreadHandleId, type ModelThreadFailure } from '../built-in-reasoning/off-thread.ts';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { closeSync, constants, existsSync, fstatSync, openSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -298,6 +300,30 @@ class HelperProcess {
  * back on the CPU, whose vectors match the GPU's (cosine 0.9996, M3).
  */
 export async function startLiteRtEmbedder(options: LiteRtEmbedderOptions): Promise<LiteRtEmbedder> {
+  // The native engine already lives in a helper, but spawning/restarting that
+  // helper can itself block. Keep its lifecycle on the model thread as well.
+  if (isMainThread && !options.gpuAvailable) {
+    const handle = modelThreadHandleId();
+    let state = await modelThread().call<{ device: LiteRtDevice; vision: boolean }>({ kind: 'litert-start', handle, options });
+    return {
+      get device() { return state.device; },
+      get vision() { return state.vision; },
+      async embed(items) {
+        try {
+          const result = await modelThread().call<{ device: LiteRtDevice; vision: boolean; vectors: Float32Array[] }>({ kind: 'litert-run', handle, items });
+          state = result;
+          return result.vectors;
+        } catch (error) {
+          const failure = error as Error & ModelThreadFailure;
+          if (failure.device !== undefined && failure.vision !== undefined) state = { device: failure.device, vision: failure.vision };
+          if (failure.name === 'LiteRtImagesUnavailableError') throw new LiteRtImagesUnavailableError(failure.indexes ?? []);
+          if (failure.name === 'LiteRtPictureEngineFaultError') throw new LiteRtPictureEngineFaultError(failure.message);
+          throw error;
+        }
+      },
+      async release() { await modelThread().call({ kind: 'litert-release', handle }); },
+    };
+  }
   let device: 'auto' | 'cpu' = options.device === 'auto' && process.platform === 'linux'
     && !(options.gpuAvailable ?? linuxGpuAvailable)() ? 'cpu' : options.device;
   let helper: HelperProcess;

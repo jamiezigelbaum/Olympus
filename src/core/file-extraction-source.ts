@@ -99,6 +99,10 @@ export const FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS: Readonly<
 
 export interface FileExtractionSourceErrorOptions {
   /**
+   * Actual content-free byte size learned at the refusal boundary.
+   */
+  sizeBytes?: number;
+  /**
    * Content-free fingerprint grouping identical provider failures. Supply the
    * provider's own failure detail and it is hashed here; the detail itself is
    * never retained on the error, so it cannot leak into a log line or a job
@@ -128,6 +132,7 @@ export class FileExtractionSourceError extends Error {
   readonly retryable: boolean;
   readonly errorHash?: string;
   readonly retryAt?: string;
+  readonly sizeBytes?: number;
 
   constructor(errorKind: FileExtractionSourceErrorKind, options: FileExtractionSourceErrorOptions = {}) {
     super(errorKind);
@@ -139,6 +144,7 @@ export class FileExtractionSourceError extends Error {
       ? undefined
       : createHash('sha256').update(options.detailForHash).digest('hex').slice(0, ERROR_HASH_CHARS);
     if (errorHash) this.errorHash = errorHash;
+    if (options.sizeBytes !== undefined && Number.isSafeInteger(options.sizeBytes) && options.sizeBytes >= 0) this.sizeBytes = options.sizeBytes;
     if (options.retryAt !== undefined && Number.isFinite(Date.parse(options.retryAt))) this.retryAt = options.retryAt;
   }
 }

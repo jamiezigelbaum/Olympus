@@ -13,6 +13,7 @@ import {
   SOURCE_RERANKER_POOL_ENV,
   SOURCE_RERANKER_MAX_TOKENS_ENV,
 } from '../src/workers/source-index/built-in-reranker.ts';
+import { DEFAULT_RERANK_POOL_SIZE } from '../src/core/evidence-reranker.ts';
 import { BUILT_IN_RERANKER_MODELS, MS_MARCO_MINILM_L6_V2, MMARCO_MMINILMV2_L12_H384_V1 } from '../src/workers/source-index/built-in-reranker-manifest.ts';
 import type { EmbeddingBatch, EmbeddingRuntime, EmbeddingSession } from '../src/workers/source-index/built-in-embedding/runtime.ts';
 
@@ -154,7 +155,7 @@ describe('built-in reranker model loading', () => {
 });
 
 describe('default activation and idle release', () => {
-  test('installed default uses injected memory, pool 24 and 256 pair tokens', async () => {
+  test('installed default uses injected memory, the default pool and 256 pair tokens', async () => {
     const root = modelDirectory();
     const dir = join(root, 'reranker', MMARCO_MMINILMV2_L12_H384_V1.modelId);
     mkdirSync(dir, { recursive: true });
@@ -166,7 +167,7 @@ describe('default activation and idle release', () => {
       return { data: new Float32Array(batch.batchSize), dims: [batch.batchSize, 1] };
     } }) };
     const reranker = builtInRerankerFromEnv({ env, totalmem: () => 16 * 1024 ** 3, runtime });
-    expect(reranker?.poolSize).toBe(24);
+    expect(reranker?.poolSize).toBe(DEFAULT_RERANK_POOL_SIZE);
     expect(reranker?.localOnly).toBe(true);
     await reranker!.score({ ...request(), passages: [Array(1000).fill('hello').join(' ')] });
     expect(tokens).toBe(256);
@@ -191,7 +192,7 @@ describe('default activation and idle release', () => {
     mkdirSync(dir, { recursive: true });
     for (const name of ['model.onnx', 'tokenizer.json']) writeFileSync(join(dir, name), readFileSync(join(root, name)));
     const found = current();
-    expect(found?.poolSize).toBe(24);
+    expect(found?.poolSize).toBe(DEFAULT_RERANK_POOL_SIZE);
     expect(current()).toBe(found);
     await flushMicrotasks();
     await found!.prepare();
@@ -208,10 +209,10 @@ describe('default activation and idle release', () => {
     mkdirSync(dir, { recursive: true });
     for (const name of ['model.onnx', 'tokenizer.json']) writeFileSync(join(dir, name), readFileSync(join(root, name)));
     const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: root };
-    const current = createBuiltInRerankerResolver({ env, totalmem: () => 16 * 1024 ** 3 }, () => undefined);
-    expect(current()).toBeUndefined();
+    // Checked without prepare(): loading would start the shared model thread.
+    expect(builtInRerankerFromEnv({ env, totalmem: () => 16 * 1024 ** 3 })).toBeUndefined();
     markBuiltInOnnxRuntimeInstalled(env);
-    expect(current()).toBeDefined();
+    expect(builtInRerankerFromEnv({ env, totalmem: () => 16 * 1024 ** 3 })).toBeDefined();
   });
 
   function idleFixture() {

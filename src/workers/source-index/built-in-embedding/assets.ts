@@ -1,4 +1,6 @@
 import { MMARCO_MMINILMV2_L12_H384_V1, type BuiltInRerankerModelSpec } from '../built-in-reranker-manifest.ts';
+import { isMainThread } from 'node:worker_threads';
+import { modelThread } from '../built-in-reasoning/off-thread.ts';
 import { downloadPinnedFile } from '../pinned-download.ts';
 import { sharedDataPath } from '../../../core/olympus-layout.ts';
 // Fetches, verifies and installs the built-in embedding model and its runtime
@@ -187,6 +189,21 @@ export function readBuiltInEmbeddingStatus(
 }
 
 /**
+ * The built-in reranker's install status, for health: the runtime pack or
+ * model downloading, ready, or failed with its reason. Never throws.
+ */
+export function readBuiltInRerankerStatus(
+  env: Record<string, string | undefined> = process.env,
+  model: BuiltInRerankerModelSpec = MMARCO_MMINILMV2_L12_H384_V1,
+): BuiltInEmbeddingStatus {
+  try {
+    const parsed = JSON.parse(readFileSync(join(builtInEmbeddingPaths(env).root, 'reranker-status.json'), 'utf8')) as BuiltInEmbeddingStatus;
+    if (parsed && typeof parsed === 'object' && parsed.modelId === model.modelId) return parsed;
+  } catch { /* not started */ }
+  return { state: 'not_started', modelId: model.modelId, percent: 0, label: 'Built-in reranker not downloaded yet', bytesDone: 0, bytesTotal: 0, updatedAt: new Date(0).toISOString() };
+}
+
+/**
  * Whether the model's image encoder started the last time the model loaded:
  * `ready`, `unavailable` (it started text-only, so no picture can be read), or
  * `unknown` (never loaded, or nothing recorded for this model). Never throws.
@@ -246,6 +263,19 @@ export function reportBuiltInEmbeddingVision(
 export async function installBuiltInEmbedding(
   options: BuiltInEmbeddingInstallerOptions = {},
 ): Promise<InstalledBuiltInEmbedding> {
+  // Production installs carry data and a progress listener. Archive inflation,
+  // checksums and recursive replacement belong beside the other model installs.
+  const { onProgress, ...serializable } = options;
+  if (isMainThread && !Object.values(serializable).some(value => typeof value === 'function')) {
+    try {
+      return await modelThread().call<InstalledBuiltInEmbedding>({
+        kind: 'embedding-install', options: { ...serializable, env: options.env ?? process.env },
+      }, { embeddingProgress: onProgress });
+    } catch (error) {
+      const failure = error as Error & { reason?: BuiltInEmbeddingFailureReason };
+      throw new BuiltInEmbeddingInstallError(failure.reason ?? 'runtime_load_failed', failure.message);
+    }
+  }
   return installEmbeddingAssets(options);
 }
 
@@ -259,6 +289,16 @@ export async function installBuiltInEmbedding(
 export async function installBuiltInReranker(
   options: BuiltInEmbeddingInstallerOptions = {},
 ): Promise<void> {
+  // The runtime pack's tar inflate and writes are synchronous: on the serving
+  // thread they stall answers (#1567), so a production install runs on the
+  // model thread, as the embedding install does.
+  const { onProgress, ...serializable } = options;
+  if (isMainThread && !Object.values(serializable).some(value => typeof value === 'function')) {
+    // The worker writes reranker-status.json; a failure there is already reported.
+    await modelThread().call<void>({ kind: 'reranker-install', options: { ...serializable, env: options.env ?? process.env } },
+      { embeddingProgress: onProgress }).catch(() => undefined);
+    return;
+  }
   const model = options.rerankerModel ?? MMARCO_MMINILMV2_L12_H384_V1;
   const paths = builtInEmbeddingPaths(options.env, options.model);
   // A separate receipt uses the same reporting mechanism without marking a

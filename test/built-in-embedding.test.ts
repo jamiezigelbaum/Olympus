@@ -19,6 +19,7 @@ import {
   installBuiltInEmbedding,
   installBuiltInReranker,
   readBuiltInEmbeddingStatus,
+  readBuiltInRerankerStatus,
   reportBuiltInEmbeddingState,
   readBuiltInEmbeddingVision,
   type BuiltInEmbeddingStatus,
@@ -278,6 +279,15 @@ describe('built-in embedding installer', () => {
     await both();
     expect(sha256(readFileSync(join(dir, 'model.onnx')))).toBe(served.reranker.model.sha256);
     expect(existsSync(join(env.OLYMPUS_BUILT_IN_EMBEDDING_DIR, 'install.lock'))).toBe(false);
+  });
+
+  test('a production reranker install runs on the model thread and reports there', async () => {
+    // No functions in the options, as the engine passes them: the install runs
+    // on the model thread, whose failure lands in reranker-status.json.
+    const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: temporaryDir() };
+    await installBuiltInReranker({ env, platform: 'plan9-x64' as never });
+    const status = JSON.parse(readFileSync(join(env.OLYMPUS_BUILT_IN_EMBEDDING_DIR, 'reranker-status.json'), 'utf8'));
+    expect(status).toMatchObject({ state: 'failed', failure: { reason: 'unsupported_platform' } });
   });
 
   test('installs the reranker when the embedding root does not exist yet', async () => {
@@ -1602,3 +1612,12 @@ function buildZip(entries: Array<{ name: string; data: string; deflate: boolean 
   }
   return out;
 }
+
+describe('reranker install status for health', () => {
+  test('not started until an install writes it, then the failure and its reason', async () => {
+    const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: mkdtempSync(join(tmpdir(), 'olympus-rr-status-')) };
+    expect(readBuiltInRerankerStatus(env).state).toBe('not_started');
+    await installBuiltInReranker({ env, platform: 'plan9-x64' as never, fetchImpl: (async () => new Response('', { status: 500 })) as unknown as typeof fetch });
+    expect(readBuiltInRerankerStatus(env)).toMatchObject({ state: 'failed', failure: { reason: 'unsupported_platform' } });
+  });
+});

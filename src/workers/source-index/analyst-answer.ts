@@ -1112,13 +1112,23 @@ function promptBudgetedAnalyst(
 
 // Floor for one candidate's passage share when fitting a pack to a lane.
 const MIN_FITTED_BYTES_PER_CANDIDATE = 600;
+// Each of the pack's first three seats that brings more than one passage
+// reads this many shares. A long document's passages arrive most likely to
+// answer first, so the second share is its second passage; at the local
+// 13,500 B prompt one share is about one passage (2026-11-12 grown passage
+// set: a top seat's answer in its second most similar passage was cut at
+// equal shares). A one-passage seat gains nothing from a second share, so
+// it keeps one and the pack keeps its seats.
+const HEAD_SEAT_SHARES = 2;
 
 /**
  * Fit a pack so the analyst's whole prompt (system rules, every candidate's
  * labels and provenance, passages, coverage) is at most maxPromptBytes of
  * UTF-8. Keeps as many candidates as can each carry a usable passage share,
  * the pack's first three seats and any recency seats first, as seated, and
- * the rest round-robin across corpora, then clips passages; the measurement is
+ * the rest round-robin across corpora, then clips passages (a first-three
+ * seat with several passages to HEAD_SEAT_SHARES shares, the rest to one);
+ * the measurement is
  * the real prompt, so labels and escaping are counted, not estimated.
  * Compact retains the full fit's seats and spends the saved header bytes on
  * their original passages; changing rendering must not widen the selection.
@@ -1179,12 +1189,12 @@ function fitPackPassagesToPromptBytes(
     ...roundRobinCandidates(pack.candidates.slice(headSeats), candidateCorpus),
   ];
   let fallback: EvidencePack | undefined;
-  // The second pass has already selected its seats. The first pass's clipped
-  // passages still fit after removing gaps, even if escaping makes the ratio
-  // correction overshoot; never shrink below their common byte share.
-  const minimumShare = minimumPack
-    ? Math.max(0, ...minimumPack.candidates.map((candidate) => candidate.chunks.reduce((sum, chunk) => sum + utf8ByteLength(chunk), 0)))
-    : 0;
+  const headSet = new Set(pack.candidates.slice(0, RESERVED_HEAD_SEATS).map((candidate) => candidate.provenance));
+  const headShares = (candidate: EvidenceCandidate) =>
+    (headSet.has(candidate.provenance) && candidate.chunks.length > 1 ? HEAD_SEAT_SHARES : 1);
+  // The extra shares never cost a seat: where they would leave a share under
+  // the floor, the same seats are tried at equal shares before one is dropped.
+  const modes = [headShares, () => 1];
   for (let keep = order.length; keep >= (minimumPack ? order.length : 1); keep -= 1) {
     const kept = new Set(order.slice(0, keep));
     const base = pack.candidates.filter((candidate) => kept.has(candidate));
@@ -1194,20 +1204,31 @@ function fitPackPassagesToPromptBytes(
       evidenceFormat,
     );
     if (overhead >= maxPromptBytes) continue;
-    let share = Math.max(minimumShare, Math.floor((maxPromptBytes - overhead) / keep));
-    for (let attempt = 0; attempt < 6; attempt += 1) {
-      if (!minimumPack && share < MIN_FITTED_BYTES_PER_CANDIDATE && keep > 1) break;
-      const fitted = restatePack(
-        pack,
-        base.map((candidate) => ({ ...candidate, chunks: clipChunksToUtf8Bytes(candidate.chunks, Math.max(0, share)) })),
-        candidateCorpus,
-      );
-      const bytes = analystPromptBytes(fitted, analyzeOptions, evidenceFormat);
-      if (bytes <= maxPromptBytes) return fitted;
-      fallback = fitted;
-      // Escaping made the passages cost more than their raw bytes; shrink by
-      // the observed ratio and measure again.
-      share = Math.max(minimumShare, Math.floor(share * (maxPromptBytes - overhead) / Math.max(1, bytes - overhead)) - 1);
+    for (const [mode, shares] of modes.entries()) {
+      if (mode > 0 && base.every((candidate) => headShares(candidate) === 1)) break;
+      // The second pass has already selected its seats. The first pass's
+      // clipped passages still fit after removing gaps, even if escaping
+      // makes the ratio correction overshoot; never shrink below their share.
+      const minimumShare = minimumPack
+        ? Math.max(0, ...minimumPack.candidates.map((candidate) =>
+          Math.ceil(candidate.chunks.reduce((sum, chunk) => sum + utf8ByteLength(chunk), 0) / shares(candidate))))
+        : 0;
+      const totalShares = base.reduce((sum, candidate) => sum + shares(candidate), 0);
+      let share = Math.max(minimumShare, Math.floor((maxPromptBytes - overhead) / totalShares));
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        if (!minimumPack && share < MIN_FITTED_BYTES_PER_CANDIDATE && keep > 1) break;
+        const fitted = restatePack(
+          pack,
+          base.map((candidate) => ({ ...candidate, chunks: clipChunksToUtf8Bytes(candidate.chunks, Math.max(0, share * shares(candidate))) })),
+          candidateCorpus,
+        );
+        const bytes = analystPromptBytes(fitted, analyzeOptions, evidenceFormat);
+        if (bytes <= maxPromptBytes) return fitted;
+        fallback = fitted;
+        // Escaping made the passages cost more than their raw bytes; shrink by
+        // the observed ratio and measure again.
+        share = Math.max(minimumShare, Math.floor(share * (maxPromptBytes - overhead) / Math.max(1, bytes - overhead)) - 1);
+      }
     }
   }
   // Nothing fits even one candidate's labels: send the smallest pack rather

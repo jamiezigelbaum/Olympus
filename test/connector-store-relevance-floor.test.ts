@@ -20,6 +20,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
+import { clipChunksToUtf8Bytes } from '../src/core/evidence-pack.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
 import { sourceIndexFtsTerms } from '../src/core/source-index/fts.ts';
 import {
@@ -217,6 +218,165 @@ describe('the private match floor', () => {
       expect(found.matched).toBe(1);
       expect(found.candidates.filter((candidate) => candidate.neighbour)).toHaveLength(4);
     }, 'secure_local');
+  });
+});
+
+describe('similarity inside a long item with word hits', () => {
+  // Six exact store windows. Word density favours 1 then 2; similarity
+  // favours 4, whose paraphrase has no query word. Chunk 0 is the anchor.
+  const openings = ['Opening', 'Dense', 'Runner', 'Lesser', 'Paraphrase', 'Closing'];
+  const wordHits = [1, 4, 3, 2, 0, 0];
+  const chunks = openings.map((opening, index) =>
+    `${opening}. ${'coverage '.repeat(wordHits[index]!)}`.padEnd(4_000, '.'));
+  const item: FixtureItem = { id: 'policy', name: 'handbook.pdf', text: chunks.join('') };
+
+  async function read(options: { similarIndex?: number; anchorChunkIndex?: number; maxPassages?: number }) {
+    let result: ReturnType<Store['localContent']>;
+    await withStore([item], async (store) => {
+      const provider = chunkCosineProvider(Object.fromEntries(openings.map((opening, index) =>
+        [`${opening}.`, index === options.similarIndex ? 0.95 : 0.4])));
+      if (options.similarIndex !== undefined) await store.embedChunks({ provider });
+      const focus = {
+        query: 'coverage',
+        ...(options.anchorChunkIndex !== undefined ? { anchorChunkIndex: options.anchorChunkIndex } : {}),
+        anchorLane: 'keyword' as const,
+        ...(options.maxPassages !== undefined ? { maxPassages: options.maxPassages } : {}),
+      };
+      // No vectors in the store must work both with a query vector and with
+      // no embedding lane at all, returning exactly the same stored bytes.
+      if (options.similarIndex === undefined) {
+        const withoutVector = store.localContent(`${ACCOUNT}:policy`, 12_000, focus);
+        expect(withoutVector?.chunks).toEqual([chunks[0]!, chunks[1]!, chunks[2]!]);
+      }
+      result = store.localContent(`${ACCOUNT}:policy`, 12_000, {
+        ...focus,
+        queryVector: [1, 0],
+        queryVectorModelId: provider.modelId,
+      });
+    });
+    return result!;
+  }
+
+  test('keeps the anchor, the most similar chunk and the densest chunk, the most similar first', async () => {
+    const content = await read({ similarIndex: 4, anchorChunkIndex: 0 });
+    expect(content.chunks).toEqual([chunks[4]!, chunks[0]!, chunks[1]!]);
+    expect(content.truncated).toBe(true);
+  });
+
+  test('without stored vectors returns exactly the existing word-only passages', async () => {
+    const content = await read({ anchorChunkIndex: 0 });
+    expect(content.chunks).toEqual([chunks[0]!, chunks[1]!, chunks[2]!]);
+  });
+
+  test('when similarity picks the anchor, word density fills the remaining seats without duplicates', async () => {
+    const content = await read({ similarIndex: 0, anchorChunkIndex: 0 });
+    expect(content.chunks).toEqual([chunks[0]!, chunks[1]!, chunks[2]!]);
+  });
+
+  test('a one-passage limit keeps the anchor', async () => {
+    const content = await read({ similarIndex: 4, anchorChunkIndex: 0, maxPassages: 1 });
+    expect(content.chunks).toEqual([chunks[0]!]);
+  });
+
+  test('a one-passage limit with no anchor keeps the most similar chunk', async () => {
+    const content = await read({ similarIndex: 4, maxPassages: 1 });
+    expect(content.chunks).toEqual([chunks[4]!]);
+  });
+
+  test('when similarity picks the densest chunk it is included only once', async () => {
+    const content = await read({ similarIndex: 1, anchorChunkIndex: 0 });
+    expect(content.chunks).toEqual([chunks[1]!, chunks[0]!, chunks[2]!]);
+  });
+
+  test('a fit with room for two passages keeps the best one when it sits third in the document', async () => {
+    // Three picks: the anchor (0), the densest (1) and the most similar (4),
+    // which answers. A later cut by position with room for about two
+    // passages must still hold it.
+    const answer = 'Diabetes care is covered at the full rate.';
+    const texts = [...chunks];
+    texts[4] = `Paraphrase. ${answer}`.padEnd(4_000, '.');
+    let content: ReturnType<Store['localContent']>;
+    await withStore([{ ...item, text: texts.join('') }], async (store) => {
+      const provider = chunkCosineProvider(Object.fromEntries(openings.map((opening, index) =>
+        [`${opening}.`, index === 4 ? 0.95 : 0.4])));
+      await store.embedChunks({ provider });
+      content = store.localContent(`${ACCOUNT}:policy`, 3_000, {
+        query: 'coverage', anchorChunkIndex: 0, anchorLane: 'keyword',
+        queryVector: [1, 0], queryVectorModelId: provider.modelId,
+      });
+    });
+    const twoPassages = content!.chunks.slice(0, 2).reduce((sum, chunk) => sum + chunk.length, 0);
+    expect(content!.chunks).toHaveLength(3);
+    expect(clipChunksToUtf8Bytes(content!.chunks, twoPassages).join('')).toContain(answer);
+  });
+
+  test('picks after the best follow similarity, so a tight cut keeps the second most similar next', async () => {
+    // Anchor 0, densest 1, and 4 then 2 by similarity: 2 is only the third word pick.
+    let content: ReturnType<Store['localContent']>;
+    await withStore([item], async (store) => {
+      const provider = chunkCosineProvider({ 'Opening.': 0.5, 'Dense.': 0.3, 'Runner.': 0.8, 'Lesser.': 0.2, 'Paraphrase.': 0.95, 'Closing.': 0.1 });
+      await store.embedChunks({ provider });
+      content = store.localContent(`${ACCOUNT}:policy`, 12_000, {
+        query: 'coverage', anchorChunkIndex: 0, anchorLane: 'keyword', maxPassages: 4,
+        queryVector: [1, 0], queryVectorModelId: provider.modelId,
+      });
+    });
+    expect(content!.chunks.map((chunk) => chunk.split('.')[0])).toEqual(['Paraphrase', 'Runner', 'Opening', 'Dense']);
+  });
+
+  test('a one-character budget returns at most one character', async () => {
+    let content: ReturnType<Store['localContent']>;
+    await withStore([item], async (store) => {
+      const provider = chunkCosineProvider(Object.fromEntries(openings.map((opening, index) =>
+        [`${opening}.`, index === 4 ? 0.95 : 0.4])));
+      await store.embedChunks({ provider });
+      content = store.localContent(`${ACCOUNT}:policy`, 1, {
+        query: 'coverage', anchorChunkIndex: 0, anchorLane: 'keyword',
+        queryVector: [1, 0], queryVectorModelId: provider.modelId,
+      });
+    });
+    expect(content!.chunks.join('').length).toBeLessThanOrEqual(1);
+    expect(content!.truncated).toBe(true);
+  });
+
+  test('duplicate word chunks are read once and the rest follow the similar pick by priority', async () => {
+    // Chunks 0 and 1 carry the same text; the store's reader keeps one copy,
+    // and each passage stays mapped to its own chunk.
+    const twin = chunks[1]!;
+    const texts = [twin, twin, chunks[2]!, chunks[3]!, chunks[4]!, `Closing. ${'coverage '.repeat(5)}`.padEnd(4_000, '.')];
+    let content: ReturnType<Store['localContent']>;
+    await withStore([{ ...item, text: texts.join('') }], async (store) => {
+      const provider = chunkCosineProvider({ 'Dense.': 0.4, 'Runner.': 0.95, 'Lesser.': 0.4, 'Paraphrase.': 0.4, 'Closing.': 0.4 });
+      await store.embedChunks({ provider });
+      content = store.localContent(`${ACCOUNT}:policy`, 12_000, {
+        query: 'coverage', maxPassages: 4,
+        queryVector: [1, 0], queryVectorModelId: provider.modelId,
+      });
+    });
+    expect(content!.chunks.map((chunk) => chunk.split('.')[0])).toEqual(['Runner', 'Closing', 'Dense']);
+  });
+
+  test('at a candidate-sized budget the most similar chunk is read for half of it, not a third', async () => {
+    // The paraphrase answers past its first thousand characters. Three equal
+    // shares of 3,000 cut it at about 1,000; similarity's own vote reads it
+    // for 1,500, and the word picks share the other half.
+    const answer = 'Diabetes care is covered at the full rate.';
+    const answering = chunks.slice(0, 4).join('')
+      + `Paraphrase. ${'.'.repeat(1_300)} ${answer}`.padEnd(4_000, '.')
+      + chunks[5]!;
+    let content: ReturnType<Store['localContent']>;
+    await withStore([{ ...item, text: answering }], async (store) => {
+      const provider = chunkCosineProvider(Object.fromEntries(openings.map((opening, index) =>
+        [`${opening}.`, index === 4 ? 0.95 : 0.4])));
+      await store.embedChunks({ provider });
+      content = store.localContent(`${ACCOUNT}:policy`, 3_000, {
+        query: 'coverage', anchorChunkIndex: 0, anchorLane: 'keyword',
+        queryVector: [1, 0], queryVectorModelId: provider.modelId,
+      });
+    });
+    expect(content!.chunks).toHaveLength(3);
+    expect(content!.chunks[0]).toContain(answer);
+    expect(content!.chunks.join('').length).toBeLessThanOrEqual(3_000);
   });
 });
 

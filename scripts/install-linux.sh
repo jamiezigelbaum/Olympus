@@ -248,10 +248,22 @@ die() { printf '%s\n' "Olympus was not installed or upgraded: $*" >&2; exit 1; }
   "$WORK/bun" --no-env-file "$WORK/unpacked/package/dist/cli.js" \
     engine install --from-checkout "$WORK/unpacked/package" --bun "$WORK/bun" --restart || result=$?
   [ "$result" = 0 ] || die "Lifecycle install failed (status $result). The engine CLI's recovery report above is authoritative."
-  "$WORK/bun" --no-env-file "$WORK/unpacked/package/dist/cli.js" engine status > "$WORK/status.json" \
-    || die 'Lifecycle status failed; do not treat this as a healthy installation.'
-  "$WORK/bun" --no-env-file -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if(s.ok!==true) process.exit(1)' "$WORK/status.json" \
-    || die 'Lifecycle status is unhealthy or unknown; do not treat this as a healthy installation.'
+  # A just-started engine can miss a status read for a few seconds while it
+  # sets up its built-in models, so the status is read again for a bounded
+  # time before the install counts as unhealthy, and any wait is said.
+  status_wait=${OLYMPUS_INSTALL_STATUS_WAIT_S:-45}
+  waited=0
+  while :; do
+    if "$WORK/bun" --no-env-file "$WORK/unpacked/package/dist/cli.js" engine status > "$WORK/status.json" \
+      && "$WORK/bun" --no-env-file -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if(s.ok!==true) process.exit(1)' "$WORK/status.json"; then
+      break
+    fi
+    [ "$waited" -lt "$status_wait" ] \
+      || die "Lifecycle status is unhealthy or unknown after $waited s; do not treat this as a healthy installation."
+    sleep 3
+    waited=$((waited + 3))
+  done
+  [ "$waited" = 0 ] || say "The engine answered healthy after about $waited s."
   cat "$WORK/status.json"
   say 'By installing Olympus you agree to its Terms (https://olympusplugin.ai/terms/)'
   say 'and acknowledge its Privacy Policy (https://olympusplugin.ai/privacy/).'

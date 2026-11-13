@@ -9,6 +9,8 @@
 // Scoring stays on this computer, falls back to fused order until installed,
 // and releases the session after ten idle minutes, reloading on demand.
 
+import { isMainThread } from 'node:worker_threads';
+import { modelThread, modelThreadHandleId } from './built-in-reasoning/off-thread.ts';
 import { availableParallelism, totalmem } from 'node:os';
 import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
@@ -217,6 +219,25 @@ export function builtInRerankerFromEnv(options: BuiltInRerankerFromEnvOptions = 
   // The model files land before the runtime; until the pinned runtime is in
   // place too, loading would fail every question, so the reranker stays off.
   if (!options.runtime && !runtimeOverride && !builtInOnnxRuntimeInstalled(runtimeDir)) return undefined;
+  if (isMainThread && !options.runtime) {
+    const handle = modelThreadHandleId();
+    let loading: Promise<void> | undefined;
+    const prepare = () => loading ??= modelThread().call<void>({ kind: 'reranker-load', handle, env }).catch(error => {
+      loading = undefined;
+      throw error;
+    });
+    return {
+      id: `cross-encoder:${modelDir.split(/[\\/]/).filter(Boolean).pop() ?? 'model'}`,
+      localOnly: true,
+      poolSize: positiveInteger(env[SOURCE_RERANKER_POOL_ENV]) ?? DEFAULT_RERANK_POOL_SIZE,
+      prepare,
+      async score({ signal, ...request }) {
+        if (signal.aborted) throw new Error('Reranking was abandoned.');
+        await prepare();
+        return modelThread().call<number[]>({ kind: 'reranker-run', handle, request }, { signal });
+      },
+    };
+  }
   const runtime = options.runtime ?? onnxRuntimeFromDirectory(runtimeDir);
   const threads = positiveInteger(env[SOURCE_RERANKER_THREADS_ENV])
     ?? Math.max(1, Math.min(4, Math.floor(availableParallelism() / 2)));

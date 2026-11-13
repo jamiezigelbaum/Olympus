@@ -57,7 +57,12 @@ export interface EvidenceRerankAudit {
 export const RERANK_PASSAGE_CHARS = 2_000;
 /** A reranker that has not answered by then is abandoned and the fused order stands. */
 export const DEFAULT_RERANK_TIMEOUT_MS = 5_000;
-export const DEFAULT_RERANK_POOL_SIZE = 24;
+export const DEFAULT_RERANK_POOL_SIZE = 30;
+// The pool is drawn by store strength: every store's leader, then the
+// strongest stores first, up to this many of each store's ranks. On subset L
+// (13 Nov 2026) this recovered 3 documents and 2 paragraphs the even turns
+// left out of a pool of the same size, losing no document.
+export const RERANK_POOL_STORE_DEPTH = 10;
 
 // Every rerank outcome since this process started, for health: a timeout
 // falls back to the fused cut, and that must be countable, not silent.

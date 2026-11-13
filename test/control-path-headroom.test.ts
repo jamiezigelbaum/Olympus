@@ -139,3 +139,9 @@ describe('cpu samples taken during a freeze', () => {
     expect(kept.filter((trace) => named(trace, 'afterwards')).length).toBeLessThanOrEqual(edge);
   });
 });
+
+// Model installation can block its own thread without holding the HTTP worker.
+test('a model-thread freeze is identified separately from the serving process', () => {
+  expect(controlPathFreezeSubject('single', false)).toBe('a background thread was blocked');
+  expect(controlPathFreezeSubject('front', false)).toBe('a background thread was blocked');
+});

@@ -84,7 +84,7 @@ export function telegramMediaConnector(input: {
     } catch {
       throw new FileExtractionSourceError('source_item_not_found');
     }
-    if (maxBytes !== undefined && size > maxBytes) throw new FileExtractionSourceError('source_too_large');
+    if (maxBytes !== undefined && size > maxBytes) throw new FileExtractionSourceError('source_too_large', { sizeBytes: size });
     return path;
   };
   const read = async (localItemId: string, options: { maxBytes?: number; deferredBytes?: { locator: string } }): Promise<RawItem> => {
@@ -100,7 +100,7 @@ export function telegramMediaConnector(input: {
       throw new FileExtractionSourceError('source_item_not_found');
     }
     // A file that grew past the bound since it was checked is still too large.
-    if (options.maxBytes !== undefined && bytes.byteLength > options.maxBytes) throw new FileExtractionSourceError('source_too_large');
+    if (options.maxBytes !== undefined && bytes.byteLength > options.maxBytes) throw new FileExtractionSourceError('source_too_large', { sizeBytes: bytes.byteLength });
     return item(localItemId, new Uint8Array(bytes));
   };
   return {

@@ -149,7 +149,7 @@ export async function readItemToFile(
   if (content.kind === 'metadata_only') throw refusalFor(item);
   const bytes = content.kind === 'bytes' ? content.bytes : new TextEncoder().encode(content.text);
   if (options.maxBytes !== undefined && bytes.byteLength > options.maxBytes) {
-    throw new FileExtractionSourceError('source_too_large');
+    throw new FileExtractionSourceError('source_too_large', { sizeBytes: bytes.byteLength });
   }
   const path = join(options.spoolDir, extractionSpoolFileName());
   const served = (): boolean => options.stillServed?.() ?? true;
@@ -241,7 +241,7 @@ export interface ConnectorFileExtractionSourceOptions {
  * are no bytes. The metadata keys are the vocabulary a connector uses for it.
  */
 function refusalFor(item: RawItem): FileExtractionSourceError {
-  if (item.metadata['contentTooLarge'] === true) return new FileExtractionSourceError('source_too_large');
+  if (item.metadata['contentTooLarge'] === true) return new FileExtractionSourceError('source_too_large', typeof item.metadata['sizeBytes'] === 'number' ? { sizeBytes: item.metadata['sizeBytes'] } : {});
   if (item.metadata['scopeContentDenied'] === true) return new FileExtractionSourceError('source_permission_denied');
   return new FileExtractionSourceError('source_content_unavailable');
 }
@@ -326,7 +326,7 @@ export function createConnectorFileExtractionSource(
       const bytes = content.kind === 'bytes' ? content.bytes : new TextEncoder().encode(content.text);
       const mimeType = typeFor(ref, content.kind === 'bytes' ? content.mimeType : item.mimeType);
       if (fetchOptions.maxBytes !== undefined && bytes.byteLength > fetchOptions.maxBytes) {
-        throw new FileExtractionSourceError('source_too_large');
+        throw new FileExtractionSourceError('source_too_large', { sizeBytes: bytes.byteLength });
       }
       return { bytes, ...(mimeType ? { mimeType } : {}), sizeBytes: bytes.byteLength };
     },
@@ -376,7 +376,7 @@ export function createConnectorFileExtractionSource(
     // A size the source stated that is already over the bound is never read.
     const stated = answer?.sizeBytes ?? ref.sizeBytes;
     if (maxBytes !== undefined && stated !== undefined && stated > maxBytes) {
-      throw new FileExtractionSourceError('source_too_large');
+      throw new FileExtractionSourceError('source_too_large', { sizeBytes: stated });
     }
     return { connector, ...(answer ? { deferred: answer } : {}) };
   }
