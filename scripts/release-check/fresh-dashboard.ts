@@ -38,7 +38,7 @@ export const DASHBOARD_JSON = `curl -sS --max-time 10 -w '\\n%{http_code}' --uni
 Authorization: Bearer $("$HOME/.local/bin/olympus" dashboard token)
 EOF`;
 
-export async function openFreshDashboard(machine: Machine, endpoint: string, timings: { timeoutMs?: number; pollMs?: number; reachRetryMs?: number; modelWaitMs?: number; modelStallMs?: number;
+export async function openFreshDashboard(machine: Machine, endpoint: string, timings: { timeoutMs?: number; pollMs?: number; modelWaitMs?: number; modelStallMs?: number;
   bridge?: { agentPath: string; pidFile: string; logTemplate: string } } = {}): Promise<FreshDashboard & TimingDashboard> {
   const { host, port } = parseCdpEndpoint(endpoint);
   let tunnel: Tunnel | undefined;
@@ -326,18 +326,7 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
         // Venice when this install can use it; a machine without a Venice key gets the dashboard's
         // own refusal, and the leg then saves "This computer", naming both in the detail.
         let judgeChoice = 'not shown';
-        // Saving the answer choice restarts the engine, so the first judge save can land while it is
-        // down and the form says "Could not reach Olympus." A person presses Save again; so does the leg.
         const saveJudge = async (choice: 'venice' | 'local') => {
-          let said: string | undefined;
-          for (let attempt = 0; attempt < 4; attempt += 1) {
-            if (attempt > 0) await sleep(timings.reachRetryMs ?? 10_000);
-            said = await saveJudgeOnce(choice);
-            if (said === undefined || !said.includes('Could not reach Olympus')) return said;
-          }
-          return said;
-        };
-        const saveJudgeOnce = async (choice: 'venice' | 'local') => {
           await click(`document.querySelector('form[data-first-run-judge] input[value="${choice}"]')`);
           await click(`document.querySelector('button[form="first-run-judge-form"]')`);
           try {

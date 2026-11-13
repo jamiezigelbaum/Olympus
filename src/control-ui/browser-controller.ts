@@ -43,6 +43,8 @@ export interface OlympusBrowserControllerOptions {
   presented?: boolean;
   signature?: string;
   pollIntervalMs?: number;
+  /** How long a first-run step waits between tries while Olympus restarts to apply the step before it. */
+  restartRetryMs?: number;
   csrfToken?: string;
   authority?: 'worker-session';
 }
@@ -634,6 +636,26 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     await refreshNow(true);
   }
 
+  /**
+   * Saving a first-run choice restarts Olympus to apply it, and the next step of the
+   * same sheet is on screen at once. A save sent while it restarts never arrives, so
+   * a step in the first-run sheet waits for Olympus to be back (up to about a minute)
+   * instead of telling the owner it could not reach Olympus.
+   */
+  async function controlThroughRestart(form: HTMLFormElement, params: OlympusDashboardControlParams): Promise<OlympusDashboardControlResult> {
+    const tries = form.closest('[data-first-run-sheet]') ? 12 : 1;
+    const wait = options.restartRetryMs ?? 5_000;
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await options.transport.control(params);
+      } catch (error) {
+        if (attempt >= tries || disposed || options.signal.aborted) throw error;
+        say(form, 'Olympus is restarting to apply your last choice. Saving when it is back…');
+        await new Promise(resolve => setTimeout(resolve, wait));
+      }
+    }
+  }
+
   async function submitControl(
     form: HTMLFormElement,
     authorizationTab: Window | null,
@@ -666,7 +688,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     setFormPending(form, true, form.dataset.pendingMessage || pendingMessage(params));
     let result: OlympusDashboardControlResult;
     try {
-      result = await options.transport.control(params);
+      result = await controlThroughRestart(form, params);
     } catch {
       closeAuthorizationTab(authorizationTab);
       say(form, 'Could not reach Olympus.');

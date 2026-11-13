@@ -58,7 +58,7 @@ for (const mode of ['saves', 'loses', 'refused', 'unlock', 'saved-judge', 'judge
     // Every element lays out, including ones the controller adds later (the unlock button).
     window.HTMLElement.prototype.getBoundingClientRect = function () { return new window!.DOMRect(0, 0, 100, 20); };
     const mount = evaluate(`(${mountDashboardController.toString()})`);
-    controller = mount({ root: window.document.body, canWrite: true, signal: new window.AbortController().signal, pollIntervalMs: -1,
+    controller = mount({ root: window.document.body, canWrite: true, signal: new window.AbortController().signal, pollIntervalMs: -1, restartRetryMs: 1,
       navigate() {}, returnUrl: url, refresh: async () => undefined,
       transport: { ...(mode === 'unlock' ? { openLocalControls: async () => { unlocks++; unlocked = true; return true; } } : {}), control: async (params: { action: string; choice: string; cap_dollars?: number }) => {
         calls.push(params.action);
@@ -131,7 +131,7 @@ for (const mode of ['saves', 'loses', 'refused', 'unlock', 'saved-judge', 'judge
   let dashboard: Awaited<ReturnType<typeof openFreshDashboard>> | undefined;
   try {
     // Each wait ends as soon as its condition holds; 300 ms was too short for the unlock round trip on a busy CI runner (#1373).
-    dashboard = await openFreshDashboard(machine, '127.0.0.1:9333', { timeoutMs: 2_000, pollMs: 1, reachRetryMs: 1 });
+    dashboard = await openFreshDashboard(machine, '127.0.0.1:9333', { timeoutMs: 2_000, pollMs: 1 });
     expect(events.indexOf('bridge.start')).toBeLessThan(events.indexOf('navigate'));
     if (mode === 'refused') {
       await expect(dashboard.privacyChoice()).rejects.toThrow(/^first-run privacy choice was not saved: the dashboard said "[^"]+"$/);
@@ -147,7 +147,7 @@ for (const mode of ['saves', 'loses', 'refused', 'unlock', 'saved-judge', 'judge
       return;
     }
     if (mode === 'judge-unreachable') {
-      // "Could not reach Olympus." while the engine restarts is pressed again, not taken as a refusal.
+      // A judge save sent while Olympus restarts for the answer choice waits for it and saves Venice (the page's own retry).
       expect(await dashboard.privacyChoice()).toBe('Local models with Venice fallback (local-first, Recommended) saved and verified after reload; privacy check: Venice (venice) saved');
       expect(judgeChoices).toEqual(['venice', 'venice']);
       return;

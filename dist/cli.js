@@ -169348,6 +169348,20 @@ function mountDashboardController(options) {
     applyWriteCapability();
     await refreshNow(true);
   }
+  async function controlThroughRestart(form, params) {
+    const tries = form.closest("[data-first-run-sheet]") ? 12 : 1;
+    const wait = options.restartRetryMs ?? 5000;
+    for (let attempt = 1;; attempt += 1) {
+      try {
+        return await options.transport.control(params);
+      } catch (error) {
+        if (attempt >= tries || disposed || options.signal.aborted)
+          throw error;
+        say(form, "Olympus is restarting to apply your last choice. Saving when it is back…");
+        await new Promise((resolve) => setTimeout(resolve, wait));
+      }
+    }
+  }
   async function submitControl(form, authorizationTab, submittedValues) {
     if (!canWrite && !csrfToken) {
       closeAuthorizationTab(authorizationTab);
@@ -169374,7 +169388,7 @@ function mountDashboardController(options) {
     setFormPending(form, true, form.dataset.pendingMessage || pendingMessage(params));
     let result;
     try {
-      result = await options.transport.control(params);
+      result = await controlThroughRestart(form, params);
     } catch {
       closeAuthorizationTab(authorizationTab);
       say(form, "Could not reach Olympus.");
