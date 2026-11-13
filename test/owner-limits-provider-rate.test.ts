@@ -208,3 +208,23 @@ test('Readwise without a usable Retry-After keeps a silent pacing retry', async 
     await absent('readwise', time.date());
   }
 });
+
+test('the X low-watermark buffer is Olympus pacing, not a wait X sets; only exhaustion reports x.rate_limit', async () => {
+  const now = new Date('2026-11-13T12:00:00.000Z');
+  const resetAt = new Date(now.getTime() + 15 * 60_000).toISOString();
+  const config = { ...defaultXBookmarksLiveSyncConfig({}), rateLimitLowWatermark: 12 };
+  const usage = new LocalXBookmarksApiUsageStore(':memory:');
+  const seed = (remaining: number) => {
+    const reservation = usage.reserveRequest({ account: 'personal', requestedMaxResources: 1, provenance: 'operator', config, now });
+    usage.settleFailure({ reservation, rateLimit: { limit: 100, remaining, resetAt }, potentiallyBillable: false, config, now });
+  };
+  const scheduled = () => { try { usage.reserveRequest({ account: 'personal', requestedMaxResources: 1, preserveHeadReserve: true, config, now }); return undefined; } catch (error) { return (error as { guardKind?: string }).guardKind; } };
+  try {
+    seed(5);
+    expect(scheduled()).toBe('provider_rate_limit');
+    await absent('x', now);
+    seed(0);
+    expect(scheduled()).toBe('provider_rate_limit');
+    await shown('x', now, resetAt, { limit: 100, used: 100 });
+  } finally { usage.close(); }
+});

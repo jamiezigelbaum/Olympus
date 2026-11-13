@@ -84433,7 +84433,7 @@ class LocalXBookmarksApiUsageStore {
       const pendingRequests = this.pendingRequestCount(account, utcDay);
       const retryAt = nextUtcDay3(now);
       if (rateLimitBlocks(row, input.config, now, routine && input.preserveHeadReserve === true)) {
-        providerStops.report(row.rate_limit_reset_at, now, { limit: row.rate_limit_limit, used: row.rate_limit_limit !== null && row.rate_limit_remaining !== null ? Math.max(0, row.rate_limit_limit - row.rate_limit_remaining) : null });
+        reportProviderExhaustion(row, now);
         throw new XApiUsageGuardError(X_PROVIDER_RATE_LIMIT, row.rate_limit_reset_at);
       }
       if (routine && row.api_requests + pendingRequests + 1 > input.config.dailyApiRequestBudget) {
@@ -84504,7 +84504,7 @@ class LocalXBookmarksApiUsageStore {
       const retryAt = nextUtcDay3(now);
       const routine = xApiInvocationProvenance(reservation.provenance) === "scheduled";
       if (rateLimitBlocks(row, input.config, now, routine && input.preserveHeadReserve === true)) {
-        providerStops.report(row.rate_limit_reset_at, now, { limit: row.rate_limit_limit, used: row.rate_limit_limit !== null && row.rate_limit_remaining !== null ? Math.max(0, row.rate_limit_limit - row.rate_limit_remaining) : null });
+        reportProviderExhaustion(row, now);
         throw new XApiUsageGuardError(X_PROVIDER_RATE_LIMIT, row.rate_limit_reset_at);
       }
       if (routine && row.api_requests + pendingRequests + 1 > input.config.dailyApiRequestBudget) {
@@ -84989,6 +84989,11 @@ function usageGuard(row, reserved, pendingRequests, config, now) {
   if (spendNear)
     return { state: "approaching", degraded_reason: "daily_cost_guard", retry_at: degradedRetry };
   return { state: "ok" };
+}
+function reportProviderExhaustion(row, now) {
+  if (row.rate_limit_remaining === null || row.rate_limit_remaining > 0)
+    return;
+  providerStops.report(row.rate_limit_reset_at, now, { limit: row.rate_limit_limit, used: row.rate_limit_limit !== null ? row.rate_limit_limit - row.rate_limit_remaining : null });
 }
 function rateLimitBlocks(row, config, now, background = true) {
   return row.rate_limit_remaining !== null && row.rate_limit_remaining <= (background ? config.rateLimitLowWatermark : 0) && row.rate_limit_reset_at !== null && Date.parse(row.rate_limit_reset_at) > now.getTime();

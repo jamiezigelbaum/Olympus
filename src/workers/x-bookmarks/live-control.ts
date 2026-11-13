@@ -753,7 +753,7 @@ export class LocalXBookmarksApiUsageStore {
       // count; only the buffer yields to an operator run. remaining <= 0 until
       // a future reset is X itself refusing, and that binds every provenance.
       if (rateLimitBlocks(row, input.config, now, routine && input.preserveHeadReserve === true)) {
-        providerStops.report(row.rate_limit_reset_at!, now, { limit: row.rate_limit_limit, used: row.rate_limit_limit !== null && row.rate_limit_remaining !== null ? Math.max(0, row.rate_limit_limit - row.rate_limit_remaining) : null });
+        reportProviderExhaustion(row, now);
         throw new XApiUsageGuardError(X_PROVIDER_RATE_LIMIT, row.rate_limit_reset_at!);
       }
       if (routine && row.api_requests + pendingRequests + 1 > input.config.dailyApiRequestBudget) {
@@ -879,7 +879,7 @@ export class LocalXBookmarksApiUsageStore {
       // dispatch. Only the provider's own exhausted rate limit binds both.
       const routine = xApiInvocationProvenance(reservation.provenance) === 'scheduled';
       if (rateLimitBlocks(row, input.config, now, routine && input.preserveHeadReserve === true)) {
-        providerStops.report(row.rate_limit_reset_at!, now, { limit: row.rate_limit_limit, used: row.rate_limit_limit !== null && row.rate_limit_remaining !== null ? Math.max(0, row.rate_limit_limit - row.rate_limit_remaining) : null });
+        reportProviderExhaustion(row, now);
         throw new XApiUsageGuardError(X_PROVIDER_RATE_LIMIT, row.rate_limit_reset_at!);
       }
       if (routine && row.api_requests + pendingRequests + 1 > input.config.dailyApiRequestBudget) {
@@ -1551,6 +1551,15 @@ function usageGuard(
   if (readsNear) return { state: 'approaching', degraded_reason: 'daily_resource_read_guard', retry_at: degradedRetry };
   if (spendNear) return { state: 'approaching', degraded_reason: 'daily_cost_guard', retry_at: degradedRetry };
   return { state: 'ok' };
+}
+
+/**
+ * Only X's own exhaustion is the provider's stop. The low-watermark buffer is Olympus pacing
+ * inside X's window: an operator run passes it, so it is never reported as a wait X sets.
+ */
+function reportProviderExhaustion(row: UsageDayRow, now: Date): void {
+  if (row.rate_limit_remaining === null || row.rate_limit_remaining > 0) return;
+  providerStops.report(row.rate_limit_reset_at!, now, { limit: row.rate_limit_limit, used: row.rate_limit_limit !== null ? row.rate_limit_limit - row.rate_limit_remaining : null });
 }
 
 function rateLimitBlocks(
