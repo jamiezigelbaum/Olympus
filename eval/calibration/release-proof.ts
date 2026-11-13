@@ -132,16 +132,19 @@ export async function main(argv = process.argv.slice(2)) {
       embeddingLedgerPath: inside(resolve(root, 'embedding-ledger.jsonl')),
     };
     const installed = configureInstalledTierClassification({ env, lane, automaticMoveContext, retirePublic: isPublicTierRetired(engine.config), ownerContext });
-    stage = 'mount-stores';
-    const scopes: TierVisibilityScope[] = [];
+    stage = 'read-copy';
+    // Read everything the proof needs through the immutable handles BEFORE any writable open:
+    // TierLedger and LocalConnectorStore migrate these same files in place, and an immutable
+    // handle reading a file this process has changed reports SQLITE_CORRUPT.
+    const sampled = picked.map(item => ({ row: item.store.row.get(item.pk) as Row,
+      parts: item.store.chunks.all(item.pk) as Array<{ bounded_text: string; content_hash: string }> }));
+    const plans: Array<{ ledgerPath: string; legs: Array<{ path: string; corpusId: string; family: SourceFamily; domain: SourceTrustDomain }> }> = [];
     for (const ledgerPath of new Set(picked.map(item => item.ledgerPath))) {
       inside(tierSnifferPathForLedger(ledgerPath));
       const db = openImmutable(inside(ledgerPath));
-      const ledger = new TierLedger({ dbPath: ledgerPath });
-      ledgers.push(ledger);
-      const stores: LocalConnectorStore[] = [];
-      const sample = picked.find(item => item.ledgerPath === ledgerPath)!;
-      const fallbackFamily = (sample.store.row.get(sample.pk) as Row)['family'] as SourceFamily;
+      const sample = picked.findIndex(item => item.ledgerPath === ledgerPath);
+      const fallbackFamily = sampled[sample]!.row['family'] as SourceFamily;
+      const legs: (typeof plans)[number]['legs'] = [];
       try {
         for (const path of storesFor(ledgerPath)) {
           const read = store(inside(path));
@@ -154,10 +157,19 @@ export async function main(argv = process.argv.slice(2)) {
           const domain = domains.length === 1 ? domains[0]!.trust_domain : (['public_safe', 'internal', 'secure_local'] as const).find(value => corpusId.startsWith(`${value}.`));
           const row = read.db.query('SELECT family FROM items LIMIT 1').get() as { family: SourceFamily } | null;
           if (!domain) continue;
-          const opened = new LocalConnectorStore({ dbPath: path, corpusId, family: row?.family ?? fallbackFamily, trustDomain: domain });
-          stores.push(opened); mounted.push(opened);
+          legs.push({ path, corpusId, family: row?.family ?? fallbackFamily, domain });
         }
       } finally { db.close(); }
+      plans.push({ ledgerPath, legs });
+    }
+    closeStores();
+    stage = 'mount-stores';
+    const scopes: TierVisibilityScope[] = [];
+    for (const { ledgerPath, legs } of plans) {
+      const ledger = new TierLedger({ dbPath: ledgerPath });
+      ledgers.push(ledger);
+      const stores = legs.map(leg => new LocalConnectorStore({ dbPath: leg.path, corpusId: leg.corpusId, family: leg.family, trustDomain: leg.domain }));
+      mounted.push(...stores);
       const secrets = new SecretLocationsIndex({ dbPath: inside(ledgerPath.slice(0, -TIER_LEDGER_FILE_SUFFIX.length) + SECRET_LOCATIONS_FILE_SUFFIX) });
       secretIndexes.push(secrets);
       new ProofSet({ setId: ledgerPath, ledger, secretLocations: secrets, legs: stores.map(opened => ({ corpusId: opened.corpusId, trustDomain: opened.trustDomain, store: opened })) });
@@ -174,16 +186,16 @@ export async function main(argv = process.argv.slice(2)) {
     let windows = 0, privateWindows = 0, unjudgedWindows = 0, groundFailures = 0;
     stage = 'ground-truth';
     const groundCalls = calls, groundHttp = httpCalls;
-    for (const item of picked) {
+    for (const [index, item] of picked.entries()) {
       const opened = mounted.find(candidate => candidate.dbPath === item.storePath);
-      const parts = item.store.chunks.all(item.pk) as Array<{ bounded_text: string; content_hash: string }>;
+      const { row, parts } = sampled[index]!;
       if (!opened) throw new Error('Sample not mounted');
       inputs.push({ ...item.identity, corpusId: opened.corpusId, privateAtAnswer: false, chunkHashes: parts.map(part => part.content_hash) });
       const privateHashes = new Set<string>();
       truth.push(privateHashes);
       for (const window of unseenWindows(parts)) {
         windows++;
-        const input = storedJudgeInput(item.store.row.get(item.pk) as Row, window.text, item.provider);
+        const input = storedJudgeInput(row, window.text, item.provider);
         let held = input.secret || (input.material === undefined && input.privateWithoutJudge);
         if (input.material !== undefined && !held) {
           const material = snifferMaterialForModel(input.material), own = snifferOwnMaterial(material);
