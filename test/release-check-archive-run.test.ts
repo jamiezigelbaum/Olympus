@@ -178,6 +178,18 @@ describe('the archive-import leg in a run', () => {
     expect(verbs()).toContain('archive-scale-cleanup');
   }, 120_000);
 
+  test('with the split on, the front-restart stage runs after the archive leg, and a machine that does not report it fails it', async () => {
+    const report = await runReleaseCheck(options({ engineSplit: true, skipRestore: true }));
+    const all = agentLog().map((line) => line.split(' ')[0]!);
+    expect(all.indexOf('front-steady')).toBeGreaterThan(all.indexOf('archive-collect'));
+    expect(failedIds(report)).toContain('front.steady');
+  }, 120_000);
+
+  test('without the split, no front-restart stage', async () => {
+    await runReleaseCheck(options({ skipRestore: true }));
+    expect(agentLog().map((line) => line.split(' ')[0])).not.toContain('front-steady');
+  }, 120_000);
+
   test('--skip-archive leaves the leg out: no archive verb is called, nothing is checked', async () => {
     const report = await runReleaseCheck(options({ skipArchive: true }));
     expect(archiveCalls()).toEqual([]);

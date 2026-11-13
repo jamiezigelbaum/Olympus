@@ -70,7 +70,7 @@ export interface ArchiveHost {
 
 const SETTLE_POLL_MS = 2_000;
 
-async function until<T>(host: ArchiveHost, read: () => Promise<T | undefined>, timeoutMs: number, everyMs: number): Promise<T | undefined> {
+export async function until<T>(host: ArchiveHost, read: () => Promise<T | undefined>, timeoutMs: number, everyMs: number): Promise<T | undefined> {
   const stop = host.now() + timeoutMs;
   for (;;) {
     const got = await read().catch(() => undefined);

@@ -57,6 +57,7 @@ import type { PageInventory } from './explore-pages-inventory.ts';
 import type { InventoryControl } from './explore-inventory.ts';
 import { FIXTURE_FOLDER, STRESS_FORMAT, legFixture, type FixtureRole } from './archive-fixtures.ts';
 import type { StoreView } from './archive-leg.ts';
+import { frontSteadyStage, type EnginePids, type FrontHost } from './front-steady.ts';
 import { besideLiveStage, changedStage, drainStage, importStage, modelStage, removeAllStage, removeStage, seedLiveStage, type ArchiveBrowserSession, type ArchiveHost } from './archive-stages.ts';
 import { openingLinkOrThrow } from './opening-link.ts';
 import { liveSeedHook } from './archive-live-seeds.ts';
@@ -455,6 +456,42 @@ function ownEngineRoles(): { front: number; background: number } | null {
     try { environs.push(readFileSync(`/proc/${pid}/environ`, 'latin1')); } catch { /* gone, or not ours */ }
   }
   return engineRolesIn(environs);
+}
+
+/**
+ * The engine's process ids by role (OLYMPUS_WORKER_ENGINE_ROLE): only the top process of each role, since a role's helpers inherit
+ * its environment. Only ids leave this function, never environments.
+ */
+export function enginePidsIn(entries: ReadonlyArray<{ pid: number; ppid: number; role: string | undefined }>): EnginePids {
+  const roleOf = new Map(entries.map((entry) => [entry.pid, entry.role]));
+  const out: EnginePids = { front: [], background: [] };
+  for (const { pid, ppid, role } of entries) {
+    if ((role === 'front' || role === 'background') && roleOf.get(ppid) !== role) out[role].push(pid);
+  }
+  return out;
+}
+
+function ownEnginePids(): EnginePids | null {
+  if (process.platform !== 'linux') {
+    const ps = spawnSync('ps', ['eww', '-axo', 'pid=,ppid=,command='], { encoding: 'utf8', timeout: 5_000 });
+    if (ps.status !== 0) return null;
+    const role = new RegExp(`(?:^|\\s)${ENGINE_ROLE_ENV}=(front|background)(?:\\s|$)`);
+    return enginePidsIn(ps.stdout.split('\n').map((line) => {
+      const ids = /^\s*(\d+)\s+(\d+)/.exec(line);
+      return { pid: Number(ids?.[1] ?? 0), ppid: Number(ids?.[2] ?? 0), role: role.exec(line)?.[1] };
+    }));
+  }
+  const entries: Array<{ pid: number; ppid: number; role: string | undefined }> = [];
+  for (const pid of readdirSync('/proc').filter((name) => /^\d+$/.test(name))) {
+    try {
+      const environ = readFileSync(`/proc/${pid}/environ`, 'latin1');
+      // The parent's id is the 4th field of stat, after the command in parentheses (which may hold spaces).
+      const stat = readFileSync(`/proc/${pid}/stat`, 'latin1');
+      const ppid = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1] ?? 0);
+      entries.push({ pid: Number(pid), ppid, role: environ.split('\0').find((entry) => entry.startsWith(`${ENGINE_ROLE_ENV}=`))?.slice(ENGINE_ROLE_ENV.length + 1).trim() });
+    } catch { /* gone, or not ours */ }
+  }
+  return enginePidsIn(entries);
 }
 
 // ---------------------------------------------------------------------------
@@ -1995,6 +2032,11 @@ async function archiveModelCommand(mode: string): Promise<never> {
   emit({ ...(await modelStage(archiveHost(), mode)) });
 }
 
+async function frontSteadyCommand(seed: string, watchS: number): Promise<never> {
+  const host: FrontHost = { ...archiveHost(), env: process.env, enginePids: ownEnginePids, engineLogPaths: platform().engineLogPaths };
+  emit({ ...(await frontSteadyStage(host, { seed, watchS })) });
+}
+
 async function archiveChangedCommand(seed: string, sizes: number[]): Promise<never> {
   emit({ ...(await changedStage(archiveHost(), { seed, sizes })) });
 }
@@ -2361,6 +2403,7 @@ async function main(): Promise<void> {
     });
     case 'archive-remove': return await archiveRemoveCommand({ targets: flag('--targets'), seed: flag('--seed') });
     case 'archive-model': return await archiveModelCommand(flag('--mode'));
+    case 'front-steady': return await frontSteadyCommand(flag('--seed'), Number(flag('--watch-s', '150')));
     case 'archive-changed': return await archiveChangedCommand(flag('--seed'), flag('--sizes').split(',').map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0));
     case 'archive-scale': return await archiveScaleCommand(flag('--format'), flag('--seed'));
     case 'archive-scale-cleanup': {
