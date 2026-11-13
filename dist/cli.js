@@ -19710,7 +19710,10 @@ function workerStillStarting(env, pid, now = Date.now(), alive = processAlive) {
   const progress = readBootProgress(env);
   if (bootProgressIsLive(progress, now, alive))
     return true;
-  return progress?.phase === "done" && pid !== undefined && progress.pid === pid && alive(pid) && now - Date.parse(progress.updatedAt) < BOOT_READY_ANSWER_GRACE_MS;
+  return pid !== undefined && progress?.pid === pid && bootDoneAndAnswering(progress, now, alive);
+}
+function bootDoneAndAnswering(progress, now = Date.now(), alive = processAlive) {
+  return progress?.phase === "done" && alive(progress.pid) && now - Date.parse(progress.updatedAt) < BOOT_READY_ANSWER_GRACE_MS;
 }
 function bootProgressIsLive(progress, now = Date.now(), alive = processAlive) {
   if (!progress || progress.phase === "done" || progress.phase === "failed" || !alive(progress.pid))
@@ -253095,7 +253098,7 @@ function waitForWorkerReadiness(options, port, wait) {
     const boot = readBoot();
     if (boot && bootProgressIsLive(boot, now) && Date.parse(boot.startedAt) >= waitStartedAt)
       bootStarts.add(boot.pid);
-    const bootMoving = bootStarts.size <= PROGRESS_MAX_STARTS && bootProgressIsLive(boot, now);
+    const bootMoving = bootStarts.size <= PROGRESS_MAX_STARTS && (bootProgressIsLive(boot, now) || boot !== undefined && Date.parse(boot.startedAt) >= waitStartedAt && bootDoneAndAnswering(boot, now));
     const front = bootMoving ? undefined : readFront();
     if (front && front.phase !== "done")
       frontStarts.add(front.pid);

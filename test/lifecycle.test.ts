@@ -766,6 +766,38 @@ describe('versioned Olympus worker lifecycle', () => {
     }
   }, 30_000);
 
+  test('a background that finished its boot during the wait and is busy holds the wait while the front still waits on it (gate7 on 893087f5)', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-boot-busy-'));
+    const manager = linuxManager('active');
+    try {
+      const artifact = createUpgradeArtifact(home, '0.4.3');
+      installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: '/opt/olympus-old', bunBin: process.execPath, authToken: 'old-token' });
+      // The background's boot ends at once and it answers ready, then holds its
+      // event loop on its first work: the front, still in its wait, has not
+      // moved since it started, and first answers four windows later.
+      const frontAt = new Date(Date.now() - 40 * 60_000).toISOString();
+      let bootDoneAt: string | undefined;
+      const readyAt = Date.now() + 1_200;
+      const result = runWorkerLifecycle('upgrade', {
+        platform: 'linux', homeDir: home, artifactPath: artifact.path,
+        bunBin: process.execPath, exec: manager.exec, activationSettleMs: 0,
+        readinessTimeoutMs: 300, actionSettlePollMs: 5,
+        bootProgress: () => {
+          bootDoneAt ??= new Date().toISOString();
+          return { schema: 'olympus.boot-progress.v1', pid: process.pid, phase: 'done', startedAt: bootDoneAt, updatedAt: bootDoneAt, completedStores: 9 };
+        },
+        frontProgress: () => ({ schema: 'olympus.boot-progress.v1', pid: process.pid, phase: 'starting', startedAt: frontAt, updatedAt: frontAt, completedStores: 0 }),
+        progressLine: () => {},
+        readinessProbe: () => Date.now() >= readyAt,
+        rollbackReadinessProbe: () => true,
+      });
+      expect(result).toMatchObject({ ok: true, readiness: { status: 'ready' } });
+    } finally {
+      makeTreeWritable(home);
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test('a supervisor that keeps replacing its background stops holding the wait after three boots, and the upgrade rolls back (gate7, 13 Nov)', () => {
     const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-boot-loop-'));
     const manager = linuxManager('active');

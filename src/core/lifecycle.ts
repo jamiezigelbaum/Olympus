@@ -12,7 +12,7 @@ import {
   removeFileDurablySync,
   writePrivateFileAtomicSync,
 } from './atomic-file.ts';
-import { bootProgressIsLive, bootProgressLine, frontProgressLine, readBootProgress, readFrontProgress, removeSchemaBackupsSince, restoreSchemaBackupsSince, type BootProgress } from './boot-progress.ts';
+import { bootDoneAndAnswering, bootProgressIsLive, bootProgressLine, frontProgressLine, readBootProgress, readFrontProgress, removeSchemaBackupsSince, restoreSchemaBackupsSince, type BootProgress } from './boot-progress.ts';
 import { prepareWorkerUpgradeArtifact, type PreparedWorkerUpgradeArtifact } from './lifecycle-artifact.ts';
 import { acquireLifecycleMutationLock } from './lifecycle-lock.ts';
 import { OperationError } from './operation-error.ts';
@@ -1157,7 +1157,13 @@ function waitForWorkerReadiness(
     // Only a boot that is live and began during this wait counts: a stopped
     // predecessor's unfinished file must not use up a slot (Astra on #1600).
     if (boot && bootProgressIsLive(boot, now) && Date.parse(boot.startedAt) >= waitStartedAt) bootStarts.add(boot.pid);
-    const bootMoving = bootStarts.size <= PROGRESS_MAX_STARTS && bootProgressIsLive(boot, now);
+    // A boot that finished during this wait and is alive counts too, for the
+    // grace a first answer gets: the split's background answers ready and
+    // then holds its event loop on its first work, and the front, still
+    // waiting on it, has not listened yet (gate7 success leg on 893087f5,
+    // 13 Nov: the wait gave up 3 min after the background's 36 min boot).
+    const bootMoving = bootStarts.size <= PROGRESS_MAX_STARTS && (bootProgressIsLive(boot, now)
+      || (boot !== undefined && Date.parse(boot.startedAt) >= waitStartedAt && bootDoneAndAnswering(boot, now)));
     const front = bootMoving ? undefined : readFront();
     if (front && front.phase !== 'done') frontStarts.add(front.pid);
     const frontMoving = front !== undefined && frontStarts.size <= PROGRESS_MAX_STARTS && bootProgressIsLive(front, now);

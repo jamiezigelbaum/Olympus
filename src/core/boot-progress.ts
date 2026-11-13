@@ -267,7 +267,19 @@ export function workerStillStarting(
 ): boolean {
   const progress = readBootProgress(env);
   if (bootProgressIsLive(progress, now, alive)) return true;
-  return progress?.phase === 'done' && pid !== undefined && progress.pid === pid && alive(pid)
+  return pid !== undefined && progress?.pid === pid && bootDoneAndAnswering(progress, now, alive);
+}
+
+/**
+ * The boot finished, its process is alive, and it is inside the grace for a
+ * first answer: busy with its first work, not dead (workerStillStarting).
+ */
+export function bootDoneAndAnswering(
+  progress: BootProgress | undefined,
+  now: number = Date.now(),
+  alive: (pid: number) => boolean = processAlive,
+): boolean {
+  return progress?.phase === 'done' && alive(progress.pid)
     && now - Date.parse(progress.updatedAt) < BOOT_READY_ANSWER_GRACE_MS;
 }
 
