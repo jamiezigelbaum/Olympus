@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>How can I use AI with confidential work documents? - Olympus guides</title>
+  <meta name="description" content="Your options for using ChatGPT, Claude and other AI with confidential documents, from enterprise plans to local models, and what each one sends where.">
+  <link rel="canonical" href="https://olympusplugin.ai/guides/confidential-work-documents-with-ai/">
+  <meta name="color-scheme" content="light">
+  <meta name="referrer" content="no-referrer">
+  <link rel="stylesheet" href="/assets/brand.css?v=1.0.0">
+  <link rel="stylesheet" href="/style.css?v=1.0.0">
+  <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="icon" href="/favicon-16.png" sizes="16x16" type="image/png">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site-head">
+    <a class="wordmark" href="/" aria-label="Olympus home"><span class="wordmark__icon" aria-hidden="true"></span>Olympus</a>
+    <nav class="site-nav" aria-label="Main">
+      <a href="/#how">How it works</a>
+      <a href="/help/on-your-computer/">Help</a>
+      <a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a>
+      <a class="btn" href="/install/">Add Olympus to your AI</a>
+    </nav>
+  </header>
+  <main id="main">
+    <div class="wrap">
+      <h1>How can I use AI with confidential work documents?</h1>
+      <p class="lede">Use an AI that never receives the confidential parts. Either run a model on your own computer, or keep the documents on your computer and give a cloud assistant only the parts that are safe to share. Before anything else, check what your employer or client agreement allows: many forbid pasting client material into consumer AI apps at all.</p>
+
+      <h2>Your options</h2>
+      <ul>
+        <li><strong>A business or enterprise plan</strong> (ChatGPT Business or Enterprise, Claude Team or Enterprise and similar). The provider still receives your documents, under a contract with stronger data protections; how long it keeps them depends on the plan and your settings. This suits material your organisation already allows in that provider's cloud.</li>
+        <li><strong>A local model</strong> (for example through Ollama, LM Studio or Jan). Your documents stay on your computer as long as the model and any tools you connect to it run there too (some of these apps can also use cloud models). The trade-off: local models are weaker than the best cloud models, and the good ones need a powerful machine.</li>
+        <li><strong>A private-by-design cloud service</strong> (for example Proton Lumo or Venice). These promise stronger privacy than mainstream chat apps, but each handles retention and chat history differently, so read their policies: private does not always mean nothing is stored. You are trusting them instead of the big AI companies.</li>
+        <li><strong>Split the work.</strong> Keep the documents on your computer, let a local layer decide what is safe to share, and send only that to a frontier model. This is what Olympus does.</li>
+      </ul>
+
+      <h2>How Olympus handles confidential documents</h2>
+      <p>Olympus keeps your mail, files and messages under your control: it indexes them on your own computer and labels each item Personal, Private or Secret. ChatGPT, Claude and other apps you connect can read excerpts from Personal items. Private items are answered by a model on your computer (or by Venice, if you turn it on): in ChatGPT only you see that answer, in a private panel; other apps get an answer written from the items, which can repeat what they say. Secrets Olympus recognizes, such as passwords and keys, are never sent.</p>
+      <p>Labels are automatic and can be wrong. A new item is labeled Personal at once and checked afterwards, so an app may read it before it moves to Private, and what an app has already received stays with it. Check how your documents are labeled before you rely on them, and mark a folder always Private if everything in it is. The <a href="/privacy/">privacy policy</a> lists exactly what each app receives.</p>
+
+      <h2>A quick checklist</h2>
+      <ol>
+        <li>Check your contract or policy for rules on AI tools.</li>
+        <li>Decide which documents may never leave your computer.</li>
+        <li>Pick a setup where those documents stay local, and test it with a harmless file first.</li>
+        <li>Read what the tool sends where, in its own privacy policy, not its marketing.</li>
+        <li>Check important answers against the documents they cite: AI answers, including Olympus's, can be wrong and are not professional advice.</li>
+      </ol>
+      <p class="meta">Updated 10 November 2026.</p>
+    </div>
+  </main>
+  <footer class="site-foot">
+    <ul>
+      <li><a href="/install/">Install</a></li>
+      <li><a href="/guides/">Guides</a></li>
+      <li><a href="/help/">Help</a></li>
+      <li><a href="/support/">Support</a></li>
+      <li><a href="/privacy/">Privacy</a></li>
+      <li><a href="/terms/">Terms</a></li>
+      <li><a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a></li>
+    </ul>
+    <p>Olympus is open source under the MIT licence and published by Open Coordination Unlimited, Inc.</p>
+  </footer>
+</body>
+</html>

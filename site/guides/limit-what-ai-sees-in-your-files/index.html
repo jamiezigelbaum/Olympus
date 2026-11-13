@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>How can I limit what an AI assistant sees in my files? - Olympus guides</title>
+  <meta name="description" content="Ways to control which of your files, emails and messages ChatGPT, Claude or another AI assistant can read, from connector scopes to a local privacy layer.">
+  <link rel="canonical" href="https://olympusplugin.ai/guides/limit-what-ai-sees-in-your-files/">
+  <meta name="color-scheme" content="light">
+  <meta name="referrer" content="no-referrer">
+  <link rel="stylesheet" href="/assets/brand.css?v=1.0.0">
+  <link rel="stylesheet" href="/style.css?v=1.0.0">
+  <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="icon" href="/favicon-16.png" sizes="16x16" type="image/png">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site-head">
+    <a class="wordmark" href="/" aria-label="Olympus home"><span class="wordmark__icon" aria-hidden="true"></span>Olympus</a>
+    <nav class="site-nav" aria-label="Main">
+      <a href="/#how">How it works</a>
+      <a href="/help/on-your-computer/">Help</a>
+      <a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a>
+      <a class="btn" href="/install/">Add Olympus to your AI</a>
+    </nav>
+  </header>
+  <main id="main">
+    <div class="wrap">
+      <h1>How can I limit what an AI assistant sees in my files?</h1>
+      <p class="lede">Give the assistant access to less: connect only the folders or accounts it needs, use read-only access, and keep anything sensitive behind a layer on your own computer that decides item by item what the assistant may read.</p>
+
+      <h2>What you can control</h2>
+      <ul>
+        <li><strong>Which accounts you connect.</strong> Built-in connectors in ChatGPT or Claude often reach much of an account (Gmail, Drive) once connected, depending on the permissions you grant and your workspace settings. Connect only what you would be comfortable with the provider reading.</li>
+        <li><strong>Folder and scope limits.</strong> Some tools let you pick folders or grant read-only access. Use the narrowest option offered.</li>
+        <li><strong>What gets uploaded versus searched.</strong> Uploading a file gives the provider a copy. Searching it where it lives sends the matching results, though some connectors also keep their own index or copies.</li>
+        <li><strong>Item-by-item rules.</strong> A local layer can judge each document on its own, so a single sensitive file in a shared folder stays out.</li>
+      </ul>
+
+      <h2>How Olympus limits what your AI sees</h2>
+      <p>Olympus keeps your index on your computer and labels each item Personal, Private or Secret. Your AI app can read the parts of Personal items that answer your question, with citations. It never gets the text of Private items or Secrets Olympus recognizes, though apps other than ChatGPT can get an answer written from Private items, which can repeat what they say. Private covers health, money, legal and identity matters by default, or whatever you describe as private in your own words. You can skip folders entirely, keep some folders to names only, and mark folders, labels or senders as always Private. Olympus refuses connected apps that ask it for full access, but it cannot stop an app you let read your files directly.</p>
+      <p>Item names are labeled separately and are Personal by default, so the name of a Private file may be visible even when its contents are not. Labels are automatic and can be wrong, and a new item is labeled Personal at once and checked afterwards, so an app may read it before it moves to Private. Details are in the <a href="/privacy/">privacy policy</a>.</p>
+
+      <h2>Before you connect anything</h2>
+      <ol>
+        <li>List the accounts and folders the assistant actually needs.</li>
+        <li>Check whether the tool uploads copies or searches in place.</li>
+        <li>Find out how to revoke access, and test that it works.</li>
+      </ol>
+      <p class="meta">Updated 10 November 2026.</p>
+    </div>
+  </main>
+  <footer class="site-foot">
+    <ul>
+      <li><a href="/install/">Install</a></li>
+      <li><a href="/guides/">Guides</a></li>
+      <li><a href="/help/">Help</a></li>
+      <li><a href="/support/">Support</a></li>
+      <li><a href="/privacy/">Privacy</a></li>
+      <li><a href="/terms/">Terms</a></li>
+      <li><a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a></li>
+    </ul>
+    <p>Olympus is open source under the MIT licence and published by Open Coordination Unlimited, Inc.</p>
+  </footer>
+</body>
+</html>
