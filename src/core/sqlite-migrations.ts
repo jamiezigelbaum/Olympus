@@ -26,21 +26,41 @@ export interface SqliteMigration {
 // Only `additiveMigration` can mark a migration additive: the mark is this
 // module's own set, not a field another module can set by hand.
 const ADDITIVE_MIGRATIONS = new WeakSet<SqliteMigration>();
-const ADDITIVE_STATEMENT = /^\s*(CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?[A-Za-z_][A-Za-z0-9_]*\s*\(|CREATE\s+INDEX\s+(IF\s+NOT\s+EXISTS\s+)?[A-Za-z_][A-Za-z0-9_]*\s+ON\s|ALTER\s+TABLE\s+[A-Za-z_][A-Za-z0-9_]*\s+ADD\s+(COLUMN\s+)?[A-Za-z_])/i;
+const NAME = '[A-Za-z_][A-Za-z0-9_]*';
+// A new table (no AS SELECT): the previous build never reads or writes it.
+const NEW_TABLE = new RegExp(`^CREATE\\s+TABLE\\s+(IF\\s+NOT\\s+EXISTS\\s+)?${NAME}\\s*\\(`, 'i');
+// A plain index on named columns: no expression the previous build's writes
+// could fail to evaluate, no WHERE, never UNIQUE.
+const NEW_INDEX = new RegExp(`^CREATE\\s+INDEX\\s+(IF\\s+NOT\\s+EXISTS\\s+)?${NAME}\\s+ON\\s+${NAME}\\s*\\(\\s*${NAME}(\\s+(ASC|DESC))?(\\s*,\\s*${NAME}(\\s+(ASC|DESC))?)*\\s*\\)$`, 'i');
+// A nullable column with at most a literal default: the previous build's
+// writes, which never name it, still pass every constraint.
+const NEW_COLUMN = new RegExp(`^ALTER\\s+TABLE\\s+${NAME}\\s+ADD\\s+(COLUMN\\s+)?${NAME}(\\s+(TEXT|INTEGER|REAL|BLOB|NUMERIC))?(\\s+DEFAULT\\s+(NULL|-?[0-9]+(\\.[0-9]+)?|'[^']*'))?$`, 'i');
 /** Words that change or read existing rows, or the shape old code relies on. */
-const NOT_ADDITIVE = /\b(DROP|RENAME|UPDATE|DELETE|INSERT|REPLACE|SELECT|TRIGGER|UNIQUE|VACUUM|PRAGMA|ATTACH|DETACH)\b/i;
+// REFERENCES: a new table pointing at an old one can refuse the previous
+// build's deletes there.
+const NOT_ADDITIVE = /\b(DROP|RENAME|UPDATE|DELETE|INSERT|REPLACE|SELECT|TRIGGER|UNIQUE|VACUUM|PRAGMA|ATTACH|DETACH|REFERENCES)\b/i;
+
+function additiveStatement(body: string): boolean {
+  if (body.includes(';') || NOT_ADDITIVE.test(body)) return false;
+  return NEW_TABLE.test(body) || NEW_INDEX.test(body) || NEW_COLUMN.test(body);
+}
 
 /**
- * A migration that only adds: `CREATE TABLE`, `CREATE INDEX` (not unique) or
- * `ALTER TABLE … ADD COLUMN`, one statement each. A build that knows only the
- * version before it still opens the store. Throws on anything else, so a
- * migration that rewrites, drops or renames cannot be declared additive.
+ * A migration that only adds: a new table, a plain non-unique index on named
+ * columns, or a nullable column with at most a literal default; one statement
+ * each. A build that knows only the version before it still opens the store
+ * and writes it. Throws on anything else, so a migration that rewrites, drops,
+ * renames or constrains cannot be declared additive.
+ *
+ * The code that reads an added column must treat NULL as "not known yet": the
+ * previous build writes rows without it, and its INSERT OR REPLACE writes a
+ * row back with the column at its default.
  */
 export function additiveMigration(version: number, name: string, statements: readonly string[]): SqliteMigration {
   if (statements.length === 0) throw new OperationError('config_error', `Additive migration "${name}" has no statements.`);
   for (const statement of statements) {
-    const body = statement.trim().replace(/;$/, '');
-    if (!ADDITIVE_STATEMENT.test(body) || NOT_ADDITIVE.test(body) || body.includes(';')) {
+    const body = statement.trim().replace(/;$/, '').trim();
+    if (!additiveStatement(body)) {
       throw new OperationError('config_error', `Additive migration "${name}" has a statement that is not additive: ${body.slice(0, 80)}`);
     }
   }

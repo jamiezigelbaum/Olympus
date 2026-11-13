@@ -43,7 +43,9 @@ describe('additive migrations', () => {
     for (const statement of [
       'CREATE TABLE IF NOT EXISTS extra (id INTEGER PRIMARY KEY)',
       'CREATE INDEX extra_id ON extra(id)',
-      'ALTER TABLE items ADD COLUMN note TEXT NOT NULL DEFAULT \'\'',
+      'ALTER TABLE items ADD COLUMN note TEXT DEFAULT \'\'',
+      'ALTER TABLE items ADD COLUMN score REAL DEFAULT 0.5;',
+      'CREATE INDEX IF NOT EXISTS items_body_id ON items(body DESC, id)',
     ]) expect(isAdditiveMigration(additiveMigration(9, 'ok', [statement]))).toBe(true);
     for (const statement of [
       'DROP TABLE items',
@@ -57,6 +59,13 @@ describe('additive migrations', () => {
       'CREATE TRIGGER t AFTER INSERT ON items BEGIN SELECT 1; END',
       'CREATE TABLE a (id INTEGER); DROP TABLE items',
       'VACUUM',
+      // Each of these makes a write the previous build does today fail.
+      'ALTER TABLE items ADD COLUMN required TEXT NOT NULL DEFAULT \'\'',
+      'ALTER TABLE items ADD COLUMN positive INTEGER CHECK (positive > 0)',
+      'ALTER TABLE items ADD COLUMN owner INTEGER REFERENCES owners(id)',
+      'CREATE TABLE notes (id INTEGER PRIMARY KEY, item INTEGER REFERENCES items(id))',
+      "CREATE INDEX by_json ON items(json_extract(body, '$.x'))",
+      'CREATE INDEX recent ON items(id) WHERE body IS NOT NULL',
     ]) expect(() => additiveMigration(9, 'not_ok', [statement])).toThrow('not additive');
     expect(() => additiveMigration(9, 'empty', [])).toThrow('no statements');
   });

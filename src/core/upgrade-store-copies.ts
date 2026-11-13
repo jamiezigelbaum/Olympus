@@ -1,9 +1,11 @@
 // The copies an upgrade takes of every store, made by `olympus worker upgrade`
 // itself after the previous version has stopped and before the new one
-// starts. A stopped store is copied as a file: checkpointed first, then cloned
-// where the disk can (APFS, btrfs, XFS: instant) or copied plainly. Nothing of
-// this runs in the engine's boot or on its loop, where a VACUUM INTO of every
-// store took 37 minutes at 39 GB and held the engine's only thread.
+// starts. A stopped store is copied as a file, by a child Bun process that
+// holds the store's write lock for the copy: any hot rollback journal is
+// recovered and the WAL folded in first, then the file is cloned where the
+// disk can (APFS, btrfs, XFS: instant) or copied plainly, and synced. Nothing
+// of this runs in the engine's boot or on its loop, where a VACUUM INTO of
+// every store took 37 minutes at 39 GB and held the engine's only thread.
 //
 // Each copy is `<store>.pre-schema-upgrade.bak`, written as a `.partial` and
 // renamed into place, and recorded with the boot's own backups
@@ -12,7 +14,7 @@
 // its own for that file.
 
 import { spawnSync } from 'node:child_process';
-import { chmodSync, constants, copyFileSync, existsSync, lstatSync, readdirSync, renameSync, rmSync, statfsSync, statSync, utimesSync } from 'node:fs';
+import { chmodSync, closeSync, fsyncSync, lstatSync, openSync, readdirSync, renameSync, rmSync, statfsSync, statSync, utimesSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { recordSchemaBackup, removeAbandonedBackupCopies } from './boot-progress.ts';
 import { olympusDataRoot, type LayoutEnv } from './olympus-layout.ts';
@@ -72,8 +74,8 @@ export function copyStoresBeforeUpgrade(env: LayoutEnv, options: {
   const started = performance.now();
   const stores = olympusStoreFiles(env);
   if (stores.length === 0) return { stores: 0, bytes: 0, ms: 0 };
-  checkpointStores(stores, options.bunBin);
-  const bytes = stores.reduce((sum, file) => sum + statSync(file).size, 0);
+  // The WAL is counted too: it is folded into the file before the copy.
+  const bytes = olympusStoreBytes(env);
   const free = (options.freeBytes ?? defaultFreeBytes)(dirname(stores[0]!));
   if (free < bytes + SPACE_MARGIN_BYTES) {
     throw new OperationError(
@@ -83,59 +85,95 @@ export function copyStoresBeforeUpgrade(env: LayoutEnv, options: {
     );
   }
   options.log?.(`Copying ${stores.length} stores (${formatBytes(bytes)}) before the update.`);
+  const pairs = stores.map((file) => [file, `${upgradeCopyPath(file)}.${process.pid}.partial`] as const);
   const made: string[] = [];
   try {
-    for (const file of stores) {
-      const copy = upgradeCopyPath(file);
-      removeAbandonedBackupCopies(copy);
-      const partial = `${copy}.${process.pid}.partial`;
+    for (const [file, partial] of pairs) {
+      removeAbandonedBackupCopies(upgradeCopyPath(file));
       rmSync(partial, { force: true });
       // Recorded before the copy starts, so a delete or forget finds one a crash left part way.
-      recordSchemaBackup(env, { storeId: 'upgrade', dbPath: file, backupPath: copy });
-      // A clone where the disk has one, else a plain copy.
-      copyFileSync(file, partial, constants.COPYFILE_FICLONE);
+      recordSchemaBackup(env, { storeId: 'upgrade', dbPath: file, backupPath: upgradeCopyPath(file) });
+    }
+    copyUnderWriteLock(pairs, options.bunBin);
+    for (const [file, partial] of pairs) {
       chmodSync(partial, 0o600);
-      // A clone keeps the store's own times; the rollback finds copies by when they were made.
+      // A clone keeps the store's own times; the rollback finds copies by when
+      // they were made, and the boot trusts a copy only if it is not older
+      // than its store (upgradeCopyExists).
       const now = new Date();
       utimesSync(partial, now, now);
-      renameSync(partial, copy);
-      made.push(copy);
+      renameSync(partial, upgradeCopyPath(file));
+      made.push(upgradeCopyPath(file));
     }
+    for (const directory of new Set(stores.map((file) => dirname(file)))) syncDirectory(directory);
   } catch (error) {
+    for (const [, partial] of pairs) rmSync(partial, { force: true });
     for (const copy of made) rmSync(copy, { force: true });
     throw error;
   }
   return { stores: stores.length, bytes, ms: Math.round(performance.now() - started) };
 }
 
-/** Whether the upgrade copied this store before the running boot: the boot then takes no copy of its own. */
+/**
+ * Whether the upgrade copied this store before the running boot: the boot then
+ * takes no copy of its own. A copy older than its store is one an earlier
+ * upgrade left behind (its cleanup failed), and protects nothing now.
+ */
 export function upgradeCopyExists(dbPath: string): boolean {
-  return existsSync(upgradeCopyPath(dbPath));
+  try {
+    return statSync(upgradeCopyPath(dbPath)).mtimeMs >= statSync(dbPath).mtimeMs;
+  } catch {
+    return false;
+  }
 }
 
 /**
- * Folds each store's WAL into it, so the file alone is the store. Run in a
- * child Bun process: this module is loaded where bun:sqlite is not.
+ * Copies each store to its partial file in a child Bun process (this module is
+ * loaded where bun:sqlite is not), holding the store's write lock for the
+ * copy so nothing else running can change it underneath: reading it first
+ * recovers a hot rollback journal, the WAL is folded in, and the copy is
+ * synced to disk before the lock is let go.
  */
-function checkpointStores(stores: string[], bunBin: string | undefined): void {
-  const withWal = stores.filter((file) => { try { return statSync(`${file}-wal`).size > 0; } catch { return false; } });
-  if (withWal.length === 0) return;
+function copyUnderWriteLock(pairs: ReadonlyArray<readonly [string, string]>, bunBin: string | undefined): void {
   const executable = bunBin ?? (typeof Bun !== 'undefined' ? process.execPath : 'bun');
   const script = [
     "import { Database } from 'bun:sqlite';",
-    'for (const path of JSON.parse(process.argv.at(-1))) {',
+    "import { closeSync, constants, copyFileSync, fsyncSync, openSync } from 'node:fs';",
+    'for (const [path, partial] of JSON.parse(process.argv.at(-1))) {',
     '  const db = new Database(path, { create: false });',
-    "  try { db.exec('PRAGMA busy_timeout = 5000;'); const row = db.query('PRAGMA wal_checkpoint(TRUNCATE)').get(); if (row.busy) throw new Error('busy'); }",
-    '  finally { db.close(); }',
+    '  try {',
+    "    db.exec('PRAGMA busy_timeout = 5000;');",
+    "    db.query('SELECT COUNT(*) FROM sqlite_master').get();",
+    "    if (String(db.query('PRAGMA journal_mode').get().journal_mode).toLowerCase() === 'wal') {",
+    "      const row = db.query('PRAGMA wal_checkpoint(TRUNCATE)').get(); if (row.busy) throw new Error('busy');",
+    '    }',
+    "    db.exec('BEGIN IMMEDIATE');",
+    '    try {',
+    '      copyFileSync(path, partial, constants.COPYFILE_FICLONE);',
+    "      const fd = openSync(partial, 'r'); try { fsyncSync(fd); } finally { closeSync(fd); }",
+    "    } finally { db.exec('ROLLBACK'); }",
+    '  } finally { db.close(); }',
     '}',
   ].join('\n');
-  const result = spawnSync(executable, ['-e', script, JSON.stringify(withWal)], { encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'] });
+  const result = spawnSync(executable, ['-e', script, JSON.stringify(pairs)], { encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'] });
   if (result.status !== 0) {
     throw new OperationError(
       'config_error',
-      'The upgrade could not fold a store\'s write-ahead log into it before copying it; another process may still have it open.',
+      'The upgrade could not copy a store before updating it; another process may still have it open.',
       'Run `olympus worker status`, stop anything else using Olympus, then run the upgrade again. Nothing was changed.',
     );
+  }
+}
+
+function syncDirectory(directory: string): void {
+  let fd: number | undefined;
+  try {
+    fd = openSync(directory, 'r');
+    fsyncSync(fd);
+  } catch {
+    // Not every platform syncs a directory; the copies themselves are synced.
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
 }
 

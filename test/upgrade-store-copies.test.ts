@@ -5,13 +5,13 @@
 // no copy of its own, and a failed upgrade puts the copies back.
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { removeSchemaBackupsSince, restoreSchemaBackupsSince } from '../src/core/boot-progress.ts';
 import { olympusDataRoot } from '../src/core/olympus-layout.ts';
 import { readSqliteSchemaVersion, runSqliteMigrations, type SqliteMigration } from '../src/core/sqlite-migrations.ts';
-import { copyStoresBeforeUpgrade, olympusStoreFiles, upgradeCopyPath } from '../src/core/upgrade-store-copies.ts';
+import { copyStoresBeforeUpgrade, olympusStoreFiles, upgradeCopyExists, upgradeCopyPath } from '../src/core/upgrade-store-copies.ts';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -94,6 +94,46 @@ describe('the upgrade copies the stores before the new version starts', () => {
     copyStoresBeforeUpgrade(env, { bunBin: process.execPath });
     expect(removeSchemaBackupsSince(env, since)).toBe(1);
     expect(existsSync(upgradeCopyPath(store))).toBe(false);
+  });
+
+  test('a store a writer died inside is recovered before it is copied, not copied half written', () => {
+    const { env, root } = fixture();
+    const store = join(root, 'app-release-log.sqlite');
+    const db = new Database(store, { create: true });
+    db.exec('PRAGMA journal_mode = DELETE; CREATE TABLE kept (value TEXT);');
+    db.transaction(() => { for (let i = 0; i < 2000; i += 1) db.query('INSERT INTO kept (value) VALUES (?)').run('committed'); })();
+    db.close();
+    // A writer whose uncommitted update spills into the file, and that dies
+    // without rolling back: its journal is left hot, the file half changed.
+    const writer = Bun.spawnSync([process.execPath, '-e', `
+      const { Database } = require('bun:sqlite');
+      const db = new Database(${JSON.stringify(store)});
+      db.exec("PRAGMA cache_size = 1; BEGIN; UPDATE kept SET value = 'uncommitted';");
+      process.kill(process.pid, 'SIGKILL');
+    `]);
+    expect(writer.signalCode).toBe('SIGKILL');
+    expect(existsSync(`${store}-journal`)).toBe(true);
+    copyStoresBeforeUpgrade(env, { bunBin: process.execPath });
+    const copy = new Database(upgradeCopyPath(store), { readonly: true });
+    expect(copy.query('PRAGMA integrity_check').get()).toEqual({ integrity_check: 'ok' });
+    expect(copy.query('SELECT value, COUNT(*) AS n FROM kept GROUP BY value').all()).toEqual([{ value: 'committed', n: 2000 }]);
+    copy.close();
+  });
+
+  test('a copy an earlier upgrade left behind does not stand in for a new one', () => {
+    const { env, root } = fixture();
+    const store = join(root, 'tier-ledger.sqlite');
+    storeAtV1(store, 2);
+    copyStoresBeforeUpgrade(env, { bunBin: process.execPath });
+    expect(upgradeCopyExists(store)).toBe(true);
+    // The store has been written since: the copy protects nothing now.
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(upgradeCopyPath(store), old, old);
+    expect(upgradeCopyExists(store)).toBe(false);
+    const db = new Database(store);
+    runSqliteMigrations(db, 'fixture', MIGRATIONS, { env, log: () => {} });
+    db.close();
+    expect(existsSync(`${store}.pre-schema-1.bak`)).toBe(true);
   });
 
   test('without room for the copies the upgrade stops before it changes anything', () => {
