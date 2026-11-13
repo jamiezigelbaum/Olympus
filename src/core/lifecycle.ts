@@ -1154,7 +1154,9 @@ function waitForWorkerReadiness(
     // Read on every poll: the window restarts from the last poll that saw
     // the worker moving, so the full window begins when it stops.
     const boot = readBoot();
-    if (boot && boot.phase !== 'done') bootStarts.add(boot.pid);
+    // Only a boot that is live and began during this wait counts: a stopped
+    // predecessor's unfinished file must not use up a slot (Astra on #1600).
+    if (boot && bootProgressIsLive(boot, now) && Date.parse(boot.startedAt) >= waitStartedAt) bootStarts.add(boot.pid);
     const bootMoving = bootStarts.size <= PROGRESS_MAX_STARTS && bootProgressIsLive(boot, now);
     const front = bootMoving ? undefined : readFront();
     if (front && front.phase !== 'done') frontStarts.add(front.pid);
