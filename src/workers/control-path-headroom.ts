@@ -24,6 +24,7 @@
  * one lane has.
  */
 
+import { isMainThread } from 'node:worker_threads';
 import { engineRoleFromEnv, type EngineRole } from '../core/engine-split.ts';
 
 export const CONTROL_PATH_SLICE_MS = 20;
@@ -39,7 +40,8 @@ export const CONTROL_PATH_FREEZE_LOG_MS = 2_000;
  * background both log to the same stream, and only the front answers
  * requests, so each line names its process.
  */
-export function controlPathFreezeSubject(role: EngineRole): string {
+export function controlPathFreezeSubject(role: EngineRole, mainThread = true): string {
+  if (!mainThread) return 'a background thread was blocked';
   if (role === 'front') return 'the front process could not answer requests';
   if (role === 'background') return 'the background process was blocked';
   return 'the worker could not answer requests';
@@ -89,7 +91,7 @@ export class ControlPathHeadroom {
     this.turn = options.turn ?? ((ms) => new Promise<void>((resolve) => { setTimeout(resolve, ms); }));
     this.log = options.log ?? ((line) => console.error(line));
     this.freezeLogMs = options.freezeLogMs ?? CONTROL_PATH_FREEZE_LOG_MS;
-    this.freezeSubject = controlPathFreezeSubject(options.role ?? roleFromEnv());
+    this.freezeSubject = controlPathFreezeSubject(options.role ?? roleFromEnv(), isMainThread);
     this.lastTurnAt = this.now();
   }
 

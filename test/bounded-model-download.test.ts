@@ -4,6 +4,7 @@ import { createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, rmS
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { installBuiltInReasoning } from '../src/workers/source-index/built-in-reasoning/install.ts';
+import { createTestClock } from './helpers/test-clock.ts';
 import { QWEN35_4B } from '../src/workers/source-index/built-in-reasoning/manifest.ts';
 import { downloadPinnedFile } from '../src/workers/source-index/pinned-download.ts';
 
@@ -222,4 +223,29 @@ test('a download hands the thread back between chunks, so the worker keeps answe
   // Every chunk offers the event loop a turn; the shared headroom decides when to take it.
   expect(turns).toBe(16);
   expect(statSync(f.target).size).toBe(16 * block.length);
+});
+
+
+test('a large buffered response yields before 250 ms of write/hash work accumulates', async () => {
+  const size = 2 * 1024 ** 2;
+  const f = fixture(size);
+  mkdirSync(join(f.target, '..'), { recursive: true });
+  const clock = createTestClock();
+  let lastTurn = clock.now();
+  let longest = 0;
+  await downloadPinnedFile({
+    fetchImpl: (async () => new Response(Buffer.alloc(size, 37))) as unknown as typeof fetch,
+    url: 'https://test/model', target: f.target, partial: `${f.target}.partial`, expectedBytes: size,
+    algorithm: 'sha256', digest: digest(size), encoding: 'hex', noun: 'test model',
+    stallMs: 60_000, verifyTimeoutMs: 60_000, keepPartial: true,
+    error: (_reason, message) => new Error(message), onStart: () => {}, onProgress: () => {},
+    // Simulate slow storage deterministically, independent of CI's disk speed.
+    write: (_fd, bytes) => { clock.set(clock.now() + bytes.byteLength / 1024); },
+    turn: async () => {
+      longest = Math.max(longest, clock.now() - lastTurn);
+      await clock.advance(0);
+      lastTurn = clock.now();
+    },
+  });
+  expect(longest).toBeLessThan(250);
 });
