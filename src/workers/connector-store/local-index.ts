@@ -16381,6 +16381,7 @@ function withPinnedNewestChatHits(input: {
         input.locatorPathScope,
       ),
       newestInStore,
+      pinAppended: true,
     });
   }
   return result;

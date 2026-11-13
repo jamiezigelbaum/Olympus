@@ -85,7 +85,7 @@ test('capture contains metadata only and replay reproduces live seats byte for b
     const json = readFileSync(path, 'utf8');
     for (const secret of [query, text, 'never serialize this hint', 'unrelated material']) expect(json).not.toContain(secret);
     expect(capture.runs[0]!.lanes[0]!.items.map(i => i.rank)).toEqual([1, 2, 3]);
-    const itemKeys = new Set(['candidateId', 'providerItemId', 'localItemId', 'rank', 'adapterScore', 'rerankerScore', 'keywordFirst', 'nameLeader', 'conceptShare', 'newestInStore', 'authoredAtMs', 'packEligible', 'expected', 'holdsQuote', 'matches']);
+    const itemKeys = new Set(['candidateId', 'providerItemId', 'localItemId', 'rank', 'adapterScore', 'rerankerScore', 'keywordFirst', 'nameLeader', 'conceptShare', 'newestInStore', 'pinAppended', 'authoredAtMs', 'packEligible', 'expected', 'holdsQuote', 'matches']);
     for (const run of capture.runs) for (const lane of run.lanes) for (const item of lane.items) {
       expect(Object.keys(item).every(key => itemKeys.has(key))).toBe(true);
       expect(Object.entries(item).filter(([key]) => key !== 'matches').every(([, value]) => ['string', 'number', 'boolean'].includes(typeof value))).toBe(true);
@@ -212,18 +212,26 @@ test('capture startup actually prepares a configured reranker and rejects a brok
 });
 
 test('a smaller depth keeps the chat store\'s newest-message pins, as the adapter would at that depth', () => {
+  type Item = { providerItemId: string; newestInStore?: number; pinAppended?: boolean };
+  const item = (id: string, newestInStore?: number, pinAppended = false): Item => ({ providerItemId: id, ...(newestInStore ? { newestInStore } : {}), ...(pinAppended ? { pinAppended } : {}) });
+  const ids = (items: Item[]) => items.map(i => i.providerItemId);
   // Captured at depth 5 from an adapter that pins its two newest messages: three hits, then the pins it appended.
-  const item = (id: string, newestInStore?: number) => ({ providerItemId: id, ...(newestInStore ? { newestInStore } : {}) });
-  const captured = [item('h1'), item('h2'), item('h3'), item('p1', 1), item('p2', 2)];
+  const captured = [item('h1'), item('h2'), item('h3'), item('p1', 1, true), item('p2', 2, true)];
   // At depth 3 the adapter keeps one hit and appends both pins; a plain prefix would drop both pins.
-  expect(laneAtDepth(captured, 3).map(i => i.providerItemId)).toEqual(['h1', 'p1', 'p2']);
+  expect(ids(laneAtDepth(captured, 3))).toEqual(['h1', 'p1', 'p2']);
   // Depth 2 leaves room for one pin beside a hit, depth 1 for the hit alone.
-  expect(laneAtDepth(captured, 2).map(i => i.providerItemId)).toEqual(['h1', 'p1']);
-  expect(laneAtDepth(captured, 1).map(i => i.providerItemId)).toEqual(['h1']);
-  // A pin the adapter found among its hits keeps its place.
-  const kept = [item('h1'), item('p1', 1), item('h2'), item('h3'), item('p2', 2)];
-  expect(laneAtDepth(kept, 3).map(i => i.providerItemId)).toEqual(['h1', 'p1', 'p2']);
+  expect(ids(laneAtDepth(captured, 2))).toEqual(['h1', 'p1']);
+  expect(ids(laneAtDepth(captured, 1))).toEqual(['h1']);
+  // A pin the adapter found among its ranked hits keeps its place.
+  const kept = [item('h1'), item('p1', 1), item('h2'), item('h3'), item('p2', 2, true)];
+  expect(ids(laneAtDepth(kept, 3))).toEqual(['h1', 'p1', 'p2']);
+  // Ranked pins at the tail are hits, not appended pins (Codex on #1620): at depth 1 the top hit stays.
+  const ranked = [item('p2', 2), item('p1', 1)];
+  expect(laneAtDepth(ranked, 1)).toEqual([{ providerItemId: 'p2' }]);
+  // A ranked pin cut at a smaller depth is appended there.
+  const cut = [item('h1'), item('h2'), item('p1', 1)];
+  expect(laneAtDepth(cut, 2)).toEqual([item('h1'), item('p1', 1, true)]);
   // Without pins a smaller depth is the prefix.
-  expect(laneAtDepth([item('h1'), item('h2'), item('h3')], 2).map(i => i.providerItemId)).toEqual(['h1', 'h2']);
+  expect(ids(laneAtDepth([item('h1'), item('h2'), item('h3')], 2))).toEqual(['h1', 'h2']);
   expect(laneAtDepth(captured, 5)).toEqual(captured);
 });

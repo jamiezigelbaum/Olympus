@@ -26,6 +26,7 @@ export interface CapturedItem {
   nameLeader?: boolean;
   conceptShare?: number;
   newestInStore?: number;
+  pinAppended?: boolean;
   authoredAtMs?: number;
   /** False when the final visibility/model-policy check excluded the item. */
   packEligible: boolean;
@@ -41,7 +42,7 @@ export interface CapturedLane {
   items: CapturedItem[];
 }
 export interface PoolCapture {
-  version: 1;
+  version: 2;
   questionId: string;
   storeDepth: number;
   poolSize: number;
@@ -167,14 +168,14 @@ export async function captureEvalPack(input: Omit<Parameters<typeof buildEvalPac
       ...(hit.score !== undefined ? { adapterScore: hit.score } : {}),
       ...(score !== undefined ? { rerankerScore: Number.isFinite(score) ? score : score > 0 ? 'Infinity' as const : '-Infinity' as const } : {}),
       ...(hit.keywordLeader ? { keywordFirst: hit.keywordLeader.kinds.includes('keyword_first'), nameLeader: hit.keywordLeader.kinds.includes('name'), conceptShare: hit.keywordLeader.conceptShare } : {}),
-      ...(hit.newestInStore !== undefined ? { newestInStore: hit.newestInStore, authoredAtMs: time } : {}),
+      ...(hit.newestInStore !== undefined ? { newestInStore: hit.newestInStore, authoredAtMs: time, ...(hit.pinAppended ? { pinAppended: true } : {}) } : {}),
       packEligible: finalVisibility?.get(candidateId) !== false && !denied.has(key(hit.corpusId, hit.sourceItem.providerItemId)),
       expected: matches.some(m => m.expected), holdsQuote: matches.some(m => m.holdsQuote), matches,
     };
   };
   const capturedCandidates = new Set(runs.flatMap(run => run.lanes.flatMap(lane => lane.items.map(routedHitCandidateId)))).size;
   const capture: PoolCapture = {
-    version: 1, questionId: input.question.id, storeDepth: input.captureDepth,
+    version: 2, questionId: input.question.id, storeDepth: input.captureDepth,
     poolSize: rerankEnabled ? MAX_RERANK_POOL_SIZE : input.maxResults, maxResults: input.maxResults,
     temporalIntent, strengthAllocation: rerankEnabled, rerankOutcome: outcome,
     scoreLimit: MAX_RERANK_POOL_SIZE, capturedCandidates,

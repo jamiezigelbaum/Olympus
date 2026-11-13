@@ -40396,7 +40396,8 @@ function withPinnedNewestChatHits(input) {
     }
     result.push({
       ...connectorStoreHitFromRow(input.store, row, CHAT_RECENCY_WEIGHT * reciprocalRank(index + 1), input.resultProjector, input.locatorPathScope),
-      newestInStore
+      newestInStore,
+      pinAppended: true
     });
   }
   return result;
@@ -199036,7 +199037,7 @@ function createEmailSourceWorker(options = {}) {
               kind: "source_index_search",
               corpus_id: connectorStore.corpusId,
               retrieval_source: "local_index",
-              hits: hits.map(({ corpusId: hitCorpusId, trustDomain: _hitTrustDomain, trustTier: _hitTrustTier, keywordLeader: _hitKeywordLeader, newestInStore: _hitNewestInStore, ...hit }) => addSelectedItemToSearchHit(hitCorpusId, hit)),
+              hits: hits.map(({ corpusId: hitCorpusId, trustDomain: _hitTrustDomain, trustTier: _hitTrustTier, keywordLeader: _hitKeywordLeader, newestInStore: _hitNewestInStore, pinAppended: _hitPinAppended, ...hit }) => addSelectedItemToSearchHit(hitCorpusId, hit)),
               ...secretLocations.length > 0 ? {
                 secret_locations: secretLocations.map((location) => ({
                   source: location.source,

@@ -2678,6 +2678,8 @@ describe('createConnectorStoreCorpusAdapter', () => {
     expect(freshHit.newestInStore).toBe(1);
     expect(response.hits.flatMap((hit) => hit.newestInStore ?? []).sort()).toEqual([1, 2]);
     expect(ids).toContain('fresh-2');
+    // Both were appended, not ranked, and say so for pool replay.
+    expect(response.hits.filter((hit) => hit.pinAppended).map((hit) => hit.sourceItem.providerItemId).sort()).toEqual(['fresh', 'fresh-2']);
     expect(ids).toHaveLength(5);
     // recentItems returns newest-first, skips chunk-less items, and is capped.
     const recent = store.recentItems(3);

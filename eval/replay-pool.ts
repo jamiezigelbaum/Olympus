@@ -34,36 +34,35 @@ export interface ReplayResult {
  * A captured store list as its adapter would return it at a smaller depth.
  * Store hits are prefix-stable, but a chat store pins its newest messages
  * inside every limit (withPinnedNewestChatHits in local-index.ts): a pin it
- * found among its hits keeps its place, the rest are appended after the
- * lowest unpinned hits are evicted to make room, one hit always kept. A plain prefix would drop pins a
- * real smaller-depth search still returns (Codex on #1617). Pins appended at
- * capture are the trailing run of pinned items; a pin's number says its order.
+ * found among its ranked hits keeps its place, and the rest, captured with
+ * pinAppended, are appended after the lowest unpinned hits are evicted to
+ * make room, one hit always kept. A plain prefix would drop pins a real
+ * smaller-depth search still returns (Codex on #1617).
  */
-export function laneAtDepth<T extends { newestInStore?: number }>(items: readonly T[], depth: number): T[] {
+export function laneAtDepth<T extends { newestInStore?: number; pinAppended?: boolean }>(items: readonly T[], depth: number): T[] {
   if (depth >= items.length) return [...items];
-  let tail = items.length;
-  while (tail > 0 && items[tail - 1]!.newestInStore !== undefined) tail -= 1;
   const pins = items.filter(item => item.newestInStore !== undefined).sort((a, b) => a.newestInStore! - b.newestInStore!);
   if (pins.length === 0) return items.slice(0, depth);
-  const hits = items.slice(0, tail).slice(0, depth);
+  const hits = items.filter(item => !item.pinAppended).slice(0, depth);
   const pinCount = Math.min(pins.length, hits.length > 0 ? depth - 1 : depth);
-  // A hit the adapter would not pin at this depth carries no pin number.
+  // A ranked hit the adapter would not pin at this depth carries no pin number.
   const result = hits.map(item => item.newestInStore !== undefined && item.newestInStore > pinCount
     ? (({ newestInStore: _unpinned, ...rest }) => rest as T)(item) : item);
   for (const pin of pins.slice(0, pinCount)) {
     if (result.includes(pin)) continue;
+    const appended = pin.pinAppended ? pin : (({ newestInStore: _n, ...rest }) => ({ ...rest, newestInStore: pin.newestInStore, pinAppended: true }) as unknown as T)(pin);
     while (result.length >= depth) {
       let last = result.length - 1;
       while (last > 0 && result[last]!.newestInStore !== undefined) last -= 1;
       result.splice(last, 1);
     }
-    result.push(pin);
+    result.push(appended);
   }
   return result;
 }
 
 export function replayPool(capture: PoolCapture, variant: ReplayVariant): ReplayResult {
-  if (capture.version !== 1) throw new Error('Unsupported pool capture version.');
+  if (capture.version !== 2) throw new Error('Unsupported pool capture version.');
   for (const [name, value] of Object.entries(variant)) {
     if (name !== 'temporalIntent' && (!Number.isSafeInteger(value) || Number(value) < 1)) throw new Error(`${name} must be a positive integer.`);
   }

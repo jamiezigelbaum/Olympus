@@ -107,6 +107,10 @@ export interface SourceIndexSearchHit {
   // the store's cut (1 = newest). A question with temporal intent seats them
   // in the pack (withReservedRecencySeats). Search routes never return it.
   newestInStore?: number;
+  // Internal: the pinned message was not among the store's ranked hits and
+  // was appended to the cut, so a smaller cut places it again (eval pool
+  // replay, laneAtDepth). Search routes never return it.
+  pinAppended?: true;
   rawExposed: false;
 }
 
