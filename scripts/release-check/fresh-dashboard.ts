@@ -145,7 +145,8 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
       if (!await pick()) return sourceAction(s, '^Connect$');
       const setup = `[...document.querySelectorAll('[data-source-setup]')].find(e=>e.getAttribute('data-source-setup').startsWith(${JSON.stringify(`${s.id}.`)}))`;
       const press = () => panel<boolean>(`(() => { const setup=${setup}; const e=setup ? [...setup.querySelectorAll('button')].find(e=>/^Connect$/.test(e.textContent.trim())) : null; if(!e || e.disabled || !(${visible})(e)) return false; e.click(); return true; })()`, Boolean);
-      const heldBy = () => panel<string>(`(()=>{const setup=${setup}; return setup?.querySelector('.blocked')?.textContent?.trim() || '';})()`, value => typeof value === 'string' && value.length > 0).catch(() => undefined);
+      // The sheet's own lock line, plus the page's blocker banner, which names the model in the way.
+      const heldBy = () => panel<string>(`(()=>{const setup=${setup}; const own=setup?.querySelector('.blocked')?.textContent?.trim() || ''; const page=document.querySelector('[data-blocker] .name')?.textContent?.trim() || ''; return [own, page && page !== own ? 'page says: ' + page : ''].filter(Boolean).join('; ');})()`, value => typeof value === 'string' && value.length > 0).catch(() => undefined);
       // A fresh install locks Connect until its private models are ready (a multi-GB download). Wait while the
       // product's own progress text keeps changing; fail with that text once it stops moving or the bound passes.
       const deadline = Date.now() + (timings.modelWaitMs ?? 30 * 60_000);
