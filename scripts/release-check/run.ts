@@ -1585,6 +1585,8 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
       } else if (ready && !options.skipSuite) {
         run.errors.push('the run exceeded its time budget before the agent suite');
       }
+      // Proof only (draft #1573): reach the front stage on rc.4 even when ingest did not settle.
+      if (!ready && options.engineSplit && !options.skipArchive) await run.inLeg('archive', () => runFrontSteady(run));
       if (ready) {
         await run.inLeg('screenshots', () => captureScreenshots(run, options.outDir));
         if (Date.now() < deadline) await run.inLeg('inbox', () => runInboxLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the Ask page and Inbox leg');
