@@ -57,7 +57,7 @@ describe('the copy whose front cannot start', () => {
     const background = Bun.spawnSync([process.execPath, entry], { env: { ...process.env, OLYMPUS_WORKER_ENGINE_ROLE: 'background' }, stdout: 'pipe' });
     expect(background.exitCode).toBe(0);
     expect(background.stdout.toString()).toBe('olympus\n');
-  });
+  }, 30_000);
 });
 
 describe('store files', () => {

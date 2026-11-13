@@ -1366,8 +1366,15 @@ async function prepareSplitUpdate(run: Run, workDir: string, beforeVersion: stri
   const storeFiles = saved.result?.ok === true ? Number(saved.result.count) : undefined;
 
   const obs: ForcedFailureObservation = { installer: { failed: false }, engine: { ready: false }, beforeVersion: beforeVersion ?? null };
+  // A copy that could not be made proves nothing about rollback: the checks fail rather than read the untouched release as rolled back.
+  let broken: string;
+  try { broken = brokenBundle(run.options.candidateDir, workDir); } catch (error) {
+    const detail = `the copy whose front cannot start was not made: ${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`;
+    for (const check of forcedFailureChecks(obs)) run.add({ ...check, status: 'fail', detail });
+    await run.agent('front-mark', '', 60_000);
+    return { ...(set ? { set } : {}), ...(storeFiles !== undefined ? { storeFiles } : {}) };
+  }
   try {
-    const broken = brokenBundle(run.options.candidateDir, workDir);
     await run.phase('upgrade-forced-failure', () => run.machine!.upgrade(broken));
   } catch (error) {
     obs.installer = { failed: true, detail: (error instanceof Error ? error.message : String(error)).slice(0, 300) };

@@ -535,6 +535,15 @@ describe('the update to a split engine, against a scripted machine (ops#151)', (
     expect(checkOf(report, 'upgrade.split.stores')?.status).toBe('fail');
   }, 240_000);
 
+  test('a candidate the broken copy cannot be made from fails the forced-failure checks instead of reading the untouched release as rolled back', async () => {
+    const report = await runReleaseCheck(splitOptions());
+    for (const id of ['upgrade.forced-failure.installer', 'upgrade.forced-failure.rollback', 'upgrade.forced-failure.stores']) {
+      expect(checkOf(report, id)?.status).toBe('fail');
+      expect(checkOf(report, id)?.detail).toContain('was not made');
+    }
+    expect(driverLog().filter((line) => line.startsWith('upgrade'))).toHaveLength(1);
+  }, 120_000);
+
   test('a front that crashes after the real update fails front.steady', async () => {
     realCandidate();
     process.env.FAKE_FRONT_CRASH = '1';
