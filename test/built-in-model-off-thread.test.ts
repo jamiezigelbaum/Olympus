@@ -41,7 +41,7 @@ test('the shipped lifecycle worker installs pinned bytes, reports speech progres
   let releaseDownload!: () => void;
   const downloadGate = new Promise<void>(resolve => { releaseDownload = resolve; });
   const script = join(dir, 'llama-server');
-  writeFileSync(script, `#!${process.execPath}\nconst args = process.argv.slice(2);\nconst value = flag => args[args.indexOf(flag) + 1];\nconst token = (await Bun.file(value('--api-key-file')).text()).trim();\nawait Bun.sleep(500);\nBun.serve({ hostname: '127.0.0.1', port: Number(value('--port')), fetch(request) {\n if (new URL(request.url).pathname === '/health') return Response.json({});\n if (request.headers.get('authorization') !== 'Bearer ' + token) return new Response(null, { status: 401 });\n return Response.json({ data: [{ id: process.env.LLAMA_ARG_ALIAS }] });\n} });\n`);
+  writeFileSync(script, `#!${process.execPath}\nconst args = process.argv.slice(2);\nconst value = flag => args[args.indexOf(flag) + 1];\nconst token = (await Bun.file(value('--api-key-file')).text()).trim();\nconst ready = Date.now() + 500;\nBun.serve({ hostname: '127.0.0.1', port: Number(value('--port')), fetch(request) {\n if (new URL(request.url).pathname === '/health') return Date.now() < ready ? new Response(null, { status: 503 }) : Response.json({});\n if (request.headers.get('authorization') !== 'Bearer ' + token) return new Response(null, { status: 401 });\n return Response.json({ data: [{ id: process.env.LLAMA_ARG_ALIAS }] });\n} });\n`);
   chmodSync(script, 0o755);
   const archivePath = join(dir, 'runtime.tar.gz');
   execFileSync('tar', ['-czf', archivePath, '-C', dir, 'llama-server'], { timeout: 5_000 });
