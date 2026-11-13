@@ -370,14 +370,15 @@ describe('start asks and touches nothing', () => {
     expect(await f.dashboard.approve({ requestId: String(same.request_id) }))
       .toMatchObject({ ok: true, status: 'already_imported', archive_id: first.id });
     expect(f.runtime.state.list()).toHaveLength(1);
-    expect(f.dashboard.view().requests).toEqual([]);
+    // The request stays, settled, so the agent that asked reads "already imported" on its status.
+    expect(f.dashboard.view().requests).toEqual([expect.objectContaining({ id: same.request_id, status: 'already_imported', archiveId: first.id })]);
 
     // The person replaces Takeout.mbox with a newer export. The old code answered "already imported" here
     // and recorded nothing, so the newer export could never be approved.
     writeFileSync(first.path, mbox([mail(0), mail(1), mail(2, { tag: 'newer' }), mail(3, { tag: 'newer' })]));
     const newer = await f.start(first.path);
     expect(newer).toMatchObject({ ok: false, code: 'needs_approval', existing_record: { archive_id: first.id, state: 'imported' } });
-    expect(f.dashboard.view().requests).toEqual([expect.objectContaining({ id: newer.request_id, status: 'pending' })]);
+    expect(f.dashboard.view().requests).toEqual(expect.arrayContaining([expect.objectContaining({ id: newer.request_id, status: 'pending' })]));
     const approved = await f.dashboard.approve({ requestId: String(newer.request_id) });
     expect(approved).toMatchObject({ ok: true, status: 'started' });
     expect(f.runtime.state.list()).toHaveLength(2);

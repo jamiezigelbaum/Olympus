@@ -624,6 +624,11 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     const answered = (): void => {
       if (from) requests.remove(from.requestId);
     };
+    // The same files again: the request stays, settled as already imported, so the agent that asked
+    // reads that outcome on its status (a copy found by its contents settles the same way).
+    const alreadyImported = (archiveId: string): void => {
+      if (from) requests.settle(from.requestId, { status: 'already_imported', archiveId });
+    };
     // A source's own Import an archive recognises that source's exports only.
     const formats = only ? only.formats : undefined;
     const prepared = prepareArchiveImport({ state, path, targets: options.runtime.targets, ...(formats ? { formats } : {}) });
@@ -665,20 +670,22 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
           if (error instanceof SourceStorageUnavailableError) return refusal('source_unavailable', ARCHIVE_APPROVE_COPY.source_unavailable);
           throw error;
         }
-        answered();
         if (again) {
+          answered();
           refresh();
           return { ok: true, status: 'started', archive_id: again.archive_id, name, ...joinedSource(again) };
         }
+        alreadyImported(archive.archive_id);
         return { ok: true, status: 'already_imported', archive_id: archive.archive_id, name, archive_name: named(archive.label) };
       }
-      answered();
       // An import of a source the owner stopped is picked up where it stopped.
       const resumed = resumeStopped(prepared.archive);
       if (resumed) {
+        answered();
         refresh();
         return { ok: true, status: 'started', archive_id: resumed.archive_id, name, ...joinedSource(resumed) };
       }
+      alreadyImported(prepared.archive.archive_id);
       return { ok: true, status: 'already_imported', archive_id: prepared.archive.archive_id, name, archive_name: named(prepared.archive.label) };
     }
     // From here the approval moves into the record or the checks, under the
@@ -718,7 +725,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
             return { ok: true, status: 'started', archive_id: result.archive.archive_id, name, ...joinedSource(result.archive) };
           }
           if (result.kind === 'already_imported') {
-            answered();
+            alreadyImported(result.archive.archive_id);
             return { ok: true, status: 'already_imported', archive_id: result.archive.archive_id, name, archive_name: named(result.archive.label) };
           }
           const code = result.kind === 'unreadable' ? unreadableCode(result.code) : result.kind;
