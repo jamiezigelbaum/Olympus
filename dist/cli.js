@@ -83198,7 +83198,29 @@ async function routePreparedSourceIndexSearch(options) {
     };
     const retrievalState = retrievalStates.get(corpus.corpusId).state;
     const metadataMatches = request.context.metadataOnly === true ? adapter.metadataMatches : undefined;
-    const outcome = await runCorpusLaneWithDeadline(() => runInSourceAnswerLane(corpus.corpusId, () => metadataMatches ? metadataMatches(corpusRequest) : adapter(corpusRequest)), laneTimeoutMs, corpus.corpusId, options.laneClock ?? REAL_LANE_CLOCK);
+    const outcome = await runCorpusLaneWithDeadline(() => runInSourceAnswerLane(corpus.corpusId, async () => {
+      if (metadataMatches)
+        return metadataMatches(corpusRequest);
+      const response = await adapter(corpusRequest);
+      const depth = request.poolAllocation?.storeDepth;
+      if (depth === undefined || !adapter.semanticNeighbours || response.hits.length >= depth)
+        return response;
+      try {
+        const neighbours = await adapter.semanticNeighbours({ ...corpusRequest, maxResults: depth });
+        const key = (hit) => `${hit.sourceItem.providerItemId}\x00${hit.sourceItem.localItemId ?? ""}`;
+        const seen = new Set(response.hits.map(key));
+        const added = neighbours.hits.filter((hit) => !seen.has(key(hit))).slice(0, depth - response.hits.length);
+        if (added.length === 0)
+          return response;
+        return {
+          ...response,
+          hits: [...response.hits, ...added],
+          ...neighbours.laneAudits?.length ? { laneAudits: [...response.laneAudits ?? [], ...neighbours.laneAudits] } : {}
+        };
+      } catch {
+        return response;
+      }
+    }), laneTimeoutMs, corpus.corpusId, options.laneClock ?? REAL_LANE_CLOCK);
     return { corpus, outcome, retrievalState };
   }));
   for (const { corpus, outcome, retrievalState } of laneOutcomes) {

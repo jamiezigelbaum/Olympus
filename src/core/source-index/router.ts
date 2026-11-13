@@ -582,7 +582,31 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
     const retrievalState = retrievalStates.get(corpus.corpusId)!.state;
     const metadataMatches = request.context.metadataOnly === true ? adapter.metadataMatches : undefined;
     const outcome = await runCorpusLaneWithDeadline(
-      () => runInSourceAnswerLane(corpus.corpusId, () => (metadataMatches ? metadataMatches(corpusRequest) : adapter(corpusRequest))),
+      () => runInSourceAnswerLane(corpus.corpusId, async () => {
+        if (metadataMatches) return metadataMatches(corpusRequest);
+        const response = await adapter(corpusRequest);
+        // A reranked pool draws each store's share from its matches first,
+        // then its nearest semantic neighbours: a below-bar vector hit can
+        // still be the answer, and the reranker decides. Neighbours are never
+        // matches, so match counts stay the store's own.
+        const depth = request.poolAllocation?.storeDepth;
+        if (depth === undefined || !adapter.semanticNeighbours || response.hits.length >= depth) return response;
+        try {
+          const neighbours = await adapter.semanticNeighbours({ ...corpusRequest, maxResults: depth });
+          const key = (hit: SourceIndexCorpusSearchResponse['hits'][number]) =>
+            `${hit.sourceItem.providerItemId}\u0000${hit.sourceItem.localItemId ?? ''}`;
+          const seen = new Set(response.hits.map(key));
+          const added = neighbours.hits.filter((hit) => !seen.has(key(hit))).slice(0, depth - response.hits.length);
+          if (added.length === 0) return response;
+          return {
+            ...response,
+            hits: [...response.hits, ...added],
+            ...(neighbours.laneAudits?.length ? { laneAudits: [...(response.laneAudits ?? []), ...neighbours.laneAudits] } : {}),
+          };
+        } catch {
+          return response;
+        }
+      }),
       laneTimeoutMs,
       corpus.corpusId,
       options.laneClock ?? REAL_LANE_CLOCK,

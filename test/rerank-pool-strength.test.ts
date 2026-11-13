@@ -124,3 +124,43 @@ describe('buildEvidencePackDetailed draws the rerank pool by store strength', ()
     expect(ids).not.toContain('internal.c-6');
   });
 });
+
+// RECALL RANKS (olympus-ops#151, 13 Nov): chat and X items the vector lane
+// ranked first never reached the pool, because their cosine sat under the
+// relevance bar and the store returned nothing. The bar-free neighbours fill
+// a store's pool share after its matches; the reranker decides.
+describe('a store whose matches fall short of its pool depth fills the rest with its semantic neighbours', () => {
+  function neighbourInput() {
+    const { input } = packInput();
+    const item = (id: string) => ({ family: 'chat' as const, provider: 'fixture', accountScope: 'personal', providerItemId: id, localItemId: id });
+    const hit = (id: string) => ({ sourceItem: item(id), provenance: { sourceItem: item(id), citation: { title: id } }, rawExposed: false as const });
+    const below: SourceIndexCorpusSearchAdapter = Object.assign(
+      () => ({ hits: [], matchCount: { matchedItems: 0, contentMatchedItems: 0, saturated: false }, latencyMs: 1, rawExposed: false as const }),
+      { semanticNeighbours: async () => ({ hits: [hit('chat-answer'), hit('chat-other')], latencyMs: 1, rawExposed: false as const }) },
+    );
+    const provider: LocalContentProvider = {
+      async fetchLocalContent(request) {
+        const id = request.provenance.sourceItem.providerItemId;
+        return { sensitivity: buildSourceSensitivity({ trustTier: 'S2', trustDomain: 'internal' }), chunks: [id === 'chat-answer' ? 'The invoice total is due on 3 March.' : `Unrelated note ${id}.`] };
+      },
+    };
+    return {
+      ...input,
+      registry: buildSourceIndexCorpusRegistry([...['internal.a', 'internal.b', 'internal.c', 'internal.d'].map((corpusId) => defineSourceIndexCorpus({ corpusId, family: 'file', trustDomain: 'internal' })),
+        defineSourceIndexCorpus({ corpusId: 'internal.chat', family: 'chat', trustDomain: 'internal' })]),
+      adapters: { ...input.adapters, 'internal.chat': below },
+      contentProviders: { ...input.contentProviders, 'internal.chat': provider },
+    };
+  }
+
+  test('a store with no match above the bar still offers its nearest item; match counts stay the store\'s own', async () => {
+    const detail = await buildEvidencePackDetailed(neighbourInput());
+    expect(packIds(detail)[0]).toBe('chat-answer');
+    expect(detail.pack.coverage.matchCounts?.find((count) => count.corpusId === 'internal.chat')?.matchedItems ?? 0).toBe(0);
+  });
+
+  test('without a reranker no neighbour enters', async () => {
+    const { reranker: _reranker, ...plain } = neighbourInput();
+    expect(packIds(await buildEvidencePackDetailed(plain))).not.toContain('chat-answer');
+  });
+});
