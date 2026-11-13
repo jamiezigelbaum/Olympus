@@ -40388,8 +40388,12 @@ function withPinnedNewestChatHits(input) {
       result[at] = { ...result[at], newestInStore };
       continue;
     }
-    while (result.length >= limit)
-      result.pop();
+    while (result.length >= limit) {
+      let last = result.length - 1;
+      while (last > 0 && result[last].newestInStore !== undefined)
+        last -= 1;
+      result.splice(last, 1);
+    }
     result.push({
       ...connectorStoreHitFromRow(input.store, row, CHAT_RECENCY_WEIGHT * reciprocalRank(index + 1), input.resultProjector, input.locatorPathScope),
       newestInStore

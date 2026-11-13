@@ -7,7 +7,7 @@ import { routeSourceIndexSearch, seatRoutedLanes, type SeatingLane, type SourceI
 import { buildEvidencePackDetailed } from '../src/core/evidence-pack.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import { captureEvalPack, writePoolCapture, prepareCaptureReranker } from '../eval/capture-pool.ts';
-import { replayPool, signFlipPValue, summarizeVariants, parseReplayArgs } from '../eval/replay-pool.ts';
+import { replayPool, signFlipPValue, summarizeVariants, parseReplayArgs, laneAtDepth } from '../eval/replay-pool.ts';
 import { parseEvalRealArgs } from '../eval/run-real.ts';
 import { createTestClock } from './helpers/test-clock.ts';
 
@@ -209,4 +209,21 @@ test('capture startup actually prepares a configured reranker and rejects a brok
     expect(reranker?.localOnly).toBe(true);
     await expect(prepareCaptureReranker(env, { runtime: { async createSession() { throw new Error('fixture runtime missing'); } } })).rejects.toThrow('capture could not load');
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a smaller depth keeps the chat store\'s newest-message pins, as the adapter would at that depth', () => {
+  // Captured at depth 5 from an adapter that pins its two newest messages: three hits, then the pins it appended.
+  const item = (id: string, newestInStore?: number) => ({ providerItemId: id, ...(newestInStore ? { newestInStore } : {}) });
+  const captured = [item('h1'), item('h2'), item('h3'), item('p1', 1), item('p2', 2)];
+  // At depth 3 the adapter keeps one hit and appends both pins; a plain prefix would drop both pins.
+  expect(laneAtDepth(captured, 3).map(i => i.providerItemId)).toEqual(['h1', 'p1', 'p2']);
+  // Depth 2 leaves room for one pin beside a hit, depth 1 for the hit alone.
+  expect(laneAtDepth(captured, 2).map(i => i.providerItemId)).toEqual(['h1', 'p1']);
+  expect(laneAtDepth(captured, 1).map(i => i.providerItemId)).toEqual(['h1']);
+  // A pin the adapter found among its hits keeps its place.
+  const kept = [item('h1'), item('p1', 1), item('h2'), item('h3'), item('p2', 2)];
+  expect(laneAtDepth(kept, 3).map(i => i.providerItemId)).toEqual(['h1', 'p1', 'p2']);
+  // Without pins a smaller depth is the prefix.
+  expect(laneAtDepth([item('h1'), item('h2'), item('h3')], 2).map(i => i.providerItemId)).toEqual(['h1', 'h2']);
+  expect(laneAtDepth(captured, 5)).toEqual(captured);
 });

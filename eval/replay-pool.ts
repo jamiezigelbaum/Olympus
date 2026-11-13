@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 // Offline seating replay. Store rankings must be prefix-stable: a smaller
-// --store-depth uses each captured store list's prefix. No stores/models/text
-// are read. Query expansions replay only the runs captured by the live build;
+// --store-depth uses each captured store list's prefix, except for a chat
+// store's newest-message pins, which are rebuilt as the adapter places them at
+// that depth (laneAtDepth). No stores/models/text are read. Query expansions replay only the runs captured by the live build;
 // changing a variant never invents a planner run the live build skipped.
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -29,6 +30,38 @@ export interface ReplayResult {
   }[];
 }
 
+/**
+ * A captured store list as its adapter would return it at a smaller depth.
+ * Store hits are prefix-stable, but a chat store pins its newest messages
+ * inside every limit (withPinnedNewestChatHits in local-index.ts): a pin it
+ * found among its hits keeps its place, the rest are appended after the
+ * lowest unpinned hits are evicted to make room, one hit always kept. A plain prefix would drop pins a
+ * real smaller-depth search still returns (Codex on #1617). Pins appended at
+ * capture are the trailing run of pinned items; a pin's number says its order.
+ */
+export function laneAtDepth<T extends { newestInStore?: number }>(items: readonly T[], depth: number): T[] {
+  if (depth >= items.length) return [...items];
+  let tail = items.length;
+  while (tail > 0 && items[tail - 1]!.newestInStore !== undefined) tail -= 1;
+  const pins = items.filter(item => item.newestInStore !== undefined).sort((a, b) => a.newestInStore! - b.newestInStore!);
+  if (pins.length === 0) return items.slice(0, depth);
+  const hits = items.slice(0, tail).slice(0, depth);
+  const pinCount = Math.min(pins.length, hits.length > 0 ? depth - 1 : depth);
+  // A hit the adapter would not pin at this depth carries no pin number.
+  const result = hits.map(item => item.newestInStore !== undefined && item.newestInStore > pinCount
+    ? (({ newestInStore: _unpinned, ...rest }) => rest as T)(item) : item);
+  for (const pin of pins.slice(0, pinCount)) {
+    if (result.includes(pin)) continue;
+    while (result.length >= depth) {
+      let last = result.length - 1;
+      while (last > 0 && result[last]!.newestInStore !== undefined) last -= 1;
+      result.splice(last, 1);
+    }
+    result.push(pin);
+  }
+  return result;
+}
+
 export function replayPool(capture: PoolCapture, variant: ReplayVariant): ReplayResult {
   if (capture.version !== 1) throw new Error('Unsupported pool capture version.');
   for (const [name, value] of Object.entries(variant)) {
@@ -40,7 +73,7 @@ export function replayPool(capture: PoolCapture, variant: ReplayVariant): Replay
   const runs = capture.runs.map(run => seatRoutedLanes(run.lanes.map(lane => ({
     name: lane.corpusId,
     ...(lane.relevance ? { relevance: lane.relevance } : {}),
-    items: lane.items.slice(0, variant.storeDepth).map(item => {
+    items: laneAtDepth(lane.items, variant.storeDepth).map(item => {
       const sourceItem = { family: 'file' as const, provider: 'offline', accountScope: 'offline', providerItemId: item.providerItemId, localItemId: item.localItemId };
       const kinds: ('keyword_first' | 'name')[] = [];
       if (item.keywordFirst) kinds.push('keyword_first');

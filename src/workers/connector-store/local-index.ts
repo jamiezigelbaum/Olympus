@@ -16365,7 +16365,13 @@ function withPinnedNewestChatHits(input: {
       result[at] = { ...result[at]!, newestInStore };
       continue;
     }
-    while (result.length >= limit) result.pop();
+    // Evict the lowest unpinned hit: popping the tail would drop the pin
+    // appended just before (the newest message, lost to the second newest).
+    while (result.length >= limit) {
+      let last = result.length - 1;
+      while (last > 0 && result[last]!.newestInStore !== undefined) last -= 1;
+      result.splice(last, 1);
+    }
     result.push({
       ...connectorStoreHitFromRow(
         input.store,
