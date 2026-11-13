@@ -38,6 +38,9 @@ import { join } from 'node:path';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { BuiltInSourceEmbeddingProvider } from '../src/workers/source-index/built-in-embedding/provider.ts';
 import { reportBuiltInEmbeddingState } from '../src/workers/source-index/built-in-embedding/assets.ts';
+// The Coverage line, wherever the prompt puts it (the compact prompt asks
+// its question again after it, #1590).
+const coverageLine = (prompt: string): string => prompt.split('\n').find((line) => line.startsWith('Coverage —')) ?? '';
 
 /**
  * The eval's pack, which must hold evidence: an empty one fails here with the
@@ -534,7 +537,7 @@ describe('the real eval matches what Ask sends a local Analyst (rerun 20)', () =
       (_pack, seats) => kept.push(seats), () => 2, () => gapIndexes).analyze(pack, { localOnly: true });
     expect(calls[1]).toEqual(calls[0]);
     expect(kept[0]).toEqual(fitted.candidates.map((candidate) => pack.candidates.findIndex((original) => original.provenance === candidate.provenance) + 1));
-    expect(calls[1]![0]!.prompt.split('\n').at(-1)).toStartWith('Coverage — searched:');
+    expect(coverageLine(calls[1]![0]!.prompt)).toStartWith('Coverage — searched:');
   });
 
   test('the pack is fitted to the local prompt budget, and the seats sent are recorded', async () => {
@@ -787,7 +790,7 @@ describe('evalPromptLayout', () => {
       } }, { evidenceFormat });
       await analyst.analyze(sent, options);
       const measured = evalPromptLayout(sent, options, evidenceFormat);
-      expect(measured.coverageBytes).toBe(Buffer.byteLength(calls[0]!.prompt.split('\n').at(-1)!));
+      expect(measured.coverageBytes).toBe(Buffer.byteLength(coverageLine(calls[0]!.prompt)));
       expect(measured.extractionGapCount).toBe(2);
     }
     expect(layout.promptBytes).toBe(analystPromptBytes(sent, options));
