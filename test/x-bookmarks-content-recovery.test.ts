@@ -1,3 +1,6 @@
+import { ownerLimits } from '../src/core/owner-limits.ts';
+import { X_CONTENT_RECOVERY_LIMIT_SUBJECT } from '../src/workers/x-bookmarks/content-recovery.ts';
+import { createTestClock } from './helpers/test-clock.ts';
 import {
   existsSync,
   mkdtempSync,
@@ -1081,6 +1084,7 @@ describe('X bookmark content recovery', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-x-content-budget-'));
     const store = createXBookmarksConnectorStore(join(dir, 'x-bookmarks.sqlite'));
     const usage = new LocalXBookmarksApiUsageStore(join(dir, 'x-usage.sqlite'));
+    const time = createTestClock(Date.parse('2026-07-30T00:00:00.000Z'));
     try {
       await store.syncFromConnector(createXBookmarksSourceConnector({
         account: ACCOUNT,
@@ -1109,7 +1113,7 @@ describe('X bookmark content recovery', () => {
         account: ACCOUNT,
         userId: 'provider-user-1',
         config,
-        now: () => new Date('2026-07-30T00:00:00.000Z'),
+        now: time.date,
       });
 
       const result = await handler.recover({ execute: true, limit: 1 });
@@ -1124,6 +1128,20 @@ describe('X bookmark content recovery', () => {
       });
       expect(result.retry_at).toBe('2026-07-31T00:00:00.000Z');
       expect(providerCalls).toBe(0);
+      const list = await ownerLimits({}, { now: time.date });
+      expect(list.stops?.filter(stop => stop.subject === X_CONTENT_RECOVERY_LIMIT_SUBJECT)).toMatchObject([{
+        id: 'x.head_reserve_requests', label: expect.any(String), unit: 'requests', limit: 0, used: 0,
+        waiting: { items: 1 }, continue: 'run_once', resumesAt: '2026-07-31T00:00:00.000Z',
+      }]);
+      await ownerLimits({ action: 'continue', id: 'x.head_reserve_requests', subject: X_CONTENT_RECOVERY_LIMIT_SUBJECT }, {
+        now: time.date, runOnce: async subject => {
+          expect(subject).toBe(X_CONTENT_RECOVERY_LIMIT_SUBJECT);
+          return handler.recover({ execute: true, limit: 1, provenance: 'operator' });
+        },
+      });
+      expect(providerCalls).toBe(1);
+      expect((await ownerLimits({}, { now: time.date })).stops?.filter(stop => stop.subject === X_CONTENT_RECOVERY_LIMIT_SUBJECT)).toEqual([]);
+      expect(usage.status({ account: ACCOUNT, config, now: time.date() }).api_requests).toBe(1);
     } finally {
       usage.close();
       store.close();

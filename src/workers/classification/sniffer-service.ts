@@ -459,6 +459,7 @@ export class TierSnifferService {
   private passGeneration = 0;
   /** The last reported reason a tick asked nothing (or 'asking'). */
   private waitingReason: string | undefined;
+  private cloudLimitGeneration = 0;
   private lastBacklogLogMs = Number.NEGATIVE_INFINITY;
   private backlogCache: { counts: BacklogCounts; atMs: number } | undefined;
   private lowerMovesCache: { count: number; atMs: number; pendingItems: number } | undefined;
@@ -528,6 +529,14 @@ export class TierSnifferService {
     if (this.stopped || this.continuation) return;
     this.continuation = this.timers().setTimeout(() => { this.continuation = undefined; void this.scheduledRun(); }, 0);
     unrefTimer(this.continuation);
+  }
+
+  /** The owner lifted a cloud stop; keep the same lane/model and release its terminal hold. */
+  resumeCloudLimit(): void {
+    this.cloudLimitGeneration++;
+    this.notAnsweringPasses = 0;
+    this.notAnsweringUntilMs = 0;
+    this.wake();
   }
 
   /** A pass the timer or a wake asked for: held back while the model is not answering. */
@@ -879,6 +888,7 @@ export class TierSnifferService {
   }
 
   async runOnce(): Promise<TierSnifferTick> {
+    const cloudLimitGeneration = this.cloudLimitGeneration;
     if (this.stopped) return { state: 'skipped_running' };
     if (this.running) {
       // A pass that never settles would hold every later tick off for good
@@ -950,8 +960,9 @@ export class TierSnifferService {
     // Any call that answered clears the hold, even when the pass then
     // stopped on failures: a model that is making progress is never held.
     if (this.waitingReason === 'cloud_stopped') {
-      // Terminal: only an explicit run or the setup reload may resume it.
-      this.notAnsweringUntilMs = Infinity;
+      // An owner continuation may arrive while this pass is unwinding its stop.
+      this.notAnsweringUntilMs = cloudLimitGeneration === this.cloudLimitGeneration ? Infinity : 0;
+      if (this.notAnsweringUntilMs === 0) this.wake();
     } else if (tick.state === 'ran' && tick.report.calls > tick.report.failedCalls) {
       this.notAnsweringPasses = 0;
       this.notAnsweringUntilMs = 0;

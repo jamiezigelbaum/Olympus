@@ -318,8 +318,9 @@ export function buildChatGptDashboardViewModel(
 
   const waits: DashboardSourceWait[] = rows.flatMap(({ wait }) => (wait ? [wait] : []));
   for (const stop of stops) {
-    const limit = limits.find((entry) => entry.id === stop.id);
-    if (!limit) continue;
+    const registered = limits.find((entry) => entry.id === stop.id);
+    if (!registered) continue;
+    const limit = { ...registered, ...(stop.continue ? { continue: stop.continue } : {}) };
     const row = rows.find(({ definition }) => limitStopSubjects(stop).some((subject) =>
       subject === definition.source_id || subject === definition.primary_corpus_id || definition.corpus_source_ids.includes(subject)));
     const raiseTo = stop.toContinue?.raiseTo ?? Math.max(1, (stop.limit ?? 0) * 2, (stop.used ?? 0) + 1);

@@ -115,7 +115,7 @@ function fakeGmail(mailbox: GmailArchiveHarness['mailbox']): GmailApiClient {
 
 export function gmailArchiveHarness(
   cleanups: Array<() => void>,
-  options: { build?: GmailMailBuild; sniffer?: TierSniffer; rules?: OwnerTierRule[] } = {},
+  options: { build?: GmailMailBuild; sniffer?: TierSniffer; rules?: OwnerTierRule[]; reportWait?: (reason: string) => void } = {},
 ): GmailArchiveHarness {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'gmail-archive-')));
   const home = join(base, 'home');
@@ -152,6 +152,7 @@ export function gmailArchiveHarness(
       set,
       sync: gmailLaneSyncOptions(),
       account: ACCOUNT,
+      reportWait: options.reportWait,
       build,
       ...(match.current ? { match: match.current } : {}),
       ...(labels.current ? { labelIds: labels.current } : {}),

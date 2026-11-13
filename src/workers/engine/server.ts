@@ -1,3 +1,5 @@
+import { X_CONTENT_RECOVERY_LIMIT_SUBJECT } from '../x-bookmarks/content-recovery.ts';
+import { GMAIL_IMPORT_LIMIT_SUBJECT, withGmailImportRunOnce } from '../google-connectors/gmail-import-allowance.ts';
 import { startVeniceCreditRecovery, fetchVeniceCreditStatus, VENICE_BILLING_BASE_URL } from '../../core/provider-credit-status.ts';
 import { openVeniceCreditPausePaths, ownerLimitStopHooks } from '../../core/owner-limit-state.ts';
 import { ownerLimits, limitRunOnceSource } from '../../core/owner-limits.ts';
@@ -733,7 +735,9 @@ export async function main(): Promise<void> {
   const cloudJudgeRuntime = resolveJudgeChoiceRuntime(judgeRuntimeInput, { choice: 'venice', stop: null, remainingDollars: 1 });
   await adoptExistingCloudApproval(judgeSpending, judgeRuntimeInput, resolveClassificationLedgerPath(process.env), snifferPromptVersions(privacyOwnerContext({ env: process.env })).approval);
   await carryCloudJudgeApproval(judgeSpending, cloudJudgeRuntime, resolveClassificationLedgerPath(process.env), snifferPromptVersions(privacyOwnerContext({ env: process.env })).approval);
-  const snifferRuntime = resolveJudgeChoiceRuntime(judgeRuntimeInput, judgeSpending.status());
+  const initialJudgeChoice = judgeSpending.status();
+  const snifferRuntime = resolveJudgeChoiceRuntime(judgeRuntimeInput, { ...initialJudgeChoice,
+    ...(initialJudgeChoice.stop === 'cap' || initialJudgeChoice.stop === 'payment' ? { stop: null, remainingDollars: 1 } : {}) });
   // The local judge's own speed and held share on this install, for the setup estimates (#891).
   const judgeObservations = new JudgeObservations(judgeObservationsPath(process.env));
   const snifferLane: SnifferLane | undefined = snifferRuntime.source === 'off' ? undefined : snifferRuntime.lane;
@@ -1621,6 +1625,7 @@ export async function main(): Promise<void> {
         }
         return {
           set: gmailArchiveSet.set,
+          reportWait: (reason: string) => gmailImportGate.reportWait?.(reason),
           sync: gmailLaneSyncOptions(ownerRules),
           // The account scope live Gmail writes under, so both inputs name one item.
           account: gmailItemScopeFor(handle),
@@ -4760,7 +4765,20 @@ export async function main(): Promise<void> {
     // "Check the judge" (issue #887): its round file sits beside the owner's privacy profile.
     judgeCheck: createJudgeCheck({ items: ownerTierItemsEngine, get: (itemId) => getOwnerTierItem(itemId, ownerTierItemsContext, { withPreview: true }) }),
     ownerLimits: (params) => ownerLimits(params, {
-      runOnce: async (subject) => {
+      runOnce: async (subject, stop) => {
+        if (subject === GMAIL_IMPORT_LIMIT_SUBJECT) {
+          if (!sourceScheduler?.status().enabled || !sourceScheduler.status().sources.some(source => source.source_id === SCHEDULER_SOURCE_IDS.archiveImports)) throw new OperationError('invalid_request', 'The import scheduler is unavailable or disabled.');
+          if (sourceScheduler.hasExecutingTask(new Set([SCHEDULER_SOURCE_IDS.archiveImports]))) return { status: 'busy' };
+          void withGmailImportRunOnce(() => sourceScheduler!.runSource(SCHEDULER_SOURCE_IDS.archiveImports, undefined, 'operator'))
+            .catch(error => console.warn('Gmail import run failed:', error instanceof Error ? error.name : 'unknown'));
+          return { status: 'checking' };
+        }
+        if (subject === X_CONTENT_RECOVERY_LIMIT_SUBJECT) {
+          const recovery = currentXBookmarksRuntime()?.contentRecovery;
+          if (!recovery) throw new OperationError('invalid_request', 'X content recovery is unavailable.');
+          const receipt = await recovery.recover({ execute: true, provenance: 'operator', ...(stop.waiting?.items ? { limit: stop.waiting.items } : {}) });
+          return { status: receipt.status, receipt };
+        }
         const response = await workerFetchInProcess(new Request('http://olympus-worker.internal/dashboard/sync-now', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source: limitRunOnceSource(subject) }),
         }));
@@ -4772,7 +4790,11 @@ export async function main(): Promise<void> {
         return body;
       },
       credit: { env: { ...process.env, ...olympusConfig.worker.creditMonitor.credentials } },
-      wake: () => tierSniffer?.wake(),
+      wake: (id) => {
+        if (id === 'judge.spend_cap' || id === 'judge.payment') tierSniffer?.resumeCloudLimit();
+        else tierSniffer?.wake();
+        if (id === 'gmail.import_allowance') void sourceScheduler?.runSource(SCHEDULER_SOURCE_IDS.archiveImports).catch(error => console.warn('Gmail import resume failed:', error instanceof Error ? error.name : 'unknown'));
+      },
     }),
     // Bound late: the consult block below sets askAnonymouslyNow.
     consultAsk: async ({ caller, ...input }, signal) => (askAnonymouslyNow
@@ -6193,7 +6215,7 @@ export async function main(): Promise<void> {
     ? undefined
     : snifferRuntime.source === 'built_in'
       ? snifferRuntime.builtIn.model
-      : createTierSnifferModel({ lane: snifferRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[snifferRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { requestModelReload(); } });
+      : createTierSnifferModel({ lane: snifferRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[snifferRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { /* The durable stop holds cloud dispatch until the owner continues it. */ } });
   snifferModelBuilt = rawSnifferModel !== undefined;
   // The local judge's answers are read at its own lane's Private bar, as the resolver reads them.
   const localDecisionBar = snifferLane ? snifferDecisionBar(snifferLane) : undefined;
@@ -6205,12 +6227,12 @@ export async function main(): Promise<void> {
   const judgeChoice = judgeSpending.status();
   // The front judges nothing, so it runs no double-check either.
   const secondRoundVenice = !engineFront && snifferModel && snifferLane?.kind === 'local' && judgeChoice.choice === 'local-then-venice'
-    && !judgeChoice.stop && (judgeChoice.uncapped === true || judgeChoice.remainingDollars > 0) && cloudJudgeRuntime.source !== 'off'
+    && judgeChoice.stop !== 'storage' && cloudJudgeRuntime.source !== 'off'
     && isClassifierApproved((await readClassificationLedger(resolveClassificationLedgerPath(process.env))).entries, {
       lane: cloudJudgeRuntime.lane.kind, profileId: cloudJudgeRuntime.lane.profileId, modelId: cloudJudgeRuntime.lane.modelId,
       promptVersion: snifferPromptVersions(privacyOwnerWords()).approval,
     })
-    ? createTierSnifferModel({ lane: cloudJudgeRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[cloudJudgeRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { requestModelReload(); } })
+    ? createTierSnifferModel({ lane: cloudJudgeRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[cloudJudgeRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { /* The durable stop holds cloud dispatch until the owner continues it. */ } })
     : undefined;
   if (!engineFront && judgeChoice.choice === 'local-then-venice' && snifferModel && !secondRoundVenice) {
     console.warn('Olympus privacy judge: the Venice double-check is paused (no approved Venice judge, or its spending limit stopped it); items stay Private as this computer judged them.');
