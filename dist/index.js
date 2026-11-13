@@ -3085,7 +3085,7 @@ function engineBackgroundSocketPath(options = {}) {
 function prepareEngineBackgroundSocketDirectory(socketPath) {
   mkdirSync5(dirname9(socketPath), { recursive: true, mode: 448 });
 }
-async function probeEngineBackground(fetchBackground, authToken, instanceId, timeoutMs) {
+async function engineBackgroundAnswer(fetchBackground, authToken, instanceId, timeoutMs) {
   const controller = new AbortController;
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   timeout.unref?.();
@@ -3099,17 +3099,21 @@ async function probeEngineBackground(fetchBackground, authToken, instanceId, tim
       await response.body?.cancel().catch(() => {
         return;
       });
-      return false;
+      return "alive";
     }
     const body = await response.json().catch(() => {
       return;
     });
-    return body?.ready === true && body.schema_current === true && (instanceId === undefined || body.instance_id === instanceId);
-  } catch {
-    return false;
+    return body?.ready === true && body.schema_current === true && (instanceId === undefined || body.instance_id === instanceId) ? "ready" : "alive";
+  } catch (error) {
+    const name = error?.name;
+    return controller.signal.aborted || name === "AbortError" || name === "TimeoutError" ? "alive" : "down";
   } finally {
     clearTimeout(timeout);
   }
+}
+async function probeEngineBackground(fetchBackground, authToken, instanceId, timeoutMs) {
+  return await engineBackgroundAnswer(fetchBackground, authToken, instanceId, timeoutMs) === "ready";
 }
 var ENGINE_ROLE_ENV = "OLYMPUS_WORKER_ENGINE_ROLE", ENGINE_BACKGROUND_SOCKET_ENV = "OLYMPUS_ENGINE_BACKGROUND_SOCKET", ENGINE_BACKGROUND_ORIGIN = "http://olympus-background", ENGINE_READY_PATH = "/engine/ready";
 var init_engine_split = __esm(() => {
@@ -16658,13 +16662,69 @@ var init_scheduler_markers = __esm(() => {
     "head_api_request_reserve_guard",
     "head_resource_read_reserve_guard",
     "head_cost_reserve_guard",
-    "provider_rate_limit"
+    "provider_rate_limit",
+    "x.rate_limit",
+    "evernote.rate_limit",
+    "readwise.rate_limit"
   ]);
+});
+
+// src/core/provider-rate-limits.ts
+function providerRetryTime(value, now, fallbackMs) {
+  const seconds = value?.trim() ? Number(value) : NaN;
+  const timestamp = Number.isFinite(seconds) ? seconds >= 0 ? now.getTime() + seconds * 1000 : NaN : Date.parse(value ?? "");
+  const retry = new Date(timestamp);
+  return Number.isFinite(retry.getTime()) ? retry.toISOString() : new Date(now.getTime() + fallbackMs).toISOString();
+}
+function createProviderRateLimitReporter(provider) {
+  return reporters[provider] ??= buildProviderRateLimitReporter(provider);
+}
+function buildProviderRateLimitReporter(provider) {
+  const registration = PROVIDERS[provider];
+  const stops = createLimitStopReporter();
+  let resumesAt;
+  return {
+    report(at, now, amounts) {
+      if (!Number.isFinite(Date.parse(at)) || Date.parse(at) - now.getTime() <= 60000)
+        return;
+      resumesAt = at;
+      stops.report({
+        id: registration.id,
+        subject: registration.subject,
+        since: now.toISOString(),
+        resumesAt: at,
+        limit: amounts?.limit ?? null,
+        used: amounts?.used ?? null
+      });
+    },
+    success() {
+      stops.clear(registration.id, registration.subject);
+      resumesAt = undefined;
+    },
+    resume(now) {
+      if (resumesAt && Date.parse(resumesAt) <= now.getTime())
+        this.success();
+    }
+  };
+}
+var PROVIDERS, reporters;
+var init_provider_rate_limits = __esm(() => {
+  init_limit_stops();
+  registerLimit({ id: "x.rate_limit", kind: "requests", scope: "source", label: "X is limiting requests", unit: "requests", continue: "none" });
+  registerLimit({ id: "evernote.rate_limit", kind: "requests", scope: "source", label: "Evernote is limiting requests", unit: "requests", continue: "none" });
+  registerLimit({ id: "readwise.rate_limit", kind: "requests", scope: "source", label: "Readwise is limiting requests", unit: "requests", continue: "none" });
+  PROVIDERS = {
+    x: { id: "x.rate_limit", subject: "x.bookmarks", name: "X" },
+    evernote: { id: "evernote.rate_limit", subject: "evernote.notes", name: "Evernote" },
+    readwise: { id: "readwise.rate_limit", subject: "readwise.library", name: "Readwise" }
+  };
+  reporters = {};
 });
 
 // src/workers/dashboard/source-failure.ts
 var SOURCE_FAILURE_KINDS, KIND_SET, SUPPORT_SOURCES, SUPPORT_STATES, SUPPORT_NEEDS;
 var init_source_failure = __esm(() => {
+  init_provider_rate_limits();
   init_scheduler_markers();
   SOURCE_FAILURE_KINDS = [
     "sign_in",
@@ -20004,7 +20064,240 @@ var init_corpora = __esm(() => {
 });
 
 // src/workers/readwise/api.ts
-var init_api = () => {};
+class ReadwiseApiClient {
+  providerStops = createProviderRateLimitReporter("readwise");
+  now;
+  token;
+  fetchImpl;
+  apiV2BaseUrl;
+  readerApiV3BaseUrl;
+  timeoutMs;
+  constructor(options) {
+    this.now = options.now ?? (() => new Date);
+    const token = options.token.trim();
+    if (!token)
+      throw new Error("Readwise API token is required.");
+    this.token = token;
+    this.fetchImpl = options.fetch ?? fetch;
+    this.apiV2BaseUrl = normalizeBaseUrl(options.apiV2BaseUrl ?? READWISE_API_V2_BASE_URL);
+    this.readerApiV3BaseUrl = normalizeBaseUrl(options.readerApiV3BaseUrl ?? READWISE_READER_API_V3_BASE_URL);
+    this.timeoutMs = normalizeTimeoutMs(options.timeoutMs);
+  }
+  async verifyToken() {
+    const response = await this.request("auth/", { baseUrl: this.apiV2BaseUrl });
+    if (response.status !== 204) {
+      throw await errorFromResponse(response, "Readwise auth check failed");
+    }
+  }
+  async listReaderDocuments(request = {}) {
+    const limit = normalizeReaderPageLimit(request.limit);
+    const params = new URLSearchParams({ limit: String(limit) });
+    appendParam(params, "id", request.documentId);
+    appendParam(params, "updatedAfter", request.updatedAfter);
+    appendParam(params, "location", request.location);
+    appendParam(params, "category", request.category);
+    appendParam(params, "pageCursor", request.pageCursor);
+    if (request.withHtmlContent === true)
+      params.set("withHtmlContent", "true");
+    if (request.withRawSourceUrl === true)
+      params.set("withRawSourceUrl", "true");
+    const payload2 = await this.requestJson(`list/?${params.toString()}`, {
+      baseUrl: this.readerApiV3BaseUrl,
+      context: "Readwise Reader list request"
+    });
+    const record2 = requireRecord(payload2, "Readwise Reader list response");
+    const results = requireRecordArray(record2.results, "Readwise Reader list response results");
+    const count = optionalNumber2(record2.count) ?? results.length;
+    const nextPageCursor = optionalString4(record2.nextPageCursor);
+    return {
+      count,
+      ...nextPageCursor ? { nextPageCursor } : {},
+      results
+    };
+  }
+  async fetchReaderDocuments(request = {}) {
+    const maxDocuments = normalizeOptionalPositiveInteger(request.maxDocuments, "maxDocuments");
+    const pageLimit = normalizeReaderPageLimit(request.pageLimit);
+    const documents = [];
+    let pageCursor;
+    let requestCount = 0;
+    while (maxDocuments === undefined || documents.length < maxDocuments) {
+      const remaining = maxDocuments === undefined ? pageLimit : Math.min(pageLimit, maxDocuments - documents.length);
+      if (remaining <= 0)
+        break;
+      const page2 = await this.listReaderDocuments({
+        ...request,
+        limit: remaining,
+        ...pageCursor ? { pageCursor } : {}
+      });
+      requestCount += 1;
+      documents.push(...page2.results);
+      if (!page2.nextPageCursor)
+        break;
+      pageCursor = page2.nextPageCursor;
+    }
+    return { documents, requestCount };
+  }
+  async exportBooks(request = {}) {
+    const params = new URLSearchParams;
+    appendParam(params, "updatedAfter", request.updatedAfter);
+    appendParam(params, "pageCursor", request.pageCursor);
+    const query = params.toString();
+    const suffix = query ? `export/?${query}` : "export/";
+    const payload2 = await this.requestJson(suffix, {
+      baseUrl: this.apiV2BaseUrl,
+      context: "Readwise export request"
+    });
+    const results = Array.isArray(payload2) ? requireRecordArray(payload2, "Readwise export response") : requireRecordArray(requireRecord(payload2, "Readwise export response").results, "Readwise export response results");
+    const nextPageCursor = Array.isArray(payload2) ? undefined : optionalString4(requireRecord(payload2, "Readwise export response").nextPageCursor);
+    return {
+      ...nextPageCursor ? { nextPageCursor } : {},
+      results
+    };
+  }
+  async fetchExportBooks(request = {}) {
+    const maxPages = normalizeOptionalPositiveInteger(request.maxPages, "maxPages") ?? 10;
+    const books = [];
+    let pageCursor;
+    let requestCount = 0;
+    while (requestCount < maxPages) {
+      const page2 = await this.exportBooks({
+        ...request.updatedAfter ? { updatedAfter: request.updatedAfter } : {},
+        ...pageCursor ? { pageCursor } : {}
+      });
+      requestCount += 1;
+      books.push(...page2.results);
+      if (!page2.nextPageCursor)
+        break;
+      pageCursor = page2.nextPageCursor;
+    }
+    return {
+      books,
+      requestCount,
+      ...pageCursor ? { nextPageCursor: pageCursor } : {},
+      pageLimitReached: pageCursor !== undefined && requestCount >= maxPages
+    };
+  }
+  async requestJson(path, options) {
+    const response = await this.request(path, { baseUrl: options.baseUrl });
+    if (!response.ok)
+      throw await errorFromResponse(response, options.context);
+    try {
+      return await response.json();
+    } catch (error) {
+      throw new ReadwiseApiError(`${options.context} returned invalid JSON.`);
+    }
+  }
+  async request(path, options) {
+    const controller = new AbortController;
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const url = new URL(path, options.baseUrl).toString();
+      this.providerStops.resume(this.now());
+      const response = await this.fetchImpl(url, {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+          Authorization: `Token ${this.token}`
+        },
+        signal: controller.signal
+      });
+      if (response.status === 429) {
+        const now = this.now();
+        const error = await errorFromResponse(response, "Readwise request");
+        error.resumesAt = providerRetryTime(error.retryAfter, now, 60000);
+        this.providerStops.report(error.resumesAt, now);
+        throw error;
+      }
+      if (response.ok)
+        this.providerStops.success();
+      return response;
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new ReadwiseApiError("Readwise API request timed out.");
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+}
+function normalizeBaseUrl(value) {
+  const trimmed = value.trim();
+  if (!trimmed)
+    throw new Error("Readwise API base URL must be non-empty.");
+  return trimmed.endsWith("/") ? trimmed : `${trimmed}/`;
+}
+function normalizeTimeoutMs(value) {
+  if (value === undefined || !Number.isFinite(value))
+    return DEFAULT_TIMEOUT_MS2;
+  return Math.max(1000, Math.floor(value));
+}
+function normalizeReaderPageLimit(value) {
+  if (value === undefined || !Number.isFinite(value))
+    return 100;
+  return Math.max(1, Math.min(Math.floor(value), 100));
+}
+function normalizeOptionalPositiveInteger(value, name) {
+  if (value === undefined)
+    return;
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive integer.`);
+  }
+  return value;
+}
+function appendParam(params, name, value) {
+  const trimmed = value?.trim();
+  if (trimmed)
+    params.set(name, trimmed);
+}
+function requireRecord(value, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ReadwiseApiError(`${label} must be a JSON object.`);
+  }
+  return value;
+}
+function requireRecordArray(value, label) {
+  if (!Array.isArray(value)) {
+    throw new ReadwiseApiError(`${label} must be an array.`);
+  }
+  return value.filter((item) => !!item && typeof item === "object" && !Array.isArray(item));
+}
+function optionalString4(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+function optionalNumber2(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+async function errorFromResponse(response, context2) {
+  const retryAfter = response.headers.get("retry-after") ?? undefined;
+  let detail = "";
+  try {
+    detail = (await response.text()).slice(0, 240).trim();
+  } catch {
+    detail = "";
+  }
+  return new ReadwiseApiError(`${context2} returned HTTP ${response.status}${detail ? `: ${detail}` : ""}.`, {
+    status: response.status,
+    ...retryAfter ? { retryAfter } : {}
+  });
+}
+var READWISE_API_V2_BASE_URL = "https://readwise.io/api/v2/", READWISE_READER_API_V3_BASE_URL = "https://readwise.io/api/v3/", DEFAULT_TIMEOUT_MS2 = 30000, ReadwiseApiError;
+var init_api = __esm(() => {
+  init_provider_rate_limits();
+  ReadwiseApiError = class ReadwiseApiError extends Error {
+    status;
+    retryAfter;
+    resumesAt;
+    constructor(message, options = {}) {
+      super(message);
+      if (options.status !== undefined)
+        this.status = options.status;
+      if (options.retryAfter !== undefined)
+        this.retryAfter = options.retryAfter;
+    }
+  };
+});
 
 // src/workers/readwise/corpus-adapter.ts
 var init_corpus_adapter = __esm(() => {
@@ -22666,11 +22959,13 @@ var init_grant_fence = __esm(() => {
 });
 
 // src/workers/x-bookmarks/live-control.ts
-var X_BOOKMARKS_HEAD_INTERVAL_MS, X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS, X_BOOKMARKS_RECONCILE_INTERVAL_MS, X_BOOKMARKS_RECONCILE_FRESHNESS_THRESHOLD_MS, EMPTY_SHA256, UNDISPATCHED_RESERVATION_LEASE_MS, IN_FLIGHT_RESERVATION_LEASE_MS, DEFAULT_X_HEAD_PAGE_SIZE_LADDER;
+var providerStops, X_BOOKMARKS_HEAD_INTERVAL_MS, X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS, X_BOOKMARKS_RECONCILE_INTERVAL_MS, X_BOOKMARKS_RECONCILE_FRESHNESS_THRESHOLD_MS, EMPTY_SHA256, UNDISPATCHED_RESERVATION_LEASE_MS, IN_FLIGHT_RESERVATION_LEASE_MS, DEFAULT_X_HEAD_PAGE_SIZE_LADDER;
 var init_live_control2 = __esm(() => {
+  init_provider_rate_limits();
   init_olympus_layout();
   init_sqlite_migrations();
   init_connector2();
+  providerStops = createProviderRateLimitReporter("x");
   X_BOOKMARKS_HEAD_INTERVAL_MS = 15 * 60000;
   X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS = 2 * X_BOOKMARKS_HEAD_INTERVAL_MS + 5 * 60000;
   X_BOOKMARKS_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
@@ -22692,8 +22987,9 @@ var init_reconcile_state = __esm(() => {
 });
 
 // src/workers/x-bookmarks/api-connector.ts
-var X_BOOKMARKS_NO_APPROVED_WINDOW_BOUNDARY, X_BOOKMARKS_RECONCILE_PAGE_SIZE_LADDER;
+var providerStops2, X_BOOKMARKS_NO_APPROVED_WINDOW_BOUNDARY, X_BOOKMARKS_RECONCILE_PAGE_SIZE_LADDER;
 var init_api_connector = __esm(() => {
+  init_provider_rate_limits();
   init_source_placement();
   init_credential_broker();
   init_grant_fence();
@@ -22702,6 +22998,7 @@ var init_api_connector = __esm(() => {
   init_live_control2();
   init_reconcile_state();
   init_grant_fence();
+  providerStops2 = createProviderRateLimitReporter("x");
   X_BOOKMARKS_NO_APPROVED_WINDOW_BOUNDARY = Object.freeze({
     algorithmVersion: X_BOOKMARKS_WINDOW_BOUNDARY_ALGORITHM_VERSION,
     approvedProviderErrorTypes: Object.freeze([]),
@@ -22768,6 +23065,7 @@ var init_scheduler_limit_stops = __esm(() => {
 // src/workers/x-bookmarks/content-recovery.ts
 var X_CONTENT_RECOVERY_LIMIT_SUBJECT;
 var init_content_recovery = __esm(() => {
+  init_provider_rate_limits();
   init_scheduler_limit_stops();
   init_limit_stops();
   init_types();
@@ -37922,10 +38220,10 @@ var operations = [
       const prompt = asString(params.prompt, "prompt");
       const lane = params.lane !== undefined ? resolveLane(ctx.config, params.lane) : undefined;
       const profile = lane === undefined ? resolveModelProfile(ctx.config, params.profile) : undefined;
-      const model = optionalString4(params.model);
-      const system = optionalString4(params.system);
-      const temperature = optionalNumber2(params.temperature, "temperature");
-      const maxTokens = optionalNumber2(params.max_tokens, "max_tokens");
+      const model = optionalString5(params.model);
+      const system = optionalString5(params.system);
+      const temperature = optionalNumber3(params.temperature, "temperature");
+      const maxTokens = optionalNumber3(params.max_tokens, "max_tokens");
       const completeOptions = {
         prompt,
         ...lane !== undefined ? { lane } : {},
@@ -37956,28 +38254,28 @@ var operations = [
     handler: async (ctx, params) => {
       assertNoUndeclaredParams(SOURCE_ANSWER_PARAMS, params, "Source answer");
       const question = asString(params.question, "question");
-      const query = optionalString4(params.query);
+      const query = optionalString5(params.query);
       const corpusId = optionalSourceIndexAnswerCorpusId(params.corpus_id, ctx.config);
       const corpusIds = params.corpus_ids !== undefined ? sourceAnswerCorpusIds(params.corpus_ids, ctx.config) : undefined;
       const account = optionalSourceAccount(params.account, corpusId);
-      const approvedScopeKey = optionalString4(params.approved_scope_key);
-      const chatScope = optionalString4(params.chat_scope);
-      const conversationId = optionalString4(params.conversation_id);
-      const senderId = optionalString4(params.sender_id);
-      const senderLabel = optionalString4(params.sender_label);
-      const authoredAfter = optionalString4(params.authored_after);
-      const authoredBefore = optionalString4(params.authored_before);
+      const approvedScopeKey = optionalString5(params.approved_scope_key);
+      const chatScope = optionalString5(params.chat_scope);
+      const conversationId = optionalString5(params.conversation_id);
+      const senderId = optionalString5(params.sender_id);
+      const senderLabel = optionalString5(params.sender_label);
+      const authoredAfter = optionalString5(params.authored_after);
+      const authoredBefore = optionalString5(params.authored_before);
       const selectedItems = optionalSourceAnswerSelectedItems(params.selected_items, corpusId);
       const retrievalMode = optionalRetrievalMode2(params.retrieval_mode);
       const analystProvider = optionalSourceAnswerAnalystProvider(params.analyst_provider);
       const analystModel = optionalAnalystModel(params.analyst_model, "analyst_model", analystProvider);
-      const maxResults = optionalNumber2(params.max_results, "max_results");
+      const maxResults = optionalNumber3(params.max_results, "max_results");
       const includeSecureLocal = optionalBoolean(params.include_secure_local, "include_secure_local");
       const includeSecureLocalContent = optionalBoolean(params.include_secure_local_content, "include_secure_local_content");
       const includeInternal = optionalBoolean(params.include_internal, "include_internal");
       const includeInternalContent = optionalBoolean(params.include_internal_content, "include_internal_content");
-      const internalContentMaxBytes = optionalNumber2(params.internal_content_max_bytes, "internal_content_max_bytes");
-      const timeoutMs = optionalNumber2(params.timeoutMs, "timeoutMs");
+      const internalContentMaxBytes = optionalNumber3(params.internal_content_max_bytes, "internal_content_max_bytes");
+      const timeoutMs = optionalNumber3(params.timeoutMs, "timeoutMs");
       const answer = (signal) => ctx.email.sourceAnswer({
         question,
         ...query !== undefined ? { query } : {},
@@ -38070,24 +38368,24 @@ var operations = [
     handler: async (ctx, params) => {
       const corpusId = optionalSourceIndexStatusCorpusId(params.corpus_id, ctx.config);
       const account = optionalSourceAccount(params.account, corpusId);
-      const approvedScopeKey = optionalString4(params.approved_scope_key);
-      const chatScope = optionalString4(params.chat_scope);
-      const conversationId = optionalString4(params.conversation_id);
+      const approvedScopeKey = optionalString5(params.approved_scope_key);
+      const chatScope = optionalString5(params.chat_scope);
+      const conversationId = optionalString5(params.conversation_id);
       const includeSenderAggregation = optionalBoolean(params.include_sender_aggregation, "include_sender_aggregation");
-      const maxSenders = optionalNumber2(params.max_senders, "max_senders");
-      const extractorKind = optionalString4(params.extractor_kind);
-      const extractorVersion = optionalString4(params.extractor_version);
+      const maxSenders = optionalNumber3(params.max_senders, "max_senders");
+      const extractorKind = optionalString5(params.extractor_kind);
+      const extractorVersion = optionalString5(params.extractor_version);
       const qaVerdicts = params.qa_verdicts !== undefined ? asStringList(params.qa_verdicts, "qa_verdicts") : undefined;
       const mimeTypes = params.mime_types !== undefined ? asStringList(params.mime_types, "mime_types") : undefined;
-      const requiredArtifactKind = optionalString4(params.required_artifact_kind);
-      const requiredArtifactWarning = optionalString4(params.required_artifact_warning);
+      const requiredArtifactKind = optionalString5(params.required_artifact_kind);
+      const requiredArtifactWarning = optionalString5(params.required_artifact_warning);
       const sourceExtractorKinds = params.source_extractor_kinds !== undefined ? asStringList(params.source_extractor_kinds, "source_extractor_kinds") : undefined;
       const sourceJobStatuses = params.source_job_statuses !== undefined ? asStringList(params.source_job_statuses, "source_job_statuses") : undefined;
       const includeReadinessLedger = optionalBoolean(params.include_readiness_ledger, "include_readiness_ledger");
       const includeIngestionLedger = optionalBoolean(params.include_ingestion_ledger, "include_ingestion_ledger");
       const includeItems = optionalBoolean(params.include_items, "include_items");
-      const maxItems = optionalNumber2(params.max_items, "max_items");
-      const query = optionalString4(params.query);
+      const maxItems = optionalNumber3(params.max_items, "max_items");
+      const query = optionalString5(params.query);
       return ctx.email.sourceIndexStatus({
         ...account !== undefined ? { account } : {},
         ...corpusId !== undefined ? { corpusId } : {},
@@ -38163,7 +38461,7 @@ var operations = [
       const before = optionalNarrowingString(params.before, "before");
       const includeDeleted = optionalBoolean(params.include_deleted, "include_deleted");
       const attachmentType = optionalAttachmentType(params.attachment_type);
-      const maxResults = optionalNumber2(params.max_results, "max_results");
+      const maxResults = optionalNumber3(params.max_results, "max_results");
       const includeLocators = optionalBoolean(params.include_locators, "include_locators");
       const allTiers = optionalBoolean(params.all_tiers, "all_tiers");
       return ctx.email.sourceIndexSearch({
@@ -38210,8 +38508,8 @@ var operations = [
     requiresOpenClawSessionRoute: true,
     cliHints: { name: "source watch create" },
     handler: async (ctx, params) => {
-      const expiresAt = optionalString4(params.expires_at);
-      const maxDeliveryAttempts = optionalNumber2(params.max_delivery_attempts, "max_delivery_attempts");
+      const expiresAt = optionalString5(params.expires_at);
+      const maxDeliveryAttempts = optionalNumber3(params.max_delivery_attempts, "max_delivery_attempts");
       return ctx.email.sourceWatchCreate({
         route: requireSourceWatchRoute(ctx),
         corpusId: asSourceIndexSearchCorpusId(params.corpus_id, ctx.config),
@@ -38234,8 +38532,8 @@ var operations = [
     requiresOpenClawSessionRoute: true,
     cliHints: { name: "source watches" },
     handler: async (ctx, params) => {
-      const limit = optionalNumber2(params.limit, "limit");
-      const cursor = optionalString4(params.cursor);
+      const limit = optionalNumber3(params.limit, "limit");
+      const cursor = optionalString5(params.cursor);
       return ctx.email.sourceWatches({
         route: requireSourceWatchRoute(ctx),
         ...limit !== undefined ? { limit } : {},
@@ -38255,7 +38553,7 @@ var operations = [
     requiresOpenClawSessionRoute: true,
     cliHints: { name: "source watch cancel" },
     handler: async (ctx, params) => {
-      const reason = optionalString4(params.reason);
+      const reason = optionalString5(params.reason);
       return ctx.email.sourceWatchCancel({
         route: requireSourceWatchRoute(ctx),
         watchId: asString(params.watch_id, "watch_id"),
@@ -38309,8 +38607,8 @@ var operations = [
       const level = optionalAskLevel(params.level);
       const cleanup = optionalAskCleanup(params.cleanup);
       const remember = optionalBoolean(params.remember, "remember");
-      const model = optionalString4(params.model);
-      const timeoutMs = optionalNumber2(params.timeoutMs, "timeoutMs");
+      const model = optionalString5(params.model);
+      const timeoutMs = optionalNumber3(params.timeoutMs, "timeoutMs");
       const insideGateway = ctx.caller?.surface === "native";
       const ask = (signal) => ctx.email.askAnonymously({
         question,
@@ -38351,8 +38649,8 @@ var operations = [
       if (action !== "start" && action !== "status" && action !== "remove") {
         throw new OperationError("invalid_params", 'action must be "start", "status" or "remove".');
       }
-      const path = optionalString4(params.path);
-      const archiveId = optionalString4(params.archive_id);
+      const path = optionalString5(params.path);
+      const archiveId = optionalString5(params.archive_id);
       if (action === "start" && (path === undefined || archiveId !== undefined)) {
         throw new OperationError("invalid_params", "start needs path, and takes no archive_id.");
       }
@@ -38384,9 +38682,9 @@ var operations = [
     cliHints: { name: "privacy item find", positional: ["query"] },
     handler: async (ctx, params) => {
       assertNoUndeclaredParams(PRIVACY_ITEM_FIND_PARAMS, params, "Privacy item find");
-      const query = optionalString4(params.query);
+      const query = optionalString5(params.query);
       const recent = optionalBoolean(params.recent, "recent");
-      const limit = optionalNumber2(params.limit, "limit");
+      const limit = optionalNumber3(params.limit, "limit");
       if (query === undefined === (recent !== true)) {
         throw new OperationError("invalid_params", "Give query, or recent: true, not both.");
       }
@@ -38462,19 +38760,19 @@ function runUnderCaller(jobs, caller, work) {
   });
 }
 function optionalAskLevel(value) {
-  const level = optionalString4(value);
+  const level = optionalString5(value);
   if (level === undefined || level === "strict" || level === "standard")
     return level;
   throw new OperationError("invalid_params", 'level must be "strict" or "standard".');
 }
 function optionalAskCleanup(value) {
-  const cleanup = optionalString4(value);
+  const cleanup = optionalString5(value);
   if (cleanup === undefined || cleanup === "as_written" || cleanup === "light_cleanup" || cleanup === "custom")
     return cleanup;
   throw new OperationError("invalid_params", 'cleanup must be "as_written", "light_cleanup" or "custom".');
 }
 function optionalSourceIndexAnswerCorpusId(value, config) {
-  const corpusId = optionalString4(value);
+  const corpusId = optionalString5(value);
   if (corpusId === undefined)
     return;
   return publicSourceCorpusRegistry(config).require(corpusId, "answer");
@@ -38488,7 +38786,7 @@ function sourceAnswerCorpusIds(value, config) {
   return [...new Set(corpusIds)];
 }
 function optionalSourceIndexStatusCorpusId(value, config) {
-  const corpusId = optionalString4(value);
+  const corpusId = optionalString5(value);
   if (corpusId === undefined)
     return;
   return publicSourceCorpusRegistry(config).require(corpusId, "status");
@@ -38498,7 +38796,7 @@ function asSourceIndexSearchCorpusId(value, config) {
   return publicSourceCorpusRegistry(config).require(corpusId, "search");
 }
 function optionalSourceWatchMode(value) {
-  const mode = optionalString4(value);
+  const mode = optionalString5(value);
   if (mode === undefined || mode === "one_shot" || mode === "continuous")
     return mode;
   throw new OperationError("invalid_params", "mode must be one_shot or continuous.");
@@ -38588,7 +38886,7 @@ function asStringList(value, name) {
   }
   throw new OperationError("invalid_params", `${name} must be a comma-separated string or array.`);
 }
-function optionalString4(value) {
+function optionalString5(value) {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 function optionalNarrowingString(value, name) {
@@ -38620,7 +38918,7 @@ function optionalTrustDomainConsistency(value, corpusId, config) {
   return value;
 }
 function optionalSourceAccount(value, corpusId) {
-  const account = optionalString4(value);
+  const account = optionalString5(value);
   if (account === undefined)
     return;
   if (account.startsWith("dropbox.") && (corpusId === undefined || corpusId === "secure_local.dropbox.files")) {
@@ -38628,7 +38926,7 @@ function optionalSourceAccount(value, corpusId) {
   }
   return account;
 }
-function optionalNumber2(value, name) {
+function optionalNumber3(value, name) {
   if (value === undefined || value === null || value === "")
     return;
   const number2 = typeof value === "number" ? value : Number(value);
@@ -38663,7 +38961,7 @@ function optionalSourceAnswerAnalystProvider(value) {
   throw new OperationError("invalid_params", "analyst_provider must be default, local, venice, or cloud.");
 }
 function optionalAnalystModel(value, name, analystProvider) {
-  const model = optionalString4(value)?.trim();
+  const model = optionalString5(value)?.trim();
   if (model === undefined)
     return;
   const normalized = analystProvider === "venice" || analystProvider === undefined ? normalizeVeniceAnalystModelId(model) : model;

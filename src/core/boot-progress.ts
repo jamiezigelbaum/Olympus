@@ -290,17 +290,44 @@ export function retiredStateBackupPath(path: string): string {
 export function retireStatePath(env: LayoutEnv, storeId: string, path: string): boolean {
   if (!existsSync(path)) return false;
   const backup = retiredStateBackupPath(path);
-  if (existsSync(backup)) {
-    // An earlier retire's copy is the older state and stands.
-    rmSync(path, { recursive: true, force: true });
-    return false;
-  }
+  // A copy an earlier start left is older than the state here, which a
+  // version that still used it wrote since: the newer state is the one kept.
+  rmSync(backup, { recursive: true, force: true });
   recordSchemaBackup(env, { storeId, dbPath: path, backupPath: backup });
-  renameSync(path, backup);
-  // The restore and the commit pick their copies by time: this one is from now.
+  // The restore and the commit pick their copies by time, so the time is set
+  // before the move, which keeps it: no moment where the copy is aside but
+  // looks older than the upgrade (#1563 review).
   const now = new Date();
-  utimesSync(backup, now, now);
+  utimesSync(path, now, now);
+  renameSync(path, backup);
   return true;
+}
+
+/**
+ * Removes the part-way copies of `backup` that a killed backup left
+ * (`<backup>.<pid>.partial` and its SQLite sidecars) when that process is
+ * gone. A live process's copy is its own (#1563: a background killed mid-backup
+ * left 33 MB behind, and its successor wrote a second copy beside it).
+ */
+export function removeAbandonedBackupCopies(backup: string): number {
+  const prefix = `${basename(backup)}.`;
+  let names: string[];
+  try {
+    names = readdirSync(dirname(backup));
+  } catch {
+    return 0;
+  }
+  let removed = 0;
+  for (const name of names) {
+    if (!name.startsWith(prefix)) continue;
+    const match = /^(\d+)\.partial(?:-journal|-wal|-shm)?$/.exec(name.slice(prefix.length));
+    if (!match) continue;
+    const pid = Number(match[1]);
+    if (pid === process.pid || processAlive(pid)) continue;
+    rmSync(join(dirname(backup), name), { force: true });
+    removed += 1;
+  }
+  return removed;
 }
 
 /** Every pre-update copy of the store at `dbPath` on disk, a copy a crash left part way included. */

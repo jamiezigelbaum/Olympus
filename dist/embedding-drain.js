@@ -13341,11 +13341,42 @@ function write(target, nowMs, force) {
     target.lastWriteMs = nowMs;
   } catch {}
 }
+function processAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
 function bootProgressPath(env) {
   return sharedDataPath("boot-progress", env);
 }
 function preSchemaBackupPath(dbPath, version) {
   return `${dbPath}.pre-schema-${version}.bak`;
+}
+function removeAbandonedBackupCopies(backup) {
+  const prefix = `${basename3(backup)}.`;
+  let names;
+  try {
+    names = readdirSync2(dirname18(backup));
+  } catch {
+    return 0;
+  }
+  let removed = 0;
+  for (const name of names) {
+    if (!name.startsWith(prefix))
+      continue;
+    const match = /^(\d+)\.partial(?:-journal|-wal|-shm)?$/.exec(name.slice(prefix.length));
+    if (!match)
+      continue;
+    const pid = Number(match[1]);
+    if (pid === process.pid || processAlive(pid))
+      continue;
+    rmSync6(join20(dirname18(backup), name), { force: true });
+    removed += 1;
+  }
+  return removed;
 }
 function recordSchemaBackup(env, entry) {
   const path = sharedDataPath("schema-backups", env);
@@ -13442,6 +13473,7 @@ function backUpBeforeUpdate(db, storeId, fromVersion, env, report, freeBytes = d
   const file = db.filename;
   const backup = preSchemaBackupPath(file, fromVersion);
   const started = performance.now();
+  removeAbandonedBackupCopies(backup);
   const needed = schemaUpdateSpaceNeeded(statSync9(file).size);
   const free = freeBytes(dirname19(file));
   if (free < needed) {
@@ -38296,6 +38328,292 @@ var PRIVATE_ANSWER_OPTIONS = [
   { id: "private-cloud-only", label: PRIVACY_PRESET_LABELS["private-cloud-only"], description: "Use Venice for Private answers after you add its key. Venice is a privacy-focused cloud provider whose policy says it does not retain conversations or train on them; it can read the content.", recommended: false },
   { id: "no-sensitive", label: PRIVACY_PRESET_LABELS["no-sensitive"], description: "Search Private items and use Ask privately on this computer. Connected agents cannot use Private items to answer.", recommended: false }
 ];
+// src/core/provider-rate-limits.ts
+registerLimit({ id: "x.rate_limit", kind: "requests", scope: "source", label: "X is limiting requests", unit: "requests", continue: "none" });
+registerLimit({ id: "evernote.rate_limit", kind: "requests", scope: "source", label: "Evernote is limiting requests", unit: "requests", continue: "none" });
+registerLimit({ id: "readwise.rate_limit", kind: "requests", scope: "source", label: "Readwise is limiting requests", unit: "requests", continue: "none" });
+var PROVIDERS = {
+  x: { id: "x.rate_limit", subject: "x.bookmarks", name: "X" },
+  evernote: { id: "evernote.rate_limit", subject: "evernote.notes", name: "Evernote" },
+  readwise: { id: "readwise.rate_limit", subject: "readwise.library", name: "Readwise" }
+};
+var SOURCE_RATE_LIMITED = "rate_limited";
+function providerRetryTime(value, now, fallbackMs) {
+  const seconds = value?.trim() ? Number(value) : NaN;
+  const timestamp = Number.isFinite(seconds) ? seconds >= 0 ? now.getTime() + seconds * 1000 : NaN : Date.parse(value ?? "");
+  const retry = new Date(timestamp);
+  return Number.isFinite(retry.getTime()) ? retry.toISOString() : new Date(now.getTime() + fallbackMs).toISOString();
+}
+var reporters = {};
+function createProviderRateLimitReporter(provider) {
+  return reporters[provider] ??= buildProviderRateLimitReporter(provider);
+}
+function buildProviderRateLimitReporter(provider) {
+  const registration = PROVIDERS[provider];
+  const stops = createLimitStopReporter();
+  let resumesAt;
+  return {
+    report(at, now, amounts) {
+      if (!Number.isFinite(Date.parse(at)) || Date.parse(at) - now.getTime() <= 60000)
+        return;
+      resumesAt = at;
+      stops.report({
+        id: registration.id,
+        subject: registration.subject,
+        since: now.toISOString(),
+        resumesAt: at,
+        limit: amounts?.limit ?? null,
+        used: amounts?.used ?? null
+      });
+    },
+    success() {
+      stops.clear(registration.id, registration.subject);
+      resumesAt = undefined;
+    },
+    resume(now) {
+      if (resumesAt && Date.parse(resumesAt) <= now.getTime())
+        this.success();
+    }
+  };
+}
+
+// src/workers/readwise/api.ts
+var READWISE_API_V2_BASE_URL = "https://readwise.io/api/v2/";
+var READWISE_READER_API_V3_BASE_URL = "https://readwise.io/api/v3/";
+var DEFAULT_TIMEOUT_MS = 30000;
+
+class ReadwiseApiError extends Error {
+  status;
+  retryAfter;
+  resumesAt;
+  constructor(message2, options = {}) {
+    super(message2);
+    if (options.status !== undefined)
+      this.status = options.status;
+    if (options.retryAfter !== undefined)
+      this.retryAfter = options.retryAfter;
+  }
+}
+
+class ReadwiseApiClient {
+  providerStops = createProviderRateLimitReporter("readwise");
+  now;
+  token;
+  fetchImpl;
+  apiV2BaseUrl;
+  readerApiV3BaseUrl;
+  timeoutMs;
+  constructor(options) {
+    this.now = options.now ?? (() => new Date);
+    const token = options.token.trim();
+    if (!token)
+      throw new Error("Readwise API token is required.");
+    this.token = token;
+    this.fetchImpl = options.fetch ?? fetch;
+    this.apiV2BaseUrl = normalizeBaseUrl(options.apiV2BaseUrl ?? READWISE_API_V2_BASE_URL);
+    this.readerApiV3BaseUrl = normalizeBaseUrl(options.readerApiV3BaseUrl ?? READWISE_READER_API_V3_BASE_URL);
+    this.timeoutMs = normalizeTimeoutMs(options.timeoutMs);
+  }
+  async verifyToken() {
+    const response = await this.request("auth/", { baseUrl: this.apiV2BaseUrl });
+    if (response.status !== 204) {
+      throw await errorFromResponse(response, "Readwise auth check failed");
+    }
+  }
+  async listReaderDocuments(request = {}) {
+    const limit = normalizeReaderPageLimit(request.limit);
+    const params = new URLSearchParams({ limit: String(limit) });
+    appendParam(params, "id", request.documentId);
+    appendParam(params, "updatedAfter", request.updatedAfter);
+    appendParam(params, "location", request.location);
+    appendParam(params, "category", request.category);
+    appendParam(params, "pageCursor", request.pageCursor);
+    if (request.withHtmlContent === true)
+      params.set("withHtmlContent", "true");
+    if (request.withRawSourceUrl === true)
+      params.set("withRawSourceUrl", "true");
+    const payload2 = await this.requestJson(`list/?${params.toString()}`, {
+      baseUrl: this.readerApiV3BaseUrl,
+      context: "Readwise Reader list request"
+    });
+    const record = requireRecord(payload2, "Readwise Reader list response");
+    const results = requireRecordArray(record.results, "Readwise Reader list response results");
+    const count = optionalNumber2(record.count) ?? results.length;
+    const nextPageCursor = optionalString2(record.nextPageCursor);
+    return {
+      count,
+      ...nextPageCursor ? { nextPageCursor } : {},
+      results
+    };
+  }
+  async fetchReaderDocuments(request = {}) {
+    const maxDocuments = normalizeOptionalPositiveInteger(request.maxDocuments, "maxDocuments");
+    const pageLimit = normalizeReaderPageLimit(request.pageLimit);
+    const documents = [];
+    let pageCursor;
+    let requestCount = 0;
+    while (maxDocuments === undefined || documents.length < maxDocuments) {
+      const remaining = maxDocuments === undefined ? pageLimit : Math.min(pageLimit, maxDocuments - documents.length);
+      if (remaining <= 0)
+        break;
+      const page = await this.listReaderDocuments({
+        ...request,
+        limit: remaining,
+        ...pageCursor ? { pageCursor } : {}
+      });
+      requestCount += 1;
+      documents.push(...page.results);
+      if (!page.nextPageCursor)
+        break;
+      pageCursor = page.nextPageCursor;
+    }
+    return { documents, requestCount };
+  }
+  async exportBooks(request = {}) {
+    const params = new URLSearchParams;
+    appendParam(params, "updatedAfter", request.updatedAfter);
+    appendParam(params, "pageCursor", request.pageCursor);
+    const query = params.toString();
+    const suffix = query ? `export/?${query}` : "export/";
+    const payload2 = await this.requestJson(suffix, {
+      baseUrl: this.apiV2BaseUrl,
+      context: "Readwise export request"
+    });
+    const results = Array.isArray(payload2) ? requireRecordArray(payload2, "Readwise export response") : requireRecordArray(requireRecord(payload2, "Readwise export response").results, "Readwise export response results");
+    const nextPageCursor = Array.isArray(payload2) ? undefined : optionalString2(requireRecord(payload2, "Readwise export response").nextPageCursor);
+    return {
+      ...nextPageCursor ? { nextPageCursor } : {},
+      results
+    };
+  }
+  async fetchExportBooks(request = {}) {
+    const maxPages = normalizeOptionalPositiveInteger(request.maxPages, "maxPages") ?? 10;
+    const books = [];
+    let pageCursor;
+    let requestCount = 0;
+    while (requestCount < maxPages) {
+      const page = await this.exportBooks({
+        ...request.updatedAfter ? { updatedAfter: request.updatedAfter } : {},
+        ...pageCursor ? { pageCursor } : {}
+      });
+      requestCount += 1;
+      books.push(...page.results);
+      if (!page.nextPageCursor)
+        break;
+      pageCursor = page.nextPageCursor;
+    }
+    return {
+      books,
+      requestCount,
+      ...pageCursor ? { nextPageCursor: pageCursor } : {},
+      pageLimitReached: pageCursor !== undefined && requestCount >= maxPages
+    };
+  }
+  async requestJson(path, options) {
+    const response = await this.request(path, { baseUrl: options.baseUrl });
+    if (!response.ok)
+      throw await errorFromResponse(response, options.context);
+    try {
+      return await response.json();
+    } catch (error) {
+      throw new ReadwiseApiError(`${options.context} returned invalid JSON.`);
+    }
+  }
+  async request(path, options) {
+    const controller = new AbortController;
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const url = new URL(path, options.baseUrl).toString();
+      this.providerStops.resume(this.now());
+      const response = await this.fetchImpl(url, {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+          Authorization: `Token ${this.token}`
+        },
+        signal: controller.signal
+      });
+      if (response.status === 429) {
+        const now = this.now();
+        const error = await errorFromResponse(response, "Readwise request");
+        error.resumesAt = providerRetryTime(error.retryAfter, now, 60000);
+        this.providerStops.report(error.resumesAt, now);
+        throw error;
+      }
+      if (response.ok)
+        this.providerStops.success();
+      return response;
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new ReadwiseApiError("Readwise API request timed out.");
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+}
+function normalizeBaseUrl(value) {
+  const trimmed = value.trim();
+  if (!trimmed)
+    throw new Error("Readwise API base URL must be non-empty.");
+  return trimmed.endsWith("/") ? trimmed : `${trimmed}/`;
+}
+function normalizeTimeoutMs(value) {
+  if (value === undefined || !Number.isFinite(value))
+    return DEFAULT_TIMEOUT_MS;
+  return Math.max(1000, Math.floor(value));
+}
+function normalizeReaderPageLimit(value) {
+  if (value === undefined || !Number.isFinite(value))
+    return 100;
+  return Math.max(1, Math.min(Math.floor(value), 100));
+}
+function normalizeOptionalPositiveInteger(value, name) {
+  if (value === undefined)
+    return;
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive integer.`);
+  }
+  return value;
+}
+function appendParam(params, name, value) {
+  const trimmed = value?.trim();
+  if (trimmed)
+    params.set(name, trimmed);
+}
+function requireRecord(value, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ReadwiseApiError(`${label} must be a JSON object.`);
+  }
+  return value;
+}
+function requireRecordArray(value, label) {
+  if (!Array.isArray(value)) {
+    throw new ReadwiseApiError(`${label} must be an array.`);
+  }
+  return value.filter((item) => !!item && typeof item === "object" && !Array.isArray(item));
+}
+function optionalString2(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+function optionalNumber2(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+async function errorFromResponse(response, context2) {
+  const retryAfter = response.headers.get("retry-after") ?? undefined;
+  let detail = "";
+  try {
+    detail = (await response.text()).slice(0, 240).trim();
+  } catch {
+    detail = "";
+  }
+  return new ReadwiseApiError(`${context2} returned HTTP ${response.status}${detail ? `: ${detail}` : ""}.`, {
+    status: response.status,
+    ...retryAfter ? { retryAfter } : {}
+  });
+}
+
 // src/workers/source-scheduler.ts
 import { createHash as createHash20 } from "node:crypto";
 
@@ -38556,14 +38874,14 @@ function parseDropboxLocalFileRootsFromEnv(env = process.env) {
       throw new Error(`Dropbox local root ${index} must be an object.`);
     }
     const record = item;
-    const rootPath = optionalString2(record.rootPath) ?? optionalString2(record.root_path);
+    const rootPath = optionalString3(record.rootPath) ?? optionalString3(record.root_path);
     if (!rootPath) {
       throw new Error(`Dropbox local root ${index} requires rootPath.`);
     }
-    const account = optionalString2(record.account);
-    const approvedScopeKey = optionalString2(record.approvedScopeKey) ?? optionalString2(record.approved_scope_key);
-    const dropboxPathPrefix = normalizeDropboxPath(optionalString2(record.dropboxPathPrefix) ?? optionalString2(record.dropbox_path_prefix));
-    const rootId = optionalString2(record.rootId) ?? optionalString2(record.root_id);
+    const account = optionalString3(record.account);
+    const approvedScopeKey = optionalString3(record.approvedScopeKey) ?? optionalString3(record.approved_scope_key);
+    const dropboxPathPrefix = normalizeDropboxPath(optionalString3(record.dropboxPathPrefix) ?? optionalString3(record.dropbox_path_prefix));
+    const rootId = optionalString3(record.rootId) ?? optionalString3(record.root_id);
     const root = { rootPath };
     if (account)
       root.account = account;
@@ -38582,7 +38900,7 @@ function normalizeDropboxPath(path) {
     return;
   return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
 }
-function optionalString2(value) {
+function optionalString3(value) {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
@@ -39051,6 +39369,7 @@ var X_BOOKMARKS_STORE_PLACEMENT = Object.freeze({
   trustDomain: "internal"
 });
 // src/workers/x-bookmarks/live-control.ts
+var providerStops = createProviderRateLimitReporter("x");
 var X_BOOKMARKS_HEAD_INTERVAL_MS = 15 * 60000;
 var X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS = 2 * X_BOOKMARKS_HEAD_INTERVAL_MS + 5 * 60000;
 var X_BOOKMARKS_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
@@ -39064,6 +39383,7 @@ var DEFAULT_X_HEAD_PAGE_SIZE_LADDER = Object.freeze([10, 20, 40, 80, 100]);
 var X_BOOKMARKS_WINDOW_BOUNDARY_ALGORITHM_VERSION = 2;
 var FOLDER_FACET_REFRESH_LEASE_MS = 5 * 60000;
 // src/workers/x-bookmarks/api-connector.ts
+var providerStops2 = createProviderRateLimitReporter("x");
 var X_BOOKMARKS_NO_APPROVED_WINDOW_BOUNDARY = Object.freeze({
   algorithmVersion: X_BOOKMARKS_WINDOW_BOUNDARY_ALGORITHM_VERSION,
   approvedProviderErrorTypes: Object.freeze([]),
@@ -42360,7 +42680,10 @@ var UTC_DAY_SCOPED_DEGRADED_REASONS = new Set([
 var SCHEDULER_PARK_REASONS = new Set([
   ...UTC_DAY_SCOPED_DEGRADED_REASONS,
   "provider_rate_limit",
-  "provider_rate_limited"
+  "provider_rate_limited",
+  "x.rate_limit",
+  "evernote.rate_limit",
+  "readwise.rate_limit"
 ]);
 function reportedDegradedReason(degradedReason, lastCompletedAt, now) {
   if (!degradedReason || !UTC_DAY_SCOPED_DEGRADED_REASONS.has(degradedReason))
@@ -42399,7 +42722,7 @@ function safeSchedulerErrorKind(error) {
   if (/timeout/i.test(message2))
     return "timeout";
   if (/rate.?limit|too many requests/i.test(message2))
-    return "rate_limited";
+    return SOURCE_RATE_LIMITED;
   if (/network|connection|ECONN/i.test(message2))
     return "network";
   if (/temporar|try again/i.test(message2))
@@ -42423,7 +42746,7 @@ function mapExplicitSchedulerErrorKind(value) {
   if (/timeout/i.test(value))
     return "timeout";
   if (/rate.?limit|too many requests/i.test(value))
-    return "rate_limited";
+    return SOURCE_RATE_LIMITED;
   if (/network|connection|ECONN/i.test(value))
     return "network";
   if (/temporar|try again/i.test(value))
@@ -42485,7 +42808,7 @@ function sanitizeSchedulerWarnings(warnings) {
     if (/timeout/i.test(warning))
       return "timeout";
     if (/rate.?limit|too many requests/i.test(warning))
-      return "rate_limited";
+      return SOURCE_RATE_LIMITED;
     if (/network|connection|ECONN/i.test(warning))
       return "network";
     return "task_warning";

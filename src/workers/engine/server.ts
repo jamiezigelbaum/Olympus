@@ -6116,8 +6116,15 @@ export async function main(): Promise<void> {
   serverOptions.fetch = (async (request, server) => {
     const response = await fetchWithTierLedgerStatus(request, server);
     const path = new URL(request.url).pathname;
-    if ((path === '/v1/health' || path === '/health') && response?.ok && tierLedgerProblems.size) {
-      return Response.json({ ...await response.json() as object, privacy_ledger_problems: Object.fromEntries(tierLedgerProblems) }, { status: response.status, headers: response.headers });
+    if ((path === '/v1/health' || path === '/health') && response?.ok && (tierLedgerProblems.size || engineFront)) {
+      return Response.json({
+        ...await response.json() as object,
+        ...(tierLedgerProblems.size ? { privacy_ledger_problems: Object.fromEntries(tierLedgerProblems) } : {}),
+        // The front answers while its background restarts or crash-loops: an
+        // upgrade or rollback reads this before it calls the engine healthy
+        // (#1563 review).
+        ...(engineFront ? { engine_background: await engineFront.backgroundReady() ? 'ready' : 'unreachable' } : {}),
+      }, { status: response.status, headers: response.headers });
     }
     return response;
   }) as typeof serverOptions.fetch;

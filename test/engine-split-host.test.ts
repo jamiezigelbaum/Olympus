@@ -72,14 +72,38 @@ describe('the host starts the background, then the front', () => {
     bg.setReady(true);
     await clock.advance(250);
     await waiting;
-    // Without progress, the same wait gives up at its deadline.
-    bg.setReady(false);
+    // Without progress, and with nothing accepting its connection, the same wait gives up at its deadline.
     inProgress = false;
-    const stalled = waitForEngineBackground({ socketPath: '/unused', authToken: TOKEN, fetch: bg.fetch, sleep: clock.sleep, now: clock.now, timeoutMs: 1_000, pollMs: 250, inProgress: () => inProgress });
+    const gone = (async () => { throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }); }) as unknown as typeof fetch;
+    const stalled = waitForEngineBackground({ socketPath: '/unused', authToken: TOKEN, fetch: gone, sleep: clock.sleep, now: clock.now, timeoutMs: 1_000, pollMs: 250, inProgress: () => inProgress });
     const outcome = stalled.then(() => 'ready', () => 'gave up');
     await flushMicrotasks();
     await clock.advance(1_500);
     expect(await outcome).toBe('gave up');
+  });
+
+  test('past its deadline the front keeps waiting for a background that is busy or not ready yet (gate7 VM, 154 s sync)', async () => {
+    const bg = background({});
+    bg.setReady(false);
+    const clock = createTestClock();
+    let busy = false;
+    // A busy background accepts the connection and answers nothing in time: the check runs out of time.
+    const fetchBackground = ((input: RequestInfo | URL, init?: RequestInit) => busy
+      ? Promise.reject(new DOMException('The operation timed out.', 'TimeoutError'))
+      : bg.fetch(input, init)) as typeof fetch;
+    const waiting = waitForEngineBackground({ socketPath: '/unused', authToken: TOKEN, fetch: fetchBackground, sleep: clock.sleep, now: clock.now, timeoutMs: 1_000, pollMs: 250, inProgress: () => false });
+    let failed = false;
+    void waiting.catch(() => { failed = true; });
+    await flushMicrotasks();
+    await clock.advance(3_000);
+    expect(failed).toBe(false);
+    busy = true;
+    await clock.advance(10_000);
+    expect(failed).toBe(false);
+    busy = false;
+    bg.setReady(true);
+    await clock.advance(250);
+    await waiting;
   });
 
   test('a front worker service does not start while its background is not ready', async () => {

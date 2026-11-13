@@ -1,3 +1,4 @@
+import { createProviderRateLimitReporter, X_PROVIDER_RATE_LIMIT } from '../../core/provider-rate-limits.ts';
 // Real Contract 1 X connector: owns credential acquisition, provider listing,
 // restart cursor interpretation, rate/cost control, normalization, fetch, and
 // sensitivity. Downstream code sees only SourceConnector.
@@ -57,6 +58,8 @@ import {
 } from './reconcile-state.ts';
 
 const X_BOOKMARKS_FOLDER_PROVIDER_MAX_ATTEMPTS = 3;
+
+const providerStops = createProviderRateLimitReporter('x');
 
 export type XBookmarksLiveSyncErrorKind =
   | 'provider_rate_limited'
@@ -471,7 +474,7 @@ async function acquireIncremental(
     );
     let providerPageSize = 0;
     const page = await guardedPage(
-      usage, account, config, clock(), maxResults, false, provenance,
+      usage, account, config, clock, maxResults, false, provenance,
       config.richResourceExpansionMultiplier,
       (reservedMaxResults) => {
         providerPageSize = reservedMaxResults;
@@ -604,6 +607,7 @@ async function acquireReconciliation(
               : {}),
             config,
             now: clock(),
+            clock,
             provenance,
             maxResults,
             resourceExpansionMultiplier: config.richResourceExpansionMultiplier,
@@ -676,6 +680,7 @@ async function acquireReconciliation(
               : {}),
             config,
             now: clock(),
+            clock,
             provenance,
             maxResults,
             resourceExpansionMultiplier: 1,
@@ -734,7 +739,7 @@ async function acquireReconciliation(
         );
         let providerPageSize = 0;
         const page = await boundedFolderProviderPage(() =>
-          guardedPage(usage, account, config, clock(), maxResults, true, provenance, 1,
+          guardedPage(usage, account, config, clock, maxResults, true, provenance, 1,
             (reservedMaxResults) => {
               stateStore.recordProviderPageRequest(account, reservedMaxResults);
               apiRequests += 1;
@@ -766,7 +771,7 @@ async function acquireReconciliation(
       let providerPageSize = 0;
       const page = await boundedFolderProviderPage(() =>
         guardedPage(
-          usage, account, config, clock(), config.reconcilePageSize, true, provenance,
+          usage, account, config, clock, config.reconcilePageSize, true, provenance,
           config.richResourceExpansionMultiplier,
           (reservedMaxResults) => {
             stateStore.recordProviderPageRequest(account, reservedMaxResults);
@@ -890,7 +895,7 @@ async function acquireReconciliation(
           message: 'X bookmarks provider rate limit reached.',
           retryAt: error.rateLimit?.resetAt
             ?? new Date(clock().getTime() + config.degradedIntervalMs).toISOString(),
-          degradedReason: 'provider_rate_limit',
+          degradedReason: X_PROVIDER_RATE_LIMIT,
           warnings: [...openedWarnings, 'x_reconcile_progress_staged_restart_safe'],
         });
       }
@@ -1103,7 +1108,7 @@ async function guardedPage<T extends { rateLimit?: XApiRateLimit }>(
   usage: LocalXBookmarksApiUsageStore,
   account: string,
   config: XBookmarksLiveSyncConfig,
-  now: Date,
+  clock: () => Date,
   maxResources: number,
   preserveHeadReserve: boolean,
   provenance: XApiInvocationProvenance,
@@ -1112,6 +1117,7 @@ async function guardedPage<T extends { rateLimit?: XApiRateLimit }>(
   resourceIds: (page: T) => readonly string[],
   bubbleProviderErrors = false,
 ): Promise<T> {
+  const now = clock();
   let reservation;
   try {
     reservation = usage.reserveRequest({
@@ -1153,16 +1159,19 @@ async function guardedPage<T extends { rateLimit?: XApiRateLimit }>(
       reservation, ...(rateLimit ? { rateLimit } : {}),
       potentiallyBillable: !(error instanceof XApiError && error.status !== undefined), config, now,
     });
-    if (bubbleProviderErrors && error instanceof XApiError) throw error;
     if (error instanceof XApiError && error.status === 429) {
+      const stoppedAt = clock();
+      providerStops.report(error.rateLimit?.resetAt ?? new Date(stoppedAt.getTime() + config.degradedIntervalMs).toISOString(), stoppedAt, { limit: error.rateLimit?.limit, used: error.rateLimit?.limit !== undefined && error.rateLimit.remaining !== undefined ? Math.max(0, error.rateLimit.limit - error.rateLimit.remaining) : null });
+      if (bubbleProviderErrors) throw error;
       throw new XBookmarksLiveSyncError({
         errorKind: 'provider_rate_limited',
         message: 'X bookmarks provider rate limit reached.',
-        retryAt: error.rateLimit?.resetAt ?? new Date(now.getTime() + config.degradedIntervalMs).toISOString(),
-        degradedReason: 'provider_rate_limit',
+        retryAt: error.rateLimit?.resetAt ?? new Date(stoppedAt.getTime() + config.degradedIntervalMs).toISOString(),
+        degradedReason: X_PROVIDER_RATE_LIMIT,
         providerStatus: error.status,
       });
     }
+    if (bubbleProviderErrors && error instanceof XApiError) throw error;
     if (error instanceof XApiError && (error.status === undefined || error.status >= 500)) {
       throw new XBookmarksLiveSyncError({
         errorKind: 'provider_temporary',
@@ -1185,6 +1194,7 @@ async function guardedReconcilePostPage(input: {
   expectedToken?: string;
   config: XBookmarksLiveSyncConfig;
   now: Date;
+  clock: () => Date;
   provenance: XApiInvocationProvenance;
   maxResults: number;
   resourceExpansionMultiplier: number;
@@ -1199,7 +1209,7 @@ async function guardedReconcilePostPage(input: {
       input.usage,
       input.account,
       input.config,
-      input.now,
+      input.clock,
       requestedSize,
       true,
       input.provenance,
@@ -1550,3 +1560,5 @@ function validDate(value: Date): Date {
   if (!Number.isFinite(value.getTime())) throw new TypeError('X connector attemptedAt must be valid.');
   return value;
 }
+
+// limit-retry: retry:guardedPage:retryAt -> x.rate_limit

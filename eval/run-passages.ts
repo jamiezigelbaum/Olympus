@@ -471,7 +471,8 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     const output = values.get('--output') ?? 'eval/private/passages.latest.json';
     mkdirSync(dirname(output), { recursive: true, mode: 0o700 });
     writeFileSync(output, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 });
-    console.log(JSON.stringify(receipt.summary));
+    // Store counts lead the line, so a short open never reads as a retrieval miss (#1576).
+    console.log(JSON.stringify({ storesOpened: opened.stores.length, storesSkipped: opened.skipped.length, ...receipt.summary }));
     if (values.has('--compare')) enter('compare');
     if (values.has('--compare')) console.log(JSON.stringify(comparePassageReceipts(receipt, JSON.parse(readFileSync(values.get('--compare')!, 'utf8')) as PassageReceipt)));
   } finally { for (const cleanup of cleanups) cleanup(); try { opened.checkFileDescriptors(); } finally { opened.close(); } }

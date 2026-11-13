@@ -53,7 +53,7 @@ describe('X bookmarks live server integration', () => {
       embeddingProvider,
       dbPath: join(root, 'x-shadow.sqlite'),
       usageStore,
-      env: {},
+      env: { HOME: root },
     });
     expect(runtime?.store.corpusId).toBe(X_BOOKMARKS_CORPUS_ID);
     expect(runtime?.sync).toBeDefined();
@@ -63,6 +63,7 @@ describe('X bookmarks live server integration', () => {
   });
 
   test('activates the canonical store task after reauth without reviving it after disconnect', () => {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-x-live-reauth-'));
     const usageStore = new LocalXBookmarksApiUsageStore(':memory:');
     const reconcileStateStore = new LocalXBookmarksReconcileStateStore(':memory:');
     const lane = createRefreshableXBookmarksConnectorStoreRuntime({ tierSetFor: (store) => xBookmarksTestTierSet(store),
@@ -71,7 +72,7 @@ describe('X bookmarks live server integration', () => {
       dbPath: ':memory:',
       usageStore,
       reconcileStateStore,
-      env: {},
+      env: { HOME: root },
     });
     if (!lane) throw new Error('fixture lane should be configured');
     const expired = {

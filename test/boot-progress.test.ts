@@ -6,7 +6,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { spawn as spawnProcess } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -21,7 +21,10 @@ import {
   recordSchemaBackup,
   removeAllSchemaBackups,
   removeSchemaBackupsSince,
+  removeAbandonedBackupCopies,
   restoreSchemaBackupsSince,
+  retiredStateBackupPath,
+  retireStatePath,
   type BootProgress,
   type BootStepEvent,
 } from '../src/core/boot-progress.ts';
@@ -158,6 +161,21 @@ describe('schema updates back up the store first', () => {
     db.close();
   });
 
+  test('a killed backup\'s part-way copy is gone before the free space is measured', () => {
+    const env = home();
+    const { path, db } = storeAtVersion1(env);
+    const gone = Bun.spawnSync([process.execPath, '-e', '0']).pid;
+    const abandoned = `${path}.pre-schema-1.bak.${gone}.partial`;
+    writeFileSync(abandoned, 'part of a copy');
+    let seenAtMeasure: boolean | undefined;
+    runSqliteMigrations(db, 'fixture', MIGRATIONS, { env, log: () => {}, freeBytes: () => {
+      seenAtMeasure = existsSync(abandoned);
+      return Number.MAX_SAFE_INTEGER;
+    } });
+    db.close();
+    expect(seenAtMeasure).toBe(false);
+  }, 30_000);
+
   test('a backup left by an earlier attempt is replaced, since the store may have changed since', () => {
     const env = home();
     const { path, db } = storeAtVersion1(env);
@@ -231,6 +249,52 @@ describe('schema updates back up the store first', () => {
     const restored = new Database(path, { readonly: true });
     expect(readSqliteSchemaVersion(restored, 'fixture')).toBe(1);
     restored.close();
+  });
+});
+
+describe('a killed backup leaves nothing behind once a backup runs again', () => {
+  test('part-way copies of gone processes are removed; a live process\'s copy is kept', () => {
+    const env = home();
+    const backup = join(env.HOME!, 'store.sqlite.pre-schema-15.bak');
+    const gone = Bun.spawnSync([process.execPath, '-e', '0']).pid;
+    const live = process.ppid;
+    for (const name of [`${backup}.${gone}.partial`, `${backup}.${gone}.partial-journal`, `${backup}.${live}.partial`, backup]) writeFileSync(name, 'x');
+    expect(removeAbandonedBackupCopies(backup)).toBe(2);
+    expect(existsSync(`${backup}.${gone}.partial`)).toBe(false);
+    expect(existsSync(`${backup}.${gone}.partial-journal`)).toBe(false);
+    expect(existsSync(`${backup}.${live}.partial`)).toBe(true);
+    expect(existsSync(backup)).toBe(true);
+  }, 30_000);
+});
+
+describe('retired state is moved aside for the upgrade that retires it (#1563 review)', () => {
+  test('state last written long ago is still put back by a failed upgrade', () => {
+    const env = home();
+    const path = join(env.HOME!, 'retired.sqlite');
+    writeFileSync(path, 'old rows');
+    const longAgo = new Date(Date.now() - 30 * 24 * HOUR);
+    utimesSync(path, longAgo, longAgo);
+    const since = Date.now() - 1;
+    expect(retireStatePath(env, 'retired', path)).toBe(true);
+    // The move keeps the time it was given just before, so the copy counts as this upgrade's.
+    expect(statSync(retiredStateBackupPath(path)).mtimeMs).toBeGreaterThanOrEqual(since);
+    expect(restoreSchemaBackupsSince(env, since)).toEqual(['retired']);
+    expect(readFileSync(path, 'utf8')).toBe('old rows');
+  });
+
+  test('a copy an earlier start left gives way to the newer state, which a failed upgrade puts back', () => {
+    const env = home();
+    const path = join(env.HOME!, 'retired.sqlite');
+    const backup = retiredStateBackupPath(path);
+    writeFileSync(backup, 'older copy');
+    const longAgo = new Date(Date.now() - 30 * 24 * HOUR);
+    utimesSync(backup, longAgo, longAgo);
+    writeFileSync(path, 'newer rows');
+    const since = Date.now() - 1;
+    expect(retireStatePath(env, 'retired', path)).toBe(true);
+    expect(readFileSync(backup, 'utf8')).toBe('newer rows');
+    expect(restoreSchemaBackupsSince(env, since)).toEqual(['retired']);
+    expect(readFileSync(path, 'utf8')).toBe('newer rows');
   });
 });
 

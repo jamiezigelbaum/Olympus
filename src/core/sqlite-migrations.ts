@@ -1,7 +1,7 @@
 import type { Database } from 'bun:sqlite';
 import { chmodSync, closeSync, existsSync, openSync, renameSync, rmSync, statfsSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { preSchemaBackupPath, recordSchemaBackup, reportBootStep, type BootStepEvent } from './boot-progress.ts';
+import { preSchemaBackupPath, recordSchemaBackup, removeAbandonedBackupCopies, reportBootStep, type BootStepEvent } from './boot-progress.ts';
 import type { LayoutEnv } from './olympus-layout.ts';
 import { OperationError } from './operation-error.ts';
 
@@ -182,6 +182,8 @@ function backUpBeforeUpdate(
   const started = performance.now();
   // An earlier attempt's copy stays until the new one replaces it: no credit for its space.
   // It is never removed first, since another opener may have just written it.
+  // A killed backup's part-way copy is, before the space is measured.
+  removeAbandonedBackupCopies(backup);
   const needed = schemaUpdateSpaceNeeded(statSync(file).size);
   const free = freeBytes(dirname(file));
   if (free < needed) {

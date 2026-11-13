@@ -1,3 +1,4 @@
+import { createProviderRateLimitReporter } from '../../core/provider-rate-limits.ts';
 import { DAILY_LIMITS } from '../scheduler-limit-stops.ts';
 import { createLimitStopReporter } from '../../core/limit-stops.ts';
 import type { SourceInvocationProvenance } from '../../core/invocation-provenance.ts';
@@ -141,9 +142,10 @@ export function createXBookmarksContentRecoveryHandler(
   }));
   const now = options.now ?? (() => new Date());
   const stops = createLimitStopReporter();
+  const providerStops = createProviderRateLimitReporter('x');
   const reportGuard = (error: XApiUsageGuardError, items: number) => {
     const limit = DAILY_LIMITS.get(error.guardKind);
-    if (!limit) return; // provider_rate_limit is the resumes-at adopter in L7 step 4.
+    if (!limit) return; // Provider guards report at the shared usage-store boundary.
     const divisor = limit.kind === 'cost' ? 1_000_000 : 1;
     stops.report({ id: limit.id, subject: X_CONTENT_RECOVERY_LIMIT_SUBJECT, since: now().toISOString(), reason: error.guardKind,
       limit: error.amounts ? error.amounts.limit / divisor : null, used: error.amounts ? error.amounts.used / divisor : null,
@@ -195,6 +197,7 @@ export function createXBookmarksContentRecoveryHandler(
       }
 
       const attemptedAt = validDate(now());
+      providerStops.resume(attemptedAt);
       const multiplier = config.richResourceExpansionMultiplier;
       let reservation;
       try {
@@ -295,7 +298,11 @@ export function createXBookmarksContentRecoveryHandler(
         });
         counts.provider_failures = 1;
         counts.items_deferred += requestedCandidates.length;
-        const retryAt = recoveryRetryAt(error, config, dispatchAt);
+        const stoppedAt = validDate(now());
+        const retryAt = recoveryRetryAt(error, config, stoppedAt);
+        if (error instanceof XApiError && error.status === 429 && retryAt) providerStops.report(retryAt, stoppedAt, {
+          limit: rateLimit?.limit, used: rateLimit?.limit !== undefined && rateLimit.remaining !== undefined ? Math.max(0, rateLimit.limit - rateLimit.remaining) : null,
+        });
         return writeReceipt(
           receiptPath,
           buildReceipt(retryAt ? 'deferred' : 'failed', counts, retryAt),
@@ -591,3 +598,6 @@ function validDate(value: Date): Date {
   if (!Number.isFinite(value.getTime())) throw new TypeError('X bookmark content-recovery time is invalid.');
   return value;
 }
+
+// limit-retry: retry:recoveryRetryAt:return -> x.rate_limit
+// limit-retry: retry:recover:retryAt -> x.rate_limit
