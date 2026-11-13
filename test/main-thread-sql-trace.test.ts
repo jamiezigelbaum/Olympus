@@ -12,7 +12,8 @@ import { buildSourceAnswerLatencyTraceRecord } from '../src/workers/source-index
 
 installMainThreadSqlTrace();
 
-// A recursive count that runs for at least `ms` on this machine.
+// A recursive count that runs for at least `ms` on this machine. Callers ask for twice the bar they test:
+// a busy runner can run the same count 20% faster the second time (#1595: 247 and 233 ms against 250).
 function slowCount(db: Database, ms: number): number {
   let rows = 200_000;
   for (;;) {
@@ -30,7 +31,7 @@ function holdThread(db: Database, rows: number): void {
 test('an Ask records its request-thread statements and names the slow one by call site', async () => {
   const db = new Database(':memory:');
   try {
-    const rows = slowCount(db, SLOW_MAIN_THREAD_SQL_MS + 50);
+    const rows = slowCount(db, SLOW_MAIN_THREAD_SQL_MS * 2);
     const trace = createSourceAnswerTrace();
     await runWithSourceAnswerTrace(trace, async () => {
       db.query('SELECT 1').get();
