@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
-import { engineSplitCheck, parseCli } from '../scripts/release-check/run.ts';
+import { engineSplitCheck, installDetail, parseCli } from '../scripts/release-check/run.ts';
 import { engineRolesIn, engineRolesInPs, turnOnEngineSplit } from '../scripts/release-check/machine-agent.ts';
 import { buildReport, renderHtml } from '../scripts/release-check/report.ts';
 
@@ -134,3 +134,13 @@ describe('the engine split on the install under test', () => {
   });
 });
 
+
+describe('install check line', () => {
+  test('names the build, the wait for a healthy engine, and the worker when it never answered', () => {
+    expect(installDetail('1.4.2+abc', { ok: true, waitedMs: 200 })).toBe('build 1.4.2+abc');
+    expect(installDetail('1.4.2+abc', { ok: true, waitedMs: 9_400 })).toBe('build 1.4.2+abc; healthy after 9 s');
+    expect(installDetail('1.4.2+abc', { ok: false, waitedMs: 45_000, worker: 'no answer' }))
+      .toBe('build 1.4.2+abc; engine status still unhealthy after 45 s (worker: no answer)');
+    expect(installDetail(null, undefined)).toBe('the engine did not report a build');
+  });
+});

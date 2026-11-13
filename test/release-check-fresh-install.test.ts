@@ -53,10 +53,25 @@ function rig(failAt?: string, inconclusive = false) {
     listTools: async () => ['olympus_search', 'source_answer', 'source_answer_result', 'source_index_status'],
     close: () => step('engine.close'),
   };
-  return { events, commands, machine, dashboard, engine, options: { sources, dashboard: async () => dashboard, engine: async () => engine, sleep: async () => {} } };
+  return { events, commands, machine, dashboard, engine, options: { sources, dashboard: async () => dashboard, engine: async () => engine, sleep: async () => {}, limitsStage: async () => ({ rows: [], checks: [] }) } };
 }
 
 describe('fresh install canary', () => {
+  test('limits always runs after usable install and reports failures before restoring the engine', async () => {
+    const r = rig();
+    const result = await runFreshInstall(r.machine, { ...r.options, limitsStage: async (target, _options, transport) => {
+      expect(transport).toBe(r.machine);
+      await target.exec('limits-test');
+      r.events.push('limits');
+      return { rows: [], checks: [{ id: 'limits.judge.daily_calls', title: 'limits', status: 'fail', detail: 'Raise did not resume judge calls' }] };
+    } });
+    expect(r.events.indexOf('limits')).toBeGreaterThan(r.events.indexOf('dropbox.first-items'));
+    expect(r.events.indexOf('limits')).toBeLessThan(r.events.lastIndexOf('restore'));
+    expect(r.commands.find(c => c.includes('limits-test'))).toContain('sudo -n -u olyfresh');
+    expect(result.limits?.checks[0]?.status).toBe('fail');
+    expect(result.checks.at(-2)?.id).toBe('limits.judge.daily_calls');
+    expect(result.checks.at(-1)).toMatchObject({ id: 'fresh.restore-zig', status: 'pass' });
+  }, 30_000);
   test('named persisted checks run in order, reuse account searches, then restore', async () => {
     const r = rig();
     const { checks } = await runFreshInstall(r.machine, r.options);

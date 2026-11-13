@@ -1,53 +1,10 @@
 /** Content-free owner settings and stops. Bun-only (the scheduler store): workers and the engine import it, the Node plugin never does. */
-import { readFileSync, mkdirSync, existsSync, statSync } from 'node:fs';
-import { dirname } from 'node:path';
-import { writePrivateFileAtomicSync } from './atomic-file.ts';
+import { existsSync } from 'node:fs';
 import { LocalSourceSchedulerStateStore, defaultSourceSchedulerStateDbPath } from '../workers/source-scheduler-state.ts';
-import { sharedDataPath } from './olympus-layout.ts';
-import type { LimitStop } from './limit-stops.ts';
+import { installLimitStopHooks, invalidateLimitStop, type LimitStop } from './limit-stops.ts';
 
-export interface DailyCallOverride { to: number; day?: string; keep: boolean; base?: number }
-export function ownerLimitSettingsPath(): string {
-  return sharedDataPath('limit-settings');
-}
-
-/** Owner config key judge.dailyCalls; a temporary value belongs to one UTC day. */
-// The judge asks on every call (hundreds of thousands a day), so the file is parsed again only when it changes.
-let settingsCache: { path: string; stamp: string; value: DailyCallOverride | undefined } | undefined;
-function readDailyCallSetting(path: string): DailyCallOverride | undefined {
-  const stat = statSync(path, { throwIfNoEntry: false });
-  if (!stat) return undefined;
-  const stamp = `${stat.mtimeMs}:${stat.size}:${stat.ino}`;
-  if (settingsCache?.path === path && settingsCache.stamp === stamp) return settingsCache.value;
-  let raw: { judge?: { dailyCalls?: DailyCallOverride } };
-  try { raw = JSON.parse(readFileSync(path, 'utf8')); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-    throw new Error('Owner limit settings could not be read.');
-  }
-  settingsCache = { path, stamp, value: raw.judge?.dailyCalls };
-  return settingsCache.value;
-}
-
-export function readJudgeCallOverride(now: Date, path = ownerLimitSettingsPath()): number | undefined {
-  const value = readDailyCallSetting(path);
-  if (!value) return undefined;
-  if (!Number.isSafeInteger(value.to) || value.to < 0 || typeof value.keep !== 'boolean') throw new Error('Owner judge.dailyCalls setting is invalid.');
-  if (value.base !== undefined && (!Number.isSafeInteger(value.base) || value.base < 0)) throw new Error('Owner judge.dailyCalls base setting is invalid.');
-  return value.keep || value.day === now.toISOString().slice(0, 10) ? value.to : value.base;
-}
-
-export function saveJudgeCallOverride(to: number, keep: boolean, now: Date, path = ownerLimitSettingsPath()): void {
-  if (!Number.isSafeInteger(to) || to < 0) throw new TypeError('The daily call limit must be a non-negative integer.');
-  let prior: DailyCallOverride | undefined;
-  try { prior = JSON.parse(readFileSync(path, 'utf8')).judge?.dailyCalls; }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('Owner limit settings could not be read.'); }
-  // A one-day raise above a permanent choice falls back to that choice tomorrow.
-  const base = prior?.keep ? prior.to : prior?.base;
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  writePrivateFileAtomicSync(path, JSON.stringify({ judge: { dailyCalls: { to, keep,
-    ...(!keep ? { day: now.toISOString().slice(0, 10), ...(base !== undefined ? { base } : {}) } : {}) } } }) + '\n');
-}
+export type { DailyCallOverride } from './owner-limit-settings.ts';
+export { ownerLimitSettingsPath, readJudgeCallOverride, saveJudgeCallOverride, readOwnerLimitOverride, saveOwnerLimitOverride } from './owner-limit-settings.ts';
 
 /** The existing store owns opening, migrations and deterministic closing. */
 export function withOwnerLimitStore<T>(use: (store: LocalSourceSchedulerStateStore) => T, dbPath = defaultSourceSchedulerStateDbPath()): T {
@@ -60,6 +17,7 @@ export function recordOwnerLimitStop(stop: LimitStop): void {
 export function clearOwnerLimitStop(id: string, subject: string): void {
   if (!existsSync(defaultSourceSchedulerStateDbPath())) return;
   withOwnerLimitStore(store => store.clearLimitStop(id, subject));
+  invalidateLimitStop(id, subject);
 }
 /** Worker-only: the scheduler store is Bun's, so the Node plugin never imports this module. */
 export const ownerLimitStopHooks = { record: recordOwnerLimitStop, clear: clearOwnerLimitStop };
@@ -68,3 +26,6 @@ export const ownerLimitStopHooks = { record: recordOwnerLimitStop, clear: clearO
 export function openVeniceCreditPausePaths(): string[] {
   return withOwnerLimitStore(store => store.openLimitStops().filter(stop => stop.id === 'venice.credit').map(stop => stop.subject));
 }
+
+// Only worker entrypoints load this store owner; shared transports stay Node-safe.
+installLimitStopHooks(ownerLimitStopHooks);

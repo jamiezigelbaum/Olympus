@@ -12,7 +12,7 @@ import {
   removeFileDurablySync,
   writePrivateFileAtomicSync,
 } from './atomic-file.ts';
-import { bootProgressIsLive, bootProgressLine, readBootProgress, removeSchemaBackupsSince, restoreSchemaBackupsSince, type BootProgress } from './boot-progress.ts';
+import { bootProgressIsLive, bootProgressLine, frontProgressLine, readBootProgress, readFrontProgress, removeSchemaBackupsSince, restoreSchemaBackupsSince, type BootProgress } from './boot-progress.ts';
 import { prepareWorkerUpgradeArtifact, type PreparedWorkerUpgradeArtifact } from './lifecycle-artifact.ts';
 import { acquireLifecycleMutationLock } from './lifecycle-lock.ts';
 import { OperationError } from './operation-error.ts';
@@ -96,6 +96,26 @@ export interface WorkerLifecycleOptions extends WorkerServiceInstallOptions {
    * boot work under way. Defaults to the worker's progress file.
    */
   bootProgress?: () => BootProgress | undefined;
+  /**
+   * The split front's start progress (core/boot-progress.ts, #1563): while
+   * it moves (a store opened in the last five minutes), the wait goes on.
+   * Defaults to the front's progress file.
+   */
+  frontProgress?: () => BootProgress | undefined;
+  /**
+   * The health probe for the previous worker a failed upgrade puts back.
+   * Defaults to `readinessProbe`, then the loopback probe.
+   */
+  rollbackReadinessProbe?: (url: string) => boolean;
+  /**
+   * How long the previous worker may take to answer after a rollback, in
+   * milliseconds. Taken only when it was running before the upgrade (one
+   * that was stopped is put back stopped). Defaults to
+   * `actionSettleTimeoutMs`, then 600000, whatever `readinessTimeoutMs` is:
+   * a previous version writes no boot progress, so its whole start has to
+   * fit in this one window.
+   */
+  rollbackReadinessTimeoutMs?: number;
   /** Where progress lines go while the upgrade waits. Defaults to stderr. */
   progressLine?: (line: string) => void;
 }
@@ -378,13 +398,90 @@ function installOrUpgradeLifecycle(
       ...(readiness ? { readiness } : {}),
     };
   } catch (error) {
-    const restored = rollbackTransaction(effective, { activatePrevious: true, touchServiceManager: true });
-    if (restored.length > 0 && error instanceof OperationError) {
-      const note = `Stores put back as they were before the update: ${restored.join(', ')}.`;
-      error.suggestion = error.suggestion ? `${error.suggestion} ${note}` : note;
-    }
-    throw error;
+    throw rolledBackUpgradeError(effective, error);
   }
+}
+
+/**
+ * A failed upgrade ends in a healthy previous version, or says plainly that
+ * it does not (#1563). The rollback's own failure never replaces the
+ * upgrade's: both are named, since the person needs both to act. When the
+ * previous worker is reactivated, it has to answer its health check before
+ * the failure is reported as rolled back.
+ */
+function rolledBackUpgradeError(
+  options: WorkerLifecycleOptions & { platform: WorkerServicePlatform; homeDir: string },
+  error: unknown,
+): unknown {
+  const failure = error instanceof Error ? error.message : String(error);
+  let rollback: RollbackResult;
+  try {
+    rollback = rollbackTransaction(options, { activatePrevious: true, touchServiceManager: true });
+  } catch (rollbackError) {
+    return new OperationError(
+      'config_error',
+      `The upgrade failed (${failure}) and putting the previous version back also failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)} Olympus may not be running.`,
+      'Run `olympus worker status`, and restore from the copy taken before the upgrade if the previous version does not start.',
+    );
+  }
+  const notes: string[] = [];
+  if (rollback.restored.length > 0) notes.push(`Stores put back as they were before the update: ${rollback.restored.join(', ')}.`);
+  if (rollback.reactivated) {
+    const health = previousWorkerHealth(options);
+    if (!health.healthy) {
+      return new OperationError(
+        'config_error',
+        `The upgrade failed (${failure}). The previous version was put back, but it ${health.reason}, so Olympus is not running healthily.`,
+        [...notes, 'Run `olympus worker status` and read the worker log before retrying the upgrade.'].join(' '),
+      );
+    }
+    notes.push('The previous version is running and answered its health check.');
+  }
+  if (rollback.leftStopped && error instanceof Error) {
+    // Put back as it was, stopped (rc.4's install stopped the worker first):
+    // the person reads that it is not running, and what to run (#1563).
+    error.message = `${error.message} Olympus is not running: it was stopped before the upgrade, and the previous version was put back stopped. Run \`olympus worker start\` to start it.`;
+  }
+  if (notes.length > 0 && error instanceof OperationError) {
+    const note = notes.join(' ');
+    error.suggestion = error.suggestion ? `${error.suggestion} ${note}` : note;
+  }
+  return error;
+}
+
+function previousWorkerHealth(
+  options: WorkerLifecycleOptions & { platform: WorkerServicePlatform; homeDir: string },
+): { healthy: true } | { healthy: false; reason: string } {
+  let port: number;
+  try {
+    port = workerReadinessPort(options);
+  } catch {
+    return { healthy: false, reason: 'has an unreadable port in its environment file' };
+  }
+  // Not the upgrade's window: the previous version writes no progress, so its
+  // whole start has to fit in this one.
+  const timeoutMs = options.rollbackReadinessTimeoutMs ?? options.actionSettleTimeoutMs ?? MAX_READINESS_TIMEOUT_MS;
+  // launchctl and systemctl acknowledge submission, not a running job: the
+  // restored worker gets the same settle the upgrade's own start does.
+  const settled = settleWorkerServiceState(options, ['active']);
+  if (settled.state !== 'active') return { healthy: false, reason: `stopped (its service is ${settled.state})` };
+  const probe = options.rollbackReadinessProbe ?? options.readinessProbe;
+  const outcome = waitForWorkerReadiness(options, port, {
+    timeoutMs,
+    ...(probe ? { probe } : {}),
+    // The previous version's boot work and front are its own: the files the
+    // failed version left say nothing about it.
+    bootProgress: () => undefined,
+    frontProgress: () => undefined,
+  });
+  if (outcome.ready) return { healthy: true };
+  const minutes = Math.round(timeoutMs / 60_000);
+  return {
+    healthy: false,
+    reason: outcome.serviceState !== 'active'
+      ? `stopped (its service is ${outcome.serviceState})`
+      : `did not answer its health check within ${minutes >= 1 ? `${minutes} min` : `${timeoutMs} ms`}`,
+  };
 }
 
 export interface ManagedWorkerFilesResult {
@@ -581,15 +678,24 @@ function recoverInterruptedTransaction(
   return true;
 }
 
+interface RollbackResult {
+  /** The stores put back from the copies taken before their schema update. */
+  restored: string[];
+  /** Whether the previous worker was started again. */
+  reactivated: boolean;
+  /** The previous worker was installed but not running before, so it was put back stopped. */
+  leftStopped: boolean;
+}
+
 function rollbackTransaction(
   options: WorkerLifecycleOptions & { platform: WorkerServicePlatform; homeDir: string },
   intent: { activatePrevious: boolean; touchServiceManager: boolean },
-): string[] {
+): RollbackResult {
   const transaction = readTransaction(options);
-  if (!transaction) return [];
+  if (!transaction) return { restored: [], reactivated: false, leftStopped: false };
   if (transaction.phase === 'snapshotting' || transaction.phase === 'commit_ready') {
     clearTransaction(options);
-    return [];
+    return { restored: [], reactivated: false, leftStopped: false };
   }
   updateTransactionPhase(options, 'rollback_required');
   const paths = transactionPaths(options.homeDir);
@@ -644,7 +750,11 @@ function rollbackTransaction(
   }
   markTransactionCommitReady(options);
   clearTransaction(options);
-  return restored;
+  return {
+    restored,
+    reactivated: reactivatePrevious,
+    leftStopped: intent.touchServiceManager && !reactivatePrevious && transaction.previous_unit_present,
+  };
 }
 
 function removeUpgradeBackups(options: WorkerLifecycleOptions & { homeDir: string }): void {
@@ -946,40 +1056,97 @@ function qualifyWorkerReadiness(
   options: WorkerLifecycleOptions & { platform: WorkerServicePlatform; homeDir: string },
   port: number,
 ): { status: 'ready'; url: string } {
+  const timeoutMs = options.readinessTimeoutMs ?? options.actionSettleTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
+  const outcome = waitForWorkerReadiness(options, port, {
+    timeoutMs,
+    ...(options.readinessProbe ? { probe: options.readinessProbe } : {}),
+  });
+  if (!outcome.ready) {
+    throw new OperationError(
+      'config_error',
+      `The upgraded Olympus worker did not answer its loopback readiness probe.${readinessFailureDetail(options, outcome)}`,
+      'The previous managed worker has been restored; inspect the worker logs before retrying the upgrade.',
+    );
+  }
+  return { status: 'ready', url: outcome.url };
+}
+
+/**
+ * What happened, when the wait can tell (#1563): the split front stopped on
+ * an error N times, or the unit stopped, with its last log line. rc.4's
+ * install reported a probe timeout for a front that had crashed seven times.
+ */
+function readinessFailureDetail(
+  options: WorkerLifecycleOptions & { platform: WorkerServicePlatform; homeDir: string },
+  outcome: { serviceState: string; front: BootProgress | undefined },
+): string {
+  const parts: string[] = [];
+  const failures = outcome.front?.failures ?? 0;
+  if (failures > 0) {
+    parts.push(` Its front stopped ${failures} ${failures === 1 ? 'time' : 'times'} while starting${outcome.front?.lastFailure ? ` (${outcome.front.lastFailure})` : ''}.`);
+  }
+  if (outcome.serviceState !== 'active') {
+    parts.push(` Its service stopped (status ${outcome.serviceState}).`);
+    const logLine = workerServiceFailureLogLine({ platform: options.platform, homeDir: options.homeDir });
+    if (logLine) parts.push(` The worker's last log line was: ${logLine}`);
+  } else if (failures === 0) {
+    parts.push(' It was still running, with no start progress, when the wait ended.');
+  }
+  return parts.join('');
+}
+
+/** A restarted front counts as moving this many times; past that it is crash-looping. */
+const FRONT_PROGRESS_MAX_STARTS = 3;
+
+/**
+ * Wait for `/v1/health` while the unit stays active. The window is
+ * `timeoutMs`, and it starts again from every poll that sees the worker
+ * moving: boot work under way (#1494), or the split's front opening its
+ * stores (#1563). So a front that is still mounting a large archive after the
+ * background's boot work is done is waited for, and one that has stopped
+ * moving gets one window, as a worker that did no boot work does.
+ */
+function waitForWorkerReadiness(
+  options: WorkerLifecycleOptions & { platform: WorkerServicePlatform; homeDir: string },
+  port: number,
+  wait: {
+    timeoutMs: number;
+    probe?: (url: string) => boolean;
+    bootProgress?: () => BootProgress | undefined;
+    frontProgress?: () => BootProgress | undefined;
+  },
+): { ready: boolean; url: string; serviceState: string; front: BootProgress | undefined } {
   const url = `http://127.0.0.1:${port}/v1/health`;
-  const probe = () => options.readinessProbe
-    ? options.readinessProbe(url)
-    : defaultWorkerReadinessProbe(url, options.bunBin);
-  const timeoutMs = validateSettleWindow(
-    options.readinessTimeoutMs ?? options.actionSettleTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS,
-    'Lifecycle readiness timeout',
-    MAX_READINESS_TIMEOUT_MS,
-  );
+  const probe = () => wait.probe ? wait.probe(url) : defaultWorkerReadinessProbe(url, options.bunBin);
+  const timeoutMs = validateSettleWindow(wait.timeoutMs, 'Lifecycle readiness timeout', MAX_READINESS_TIMEOUT_MS);
   const pollMs = validateSettleWindow(
     options.actionSettlePollMs ?? DEFAULT_ACTION_SETTLE_POLL_MS,
     'Lifecycle readiness poll interval',
     10_000,
   );
-  const firstDeadline = Date.now() + timeoutMs;
+  const waitStartedAt = Date.now();
+  const firstDeadline = waitStartedAt + timeoutMs;
   let deadline = firstDeadline;
-  // Past the deadline, a worker still doing boot work (store updates, a slow
-  // cold start) is waited for while its unit stays active (#1494). Each time
-  // that work is seen, the full window starts again: when it ends (phase
-  // done), the split's front still mounts its stores and starts listening,
-  // and gets the same window to answer as a worker that did no boot work.
-  const readProgress = options.bootProgress ?? (() => readBootProgress(lifecycleEnv(options)));
+  const readBoot = wait.bootProgress ?? options.bootProgress ?? (() => readBootProgress(lifecycleEnv(options)));
+  const readFront = wait.frontProgress ?? options.frontProgress ?? (() => readFrontProgress(lifecycleEnv(options)));
   const progressLine = options.progressLine ?? ((line: string) => process.stderr.write(`${line}\n`));
+  const frontStarts = new Set<number>();
   let lastLineAt = 0;
+  let serviceState = 'active';
   let ready = probe();
   while (!ready) {
-    if (inspectWorkerService(serviceActionOptions(options)).state !== 'active') break;
+    serviceState = inspectWorkerService(serviceActionOptions(options)).state;
+    if (serviceState !== 'active') break;
     const now = Date.now();
     // Read on every poll: the window restarts from the last poll that saw
-    // boot work, so the front's full window begins when that work ends.
-    const progress = readProgress();
-    if (bootProgressIsLive(progress, now)) {
+    // the worker moving, so the full window begins when it stops.
+    const boot = readBoot();
+    const front = bootProgressIsLive(boot, now) ? undefined : readFront();
+    if (front && front.phase !== 'done') frontStarts.add(front.pid);
+    const frontMoving = front !== undefined && frontStarts.size <= FRONT_PROGRESS_MAX_STARTS && bootProgressIsLive(front, now);
+    if (bootProgressIsLive(boot, now) || frontMoving) {
       if (now >= firstDeadline && now - lastLineAt >= READINESS_PROGRESS_LINE_MS) {
-        progressLine(bootProgressLine(progress!, now));
+        progressLine(frontMoving ? frontProgressLine(front!, now) : bootProgressLine(boot!, now));
         lastLineAt = now;
       }
       deadline = Math.max(deadline, now + timeoutMs);
@@ -989,14 +1156,10 @@ function qualifyWorkerReadiness(
     waitForActivationSettle(Math.max(1, Math.min(pollMs, now < deadline ? deadline - now : pollMs)));
     ready = probe();
   }
-  if (!ready) {
-    throw new OperationError(
-      'config_error',
-      'The upgraded Olympus worker did not answer its loopback readiness probe.',
-      'The previous managed worker has been restored; inspect the worker logs before retrying the upgrade.',
-    );
-  }
-  return { status: 'ready', url };
+  // Only a front file written during this wait speaks for this start.
+  const lastFront = ready ? undefined : readFront();
+  const front = lastFront && Date.parse(lastFront.updatedAt) >= waitStartedAt ? lastFront : undefined;
+  return { ready, url, serviceState: ready ? 'active' : serviceState, front };
 }
 
 function workerReadinessPort(options: WorkerLifecycleOptions & { homeDir: string }): number {

@@ -2968,6 +2968,7 @@ var init_olympus_layout = __esm(() => {
     "backup-staging": "backup-staging",
     "people-index": "people-index.sqlite",
     "boot-progress": "boot-progress.json",
+    "front-progress": "front-progress.json",
     "schema-backups": "schema-backups.jsonl",
     models: "models",
     "built-in-embedding": "models/built-in-embedding",
@@ -6517,12 +6518,19 @@ var init_native_process_service = __esm(() => {
 });
 
 // src/core/boot-progress.ts
-import { appendFileSync, existsSync as existsSync8, mkdirSync as mkdirSync9, readdirSync as readdirSync2, readFileSync as readFileSync13, renameSync as renameSync4, rmSync as rmSync5, statSync as statSync6 } from "node:fs";
+import { appendFileSync, existsSync as existsSync8, mkdirSync as mkdirSync9, readdirSync as readdirSync2, readFileSync as readFileSync13, renameSync as renameSync4, rmSync as rmSync5, statSync as statSync6, utimesSync } from "node:fs";
 function readBootProgress(env = process.env) {
+  return readProgressFile(bootProgressPath(env));
+}
+function readProgressFile(path) {
   try {
-    const value = JSON.parse(readFileSync13(bootProgressPath(env), "utf8"));
+    const value = JSON.parse(readFileSync13(path, "utf8"));
     if (value.schema !== BOOT_PROGRESS_SCHEMA || typeof value.pid !== "number" || typeof value.phase !== "string" || typeof value.startedAt !== "string" || typeof value.updatedAt !== "string")
       return;
+    if (value.failures !== undefined && (!Number.isSafeInteger(value.failures) || value.failures < 0))
+      delete value.failures;
+    if (value.lastFailure !== undefined && typeof value.lastFailure !== "string")
+      delete value.lastFailure;
     return { completedStores: 0, ...value };
   } catch {
     return;
@@ -6532,7 +6540,7 @@ function bootInProgress(env = process.env, now = Date.now()) {
   return bootProgressIsLive(readBootProgress(env), now);
 }
 function bootProgressIsLive(progress, now = Date.now(), alive = processAlive) {
-  if (!progress || progress.phase === "done" || !alive(progress.pid))
+  if (!progress || progress.phase === "done" || progress.phase === "failed" || !alive(progress.pid))
     return false;
   if (progress.phase === "backing_up" || progress.phase === "migrating") {
     return now - Date.parse(progress.startedAt) < BOOT_LONG_STEP_BACKSTOP_MS;
@@ -6572,10 +6580,31 @@ function registerLimit(input) {
   }
   limits.set(input.id, Object.freeze({ ...input }));
 }
-var limits;
+function createLimitStopReporter() {
+  const reported = new Map;
+  return {
+    report(stop) {
+      const key = JSON.stringify([stop.id, stop.subject]);
+      const signature = JSON.stringify([{ ...stop, since: undefined }, stopGenerations.get(key) ?? 0]);
+      if (stopHooks && reported.get(key) !== signature) {
+        stopHooks.record(stop);
+        reported.set(key, signature);
+      }
+    },
+    clear(id, subject) {
+      const key = JSON.stringify([id, subject]);
+      if (stopHooks && reported.get(key) !== "") {
+        stopHooks.clear(id, subject);
+        reported.set(key, "");
+      }
+    }
+  };
+}
+var limits, stopHooks, stopGenerations;
 var init_limit_stops = __esm(() => {
   init_sqlite_migrations();
   limits = new Map;
+  stopGenerations = new Map;
 });
 
 // src/core/zkapi-consult-settings.ts
@@ -9813,19 +9842,59 @@ var init_worker_service = __esm(() => {
   WORKER_LOG_TAIL_BYTES = 64 * 1024;
 });
 
+// src/core/owner-limit-settings.ts
+import { readFileSync as readFileSync27, mkdirSync as mkdirSync14, statSync as statSync14 } from "node:fs";
+function ownerLimitSettingsPath() {
+  return sharedDataPath("limit-settings");
+}
+function readSettings(path) {
+  const stat2 = statSync14(path, { throwIfNoEntry: false });
+  if (!stat2)
+    return {};
+  const stamp = `${stat2.mtimeMs}:${stat2.ctimeMs}:${stat2.size}:${stat2.ino}`;
+  if (settingsCache?.path === path && settingsCache.stamp === stamp)
+    return settingsCache.value;
+  let value;
+  try {
+    value = JSON.parse(readFileSync27(path, "utf8"));
+  } catch {
+    throw new Error("Owner limit settings could not be read.");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("Owner limit settings are invalid.");
+  settingsCache = { path, stamp, value };
+  return value;
+}
+function readOwnerLimitOverride(key, now, path = ownerLimitSettingsPath()) {
+  const [group, name] = key.split(".");
+  const value = readSettings(path)[group]?.[name];
+  if (!value)
+    return;
+  const valid = (n) => Number.isFinite(n) && n >= 0 && (key === "zkapi.dailySpend" || Number.isSafeInteger(n));
+  if (!valid(value.to) || typeof value.keep !== "boolean" || value.base !== undefined && !valid(value.base))
+    throw new Error(`Owner ${key} setting is invalid.`);
+  return value.keep || value.day === now.toISOString().slice(0, 10) ? value.to : value.base;
+}
+var settingsCache;
+var init_owner_limit_settings = __esm(() => {
+  init_olympus_layout();
+  init_atomic_file();
+  init_file_lease();
+});
+
 // src/core/managed-tools.ts
 import { createHash as createHash3, randomUUID as randomUUID8 } from "node:crypto";
 import {
   accessSync as accessSync7,
   constants as constants4,
   lstatSync as lstatSync11,
-  mkdirSync as mkdirSync14,
-  readFileSync as readFileSync27,
+  mkdirSync as mkdirSync15,
+  readFileSync as readFileSync28,
   readdirSync as readdirSync3,
   realpathSync as realpathSync4,
   renameSync as renameSync5,
   rmSync as rmSync7,
-  statSync as statSync14,
+  statSync as statSync15,
   symlinkSync,
   writeFileSync as writeFileSync6,
   chmodSync as chmodSync5
@@ -9887,7 +9956,7 @@ function currentUid(host) {
 }
 function privatelyOwned(path, uid, kind) {
   try {
-    const stats = statSync14(path);
+    const stats = statSync15(path);
     if (kind === "dir" ? !stats.isDirectory() : !stats.isFile())
       return false;
     if (uid !== undefined && stats.uid !== uid)
@@ -9905,7 +9974,7 @@ function readManifest(path, uid) {
     const stats = lstatSync11(path);
     if (!stats.isFile() || uid !== undefined && stats.uid !== uid || (stats.mode & 18) !== 0)
       return;
-    const parsed = JSON.parse(readFileSync27(path, "utf8"));
+    const parsed = JSON.parse(readFileSync28(path, "utf8"));
     if (parsed.schema !== 1 || typeof parsed.tool !== "string" || typeof parsed.version !== "string" || typeof parsed.sha256 !== "string")
       return;
     return parsed;
@@ -9981,7 +10050,7 @@ function trustedInside(realDir, path, uid, versionDir) {
   return true;
 }
 function fileSha256(path) {
-  return createHash3("sha256").update(readFileSync27(path)).digest("hex");
+  return createHash3("sha256").update(readFileSync28(path)).digest("hex");
 }
 function verifyPinnedFiles(staging, asset, uid, label, tool) {
   for (const pinned of asset.pinnedFiles ?? []) {
@@ -10004,7 +10073,7 @@ function verifyPinnedFiles(staging, asset, uid, label, tool) {
     }
     let recorded;
     try {
-      recorded = JSON.parse(readFileSync27(record, "utf8")).zkapi_confine_sha256;
+      recorded = JSON.parse(readFileSync28(record, "utf8")).zkapi_confine_sha256;
     } catch {
       throw new ManagedToolsError("launcher_mismatch", `The ${label} download's build record (${pinned.record}) cannot be read, so nothing was installed.`, tool);
     }
@@ -10650,7 +10719,7 @@ var init_zkapi_confine_fetch = __esm(() => {
 
 // src/core/zkapi-confine-selftest.ts
 import { randomBytes as randomBytes7 } from "node:crypto";
-import { chmodSync as chmodSync6, readFileSync as readFileSync28, readlinkSync, readdirSync as readdirSync4, rmSync as rmSync8, writeFileSync as writeFileSync7 } from "node:fs";
+import { chmodSync as chmodSync6, readFileSync as readFileSync29, readlinkSync, readdirSync as readdirSync4, rmSync as rmSync8, writeFileSync as writeFileSync7 } from "node:fs";
 import { createServer, createConnection as createConnection2 } from "node:net";
 import { createSocket } from "node:dgram";
 import { networkInterfaces } from "node:os";
@@ -10752,7 +10821,7 @@ function processGone(pgid) {
         if (!/^\d+$/.test(name))
           continue;
         try {
-          const raw = readFileSync28(`/proc/${name}/stat`, "utf8");
+          const raw = readFileSync29(`/proc/${name}/stat`, "utf8");
           const fields = raw.slice(raw.lastIndexOf(")") + 1).trim().split(/\s+/);
           if (Number(fields[2]) === pgid && fields[0] !== "Z" && fields[0] !== "X")
             return false;
@@ -11466,7 +11535,7 @@ import { execFile as execFile2 } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile, stat as fileStat } from "node:fs/promises";
 import { createHash as createHash4 } from "node:crypto";
-import { lstatSync as lstatSync12, readFileSync as readFileSync29, readlinkSync as readlinkSync2, readdirSync as readdirSync5, realpathSync as realpathSync5 } from "node:fs";
+import { lstatSync as lstatSync12, readFileSync as readFileSync30, readlinkSync as readlinkSync2, readdirSync as readdirSync5, realpathSync as realpathSync5 } from "node:fs";
 import { dirname as dirname26, join as join35 } from "node:path";
 function record(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
@@ -11806,7 +11875,7 @@ var init_zkapi_confinement_linux = __esm(() => {
   init_managed_tools();
   init_zkapi_confine_fetch();
   init_zkapi_confine_selftest();
-  realProc = { read: (p) => readFileSync29(p, "utf8"), link: readlinkSync2, list: (p) => readdirSync5(p) };
+  realProc = { read: (p) => readFileSync30(p, "utf8"), link: readlinkSync2, list: (p) => readdirSync5(p) };
   execFileAsync = promisify(execFile2);
   hostChecks = new Map;
   injectedChecks = new WeakMap;
@@ -11860,7 +11929,7 @@ __export(exports_consult_transport_zkapi, {
 });
 import { spawn as spawn2, execFileSync as execFileSync2 } from "node:child_process";
 import { createHash as createHash5, randomUUID as randomUUID9 } from "node:crypto";
-import { accessSync as accessSync8, chmodSync as chmodSync7, closeSync as closeSync6, constants as constants5, existsSync as existsSync13, mkdirSync as mkdirSync15, mkdtempSync as mkdtempSync2, readdirSync as readdirSync6, readFileSync as readFileSync30, readlinkSync as readlinkSync3, realpathSync as realpathSync6, rmSync as rmSync9, statSync as statSync15, writeFileSync as writeFileSync8 } from "node:fs";
+import { accessSync as accessSync8, chmodSync as chmodSync7, closeSync as closeSync6, constants as constants5, existsSync as existsSync13, mkdirSync as mkdirSync16, mkdtempSync as mkdtempSync2, readdirSync as readdirSync6, readFileSync as readFileSync31, readlinkSync as readlinkSync3, realpathSync as realpathSync6, rmSync as rmSync9, statSync as statSync16, writeFileSync as writeFileSync8 } from "node:fs";
 import { createConnection as createConnection3, createServer as createServer2 } from "node:net";
 import { homedir as homedir13, tmpdir as tmpdir3 } from "node:os";
 import { delimiter as delimiter5, dirname as dirname27, isAbsolute as isAbsolute19, join as join36, resolve as resolvePath } from "node:path";
@@ -12117,7 +12186,7 @@ function utcDay(now) {
 function readState(path) {
   if (!existsSync13(path))
     return;
-  const parsed = JSON.parse(readFileSync30(path, "utf8"));
+  const parsed = JSON.parse(readFileSync31(path, "utf8"));
   if (parsed.version !== 1 || typeof parsed.day !== "string" || !Number.isInteger(parsed.count) || parsed.count < 0 || !Number.isInteger(parsed.reservedMicroUsd) || parsed.reservedMicroUsd < 0) {
     throw new Error("zkAPI state record is malformed");
   }
@@ -12168,7 +12237,7 @@ function abandonZkapiFence(path, scope, now) {
   return found;
 }
 function updateState(path, now, mutate) {
-  mkdirSync15(dirname27(path), { recursive: true, mode: 448 });
+  mkdirSync16(dirname27(path), { recursive: true, mode: 448 });
   return withFileLeaseSync(path, (lease) => {
     const day = utcDay(now);
     const current2 = readState(path);
@@ -12190,14 +12259,16 @@ function updateState(path, now, mutate) {
     return next;
   }, { acquireTimeoutMs: 5000 });
 }
-function ownerLimits(settings) {
+function ownerLimits(settings, now = new Date) {
+  const requestCap = readOwnerLimitOverride("zkapi.dailyRequests", now) ?? settings.dailyRequestCap;
+  const spendCapUsd = readOwnerLimitOverride("zkapi.dailySpend", now) ?? settings.dailySpendCapUsd;
   return {
-    ...settings.dailyRequestCap !== undefined ? { requestCap: settings.dailyRequestCap } : {},
-    ...settings.dailySpendCapUsd !== undefined ? { spendCapMicroUsd: Math.round(settings.dailySpendCapUsd * 1e6) } : {}
+    ...requestCap !== undefined ? { requestCap } : {},
+    ...spendCapUsd !== undefined ? { spendCapMicroUsd: Math.round(spendCapUsd * 1e6) } : {}
   };
 }
 function zkapiDailyLimitState(settings, statePath, now) {
-  const limit = ownerLimits(settings);
+  const limit = ownerLimits(settings, now);
   if (limit.requestCap === undefined && limit.spendCapMicroUsd === undefined)
     return "unset";
   let usage;
@@ -12213,27 +12284,54 @@ function zkapiDailyLimitState(settings, statePath, now) {
   return "available";
 }
 function reserveZkapiRequest(path, limits2, now, fence = { scope: "default", configDir: "unknown" }, allowanceMicroUsd = ZKAPI_MAX_ALLOWANCE_MICRO_USD) {
+  const effective = {
+    requestCap: readOwnerLimitOverride("zkapi.dailyRequests", now) ?? limits2.requestCap,
+    spendCapMicroUsd: (() => {
+      const usd = readOwnerLimitOverride("zkapi.dailySpend", now);
+      return usd === undefined ? limits2.spendCapMicroUsd : Math.round(usd * 1e6);
+    })()
+  };
   let refusal2;
-  updateState(path, now, (state) => {
-    if (limits2.requestCap !== undefined && state.count >= limits2.requestCap) {
+  const state = updateState(path, now, (state2) => {
+    if (effective.requestCap !== undefined && state2.count >= effective.requestCap) {
       refusal2 = "daily_cap_reached";
       return;
     }
-    if (limits2.spendCapMicroUsd !== undefined && state.reservedMicroUsd + allowanceMicroUsd > limits2.spendCapMicroUsd) {
+    if (effective.spendCapMicroUsd !== undefined && state2.reservedMicroUsd + allowanceMicroUsd > effective.spendCapMicroUsd) {
       refusal2 = "spend_cap_reached";
       return;
     }
     return {
-      ...state,
-      count: state.count + 1,
-      reservedMicroUsd: state.reservedMicroUsd + allowanceMicroUsd,
+      ...state2,
+      count: state2.count + 1,
+      reservedMicroUsd: state2.reservedMicroUsd + allowanceMicroUsd,
       fences: (() => {
         const { scope, ...facts } = fence;
-        return { ...state.fences, [scope]: { ...facts, at: now.toISOString() } };
+        return { ...state2.fences, [scope]: { ...facts, at: now.toISOString() } };
       })()
     };
   });
+  if (refusal2) {
+    reportZkapiLimitRefusal(path, effective, state, refusal2, now, allowanceMicroUsd);
+  } else {
+    zkapiStops.clear("zkapi.daily_requests", path);
+    zkapiStops.clear("zkapi.daily_spend", path);
+  }
   return refusal2 ? { reserved: false, reason: refusal2 } : { reserved: true };
+}
+function reportZkapiLimitRefusal(path, limits2, state, refusal2, now, allowanceMicroUsd = ZKAPI_MAX_ALLOWANCE_MICRO_USD) {
+  const requests = refusal2 === "daily_cap_reached";
+  zkapiStops.report({
+    id: requests ? "zkapi.daily_requests" : "zkapi.daily_spend",
+    subject: path,
+    since: now.toISOString(),
+    reason: refusal2,
+    limit: requests ? limits2.requestCap : limits2.spendCapMicroUsd / 1e6,
+    used: requests ? state.count : state.reservedMicroUsd / 1e6,
+    waiting: { runs: 1 },
+    toContinue: { raiseTo: requests ? state.count + 1 : (state.reservedMicroUsd + allowanceMicroUsd) / 1e6 },
+    resumesAt: new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)).toISOString()
+  });
 }
 function linuxBunStatusChannel() {
   if (process.platform !== "linux" || !process.versions.bun)
@@ -12469,7 +12567,7 @@ function zkapiConsultInFlightOnDisk(statePath) {
 }
 function zkapiRunningSince(statePath) {
   try {
-    return statSync15(statePath).mtime.toISOString();
+    return statSync16(statePath).mtime.toISOString();
   } catch {
     return "an unknown time";
   }
@@ -12526,7 +12624,7 @@ async function recoverStrandedGroups(statePath, now) {
 function processGroupOf(pid) {
   try {
     if (process.platform === "linux") {
-      const stat3 = readFileSync30(`/proc/${pid}/stat`, "utf8");
+      const stat3 = readFileSync31(`/proc/${pid}/stat`, "utf8");
       const fields = stat3.slice(stat3.lastIndexOf(")") + 1).trim().split(/\s+/);
       const pgrp = Number(fields[2]);
       return Number.isInteger(pgrp) ? pgrp : undefined;
@@ -12605,7 +12703,7 @@ function resolveExecutable(name, explicit, env, platform2 = process.platform, tr
   for (const candidate of candidates) {
     try {
       accessSync8(candidate, constants5.X_OK);
-      if (statSync15(candidate).isFile())
+      if (statSync16(candidate).isFile())
         return candidate;
     } catch {}
   }
@@ -12768,7 +12866,7 @@ function linuxListenerPids(port) {
   for (const table of ["/proc/net/tcp", "/proc/net/tcp6"]) {
     let text2;
     try {
-      text2 = readFileSync30(table, "utf8");
+      text2 = readFileSync31(table, "utf8");
     } catch {
       continue;
     }
@@ -12899,7 +12997,7 @@ async function zkapiConsultReadiness(options) {
     blockers.push("unresolved_session_other_wallet");
   if (stranded && !stranded.supervisorRunning)
     blockers.push("stranded_processes");
-  const limit = ownerLimits(settings);
+  const limit = ownerLimits(settings, now);
   if (limit.requestCap !== undefined && usage.count >= limit.requestCap)
     blockers.push("daily_cap_reached");
   if (limit.spendCapMicroUsd !== undefined && usage.reservedMicroUsd >= limit.spendCapMicroUsd) {
@@ -12915,10 +13013,10 @@ async function zkapiConsultReadiness(options) {
     torPort,
     apiKeyConfigured,
     money,
-    requestsToday: { count: usage.count, ...settings.dailyRequestCap !== undefined ? { cap: settings.dailyRequestCap } : {} },
+    requestsToday: { count: usage.count, ...limit.requestCap !== undefined ? { cap: limit.requestCap } : {} },
     spendToday: {
       reservedUsd: usage.reservedMicroUsd / 1e6,
-      ...settings.dailySpendCapUsd !== undefined ? { capUsd: settings.dailySpendCapUsd } : {}
+      ...limit.spendCapMicroUsd !== undefined ? { capUsd: limit.spendCapMicroUsd / 1e6 } : {}
     },
     unresolvedSession,
     fences,
@@ -12997,7 +13095,7 @@ async function openSession(options, control, recovery) {
   let admissionHeld = false;
   const finished = (async () => {
     try {
-      mkdirSync15(dirname27(statePath), { recursive: true, mode: 448 });
+      mkdirSync16(dirname27(statePath), { recursive: true, mode: 448 });
       const result2 = await withEngineConsultAdmission(statePath, () => {
         leaseHeld = true;
         if (zkapiConsultInFlight)
@@ -13194,10 +13292,13 @@ async function runSession(recovery, options, statePath, bridge, sent, clock2, st
     if (!fenced && recovery)
       return refuse("no_unresolved_session");
     const usage = zkapiUsageToday(statePath, now());
-    const limit = ownerLimits(settings);
-    if (limit.requestCap !== undefined && usage.count >= limit.requestCap)
+    const limit = ownerLimits(settings, now());
+    if (limit.requestCap !== undefined && usage.count >= limit.requestCap) {
+      reportZkapiLimitRefusal(statePath, limit, usage, "daily_cap_reached", now());
       return refuse("daily_cap_reached");
+    }
     if (limit.spendCapMicroUsd !== undefined && usage.reservedMicroUsd >= limit.spendCapMicroUsd) {
+      reportZkapiLimitRefusal(statePath, limit, usage, "spend_cap_reached", now());
       return refuse("spend_cap_reached");
     }
   } catch {
@@ -13279,7 +13380,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock2, st
           }
         }
         const torDataDir = join36(workDir, "tor");
-        mkdirSync15(torDataDir, { mode: 448 });
+        mkdirSync16(torDataDir, { mode: 448 });
         let bootstrapped = false;
         stage("torBootstrapMs");
         tor = supervise("tor", watchdog, [
@@ -13482,7 +13583,8 @@ async function runSession(recovery, options, statePath, bridge, sent, clock2, st
       clearTimeout(sendDeadline);
       let reservation;
       try {
-        reservation = reserveZkapiRequest(statePath, ownerLimits(settings), now(), {
+        const reservationAt = now();
+        reservation = reserveZkapiRequest(statePath, ownerLimits(settings, reservationAt), reservationAt, {
           scope,
           configDir: zkapiWalletDirectory(env),
           daemonExecutable,
@@ -13877,7 +13979,7 @@ async function readBounded(response, maxBytes) {
   }
   return { ok: true, text: new TextDecoder().decode(joined) };
 }
-var DAY_MS, PROBE_TIMEOUT_MS = 1e4, MODELS_PROBE_TIMEOUT_MS = 190000, PROBE_MAX_BYTES, MAX_QUESTION_BYTES, POLL_MS2 = 100, POLICY_POLL_MS = 5000, STOP_GRACE_MS = 1e4, KILL_GRACE_MS = 3000, ZKAPI_SUPPORTED_DAEMON_VERSIONS, ZKAPI_MAX_ALLOWANCE_MICRO_USD = 6000000, RECOVERY_QUESTION = "Reply with the single word OK.", CHILD_ENV_KEYS, KNOWN_DAEMON_ERROR_CODES, ZKAPI_STAGE_LABELS, ZKAPI_CONSULT_ERROR_MESSAGES, MESSAGES, DARWIN_POLICY, SELF_TEST_SCRIPT = `
+var zkapiStops, DAY_MS, PROBE_TIMEOUT_MS = 1e4, MODELS_PROBE_TIMEOUT_MS = 190000, PROBE_MAX_BYTES, MAX_QUESTION_BYTES, POLL_MS2 = 100, POLICY_POLL_MS = 5000, STOP_GRACE_MS = 1e4, KILL_GRACE_MS = 3000, ZKAPI_SUPPORTED_DAEMON_VERSIONS, ZKAPI_MAX_ALLOWANCE_MICRO_USD = 6000000, RECOVERY_QUESTION = "Reply with the single word OK.", CHILD_ENV_KEYS, KNOWN_DAEMON_ERROR_CODES, ZKAPI_STAGE_LABELS, ZKAPI_CONSULT_ERROR_MESSAGES, MESSAGES, DARWIN_POLICY, SELF_TEST_SCRIPT = `
 const net = require('node:net');
 const dgram = require('node:dgram');
 const { execFileSync } = require('node:child_process');
@@ -13910,6 +14012,8 @@ const udp = (host, port) => new Promise((resolve) => {
 })().catch(() => process.exit(1));
 `, WATCHDOG_CHILD_EXITED = "OLYMPUS_ZKAPI_WATCHDOG_CHILD_EXITED", WATCHDOG_SCRIPT, activeSessionId, DEFAULT_EXECUTABLE_TRUST, zkapiConsultInFlight = false, ZKAPI_SESSION_READY_TIMEOUT_MS = 120000, SESSION_OWNED_FAILURES, EXIT_STAGE_NAMES;
 var init_consult_transport_zkapi = __esm(() => {
+  init_limit_stops();
+  init_owner_limit_settings();
   init_zkapi_confinement_linux();
   init_zkapi_confinement_linux();
   init_linux_engine_layout();
@@ -13918,6 +14022,9 @@ var init_consult_transport_zkapi = __esm(() => {
   init_engine_maintenance();
   init_managed_tools();
   init_zkapi_consult_settings();
+  registerLimit({ id: "zkapi.daily_requests", kind: "requests", scope: "outside_help", label: "zkAPI daily request cap reached", unit: "requests", continue: "raise" });
+  registerLimit({ id: "zkapi.daily_spend", kind: "cost", scope: "outside_help", label: "zkAPI daily spending cap reached", unit: "usd", continue: "raise" });
+  zkapiStops = createLimitStopReporter();
   DAY_MS = 24 * 60 * 60 * 1000;
   PROBE_MAX_BYTES = 64 * 1024;
   MAX_QUESTION_BYTES = 8 * 1024;
@@ -14091,7 +14198,7 @@ setInterval(() => { if (process.ppid !== expectedParent) cleanup(); }, 500);
 `;
   DEFAULT_EXECUTABLE_TRUST = {
     realpath: (path) => realpathSync6(path),
-    stat: (path) => statSync15(path),
+    stat: (path) => statSync16(path),
     executable: (path) => {
       try {
         accessSync8(path, constants5.X_OK);
@@ -16093,7 +16200,7 @@ var init_credential_broker = __esm(() => {
 
 // src/workers/credential-broker/connected-handles.ts
 import { randomUUID as randomUUID10 } from "node:crypto";
-import { existsSync as existsSync17, mkdirSync as mkdirSync17, readFileSync as readFileSync34 } from "node:fs";
+import { existsSync as existsSync17, mkdirSync as mkdirSync18, readFileSync as readFileSync35 } from "node:fs";
 import { homedir as homedir15 } from "node:os";
 import { dirname as dirname32, join as join40 } from "node:path";
 function defaultHandleRegistryPath() {
@@ -16105,7 +16212,7 @@ function readConnectedHandleGrantEpoch(registryPath = defaultHandleRegistryPath(
     return INITIAL_CONNECTED_HANDLE_GRANT_EPOCH;
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync34(path, "utf8"));
+    parsed = JSON.parse(readFileSync35(path, "utf8"));
   } catch {
     throw new Error("Olympus credential-grant generation is unreadable. Refusing connection changes.");
   }
@@ -16145,7 +16252,7 @@ function readConnectedHandleRegistryForWrite(path = defaultHandleRegistryPath())
   if (!existsSync17(path)) {
     return { registry: { version: 1, handles: [] }, preservedUnknownHandles: [] };
   }
-  const parsed = JSON.parse(readFileSync34(path, "utf8"));
+  const parsed = JSON.parse(readFileSync35(path, "utf8"));
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("Olympus handle registry must be a JSON object.");
   }
@@ -16173,7 +16280,7 @@ function readConnectedHandleRegistryForWrite(path = defaultHandleRegistryPath())
   return { registry, preservedUnknownHandles };
 }
 function writeConnectedHandleRegistryWithPreservedUnknowns(registry, path, preservedUnknownHandles) {
-  mkdirSync17(dirname32(path), { recursive: true, mode: 448 });
+  mkdirSync18(dirname32(path), { recursive: true, mode: 448 });
   writePrivateFileAtomicSync(path, JSON.stringify({
     version: 1,
     handles: [
@@ -19283,6 +19390,7 @@ function hashString2(value) {
 }
 var GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS = 32, GMAIL_METADATA_HEADERS, GMAIL_PART_LOCATOR_PREFIX = "gmail-part1:";
 var init_gmail = __esm(() => {
+  init_owner_limit_settings();
   init_olympus_layout();
   init_mail_source_scope();
   init_sender_rules();
@@ -20481,7 +20589,7 @@ function boundedOwnerContext(ownerContext) {
   const trimmed = ownerContext?.replace(/\s+/g, " ").trim();
   return trimmed ? trimmed.slice(0, SNIFFER_OWNER_CONTEXT_MAX_CHARS) : undefined;
 }
-var SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, QWEN36_35B_A3B_SNIFFER_MODEL = "qwen36-35b-a3b-text", SNIFFER_DECISION_BARS, SNIFFER_DECISION_VERSION = "decision-v2", SNIFFER_UNION_VERSION, ROLE_TAG, TIER_VALUE_ENDS, TIER_PREDICATE, INJECTION_RULES, INSTRUCTION_VERBS, OBJECT_GLUE, ASSIGN_VERBS, SETTING_VERBS, SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION;
+var SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, JudgeCloudStopped, QWEN36_35B_A3B_SNIFFER_MODEL = "qwen36-35b-a3b-text", SNIFFER_DECISION_BARS, SNIFFER_DECISION_VERSION = "decision-v2", SNIFFER_UNION_VERSION, ROLE_TAG, TIER_VALUE_ENDS, TIER_PREDICATE, INJECTION_RULES, INSTRUCTION_VERBS, OBJECT_GLUE, ASSIGN_VERBS, SETTING_VERBS, SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION;
 var init_sniffer = __esm(() => {
   init_sniffer_lane();
   init_secret_patterns();
@@ -20504,6 +20612,13 @@ var init_sniffer = __esm(() => {
     "other"
   ];
   SNIFFER_PRIVATE_KINDS = ["none", "health", "therapy", "financial", "legal", "identity", "intimate", "family", "other"];
+  JudgeCloudStopped = class JudgeCloudStopped extends Error {
+    reason;
+    constructor(reason) {
+      super(`Cloud judging stopped: ${reason}`);
+      this.reason = reason;
+    }
+  };
   SNIFFER_DECISION_BARS = [
     [QWEN35_4B.modelId, "qwen3\\.5-4b", 0.15],
     [QWEN36_35B_A3B_SNIFFER_MODEL, "qwen3\\.6-35b-a3b", 0.3738]
@@ -20597,14 +20712,245 @@ var init_classification_ledger = __esm(() => {
 });
 
 // src/workers/classification/judge-spending.ts
-var JUDGE_PRICES;
+import { existsSync as existsSync19, readFileSync as readFileSync37 } from "node:fs";
+function judgeChoiceUsesVenice(choice) {
+  return choice !== "local";
+}
+function readJudgeSpending(path) {
+  try {
+    return statusFromRow(readBudgetRow(path));
+  } catch {
+    return { choice: "local", capDollars: 0, spentDollars: 0, remainingDollars: 0, stop: "storage" };
+  }
+}
+function readBudgetRow(path) {
+  try {
+    const row = JSON.parse(readFileSync37(path, "utf8"));
+    statusFromRow(row);
+    return row;
+  } catch (error) {
+    if (error.code === "ENOENT")
+      return { choice: "local", cap: 0, spent: 0, stop: null };
+    throw new Error("The saved judge budget cannot be read. Restore the spending record or fix its file permissions; cloud judging is off.");
+  }
+}
+function statusFromRow(row) {
+  if (!row || !JUDGE_CHOICES.includes(row.choice) || !Number.isSafeInteger(row.cap) || !Number.isSafeInteger(row.spent) || row.cap < 0 || row.spent < 0 || ![null, "cap", "payment"].includes(row.stop) || ![undefined, true].includes(row.uncapped))
+    throw new Error("The saved judge budget cannot be read. Cloud judging is stopped.");
+  return {
+    choice: row.choice,
+    capDollars: row.cap / 1e6,
+    spentDollars: row.spent / 1e6,
+    remainingDollars: Math.max(0, row.cap - row.spent) / 1e6,
+    stop: row.stop,
+    ...row.uncapped ? { uncapped: true } : {}
+  };
+}
+
+class JudgeSpending {
+  path;
+  stops = createLimitStopReporter();
+  constructor(path) {
+    this.path = path;
+  }
+  raise(capDollars) {
+    const cap = judgeCapMicros(capDollars);
+    this.change((row) => {
+      row.cap = cap;
+      if (row.stop === "cap" && row.spent < cap)
+        row.stop = null;
+      delete row.uncapped;
+    });
+  }
+  refill() {
+    this.change((row) => {
+      if (row.stop === "payment")
+        row.stop = null;
+    });
+  }
+  report(row, cost = 0) {
+    for (const [reason, id] of [["cap", "judge.spend_cap"], ["payment", "judge.payment"]]) {
+      if (row.stop === reason)
+        this.stops.report({
+          id,
+          subject: this.path,
+          since: new Date().toISOString(),
+          reason,
+          limit: row.cap / 1e6,
+          used: row.spent / 1e6,
+          waiting: { runs: 1 },
+          ...reason === "cap" ? { toContinue: { raiseTo: Math.max(row.cap + 1, row.spent + cost) / 1e6 } } : {}
+        });
+      else
+        this.stops.clear(id, this.path);
+    }
+  }
+  reportedOnStart = false;
+  status() {
+    const status = readJudgeSpending(this.path);
+    if (!this.reportedOnStart && status.stop !== "storage") {
+      this.report(readBudgetRow(this.path));
+      this.reportedOnStart = true;
+    }
+    return status;
+  }
+  change(edit) {
+    return withFileLeaseSync(this.path, () => {
+      const row = readBudgetRow(this.path);
+      const result = edit(row);
+      statusFromRow(row);
+      writePrivateFileAtomicSync(this.path, `${JSON.stringify(row)}
+`);
+      return result;
+    });
+  }
+  choose(choice, capDollars) {
+    const cap = judgeCapMicros(capDollars);
+    this.change((row) => {
+      row.choice = choice;
+      row.cap = cap;
+      row.stop = null;
+      delete row.uncapped;
+      delete row.noted;
+      this.report(row);
+    });
+  }
+  adoptExistingApproval() {
+    withFileLeaseSync(this.path, () => {
+      if (existsSync19(this.path))
+        return;
+      writePrivateFileAtomicSync(this.path, `${JSON.stringify({ choice: "venice", cap: 0, spent: 0, stop: null, uncapped: true })}
+`);
+    });
+  }
+  hasRecord() {
+    return existsSync19(this.path);
+  }
+  takeUpgradeNote() {
+    if (!this.status().uncapped)
+      return false;
+    return this.change((row) => {
+      const show = row.uncapped === true && !row.noted;
+      if (show)
+        row.noted = true;
+      return show;
+    });
+  }
+  lowerCap(capDollars) {
+    const cap = judgeCapMicros(capDollars);
+    this.change((row) => {
+      row.cap = Math.min(row.cap, cap);
+      if (!row.stop && row.spent >= row.cap)
+        row.stop = "cap";
+      this.report(row);
+    });
+  }
+  reserve(cost) {
+    const stopped = this.change((row) => {
+      if (!judgeChoiceUsesVenice(row.choice))
+        return "opt_in";
+      if (row.stop) {
+        this.report(row, cost);
+        return row.stop;
+      }
+      if (row.spent + cost > row.cap) {
+        row.stop = "cap";
+        this.report(row, cost);
+        return row.stop;
+      }
+      this.report(row);
+      row.spent += cost;
+      return;
+    });
+    if (stopped)
+      throw new JudgeCloudStopped(stopped);
+  }
+  fetch(fetchImpl, onStop = () => {}) {
+    return async (url, init) => {
+      const status = this.status();
+      if (status.uncapped) {
+        if (status.stop) {
+          onStop();
+          throw new JudgeCloudStopped(status.stop);
+        }
+        const response2 = await fetchImpl(url, init);
+        if (response2.status === 402) {
+          this.change((row) => {
+            row.stop = "payment";
+            this.report(row);
+          });
+          onStop();
+          throw new JudgeCloudStopped("payment");
+        }
+        return response2;
+      }
+      const body = JSON.parse(String(init.body));
+      const price = JUDGE_PRICES[normalizeVeniceAnalystModelId(body.model)];
+      if (!price)
+        throw new JudgeCloudStopped("price");
+      const input = Buffer.byteLength(JSON.stringify(body.messages), "utf8") + 64;
+      const output = body.max_completion_tokens;
+      if (!Number.isSafeInteger(output) || output < 0)
+        throw new Error("The judge output allowance is missing.");
+      const cost = Math.ceil(input * price.input + output * price.output);
+      try {
+        this.reserve(cost);
+      } catch (error) {
+        if (error instanceof JudgeCloudStopped)
+          onStop();
+        throw error;
+      }
+      const response = await fetchImpl(url, init);
+      if (response.status === 402) {
+        this.change((row) => {
+          row.spent -= cost;
+          row.stop = "payment";
+          this.report(row);
+        });
+        onStop();
+        throw new JudgeCloudStopped("payment");
+      }
+      if ([400, 401, 403, 404, 405, 413, 422, 429].includes(response.status)) {
+        this.change((row) => {
+          row.spent -= cost;
+        });
+      }
+      if (response.ok) {
+        try {
+          const reply = await response.clone().json();
+          const usage = reply.usage;
+          if (usage && Number.isSafeInteger(usage.prompt_tokens) && Number.isSafeInteger(usage.completion_tokens) && usage.prompt_tokens >= 0 && usage.completion_tokens >= 0) {
+            const actual = Math.ceil(usage.prompt_tokens * price.input + usage.completion_tokens * price.output);
+            this.change((row) => {
+              row.spent += actual - cost;
+              if (row.spent >= row.cap)
+                row.stop = "cap";
+              this.report(row);
+            });
+          }
+        } catch {}
+      }
+      return response;
+    };
+  }
+}
+function judgeCapMicros(capDollars) {
+  const cap = Math.round(capDollars * 1e6);
+  if (!Number.isFinite(capDollars) || capDollars < 0 || !Number.isSafeInteger(cap))
+    throw new Error("Enter a spending limit in dollars.");
+  return cap;
+}
+var JUDGE_PRICES, JUDGE_CHOICES;
 var init_judge_spending = __esm(() => {
+  init_limit_stops();
   init_file_lease();
   init_atomic_file();
   init_sniffer();
   init_classification_ledger();
   init_venice_models();
   init_sniffer();
+  registerLimit({ id: "judge.spend_cap", kind: "cost", scope: "judge", label: "Privacy judge spending cap reached", unit: "usd", continue: "raise" });
+  registerLimit({ id: "judge.payment", kind: "funding", scope: "judge", label: "Privacy judge provider refused payment (402)", unit: "usd", continue: "refill" });
   JUDGE_PRICES = Object.freeze({
     "deepseek-v4-flash-0731": { input: 0.13, output: 0.26 },
     "qwen3-6-35b-a3b": { input: 0.1, output: 1 },
@@ -20613,6 +20959,7 @@ var init_judge_spending = __esm(() => {
     "grok-4-3": { input: 1.42, output: 2.83 },
     "grok-4-5": { input: 2.27, output: 6.8 }
   });
+  JUDGE_CHOICES = ["local", "local-then-venice", "venice"];
 });
 
 // src/workers/classification/built-in-sniffer.ts
@@ -20879,6 +21226,7 @@ function connectorStoreContentPreference(vettedVectorItemIds) {
 var CONCEPT_COUNT_MAX_AGE_MS, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, STATUS_COUNTS_MAX_AGE_MS, TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
 var init_local_index = __esm(() => {
   init_vector_digest();
+  init_boot_progress();
   init_main_thread_sql_trace();
   init_store_reclaim_admission();
   init_store_write_guard();
@@ -21292,7 +21640,7 @@ var init_tier_auto_prune_sweep = __esm(() => {
 });
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { spawn as spawn4 } from "node:child_process";
-import { closeSync as closeSync8, constants as constants7, existsSync as existsSync19, fstatSync as fstatSync3, openSync as openSync7, readdirSync as readdirSync9, statSync as statSync18 } from "node:fs";
+import { closeSync as closeSync8, constants as constants7, existsSync as existsSync20, fstatSync as fstatSync3, openSync as openSync7, readdirSync as readdirSync9, statSync as statSync19 } from "node:fs";
 import { homedir as homedir17 } from "node:os";
 import { delimiter as delimiter6, dirname as dirname34, isAbsolute as isAbsolute21, join as join42 } from "node:path";
 import { createInterface } from "node:readline";
@@ -21471,7 +21819,7 @@ function helperPath() {
   const here = dirname34(fileURLToPath9(import.meta.url));
   for (const name of ["litert-helper.js", "litert-helper.ts"]) {
     const candidate = join42(here, name);
-    if (existsSync19(candidate))
+    if (existsSync20(candidate))
       return candidate;
   }
   throw new Error("The built-in search model helper is missing from this install.");
@@ -21488,7 +21836,7 @@ function resolveBun() {
     if (!candidate || !isAbsolute21(candidate))
       continue;
     try {
-      if (statSync18(candidate).isFile())
+      if (statSync19(candidate).isFile())
         return candidate;
     } catch {}
   }
@@ -21514,7 +21862,7 @@ var init_litert_runtime = __esm(() => {
 });
 
 // src/workers/source-index/built-in-embedding/remote-litert-runtime.ts
-import { readFileSync as readFileSync36 } from "node:fs";
+import { readFileSync as readFileSync38 } from "node:fs";
 
 class RemoteLiteRtEmbedder {
   options;
@@ -21604,7 +21952,7 @@ class RemoteLiteRtEmbedder {
   async request(path, texts) {
     const headers = {};
     if (this.options.tokenFile) {
-      const token = readFileSync36(this.options.tokenFile, "utf8").trim();
+      const token = readFileSync38(this.options.tokenFile, "utf8").trim();
       if (!token)
         throw new Error("Empty remote token file.");
       headers.Authorization = `Bearer ${token}`;
@@ -22397,8 +22745,31 @@ var init_live_sync2 = __esm(() => {
   init_api_connector();
 });
 
+// src/workers/scheduler-limit-stops.ts
+var DAILY_LIMITS;
+var init_scheduler_limit_stops = __esm(() => {
+  init_limit_stops();
+  DAILY_LIMITS = new Map(Object.entries({
+    daily_cost_guard: { id: "x.daily_cost", kind: "cost", label: "daily X spending budget used" },
+    daily_api_request_guard: { id: "x.daily_requests", kind: "requests", label: "daily X request budget used" },
+    daily_resource_read_guard: { id: "x.daily_resource_reads", kind: "requests", label: "daily X resource-read budget used" },
+    head_api_request_reserve_guard: { id: "x.head_reserve_requests", kind: "requests", label: "X request reserve for new bookmarks reached" },
+    head_resource_read_reserve_guard: { id: "x.head_reserve_reads", kind: "requests", label: "X resource-read reserve for new bookmarks reached" },
+    head_cost_reserve_guard: { id: "x.head_reserve_cost", kind: "cost", label: "X spending reserve for new bookmarks reached" },
+    readwise_daily_api_request_guard: { id: "readwise.daily_requests", kind: "requests", label: "daily Readwise API budget used" },
+    gmail_daily_api_request_guard: { id: "gmail.daily_requests", kind: "requests", label: "daily Gmail API budget used" },
+    google_drive_daily_api_request_guard: { id: "drive.daily_requests", kind: "requests", label: "daily Google Drive API budget used" }
+  }));
+  for (const limit of DAILY_LIMITS.values()) {
+    registerLimit({ ...limit, scope: "source", unit: limit.kind === "cost" ? "usd" : "requests", continue: "run_once" });
+  }
+});
+
 // src/workers/x-bookmarks/content-recovery.ts
+var X_CONTENT_RECOVERY_LIMIT_SUBJECT;
 var init_content_recovery = __esm(() => {
+  init_scheduler_limit_stops();
+  init_limit_stops();
   init_types();
   init_connector_store();
   init_credential_broker();
@@ -22407,6 +22778,7 @@ var init_content_recovery = __esm(() => {
   init_folder_facets();
   init_live_control2();
   init_grant_fence();
+  X_CONTENT_RECOVERY_LIMIT_SUBJECT = JSON.stringify(["x.bookmarks", "internal.x.bookmarks", "content_recovery"]);
 });
 
 // src/workers/x-bookmarks/index.ts
@@ -22757,7 +23129,7 @@ var init_dropbox = __esm(() => {
 // src/workers/file-extraction/extractors/command-runner.ts
 import { Buffer as Buffer2 } from "node:buffer";
 import { spawn as spawn5 } from "node:child_process";
-import { accessSync as accessSync9, constants as fsConstants5, statSync as statSync19 } from "node:fs";
+import { accessSync as accessSync9, constants as fsConstants5, statSync as statSync20 } from "node:fs";
 import { delimiter as delimiter7, join as join44 } from "node:path";
 function errnoCode(error) {
   const code = error?.code;
@@ -22816,7 +23188,7 @@ function resolveExtractionCommand(command, options = {}) {
 }
 function executableFile(path) {
   try {
-    if (!statSync19(path).isFile())
+    if (!statSync20(path).isFile())
       return false;
     accessSync9(path, fsConstants5.X_OK);
     return true;
@@ -25138,10 +25510,10 @@ var init_text = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/apple-vision-ocr.ts
-import { existsSync as existsSync20 } from "node:fs";
+import { existsSync as existsSync21 } from "node:fs";
 import { dirname as dirname35, join as join45 } from "node:path";
 import { fileURLToPath as fileURLToPath10 } from "node:url";
-function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync20) {
+function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync21) {
   let directory = dirname35(fileURLToPath10(moduleUrl));
   for (let depth2 = 0;depth2 < 6; depth2 += 1) {
     const candidate = join45(directory, APPLE_VISION_OCR_SCRIPT);
@@ -25476,7 +25848,7 @@ var init_remote_vlm = __esm(() => {
 
 // src/workers/source-index/built-in-reasoning/off-thread.ts
 import { Worker as Worker2 } from "node:worker_threads";
-import { existsSync as existsSync21 } from "node:fs";
+import { existsSync as existsSync22 } from "node:fs";
 import { dirname as dirname36, join as join47 } from "node:path";
 import { fileURLToPath as fileURLToPath11 } from "node:url";
 
@@ -25578,7 +25950,7 @@ function modelWorkerPath() {
   const here = dirname36(fileURLToPath11(import.meta.url));
   for (const name of ["model-worker.js", "model-worker.ts"]) {
     const path = join47(here, name);
-    if (existsSync21(path))
+    if (existsSync22(path))
       return path;
   }
   throw new Error("The built-in model worker is not installed.");
@@ -25764,6 +26136,7 @@ var init_file_extraction_runtime = __esm(() => {
   init_file_extraction_source();
   init_media_cache();
   init_olympus_layout();
+  init_store_write_guard();
   init_source_placement();
   init_spool();
   init_connector_store2();
@@ -26411,16 +26784,16 @@ var init_source_delete_holds = __esm(() => {
 });
 
 // src/core/ingestion-health-state.ts
-import { existsSync as existsSync22, mkdirSync as mkdirSync19, readFileSync as readFileSync37, writeFileSync as writeFileSync11 } from "node:fs";
+import { existsSync as existsSync23, mkdirSync as mkdirSync20, readFileSync as readFileSync39, writeFileSync as writeFileSync11 } from "node:fs";
 import { dirname as dirname37 } from "node:path";
 function defaultIngestionHealthStatePath(env = process.env) {
   return sharedDataPath("ingestion-doctor-state", env);
 }
 function readIngestionHealthState(path) {
   try {
-    if (!existsSync22(path))
+    if (!existsSync23(path))
       return;
-    const parsed = JSON.parse(readFileSync37(path, "utf8"));
+    const parsed = JSON.parse(readFileSync39(path, "utf8"));
     const record2 = asRecord16(parsed);
     const sources = asRecord16(record2.sources);
     const normalized = {};
@@ -26441,7 +26814,7 @@ function readIngestionHealthState(path) {
   }
 }
 function writeIngestionHealthState(path, state) {
-  mkdirSync19(dirname37(path), { recursive: true, mode: 448 });
+  mkdirSync20(dirname37(path), { recursive: true, mode: 448 });
   writeFileSync11(path, `${JSON.stringify(state, null, 2)}
 `);
 }
@@ -26534,26 +26907,6 @@ var init_this_computer = __esm(() => {
   init_atomic_file();
   init_file_lease();
   init_file_scope_sources();
-});
-
-// src/workers/scheduler-limit-stops.ts
-var DAILY_LIMITS;
-var init_scheduler_limit_stops = __esm(() => {
-  init_limit_stops();
-  DAILY_LIMITS = new Map(Object.entries({
-    daily_cost_guard: { id: "x.daily_cost", kind: "cost", label: "daily X spending budget used" },
-    daily_api_request_guard: { id: "x.daily_requests", kind: "requests", label: "daily X request budget used" },
-    daily_resource_read_guard: { id: "x.daily_resource_reads", kind: "requests", label: "daily X resource-read budget used" },
-    head_api_request_reserve_guard: { id: "x.head_reserve_requests", kind: "requests", label: "X request reserve for new bookmarks reached" },
-    head_resource_read_reserve_guard: { id: "x.head_reserve_reads", kind: "requests", label: "X resource-read reserve for new bookmarks reached" },
-    head_cost_reserve_guard: { id: "x.head_reserve_cost", kind: "cost", label: "X spending reserve for new bookmarks reached" },
-    readwise_daily_api_request_guard: { id: "readwise.daily_requests", kind: "requests", label: "daily Readwise API budget used" },
-    gmail_daily_api_request_guard: { id: "gmail.daily_requests", kind: "requests", label: "daily Gmail API budget used" },
-    google_drive_daily_api_request_guard: { id: "drive.daily_requests", kind: "requests", label: "daily Google Drive API budget used" }
-  }));
-  for (const limit of DAILY_LIMITS.values()) {
-    registerLimit({ ...limit, scope: "source", unit: limit.kind === "cost" ? "usd" : "requests", continue: "run_once" });
-  }
 });
 
 // src/workers/source-scheduler-state.ts
@@ -32762,7 +33115,7 @@ init_file_lease();
 init_worker_auth();
 init_linux_desktop_entry();
 import { spawnSync as spawnSync7 } from "node:child_process";
-import { chmodSync as chmodSync8, closeSync as closeSync7, constants as constants6, copyFileSync, existsSync as existsSync15, fstatSync as fstatSync2, fsyncSync as fsyncSync2, ftruncateSync, lstatSync as lstatSync14, linkSync as linkSync2, mkdirSync as mkdirSync16, openSync as openSync6, readFileSync as readFileSync32, readlinkSync as readlinkSync4, readdirSync as readdirSync8, realpathSync as realpathSync7, renameSync as renameSync7, rmSync as rmSync11, rmdirSync, statSync as statSync17, symlinkSync as symlinkSync2, writeFileSync as writeFileSync9 } from "node:fs";
+import { chmodSync as chmodSync8, closeSync as closeSync7, constants as constants6, copyFileSync, existsSync as existsSync15, fstatSync as fstatSync2, fsyncSync as fsyncSync2, ftruncateSync, lstatSync as lstatSync14, linkSync as linkSync2, mkdirSync as mkdirSync17, openSync as openSync6, readFileSync as readFileSync33, readlinkSync as readlinkSync4, readdirSync as readdirSync8, realpathSync as realpathSync7, renameSync as renameSync7, rmSync as rmSync11, rmdirSync, statSync as statSync18, symlinkSync as symlinkSync2, writeFileSync as writeFileSync9 } from "node:fs";
 import { createRequire as createRequire4 } from "node:module";
 import { basename as basename6, dirname as dirname29, join as join38, relative as relative5, resolve as resolve9, sep as sep6 } from "node:path";
 init_linux_engine_layout();
@@ -32822,7 +33175,7 @@ function runningOlympusVersion() {
 // src/core/engine-service.ts
 import { spawn as spawn3, spawnSync as spawnSync6 } from "node:child_process";
 init_atomic_file();
-import { existsSync as existsSync14, lstatSync as lstatSync13, readdirSync as readdirSync7, readFileSync as readFileSync31, renameSync as renameSync6, rmSync as rmSync10, statSync as statSync16 } from "node:fs";
+import { existsSync as existsSync14, lstatSync as lstatSync13, readdirSync as readdirSync7, readFileSync as readFileSync32, renameSync as renameSync6, rmSync as rmSync10, statSync as statSync17 } from "node:fs";
 import { homedir as homedir14, platform as osPlatform } from "node:os";
 import { basename as basename5, dirname as dirname28, isAbsolute as isAbsolute20, join as join37, resolve as resolvePath2 } from "node:path";
 
@@ -32940,7 +33293,7 @@ function engineStatusPath(env = process.env) {
 }
 function readEngineWorkerHealth(statusPath) {
   try {
-    const status = JSON.parse(readFileSync31(statusPath, "utf8"));
+    const status = JSON.parse(readFileSync32(statusPath, "utf8"));
     if (status?.schema !== "olympus.engine.status.v1" || status.state !== "running" || !Number.isSafeInteger(status.pid) || status.pid <= 0)
       return;
     process.kill(status.pid, 0);
@@ -32961,7 +33314,7 @@ function readEngineConfig(path) {
     return;
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync31(path, "utf8"));
+    parsed = JSON.parse(readFileSync32(path, "utf8"));
   } catch {
     throw new OperationError("config_error", `${path} is not valid JSON.`, "Fix or remove it, then run olympus engine install again.");
   }
@@ -33002,7 +33355,7 @@ async function checkEngineHealthOnce(input, pidAlive, fetchImpl, deps) {
   const base = { ok: false, expected_build: input.expectedBuild, running_build: null, pid: null, worker: "not_ready" };
   let status;
   try {
-    status = JSON.parse(readFileSync31(input.paths.statusPath, "utf8"));
+    status = JSON.parse(readFileSync32(input.paths.statusPath, "utf8"));
   } catch {
     return { ...base, reason: "the engine has not written its status yet" };
   }
@@ -33217,7 +33570,7 @@ function systemdCgroupEmpty(group, root = "/sys/fs/cgroup") {
   if (!group.startsWith("/user.slice/") || group.split("/").includes(".."))
     return;
   try {
-    return /^populated 0$/m.test(readFileSync32(join38(root, group, "cgroup.events"), "utf8"));
+    return /^populated 0$/m.test(readFileSync33(join38(root, group, "cgroup.events"), "utf8"));
   } catch (e) {
     if (e.code !== "ENOENT")
       return;
@@ -33225,13 +33578,13 @@ function systemdCgroupEmpty(group, root = "/sys/fs/cgroup") {
     if (uid === undefined || !group.startsWith(`/user.slice/user-${uid}.slice/user@${uid}.service/`))
       return;
     try {
-      readFileSync32(join38(root, "cgroup.controllers"));
-      statSync17(dirname29(join38(root, group)));
+      readFileSync33(join38(root, "cgroup.controllers"));
+      statSync18(dirname29(join38(root, group)));
     } catch {
       return;
     }
     try {
-      statSync17(join38(root, group));
+      statSync18(join38(root, group));
       return;
     } catch (error) {
       return error.code === "ENOENT" ? true : undefined;
@@ -33254,7 +33607,7 @@ function waitForEmptyCgroup(group, options) {
 }
 function systemdPidInCgroup(pid, group) {
   try {
-    return readFileSync32(`/proc/${pid}/cgroup`, "utf8").split(`
+    return readFileSync33(`/proc/${pid}/cgroup`, "utf8").split(`
 `).some((line) => line === `0::${group}`);
   } catch {
     return false;
@@ -33267,7 +33620,7 @@ function linuxLayoutFor(options) {
 }
 function currentProgram(l) {
   try {
-    return JSON.parse(readFileSync32(join38(l.stateDir, "service-current.json"), "utf8")).program;
+    return JSON.parse(readFileSync33(join38(l.stateDir, "service-current.json"), "utf8")).program;
   } catch (e) {
     if (e.code === "ENOENT")
       return;
@@ -33299,15 +33652,15 @@ init_worker_transport();
 init_model_transport();
 init_config();
 import { spawnSync as spawnSync8 } from "node:child_process";
-import { existsSync as existsSync24, readFileSync as readFileSync39 } from "node:fs";
+import { existsSync as existsSync25, readFileSync as readFileSync41 } from "node:fs";
 import { join as join50 } from "node:path";
 
 // src/version.ts
-import { readFileSync as readFileSync33 } from "node:fs";
+import { readFileSync as readFileSync34 } from "node:fs";
 import { dirname as dirname30, join as join39 } from "node:path";
 import { fileURLToPath as fileURLToPath8 } from "node:url";
 var repoRoot = dirname30(dirname30(fileURLToPath8(import.meta.url)));
-var manifest = JSON.parse(readFileSync33(join39(repoRoot, "openclaw.plugin.json"), "utf8"));
+var manifest = JSON.parse(readFileSync34(join39(repoRoot, "openclaw.plugin.json"), "utf8"));
 var VERSION = manifest.version;
 
 // src/core/doctor.ts
@@ -33644,7 +33997,7 @@ init_linux_engine_layout();
 init_google_handle_compatibility();
 init_model_transport();
 init_zkapi_consult_settings();
-import { mkdirSync as mkdirSync18, readFileSync as readFileSync35, rmSync as rmSync12, writeFileSync as writeFileSync10 } from "node:fs";
+import { mkdirSync as mkdirSync19, readFileSync as readFileSync36, rmSync as rmSync12, writeFileSync as writeFileSync10 } from "node:fs";
 import { homedir as homedir16 } from "node:os";
 import { dirname as dirname33, join as join41 } from "node:path";
 init_secret_store();
@@ -33689,7 +34042,7 @@ function defaultDetachedOAuthStateDir(env = process.env) {
 }
 function readDetachedOAuthState(path) {
   try {
-    const state = sanitizeDetachedOAuthState(JSON.parse(readFileSync35(path, "utf8")));
+    const state = sanitizeDetachedOAuthState(JSON.parse(readFileSync36(path, "utf8")));
     if (process.platform === "linux" && state.logPath) {
       const layout = resolveLinuxEngineLayout();
       const legacyLogs = join41(layout.home, ".olympus/logs") + "/";
@@ -33774,7 +34127,7 @@ init_consult_transport_zkapi();
 // src/core/consult-gate.ts
 init_owner_config_read();
 import { createHash as createHash14 } from "node:crypto";
-import { existsSync as existsSync23, readFileSync as readFileSync38, statSync as statSync20 } from "node:fs";
+import { existsSync as existsSync24, readFileSync as readFileSync40, statSync as statSync21 } from "node:fs";
 import { homedir as homedir18 } from "node:os";
 import { basename as basename7, dirname as dirname38, join as join48 } from "node:path";
 import { fileURLToPath as fileURLToPath12 } from "node:url";
@@ -34019,11 +34372,11 @@ function consultUserVocabularyDir(env = process.env) {
 var vocabularyCache = new Map;
 function verifiedPackFile(path, sha256) {
   try {
-    if (!existsSync23(path))
+    if (!existsSync24(path))
       return "missing";
-    if (statSync20(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
+    if (statSync21(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
       return "too_large";
-    const gz = readFileSync38(path);
+    const gz = readFileSync40(path);
     return createHash14("sha256").update(gz).digest("hex") === sha256 ? gz : "hash_mismatch";
   } catch {
     return "unreadable";
@@ -34032,7 +34385,7 @@ function verifiedPackFile(path, sha256) {
 function consultVocabularyRoot(moduleUrl = import.meta.url) {
   const here = dirname38(fileURLToPath12(moduleUrl));
   const root = basename7(here) === "core" && basename7(dirname38(here)) === "src" ? dirname38(dirname38(here)) : basename7(here) === "dist" ? dirname38(here) : undefined;
-  return root !== undefined && existsSync23(join48(root, ...VOCABULARY_DIR)) ? root : undefined;
+  return root !== undefined && existsSync24(join48(root, ...VOCABULARY_DIR)) ? root : undefined;
 }
 function consultVocabularyFileStatus(options = {}, env = process.env) {
   const selection = consultVocabularySelection(options);
@@ -34057,9 +34410,9 @@ function userManifestEntries(userDir) {
     return [];
   try {
     const path = join48(userDir, "manifest.json");
-    if (!existsSync23(path) || statSync20(path).size > 1024 * 1024)
+    if (!existsSync24(path) || statSync21(path).size > 1024 * 1024)
       return [];
-    const manifest2 = JSON.parse(readFileSync38(path, "utf8"));
+    const manifest2 = JSON.parse(readFileSync40(path, "utf8"));
     if (!manifest2 || typeof manifest2 !== "object" || Array.isArray(manifest2))
       return [];
     const packs = manifest2.packs;
@@ -35490,7 +35843,7 @@ function errorCode(error) {
 // src/core/doctor.ts
 function installedPluginVersion() {
   try {
-    const value = JSON.parse(readFileSync39(join50(olympusPackageRoot(), "openclaw.plugin.json"), "utf8")).version;
+    const value = JSON.parse(readFileSync41(join50(olympusPackageRoot(), "openclaw.plugin.json"), "utf8")).version;
     return typeof value === "string" ? value : undefined;
   } catch {
     return;
@@ -35501,7 +35854,7 @@ async function defaultDoctorHostProbe(env = process.env, options = {}) {
   const paths = engineServicePaths({ homeDir: home, env });
   const openclawPath = resolveOpenClawExecutable({ env, homeDir: home });
   const engine = process.platform === "darwin" || process.platform === "linux" ? inspectEngine({ homeDir: home, env }) : { installed: false, state: "not_loaded" };
-  const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync24(workerServicePaths(process.platform, home).unitPath) : false;
+  const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync25(workerServicePaths(process.platform, home).unitPath) : false;
   const health = process.platform === "linux" && engine.installed ? await waitForEngineHealthy({ paths, expectedBuild: linuxInstalledBuild({ homeDir: home, env }) }, { timeoutMs: 0 }) : undefined;
   return {
     ...openclawPath ? { openclawPath } : {},
@@ -35582,7 +35935,7 @@ async function photoSearchCheck(deps) {
 }
 function defaultOsRelease() {
   try {
-    return readFileSync39("/etc/os-release", "utf8");
+    return readFileSync41("/etc/os-release", "utf8");
   } catch {
     return;
   }
@@ -35618,7 +35971,7 @@ function doctorSovereigntyEngine(deps) {
   if (inline !== undefined)
     return loadSovereigntyEngine({ inlineConfig: inline });
   const configPath = doctorSovereigntyConfigPath(deps);
-  if (configPath === undefined || !existsSync24(configPath))
+  if (configPath === undefined || !existsSync25(configPath))
     return;
   return loadSovereigntyEngine({ configPath, ...deps.env ? { env: deps.env } : {} });
 }
@@ -36907,7 +37260,7 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync24(join50(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync25(join50(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync8(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
@@ -36926,7 +37279,7 @@ function errorDetail(error) {
 // src/core/ocr-readiness.ts
 init_apple_vision_ocr();
 init_ocr_capability();
-import { existsSync as existsSync25, readFileSync as readFileSync40 } from "node:fs";
+import { existsSync as existsSync26, readFileSync as readFileSync42 } from "node:fs";
 var ARCH_IDS2 = ["arch", "archlinux", "omarchy", "manjaro", "endeavouros", "cachyos", "arcolinux", "garuda"];
 var DEBIAN_IDS2 = ["debian", "ubuntu", "linuxmint", "pop", "raspbian", "neon", "elementary", "zorin"];
 var FEDORA_IDS2 = ["fedora", "rhel", "centos", "rocky", "almalinux", "ol", "nobara"];
@@ -36962,7 +37315,7 @@ function linuxFamilyFromOsRelease2(text3) {
 function readOsRelease() {
   for (const path of ["/etc/os-release", "/usr/lib/os-release"]) {
     try {
-      return readFileSync40(path, "utf8");
+      return readFileSync42(path, "utf8");
     } catch {}
   }
   return;
@@ -36982,7 +37335,7 @@ function ocrInstallRemedy(input) {
   return "Install the packages that provide tesseract (with its English language data) and pdftoppm (poppler-utils) with your package manager.";
 }
 function visionReady(platform2, preference) {
-  return appleVisionOcrSelected(preference, platform2) && resolveAppleVisionOcrScript() !== undefined && existsSync25(APPLE_VISION_OSASCRIPT);
+  return appleVisionOcrSelected(preference, platform2) && resolveAppleVisionOcrScript() !== undefined && existsSync26(APPLE_VISION_OSASCRIPT);
 }
 function describeOcrReadiness(input) {
   if (input.preference === "tesseract")
@@ -37500,12 +37853,12 @@ var PRIVACY_ITEM_SET_PARAMS = {
 var operations = [
   {
     name: "olympus_limits",
-    description: "List open work stops with exact reasons, amounts, units and continuation actions; continue one with run_once, raise (--to, optional --keep), or a Venice refill re-check. Raising without keep lasts only this UTC day.",
+    description: "List open work stops with exact reasons, amounts, units and continuation actions; continue one with run_once, raise (--to, optional --keep), or refill. Daily raises without keep last only this UTC day; the cumulative judge spending cap stays raised.",
     params: {
       action: { type: "string", enum: ["list", "continue"] },
       id: { type: "string", description: "The limit id from the list." },
       subject: { type: "string", description: "The exact subject from the list; required if more than one matches." },
-      to: { type: "number", description: "New total daily call limit, greater than current limit and calls used." },
+      to: { type: "number", description: "New total limit in the reported unit, covering the next step and greater than the current limit and usage." },
       keep: { type: "boolean", description: "Keep the new daily limit for good." }
     },
     mutating: true,

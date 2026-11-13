@@ -2368,15 +2368,26 @@ async function upgradeSelftest(mode: string): Promise<never> {
   emit({ ok: false, detail: `unknown self-test mode ${mode}` });
 }
 
+/**
+ * The engine's build, once its status is healthy. A just-installed engine can report itself running while its worker
+ * cannot yet answer for a few seconds at a time (engine.err names each stall), so the status is read again for up to
+ * `ENGINE_HEALTH_WAIT_MS` before the install counts as failed; the wait is reported, never hidden.
+ */
+const ENGINE_HEALTH_WAIT_MS = 45_000;
+
 async function engineBuild(): Promise<never> {
-  const status = olympus(['engine', 'status']);
-  let build: string | null = null;
-  let remote: unknown = null;
-  try {
-    const parsed = JSON.parse(status.stdout) as { engine?: { build?: string; remote_mode?: string } };
-    build = parsed.engine?.build ?? null;
-    remote = parsed.engine?.remote_mode ?? null;
-  } catch { /* leave null */ }
+  const started = Date.now();
+  let status = olympus(['engine', 'status']);
+  let parsed: { ok?: boolean; engine?: { build?: string; remote_mode?: string }; worker?: { detail?: string } } | undefined;
+  for (;;) {
+    try { parsed = JSON.parse(status.stdout); } catch { parsed = undefined; }
+    if (status.code === 0 || Date.now() - started >= ENGINE_HEALTH_WAIT_MS) break;
+    await sleep(3_000);
+    status = olympus(['engine', 'status']);
+  }
+  const build = parsed?.engine?.build ?? null;
+  const remote: unknown = parsed?.engine?.remote_mode ?? null;
+  const waitedMs = Date.now() - started;
   const conn = olympus(['connections', 'status']);
   let relay: unknown = null;
   try {
@@ -2384,7 +2395,7 @@ async function engineBuild(): Promise<never> {
     relay = { state: parsed.relay?.state ?? null, connected: parsed.relay?.connected ?? null };
   } catch { /* leave null */ }
   const version = /\b(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)\b/.exec(olympus(['--version']).stdout)?.[1] ?? null;
-  emit({ ok: status.code === 0, build, version, remoteMode: remote, relay });
+  emit({ ok: status.code === 0, build, version, remoteMode: remote, relay, waitedMs, ...(status.code === 0 ? {} : { worker: parsed?.worker?.detail ?? null }) });
 }
 
 // ---------------------------------------------------------------------------
