@@ -1,6 +1,6 @@
 import { sourceCard, sourceConnected } from '../scripts/release-check/source-cards.ts';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, realpathSync } from 'node:fs';
+import { mkdtempSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
@@ -59,22 +59,25 @@ function rig(failAt?: string, inconclusive = false, listening = '') {
 }
 
 describe('fresh install canary', () => {
-  test('the test Venice key goes to the install on stdin before the walkthrough, never in a command or a check', async () => {
+  test('the test Venice key reaches the install as a file through put before the walkthrough, never in a command or a check', async () => {
     const r = rig();
-    const stdins: string[] = [];
-    const exec = r.machine.exec;
-    r.machine.exec = async (script, options) => { if (options?.stdin) stdins.push(options.stdin); return exec(script, options); };
+    const put: Array<{ to: string; body: string }> = [];
+    r.machine.put = async (from, to) => { put.push({ to, body: readFileSync(from, 'utf8') }); };
     const key = 'vk-test-not-a-real-key';
     const { checks } = await runFreshInstall(r.machine, { ...r.options, veniceKey: key });
     const ids = checks.map(c => c.id);
+    expect(checks.find(c => c.id === 'fresh.venice-key')?.status).toBe('pass');
     expect(ids.indexOf('fresh.venice-key')).toBeGreaterThan(ids.indexOf('fresh.engine-up'));
     expect(ids.indexOf('fresh.venice-key')).toBeLessThan(ids.indexOf('fresh.privacy-choice'));
-    expect(r.commands.some(c => c.includes('connect venice --api-key-stdin'))).toBe(true);
+    expect(put).toEqual([{ to: '/home/zig/.olympus-canary/fresh-run/venice-key', body: `${key}\n` }]);
+    const saved = r.commands.find(c => c.includes('connect venice --api-key-stdin'))!;
+    expect(saved).toContain('venice-key');
+    expect(saved).toContain('rm -f');
     expect(r.commands.some(c => c.includes(key))).toBe(false);
     expect(JSON.stringify(checks)).not.toContain(key);
-    expect(stdins).toEqual([`${key}\n`]);
-    const empty = await runFreshInstall(rig().machine, { ...rig().options, veniceKey: '' });
-    expect(empty.checks.find(c => c.id === 'fresh.venice-key')?.status).toBe('fail');
+    const empty = rig();
+    const none = await runFreshInstall(empty.machine, { ...empty.options, veniceKey: '' });
+    expect(none.checks.find(c => c.id === 'fresh.venice-key')?.status).toBe('fail');
   }, 30_000);
 
   test('a server left on the local-first model port fails the leg before anything is installed, naming it and its unit (olympus-ops#221)', async () => {
