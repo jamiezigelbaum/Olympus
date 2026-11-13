@@ -2330,7 +2330,7 @@ type VectorScoreRow = { item_pk: number; chunk_pk: number; local_item_id: string
 type VectorWinners = Extract<VectorScan, { bestByItem: unknown }>['bestByItem'];
 
 /** Shared exact scoring preserves the winning chunk and deterministic ties. */
-function foldVectorScore(bestByItem: VectorWinners, row: VectorScoreRow, queryVector: readonly number[]): { mismatch: number; qualified: number } {
+function foldVectorScore(bestByItem: VectorWinners, row: VectorScoreRow, queryVector: readonly number[]): { mismatch: number; qualified: number; score?: number } {
   const vector = decodeEmbedding(row.embedding);
   if (vector.length !== queryVector.length) return { mismatch: 1, qualified: 0 };
   const score = cosineSimilarity(queryVector, vector);
@@ -2340,7 +2340,7 @@ function foldVectorScore(bestByItem: VectorWinners, row: VectorScoreRow, queryVe
     qualified = Number(score >= MIN_VECTOR_SCORE && (!prior || prior.bestCosine < MIN_VECTOR_SCORE));
     bestByItem.set(row.item_pk, { bestCosine: score, bestChunkPk: row.chunk_pk, localItemId: row.local_item_id });
   }
-  return { mismatch: 0, qualified };
+  return { mismatch: 0, qualified, score };
 }
 
 /**
@@ -2372,7 +2372,7 @@ async function scanVectorPages(
       sql: "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'", params: [] })) };
   }
   // Old/read-only schemas and incomplete backfills retain the exact scan, as
-  // does every store unless OLYMPUS_VECTOR_DIGEST=on (see
+  // does every store with OLYMPUS_VECTOR_DIGEST=off (see
   // vectorDigestSearchDisabled).
   const digestTable = !vectorDigestSearchDisabled() && await read({ mode: 'get', sql: "SELECT 1 FROM sqlite_master WHERE name = 'chunk_vector_digest_meta'", params: [] });
   const digestReady = digestTable && await read({ mode: 'get', sql: 'SELECT 1 FROM chunk_vector_digest_meta WHERE model_id = ? AND completed = 1', params: [pageOptions.modelId] });
@@ -2408,13 +2408,12 @@ async function scanVectorPages(
 }
 
 /**
- * The digest pass is off by default until an intermittent Bun memory fault
- * seen with it on a 608K-row store under concurrent reads is understood
- * (olympus-ops#151): OLYMPUS_VECTOR_DIGEST=on turns it on. Off, every vector
- * lane runs the exact scan; the digest is still written and backfilled.
+ * OLYMPUS_VECTOR_DIGEST=off sends every vector lane to the exact scan; the
+ * digest is still written and backfilled. Kept as a switch since the Bun
+ * memory fault that held the digest off (olympus-ops#151, fixed by #1522).
  */
 export function vectorDigestSearchDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.OLYMPUS_VECTOR_DIGEST?.trim().toLowerCase() !== 'on';
+  return env.OLYMPUS_VECTOR_DIGEST?.trim().toLowerCase() === 'off';
 }
 
 /** Backfill turns stay short on the worker thread (plan ruling on #1444). */
@@ -2474,17 +2473,32 @@ export async function scanDigestPages(
   const bestByItem: Extract<VectorScan, { bestByItem: unknown }>['bestByItem'] = new Map();
   let dimensionMismatches = 0;
   const batchSize = Math.max(400, 20 * limit);
-  // Expansion counts SQL-eligible items above the score floor. Ledger
-  // visibility is checked once, on the ranked winners, by the lane's final
-  // step; each batch re-scores 20x the limit, which leaves that step a deep
-  // list to walk past hidden copies without validating every candidate here.
+  // The stop is by score, not by count: re-scoring continues while the next
+  // candidate's digest score, raised by the digest's largest underestimate
+  // seen so far (never less than the floor), could still beat the K-th best
+  // exact item. A count-only stop missed items the exact scan ranks highly
+  // but the 256-dimension digest ranks a few hundred chunks down (#1529).
+  // Ledger visibility is checked once, on the ranked winners, by the lane's
+  // final step; batches of 20x the limit leave it a deep list.
+  let underestimate = VECTOR_DIGEST_MIN_MARGIN;
+  let candidates = 0;
   let qualifiedItems = 0;
   let batches = 0;
-  while (heap.length > 0 && qualifiedItems < limit) {
+  while (heap.length > 0) {
+    // Until `limit` items qualify the pass reads on as before (a narrow filter
+    // drains the heap rather than restarting wider); the cap bounds only the
+    // score-driven reading past that point.
+    if (qualifiedItems >= limit && (candidates >= VECTOR_DIGEST_MAX_CANDIDATES
+      || heap.peekScore() + underestimate < kthBestCosine(bestByItem, limit))) break;
     if (expired()) return cut;
     if (batches++ > 0) await yieldConnectorStoreVectorScan();
-    const chunkPks: number[] = [];
-    while (heap.length > 0 && chunkPks.length < batchSize) chunkPks.push(heap.pop());
+    const digestScores = new Map<number, number>();
+    while (heap.length > 0 && digestScores.size < batchSize) {
+      const score = heap.peekScore();
+      digestScores.set(heap.pop(), score);
+    }
+    candidates += digestScores.size;
+    const chunkPks = [...digestScores.keys()];
     let after = 0;
     let rePages = 0;
     while (true) {
@@ -2496,6 +2510,8 @@ export async function scanDigestPages(
         const folded = foldVectorScore(bestByItem, row, queryVector);
         dimensionMismatches += folded.mismatch;
         qualifiedItems += folded.qualified;
+        const digestScore = digestScores.get(row.chunk_pk);
+        if (folded.score !== undefined && digestScore !== undefined) underestimate = Math.max(underestimate, folded.score - digestScore);
       }
       if (rows.length < CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE) break;
       after = rows.at(-1)!.chunk_pk;
@@ -2506,6 +2522,20 @@ export async function scanDigestPages(
 }
 
 const VECTOR_DIGEST_PAGE_ROWS = 4096;
+/** The least the digest is assumed to underestimate an exact cosine by. */
+const VECTOR_DIGEST_MIN_MARGIN = 0.05;
+/**
+ * Re-scored chunks per digest pass once enough items qualify: about 60 MB
+ * of 768-dimension vectors, a few percent of a 600K-chunk exact scan.
+ */
+const VECTOR_DIGEST_MAX_CANDIDATES = 20_000;
+
+/** The K-th best item's exact cosine so far; -Infinity with fewer than K items. */
+function kthBestCosine(bestByItem: VectorWinners, k: number): number {
+  if (bestByItem.size < k) return -Infinity;
+  const scores = [...bestByItem.values()].map((winner) => winner.bestCosine).sort((a, b) => b - a);
+  return scores[k - 1]!;
+}
 
 /**
  * One page of digests as ONE row: the digests concatenated into a single

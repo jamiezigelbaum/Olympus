@@ -50,6 +50,8 @@ export class VectorDigestHeap {
       index = child;
     }
   }
+  /** The best remaining score; -Infinity when empty. */
+  peekScore(): number { return this.length ? this.scores[0]! : -Infinity; }
   pop(): number {
     const pk = this.pks[0]!;
     const last = this.length - 1;

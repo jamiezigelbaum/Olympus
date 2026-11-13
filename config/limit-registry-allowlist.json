@@ -438,6 +438,12 @@
     "retire_when": "Remove when superseded-copy reclamation no longer uses RECLAIM_MAX_PAGES_PER_STEP."
   },
   {
+    "path": "src/workers/connector-store/local-index.ts",
+    "symbol": "VECTOR_DIGEST_MAX_CANDIDATES",
+    "reason": "clamp",
+    "retire_when": "Remove when the digest re-score depth clamp VECTOR_DIGEST_MAX_CANDIDATES is removed; it bounds how far past the top results a search reads, and stops no work."
+  },
+  {
     "path": "src/workers/connector-store/tier-auto-prune-sweep.ts",
     "symbol": "RECLAIM_MAX_RETAINED_FREE_BYTES",
     "reason": "pacing",

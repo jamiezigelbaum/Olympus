@@ -28569,6 +28569,9 @@ class VectorDigestHeap {
       index = child;
     }
   }
+  peekScore() {
+    return this.length ? this.scores[0] : -Infinity;
+  }
   pop() {
     const pk = this.pks[0];
     const last = this.length - 1;
@@ -39737,7 +39740,7 @@ function foldVectorScore(bestByItem, row, queryVector) {
     qualified = Number(score >= MIN_VECTOR_SCORE && (!prior || prior.bestCosine < MIN_VECTOR_SCORE));
     bestByItem.set(row.item_pk, { bestCosine: score, bestChunkPk: row.chunk_pk, localItemId: row.local_item_id });
   }
-  return { mismatch: 0, qualified };
+  return { mismatch: 0, qualified, score };
 }
 async function scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, pageSize, resultLimit) {
   const authority = embeddingAuthorityRead(provider);
@@ -39783,7 +39786,7 @@ async function scanVectorPages(read, provider, beforeToken, queryVector, pageOpt
   return { bestByItem, dimensionMismatches };
 }
 function vectorDigestSearchDisabled(env = process.env) {
-  return env.OLYMPUS_VECTOR_DIGEST?.trim().toLowerCase() !== "on";
+  return env.OLYMPUS_VECTOR_DIGEST?.trim().toLowerCase() === "off";
 }
 function nextVectorDigestBackfillRows(rows, turnMs) {
   if (turnMs > VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS)
@@ -39829,16 +39832,24 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit) 
   const bestByItem = new Map;
   let dimensionMismatches = 0;
   const batchSize = Math.max(400, 20 * limit);
+  let underestimate = VECTOR_DIGEST_MIN_MARGIN;
+  let candidates = 0;
   let qualifiedItems = 0;
   let batches = 0;
-  while (heap.length > 0 && qualifiedItems < limit) {
+  while (heap.length > 0) {
+    if (qualifiedItems >= limit && (candidates >= VECTOR_DIGEST_MAX_CANDIDATES || heap.peekScore() + underestimate < kthBestCosine(bestByItem, limit)))
+      break;
     if (expired())
       return cut;
     if (batches++ > 0)
       await yieldConnectorStoreVectorScan();
-    const chunkPks = [];
-    while (heap.length > 0 && chunkPks.length < batchSize)
-      chunkPks.push(heap.pop());
+    const digestScores = new Map;
+    while (heap.length > 0 && digestScores.size < batchSize) {
+      const score = heap.peekScore();
+      digestScores.set(heap.pop(), score);
+    }
+    candidates += digestScores.size;
+    const chunkPks = [...digestScores.keys()];
     let after = 0;
     let rePages = 0;
     while (true) {
@@ -39852,6 +39863,9 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit) 
         const folded = foldVectorScore(bestByItem, row, queryVector);
         dimensionMismatches += folded.mismatch;
         qualifiedItems += folded.qualified;
+        const digestScore = digestScores.get(row.chunk_pk);
+        if (folded.score !== undefined && digestScore !== undefined)
+          underestimate = Math.max(underestimate, folded.score - digestScore);
       }
       if (rows.length < CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE)
         break;
@@ -39861,6 +39875,12 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit) 
     }
   }
   return expired() ? cut : { bestByItem, dimensionMismatches, exhausted: heap.length === 0 };
+}
+function kthBestCosine(bestByItem, k) {
+  if (bestByItem.size < k)
+    return -Infinity;
+  const scores = [...bestByItem.values()].map((winner) => winner.bestCosine).sort((a, b) => b - a);
+  return scores[k - 1];
 }
 function forEachPackedVectorDigest(page, visit) {
   if (page.n === 0)
@@ -42765,7 +42785,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128, VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8, VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS = 60000, VECTOR_DIGEST_PAGE_ROWS = 4096, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, CONNECTOR_RECLAIM_WORKER_SOURCE = `
+`, VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128, VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8, VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS = 60000, VECTOR_DIGEST_PAGE_ROWS = 4096, VECTOR_DIGEST_MIN_MARGIN = 0.05, VECTOR_DIGEST_MAX_CANDIDATES = 20000, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, CONNECTOR_RECLAIM_WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
 // core/sqlite-store.ts closeSqliteStore, inlined: this source runs in its own

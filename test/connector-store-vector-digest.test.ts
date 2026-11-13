@@ -15,8 +15,8 @@ import { probeVectorDigest, seededVectorRandom } from '../eval/vector-digest-pro
 
 // The digest pass is opt-in while olympus-ops#151 is open; these tests cover it on.
 const digestSetting = process.env.OLYMPUS_VECTOR_DIGEST;
-beforeAll(() => { process.env.OLYMPUS_VECTOR_DIGEST = 'on'; });
-afterAll(() => { if (digestSetting === undefined) delete process.env.OLYMPUS_VECTOR_DIGEST; else process.env.OLYMPUS_VECTOR_DIGEST = digestSetting; });
+beforeAll(() => { delete process.env.OLYMPUS_VECTOR_DIGEST; });
+afterAll(() => { if (digestSetting !== undefined) process.env.OLYMPUS_VECTOR_DIGEST = digestSetting; });
 const modelId = 'digest-fixture';
 const provider: SourceEmbeddingProvider = { provider: 'built-in', backend: 'local', modelId, dimension: 3, configHash: '1', epochId: '1', async embed(inputs) { return inputs.map(() => [1, 0, 0]); } };
 const open = (dbPath = ':memory:') => {
@@ -416,7 +416,7 @@ test('a file store backfills on the read pool: the worker thread only writes dig
   } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('without OLYMPUS_VECTOR_DIGEST=on, a store with a complete digest runs the exact scan', async () => {
+test('with OLYMPUS_VECTOR_DIGEST=off, a store with a complete digest runs the exact scan', async () => {
   const store = open();
   const saved = process.env.OLYMPUS_VECTOR_DIGEST;
   const queries: string[] = [];
@@ -425,7 +425,7 @@ test('without OLYMPUS_VECTOR_DIGEST=on, a store with a complete digest runs the 
     await store.embedChunks({ provider });
     expect(vectorDigestState(database(store), modelId).completed).toBe(true);
     const withDigest = await store.vectorSearchLane('harbor', provider, 10, 'a');
-    delete process.env.OLYMPUS_VECTOR_DIGEST;
+    process.env.OLYMPUS_VECTOR_DIGEST = 'off';
     const db = database(store);
     const query = db.query.bind(db);
     db.query = ((sql: string) => { queries.push(sql); return query(sql); }) as typeof db.query;
@@ -587,5 +587,50 @@ test('a digest page crosses as one packed blob that unpacks byte for byte, NULs 
     const none = db.query(empty.sql).get(...empty.params) as VectorDigestPackedPage;
     expect(none.n).toBe(0);
     expect(forEachPackedVectorDigest(none, () => { throw new Error('no rows to visit'); })).toBe(true);
+  } finally { db.close(); }
+});
+
+test('re-scoring stops by score, not count: an item the 256-dimension digest ranks below a full batch is still found (#1529)', async () => {
+  const db = numericStore();
+  const dims = 300;
+  const vector = (entries: Array<[number, number]>) => { const v = new Array(dims).fill(0); for (const [i, x] of entries) v[i] = x; return v; };
+  try {
+    db.transaction(() => {
+      // 1,000 chunks the digest scores 1.0 (their prefix is the query's) but whose exact cosine is about 0.88.
+      for (let i = 1; i <= 1000; i++) insert(db, i, vector([[0, 1], [299, 0.3]]));
+      // The exact winner: its digest score (about 0.95) puts it behind all 1,000.
+      insert(db, 1001, vector([[0, 0.95], [1, 0.31], [299, 1]]));
+      // Chunks the digest scores near 0: once they are next, re-scoring stops.
+      for (let i = 1002; i <= 4000; i++) insert(db, i, vector([[2, 1]]));
+    })();
+    finish(db);
+    const query = vector([[0, 1], [299, 1]]);
+    const options = { modelId };
+    let rescored = 0;
+    const result = await scanDigestPages(reader(db, (q, rows) => {
+      if (q.sql.includes('FROM chunk_embeddings emb')) rescored += (rows as unknown[]).length;
+    }), query, options, undefined, 5);
+    expect(rank(result, 5)).toEqual(exact(db, query, options, 5));
+    expect(rank(result, 5)[0]).toBe(1001);
+    if ('skippedReason' in result) throw new Error(result.skippedReason);
+    expect(result.exhausted).toBe(false);
+    expect(rescored).toBeLessThanOrEqual(1200);
+  } finally { db.close(); }
+});
+
+test('the candidate cap never cuts a pass short of the limit: rejected top candidates drain to the eligible tail in one pass', async () => {
+  const db = numericStore();
+  try {
+    db.transaction(() => {
+      // 21,000 top digest candidates SQL rejects (tombstoned), above five eligible chunks.
+      for (let i = 1; i <= 21_000; i++) insert(db, i, [1, 0, 0]);
+      for (let i = 21_001; i <= 21_005; i++) insert(db, i, [0.6, 0.8, 0]);
+      db.exec('UPDATE items SET tombstoned = 1 WHERE item_pk <= 21000');
+    })();
+    finish(db);
+    const result = await scanDigestPages(reader(db), [1, 0, 0], { modelId }, undefined, 5);
+    expect(rank(result, 5)).toEqual([21_001, 21_002, 21_003, 21_004, 21_005]);
+    if ('skippedReason' in result) throw new Error(result.skippedReason);
+    expect(result.exhausted).toBe(true);
   } finally { db.close(); }
 });
