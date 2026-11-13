@@ -38,9 +38,11 @@ same across the continuation.
 For `venice.credit`, the stage writes the same `kind: venice` marker shape as
 `writeProviderPause`, at the configured pause file (or a temporary path
 configured with `OLYMPUS_VENICE_CREDIT_STATUS_PROVIDER_PAUSE_FILE` before the
-restart). It refuses to overwrite an existing marker. It then seeds fresh
-synthetic items, so the stop has work to hold; seeding restarts the engine, so
-the no-restart window starts once the engine is ready again. Within 90 seconds the
+restart). It first seeds fresh synthetic items, so the stop has work to hold.
+Seeding restarts the engine, so the no-restart window starts once the engine is
+ready again, and the marker is written only then: startup's billing check would
+otherwise clear it before the stage looks. It refuses to overwrite an existing
+marker. Within 90 seconds the
 CLI must show the billing reason and Home must offer the matching Refill fix.
 One `olympus limits continue venice.credit` uses the product's constant Venice
 billing URL. With a credential, it must return `ok:true`, clear the stop from

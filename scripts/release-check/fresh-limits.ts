@@ -129,11 +129,11 @@ export async function runFreshLimits(machine: Machine, options: FreshLimitsOptio
     result.rows.push(venice);
     await check('venice.credit', async () => {
       const credential = await probe.hasVeniceCredential();
-      await probe.marker('write');
-      // Fresh items while Venice is stopped, so Refill has work to resume. Seeding restarts the engine,
-      // so the no-restart window starts after it.
+      // Fresh items so Refill has work to resume. Seeding restarts the engine, so the no-restart window
+      // starts after it, and the marker goes in only once startup's billing check (then every 15 min) has run.
       assert(await probe.seed() >= 2, 'fewer than 2 synthetic judgment items seeded');
       const before = await poll(() => probe.snapshot(), s => s.pid > 0 && s.workerPids.length > 0, 180_000, 'engine did not become ready');
+      await probe.marker('write');
       const stops = await poll(list, stops => stops.some(stop => stop.id === venice.id), 90_000, 'venice.credit never appeared within 90 seconds');
       const stop = stops.find(stop => stop.id === venice.id)!;
       assert(typeof stop.label === 'string' && stop.label.includes('canConsume') && stop.unit === 'usd', 'Venice stop lacks its billing reason');

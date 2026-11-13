@@ -80,6 +80,8 @@ test('limits proves list, Home actions, one-step Raise and Refill, bounded resum
     '"$HOME/.local/bin/olympus" limits continue venice.credit',
   ]);
   expect(r.events.slice(-2)).toEqual(['marker-remove', 'close']);
+  // The Venice leg seeds (restarting the engine) before writing its marker, so startup recovery cannot clear it.
+  expect(r.events.lastIndexOf('seed')).toBeLessThan(r.events.indexOf('marker-write'));
   expect(r.marker()).toBe(false); expect(r.closed()).toBe(true);
   expect(JSON.stringify(result)).not.toContain('/private/account');
   expect(renderLimits(result.rows)).toContain('Calls after continue');
