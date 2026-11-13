@@ -1,7 +1,7 @@
 // The Ask trace names synchronous SQLite that holds the request thread (#1305).
 import { Database } from 'bun:sqlite';
 import { expect, test } from 'bun:test';
-import { installMainThreadSqlTrace } from '../src/workers/connector-store/main-thread-sql-trace.ts';
+import { installMainThreadSqlTrace, withMainThreadSqlTiming } from '../src/workers/connector-store/main-thread-sql-trace.ts';
 import {
   createSourceAnswerTrace,
   runWithSourceAnswerTrace,
@@ -64,4 +64,22 @@ test('statements outside an Ask are not counted against one', async () => {
   } finally {
     db.close();
   }
+});
+
+
+test('a synchronous sweep scope measures statements and exec, then restores the previous scope after failure', () => {
+  const db = new Database(':memory:');
+  const timing = { maxStatementMs: 0 };
+  try {
+    expect(() => withMainThreadSqlTiming(timing, () => {
+      db.exec('CREATE TABLE sweep_test (id INTEGER PRIMARY KEY)');
+      db.transaction(() => { db.query('INSERT INTO sweep_test VALUES (1)').run(); })();
+      db.query('SELECT * FROM sweep_test').all();
+      throw new Error('interrupted sweep');
+    })).toThrow('interrupted sweep');
+    expect(timing.maxStatementMs).toBeGreaterThan(0);
+    const before = timing.maxStatementMs;
+    holdThread(db, 200_000);
+    expect(timing.maxStatementMs).toBe(before);
+  } finally { db.close(); }
 });

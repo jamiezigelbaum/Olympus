@@ -1,3 +1,4 @@
+import { provedChunks } from './helpers/scripted-search-release.ts';
 import { recordReleaseManifest } from '../src/core/release-manifest.ts';
 import { engineBriefFromViewModel, parseEngineBrief } from '../src/core/engine-brief.ts';
 // ChatGPT MCP surface: the dashboard view-model producer, the MCP Apps
@@ -786,7 +787,7 @@ beforeEach(() => {
         // The scripted answer reads the Personal budget-plan item. The
         // malicious Private citation below is never an analyst input; the
         // response builder must still strip it, independently of this guard.
-        recordReleaseManifest({ inputs: [{ corpusId: S('EVIDENCE_CORPUS_2'), provider: 'google_drive', accountScope: 'test-account', providerItemId: S('ITEM_ID_2'), privateAtAnswer: false }],
+        recordReleaseManifest({ inputs: [{ corpusId: S('EVIDENCE_CORPUS_2'), provider: 'google_drive', accountScope: 'test-account', providerItemId: S('ITEM_ID_2'), privateAtAnswer: false, chunkHashes: ['budget-plan-chunk'] }],
           constraints: { secureDerivativeDefault: 'allow', includeSecureLocalContent: false } });
         return sentinelAnswer();
       },
@@ -804,6 +805,7 @@ beforeEach(() => {
       signal,
     }), releaseCheck: {
       inputs: (inputs) => inputs.map(() => ({ tier: 'public_or_personal' as const, gone: false })),
+      chunks: provedChunks,
       secureDerivativeDefault: () => 'allow' as const,
     } }),
     chatgpt: {
@@ -878,6 +880,7 @@ describe('ChatGPT MCP surface over the remote handler', () => {
         'olympus_privacy_questions',
         'olympus_privacy_check',
         'olympus_sync_source',
+        'olympus_limits',
       ]);
       const readOnly = new Set([DASHBOARD_TOOL_NAME, 'olympus_search', 'source_index_status', 'source_answer', 'source_answer_result', 'olympus_scope_list', 'olympus_privacy_get']);
       for (const tool of tools) {

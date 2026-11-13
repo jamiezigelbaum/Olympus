@@ -70,7 +70,7 @@ export interface ReadwiseDailyRequestBudgetOptions {
 export class ReadwiseRequestBudgetError extends Error {
   readonly retryAt: string;
 
-  constructor(retryAt: string) {
+  constructor(retryAt: string, readonly amounts?: { limit: number; used: number }) {
     super('Readwise request deferred by daily_api_request_guard.');
     this.name = 'ReadwiseRequestBudgetError';
     this.retryAt = retryAt;
@@ -137,7 +137,7 @@ export class ReadwiseDailyRequestBudget {
       this.requests = 0;
     }
     if (routine && this.requests >= this.dailyRequestBudget) {
-      throw new ReadwiseRequestBudgetError(nextUtcDay(now));
+      throw new ReadwiseRequestBudgetError(nextUtcDay(now), { limit: this.dailyRequestBudget, used: this.requests });
     }
     // Count first, then persist. A failed write is a loud host problem, and the
     // in-memory counter it leaves behind is the conservative one.

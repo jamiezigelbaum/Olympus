@@ -1811,6 +1811,7 @@ describe('X bookmarks API usage and response controls', () => {
     await expect(firstPageWithCursor(connector, 'old')).rejects.toMatchObject({
       errorKind: 'api_request_guard',
       degradedReason: 'daily_cost_guard',
+      counts: { limit_stop_limit: 5_000, limit_stop_used: 0 },
     });
     expect(calls).toEqual([]);
     expect(usage.status({ account: ACCOUNT, config, now }).estimated_spend_microusd).toBe(0);
@@ -1989,7 +1990,7 @@ describe('X bookmarks API usage and response controls', () => {
         caught = error;
       }
       expect(caught).toBeInstanceOf(XApiUsageGuardError);
-      expect(caught).toMatchObject({ guardKind: expectedGuard });
+      expect(caught).toMatchObject({ guardKind: expectedGuard, amounts: { limit: expectedGuard === 'head_cost_reserve_guard' ? 2_000 : 2, used: expectedGuard === 'head_cost_reserve_guard' ? 2_000 : 2 } });
 
       const head = usage.reserveRequest({
         account: ACCOUNT,

@@ -82,7 +82,7 @@ export interface DelphiItemTierScorerOptions {
 const DEFAULT_MAX_TOKENS = 120;
 const DEFAULT_SUBJECT_LIMIT = 300;
 const DEFAULT_SENDER_LIMIT = 200;
-const DEFAULT_EXCERPT_LIMIT = 2_000;
+export const DEFAULT_EXCERPT_LIMIT = 2_000;
 
 const SCORER_SYSTEM_PROMPT = [
   'You are a privacy tier scorer for a personal email index.',

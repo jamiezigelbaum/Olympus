@@ -5,11 +5,12 @@ import { createOwnerQuestionActivity, createSourceAnswerLanes, OWNER_QUESTION_RE
 import { OwnerBusyRelay } from '../src/workers/engine-split/client.ts';
 import { OwnerBusyMarks } from '../src/workers/engine-split/runtime.ts';
 import type { EngineCommand } from '../src/workers/engine-split/commands.ts';
-import { startSupersededSweepTicker, SUPERSEDED_SWEEP_TICK_MS } from '../src/workers/connector-store/tier-auto-prune-sweep.ts';
+import { startSupersededSweepTicker, SUPERSEDED_SWEEP_TICK_MS, SUPERSEDED_SWEEP_IDLE_TICK_MS, SUPERSEDED_SWEEP_IDLE_AFTER_MS } from '../src/workers/connector-store/tier-auto-prune-sweep.ts';
 import type { TieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
 import { createAnalystSourceIndexAnswerHandler, searchReleasedEvidence } from '../src/workers/source-index/analyst-answer.ts';
 import { createAnalyst } from '../src/core/analyst.ts';
 import { createTestClock } from './helpers/test-clock.ts';
+import { provedReleaseCheck } from './helpers/scripted-search-release.ts';
 
 function deferred() {
   let resolve!: () => void;
@@ -30,7 +31,7 @@ function world(split = true) {
     front: 'front', setInterval: clock.setInterval,
     clearInterval: timer => clock.clearInterval(timer as never),
   });
-  const questions = createOwnerQuestionActivity(split ? relay : undefined);
+  const questions = createOwnerQuestionActivity(split ? relay : undefined, clock.now);
   const corpusId = 'internal.fixture';
   const registry = buildSourceIndexCorpusRegistry([
     defineSourceIndexCorpus({ corpusId, family: 'file', trustDomain: 'internal' }),
@@ -65,9 +66,11 @@ function world(split = true) {
     analyst: createAnalyst({ complete: async () => { throw new Error('empty evidence never calls a model'); } }),
   });
   const ask = () => questions.run(() => handler.answer({ question: 'What do my sources say?', retrieval_mode: 'keyword' }));
-  const search = () => questions.run(() => searchReleasedEvidence({ lanes, question: 'What do my sources say?' }));
+  const search = () => questions.run(() => searchReleasedEvidence({ lanes, question: 'What do my sources say?', releaseCheck: provedReleaseCheck }));
   let slices = 0;
   const stopTicker = startSupersededSweepTicker({
+    now: clock.now,
+    ownerQuestionEndedAt: () => split ? marks.lastEndedAt(OWNER_QUESTION_RESOURCE) : questions.lastEndedAt,
     active: () => split ? !marks.busy(OWNER_QUESTION_RESOURCE) : !questions.busy,
     sets: () => [{ sweepSupersededSlice: () => { slices++; return false; } } as TieredStoreSet],
     every: (tick, ms) => {
@@ -81,6 +84,29 @@ function world(split = true) {
 }
 
 const kinds = (sent: EngineCommand[]) => sent.map(command => command.kind);
+
+test('each ticker callback admits only one set, rotates fairly, and cancels its fast timer', async () => {
+  const clock = createTestClock();
+  const calls: number[] = [];
+  const sets = [0, 1].map(id => ({ sweepSupersededSlice: () => { calls.push(id); return false; } }) as TieredStoreSet);
+  const stop = startSupersededSweepTicker({ now: clock.now, sets: () => sets,
+    every: (tick, ms) => { const timer = clock.setInterval(tick, ms); return () => clock.clearInterval(timer); },
+  });
+  try {
+    await clock.advance(SUPERSEDED_SWEEP_TICK_MS);
+    expect(calls).toEqual([0]);
+    await clock.advance(SUPERSEDED_SWEEP_TICK_MS);
+    expect(calls).toEqual([0, 1]);
+    await clock.advance(SUPERSEDED_SWEEP_IDLE_AFTER_MS - 2 * SUPERSEDED_SWEEP_TICK_MS);
+    const before = calls.length;
+    await clock.advance(2 * SUPERSEDED_SWEEP_IDLE_TICK_MS);
+    expect(calls.slice(before)).toEqual([0, 1]);
+  } finally { stop(); }
+  const before = calls.length;
+  await clock.advance(SUPERSEDED_SWEEP_TICK_MS);
+  expect(calls).toHaveLength(before);
+  expect(clock.pendingTimers()).toBe(0);
+});
 
 describe('owner questions pause the superseded-copy sweep', () => {
   test('a real Ask sends busy before retrieval, skips ticks, and sends idle on success', async () => {
@@ -101,6 +127,67 @@ describe('owner questions pause the superseded-copy sweep', () => {
       await w.clock.advance(SUPERSEDED_SWEEP_TICK_MS);
       expect(w.slices()).toBe(2);
     } finally { w.close(); }
+  });
+
+  for (const split of [false, true]) test(`${split ? 'relayed' : 'local'} idle cadence accelerates at 60 seconds and resets after an Ask`, async () => {
+    const w = world(split);
+    try {
+      await w.clock.advance(SUPERSEDED_SWEEP_IDLE_AFTER_MS - 1);
+      expect(w.slices()).toBe(11);
+      await w.clock.advance(1);
+      expect(w.slices()).toBe(12);
+      await w.clock.advance(SUPERSEDED_SWEEP_IDLE_TICK_MS * 4);
+      expect(w.slices()).toBe(16);
+      const answer = w.ask();
+      await w.clock.advance(SUPERSEDED_SWEEP_TICK_MS * 2);
+      expect(w.slices()).toBe(16);
+      expect(w.questions.lastEndedAt).toBeUndefined();
+      const ended = w.clock.now();
+      w.pending[0]!.resolve();
+      await answer;
+      expect(w.questions.lastEndedAt).toBe(ended);
+      if (split) expect(w.marks.lastEndedAt(OWNER_QUESTION_RESOURCE)).toBe(ended);
+      const before = w.slices();
+      await w.clock.advance(SUPERSEDED_SWEEP_TICK_MS);
+      expect(w.slices()).toBe(before + 1);
+      await w.clock.advance(SUPERSEDED_SWEEP_IDLE_AFTER_MS - SUPERSEDED_SWEEP_TICK_MS);
+      const fast = w.slices();
+      await w.clock.advance(SUPERSEDED_SWEEP_TICK_MS + 4 * SUPERSEDED_SWEEP_IDLE_TICK_MS);
+      expect(w.slices() - fast).toBeGreaterThanOrEqual(4);
+    } finally { w.close(); }
+  });
+
+  test('an Ask entirely between fast ticks still resets cadence from its end mark', async () => {
+    const w = world();
+    try {
+      await w.clock.advance(SUPERSEDED_SWEEP_IDLE_AFTER_MS);
+      const before = w.slices();
+      const release = w.questions.begin();
+      await w.clock.advance(50);
+      release();
+      await w.clock.advance(SUPERSEDED_SWEEP_TICK_MS - 50);
+      expect(w.slices()).toBe(before);
+      await w.clock.advance(SUPERSEDED_SWEEP_IDLE_TICK_MS);
+      expect(w.slices()).toBe(before + 1);
+    } finally { w.close(); }
+  });
+
+  test('a stale relayed idle cannot move the quiet boundary, and a crashed front ends conservatively at lease expiry', async () => {
+    const clock = createTestClock();
+    const marks = new OwnerBusyMarks({ now: clock.now });
+    const change = (kind: 'owner_busy' | 'owner_idle', seq: number) => ({ kind, resource: OWNER_QUESTION_RESOURCE, front: 'front', seq });
+    marks.apply(change('owner_busy', 1));
+    await clock.advance(1_000);
+    marks.apply(change('owner_idle', 2));
+    const ended = clock.now();
+    await clock.advance(1_000);
+    expect(marks.apply(change('owner_idle', 2))).toBe(false);
+    expect(marks.lastEndedAt(OWNER_QUESTION_RESOURCE)).toBe(ended);
+    marks.apply(change('owner_busy', 3));
+    const expires = clock.now() + 10 * 60_000;
+    await clock.advance(10 * 60_000);
+    expect(marks.busy(OWNER_QUESTION_RESOURCE)).toBe(false);
+    expect(marks.lastEndedAt(OWNER_QUESTION_RESOURCE)).toBe(expires);
   });
 
   test('a lane setup failure still releases the front mark', async () => {
@@ -144,6 +231,7 @@ describe('owner questions pause the superseded-copy sweep', () => {
       await first;
       expect(w.questions.busy).toBe(true);
       expect(kinds(w.sent)).toEqual(['owner_busy']);
+      expect(w.questions.lastEndedAt).toBeUndefined();
       await w.clock.advance(SUPERSEDED_SWEEP_TICK_MS);
       expect(w.slices()).toBe(0);
       w.pending[1]!.resolve();

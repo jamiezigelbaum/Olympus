@@ -11,6 +11,7 @@ import type { VisualResult } from './visual.ts';
 import type { ExploreResult } from './explore.ts';
 import type { PagesResult } from './explore-pages.ts';
 import type { ReviewResult } from './reviewer.ts';
+import type { OnDemandNotRun, OnDemandTimingRow } from './on-demand-timing.ts';
 
 export type CheckStatus = 'pass' | 'fail' | 'warn' | 'skip';
 
@@ -24,6 +25,24 @@ export interface CheckResult {
   carried?: CarriedFrom;
   /** The leg that produced it (run.ts inLeg); absent for the install and setup checks every run makes. */
   leg?: string;
+}
+
+/** The same table is used by the real-accounts canary and release reports. Values are observations, including failures. */
+export function renderOnDemandTiming(rows: readonly OnDemandTimingRow[] | undefined, notRun?: readonly OnDemandNotRun[]): string {
+  const skipped = notRun?.length ? '<h3>Not run</h3><ul>' + notRun.map(file => `<li>${escapeHtml(file.file)} (${escapeHtml(file.source)}): ${escapeHtml(file.reason)}</li>`).join('') + '</ul>' : '';
+  if (!rows?.length) return skipped;
+  const yes = (value: boolean) => value ? 'yes' : 'no';
+  const body = rows.map(row => {
+    const first = row.replies[0];
+    const values = [row.file, row.source, row.action, row.t0, yes(row.foundFile), yes(row.indexed), yes(row.foundParagraph),
+      row.secondsToAnswer === null ? `not answered (${row.elapsedSeconds.toFixed(1)} s observed)` : row.secondsToAnswer.toFixed(1),
+      String(row.asks), yes(first?.namesFile ?? false), yes(first?.reading ?? false), row.firstReply, row.waitMessage || '(none)',
+      ...(['fetch', 'extract', 'judge', 'embed'] as const).map(step => row.steps[step] === undefined ? 'missing' : String(row.steps[step])),
+      row.attribution, row.jobIds.join(', ') || '(none)'];
+    return `<tr>${values.map(value => `<td>${escapeHtml(value)}</td>`).join('')}<td><details><summary>Replies and engine timings</summary><pre>${escapeHtml(JSON.stringify(row.replies, null, 2))}</pre><pre>${escapeHtml(row.timingLog)}</pre>${row.error ? escapeHtml(row.error) : ''}</details></td></tr>`;
+  }).join('');
+  const headings = ['File', 'Source', 'Action', 't0', 'Found file', 'Read (job indexed)', 'Found paragraph (fact, cited)', 'Seconds to answer', 'Asks', 'First reply names file', 'First reply says reading', 'First reply', 'Wait message shown', 'Fetch ms', 'Extract ms', 'Judge ms', 'Embed ms', 'Timing attribution', 'Read jobs', 'Evidence'];
+  return `<h2>Names with read on demand</h2><div style="overflow-x:auto"><table><thead><tr>${headings.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table></div>${skipped}`;
 }
 
 /** The tested run a result was kept from. */
@@ -123,6 +142,21 @@ export interface MachineReport {
   upgrade?: UpgradeReport;
   /** The AI reviewer's findings (reviewer.ts), added after the run; advisory, so they never change the verdict. */
   review?: ReviewResult;
+  /** Observations only; these numbers never affect the verdict. */
+  archiveScale?: ArchiveScaleMeasurement[];
+}
+
+export interface ArchiveScaleMeasurement {
+  format: string;
+  wallMs: number;
+  items: number;
+  itemsPerMinute: number;
+  /** Peak sampled sum of the front and background RSS (not the harness/browser). */
+  peakRssBytes: number | null;
+  frontP50Ms: number | null;
+  frontP95Ms: number | null;
+  frontSamples: number;
+  frontFailures: number;
 }
 
 export interface ReleaseReportInput {
@@ -143,7 +177,7 @@ export interface ReleaseReportInput {
    */
   carry?: CarryRecord;
   /** Settings the run turned on in the install under test that are off by default (`run.ts --engine-split`). */
-  settings?: { engineSplit?: boolean };
+  settings?: { engineSplit?: boolean; archiveScale?: boolean };
 }
 
 export interface CarryRecord {
@@ -432,7 +466,7 @@ function machineSection(machine: MachineReport): string {
   const verdicts = phaseVerdicts(machine);
   if (!machine.upgrade) {
     return head
-      + timingsLine(machine.timings)
+      + timingsLine(machine.timings) + archiveScaleSection(machine.archiveScale)
       + `<h3>Machine checks</h3>${checkTable(machine.checks)}`
       + `<h3>Agents</h3>${machine.agents.map(agentSection).join('') || '<p class="muted">No agents.</p>'}`
       + `<h3>Dashboard screenshots</h3>${screenshotGrid(machine.screenshots)}`
@@ -453,12 +487,21 @@ function machineSection(machine: MachineReport): string {
     + `<h3>What differs across the upgrade</h3>${differencesTable(step.differences)}`
     + `<h2>3. After the upgrade: ${escapeHtml(machine.upgrade.afterLabel)} ${badge(verdicts[2]!.verdict)}</h2>`
     + `<p class="muted">${machine.upgrade.afterVersion ? `version ${escapeHtml(machine.upgrade.afterVersion)}` : ''}${machine.build ? ` · build ${escapeHtml(machine.build)}` : ''}</p>`
-    + timingsLine(machine.timings)
+    + timingsLine(machine.timings) + archiveScaleSection(machine.archiveScale)
     + `<h3>Machine checks</h3>${checkTable(machine.checks)}`
     + `<h3>Agents</h3>${machine.agents.map(agentSection).join('') || '<p class="muted">No agents.</p>'}`
     + `<h3>Dashboard screenshots</h3>${screenshotGrid(machine.screenshots)}`
     + traceSections(machine.traces) + exploreSection(machine.explore) + visualSection(machine.visual) + reviewSection(machine.review)
     + `<h3>Logs</h3>${fileLinks(from.logs)}${fileLinks(machine.logs)}</section>`;
+}
+
+function archiveScaleSection(measurements: ArchiveScaleMeasurement[] | undefined): string {
+  if (!measurements?.length) return '';
+  const ms = (value: number | null): string => value === null ? 'unavailable' : `${value.toFixed(1)} ms`;
+  return '<h3>Archive scale measurements</h3><p class="muted">Observations, without pass/fail thresholds. Front status sampled every 2 s; dashboard progress every 10 s. RSS is the peak sampled sum of engine processes.</p>'
+    + '<table><thead><tr><th>Format</th><th>Items</th><th>Wall time</th><th>Items/min</th><th>Peak engine RSS</th><th>Front p50 / p95</th><th>Requests / failed</th></tr></thead><tbody>'
+    + measurements.map(m => `<tr><td>${escapeHtml(m.format)}</td><td>${m.items}</td><td>${(m.wallMs / 1000).toFixed(1)} s</td><td>${m.itemsPerMinute.toFixed(1)}</td><td>${m.peakRssBytes === null ? 'unavailable' : `${(m.peakRssBytes / 1024 / 1024).toFixed(1)} MiB`}</td><td>${ms(m.frontP50Ms)} / ${ms(m.frontP95Ms)}</td><td>${m.frontSamples} / ${m.frontFailures}</td></tr>`).join('')
+    + '</tbody></table>';
 }
 
 const STYLE = `

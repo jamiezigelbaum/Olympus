@@ -174,12 +174,6 @@
     "retire_when": "Remove when the bounded input/output clamp PARENT_LABEL_MAX_CHARS is removed or becomes a registered work stop."
   },
   {
-    "path": "src/core/provider-credit-status.ts",
-    "symbol": "reconcileProviderPauseFile",
-    "reason": "pending",
-    "retire_when": "The Venice credit-marker adopter reports and clears stops from reconcileProviderPauseFile, with a refill control."
-  },
-  {
     "path": "src/core/release-signing.ts",
     "symbol": "RELEASE_MANIFEST_MAX_BYTES",
     "reason": "clamp",
@@ -390,12 +384,6 @@
     "retire_when": "Remove when the bounded input/output clamp PRIVACY_KEY_MAX_CHARS is removed or becomes a registered work stop."
   },
   {
-    "path": "src/workers/classification/sniffer-resolver.ts",
-    "symbol": "SnifferCallBudget",
-    "reason": "pending",
-    "retire_when": "The sniffer daily-call adopter reports and clears stops from SnifferCallBudget.tryConsume, with a continue control."
-  },
-  {
     "path": "src/workers/classification/sniffer-service.ts",
     "symbol": "DEFAULT_TIER_SNIFFER_MAX_PASS_MS",
     "reason": "pacing",
@@ -448,6 +436,24 @@
     "symbol": "MEDIA_JUDGE_MAX_PER_PASS",
     "reason": "pacing",
     "retire_when": "Remove when the resumable pacing/retry boundary MEDIA_JUDGE_MAX_PER_PASS is retired or adopted."
+  },
+  {
+    "path": "src/workers/connector-store/local-index.ts",
+    "symbol": "RECLAIM_MAX_PAGES_PER_STEP",
+    "reason": "pacing",
+    "retire_when": "Remove when superseded-copy reclamation no longer uses RECLAIM_MAX_PAGES_PER_STEP."
+  },
+  {
+    "path": "src/workers/connector-store/tier-auto-prune-sweep.ts",
+    "symbol": "RECLAIM_MAX_RETAINED_FREE_BYTES",
+    "reason": "pacing",
+    "retire_when": "Remove when superseded-copy reclamation no longer uses RECLAIM_MAX_RETAINED_FREE_BYTES."
+  },
+  {
+    "path": "src/workers/connector-store/tier-auto-prune-sweep.ts",
+    "symbol": "RECLAIM_MAX_RETAINED_FREE_RATIO",
+    "reason": "pacing",
+    "retire_when": "Remove when superseded-copy reclamation no longer uses RECLAIM_MAX_RETAINED_FREE_RATIO."
   },
   {
     "path": "src/workers/credential-health.ts",

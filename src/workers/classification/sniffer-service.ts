@@ -32,6 +32,7 @@ import {
   runSnifferPass,
   DEFAULT_SNIFFER_PASS_TIME_MS,
   prepareSnifferModel,
+  resolveReleaseWindow,
   type SnifferPassReport,
   type SnifferTarget,
 } from './sniffer-resolver.ts';
@@ -90,6 +91,8 @@ export interface TierSnifferServiceStore {
   /** Where the bound set ledger sits now (found by its identity); a store without it is read by the recorded path. */
   tierSetLedgerPath?(): string | undefined;
   tierLedgerPathInUse?: LocalConnectorStore['tierLedgerPathInUse'];
+  onDemandReadCandidate?: LocalConnectorStore['onDemandReadCandidate'];
+  readOnDemand?: LocalConnectorStore['readOnDemand'];
   exportItemCopy?: LocalConnectorStore['exportItemCopy'];
   changeMarker?: LocalConnectorStore['changeMarker'];
   tombstoneCopy?: LocalConnectorStore['tombstoneCopy'];
@@ -482,6 +485,22 @@ export class TierSnifferService {
       ...(options.maxCallsPerDay !== undefined ? { maxCallsPerDay: options.maxCallsPerDay } : {}),
       ...(options.now ? { now: options.now } : {}),
       ...(options.budgetStatePath ? { statePath: options.budgetStatePath } : {}),
+    });
+    options.installed.setReleaseWindowResolver(async (ledgerPath, request, signal, expected) => {
+      const lane = options.lane;
+      if (this.stopped || signal.aborted || options.modelAvailable?.() === false || options.breakerOpen?.()
+        || lane.rejudgeReady === false) return { verdict: 'undecided' };
+      const ownerContext = options.ownerContext?.();
+      const versions = snifferPromptVersions(ownerContext);
+      if (versions.cache !== expected.promptVersion || snifferId(lane, versions.cache) !== expected.snifferId) return { verdict: 'undecided' };
+      const ledger = await readClassificationLedger(options.classificationLedgerPath);
+      const key = { lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: versions.approval };
+      const builtInDefault = options.autoApproveBuiltIn === true && isBuiltInLane(lane);
+      if (!isClassifierApproved(ledger.entries, key, { builtInDefault })) return { verdict: 'undecided' };
+      return resolveReleaseWindow({
+        store: options.installed.snifferStoreForLedger(ledgerPath), lane, model: options.model,
+        request, promptVersion: versions.cache, ...(ownerContext ? { ownerContext } : {}), signal, budget: this.budget,
+      });
     });
   }
 
@@ -1165,6 +1184,11 @@ export class TierSnifferService {
       targets.push({
         ledger,
         sniffer: this.options.installed.snifferStoreForLedger(ledgerPath),
+        onDemandRead: question => this.options.stores().some(store => {
+          const candidate = store.onDemandReadCandidate?.(question.providerItemId);
+          return candidate && candidate.identity.provider === question.provider && candidate.identity.accountScope === question.accountScope
+            && store.readOnDemand?.(candidate.identity.localItemId) === true;
+        }),
         ...(planner ? { placementFor: planner } : {}),
         screenStoredQuestion: question => {
           const row = ledger.getCurrent(question);
@@ -1805,6 +1829,10 @@ export class TierSnifferService {
       if (budget === 0 || shouldStop()) break;
       const set = tierSetForLedger(ledgerPath);
       if (!set) continue;
+      // A batch takes a write transaction on every open store; one being
+      // reclaimed would block this thread on its busy timeout. Moves stay
+      // queued for the next pass.
+      if (set.openStores().some(store => store.reclaiming)) continue;
       const queued = set.ledger.listMoving({ limit: budget, direction })
         .filter(isAutoMoveCandidate);
       if (!setEmbedsWithBuiltInOnly(set)) { report.notEligible += queued.length; continue; }

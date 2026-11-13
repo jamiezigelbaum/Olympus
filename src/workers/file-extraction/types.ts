@@ -185,6 +185,14 @@ export interface FileExtractionSource {
    */
   listCandidates(options: ExtractionCandidateListOptions): Promise<ExtractionCandidatePage>;
   /**
+   * Optional alternate representation available to an individual read. This
+   * describes the fetch result without reading content or changing bulk
+   * candidates. An absent size means the representation's size is unknown,
+   * so the question reserves its remaining allowance until bytes arrive.
+   * The original ref still identifies the provider item and its version.
+   */
+  onDemandReadFormat?(ref: ExtractionItemRef): { mimeType: string; sizeBytes?: number } | undefined;
+  /**
    * Bytes for one item: provider download, local mount, or both.
    */
   fetch(ref: ExtractionItemRef, options: ExtractionFetchOptions): Promise<FetchedBytes>;

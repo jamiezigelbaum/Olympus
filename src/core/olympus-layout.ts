@@ -62,6 +62,7 @@ export const SHARED_DATA_FILES = {
   'remote-connections': 'remote-connections.sqlite',
   'source-dashboard': 'source-dashboard.sqlite',
   'source-scheduler': 'source-scheduler.sqlite',
+  'limit-settings': 'limits.json',
   'source-watches': 'source-watches.sqlite',
   'file-extraction-jobs': 'file-extraction-jobs.sqlite',
   'ingestion-doctor-state': 'source-ingestion-doctor-state.json',

@@ -6,16 +6,16 @@
 import type { Database } from 'bun:sqlite';
 import { clearLimitStop, registerLimit, reportLimitStop } from '../core/limit-stops.ts';
 
-// Labels use the existing daily-budget wait copy. Amounts are unknown here:
-// scheduler markers carry neither the provider's daily ledger nor its config.
+// Provider guards forward known amounts through the existing counts payload.
+// Older markers and boundaries without amounts remain explicitly unknown.
 const DAILY_LIMITS = new Map<string, { id: string; kind: 'cost' | 'requests'; label: string }>(Object.entries({
-  daily_cost_guard: { id: 'x.daily_cost', kind: 'cost', label: 'daily X API budget used' },
-  daily_api_request_guard: { id: 'x.daily_requests', kind: 'requests', label: 'daily X API budget used' },
-  daily_resource_read_guard: { id: 'x.daily_resource_reads', kind: 'requests', label: 'daily X API budget used' },
+  daily_cost_guard: { id: 'x.daily_cost', kind: 'cost', label: 'daily X spending budget used' },
+  daily_api_request_guard: { id: 'x.daily_requests', kind: 'requests', label: 'daily X request budget used' },
+  daily_resource_read_guard: { id: 'x.daily_resource_reads', kind: 'requests', label: 'daily X resource-read budget used' },
   // Background reconcile stops short of the day's budget to keep a reserve for new bookmarks.
-  head_api_request_reserve_guard: { id: 'x.head_reserve_requests', kind: 'requests', label: 'daily X API budget used' },
-  head_resource_read_reserve_guard: { id: 'x.head_reserve_reads', kind: 'requests', label: 'daily X API budget used' },
-  head_cost_reserve_guard: { id: 'x.head_reserve_cost', kind: 'cost', label: 'daily X API budget used' },
+  head_api_request_reserve_guard: { id: 'x.head_reserve_requests', kind: 'requests', label: 'X request reserve for new bookmarks reached' },
+  head_resource_read_reserve_guard: { id: 'x.head_reserve_reads', kind: 'requests', label: 'X resource-read reserve for new bookmarks reached' },
+  head_cost_reserve_guard: { id: 'x.head_reserve_cost', kind: 'cost', label: 'X spending reserve for new bookmarks reached' },
   readwise_daily_api_request_guard: { id: 'readwise.daily_requests', kind: 'requests', label: 'daily Readwise API budget used' },
   gmail_daily_api_request_guard: { id: 'gmail.daily_requests', kind: 'requests', label: 'daily Gmail API budget used' },
   google_drive_daily_api_request_guard: { id: 'drive.daily_requests', kind: 'requests', label: 'daily Google Drive API budget used' },
@@ -33,7 +33,7 @@ export function schedulerLimitSubject(state: { sourceId: string; corpusId: strin
 /** Runs inside the background scheduler's marker transaction, never on a read. */
 export function syncSchedulerLimitStop(db: Database, previousReason: string | undefined, state: {
   sourceId: string; corpusId: string; taskId: string; updatedAt: string;
-  degradedReason?: string; notBeforeAt?: string;
+  degradedReason?: string; notBeforeAt?: string; lastCounts?: Record<string, number>;
 }): void {
   const previous = previousReason ? DAILY_LIMITS.get(previousReason) : undefined;
   const current = state.degradedReason ? DAILY_LIMITS.get(state.degradedReason) : undefined;
@@ -42,7 +42,9 @@ export function syncSchedulerLimitStop(db: Database, previousReason: string | un
   const subject = schedulerLimitSubject(state);
   if (previous && previous.id !== current?.id) clearLimitStop(previous.id, subject, db);
   if (current) reportLimitStop({
-    id: current.id, subject, since: state.updatedAt, limit: null, used: null,
+    id: current.id, subject, since: state.updatedAt,
+    limit: state.lastCounts?.limit_stop_limit === undefined ? null : state.lastCounts.limit_stop_limit / (current.kind === 'cost' ? 1_000_000 : 1),
+    used: state.lastCounts?.limit_stop_used === undefined ? null : state.lastCounts.limit_stop_used / (current.kind === 'cost' ? 1_000_000 : 1),
     resumesAt: dailyResume(state.updatedAt, state.notBeforeAt),
   }, db);
 }

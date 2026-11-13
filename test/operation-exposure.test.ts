@@ -14,11 +14,13 @@ function surfaceNames(surface: OperationSurface, config = defaultConfig()): stri
 describe('operation exposure policy', () => {
   test('fresh defaults expose the promoted source-index read surface', () => {
     expect(exposedNames()).toEqual([
+      'olympus_limits',
       'argus_ping',
       'argus_list_models',
       'argus_complete',
       'source_answer',
       'source_index_status',
+      'source_item_read',
       'source_index_search',
       'source_watch_create',
       'source_watches',
@@ -66,6 +68,7 @@ describe('operation exposure policy', () => {
     expect(exposedNames(config)).not.toContain('source_watches');
     expect(exposedNames(config)).not.toContain('source_watch_cancel');
     expect(exposedNames(config)).toEqual([
+      'olympus_limits',
       'argus_ping',
       'argus_list_models',
       'argus_complete',

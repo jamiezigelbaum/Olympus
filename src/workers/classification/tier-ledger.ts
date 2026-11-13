@@ -1967,11 +1967,7 @@ export class TierLedger {
       SELECT override_json FROM tier_overrides
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
     `).get(...idParams(identity)) as { override_json: string } | null;
-    if (!row) return undefined;
-    const parsed = JSON.parse(row.override_json) as ItemTierOverride;
-    if (parsed.kind === 'tier' && TIER_KEYS.includes(parsed.tier)) return parsed;
-    if (parsed.kind === 'not_secret') return parsed;
-    return undefined;
+    return row ? overrideFromJson(row.override_json) : undefined;
   }
 
   /**
@@ -2327,6 +2323,14 @@ export class TierLedger {
     return this.db.query(`SELECT key, value FROM tier_ledger_meta INDEXED BY tier_ledger_pending_meta
       WHERE key >= ? AND key < ? AND key > ? AND value <> '' ORDER BY key LIMIT ?`)
       .all(prefix, `${prefix}\uffff`, options.after ?? '', options.limit ?? -1) as Array<{ key: string; value: string }>;
+  }
+
+  /** Background cleanup retries lock contention on its next slice, without stalling an Ask. */
+  withoutBusyWait<T>(work: () => T): T {
+    const previous = (this.db.query('PRAGMA busy_timeout').get() as { timeout: number }).timeout;
+    this.db.exec('PRAGMA busy_timeout = 0');
+    try { return work(); }
+    finally { this.db.exec(`PRAGMA busy_timeout = ${previous}`); }
   }
 
   /** Hold the ledger write lock across a synchronous cross-store cleanup.
@@ -2859,7 +2863,7 @@ export class TierLedger {
    */
   itemStatesForMany(
     identities: readonly TierLedgerIdentity[],
-  ): Map<string, { record: TierLedgerRecord; copies: TierCopy[] }> {
+  ): Map<string, { record: TierLedgerRecord; copies: TierCopy[]; override?: ItemTierOverride }> {
     return this.readSteps(this.itemStatesSteps(identities));
   }
 
@@ -2867,8 +2871,8 @@ export class TierLedger {
   // must not make the Ask read every governed item on the request thread.
   *itemStatesSteps(
     identities: readonly TierLedgerIdentity[],
-  ): Generator<LedgerRead, Map<string, { record: TierLedgerRecord; copies: TierCopy[] }>, unknown> {
-    const result = new Map<string, { record: TierLedgerRecord; copies: TierCopy[] }>();
+  ): Generator<LedgerRead, Map<string, { record: TierLedgerRecord; copies: TierCopy[]; override?: ItemTierOverride }>, unknown> {
+    const result = new Map<string, { record: TierLedgerRecord; copies: TierCopy[]; override?: ItemTierOverride }>();
     const list = uniqueIdentities(identities);
     for (let offset = 0; offset < list.length; offset += IDENTITY_BATCH) {
       const { values, params } = identityValues(list.slice(offset, offset + IDENTITY_BATCH));
@@ -2885,6 +2889,18 @@ export class TierLedger {
         params, mode: 'all',
       }) as TierCopyRow[];
       for (const row of copies) result.get(tierLedgerIdentityKey(identityFromRow(row)))?.copies.push(copyFromRow(row));
+      // The owner's override, read in the same batch: a release check weighs an
+      // override whose queued placement has not settled yet.
+      const overrides = (yield {
+        sql: `SELECT provider, account_scope, conversation_key, provider_item_id, override_json FROM tier_overrides
+          WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})`,
+        params, mode: 'all',
+      }) as Array<TierIdentityRow & { override_json: string }>;
+      for (const row of overrides) {
+        const state = result.get(tierLedgerIdentityKey(identityFromRow(row)));
+        const override = overrideFromJson(row.override_json);
+        if (state && override) state.override = override;
+      }
     }
     return result;
   }
@@ -5667,4 +5683,11 @@ function tierLedgerMigrations(): SqliteMigration[] {
       },
     },
   ];
+}
+
+function overrideFromJson(json: string): ItemTierOverride | undefined {
+  const parsed = JSON.parse(json) as ItemTierOverride;
+  if (parsed.kind === 'tier' && TIER_KEYS.includes(parsed.tier)) return parsed;
+  if (parsed.kind === 'not_secret') return parsed;
+  return undefined;
 }

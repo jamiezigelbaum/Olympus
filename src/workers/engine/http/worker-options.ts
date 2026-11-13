@@ -1,3 +1,4 @@
+import type { RequestOnDemandRead, OnDemandReadResult } from '../../file-extraction/on-demand-read.ts';
 import type { JudgeChoice } from '../../classification/judge-spending.ts';
 import type { DashboardPeopleBackend } from '../dashboard/dashboard-people.ts';
 import type {
@@ -103,6 +104,8 @@ export interface EmailSourceWorkerOptions {
    * Absent: `/consult/ask` answers 501.
    */
   consultAsk?: (input: ConsultAskWireRequest, signal: AbortSignal) => Promise<unknown>;
+  /** olympus_limits (owner-limits.ts): list open stops and continue one, beside the Bun stores. */
+  ownerLimits?: (params: Record<string, unknown>) => Promise<unknown>;
   /**
    * What an agent may do about archive imports (archive-import/agent.ts):
    * ask for an import or a removal, and read the list. Absent:
@@ -159,6 +162,8 @@ export interface EmailSourceWorkerOptions {
    * `fileExtractionAliasFor`.
    */
   fileExtraction?: FileExtractionRunner;
+  requestOnDemandRead?: RequestOnDemandRead;
+  readOwnerItem?: (itemId: string) => Promise<OnDemandReadResult>;
   /** Apply current lane policy before any extraction route reads jobs or items. */
   authorizeFileExtractionLane?: (lane: ExtractionLaneKey) => void;
   /** The file lanes whose PDFs `/source/index/files/extract-pdfs` drains, resolved per call. */

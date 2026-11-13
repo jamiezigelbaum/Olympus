@@ -22,6 +22,8 @@
 // an answer was written is not cited.
 
 import type { ReleaseCheck, ReleaseInputVerdict } from '../../core/release-manifest.ts';
+import { releaseChunks, type ChunkReleaseOptions } from '../classification/chunk-release.ts';
+import type { LocalConnectorStore } from './local-index.ts';
 import type { SourceIndexRoutedSearchHit, SourceIndexVisibilityGate, SourceIndexVisibilityGateReport } from '../../core/source-index/router.ts';
 import { contentHeldForJudgment } from '../classification/tier-classifier.ts';
 import { tierLedgerIdentityKey, type TierLedger, type TierLedgerIdentity, type TierVisibilityReads } from '../classification/tier-ledger.ts';
@@ -42,7 +44,7 @@ export interface TierVisibilityScope {
    * other item and applies the copy rules alone; a composition root passes
    * them for every scope it builds.
    */
-  stores?: () => readonly ChildVisibilityStore[];
+  stores?: () => readonly (ChildVisibilityStore & Partial<Pick<LocalConnectorStore, 'releaseItemChunks'>>)[];
 }
 
 function childLane(scope: TierVisibilityScope): { ledger: () => TierLedger; stores: () => readonly ChildVisibilityStore[] } | undefined {
@@ -251,6 +253,7 @@ function interleaveByCorpus(hits: readonly SourceIndexRoutedSearchHit[]): Source
 export function createReleaseTierCheck(
   scopes: () => readonly TierVisibilityScope[],
   secureDerivativeDefault: () => 'allow' | 'approval',
+  chunkOptions: Pick<ChunkReleaseOptions, 'judgeNow' | 'boost'> = {},
 ): ReleaseCheck {
   function* inputsSteps(inputs: Parameters<ReleaseCheck['inputs']>[0]): Generator<VisibilityRead, ReleaseInputVerdict[], unknown> {
     const verdicts: ReleaseInputVerdict[] = inputs.map(() => ({ tier: 'legacy', gone: false }));
@@ -282,7 +285,7 @@ export function createReleaseTierCheck(
       for (const { index, identity } of governed) {
         const state = states.get(tierLedgerIdentityKey(identity));
         if (!state) continue;
-        const { record, copies } = state;
+        const { record, copies, override } = state;
         // An input of the names layer (a child citation's parent label) is
         // judged on the item's names alone: its content tier never limits an
         // answer that carries only its names.
@@ -290,6 +293,8 @@ export function createReleaseTierCheck(
         const tiers = namesOnly
           ? [record.metadataTier, record.targetMetadataTier]
           : [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier];
+        // Owner edits take effect before their queued placement settles.
+        if (override?.kind === 'tier') tiers.push(override.tier);
         // What waits for its model question is held Private, as placement
         // holds it, though its recorded tier is the Personal default: an
         // answer read from it is Private until the model says otherwise.
@@ -324,8 +329,9 @@ export function createReleaseTierCheck(
     }
     return verdicts;
   }
-  return {
+  const check: ReleaseCheck = {
     secureDerivativeDefault,
+    chunks: (inputs, options) => releaseChunks(inputs, scopes, check, { ...chunkOptions, ...options }),
     inputs: (inputs) => visibilityHere(inputsSteps(inputs)),
     // A write during the pooled check takes it again, then checks here once.
     inputsOffThread: (inputs) => judgedAwaited(async () => {
@@ -335,6 +341,7 @@ export function createReleaseTierCheck(
       return verdicts;
     }, () => visibilityHere(inputsSteps(inputs))),
   };
+  return check;
 }
 
 /**

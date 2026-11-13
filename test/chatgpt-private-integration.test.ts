@@ -1,4 +1,4 @@
-import { recordScriptedSearch, scriptedSearchReleaseCheck } from './helpers/scripted-search-release.ts';
+import { provedChunks, recordScriptedSearch, scriptedSearchReleaseCheck } from './helpers/scripted-search-release.ts';
 // The private answer panel wired to the built-in private model (integration):
 //
 // - olympus_search with a Private match creates a one-time panel job; the
@@ -748,7 +748,9 @@ describe('content held Private is answered in the panel, not listed as name-only
 
     // olympus_search: the crown's name matched, but its contents are Private,
     // so it is counted and not listed; the readable Personal match is.
-    const released = await searchReleasedEvidence({ lanes, question: 'dentist', maxResults: 10 });
+    const released = await searchReleasedEvidence({ lanes, question: 'dentist', maxResults: 10,
+      // Selection-time tiers decide here; passage proof is exercised in chunk-release.test.ts.
+      releaseCheck: { inputs: (inputs) => inputs.map(() => ({ tier: 'public_or_personal' as const, gone: false })), chunks: provedChunks, secureDerivativeDefault: () => 'allow' as const } });
     expect(released.coverage.content_private_items).toBe(1);
     expect(released.evidence.map((item) => item.provider_item_id)).toEqual(['bridge']);
     expect(released.evidence[0]!.excerpt).toContain('bridge at four hundred');

@@ -51,7 +51,7 @@ function candidateReader(
 function bytesClient(
   impl: (fileId: string, maxBytes?: number) => Promise<GoogleDriveFileBytes>,
 ): GoogleDriveFileBytesClient {
-  return { downloadFileBytes: impl };
+  return { downloadFileBytes: impl, exportGoogleDocText: () => { throw new Error('Unexpected export'); } };
 }
 
 function row(overrides: Partial<ExtractionCandidateRow> = {}): ExtractionCandidateRow {
@@ -128,8 +128,8 @@ describe('Drive extraction source: candidate enumeration', () => {
     expect(seen[0]?.mimeTypes).toEqual(GOOGLE_DRIVE_EXTRACTION_MIME_TYPES);
     expect(seen[0]?.mimeTypes).toContain('application/pdf');
     expect(seen[0]?.mimeTypes).toContain('image/jpeg');
-    // Drive's own connector exports Google Docs to text/plain, so they are
-    // already indexed and must never be queued here.
+    // Full-folder sync exports native Docs through the connector. Individual
+    // read support must not add them to the bulk extraction population.
     expect(seen[0]?.mimeTypes).not.toContain('application/vnd.google-apps.document');
     expect(seen[0]?.mimeTypes).not.toContain('text/plain');
   });
@@ -170,6 +170,45 @@ describe('Drive extraction source: candidate enumeration', () => {
     });
     const page = await source.listCandidates({ limit: 10 });
     expect(page.candidates.map((ref) => ref.providerItemId)).toEqual(['keep']);
+  });
+});
+
+describe('Drive extraction source: native Doc reads', () => {
+  test('describes plain text without reading, and exports a versioned Doc instead of downloading media', async () => {
+    const calls: Array<[string, number]> = [];
+    const text = 'Café 😀';
+    const bytes = new TextEncoder().encode(text);
+    const source = makeSource({ client: {
+      downloadFileBytes() { throw new Error('Native Docs have no media download'); },
+      async exportGoogleDocText(id, limit) { calls.push([id, limit]); return text; },
+    } });
+    const ref = refFor({ mimeType: 'application/vnd.google-apps.document', sourceVersion: 'v7', sizeBytes: 1_000_000 });
+    expect(source.onDemandReadFormat(ref)).toEqual({ mimeType: 'text/plain' });
+    expect(source.onDemandReadFormat(refFor())).toBeUndefined();
+    expect(source.onDemandReadFormat(refFor({ mimeType: 'application/vnd.google-apps.spreadsheet' }))).toBeUndefined();
+    expect(source.onDemandReadFormat(refFor({ mimeType: 'application/vnd.google-apps.presentation' }))).toBeUndefined();
+    expect(calls).toEqual([]);
+    expect(await source.fetch(ref, { maxBytes: bytes.byteLength })).toEqual({ bytes, mimeType: 'text/plain', sizeBytes: bytes.byteLength });
+    expect(calls).toEqual([['1AbCdEf', bytes.byteLength + 1]]);
+    expect(ref).toMatchObject({ sourceVersion: 'v7', sizeBytes: 1_000_000, mimeType: 'application/vnd.google-apps.document' });
+  });
+
+  test.each(['abcdef', 'ééé'])('refuses an oversized export rather than extracting a character-truncated prefix (%s)', async text => {
+    const client = createRestGoogleDriveApiClient({ token: 'test-token', baseUrl: BASE_URL, maxRetries: 0,
+      fetch: async () => new Response(text),
+    });
+    const source = makeSource({ client });
+    await expect(source.fetch(refFor({ mimeType: 'application/vnd.google-apps.document' }), { maxBytes: 4 }))
+      .rejects.toMatchObject({ errorKind: 'source_too_large', settleAs: 'skipped_too_large' });
+  });
+
+  test('export failures retain the same bounded provider reason and settlement as downloads', async () => {
+    const source = makeSource({ client: {
+      downloadFileBytes() { throw new Error('Unexpected media download'); },
+      async exportGoogleDocText() { throw new GoogleDriveApiError('private filename', 403); },
+    } });
+    await expect(source.fetch(refFor({ mimeType: 'application/vnd.google-apps.document' }), { maxBytes: 10 }))
+      .rejects.toMatchObject({ message: 'source_permission_denied', errorKind: 'source_permission_denied', settleAs: 'failed_terminal' });
   });
 });
 
@@ -257,6 +296,7 @@ describe('Drive extraction source: the unreadable item', () => {
         downloadFileBytes() {
           throw new GoogleRequestBudgetError('google_drive', '2026-07-29T00:00:00.000Z');
         },
+        exportGoogleDocText() { throw new Error('Unexpected export'); },
       },
     });
     const caught = await source.fetch(refFor(), {}).then(() => undefined, (thrown: unknown) => thrown);

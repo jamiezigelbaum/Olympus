@@ -457,6 +457,8 @@ export interface SourceSchedulerSourceStatus {
 export interface SourceSchedulerTaskStatus {
   /** Computer dashboard only; never persisted in scheduler state. */
   missing_scope_path?: string;
+  /** Short maintenance hold, never persisted as a failure or provider deferral. */
+  wait_reason?: 'store_reclaim';
   id: string;
   kind: SourceSchedulerTaskKind;
   metadata_walk_role?: SourceSchedulerTask['metadataWalkRole'];
@@ -481,6 +483,7 @@ export interface SourceSchedulerTaskStatus {
 }
 
 interface SchedulerTaskState {
+  waitReason?: 'store_reclaim';
   task: SourceSchedulerTask;
   source: SourceSchedulerSource;
   running: boolean;
@@ -883,6 +886,34 @@ export class SourceScheduler {
     return false;
   }
 
+  private readonly storeReclaims = new Set<{ done: Promise<void>; preempt?: () => void }>();
+
+  /**
+   * Store maintenance holds every task, not only the store's own sources:
+   * writers reach a store through other sources too (an archive import into
+   * an existing source, tier moves), and any of them would block the engine
+   * thread on the store's write lock. Skips while any task is executing, or
+   * when a continuous task falls due within `quietForMs`. Ingest comes first:
+   * a task that comes due during the hold calls `preempt` (the maintenance
+   * stops at once) and runs as soon as the hold ends, with no attempt or
+   * failure recorded.
+   */
+  async withIdleTasks<T>(work: () => Promise<T>, options: { quietForMs?: number; preempt?: () => void } = {}): Promise<T | undefined> {
+    if (this.anyTaskRunning || this.storeReclaims.size > 0) return undefined;
+    if ((options.quietForMs ?? 0) > 0 && this.continuousTaskDueBy(this.now().getTime() + options.quietForMs!)) return undefined;
+    let release!: () => void;
+    const hold = { done: new Promise<void>(resolve => { release = resolve; }), ...(options.preempt ? { preempt: options.preempt } : {}) };
+    this.storeReclaims.add(hold);
+    try { return await work(); }
+    finally { this.storeReclaims.delete(hold); release(); }
+  }
+
+  /** Whether an enabled continuous task is due at or before `at`. */
+  private continuousTaskDueBy(at: number): boolean {
+    if (!this.enabled) return false;
+    return this.states.some(state => taskCadence(state.source, state.task) === 'continuous' && state.nextRunAt <= at);
+  }
+
   status(now: Date = this.now()): SourceSchedulerStatus {
     return {
       kind: 'source_scheduler_status',
@@ -989,7 +1020,6 @@ export class SourceScheduler {
         for (const state of group) {
           if (state.running) continue;
           state.running = true;
-          this.executingStates.add(state);
           try {
             await this.runTaskSharingThread(state, dueAt, provenance);
           } finally {
@@ -1022,7 +1052,6 @@ export class SourceScheduler {
               this.busyConcurrencyKeys.add(ownKey);
             }
             state.running = true;
-            this.executingStates.add(state);
             try {
               await this.runTaskSharingThread(state, state.nextRunAt, provenance);
             } finally {
@@ -1048,6 +1077,18 @@ export class SourceScheduler {
     dueAt: number,
     provenance: SourceSchedulerRunProvenance,
   ): Promise<void> {
+    const stops = this.stops;
+    for (;;) {
+      const holds = [...this.storeReclaims];
+      if (holds.length === 0) break;
+      state.waitReason = 'store_reclaim';
+      console.info(`[olympus:source-scheduler] task_wait source_id=${state.source.sourceId} task_id=${state.task.id} reason=store_reclaim`);
+      for (const hold of holds) hold.preempt?.();
+      try { await Promise.all(holds.map(hold => hold.done)); }
+      finally { delete state.waitReason; }
+      if (this.stops !== stops) return;
+    }
+    this.executingStates.add(state);
     const leave = controlPathHeadroom.enter(`${state.source.sourceId}/${state.task.kind}`);
     try {
       await this.runTask(state, dueAt, provenance);
@@ -1517,6 +1558,7 @@ export class SourceScheduler {
         && (freshnessMs === undefined || freshnessMs > freshnessThresholdMs),
       ...(state.nextRunAt > 0 ? { next_run_at: new Date(state.nextRunAt).toISOString() } : {}),
       running: state.running,
+      ...(state.waitReason ? { wait_reason: state.waitReason } : {}),
       consecutive_failures: state.consecutiveFailures,
       ...(state.lastSuccessAt ? { last_success_at: state.lastSuccessAt } : {}),
       ...(state.lastAttemptAt ? { last_attempt_at: state.lastAttemptAt } : {}),
@@ -2547,7 +2589,7 @@ function readwiseSchedulerFailure(error: unknown): unknown {
   return new SourceSchedulerTaskDeferral(error.message, {
     at: error.retryAt,
     degradedReason: READWISE_DAILY_REQUEST_GUARD_REASON,
-  });
+  }, error.amounts ? { limit_stop_limit: error.amounts.limit, ...(error.amounts.used !== undefined ? { limit_stop_used: error.amounts.used } : {}) } : undefined);
 }
 
 function xBookmarksLiveProgress(result: Awaited<ReturnType<XBookmarksConnectorStoreSyncHandler['syncHead']>>): SourceSchedulerTaskRunResult {
@@ -2621,7 +2663,7 @@ function gmailSchedulerFailure(error: unknown): unknown {
   if (error.reason === 'daily_api_request_guard') {
     return new SourceSchedulerTaskDeferral(error.message, {
       at: error.retryAt, degradedReason: GMAIL_DAILY_REQUEST_GUARD_REASON,
-    });
+    }, error.amounts ? { limit_stop_limit: error.amounts.limit, ...(error.amounts.used !== undefined ? { limit_stop_used: error.amounts.used } : {}) } : undefined);
   }
   const errorKind = error.reason === 'future_utc_day'
     ? GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION
@@ -2660,7 +2702,7 @@ function googleDriveSchedulerFailure(error: unknown): unknown {
   if (error.reason === 'daily_api_request_guard') {
     return new SourceSchedulerTaskDeferral(error.message, {
       at: error.retryAt, degradedReason: GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON,
-    });
+    }, error.amounts ? { limit_stop_limit: error.amounts.limit, ...(error.amounts.used !== undefined ? { limit_stop_used: error.amounts.used } : {}) } : undefined);
   }
   const errorKind = error.reason === 'future_utc_day'
     ? GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION

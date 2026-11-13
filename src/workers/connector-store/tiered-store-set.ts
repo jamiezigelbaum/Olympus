@@ -130,7 +130,7 @@ import { automaticTierMoveOptions, automaticTierMovesAllowed } from './tier-auto
 
 export const LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60_000;
 /** Time the one-time superseded-copy sweep may take on each maintenance call. */
-export const SUPERSEDED_SWEEP_SLICE_MS = 250;
+export const SUPERSEDED_SWEEP_SLICE_MS = 100;
 import { rehomePrivateTierRows, type TierRowRehomeReport } from './tier-row-rehome.ts';
 import { sweepOwnerRuleRaises } from './tier-rules-sweep.ts';
 import { applyOwnerOverrides } from './tier-override-settle.ts';
@@ -618,8 +618,7 @@ export class TieredStoreSet {
 
   /**
    * One time-boxed slice of the one-time superseded-copy sweep. Only the
-   * engine background's ticker takes them (startSupersededSweepTicker), every
-   * few seconds and never while an owner question is in flight. True once
+   * engine background's adaptive ticker takes them (startSupersededSweepTicker) and never while an owner question is in flight. True once
    * the sweep is done for this ledger.
    */
   sweepSupersededSlice(options: { embeddingLedger?: TierMoveOptions['embeddingLedger'] } = {}): boolean {
@@ -1925,7 +1924,8 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     // container's (a folder has no text of its own), so no extraction will
     // ever answer a question about it.
     const deferred = this.set.readsContentLater(item);
-    const namesOnly = deferred
+    const promoted = TIER_DOMAIN_ORDER.some(domain => this.set.store(domain)?.readOnDemand(item.identity.localItemId, item.identity.sourceVersion ?? ''));
+    const namesOnly = deferred && !promoted
       && (input.metadataOnly || CONTAINER_MIME_TYPES.includes(item.mimeType?.trim().toLowerCase() ?? '')
         || this.set.ownerKeepsNamesOnly(pathOf(sourceExclusionFactsFromMetadata(item.metadata).path)));
     const text = namesOnly ? undefined : connectorStoreItemText(item);

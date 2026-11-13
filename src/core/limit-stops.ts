@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { Database } from 'bun:sqlite';
 import { runSqliteMigrations } from './sqlite-migrations.ts';
 
@@ -122,4 +123,9 @@ export function limitStopSubjects(stop: LimitStop): readonly string[] {
     if (Array.isArray(parts) && parts.length === 3 && parts.every((part) => typeof part === 'string')) return parts.slice(0, 2);
   } catch { /* A plain source or corpus id is also a valid subject. */ }
   return [stop.subject];
+}
+
+/** Dashboard continuations carry an opaque identity, never a marker path or internal task ids. */
+export function limitStopReference(stop: Pick<LimitStop, 'id' | 'subject'>): string {
+  return 'limit:' + createHash('sha256').update(stop.id).update('\0').update(stop.subject).digest('hex');
 }

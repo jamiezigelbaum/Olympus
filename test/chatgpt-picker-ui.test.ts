@@ -409,7 +409,7 @@ describe('folder picker', () => {
   const rowNames = (host: Host) => Array.from(doc(host).querySelectorAll('li.seg-row .fname-text')).map((node) => node.textContent);
   const mixedTag = (host: Host, name: string) => rowOf(host, name).querySelector('.ftag');
 
-  test('root: one thin row per folder with a three-segment control, nothing chosen, a disabled Save, and no <select>, sheet or status links', async () => {
+  test('root: one thin row per folder with three reading modes and Skip, nothing chosen, a disabled Save, and no <select>, sheet or status links', async () => {
     const host = await openFolders({}, { displayMode: 'fullscreen' });
     const top = doc(host).querySelector('.this-row')!;
     expect(top.querySelector('.this-label')!.textContent).toBe('Everything in Dropbox');
@@ -433,8 +433,8 @@ describe('folder picker', () => {
       expect(Array.from(name.children).slice(0, 2).map((child) => child.className)).toEqual([opens ? 'fopen' : 'fopen-gap', 'fname-main']);
       expect(name.firstElementChild!.getAttribute('aria-hidden')).toBe('true');
       expect(row.lastElementChild!.getAttribute('role')).toBe('group');
-      expect(Array.from(row.querySelectorAll('.seg-opt .seg-long')).map((node) => node.textContent)).toEqual(['Full', 'Names only', 'Skip']);
-      expect(Array.from(row.querySelectorAll('.seg-opt .seg-short')).map((node) => node.textContent)).toEqual(['Full', 'Names', 'Skip']);
+      expect(Array.from(row.querySelectorAll('.seg-opt .seg-long')).map((node) => node.textContent)).toEqual(['Full', 'Names only', 'Names with read on demand', 'Skip']);
+      expect(Array.from(row.querySelectorAll('.seg-opt .seg-short')).map((node) => node.textContent)).toEqual(['Full', 'Names', 'Read on demand', 'Skip']);
     }
     expect(rowShows(host, 'Medical Records')).toEqual({ pressed: '', inherited: '' });
     // Nothing repeats per row: no status line, no "Not included", no underlined links, no notice.
@@ -457,10 +457,10 @@ describe('folder picker', () => {
     expect(doc(host).querySelector('[role=radiogroup], [role=radio]')).toBeNull();
     expect(group.getAttribute('aria-label')).toBe('Choice for Medical Records');
     const segs = () => Array.from(rowOf(host, 'Medical Records').querySelectorAll('.seg-opt')) as unknown as HTMLButtonElement[];
-    expect(segs().map((button) => button.tagName)).toEqual(['BUTTON', 'BUTTON', 'BUTTON']);
-    expect(segs().map((button) => button.getAttribute('aria-pressed'))).toEqual(['false', 'false', 'false']);
-    expect(segs().map((button) => button.getAttribute('aria-label'))).toEqual(['Full', 'Names only', 'Skip']);
-    expect(segs().map((button) => button.tabIndex)).toEqual([0, -1, -1]);
+    expect(segs().map((button) => button.tagName)).toEqual(['BUTTON', 'BUTTON', 'BUTTON', 'BUTTON']);
+    expect(segs().map((button) => button.getAttribute('aria-pressed'))).toEqual(['false', 'false', 'false', 'false']);
+    expect(segs().map((button) => button.getAttribute('aria-label'))).toEqual(['Full', 'Names only', 'Names with read on demand', 'Skip']);
+    expect(segs().map((button) => button.tabIndex)).toEqual([0, -1, -1, -1]);
     const press = (name: string) => {
       const from = doc(host).activeElement as unknown as HTMLButtonElement;
       from.dispatchEvent(new host.win.KeyboardEvent('keydown', { key: name, bubbles: true, cancelable: true }) as any);
@@ -468,8 +468,12 @@ describe('folder picker', () => {
     segs()[0]!.focus();
     press('ArrowRight');
     expect(focused(host)).toBe('picker:seg:k-b:metadata_only');
-    expect(segs().map((button) => button.tabIndex)).toEqual([-1, 0, -1]);
+    expect(segs().map((button) => button.tabIndex)).toEqual([-1, 0, -1, -1]);
     press('ArrowRight');
+    expect(focused(host)).toBe('picker:seg:k-b:on_demand');
+    expect(segs()[2]!.getAttribute('aria-description')).toContain('read an individual file');
+    press('ArrowRight');
+    expect(focused(host)).toBe('picker:seg:k-b:exclude');
     press('ArrowRight');
     expect(focused(host)).toBe('picker:seg:k-b:ingest');
     press('ArrowLeft');
@@ -487,11 +491,21 @@ describe('folder picker', () => {
     // After a choice the chosen segment keeps focus and is the group's tab stop.
     tap(host, 'Medical Records', 'metadata_only');
     expect(focused(host)).toBe('picker:seg:k-b:metadata_only');
-    expect(segs().map((button) => button.tabIndex)).toEqual([-1, 0, -1]);
+    expect(segs().map((button) => button.tabIndex)).toEqual([-1, 0, -1, -1]);
     // Tapping it again clears it; a toggle, so focus stays put.
     tap(host, 'Medical Records', 'metadata_only');
-    expect(segs().map((button) => button.getAttribute('aria-pressed'))).toEqual(['false', 'false', 'false']);
+    expect(segs().map((button) => button.getAttribute('aria-pressed'))).toEqual(['false', 'false', 'false', 'false']);
     expect(focused(host)).toBe('picker:seg:k-b:metadata_only');
+  });
+
+  test('Names with read on demand saves that explicit mode without turning the folder Full', async () => {
+    const host = await openFolders();
+    tap(host, 'Medical Records', 'on_demand');
+    expect(rowShows(host, 'Medical Records')).toEqual({ pressed: 'on_demand', inherited: '' });
+    expect(footer(host)).toContain('names with read on demand');
+    host.serve[T.scopeSet] = () => SAVED;
+    host.button(Q.saveFolders).click();
+    expect(host.toolCalls(T.scopeSet)[0]).toMatchObject({ selections: [{ key: 'k-b', state: 'on_demand', ancestor_keys: [] }] });
   });
 
   test('Mixed follows access: Skip inside a folder that is not included is not Mixed; Full inside it is', async () => {

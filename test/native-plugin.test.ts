@@ -669,11 +669,13 @@ describe('native OpenClaw plugin adapter', () => {
 
     expect(manifest.contracts.tools).toEqual([...V0_4_PUBLIC_NATIVE_TOOLS]);
     expect(registeredToolNames).toEqual([
+      'olympus_limits',
       'argus_ping',
       'argus_list_models',
       'argus_complete',
       'source_answer',
       'source_index_status',
+      'source_item_read',
       'source_index_search',
       'source_watch_create',
       'source_watches',
@@ -701,7 +703,9 @@ describe('native OpenClaw plugin adapter', () => {
     expect(disabled).not.toContain('source_answer');
     expect(disabled).not.toContain('source_index_status');
     expect(disabled).not.toContain('source_index_search');
+    expect(disabled).not.toContain('source_item_read');
     expect(disabled).toEqual([
+      'olympus_limits',
       'argus_ping',
       'argus_list_models',
       'argus_complete',

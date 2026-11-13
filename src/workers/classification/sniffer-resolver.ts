@@ -23,6 +23,9 @@ import type { SnifferModel, SnifferModelRequest, SnifferModelCompletion } from '
 // - The pass only updates ledger decisions. It never moves, embeds or deletes
 //   stored content.
 
+import { registerLimit } from '../../core/limit-stops.ts';
+import { clearOwnerLimitStop, ownerLimitSettingsPath, recordOwnerLimitStop, readJudgeCallOverride } from '../../core/owner-limit-state.ts';
+
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -31,6 +34,7 @@ import { runWithLocalInferenceGuard } from '../answer-activity.ts';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import {
   JudgeCloudStopped,
+  CachedTierSniffer,
   SNIFFER_INJECTION_CATEGORY,
   SNIFFER_MAX_ATTEMPTS,
   SNIFFER_PROMPT_VERSION,
@@ -49,7 +53,7 @@ import {
 } from './sniffer.ts';
 import { judgeBoosts, type JudgeBoosts } from './judge-boost.ts';
 import { assertSnifferProfileAllowed, type SnifferLane } from './sniffer-lane.ts';
-import { contentVerdictReusable, snifferSubjectKey } from './sniffer-store.ts';
+import { contentVerdictReusable, snifferSubjectKey, snifferMaterialHash } from './sniffer-store.ts';
 import type {
   SnifferPass,
   SnifferQuestion,
@@ -57,8 +61,10 @@ import type {
   StoredSnifferVerdict,
   TierSnifferStore,
 } from './sniffer-store.ts';
-import { TIER_CLASSIFIER_VERSION, type TierDecision } from './tier-classifier.ts';
+import { TIER_CLASSIFIER_VERSION, type TierDecision, type TierSnifferRequest, type TierSnifferVerdict } from './tier-classifier.ts';
 import { tierLedgerIdentityKey, type TierLedger, type TierLedgerRecord, type TierPlacementPlan } from './tier-ledger.ts';
+
+registerLimit({ id: 'judge.daily_calls', kind: 'calls', scope: 'judge', label: 'Privacy judge daily call budget used', unit: 'calls', continue: 'raise' });
 
 /** The UTC daily cap survives restart. Time slices, not call counts, set the pace. */
 export const DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20_000;
@@ -80,6 +86,7 @@ const MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2;
 const OUTPUT_CHARS_PER_ITEM = 110;
 
 export interface SnifferTarget {
+  onDemandRead?: (question: SnifferQuestion) => boolean;
   ledger: TierLedger;
   sniffer: TierSnifferStore;
   /**
@@ -106,12 +113,18 @@ export class SnifferCallBudget {
   private day = '';
   private used = 0;
   private readonly explicitLimit: boolean;
+  private stopRecorded = false;
+  private recordedStop = '';
+  private clearedOnStart = false;
+  private readonly settingsPath: string;
 
-  constructor(options: { maxCallsPerDay?: number; now?: () => Date; statePath?: string } = {}) {
+  constructor(options: { maxCallsPerDay?: number; now?: () => Date; statePath?: string; settingsPath?: string } = {}) {
     this.explicitLimit = options.maxCallsPerDay !== undefined;
     this.maxCallsPerDay = Math.max(0, Math.floor(options.maxCallsPerDay ?? DEFAULT_SNIFFER_MAX_CALLS_PER_DAY));
     this.now = options.now ?? (() => new Date());
     this.statePath = options.statePath;
+    // Resolved once: the judge asks on every call, and resolving the layout path is the costly part.
+    this.settingsPath = options.settingsPath ?? ownerLimitSettingsPath();
     if (this.statePath) {
       try {
         const saved = JSON.parse(readFileSync(this.statePath, 'utf8')) as { day?: unknown; used?: unknown };
@@ -126,9 +139,26 @@ export class SnifferCallBudget {
   }
 
   tryConsume(decisionMode = false): boolean {
-    this.roll();
-    const limit = decisionMode && !this.explicitLimit ? DEFAULT_DECISION_SNIFFER_MAX_CALLS_PER_DAY : this.maxCallsPerDay;
-    if (this.used >= limit) return false;
+    const now = this.now();
+    this.roll(now);
+    const limit = readJudgeCallOverride(now, this.settingsPath)
+      ?? (decisionMode && !this.explicitLimit ? DEFAULT_DECISION_SNIFFER_MAX_CALLS_PER_DAY : this.maxCallsPerDay);
+    if (this.used >= limit) {
+      // Once per stop (and per limit): a refused attempt must not reopen the scheduler store each time.
+      const resumesAt = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)).toISOString();
+      const key = `${limit}:${this.used}:${resumesAt}`;
+      if (!this.stopRecorded || this.recordedStop !== key) {
+        recordOwnerLimitStop({ id: 'judge.daily_calls', subject: 'judge', since: now.toISOString(), limit, used: this.used, resumesAt });
+        this.stopRecorded = true;
+        this.recordedStop = key;
+      }
+      return false;
+    }
+    if (this.stopRecorded || !this.clearedOnStart) {
+      clearOwnerLimitStop('judge.daily_calls', 'judge');
+      this.stopRecorded = false;
+      this.clearedOnStart = true;
+    }
     this.used += 1;
     this.save();
     return true;
@@ -149,8 +179,8 @@ export class SnifferCallBudget {
     return this.used;
   }
 
-  private roll(): void {
-    const day = this.now().toISOString().slice(0, 10);
+  private roll(now = this.now()): void {
+    const day = now.toISOString().slice(0, 10);
     if (day !== this.day) {
       this.day = day;
       this.used = 0;
@@ -358,6 +388,52 @@ export async function completeSnifferQuestion(model: AnalystModel, options: {
     snifferItem: { pass: options.pass, material, ownerContext: options.ownerContext },
   };
   return await model.complete(request) as SnifferModelCompletion;
+}
+
+/** Same cache, screens, transport and parser as the background pass; no item queue is overwritten. */
+export async function resolveReleaseWindow(options: {
+  store: TierSnifferStore; lane: SnifferLane; model: AnalystModel;
+  request: TierSnifferRequest; promptVersion: string; ownerContext?: string;
+  signal: AbortSignal; budget: SnifferCallBudget;
+}): Promise<TierSnifferVerdict> {
+  const { request, store, lane, signal } = options;
+  const stillAsk = () => !signal.aborted && request.stillAsk?.() !== false;
+  if (!stillAsk()) return { verdict: 'undecided' };
+  const sniffer = new CachedTierSniffer(store, lane, options.promptVersion);
+  const id = sniffer.id;
+  let verdict = sniffer.cachedVerdict(request);
+  if (verdict.verdict === 'decided' || !request.material || signal.aborted) return verdict;
+  assertSnifferProfileAllowed(lane.profileId, lane.profile);
+  if (await prepareSnifferModel({ model: options.model, signal })) return { verdict: 'undecided' };
+  if (id !== sniffer.id || !stillAsk()) return { verdict: 'undecided' };
+  const material = snifferMaterialForModel(request.material);
+  const key = {
+    materialHash: request.materialHash ?? snifferMaterialHash(request.pass, material),
+    modelId: snifferCacheModelId(lane), promptVersion: options.promptVersion, mapRevision: request.mapRevision ?? 'none',
+  };
+  for (let attempt = 0; attempt < SNIFFER_MAX_ATTEMPTS && !signal.aborted; attempt++) {
+    if (!stillAsk()) break;
+    if (!options.budget.tryConsume(lane.snifferMode === 'decision')) break;
+    let completion: SnifferModelCompletion;
+    try { completion = await completeSnifferQuestion(options.model, { pass: request.pass, material, ownerContext: options.ownerContext, signal }); }
+    catch { return { verdict: 'undecided' }; }
+    if (signal.aborted) break;
+    const stored = snifferCompletionVerdict(completion);
+    if (stored) store.putVerdict(key, stored, request.subject);
+    else if (attempt === SNIFFER_MAX_ATTEMPTS - 1) {
+      store.putVerdict(key, { tier: 'private', category: 'other', confidence: 0, failSafe: true });
+      return { verdict: 'decided', tier: 'secure', code: 'fail_safe', origin: 'rule', rule: 'fail_safe' };
+    }
+    verdict = sniffer.cachedVerdict(request);
+    if (verdict.verdict === 'decided') return verdict;
+  }
+  return { verdict: 'undecided' };
+}
+
+/** All production sniffer calls carry one item. Share response decoding across dispatchers. */
+function snifferCompletionVerdict(completion: { text: string; decisionVerdict?: SnifferModelCompletion['decisionVerdict'] }): Omit<StoredSnifferVerdict, 'decidedAt'> | undefined {
+  const verdict = completion.decisionVerdict ?? parseSnifferBatchResponse(completion.text, new Set([1])).get(1);
+  return verdict ? { ...verdict, failSafe: completion.decisionVerdict?.failSafe ?? false } : undefined;
 }
 
 export async function runSnifferPass(options: SnifferPassOptions): Promise<SnifferPassReport> {
@@ -759,6 +835,8 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       } finally {
         turnCallMs = Math.max(0, monotonicNow() - callStarted);
         report.callMs += turnCallMs;
+        const onDemandCount = group.filter((item) => item.question.pass === 'content' && item.target.onDemandRead?.(item.question)).length;
+        if (onDemandCount > 0) console.info(`[olympus:on-demand] step=judge count=${onDemandCount} ms=${Math.max(0, turnCallMs - Math.min(slotWaitMs, turnCallMs))}`);
         // A wait can never be longer than the call that reported it.
         const waited = Math.min(slotWaitMs, turnCallMs);
         report.timing.slotWaitMs += waited;
@@ -767,12 +845,12 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       if (options.signal?.aborted) { report.stoppedBy = 'preempted'; return; }
       consecutiveTransportFailures = 0;
       report.responseChars += text.length;
-      const verdicts = parseSnifferBatchResponse(text, new Set(batch.map((_, index) => index + 1)));
+      const decoded = snifferCompletionVerdict({ text, decisionVerdict });
       for (const [index, group] of batch.entries()) {
-        const verdict = decisionVerdict ?? verdicts.get(index + 1);
+        const verdict = index === 0 ? decoded : undefined;
         const key = keyOf(group[0]!.question);
         if (verdict) {
-          const stored = { ...verdict, failSafe: decisionVerdict?.failSafe ?? false };
+          const stored = verdict;
           group[0]!.target.sniffer.putVerdict(key, stored, group[0]!.question);
           for (const item of group) {
             if (item.target !== group[0]!.target) item.target.sniffer.putVerdict(key, stored, group[0]!.question);

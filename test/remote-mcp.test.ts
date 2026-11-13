@@ -1,3 +1,4 @@
+import { recordScriptedSearch, scriptedSearchReleaseCheck } from './helpers/scripted-search-release.ts';
 // Remote MCP endpoint with bearer connections (hosted agents slice 2).
 //
 // Assembled exactly the way the worker server assembles it: `/mcp` goes to the
@@ -17,7 +18,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { defaultConfig } from '../src/core/config.ts';
 import { exposedOperations } from '../src/core/operation-exposure.ts';
 import { operations } from '../src/core/operations.ts';
-import { V0_4_HERMES_MCP_TOOLS } from '../src/core/public-surface.ts';
+import { V0_4_PUBLIC_REMOTE_MCP_TOOLS } from '../src/core/public-surface.ts';
 import {
   openRemoteConnectionStore,
   REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS,
@@ -178,10 +179,10 @@ function mcpInitialize(authorization?: string, extraHeaders: Record<string, stri
 }
 
 describe('remote operation surface', () => {
-  test('exposes exactly the Hermes tool list', () => {
+  test('exposes exactly the remote tool list', () => {
     const config = { ...defaultConfig(), sourceIndex: { ...defaultConfig().sourceIndex, enabled: true } };
-    expect(exposedOperations(operations, { config, surface: 'remote' }).map((op) => op.name))
-      .toEqual([...V0_4_HERMES_MCP_TOOLS]);
+    expect(exposedOperations(operations, { config, surface: 'remote' }).map((op) => op.name).sort())
+      .toEqual([...V0_4_PUBLIC_REMOTE_MCP_TOOLS].sort());
   });
 });
 
@@ -700,27 +701,30 @@ describe('remote evidence search', () => {
       createRemoteMcpHandler({
         connections: () => store,
         anonymousAnswersEnabled: () => anonymousEnabled,
-        makeOperationContext: (caller, signal) => createInProcessOperationContext({
-          config: defaultConfig(),
-          sourceIndexReadEnabled: true,
-          workerFetch: worker.fetch,
-          caller,
-          signal,
+        makeOperationContext: (caller, signal) => ({
+          ...createInProcessOperationContext({
+            config: defaultConfig(),
+            sourceIndexReadEnabled: true,
+            workerFetch: worker.fetch,
+            caller,
+            signal,
+          }),
+          releaseCheck: scriptedSearchReleaseCheck,
         }),
         search: {
           evidenceSearch: async (input) => {
             searches.push(input);
             searchStarted?.();
             if (pauseSearch) await pauseSearch;
-            return {
+            return recordScriptedSearch({
               evidence: [
-                { trust_domain: 'internal', provider: 'test-mail', family: 'email', title: 'Lease renewal', excerpt: 'The lease renews on 1 March.', authored_at: '2026-09-01T10:00:00Z' },
+                { corpus_id: 'internal.test-mail', provider_item_id: 'lease', account_scope: 'scripted-account', trust_domain: 'internal', provider: 'test-mail', family: 'email', title: 'Lease renewal', excerpt: 'The lease renews on 1 March.', authored_at: '2026-09-01T10:00:00Z' },
                 // Never released to this surface: dropped even if a search returned it.
                 { trust_domain: 'secure_local', provider: 'test-mail', family: 'email', title: 'Private note', excerpt: 'private text' },
               ],
               withheld: 0,
               coverage: { searched_corpora: 1 },
-            };
+            });
           },
           answerModelAvailable: () => answerModel,
         },
@@ -749,7 +753,7 @@ describe('remote evidence search', () => {
     const client = await searchClient(token);
     try {
       const tools = await client.listTools();
-      expect(tools.tools.map((tool) => tool.name).sort()).toEqual(['ask_anonymously', 'olympus_search', 'source_answer', 'source_answer_result', 'source_index_status']);
+      expect(tools.tools.map((tool) => tool.name).sort()).toEqual(['ask_anonymously', 'olympus_search', 'source_answer', 'source_answer_result', 'source_index_status', 'source_item_read']);
       const search = tools.tools.find((tool) => tool.name === 'olympus_search')!;
       expect(search.annotations).toEqual({ readOnlyHint: true, destructiveHint: false, openWorldHint: false });
 
@@ -842,7 +846,7 @@ describe('remote evidence search', () => {
     try {
       const tools = await client.listTools();
       expect(tools.tools.map((tool) => tool.name).sort())
-        .toEqual(['ask_anonymously', 'olympus_search', 'source_answer', 'source_answer_result', 'source_index_status']);
+        .toEqual(['ask_anonymously', 'olympus_search', 'source_answer', 'source_answer_result', 'source_index_status', 'source_item_read']);
       const answer = await client.callTool({ name: 'source_answer', arguments: { question: 'what changed?' } });
       expect(answer.isError).toBeFalsy();
       expect(answered).toBe(1);

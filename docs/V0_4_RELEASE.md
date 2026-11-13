@@ -46,6 +46,14 @@ time (#1045, #1046, #1047, #1074), and agent-proposed settings with one-click
 apply (#1050; the owner chose "agent proposes, person clicks Apply" on
 2026-11-10).
 
+Lane 5 also includes the on-demand reading decision approved on 2026-11-12:
+folders have Full, Names only, and Names with read on demand modes. Defaults
+stay Names only. Only the owner can read individual files in a plain Names only
+folder; remote apps and the Analyst can request reads in the third mode, with
+three files and 25 MB per question. Every read goes through the shared
+extraction queue and stays out of evidence until judged. Lane 2 uses its existing
+`source_item_read` surface; lane 7 owns the visible limit setting.
+
 Rules for this release:
 
 - Recent requests from AI apps (#1266): the Agents panel and
@@ -102,6 +110,17 @@ Owner decisions on 2026-11-10 that change the Privacy accuracy lane:
 - Minor Private items do not gate a judge or the release (owner, 2026-11-10:
   they are a judgment call even for the owner). The gate is the first bullet:
   more than 75% agreement and no important Private item missed.
+
+Lane 3, long-item reading (2026-11-12): remote evidence and the ordinary cloud
+Analyst may receive a stored chunk only after every consecutive judge-sized
+window has a below-Private verdict. The item excerpt alone covers only whole
+short items. Window receipts bind the item, stored chunk hash, names, prompt,
+and judge identity; changed hashes and prompts need fresh coverage. Release
+uses a provisional 8,000 ms judging budget and reports withheld passages and
+documents. A Private window raises the item through automatic re-judging and
+placement; local Private models keep their existing access. The implementation
+proof is `test/chunk-release.test.ts`; the release's independent Critical review
+and owner-data qualification remain required.
 
 Measured on the fresh sample (#883; 200 whole items labelled by the owner on
 2026-11-10: 145 Personal, 21 important Private, 34 minor Private; counts on

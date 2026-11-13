@@ -183,6 +183,7 @@ import {
 import { TIER_CLI_USAGE, runTierCommand, tierCommandOpensStores, tierCommandRewritesStores } from './workers/classification/tier-cli.ts';
 import { DataOwnerBusyError } from './core/data-owner-lock.ts';
 import { callWorkerCli, runLocallyOrThroughWorker, WorkerUnreachableError } from './core/cli-via-worker.ts';
+import { ownerLimits } from './core/owner-limits.ts';
 import { backupOlympusData, restoreOlympusBackup, deriveBackupKey } from './data-backup.ts';
 import { parseProposalFrom, parseSettingsProposalInput, SETTINGS_PROPOSAL_SCHEMA, SettingsProposalError } from './core/settings-proposal.ts';
 import { olympusDataRoot } from './core/olympus-layout.ts';
@@ -928,7 +929,13 @@ async function main(): Promise<void> {
         'Enable the appropriate proof gate and, for private/admin email tools, use an approved local/private model surface.',
       );
     }
-    const result = await operation.handler(ctx, params);
+    // olympus limits opens the scheduler store: here only while Olympus is down, else through the worker.
+    const result = operation.name === 'olympus_limits'
+      ? await runLocallyOrThroughWorker(
+        () => ownerLimits(params, { credit: { env: { ...process.env, ...ctx.config.worker.creditMonitor.credentials } } }),
+        () => operation.handler(ctx, params),
+      )
+      : await operation.handler(ctx, params);
     console.log(JSON.stringify(result, null, 2));
     // A health walk that reports ok:false and exits 0 cannot be looped on:
     // "run it until it goes green" needs an exit code and a line a human can
@@ -971,6 +978,16 @@ export function doctorFailureSummary(result: DoctorSummaryShape): string[] {
   ];
 }
 
+/** An object-valued flag is JSON on the command line, e.g. a search hit's selected_item. */
+function parseCliObject(value: string, key: string): Record<string, unknown> {
+  let parsed: unknown;
+  try { parsed = JSON.parse(value); } catch { parsed = undefined; }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new OperationError('invalid_params', `--${key.replace(/_/g, '-')} must be a JSON object.`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
 export function parseArgs(operation: Operation, args: string[]): Record<string, unknown> {
   const params: Record<string, unknown> = {};
   const positional = operation.cliHints.positional ?? [];
@@ -1000,7 +1017,8 @@ export function parseArgs(operation: Operation, args: string[]): Record<string, 
         if (value === undefined) {
           throw new OperationError('invalid_params', `Missing value for --${key.replace(/_/g, '-')}.`);
         }
-        params[key] = definition?.type === 'number' ? Number(value) : value;
+        params[key] = definition?.type === 'number' ? Number(value)
+          : definition?.type === 'object' ? parseCliObject(value, key) : value;
         if (inlineValue === undefined) index += 1;
       }
     } else if (position < positional.length) {
@@ -1523,6 +1541,8 @@ function printHelp(): void {
   console.log('  olympus settings show|schema');
   console.log('  olympus settings propose <file.json|-> [--from <name>]');
   console.log('  olympus doctor');
+  console.log('  olympus limits');
+  console.log('  olympus limits continue <id> [--subject S] [--to N] [--keep]');
   console.log('  olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin] [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
   console.log('  olympus connect dropbox --client-id <id> [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
   console.log('  olympus connect telegram|whatsapp --pair');

@@ -1,4 +1,5 @@
 import { withKeywordRequestScope } from './source-index/keyword-context.ts';
+import { bindReleaseChunks, copyReleaseChunks } from './release-manifest.ts';
 import { RECENT_ITEMS_CUT_SHORT, VISIBILITY_CHECK_CUT_SHORT, recentItemsTimeoutGap, semanticSearchTimedOut, semanticTimeoutGap, visibilityCheckTimeoutGap } from './source-index/partial-search.ts';
 import {
   rerankCandidates,
@@ -102,6 +103,8 @@ export interface LocalContentRequest {
 export interface LocalContentBlock {
   sensitivity: SourceSensitivity;
   chunks: readonly string[];
+  // Stored chunk hashes behind each selected passage, before clipping.
+  chunkHashes?: readonly (readonly string[])[];
   tables?: readonly EvidenceTableBlock[];
   facts?: readonly StructuredEvidenceFact[];
   truncated?: boolean;
@@ -516,6 +519,7 @@ async function buildPreparedEvidencePackDetailed(
       ...(content?.facts ? { facts: content.facts } : {}),
       ...(hit.score !== undefined ? { score: hit.score } : {}),
     };
+    bindReleaseChunks(candidate.provenance, chunks, content?.chunkHashes ?? []);
     // A provider is expected to throw the typed denial before hydration. If
     // it instead returns S5 content, that is an invariant failure: hard-stop
     // the entire build rather than misreporting it as an extraction miss.
@@ -570,6 +574,7 @@ async function buildPreparedEvidencePackDetailed(
     // A corpus without an adapter is one this request leaves out (owner's read scope, request scope).
     domainOf: (corpusId) => (Object.hasOwn(input.adapters, corpusId) ? input.registry.get(corpusId)?.trustDomain : undefined),
   });
+  labelled.candidates.forEach((candidate, index) => copyReleaseChunks(candidates[index]!.provenance, candidate.provenance));
 
   const builtAt = (input.now ?? (() => new Date()))().toISOString();
   const laneAudits = policyDeniedCandidates > 0

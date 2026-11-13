@@ -12,6 +12,7 @@ import {
 import type { SourceIndexRouterAdapterMap } from '../src/core/source-index/router.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import { createAnalystSourceIndexAnswerHandler } from '../src/workers/source-index/analyst-answer.ts';
+import { createReleaseManifestSink, runWithReleaseManifestSink } from '../src/core/release-manifest.ts';
 
 const SECURE = 'secure_local.dropbox.files';
 const TITLE = 'PT COMPANY | Pat Example.pdf';
@@ -51,9 +52,24 @@ describe('strict posture unreadable secure_local matches', () => {
       uri: URI,
     })]);
   });
+
+  test('an unreadable match cited by name is in the release manifest, even when no leg read it', async () => {
+    // Prompt fitting leaves the nameless-text file out of what the analyst reads.
+    const handler = unreadableSecureHandler('allow', { localAnalystPromptByteBudget: 1, readableFirst: 4 });
+    const sink = createReleaseManifestSink();
+    const result = await runWithReleaseManifestSink(sink, () => handler.answer({
+      question: 'Find the Lexidy engagement document.',
+      corpus_id: SECURE,
+      include_secure_local: true,
+    }));
+    expect(result.evidence).toHaveLength(1);
+    const inputs = sink.manifests.flatMap((manifest) => manifest.inputs);
+    expect(inputs).toContainEqual(expect.objectContaining({ corpusId: SECURE, providerItemId: 'id:lexidy-engagement', layer: 'names' }));
+  });
 });
 
-function unreadableSecureHandler(secureDerivativeDefault: 'allow' | 'approval') {
+function unreadableSecureHandler(secureDerivativeDefault: 'allow' | 'approval', options: { localAnalystPromptByteBudget?: number; readableFirst?: number } = {}) {
+  const { readableFirst = 0, ...extra } = options;
   const identity = {
     family: 'file' as const,
     provider: 'dropbox',
@@ -62,6 +78,7 @@ function unreadableSecureHandler(secureDerivativeDefault: 'allow' | 'approval') 
     providerFileId: 'id:lexidy-engagement',
     localItemId: 'personal:id:lexidy-engagement',
   };
+  const readable = Array.from({ length: readableFirst }, (_, n) => ({ ...identity, providerItemId: `id:readable-${n}`, providerFileId: `id:readable-${n}`, localItemId: `personal:id:readable-${n}` }));
   return createAnalystSourceIndexAnswerHandler({
     analyst: scriptedAnalyst((pack) => ({
       answer: 'I could not answer because the matched document has no readable extracted text.',
@@ -69,6 +86,7 @@ function unreadableSecureHandler(secureDerivativeDefault: 'allow' | 'approval') 
       unanswered: pack.coverage.extractionGaps,
     })),
     secureDerivativeDefault,
+    ...extra,
     lanes: () => {
       const registry = buildSourceIndexCorpusRegistry([
         defineSourceIndexCorpus({ corpusId: SECURE, family: 'file', trustDomain: 'secure_local' }),
@@ -77,7 +95,12 @@ function unreadableSecureHandler(secureDerivativeDefault: 'allow' | 'approval') 
         registry,
         adapters: {
           [SECURE]: () => ({
-            hits: [{
+            hits: [...readable.map((item, n) => ({
+              sourceItem: item,
+              provenance: { sourceItem: item, citation: { title: `Readable ${n}.pdf` } },
+              score: 2,
+              rawExposed: false as const,
+            })), {
               sourceItem: identity,
               provenance: {
                 sourceItem: identity,
@@ -92,7 +115,13 @@ function unreadableSecureHandler(secureDerivativeDefault: 'allow' | 'approval') 
         } as SourceIndexRouterAdapterMap,
         contentProviders: {
           [SECURE]: {
-            async fetchLocalContent() {
+            async fetchLocalContent(request: { provenance: { sourceItem: { providerItemId: string } } }) {
+              if (request.provenance.sourceItem.providerItemId.startsWith('id:readable-')) {
+                return {
+                  sensitivity: buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' }),
+                  chunks: ['The engagement letter is with Lexidy. '.repeat(40)],
+                };
+              }
               return {
                 sensitivity: buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' }),
                 chunks: [],

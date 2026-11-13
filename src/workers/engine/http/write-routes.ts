@@ -13,6 +13,7 @@ import { isV04PublicDashboardRoute } from '../../../core/public-surface.ts';
 
 const WORKER_POST_PATHS: readonly string[] = [
   '/consult/ask',
+  '/limits',
   '/archive-import/start',
   '/archive-import/status',
   '/archive-import/remove',
@@ -32,6 +33,7 @@ const WORKER_POST_PATHS: readonly string[] = [
   '/source/index/sync',
   '/source/index/files/extract',
   '/source/index/files/plan',
+  '/source/index/files/read-on-demand',
   '/source/index/files/transcribe',
   '/source/index/files/recycle-leases',
   '/source/index/files/janitor-requeue',
@@ -39,6 +41,7 @@ const WORKER_POST_PATHS: readonly string[] = [
   '/source/index/files/status',
   '/source/index/dropbox/content/export-eval-shard',
   '/source/index/search',
+  '/source/item/read',
   '/source/index/embed',
   // Family-scoped aliases of the extraction routes (index.ts rewrites them).
   '/source/index/dropbox/content/extract',

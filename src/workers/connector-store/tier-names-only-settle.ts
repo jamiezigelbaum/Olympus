@@ -64,6 +64,8 @@ function settleOne(set: TieredStoreSet, record: TierLedgerRecord): boolean {
   const store = domain ? set.store(domain) : undefined;
   const exported = store?.exportItemCopy(identity);
   if (!store || !exported) return false;
+  const localId = exported.columns['local_item_id'];
+  if (typeof localId === 'string' && store.readOnDemand(localId)) return false;
   const locator = exported.columns['locator_uri'];
   const mimeType = exported.columns['mime_type'];
   // A container (a folder) has no text of its own: listed today it is

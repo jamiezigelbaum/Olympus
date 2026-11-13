@@ -1,3 +1,9 @@
+import { startVeniceCreditRecovery, fetchVeniceCreditStatus, VENICE_BILLING_BASE_URL } from '../../core/provider-credit-status.ts';
+import { openVeniceCreditPausePaths, ownerLimitStopHooks } from '../../core/owner-limit-state.ts';
+import { ownerLimits, limitRunOnceSource } from '../../core/owner-limits.ts';
+import { parseOwnerTierItemId } from '../classification/tier-owner-items.ts';
+import { fileSourceScopeOnDemandFilters } from '../source-scope-runtime.ts';
+import type { OnDemandReadRequest, OnDemandReadResult } from '../file-extraction/on-demand-read.ts';
 import { ConnectionRequestStore, connectionRequestsPath, requestCredentialTag } from '../../core/connection-requests.ts';
 import { createDashboardPeople } from './dashboard/dashboard-people.ts';
 import { PeopleIndexRefresher } from '../../core/people-index.ts';
@@ -139,6 +145,7 @@ import {
 import { createSourceCorpusRegistry } from '../../core/source-corpus-registry.ts';
 import {
   dropboxPolicyFullExtractionScopeKeys,
+  dropboxPolicyApprovedScopeKeys,
   loadDropboxIngestionPolicy,
 } from '../../core/source-ingestion-policy.ts';
 import { OperationError } from '../../core/operation-error.ts';
@@ -432,6 +439,7 @@ import {
   unregisterFileScopeBrowserFactory,
   type SourceFolderScopeBrowser,
 } from '../source-scope-browser.ts';
+import { frontJudgeNow, judgeNow } from '../classification/chunk-release.ts';
 import { configureInstalledTierClassification } from '../classification/installed-tier-classification.ts';
 import { type SnifferLane } from '../classification/sniffer-lane.ts';
 import { registerBuiltInPrivateModel, registeredBuiltInPrivateModel, resolveJudgeChoiceRuntime } from '../classification/built-in-sniffer.ts';
@@ -473,6 +481,7 @@ import { createFrontScheduler } from '../engine-split/front-scheduler.ts';
 import { createFrontDashboardHistory, openWritableDashboardHistory } from '../engine-split/front-history.ts';
 import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
 import { startSupersededSweepTicker } from '../connector-store/tier-auto-prune-sweep.ts';
+import { withStoreReadPriority } from '../../core/store-reclaim-admission.ts';
 import { remoteAccessFromStatus, type DashboardAgentConnectionsBackend } from '../agent-connections.ts';
 import { applyPendingRestoreAtBoot, createBackupService, defaultBackupServicePaths } from '../backup-service.ts';
 import { createDashboardRemoteAccessControl, createGatewayRemoteAccessConfigWriter, createStandaloneRemoteAccessControl, createDashboardEngineRestart } from '../remote-access-control.ts';
@@ -750,6 +759,7 @@ export async function main(): Promise<void> {
   };
   const installedTierClassification = configureInstalledTierClassification({
     automaticMoveContext,
+    readOnly: !!engineFront,
     env: process.env,
     ...(snifferLane ? { lane: snifferLane } : {}),
     ...(publicTierRetired ? { retirePublic: true } : {}),
@@ -1337,6 +1347,17 @@ export async function main(): Promise<void> {
   // A query's matches still waiting for their privacy judgment are judged next (#1062).
   // The judge runs in the background in the split: raise its boosts there.
   const raiseJudgeBoosts = engineFront ? frontJudgeBoost(engineFront.client) : (identities: Parameters<typeof judgeBoosts.raise>[0]) => judgeBoosts.raise(identities);
+  let chunkJudgmentsInFlight = 0;
+  const runChunkJudgment: NonNullable<import('../classification/chunk-release.ts').ChunkReleaseOptions['judgeNow']> = async (items, budgetMs) => {
+    chunkJudgmentsInFlight++;
+    tierSniffer?.preempt();
+    try { return await judgeNow(items, tierScopes(), createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? 'allow'), { budgetMs }); }
+    finally { chunkJudgmentsInFlight--; tierSniffer?.wake(); }
+  };
+  const chunkReleaseOptions = {
+    judgeNow: engineFront ? frontJudgeNow(engineFront.client) : runChunkJudgment,
+    boost: raiseJudgeBoosts,
+  };
   const tierVisibilityGate = createTierVisibilityGate(tierScopes, (identities) => raiseJudgeBoosts(identities));
   // A child item's parent: its names, judged against the ledger that governs its lane (answers and the unreadable list).
   const parentLabelResolver = createParentLabelResolver({
@@ -2265,6 +2286,10 @@ export async function main(): Promise<void> {
       ? {
           dropbox: {
             extractionScopes: dropboxExtractionScopes,
+            resolveReadScopes: () => {
+              const approval = fileSourceScopeAuthority?.snapshot('dropbox.files');
+              return approval ? dropboxPolicyApprovedScopeKeys(fileSourceScopeDropboxPolicy(dropboxIngestionPolicy, approval)) : [];
+            },
             resolveExtractionScopes: () => {
               const ref = fileSourceScopeAuthority?.policyRef('dropbox.files');
               if (!ref || !fileSourceScopeAuthority) return [];
@@ -2297,6 +2322,10 @@ export async function main(): Promise<void> {
     ...(localFilesConnectorStore
       ? {
           localFiles: {
+            resolveReadScopes: () => {
+              const approval = fileSourceScopeAuthority?.snapshot(LOCAL_FILES_SOURCE_ID);
+              return approval ? fileSourceScopeLocalFilesPolicy(localFilesIngestionPolicy, approval, localFilesExclusionContext).roots.map((root) => root.approved_scope_key) : [];
+            },
             resolveExtractionScopes: () => {
               const ref = fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID);
               if (!ref || !fileSourceScopeAuthority) return [];
@@ -2506,7 +2535,14 @@ export async function main(): Promise<void> {
         const connector = createLocalFilesSourceConnector({
           connectorId: 'local.files.extraction',
           root: '/',
-          scope: createScopeBoundLocalFilesContentScope({ authority: fileSourceScopeAuthority, ref, context: localFilesExclusionContext }),
+          scope: (() => {
+            const scope = createScopeBoundLocalFilesContentScope({ authority: fileSourceScopeAuthority, ref, context: localFilesExclusionContext });
+            const allow = (decide: (path: string) => 'content' | 'metadata' | 'denied') => (path: string) => {
+              const decision = decide(path);
+              return decision === 'metadata' && connectorStores.some((holder) => holder.onDemandReadForLocator(path)) ? 'content' : decision;
+            };
+            return { ...scope, decide: allow(scope.decide), snapshotDecider: () => allow(scope.snapshotDecider()) };
+          })(),
           volumes: localFilesVolumes,
           locate: (localItemId) => reader.localContent(localItemId)?.locatorUri,
         });
@@ -2515,7 +2551,7 @@ export async function main(): Promise<void> {
           corpusId: config.corpusId,
           provider: config.provider,
           connector,
-          candidates: connectorStoreExtractionCandidateReader(reader, config.resolveCandidateFilters?.()),
+          candidates: connectorStoreExtractionCandidateReader(reader, config.resolveCandidateFilters),
           lanes: (config.resolveScopes?.() ?? config.scopes).map((approvedScopeKey) => ({
             approvedScopeKey,
             matches: (row) => row.locatorUri !== undefined
@@ -2527,6 +2563,18 @@ export async function main(): Promise<void> {
       ['whatsapp', ({ config, store, view }) => whatsappExtraction({ config, store, ...(view ? { view } : {}) })],
     ]),
     tierSets: fileExtractionTierSets(),
+    onDemandPolicy(holder, localItemId) {
+      const sourceId = fileSourceScopeIdForProvider(holder.activeLocalItemRow(localItemId)?.identity.provider ?? '');
+      if (!sourceId) return { allowed: true, readableOnRequest: false };
+      const approval = fileSourceScopeAuthority?.snapshot(sourceId);
+      if (!approval) return { allowed: false, readableOnRequest: false };
+      const metadata = fileSourceScopeMetadataFilters(approval);
+      const onDemand = fileSourceScopeOnDemandFilters(approval);
+      return {
+        allowed: metadata.allowed && holder.itemMatchesSearchFilters(localItemId, undefined, metadata.filters),
+        readableOnRequest: onDemand.allowed && holder.itemMatchesSearchFilters(localItemId, undefined, onDemand.filters),
+      };
+    },
     scopeGuard: {
       assertAuthorized({ config }) {
         assertFileSourceScopeCurrent(config.provider);
@@ -2538,7 +2586,9 @@ export async function main(): Promise<void> {
         if (!approval) return false;
         const scope = fileSourceScopeContentFilters(approval);
         // The row may sit in any of the lane's tier stores: the corpus reads it through its view.
-        return scope.allowed && reader.itemMatchesSearchFilters(ref.localItemId, ref.accountScope, scope.filters);
+        const granted = connectorStores.some((holder) => holder.readOnDemand(ref.localItemId, ref.sourceVersion ?? ''));
+        const effective = granted ? fileSourceScopeMetadataFilters(approval) : scope;
+        return effective.allowed && reader.itemMatchesSearchFilters(ref.localItemId, ref.accountScope, effective.filters);
       },
     },
     extractors: fileExtractionExtractors,
@@ -2561,6 +2611,19 @@ export async function main(): Promise<void> {
     store.setExtractionOutcomeProbe((identity, localItemId) => extractionOutcomeFor(store.family, identity, localItemId));
   };
   for (const store of connectorStores) probeExtractionEnded(store);
+  const requestFileRead = async (request: OnDemandReadRequest): Promise<OnDemandReadResult> => {
+    if (engineFront) {
+      const receipt = await engineFront.client.send({ kind: 'extraction_queue', request: {
+        path: '/v1/source/index/files/read-on-demand', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(request),
+      } });
+      if (receipt.state !== 'done') return { state: 'refused', reason: 'background_unavailable' };
+      const response = receipt.result as { status: number; body: string };
+      if (response.status !== 200) return { state: 'refused', reason: 'background_unavailable' };
+      return JSON.parse(response.body) as OnDemandReadResult;
+    }
+    return fileExtractionRuntime?.requestOnDemandRead(request) ?? { state: 'refused', reason: 'read_unavailable' };
+  };
   const connectorStoreEmbeddingProviders = new Map<string, SourceEmbeddingProvider>();
   const connectorStoreAccountScopes = new Map<string, string>();
   const connectorStorePrincipals = new Map<string, ConnectorStoreDeclaredPrincipal>();
@@ -3246,11 +3309,13 @@ export async function main(): Promise<void> {
       // Off unless the owner set OLYMPUS_SOURCE_RERANKER=built-in (issue #921).
       const sourceReranker = await prepareBuiltInRerankerFromEnv();
       return createAnalystSourceIndexAnswerHandler({
+        requestOnDemandRead: requestFileRead,
         inferenceGuard: (pack, request, corpusIds) => guardSourceAnswerEvidence({ lanes: sourceAnswerLanes!, pack, request, corpusIds }),
         analyst: defaultLocalAnalyst,
         releaseCheck: createReleaseTierCheck(
           tierScopes,
           () => secureDerivativeDefault ?? 'allow',
+          chunkReleaseOptions,
         ),
         queryPlanner: createAnalystQueryPlanner(localSourceAnswerModel),
         ...(sourceReranker ? { reranker: sourceReranker } : {}),
@@ -3345,7 +3410,7 @@ export async function main(): Promise<void> {
           // A background agent's answer does not hold back queued background
           // answers the way the owner's own work does (core/source-answer-jobs.ts).
           const kind = request.caller?.surface === 'remote' && isBackgroundConnection(request.caller.connection_id) ? 'background' : 'owner';
-          return ownerQuestions.run(() => answerActivity.run(() => analystSourceAnswer.answer(request, local), kind), kind);
+          return withStoreReadPriority(() => ownerQuestions.run(() => answerActivity.run(() => analystSourceAnswer.answer(request, local), kind), kind));
         },
       }
     : undefined;
@@ -4524,7 +4589,7 @@ export async function main(): Promise<void> {
       sourceId: string;
       accountGeneration: string;
       expectedRevision: string;
-      selections: Array<{ key: string; state: 'ingest' | 'metadata_only' | 'exclude'; ancestor_keys?: string[] }>;
+      selections: Array<{ key: string; state: 'ingest' | 'metadata_only' | 'on_demand' | 'exclude'; ancestor_keys?: string[] }>;
       wholeAccount: boolean;
       explicitWholeAccountConfirmation: boolean;
     }) => {
@@ -4682,6 +4747,7 @@ export async function main(): Promise<void> {
     sourceAnswerReleaseCheck: createReleaseTierCheck(
       tierScopes,
       () => secureDerivativeDefault ?? 'allow',
+      chunkReleaseOptions,
     ),
     // Local callers read Private, so only items still waiting for their
     // judgment (found by words, not yet by meaning) are counted for them.
@@ -4693,6 +4759,21 @@ export async function main(): Promise<void> {
     ownerTierItems: ownerTierItemsEngine,
     // "Check the judge" (issue #887): its round file sits beside the owner's privacy profile.
     judgeCheck: createJudgeCheck({ items: ownerTierItemsEngine, get: (itemId) => getOwnerTierItem(itemId, ownerTierItemsContext, { withPreview: true }) }),
+    ownerLimits: (params) => ownerLimits(params, {
+      runOnce: async (subject) => {
+        const response = await workerFetchInProcess(new Request('http://olympus-worker.internal/dashboard/sync-now', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source: limitRunOnceSource(subject) }),
+        }));
+        const body = await response.json() as { error?: { code?: unknown; message?: unknown } };
+        // A refusal (stopping, scope not approved, no lane) is the route's own words, never a success.
+        if (!response.ok) {
+          throw new OperationError('invalid_request', typeof body.error?.message === 'string' ? body.error.message : `The sync could not start (${response.status}).`);
+        }
+        return body;
+      },
+      credit: { env: { ...process.env, ...olympusConfig.worker.creditMonitor.credentials } },
+      wake: () => tierSniffer?.wake(),
+    }),
     // Bound late: the consult block below sets askAnonymouslyNow.
     consultAsk: async ({ caller, ...input }, signal) => (askAnonymouslyNow
       ? askWithAnonymousInbox({ ...input, ...(caller?.provider ? { callerProvider: caller.provider } : {}), signal }, {
@@ -4711,6 +4792,17 @@ export async function main(): Promise<void> {
     currentXBookmarksRuntime,
     dropboxIngestionPolicy,
     ...(sourceIndexEmbeddingProvider ? { sourceIndexEmbeddingProvider } : {}),
+    requestOnDemandRead: requestFileRead,
+    readOwnerItem: async (itemId) => {
+      const identity = parseOwnerTierItemId(itemId);
+      for (const holder of connectorStores) {
+        const candidate = holder.onDemandReadCandidate(identity.providerItemId);
+        if (!candidate || candidate.identity.provider !== identity.provider || candidate.identity.accountScope !== identity.accountScope
+          || candidate.identity.providerConversationId !== identity.providerConversationId) continue;
+        return requestFileRead({ itemRef: { corpusId: holder.corpusId, providerItemId: identity.providerItemId }, requester: 'owner' });
+      }
+      return { state: 'refused', reason: 'item_not_found' };
+    },
     ...(fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {}),
     authorizeFileExtractionLane: (lane) => {
       if (lane.provider === LOCAL_FILES_PROVIDER && !localFilesCleanupRecovery?.ready()) {
@@ -5232,6 +5324,7 @@ export async function main(): Promise<void> {
   const remoteReleaseCheck = createReleaseTierCheck(
     tierScopes,
     () => secureDerivativeDefault ?? 'allow',
+    chunkReleaseOptions,
   );
   // Private answers on this computer (design background-agents.md, section
   // B): Ask privately, and Answer on a question waiting here. Planning none,
@@ -5292,8 +5385,8 @@ export async function main(): Promise<void> {
       localConnectionId: '@local:You',
       anonymousAsk: localAnonymousAsk,
       // The built-in model serves one question at once: an answer preempts the sniffer.
-      answer: (input) => ownerQuestions.run(() => answerActivity.run(() => local.answer(input))),
-      backgroundAnswer: (input) => runBackgroundInference(() => answerActivity.run(() => local.answer(input), 'background')),
+      answer: (input) => withStoreReadPriority(() => ownerQuestions.run(() => answerActivity.run(() => local.answer(input)))),
+      backgroundAnswer: (input) => withStoreReadPriority(() => runBackgroundInference(() => answerActivity.run(() => local.answer(input), 'background'))),
       interactiveBusy: () => answerActivity.interactiveInFlight > 0,
       backgroundBusy: () => classificationBusy(),
       panelClaimed: (ref) => privateAnswers.hasClaimedWaiting(ref),
@@ -5493,9 +5586,9 @@ export async function main(): Promise<void> {
   // "Couldn't check yet" records are re-probed here every ten minutes.
   const { createRemotePrivateParts } = await import('../../core/remote-private-part.ts');
   const remotePrivateParts = createRemotePrivateParts({
-    probe: (request, timeoutMs) => (sourceAnswerLanes
+    probe: (request, timeoutMs) => withStoreReadPriority(() => (sourceAnswerLanes
       ? probePrivateMatch({ lanes: sourceAnswerLanes, request: request as unknown as SourceIndexAnswerRequest, timeoutMs, distinguishSecret: true })
-      : Promise.resolve('unknown' as const)),
+      : Promise.resolve('unknown' as const))),
     store: waitingQuestionStore,
     isActive: connectionActive,
     // The re-check is background work: it waits on the model's keyword
@@ -5706,23 +5799,23 @@ export async function main(): Promise<void> {
         // once per new wording, to translate the question's words
         // (core/source-index/keyword-expansion.ts),
         // on the model directly, so that call queues behind what the model runs.
-        return ownerQuestions.run(() => searchReleasedEvidence({
+        return withStoreReadPriority(() => ownerQuestions.run(() => searchReleasedEvidence({
           lanes: sourceAnswerLanes!,
           question: input.question,
           ...(input.limit ? { maxResults: input.limit } : {}),
           releaseCheck: remoteReleaseCheck,
-        }));
+        })));
       }
     : undefined;
   // The same search for every other remote agent, with the tiers read once
   // more right before the result leaves (workers/remote-search.ts).
   const remoteEvidenceSearch = sourceAnswerLanes
-    ? async (input: { question: string; limit?: number }) => ownerQuestions.run(() => searchReleasedEvidence({
+    ? async (input: { question: string; limit?: number }) => withStoreReadPriority(() => ownerQuestions.run(() => searchReleasedEvidence({
         lanes: sourceAnswerLanes!,
         question: input.question,
         ...(input.limit ? { maxResults: input.limit } : {}),
         releaseCheck: remoteReleaseCheck,
-      }))
+      })))
     : undefined;
   // Which Private items match, for the private answer panel: the shared
   // EvidencePack build over Private corpora only, so each item carries its
@@ -5732,7 +5825,7 @@ export async function main(): Promise<void> {
   // that have moved to a lower tier; those still go only to the private job.
   const chatgptPrivateMatchProbe = sourceAnswerLanes
     ? async (question: string, _ctx: import('../../core/operations.ts').OperationContext, originalMatches?: readonly Readonly<Record<string, unknown>>[]) => {
-        const result = await ownerQuestions.run(() => searchPrivateEvidence({ lanes: sourceAnswerLanes!, question, ...(originalMatches ? { originalMatches } : {}) }));
+        const result = await withStoreReadPriority(() => ownerQuestions.run(() => searchPrivateEvidence({ lanes: sourceAnswerLanes!, question, ...(originalMatches ? { originalMatches } : {}) })));
         return { count: result.matched, evidence: result.candidates as unknown as readonly Record<string, unknown>[], ...(result.secretMatch ? { secretMatch: true as const } : {}) };
       }
     : undefined;
@@ -6087,6 +6180,11 @@ export async function main(): Promise<void> {
   // The combined engine uses its local count; the split background uses the relayed mark.
   const stopSupersededSweep = startSupersededSweepTicker({
     active: () => !engineFront && !ownerQuestions.busy && !remoteOwnerBusy(OWNER_QUESTION_RESOURCE),
+    ownerQuestionEndedAt: () => Math.max(ownerQuestions.lastEndedAt ?? 0, remoteOwnerMarks.lastEndedAt(OWNER_QUESTION_RESOURCE) ?? 0),
+    // Ingest first: a conversion starts only in a quiet window and stops when a task comes due.
+    reclaimStore: (store, work) => sourceScheduler
+      ? sourceScheduler.withIdleTasks(work, { quietForMs: store.reclaimQuietWindowMs(), preempt: () => store.preemptReclaim() })
+      : work(),
   });
 
   // The privacy-safe sniffer's bounded background pass over pending items.
@@ -6168,7 +6266,7 @@ export async function main(): Promise<void> {
         answersInFlight: () => snifferResource !== undefined && (localModelActivity.busyExcept(snifferResource, 'tier_sniffer') || remoteOwnerBusy(snifferResource)),
         ownerInFlight: () => snifferResource !== undefined && (localModelActivity.ownerInFlight(snifferResource) || remoteOwnerBusy(snifferResource)),
         // A ready Inbox question stops the pass, so its answer runs, then classification resumes.
-        shouldYield: () => localPrivateAnswers?.overdue() ?? false,
+        shouldYield: () => chunkJudgmentsInFlight > 0 || (localPrivateAnswers?.overdue() ?? false),
         // The service applies it to the built-in judge only, never Venice or a remote judge.
         pacing: localPacer,
         breakerOpen: () => secureAnalystPoolState.isBreakerOpen('secure_local', snifferLane.profileId),
@@ -6334,8 +6432,10 @@ export async function main(): Promise<void> {
         people: ({ request }) => runForwarded(request),
         source_sync: ({ request }) => runForwarded(request),
         data_export: ({ request }) => runForwarded(request),
+        owner_limits: ({ request }) => runForwarded(request),
         // Matched-first judging (#1062, PR #1115) is not in this build yet.
         // A question the front answered matched these pending items: the judge here asks about them first.
+        judge_now: ({ items, budgetMs }) => runChunkJudgment(items, budgetMs),
         judge_boost: ({ identities }) => {
           judgeBoosts.raise(identities);
           return { applied: true, raised: identities.length };
@@ -6395,6 +6495,18 @@ export async function main(): Promise<void> {
   localWorkPending = () => (snifferRuntime.source === 'built_in' && (tierSniffer?.backlog().remainingQuestions ?? 0) > 0)
     || connectorStores.some((store) => embedsOnThisComputer(connectorStoreEmbeddingProviders.get(store.corpusId)) && store.queuedEmbeddingItemIds(1).length > 0);
   localPacer.start();
+  // The plugin's credit monitor runs in Node and writes only the marker; the marker check reports it here.
+  const configuredCreditMarkers = (): string[] => [olympusConfig.worker.creditMonitor.pauseFile,
+    process.env.OLYMPUS_VENICE_CREDIT_STATUS_PROVIDER_PAUSE_FILE].filter((path): path is string => !!path);
+  // The split's front stays a reader: recovery writes the scheduler store, so only the writer runs it.
+  const stopCreditRecovery = engineFront ? () => {} : startVeniceCreditRecovery({
+    paths: () => [...new Set([...openVeniceCreditPausePaths(), ...configuredCreditMarkers()])],
+    markers: configuredCreditMarkers,
+    stops: ownerLimitStopHooks,
+    probe: signal => fetchVeniceCreditStatus({ signal, baseUrl: VENICE_BILLING_BASE_URL, balanceOnly: true,
+      env: { ...process.env, ...olympusConfig.worker.creditMonitor.credentials } }),
+    onResume: () => tierSniffer?.wake(),
+  });
   const stopCpuSampleLog = await startCpuSampleLog(process.env);
 
   // The worker owns a background tick that outlives any request, so the process
@@ -6418,6 +6530,7 @@ export async function main(): Promise<void> {
     clearInterval(captureTick);
     stopSupersededSweep();
     stopCpuSampleLog?.();
+    stopCreditRecovery();
     tierSniffer?.stop();
     localPacer.stop();
     archiveImportDashboard.close();
