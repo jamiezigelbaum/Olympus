@@ -428,6 +428,9 @@ describe('remote output allowlists, per operation and result family', () => {
     expect(remoteOperationOutput('source_index_status', status).privacy_check).toEqual({ waiting_items: 5, waiting_for: 'awaiting_owner_approval' });
     (status as Record<string, unknown>).tier_classification = { checking_items: 5, remaining_questions: 5, pending_items: 5, summary: '', awaiting_owner_approval: false, waiting_reason: 'REASON_LEAK' };
     expect(remoteOperationOutput('source_index_status', status).privacy_check).toEqual({ waiting_items: 5 });
+    // A spent daily call budget is named by its registered limit id.
+    (status as Record<string, unknown>).tier_classification = { checking_items: 5, remaining_questions: 5, pending_items: 5, summary: '', awaiting_owner_approval: false, waiting_reason: 'daily_budget' };
+    expect(remoteOperationOutput('source_index_status', status).privacy_check).toEqual({ waiting_items: 5, waiting_for: 'judge.daily_calls' });
     // Nothing waiting: no privacy_check at all.
     (status as Record<string, unknown>).tier_classification = { checking_items: 0, remaining_questions: 0, pending_items: 0, summary: '', awaiting_owner_approval: false };
     expect(remoteOperationOutput('source_index_status', status)).not.toHaveProperty('privacy_check');

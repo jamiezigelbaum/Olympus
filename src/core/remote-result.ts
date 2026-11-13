@@ -189,16 +189,24 @@ const REFRESH_STATUSES: readonly string[] = Object.freeze(['running', 'completed
 const TRUST_DOMAINS: readonly string[] = Object.freeze(['public_safe', 'internal', 'secure_local']);
 const RETRIEVAL_MODES: readonly string[] = Object.freeze(['keyword', 'hybrid']);
 const RETRIEVAL_STATES: readonly string[] = Object.freeze(['ready', 'degraded']);
-/** Why a corpus searches by keyword only (core/source-index/retrieval.ts SourceIndexHybridUnservableReason). */
+/**
+ * Why a corpus searches by keyword only (core/source-index/retrieval.ts
+ * SourceIndexHybridUnservableReason). A corpus whose capability went
+ * unreported gives no reason.
+ */
 const RETRIEVAL_REASONS: readonly string[] = Object.freeze([
-  'embedding_provider_unavailable', 'embedding_provider_not_allowed', 'no_current_embedding_artifacts',
-  'embedding_epoch_stale', 'hybrid_capability_unreported',
+  'embedding_provider_unavailable', 'embedding_provider_not_allowed', 'no_current_embedding_artifacts', 'embedding_epoch_stale',
 ]);
-/** Why the privacy check asked nothing while items wait (classification/sniffer-service.ts TierSnifferWaitReason). */
-const PRIVACY_CHECK_WAITS: readonly string[] = Object.freeze([
-  'yielding_to_answers', 'breaker_open', 'pass_running', 'pass_stuck', 'awaiting_owner_approval', 'no_model',
-  'daily_budget', 'cloud_stopped', 'model_not_answering', 'failed',
-]);
+/**
+ * Why the privacy check asked nothing while items wait
+ * (classification/sniffer-service.ts TierSnifferWaitReason). A spent daily
+ * call budget is named by its registered limit id.
+ */
+const PRIVACY_CHECK_WAITS: Readonly<Record<string, string>> = Object.freeze({
+  yielding_to_answers: 'yielding_to_answers', breaker_open: 'breaker_open', pass_running: 'pass_running',
+  pass_stuck: 'pass_stuck', awaiting_owner_approval: 'awaiting_owner_approval', no_model: 'no_model',
+  daily_budget: 'judge.daily_calls', cloud_stopped: 'cloud_stopped', model_not_answering: 'model_not_answering', failed: 'failed',
+});
 const NETWORK_IDENTITIES: readonly string[] = Object.freeze(['hidden', 'visible', 'not_verified']);
 const CLEANUPS: readonly string[] = Object.freeze(['as_written', 'light_cleanup', 'custom']);
 const OUTCOMES: readonly string[] = Object.freeze(['not_sent', 'sent_failed', 'unknown']);
@@ -649,7 +657,8 @@ function privacyCheckOutput(raw: unknown): { waiting_items: number; waiting_for?
   const backlog = asRecord(raw);
   const waiting = wholeNumber(backlog?.pending_items);
   if (!backlog || waiting === 0) return undefined;
-  const reason = backlog.awaiting_owner_approval === true ? 'awaiting_owner_approval' : oneOf(backlog.waiting_reason, PRIVACY_CHECK_WAITS);
+  const reason = backlog.awaiting_owner_approval === true ? 'awaiting_owner_approval'
+    : typeof backlog.waiting_reason === 'string' && Object.hasOwn(PRIVACY_CHECK_WAITS, backlog.waiting_reason) ? PRIVACY_CHECK_WAITS[backlog.waiting_reason] : undefined;
   return { waiting_items: waiting, ...(reason ? { waiting_for: reason } : {}) };
 }
 
@@ -976,7 +985,7 @@ const SOURCE_INDEX_STATUS_SCHEMA = {
       description: 'New items not searchable yet because they wait for the privacy check, and what the check waits for.',
       properties: {
         waiting_items: { type: 'integer', minimum: 1 },
-        waiting_for: { enum: [...PRIVACY_CHECK_WAITS] },
+        waiting_for: { enum: [...new Set(Object.values(PRIVACY_CHECK_WAITS))] },
       },
     },
   },

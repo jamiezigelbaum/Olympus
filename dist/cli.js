@@ -35504,7 +35504,7 @@ function privacyCheckOutput(raw) {
   const waiting = wholeNumber(backlog?.pending_items);
   if (!backlog || waiting === 0)
     return;
-  const reason = backlog.awaiting_owner_approval === true ? "awaiting_owner_approval" : oneOf(backlog.waiting_reason, PRIVACY_CHECK_WAITS);
+  const reason = backlog.awaiting_owner_approval === true ? "awaiting_owner_approval" : typeof backlog.waiting_reason === "string" && Object.hasOwn(PRIVACY_CHECK_WAITS, backlog.waiting_reason) ? PRIVACY_CHECK_WAITS[backlog.waiting_reason] : undefined;
   return { waiting_items: waiting, ...reason ? { waiting_for: reason } : {} };
 }
 function remoteRetryAfterSeconds(body) {
@@ -35743,21 +35743,20 @@ var init_remote_result = __esm(() => {
     "embedding_provider_unavailable",
     "embedding_provider_not_allowed",
     "no_current_embedding_artifacts",
-    "embedding_epoch_stale",
-    "hybrid_capability_unreported"
+    "embedding_epoch_stale"
   ]);
-  PRIVACY_CHECK_WAITS = Object.freeze([
-    "yielding_to_answers",
-    "breaker_open",
-    "pass_running",
-    "pass_stuck",
-    "awaiting_owner_approval",
-    "no_model",
-    "daily_budget",
-    "cloud_stopped",
-    "model_not_answering",
-    "failed"
-  ]);
+  PRIVACY_CHECK_WAITS = Object.freeze({
+    yielding_to_answers: "yielding_to_answers",
+    breaker_open: "breaker_open",
+    pass_running: "pass_running",
+    pass_stuck: "pass_stuck",
+    awaiting_owner_approval: "awaiting_owner_approval",
+    no_model: "no_model",
+    daily_budget: "judge.daily_calls",
+    cloud_stopped: "cloud_stopped",
+    model_not_answering: "model_not_answering",
+    failed: "failed"
+  });
   NETWORK_IDENTITIES = Object.freeze(["hidden", "visible", "not_verified"]);
   CLEANUPS = Object.freeze(["as_written", "light_cleanup", "custom"]);
   OUTCOMES = Object.freeze(["not_sent", "sent_failed", "unknown"]);
@@ -35978,7 +35977,7 @@ var init_remote_result = __esm(() => {
         description: "New items not searchable yet because they wait for the privacy check, and what the check waits for.",
         properties: {
           waiting_items: { type: "integer", minimum: 1 },
-          waiting_for: { enum: [...PRIVACY_CHECK_WAITS] }
+          waiting_for: { enum: [...new Set(Object.values(PRIVACY_CHECK_WAITS))] }
         }
       }
     }

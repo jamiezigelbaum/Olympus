@@ -23811,21 +23811,20 @@ var RETRIEVAL_REASONS = Object.freeze([
   "embedding_provider_unavailable",
   "embedding_provider_not_allowed",
   "no_current_embedding_artifacts",
-  "embedding_epoch_stale",
-  "hybrid_capability_unreported"
+  "embedding_epoch_stale"
 ]);
-var PRIVACY_CHECK_WAITS = Object.freeze([
-  "yielding_to_answers",
-  "breaker_open",
-  "pass_running",
-  "pass_stuck",
-  "awaiting_owner_approval",
-  "no_model",
-  "daily_budget",
-  "cloud_stopped",
-  "model_not_answering",
-  "failed"
-]);
+var PRIVACY_CHECK_WAITS = Object.freeze({
+  yielding_to_answers: "yielding_to_answers",
+  breaker_open: "breaker_open",
+  pass_running: "pass_running",
+  pass_stuck: "pass_stuck",
+  awaiting_owner_approval: "awaiting_owner_approval",
+  no_model: "no_model",
+  daily_budget: "judge.daily_calls",
+  cloud_stopped: "cloud_stopped",
+  model_not_answering: "model_not_answering",
+  failed: "failed"
+});
 var NETWORK_IDENTITIES = Object.freeze(["hidden", "visible", "not_verified"]);
 var CLEANUPS = Object.freeze(["as_written", "light_cleanup", "custom"]);
 var OUTCOMES = Object.freeze(["not_sent", "sent_failed", "unknown"]);
@@ -24030,7 +24029,7 @@ var SOURCE_INDEX_STATUS_SCHEMA = {
       description: "New items not searchable yet because they wait for the privacy check, and what the check waits for.",
       properties: {
         waiting_items: { type: "integer", minimum: 1 },
-        waiting_for: { enum: [...PRIVACY_CHECK_WAITS] }
+        waiting_for: { enum: [...new Set(Object.values(PRIVACY_CHECK_WAITS))] }
       }
     }
   }
