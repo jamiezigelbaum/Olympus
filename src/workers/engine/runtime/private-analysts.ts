@@ -1,3 +1,4 @@
+import { reportLocalAnalystPromptOverride, resolveLocalAnalystWindow, setLocalAnalystWindow } from '../../source-index/local-analyst-window.ts';
 import {
   type SecureLocalAnalystRouteStatus,
   type SovereigntyAnalystRoutePlan,
@@ -112,6 +113,15 @@ export async function createSovereigntyAnalystMap(input: {
           ...(input.bootSecretResolver ? { bootSecretResolver: input.bootSecretResolver } : {}),
         });
     if (!analyst) continue;
+    if (backend === 'local' && !(input.engine.source === 'env_bridge' && id === 'local-source-answer')) {
+      const report = { analyst: id, model: profile.model ?? '' };
+      if (input.env.OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES === undefined) {
+        setLocalAnalystWindow(analyst, await resolveLocalAnalystWindow({
+          model: profile.model ?? '',
+          ...(profile.provider === 'local-openai-compatible' && !profile.secretRef ? { baseUrl: profile.baseUrl } : {}),
+        }), report);
+      } else reportLocalAnalystPromptOverride(report);
+    }
     map.set(id, { profile: resolved, backend, analyst });
   }
   applyBuiltInPrivateAnalyst(map, securePoolMemberIds, input.builtInAnalyst);

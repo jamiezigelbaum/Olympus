@@ -1,3 +1,4 @@
+import { registerLocalAnalystFallback } from '../workers/source-index/local-analyst-window.ts';
 // The built-in private analyst (`built_in`): a small local LLM that ships
 // inside Olympus with zero setup. It answers Private-tier questions from
 // Private evidence on this computer; nothing it reads or writes leaves the
@@ -349,7 +350,7 @@ async function chatCompletion(
           { role: 'user', content: request.prompt },
         ],
         temperature: 0,
-        max_tokens: maxTokensForChars(request.maxOutputChars),
+        max_tokens: builtInAnalystMaxTokensForChars(request.maxOutputChars),
         // Every Analyst-seam prompt asks for one JSON object; a grammar keeps
         // a small model from wrapping it in prose or truncating its syntax.
         // With a response schema the grammar also bounds each field, so the
@@ -416,7 +417,7 @@ function llamaUsage(timings: Record<string, unknown> | undefined): AnalystModelU
 // ~3 characters per token for prose; the JSON envelope and citation claims
 // need headroom beyond the answer itself, with a floor so a tight budget never
 // truncates the object.
-function maxTokensForChars(chars: number | undefined): number {
+export function builtInAnalystMaxTokensForChars(chars: number | undefined): number {
   if (chars === undefined) return 1_024;
   return Math.max(512, Math.ceil(chars / 2));
 }
@@ -431,7 +432,7 @@ function maxTokensForChars(chars: number | undefined): number {
  * (a policy refusal, a bad answer, a timeout) surfaces unchanged.
  */
 export function withBuiltInFallback(primary: Analyst, builtIn: Analyst): Analyst {
-  return withEvidenceFormatOf({
+  const analyst = withEvidenceFormatOf({
     async analyze(pack, options) {
       try {
         return await primary.analyze(pack, options);
@@ -441,6 +442,7 @@ export function withBuiltInFallback(primary: Analyst, builtIn: Analyst): Analyst
       }
     },
   }, primary, builtIn);
+  return registerLocalAnalystFallback(analyst, fit => withBuiltInFallback(fit(primary), fit(builtIn)));
 }
 
 function isLocalServiceDown(error: unknown): boolean {

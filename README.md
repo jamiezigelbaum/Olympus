@@ -379,6 +379,14 @@ fork:
 | **Private cloud only** (`private-cloud-only`) | frontier cloud | [Venice](https://venice.ai) Private model (`kimi-k3`) |
 | **Private meaning search on this computer** (`no-sensitive`) | frontier cloud | **stored and searched by meaning on this computer**: its search vectors come from the built-in model and are kept here; no Private agent answer lane |
 
+The engine sizes local answer prompts from the model's served context window
+when it can read it at startup (or the built-in model's manifest). Unknown
+windows keep the 13,500-byte fallback. Automatic sizing reserves answer tokens
+and framing space and caps prompts at 27,000 bytes, the size that kept every
+passage hit in measurement. `/health` lists each local answer route's
+`local_prompt_budget` source, so a fallback shows.
+`OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES` still overrides that size.
+
 “Private cloud only” describes **Private-data handling**: Venice answers
 Private questions. Search indexing for every tier uses EmbeddingGemma 2,
 Google's small embedding model, built into Olympus: it downloads once, runs on

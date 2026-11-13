@@ -97,7 +97,7 @@ export interface SourceAnswerLatencyTraceRecord {
     // Short one-way hash of store and item per seat; never the item id.
     item_hashes?: string[];
     recency_seats: number;
-    fits: Array<{ lane: 'local' | 'cloud'; kept_seats: number[]; prompt_bytes?: number }>;
+    fits: Array<{ lane: 'local' | 'cloud'; kept_seats: number[]; prompt_bytes?: number; prompt_budget_bytes?: number; prompt_budget_source?: 'env' | 'manifest' | 'server' | 'fallback' }>;
   };
   caller?: OperationCallerWire;
   // Synchronous SQLite the Ask ran on the request thread (#1305).
@@ -283,6 +283,7 @@ export function buildSourceAnswerLatencyTraceRecord(input: {
           recency_seats: Math.max(0, Math.floor(input.trace.evidenceSeats.recencySeats)),
           fits: input.trace.evidenceSeats.fits.map((fit) => ({
             lane: fit.lane,
+            ...(fit.promptBudgetBytes === undefined ? {} : { prompt_budget_bytes: fit.promptBudgetBytes, prompt_budget_source: fit.promptBudgetSource }),
             kept_seats: fit.keptSeats.map((seat) => Math.max(0, Math.floor(seat))),
             ...(fit.promptBytes === undefined ? {} : { prompt_bytes: Math.max(0, Math.floor(fit.promptBytes)) }),
           })),

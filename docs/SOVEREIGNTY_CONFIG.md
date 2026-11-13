@@ -989,3 +989,30 @@ The active email posture is:
   surface
 - if the private email lane is unavailable, Olympus should fail closed rather
   than silently using ordinary cloud-visible email access
+
+### Local answer prompt size
+
+At engine startup Olympus sizes each local answer route from its served context
+window when the endpoint reports it. Built-in models use the manifest's
+`contextTokens`. The prompt allowance is two bytes per token after reserving the
+answer's max tokens and 1,024 framing tokens, between 13,500 and 27,000 bytes.
+The ceiling is measured, not derived: on 13 Nov 2026 a 27,000-byte prompt kept
+every passage hit a 54,000-byte prompt kept, and a larger prompt only adds
+prefill time.
+Unknown or hidden server windows retain 13,500 bytes. Set
+`OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES` to override automatic sizing.
+The local fitting audit records `prompt_budget_bytes` and
+`prompt_budget_source` (`env`, `manifest`, `server`, or `fallback`).
+
+The startup probe asks the analyst's own host, read-only, within one
+two-second deadline, and caches the result for this process. It asks llama.cpp
+`/props` (`n_ctx`), then vLLM `/v1/models` (`max_model_len`), then Ollama
+`/api/ps` (`context_length`), and the first usable reply supplies the window.
+It never reads a training length (`n_ctx_train`). A prefixed router that hides
+these endpoints, a URL with credentials or a query, and a route whose
+authentication the probe does not have all keep the fallback. A failed or slow
+probe never stops engine start.
+
+`/health` reports `local_prompt_budget`: for each local answer route, its
+`analyst`, `model`, `source` (`env`, `manifest`, `server` or `fallback`) and,
+when known, `window_tokens`.

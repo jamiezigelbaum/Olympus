@@ -1,3 +1,4 @@
+import { localAnalystWindowReports, reportLocalAnalystPromptOverride, resolveLocalAnalystWindow, setLocalAnalystWindow } from '../source-index/local-analyst-window.ts';
 import { X_CONTENT_RECOVERY_LIMIT_SUBJECT } from '../x-bookmarks/content-recovery.ts';
 import { GMAIL_IMPORT_LIMIT_SUBJECT, withGmailImportRunOnce } from '../google-connectors/gmail-import-allowance.ts';
 import { startVeniceCreditRecovery, fetchVeniceCreditStatus, VENICE_BILLING_BASE_URL } from '../../core/provider-credit-status.ts';
@@ -3191,9 +3192,7 @@ export async function main(): Promise<void> {
     process.env.OLYMPUS_SOURCE_INDEX_ANSWER_MAX_RESULTS,
     'OLYMPUS_SOURCE_INDEX_ANSWER_MAX_RESULTS',
   );
-  // Total prompt bytes a local analyst leg may receive. Set it only when the
-  // local model's served context is known to hold more than the conservative
-  // default.
+  // Explicit override wins over the served window resolved once at startup.
   const sourceIndexLocalAnalystPromptBytes = parseOptionalPositiveInteger(
     process.env.OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES,
     'OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES',
@@ -3312,18 +3311,32 @@ export async function main(): Promise<void> {
           ? { lane: analystLane, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs }
           : { profile: analystProfile, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs },
       ), { serialize: false });
+      const defaultLocal = createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' });
+      const localEndpoint = process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE
+        ? olympusConfig.argus.lanes[analystLane] : olympusConfig.argus.modelProfiles[analystProfile];
+      const localReport = { analyst: 'local-source-answer', model: localEndpoint.model };
+      if (sourceIndexLocalAnalystPromptBytes === undefined) {
+        setLocalAnalystWindow(defaultLocal, await resolveLocalAnalystWindow({
+          model: localEndpoint.model,
+          ...(!localEndpoint.secretRef ? { baseUrl: localEndpoint.baseUrl } : {}),
+        }), localReport);
+      } else reportLocalAnalystPromptOverride(localReport);
       const builtInAnalystModel = answerBuiltInModel;
+      const builtInAnalyst = builtInAnalystModel
+        ? setLocalAnalystWindow(createAnalyst(builtInAnalystModel, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' }),
+          await resolveLocalAnalystWindow({ model: builtInAnalystModel.spec.modelId }),
+          { analyst: 'built-in', model: builtInAnalystModel.spec.modelId }) : undefined;
       const sovereigntyAnalysts = await createSovereigntyAnalystMap({
         localModelActivity,
         engine: sovereigntyEngine,
         olympusConfig,
         env: process.env,
-        defaultLocal: createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' }),
+        defaultLocal,
         veniceAnalystTimeoutMs,
         veniceReasoningHeadroomTokens,
         bootSecretResolver,
-        ...(builtInAnalystModel
-          ? { builtInAnalyst: createAnalyst(builtInAnalystModel, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' }) }
+        ...(builtInAnalyst
+          ? { builtInAnalyst }
           : {}),
       });
       if (builtInAnalystModel) {
@@ -3335,7 +3348,7 @@ export async function main(): Promise<void> {
         });
       }
       const defaultLocalAnalyst = sovereigntyAnalysts.get('local-source-answer')?.analyst
-        ?? createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' });
+        ?? defaultLocal;
       // Off unless the owner set OLYMPUS_SOURCE_RERANKER=built-in (issue #921).
       const sourceReranker = await prepareBuiltInRerankerFromEnv();
       return createAnalystSourceIndexAnswerHandler({
@@ -3363,8 +3376,8 @@ export async function main(): Promise<void> {
             trustDomain,
             requestedProvider,
             analysts: sovereigntyAnalysts,
-            defaultLocal: builtInAnalystModel
-              ? withBuiltInFallback(defaultLocalAnalyst, createAnalyst(builtInAnalystModel, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' }))
+            defaultLocal: builtInAnalyst
+              ? withBuiltInFallback(defaultLocalAnalyst, builtInAnalyst)
               : defaultLocalAnalyst,
           });
         },
@@ -6116,9 +6129,16 @@ export async function main(): Promise<void> {
   serverOptions.fetch = (async (request, server) => {
     const response = await fetchWithTierLedgerStatus(request, server);
     const path = new URL(request.url).pathname;
-    if ((path === '/v1/health' || path === '/health') && response?.ok && (tierLedgerProblems.size || engineFront)) {
+    const localPromptBudgets = localAnalystWindowReports();
+    if ((path === '/v1/health' || path === '/health') && response?.ok && (tierLedgerProblems.size || engineFront || localPromptBudgets.length)) {
       return Response.json({
         ...await response.json() as object,
+        // Which window sized each local answer prompt, so a fallback to the
+        // 13,500-byte floor is visible rather than silent.
+        ...(localPromptBudgets.length ? { local_prompt_budget: localPromptBudgets.map(report => ({
+          analyst: report.analyst, model: report.model, source: report.source,
+          ...(report.windowTokens !== undefined ? { window_tokens: report.windowTokens } : {}),
+        })) } : {}),
         ...(tierLedgerProblems.size ? { privacy_ledger_problems: Object.fromEntries(tierLedgerProblems) } : {}),
         // The front answers while its background restarts or crash-loops: an
         // upgrade or rollback reads this before it calls the engine healthy

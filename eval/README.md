@@ -158,7 +158,10 @@ local Dropbox index and a reachable Argus lane:
    `OLYMPUS_EVAL_MAX_CHARS_PER_CANDIDATE` for targeted diagnosis. A local
    Analyst is sent the pack Ask's local leg would send: fitted to 13,500 prompt
    bytes, or to `OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES` when set (the
-   same override Ask reads). After the gate, the same questions run again at
+   same override Ask reads). The engine now sizes local prompts from the model's
+   served window at startup, or the built-in manifest, capped at 27,000 bytes;
+   unknown windows retain 13,500 bytes and the env override still wins. The
+   standalone eval retains its explicit fallback above. After the gate, the same questions run again at
    Ask's own pack size (24) as a second, informational score in the report's
    `informational` section; it never decides pass or fail. Set
    `OLYMPUS_EVAL_INFORMATIONAL_MAX_RESULTS` to another size, or 0 to skip it.
