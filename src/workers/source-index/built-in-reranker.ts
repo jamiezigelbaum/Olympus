@@ -173,10 +173,19 @@ export async function prepareBuiltInRerankerFromEnv(
   return reranker;
 }
 
-/** Whether this install's setting allows the built-in reranker at all (unset, blank or built-in). */
-export function builtInRerankerMayRun(env: Record<string, string | undefined> = process.env): boolean {
+/**
+ * Whether the built-in reranker may turn on here: set to built-in, or unset
+ * (or blank) on a machine with the default's 16 GiB of RAM. Health and the
+ * boot download follow this, so a smaller machine neither downloads it nor
+ * reports it as on.
+ */
+export function builtInRerankerMayRun(
+  env: Record<string, string | undefined> = process.env,
+  memory: () => number = totalmem,
+): boolean {
   const mode = env[SOURCE_RERANKER_ENV]?.trim().toLowerCase() || undefined;
-  return mode === undefined || mode === 'built-in';
+  if (mode === 'built-in') return true;
+  return mode === undefined && memory() >= DEFAULT_ON_MIN_MEMORY_BYTES;
 }
 
 /**
@@ -204,9 +213,8 @@ export function createBuiltInRerankerResolver(
  */
 export function builtInRerankerFromEnv(options: BuiltInRerankerFromEnvOptions = {}): CrossEncoderReranker | undefined {
   const env = options.env ?? process.env;
-  if (!builtInRerankerMayRun(env)) return undefined;
+  if (!builtInRerankerMayRun(env, options.totalmem)) return undefined;
   const mode = env[SOURCE_RERANKER_ENV]?.trim().toLowerCase() || undefined;
-  if (mode === undefined && (options.totalmem ?? totalmem)() < DEFAULT_ON_MIN_MEMORY_BYTES) return undefined;
   const modelDir = (mode === 'built-in' ? env[SOURCE_RERANKER_MODEL_DIR_ENV]?.trim() : undefined)
     || join(builtInEmbeddingPaths(env).root, 'reranker', MMARCO_MMINILMV2_L12_H384_V1.modelId);
   if (!modelDir || !isAbsolute(modelDir)) return undefined;

@@ -164555,9 +164555,11 @@ function createCrossEncoderReranker(options) {
     }
   };
 }
-function builtInRerankerMayRun(env = process.env) {
+function builtInRerankerMayRun(env = process.env, memory = totalmem4) {
   const mode = env[SOURCE_RERANKER_ENV]?.trim().toLowerCase() || undefined;
-  return mode === undefined || mode === "built-in";
+  if (mode === "built-in")
+    return true;
+  return mode === undefined && memory() >= DEFAULT_ON_MIN_MEMORY_BYTES;
 }
 function createBuiltInRerankerResolver(options = {}, warn = console.warn) {
   let found;
@@ -164571,11 +164573,9 @@ function createBuiltInRerankerResolver(options = {}, warn = console.warn) {
 }
 function builtInRerankerFromEnv(options = {}) {
   const env = options.env ?? process.env;
-  if (!builtInRerankerMayRun(env))
+  if (!builtInRerankerMayRun(env, options.totalmem))
     return;
   const mode = env[SOURCE_RERANKER_ENV]?.trim().toLowerCase() || undefined;
-  if (mode === undefined && (options.totalmem ?? totalmem4)() < DEFAULT_ON_MIN_MEMORY_BYTES)
-    return;
   const modelDir = (mode === "built-in" ? env[SOURCE_RERANKER_MODEL_DIR_ENV]?.trim() : undefined) || join129(builtInEmbeddingPaths(env).root, "reranker", MMARCO_MMINILMV2_L12_H384_V1.modelId);
   if (!modelDir || !isAbsolute37(modelDir))
     return;

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   builtInRerankerFromEnv,
+  builtInRerankerMayRun,
   createBuiltInRerankerResolver,
   createCrossEncoderReranker,
   prepareBuiltInRerankerFromEnv,
@@ -213,6 +214,18 @@ describe('default activation and idle release', () => {
     expect(builtInRerankerFromEnv({ env, totalmem: () => 16 * 1024 ** 3 })).toBeUndefined();
     markBuiltInOnnxRuntimeInstalled(env);
     expect(builtInRerankerFromEnv({ env, totalmem: () => 16 * 1024 ** 3 })).toBeDefined();
+  });
+
+  test('may run only where it would turn on: the setting allows it and, by default, 16 GiB of RAM', () => {
+    // Health and the boot download follow this, so a smaller machine neither
+    // downloads the reranker nor reports it as on.
+    const big = () => 16 * 1024 ** 3;
+    const small = () => 8 * 1024 ** 3;
+    expect(builtInRerankerMayRun({}, big)).toBe(true);
+    expect(builtInRerankerMayRun({}, small)).toBe(false);
+    expect(builtInRerankerMayRun({ OLYMPUS_SOURCE_RERANKER: ' ' }, small)).toBe(false);
+    expect(builtInRerankerMayRun({ OLYMPUS_SOURCE_RERANKER: 'built-in' }, small)).toBe(true);
+    expect(builtInRerankerMayRun({ OLYMPUS_SOURCE_RERANKER: 'off' }, big)).toBe(false);
   });
 
   function idleFixture() {
