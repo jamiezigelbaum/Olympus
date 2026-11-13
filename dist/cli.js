@@ -19850,11 +19850,12 @@ function backupsSince(env, sinceMs) {
 function restoreSchemaBackupsSince(env, sinceMs) {
   const restored = [];
   for (const entry of backupsSince(env, sinceMs)) {
-    rmSync8(`${entry.dbPath}-wal`, { force: true });
-    rmSync8(`${entry.dbPath}-shm`, { force: true });
+    for (const suffix of ["-wal", "-shm", "-journal"])
+      rmSync8(`${entry.dbPath}${suffix}`, { force: true });
     renameSync4(entry.backupPath, entry.dbPath);
     restored.push(entry.storeId);
   }
+  removeAbandonedCopiesOfRecorded(env);
   pruneSchemaBackupRecord(env);
   return restored;
 }
@@ -19862,8 +19863,13 @@ function removeSchemaBackupsSince(env, sinceMs) {
   const removed = backupsSince(env, sinceMs);
   for (const entry of removed)
     rmSync8(entry.backupPath, { recursive: true, force: true });
+  removeAbandonedCopiesOfRecorded(env);
   pruneSchemaBackupRecord(env);
   return removed.length;
+}
+function removeAbandonedCopiesOfRecorded(env) {
+  for (const backup of new Set(schemaBackups(env).map((entry) => entry.backupPath)))
+    removeAbandonedBackupCopies(backup);
 }
 function removeAllSchemaBackups(env, dryRun) {
   const copies = [...new Set(schemaBackups(env).flatMap((entry) => preSchemaBackupsOf(entry.dbPath)))];
@@ -258283,6 +258289,9 @@ function formatCliFatalError(error2) {
   if (typeof candidate2.code !== "string" || !/^[a-z0-9][a-z0-9._:-]{0,127}$/.test(candidate2.code))
     return [message2];
   const lines2 = [`Error [${candidate2.code}]: ${message2}`];
+  const suggestion = error2.suggestion;
+  if (typeof suggestion === "string" && suggestion.trim())
+    lines2.push(`Fix: ${suggestion}`);
   if (candidate2.retryable === true && typeof candidate2.retryAfterMs === "number" && Number.isSafeInteger(candidate2.retryAfterMs) && candidate2.retryAfterMs > 0) {
     lines2.push(`Retryable: retry after ${Math.ceil(candidate2.retryAfterMs / 1000)} seconds.`);
   } else if (candidate2.retryable === true) {

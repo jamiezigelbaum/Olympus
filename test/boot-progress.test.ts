@@ -253,6 +253,42 @@ describe('schema updates back up the store first', () => {
   });
 });
 
+describe('a rollback or a commit leaves no copy behind (the gate7 forced leg, 2026-11-13)', () => {
+  function migratedWithLeftovers(env: Record<string, string>): { path: string; since: number; gone: number } {
+    const { path, db } = storeAtVersion1(env);
+    const since = Date.now() - 1;
+    runSqliteMigrations(db, 'fixture', MIGRATIONS, { env, log: () => {} });
+    db.close();
+    // A process stopped inside a transaction leaves its hot journal, and one
+    // stopped inside a backup leaves its part-way copy.
+    const gone = Bun.spawnSync([process.execPath, '-e', '0']).pid;
+    writeFileSync(`${path}-journal`, 'a hot journal of the updated file');
+    for (const suffix of ['partial', 'partial-journal']) writeFileSync(`${path}.pre-schema-1.bak.${gone}.${suffix}`, 'x');
+    return { path, since, gone };
+  }
+
+  test('a restore removes the -journal written for the file it replaces, and every part-way copy', () => {
+    const env = home();
+    const { path, since, gone } = migratedWithLeftovers(env);
+    expect(restoreSchemaBackupsSince(env, since)).toEqual(['fixture']);
+    expect(existsSync(`${path}-journal`)).toBe(false);
+    expect(existsSync(`${path}.pre-schema-1.bak.${gone}.partial`)).toBe(false);
+    expect(existsSync(`${path}.pre-schema-1.bak.${gone}.partial-journal`)).toBe(false);
+    expect(preSchemaBackupsOf(path)).toEqual([]);
+    const restored = new Database(path, { readonly: true });
+    expect(readSqliteSchemaVersion(restored, 'fixture')).toBe(1);
+    restored.close();
+  }, 30_000);
+
+  test('a commit removes the part-way copies with the backups', () => {
+    const env = home();
+    const { path, since, gone } = migratedWithLeftovers(env);
+    expect(removeSchemaBackupsSince(env, since)).toBe(1);
+    expect(existsSync(`${path}.pre-schema-1.bak.${gone}.partial`)).toBe(false);
+    expect(preSchemaBackupsOf(path)).toEqual([]);
+  }, 30_000);
+});
+
 describe('a killed backup leaves nothing behind once a backup runs again', () => {
   test('part-way copies of gone processes are removed; a live process\'s copy is kept', () => {
     const env = home();
