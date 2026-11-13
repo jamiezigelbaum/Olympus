@@ -215,7 +215,8 @@ export async function openBrowserTimingSeeds(machine: Machine, endpoint: string,
           await click(tab.session, source === 'google_drive' ? ['New folder'] : ['Folder', 'Create folder']);
           await fill(tab.session, '[role=dialog] input[type=text], [role=dialog] input:not([type])', name);
           await click(tab.session, ['Create']);
-          await until(() => evaluate(tab.session, `![...document.querySelectorAll('[role=dialog]')].some(${visible})`), `${source} new folder dialog stayed open after Create`);
+          // Drive's dialog closes once the folder exists; Dropbox moves on to the new folder and may leave other dialogs up.
+          if (source === 'google_drive') await until(() => evaluate(tab.session, `![...document.querySelectorAll('[role=dialog]')].some(${visible})`), 'Drive new folder dialog stayed open after Create');
           if (source === 'google_drive') {
             // A folder created from a search may not be in the current result yet; rerun that search.
             await driveSearch(tab.session, name);
