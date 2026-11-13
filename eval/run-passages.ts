@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { EvidencePackBuildDetail } from '../src/core/evidence-pack.ts';
-import type { EvidenceRerankOutcome } from '../src/core/evidence-reranker.ts';
+import { RERANK_POOL_STORE_DEPTH, type EvidenceRerankOutcome } from '../src/core/evidence-reranker.ts';
 import { loadConfig, parseLane, parseModelProfile } from '../src/core/config.ts';
 import { createAnalyst, withPromptBudget } from '../src/core/analyst.ts';
 import { createDelphiAnalystModel } from '../src/core/analyst-delphi.ts';
@@ -86,7 +86,7 @@ export interface PassageReceipt {
   setId: string; maxResults: number; ks: number[];
   /** The reranker's id (its model folder's name), or 'off'. */
   reranker: string;
-  /** Set when the reranker's pool was strength-allocated (OLYMPUS_EVAL_RERANK_POOL_STORE_DEPTH); absent: even turns. */
+  /** The per-store depth of the reranker's strength-drawn pool; absent with the reranker off. */
   rerankPoolStoreDepth?: number;
   storeCounts: readonly EvalStoreCount[]; skippedStores: readonly EvalSkippedStore[];
   summary: { overall: PassageSummary; byShape: Record<string, PassageSummary>; byFamily: Record<string, PassageSummary>; byTier: Record<string, PassageSummary>;
@@ -394,19 +394,6 @@ export function questionJudge(model: DraftModel) {
   };
 }
 
-/**
- * Eval-only arm switch: OLYMPUS_EVAL_RERANK_POOL_STORE_DEPTH=<n> draws the
- * reranker's pool by store strength (every store's leader, then the strongest
- * stores up to n of their ranks). Unset: even turns, as the product does.
- */
-export function evalRerankPoolAllocation(env: Record<string, string | undefined>): { storeDepth: number } | undefined {
-  const raw = env.OLYMPUS_EVAL_RERANK_POOL_STORE_DEPTH?.trim();
-  if (!raw) return undefined;
-  const storeDepth = Number(raw);
-  if (!Number.isInteger(storeDepth) || storeDepth < 1) throw new Error('OLYMPUS_EVAL_RERANK_POOL_STORE_DEPTH must be a whole number of at least 1.');
-  return { storeDepth };
-}
-
 export async function main(argv = process.argv.slice(2), stage?: EvalStage): Promise<void> {
   const enter = (name: string) => enterStage(stage, name, 'passage eval');
   enter('arguments');
@@ -462,7 +449,6 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     const embedding = await prepareEvalEmbedding({ configured: await configuredEvalEmbedding(config, process.env) });
     enter('load_reranker');
     const reranker = await prepareBuiltInRerankerFromEnv();
-    const rerankPoolAllocation = reranker ? evalRerankPoolAllocation(process.env) : undefined;
     // Each store search's returned ids, for the funnel's store rank.
     let searches: EvalStoreSearch[] = [];
     const lanes = createEvalSourceLanes({ ...opened, embeddingFor: embedding.embeddingFor, onStoreSearch: search => { searches.push(search); } });
@@ -473,10 +459,10 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     const receipt = await runPassageEval({ dataset, split, maxResults, storeCounts: opened.storeCounts, skippedStores: opened.skipped,
       gitSha: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
       ...(promptBytes !== undefined ? { promptBytes } : {}),
-      ...(rerankPoolAllocation ? { rerankPoolStoreDepth: rerankPoolAllocation.storeDepth } : {}),
+      ...(reranker ? { rerankPoolStoreDepth: RERANK_POOL_STORE_DEPTH } : {}),
       buildPack: async q => {
         searches = [];
-        const built = await buildEvalPack({ question: q.question, lanes, maxResults, maxCharsPerCandidate, ...(reranker ? { reranker } : {}), ...(rerankPoolAllocation ? { rerankPoolAllocation } : {}) });
+        const built = await buildEvalPack({ question: q.question, lanes, maxResults, maxCharsPerCandidate, ...(reranker ? { reranker } : {}) });
         return { ...built, storeSearches: searches };
       },
       ...(probe ? { probeLanes: probe } : {}),

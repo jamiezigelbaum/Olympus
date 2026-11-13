@@ -214,7 +214,6 @@ export function buildEvalPack(input: {
   lanes: (question: string) => AnalystAnswerLanes;
   queryPlanner?: AnalystQueryPlanner;
   reranker?: EvidenceReranker;
-  rerankPoolAllocation?: { storeDepth: number };
   maxResults: number;
   maxCharsPerCandidate: number;
 }): Promise<EvidencePackBuildDetail> {
@@ -223,7 +222,6 @@ export function buildEvalPack(input: {
     question: input.question,
     ...(input.queryPlanner ? { queryPlanner: input.queryPlanner } : {}),
     ...(input.reranker ? { reranker: input.reranker } : {}),
-    ...(input.rerankPoolAllocation ? { rerankPoolAllocation: input.rerankPoolAllocation } : {}),
     maxResults: input.maxResults,
     maxCharsPerCandidate: input.maxCharsPerCandidate,
     searchContext: {

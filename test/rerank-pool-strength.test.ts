@@ -55,7 +55,7 @@ describe('applyStrengthPoolBudget', () => {
 });
 
 // Four stores; the strongest by concept share holds the answer at its rank 6.
-function packInput(rerankPoolAllocation?: { storeDepth: number }) {
+function packInput() {
   const stores = ['internal.a', 'internal.b', 'internal.c', 'internal.d'];
   const answerStore = 'internal.c';
   const item = (id: string) => ({ family: 'file' as const, provider: 'fixture', accountScope: 'personal', providerItemId: id, localItemId: id });
@@ -101,7 +101,6 @@ function packInput(rerankPoolAllocation?: { storeDepth: number }) {
         setTimeout: (callback: () => void, ms: number) => clock.setTimeout(callback, ms),
         clearTimeout: (handle: unknown) => clock.clearTimeout(handle as Parameters<typeof clock.clearTimeout>[0]),
       },
-      ...(rerankPoolAllocation ? { rerankPoolAllocation } : {}),
     },
   };
 }
@@ -109,35 +108,19 @@ function packInput(rerankPoolAllocation?: { storeDepth: number }) {
 const packIds = (detail: Awaited<ReturnType<typeof buildEvidencePackDetailed>>) =>
   detail.pack.candidates.map((candidate) => candidate.provenance.sourceItem.providerItemId);
 
-describe('buildEvidencePackDetailed with a strength-allocated rerank pool', () => {
-  test('even pool (default): the strong store\'s rank 6 is never scored', async () => {
+describe('buildEvidencePackDetailed draws the rerank pool by store strength', () => {
+  test('the strong store goes deep, every store keeps its leader, and the reranker finds the answer', async () => {
     const { input, scored } = packInput();
-    const detail = await buildEvidencePackDetailed(input);
-    expect(scored[0]).toHaveLength(9);
-    expect(packIds(detail)).not.toContain('internal.c-6');
-  });
-
-  test('strength pool: the strong store goes deep, every store keeps its leader, and the reranker finds the answer', async () => {
-    const { input, scored } = packInput({ storeDepth: 6 });
     const detail = await buildEvidencePackDetailed(input);
     expect(scored[0]).toHaveLength(9);
     expect(packIds(detail)[0]).toBe('internal.c-6');
     for (const store of ['a', 'b', 'd']) expect(scored[0]!.some((passage) => passage.includes(`internal.${store}-1`))).toBe(true);
   });
 
-  test('without a reranker the allocation is ignored and the even cut stands', async () => {
-    const { reranker: _a, ...withAllocation } = packInput({ storeDepth: 6 }).input;
-    const { reranker: _b, ...plain } = packInput().input;
-    expect(packIds(await buildEvidencePackDetailed(withAllocation))).toEqual(packIds(await buildEvidencePackDetailed(plain)));
-  });
-});
-
-describe('eval arm switch', () => {
-  test('OLYMPUS_EVAL_RERANK_POOL_STORE_DEPTH picks the strength pool; unset or blank is even; nonsense fails loudly', async () => {
-    const { evalRerankPoolAllocation } = await import('../eval/run-passages.ts');
-    expect(evalRerankPoolAllocation({})).toBeUndefined();
-    expect(evalRerankPoolAllocation({ OLYMPUS_EVAL_RERANK_POOL_STORE_DEPTH: ' ' })).toBeUndefined();
-    expect(evalRerankPoolAllocation({ OLYMPUS_EVAL_RERANK_POOL_STORE_DEPTH: '10' })).toEqual({ storeDepth: 10 });
-    for (const value of ['0', '2.5', 'deep']) expect(() => evalRerankPoolAllocation({ OLYMPUS_EVAL_RERANK_POOL_STORE_DEPTH: value })).toThrow();
+  test('without a reranker the even cut stands', async () => {
+    const { reranker: _reranker, ...plain } = packInput().input;
+    const ids = packIds(await buildEvidencePackDetailed(plain));
+    expect(ids).toHaveLength(3);
+    expect(ids).not.toContain('internal.c-6');
   });
 });

@@ -58,6 +58,11 @@ export const RERANK_PASSAGE_CHARS = 2_000;
 /** A reranker that has not answered by then is abandoned and the fused order stands. */
 export const DEFAULT_RERANK_TIMEOUT_MS = 5_000;
 export const DEFAULT_RERANK_POOL_SIZE = 30;
+// The pool is drawn by store strength: every store's leader, then the
+// strongest stores first, up to this many of each store's ranks. On subset L
+// (13 Nov 2026) this recovered 3 documents and 2 paragraphs the even turns
+// left out of a pool of the same size, losing no document.
+export const RERANK_POOL_STORE_DEPTH = 10;
 // Sparta scores 360 candidates of 128 tokens in 4 s with MiniLM int8 (#921).
 export const MAX_RERANK_POOL_SIZE = 400;
 

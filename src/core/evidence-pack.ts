@@ -5,6 +5,7 @@ import {
   rerankCandidates,
   rerankPassage,
   rerankPoolSize,
+  RERANK_POOL_STORE_DEPTH,
   type EvidenceRerankAudit,
   type EvidenceReranker,
   type RerankTimers,
@@ -233,12 +234,6 @@ export interface BuildEvidencePackInput {
    */
   reranker?: EvidenceReranker;
   rerankTimers?: RerankTimers;
-  /**
-   * How the reranker's pool is drawn across stores. Absent: even turns.
-   * `storeDepth`: every store's leader, then the strongest stores first, up
-   * to that many of each store's ranks. Ignored when no reranker runs.
-   */
-  rerankPoolAllocation?: { storeDepth: number };
   now?: () => Date;
 }
 
@@ -365,7 +360,7 @@ async function buildPreparedEvidencePackDetailed(
   const retrievalLimit = reranker ? rerankPoolSize(reranker, input.maxResults) : input.maxResults;
   const routed = input.selectedItems?.length
     ? selectedItemsToRoutedSlice(input)
-    : await runRoutedSearches(input, retrievalLimit, reranker ? input.rerankPoolAllocation : undefined);
+    : await runRoutedSearches(input, retrievalLimit, reranker ? { storeDepth: RERANK_POOL_STORE_DEPTH } : undefined);
   // A build can fan out more than once (the literal query plus planner
   // expansions), and each routed run judged its hits against its own ledger
   // snapshot. One more pass over the merged hits puts the whole pack on ONE
