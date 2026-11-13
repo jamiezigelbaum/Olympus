@@ -32,12 +32,13 @@ export function driveFolderSearchUrl(name: string): string {
   return `https://drive.google.com/drive/u/0/search?q=${encodeURIComponent(`type:folder "${name}"`)}`;
 }
 
-/** A loading bar the user can see; Drive keeps hidden progressbar elements in the page at rest. */
-const BUSY = `[...document.querySelectorAll('[role=progressbar]')].some(${visible})`;
+/** A loading bar the user can see. Drive keeps hidden bars in the page at rest, and its storage meter is a
+ * visible bar with a value, so only a visible bar without aria-valuenow (indeterminate) counts as loading. */
+const BUSY = `[...document.querySelectorAll('[role=progressbar]')].some(e => !e.hasAttribute('aria-valuenow') && (${visible})(e))`;
 const DRIVE_EMPTY = `/no results|no matching|matched this search|try another search|none of your files/i.test(document.body?.innerText || '')`;
 
 /** Drive search has settled: results grid, or the empty state a first run gets before the folder exists. */
-export const DRIVE_SEARCH_SETTLED = `(() => location.pathname.includes('/search') && !${BUSY} && (!!document.querySelector('[role=grid]') || ${DRIVE_EMPTY}))()`;
+export const DRIVE_SEARCH_SETTLED = `(() => location.pathname.includes('/search') && (${DRIVE_EMPTY} || (!!document.querySelector('[role=grid]') && !${BUSY})))()`;
 
 /** What a Drive search page showed, for a failure message: no file names or page text. */
 export const DRIVE_SEARCH_SNAPSHOT = `(() => ({path: location.pathname, grid: !!document.querySelector('[role=grid]'), progress: !!document.querySelector('[role=progressbar]'), busy: ${BUSY}, empty: ${DRIVE_EMPTY}, rows: document.querySelectorAll('[role=row]').length}))()`;
