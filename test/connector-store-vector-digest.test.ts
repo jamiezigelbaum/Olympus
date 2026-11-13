@@ -589,3 +589,31 @@ test('a digest page crosses as one packed blob that unpacks byte for byte, NULs 
     expect(forEachPackedVectorDigest(none, () => { throw new Error('no rows to visit'); })).toBe(true);
   } finally { db.close(); }
 });
+
+test('re-scoring stops by score, not count: an item the 256-dimension digest ranks below a full batch is still found (#1529)', async () => {
+  const db = numericStore();
+  const dims = 300;
+  const vector = (entries: Array<[number, number]>) => { const v = new Array(dims).fill(0); for (const [i, x] of entries) v[i] = x; return v; };
+  try {
+    db.transaction(() => {
+      // 1,000 chunks the digest scores 1.0 (their prefix is the query's) but whose exact cosine is about 0.88.
+      for (let i = 1; i <= 1000; i++) insert(db, i, vector([[0, 1], [299, 0.3]]));
+      // The exact winner: its digest score (about 0.95) puts it behind all 1,000.
+      insert(db, 1001, vector([[0, 0.95], [1, 0.31], [299, 1]]));
+      // Chunks the digest scores near 0: once they are next, re-scoring stops.
+      for (let i = 1002; i <= 4000; i++) insert(db, i, vector([[2, 1]]));
+    })();
+    finish(db);
+    const query = vector([[0, 1], [299, 1]]);
+    const options = { modelId };
+    let rescored = 0;
+    const result = await scanDigestPages(reader(db, (q, rows) => {
+      if (q.sql.includes('FROM chunk_embeddings emb')) rescored += (rows as unknown[]).length;
+    }), query, options, undefined, 5);
+    expect(rank(result, 5)).toEqual(exact(db, query, options, 5));
+    expect(rank(result, 5)[0]).toBe(1001);
+    if ('skippedReason' in result) throw new Error(result.skippedReason);
+    expect(result.exhausted).toBe(false);
+    expect(rescored).toBeLessThanOrEqual(1200);
+  } finally { db.close(); }
+});
