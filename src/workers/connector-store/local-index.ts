@@ -17196,6 +17196,8 @@ export function createConnectorStoreContentProvider(
     }
     return embeddings.map(value => cosineSimilarity(queryEmbedding, value));
   } : undefined;
+  // The backend, not this per-question provider, is what gets overloaded.
+  const windowScorerKey = privateProvider ? `${privateProvider.provider}|${privateProvider.backend}|${privateProvider.configHash}` : undefined;
   // The query's vector for passage ranking, or nothing. Never fails the read:
   // without it, passages fall back to lexical and document order.
   let storeHasVectors: boolean | undefined;
@@ -17291,7 +17293,7 @@ export function createConnectorStoreContentProvider(
       const coverageGaps = connectorStoreCoverageGaps(content, metadataOnlyRuleId);
       let windowPlacement: EvidenceWindowSource | undefined;
       if (content.truncated && content.windowTexts && content.windowTexts.length > 1) {
-        windowPlacement = { texts: content.windowTexts, ...(content.windowTextHashes ? { hashes: content.windowTextHashes } : {}), ...(scoreWindows ? { scoreWindows } : {}) };
+        windowPlacement = { texts: content.windowTexts, ...(content.windowTextHashes ? { hashes: content.windowTextHashes } : {}), ...(scoreWindows ? { scoreWindows } : {}), ...(windowScorerKey ? { scorerKey: windowScorerKey } : {}) };
       }
 
       return {

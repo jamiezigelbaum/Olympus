@@ -38496,7 +38496,8 @@ var MAX_PROMPT_BYTES = 1e5;
 var OPENCLAW_INFER_MAX_PROMPT_BYTES = MAX_PROMPT_BYTES;
 
 // src/core/evidence-window-placement.ts
-var embeddingHistory = new WeakMap;
+var keyedHistory = new Map;
+var unkeyedHistory = new WeakMap;
 
 // src/core/limit-stops.ts
 var limits = new Map;

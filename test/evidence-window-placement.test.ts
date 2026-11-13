@@ -501,6 +501,24 @@ test('one store\'s slow embedding history does not skip another store in the sam
   expect(placer.audit.calls.map(call => call.outcome)).toEqual(['scored', 'scored']);
 });
 
+test('slow history follows the embedding backend across questions, even with a new scorer closure each time', async () => {
+  const clock = createTestClock();
+  const chunks = ['o'.repeat(600)];
+  let calls = 0;
+  // Production builds a fresh content provider, so a fresh closure, per question.
+  const closure = (): WindowScorer => async (_query, windows) => { calls++; clock.set(clock.now() + 2_000); return windows.map(() => 0); };
+  const source = () => ({ texts: ['x'.repeat(4000)], scoreWindows: closure(), scorerKey: 'backend-a' });
+  await createEvidenceWindowPlacer(QUESTION, fakeTimers(clock)).place(chunks, source());
+  await flushMicrotasks();
+  const next = createEvidenceWindowPlacer(QUESTION, fakeTimers(clock));
+  await next.place(chunks, source());
+  expect(calls).toBe(1);
+  expect(next.audit.skipped).toBe('slow_scorer');
+  const other = createEvidenceWindowPlacer(QUESTION, fakeTimers(clock));
+  await other.place(chunks, { ...source(), scorerKey: 'backend-b' });
+  expect(calls).toBe(2);
+});
+
 test('a placed window stays provable: its stored chunk hashes still bind to it for release', async () => {
   const f = await fixture();
   const detail = await buildEvidencePackDetailed(f.input);

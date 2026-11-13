@@ -40235,6 +40235,7 @@ function createConnectorStoreContentProvider(options) {
     }
     return embeddings.map((value) => cosineSimilarity(queryEmbedding, value));
   } : undefined;
+  const windowScorerKey = privateProvider ? `${privateProvider.provider}|${privateProvider.backend}|${privateProvider.configHash}` : undefined;
   let storeHasVectors;
   const queryVector = async (query) => {
     const text2 = query?.trim();
@@ -40319,7 +40320,7 @@ function createConnectorStoreContentProvider(options) {
         const coverageGaps = connectorStoreCoverageGaps(content, metadataOnlyRuleId);
         let windowPlacement;
         if (content.truncated && content.windowTexts && content.windowTexts.length > 1) {
-          windowPlacement = { texts: content.windowTexts, ...content.windowTextHashes ? { hashes: content.windowTextHashes } : {}, ...scoreWindows ? { scoreWindows } : {} };
+          windowPlacement = { texts: content.windowTexts, ...content.windowTextHashes ? { hashes: content.windowTextHashes } : {}, ...scoreWindows ? { scoreWindows } : {}, ...windowScorerKey ? { scorerKey: windowScorerKey } : {} };
         }
         return {
           sensitivity: buildSourceSensitivity({ trustTier: content.trustTier, trustDomain: store.trustDomain }),
@@ -79873,12 +79874,17 @@ var init_analyst_openclaw_infer = __esm(() => {
 });
 
 // src/core/evidence-window-placement.ts
-function historyFor(kind, score) {
+function historyFor(kind, score, key2) {
   if (kind === "reranker")
     return rerankerHistory;
-  let history = embeddingHistory.get(score);
-  if (!history)
-    embeddingHistory.set(score, history = { ms: 0, at: 0 });
+  let history = key2 === undefined ? unkeyedHistory.get(score) : keyedHistory.get(key2);
+  if (!history) {
+    history = { ms: 0, at: 0 };
+    if (key2 === undefined)
+      unkeyedHistory.set(score, history);
+    else
+      keyedHistory.set(key2, history);
+  }
   return history;
 }
 function createEvidenceWindowPlacer(query, timers = systemTimers) {
@@ -79897,7 +79903,7 @@ function createEvidenceWindowPlacer(query, timers = systemTimers) {
         continue;
       reserved += windows.length;
       const group = groups.get(scorer) ?? [];
-      group.push({ seat, windows });
+      group.push({ seat, windows, ...entry.source.scorerKey === undefined ? {} : { key: entry.source.scorerKey } });
       groups.set(scorer, group);
     }
     for (const [score, group] of groups) {
@@ -79910,7 +79916,7 @@ function createEvidenceWindowPlacer(query, timers = systemTimers) {
         audit.timedOut = true;
         break;
       }
-      const lastCall = historyFor(kind, score);
+      const lastCall = historyFor(kind, score, group[0].key);
       if (lastCall.ms > remaining && timers.now() - lastCall.at < SLOW_SCORER_RETRY_MS) {
         audit.skipped = "slow_scorer";
         continue;
@@ -80028,7 +80034,7 @@ function utf8Prefix(text2, maxBytes) {
   }
   return text2.slice(0, end);
 }
-var WINDOW_PLACEMENT_BUDGET_MS = 1500, WINDOW_CHARS = 600, WINDOW_STRIDE = 300, MAX_WINDOWS_PER_SEAT = 8, MAX_WINDOWS_PER_QUESTION = 24, KEEP_ORIGINAL = -1, systemTimers, SLOW_SCORER_RETRY_MS = 60000, rerankerHistory, embeddingHistory;
+var WINDOW_PLACEMENT_BUDGET_MS = 1500, WINDOW_CHARS = 600, WINDOW_STRIDE = 300, MAX_WINDOWS_PER_SEAT = 8, MAX_WINDOWS_PER_QUESTION = 24, KEEP_ORIGINAL = -1, systemTimers, SLOW_SCORER_RETRY_MS = 60000, rerankerHistory, keyedHistory, unkeyedHistory;
 var init_evidence_window_placement = __esm(() => {
   init_chunk_selection();
   systemTimers = {
@@ -80037,7 +80043,8 @@ var init_evidence_window_placement = __esm(() => {
     clearTimeout: (handle) => clearTimeout(handle)
   };
   rerankerHistory = { ms: 0, at: 0 };
-  embeddingHistory = new WeakMap;
+  keyedHistory = new Map;
+  unkeyedHistory = new WeakMap;
 });
 
 // src/core/evidence-reranker.ts

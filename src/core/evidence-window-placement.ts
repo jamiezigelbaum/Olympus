@@ -21,6 +21,8 @@ export interface EvidenceWindowSource {
   /** Indexes into texts, most relevant first. Texts arrive in document order. */
   priority?: readonly number[];
   scoreWindows?: WindowScorer;
+  /** Stable name of the backend behind scoreWindows, so slow-call history survives the per-question closure. */
+  scorerKey?: string;
 }
 
 export interface WindowPlacementAudit {
@@ -55,15 +57,21 @@ type ScorerKind = 'reranker' | 'embedding';
 // A slow scorer is tried again after a minute, so a skip is never permanent:
 // while skipped, no call runs that could report it fast again.
 const SLOW_SCORER_RETRY_MS = 60_000;
-// History is per backend: the one built-in reranker, or each store's embedding
-// scorer, so one slow store never skips another store's placement.
+// History is per backend: the one built-in reranker, or each embedding backend
+// by its stable key (by scorer identity when a source names none), so one slow
+// backend never skips another's placement and history outlives the per-question
+// content providers.
 type CallHistory = { ms: number; at: number };
 const rerankerHistory: CallHistory = { ms: 0, at: 0 };
-const embeddingHistory = new WeakMap<WindowScorer, CallHistory>();
-function historyFor(kind: ScorerKind, score: WindowScorer): CallHistory {
+const keyedHistory = new Map<string, CallHistory>();
+const unkeyedHistory = new WeakMap<WindowScorer, CallHistory>();
+function historyFor(kind: ScorerKind, score: WindowScorer, key: string | undefined): CallHistory {
   if (kind === 'reranker') return rerankerHistory;
-  let history = embeddingHistory.get(score);
-  if (!history) embeddingHistory.set(score, history = { ms: 0, at: 0 });
+  let history = key === undefined ? unkeyedHistory.get(score) : keyedHistory.get(key);
+  if (!history) {
+    history = { ms: 0, at: 0 };
+    if (key === undefined) unkeyedHistory.set(score, history); else keyedHistory.set(key, history);
+  }
   return history;
 }
 
@@ -73,7 +81,7 @@ export function createEvidenceWindowPlacer(query: string, timers = systemTimers)
   let startedAt: number | undefined;
   async function placeAll(seats: readonly EvidenceWindowSeat[], reranker?: WindowScorer): Promise<readonly (readonly string[])[]> {
     const results = seats.map(seat => seat.chunks);
-    const groups = new Map<WindowScorer, { seat: number; windows: ReturnType<typeof seatWindows> }[]>();
+    const groups = new Map<WindowScorer, { seat: number; key?: string; windows: ReturnType<typeof seatWindows> }[]>();
     let reserved = audit.windowsSubmitted;
     for (const [seat, entry] of seats.entries()) {
       const scorer = reranker ?? entry.source.scoreWindows;
@@ -82,7 +90,7 @@ export function createEvidenceWindowPlacer(query: string, timers = systemTimers)
       if (!windows.length) continue;
       reserved += windows.length;
       const group = groups.get(scorer) ?? [];
-      group.push({ seat, windows });
+      group.push({ seat, windows, ...(entry.source.scorerKey === undefined ? {} : { key: entry.source.scorerKey }) });
       groups.set(scorer, group);
     }
     // Map insertion order is the first seat's order, even for interleaved stores.
@@ -92,7 +100,7 @@ export function createEvidenceWindowPlacer(query: string, timers = systemTimers)
       audit.scorer = kind;
       const remaining = WINDOW_PLACEMENT_BUDGET_MS - (startedAt === undefined ? 0 : timers.now() - startedAt);
       if (remaining <= 0) { audit.timedOut = true; break; }
-      const lastCall = historyFor(kind, score);
+      const lastCall = historyFor(kind, score, group[0]!.key);
       if (lastCall.ms > remaining && timers.now() - lastCall.at < SLOW_SCORER_RETRY_MS) { audit.skipped = 'slow_scorer'; continue; }
       startedAt ??= timers.now();
       const windows = group.flatMap(entry => entry.windows);
