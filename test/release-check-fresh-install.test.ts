@@ -34,6 +34,7 @@ function rig(failAt?: string, inconclusive = false, listening = '', health: () =
       if (script.includes('rm -f ') && script.includes('/lease')) await step('restore');
       if (script.includes('sh "$HOME/.olympus-canary/install-linux.sh"')) await step('install');
       if (script.includes('/v1/health') && !script.includes('/dev/null')) return { code: 0, stdout: JSON.stringify(health()), stderr: '', ms: 0, timedOut: false };
+      if (script.includes('olympus" settings show')) return { code: 0, stdout: JSON.stringify({ kind: 'olympus_settings', privacy_judge: { choice: 'venice', spending_limit_dollars: 1, spent_dollars: 0.0123, stopped: null } }), stderr: '', ms: 0, timedOut: false };
       return { code: 0, stdout: '', stderr: '', ms: 0, timedOut: false };
     },
     put: async () => {}, get: async () => {}, upgrade: async () => {},
@@ -118,7 +119,7 @@ describe('fresh install canary', () => {
       'fresh.machine-clear', 'fresh.install', 'fresh.engine-up', 'fresh.reranker-ready', 'fresh.ask-without-model', 'fresh.dashboard-opens', 'fresh.privacy-choice',
       ...sources.flatMap(s => ['connect', 'consent', 'callback', 'scope', 'first-items'].map(step => `fresh.${s.id}.${step}`)),
       'live.gmail.status', 'live.dropbox.status', 'live.gmail.known', 'live.dropbox.known',
-      'fresh.gmail.answer', 'fresh.gmail.scope-absence', 'fresh.dropbox.answer', 'fresh.dropbox.scope-absence', 'fresh.restore-zig',
+      'fresh.gmail.answer', 'fresh.gmail.scope-absence', 'fresh.dropbox.answer', 'fresh.dropbox.scope-absence', 'fresh.judge-spend', 'fresh.restore-zig',
     ]);
     expect(r.events.slice(-3)).toEqual(['engine.close', 'dashboard.close', 'restore']);
     expect(checks.find(c => c.id === 'fresh.gmail.first-items')?.detail).toBe('2 item(s) indexed');

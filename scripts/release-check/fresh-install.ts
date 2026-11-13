@@ -352,6 +352,17 @@ ${asFresh('"$HOME/.local/bin/olympus" connect venice --api-key-stdin < "$HOME/.o
         if (problem) throw new Error(problem);
       });
     }
+    // What the privacy check spent against its limit, from the engine's own settings (never a key).
+    await recorded('judge-spend', async () => {
+      const out = await exec(asFresh('"$HOME/.local/bin/olympus" settings show'));
+      const judge = (JSON.parse(out) as { privacy_judge?: { choice?: string; spending_limit_dollars?: number | null; spent_dollars?: number; stopped?: string | null } | null }).privacy_judge;
+      if (!judge) throw new Error('the settings show no privacy check');
+      const cap = judge.spending_limit_dollars;
+      const spent = judge.spent_dollars ?? 0;
+      const detail = `privacy check ${judge.choice ?? 'unknown'}: $${spent.toFixed(4)} spent of ${typeof cap === 'number' ? `a $${cap.toFixed(2)} limit` : 'no limit'}${judge.stopped ? `, stopped (${judge.stopped})` : ''}`;
+      if (typeof cap === 'number' && spent > cap) throw new Error(`spent past the limit: ${detail}`);
+      return detail;
+    });
     if (rerankerOn) {
       await checked('reranker-applied', async () => {
         const counts = (await rerankHealth()).rerank_outcomes ?? {};
