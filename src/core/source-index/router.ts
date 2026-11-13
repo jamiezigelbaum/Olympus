@@ -358,6 +358,10 @@ export interface RouteSourceIndexSearchOptions {
   adapters: SourceIndexRouterAdapterMap;
   request: SourceIndexSearchRequest;
   visibilityGate?: SourceIndexVisibilityGate;
+  // Internal observer, after visibility and before seating. No work when absent.
+  onSeatingLanes?: (lanes: readonly SeatingLane[]) => void;
+  // Eval capture only: ask each adapter for this depth independently of the seated pool.
+  storeSearchDepth?: number;
   // Per-lane retrieval deadline for the evidence-pack fan-out. A corpus adapter
   // that does not settle within this budget is DROPPED from the pack and
   // reported in skippedCorpora with reason 'lane_timeout', so one slow corpus
@@ -566,7 +570,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
     const cooperativeDeadlineAtMs = cooperativeLaneDeadlineAtMs(laneTimeoutMs);
     const corpusRequest: SourceIndexCorpusSearchRequest = {
       query: request.query,
-      maxResults: request.maxResults,
+      maxResults: options.storeSearchDepth ?? request.maxResults,
       corpus,
       context: request.context,
       ...(cooperativeDeadlineAtMs !== undefined ? { deadlineAtMs: cooperativeDeadlineAtMs } : {}),
@@ -662,6 +666,48 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
     for (const corpusId of [...unchecked].sort()) degradations.push(visibilityCheckDegradation(corpusId));
   }
 
+  options.onSeatingLanes?.(lanes);
+  const recency = seatRoutedLanes(lanes, request);
+  const { hits: fused, degradations: budgetDegradations } = recency;
+
+  const result: SourceIndexRoutedSearchResponse = {
+    hits: fused,
+    searchedCorpora,
+    skippedCorpora,
+    laneAudits,
+    degradations: mergeRetrievalDegradations(degradations, budgetDegradations),
+    corpusTimings,
+    ...(matchCounts.length > 0 ? { matchCounts } : {}),
+    ...(incompleteCorpora.length > 0 ? { incompleteCorpora } : {}),
+    encounteredSecureLocal,
+    secureLaneAudits,
+    ...(recency.recencySeats > 0 ? { recencySeats: recency.recencySeats } : {}),
+    latencyMs: Date.now() - startedAt,
+    rawExposed: false,
+  };
+  assertSafeRoutedSearchResponse(result);
+  recordSourceAnswerQueryStages({
+    prepare_ms: lanesStartedAt - prepareStartedAt,
+    prepare_keywords_max_ms: prepareKeywordsMaxMs,
+    prepare_semantic_max_ms: prepareSemanticMaxMs,
+    lanes_ms: lanesSettledAt - lanesStartedAt,
+    after_lanes_ms: Date.now() - lanesSettledAt,
+  });
+  return result;
+}
+
+// A store's ranked candidates after the visibility gate, before any seating.
+export interface SeatingLane {
+  name: string;
+  relevance?: SourceIndexStoreRelevance;
+  items: readonly SourceIndexRoutedSearchHit[];
+}
+
+// Pure seating shared by routed search and offline eval replay.
+export function seatRoutedLanes(
+  lanes: readonly SeatingLane[],
+  options: Pick<SourceIndexSearchRequest, 'maxResults' | 'poolAllocation' | 'temporalIntent'>,
+): { hits: SourceIndexRoutedSearchHit[]; degradations: RetrievalDegradation[]; recencySeats: number } {
   // Store order within each turn: how well each store's best hit answers
   // this question (storeOrderForQuestion), then lane declaration order.
   // registry.list() preserves the order the corpora were registered in, which
@@ -689,40 +735,15 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
     // secure_local corpus lost to every internal one on every query forever.
     tieBreaker: (left, right) => compareTiedRoutedCandidates(left, right, laneOrder),
   });
-  const budgeted = request.poolAllocation
-    ? applyStrengthPoolBudget(fusedAll, request.maxResults, laneOrder, request.poolAllocation.storeDepth)
-    : applyPerCorpusResultBudget(fusedAll, request.maxResults);
+  const budgeted = options.poolAllocation
+    ? applyStrengthPoolBudget(fusedAll, options.maxResults, laneOrder, options.poolAllocation.storeDepth)
+    : applyPerCorpusResultBudget(fusedAll, options.maxResults);
   const pool = fusedAll.map((candidate) => candidate.item);
-  const leadered = withReservedLeaderSeats(budgeted, pool, request.maxResults);
-  const recency = request.temporalIntent
-    ? withReservedRecencySeats(leadered, pool, request.maxResults)
+  const leadered = withReservedLeaderSeats(budgeted, pool, options.maxResults);
+  const recency = options.temporalIntent
+    ? withReservedRecencySeats(leadered, pool, options.maxResults)
     : { ...leadered, recencySeats: 0 };
-  const { hits: fused, degradations: budgetDegradations } = recency;
-
-  const result: SourceIndexRoutedSearchResponse = {
-    hits: fused,
-    searchedCorpora,
-    skippedCorpora,
-    laneAudits,
-    degradations: mergeRetrievalDegradations(degradations, budgetDegradations),
-    corpusTimings,
-    ...(matchCounts.length > 0 ? { matchCounts } : {}),
-    ...(incompleteCorpora.length > 0 ? { incompleteCorpora } : {}),
-    encounteredSecureLocal,
-    secureLaneAudits,
-    ...(recency.recencySeats > 0 ? { recencySeats: recency.recencySeats } : {}),
-    latencyMs: Date.now() - startedAt,
-    rawExposed: false,
-  };
-  assertSafeRoutedSearchResponse(result);
-  recordSourceAnswerQueryStages({
-    prepare_ms: lanesStartedAt - prepareStartedAt,
-    prepare_keywords_max_ms: prepareKeywordsMaxMs,
-    prepare_semantic_max_ms: prepareSemanticMaxMs,
-    lanes_ms: lanesSettledAt - lanesStartedAt,
-    after_lanes_ms: Date.now() - lanesSettledAt,
-  });
-  return result;
+  return recency;
 }
 
 // Whether one corpus lane's raw response (before any filter or trim) carried
@@ -1122,7 +1143,7 @@ function corpusMatchesRequestedSelection(corpus: SourceIndexCorpusDefinition, se
   return true;
 }
 
-function routedHitCandidateId(hit: SourceIndexRoutedSearchHit): SourceIndexCandidateId {
+export function routedHitCandidateId(hit: SourceIndexRoutedSearchHit): SourceIndexCandidateId {
   return hit.candidateId ?? `${hit.corpusId}:${hit.sourceItem.localItemId || hit.sourceItem.providerItemId}`;
 }
 

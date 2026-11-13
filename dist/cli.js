@@ -80613,17 +80613,20 @@ async function rerankCandidates(options) {
   const startedAt = timers.now();
   const passages = options.items.map((item) => clipPassage(options.passageOf(item)));
   const scoredIndexes = passages.flatMap((passage, index) => passage ? [index] : []);
-  const fusedCut = (outcome, scored) => ({
-    kept: options.items.slice(0, keep),
-    audit: {
-      rerankerId: options.reranker.id,
-      outcome,
-      scored,
-      kept: Math.min(keep, options.items.length),
-      promoted: 0,
-      elapsedMs: timers.now() - startedAt
-    }
-  });
+  const fusedCut = (outcome, scored) => {
+    options.onScores?.([], outcome);
+    return {
+      kept: options.items.slice(0, keep),
+      audit: {
+        rerankerId: options.reranker.id,
+        outcome,
+        scored,
+        kept: Math.min(keep, options.items.length),
+        promoted: 0,
+        elapsedMs: timers.now() - startedAt
+      }
+    };
+  };
   if (scoredIndexes.length === 0)
     return fusedCut("applied", 0);
   const controller = new AbortController;
@@ -80655,6 +80658,8 @@ async function rerankCandidates(options) {
   if (scores.length !== scoredIndexes.length || scores.some((score) => typeof score !== "number" || Number.isNaN(score))) {
     return fusedCut("failed", 0);
   }
+  if (options.onScores)
+    options.onScores(scoredIndexes.map((index, position) => ({ item: options.items[index], score: scores[position] })), "applied");
   const scoreByIndex = new Map(scoredIndexes.map((index, position) => [index, scores[position]]));
   const order = options.items.map((_, index) => index).sort((left, right) => {
     const leftScore = scoreByIndex.get(left);
@@ -80790,7 +80795,7 @@ async function routePreparedSourceIndexSearch(options) {
     const cooperativeDeadlineAtMs = cooperativeLaneDeadlineAtMs(laneTimeoutMs);
     const corpusRequest = {
       query: request.query,
-      maxResults: request.maxResults,
+      maxResults: options.storeSearchDepth ?? request.maxResults,
       corpus,
       context: request.context,
       ...cooperativeDeadlineAtMs !== undefined ? { deadlineAtMs: cooperativeDeadlineAtMs } : {}
@@ -80882,17 +80887,8 @@ async function routePreparedSourceIndexSearch(options) {
     for (const corpusId of [...unchecked].sort())
       degradations.push(visibilityCheckDegradation(corpusId));
   }
-  const laneOrder = storeOrderForQuestion(lanes);
-  const fusedAll = fuseRankedCandidateLanes({
-    lanes,
-    getId: routedHitCandidateId,
-    limit: lanes.reduce((total, lane) => total + lane.items.length, 0),
-    tieBreaker: (left, right) => compareTiedRoutedCandidates(left, right, laneOrder)
-  });
-  const budgeted = request.poolAllocation ? applyStrengthPoolBudget(fusedAll, request.maxResults, laneOrder, request.poolAllocation.storeDepth) : applyPerCorpusResultBudget(fusedAll, request.maxResults);
-  const pool = fusedAll.map((candidate) => candidate.item);
-  const leadered = withReservedLeaderSeats(budgeted, pool, request.maxResults);
-  const recency = request.temporalIntent ? withReservedRecencySeats(leadered, pool, request.maxResults) : { ...leadered, recencySeats: 0 };
+  options.onSeatingLanes?.(lanes);
+  const recency = seatRoutedLanes(lanes, request);
   const { hits: fused, degradations: budgetDegradations } = recency;
   const result = {
     hits: fused,
@@ -80918,6 +80914,20 @@ async function routePreparedSourceIndexSearch(options) {
     after_lanes_ms: Date.now() - lanesSettledAt
   });
   return result;
+}
+function seatRoutedLanes(lanes, options) {
+  const laneOrder = storeOrderForQuestion(lanes);
+  const fusedAll = fuseRankedCandidateLanes({
+    lanes,
+    getId: routedHitCandidateId,
+    limit: lanes.reduce((total, lane) => total + lane.items.length, 0),
+    tieBreaker: (left, right) => compareTiedRoutedCandidates(left, right, laneOrder)
+  });
+  const budgeted = options.poolAllocation ? applyStrengthPoolBudget(fusedAll, options.maxResults, laneOrder, options.poolAllocation.storeDepth) : applyPerCorpusResultBudget(fusedAll, options.maxResults);
+  const pool = fusedAll.map((candidate) => candidate.item);
+  const leadered = withReservedLeaderSeats(budgeted, pool, options.maxResults);
+  const recency = options.temporalIntent ? withReservedRecencySeats(leadered, pool, options.maxResults) : { ...leadered, recencySeats: 0 };
+  return recency;
 }
 function corpusContributedSecure(corpus, response) {
   const count = response.matchCount;
@@ -81272,7 +81282,7 @@ async function buildEvidencePackDetailed(input) {
 async function buildPreparedEvidencePackDetailed(input) {
   const reranker = input.reranker && !input.selectedItems?.length && !questionHasTemporalIntent(input) ? input.reranker : undefined;
   const retrievalLimit = reranker ? rerankPoolSize(reranker, input.maxResults) : input.maxResults;
-  const routed = input.selectedItems?.length ? selectedItemsToRoutedSlice(input) : await runRoutedSearches(input, retrievalLimit, reranker ? { storeDepth: RERANK_POOL_STORE_DEPTH } : undefined);
+  const routed = input.selectedItems?.length ? selectedItemsToRoutedSlice(input) : await runRoutedSearches(input, retrievalLimit, input.poolAllocation ?? (reranker ? { storeDepth: RERANK_POOL_STORE_DEPTH } : undefined));
   const visibleHits = input.visibilityGate && !input.selectedItems?.length ? await applySourceIndexVisibilityGate(input.visibilityGate, routed.hits) : routed.hits;
   const routedHits = input.selectedItems?.length ? routed.hits : visibleHits;
   const candidates = [];
@@ -81360,7 +81370,8 @@ async function buildPreparedEvidencePackDetailed(input) {
       items: scorable,
       passageOf: (entry) => rerankPassage(entry.provenance.citation?.title, entry.content?.chunks ?? []),
       keep: input.maxResults,
-      ...input.rerankTimers ? { timers: input.rerankTimers } : {}
+      ...input.rerankTimers ? { timers: input.rerankTimers } : {},
+      ...input.onRerankScores ? { onScores: (entries, outcome) => input.onRerankScores(entries.map(({ item, score }) => ({ candidateId: routedHitCandidateId(item.hit), score })), outcome) } : {}
     });
     hydrated = [...denied, ...reranked.kept];
     rerank = reranked.audit;
@@ -81629,15 +81640,7 @@ async function runRoutedSearches(input, retrievalLimit = input.maxResults, poolA
   }
   if (runs.length === 1)
     return literalRun;
-  const queries = [literalQuery, ...expansions];
-  const ranked = fuseRankedCandidateLanes({
-    lanes: runs.map((run, index) => ({ name: queries[index], items: run.hits })),
-    getId: (hit) => `${hit.corpusId}:${hit.sourceItem.localItemId || hit.sourceItem.providerItemId}`,
-    limit: runs.reduce((total, run) => total + run.hits.length, 0),
-    tieBreaker: (left, right) => String(left.id).localeCompare(String(right.id))
-  });
-  const budgeted = applyPerCorpusResultBudget(ranked, retrievalLimit);
-  const recency = questionHasTemporalIntent(input) ? withReservedRecencySeats(budgeted, ranked.map((candidate) => candidate.item), retrievalLimit) : { ...budgeted, recencySeats: 0 };
+  const recency = seatRoutedQueryRuns(runs.map((run) => run.hits), retrievalLimit, questionHasTemporalIntent(input));
   const { hits: fused, degradations: budgetDegradations } = recency;
   return {
     hits: fused,
@@ -81651,6 +81654,17 @@ async function runRoutedSearches(input, retrievalLimit = input.maxResults, poolA
     encounteredSecureLocal: runs.some((run) => run.encounteredSecureLocal),
     ...recency.recencySeats > 0 ? { recencySeats: recency.recencySeats } : {}
   };
+}
+function seatRoutedQueryRuns(runs, retrievalLimit, temporalIntent) {
+  const ranked = fuseRankedCandidateLanes({
+    lanes: runs.map((run, index) => ({ name: String(index + 1), items: run })),
+    getId: (hit) => `${hit.corpusId}:${hit.sourceItem.localItemId || hit.sourceItem.providerItemId}`,
+    limit: runs.reduce((total, run) => total + run.length, 0),
+    tieBreaker: (left, right) => String(left.id).localeCompare(String(right.id))
+  });
+  const budgeted = applyPerCorpusResultBudget(ranked, retrievalLimit);
+  const recency = temporalIntent ? withReservedRecencySeats(budgeted, ranked.map((candidate) => candidate.item), retrievalLimit) : { ...budgeted, recencySeats: 0 };
+  return recency;
 }
 function mergeRoutedSkippedCorpora(runs) {
   const merged = new Map;
@@ -81694,6 +81708,8 @@ function runRoutedSearch(input, query, ordinal, maxResults, laneTimeoutMs, searc
       ...poolAllocation ? { poolAllocation } : {}
     },
     laneTimeoutMs,
+    ...input.onSeatingLanes ? { onSeatingLanes: (lanes) => input.onSeatingLanes(lanes, ordinal) } : {},
+    ...input.storeSearchDepth !== undefined ? { storeSearchDepth: input.storeSearchDepth } : {},
     ...searchDeadlineAtMs !== undefined ? { searchDeadlineAtMs } : {},
     ...input.visibilityGate ? { visibilityGate: input.visibilityGate } : {}
   }));

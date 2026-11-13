@@ -21,7 +21,7 @@ import { loadedBuiltInEmbedding } from '../src/workers/source-index/built-in-emb
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { localAnswerRequest } from '../src/workers/source-index/local-answer.ts';
 import type { AnalystAnswerLanes } from '../src/workers/source-index/analyst-answer.ts';
-import { buildEvidencePackDetailed, type EvidencePackBuildDetail } from '../src/core/evidence-pack.ts';
+import { buildEvidencePackDetailed, type EvidencePackBuildDetail, type BuildEvidencePackInput } from '../src/core/evidence-pack.ts';
 import type { AnalystQueryPlanner } from '../src/core/query-planner.ts';
 import type { EvidenceReranker } from '../src/core/evidence-reranker.ts';
 const DEFAULT_EMBEDDING_WARM_TIMEOUT_MS = 180_000;
@@ -216,12 +216,16 @@ export function buildEvalPack(input: {
   reranker?: EvidenceReranker;
   maxResults: number;
   maxCharsPerCandidate: number;
-}): Promise<EvidencePackBuildDetail> {
+} & Pick<BuildEvidencePackInput, 'onSeatingLanes' | 'onRerankScores' | 'poolAllocation' | 'storeSearchDepth'>): Promise<EvidencePackBuildDetail> {
   const lanes = input.lanes(input.question);
   return buildEvidencePackDetailed({
     question: input.question,
     ...(input.queryPlanner ? { queryPlanner: input.queryPlanner } : {}),
     ...(input.reranker ? { reranker: input.reranker } : {}),
+    ...(input.onSeatingLanes ? { onSeatingLanes: input.onSeatingLanes } : {}),
+    ...(input.onRerankScores ? { onRerankScores: input.onRerankScores } : {}),
+    ...(input.poolAllocation ? { poolAllocation: input.poolAllocation } : {}),
+    ...(input.storeSearchDepth !== undefined ? { storeSearchDepth: input.storeSearchDepth } : {}),
     maxResults: input.maxResults,
     maxCharsPerCandidate: input.maxCharsPerCandidate,
     searchContext: {
