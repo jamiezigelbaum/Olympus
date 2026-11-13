@@ -51,12 +51,12 @@ export function scopeAbsenceProblem(spec: LiveSourceSpec, answer: { ok: boolean;
 
 export const redactFreshDetail = (text: string): string => text.replace(/https?:\/\/[^\s]+/gi, '[URL redacted]').replace(/(?:Bearer\s+|(?:token|code|state|cookie|password)[=:]\s*)[^\s,;]+/gi, '[credential redacted]').slice(0, 300);
 
-/** A timeline or log excerpt keeps its lines, with links and credentials taken out like any detail, up to 20,000 characters. */
-export const redactFreshTimeline = (text: string): string => text.replace(/https?:\/\/[^\s]+/gi, '[URL redacted]').replace(/(?:Bearer\s+|(?:token|code|state|cookie|password|key)[=:]\s*)[^\s,;]+/gi, '[credential redacted]').slice(-20_000);
+/** A timeline or log excerpt keeps its lines, with links and credentials taken out like any detail; past 30,000 characters it keeps the first and last 10,000. */
+export const redactFreshTimeline = (text: string): string => text.replace(/https?:\/\/[^\s]+/gi, '[URL redacted]').replace(/(?:Bearer\s+|(?:token|code|state|cookie|password|key)[=:]\s*)[^\s,;]+/gi, '[credential redacted]').replace(/^([\s\S]{10000})[\s\S]{10000,}([\s\S]{10000})$/, '$1\n[middle cut]\n$2');
 /** Load, CPU count and the four busiest processes of the fresh user; never fails the sample. */
-export const FRESH_MACHINE_SAMPLE = `{ printf 'load %s of %s cpus | ' "$(cut -d' ' -f1 /proc/loadavg)" "$(nproc)"; ps -u "$(id -un)" -o pcpu=,rss=,args= --sort=-pcpu | head -n 4 | awk '{ c=$1; r=int($2/1024); $1=""; $2=""; sub(/^ +/, ""); printf "%s%% %sMB %s; ", c, r, substr($0, 1, 70) }'; } 2>/dev/null || true`;
+export const FRESH_MACHINE_SAMPLE = `{ printf 'load %s of %s cpus | ' "$(cut -d' ' -f1 /proc/loadavg)" "$(nproc)"; ps -u "$(id -un)" -o pcpu=,rss=,args= --sort=-pcpu | head -n 4 | awk '{ n=split($3, a, "/"); m=split($4, b, "/"); printf "%s%% %sMB %s %s %s; ", $1, int($2/1024), a[n], b[m], $5 }'; } 2>/dev/null || true`;
 /** The engine's log lines about judging, embedding and the privacy check: counts and the last 60 lines. */
-export const FRESH_ENGINE_LOG = `{ log=$(journalctl --user --no-pager -o short-iso 2>/dev/null | grep -iE 'embed|judg|sniffer|classif|privacy check|tier' || true); printf 'matching lines: %s (embed %s, judge %s)\\n' "$(printf '%s\\n' "$log" | grep -c . || true)" "$(printf '%s\\n' "$log" | grep -ic embed || true)" "$(printf '%s\\n' "$log" | grep -icE 'judg|sniffer|classif' || true)"; printf '%s\\n' "$log" | tail -n 60 | cut -c1-220; } || true`;
+export const FRESH_ENGINE_LOG = `{ out=$(systemctl --user show -p StandardOutput --value olympus-engine.service 2>/dev/null | sed 's/^append://'); log=$(cat "$out" "\${out%.log}.err" 2>/dev/null | grep -iE 'embed|judg|sniffer|classif|privacy check|tier' || true); printf 'log %s: matching lines %s (embed %s, judge %s)\\n' "\${out:-not found}" "$(printf '%s\\n' "$log" | grep -c . || true)" "$(printf '%s\\n' "$log" | grep -ic embed || true)" "$(printf '%s\\n' "$log" | grep -icE 'judg|sniffer|classif' || true)"; printf '%s\\n' "$log" | tail -n 80 | cut -c1-220; } || true`;
 
 export class FreshInconclusive extends Error {}
 export function validateFreshSources(sources: LiveSourceSpec[]): LiveSourceSpec[] {
@@ -358,7 +358,7 @@ ${asFresh('"$HOME/.local/bin/olympus" connect venice --api-key-stdin < "$HOME/.o
       });
       await recorded(`${source.id}.scope-absence`, async () => {
         const answer = await ask(engine!, source.fresh!.outside.question, sleep);
-        const search = await engine!.call('olympus_search', { question: source.fresh!.outside.question, limit: 100 });
+        const search = await engine!.call('olympus_search', { question: source.fresh!.outside.question, limit: 48 });
         const problem = scopeAbsenceProblem(source, answer, search);
         if (problem) throw new Error(problem);
       });
