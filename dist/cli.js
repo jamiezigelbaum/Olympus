@@ -79399,23 +79399,26 @@ function formatCompactCandidate(candidate, number, versionNote, passages = candi
 `);
 }
 function compactAuditPrompt(pack, draft, maxBytes, unseen = []) {
-  let chars = AUDIT_CHARS_PER_CANDIDATE;
-  let prompt = buildAnalystAuditPrompt(pack, draft, false, chars, unseen);
   if (maxBytes === undefined)
-    return prompt;
-  for (let attempt = 0;attempt < 6; attempt += 1) {
-    const bytes = promptEncoder.encode(`${ANALYST_AUDIT_SYSTEM}
+    return buildAnalystAuditPrompt(pack, draft, false, AUDIT_CHARS_PER_CANDIDATE, unseen);
+  const render = (chars) => buildAnalystAuditPrompt(pack, draft, false, chars, unseen);
+  const fits = (prompt) => promptEncoder.encode(`${ANALYST_AUDIT_SYSTEM}
 
-${prompt}`).length;
-    if (bytes <= maxBytes)
-      break;
-    const passageBytes = promptEncoder.encode(prompt).length - promptEncoder.encode(buildAnalystAuditPrompt(pack, draft, false, 0, unseen)).length;
-    if (passageBytes <= 0)
-      break;
-    chars = Math.max(0, Math.floor(chars * Math.max(0, passageBytes - (bytes - maxBytes)) / passageBytes) - 1);
-    prompt = buildAnalystAuditPrompt(pack, draft, false, chars, unseen);
+${prompt}`).length <= maxBytes;
+  const whole = Math.max(0, ...pack.candidates.map((candidate) => candidate.chunks.reduce((total, chunk) => total + chunk.length + 1, 0)));
+  const full = render(whole);
+  if (fits(full))
+    return full;
+  let low = 0;
+  let high = whole;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (fits(render(mid)))
+      low = mid;
+    else
+      high = mid - 1;
   }
-  return prompt;
+  return render(low);
 }
 function amountReadings(amount) {
   const number = amount.replace(/[^\d.,' ]/gu, "").trim();
