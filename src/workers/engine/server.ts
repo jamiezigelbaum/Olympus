@@ -4815,6 +4815,7 @@ export async function main(): Promise<void> {
         return body;
       },
       credit: { env: { ...process.env, ...olympusConfig.worker.creditMonitor.credentials } },
+      extractionJobs: () => fileExtractionRuntime?.jobs,
       wake: (id) => {
         if (id === 'judge.spend_cap' || id === 'judge.payment') {
           reopenSecondRoundAfterStop(judgeSpending.status().choice, judgeSecondRoundStatePath(process.env));

@@ -1,12 +1,11 @@
 /**
  * Worker-side adoption of size refusals in the existing extraction queue.
  */
-import { existsSync } from 'node:fs';
 import { sourceSizeBytes, sourceSizeCeiling, sizeHeldItemKey, SOURCE_SIZE_LIMITS, type SourceSizeLimit } from '../../core/source-size-limits.ts';
 import { readOwnerLimitOverride, saveOwnerLimitOverride } from '../../core/owner-limit-settings.ts';
 import { createLimitStopReporter } from '../../core/limit-stops.ts';
 import { OperationError } from '../../core/operation-error.ts';
-import { LocalFileExtractionJobStore, defaultFileExtractionJobsDbPath } from './job-store.ts';
+import type { LocalFileExtractionJobStore } from './job-store.ts';
 
 const reporter = createLimitStopReporter();
 
@@ -24,25 +23,25 @@ export function refreshSourceSizeStop(jobs: LocalFileExtractionJobStore, policy:
 
 /**
  * Durable per-version grants survive restart and never apply to future files.
+ * The queue is the engine's own (createFileExtractionRuntime is its only
+ * constructor). A read-only queue, as the split front holds, still lists the
+ * held files; the background's runner requeues them on its next extract wake.
  */
-export function raiseSourceSizeLimit(id: string, to: number, keep: boolean, now: Date): void {
+export function raiseSourceSizeLimit(id: string, to: number, keep: boolean, now: Date, jobs: LocalFileExtractionJobStore | undefined): void {
   const policy = SOURCE_SIZE_LIMITS.find(policy => policy.id === id);
   if (!policy) throw new OperationError('invalid_params', 'This limit has no Raise action.');
   if (to > policy.ceilingBytes) throw new OperationError('invalid_params', `The memory safety ceiling is ${policy.ceilingBytes} bytes (${policy.ceilingBytes / 1024 / 1024} MiB).`);
-  const path = defaultFileExtractionJobsDbPath();
-  if (!existsSync(path)) throw new OperationError('invalid_params', 'The held-file queue is unavailable.');
-  const jobs = new LocalFileExtractionJobStore(path);
-  try {
-    const held = jobs.sizeHeldJobs(policy.providers);
-    const current = held.reduce((max, job) => Math.max(max, Math.min(job.maxBytes ?? Infinity, sourceSizeBytes(policy, job.ref, now))), 0);
-    if (to <= current) throw new OperationError('invalid_params', `--to must be greater than the current limit of ${current} bytes.`);
-    if (!held.length) throw new OperationError('invalid_params', 'No files are held for size any more.');
-    const ceiling = held.reduce((max, job) => Math.max(max, sourceSizeCeiling(policy, job.ref.mimeType)), 0);
-    if (to > ceiling) throw new OperationError('invalid_params', `The memory safety ceiling is ${ceiling} bytes (${ceiling / 1024 / 1024} MiB).`);
-    saveOwnerLimitOverride(policy.id, to, keep, now, undefined, held.map(job => sizeHeldItemKey(job.ref)));
-    resumeGrantedSizeHeld(jobs, policy, now);
-    refreshSourceSizeStop(jobs, policy, now);
-  } finally { jobs.close(); }
+  if (!jobs) throw new OperationError('invalid_params', 'The held-file queue is unavailable.');
+  const held = jobs.sizeHeldJobs(policy.providers);
+  const current = held.reduce((max, job) => Math.max(max, Math.min(job.maxBytes ?? Infinity, sourceSizeBytes(policy, job.ref, now))), 0);
+  if (to <= current) throw new OperationError('invalid_params', `--to must be greater than the current limit of ${current} bytes.`);
+  if (!held.length) throw new OperationError('invalid_params', 'No files are held for size any more.');
+  const ceiling = held.reduce((max, job) => Math.max(max, sourceSizeCeiling(policy, job.ref.mimeType)), 0);
+  if (to > ceiling) throw new OperationError('invalid_params', `The memory safety ceiling is ${ceiling} bytes (${ceiling / 1024 / 1024} MiB).`);
+  saveOwnerLimitOverride(policy.id, to, keep, now, undefined, held.map(job => sizeHeldItemKey(job.ref)));
+  if (jobs.readonly) return;
+  resumeGrantedSizeHeld(jobs, policy, now);
+  refreshSourceSizeStop(jobs, policy, now);
 }
 
 /**

@@ -1,4 +1,5 @@
 import { raiseSourceSizeLimit } from '../workers/file-extraction/size-limit-stops.ts';
+import type { LocalFileExtractionJobStore } from '../workers/file-extraction/job-store.ts';
 import { providerWaitMessage } from './provider-rate-limits.ts';
 import './consult-transport-zkapi.ts';
 import { JudgeSpending } from '../workers/classification/judge-spending.ts';
@@ -27,6 +28,8 @@ export interface OwnerLimitsDependencies {
   credit?: FetchVeniceCreditStatusOptions;
   runOnce?: (subject: string, stop: LimitStop) => Promise<unknown>;
   wake?: (id?: string) => void;
+  /** The engine's extraction queue, for size-stop Raise. */
+  extractionJobs?: () => LocalFileExtractionJobStore | undefined;
 }
 
 /**
@@ -62,7 +65,7 @@ export async function ownerLimits(params: Record<string, unknown>, deps: OwnerLi
         : '--to must cover the next step and be greater than the current limit and usage, in the reported unit.');
     const keys: Record<string, OwnerLimitKey> = { 'judge.daily_calls': 'judge.dailyCalls', 'zkapi.daily_requests': 'zkapi.dailyRequests', 'zkapi.daily_spend': 'zkapi.dailySpend', 'gmail.import_allowance': 'gmail.dailyRequests' };
     if (size) {
-      raiseSourceSizeLimit(stop.id, params.to, params.keep === true, now);
+      raiseSourceSizeLimit(stop.id, params.to, params.keep === true, now, deps.extractionJobs?.());
     } else if (stop.id === 'judge.spend_cap') {
       // This is a cumulative archive spending cap, rather than a per-day allowance.
       new JudgeSpending(stop.subject).raise(params.to);

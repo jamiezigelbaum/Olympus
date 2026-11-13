@@ -98,11 +98,11 @@ for (const policy of SOURCE_SIZE_LIMITS) {
     }
     expect((await f.coverage()).extractionGaps.join(' ')).toContain('2 files held because they are too large');
     for (const to of [policy.defaultBytes - 1, policy.defaultBytes]) {
-      await expect(ownerLimits({ action: 'continue', id: policy.id, to }, { now: time.date })).rejects.toThrow('greater than');
+      await expect(ownerLimits({ action: 'continue', id: policy.id, to }, { now: time.date, extractionJobs: () => jobs })).rejects.toThrow('greater than');
     }
-    await expect(ownerLimits({ action: 'continue', id: policy.id, to: policy.ceilingBytes + 1 }, { now: time.date })).rejects.toThrow(`${policy.ceilingBytes} bytes`);
+    await expect(ownerLimits({ action: 'continue', id: policy.id, to: policy.ceilingBytes + 1 }, { now: time.date, extractionJobs: () => jobs })).rejects.toThrow(`${policy.ceilingBytes} bytes`);
     let woke = false;
-    await ownerLimits(wait.fix!.args!, { now: time.date, wake: () => { woke = true; } });
+    await ownerLimits(wait.fix!.args!, { now: time.date, extractionJobs: () => jobs, wake: () => { woke = true; } });
     expect(woke).toBe(true);
     expect(jobs.sizeHeldJobs(policy.providers)).toEqual([]);
     await f.runner.run({ ...f.lane, limit: 10, reclassify: false });
@@ -115,7 +115,7 @@ for (const policy of SOURCE_SIZE_LIMITS) {
     await f.runner.plan({ ...f.lane, limit: 10 });
     expect(stops()[0]?.waiting).toEqual({ items: 1 });
     expect(stops()[0]?.limit).toBe(policy.defaultBytes);
-    await ownerLimits({ action: 'continue', id: policy.id, to: policy.defaultBytes + 10, keep: true }, { now: time.date });
+    await ownerLimits({ action: 'continue', id: policy.id, to: policy.defaultBytes + 10, keep: true }, { now: time.date, extractionJobs: () => jobs });
     expect(sourceSizeBytes(policy, undefined, new Date('2026-11-15'))).toBe(policy.defaultBytes + 10);
     await f.runner.run({ ...f.lane, limit: 10, reclassify: false });
     expect(f.extracted()).toBe(3);
@@ -129,7 +129,7 @@ for (const policy of SOURCE_SIZE_LIMITS) {
     jobs.enqueue({ refs: f.refs(), extractorKind: 'local_text', extractorVersion: '1', maxBytesPerFile: policy.ceilingBytes });
     await f.runner.run({ ...f.lane, limit: 10, reclassify: false });
     expect(stops()).toMatchObject([{ id: policy.id, limit: policy.defaultBytes, used: policy.defaultBytes + 2, waiting: { items: 2 } }]);
-    await ownerLimits({ action: 'continue', id: policy.id, to: policy.defaultBytes + 2 }, { now: time.date });
+    await ownerLimits({ action: 'continue', id: policy.id, to: policy.defaultBytes + 2 }, { now: time.date, extractionJobs: () => jobs });
     await f.runner.run({ ...f.lane, limit: 10, reclassify: false });
     expect(f.extracted()).toBe(2);
     expect(stops()).toEqual([]);
@@ -138,18 +138,18 @@ for (const policy of SOURCE_SIZE_LIMITS) {
   test(`${policy.id}: partial raises retain the remaining stop; images cannot exceed 64 MiB`, async () => {
     const f = fixture(policy);
     await f.runner.plan({ ...f.lane, limit: 10 });
-    await ownerLimits({ action: 'continue', id: policy.id, to: policy.defaultBytes + 1 }, { now: time.date });
+    await ownerLimits({ action: 'continue', id: policy.id, to: policy.defaultBytes + 1 }, { now: time.date, extractionJobs: () => jobs });
     expect(stops()).toMatchObject([{ waiting: { items: 1 }, limit: policy.defaultBytes + 1, used: policy.defaultBytes + 2 }]);
     expect((await f.coverage()).extractionGaps.join(' ')).toContain('1 file held because they are too large');
     await f.runner.run({ ...f.lane, limit: 10, reclassify: false });
     expect(f.extracted()).toBe(1);
-    await ownerLimits({ action: 'continue', id: policy.id, to: policy.defaultBytes + 2 }, { now: time.date });
+    await ownerLimits({ action: 'continue', id: policy.id, to: policy.defaultBytes + 2 }, { now: time.date, extractionJobs: () => jobs });
     await f.runner.run({ ...f.lane, limit: 10, reclassify: false });
     expect(f.extracted()).toBe(2);
     const image = { ...f.refs()[0]!, localItemId: 'image', providerItemId: 'image', mimeType: 'image/png', sizeBytes: IMAGE_READER_MAX_INPUT_BYTES + 1 };
     jobs.enqueue({ refs: [image], extractorKind: 'local_text', extractorVersion: '1', maxBytesPerFile: policy.defaultBytes });
     refreshSourceSizeStop(jobs, policy, time.date());
-    await expect(ownerLimits({ action: 'continue', id: policy.id, to: IMAGE_READER_MAX_INPUT_BYTES + 1 }, { now: time.date }))
+    await expect(ownerLimits({ action: 'continue', id: policy.id, to: IMAGE_READER_MAX_INPUT_BYTES + 1 }, { now: time.date, extractionJobs: () => jobs }))
       .rejects.toThrow(`${IMAGE_READER_MAX_INPUT_BYTES} bytes`);
   });
 
@@ -219,4 +219,22 @@ test('a source byte-size stop does not relabel an extractor dimension ceiling as
   refreshSourceSizeStop(jobs, policy, time.date());
   expect(stops()).toEqual([]);
   expect(jobs.corpusReadiness(ref.corpusId)).toMatchObject({ unreadableItems: 1, failedTerminalJobs: 0 });
+});
+
+test('Raise from a read-only queue (the split front) saves the grant; the runner requeues on its next run', async () => {
+  const policy = SOURCE_SIZE_LIMITS[0]!;
+  const f = fixture(policy);
+  await f.runner.plan({ ...f.lane, limit: 10 });
+  expect(jobs.sizeHeldJobs(policy.providers)).toHaveLength(2);
+  await expect(ownerLimits({ action: 'continue', id: policy.id, to: policy.defaultBytes + 2 }, { now: time.date }))
+    .rejects.toThrow('held-file queue is unavailable');
+  const front = new LocalFileExtractionJobStore(defaultFileExtractionJobsDbPath(), { readonly: true });
+  try {
+    await ownerLimits({ action: 'continue', id: policy.id, to: policy.defaultBytes + 2 }, { now: time.date, extractionJobs: () => front });
+  } finally { front.close(); }
+  // Nothing was written through the read-only queue.
+  expect(jobs.sizeHeldJobs(policy.providers)).toHaveLength(2);
+  await f.runner.run({ ...f.lane, limit: 10, reclassify: false });
+  expect(f.extracted()).toBe(2);
+  expect(stops()).toEqual([]);
 });

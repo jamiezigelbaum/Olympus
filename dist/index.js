@@ -24848,34 +24848,6 @@ var init_input_media = __esm(() => {
   init_media_bindings();
   init_zip_reader();
 });
-// src/workers/file-extraction/job-store.ts
-var NETWORK_ERROR_KINDS, POLICY_DECISIONS, TERMINAL_STATUSES;
-var init_job_store = __esm(() => {
-  init_sqlite_migrations();
-  init_store_write_guard();
-  init_job_names();
-  NETWORK_ERROR_KINDS = new Set([
-    "network_unreachable",
-    "network_socket_closed"
-  ]);
-  POLICY_DECISIONS = new Set([
-    "index_allowed",
-    "index_redacted",
-    "metadata_only",
-    "blocked_sensitive",
-    "needs_review"
-  ]);
-  TERMINAL_STATUSES = new Set([
-    "indexed",
-    "metadata_only",
-    "skipped_unsupported",
-    "skipped_too_large",
-    "blocked_policy",
-    "failed_retryable",
-    "failed_terminal"
-  ]);
-});
-
 // src/workers/file-extraction/size-limit-stops.ts
 var reporter;
 var init_size_limit_stops = __esm(() => {
@@ -24883,7 +24855,6 @@ var init_size_limit_stops = __esm(() => {
   init_owner_limit_settings();
   init_limit_stops();
   init_operation_error();
-  init_job_store();
   reporter = createLimitStopReporter();
 });
 
@@ -25408,6 +25379,34 @@ var init_extraction_factory = __esm(() => {
   init_child_media();
   init_extraction_source2();
   init_store_sync();
+});
+
+// src/workers/file-extraction/job-store.ts
+var NETWORK_ERROR_KINDS, POLICY_DECISIONS, TERMINAL_STATUSES;
+var init_job_store = __esm(() => {
+  init_sqlite_migrations();
+  init_store_write_guard();
+  init_job_names();
+  NETWORK_ERROR_KINDS = new Set([
+    "network_unreachable",
+    "network_socket_closed"
+  ]);
+  POLICY_DECISIONS = new Set([
+    "index_allowed",
+    "index_redacted",
+    "metadata_only",
+    "blocked_sensitive",
+    "needs_review"
+  ]);
+  TERMINAL_STATUSES = new Set([
+    "indexed",
+    "metadata_only",
+    "skipped_unsupported",
+    "skipped_too_large",
+    "blocked_policy",
+    "failed_retryable",
+    "failed_terminal"
+  ]);
 });
 
 // src/workers/file-extraction/extractors/bounded-text.ts
