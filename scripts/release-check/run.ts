@@ -535,7 +535,7 @@ async function setupMachine(run: Run, workDir: string, bundlePath: string, insta
     id: 'install.engine',
     title: installTitle,
     status: build.result?.ok === true && run.build ? 'pass' : 'fail',
-    detail: run.build ? `build ${run.build}` : 'the engine did not report a build',
+    detail: installDetail(run.build, build.result),
   });
   if (build.result?.ok !== true) return false;
 
@@ -563,6 +563,17 @@ async function setupMachine(run: Run, workDir: string, bundlePath: string, insta
   // then what it found) stays on the card for ten minutes, about when the screens are taken, so the pictures varied by the clock.
 
   return (await settleIngest(run)).settled;
+}
+
+/** The install check's line: the build, how long the engine took to answer healthy, and the worker's state if it never did. */
+export function installDetail(build: string | null | undefined, result: Record<string, unknown> | undefined): string {
+  if (!build) return 'the engine did not report a build';
+  const waited = Number(result?.waitedMs ?? 0);
+  const parts = [`build ${build}`];
+  const seconds = Math.round(waited / 1000);
+  if (result?.ok !== true) parts.push(`engine status still unhealthy after ${seconds} s${result?.worker ? ` (worker: ${String(result.worker)})` : ''}`);
+  else if (waited >= 1_000) parts.push(`healthy after ${seconds} s`);
+  return parts.join('; ');
 }
 
 /** What prepare-source saw of the engine split after its restart: the roles' process counts, or null if the OS cannot expose them. */
