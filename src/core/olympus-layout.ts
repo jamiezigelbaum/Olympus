@@ -91,6 +91,8 @@ export const SHARED_DATA_FILES = {
   // The worker's boot progress, which the upgrade and the supervisors wait on,
   // and the store backups taken before a schema update (core/boot-progress.ts, #1494).
   'boot-progress': 'boot-progress.json',
+  // The split front's own start (core/boot-progress.ts): the upgrade's wait reads it beside boot-progress.
+  'front-progress': 'front-progress.json',
   'schema-backups': 'schema-backups.jsonl',
   models: 'models',
   'built-in-embedding': 'models/built-in-embedding',

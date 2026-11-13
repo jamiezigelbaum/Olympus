@@ -8,6 +8,8 @@
 // Candidate files are pinned in built-in-reranker-manifest.ts; the search lane
 // chooses a default only after measuring the held-out eval.
 
+import { isMainThread } from 'node:worker_threads';
+import { modelThread, modelThreadHandleId } from './built-in-reasoning/off-thread.ts';
 import { availableParallelism } from 'node:os';
 import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
@@ -134,6 +136,25 @@ export function builtInRerankerFromEnv(options: BuiltInRerankerFromEnvOptions = 
   const vocabularyPath = join(modelDir, 'vocab.txt');
   const tokenizerPath = join(modelDir, 'tokenizer.json');
   if (!existsSync(modelPath) || (!existsSync(vocabularyPath) && !existsSync(tokenizerPath))) return undefined;
+  if (isMainThread && !options.runtime) {
+    const handle = modelThreadHandleId();
+    let loading: Promise<void> | undefined;
+    const prepare = () => loading ??= modelThread().call<void>({ kind: 'reranker-load', handle, env }).catch(error => {
+      loading = undefined;
+      throw error;
+    });
+    return {
+      id: `cross-encoder:${modelDir.split(/[\\/]/).filter(Boolean).pop() ?? 'model'}`,
+      localOnly: true,
+      poolSize: positiveInteger(env[SOURCE_RERANKER_POOL_ENV]) ?? DEFAULT_RERANK_POOL_SIZE,
+      prepare,
+      async score({ signal, ...request }) {
+        if (signal.aborted) throw new Error('Reranking was abandoned.');
+        await prepare();
+        return modelThread().call<number[]>({ kind: 'reranker-run', handle, request }, { signal });
+      },
+    };
+  }
   const runtimeDir = env[SOURCE_RERANKER_RUNTIME_DIR_ENV]?.trim()
     || builtInEmbeddingPaths(env, ARCTIC_EMBED_M_V1_5).runtimeDir;
   const runtime = options.runtime ?? onnxRuntimeFromDirectory(runtimeDir);

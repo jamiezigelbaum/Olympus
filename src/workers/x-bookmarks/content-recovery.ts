@@ -1,3 +1,8 @@
+import { createProviderRateLimitReporter } from '../../core/provider-rate-limits.ts';
+import { DAILY_LIMITS } from '../scheduler-limit-stops.ts';
+import { createLimitStopReporter } from '../../core/limit-stops.ts';
+import type { SourceInvocationProvenance } from '../../core/invocation-provenance.ts';
+export const X_CONTENT_RECOVERY_LIMIT_SUBJECT = JSON.stringify(['x.bookmarks', 'internal.x.bookmarks', 'content_recovery']);
 import { createHash, randomUUID } from 'node:crypto';
 import {
   chmodSync,
@@ -51,6 +56,7 @@ const MAX_RECOVERY_ITEMS = 100;
 
 export interface XBookmarksContentRecoveryRequest {
   execute?: boolean;
+  provenance?: SourceInvocationProvenance;
   limit?: number;
 }
 
@@ -130,11 +136,21 @@ export function createXBookmarksContentRecoveryHandler(
   const credentialHandle = options.credentialHandle?.trim()
     || env.OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CREDENTIAL_HANDLE?.trim()
     || 'x.bookmarks.personal';
-  const broker = options.credentialBroker ?? createEnvCredentialBroker({
+  const broker = options.credentialBroker ?? (options.sourceClient ? undefined : createEnvCredentialBroker({
     env,
     ...(options.fetch ? { fetch: options.fetch } : {}),
-  });
+  }));
   const now = options.now ?? (() => new Date());
+  const stops = createLimitStopReporter();
+  const providerStops = createProviderRateLimitReporter('x');
+  const reportGuard = (error: XApiUsageGuardError, items: number) => {
+    const limit = DAILY_LIMITS.get(error.guardKind);
+    if (!limit) return; // Provider guards report at the shared usage-store boundary.
+    const divisor = limit.kind === 'cost' ? 1_000_000 : 1;
+    stops.report({ id: limit.id, subject: X_CONTENT_RECOVERY_LIMIT_SUBJECT, since: now().toISOString(), reason: error.guardKind,
+      limit: error.amounts ? error.amounts.limit / divisor : null, used: error.amounts ? error.amounts.used / divisor : null,
+      waiting: { items }, resumesAt: error.retryAt });
+  };
   const receiptPath = options.receiptPath
     ?? defaultXBookmarksContentRecoveryReceiptPath(options.store.dbPath);
 
@@ -181,11 +197,13 @@ export function createXBookmarksContentRecoveryHandler(
       }
 
       const attemptedAt = validDate(now());
+      providerStops.resume(attemptedAt);
       const multiplier = config.richResourceExpansionMultiplier;
       let reservation;
       try {
         reservation = options.usageStore.reserveRequest({
           account,
+          ...(request.provenance ? { provenance: request.provenance } : {}),
           requestedMaxResources: recoverable.length * multiplier,
           minimumResources: multiplier,
           preserveHeadReserve: true,
@@ -196,9 +214,11 @@ export function createXBookmarksContentRecoveryHandler(
       } catch (error) {
         if (!(error instanceof XApiUsageGuardError)) throw error;
         counts.items_deferred = recoverable.length;
+        reportGuard(error, counts.items_deferred);
         return writeReceipt(receiptPath, buildReceipt('deferred', counts, error.retryAt));
       }
 
+      for (const limit of DAILY_LIMITS.values()) if (limit.id.startsWith('x.')) stops.clear(limit.id, X_CONTENT_RECOVERY_LIMIT_SUBJECT);
       const requestedCount = Math.min(
         recoverable.length,
         Math.floor(reservation.maxResources / multiplier),
@@ -212,7 +232,7 @@ export function createXBookmarksContentRecoveryHandler(
       try {
         if (options.sourceClient) client = options.sourceClient;
         else ({ client, assertGrantCurrent } = await authenticatedClient({
-          broker,
+          broker: broker!,
           credentialHandle,
           userId,
           ...(options.fetch ? { fetch: options.fetch } : {}),
@@ -258,6 +278,7 @@ export function createXBookmarksContentRecoveryHandler(
         if (!dispatched) {
           options.usageStore.cancelUndispatchedRequest({ reservation });
           counts.items_deferred += requestedCandidates.length;
+          if (error instanceof XApiUsageGuardError) reportGuard(error, counts.items_deferred);
           return writeReceipt(
             receiptPath,
             buildReceipt(
@@ -277,7 +298,11 @@ export function createXBookmarksContentRecoveryHandler(
         });
         counts.provider_failures = 1;
         counts.items_deferred += requestedCandidates.length;
-        const retryAt = recoveryRetryAt(error, config, dispatchAt);
+        const stoppedAt = validDate(now());
+        const retryAt = recoveryRetryAt(error, config, stoppedAt);
+        if (error instanceof XApiError && error.status === 429 && retryAt) providerStops.report(retryAt, stoppedAt, {
+          limit: rateLimit?.limit, used: rateLimit?.limit !== undefined && rateLimit.remaining !== undefined ? Math.max(0, rateLimit.limit - rateLimit.remaining) : null,
+        });
         return writeReceipt(
           receiptPath,
           buildReceipt(retryAt ? 'deferred' : 'failed', counts, retryAt),
@@ -573,3 +598,6 @@ function validDate(value: Date): Date {
   if (!Number.isFinite(value.getTime())) throw new TypeError('X bookmark content-recovery time is invalid.');
   return value;
 }
+
+// limit-retry: retry:recoveryRetryAt:return -> x.rate_limit
+// limit-retry: retry:recover:retryAt -> x.rate_limit

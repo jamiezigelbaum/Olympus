@@ -87,6 +87,8 @@ describe('command driver', () => {
     const driver = new CommandDriver({ argv: [driverPath], onLog: (line) => lines.push(line) });
     const machine = await driver.provision({ runId: 'run1', candidateDir: dir, workdir: dir, timeoutMs: 20_000 });
     expect(machine).toMatchObject({ handle: 'fake-run1', label: 'Fake machine', os: 'linux' });
+    expect(machine.disposable).toBe(true);
+    expect(driver.machineFor(machine).disposable).toBeUndefined();
     // Redrawn meters and bare dots are dropped from the diagnostics.
     expect(lines.some((line) => line.includes('Pulling image: 12%'))).toBe(false);
     expect(lines.some((line) => /^\.+$/.test(line))).toBe(false);

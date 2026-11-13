@@ -6,7 +6,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { spawn as spawnProcess } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -14,6 +14,7 @@ import {
   beginBootProgress,
   bootInProgress,
   bootProgressIsLive,
+  duringStoreUpdateStep,
   finishBootProgress,
   readBootProgress,
   reportBootStep,
@@ -21,7 +22,10 @@ import {
   recordSchemaBackup,
   removeAllSchemaBackups,
   removeSchemaBackupsSince,
+  removeAbandonedBackupCopies,
   restoreSchemaBackupsSince,
+  retiredStateBackupPath,
+  retireStatePath,
   type BootProgress,
   type BootStepEvent,
 } from '../src/core/boot-progress.ts';
@@ -158,6 +162,21 @@ describe('schema updates back up the store first', () => {
     db.close();
   });
 
+  test('a killed backup\'s part-way copy is gone before the free space is measured', () => {
+    const env = home();
+    const { path, db } = storeAtVersion1(env);
+    const gone = Bun.spawnSync([process.execPath, '-e', '0']).pid;
+    const abandoned = `${path}.pre-schema-1.bak.${gone}.partial`;
+    writeFileSync(abandoned, 'part of a copy');
+    let seenAtMeasure: boolean | undefined;
+    runSqliteMigrations(db, 'fixture', MIGRATIONS, { env, log: () => {}, freeBytes: () => {
+      seenAtMeasure = existsSync(abandoned);
+      return Number.MAX_SAFE_INTEGER;
+    } });
+    db.close();
+    expect(seenAtMeasure).toBe(false);
+  }, 30_000);
+
   test('a backup left by an earlier attempt is replaced, since the store may have changed since', () => {
     const env = home();
     const { path, db } = storeAtVersion1(env);
@@ -234,6 +253,88 @@ describe('schema updates back up the store first', () => {
   });
 });
 
+describe('a rollback or a commit leaves no copy behind (the gate7 forced leg, 2026-11-13)', () => {
+  function migratedWithLeftovers(env: Record<string, string>): { path: string; since: number; gone: number } {
+    const { path, db } = storeAtVersion1(env);
+    const since = Date.now() - 1;
+    runSqliteMigrations(db, 'fixture', MIGRATIONS, { env, log: () => {} });
+    db.close();
+    // A process stopped inside a transaction leaves its hot journal, and one
+    // stopped inside a backup leaves its part-way copy.
+    const gone = Bun.spawnSync([process.execPath, '-e', '0']).pid;
+    writeFileSync(`${path}-journal`, 'a hot journal of the updated file');
+    for (const suffix of ['partial', 'partial-journal']) writeFileSync(`${path}.pre-schema-1.bak.${gone}.${suffix}`, 'x');
+    return { path, since, gone };
+  }
+
+  test('a restore removes the -journal written for the file it replaces, and every part-way copy', () => {
+    const env = home();
+    const { path, since, gone } = migratedWithLeftovers(env);
+    expect(restoreSchemaBackupsSince(env, since)).toEqual(['fixture']);
+    expect(existsSync(`${path}-journal`)).toBe(false);
+    expect(existsSync(`${path}.pre-schema-1.bak.${gone}.partial`)).toBe(false);
+    expect(existsSync(`${path}.pre-schema-1.bak.${gone}.partial-journal`)).toBe(false);
+    expect(preSchemaBackupsOf(path)).toEqual([]);
+    const restored = new Database(path, { readonly: true });
+    expect(readSqliteSchemaVersion(restored, 'fixture')).toBe(1);
+    restored.close();
+  }, 30_000);
+
+  test('a commit removes the part-way copies with the backups', () => {
+    const env = home();
+    const { path, since, gone } = migratedWithLeftovers(env);
+    expect(removeSchemaBackupsSince(env, since)).toBe(1);
+    expect(existsSync(`${path}.pre-schema-1.bak.${gone}.partial`)).toBe(false);
+    expect(preSchemaBackupsOf(path)).toEqual([]);
+  }, 30_000);
+});
+
+describe('a killed backup leaves nothing behind once a backup runs again', () => {
+  test('part-way copies of gone processes are removed; a live process\'s copy is kept', () => {
+    const env = home();
+    const backup = join(env.HOME!, 'store.sqlite.pre-schema-15.bak');
+    const gone = Bun.spawnSync([process.execPath, '-e', '0']).pid;
+    const live = process.ppid;
+    for (const name of [`${backup}.${gone}.partial`, `${backup}.${gone}.partial-journal`, `${backup}.${live}.partial`, backup]) writeFileSync(name, 'x');
+    expect(removeAbandonedBackupCopies(backup)).toBe(2);
+    expect(existsSync(`${backup}.${gone}.partial`)).toBe(false);
+    expect(existsSync(`${backup}.${gone}.partial-journal`)).toBe(false);
+    expect(existsSync(`${backup}.${live}.partial`)).toBe(true);
+    expect(existsSync(backup)).toBe(true);
+  }, 30_000);
+});
+
+describe('retired state is moved aside for the upgrade that retires it (#1563 review)', () => {
+  test('state last written long ago is still put back by a failed upgrade', () => {
+    const env = home();
+    const path = join(env.HOME!, 'retired.sqlite');
+    writeFileSync(path, 'old rows');
+    const longAgo = new Date(Date.now() - 30 * 24 * HOUR);
+    utimesSync(path, longAgo, longAgo);
+    const since = Date.now() - 1;
+    expect(retireStatePath(env, 'retired', path)).toBe(true);
+    // The move keeps the time it was given just before, so the copy counts as this upgrade's.
+    expect(statSync(retiredStateBackupPath(path)).mtimeMs).toBeGreaterThanOrEqual(since);
+    expect(restoreSchemaBackupsSince(env, since)).toEqual(['retired']);
+    expect(readFileSync(path, 'utf8')).toBe('old rows');
+  });
+
+  test('a copy an earlier start left gives way to the newer state, which a failed upgrade puts back', () => {
+    const env = home();
+    const path = join(env.HOME!, 'retired.sqlite');
+    const backup = retiredStateBackupPath(path);
+    writeFileSync(backup, 'older copy');
+    const longAgo = new Date(Date.now() - 30 * 24 * HOUR);
+    utimesSync(backup, longAgo, longAgo);
+    writeFileSync(path, 'newer rows');
+    const since = Date.now() - 1;
+    expect(retireStatePath(env, 'retired', path)).toBe(true);
+    expect(readFileSync(backup, 'utf8')).toBe('newer rows');
+    expect(restoreSchemaBackupsSince(env, since)).toEqual(['retired']);
+    expect(readFileSync(path, 'utf8')).toBe('newer rows');
+  });
+});
+
 describe('a long store update is not a stall', () => {
   test('while one store updates, silent for longer than the stall limit, the boot stays in progress', () => {
     const env = home();
@@ -291,6 +392,103 @@ describe('the supervisor waits on boot progress', () => {
   test('a child with no progress still times out', async () => {
     expect(await startWith(false)).toBe('timed out');
   }, 10_000);
+});
+
+describe('a check that reads every row after an update is not a stall (gate7 forced leg, 2026-11-13)', () => {
+  test('inside the step the boot reads as a long update; after it, the stall rule applies again', () => {
+    const env = home();
+    beginBootProgress(env);
+    const seen = duringStoreUpdateStep(env, 'fixture', () => ({
+      phase: readBootProgress(env)?.phase,
+      liveAfter10Min: bootInProgress(env, Date.now() + 10 * 60_000),
+    }));
+    expect(seen).toEqual({ phase: 'migrating', liveAfter10Min: true });
+    expect(readBootProgress(env)?.phase).toBe('starting');
+    expect(bootInProgress(env, Date.now() + 10 * 60_000)).toBe(false);
+  });
+
+  test('a step that throws still returns the boot to starting', () => {
+    const env = home();
+    beginBootProgress(env);
+    expect(() => duringStoreUpdateStep(env, 'fixture', () => { throw new Error('bad rows'); })).toThrow('bad rows');
+    expect(readBootProgress(env)?.phase).toBe('starting');
+  });
+
+  // A real child holds one silent step for longer than the supervisor's
+  // startup timeout, and the supervisor reads its progress as if ten minutes
+  // had passed since the step began: twice the stall limit.
+  async function superviseSilentStep(asUpdateStep: boolean): Promise<string> {
+    const env = home();
+    const readyFile = join(env.HOME!, 'ready');
+    const module = join(import.meta.dir, '..', 'src', 'core', 'boot-progress.ts');
+    const script = `
+      const { beginBootProgress, duringStoreUpdateStep, reportBootStep } = await import(${JSON.stringify(module)});
+      const { writeFileSync } = await import('node:fs');
+      const env = ${JSON.stringify(env)};
+      beginBootProgress(env);
+      const silent = () => { const end = Date.now() + 3000; while (Date.now() < end) {} };
+      if (${asUpdateStep}) duringStoreUpdateStep(env, 'fixture', silent);
+      else { reportBootStep(env, { phase: 'starting', storeId: 'fixture' }); silent(); }
+      writeFileSync(${JSON.stringify(readyFile)}, '');
+      setInterval(() => {}, 1000);
+    `;
+    const service = createNativeProcessService({
+      id: 'fixture', label: 'fixture', initialConfig: {}, reload: { configPrefixes: [] },
+      readinessPollMs: 20, stopGraceMs: 100, restartDelaysMs: [60_000],
+      async prepareStart() {
+        return {
+          command: process.execPath, args: ['-e', script], env: { PATH: process.env.PATH ?? '' },
+          startupTimeoutMs: 1500, endpointOccupied: false,
+          startupInProgress: () => bootInProgress(env, Date.now() + 10 * 60_000),
+          readinessProbe: async () => existsSync(readyFile),
+        };
+      },
+    });
+    try {
+      await service.start({ logger: { warn() {} }, serviceHealth: { reportFailure() {}, clearFailure() {} } });
+      return 'ready';
+    } catch {
+      return 'timed out';
+    } finally {
+      await service.stop();
+    }
+  }
+
+  test('the supervisor waits out a check longer than its timeout and the stall limit', async () => {
+    expect(await superviseSilentStep(true)).toBe('ready');
+  }, 30_000);
+
+  test('the same silence outside an update step still times out', async () => {
+    expect(await superviseSilentStep(false)).toBe('timed out');
+  }, 30_000);
+});
+
+describe('the supervisor probes before it gives up', () => {
+  test('a child that finished its boot during the last wait is ready, not timed out', async () => {
+    const readyAt = Date.now() + 150;
+    const service = createNativeProcessService({
+      id: 'fixture', label: 'fixture', initialConfig: {}, reload: { configPrefixes: [] },
+      // The deadline passes during the wait, and the boot ends then too.
+      readinessPollMs: 400, stopGraceMs: 100, restartDelaysMs: [60_000],
+      async prepareStart() {
+        return {
+          command: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'], env: { PATH: process.env.PATH ?? '' },
+          startupTimeoutMs: 100, endpointOccupied: false,
+          startupInProgress: () => Date.now() < readyAt,
+          readinessProbe: async () => Date.now() >= readyAt,
+        };
+      },
+    });
+    let outcome = 'ready';
+    try {
+      await service.start({ logger: { warn() {} }, serviceHealth: { reportFailure() {}, clearFailure() {} } });
+    } catch {
+      outcome = 'timed out';
+    } finally {
+      await service.stop();
+    }
+    expect(outcome).toBe('ready');
+  }, 30_000);
 });
 
 describe('the worker reports its boot', () => {

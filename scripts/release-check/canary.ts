@@ -38,7 +38,7 @@ import { randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { CommandDriver, type Machine } from './machine.ts';
-import { escapeHtml, renderOnDemandTiming, type CheckResult, type CheckStatus } from './report.ts';
+import { escapeHtml, renderLimits, renderOnDemandTiming, type CheckResult, type CheckStatus } from './report.ts';
 import { openEngineMcp, runLiveAccounts, type LiveSourceSpec } from './live-accounts.ts';
 import { parseTimingAccounts, parseTimingSeedConfig, realTimingSeeds, type TimingAccounts } from './on-demand-seeds.ts';
 import { runOnDemandTiming, type OnDemandTimingResult } from './on-demand-timing.ts';
@@ -65,6 +65,7 @@ export interface CanaryReport {
   checks: CheckResult[];
   screens: CanaryScreen[];
   onDemandTiming?: OnDemandTimingResult;
+  limits?: import('./fresh-limits.ts').LimitsResult;
 }
 
 export interface CanaryOptions {
@@ -503,6 +504,7 @@ ${renewals(report.checks).length > 0 ? `<h2>To renew before the next run</h2><ul
 <table>${rows}</table>
 ${report.onDemandTiming?.preflight ? `<p>${escapeHtml(report.onDemandTiming.preflight)}</p>` : ''}
 ${renderOnDemandTiming(report.onDemandTiming?.rows, report.onDemandTiming?.notRun)}
+${renderLimits(report.limits?.rows)}
 ${pictures}
 </body></html>
 `;

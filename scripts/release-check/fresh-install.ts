@@ -5,8 +5,10 @@ import { openEngineMcp, runLiveAccounts, type EngineMcp, type LiveSourceSpec } f
 import { openFreshDashboard, type FreshDashboard } from './fresh-dashboard.ts';
 import { runFreshOnDemand, type FreshTimingOptions } from './fresh-on-demand.ts';
 import type { OnDemandTimingResult } from './on-demand-timing.ts';
+import { runFreshLimits, type FreshLimitsOptions, type LimitsResult } from './fresh-limits.ts';
 import { ANSWER_MODEL_REQUIRED_TEXT } from '../../src/workers/answer-model-required.ts';
 import { FIRST_RUN_PRIVACY_REQUIRED_TEXT } from '../../src/workers/first-run-privacy-gate.ts';
+import localFirst from '../../config/sovereignty/presets/local-first.json';
 
 export const FRESH_LEG = 'canary-test-omarchy-fresh';
 export const quote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
@@ -55,6 +57,28 @@ export function validateFreshSources(sources: LiveSourceSpec[]): LiveSourceSpec[
   });
 }
 
+/**
+ * The ports of the model servers the recommended preset expects a person to run. The built-in model covers for one only when
+ * nothing listens there, so a leftover server on such a port keeps a fresh install's sources locked (olympus-ops#221).
+ */
+export const LOCAL_FIRST_PORTS: readonly number[] = Object.values(localFirst.modelProfiles as Record<string, { provider: string; baseUrl?: string }>)
+  .filter((profile) => profile.provider === 'local-openai-compatible' && profile.baseUrl)
+  .map((profile) => new URL(profile.baseUrl!))
+  .filter((url) => url.hostname === '127.0.0.1' || url.hostname === 'localhost')
+  .map((url) => Number(url.port || (url.protocol === 'https:' ? 443 : 80)));
+
+/** Each held port, with the program and user holding it, from `ss -Hltnp` lines; empty when every port is free. */
+export function heldPorts(ssOutput: string, ports: readonly number[]): string[] {
+  const held: string[] = [];
+  for (const port of ports) {
+    const line = ssOutput.split('\n').find((row) => new RegExp(`[:\\]]${port}\\s`).test(row));
+    if (!line) continue;
+    const program = /users:\(\("([^"]+)",pid=(\d+)/.exec(line);
+    held.push(`127.0.0.1:${port} is held by ${program ? `${program[1]} (pid ${program[2]})` : 'a process ss could not name'}`);
+  }
+  return held;
+}
+
 const ROOT = '"$HOME/.olympus-canary/fresh-run"';
 export const FRESH_BRIDGE_PID = '/home/olyfresh/.olympus-canary/owner-bridge.pid';
 export const SOCKET_READY = 'curl -fsS --max-time 2 --unix-socket "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/olympus/worker.sock" http://127.0.0.1:8010/v1/health > /dev/null';
@@ -91,6 +115,9 @@ export interface FreshOptions {
   bundle?: { installer: string; tarball: string };
   cdp?: string;
   onDemandTiming?: FreshTimingOptions;
+  limits?: FreshLimitsOptions;
+  /** Unit-test seam. Every production fresh install runs limits. */
+  limitsStage?: typeof runFreshLimits;
   /** Current harness bundle, copied to the fresh user's home for the existing owner-bridge command. */
   bridgeAgent?: string;
   /** Test seam: real implementation uses only dashboard controls and persisted reads. */
@@ -99,12 +126,13 @@ export interface FreshOptions {
   sleep?: (ms: number) => Promise<void>;
 }
 
-export async function runFreshInstall(machine: Machine, options: FreshOptions): Promise<{ checks: CheckResult[]; screens: []; onDemandTiming?: OnDemandTimingResult }> {
+export async function runFreshInstall(machine: Machine, options: FreshOptions): Promise<{ checks: CheckResult[]; screens: []; onDemandTiming?: OnDemandTimingResult; limits?: LimitsResult }> {
   const sources = validateFreshSources(options.sources);
   if (machine.os !== 'linux') throw new Error('fresh install requires Linux');
   if (!options.dashboard && !options.bridgeAgent) throw new Error('fresh install needs the machine-agent bundle');
   const checks: CheckResult[] = [];
   let onDemandTiming: OnDemandTimingResult | undefined;
+  let limits: LimitsResult | undefined;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)));
   let current = 'install';
   let interrupted = false;
@@ -131,6 +159,20 @@ export async function runFreshInstall(machine: Machine, options: FreshOptions): 
     return result.stdout;
   };
   try {
+    // A fresh machine has nothing on the ports the recommended preset reaches for; a leftover there is the machine's fault, said at once.
+    await checked('machine-clear', async () => {
+      const result = await machine.exec(`sudo -n ss -Hltnp 2>/dev/null || ss -Hltnp`, { timeoutMs: 30_000 });
+      if (result.code !== 0) throw new Error(`could not list listening ports (exit ${result.code})`);
+      let held = heldPorts(result.stdout, LOCAL_FIRST_PORTS);
+      // Name the unit that keeps it running, so the owner knows what to move (a test unit, olympus-ops#221).
+      held = await Promise.all(held.map(async (line) => {
+        const pid = /\(pid (\d+)\)/.exec(line)?.[1];
+        const unit = pid ? (await machine.exec(`ps -o unit= -p ${pid}`, { timeoutMs: 10_000 }).catch(() => undefined))?.stdout.trim() : undefined;
+        return unit && /^[\w@.-]+$/.test(unit) ? `${line}, unit ${unit}` : line;
+      }));
+      if (held.length > 0) throw new Error(`${held.join('; ')}: the local-first preset's model server port must be free on a fresh machine, or the built-in model never covers for it`);
+      return `${LOCAL_FIRST_PORTS.map((port) => `127.0.0.1:${port}`).join(', ')} free`;
+    });
     await checked('install', async () => {
       await exec(`umask 077
 [ "$(id -un)" = zig ]
@@ -244,6 +286,9 @@ done; exit 1`), 200_000);
         async ms => { if (interrupted) throw new Error('run interrupted'); await sleep(ms); }, machine);
       checks.push(...onDemandTiming.checks);
     }
+    current = 'limits';
+    limits = await (options.limitsStage ?? runFreshLimits)(fresh, options.limits ?? {}, machine);
+    checks.push(...limits.checks);
   } catch (error) {
     checks.push({ id: `fresh.${current}`, title: current, status: error instanceof FreshInconclusive ? 'skip' : 'fail', detail: error instanceof FreshInconclusive ? `Inconclusive: ${error.message}` : `check failed: ${error instanceof Error ? redactFreshDetail(error.message) : 'unexpected failure'}` });
   } finally {
@@ -265,7 +310,7 @@ done; exit 1`, 130_000);
   }
   process.removeListener('SIGINT', onInterrupt);
   process.removeListener('SIGTERM', onInterrupt);
-  return { checks, screens: [], ...(onDemandTiming ? { onDemandTiming } : {}) };
+  return { checks, screens: [], ...(onDemandTiming ? { onDemandTiming } : {}), ...(limits ? { limits } : {}) };
 }
 
 async function ask(engine: EngineMcp, question: string, sleep: (ms: number) => Promise<void>) {

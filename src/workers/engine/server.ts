@@ -1,3 +1,5 @@
+import { X_CONTENT_RECOVERY_LIMIT_SUBJECT } from '../x-bookmarks/content-recovery.ts';
+import { GMAIL_IMPORT_LIMIT_SUBJECT, withGmailImportRunOnce } from '../google-connectors/gmail-import-allowance.ts';
 import { startVeniceCreditRecovery, fetchVeniceCreditStatus, VENICE_BILLING_BASE_URL } from '../../core/provider-credit-status.ts';
 import { openVeniceCreditPausePaths, ownerLimitStopHooks } from '../../core/owner-limit-state.ts';
 import { ownerLimits, limitRunOnceSource } from '../../core/owner-limits.ts';
@@ -12,7 +14,7 @@ import { createOwnerTierItems, getOwnerTierItem, type OwnerTierItemsContext } fr
 import { createJudgeCheck } from '../classification/judge-check.ts';
 import { prepareBuiltInRerankerFromEnv } from '../source-index/built-in-reranker.ts';
 import { JudgeSpending, judgeSpendingPath } from '../classification/judge-spending.ts';
-import { JudgeObservations, SecondRoundConfirmed, SecondRoundSweep, judgeObservationsPath, judgeSecondRoundConfirmedPath, judgeSecondRoundStatePath, observedJudge, secondRoundJudge } from '../classification/judge-second-round.ts';
+import { JudgeObservations, SecondRoundConfirmed, SecondRoundSweep, judgeObservationsPath, judgeSecondRoundConfirmedPath, judgeSecondRoundStatePath, observedJudge, reopenSecondRoundAfterStop, secondRoundJudge } from '../classification/judge-second-round.ts';
 import { DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS } from '../classification/judge-pacing.ts';
 import { type SnifferModel } from '../classification/sniffer-decision.ts';
 import { macComputerSetupView, saveMacComputerUseChoice } from '../../core/engine-service.ts';
@@ -222,7 +224,7 @@ import { accountStoreNames } from '../../core/olympus-layout.ts';
 import { ARCHIVE_IMPORTS_SOURCE_ID } from '../archive-import/state.ts';
 import { createArchiveExtractionRuntime } from '../archive-import/extraction-runtime.ts';
 import { createArchiveImportsSchedulerSource } from '../archive-import/scheduler-source.ts';
-import type { ExtractorRegistryConfig } from '../file-extraction/types.ts';
+import type { ExtractionItemRef, ExtractorRegistryConfig } from '../file-extraction/types.ts';
 import { createLocalFilesSourceConnector } from '../local-files/connector.ts';
 import { createLocalFilesOpenTargets, localFilesOpenRoots } from '../local-files/open-target.ts';
 import { defaultExclusionContext, scopePathIsWithin } from '../local-files/paths.ts';
@@ -457,7 +459,7 @@ import { approveClassifier, resolveClassificationLedgerPath, readClassificationL
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 import { ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
-import { beginBootProgress, finishBootProgress, reportBootStep } from '../../core/boot-progress.ts';
+import { beginBootProgress, beginFrontProgress, failFrontProgress, finishBootProgress, finishFrontProgress, reportBootStep, reportFrontStep } from '../../core/boot-progress.ts';
 import { ENGINE_BACKGROUND_INSTANCE_ENV, engineRoleFromEnv } from '../../core/engine-split.ts';
 import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
 import {
@@ -575,7 +577,17 @@ let workerLaunch: WorkerLaunch = {};
  */
 export async function startWorkerWithLaunch(launch: WorkerLaunch): Promise<void> {
   workerLaunch = { ...launch };
-  await main();
+  await mainRecordingFrontFailure();
+}
+
+/** A front whose start throws records the error's code before it goes (#1563); a no-op in any other role. */
+async function mainRecordingFrontFailure(): Promise<void> {
+  try {
+    await main();
+  } catch (error) {
+    failFrontProgress(error);
+    throw error;
+  }
 }
 
 /**
@@ -610,8 +622,22 @@ export async function main(): Promise<void> {
   dataOwnerLock = takeWorkerDataOwnerLock(process.env, { engineRole: engineRoleFromEnv(process.env) });
   const engineRole = engineRoleFromEnv(process.env);
   // The waits on this boot read its progress, not a fixed ceiling (#1494). The
-  // front does not own the data root and never writes it.
+  // front does not own the data root's boot work and never writes that file;
+  // it reports its own start, each store it opens a step (#1563).
   if (engineRole !== 'front') beginBootProgress(process.env);
+  else {
+    beginFrontProgress(process.env);
+    // A front that exits on an error says which, by code, in its progress
+    // file, so an upgrade that waited on it reports the cause and not a
+    // probe timeout (#1563). The exit stays what it was: print, exit 1.
+    const exitOnError = (error: unknown) => {
+      failFrontProgress(error);
+      console.error(error);
+      process.exit(1);
+    };
+    process.once('uncaughtException', exitOnError);
+    process.once('unhandledRejection', exitOnError);
+  }
   const engineSocketPath = engineRole === 'single' ? undefined : engineBackgroundSocketFromEnv(process.env);
   let engineFront: EngineFront | undefined;
   if (engineRole === 'front') {
@@ -622,6 +648,7 @@ export async function main(): Promise<void> {
     if (!frontToken) throw new Error('The engine front needs the worker auth token.');
     forbidWritableStoreOpens();
     await waitForEngineBackground({ socketPath: engineSocketPath!, authToken: frontToken });
+    reportFrontStep();
     engineFront = createEngineFront({ env: process.env, socketPath: engineSocketPath!, authToken: frontToken });
   }
   // A retired per-store path setting would open empty stores beside the
@@ -733,7 +760,9 @@ export async function main(): Promise<void> {
   const cloudJudgeRuntime = resolveJudgeChoiceRuntime(judgeRuntimeInput, { choice: 'venice', stop: null, remainingDollars: 1 });
   await adoptExistingCloudApproval(judgeSpending, judgeRuntimeInput, resolveClassificationLedgerPath(process.env), snifferPromptVersions(privacyOwnerContext({ env: process.env })).approval);
   await carryCloudJudgeApproval(judgeSpending, cloudJudgeRuntime, resolveClassificationLedgerPath(process.env), snifferPromptVersions(privacyOwnerContext({ env: process.env })).approval);
-  const snifferRuntime = resolveJudgeChoiceRuntime(judgeRuntimeInput, judgeSpending.status());
+  const initialJudgeChoice = judgeSpending.status();
+  const snifferRuntime = resolveJudgeChoiceRuntime(judgeRuntimeInput, { ...initialJudgeChoice,
+    ...(initialJudgeChoice.stop === 'cap' || initialJudgeChoice.stop === 'payment' ? { stop: null, remainingDollars: 1 } : {}) });
   // The local judge's own speed and held share on this install, for the setup estimates (#891).
   const judgeObservations = new JudgeObservations(judgeObservationsPath(process.env));
   const snifferLane: SnifferLane | undefined = snifferRuntime.source === 'off' ? undefined : snifferRuntime.lane;
@@ -1621,6 +1650,7 @@ export async function main(): Promise<void> {
         }
         return {
           set: gmailArchiveSet.set,
+          reportWait: (reason: string) => gmailImportGate.reportWait?.(reason),
           sync: gmailLaneSyncOptions(ownerRules),
           // The account scope live Gmail writes under, so both inputs name one item.
           account: gmailItemScopeFor(handle),
@@ -2518,15 +2548,75 @@ export async function main(): Promise<void> {
         }
       : {}),
   };
+  const connectorStoreReadScope = (store: LocalConnectorStore):
+    { allowed: false } | {
+      allowed: true;
+      accountScope?: string;
+      filters?: import('../connector-store/index.ts').ConnectorStoreSearchFilters;
+      contentAllowed: boolean;
+      contentFilters?: import('../connector-store/index.ts').ConnectorStoreSearchFilters;
+    } => {
+    const sourceId = isDropboxTierStore(store)
+      ? 'dropbox.files' as const
+      : isLocalFilesTierStore(store)
+        ? LOCAL_FILES_SOURCE_ID
+      : store === googleDriveInternalConnectorStore || store === googleDriveSecureConnectorStore
+        || (store.corpusId === GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID && store === googleDriveTierLane?.publicStore?.current())
+        ? 'google_drive.docs' as const
+      : Object.values(EVERNOTE_TIER_CORPUS_IDS).includes(store.corpusId)
+        ? EVERNOTE_SOURCE_ID
+        : undefined;
+    if (sourceId === LOCAL_FILES_SOURCE_ID && !localFilesCleanupRecovery?.ready()) return { allowed: false };
+    if (!sourceId) return { allowed: true, contentAllowed: true };
+    const approval = fileSourceScopeAuthority?.snapshot(sourceId);
+    if (!approval || approval.status !== 'approved') return { allowed: false };
+    const metadataScope = fileSourceScopeMetadataFilters(approval);
+    if (!metadataScope.allowed) return { allowed: false };
+    const contentScope = fileSourceScopeContentFilters(approval);
+    const scopeAccount = fileScopeAccount(sourceId);
+    if (!scopeAccount) return { allowed: false };
+    return {
+      allowed: true,
+      accountScope: scopeAccount.accountScope,
+      filters: metadataScope.filters,
+      contentAllowed: contentScope.allowed,
+      ...(contentScope.allowed && contentScope.filters ? { contentFilters: contentScope.filters } : {}),
+    };
+  };
+  const currentExtractionItems = (refs: readonly ExtractionItemRef[]): readonly boolean[] => {
+    // One batched check per store for the whole queue; shared by readiness
+    // and size stops so obsolete jobs are neither reported nor granted.
+    const answers = refs.map(() => false);
+    const check = (
+      corpusId: string,
+      store: LocalConnectorStore | undefined,
+      view: { itemsMatchingExtractionRefs: LocalConnectorStore['itemsMatchingExtractionRefs'] } | undefined,
+    ): void => {
+      if (!store) return;
+      const indexes = refs.flatMap((ref, index) => (ref.corpusId === corpusId ? [index] : []));
+      if (indexes.length === 0) return;
+      const readScope = connectorStoreReadScope(store);
+      if (!readScope.allowed || !readScope.contentAllowed) return;
+      const matched = (view ?? store).itemsMatchingExtractionRefs(indexes.map((index) => refs[index]!), readScope.contentFilters);
+      indexes.forEach((index, position) => { answers[index] = matched[position] === true; });
+    };
+    for (const store of connectorStores) {
+      const view = store.corpusId === LOCAL_FILES_CORPUS_ID ? localFilesExtractionView
+        : store.corpusId === DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID ? dropboxExtractionView : undefined;
+      check(store.corpusId, store, view);
+    }
+    return answers;
+  };
   const buildFileExtractionRuntime = () => createFileExtractionRuntime({
     env: process.env,
-    // The split's front reads the queue; the background owns it and runs the jobs.
-    ...(engineRole === 'front' ? { readOnly: true } : {}),
+    // The split's front reads the queue (the runtime takes that from the
+    // process role); the background owns it and runs the jobs.
     enabled: fileExtractionCorpora().length > 0 || dropboxConnectorStoreLane.enabled || localFilesConnectorStoreLane.enabled
       || whatsappConnectorStoreLane.enabled || googleDriveConnectorStoreLane.enabled,
     allowEmpty: true,
     connectorStores,
     corpora: fileExtractionCorpora(),
+    currentItems: currentExtractionItems,
     extraSourceFactories: new Map([
       [LOCAL_FILES_PROVIDER, ({ config, store, view }) => {
         const ref = fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID);
@@ -2672,41 +2762,6 @@ export async function main(): Promise<void> {
     }
   };
   for (const mount of configuredConnectorStoreMounts) adoptConfiguredPrincipal(mount);
-  const connectorStoreReadScope = (store: LocalConnectorStore):
-    { allowed: false } | {
-      allowed: true;
-      accountScope?: string;
-      filters?: import('../connector-store/index.ts').ConnectorStoreSearchFilters;
-      contentAllowed: boolean;
-      contentFilters?: import('../connector-store/index.ts').ConnectorStoreSearchFilters;
-    } => {
-    const sourceId = isDropboxTierStore(store)
-      ? 'dropbox.files' as const
-      : isLocalFilesTierStore(store)
-        ? LOCAL_FILES_SOURCE_ID
-      : store === googleDriveInternalConnectorStore || store === googleDriveSecureConnectorStore
-        || (store.corpusId === GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID && store === googleDriveTierLane?.publicStore?.current())
-        ? 'google_drive.docs' as const
-      : Object.values(EVERNOTE_TIER_CORPUS_IDS).includes(store.corpusId)
-        ? EVERNOTE_SOURCE_ID
-        : undefined;
-    if (sourceId === LOCAL_FILES_SOURCE_ID && !localFilesCleanupRecovery?.ready()) return { allowed: false };
-    if (!sourceId) return { allowed: true, contentAllowed: true };
-    const approval = fileSourceScopeAuthority?.snapshot(sourceId);
-    if (!approval || approval.status !== 'approved') return { allowed: false };
-    const metadataScope = fileSourceScopeMetadataFilters(approval);
-    if (!metadataScope.allowed) return { allowed: false };
-    const contentScope = fileSourceScopeContentFilters(approval);
-    const scopeAccount = fileScopeAccount(sourceId);
-    if (!scopeAccount) return { allowed: false };
-    return {
-      allowed: true,
-      accountScope: scopeAccount.accountScope,
-      filters: metadataScope.filters,
-      contentAllowed: contentScope.allowed,
-      ...(contentScope.allowed && contentScope.filters ? { contentFilters: contentScope.filters } : {}),
-    };
-  };
   const connectorStoreStatusScope = (store: LocalConnectorStore):
     ConnectorStoreStatusScope | undefined => {
     // Mail older than the approved window is kept as names only on purpose,
@@ -3455,42 +3510,7 @@ export async function main(): Promise<void> {
     ? createExtractionReadinessLedger(fileExtractionRuntime.jobs, {
         terminalRetryPaths: fileExtractionRuntime.terminalRetryPaths,
         classifyUnreadable: unreadableVerdict,
-        currentItems(refs) {
-          // One batched check per store for the whole queue (the per-job
-          // check below held the worker for seconds on a large Dropbox queue).
-          const answers = refs.map(() => false);
-          const check = (
-            corpusId: string,
-            store: LocalConnectorStore | undefined,
-            view: { itemsMatchingExtractionRefs: LocalConnectorStore['itemsMatchingExtractionRefs'] } | undefined,
-          ): void => {
-            if (!store) return;
-            const indexes = refs.flatMap((ref, index) => (ref.corpusId === corpusId ? [index] : []));
-            if (indexes.length === 0) return;
-            const readScope = connectorStoreReadScope(store);
-            if (!readScope.allowed || !readScope.contentAllowed) return;
-            const matched = (view ?? store).itemsMatchingExtractionRefs(indexes.map((index) => refs[index]!), readScope.contentFilters);
-            indexes.forEach((index, position) => { answers[index] = matched[position] === true; });
-          };
-          check(LOCAL_FILES_CORPUS_ID, localFilesConnectorStore, localFilesExtractionView);
-          check(DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, dropboxConnectorStore, dropboxExtractionView);
-          return answers;
-        },
-        currentItem(ref) {
-          if (ref.corpusId === LOCAL_FILES_CORPUS_ID && localFilesConnectorStore) {
-            const readScope = connectorStoreReadScope(localFilesConnectorStore);
-            return readScope.allowed
-              && readScope.contentAllowed
-              && (localFilesExtractionView ?? localFilesConnectorStore).itemMatchesExtractionRef(ref, readScope.contentFilters);
-          }
-          if (ref.corpusId !== DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID || !dropboxConnectorStore) {
-            return false;
-          }
-          const readScope = connectorStoreReadScope(dropboxConnectorStore);
-          return readScope.allowed
-            && readScope.contentAllowed
-            && (dropboxExtractionView ?? dropboxConnectorStore).itemMatchesExtractionRef(ref, readScope.contentFilters);
-        },
+        currentItems: currentExtractionItems,
         lanesForCorpus(corpusId) {
           if (corpusId === LOCAL_FILES_CORPUS_ID) {
             const ref = fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID);
@@ -4760,7 +4780,20 @@ export async function main(): Promise<void> {
     // "Check the judge" (issue #887): its round file sits beside the owner's privacy profile.
     judgeCheck: createJudgeCheck({ items: ownerTierItemsEngine, get: (itemId) => getOwnerTierItem(itemId, ownerTierItemsContext, { withPreview: true }) }),
     ownerLimits: (params) => ownerLimits(params, {
-      runOnce: async (subject) => {
+      runOnce: async (subject, stop) => {
+        if (subject === GMAIL_IMPORT_LIMIT_SUBJECT) {
+          if (!sourceScheduler?.status().enabled || !sourceScheduler.status().sources.some(source => source.source_id === SCHEDULER_SOURCE_IDS.archiveImports)) throw new OperationError('invalid_request', 'The import scheduler is unavailable or disabled.');
+          if (sourceScheduler.hasExecutingTask(new Set([SCHEDULER_SOURCE_IDS.archiveImports]))) return { status: 'busy' };
+          void withGmailImportRunOnce(() => sourceScheduler!.runSource(SCHEDULER_SOURCE_IDS.archiveImports, undefined, 'operator'))
+            .catch(error => console.warn('Gmail import run failed:', error instanceof Error ? error.name : 'unknown'));
+          return { status: 'checking' };
+        }
+        if (subject === X_CONTENT_RECOVERY_LIMIT_SUBJECT) {
+          const recovery = currentXBookmarksRuntime()?.contentRecovery;
+          if (!recovery) throw new OperationError('invalid_request', 'X content recovery is unavailable.');
+          const receipt = await recovery.recover({ execute: true, provenance: 'operator', ...(stop.waiting?.items ? { limit: stop.waiting.items } : {}) });
+          return { status: receipt.status, receipt };
+        }
         const response = await workerFetchInProcess(new Request('http://olympus-worker.internal/dashboard/sync-now', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source: limitRunOnceSource(subject) }),
         }));
@@ -4772,7 +4805,16 @@ export async function main(): Promise<void> {
         return body;
       },
       credit: { env: { ...process.env, ...olympusConfig.worker.creditMonitor.credentials } },
-      wake: () => tierSniffer?.wake(),
+      extractionJobs: () => fileExtractionRuntime?.jobs,
+      wake: (id) => {
+        if (id === 'judge.spend_cap' || id === 'judge.payment') {
+          reopenSecondRoundAfterStop(judgeSpending.status().choice, judgeSecondRoundStatePath(process.env));
+          tierSniffer?.resumeCloudLimit();
+        }
+        else tierSniffer?.wake();
+        if (id === 'dropbox.max_file_bytes' || id === 'local_files.max_file_bytes' || id === 'telegram.media_quota') sourceScheduler?.wakeTasksOfKind('extract');
+        if (id === 'gmail.import_allowance') void sourceScheduler?.runSource(SCHEDULER_SOURCE_IDS.archiveImports).catch(error => console.warn('Gmail import resume failed:', error instanceof Error ? error.name : 'unknown'));
+      },
     }),
     // Bound late: the consult block below sets askAnonymouslyNow.
     consultAsk: async ({ caller, ...input }, signal) => (askAnonymouslyNow
@@ -6066,8 +6108,15 @@ export async function main(): Promise<void> {
   serverOptions.fetch = (async (request, server) => {
     const response = await fetchWithTierLedgerStatus(request, server);
     const path = new URL(request.url).pathname;
-    if ((path === '/v1/health' || path === '/health') && response?.ok && tierLedgerProblems.size) {
-      return Response.json({ ...await response.json() as object, privacy_ledger_problems: Object.fromEntries(tierLedgerProblems) }, { status: response.status, headers: response.headers });
+    if ((path === '/v1/health' || path === '/health') && response?.ok && (tierLedgerProblems.size || engineFront)) {
+      return Response.json({
+        ...await response.json() as object,
+        ...(tierLedgerProblems.size ? { privacy_ledger_problems: Object.fromEntries(tierLedgerProblems) } : {}),
+        // The front answers while its background restarts or crash-loops: an
+        // upgrade or rollback reads this before it calls the engine healthy
+        // (#1563 review).
+        ...(engineFront ? { engine_background: await engineFront.backgroundReady() ? 'ready' : 'unreachable' } : {}),
+      }, { status: response.status, headers: response.headers });
     }
     return response;
   }) as typeof serverOptions.fetch;
@@ -6119,6 +6168,7 @@ export async function main(): Promise<void> {
   const server = !listens ? undefined : socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
   // The single worker's boot work ends when it listens; the background's when it is ready on its socket.
   if (engineRole === 'single') finishBootProgress();
+  if (engineFront) finishFrontProgress();
   if (listens) {
   // This Bun worker owns listener lifecycle on standalone Mac/Linux and
   // OpenClaw-hosted installs alike. Dashboard-only backends without this
@@ -6193,7 +6243,7 @@ export async function main(): Promise<void> {
     ? undefined
     : snifferRuntime.source === 'built_in'
       ? snifferRuntime.builtIn.model
-      : createTierSnifferModel({ lane: snifferRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[snifferRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { requestModelReload(); } });
+      : createTierSnifferModel({ lane: snifferRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[snifferRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { /* The durable stop holds cloud dispatch until the owner continues it. */ } });
   snifferModelBuilt = rawSnifferModel !== undefined;
   // The local judge's answers are read at its own lane's Private bar, as the resolver reads them.
   const localDecisionBar = snifferLane ? snifferDecisionBar(snifferLane) : undefined;
@@ -6205,12 +6255,12 @@ export async function main(): Promise<void> {
   const judgeChoice = judgeSpending.status();
   // The front judges nothing, so it runs no double-check either.
   const secondRoundVenice = !engineFront && snifferModel && snifferLane?.kind === 'local' && judgeChoice.choice === 'local-then-venice'
-    && !judgeChoice.stop && (judgeChoice.uncapped === true || judgeChoice.remainingDollars > 0) && cloudJudgeRuntime.source !== 'off'
+    && judgeChoice.stop !== 'storage' && cloudJudgeRuntime.source !== 'off'
     && isClassifierApproved((await readClassificationLedger(resolveClassificationLedgerPath(process.env))).entries, {
       lane: cloudJudgeRuntime.lane.kind, profileId: cloudJudgeRuntime.lane.profileId, modelId: cloudJudgeRuntime.lane.modelId,
       promptVersion: snifferPromptVersions(privacyOwnerWords()).approval,
     })
-    ? createTierSnifferModel({ lane: cloudJudgeRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[cloudJudgeRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { requestModelReload(); } })
+    ? createTierSnifferModel({ lane: cloudJudgeRuntime.lane, configuredProfile: judgeRuntimeInput.engine.config.modelProfiles[cloudJudgeRuntime.lane.profileId], olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { /* The durable stop holds cloud dispatch until the owner continues it. */ } })
     : undefined;
   if (!engineFront && judgeChoice.choice === 'local-then-venice' && snifferModel && !secondRoundVenice) {
     console.warn('Olympus privacy judge: the Venice double-check is paused (no approved Venice judge, or its spending limit stopped it); items stay Private as this computer judged them.');
@@ -6631,5 +6681,5 @@ export function resolveEmailSourceBindHostFromEnv(env: Record<string, string | u
 }
 
 if (import.meta.main) {
-  await main();
+  await mainRecordingFrontFailure();
 }

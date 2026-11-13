@@ -8,7 +8,7 @@ import { bootInProgress } from '../../core/boot-progress.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { lstatSync } from 'node:fs';
-import { ENGINE_BACKGROUND_ORIGIN, ENGINE_BACKGROUND_SOCKET_ENV, ENGINE_MODEL_COMPLETE_PATH, prepareEngineBackgroundSocketDirectory, probeEngineBackground } from '../../core/engine-split.ts';
+import { ENGINE_BACKGROUND_ORIGIN, ENGINE_BACKGROUND_SOCKET_ENV, ENGINE_MODEL_COMPLETE_PATH, engineBackgroundAnswer, prepareEngineBackgroundSocketDirectory, probeEngineBackground } from '../../core/engine-split.ts';
 import type { AnalystModelCompletion, AnalystModelRequest } from '../../core/analyst.ts';
 import { OperationError, type OperationErrorCode } from '../../core/operation-error.ts';
 import { sharedDataPath } from '../../core/olympus-layout.ts';
@@ -102,8 +102,13 @@ export async function waitForEngineBackground(input: {
   const inProgress = input.inProgress ?? (() => bootInProgress(process.env));
   const deadline = now() + (input.timeoutMs ?? 120_000);
   for (;;) {
-    if (await probeEngineBackground(fetchBackground, input.authToken, undefined, 1_000)) return;
-    if (now() >= deadline && !inProgress()) throw new Error('The background engine did not become ready; the front is not serving.');
+    const answer = await engineBackgroundAnswer(fetchBackground, input.authToken, undefined, 1_000);
+    if (answer === 'ready') return;
+    // Past the deadline the front gives up only on a background that is gone.
+    // One that is busy (a long sync held its event loop for 154 s in a VM
+    // upgrade) or still answering "not ready" is waited for: exiting would
+    // only restart the front into the same wait.
+    if (now() >= deadline && answer === 'down' && !inProgress()) throw new Error('The background engine did not become ready; the front is not serving.');
     await sleep(input.pollMs ?? 250);
   }
 }
@@ -115,6 +120,8 @@ export interface EngineFront {
   status(): EngineStatusRead | undefined;
   /** One built-in model completion, run by the background, which holds the model. */
   completeModel(request: AnalystModelRequest): Promise<AnalystModelCompletion>;
+  /** Whether the background answers its ready check now, boot work done (the front's health reports it). */
+  backgroundReady(): Promise<boolean>;
   stop(): void;
 }
 
@@ -163,7 +170,8 @@ export function createEngineFront(input: {
   const poll = setInterval(() => { status(); }, 2_000);
   poll.unref?.();
   const completeModel = (request: AnalystModelRequest) => completeModelInBackground(fetchBackground, input.authToken, request);
-  return { client, ownerBusy: relay, status, completeModel, stop: () => { clearInterval(poll); relay?.stop(); } };
+  const backgroundReady = () => probeEngineBackground(fetchBackground, input.authToken, undefined, 1_000);
+  return { client, ownerBusy: relay, status, completeModel, backgroundReady, stop: () => { clearInterval(poll); relay?.stop(); } };
 }
 
 /** A forwarded sync answers when its pass ends, as the route did in one process: up to a long pass. */

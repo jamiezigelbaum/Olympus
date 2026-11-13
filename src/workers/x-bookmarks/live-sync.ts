@@ -784,3 +784,5 @@ function validSnapshotTimestamp(value: string | undefined): Date {
   }
   return timestamp;
 }
+
+// limit-retry: retry:withGuard:retry_at -> x.rate_limit

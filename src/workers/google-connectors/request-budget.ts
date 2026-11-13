@@ -43,6 +43,7 @@ export interface GoogleDailyRequestBudgetOptions {
   /** Provider label; appears in the deferral message and ledger key only. */
   provider: string;
   dailyRequestBudget: number;
+  dailyRequestBudgetOverride?: (now: Date) => number | undefined;
   /**
    * Durable counter location. Existing JSON state is imported into an adjacent
    * SQLite ledger; new `.sqlite` paths are used directly.
@@ -119,13 +120,18 @@ export class GoogleDailyRequestBudget {
   private utcDay = '';
   private requests = 0;
   private readonly provider: string;
-  private readonly dailyRequestBudget: number;
+  private readonly baseDailyRequestBudget: number;
+  private readonly dailyRequestBudgetOverride: ((now: Date) => number | undefined) | undefined;
+  private get dailyRequestBudget(): number {
+    return positiveInteger(this.dailyRequestBudgetOverride?.(this.now()) ?? this.baseDailyRequestBudget, `${this.provider} daily API request budget`);
+  }
   private readonly ledgerPath: string | undefined;
   private readonly now: () => Date;
 
   constructor(options: GoogleDailyRequestBudgetOptions) {
     this.provider = providerLabel(options.provider);
-    this.dailyRequestBudget = positiveInteger(
+    this.dailyRequestBudgetOverride = options.dailyRequestBudgetOverride;
+    this.baseDailyRequestBudget = positiveInteger(
       options.dailyRequestBudget,
       `${options.provider} daily API request budget`,
     );

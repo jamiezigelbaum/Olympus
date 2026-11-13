@@ -3726,6 +3726,10 @@ export function formatCliFatalError(error: unknown): string[] {
     || !/^[a-z0-9][a-z0-9._:-]{0,127}$/.test(candidate.code)
   ) return [message];
   const lines = [`Error [${candidate.code}]: ${message}`];
+  // The hint says what happened next and what to do: a failed upgrade's
+  // "Stores put back" and "The previous version is running" live here.
+  const suggestion = (error as { suggestion?: unknown }).suggestion;
+  if (typeof suggestion === 'string' && suggestion.trim()) lines.push(`Fix: ${suggestion}`);
   if (
     candidate.retryable === true
     && typeof candidate.retryAfterMs === 'number'

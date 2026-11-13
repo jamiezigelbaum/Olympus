@@ -1,3 +1,10 @@
+import { registerLimit, createLimitStopReporter } from './limit-stops.ts';
+import { readOwnerLimitOverride } from './owner-limit-settings.ts';
+
+registerLimit({ id: 'zkapi.daily_requests', kind: 'requests', scope: 'outside_help', label: 'zkAPI daily request cap reached', unit: 'requests', continue: 'raise' });
+registerLimit({ id: 'zkapi.daily_spend', kind: 'cost', scope: 'outside_help', label: 'zkAPI daily spending cap reached', unit: 'usd', continue: 'raise' });
+const zkapiStops = createLimitStopReporter();
+
 import { linuxZkapiConfinement, type LinuxConfinementDependencies, parseLinuxStatus, type LinuxEvent, type LinuxBackend, type ZkapiPreparedConfinement } from './zkapi-confinement-linux.ts';
 export { linuxZkapiConfinement } from './zkapi-confinement-linux.ts';
 import type { Readable } from 'node:stream';
@@ -1022,10 +1029,12 @@ function updateState(path: string, now: Date, mutate: (state: ZkapiState) => Zka
 }
 
 /** The owner's optional daily limits; absent means no limit (owner ruling, 2026-10-05). */
-function ownerLimits(settings: ZkapiConsultSettings): { requestCap?: number; spendCapMicroUsd?: number } {
+function ownerLimits(settings: ZkapiConsultSettings, now: Date = new Date()): { requestCap?: number; spendCapMicroUsd?: number } {
+  const requestCap = readOwnerLimitOverride('zkapi.dailyRequests', now) ?? settings.dailyRequestCap;
+  const spendCapUsd = readOwnerLimitOverride('zkapi.dailySpend', now) ?? settings.dailySpendCapUsd;
   return {
-    ...(settings.dailyRequestCap !== undefined ? { requestCap: settings.dailyRequestCap } : {}),
-    ...(settings.dailySpendCapUsd !== undefined ? { spendCapMicroUsd: Math.round(settings.dailySpendCapUsd * 1_000_000) } : {}),
+    ...(requestCap !== undefined ? { requestCap } : {}),
+    ...(spendCapUsd !== undefined ? { spendCapMicroUsd: Math.round(spendCapUsd * 1_000_000) } : {}),
   };
 }
 
@@ -1039,7 +1048,7 @@ export type ZkapiDailyLimitState = 'unset' | 'available' | 'reached';
  * `available`; reserveZkapiRequest still enforces the cap at every send.
  */
 export function zkapiDailyLimitState(settings: ZkapiConsultSettings, statePath: string, now: Date): ZkapiDailyLimitState {
-  const limit = ownerLimits(settings);
+  const limit = ownerLimits(settings, now);
   if (limit.requestCap === undefined && limit.spendCapMicroUsd === undefined) return 'unset';
   let usage: { count: number; reservedMicroUsd: number };
   try {
@@ -1066,13 +1075,17 @@ export function reserveZkapiRequest(
   fence: { scope: string } & Omit<ZkapiFence, 'at'> = { scope: 'default', configDir: 'unknown' },
   allowanceMicroUsd: number = ZKAPI_MAX_ALLOWANCE_MICRO_USD,
 ): { reserved: true } | { reserved: false; reason: 'daily_cap_reached' | 'spend_cap_reached' } {
+  const effective = {
+    requestCap: readOwnerLimitOverride('zkapi.dailyRequests', now) ?? limits.requestCap,
+    spendCapMicroUsd: (() => { const usd = readOwnerLimitOverride('zkapi.dailySpend', now); return usd === undefined ? limits.spendCapMicroUsd : Math.round(usd * 1_000_000); })(),
+  };
   let refusal: 'daily_cap_reached' | 'spend_cap_reached' | undefined;
-  updateState(path, now, (state) => {
-    if (limits.requestCap !== undefined && state.count >= limits.requestCap) {
+  const state = updateState(path, now, (state) => {
+    if (effective.requestCap !== undefined && state.count >= effective.requestCap) {
       refusal = 'daily_cap_reached';
       return undefined;
     }
-    if (limits.spendCapMicroUsd !== undefined && state.reservedMicroUsd + allowanceMicroUsd > limits.spendCapMicroUsd) {
+    if (effective.spendCapMicroUsd !== undefined && state.reservedMicroUsd + allowanceMicroUsd > effective.spendCapMicroUsd) {
       refusal = 'spend_cap_reached';
       return undefined;
     }
@@ -1086,7 +1099,25 @@ export function reserveZkapiRequest(
       })(),
     };
   });
+  if (refusal) {
+    reportZkapiLimitRefusal(path, effective, state, refusal, now, allowanceMicroUsd);
+  } else {
+    zkapiStops.clear('zkapi.daily_requests', path);
+    zkapiStops.clear('zkapi.daily_spend', path);
+  }
   return refusal ? { reserved: false, reason: refusal } : { reserved: true };
+}
+
+/** Opening can refuse an already exhausted day before a daemon or reservation exists. */
+function reportZkapiLimitRefusal(path: string, limits: { requestCap?: number | undefined; spendCapMicroUsd?: number | undefined },
+  state: { count: number; reservedMicroUsd: number }, refusal: 'daily_cap_reached' | 'spend_cap_reached', now: Date,
+  allowanceMicroUsd = ZKAPI_MAX_ALLOWANCE_MICRO_USD): void {
+  const requests = refusal === 'daily_cap_reached';
+  zkapiStops.report({ id: requests ? 'zkapi.daily_requests' : 'zkapi.daily_spend', subject: path,
+    since: now.toISOString(), reason: refusal, limit: requests ? limits.requestCap! : limits.spendCapMicroUsd! / 1_000_000,
+    used: requests ? state.count : state.reservedMicroUsd / 1_000_000, waiting: { runs: 1 },
+    toContinue: { raiseTo: requests ? state.count + 1 : (state.reservedMicroUsd + allowanceMicroUsd) / 1_000_000 },
+    resumesAt: new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)).toISOString() });
 }
 
 // ---------------------------------------------------------------------------
@@ -2028,7 +2059,7 @@ export async function zkapiConsultReadiness(
   if (fences.some((fence) => fence.thisWallet)) blockers.push('unresolved_session');
   if (fences.some((fence) => !fence.thisWallet)) blockers.push('unresolved_session_other_wallet');
   if (stranded && !stranded.supervisorRunning) blockers.push('stranded_processes');
-  const limit = ownerLimits(settings);
+  const limit = ownerLimits(settings, now);
   if (limit.requestCap !== undefined && usage.count >= limit.requestCap) blockers.push('daily_cap_reached');
   // The next request's allowance is known only from the live listing inside
   // a session, so before one the limit blocks only once it is used up.
@@ -2045,10 +2076,10 @@ export async function zkapiConsultReadiness(
     torPort,
     apiKeyConfigured,
     money,
-    requestsToday: { count: usage.count, ...(settings.dailyRequestCap !== undefined ? { cap: settings.dailyRequestCap } : {}) },
+    requestsToday: { count: usage.count, ...(limit.requestCap !== undefined ? { cap: limit.requestCap } : {}) },
     spendToday: {
       reservedUsd: usage.reservedMicroUsd / 1_000_000,
-      ...(settings.dailySpendCapUsd !== undefined ? { capUsd: settings.dailySpendCapUsd } : {}),
+      ...(limit.spendCapMicroUsd !== undefined ? { capUsd: limit.spendCapMicroUsd / 1_000_000 } : {}),
     },
     unresolvedSession,
     fences,
@@ -2517,9 +2548,13 @@ async function runSession(
     if (fencedElsewhere && !fenced) return refuse('unresolved_session_other_wallet');
     if (!fenced && recovery) return refuse('no_unresolved_session');
     const usage = zkapiUsageToday(statePath, now());
-    const limit = ownerLimits(settings);
-    if (limit.requestCap !== undefined && usage.count >= limit.requestCap) return refuse('daily_cap_reached');
+    const limit = ownerLimits(settings, now());
+    if (limit.requestCap !== undefined && usage.count >= limit.requestCap) {
+      reportZkapiLimitRefusal(statePath, limit, usage, 'daily_cap_reached', now());
+      return refuse('daily_cap_reached');
+    }
     if (limit.spendCapMicroUsd !== undefined && usage.reservedMicroUsd >= limit.spendCapMicroUsd) {
+      reportZkapiLimitRefusal(statePath, limit, usage, 'spend_cap_reached', now());
       return refuse('spend_cap_reached');
     }
   } catch {
@@ -2815,7 +2850,8 @@ async function runSession(
 
     let reservation: ReturnType<typeof reserveZkapiRequest>;
     try {
-      reservation = reserveZkapiRequest(statePath, ownerLimits(settings), now(), {
+      const reservationAt = now();
+      reservation = reserveZkapiRequest(statePath, ownerLimits(settings, reservationAt), reservationAt, {
         scope,
         configDir: zkapiWalletDirectory(env),
         daemonExecutable,

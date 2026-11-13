@@ -182,6 +182,13 @@ local Dropbox index and a reachable Argus lane:
    wrong in the full pack means the other seats distract it; wrong alone means
    it misreads that document as extracted. It follows
    `OLYMPUS_EVAL_ANALYST_REPEAT_QUESTIONS` when set.
+   To tell an audit that drops a value from a draft that never had it, set
+   `OLYMPUS_EVAL_TRACE_DRAFT_AUDIT=on`. When the graded answer had an audit
+   call, each expected value gets `draftAudit`: whether it is in the first
+   call's prompt, in that call's draft answer and in the audit call's
+   evidence (its quote of the draft left out). `auditReplacedDraft` says
+   whether the audit's answer differs from the draft's. Booleans only; the
+   draft text stays in memory.
    Every answer stage also reports `promptLayout`, which shows where the bytes
    of the prompt the Analyst was sent went. It holds the text every prompt
    carries (system rules, question, coverage), each sent seat's header (name,
@@ -375,6 +382,13 @@ Linux descriptor checks run as stores mount and at completion, checking the
 live default data folder and each repeatable `--forbid-root`. Platforms without
 `/proc/self/fd` require explicit `--allow-no-fd-check`. Keep model assets outside
 forbidden data folders, or point the existing model settings at copied assets.
+The eval's own read-only probes wait up to 10 s on a busy file, as the product's
+read-only opens do, so two eval rows can share one copy. A store or ledger the run
+still cannot open fails it with `EVAL_STORE_UNREADABLE`: the message names which
+open failed, SQLite's code, extended errno and path-free message, and how many
+other processes hold the copy open (Linux). `--allow-unreadable-stores` runs
+without them and records the same facts in `skippedStores`. The passage eval's
+summary line starts with `storesOpened` and `storesSkipped`.
 The existing built-in embedding selection, `OLYMPUS_SOURCE_RERANKER*` settings,
 `OLYMPUS_EVAL_MAX_RESULTS`, and `OLYMPUS_EVAL_MAX_CHARS_PER_CANDIDATE` apply.
 `--max-chars-per-candidate` overrides the last setting. The local Analyst lane's

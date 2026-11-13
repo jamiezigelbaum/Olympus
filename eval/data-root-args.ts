@@ -6,9 +6,11 @@ export function parseDataRootArgs(argv: readonly string[]): { rest: string[]; is
   let dataRoot: string | undefined;
   const forbidRoots: string[] = [];
   let allowNoFdCheck = false;
+  let allowUnreadableStores = false;
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index]!;
     if (arg === '--allow-no-fd-check') { allowNoFdCheck = true; continue; }
+    if (arg === '--allow-unreadable-stores') { allowUnreadableStores = true; continue; }
     const name = arg.split('=')[0]!;
     if (name === '--data-root' || name === '--forbid-root') {
       const value = arg.includes('=') ? arg.slice(arg.indexOf('=') + 1) : argv[++index];
@@ -16,9 +18,9 @@ export function parseDataRootArgs(argv: readonly string[]): { rest: string[]; is
       if (name === '--data-root') dataRoot = value; else forbidRoots.push(value);
     } else rest.push(arg);
   }
-  if (!dataRoot && (forbidRoots.length || allowNoFdCheck)) throw new Error('--data-root is required with isolation options.');
-  return { rest, ...(dataRoot ? { isolation: { dataRoot, forbidRoots, allowNoFdCheck } } : {}) };
+  if (!dataRoot && (forbidRoots.length || allowNoFdCheck || allowUnreadableStores)) throw new Error('--data-root is required with isolation options.');
+  return { rest, ...(dataRoot ? { isolation: { dataRoot, forbidRoots, allowNoFdCheck, ...(allowUnreadableStores ? { allowUnreadableStores } : {}) } } : {}) };
 }
 export function dataRootArgv(options?: EvalDataRootOptions): string[] {
-  return options ? ['--data-root', options.dataRoot, ...(options.forbidRoots ?? []).flatMap(root => ['--forbid-root', root]), ...(options.allowNoFdCheck ? ['--allow-no-fd-check'] : [])] : [];
+  return options ? ['--data-root', options.dataRoot, ...(options.forbidRoots ?? []).flatMap(root => ['--forbid-root', root]), ...(options.allowNoFdCheck ? ['--allow-no-fd-check'] : []), ...(options.allowUnreadableStores ? ['--allow-unreadable-stores'] : [])] : [];
 }

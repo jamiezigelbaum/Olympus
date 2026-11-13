@@ -1,3 +1,4 @@
+import { sizeHeldItemKey } from '../../core/source-size-limits.ts';
 import type { OnDemandReadRequest, OnDemandReadResult } from './on-demand-read.ts';
 /**
  * The generic extraction job side database.
@@ -151,6 +152,10 @@ const TERMINAL_STATUSES: ReadonlySet<string> = new Set([
  * The settled job's own explanation, looked up by item identity across tier copies.
  */
 export interface ItemExtractionOutcome {
+  /**
+   * Opaque version key, present only for a source byte-size hold.
+   */
+  sizeHeldItemKey?: string;
   status: ExtractionTerminalStatus;
   lastErrorKind?: string;
   warnings: readonly string[];
@@ -432,7 +437,7 @@ export interface ExtractionCorpusReadiness {
    */
   blockedByPolicyItems: number;
   /**
-   * Items the factory is not asked to read: unsupported, oversized, deferred.
+   * Items the factory is not asked to read: unsupported or deferred; size holds are unreadable with a too-large reason.
    */
   metadataOnlyExpectedItems: number;
   queuedJobs: number;
@@ -487,7 +492,9 @@ export interface ExtractionScopedReadinessOptions {
   now?: Date;
   // Terminal failures that still have a retry path (ExtractionTerminalRetryPath).
   terminalRetryPaths?: readonly ExtractionTerminalRetryPath[];
-  /** Current store identity/scope fence for rows read from this separate queue. */
+  /**
+   * Current store identity/scope fence for rows read from this separate queue.
+   */
   currentItem?: (ref: ExtractionItemRef) => boolean;
   /**
    * The same fence for many rows at once, one answer per ref in order. Used
@@ -567,16 +574,16 @@ function settleUnreadable(
 }
 
 /**
- * An item's unreadable entry: its newest `failed_terminal` job.
+ * An item's unreadable entry: its newest terminal failure or size hold.
  */
 function unreadableCandidate(itemRows: readonly ExtractionJobSqlRow[]): ExtractionUnreadableItem | undefined {
   let newest: ExtractionJobSqlRow | undefined;
   for (const row of itemRows) {
-    if (row.status !== 'failed_terminal') continue;
+    if (row.status !== 'failed_terminal' && row.status !== 'skipped_too_large') continue;
     if (!newest || row.updated_at > newest.updated_at) newest = row;
   }
   return newest
-    ? { ref: refFromRow(newest), failedAt: newest.updated_at, ...(newest.last_error_kind ? { errorKind: newest.last_error_kind } : {}) }
+    ? { ref: refFromRow(newest), failedAt: newest.updated_at, ...(newest.status === 'skipped_too_large' ? { errorKind: 'source_too_large' } : newest.last_error_kind ? { errorKind: newest.last_error_kind } : {}) }
     : undefined;
 }
 
@@ -647,6 +654,7 @@ export class LocalFileExtractionJobStore {
   readonly dbPath: string;
   readonly readonly: boolean;
   private readonly db: Database;
+  private sizeHoldCurrentItems: ExtractionScopedReadinessOptions['currentItems'];
   private grantAuthorityId: string | undefined;
   private unregisterPath: (() => void) | undefined;
 
@@ -832,6 +840,71 @@ export class LocalFileExtractionJobStore {
     return this.db.query('SELECT 1 FROM on_demand_reads WHERE job_id = ?').get(jobId) !== null;
   }
 
+  /**
+   * A fetch may learn a size that listing did not supply. The lease fences that fact too.
+   */
+  recordSizeRefusal(jobId: string, leaseToken: string, amounts: { sizeBytes?: number; maxBytes?: number }): void {
+    this.assertWritable('size_refusal');
+    if (amounts.sizeBytes !== undefined) requireSafeInteger(amounts.sizeBytes, 'sizeBytes');
+    if (amounts.maxBytes !== undefined) requirePositiveSafeInteger(amounts.maxBytes, 'maxBytes');
+    this.db.query(`UPDATE extraction_jobs SET size_bytes = COALESCE(?, size_bytes),
+      max_bytes_per_file = COALESCE(?, max_bytes_per_file)
+      WHERE job_id = ? AND lease_token = ? AND status = 'leased'`)
+      .run(amounts.sizeBytes ?? null, amounts.maxBytes ?? null, jobId, leaseToken);
+  }
+
+  /**
+   * The runtime supplies the same live identity and approval fence as readiness.
+   */
+  setSizeHoldCurrentItems(fence: NonNullable<ExtractionScopedReadinessOptions['currentItems']>): void {
+    this.sizeHoldCurrentItems = fence;
+  }
+
+  /**
+   * Current size holds, across a source's tier stores and scopes. No separate queue.
+   */
+  sizeHeldJobs(providers: readonly string[]): Array<{ jobId: string; ref: ExtractionItemRef; maxBytes?: number }> {
+    if (providers.length === 0) return [];
+    const rows = this.db.query(`SELECT j.* FROM extraction_jobs j
+      WHERE j.provider IN (${providers.map(() => '?').join(',')}) AND j.status = 'skipped_too_large'
+        AND (j.last_error_kind = 'source_too_large' OR j.size_bytes > j.max_bytes_per_file)
+        AND NOT EXISTS (SELECT 1 FROM extraction_jobs newer
+          WHERE newer.provider = j.provider AND newer.account_scope = j.account_scope
+            AND newer.provider_item_id = j.provider_item_id AND newer.local_item_id = j.local_item_id
+            AND ((newer.source_version = j.source_version AND newer.status IN ('indexed', 'blocked_policy'))
+              OR newer.created_at > j.created_at
+              OR (newer.rowid > j.rowid AND (newer.source_version != j.source_version OR newer.content_hash != j.content_hash))))
+    `).all(...providers) as ExtractionJobSqlRow[];
+    const allowed: boolean[] = [];
+    if (this.sizeHoldCurrentItems) {
+      for (let start = 0; start < rows.length; start += SCOPED_READINESS_CURRENT_SLICE) {
+        const slice = rows.slice(start, start + SCOPED_READINESS_CURRENT_SLICE);
+        const answers = this.sizeHoldCurrentItems(slice.map(refFromRow));
+        for (let index = 0; index < slice.length; index++) allowed.push(answers[index] === true);
+      }
+    }
+    const held = this.sizeHoldCurrentItems ? rows.filter((_row, index) => allowed[index] === true) : rows;
+    return held.map(row => ({ jobId: row.job_id, ref: refFromRow(row),
+      ...(row.max_bytes_per_file === null ? {} : { maxBytes: row.max_bytes_per_file }) }));
+  }
+
+  /**
+   * Only the held jobs the owner approved; all lease fences remain untouched.
+   */
+  requeueSizeHeld(jobIds: readonly string[], to: number): void {
+    this.assertWritable('size_raise');
+    requirePositiveSafeInteger(to, 'size limit');
+    this.db.transaction(() => {
+      const update = this.db.query(`UPDATE extraction_jobs SET status = CASE WHEN size_bytes > ? THEN 'skipped_too_large' ELSE 'queued' END, max_bytes_per_file = ?,
+        attempts = 0, last_error_hash = NULL, next_retry_at = NULL, updated_at = ?,
+        -- A job still over the new bound stays a size hold: a later replan may
+        -- forget a size learned only at fetch, and this keeps it reported.
+        last_error_kind = CASE WHEN size_bytes > ? THEN 'source_too_large' ELSE NULL END
+        WHERE job_id = ? AND status = 'skipped_too_large'`);
+      for (const id of jobIds) update.run(to, to, nowIso(), to, id);
+    }).immediate();
+  }
+
   enqueue(request: EnqueueExtractionJobsRequest): EnqueueExtractionJobsResult {
     this.assertWritable('enqueue');
     const extractorKind = requireToken(request.extractorKind, 'extractorKind');
@@ -949,6 +1022,9 @@ export class LocalFileExtractionJobStore {
           reset,
         );
 
+        if (status === 'skipped_too_large' && !existing) {
+          this.db.query("UPDATE extraction_jobs SET last_error_kind = 'source_too_large' WHERE job_id = ?").run(jobId);
+        }
         if (identityReread) {
           this.db.query(`UPDATE extraction_jobs
             SET janitor_terminal_requeue_count = COALESCE(janitor_terminal_requeue_count, 0) + 1
@@ -1636,12 +1712,10 @@ export class LocalFileExtractionJobStore {
     // its provider item id with another conversation's: its local id tells them apart.
     const inConversation = Boolean(item.providerConversationId) && item.localItemId !== undefined;
     const all = this.db.query(`
-      SELECT job_id, status, last_error_kind, policy_decision, source_version FROM extraction_jobs
+      SELECT job_id, status, last_error_kind, policy_decision, source_version, content_hash, local_item_id, size_bytes, max_bytes_per_file FROM extraction_jobs
       WHERE provider = ? AND account_scope = ? AND provider_item_id = ?${inConversation ? ' AND local_item_id = ?' : ''}
       ORDER BY updated_at DESC, job_id DESC
-    `).all(item.provider, item.accountScope, item.providerItemId, ...(inConversation ? [item.localItemId!] : [])) as Array<{
-      job_id: string; status: ExtractionJobStatus; last_error_kind: string | null; policy_decision: ExtractionPolicyDecision; source_version: string | null;
-    }>;
+    `).all(item.provider, item.accountScope, item.providerItemId, ...(inConversation ? [item.localItemId!] : [])) as (ExtractionJobSqlRow & { policy_decision: ExtractionPolicyDecision })[];
     // Only the newest version's jobs speak for the item: an older version's
     // successful read must not hide that the current one failed.
     const current = all[0]?.source_version ?? null;
@@ -1656,6 +1730,9 @@ export class LocalFileExtractionJobStore {
       WHERE a.job_id = ? AND a.warnings_json IS NOT NULL ORDER BY w.value
     `).all(row.job_id) as Array<{ warning: string }>;
     return {
+      ...(row.status === 'skipped_too_large'
+        && (row.last_error_kind === 'source_too_large' || (row.size_bytes !== null && row.max_bytes_per_file !== null && row.size_bytes > row.max_bytes_per_file))
+        ? { sizeHeldItemKey: sizeHeldItemKey({ ...item, localItemId: row.local_item_id, ...(row.source_version === null ? {} : { sourceVersion: row.source_version }), ...(row.content_hash === null ? {} : { contentHash: row.content_hash }) }) } : {}),
       status: row.status as ExtractionTerminalStatus,
       ...(row.last_error_kind ? { lastErrorKind: row.last_error_kind } : {}),
       warnings: warnings.map(row => row.warning),
@@ -1918,10 +1995,10 @@ export class LocalFileExtractionJobStore {
       } else if (itemRows.some((row) => (
         row.status === 'metadata_only'
         || row.status === 'skipped_unsupported'
-        || row.status === 'skipped_too_large'
       ))) {
         metadataOnlyExpectedItems += 1;
-      } else if (settledFailed) {
+      } else if (settledFailed || (itemRows.some(row => row.status === 'skipped_too_large')
+        && !itemRows.some(row => ['queued', 'leased', 'failed_retryable'].includes(row.status)))) {
         const candidate = unreadableCandidate(itemRows);
         if (candidate) unreadableCandidates.push(candidate);
       }
@@ -2010,9 +2087,9 @@ export class LocalFileExtractionJobStore {
         SELECT
           MAX(CASE WHEN status = 'indexed' THEN 1 ELSE 0 END) AS indexed_jobs,
           MAX(CASE WHEN status = 'blocked_policy' THEN 1 ELSE 0 END) AS blocked_jobs,
-          MAX(CASE WHEN status IN ('metadata_only', 'skipped_unsupported', 'skipped_too_large')
+          MAX(CASE WHEN status IN ('metadata_only', 'skipped_unsupported')
               THEN 1 ELSE 0 END) AS metadata_only_jobs,
-          MAX(CASE WHEN status = 'failed_terminal' THEN 1 ELSE 0 END) AS terminal_failed_jobs,
+          MAX(CASE WHEN status IN ('failed_terminal', 'skipped_too_large') THEN 1 ELSE 0 END) AS terminal_failed_jobs,
           MAX(CASE WHEN status IN ('queued', 'leased', 'failed_retryable') OR ${itemRetry.sql}
               THEN 1 ELSE 0 END) AS in_flight_jobs
         FROM extraction_jobs x
@@ -2036,12 +2113,12 @@ export class LocalFileExtractionJobStore {
           local_item_id,
           MAX(CASE WHEN status = 'indexed' THEN 1 ELSE 0 END) AS indexed_jobs,
           MAX(CASE WHEN status = 'blocked_policy' THEN 1 ELSE 0 END) AS blocked_jobs,
-          MAX(CASE WHEN status IN ('metadata_only', 'skipped_unsupported', 'skipped_too_large')
+          MAX(CASE WHEN status IN ('metadata_only', 'skipped_unsupported')
               THEN 1 ELSE 0 END) AS metadata_only_jobs,
-          MAX(CASE WHEN status = 'failed_terminal' THEN 1 ELSE 0 END) AS terminal_failed_jobs,
+          MAX(CASE WHEN status IN ('failed_terminal', 'skipped_too_large') THEN 1 ELSE 0 END) AS terminal_failed_jobs,
           MAX(CASE WHEN status IN ('queued', 'leased', 'failed_retryable') OR ${itemRetry.sql}
               THEN 1 ELSE 0 END) AS in_flight_jobs,
-          MAX(CASE WHEN status = 'failed_terminal' THEN updated_at END) AS failed_at
+          MAX(CASE WHEN status IN ('failed_terminal', 'skipped_too_large') THEN updated_at END) AS failed_at
         FROM extraction_jobs x
         WHERE corpus_id = ?
         GROUP BY local_item_id
@@ -2050,7 +2127,7 @@ export class LocalFileExtractionJobStore {
       FROM item_state s
       JOIN extraction_jobs j
         ON j.corpus_id = ? AND j.local_item_id = s.local_item_id
-        AND j.status = 'failed_terminal' AND j.updated_at = s.failed_at
+        AND j.status IN ('failed_terminal', 'skipped_too_large') AND j.updated_at = s.failed_at
       WHERE s.indexed_jobs = 0 AND s.blocked_jobs = 0 AND s.metadata_only_jobs = 0
         AND s.terminal_failed_jobs = 1 AND s.in_flight_jobs = 0
     `).all(...itemRetry.params, corpus, corpus) as ExtractionJobSqlRow[];
@@ -2059,7 +2136,7 @@ export class LocalFileExtractionJobStore {
     for (const row of failedRows) {
       if (seen.has(row.local_item_id)) continue;
       seen.add(row.local_item_id);
-      candidates.push({ ref: refFromRow(row), failedAt: row.updated_at, ...(row.last_error_kind ? { errorKind: row.last_error_kind } : {}) });
+      candidates.push({ ref: refFromRow(row), failedAt: row.updated_at, ...(row.status === 'skipped_too_large' ? { errorKind: 'source_too_large' } : row.last_error_kind ? { errorKind: row.last_error_kind } : {}) });
     }
     const unreadable = settleUnreadable(candidates, options.classifyUnreadable);
     options.onUnreadable?.(unreadable.items);

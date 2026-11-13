@@ -25,4 +25,7 @@ export const OPERATOR_PAUSED_SCHEDULER_MARKERS: ReadonlySet<string> = new Set([
   'head_resource_read_reserve_guard',
   'head_cost_reserve_guard',
   'provider_rate_limit',
+  'x.rate_limit',
+  'evernote.rate_limit',
+  'readwise.rate_limit',
 ]);
