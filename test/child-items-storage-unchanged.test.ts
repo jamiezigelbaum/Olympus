@@ -116,6 +116,9 @@ function snapshot(dbPath: string): { items: unknown[]; chunks: unknown[]; vector
 function rewindToV14(dbPath: string): void {
   const db = new Database(dbPath);
   try {
+    // The store's read pool releases its connections on its own threads after
+    // close, so a snapshot can still hold the file for a moment.
+    db.exec('PRAGMA busy_timeout = 10000');
     db.exec(`
       DROP INDEX IF EXISTS idx_connector_store_items_parent;
       ALTER TABLE items DROP COLUMN parent_local_item_id;
