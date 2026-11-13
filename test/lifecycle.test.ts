@@ -16,6 +16,7 @@ import { dirname, join } from 'node:path';
 import { describe, expect, setSystemTime, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { readSqliteSchemaVersion, runSqliteMigrations } from '../src/core/sqlite-migrations.ts';
+import { retiredStateBackupPath, retireStatePath } from '../src/core/boot-progress.ts';
 import {
   installManagedWorkerFiles,
   lifecycleRecoveryPlan,
@@ -842,19 +843,20 @@ describe('versioned Olympus worker lifecycle', () => {
           readinessTimeoutMs: 0, actionSettlePollMs: 1,
           bootProgress: () => undefined, frontProgress: () => undefined,
           readinessProbe: () => false,
-          // The previous version takes four minutes to answer after its
-          // restart, far past the upgraded worker's window.
-          rollbackReadinessTimeoutMs: 600_000,
+          // The previous version was running before, and takes nine minutes
+          // to answer after its restart: far past the upgraded worker's
+          // window, inside the rollback's own 10-minute default.
           rollbackReadinessProbe: () => {
             setSystemTime(new Date(Date.now() + 60_000));
-            return ++previousProbes >= 5;
+            return ++previousProbes >= 10;
           },
         });
       } catch (caught) { error = caught; }
-      expect(previousProbes).toBe(5);
+      expect(previousProbes).toBe(10);
       expect(String(error)).toContain('did not answer its loopback readiness probe');
       expect((error as { suggestion?: string }).suggestion).toContain('The previous version is running and answered its health check.');
       expect(manager.calls).toContain('systemctl --user restart olympus-worker.service');
+      expect(String(error)).not.toContain('Olympus is not running');
     } finally {
       setSystemTime();
       makeTreeWritable(home);
@@ -1012,6 +1014,52 @@ describe('versioned Olympus worker lifecycle', () => {
     } finally {
       makeTreeWritable(home);
       rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('retired state a new worker moves aside is removed only once it has answered healthy, and put back when it does not (#1563)', () => {
+    for (const answers of [true, false]) {
+      const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-retired-state-'));
+      const manager = linuxManager('active');
+      const env = { HOME: home, XDG_DATA_HOME: join(home, '.local', 'share') };
+      const retired = join(home, 'classification.jsonl.embedding-prefilter.tier-ledger.sqlite');
+      try {
+        writeFileSync(retired, 'retired ledger');
+        const artifact = createUpgradeArtifact(home, '0.4.3');
+        installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: '/opt/olympus-old', bunBin: process.execPath, authToken: 'old-token' });
+        const seenWhileWaiting: boolean[] = [];
+        let probes = 0;
+        let error: unknown;
+        try {
+          runWorkerLifecycle('upgrade', {
+            platform: 'linux', homeDir: home, artifactPath: artifact.path,
+            bunBin: process.execPath, exec: manager.exec, activationSettleMs: 0,
+            actionSettleTimeoutMs: 1_000, actionSettlePollMs: 1,
+            bootProgress: () => undefined, frontProgress: () => undefined,
+            rollbackReadinessProbe: () => true,
+            readinessProbe: () => {
+              // The new worker retires the file on its first pass, as the sniffer does.
+              if (++probes === 1) retireStatePath(env, 'olympus_tier_ledger', retired);
+              seenWhileWaiting.push(existsSync(retiredStateBackupPath(retired)));
+              return answers && probes >= 3;
+            },
+          });
+        } catch (caught) { error = caught; }
+        // Until the new version answers, the copy is there to put back.
+        expect(seenWhileWaiting.length).toBeGreaterThanOrEqual(3);
+        expect(seenWhileWaiting.every(Boolean)).toBe(true);
+        expect(existsSync(retiredStateBackupPath(retired))).toBe(false);
+        if (answers) {
+          expect(error).toBeUndefined();
+          expect(existsSync(retired)).toBe(false);
+        } else {
+          expect(String(error)).toContain('did not answer its loopback readiness probe');
+          expect(readFileSync(retired, 'utf8')).toBe('retired ledger');
+        }
+      } finally {
+        makeTreeWritable(home);
+        rmSync(home, { recursive: true, force: true });
+      }
     }
   }, 30_000);
 

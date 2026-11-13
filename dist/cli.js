@@ -117815,7 +117815,7 @@ function looksLikeSqlite(path) {
   }
 }
 function retiredEmbeddingDirectoryTargets(ledgerPath) {
-  return retiredEmbeddingPrefilterPaths(ledgerPath).directories.map((path) => ({
+  return retiredEmbeddingPrefilterPaths(ledgerPath).directories.flatMap((path) => [path, retiredStateBackupPath(path)]).map((path) => ({
     path,
     kind: "known_root",
     allowRecursive: true
@@ -252716,7 +252716,7 @@ function previousWorkerHealth(options) {
   } catch {
     return { healthy: false, reason: "has an unreadable port in its environment file" };
   }
-  const timeoutMs = options.rollbackReadinessTimeoutMs ?? options.readinessTimeoutMs ?? options.actionSettleTimeoutMs ?? MAX_READINESS_TIMEOUT_MS;
+  const timeoutMs = options.rollbackReadinessTimeoutMs ?? options.actionSettleTimeoutMs ?? MAX_READINESS_TIMEOUT_MS;
   const probe2 = options.rollbackReadinessProbe ?? options.readinessProbe;
   const outcome = waitForWorkerReadiness(options, port, {
     timeoutMs,

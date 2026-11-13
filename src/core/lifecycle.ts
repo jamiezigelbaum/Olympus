@@ -109,9 +109,11 @@ export interface WorkerLifecycleOptions extends WorkerServiceInstallOptions {
   rollbackReadinessProbe?: (url: string) => boolean;
   /**
    * How long the previous worker may take to answer after a rollback, in
-   * milliseconds. Defaults to `readinessTimeoutMs`, then
-   * `actionSettleTimeoutMs`, then 600000: a previous version writes no boot
-   * progress, so its whole start has to fit in this one window.
+   * milliseconds. Taken only when it was running before the upgrade (one
+   * that was stopped is put back stopped). Defaults to
+   * `actionSettleTimeoutMs`, then 600000, whatever `readinessTimeoutMs` is:
+   * a previous version writes no boot progress, so its whole start has to
+   * fit in this one window.
    */
   rollbackReadinessTimeoutMs?: number;
   /** Where progress lines go while the upgrade waits. Defaults to stderr. */
@@ -456,8 +458,9 @@ function previousWorkerHealth(
   } catch {
     return { healthy: false, reason: 'has an unreadable port in its environment file' };
   }
-  const timeoutMs = options.rollbackReadinessTimeoutMs
-    ?? options.readinessTimeoutMs ?? options.actionSettleTimeoutMs ?? MAX_READINESS_TIMEOUT_MS;
+  // Not the upgrade's window: the previous version writes no progress, so its
+  // whole start has to fit in this one.
+  const timeoutMs = options.rollbackReadinessTimeoutMs ?? options.actionSettleTimeoutMs ?? MAX_READINESS_TIMEOUT_MS;
   const probe = options.rollbackReadinessProbe ?? options.readinessProbe;
   const outcome = waitForWorkerReadiness(options, port, {
     timeoutMs,
