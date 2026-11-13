@@ -47,8 +47,10 @@ export interface FunnelRow {
   packRank: number | null; packSize: number; fitRank: number | null;
   /** Best rank in a deep keyword and vector probe of the item's store (present when probed). */
   keywordRank?: number | null; vectorRank?: number | null;
+  /** The vector probe's rank with the exact full-vector scan instead of the digest (present when probed). */
+  exactVectorRank?: number | null;
 }
-export interface LaneProbe { keyword: number | null; vector: number | null }
+export interface LaneProbe { keyword: number | null; vector: number | null; exactVector?: number | null }
 export interface QuestionJudgement { answers: boolean | null; specific: boolean | null }
 export interface PassageAnswer {
   outcome: 'answered' | 'failed'; cited?: boolean; coverage?: number; right?: boolean; answerMs?: number; code?: string;
@@ -264,7 +266,7 @@ export async function runPassageEval(input: {
       const stage: FunnelStage = passageRank !== null ? 'hit' : objectRank !== null ? 'fitted_no_passage' : packRank !== null ? 'packed_not_fitted'
         : storeRank !== null ? 'returned_not_packed' : !lanes ? 'not_returned' : lanes.keyword !== null || lanes.vector !== null ? 'found_not_returned' : 'not_found';
       funnel = { stage, storeRank, storeHits: searches.length ? Math.max(...searches.map(search => search.providerItemIds.length)) : null,
-        packRank, packSize: original.candidates.length, fitRank: objectRank, ...chunkCount(identities), ...(lanes ? { keywordRank: lanes.keyword, vectorRank: lanes.vector } : {}) };
+        packRank, packSize: original.candidates.length, fitRank: objectRank, ...chunkCount(identities), ...(lanes ? { keywordRank: lanes.keyword, vectorRank: lanes.vector, ...(lanes.exactVector !== undefined ? { exactVectorRank: lanes.exactVector } : {}) } : {}) };
     }
     const quoted = question.expectedEvidence?.find(expected => expected.quote)?.quote;
     if (answerable && quoted && input.judgeQuestion) step('judge');
@@ -351,16 +353,49 @@ const LANE_PROBE_DEPTH = 50;
 export function laneProbe(stores: readonly LocalConnectorStore[], embeddingFor: (trustDomain: SourceTrustDomain) => SourceEmbeddingProvider | undefined) {
   return async (question: EvalQuestion, items: ReadonlyArray<{ corpusId: string; providerItemId?: string }>): Promise<LaneProbe> => {
     const best = (ranks: number[]) => ranks.length ? Math.min(...ranks) : null;
-    const keyword: number[] = []; const vector: number[] = [];
+    const keyword: number[] = []; const vector: number[] = []; const exact: number[] = [];
     for (const store of stores.filter(store => items.some(item => item.corpusId === store.corpusId))) {
       const wanted = new Set(items.filter(item => item.corpusId === store.corpusId).map(item => item.providerItemId));
       const rankIn = (ids: string[]) => { const at = ids.findIndex(id => wanted.has(id)); return at < 0 ? [] : [at + 1]; };
       keyword.push(...rankIn(store.searchItemsDetailed(question.question, LANE_PROBE_DEPTH).rows.map(row => row.sourceItem.providerItemId)));
       const provider = embeddingFor(store.trustDomain);
-      if (provider) vector.push(...rankIn((await store.vectorSearchItems(question.question, provider, LANE_PROBE_DEPTH)).map(row => row.sourceItem.providerItemId)));
+      if (!provider) continue;
+      vector.push(...rankIn((await store.vectorSearchItems(question.question, provider, LANE_PROBE_DEPTH)).map(row => row.sourceItem.providerItemId)));
+      // The same search on the exact full-vector scan: an item it finds that
+      // the digest does not is lost to the digest, not to the embedding.
+      const digest = process.env.OLYMPUS_VECTOR_DIGEST;
+      process.env.OLYMPUS_VECTOR_DIGEST = 'off';
+      try {
+        exact.push(...rankIn((await store.vectorSearchItems(question.question, provider, LANE_PROBE_DEPTH)).map(row => row.sourceItem.providerItemId)));
+      } finally {
+        if (digest === undefined) delete process.env.OLYMPUS_VECTOR_DIGEST; else process.env.OLYMPUS_VECTOR_DIGEST = digest;
+      }
     }
-    return { keyword: best(keyword), vector: best(vector) };
+    return { keyword: best(keyword), vector: best(vector), exactVector: best(exact) };
   };
+}
+
+export type RecallGroup = 'not_indexed' | 'digest_loses' | 'below_store_depth' | 'beyond_probe';
+/**
+ * Why an answerable item never came back from its store (funnel stage
+ * not_found or found_not_returned), from the lane probe: the item is not in
+ * the store or has no chunks; the exact vector scan finds it in the probe
+ * depth and the digest does not; some lane finds it in the probe depth but
+ * the store's search returned fewer; or no lane finds it within the probe
+ * depth. Counted per family of the item's store.
+ */
+export function recallGroups(rows: readonly PassageRow[]): Record<string, Partial<Record<RecallGroup, number>>> {
+  const groups: Record<string, Partial<Record<RecallGroup, number>>> = {};
+  for (const row of rows) {
+    const funnel = row.funnel;
+    if (!funnel || (funnel.stage !== 'not_found' && funnel.stage !== 'found_not_returned')) continue;
+    const ranks = [funnel.keywordRank, funnel.vectorRank, funnel.exactVectorRank].filter((rank): rank is number => typeof rank === 'number');
+    const group: RecallGroup = !funnel.chunks ? 'not_indexed'
+      : typeof funnel.exactVectorRank === 'number' && funnel.vectorRank === null ? 'digest_loses'
+      : ranks.length ? 'below_store_depth' : 'beyond_probe';
+    for (const family of row.families) (groups[family] ??= {})[group] = (groups[family]![group] ?? 0) + 1;
+  }
+  return groups;
 }
 
 /**
@@ -478,6 +513,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     writeFileSync(output, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 });
     // Store counts lead the line, so a short open never reads as a retrieval miss (#1576).
     console.log(JSON.stringify({ storesOpened: opened.stores.length, storesSkipped: opened.skipped.length, ...receipt.summary }));
+    if (probe && receipt.questions) console.log(JSON.stringify({ recallGroups: recallGroups(receipt.questions) }));
     if (values.has('--compare')) enter('compare');
     if (values.has('--compare')) console.log(JSON.stringify(comparePassageReceipts(receipt, JSON.parse(readFileSync(values.get('--compare')!, 'utf8')) as PassageReceipt)));
   } finally { for (const cleanup of cleanups) cleanup(); try { opened.checkFileDescriptors(); } finally { opened.close(); } }

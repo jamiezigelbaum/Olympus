@@ -485,7 +485,13 @@ the quote) and `hit`. Rows carry the store, pack and fit ranks; summaries count
 questions per stage. `--probe-lanes` adds the expected item's rank in its own
 store's keyword and vector lanes, searched 50 deep (the store's search cap,
 so an item ranked lower in both reads as `not_found`), which separates
-`not_found` from `found_not_returned`. Neither diagnostic counts toward the
+`not_found` from `found_not_returned`. The vector lane is also searched with
+the exact full-vector scan instead of the digest, and the run prints
+`recallGroups`: for each family, the items their store never returned, sorted
+into `not_indexed` (not in the store, or no chunks), `digest_loses` (the exact
+scan finds it within 50 and the digest does not), `below_store_depth` (a lane
+finds it within 50 but the store returned fewer) and `beyond_probe` (no lane
+finds it within 50). Neither diagnostic counts toward the
 row's timings. `--judge-questions` asks the eval's local
 Analyst model (same endpoint rules as drafting) whether each question is
 answered by its quote and is specific enough to point at one item. Rows record

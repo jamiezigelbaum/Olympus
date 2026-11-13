@@ -2,7 +2,7 @@ import { expect, spyOn, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import type { EvidencePackBuildDetail } from '../src/core/evidence-pack.ts';
 import type { AnalystResult, EvidencePack } from '../src/core/contracts.ts';
-import { comparePassageReceipts, runPassageEval } from '../eval/run-passages.ts';
+import { comparePassageReceipts, recallGroups, runPassageEval, type LaneProbe } from '../eval/run-passages.ts';
 import { fitPackToPromptBytes } from '../src/workers/source-index/analyst-answer.ts';
 import type { EvalDataset } from '../eval/types.ts';
 import { createTestClock } from './helpers/test-clock.ts';
@@ -135,6 +135,18 @@ test('each answerable question records where its expected item was lost, by stag
   expect((await run(packOf(['a']), [{ corpusId: 'internal.fixture.file', providerItemIds: ['a'] }])).questions![0]!.funnel!.stage).toBe('not_returned');
   const noPassage = await run(packOf(['copy']).pack.candidates.length ? { ...packOf(['copy']), pack: { ...packOf(['copy']).pack, candidates: [{ ...seat('copy'), chunks: ['unrelated text'] }] } } : base, [{ corpusId: 'internal.fixture.file', providerItemIds: ['copy'] }]);
   expect(noPassage.questions![0]!.funnel!.stage).toBe('fitted_no_passage');
+  // A miss the store never returned is sorted by what the lane probe saw, per family.
+  const probed = async (lanes: LaneProbe, chunks?: number) => (await runPassageEval({ dataset: one, maxResults: 12, storeCounts: counts, gitSha: 'abc',
+    buildPack: async () => ({ ...packOf(['a']), storeSearches: [{ corpusId: 'internal.fixture.file', providerItemIds: ['a'] }] }), probeLanes: async () => lanes,
+    ...(chunks !== undefined ? { itemChunks: () => chunks } : {}) })).questions!;
+  expect(recallGroups([
+    ...await probed({ keyword: null, vector: null, exactVector: null }),
+    ...await probed({ keyword: null, vector: null, exactVector: 20 }, 3),
+    ...await probed({ keyword: 40, vector: null, exactVector: null }, 3),
+    ...await probed({ keyword: null, vector: null, exactVector: null }, 3),
+    ...await probed({ keyword: 2, vector: 1, exactVector: 1 }, 0),
+  ])).toEqual({ file: { not_indexed: 2, digest_loses: 1, below_store_depth: 1, beyond_probe: 1 } });
+  expect((await probed({ keyword: null, vector: null, exactVector: 20 }, 3))[0]!.funnel).toMatchObject({ vectorRank: null, exactVectorRank: 20, chunks: 3 });
   // The summary counts stages, overall and per family.
   expect(lost.summary.overall.funnel).toEqual({ not_found: 1 });
   expect(lost.summary.byFamily.file!.funnel).toEqual({ not_found: 1 });
