@@ -12,6 +12,7 @@ import type { ExploreResult } from './explore.ts';
 import type { PagesResult } from './explore-pages.ts';
 import type { ReviewResult } from './reviewer.ts';
 import type { OnDemandNotRun, OnDemandTimingRow } from './on-demand-timing.ts';
+import type { LimitsRow } from './fresh-limits.ts';
 
 export type CheckStatus = 'pass' | 'fail' | 'warn' | 'skip';
 
@@ -25,6 +26,14 @@ export interface CheckResult {
   carried?: CarriedFrom;
   /** The leg that produced it (run.ts inLeg); absent for the install and setup checks every run makes. */
   leg?: string;
+}
+
+/** Content-free release proof; an unconfirmed refill remains visibly inconclusive. */
+export function renderLimits(rows: readonly LimitsRow[] | undefined): string {
+  if (!rows?.length) return '';
+  return '<h2>Limits</h2><table><thead><tr><th>Id</th><th>Result</th><th>Unit</th><th>Limit</th><th>Used</th><th>Calls after Raise</th><th>Resumes at</th><th>Started</th><th>ms</th><th>Reason</th></tr></thead><tbody>'
+    + rows.map(row => `<tr>${[row.id, row.status, row.unit, row.limit, row.used, row.callsAfter, row.resumesAt, row.startedAt, row.ms, row.reason]
+      .map(value => `<td>${escapeHtml(value === undefined ? '' : String(value))}</td>`).join('')}</tr>`).join('') + '</tbody></table>';
 }
 
 /** The same table is used by the real-accounts canary and release reports. Values are observations, including failures. */
@@ -118,6 +127,7 @@ export interface UpgradeReport {
 }
 
 export interface MachineReport {
+  limits?: import('./fresh-limits.ts').LimitsResult;
   id: string;
   label: string;
   os: string;
@@ -466,7 +476,7 @@ function machineSection(machine: MachineReport): string {
   const verdicts = phaseVerdicts(machine);
   if (!machine.upgrade) {
     return head
-      + timingsLine(machine.timings) + archiveScaleSection(machine.archiveScale)
+      + timingsLine(machine.timings) + archiveScaleSection(machine.archiveScale) + renderLimits(machine.limits?.rows)
       + `<h3>Machine checks</h3>${checkTable(machine.checks)}`
       + `<h3>Agents</h3>${machine.agents.map(agentSection).join('') || '<p class="muted">No agents.</p>'}`
       + `<h3>Dashboard screenshots</h3>${screenshotGrid(machine.screenshots)}`
@@ -487,7 +497,7 @@ function machineSection(machine: MachineReport): string {
     + `<h3>What differs across the upgrade</h3>${differencesTable(step.differences)}`
     + `<h2>3. After the upgrade: ${escapeHtml(machine.upgrade.afterLabel)} ${badge(verdicts[2]!.verdict)}</h2>`
     + `<p class="muted">${machine.upgrade.afterVersion ? `version ${escapeHtml(machine.upgrade.afterVersion)}` : ''}${machine.build ? ` · build ${escapeHtml(machine.build)}` : ''}</p>`
-    + timingsLine(machine.timings) + archiveScaleSection(machine.archiveScale)
+    + timingsLine(machine.timings) + archiveScaleSection(machine.archiveScale) + renderLimits(machine.limits?.rows)
     + `<h3>Machine checks</h3>${checkTable(machine.checks)}`
     + `<h3>Agents</h3>${machine.agents.map(agentSection).join('') || '<p class="muted">No agents.</p>'}`
     + `<h3>Dashboard screenshots</h3>${screenshotGrid(machine.screenshots)}`
