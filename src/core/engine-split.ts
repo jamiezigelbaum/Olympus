@@ -102,8 +102,10 @@ export async function engineBackgroundAnswer(
     const body = await response.json().catch(() => undefined) as Partial<EngineReadyBody> | undefined;
     return body?.ready === true && body.schema_current === true
       && (instanceId === undefined || body.instance_id === instanceId) ? 'ready' : 'alive';
-  } catch {
-    return controller.signal.aborted ? 'alive' : 'down';
+  } catch (error) {
+    // Out of time (this check's own abort) means it is there but busy.
+    const name = (error as { name?: unknown } | undefined)?.name;
+    return controller.signal.aborted || name === 'AbortError' || name === 'TimeoutError' ? 'alive' : 'down';
   } finally {
     clearTimeout(timeout);
   }

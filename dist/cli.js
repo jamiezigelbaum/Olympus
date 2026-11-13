@@ -15051,8 +15051,9 @@ async function engineBackgroundAnswer(fetchBackground, authToken, instanceId, ti
       return;
     });
     return body?.ready === true && body.schema_current === true && (instanceId === undefined || body.instance_id === instanceId) ? "ready" : "alive";
-  } catch {
-    return controller.signal.aborted ? "alive" : "down";
+  } catch (error) {
+    const name = error?.name;
+    return controller.signal.aborted || name === "AbortError" || name === "TimeoutError" ? "alive" : "down";
   } finally {
     clearTimeout(timeout);
   }
@@ -220521,7 +220522,7 @@ async function waitForEngineBackground(input) {
   const inProgress = input.inProgress ?? (() => bootInProgress(process.env));
   const deadline = now() + (input.timeoutMs ?? 120000);
   for (;; ) {
-    const answer = await engineBackgroundAnswer(fetchBackground, input.authToken, undefined, input.probeTimeoutMs ?? 1000);
+    const answer = await engineBackgroundAnswer(fetchBackground, input.authToken, undefined, 1000);
     if (answer === "ready")
       return;
     if (now() >= deadline && answer === "down" && !inProgress())

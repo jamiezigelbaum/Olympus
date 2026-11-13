@@ -95,8 +95,6 @@ export async function waitForEngineBackground(input: {
   now?: () => number;
   /** Whether the background is still doing boot work; past the deadline the front keeps waiting while it is (#1494). */
   inProgress?: () => boolean;
-  /** How long one ready check waits for an answer. */
-  probeTimeoutMs?: number;
 }): Promise<void> {
   const fetchBackground = input.fetch ?? createUnixSocketFetch(input.socketPath);
   const now = input.now ?? (() => Date.now());
@@ -104,7 +102,7 @@ export async function waitForEngineBackground(input: {
   const inProgress = input.inProgress ?? (() => bootInProgress(process.env));
   const deadline = now() + (input.timeoutMs ?? 120_000);
   for (;;) {
-    const answer = await engineBackgroundAnswer(fetchBackground, input.authToken, undefined, input.probeTimeoutMs ?? 1_000);
+    const answer = await engineBackgroundAnswer(fetchBackground, input.authToken, undefined, 1_000);
     if (answer === 'ready') return;
     // Past the deadline the front gives up only on a background that is gone.
     // One that is busy (a long sync held its event loop for 154 s in a VM

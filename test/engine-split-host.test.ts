@@ -87,30 +87,22 @@ describe('the host starts the background, then the front', () => {
     bg.setReady(false);
     const clock = createTestClock();
     let busy = false;
-    // A busy background accepts the connection and answers nothing until it is free.
+    // A busy background accepts the connection and answers nothing in time: the check runs out of time.
     const fetchBackground = ((input: RequestInfo | URL, init?: RequestInit) => busy
-      ? new Promise<Response>((_, reject) => init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))))
+      ? Promise.reject(new DOMException('The operation timed out.', 'TimeoutError'))
       : bg.fetch(input, init)) as typeof fetch;
-    const waiting = waitForEngineBackground({ socketPath: '/unused', authToken: TOKEN, fetch: fetchBackground, sleep: clock.sleep, now: clock.now, timeoutMs: 1_000, pollMs: 250, probeTimeoutMs: 5, inProgress: () => false });
+    const waiting = waitForEngineBackground({ socketPath: '/unused', authToken: TOKEN, fetch: fetchBackground, sleep: clock.sleep, now: clock.now, timeoutMs: 1_000, pollMs: 250, inProgress: () => false });
     let failed = false;
     void waiting.catch(() => { failed = true; });
     await flushMicrotasks();
     await clock.advance(3_000);
     expect(failed).toBe(false);
     busy = true;
-    for (let i = 0; i < 20; i += 1) {
-      await Bun.sleep(10);
-      await clock.advance(500);
-    }
+    await clock.advance(10_000);
     expect(failed).toBe(false);
     busy = false;
     bg.setReady(true);
-    let ready = false;
-    void waiting.then(() => { ready = true; });
-    for (let i = 0; i < 20 && !ready; i += 1) {
-      await Bun.sleep(10);
-      await clock.advance(250);
-    }
+    await clock.advance(250);
     await waiting;
   });
 
