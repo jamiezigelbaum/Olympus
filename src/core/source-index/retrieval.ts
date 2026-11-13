@@ -213,6 +213,52 @@ export function applyPerCorpusResultBudget<T extends { corpusId: string }>(
   };
 }
 
+/**
+ * The reranker's pool, allocated by store strength instead of in even turns.
+ * Every store's leader is seated first, so no store leaves the pool. The rest
+ * of the seats go to stores in `storeOrder` (strongest first), each up to
+ * `storeDepth` of its own ranks; seats still left after that are filled in
+ * turns, strongest store first. The pool keeps fused order. With more stores
+ * than seats, or a pool that already fits, this is the even budget.
+ */
+export function applyStrengthPoolBudget<T extends { corpusId: string }>(
+  ranked: readonly FusedRankedCandidate<T>[],
+  budget: number,
+  storeOrder: ReadonlyMap<string, number>,
+  storeDepth: number,
+): { hits: T[]; degradations: RetrievalDegradation[] } {
+  const byCorpus = new Map<string, FusedRankedCandidate<T>[]>();
+  for (const candidate of ranked) {
+    const bucket = byCorpus.get(candidate.item.corpusId);
+    if (bucket) bucket.push(candidate);
+    else byCorpus.set(candidate.item.corpusId, [candidate]);
+  }
+  if (ranked.length <= budget || byCorpus.size >= budget) return applyPerCorpusResultBudget(ranked, budget);
+
+  const rankOf = (corpusId: string) => storeOrder.get(corpusId) ?? Number.POSITIVE_INFINITY;
+  const buckets = [...byCorpus.entries()]
+    .map(([corpusId, bucket], index) => ({ corpusId, bucket, index }))
+    .sort((left, right) => (rankOf(left.corpusId) - rankOf(right.corpusId)) || left.index - right.index)
+    .map((entry) => entry.bucket);
+  const seated = new Set<SourceIndexCandidateId>(buckets.map((bucket) => bucket[0]!.id));
+  const depth = Math.max(1, Math.floor(storeDepth));
+  for (const bucket of buckets) {
+    for (const candidate of bucket.slice(1, depth)) {
+      if (seated.size >= budget) break;
+      seated.add(candidate.id);
+    }
+  }
+  for (let turn = depth; seated.size < budget; turn += 1) {
+    const before = seated.size;
+    for (const bucket of buckets) {
+      const candidate = bucket[turn];
+      if (candidate && seated.size < budget) seated.add(candidate.id);
+    }
+    if (seated.size === before) break;
+  }
+  return { hits: ranked.filter((candidate) => seated.has(candidate.id)).map((candidate) => candidate.item), degradations: [] };
+}
+
 // The pack keeps lane leaders across stores, as a store keeps them inside its
 // own order (#1230). The per-corpus budget seats stores in turn, so with more
 // stores than seats each store gets its first rank or two, and a store's

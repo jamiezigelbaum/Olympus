@@ -186,6 +186,23 @@ export function reportBootStep(env: LayoutEnv, event: BootStepEvent, now: () => 
   }
 }
 
+/**
+ * Runs one long, silent step of a store's update that comes after its
+ * migration commits (a check that reads every row). It reads as part of the
+ * update, a long step, so the waits do not take a check that is still
+ * reading for a stalled boot: on a slow disk the connector store's checks ran
+ * past the five-minute stall limit and the supervisor replaced a background
+ * that was still working (the gate7 forced leg, 2026-11-13).
+ */
+export function duringStoreUpdateStep<T>(env: LayoutEnv, storeId: string, step: () => T): T {
+  reportBootStep(env, { phase: 'migrating', storeId });
+  try {
+    return step();
+  } finally {
+    reportBootStep(env, { phase: 'starting', storeId });
+  }
+}
+
 function write(target: ProgressFile, nowMs: number, force: boolean): void {
   if (!force && nowMs - target.lastWriteMs < WRITE_INTERVAL_MS) return;
   try {

@@ -151,9 +151,9 @@
   },
   {
     "path": "src/core/lifecycle.ts",
-    "symbol": "FRONT_PROGRESS_MAX_STARTS",
+    "symbol": "PROGRESS_MAX_STARTS",
     "reason": "internal",
-    "retire_when": "Remove when the upgrade's readiness wait stops counting front restarts to tell a starting front from a crash loop."
+    "retire_when": "Remove when the upgrade's readiness wait stops counting front and background restarts to tell a starting process from a crash loop."
   },
   {
     "path": "src/core/oauth-relay.ts",
@@ -610,12 +610,6 @@
     "symbol": "SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS",
     "reason": "pacing",
     "retire_when": "Remove when the resumable pacing/retry boundary SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS is retired or adopted."
-  },
-  {
-    "path": "src/workers/telegram-messages/media-child.ts",
-    "symbol": "LIVE_MEDIA_MAX_READ_BYTES",
-    "reason": "pending",
-    "retire_when": "The limits adopter for src/workers/telegram-messages/media-child.ts must register/report/clear LIVE_MEDIA_MAX_READ_BYTES and expose its continue action."
   },
   {
     "path": "src/workers/whatsapp/archive-input.ts",

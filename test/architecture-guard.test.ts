@@ -264,6 +264,7 @@ const SOURCE_AGNOSTIC_SHARED_FILES = [
   'src/workers/file-extraction/http-types.ts',
   'src/workers/file-extraction/job-names.ts',
   'src/workers/file-extraction/job-store.ts',
+  'src/workers/file-extraction/size-limit-stops.ts',
   // The readiness counts the source status surface publishes. It maps the
   // queue's own vocabulary onto the dashboard's count keys, which is exactly
   // the place a one-provider verdict would be tempting to add — and the
