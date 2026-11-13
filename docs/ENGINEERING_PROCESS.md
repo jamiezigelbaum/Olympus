@@ -2,7 +2,8 @@
 
 Status: canonical
 
-Owner-ratified reset: 2026-08-29
+Owner-ratified reset: 2026-08-29; direct commits to `main` from 13 Nov 2026
+(owner rule: no pull requests, no review waits).
 
 This document is the single process authority for changing Olympus. Product
 scope stays in `V0_4_RELEASE.md`, source-pipeline architecture stays in
@@ -12,14 +13,13 @@ evidence, not instructions.
 
 ## Outcome
 
-Optimize for fast, safe integration:
+Optimize for fast integration:
 
 - feedback in seconds while editing;
-- one short-lived pull request per coherent change;
-- complete CI on every pull request;
-- stronger proof only when the changed risk demands it;
-- the exact tested result is what may be released; and
-- merged branches and worktrees disappear instead of becoming inventory.
+- one commit straight to `main` per coherent change;
+- complete CI on every push to `main`, fixed forward when red;
+- stronger proof only when the changed risk demands it; and
+- the exact tested result is what may be released.
 
 No work order, handoff document, clean working tree, or full local suite is a
 precondition for ordinary implementation. A direct owner request authorizes
@@ -27,13 +27,12 @@ the scoped work in any harness. An issue is an inbox item, not authorization.
 
 ## One delivery path
 
-1. **Claim the surface.** Inspect active branches/worktrees before overlapping
-   work. The main checkout remains on `main`; implementation uses a dedicated
-   short-lived `codex/*` branch and worktree when parallel work is possible.
-2. **Make the smallest coherent change.** Keep unrelated cleanup out. Use TDD
-   when a behavior is subtle, a regression is being fixed, or the test is the
-   clearest executable specification. Do not write low-value tests merely to
-   satisfy a universal ritual.
+1. **Work on `main`.** A cloud thread has its own clone. A Mac session works in
+   the shared checkout when it is clean and on `main`, and takes a worktree
+   only when it isn't.
+2. **Make the smallest coherent change.** Keep unrelated cleanup out. Write a
+   new test only for data loss, secrets, money, a failure that would be
+   silent, or a bug that has come back.
 3. **Run focused local proof.** Run the narrowest relevant test, typecheck,
    build, lint, render, or smoke check. `bun test <files>` and
    `bun run test:focus -- <files>` are the normal loop. `bun run verify` and
@@ -45,40 +44,28 @@ the scoped work in any harness. An issue is an inbox item, not authorization.
    non-zero if any lane fails. `--lanes=` picks lanes and `--dry-run` prints
    the plan. Never run the whole tree as one `bun test`: files then share a
    process, which CI never does, and leaked state fails or hangs the run.
-4. **Commit and push.** Stage only task files. Olympus owns no local Git hook:
-   mutable clone/worktree configuration is not a trustworthy merge boundary,
-   and no push should pay for a bypassable duplicate quality gate. Protected
-   `main` rejects direct pushes; required CI evaluates the immutable result.
-   User-installed hooks remain user-owned and must not be rewritten by repo
-   automation.
-5. **Let CI decide merge readiness.** GitHub requires every substantive lane
-   directly: `static checks`, all three `fast tests` shards, `exchange tests`, all four
-   `deploy tests` shards, and `Go bridge tests`. A local result is useful
-   evidence, never a substitute for those exact-head checks. Branch protection
-   requires `fast tests 1/3`, `2/3` and `3/3` directly (owner-approved
-   2026-10-31; #688 briefly kept an aggregate `fast tests` context). On 2026-10-31 the
-   unsharded main test work took 433 seconds in run 41191132361, before relay
-   tests and setup. Shards use those per-file timings and a conservative p95
-   for unknown files. The first sharded PR run (41191925041) finished the
-   three jobs in 3m23s, 2m52s and 2m04s.
+4. **Commit straight to `main` and push.** Stage only task files. Pull in
+   `main` first, retry a rejected push, never force-push. No pull request,
+   auto-merge or review wait. Olympus owns no local Git hook; user-installed
+   hooks remain user-owned and must not be rewritten by repo automation.
+5. **Keep `main` green.** CI runs every substantive lane on each push:
+   `static checks`, all three `fast tests` shards, `exchange tests`, all four
+   `deploy tests` shards, and `Go bridge tests`. Shards use per-file timings
+   from `main` runs and a conservative p95 for unknown files.
    The `exchange tests` lane runs `test:exchange` for the publisher Google
-   exchange service; `typecheck` checks both the plugin and the exchange service's
-   separate WebWorker configuration. The `exchange/` subtree is critical,
-   including its deployment configuration and tests. The same holds for the
-   `connect-relay/` service (`test:connect-relay`, `typecheck:connect-relay`;
-   see `docs/design/chatgpt-plugin.md`, "Architecture").
-6. **Review in proportion to risk.** Standard changes may auto-merge after
-   required checks. Critical changes get an independent review before merge.
-   Live mutations additionally follow the OpenClaw change protocol and remain
-   separately authorized.
-7. **Squash, prove main, and clean up.** Merge one coherent pull request as one
-   commit, then follow the `verify` workflow triggered for that exact `main`
-   SHA. The implementing session owns a red post-merge run: inspect the failing
-   step, distinguish product failure from runner/capacity failure, and either
-   repair it or report the unresolved blocker. A green pull-request head is not
-   the final receipt for repository delivery. Remove the branch and worktree
-   after exact-main is green. Git history and the pull request are the audit
-   trail; do not create a second narrative ledger.
+   exchange service; `typecheck` checks both the plugin and the exchange
+   service's separate WebWorker configuration. The `connect-relay/` service
+   has `test:connect-relay` and `typecheck:connect-relay` (see
+   `docs/design/chatgpt-plugin.md`, "Architecture").
+6. **Review only where it pays.** Ask another model for a review only for
+   credential paths, deleting or migrating data, permissions, money or a
+   public release. Fix what is real and move on: no review rounds. Live
+   mutations additionally follow the OpenClaw change protocol.
+7. **Own the red run.** The pushing session follows the `verify` workflow for
+   its `main` SHA. If it fails, inspect the failing step, distinguish product
+   failure from runner/capacity failure, and fix forward or report the
+   blocker. Git history is the audit trail; do not create a second narrative
+   ledger.
 
 ## Risk classes
 
@@ -88,29 +75,28 @@ the change.
 | Class | Examples | Required proof |
 |---|---|---|
 | Standard | docs, ordinary product behavior, bounded refactors, test-only changes | focused local proof; required CI |
-| Critical | source contracts, security/trust routing, credentials, destructive data behavior, install/uninstall, lifecycle and service-manager behavior, managed system paths, upgrade/rollback, CI/governance, release provenance | focused proof; required CI; independent review; relevant eval or migration proof |
+| Critical | source contracts, security/trust routing, credentials, destructive data behavior, install/uninstall, lifecycle and service-manager behavior, managed system paths, upgrade/rollback, CI/governance, release provenance | focused proof; CI on `main`; a second-model review for credentials, data deletion or migration, permissions, money or a public release; relevant eval or migration proof |
 | Live | deploy, restart, provider mutation, production data or secrets | all critical proof plus explicit live authorization and the canonical live-change protocol |
 
 The repository's classifier is fail-closed: unclassified sensitive surfaces
 are critical. A declaration may raise risk but may not lower a path-derived
 classification.
 
-On a critical pull request, a fresh-context reviewer examines the current head
-and the relevant invariant before the implementing session merges. The review
-is recorded in the pull request; GitHub does not gate on it (the
-`critical-review` status check was retired on 2026-10-07 by owner decision).
+Where a review is due, a fresh-context reviewer examines the change and the
+relevant invariant; the pushing session fixes what is real and moves on.
+Nothing gates on it.
 
 ## Contract evolution
 
 `SourceConnector`, `EvidencePack`, and `Analyst` are stable, versioned product
 contracts. Compatibility is the default, not permanent immobility. A semantic
-contract change must include, in the same pull request:
+contract change must include, in the same commit:
 
 - a version increment;
 - the changed canonical contract fingerprint;
 - a compatibility or migration note;
 - focused contract tests and the relevant held-out evaluation receipt; and
-- critical-change review.
+- a second-model review.
 
 The contract gate rejects shape drift without those artifacts. Architecture
 rules remain invariant: only `SourceConnector` is source-specific; downstream
@@ -198,8 +184,7 @@ the whole workflow. Reproduce deterministic failures with the narrowest local
 command. One rerun is useful to classify a suspected runner flake or billing
 failure; repeated reruns are not proof and do not replace a root-cause
 disposition. Rerun only failed jobs when the failed boundary is external, and
-cancel obsolete pull-request runs instead of paying for results that can no
-longer merge.
+cancel obsolete runs instead of paying for results nobody will use.
 
 Tests do not wait on the real clock. Code with a time seam (`now`, `sleep`,
 `setTimeoutImpl`, `schedule`) takes `createTestClock()` from
@@ -207,7 +192,7 @@ Tests do not wait on the real clock. Code with a time seam (`now`, `sleep`,
 Work that is really asynchronous (a worker, a subprocess, a page) uses
 `waitFor(condition)` from the same file, never a fixed sleep and an assert.
 `test/raw-sleep-guard.test.ts` holds each older file to its count in
-`config/test-raw-sleep-allowance.json`, and the static checks reject a PR that
+`config/test-raw-sleep-allowance.json`, and the static checks reject a push that
 adds a file to that list or raises a count, so the list only shrinks (#1066).
 Converting a file is the fix for a timing flake; raising its timeout is not.
 
@@ -254,22 +239,22 @@ launch release; after it:
 - Every published build gets a new number. A number is never reused, and a
   published artifact is never replaced under the same number.
 
-A release is two pull requests, a tag and a site publish:
+A release is two commits to `main`, a tag and a site publish:
 
-1. **Version PR** ("Release X.Y.Z"): `package.json`, `openclaw.plugin.json`
+1. **Version commit** ("Release X.Y.Z"): `package.json`, `openclaw.plugin.json`
    and `chatgpt-plugin/plugin.json` (kept equal by test), the version
    assertion in `test/native-plugin.test.ts`, and a `CHANGELOG.md` entry.
 2. **Tag and GitHub release** `vX.Y.Z` on the merged commit, with the
    `olympus-X.Y.Z.tgz` from `bun run release:artifact`. A suffixed version is
    a GitHub pre-release; a plain `X.Y.Z` is a full release marked latest.
-3. **Pins PR** ("Point the install guide, quickstart and README at X.Y.Z"):
+3. **Pins commit** ("Point the install guide, quickstart and README at X.Y.Z"):
    `INSTALL_FOR_AGENTS.md` (tag, asset, SHA-256, size, and the `prerelease`
    value it requires, which is `false` for a plain version), the `README.md`
    badge and install line, `docs/QUICKSTART.md`,
    `scripts/owner-identifier-patterns.ts`, and the tests that check them.
 4. **Site**: publish the exact tarball attached to the GitHub release, never
    a rebuild. Without `--artifact` the script builds a new tarball from the
-   current tree, and once the pins PR has changed the packaged guides its
+   current tree, and once the pins commit has changed the packaged guides its
    bytes differ from the tagged release's. So:
    `gh release download vX.Y.Z -p olympus-X.Y.Z.tgz -D <dir>`, then
    `bun scripts/publish-release-to-site.ts --artifact <dir>/olympus-X.Y.Z.tgz`,
@@ -294,13 +279,8 @@ re-uploads the listing on its own.
 ## Budgets and measurement
 
 - Local push gate: zero repository-owned hook time.
-- Pull-request CI target after the setup/cache reset: p95 at or below 70
+- CI target after the setup/cache reset: p95 at or below 70
   seconds; investigate sustained regression above 90 seconds.
-- The review publisher runs in parallel and must not extend the slowest
-  substantive CI lane. Unrelated comments and non-base pull-request edits
-  allocate no runner. One `main`-push backfill minute replaces stale-policy
-  risk; a critical receipt costs one short publisher minute instead of another
-  full-CI run.
 - Unknown tests use a conservative measured p95 for shard placement. Timeouts
   are diagnostic ceilings and only a cold-start scheduling fallback.
 - Toolchain-specific tests use a co-located, fail-closed lane declaration. The
@@ -311,6 +291,4 @@ re-uploads the listing on its own.
 
 ## Exceptions
 
-Emergency bypasses do not redefine the process. Record why a check could not
-run, preserve the branch, and restore missing proof before merge or release.
-Admin rights are recovery capability, not a routine integration path.
+Record why a check could not run and restore missing proof before a release.

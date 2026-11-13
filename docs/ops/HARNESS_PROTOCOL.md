@@ -13,19 +13,19 @@ Castor, and future harnesses use the same delivery path and quality bar.
   delegation ceremony is required.
 - An issue is an inbox item, not authorization. A harness that merely observes
   an out-of-scope problem reports it without silently expanding its mandate.
-- The active implementer owns integration for its scoped pull request: surface
-  coordination, focused proof, commit, push, pull-request CI, squash merge,
-  exact-main CI follow-through, and cleanup.
-- Risk comes from the change. Critical changes need the independent review
-  receipt defined by the engineering process regardless of which harness made
-  them.
+- The active implementer owns its change end to end: focused proof, a commit
+  straight to `main`, push, and green CI on that `main` commit (fix forward
+  when red). No pull request or review wait.
+- Risk comes from the change. A second-model review is for credential paths,
+  deleting or migrating data, permissions, money or a public release,
+  whichever harness made the change.
 
 ## Shared-repository coordination
 
-Inspect active worktrees before editing. Keep the main checkout on `main` and
-make overlapping work in one short-lived branch/worktree per pull request.
-Declare owned files when another slice is active, preserve unrelated changes,
-and serialize only the genuinely overlapping commit window.
+Work on `main`. A cloud thread has its own clone. A Mac session works in the
+shared checkout when it is clean and on `main`, and takes a worktree only when
+it isn't. Stage only your own files, preserve unrelated changes, pull in
+`main` before pushing and retry a rejected push.
 
 ## Live systems
 
