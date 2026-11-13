@@ -8,6 +8,7 @@ import type { OnDemandTimingResult } from './on-demand-timing.ts';
 import { runFreshLimits, type FreshLimitsOptions, type LimitsResult } from './fresh-limits.ts';
 import { ANSWER_MODEL_REQUIRED_TEXT } from '../../src/workers/answer-model-required.ts';
 import { FIRST_RUN_PRIVACY_REQUIRED_TEXT } from '../../src/workers/first-run-privacy-gate.ts';
+import localFirst from '../../config/sovereignty/presets/local-first.json';
 
 export const FRESH_LEG = 'canary-test-omarchy-fresh';
 export const quote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
@@ -54,6 +55,28 @@ export function validateFreshSources(sources: LiveSourceSpec[]): LiveSourceSpec[
     }
     return source;
   });
+}
+
+/**
+ * The ports of the model servers the recommended preset expects a person to run. The built-in model covers for one only when
+ * nothing listens there, so a leftover server on such a port keeps a fresh install's sources locked (olympus-ops#221).
+ */
+export const LOCAL_FIRST_PORTS: readonly number[] = Object.values(localFirst.modelProfiles as Record<string, { provider: string; baseUrl?: string }>)
+  .filter((profile) => profile.provider === 'local-openai-compatible' && profile.baseUrl)
+  .map((profile) => new URL(profile.baseUrl!))
+  .filter((url) => url.hostname === '127.0.0.1' || url.hostname === 'localhost')
+  .map((url) => Number(url.port || (url.protocol === 'https:' ? 443 : 80)));
+
+/** Each held port, with the program and user holding it, from `ss -Hltnp` lines; empty when every port is free. */
+export function heldPorts(ssOutput: string, ports: readonly number[]): string[] {
+  const held: string[] = [];
+  for (const port of ports) {
+    const line = ssOutput.split('\n').find((row) => new RegExp(`[:\\]]${port}\\s`).test(row));
+    if (!line) continue;
+    const program = /users:\(\("([^"]+)",pid=(\d+)/.exec(line);
+    held.push(`127.0.0.1:${port} is held by ${program ? `${program[1]} (pid ${program[2]})` : 'a process ss could not name'}`);
+  }
+  return held;
 }
 
 const ROOT = '"$HOME/.olympus-canary/fresh-run"';
@@ -136,6 +159,20 @@ export async function runFreshInstall(machine: Machine, options: FreshOptions): 
     return result.stdout;
   };
   try {
+    // A fresh machine has nothing on the ports the recommended preset reaches for; a leftover there is the machine's fault, said at once.
+    await checked('machine-clear', async () => {
+      const result = await machine.exec(`sudo -n ss -Hltnp 2>/dev/null || ss -Hltnp`, { timeoutMs: 30_000 });
+      if (result.code !== 0) throw new Error(`could not list listening ports (exit ${result.code})`);
+      let held = heldPorts(result.stdout, LOCAL_FIRST_PORTS);
+      // Name the unit that keeps it running, so the owner knows what to move (a test unit, olympus-ops#221).
+      held = await Promise.all(held.map(async (line) => {
+        const pid = /\(pid (\d+)\)/.exec(line)?.[1];
+        const unit = pid ? (await machine.exec(`ps -o unit= -p ${pid}`, { timeoutMs: 10_000 }).catch(() => undefined))?.stdout.trim() : undefined;
+        return unit && /^[\w@.-]+$/.test(unit) ? `${line}, unit ${unit}` : line;
+      }));
+      if (held.length > 0) throw new Error(`${held.join('; ')}: the local-first preset's model server port must be free on a fresh machine, or the built-in model never covers for it`);
+      return `${LOCAL_FIRST_PORTS.map((port) => `127.0.0.1:${port}`).join(', ')} free`;
+    });
     await checked('install', async () => {
       await exec(`umask 077
 [ "$(id -un)" = zig ]

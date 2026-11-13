@@ -137,6 +137,14 @@ invocation, 3 inconclusive. Password, verification, signed-out and ambiguous
 account pages identify which browser sign-in to renew. No consent screenshots,
 OAuth URLs, ordinary account answers, cookies or tokens are included in the fresh report.
 
+Before anything is installed, `fresh.machine-clear` checks that nothing listens
+on the local model port the recommended local-first preset reaches for
+(127.0.0.1:28090, read from `config/sovereignty/presets/local-first.json`). The
+built-in model covers for that server only when the port refuses connections, so
+a server left there keeps every source locked; the check fails at once and names
+the program and its systemd unit (olympus-ops#221: a test-only llama.cpp unit sat
+there from 11 Nov). Move such a server to another port.
+
 The dedicated `olyfresh` account gets linger and a clean home each run. Zig's
 engine is stopped before installation. Engine readiness uses olyfresh's worker
 socket, since this user has no graphical session. The harness bundles its current
