@@ -613,23 +613,28 @@ function formatCompactCandidate(
  * A compact Analyst's audit prompt. Its pack was fitted to a byte budget for
  * the compact main call, so the audit renders each candidate as that call
  * did (compact header, the audit's bounded passages) and is held to the
- * budget the fit recorded (withPromptBudget): the draft and the audit rules
- * take their room from the passages, shrunk evenly until the whole audit call
- * fits. A pack with no recorded budget keeps the audit's full passages.
+ * budget the fit recorded (withPromptBudget). It starts from the whole
+ * passages the main call sent, so it never rewrites the draft from less
+ * evidence than the draft had (#1590), and gives the draft and audit rules
+ * their room by the largest even per-candidate passage size that fits. A
+ * pack with no recorded budget keeps the audit's bounded passages.
  */
 function compactAuditPrompt(pack: EvidencePack, draft: ParsedModelOutput | null, maxBytes: number | undefined, unseen: readonly string[] = []): string {
-  let chars = AUDIT_CHARS_PER_CANDIDATE;
-  let prompt = buildAnalystAuditPrompt(pack, draft, false, chars, unseen);
-  if (maxBytes === undefined) return prompt;
-  for (let attempt = 0; attempt < 6; attempt += 1) {
-    const bytes = promptEncoder.encode(`${ANALYST_AUDIT_SYSTEM}\n\n${prompt}`).length;
-    if (bytes <= maxBytes) break;
-    const passageBytes = promptEncoder.encode(prompt).length - promptEncoder.encode(buildAnalystAuditPrompt(pack, draft, false, 0, unseen)).length;
-    if (passageBytes <= 0) break;
-    chars = Math.max(0, Math.floor(chars * Math.max(0, passageBytes - (bytes - maxBytes)) / passageBytes) - 1);
-    prompt = buildAnalystAuditPrompt(pack, draft, false, chars, unseen);
+  if (maxBytes === undefined) return buildAnalystAuditPrompt(pack, draft, false, AUDIT_CHARS_PER_CANDIDATE, unseen);
+  const render = (chars: number) => buildAnalystAuditPrompt(pack, draft, false, chars, unseen);
+  const fits = (prompt: string) => promptEncoder.encode(`${ANALYST_AUDIT_SYSTEM}\n\n${prompt}`).length <= maxBytes;
+  // Each candidate's whole sent text, plus room for the separators between chunks.
+  const whole = Math.max(0, ...pack.candidates.map((candidate) =>
+    candidate.chunks.reduce((total, chunk) => total + chunk.length + 1, 0)));
+  const full = render(whole);
+  if (fits(full)) return full;
+  let low = 0;
+  let high = whole;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (fits(render(mid))) low = mid; else high = mid - 1;
   }
-  return prompt;
+  return render(low);
 }
 
 const AUDIT_DRAFT_HEADING = 'Draft JSON:';
