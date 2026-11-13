@@ -133,7 +133,7 @@ with leg `canary-test-omarchy-fresh`. Checks name install, engine, dashboard,
 the first-run privacy choice (Local models with Venice fallback, Recommended),
 each source's connect/consent/callback/scope/first items, known answers and scope
 absence, and restoration. On a machine with 16 GiB RAM or more the reranker
-turns itself on: after the first items, `reranker-ready` waits up to 15 minutes
+turns itself on: right after the engine starts, `reranker-ready` waits up to 15 minutes
 for health's `reranker_install` to reach `ready` (its own ONNX pack and model;
 a LiteRT install never ships that pack), and after the answers
 `reranker-applied` requires `rerank_outcomes` applied above 0 and failed 0.

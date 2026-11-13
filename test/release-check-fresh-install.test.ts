@@ -79,9 +79,8 @@ describe('fresh install canary', () => {
     expect(canaryVerdict(checks)).toBe('pass');
     expect(FRESH_LEG).toBe('canary-test-omarchy-fresh');
     expect(checks.map(c => c.id)).toEqual([
-      'fresh.install', 'fresh.engine-up', 'fresh.ask-without-model', 'fresh.dashboard-opens', 'fresh.privacy-choice',
+      'fresh.install', 'fresh.engine-up', 'fresh.reranker-ready', 'fresh.ask-without-model', 'fresh.dashboard-opens', 'fresh.privacy-choice',
       ...sources.flatMap(s => ['connect', 'consent', 'callback', 'scope', 'first-items'].map(step => `fresh.${s.id}.${step}`)),
-      'fresh.reranker-ready',
       'live.gmail.status', 'live.dropbox.status', 'live.gmail.known', 'live.dropbox.known',
       'fresh.gmail.answer', 'fresh.gmail.scope-absence', 'fresh.dropbox.answer', 'fresh.dropbox.scope-absence', 'fresh.restore-zig',
     ]);
@@ -253,7 +252,7 @@ describe('fresh install canary', () => {
     const r = rig('gmail.consent', true);
     const { checks } = await runFreshInstall(r.machine, r.options);
     expect(canaryVerdict(checks)).toBe('inconclusive');
-    expect(checks.find(c => c.status === 'skip')?.detail).toContain('renew Google');
+    expect(checks.find(c => c.status === 'skip' && c.id !== 'fresh.reranker-ready')?.detail).toContain('renew Google');
     expect(r.events.at(-1)).toBe('restore');
     expect(r.events).not.toContain('gmail.scope');
   });

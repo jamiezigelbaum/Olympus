@@ -183,6 +183,34 @@ for i in $(seq 1 180); do
 done; exit 1`), 200_000);
       try { engine = await (options.engine ?? openEngineMcp)(fresh); } catch { throw new Error('engine MCP connection failed'); }
     });
+    // The reranker turns itself on once its own ONNX pack and model land; a LiteRT install never ships that pack (#1583).
+    // It downloads from boot, so wait for it first: this holds even when a later step stops the leg, and the answers
+    // then show whether it ranks. Off below 16 GiB RAM, where health leaves it out.
+    let rerankerOn = false;
+    current = 'reranker-ready';
+    const rerankStart = Date.now();
+    const rerankHealth = async () => JSON.parse(await exec(asFresh(HEALTH_READ), 30_000)) as {
+      rerank_outcomes?: { applied?: number; failed?: number; timed_out?: number };
+      reranker_install?: { state?: string; reason?: string; percent?: number };
+    };
+    let health = await rerankHealth();
+    if (!health.rerank_outcomes) {
+      checks.push({ id: 'fresh.reranker-ready', title: 'reranker-ready', status: 'skip', detail: 'reranker off on this machine (below 16 GiB RAM, or turned off)', ms: Date.now() - rerankStart });
+    } else {
+      await checked('reranker-ready', async () => {
+        const deadline = Date.now() + 900_000;
+        while (health.reranker_install?.state !== 'ready') {
+          const install = health.reranker_install;
+          if (install?.state === 'failed') throw new Error(`reranker install failed: ${install.reason ?? 'no reason'}`);
+          if (Date.now() >= deadline) throw new Error(`reranker install not ready within 15 minutes (${install?.state ?? 'no state'}, ${install?.percent ?? 0}%)`);
+          if (interrupted) throw new Error('run interrupted');
+          await sleep(5000);
+          health = await rerankHealth();
+        }
+        rerankerOn = true;
+        return 'runtime pack and model installed';
+      });
+    }
     // Nothing has chosen an answer model yet, so Ask must stay callable and explain setup instead of answering (#1370).
     // A failure here is recorded without stopping the leg: nothing after it depends on it.
     try {
@@ -219,33 +247,6 @@ done; exit 1`), 200_000);
           count = await dashboard!.indexed(source);
         }
         return `${count} item(s) indexed`;
-      });
-    }
-    // The reranker turns itself on once its own ONNX pack and model land; a LiteRT install never ships that pack (#1583).
-    // Wait for it before the answers, so they show whether it ranks. Off below 16 GiB RAM, where health leaves it out.
-    let rerankerOn = false;
-    current = 'reranker-ready';
-    const rerankStart = Date.now();
-    const rerankHealth = async () => JSON.parse(await exec(asFresh(HEALTH_READ), 30_000)) as {
-      rerank_outcomes?: { applied?: number; failed?: number; timed_out?: number };
-      reranker_install?: { state?: string; reason?: string; percent?: number };
-    };
-    let health = await rerankHealth();
-    if (!health.rerank_outcomes) {
-      checks.push({ id: 'fresh.reranker-ready', title: 'reranker-ready', status: 'skip', detail: 'reranker off on this machine (below 16 GiB RAM, or turned off)', ms: Date.now() - rerankStart });
-    } else {
-      await checked('reranker-ready', async () => {
-        const deadline = Date.now() + 900_000;
-        while (health.reranker_install?.state !== 'ready') {
-          const install = health.reranker_install;
-          if (install?.state === 'failed') throw new Error(`reranker install failed: ${install.reason ?? 'no reason'}`);
-          if (Date.now() >= deadline) throw new Error(`reranker install not ready within 15 minutes (${install?.state ?? 'no state'}, ${install?.percent ?? 0}%)`);
-          if (interrupted) throw new Error('run interrupted');
-          await sleep(5000);
-          health = await rerankHealth();
-        }
-        rerankerOn = true;
-        return 'runtime pack and model installed';
       });
     }
     // Reuse existing status, known-search and optional fresh-item plant checks.
