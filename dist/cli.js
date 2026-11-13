@@ -184481,7 +184481,8 @@ function instructionsStep(agent, inStep) {
   const lead = inStep ? `Tell it when to ask Olympus. ${agent.instructionsWhere}` : `To have it ask Olympus on its own, ${agent.instructionsWhere.charAt(0).toLowerCase()}${agent.instructionsWhere.slice(1)}`;
   const body = `${escapeHtml(lead)}${copyBox(`agent-${agent.id}-instructions`, AGENT_INSTRUCTION_TEXT, "Copy instructions", true)}`;
   const skill = agent.id === "claude" || agent.id === "local" ? `<span class="hint">The Olympus skill is the folder ${escapeHtml(AGENT_SKILL_PATH.replace(/\/SKILL\.md$/, ""))} inside the plugin folder.</span>` : "";
-  return inStep ? `${body}${skill}` : `<p>${body}</p>${skill}`;
+  const tip = agent.id === "claude" ? `<span class="hint">${escapeHtml(CLAUDE_NO_TOOLS_TIP)}</span>` : "";
+  return inStep ? `${body}${skill}${tip}` : `<p>${body}</p>${skill}${tip}`;
 }
 function copyBox(id, text4, label, primary = false) {
   const prose = text4.includes(" ") && !text4.startsWith("http") ? " prose" : "";
@@ -184554,7 +184555,7 @@ function renderConnectionRequests(view4) {
   const rows = history.requests.map((entry) => `<div class="attncard plain"><div class="grow"><span class="name">${escapeHtml(entry.app)}</span><div class="why"><time datetime="${escapeHtml(entry.at)}">${escapeHtml(new Date(entry.at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }))}</time> · ${escapeHtml(entry.asked)} · ${escapeHtml(entry.result)}</div></div></div>`).join("");
   return `<section data-connection-requests><div class="sect">${escapeHtml(history.title)}</div>${readings}${rows || '<p class="pnote">No requests recorded yet.</p>'}<p class="foot">Showing retained history only. Relay and engine observations appear separately; a relay line alone does not show that the request reached this computer.</p></section>`;
 }
-var AGENT_CONNECT_SHEET_ID = "agent-connect", AGENTS, LOCAL_AGENT_PROMPT, CLAUDE_CODE_SNIPPET = "claude mcp add olympus -- <olympus path> serve", CODEX_SNIPPET, MONTHS4;
+var AGENT_CONNECT_SHEET_ID = "agent-connect", AGENTS, LOCAL_AGENT_PROMPT, CLAUDE_CODE_SNIPPET = "claude mcp add olympus -- <olympus path> serve", CODEX_SNIPPET, CLAUDE_NO_TOOLS_TIP = "If Claude says Olympus has no tools, Claude did not ask Olympus for them. In that chat, turn Olympus off and on in the tools menu under the message box, then ask again.", MONTHS4;
 var init_agents = __esm(() => {
   init_agent_connections();
   init_agent_instructions();
