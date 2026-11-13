@@ -82,7 +82,13 @@ function historyFor(kind: ScorerKind, score: WindowScorer, key: string | undefin
 }
 
 /** One shared deadline and window allowance for a whole question. Fail open. */
-export function createEvidenceWindowPlacer(query: string, timers = systemTimers) {
+/** Eval-only switches to measure the placer's ceiling; production uses the defaults. */
+export interface WindowPlacementOptions { budgetMs?: number; slowSkip?: boolean }
+
+export function createEvidenceWindowPlacer(query: string, timers = systemTimers, options: WindowPlacementOptions = {}) {
+  // Uppercase so the limit registry inventories this deadline.
+  const PLACEMENT_BUDGET_MS = options.budgetMs ?? WINDOW_PLACEMENT_BUDGET_MS;
+  const slowSkip = options.slowSkip ?? true;
   const audit: WindowPlacementAudit = { seats: 0, windowsScored: 0, windowsSubmitted: 0, calls: [], scorer: 'none', elapsedMs: 0, timedOut: false };
   let startedAt: number | undefined;
   async function placeAll(seats: readonly EvidenceWindowSeat[], reranker?: WindowScorer): Promise<readonly (readonly string[])[]> {
@@ -104,10 +110,10 @@ export function createEvidenceWindowPlacer(query: string, timers = systemTimers)
       if (audit.timedOut) break;
       const kind: ScorerKind = reranker ? 'reranker' : 'embedding';
       audit.scorer = kind;
-      const remaining = WINDOW_PLACEMENT_BUDGET_MS - (startedAt === undefined ? 0 : timers.now() - startedAt);
+      const remaining = PLACEMENT_BUDGET_MS - (startedAt === undefined ? 0 : timers.now() - startedAt);
       if (remaining <= 0) { audit.timedOut = true; break; }
       const lastCall = historyFor(kind, score, group[0]!.key);
-      if ((lastCall.pending || lastCall.ms > remaining) && timers.now() - lastCall.at < SLOW_SCORER_RETRY_MS) { audit.skipped = 'slow_scorer'; continue; }
+      if (slowSkip && (lastCall.pending || lastCall.ms > remaining) && timers.now() - lastCall.at < SLOW_SCORER_RETRY_MS) { audit.skipped = 'slow_scorer'; continue; }
       startedAt ??= timers.now();
       const windows = group.flatMap(entry => entry.windows);
       audit.seats += group.length;
@@ -130,7 +136,7 @@ export function createEvidenceWindowPlacer(query: string, timers = systemTimers)
       try {
         const scores = await Promise.race([scoring, timeout]);
         // A synchronous scorer can consume the deadline before the timer runs.
-        if (scores === expired || timers.now() - startedAt >= WINDOW_PLACEMENT_BUDGET_MS) {
+        if (scores === expired || timers.now() - startedAt >= PLACEMENT_BUDGET_MS) {
           audit.timedOut = true;
           call.outcome = 'timed_out';
           controller.abort();
@@ -147,7 +153,7 @@ export function createEvidenceWindowPlacer(query: string, timers = systemTimers)
           offset += entry.windows.length;
         }
       } catch {
-        if (timers.now() - startedAt >= WINDOW_PLACEMENT_BUDGET_MS) {
+        if (timers.now() - startedAt >= PLACEMENT_BUDGET_MS) {
           audit.timedOut = true;
           call.outcome = 'timed_out';
           controller.abort();

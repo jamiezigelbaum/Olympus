@@ -79887,7 +79887,9 @@ function historyFor(kind, score, key2) {
   }
   return history;
 }
-function createEvidenceWindowPlacer(query, timers = systemTimers) {
+function createEvidenceWindowPlacer(query, timers = systemTimers, options = {}) {
+  const PLACEMENT_BUDGET_MS = options.budgetMs ?? WINDOW_PLACEMENT_BUDGET_MS;
+  const slowSkip = options.slowSkip ?? true;
   const audit = { seats: 0, windowsScored: 0, windowsSubmitted: 0, calls: [], scorer: "none", elapsedMs: 0, timedOut: false };
   let startedAt;
   async function placeAll(seats, reranker) {
@@ -79911,13 +79913,13 @@ function createEvidenceWindowPlacer(query, timers = systemTimers) {
         break;
       const kind = reranker ? "reranker" : "embedding";
       audit.scorer = kind;
-      const remaining = WINDOW_PLACEMENT_BUDGET_MS - (startedAt === undefined ? 0 : timers.now() - startedAt);
+      const remaining = PLACEMENT_BUDGET_MS - (startedAt === undefined ? 0 : timers.now() - startedAt);
       if (remaining <= 0) {
         audit.timedOut = true;
         break;
       }
       const lastCall = historyFor(kind, score, group[0].key);
-      if ((lastCall.pending || lastCall.ms > remaining) && timers.now() - lastCall.at < SLOW_SCORER_RETRY_MS) {
+      if (slowSkip && (lastCall.pending || lastCall.ms > remaining) && timers.now() - lastCall.at < SLOW_SCORER_RETRY_MS) {
         audit.skipped = "slow_scorer";
         continue;
       }
@@ -79950,7 +79952,7 @@ function createEvidenceWindowPlacer(query, timers = systemTimers) {
       });
       try {
         const scores = await Promise.race([scoring, timeout]);
-        if (scores === expired || timers.now() - startedAt >= WINDOW_PLACEMENT_BUDGET_MS) {
+        if (scores === expired || timers.now() - startedAt >= PLACEMENT_BUDGET_MS) {
           audit.timedOut = true;
           call.outcome = "timed_out";
           controller.abort();
@@ -79970,7 +79972,7 @@ function createEvidenceWindowPlacer(query, timers = systemTimers) {
           offset += entry.windows.length;
         }
       } catch {
-        if (timers.now() - startedAt >= WINDOW_PLACEMENT_BUDGET_MS) {
+        if (timers.now() - startedAt >= PLACEMENT_BUDGET_MS) {
           audit.timedOut = true;
           call.outcome = "timed_out";
           controller.abort();
@@ -80890,7 +80892,7 @@ async function buildPreparedEvidencePackDetailed(input) {
     hydrated = [...denied, ...reranked.kept];
     rerank = reranked.audit;
   }
-  const windowPlacer = createEvidenceWindowPlacer(input.question, input.windowPlacementTimers);
+  const windowPlacer = createEvidenceWindowPlacer(input.question, input.windowPlacementTimers, input.windowPlacement);
   const scoreWindows = reranker ? (query, passages, signal) => reranker.score({ query, passages, signal }) : undefined;
   const windowSeats = [];
   for (const { hit, provenance, provider, content, policyDenied } of hydrated) {

@@ -1,4 +1,4 @@
-import { createEvidenceWindowPlacer, type EvidenceWindowSeat, type EvidenceWindowSource, type WindowPlacementAudit, type WindowScorer } from './evidence-window-placement.ts';
+import { createEvidenceWindowPlacer, type EvidenceWindowSeat, type EvidenceWindowSource, type WindowPlacementAudit, type WindowPlacementOptions, type WindowScorer } from './evidence-window-placement.ts';
 import { withKeywordRequestScope } from './source-index/keyword-context.ts';
 import { bindReleaseChunks, copyReleaseChunks } from './release-manifest.ts';
 import { RECENT_ITEMS_CUT_SHORT, VISIBILITY_CHECK_CUT_SHORT, recentItemsTimeoutGap, semanticSearchTimedOut, semanticTimeoutGap, visibilityCheckTimeoutGap } from './source-index/partial-search.ts';
@@ -237,6 +237,8 @@ export interface BuildEvidencePackInput {
   reranker?: EvidenceReranker;
   rerankTimers?: RerankTimers;
   windowPlacementTimers?: RerankTimers;
+  // Eval only: a wider placement deadline, or the slow skip off, measures the ceiling.
+  windowPlacement?: WindowPlacementOptions;
   now?: () => Date;
 }
 
@@ -488,7 +490,7 @@ async function buildPreparedEvidencePackDetailed(
     rerank = reranked.audit;
   }
 
-  const windowPlacer = createEvidenceWindowPlacer(input.question, input.windowPlacementTimers);
+  const windowPlacer = createEvidenceWindowPlacer(input.question, input.windowPlacementTimers, input.windowPlacement);
   const scoreWindows: WindowScorer | undefined = reranker
     ? (query, passages, signal) => reranker.score({ query, passages, signal }) : undefined;
   const windowSeats: (EvidenceWindowSeat & { candidate: EvidenceCandidate })[] = [];

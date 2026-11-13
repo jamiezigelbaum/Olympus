@@ -7,6 +7,7 @@ import { dirname } from 'node:path';
 import type { EvidencePackBuildDetail } from '../src/core/evidence-pack.ts';
 import type { WindowPlacementAudit } from '../src/core/evidence-window-placement.ts';
 import type { EvidenceRerankOutcome } from '../src/core/evidence-reranker.ts';
+import type { WindowPlacementOptions } from '../src/core/evidence-window-placement.ts';
 import { loadConfig, parseLane, parseModelProfile } from '../src/core/config.ts';
 import { createAnalyst, withPromptBudget } from '../src/core/analyst.ts';
 import { createDelphiAnalystModel } from '../src/core/analyst-delphi.ts';
@@ -341,6 +342,22 @@ export function comparePassageReceipts(current: PassageReceipt, baseline: Passag
   return { kept: gained >= 2 && shapeLosses <= 1 && familyLosses <= 1, gained, shapeLosses, familyLosses, leftOut: left.size };
 }
 
+/**
+ * Eval-only ceiling switches for the window placer (production keeps the defaults):
+ * OLYMPUS_EVAL_WINDOW_PLACEMENT_BUDGET_MS widens the deadline, and
+ * OLYMPUS_EVAL_WINDOW_PLACEMENT_SLOW_SKIP=off stops skipping a backend whose last call was slow.
+ */
+export function evalWindowPlacement(env: Record<string, string | undefined>): WindowPlacementOptions | undefined {
+  const budget = env.OLYMPUS_EVAL_WINDOW_PLACEMENT_BUDGET_MS?.trim();
+  const skip = env.OLYMPUS_EVAL_WINDOW_PLACEMENT_SLOW_SKIP?.trim();
+  if (skip && skip !== 'off' && skip !== 'on') throw new Error('OLYMPUS_EVAL_WINDOW_PLACEMENT_SLOW_SKIP must be on or off.');
+  const options: WindowPlacementOptions = {
+    ...(budget ? { budgetMs: positiveInteger(budget, 0) } : {}),
+    ...(skip === 'off' ? { slowSkip: false } : {}),
+  };
+  return Object.keys(options).length ? options : undefined;
+}
+
 export function positiveInteger(value: string | undefined, fallback: number): number {
   const number = value === undefined ? fallback : Number(value);
   if (!Number.isInteger(number) || number < 1) throw new Error('Expected a positive integer option.');
@@ -457,6 +474,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     const embedding = await prepareEvalEmbedding({ configured: await configuredEvalEmbedding(config, process.env) });
     enter('load_reranker');
     const reranker = await prepareBuiltInRerankerFromEnv();
+    const windowPlacement = evalWindowPlacement(process.env);
     // Each store search's returned ids, for the funnel's store rank.
     let searches: EvalStoreSearch[] = [];
     const lanes = createEvalSourceLanes({ ...opened, embeddingFor: embedding.embeddingFor, onStoreSearch: search => { searches.push(search); } });
@@ -469,7 +487,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
       ...(promptBytes !== undefined ? { promptBytes } : {}),
       buildPack: async q => {
         searches = [];
-        const built = await buildEvalPack({ question: q.question, lanes, maxResults, maxCharsPerCandidate, ...(reranker ? { reranker } : {}) });
+        const built = await buildEvalPack({ question: q.question, lanes, maxResults, maxCharsPerCandidate, ...(reranker ? { reranker } : {}), ...(windowPlacement ? { windowPlacement } : {}) });
         return { ...built, storeSearches: searches };
       },
       ...(probe ? { probeLanes: probe } : {}),

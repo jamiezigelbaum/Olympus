@@ -2,7 +2,7 @@ import { expect, spyOn, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import type { EvidencePackBuildDetail } from '../src/core/evidence-pack.ts';
 import type { AnalystResult, EvidencePack } from '../src/core/contracts.ts';
-import { comparePassageReceipts, runPassageEval } from '../eval/run-passages.ts';
+import { comparePassageReceipts, evalWindowPlacement, runPassageEval } from '../eval/run-passages.ts';
 import { fitPackToPromptBytes } from '../src/workers/source-index/analyst-answer.ts';
 import type { EvalDataset } from '../eval/types.ts';
 import { createTestClock } from './helpers/test-clock.ts';
@@ -353,4 +353,12 @@ test('every passage row carries the full placement audit and summaries count pla
       ...(call === 2 ? { corpusTimings: [{ corpusId: 'internal.fixture.file', elapsedMs: 9, outcome: 'timeout' as const }] } : {}) }) });
   expect(receipt.questions!.map(row => row.windowPlacement)).toEqual(audits);
   expect(receipt.summary.overall.windowPlacement).toEqual({ placed: 1, timedOut: 1, skipped: 1, elapsedMs: 1540, maxElapsedMs: 1500 });
+});
+
+test('window placement ceiling switches are eval-only, off by default, and refuse bad values', () => {
+  expect(evalWindowPlacement({})).toBeUndefined();
+  expect(evalWindowPlacement({ OLYMPUS_EVAL_WINDOW_PLACEMENT_BUDGET_MS: '10000', OLYMPUS_EVAL_WINDOW_PLACEMENT_SLOW_SKIP: 'off' })).toEqual({ budgetMs: 10_000, slowSkip: false });
+  expect(evalWindowPlacement({ OLYMPUS_EVAL_WINDOW_PLACEMENT_SLOW_SKIP: 'on' })).toBeUndefined();
+  expect(() => evalWindowPlacement({ OLYMPUS_EVAL_WINDOW_PLACEMENT_BUDGET_MS: '0' })).toThrow();
+  expect(() => evalWindowPlacement({ OLYMPUS_EVAL_WINDOW_PLACEMENT_SLOW_SKIP: 'maybe' })).toThrow();
 });

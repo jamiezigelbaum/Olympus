@@ -538,6 +538,27 @@ test('a scorer that never settles is skipped on the next question until it is re
   expect(next.audit.skipped).toBe('slow_scorer');
 });
 
+test('an eval can widen the deadline and turn the slow skip off to measure the ceiling', async () => {
+  const clock = createTestClock();
+  const chunks = ['o'.repeat(600)];
+  let calls = 0;
+  const twoSeconds: WindowScorer = (_query, windows) => { calls++; return new Promise(settle => { clock.setTimeout(() => settle(windows.map(() => 0)), 2_000); }); };
+  const source = { texts: ['x'.repeat(4000)], scoreWindows: twoSeconds, scorerKey: 'ceiling-backend' };
+  const first = createEvidenceWindowPlacer(QUESTION, fakeTimers(clock), { budgetMs: 10_000, slowSkip: false });
+  const pending = first.place(chunks, source);
+  await clock.advance(2_000);
+  await pending;
+  expect(first.audit).toMatchObject({ timedOut: false, windowsScored: 8 });
+  // The 2 s history would skip a default placer; with the skip off it runs again.
+  const second = createEvidenceWindowPlacer(QUESTION, fakeTimers(clock), { budgetMs: 10_000, slowSkip: false });
+  const again = second.place(chunks, source);
+  await clock.advance(2_000);
+  await again;
+  expect(calls).toBe(2);
+  expect(second.audit.skipped).toBeUndefined();
+  expect(second.audit.windowsScored).toBe(8);
+});
+
 test('a placed window stays provable: its stored chunk hashes still bind to it for release', async () => {
   const f = await fixture();
   const detail = await buildEvidencePackDetailed(f.input);

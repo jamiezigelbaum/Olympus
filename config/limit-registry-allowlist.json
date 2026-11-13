@@ -151,9 +151,9 @@
   },
   {
     "path": "src/core/evidence-window-placement.ts",
-    "symbol": "WINDOW_PLACEMENT_BUDGET_MS",
+    "symbol": "PLACEMENT_BUDGET_MS",
     "reason": "pacing",
-    "retire_when": "Remove when the per-question window placement deadline WINDOW_PLACEMENT_BUDGET_MS is retired or adopted; past it the placer keeps the chunks it has, so no work stops."
+    "retire_when": "Remove when the per-question window placement deadline PLACEMENT_BUDGET_MS is retired or adopted; past it the placer keeps the chunks it has, so no work stops."
   },
   {
     "path": "src/core/interactive-secret.ts",

@@ -1,3 +1,4 @@
+import type { WindowPlacementOptions } from '../src/core/evidence-window-placement.ts';
 import type { OlympusConfig } from '../src/core/config.ts';
 import { BuiltInSourceEmbeddingProvider } from '../src/workers/source-index/built-in-embedding/provider.ts';
 import { builtInEmbeddingPaths, installedBuiltInEmbedding } from '../src/workers/source-index/built-in-embedding/assets.ts';
@@ -216,6 +217,7 @@ export function buildEvalPack(input: {
   reranker?: EvidenceReranker;
   maxResults: number;
   maxCharsPerCandidate: number;
+  windowPlacement?: WindowPlacementOptions;
 }): Promise<EvidencePackBuildDetail> {
   const lanes = input.lanes(input.question);
   return buildEvidencePackDetailed({
@@ -224,6 +226,7 @@ export function buildEvalPack(input: {
     ...(input.reranker ? { reranker: input.reranker } : {}),
     maxResults: input.maxResults,
     maxCharsPerCandidate: input.maxCharsPerCandidate,
+    ...(input.windowPlacement ? { windowPlacement: input.windowPlacement } : {}),
     searchContext: {
       allowedTrustDomains: ['public_safe', 'internal', 'secure_local'],
     },
