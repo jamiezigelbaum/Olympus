@@ -4,6 +4,8 @@
 // helper. The model and runtime download once into the Olympus data directory
 // (see assets.ts).
 
+import { isMainThread } from 'node:worker_threads';
+import { modelThread, modelThreadHandleId } from '../built-in-reasoning/off-thread.ts';
 import { modelInstallFailedReason, type ModelInstallFailedReason } from '../../../core/model-install-failure.ts';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -100,7 +102,7 @@ export interface BuiltInSourceEmbeddingProviderOptions {
 }
 
 interface OnnxModel { kind: 'onnx'; session: EmbeddingSession; tokenizer: WindowTokenizer }
-type LoadedModel = OnnxModel | { kind: 'litert'; embedder: LiteRtEmbedder };
+type LoadedModel = { kind: 'thread'; handle: number } | OnnxModel | { kind: 'litert'; embedder: LiteRtEmbedder };
 
 /** A tokenizer as the windowing sees it: content ids, and the special ids around every window. */
 interface WindowTokenizer {
@@ -141,6 +143,7 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
   private remote: RemoteLiteRtEmbedder | undefined;
   private spec: BuiltInEmbeddingModelSpec;
   private env: Record<string, string | undefined>;
+  private readonly onnxOffThread: boolean;
   private runtimeFactory: (installed: InstalledBuiltInEmbedding) => EmbeddingRuntime;
   private liteRtFactory: (options: LiteRtEmbedderOptions) => Promise<LiteRtEmbedder>;
   private install: (options: BuiltInEmbeddingInstallerOptions) => Promise<InstalledBuiltInEmbedding>;
@@ -149,7 +152,7 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
   private loading: Promise<LoadedModel> | undefined;
   private loaded: LoadedModel | undefined;
   /** Text-only runtime reserved for deadline-bound probes, loaded with the ordinary runtime. */
-  private priorityLoaded: LoadedModel | undefined;
+  private priorityLoaded: Exclude<LoadedModel, { kind: 'thread' }> | undefined;
   private prioritySlotBusy = false;
   private readonly priorityWaiting: Array<() => void> = [];
   private lastFailure: { atMs: number; error: Error } | undefined;
@@ -174,6 +177,7 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
     this.dimension = this.spec.dimension;
     this.threads = resolveThreads(options.threads, this.env);
     this.device = resolveDevice(this.env);
+    this.onnxOffThread = isMainThread && !options.runtime;
     this.runtimeFactory = options.runtime ?? ((installed) => onnxRuntimeFromDirectory(installed.runtimeDir));
     this.liteRtFactory = options.liteRt ?? startLiteRtEmbedder;
     this.install = options.install ?? installBuiltInEmbedding;
@@ -395,6 +399,10 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
         // ingestion policy admits photos only while it is not known to have
         // failed).
         if (this.spec.vision) reportBuiltInEmbeddingVision(embedder.vision, { env: this.env, model: this.spec });
+      } else if (this.onnxOffThread) {
+        const handle = modelThreadHandleId();
+        await modelThread().call({ kind: 'embedding-load', handle, installed, model: this.spec, env: this.env, threads: this.threads });
+        model = { kind: 'thread', handle };
       } else {
         if (!installed.vocabularyPath) throw new Error('the model vocabulary is not installed.');
         const tokenizer = loadTokenizer(installed.vocabularyPath);
@@ -460,6 +468,9 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
     inputs: SourceEmbeddingInput[],
     taskType: SourceEmbeddingTaskType,
   ): Promise<number[][]> {
+    if (model.kind === 'thread') {
+      return modelThread().call<number[][]>({ kind: 'embedding-run', handle: model.handle, inputs, taskType, priority: priorityQueryEmbeddingRequested() });
+    }
     if (taskType === 'RETRIEVAL_QUERY' && priorityQueryEmbeddingRequested()) {
       if (!this.priorityLoaded) throw new BuiltInEmbeddingNotReadyError(this.status());
       model = this.priorityLoaded;

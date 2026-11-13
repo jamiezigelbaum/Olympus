@@ -5,6 +5,7 @@ import { closeSync, createReadStream, existsSync, openSync, renameSync, rmSync, 
 
 /** Bound fetch's read-ahead even when the runtime does not backpressure it. */
 const REQUEST_BYTES = 256 * 1024 ** 2;
+const WRITE_SLICE_BYTES = 64 * 1024;
 const READ_RETRIES = 3;
 const RETRY_DELAY_MS = 250;
 type Failure = 'download_failed' | 'checksum_mismatch' | 'disk_write_failed';
@@ -115,23 +116,31 @@ export async function downloadPinnedFile(options: PinnedDownloadOptions): Promis
         if (fd === undefined) {
           try { fd = openSync(partial, received > 0 ? 'a' : 'w', 0o644); } catch (cause) { throw disk(cause); }
         }
-        reader = response.body.getReader();
-        for (;;) {
+        const bodyReader = response.body.getReader();
+        reader = bodyReader;
+        // Keep each network chunk in its own async frame. A suspended next read
+        // must not retain the previous chunk through the serving loop's locals.
+        const readNext = async (): Promise<boolean> => {
           armStall();
-          let part: Awaited<ReturnType<typeof reader.read>>;
-          try { part = await untilAborted(reader.read(), controller.signal); }
+          let part: Awaited<ReturnType<typeof bodyReader.read>>;
+          try { part = await untilAborted(bodyReader.read(), controller.signal); }
           catch (cause) { throw new InterruptedRead(message(cause)); }
-          if (part.done) break;
+          if (part.done) return false;
           if (received + part.value.byteLength > responseEnd + 1) {
             throw mismatch(`${url} is larger than its pinned size or requested range.`);
           }
-          try { (options.write ?? writeDownloadChunk)(fd, part.value); } catch (cause) { throw disk(cause); }
-          hash.update(part.value);
-          received += part.value.byteLength;
-          options.onProgress(part.value.byteLength);
-          const turn = (options.turn ?? ingestionTurn)();
-          if (turn) await turn;
-        }
+          for (let offset = 0; offset < part.value.byteLength; offset += WRITE_SLICE_BYTES) {
+            const slice = part.value.subarray(offset, offset + WRITE_SLICE_BYTES);
+            try { (options.write ?? writeDownloadChunk)(fd!, slice); } catch (cause) { throw disk(cause); }
+            hash.update(slice);
+            received += slice.byteLength;
+            options.onProgress(slice.byteLength);
+            const turn = (options.turn ?? ingestionTurn)();
+            if (turn) await turn;
+          }
+          return true;
+        };
+        while (await readNext()) { /* consume and release one chunk at a time */ }
         if (received !== responseEnd + 1) throw mismatch(`${url} did not match its pinned size; nothing was installed.`);
       } catch (cause) {
         if (!(cause instanceof InterruptedRead)) throw cause;
