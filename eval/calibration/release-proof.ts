@@ -186,7 +186,7 @@ export async function main(argv = process.argv.slice(2)) {
     let windows = 0, privateWindows = 0, unjudgedWindows = 0, groundFailures = 0;
     stage = 'screen';
     // Windows the deterministic screens hold are Private truth at once; the rest need a judge call.
-    const judgeJobs: Array<{ item: number; material: Parameters<typeof snifferMaterialForModel>[0]; hashes: readonly string[] }> = [];
+    const judgeJobs: Array<{ item: number; material: Parameters<typeof snifferMaterialForModel>[0]; hashes: readonly string[]; flags: readonly string[] }> = [];
     const hold = (hashes: readonly string[], into: Set<string>) => { privateWindows++; for (const hash of hashes) into.add(hash); };
     for (const [index, item] of picked.entries()) {
       const opened = mounted.find(candidate => candidate.dbPath === item.storePath);
@@ -202,7 +202,7 @@ export async function main(argv = process.argv.slice(2)) {
         if (input.material === undefined) continue;
         const own = snifferOwnMaterial(snifferMaterialForModel(input.material));
         if (snifferMaterialCarriesSecret(own) || snifferInjectionRule(own)) { hold(window.chunkHashes, privateHashes); continue; }
-        judgeJobs.push({ item: index, material: input.material, hashes: window.chunkHashes });
+        judgeJobs.push({ item: index, material: input.material, hashes: window.chunkHashes, flags: input.flags });
       }
     }
     for (const path of [...appReleaseLogDbPaths(), ...jobLedgerPathsToVisit(ledgers.flatMap(ledger => ledger.knownJobLedgerPaths())).visit]) inside(path);
@@ -245,7 +245,7 @@ export async function main(argv = process.argv.slice(2)) {
         const parsed = reply && (reply.decisionVerdict ?? parseSnifferBatchResponse(reply.text, new Set([1])).get(1));
         const verdict = parsed ? { ...parsed, failSafe: reply!.decisionVerdict?.failSafe ?? false } : undefined;
         if (!verdict || verdict.failSafe) unjudgedWindows++;
-        if (!verdict || snifferVerdictTier(verdict, lane, []).tier !== 'private') hold(job.hashes, truth[job.item]!);
+        if (!verdict || snifferVerdictTier(verdict, lane, job.flags).tier !== 'private') hold(job.hashes, truth[job.item]!);
         if (++done % 25 === 0 || done === jobs.length) progress(done);
       }
     }));
