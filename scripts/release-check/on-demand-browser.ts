@@ -43,6 +43,20 @@ export const DRIVE_SEARCH_SETTLED = `(() => location.pathname.includes('/search'
 /** What a Drive search page showed, for a failure message: no file names or page text. */
 export const DRIVE_SEARCH_SNAPSHOT = `(() => ({path: location.pathname, grid: !!document.querySelector('[role=grid]'), progress: !!document.querySelector('[role=progressbar]'), busy: ${BUSY}, empty: ${DRIVE_EMPTY}, rows: document.querySelectorAll('[role=row]').length}))()`;
 
+const PROVIDER_CONTROLS = `[...document.querySelectorAll('button,[role=button],[role=menuitem],a')].filter(${visible})`;
+/** A control's names: its label, its text, and its first rendered line. Drive's menu items carry a
+ * keyboard-shortcut hint after the name ("New folder" then "Alt+C then F"), so the whole text never equals it. */
+const CONTROL_NAMES = `(e) => [e.getAttribute('aria-label'), e.textContent, (e.innerText || '').split('\\n')[0]].filter(Boolean).map(v => v.trim())`;
+
+/** Find the first visible control named by one of `labels` and press it as a person would. Closure menus
+ * (Drive) act on mousedown/mouseup, so send those before the click. */
+export function providerClickExpression(labels: readonly string[]): string {
+  return `(() => {const names=${CONTROL_NAMES};const e=${PROVIDER_CONTROLS}.find(e=>names(e).some(value=>${JSON.stringify(labels)}.some(label=>value===label || value.startsWith(label+' '))));if(!e||e.disabled||e.getAttribute('aria-disabled')==='true')return false;for(const type of ['mousedown','mouseup'])e.dispatchEvent(new MouseEvent(type,{bubbles:true,cancelable:true,view:window}));e.click();return true;})()`;
+}
+
+/** Visible menu item names, for a failure message: provider UI labels only, never file names. */
+const PROVIDER_CONTROL_NAMES = `[...document.querySelectorAll('[role=menuitem]')].filter(${visible}).map(e => (${CONTROL_NAMES})(e).at(-1)).slice(0, 20)`;
+
 export async function openBrowserTimingSeeds(machine: Machine, endpoint: string, sources: readonly TimingSource[] = ['dropbox', 'google_drive']) {
   const { host, port } = parseCdpEndpoint(endpoint);
   let tunnel: Tunnel | undefined;
@@ -108,9 +122,13 @@ export async function openBrowserTimingSeeds(machine: Machine, endpoint: string,
       await send('Page.navigate', { url }, session);
       return { id: targetId as string, session, url };
     };
-    const controls = `[...document.querySelectorAll('button,[role=button],[role=menuitem],a')].filter(${visible})`;
     const click = async (session: string, labels: string[]) => {
-      await until(() => evaluate(session, `(() => {const e=${controls}.find(e=>[e.getAttribute('aria-label'),e.textContent].some(value=>value && ${JSON.stringify(labels)}.some(label=>value.trim()===label || value.trim().startsWith(label+' ')))); if(!e||e.disabled)return false;e.click();return true;})()`), `provider control unavailable: ${labels.join(' / ')}`);
+      try {
+        await until(() => evaluate(session, providerClickExpression(labels)), `provider control unavailable: ${labels.join(' / ')}`);
+      } catch (error) {
+        const shown = await evaluate<string[]>(session, PROVIDER_CONTROL_NAMES).catch(() => undefined);
+        throw new Error(`provider control unavailable: ${labels.join(' / ')}${shown ? ` (menu items shown: ${JSON.stringify(shown)})` : ''}`, { cause: error });
+      }
     };
     const enter = async (session: string) => {
       await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }, session);
@@ -217,7 +235,7 @@ export async function openBrowserTimingSeeds(machine: Machine, endpoint: string,
         let blankOffered = false;
         await until(async () => {
           doc = (await send('Target.getTargets')).targetInfos.find((t: any) => !baseline.has(t.targetId) && /^https:\/\/docs.google.com\/document\//.test(t.url) && (!t.openerId || t.openerId === tab.id));
-          if (!doc && !blankOffered) blankOffered = await evaluate(tab.session, `(() => {const e=${controls}.find(e=>e.textContent.trim()==='Blank document');if(!e)return false;e.click();return true;})()`);
+          if (!doc && !blankOffered) blankOffered = await evaluate(tab.session, providerClickExpression(['Blank document']));
           return !!doc;
         }, 'native Google Doc did not open from the seed folder');
         tabs.add(doc.targetId);

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { Database } from 'bun:sqlite';
 import { createTestClock } from './helpers/test-clock.ts';
 import { browserSeedPlan, browserTimingSeeds, parseTimingSeedConfig, ON_DEMAND_FOLDER, type BrowserSeedUi, type TimingFile } from '../scripts/release-check/on-demand-seeds.ts';
-import { providerListingExpression, driveFolderSearchUrl, DRIVE_SEARCH_SETTLED } from '../scripts/release-check/on-demand-browser.ts';
+import { providerListingExpression, driveFolderSearchUrl, DRIVE_SEARCH_SETTLED, providerClickExpression } from '../scripts/release-check/on-demand-browser.ts';
 import { validateCanaryTimingMode, parseCanaryAccounts, renderCanaryHtml, type CanaryReport } from '../scripts/release-check/canary.ts';
 import { runFreshOnDemand } from '../scripts/release-check/fresh-on-demand.ts';
 import { enableTimingSplit, resolveTimingFile } from '../scripts/release-check/on-demand-probe.ts';
@@ -110,6 +110,26 @@ describe('fresh read-on-demand without write tokens', () => {
     expect(settled('/drive/u/0/search', '<div role="progressbar"></div><div>No results</div>', true)).toBe(true);
     expect(settled('/drive/u/0/my-drive', '<div role="grid"></div>')).toBe(false);
     expect(settled('/drive/u/0/search', '<div>Loading</div>')).toBe(false);
+  });
+
+  test('provider clicks find a Drive menu item past its shortcut hint and press it with mouse events', async () => {
+    const window = new Window();
+    try {
+      window.document.body.innerHTML = '<div role="menu"><div role="menuitem" id="folder"><span>New folder</span><span>Alt+C then F</span></div></div>';
+      const sized = (e: any) => { e.getBoundingClientRect = () => ({ width: 100, height: 20 }); };
+      for (const e of window.document.querySelectorAll('[role=menuitem]')) sized(e);
+      const folder = window.document.getElementById('folder') as any;
+      Object.defineProperty(folder, 'innerText', { value: 'New folder\nAlt+C then F' }); // happy-dom has no layout; this is what a browser renders.
+      const seen: string[] = [];
+      for (const type of ['mousedown', 'mouseup', 'click']) folder.addEventListener(type, () => seen.push(type));
+      const run = (labels: string[]) => new Function('document', 'window', 'MouseEvent', 'getComputedStyle', `return ${providerClickExpression(labels)}`)(window.document, window, window.MouseEvent, window.getComputedStyle.bind(window));
+      expect(folder.textContent).toBe('New folderAlt+C then F');
+      expect(run(['New folder'])).toBe(true);
+      expect(seen).toEqual(['mousedown', 'mouseup', 'click']);
+      expect(run(['Upload'])).toBe(false);
+      folder.setAttribute('aria-disabled', 'true');
+      expect(run(['New folder'])).toBe(false);
+    } finally { await window.happyDOM.close(); }
   });
 
   test('metadata resolution uses listed provider identity/version, deduplicates twins and refuses ambiguity', () => {
