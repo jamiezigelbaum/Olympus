@@ -139,7 +139,8 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
         await click(`(()=>{const row=${row}; if(!row)return null; const e=[...row.querySelectorAll('button')].find(e=>/${pattern}/i.test(e.textContent.trim())); const menu=row.querySelector('details');if(e && menu && menu.contains(e) && !menu.open)menu.querySelector('summary').click();return e;})()`);
       } catch (error) {
         // Say what the page showed instead: the rows' names, and this row's buttons with their state and reason.
-        const seen = await panel<string>(`(()=>{const row=${row}; if(!row) return 'no row named ${s.label.replace(/'/g, '')}; rows: '+[...document.querySelectorAll('.source .source-name')].map(e=>e.textContent.trim()).join(', ');
+        // A document without source rows (the sandbox host page) is skipped, so the panel frame is the one described.
+        const seen = await panel<string>(`(()=>{if(!document.querySelector('.source'))return null; const row=${row}; if(!row) return 'no row named ${s.label.replace(/'/g, '')}; rows: '+[...document.querySelectorAll('.source .source-name')].map(e=>e.textContent.trim()).join(', ');
           const buttons=[...row.querySelectorAll('button')].map(b=>b.textContent.trim()+(b.disabled?' (disabled)':'')).join(', ');
           const reason=[...row.querySelectorAll('.row-reason, .reason, .muted')].map(e=>e.textContent.trim()).filter(Boolean).join(' / ');
           return 'buttons: '+(buttons||'none')+(reason?'; row says: '+reason:'');})()`, v => typeof v === 'string');
