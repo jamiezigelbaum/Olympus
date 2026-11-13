@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { EvidencePackBuildDetail } from '../src/core/evidence-pack.ts';
-import type { EvidenceRerankOutcome } from '../src/core/evidence-reranker.ts';
+import { RERANK_POOL_STORE_DEPTH, type EvidenceRerankOutcome } from '../src/core/evidence-reranker.ts';
 import { loadConfig, parseLane, parseModelProfile } from '../src/core/config.ts';
 import { createAnalyst, withPromptBudget } from '../src/core/analyst.ts';
 import { createDelphiAnalystModel } from '../src/core/analyst-delphi.ts';
@@ -86,6 +86,8 @@ export interface PassageReceipt {
   setId: string; maxResults: number; ks: number[];
   /** The reranker's id (its model folder's name), or 'off'. */
   reranker: string;
+  /** The per-store depth of the reranker's strength-drawn pool; absent with the reranker off. */
+  rerankPoolStoreDepth?: number;
   storeCounts: readonly EvalStoreCount[]; skippedStores: readonly EvalSkippedStore[];
   summary: { overall: PassageSummary; byShape: Record<string, PassageSummary>; byFamily: Record<string, PassageSummary>; byTier: Record<string, PassageSummary>;
     /** By the expected item's stored chunks (1_chunk, 2-3_chunks, 4+_chunks), when counted. */
@@ -176,7 +178,7 @@ function grouped(rows: readonly PassageRow[], ks: readonly number[], groups: (ro
 }
 
 export async function runPassageEval(input: {
-  dataset: EvalDataset; split?: EvalSplit; maxResults: number; promptBytes?: number;
+  dataset: EvalDataset; split?: EvalSplit; maxResults: number; promptBytes?: number; rerankPoolStoreDepth?: number;
   storeCounts: readonly EvalStoreCount[]; skippedStores?: readonly EvalSkippedStore[]; gitSha: string;
   /** The pack, and each store search's returned item ids in order (EvalStoreSearch) when recorded. */
   buildPack: (question: EvalQuestion) => Promise<EvidencePackBuildDetail & { storeSearches?: readonly EvalStoreSearch[] }>;
@@ -282,7 +284,9 @@ export async function runPassageEval(input: {
   return { schema: 3, rule: PASSAGE_MATCH_RULE, gitSha: input.gitSha, split,
     // Identity includes only ids and structural labels; never hashes private text.
     setId: createHash('sha256').update(JSON.stringify(questions.map(q => [q.id, q.shape]).sort((a, b) => a[0]!.localeCompare(b[0]!)))).digest('hex'),
-    maxResults: input.maxResults, ks, reranker: rerankerId ?? 'off', storeCounts: input.storeCounts, skippedStores: input.skippedStores ?? [],
+    maxResults: input.maxResults, ks, reranker: rerankerId ?? 'off',
+    ...(rerankerId && input.rerankPoolStoreDepth !== undefined ? { rerankPoolStoreDepth: input.rerankPoolStoreDepth } : {}),
+    storeCounts: input.storeCounts, skippedStores: input.skippedStores ?? [],
     summary: summaries(rows, ks),
     ...(split === 'open' ? { questions: rows } : {}),
     degradedIds: rows.filter(row => row.degraded).map(row => row.questionId),
@@ -455,6 +459,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     const receipt = await runPassageEval({ dataset, split, maxResults, storeCounts: opened.storeCounts, skippedStores: opened.skipped,
       gitSha: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
       ...(promptBytes !== undefined ? { promptBytes } : {}),
+      ...(reranker ? { rerankPoolStoreDepth: RERANK_POOL_STORE_DEPTH } : {}),
       buildPack: async q => {
         searches = [];
         const built = await buildEvalPack({ question: q.question, lanes, maxResults, maxCharsPerCandidate, ...(reranker ? { reranker } : {}) });
@@ -471,7 +476,8 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     const output = values.get('--output') ?? 'eval/private/passages.latest.json';
     mkdirSync(dirname(output), { recursive: true, mode: 0o700 });
     writeFileSync(output, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 });
-    console.log(JSON.stringify(receipt.summary));
+    // Store counts lead the line, so a short open never reads as a retrieval miss (#1576).
+    console.log(JSON.stringify({ storesOpened: opened.stores.length, storesSkipped: opened.skipped.length, ...receipt.summary }));
     if (values.has('--compare')) enter('compare');
     if (values.has('--compare')) console.log(JSON.stringify(comparePassageReceipts(receipt, JSON.parse(readFileSync(values.get('--compare')!, 'utf8')) as PassageReceipt)));
   } finally { for (const cleanup of cleanups) cleanup(); try { opened.checkFileDescriptors(); } finally { opened.close(); } }

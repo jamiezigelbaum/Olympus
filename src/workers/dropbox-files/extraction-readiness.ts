@@ -294,7 +294,8 @@ export function dropboxQaVerdictLadderSql(
               WHEN extraction_status = 'metadata_only' THEN 'qa_metadata_only_gap'
               WHEN extraction_status = 'extracted' AND fact_count = 0 AND minimum_useful_chars > 0 AND text_char_count > 0 AND text_char_count < minimum_useful_chars THEN 'qa_low_confidence_retry_local'
               WHEN extraction_status = 'extracted' AND (chunk_count > 0 OR artifact_text_count > 0 OR fact_count > 0) THEN 'qa_pass'
-              WHEN extraction_status IN ('skipped_unsupported', 'skipped_too_large') THEN 'qa_metadata_only_expected'
+              WHEN extraction_status = 'skipped_too_large' THEN 'qa_metadata_only_gap'
+              WHEN extraction_status = 'skipped_unsupported' THEN 'qa_metadata_only_expected'
               WHEN artifact_count > 0 OR fact_count > 0 THEN 'qa_pass'
               ELSE 'qa_metadata_only_gap'
             END`;

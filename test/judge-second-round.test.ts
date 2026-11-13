@@ -4,11 +4,11 @@
 // Venice; a cap or 402 keeps the local Private. Synthetic data only.
 
 import { afterEach, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AnalystModel, AnalystModelRequest } from '../src/core/analyst.ts';
-import { JudgeObservations, SecondRoundConfirmed, SecondRoundSweep, forgetSecondRoundCursors, observedJudge, secondRoundJudge, OBSERVED_MIN_CALLS, OBSERVED_MIN_VERDICTS } from '../src/workers/classification/judge-second-round.ts';
+import { JudgeObservations, SecondRoundConfirmed, SecondRoundSweep, forgetSecondRoundCursors, observedJudge, reopenSecondRoundAfterStop, secondRoundJudge, OBSERVED_MIN_CALLS, OBSERVED_MIN_VERDICTS } from '../src/workers/classification/judge-second-round.ts';
 import { createJudgeSetup } from '../src/workers/classification/judge-setup.ts';
 import { JudgeCloudStopped, JudgeSpending, judgeArchiveEstimate, judgeDefaultCapDollars, SECOND_ROUND_HELD_ASSUMPTION } from '../src/workers/classification/judge-spending.ts';
 import { resolveJudgeChoiceRuntime } from '../src/workers/classification/built-in-sniffer.ts';
@@ -417,4 +417,16 @@ test('a fail-safe hold from the built-in 4B union never goes to the Venice secon
   const second = secondRoundJudge(vetoed as SnifferModel, veniceJudge(sent));
   await second.complete(request);
   expect(second.secondRound.asked).toBe(1);
+});
+
+test('lifting a judge stop re-asks the double-check only when the owner chose it', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'olympus-second-round-reopen-'));
+  try {
+    const statePath = join(dir, 'second-round.json');
+    writeFileSync(statePath, '{"v":1,"cursors":{"a":"done"}}');
+    reopenSecondRoundAfterStop('venice', statePath);
+    expect(existsSync(statePath)).toBe(true);
+    reopenSecondRoundAfterStop('local-then-venice', statePath);
+    expect(existsSync(statePath)).toBe(false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

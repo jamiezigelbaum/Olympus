@@ -28,7 +28,7 @@ import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 //   /dashboard?state=secret-notice  ChatGPT private panel and remote verdict
 //   /dashboard?keys | ?connect | ?agents | ?private-answers | ?apps-received | ?privacy-items | ?connector
 //                the computer's own pages, as the worker renders them.
-//   &sheet=first-run|first-run-local|first-run-no-sensitive&step=1..3 with state=first-run
+//   &sheet=first-run|first-run-local|first-run-no-sensitive&step=1..4 with state=first-run
 //   &sheet=dropbox|venice&step=1..4 opens a setup fixture without starting OAuth (a source's
 //                sheet inside Add a source opens that dialog at the source first).
 //   &waiting=0..9  how many private inbox questions appear (default 3; remembered):
@@ -1950,8 +1950,8 @@ function pickerAutoScript(spec: string): string {
 export function setupPreviewScript(name: string | null, step: string | null): string {
   if (name === 'first-run' || name === 'first-run-local' || name === 'first-run-no-sensitive') {
     const choice = name === 'first-run-local' ? 'local-only' : name === 'first-run-no-sensitive' ? 'no-sensitive' : 'local-first';
-    const index = Math.max(1, Math.min(3, Number(step) || 1));
-    return `<script>window.addEventListener('DOMContentLoaded',async function(){var sheet=document.querySelector('[data-first-run-sheet]');if(!sheet)return;if(${index}>1){sheet.querySelector('input[value="${choice}"]').checked=true;sheet.querySelector('[data-setup-submit]').click();for(var i=0;i<100&& !sheet.querySelector('[data-setup-panel]').hidden;i++)await new Promise(r=>setTimeout(r,20));if(${index}>2&&${JSON.stringify(choice)}!=='no-sensitive')sheet.querySelector('[data-setup-next]').click();}sheet.scrollIntoView({block:'start'});});</script>`;
+    const index = Math.max(1, Math.min(choice === 'local-first' ? 4 : choice === 'local-only' ? 3 : 2, Number(step) || 1));
+    return `<script>window.addEventListener('DOMContentLoaded',async function(){var sheet=document.querySelector('[data-first-run-sheet]');if(!sheet)return;if(${index}>1){sheet.querySelector('input[value="${choice}"]').checked=true;sheet.querySelector('[data-setup-submit]').click();for(var i=0;i<100&& !sheet.querySelector('[data-setup-panel]').hidden;i++)await new Promise(r=>setTimeout(r,20));if(${index}>2&&${JSON.stringify(choice)}!=='no-sensitive')sheet.querySelector('[data-setup-next]').click();if(${index}>3)sheet.querySelector('[data-setup-submit]').click();}sheet.scrollIntoView({block:'start'});});</script>`;
   }
   const sheets: Record<string, { selector: string; count: number }> = {
     dropbox: { selector: '#connect-dropbox-files', count: 5 },
@@ -2326,7 +2326,7 @@ if (import.meta.main) {
       return Response.json({ ok: true, status_message: 'Preview only: nothing was revoked.' });
     }
     // First-run controls are synthetic preview state, never persisted to a policy.
-    if (state === 'first-run' && request.method === 'POST' && ['/dashboard/models/first-run-privacy', '/dashboard/models/check'].includes(url.pathname)) {
+    if (state === 'first-run' && request.method === 'POST' && ['/dashboard/models/first-run-privacy', '/dashboard/models/judge', '/dashboard/models/check'].includes(url.pathname)) {
       if (!previewUnlocked) return Response.json({ ok: false }, { status: 403 });
       return Response.json({ ok: true }, { headers: { 'set-cookie': 'olympus_preview_first_run=saved; Path=/; SameSite=Strict' } });
     }

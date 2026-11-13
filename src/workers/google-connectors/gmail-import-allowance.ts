@@ -1,3 +1,17 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { registerLimit, createLimitStopReporter } from '../../core/limit-stops.ts';
+registerLimit({ id: 'gmail.import_allowance', kind: 'requests', scope: 'source', label: 'Gmail import request allowance reached', unit: 'requests', continue: 'run_once' });
+export const GMAIL_IMPORT_LIMIT_SUBJECT = JSON.stringify(['gmail.email', 'internal.email', 'gmail.import_allowance']);
+const operatorImport = new AsyncLocalStorage<{ active: boolean }>();
+/** One bounded import pass; concurrent scheduled work does not inherit this permission. */
+export function withGmailImportRunOnce<T>(run: () => Promise<T>): Promise<T> {
+  const permission = { active: true };
+  return operatorImport.run(permission, async () => {
+    try { return await run(); }
+    finally { permission.active = false; }
+  });
+}
+
 /**
  * The one budget model for the Gmail requests imports make
  * (docs/design/archive-live-one-dataset.md, "Built, step 6").
@@ -64,6 +78,7 @@ export class GmailImportWaitError extends Error {
 }
 
 export interface GmailImportAllowance {
+  reportWait?(reason: string): void;
   /** Whether `requests` attempts may begin now, without counting them. */
   check(requests: number): true | GmailImportWait;
   /** Counts one attempt, or refuses it. */
@@ -77,6 +92,7 @@ export function gmailImportAllowance(options: {
   const now = options.now ?? (() => new Date());
   let day = '';
   let used = 0;
+  const stops = createLimitStopReporter();
   const check = (requests: number): true | GmailImportWait => {
     const today = now().toISOString().slice(0, 10);
     if (today !== day) {
@@ -86,10 +102,25 @@ export function gmailImportAllowance(options: {
     const usage = options.usage();
     if (!usage) return true;
     if (usage.dailyRequestBudget < GMAIL_IMPORT_MIN_DAILY_BUDGET) return 'gmail_budget_too_small';
+    if (operatorImport.getStore()?.active) { stops.clear('gmail.import_allowance', GMAIL_IMPORT_LIMIT_SUBJECT); return true; }
     if (usage.requests + requests > usage.dailyRequestBudget) return 'gmail_requests_spent';
-    return used + requests > Math.floor(usage.dailyRequestBudget * GMAIL_IMPORT_SHARE) ? 'gmail_import_allowance_spent' : true;
+    if (used + requests > Math.floor(usage.dailyRequestBudget * GMAIL_IMPORT_SHARE)) return 'gmail_import_allowance_spent';
+    stops.clear('gmail.import_allowance', GMAIL_IMPORT_LIMIT_SUBJECT);
+    return true;
   };
   return {
+    reportWait(reason) {
+      if (!['gmail_import_allowance_spent', 'gmail_requests_spent', 'gmail_budget_too_small'].includes(reason)) return;
+      const usage = options.usage();
+      const small = reason === 'gmail_budget_too_small';
+      const lane = reason === 'gmail_requests_spent' || small;
+      const at = now();
+      stops.report({ id: 'gmail.import_allowance', subject: GMAIL_IMPORT_LIMIT_SUBJECT, since: at.toISOString(), reason,
+        continue: small ? 'raise' : 'run_once', limit: usage ? lane ? usage.dailyRequestBudget : Math.floor(usage.dailyRequestBudget * GMAIL_IMPORT_SHARE) : null,
+        used: lane ? usage?.requests ?? null : used, waiting: { runs: 1 },
+        ...(small ? { toContinue: { raiseTo: Math.max(GMAIL_IMPORT_MIN_DAILY_BUDGET, (usage?.requests ?? 0) + GMAIL_IMPORT_MESSAGE_COST + GMAIL_IMPORT_LABELS_COST) } }
+          : { resumesAt: new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate() + 1)).toISOString() }) });
+    },
     check,
     take() {
       const verdict = check(1);
@@ -114,7 +145,7 @@ export function gmailImportBudget(lane: GmailRequestCounter, allowance: GmailImp
     reserve(provenance) {
       const verdict = allowance.take();
       if (verdict !== true) throw new GmailImportWaitError(verdict);
-      lane.reserve(provenance);
+      lane.reserve(operatorImport.getStore()?.active ? 'operator' : provenance);
     },
     status: () => lane.status(),
   };

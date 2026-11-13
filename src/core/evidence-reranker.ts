@@ -58,6 +58,11 @@ export const RERANK_PASSAGE_CHARS = 2_000;
 /** A reranker that has not answered by then is abandoned and the fused order stands. */
 export const DEFAULT_RERANK_TIMEOUT_MS = 5_000;
 export const DEFAULT_RERANK_POOL_SIZE = 30;
+// The pool is drawn by store strength: every store's leader, then the
+// strongest stores first, up to this many of each store's ranks. On subset L
+// (13 Nov 2026) this recovered 3 documents and 2 paragraphs the even turns
+// left out of a pool of the same size, losing no document.
+export const RERANK_POOL_STORE_DEPTH = 10;
 // Sparta scores 360 candidates of 128 tokens in 4 s with MiniLM int8 (#921).
 export const MAX_RERANK_POOL_SIZE = 400;
 
@@ -83,6 +88,8 @@ export interface RerankCandidatesOptions<T> {
   keep: number;
   timeoutMs?: number;
   timers?: RerankTimers;
+  // Internal observer; entries are in input order and contain no passage text.
+  onScores?: (entries: readonly { item: T; score: number }[], outcome: EvidenceRerankOutcome) => void;
 }
 
 export interface RerankCandidatesResult<T> {
@@ -101,17 +108,20 @@ export async function rerankCandidates<T>(options: RerankCandidatesOptions<T>): 
   const startedAt = timers.now();
   const passages = options.items.map((item) => clipPassage(options.passageOf(item)));
   const scoredIndexes = passages.flatMap((passage, index) => (passage ? [index] : []));
-  const fusedCut = (outcome: EvidenceRerankOutcome, scored: number): RerankCandidatesResult<T> => ({
-    kept: options.items.slice(0, keep),
-    audit: {
-      rerankerId: options.reranker.id,
-      outcome,
-      scored,
-      kept: Math.min(keep, options.items.length),
-      promoted: 0,
-      elapsedMs: timers.now() - startedAt,
-    },
-  });
+  const fusedCut = (outcome: EvidenceRerankOutcome, scored: number): RerankCandidatesResult<T> => {
+    options.onScores?.([], outcome);
+    return {
+      kept: options.items.slice(0, keep),
+      audit: {
+        rerankerId: options.reranker.id,
+        outcome,
+        scored,
+        kept: Math.min(keep, options.items.length),
+        promoted: 0,
+        elapsedMs: timers.now() - startedAt,
+      },
+    };
+  };
   if (scoredIndexes.length === 0) return fusedCut('applied', 0);
 
   const controller = new AbortController();
@@ -143,6 +153,7 @@ export async function rerankCandidates<T>(options: RerankCandidatesOptions<T>): 
     return fusedCut('failed', 0);
   }
 
+  if (options.onScores) options.onScores(scoredIndexes.map((index, position) => ({ item: options.items[index]!, score: scores[position]! })), 'applied');
   const scoreByIndex = new Map(scoredIndexes.map((index, position) => [index, scores[position]!] as const));
   const order = options.items.map((_, index) => index).sort((left, right) => {
     const leftScore = scoreByIndex.get(left);

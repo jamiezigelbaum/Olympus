@@ -57,7 +57,7 @@ export const TELEGRAM_SPOOL_REDACTION_FAILED_WARNING = 'telegram_spool_secret_re
 // while older ones stayed, or the file is shorter than the cursor says), so
 // the lane reads the spool again from its start instead of stopping for good.
 export const TELEGRAM_SPOOL_CURSOR_RESET_WARNING = 'telegram_spool_cursor_reset';
-// The capture helper's media quota is full: new photos and files are named only, and nothing kept was evicted.
+// New media waits for the computer's free-disk floor. Capture has no media quota (owner, 26 Oct 2026).
 export const TELEGRAM_MEDIA_DISK_LOW_WARNING = 'telegram_media_disk_low';
 // The identity of the day file a lane cursor stands in, kept in the set's ledger.
 const TELEGRAM_SPOOL_FILE_META_PREFIX = 'telegram:spool_file:';

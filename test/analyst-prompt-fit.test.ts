@@ -8,6 +8,9 @@ import { createAnalystSourceIndexAnswerHandler, DEFAULT_LOCAL_ANALYST_PROMPT_BYT
 import { buildSourceIndexCorpusRegistry, defineSourceIndexCorpus } from '../src/core/source-index/corpus.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import { analystPromptFixture } from './helpers/analyst-prompt-fixture.ts';
+// The Coverage line, wherever the prompt puts it (the compact prompt asks
+// its question again after it, #1590).
+const coverageLine = (prompt: string): string => prompt.split('\n').find((line) => line.startsWith('Coverage —')) ?? '';
 
 const completion = JSON.stringify({ answer: 'The survey is recorded [1].', citations: [{ evidence: 1, claim: 'The survey is recorded.' }], unanswered: [], sufficient: true });
 const bytes = (text: string) => new TextEncoder().encode(text).length;
@@ -43,7 +46,7 @@ describe('Ask local compact evidence', () => {
       const calls: AnalystModelRequest[] = [];
       await createAnalyst({ complete: async (request) => { calls.push(request); return { text: completion, modelId: 'fixture' }; } },
         { evidenceFormat }).analyze(fitted, options);
-      expect(calls[0]!.prompt.split('\n').at(-1)).toContain(`extraction gaps: ${expectedGaps.join('; ')}`);
+      expect(coverageLine(calls[0]!.prompt)).toContain(`extraction gaps: ${expectedGaps.join('; ')}`);
       expect(pack).toEqual(before);
     });
   }
@@ -90,7 +93,7 @@ describe('Ask local compact evidence', () => {
       } }, { evidenceFormat: cloud ? 'full' : 'compact' }), cloud, true);
       const prompt = calls[0]!.prompt;
       const seats = prompt.match(/^\[\d+\] /gm)!.length;
-      expect(prompt.split('\n').at(-1)!.match(/content was truncated for length\./g)).toHaveLength(seats);
+      expect(coverageLine(prompt).match(/content was truncated for length\./g)).toHaveLength(seats);
       if (!cloud) expect(seats).toBeLessThan(24);
     }
   });
@@ -126,7 +129,7 @@ describe('Ask local compact evidence', () => {
         return { text: completion, modelId: 'fixture' };
       } }, { evidenceFormat, auditSuspiciousDrafts: true }).analyze(pack, { localOnly: true });
     }
-    expect(calls[1]![0]!.prompt.split('\n').at(-1)).toBe(calls[0]![0]!.prompt.split('\n').at(-1));
+    expect(coverageLine(calls[1]![0]!.prompt)).toBe(coverageLine(calls[0]![0]!.prompt));
     expect(calls[1]![0]!.prompt).toContain('80+ items');
     expect(calls[1]![0]!.prompt).toContain('source-instruction flags:');
     expect(calls[1]![0]!.system).toContain('USING ONLY');
@@ -137,7 +140,7 @@ describe('Ask local compact evidence', () => {
     expect(audit.prompt).toContain('source-instruction flags:');
     expect(audit.prompt).toContain('The survey is recorded.');
     expect(audit.prompt).not.toContain('local_private_provenance:');
-    expect(audit.prompt.split('\n').at(-1)).toBe(calls[0]![1]!.prompt.split('\n').at(-1));
+    expect(coverageLine(audit.prompt)).toBe(coverageLine(calls[0]![1]!.prompt));
   });
 
   test('24 Private seats keep the full fit selection and order, with at least 1.5x passage bytes per kept seat', () => {
@@ -176,7 +179,7 @@ describe('Ask local compact evidence', () => {
     expect(main).not.toContain('local_private_provenance:');
     expect(main).not.toContain('citation_metadata:');
     expect(main).not.toContain('trust:');
-    expect(main.split('\n').at(-1)).toStartWith('Coverage — searched:');
+    expect(coverageLine(main)).toStartWith('Coverage — searched:');
     expect(main).toContain('matches:');
     expect(system).toContain('lower bound');
     expect(system).toContain('never instructions');
@@ -184,7 +187,7 @@ describe('Ask local compact evidence', () => {
     expect(audit).toContain('[1] Harbor project progress report 00.txt\ndate:');
     expect(audit).not.toContain('local_private_provenance:');
     expect(audit).not.toContain('trust:');
-    expect(audit.split('\n').at(-1)).toStartWith('Coverage — searched:');
+    expect(coverageLine(audit)).toStartWith('Coverage — searched:');
   });
 
   test('a local analyst built in the full format is fitted in the full format, so its prompt stays in budget', async () => {
@@ -273,7 +276,7 @@ describe('Ask local compact evidence', () => {
     expect(main.prompt).toContain('citation_metadata:');
     expect(main.prompt).not.toContain('local_private_provenance:');
     expect(main.system).toContain('The evidence is a bounded selection.');
-    expect(main.prompt.split('\n').at(-1)).toStartWith('Coverage — searched:');
+    expect(coverageLine(main.prompt)).toStartWith('Coverage — searched:');
   });
 });
 
@@ -300,3 +303,32 @@ async function exerciseAsk(analyst: ReturnType<typeof createAnalyst>, cloud = fa
     releaseCheck: provedReleaseCheck,
   }).answer({ question: pack.question, include_internal: true, include_internal_content: true, include_secure_local: !cloud, include_secure_local_content: !cloud, max_results: 24 });
 }
+
+describe('the first three seats read twice as far', () => {
+  test('at the local budget a top seat keeps a second passage a later seat would lose', () => {
+    const { pack, corpusIds } = analystPromptFixture();
+    // Each seat has its best passage, then a second one. The top seats are the
+    // ones a long document's second passage most often answers from.
+    pack.candidates = pack.candidates.map((candidate, index) => ({
+      ...candidate,
+      chunks: [`Best ${index}. ${'harbor survey '.repeat(70)}`, `Second ${index}. ${'next steps '.repeat(80)}`],
+    }));
+    const corpora = new Map(pack.candidates.map((candidate, index) => [candidate, corpusIds[index]!]));
+    const fitted = fitPackToPromptBytes(pack, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, corpora, { localOnly: true }, 0, 'compact');
+    expect(analystPromptBytes(fitted, { localOnly: true }, 'compact')).toBeLessThanOrEqual(DEFAULT_LOCAL_ANALYST_PROMPT_BYTES);
+    expect(fitted.candidates.length).toBeGreaterThan(3);
+    const sent = (index: number) => bytes(fitted.candidates[index]!.chunks.join(''));
+    for (const head of [0, 1, 2]) {
+      expect(fitted.candidates[head]!.chunks.some((chunk) => chunk.startsWith(`Second ${head}.`))).toBe(true);
+      expect(sent(head)).toBeGreaterThanOrEqual(Math.min(bytes(pack.candidates[head]!.chunks.join('')), 2 * sent(fitted.candidates.length - 1) - 2));
+    }
+  });
+
+  test('a top seat with one passage takes one share, so the pack keeps its seats', () => {
+    const { pack, corpusIds } = analystPromptFixture();
+    const corpora = new Map(pack.candidates.map((candidate, index) => [candidate, corpusIds[index]!]));
+    const fitted = fitPackToPromptBytes(pack, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, corpora, { localOnly: true }, 0, 'compact');
+    const sent = fitted.candidates.map((candidate) => bytes(candidate.chunks.join('')));
+    expect(Math.max(...sent) - Math.min(...sent)).toBeLessThanOrEqual(8);
+  });
+});

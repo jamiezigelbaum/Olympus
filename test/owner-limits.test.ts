@@ -302,3 +302,90 @@ test('a refused, restarting or unconfirmed continue reaches the CLI and Home in 
     expect(JSON.stringify(home.content)).not.toContain('still open');
   }
 });
+
+test('zkAPI request/spend refusals list exact amounts and independent one-day and permanent raises resume reservations', async () => {
+  const time = clock();
+  const path = join(scratch(), 'zkapi.json');
+  const { reserveZkapiRequest } = await import('../src/core/consult-transport-zkapi.ts');
+  const { readOwnerLimitOverride } = await import('../src/core/owner-limit-state.ts');
+  const reserve = () => reserveZkapiRequest(path, { requestCap: 0, spendCapMicroUsd: 1_000_000 }, time.date(), undefined, 2_000_000);
+  expect(reserve()).toEqual({ reserved: false, reason: 'daily_cap_reached' });
+  expect((await ownerLimits({}, { now: time.date })).stops).toMatchObject([{ id: 'zkapi.daily_requests', label: expect.any(String), unit: 'requests', limit: 0, used: 0, waiting: { runs: 1 }, resumesAt: '2026-11-13T00:00:00.000Z' }]);
+  const since = stops(time.date())[0]!.since;
+  reserve();
+  expect(stops(time.date())[0]!.since).toBe(since);
+  await ownerLimits({ action: 'continue', id: 'zkapi.daily_requests', to: 2, keep: true }, { now: time.date });
+  expect(reserve()).toEqual({ reserved: false, reason: 'spend_cap_reached' });
+  expect(stops(time.date())[0]).toMatchObject({ id: 'zkapi.daily_spend', limit: 1, used: 0, toContinue: { raiseTo: 2 } });
+  await expect(ownerLimits({ action: 'continue', id: 'zkapi.daily_spend', to: 1.5 }, { now: time.date })).rejects.toThrow('next step');
+  await ownerLimits({ action: 'continue', id: 'zkapi.daily_spend', to: 3 }, { now: time.date });
+  expect(reserve()).toEqual({ reserved: true });
+  expect(stops(time.date())).toEqual([]);
+  saveJudgeCallOverride(10, true, time.date());
+  expect(readOwnerLimitOverride('zkapi.dailyRequests', time.date())).toBe(2);
+  expect(readOwnerLimitOverride('zkapi.dailySpend', time.date())).toBe(3);
+  await time.advance(1_000);
+  expect(readOwnerLimitOverride('zkapi.dailySpend', time.date())).toBeUndefined();
+  expect(readOwnerLimitOverride('zkapi.dailyRequests', time.date())).toBe(2);
+});
+
+test('judge cap Raise and payment Refill preserve usage and resume the same transport with no probe', async () => {
+  const { JudgeSpending, JudgeCloudStopped } = await import('../src/workers/classification/judge-spending.ts');
+  const path = join(scratch(), 'judge.json');
+  const budget = new JudgeSpending(path);
+  budget.choose('venice', 0);
+  let calls = 0, payment = false;
+  const send = budget.fetch(async () => { calls++; return payment ? new Response('', { status: 402 }) : Response.json({ usage: { prompt_tokens: 1, completion_tokens: 1 } }); });
+  const init = { method: 'POST', body: JSON.stringify({ model: 'qwen3-6-35b-a3b', messages: [], max_completion_tokens: 10 }) };
+  await expect(send('https://fixture.invalid', init)).rejects.toBeInstanceOf(JudgeCloudStopped);
+  expect(calls).toBe(0);
+  expect((await ownerLimits({})).stops).toMatchObject([{ id: 'judge.spend_cap', unit: 'usd', limit: 0, used: 0 }]);
+  await ownerLimits({ action: 'continue', id: 'judge.spend_cap', to: 1 });
+  await send('https://fixture.invalid', init);
+  const spent = budget.status().spentDollars;
+  payment = true;
+  await expect(send('https://fixture.invalid', init)).rejects.toBeInstanceOf(JudgeCloudStopped);
+  expect(budget.status().spentDollars).toBe(spent);
+  expect((await ownerLimits({})).stops).toMatchObject([{ id: 'judge.payment', unit: 'usd', continue: 'refill', used: spent }]);
+  await ownerLimits({ action: 'continue', id: 'judge.payment' });
+  expect(calls).toBe(2);
+  await expect(send('https://fixture.invalid', init)).rejects.toBeInstanceOf(JudgeCloudStopped);
+  expect(stops(new Date()).find(stop => stop.id === 'judge.payment')).toBeDefined();
+  await ownerLimits({ action: 'continue', id: 'judge.payment' });
+  payment = false;
+  await send('https://fixture.invalid', init);
+  expect(calls).toBe(4);
+  expect(budget.status().spentDollars).toBeGreaterThan(spent);
+  expect(stops(new Date())).toEqual([]);
+});
+
+test('Gmail import waits offer Raise or run_once, update the existing counter and retain usage', async () => {
+  const { gmailImportAllowance, gmailImportBudget, GMAIL_IMPORT_MIN_DAILY_BUDGET, GMAIL_IMPORT_LIMIT_SUBJECT, withGmailImportRunOnce } = await import('../src/workers/google-connectors/gmail-import-allowance.ts');
+  const { createGmailDailyRequestBudget } = await import('../src/workers/google-connectors/gmail.ts');
+  const time = clock();
+  const counter = createGmailDailyRequestBudget({ env: { OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET: '1' }, statePath: join(scratch(), 'gmail.sqlite'), now: time.date });
+  const allowance = gmailImportAllowance({ usage: () => counter.status(), now: time.date });
+  const gate = gmailImportBudget(counter, allowance);
+  expect(allowance.check(14)).toBe('gmail_budget_too_small');
+  allowance.reportWait?.('gmail_budget_too_small');
+  const listed = await ownerLimits({}, { now: time.date });
+  expect(listed.stops).toMatchObject([{ id: 'gmail.import_allowance', label: expect.any(String), unit: 'requests', limit: 1, used: 0, continue: 'raise' }]);
+  const copied = JSON.parse((limitsToolResult(listed).content[0] as { text: string }).text);
+  expect(copied.stops[0]).toMatchObject({ continue: 'raise', reason: 'gmail_budget_too_small' });
+  await ownerLimits({ action: 'continue', id: 'gmail.import_allowance', to: GMAIL_IMPORT_MIN_DAILY_BUDGET }, { now: time.date });
+  expect(counter.status().dailyRequestBudget).toBe(GMAIL_IMPORT_MIN_DAILY_BUDGET);
+  for (let i = 0; i < GMAIL_IMPORT_MIN_DAILY_BUDGET / 2; i++) gate.reserve();
+  expect(allowance.check(1)).toBe('gmail_import_allowance_spent');
+  allowance.reportWait?.('gmail_import_allowance_spent');
+  expect(stops(time.date())[0]).toMatchObject({ id: 'gmail.import_allowance', continue: 'run_once', limit: 16, used: 16, resumesAt: '2026-11-13T00:00:00.000Z' });
+  await ownerLimits({ action: 'continue', id: 'gmail.import_allowance' }, { now: time.date, runOnce: async subject => {
+    expect(subject).toBe(GMAIL_IMPORT_LIMIT_SUBJECT);
+    await withGmailImportRunOnce(async () => { for (let i = 0; i < 20; i++) gate.reserve(); });
+    return { status: 'completed' };
+  } });
+  expect(counter.status().requests).toBe(36);
+  expect(stops(time.date())).toEqual([]);
+  expect(allowance.check(1)).toBe('gmail_requests_spent');
+  allowance.reportWait?.('gmail_requests_spent');
+  expect(stops(time.date())[0]).toMatchObject({ reason: 'gmail_requests_spent', continue: 'run_once', limit: 32, used: 36 });
+});

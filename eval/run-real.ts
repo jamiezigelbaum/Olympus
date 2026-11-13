@@ -1,3 +1,4 @@
+import { captureEvalPack, prepareCaptureReranker, writePoolCapture } from './capture-pool.ts';
 import { openEvalDataRoot } from './data-root.ts';
 import { parseDataRootArgs, dataRootArgv } from './data-root-args.ts';
 import { createEvalSourceLanes } from './retrieval.ts';
@@ -38,7 +39,7 @@ import type { EvidenceReranker } from '../src/core/evidence-reranker.ts';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { analystCoverageBytes, analystEvidenceFormat, analystPromptBytes, analystPromptWithoutDraft, auditNamedAmountCount, createAnalyst, withPromptBudget, type AnalystEvidenceFormat, type AnalystModel } from '../src/core/analyst.ts';
+import { analystCoverageBytes, analystEvidenceFormat, analystPromptBytes, analystOutputAnswer, analystPromptWithoutDraft, auditNamedAmountCount, createAnalyst, withPromptBudget, type AnalystEvidenceFormat, type AnalystModel } from '../src/core/analyst.ts';
 import { createDelphiAnalystModel } from '../src/core/analyst-delphi.ts';
 import {
   DEFAULT_VENICE_ANALYST_MODEL,
@@ -204,11 +205,16 @@ async function main(): Promise<void> {
   // question's: the answer-stage audit checks the values against it.
   const analystPrompts: string[] = [];
   const analystModelIds: string[] = [];
+  // Eval-only (#1590): keep each call's text in memory so the report can say,
+  // as booleans, whether the first draft held each value. Never written out.
+  const traceDraftAudit = process.env.OLYMPUS_EVAL_TRACE_DRAFT_AUDIT?.trim().toLowerCase() === 'on';
+  const analystCompletions: string[] = [];
   const analyst = createAnalyst({
     async complete(request) {
       analystPrompts.push(request.prompt);
       const completion = await model.complete(request);
       analystModelIds.push(completion.modelId);
+      if (traceDraftAudit) analystCompletions.push(completion.text);
       return completion;
     },
   }, { auditSuspiciousDrafts: true, evidenceFormat: analystProvider === 'local' ? 'compact' : 'full' });
@@ -218,7 +224,9 @@ async function main(): Promise<void> {
   const queryPlanner = queryPlannerEnabled ? createAnalystQueryPlanner(model) : undefined;
   // Off unless OLYMPUS_SOURCE_RERANKER=built-in names a reranker model
   // directory, so one corpus can be measured with and without it (issue #921).
-  const reranker = await prepareBuiltInRerankerFromEnv();
+  const reranker = args.capturePoolDir
+    ? await prepareCaptureReranker(process.env)
+    : await prepareBuiltInRerankerFromEnv();
 
   const detailsByPack = new WeakMap<object, EvidencePackBuildDetail>();
   const rawResultsByPack = new WeakMap<object, AnalystResult>();
@@ -245,6 +253,7 @@ async function main(): Promise<void> {
   const keepGradedAnswerRecords = () => {
     analystPrompts.splice(firstAnswer?.prompts ?? 0);
     analystModelIds.splice(firstAnswer?.modelIds ?? 0);
+    analystCompletions.splice(firstAnswer?.prompts ?? 0);
   };
   const gradedAnalyst: Analyst = {
     async analyze(pack, analyzeOptions) {
@@ -286,7 +295,7 @@ async function main(): Promise<void> {
     continueOnQuestionError: true,
     stopOnQuestionTimeout: true,
     async buildPack(question) {
-      const detail = await buildEvalPack({
+      const packInput = {
         question: question.question,
         lanes,
         ...(queryPlanner ? { queryPlanner } : {}),
@@ -295,7 +304,15 @@ async function main(): Promise<void> {
         // Keep local-model prompts bounded for an eval gate. Truncation is
         // reported as a coverage gap; raise this only for targeted diagnosis.
         maxCharsPerCandidate,
-      });
+      };
+      let detail: EvidencePackBuildDetail;
+      if (args.capturePoolDir) {
+        const captured = await captureEvalPack({ ...packInput, question, captureDepth: args.captureDepth ?? 30 });
+        writePoolCapture(args.capturePoolDir, captured.capture);
+        detail = captured.detail;
+      } else {
+        detail = await buildEvalPack(packInput);
+      }
       detailsByPack.set(detail.pack, detail);
       return detail.pack;
     },
@@ -317,7 +334,8 @@ async function main(): Promise<void> {
         }),
         ...(detail ? { retrieval: evalRetrievalAudit(detail, question, storeSearches) } : {}),
         answerStage: {
-          ...evalAnswerStageAudit(question, pack, rawResultsByPack.get(pack), result, analystPrompts, analystModelIds, analystSeatsByPack.get(pack)),
+          ...evalAnswerStageAudit(question, pack, rawResultsByPack.get(pack), result, analystPrompts, analystModelIds, analystSeatsByPack.get(pack),
+            traceDraftAudit ? { completions: analystCompletions } : undefined),
           ...(repeatsByPack.has(pack)
             ? {
               answerRepeats: repeatsByPack.get(pack)!.results.map((repeat) => evalAnswerRepeat(question, pack, repeat)),
@@ -552,6 +570,12 @@ export interface EvalAnswerStageAudit {
     inPackAsSubstring: boolean;
     /** In the prompt the Analyst model was sent; absent when no prompt was recorded. */
     inAnalystPrompt?: boolean;
+    /**
+     * With OLYMPUS_EVAL_TRACE_DRAFT_AUDIT=on and an audit call (#1590): in the
+     * first call's prompt, in its draft answer, and in the audit call's
+     * evidence (its quote of the draft left out). Booleans only.
+     */
+    draftAudit?: { inFirstPrompt: boolean; inFirstDraft: boolean; inAuditPrompt: boolean };
     inAnalystAnswer: boolean;
     inReleasedAnswer: boolean;
     /**
@@ -617,6 +641,8 @@ export interface EvalAnswerStageAudit {
    */
   auditNamedAmounts?: number;
   auditPromptBytes?: number;
+  /** With OLYMPUS_EVAL_TRACE_DRAFT_AUDIT=on and an audit call: whether the audit's answer differs from the first draft's. */
+  auditReplacedDraft?: boolean;
   /** The pack seats the Analyst was sent, when a prompt budget fitted the pack (Ask's local leg). */
   analystSeats?: number[];
   /**
@@ -871,6 +897,7 @@ export function evalAnswerStageAudit(
   analystPrompts?: readonly string[],
   analystModelIds?: readonly string[],
   analystSeats?: readonly number[],
+  draftTrace?: { completions: readonly string[] },
 ): EvalAnswerStageAudit {
   // Every evidence field the Analyst can be shown: citation metadata
   // (title, locator, dates), chunk text, extracted facts and tables.
@@ -887,6 +914,16 @@ export function evalAnswerStageAudit(
   // The audit quotes the model's own draft; that is not evidence it was sent.
   const promptText = analystPrompts && analystPrompts.length > 0 ? analystPrompts.map(analystPromptWithoutDraft).join('\n') : undefined;
   const analystOwn = analystResult ?? releasedResult;
+  // Only when the first call was audited: its draft, and the two prompts.
+  const traced = draftTrace && analystPrompts && analystPrompts.length >= 2 && draftTrace.completions.length >= 1
+    ? {
+      firstPrompt: analystPrompts[0]!,
+      auditPrompt: analystPromptWithoutDraft(analystPrompts[1]!),
+      // Read as the Analyst reads them; an audit that does not parse keeps the draft.
+      draft: analystOutputAnswer(draftTrace.completions[0]!) ?? '',
+      audited: draftTrace.completions[1] === undefined ? undefined : analystOutputAnswer(draftTrace.completions[1]),
+    }
+    : undefined;
   // A citation names its seat by the candidate's own provenance, else by the item.
   const citationSeats = analystOwn.citations.map((citation) => {
     const exact = pack.candidates.findIndex((candidate) => candidate.provenance === citation.provenance);
@@ -934,12 +971,20 @@ export function evalAnswerStageAudit(
     ...(promptText !== undefined ? { analystPromptChars: analystPrompts!.reduce((sum, prompt) => sum + prompt.length, 0) } : {}),
     ...auditNoteFields(analystPrompts),
     ...(analystModelIds && analystModelIds.length > 0 ? { analystModelIds: [...analystModelIds] } : {}),
+    ...(traced ? { auditReplacedDraft: traced.audited !== undefined && traced.audited.trim() !== traced.draft.trim() } : {}),
     expected: (question.expectedAnswerContains ?? []).map((value) => ({
       inPack: answerContainsExpectedValue(value, packText).matched,
       inPackAsSubstring: acceptableForms(value).some((form) => packText.toLowerCase().includes(form)),
       ...(promptText !== undefined ? { inAnalystPrompt: answerContainsExpectedValue(value, promptText).matched } : {}),
       inAnalystAnswer: answerContainsExpectedValue(value, (analystResult ?? releasedResult).answer).matched,
       inReleasedAnswer: answerContainsExpectedValue(value, releasedResult.answer).matched,
+      ...(traced
+        ? { draftAudit: {
+          inFirstPrompt: answerContainsExpectedValue(value, traced.firstPrompt).matched,
+          inFirstDraft: answerContainsExpectedValue(value, traced.draft).matched,
+          inAuditPrompt: answerContainsExpectedValue(value, traced.auditPrompt).matched,
+        } }
+        : {}),
     })).map((entry, index) => {
       const value = question.expectedAnswerContains![index]!;
       const analystAnswer = (analystResult ?? releasedResult).answer;
@@ -1170,10 +1215,12 @@ async function runIsolatedPass(
         '--analyst-provider',
         input.args.analystProvider,
         ...dataRootArgv(input.args.isolation),
+        ...(input.args.capturePoolDir && label === 'gate' ? ['--capture-pool', input.args.capturePoolDir, '--capture-depth', String(input.args.captureDepth ?? 30)] : []),
       ],
       env: {
         ...process.env,
         ...env,
+        ...(input.args.capturePoolDir ? { OLYMPUS_EVAL_CAPTURE_POOL_DIR: '' } : {}),
         [INTERNAL_QUESTION_INDEX_ENV]: String(index),
         OLYMPUS_EVAL_REPORT_PATH: childReportPath,
       },
@@ -1332,13 +1379,28 @@ function parseQuestionTimeoutMs(value: string | undefined): number {
 export function parseEvalRealArgs(
   argv: readonly string[],
   env: Record<string, string | undefined> = process.env,
-): { datasetPath: string; analystProvider: EvalAnalystProvider; isolation?: EvalDataRootOptions } {
+): { datasetPath: string; analystProvider: EvalAnalystProvider; isolation?: EvalDataRootOptions; capturePoolDir?: string; captureDepth?: number } {
   const offline = parseDataRootArgs(argv);
   argv = offline.rest;
   let datasetPath: string | undefined;
+  let capturePoolDir = env.OLYMPUS_EVAL_CAPTURE_POOL_DIR?.trim() || undefined;
+  let captureDepth = 30;
+  let captureDepthSet = false;
   let analystProvider = resolveEvalAnalystProvider(env.OLYMPUS_EVAL_ANALYST_PROVIDER);
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]!;
+    const name = arg.split('=')[0];
+    if (name === '--capture-pool' || name === '--capture-depth') {
+      const value = arg.includes('=') ? arg.slice(arg.indexOf('=') + 1) : argv[++index];
+      if (!value || value.startsWith('--')) throw new Error(`${name} requires a value.`);
+      if (name === '--capture-pool') capturePoolDir = value;
+      else {
+        captureDepth = Number(value);
+        captureDepthSet = true;
+        if (!Number.isSafeInteger(captureDepth) || captureDepth < 1) throw new Error('--capture-depth must be a positive integer.');
+      }
+      continue;
+    }
     if (arg === '--analyst-provider') {
       const value = argv[index + 1];
       if (!value) throw new Error('--analyst-provider requires local or venice.');
@@ -1360,6 +1422,7 @@ export function parseEvalRealArgs(
   }
   return {
     ...(offline.isolation ? { isolation: offline.isolation } : {}),
+    ...(capturePoolDir ? { capturePoolDir, captureDepth } : captureDepthSet ? { captureDepth } : {}),
     datasetPath: datasetPath ?? DEFAULT_DATASET_PATH,
     analystProvider,
   };

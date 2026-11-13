@@ -1,3 +1,4 @@
+import { createTestClock, flushMicrotasks, waitFor } from './helpers/test-clock.ts';
 import { DASHBOARD_UNLOCK_HEADER } from '../src/core/dashboard-launch.ts';
 import { runTierClassifier } from '../src/workers/classification/tier-cli.ts';
 import { ownerLocalMint, ownerUnlockKey } from './helpers/owner-local-mint.ts';
@@ -15,7 +16,7 @@ import { afterEach, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULT_VENICE_JUDGE_MODEL, JUDGE_PRICES, JudgeSpending, JudgeCloudStopped, judgeArchiveEstimate, readJudgeSpending, withJudgeSpendingStop } from '../src/workers/classification/judge-spending.ts';
+import { DEFAULT_VENICE_JUDGE_MODEL, JUDGE_PRICES, JudgeSpending, JudgeCloudStopped, judgeArchiveEstimate, readJudgeSpending, withJudgeSpendingStop, judgeLocalIsSlow } from '../src/workers/classification/judge-spending.ts';
 import { resolveJudgeChoiceRuntime, resolveTierSnifferRuntime } from '../src/workers/classification/built-in-sniffer.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { renderJudgeChoice } from '../src/workers/dashboard/pages/local.ts';
@@ -38,6 +39,16 @@ function fixture() {
 }
 const request = { method: 'POST', body: JSON.stringify({ model: 'qwen3-6-35b-a3b', messages: [{ role: 'user', content: 'ordinary synthetic text' }], max_completion_tokens: 256 }) };
 const response = () => Response.json({ choices: [{ message: { content: 'synthetic answer' } }] });
+
+test('first-run slow rule uses measured throughput before runtime GPU capability, with a strict one-hour threshold', () => {
+  expect(judgeLocalIsSlow({ localItemsPerMinute: 1 }, { gpu: true })).toBe(true);
+  expect(judgeLocalIsSlow({ localItemsPerMinute: 1000 / 60 }, { gpu: false })).toBe(false);
+  expect(judgeLocalIsSlow({ localItemsPerMinute: 1000 / 60 - 0.001 }, { gpu: true })).toBe(true);
+  expect(judgeLocalIsSlow({ localItemsPerMinute: 67 }, { gpu: false })).toBe(false);
+  expect(judgeLocalIsSlow({}, { gpu: false })).toBe(true);
+  expect(judgeLocalIsSlow({}, { gpu: true })).toBe(false);
+  expect(judgeLocalIsSlow({}, undefined)).toBe(false);
+});
 
 test('cloud is off until explicit opt-in, regardless of a size recommendation', async () => {
   const { budget } = fixture(); let calls = 0;
@@ -172,7 +183,9 @@ test('the actual setup backend records exact consent before opt-in and can lower
   const promptVersion = snifferPromptVersions().approval;
   const backend = createJudgeSetup({ spending: budget, cloud, local: () => resolveJudgeChoiceRuntime({ engine }, { choice: 'local', stop: null, remainingDollars: 0 }),
     ledgerPath: path + '.ledger', promptVersion: () => promptVersion, credentialReady: () => true, requestReload: () => false });
+  expect(backend.status().chosen).toBe(false);
   await backend.save('venice', 20);
+  expect(backend.status().chosen).toBe(true);
   const lane = cloud.source === 'off' ? null : cloud.lane;
   expect(isClassifierApproved((await readClassificationLedger(path + '.ledger')).entries,
     { lane: lane!.kind, profileId: lane!.profileId, modelId: lane!.modelId, promptVersion })).toBe(true);
@@ -225,14 +238,21 @@ test('a terminal cloud stop leaves the real service waiting without a continuati
   const subject = { provider: 'synthetic', accountScope: 'personal', providerItemId: 'one' };
   ledger.recordDecision(subject, classifyItemTiers({ signals: { title: 'My medical records', labels: ['SSN 123-45-6789'] }, subject }, { sniffer: new CachedTierSniffer(queue, lane) }));
   await approveClassifier(path + '.ledger', lane, snifferPromptVersions().approval, 'Synthetic fixture approval');
-  let calls = 0; let asked!: () => void; const done = new Promise<void>(resolve => { asked = resolve; });
-  const service = new TierSnifferService({ installed, lane, model: { complete: async () => { calls++; asked(); throw new JudgeCloudStopped('cap'); } },
+  const time = createTestClock(Date.parse('2026-11-13T12:00:00Z'));
+  let calls = 0;
+  const service = new TierSnifferService({ installed, lane, now: time.date, timers: time, ingestionTurn: async () => {}, model: { complete: async () => { calls++; throw new JudgeCloudStopped('cap'); } },
     stores: () => [{ dbPath: storePath, tierSetBinding: () => ({ ledgerPath }) }], classificationLedgerPath: path + '.ledger', intervalMs: 5 });
-  cleanup.push(() => service.stop()); service.start();
-  await Promise.race([done, new Promise((_, reject) => setTimeout(() => reject(new Error('Service did not reach the stop')), 1000))]);
-  await new Promise(resolve => setTimeout(resolve, 50));
+  cleanup.push(() => service.stop());
+  await service.runOnce();
+  service.start();
+  await time.advance(50);
+  await flushMicrotasks();
   expect(calls).toBe(1); expect(service.status().waiting?.reason).toBe('cloud_stopped');
   expect(service.status().waiting?.label).toContain('Keys');
+  service.resumeCloudLimit();
+  await time.advance(0);
+  await waitFor(() => calls === 2);
+  expect(calls).toBe(2);
 });
 
 test('cloud judging spends its calls on newest items before an aged backlog', async () => {
@@ -274,12 +294,12 @@ test('saving the choice already shown still says it saved, and Local needs no sp
       refresh: async () => ({ status: 200, title: 'Keys', body: html, controller: 'dashboard', can_write: true, signature: `redraw-${++redraws}`, poll_interval_ms: -1 }),
       transport: { control: async params => { calls.push(params); return { status: 200, body: { ok: true, status_message: 'Cloud judging is off. Olympus is applying local judging.' } }; } },
     }); dispose = () => controller.dispose();
+    const pageLine = () => Array.from(root.querySelectorAll('[data-action-message]')).find(node => !node.closest('dialog'))!;
     root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     await browser.happyDOM.waitUntilComplete();
-    await new Promise(resolve => setTimeout(resolve, 30));
+    await waitFor(() => redraws > 0 && pageLine().textContent === 'Cloud judging is off. Olympus is applying local judging.');
     expect(calls).toEqual([{ action: 'save_judge', choice: 'local', cap_dollars: 0 }]);
     expect(redraws).toBeGreaterThan(0);
-    const pageLine = () => Array.from(root.querySelectorAll('[data-action-message]')).find(node => !node.closest('dialog'))!;
     expect(pageLine().textContent).toBe('Cloud judging is off. Olympus is applying local judging.');
     // Venice with no limit is explained inside its still-open confirmation and sends nothing.
     root.querySelector<HTMLInputElement>('input[value="venice"]')!.click();
@@ -296,7 +316,7 @@ test('saving the choice already shown still says it saved, and Local needs no sp
     root.querySelector<HTMLInputElement>('input[name="cap_dollars"]')!.value = '15';
     root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     await browser.happyDOM.waitUntilComplete();
-    await new Promise(resolve => setTimeout(resolve, 30));
+    await waitFor(() => calls.length === 2 && root.querySelector('dialog[open]') === null);
     expect(calls.at(-1)).toEqual({ action: 'save_judge', choice: 'venice', cap_dollars: 15 });
     expect(root.querySelector('dialog[open]')).toBeNull();
   } finally {
@@ -404,12 +424,14 @@ test('an upgrade keeps an exact Venice approval judging with no cap until the ow
   const running = resolveJudgeChoiceRuntime(input, budget.status());
   expect(running.source !== 'off' && running.lane.kind).toBe('venice');
 
-  // Calls pass with no cap and no listed price; a 402 stays as it was before.
+  // Calls still need no cap or listed price; a 402 now reports a liftable payment stop.
   let sent = 0;
   const judged = budget.fetch(async () => { sent++; return new Response('', { status: 402 }); });
   const unlisted = { ...request, body: JSON.stringify({ model: 'some-unlisted-model', messages: [], max_completion_tokens: 8 }) };
-  expect((await judged('https://venice.test', unlisted)).status).toBe(402);
+  await expect(judged('https://venice.test', unlisted)).rejects.toBeInstanceOf(JudgeCloudStopped);
   expect(sent).toBe(1);
+  expect(budget.status().stop).toBe('payment');
+  budget.refill();
   expect(budget.status().stop).toBeNull();
 
   // The note shows once and survives a restart as already shown.
@@ -476,7 +498,10 @@ test('the Keys page renders through the real setup object and shows the upgrade 
   const worker = createEmailSourceWorker({
     sourceIndexStatus: { status: async () => ({ kind: 'source_index_status', generated_at: '2026-11-06T00:00:00.000Z', corpora: [],
       policy: { read_only: true, raw_source_exposed: false, source_text_returned: false, secure_local_item_metadata_exposed: false, castor_visible: true } }) as never },
-    sourceDashboard: { sovereigntyEngine: engine, registryPath: path + '-handles.json', judgeSetup },
+    sourceDashboard: { sovereigntyEngine: engine, registryPath: path + '-handles.json', judgeSetup,
+      // This page tests judge setup; its empty credential fixture must not open a system keychain.
+      secretStore: { label: 'fixture', get: async () => undefined, set: async () => {}, delete: async () => {}, list: async () => [] },
+    },
   });
   cleanup.push(() => worker.close());
   const fetcher = withWorkerBearerAuth(worker.fetch, { authToken: 'synthetic-bearer' });

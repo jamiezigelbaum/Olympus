@@ -89,6 +89,8 @@ import { SOURCE_ANSWER_HANDOFF_MAX_MS, SOURCE_ANSWER_RESULT_WAIT_MAX_MS } from '
 import { evaluateInbox, privateLinkIdsIn, privateNoteIn, type InboxObservation } from './inbox.ts';
 import { commandJudge, judgeCheck, type Judge } from './judge.ts';
 import type { AgentConfig } from './machine-agent.ts';
+import { FRONT_WATCH_S, frontSteadyChecks, type FrontStoreSet, type FrontSteadyObservation, type FrontWatch } from './front-steady.ts';
+import { STORES_PUT_BACK, brokenBundle, forcedFailureChecks, storesKeptCheck, type ForcedFailureObservation, type StoreFileCount } from './upgrade-split.ts';
 import { journeyChecks, type JourneyTrace } from './journey.ts';
 import { JOURNEYS, type JourneyMachine } from './journeys.ts';
 import { evaluateRestore, RESTORE_BACKUP_FOLDER, RESTORE_BACKUP_PATH } from './restore.ts';
@@ -107,6 +109,7 @@ import { runServerModeLeg } from './server-mode.ts';
 import { SCALE_FORMATS } from './archive-scale-fixtures.ts';
 import { SCALE_BOUND_S, SCALE_REPEAT_S, SCALE_REMOVE_S, scaleChecks, type ScaleObservation } from './archive-scale.ts';
 import type { ArchiveScaleMeasurement } from './report.ts';
+import { runFreshLimits, type LimitsResult } from './fresh-limits.ts';
 import { checkMacOwnerProof } from './mac-owner-proof.ts';
 import { checkMacConsentOwnerProof } from './mac-consent-owner-proof.ts';
 import { checkForwardedSocketOwnerProof } from './forwarded-socket-owner-proof.ts';
@@ -134,6 +137,8 @@ export const INBOX_SELFTESTS: readonly InboxSelftest[] = ['plant-private-reply',
 export const INBOX_SELFTEST_FAILS: Record<InboxSelftest, string> = { 'plant-private-reply': 'private-medical.no-leak', 'wrong-link-id': 'inbox.agent.entry' };
 
 export interface RunOptions {
+  /** Machine-free test seam; CLI candidates always execute the real limits proof. */
+  limitsStage?: typeof runFreshLimits;
   runId: string;
   candidateDir: string;
   candidateLabel: string;
@@ -183,7 +188,10 @@ export interface RunOptions {
   skipScreenshots?: boolean;
   /** Run only these configured agents (by id); omitted runs every enabled one. */
   onlyAgents?: string[];
-  /** Turn `worker.engineSplit` on in the install's engine config before the legs run (the engine split, #1240). The report records it. */
+  /**
+   * Turn `worker.engineSplit` on in the install's engine config before the legs run (the engine split, #1240). The report records it.
+   * On an upgrade leg the switch goes on just before the update, over a store set, with a forced failed update first (upgrade-split.ts).
+   */
   engineSplit?: boolean;
   /** Runtime-generated realistic archives on the split engine. Opt-in; RC_ARCHIVE_SCALE=1 is the harness-only equivalent. */
   archiveScale?: boolean;
@@ -220,6 +228,7 @@ function sh(value: string): string {
 
 /** One stage of a run: a plain run has one; an upgrade run has three (before, the update itself, after). */
 interface Stage {
+  limits?: LimitsResult;
   id: string;
   label: string;
   version?: string;
@@ -481,7 +490,8 @@ function agentConfig(options: RunOptions): AgentConfig {
       agent: { text: privateQuestion().text, facts: [...privateQuestion().privateFacts], citedTitle: INBOX_ASK.citedTitle },
       ask: { text: INBOX_ASK.text, facts: [...INBOX_ASK.facts], citedTitle: INBOX_ASK.citedTitle },
     },
-    ...(options.engineSplit ? { engineSplit: true } : {}),
+    // On an update the switch goes on just before the candidate's installer runs (upgrade-split.ts), not on the earlier release.
+    ...(options.engineSplit && options.upgradeFromDir === undefined ? { engineSplit: true } : {}),
   };
 }
 
@@ -535,7 +545,7 @@ async function setupMachine(run: Run, workDir: string, bundlePath: string, insta
     id: 'install.engine',
     title: installTitle,
     status: build.result?.ok === true && run.build ? 'pass' : 'fail',
-    detail: run.build ? `build ${run.build}` : 'the engine did not report a build',
+    detail: installDetail(run.build, build.result),
   });
   if (build.result?.ok !== true) return false;
 
@@ -548,7 +558,7 @@ async function setupMachine(run: Run, workDir: string, bundlePath: string, insta
     ms: prepare.ms,
   });
   if (prepare.result?.ok !== true) return false;
-  if (run.options.engineSplit) run.add(engineSplitCheck(prepare.result.engineSplit));
+  if (run.options.engineSplit && run.options.upgradeFromDir === undefined) run.add(engineSplitCheck(prepare.result.engineSplit));
 
   const connect = await run.agent('connect-source', '', 120_000);
   run.add({
@@ -563,6 +573,17 @@ async function setupMachine(run: Run, workDir: string, bundlePath: string, insta
   // then what it found) stays on the card for ten minutes, about when the screens are taken, so the pictures varied by the clock.
 
   return (await settleIngest(run)).settled;
+}
+
+/** The install check's line: the build, how long the engine took to answer healthy, and the worker's state if it never did. */
+export function installDetail(build: string | null | undefined, result: Record<string, unknown> | undefined): string {
+  if (!build) return 'the engine did not report a build';
+  const waited = Number(result?.waitedMs ?? 0);
+  const parts = [`build ${build}`];
+  const seconds = Math.round(waited / 1000);
+  if (result?.ok !== true) parts.push(`engine status still unhealthy after ${seconds} s${result?.worker ? ` (worker: ${String(result.worker)})` : ''}`);
+  else if (waited >= 1_000) parts.push(`healthy after ${seconds} s`);
+  return parts.join('; ');
 }
 
 /** What prepare-source saw of the engine split after its restart: the roles' process counts, or null if the OS cannot expose them. */
@@ -1330,6 +1351,79 @@ async function collectArchiveTraces(run: Run, outDir: string): Promise<void> {
   rmSync(scratch, { recursive: true, force: true });
 }
 
+/** The split front after a restart on a store set with Gmail attachments, Telegram and archives (front-steady.ts). */
+async function runFrontSteady(run: Run): Promise<void> {
+  const seed = randomBytes(6).toString('hex');
+  const done = await run.phase('front-steady', () => run.agent('front-steady', `--seed ${seed} --watch-s ${FRONT_WATCH_S}`, (FRONT_WATCH_S + 30 * 60) * 1_000));
+  if (!done.result) run.log(`front-steady: ${agentDetail(done)}`);
+  const obs = done.result as FrontSteadyObservation | undefined;
+  for (const check of [...frontSteadyChecks(obs), ...journeyChecks(obs?.traces ?? [])]) run.add(check);
+}
+
+/**
+ * Before the candidate's installer runs with the split on (upgrade-split.ts): the earlier release gets the store set, the owner's
+ * switch goes on, and a copy of the candidate whose front cannot start is installed over it first. Returns what the real
+ * update's checks compare against.
+ */
+async function prepareSplitUpdate(run: Run, workDir: string, beforeVersion: string | null | undefined): Promise<{ set?: FrontStoreSet; storeFiles?: number }> {
+  const seed = randomBytes(6).toString('hex');
+  const seeded = await run.phase('front-seed', () => run.agent('front-seed', `--seed ${seed}`, 30 * 60_000));
+  const set = seeded.result as FrontStoreSet | undefined;
+  if (!set) run.log(`front-seed: ${agentDetail(seeded)}`);
+  const on = await run.agent('engine-split-on', '', 60_000);
+  run.add({
+    id: 'upgrade.split.switch',
+    title: 'The owner\'s engine.json has worker.engineSplit on before the update, as on the owner\'s machine',
+    status: on.result?.ok === true ? 'pass' : 'fail',
+    detail: on.result?.ok === true ? 'set on the earlier release without a restart; the installer\'s start picks it up' : agentDetail(on),
+  });
+  const saved = await run.agent('store-files', '--save before', 60_000);
+  const storeFiles = saved.result?.ok === true ? Number(saved.result.count) : undefined;
+
+  const obs: ForcedFailureObservation = { installer: { failed: false }, engine: { ready: false }, beforeVersion: beforeVersion ?? null };
+  // A copy that could not be made proves nothing about rollback: the checks fail rather than read the untouched release as rolled back.
+  let broken: string;
+  try { broken = brokenBundle(run.options.candidateDir, workDir); } catch (error) {
+    const detail = `the copy whose front cannot start was not made: ${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`;
+    for (const check of forcedFailureChecks(obs)) run.add({ ...check, status: 'fail', detail });
+    await run.agent('front-mark', '', 60_000);
+    return { ...(set ? { set } : {}), ...(storeFiles !== undefined ? { storeFiles } : {}) };
+  }
+  await run.agent('front-mark', '', 60_000);
+  try {
+    await run.phase('upgrade-forced-failure', () => run.machine!.upgrade(broken));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    // The receipt is read from the whole message: the Fix: line names log paths first and can run past the shown detail.
+    obs.installer = { failed: true, detail: message.slice(0, 300), storesPutBack: message.includes(STORES_PUT_BACK) };
+  }
+  const ran = await run.agent('front-watch', '--watch-s 0', 60_000);
+  obs.frontRan = Number((ran.result as Partial<FrontWatch> | undefined)?.logHits?.brokenFront ?? 0);
+  const back = await run.phase('forced-failure-engine', () => run.agent('await-engine', '--timeout-s 300', 330_000));
+  const build = await run.agent('engine-build', '', 60_000);
+  obs.engine = {
+    ready: back.result?.ok === true,
+    ...(back.result?.ok === true ? {} : { detail: agentDetail(back) }),
+    version: typeof build.result?.version === 'string' ? build.result.version : null,
+  };
+  const compared = await run.agent('store-files', '--compare before', 60_000);
+  if (storeFiles !== undefined) obs.storeFiles = { before: storeFiles, ...(compared.result?.ok === true ? { after: compared.result as unknown as StoreFileCount } : {}) };
+  for (const check of forcedFailureChecks(obs)) run.add(check);
+  // The real update's watch reads only what the logs gain from here.
+  await run.agent('front-mark', '', 60_000);
+  return { ...(set ? { set } : {}), ...(storeFiles !== undefined ? { storeFiles } : {}) };
+}
+
+/** After the real update with the split on: the front stays up on the store set, and no store file went missing. */
+async function checkSplitUpdate(run: Run, prep: { set?: FrontStoreSet; storeFiles?: number }, back: { ok: boolean; ms: number; detail?: string }): Promise<void> {
+  const watched = await run.phase('front-watch', () => run.agent('front-watch', `--watch-s ${FRONT_WATCH_S}`, (FRONT_WATCH_S + 120) * 1_000));
+  const watch = watched.result?.ok === true ? watched.result as unknown as FrontWatch : undefined;
+  const obs = prep.set && watch ? { ...prep.set, ...watch, restart: back } as FrontSteadyObservation : undefined;
+  for (const check of [...frontSteadyChecks(obs, 'the update to the candidate'), ...journeyChecks(prep.set?.traces ?? [])]) run.add(check);
+  const compared = await run.agent('store-files', '--compare before', 60_000);
+  run.add(storesKeptCheck(prep.storeFiles, compared.result?.ok === true ? compared.result as unknown as StoreFileCount : undefined));
+}
+
 async function runArchiveScaleLeg(run: Run, outDir: string, deadline: number): Promise<void> {
   if (!run.options.archiveScale) return;
   const seed = randomBytes(6).toString('hex');
@@ -1509,6 +1603,7 @@ async function runUpgradeLeg(run: Run, workDir: string, bundlePath: string, judg
 
   run.use('upgrade');
   run.stage.label = `${expected.from ?? 'the earlier release'} -> ${expected.to ?? 'the candidate'}, with the candidate's public Linux installer over the existing install`;
+  const split = options.engineSplit ? await prepareSplitUpdate(run, workDir, before.version) : undefined;
   try {
     await run.phase('upgrade', () => machine.upgrade(options.candidateDir));
     run.add({ id: 'upgrade.installer', title: 'The candidate\'s installer ran over the existing install and reported a usable install', status: 'pass', detail: 'the same installer the update instructions give, with the candidate\'s tarball' });
@@ -1518,6 +1613,7 @@ async function runUpgradeLeg(run: Run, workDir: string, bundlePath: string, judg
   }
   const back = await run.phase('engine-restart', () => run.agent('await-engine', '--timeout-s 300', 330_000));
   run.add({ id: 'upgrade.engine-ready', title: 'The engine came back ready (models included) after the update', status: back.result?.ok === true ? 'pass' : 'fail', detail: back.result?.ok === true ? `ready after ${Math.round(Number(back.result.readyMs) / 1000)} s` : agentDetail(back), ms: back.ms });
+  if (split) await checkSplitUpdate(run, split, { ok: back.result?.ok === true, ms: back.ms, ...(back.result?.ok === true ? {} : { detail: agentDetail(back) }) });
   if (back.result?.ok !== true) return;
   if (options.upgradeSelftest === 'revert-policy') {
     const fault = await run.agent('upgrade-selftest', '--mode revert-policy', 60_000);
@@ -1545,6 +1641,7 @@ async function runUpgradeLeg(run: Run, workDir: string, bundlePath: string, judg
   if (Date.now() < deadline) await runRelayConsentCheck(run);
   if (Date.now() < deadline) await runExploreLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the control exploration');
   if (Date.now() < deadline) await runConfinementCheck(run); else run.errors.push('the run exceeded its time budget before the anonymous-answer confinement check');
+  await runLimitsLeg(run);
   await collectEvidence(run, options.outDir);
 }
 
@@ -1553,6 +1650,12 @@ async function runUpgradeLeg(run: Run, workDir: string, bundlePath: string, judg
 // Mac only, in relay mode: a second account's Connect on the app approval page is refused, the owner's approves (#1186).
 async function runRelayConsentCheck(run: Run): Promise<void> {
   run.add(await run.phase('mac-consent-owner-proof', () => checkMacConsentOwnerProof(run.machine!, !run.options.skipRelay && !!run.options.config.relay)));
+}
+
+/** Always executed on the candidate's provisioned machine; no carry or skip flag can supply this proof. */
+async function runLimitsLeg(run: Run): Promise<void> {
+  run.stage.limits = await run.phase('limits', () => (run.options.limitsStage ?? runFreshLimits)(run.machine!));
+  for (const check of run.stage.limits.checks) run.add(check);
 }
 
 // Last, because installing the anonymous-answer tools and, on Ubuntu, the administrator's AppArmor profile changes what
@@ -1626,6 +1729,8 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
         if (Date.now() < deadline) await run.inLeg('journeys', () => runJourneyLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the journeys');
         if (Date.now() < deadline) await run.inLeg('archive', () => runArchiveLeg(run, options.outDir, deadline)); else run.errors.push('the run exceeded its time budget before the archive-import leg');
         if (options.archiveScale) await run.inLeg('archive', () => runArchiveScaleLeg(run, options.outDir, deadline));
+        // With the split on, the front must survive a restart on a store set like a real one (rc.4, ops#151).
+        if (options.engineSplit && !options.skipArchive && Date.now() < deadline) await run.inLeg('archive', () => runFrontSteady(run));
         // The backup is made before the control exploration, which ends with Readwise disconnected and its data deleted (its
         // `empty` state): a backup made after it holds no source to restore (#1323, run 42936532388).
         // The restore leg's second machine comes only after the first is done and gone: both drivers run one machine at a time
@@ -1639,6 +1744,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
         if (Date.now() < deadline) await run.inLeg('explore', () => runExploreLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the control exploration');
         if (Date.now() < deadline) await runConfinementCheck(run); else run.errors.push('the run exceeded its time budget before the anonymous-answer confinement check');
         if (Date.now() < deadline) await runServerModeCheck(run); else run.errors.push('the run exceeded its time budget before the Mac server-mode leg');
+        await runLimitsLeg(run);
         await collectEvidence(run, options.outDir);
         if (restore) {
           const prepared: RestorePrepared = restore;
@@ -1700,6 +1806,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
     ...(last.visual ? { visual: last.visual } : {}),
     ...(last.explore ? { explore: last.explore } : {}),
     ...(last.archiveScale ? { archiveScale: last.archiveScale } : {}),
+    ...(last.limits ? { limits: last.limits } : {}),
     ...(upgrading ? {
       upgrade: {
         from: toPhase(run.stages.get('before')!),

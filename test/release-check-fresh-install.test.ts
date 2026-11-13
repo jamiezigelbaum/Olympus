@@ -1,11 +1,11 @@
 import { sourceCard, sourceConnected } from '../scripts/release-check/source-cards.ts';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, realpathSync } from 'node:fs';
+import { mkdtempSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import { canaryVerdict } from '../scripts/release-check/canary.ts';
-import { asFresh, consentBlock, FRESH_LEG, FreshInconclusive, GUARD, SOCKET_READY, redactFreshDetail, runFreshInstall, scopeAbsent, validateFreshSources, type ConsentSnapshot } from '../scripts/release-check/fresh-install.ts';
+import { asFresh, consentBlock, FRESH_LEG, FreshInconclusive, GUARD, heldPorts, LOCAL_FIRST_PORTS, SOCKET_READY, redactFreshDetail, runFreshInstall, scopeAbsent, validateFreshSources, type ConsentSnapshot } from '../scripts/release-check/fresh-install.ts';
 import { parseCdpEndpoint, type FreshDashboard } from '../scripts/release-check/fresh-dashboard.ts';
 import type { LiveSourceSpec, EngineMcp } from '../scripts/release-check/live-accounts.ts';
 import type { Machine } from '../scripts/release-check/machine.ts';
@@ -16,7 +16,7 @@ const sources: LiveSourceSpec[] = ['gmail', 'dropbox'].map(id => ({ id, label: i
 const snapshot = (extra: Partial<ConsentSnapshot> = {}): ConsentSnapshot => ({ url: 'https://accounts.google.com/consent', text: 'Advanced Go to Olympus (unsafe) Continue', password: false, accounts: 0, signedOut: false, ...extra });
 const response = (structured: unknown, ok = true) => ({ ok, structured, text: '' });
 
-function rig(failAt?: string, inconclusive = false) {
+function rig(failAt?: string, inconclusive = false, listening = '') {
   const events: string[] = [];
   // Like a fresh install: no answer model until the privacy choice sets one.
   let modelSet = false;
@@ -29,6 +29,8 @@ function rig(failAt?: string, inconclusive = false) {
     handle: 'test-omarchy', label: 'test', os: 'linux', driver: 'fake',
     exec: async script => {
       commands.push(script);
+      if (script.includes('ss -Hltnp')) return { code: 0, stdout: listening, stderr: '', ms: 0, timedOut: false };
+      if (script.startsWith('ps -o unit=')) return { code: 0, stdout: 'olympus-test-answer-llama.service\n', stderr: '', ms: 0, timedOut: false };
       if (script.includes('rm -f ') && script.includes('/lease')) await step('restore');
       if (script.includes('sh "$HOME/.olympus-canary/install-linux.sh"')) await step('install');
       return { code: 0, stdout: '', stderr: '', ms: 0, timedOut: false };
@@ -36,7 +38,7 @@ function rig(failAt?: string, inconclusive = false) {
     put: async () => {}, get: async () => {}, upgrade: async () => {},
   };
   const dashboard: FreshDashboard = {
-    privacyChoice: async () => { await step('privacy-choice'); modelSet = true; return 'Local models with Venice fallback (local-first, Recommended) saved and verified after reload'; },
+    privacyChoice: async () => { await step('privacy-choice'); modelSet = true; return 'Local models with Venice fallback (local-first, Recommended) saved and verified after reload; privacy check: Venice (venice) saved'; },
     connect: s => step(`${s.id}.connect`), consent: s => step(`${s.id}.consent`), callback: s => step(`${s.id}.callback`), scope: s => step(`${s.id}.scope`),
     indexed: async s => { await step(`${s.id}.first-items`); return 2; },
     close: () => step('dashboard.close'),
@@ -53,17 +55,66 @@ function rig(failAt?: string, inconclusive = false) {
     listTools: async () => ['olympus_search', 'source_answer', 'source_answer_result', 'source_index_status'],
     close: () => step('engine.close'),
   };
-  return { events, commands, machine, dashboard, engine, options: { sources, dashboard: async () => dashboard, engine: async () => engine, sleep: async () => {} } };
+  return { events, commands, machine, dashboard, engine, options: { sources, dashboard: async () => dashboard, engine: async () => engine, sleep: async () => {}, limitsStage: async () => ({ rows: [], checks: [] }) } };
 }
 
 describe('fresh install canary', () => {
+  test('the test Venice key reaches the install as a file through put before the walkthrough, never in a command or a check', async () => {
+    const r = rig();
+    const put: Array<{ to: string; body: string }> = [];
+    r.machine.put = async (from, to) => { put.push({ to, body: readFileSync(from, 'utf8') }); };
+    const key = 'vk-test-not-a-real-key';
+    const { checks } = await runFreshInstall(r.machine, { ...r.options, veniceKey: key });
+    const ids = checks.map(c => c.id);
+    expect(checks.find(c => c.id === 'fresh.venice-key')?.status).toBe('pass');
+    expect(ids.indexOf('fresh.venice-key')).toBeGreaterThan(ids.indexOf('fresh.engine-up'));
+    expect(ids.indexOf('fresh.venice-key')).toBeLessThan(ids.indexOf('fresh.privacy-choice'));
+    expect(put).toEqual([{ to: '/home/zig/.olympus-canary/fresh-run/venice-key', body: `${key}\n` }]);
+    const saved = r.commands.find(c => c.includes('connect venice --api-key-stdin'))!;
+    expect(saved).toContain('venice-key');
+    expect(saved).toContain('rm -f');
+    expect(r.commands.some(c => c.includes(key))).toBe(false);
+    expect(JSON.stringify(checks)).not.toContain(key);
+    const empty = rig();
+    const none = await runFreshInstall(empty.machine, { ...empty.options, veniceKey: '' });
+    expect(none.checks.find(c => c.id === 'fresh.venice-key')?.status).toBe('fail');
+  }, 30_000);
+
+  test('a server left on the local-first model port fails the leg before anything is installed, naming it and its unit (olympus-ops#221)', async () => {
+    expect(LOCAL_FIRST_PORTS).toEqual([28090]);
+    const line = 'LISTEN 0 512 127.0.0.1:28090 0.0.0.0:* users:(("llama-server",pid=885816,fd=3))';
+    expect(heldPorts(`LISTEN 0 4096 127.0.0.1:280900 0.0.0.0:*\n${line}\n`, [28090])).toEqual(['127.0.0.1:28090 is held by llama-server (pid 885816)']);
+    expect(heldPorts('LISTEN 0 4096 127.0.0.1:8010 0.0.0.0:*\n', [28090])).toEqual([]);
+    const r = rig(undefined, false, `${line}\n`);
+    const { checks } = await runFreshInstall(r.machine, r.options);
+    expect(checks).toHaveLength(1);
+    expect(checks[0]).toMatchObject({ id: 'fresh.machine-clear', status: 'fail' });
+    expect(checks[0]!.detail).toContain('127.0.0.1:28090 is held by llama-server (pid 885816), unit olympus-test-answer-llama.service');
+    expect(r.commands.some(c => c.includes('install-linux.sh'))).toBe(false);
+  });
+
+  test('limits always runs after usable install and reports failures before restoring the engine', async () => {
+    const r = rig();
+    const result = await runFreshInstall(r.machine, { ...r.options, limitsStage: async (target, _options, transport) => {
+      expect(transport).toBe(r.machine);
+      await target.exec('limits-test');
+      r.events.push('limits');
+      return { rows: [], checks: [{ id: 'limits.judge.daily_calls', title: 'limits', status: 'fail', detail: 'Raise did not resume judge calls' }] };
+    } });
+    expect(r.events.indexOf('limits')).toBeGreaterThan(r.events.indexOf('dropbox.first-items'));
+    expect(r.events.indexOf('limits')).toBeLessThan(r.events.lastIndexOf('restore'));
+    expect(r.commands.find(c => c.includes('limits-test'))).toContain('sudo -n -u olyfresh');
+    expect(result.limits?.checks[0]?.status).toBe('fail');
+    expect(result.checks.at(-2)?.id).toBe('limits.judge.daily_calls');
+    expect(result.checks.at(-1)).toMatchObject({ id: 'fresh.restore-zig', status: 'pass' });
+  }, 30_000);
   test('named persisted checks run in order, reuse account searches, then restore', async () => {
     const r = rig();
     const { checks } = await runFreshInstall(r.machine, r.options);
     expect(canaryVerdict(checks)).toBe('pass');
     expect(FRESH_LEG).toBe('canary-test-omarchy-fresh');
     expect(checks.map(c => c.id)).toEqual([
-      'fresh.install', 'fresh.engine-up', 'fresh.ask-without-model', 'fresh.dashboard-opens', 'fresh.privacy-choice',
+      'fresh.machine-clear', 'fresh.install', 'fresh.engine-up', 'fresh.ask-without-model', 'fresh.dashboard-opens', 'fresh.privacy-choice',
       ...sources.flatMap(s => ['connect', 'consent', 'callback', 'scope', 'first-items'].map(step => `fresh.${s.id}.${step}`)),
       'live.gmail.status', 'live.dropbox.status', 'live.gmail.known', 'live.dropbox.known',
       'fresh.gmail.answer', 'fresh.gmail.scope-absence', 'fresh.dropbox.answer', 'fresh.dropbox.scope-absence', 'fresh.restore-zig',
@@ -71,6 +122,7 @@ describe('fresh install canary', () => {
     expect(r.events.slice(-3)).toEqual(['engine.close', 'dashboard.close', 'restore']);
     expect(checks.find(c => c.id === 'fresh.gmail.first-items')?.detail).toBe('2 item(s) indexed');
     expect(checks.find(c => c.id === 'fresh.privacy-choice')?.detail).toContain('Local models with Venice fallback (local-first, Recommended)');
+    expect(checks.find(c => c.id === 'fresh.privacy-choice')?.detail).toContain('privacy check: Venice (venice) saved');
     expect(r.events.indexOf('privacy-choice')).toBeLessThan(r.events.indexOf('gmail.connect'));
     expect(r.commands.find(c => c.includes('seq 1 180'))).toContain(SOCKET_READY);
     expect(r.commands.find(c => c.includes('seq 1 120'))).toContain(SOCKET_READY);

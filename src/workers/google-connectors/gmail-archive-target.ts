@@ -94,6 +94,7 @@ export function gmailExportEvidence(archive: ArchiveToIdentify): ArchiveAccountE
 /** The Gmail account's lane, as the runtime has it: nothing of it is the archive layer's. */
 export interface GmailArchiveLane {
   set: TieredStoreSet;
+  reportWait?: ((reason: string) => void) | undefined;
   /** The live lane's own sync options. */
   sync: ConnectorStoreSyncOptions;
   /** The account scope live Gmail writes under (`personal` unless the handle names another). */
@@ -115,8 +116,9 @@ export interface GmailArchiveLane {
  */
 export async function gmailLabelLookup(lane: Pick<GmailArchiveLane, 'set' | 'labelIds'>): Promise<GmailLabelLookup> {
   const rules = lane.set.classification()?.rules ?? [];
-  // No rule names a label: names are enough, and nothing is asked of Gmail.
-  if (!rules.some((rule) => rule.match.kind === 'label')) return { kind: 'none' };
+  // No rule names a label that can apply to Gmail mail: names are enough, and nothing is asked of Gmail. A label rule the
+  // owner scoped to another source (a Readwise tag) never matches Gmail mail, so it must not hold the import.
+  if (!rules.some((rule) => rule.match.kind === 'label' && (rule.source === undefined || rule.source === GMAIL_PROVIDER_ID))) return { kind: 'none' };
   let found: ReadonlyMap<string, string> | { unavailable: string; minimum?: number } | undefined;
   try {
     found = await lane.labelIds?.();
@@ -154,7 +156,10 @@ export function gmailArchiveTarget(options: GmailArchiveTargetOptions): ArchiveS
     identify: gmailExportEvidence,
     input(archive: ArchiveConnectorInput): SourceConnectorInput {
       const lane = current ?? laneNow();
-      return mboxGmailInput(archive, {
+      return mboxGmailInput({ ...archive, waitForProvider: (reason, detail) => {
+        lane.reportWait?.(reason);
+        archive.waitForProvider?.(reason, detail);
+      } }, {
         ...(lane.build ? { build: lane.build } : {}),
         ...(lane.match ? { match: lane.match } : {}),
         labels: () => gmailLabelLookup(lane),

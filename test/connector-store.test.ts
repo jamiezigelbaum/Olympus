@@ -2627,6 +2627,9 @@ describe('createConnectorStoreCorpusAdapter', () => {
     const older = Array.from({ length: 12 }, (_, index) =>
       chatItem(`old-${index}`, `test message number ${index} about the test run`, `2026-07-01T10:${String(10 + index).padStart(2, '0')}:00.000Z`));
     const newest = chatItem('fresh', 'totally unrelated fresh arrival', '2026-07-05T22:08:31.000Z');
+    // The second newest matches nothing either: both pins must be appended,
+    // and the second must not evict the first (it did when hits were full).
+    const secondNewest = chatItem('fresh-2', 'another unrelated arrival', '2026-07-05T21:00:00.000Z');
     // Newer than 'fresh' but chunk-less (media awaiting transcription): the
     // recency lane must skip it rather than pin an extraction gap.
     const chunkless: RawItem = {
@@ -2639,11 +2642,11 @@ describe('createConnectorStoreCorpusAdapter', () => {
       async authenticate() {},
       listItems(): AsyncIterable<SourceConnectorListPage> {
         return (async function* (): AsyncGenerator<SourceConnectorListPage> {
-          yield { items: [...older, newest, chunkless], done: true };
+          yield { items: [...older, secondNewest, newest, chunkless], done: true };
         })();
       },
       async fetchItem(localItemId: string): Promise<RawItem> {
-        const all = [...older, newest, chunkless];
+        const all = [...older, secondNewest, newest, chunkless];
         const found = all.find((item) => item.identity.localItemId === localItemId);
         if (!found) throw new Error(`no item ${localItemId}`);
         return found;
@@ -2674,6 +2677,10 @@ describe('createConnectorStoreCorpusAdapter', () => {
     // can seat them in the pack (withReservedRecencySeats).
     expect(freshHit.newestInStore).toBe(1);
     expect(response.hits.flatMap((hit) => hit.newestInStore ?? []).sort()).toEqual([1, 2]);
+    expect(ids).toContain('fresh-2');
+    // Both were appended, not ranked, and say so for pool replay.
+    expect(response.hits.filter((hit) => hit.pinAppended).map((hit) => hit.sourceItem.providerItemId).sort()).toEqual(['fresh', 'fresh-2']);
+    expect(ids).toHaveLength(5);
     // recentItems returns newest-first, skips chunk-less items, and is capped.
     const recent = store.recentItems(3);
     expect(recent[0]!.sourceItem.providerItemId).toBe('fresh');

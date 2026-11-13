@@ -129,13 +129,47 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
         await sleep(timings.pollMs ?? 1000);
       }
     };
-    const click = async (expression: string) => {
-      await until(async () => !!await panel<boolean>(`(() => { const e=${expression}; if(!e || e.disabled || !(${visible})(e)) return false; e.click(); return true; })()`, Boolean), 'dashboard control did not appear');
+    // On a timeout the error names the control and whether it was absent, disabled or hidden, plus what `seen` reads
+    // from the page (the controls that were there instead), so a moved control is named in the report (olympus-ops#222).
+    const click = async (expression: string, what = 'dashboard control', seen?: string) => {
+      try {
+        await until(async () => !!await panel<boolean>(`(() => { const e=${expression}; if(!e || e.disabled || !(${visible})(e)) return false; e.click(); return true; })()`, Boolean), `${what} did not appear`);
+      } catch (error) {
+        // The host document answers too, and has none of the panel's controls: prefer a frame that has the control or the row.
+        const read = async (expression: string, found: (value: string) => boolean) => await panel<string>(expression, (value) => typeof value === 'string' && found(value)).catch(() => undefined)
+          ?? await panel<string>(expression, (value) => typeof value === 'string').catch(() => undefined);
+        const state = await read(`(() => { const e=${expression}; return !e ? 'absent' : e.disabled ? 'disabled' : !(${visible})(e) ? 'hidden' : 'present'; })()`, (value) => value !== 'absent');
+        const there = seen ? await read(seen, (value) => !value.startsWith('no ') && !value.endsWith(': ')) : undefined;
+        throw new Error(`${what} did not appear${state ? ` (${state})` : ''}${there ? `; ${there}` : ''}`, { cause: error });
+      }
     };
     const byKey = (key: string) => `[...document.querySelectorAll('[data-key]')].find(e=>e.getAttribute('data-key')===${JSON.stringify(key)})`;
+    const clickKey = (key: string) => click(byKey(key), `control ${key}`, `'controls with keys: ' + [...new Set([...document.querySelectorAll('[data-key]')].map(e=>e.getAttribute('data-key').replace(/:[^:]*$/, ':…')))].slice(0, 20).join(', ')`);
     const sourceAction = async (s: LiveSourceSpec, pattern: string) => {
       const row = `[...document.querySelectorAll('.source')].find(e=>e.querySelector('.source-name')?.textContent?.trim()===${JSON.stringify(s.label)})`;
-      await click(`(()=>{const row=${row}; if(!row)return null; const e=[...row.querySelectorAll('button')].find(e=>/${pattern}/i.test(e.textContent.trim())); const menu=row.querySelector('details');if(e && menu && menu.contains(e) && !menu.open)menu.querySelector('summary').click();return e;})()`);
+      // Sources lists a connected source as a short row whose Details opens its full row (with Choose mail or
+      // Choose folders, Sync now) on Home; Home lists no sources otherwise (#1085). Go there when this page has no such row.
+      if (!await panel<boolean>(`!!${row}`, Boolean)) {
+        const details = `document.querySelector('[data-source-row^=${JSON.stringify(`${s.id}.`)}] a[data-source-details]')?.getAttribute('href')`;
+        let href = await panel<string>(details, v => typeof v === 'string' && v.length > 0);
+        // Best effort: if Sources or the landing does not load, the press below fails naming what the page showed.
+        if (!href) {
+          await reload('/dashboard?connect', `!!document.querySelector('.srcrows')`).catch(() => undefined);
+          href = await panel<string>(details, v => typeof v === 'string' && v.length > 0);
+        }
+        if (href) await reload(href, `!!${row}`).catch(() => undefined);
+      }
+      try {
+        await click(`(()=>{const row=${row}; if(!row)return null; const e=[...row.querySelectorAll('button')].find(e=>/${pattern}/i.test(e.textContent.trim())); const menu=row.querySelector('details');if(e && menu && menu.contains(e) && !menu.open)menu.querySelector('summary').click();return e;})()`);
+      } catch (error) {
+        // Say what the page showed instead: the rows' names, and this row's buttons with their state and reason.
+        // A document without source rows (the sandbox host page) is skipped, so the panel frame is the one described.
+        const seen = await panel<string>(`(()=>{if(!document.querySelector('.source'))return null; const row=${row}; if(!row) return 'no row named ${s.label.replace(/'/g, '')}; rows: '+[...document.querySelectorAll('.source .source-name')].map(e=>e.textContent.trim()).join(', ');
+          const buttons=[...row.querySelectorAll('button')].map(b=>b.textContent.trim()+(b.disabled?' (disabled)':'')).join(', ');
+          const reason=[...row.querySelectorAll('.row-reason, .reason, .muted')].map(e=>e.textContent.trim()).filter(Boolean).join(' / ');
+          return 'buttons: '+(buttons||'none')+(reason?'; row says: '+reason:'');})()`, v => typeof v === 'string');
+        throw new Error(`${s.label} control /${pattern}/ did not appear${seen ? ` (${seen.slice(0, 240)})` : ''}`, { cause: error });
+      }
     };
     // Sources not yet connected are offered as tiles in the Add a source sheet: pick the tile, then press
     // that source's Connect. A build that still lists unconnected sources as rows uses the row's Connect.
@@ -217,23 +251,23 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
       folderMode: async folder => {
         await openTimingFolder(folder);
         const mode = await pressedMode();
-        await click(byKey('picker:cancel'));
+        await clickKey('picker:cancel');
         return mode;
       },
       setFolderMode: async (folder, mode) => {
         await openTimingFolder(folder);
         const before = await pressedMode();
-        if (before === mode) { await click(byKey('picker:cancel')); return; }
+        if (before === mode) { await clickKey('picker:cancel'); return; }
         // The selected segment toggles off to restore an inherited choice exactly.
         await click(`${folderRow(ON_DEMAND_FOLDER)}?.querySelector('[data-key$=":${mode || before}"]')`);
-        await click(byKey('picker:save'));
+        await clickKey('picker:save');
         await until(async () => {
           await panel<boolean>(`(() => {const e=document.querySelector('[data-unlock-here]'); if(e && !e.disabled && (${visible})(e)){e.click();return true;}return false;})()`, Boolean);
-          return !!await panel<boolean>(`!document.querySelector('[data-key="picker:save"]') && !!document.querySelector('.srcrows')`, Boolean);
+          return !!await panel<boolean>(`!document.querySelector('[data-key="picker:save"]') && !!document.querySelector('.srcrows, .source')`, Boolean);
         }, 'folder mode was not saved');
         await openTimingFolder(folder);
         const saved = await pressedMode();
-        await click(byKey('picker:cancel'));
+        await clickKey('picker:cancel');
         if (saved !== mode) throw new Error(`folder mode did not persist: expected ${mode || 'inherited'}, saw ${saved || 'inherited'}`);
       },
       sync: async folder => {
@@ -285,13 +319,40 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
           const said = await panel<string>(`document.querySelector('form[data-first-run-privacy] [data-action-message]')?.textContent?.trim() ?? ''`, value => typeof value === 'string' && value.length > 0).catch(() => undefined);
           throw new Error(said ? `first-run privacy choice was not saved: the dashboard said "${said}"` : `${(error as Error).message} (the dashboard showed no message)`);
         }
+        // Stay in the walkthrough for the separate, explicit judge approval.
+        // A local-first answer choice alone never approves Venice judging.
+        await click(`document.querySelector('[data-first-run-sheet] [data-setup-next]')`);
+        const judgeShown = !!await panel<boolean>(`(() => { const sheet=document.querySelector('[data-first-run-sheet]'); if(!sheet) return null; const e=sheet.querySelector('form[data-first-run-judge]'); return !!e && !e.closest('[data-setup-panel]').hidden; })()`, value => typeof value === 'boolean');
+        // Venice when this install can use it; a machine without a Venice key gets the dashboard's
+        // own refusal, and the leg then saves "This computer", naming both in the detail.
+        let judgeChoice = 'not shown';
+        const saveJudge = async (choice: 'venice' | 'local') => {
+          await click(`document.querySelector('form[data-first-run-judge] input[value="${choice}"]')`);
+          await click(`document.querySelector('button[form="first-run-judge-form"]')`);
+          try {
+            await until(async () => !!await panel<boolean>(`(() => { const e=document.querySelector('[data-first-run-sheet] [data-model-check]'); return !!e && !e.closest('[data-setup-panel]').hidden; })()`, Boolean), 'first-run privacy check choice was not saved');
+            return undefined;
+          } catch (error) {
+            const said = await panel<string>(`document.querySelector('form[data-first-run-judge] [data-action-message]')?.textContent?.trim() ?? ''`, value => typeof value === 'string' && value.length > 0).catch(() => undefined);
+            return said ? `the dashboard said "${said}"` : (error as Error).message;
+          }
+        };
+        if (judgeShown) {
+          const refused = await saveJudge('venice');
+          if (refused === undefined) judgeChoice = 'Venice (venice) saved';
+          else {
+            const local = await saveJudge('local');
+            if (local !== undefined) throw new Error(`first-run privacy check choice was not saved: Venice: ${refused}; this computer: ${local}`);
+            judgeChoice = `This computer (local) saved after Venice was refused: ${refused}`;
+          }
+        }
         // Saving restarts the worker. Retry fresh documents across that handoff;
         // only the applied policy, never the submitted radio's state, proves persistence:
         // the engine's own setup status must no longer report the choice pending (every
         // release renders it), and a build that shows the answer mode must show this one.
         await until(async () => await navigate('/dashboard?keys') && !!await panel<boolean>(`(() => { const s=document.querySelector('[data-model-setup-status]'); if(!s || document.querySelector('form[data-first-run-privacy]')) return false; let view; try { view=JSON.parse(s.dataset.modelSetupStatus); } catch { return false; } if(view.privacy_choice_pending) return false; const shown=document.querySelector('[data-answer-mode]'); return !shown || shown.getAttribute('data-answer-mode')===${JSON.stringify(recommended.id)}; })()`, Boolean), 'first-run privacy choice did not persist after reload');
         await reload();
-        return `${recommended.label} (${recommended.id}, Recommended) saved and verified after reload`;
+        return `${recommended.label} (${recommended.id}, Recommended) saved and verified after reload; privacy check: ${judgeChoice}`;
       },
       connection: async s => {
         await reload('/dashboard?connect', `!!document.querySelector('.srcrows')`);
@@ -372,7 +433,7 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
             await click(i === parts.length - 1 ? `${row}?.querySelector('[data-key$=":ingest"]')` : `${row}?.querySelector('[data-key^="picker:open:"]')`);
           }
         }
-        await click(byKey('picker:save'));
+        await clickKey('picker:save');
         await until(async () => (await card(s))?.scope_selection?.status === 'approved', 'scope was not saved');
         await reload();
         await sourceAction(s, 'Choose (mail|folders)|Scope|Edit scope');
@@ -387,7 +448,7 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
           const leaf = parts.at(-1)!;
           await until(async () => !!await panel<boolean>(`!!${folderRow(leaf)}?.querySelector('[data-key$=":ingest"][aria-pressed=true]')`, Boolean), 'Dropbox scope changed after reload');
         }
-        await click(byKey('picker:cancel'));
+        await clickKey('picker:cancel');
       },
       indexed: async s => { const c = await card(s); return connected(c) ? Number(c.coverage?.indexed_items ?? 0) : 0; },
       close: cleanup,

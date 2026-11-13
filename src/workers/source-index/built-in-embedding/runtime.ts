@@ -3,8 +3,9 @@
 // (never bundled: the plugin ships as one JavaScript file and the native
 // binding is per-platform), so a test can substitute any `EmbeddingRuntime`.
 
+import { realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 
 export interface EmbeddingBatch {
   inputIds: BigInt64Array;
@@ -52,8 +53,7 @@ interface OrtModule {
 export function onnxRuntimeFromDirectory(runtimeDir: string): EmbeddingRuntime {
   return {
     async createSession(modelPath, options) {
-      const requireFromPack = createRequire(join(runtimeDir, 'olympus-runtime.json'));
-      const ort = requireFromPack('onnxruntime-node') as OrtModule;
+      const ort = requireOnnxRuntimeFromPack(runtimeDir);
       const session = await ort.InferenceSession.create(modelPath, {
         executionProviders: ['cpu'],
         intraOpNumThreads: options.threads,
@@ -95,4 +95,23 @@ export function onnxRuntimeFromDirectory(runtimeDir: string): EmbeddingRuntime {
       };
     },
   };
+}
+
+/**
+ * Only the verified pack counts. Bun's resolver falls through to its global
+ * install cache when the pack is missing, which once let an unpinned
+ * onnxruntime-node load on one thread and not another; refuse anything that
+ * did not resolve inside `<runtimeDir>/node_modules`.
+ */
+function requireOnnxRuntimeFromPack(runtimeDir: string): OrtModule {
+  const missing = () => new Error(`The ONNX Runtime pack is not installed in ${runtimeDir}.`);
+  let root: string;
+  let resolved: string;
+  const requireFromPack = createRequire(join(runtimeDir, 'olympus-runtime.json'));
+  try {
+    root = realpathSync(join(runtimeDir, 'node_modules'));
+    resolved = realpathSync(requireFromPack.resolve('onnxruntime-node'));
+  } catch { throw missing(); }
+  if (!resolved.startsWith(root + sep)) throw missing();
+  return requireFromPack(resolved) as OrtModule;
 }

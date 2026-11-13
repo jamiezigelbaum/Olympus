@@ -37,7 +37,8 @@ import {
   type SnifferTarget,
 } from './sniffer-resolver.ts';
 import { existsSync, rmSync } from 'node:fs';
-import { retiredEmbeddingPrefilterPaths, tierSnifferPathForLedger } from './tier-ledger-path.ts';
+import { retireStatePath } from '../../core/boot-progress.ts';
+import { retiredEmbeddingPrefilterPaths, TIER_LEDGER_SQLITE_STORE_ID, tierSnifferPathForLedger } from './tier-ledger-path.ts';
 import { tierSetPlannerForLedger, type AutomaticTierMoveContext } from './installed-tier-classification-registry.ts';
 import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
 import {
@@ -459,6 +460,7 @@ export class TierSnifferService {
   private passGeneration = 0;
   /** The last reported reason a tick asked nothing (or 'asking'). */
   private waitingReason: string | undefined;
+  private cloudLimitGeneration = 0;
   private lastBacklogLogMs = Number.NEGATIVE_INFINITY;
   private backlogCache: { counts: BacklogCounts; atMs: number } | undefined;
   private lowerMovesCache: { count: number; atMs: number; pendingItems: number } | undefined;
@@ -528,6 +530,14 @@ export class TierSnifferService {
     if (this.stopped || this.continuation) return;
     this.continuation = this.timers().setTimeout(() => { this.continuation = undefined; void this.scheduledRun(); }, 0);
     unrefTimer(this.continuation);
+  }
+
+  /** The owner lifted a cloud stop; keep the same lane/model and release its terminal hold. */
+  resumeCloudLimit(): void {
+    this.cloudLimitGeneration++;
+    this.notAnsweringPasses = 0;
+    this.notAnsweringUntilMs = 0;
+    this.wake();
   }
 
   /** A pass the timer or a wake asked for: held back while the model is not answering. */
@@ -879,6 +889,7 @@ export class TierSnifferService {
   }
 
   async runOnce(): Promise<TierSnifferTick> {
+    const cloudLimitGeneration = this.cloudLimitGeneration;
     if (this.stopped) return { state: 'skipped_running' };
     if (this.running) {
       // A pass that never settles would hold every later tick off for good
@@ -950,8 +961,9 @@ export class TierSnifferService {
     // Any call that answered clears the hold, even when the pass then
     // stopped on failures: a model that is making progress is never held.
     if (this.waitingReason === 'cloud_stopped') {
-      // Terminal: only an explicit run or the setup reload may resume it.
-      this.notAnsweringUntilMs = Infinity;
+      // An owner continuation may arrive while this pass is unwinding its stop.
+      this.notAnsweringUntilMs = cloudLimitGeneration === this.cloudLimitGeneration ? Infinity : 0;
+      if (this.notAnsweringUntilMs === 0) this.wake();
     } else if (tick.state === 'ran' && tick.report.calls > tick.report.failedCalls) {
       this.notAnsweringPasses = 0;
       this.notAnsweringUntilMs = 0;
@@ -1282,11 +1294,17 @@ export class TierSnifferService {
     }
     for (const path of [...targets.map(target => target.ledger.dbPath), this.options.classificationLedgerPath]) {
       if (path === ':memory:' || this.retiredPrefilterCleaned.has(path)) continue;
+      // Moved aside, not deleted, until the upgrade that retired them commits
+      // (core/boot-progress.ts retireStatePath, #1563).
       const retired = retiredEmbeddingPrefilterPaths(path);
-      for (const directory of retired.directories) {
-        rmSync(directory, { recursive: true, force: true });
+      for (const directory of retired.directories) retireStatePath(process.env, 'embedding_prefilter_weights', directory);
+      // Only a ledger whose -wal is fully written into it is moved: what a
+      // busy checkpoint leaves in the -wal would be lost. It stays as it is,
+      // and the next start tries again.
+      if (checkpointRetiredLedger(retired.ledger)) {
+        retireStatePath(process.env, TIER_LEDGER_SQLITE_STORE_ID, retired.ledger);
+        for (const suffix of ['-wal', '-shm']) rmSync(`${retired.ledger}${suffix}`, { force: true });
       }
-      for (const suffix of ['', '-wal', '-shm']) rmSync(`${retired.ledger}${suffix}`, { force: true });
       this.retiredPrefilterCleaned.add(path);
     }
     return targets;
@@ -2073,4 +2091,26 @@ export function moveFailureName(error: unknown): string {
   if (!(error instanceof Error)) return 'unknown';
   if (error.constructor !== Error) return error.name || error.constructor.name || 'Error';
   return /^[a-z][a-z ]{0,39}$/.test(error.message) ? error.message : 'Error';
+}
+
+/**
+ * The retired ledger keeps only its main file aside, so what its -wal holds
+ * is written into it first. Returns whether the main file now holds
+ * everything: no -wal, or a checkpoint that was not busy and wrote every
+ * frame. A file that will not open, or a busy checkpoint, is false.
+ */
+function checkpointRetiredLedger(path: string): boolean {
+  if (!existsSync(`${path}-wal`)) return true;
+  if (!existsSync(path)) return false;
+  let db: Database | undefined;
+  try {
+    db = new Database(path);
+    db.exec('PRAGMA busy_timeout = 10000;');
+    const result = db.query('PRAGMA wal_checkpoint(TRUNCATE)').get() as { busy: number; log: number; checkpointed: number } | null;
+    return result !== null && result.busy === 0 && result.log === result.checkpointed;
+  } catch {
+    return false;
+  } finally {
+    db?.close();
+  }
 }

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { Database } from 'bun:sqlite';
 import { createTestClock } from './helpers/test-clock.ts';
 import { browserSeedPlan, browserTimingSeeds, parseTimingSeedConfig, ON_DEMAND_FOLDER, type BrowserSeedUi, type TimingFile } from '../scripts/release-check/on-demand-seeds.ts';
-import { providerListingExpression } from '../scripts/release-check/on-demand-browser.ts';
+import { providerListingExpression, driveFolderSearchUrl, DRIVE_SEARCH_SETTLED } from '../scripts/release-check/on-demand-browser.ts';
 import { validateCanaryTimingMode, parseCanaryAccounts, renderCanaryHtml, type CanaryReport } from '../scripts/release-check/canary.ts';
 import { runFreshOnDemand } from '../scripts/release-check/fresh-on-demand.ts';
 import { enableTimingSplit, resolveTimingFile } from '../scripts/release-check/on-demand-probe.ts';
@@ -87,6 +87,29 @@ describe('fresh read-on-demand without write tokens', () => {
       window.document.querySelector('[role=grid]')!.append(window.document.querySelector('[role=row]')!.cloneNode(true));
       expect(new Function('document', `return ${providerListingExpression('google_drive')}`)(window.document)).toEqual([name, name]);
     } finally { await window.happyDOM.close(); }
+  });
+
+  test('Drive folder search opens by address and settles on results or the first-run empty state', async () => {
+    expect(driveFolderSearchUrl(ON_DEMAND_FOLDER)).toBe(`https://drive.google.com/drive/u/0/search?q=${encodeURIComponent(`type:folder "${ON_DEMAND_FOLDER}"`)}`);
+    const settled = (path: string, html: string, shownBar = false) => {
+      const window = new Window({ url: `https://drive.google.com${path}` });
+      window.document.body.innerHTML = html;
+      // happy-dom lays nothing out, so every element measures 0x0 (hidden) unless given a size.
+      if (shownBar) for (const bar of window.document.querySelectorAll('[role=progressbar]')) (bar as any).getBoundingClientRect = () => ({ width: 100, height: 4 });
+      try { return new Function('document', 'location', 'getComputedStyle', `return ${DRIVE_SEARCH_SETTLED}`)(window.document, window.location, window.getComputedStyle.bind(window)); }
+      finally { void window.happyDOM.close(); }
+    };
+    expect(settled('/drive/u/0/search', '<div role="grid"></div>')).toBe(true);
+    expect(settled('/drive/u/0/search', '<div>None of your files or folders matched this search</div>')).toBe(true);
+    // Drive keeps a hidden progressbar in the page at rest; only a visible one means still loading.
+    expect(settled('/drive/u/0/search', '<div role="progressbar"></div><div>No results</div>')).toBe(true);
+    expect(settled('/drive/u/0/search', '<div role="progressbar"></div><div role="grid"></div>', true)).toBe(false);
+    // The storage meter is a visible bar with a value; it never means loading.
+    expect(settled('/drive/u/0/search', '<div role="progressbar" aria-valuenow="1"></div><div role="grid"></div>', true)).toBe(true);
+    // The empty-state text is final even while another visible bar is on the page.
+    expect(settled('/drive/u/0/search', '<div role="progressbar"></div><div>No results</div>', true)).toBe(true);
+    expect(settled('/drive/u/0/my-drive', '<div role="grid"></div>')).toBe(false);
+    expect(settled('/drive/u/0/search', '<div>Loading</div>')).toBe(false);
   });
 
   test('metadata resolution uses listed provider identity/version, deduplicates twins and refuses ambiguity', () => {

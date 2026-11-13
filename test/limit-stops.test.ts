@@ -89,6 +89,26 @@ describe('limit stops', () => {
     try { expect(reader.query('SELECT name FROM sqlite_master').all()).toEqual([]); } finally { reader.close(); }
   });
 
+  test('upgrades version-one stops without losing amounts and persists the reason and continuation', () => {
+    const db = new Database(':memory:');
+    try {
+      db.exec(`CREATE TABLE schema_version (store_id TEXT PRIMARY KEY, version INTEGER NOT NULL, applied_at TEXT NOT NULL);
+        INSERT INTO schema_version VALUES ('limit-stops', 1, '2026-11-12T00:00:00Z');
+        CREATE TABLE limit_stops (id TEXT NOT NULL, subject TEXT NOT NULL, since TEXT NOT NULL,
+          "limit" REAL, used REAL, waiting_json TEXT, to_continue_json TEXT, resumes_at TEXT, cleared_at TEXT, PRIMARY KEY (id, subject));`);
+      db.query('INSERT INTO limit_stops (id, subject, since, "limit", used) VALUES (?, ?, ?, ?, ?)')
+        .run(stop.id, stop.subject, stop.since, stop.limit, stop.used);
+      const prior = { id: stop.id, subject: stop.subject, since: stop.since, limit: stop.limit, used: stop.used };
+      expect(listOpenLimitStops(db, AT)).toEqual([prior]);
+      initializeLimitStops(db);
+      expect(listOpenLimitStops(db, AT)).toEqual([prior]);
+      reportLimitStop({ ...prior, reason: 'fixture_cap', continue: 'run_once' }, db);
+      expect(listOpenLimitStops(db, AT)).toEqual([{ ...prior, reason: 'fixture_cap', continue: 'run_once' }]);
+      initializeLimitStops(db);
+      expect(db.query("SELECT version FROM schema_version WHERE store_id = 'limit-stops'").get()).toEqual({ version: 2 });
+    } finally { db.close(); }
+  });
+
   test('unregistered ids throw and write nothing', () => {
     const db = new Database(':memory:');
     try {

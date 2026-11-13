@@ -5,7 +5,9 @@ import {
   rerankCandidates,
   rerankPassage,
   rerankPoolSize,
+  RERANK_POOL_STORE_DEPTH,
   type EvidenceRerankAudit,
+  type EvidenceRerankOutcome,
   type EvidenceReranker,
   type RerankTimers,
 } from './evidence-reranker.ts';
@@ -54,6 +56,8 @@ import {
   resolveAskSearchBudgetMs,
   resolveLaneTimeoutMs,
   routeSourceIndexSearch,
+  routedHitCandidateId,
+  type SeatingLane,
   type SourceIndexRoutedCorpusTiming,
   type SourceIndexRoutedMatchCount,
   type SourceIndexRoutedSearchHit,
@@ -71,6 +75,7 @@ import {
   type RetrievalDegradation,
   type RetrievalLaneAudit,
   type SourceIndexProvenance,
+  type SourceIndexCandidateId,
   type SourceItemIdentity,
   type SourceCitationMetadata,
   type SourceSensitivity,
@@ -109,6 +114,8 @@ export interface LocalContentBlock {
   facts?: readonly StructuredEvidenceFact[];
   truncated?: boolean;
   coverageGaps?: readonly string[];
+  // This exact stored item version is held by the source byte-size limit.
+  sizeHeld?: boolean;
   // The owner chose to keep this item's contents unread (a folder set to
   // Names only, or a metadata-only ingestion rule). Its name still matches;
   // its missing text is a settled choice, not a failed read, and coverage
@@ -233,6 +240,13 @@ export interface BuildEvidencePackInput {
    */
   reranker?: EvidenceReranker;
   rerankTimers?: RerankTimers;
+  // Internal eval observers; never part of the EvidencePack contract.
+  onSeatingLanes?: (lanes: readonly SeatingLane[], ordinal: number) => void;
+  onRerankScores?: (entries: readonly { candidateId: SourceIndexCandidateId; score: number }[], outcome: EvidenceRerankOutcome) => void;
+  // Optional experimental store allocation; ordinary builds use the shared default.
+  poolAllocation?: { storeDepth: number };
+  // Eval capture's adapter depth, independent of pool/pack seats.
+  storeSearchDepth?: number;
   now?: () => Date;
 }
 
@@ -359,7 +373,7 @@ async function buildPreparedEvidencePackDetailed(
   const retrievalLimit = reranker ? rerankPoolSize(reranker, input.maxResults) : input.maxResults;
   const routed = input.selectedItems?.length
     ? selectedItemsToRoutedSlice(input)
-    : await runRoutedSearches(input, retrievalLimit);
+    : await runRoutedSearches(input, retrievalLimit, input.poolAllocation ?? (reranker ? { storeDepth: RERANK_POOL_STORE_DEPTH } : undefined));
   // A build can fan out more than once (the literal query plus planner
   // expansions), and each routed run judged its hits against its own ledger
   // snapshot. One more pass over the merged hits puts the whole pack on ONE
@@ -382,13 +396,24 @@ async function buildPreparedEvidencePackDetailed(
   const searchedSources = new Set(defaultSourceCorpusRegistryConfig().corpora
     .filter((corpus) => searched.has(corpus.corpusId)).map((corpus) => corpus.sourceId));
   const limitStopGaps: string[] = [];
+  // Searched corpora whose counts-only size notice is in this answer.
+  const sizeNoticeCorpora = new Set<string>();
   const limits = registeredLimits();
   const now = (input.now?.() ?? new Date()).getTime();
   for (const stop of input.limitStops ?? []) {
     const limit = limits.find((entry) => entry.id === stop.id);
-    if (limit?.scope !== 'source' || (stop.resumesAt && Date.parse(stop.resumesAt) <= now)) continue;
+    if ((limit?.scope !== 'source' && !(limit?.scope === 'extraction' && limit.kind === 'size')) || (stop.resumesAt && Date.parse(stop.resumesAt) <= now)) continue;
     if (limitStopSubjects(stop).some((subject) => searched.has(subject) || searchedSources.has(subject))) {
-      limitStopGaps.push(`${limit.label} since ${stop.since}; new items from this source may be missing from this answer`);
+      const heldFiles = stop.waiting?.items ?? 0;
+      if (limit.kind === 'size') {
+        const subjects = new Set(limitStopSubjects(stop));
+        for (const corpus of defaultSourceCorpusRegistryConfig().corpora) {
+          if (subjects.has(corpus.corpusId) || subjects.has(corpus.sourceId)) sizeNoticeCorpora.add(corpus.corpusId);
+        }
+      }
+      limitStopGaps.push(limit.kind === 'size'
+        ? `${limit.label}: ${heldFiles} ${heldFiles === 1 ? 'file' : 'files'} held because they are too large; not read. Raise the size limit to continue.`
+        : `${limit.label} since ${stop.since}; new items from this source may be missing from this answer`);
     }
   }
   extractionGaps.push(...limitStopGaps);
@@ -469,13 +494,16 @@ async function buildPreparedEvidencePackDetailed(
       }
       scorable.push(entry);
     }
-    const reranked = await rerankCandidates({
+    const reranked = await rerankCandidates<(typeof pool)[number]>({
       reranker,
       query: literalSearchQuery(input),
       items: scorable,
       passageOf: (entry) => rerankPassage(entry.provenance.citation?.title, entry.content?.chunks ?? []),
       keep: input.maxResults,
       ...(input.rerankTimers ? { timers: input.rerankTimers } : {}),
+      ...(input.onRerankScores ? { onScores: (entries, outcome) => input.onRerankScores!(
+        entries.map(({ item, score }) => ({ candidateId: routedHitCandidateId(item.hit), score })), outcome,
+      ) } : {}),
     });
     // Denied items carry no text, but every one is still counted below, so the
     // policy gap and the content-free lane audits do not depend on the cut.
@@ -534,7 +562,14 @@ async function buildPreparedEvidencePackDetailed(
     candidates.push(candidate);
     candidateCorpusIds.push(hit.corpusId);
 
-    const gap = extractionGapFor(hit, provider !== undefined, content);
+    // The source's counts-only size notice explains these unread files. Do
+    // not copy a held file's title or locator into the answer's coverage.
+    // A file held by a reader's own ceiling, with no registered source size
+    // stop, keeps a content-free gap so its being unread is never silent.
+    const sizeHeld = content?.sizeHeld === true && content.chunks.length === 0;
+    const gap = !sizeHeld ? extractionGapFor(hit, provider !== undefined, content)
+      : sizeNoticeCorpora.has(hit.corpusId) ? undefined
+        : `A file (${hit.corpusId}) was located but is too large to read; not read.`;
     candidateExtractionGapIndexes.push(gap ? [extractionGaps.length] : []);
     if (gap) extractionGaps.push(gap);
   }
@@ -740,7 +775,7 @@ function contentFreePolicyLaneAudits(
   }));
 }
 
-function questionHasTemporalIntent(input: Pick<BuildEvidencePackInput, 'question' | 'searchQuery'>): boolean {
+export function questionHasTemporalIntent(input: Pick<BuildEvidencePackInput, 'question' | 'searchQuery'>): boolean {
   return hasTemporalIntent(input.question) || hasTemporalIntent(input.searchQuery ?? '');
 }
 
@@ -862,6 +897,7 @@ function selectedItemsToRoutedSlice(input: BuildEvidencePackInput): RoutedSearch
 async function runRoutedSearches(
   input: BuildEvidencePackInput,
   retrievalLimit: number = input.maxResults,
+  poolAllocation?: { storeDepth: number },
 ): Promise<RoutedSearchSlice> {
   const literalQuery = literalSearchQuery(input);
   // Kicked off BEFORE the literal search so the two overlap rather than queue.
@@ -870,7 +906,7 @@ async function runRoutedSearches(
     : undefined;
 
   const budget = searchBudget(input);
-  const literalRun = await runRoutedSearch(input, literalQuery, 1, retrievalLimit, budget.firstLaneTimeoutMs(), budget.deadlineAtMs);
+  const literalRun = await runRoutedSearch(input, literalQuery, 1, retrievalLimit, budget.firstLaneTimeoutMs(), budget.deadlineAtMs, poolAllocation);
   if (!pendingPlan) return literalRun;
 
   if (isStrongLiteralRun(literalRun, input.maxResults)) {
@@ -894,31 +930,11 @@ async function runRoutedSearches(
       recordSourceAnswerQueryPlannerDisposition('search_budget_spent');
       break;
     }
-    runs.push(await runRoutedSearch(input, query, runs.length + 1, retrievalLimit, laneTimeoutMs, budget.deadlineAtMs));
+    runs.push(await runRoutedSearch(input, query, runs.length + 1, retrievalLimit, laneTimeoutMs, budget.deadlineAtMs, poolAllocation));
   }
   if (runs.length === 1) return literalRun;
 
-  const queries = [literalQuery, ...expansions];
-  const ranked = fuseRankedCandidateLanes({
-    lanes: runs.map((run, index) => ({ name: queries[index]!, items: run.hits })),
-    getId: (hit) => `${hit.corpusId}:${hit.sourceItem.localItemId || hit.sourceItem.providerItemId}`,
-    // Rank the whole bounded union before allocating seats by corpus. Taking
-    // the cut here could discard a corpus before the shared budget sees it.
-    limit: runs.reduce((total, run) => total + run.hits.length, 0),
-    // Scale-free, and deliberately so. Adapter `score` is adapter-local — a
-    // negated bm25 rank in one corpus, a sub-lane RRF sum in another — and RRF
-    // exists precisely so those are never compared. Comparing them here decided
-    // the pack cut by scoring scale rather than relevance, dropping a whole
-    // corpus family from the analyst's evidence with nothing in coverage to
-    // record it.
-    tieBreaker: (left, right) => String(left.id).localeCompare(String(right.id)),
-  });
-  const budgeted = applyPerCorpusResultBudget(ranked, retrievalLimit);
-  // The fused budget cuts again, so the recency seats are taken again from
-  // the fused pool; the router's leader seats are not re-reserved here.
-  const recency = questionHasTemporalIntent(input)
-    ? withReservedRecencySeats(budgeted, ranked.map((candidate) => candidate.item), retrievalLimit)
-    : { ...budgeted, recencySeats: 0 };
+  const recency = seatRoutedQueryRuns(runs.map(run => run.hits), retrievalLimit, questionHasTemporalIntent(input));
   const { hits: fused, degradations: budgetDegradations } = recency;
 
   return {
@@ -941,6 +957,35 @@ async function runRoutedSearches(
     encounteredSecureLocal: runs.some((run) => run.encounteredSecureLocal),
     ...(recency.recencySeats > 0 ? { recencySeats: recency.recencySeats } : {}),
   };
+}
+
+// Shared final fusion of multiple routed runs, also used by offline eval replay.
+export function seatRoutedQueryRuns(
+  runs: readonly (readonly SourceIndexRoutedSearchHit[])[],
+  retrievalLimit: number,
+  temporalIntent: boolean,
+): { hits: SourceIndexRoutedSearchHit[]; degradations: RetrievalDegradation[]; recencySeats: number } {
+  const ranked = fuseRankedCandidateLanes({
+    lanes: runs.map((run, index) => ({ name: String(index + 1), items: run })),
+    getId: (hit) => `${hit.corpusId}:${hit.sourceItem.localItemId || hit.sourceItem.providerItemId}`,
+    // Rank the whole bounded union before allocating seats by corpus. Taking
+    // the cut here could discard a corpus before the shared budget sees it.
+    limit: runs.reduce((total, run) => total + run.length, 0),
+    // Scale-free, and deliberately so. Adapter `score` is adapter-local — a
+    // negated bm25 rank in one corpus, a sub-lane RRF sum in another — and RRF
+    // exists precisely so those are never compared. Comparing them here decided
+    // the pack cut by scoring scale rather than relevance, dropping a whole
+    // corpus family from the analyst's evidence with nothing in coverage to
+    // record it.
+    tieBreaker: (left, right) => String(left.id).localeCompare(String(right.id)),
+  });
+  const budgeted = applyPerCorpusResultBudget(ranked, retrievalLimit);
+  // The fused budget cuts again, so the recency seats are taken again from
+  // the fused pool; the router's leader seats are not re-reserved here.
+  const recency = temporalIntent
+    ? withReservedRecencySeats(budgeted, ranked.map((candidate) => candidate.item), retrievalLimit)
+    : { ...budgeted, recencySeats: 0 };
+  return recency;
 }
 
 function mergeRoutedSkippedCorpora(
@@ -997,6 +1042,7 @@ function runRoutedSearch(
   maxResults: number,
   laneTimeoutMs: number,
   searchDeadlineAtMs?: number,
+  poolAllocation?: { storeDepth: number },
 ): Promise<SourceIndexRoutedSearchResponse> {
   return observeSourceAnswerRoutedQuery(ordinal, () =>
     routeSourceIndexSearch({
@@ -1008,8 +1054,11 @@ function runRoutedSearch(
         ...(input.corpusIds ? { corpusIds: input.corpusIds } : {}),
         context: input.searchContext,
         ...(questionHasTemporalIntent(input) ? { temporalIntent: true } : {}),
+        ...(poolAllocation ? { poolAllocation } : {}),
       },
       laneTimeoutMs,
+      ...(input.onSeatingLanes ? { onSeatingLanes: (lanes) => input.onSeatingLanes!(lanes, ordinal) } : {}),
+      ...(input.storeSearchDepth !== undefined ? { storeSearchDepth: input.storeSearchDepth } : {}),
       ...(searchDeadlineAtMs !== undefined ? { searchDeadlineAtMs } : {}),
       ...(input.visibilityGate ? { visibilityGate: input.visibilityGate } : {}),
     }));

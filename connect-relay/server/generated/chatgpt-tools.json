@@ -1079,7 +1079,7 @@
           },
           "to": {
             "type": "number",
-            "description": "New total daily call limit, greater than current limit and calls used."
+            "description": "New total limit in the reported unit, covering the next step and greater than the current limit and usage."
           },
           "keep": {
             "type": "boolean",

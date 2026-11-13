@@ -75,15 +75,17 @@ export interface EngineReadyBody {
 }
 
 /**
- * Whether the background with this instance id is up and has finished its
- * boot work. Any failure, timeout or other instance is `false`.
+ * What the background with this instance id says now: `ready` once it is up
+ * with its boot work done; `alive` when it answered not ready, answered for
+ * another instance, or took longer than `timeoutMs` (a busy event loop still
+ * accepts the connection); `down` when nothing accepts the connection.
  */
-export async function probeEngineBackground(
+export async function engineBackgroundAnswer(
   fetchBackground: typeof fetch,
   authToken: string,
   instanceId: string | undefined,
   timeoutMs: number,
-): Promise<boolean> {
+): Promise<'ready' | 'alive' | 'down'> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   timeout.unref?.();
@@ -95,14 +97,29 @@ export async function probeEngineBackground(
     });
     if (!response.ok) {
       await response.body?.cancel().catch(() => undefined);
-      return false;
+      return 'alive';
     }
     const body = await response.json().catch(() => undefined) as Partial<EngineReadyBody> | undefined;
     return body?.ready === true && body.schema_current === true
-      && (instanceId === undefined || body.instance_id === instanceId);
-  } catch {
-    return false;
+      && (instanceId === undefined || body.instance_id === instanceId) ? 'ready' : 'alive';
+  } catch (error) {
+    // Out of time (this check's own abort) means it is there but busy.
+    const name = (error as { name?: unknown } | undefined)?.name;
+    return controller.signal.aborted || name === 'AbortError' || name === 'TimeoutError' ? 'alive' : 'down';
   } finally {
     clearTimeout(timeout);
   }
+}
+
+/**
+ * Whether the background with this instance id is up and has finished its
+ * boot work. Any failure, timeout or other instance is `false`.
+ */
+export async function probeEngineBackground(
+  fetchBackground: typeof fetch,
+  authToken: string,
+  instanceId: string | undefined,
+  timeoutMs: number,
+): Promise<boolean> {
+  return await engineBackgroundAnswer(fetchBackground, authToken, instanceId, timeoutMs) === 'ready';
 }

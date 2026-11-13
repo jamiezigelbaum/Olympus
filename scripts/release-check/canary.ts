@@ -34,11 +34,12 @@ import { prepareLinuxLocalBundle } from '../publish-release-to-site.ts';
 import { FRESH_LEG, runFreshInstall, validateFreshSources } from './fresh-install.ts';
 import { parseCdpEndpoint } from './fresh-dashboard.ts';
 import { bundleAgent } from './run.ts';
+import { readAgentKey } from './agents.ts';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { CommandDriver, type Machine } from './machine.ts';
-import { escapeHtml, renderOnDemandTiming, type CheckResult, type CheckStatus } from './report.ts';
+import { escapeHtml, renderLimits, renderOnDemandTiming, type CheckResult, type CheckStatus } from './report.ts';
 import { openEngineMcp, runLiveAccounts, type LiveSourceSpec } from './live-accounts.ts';
 import { parseTimingAccounts, parseTimingSeedConfig, realTimingSeeds, type TimingAccounts } from './on-demand-seeds.ts';
 import { runOnDemandTiming, type OnDemandTimingResult } from './on-demand-timing.ts';
@@ -65,6 +66,7 @@ export interface CanaryReport {
   checks: CheckResult[];
   screens: CanaryScreen[];
   onDemandTiming?: OnDemandTimingResult;
+  limits?: import('./fresh-limits.ts').LimitsResult;
 }
 
 export interface CanaryOptions {
@@ -166,10 +168,14 @@ export interface CanaryAccounts {
   /** Expected Claude MCP Apps switch (`remote.claudeAppEnabled`); left out, the product default, which is on. */
   claude_app?: boolean;
   on_demand_timing?: TimingAccounts;
+  /** The fresh-install leg's test Venice key, read at run time (argv, e.g. `secret get "Test Venice"`; olympus-ops#211). */
+  venice_key_command?: string[];
 }
 
 export function parseCanaryAccounts(raw: unknown, readQuestions: (path: string) => unknown): CanaryAccounts {
-  const record = (raw ?? {}) as { sources?: unknown; clients?: unknown; questions?: unknown; claude_app?: unknown; on_demand_timing?: unknown };
+  const record = (raw ?? {}) as { sources?: unknown; clients?: unknown; questions?: unknown; claude_app?: unknown; on_demand_timing?: unknown; venice_key_command?: unknown };
+  const veniceKey = record.venice_key_command;
+  if (veniceKey !== undefined && (!Array.isArray(veniceKey) || veniceKey.length === 0 || veniceKey.some((part) => typeof part !== 'string' || !part))) throw new Error('venice_key_command must be an argv list');
   if (record.claude_app !== undefined && typeof record.claude_app !== 'boolean') throw new Error('claude_app must be true or false');
   const sources = Array.isArray(record.sources) ? record.sources as LiveSourceSpec[] : [];
   for (const source of sources) {
@@ -186,7 +192,7 @@ export function parseCanaryAccounts(raw: unknown, readQuestions: (path: string) 
   if (unasked.length > 0) throw new Error(`no question applies to ${unasked.join(', ')}`);
   const timing = parseTimingSeedConfig(record.on_demand_timing);
   return { sources, clients: clients as WebClientId[], questions, claude_app: (record.claude_app as boolean | undefined) ?? true,
-    ...(timing ? { on_demand_timing: timing } : {}) };
+    ...(timing ? { on_demand_timing: timing } : {}), ...(veniceKey ? { venice_key_command: veniceKey as string[] } : {}) };
 }
 
 /** Runs the canary's checks on one machine. Never throws for a product problem: every failure is a check. */
@@ -503,6 +509,7 @@ ${renewals(report.checks).length > 0 ? `<h2>To renew before the next run</h2><ul
 <table>${rows}</table>
 ${report.onDemandTiming?.preflight ? `<p>${escapeHtml(report.onDemandTiming.preflight)}</p>` : ''}
 ${renderOnDemandTiming(report.onDemandTiming?.rows, report.onDemandTiming?.notRun)}
+${renderLimits(report.limits?.rows)}
 ${pictures}
 </body></html>
 `;
@@ -594,6 +601,7 @@ if (import.meta.main) {
     sources: accounts!.sources, cdp,
     ...(onDemandTimingEnabled ? { onDemandTiming: { ...(accounts!.on_demand_timing ? { accounts: accounts!.on_demand_timing } : {}) } } : {}),
     bridgeAgent: await bundleAgent(runDir),
+    ...(accounts!.venice_key_command ? { veniceKey: await readAgentKey({ keyCommand: accounts!.venice_key_command }) ?? '' } : {}),
     ...(bundle ? { bundle: { installer: join(bundle.directory, 'install-linux.sh'), tarball: join(bundle.directory, `olympus-${bundle.version}.tgz`) } } : {}),
   }) : await runCanary(machine, {
     os,

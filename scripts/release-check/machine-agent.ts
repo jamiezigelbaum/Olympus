@@ -57,6 +57,8 @@ import type { PageInventory } from './explore-pages-inventory.ts';
 import type { InventoryControl } from './explore-inventory.ts';
 import { FIXTURE_FOLDER, STRESS_FORMAT, legFixture, type FixtureRole } from './archive-fixtures.ts';
 import type { StoreView } from './archive-leg.ts';
+import { frontSteadyStage, logMark, seedFrontStoreSet, watchFront, type EnginePids, type FrontHost, type LaneView } from './front-steady.ts';
+import { compareStoreFiles, leftoverFiles, storeFiles } from './upgrade-split.ts';
 import { besideLiveStage, changedStage, drainStage, importStage, modelStage, removeAllStage, removeStage, seedLiveStage, type ArchiveBrowserSession, type ArchiveHost } from './archive-stages.ts';
 import { openingLinkOrThrow } from './opening-link.ts';
 import { liveSeedHook } from './archive-live-seeds.ts';
@@ -291,11 +293,43 @@ async function waitForEngine(timeoutMs: number): Promise<number> {
   while (Date.now() - started < timeoutMs) {
     try {
       const dash = await dashboardJson();
-      if (dash.status === 200 && dash.json?.model_setup?.ready === true) return Date.now() - started;
-    } catch { /* engine still starting */ }
+      if (dash.status === 200 && dash.json?.model_setup?.ready === true) {
+        await frontStaysUp(FRONT_SETTLE_MS);
+        return Date.now() - started;
+      }
+    } catch (error) {
+      if (error instanceof FrontRestartError) throw error;
+      /* engine still starting */
+    }
     await sleep(3_000);
   }
   throw new Error(`the engine was not ready (models included) within ${Math.round(timeoutMs / 1000)} s`);
+}
+
+/**
+ * One ready answer is not a steady engine: the rc.4 front said ready, then crashed and was started again about every 20 s
+ * (ops#151). With the split on, every wait for the engine also watches the front for a minute; a front that restarts or is
+ * gone fails the wait.
+ */
+const FRONT_SETTLE_MS = 60_000;
+class FrontRestartError extends Error {}
+
+async function frontStaysUp(watchMs: number): Promise<void> {
+  const first = ownEnginePids();
+  if (!first || first.front.length === 0) return; // not split, or the platform cannot tell
+  const seen = new Set(first.front);
+  let gone = 0;
+  const end = Date.now() + watchMs;
+  while (Date.now() < end) {
+    await sleep(3_000);
+    const now = ownEnginePids();
+    if (!now) continue;
+    if (now.front.length === 0) gone++;
+    for (const pid of now.front) seen.add(pid);
+  }
+  if (seen.size > 1 || gone > 0) {
+    throw new FrontRestartError(`the engine said ready, then its front ${seen.size > 1 ? `restarted ${seen.size - 1} time(s)` : 'was gone'} within ${Math.round(watchMs / 1000)} s${gone > 0 ? ` (no front in ${gone} sample(s))` : ''}`);
+  }
 }
 
 /**
@@ -455,6 +489,42 @@ function ownEngineRoles(): { front: number; background: number } | null {
     try { environs.push(readFileSync(`/proc/${pid}/environ`, 'latin1')); } catch { /* gone, or not ours */ }
   }
   return engineRolesIn(environs);
+}
+
+/**
+ * The engine's process ids by role (OLYMPUS_WORKER_ENGINE_ROLE): only the top process of each role, since a role's helpers inherit
+ * its environment. Only ids leave this function, never environments.
+ */
+export function enginePidsIn(entries: ReadonlyArray<{ pid: number; ppid: number; role: string | undefined }>): EnginePids {
+  const roleOf = new Map(entries.map((entry) => [entry.pid, entry.role]));
+  const out: EnginePids = { front: [], background: [] };
+  for (const { pid, ppid, role } of entries) {
+    if ((role === 'front' || role === 'background') && roleOf.get(ppid) !== role) out[role].push(pid);
+  }
+  return out;
+}
+
+function ownEnginePids(): EnginePids | null {
+  if (process.platform !== 'linux') {
+    const ps = spawnSync('ps', ['eww', '-axo', 'pid=,ppid=,command='], { encoding: 'utf8', timeout: 5_000 });
+    if (ps.status !== 0) return null;
+    const role = new RegExp(`(?:^|\\s)${ENGINE_ROLE_ENV}=(front|background)(?:\\s|$)`);
+    return enginePidsIn(ps.stdout.split('\n').map((line) => {
+      const ids = /^\s*(\d+)\s+(\d+)/.exec(line);
+      return { pid: Number(ids?.[1] ?? 0), ppid: Number(ids?.[2] ?? 0), role: role.exec(line)?.[1] };
+    }));
+  }
+  const entries: Array<{ pid: number; ppid: number; role: string | undefined }> = [];
+  for (const pid of readdirSync('/proc').filter((name) => /^\d+$/.test(name))) {
+    try {
+      const environ = readFileSync(`/proc/${pid}/environ`, 'latin1');
+      // The parent's id is the 4th field of stat, after the command in parentheses (which may hold spaces).
+      const stat = readFileSync(`/proc/${pid}/stat`, 'latin1');
+      const ppid = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1] ?? 0);
+      entries.push({ pid: Number(pid), ppid, role: environ.split('\0').find((entry) => entry.startsWith(`${ENGINE_ROLE_ENV}=`))?.slice(ENGINE_ROLE_ENV.length + 1).trim() });
+    } catch { /* gone, or not ours */ }
+  }
+  return enginePidsIn(entries);
 }
 
 // ---------------------------------------------------------------------------
@@ -649,7 +719,7 @@ function startBridge(port: number): () => void {
   // macOS: the engine already listens on the loopback port the browser and the smoke use, so there is nothing to forward.
   if (p.socketPath === undefined) return () => undefined;
   type Upstream = { write(data: Uint8Array): number; end(): void };
-  const server = Bun.listen<{ upstream?: Upstream; queue: Uint8Array[]; closed: boolean }>({
+  const listen = () => Bun.listen<{ upstream?: Upstream; queue: Uint8Array[]; closed: boolean }>({
     hostname: '127.0.0.1',
     port,
     socket: {
@@ -677,7 +747,44 @@ function startBridge(port: number): () => void {
       error(socket) { socket.data.closed = true; socket.data.upstream?.end(); },
     },
   });
+  let server: ReturnType<typeof listen>;
+  try { server = listen(); } catch (error) {
+    // An earlier agent the run lost track of (its exec timed out on the VM's transport, run 43350279960) can still hold the
+    // port, and every later browser step then fails to listen. Stop that agent, and only an agent, then try once more.
+    const stale = staleAgentOnPort(port);
+    if (stale === undefined) throw error;
+    say(`stopping an earlier agent (pid ${stale}) that still holds port ${port}`);
+    try { process.kill(stale, 'SIGTERM'); } catch { /* already gone */ }
+    const until = Date.now() + 5_000;
+    while (Date.now() < until && pidAlive(stale)) Bun.sleepSync(100);
+    if (pidAlive(stale)) { try { process.kill(stale, 'SIGKILL'); } catch { /* gone */ } Bun.sleepSync(200); }
+    server = listen();
+  }
   return () => server.stop(true);
+}
+
+const pidAlive = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch { return false; } };
+
+/** The pid of another of this run's agents (~/rc/agent.js) listening on 127.0.0.1:`port`, from /proc; undefined for anything else. */
+export function staleAgentOnPort(port: number): number | undefined {
+  if (process.platform !== 'linux') return undefined;
+  const hexPort = port.toString(16).toUpperCase().padStart(4, '0');
+  let inode: string | undefined;
+  try {
+    for (const line of readFileSync('/proc/net/tcp', 'utf8').split('\n').slice(1)) {
+      const cols = line.trim().split(/\s+/);
+      // local_address 0100007F:PORT, state 0A (LISTEN), inode in column 9.
+      if (cols[1] === `0100007F:${hexPort}` && cols[3] === '0A') { inode = cols[9]; break; }
+    }
+  } catch { return undefined; }
+  if (!inode) return undefined;
+  const pid = pidOfSocket(inode, process.pid);
+  if (pid !== undefined) {
+    let cmdline = '';
+    try { cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf8'); } catch { return undefined; }
+    return cmdline.includes('rc/agent.js') ? pid : undefined;
+  }
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -863,20 +970,26 @@ function currentConnections(): Connection[] {
   return rows;
 }
 
-/** Linux: the name of the process that holds a socket open, found through this user's open files; undefined when it has closed. */
-function ownerOfSocket(inode: string): string | undefined {
+/** Linux: the process that holds a socket open, found through this user's open files; undefined when it has closed. */
+function pidOfSocket(inode: string, skip?: number): number | undefined {
   try {
-    for (const pid of readdirSync('/proc').filter((name) => /^\d+$/.test(name))) {
+    for (const pid of readdirSync('/proc').filter((name) => /^\d+$/.test(name)).map(Number)) {
+      if (pid === skip) continue;
       let fds: string[];
       try { fds = readdirSync(`/proc/${pid}/fd`); } catch { continue; }
       for (const fd of fds) {
-        try {
-          if (readlinkSync(`/proc/${pid}/fd/${fd}`) === `socket:[${inode}]`) return readFileSync(`/proc/${pid}/comm`, 'utf8').trim();
-        } catch { /* closed meanwhile */ }
+        try { if (readlinkSync(`/proc/${pid}/fd/${fd}`) === `socket:[${inode}]`) return pid; } catch { /* closed meanwhile */ }
       }
     }
   } catch { /* no /proc */ }
   return undefined;
+}
+
+/** Linux: the name of the process that holds a socket open; undefined when it has closed. */
+function ownerOfSocket(inode: string): string | undefined {
+  const pid = pidOfSocket(inode);
+  if (pid === undefined) return undefined;
+  try { return readFileSync(`/proc/${pid}/comm`, 'utf8').trim(); } catch { return undefined; }
 }
 
 /** Linux: the socket inodes held by a process and everything it started (the browser and its network service), read fresh. */
@@ -1995,6 +2108,70 @@ async function archiveModelCommand(mode: string): Promise<never> {
   emit({ ...(await modelStage(archiveHost(), mode)) });
 }
 
+/** How many live rows a source's store holds, read-only (front-steady.ts's store set). */
+function laneItems(source: string, tier: 'internal' | 'secure_local'): LaneView {
+  const path = resolvedStorePath(source, tier, process.env);
+  if (!existsSync(path)) return { source, tier, exists: false, items: 0 };
+  try {
+    const db = new Database(path, { readonly: true });
+    try {
+      db.exec('PRAGMA busy_timeout = 10000;');
+      const row = db.query('select count(*) as n from items where tombstoned = 0').get() as { n: number } | null;
+      return { source, tier, exists: true, items: Number(row?.n ?? 0) };
+    } finally { db.close(); }
+  } catch (error) {
+    return { source, tier, exists: true, items: 0, error: (error instanceof Error ? error.message : String(error)).slice(0, 160) };
+  }
+}
+
+const frontHost = (): FrontHost => ({ ...archiveHost(), laneItems, enginePids: ownEnginePids, engineLogPaths: platform().engineLogPaths });
+
+async function frontSteadyCommand(seed: string, watchS: number): Promise<never> {
+  emit({ ...(await frontSteadyStage(frontHost(), { seed, watchS })) });
+}
+
+// The update to a split engine (upgrade-split.ts) runs the front stage in parts, around the installer.
+const FRONT_MARK = join(WORKDIR, 'front-mark.json');
+const storeList = (name: string): string => join(WORKDIR, `store-files-${name.replace(/[^a-z0-9-]/gi, '')}.json`);
+
+async function frontSeedCommand(seed: string): Promise<never> {
+  emit({ ...(await seedFrontStoreSet(frontHost(), { seed })) });
+}
+
+/** Where the engine's logs end now; the next front-watch reads only what comes after. */
+function frontMarkCommand(): never {
+  writeFileSync(FRONT_MARK, JSON.stringify(logMark(platform().engineLogPaths)), { mode: 0o600 });
+  emit({ ok: true });
+}
+
+async function frontWatchCommand(watchS: number): Promise<never> {
+  let offsets: number[] = [];
+  try { offsets = JSON.parse(readFileSync(FRONT_MARK, 'utf8')) as number[]; } catch { /* no mark: the whole log */ }
+  emit({ ok: true, ...(await watchFront(frontHost(), offsets, watchS * 1_000)) });
+}
+
+/** The owner's switch, set in engine.json without a restart: the next start (the installer's) picks it up. */
+function engineSplitOnCommand(): never {
+  try { turnOnEngineSplit(join(platform().configDir, 'engine.json')); } catch (error) {
+    emit({ ok: false, detail: error instanceof Error ? error.message : String(error) });
+  }
+  emit({ ok: true });
+}
+
+/** Saves the store files' list on the machine (`--save`), or compares the data root with a saved list (`--compare`). Counts only. */
+function storeFilesCommand(save: string | undefined, compare: string | undefined): never {
+  const now = storeFiles(platform().dataDir);
+  if (save) {
+    writeFileSync(storeList(save), JSON.stringify(now), { mode: 0o600 });
+    emit({ ok: true, count: now.length });
+  }
+  let before: string[];
+  try { before = JSON.parse(readFileSync(storeList(compare ?? ''), 'utf8')) as string[]; } catch {
+    emit({ ok: false, detail: `no saved store-file list ${compare ?? ''}` });
+  }
+  emit({ ok: true, before: before.length, ...compareStoreFiles(before, now), leftovers: leftoverFiles(platform().dataDir) });
+}
+
 async function archiveChangedCommand(seed: string, sizes: number[]): Promise<never> {
   emit({ ...(await changedStage(archiveHost(), { seed, sizes })) });
 }
@@ -2278,15 +2455,26 @@ async function upgradeSelftest(mode: string): Promise<never> {
   emit({ ok: false, detail: `unknown self-test mode ${mode}` });
 }
 
+/**
+ * The engine's build, once its status is healthy. A just-installed engine can report itself running while its worker
+ * cannot yet answer for a few seconds at a time (engine.err names each stall), so the status is read again for up to
+ * `ENGINE_HEALTH_WAIT_MS` before the install counts as failed; the wait is reported, never hidden.
+ */
+const ENGINE_HEALTH_WAIT_MS = 45_000;
+
 async function engineBuild(): Promise<never> {
-  const status = olympus(['engine', 'status']);
-  let build: string | null = null;
-  let remote: unknown = null;
-  try {
-    const parsed = JSON.parse(status.stdout) as { engine?: { build?: string; remote_mode?: string } };
-    build = parsed.engine?.build ?? null;
-    remote = parsed.engine?.remote_mode ?? null;
-  } catch { /* leave null */ }
+  const started = Date.now();
+  let status = olympus(['engine', 'status']);
+  let parsed: { ok?: boolean; engine?: { build?: string; remote_mode?: string }; worker?: { detail?: string } } | undefined;
+  for (;;) {
+    try { parsed = JSON.parse(status.stdout); } catch { parsed = undefined; }
+    if (status.code === 0 || Date.now() - started >= ENGINE_HEALTH_WAIT_MS) break;
+    await sleep(3_000);
+    status = olympus(['engine', 'status']);
+  }
+  const build = parsed?.engine?.build ?? null;
+  const remote: unknown = parsed?.engine?.remote_mode ?? null;
+  const waitedMs = Date.now() - started;
   const conn = olympus(['connections', 'status']);
   let relay: unknown = null;
   try {
@@ -2294,7 +2482,7 @@ async function engineBuild(): Promise<never> {
     relay = { state: parsed.relay?.state ?? null, connected: parsed.relay?.connected ?? null };
   } catch { /* leave null */ }
   const version = /\b(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)\b/.exec(olympus(['--version']).stdout)?.[1] ?? null;
-  emit({ ok: status.code === 0, build, version, remoteMode: remote, relay });
+  emit({ ok: status.code === 0, build, version, remoteMode: remote, relay, waitedMs, ...(status.code === 0 ? {} : { worker: parsed?.worker?.detail ?? null }) });
 }
 
 // ---------------------------------------------------------------------------
@@ -2361,6 +2549,12 @@ async function main(): Promise<void> {
     });
     case 'archive-remove': return await archiveRemoveCommand({ targets: flag('--targets'), seed: flag('--seed') });
     case 'archive-model': return await archiveModelCommand(flag('--mode'));
+    case 'front-steady': return await frontSteadyCommand(flag('--seed'), Number(flag('--watch-s', '150')));
+    case 'front-seed': return await frontSeedCommand(flag('--seed'));
+    case 'front-mark': return frontMarkCommand();
+    case 'front-watch': return await frontWatchCommand(Number(flag('--watch-s', '150')));
+    case 'engine-split-on': return engineSplitOnCommand();
+    case 'store-files': return storeFilesCommand(process.argv.includes('--save') ? flag('--save') : undefined, process.argv.includes('--compare') ? flag('--compare') : undefined);
     case 'archive-changed': return await archiveChangedCommand(flag('--seed'), flag('--sizes').split(',').map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0));
     case 'archive-scale': return await archiveScaleCommand(flag('--format'), flag('--seed'));
     case 'archive-scale-cleanup': {
