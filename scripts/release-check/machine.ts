@@ -209,7 +209,7 @@ export class CommandDriver {
         if (r.code !== 0) {
           // The installer's own "Fix:" line says what it put back; the forced-failure check reads it.
           const fix = r.stderr.split(/[\r\n]+/).map((line) => line.trim()).filter((line) => line.startsWith('Fix:')).pop();
-          throw new Error(`driver upgrade failed (exit ${r.code}${r.timedOut ? ', timed out' : ''})${fix ? `: ${fix.slice(0, 400)}` : ''}`);
+          throw new Error(`driver upgrade failed (exit ${r.code}${r.timedOut ? ', timed out' : ''})${fix ? `: ${fix}` : ''}`);
         }
       },
       put: async (from, to) => {

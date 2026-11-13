@@ -150,7 +150,7 @@ const filesDetail = (before: number, after: StoreFileCount): string =>
 
 export interface ForcedFailureObservation {
   /** The installer's own verdict on the broken copy: it must report a failure. */
-  installer: { failed: boolean; detail?: string };
+  installer: { failed: boolean; detail?: string; storesPutBack?: boolean };
   /** How many times the broken front's own line reached the engine log: proof the update got as far as starting it. */
   frontRan?: number;
   /** The engine after it: ready, and the earlier release's version. */
@@ -171,7 +171,7 @@ export function forcedFailureChecks(obs: ForcedFailureObservation): CheckResult[
   const files = obs.storeFiles?.after;
   // A rollback puts back what the update retired too, so nothing may be gone, retired or not.
   const kept = files !== undefined && files.missing === 0 && !(files.retired > 0) && files.count === obs.storeFiles!.before && files.leftovers === 0;
-  const putBack = obs.installer.failed && (obs.installer.detail ?? '').includes(STORES_PUT_BACK);
+  const putBack = obs.installer.failed && (obs.installer.storesPutBack ?? (obs.installer.detail ?? '').includes(STORES_PUT_BACK));
   const [installer, rollback, stores] = forcedFailureCheckShapes();
   return [
     {

@@ -276,7 +276,7 @@ if (verb === 'provision') {
     mark('broken-front-ran');
     if (process.env.FAKE_BROKEN_ACCEPTED === '1') { mark('upgraded'); process.exit(0); }
     if (process.env.FAKE_LOST_STORE === '1') mark('lost-store');
-    console.error('the engine did not become healthy; rolled back'); console.error('Fix: Stores put back as they were before the update: gmail.email. The previous version is running and answered its health check.'); process.exit(1);
+    console.error('the engine did not become healthy; rolled back'); console.error('Fix: See ' + '/home/tester/.local/state/olympus/logs/engine.log'.repeat(8) + ' for details. Stores put back as they were before the update: gmail.email. The previous version is running and answered its health check.'); process.exit(1);
   }
   if (process.env.FAKE_UPGRADE_FAIL === '1') { console.error('the installer failed'); process.exit(1); }
   mark('upgraded');

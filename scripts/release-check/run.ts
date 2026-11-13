@@ -90,7 +90,7 @@ import { evaluateInbox, privateLinkIdsIn, privateNoteIn, type InboxObservation }
 import { commandJudge, judgeCheck, type Judge } from './judge.ts';
 import type { AgentConfig } from './machine-agent.ts';
 import { FRONT_WATCH_S, frontSteadyChecks, type FrontStoreSet, type FrontSteadyObservation, type FrontWatch } from './front-steady.ts';
-import { brokenBundle, forcedFailureChecks, storesKeptCheck, type ForcedFailureObservation, type StoreFileCount } from './upgrade-split.ts';
+import { STORES_PUT_BACK, brokenBundle, forcedFailureChecks, storesKeptCheck, type ForcedFailureObservation, type StoreFileCount } from './upgrade-split.ts';
 import { journeyChecks, type JourneyTrace } from './journey.ts';
 import { JOURNEYS, type JourneyMachine } from './journeys.ts';
 import { evaluateRestore, RESTORE_BACKUP_FOLDER, RESTORE_BACKUP_PATH } from './restore.ts';
@@ -1393,7 +1393,9 @@ async function prepareSplitUpdate(run: Run, workDir: string, beforeVersion: stri
   try {
     await run.phase('upgrade-forced-failure', () => run.machine!.upgrade(broken));
   } catch (error) {
-    obs.installer = { failed: true, detail: (error instanceof Error ? error.message : String(error)).slice(0, 300) };
+    const message = error instanceof Error ? error.message : String(error);
+    // The receipt is read from the whole message: the Fix: line names log paths first and can run past the shown detail.
+    obs.installer = { failed: true, detail: message.slice(0, 300), storesPutBack: message.includes(STORES_PUT_BACK) };
   }
   const ran = await run.agent('front-watch', '--watch-s 0', 60_000);
   obs.frontRan = Number((ran.result as Partial<FrontWatch> | undefined)?.logHits?.brokenFront ?? 0);
