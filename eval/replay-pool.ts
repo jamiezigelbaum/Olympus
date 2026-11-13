@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 // Offline seating replay. Store rankings must be prefix-stable: a smaller
-// --store-depth uses each captured store list's prefix. No stores/models/text
-// are read. Query expansions replay only the runs captured by the live build;
+// --store-depth uses each captured store list's prefix, except for a chat
+// store's newest-message pins, which are rebuilt as the adapter places them at
+// that depth (laneAtDepth). No stores/models/text are read. Query expansions replay only the runs captured by the live build;
 // changing a variant never invents a planner run the live build skipped.
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -29,8 +30,44 @@ export interface ReplayResult {
   }[];
 }
 
+/**
+ * A captured store list as its adapter would return it at a smaller depth.
+ * Store hits are prefix-stable, but a chat store pins its newest messages
+ * inside every limit (withPinnedNewestChatHits in local-index.ts): a pin it
+ * found among its ranked hits keeps its place, and the rest, captured with
+ * pinAppended, are appended after the lowest unpinned hits are evicted to
+ * make room, one hit always kept. A plain prefix would drop pins a real
+ * smaller-depth search still returns (Codex on #1617).
+ */
+export function laneAtDepth<T extends { newestInStore?: number; pinAppended?: boolean }>(items: readonly T[], depth: number): T[] {
+  if (depth >= items.length) return [...items];
+  const pins = items.filter(item => item.newestInStore !== undefined).sort((a, b) => a.newestInStore! - b.newestInStore!);
+  if (pins.length === 0) return items.slice(0, depth);
+  // The adapter's ranked hits at this depth, unmarked: it marks pins one at a
+  // time, newest first, so a ranked pin is protected only once its turn comes.
+  const bare = (item: T): T => (({ newestInStore: _n, pinAppended: _a, ...rest }) => rest as T)(item);
+  const ranked = items.filter(item => !item.pinAppended).slice(0, depth);
+  const result = ranked.map(bare);
+  const original = new Map(ranked.map((item, index) => [result[index]!, item]));
+  const pinCount = Math.min(pins.length, result.length > 0 ? depth - 1 : depth);
+  for (const pin of pins.slice(0, pinCount)) {
+    const at = result.findIndex(item => original.get(item) === pin);
+    if (at >= 0) {
+      result[at] = { ...result[at]!, newestInStore: pin.newestInStore };
+      continue;
+    }
+    while (result.length >= depth) {
+      let last = result.length - 1;
+      while (last > 0 && result[last]!.newestInStore !== undefined) last -= 1;
+      result.splice(last, 1);
+    }
+    result.push({ ...bare(pin), newestInStore: pin.newestInStore, pinAppended: true });
+  }
+  return result;
+}
+
 export function replayPool(capture: PoolCapture, variant: ReplayVariant): ReplayResult {
-  if (capture.version !== 1) throw new Error('Unsupported pool capture version.');
+  if (capture.version !== 2) throw new Error('Unsupported pool capture version.');
   for (const [name, value] of Object.entries(variant)) {
     if (name !== 'temporalIntent' && (!Number.isSafeInteger(value) || Number(value) < 1)) throw new Error(`${name} must be a positive integer.`);
   }
@@ -40,7 +77,7 @@ export function replayPool(capture: PoolCapture, variant: ReplayVariant): Replay
   const runs = capture.runs.map(run => seatRoutedLanes(run.lanes.map(lane => ({
     name: lane.corpusId,
     ...(lane.relevance ? { relevance: lane.relevance } : {}),
-    items: lane.items.slice(0, variant.storeDepth).map(item => {
+    items: laneAtDepth(lane.items, variant.storeDepth).map(item => {
       const sourceItem = { family: 'file' as const, provider: 'offline', accountScope: 'offline', providerItemId: item.providerItemId, localItemId: item.localItemId };
       const kinds: ('keyword_first' | 'name')[] = [];
       if (item.keywordFirst) kinds.push('keyword_first');

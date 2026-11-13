@@ -40427,11 +40427,16 @@ function withPinnedNewestChatHits(input) {
       result[at] = { ...result[at], newestInStore };
       continue;
     }
-    while (result.length >= limit)
-      result.pop();
+    while (result.length >= limit) {
+      let last = result.length - 1;
+      while (last > 0 && result[last].newestInStore !== undefined)
+        last -= 1;
+      result.splice(last, 1);
+    }
     result.push({
       ...connectorStoreHitFromRow(input.store, row, CHAT_RECENCY_WEIGHT * reciprocalRank(index + 1), input.resultProjector, input.locatorPathScope),
-      newestInStore
+      newestInStore,
+      pinAppended: true
     });
   }
   return result;
@@ -199071,7 +199076,7 @@ function createEmailSourceWorker(options = {}) {
               kind: "source_index_search",
               corpus_id: connectorStore.corpusId,
               retrieval_source: "local_index",
-              hits: hits.map(({ corpusId: hitCorpusId, trustDomain: _hitTrustDomain, trustTier: _hitTrustTier, keywordLeader: _hitKeywordLeader, newestInStore: _hitNewestInStore, ...hit }) => addSelectedItemToSearchHit(hitCorpusId, hit)),
+              hits: hits.map(({ corpusId: hitCorpusId, trustDomain: _hitTrustDomain, trustTier: _hitTrustTier, keywordLeader: _hitKeywordLeader, newestInStore: _hitNewestInStore, pinAppended: _hitPinAppended, ...hit }) => addSelectedItemToSearchHit(hitCorpusId, hit)),
               ...secretLocations.length > 0 ? {
                 secret_locations: secretLocations.map((location) => ({
                   source: location.source,
