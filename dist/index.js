@@ -2968,6 +2968,7 @@ var init_olympus_layout = __esm(() => {
     "backup-staging": "backup-staging",
     "people-index": "people-index.sqlite",
     "boot-progress": "boot-progress.json",
+    "front-progress": "front-progress.json",
     "schema-backups": "schema-backups.jsonl",
     models: "models",
     "built-in-embedding": "models/built-in-embedding",
@@ -6517,12 +6518,19 @@ var init_native_process_service = __esm(() => {
 });
 
 // src/core/boot-progress.ts
-import { appendFileSync, existsSync as existsSync8, mkdirSync as mkdirSync9, readdirSync as readdirSync2, readFileSync as readFileSync13, renameSync as renameSync4, rmSync as rmSync5, statSync as statSync6 } from "node:fs";
+import { appendFileSync, existsSync as existsSync8, mkdirSync as mkdirSync9, readdirSync as readdirSync2, readFileSync as readFileSync13, renameSync as renameSync4, rmSync as rmSync5, statSync as statSync6, utimesSync } from "node:fs";
 function readBootProgress(env = process.env) {
+  return readProgressFile(bootProgressPath(env));
+}
+function readProgressFile(path) {
   try {
-    const value = JSON.parse(readFileSync13(bootProgressPath(env), "utf8"));
+    const value = JSON.parse(readFileSync13(path, "utf8"));
     if (value.schema !== BOOT_PROGRESS_SCHEMA || typeof value.pid !== "number" || typeof value.phase !== "string" || typeof value.startedAt !== "string" || typeof value.updatedAt !== "string")
       return;
+    if (value.failures !== undefined && (!Number.isSafeInteger(value.failures) || value.failures < 0))
+      delete value.failures;
+    if (value.lastFailure !== undefined && typeof value.lastFailure !== "string")
+      delete value.lastFailure;
     return { completedStores: 0, ...value };
   } catch {
     return;
@@ -6532,7 +6540,7 @@ function bootInProgress(env = process.env, now = Date.now()) {
   return bootProgressIsLive(readBootProgress(env), now);
 }
 function bootProgressIsLive(progress, now = Date.now(), alive = processAlive) {
-  if (!progress || progress.phase === "done" || !alive(progress.pid))
+  if (!progress || progress.phase === "done" || progress.phase === "failed" || !alive(progress.pid))
     return false;
   if (progress.phase === "backing_up" || progress.phase === "migrating") {
     return now - Date.parse(progress.startedAt) < BOOT_LONG_STEP_BACKSTOP_MS;
@@ -20879,6 +20887,7 @@ function connectorStoreContentPreference(vettedVectorItemIds) {
 var CONCEPT_COUNT_MAX_AGE_MS, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, STATUS_COUNTS_MAX_AGE_MS, TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
 var init_local_index = __esm(() => {
   init_vector_digest();
+  init_boot_progress();
   init_main_thread_sql_trace();
   init_store_reclaim_admission();
   init_store_write_guard();
@@ -25764,6 +25773,7 @@ var init_file_extraction_runtime = __esm(() => {
   init_file_extraction_source();
   init_media_cache();
   init_olympus_layout();
+  init_store_write_guard();
   init_source_placement();
   init_spool();
   init_connector_store2();

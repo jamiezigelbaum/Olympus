@@ -1870,6 +1870,7 @@ var init_olympus_layout = __esm(() => {
     "backup-staging": "backup-staging",
     "people-index": "people-index.sqlite",
     "boot-progress": "boot-progress.json",
+    "front-progress": "front-progress.json",
     "schema-backups": "schema-backups.jsonl",
     models: "models",
     "built-in-embedding": "models/built-in-embedding",
@@ -19439,24 +19440,82 @@ var init_fts = __esm(() => {
 });
 
 // src/core/boot-progress.ts
-import { appendFileSync, existsSync as existsSync19, mkdirSync as mkdirSync12, readdirSync as readdirSync4, readFileSync as readFileSync26, renameSync as renameSync4, rmSync as rmSync8, statSync as statSync11 } from "node:fs";
+import { appendFileSync, existsSync as existsSync19, mkdirSync as mkdirSync12, readdirSync as readdirSync4, readFileSync as readFileSync26, renameSync as renameSync4, rmSync as rmSync8, statSync as statSync11, utimesSync } from "node:fs";
 import { basename as basename5, dirname as dirname25, join as join31 } from "node:path";
-function beginBootProgress(env = process.env, now = Date.now) {
+function beginProgress(env, file, now) {
   const at = new Date(now()).toISOString();
-  current2 = {
+  const started = {
     env,
+    file,
     progress: { schema: BOOT_PROGRESS_SCHEMA, pid: process.pid, phase: "starting", startedAt: at, updatedAt: at, completedStores: 0 },
     lastWriteMs: 0
   };
-  write(now(), true);
+  write(started, now(), true);
+  return started;
+}
+function finishProgress(target, now) {
+  target.progress = { ...target.progress, phase: "done", updatedAt: new Date(now()).toISOString() };
+  delete target.progress.storeId;
+  write(target, now(), true);
+}
+function beginBootProgress(env = process.env, now = Date.now) {
+  current2 = beginProgress(env, "boot-progress", now);
 }
 function finishBootProgress(now = Date.now) {
   if (!current2)
     return;
-  current2.progress = { ...current2.progress, phase: "done", updatedAt: new Date(now()).toISOString() };
-  delete current2.progress.storeId;
-  write(now(), true);
+  finishProgress(current2, now);
   current2 = undefined;
+}
+function beginFrontProgress(env = process.env, now = Date.now) {
+  const previous = readFrontProgress(env);
+  front = beginProgress(env, "front-progress", now);
+  if (previous?.phase === "failed" && previous.failures) {
+    front.progress = { ...front.progress, failures: previous.failures, ...previous.lastFailure ? { lastFailure: previous.lastFailure } : {} };
+    write(front, now(), true);
+  }
+}
+function failFrontProgress(error, now = Date.now) {
+  if (!front)
+    return;
+  const code = error?.code;
+  const name = error instanceof Error ? error.name : typeof error;
+  const label = typeof code === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(code) ? code : /^[A-Za-z0-9_.-]{1,64}$/.test(name) ? name : "error";
+  front.progress = {
+    ...front.progress,
+    phase: "failed",
+    updatedAt: new Date(now()).toISOString(),
+    failures: (front.progress.failures ?? 0) + 1,
+    lastFailure: label
+  };
+  write(front, now(), true);
+  front = undefined;
+}
+function reportFrontStep(now = Date.now) {
+  stepFront(false, now);
+}
+function reportFrontStoreOpened(now = Date.now) {
+  stepFront(true, now);
+}
+function stepFront(storeOpened, now) {
+  try {
+    if (!front)
+      return;
+    front.progress = {
+      ...front.progress,
+      updatedAt: new Date(now()).toISOString(),
+      completedStores: front.progress.completedStores + (storeOpened ? 1 : 0)
+    };
+    write(front, now(), false);
+  } catch {}
+}
+function finishFrontProgress(now = Date.now) {
+  if (!front)
+    return;
+  delete front.progress.failures;
+  delete front.progress.lastFailure;
+  finishProgress(front, now);
+  front = undefined;
 }
 function reportBootStep(env, event, now = Date.now) {
   try {
@@ -19473,27 +19532,35 @@ function reportBootStep(env, event, now = Date.now) {
       current2.progress.storeId = event.storeId;
     else
       delete current2.progress.storeId;
-    write(now(), phaseChanged);
+    write(current2, now(), phaseChanged);
   } catch {}
 }
-function write(nowMs, force) {
-  if (!current2)
-    return;
-  if (!force && nowMs - current2.lastWriteMs < WRITE_INTERVAL_MS)
+function write(target, nowMs, force) {
+  if (!force && nowMs - target.lastWriteMs < WRITE_INTERVAL_MS)
     return;
   try {
-    const path = bootProgressPath(current2.env);
+    const path = sharedDataPath(target.file, target.env);
     mkdirSync12(dirname25(path), { recursive: true, mode: 448 });
-    writePrivateFileAtomicSync(path, `${JSON.stringify(current2.progress)}
+    writePrivateFileAtomicSync(path, `${JSON.stringify(target.progress)}
 `);
-    current2.lastWriteMs = nowMs;
+    target.lastWriteMs = nowMs;
   } catch {}
 }
 function readBootProgress(env = process.env) {
+  return readProgressFile(bootProgressPath(env));
+}
+function readFrontProgress(env = process.env) {
+  return readProgressFile(sharedDataPath("front-progress", env));
+}
+function readProgressFile(path) {
   try {
-    const value = JSON.parse(readFileSync26(bootProgressPath(env), "utf8"));
+    const value = JSON.parse(readFileSync26(path, "utf8"));
     if (value.schema !== BOOT_PROGRESS_SCHEMA || typeof value.pid !== "number" || typeof value.phase !== "string" || typeof value.startedAt !== "string" || typeof value.updatedAt !== "string")
       return;
+    if (value.failures !== undefined && (!Number.isSafeInteger(value.failures) || value.failures < 0))
+      delete value.failures;
+    if (value.lastFailure !== undefined && typeof value.lastFailure !== "string")
+      delete value.lastFailure;
     return { completedStores: 0, ...value };
   } catch {
     return;
@@ -19503,7 +19570,7 @@ function bootInProgress(env = process.env, now = Date.now()) {
   return bootProgressIsLive(readBootProgress(env), now);
 }
 function bootProgressIsLive(progress, now = Date.now(), alive = processAlive) {
-  if (!progress || progress.phase === "done" || !alive(progress.pid))
+  if (!progress || progress.phase === "done" || progress.phase === "failed" || !alive(progress.pid))
     return false;
   if (progress.phase === "backing_up" || progress.phase === "migrating") {
     return now - Date.parse(progress.startedAt) < BOOT_LONG_STEP_BACKSTOP_MS;
@@ -19514,6 +19581,10 @@ function bootProgressLine(progress, now = Date.now()) {
   const minutes = Math.max(0, Math.floor((now - Date.parse(progress.startedAt)) / 60000));
   const store = progress.storeId ? `, now ${progress.storeId}` : "";
   return `Updating your data: ${progress.completedStores} ${progress.completedStores === 1 ? "store" : "stores"} done${store} (${minutes}m)`;
+}
+function frontProgressLine(progress, now = Date.now()) {
+  const minutes = Math.max(0, Math.floor((now - Date.parse(progress.startedAt)) / 60000));
+  return `Starting Olympus: ${progress.completedStores} ${progress.completedStores === 1 ? "store" : "stores"} open (${minutes}m)`;
 }
 function processAlive(pid) {
   try {
@@ -19529,10 +19600,27 @@ function bootProgressPath(env) {
 function preSchemaBackupPath(dbPath, version) {
   return `${dbPath}.pre-schema-${version}.bak`;
 }
+function retiredStateBackupPath(path) {
+  return `${path}.pre-schema-retired.bak`;
+}
+function retireStatePath(env, storeId, path) {
+  if (!existsSync19(path))
+    return false;
+  const backup = retiredStateBackupPath(path);
+  if (existsSync19(backup)) {
+    rmSync8(path, { recursive: true, force: true });
+    return false;
+  }
+  recordSchemaBackup(env, { storeId, dbPath: path, backupPath: backup });
+  renameSync4(path, backup);
+  const now = new Date;
+  utimesSync(backup, now, now);
+  return true;
+}
 function preSchemaBackupsOf(dbPath) {
   const prefix = `${basename5(dbPath)}.pre-schema-`;
   try {
-    return readdirSync4(dirname25(dbPath)).filter((name) => name.startsWith(prefix) && /^\d+\.bak(?:\.\d+\.partial)?$/.test(name.slice(prefix.length))).map((name) => join31(dirname25(dbPath), name));
+    return readdirSync4(dirname25(dbPath)).filter((name) => name.startsWith(prefix) && /^(?:\d+|retired)\.bak(?:\.\d+\.partial)?$/.test(name.slice(prefix.length))).map((name) => join31(dirname25(dbPath), name));
   } catch {
     return [];
   }
@@ -19587,7 +19675,7 @@ function restoreSchemaBackupsSince(env, sinceMs) {
 function removeSchemaBackupsSince(env, sinceMs) {
   const removed = backupsSince(env, sinceMs);
   for (const entry of removed)
-    rmSync8(entry.backupPath, { force: true });
+    rmSync8(entry.backupPath, { recursive: true, force: true });
   pruneSchemaBackupRecord(env);
   return removed.length;
 }
@@ -19596,7 +19684,7 @@ function removeAllSchemaBackups(env, dryRun) {
   if (dryRun)
     return copies.length;
   for (const copy of copies)
-    rmSync8(copy, { force: true });
+    rmSync8(copy, { recursive: true, force: true });
   pruneSchemaBackupRecord(env);
   return copies.length;
 }
@@ -19612,7 +19700,7 @@ function pruneSchemaBackupRecord(env) {
 `) + `
 `);
 }
-var BOOT_PROGRESS_SCHEMA = "olympus.boot-progress.v1", BOOT_LONG_STEP_BACKSTOP_MS, BOOT_STALL_MS, WRITE_INTERVAL_MS = 1000, current2;
+var BOOT_PROGRESS_SCHEMA = "olympus.boot-progress.v1", BOOT_LONG_STEP_BACKSTOP_MS, BOOT_STALL_MS, WRITE_INTERVAL_MS = 1000, current2, front;
 var init_boot_progress = __esm(() => {
   init_atomic_file();
   init_olympus_layout();
@@ -42302,6 +42390,7 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
 };`, RECLAIM_MAX_PAGES_PER_STEP = 128, RECLAIM_CONVERSION_BYTES_PER_MS = 15000, SUPERSEDED_PRUNE_MEDIA_ROWS = 1, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, VECTOR_SCAN_RESERVE_MIN_MS = 1000, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_vector_digest();
+  init_boot_progress();
   init_main_thread_sql_trace();
   init_store_reclaim_admission();
   init_store_write_guard();
@@ -42561,6 +42650,7 @@ var init_local_index = __esm(() => {
           if (model && !vectorDigestState(this.db, model).completed)
             this.scheduleVectorDigestBackfill(model, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS);
         }
+        reportFrontStoreOpened();
       } catch (error) {
         closeSqliteStore(this.db, { checkpoint: !this.readOnly });
         throw error;
@@ -108350,6 +108440,7 @@ function createRefreshableFileExtractionRuntime(options) {
 }
 function createFileExtractionRuntime(options) {
   const env = options.env ?? process.env;
+  const readOnly = options.readOnly === true || writableStoreOpensForbidden();
   if (options.enabled !== true && (env[FILE_EXTRACTION_ENABLED_ENV] ?? "").trim().toLowerCase() !== "true")
     return;
   const roster = options.corpora ?? parseFileExtractionCorporaEnv(env[FILE_EXTRACTION_CORPORA_ENV]);
@@ -108362,12 +108453,12 @@ function createFileExtractionRuntime(options) {
     ...options.extraSourceFactories ?? []
   ]);
   const jobsDbPath = options.jobsDbPath ?? defaultFileExtractionJobsDbPath(env);
-  if (options.readOnly === true && !existsSync67(jobsDbPath))
+  if (readOnly && !existsSync67(jobsDbPath))
     return;
-  const jobs = new LocalFileExtractionJobStore(jobsDbPath, options.readOnly === true ? { readonly: true } : {});
+  const jobs = new LocalFileExtractionJobStore(jobsDbPath, readOnly ? { readonly: true } : {});
   const preparedSpools = new Map;
   const prepareSpool = (root) => {
-    if (options.readOnly === true)
+    if (readOnly)
       return;
     if (!preparedSpools.has(root)) {
       preparedSpools.set(root, prepareExtractionSpool(root, {
@@ -108398,7 +108489,7 @@ function createFileExtractionRuntime(options) {
       const leg = tierSet.store(domain);
       return leg ? [leg] : [];
     }) : () => [store]);
-    if (store.trustDomain !== "secure_local") {
+    if (store.trustDomain !== "secure_local" && !readOnly) {
       try {
         if (tierSet)
           store.stripImageContentOutsidePrivate({ keep: (identity2) => tierSet.ledger.isRouted(identity2) });
@@ -108536,7 +108627,7 @@ function createFileExtractionRuntime(options) {
   };
   let resumeTicks = 0;
   const resumeReads = () => {
-    if (closed || options.readOnly)
+    if (closed || readOnly)
       return;
     try {
       if (resumeTicks++ % 12 === 0) {
@@ -108553,7 +108644,7 @@ function createFileExtractionRuntime(options) {
       console.warn("[olympus:on-demand] resume_failed count=1");
     }
   };
-  const recoveryTimer = options.readOnly ? undefined : setInterval(resumeReads, 5000);
+  const recoveryTimer = readOnly ? undefined : setInterval(resumeReads, 5000);
   recoveryTimer?.unref?.();
   Promise.resolve().then(resumeReads);
   return {
@@ -108868,6 +108959,7 @@ var init_file_extraction_runtime = __esm(() => {
   init_file_extraction_source();
   init_media_cache();
   init_olympus_layout();
+  init_store_write_guard();
   init_source_placement();
   init_spool();
   init_connector_store2();
@@ -180729,7 +180821,7 @@ var init_top_nav = __esm(() => {
 
 // src/workers/archive-import/staging.ts
 import { randomBytes as randomBytes30 } from "node:crypto";
-import { existsSync as existsSync106, mkdirSync as mkdirSync68, readdirSync as readdirSync29, realpathSync as realpathSync21, renameSync as renameSync26, rmSync as rmSync43, statSync as statSync46, statfsSync as statfsSync6, utimesSync } from "node:fs";
+import { existsSync as existsSync106, mkdirSync as mkdirSync68, readdirSync as readdirSync29, realpathSync as realpathSync21, renameSync as renameSync26, rmSync as rmSync43, statSync as statSync46, statfsSync as statfsSync6, utimesSync as utimesSync2 } from "node:fs";
 import { open as open5, rm as rm11 } from "node:fs/promises";
 import { sep as sep22, join as join134, resolve as resolve28 } from "node:path";
 function sanitizeUploadPath(raw) {
@@ -180940,7 +181032,7 @@ function createArchiveUploads(options) {
       if (modified !== undefined && Number.isFinite(modified) && modified > 0 && modified < 4102444800000) {
         try {
           const when = new Date(modified);
-          utimesSync(target2, when, when);
+          utimesSync2(target2, when, when);
         } catch {}
       }
       found.fileCount += 1;
@@ -215950,11 +216042,11 @@ function parseEngineCommandEnvelope(value2) {
       const resource = command2.resource;
       if (typeof resource !== "string" || !RESOURCE.test(resource))
         fail(`${kind} needs a resource.`);
-      const front = boundedString2(command2.front, 64);
+      const front2 = boundedString2(command2.front, 64);
       const seq = command2.seq;
-      if (!front || !Number.isSafeInteger(seq) || seq < 1)
+      if (!front2 || !Number.isSafeInteger(seq) || seq < 1)
         fail(`${kind} needs its front and a sequence number.`);
-      return { id, command: { kind, resource, front, seq } };
+      return { id, command: { kind, resource, front: front2, seq } };
     }
     case "judge_boost":
     case "judge_now": {
@@ -218987,10 +219079,11 @@ class TierSnifferService {
       if (path === ":memory:" || this.retiredPrefilterCleaned.has(path))
         continue;
       const retired = retiredEmbeddingPrefilterPaths(path);
-      for (const directory of retired.directories) {
-        rmSync46(directory, { recursive: true, force: true });
-      }
-      for (const suffix of ["", "-wal", "-shm"])
+      for (const directory of retired.directories)
+        retireStatePath(process.env, "embedding_prefilter_weights", directory);
+      checkpointRetiredLedger(retired.ledger);
+      retireStatePath(process.env, TIER_LEDGER_SQLITE_STORE_ID, retired.ledger);
+      for (const suffix of ["-wal", "-shm"])
         rmSync46(`${retired.ledger}${suffix}`, { force: true });
       this.retiredPrefilterCleaned.add(path);
     }
@@ -219605,6 +219698,17 @@ function moveFailureName(error2) {
     return error2.name || error2.constructor.name || "Error";
   return /^[a-z][a-z ]{0,39}$/.test(error2.message) ? error2.message : "Error";
 }
+function checkpointRetiredLedger(path) {
+  if (!existsSync118(path) || !existsSync118(`${path}-wal`))
+    return;
+  let db;
+  try {
+    db = new Database30(path);
+    db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  } catch {} finally {
+    db?.close();
+  }
+}
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, NOT_ANSWERING_FIRST_BACKOFF_MS = 30000, NOT_ANSWERING_MAX_BACKOFF_MS = 60000, GLOBAL_TIMERS, MISSING_QUESTION_RECOVERY_PHASE_MS = 25, DEFAULT_AUTO_MOVES_PER_PASS = 1000, DEFAULT_LOWER_MOVE_SLICE_MS = 1000, MAX_LOWER_MOVE_SLICE_MS = 1e4, DEFAULT_LOWER_MOVE_BATCH_MS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, EXTRACTION_ENQUEUE_GRACE_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_CLASSIFICATION_FAIR_TURN_MS = 60000, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", MOVES_SCAN_BOUND = 2000, BACKLOG_EXACT_ROWS = 20000, BACKLOG_REFRESH_MS = 60000, BACKLOG_SLICE_ROWS = 5000;
 var init_sniffer_service = __esm(() => {
   init_tier_move();
@@ -219617,6 +219721,7 @@ var init_sniffer_service = __esm(() => {
   init_built_in_sniffer();
   init_sniffer();
   init_sniffer_resolver();
+  init_boot_progress();
   init_tier_ledger_path();
   init_tier_rejudge();
   init_tier_names_only_settle();
@@ -246181,13 +246286,31 @@ import { existsSync as existsSync124, readFileSync as readFileSync105 } from "no
 import { dirname as dirname118, join as join148 } from "node:path";
 async function startWorkerWithLaunch(launch) {
   workerLaunch = { ...launch };
-  await main();
+  await mainRecordingFrontFailure();
+}
+async function mainRecordingFrontFailure() {
+  try {
+    await main();
+  } catch (error2) {
+    failFrontProgress(error2);
+    throw error2;
+  }
 }
 async function main() {
   dataOwnerLock = takeWorkerDataOwnerLock(process.env, { engineRole: engineRoleFromEnv(process.env) });
   const engineRole = engineRoleFromEnv(process.env);
   if (engineRole !== "front")
     beginBootProgress(process.env);
+  else {
+    beginFrontProgress(process.env);
+    const exitOnError = (error2) => {
+      failFrontProgress(error2);
+      console.error(error2);
+      process.exit(1);
+    };
+    process.once("uncaughtException", exitOnError);
+    process.once("unhandledRejection", exitOnError);
+  }
   const engineSocketPath = engineRole === "single" ? undefined : engineBackgroundSocketFromEnv(process.env);
   let engineFront;
   if (engineRole === "front") {
@@ -246196,6 +246319,7 @@ async function main() {
       throw new Error("The engine front needs the worker auth token.");
     forbidWritableStoreOpens();
     await waitForEngineBackground({ socketPath: engineSocketPath, authToken: frontToken });
+    reportFrontStep();
     engineFront = createEngineFront({ env: process.env, socketPath: engineSocketPath, authToken: frontToken });
   }
   const retired = retiredPathSettings(process.env);
@@ -247596,7 +247720,6 @@ ${key2}`;
   };
   const buildFileExtractionRuntime = () => createFileExtractionRuntime({
     env: process.env,
-    ...engineRole === "front" ? { readOnly: true } : {},
     enabled: fileExtractionCorpora().length > 0 || dropboxConnectorStoreLane.enabled || localFilesConnectorStoreLane.enabled || whatsappConnectorStoreLane.enabled || googleDriveConnectorStoreLane.enabled,
     allowEmpty: true,
     connectorStores,
@@ -250377,6 +250500,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const server = !listens ? undefined : socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
   if (engineRole === "single")
     finishBootProgress();
+  if (engineFront)
+    finishFrontProgress();
   if (listens) {
     const { createPrivateAgentListeners: createPrivateAgentListeners2 } = await Promise.resolve().then(() => (init_private_agent_listeners(), exports_private_agent_listeners));
     privateAgentListeners = createPrivateAgentListeners2({
@@ -251550,7 +251675,7 @@ async function superviseWorkerServiceSplit(input) {
       });
     }
   });
-  const front = createNativeProcessService({
+  const front2 = createNativeProcessService({
     ...shared,
     id: "olympus-worker",
     label: "worker front",
@@ -251574,7 +251699,7 @@ async function superviseWorkerServiceSplit(input) {
   let stopping;
   const stop = () => {
     stopping ??= (async () => {
-      await Promise.all([front.stop().catch(() => {
+      await Promise.all([front2.stop().catch(() => {
         return;
       }), background.stop().catch(() => {
         return;
@@ -251597,7 +251722,7 @@ async function superviseWorkerServiceSplit(input) {
   await background.start(context2).catch(() => log("Olympus worker service: the background engine did not start yet; retrying."));
   if (stopping)
     return { stop };
-  await front.start(context2).catch(() => log("Olympus worker service: the worker front did not start yet; retrying."));
+  await front2.start(context2).catch(() => log("Olympus worker service: the worker front did not start yet; retrying."));
   return { stop };
 }
 
@@ -252554,13 +252679,62 @@ function installOrUpgradeLifecycle(action, options) {
       ...readiness ? { readiness } : {}
     };
   } catch (error) {
-    const restored = rollbackTransaction(effective, { activatePrevious: true, touchServiceManager: true });
-    if (restored.length > 0 && error instanceof OperationError) {
-      const note = `Stores put back as they were before the update: ${restored.join(", ")}.`;
-      error.suggestion = error.suggestion ? `${error.suggestion} ${note}` : note;
-    }
-    throw error;
+    throw rolledBackUpgradeError(effective, error);
   }
+}
+function rolledBackUpgradeError(options, error) {
+  const failure2 = error instanceof Error ? error.message : String(error);
+  let rollback;
+  try {
+    rollback = rollbackTransaction(options, { activatePrevious: true, touchServiceManager: true });
+  } catch (rollbackError) {
+    return new OperationError("config_error", `The upgrade failed (${failure2}) and putting the previous version back also failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)} Olympus may not be running.`, "Run `olympus worker status`, and restore from the copy taken before the upgrade if the previous version does not start.");
+  }
+  const notes = [];
+  if (rollback.restored.length > 0)
+    notes.push(`Stores put back as they were before the update: ${rollback.restored.join(", ")}.`);
+  if (rollback.reactivated) {
+    const health = previousWorkerHealth(options);
+    if (!health.healthy) {
+      return new OperationError("config_error", `The upgrade failed (${failure2}). The previous version was put back, but it ${health.reason}, so Olympus is not running healthily.`, [...notes, "Run `olympus worker status` and read the worker log before retrying the upgrade."].join(" "));
+    }
+    notes.push("The previous version is running and answered its health check.");
+  }
+  if (rollback.leftStopped && error instanceof Error) {
+    error.message = `${error.message} Olympus is not running: it was stopped before the upgrade, and the previous version was put back stopped. Run \`olympus worker start\` to start it.`;
+  }
+  if (notes.length > 0 && error instanceof OperationError) {
+    const note = notes.join(" ");
+    error.suggestion = error.suggestion ? `${error.suggestion} ${note}` : note;
+  }
+  return error;
+}
+function previousWorkerHealth(options) {
+  let port;
+  try {
+    port = workerReadinessPort(options);
+  } catch {
+    return { healthy: false, reason: "has an unreadable port in its environment file" };
+  }
+  const timeoutMs = options.rollbackReadinessTimeoutMs ?? options.readinessTimeoutMs ?? options.actionSettleTimeoutMs ?? MAX_READINESS_TIMEOUT_MS;
+  const probe2 = options.rollbackReadinessProbe ?? options.readinessProbe;
+  const outcome = waitForWorkerReadiness(options, port, {
+    timeoutMs,
+    ...probe2 ? { probe: probe2 } : {},
+    bootProgress: () => {
+      return;
+    },
+    frontProgress: () => {
+      return;
+    }
+  });
+  if (outcome.ready)
+    return { healthy: true };
+  const minutes = Math.round(timeoutMs / 60000);
+  return {
+    healthy: false,
+    reason: outcome.serviceState !== "active" ? `stopped (its service is ${outcome.serviceState})` : `did not answer its health check within ${minutes >= 1 ? `${minutes} min` : `${timeoutMs} ms`}`
+  };
 }
 function installManagedWorkerFiles(options = {}) {
   const platform2 = normalizeLifecyclePlatform(options.platform ?? osPlatform4());
@@ -252698,10 +252872,10 @@ function recoverInterruptedTransaction(options) {
 function rollbackTransaction(options, intent) {
   const transaction = readTransaction(options);
   if (!transaction)
-    return [];
+    return { restored: [], reactivated: false, leftStopped: false };
   if (transaction.phase === "snapshotting" || transaction.phase === "commit_ready") {
     clearTransaction(options);
-    return [];
+    return { restored: [], reactivated: false, leftStopped: false };
   }
   updateTransactionPhase(options, "rollback_required");
   const paths = transactionPaths(options.homeDir);
@@ -252740,7 +252914,11 @@ function rollbackTransaction(options, intent) {
   }
   markTransactionCommitReady(options);
   clearTransaction(options);
-  return restored;
+  return {
+    restored,
+    reactivated: reactivatePrevious,
+    leftStopped: intent.touchServiceManager && !reactivatePrevious && transaction.previous_unit_present
+  };
 }
 function removeUpgradeBackups(options) {
   const transaction = readTransaction(options);
@@ -252939,25 +253117,62 @@ function waitForActivationSettle(value2) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
 }
 function qualifyWorkerReadiness(options, port) {
+  const timeoutMs = options.readinessTimeoutMs ?? options.actionSettleTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
+  const outcome = waitForWorkerReadiness(options, port, {
+    timeoutMs,
+    ...options.readinessProbe ? { probe: options.readinessProbe } : {}
+  });
+  if (!outcome.ready) {
+    throw new OperationError("config_error", `The upgraded Olympus worker did not answer its loopback readiness probe.${readinessFailureDetail(options, outcome)}`, "The previous managed worker has been restored; inspect the worker logs before retrying the upgrade.");
+  }
+  return { status: "ready", url: outcome.url };
+}
+function readinessFailureDetail(options, outcome) {
+  const parts = [];
+  const failures = outcome.front?.failures ?? 0;
+  if (failures > 0) {
+    parts.push(` Its front stopped ${failures} ${failures === 1 ? "time" : "times"} while starting${outcome.front?.lastFailure ? ` (${outcome.front.lastFailure})` : ""}.`);
+  }
+  if (outcome.serviceState !== "active") {
+    parts.push(` Its service stopped (status ${outcome.serviceState}).`);
+    const logLine = workerServiceFailureLogLine({ platform: options.platform, homeDir: options.homeDir });
+    if (logLine)
+      parts.push(` The worker's last log line was: ${logLine}`);
+  } else if (failures === 0) {
+    parts.push(" It was still running, with no start progress, when the wait ended.");
+  }
+  return parts.join("");
+}
+var FRONT_PROGRESS_MAX_STARTS = 3;
+function waitForWorkerReadiness(options, port, wait) {
   const url = `http://127.0.0.1:${port}/v1/health`;
-  const probe2 = () => options.readinessProbe ? options.readinessProbe(url) : defaultWorkerReadinessProbe(url, options.bunBin);
-  const timeoutMs = validateSettleWindow(options.readinessTimeoutMs ?? options.actionSettleTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS, "Lifecycle readiness timeout", MAX_READINESS_TIMEOUT_MS);
+  const probe2 = () => wait.probe ? wait.probe(url) : defaultWorkerReadinessProbe(url, options.bunBin);
+  const timeoutMs = validateSettleWindow(wait.timeoutMs, "Lifecycle readiness timeout", MAX_READINESS_TIMEOUT_MS);
   const pollMs = validateSettleWindow(options.actionSettlePollMs ?? DEFAULT_ACTION_SETTLE_POLL_MS, "Lifecycle readiness poll interval", 1e4);
-  const firstDeadline = Date.now() + timeoutMs;
+  const waitStartedAt = Date.now();
+  const firstDeadline = waitStartedAt + timeoutMs;
   let deadline = firstDeadline;
-  const readProgress = options.bootProgress ?? (() => readBootProgress(lifecycleEnv2(options)));
+  const readBoot = wait.bootProgress ?? options.bootProgress ?? (() => readBootProgress(lifecycleEnv2(options)));
+  const readFront = wait.frontProgress ?? options.frontProgress ?? (() => readFrontProgress(lifecycleEnv2(options)));
   const progressLine = options.progressLine ?? ((line2) => process.stderr.write(`${line2}
 `));
+  const frontStarts = new Set;
   let lastLineAt = 0;
+  let serviceState = "active";
   let ready = probe2();
   while (!ready) {
-    if (inspectWorkerService(serviceActionOptions(options)).state !== "active")
+    serviceState = inspectWorkerService(serviceActionOptions(options)).state;
+    if (serviceState !== "active")
       break;
     const now = Date.now();
-    const progress = readProgress();
-    if (bootProgressIsLive(progress, now)) {
+    const boot = readBoot();
+    const front3 = bootProgressIsLive(boot, now) ? undefined : readFront();
+    if (front3 && front3.phase !== "done")
+      frontStarts.add(front3.pid);
+    const frontMoving = front3 !== undefined && frontStarts.size <= FRONT_PROGRESS_MAX_STARTS && bootProgressIsLive(front3, now);
+    if (bootProgressIsLive(boot, now) || frontMoving) {
       if (now >= firstDeadline && now - lastLineAt >= READINESS_PROGRESS_LINE_MS) {
-        progressLine(bootProgressLine(progress, now));
+        progressLine(frontMoving ? frontProgressLine(front3, now) : bootProgressLine(boot, now));
         lastLineAt = now;
       }
       deadline = Math.max(deadline, now + timeoutMs);
@@ -252967,10 +253182,9 @@ function qualifyWorkerReadiness(options, port) {
     waitForActivationSettle(Math.max(1, Math.min(pollMs, now < deadline ? deadline - now : pollMs)));
     ready = probe2();
   }
-  if (!ready) {
-    throw new OperationError("config_error", "The upgraded Olympus worker did not answer its loopback readiness probe.", "The previous managed worker has been restored; inspect the worker logs before retrying the upgrade.");
-  }
-  return { status: "ready", url };
+  const lastFront = ready ? undefined : readFront();
+  const front2 = lastFront && Date.parse(lastFront.updatedAt) >= waitStartedAt ? lastFront : undefined;
+  return { ready, url, serviceState: ready ? "active" : serviceState, front: front2 };
 }
 function workerReadinessPort(options) {
   if (options.port !== undefined)

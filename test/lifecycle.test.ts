@@ -513,6 +513,7 @@ describe('versioned Olympus worker lifecycle', () => {
         bunBin: process.execPath,
         exec,
         activationSettleMs: 0,
+        rollbackReadinessProbe: () => true,
       })).toThrow('olympus worker install failed');
 
       expect(readFileSync(paths.unitPath, 'utf8')).toBe(oldUnit);
@@ -575,6 +576,7 @@ describe('versioned Olympus worker lifecycle', () => {
         bunBin: process.execPath,
         exec,
         activationSettleMs: 0,
+        rollbackReadinessProbe: () => true,
       })).toThrow('did not remain active through qualification');
 
       expect(readFileSync(paths.unitPath, 'utf8')).toBe(oldUnit);
@@ -731,6 +733,194 @@ describe('versioned Olympus worker lifecycle', () => {
     }
   }, 30_000);
 
+  test('a split front still opening stores after the boot work is done is waited for past the window (#1563)', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-front-moving-'));
+    const manager = linuxManager('active');
+    try {
+      const artifact = createUpgradeArtifact(home, '0.4.3');
+      installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: '/opt/olympus-old', bunBin: process.execPath, authToken: 'old-token' });
+      const t0 = Date.now();
+      const startedAt = new Date(t0).toISOString();
+      // The background's boot work is already done. The front opens a store
+      // every poll and first answers four windows later: rc.4's install gave
+      // up on a front like this one window after done (ops#151, 13 Nov).
+      const readyAt = t0 + 1_200;
+      const lines: string[] = [];
+      let stores = 0;
+      const result = runWorkerLifecycle('upgrade', {
+        platform: 'linux', homeDir: home, artifactPath: artifact.path,
+        bunBin: process.execPath, exec: manager.exec, activationSettleMs: 0,
+        readinessTimeoutMs: 300, actionSettlePollMs: 5,
+        bootProgress: () => ({ schema: 'olympus.boot-progress.v1', pid: process.pid, phase: 'done', startedAt, updatedAt: startedAt, completedStores: 3 }),
+        frontProgress: () => ({ schema: 'olympus.boot-progress.v1', pid: process.pid, phase: 'starting', startedAt, updatedAt: new Date().toISOString(), completedStores: ++stores }),
+        progressLine: (line) => lines.push(line),
+        readinessProbe: () => Date.now() >= readyAt,
+      });
+      expect(result).toMatchObject({ ok: true, readiness: { status: 'ready' } });
+      expect(lines.length).toBeGreaterThan(0);
+      expect(lines[0]).toMatch(/^Starting Olympus: \d+ stores open \(0m\)$/);
+    } finally {
+      makeTreeWritable(home);
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('a front that has stopped moving gets one window after the boot work, then the upgrade rolls back (#1563)', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-front-stalled-'));
+    const manager = linuxManager('active');
+    try {
+      const artifact = createUpgradeArtifact(home, '0.4.3');
+      installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: '/opt/olympus-old', bunBin: process.execPath, authToken: 'old-token' });
+      const stalledAt = new Date(Date.now() - 6 * 60_000).toISOString();
+      const started = Date.now();
+      expect(() => runWorkerLifecycle('upgrade', {
+        platform: 'linux', homeDir: home, artifactPath: artifact.path,
+        bunBin: process.execPath, exec: manager.exec, activationSettleMs: 0,
+        readinessTimeoutMs: 300, actionSettlePollMs: 5,
+        bootProgress: () => ({ schema: 'olympus.boot-progress.v1', pid: process.pid, phase: 'done', startedAt: stalledAt, updatedAt: stalledAt, completedStores: 3 }),
+        frontProgress: () => ({ schema: 'olympus.boot-progress.v1', pid: process.pid, phase: 'starting', startedAt: stalledAt, updatedAt: stalledAt, completedStores: 4 }),
+        progressLine: () => {},
+        readinessProbe: () => false,
+        rollbackReadinessProbe: () => true,
+      })).toThrow('did not answer its loopback readiness probe');
+      expect(Date.now() - started).toBeLessThan(5_000);
+    } finally {
+      makeTreeWritable(home);
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('a front that crashes on start is reported by its error code and count, not as a probe timeout (#1563)', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-front-crash-'));
+    const manager = linuxManager('active');
+    try {
+      const artifact = createUpgradeArtifact(home, '0.4.3');
+      installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: '/opt/olympus-old', bunBin: process.execPath, authToken: 'old-token' });
+      // rc.4 on Sparta: the supervisor restarted a front that crashed with
+      // front_store_write seven times, then the unit stopped.
+      let probes = 0;
+      let stopped = false;
+      const exec: WorkerServiceExec = (command, args) => {
+        const call = [command, ...args].join(' ');
+        if (call.endsWith('restart olympus-worker.service') || call.endsWith('stop olympus-worker.service')) stopped = false;
+        if (stopped && call === 'systemctl --user is-active olympus-worker.service') return { status: 3, stdout: 'failed\n', stderr: '' };
+        return manager.exec(command, args);
+      };
+      const crashedAt = new Date().toISOString();
+      let error: unknown;
+      try {
+        runWorkerLifecycle('upgrade', {
+          platform: 'linux', homeDir: home, artifactPath: artifact.path,
+          bunBin: process.execPath, exec, activationSettleMs: 0,
+          readinessTimeoutMs: 60_000, actionSettlePollMs: 1,
+          bootProgress: () => undefined,
+          frontProgress: () => ({ schema: 'olympus.boot-progress.v1', pid: process.pid, phase: 'failed', startedAt: crashedAt, updatedAt: new Date().toISOString(), completedStores: 0, failures: 7, lastFailure: 'front_store_write' }),
+          readinessProbe: () => { if (++probes === 3) stopped = true; return false; },
+          rollbackReadinessProbe: () => true,
+        });
+      } catch (caught) { error = caught; }
+      expect(String(error)).toContain('did not answer its loopback readiness probe. Its front stopped 7 times while starting (front_store_write). Its service stopped (status failed).');
+      expect((error as { suggestion?: string }).suggestion).toContain('The previous version is running and answered its health check.');
+    } finally {
+      makeTreeWritable(home);
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('a failed upgrade waits for a slow previous worker and reports it healthy (#1563)', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-slow-rollback-'));
+    const manager = linuxManager('active');
+    try {
+      const artifact = createUpgradeArtifact(home, '0.4.3');
+      installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: '/opt/olympus-old', bunBin: process.execPath, authToken: 'old-token' });
+      let previousProbes = 0;
+      let error: unknown;
+      try {
+        runWorkerLifecycle('upgrade', {
+          platform: 'linux', homeDir: home, artifactPath: artifact.path,
+          bunBin: process.execPath, exec: manager.exec, activationSettleMs: 0,
+          readinessTimeoutMs: 0, actionSettlePollMs: 1,
+          bootProgress: () => undefined, frontProgress: () => undefined,
+          readinessProbe: () => false,
+          // The previous version takes four minutes to answer after its
+          // restart, far past the upgraded worker's window.
+          rollbackReadinessTimeoutMs: 600_000,
+          rollbackReadinessProbe: () => {
+            setSystemTime(new Date(Date.now() + 60_000));
+            return ++previousProbes >= 5;
+          },
+        });
+      } catch (caught) { error = caught; }
+      expect(previousProbes).toBe(5);
+      expect(String(error)).toContain('did not answer its loopback readiness probe');
+      expect((error as { suggestion?: string }).suggestion).toContain('The previous version is running and answered its health check.');
+      expect(manager.calls).toContain('systemctl --user restart olympus-worker.service');
+    } finally {
+      setSystemTime();
+      makeTreeWritable(home);
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('a failed upgrade whose previous worker never answers says plainly that Olympus is not healthy (#1563)', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-unhealthy-rollback-'));
+    const manager = linuxManager('active');
+    try {
+      const artifact = createUpgradeArtifact(home, '0.4.3');
+      installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: '/opt/olympus-old', bunBin: process.execPath, authToken: 'old-token' });
+      let error: unknown;
+      try {
+        runWorkerLifecycle('upgrade', {
+          platform: 'linux', homeDir: home, artifactPath: artifact.path,
+          bunBin: process.execPath, exec: manager.exec, activationSettleMs: 0,
+          readinessTimeoutMs: 0, actionSettlePollMs: 1,
+          bootProgress: () => undefined, frontProgress: () => undefined,
+          readinessProbe: () => false,
+          rollbackReadinessTimeoutMs: 120_000,
+          rollbackReadinessProbe: () => { setSystemTime(new Date(Date.now() + 30_000)); return false; },
+        });
+      } catch (caught) { error = caught; }
+      expect(String(error)).toContain('The upgrade failed (The upgraded Olympus worker did not answer its loopback readiness probe.');
+      expect(String(error)).toContain('The previous version was put back, but it did not answer its health check within 2 min, so Olympus is not running healthily.');
+      expect(existsSync(transactionPath(home))).toBe(false);
+    } finally {
+      setSystemTime();
+      makeTreeWritable(home);
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('a rollback that cannot restart the previous worker names both failures (#1563)', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-rollback-fails-'));
+    const manager = linuxManager('active');
+    try {
+      const artifact = createUpgradeArtifact(home, '0.4.3');
+      installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: '/opt/olympus-old', bunBin: process.execPath, authToken: 'old-token' });
+      let stopped = false;
+      const exec: WorkerServiceExec = (command, args) => {
+        const call = [command, ...args].join(' ');
+        if (call === 'systemctl --user stop olympus-worker.service') stopped = true;
+        if (stopped && call === 'systemctl --user restart olympus-worker.service') return { status: 1, stdout: '', stderr: 'Job failed' };
+        return manager.exec(command, args);
+      };
+      let error: unknown;
+      try {
+        runWorkerLifecycle('upgrade', {
+          platform: 'linux', homeDir: home, artifactPath: artifact.path,
+          bunBin: process.execPath, exec, activationSettleMs: 0,
+          readinessTimeoutMs: 0, actionSettleTimeoutMs: 0, actionSettlePollMs: 1,
+          bootProgress: () => undefined, frontProgress: () => undefined,
+          readinessProbe: () => false,
+        });
+      } catch (caught) { error = caught; }
+      expect(String(error)).toContain('The upgrade failed (The upgraded Olympus worker did not answer its loopback readiness probe.');
+      expect(String(error)).toContain('putting the previous version back also failed: Olympus lifecycle rollback restored the previous managed files but could not reactivate the previous worker.');
+    } finally {
+      makeTreeWritable(home);
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test('a failed upgrade puts back the stores its worker updated before the previous worker starts (#1494)', () => {
     const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-store-restore-'));
     const manager = linuxManager('active');
@@ -766,6 +956,7 @@ describe('versioned Olympus worker lifecycle', () => {
           platform: 'linux', homeDir: home, artifactPath: artifact.path,
           bunBin: process.execPath, exec, activationSettleMs: 0, actionSettleTimeoutMs: 0,
           bootProgress: () => undefined,
+          rollbackReadinessProbe: () => true,
           readinessProbe: () => {
             writeFileSync(workerServicePaths('linux', home).envPath, `${readFileSync(workerServicePaths('linux', home).envPath, 'utf8')}XDG_DATA_HOME=${env.XDG_DATA_HOME}\n`);
             // The new worker updates the store, leaving a -wal, and never answers.
@@ -961,6 +1152,7 @@ describe('versioned Olympus worker lifecycle', () => {
         bunBin: process.execPath,
         exec,
         activationSettleMs: 0,
+        rollbackReadinessProbe: () => true,
       })).toThrow('did not remain active through qualification');
 
       expect(calls).toContain('systemctl --user reset-failed olympus-worker.service');
@@ -1067,7 +1259,7 @@ describe('versioned Olympus worker lifecycle', () => {
         activationSettleMs: 0,
         readinessTimeoutMs: 0,
         readinessProbe: () => false,
-      })).toThrow('did not answer its loopback readiness probe');
+      })).toThrow('did not answer its loopback readiness probe. It was still running, with no start progress, when the wait ended. Olympus is not running: it was stopped before the upgrade, and the previous version was put back stopped. Run `olympus worker start` to start it.');
 
       expect(readFileSync(paths.unitPath, 'utf8')).toBe(oldUnit);
       expect(cachedUnit).toBe(oldUnit);

@@ -1,6 +1,7 @@
 import { Database } from 'bun:sqlite';
 import { afterEach, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { restoreSchemaBackupsSince, retiredStateBackupPath } from '../src/core/boot-progress.ts';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TierLedger, RETIRED_EMBEDDING_CLEARANCE_REASON, type TierLedgerIdentity } from '../src/workers/classification/tier-ledger.ts';
@@ -84,7 +85,7 @@ test('upgrade requeues only current clearance reasons once, retaining every tier
   } finally { sniffer.close(); ledger.close(); }
 });
 
-test('worker removes both retired model locations and SQLite sidecars once after the requeue, even without a model', async () => {
+test('worker moves both retired model locations and the retired ledger aside once after the requeue, even without a model', async () => {
   const f = fixture();
   f.ledger.recordDecision(subject('cleared'), f.decision());
   f.ledger.close(); oldSchema(f.path);
@@ -96,6 +97,7 @@ test('worker removes both retired model locations and SQLite sidecars once after
     }
     for (const suffix of ['', '-wal', '-shm']) writeFileSync(`${paths.ledger}${suffix}`, 'old state');
   }
+  const startedAt = Date.now() - 1_000;
   const installed = new InstalledTierClassification({ env: {} });
   const service = new TierSnifferService({ installed, classificationLedgerPath, lane: BUILT_IN_SNIFFER_LANE,
     stores: () => [{ dbPath: join(f.dir, 'items.sqlite') }], modelAvailable: () => false,
@@ -109,7 +111,19 @@ test('worker removes both retired model locations and SQLite sidecars once after
       for (const path of [...paths.directories, ...['', '-wal', '-shm'].map(suffix => `${paths.ledger}${suffix}`)]) {
         expect(existsSync(path)).toBe(false);
       }
+      // Moved aside until the upgrade commits, not deleted (#1563).
+      for (const path of [...paths.directories, paths.ledger]) expect(existsSync(retiredStateBackupPath(path))).toBe(true);
     }
+    // A failed upgrade puts them back with the stores: rc.4's rollback came back with 7 of 8 ledgers.
+    const restored = restoreSchemaBackupsSince(process.env, startedAt);
+    // Two retired ledgers and the live ledger's own pre-update copy (13 to 16), and four weight folders.
+    expect(restored.filter(id => id === 'olympus_tier_ledger')).toHaveLength(3);
+    expect(restored.filter(id => id === 'embedding_prefilter_weights')).toHaveLength(4);
+    for (const paths of retired) {
+      expect(readFileSync(paths.ledger, 'utf8')).toBe('old state');
+      for (const directory of paths.directories) expect(readFileSync(join(directory, 'weights.json'), 'utf8')).toBe('old weights');
+    }
+    for (const paths of retired) for (const path of [...paths.directories, paths.ledger]) rmSync(path, { recursive: true, force: true });
     // Startup cleanup is not a recurring filesystem sweep.
     mkdirSync(retired[0]!.directories[0]!);
     await service.runOnce();

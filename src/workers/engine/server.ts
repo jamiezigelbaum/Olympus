@@ -457,7 +457,7 @@ import { approveClassifier, resolveClassificationLedgerPath, readClassificationL
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 import { ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
-import { beginBootProgress, finishBootProgress, reportBootStep } from '../../core/boot-progress.ts';
+import { beginBootProgress, beginFrontProgress, failFrontProgress, finishBootProgress, finishFrontProgress, reportBootStep, reportFrontStep } from '../../core/boot-progress.ts';
 import { ENGINE_BACKGROUND_INSTANCE_ENV, engineRoleFromEnv } from '../../core/engine-split.ts';
 import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
 import {
@@ -575,7 +575,17 @@ let workerLaunch: WorkerLaunch = {};
  */
 export async function startWorkerWithLaunch(launch: WorkerLaunch): Promise<void> {
   workerLaunch = { ...launch };
-  await main();
+  await mainRecordingFrontFailure();
+}
+
+/** A front whose start throws records the error's code before it goes (#1563); a no-op in any other role. */
+async function mainRecordingFrontFailure(): Promise<void> {
+  try {
+    await main();
+  } catch (error) {
+    failFrontProgress(error);
+    throw error;
+  }
 }
 
 /**
@@ -610,8 +620,22 @@ export async function main(): Promise<void> {
   dataOwnerLock = takeWorkerDataOwnerLock(process.env, { engineRole: engineRoleFromEnv(process.env) });
   const engineRole = engineRoleFromEnv(process.env);
   // The waits on this boot read its progress, not a fixed ceiling (#1494). The
-  // front does not own the data root and never writes it.
+  // front does not own the data root's boot work and never writes that file;
+  // it reports its own start, each store it opens a step (#1563).
   if (engineRole !== 'front') beginBootProgress(process.env);
+  else {
+    beginFrontProgress(process.env);
+    // A front that exits on an error says which, by code, in its progress
+    // file, so an upgrade that waited on it reports the cause and not a
+    // probe timeout (#1563). The exit stays what it was: print, exit 1.
+    const exitOnError = (error: unknown) => {
+      failFrontProgress(error);
+      console.error(error);
+      process.exit(1);
+    };
+    process.once('uncaughtException', exitOnError);
+    process.once('unhandledRejection', exitOnError);
+  }
   const engineSocketPath = engineRole === 'single' ? undefined : engineBackgroundSocketFromEnv(process.env);
   let engineFront: EngineFront | undefined;
   if (engineRole === 'front') {
@@ -622,6 +646,7 @@ export async function main(): Promise<void> {
     if (!frontToken) throw new Error('The engine front needs the worker auth token.');
     forbidWritableStoreOpens();
     await waitForEngineBackground({ socketPath: engineSocketPath!, authToken: frontToken });
+    reportFrontStep();
     engineFront = createEngineFront({ env: process.env, socketPath: engineSocketPath!, authToken: frontToken });
   }
   // A retired per-store path setting would open empty stores beside the
@@ -2520,8 +2545,8 @@ export async function main(): Promise<void> {
   };
   const buildFileExtractionRuntime = () => createFileExtractionRuntime({
     env: process.env,
-    // The split's front reads the queue; the background owns it and runs the jobs.
-    ...(engineRole === 'front' ? { readOnly: true } : {}),
+    // The split's front reads the queue (the runtime takes that from the
+    // process role); the background owns it and runs the jobs.
     enabled: fileExtractionCorpora().length > 0 || dropboxConnectorStoreLane.enabled || localFilesConnectorStoreLane.enabled
       || whatsappConnectorStoreLane.enabled || googleDriveConnectorStoreLane.enabled,
     allowEmpty: true,
@@ -6119,6 +6144,7 @@ export async function main(): Promise<void> {
   const server = !listens ? undefined : socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
   // The single worker's boot work ends when it listens; the background's when it is ready on its socket.
   if (engineRole === 'single') finishBootProgress();
+  if (engineFront) finishFrontProgress();
   if (listens) {
   // This Bun worker owns listener lifecycle on standalone Mac/Linux and
   // OpenClaw-hosted installs alike. Dashboard-only backends without this
@@ -6631,5 +6657,5 @@ export function resolveEmailSourceBindHostFromEnv(env: Record<string, string | u
 }
 
 if (import.meta.main) {
-  await main();
+  await mainRecordingFrontFailure();
 }
