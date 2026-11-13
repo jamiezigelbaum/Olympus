@@ -189,6 +189,16 @@ const REFRESH_STATUSES: readonly string[] = Object.freeze(['running', 'completed
 const TRUST_DOMAINS: readonly string[] = Object.freeze(['public_safe', 'internal', 'secure_local']);
 const RETRIEVAL_MODES: readonly string[] = Object.freeze(['keyword', 'hybrid']);
 const RETRIEVAL_STATES: readonly string[] = Object.freeze(['ready', 'degraded']);
+/** Why a corpus searches by keyword only (core/source-index/retrieval.ts SourceIndexHybridUnservableReason). */
+const RETRIEVAL_REASONS: readonly string[] = Object.freeze([
+  'embedding_provider_unavailable', 'embedding_provider_not_allowed', 'no_current_embedding_artifacts',
+  'embedding_epoch_stale', 'hybrid_capability_unreported',
+]);
+/** Why the privacy check asked nothing while items wait (classification/sniffer-service.ts TierSnifferWaitReason). */
+const PRIVACY_CHECK_WAITS: readonly string[] = Object.freeze([
+  'yielding_to_answers', 'breaker_open', 'pass_running', 'pass_stuck', 'awaiting_owner_approval', 'no_model',
+  'daily_budget', 'cloud_stopped', 'model_not_answering', 'failed',
+]);
 const NETWORK_IDENTITIES: readonly string[] = Object.freeze(['hidden', 'visible', 'not_verified']);
 const CLEANUPS: readonly string[] = Object.freeze(['as_written', 'light_cleanup', 'custom']);
 const OUTCOMES: readonly string[] = Object.freeze(['not_sent', 'sent_failed', 'unknown']);
@@ -601,6 +611,7 @@ function sourceIndexStatusOutput(raw: unknown): Record<string, unknown> {
     const retrieval = asRecord(corpus.retrieval);
     const mode = oneOf(retrieval?.servable_mode, RETRIEVAL_MODES);
     const state = oneOf(retrieval?.state, RETRIEVAL_STATES);
+    const reason = state === 'degraded' ? oneOf(retrieval?.reason, RETRIEVAL_REASONS) : undefined;
     const refresh = asRecord(corpus.last_refresh);
     const refreshStatus = oneOf(refresh?.status, REFRESH_STATUSES);
     const completedAt = iso(refresh?.completed_at);
@@ -611,7 +622,7 @@ function sourceIndexStatusOutput(raw: unknown): Record<string, unknown> {
       label: sourceLabel(corpus.provider, corpus.family),
       ...(trustDomain ? { trust_domain: trustDomain } : {}),
       configured: corpus.configured === true,
-      ...(mode && state ? { retrieval: { mode, state } } : {}),
+      ...(mode && state ? { retrieval: { mode, state, ...(reason ? { reason } : {}) } } : {}),
       ...(refreshStatus ? { last_refresh: { status: refreshStatus, ...(completedAt ? { completed_at: completedAt } : {}) } } : {}),
       ...(counts
         ? {
@@ -624,7 +635,22 @@ function sourceIndexStatusOutput(raw: unknown): Record<string, unknown> {
         : {}),
     });
   }
-  return { kind: 'source_index_status', ...(generatedAt ? { generated_at: generatedAt } : {}), corpora };
+  const privacyCheck = privacyCheckOutput(record.tier_classification);
+  return { kind: 'source_index_status', ...(generatedAt ? { generated_at: generatedAt } : {}), corpora, ...(privacyCheck ? { privacy_check: privacyCheck } : {}) };
+}
+
+/**
+ * How many items an agent outside this computer cannot find yet because they
+ * wait for the privacy check, and what the check waits for: a count and a
+ * closed code, never the computer's own wording (#1616: a fresh install's
+ * search came back empty for half an hour while status said only "degraded").
+ */
+function privacyCheckOutput(raw: unknown): { waiting_items: number; waiting_for?: string } | undefined {
+  const backlog = asRecord(raw);
+  const waiting = wholeNumber(backlog?.pending_items);
+  if (!backlog || waiting === 0) return undefined;
+  const reason = backlog.awaiting_owner_approval === true ? 'awaiting_owner_approval' : oneOf(backlog.waiting_reason, PRIVACY_CHECK_WAITS);
+  return { waiting_items: waiting, ...(reason ? { waiting_for: reason } : {}) };
 }
 
 /* ------------------------------------------------------------------ */
@@ -918,6 +944,7 @@ const SOURCE_INDEX_STATUS_SCHEMA = {
             properties: {
               mode: { enum: [...RETRIEVAL_MODES] },
               state: { enum: [...RETRIEVAL_STATES] },
+              reason: { enum: [...RETRIEVAL_REASONS], description: 'Why a degraded corpus searches by keyword only.' },
             },
           },
           last_refresh: {
@@ -940,6 +967,16 @@ const SOURCE_INDEX_STATUS_SCHEMA = {
             },
           },
         },
+      },
+    },
+    privacy_check: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['waiting_items'],
+      description: 'New items not searchable yet because they wait for the privacy check, and what the check waits for.',
+      properties: {
+        waiting_items: { type: 'integer', minimum: 1 },
+        waiting_for: { enum: [...PRIVACY_CHECK_WAITS] },
       },
     },
   },

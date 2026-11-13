@@ -40,6 +40,18 @@ describe('live accounts: what each source is held to', () => {
     expect(statusCheck(gmail, [(({ last_refresh: _none, ...row }) => row)(corpus('Gmail'))], NOW).detail).toContain('no refresh has finished');
   });
 
+  test('a failing status and an empty search say what search waits for (#1616)', () => {
+    const gmail: LiveSourceSpec = { id: 'gmail', label: 'Gmail' };
+    const degraded = corpus('Gmail', { retrieval: { mode: 'keyword', state: 'degraded', reason: 'embedding_provider_unavailable' } });
+    expect(statusCheck(gmail, [degraded], NOW, { waiting_items: 101, waiting_for: 'no_model' }).detail)
+      .toContain('search is degraded (embedding_provider_unavailable); 101 item(s) wait for the privacy check (no_model)');
+    expect(statusCheck(gmail, [corpus('Gmail')], NOW, { waiting_items: 3 })).toMatchObject({ status: 'pass', detail: expect.stringContaining('; 3 item(s) wait for the privacy check') });
+    const structured = { evidence: [], notes: ['Olympus is still checking 101 new items for privacy before they can be searched.'] };
+    expect(searchCheck('x', 't', 'Gmail', ['k7q2zx'], { ok: true, structured }).detail)
+      .toBe('0 item(s) came back, 0 labelled Gmail, none holding all 1 expected string(s); notes: Olympus is still checking 101 new items for privacy before they can be searched.');
+    expect(corpusRows({ corpora: [degraded] })[0]!.retrieval).toEqual({ mode: 'keyword', state: 'degraded', reason: 'embedding_provider_unavailable' });
+  });
+
   test('a search passes only on an item of that source holding every expected string', () => {
     const structured = { evidence: [
       { id: 'E1', source: 'Gmail', title: 'Your trip to Santa Fe is booked', excerpt: 'Confirmation K7Q2ZX, departs 7:05' },
