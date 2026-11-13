@@ -57,7 +57,8 @@ import type { PageInventory } from './explore-pages-inventory.ts';
 import type { InventoryControl } from './explore-inventory.ts';
 import { FIXTURE_FOLDER, STRESS_FORMAT, legFixture, type FixtureRole } from './archive-fixtures.ts';
 import type { StoreView } from './archive-leg.ts';
-import { frontSteadyStage, type EnginePids, type FrontHost } from './front-steady.ts';
+import { frontSteadyStage, logMark, seedFrontStoreSet, watchFront, type EnginePids, type FrontHost } from './front-steady.ts';
+import { compareStoreFiles, storeFiles } from './upgrade-split.ts';
 import { besideLiveStage, changedStage, drainStage, importStage, modelStage, removeAllStage, removeStage, seedLiveStage, type ArchiveBrowserSession, type ArchiveHost } from './archive-stages.ts';
 import { openingLinkOrThrow } from './opening-link.ts';
 import { liveSeedHook } from './archive-live-seeds.ts';
@@ -2064,9 +2065,52 @@ async function archiveModelCommand(mode: string): Promise<never> {
   emit({ ...(await modelStage(archiveHost(), mode)) });
 }
 
+const frontHost = (): FrontHost => ({ ...archiveHost(), env: process.env, enginePids: ownEnginePids, engineLogPaths: platform().engineLogPaths });
+
 async function frontSteadyCommand(seed: string, watchS: number): Promise<never> {
-  const host: FrontHost = { ...archiveHost(), env: process.env, enginePids: ownEnginePids, engineLogPaths: platform().engineLogPaths };
-  emit({ ...(await frontSteadyStage(host, { seed, watchS })) });
+  emit({ ...(await frontSteadyStage(frontHost(), { seed, watchS })) });
+}
+
+// The update to a split engine (upgrade-split.ts) runs the front stage in parts, around the installer.
+const FRONT_MARK = join(WORKDIR, 'front-mark.json');
+const storeList = (name: string): string => join(WORKDIR, `store-files-${name.replace(/[^a-z0-9-]/gi, '')}.json`);
+
+async function frontSeedCommand(seed: string): Promise<never> {
+  emit({ ...(await seedFrontStoreSet(frontHost(), { seed })) });
+}
+
+/** Where the engine's logs end now; the next front-watch reads only what comes after. */
+function frontMarkCommand(): never {
+  writeFileSync(FRONT_MARK, JSON.stringify(logMark(platform().engineLogPaths)), { mode: 0o600 });
+  emit({ ok: true });
+}
+
+async function frontWatchCommand(watchS: number): Promise<never> {
+  let offsets: number[] = [];
+  try { offsets = JSON.parse(readFileSync(FRONT_MARK, 'utf8')) as number[]; } catch { /* no mark: the whole log */ }
+  emit({ ok: true, ...(await watchFront(frontHost(), offsets, watchS * 1_000)) });
+}
+
+/** The owner's switch, set in engine.json without a restart: the next start (the installer's) picks it up. */
+function engineSplitOnCommand(): never {
+  try { turnOnEngineSplit(join(platform().configDir, 'engine.json')); } catch (error) {
+    emit({ ok: false, detail: error instanceof Error ? error.message : String(error) });
+  }
+  emit({ ok: true });
+}
+
+/** Saves the store files' list on the machine (`--save`), or compares the data root with a saved list (`--compare`). Counts only. */
+function storeFilesCommand(save: string | undefined, compare: string | undefined): never {
+  const now = storeFiles(platform().dataDir);
+  if (save) {
+    writeFileSync(storeList(save), JSON.stringify(now), { mode: 0o600 });
+    emit({ ok: true, count: now.length });
+  }
+  let before: string[];
+  try { before = JSON.parse(readFileSync(storeList(compare ?? ''), 'utf8')) as string[]; } catch {
+    emit({ ok: false, detail: `no saved store-file list ${compare ?? ''}` });
+  }
+  emit({ ok: true, before: before.length, ...compareStoreFiles(before, now) });
 }
 
 async function archiveChangedCommand(seed: string, sizes: number[]): Promise<never> {
@@ -2436,6 +2480,11 @@ async function main(): Promise<void> {
     case 'archive-remove': return await archiveRemoveCommand({ targets: flag('--targets'), seed: flag('--seed') });
     case 'archive-model': return await archiveModelCommand(flag('--mode'));
     case 'front-steady': return await frontSteadyCommand(flag('--seed'), Number(flag('--watch-s', '150')));
+    case 'front-seed': return await frontSeedCommand(flag('--seed'));
+    case 'front-mark': return frontMarkCommand();
+    case 'front-watch': return await frontWatchCommand(Number(flag('--watch-s', '150')));
+    case 'engine-split-on': return engineSplitOnCommand();
+    case 'store-files': return storeFilesCommand(process.argv.includes('--save') ? flag('--save') : undefined, process.argv.includes('--compare') ? flag('--compare') : undefined);
     case 'archive-changed': return await archiveChangedCommand(flag('--seed'), flag('--sizes').split(',').map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0));
     case 'archive-scale': return await archiveScaleCommand(flag('--format'), flag('--seed'));
     case 'archive-scale-cleanup': {

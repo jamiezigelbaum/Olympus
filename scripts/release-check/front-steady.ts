@@ -143,56 +143,81 @@ function logSince(paths: readonly string[], offsets: readonly number[]): string 
   return paths.map((path, index) => {
     try {
       const all = readFileSync(path);
-      return all.subarray(Math.min(offsets[index] ?? 0, all.length)).toString('utf8');
+      // A log that is shorter than at the mark was started again (an install can replace it): all of it is new.
+      const from = offsets[index] ?? 0;
+      return all.subarray(from <= all.length ? from : 0).toString('utf8');
     } catch { return ''; }
   }).join('\n');
 }
 
-export async function frontSteadyStage(host: FrontHost, args: { seed: string; watchS?: number; settleS?: number }): Promise<FrontSteadyObservation> {
-  const watchMs = (args.watchS ?? FRONT_WATCH_S) * 1_000;
-  const obs: FrontSteadyObservation = {
-    ok: false, gmail: { approved: false, settled: false }, telegram: { ok: false }, lanes: [], archives: 0,
-    samples: [], watchMs, logHits: { frontStoreWrite: 0, exitedUnexpectedly: 0 }, traces: [],
-  };
+/** Where each engine log ends now, so a later watch reads only what came after. */
+export const logMark = (paths: readonly string[]): number[] => paths.map(sizeOf);
+
+export type FrontStoreSet = Pick<FrontSteadyObservation, 'gmail' | 'telegram' | 'lanes' | 'archives' | 'traces'> & { ok: boolean; detail?: string };
+export type FrontWatch = Pick<FrontSteadyObservation, 'samples' | 'watchMs' | 'logHits'>;
+
+/**
+ * Builds the store set: the agent asks to import a Gmail Takeout mbox, the owner approves, the import settles; Telegram is
+ * seeded through its own pull; then what each lane holds is read. Beside the archive leg's files, which its imports still
+ * name: nothing there is removed.
+ */
+export async function seedFrontStoreSet(host: FrontHost, args: { seed: string; settleS?: number }): Promise<FrontStoreSet> {
+  const set: FrontStoreSet = { ok: false, gmail: { approved: false, settled: false }, telegram: { ok: false }, lanes: [], archives: 0, traces: [] };
   try {
-    // Gmail: the agent asks, the owner approves, the import settles.
-    // Beside the archive leg's files, which its imports still name: nothing there is removed.
     const folder = join(host.home, FIXTURE_FOLDER);
     mkdirSync(folder, { recursive: true, mode: 0o700 });
     const path = join(folder, FRONT_GMAIL_FILE);
     writeFileSync(path, frontGmailMbox(`front${args.seed}`), { mode: 0o600 });
     const started = host.cli(['start', '--path', path]);
-    obs.gmail.started = String(asRecord(started.json).code ?? (asRecord(started.json).ok === true ? 'started' : `exit ${started.code}`));
+    set.gmail.started = String(asRecord(started.json).code ?? (asRecord(started.json).ok === true ? 'started' : `exit ${started.code}`));
     await host.withBrowser(async ({ driver }) => {
       const trace = await runJourney(driver, approveFileJourney(FRONT_GMAIL_FILE));
-      obs.traces.push(trace);
-      obs.gmail.approved = trace.ok;
+      set.traces.push(trace);
+      set.gmail.approved = trace.ok;
     });
     const settled = await until(host, async () => {
       const status = archiveStatusOf(host.cli(['status']).json, FRONT_GMAIL_FILE);
-      if (status !== undefined) obs.gmail.status = status;
+      if (status !== undefined) set.gmail.status = status;
       return status === 'imported' ? status : undefined;
     }, (args.settleS ?? 900) * 1_000, 5_000);
-    obs.gmail.settled = settled !== undefined;
-    host.say(`front: Gmail import ${obs.gmail.settled ? 'settled' : `not settled (${obs.gmail.status ?? 'not listed'})`}`);
-    // Telegram: its account and a live input, through its own pull.
+    set.gmail.settled = settled !== undefined;
+    host.say(`front: Gmail import ${set.gmail.settled ? 'settled' : `not settled (${set.gmail.status ?? 'not listed'})`}`);
     if (host.seedLive) {
       const seeded = await host.seedLive('telegram');
-      obs.telegram = { ok: seeded.ok, detail: seeded.detail };
-    } else obs.telegram = { ok: false, detail: 'this machine cannot run a live seed hook' };
-    obs.archives = archiveCount(host.cli(['status']).json);
-    obs.lanes = [GMAIL_SOURCE, TELEGRAM_SOURCE].flatMap((source) => (['internal', 'secure_local'] as const).map((tier) => laneView(source, tier, host.env)));
+      set.telegram = { ok: seeded.ok, ...(seeded.detail !== undefined ? { detail: seeded.detail } : {}) };
+    } else set.telegram = { ok: false, detail: 'this machine cannot run a live seed hook' };
+    set.archives = archiveCount(host.cli(['status']).json);
+    set.lanes = [GMAIL_SOURCE, TELEGRAM_SOURCE].flatMap((source) => (['internal', 'secure_local'] as const).map((tier) => laneView(source, tier, host.env)));
+    set.ok = true;
+  } catch (error) {
+    set.detail = error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300);
+  }
+  return set;
+}
+
+/** Samples the engine's processes every few seconds for `watchMs`, then counts the crash lines the logs gained since `offsets`. */
+export async function watchFront(host: FrontHost, offsets: readonly number[], watchMs: number): Promise<FrontWatch> {
+  const samples: EnginePids[] = [];
+  const end = host.now() + watchMs;
+  while (host.now() < end) {
+    const pids = host.enginePids();
+    if (pids) samples.push(pids);
+    await host.sleep(SAMPLE_MS);
+  }
+  return { samples, watchMs, logHits: crashLines(logSince(host.engineLogPaths, offsets)) };
+}
+
+export async function frontSteadyStage(host: FrontHost, args: { seed: string; watchS?: number; settleS?: number }): Promise<FrontSteadyObservation> {
+  const watchMs = (args.watchS ?? FRONT_WATCH_S) * 1_000;
+  const set = await seedFrontStoreSet(host, { seed: args.seed, ...(args.settleS !== undefined ? { settleS: args.settleS } : {}) });
+  const obs: FrontSteadyObservation = { ...set, ok: false, samples: [], watchMs, logHits: { frontStoreWrite: 0, exitedUnexpectedly: 0 } };
+  if (!set.ok) return obs;
+  try {
     // The restart, as the owner's unit does it, then the watch.
-    const offsets = host.engineLogPaths.map(sizeOf);
+    const offsets = logMark(host.engineLogPaths);
     obs.restart = await host.restartEngine(600_000);
     host.say(`front: engine restart ${obs.restart.ok ? 'ok' : `FAILED (${obs.restart.detail ?? ''})`} after ${Math.round(obs.restart.ms / 1000)} s`);
-    const end = host.now() + watchMs;
-    while (host.now() < end) {
-      const pids = host.enginePids();
-      if (pids) obs.samples.push(pids);
-      await host.sleep(SAMPLE_MS);
-    }
-    obs.logHits = crashLines(logSince(host.engineLogPaths, offsets));
+    Object.assign(obs, await watchFront(host, offsets, watchMs));
     obs.ok = true;
   } catch (error) {
     obs.detail = error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300);
@@ -212,10 +237,12 @@ export function frontChurn(samples: readonly EnginePids[]): { fronts: number; wi
   };
 }
 
-export function frontSteadyChecks(obs: FrontSteadyObservation | undefined): CheckResult[] {
+/** `after` names what started the engine the checks watch: a restart as the unit runs it (the default), or an update. */
+export function frontSteadyChecks(obs: FrontSteadyObservation | undefined, after = 'a restart as the unit runs it'): CheckResult[] {
+  const steadyTitle = `After ${after}, the split front stays up: one front process throughout, no crash in the engine log`;
   // A machine that answered with something else (an older agent, a fake) has not reported this stage.
   if (!obs || !Array.isArray(obs.lanes) || !Array.isArray(obs.samples) || !obs.gmail || !obs.telegram || !obs.logHits) {
-    return [{ id: 'front.steady', title: 'The split front stays up after a restart on a store set with Gmail, Telegram and archive lanes', status: 'fail', detail: 'the stage did not report' }];
+    return [{ id: 'front.steady', title: steadyTitle, status: 'fail', detail: 'the stage did not report' }];
   }
   const out: CheckResult[] = [];
   const held = (source: string): number => obs.lanes.filter((lane) => lane.source === source).reduce((sum, lane) => sum + lane.items, 0);
@@ -237,7 +264,7 @@ export function frontSteadyChecks(obs: FrontSteadyObservation | undefined): Chec
   const churn = frontChurn(obs.samples);
   const problems = [
     ...(obs.detail ? [`the stage stopped: ${obs.detail}`] : []),
-    ...(obs.restart && !obs.restart.ok ? [`the engine did not come back from its restart: ${obs.restart.detail ?? 'no detail'}`] : []),
+    ...(obs.restart && !obs.restart.ok ? [`the engine did not come back: ${obs.restart.detail ?? 'no detail'}`] : []),
     ...(obs.samples.length === 0 ? ['no process sample was taken'] : []),
     ...(churn.fronts > 1 ? [`${churn.fronts} different front processes in ${Math.round(obs.watchMs / 1000)} s (it restarted ${churn.fronts - 1} time(s))`] : []),
     ...(obs.samples.length > 0 && churn.withoutFront > 0 ? [`no front running in ${churn.withoutFront} of ${obs.samples.length} samples`] : []),
@@ -247,10 +274,10 @@ export function frontSteadyChecks(obs: FrontSteadyObservation | undefined): Chec
   ];
   out.push({
     id: 'front.steady',
-    title: 'After a restart as the unit runs it, the split front stays up: one front process throughout, no crash in the engine log',
+    title: steadyTitle,
     status: problems.length === 0 ? 'pass' : 'fail',
     detail: problems.length === 0
-      ? `one front and one background for ${Math.round(obs.watchMs / 1000)} s after the restart (${obs.samples.length} samples); no crash line in the log`
+      ? `one front and one background for ${Math.round(obs.watchMs / 1000)} s after ${after} (${obs.samples.length} samples); no crash line in the log`
       : problems.join('; '),
   });
   return out;

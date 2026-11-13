@@ -269,6 +269,13 @@ const oldText = JSON.stringify(OLD, null, 2) + '\n';
 if (verb === 'provision') {
   console.log('{"machine":"fake-' + arg('--run-id') + '","label":"Scripted machine","os":"linux","driver":"fake"}');
 } else if (verb === 'upgrade') {
+  // The split update's forced failure: a copy of the candidate whose front cannot start. The installer rolls it back unless told not to.
+  if (arg('--candidate').includes('upgrade-broken-front')) {
+    mark('forced');
+    if (process.env.FAKE_BROKEN_ACCEPTED === '1') { mark('upgraded'); process.exit(0); }
+    if (process.env.FAKE_LOST_STORE === '1') mark('lost-store');
+    console.error('the engine did not become healthy; rolled back'); process.exit(1);
+  }
   if (process.env.FAKE_UPGRADE_FAIL === '1') { console.error('the installer failed'); process.exit(1); }
   mark('upgraded');
 } else if (verb === 'exec') {
@@ -294,6 +301,16 @@ if (verb === 'provision') {
   else if (sub === 'set-policy-setting') { mark('setting'); say({ ok: true, changed: 'retrieval.trustDomains.internal.allowCloudQuery', value: false }); }
   else if (sub === 'upgrade-selftest') { const mode = /--mode (\S+)/.exec(script)?.[1]; mark(mode); say({ ok: true, mode }); }
   else if (sub === 'await-engine') say({ ok: true, readyMs: 2000 });
+  else if (sub === 'front-seed') say({ ok: true, gmail: { started: 'needs_approval', approved: true, settled: true, status: 'imported' }, telegram: { ok: true, detail: 'seeded' },
+    lanes: [{ source: 'gmail.email', tier: 'internal', exists: true, items: 2 }, { source: 'telegram.messages', tier: 'internal', exists: true, items: 2 }], archives: 1, traces: [] });
+  else if (sub === 'engine-split-on') { mark('split-on'); say({ ok: true }); }
+  else if (sub === 'front-mark') { mark('front-mark'); say({ ok: true }); }
+  else if (sub === 'front-watch') say({ ok: true, watchMs: 150000, logHits: { frontStoreWrite: process.env.FAKE_FRONT_CRASH === '1' ? 3 : 0, exitedUnexpectedly: 0 },
+    samples: process.env.FAKE_FRONT_CRASH === '1' ? [{ front: [20], background: [10] }, { front: [], background: [10] }, { front: [21], background: [10] }] : [{ front: [20], background: [10] }, { front: [20], background: [10] }] });
+  else if (sub === 'store-files') {
+    if (script.includes('--save')) say({ ok: true, count: 5 });
+    else { const lost = flag('lost-store') ? 1 : 0; say({ ok: true, before: 5, count: 5 - lost, missing: lost, extra: 0 }); }
+  }
   else if (sub === 'snapshot-state') {
     const migratedNow = upgraded && process.env.FAKE_NO_MIGRATION !== '1' && !flag('revert-policy');
     const policy = migratedNow ? NEW : OLD;
@@ -323,7 +340,8 @@ let driverPath: string;
 let candidateDir: string;
 let baselineDir: string;
 const saved: Record<string, string | undefined> = {};
-const ENV_KEYS = ['FAKE_STATE', 'FAKE_OLD_POLICY', 'FAKE_NEW_POLICY', 'FAKE_UPGRADE_FAIL', 'FAKE_NO_MIGRATION', 'FAKE_TOKEN_REFUSED'];
+const SPLIT_KEYS = ['FAKE_BROKEN_ACCEPTED', 'FAKE_LOST_STORE', 'FAKE_FRONT_CRASH'];
+const ENV_KEYS = ['FAKE_STATE', 'FAKE_OLD_POLICY', 'FAKE_NEW_POLICY', 'FAKE_UPGRADE_FAIL', 'FAKE_NO_MIGRATION', 'FAKE_TOKEN_REFUSED', ...SPLIT_KEYS];
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'rc-upgrade-flow-'));
@@ -344,7 +362,7 @@ beforeEach(() => {
   process.env.FAKE_STATE = dir;
   process.env.FAKE_OLD_POLICY = join(dir, 'old.json');
   process.env.FAKE_NEW_POLICY = join(dir, 'new.json');
-  for (const key of ['FAKE_UPGRADE_FAIL', 'FAKE_NO_MIGRATION', 'FAKE_TOKEN_REFUSED']) delete process.env[key];
+  for (const key of ['FAKE_UPGRADE_FAIL', 'FAKE_NO_MIGRATION', 'FAKE_TOKEN_REFUSED', ...SPLIT_KEYS]) delete process.env[key];
 });
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
@@ -468,5 +486,60 @@ describe('the upgrade leg end to end, against a scripted machine', () => {
     expect(report.phases.map((p) => p.id)).toEqual(['install']);
     expect(driverLog()[0]).toContain(`--candidate ${candidateDir}`);
     expect(driverLog().some((line) => line.startsWith('upgrade'))).toBe(false);
+  }, 120_000);
+});
+
+describe('the update to a split engine, against a scripted machine (ops#151)', () => {
+  /** A candidate bundle the broken copy can be made from: a real tarball, its installer's pins and SHA256SUMS. */
+  function realCandidate(): void {
+    const work = join(dir, 'pack');
+    mkdirSync(join(work, 'package', 'dist'), { recursive: true });
+    writeFileSync(join(work, 'package', 'dist', 'cli.js'), '#!/usr/bin/env bun\nconsole.log("olympus");\n');
+    rmSync(join(candidateDir, 'olympus-1.0.1.tgz'));
+    expect(Bun.spawnSync(['tar', '-czf', join(candidateDir, 'olympus-1.0.1.tgz'), '-C', work, 'package']).exitCode).toBe(0);
+    writeFileSync(join(candidateDir, 'install-linux.sh'), `#!/bin/sh\nOLYMPUS_VERSION=1.0.1\nOLYMPUS_SHA256=${'0'.repeat(64)}\nOLYMPUS_BYTES=1\n`);
+    writeFileSync(join(candidateDir, 'SHA256SUMS'), `${'0'.repeat(64)}  olympus-1.0.1.tgz\n${'0'.repeat(64)}  install-linux.sh\n`);
+  }
+  const splitOptions = () => options({ engineSplit: true });
+
+  test('the switch goes on over the store set, a candidate whose front cannot start is installed and rolled back, then the real update keeps its front up', async () => {
+    realCandidate();
+    const opts = splitOptions();
+    const report = await runReleaseCheck(opts);
+    expect(failedIds(report)).toEqual([]);
+    for (const id of ['upgrade.split.switch', 'upgrade.forced-failure.installer', 'upgrade.forced-failure.rollback', 'upgrade.forced-failure.stores', 'front.store-set', 'front.steady', 'upgrade.split.stores']) {
+      expect(checkOf(report, id)?.status).toBe('pass');
+    }
+    expect(checkOf(report, 'front.steady')?.title).toContain('the update to the candidate');
+    // The earlier release is not asked to split: its prepare step leaves the switch alone, and no engine.split check runs on it.
+    expect(checkOf(report, 'engine.split')).toBeUndefined();
+    const upgrades = driverLog().filter((line) => line.startsWith('upgrade'));
+    expect(upgrades).toHaveLength(2);
+    expect(upgrades[0]).toContain('upgrade-broken-front');
+    expect(upgrades[1]).toContain(`--candidate ${candidateDir}`);
+  }, 120_000);
+
+  test('an installer that accepts a front that cannot start fails the forced-failure checks; a lost store file fails the store count', async () => {
+    realCandidate();
+    process.env.FAKE_BROKEN_ACCEPTED = '1';
+    let report = await runReleaseCheck(splitOptions());
+    expect(checkOf(report, 'upgrade.forced-failure.installer')?.status).toBe('fail');
+    expect(checkOf(report, 'upgrade.forced-failure.rollback')?.detail).toContain('not 1.0.0');
+    delete process.env.FAKE_BROKEN_ACCEPTED;
+    rmSync(join(dir, 'driver.log'));
+    for (const name of ['upgraded', 'forced']) rmSync(join(dir, name), { force: true });
+    process.env.FAKE_LOST_STORE = '1';
+    report = await runReleaseCheck(splitOptions());
+    expect(checkOf(report, 'upgrade.forced-failure.rollback')?.status).toBe('pass');
+    expect(checkOf(report, 'upgrade.forced-failure.stores')?.detail).toBe('5 before, 4 after: 1 missing, 0 new');
+    expect(checkOf(report, 'upgrade.split.stores')?.status).toBe('fail');
+  }, 240_000);
+
+  test('a front that crashes after the real update fails front.steady', async () => {
+    realCandidate();
+    process.env.FAKE_FRONT_CRASH = '1';
+    const report = await runReleaseCheck(splitOptions());
+    expect(checkOf(report, 'front.steady')?.status).toBe('fail');
+    expect(checkOf(report, 'front.steady')?.detail).toContain('front_store_write 3 time(s)');
   }, 120_000);
 });
