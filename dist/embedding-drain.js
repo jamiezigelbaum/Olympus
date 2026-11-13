@@ -683,6 +683,7 @@ var SHARED_DATA_FILES = {
   "backup-staging": "backup-staging",
   "people-index": "people-index.sqlite",
   "boot-progress": "boot-progress.json",
+  "front-progress": "front-progress.json",
   "schema-backups": "schema-backups.jsonl",
   models: "models",
   "built-in-embedding": "models/built-in-embedding",
@@ -13289,12 +13290,28 @@ import { chmodSync as chmodSync3, closeSync as closeSync7, existsSync as existsS
 import { dirname as dirname19 } from "node:path";
 
 // src/core/boot-progress.ts
-import { appendFileSync, existsSync as existsSync14, mkdirSync as mkdirSync10, readdirSync as readdirSync2, readFileSync as readFileSync19, renameSync as renameSync5, rmSync as rmSync6, statSync as statSync8 } from "node:fs";
+import { appendFileSync, existsSync as existsSync14, mkdirSync as mkdirSync10, readdirSync as readdirSync2, readFileSync as readFileSync19, renameSync as renameSync5, rmSync as rmSync6, statSync as statSync8, utimesSync } from "node:fs";
 import { basename as basename3, dirname as dirname18, join as join20 } from "node:path";
 var BOOT_LONG_STEP_BACKSTOP_MS = 6 * 60 * 60 * 1000;
 var BOOT_STALL_MS = 5 * 60 * 1000;
 var WRITE_INTERVAL_MS = 1000;
 var current2;
+var front;
+function reportFrontStoreOpened(now = Date.now) {
+  stepFront(true, now);
+}
+function stepFront(storeOpened, now) {
+  try {
+    if (!front)
+      return;
+    front.progress = {
+      ...front.progress,
+      updatedAt: new Date(now()).toISOString(),
+      completedStores: front.progress.completedStores + (storeOpened ? 1 : 0)
+    };
+    write(front, now(), false);
+  } catch {}
+}
 function reportBootStep(env, event, now = Date.now) {
   try {
     if (!current2 || bootProgressPath(env) !== bootProgressPath(current2.env))
@@ -13310,20 +13327,18 @@ function reportBootStep(env, event, now = Date.now) {
       current2.progress.storeId = event.storeId;
     else
       delete current2.progress.storeId;
-    write(now(), phaseChanged);
+    write(current2, now(), phaseChanged);
   } catch {}
 }
-function write(nowMs, force) {
-  if (!current2)
-    return;
-  if (!force && nowMs - current2.lastWriteMs < WRITE_INTERVAL_MS)
+function write(target, nowMs, force) {
+  if (!force && nowMs - target.lastWriteMs < WRITE_INTERVAL_MS)
     return;
   try {
-    const path = bootProgressPath(current2.env);
+    const path = sharedDataPath(target.file, target.env);
     mkdirSync10(dirname18(path), { recursive: true, mode: 448 });
-    writePrivateFileAtomicSync(path, `${JSON.stringify(current2.progress)}
+    writePrivateFileAtomicSync(path, `${JSON.stringify(target.progress)}
 `);
-    current2.lastWriteMs = nowMs;
+    target.lastWriteMs = nowMs;
   } catch {}
 }
 function bootProgressPath(env) {
@@ -26183,6 +26198,7 @@ class LocalConnectorStore {
         if (model && !vectorDigestState(this.db, model).completed)
           this.scheduleVectorDigestBackfill(model, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS);
       }
+      reportFrontStoreOpened();
     } catch (error) {
       closeSqliteStore(this.db, { checkpoint: !this.readOnly });
       throw error;

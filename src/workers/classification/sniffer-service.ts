@@ -37,7 +37,8 @@ import {
   type SnifferTarget,
 } from './sniffer-resolver.ts';
 import { existsSync, rmSync } from 'node:fs';
-import { retiredEmbeddingPrefilterPaths, tierSnifferPathForLedger } from './tier-ledger-path.ts';
+import { retireStatePath } from '../../core/boot-progress.ts';
+import { retiredEmbeddingPrefilterPaths, TIER_LEDGER_SQLITE_STORE_ID, tierSnifferPathForLedger } from './tier-ledger-path.ts';
 import { tierSetPlannerForLedger, type AutomaticTierMoveContext } from './installed-tier-classification-registry.ts';
 import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
 import {
@@ -1293,11 +1294,17 @@ export class TierSnifferService {
     }
     for (const path of [...targets.map(target => target.ledger.dbPath), this.options.classificationLedgerPath]) {
       if (path === ':memory:' || this.retiredPrefilterCleaned.has(path)) continue;
+      // Moved aside, not deleted, until the upgrade that retired them commits
+      // (core/boot-progress.ts retireStatePath, #1563).
       const retired = retiredEmbeddingPrefilterPaths(path);
-      for (const directory of retired.directories) {
-        rmSync(directory, { recursive: true, force: true });
+      for (const directory of retired.directories) retireStatePath(process.env, 'embedding_prefilter_weights', directory);
+      // Only a ledger whose -wal is fully written into it is moved: what a
+      // busy checkpoint leaves in the -wal would be lost. It stays as it is,
+      // and the next start tries again.
+      if (checkpointRetiredLedger(retired.ledger)) {
+        retireStatePath(process.env, TIER_LEDGER_SQLITE_STORE_ID, retired.ledger);
+        for (const suffix of ['-wal', '-shm']) rmSync(`${retired.ledger}${suffix}`, { force: true });
       }
-      for (const suffix of ['', '-wal', '-shm']) rmSync(`${retired.ledger}${suffix}`, { force: true });
       this.retiredPrefilterCleaned.add(path);
     }
     return targets;
@@ -2084,4 +2091,26 @@ export function moveFailureName(error: unknown): string {
   if (!(error instanceof Error)) return 'unknown';
   if (error.constructor !== Error) return error.name || error.constructor.name || 'Error';
   return /^[a-z][a-z ]{0,39}$/.test(error.message) ? error.message : 'Error';
+}
+
+/**
+ * The retired ledger keeps only its main file aside, so what its -wal holds
+ * is written into it first. Returns whether the main file now holds
+ * everything: no -wal, or a checkpoint that was not busy and wrote every
+ * frame. A file that will not open, or a busy checkpoint, is false.
+ */
+function checkpointRetiredLedger(path: string): boolean {
+  if (!existsSync(`${path}-wal`)) return true;
+  if (!existsSync(path)) return false;
+  let db: Database | undefined;
+  try {
+    db = new Database(path);
+    db.exec('PRAGMA busy_timeout = 10000;');
+    const result = db.query('PRAGMA wal_checkpoint(TRUNCATE)').get() as { busy: number; log: number; checkpointed: number } | null;
+    return result !== null && result.busy === 0 && result.log === result.checkpointed;
+  } catch {
+    return false;
+  } finally {
+    db?.close();
+  }
 }

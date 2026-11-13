@@ -150,6 +150,12 @@
     "retire_when": "Remove when the bounded input/output clamp SECRET_MAX_BYTES is removed or becomes a registered work stop."
   },
   {
+    "path": "src/core/lifecycle.ts",
+    "symbol": "FRONT_PROGRESS_MAX_STARTS",
+    "reason": "internal",
+    "retire_when": "Remove when the upgrade's readiness wait stops counting front restarts to tell a starting front from a crash loop."
+  },
+  {
     "path": "src/core/oauth-relay.ts",
     "symbol": "OAUTH_RELAY_MAX_STATE_LENGTH",
     "reason": "clamp",
