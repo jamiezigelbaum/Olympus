@@ -231,6 +231,10 @@ test('a smaller depth keeps the chat store\'s newest-message pins, as the adapte
   // A ranked pin cut at a smaller depth is appended there.
   const cut = [item('h1'), item('h2'), item('p1', 1)];
   expect(laneAtDepth(cut, 2)).toEqual([item('h1'), item('p1', 1, true)]);
+  // A ranked pin is protected only when its turn comes, newest first (Codex on #1620): the newest
+  // is appended first and evicts the unmarked second newest, which is then appended after it.
+  const turn = [item('h1'), item('h2'), item('p2', 2), item('h3'), item('p1', 1, true)];
+  expect(ids(laneAtDepth(turn, 3))).toEqual(['h1', 'p1', 'p2']);
   // Without pins a smaller depth is the prefix.
   expect(ids(laneAtDepth([item('h1'), item('h2'), item('h3')], 2))).toEqual(['h1', 'h2']);
   expect(laneAtDepth(captured, 5)).toEqual(captured);

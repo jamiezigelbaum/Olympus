@@ -43,20 +43,25 @@ export function laneAtDepth<T extends { newestInStore?: number; pinAppended?: bo
   if (depth >= items.length) return [...items];
   const pins = items.filter(item => item.newestInStore !== undefined).sort((a, b) => a.newestInStore! - b.newestInStore!);
   if (pins.length === 0) return items.slice(0, depth);
-  const hits = items.filter(item => !item.pinAppended).slice(0, depth);
-  const pinCount = Math.min(pins.length, hits.length > 0 ? depth - 1 : depth);
-  // A ranked hit the adapter would not pin at this depth carries no pin number.
-  const result = hits.map(item => item.newestInStore !== undefined && item.newestInStore > pinCount
-    ? (({ newestInStore: _unpinned, ...rest }) => rest as T)(item) : item);
+  // The adapter's ranked hits at this depth, unmarked: it marks pins one at a
+  // time, newest first, so a ranked pin is protected only once its turn comes.
+  const bare = (item: T): T => (({ newestInStore: _n, pinAppended: _a, ...rest }) => rest as T)(item);
+  const ranked = items.filter(item => !item.pinAppended).slice(0, depth);
+  const result = ranked.map(bare);
+  const original = new Map(ranked.map((item, index) => [result[index]!, item]));
+  const pinCount = Math.min(pins.length, result.length > 0 ? depth - 1 : depth);
   for (const pin of pins.slice(0, pinCount)) {
-    if (result.includes(pin)) continue;
-    const appended = pin.pinAppended ? pin : (({ newestInStore: _n, ...rest }) => ({ ...rest, newestInStore: pin.newestInStore, pinAppended: true }) as unknown as T)(pin);
+    const at = result.findIndex(item => original.get(item) === pin);
+    if (at >= 0) {
+      result[at] = { ...result[at]!, newestInStore: pin.newestInStore };
+      continue;
+    }
     while (result.length >= depth) {
       let last = result.length - 1;
       while (last > 0 && result[last]!.newestInStore !== undefined) last -= 1;
       result.splice(last, 1);
     }
-    result.push(appended);
+    result.push({ ...bare(pin), newestInStore: pin.newestInStore, pinAppended: true });
   }
   return result;
 }
