@@ -67,6 +67,13 @@ describe('front steadiness', () => {
     expect(check.detail).toContain('Telegram was not seeded');
   });
 
+  test('a restart before the background made the extraction job queue proves nothing, so the store set fails', () => {
+    const check = status(frontSteadyChecks(steady({ jobQueue: false })), 'front.store-set')!;
+    expect(check.status).toBe('fail');
+    expect(check.detail).toContain('never made the extraction job queue');
+    expect(status(frontSteadyChecks(steady({ jobQueue: true })), 'front.store-set')!.status).toBe('pass');
+  });
+
   test('churn counts distinct processes per role and samples without one', () => {
     expect(frontChurn([{ front: [1], background: [9] }, { front: [], background: [9] }, { front: [2], background: [9] }]))
       .toEqual({ fronts: 2, withoutFront: 1, backgrounds: 1, withoutBackground: 0 });

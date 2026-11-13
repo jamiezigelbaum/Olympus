@@ -17,8 +17,9 @@
  * engine's log must say no process exited unexpectedly and no front opened a store for writing. One read of health would not do:
  * the rc.4 front answered "ready" each time before it crashed.
  */
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { sharedDataPath } from '../../src/core/olympus-layout.ts';
 import { DASHBOARD_ARCHIVE_COPY as A } from '../../src/workers/dashboard/vocabulary.ts';
 import { mail as gmailMail, takeoutMbox } from '../../test/support/archive-fixtures-gmail.ts';
 import { FIXTURE_FOLDER } from './archive-fixtures.ts';
@@ -54,6 +55,8 @@ export interface FrontSteadyObservation {
   telegram: { ok: boolean; detail?: string };
   lanes: LaneView[];
   archives: number;
+  /** Whether the background had made the extraction job queue before the restart (the front opens it only once it exists). */
+  jobQueue?: boolean;
   restart?: { ok: boolean; ms: number; detail?: string };
   /** The front's and background's processes at each sample after the restart. */
   samples: EnginePids[];
@@ -166,6 +169,11 @@ export async function frontSteadyStage(host: FrontHost, args: { seed: string; wa
     } else obs.telegram = { ok: false, detail: 'this machine cannot run a live seed hook' };
     obs.archives = archiveCount(host.cli(['status']).json);
     obs.lanes = [GMAIL_SOURCE, TELEGRAM_SOURCE].flatMap((source) => (['internal', 'secure_local'] as const).map((tier) => host.laneItems(source, tier)));
+    // rc.4's front built an extraction runtime only for stores that already exist, the background's job queue among them, so the
+    // restart waits for the background to have made it (L1, 13 Nov).
+    const queue = sharedDataPath('file-extraction-jobs');
+    obs.jobQueue = (await until(host, async () => (existsSync(queue) ? true : undefined), 600_000, 5_000)) === true;
+    host.say(`front: extraction job queue ${obs.jobQueue ? 'present' : 'never made'} before the restart`);
     // The restart, as the owner's unit does it, then the watch.
     const offsets = host.engineLogPaths.map(sizeOf);
     obs.restart = await host.restartEngine(600_000);
@@ -208,6 +216,7 @@ export function frontSteadyChecks(obs: FrontSteadyObservation | undefined): Chec
   const setProblems = [
     ...(obs.gmail.settled ? [] : [`the Gmail import did not settle (${obs.gmail.status ?? obs.gmail.started ?? 'no status'})`]),
     ...(gmailItems > 0 ? [] : ['the Gmail stores hold no mail']),
+    ...(obs.jobQueue === false ? ['the background never made the extraction job queue, so the front had no extraction runtime to build'] : []),
     ...(obs.telegram.ok && telegramItems > 0 ? [] : [`Telegram was not seeded (${obs.telegram.detail ?? 'no detail'})`]),
   ];
   out.push({
@@ -215,7 +224,7 @@ export function frontSteadyChecks(obs: FrontSteadyObservation | undefined): Chec
     title: 'The machine holds the lanes whose extraction the front must not open for writing: Gmail with an attachment, Telegram, archives',
     status: setProblems.length === 0 ? 'pass' : 'fail',
     detail: setProblems.length === 0
-      ? `Gmail ${gmailItems} item(s) from an approved Takeout import with an attachment; Telegram ${telegramItems} item(s); ${obs.archives} archive(s) listed; Evernote's own account is not seeded on this machine`
+      ? `Gmail ${gmailItems} item(s) from an approved Takeout import with an attachment; Telegram ${telegramItems} item(s); ${obs.archives} archive(s) listed; the extraction job queue existed before the restart; Evernote's own account is not seeded on this machine`
       : setProblems.join('; '),
   });
   const churn = frontChurn(obs.samples);
