@@ -35198,6 +35198,7 @@ var init_remote_result = __esm(() => {
     argus_error: "Olympus's private analyst could not answer. Try again later.",
     email_not_configured: "Olympus on the computer needs setup before it can answer.",
     email_unreachable: "Olympus could not reach its source worker in time. Try again later.",
+    worker_restarting: "Olympus is restarting. Try again in a moment.",
     email_error: "Olympus could not complete this request.",
     email_policy_violation: "Olympus withheld this result under the owner's privacy rules.",
     source_index_not_enabled: "Searching sources is not turned on in Olympus on the computer.",
@@ -118849,11 +118850,18 @@ class EmailClient {
     if (!this.config.email.enabled) {
       throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before continuing stopped work.");
     }
-    return this.transport.requestJson(`${this.config.email.baseUrl}/limits`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(params)
-    });
+    try {
+      return await this.transport.requestJson(`${this.config.email.baseUrl}/limits`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(params)
+      });
+    } catch (error) {
+      if (error instanceof OperationError && (error.code === "email_unreachable" || error.code === "email_error")) {
+        throw new OperationError(error.code, error.message, "It may still go through. Run olympus limits in a moment to see whether the stop is still open.");
+      }
+      throw error;
+    }
   }
   async archiveImport(options) {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) {
@@ -119900,7 +119908,7 @@ var init_email = __esm(() => {
     ["unsupported_filter", "unsupported_filter"],
     ["invalid_request", "invalid_request"],
     ["invalid_params", "invalid_params"],
-    ["worker_restarting", "email_unreachable"],
+    ["worker_restarting", "worker_restarting"],
     ["engine_background_unavailable", "email_unreachable"],
     ["engine_background_failed", "email_error"],
     ["source_index_policy_violation", "source_index_policy_violation"]
@@ -229242,6 +229250,7 @@ var init_response_builder = __esm(() => {
     argus_error: "The answer model on the computer could not answer. Try again shortly.",
     email_not_configured: "Olympus on the computer needs setup before it can answer. Open Olympus on the computer.",
     email_unreachable: "Olympus on the computer is not reachable right now. Try again shortly.",
+    worker_restarting: "Olympus on the computer is restarting. Try again in a moment.",
     email_error: "Olympus could not complete this request. Try again shortly.",
     email_policy_violation: "Olympus withheld this result under the owner's privacy rules.",
     source_index_not_enabled: "Searching sources is not turned on in Olympus on the computer.",
@@ -229260,7 +229269,8 @@ var init_response_builder = __esm(() => {
     sign_in_failed: "Olympus couldn't open the sign-in page for this source. Try again.",
     source_not_connected: "This source isn't connected, so there is nothing to disconnect.",
     source_busy: "This source is finishing a read. Try again in a moment.",
-    limit_not_continued: "Olympus on the computer is restarting or busy, so this stop was not lifted. It is still open; try again in a moment.",
+    limit_not_continued: "Olympus on the computer is restarting, so this stop was not lifted. It is still open; try again in a moment.",
+    limit_unconfirmed: "Olympus on the computer did not confirm this in time. It may still go through: check the stop again in a moment before trying again.",
     sync_unavailable: "Olympus can't check this source from here right now. It keeps checking on its own.",
     disconnect_incomplete: "Olympus couldn't finish disconnecting this source. Try again.",
     delete_needs_disconnect: "Disconnect this source first, then delete its indexed data.",
@@ -230221,8 +230231,10 @@ async function runChatGptTool(name, args, ctx, options, signal, detachedContext)
         try {
           result = await findOperationByName("olympus_limits").handler(ctx, args);
         } catch (error2) {
-          if (error2 instanceof OperationError && (error2.code === "email_unreachable" || error2.code === "email_error"))
+          if (error2 instanceof OperationError && error2.code === "worker_restarting")
             throw new ChatGptSurfaceError("limit_not_continued");
+          if (error2 instanceof OperationError && (error2.code === "email_unreachable" || error2.code === "email_error"))
+            throw new ChatGptSurfaceError("limit_unconfirmed");
           throw error2;
         }
         return limitsToolResult(result);

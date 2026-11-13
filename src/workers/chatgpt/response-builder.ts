@@ -1437,6 +1437,7 @@ function directSignInUrl(value: unknown): string | undefined {
 type SurfaceOnlyErrorCode =
   | 'unavailable'
   | 'limit_not_continued'
+  | 'limit_unconfirmed'
   | 'unknown_tool'
   | 'internal'
   | 'models_not_ready'
@@ -1471,6 +1472,7 @@ const ERROR_TEXT: Record<OperationErrorCode | SurfaceOnlyErrorCode, string> = {
   argus_error: 'The answer model on the computer could not answer. Try again shortly.',
   email_not_configured: 'Olympus on the computer needs setup before it can answer. Open Olympus on the computer.',
   email_unreachable: 'Olympus on the computer is not reachable right now. Try again shortly.',
+  worker_restarting: 'Olympus on the computer is restarting. Try again in a moment.',
   email_error: 'Olympus could not complete this request. Try again shortly.',
   email_policy_violation: 'Olympus withheld this result under the owner\'s privacy rules.',
   source_index_not_enabled: 'Searching sources is not turned on in Olympus on the computer.',
@@ -1489,7 +1491,8 @@ const ERROR_TEXT: Record<OperationErrorCode | SurfaceOnlyErrorCode, string> = {
   sign_in_failed: 'Olympus couldn\'t open the sign-in page for this source. Try again.',
   source_not_connected: 'This source isn\'t connected, so there is nothing to disconnect.',
   source_busy: 'This source is finishing a read. Try again in a moment.',
-  limit_not_continued: 'Olympus on the computer is restarting or busy, so this stop was not lifted. It is still open; try again in a moment.',
+  limit_not_continued: 'Olympus on the computer is restarting, so this stop was not lifted. It is still open; try again in a moment.',
+  limit_unconfirmed: 'Olympus on the computer did not confirm this in time. It may still go through: check the stop again in a moment before trying again.',
   sync_unavailable: 'Olympus can\'t check this source from here right now. It keeps checking on its own.',
   disconnect_incomplete: 'Olympus couldn\'t finish disconnecting this source. Try again.',
   delete_needs_disconnect: 'Disconnect this source first, then delete its indexed data.',

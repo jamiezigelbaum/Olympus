@@ -283,7 +283,7 @@ test('request stop amounts retain their units through marker persistence and reo
   expect(stops(time.date())).toMatchObject([{ id: 'gmail.daily_requests', limit: 100, used: 100 }]);
 });
 
-test('a refused or interrupted continue reaches the CLI and Home in its own words, and the stop stays open', async () => {
+test('a refused, restarting or unconfirmed continue reaches the CLI and Home in its own words without claiming more than is known', async () => {
   const config = { ...defaultConfig(), email: { ...defaultConfig().email, enabled: true, baseUrl: 'http://worker.test/v1' } };
   const answering = (status: number, error: { code: string; message: string }) => {
     const email = new EmailClient(config, new DirectHttpEmailTransport(async () => Response.json({ error, policy: { raw_email_exposed: false } }, { status })));
@@ -291,12 +291,20 @@ test('a refused or interrupted continue reaches the CLI and Home in its own word
   };
   const refused = answering(400, { code: 'invalid_params', message: '--to must be a whole number greater than the current limit and used calls.' });
   await expect(refused.email.ownerLimits({ action: 'continue', id: 'judge.daily_calls', to: 0 })).rejects.toMatchObject({ code: 'invalid_params', message: expect.stringContaining('--to must be') });
-  for (const [status, code, message] of [[503, 'worker_restarting', 'Olympus is restarting; try again in a moment.'], [503, 'engine_background_unavailable', 'The background engine is not answering.'], [502, 'engine_background_failed', 'The background could not run this.']] as const) {
+  // Restarting refuses before anything is sent: the stop is still open.
+  const restarting = answering(503, { code: 'worker_restarting', message: 'Olympus is restarting; try again in a moment.' });
+  await expect(restarting.email.ownerLimits({ action: 'list' })).rejects.toMatchObject({ code: 'worker_restarting', message: 'Olympus is restarting; try again in a moment.' });
+  const notLifted = await callChatGptTool('olympus_limits', { action: 'continue', id: 'venice.credit' }, restarting, { dashboardView: async () => emptyView() });
+  expect(notLifted.structuredContent).toMatchObject({ error: 'limit_not_continued' });
+  expect(JSON.stringify(notLifted.content)).toContain('still open');
+  // Unanswered or failed after sending may still apply later: never claim the stop is still open.
+  for (const [status, code, message] of [[503, 'engine_background_unavailable', 'The background engine is not answering.'], [502, 'engine_background_failed', 'The background could not run this.']] as const) {
     const ctx = answering(status, { code, message });
-    await expect(ctx.email.ownerLimits({ action: 'list' })).rejects.toMatchObject({ message });
+    await expect(ctx.email.ownerLimits({ action: 'continue', id: 'judge.daily_calls', to: 5 })).rejects.toMatchObject({ message, suggestion: expect.stringContaining('may still go through') });
     const home = await callChatGptTool('olympus_limits', { action: 'continue', id: 'venice.credit' }, ctx, { dashboardView: async () => emptyView() });
     expect(home.isError).toBe(true);
-    expect(home.structuredContent).toMatchObject({ error: 'limit_not_continued' });
-    expect(JSON.stringify(home.content)).toContain('still open');
+    expect(home.structuredContent).toMatchObject({ error: 'limit_unconfirmed' });
+    expect(JSON.stringify(home.content)).toContain('may still go through');
+    expect(JSON.stringify(home.content)).not.toContain('still open');
   }
 });

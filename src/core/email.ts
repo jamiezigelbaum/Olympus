@@ -47,7 +47,8 @@ const PASSTHROUGH_EMAIL_WORKER_ERROR_CODES: ReadonlyMap<string, OperationErrorCo
   // olympus_limits refusals (owner-limits.ts) carry no source content.
   ['invalid_params', 'invalid_params'],
   // The engine split's answers when the background cannot take a forwarded action (engine-split/runtime.ts).
-  ['worker_restarting', 'email_unreachable'],
+  // Restarting is refused before anything is sent; the other two may still apply later.
+  ['worker_restarting', 'worker_restarting'],
   ['engine_background_unavailable', 'email_unreachable'],
   ['engine_background_failed', 'email_error'],
   ['source_index_policy_violation', 'source_index_policy_violation'],
@@ -485,9 +486,17 @@ export class EmailClient {
       throw new OperationError('email_not_configured', 'Private source worker is disabled.',
         'Run olympus setup, then olympus worker install, to bring the private source worker up before continuing stopped work.');
     }
-    return this.transport.requestJson(`${this.config.email.baseUrl}/limits`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params),
-    });
+    try {
+      return await this.transport.requestJson(`${this.config.email.baseUrl}/limits`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params),
+      });
+    } catch (error) {
+      // Unanswered or failed after it was sent: a continue may still apply, so never say it did not.
+      if (error instanceof OperationError && (error.code === 'email_unreachable' || error.code === 'email_error')) {
+        throw new OperationError(error.code, error.message, 'It may still go through. Run olympus limits in a moment to see whether the stop is still open.');
+      }
+      throw error;
+    }
   }
 
   /**

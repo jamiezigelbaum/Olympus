@@ -557,8 +557,9 @@ async function runChatGptTool(
         let result: unknown;
         try { result = await findOperationByName('olympus_limits')!.handler(ctx, args); }
         catch (error) {
-          // The engine restarting or busy: say the stop is still open, never a bare "could not complete".
-          if (error instanceof OperationError && (error.code === 'email_unreachable' || error.code === 'email_error')) throw new ChatGptSurfaceError('limit_not_continued');
+          // Restarting refuses before sending: the stop is still open. Unanswered or failed after sending may still apply.
+          if (error instanceof OperationError && error.code === 'worker_restarting') throw new ChatGptSurfaceError('limit_not_continued');
+          if (error instanceof OperationError && (error.code === 'email_unreachable' || error.code === 'email_error')) throw new ChatGptSurfaceError('limit_unconfirmed');
           throw error;
         }
         return limitsToolResult(result);
