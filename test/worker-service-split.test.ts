@@ -155,6 +155,32 @@ describe('the worker service runs the engine split itself', () => {
   }, 30_000);
 });
 
+describe('a busy background is never judged dead (gate7, 13 Nov)', () => {
+  // The class behind every split install failure on the owner's data: the
+  // background's only thread sits in one long synchronous SQLite call (a store
+  // backup, row checks, a first-open migration) and neither answers nor
+  // writes progress. Here it blocks for 60 s in its boot work and 60 s again
+  // just after it answers ready, each far past the 10 s start window. Neither
+  // process may be replaced, and the front, which waits on the background,
+  // must end up serving.
+  test('a background blocked for 60 s at boot and 60 s after ready keeps running, and the front serves', async () => {
+    const context = setup();
+    context.env.BLOCK_BOOT_MS = '60000';
+    context.env.BLOCK_AFTER_READY_MS = '60000';
+    context.env.FRONT_WAITS = '1';
+    await supervise(context);
+    const events = await waitFor(() => {
+      const all = context.read();
+      return all.some((e) => (e.event as string) === 'serving' || (e.event as string) === 'gave-up') ? all : undefined;
+    }, { timeoutMs: 170_000, intervalMs: 500 });
+    expect(events.filter((e) => (e.event as string) === 'gave-up')).toEqual([]);
+    expect(events.filter((e) => (e.event as string) === 'blocked')).toHaveLength(2);
+    const starts = events.filter((e) => e.event === 'start');
+    expect(starts.map((e) => e.role)).toEqual(['background', 'front']);
+    expect(events.filter((e) => e.event === 'stop')).toEqual([]);
+  }, 180_000);
+});
+
 describe('a unit stop signals every process at once (KillMode=control-group)', () => {
   test('the supervisor, the front and the background all get SIGTERM: all stop, none is started again, exit 143', async () => {
     const context = setup();

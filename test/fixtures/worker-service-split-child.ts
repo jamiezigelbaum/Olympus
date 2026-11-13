@@ -8,9 +8,16 @@
 // READY_DELAY_MS holds the background's readiness back; CRASH_AFTER_MS exits 1
 // that long after start; SPAWN_EXTRACTION has the background start a long
 // extraction command through the real command runner, as a document
-// extraction does (its own detached process group).
+// extraction does (its own detached process group). BLOCK_BOOT_MS and
+// BLOCK_AFTER_READY_MS hold the background's only thread in one synchronous
+// call, as a long SQLite backup does: during its boot work (reported as
+// backing_up, as the real one is) and again just after it answers ready.
+// FRONT_WAITS has the front wait for the background as the real front does,
+// then record that it serves.
 import { appendFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { beginBootProgress, finishBootProgress, reportBootStep } from '../../src/core/boot-progress.ts';
+import { waitForEngineBackground } from '../../src/workers/engine-split/runtime.ts';
 import { runExtractionCommand } from '../../src/workers/file-extraction/extractors/command-runner.ts';
 
 const role = process.env.OLYMPUS_WORKER_ENGINE_ROLE ?? 'single';
@@ -53,9 +60,27 @@ const serve = () => {
     },
   });
 };
+/** One synchronous call that holds this process's only thread, as bun:sqlite does. */
+const blockLoop = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 if (role === 'background') {
   const readyDelay = Number(process.env.READY_DELAY_MS ?? 0);
-  if (readyDelay > 0) setTimeout(serve, readyDelay);
+  const blockBoot = Number(process.env.BLOCK_BOOT_MS ?? 0);
+  const blockAfterReady = Number(process.env.BLOCK_AFTER_READY_MS ?? 0);
+  if (blockBoot > 0 || blockAfterReady > 0) {
+    beginBootProgress(process.env);
+    if (blockBoot > 0) {
+      reportBootStep(process.env, { phase: 'backing_up', storeId: 'stand-in' });
+      note('blocked', { ms: blockBoot });
+      blockLoop(blockBoot);
+    }
+    finishBootProgress();
+    serve();
+    note('ready');
+    if (blockAfterReady > 0) {
+      // Just after ready: the first answer has not gone out yet.
+      setTimeout(() => { note('blocked', { ms: blockAfterReady }); blockLoop(blockAfterReady); }, 0);
+    }
+  } else if (readyDelay > 0) setTimeout(serve, readyDelay);
   else serve();
   if (process.env.SPAWN_EXTRACTION) {
     // Through a shell that execs the real program, as an interpreter-launched
@@ -67,6 +92,12 @@ if (role === 'background') {
       timeoutMs: 120_000,
     }).catch(() => undefined);
   }
+}
+if (role === 'front' && process.env.FRONT_WAITS) {
+  void waitForEngineBackground({
+    socketPath: process.env.OLYMPUS_ENGINE_BACKGROUND_SOCKET!,
+    authToken: process.env.OLYMPUS_WORKER_AUTH_TOKEN!,
+  }).then(() => note('serving'), (error: unknown) => { note('gave-up', { error: String(error) }); process.exit(1); });
 }
 const crashAfter = Number(process.env.CRASH_AFTER_MS ?? 0);
 if (crashAfter > 0) setTimeout(() => process.exit(1), crashAfter);
