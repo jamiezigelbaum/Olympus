@@ -8,6 +8,9 @@ import { PRIVATE_ANSWER_OPTIONS } from '../../src/core/privacy-language.ts';
 import { ON_DEMAND_FOLDER, type SeedFolder } from './on-demand-seeds.ts';
 import type { FolderMode, TimingDashboard } from './on-demand-timing.ts';
 
+/** The Add a source tile for a source, by its provider id (gmail.email, google_drive.docs, dropbox.files). */
+const sourcePick = (s: LiveSourceSpec) => `[data-source-pick^="${s.id}."]`;
+
 export interface FreshDashboard {
   privacyChoice(): Promise<string>;
   connection?(source: LiveSourceSpec): Promise<'connected' | 'web' | 'unavailable'>;
@@ -133,6 +136,21 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
     const sourceAction = async (s: LiveSourceSpec, pattern: string) => {
       const row = `[...document.querySelectorAll('.source')].find(e=>e.querySelector('.source-name')?.textContent?.trim()===${JSON.stringify(s.label)})`;
       await click(`(()=>{const row=${row}; if(!row)return null; const e=[...row.querySelectorAll('button')].find(e=>/${pattern}/i.test(e.textContent.trim())); const menu=row.querySelector('details');if(e && menu && menu.contains(e) && !menu.open)menu.querySelector('summary').click();return e;})()`);
+    };
+    // Sources not yet connected are offered as tiles in the Add a source sheet: pick the tile, then press
+    // that source's Connect. A build that still lists unconnected sources as rows uses the row's Connect.
+    const startConnect = async (s: LiveSourceSpec) => {
+      const tile = sourcePick(s);
+      const picked = await panel<boolean>(`(() => {const tile=document.querySelector(${JSON.stringify(tile)}); if(!tile)return false; const d=tile.closest('dialog'); if(d && !d.open) document.querySelector('[data-dialog-open="add-source"]')?.click(); tile.click(); return true;})()`, Boolean);
+      if (!picked) return sourceAction(s, '^Connect$');
+      const setup = `[...document.querySelectorAll('[data-source-setup]')].find(e=>e.getAttribute('data-source-setup').startsWith(${JSON.stringify(`${s.id}.`)}))`;
+      try {
+        await click(`(()=>{const setup=${setup}; return setup ? [...setup.querySelectorAll('button')].find(e=>/^Connect$/.test(e.textContent.trim())) : null;})()`);
+      } catch (error) {
+        // Say what holds the button (for example models still downloading), from the product's own copy.
+        const held = await panel<string>(`(()=>{const setup=${setup}; return setup?.querySelector('.blocked')?.textContent?.trim() || '';})()`, value => typeof value === 'string' && value.length > 0).catch(() => undefined);
+        throw new Error(held ? `${s.label} Connect is held: ${held}` : `${s.label} Connect did not appear in the Add a source sheet`);
+      }
     };
     const folderRow = (name: string) => `(()=>{
       const row=[...document.querySelectorAll('.frow:not(.jump)')].find(e=>e.querySelector('.fname-text')?.textContent===${JSON.stringify(name)});
@@ -267,7 +285,8 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
         if (!view) throw new Error(`source cards unreadable: HTTP ${status}`);
         const c = sourceCard(view, s.id);
         if (connected(c)) return 'connected';
-        return await panel<boolean>(`(() => {const row=[...document.querySelectorAll('.source')].find(e=>e.querySelector('.source-name')?.textContent?.trim()===${JSON.stringify(s.label)});if(!row)return null;return [...row.querySelectorAll('button')].some(e=>/^Connect$/.test(e.textContent.trim()));})()`, value => typeof value === 'boolean') ? 'web' : 'unavailable';
+        // An unconnected source is offered as a tile in the Add a source sheet (older builds: a row with Connect).
+        return await panel<boolean>(`(() => {if(document.querySelector(${JSON.stringify(sourcePick(s))}))return true;const row=[...document.querySelectorAll('.source')].find(e=>e.querySelector('.source-name')?.textContent?.trim()===${JSON.stringify(s.label)});if(!row)return null;return [...row.querySelectorAll('button')].some(e=>/^Connect$/.test(e.textContent.trim()));})()`, value => typeof value === 'boolean') ? 'web' : 'unavailable';
       },
       connect: async s => {
         // Say which precondition failed, from the dashboard's own JSON: provider names and states only.
@@ -280,7 +299,7 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
         baseline.clear();
         for (const t of (await browser!.send('Target.getTargets')).targetInfos) baseline.add(t.targetId);
         windowOffered = false;
-        await sourceAction(s, '^Connect$');
+        await startConnect(s);
         // A remembered grant can redirect at once and finish between polls; the callback check verifies completion.
         await until(async () => { const c = await card(s); return c?.connection?.state === 'awaiting_consent' || (!!c && connected(c)); }, 'source card did not enter awaiting_consent or connect');
       },
