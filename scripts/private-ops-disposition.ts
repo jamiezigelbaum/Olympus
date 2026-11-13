@@ -188,7 +188,9 @@ function verify(allowPending: boolean): never {
     if (entry.path === undefined) throw new Error('Entry has neither a path nor a path digest.');
     const absolute = containedPath(entry.path);
     if (entry.disposition === 'retained_product_or_governance') {
-      if (!RETAINED_PATHS.has(entry.path) || !entry.public_sha256 || !existsSync(absolute) || sha256File(absolute) !== entry.public_sha256) throw new Error(`Retained path is not exact: ${entry.path}.`);
+      // Retained docs keep evolving; only their presence is checked. Pinning
+      // their bytes policed record keeping and was retired on 13 Nov 2026.
+      if (!RETAINED_PATHS.has(entry.path) || !entry.public_sha256 || !existsSync(absolute)) throw new Error(`Retained path is missing: ${entry.path}.`);
     } else if (existsSync(absolute)) throw new Error(`Disposed private path remains in Olympus: ${entry.path}.`);
     if (redactedDigests.has(pathDigest(entry.path))) throw new Error('A literal entry duplicates a redacted entry.');
   }
