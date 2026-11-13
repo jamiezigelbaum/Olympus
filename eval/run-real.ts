@@ -38,7 +38,7 @@ import type { EvidenceReranker } from '../src/core/evidence-reranker.ts';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { analystCoverageBytes, analystEvidenceFormat, analystPromptBytes, analystPromptWithoutDraft, auditNamedAmountCount, createAnalyst, withPromptBudget, type AnalystEvidenceFormat, type AnalystModel } from '../src/core/analyst.ts';
+import { analystCoverageBytes, analystEvidenceFormat, analystPromptBytes, analystOutputAnswer, analystPromptWithoutDraft, auditNamedAmountCount, createAnalyst, withPromptBudget, type AnalystEvidenceFormat, type AnalystModel } from '../src/core/analyst.ts';
 import { createDelphiAnalystModel } from '../src/core/analyst-delphi.ts';
 import {
   DEFAULT_VENICE_ANALYST_MODEL,
@@ -204,11 +204,16 @@ async function main(): Promise<void> {
   // question's: the answer-stage audit checks the values against it.
   const analystPrompts: string[] = [];
   const analystModelIds: string[] = [];
+  // Eval-only (#1590): keep each call's text in memory so the report can say,
+  // as booleans, whether the first draft held each value. Never written out.
+  const traceDraftAudit = process.env.OLYMPUS_EVAL_TRACE_DRAFT_AUDIT?.trim().toLowerCase() === 'on';
+  const analystCompletions: string[] = [];
   const analyst = createAnalyst({
     async complete(request) {
       analystPrompts.push(request.prompt);
       const completion = await model.complete(request);
       analystModelIds.push(completion.modelId);
+      if (traceDraftAudit) analystCompletions.push(completion.text);
       return completion;
     },
   }, { auditSuspiciousDrafts: true, evidenceFormat: analystProvider === 'local' ? 'compact' : 'full' });
@@ -245,6 +250,7 @@ async function main(): Promise<void> {
   const keepGradedAnswerRecords = () => {
     analystPrompts.splice(firstAnswer?.prompts ?? 0);
     analystModelIds.splice(firstAnswer?.modelIds ?? 0);
+    analystCompletions.splice(firstAnswer?.prompts ?? 0);
   };
   const gradedAnalyst: Analyst = {
     async analyze(pack, analyzeOptions) {
@@ -317,7 +323,8 @@ async function main(): Promise<void> {
         }),
         ...(detail ? { retrieval: evalRetrievalAudit(detail, question, storeSearches) } : {}),
         answerStage: {
-          ...evalAnswerStageAudit(question, pack, rawResultsByPack.get(pack), result, analystPrompts, analystModelIds, analystSeatsByPack.get(pack)),
+          ...evalAnswerStageAudit(question, pack, rawResultsByPack.get(pack), result, analystPrompts, analystModelIds, analystSeatsByPack.get(pack),
+            traceDraftAudit ? { completions: analystCompletions } : undefined),
           ...(repeatsByPack.has(pack)
             ? {
               answerRepeats: repeatsByPack.get(pack)!.results.map((repeat) => evalAnswerRepeat(question, pack, repeat)),
@@ -552,6 +559,12 @@ export interface EvalAnswerStageAudit {
     inPackAsSubstring: boolean;
     /** In the prompt the Analyst model was sent; absent when no prompt was recorded. */
     inAnalystPrompt?: boolean;
+    /**
+     * With OLYMPUS_EVAL_TRACE_DRAFT_AUDIT=on and an audit call (#1590): in the
+     * first call's prompt, in its draft answer, and in the audit call's
+     * evidence (its quote of the draft left out). Booleans only.
+     */
+    draftAudit?: { inFirstPrompt: boolean; inFirstDraft: boolean; inAuditPrompt: boolean };
     inAnalystAnswer: boolean;
     inReleasedAnswer: boolean;
     /**
@@ -617,6 +630,8 @@ export interface EvalAnswerStageAudit {
    */
   auditNamedAmounts?: number;
   auditPromptBytes?: number;
+  /** With OLYMPUS_EVAL_TRACE_DRAFT_AUDIT=on and an audit call: whether the audit's answer differs from the first draft's. */
+  auditReplacedDraft?: boolean;
   /** The pack seats the Analyst was sent, when a prompt budget fitted the pack (Ask's local leg). */
   analystSeats?: number[];
   /**
@@ -871,6 +886,7 @@ export function evalAnswerStageAudit(
   analystPrompts?: readonly string[],
   analystModelIds?: readonly string[],
   analystSeats?: readonly number[],
+  draftTrace?: { completions: readonly string[] },
 ): EvalAnswerStageAudit {
   // Every evidence field the Analyst can be shown: citation metadata
   // (title, locator, dates), chunk text, extracted facts and tables.
@@ -887,6 +903,16 @@ export function evalAnswerStageAudit(
   // The audit quotes the model's own draft; that is not evidence it was sent.
   const promptText = analystPrompts && analystPrompts.length > 0 ? analystPrompts.map(analystPromptWithoutDraft).join('\n') : undefined;
   const analystOwn = analystResult ?? releasedResult;
+  // Only when the first call was audited: its draft, and the two prompts.
+  const traced = draftTrace && analystPrompts && analystPrompts.length >= 2 && draftTrace.completions.length >= 1
+    ? {
+      firstPrompt: analystPrompts[0]!,
+      auditPrompt: analystPromptWithoutDraft(analystPrompts[1]!),
+      // Read as the Analyst reads them; an audit that does not parse keeps the draft.
+      draft: analystOutputAnswer(draftTrace.completions[0]!) ?? '',
+      audited: draftTrace.completions[1] === undefined ? undefined : analystOutputAnswer(draftTrace.completions[1]),
+    }
+    : undefined;
   // A citation names its seat by the candidate's own provenance, else by the item.
   const citationSeats = analystOwn.citations.map((citation) => {
     const exact = pack.candidates.findIndex((candidate) => candidate.provenance === citation.provenance);
@@ -934,12 +960,20 @@ export function evalAnswerStageAudit(
     ...(promptText !== undefined ? { analystPromptChars: analystPrompts!.reduce((sum, prompt) => sum + prompt.length, 0) } : {}),
     ...auditNoteFields(analystPrompts),
     ...(analystModelIds && analystModelIds.length > 0 ? { analystModelIds: [...analystModelIds] } : {}),
+    ...(traced ? { auditReplacedDraft: traced.audited !== undefined && traced.audited.trim() !== traced.draft.trim() } : {}),
     expected: (question.expectedAnswerContains ?? []).map((value) => ({
       inPack: answerContainsExpectedValue(value, packText).matched,
       inPackAsSubstring: acceptableForms(value).some((form) => packText.toLowerCase().includes(form)),
       ...(promptText !== undefined ? { inAnalystPrompt: answerContainsExpectedValue(value, promptText).matched } : {}),
       inAnalystAnswer: answerContainsExpectedValue(value, (analystResult ?? releasedResult).answer).matched,
       inReleasedAnswer: answerContainsExpectedValue(value, releasedResult.answer).matched,
+      ...(traced
+        ? { draftAudit: {
+          inFirstPrompt: answerContainsExpectedValue(value, traced.firstPrompt).matched,
+          inFirstDraft: answerContainsExpectedValue(value, traced.draft).matched,
+          inAuditPrompt: answerContainsExpectedValue(value, traced.auditPrompt).matched,
+        } }
+        : {}),
     })).map((entry, index) => {
       const value = question.expectedAnswerContains![index]!;
       const analystAnswer = (analystResult ?? releasedResult).answer;

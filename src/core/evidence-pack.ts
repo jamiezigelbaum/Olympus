@@ -5,6 +5,7 @@ import {
   rerankCandidates,
   rerankPassage,
   rerankPoolSize,
+  RERANK_POOL_STORE_DEPTH,
   type EvidenceRerankAudit,
   type EvidenceReranker,
   type RerankTimers,
@@ -361,7 +362,7 @@ async function buildPreparedEvidencePackDetailed(
   const retrievalLimit = reranker ? rerankPoolSize(reranker, input.maxResults) : input.maxResults;
   const routed = input.selectedItems?.length
     ? selectedItemsToRoutedSlice(input)
-    : await runRoutedSearches(input, retrievalLimit);
+    : await runRoutedSearches(input, retrievalLimit, reranker ? { storeDepth: RERANK_POOL_STORE_DEPTH } : undefined);
   // A build can fan out more than once (the literal query plus planner
   // expansions), and each routed run judged its hits against its own ledger
   // snapshot. One more pass over the merged hits puts the whole pack on ONE
@@ -882,6 +883,7 @@ function selectedItemsToRoutedSlice(input: BuildEvidencePackInput): RoutedSearch
 async function runRoutedSearches(
   input: BuildEvidencePackInput,
   retrievalLimit: number = input.maxResults,
+  poolAllocation?: { storeDepth: number },
 ): Promise<RoutedSearchSlice> {
   const literalQuery = literalSearchQuery(input);
   // Kicked off BEFORE the literal search so the two overlap rather than queue.
@@ -890,7 +892,7 @@ async function runRoutedSearches(
     : undefined;
 
   const budget = searchBudget(input);
-  const literalRun = await runRoutedSearch(input, literalQuery, 1, retrievalLimit, budget.firstLaneTimeoutMs(), budget.deadlineAtMs);
+  const literalRun = await runRoutedSearch(input, literalQuery, 1, retrievalLimit, budget.firstLaneTimeoutMs(), budget.deadlineAtMs, poolAllocation);
   if (!pendingPlan) return literalRun;
 
   if (isStrongLiteralRun(literalRun, input.maxResults)) {
@@ -914,7 +916,7 @@ async function runRoutedSearches(
       recordSourceAnswerQueryPlannerDisposition('search_budget_spent');
       break;
     }
-    runs.push(await runRoutedSearch(input, query, runs.length + 1, retrievalLimit, laneTimeoutMs, budget.deadlineAtMs));
+    runs.push(await runRoutedSearch(input, query, runs.length + 1, retrievalLimit, laneTimeoutMs, budget.deadlineAtMs, poolAllocation));
   }
   if (runs.length === 1) return literalRun;
 
@@ -1017,6 +1019,7 @@ function runRoutedSearch(
   maxResults: number,
   laneTimeoutMs: number,
   searchDeadlineAtMs?: number,
+  poolAllocation?: { storeDepth: number },
 ): Promise<SourceIndexRoutedSearchResponse> {
   return observeSourceAnswerRoutedQuery(ordinal, () =>
     routeSourceIndexSearch({
@@ -1028,6 +1031,7 @@ function runRoutedSearch(
         ...(input.corpusIds ? { corpusIds: input.corpusIds } : {}),
         context: input.searchContext,
         ...(questionHasTemporalIntent(input) ? { temporalIntent: true } : {}),
+        ...(poolAllocation ? { poolAllocation } : {}),
       },
       laneTimeoutMs,
       ...(searchDeadlineAtMs !== undefined ? { searchDeadlineAtMs } : {}),
