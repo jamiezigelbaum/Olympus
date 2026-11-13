@@ -195,7 +195,7 @@ export async function main(argv = process.argv.slice(2)) {
       inputs.push({ ...item.identity, corpusId: opened.corpusId, privateAtAnswer: false, chunkHashes: parts.map(part => part.content_hash) });
       const privateHashes = new Set<string>();
       truth.push(privateHashes);
-      for (const window of unseenWindows(parts)) {
+      for (const window of unseenWindows(parts, Infinity)) {
         windows++;
         const input = storedJudgeInput(row, window.text, item.provider);
         if (input.secret || (input.material === undefined && input.privateWithoutJudge)) { hold(window.chunkHashes, privateHashes); continue; }
