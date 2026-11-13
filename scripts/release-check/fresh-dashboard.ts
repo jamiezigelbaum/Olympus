@@ -152,11 +152,12 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
       if (!await panel<boolean>(`!!${row}`, Boolean)) {
         const details = `document.querySelector('[data-source-row^=${JSON.stringify(`${s.id}.`)}] a[data-source-details]')?.getAttribute('href')`;
         let href = await panel<string>(details, v => typeof v === 'string' && v.length > 0);
+        // Best effort: if Sources or the landing does not load, the press below fails naming what the page showed.
         if (!href) {
-          await reload('/dashboard?connect', `!!document.querySelector('.srcrows')`);
+          await reload('/dashboard?connect', `!!document.querySelector('.srcrows')`).catch(() => undefined);
           href = await panel<string>(details, v => typeof v === 'string' && v.length > 0);
         }
-        if (href) await reload(href, `!!${row}`);
+        if (href) await reload(href, `!!${row}`).catch(() => undefined);
       }
       try {
         await click(`(()=>{const row=${row}; if(!row)return null; const e=[...row.querySelectorAll('button')].find(e=>/${pattern}/i.test(e.textContent.trim())); const menu=row.querySelector('details');if(e && menu && menu.contains(e) && !menu.open)menu.querySelector('summary').click();return e;})()`);
