@@ -13,6 +13,7 @@ import { isV04PublicDashboardRoute } from '../../../core/public-surface.ts';
 
 const WORKER_POST_PATHS: readonly string[] = [
   '/consult/ask',
+  '/limits',
   '/archive-import/start',
   '/archive-import/status',
   '/archive-import/remove',

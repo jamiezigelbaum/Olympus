@@ -1376,6 +1376,7 @@ function isV04PublicOperation(surface, operationName) {
 var V0_4_PUBLIC_NATIVE_TOOLS, V0_4_PUBLIC_MCP_TOOLS, V0_4_PUBLIC_CLI_OPERATIONS, V0_4_HERMES_MCP_TOOLS, V0_4_PUBLIC_REMOTE_MCP_TOOLS, V0_4_PUBLIC_SOURCE_IDS, PUBLIC_OPERATION_NAMES;
 var init_public_surface = __esm(() => {
   V0_4_PUBLIC_NATIVE_TOOLS = [
+    "olympus_limits",
     "argus_ping",
     "argus_list_models",
     "argus_complete",
@@ -1395,6 +1396,7 @@ var init_public_surface = __esm(() => {
     "olympus_open_remote"
   ];
   V0_4_PUBLIC_MCP_TOOLS = [
+    "olympus_limits",
     "argus_ping",
     "argus_list_models",
     "argus_complete",
@@ -1411,6 +1413,7 @@ var init_public_surface = __esm(() => {
     "privacy_item_set"
   ];
   V0_4_PUBLIC_CLI_OPERATIONS = [
+    "olympus_limits",
     "argus_ping",
     "argus_list_models",
     "argus_complete",
@@ -2945,6 +2948,7 @@ var init_olympus_layout = __esm(() => {
     "remote-connections": "remote-connections.sqlite",
     "source-dashboard": "source-dashboard.sqlite",
     "source-scheduler": "source-scheduler.sqlite",
+    "limit-settings": "limits.json",
     "source-watches": "source-watches.sqlite",
     "file-extraction-jobs": "file-extraction-jobs.sqlite",
     "ingestion-doctor-state": "source-ingestion-doctor-state.json",
@@ -6512,8 +6516,70 @@ var init_native_process_service = __esm(() => {
   };
 });
 
+// src/core/boot-progress.ts
+import { appendFileSync, existsSync as existsSync8, mkdirSync as mkdirSync9, readdirSync as readdirSync2, readFileSync as readFileSync13, renameSync as renameSync4, rmSync as rmSync5, statSync as statSync6 } from "node:fs";
+function readBootProgress(env = process.env) {
+  try {
+    const value = JSON.parse(readFileSync13(bootProgressPath(env), "utf8"));
+    if (value.schema !== BOOT_PROGRESS_SCHEMA || typeof value.pid !== "number" || typeof value.phase !== "string" || typeof value.startedAt !== "string" || typeof value.updatedAt !== "string")
+      return;
+    return { completedStores: 0, ...value };
+  } catch {
+    return;
+  }
+}
+function bootInProgress(env = process.env, now = Date.now()) {
+  return bootProgressIsLive(readBootProgress(env), now);
+}
+function bootProgressIsLive(progress, now = Date.now(), alive = processAlive) {
+  if (!progress || progress.phase === "done" || !alive(progress.pid))
+    return false;
+  if (progress.phase === "backing_up" || progress.phase === "migrating") {
+    return now - Date.parse(progress.startedAt) < BOOT_LONG_STEP_BACKSTOP_MS;
+  }
+  return now - Date.parse(progress.updatedAt) < BOOT_STALL_MS;
+}
+function processAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+function bootProgressPath(env) {
+  return sharedDataPath("boot-progress", env);
+}
+var BOOT_PROGRESS_SCHEMA = "olympus.boot-progress.v1", BOOT_LONG_STEP_BACKSTOP_MS, BOOT_STALL_MS;
+var init_boot_progress = __esm(() => {
+  init_atomic_file();
+  init_olympus_layout();
+  BOOT_LONG_STEP_BACKSTOP_MS = 6 * 60 * 60 * 1000;
+  BOOT_STALL_MS = 5 * 60 * 1000;
+});
+
+// src/core/sqlite-migrations.ts
+var init_sqlite_migrations = __esm(() => {
+  init_boot_progress();
+  init_operation_error();
+});
+
+// src/core/limit-stops.ts
+function registerLimit(input) {
+  const prior = limits.get(input.id);
+  if (prior && Object.keys({ ...prior, ...input }).some((key) => prior[key] !== input[key])) {
+    throw new Error(`Limit already registered differently: ${input.id}`);
+  }
+  limits.set(input.id, Object.freeze({ ...input }));
+}
+var limits;
+var init_limit_stops = __esm(() => {
+  init_sqlite_migrations();
+  limits = new Map;
+});
+
 // src/core/zkapi-consult-settings.ts
-import { readFileSync as readFileSync13, statSync as statSync6 } from "node:fs";
+import { readFileSync as readFileSync14, statSync as statSync7 } from "node:fs";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 function parseZkapiConsultSettings(value, label) {
@@ -6608,7 +6674,7 @@ function refreshZkapiPortsFromPolicyFile(env = process.env) {
   }
   let stamp;
   try {
-    const stat2 = statSync6(path);
+    const stat2 = statSync7(path);
     stamp = `${path}:${stat2.dev}:${stat2.ino}:${stat2.size}:${stat2.mtimeMs}:${stat2.ctimeMs}`;
   } catch (error) {
     if (error.code === "ENOENT") {
@@ -6623,7 +6689,7 @@ function refreshZkapiPortsFromPolicyFile(env = process.env) {
   if (policyFile.seen === stamp && policyFile.unreadable === undefined)
     return;
   try {
-    const ports = zkapiPortsInPolicy(JSON.parse(readFileSync13(path, "utf8")));
+    const ports = zkapiPortsInPolicy(JSON.parse(readFileSync14(path, "utf8")));
     for (const port of ports)
       zkapiDaemonPorts.add(port);
     policyFile.seen = stamp;
@@ -7056,54 +7122,6 @@ var OPERATION_CALLER_DISPLAY_NAME_MAX = 80, UNSAFE_LABEL_CHARS, inProcessRemoteR
 var init_operation_caller = __esm(() => {
   UNSAFE_LABEL_CHARS = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
   inProcessRemoteRequests = new WeakSet;
-});
-
-// src/core/boot-progress.ts
-import { appendFileSync, existsSync as existsSync9, mkdirSync as mkdirSync10, readdirSync as readdirSync2, readFileSync as readFileSync15, renameSync as renameSync4, rmSync as rmSync5, statSync as statSync7 } from "node:fs";
-function readBootProgress(env = process.env) {
-  try {
-    const value = JSON.parse(readFileSync15(bootProgressPath(env), "utf8"));
-    if (value.schema !== BOOT_PROGRESS_SCHEMA || typeof value.pid !== "number" || typeof value.phase !== "string" || typeof value.startedAt !== "string" || typeof value.updatedAt !== "string")
-      return;
-    return { completedStores: 0, ...value };
-  } catch {
-    return;
-  }
-}
-function bootInProgress(env = process.env, now = Date.now()) {
-  return bootProgressIsLive(readBootProgress(env), now);
-}
-function bootProgressIsLive(progress, now = Date.now(), alive = processAlive) {
-  if (!progress || progress.phase === "done" || !alive(progress.pid))
-    return false;
-  if (progress.phase === "backing_up" || progress.phase === "migrating") {
-    return now - Date.parse(progress.startedAt) < BOOT_LONG_STEP_BACKSTOP_MS;
-  }
-  return now - Date.parse(progress.updatedAt) < BOOT_STALL_MS;
-}
-function processAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error.code === "EPERM";
-  }
-}
-function bootProgressPath(env) {
-  return sharedDataPath("boot-progress", env);
-}
-var BOOT_PROGRESS_SCHEMA = "olympus.boot-progress.v1", BOOT_LONG_STEP_BACKSTOP_MS, BOOT_STALL_MS;
-var init_boot_progress = __esm(() => {
-  init_atomic_file();
-  init_olympus_layout();
-  BOOT_LONG_STEP_BACKSTOP_MS = 6 * 60 * 60 * 1000;
-  BOOT_STALL_MS = 5 * 60 * 1000;
-});
-
-// src/core/sqlite-migrations.ts
-var init_sqlite_migrations = __esm(() => {
-  init_boot_progress();
-  init_operation_error();
 });
 // src/core/store-write-guard.ts
 var init_store_write_guard = () => {};
@@ -12193,14 +12211,14 @@ function zkapiDailyLimitState(settings, statePath, now) {
     return "reached";
   return "available";
 }
-function reserveZkapiRequest(path, limits, now, fence = { scope: "default", configDir: "unknown" }, allowanceMicroUsd = ZKAPI_MAX_ALLOWANCE_MICRO_USD) {
+function reserveZkapiRequest(path, limits2, now, fence = { scope: "default", configDir: "unknown" }, allowanceMicroUsd = ZKAPI_MAX_ALLOWANCE_MICRO_USD) {
   let refusal2;
   updateState(path, now, (state) => {
-    if (limits.requestCap !== undefined && state.count >= limits.requestCap) {
+    if (limits2.requestCap !== undefined && state.count >= limits2.requestCap) {
       refusal2 = "daily_cap_reached";
       return;
     }
-    if (limits.spendCapMicroUsd !== undefined && state.reservedMicroUsd + allowanceMicroUsd > limits.spendCapMicroUsd) {
+    if (limits2.spendCapMicroUsd !== undefined && state.reservedMicroUsd + allowanceMicroUsd > limits2.spendCapMicroUsd) {
       refusal2 = "spend_cap_reached";
       return;
     }
@@ -18432,6 +18450,7 @@ var init_request_budget = __esm(() => {
     provider;
     reason;
     observedFutureUtcDay;
+    amounts;
     constructor(provider, retryAt, reason = "daily_api_request_guard", options = {}) {
       super(reason === "future_utc_day" ? `${provider} request budget clock regression: persisted future UTC day ` + `${options.observedFutureUtcDay ?? "future"} is later than current UTC day ` + `${options.currentUtcDay ?? "current"}; recover with ` + "`olympus source request-budget recover-future` using the observed day." : reason === "ledger_busy" ? `${provider} request budget ledger remained busy; the provider request was refused before dispatch.` : `${provider} request deferred by daily_api_request_guard.`);
       this.name = "GoogleRequestBudgetError";
@@ -18439,6 +18458,7 @@ var init_request_budget = __esm(() => {
       this.retryAt = retryAt;
       this.reason = reason;
       this.observedFutureUtcDay = options.observedFutureUtcDay;
+      this.amounts = options.limit !== undefined ? { limit: options.limit, ...options.used !== undefined ? { used: options.used } : {} } : undefined;
     }
   };
 });
@@ -22079,20 +22099,6 @@ var init_analyst_openclaw_infer = __esm(() => {
 
 // src/core/evidence-reranker.ts
 var init_evidence_reranker = () => {};
-
-// src/core/limit-stops.ts
-function registerLimit(input) {
-  const prior = limits.get(input.id);
-  if (prior && Object.keys({ ...prior, ...input }).some((key) => prior[key] !== input[key])) {
-    throw new Error(`Limit already registered differently: ${input.id}`);
-  }
-  limits.set(input.id, Object.freeze({ ...input }));
-}
-var limits;
-var init_limit_stops = __esm(() => {
-  init_sqlite_migrations();
-  limits = new Map;
-});
 
 // src/core/evidence-pack.ts
 var utf8, CUT_SHORT_LANES;
@@ -26534,12 +26540,12 @@ var DAILY_LIMITS;
 var init_scheduler_limit_stops = __esm(() => {
   init_limit_stops();
   DAILY_LIMITS = new Map(Object.entries({
-    daily_cost_guard: { id: "x.daily_cost", kind: "cost", label: "daily X API budget used" },
-    daily_api_request_guard: { id: "x.daily_requests", kind: "requests", label: "daily X API budget used" },
-    daily_resource_read_guard: { id: "x.daily_resource_reads", kind: "requests", label: "daily X API budget used" },
-    head_api_request_reserve_guard: { id: "x.head_reserve_requests", kind: "requests", label: "daily X API budget used" },
-    head_resource_read_reserve_guard: { id: "x.head_reserve_reads", kind: "requests", label: "daily X API budget used" },
-    head_cost_reserve_guard: { id: "x.head_reserve_cost", kind: "cost", label: "daily X API budget used" },
+    daily_cost_guard: { id: "x.daily_cost", kind: "cost", label: "daily X spending budget used" },
+    daily_api_request_guard: { id: "x.daily_requests", kind: "requests", label: "daily X request budget used" },
+    daily_resource_read_guard: { id: "x.daily_resource_reads", kind: "requests", label: "daily X resource-read budget used" },
+    head_api_request_reserve_guard: { id: "x.head_reserve_requests", kind: "requests", label: "X request reserve for new bookmarks reached" },
+    head_resource_read_reserve_guard: { id: "x.head_reserve_reads", kind: "requests", label: "X resource-read reserve for new bookmarks reached" },
+    head_cost_reserve_guard: { id: "x.head_reserve_cost", kind: "cost", label: "X spending reserve for new bookmarks reached" },
     readwise_daily_api_request_guard: { id: "readwise.daily_requests", kind: "requests", label: "daily Readwise API budget used" },
     gmail_daily_api_request_guard: { id: "gmail.daily_requests", kind: "requests", label: "daily Gmail API budget used" },
     google_drive_daily_api_request_guard: { id: "drive.daily_requests", kind: "requests", label: "daily Google Drive API budget used" }
@@ -28457,10 +28463,12 @@ init_config();
 import { isAbsolute as isAbsolute10 } from "node:path";
 
 // src/core/provider-credit-status.ts
+init_limit_stops();
 init_model_transport();
 init_atomic_file();
-import { existsSync as existsSync8, mkdirSync as mkdirSync9, readFileSync as readFileSync14, unlinkSync } from "node:fs";
+import { existsSync as existsSync9, mkdirSync as mkdirSync10, readFileSync as readFileSync15, unlinkSync } from "node:fs";
 import { dirname as dirname14 } from "node:path";
+registerLimit({ id: "venice.credit", kind: "funding", scope: "judge", label: "Venice billing/balance.canConsume is false", unit: "usd", continue: "refill" });
 var VENICE_BILLING_BASE_URL = "https://api.venice.ai/api/v1";
 var DEFAULT_BASE_URL = VENICE_BILLING_BASE_URL;
 var DEFAULT_TIMEOUT_MS = 15000;
@@ -28506,6 +28514,8 @@ async function fetchVeniceCreditStatus(options = {}) {
     if (!response.ok)
       return buildHttpErrorReport(generatedAt, response.status, "balance");
     const body = await response.json();
+    if (options.balanceOnly)
+      return buildBalanceReport(generatedAt, body);
     const usageResult = await fetchBundledCreditUsage({
       baseUrl,
       generatedAt,
@@ -28730,7 +28740,7 @@ function unavailableUsage(errorKind, errorMessage, pagesFetched = 0) {
 function actionsForReport(report) {
   const actions = [];
   if (report.status === "credit_exhausted") {
-    actions.push("venice: billing/balance.canConsume is false; keep escalation paused until credits are refilled, then clear the provider pause marker and restart Venice timers.");
+    actions.push("venice: billing/balance.canConsume is false; refill Venice credits, then use olympus limits continue venice.credit to re-check, or wait for the automatic re-check (at most 15 minutes).");
   } else if (report.status === "not_configured") {
     actions.push("venice: credit monitor is not configured; provide OLYMPUS_SOURCE_INDEX_VENICE_API_KEY through the private-host runtime secret wrapper.");
   } else if (report.status === "auth_failed") {
@@ -28815,38 +28825,45 @@ function safeErrorMessage(error) {
   return error instanceof Error && error.name === "AbortError" ? "Venice billing request timed out or was cancelled." : "Venice billing request failed.";
 }
 function writeReport(path, report) {
-  mkdirSync9(dirname14(path), { recursive: true, mode: 448 });
+  mkdirSync10(dirname14(path), { recursive: true, mode: 448 });
   writePrivateFileAtomicSync(path, `${JSON.stringify(report, null, 2)}
 `);
 }
 function writeProviderPause(path, report) {
-  mkdirSync9(dirname14(path), { recursive: true, mode: 448 });
+  mkdirSync10(dirname14(path), { recursive: true, mode: 448 });
   writePrivateFileAtomicSync(path, `${JSON.stringify({
     active: true,
     kind: "venice",
     reason: "provider_credit_exhausted",
     error_kind: report.error_kind ?? "venice_billing_credit_exhausted",
     created_at: report.generated_at,
-    message: "Venice escalation paused because billing/balance.canConsume is false. Refill Venice credits, remove this marker, then restart Venice escalation timers."
+    message: "Venice escalation paused because billing/balance.canConsume is false. Refill Venice credits; Olympus re-checks automatically within 15 minutes, or use olympus limits continue venice.credit."
   }, null, 2)}
 `);
 }
-function reconcileProviderPauseFile(path, report) {
+function veniceCreditStop(path, since) {
+  return { id: "venice.credit", subject: path, since, limit: null, used: null };
+}
+function reconcileProviderPauseFile(path, report, stops) {
   if (report.can_consume === false) {
     writeProviderPause(path, report);
+    stops?.record(veniceCreditStop(path, report.generated_at));
     return "written";
   }
   if (report.status === "ok" && report.can_consume === true && isVeniceProviderPauseFile(path)) {
     unlinkSync(path);
+    stops?.clear("venice.credit", path);
     return "cleared";
   }
+  if (report.status === "ok" && report.can_consume === true && !existsSync9(path))
+    stops?.clear("venice.credit", path);
   return "left";
 }
 function isVeniceProviderPauseFile(path) {
-  if (!existsSync8(path))
+  if (!existsSync9(path))
     return false;
   try {
-    const raw = JSON.parse(readFileSync14(path, "utf8"));
+    const raw = JSON.parse(readFileSync15(path, "utf8"));
     return raw.kind === "venice";
   } catch {
     return false;
@@ -28924,7 +28941,7 @@ function createNativeCreditMonitorService(options) {
         if (!isCurrent(lifetime))
           return;
         lifetime.tick = runTick(lifetime, settings);
-      }, options.intervalMs ?? settings.intervalSeconds * 1000);
+      }, options.intervalMs ?? Math.min(settings.intervalSeconds * 1000, 15 * 60000));
       lifetime.timer.unref?.();
     }
   }
@@ -29469,6 +29486,7 @@ var PASSTHROUGH_EMAIL_WORKER_ERROR_CODES = new Map([
   ["not_personal", "not_personal"],
   ["unsupported_filter", "unsupported_filter"],
   ["invalid_request", "invalid_request"],
+  ["invalid_params", "invalid_params"],
   ["source_index_policy_violation", "source_index_policy_violation"]
 ]);
 var CONSULT_ASK_CLIENT_TIMEOUT_MS = 20 * 60000;
@@ -29500,6 +29518,16 @@ class EmailClient {
     }, {
       timeoutMs: options.timeoutMs ?? CONSULT_ASK_CLIENT_TIMEOUT_MS,
       ...options.maxTimeoutMs !== undefined ? { maxTimeoutMs: options.maxTimeoutMs } : {}
+    });
+  }
+  async ownerLimits(params) {
+    if (!this.config.email.enabled) {
+      throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before continuing stopped work.");
+    }
+    return this.transport.requestJson(`${this.config.email.baseUrl}/limits`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params)
     });
   }
   async archiveImport(options) {
@@ -37451,6 +37479,20 @@ var PRIVACY_ITEM_SET_PARAMS = {
 };
 var operations = [
   {
+    name: "olympus_limits",
+    description: "List open work stops with exact reasons, amounts, units and continuation actions; continue one with run_once, raise (--to, optional --keep), or a Venice refill re-check. Raising without keep lasts only this UTC day.",
+    params: {
+      action: { type: "string", enum: ["list", "continue"] },
+      id: { type: "string", description: "The limit id from the list." },
+      subject: { type: "string", description: "The exact subject from the list; required if more than one matches." },
+      to: { type: "number", description: "New total daily call limit, greater than current limit and calls used." },
+      keep: { type: "boolean", description: "Keep the new daily limit for good." }
+    },
+    mutating: true,
+    cliHints: { name: "limits", positional: ["action", "id"] },
+    handler: async (ctx, params) => ctx.email.ownerLimits(params)
+  },
+  {
     name: "argus_ping",
     description: "Check whether the configured Argus local model profile is reachable.",
     params: {
@@ -38281,6 +38323,7 @@ var OLYMPUS_DASHBOARD_PANEL_PATH = "/olympus/dashboard/panel";
 // src/core/control-ui-gateway.ts
 init_worker_auth();
 var OLYMPUS_TAB_TOOL_NAMES = [
+  "olympus_limits",
   "olympus_dashboard",
   "olympus_connect_source",
   "olympus_scope_list",

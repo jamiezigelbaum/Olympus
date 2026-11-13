@@ -29,7 +29,7 @@ import {
   ReadResourceRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { shouldExposeOperation } from '../../core/operation-exposure.ts';
-import { findOperationByName, type OperationContext } from '../../core/operations.ts';
+import { findOperationByName, operationToolSchema, type OperationContext } from '../../core/operations.ts';
 import { createPublicSourceCorpusRegistry } from '../../core/source-corpus-registry.ts';
 import { VERSION } from '../../version.ts';
 import type { SourceDashboardViewModel } from '../source-dashboard.ts';
@@ -53,6 +53,7 @@ import {
   ChatGptSurfaceError,
   dashboardToolMeta,
   dashboardToolResult,
+  limitsToolResult,
   errorToolResult,
   openPrivateQuestionToolResult,
   privateQuestionToolMeta,
@@ -383,6 +384,15 @@ function readOnlyGrantMayUse(tool: ChatGptToolDefinition): boolean {
   return tool.annotations.readOnlyHint || READ_ONLY_GRANT_EXCEPTIONS.includes(tool.name);
 }
 
+const LIMITS_TOOL: ChatGptToolDefinition = {
+  name: 'olympus_limits', title: 'Continue stopped work',
+  description: 'For the Olympus Home panel: list work stopped by a limit or continue a stop with the owner’s chosen action.',
+  inputSchema: operationToolSchema(findOperationByName('olympus_limits')!) as ChatGptToolDefinition['inputSchema'],
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  securitySchemes: [{ type: 'oauth2', scopes: [] }],
+  _meta: { ui: { visibility: ['app'] }, 'openai/widgetAccessible': true, 'openai/visibility': 'private' },
+};
+
 /**
  * Every tool this surface can list, in list order. The relay lists all of them
  * to a caller with no token (it cannot see the engine's config), from the
@@ -396,6 +406,7 @@ export const CHATGPT_TOOLS: readonly ChatGptToolDefinition[] = [
   ASK_ANONYMOUSLY_TOOL,
   OPEN_PRIVATE_QUESTION_TOOL,
   ...SETUP_TOOLS,
+  LIMITS_TOOL,
 ];
 
 export function listChatGptTools(ctx: OperationContext, options: Pick<ChatGptSurfaceOptions, 'answerModelAvailable' | 'readOnly' | 'appClient'> = {}): ChatGptToolDefinition[] {
@@ -404,7 +415,7 @@ export function listChatGptTools(ctx: OperationContext, options: Pick<ChatGptSur
   // Anonymous answers also use the collector when the source index is off.
   else if (askToolListed(ctx)) tools.push(SOURCE_ANSWER_RESULT_TOOL);
   if (askToolListed(ctx)) tools.push(ASK_ANONYMOUSLY_TOOL, OPEN_PRIVATE_QUESTION_TOOL);
-  tools.push(...SETUP_TOOLS);
+  tools.push(...SETUP_TOOLS, LIMITS_TOOL);
   return appClientCopy(options.readOnly ? tools.filter(readOnlyGrantMayUse) : tools, options.appClient);
 }
 
@@ -541,6 +552,10 @@ async function runChatGptTool(
       throw new ChatGptSurfaceError('unknown_tool');
     }
     switch (name) {
+      case 'olympus_limits': {
+        const result = await findOperationByName('olympus_limits')!.handler(ctx, args);
+        return limitsToolResult(result);
+      }
       case DASHBOARD_TOOL_NAME:
         return dashboardToolResult(await dashboardViewModel(options, signal));
       case SOURCE_STATUS_TOOL.name:

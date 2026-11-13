@@ -44,6 +44,8 @@ const PASSTHROUGH_EMAIL_WORKER_ERROR_CODES: ReadonlyMap<string, OperationErrorCo
   ['not_personal', 'not_personal'],
   ['unsupported_filter', 'unsupported_filter'],
   ['invalid_request', 'invalid_request'],
+  // olympus_limits refusals (owner-limits.ts) carry no source content.
+  ['invalid_params', 'invalid_params'],
   ['source_index_policy_violation', 'source_index_policy_violation'],
 ]);
 
@@ -467,6 +469,20 @@ export class EmailClient {
     }, {
       timeoutMs: options.timeoutMs ?? CONSULT_ASK_CLIENT_TIMEOUT_MS,
       ...(options.maxTimeoutMs !== undefined ? { maxTimeoutMs: options.maxTimeoutMs } : {}),
+    });
+  }
+
+  /**
+   * olympus_limits: the stops live in the engine's Bun store, so the engine
+   * lists and continues them (owner-limits.ts). Refusals arrive as errors.
+   */
+  async ownerLimits(params: Record<string, unknown>): Promise<unknown> {
+    if (!this.config.email.enabled) {
+      throw new OperationError('email_not_configured', 'Private source worker is disabled.',
+        'Run olympus setup, then olympus worker install, to bring the private source worker up before continuing stopped work.');
+    }
+    return this.transport.requestJson(`${this.config.email.baseUrl}/limits`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params),
     });
   }
 

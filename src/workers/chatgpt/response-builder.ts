@@ -1,3 +1,4 @@
+import { limitStopReference, registeredLimits } from '../../core/limit-stops.ts';
 import { appClientCopy, type McpAppClient } from '../../../connect-relay/shared/mcp-app-client.ts';
 import { sourceSupportDetails } from '../dashboard/source-failure.ts';
 import { PRIVATE_ANSWER_OPTIONS, PRIVACY_PRESET_LABELS } from '../../core/privacy-language.ts';
@@ -148,6 +149,7 @@ const DISCONNECT_SOURCE_IDS = new Set<ChatGptDisconnectSourceId>(['gmail.email',
 const DELETE_DATA_SOURCE_IDS = new Set<ChatGptDeleteSourceId>([...DISCONNECT_SOURCE_IDS, 'telegram.messages', 'whatsapp.personal.messages']);
 const SYNC_SOURCE_IDS = new Set<ChatGptSyncSourceId>(DISCONNECT_SOURCE_IDS);
 const FIX_TOOL_ARGS: Record<string, Record<string, ReadonlySet<string>>> = {
+  olympus_limits: {},
   [DASHBOARD_TOOL_NAME]: {},
   [CONNECT_SOURCE_TOOL_NAME]: { source: OAUTH_SOURCES },
   [SCOPE_LIST_TOOL_NAME]: { source_id: SCOPE_SOURCE_IDS },
@@ -178,6 +180,37 @@ const CITABLE_TRUST_DOMAINS = new Set(['public_safe', 'internal']);
 /* ------------------------------------------------------------------ */
 /* Dashboard                                                           */
 /* ------------------------------------------------------------------ */
+
+export function limitsToolResult(raw: unknown): ChatGptToolResult {
+  const record = asRecord(raw) ?? {};
+  if (Array.isArray(record.stops)) {
+    const registrations = registeredLimits();
+    const stops = record.stops.flatMap(value => {
+      const stop = asRecord(value);
+      const registration = registrations.find(limit => limit.id === stop?.id);
+      if (!registration || typeof stop?.subject !== 'string') return [];
+      const waiting = asRecord(stop.waiting);
+      return [{ ...registration, subject: limitStopReference({ id: registration.id, subject: stop.subject }),
+        since: iso(stop.since), limit: finite(stop.limit) && stop.limit >= 0 ? stop.limit : null,
+        used: finite(stop.used) && stop.used >= 0 ? stop.used : null,
+        ...(waiting ? { waiting: {
+          ...(finite(waiting.items) ? { items: whole(waiting.items) } : {}),
+          ...(finite(waiting.runs) ? { runs: whole(waiting.runs) } : {}),
+        } } : {}), ...(iso(stop.resumesAt) ? { resumesAt: iso(stop.resumesAt)! } : {}) }];
+    });
+    return { content: [{ type: 'text', text: JSON.stringify({ stops }) }] };
+  }
+  const ok = record.ok === true;
+  const status = asRecord(record.result)?.status;
+  const message = record.action === 'raise' && ok
+    ? `Call limit raised to ${whole(record.to)} calls${record.keep === true ? ' for good' : ' for this UTC day'}. Judging can continue.`
+    : record.action === 'refill'
+      ? ok ? 'Venice can consume again. Work can continue.' : 'Venice billing has not confirmed canConsume=true. The stop remains; Olympus will re-check automatically.'
+      : record.action === 'run_once'
+        ? ok ? 'One operator run requested. Usage stays counted.' : status === 'busy' ? 'This source already has a run in progress.' : 'This source was just started. Check its progress on Home.'
+        : 'Olympus could not continue this stop. Refresh Home and try again.';
+  return { content: [{ type: 'text', text: message }], ...(!ok ? { isError: true } : {}) };
+}
 
 export function dashboardToolResult(view: DashboardViewModelV1): ChatGptToolResult {
   const structured = copyDashboardViewModel(view);
@@ -430,7 +463,7 @@ function copyFix(fix: DashboardFix): DashboardFix {
   const tool = typeof fix?.tool === 'string' && Object.prototype.hasOwnProperty.call(FIX_TOOL_ARGS, fix.tool) ? fix.tool : undefined;
   // A Fix always names a tool: an unknown one becomes "check again".
   const out: DashboardFix = tool
-    ? { label: text(fix.label), tool, args: copyFixArgs(fix.args, FIX_TOOL_ARGS[tool]!) }
+    ? { label: text(fix.label), tool, args: tool === 'olympus_limits' ? copyLimitFixArgs(fix.args) : copyFixArgs(fix.args, FIX_TOOL_ARGS[tool]!) }
     : { label: text(fix?.label), tool: DASHBOARD_TOOL_NAME, args: {} };
   const href = safeHref(fix?.href);
   if (href) out.href = href;
@@ -439,6 +472,17 @@ function copyFix(fix: DashboardFix): DashboardFix {
   if (tool === DELETE_SOURCE_DATA_TOOL_NAME && (fix?.deletesCopies === 'messages' || fix?.deletesCopies === 'messages_and_media')) out.deletesCopies = fix.deletesCopies;
   if (fix?.openHref === true && href) out.openHref = true;
   return out;
+}
+
+/** Limit identities come from the registry; numeric and boolean choices retain their types. */
+function copyLimitFixArgs(args: unknown): Record<string, unknown> {
+  const record = asRecord(args) ?? {};
+  if (record.action !== 'continue' || typeof record.id !== 'string'
+    || !registeredLimits().some(limit => limit.id === record.id && limit.continue !== 'none')
+    || typeof record.subject !== 'string' || !/^limit:[a-f0-9]{64}$/.test(record.subject)) return {};
+  return { action: 'continue', id: record.id, subject: record.subject,
+    ...(Number.isSafeInteger(record.to) && (record.to as number) > 0 ? { to: record.to } : {}),
+    ...(typeof record.keep === 'boolean' ? { keep: record.keep } : {}) };
 }
 
 /** Only allowlisted argument names, each one of its enum values. */
@@ -1653,7 +1697,11 @@ function copyWait(wait: DashboardSourceWait): DashboardSourceWait[] {
   const fix = wait.fix ? copyFix(wait.fix) : undefined;
   return [{ sourceId: text(wait.sourceId), label: text(wait.label), reason: wait.reason, api: text(wait.api),
     ...(wait.reason === 'limit' ? {
-      limitLabel: text(wait.limitLabel), ...(iso(wait.since) ? { since: iso(wait.since)! } : {}),
+      limitLabel: text(wait.limitLabel),
+      ...(wait.limit === null || (finite(wait.limit) && wait.limit >= 0) ? { limit: wait.limit } : {}),
+      ...(wait.used === null || (finite(wait.used) && wait.used >= 0) ? { used: wait.used } : {}),
+      ...(['usd', 'requests', 'calls', 'ms', 'bytes'].includes(wait.unit ?? '') ? { unit: wait.unit! } : {}),
+      ...(iso(wait.since) ? { since: iso(wait.since)! } : {}),
       ...(wait.waiting ? { waiting: {
         ...(finite(wait.waiting.items) ? { items: whole(wait.waiting.items) } : {}),
         ...(finite(wait.waiting.runs) ? { runs: whole(wait.waiting.runs) } : {}),

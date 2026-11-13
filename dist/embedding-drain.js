@@ -663,6 +663,7 @@ var SHARED_DATA_FILES = {
   "remote-connections": "remote-connections.sqlite",
   "source-dashboard": "source-dashboard.sqlite",
   "source-scheduler": "source-scheduler.sqlite",
+  "limit-settings": "limits.json",
   "source-watches": "source-watches.sqlite",
   "file-extraction-jobs": "file-extraction-jobs.sqlite",
   "ingestion-doctor-state": "source-ingestion-doctor-state.json",
@@ -1664,6 +1665,7 @@ var SOURCE_INDEX_ACTIVATION_MODES = ["lexical_only", "hybrid_shadow", "hybrid_pr
 
 // src/core/public-surface.ts
 var V0_4_PUBLIC_NATIVE_TOOLS = [
+  "olympus_limits",
   "argus_ping",
   "argus_list_models",
   "argus_complete",
@@ -1683,6 +1685,7 @@ var V0_4_PUBLIC_NATIVE_TOOLS = [
   "olympus_open_remote"
 ];
 var V0_4_PUBLIC_MCP_TOOLS = [
+  "olympus_limits",
   "argus_ping",
   "argus_list_models",
   "argus_complete",
@@ -1699,6 +1702,7 @@ var V0_4_PUBLIC_MCP_TOOLS = [
   "privacy_item_set"
 ];
 var V0_4_PUBLIC_CLI_OPERATIONS = [
+  "olympus_limits",
   "argus_ping",
   "argus_list_models",
   "argus_complete",
@@ -13902,6 +13906,7 @@ class GoogleRequestBudgetError extends Error {
   provider;
   reason;
   observedFutureUtcDay;
+  amounts;
   constructor(provider, retryAt, reason = "daily_api_request_guard", options = {}) {
     super(reason === "future_utc_day" ? `${provider} request budget clock regression: persisted future UTC day ` + `${options.observedFutureUtcDay ?? "future"} is later than current UTC day ` + `${options.currentUtcDay ?? "current"}; recover with ` + "`olympus source request-budget recover-future` using the observed day." : reason === "ledger_busy" ? `${provider} request budget ledger remained busy; the provider request was refused before dispatch.` : `${provider} request deferred by daily_api_request_guard.`);
     this.name = "GoogleRequestBudgetError";
@@ -13909,6 +13914,7 @@ class GoogleRequestBudgetError extends Error {
     this.retryAt = retryAt;
     this.reason = reason;
     this.observedFutureUtcDay = options.observedFutureUtcDay;
+    this.amounts = options.limit !== undefined ? { limit: options.limit, ...options.used !== undefined ? { used: options.used } : {} } : undefined;
   }
 }
 
@@ -40795,12 +40801,12 @@ var TELEGRAM_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:telegra
 var TELEGRAM_SPOOL_CLEARED_KEY = `${TELEGRAM_SPOOL_REDACTION_STATE_KEY}:cleared_through`;
 // src/workers/scheduler-limit-stops.ts
 var DAILY_LIMITS = new Map(Object.entries({
-  daily_cost_guard: { id: "x.daily_cost", kind: "cost", label: "daily X API budget used" },
-  daily_api_request_guard: { id: "x.daily_requests", kind: "requests", label: "daily X API budget used" },
-  daily_resource_read_guard: { id: "x.daily_resource_reads", kind: "requests", label: "daily X API budget used" },
-  head_api_request_reserve_guard: { id: "x.head_reserve_requests", kind: "requests", label: "daily X API budget used" },
-  head_resource_read_reserve_guard: { id: "x.head_reserve_reads", kind: "requests", label: "daily X API budget used" },
-  head_cost_reserve_guard: { id: "x.head_reserve_cost", kind: "cost", label: "daily X API budget used" },
+  daily_cost_guard: { id: "x.daily_cost", kind: "cost", label: "daily X spending budget used" },
+  daily_api_request_guard: { id: "x.daily_requests", kind: "requests", label: "daily X request budget used" },
+  daily_resource_read_guard: { id: "x.daily_resource_reads", kind: "requests", label: "daily X resource-read budget used" },
+  head_api_request_reserve_guard: { id: "x.head_reserve_requests", kind: "requests", label: "X request reserve for new bookmarks reached" },
+  head_resource_read_reserve_guard: { id: "x.head_reserve_reads", kind: "requests", label: "X resource-read reserve for new bookmarks reached" },
+  head_cost_reserve_guard: { id: "x.head_reserve_cost", kind: "cost", label: "X spending reserve for new bookmarks reached" },
   readwise_daily_api_request_guard: { id: "readwise.daily_requests", kind: "requests", label: "daily Readwise API budget used" },
   gmail_daily_api_request_guard: { id: "gmail.daily_requests", kind: "requests", label: "daily Gmail API budget used" },
   google_drive_daily_api_request_guard: { id: "drive.daily_requests", kind: "requests", label: "daily Google Drive API budget used" }

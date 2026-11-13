@@ -1,3 +1,6 @@
+import { startVeniceCreditRecovery, fetchVeniceCreditStatus, VENICE_BILLING_BASE_URL } from '../../core/provider-credit-status.ts';
+import { openVeniceCreditPausePaths, ownerLimitStopHooks } from '../../core/owner-limit-state.ts';
+import { ownerLimits, limitRunOnceSource } from '../../core/owner-limits.ts';
 import { parseOwnerTierItemId } from '../classification/tier-owner-items.ts';
 import { fileSourceScopeOnDemandFilters } from '../source-scope-runtime.ts';
 import type { OnDemandReadRequest, OnDemandReadResult } from '../file-extraction/on-demand-read.ts';
@@ -4756,6 +4759,21 @@ export async function main(): Promise<void> {
     ownerTierItems: ownerTierItemsEngine,
     // "Check the judge" (issue #887): its round file sits beside the owner's privacy profile.
     judgeCheck: createJudgeCheck({ items: ownerTierItemsEngine, get: (itemId) => getOwnerTierItem(itemId, ownerTierItemsContext, { withPreview: true }) }),
+    ownerLimits: (params) => ownerLimits(params, {
+      runOnce: async (subject) => {
+        const response = await workerFetchInProcess(new Request('http://olympus-worker.internal/dashboard/sync-now', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source: limitRunOnceSource(subject) }),
+        }));
+        const body = await response.json() as { error?: { code?: unknown; message?: unknown } };
+        // A refusal (stopping, scope not approved, no lane) is the route's own words, never a success.
+        if (!response.ok) {
+          throw new OperationError('invalid_request', typeof body.error?.message === 'string' ? body.error.message : `The sync could not start (${response.status}).`);
+        }
+        return body;
+      },
+      credit: { env: { ...process.env, ...olympusConfig.worker.creditMonitor.credentials } },
+      wake: () => tierSniffer?.wake(),
+    }),
     // Bound late: the consult block below sets askAnonymouslyNow.
     consultAsk: async ({ caller, ...input }, signal) => (askAnonymouslyNow
       ? askWithAnonymousInbox({ ...input, ...(caller?.provider ? { callerProvider: caller.provider } : {}), signal }, {
@@ -6414,6 +6432,7 @@ export async function main(): Promise<void> {
         people: ({ request }) => runForwarded(request),
         source_sync: ({ request }) => runForwarded(request),
         data_export: ({ request }) => runForwarded(request),
+        owner_limits: ({ request }) => runForwarded(request),
         // Matched-first judging (#1062, PR #1115) is not in this build yet.
         // A question the front answered matched these pending items: the judge here asks about them first.
         judge_now: ({ items, budgetMs }) => runChunkJudgment(items, budgetMs),
@@ -6476,6 +6495,18 @@ export async function main(): Promise<void> {
   localWorkPending = () => (snifferRuntime.source === 'built_in' && (tierSniffer?.backlog().remainingQuestions ?? 0) > 0)
     || connectorStores.some((store) => embedsOnThisComputer(connectorStoreEmbeddingProviders.get(store.corpusId)) && store.queuedEmbeddingItemIds(1).length > 0);
   localPacer.start();
+  // The plugin's credit monitor runs in Node and writes only the marker; the marker check reports it here.
+  const configuredCreditMarkers = (): string[] => [olympusConfig.worker.creditMonitor.pauseFile,
+    process.env.OLYMPUS_VENICE_CREDIT_STATUS_PROVIDER_PAUSE_FILE].filter((path): path is string => !!path);
+  // The split's front stays a reader: recovery writes the scheduler store, so only the writer runs it.
+  const stopCreditRecovery = engineFront ? () => {} : startVeniceCreditRecovery({
+    paths: () => [...new Set([...openVeniceCreditPausePaths(), ...configuredCreditMarkers()])],
+    markers: configuredCreditMarkers,
+    stops: ownerLimitStopHooks,
+    probe: signal => fetchVeniceCreditStatus({ signal, baseUrl: VENICE_BILLING_BASE_URL, balanceOnly: true,
+      env: { ...process.env, ...olympusConfig.worker.creditMonitor.credentials } }),
+    onResume: () => tierSniffer?.wake(),
+  });
   const stopCpuSampleLog = await startCpuSampleLog(process.env);
 
   // The worker owns a background tick that outlives any request, so the process
@@ -6499,6 +6530,7 @@ export async function main(): Promise<void> {
     clearInterval(captureTick);
     stopSupersededSweep();
     stopCpuSampleLog?.();
+    stopCreditRecovery();
     tierSniffer?.stop();
     localPacer.stop();
     archiveImportDashboard.close();
