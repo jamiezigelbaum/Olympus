@@ -1808,7 +1808,7 @@ function withPreviewEvernote(view: SourceDashboardViewModel): SourceDashboardVie
   const own = view.sources[index]!;
   // Readwise's healthy state, under Evernote's own identity.
   view.sources[index] = { ...connected, corpus_id: own.corpus_id, source_id: own.source_id, label: own.label, provider: own.provider,
-    family: own.family, trust_domain: own.trust_domain, capabilities: own.capabilities };
+    family: own.family, trust_domain: own.trust_domain, ...(own.capabilities ? { capabilities: own.capabilities } : {}) };
   return view;
 }
 
@@ -2310,7 +2310,7 @@ if (import.meta.main) {
       if ((state.startsWith('privacy-')) && (body.name === PRIVACY_GET_TOOL_NAME || body.name === PRIVACY_SET_TOOL_NAME)) {
         return Response.json(previewPrivacyToolResult(state, body.name === PRIVACY_GET_TOOL_NAME ? 'get' : 'set', body.arguments as PrivacySetInput));
       }
-      if (state.startsWith('privacy-') && body.name === SCOPE_LIST_TOOL_NAME) return Response.json(previewPrivacyScope(body.arguments?.source_id, body.arguments?.cursor));
+      if (state.startsWith('privacy-') && body.name === SCOPE_LIST_TOOL_NAME) return Response.json(previewPrivacyScope(body.arguments?.source_id, (body.arguments as { cursor?: unknown } | undefined)?.cursor));
       if (body.name === SCOPE_LIST_TOOL_NAME && body.arguments?.source_id === 'local.files' && state.startsWith('local-files')) {
         return Response.json(previewScopeList(state, body.arguments));
       }
