@@ -617,3 +617,20 @@ test('re-scoring stops by score, not count: an item the 256-dimension digest ran
     expect(rescored).toBeLessThanOrEqual(1200);
   } finally { db.close(); }
 });
+
+test('the candidate cap never cuts a pass short of the limit: rejected top candidates drain to the eligible tail in one pass', async () => {
+  const db = numericStore();
+  try {
+    db.transaction(() => {
+      // 21,000 top digest candidates SQL rejects (tombstoned), above five eligible chunks.
+      for (let i = 1; i <= 21_000; i++) insert(db, i, [1, 0, 0]);
+      for (let i = 21_001; i <= 21_005; i++) insert(db, i, [0.6, 0.8, 0]);
+      db.exec('UPDATE items SET tombstoned = 1 WHERE item_pk <= 21000');
+    })();
+    finish(db);
+    const result = await scanDigestPages(reader(db), [1, 0, 0], { modelId }, undefined, 5);
+    expect(rank(result, 5)).toEqual([21_001, 21_002, 21_003, 21_004, 21_005]);
+    if ('skippedReason' in result) throw new Error(result.skippedReason);
+    expect(result.exhausted).toBe(true);
+  } finally { db.close(); }
+});

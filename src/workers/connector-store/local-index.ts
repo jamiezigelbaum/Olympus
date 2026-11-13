@@ -2482,8 +2482,12 @@ export async function scanDigestPages(
   let candidates = 0;
   let qualifiedItems = 0;
   let batches = 0;
-  while (heap.length > 0 && candidates < VECTOR_DIGEST_MAX_CANDIDATES) {
-    if (qualifiedItems >= limit && heap.peekScore() + underestimate < kthBestCosine(bestByItem, limit)) break;
+  while (heap.length > 0) {
+    // Until `limit` items qualify the pass reads on as before (a narrow filter
+    // drains the heap rather than restarting wider); the cap bounds only the
+    // score-driven reading past that point.
+    if (qualifiedItems >= limit && (candidates >= VECTOR_DIGEST_MAX_CANDIDATES
+      || heap.peekScore() + underestimate < kthBestCosine(bestByItem, limit))) break;
     if (expired()) return cut;
     if (batches++ > 0) await yieldConnectorStoreVectorScan();
     const digestScores = new Map<number, number>();
@@ -2519,8 +2523,8 @@ const VECTOR_DIGEST_PAGE_ROWS = 4096;
 /** The least the digest is assumed to underestimate an exact cosine by. */
 const VECTOR_DIGEST_MIN_MARGIN = 0.05;
 /**
- * Re-scored chunks per digest pass at most: about 60 MB of 768-dimension
- * vectors, a few percent of a 600K-chunk exact scan.
+ * Re-scored chunks per digest pass once enough items qualify: about 60 MB
+ * of 768-dimension vectors, a few percent of a 600K-chunk exact scan.
  */
 const VECTOR_DIGEST_MAX_CANDIDATES = 20_000;
 
