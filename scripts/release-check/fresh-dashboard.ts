@@ -147,6 +147,18 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
     const clickKey = (key: string) => click(byKey(key), `control ${key}`, `'controls with keys: ' + [...new Set([...document.querySelectorAll('[data-key]')].map(e=>e.getAttribute('data-key').replace(/:[^:]*$/, ':…')))].slice(0, 20).join(', ')`);
     const sourceAction = async (s: LiveSourceSpec, pattern: string) => {
       const row = `[...document.querySelectorAll('.source')].find(e=>e.querySelector('.source-name')?.textContent?.trim()===${JSON.stringify(s.label)})`;
+      // Sources lists a connected source as a short row whose Details opens its full row (with Choose mail or
+      // Choose folders, Sync now) on Home; Home lists no sources otherwise (#1085). Go there when this page has no such row.
+      if (!await panel<boolean>(`!!${row}`, Boolean)) {
+        const details = `document.querySelector('[data-source-row^=${JSON.stringify(`${s.id}.`)}] a[data-source-details]')?.getAttribute('href')`;
+        let href = await panel<string>(details, v => typeof v === 'string' && v.length > 0);
+        // Best effort: if Sources or the landing does not load, the press below fails naming what the page showed.
+        if (!href) {
+          await reload('/dashboard?connect', `!!document.querySelector('.srcrows')`).catch(() => undefined);
+          href = await panel<string>(details, v => typeof v === 'string' && v.length > 0);
+        }
+        if (href) await reload(href, `!!${row}`).catch(() => undefined);
+      }
       try {
         await click(`(()=>{const row=${row}; if(!row)return null; const e=[...row.querySelectorAll('button')].find(e=>/${pattern}/i.test(e.textContent.trim())); const menu=row.querySelector('details');if(e && menu && menu.contains(e) && !menu.open)menu.querySelector('summary').click();return e;})()`);
       } catch (error) {
@@ -251,7 +263,7 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
         await clickKey('picker:save');
         await until(async () => {
           await panel<boolean>(`(() => {const e=document.querySelector('[data-unlock-here]'); if(e && !e.disabled && (${visible})(e)){e.click();return true;}return false;})()`, Boolean);
-          return !!await panel<boolean>(`!document.querySelector('[data-key="picker:save"]') && !!document.querySelector('.srcrows')`, Boolean);
+          return !!await panel<boolean>(`!document.querySelector('[data-key="picker:save"]') && !!document.querySelector('.srcrows, .source')`, Boolean);
         }, 'folder mode was not saved');
         await openTimingFolder(folder);
         const saved = await pressedMode();
