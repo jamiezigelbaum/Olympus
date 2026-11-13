@@ -58,6 +58,7 @@ export function createJudgeSetup(options: {
 }) {
   const cloud = options.cloud;
   const status = () => ({ ...options.spending.status(),
+    chosen: options.spending.hasRecord(),
     cloudModel: cloud.source === 'off' ? null : cloud.lane.modelId,
     cloudAvailable: cloud.source !== 'off' && Boolean(JUDGE_PRICES[normalizeVeniceAnalystModelId(cloud.lane.modelId)]),
     observed: options.observed?.() ?? {},

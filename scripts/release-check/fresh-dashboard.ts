@@ -319,13 +319,40 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
           const said = await panel<string>(`document.querySelector('form[data-first-run-privacy] [data-action-message]')?.textContent?.trim() ?? ''`, value => typeof value === 'string' && value.length > 0).catch(() => undefined);
           throw new Error(said ? `first-run privacy choice was not saved: the dashboard said "${said}"` : `${(error as Error).message} (the dashboard showed no message)`);
         }
+        // Stay in the walkthrough for the separate, explicit judge approval.
+        // A local-first answer choice alone never approves Venice judging.
+        await click(`document.querySelector('[data-first-run-sheet] [data-setup-next]')`);
+        const judgeShown = !!await panel<boolean>(`(() => { const sheet=document.querySelector('[data-first-run-sheet]'); if(!sheet) return null; const e=sheet.querySelector('form[data-first-run-judge]'); return !!e && !e.closest('[data-setup-panel]').hidden; })()`, value => typeof value === 'boolean');
+        // Venice when this install can use it; a machine without a Venice key gets the dashboard's
+        // own refusal, and the leg then saves "This computer", naming both in the detail.
+        let judgeChoice = 'not shown';
+        const saveJudge = async (choice: 'venice' | 'local') => {
+          await click(`document.querySelector('form[data-first-run-judge] input[value="${choice}"]')`);
+          await click(`document.querySelector('button[form="first-run-judge-form"]')`);
+          try {
+            await until(async () => !!await panel<boolean>(`(() => { const e=document.querySelector('[data-first-run-sheet] [data-model-check]'); return !!e && !e.closest('[data-setup-panel]').hidden; })()`, Boolean), 'first-run privacy check choice was not saved');
+            return undefined;
+          } catch (error) {
+            const said = await panel<string>(`document.querySelector('form[data-first-run-judge] [data-action-message]')?.textContent?.trim() ?? ''`, value => typeof value === 'string' && value.length > 0).catch(() => undefined);
+            return said ? `the dashboard said "${said}"` : (error as Error).message;
+          }
+        };
+        if (judgeShown) {
+          const refused = await saveJudge('venice');
+          if (refused === undefined) judgeChoice = 'Venice (venice) saved';
+          else {
+            const local = await saveJudge('local');
+            if (local !== undefined) throw new Error(`first-run privacy check choice was not saved: Venice: ${refused}; this computer: ${local}`);
+            judgeChoice = `This computer (local) saved after Venice was refused: ${refused}`;
+          }
+        }
         // Saving restarts the worker. Retry fresh documents across that handoff;
         // only the applied policy, never the submitted radio's state, proves persistence:
         // the engine's own setup status must no longer report the choice pending (every
         // release renders it), and a build that shows the answer mode must show this one.
         await until(async () => await navigate('/dashboard?keys') && !!await panel<boolean>(`(() => { const s=document.querySelector('[data-model-setup-status]'); if(!s || document.querySelector('form[data-first-run-privacy]')) return false; let view; try { view=JSON.parse(s.dataset.modelSetupStatus); } catch { return false; } if(view.privacy_choice_pending) return false; const shown=document.querySelector('[data-answer-mode]'); return !shown || shown.getAttribute('data-answer-mode')===${JSON.stringify(recommended.id)}; })()`, Boolean), 'first-run privacy choice did not persist after reload');
         await reload();
-        return `${recommended.label} (${recommended.id}, Recommended) saved and verified after reload`;
+        return `${recommended.label} (${recommended.id}, Recommended) saved and verified after reload; privacy check: ${judgeChoice}`;
       },
       connection: async s => {
         await reload('/dashboard?connect', `!!document.querySelector('.srcrows')`);

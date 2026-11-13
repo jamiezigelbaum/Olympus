@@ -3,6 +3,20 @@ import { PRIVATE_ANSWER_OPTIONS } from '../../core/privacy-language.ts';
 import { VENICE_SETUP_SHORTCUT, VENICE_SETUP_STEPS } from '../source-dashboard.ts';
 import type { ModelSetupCard, ModelSetupView } from '../../core/model-setup.ts';
 import { blockerBanner, connectorSheet, escapeHtml, rowMenu, setupStepsSheet } from './components.ts';
+import { judgeArchiveEstimate, judgeDefaultCapDollars, judgeLocalIsSlow, type JudgeObserved } from '../classification/judge-spending.ts';
+import { runtimeArchiveFor } from '../source-index/built-in-reasoning/manifest.ts';
+import { judgeCount, judgeDuration, judgeMoney } from './judge-format.ts';
+
+interface FirstRunJudgeSetup {
+  chosen?: boolean;
+  cloudModel: string | null;
+  observed?: JudgeObserved;
+}
+interface ModelSetupOptions {
+  heading?: boolean;
+  judgeSetup?: FirstRunJudgeSetup | undefined;
+  judgeRuntime?: { gpu: boolean } | undefined;
+}
 
 export const LOCAL_MODELS_SETUP_PROMPT = 'Connect my existing local models to Olympus. Read the installed docs/SOVEREIGNTY_CONFIG.md, inspect the current Olympus policy, and help identify the running answer endpoint and its exact model ID on the machine hosting Olympus. Do not install or maintain model software, download models, change network access, or replace existing vectors. Explain any needed configuration changes before applying them. After an approved policy change, use olympus worker restart to apply it. Use synthetic text to verify the configured answer model, run olympus doctor, then send me back to the Keys page of the Olympus dashboard and its Check readiness button. If the server is on another machine or needs unsupported settings, explain that specific limit rather than inventing a working configuration.';
 
@@ -10,14 +24,14 @@ const LOCAL_MODELS_TOGGLE = 'data-sheet-toggle="#local-model-setup-sheet" aria-e
 const CHECK_FORM_OPEN = '<form method="post" action="/dashboard/models/check" data-model-check>';
 const CHECK_FORM_TAIL = '<span data-action-message role="status"></span></form>';
 
-export function renderModelSetup(view: ModelSetupView | undefined, options: { heading?: boolean } = {}): string {
+export function renderModelSetup(view: ModelSetupView | undefined, options: ModelSetupOptions = {}): string {
   if (!view) return '';
   // The browser reads the same readiness facts as these cards, without
   // treating the asynchronous check request's acknowledgement as success.
   const status = `<span hidden data-model-setup-status="${escapeHtml(JSON.stringify(view))}"></span>`;
   if (view.computer_use_pending) return status + renderComputerUseChoice(view);
   const engine = renderEngineServerMode(view);
-  if (view.privacy_choice_pending) return status + engine + privateModelProgress(view) + renderFirstRunPrivacyChoice();
+  if (view.privacy_choice_pending) return status + engine + privateModelProgress(view) + renderFirstRunPrivacyChoice(options);
   // The local-models sheet opens in place: directly under whichever control
   // opens it, and only where one does.
   const bannerOwnsToggle = blockerOwnsLocalToggle(view);
@@ -71,22 +85,44 @@ export function renderModelSetup(view: ModelSetupView | undefined, options: { he
     + '</section>';
 }
 
-function renderFirstRunPrivacyChoice(): string {
+function renderFirstRunPrivacyChoice(options: ModelSetupOptions): string {
   const choices = PRIVATE_ANSWER_OPTIONS.map(option => `<label class="modelcard"><input type="radio" name="choice" value="${escapeHtml(option.id)}"${option.recommended ? ' checked' : ''}> <b>${escapeHtml(option.label)}${option.recommended ? ' — Recommended' : ''}</b><p>${escapeHtml(option.description)}</p></label>`).join('');
   const choice = `<form id="first-run-privacy-choice" data-first-run-privacy>${choices}<span data-action-message role="status"></span></form>`;
   const connect = '<div data-first-run-venice hidden><h4>Add a Venice key</h4><p data-first-run-venice-help></p><button class="btn" type="button" data-focus-target="#venice-setup input[name=api_key]">Go to the Venice key field</button></div>'
     + `<div data-first-run-local hidden><h4>Connect my local models</h4><p>The built-in model is already included. Connect a model you run, or continue with the built-in model.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}${localModelsSheet()}</div>`;
   const verify = `<form id="first-run-privacy-form" method="post" action="/dashboard/models/check" data-model-check>${CHECK_FORM_TAIL}`
     + '<p data-first-run-result role="status">Run the readiness check to verify your setup.</p><button class="btn" type="button" data-first-run-redo hidden></button><button class="btn" type="button" data-first-run-keys hidden>Continue setup in Keys</button>';
+  const judge = options.judgeSetup?.chosen ? '' : firstRunJudgeForm(options);
   return '<section aria-label="Private answers" data-first-run-sheet>' + setupStepsSheet({
     id: 'first-run-privacy', provider: 'Olympus', steps: [
       { title: 'How should Olympus answer with Private items?', text: 'Choose how Private answers may be made. You can change this later in Privacy settings.' },
       { title: 'Connect your choice', text: 'Your privacy choice is saved.' },
+      ...(judge ? [{ title: 'Who checks privacy?', text: 'Choose who reads each item to check whether it is Personal, Private or Secret.' }] : []),
       { title: 'Verify it works', text: 'Check that Olympus is ready with your saved choice.' },
-    ], stepContent: [choice, connect], finalForm: () => verify,
-    stepActions: [{ formId: 'first-run-privacy-choice', label: 'Continue' }, undefined, { formId: 'first-run-privacy-form', label: 'Check readiness' }],
+    ], stepContent: [choice, connect, ...(judge ? [judge] : [])], finalForm: () => verify,
+    stepActions: [{ formId: 'first-run-privacy-choice', label: 'Continue' }, undefined,
+      ...(judge ? [{ formId: 'first-run-judge-form', label: 'Save privacy check choice' }] : []),
+      { formId: 'first-run-privacy-form', label: 'Check readiness' }],
     footerContent: '<button class="btn primary" type="button" data-first-run-done hidden>Done</button>',
   }) + '</section>';
+}
+
+function firstRunJudgeForm(options: ModelSetupOptions): string {
+  const observed = options.judgeSetup?.observed ?? {};
+  const archive = options.judgeRuntime ?? runtimeArchiveFor(`${process.platform}-${process.arch}`);
+  const slow = judgeLocalIsSlow(observed, archive);
+  const estimate = judgeArchiveEstimate(1_000, options.judgeSetup?.cloudModel ?? '', observed);
+  const count = judgeCount(estimate.items);
+  const localTime = estimate.measuredHours !== undefined
+    ? `${judgeDuration(estimate.measuredHours)} for ${count} items, measured on this computer (${judgeCount(estimate.measuredPerMinute!)} items a minute).`
+    : `Time for ${count} items: not measured yet.${archive?.gpu === false ? ' The built-in privacy checker uses only the CPU on this computer and may be slow.' : ''}`;
+  return '<form id="first-run-judge-form" method="post" action="/dashboard/models/judge" data-judge-choice data-first-run-judge>'
+    + `<label class="modelcard"><input type="radio" name="choice" value="local"${slow ? '' : ' checked'}> <b>This computer</b><p>Free. ${escapeHtml(localTime)}</p></label>`
+    + `<label class="modelcard"><input type="radio" name="choice" value="venice"${slow ? ' checked' : ''}> <b>Venice${slow ? ' — Recommended' : ''}</b><p>${escapeHtml(judgeDuration(estimate.cloudHours))} and ${escapeHtml(judgeMoney(estimate.cloudDollars).toLowerCase())} for ${count} items, charged to your Venice account.</p></label>`
+    + '<p>Choosing Venice lets it read every item, including Private items, to check privacy. End-to-end encryption is not available yet.</p>'
+    + `<label>Total Venice spending limit in dollars<input class="keyfield" type="number" name="cap_dollars" min="0" step="0.01" value="${judgeDefaultCapDollars(estimate.cloudDollars)}"></label>`
+    + '<p>Olympus stops sending privacy checks to Venice at this limit. You can change your choice and limit later in Privacy settings.</p>'
+    + '<span data-action-message role="status"></span></form>';
 }
 
 function localModelsSheet(): string {

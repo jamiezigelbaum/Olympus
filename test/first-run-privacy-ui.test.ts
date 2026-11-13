@@ -9,6 +9,7 @@ import { ModelSetupService, type ModelSetupView } from '../src/core/model-setup.
 import { loadSovereigntyPreset, type SovereigntyPresetName } from '../src/core/sovereignty.ts';
 import { renderModelSetup } from '../src/workers/dashboard/model-setup.ts';
 import { renderDashboardKeysPage } from '../src/workers/dashboard/pages/local.ts';
+import { DEFAULT_VENICE_JUDGE_MODEL, judgeArchiveEstimate, judgeDefaultCapDollars } from '../src/workers/classification/judge-spending.ts';
 import { buildDashboardPreviewView, setupPreviewScript } from '../scripts/dashboard-preview.ts';
 
 const globals = ['window', 'document', 'navigator', 'Element', 'HTMLElement', 'HTMLFormElement', 'HTMLInputElement', 'HTMLTextAreaElement', 'HTMLSelectElement', 'HTMLButtonElement', 'ShadowRoot', 'Event', 'MouseEvent', 'FormData', 'CSS'] as const;
@@ -32,7 +33,9 @@ afterEach(() => {
   }
 });
 
-function fixture(upgrade = false, needsLocalUnlock = false, extra: () => string = () => '') {
+function fixture(upgrade = false, needsLocalUnlock = false, extra: () => string = () => '', setupOptions: NonNullable<Parameters<typeof renderModelSetup>[1]> = {
+  judgeSetup: { cloudModel: DEFAULT_VENICE_JUDGE_MODEL }, judgeRuntime: { gpu: false },
+}) {
   const dir = mkdtempSync(join(tmpdir(), 'privacy-sheet-ui-'));
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
   const path = join(dir, 'sovereignty.json');
@@ -40,16 +43,26 @@ function fixture(upgrade = false, needsLocalUnlock = false, extra: () => string 
   const policy = () => JSON.parse(readFileSync(path, 'utf8'));
   let override: ModelSetupView | undefined;
   const view = () => override ?? new ModelSetupService({ config: policy(), credentialState: () => 'ready', autoCheck: false }).getStatus();
-  const html = () => renderModelSetup(view()) + extra();
+  const html = () => renderModelSetup(view(), setupOptions) + extra();
   const root = document.createElement('div');
   root.innerHTML = html(); document.body.append(root);
+  // happy-dom uses floating-point modulo for step validity (even 1 % .01
+  // fails). Exercise the real submit button without that emulation defect.
+  const judgeForm = root.querySelector<HTMLFormElement>('[data-first-run-judge]');
+  if (judgeForm) judgeForm.noValidate = true;
   const calls: string[] = [];
+  const controls: unknown[] = [];
+  let judgeError: string | undefined;
   const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, pollIntervalMs: -1,
     navigate() {}, returnUrl: 'http://localhost/dashboard?keys',
     async refresh() { return { status: 200, title: 'Keys', body: html(), controller: 'dashboard', can_write: true, signature: html(), poll_interval_ms: -1 }; },
     transport: { async openLocalControls() { calls.push('open_local_controls'); needsLocalUnlock = false; return true; },
     async control(params) {
       calls.push(params.action);
+      controls.push(params);
+      if (params.action === 'save_judge' && params.choice === 'venice' && judgeError) {
+        return { status: 400, body: { ok: false, error: { message: judgeError } } };
+      }
       if (needsLocalUnlock && params.action === 'save_first_run_privacy') {
         return { status: 403, body: { ok: false, error: { code: 'mac_dashboard_only', message: 'Outside help can be changed only from the dashboard on this computer, in an unlocked browser.' } } };
       }
@@ -76,10 +89,76 @@ function fixture(upgrade = false, needsLocalUnlock = false, extra: () => string 
     const button = root.querySelector<HTMLButtonElement>(selector);
     expect(button).not.toBeNull(); button!.click();
   };
-  return { root, policy, path, calls, controller, submit, click, setView: (value: ModelSetupView) => { override = value; } };
+  return { root, policy, path, calls, controls, controller, submit, click, failJudge: (message: string) => { judgeError = message; }, setView: (value: ModelSetupView) => { override = value; } };
 }
 
 function visiblePanel(root: HTMLElement) { return root.querySelector<HTMLElement>('[data-first-run-sheet] [data-setup-panel]:not([hidden])'); }
+
+test.each([
+  [{ gpu: false }, {}, 'venice'],
+  [{ gpu: true }, {}, 'local'],
+  [{ gpu: false }, { localItemsPerMinute: 67 }, 'local'],
+  [{ gpu: true }, { localItemsPerMinute: 1 }, 'venice'],
+] as const)('first-run judge preselection follows measurements and runtime capability (%j, %j)', async (judgeRuntime, observed, selected) => {
+  const f = fixture(false, false, () => '', { judgeRuntime, judgeSetup: { cloudModel: DEFAULT_VENICE_JUDGE_MODEL, observed } });
+  await f.submit('[data-first-run-privacy]');
+  f.click('[data-first-run-sheet] [data-setup-next]');
+  const form = visiblePanel(f.root)?.querySelector<HTMLFormElement>('[data-first-run-judge]')!;
+  expect(form.querySelector<HTMLInputElement>('input[name="choice"]:checked')?.value).toBe(selected);
+  expect(form.querySelectorAll('input[name="choice"]')).toHaveLength(2);
+  expect(form.textContent?.includes('Recommended')).toBe(selected === 'venice');
+  expect(form.textContent).toContain('1,000 items');
+  expect(form.textContent).toContain('About 5 minutes');
+  expect(form.textContent).toContain('$0.12');
+  expect(form.textContent).toContain('including Private items');
+  if ('localItemsPerMinute' in observed) expect(form.textContent).toContain('measured on this computer');
+  else {
+    expect(form.textContent).toContain('not measured yet');
+    expect(form.textContent?.includes('only the CPU')).toBe(!judgeRuntime.gpu);
+  }
+  const cap = form.querySelector<HTMLInputElement>('[name="cap_dollars"]')!;
+  expect(Number(cap.value)).toBe(judgeDefaultCapDollars(judgeArchiveEstimate(1000, DEFAULT_VENICE_JUDGE_MODEL).cloudDollars));
+  expect(form.action).toBe('http://localhost/dashboard/models/judge');
+  expect(form.method).toBe('post');
+  cap.value = '3.25';
+  form.querySelector<HTMLInputElement>('[value="venice"]')!.checked = true;
+  const primary = f.root.querySelector<HTMLButtonElement>('[data-setup-submit]')!;
+  expect(primary.form).toBe(form);
+  primary.click();
+  await browser.happyDOM.waitUntilComplete();
+  expect(f.controls.at(-1)).toEqual({ action: 'save_judge', choice: 'venice', cap_dollars: 3.25 });
+  expect(visiblePanel(f.root)?.textContent).toContain('Verify it works');
+});
+
+test.each([
+  'Add your own Venice API key in Keys first.',
+  'A listed price is needed before this model can judge in the cloud.',
+])('a judge save refusal stays in the step and lets the owner save local: %s', async message => {
+  const f = fixture();
+  await f.submit('[data-first-run-privacy]');
+  f.click('[data-first-run-sheet] [data-setup-next]');
+  f.failJudge(message);
+  await f.submit('[data-first-run-judge]');
+  expect(visiblePanel(f.root)?.textContent).toContain('Who checks privacy?');
+  expect(visiblePanel(f.root)?.querySelector('[data-action-message]')?.textContent).toBe(message);
+  expect(f.root.querySelector('[data-setup-error]')).toBeNull();
+  const local = visiblePanel(f.root)?.querySelector<HTMLInputElement>('[value="local"]')!;
+  expect(local.disabled).toBe(false);
+  local.click();
+  await f.submit('[data-first-run-judge]');
+  expect(f.controls.at(-1)).toEqual({ action: 'save_judge', choice: 'local', cap_dollars: 1 });
+  expect(visiblePanel(f.root)?.textContent).toContain('Verify it works');
+});
+
+test.each(['local-first', 'private-cloud-only'] as const)('a saved judge record skips the step for %s', async choice => {
+  const f = fixture(false, false, () => '', { judgeSetup: { chosen: true, cloudModel: DEFAULT_VENICE_JUDGE_MODEL } });
+  f.root.querySelector<HTMLInputElement>(`input[value="${choice}"]`)!.checked = true;
+  expect(f.root.querySelector('[data-first-run-judge]')).toBeNull();
+  await f.submit('[data-first-run-privacy]');
+  f.click('[data-first-run-sheet] [data-setup-next]');
+  expect(visiblePanel(f.root)?.textContent).toContain('Verify it works');
+  expect(f.root.querySelector('[data-setup-counter]')?.textContent).toBe('Step 3 of 3');
+});
 
 test('a first save from a session not yet opened on this computer offers the unlock in place, then saves', async () => {
   const f = fixture(false, true);
@@ -149,11 +228,17 @@ for (const [choice, step] of [
     expect(f.root.querySelector<HTMLElement>(other)?.hidden).toBe(true);
     f.click('[data-first-run-sheet] [data-setup-next]');
   }
+  const hasJudge = choice === 'local-first' || choice === 'private-cloud-only';
+  if (hasJudge) {
+    expect(visiblePanel(f.root)?.textContent).toContain('Who checks privacy?');
+    expect(f.root.querySelector<HTMLButtonElement>('[data-setup-next]')?.hidden).toBe(true);
+    await f.submit('[data-first-run-judge]');
+  }
   expect(visiblePanel(f.root)?.textContent).toContain('Verify it works');
-  expect(f.root.querySelector('[data-setup-counter]')?.textContent).toBe(choice === 'no-sensitive' ? 'Step 2 of 2' : 'Step 3 of 3');
+  expect(f.root.querySelector('[data-setup-counter]')?.textContent).toBe(choice === 'no-sensitive' ? 'Step 2 of 2' : hasJudge ? 'Step 4 of 4' : 'Step 3 of 3');
   expect(visiblePanel(f.root)?.textContent).not.toContain('Working');
   await f.submit('[data-first-run-sheet] [data-model-check]');
-  expect(f.calls).toEqual(['save_first_run_privacy', 'check_model_setup']);
+  expect(f.calls).toEqual(['save_first_run_privacy', ...(hasJudge ? ['save_judge'] : []), 'check_model_setup']);
   expect(visiblePanel(f.root)?.textContent).toContain('Working');
   expect(f.root.querySelector<HTMLElement>('[data-first-run-done]')?.hidden).toBe(false);
   f.click('[data-first-run-done]');
@@ -167,6 +252,7 @@ test.each(['local-first', 'local-only'] as const)('%s failed readiness names the
   f.root.querySelector<HTMLInputElement>(`input[value="${choice}"]`)!.checked = true;
   await f.submit('[data-first-run-privacy]');
   f.click('[data-first-run-sheet] [data-setup-next]');
+  if (choice === 'local-first') await f.submit('[data-first-run-judge]');
   const local = choice === 'local-only';
   const detail = local ? 'The answer model is not responding.' : 'The key was rejected.';
   const step = local ? 'Connect my local models' : 'Add a Venice key';
@@ -183,6 +269,7 @@ test.each(['local-first', 'local-only'] as const)('%s failed readiness names the
 test('pending worker activation never reports Working and a later read can complete verification', async () => {
   const f = fixture();
   await f.submit('[data-first-run-privacy]'); f.click('[data-first-run-sheet] [data-setup-next]');
+  await f.submit('[data-first-run-judge]');
   f.setView({ ready: false, privacy_choice_pending: true, checked_at: '', cards: [] });
   await f.submit('[data-first-run-sheet] [data-model-check]');
   expect(visiblePanel(f.root)?.textContent).toContain('applying');
@@ -236,12 +323,16 @@ test('first-run primary actions share the bottom row with Back', async () => {
   expect(primary.hidden).toBe(true);
   f.click('[data-setup-next]');
   expect(primary.hidden).toBe(false);
+  expect(primary.textContent).toBe('Save privacy check choice');
+  expect(primary.form).toBe(f.root.querySelector('[data-first-run-judge]'));
+  await f.submit('[data-first-run-judge]');
   expect(primary.textContent).toBe('Check readiness');
   expect(primary.form).toBe(f.root.querySelector('[data-model-check]'));
   expect(actions.querySelector<HTMLButtonElement>('[data-setup-back]')!.disabled).toBe(false);
   await f.submit('[data-model-check]');
   expect(primary.hidden).toBe(true);
   expect(actions.querySelector('[data-first-run-done]')).not.toBeNull();
+  f.click('[data-setup-back]');
   f.click('[data-setup-back]');
   await f.controller.refresh();
   expect(actions.querySelector<HTMLButtonElement>('[data-first-run-done]')!.hidden).toBe(true);
@@ -258,7 +349,9 @@ for (const [sheet, step, text] of [
   ['first-run', '1', 'How should Olympus answer'],
   ['first-run', '2', 'Add a Venice key'],
   ['first-run-local', '2', 'Connect my local models'],
-  ['first-run', '3', 'Verify it works'],
+  ['first-run', '3', 'Who checks privacy?'],
+  ['first-run', '4', 'Verify it works'],
+  ['first-run-local', '3', 'Verify it works'],
   ['first-run-no-sensitive', '2', 'Verify it works'],
 ] as const) test(`preview link ${sheet} step ${step} opens the intended panel`, async () => {
   const f = fixture();
