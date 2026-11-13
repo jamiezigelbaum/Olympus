@@ -8558,6 +8558,7 @@ var init_remote_result = __esm(() => {
     argus_error: "Olympus's private analyst could not answer. Try again later.",
     email_not_configured: "Olympus on the computer needs setup before it can answer.",
     email_unreachable: "Olympus could not reach its source worker in time. Try again later.",
+    worker_restarting: "Olympus is restarting. Try again in a moment.",
     email_error: "Olympus could not complete this request.",
     email_policy_violation: "Olympus withheld this result under the owner's privacy rules.",
     source_index_not_enabled: "Searching sources is not turned on in Olympus on the computer.",
@@ -29487,6 +29488,9 @@ var PASSTHROUGH_EMAIL_WORKER_ERROR_CODES = new Map([
   ["unsupported_filter", "unsupported_filter"],
   ["invalid_request", "invalid_request"],
   ["invalid_params", "invalid_params"],
+  ["worker_restarting", "worker_restarting"],
+  ["engine_background_unavailable", "email_unreachable"],
+  ["engine_background_failed", "email_error"],
   ["source_index_policy_violation", "source_index_policy_violation"]
 ]);
 var CONSULT_ASK_CLIENT_TIMEOUT_MS = 20 * 60000;
@@ -29524,11 +29528,18 @@ class EmailClient {
     if (!this.config.email.enabled) {
       throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before continuing stopped work.");
     }
-    return this.transport.requestJson(`${this.config.email.baseUrl}/limits`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(params)
-    });
+    try {
+      return await this.transport.requestJson(`${this.config.email.baseUrl}/limits`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(params)
+      });
+    } catch (error) {
+      if (error instanceof OperationError && (error.code === "worker_restarting" || error.code === "email_unreachable" || error.code === "email_error")) {
+        throw new OperationError(error.code, error.message, "It may still go through. Run olympus limits in a moment to see whether the stop is still open.");
+      }
+      throw error;
+    }
   }
   async archiveImport(options) {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) {
@@ -29923,6 +29934,13 @@ function boundedEmailWorkerErrorMessage(value) {
     return;
   return value;
 }
+function isOwnerLimitsRoute(url) {
+  try {
+    return new URL(url).pathname.endsWith("/limits");
+  } catch {
+    return false;
+  }
+}
 function isSourceIndexSearchRoute(url) {
   try {
     return new URL(url).pathname.endsWith("/source/index/search");
@@ -29938,6 +29956,8 @@ function workerLaneLabel(url) {
   return "Private email lane";
 }
 function isAllowlistedEmailWorkerErrorResponse(status, url) {
+  if ((status === 400 || status === 502 || status === 503) && isOwnerLimitsRoute(url))
+    return true;
   if (status === 400)
     return isSourceIndexSearchRoute(url);
   if (status !== 403)

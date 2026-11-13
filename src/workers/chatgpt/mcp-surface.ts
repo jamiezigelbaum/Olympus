@@ -1,3 +1,4 @@
+import { OperationError } from '../../core/operation-error.ts';
 import { answerModelRequiredResult } from '../answer-model-required.ts';
 import { appClientCopy, type McpAppClient } from '../../../connect-relay/shared/mcp-app-client.ts';
 import { createReleaseCapture, notePrivateQuestion, recordAppRequest, runWithReleaseCapture, sourceAnswerQuestion } from '../../core/app-release-capture.ts';
@@ -553,7 +554,13 @@ async function runChatGptTool(
     }
     switch (name) {
       case 'olympus_limits': {
-        const result = await findOperationByName('olympus_limits')!.handler(ctx, args);
+        let result: unknown;
+        try { result = await findOperationByName('olympus_limits')!.handler(ctx, args); }
+        catch (error) {
+          // A restart, a timeout or a failed forward can each land after the action applied: never claim the stop is still open.
+          if (error instanceof OperationError && (error.code === 'worker_restarting' || error.code === 'email_unreachable' || error.code === 'email_error')) throw new ChatGptSurfaceError('limit_unconfirmed');
+          throw error;
+        }
         return limitsToolResult(result);
       }
       case DASHBOARD_TOOL_NAME:

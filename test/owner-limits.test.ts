@@ -19,7 +19,7 @@ import { copyDashboardViewModel, limitsToolResult } from '../src/workers/chatgpt
 import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
 import { callChatGptTool, listChatGptTools } from '../src/workers/chatgpt/mcp-surface.ts';
 import { defaultConfig } from '../src/core/config.ts';
-import { EmailClient } from '../src/core/email.ts';
+import { DirectHttpEmailTransport, EmailClient } from '../src/core/email.ts';
 import { DelphiClient } from '../src/core/delphi.ts';
 import { findOperationByName } from '../src/core/operations.ts';
 import { listMcpTools } from '../src/mcp/tools.ts';
@@ -281,4 +281,24 @@ test('request stop amounts retain their units through marker persistence and reo
     degradedReason: 'gmail_daily_api_request_guard', counts: { limit_stop_limit: 100, limit_stop_used: 100 } }); }
   finally { store.close(); }
   expect(stops(time.date())).toMatchObject([{ id: 'gmail.daily_requests', limit: 100, used: 100 }]);
+});
+
+test('a refused, restarting or unconfirmed continue reaches the CLI and Home in its own words without claiming more than is known', async () => {
+  const config = { ...defaultConfig(), email: { ...defaultConfig().email, enabled: true, baseUrl: 'http://worker.test/v1' } };
+  const answering = (status: number, error: { code: string; message: string }) => {
+    const email = new EmailClient(config, new DirectHttpEmailTransport(async () => Response.json({ error, policy: { raw_email_exposed: false } }, { status })));
+    return { config, email, delphi: new DelphiClient(config) };
+  };
+  const refused = answering(400, { code: 'invalid_params', message: '--to must be a whole number greater than the current limit and used calls.' });
+  await expect(refused.email.ownerLimits({ action: 'continue', id: 'judge.daily_calls', to: 0 })).rejects.toMatchObject({ code: 'invalid_params', message: expect.stringContaining('--to must be') });
+  // A restart (even one that replaced an applied answer), a timeout or a failure: never claim the stop is still open.
+  for (const [status, code, message] of [[503, 'worker_restarting', 'Olympus is restarting; try again in a moment.'], [503, 'engine_background_unavailable', 'The background engine is not answering.'], [502, 'engine_background_failed', 'The background could not run this.']] as const) {
+    const ctx = answering(status, { code, message });
+    await expect(ctx.email.ownerLimits({ action: 'continue', id: 'judge.daily_calls', to: 5 })).rejects.toMatchObject({ message, suggestion: expect.stringContaining('may still go through') });
+    const home = await callChatGptTool('olympus_limits', { action: 'continue', id: 'venice.credit' }, ctx, { dashboardView: async () => emptyView() });
+    expect(home.isError).toBe(true);
+    expect(home.structuredContent).toMatchObject({ error: 'limit_unconfirmed' });
+    expect(JSON.stringify(home.content)).toContain('may still go through');
+    expect(JSON.stringify(home.content)).not.toContain('still open');
+  }
 });
