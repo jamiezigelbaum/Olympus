@@ -425,7 +425,7 @@ export function createAnalyst(model: AnalystModel, createOptions: CreateAnalystO
         // answer computes it from cited values.
         // The question is left out: repeating a value the question proposes
         // does not make it evidence.
-        const unseen = amountsMissingFrom(parsed?.answer ?? '', request.prompt.replace(`Question: ${pack.question}`, ''));
+        const unseen = amountsMissingFrom(parsed?.answer ?? '', request.prompt.replace(`Question: ${pack.question}`, '').replace(restatedQuestion(pack), ''));
         const auditCompletion = await model.complete({
           system: ANALYST_AUDIT_SYSTEM,
           prompt: compact
@@ -559,8 +559,13 @@ function buildAnalystPrompt(pack: EvidencePack, includeLocalPrivateProvenance: b
 function buildCompactAnalystPrompt(pack: EvidencePack): string {
   const versions = candidateVersionNotes(pack);
   const blocks = pack.candidates.map((candidate, index) => formatCompactCandidate(candidate, index + 1, versions[index]));
-  return [`Question: ${pack.question}`, '', 'Evidence:', blocks.join('\n\n'), ...(versions.some(Boolean) ? ['', VERSION_INSTRUCTION] : []), '', formatCoverage(pack)].join('\n');
+  // Asked again after the evidence (#1590): a small model reading a long
+  // list loses the question at its head and drops a requested value the
+  // evidence holds.
+  return [`Question: ${pack.question}`, '', 'Evidence:', blocks.join('\n\n'), ...(versions.some(Boolean) ? ['', VERSION_INSTRUCTION] : []), '', formatCoverage(pack), '', restatedQuestion(pack)].join('\n');
 }
+
+const restatedQuestion = (pack: EvidencePack): string => `Answer this question from the evidence above: ${pack.question}`;
 
 function formatCompactCandidate(
   candidate: EvidenceCandidate,
