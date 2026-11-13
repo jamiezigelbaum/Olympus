@@ -273,15 +273,19 @@ the cause).
   - The background (and a single worker) runs a heartbeat from a Worker
     thread its loop cannot hold (`src/core/engine-heartbeat.ts`): pid,
     current step, how long the loop has been held.
-  - The supervisor replaces a child that exits, or one whose heartbeat has
-    stopped. The upgrade's wait ends on an answer, the unit stopping, a
-    crash loop (more than three engine processes, or three front
-    failures), a heartbeat stopped for a whole window, or a cap of 30
-    minutes plus a minute per GB of stores; at the cap it says what the
-    engine says it is doing.
+  - The supervisor replaces a child only when it exits. A start is waited
+    for until a cap of 30 minutes plus a minute per GB of stores, on the
+    supervisor's own monotonic clock, so a laptop that slept or a clock
+    that jumped changes nothing. After ready there is no liveness check.
+  - The upgrade's wait ends on an answer, the unit stopping, a crash loop
+    (more than three engine processes, or three front failures), or the
+    same cap. A stopped heartbeat is reported, never a reason to end a
+    start or a wait: that is where the heavy disk work is, and a kill
+    there means a rollback. At the cap it says what the engine says it is
+    doing.
   - The front listens at once and answers "starting: <step>". It opens
     its stores on the background's receipt that its boot work is done
-    (the boot file at `done`, from a process whose heartbeat beats),
+    (the boot file at `done`, from a live process),
     never on how fast the background answers.
   - `olympus worker upgrade` copies every store itself, after the
     previous version stops and before the new one starts
@@ -289,7 +293,9 @@ the cause).
     else a plain copy. The boot then takes no VACUUM INTO copy of its
     own.
   - The class is tested with a background that blocks its loop for 60 s
-    at boot and 60 s after ready (`test/worker-service-split.test.ts`).
+    at boot and 60 s after ready, both processes stopped and continued
+    (standing in for sleep), and a heartbeat paused through a boot step
+    (`test/worker-service-split.test.ts`).
 
 The writes the front still needs are listed in the next section; each is
 either kept front-owned or becomes one command.

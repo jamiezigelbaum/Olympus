@@ -5,7 +5,7 @@
  * chooses by role (core/engine-split.ts).
  */
 import { readBootProgress, type BootProgress } from '../../core/boot-progress.ts';
-import { engineHeartbeatBeating, engineHeartbeatLine, readEngineHeartbeat, type EngineHeartbeat } from '../../core/engine-heartbeat.ts';
+import { engineHeartbeatBeating, engineHeartbeatLine, processAlive, readEngineHeartbeat } from '../../core/engine-heartbeat.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { lstatSync, rmSync } from 'node:fs';
@@ -87,15 +87,15 @@ export function startEngineBackgroundStatus(input: {
 
 /**
  * The background's receipt that its boot work is done: its boot file says
- * done, written by a process that is alive and whose heartbeat beats. The
- * file lives in the data root and names its writer's pid; a new background
- * starts it over before any boot work, and a background about to restart
- * for a delete withdraws it, so a receipt from an earlier boot is never
- * taken as current.
+ * done, written by a process that is still alive. The file lives in the data
+ * root and names its writer's pid; a new background starts it over before
+ * any boot work, and a background about to restart for a delete or a model
+ * change withdraws it, so a receipt from an earlier boot is never taken as
+ * current. No clock is read: a laptop that slept or a late heartbeat write
+ * changes nothing.
  */
-export function backgroundBootDone(read: { boot: BootProgress | undefined; heartbeat: EngineHeartbeat | undefined }, now: number = Date.now()): boolean {
-  const { boot, heartbeat } = read;
-  return boot?.phase === 'done' && engineHeartbeatBeating(heartbeat, { pid: boot.pid, now });
+export function backgroundBootDone(boot: BootProgress | undefined, alive: (pid: number) => boolean = processAlive): boolean {
+  return boot?.phase === 'done' && alive(boot.pid);
 }
 
 /**
@@ -110,11 +110,12 @@ export async function waitForBackgroundBootDone(input: {
   env: Record<string, string | undefined>;
   pollMs?: number;
   sleep?: (ms: number) => Promise<void>;
-  read?: () => { boot: BootProgress | undefined; heartbeat: EngineHeartbeat | undefined };
+  read?: () => BootProgress | undefined;
+  alive?: (pid: number) => boolean;
 }): Promise<void> {
   const sleep = input.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
-  const read = input.read ?? (() => ({ boot: readBootProgress(input.env), heartbeat: readEngineHeartbeat(input.env) }));
-  while (!backgroundBootDone(read())) await sleep(input.pollMs ?? 250);
+  const read = input.read ?? (() => readBootProgress(input.env));
+  while (!backgroundBootDone(read(), input.alive)) await sleep(input.pollMs ?? 250);
 }
 
 /**
@@ -160,7 +161,7 @@ export interface EngineFront {
   status(): EngineStatusRead | undefined;
   /** One built-in model completion, run by the background, which holds the model. */
   completeModel(request: AnalystModelRequest): Promise<AnalystModelCompletion>;
-  /** Whether the background's boot work is done and its heartbeat beats, busy or not (the front's health reports it). */
+  /** Whether the background's boot work is done and its process is alive, busy or not (the front's health reports it). */
   backgroundReady(): Promise<boolean>;
   stop(): void;
 }
@@ -211,7 +212,7 @@ export function createEngineFront(input: {
   poll.unref?.();
   const completeModel = (request: AnalystModelRequest) => completeModelInBackground(fetchBackground, input.authToken, request);
   // Busy is not unreachable: the background's receipt and heartbeat say it is up.
-  const backgroundReady = async () => backgroundBootDone({ boot: readBootProgress(input.env), heartbeat: readEngineHeartbeat(input.env) });
+  const backgroundReady = async () => backgroundBootDone(readBootProgress(input.env));
   return { client, ownerBusy: relay, status, completeModel, backgroundReady, stop: () => { clearInterval(poll); relay?.stop(); } };
 }
 

@@ -5,11 +5,12 @@
 // (gate7, 13 Nov) was a busy process read as a dead one.
 import { afterEach, describe, expect, test } from 'bun:test';
 import { spawn as spawnProcess } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { engineHeartbeatBeating, engineHeartbeatLine, HEARTBEAT_STALE_MS, readEngineHeartbeat } from '../src/core/engine-heartbeat.ts';
+import { dirname, join } from 'node:path';
+import { createStartupWatch, engineHeartbeatBeating, engineHeartbeatLine, HEARTBEAT_STALE_MS, readEngineHeartbeat } from '../src/core/engine-heartbeat.ts';
 import { createNativeProcessService } from '../src/core/native-process-service.ts';
+import { sharedDataPath } from '../src/core/olympus-layout.ts';
 import { waitFor } from './helpers/test-clock.ts';
 
 const roots: string[] = [];
@@ -72,37 +73,53 @@ describe('the heartbeat beats while the loop is held', () => {
   });
 });
 
-describe('the supervisor waits on the heartbeat, not on an answer', () => {
-  async function supervise(withHeartbeat: boolean): Promise<string> {
+describe('a supervisor waits for a live child until the cap, whatever its heartbeat says', () => {
+  test('alive with no heartbeat, a stopped one or a beating one: waited for until the cap on its own clock; gone: not', () => {
+    const env = home();
+    let tick = 0;
+    const lines: string[] = [];
+    const watch = createStartupWatch({ env, capMs: () => 10 * 60_000, now: () => tick, log: (line) => lines.push(line) });
+    expect(watch(process.pid)).toBe(true);
+    expect(lines.at(-1)).toContain('no heartbeat from it yet');
+    // A heartbeat file an hour old (a laptop that slept) is reported, not a reason to give up.
+    const old = new Date(Date.now() - 60 * 60_000).toISOString();
+    const path = sharedDataPath('engine-heartbeat', env);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify({ schema: 'olympus.engine-heartbeat.v1', pid: process.pid, role: 'background', startedAt: old, writtenAt: old, blockedMs: 0, step: 'backing up fixture' }));
+    tick = 9 * 60_000;
+    expect(watch(process.pid)).toBe(true);
+    expect(lines.at(-1)).toContain(`its heartbeat was last written at ${old}`);
+    tick = 10 * 60_000;
+    expect(watch(process.pid)).toBe(false);
+    expect(lines.at(-1)).toContain('giving up on this start');
+    expect(watch(process.pid + 1_000_000)).toBe(false);
+    expect(watch(undefined)).toBe(false);
+  });
+
+  test('a real child holding its loop past its start window with no heartbeat at all is still waited for', async () => {
     const env = home();
     const readyFile = join(env.HOME!, 'ready');
     const service = createNativeProcessService({
       id: 'fixture', label: 'fixture', initialConfig: {}, reload: { configPrefixes: [] },
       readinessPollMs: 20, stopGraceMs: 100, restartDelaysMs: [60_000],
       async prepareStart() {
+        const watch = createStartupWatch({ env, capMs: () => 60_000, log: () => {} });
         return {
-          command: process.execPath, args: ['-e', blockingChild(env, 4_000, readyFile, withHeartbeat)], env,
+          command: process.execPath, args: ['-e', blockingChild(env, 4_000, readyFile, false)], env,
           startupTimeoutMs: 1_500, endpointOccupied: false,
-          startupInProgress: (child) => child.pid !== undefined && engineHeartbeatBeating(readEngineHeartbeat(env), { pid: child.pid }),
+          startupInProgress: (child) => watch(child.pid),
           readinessProbe: async () => existsSync(readyFile),
         };
       },
     });
+    let outcome = 'ready';
     try {
       await service.start({ logger: { warn() {} }, serviceHealth: { reportFailure() {}, clearFailure() {} } });
-      return 'ready';
     } catch {
-      return 'timed out';
+      outcome = 'timed out';
     } finally {
       await service.stop();
     }
-  }
-
-  test('a child whose loop is held past its start window, heartbeat beating, is waited for', async () => {
-    expect(await supervise(true)).toBe('ready');
-  }, 30_000);
-
-  test('the same child without a heartbeat is timed out', async () => {
-    expect(await supervise(false)).toBe('timed out');
+    expect(outcome).toBe('ready');
   }, 30_000);
 });

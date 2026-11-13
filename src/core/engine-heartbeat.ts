@@ -124,11 +124,54 @@ export function readEngineHeartbeat(env: LayoutEnv = process.env): EngineHeartbe
 export function engineHeartbeatBeating(
   heartbeat: EngineHeartbeat | undefined,
   options: { pid?: number; now?: number; alive?: (pid: number) => boolean } = {},
-): heartbeat is EngineHeartbeat {
+): boolean {
   if (!heartbeat) return false;
   if (options.pid !== undefined && heartbeat.pid !== options.pid) return false;
   if ((options.now ?? Date.now()) - Date.parse(heartbeat.writtenAt) >= HEARTBEAT_STALE_MS) return false;
   return (options.alive ?? processAlive)(heartbeat.pid);
+}
+
+/** The longest a start is waited for: 30 minutes, plus a minute per GB of stores. */
+export const STARTUP_CAP_BASE_MS = 30 * 60_000;
+export const STARTUP_CAP_PER_GB_MS = 60_000;
+
+export function startupCapMs(storeBytes: number): number {
+  return STARTUP_CAP_BASE_MS + Math.ceil(storeBytes / 1024 ** 3) * STARTUP_CAP_PER_GB_MS;
+}
+
+/**
+ * What a supervisor's start wait asks once a child's deadline has passed
+ * without an answer: keep waiting? Yes for a live child until the cap, on
+ * the supervisor's own monotonic clock, whatever its heartbeat says. A
+ * stopped heartbeat during a start is reported, never a reason to replace
+ * it: that is where the heavy disk work is, and a kill there means a
+ * rollback. A laptop that slept, or a clock that jumped, changes nothing.
+ * A child that exits is replaced by the kernel at once.
+ */
+export function createStartupWatch(input: {
+  env: LayoutEnv;
+  capMs: () => number;
+  now?: () => number;
+  log?: (line: string) => void;
+}): (pid: number | undefined) => boolean {
+  const now = input.now ?? (() => performance.now());
+  const log = input.log ?? ((line: string) => console.log(line));
+  const firstAsked = new Map<number, { at: number; capMs: number }>();
+  return (pid) => {
+    if (pid === undefined || !processAlive(pid)) return false;
+    let watch = firstAsked.get(pid);
+    if (!watch) { watch = { at: now(), capMs: input.capMs() }; firstAsked.set(pid, watch); }
+    const heartbeat = readEngineHeartbeat(input.env);
+    const state = heartbeat?.pid !== pid ? 'no heartbeat from it yet'
+      : engineHeartbeatBeating(heartbeat, { pid }) ? engineHeartbeatLine(heartbeat)
+        : `its heartbeat was last written at ${heartbeat.writtenAt}`;
+    if (now() - watch.at >= watch.capMs) {
+      log(`[native-process] the worker has not answered within ${Math.round(watch.capMs / 60_000)} min of waiting; giving up on this start: ${state}`);
+      return false;
+    }
+    log(`[native-process] the worker is alive and has not answered yet: ${state}`);
+    return true;
+  };
 }
 
 /** One line for a person waiting: "busy 86 s: backing up tier-ledger". */

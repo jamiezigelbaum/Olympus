@@ -766,9 +766,9 @@ function acquireFileLeaseSync(targetPath, options) {
 function openSqlite(path) {
   if (typeof globalThis.Bun !== "undefined") {
     const { Database } = runtimeRequire("bun:sqlite");
-    const connection2 = new Database(path);
-    connection2.exec("PRAGMA busy_timeout = 0");
-    return connection2;
+    const connection = new Database(path);
+    connection.exec("PRAGMA busy_timeout = 0");
+    return connection;
   }
   const { DatabaseSync } = runtimeRequire("node:sqlite");
   const connection = new DatabaseSync(path);
@@ -1234,8 +1234,8 @@ class ControlPathHeadroom {
     this.lagRestThresholdMs = options.lagRestThresholdMs ?? CONTROL_PATH_LAG_REST_THRESHOLD_MS;
     this.restMs = options.restMs ?? CONTROL_PATH_REST_MS;
     this.now = options.now ?? (() => performance.now());
-    this.turn = options.turn ?? ((ms) => new Promise((resolve4) => {
-      setTimeout(resolve4, ms);
+    this.turn = options.turn ?? ((ms) => new Promise((resolve) => {
+      setTimeout(resolve, ms);
     }));
     this.log = options.log ?? ((line) => console.error(line));
     this.freezeLogMs = options.freezeLogMs ?? CONTROL_PATH_FREEZE_LOG_MS;
@@ -1456,7 +1456,7 @@ async function downloadPinnedFile(options) {
         controller.abort();
       }
       if (retry)
-        await new Promise((resolve4) => setTimeout(resolve4, RETRY_DELAY_MS * 2 ** (retries - 1)));
+        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS * 2 ** (retries - 1)));
     }
     close();
     if (received !== expectedBytes || hash.digest(encoding) !== options.digest) {
@@ -1686,9 +1686,9 @@ var LOCAL_FILE_HEADER = 67324752;
 function readZipEntry(archive, name) {
   const view = new DataView(archive.buffer, archive.byteOffset, archive.byteLength);
   let end = -1;
-  for (let offset2 = archive.length - 22;offset2 >= Math.max(0, archive.length - 22 - 65535); offset2 -= 1) {
-    if (view.getUint32(offset2, true) === END_OF_CENTRAL_DIRECTORY) {
-      end = offset2;
+  for (let offset = archive.length - 22;offset >= Math.max(0, archive.length - 22 - 65535); offset -= 1) {
+    if (view.getUint32(offset, true) === END_OF_CENTRAL_DIRECTORY) {
+      end = offset;
       break;
     }
   }
@@ -1740,8 +1740,8 @@ var DOWNLOAD_STALL_MS = 2 * 60000;
 
 class BuiltInEmbeddingInstallError extends Error {
   reason;
-  constructor(reason, message2) {
-    super(message2);
+  constructor(reason, message) {
+    super(message);
     this.name = "BuiltInEmbeddingInstallError";
     this.reason = reason;
   }
@@ -2117,7 +2117,7 @@ async function downloadVerified(fetchImpl, url, target, expectedBytes, expected,
     stallMs,
     verifyTimeoutMs: 10 * 60000,
     keepPartial: false,
-    error: (reason, message2) => new BuiltInEmbeddingInstallError(reason, message2),
+    error: (reason, message) => new BuiltInEmbeddingInstallError(reason, message),
     onStart: () => reporter.set("downloading", label),
     onProgress: (bytes) => reporter.advance(bytes, label)
   });
@@ -2130,7 +2130,7 @@ function integrityAlgorithm(integrity) {
   return algorithm;
 }
 function sha256File(path, timeoutMs = 10 * 60000) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve, reject) => {
     const hash = createHash2("sha256");
     let settled = false;
     const stream = createReadStream2(path);
@@ -2143,7 +2143,7 @@ function sha256File(path, timeoutMs = 10 * 60000) {
         stream.destroy();
         reject(error);
       } else {
-        resolve4(hash.digest("hex"));
+        resolve(hash.digest("hex"));
       }
     };
     const timer = setTimeout(() => finish(new BuiltInEmbeddingInstallError("checksum_mismatch", `Checking ${path} did not finish within ${Math.round(timeoutMs / 60000)} min.`)), timeoutMs);
@@ -2158,7 +2158,7 @@ async function withInstallLock(lockPath, waitMs, run) {
     if (Date.now() > deadline) {
       throw new BuiltInEmbeddingInstallError("download_failed", "Another Olympus process is still installing the built-in search model.");
     }
-    await new Promise((resolve4) => setTimeout(resolve4, LOCK_POLL_MS));
+    await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS));
   }
   try {
     await run();
@@ -2258,12 +2258,12 @@ class ProgressReporter {
     if (this.status.state === "downloading")
       this.set("verifying", "Checking the built-in search model", 99);
   }
-  fail(reason, message2) {
+  fail(reason, message) {
     this.status = {
       ...this.status,
       state: "failed",
       label: "The built-in search model could not be installed",
-      failure: { reason, message: message2 }
+      failure: { reason, message }
     };
     this.emit(true);
   }
@@ -2295,8 +2295,8 @@ import { dirname as dirname11, join as join11 } from "node:path";
 class OperationError extends Error {
   code;
   suggestion;
-  constructor(code, message2, suggestion) {
-    super(message2);
+  constructor(code, message, suggestion) {
+    super(message);
     this.name = "OperationError";
     this.code = code;
     this.suggestion = suggestion;
@@ -2995,8 +2995,8 @@ function isMediaCachePath(path, sha256, dir) {
   if (dir !== undefined && dirname9(path) !== resolve4(dir))
     return false;
   try {
-    const stat2 = lstatSync3(path);
-    if (!stat2.isFile())
+    const stat = lstatSync3(path);
+    if (!stat.isFile())
       return false;
   } catch {}
   return true;
@@ -3102,12 +3102,12 @@ function readOwnerConfigFile(path) {
   }
   return { status: "ok", text, stamp };
 }
-function stampOf(stat2) {
-  return `${stat2.ino}:${stat2.size}:${stat2.mtimeMs}:${stat2.ctimeMs}`;
+function stampOf(stat) {
+  return `${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
 }
-function ownedByThisUser(stat2) {
+function ownedByThisUser(stat) {
   const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
-  return uid === undefined || stat2.uid === uid;
+  return uid === undefined || stat.uid === uid;
 }
 
 // src/core/zkapi-consult-settings.ts
@@ -3163,8 +3163,8 @@ function refreshZkapiPortsFromPolicyFile(env = process.env) {
   }
   let stamp;
   try {
-    const stat2 = statSync6(path);
-    stamp = `${path}:${stat2.dev}:${stat2.ino}:${stat2.size}:${stat2.mtimeMs}:${stat2.ctimeMs}`;
+    const stat = statSync6(path);
+    stamp = `${path}:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
   } catch (error) {
     if (error.code === "ENOENT") {
       policyFile.seen = `${path}:absent`;
@@ -3275,8 +3275,8 @@ async function defaultLookupAll(hostname) {
 
 class ZkapiDaemonEndpointRefusal extends OperationError {
   reason;
-  constructor(reason, message2, policyPath) {
-    super("config_error", message2, refusalSuggestion(reason, policyPath));
+  constructor(reason, message, policyPath) {
+    super("config_error", message, refusalSuggestion(reason, policyPath));
     this.name = "ZkapiDaemonEndpointRefusal";
     this.reason = reason;
   }
@@ -3382,9 +3382,9 @@ function isRedirectResponse(response) {
 }
 function discardBody(response) {
   try {
-    const cancelled2 = response.body?.cancel();
-    if (cancelled2 && typeof cancelled2.catch === "function") {
-      cancelled2.catch(() => {
+    const cancelled = response.body?.cancel();
+    if (cancelled && typeof cancelled.catch === "function") {
+      cancelled.catch(() => {
         return;
       });
     }
@@ -3455,8 +3455,8 @@ class TransientSourceEmbeddingError extends OperationError {
   reason;
   modelStarting;
   constructor(provider, reason, attempts, budgetMs = 0, options = {}) {
-    const { message: message2, suggestion } = transientEmbeddingMessage(provider, reason, attempts, budgetMs);
-    super("source_index_error", message2, suggestion);
+    const { message, suggestion } = transientEmbeddingMessage(provider, reason, attempts, budgetMs);
+    super("source_index_error", message, suggestion);
     this.name = "TransientSourceEmbeddingError";
     this.reason = reason;
     this.modelStarting = options.modelStarting === true;
@@ -3493,8 +3493,8 @@ class RemoteLiteRtEmbedder {
   async embed(items) {
     const previous = this.slot;
     let unlock;
-    this.slot = new Promise((resolve5) => {
-      unlock = resolve5;
+    this.slot = new Promise((resolve) => {
+      unlock = resolve;
     });
     await previous;
     try {
@@ -3526,7 +3526,7 @@ class RemoteLiteRtEmbedder {
         const bytes = Buffer.from(response.vectors, "base64");
         if (bytes.length !== items.length * identity.dimension * 4)
           throw new Error("Invalid remote vector length.");
-        const vectors = items.map((_, row) => Float32Array.from({ length: identity.dimension }, (_2, column) => bytes.readFloatLE((row * identity.dimension + column) * 4)));
+        const vectors = items.map((_, row) => Float32Array.from({ length: identity.dimension }, (_, column) => bytes.readFloatLE((row * identity.dimension + column) * 4)));
         if (vectors.some((vector) => vector.some((value) => !Number.isFinite(value)) || !vector.some((value) => value !== 0))) {
           throw new Error("Invalid remote vector values.");
         }
@@ -4061,7 +4061,7 @@ class BuiltInSourceEmbeddingProvider {
   async withSlot(taskType, run) {
     if (taskType === "RETRIEVAL_QUERY" && priorityQueryEmbeddingRequested()) {
       if (this.prioritySlotBusy)
-        await new Promise((resolve5) => this.priorityWaiting.push(resolve5));
+        await new Promise((resolve) => this.priorityWaiting.push(resolve));
       else
         this.prioritySlotBusy = true;
       try {
@@ -4075,7 +4075,7 @@ class BuiltInSourceEmbeddingProvider {
       }
     }
     if (this.slotBusy) {
-      await new Promise((resolve5) => this.waiting[taskType === "RETRIEVAL_QUERY" ? "query" : "document"].push(resolve5));
+      await new Promise((resolve) => this.waiting[taskType === "RETRIEVAL_QUERY" ? "query" : "document"].push(resolve));
     } else {
       this.slotBusy = true;
     }
@@ -4332,9 +4332,9 @@ class BuiltInEmbeddingNotReadyError extends TransientSourceEmbeddingError {
 function builtInEmbeddingOperationError(error) {
   if (error instanceof OperationError)
     return error;
-  const message2 = error instanceof Error ? error.message : String(error);
+  const message = error instanceof Error ? error.message : String(error);
   const reason = error instanceof BuiltInEmbeddingInstallError ? error.reason : undefined;
-  return new OperationError("source_index_error", message2, reason === "unsupported_platform" ? "Choose another embedding provider for this machine in the model settings." : reason === "download_failed" ? "Check the internet connection; Olympus tries the download again automatically." : reason === "disk_write_failed" ? "Free some disk space; Olympus tries again automatically." : "Olympus removes the bad file and downloads it again automatically.");
+  return new OperationError("source_index_error", message, reason === "unsupported_platform" ? "Choose another embedding provider for this machine in the model settings." : reason === "download_failed" ? "Check the internet connection; Olympus tries the download again automatically." : reason === "disk_write_failed" ? "Free some disk space; Olympus tries again automatically." : "Olympus removes the bad file and downloads it again automatically.");
 }
 function planBatches(windows) {
   const ordered = [...windows].sort((left, right) => right.ids.length - left.ids.length);
@@ -4714,7 +4714,7 @@ var parse_character_class = (regex, start, ascii_fold, apply_ascii_fold = true, 
         }
         throw new SyntaxError(`Empty character class at index ${start}`);
       }
-      const contains_complex_set = operands.some((candidate2) => candidate2.contains_complex_set);
+      const contains_complex_set = operands.some((candidate) => candidate.contains_complex_set);
       if (negated && operands.length > 1 && contains_nested_negated_complex_set) {
         throw new SyntaxError(`Unsupported outer-negated character-class intersection with a nested negated class containing a Unicode property, POSIX class, or shorthand at index ${start}`);
       }
@@ -7062,8 +7062,8 @@ var SERVER_BINARY = "llama-server";
 class BuiltInReasoningInstallError extends Error {
   reason;
   shortfall;
-  constructor(reason, message2, shortfall) {
-    super(message2);
+  constructor(reason, message, shortfall) {
+    super(message);
     this.name = "BuiltInReasoningInstallError";
     this.reason = reason;
     this.shortfall = shortfall;
@@ -7316,7 +7316,7 @@ async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract
   }
 }
 function extractWithTar(archivePath, targetDir) {
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve, reject) => {
     const child = spawn2("tar", ["-xzf", archivePath, "-C", targetDir], { stdio: ["ignore", "ignore", "pipe"] });
     let stderr = "";
     child.stderr?.on("data", (chunk) => {
@@ -7334,7 +7334,7 @@ function extractWithTar(archivePath, targetDir) {
     child.on("close", (status, signal) => {
       clearTimeout(timer);
       if (status === 0)
-        resolve5();
+        resolve();
       else
         reject(new Error(stderr.trim() || `tar exited with ${status ?? signal}`));
     });
@@ -7348,10 +7348,10 @@ function locateFile(root, name, depth = 0, prefix = "") {
     return;
   }
   if (entries.includes(name)) {
-    const relative4 = prefix ? `${prefix}/${name}` : name;
+    const relative = prefix ? `${prefix}/${name}` : name;
     try {
-      if (statSync7(join13(root, relative4)).isFile())
-        return relative4;
+      if (statSync7(join13(root, relative)).isFile())
+        return relative;
     } catch {}
   }
   if (depth >= 2)
@@ -7384,7 +7384,7 @@ async function downloadVerified2(fetchImpl, url, target, expectedBytes, expected
     stallMs,
     verifyTimeoutMs: VERIFY_TIMEOUT_MS,
     keepPartial: true,
-    error: (reason, message2) => new BuiltInReasoningInstallError(reason, message2),
+    error: (reason, message) => new BuiltInReasoningInstallError(reason, message),
     diskError: (error) => isNoSpaceError(error) ? spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname12(target)) ?? 0, "the disk filled up during the download") : new BuiltInReasoningInstallError("disk_write_failed", `Could not write the download: ${String(error)}`),
     write: space.write,
     onStart: () => reporter.set("downloading", label),
@@ -7392,7 +7392,7 @@ async function downloadVerified2(fetchImpl, url, target, expectedBytes, expected
   });
 }
 function hashInto(path, hash, timeoutMs, onProgress) {
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve, reject) => {
     let done = 0;
     let settled = false;
     const stream = createReadStream3(path);
@@ -7405,7 +7405,7 @@ function hashInto(path, hash, timeoutMs, onProgress) {
         stream.destroy();
         reject(error);
       } else {
-        resolve5();
+        resolve();
       }
     };
     const timer = setTimeout(() => finish(new BuiltInReasoningInstallError("checksum_mismatch", `Checking ${path} did not finish within ${Math.round(timeoutMs / 60000)} min.`)), timeoutMs);
@@ -7430,7 +7430,7 @@ async function withInstallLock2(lockPath, waitMs, refreshMs, noun, run) {
     if (Date.now() > deadline) {
       throw new BuiltInReasoningInstallError("download_failed", `Another Olympus process is still installing the ${noun}.`);
     }
-    await new Promise((resolve5) => setTimeout(resolve5, LOCK_POLL_MS2));
+    await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS2));
   }
   const refresh = setInterval(() => refreshLock(lockPath, token), refreshMs);
   refresh.unref?.();
@@ -7547,12 +7547,12 @@ class ProgressReporter2 {
     this.status = { ...rest, state, label, percent };
     this.emit(true);
   }
-  fail(reason, message2, shortfall) {
+  fail(reason, message, shortfall) {
     this.status = {
       ...this.status,
       state: "failed",
       label: reason === "insufficient_space" ? `Waiting for free disk space to download the ${this.noun}` : `The ${this.noun} could not be installed`,
-      failure: { reason, message: message2, ...shortfall ?? {} }
+      failure: { reason, message, ...shortfall ?? {} }
     };
     this.emit(true);
   }
@@ -7582,22 +7582,22 @@ import { createServer } from "node:net";
 import { availableParallelism as availableParallelism3, setPriority, tmpdir } from "node:os";
 import { join as join14 } from "node:path";
 class LlamaServerStartError extends Error {
-  constructor(message2) {
-    super(message2);
+  constructor(message) {
+    super(message);
     this.name = "LlamaServerStartError";
   }
 }
 
 class LlamaServerStillExitingError extends LlamaServerStartError {
-  constructor(message2) {
-    super(message2);
+  constructor(message) {
+    super(message);
     this.name = "LlamaServerStillExitingError";
   }
 }
 
 class LlamaServerStopError extends Error {
-  constructor(message2) {
-    super(message2);
+  constructor(message) {
+    super(message);
     this.name = "LlamaServerStopError";
   }
 }
@@ -7865,7 +7865,7 @@ function createLlamaServerHandle(launch, options = {}) {
       if (Date.now() > deadline) {
         fail(new LlamaServerStartError(`The built-in model server did not load within ${Math.round(launch.startupTimeoutMs / 1000)}s.`));
       }
-      await new Promise((resolve5) => setTimeout(resolve5, HEALTH_POLL_MS));
+      await new Promise((resolve) => setTimeout(resolve, HEALTH_POLL_MS));
     }
     if (current !== spawned || spawned.exited) {
       throw new LlamaServerStartError(STOPPED_WHILE_STARTING);
@@ -7885,9 +7885,9 @@ function createLlamaServerHandle(launch, options = {}) {
         return endpoint;
       const callerGeneration = generation;
       while (starting?.controller.signal.aborted) {
-        const cancelled2 = starting;
+        const cancelled = starting;
         try {
-          await abortable(cancelled2.promise.then(() => {
+          await abortable(cancelled.promise.then(() => {
             return;
           }, () => {
             return;
@@ -7897,39 +7897,39 @@ function createLlamaServerHandle(launch, options = {}) {
         }
         if (generation !== callerGeneration)
           throw new LlamaServerStartError(STOPPED_WHILE_STARTING);
-        if (starting === cancelled2)
+        if (starting === cancelled)
           starting = undefined;
         if (endpoint && current && !current.exited)
           return endpoint;
       }
       if (!starting) {
         const controller = new AbortController;
-        const shared3 = {
+        const shared = {
           controller,
           waiters: 0,
           promise: start(generation, controller.signal).finally(() => {
-            if (starting === shared3)
+            if (starting === shared)
               starting = undefined;
           })
         };
-        shared3.promise.catch(() => {
+        shared.promise.catch(() => {
           return;
         });
-        starting = shared3;
+        starting = shared;
       }
-      const shared2 = starting;
+      const shared = starting;
       if (!signal) {
-        shared2.waiters = Number.POSITIVE_INFINITY;
-        return shared2.promise;
+        shared.waiters = Number.POSITIVE_INFINITY;
+        return shared.promise;
       }
-      shared2.waiters += 1;
+      shared.waiters += 1;
       try {
-        return await abortable(shared2.promise, signal);
+        return await abortable(shared.promise, signal);
       } catch (error) {
         if (signal.aborted) {
-          shared2.waiters -= 1;
-          if (shared2.waiters <= 0)
-            shared2.controller.abort(signal.reason);
+          shared.waiters -= 1;
+          if (shared.waiters <= 0)
+            shared.controller.abort(signal.reason);
           throw callerCancelled(signal.reason);
         }
         throw error;
@@ -7976,11 +7976,11 @@ function trackServerProcess(child, tokenDir, onExit) {
     waitExit(timeoutMs) {
       if (exited)
         return Promise.resolve(true);
-      return new Promise((resolve5) => {
+      return new Promise((resolve) => {
         const settle = (value) => {
           clearTimeout(timer);
           exitWaiters.delete(onExited);
-          resolve5(value);
+          resolve(value);
         };
         const onExited = () => settle(true);
         const timer = setTimeout(() => settle(false), timeoutMs);
@@ -8023,12 +8023,12 @@ function abortable(promise, signal) {
     return promise;
   if (signal.aborted)
     return Promise.reject(signal.reason);
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve, reject) => {
     const onAbort = () => reject(signal.reason);
     signal.addEventListener("abort", onAbort, { once: true });
     promise.then((value) => {
       signal.removeEventListener("abort", onAbort);
-      resolve5(value);
+      resolve(value);
     }, (error) => {
       signal.removeEventListener("abort", onAbort);
       reject(error);
@@ -8065,14 +8065,14 @@ async function servesAlias(fetchImpl, baseUrl, token, alias) {
   }
 }
 function freeLoopbackPort() {
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve, reject) => {
     const server = createServer();
     server.unref();
     server.on("error", reject);
     server.listen(0, "127.0.0.1", () => {
       const address = server.address();
       const port = typeof address === "object" && address ? address.port : 0;
-      server.close(() => port > 0 ? resolve5(port) : reject(new LlamaServerStartError("No free loopback port.")));
+      server.close(() => port > 0 ? resolve(port) : reject(new LlamaServerStartError("No free loopback port.")));
     });
   });
 }
@@ -8094,8 +8094,8 @@ var stopAll = () => Promise.all([
   ...[...liteRtHelpers.values()].map((helper) => helper.release())
 ]);
 var send = (reply) => port.postMessage(reply);
-port.on("message", async (message2) => {
-  if (message2.shutdown) {
+port.on("message", async (message) => {
+  if (message.shutdown) {
     try {
       await stopAll();
     } finally {
@@ -8104,11 +8104,11 @@ port.on("message", async (message2) => {
     }
     return;
   }
-  if (message2.cancel !== undefined) {
-    controllers.get(message2.cancel)?.abort();
+  if (message.cancel !== undefined) {
+    controllers.get(message.cancel)?.abort();
     return;
   }
-  const { id, request } = message2;
+  const { id, request } = message;
   const controller = new AbortController;
   controllers.set(id, controller);
   try {

@@ -49,7 +49,7 @@ describe('versioned Olympus worker lifecycle', () => {
         expect(launch().stdout.toString().trim()).toBe('olympus 0.4.9');
         const next = createUpgradeArtifact(home, '0.4.10');
         expect(() => runWorkerLifecycle('upgrade', {
-          ...options, artifactPath: next.path, actionSettleTimeoutMs: 0, readinessProbe: () => false,
+          ...options, artifactPath: next.path, actionSettleTimeoutMs: 0, readinessProbe: () => false, readinessCapMs: 1_000,
         })).toThrow('did not answer its loopback readiness probe');
         expect(readFileSync(path, 'utf8')).toBe(launcher);
         expect(lstatSync(path).mode & 0o777).toBe(0o700);
@@ -70,6 +70,7 @@ describe('versioned Olympus worker lifecycle', () => {
       expect(() => runWorkerLifecycle('upgrade', {
         platform: 'linux', homeDir: home, artifactPath: artifact.path, exec: manager.exec,
         activationSettleMs: 0, actionSettleTimeoutMs: 0,
+        readinessCapMs: 1_000,
         readinessProbe: () => { writeFileSync(path, ownerLauncher); return false; },
       })).toThrow('did not answer its loopback readiness probe');
       expect(readFileSync(path, 'utf8')).toBe(ownerLauncher);
@@ -307,7 +308,7 @@ describe('versioned Olympus worker lifecycle', () => {
         exec: manager.exec,
         actionSettleTimeoutMs: 20,
         actionSettlePollMs: 0,
-        readinessProbe: () => false,
+        readinessProbe: () => false, readinessCapMs: 1_000,
       })).toThrow(/olympus worker start completed but status is inactive\. The worker's last log line was: boom/);
     } finally {
       rmSync(home, { recursive: true, force: true });
@@ -617,6 +618,7 @@ describe('versioned Olympus worker lifecycle', () => {
         exec: manager.exec,
         activationSettleMs: 0,
         actionSettleTimeoutMs: 0,
+        readinessCapMs: 1_000,
         readinessProbe: (url) => {
           probedUrl = url;
           return false;
@@ -716,24 +718,26 @@ describe('versioned Olympus worker lifecycle', () => {
     }
   }, 30_000);
 
-  test('an engine whose heartbeat has stopped gets one window, then the upgrade rolls back', () => {
+  test('a stopped heartbeat (a slept laptop, a stalled disk) is reported, never a reason to roll back: the wait goes on to the cap', () => {
     const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-heartbeat-stopped-'));
     const manager = linuxManager('active');
     try {
       const artifact = createUpgradeArtifact(home, '0.4.3');
       installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: '/opt/olympus-old', bunBin: process.execPath, authToken: 'old-token' });
-      const started = Date.now();
-      expect(() => runWorkerLifecycle('upgrade', {
+      const lines: string[] = [];
+      const readyAt = Date.now() + 1_200;
+      const stoppedAt = new Date(Date.now() - 60 * 60_000).toISOString();
+      const result = runWorkerLifecycle('upgrade', {
         platform: 'linux', homeDir: home, artifactPath: artifact.path,
         bunBin: process.execPath, exec: manager.exec, activationSettleMs: 0,
         readinessTimeoutMs: 300, actionSettlePollMs: 5, readinessCapMs: 60_000,
-        heartbeat: () => beat(process.pid, { writtenAt: new Date(Date.now() - 60_000).toISOString() }),
+        heartbeat: () => beat(process.pid, { writtenAt: stoppedAt, step: 'updating tier-ledger' }),
         bootProgress: () => undefined, frontProgress: () => undefined,
-        progressLine: () => {},
-        readinessProbe: () => false,
-        rollbackReadinessProbe: () => true,
-      })).toThrow('its engine had stopped beating');
-      expect(Date.now() - started).toBeLessThan(10_000);
+        progressLine: (line) => lines.push(line),
+        readinessProbe: () => Date.now() >= readyAt,
+      });
+      expect(result).toMatchObject({ ok: true, readiness: { status: 'ready' } });
+      expect(lines[0]).toContain(`its heartbeat was last written at ${stoppedAt}`);
     } finally {
       makeTreeWritable(home);
       rmSync(home, { recursive: true, force: true });
@@ -781,7 +785,7 @@ describe('versioned Olympus worker lifecycle', () => {
         progressLine: () => {},
         readinessProbe: () => false,
         rollbackReadinessProbe: () => true,
-      })).toThrow(/It was still working when the wait reached its limit: updating tier-ledger \(\d+ s\)\./);
+      })).toThrow(/It was still running when the wait reached its limit: updating tier-ledger \(\d+ s\)\./);
     } finally {
       makeTreeWritable(home);
       rmSync(home, { recursive: true, force: true });
@@ -813,6 +817,7 @@ describe('versioned Olympus worker lifecycle', () => {
           readinessTimeoutMs: 60_000, actionSettlePollMs: 1,
           bootProgress: () => undefined,
           frontProgress: () => ({ schema: 'olympus.boot-progress.v1', pid: process.pid, phase: 'failed', startedAt: crashedAt, updatedAt: new Date().toISOString(), completedStores: 0, failures: 7, lastFailure: 'front_store_write' }),
+          readinessCapMs: 1_000,
           readinessProbe: () => { if (++probes === 3) stopped = true; return false; },
           rollbackReadinessProbe: () => true,
         });
@@ -839,7 +844,7 @@ describe('versioned Olympus worker lifecycle', () => {
           bunBin: process.execPath, exec: manager.exec, activationSettleMs: 0,
           readinessTimeoutMs: 0, actionSettlePollMs: 1,
           bootProgress: () => undefined, frontProgress: () => undefined,
-          readinessProbe: () => false,
+          readinessProbe: () => false, readinessCapMs: 1_000,
           // The previous version was running before, and takes nine minutes
           // to answer after its restart: far past the upgraded worker's
           // window, inside the rollback's own 10-minute default.
@@ -874,8 +879,8 @@ describe('versioned Olympus worker lifecycle', () => {
           bunBin: process.execPath, exec: manager.exec, activationSettleMs: 0,
           readinessTimeoutMs: 0, actionSettlePollMs: 1,
           bootProgress: () => undefined, frontProgress: () => undefined,
-          readinessProbe: () => false,
-          rollbackReadinessTimeoutMs: 120_000,
+          readinessProbe: () => false, readinessCapMs: 1_000,
+          rollbackReadinessTimeoutMs: 120_000, readinessClock: () => Date.now(),
           rollbackReadinessProbe: () => { setSystemTime(new Date(Date.now() + 30_000)); return false; },
         });
       } catch (caught) { error = caught; }
@@ -909,7 +914,7 @@ describe('versioned Olympus worker lifecycle', () => {
           bunBin: process.execPath, exec, activationSettleMs: 0,
           readinessTimeoutMs: 0, actionSettleTimeoutMs: 0, actionSettlePollMs: 1,
           bootProgress: () => undefined, frontProgress: () => undefined,
-          readinessProbe: () => false,
+          readinessProbe: () => false, readinessCapMs: 1_000,
         });
       } catch (caught) { error = caught; }
       expect(String(error)).toContain('The upgrade failed (The upgraded Olympus worker did not answer its loopback readiness probe.');
@@ -958,6 +963,7 @@ describe('versioned Olympus worker lifecycle', () => {
           bunBin: process.execPath, exec, activationSettleMs: 0, actionSettleTimeoutMs: 0,
           bootProgress: () => undefined,
           rollbackReadinessProbe: () => true,
+          readinessCapMs: 1_000,
           readinessProbe: () => {
             probed = true;
             writeFileSync(workerServicePaths('linux', home).envPath, `${readFileSync(workerServicePaths('linux', home).envPath, 'utf8')}XDG_DATA_HOME=${env.XDG_DATA_HOME}\n`);
@@ -1037,6 +1043,7 @@ describe('versioned Olympus worker lifecycle', () => {
             actionSettleTimeoutMs: 1_000, actionSettlePollMs: 1,
             bootProgress: () => undefined, frontProgress: () => undefined,
             rollbackReadinessProbe: () => true,
+            readinessCapMs: 1_000,
             readinessProbe: () => {
               // The new worker retires the file on its first pass, as the sniffer does.
               if (++probes === 1) retireStatePath(env, 'olympus_tier_ledger', retired);
@@ -1306,8 +1313,8 @@ describe('versioned Olympus worker lifecycle', () => {
         exec,
         activationSettleMs: 0,
         readinessTimeoutMs: 0,
-        readinessProbe: () => false,
-      })).toThrow('did not answer its loopback readiness probe. It was still running, but its engine had stopped beating, when the wait ended. Olympus is not running: it was stopped before the upgrade, and the previous version was put back stopped. Run `olympus worker start` to start it.');
+        readinessProbe: () => false, readinessCapMs: 1_000,
+      })).toThrow('did not answer its loopback readiness probe. It was still running when the wait reached its limit: no heartbeat from the engine yet. Olympus is not running: it was stopped before the upgrade, and the previous version was put back stopped. Run `olympus worker start` to start it.');
 
       expect(readFileSync(paths.unitPath, 'utf8')).toBe(oldUnit);
       expect(cachedUnit).toBe(oldUnit);
@@ -1350,7 +1357,7 @@ describe('versioned Olympus worker lifecycle', () => {
         exec: manager.exec,
         activationSettleMs: 0,
         readinessTimeoutMs: 0,
-        readinessProbe: () => false,
+        readinessProbe: () => false, readinessCapMs: 1_000,
       })).toThrow('did not answer its loopback readiness probe');
 
       expect(readFileSync(paths.unitPath, 'utf8')).toBe(oldUnit);

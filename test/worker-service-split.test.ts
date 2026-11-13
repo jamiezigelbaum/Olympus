@@ -180,6 +180,46 @@ describe('a busy background is never judged dead (gate7, 13 Nov)', () => {
     expect(events.filter((e) => e.event === 'stop')).toEqual([]);
   }, 180_000);
 
+  test('both processes stopped and continued (a laptop that slept) are not replaced, and the front serves', async () => {
+    const context = setup();
+    context.env.BLOCK_BOOT_MS = '3000';
+    context.env.FRONT_WAITS = '1';
+    await supervise(context);
+    const started = await waitFor(() => {
+      const all = context.read();
+      const background = all.find((e) => e.event === 'start' && e.role === 'background');
+      const front = all.find((e) => e.event === 'start' && e.role === 'front');
+      return background && front ? { background: background.pid, front: front.pid } : undefined;
+    }, { timeoutMs: 30_000, intervalMs: 100 });
+    process.kill(started.background, 'SIGSTOP');
+    process.kill(started.front, 'SIGSTOP');
+    // Stopped for longer than the start window (10 s) and the heartbeat's staleness (15 s).
+    const until = Date.now() + 20_000;
+    await waitFor(() => (Date.now() >= until ? true : undefined), { timeoutMs: 30_000, intervalMs: 500 });
+    process.kill(started.background, 'SIGCONT');
+    process.kill(started.front, 'SIGCONT');
+    const events = await waitFor(() => {
+      const all = context.read();
+      return all.some((e) => (e.event as string) === 'serving') ? all : undefined;
+    }, { timeoutMs: 30_000, intervalMs: 100 });
+    expect(events.filter((e) => e.event === 'start').map((e) => e.role)).toEqual(['background', 'front']);
+    expect(events.filter((e) => e.event === 'stop')).toEqual([]);
+  }, 90_000);
+
+  test('a heartbeat whose writes stop for 20 s during boot work (a stalled disk) is not a reason to replace the background', async () => {
+    const context = setup();
+    context.env.BLOCK_BOOT_MS = '20000';
+    context.env.PAUSE_HEARTBEAT = '1';
+    context.env.FRONT_WAITS = '1';
+    await supervise(context);
+    const events = await waitFor(() => {
+      const all = context.read();
+      return all.some((e) => (e.event as string) === 'serving') ? all : undefined;
+    }, { timeoutMs: 60_000, intervalMs: 200 });
+    expect(events.filter((e) => e.event === 'start').map((e) => e.role)).toEqual(['background', 'front']);
+    expect(events.filter((e) => e.event === 'stop')).toEqual([]);
+  }, 90_000);
+
   test('a background that exits part way through its boot is replaced, and the front serves once the new one is done', async () => {
     const context = setup();
     context.env.BLOCK_BOOT_MS = '3000';

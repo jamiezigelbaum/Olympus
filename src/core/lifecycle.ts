@@ -13,7 +13,7 @@ import {
   writePrivateFileAtomicSync,
 } from './atomic-file.ts';
 import { bootProgressLine, readBootProgress, readFrontProgress, removeSchemaBackupsSince, restoreSchemaBackupsSince, type BootProgress } from './boot-progress.ts';
-import { engineHeartbeatBeating, engineHeartbeatLine, readEngineHeartbeat, type EngineHeartbeat } from './engine-heartbeat.ts';
+import { engineHeartbeatBeating, engineHeartbeatLine, readEngineHeartbeat, startupCapMs, type EngineHeartbeat } from './engine-heartbeat.ts';
 import { copyStoresBeforeUpgrade, olympusStoreBytes } from './upgrade-store-copies.ts';
 import { prepareWorkerUpgradeArtifact, type PreparedWorkerUpgradeArtifact } from './lifecycle-artifact.ts';
 import { acquireLifecycleMutationLock } from './lifecycle-lock.ts';
@@ -110,6 +110,8 @@ export interface WorkerLifecycleOptions extends WorkerServiceInstallOptions {
    * fit in this one window.
    */
   rollbackReadinessTimeoutMs?: number;
+  /** The readiness waits' monotonic clock, in ms (tests). */
+  readinessClock?: () => number;
   /** Where progress lines go while the upgrade waits. Defaults to stderr. */
   progressLine?: (line: string) => void;
   /**
@@ -1107,7 +1109,7 @@ function qualifyWorkerReadiness(
  */
 function readinessFailureDetail(
   options: WorkerLifecycleOptions & { platform: WorkerServicePlatform; homeDir: string },
-  outcome: { serviceState: string; front: BootProgress | undefined; lastCheck?: string; ended?: 'cap' | 'crash_loop' | 'stopped_beating'; heartbeat?: EngineHeartbeat },
+  outcome: { serviceState: string; front: BootProgress | undefined; lastCheck?: string; ended?: 'cap' | 'crash_loop'; heartbeat?: EngineHeartbeat },
 ): string {
   const parts: string[] = [];
   if (outcome.lastCheck) parts.push(` Its last health check: ${outcome.lastCheck}.`);
@@ -1121,10 +1123,8 @@ function readinessFailureDetail(
     if (logLine) parts.push(` The worker's last log line was: ${logLine}`);
   } else if (outcome.ended === 'crash_loop' && failures === 0) {
     parts.push(' Its engine kept exiting and being started again.');
-  } else if (outcome.ended === 'cap') {
-    parts.push(` It was still working when the wait reached its limit${outcome.heartbeat ? `: ${engineHeartbeatLine(outcome.heartbeat)}` : ''}.`);
-  } else if (failures === 0) {
-    parts.push(' It was still running, but its engine had stopped beating, when the wait ended.');
+  } else if (outcome.ended === 'cap' || failures === 0) {
+    parts.push(` It was still running when the wait reached its limit: ${heartbeatState(outcome.heartbeat)}.`);
   }
   return parts.join('');
 }
@@ -1134,17 +1134,15 @@ function readinessFailureDetail(
  * was replaced, and the next one exited too.
  */
 const MAX_PROCESS_STARTS = 3;
-/** The cap on a wait whose engine still beats: 30 minutes, plus a minute per GB of stores. */
-const READINESS_CAP_BASE_MS = 30 * 60_000;
-const READINESS_CAP_PER_GB_MS = 60_000;
 
 /**
  * Wait for `/v1/health` while the unit stays active. A slow answer is never
- * read as a dead engine: the wait goes on while the engine's heartbeat beats
- * (a thread its busy loop cannot hold writes it), and ends on an answer, the
- * unit stopping, a crash loop (more than three engine processes, or a front
- * that stopped three times), a heartbeat that has stopped for a whole window,
- * or the cap. At the cap it says what the engine says it is doing.
+ * read as a dead engine, and neither is a heartbeat that has stopped (a
+ * slept laptop, a stalled disk): it is reported, never a reason to roll back.
+ * The wait ends on an answer, the unit stopping, a crash loop (more than
+ * three engine processes, or a front that stopped three times), or the cap,
+ * measured on this process's monotonic clock; at the cap it says what the
+ * engine last said it was doing.
  */
 function waitForWorkerReadiness(
   options: WorkerLifecycleOptions & { platform: WorkerServicePlatform; homeDir: string },
@@ -1156,7 +1154,7 @@ function waitForWorkerReadiness(
     frontProgress?: () => BootProgress | undefined;
     capMs?: number;
   },
-): { ready: boolean; url: string; serviceState: string; front: BootProgress | undefined; lastCheck?: string; ended?: 'cap' | 'crash_loop' | 'stopped_beating'; heartbeat?: EngineHeartbeat } {
+): { ready: boolean; url: string; serviceState: string; front: BootProgress | undefined; lastCheck?: string; ended?: 'cap' | 'crash_loop'; heartbeat?: EngineHeartbeat } {
   const url = `http://127.0.0.1:${port}/v1/health`;
   let lastCheck: string | undefined;
   const probe = () => {
@@ -1172,39 +1170,38 @@ function waitForWorkerReadiness(
   );
   const env = lifecycleEnv(options);
   const waitStartedAt = Date.now();
+  const clock = options.readinessClock ?? (() => performance.now());
+  const startedTick = clock();
   const capMs = Math.max(timeoutMs, wait.capMs ?? options.readinessCapMs ?? defaultReadinessCapMs(env));
-  const cap = waitStartedAt + capMs;
-  let deadline = waitStartedAt + timeoutMs;
   const readHeartbeat = wait.heartbeat ?? options.heartbeat ?? (() => readEngineHeartbeat(env));
   const readFront = wait.frontProgress ?? options.frontProgress ?? (() => readFrontProgress(env));
   const readBoot = options.bootProgress ?? (() => readBootProgress(env));
   const progressLine = options.progressLine ?? ((line: string) => process.stderr.write(`${line}\n`));
   const processes = new Set<number>();
-  let lastLineAt = 0;
+  let lastLineTick = -Infinity;
   let serviceState = 'active';
-  let ended: 'cap' | 'crash_loop' | 'stopped_beating' | undefined;
+  let ended: 'cap' | 'crash_loop' | undefined;
   let heartbeat: EngineHeartbeat | undefined;
   let ready = probe();
   while (!ready) {
     serviceState = inspectWorkerService(serviceActionOptions(options)).state;
     if (serviceState !== 'active') break;
-    const now = Date.now();
-    heartbeat = readHeartbeat();
-    const beating = engineHeartbeatBeating(heartbeat, { now });
-    if (beating) processes.add(heartbeat!.pid);
+    const tick = clock();
+    const read = readHeartbeat();
+    if (read) heartbeat = read;
+    // Each engine process that lived during this wait; a stale file from one that is gone counts too.
+    if (read && Date.parse(read.startedAt) >= waitStartedAt - 60_000) processes.add(read.pid);
     const front = readFront();
     const frontFailures = front && Date.parse(front.updatedAt) >= waitStartedAt ? front.failures ?? 0 : 0;
     if (processes.size > MAX_PROCESS_STARTS || frontFailures >= MAX_PROCESS_STARTS) { ended = 'crash_loop'; break; }
-    if (now >= cap) { ended = 'cap'; break; }
-    if (beating) deadline = Math.max(deadline, now + timeoutMs);
-    else if (now >= deadline) { ended = 'stopped_beating'; break; }
-    if (beating && now >= waitStartedAt + timeoutMs && now - lastLineAt >= READINESS_PROGRESS_LINE_MS) {
+    if (tick - startedTick >= capMs) { ended = 'cap'; break; }
+    if (tick - startedTick >= timeoutMs && tick - lastLineTick >= READINESS_PROGRESS_LINE_MS) {
       const boot = readBoot();
-      const counts = boot && boot.pid === heartbeat!.pid ? `${bootProgressLine(boot, now)}; ` : '';
-      progressLine(`Starting Olympus: ${counts}${engineHeartbeatLine(heartbeat!, now)}`);
-      lastLineAt = now;
+      const counts = boot && heartbeat && boot.pid === heartbeat.pid ? `${bootProgressLine(boot)}; ` : '';
+      progressLine(`Starting Olympus: ${counts}${heartbeatState(heartbeat)}`);
+      lastLineTick = tick;
     }
-    waitForActivationSettle(Math.max(1, Math.min(pollMs, now < deadline ? deadline - now : pollMs)));
+    waitForActivationSettle(Math.max(1, Math.ceil(Math.min(pollMs, capMs - (tick - startedTick)))));
     ready = probe();
   }
   // Only a front file written during this wait speaks for this start.
@@ -1219,9 +1216,16 @@ function waitForWorkerReadiness(
 }
 
 function defaultReadinessCapMs(env: Record<string, string | undefined>): number {
-  let gb = 0;
-  try { gb = olympusStoreBytes(env) / 1024 ** 3; } catch { /* unreadable: the base cap */ }
-  return READINESS_CAP_BASE_MS + Math.ceil(gb) * READINESS_CAP_PER_GB_MS;
+  let bytes = 0;
+  try { bytes = olympusStoreBytes(env); } catch { /* unreadable: the base cap */ }
+  return startupCapMs(bytes);
+}
+
+/** What the engine last said, or that its heartbeat has stopped, or that there is none. */
+function heartbeatState(heartbeat: EngineHeartbeat | undefined): string {
+  if (!heartbeat) return 'no heartbeat from the engine yet';
+  if (engineHeartbeatBeating(heartbeat)) return engineHeartbeatLine(heartbeat);
+  return `its heartbeat was last written at ${heartbeat.writtenAt} (${engineHeartbeatLine(heartbeat)})`;
 }
 
 function workerReadinessPort(options: WorkerLifecycleOptions & { homeDir: string }): number {

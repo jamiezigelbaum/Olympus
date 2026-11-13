@@ -17,7 +17,6 @@ import {
 import { createEngineCommandHandler, EngineCommandLedger, type EngineCommandHandlers } from '../src/workers/engine-split/commands.ts';
 import { backgroundBootDone, waitForBackgroundBootDone } from '../src/workers/engine-split/runtime.ts';
 import type { BootProgress } from '../src/core/boot-progress.ts';
-import type { EngineHeartbeat } from '../src/core/engine-heartbeat.ts';
 import { createTestClock, flushMicrotasks, waitFor } from './helpers/test-clock.ts';
 
 const TOKEN = 'engine-split-test-token';
@@ -45,29 +44,28 @@ function background(handlers: EngineCommandHandlers, instanceId = 'background-1'
 }
 
 describe('the host starts the background, then the front', () => {
-  test('the front opens its stores on the background\'s receipt, never on its answer, and never gives up (gate7 on 893087f5)', async () => {
+  test('the front opens its stores on the background\'s receipt, never on its answer or a clock, and never gives up (gate7 on 893087f5)', async () => {
     const clock = createTestClock();
-    const now = Date.now();
-    const at = new Date(now).toISOString();
-    const heartbeat = { schema: 'olympus.engine-heartbeat.v1' as const, pid: process.pid, role: 'background', startedAt: at, writtenAt: at, blockedMs: 86_000, step: 'backing up tier-sniffer' };
+    const at = new Date().toISOString();
     let boot: BootProgress | undefined = { schema: 'olympus.boot-progress.v1', pid: process.pid, phase: 'backing_up', startedAt: at, updatedAt: at, completedStores: 3 };
-    let beating: EngineHeartbeat | undefined = heartbeat;
-    const waiting = waitForBackgroundBootDone({ env: {}, sleep: clock.sleep, pollMs: 250, read: () => ({ boot, heartbeat: beating && { ...beating, writtenAt: new Date().toISOString() } }) });
+    let alive = true;
+    const waiting = waitForBackgroundBootDone({ env: {}, sleep: clock.sleep, pollMs: 250, read: () => boot, alive: () => alive });
     let settled = false;
     void waiting.then(() => { settled = true; });
     await flushMicrotasks();
-    // A long boot, then a done receipt from a process whose heartbeat has stopped: still waiting.
+    // A long boot, then a done receipt from a process that has gone: still waiting.
     await clock.advance(60 * 60_000);
     expect(settled).toBe(false);
     boot = { ...boot!, phase: 'done' };
-    beating = undefined;
+    alive = false;
     await clock.advance(1_000);
     expect(settled).toBe(false);
-    // Done, and beating while busy (its loop held 86 s): the front goes on.
-    beating = heartbeat;
+    // Done, by a live process, however busy: the front goes on.
+    alive = true;
     await clock.advance(250);
     await waiting;
-    expect(backgroundBootDone({ boot: { ...boot!, pid: process.pid + 1_000_000 }, heartbeat })).toBe(false);
+    expect(backgroundBootDone(boot, () => false)).toBe(false);
+    expect(backgroundBootDone(undefined)).toBe(false);
   });
 
   test('a front worker service does not start while its background is not ready', async () => {

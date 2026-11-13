@@ -1,5 +1,6 @@
 import { homedir } from 'node:os';
-import { engineHeartbeatBeating, engineHeartbeatLine, readEngineHeartbeat } from './engine-heartbeat.ts';
+import { createStartupWatch, startupCapMs } from './engine-heartbeat.ts';
+import { olympusStoreBytes } from './upgrade-store-copies.ts';
 import { quoteCliArgument, readWorkerCliLauncher, renderWorkerCliLauncher, workerCliLauncherPath, writeWorkerCliLauncher } from './worker-cli-launcher.ts';
 import { WORKER_DATA_OWNER_BUSY_EXIT_CODE } from './data-owner-lock.ts';
 import { OWNER_BRIDGE_HOST_ENV } from './linux-owner-bridge-host.ts';
@@ -255,7 +256,7 @@ async function prepareWorkerStart(
     endpointOccupied,
     startupFailure: child => child.exitCode === WORKER_DATA_OWNER_BUSY_EXIT_CODE
       ? new NativeProcessRetryableStartError(WORKER_DATA_OWNER_CONFLICT_MESSAGE) : undefined,
-    startupInProgress: (child) => stillBeating(settings.env, child),
+    startupInProgress: startupWatch(settings.env),
     readinessProbe: () => authenticatedReadinessProbe(
       worker.fetchWorker,
       settings.readinessUrl,
@@ -572,7 +573,7 @@ export function engineBackgroundLaunch(input: {
     endpointOccupied: false,
     startupFailure: child => child.exitCode === WORKER_DATA_OWNER_BUSY_EXIT_CODE
       ? new NativeProcessRetryableStartError(WORKER_DATA_OWNER_CONFLICT_MESSAGE) : undefined,
-    startupInProgress: (child) => stillBeating(input.env, child),
+    startupInProgress: startupWatch(input.env),
     async readinessProbe(child) {
       const ready = await probeEngineBackground(fetchBackground, input.authToken, input.instanceId, input.probeTimeoutMs);
       if (ready) input.onReady?.(child);
@@ -581,17 +582,18 @@ export function engineBackgroundLaunch(input: {
   };
 }
 
-/**
- * A child that has not answered by its deadline is waited for while its
- * heartbeat beats: the heartbeat comes from a thread its busy loop cannot
- * hold, so a slow answer is never read as a dead process. One that exited is
- * replaced at once by the kernel; one whose heartbeat stopped is replaced here.
- */
-function stillBeating(env: NodeJS.ProcessEnv, child: ChildProcess): boolean {
-  const heartbeat = readEngineHeartbeat(env);
-  if (child.pid === undefined || !engineHeartbeatBeating(heartbeat, { pid: child.pid })) return false;
-  console.log(`[native-process] the worker is alive and has not answered yet: ${engineHeartbeatLine(heartbeat)}`);
-  return true;
+/** One start watch per environment's data root: a live child is waited for until the cap. */
+function startupWatch(env: NodeJS.ProcessEnv): (child: ChildProcess) => boolean {
+  let capMs: number | undefined;
+  const watch = createStartupWatch({
+    env,
+    capMs: () => (capMs ??= startupCapMs(storeBytesOrZero(env))),
+  });
+  return (child) => watch(child.pid);
+}
+
+function storeBytesOrZero(env: NodeJS.ProcessEnv): number {
+  try { return olympusStoreBytes(env); } catch { return 0; }
 }
 
 /**

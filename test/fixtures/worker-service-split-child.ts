@@ -17,7 +17,7 @@
 import { appendFileSync, existsSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beginBootProgress, finishBootProgress, reportBootStep } from '../../src/core/boot-progress.ts';
-import { startEngineHeartbeat } from '../../src/core/engine-heartbeat.ts';
+import { startEngineHeartbeat, stopEngineHeartbeat } from '../../src/core/engine-heartbeat.ts';
 import { waitForBackgroundBootDone } from '../../src/workers/engine-split/runtime.ts';
 import { runExtractionCommand } from '../../src/workers/file-extraction/extractors/command-runner.ts';
 
@@ -82,7 +82,10 @@ if (role === 'background') {
         note('exit');
         process.exit(1);
       }
+      // PAUSE_HEARTBEAT: the heartbeat's writes stop for the hold (a stalled disk), then resume.
+      if (process.env.PAUSE_HEARTBEAT) stopEngineHeartbeat();
       blockLoop(blockBoot);
+      if (process.env.PAUSE_HEARTBEAT) startEngineHeartbeat(process.env, 'background');
     }
     finishBootProgress();
     serve();
