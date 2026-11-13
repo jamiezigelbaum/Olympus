@@ -68,8 +68,13 @@ export function drivePageSnapshot(name: string): string {
 
 /** Open the one row named `name` (by tooltip, label, or its visible text, as the listing reads names).
  * Returns 'none' while it is not listed and 'many' when the name is not unique. */
+/**
+ * Finds the one Drive item showing `name`. Returns its folder id when Drive
+ * labels the item with one (the caller opens the folder by address, which a
+ * synthetic double-click does not reliably do); otherwise double-clicks it.
+ */
 export function driveFolderRowExpression(name: string): string {
-  return `(() => {const name=${JSON.stringify(name)};const named=[...document.querySelectorAll(${JSON.stringify(DRIVE_ITEMS)})].filter(row=>[row,...row.querySelectorAll('*')].some(e=>[e.getAttribute('data-tooltip'),e.getAttribute('aria-label'),e.getAttribute('data-filename'),e.children.length?null:e.textContent?.trim()].includes(name)));const rows=named.filter(row=>!named.some(other=>other!==row&&row.contains(other)));if(rows.length>1)return 'many';if(!rows.length)return 'none';rows[0].dispatchEvent(new MouseEvent('dblclick',{bubbles:true,view:window}));return 'opened';})()`;
+  return `(() => {const name=${JSON.stringify(name)};const named=[...document.querySelectorAll(${JSON.stringify(DRIVE_ITEMS)})].filter(row=>[row,...row.querySelectorAll('*')].some(e=>[e.getAttribute('data-tooltip'),e.getAttribute('aria-label'),e.getAttribute('data-filename'),e.children.length?null:e.textContent?.trim()].includes(name)));const rows=named.filter(row=>!named.some(other=>other!==row&&row.contains(other)));if(rows.length>1)return 'many';if(!rows.length)return 'none';const row=rows[0];const id=[row,...row.querySelectorAll('[data-id]')].map(e=>e.getAttribute('data-id')).find(Boolean)||row.closest('[data-id]')?.getAttribute('data-id');if(id)return 'id:'+id;row.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,view:window}));return 'opened';})()`;
 }
 
 export async function openBrowserTimingSeeds(machine: Machine, endpoint: string, sources: readonly TimingSource[] = ['dropbox', 'google_drive']) {
@@ -171,8 +176,12 @@ export async function openBrowserTimingSeeds(machine: Machine, endpoint: string,
     const openDriveFolderRow = async (session: string, name: string, ms: number) => {
       const deadline = Date.now() + ms;
       for (;;) {
-        const found = await evaluate<'none' | 'many' | 'opened'>(session, driveFolderRowExpression(name));
-        if (found !== 'none' || Date.now() >= deadline) return found;
+        const found = await evaluate<string>(session, driveFolderRowExpression(name));
+        if (found.startsWith('id:')) {
+          await send('Page.navigate', { url: `https://drive.google.com/drive/u/0/folders/${encodeURIComponent(found.slice(3))}` }, session);
+          return 'opened';
+        }
+        if (found !== 'none' || Date.now() >= deadline) return found as 'none' | 'many' | 'opened';
         await delay(1000);
       }
     };
@@ -234,7 +243,12 @@ export async function openBrowserTimingSeeds(machine: Machine, endpoint: string,
             const shown = await evaluate<Record<string, unknown>>(tab.session, drivePageSnapshot(name)).catch(() => undefined);
             throw new Error(`${opened === 'many' ? 'duplicate Drive seed folders' : 'Drive seed folder not listed in search or My Drive'}${shown ? ` (${JSON.stringify(shown)})` : ''}`);
           }
-          await until(() => evaluate(tab.session, `location.pathname.includes('/folders/') && !!document.querySelector('[role=grid]')`), 'Drive seed folder did not open');
+          try {
+            await until(() => evaluate(tab.session, `location.pathname.includes('/folders/') && !!document.querySelector('[role=grid]')`), 'Drive seed folder did not open');
+          } catch (error) {
+            const shown = await evaluate<Record<string, unknown>>(tab.session, drivePageSnapshot(name)).catch(() => undefined);
+            throw new Error(`Drive seed folder did not open${shown ? ` (${JSON.stringify(shown)})` : ''}`, { cause: error });
+          }
         } else {
           await send('Page.navigate', { url: `https://www.dropbox.com/home/${encodeURIComponent(name)}` }, tab.session);
         }

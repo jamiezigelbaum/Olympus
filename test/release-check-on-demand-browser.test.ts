@@ -151,6 +151,12 @@ describe('fresh read-on-demand without write tokens', () => {
       expect(run()).toBe('opened');
       window.document.body.innerHTML = `<div role="listbox"><div role="option"><span>${ON_DEMAND_FOLDER}</span></div></div>`;
       expect(run()).toBe('opened');
+      // Drive labels the item with its folder id: open by address, no double-click.
+      window.document.body.innerHTML = `<div role="grid"><div role="row" data-id="1AbC_folder" id="seed"><span>${ON_DEMAND_FOLDER}</span></div></div>`;
+      let clicked = 0;
+      window.document.getElementById('seed')!.addEventListener('dblclick', () => clicked++);
+      expect(run()).toBe('id:1AbC_folder');
+      expect(clicked).toBe(0);
     } finally { await window.happyDOM.close(); }
   });
 
