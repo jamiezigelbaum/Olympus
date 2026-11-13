@@ -353,6 +353,24 @@ section consolidates and supersedes all other policy wording.
   and records compatibility/migration, held-out eval, and independent-review
   receipts. The change and reason are also recorded below.
 
+Implementation note, 2026-11-12 (1.5 lane 3): the remote release membrane now
+checks reading coverage per stored chunk, in addition to the item's tier and
+the secret scan. `ReleaseCheck.chunks` uses the production content classifier,
+sniffer cache and configured judge over consecutive bounded windows. Its
+content-free receipts live beside sniffer verdicts (schema 8); old installs
+start with no long-chunk receipts and withhold unverified passages until read.
+Whole short-item verdicts need no extra calls. Private windows feed the existing
+automatic re-judge/move path. SourceConnector, EvidencePack and Analyst types
+and versions are unchanged: the evidence provider's internal chunk provenance
+is carried separately and never added to those contracts or remote output.
+
+Shared code restructuring: passage filtering is shared by remote search and
+cloud dispatch (`checkedRemotePack`); item release identity construction is
+shared by dispatch and answer manifests (`candidateReleaseInput`); search tier
+reads share `evidenceTierVerdicts`; both sniffer dispatchers share completion
+decoding (`snifferCompletionVerdict`); the remote search surface now runs one
+final release/connection check after its optional Private probe.
+
 ### Change log
 
 - 2026-11-10 (no contract type version change; native sniffer cache stays

@@ -1,3 +1,5 @@
+import { connectionRequestsPath } from './core/connection-requests.ts';
+import { preSchemaBackupsOf } from './core/boot-progress.ts';
 import { PEOPLE_INDEX_STORE_ID, peopleIndexPath } from './core/people-index.ts';
 import { MAC_ENGINE_DAEMON_PLIST, authorizeMacServerMode, macEngineManager } from './core/mac-engine-daemon.ts';
 import { APP_RELEASE_LOG_STORE_ID, appReleaseLogDbPath } from './core/app-release-log.ts';
@@ -482,7 +484,7 @@ export function exportOlympusData(options: {
   // So is the list of what each AI app received (core/app-release-log.ts).
   if (options.sourceId === undefined) {
     const connectionsPath = resolveRemoteConnectionsDbPath(envForContext(options));
-    for (const path of [connectionsPath, remoteConnectionsPreV2BackupPath(connectionsPath), waitingPrivateQuestionsDbPath(connectionsPath), appReleaseLogDbPath(connectionsPath)]) {
+    for (const path of [connectionsPath, remoteConnectionsPreV2BackupPath(connectionsPath), waitingPrivateQuestionsDbPath(connectionsPath), appReleaseLogDbPath(connectionsPath), connectionRequestsPath(connectionsPath)]) {
       if (existsSync(path)) skipped.push(path);
     }
   }
@@ -1687,6 +1689,8 @@ function remoteConnectionsDeleteTargets(context: LifecyclePathContext): DeleteTa
   return [
     ...targets,
     { ...targets[1]!, path: remoteConnectionsPreV2BackupPath(dbPath) },
+    { ...targets[1]!, path: connectionRequestsPath(dbPath) },
+    { ...targets[1]!, path: `${connectionRequestsPath(dbPath)}.tmp` },
     ...sqliteDeleteTargets(waitingPrivateQuestionsDbPath(dbPath), WAITING_PRIVATE_QUESTIONS_STORE_ID, context),
     // What each AI app received (core/app-release-log.ts): questions and titles, kept like Private data.
     ...sqliteDeleteTargets(appReleaseLogDbPath(dbPath), APP_RELEASE_LOG_STORE_ID, context),
@@ -1726,6 +1730,16 @@ function sqliteDeleteTargets(
       allowRecursive: false,
       externalSourcePath,
     },
+    // The store as it was before a schema update (core/boot-progress.ts):
+    // a full copy of what is being deleted.
+    ...preSchemaBackupsOf(sqlitePath).map((path) => ({
+      path,
+      kind: 'source_sqlite_sidecar' as const,
+      sqliteStoreId,
+      sqlitePrimaryPath: sqlitePath,
+      allowRecursive: false,
+      externalSourcePath,
+    })),
   ];
 }
 

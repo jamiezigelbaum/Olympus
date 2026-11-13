@@ -29,7 +29,7 @@ import { noteReleasedItems, releasedItemFromEvidence, type ReleasedItem } from '
  */
 import { isValidPort, isValidSshTarget, isSshWorkerSocketPath } from '../../core/remote-open.ts';
 import { OperationError, type OperationErrorCode } from '../../core/operation-error.ts';
-import { boundedLogErrorMessage } from '../../core/log-redaction.ts';
+import { boundedLogErrorMessage, logErrorOrigin } from '../../core/log-redaction.ts';
 import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
 import { privacyBacklogCoverageNote } from '../../core/privacy-backlog-coverage.ts';
 import { citationTitleWithParent } from '../../core/parent-label.ts';
@@ -856,7 +856,10 @@ export const SEARCH_COVERAGE_INSTRUCTION = 'Mention coverage only if the user as
  * answer panel is answering, and one terse line otherwise; the Names-only
  * hint appears only when Names-only matches are why nothing was answered.
  */
-export function searchToolResult(raw: unknown, options: AnswerResultOptions = {}): ChatGptToolResult {
+export function searchToolResult(raw: unknown, options: AnswerResultOptions & {
+  /** Internal observer: the raw items kept, paired with their final evidence ids. */
+  onKeptEvidence?: (item: Record<string, unknown>, id: string) => void;
+} = {}): ChatGptToolResult {
   const record = asRecord(raw);
   if (!record || !Array.isArray(record.evidence)) {
     return errorToolResult(new OperationError('source_index_error', 'unexpected search shape'));
@@ -889,6 +892,7 @@ export function searchToolResult(raw: unknown, options: AnswerResultOptions = {}
     }
     if (item.source_instructions_flagged === true) flagged = true;
     evidence.push(entry);
+    options.onKeptEvidence?.(item, entry.id);
     released.push(releasedItemFromEvidence(item, source, entry.title));
   }
   const coverageRecord = asRecord(record.coverage) ?? {};
@@ -1413,6 +1417,7 @@ type SurfaceOnlyErrorCode =
   | 'delete_incomplete';
 
 const ERROR_TEXT: Record<OperationErrorCode | SurfaceOnlyErrorCode, string> = {
+  not_personal: 'Private item: ask with source_answer',
   invalid_params: 'The request was not valid. Check the arguments and try again.',
   invalid_request: 'The request was not valid. Check the arguments and try again.',
   unsupported_filter: 'That filter is not supported here.',
@@ -1499,7 +1504,7 @@ export function errorToolResult(error: unknown, client?: McpAppClient): ChatGptT
   }
   const ref = mintErrorRef();
   const errorClass = error instanceof Error ? error.name : typeof error;
-  console.error(`[olympus:chatgpt] tool_error code=${code} ref=${ref} class=${JSON.stringify(errorClass)} error_message=${boundedLogErrorMessage(error)}`);
+  console.error(`[olympus:chatgpt] tool_error code=${code} ref=${ref} class=${JSON.stringify(errorClass)} error_message=${boundedLogErrorMessage(error)} origin=${logErrorOrigin(error)}`);
   return {
     content: [{ type: 'text', text: `${appClientCopy(ERROR_TEXT[code], client)} ${errorReferenceSentence(ref)}` }],
     structuredContent: { error: code, ref },
@@ -1643,9 +1648,17 @@ function percent(value: unknown): number {
 
 /** A source waiting on a budget or a rate limit (#1044): closed words, a label and a time only. */
 function copyWait(wait: DashboardSourceWait): DashboardSourceWait[] {
-  if (!wait || typeof wait.sourceId !== 'string' || (wait.reason !== 'daily_budget' && wait.reason !== 'rate_limit')) return [];
+  if (!wait || typeof wait.sourceId !== 'string' || (wait.reason !== 'daily_budget' && wait.reason !== 'rate_limit' && wait.reason !== 'limit')) return [];
   const resumesAt = iso(wait.resumesAt);
-  return [{ sourceId: text(wait.sourceId), label: text(wait.label), reason: wait.reason, api: text(wait.api), ...(resumesAt ? { resumesAt } : {}) }];
+  const fix = wait.fix ? copyFix(wait.fix) : undefined;
+  return [{ sourceId: text(wait.sourceId), label: text(wait.label), reason: wait.reason, api: text(wait.api),
+    ...(wait.reason === 'limit' ? {
+      limitLabel: text(wait.limitLabel), ...(iso(wait.since) ? { since: iso(wait.since)! } : {}),
+      ...(wait.waiting ? { waiting: {
+        ...(finite(wait.waiting.items) ? { items: whole(wait.waiting.items) } : {}),
+        ...(finite(wait.waiting.runs) ? { runs: whole(wait.waiting.runs) } : {}),
+      } } : {}), ...(fix ? { fix } : {}),
+    } : {}), ...(resumesAt ? { resumesAt } : {}) }];
 }
 
 function iso(value: unknown): string | undefined {

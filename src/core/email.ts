@@ -1,4 +1,6 @@
-import { ANSWER_RELEASE_UNVERIFIED, isWithheldSourceAnswer, withheldSourceAnswer } from './release-manifest.ts';
+import { parseSourceItemReadResult, type SourceItemReadResult } from './source-item-read.ts';
+import { sourceItemReadSelectedItem, sourceItemReadPage } from './source-index/selected-items.ts';
+import { ANSWER_RELEASE_UNVERIFIED, isWithheldSourceAnswer, withheldSourceAnswer, recordReleaseManifest } from './release-manifest.ts';
 import { workerFetch } from './worker-transport.ts';
 import { isSourceIndexReadSurfaceEnabled, type OlympusConfig } from './config.ts';
 import { assertNoRawEmailFields } from './email-policy.ts';
@@ -39,6 +41,7 @@ export interface EmailTransport {
 const MAX_EMAIL_WORKER_ERROR_MESSAGE_LENGTH = 512;
 const MAX_EMAIL_WORKER_ERROR_BODY_LENGTH = 8 * 1024;
 const PASSTHROUGH_EMAIL_WORKER_ERROR_CODES: ReadonlyMap<string, OperationErrorCode> = new Map([
+  ['not_personal', 'not_personal'],
   ['unsupported_filter', 'unsupported_filter'],
   ['invalid_request', 'invalid_request'],
   ['source_index_policy_violation', 'source_index_policy_violation'],
@@ -748,6 +751,28 @@ export class EmailClient {
     return data;
   }
 
+  async sourceItemRead(options: { selectedItem: SourceAnswerSelectedItemOption; page?: number; pages?: number }): Promise<SourceItemReadResult> {
+    if (!isSourceIndexReadSurfaceEnabled(this.config)) throw new OperationError('source_index_not_enabled', 'Source-index read is disabled.');
+    if (!this.config.email.enabled) throw new OperationError('email_not_configured', 'Private source worker is disabled.');
+    const selected = sourceItemReadSelectedItem(options.selectedItem);
+    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/item/read`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ selected_item: selected, page: sourceItemReadPage(options.page, 'page'), pages: sourceItemReadPage(options.pages, 'pages', 3) }),
+    });
+    assertNoRawEmailFields(response);
+    assertNoSourceIndexOperationalLeakFields(response);
+    const result = parseSourceItemReadResult(response);
+    if (result.couldNotRead.includes('not_personal')) throw new OperationError('not_personal', 'Private item: ask with source_answer');
+    if (result.pages.length > 0) recordReleaseManifest({
+      inputs: [{ corpusId: selected.corpus_id, provider: selected.provider, accountScope: selected.account_scope,
+        providerItemId: selected.provider_item_id,
+        ...(selected.provider_conversation_id ? { providerConversationId: selected.provider_conversation_id } : {}),
+        privateAtAnswer: false }],
+      constraints: { secureDerivativeDefault: 'approval', includeSecureLocalContent: false },
+    });
+    return result;
+  }
+
   async sourceIndexSearch(options: SourceIndexSearchOptions): Promise<SourceIndexSearchResult> {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) {
       throw new OperationError(
@@ -1006,7 +1031,8 @@ function isAllowlistedEmailWorkerErrorResponse(status: number, url: string): boo
   if (status === 400) return isSourceIndexSearchRoute(url);
   if (status !== 403) return false;
   try {
-    return new URL(url).pathname.endsWith('/source/answer');
+    const path = new URL(url).pathname;
+    return path.endsWith('/source/answer') || path.endsWith('/source/item/read');
   } catch {
     return false;
   }
@@ -1743,7 +1769,7 @@ const FORBIDDEN_SOURCE_INDEX_OPERATIONAL_KEYS = new Set([
   'token',
 ]);
 
-function assertNoSourceIndexOperationalLeakFields(value: unknown): void {
+export function assertNoSourceIndexOperationalLeakFields(value: unknown): void {
   assertNoSourceIndexOperationalLeakFieldsAtPath(value, []);
 }
 

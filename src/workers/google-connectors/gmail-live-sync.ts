@@ -50,6 +50,7 @@ import {
   GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS,
   GoogleGmailSourceConnector,
   gmailConnectorStoreClassification,
+  gmailCursorHasBacklog,
   gmailCursorIsMidTraversal,
   gmailLabelledMessageSource,
   isGmailConnectorCursor,
@@ -157,6 +158,12 @@ export interface GmailConnectorStoreTaskOutcome {
   receipt: GmailConnectorStoreReceipt;
   /** Scheduler-private durable provider resume point. */
   checkpoint: string | null;
+  /**
+   * The pull stopped partway through a traversal, so more is ready now. A
+   * widened window walks the whole mailbox again; at one bounded pull per
+   * interval that took days before any older mail arrived.
+   */
+  backlog?: boolean;
 }
 
 export interface GmailStorePullRequest {
@@ -513,7 +520,7 @@ export function createGmailConnectorStoreSyncHandler(
       }
       const headCheckpoint = head.internal.sync.cursor;
 
-      return taskOutcome({
+      const outcome = taskOutcome({
         kind: GMAIL_STORE_PULL_RECEIPT_KIND,
         head,
         traversal: connector.traversalStatus(),
@@ -525,6 +532,7 @@ export function createGmailConnectorStoreSyncHandler(
         }),
         warnings,
       });
+      return gmailCursorHasBacklog(headCheckpoint) ? { ...outcome, backlog: true } : outcome;
     },
 
     async reconcile(

@@ -1,9 +1,11 @@
 import { expect, spyOn, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import type { EvidencePackBuildDetail } from '../src/core/evidence-pack.ts';
-import type { EvidencePack } from '../src/core/contracts.ts';
+import type { AnalystResult, EvidencePack } from '../src/core/contracts.ts';
 import { comparePassageReceipts, runPassageEval } from '../eval/run-passages.ts';
 import { fitPackToPromptBytes } from '../src/workers/source-index/analyst-answer.ts';
 import type { EvalDataset } from '../eval/types.ts';
+import { createTestClock } from './helpers/test-clock.ts';
 const quote = 'Kestrel invoices total forty seven dollars this month';
 const question = 'Confidential fixture question that must never appear';
 const passage = `Confidential fixture passage. ${quote}`;
@@ -200,4 +202,136 @@ test('a store left without a seat by the seat budget is not a degraded search', 
     buildPack: async () => ({ ...detail(), degradations: [{ laneName: 'internal.other.mail', laneType: 'keyword', reason: 'lane_budget_cut', occurrences: 1 }] }) });
   expect(receipt.questions![0]!.degraded).toBeUndefined();
   expect(receipt.degradedIds).toEqual([]);
+});
+
+const answerQuote = 'The café amber violet silver cedar'; // Five content words.
+const answerDataset: EvalDataset = { ...dataset, questions: [{ ...dataset.questions[0]!,
+  expectedEvidence: [{ ...dataset.questions[0]!.expectedEvidence![0]!, quote: answerQuote }] }] };
+function answered(text: string, cited = true): AnalystResult {
+  return { answer: text, citations: cited ? [{ provenance: structuredClone(detail().pack.candidates[0]!.provenance), claim: 'Synthetic claim sentinel' }] : [], unanswered: [] };
+}
+
+test('answer grading requires an expected citation and at least four of five content words', async () => {
+  const clock = createTestClock(0);
+  const now = spyOn(performance, 'now').mockImplementation(clock.now);
+  try {
+    for (const [text, cited, coverage, right] of [
+      ['CAFÉ, amber violet silver', true, 0.8, true],
+      ['cafe amber violet', true, 0.6, false],
+      ['cafe amber violet silver cedar', false, 1, false],
+    ] as const) {
+      const receipt = await runPassageEval({ dataset: answerDataset, maxResults: 5, storeCounts: counts, gitSha: 'abc', buildPack: async () => detail(),
+        answer: async () => { await clock.advance(17); return answered(text, cited); } });
+      expect(receipt.questions![0]!.answer).toEqual({ outcome: 'answered', cited, coverage, right, answerMs: 17 });
+    }
+  } finally { now.mockRestore(); }
+});
+
+test('answer coverage ignores stop words, short words and numbers, and uses passage normalization', async () => {
+  for (const [quote, text, coverage] of [
+    ['The and with from this that is an of to 12 123 café amber violet silver cedar', 'cafe amber violet silver', 0.8],
+    ['The and with from this that is an of to 12 123', 'The and with from this that is an of to 12 123', 0],
+    ['The café am-\nber violet silver cedar', 'cafe amber violet silver', 0.8],
+  ] as const) {
+    const one = { ...answerDataset, questions: [{ ...answerDataset.questions[0]!, expectedEvidence: [{ ...answerDataset.questions[0]!.expectedEvidence![0]!, quote }] }] };
+    const receipt = await runPassageEval({ dataset: one, maxResults: 5, storeCounts: counts, gitSha: 'abc', buildPack: async () => detail(), answer: async () => answered(text) });
+    expect(receipt.questions![0]!.answer!.coverage).toBe(coverage);
+  }
+});
+
+test('answer citations match corpus and item identity including alternates', async () => {
+  for (const [corpusId, providerItemId, cited] of [
+    ['internal.fixture.file', 'original', true], ['internal.fixture.file', 'copy', true],
+    ['internal.other.file', 'copy', false], ['internal.fixture.file', 'wrong', false],
+  ] as const) {
+    const result = answered('cafe amber violet silver cedar');
+    const provenance = { ...result.citations[0]!.provenance, localIds: { corpus_id: corpusId }, sourceItem: { ...result.citations[0]!.provenance.sourceItem, providerItemId } };
+    const receipt = await runPassageEval({ dataset: answerDataset, maxResults: 5, storeCounts: counts, gitSha: 'abc', buildPack: async () => detail(),
+      answer: async () => ({ ...result, citations: [{ provenance, claim: 'Synthetic claim sentinel' }] }) });
+    expect(receipt.questions![0]!.answer).toMatchObject({ cited, coverage: 1, right: cited });
+  }
+});
+
+test('the answer sees the fitted pack immediately after fit and its time is separate', async () => {
+  const clock = createTestClock(0);
+  const now = spyOn(performance, 'now').mockImplementation(clock.now);
+  const steps: string[] = [];
+  const built = detail(`${'unrelated filler '.repeat(2000)} ${quote}`);
+  try {
+    const receipt = await runPassageEval({ dataset: answerDataset, maxResults: 5, promptBytes: 5000, storeCounts: counts, gitSha: 'abc',
+      buildPack: async () => built, onProgress: (_index, _total, step) => { steps.push(step); },
+      probeLanes: async () => ({ keyword: 1, vector: null }), judgeQuestion: async () => ({ answers: true, specific: true }),
+      answer: async (question, pack) => {
+        expect(question).toBe(answerDataset.questions[0]!);
+        expect(pack.candidates).toHaveLength(1);
+        expect(pack.candidates[0]!.chunks.join('')).not.toContain(quote);
+        expect(pack.candidates[0]!.chunks.join('').length).toBeLessThan(built.pack.candidates[0]!.chunks.join('').length);
+        await clock.advance(31);
+        return answered('cafe amber violet silver');
+      } });
+    expect(steps).toEqual(['build_pack', 'fit', 'answer', 'probe_lanes', 'judge']);
+    expect(receipt.questions![0]!.answer!.answerMs).toBe(31);
+    expect(receipt.questions![0]!.timings.totalMs).toBe(0);
+  } finally { now.mockRestore(); }
+});
+
+test('answer failures keep only safe codes, continue the run, and receipts contain no content', async () => {
+  const sentinel = 'Synthetic private sentinel never written';
+  const many = { ...answerDataset, questions: Array.from({ length: 4 }, (_, i) => ({ ...answerDataset.questions[0]!, id: `a${i}` })) };
+  const calls: string[] = [];
+  const receipt = await runPassageEval({ dataset: many, maxResults: 5, storeCounts: counts, gitSha: 'abc', buildPack: async () => detail(),
+    answer: async q => {
+      calls.push(q.id);
+      if (q.id === 'a0') throw Object.assign(new Error(sentinel), { code: 'ECONNREFUSED' });
+      if (q.id === 'a1') throw Object.assign(new Error(sentinel), { code: sentinel });
+      if (q.id === 'a2') throw sentinel;
+      return answered(`${sentinel} cafe amber violet silver cedar`);
+    } });
+  expect(calls).toEqual(['a0', 'a1', 'a2', 'a3']);
+  expect(receipt.questions![0]!.answer).toEqual({ outcome: 'failed', code: 'ECONNREFUSED' });
+  expect(receipt.questions![1]!.answer).toEqual({ outcome: 'failed', code: 'UNKNOWN' });
+  expect(receipt.questions![2]!.answer).toEqual({ outcome: 'failed', code: 'UNKNOWN' });
+  expect(receipt.questions![3]!.answer!.right).toBe(true);
+  const json = JSON.stringify(receipt);
+  for (const text of [sentinel, answerQuote, 'Synthetic claim sentinel', question, passage]) expect(json).not.toContain(text);
+});
+
+test('answer summaries count attempts and successful-call percentiles by family and length, including sealed runs', async () => {
+  const clock = createTestClock(0);
+  const now = spyOn(performance, 'now').mockImplementation(clock.now);
+  const many: EvalDataset = { ...answerDataset, questions: Array.from({ length: 5 }, (_, i) => ({ ...answerDataset.questions[0]!, id: `a${i}`,
+    expectedEvidence: [{ ...answerDataset.questions[0]!.expectedEvidence![0]!, corpusId: i < 3 ? 'internal.fixture.file' : 'internal.fixture.mail', providerItemId: `item${i}`, alternates: [] }] })) };
+  try {
+    for (const split of ['open', 'sealed'] as const) {
+      const receipt = await runPassageEval({ dataset: { ...many, questions: many.questions.map(q => ({ ...q, split })) }, split,
+        maxResults: 5, storeCounts: [...counts, { ...counts[0]!, corpusId: 'internal.fixture.mail', family: 'email' }], gitSha: 'abc', buildPack: async () => detail(),
+        itemChunks: (_corpus, item) => Number(item.slice(-1)) < 3 ? 1 : 7,
+        answer: async q => {
+          const n = Number(q.id.slice(1));
+          await clock.advance([10, 30, 900, 70, 50][n]!);
+          if (n === 2) throw new Error('Synthetic failure sentinel');
+          const result = answered(n === 1 ? 'cafe amber violet' : 'cafe amber violet silver cedar', n !== 4);
+          return { ...result, citations: result.citations.map(citation => ({ ...citation, provenance: { ...citation.provenance,
+            localIds: { corpus_id: q.expectedEvidence![0]!.corpusId }, sourceItem: { ...citation.provenance.sourceItem, providerItemId: q.expectedEvidence![0]!.providerItemId! } } })) };
+        } });
+      expect(receipt.summary.overall.answer).toEqual({ asked: 5, right: 2, cited: 3, failed: 1, medianMs: 40, p90Ms: 70 });
+      const file = { asked: 3, right: 1, cited: 2, failed: 1, medianMs: 20, p90Ms: 30 };
+      const mail = { asked: 2, right: 1, cited: 1, failed: 0, medianMs: 60, p90Ms: 70 };
+      expect(receipt.summary.byFamily.file!.answer).toEqual(file);
+      expect(receipt.summary.byLength['1_chunk']!.answer).toEqual(file);
+      expect(receipt.summary.byFamily.email!.answer).toEqual(mail);
+      expect(receipt.summary.byLength['4+_chunks']!.answer).toEqual(mail);
+      if (split === 'sealed') expect(receipt.questions).toBeUndefined();
+    }
+    const failed = await runPassageEval({ dataset: answerDataset, maxResults: 5, storeCounts: counts, gitSha: 'abc', buildPack: async () => detail(), answer: async () => { throw new Error('Synthetic failure'); } });
+    expect(failed.summary.overall.answer).toEqual({ asked: 1, right: 0, cited: 0, failed: 1, medianMs: 0, p90Ms: 0 });
+  } finally { now.mockRestore(); }
+});
+
+test('without an answer callback the serialized receipt is byte-identical to the retrieval-only baseline', async () => {
+  const now = spyOn(performance, 'now').mockReturnValue(0);
+  try {
+    const receipt = await runPassageEval({ dataset, maxResults: 5, storeCounts: counts, gitSha: 'abc', buildPack: async () => detail() });
+    expect(createHash('sha256').update(JSON.stringify(receipt)).digest('hex')).toBe('56f12eb867b6dce832872531b0387a32ff5b3955e45b415f184184e307ec6ead');
+  } finally { now.mockRestore(); }
 });

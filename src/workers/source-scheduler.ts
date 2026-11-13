@@ -411,6 +411,7 @@ export interface SourceSchedulerOptions {
 }
 
 export interface SourceSchedulerStateStore {
+  openLimitStops?(now?: Date): import('../core/limit-stops.ts').LimitStop[];
   get(key: SourceSchedulerTaskStateKey): PersistedSourceSchedulerTaskState | undefined;
   recordAttempt(input: Parameters<LocalSourceSchedulerStateStore['recordAttempt']>[0]): PersistedSourceSchedulerTaskState;
   recordSuccess(input: Parameters<LocalSourceSchedulerStateStore['recordSuccess']>[0]): PersistedSourceSchedulerTaskState;
@@ -426,6 +427,7 @@ export interface SourceSchedulerStateStore {
 }
 
 export interface SourceSchedulerStatus {
+  limit_stops?: import('../core/limit-stops.ts').LimitStop[];
   kind: 'source_scheduler_status';
   enabled: boolean;
   running: boolean;
@@ -455,6 +457,8 @@ export interface SourceSchedulerSourceStatus {
 export interface SourceSchedulerTaskStatus {
   /** Computer dashboard only; never persisted in scheduler state. */
   missing_scope_path?: string;
+  /** Short maintenance hold, never persisted as a failure or provider deferral. */
+  wait_reason?: 'store_reclaim';
   id: string;
   kind: SourceSchedulerTaskKind;
   metadata_walk_role?: SourceSchedulerTask['metadataWalkRole'];
@@ -479,10 +483,12 @@ export interface SourceSchedulerTaskStatus {
 }
 
 interface SchedulerTaskState {
+  waitReason?: 'store_reclaim';
   task: SourceSchedulerTask;
   source: SourceSchedulerSource;
   running: boolean;
   nextRunAt: number;
+  retryNotBeforeAt?: number | undefined;
   bootstrapLastSuccessAt?: string;
   checkpoint?: string;
   consecutiveFailures: number;
@@ -497,6 +503,22 @@ interface SchedulerTaskState {
   pendingUnpark?: PendingSourceSchedulerUnpark;
   /** Woken while running: run again within seconds of completing. */
   wakeAfterRun?: boolean;
+}
+
+/**
+ * A task that could not start more work until a known reset. The common run
+ * path turns this into an idle result, preserving its checkpoint and reason.
+ */
+class SourceSchedulerTaskDeferral extends Error {
+  constructor(
+    message: string,
+    readonly retryAt: SourceSchedulerRetryAt,
+    readonly counts?: Record<string, number>,
+    readonly warnings?: string[],
+  ) {
+    super(message);
+    this.name = 'SourceSchedulerTaskDeferral';
+  }
 }
 
 export class SourceSchedulerTaskFailure extends Error {
@@ -729,6 +751,7 @@ export class SourceScheduler {
     for (const state of this.states) {
       if (state.source.sourceId !== sourceId || state.consecutiveFailures > 0) continue;
       if (taskCadence(state.source, state.task) !== 'continuous') continue;
+      if ((state.retryNotBeforeAt ?? 0) > at) continue;
       if (state.running) {
         state.wakeAfterRun = true;
         continue;
@@ -772,7 +795,7 @@ export class SourceScheduler {
       if (!downstream.has(sibling.task.kind)) continue;
       if (sibling.nextRunAt <= at) continue;
       // A failure backoff stays a backoff.
-      if (sibling.consecutiveFailures > 0) continue;
+      if (sibling.consecutiveFailures > 0 || (sibling.retryNotBeforeAt ?? 0) > at) continue;
       sibling.nextRunAt = at;
       woke = true;
     }
@@ -793,6 +816,7 @@ export class SourceScheduler {
     for (const state of this.states) {
       if (state.task.kind !== kind || state.consecutiveFailures > 0) continue;
       if (taskCadence(state.source, state.task) !== 'continuous') continue;
+      if ((state.retryNotBeforeAt ?? 0) > at) continue;
       if (state.running) {
         state.wakeAfterRun = true;
         woke += 1;
@@ -862,12 +886,41 @@ export class SourceScheduler {
     return false;
   }
 
+  private readonly storeReclaims = new Set<{ done: Promise<void>; preempt?: () => void }>();
+
+  /**
+   * Store maintenance holds every task, not only the store's own sources:
+   * writers reach a store through other sources too (an archive import into
+   * an existing source, tier moves), and any of them would block the engine
+   * thread on the store's write lock. Skips while any task is executing, or
+   * when a continuous task falls due within `quietForMs`. Ingest comes first:
+   * a task that comes due during the hold calls `preempt` (the maintenance
+   * stops at once) and runs as soon as the hold ends, with no attempt or
+   * failure recorded.
+   */
+  async withIdleTasks<T>(work: () => Promise<T>, options: { quietForMs?: number; preempt?: () => void } = {}): Promise<T | undefined> {
+    if (this.anyTaskRunning || this.storeReclaims.size > 0) return undefined;
+    if ((options.quietForMs ?? 0) > 0 && this.continuousTaskDueBy(this.now().getTime() + options.quietForMs!)) return undefined;
+    let release!: () => void;
+    const hold = { done: new Promise<void>(resolve => { release = resolve; }), ...(options.preempt ? { preempt: options.preempt } : {}) };
+    this.storeReclaims.add(hold);
+    try { return await work(); }
+    finally { this.storeReclaims.delete(hold); release(); }
+  }
+
+  /** Whether an enabled continuous task is due at or before `at`. */
+  private continuousTaskDueBy(at: number): boolean {
+    if (!this.enabled) return false;
+    return this.states.some(state => taskCadence(state.source, state.task) === 'continuous' && state.nextRunAt <= at);
+  }
+
   status(now: Date = this.now()): SourceSchedulerStatus {
     return {
       kind: 'source_scheduler_status',
       enabled: this.enabled,
       running: this.timer !== undefined,
       generated_at: now.toISOString(),
+      limit_stops: this.stateStore?.openLimitStops?.(now) ?? [],
       selected_source_ids: this.allowedSourceIds === undefined
         ? this.sources.map((source) => source.sourceId)
         : [...this.allowedSourceIds],
@@ -967,7 +1020,6 @@ export class SourceScheduler {
         for (const state of group) {
           if (state.running) continue;
           state.running = true;
-          this.executingStates.add(state);
           try {
             await this.runTaskSharingThread(state, dueAt, provenance);
           } finally {
@@ -1000,7 +1052,6 @@ export class SourceScheduler {
               this.busyConcurrencyKeys.add(ownKey);
             }
             state.running = true;
-            this.executingStates.add(state);
             try {
               await this.runTaskSharingThread(state, state.nextRunAt, provenance);
             } finally {
@@ -1026,6 +1077,18 @@ export class SourceScheduler {
     dueAt: number,
     provenance: SourceSchedulerRunProvenance,
   ): Promise<void> {
+    const stops = this.stops;
+    for (;;) {
+      const holds = [...this.storeReclaims];
+      if (holds.length === 0) break;
+      state.waitReason = 'store_reclaim';
+      console.info(`[olympus:source-scheduler] task_wait source_id=${state.source.sourceId} task_id=${state.task.id} reason=store_reclaim`);
+      for (const hold of holds) hold.preempt?.();
+      try { await Promise.all(holds.map(hold => hold.done)); }
+      finally { delete state.waitReason; }
+      if (this.stops !== stops) return;
+    }
+    this.executingStates.add(state);
     const leave = controlPathHeadroom.enter(`${state.source.sourceId}/${state.task.kind}`);
     try {
       await this.runTask(state, dueAt, provenance);
@@ -1146,6 +1209,7 @@ export class SourceScheduler {
         }
       }
       state.nextRunAt = nextRunAt;
+      state.retryNotBeforeAt = retryAt ? nextRunAt : undefined;
       for (const { counts, ...store } of result.embeddingSweep ?? []) {
         console.info(`[olympus:embedding-sweep] ${JSON.stringify({
           ...store, ...counts,
@@ -1300,6 +1364,13 @@ export class SourceScheduler {
             : {}),
         });
       } catch (error) {
+        if (error instanceof SourceSchedulerTaskDeferral) {
+          return {
+            status: 'idle', retryAt: error.retryAt,
+            ...(error.counts ? { counts: error.counts } : {}),
+            ...(error.warnings?.length ? { warnings: error.warnings } : {}),
+          };
+        }
         lastError = error;
         if (safeSchedulerRetryAt(error) || !isTransientError(error) || attempt >= this.maxTransientRetries) break;
         // A stopped scheduler starts no new attempt.
@@ -1386,6 +1457,13 @@ export class SourceScheduler {
     state: SchedulerTaskState,
     persisted: PersistedSourceSchedulerTaskState,
   ): void {
+    // Only a limit park holds wakes off after a restart. Advisory reasons on
+    // an ordinary cadence (traversal_not_advancing, an embedding outage) must
+    // still let new work wake the task.
+    state.retryNotBeforeAt = persisted.degradedReason && persisted.notBeforeAt
+      && SCHEDULER_PARK_REASONS.has(persisted.degradedReason)
+      ? Math.min(Date.parse(persisted.notBeforeAt), this.now().getTime() + SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS)
+      : undefined;
     state.consecutiveFailures = persisted.consecutiveFailures;
     if (persisted.checkpoint) state.checkpoint = persisted.checkpoint;
     else delete state.checkpoint;
@@ -1480,6 +1558,7 @@ export class SourceScheduler {
         && (freshnessMs === undefined || freshnessMs > freshnessThresholdMs),
       ...(state.nextRunAt > 0 ? { next_run_at: new Date(state.nextRunAt).toISOString() } : {}),
       running: state.running,
+      ...(state.waitReason ? { wait_reason: state.waitReason } : {}),
       consecutive_failures: state.consecutiveFailures,
       ...(state.lastSuccessAt ? { last_success_at: state.lastSuccessAt } : {}),
       ...(state.lastAttemptAt ? { last_attempt_at: state.lastAttemptAt } : {}),
@@ -2505,14 +2584,11 @@ function readwiseStoreProgress(
  * to a structured deferral so the scheduler waits for the UTC rollover instead
  * of fail-looping the lane at the error backoff all day.
  */
-function readwiseSchedulerFailure(error: unknown): SourceSchedulerTaskFailure | unknown {
+function readwiseSchedulerFailure(error: unknown): unknown {
   if (!(error instanceof ReadwiseRequestBudgetError)) return error;
-  return new SourceSchedulerTaskFailure(error.message, {
-    errorKind: READWISE_DAILY_REQUEST_GUARD_REASON,
-    retryAt: {
-      at: error.retryAt,
-      degradedReason: READWISE_DAILY_REQUEST_GUARD_REASON,
-    },
+  return new SourceSchedulerTaskDeferral(error.message, {
+    at: error.retryAt,
+    degradedReason: READWISE_DAILY_REQUEST_GUARD_REASON,
   });
 }
 
@@ -2538,6 +2614,13 @@ function xBookmarksSchedulerFailure(
   config: XBookmarksLiveSyncConfig,
 ): SourceSchedulerTaskFailure | unknown {
   if (!(error instanceof XBookmarksLiveSyncError)) return error;
+  if ((error.errorKind === 'api_request_guard' || error.errorKind === 'provider_rate_limited') && error.retryAt) {
+    return new SourceSchedulerTaskDeferral(error.message, {
+      at: error.retryAt,
+      effectiveIntervalMs: config.degradedIntervalMs,
+      degradedReason: error.degradedReason ?? error.errorKind,
+    }, error.counts, error.warnings);
+  }
   return new SourceSchedulerTaskFailure(error.message, {
     errorKind: error.errorKind,
     ...(error.warnings.length > 0 ? { warnings: error.warnings } : {}),
@@ -2565,6 +2648,8 @@ function gmailStoreProgress(
     // traversal, a string carries the two-lane resume envelope for the next
     // bounded slice.
     checkpoint: outcome.checkpoint,
+    // A walk in progress continues within seconds, not at the next interval.
+    ...(outcome.backlog ? { continueSoon: true } : {}),
   };
 }
 
@@ -2573,8 +2658,13 @@ function gmailStoreProgress(
  * to a structured deferral so the scheduler waits for the UTC rollover instead
  * of fail-looping the lane at the error backoff all day.
  */
-function gmailSchedulerFailure(error: unknown): SourceSchedulerTaskFailure | unknown {
+function gmailSchedulerFailure(error: unknown): unknown {
   if (!(error instanceof GoogleRequestBudgetError)) return error;
+  if (error.reason === 'daily_api_request_guard') {
+    return new SourceSchedulerTaskDeferral(error.message, {
+      at: error.retryAt, degradedReason: GMAIL_DAILY_REQUEST_GUARD_REASON,
+    });
+  }
   const errorKind = error.reason === 'future_utc_day'
     ? GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION
     : error.reason === 'ledger_busy'
@@ -2607,8 +2697,13 @@ function googleDriveStoreProgress(
  * to a structured deferral so the scheduler waits for the UTC rollover instead
  * of fail-looping the lane at the error backoff all day.
  */
-function googleDriveSchedulerFailure(error: unknown): SourceSchedulerTaskFailure | unknown {
+function googleDriveSchedulerFailure(error: unknown): unknown {
   if (!(error instanceof GoogleRequestBudgetError)) return error;
+  if (error.reason === 'daily_api_request_guard') {
+    return new SourceSchedulerTaskDeferral(error.message, {
+      at: error.retryAt, degradedReason: GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON,
+    });
+  }
   const errorKind = error.reason === 'future_utc_day'
     ? GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION
     : error.reason === 'ledger_busy'
@@ -2928,6 +3023,14 @@ const UTC_DAY_SCOPED_DEGRADED_REASONS: ReadonlySet<string> = new Set([
   READWISE_DAILY_REQUEST_GUARD_REASON,
   GMAIL_DAILY_REQUEST_GUARD_REASON,
   GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON,
+]);
+
+// The reasons a SourceSchedulerTaskDeferral parks a task with: the daily
+// limits above and a provider's rate limit.
+const SCHEDULER_PARK_REASONS: ReadonlySet<string> = new Set([
+  ...UTC_DAY_SCOPED_DEGRADED_REASONS,
+  'provider_rate_limit',
+  'provider_rate_limited',
 ]);
 
 /**

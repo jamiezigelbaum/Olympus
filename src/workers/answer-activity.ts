@@ -1,6 +1,15 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 let localInferencePriority: AsyncLocalStorage<AnswerLeaseKind | 'maintenance'> | undefined;
+let privacyReleaseInference: AsyncLocalStorage<boolean> | undefined;
+
+/** Chunk release is owner work even through the shared classification model wrapper. */
+export function runPrivacyReleaseInference<T>(work: () => Promise<T>): Promise<T> {
+  privacyReleaseInference ??= new AsyncLocalStorage();
+  localInferencePriority ??= new AsyncLocalStorage();
+  return privacyReleaseInference.run(true, () => localInferencePriority!.run('owner', work));
+}
+
 let localInferenceGuards: AsyncLocalStorage<readonly (() => Promise<void>)[]> | undefined;
 /** Provider-internal context, outside the frozen Analyst contract. A queued
  * call repeats these live guards after waiting, immediately before dispatch. */
@@ -17,7 +26,7 @@ export function runBackgroundInference<T>(work: () => Promise<T>): Promise<T> {
 /** Classification dispatches yield to waiting answers on a shared model. */
 export function runClassificationInference<T>(work: () => Promise<T>): Promise<T> {
   localInferencePriority ??= new AsyncLocalStorage();
-  return localInferencePriority.run('maintenance', work);
+  return localInferencePriority.run(privacyReleaseInference?.getStore() ? 'owner' : 'maintenance', work);
 }
 
 /** Who a model call is for: the owner, background answers, or maintenance (classification). */

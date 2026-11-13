@@ -132,7 +132,7 @@ export function parseSourceScopeSelections(value: unknown): OlympusSourceScopeSe
     }
     const record = entry as Record<string, unknown>;
     const key = asOptionalString(record.key);
-    if (!key || !['ingest', 'metadata_only', 'exclude'].includes(String(record.state))) {
+    if (!key || !['ingest', 'metadata_only', 'on_demand', 'exclude'].includes(String(record.state))) {
       throw new EmailSourceWorkerError(400, 'invalid_request', 'Every scope selection requires a folder key and disposition.');
     }
     const ancestorKeys = record.ancestor_keys === undefined

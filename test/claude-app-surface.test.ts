@@ -99,11 +99,12 @@ async function listing(token: string): Promise<{ tools: any[]; resources?: any[]
 
 describe('Claude MCP App opt-in', () => {
   test('setting defaults off, turns on only when set to true, and follows plugin, standalone and native remote configuration', () => {
-    expect(claudeAppEnabled(defaultConfig())).toBe(false);
-    expect(claudeAppEnabled({ remote: parseRemoteConfig({ enabled: true }) })).toBe(false);
+    expect(claudeAppEnabled(defaultConfig())).toBe(true);
+    expect(claudeAppEnabled({ remote: parseRemoteConfig({ enabled: true }) })).toBe(true);
     expect(claudeAppEnabled({ remote: parseRemoteConfig({ claudeAppEnabled: true }) })).toBe(true);
     expect(claudeAppEnabled({ remote: parseRemoteConfig({ claudeAppEnabled: false }) })).toBe(false);
-    for (const value of [false, 'true', 1, null]) expect(parseRemoteConfig({ claudeAppEnabled: value }).claudeAppEnabled).toBe(false);
+    expect(parseRemoteConfig({ claudeAppEnabled: false }).claudeAppEnabled).toBe(false);
+    for (const value of ['false', 0, null]) expect(claudeAppEnabled({ remote: parseRemoteConfig({ claudeAppEnabled: value }) })).toBe(true);
     expect(configFromPluginConfig({ remote: { claudeAppEnabled: true } }).remote?.claudeAppEnabled).toBe(true);
     mkdirSync(join(dir, '.olympus'));
     writeFileSync(join(dir, '.olympus', 'engine.json'), JSON.stringify({ remote: { claudeAppEnabled: true } }));

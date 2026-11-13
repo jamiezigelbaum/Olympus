@@ -18,6 +18,7 @@
 // a keyword read wait for all of it (#1305). The worker runs one statement at
 // a time either way; the snapshot's transaction is on its own connection.
 
+import { errorFromBoundary } from '../../core/log-redaction.ts';
 import { SOURCE_INDEX_LANE_BUSY_CODE } from '../../core/source-index/lane-busy.ts';
 import { beginSourceAnswerPoolRead, type SourceAnswerPoolReadOutcome } from '../source-index/answer-latency-trace.ts';
 
@@ -81,7 +82,8 @@ export function setReadPoolWorkerFactoryForTests(factory?: (url: string) => Work
   workerFactory = factory ?? ((url) => new Worker(url));
 }
 
-// A snapshot is its own read-only connection inside one read transaction, so
+// A snapshot is its own read-only connection inside one read transaction (a
+// connection kept from an earlier snapshot on this thread when one is idle), so
 // every count in one status describes the same database state, as they did
 // when status() ran them back to back with no write in between. A single
 // query uses the thread's one connection to that file and opens no
@@ -100,6 +102,27 @@ const open = (path) => {
   postMessage({ diagnostic: 'open', path, ms: performance.now() - started });
   return db;
 };
+// Snapshot connections are kept for the next snapshot instead of closed:
+// Bun 1.3.x corrupts its heap when pool threads open and close SQLite
+// connections concurrently (olympus-ops#151), and a store's searches would
+// otherwise open one connection per snapshot.
+const IDLE_SNAPSHOT_CONNECTIONS = 8;
+const idleSnapshots = new Map();
+const snapshotConnection = (path) => {
+  const stat = statSync(path);
+  const file = stat.dev + ':' + stat.ino;
+  const idle = idleSnapshots.get(path) ?? [];
+  while (idle.length > 0) {
+    const held = idle.pop();
+    if (held.file === file) {
+      // A snapshot may have changed its connection's settings; the next starts from the defaults.
+      held.db.exec('PRAGMA busy_timeout = 10000');
+      return held;
+    }
+    try { held.db.close(); } catch {}
+  }
+  return { db: open(path), file, path };
+};
 const connection = (path) => {
   const stat = statSync(path);
   const file = stat.dev + ':' + stat.ino;
@@ -116,23 +139,31 @@ self.onmessage = (event) => {
     const held = connections.get(path);
     connections.delete(path);
     try { held?.db.close(); } catch {}
+    for (const idle of idleSnapshots.get(path) ?? []) { try { idle.db.close(); } catch {} }
+    idleSnapshots.delete(path);
+    // A snapshot still open on the released store closes, rather than idles, when it ends.
+    for (const open of snapshots.values()) if (open.path === path) open.discard = true;
     return;
   }
   try {
     if (op === 'open') {
-      const db = open(path);
-      db.exec('BEGIN');
-      snapshots.set(snapshot, db);
+      const held = snapshotConnection(path);
+      try { held.db.exec('BEGIN'); } catch (error) { held.db.close(); throw error; }
+      snapshots.set(snapshot, held);
       postMessage({ id, ok: true, rows: null });
     } else if (op === 'close') {
-      const db = snapshots.get(snapshot);
+      const held = snapshots.get(snapshot);
       snapshots.delete(snapshot);
-      if (db) {
-        try { db.exec('COMMIT'); } finally { db.close(); }
+      if (held) {
+        let reusable = false;
+        try { held.db.exec('COMMIT'); reusable = true; } finally {
+          const idle = idleSnapshots.get(held.path) ?? [];
+          if (reusable && !held.discard && idle.length < IDLE_SNAPSHOT_CONNECTIONS) { idle.push(held); idleSnapshots.set(held.path, idle); } else held.db.close();
+        }
       }
       postMessage({ id, ok: true, rows: null });
     } else {
-      const db = op === 'query' ? connection(path) : snapshots.get(snapshot);
+      const db = op === 'query' ? connection(path) : snapshots.get(snapshot)?.db;
       if (!db) throw new Error('unknown snapshot');
       const started = performance.now();
       const query = db.query(sql);
@@ -140,7 +171,8 @@ self.onmessage = (event) => {
       postMessage({ id, ok: true, rows, ms: performance.now() - started });
     }
   } catch (error) {
-    postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error) });
+    const frame = error instanceof Error && error.stack ? error.stack.split('\\n').map((line) => line.trim()).find((line) => line.startsWith('at ')) : undefined;
+    postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error), errorName: error instanceof Error ? error.name : undefined, errorFrame: frame ? frame.slice(3) : undefined, op, sqlHead: typeof sql === 'string' ? sql.replace(/\\s+/g, ' ').trim().slice(0, 80) : undefined });
   }
 };
 `;
@@ -228,7 +260,7 @@ function startThread(store: string): ReaderThread | undefined {
     if (startedStores.has(store)) counters.restarts += 1;
     startedStores.add(store);
     const started: ReaderThread = { store, worker, pending: new Map(), snapshots: 0 };
-    worker.onmessage = (event: MessageEvent<{ id: number; ok: boolean; rows?: unknown; error?: string; ms?: number }>) => {
+    worker.onmessage = (event: MessageEvent<{ id: number; ok: boolean; rows?: unknown; error?: string; errorName?: string; errorFrame?: string; op?: string; sqlHead?: string; ms?: number }>) => {
       const message = event.data;
       const diagnostic = message as unknown as { diagnostic?: string; path: string; ms: number };
       if (diagnostic.diagnostic === 'open') {
@@ -247,7 +279,8 @@ function startThread(store: string): ReaderThread | undefined {
       if (waiting.timer !== undefined) clock.clearTimeout(waiting.timer);
       if (typeof message.ms === 'number') waiting.sqlMs?.(message.ms);
       if (message.ok) waiting.resolve(message.rows ?? null);
-      else waiting.reject(new Error(message.error ?? 'off-thread read failed'));
+      // The class and frame from the reader thread, and what it ran (SQL text only, never its values): #1502.
+      else waiting.reject(errorFromBoundary(message.error ?? 'off-thread read failed', message.errorName, message.errorFrame, `read pool ${message.op ?? 'read'}${message.sqlHead ? `: ${message.sqlHead}` : ''}`));
     };
     worker.onerror = (event: ErrorEvent) => {
       retire(started, new Error(event.message || 'off-thread reader stopped'));
@@ -411,6 +444,21 @@ function serveSnapshotWaiters(): void {
     reader.snapshots += 1;
     waiter.resolve(reader);
   }
+}
+
+/**
+ * Whether any store's pool work is waiting for a thread: a queued read or a
+ * snapshot (a status count, an Ask lane). Background maintenance stands back
+ * while this is true, so owner-visible reads go first.
+ */
+export function readPoolHasWaitingWork(): boolean {
+  return waitingWorkForTests?.() ?? (snapshotWaiters.length > 0 || [...queues.values()].some((waiting) => waiting.length > 0));
+}
+
+let waitingWorkForTests: (() => boolean) | undefined;
+/** Tests only: what readPoolHasWaitingWork answers. Left out, the pool's own state. */
+export function setReadPoolWaitingWorkForTests(waiting?: () => boolean): void {
+  waitingWorkForTests = waiting;
 }
 
 /**

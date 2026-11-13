@@ -1,7 +1,7 @@
 import { type XBookmarksLiveSyncResult, X_BOOKMARKS_HEAD_MAX_LADDER_PAGES } from '../../x-bookmarks/index.ts';
 
 export function xBookmarksLiveAdminResult(
-  mode: 'head' | 'reconcile' | 'window_diagnostic',
+  mode: 'head' | 'reconcile' | 'window_diagnostic' | 'import_archive',
   result: XBookmarksLiveSyncResult,
 ): Record<string, unknown> {
   const allowedCountKeys = new Set([
@@ -60,6 +60,10 @@ export function xBookmarksLiveAdminResult(
     'reconcile_page_size_20_requests',
     'reconcile_page_size_other_requests',
     'reconcile_truncation_retries',
+    'archive_rows_read',
+    'archive_rows_skipped',
+    'archive_posts_with_text',
+    'archive_posts_already_held',
   ]);
   for (let index = 0; index < 8; index += 1) {
     allowedCountKeys.add(`traversal_digest_word_${index}`);

@@ -26,6 +26,8 @@ const ALLOWED: Record<string, string> = {
   'src/workers/classification/sniffer-store.ts': 'the sniffer store class opening its own database',
   'src/core/file-lease.ts': 'the lock databases themselves',
   'src/workers/apple-messages/connector.ts': 'reads the macOS Messages chat.db, never an Olympus store',
+  'src/workers/x-bookmarks/archive-import.ts':
+    'reads, read-only, an earlier install\'s X bookmarks store at the path the owner names, to import it through the X lane; the X sync refuses this install\'s own store',
   'src/core/messaging-pairing.ts': 'copies and writes the Telegram login a pairing proves (telegram.session), never an Olympus store',
   // X's state outside the stores.
   'src/workers/x-bookmarks/reconcile-state.ts':
@@ -60,7 +62,9 @@ const ALLOWED: Record<string, string> = {
   'src/workers/source-index/status.ts': 'counts secret locations beside a mounted Private store, read-only',
   // Release testing, on a machine kept for it.
   'scripts/release-check/machine-agent.ts':
-    'the release check\'s agent on a test machine: reads its stand-in Readwise and archive stores and ledger, read-only, at the paths the resolvers give, to compare an upgrade; it runs beside the engine under test by design, so it takes no owner lock',
+    'the release check\'s agent on a test machine: reads its stand-in Readwise and archive stores and ledger, read-only, at the paths the resolvers give, to compare an upgrade and verify scale imports (dates and completed provider traversals); it runs beside the engine under test by design, so it takes no owner lock',
+  'scripts/release-check/on-demand-probe.ts':
+    'the release check\'s read-on-demand timing probe on an accounts test machine: opens the extraction job queue read-only to bracket one read and reads bounded log slices; it runs beside the engine under test by design, so it takes no owner lock',
   // Operator scripts on a database named on their command line; each holds
   // the owner lock for its run (core/data-owner-lock.ts), so it refuses
   // while Olympus runs.

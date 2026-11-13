@@ -24,7 +24,7 @@
  *
  * The tool list is the `remote` operation surface (the Hermes list:
  * source_answer, source_answer_result, source_index_status and
- * ask_anonymously), plus the evidence search `olympus_search` when the worker
+ * ask_anonymously), a connection-bound Personal item read, plus the evidence search `olympus_search` when the worker
  * supplies one (workers/remote-search.ts), which also hides source_answer
  * while no answer model is set up and, for every connection but a demo grant,
  * settles the connection's Private part (core/remote-private-part.ts) so a
@@ -33,6 +33,9 @@
  * The connection's identity is set as the caller by the worker, never taken
  * from the client, and lands on the answer's audit ledger entry.
  */
+import { RemoteReadHandleStore } from '../core/remote-read-handles.ts';
+import { createHash } from 'node:crypto';
+import { requestCredentialTag } from '../core/connection-requests.ts';
 import { existsSync } from 'node:fs';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import type { OlympusConfig } from '../core/config.ts';
@@ -55,6 +58,7 @@ import { createChatGptDirectoryMcpServer } from './chatgpt/directory-surface.ts'
 import { remoteSearchExtension, type RemoteSearchOptions } from './remote-search.ts';
 import { DEMO_GRANT_REMOTE_TOOLS, DIRECTORY_MCP_PATH, type McpSurface } from '../../connect-relay/shared/directory-tools.ts';
 import { readBoundedRequestText } from './remote-request-body.ts';
+import { rpcCallNames } from '../../connect-relay/shared/mcp-log.ts';
 import { remoteErrorOutput, remoteRetryAfterSeconds, remoteSurfaceErrorOutput } from '../core/remote-result.ts';
 import { AUTHENTICATED_RESPONSE_HEADER, SURFACE_RESPONSE_HEADER, credentialInstallId, type CredentialSurface } from '../../connect-relay/shared/tokens.ts';
 import { grantMcpSurface } from './remote-oauth/pinned-clients.ts';
@@ -67,6 +71,9 @@ export const REMOTE_DIRECTORY_MCP_PATH = DIRECTORY_MCP_PATH;
 const IN_PROCESS_WORKER_BASE_URL = 'http://olympus-worker.internal/v1';
 
 export interface RemoteMcpHandlerOptions {
+  /** Clock for process-local read handles (30 minute lifetime). */
+  readHandleNow?: () => number;
+  onRequestLog?: (entry: import('../../connect-relay/shared/request-log.ts').RequestLogEntry, app?: string, relayed?: boolean) => void;
   /**
    * Opened lazily so an unreadable store never blocks worker boot. Returns
    * undefined when no connection database exists yet: an install that never
@@ -116,6 +123,11 @@ export interface RemoteMcpHandlerOptions {
   demoGrant?: (connection: RemoteMcpConnection) => boolean;
   /** Builds the directory endpoint's server (default createChatGptDirectoryMcpServer; tests narrow its allowlist). */
   directoryServer?: typeof createChatGptDirectoryMcpServer;
+  /**
+   * Where the one line per request goes (remoteMcpLogLine); default stdout,
+   * the worker's journal. Tests capture it.
+   */
+  log?: (line: string) => void;
 }
 
 /** The verified connection behind a remote request; `clientId` for OAuth grants, `provider` as stored. */
@@ -148,24 +160,46 @@ export function withRemoteMcpRoute(
 }
 
 export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (request: Request) => Promise<Response> {
+  const readHandles = new RemoteReadHandleStore(options.readHandleNow ? { now: options.readHandleNow } : {});
   const isRelayed = options.isRelayed ?? isRelayedRequest;
+  const log = options.log ?? ((line: string) => console.log(line));
   return async (request: Request): Promise<Response> => {
+    const started = performance.now();
+    const trace: RemoteMcpTrace = { surface: remoteMcpSurface(request) ?? 'default', relayed: isRelayed(request) };
+    const response = await handle(request, trace);
+    const line = remoteMcpLogLine(trace, response.status, performance.now() - started);
+    log(line);
+    const recorded = JSON.parse(line) as { at: string; ms: number };
     try {
-      const surface = remoteMcpSurface(request) ?? 'default';
+      options.onRequestLog?.({ at: recorded.at, surface: trace.surface, calls: (trace.calls ?? []).join(','), status: response.status, ms: Math.max(0, recorded.ms),
+        ...(trace.credential ? { credential: trace.credential } : {}),
+      }, trace.app, trace.relayed);
+    } catch { /* Observing a request cannot change its response. */ }
+    return response;
+  };
+
+  async function handle(request: Request, trace: RemoteMcpTrace): Promise<Response> {
+    try {
+      const surface = trace.surface;
       const verification = authenticateRemoteRequest(request, options, surface);
       if (!verification.ok) return verification.response;
-      const response = await serveAuthenticated(request, verification, surface);
+      trace.connection = verification.connection.id;
+      trace.app = verification.connection.displayName;
+      const bearer = /^Bearer\s+(\S+)$/i.exec(request.headers.get('authorization')?.trim() ?? '')?.[1];
+      if (bearer) trace.credential = requestCredentialTag(createHash('sha256').update(bearer).digest());
+      const response = await serveAuthenticated(request, verification, surface, trace);
       // Only the relay reads the mark; a direct caller never sees it.
-      if (!isRelayed(request)) return response;
+      if (!trace.relayed) return response;
       return markAuthenticated(response, appSurface(request, verification.connection, surface));
     } catch (error) {
       // Anything thrown before or around the MCP transport (building the
       // operation context, the surface choice, the transport itself) is a
       // fixed JSON error, never the runtime's default page with the exception
       // in it, and never carries the relay's authenticated mark.
+      trace.failed = true;
       return remoteFailureResponse(error);
     }
-  };
+  }
 
   function appSurface(request: Request, connection: RemoteMcpConnection, surface: McpSurface): CredentialSurface {
     if (options.chatgpt?.servesRequest(request, connection)) return 'chatgpt';
@@ -178,6 +212,7 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
     request: Request,
     verification: { connection: RemoteMcpConnection },
     surface: McpSurface,
+    trace: RemoteMcpTrace,
   ): Promise<Response> {
     if (request.method !== 'POST') {
       // Stateless server: no standalone SSE stream (GET) and no session to end
@@ -197,9 +232,13 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
     } catch {
       // Left undefined: the transport then answers its own JSON-RPC parse error.
     }
+    trace.calls = rpcCallNames(parsedBody);
     const caller = remoteOperationCaller(verification.connection);
     const ctx = options.makeOperationContext(caller, request.signal);
     const selected = appSurface(request, verification.connection, surface);
+    // The engine wires evidence search when its source lanes are available.
+    // Operation-only hosts keep their existing listing until they can mint handles.
+    const readScope = options.search ? readHandles.forConnection(verification.connection.id) : undefined;
     const urls = currentRemotePublicUrls(options.publicUrls);
     const chatgpt = selected !== 'remote' && options.chatgpt
       ? { ...options.chatgpt, readOnly: options.chatgpt.readOnlyFor?.(verification.connection) === true,
@@ -225,8 +264,9 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
           signal: request.signal,
           // The owner's list of what each AI app received (a demo grant's too: it is what left).
           caller,
+          ...(readScope ? { issueReadHandle: readScope.issueReadHandle } : {}),
         })
-        : undefined)), authorized);
+        : undefined)), authorized, readScope);
     // No sessionIdGenerator: stateless mode.
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     try {
@@ -240,6 +280,38 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
       await server.close().catch(() => undefined);
     }
   }
+}
+
+/** What one remote MCP request was, for its log line; filled in as it is served. */
+interface RemoteMcpTrace {
+  credential?: string;
+  app?: string;
+  surface: McpSurface;
+  relayed: boolean;
+  connection?: string;
+  calls?: string[];
+  failed?: boolean;
+}
+
+/**
+ * One JSON line per remote MCP request (#1266: whether an agent fetched the
+ * tool list, and what it got back, while it said it had no tools). It names
+ * the methods, the status, the time taken, the endpoint, whether the relay
+ * carried it, and the connection only as a short hash: never a body, an
+ * argument, a token or an address.
+ */
+export function remoteMcpLogLine(trace: RemoteMcpTrace, status: number, ms: number): string {
+  return JSON.stringify({
+    at: new Date().toISOString(),
+    event: 'remote_mcp',
+    surface: trace.surface,
+    relayed: trace.relayed,
+    calls: trace.calls ?? [],
+    status,
+    ms: Math.round(ms),
+    ...(trace.connection ? { connection: createHash('sha256').update(`olympus-remote-log\n${trace.connection}`).digest('hex').slice(0, 8) } : {}),
+    ...(trace.failed ? { failed: true } : {}),
+  });
 }
 
 function anonymousListing(enabled: (() => boolean) | undefined, inner: McpServerExtension | undefined): McpServerExtension {

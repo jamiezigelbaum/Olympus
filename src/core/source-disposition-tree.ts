@@ -42,7 +42,7 @@ import {
  * The mapping is total and lives in one function below, so the two vocabularies
  * cannot drift.
  */
-export type SourceDispositionState = 'ingest' | 'metadata_only' | 'exclude';
+export type SourceDispositionState = 'ingest' | 'metadata_only' | 'on_demand' | 'exclude';
 
 /**
  * Where a node's state came from.
@@ -200,7 +200,8 @@ const DEFAULT_MAX_NODES = 4000;
  * Exhaustive on purpose: adding a disposition to the gate without deciding what
  * the picker calls it is a type error here, not a folder that renders blank.
  */
-export function sourceDispositionStateFor(disposition: SourceIngestionDisposition): SourceDispositionState {
+export function sourceDispositionStateFor(disposition: SourceIngestionDisposition | SourceIngestionRuleMode, readOnDemand = false): SourceDispositionState {
+  if (readOnDemand || disposition === 'on_demand') return 'on_demand';
   switch (disposition) {
     case 'admit':
       return 'ingest';
@@ -224,6 +225,7 @@ export function sourceDispositionRuleMode(
 export const SOURCE_DISPOSITION_STATE_LABELS: Record<SourceDispositionState, string> = {
   ingest: 'Ingest',
   metadata_only: 'Metadata only',
+  on_demand: 'Names with read on demand',
   exclude: 'Exclude',
 };
 
@@ -418,7 +420,7 @@ export function buildSourceDispositionTree(
   const render = (node: MutableNode, depth: number): SourceDispositionNode => {
     renderedNodes += 1;
     const decision = matcher.evaluatePath(node.path);
-    const state = sourceDispositionStateFor(decision.disposition);
+    const state = sourceDispositionStateFor(decision.disposition, decision.readOnDemand);
     const isExplicit = explicit.has(node.path);
     const ancestor = isExplicit ? undefined : nearestExplicitAncestor(node.segments, explicit);
     const origin: SourceDispositionOrigin = isExplicit
@@ -561,6 +563,7 @@ export interface SourceDispositionEditOptions {
 const DEFAULT_EDIT_REASONS: Record<SourceIngestionRuleMode, string> = {
   exclude: 'excluded from the folder picker',
   metadata_only: 'index titles and dates, never read the contents',
+  on_demand: 'index names and read individual files when requested',
 };
 
 /**
@@ -640,7 +643,7 @@ export function applySourceDispositionEdits(
       continue;
     }
     const before = matcher.evaluatePath(path);
-    const beforeState = sourceDispositionStateFor(before.disposition);
+    const beforeState = sourceDispositionStateFor(before.disposition, before.readOnDemand);
     const isExplicit = explicit.has(path);
     // What this folder would inherit if it carried no rule of its own. The
     // whole refusal set below is decided against the ANCESTOR's state rather
@@ -688,7 +691,7 @@ export function applySourceDispositionEdits(
     }
 
     const mode = sourceDispositionRuleMode(edit.state)!;
-    if (edit.state === 'metadata_only' && ancestorState === 'exclude') {
+    if ((edit.state === 'metadata_only' || edit.state === 'on_demand') && ancestorState === 'exclude') {
       // Exclusion beats metadata-only whatever order the two are written in, so
       // writing this rule would produce a file that says one thing and a gate
       // that does another. Refusing says so; writing it would be the picker
@@ -762,7 +765,7 @@ function ancestorStateFor(path: string, matcher: SourceExclusionMatcher): Source
   const segments = normalizedSegmentsFor(path);
   if (segments.length < 2) return 'ingest';
   const parent = `/${segments.slice(0, -1).join('/')}`;
-  return sourceDispositionStateFor(matcher.evaluatePath(parent).disposition);
+  return sourceDispositionStateFor(matcher.evaluatePath(parent).disposition, matcher.evaluatePath(parent).readOnDemand);
 }
 
 /**

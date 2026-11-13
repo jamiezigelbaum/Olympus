@@ -32,6 +32,7 @@ import {
   remoteErrorOutput,
   remoteRetryAfterSeconds,
   remoteOperationOutputOffThread,
+  remoteOperationOutput,
   withRemotePrivateNote,
   remoteOutputSchema,
   remoteSurfaceErrorOutput,
@@ -52,7 +53,7 @@ import {
   type Operation,
 } from '../core/operations.ts';
 import { authenticateRemoteRequest, DEMO_GRANT_REMOTE_TOOLS, jsonResponse, remoteOperationCaller, unauthorized, type RemoteMcpHandlerOptions } from './remote-mcp.ts';
-import { currentAccess, type RemoteAccessAuthorization } from './remote-access-recheck.ts';
+import { withRemoteReadAuthorization, currentAccess, type RemoteAccessAuthorization } from './remote-access-recheck.ts';
 import { isJsonContentType, readBoundedRequestText, REMOTE_REQUEST_MAX_BODY_BYTES } from './remote-request-body.ts';
 
 export const REMOTE_OPENAPI_SPEC_PATH = '/openapi.json';
@@ -169,7 +170,7 @@ async function callTool(request: Request, name: string, options: RemoteOpenApiHa
   const operation = findOperationByName(name);
   // A demo grant reaches only its read-only tools, answered like any unknown name.
   const demoRefused = options.demoGrant?.(verification.connection) === true && !DEMO_GRANT_REMOTE_TOOLS.includes(name);
-  if (demoRefused || !operation || !shouldExposeOperation(operation, { config: neutralSpecConfig(), surface: 'remote' })) {
+  if (name === 'source_item_read' || demoRefused || !operation || !shouldExposeOperation(operation, { config: neutralSpecConfig(), surface: 'remote' })) {
     return failure(404, remoteSurfaceErrorOutput('unknown_operation'));
   }
   // On the published list, but this install has it switched off.
@@ -200,7 +201,7 @@ async function callTool(request: Request, name: string, options: RemoteOpenApiHa
     ...(ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}),
   });
   try {
-    const result = await runWithReleaseManifestSink(manifests, () => operation.handler(ctx, params.value));
+    const result = await runWithReleaseManifestSink(manifests, () => withRemoteReadAuthorization(authorized, () => operation.handler(ctx, params.value)));
     const afterHandler = currentAccess(authorized);
     if (afterHandler !== 'active') return refused(afterHandler);
     // The output builders note what the agent receives (core/app-release-capture.ts).
@@ -220,9 +221,12 @@ async function callTool(request: Request, name: string, options: RemoteOpenApiHa
     // The settle can wait on the local probe: an item reclassified meanwhile
     // (to Secret, say) is caught by checking the release again right before
     // it leaves. The note follows the output that actually leaves.
-    const output = privatePart ? await release() : approved;
+    let output = privatePart ? await release() : approved;
     const afterFinalRelease = currentAccess(authorized);
     if (afterFinalRelease !== 'active') return refused(afterFinalRelease);
+    if (operation.name === 'source_item_read') output = remoteOperationOutput(operation.name, result, {
+      ...(ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}), releaseManifests: manifests.manifests,
+    });
     recordRemoteOperation({ operation: operation.name, args: params.value, caller: ctx.caller, output, capture, privateQuestion: privateMayAnswer ? privatePart?.answerRef : undefined });
     return jsonResponse(200, privateMayAnswer ? withRemotePrivateNote(output, privatePart?.answerId, privatePart?.secretMatch) : output);
   } catch (error) {
@@ -296,6 +300,7 @@ const ERROR_STATUS: Partial<Record<OperationErrorCode, number>> = {
   source_answer_job_not_found: 404,
   source_answer_deadline: 504,
   source_answer_too_large: 502,
+  not_personal: 403,
 };
 
 function operationErrorResponse(error: unknown, declaredParams: readonly string[]): Response {
@@ -328,7 +333,9 @@ function publicServerUrl(publicBaseUrl: string | undefined): string {
  */
 export function buildRemoteOpenApiSpec(options: { serverUrl?: string } = {}): Record<string, unknown> {
   const rendering = neutralSpecConfig();
-  const exposed = exposedOperations(operations, { config: rendering, surface: 'remote' });
+  // Read handles belong to the live MCP handler, never to the REST surface.
+  const exposed = exposedOperations(operations, { config: rendering, surface: 'remote' })
+    .filter(operation => operation.name !== 'source_item_read');
   const paths = Object.fromEntries(exposed.map((operation) => [
     `${REMOTE_OPENAPI_TOOLS_PREFIX}${operation.name}`,
     { post: openApiOperation(operation, rendering) },

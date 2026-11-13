@@ -14,6 +14,7 @@
  * `test/store-open-guard.test.ts` ties the two lists to the code: a module that
  * opens a shared SQLite file must own a step or a kept entry.
  */
+import { removeAllSchemaBackups } from './boot-progress.ts';
 import { appReleaseLogDbPath, forgetAppReleaseItems } from './app-release-log.ts';
 import type { LayoutEnv } from './olympus-layout.ts';
 import { OperationError } from './operation-error.ts';
@@ -533,6 +534,17 @@ export const KEPT_SHARED_FILES: readonly KeptSharedFile[] = [
 ];
 
 /**
+ * The copies of shared stores taken before a schema update still hold the
+ * forgotten account's rows: they go too (core/boot-progress.ts). A rollback
+ * after this has no copy to restore and keeps the updated stores.
+ */
+function forgetSchemaBackups(env: LayoutEnv, dryRun: boolean): string[] {
+  const count = removeAllSchemaBackups(env, dryRun);
+  if (count === 0) return [];
+  return [`${dryRun ? 'Would remove' : 'Removed'} ${count} store ${count === 1 ? 'copy' : 'copies'} taken before a schema update.`];
+}
+
+/**
  * Runs every step for one account, in order, and returns their report lines.
  * The first failure throws a ForgetStepError naming the step and the file.
  * Steps are idempotent, so after a failure the same call can simply run again.
@@ -548,7 +560,7 @@ export function runForgetSteps(account: ForgetAccount, context: ForgetContext, o
       throw new ForgetStepError(step, account, error);
     }
   }
-  return lines;
+  return [...lines, ...forgetSchemaBackups(context.env, options.dryRun)];
 }
 
 /**
@@ -571,5 +583,5 @@ export function runForgetAccountScopeSteps(
       throw new ForgetStepError(step, account, error);
     }
   }
-  return lines;
+  return [...lines, ...forgetSchemaBackups(context.env, options.dryRun)];
 }

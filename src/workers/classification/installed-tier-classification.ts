@@ -17,8 +17,8 @@
 // pending (Private, embedding held) and a plain store records none, until the
 // file is fixed.
 
-import { CachedTierSniffer, snifferPromptVersions, type SnifferLaneIdentity } from './sniffer.ts';
-import { TierSnifferStore } from './sniffer-store.ts';
+import { CachedTierSniffer, snifferCacheModelId, snifferPromptVersions, type SnifferLaneIdentity } from './sniffer.ts';
+import { TierSnifferStore, type ChunkWindowKey } from './sniffer-store.ts';
 import { tierSnifferPathForLedger } from './tier-ledger-path.ts';
 import {
   registerInstalledTierClassification,
@@ -28,7 +28,7 @@ import {
 } from './installed-tier-classification-registry.ts';
 
 export type { InstalledStoreTierClassification };
-import type { OwnerTierRule, TierSniffer } from './tier-classifier.ts';
+import type { OwnerTierRule, TierSniffer, TierSnifferRequest, TierSnifferVerdict } from './tier-classifier.ts';
 import { loadOwnerTierRules, tierRulesFileStamp } from './tier-rules.ts';
 
 
@@ -46,6 +46,7 @@ export const NO_JUDGE_TIER_SNIFFER: TierSniffer = {
 export interface InstalledTierClassificationOptions {
   /** Shared with the sniffer executor and inherited by sets opened in this engine. */
   automaticMoveContext?: AutomaticTierMoveContext;
+  readOnly?: boolean;
   env?: Record<string, string | undefined>;
   /** The resolved privacy-safe lane. Absent: no judge; every read item stays pending, held (NO_JUDGE_TIER_SNIFFER). */
   lane?: SnifferLaneIdentity;
@@ -63,6 +64,7 @@ export interface InstalledTierClassificationOptions {
 }
 
 export class InstalledTierClassification implements InstalledTierClassificationProvider {
+  private readonly readOnly: boolean;
   readonly lane: SnifferLaneIdentity | undefined;
   readonly automaticMoveContext: AutomaticTierMoveContext | undefined;
   readonly retirePublic: boolean;
@@ -74,8 +76,16 @@ export class InstalledTierClassification implements InstalledTierClassificationP
   /** The last rules that read cleanly. */
   private rules: OwnerTierRule[] = [];
   private rulesInvalid = false;
+  private releaseResolver?: (ledgerPath: string, request: TierSnifferRequest, signal: AbortSignal,
+    expected: { promptVersion: string; snifferId: string }) => Promise<TierSnifferVerdict>;
+
+  /** The service supplies its approved production lane, transport and call budget. */
+  setReleaseWindowResolver(resolve: NonNullable<InstalledTierClassification['releaseResolver']>): void {
+    this.releaseResolver = resolve;
+  }
 
   constructor(options: InstalledTierClassificationOptions = {}) {
+    this.readOnly = options.readOnly === true;
     this.env = options.env ?? process.env;
     this.automaticMoveContext = options.automaticMoveContext;
     this.lane = options.lane;
@@ -92,13 +102,14 @@ export class InstalledTierClassification implements InstalledTierClassificationP
   forLedger(ledgerPath: string): InstalledStoreTierClassification {
     const rules = this.currentRules();
     const unavailableReason = this.rulesInvalid ? 'tier_rules_invalid' : undefined;
+    const promptVersion = snifferPromptVersions(this.ownerContext?.()).cache;
     let sniffer: TierSniffer | undefined;
     if (this.lane && ledgerPath !== ':memory:') {
       try {
         sniffer = new CachedTierSniffer(
           this.snifferStoreForLedger(ledgerPath),
           this.lane,
-          snifferPromptVersions(this.ownerContext?.()).cache,
+          promptVersion,
         );
       } catch {
         // No sniffer store: no question can be queued, so the install has no
@@ -110,9 +121,22 @@ export class InstalledTierClassification implements InstalledTierClassificationP
       // asked, so its content is held until a judge is set up and answers.
       sniffer = NO_JUDGE_TIER_SNIFFER;
     }
+    const judgeId = sniffer?.id;
+    const releaseWindows = this.lane && sniffer && ledgerPath !== ':memory:' ? {
+      // Include the decision bar: changing it must re-read cached model mass.
+      modelId: `${snifferCacheModelId(this.lane)}:${judgeId}`,
+      promptVersion,
+      read: (key: ChunkWindowKey) => this.snifferStoreForLedger(ledgerPath).chunkWindowVerdict(key),
+    } : undefined;
     return {
       ...(rules.length > 0 ? { rules } : {}),
       ...(sniffer ? { sniffer } : {}),
+      ...(releaseWindows ? { releaseWindows } : {}),
+      ...(releaseWindows && !this.readOnly && !unavailableReason ? { releaseJudge: {
+        ...releaseWindows,
+        record: (key, tier) => this.snifferStoreForLedger(ledgerPath).recordChunkWindow(key, tier),
+        resolve: (request, signal) => this.releaseResolver?.(ledgerPath, request, signal, { promptVersion, snifferId: judgeId! }) ?? Promise.resolve({ verdict: 'undecided' as const }),
+      } satisfies NonNullable<InstalledStoreTierClassification['releaseJudge']> } : {}),
       ...(this.retirePublic ? { retirePublic: true } : {}),
       ...(unavailableReason ? { unavailableReason } : {}),
     };
@@ -123,7 +147,7 @@ export class InstalledTierClassification implements InstalledTierClassificationP
     const path = tierSnifferPathForLedger(ledgerPath);
     let store = this.snifferStores.get(path);
     if (!store) {
-      store = new TierSnifferStore({ dbPath: path, ...(this.now ? { now: this.now } : {}) });
+      store = new TierSnifferStore({ dbPath: path, readOnly: this.readOnly, ...(this.now ? { now: this.now } : {}) });
       this.snifferStores.set(path, store);
     }
     return store;
