@@ -62,7 +62,7 @@ export const DEFAULT_RERANK_POOL_SIZE = 30;
 // strongest stores first, up to this many of each store's ranks. On subset L
 // (13 Nov 2026) this recovered 3 documents and 2 paragraphs the even turns
 // left out of a pool of the same size, losing no document.
-export const RERANK_POOL_STORE_DEPTH = 10;
+export const RERANK_POOL_STORE_DEPTH = 6;
 // Sparta scores 360 candidates of 128 tokens in 4 s with MiniLM int8 (#921).
 export const MAX_RERANK_POOL_SIZE = 400;
 
