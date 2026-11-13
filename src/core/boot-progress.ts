@@ -290,16 +290,16 @@ export function retiredStateBackupPath(path: string): string {
 export function retireStatePath(env: LayoutEnv, storeId: string, path: string): boolean {
   if (!existsSync(path)) return false;
   const backup = retiredStateBackupPath(path);
-  if (existsSync(backup)) {
-    // An earlier retire's copy is the older state and stands.
-    rmSync(path, { recursive: true, force: true });
-    return false;
-  }
+  // A copy an earlier start left is older than the state here, which a
+  // version that still used it wrote since: the newer state is the one kept.
+  rmSync(backup, { recursive: true, force: true });
   recordSchemaBackup(env, { storeId, dbPath: path, backupPath: backup });
-  renameSync(path, backup);
-  // The restore and the commit pick their copies by time: this one is from now.
+  // The restore and the commit pick their copies by time, so the time is set
+  // before the move, which keeps it: no moment where the copy is aside but
+  // looks older than the upgrade (#1563 review).
   const now = new Date();
-  utimesSync(backup, now, now);
+  utimesSync(path, now, now);
+  renameSync(path, backup);
   return true;
 }
 
