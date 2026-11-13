@@ -84,6 +84,7 @@ import { SOURCE_ANSWER_HANDOFF_MAX_MS, SOURCE_ANSWER_RESULT_WAIT_MAX_MS } from '
 import { evaluateInbox, privateLinkIdsIn, privateNoteIn, type InboxObservation } from './inbox.ts';
 import { commandJudge, judgeCheck, type Judge } from './judge.ts';
 import type { AgentConfig } from './machine-agent.ts';
+import { FRONT_WATCH_S, frontSteadyChecks, type FrontSteadyObservation } from './front-steady.ts';
 import { journeyChecks, type JourneyTrace } from './journey.ts';
 import { JOURNEYS, type JourneyMachine } from './journeys.ts';
 import { evaluateRestore, RESTORE_BACKUP_FOLDER, RESTORE_BACKUP_PATH } from './restore.ts';
@@ -1315,6 +1316,15 @@ async function runArchiveLeg(run: Run, outDir: string, deadline: number): Promis
   rmSync(scratch, { recursive: true, force: true });
 }
 
+/** The split front after a restart on a store set with Gmail attachments, Telegram and archives (front-steady.ts). */
+async function runFrontSteady(run: Run): Promise<void> {
+  const seed = randomBytes(6).toString('hex');
+  const done = await run.phase('front-steady', () => run.agent('front-steady', `--seed ${seed} --watch-s ${FRONT_WATCH_S}`, (FRONT_WATCH_S + 30 * 60) * 1_000));
+  if (!done.result) run.log(`front-steady: ${agentDetail(done)}`);
+  const obs = done.result as FrontSteadyObservation | undefined;
+  for (const check of [...frontSteadyChecks(obs), ...journeyChecks(obs?.traces ?? [])]) run.add(check);
+}
+
 /** The agent suite against the engine: the connection, every model agent, then the ChatGPT-protocol pass. */
 async function runSuite(run: Run, workDir: string, judge: Judge | undefined, { mintToken }: { mintToken: boolean }): Promise<void> {
   const bridge = machineToolBridge(run);
@@ -1580,6 +1590,8 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
         if (Date.now() < deadline) await run.inLeg('inbox', () => runInboxLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the Ask page and Inbox leg');
         if (Date.now() < deadline) await run.inLeg('journeys', () => runJourneyLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the journeys');
         if (Date.now() < deadline) await run.inLeg('archive', () => runArchiveLeg(run, options.outDir, deadline)); else run.errors.push('the run exceeded its time budget before the archive-import leg');
+        // With the split on, the front must survive a restart on a store set like a real one (rc.4, ops#151).
+        if (options.engineSplit && !options.skipArchive && Date.now() < deadline) await run.inLeg('archive', () => runFrontSteady(run));
         // The backup is made before the control exploration, which ends with Readwise disconnected and its data deleted (its
         // `empty` state): a backup made after it holds no source to restore (#1323, run 42936532388).
         // The restore leg's second machine comes only after the first is done and gone: both drivers run one machine at a time
