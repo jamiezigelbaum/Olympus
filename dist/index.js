@@ -9990,7 +9990,7 @@ function readSettings(path) {
   settingsCache = { path, stamp, value };
   return value;
 }
-function readOwnerLimitOverride(key, now, path = ownerLimitSettingsPath()) {
+function readOwnerLimitOverride(key, now, path = ownerLimitSettingsPath(), heldItem) {
   const [group, name] = key.split(".");
   const value = readSettings(path)[group]?.[name];
   if (!value)
@@ -9998,7 +9998,16 @@ function readOwnerLimitOverride(key, now, path = ownerLimitSettingsPath()) {
   const valid = (n) => Number.isFinite(n) && n >= 0 && (key === "zkapi.dailySpend" || Number.isSafeInteger(n));
   if (!valid(value.to) || typeof value.keep !== "boolean" || value.base !== undefined && !valid(value.base))
     throw new Error(`Owner ${key} setting is invalid.`);
+  if (isSizeLimitKey(key)) {
+    const granted = heldItem === undefined ? undefined : value.heldItems?.[heldItem];
+    if (granted !== undefined && !valid(granted))
+      throw new Error(`Owner ${key} held-file setting is invalid.`);
+    return value.keep ? value.to : granted ?? value.base;
+  }
   return value.keep || value.day === now.toISOString().slice(0, 10) ? value.to : value.base;
+}
+function isSizeLimitKey(key) {
+  return ["dropbox.max_file_bytes", "local_files.max_file_bytes", "telegram.media_quota"].includes(key);
 }
 var settingsCache;
 var init_owner_limit_settings = __esm(() => {
@@ -18294,6 +18303,7 @@ var init_file_extraction_source = __esm(() => {
     retryable;
     errorHash;
     retryAt;
+    sizeBytes;
     constructor(errorKind, options = {}) {
       super(errorKind);
       this.name = "FileExtractionSourceError";
@@ -18303,6 +18313,8 @@ var init_file_extraction_source = __esm(() => {
       const errorHash = options.detailForHash === undefined ? undefined : createHash8("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
       if (errorHash)
         this.errorHash = errorHash;
+      if (options.sizeBytes !== undefined && Number.isSafeInteger(options.sizeBytes) && options.sizeBytes >= 0)
+        this.sizeBytes = options.sizeBytes;
       if (options.retryAt !== undefined && Number.isFinite(Date.parse(options.retryAt)))
         this.retryAt = options.retryAt;
     }
@@ -20714,6 +20726,22 @@ var init_tier_set_binding = __esm(() => {
   init_tier_ledger_path();
 });
 
+// src/core/source-size-limits.ts
+var SOURCE_FILE_SIZE_CEILING, SOURCE_SIZE_LIMITS;
+var init_source_size_limits = __esm(() => {
+  init_limit_stops();
+  init_owner_limit_settings();
+  SOURCE_FILE_SIZE_CEILING = 256 * 1024 * 1024;
+  SOURCE_SIZE_LIMITS = [
+    { id: "dropbox.max_file_bytes", subject: "dropbox.files", providers: ["dropbox"], defaultBytes: 8000000, ceilingBytes: SOURCE_FILE_SIZE_CEILING },
+    { id: "local_files.max_file_bytes", subject: "local.files", providers: ["local_files"], defaultBytes: 64000000, ceilingBytes: SOURCE_FILE_SIZE_CEILING },
+    { id: "telegram.media_quota", subject: "telegram.messages", providers: ["telegram", "telegram.media"], bytesOnly: true, defaultBytes: 64 * 1024 * 1024, ceilingBytes: SOURCE_FILE_SIZE_CEILING }
+  ];
+  registerLimit({ id: "dropbox.max_file_bytes", kind: "size", scope: "extraction", label: "Dropbox file size", unit: "bytes", continue: "raise" });
+  registerLimit({ id: "local_files.max_file_bytes", kind: "size", scope: "extraction", label: "Local file size", unit: "bytes", continue: "raise" });
+  registerLimit({ id: "telegram.media_quota", kind: "size", scope: "extraction", label: "Telegram media read size", unit: "bytes", continue: "raise" });
+});
+
 // src/workers/source-index/embedding-identity.ts
 function embeddingProviderFamily(providerKind) {
   return declaredEmbeddingProviderFamily(providerKind) ?? { providerKind, epochProviderToken: providerKind, dimensionToken: "declared" };
@@ -21639,6 +21667,7 @@ function connectorStoreContentPreference(vettedVectorItemIds) {
 }
 var CONCEPT_COUNT_MAX_AGE_MS, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, STATUS_COUNTS_MAX_AGE_MS, TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
 var init_local_index = __esm(() => {
+  init_source_size_limits();
   init_vector_digest();
   init_boot_progress();
   init_main_thread_sql_trace();
@@ -23325,6 +23354,7 @@ var init_provider_client = __esm(() => {
 
 // src/workers/dropbox-files/connector.ts
 var init_connector3 = __esm(() => {
+  init_source_size_limits();
   init_credential_broker();
   init_file_mime();
   init_provider_client();
@@ -23907,10 +23937,11 @@ var init_record_builder = __esm(() => {
 });
 
 // src/workers/telegram-messages/media-child.ts
-var TELEGRAM_CHILD_KEY = "media", TELEGRAM_MEDIA_CHILD_SUFFIX, LIVE_MEDIA_MAX_READ_BYTES, MEDIA_DISK_FLOOR_BYTES;
+var TELEGRAM_CHILD_KEY = "media", TELEGRAM_MEDIA_CHILD_SUFFIX, MEDIA_DISK_FLOOR_BYTES;
 var init_media_child = __esm(() => {
+  init_source_size_limits();
+  init_file_extraction_source();
   TELEGRAM_MEDIA_CHILD_SUFFIX = `${CHILD_ITEM_ID_SEPARATOR}${TELEGRAM_CHILD_KEY}`;
-  LIVE_MEDIA_MAX_READ_BYTES = 64 * 1024 * 1024;
   MEDIA_DISK_FLOOR_BYTES = 5 * 1024 * 1024 * 1024;
 });
 
@@ -24941,6 +24972,16 @@ var init_input_media = __esm(() => {
   init_media_bindings();
   init_zip_reader();
 });
+// src/workers/file-extraction/size-limit-stops.ts
+var reporter;
+var init_size_limit_stops = __esm(() => {
+  init_source_size_limits();
+  init_owner_limit_settings();
+  init_limit_stops();
+  init_operation_error();
+  reporter = createLimitStopReporter();
+});
+
 // src/workers/file-extraction/on-demand-read.ts
 var init_on_demand_read = () => {};
 
@@ -25146,7 +25187,7 @@ class DropboxExtractionSource {
       throw await downloadFailure(response);
     const declaredSize = parsePositiveInteger(response.headers.get("content-length") ?? undefined);
     if (maxBytes !== undefined && declaredSize !== undefined && declaredSize > maxBytes) {
-      throw new FileExtractionSourceError("source_too_large");
+      throw new FileExtractionSourceError("source_too_large", { sizeBytes: declaredSize });
     }
     let bytes;
     try {
@@ -25157,7 +25198,7 @@ class DropboxExtractionSource {
       throw error;
     }
     if (maxBytes !== undefined && bytes.byteLength > maxBytes) {
-      throw new FileExtractionSourceError("source_too_large");
+      throw new FileExtractionSourceError("source_too_large", { sizeBytes: bytes.byteLength });
     }
     const contentType = response.headers.get("content-type");
     return {
@@ -25226,14 +25267,14 @@ async function readVerifiedCandidate(input) {
   if (!fileStat2.isFile())
     return;
   if (input.maxBytes !== undefined && fileStat2.size > input.maxBytes) {
-    throw new FileExtractionSourceError("source_too_large");
+    throw new FileExtractionSourceError("source_too_large", { sizeBytes: fileStat2.size });
   }
   if (input.declaredSizeBytes !== undefined && input.declaredSizeBytes !== fileStat2.size) {
     return;
   }
   const bytes = new Uint8Array(await readFile3(input.candidatePath));
   if (input.maxBytes !== undefined && bytes.byteLength > input.maxBytes) {
-    throw new FileExtractionSourceError("source_too_large");
+    throw new FileExtractionSourceError("source_too_large", { sizeBytes: bytes.byteLength });
   }
   if (computeDropboxContentHash(bytes) !== input.contentHash)
     return;
@@ -25467,6 +25508,7 @@ var init_extraction_factory = __esm(() => {
 // src/workers/file-extraction/job-store.ts
 var NETWORK_ERROR_KINDS, POLICY_DECISIONS, TERMINAL_STATUSES;
 var init_job_store = __esm(() => {
+  init_source_size_limits();
   init_sqlite_migrations();
   init_store_write_guard();
   init_job_names();
@@ -26375,6 +26417,7 @@ var init_store_sink = __esm(() => {
 // src/workers/file-extraction/runner.ts
 var SOURCE_PARK_FALLBACK_MS, SINK_SKIP_SETTLEMENTS, ITEM_REF_FIELDS, PDF_MIME_TYPES;
 var init_runner = __esm(() => {
+  init_source_size_limits();
   init_control_path_headroom();
   init_media_cache();
   init_operation_error();
@@ -26439,6 +26482,8 @@ var init_tiered_extraction = __esm(() => {
 
 // src/workers/engine/runtime/file-extraction-runtime.ts
 var init_file_extraction_runtime = __esm(() => {
+  init_source_size_limits();
+  init_size_limit_stops();
   init_on_demand_read();
   init_credential_broker();
   init_types();

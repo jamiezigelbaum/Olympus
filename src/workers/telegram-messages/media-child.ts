@@ -1,3 +1,5 @@
+import { sourceSizeBytes, sourceSizeLimitForProvider } from '../../core/source-size-limits.ts';
+import { FileExtractionSourceError } from '../../core/file-extraction-source.ts';
 // A Telegram message's media as its child item (docs/design/child-items.md;
 // docs/design/archive-live-one-dataset.md, section 5): one per message, keyed
 // `media`, whichever input brought it. An export's child names the file the
@@ -17,8 +19,6 @@ export const TELEGRAM_MEDIA_CHILD_SUFFIX = `${CHILD_ITEM_ID_SEPARATOR}${TELEGRAM
 
 /** The live capture's locator of a kept media file: the file's path under the spool. */
 export const TELEGRAM_LIVE_MEDIA_LOCATOR_PREFIX = 'telegram-live-media:v1:';
-/** The largest kept file the connector hands to a reader at once. */
-const LIVE_MEDIA_MAX_READ_BYTES = 64 * 1024 * 1024;
 const CAPTURE_MARK = '~at:';
 
 export interface TelegramMediaDescription {
@@ -131,7 +131,7 @@ export function telegramLiveMediaBytes(child: RawItem, spoolDir: string, locator
   const path = telegramLiveMediaPath(spoolDir, locator);
   if (!path) throw new Error('Telegram no longer has this media file.');
   const size = lstatSync(path).size;
-  if (size > LIVE_MEDIA_MAX_READ_BYTES) throw new Error('Telegram media file is larger than one read.');
+  if (size > sourceSizeBytes(sourceSizeLimitForProvider('telegram')!, { ...child.identity, mimeType: child.mimeType })) throw new FileExtractionSourceError('source_too_large', { sizeBytes: size });
   const bytes = readFileSync(path);
   return { ...child, content: { kind: 'bytes', mimeType: child.mimeType, bytes: new Uint8Array(bytes) } };
 }

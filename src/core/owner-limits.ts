@@ -1,9 +1,11 @@
+import { raiseSourceSizeLimit } from '../workers/file-extraction/size-limit-stops.ts';
+import type { LocalFileExtractionJobStore } from '../workers/file-extraction/job-store.ts';
 import { providerWaitMessage } from './provider-rate-limits.ts';
 import './consult-transport-zkapi.ts';
 import { JudgeSpending } from '../workers/classification/judge-spending.ts';
 import '../workers/google-connectors/gmail-import-allowance.ts';
 import { GMAIL_IMPORT_MIN_DAILY_BUDGET } from '../workers/google-connectors/gmail-import-allowance.ts';
-import { saveOwnerLimitOverride, type OwnerLimitKey } from './owner-limit-settings.ts';
+import { isSizeLimitKey, saveOwnerLimitOverride, type OwnerLimitKey } from './owner-limit-settings.ts';
 import './provider-credit-status.ts';
 import '../workers/classification/sniffer-resolver.ts';
 import { limitStopReference, registeredLimits, type LimitStop } from './limit-stops.ts';
@@ -26,6 +28,8 @@ export interface OwnerLimitsDependencies {
   credit?: FetchVeniceCreditStatusOptions;
   runOnce?: (subject: string, stop: LimitStop) => Promise<unknown>;
   wake?: (id?: string) => void;
+  /** The engine's extraction queue, for size-stop Raise. */
+  extractionJobs?: () => LocalFileExtractionJobStore | undefined;
 }
 
 /**
@@ -53,21 +57,28 @@ export async function ownerLimits(params: Record<string, unknown>, deps: OwnerLi
   if (registration.continue === 'none') throw new OperationError('invalid_params', providerWaitMessage(stop.id, stop.resumesAt) ?? 'This stop resumes on its own.');
   if (registration.continue === 'raise') {
     const integer = registration.unit !== 'usd';
-    const minimum = Math.max(stop.limit ?? 0, stop.used ?? 0);
+    const size = isSizeLimitKey(stop.id);
+    const minimum = size ? (stop.limit ?? 0) : Math.max(stop.limit ?? 0, stop.used ?? 0);
     if (typeof params.to !== 'number' || !Number.isFinite(params.to) || (integer && !Number.isSafeInteger(params.to)) || params.to <= minimum
-      || params.to < (stop.toContinue?.raiseTo ?? 0)) throw new OperationError('invalid_params', '--to must cover the next step and be greater than the current limit and usage, in the reported unit.');
+      || (!size && params.to < (stop.toContinue?.raiseTo ?? 0))) throw new OperationError('invalid_params', size
+        ? '--to must be a whole number greater than the current file size limit, in bytes.'
+        : '--to must cover the next step and be greater than the current limit and usage, in the reported unit.');
     const keys: Record<string, OwnerLimitKey> = { 'judge.daily_calls': 'judge.dailyCalls', 'zkapi.daily_requests': 'zkapi.dailyRequests', 'zkapi.daily_spend': 'zkapi.dailySpend', 'gmail.import_allowance': 'gmail.dailyRequests' };
-    if (stop.id === 'judge.spend_cap') {
+    if (size) {
+      raiseSourceSizeLimit(stop.id, params.to, params.keep === true, now, deps.extractionJobs?.());
+    } else if (stop.id === 'judge.spend_cap') {
       // This is a cumulative archive spending cap, rather than a per-day allowance.
       new JudgeSpending(stop.subject).raise(params.to);
     } else if (keys[stop.id]) {
       if (stop.id === 'gmail.import_allowance' && params.to < GMAIL_IMPORT_MIN_DAILY_BUDGET) throw new OperationError('invalid_params', 'The Gmail day budget must hold one complete import step.');
       saveOwnerLimitOverride(keys[stop.id]!, params.to, params.keep === true, now);
     } else throw new OperationError('invalid_params', 'This limit has no Raise action.');
-    clearOwnerLimitStop(stop.id, stop.subject);
+    if (!size) clearOwnerLimitStop(stop.id, stop.subject);
     deps.wake?.(stop.id);
     return { ok: true, id: stop.id, subject: stop.subject, action: 'raise', to: params.to, unit: registration.unit, keep: params.keep === true,
-      status_message: stop.id === 'judge.spend_cap' ? 'Spending cap raised. Judging can continue.' : params.keep === true ? 'Limit raised for good. Work can continue.' : 'Limit raised for this UTC day. Work can continue.' };
+      status_message: stop.id === 'judge.spend_cap' ? 'Spending cap raised. Judging can continue.'
+        : size ? `File size limit raised ${params.keep === true ? 'for good' : 'for the held files'}. Files within the new limit are queued.`
+        : params.keep === true ? 'Limit raised for good. Work can continue.' : 'Limit raised for this UTC day. Work can continue.' };
   }
   if (registration.continue === 'refill' && stop.id === 'judge.payment') {
     new JudgeSpending(stop.subject).refill();

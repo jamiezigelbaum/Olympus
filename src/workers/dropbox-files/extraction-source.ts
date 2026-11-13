@@ -391,7 +391,7 @@ export class DropboxExtractionSource implements FileExtractionSource {
     // before its body is read, and the body check catches a provider that
     // declared nothing or declared wrongly.
     if (maxBytes !== undefined && declaredSize !== undefined && declaredSize > maxBytes) {
-      throw new FileExtractionSourceError('source_too_large');
+      throw new FileExtractionSourceError('source_too_large', { sizeBytes: declaredSize });
     }
     let bytes: Uint8Array;
     try {
@@ -403,7 +403,7 @@ export class DropboxExtractionSource implements FileExtractionSource {
       throw error;
     }
     if (maxBytes !== undefined && bytes.byteLength > maxBytes) {
-      throw new FileExtractionSourceError('source_too_large');
+      throw new FileExtractionSourceError('source_too_large', { sizeBytes: bytes.byteLength });
     }
 
     const contentType = response.headers.get('content-type');
@@ -545,7 +545,7 @@ async function readVerifiedCandidate(input: {
   }
   if (!fileStat.isFile()) return undefined;
   if (input.maxBytes !== undefined && fileStat.size > input.maxBytes) {
-    throw new FileExtractionSourceError('source_too_large');
+    throw new FileExtractionSourceError('source_too_large', { sizeBytes: fileStat.size });
   }
   if (input.declaredSizeBytes !== undefined && input.declaredSizeBytes !== fileStat.size) {
     return undefined;
@@ -553,7 +553,7 @@ async function readVerifiedCandidate(input: {
 
   const bytes = new Uint8Array(await readFile(input.candidatePath));
   if (input.maxBytes !== undefined && bytes.byteLength > input.maxBytes) {
-    throw new FileExtractionSourceError('source_too_large');
+    throw new FileExtractionSourceError('source_too_large', { sizeBytes: bytes.byteLength });
   }
   // The gate. Bytes whose Dropbox content hash disagrees with the one the job
   // was enqueued for are a different file than the one that was approved, and

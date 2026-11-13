@@ -1,3 +1,4 @@
+import { sourceSizeBytes, sourceSizeLimitForProvider } from '../../core/source-size-limits.ts';
 // Contract 1 (SourceConnector) adapter for Dropbox — the first ingest-side
 // connector implementing the frozen shape in src/core/contracts.ts.
 //
@@ -57,7 +58,6 @@ import {
 
 const CONNECTOR_ID = 'dropbox';
 const DEFAULT_CREDENTIAL_HANDLE = 'dropbox.personal';
-const DEFAULT_MAX_FETCH_BYTES = 8_000_000;
 const DEFAULT_PAGE_LIMIT = 1_000;
 const MAX_PAGE_LIMIT = 2_000;
 const MAX_TRAVERSAL_ITEMS = 100_000;
@@ -152,7 +152,8 @@ export function createDropboxSourceConnector(options: DropboxSourceConnectorOpti
   const account = requireNonEmpty(options.account, 'Dropbox source connector account');
   const credentialHandle = options.credentialHandle?.trim() || DEFAULT_CREDENTIAL_HANDLE;
   const broker = options.broker ?? createEnvCredentialBroker();
-  const maxFetchBytes = normalizePositiveInteger(options.maxFetchBytes, DEFAULT_MAX_FETCH_BYTES);
+  const sizePolicy = sourceSizeLimitForProvider('dropbox')!;
+  const configuredMaxFetchBytes = normalizePositiveInteger(options.maxFetchBytes, sizePolicy.defaultBytes);
   const recursive = options.recursive ?? true;
   const rootListPath = listRootPath(options.rootFolderPath, options.approvedScopeKey, account);
   const connectorId = options.connectorId?.trim() || CONNECTOR_ID;
@@ -511,6 +512,7 @@ export function createDropboxSourceConnector(options: DropboxSourceConnectorOpti
           };
         }
       }
+      const maxFetchBytes = sourceSizeBytes(sizePolicy, identity, new Date(fetchedAt), configuredMaxFetchBytes);
       const downloader = await ensureDownloadClient();
       try {
         const downloaded = await downloader.download({

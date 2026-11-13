@@ -1,3 +1,4 @@
+import { sizeHeldItemKey } from '../../core/source-size-limits.ts';
 import { createVectorDigestSchema, writeVectorDigest, backfillVectorDigests, vectorDigestState, vectorDigestSourceQuery, applyVectorDigestWindow, type VectorDigestSourceRow } from './vector-digest.ts';
 import { encodeVectorDigest, scoreVectorDigest, VectorDigestHeap } from '../source-index/vector-digest.ts';
 import { reportFrontStoreOpened } from '../../core/boot-progress.ts';
@@ -15217,6 +15218,17 @@ export class LocalConnectorStore {
     this.settledUnreadableCountMemo = undefined;
   }
 
+  /** Exact current version only; the opaque key never reaches coverage. */
+  itemHeldForSize(localItemId: string): boolean {
+    if (!this.extractionOutcome) return false;
+    const active = this.activeLocalItemRow(localItemId);
+    if (!active) return false;
+    const identity = { ...active.identity, family: this.family, localItemId };
+    const metadata = this.itemMetadataSnapshot(identity);
+    if (!metadata) return false;
+    return this.extractionOutcome(identity, localItemId)?.sizeHeldItemKey === sizeHeldItemKey({ ...identity, ...metadata });
+  }
+
   private unreadHoldCounts(rows: Array<{ row: { item_pk: number }; disposition: UnreadHoldDisposition }>): { count: number; waitingPks: number[]; policyPks: number[] } {
     return {
       count: rows.filter(item => item.disposition.kind === 'cannot_read').length,
@@ -17264,6 +17276,7 @@ export function createConnectorStoreContentProvider(
         ...(content.chunkHashes ? { chunkHashes: content.chunkHashes } : {}),
         ...(content.truncated ? { truncated: true } : {}),
         ...(coverageGaps.length > 0 ? { coverageGaps } : {}),
+        ...(content.storedChunks === 0 && store.itemHeldForSize(localItemId) ? { sizeHeld: true } : {}),
         ...(metadataOnlyRuleId !== undefined ? { namesOnly: true } : {}),
         ...(content.locatorUri ? { locatorUri: content.locatorUri } : {}),
       };

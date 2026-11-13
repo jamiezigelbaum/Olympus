@@ -110,6 +110,8 @@ export interface LocalContentBlock {
   facts?: readonly StructuredEvidenceFact[];
   truncated?: boolean;
   coverageGaps?: readonly string[];
+  // This exact stored item version is held by the source byte-size limit.
+  sizeHeld?: boolean;
   // The owner chose to keep this item's contents unread (a folder set to
   // Names only, or a metadata-only ingestion rule). Its name still matches;
   // its missing text is a settled choice, not a failed read, and coverage
@@ -383,13 +385,24 @@ async function buildPreparedEvidencePackDetailed(
   const searchedSources = new Set(defaultSourceCorpusRegistryConfig().corpora
     .filter((corpus) => searched.has(corpus.corpusId)).map((corpus) => corpus.sourceId));
   const limitStopGaps: string[] = [];
+  // Searched corpora whose counts-only size notice is in this answer.
+  const sizeNoticeCorpora = new Set<string>();
   const limits = registeredLimits();
   const now = (input.now?.() ?? new Date()).getTime();
   for (const stop of input.limitStops ?? []) {
     const limit = limits.find((entry) => entry.id === stop.id);
-    if (limit?.scope !== 'source' || (stop.resumesAt && Date.parse(stop.resumesAt) <= now)) continue;
+    if ((limit?.scope !== 'source' && !(limit?.scope === 'extraction' && limit.kind === 'size')) || (stop.resumesAt && Date.parse(stop.resumesAt) <= now)) continue;
     if (limitStopSubjects(stop).some((subject) => searched.has(subject) || searchedSources.has(subject))) {
-      limitStopGaps.push(`${limit.label} since ${stop.since}; new items from this source may be missing from this answer`);
+      const heldFiles = stop.waiting?.items ?? 0;
+      if (limit.kind === 'size') {
+        const subjects = new Set(limitStopSubjects(stop));
+        for (const corpus of defaultSourceCorpusRegistryConfig().corpora) {
+          if (subjects.has(corpus.corpusId) || subjects.has(corpus.sourceId)) sizeNoticeCorpora.add(corpus.corpusId);
+        }
+      }
+      limitStopGaps.push(limit.kind === 'size'
+        ? `${limit.label}: ${heldFiles} ${heldFiles === 1 ? 'file' : 'files'} held because they are too large; not read. Raise the size limit to continue.`
+        : `${limit.label} since ${stop.since}; new items from this source may be missing from this answer`);
     }
   }
   extractionGaps.push(...limitStopGaps);
@@ -535,7 +548,14 @@ async function buildPreparedEvidencePackDetailed(
     candidates.push(candidate);
     candidateCorpusIds.push(hit.corpusId);
 
-    const gap = extractionGapFor(hit, provider !== undefined, content);
+    // The source's counts-only size notice explains these unread files. Do
+    // not copy a held file's title or locator into the answer's coverage.
+    // A file held by a reader's own ceiling, with no registered source size
+    // stop, keeps a content-free gap so its being unread is never silent.
+    const sizeHeld = content?.sizeHeld === true && content.chunks.length === 0;
+    const gap = !sizeHeld ? extractionGapFor(hit, provider !== undefined, content)
+      : sizeNoticeCorpora.has(hit.corpusId) ? undefined
+        : `A file (${hit.corpusId}) was located but is too large to read; not read.`;
     candidateExtractionGapIndexes.push(gap ? [extractionGaps.length] : []);
     if (gap) extractionGaps.push(gap);
   }
