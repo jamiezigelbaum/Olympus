@@ -1,7 +1,7 @@
 /** Release proof of a reported cost stop and one-step continuation, on driver-provisioned machines only. */
 import type { Machine } from './machine.ts';
 import type { CheckResult } from './report.ts';
-import { openLimitsMachine } from './limits-machine.ts';
+import { LimitsReason, openLimitsMachine } from './limits-machine.ts';
 
 export interface LimitsClock { now(): number; sleep(ms: number): Promise<void> }
 export interface LimitsStop {
@@ -42,7 +42,7 @@ EOF`;
 export function judgeRaiseTarget(stop: Pick<LimitsStop, 'limit' | 'used'>): number {
   return Math.max(stop.limit ?? 0, stop.used ?? 0) + 50;
 }
-class Assertion extends Error {}
+class Assertion extends LimitsReason {}
 function assert(value: unknown, message: string): asserts value { if (!value) throw new Assertion(message); }
 const REFILL_UNCONFIRMED = 'has not confirmed canConsume=true';
 
@@ -64,23 +64,31 @@ export async function runFreshLimits(machine: Machine, options: FreshLimitsOptio
     assert(Array.isArray(value.stops), 'limits list unavailable');
     return value.stops;
   };
-  const poll = async <T>(read: () => Promise<T>, ready: (value: T) => boolean, bound: number, message: string): Promise<T> => {
+  const poll = async <T>(read: () => Promise<T>, ready: (value: T) => boolean, bound: number, message: string | (() => string)): Promise<T> => {
     const deadline = clock.now() + bound;
     for (;;) {
       const value = await read();
       if (clock.now() <= deadline && ready(value)) return value;
-      assert(clock.now() < deadline, message);
+      assert(clock.now() < deadline, typeof message === 'string' ? message : message());
       await clock.sleep(Math.min(1000, deadline - clock.now()));
     }
   };
   let diagnostics: LimitsMachine | undefined;
+  // While the engine restarts, a status read can fail; that is not ready yet. A timeout names the last reason.
+  const settled = (ready: (s: LimitsSnapshot) => boolean, bound: number, message: string) => {
+    let last: string | undefined;
+    return poll(async () => {
+      try { const s = await diagnostics!.snapshot(); last = undefined; return s; }
+      catch (error) { if (!(error instanceof LimitsReason)) throw error; last = error.message; return { pid: 0, workerPids: [], calls: 0 }; }
+    }, s => s.pid > 0 && ready(s), bound, () => last ? `${message} (last read: ${last})` : message);
+  };
   const check = async (id: string, action: () => Promise<void>) => {
     const started = clock.now();
     try { await action(); result.checks.push({ id: `limits.${id}`, title: `limits: ${id}`, status: 'pass', ms: clock.now() - started }); return true; }
     catch (error) {
       // Never forward machine output, paths, Home rows, item text or arbitrary exception messages.
       result.checks.push({ id: `limits.${id}`, title: `limits: ${id}`, status: 'fail',
-        detail: error instanceof Assertion ? error.message : 'machine or dashboard operation failed', ms: clock.now() - started });
+        detail: error instanceof LimitsReason ? error.message : 'machine or dashboard operation failed', ms: clock.now() - started });
       return false;
     }
   };
@@ -90,7 +98,7 @@ export async function runFreshLimits(machine: Machine, options: FreshLimitsOptio
       diagnostics = await (options.diagnostics ?? openLimitsMachine)(machine, transport);
       await diagnostics.prepare();
       assert(await diagnostics.seed() >= 2, 'fewer than 2 synthetic judgment items seeded');
-      await poll(() => diagnostics!.snapshot(), s => s.pid > 0 && s.workerPids.length > 0, 180_000, 'engine did not become ready');
+      await settled(s => s.workerPids.length > 0, 180_000, 'engine did not become ready');
     })) return result;
     const probe = diagnostics!;
     const unchanged = (before: LimitsSnapshot, after: LimitsSnapshot) => {
@@ -119,7 +127,7 @@ export async function runFreshLimits(machine: Machine, options: FreshLimitsOptio
       const reply = JSON.parse(await exec(`${CLI} limits continue judge.daily_calls --to ${judgeRaiseTarget(stop)}`));
       assert(reply.ok === true, 'Raise did not return ok:true');
       await cleared(judge.id, stop.label);
-      const after = await poll(() => probe.snapshot(), s => s.calls > 1 && s.calls > before.calls, 180_000, 'Raise did not resume judge calls');
+      const after = await settled(s => s.calls > 1 && s.calls > before.calls, 180_000, 'Raise did not resume judge calls');
       unchanged(before, after);
       judge.callsAfter = after.calls; judge.status = 'pass';
     });
@@ -132,7 +140,7 @@ export async function runFreshLimits(machine: Machine, options: FreshLimitsOptio
       // Fresh items so Refill has work to resume. Seeding restarts the engine, so the no-restart window
       // starts after it, and the marker goes in only once startup's billing check (then every 15 min) has run.
       assert(await probe.seed() >= 2, 'fewer than 2 synthetic judgment items seeded');
-      const before = await poll(() => probe.snapshot(), s => s.pid > 0 && s.workerPids.length > 0, 180_000, 'engine did not become ready');
+      const before = await settled(s => s.workerPids.length > 0, 180_000, 'engine did not become ready');
       await probe.marker('write');
       const stops = await poll(list, stops => stops.some(stop => stop.id === venice.id), 90_000, 'venice.credit never appeared within 90 seconds');
       const stop = stops.find(stop => stop.id === venice.id)!;
@@ -143,7 +151,7 @@ export async function runFreshLimits(machine: Machine, options: FreshLimitsOptio
         assert(reply.ok === true, 'Refill did not return ok:true');
         await cleared(venice.id, stop.label);
         assert(!await probe.marker('exists'), 'Refill left its pause marker');
-        const after = await poll(() => probe.snapshot(), s => s.calls > before.calls, 180_000, 'Refill did not resume work');
+        const after = await settled(s => s.calls > before.calls, 180_000, 'Refill did not resume work');
         venice.callsAfter = after.calls;
       } else {
         assert(reply.ok === false && typeof reply.status_message === 'string' && reply.status_message.includes(REFILL_UNCONFIRMED), 'Refill without credentials did not report unconfirmed canConsume=true');

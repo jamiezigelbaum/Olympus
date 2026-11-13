@@ -3,6 +3,10 @@ import { judgeRaiseTarget, runFreshLimits, LIMITS_HOME, type FreshLimitsOptions,
 import type { Machine } from '../scripts/release-check/machine.ts';
 import { renderLimits } from '../scripts/release-check/report.ts';
 import { canaryVerdict } from '../scripts/release-check/canary.ts';
+import { LimitsReason, probeFailure } from '../scripts/release-check/limits-machine.ts';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createTestClock } from './helpers/test-clock.ts';
 
 function rig(fault?: 'missing-judge' | 'no-resume' | 'venice-no-resume' | 'missing-venice' | 'no-credential' | 'no-credential-restart' | 'restart' | 'wrong-home' | 'refill-failed' | 'marker-remains' | 'command-error') {
@@ -161,4 +165,48 @@ test('limits refuses an existing machine before executing anything', async () =>
   const result = await runFreshLimits(existing, r.options);
   expect(result.checks).toEqual([{ id: 'limits.setup', title: 'limits: setup', status: 'fail', detail: 'requires a throwaway machine from driver provision', ms: 0 }]);
   expect(r.events).toEqual([]); expect(r.commands).toEqual([]);
+}, 30_000);
+
+test('a probe failure names its step and nothing the machine printed', () => {
+  const failed = (stdout: string, code = 1, timedOut = false) => probeFailure({ code, stdout, timedOut }).message;
+  expect(failed('{"failed":"seed.restart (CLI exit 3)"}\n')).toBe('limits probe failed at seed.restart (CLI exit 3)');
+  expect(failed('noise\n{"failed":"snapshot.engine-children"}')).toBe('limits probe failed at snapshot.engine-children');
+  // A step that is not a fixed name (a path, a sender) is never forwarded.
+  expect(failed('{"failed":"/private/account somebody@example.test"}')).toBe('limits probe failed before it answered (exit 1)');
+  expect(failed('/private/account Secret title', 2)).toBe('limits probe failed before it answered (exit 2)');
+  expect(failed('', 97)).toBe('limits probe found no Olympus runtime to run under');
+  expect(failed('{"failed":"prepare.config"}', 1, true)).toBe('limits probe timed out');
+});
+
+test('the probe itself answers a failure with only its step', () => {
+  const home = mkdtempSync(join(tmpdir(), 'limits-probe-home-'));
+  const run = Bun.spawnSync([process.execPath, join(import.meta.dir, '../scripts/release-check/limits-probe.ts')], {
+    stdin: Buffer.from(JSON.stringify({ command: 'prepare', scratch: join(home, 'scratch') })), env: { ...process.env, HOME: home },
+  });
+  expect(run.exitCode).toBe(1);
+  // No installed CLI in this home, so prepare stops reading engine status.
+  expect(probeFailure({ code: 1, stdout: run.stdout.toString(), timedOut: false }).message).toBe('limits probe failed at prepare.engine-status');
+  expect(run.stderr.toString()).toBe('');
+}, 30_000);
+
+test('a status read failing while the engine restarts is not ready yet, and a timeout names the last reason', async () => {
+  for (const persistent of [false, true]) {
+    const r = rig();
+    let reads = 0;
+    const snapshot = r.diagnostics.snapshot;
+    r.diagnostics.snapshot = async () => {
+      reads += 1;
+      if (persistent || reads <= 3) throw new LimitsReason('limits probe failed at snapshot.engine-status (CLI exit 1)');
+      return snapshot();
+    };
+    const result = await runFreshLimits(r.machine, r.options);
+    const setup = result.checks.find(check => check.id === 'limits.setup');
+    if (persistent) {
+      expect(setup).toMatchObject({ status: 'fail', detail: 'engine did not become ready (last read: limits probe failed at snapshot.engine-status (CLI exit 1))' });
+    } else {
+      expect(setup?.status).toBe('pass');
+      expect(result.checks.every(check => check.status === 'pass')).toBe(true);
+    }
+    expect(r.closed()).toBe(true);
+  }
 }, 30_000);
