@@ -385,13 +385,19 @@ for (const kind of ['embedding', 'reranker'] as const) test(`${kind}: late compl
   const clock = createTestClock();
   let finishSlow!: (scores: number[]) => void;
   let calls = 0;
-  const scorer = async () => { calls++; return new Promise<readonly number[]>(resolve => { finishSlow = resolve; }); };
+  let finishFast!: (scores: number[]) => void;
+  // One backend throughout: slow first, then a fast in-flight call, then quick.
+  const scorer: WindowScorer = async (_query, windows) => {
+    calls++;
+    if (calls === 1) return new Promise<readonly number[]>(resolve => { finishSlow = resolve; });
+    if (calls === 2) return new Promise<readonly number[]>(resolve => { finishFast = resolve; });
+    return windows.map(() => 0);
+  };
   const placer = createEvidenceWindowPlacer(QUESTION, fakeTimers(clock));
   const pending = run(placer, scorer);
   await clock.advance(1400);
   // This second question starts before the slow completion is known.
-  let finishFast!: (scores: number[]) => void;
-  const fast = run(createEvidenceWindowPlacer(QUESTION, fakeTimers(clock)), () => new Promise(resolve => { finishFast = resolve; }));
+  const fast = run(createEvidenceWindowPlacer(QUESTION, fakeTimers(clock)), scorer);
   await clock.advance(100);
   expect(await pending).toEqual(chunks);
   expect(placer.audit).toMatchObject({ windowsSubmitted: 8, calls: [{ windows: 8, ms: 1500, outcome: 'timed_out' }] });
@@ -400,14 +406,14 @@ for (const kind of ['embedding', 'reranker'] as const) test(`${kind}: late compl
   await flushMicrotasks();
   const skipped = createEvidenceWindowPlacer(QUESTION, fakeTimers(clock));
   expect(await run(skipped, scorer)).toEqual(chunks);
-  expect(calls).toBe(1);
+  expect(calls).toBe(2);
   expect(skipped.audit).toMatchObject({ skipped: 'slow_scorer', seats: 0, windowsSubmitted: 0, elapsedMs: 0, calls: [] });
   await clock.advance(10);
   finishFast(Array(8).fill(0));
   await fast;
   const recovered = createEvidenceWindowPlacer(QUESTION, fakeTimers(clock));
-  await run(recovered, async (_query, windows) => { calls++; return windows.map(() => 0); });
-  expect(calls).toBe(2);
+  await run(recovered, scorer);
+  expect(calls).toBe(3);
   expect(recovered.audit.windowsScored).toBe(8);
 });
 
@@ -463,7 +469,9 @@ test('a scorer skipped as slow is tried again after a minute, so placement is ne
   const chunks = ['o'.repeat(600)];
   const clock = createTestClock();
   let calls = 0;
-  const slow: WindowScorer = (_query, windows) => { calls++; return new Promise(settle => { clock.setTimeout(() => settle(windows.map(() => 0)), 2_000); }); };
+  // The same backend: slow on its first call, quick once it has recovered.
+  const slow: WindowScorer = async (_query, windows) => { calls++;
+    return calls === 1 ? new Promise(settle => { clock.setTimeout(() => settle(windows.map(() => 0)), 2_000); }) : windows.map(() => 0); };
   const first = createEvidenceWindowPlacer(QUESTION, fakeTimers(clock));
   const pending = first.place(chunks, { texts: ['x'.repeat(4000)], scoreWindows: slow });
   await clock.advance(2_000);
@@ -475,9 +483,22 @@ test('a scorer skipped as slow is tried again after a minute, so placement is ne
   expect(calls).toBe(1);
   await clock.advance(60_000);
   const retried = createEvidenceWindowPlacer(QUESTION, fakeTimers(clock));
-  await retried.place(chunks, { texts: ['x'.repeat(4000)], scoreWindows: async (_query, windows) => { calls++; return windows.map(() => 0); } });
+  await retried.place(chunks, { texts: ['x'.repeat(4000)], scoreWindows: slow });
   expect(calls).toBe(2);
   expect(retried.audit.windowsScored).toBe(8);
+});
+
+test('one store\'s slow embedding history does not skip another store in the same question', async () => {
+  const clock = createTestClock();
+  const seat = (scoreWindows: WindowScorer) => ({ chunks: ['o'.repeat(600)], source: { texts: ['x'.repeat(4000)], scoreWindows } });
+  let fastCalls = 0;
+  const slowStore: WindowScorer = async (_query, windows) => { clock.set(clock.now() + 1_000); return windows.map(() => 0); };
+  const fastStore: WindowScorer = async (_query, windows) => { fastCalls++; return windows.map(() => 0); };
+  const placer = createEvidenceWindowPlacer(QUESTION, fakeTimers(clock));
+  await placer.placeAll([seat(slowStore), seat(fastStore)]);
+  expect(fastCalls).toBe(1);
+  expect(placer.audit.skipped).toBeUndefined();
+  expect(placer.audit.calls.map(call => call.outcome)).toEqual(['scored', 'scored']);
 });
 
 test('a placed window stays provable: its stored chunk hashes still bind to it for release', async () => {

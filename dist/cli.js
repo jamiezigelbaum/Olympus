@@ -79873,6 +79873,14 @@ var init_analyst_openclaw_infer = __esm(() => {
 });
 
 // src/core/evidence-window-placement.ts
+function historyFor(kind, score) {
+  if (kind === "reranker")
+    return rerankerHistory;
+  let history = embeddingHistory.get(score);
+  if (!history)
+    embeddingHistory.set(score, history = { ms: 0, at: 0 });
+  return history;
+}
 function createEvidenceWindowPlacer(query, timers = systemTimers) {
   const audit = { seats: 0, windowsScored: 0, windowsSubmitted: 0, calls: [], scorer: "none", elapsedMs: 0, timedOut: false };
   let startedAt;
@@ -79902,7 +79910,8 @@ function createEvidenceWindowPlacer(query, timers = systemTimers) {
         audit.timedOut = true;
         break;
       }
-      if (lastCall[kind].ms > remaining && timers.now() - lastCall[kind].at < SLOW_SCORER_RETRY_MS) {
+      const lastCall = historyFor(kind, score);
+      if (lastCall.ms > remaining && timers.now() - lastCall.at < SLOW_SCORER_RETRY_MS) {
         audit.skipped = "slow_scorer";
         continue;
       }
@@ -79923,7 +79932,8 @@ function createEvidenceWindowPlacer(query, timers = systemTimers) {
         }, remaining);
       });
       const scoring = Promise.resolve().then(() => score(query, windows.map((window2) => window2.text), controller.signal)).finally(() => {
-        lastCall[kind] = { ms: Math.max(0, timers.now() - callStartedAt), at: timers.now() };
+        lastCall.ms = Math.max(0, timers.now() - callStartedAt);
+        lastCall.at = timers.now();
       });
       try {
         const scores = await Promise.race([scoring, timeout]);
@@ -80018,7 +80028,7 @@ function utf8Prefix(text2, maxBytes) {
   }
   return text2.slice(0, end);
 }
-var WINDOW_PLACEMENT_BUDGET_MS = 1500, WINDOW_CHARS = 600, WINDOW_STRIDE = 300, MAX_WINDOWS_PER_SEAT = 8, MAX_WINDOWS_PER_QUESTION = 24, KEEP_ORIGINAL = -1, systemTimers, SLOW_SCORER_RETRY_MS = 60000, lastCall;
+var WINDOW_PLACEMENT_BUDGET_MS = 1500, WINDOW_CHARS = 600, WINDOW_STRIDE = 300, MAX_WINDOWS_PER_SEAT = 8, MAX_WINDOWS_PER_QUESTION = 24, KEEP_ORIGINAL = -1, systemTimers, SLOW_SCORER_RETRY_MS = 60000, rerankerHistory, embeddingHistory;
 var init_evidence_window_placement = __esm(() => {
   init_chunk_selection();
   systemTimers = {
@@ -80026,7 +80036,8 @@ var init_evidence_window_placement = __esm(() => {
     setTimeout: (callback, ms) => setTimeout(callback, ms),
     clearTimeout: (handle) => clearTimeout(handle)
   };
-  lastCall = { reranker: { ms: 0, at: 0 }, embedding: { ms: 0, at: 0 } };
+  rerankerHistory = { ms: 0, at: 0 };
+  embeddingHistory = new WeakMap;
 });
 
 // src/core/evidence-reranker.ts

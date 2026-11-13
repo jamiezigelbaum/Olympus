@@ -55,7 +55,17 @@ type ScorerKind = 'reranker' | 'embedding';
 // A slow scorer is tried again after a minute, so a skip is never permanent:
 // while skipped, no call runs that could report it fast again.
 const SLOW_SCORER_RETRY_MS = 60_000;
-const lastCall: Record<ScorerKind, { ms: number; at: number }> = { reranker: { ms: 0, at: 0 }, embedding: { ms: 0, at: 0 } };
+// History is per backend: the one built-in reranker, or each store's embedding
+// scorer, so one slow store never skips another store's placement.
+type CallHistory = { ms: number; at: number };
+const rerankerHistory: CallHistory = { ms: 0, at: 0 };
+const embeddingHistory = new WeakMap<WindowScorer, CallHistory>();
+function historyFor(kind: ScorerKind, score: WindowScorer): CallHistory {
+  if (kind === 'reranker') return rerankerHistory;
+  let history = embeddingHistory.get(score);
+  if (!history) embeddingHistory.set(score, history = { ms: 0, at: 0 });
+  return history;
+}
 
 /** One shared deadline and window allowance for a whole question. Fail open. */
 export function createEvidenceWindowPlacer(query: string, timers = systemTimers) {
@@ -82,7 +92,8 @@ export function createEvidenceWindowPlacer(query: string, timers = systemTimers)
       audit.scorer = kind;
       const remaining = WINDOW_PLACEMENT_BUDGET_MS - (startedAt === undefined ? 0 : timers.now() - startedAt);
       if (remaining <= 0) { audit.timedOut = true; break; }
-      if (lastCall[kind].ms > remaining && timers.now() - lastCall[kind].at < SLOW_SCORER_RETRY_MS) { audit.skipped = 'slow_scorer'; continue; }
+      const lastCall = historyFor(kind, score);
+      if (lastCall.ms > remaining && timers.now() - lastCall.at < SLOW_SCORER_RETRY_MS) { audit.skipped = 'slow_scorer'; continue; }
       startedAt ??= timers.now();
       const windows = group.flatMap(entry => entry.windows);
       audit.seats += group.length;
@@ -99,7 +110,7 @@ export function createEvidenceWindowPlacer(query: string, timers = systemTimers)
       // Measure the underlying call, not the race: overload may only become
       // known after this question has already returned at its deadline.
       const scoring = Promise.resolve().then(() => score(query, windows.map(window => window.text), controller.signal))
-        .finally(() => { lastCall[kind] = { ms: Math.max(0, timers.now() - callStartedAt), at: timers.now() }; });
+        .finally(() => { lastCall.ms = Math.max(0, timers.now() - callStartedAt); lastCall.at = timers.now(); });
       try {
         const scores = await Promise.race([scoring, timeout]);
         // A synchronous scorer can consume the deadline before the timer runs.

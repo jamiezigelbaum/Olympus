@@ -22078,8 +22078,10 @@ var init_analyst_openclaw_infer = __esm(() => {
 });
 
 // src/core/evidence-window-placement.ts
+var embeddingHistory;
 var init_evidence_window_placement = __esm(() => {
   init_chunk_selection();
+  embeddingHistory = new WeakMap;
 });
 
 // src/core/evidence-reranker.ts
