@@ -272,6 +272,8 @@ if (verb === 'provision') {
   // The split update's forced failure: a copy of the candidate whose front cannot start. The installer rolls it back unless told not to.
   if (arg('--candidate').includes('upgrade-broken-front')) {
     mark('forced');
+    if (process.env.FAKE_DRIVER_ERROR === '1') { console.error('copy to the machine failed'); process.exit(1); }
+    mark('broken-front-ran');
     if (process.env.FAKE_BROKEN_ACCEPTED === '1') { mark('upgraded'); process.exit(0); }
     if (process.env.FAKE_LOST_STORE === '1') mark('lost-store');
     console.error('the engine did not become healthy; rolled back'); process.exit(1);
@@ -305,7 +307,7 @@ if (verb === 'provision') {
     lanes: [{ source: 'gmail.email', tier: 'internal', exists: true, items: 2 }, { source: 'telegram.messages', tier: 'internal', exists: true, items: 2 }], archives: 1, traces: [] });
   else if (sub === 'engine-split-on') { mark('split-on'); say({ ok: true }); }
   else if (sub === 'front-mark') { mark('front-mark'); say({ ok: true }); }
-  else if (sub === 'front-watch') say({ ok: true, watchMs: 150000, logHits: { frontStoreWrite: process.env.FAKE_FRONT_CRASH === '1' ? 3 : 0, exitedUnexpectedly: 0 },
+  else if (sub === 'front-watch') say({ ok: true, watchMs: 150000, logHits: { frontStoreWrite: process.env.FAKE_FRONT_CRASH === '1' ? 3 : 0, exitedUnexpectedly: 0, brokenFront: script.includes('--watch-s 0') && flag('broken-front-ran') ? 1 : 0 },
     samples: process.env.FAKE_FRONT_CRASH === '1' ? [{ front: [20], background: [10] }, { front: [], background: [10] }, { front: [21], background: [10] }] : [{ front: [20], background: [10] }, { front: [20], background: [10] }] });
   else if (sub === 'store-files') {
     if (script.includes('--save')) say({ ok: true, count: 5 });
@@ -340,7 +342,7 @@ let driverPath: string;
 let candidateDir: string;
 let baselineDir: string;
 const saved: Record<string, string | undefined> = {};
-const SPLIT_KEYS = ['FAKE_BROKEN_ACCEPTED', 'FAKE_LOST_STORE', 'FAKE_FRONT_CRASH'];
+const SPLIT_KEYS = ['FAKE_BROKEN_ACCEPTED', 'FAKE_LOST_STORE', 'FAKE_FRONT_CRASH', 'FAKE_DRIVER_ERROR'];
 const ENV_KEYS = ['FAKE_STATE', 'FAKE_OLD_POLICY', 'FAKE_NEW_POLICY', 'FAKE_UPGRADE_FAIL', 'FAKE_NO_MIGRATION', 'FAKE_TOKEN_REFUSED', ...SPLIT_KEYS];
 
 beforeEach(() => {
@@ -527,7 +529,7 @@ describe('the update to a split engine, against a scripted machine (ops#151)', (
     expect(checkOf(report, 'upgrade.forced-failure.rollback')?.detail).toContain('not 1.0.0');
     delete process.env.FAKE_BROKEN_ACCEPTED;
     rmSync(join(dir, 'driver.log'));
-    for (const name of ['upgraded', 'forced']) rmSync(join(dir, name), { force: true });
+    for (const name of ['upgraded', 'forced', 'broken-front-ran']) rmSync(join(dir, name), { force: true });
     process.env.FAKE_LOST_STORE = '1';
     report = await runReleaseCheck(splitOptions());
     expect(checkOf(report, 'upgrade.forced-failure.rollback')?.status).toBe('pass');
@@ -542,6 +544,16 @@ describe('the update to a split engine, against a scripted machine (ops#151)', (
       expect(checkOf(report, id)?.detail).toContain('was not made');
     }
     expect(driverLog().filter((line) => line.startsWith('upgrade'))).toHaveLength(1);
+  }, 120_000);
+
+  test('a driver error before the broken front started is not read as the installer\'s rejection', async () => {
+    realCandidate();
+    process.env.FAKE_DRIVER_ERROR = '1';
+    const report = await runReleaseCheck(splitOptions());
+    for (const id of ['upgrade.forced-failure.installer', 'upgrade.forced-failure.rollback', 'upgrade.forced-failure.stores']) {
+      expect(checkOf(report, id)?.status).toBe('fail');
+      expect(checkOf(report, id)?.detail).toContain('before the broken front started');
+    }
   }, 120_000);
 
   test('a front that crashes after the real update fails front.steady', async () => {

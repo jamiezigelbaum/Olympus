@@ -27,6 +27,7 @@ import { until, type ArchiveHost } from './archive-stages.ts';
 import { runJourney, type Journey, type JourneyTrace } from './journey.ts';
 import { OPEN_ALL_SOURCES } from './journeys.ts';
 import type { CheckResult } from './report.ts';
+import { BROKEN_FRONT_LINE } from './upgrade-split.ts';
 
 export const FRONT_WATCH_S = 150;
 const SAMPLE_MS = 3_000;
@@ -59,7 +60,7 @@ export interface FrontSteadyObservation {
   samples: EnginePids[];
   watchMs: number;
   /** Lines of the engine's log written since just before the restart that name a crash (counts by kind, never the text). */
-  logHits: { frontStoreWrite: number; exitedUnexpectedly: number };
+  logHits: { frontStoreWrite: number; exitedUnexpectedly: number; brokenFront?: number };
   traces: JourneyTrace[];
 }
 
@@ -116,10 +117,12 @@ const archiveCount = (json: unknown): number => {
 const sizeOf = (path: string): number => { try { return statSync(path).size; } catch { return 0; } };
 
 /** Counts the crash lines in what the logs gained since `offsets`. Only counts leave the machine. */
-export function crashLines(text: string): { frontStoreWrite: number; exitedUnexpectedly: number } {
+export function crashLines(text: string): { frontStoreWrite: number; exitedUnexpectedly: number; brokenFront: number } {
   return {
     frontStoreWrite: (text.match(/front_store_write/g) ?? []).length,
     exitedUnexpectedly: (text.match(/exited unexpectedly/g) ?? []).length,
+    // The forced failed update's own front (upgrade-split.ts): proof it started before it exited.
+    brokenFront: text.split(BROKEN_FRONT_LINE).length - 1,
   };
 }
 

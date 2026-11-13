@@ -84,7 +84,7 @@ describe('front steadiness', () => {
 
   test('crash lines are counted, never quoted', () => {
     expect(crashLines('ok\nError [front_store_write]: x\nOlympus front exited unexpectedly.\nError [front_store_write]: y\n'))
-      .toEqual({ frontStoreWrite: 2, exitedUnexpectedly: 1 });
+      .toEqual({ frontStoreWrite: 2, exitedUnexpectedly: 1, brokenFront: 0 });
   });
 
   test('the agent\'s status names the archive\'s state', () => {

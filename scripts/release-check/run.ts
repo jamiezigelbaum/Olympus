@@ -1374,11 +1374,14 @@ async function prepareSplitUpdate(run: Run, workDir: string, beforeVersion: stri
     await run.agent('front-mark', '', 60_000);
     return { ...(set ? { set } : {}), ...(storeFiles !== undefined ? { storeFiles } : {}) };
   }
+  await run.agent('front-mark', '', 60_000);
   try {
     await run.phase('upgrade-forced-failure', () => run.machine!.upgrade(broken));
   } catch (error) {
     obs.installer = { failed: true, detail: (error instanceof Error ? error.message : String(error)).slice(0, 300) };
   }
+  const ran = await run.agent('front-watch', '--watch-s 0', 60_000);
+  obs.frontRan = Number((ran.result as Partial<FrontWatch> | undefined)?.logHits?.brokenFront ?? 0);
   const back = await run.phase('forced-failure-engine', () => run.agent('await-engine', '--timeout-s 300', 330_000));
   const build = await run.agent('engine-build', '', 60_000);
   obs.engine = {

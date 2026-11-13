@@ -110,6 +110,8 @@ export function compareStoreFiles(before: readonly string[], now: readonly strin
 export interface ForcedFailureObservation {
   /** The installer's own verdict on the broken copy: it must report a failure. */
   installer: { failed: boolean; detail?: string };
+  /** How many times the broken front's own line reached the engine log: proof the update got as far as starting it. */
+  frontRan?: number;
   /** The engine after it: ready, and the earlier release's version. */
   engine: { ready: boolean; detail?: string; version?: string | null };
   beforeVersion?: string | null;
@@ -117,33 +119,45 @@ export interface ForcedFailureObservation {
 }
 
 export function forcedFailureChecks(obs: ForcedFailureObservation): CheckResult[] {
+  // A failure before the broken front started (a copy or transfer error in the driver) exercised no rollback: the untouched
+  // release would read as rolled back. Every check fails then, and says so.
+  if (obs.installer.failed && !(Number(obs.frontRan) > 0)) {
+    const detail = `the update failed before the broken front started, so no rollback was exercised: ${obs.installer.detail ?? 'no detail'}`;
+    return forcedFailureCheckShapes().map((check) => ({ ...check, status: 'fail' as const, detail }));
+  }
   const version = obs.engine.version ?? null;
   const back = obs.engine.ready && version !== null && version === (obs.beforeVersion ?? null);
   const files = obs.storeFiles?.after;
   const kept = files !== undefined && files.missing === 0 && files.count === obs.storeFiles!.before;
+  const [installer, rollback, stores] = forcedFailureCheckShapes();
   return [
     {
-      id: 'upgrade.forced-failure.installer',
-      title: 'An update whose front crashes on start is reported as failed by the installer',
+      ...installer!,
       status: obs.installer.failed ? 'pass' : 'fail',
       detail: obs.installer.failed ? (obs.installer.detail ?? 'the installer exited with an error') : 'the installer reported a usable install of a build whose front cannot start',
     },
     {
-      id: 'upgrade.forced-failure.rollback',
-      title: 'After the failed update, the earlier release is running and healthy',
+      ...rollback!,
       status: back ? 'pass' : 'fail',
       detail: back
         ? `the engine is ready on ${version}`
         : !obs.engine.ready ? `the engine is not ready: ${obs.engine.detail ?? 'no detail'}` : `the engine reports ${version ?? 'no version'}, not ${obs.beforeVersion ?? 'the earlier release'}`,
     },
     {
-      id: 'upgrade.forced-failure.stores',
-      title: 'After the failed update, every store file is still there and there are as many as before',
+      ...stores!,
       status: kept ? 'pass' : 'fail',
       detail: files === undefined
         ? 'the store files were not counted'
         : `${obs.storeFiles!.before} before, ${files.count} after: ${files.missing} missing, ${files.extra} new`,
     },
+  ];
+}
+
+function forcedFailureCheckShapes(): Array<Pick<CheckResult, 'id' | 'title'>> {
+  return [
+    { id: 'upgrade.forced-failure.installer', title: 'An update whose front crashes on start is reported as failed by the installer' },
+    { id: 'upgrade.forced-failure.rollback', title: 'After the failed update, the earlier release is running and healthy' },
+    { id: 'upgrade.forced-failure.stores', title: 'After the failed update, every store file is still there and there are as many as before' },
   ];
 }
 

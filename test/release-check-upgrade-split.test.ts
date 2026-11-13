@@ -75,10 +75,16 @@ describe('store files', () => {
   });
 
   test('a rolled-back update with the same count but another file in place of a lost one still fails', () => {
-    const checks = forcedFailureChecks({ installer: { failed: true }, engine: { ready: true, version: '1.4.4' }, beforeVersion: '1.4.4', storeFiles: { before: 4, after: { count: 4, missing: 1, extra: 1 } } });
+    const checks = forcedFailureChecks({ installer: { failed: true }, frontRan: 1, engine: { ready: true, version: '1.4.4' }, beforeVersion: '1.4.4', storeFiles: { before: 4, after: { count: 4, missing: 1, extra: 1 } } });
     expect(checks.map((check) => [check.id, check.status])).toEqual([
       ['upgrade.forced-failure.installer', 'pass'], ['upgrade.forced-failure.rollback', 'pass'], ['upgrade.forced-failure.stores', 'fail'],
     ]);
-    expect(forcedFailureChecks({ installer: { failed: true }, engine: { ready: false, detail: 'not ready' }, beforeVersion: '1.4.4' })[1]!.detail).toContain('not ready');
+    expect(forcedFailureChecks({ installer: { failed: true }, frontRan: 1, engine: { ready: false, detail: 'not ready' }, beforeVersion: '1.4.4' })[1]!.detail).toContain('not ready');
+  });
+
+  test('an update that failed before the broken front ever started proves no rollback: every forced-failure check fails', () => {
+    const checks = forcedFailureChecks({ installer: { failed: true, detail: 'copy failed' }, frontRan: 0, engine: { ready: true, version: '1.4.4' }, beforeVersion: '1.4.4', storeFiles: { before: 4, after: { count: 4, missing: 0, extra: 0 } } });
+    expect(checks.map((check) => check.status)).toEqual(['fail', 'fail', 'fail']);
+    expect(checks[1]!.detail).toContain('before the broken front started');
   });
 });
