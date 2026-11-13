@@ -38707,6 +38707,40 @@ function applyPerCorpusResultBudget(ranked, budget) {
     }))
   };
 }
+function applyStrengthPoolBudget(ranked, budget, storeOrder, storeDepth) {
+  const byCorpus = new Map;
+  for (const candidate of ranked) {
+    const bucket = byCorpus.get(candidate.item.corpusId);
+    if (bucket)
+      bucket.push(candidate);
+    else
+      byCorpus.set(candidate.item.corpusId, [candidate]);
+  }
+  if (ranked.length <= budget || byCorpus.size >= budget)
+    return applyPerCorpusResultBudget(ranked, budget);
+  const rankOf = (corpusId) => storeOrder.get(corpusId) ?? Number.POSITIVE_INFINITY;
+  const buckets = [...byCorpus.entries()].map(([corpusId, bucket], index) => ({ corpusId, bucket, index })).sort((left, right) => rankOf(left.corpusId) - rankOf(right.corpusId) || left.index - right.index).map((entry) => entry.bucket);
+  const seated = new Set(buckets.map((bucket) => bucket[0].id));
+  const depth = Math.max(1, Math.floor(storeDepth));
+  for (const bucket of buckets) {
+    for (const candidate of bucket.slice(1, depth)) {
+      if (seated.size >= budget)
+        break;
+      seated.add(candidate.id);
+    }
+  }
+  for (let turn = depth;seated.size < budget; turn += 1) {
+    const before = seated.size;
+    for (const bucket of buckets) {
+      const candidate = bucket[turn];
+      if (candidate && seated.size < budget)
+        seated.add(candidate.id);
+    }
+    if (seated.size === before)
+      break;
+  }
+  return { hits: ranked.filter((candidate) => seated.has(candidate.id)).map((candidate) => candidate.item), degradations: [] };
+}
 function withReservedLeaderSeats(budgeted, pool, budget) {
   if (budget < 3 || budgeted.hits.length < 1)
     return budgeted;
@@ -80573,7 +80607,7 @@ function rerankPoolSize(reranker, maxResults) {
   const pool = Number.isFinite(reranker.poolSize) ? Math.floor(reranker.poolSize) : DEFAULT_RERANK_POOL_SIZE;
   return Math.max(Math.floor(maxResults), Math.min(MAX_RERANK_POOL_SIZE, pool));
 }
-var RERANK_PASSAGE_CHARS = 2000, DEFAULT_RERANK_TIMEOUT_MS = 5000, DEFAULT_RERANK_POOL_SIZE = 30, MAX_RERANK_POOL_SIZE = 400, systemTimers;
+var RERANK_PASSAGE_CHARS = 2000, DEFAULT_RERANK_TIMEOUT_MS = 5000, DEFAULT_RERANK_POOL_SIZE = 30, RERANK_POOL_STORE_DEPTH = 10, MAX_RERANK_POOL_SIZE = 400, systemTimers;
 var init_evidence_reranker = __esm(() => {
   systemTimers = {
     now: () => Date.now(),
@@ -80769,7 +80803,7 @@ async function routePreparedSourceIndexSearch(options) {
     limit: lanes.reduce((total, lane) => total + lane.items.length, 0),
     tieBreaker: (left, right) => compareTiedRoutedCandidates(left, right, laneOrder)
   });
-  const budgeted = applyPerCorpusResultBudget(fusedAll, request.maxResults);
+  const budgeted = request.poolAllocation ? applyStrengthPoolBudget(fusedAll, request.maxResults, laneOrder, request.poolAllocation.storeDepth) : applyPerCorpusResultBudget(fusedAll, request.maxResults);
   const pool = fusedAll.map((candidate) => candidate.item);
   const leadered = withReservedLeaderSeats(budgeted, pool, request.maxResults);
   const recency = request.temporalIntent ? withReservedRecencySeats(leadered, pool, request.maxResults) : { ...leadered, recencySeats: 0 };
@@ -81152,7 +81186,7 @@ async function buildEvidencePackDetailed(input) {
 async function buildPreparedEvidencePackDetailed(input) {
   const reranker = input.reranker && !input.selectedItems?.length && !questionHasTemporalIntent(input) ? input.reranker : undefined;
   const retrievalLimit = reranker ? rerankPoolSize(reranker, input.maxResults) : input.maxResults;
-  const routed = input.selectedItems?.length ? selectedItemsToRoutedSlice(input) : await runRoutedSearches(input, retrievalLimit);
+  const routed = input.selectedItems?.length ? selectedItemsToRoutedSlice(input) : await runRoutedSearches(input, retrievalLimit, reranker ? { storeDepth: RERANK_POOL_STORE_DEPTH } : undefined);
   const visibleHits = input.visibilityGate && !input.selectedItems?.length ? await applySourceIndexVisibilityGate(input.visibilityGate, routed.hits) : routed.hits;
   const routedHits = input.selectedItems?.length ? routed.hits : visibleHits;
   const candidates = [];
@@ -81470,11 +81504,11 @@ function selectedItemsToRoutedSlice(input) {
     encounteredSecureLocal
   };
 }
-async function runRoutedSearches(input, retrievalLimit = input.maxResults) {
+async function runRoutedSearches(input, retrievalLimit = input.maxResults, poolAllocation) {
   const literalQuery = literalSearchQuery(input);
   const pendingPlan = input.queryPlanner ? startQueryPlanner(input.queryPlanner, input.question) : undefined;
   const budget = searchBudget(input);
-  const literalRun = await runRoutedSearch(input, literalQuery, 1, retrievalLimit, budget.firstLaneTimeoutMs(), budget.deadlineAtMs);
+  const literalRun = await runRoutedSearch(input, literalQuery, 1, retrievalLimit, budget.firstLaneTimeoutMs(), budget.deadlineAtMs, poolAllocation);
   if (!pendingPlan)
     return literalRun;
   if (isStrongLiteralRun(literalRun, input.maxResults)) {
@@ -81495,7 +81529,7 @@ async function runRoutedSearches(input, retrievalLimit = input.maxResults) {
       recordSourceAnswerQueryPlannerDisposition("search_budget_spent");
       break;
     }
-    runs.push(await runRoutedSearch(input, query, runs.length + 1, retrievalLimit, laneTimeoutMs, budget.deadlineAtMs));
+    runs.push(await runRoutedSearch(input, query, runs.length + 1, retrievalLimit, laneTimeoutMs, budget.deadlineAtMs, poolAllocation));
   }
   if (runs.length === 1)
     return literalRun;
@@ -81551,7 +81585,7 @@ function searchBudget(input) {
     }
   };
 }
-function runRoutedSearch(input, query, ordinal, maxResults, laneTimeoutMs, searchDeadlineAtMs) {
+function runRoutedSearch(input, query, ordinal, maxResults, laneTimeoutMs, searchDeadlineAtMs, poolAllocation) {
   return observeSourceAnswerRoutedQuery(ordinal, () => routeSourceIndexSearch({
     registry: input.registry,
     adapters: input.adapters,
@@ -81560,7 +81594,8 @@ function runRoutedSearch(input, query, ordinal, maxResults, laneTimeoutMs, searc
       maxResults,
       ...input.corpusIds ? { corpusIds: input.corpusIds } : {},
       context: input.searchContext,
-      ...questionHasTemporalIntent(input) ? { temporalIntent: true } : {}
+      ...questionHasTemporalIntent(input) ? { temporalIntent: true } : {},
+      ...poolAllocation ? { poolAllocation } : {}
     },
     laneTimeoutMs,
     ...searchDeadlineAtMs !== undefined ? { searchDeadlineAtMs } : {},
