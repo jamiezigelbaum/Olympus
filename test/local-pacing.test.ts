@@ -24,6 +24,7 @@ import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import {
   GO_EASY_LOCAL_WORK_RECENT_MS,
   GO_EASY_REFRESH_MS,
+  GO_EASY_TRICKLE_EMBED_ITEMS,
   embedsOnThisComputer,
   LocalWorkPacer,
   parseLogindIdleSeconds,
@@ -355,8 +356,8 @@ function connector(items: RawItem[]): SourceConnector {
   };
 }
 
-test('local embedding embeds one item a pass while trickling, and drains at full speed', async () => {
-  const items = Array.from({ length: 5 }, (_, n) => rawItem(`note-${n}`));
+test('local embedding embeds a few items a pass while trickling, and drains at full speed', async () => {
+  const items = Array.from({ length: GO_EASY_TRICKLE_EMBED_ITEMS + 4 }, (_, n) => rawItem(`note-${n}`));
   const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: 'internal.fixture.files', family: 'file', trustDomain: 'internal', tierLedger: null });
   cleanup.push(() => store.close());
   await store.syncFromConnector(connector(items), { fetchContent: true, placement: () => buildSourceSensitivity({ trustTier: 'S3', trustDomain: 'internal' }) });
@@ -371,7 +372,7 @@ test('local embedding embeds one item a pass while trickling, and drains at full
     () => () => [{ store, provider }], { trickle: () => trickle, onProgress: target => { progress.push(target.provider); } });
   const sweep = swept!.tasks.find(task => task.kind === 'embed')!;
   const slow = await sweep.run();
-  expect(slow.counts).toMatchObject({ chunks_embedded: 1, items_queued: 4 });
+  expect(slow.counts).toMatchObject({ chunks_embedded: GO_EASY_TRICKLE_EMBED_ITEMS, items_queued: 4 });
   expect(progress).toEqual([provider]);
   expect(slow.continueSoon).toBeUndefined();
   trickle = false;

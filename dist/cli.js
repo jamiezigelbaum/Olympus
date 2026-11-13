@@ -201381,7 +201381,7 @@ function spawnCaffeinate() {
   child.unref();
   return child;
 }
-var GO_EASY_IDLE_FULL_SPEED_MS, GO_EASY_REFRESH_MS = 30000, GO_EASY_NIGHT, GO_EASY_LOCAL_WORK_RECENT_MS, GO_EASY_TRICKLE_GAP_MS = 20000, GO_EASY_TRICKLE_EMBED_ITEMS = 1, defaultExec3 = (command, args) => new Promise((resolve) => {
+var GO_EASY_IDLE_FULL_SPEED_MS, GO_EASY_REFRESH_MS = 30000, GO_EASY_NIGHT, GO_EASY_LOCAL_WORK_RECENT_MS, GO_EASY_TRICKLE_GAP_MS = 20000, GO_EASY_TRICKLE_EMBED_ITEMS = 4, defaultExec3 = (command, args) => new Promise((resolve) => {
   try {
     execFile4(command, [...args], { timeout: 3000, maxBuffer: 256 * 1024, encoding: "utf8" }, (error, stdout) => {
       resolve(error ? undefined : stdout);
@@ -202666,6 +202666,17 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
           }
         };
       }
+      if (counts.chunks_embedded > 0) {
+        return {
+          status,
+          counts,
+          embeddingSweep,
+          retryAt: {
+            at: new Date(attemptedAt + EMBEDDING_SWEEP_INTERVAL_MS).toISOString(),
+            degradedReason: EMBEDDING_PROVIDER_UNAVAILABLE_REASON
+          }
+        };
+      }
       const previousMs = context?.effectiveIntervalMs ?? EMBEDDING_SWEEP_INTERVAL_MS;
       const backoffMs = Math.min(Math.max(previousMs, EMBEDDING_SWEEP_INTERVAL_MS) * 2, EMBEDDING_SWEEP_MAX_BACKOFF_MS);
       return {
@@ -203489,7 +203500,7 @@ var init_source_scheduler = __esm(() => {
       this.counts = options.counts ? sanitizeSchedulerCounts(options.counts) : undefined;
     }
   };
-  EMBEDDING_SWEEP_MAX_BACKOFF_MS = 30 * 60000;
+  EMBEDDING_SWEEP_MAX_BACKOFF_MS = 5 * 60000;
   EMBEDDING_SWEEP_STORE_DEADLINE_MS = 10 * 60000;
   EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
   HONEST_SCHEDULER_ERROR_KINDS = new Set([
@@ -213963,6 +213974,10 @@ function createArchiveImportDashboard(options) {
       if (from)
         requests.remove(from.requestId);
     };
+    const alreadyImported = (archiveId) => {
+      if (from)
+        requests.settle(from.requestId, { status: "already_imported", archiveId });
+    };
     const formats = only ? only.formats : undefined;
     const prepared = prepareArchiveImport({ state, path, targets: options.runtime.targets, ...formats ? { formats } : {} });
     if (prepared.kind === "unsupported" && only && formats) {
@@ -214002,19 +214017,21 @@ function createArchiveImportDashboard(options) {
             return refusal("source_unavailable", ARCHIVE_APPROVE_COPY.source_unavailable);
           throw error;
         }
-        answered();
         if (again) {
+          answered();
           refresh();
           return { ok: true, status: "started", archive_id: again.archive_id, name, ...joinedSource(again) };
         }
+        alreadyImported(archive.archive_id);
         return { ok: true, status: "already_imported", archive_id: archive.archive_id, name, archive_name: named(archive.label) };
       }
-      answered();
       const resumed = resumeStopped(prepared.archive);
       if (resumed) {
+        answered();
         refresh();
         return { ok: true, status: "started", archive_id: resumed.archive_id, name, ...joinedSource(resumed) };
       }
+      alreadyImported(prepared.archive.archive_id);
       return { ok: true, status: "already_imported", archive_id: prepared.archive.archive_id, name, archive_name: named(prepared.archive.label) };
     }
     let handed = false;
@@ -214051,7 +214068,7 @@ function createArchiveImportDashboard(options) {
             return { ok: true, status: "started", archive_id: result.archive.archive_id, name, ...joinedSource(result.archive) };
           }
           if (result.kind === "already_imported") {
-            answered();
+            alreadyImported(result.archive.archive_id);
             return { ok: true, status: "already_imported", archive_id: result.archive.archive_id, name, archive_name: named(result.archive.label) };
           }
           const code = result.kind === "unreadable" ? unreadableCode(result.code) : result.kind;

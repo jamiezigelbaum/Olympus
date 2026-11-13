@@ -1949,8 +1949,14 @@ export function createReadwiseSchedulerSource(input: {
 
 /** How often a source's embedding sweep looks for queued items, while the provider answers. */
 export const EMBEDDING_SWEEP_INTERVAL_MS = 60_000;
-/** The longest a sweep backs off while its provider does not answer. */
-export const EMBEDDING_SWEEP_MAX_BACKOFF_MS = 30 * 60_000;
+/**
+ * The longest a sweep backs off while its provider does not answer. A new item
+ * in a live source must be searchable within about ten minutes on any install
+ * (plan, 13 Nov 2026), and a backoff also holds off the wake a sync sends its
+ * sweep, so a provider that comes back is retried within five minutes. A
+ * failed call to a provider that is down costs next to nothing.
+ */
+export const EMBEDDING_SWEEP_MAX_BACKOFF_MS = 5 * 60_000;
 /** Items per store per sweep pass. */
 export const EMBEDDING_SWEEP_MAX_ITEMS = 32;
 /**
@@ -2145,6 +2151,20 @@ function embeddingSweepTask(
           retryAt: {
             at: new Date(attemptedAt + (more ? SOURCE_SCHEDULER_CONTINUE_AFTER_MS : EMBEDDING_SWEEP_INTERVAL_MS)).toISOString(),
             degradedReason: EMBEDDING_ITEMS_FAILED_REASON,
+          },
+        };
+      }
+      // A pass that embedded anything has a provider that answers: one store's
+      // outage must not back off the stores that are making progress, nor hold
+      // off the wake the next sync sends.
+      if (counts.chunks_embedded > 0) {
+        return {
+          status,
+          counts,
+          embeddingSweep,
+          retryAt: {
+            at: new Date(attemptedAt + EMBEDDING_SWEEP_INTERVAL_MS).toISOString(),
+            degradedReason: EMBEDDING_PROVIDER_UNAVAILABLE_REASON,
           },
         };
       }

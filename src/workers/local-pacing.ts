@@ -67,8 +67,14 @@ export const GO_EASY_NIGHT = { fromHour: 22, toHour: 7 } as const;
 export const GO_EASY_LOCAL_WORK_RECENT_MS = 3 * 60_000;
 /** While trickling: the pause between one local judge call and the next. */
 export const GO_EASY_TRICKLE_GAP_MS = 20_000;
-/** While trickling: items per store per embedding sweep (a sweep runs about once a minute). */
-export const GO_EASY_TRICKLE_EMBED_ITEMS = 1;
+/**
+ * While trickling: items per store per embedding sweep (a sweep runs about once
+ * a minute, and within seconds of a sync that brought items in). Four keeps a
+ * live source's new items searchable within minutes while the owner works, at
+ * a few seconds of processor a minute; one held a fresh install's first 54
+ * emails for most of an hour (ops#222, 13 Nov 2026).
+ */
+export const GO_EASY_TRICKLE_EMBED_ITEMS = 4;
 
 type Exec = (command: string, args: readonly string[]) => Promise<string | undefined>;
 

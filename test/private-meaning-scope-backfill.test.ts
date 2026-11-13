@@ -49,7 +49,7 @@ describe('Private meaning catch-up follows current provider observations', () =>
     } finally { s.close(); }
   });
 
-  test('a temporarily unavailable model backs off, other stores progress, and historical cloud queue providers are never used', async () => {
+  test('a temporarily unavailable model is retried on the next pass while other stores progress, and historical cloud queue providers are never used', async () => {
     const first = store(), second = store(); const captured: string[] = []; const local = provider(captured);
     let calls = 0;
     const intermittent = { ...local, async embed(inputs: Parameters<SourceEmbeddingProvider['embed']>[0], options: Parameters<SourceEmbeddingProvider['embed']>[1]) {
@@ -63,7 +63,7 @@ describe('Private meaning catch-up follows current provider observations', () =>
       await second.syncFromConnector(connector('second', [item('second')]), { fetchContent: true });
       first.queueEmbedding(['first'], cloud);
       const task = withEmbeddingSweep([source(first.corpusId)], () => () => [{ store: first, provider: intermittent, wholeStore: true }, { store: second, provider: local, wholeStore: true }])[0]!.tasks[0]!;
-      expect(await task.run({ sourceId: 'gmail.email', corpusId: first.corpusId, taskId: task.id, attemptedAt: '2026-10-14T12:00:00Z', consecutiveFailures: 0, effectiveIntervalMs: 60_000 })).toMatchObject({ counts: { chunks_embedded: 1, stores_deferred: 1 }, retryAt: { effectiveIntervalMs: 120_000, degradedReason: 'embedding_provider_unavailable' } });
+      expect(await task.run({ sourceId: 'gmail.email', corpusId: first.corpusId, taskId: task.id, attemptedAt: '2026-10-14T12:00:00Z', consecutiveFailures: 0, effectiveIntervalMs: 60_000 })).toMatchObject({ counts: { chunks_embedded: 1, stores_deferred: 1 }, retryAt: { at: '2026-10-14T12:01:00.000Z', degradedReason: 'embedding_provider_unavailable' } });
       expect(cloudCalls).toBe(0);
       expect(await task.run()).toMatchObject({ counts: { chunks_embedded: 1, stores_deferred: 0 } });
       expect(captured.join('')).toContain('first private body');

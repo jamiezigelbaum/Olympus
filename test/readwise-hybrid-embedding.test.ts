@@ -292,20 +292,22 @@ describe('Readwise: sync commits, the embedding task embeds with backoff, nothin
     expect(store.status().counts.embeddedChunks).toBe(store.status().counts.chunks);
     expect(cloud.inputs.some((input) => input.includes('acme'))).toBe(false);
 
-    // The embedding sweep did not fail: it deferred, said why, and doubled its
-    // interval. It reports progress only for chunks it actually embedded.
+    // The embedding sweep did not fail: it deferred and said why. The Personal
+    // store embedded in the same pass, so it keeps its interval: one store's
+    // outage does not back off a store that is making progress. It reports
+    // progress only for chunks it actually embedded.
     const deferred = task('readwise.library_embeddings');
     expect(deferred.kind).toBe('embed');
     expect(deferred.consecutive_failures).toBe(0);
     expect(deferred.last_result?.counts).toMatchObject({ stores_deferred: 1 });
     expect(deferred.degraded_reason).toBe('embedding_provider_unavailable');
-    expect(deferred.effective_interval_seconds).toBe(120);
+    expect(deferred.effective_interval_seconds).toBe(60);
 
-    // Venice stays down through the next due pass: the backoff doubles again,
+    // Venice stays down through the next due pass, with nothing else to embed: it backs off,
     // and a sync that runs meanwhile says the store's embedding is deferred.
     clock.now = new Date(clock.now.getTime() + 15 * 60_000 + 1_000);
     await scheduler.runDueTasks();
-    expect(task('readwise.library_embeddings').effective_interval_seconds).toBe(240);
+    expect(task('readwise.library_embeddings').effective_interval_seconds).toBe(120);
     expect(task('readwise.library_embeddings').consecutive_failures).toBe(0);
     expect(task('readwise.library_store_pull').consecutive_failures).toBe(0);
     expect(task('readwise.library_store_pull').degraded_reason).toBe('embedding_provider_unavailable');
