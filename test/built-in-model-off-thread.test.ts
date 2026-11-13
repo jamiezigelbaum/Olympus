@@ -79,8 +79,7 @@ test('the shipped lifecycle worker installs pinned bytes, reports speech progres
     const starting = handle.ensureRunning();
     controller.abort(reason);
     expect(await cancelled).toMatchObject({ name: 'AbortError', cause: reason });
-    const [first, second] = await Promise.all([starting, handle.ensureRunning()])
-      .catch(error => retryOnTakenPort(error, () => Promise.all([handle!.ensureRunning(), handle!.ensureRunning()])));
+    const [first, second] = await Promise.all([starting, handle.ensureRunning()]);
     expect(first).toEqual(second);
     expect(handle.pid).toBeGreaterThan(0);
     expect((await fetch(`${first.baseUrl}/v1/models`, { signal: AbortSignal.timeout(1_000) })).status).toBe(401);
@@ -92,10 +91,7 @@ test('the shipped lifecycle worker installs pinned bytes, reports speech progres
       import { createLlamaServerHandle } from ${JSON.stringify(join(import.meta.dir, '../src/workers/source-index/built-in-reasoning/server.ts'))};
       import { writeFileSync } from 'node:fs';
       const handle = createLlamaServerHandle(${JSON.stringify({ serverPath: paths.serverPath, modelPath: paths.filePaths[0], contextTokens: 1, gpu: false, threads: 1, idleShutdownSeconds: 0, startupTimeoutMs: 3_000 })});
-      await handle.ensureRunning().catch(error => {
-        if (!String(error?.message).includes('port was taken')) throw error;
-        return handle.ensureRunning();
-      });
+      await handle.ensureRunning();
       writeFileSync(${JSON.stringify(pidPath)}, String(handle.pid));
       process.exit(0);
     `);
@@ -107,11 +103,3 @@ test('the shipped lifecycle worker installs pinned bytes, reports speech progres
     releaseDownload(); await installed.catch(() => {}); await handle?.stop(); server.stop(true); rmSync(dir, { recursive: true, force: true });
   }
 }, 15_000);
-
-// Another process on the machine can bind the port the handle picked before
-// the child does; the handle then refuses it and starts on a new port on the
-// next call (deploy tests 3/4 on e08c504e). The test makes that next call.
-function retryOnTakenPort<T>(error: unknown, again: () => Promise<T>): Promise<T> {
-  if (!(error instanceof Error) || !error.message.includes('port was taken')) throw error;
-  return again();
-}
