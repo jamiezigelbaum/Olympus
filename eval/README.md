@@ -265,8 +265,8 @@ directory for each capture configuration.
 Capture also groups items whose read passages are near duplicates (5-word
 shingle Jaccard of 0.85 or more; only hashed shingles are kept, never text).
 `--max-per-dup-group 1,2` adds variants that keep at most that many items of a
-group in the pool. A collapse seats past the pool size, so later candidates
-take the freed seats; only items whose content the capture read can be grouped,
+group in the pool. A collapse drops the extra copies and seats again with the
+same pool budget, so later candidates take the freed seats; only items whose content the capture read can be grouped,
 so a candidate past the captured pool counts as unique. The uncollapsed variant
 stays first, as the baseline. Captures from before groups (version 2) refuse a
 collapse variant.
