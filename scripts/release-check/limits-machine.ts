@@ -13,10 +13,13 @@ const PROBE_STEP = /^[a-z]+(?:-[a-z]+)*(?:\.[a-z]+(?:-[a-z]+)*)?(?: \((?:CLI exi
 export function probeFailure(result: { code: number; stdout: string; timedOut: boolean }): LimitsReason {
   if (result.timedOut) return new LimitsReason('limits probe timed out');
   if (result.code === 97) return new LimitsReason('limits probe found no Olympus runtime to run under');
-  let step: unknown;
-  try { step = JSON.parse(result.stdout.trim().split('\n').pop() ?? '').failed; } catch { /* no reply: unnamed */ }
-  return new LimitsReason(typeof step === 'string' && PROBE_STEP.test(step) ? `limits probe failed at ${step}`
-    : `limits probe failed before it answered (exit ${result.code})`);
+  let reply: { failed?: unknown; why?: unknown } = {};
+  try { reply = JSON.parse(result.stdout.trim().split('\n').pop() ?? ''); } catch { /* no reply: unnamed */ }
+  if (typeof reply.failed !== 'string' || !PROBE_STEP.test(reply.failed)) return new LimitsReason(`limits probe failed before it answered (exit ${result.code})`);
+  // The cause comes from a throwaway machine holding only synthetic items; paths and control characters still stay out.
+  const why = typeof reply.why === 'string'
+    ? reply.why.replace(/[\p{Cc}]+/gu, ' ').replace(/(?:~|\.{0,2})?\/[^\s'"`,;)]+/g, '<path>').replace(/\s+/g, ' ').trim().slice(0, 240) : '';
+  return new LimitsReason(`limits probe failed at ${reply.failed}${why ? `: ${why}` : ''}`);
 }
 export async function openLimitsMachine(machine: Machine, transport: Machine = machine): Promise<LimitsMachine> {
   if (!machine.disposable || !transport.disposable) throw new Error('limits requires driver provision');

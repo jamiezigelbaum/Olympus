@@ -176,6 +176,9 @@ test('a probe failure names its step and nothing the machine printed', () => {
   expect(failed('/private/account Secret title', 2)).toBe('limits probe failed before it answered (exit 2)');
   expect(failed('', 97)).toBe('limits probe found no Olympus runtime to run under');
   expect(failed('{"failed":"prepare.config"}', 1, true)).toBe('limits probe timed out');
+  // The cause rides along, without paths or control characters.
+  expect(failed('{"failed":"seed.stored","why":"0 of 2 seeded messages stored; SQLITE_BUSY opening /home/x/.local/share/olympus/t.db\\n"}'))
+    .toBe('limits probe failed at seed.stored: 0 of 2 seeded messages stored; SQLITE_BUSY opening <path>');
 });
 
 test('the probe itself answers a failure with only its step', () => {
@@ -185,7 +188,9 @@ test('the probe itself answers a failure with only its step', () => {
   });
   expect(run.exitCode).toBe(1);
   // No installed CLI in this home, so prepare stops reading engine status.
-  expect(probeFailure({ code: 1, stdout: run.stdout.toString(), timedOut: false }).message).toBe('limits probe failed at prepare.engine-status');
+  const message = probeFailure({ code: 1, stdout: run.stdout.toString(), timedOut: false }).message;
+  expect(message.startsWith('limits probe failed at prepare.engine-status')).toBe(true);
+  expect(message).not.toContain(home);
   expect(run.stderr.toString()).toBe('');
 }, 30_000);
 

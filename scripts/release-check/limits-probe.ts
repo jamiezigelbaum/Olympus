@@ -85,10 +85,12 @@ async function probe(command: string, scratch: string): Promise<unknown> {
       chatTitle: TELEGRAM_BESIDE_LIVE.chatName,
     })).join(''), { mode: 0o600 });
     // The existing hook registers the synthetic account and pulls through the thin connector and shared intake.
+    // The running engine reads the same spool and may store these lines before the hook's pull does, and the hook's own
+    // lines are already stored when an earlier stage seeded, so its count is not the proof. A pull that fails is: its
+    // cause goes to the report. The judge stop appearing next is what shows the fresh lines reached intake.
     at('seed.classification'); const classification = configureInstalledTierClassification({ env, retirePublic: true, ownerContext: () => privacyOwnerContext({ env }) });
     try {
-      at('seed.intake'); const seeded = await liveSeedHook('telegram').seed({ env, home: homedir() });
-      if (!seeded.ok || seeded.liveItems < items.length) throw new Error('fixture intake failed');
+      at('seed.intake'); await liveSeedHook('telegram').seed({ env, home: homedir() });
     }
     finally { classification.close(); }
     at('seed.restart'); cli('engine', 'restart', '--now');
@@ -128,5 +130,8 @@ async function probe(command: string, scratch: string): Promise<unknown> {
 if (import.meta.main) {
   try { const input = JSON.parse(await Bun.stdin.text()); console.log(JSON.stringify(await probe(input.command, input.scratch))); }
   // Only the fixed step name leaves the machine, so the report says where setup stopped without machine output.
-  catch { console.log(JSON.stringify({ failed: step })); process.exit(1); }
+  catch (error) {
+    // The cause comes from a throwaway machine with synthetic items only; the adapter scrubs paths and cuts it short.
+    console.log(JSON.stringify({ failed: step, why: error instanceof Error ? error.message : String(error) })); process.exit(1);
+  }
 }
