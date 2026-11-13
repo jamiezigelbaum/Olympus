@@ -1,4 +1,7 @@
 /** Fresh-user canary. All lifecycle commands run on the machine; no provider credentials leave it. */
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { Machine } from './machine.ts';
 import type { CheckResult } from './report.ts';
 import { openEngineMcp, runLiveAccounts, type EngineMcp, type LiveSourceSpec } from './live-accounts.ts';
@@ -118,6 +121,8 @@ export interface FreshOptions {
   limits?: FreshLimitsOptions;
   /** Unit-test seam. Every production fresh install runs limits. */
   limitsStage?: typeof runFreshLimits;
+  /** The test Venice key (olympus-ops#211), given to the install on stdin before the walkthrough; never logged or reported. */
+  veniceKey?: string;
   /** Current harness bundle, copied to the fresh user's home for the existing owner-bridge command. */
   bridgeAgent?: string;
   /** Test seam: real implementation uses only dashboard controls and persisted reads. */
@@ -239,7 +244,31 @@ done; exit 1`), 200_000);
         if (result.text.trim() !== ANSWER_MODEL_REQUIRED_TEXT) throw new Error('source_answer did not return the setup text');
         return 'source_answer listed; setup text returned, no answer run';
     });
+    // With the test Venice key, the walkthrough's "Who checks privacy?" step can save Venice (#1634); without it, it saves this computer.
+    if (options.veniceKey !== undefined) {
+      await checked('venice-key', async () => {
+        if (!options.veniceKey) throw new Error('the Venice key command returned nothing');
+        // The driver carries only the script on stdin, so the key travels as a file through put: 0600 here, on the machine
+        // and in the fresh user's home, read by olympus connect venice --api-key-stdin and removed at once on every side.
+        const local = mkdtempSync(join(tmpdir(), 'rc-venice-'));
+        try {
+          writeFileSync(join(local, 'key'), `${options.veniceKey}\n`, { mode: 0o600 });
+          await machine.put(join(local, 'key'), '/home/zig/.olympus-canary/fresh-run/venice-key');
+        } finally { rmSync(local, { recursive: true, force: true }); }
+        try {
+          await exec(`chmod 600 ${ROOT}/venice-key
+sudo -n install -o olyfresh -g "$(id -gn olyfresh)" -m 600 ${ROOT}/venice-key /home/olyfresh/.olympus-canary/venice-key
+rm -f ${ROOT}/venice-key
+${asFresh('"$HOME/.local/bin/olympus" connect venice --api-key-stdin < "$HOME/.olympus-canary/venice-key" > /dev/null 2>&1; rc=$?; rm -f "$HOME/.olympus-canary/venice-key"; exit $rc')}`, 60_000);
+        } catch (error) {
+          await machine.exec(`rm -f ${ROOT}/venice-key; sudo -n rm -f /home/olyfresh/.olympus-canary/venice-key`, { timeoutMs: 30_000 }).catch(() => undefined);
+          throw new Error(`the test Venice key was not saved: ${error instanceof Error ? error.message : 'unexpected failure'}`);
+        }
+        return 'test Venice key saved through olympus connect venice --api-key-stdin';
+      });
+    }
     await checked('dashboard-opens', async () => { dashboard = await (options.dashboard ?? openFreshDashboard)(fresh, options.cdp ?? '127.0.0.1:9334'); });
+    // Includes the explicit Venice judge choice when first run offers it.
     await checked('privacy-choice', () => dashboard!.privacyChoice());
     for (const source of sources) {
       await checked(`${source.id}.connect`, () => dashboard!.connect(source));

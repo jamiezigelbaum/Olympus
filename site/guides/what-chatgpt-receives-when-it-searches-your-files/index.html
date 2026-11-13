@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>What does ChatGPT receive when it searches my files? - Olympus guides</title>
+  <meta name="description" content="What ChatGPT and other AI assistants actually receive when they search your email or files through a connector, and how to keep private items out.">
+  <link rel="canonical" href="https://olympusplugin.ai/guides/what-chatgpt-receives-when-it-searches-your-files/">
+  <meta name="color-scheme" content="light">
+  <meta name="referrer" content="no-referrer">
+  <link rel="stylesheet" href="/assets/brand.css?v=1.0.0">
+  <link rel="stylesheet" href="/style.css?v=1.0.0">
+  <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="icon" href="/favicon-16.png" sizes="16x16" type="image/png">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site-head">
+    <a class="wordmark" href="/" aria-label="Olympus home"><span class="wordmark__icon" aria-hidden="true"></span>Olympus</a>
+    <nav class="site-nav" aria-label="Main">
+      <a href="/#how">How it works</a>
+      <a href="/help/on-your-computer/">Help</a>
+      <a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a>
+      <a class="btn" href="/install/">Add Olympus to your AI</a>
+    </nav>
+  </header>
+  <main id="main">
+    <div class="wrap">
+      <h1>What does ChatGPT receive when it searches my files?</h1>
+      <p class="lede">It receives whatever the connector returns: usually your question plus the text of the matching emails or documents, their titles and other details. That text then sits in your conversation with the provider, under the provider's own retention and training settings.</p>
+
+      <h2>With a built-in connector</h2>
+      <p>When ChatGPT searches Gmail or Google Drive through a built-in connector, the connector fetches matching items from your account and passes their content to the model so it can answer. You control which accounts are connected, but usually not which individual items in them the model may read. OpenAI's own documentation describes what is stored and for how long.</p>
+
+      <h2>With Olympus</h2>
+      <p>Olympus searches on your computer and decides what to return, item by item:</p>
+      <ul>
+        <li><strong>Personal items:</strong> ChatGPT receives answers and excerpts from them, with citations and item names.</li>
+        <li><strong>Private items:</strong> ChatGPT's model receives none of their contents, only a note that Private items matched (and their names, which are labeled separately and Personal by default). Olympus answers on your computer and shows that answer only to you, in a panel inside ChatGPT, encrypted between the panel and your computer.</li>
+        <li><strong>Secrets</strong> Olympus recognizes, such as passwords and keys, are never sent.</li>
+      </ul>
+      <p>ChatGPT also sees the question you typed and some status details, Requests pass through Olympus's relay, which reads them in memory while forwarding them and is not designed to store them; private answers pass through it encrypted. Labels are automatic and can be wrong, and a new item is labeled Personal until its check finishes. The full list is in <a href="/privacy/">What ChatGPT receives</a>.</p>
+
+      <h2>How to check any tool</h2>
+      <ol>
+        <li>Ask a question and look at what the assistant quotes back: that text was sent.</li>
+        <li>Read the tool's privacy policy for what is returned to the model and what is logged.</li>
+        <li>Check your provider's data controls for retention and training.</li>
+      </ol>
+      <p class="meta">Updated 10 November 2026.</p>
+    </div>
+  </main>
+  <footer class="site-foot">
+    <ul>
+      <li><a href="/install/">Install</a></li>
+      <li><a href="/guides/">Guides</a></li>
+      <li><a href="/help/">Help</a></li>
+      <li><a href="/support/">Support</a></li>
+      <li><a href="/privacy/">Privacy</a></li>
+      <li><a href="/terms/">Terms</a></li>
+      <li><a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a></li>
+    </ul>
+    <p>Olympus is open source under the MIT licence and published by Open Coordination Unlimited, Inc.</p>
+  </footer>
+</body>
+</html>

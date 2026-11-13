@@ -246,6 +246,31 @@ export function bootInProgress(env: LayoutEnv = process.env, now: number = Date.
   return bootProgressIsLive(readBootProgress(env), now);
 }
 
+/** How long a worker that finished its boot may go without answering before a supervisor gives up on it. */
+export const BOOT_READY_ANSWER_GRACE_MS = 15 * 60 * 1000;
+
+/**
+ * Whether the worker at `pid` is still starting for a supervisor's readiness
+ * wait: its boot work is under way, or it finished its boot (it serves) and
+ * is alive but has not answered yet. A worker that has just become ready runs
+ * its first work at once, and a synchronous step there (a store's backup
+ * before its schema update, an embed batch) holds its event loop for a minute
+ * or more, so the probe times out against a worker that is busy, not dead.
+ * Without this the supervisor replaced it (gate7 success leg on c013270b,
+ * 13 Nov: a 70 s sniffer backup and a 33 s embed block, twice).
+ */
+export function workerStillStarting(
+  env: LayoutEnv,
+  pid: number | undefined,
+  now: number = Date.now(),
+  alive: (pid: number) => boolean = processAlive,
+): boolean {
+  const progress = readBootProgress(env);
+  if (bootProgressIsLive(progress, now, alive)) return true;
+  return progress?.phase === 'done' && pid !== undefined && progress.pid === pid && alive(pid)
+    && now - Date.parse(progress.updatedAt) < BOOT_READY_ANSWER_GRACE_MS;
+}
+
 export function bootProgressIsLive(
   progress: BootProgress | undefined,
   now: number = Date.now(),

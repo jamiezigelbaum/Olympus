@@ -16,7 +16,7 @@ import { afterEach, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULT_VENICE_JUDGE_MODEL, JUDGE_PRICES, JudgeSpending, JudgeCloudStopped, judgeArchiveEstimate, readJudgeSpending, withJudgeSpendingStop } from '../src/workers/classification/judge-spending.ts';
+import { DEFAULT_VENICE_JUDGE_MODEL, JUDGE_PRICES, JudgeSpending, JudgeCloudStopped, judgeArchiveEstimate, readJudgeSpending, withJudgeSpendingStop, judgeLocalIsSlow } from '../src/workers/classification/judge-spending.ts';
 import { resolveJudgeChoiceRuntime, resolveTierSnifferRuntime } from '../src/workers/classification/built-in-sniffer.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { renderJudgeChoice } from '../src/workers/dashboard/pages/local.ts';
@@ -39,6 +39,16 @@ function fixture() {
 }
 const request = { method: 'POST', body: JSON.stringify({ model: 'qwen3-6-35b-a3b', messages: [{ role: 'user', content: 'ordinary synthetic text' }], max_completion_tokens: 256 }) };
 const response = () => Response.json({ choices: [{ message: { content: 'synthetic answer' } }] });
+
+test('first-run slow rule uses measured throughput before runtime GPU capability, with a strict one-hour threshold', () => {
+  expect(judgeLocalIsSlow({ localItemsPerMinute: 1 }, { gpu: true })).toBe(true);
+  expect(judgeLocalIsSlow({ localItemsPerMinute: 1000 / 60 }, { gpu: false })).toBe(false);
+  expect(judgeLocalIsSlow({ localItemsPerMinute: 1000 / 60 - 0.001 }, { gpu: true })).toBe(true);
+  expect(judgeLocalIsSlow({ localItemsPerMinute: 67 }, { gpu: false })).toBe(false);
+  expect(judgeLocalIsSlow({}, { gpu: false })).toBe(true);
+  expect(judgeLocalIsSlow({}, { gpu: true })).toBe(false);
+  expect(judgeLocalIsSlow({}, undefined)).toBe(false);
+});
 
 test('cloud is off until explicit opt-in, regardless of a size recommendation', async () => {
   const { budget } = fixture(); let calls = 0;
@@ -173,7 +183,9 @@ test('the actual setup backend records exact consent before opt-in and can lower
   const promptVersion = snifferPromptVersions().approval;
   const backend = createJudgeSetup({ spending: budget, cloud, local: () => resolveJudgeChoiceRuntime({ engine }, { choice: 'local', stop: null, remainingDollars: 0 }),
     ledgerPath: path + '.ledger', promptVersion: () => promptVersion, credentialReady: () => true, requestReload: () => false });
+  expect(backend.status().chosen).toBe(false);
   await backend.save('venice', 20);
+  expect(backend.status().chosen).toBe(true);
   const lane = cloud.source === 'off' ? null : cloud.lane;
   expect(isClassifierApproved((await readClassificationLedger(path + '.ledger')).entries,
     { lane: lane!.kind, profileId: lane!.profileId, modelId: lane!.modelId, promptVersion })).toBe(true);

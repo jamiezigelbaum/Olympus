@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { Window, type HTMLInputElement } from 'happy-dom';
+import { Window, type HTMLFormElement, type HTMLInputElement } from 'happy-dom';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,7 +12,7 @@ import { openFreshDashboard } from '../scripts/release-check/fresh-dashboard.ts'
 import type { Machine } from '../scripts/release-check/machine.ts';
 
 const REFUSAL = 'Choose this on the computer in an unlocked dashboard.';
-for (const mode of ['saves', 'loses', 'refused', 'unlock'] as const) test(`first-run dashboard ${mode === 'loses' ? 'rejects a choice lost on reload' : mode === 'refused' ? 'reports the dashboard\'s own refusal' : mode === 'unlock' ? 'unlocks on this computer when asked, then saves' : 'saves the Recommended choice through its normal form before sources'}`, async () => {
+for (const mode of ['saves', 'loses', 'refused', 'unlock', 'saved-judge', 'judge-refused'] as const) test(`first-run dashboard ${mode === 'loses' ? 'rejects a choice lost on reload' : mode === 'refused' ? 'reports the dashboard\'s own refusal' : mode === 'unlock' ? 'unlocks on this computer when asked, then saves' : 'saves the Recommended choice through its normal form before sources'}`, async () => {
   const losesSave = mode === 'loses';
   const dir = mkdtempSync(join(tmpdir(), 'fresh-dashboard-'));
   const path = join(dir, 'sovereignty.json');
@@ -29,6 +29,8 @@ for (const mode of ['saves', 'loses', 'refused', 'unlock'] as const) test(`first
   const host = new Window({ url: 'http://127.0.0.1:8010/' });
   const hostEvaluate = (expression: string): unknown => new Function('window', 'document', `return ${expression}`)(host, host.document);
   let unlocked = false, unlocks = 0;
+  let judgeChosen = mode === 'saved-judge';
+  const judgeChoices: string[] = [];
   // The engine's /dashboard.json as the page fetches it.
   let dashboardJson: { status: number; body: unknown } = { status: 200, body: { sources: [] } };
   let keysVisits = 0;
@@ -44,9 +46,12 @@ for (const mode of ['saves', 'loses', 'refused', 'unlock'] as const) test(`first
     keysVisits++;
     if (losesSave && keysVisits === 2) writeFileSync(path, JSON.stringify(createPendingPrivacyPolicy()));
     const config = policy();
-    const html = renderModelSetup(new ModelSetupService({ config, credentialState: () => 'ready', autoCheck: false }).getStatus());
+    const html = renderModelSetup(new ModelSetupService({ config, credentialState: () => 'ready', autoCheck: false }).getStatus(), { judgeSetup: { chosen: judgeChosen, cloudModel: 'deepseek-v4-flash-0731' }, judgeRuntime: { gpu: true } });
     // The Keys page as shipped: only the engine's setup status, no separate answer-mode row.
     window.document.body.innerHTML = html;
+    // happy-dom marks even whole-dollar values invalid for step=.01.
+    const judgeForm = window.document.querySelector<HTMLFormElement>('form[data-first-run-judge]');
+    if (judgeForm) judgeForm.noValidate = true;
     // Start on a different option so the driver must select Recommended explicitly.
     const other = window.document.querySelector<HTMLInputElement>('input[value="no-sensitive"]');
     if (other) other.checked = true;
@@ -55,8 +60,15 @@ for (const mode of ['saves', 'loses', 'refused', 'unlock'] as const) test(`first
     const mount = evaluate(`(${mountDashboardController.toString()})`);
     controller = mount({ root: window.document.body, canWrite: true, signal: new window.AbortController().signal, pollIntervalMs: -1,
       navigate() {}, returnUrl: url, refresh: async () => undefined,
-      transport: { ...(mode === 'unlock' ? { openLocalControls: async () => { unlocks++; unlocked = true; return true; } } : {}), control: async (params: { action: string; choice: string }) => {
+      transport: { ...(mode === 'unlock' ? { openLocalControls: async () => { unlocks++; unlocked = true; return true; } } : {}), control: async (params: { action: string; choice: string; cap_dollars?: number }) => {
         calls.push(params.action);
+        if (params.action === 'save_judge') {
+          expect(params).toEqual({ action: 'save_judge', choice: judgeChoices.length === 0 ? 'venice' : 'local', cap_dollars: 1 });
+          judgeChoices.push(String(params.choice));
+          if (mode === 'judge-refused' && params.choice === 'venice') return { status: 400, body: { ok: false, error: { message: 'Add your own Venice API key in Keys first.' } } };
+          judgeChosen = true;
+          return { status: 200, body: { ok: true } };
+        }
         if (params.action !== 'save_first_run_privacy') throw new Error('unexpected control');
         if (mode === 'refused' || (mode === 'unlock' && !unlocked)) return { status: 403, body: { ok: false, error: { code: 'mac_dashboard_only', message: REFUSAL } } };
         const saved = saveFirstRunPrivacyChoice(path, params.choice as SovereigntyPresetName);
@@ -126,9 +138,16 @@ for (const mode of ['saves', 'loses', 'refused', 'unlock'] as const) test(`first
       await dashboard.close(); dashboard = undefined;
       return;
     }
+    if (mode === 'judge-refused') {
+      // Without a Venice key the leg saves this computer instead and says why.
+      expect(await dashboard.privacyChoice()).toBe('Local models with Venice fallback (local-first, Recommended) saved and verified after reload; privacy check: This computer (local) saved after Venice was refused: the dashboard said "Add your own Venice API key in Keys first."');
+      expect(judgeChoices).toEqual(['venice', 'local']);
+      return;
+    }
     if (losesSave) await expect(dashboard.privacyChoice()).rejects.toThrow('did not persist after reload');
     else {
-      expect(await dashboard.privacyChoice()).toBe('Local models with Venice fallback (local-first, Recommended) saved and verified after reload');
+      expect(await dashboard.privacyChoice()).toBe(`Local models with Venice fallback (local-first, Recommended) saved and verified after reload${mode === 'saved-judge' ? '; privacy check: not shown' : '; privacy check: Venice (venice) saved'}`);
+      expect(judgeChosen).toBe(true);
       expect(policy()).toEqual(loadSovereigntyPreset('local-first'));
       expect(isPendingPrivacyPolicy(policy())).toBe(false);
       // A connect that cannot start says which precondition failed, from the dashboard's JSON.
@@ -143,7 +162,7 @@ for (const mode of ['saves', 'loses', 'refused', 'unlock'] as const) test(`first
       await expect(dashboard.scope({ id: 'gmail', label: 'Gmail', fresh: { scope: 'Canary' } } as never))
         .rejects.toThrow('Gmail control /Choose (mail|folders)|Scope|Edit scope/ did not appear');
     }
-    expect(calls).toEqual(mode === 'unlock' ? ['save_first_run_privacy', 'save_first_run_privacy'] : ['save_first_run_privacy']);
+    expect(calls).toEqual([...(mode === 'unlock' ? ['save_first_run_privacy'] : []), 'save_first_run_privacy', ...(mode === 'saved-judge' ? [] : ['save_judge'])]);
     expect(unlocks).toBe(mode === 'unlock' ? 1 : 0);
     expect(keysVisits).toBeGreaterThanOrEqual(2);
     expect(navigationFailures).toBe(1);

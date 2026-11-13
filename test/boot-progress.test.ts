@@ -15,6 +15,8 @@ import {
   bootInProgress,
   bootProgressIsLive,
   duringStoreUpdateStep,
+  workerStillStarting,
+  BOOT_READY_ANSWER_GRACE_MS,
   finishBootProgress,
   readBootProgress,
   reportBootStep,
@@ -460,6 +462,55 @@ describe('a check that reads every row after an update is not a stall (gate7 for
 
   test('the same silence outside an update step still times out', async () => {
     expect(await superviseSilentStep(false)).toBe('timed out');
+  }, 30_000);
+});
+
+describe('a worker that finished its boot and is busy is not dead (gate7 success leg on c013270b, 13 Nov)', () => {
+  test('done by this live child counts as starting until the grace runs out; another pid does not', () => {
+    const env = home();
+    beginBootProgress(env);
+    finishBootProgress();
+    expect(workerStillStarting(env, process.pid)).toBe(true);
+    expect(workerStillStarting(env, process.pid + 1_000_000)).toBe(false);
+    expect(workerStillStarting(env, undefined)).toBe(false);
+    expect(workerStillStarting(env, process.pid, Date.now() + BOOT_READY_ANSWER_GRACE_MS + 1)).toBe(false);
+  });
+
+  test('the supervisor waits for a ready child whose first work blocks it past the timeout', async () => {
+    const env = home();
+    const readyFile = join(env.HOME!, 'ready');
+    const module = join(import.meta.dir, '..', 'src', 'core', 'boot-progress.ts');
+    const script = `
+      const { beginBootProgress, finishBootProgress } = await import(${JSON.stringify(module)});
+      const { writeFileSync } = await import('node:fs');
+      beginBootProgress(${JSON.stringify(env)});
+      finishBootProgress();
+      // Its first work after ready holds the event loop, as a store backup does.
+      const end = Date.now() + 3000; while (Date.now() < end) {}
+      writeFileSync(${JSON.stringify(readyFile)}, '');
+      setInterval(() => {}, 1000);
+    `;
+    const service = createNativeProcessService({
+      id: 'fixture', label: 'fixture', initialConfig: {}, reload: { configPrefixes: [] },
+      readinessPollMs: 20, stopGraceMs: 100, restartDelaysMs: [60_000],
+      async prepareStart() {
+        return {
+          command: process.execPath, args: ['-e', script], env: { PATH: process.env.PATH ?? '' },
+          startupTimeoutMs: 1500, endpointOccupied: false,
+          startupInProgress: (child) => workerStillStarting(env, child.pid),
+          readinessProbe: async () => existsSync(readyFile),
+        };
+      },
+    });
+    let outcome = 'ready';
+    try {
+      await service.start({ logger: { warn() {} }, serviceHealth: { reportFailure() {}, clearFailure() {} } });
+    } catch {
+      outcome = 'timed out';
+    } finally {
+      await service.stop();
+    }
+    expect(outcome).toBe('ready');
   }, 30_000);
 });
 

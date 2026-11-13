@@ -1,6 +1,6 @@
 import { sourceCard, sourceConnected } from '../scripts/release-check/source-cards.ts';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, realpathSync } from 'node:fs';
+import { mkdtempSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
@@ -38,7 +38,7 @@ function rig(failAt?: string, inconclusive = false, listening = '') {
     put: async () => {}, get: async () => {}, upgrade: async () => {},
   };
   const dashboard: FreshDashboard = {
-    privacyChoice: async () => { await step('privacy-choice'); modelSet = true; return 'Local models with Venice fallback (local-first, Recommended) saved and verified after reload'; },
+    privacyChoice: async () => { await step('privacy-choice'); modelSet = true; return 'Local models with Venice fallback (local-first, Recommended) saved and verified after reload; privacy check: Venice (venice) saved'; },
     connect: s => step(`${s.id}.connect`), consent: s => step(`${s.id}.consent`), callback: s => step(`${s.id}.callback`), scope: s => step(`${s.id}.scope`),
     indexed: async s => { await step(`${s.id}.first-items`); return 2; },
     close: () => step('dashboard.close'),
@@ -59,6 +59,27 @@ function rig(failAt?: string, inconclusive = false, listening = '') {
 }
 
 describe('fresh install canary', () => {
+  test('the test Venice key reaches the install as a file through put before the walkthrough, never in a command or a check', async () => {
+    const r = rig();
+    const put: Array<{ to: string; body: string }> = [];
+    r.machine.put = async (from, to) => { put.push({ to, body: readFileSync(from, 'utf8') }); };
+    const key = 'vk-test-not-a-real-key';
+    const { checks } = await runFreshInstall(r.machine, { ...r.options, veniceKey: key });
+    const ids = checks.map(c => c.id);
+    expect(checks.find(c => c.id === 'fresh.venice-key')?.status).toBe('pass');
+    expect(ids.indexOf('fresh.venice-key')).toBeGreaterThan(ids.indexOf('fresh.engine-up'));
+    expect(ids.indexOf('fresh.venice-key')).toBeLessThan(ids.indexOf('fresh.privacy-choice'));
+    expect(put).toEqual([{ to: '/home/zig/.olympus-canary/fresh-run/venice-key', body: `${key}\n` }]);
+    const saved = r.commands.find(c => c.includes('connect venice --api-key-stdin'))!;
+    expect(saved).toContain('venice-key');
+    expect(saved).toContain('rm -f');
+    expect(r.commands.some(c => c.includes(key))).toBe(false);
+    expect(JSON.stringify(checks)).not.toContain(key);
+    const empty = rig();
+    const none = await runFreshInstall(empty.machine, { ...empty.options, veniceKey: '' });
+    expect(none.checks.find(c => c.id === 'fresh.venice-key')?.status).toBe('fail');
+  }, 30_000);
+
   test('a server left on the local-first model port fails the leg before anything is installed, naming it and its unit (olympus-ops#221)', async () => {
     expect(LOCAL_FIRST_PORTS).toEqual([28090]);
     const line = 'LISTEN 0 512 127.0.0.1:28090 0.0.0.0:* users:(("llama-server",pid=885816,fd=3))';
@@ -101,6 +122,7 @@ describe('fresh install canary', () => {
     expect(r.events.slice(-3)).toEqual(['engine.close', 'dashboard.close', 'restore']);
     expect(checks.find(c => c.id === 'fresh.gmail.first-items')?.detail).toBe('2 item(s) indexed');
     expect(checks.find(c => c.id === 'fresh.privacy-choice')?.detail).toContain('Local models with Venice fallback (local-first, Recommended)');
+    expect(checks.find(c => c.id === 'fresh.privacy-choice')?.detail).toContain('privacy check: Venice (venice) saved');
     expect(r.events.indexOf('privacy-choice')).toBeLessThan(r.events.indexOf('gmail.connect'));
     expect(r.commands.find(c => c.includes('seq 1 180'))).toContain(SOCKET_READY);
     expect(r.commands.find(c => c.includes('seq 1 120'))).toContain(SOCKET_READY);

@@ -27,6 +27,8 @@ export interface CapturedItem {
   conceptShare?: number;
   newestInStore?: number;
   pinAppended?: boolean;
+  /** Items whose passages are near duplicates (5-word shingle Jaccard >= 0.85) share a group number. */
+  dupGroup?: number;
   authoredAtMs?: number;
   /** False when the final visibility/model-policy check excluded the item. */
   packEligible: boolean;
@@ -42,7 +44,8 @@ export interface CapturedLane {
   items: CapturedItem[];
 }
 export interface PoolCapture {
-  version: 2;
+  /** 2: before near-duplicate groups were recorded. */
+  version: 2 | 3;
   questionId: string;
   storeDepth: number;
   poolSize: number;
@@ -84,6 +87,7 @@ export async function captureEvalPack(input: Omit<Parameters<typeof buildEvalPac
   // asked for a matched item outside the scored pool, using the same passage
   // budget/query as the live build, so it too gets a paragraph mark.
   const holds = new Map<string, boolean[]>();
+  const shingles = new Map<string, ReadonlySet<number>>();
   const denied = new Set<string>();
   let finalVisibility: ReadonlyMap<SourceIndexCandidateId, boolean> | undefined;
   const key = (corpusId: string, providerItemId: string) => JSON.stringify([corpusId, providerItemId]);
@@ -93,6 +97,8 @@ export async function captureEvalPack(input: Omit<Parameters<typeof buildEvalPac
       ...(content?.tables ?? []).flatMap(t => [t.caption ?? '', ...t.columns, ...t.rows.map(row => row.join(' '))])].join('\n');
     holds.set(key(corpusId, providerItemId), (input.question.expectedEvidence ?? []).map(e =>
       !!e.quote && passageContainsQuote(passage, e.quote)));
+    // Hashed shingles only: no passage text outlives this call.
+    shingles.set(key(corpusId, providerItemId), shingleSet(passage));
   };
   const liveLanes = input.lanes(input.question.question);
   const contentProviders = Object.fromEntries(Object.entries(liveLanes.contentProviders).map(([corpusId, provider]) => [corpusId, provider && {
@@ -155,6 +161,7 @@ export async function captureEvalPack(input: Omit<Parameters<typeof buildEvalPac
       }
     }
   }
+  const dupGroups = groupNearDuplicates(shingles);
   const serializeItem = (hit: SourceIndexRoutedSearchHit, index: number): CapturedItem => {
     const candidateId = routedHitCandidateId(hit);
     const score = scores.get(candidateId);
@@ -169,13 +176,14 @@ export async function captureEvalPack(input: Omit<Parameters<typeof buildEvalPac
       ...(score !== undefined ? { rerankerScore: Number.isFinite(score) ? score : score > 0 ? 'Infinity' as const : '-Infinity' as const } : {}),
       ...(hit.keywordLeader ? { keywordFirst: hit.keywordLeader.kinds.includes('keyword_first'), nameLeader: hit.keywordLeader.kinds.includes('name'), conceptShare: hit.keywordLeader.conceptShare } : {}),
       ...(hit.newestInStore !== undefined ? { newestInStore: hit.newestInStore, authoredAtMs: time, ...(hit.pinAppended ? { pinAppended: true } : {}) } : {}),
+      ...(dupGroups.has(key(hit.corpusId, hit.sourceItem.providerItemId)) ? { dupGroup: dupGroups.get(key(hit.corpusId, hit.sourceItem.providerItemId))! } : {}),
       packEligible: finalVisibility?.get(candidateId) !== false && !denied.has(key(hit.corpusId, hit.sourceItem.providerItemId)),
       expected: matches.some(m => m.expected), holdsQuote: matches.some(m => m.holdsQuote), matches,
     };
   };
   const capturedCandidates = new Set(runs.flatMap(run => run.lanes.flatMap(lane => lane.items.map(routedHitCandidateId)))).size;
   const capture: PoolCapture = {
-    version: 2, questionId: input.question.id, storeDepth: input.captureDepth,
+    version: 3, questionId: input.question.id, storeDepth: input.captureDepth,
     poolSize: rerankEnabled ? MAX_RERANK_POOL_SIZE : input.maxResults, maxResults: input.maxResults,
     temporalIntent, strengthAllocation: rerankEnabled, rerankOutcome: outcome,
     scoreLimit: MAX_RERANK_POOL_SIZE, capturedCandidates,
@@ -189,6 +197,58 @@ export async function captureEvalPack(input: Omit<Parameters<typeof buildEvalPac
     pack: detail.pack.candidates.map((candidate, index) => ({ corpusId: detail.candidateCorpusIds[index]!, providerItemId: candidate.provenance.sourceItem.providerItemId })),
   };
   return { detail, capture };
+}
+
+const SHINGLE_WORDS = 5;
+const NEAR_DUPLICATE_JACCARD = 0.85;
+
+/** A passage's 5-word shingles as 32-bit hashes (a shorter passage is one shingle). */
+function shingleSet(passage: string): ReadonlySet<number> {
+  const words = passage.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  const set = new Set<number>();
+  if (words.length === 0) return set;
+  const hash = (text: string) => {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 0x01000193);
+    return h >>> 0;
+  };
+  if (words.length < SHINGLE_WORDS) set.add(hash(words.join(' ')));
+  for (let i = 0; i + SHINGLE_WORDS <= words.length; i++) set.add(hash(words.slice(i, i + SHINGLE_WORDS).join(' ')));
+  return set;
+}
+
+/**
+ * Groups of two or more keys whose shingle sets overlap at Jaccard >= 0.85,
+ * numbered from 1 in first-seen order. A key joins the first group whose every
+ * member it matches, so a chain of near duplicates never joins two ends that
+ * fall below the threshold (Codex on #1623).
+ */
+function groupNearDuplicates(sets: ReadonlyMap<string, ReadonlySet<number>>): Map<string, number> {
+  const similar = (a: ReadonlySet<number>, b: ReadonlySet<number>) => {
+    let shared = 0;
+    for (const h of a) if (b.has(h)) shared += 1;
+    return shared / (a.size + b.size - shared) >= NEAR_DUPLICATE_JACCARD;
+  };
+  const clusters: string[][] = [];
+  for (const [key, set] of sets) {
+    if (set.size === 0) continue;
+    const cluster = clusters.find(members => members.every(member => similar(set, sets.get(member)!)));
+    if (cluster) cluster.push(key);
+    else clusters.push([key]);
+  }
+  const groups = new Map<string, number>();
+  let next = 1;
+  for (const cluster of clusters) {
+    if (cluster.length < 2) continue;
+    for (const k of cluster) groups.set(k, next);
+    next += 1;
+  }
+  return groups;
+}
+
+/** Near-duplicate groups of passages by key (for tests and offline checks). */
+export function nearDuplicateGroups(passages: ReadonlyMap<string, string>): Map<string, number> {
+  return groupNearDuplicates(new Map([...passages].map(([k, text]) => [k, shingleSet(text)])));
 }
 
 export function writePoolCapture(directory: string, capture: PoolCapture): string {

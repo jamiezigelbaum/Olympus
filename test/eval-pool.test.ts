@@ -6,7 +6,7 @@ import { buildSourceIndexCorpusRegistry, defineSourceIndexCorpus } from '../src/
 import { routeSourceIndexSearch, seatRoutedLanes, type SeatingLane, type SourceIndexRoutedSearchHit } from '../src/core/source-index/router.ts';
 import { buildEvidencePackDetailed } from '../src/core/evidence-pack.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
-import { captureEvalPack, writePoolCapture, prepareCaptureReranker } from '../eval/capture-pool.ts';
+import { captureEvalPack, writePoolCapture, prepareCaptureReranker, nearDuplicateGroups } from '../eval/capture-pool.ts';
 import { replayPool, signFlipPValue, summarizeVariants, parseReplayArgs, laneAtDepth } from '../eval/replay-pool.ts';
 import { parseEvalRealArgs } from '../eval/run-real.ts';
 import { createTestClock } from './helpers/test-clock.ts';
@@ -85,7 +85,7 @@ test('capture contains metadata only and replay reproduces live seats byte for b
     const json = readFileSync(path, 'utf8');
     for (const secret of [query, text, 'never serialize this hint', 'unrelated material']) expect(json).not.toContain(secret);
     expect(capture.runs[0]!.lanes[0]!.items.map(i => i.rank)).toEqual([1, 2, 3]);
-    const itemKeys = new Set(['candidateId', 'providerItemId', 'localItemId', 'rank', 'adapterScore', 'rerankerScore', 'keywordFirst', 'nameLeader', 'conceptShare', 'newestInStore', 'pinAppended', 'authoredAtMs', 'packEligible', 'expected', 'holdsQuote', 'matches']);
+    const itemKeys = new Set(['candidateId', 'providerItemId', 'localItemId', 'rank', 'adapterScore', 'rerankerScore', 'keywordFirst', 'nameLeader', 'conceptShare', 'newestInStore', 'pinAppended', 'dupGroup', 'authoredAtMs', 'packEligible', 'expected', 'holdsQuote', 'matches']);
     for (const run of capture.runs) for (const lane of run.lanes) for (const item of lane.items) {
       expect(Object.keys(item).every(key => itemKeys.has(key))).toBe(true);
       expect(Object.entries(item).filter(([key]) => key !== 'matches').every(([, value]) => ['string', 'number', 'boolean'].includes(typeof value))).toBe(true);
@@ -243,4 +243,52 @@ test('a smaller depth keeps the chat store\'s newest-message pins, as the adapte
   // Without pins a smaller depth is the prefix.
   expect(ids(laneAtDepth([item('h1'), item('h2'), item('h3')], 2))).toEqual(['h1', 'h2']);
   expect(laneAtDepth(captured, 5)).toEqual(captured);
+});
+
+test('near-duplicate passages share a group in the capture, and replay can keep at most N of a group', async () => {
+  // Shingle overlap, not exact equality: one changed word in a long passage is still a near duplicate.
+  const long = Array.from({ length: 40 }, (_, i) => `word${i}`).join(' ');
+  const groups = nearDuplicateGroups(new Map([['x', long], ['y', long.replace('word39', 'other')], ['z', 'a different passage entirely about something else'], ['w', '']]));
+  expect(groups.get('x')).toBeDefined();
+  expect(groups.get('x')).toBe(groups.get('y'));
+  expect(groups.has('z')).toBe(false);
+  expect(groups.has('w')).toBe(false);
+  // A chain does not join its ends when they fall below the threshold (Codex on #1623):
+  // A~B and B~C are near duplicates, A and C are not, so A and C never share a group.
+  const words = Array.from({ length: 100 }, (_, i) => `w${i}`);
+  const chainA = words.join(' ');
+  const chainB = ['x0', 'x1', 'x2', 'x3', ...words.slice(4)].join(' ');
+  const chainC = ['x0', 'x1', 'x2', 'x3', ...words.slice(4, 96), 'y0', 'y1', 'y2', 'y3'].join(' ');
+  const chain = nearDuplicateGroups(new Map([['a', chainA], ['b', chainB], ['c', chainC]]));
+  expect(chain.get('a')).toBe(chain.get('b'));
+  expect(chain.get('c')).not.toBe(chain.get('a'));
+
+  const f = fixture();
+  const { capture } = await captureEvalPack({ question, lanes: () => f, reranker: f.reranker, maxResults: 2, maxCharsPerCandidate: 2000, captureDepth: 3 });
+  expect(capture.version).toBe(3);
+  const items = capture.runs.flatMap(run => run.lanes.flatMap(lane => lane.items));
+  // Every item but b2 reads the same unrelated material: one group; b2 stands alone.
+  expect(items.find(i => i.providerItemId === 'b2')!.dupGroup).toBeUndefined();
+  expect(new Set(items.filter(i => i.providerItemId !== 'b2').map(i => i.dupGroup)).size).toBe(1);
+  const full = replayPool(capture, { storeDepth: 3, poolSize: 400, keep: 2 });
+  const collapsed = replayPool(capture, { storeDepth: 3, poolSize: 400, keep: 2, maxPerDupGroup: 1 });
+  expect(full.pool).toHaveLength(6);
+  // The first-seated copy of the unrelated material stays; b2 is in no group.
+  expect(collapsed.pool.map(i => i.providerItemId)).toEqual(full.pool.map(i => i.providerItemId).filter((id, index) => id === 'b2' || index === full.pool.findIndex(i => i.providerItemId !== 'b2')));
+  expect(collapsed.pool).toHaveLength(2);
+  expect(collapsed.expected[0]).toMatchObject({ documentPackSeat: 1, paragraphPackSeat: 1 });
+  // A capture made before groups were recorded cannot answer a collapse variant.
+  expect(() => replayPool({ ...capture, version: 2 }, { storeDepth: 3, poolSize: 400, keep: 2, maxPerDupGroup: 1 })).toThrow('near-duplicate groups');
+  expect(parseReplayArgs(['/tmp/c', '--max-per-dup-group', '1,2']).maxPerDupGroups).toEqual([1, 2]);
+  // A collapse that removes nothing keeps the baseline's seats, strength allocation included (Codex on #1623).
+  const unique: typeof capture = { ...capture, strengthAllocation: true, runs: capture.runs.map(run => ({ ...run, lanes: run.lanes.map(lane => ({ ...lane, items: lane.items.map(({ dupGroup: _g, ...rest }) => rest) })) })) };
+  for (const poolSize of [1, 2, 3, 4, 5]) {
+    const plain = replayPool(unique, { storeDepth: 3, poolSize, keep: 2 }).pool.map(i => i.providerItemId);
+    expect(replayPool(unique, { storeDepth: 3, poolSize, keep: 2, maxPerDupGroup: 1 }).pool.map(i => i.providerItemId)).toEqual(plain);
+  }
+  // A collapse frees a seat for the next candidate the budget would seat.
+  for (const poolSize of [2, 3, 4]) {
+    const kept = replayPool(capture, { storeDepth: 3, poolSize, keep: 2, maxPerDupGroup: 1 }).pool;
+    expect(kept.length).toBe(Math.min(poolSize, 2));
+  }
 });

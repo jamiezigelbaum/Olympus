@@ -102,13 +102,23 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   let firstRunChoice: string | undefined;
   let firstRunCheckRequested = false;
 
+  function setupPanels(sheet: HTMLElement): HTMLElement[] {
+    const panels = Array.from(sheet.querySelectorAll<HTMLElement>(':scope > [data-setup-panel]'));
+    if (!sheet.closest('[data-first-run-sheet]') || !firstRunChoice) return panels;
+    return panels.filter((panel, index) => {
+      if (firstRunChoice === 'no-sensitive') return index === 0 || index === panels.length - 1;
+      return !panel.querySelector('[data-first-run-judge]') || ['local-first', 'private-cloud-only'].includes(firstRunChoice!);
+    });
+  }
+
   function showSetupStep(sheet: HTMLElement, next: number): void {
     const panels = Array.from(sheet.querySelectorAll<HTMLElement>(':scope > [data-setup-panel]'));
     const firstRun = sheet.closest('[data-first-run-sheet]');
     const noConnection = firstRun && firstRunChoice === 'no-sensitive';
     panels.forEach((panel, index) => { panel.hidden = index !== next; });
-    const count = noConnection ? 2 : panels.length;
-    const position = noConnection && next === 2 ? 2 : next + 1;
+    const available = setupPanels(sheet);
+    const count = available.length;
+    const position = available.indexOf(panels[next]!) + 1;
     const counter = sheet.querySelector<HTMLElement>('[data-setup-counter]');
     if (counter) counter.textContent = sheet.hasAttribute('data-setup-guided') ? `STEP ${position} OF ${count}` : `Step ${position} of ${count}`;
     sheet.querySelectorAll<HTMLElement>('[data-setup-segment]').forEach((segment, index) => segment.classList.toggle('filled', index <= next));
@@ -116,7 +126,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     const progress = sheet.querySelector<HTMLProgressElement>('[data-setup-progress]');
     if (progress) { progress.max = count; progress.value = position; }
     const forward = sheet.querySelector<HTMLElement>('[data-setup-next]');
-    if (forward) forward.hidden = next === panels.length - 1 || Boolean(firstRun && next === 0);
+    if (forward) forward.hidden = next === panels.length - 1 || Boolean(panels[next]?.dataset.setupForm);
     const back = sheet.querySelector<HTMLButtonElement>('[data-setup-back]');
     if (back) back.disabled = next === 0 || Boolean(firstRun && (next < 2 || noConnection));
     const submit = sheet.querySelector<HTMLButtonElement>('[data-setup-submit]');
@@ -686,7 +696,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       closeAuthorizationTab(authorizationTab);
       const message = errorMessage(result);
       say(form, message);
-      showSetupFailure(form, message);
+      // Keep both judge choices and the save button available after a refusal.
+      if (!form.hasAttribute('data-first-run-judge')) showSetupFailure(form, message);
       return;
     }
     if (params.action === 'discover_local_models') {
@@ -706,7 +717,14 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
         ? 'Optional: add a key for Venice fallback, or continue with the built-in model on this computer.'
         : 'Add your Venice key in the existing field below, then return here to check readiness.';
       const steps = form.closest<HTMLElement>('[data-setup-steps]');
-      if (steps) showSetupStep(steps, params.choice === 'no-sensitive' ? 2 : 1);
+      if (steps) showSetupStep(steps, params.choice === 'no-sensitive'
+        ? steps.querySelectorAll(':scope > [data-setup-panel]').length - 1 : 1);
+      return;
+    }
+    if (params.action === 'save_judge' && form.hasAttribute('data-first-run-judge')) {
+      releaseSubmittedForm(form, submittedValues);
+      const steps = form.closest<HTMLElement>('[data-setup-steps]');
+      if (steps) showSetupStep(steps, steps.querySelectorAll(':scope > [data-setup-panel]').length - 1);
       return;
     }
     if (params.action === 'check_model_setup' && form.closest('[data-first-run-sheet]')) {
@@ -1823,7 +1841,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       if (!sheet) return;
       const panels = Array.from(sheet.querySelectorAll<HTMLElement>(':scope > [data-setup-panel]'));
       const current = panels.findIndex(panel => !panel.hidden);
-      const next = Math.max(0, Math.min(panels.length - 1, setupControl.hasAttribute('data-setup-retry') ? Number(setupControl.dataset.setupRetry) : setupControl.hasAttribute('data-setup-jump') ? Number(setupControl.dataset.setupJump) : current + (setupControl.hasAttribute('data-setup-next') ? 1 : -1)));
+      const available = setupPanels(sheet);
+      const adjacent = available[Math.max(0, Math.min(available.length - 1, available.indexOf(panels[current]!) + (setupControl.hasAttribute('data-setup-next') ? 1 : -1)))];
+      const next = setupControl.hasAttribute('data-setup-retry') ? Number(setupControl.dataset.setupRetry) : setupControl.hasAttribute('data-setup-jump') ? Number(setupControl.dataset.setupJump) : panels.indexOf(adjacent!);
       showSetupStep(sheet, next);
       return;
     }
