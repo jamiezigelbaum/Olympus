@@ -262,6 +262,15 @@ as-captured` is the default (`on`/`off` can override seating). `--keep` defaults
 to the captured runner maxResults, before Analyst prompt fitting. Use a fresh
 directory for each capture configuration.
 
+Capture also groups items whose read passages are near duplicates (5-word
+shingle Jaccard of 0.85 or more; only hashed shingles are kept, never text).
+`--max-per-dup-group 1,2` adds variants that keep at most that many items of a
+group in the pool. A collapse seats past the pool size, so later candidates
+take the freed seats; only items whose content the capture read can be grouped,
+so a candidate past the captured pool counts as unique. The uncollapsed variant
+stays first, as the baseline. Captures from before groups (version 2) refuse a
+collapse variant.
+
 Tables report each expected document and paragraph's pool rank (before reranking)
 and pack seat (after reranking), totals, and paired wins/losses against the first
 variant with an exact two-sided sign-flip p-value over discordant expected

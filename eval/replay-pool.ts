@@ -15,6 +15,8 @@ export interface ReplayVariant {
   poolSize: number;
   keep: number;
   temporalIntent?: boolean;
+  /** Keep at most this many items of one near-duplicate group in the pool (capture version 3). */
+  maxPerDupGroup?: number;
 }
 export type ReplayItem = CapturedItem & { corpusId: string };
 export interface ReplayResult {
@@ -74,12 +76,14 @@ export function laneAtDepth<T extends { newestInStore?: number; pinAppended?: bo
 }
 
 export function replayPool(capture: PoolCapture, variant: ReplayVariant): ReplayResult {
-  if (capture.version !== 2) throw new Error('Unsupported pool capture version.');
+  if (capture.version !== 2 && capture.version !== 3) throw new Error('Unsupported pool capture version.');
+  if (variant.maxPerDupGroup !== undefined && capture.version < 3) throw new Error(`Capture ${capture.questionId} has no near-duplicate groups; capture it again to replay a collapse.`);
   for (const [name, value] of Object.entries(variant)) {
     if (name !== 'temporalIntent' && (!Number.isSafeInteger(value) || Number(value) < 1)) throw new Error(`${name} must be a positive integer.`);
   }
   if (variant.storeDepth > capture.storeDepth) throw new Error(`Requested depth ${variant.storeDepth} exceeds captured depth ${capture.storeDepth} for ${capture.questionId}.`);
   const temporalIntent = variant.temporalIntent ?? capture.temporalIntent;
+  const collapse = variant.maxPerDupGroup !== undefined;
   const metadata = new Map<SourceIndexRoutedSearchHit, ReplayItem>();
   const runs = capture.runs.map(run => seatRoutedLanes(run.lanes.map(lane => ({
     name: lane.corpusId,
@@ -99,12 +103,14 @@ export function replayPool(capture: PoolCapture, variant: ReplayVariant): Replay
       return hit;
     }),
   })), {
-    maxResults: variant.poolSize,
+    // A collapse seats past the pool so later candidates take the seats it frees.
+    maxResults: collapse ? Number.MAX_SAFE_INTEGER : variant.poolSize,
     ...(capture.strengthAllocation ? { poolAllocation: { storeDepth: variant.storeDepth } } : {}),
     temporalIntent,
   }).hits);
-  const seated = runs.length === 1 ? runs[0]! : seatRoutedQueryRuns(runs, variant.poolSize, temporalIntent).hits;
-  const pool = seated.map(hit => metadata.get(hit)!).filter(item => item.packEligible);
+  const seated = runs.length === 1 ? runs[0]! : seatRoutedQueryRuns(runs, collapse ? Number.MAX_SAFE_INTEGER : variant.poolSize, temporalIntent).hits;
+  const eligible = seated.map(hit => metadata.get(hit)!).filter(item => item.packEligible);
+  const pool = collapse ? collapseNearDuplicates(eligible, variant.maxPerDupGroup!).slice(0, variant.poolSize) : eligible;
   // Only valid, applied scores reorder a pool. Failed/timed-out scoring keeps
   // the exact seating order. Ties and unscored items retain that order too.
   const ordered = capture.rerankOutcome === 'applied' ? pool.map((item, index) => ({ item, index })).sort((left, right) => {
@@ -127,6 +133,17 @@ export function replayPool(capture: PoolCapture, variant: ReplayVariant): Replay
       paragraphPoolRank: rank(pool, expectedIndex, true), paragraphPackSeat: rank(pack, expectedIndex, true),
     })),
   };
+}
+
+/** Items in seating order, with at most `max` of each near-duplicate group; ungrouped items all stay. */
+function collapseNearDuplicates(items: readonly ReplayItem[], max: number): ReplayItem[] {
+  const seen = new Map<number, number>();
+  return items.filter(item => {
+    if (item.dupGroup === undefined) return true;
+    const count = (seen.get(item.dupGroup) ?? 0) + 1;
+    seen.set(item.dupGroup, count);
+    return count <= max;
+  });
 }
 
 /** Two-sided exact sign-flip test on discordant binary pairs (ties omitted).
@@ -174,6 +191,7 @@ export function parseReplayArgs(argv: readonly string[]) {
   let storeDepths: number[] | undefined;
   let poolSizes: number[] | undefined;
   let keep: number | undefined;
+  let maxPerDupGroups: number[] | undefined;
   let temporalIntent: boolean | undefined;
   let json = false;
   const list = (value: string) => {
@@ -193,6 +211,7 @@ export function parseReplayArgs(argv: readonly string[]) {
     if (!value || value.startsWith('--')) throw new Error(`${name} requires a value.`);
     if (name === '--store-depth') storeDepths = list(value);
     else if (name === '--pool-size') poolSizes = list(value);
+    else if (name === '--max-per-dup-group') maxPerDupGroups = list(value);
     else if (name === '--keep') { const values = list(value); if (values.length !== 1) throw new Error('--keep requires one integer.'); keep = values[0]!; }
     else if (name === '--temporal') {
       if (value === 'as-captured') temporalIntent = undefined;
@@ -201,8 +220,8 @@ export function parseReplayArgs(argv: readonly string[]) {
       else throw new Error('--temporal requires as-captured, on or off.');
     } else throw new Error(`Unknown replay option ${name}.`);
   }
-  if (!directory) throw new Error('Usage: bun eval/replay-pool.ts <capture-dir> [--store-depth 5,10,30] [--pool-size 30,100,400] [--keep 5] [--temporal as-captured] [--json]');
-  return { directory, storeDepths, poolSizes, keep, temporalIntent, json };
+  if (!directory) throw new Error('Usage: bun eval/replay-pool.ts <capture-dir> [--store-depth 5,10,30] [--pool-size 30,100,400] [--keep 5] [--temporal as-captured] [--max-per-dup-group 1,2] [--json]');
+  return { directory, storeDepths, poolSizes, keep, maxPerDupGroups, temporalIntent, json };
 }
 
 function main() {
@@ -215,12 +234,16 @@ function main() {
   const keep = args.keep ?? captures[0]!.maxResults;
   if (args.keep === undefined && captures.some(c => c.maxResults !== keep)) throw new Error('Captures have different pack sizes; specify --keep.');
   if (args.poolSizes === undefined && captures.some(c => c.poolSize !== pools[0])) throw new Error('Captures have different pool sizes; specify --pool-size.');
-  const variants = depths.flatMap(storeDepth => pools.map(poolSize => ({ storeDepth, poolSize, keep, ...(args.temporalIntent !== undefined ? { temporalIntent: args.temporalIntent } : {}) })));
+  // Without --max-per-dup-group every variant keeps the whole pool; with it, the first listed variant is still the uncollapsed baseline.
+  const collapses: (number | undefined)[] = args.maxPerDupGroups ? [undefined, ...args.maxPerDupGroups] : [undefined];
+  const variants: ReplayVariant[] = depths.flatMap(storeDepth => pools.flatMap(poolSize => collapses.map(maxPerDupGroup => ({ storeDepth, poolSize, keep,
+    ...(args.temporalIntent !== undefined ? { temporalIntent: args.temporalIntent } : {}),
+    ...(maxPerDupGroup !== undefined ? { maxPerDupGroup } : {}) }))));
   const report = summarizeVariants(captures, variants);
   if (args.json) { console.log(JSON.stringify(report, null, 2)); return; }
   console.log('Pool rank = seating order before reranking; pack seat = score order. Paired tests count discordant expected entries against the first variant.');
   for (const result of report) {
-    console.log(`\nDepth ${result.variant.storeDepth}, pool ${result.variant.poolSize}, keep ${result.variant.keep}, temporal ${args.temporalIntent ?? 'as-captured'}`);
+    console.log(`\nDepth ${result.variant.storeDepth}, pool ${result.variant.poolSize}, keep ${result.variant.keep}, temporal ${args.temporalIntent ?? 'as-captured'}${result.variant.maxPerDupGroup !== undefined ? `, at most ${result.variant.maxPerDupGroup} per near-duplicate group` : ''}`);
     console.table(result.questions.flatMap(q => q.expected.map(e => ({ question: q.questionId, expected: e.expectedIndex + 1,
       documentPoolRank: e.documentPoolRank ?? '-', documentPackSeat: e.documentPackSeat ?? '-', paragraphPoolRank: e.paragraphPoolRank ?? '-', paragraphPackSeat: e.paragraphPackSeat ?? '-',
     }))));
