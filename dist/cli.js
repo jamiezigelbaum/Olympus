@@ -15955,14 +15955,12 @@ async function installBuiltInEmbedding(options = {}) {
 async function installBuiltInReranker(options = {}) {
   const { onProgress, ...serializable } = options;
   if (isMainThread2 && !Object.values(serializable).some((value) => typeof value === "function")) {
-    await modelThread().call({ kind: "reranker-install", options: { ...serializable, env: options.env ?? process.env } }, { embeddingProgress: onProgress }).catch(() => {
-      return;
-    });
+    await modelThread().call({ kind: "reranker-install", options: { ...serializable, env: options.env ?? process.env } }, { embeddingProgress: onProgress }).catch((error) => failRerankerInstall(rerankerReporter(options), error));
     return;
   }
   const model = options.rerankerModel ?? MMARCO_MMINILMV2_L12_H384_V1;
   const paths = builtInEmbeddingPaths(options.env, options.model);
-  const reporter = new ProgressReporter(join27(paths.root, "reranker-status.json"), model.modelId, options.now, options.onProgress);
+  const reporter = rerankerReporter(options);
   try {
     ensureDirectory(paths.root);
     await withInstallLock(paths.lockPath, options.lockWaitMs ?? STALE_LOCK_MS, async () => {
@@ -15989,8 +15987,15 @@ async function installBuiltInReranker(options = {}) {
       reporter.set("ready", "Built-in reranker installed", 100);
     });
   } catch (error) {
-    reporter.fail(error instanceof BuiltInEmbeddingInstallError ? error.reason : "disk_write_failed", `Built-in reranker could not be installed; the next start will retry. ${error instanceof Error ? error.message : String(error)}`);
+    failRerankerInstall(reporter, error);
   }
+}
+function rerankerReporter(options) {
+  const model = options.rerankerModel ?? MMARCO_MMINILMV2_L12_H384_V1;
+  return new ProgressReporter(join27(builtInEmbeddingPaths(options.env, options.model).root, "reranker-status.json"), model.modelId, options.now, options.onProgress);
+}
+function failRerankerInstall(reporter, error) {
+  reporter.fail(error instanceof BuiltInEmbeddingInstallError ? error.reason : "disk_write_failed", `Built-in reranker could not be installed; the next start will retry. ${error instanceof Error ? error.message : String(error)}`);
 }
 async function installEmbeddingAssets(options) {
   const model = options.model ?? BUILT_IN_EMBEDDING_MODEL;

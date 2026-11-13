@@ -290,6 +290,15 @@ describe('built-in embedding installer', () => {
     expect(status).toMatchObject({ state: 'failed', failure: { reason: 'unsupported_platform' } });
   });
 
+  test('a model-thread install that fails before it reports still leaves a failed status', async () => {
+    // A value the worker cannot receive rejects the hand-off before the worker
+    // writes anything; health must not keep showing the previous state.
+    const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: temporaryDir(), UNSENDABLE: Symbol('x') as unknown as string };
+    await installBuiltInReranker({ env });
+    const status = JSON.parse(readFileSync(join(env.OLYMPUS_BUILT_IN_EMBEDDING_DIR, 'reranker-status.json'), 'utf8'));
+    expect(status).toMatchObject({ state: 'failed', failure: { reason: 'disk_write_failed' } });
+  });
+
   test('installs the reranker when the embedding root does not exist yet', async () => {
     const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: join(temporaryDir(), 'not-yet', 'created') };
     const served = servedAssets();

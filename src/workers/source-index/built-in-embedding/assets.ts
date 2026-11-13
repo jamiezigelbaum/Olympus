@@ -294,16 +294,15 @@ export async function installBuiltInReranker(
   // model thread, as the embedding install does.
   const { onProgress, ...serializable } = options;
   if (isMainThread && !Object.values(serializable).some(value => typeof value === 'function')) {
-    // The worker writes reranker-status.json; a failure there is already reported.
+    // The worker writes reranker-status.json. If it dies, times out or never
+    // receives the request, it wrote nothing, so the failure is written here.
     await modelThread().call<void>({ kind: 'reranker-install', options: { ...serializable, env: options.env ?? process.env } },
-      { embeddingProgress: onProgress }).catch(() => undefined);
+      { embeddingProgress: onProgress }).catch(error => failRerankerInstall(rerankerReporter(options), error));
     return;
   }
   const model = options.rerankerModel ?? MMARCO_MMINILMV2_L12_H384_V1;
   const paths = builtInEmbeddingPaths(options.env, options.model);
-  // A separate receipt uses the same reporting mechanism without marking a
-  // working embedding model failed when this optional download fails.
-  const reporter = new ProgressReporter(join(paths.root, 'reranker-status.json'), model.modelId, options.now, options.onProgress);
+  const reporter = rerankerReporter(options);
   try {
     // The lock lives in the root; an install that never used the built-in
     // embedding model has no root yet.
@@ -336,9 +335,21 @@ export async function installBuiltInReranker(
       reporter.set('ready', 'Built-in reranker installed', 100);
     });
   } catch (error) {
-    reporter.fail(error instanceof BuiltInEmbeddingInstallError ? error.reason : 'disk_write_failed',
-      `Built-in reranker could not be installed; the next start will retry. ${error instanceof Error ? error.message : String(error)}`);
+    failRerankerInstall(reporter, error);
   }
+}
+
+// A separate receipt uses the same reporting mechanism without marking a
+// working embedding model failed when this optional download fails.
+function rerankerReporter(options: BuiltInEmbeddingInstallerOptions): ProgressReporter {
+  const model = options.rerankerModel ?? MMARCO_MMINILMV2_L12_H384_V1;
+  return new ProgressReporter(join(builtInEmbeddingPaths(options.env, options.model).root, 'reranker-status.json'),
+    model.modelId, options.now, options.onProgress);
+}
+
+function failRerankerInstall(reporter: ProgressReporter, error: unknown): void {
+  reporter.fail(error instanceof BuiltInEmbeddingInstallError ? error.reason : 'disk_write_failed',
+    `Built-in reranker could not be installed; the next start will retry. ${error instanceof Error ? error.message : String(error)}`);
 }
 
 async function installEmbeddingAssets(
