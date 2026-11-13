@@ -16,6 +16,8 @@ export interface EvalDataRootOptions {
   dataRoot: string;
   forbidRoots?: readonly string[];
   allowNoFdCheck?: boolean;
+  /** Carry on when a store or ledger cannot be opened, reporting it in skipped. Off by default: the run fails (#1576). */
+  allowUnreadableStores?: boolean;
   /** Engine mount declarations, normally read from its JSON env setting. */
   mountDeclarations?: readonly { dbPath: string; corpusId: string; family: SourceFamily; trustDomain: SourceTrustDomain }[];
 }
@@ -42,7 +44,30 @@ export function assertEvalFileDescriptors(options: EvalFdOptions): void {
 
 interface Declaration { dbPath: string; corpusId: string; family: SourceFamily; trustDomain: SourceTrustDomain; ledgerPath?: string; ledgerId?: string }
 export interface EvalStoreCount { corpusId: string; family: SourceFamily; tier: SourceTrustDomain; rows: number }
-export interface EvalSkippedStore { store: number; reason: 'unreadable_store' | 'unreadable_ledger' | 'unknown_identity' | 'duplicate_corpus' }
+export interface EvalSkippedStore {
+  store: number; reason: 'unreadable_store' | 'unreadable_ledger' | 'unknown_identity' | 'duplicate_corpus';
+  /** Which open failed: the store's schema probe, its ledger, the store itself, or its row count. */
+  stage?: 'store_probe' | 'ledger' | 'store_open' | 'row_count';
+  /** SQLite's error code name and extended errno when the open threw one (#1576). */
+  code?: string;
+  errno?: number;
+  /** SQLite's own message, only when it holds no path (for example "disk I/O error"). */
+  message?: string;
+}
+
+/** The SQLite facts of an open failure: code, extended errno, and a path-free message. */
+function sqliteFailure(error: unknown): Pick<EvalSkippedStore, 'code' | 'errno' | 'message'> {
+  const { code, errno, message } = (error ?? {}) as { code?: unknown; errno?: unknown; message?: unknown };
+  return {
+    ...(typeof code === 'string' && /^SQLITE_[A-Z_]+$/.test(code) ? { code } : {}),
+    ...(typeof errno === 'number' && Number.isInteger(errno) ? { errno } : {}),
+    ...(typeof message === 'string' && /^[a-z][a-z ,()'-]{0,80}$/i.test(message) ? { message } : {}),
+  };
+}
+
+// The product's read-only opens wait out a concurrent reader's WAL recovery;
+// the eval's own probes must too, or two eval rows on one copy skip stores.
+const READ_ONLY_PRAGMAS = 'PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;';
 export interface EvalDataRoot {
   stores: LocalConnectorStore[];
   scopes: TierVisibilityScope[];
@@ -129,7 +154,39 @@ function canonicalPath(path: string): string {
   return existsSync(path) ? realpathSync(path) : resolve(path);
 }
 
+const UNREADABLE: ReadonlySet<EvalSkippedStore['reason']> = new Set(['unreadable_store', 'unreadable_ledger']);
+
+/**
+ * Opens every store the copy holds. A store or ledger that cannot be opened
+ * fails the run with SQLite's exact error, so a short open never reads as a
+ * retrieval miss (#1576), unless the caller allows skips.
+ */
 export function openEvalDataRoot(options: EvalDataRootOptions): EvalDataRoot {
+  const opened = openEvalDataRootOnce(options);
+  const unreadable = opened.skipped.filter(skip => UNREADABLE.has(skip.reason));
+  if (!unreadable.length || options.allowUnreadableStores) return opened;
+  opened.close();
+  const total = opened.stores.length + opened.skipped.length;
+  const others = otherProcessesHolding(realpathSync(options.dataRoot));
+  const failures = unreadable.map(skip => [skip.stage ?? skip.reason, skip.code, skip.errno, skip.message].filter(part => part !== undefined).join(' ')).join('; ');
+  throw Object.assign(new Error(`${unreadable.length} of ${total} store${total === 1 ? '' : 's'} in --data-root could not be opened: ${failures}.`
+    + `${others === undefined ? '' : ` Other processes holding the copy open: ${others}.`} Pass --allow-unreadable-stores to run without them.`), { code: 'EVAL_STORE_UNREADABLE' });
+}
+
+/** How many other processes hold a file under root open (Linux), or undefined when it cannot be read. */
+export function otherProcessesHolding(root: string, procDirectory = '/proc'): number | undefined {
+  let pids: string[];
+  try { pids = readdirSync(procDirectory).filter(name => /^[0-9]+$/.test(name) && Number(name) !== process.pid); } catch { return undefined; }
+  let holding = 0;
+  for (const pid of pids) {
+    let fds: string[];
+    try { fds = readdirSync(join(procDirectory, pid, 'fd')); } catch { continue; }
+    if (fds.some(fd => { try { return tierLedgerIsWithin(root, readlinkSync(join(procDirectory, pid, 'fd', fd))); } catch { return false; } })) holding++;
+  }
+  return holding;
+}
+
+function openEvalDataRootOnce(options: EvalDataRootOptions): EvalDataRoot {
   const root = realpathSync(options.dataRoot);
   // The live data folder is refused without being named: a copy must not be
   // it, sit inside it or hold it (privacy review of #1450).
@@ -145,7 +202,8 @@ export function openEvalDataRoot(options: EvalDataRootOptions): EvalDataRoot {
   for (const [path, identity] of mounted) known.set(path, identity);
   const declarations: Declaration[] = [];
   const skipped: EvalSkippedStore[] = [];
-  const report = (store: number, reason: EvalSkippedStore['reason']) => skipped.push({ store, reason });
+  const report = (store: number, reason: EvalSkippedStore['reason'], stage?: EvalSkippedStore['stage'], error?: unknown) =>
+    skipped.push({ store, reason, ...(stage ? { stage } : {}), ...sqliteFailure(error) });
   // Preflight all recorded ledger hints before constructing any store or ledger.
   // Schema probes themselves are read-only, query-only, bounded to the inventory.
   for (const [index, dbPath] of files.filter(path => /\.(sqlite|db)$/.test(path)).entries()) {
@@ -154,7 +212,7 @@ export function openEvalDataRoot(options: EvalDataRootOptions): EvalDataRoot {
     let binding: { ledgerId: string; ledgerPath: string } | undefined;
     try {
       db = new Database(dbPath, { readonly: true, create: false });
-      db.exec('PRAGMA query_only = ON;');
+      db.exec(READ_ONLY_PRAGMAS);
       if (!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync_runs'").get()) {
         if (known.has(dbPath)) report(index, 'unreadable_store');
         continue;
@@ -177,20 +235,21 @@ export function openEvalDataRoot(options: EvalDataRootOptions): EvalDataRoot {
         report(index, 'unknown_identity'); continue;
       }
       declaration = { dbPath, corpusId, family, trustDomain };
-    } catch { report(index, 'unreadable_store'); continue; }
+    } catch (error) { report(index, 'unreadable_store', 'store_probe', error); continue; }
     finally { db?.close(); }
     if (binding) {
       const candidates = tierSetLedgerCandidates(dbPath, binding.ledgerPath)
         .filter(path => tierLedgerIsWithin(root, path) && existsSync(path));
       let ledgerPath: string | undefined;
+      let ledgerError: unknown;
       for (const candidate of candidates) {
         try { if (readOnlyLedgerId(candidate) === binding.ledgerId) { ledgerPath = realpathSync(candidate); break; } }
-        catch { /* Report this store below; never repair its ledger. */ }
+        catch (error) { ledgerError = error; /* Report this store below; never repair its ledger. */ }
       }
       if (!ledgerPath && !tierLedgerIsWithin(root, binding.ledgerPath)) {
         throw new Error('Refusing recorded ledger outside --data-root; copy its bound ledger with the stores.');
       }
-      if (!ledgerPath) { report(index, 'unreadable_ledger'); continue; }
+      if (!ledgerPath) { report(index, 'unreadable_ledger', 'ledger', ledgerError); continue; }
       declaration.ledgerPath = ledgerPath;
       declaration.ledgerId = binding.ledgerId;
     } else {
@@ -216,16 +275,18 @@ export function openEvalDataRoot(options: EvalDataRootOptions): EvalDataRoot {
           ledger = ledgers.get(declaration.ledgerPath) ?? new TierLedger({ dbPath: declaration.ledgerPath, readOnly: true });
           ledgers.set(declaration.ledgerPath, ledger);
           if (declaration.ledgerId && ledger.ledgerId() !== declaration.ledgerId) throw new Error('identity changed');
-        } catch { report(index, 'unreadable_ledger'); continue; }
+        } catch (error) { report(index, 'unreadable_ledger', 'ledger', error); continue; }
       }
       let store: LocalConnectorStore | undefined;
+      let stage: EvalSkippedStore['stage'] = 'store_open';
       try {
         store = new LocalConnectorStore({ ...declaration, readOnly: true, ...(ledger ? { tierLedger: ledger } : {}) });
         if (ledger) store.useTierLedger(ledger);
         // A counts-only snapshot on the same read-only schema path.
+        stage = 'row_count';
         const db = new Database(declaration.dbPath, { readonly: true, create: false });
         let rows: number;
-        try { db.exec('PRAGMA query_only = ON;'); rows = (db.query('SELECT count(*) AS n FROM items').get() as { n: number }).n; }
+        try { db.exec(READ_ONLY_PRAGMAS); rows = (db.query('SELECT count(*) AS n FROM items').get() as { n: number }).n; }
         finally { db.close(); }
         stores.push(store);
         storeCounts.push({ corpusId: store.corpusId, family: store.family, tier: store.trustDomain, rows });
@@ -234,7 +295,7 @@ export function openEvalDataRoot(options: EvalDataRootOptions): EvalDataRoot {
           if (!scope) { scope = { ledger, corpusIds: new Set(), stores: () => stores.filter(s => scope!.corpusIds.has(s.corpusId)) }; scopes.push(scope); }
           (scope.corpusIds as Set<string>).add(store.corpusId);
         }
-      } catch { store?.close(); report(index, 'unreadable_store'); }
+      } catch (error) { store?.close(); report(index, 'unreadable_store', stage, error); }
       // Check while all handles accumulated so far are still open.
       checkFileDescriptors();
     }
@@ -246,7 +307,7 @@ export function openEvalDataRoot(options: EvalDataRootOptions): EvalDataRoot {
 function readOnlyLedgerId(path: string): string | undefined {
   const db = new Database(path, { readonly: true, create: false });
   try {
-    db.exec('PRAGMA query_only = ON;');
+    db.exec(READ_ONLY_PRAGMAS);
     return (db.query("SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'").get() as { value: string } | null)?.value;
   } finally { db.close(); }
 }
