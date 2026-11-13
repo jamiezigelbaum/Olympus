@@ -107,7 +107,7 @@ export function applyVectorDigestWindow(
       }
       const cursorRowid = rows.at(-1)?.rowid ?? state.cursorRowid;
       const completed = rows.length < maxRows;
-      db.query(`INSERT INTO chunk_vector_digest_meta VALUES (?, ?, ?)
+      db.query(`INSERT INTO chunk_vector_digest_meta (model_id, cursor_rowid, completed) VALUES (?, ?, ?)
         ON CONFLICT(model_id) DO UPDATE SET cursor_rowid = excluded.cursor_rowid, completed = excluded.completed`)
         .run(modelId, cursorRowid, Number(completed));
       return { cursorRowid, completed, scanned: rows.length };

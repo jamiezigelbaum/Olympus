@@ -6434,11 +6434,13 @@ var init_upgrade_store_copies = __esm(() => {
 });
 
 // src/core/sqlite-migrations.ts
+var ADDITIVE_MIGRATIONS;
 var init_sqlite_migrations = __esm(() => {
   init_boot_progress();
   init_engine_heartbeat();
   init_upgrade_store_copies();
   init_operation_error();
+  ADDITIVE_MIGRATIONS = new WeakSet;
 });
 
 // src/core/limit-stops.ts

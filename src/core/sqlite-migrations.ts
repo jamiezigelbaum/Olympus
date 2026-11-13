@@ -16,6 +16,47 @@ export interface SqliteMigration {
   up(db: Database): void;
 }
 
+// A store's compatible version is the lowest schema version a build must know
+// to use it (Chromium's sql::MetaTable rule). A migration made with
+// `additiveMigration` only adds tables, indexes or columns, so it leaves the
+// compatible version where it was: a build one version behind still opens the
+// store, a rollback needs no copy of it, and the boot takes none. Every other
+// migration raises the compatible version to its own.
+//
+// Only `additiveMigration` can mark a migration additive: the mark is this
+// module's own set, not a field another module can set by hand.
+const ADDITIVE_MIGRATIONS = new WeakSet<SqliteMigration>();
+const ADDITIVE_STATEMENT = /^\s*(CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?[A-Za-z_][A-Za-z0-9_]*\s*\(|CREATE\s+INDEX\s+(IF\s+NOT\s+EXISTS\s+)?[A-Za-z_][A-Za-z0-9_]*\s+ON\s|ALTER\s+TABLE\s+[A-Za-z_][A-Za-z0-9_]*\s+ADD\s+(COLUMN\s+)?[A-Za-z_])/i;
+/** Words that change or read existing rows, or the shape old code relies on. */
+const NOT_ADDITIVE = /\b(DROP|RENAME|UPDATE|DELETE|INSERT|REPLACE|SELECT|TRIGGER|UNIQUE|VACUUM|PRAGMA|ATTACH|DETACH)\b/i;
+
+/**
+ * A migration that only adds: `CREATE TABLE`, `CREATE INDEX` (not unique) or
+ * `ALTER TABLE … ADD COLUMN`, one statement each. A build that knows only the
+ * version before it still opens the store. Throws on anything else, so a
+ * migration that rewrites, drops or renames cannot be declared additive.
+ */
+export function additiveMigration(version: number, name: string, statements: readonly string[]): SqliteMigration {
+  if (statements.length === 0) throw new OperationError('config_error', `Additive migration "${name}" has no statements.`);
+  for (const statement of statements) {
+    const body = statement.trim().replace(/;$/, '');
+    if (!ADDITIVE_STATEMENT.test(body) || NOT_ADDITIVE.test(body) || body.includes(';')) {
+      throw new OperationError('config_error', `Additive migration "${name}" has a statement that is not additive: ${body.slice(0, 80)}`);
+    }
+  }
+  const migration: SqliteMigration = {
+    version,
+    name,
+    up(db) { for (const statement of statements) db.exec(statement); },
+  };
+  ADDITIVE_MIGRATIONS.add(migration);
+  return migration;
+}
+
+export function isAdditiveMigration(migration: SqliteMigration): boolean {
+  return ADDITIVE_MIGRATIONS.has(migration);
+}
+
 export interface SqliteMigrationResult {
   storeId: string;
   currentVersion: number;
@@ -62,7 +103,7 @@ export function assertSqliteSchemaCanOpen(
   knownVersion = CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION,
 ): void {
   const currentVersion = readSqliteSchemaVersion(db, storeId);
-  if (currentVersion > knownVersion) {
+  if (currentVersion > knownVersion && readSqliteCompatibleVersion(db, storeId) > knownVersion) {
     throw new OperationError(
       'config_error',
       `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${knownVersion}.`,
@@ -81,6 +122,10 @@ export function runSqliteMigrations(
   const targetVersion = options.knownVersion ?? ordered.at(-1)?.version ?? CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION;
   const currentVersion = readSqliteSchemaVersion(db, storeId);
   if (currentVersion > targetVersion) {
+    // A newer build's store that this one may still use: nothing to apply.
+    if (readSqliteCompatibleVersion(db, storeId) <= targetVersion) {
+      return { storeId, currentVersion, targetVersion, dryRun: options.dryRun === true, applied: [], pending: [] };
+    }
     throw new OperationError(
       'config_error',
       `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${targetVersion}.`,
@@ -125,7 +170,14 @@ export function runSqliteMigrations(
     // The upgrade already copied the whole file after the previous version
     // stopped (upgrade-store-copies.ts): no second copy, and none on this loop.
     const upgradeCopied = storeOnDisk(db) && upgradeCopyExists(db.filename);
-    const backupMs = storeOnDisk(db) && !upgradeCopied
+    // Only additions, to a store a build that knows compatible versions last
+    // wrote: the version a rollback restores still opens it, so no copy.
+    // A store from before compatible versions keeps its copy, since the build
+    // a rollback restores then refuses any version newer than its own.
+    const compatibleWithPrevious = currentVersion > 0
+      && storedCompatibleVersion(db, storeId) !== undefined
+      && ordered.filter((migration) => migration.version > currentVersion).every(isAdditiveMigration);
+    const backupMs = storeOnDisk(db) && !upgradeCopied && !compatibleWithPrevious
       && (currentVersion > 0 || holdsOtherVersionedStore(db, storeId))
       ? backUpBeforeUpdate(db, storeId, currentVersion, env, report, options.freeBytes)
       : undefined;
@@ -139,6 +191,8 @@ export function runSqliteMigrations(
     // migration twice or failing on a stale snapshot.
     db.transaction(() => {
       const lockedVersion = readSqliteSchemaVersion(db, storeId);
+      // Another process moved it past this build in the meantime, compatibly.
+      if (lockedVersion > targetVersion && readSqliteCompatibleVersion(db, storeId) <= targetVersion) return;
       if (lockedVersion > targetVersion) {
         throw new OperationError(
           'config_error',
@@ -146,9 +200,12 @@ export function runSqliteMigrations(
           'Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.',
         );
       }
+      // A store from before compatible versions starts at its own version.
+      let compatible = storedCompatibleVersion(db, storeId) ?? lockedVersion;
       for (const migration of ordered.filter((entry) => entry.version > lockedVersion)) {
         migration.up(db);
-        writeSqliteSchemaVersion(db, storeId, migration.version);
+        if (!isAdditiveMigration(migration)) compatible = migration.version;
+        writeSqliteSchemaVersion(db, storeId, migration.version, compatible);
         applied.push({ version: migration.version, name: migration.name });
       }
     }).immediate();
@@ -281,24 +338,70 @@ export function readSqliteSchemaVersion(db: Database, storeId: string): number {
   return typeof row?.version === 'number' && Number.isInteger(row.version) ? row.version : 0;
 }
 
+/**
+ * Whether this build, which knows schema version `knownVersion`, uses the
+ * store as it is: at that version, or newer but compatible with it.
+ */
+export function sqliteSchemaUsable(db: Database, storeId: string, knownVersion: number): boolean {
+  const version = readSqliteSchemaVersion(db, storeId);
+  return version === knownVersion || (version > knownVersion && readSqliteCompatibleVersion(db, storeId) <= knownVersion);
+}
+
+/**
+ * The lowest schema version a build must know to use this store: its own
+ * version for a store from before compatible versions.
+ */
+export function readSqliteCompatibleVersion(db: Database, storeId: string): number {
+  return storedCompatibleVersion(db, storeId) ?? readSqliteSchemaVersion(db, storeId);
+}
+
+/**
+ * The stored compatible version, when a build that knows them wrote this
+ * store's row. A build from before them (1.4) updates `version` and leaves the
+ * column as it was; it only ever does so for versions every later build knows,
+ * so a stale value never lets a build open a store newer than it can use.
+ */
+function storedCompatibleVersion(db: Database, storeId: string): number | undefined {
+  if (!schemaVersionTableExists(db) || !compatibleVersionColumnExists(db)) return undefined;
+  const row = db
+    .query(`SELECT compatible_version FROM ${SQLITE_SCHEMA_VERSION_TABLE} WHERE store_id = ?`)
+    .get(storeId) as { compatible_version?: number | null } | null;
+  return typeof row?.compatible_version === 'number' && Number.isInteger(row.compatible_version) ? row.compatible_version : undefined;
+}
+
+function compatibleVersionColumnExists(db: Database): boolean {
+  return (db.query(`SELECT COUNT(*) AS n FROM pragma_table_info('${SQLITE_SCHEMA_VERSION_TABLE}') WHERE name = 'compatible_version'`)
+    .get() as { n: number }).n > 0;
+}
+
 function ensureSchemaVersionTable(db: Database): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS ${SQLITE_SCHEMA_VERSION_TABLE} (
       store_id TEXT PRIMARY KEY,
       version INTEGER NOT NULL,
-      applied_at TEXT NOT NULL
+      applied_at TEXT NOT NULL,
+      compatible_version INTEGER
     );
   `);
+  // Added beside the 1.4 columns: 1.4 writes rows by column name and ignores it.
+  if (compatibleVersionColumnExists(db)) return;
+  try {
+    db.exec(`ALTER TABLE ${SQLITE_SCHEMA_VERSION_TABLE} ADD COLUMN compatible_version INTEGER`);
+  } catch (error) {
+    // Another process opening the same file added it first.
+    if (!compatibleVersionColumnExists(db)) throw error;
+  }
 }
 
-function writeSqliteSchemaVersion(db: Database, storeId: string, version: number): void {
+function writeSqliteSchemaVersion(db: Database, storeId: string, version: number, compatible: number): void {
   db.query(`
-    INSERT INTO ${SQLITE_SCHEMA_VERSION_TABLE} (store_id, version, applied_at)
-    VALUES (?, ?, ?)
+    INSERT INTO ${SQLITE_SCHEMA_VERSION_TABLE} (store_id, version, applied_at, compatible_version)
+    VALUES (?, ?, ?, ?)
     ON CONFLICT(store_id) DO UPDATE SET
       version = excluded.version,
-      applied_at = excluded.applied_at
-  `).run(storeId, version, new Date().toISOString());
+      applied_at = excluded.applied_at,
+      compatible_version = excluded.compatible_version
+  `).run(storeId, version, new Date().toISOString(), compatible);
 }
 
 function schemaVersionTableExists(db: Database): boolean {

@@ -200,7 +200,7 @@ describe('the table is append-only', () => {
     bindings.bind('a1', 'media/a.jpg', v1);
     bindings.close();
     const db = new Database(path);
-    db.query('UPDATE schema_version SET version = 9').run();
+    db.query('UPDATE schema_version SET version = 9, compatible_version = 9').run();
     db.close();
     expect(() => new ArchiveMediaBindingStore({ path, env: { HOME: dirname(path) } })).toThrow();
   });

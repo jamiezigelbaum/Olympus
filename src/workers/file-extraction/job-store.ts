@@ -790,7 +790,7 @@ export class LocalFileExtractionJobStore {
         FROM on_demand_reads WHERE question_id = ? AND requester != 'owner'`).get(request.questionId ?? null) as { files: number; bytes: number };
       const bytes = size ?? Math.max(0, limits.bytes - used.bytes);
       if (request.requester !== 'owner' && (used.files >= limits.files || bytes < 1 || used.bytes + bytes > limits.bytes)) {
-        this.db.query(`INSERT OR IGNORE INTO on_demand_waiting VALUES (?, ?, ?)`).run(request.questionId ?? '', request.itemRef.corpusId, request.itemRef.providerItemId);
+        this.db.query(`INSERT OR IGNORE INTO on_demand_waiting (question_id, corpus_id, provider_item_id) VALUES (?, ?, ?)`).run(request.questionId ?? '', request.itemRef.corpusId, request.itemRef.providerItemId);
         const waiting = this.db.query('SELECT COUNT(*) AS n FROM on_demand_waiting WHERE question_id = ?').get(request.questionId ?? '') as { n: number };
         return { state: 'capped', reason: { id: 'on_demand_reads_per_question', limit: limits, used,
           waiting_names_count: waiting.n, resumes: 'never' } };

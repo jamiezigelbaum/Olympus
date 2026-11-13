@@ -642,7 +642,7 @@ function snifferMigrations(): SqliteMigration[] {
         db.exec(`ALTER TABLE sniffer_questions ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;
           CREATE INDEX sniffer_recent ON sniffer_questions(priority DESC, queued_at DESC, question_pk DESC);
           CREATE TABLE sniffer_schedule (id INTEGER PRIMARY KEY, dispatches INTEGER NOT NULL);
-          INSERT INTO sniffer_schedule VALUES (1, 0);`);
+          INSERT INTO sniffer_schedule (id, dispatches) VALUES (1, 0);`);
       },
     },
     {

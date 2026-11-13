@@ -300,7 +300,7 @@ describe('source storage, end to end on this host', () => {
     store.close();
     ledger.close();
     const db = new Database(ledgerPath);
-    db.query('UPDATE schema_version SET version = ? WHERE store_id = ?').run(TIER_LEDGER_SCHEMA_VERSION + 1, TIER_LEDGER_SQLITE_STORE_ID);
+    db.query('UPDATE schema_version SET version = ?, compatible_version = ? WHERE store_id = ?').run(TIER_LEDGER_SCHEMA_VERSION + 1, TIER_LEDGER_SCHEMA_VERSION + 1, TIER_LEDGER_SQLITE_STORE_ID);
     db.close();
     const hash = (path: string) => createHash('sha256').update(readFileSync(path)).digest('hex');
     const before = [hash(storePath), hash(ledgerPath)];

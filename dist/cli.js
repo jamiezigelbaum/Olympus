@@ -20185,6 +20185,9 @@ var init_upgrade_store_copies = __esm(() => {
 // src/core/sqlite-migrations.ts
 import { chmodSync as chmodSync6, closeSync as closeSync11, existsSync as existsSync22, openSync as openSync11, renameSync as renameSync6, rmSync as rmSync10, statfsSync as statfsSync2, statSync as statSync13 } from "node:fs";
 import { dirname as dirname28 } from "node:path";
+function isAdditiveMigration(migration) {
+  return ADDITIVE_MIGRATIONS.has(migration);
+}
 function schemaUpdateSpaceNeeded(fileBytes) {
   return Math.ceil(fileBytes * 1.2) + 512 * 1024 * 1024;
 }
@@ -20199,7 +20202,7 @@ function currentStoreMigrations() {
 }
 function assertSqliteSchemaCanOpen(db, storeId, knownVersion = CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION) {
   const currentVersion = readSqliteSchemaVersion(db, storeId);
-  if (currentVersion > knownVersion) {
+  if (currentVersion > knownVersion && readSqliteCompatibleVersion(db, storeId) > knownVersion) {
     throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${knownVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
   }
 }
@@ -20208,6 +20211,9 @@ function runSqliteMigrations(db, storeId, migrations = currentStoreMigrations(),
   const targetVersion = options.knownVersion ?? ordered.at(-1)?.version ?? CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION;
   const currentVersion = readSqliteSchemaVersion(db, storeId);
   if (currentVersion > targetVersion) {
+    if (readSqliteCompatibleVersion(db, storeId) <= targetVersion) {
+      return { storeId, currentVersion, targetVersion, dryRun: options.dryRun === true, applied: [], pending: [] };
+    }
     throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
   }
   const pending = ordered.filter((migration) => migration.version > currentVersion).map(({ version, name }) => ({ version, name }));
@@ -20234,18 +20240,24 @@ function runSqliteMigrations(db, storeId, migrations = currentStoreMigrations(),
     if (logged)
       log(`${label}: updating`);
     const upgradeCopied = storeOnDisk(db) && upgradeCopyExists(db.filename);
-    const backupMs = storeOnDisk(db) && !upgradeCopied && (currentVersion > 0 || holdsOtherVersionedStore(db, storeId)) ? backUpBeforeUpdate(db, storeId, currentVersion, env, report, options.freeBytes) : undefined;
+    const compatibleWithPrevious = currentVersion > 0 && storedCompatibleVersion(db, storeId) !== undefined && ordered.filter((migration) => migration.version > currentVersion).every(isAdditiveMigration);
+    const backupMs = storeOnDisk(db) && !upgradeCopied && !compatibleWithPrevious && (currentVersion > 0 || holdsOtherVersionedStore(db, storeId)) ? backUpBeforeUpdate(db, storeId, currentVersion, env, report, options.freeBytes) : undefined;
     report({ phase: "migrating", storeId });
     setEngineStep(`updating ${storeId}`);
     const migrateStarted = performance.now();
     db.transaction(() => {
       const lockedVersion = readSqliteSchemaVersion(db, storeId);
+      if (lockedVersion > targetVersion && readSqliteCompatibleVersion(db, storeId) <= targetVersion)
+        return;
       if (lockedVersion > targetVersion) {
         throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${lockedVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
       }
+      let compatible = storedCompatibleVersion(db, storeId) ?? lockedVersion;
       for (const migration of ordered.filter((entry) => entry.version > lockedVersion)) {
         migration.up(db);
-        writeSqliteSchemaVersion(db, storeId, migration.version);
+        if (!isAdditiveMigration(migration))
+          compatible = migration.version;
+        writeSqliteSchemaVersion(db, storeId, migration.version, compatible);
         applied.push({ version: migration.version, name: migration.name });
       }
     }).immediate();
@@ -20334,23 +20346,49 @@ function readSqliteSchemaVersion(db, storeId) {
   const row = db.query(`SELECT version FROM ${SQLITE_SCHEMA_VERSION_TABLE} WHERE store_id = ?`).get(storeId);
   return typeof row?.version === "number" && Number.isInteger(row.version) ? row.version : 0;
 }
+function sqliteSchemaUsable(db, storeId, knownVersion) {
+  const version = readSqliteSchemaVersion(db, storeId);
+  return version === knownVersion || version > knownVersion && readSqliteCompatibleVersion(db, storeId) <= knownVersion;
+}
+function readSqliteCompatibleVersion(db, storeId) {
+  return storedCompatibleVersion(db, storeId) ?? readSqliteSchemaVersion(db, storeId);
+}
+function storedCompatibleVersion(db, storeId) {
+  if (!schemaVersionTableExists(db) || !compatibleVersionColumnExists(db))
+    return;
+  const row = db.query(`SELECT compatible_version FROM ${SQLITE_SCHEMA_VERSION_TABLE} WHERE store_id = ?`).get(storeId);
+  return typeof row?.compatible_version === "number" && Number.isInteger(row.compatible_version) ? row.compatible_version : undefined;
+}
+function compatibleVersionColumnExists(db) {
+  return db.query(`SELECT COUNT(*) AS n FROM pragma_table_info('${SQLITE_SCHEMA_VERSION_TABLE}') WHERE name = 'compatible_version'`).get().n > 0;
+}
 function ensureSchemaVersionTable(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS ${SQLITE_SCHEMA_VERSION_TABLE} (
       store_id TEXT PRIMARY KEY,
       version INTEGER NOT NULL,
-      applied_at TEXT NOT NULL
+      applied_at TEXT NOT NULL,
+      compatible_version INTEGER
     );
   `);
+  if (compatibleVersionColumnExists(db))
+    return;
+  try {
+    db.exec(`ALTER TABLE ${SQLITE_SCHEMA_VERSION_TABLE} ADD COLUMN compatible_version INTEGER`);
+  } catch (error) {
+    if (!compatibleVersionColumnExists(db))
+      throw error;
+  }
 }
-function writeSqliteSchemaVersion(db, storeId, version) {
+function writeSqliteSchemaVersion(db, storeId, version, compatible) {
   db.query(`
-    INSERT INTO ${SQLITE_SCHEMA_VERSION_TABLE} (store_id, version, applied_at)
-    VALUES (?, ?, ?)
+    INSERT INTO ${SQLITE_SCHEMA_VERSION_TABLE} (store_id, version, applied_at, compatible_version)
+    VALUES (?, ?, ?, ?)
     ON CONFLICT(store_id) DO UPDATE SET
       version = excluded.version,
-      applied_at = excluded.applied_at
-  `).run(storeId, version, new Date().toISOString());
+      applied_at = excluded.applied_at,
+      compatible_version = excluded.compatible_version
+  `).run(storeId, version, new Date().toISOString(), compatible);
 }
 function schemaVersionTableExists(db) {
   const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(SQLITE_SCHEMA_VERSION_TABLE);
@@ -20370,12 +20408,13 @@ function validateMigrations(migrations) {
   }
   return ordered;
 }
-var SQLITE_SCHEMA_VERSION_TABLE = "schema_version", CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION = 1;
+var SQLITE_SCHEMA_VERSION_TABLE = "schema_version", CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION = 1, ADDITIVE_MIGRATIONS;
 var init_sqlite_migrations = __esm(() => {
   init_boot_progress();
   init_engine_heartbeat();
   init_upgrade_store_copies();
   init_operation_error();
+  ADDITIVE_MIGRATIONS = new WeakSet;
 });
 
 // node_modules/entities/dist/esm/decode-codepoint.js
@@ -23771,7 +23810,7 @@ function snifferMigrations() {
         db.exec(`ALTER TABLE sniffer_questions ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;
           CREATE INDEX sniffer_recent ON sniffer_questions(priority DESC, queued_at DESC, question_pk DESC);
           CREATE TABLE sniffer_schedule (id INTEGER PRIMARY KEY, dispatches INTEGER NOT NULL);
-          INSERT INTO sniffer_schedule VALUES (1, 0);`);
+          INSERT INTO sniffer_schedule (id, dispatches) VALUES (1, 0);`);
       }
     },
     {
@@ -24031,9 +24070,9 @@ class TierLedger {
       db = new Database3(this.dbPath, this.readOnly ? { readonly: true, create: false } : { create: true });
       if (this.readOnly) {
         db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
-        const version = readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID);
-        if (version !== TIER_LEDGER_SCHEMA_VERSION)
-          throw new TierLedgerSchemaError(version);
+        if (!sqliteSchemaUsable(db, TIER_LEDGER_SQLITE_STORE_ID, TIER_LEDGER_SCHEMA_VERSION)) {
+          throw new TierLedgerSchemaError(readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID));
+        }
         this.db = db;
         return;
       }
@@ -24052,13 +24091,16 @@ class TierLedger {
   static assertSchemaCanOpen(dbPath, readOnly = false) {
     if (dbPath === ":memory:" || !existsSync25(dbPath))
       return;
-    const version = readSqliteWithoutWriting(dbPath, 1e4, (db) => readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID), readOnly);
-    if (version !== undefined && (version > TIER_LEDGER_SCHEMA_VERSION || readOnly && version !== TIER_LEDGER_SCHEMA_VERSION)) {
-      throw new TierLedgerSchemaError(version);
+    const read = readSqliteWithoutWriting(dbPath, 1e4, (db) => ({
+      version: readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID),
+      usable: sqliteSchemaUsable(db, TIER_LEDGER_SQLITE_STORE_ID, TIER_LEDGER_SCHEMA_VERSION)
+    }), readOnly);
+    if (read !== undefined && !read.usable && (read.version > TIER_LEDGER_SCHEMA_VERSION || readOnly)) {
+      throw new TierLedgerSchemaError(read.version);
     }
   }
   hasCurrentSchema() {
-    return readSqliteSchemaVersion(this.db, TIER_LEDGER_SQLITE_STORE_ID) === TIER_LEDGER_SCHEMA_VERSION;
+    return sqliteSchemaUsable(this.db, TIER_LEDGER_SQLITE_STORE_ID, TIER_LEDGER_SCHEMA_VERSION);
   }
   close() {
     try {
@@ -28971,7 +29013,7 @@ function applyVectorDigestWindow(db, modelId, readFromCursor, rows, maxRows) {
       }
       const cursorRowid = rows.at(-1)?.rowid ?? state.cursorRowid;
       const completed = rows.length < maxRows;
-      db.query(`INSERT INTO chunk_vector_digest_meta VALUES (?, ?, ?)
+      db.query(`INSERT INTO chunk_vector_digest_meta (model_id, cursor_rowid, completed) VALUES (?, ?, ?)
         ON CONFLICT(model_id) DO UPDATE SET cursor_rowid = excluded.cursor_rowid, completed = excluded.completed`).run(modelId, cursorRowid, Number(completed));
       return { cursorRowid, completed, scanned: rows.length };
     })();
@@ -42689,7 +42731,8 @@ function validateConnectorStoreSchemaShape(db, itemColumns, conversationScoped, 
 }
 function assertExactTableColumns(db, table, expected, includeGenerated, versionLabel) {
   const actual = tableColumns(db, table, includeGenerated);
-  if (!sameStringSet(actual, expected)) {
+  const newer = readSqliteSchemaVersion(db, SQLITE_STORE_ID) > CONNECTOR_STORE_SQLITE_SCHEMA_VERSION;
+  if (newer ? !expected.every((column) => actual.includes(column)) : !sameStringSet(actual, expected)) {
     throw new Error(`Connector store schema table ${table} does not have the required ${versionLabel} columns.`);
   }
 }
@@ -101008,7 +101051,7 @@ class LocalFileExtractionJobStore {
         FROM on_demand_reads WHERE question_id = ? AND requester != 'owner'`).get(request.questionId ?? null);
       const bytes = size ?? Math.max(0, limits.bytes - used.bytes);
       if (request.requester !== "owner" && (used.files >= limits.files || bytes < 1 || used.bytes + bytes > limits.bytes)) {
-        this.db.query(`INSERT OR IGNORE INTO on_demand_waiting VALUES (?, ?, ?)`).run(request.questionId ?? "", request.itemRef.corpusId, request.itemRef.providerItemId);
+        this.db.query(`INSERT OR IGNORE INTO on_demand_waiting (question_id, corpus_id, provider_item_id) VALUES (?, ?, ?)`).run(request.questionId ?? "", request.itemRef.corpusId, request.itemRef.providerItemId);
         const waiting = this.db.query("SELECT COUNT(*) AS n FROM on_demand_waiting WHERE question_id = ?").get(request.questionId ?? "");
         return { state: "capped", reason: {
           id: "on_demand_reads_per_question",

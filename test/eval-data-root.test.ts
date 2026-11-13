@@ -61,7 +61,7 @@ test('checks every forbidden root and refuses unavailable proc unless explicitly
 });
 test('incompatible stores are counted and skipped without upgrade', async () => {
   const root = temp(); const path = await seed(root);
-  const db = new Database(path); db.exec('UPDATE schema_version SET version = 999; PRAGMA wal_checkpoint(TRUNCATE);'); db.close();
+  const db = new Database(path); db.exec('UPDATE schema_version SET version = 999, compatible_version = 999; PRAGMA wal_checkpoint(TRUNCATE);'); db.close();
   const before = readFileSync(path);
   const opened = openEvalDataRoot({ dataRoot: root, allowUnreadableStores: true });
   try { expect(opened.stores).toHaveLength(0); expect(opened.skipped).toHaveLength(1); } finally { opened.close(); }

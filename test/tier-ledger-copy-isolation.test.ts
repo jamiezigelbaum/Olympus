@@ -18,7 +18,8 @@ const hash = (path: string) => createHash('sha256').update(readFileSync(path)).d
 function version(path: string, set?: number): number {
   const db = new Database(path, set === undefined ? { readonly: true } : { readwrite: true });
   try {
-    if (set !== undefined) db.query('UPDATE schema_version SET version = ? WHERE store_id = ?').run(set, TIER_LEDGER_SQLITE_STORE_ID);
+    // A newer schema this build cannot use: its compatible version moves with it.
+    if (set !== undefined) db.query('UPDATE schema_version SET version = ?, compatible_version = ? WHERE store_id = ?').run(set, set, TIER_LEDGER_SQLITE_STORE_ID);
     return (db.query('SELECT version FROM schema_version WHERE store_id = ?').get(TIER_LEDGER_SQLITE_STORE_ID) as { version: number }).version;
   } finally { db.close(); }
 }

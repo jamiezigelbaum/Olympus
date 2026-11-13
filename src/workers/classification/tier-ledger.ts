@@ -25,7 +25,7 @@ import { randomUUID } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { SourceItemIdentity, SourceTrustDomain, SourceTrustTier } from '../../core/source-index/types.ts';
-import { readSqliteSchemaVersion, runSqliteMigrations, type SqliteMigration } from '../../core/sqlite-migrations.ts';
+import { readSqliteSchemaVersion, runSqliteMigrations, sqliteSchemaUsable, type SqliteMigration } from '../../core/sqlite-migrations.ts';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import { assertWritableStoreOpenAllowed } from '../../core/store-write-guard.ts';
 import {
@@ -556,8 +556,9 @@ export class TierLedger {
       db = new Database(this.dbPath, this.readOnly ? { readonly: true, create: false } : { create: true });
       if (this.readOnly) {
         db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
-        const version = readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID);
-        if (version !== TIER_LEDGER_SCHEMA_VERSION) throw new TierLedgerSchemaError(version);
+        if (!sqliteSchemaUsable(db, TIER_LEDGER_SQLITE_STORE_ID, TIER_LEDGER_SCHEMA_VERSION)) {
+          throw new TierLedgerSchemaError(readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID));
+        }
         this.db = db;
         return;
       }
@@ -575,15 +576,19 @@ export class TierLedger {
   /** Preflight existing files read-only, before chmod, WAL setup or a writable open. */
   static assertSchemaCanOpen(dbPath: string, readOnly = false): void {
     if (dbPath === ':memory:' || !existsSync(dbPath)) return;
-    const version = readSqliteWithoutWriting(dbPath, 10_000, (db) => readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID), readOnly);
-    if (version !== undefined && (version > TIER_LEDGER_SCHEMA_VERSION || (readOnly && version !== TIER_LEDGER_SCHEMA_VERSION))) {
-      throw new TierLedgerSchemaError(version);
+    const read = readSqliteWithoutWriting(dbPath, 10_000, (db) => ({
+      version: readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID),
+      usable: sqliteSchemaUsable(db, TIER_LEDGER_SQLITE_STORE_ID, TIER_LEDGER_SCHEMA_VERSION),
+    }), readOnly);
+    // Newer is refused unless compatible; a read-only open cannot migrate an older one.
+    if (read !== undefined && !read.usable && (read.version > TIER_LEDGER_SCHEMA_VERSION || readOnly)) {
+      throw new TierLedgerSchemaError(read.version);
     }
   }
 
   /** Whether this file is at this build's schema (a read-only open never migrates it). */
   hasCurrentSchema(): boolean {
-    return readSqliteSchemaVersion(this.db, TIER_LEDGER_SQLITE_STORE_ID) === TIER_LEDGER_SCHEMA_VERSION;
+    return sqliteSchemaUsable(this.db, TIER_LEDGER_SQLITE_STORE_ID, TIER_LEDGER_SCHEMA_VERSION);
   }
 
   close(): void {

@@ -19966,7 +19966,10 @@ function assertExactTableColumns(
   versionLabel: string,
 ): void {
   const actual = tableColumns(db, table, includeGenerated);
-  if (!sameStringSet(actual, expected)) {
+  // A newer build's store this one may use (its compatible version, checked
+  // on open) can only have added columns: these must all be there.
+  const newer = readSqliteSchemaVersion(db, SQLITE_STORE_ID) > CONNECTOR_STORE_SQLITE_SCHEMA_VERSION;
+  if (newer ? !expected.every((column) => actual.includes(column)) : !sameStringSet(actual, expected)) {
     throw new Error(`Connector store schema table ${table} does not have the required ${versionLabel} columns.`);
   }
 }

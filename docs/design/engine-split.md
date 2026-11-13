@@ -292,6 +292,15 @@ the cause).
     (`src/core/upgrade-store-copies.ts`): a clone where the disk has one,
     else a plain copy. The boot then takes no VACUUM INTO copy of its
     own.
+  - Each store records a compatible version beside its version: the
+    lowest version a build must know to use it (Chromium's rule). A
+    migration made with `additiveMigration` (`src/core/sqlite-migrations.ts`)
+    may only add tables, non-unique indexes or columns, and leaves it
+    alone, so the build before still opens the store and the boot takes
+    no copy for it. Every other migration raises it. A store last written
+    by 1.4 has no compatible version and is still copied. Only stores that
+    `test/sqlite-compatible-version.test.ts` reopens after an additive bump
+    may declare additive migrations, and no INSERT may omit its column list.
   - The class is tested with a background that blocks its loop for 60 s
     at boot and 60 s after ready, both processes stopped and continued
     (standing in for sleep), and a heartbeat paused through a boot step
