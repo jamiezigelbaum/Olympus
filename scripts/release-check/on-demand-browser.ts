@@ -27,6 +27,17 @@ export function providerListingExpression(source: TimingSource): string {
   })()`;
 }
 
+/** Drive's own search address for one folder name, so no keyboard submit is needed. */
+export function driveFolderSearchUrl(name: string): string {
+  return `https://drive.google.com/drive/u/0/search?q=${encodeURIComponent(`type:folder "${name}"`)}`;
+}
+
+/** Drive search has settled: results grid, or the empty state a first run gets before the folder exists. */
+export const DRIVE_SEARCH_SETTLED = `(() => location.pathname.includes('/search') && !document.querySelector('[role=progressbar]') && (!!document.querySelector('[role=grid]') || /no results|matched this search|try another search/i.test(document.body?.innerText || '')))()`;
+
+/** What a Drive search page showed, for a failure message: no file names or page text. */
+export const DRIVE_SEARCH_SNAPSHOT = `(() => ({path: location.pathname, grid: !!document.querySelector('[role=grid]'), progress: !!document.querySelector('[role=progressbar]'), rows: document.querySelectorAll('[role=row]').length}))()`;
+
 export async function openBrowserTimingSeeds(machine: Machine, endpoint: string, sources: readonly TimingSource[] = ['dropbox', 'google_drive']) {
   const { host, port } = parseCdpEndpoint(endpoint);
   let tunnel: Tunnel | undefined;
@@ -119,6 +130,15 @@ export async function openBrowserTimingSeeds(machine: Machine, endpoint: string,
         await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 }, session);
       }
     };
+    const driveSearch = async (session: string, name: string) => {
+      await send('Page.navigate', { url: driveFolderSearchUrl(name) }, session);
+      try {
+        await until(() => evaluate(session, DRIVE_SEARCH_SETTLED), 'Drive folder search did not finish');
+      } catch (error) {
+        const shown = await evaluate<Record<string, unknown>>(session, DRIVE_SEARCH_SNAPSHOT).catch(() => undefined);
+        throw new Error(`Drive folder search did not finish${shown ? ` (${JSON.stringify(shown)})` : ''}`, { cause: error });
+      }
+    };
     // Read only the rendered provider listing. The seed folder is small, with at most four files.
     const listing = providerListingExpression;
     const names = async (folder: SeedFolder) => {
@@ -133,9 +153,7 @@ export async function openBrowserTimingSeeds(machine: Machine, endpoint: string,
         await checkAccount(source, tab.session);
         // Drive's search is folder scoped after opening; use global search here to avoid a partial/virtual root listing.
         if (source === 'google_drive') {
-          await fill(tab.session, 'input[aria-label="Search in Drive"], input[placeholder="Search in Drive"]', `type:folder "${name}"`);
-          await enter(tab.session);
-          await until(() => evaluate(tab.session, `!!document.querySelector('[role=grid]') && !document.querySelector('[role=progressbar]') && location.pathname.includes('/search')`), 'Drive folder search did not finish');
+          await driveSearch(tab.session, name);
         } else {
           // Direct folder navigation is the same address as opening this path in Dropbox's Files view.
           await send('Page.navigate', { url: `https://www.dropbox.com/home/${encodeURIComponent(name)}` }, tab.session);
@@ -154,8 +172,7 @@ export async function openBrowserTimingSeeds(machine: Machine, endpoint: string,
           await click(tab.session, ['Create']);
           if (source === 'google_drive') {
             // A folder created from a search may not be in the current result yet; rerun that search.
-            await fill(tab.session, 'input[aria-label="Search in Drive"], input[placeholder="Search in Drive"]', `type:folder "${name}"`);
-            await enter(tab.session);
+            await driveSearch(tab.session, name);
           }
         }
         if (source === 'google_drive') {

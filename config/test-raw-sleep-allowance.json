@@ -18,7 +18,7 @@
     "test/bounded-reader-retention.test.ts": 1,
     "test/built-in-embedding-priority.test.ts": 2,
     "test/built-in-embedding.test.ts": 3,
-    "test/built-in-model-off-thread.test.ts": 2,
+    "test/built-in-model-off-thread.test.ts": 1,
     "test/built-in-reasoning-server.test.ts": 1,
     "test/built-in-transcription.test.ts": 8,
     "test/chatgpt-dashboard-ui.test.ts": 23,
