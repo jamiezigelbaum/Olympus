@@ -58,6 +58,15 @@ export const RERANK_PASSAGE_CHARS = 2_000;
 /** A reranker that has not answered by then is abandoned and the fused order stands. */
 export const DEFAULT_RERANK_TIMEOUT_MS = 5_000;
 export const DEFAULT_RERANK_POOL_SIZE = 24;
+
+// Every rerank outcome since this process started, for health: a timeout
+// falls back to the fused cut, and that must be countable, not silent.
+const outcomeCounts: Record<EvidenceRerankOutcome, number> = { applied: 0, failed: 0, timed_out: 0 };
+export function rerankOutcomeCounts(): Record<EvidenceRerankOutcome, number> { return { ...outcomeCounts }; }
+const counted = <T>(result: RerankCandidatesResult<T>): RerankCandidatesResult<T> => {
+  outcomeCounts[result.audit.outcome] += 1;
+  return result;
+};
 // Sparta scores 360 candidates of 128 tokens in 4 s with MiniLM int8 (#921).
 export const MAX_RERANK_POOL_SIZE = 400;
 
@@ -101,7 +110,7 @@ export async function rerankCandidates<T>(options: RerankCandidatesOptions<T>): 
   const startedAt = timers.now();
   const passages = options.items.map((item) => clipPassage(options.passageOf(item)));
   const scoredIndexes = passages.flatMap((passage, index) => (passage ? [index] : []));
-  const fusedCut = (outcome: EvidenceRerankOutcome, scored: number): RerankCandidatesResult<T> => ({
+  const fusedCut = (outcome: EvidenceRerankOutcome, scored: number): RerankCandidatesResult<T> => counted({
     kept: options.items.slice(0, keep),
     audit: {
       rerankerId: options.reranker.id,
@@ -153,7 +162,7 @@ export async function rerankCandidates<T>(options: RerankCandidatesOptions<T>): 
     return left - right;
   });
   const keptOrder = order.slice(0, keep);
-  return {
+  return counted({
     kept: keptOrder.map((index) => options.items[index]!),
     audit: {
       rerankerId: options.reranker.id,
@@ -163,7 +172,7 @@ export async function rerankCandidates<T>(options: RerankCandidatesOptions<T>): 
       promoted: keptOrder.filter((index) => index >= keep).length,
       elapsedMs: timers.now() - startedAt,
     },
-  };
+  });
 }
 
 /** The candidate's title and text, whitespace-collapsed and bounded. */

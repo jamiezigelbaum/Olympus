@@ -111,6 +111,7 @@ import {
   observeSourceAnswerRetrievalAttempt,
   recordSourceAnswerAnalystFit,
   recordSourceAnswerPackSeats,
+  recordSourceAnswerRerank,
   recordSourceAnswerPhaseTimings,
   recordSourceAnswerReleaseDecision,
   recordSourceAnswerResidualAnalystOrphan,
@@ -548,6 +549,7 @@ export function createAnalystSourceIndexAnswerHandler(
           candidate.provenance,
           analysisDetail.candidateExtractionGapIndexes?.[index] ?? [],
         ] as const));
+        recordSourceAnswerRerank(analysisDetail.rerank);
         recordSourceAnswerPackSeats(
           analysisDetail.pack.candidates.map((_, index) => analysisDetail.candidateCorpusIds[index] ?? ''),
           analysisDetail.recencySeats ?? 0,

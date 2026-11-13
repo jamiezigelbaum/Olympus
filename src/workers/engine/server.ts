@@ -1,3 +1,4 @@
+import { rerankOutcomeCounts } from '../../core/evidence-reranker.ts';
 import { X_CONTENT_RECOVERY_LIMIT_SUBJECT } from '../x-bookmarks/content-recovery.ts';
 import { GMAIL_IMPORT_LIMIT_SUBJECT, withGmailImportRunOnce } from '../google-connectors/gmail-import-allowance.ts';
 import { startVeniceCreditRecovery, fetchVeniceCreditStatus, VENICE_BILLING_BASE_URL } from '../../core/provider-credit-status.ts';
@@ -6122,9 +6123,13 @@ export async function main(): Promise<void> {
   serverOptions.fetch = (async (request, server) => {
     const response = await fetchWithTierLedgerStatus(request, server);
     const path = new URL(request.url).pathname;
-    if ((path === '/v1/health' || path === '/health') && response?.ok && (tierLedgerProblems.size || engineFront)) {
+    // Rerank outcomes since start, unless the owner turned reranking off: a timeout keeps
+    // the fused cut, and health counts it rather than let it vanish (#1583).
+    const rerankOutcomes = builtInRerankerMayRun(process.env) ? rerankOutcomeCounts() : undefined;
+    if ((path === '/v1/health' || path === '/health') && response?.ok && (tierLedgerProblems.size || engineFront || rerankOutcomes)) {
       return Response.json({
         ...await response.json() as object,
+        ...(rerankOutcomes ? { rerank_outcomes: rerankOutcomes } : {}),
         ...(tierLedgerProblems.size ? { privacy_ledger_problems: Object.fromEntries(tierLedgerProblems) } : {}),
         // The front answers while its background restarts or crash-loops: an
         // upgrade or rollback reads this before it calls the engine healthy

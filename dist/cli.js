@@ -28692,6 +28692,11 @@ function recordSourceAnswerAnalystFit(lane, keptSeats, promptBytes) {
     ...promptBytes === undefined ? {} : { promptBytes: nonNegativeCount(promptBytes) }
   });
 }
+function recordSourceAnswerRerank(audit) {
+  const trace = currentSourceAnswerTrace();
+  if (trace && audit)
+    trace.rerank = { ...audit };
+}
 function recordSourceAnswerResidualAnalystOrphan() {
   const trace = currentSourceAnswerTrace();
   if (trace)
@@ -28754,7 +28759,8 @@ function snapshotSourceAnswerTrace(trace) {
         recencySeats: trace.evidenceSeats.recencySeats,
         fits: trace.evidenceSeats.fits.map((fit) => ({ ...fit, keptSeats: [...fit.keptSeats] }))
       }
-    } : {}
+    } : {},
+    ...trace.rerank ? { rerank: { ...trace.rerank } } : {}
   };
 }
 function sourceAnswerTraceErrorClass(error) {
@@ -80288,13 +80294,16 @@ var init_analyst_openclaw_infer = __esm(() => {
 });
 
 // src/core/evidence-reranker.ts
+function rerankOutcomeCounts() {
+  return { ...outcomeCounts };
+}
 async function rerankCandidates(options) {
   const timers = options.timers ?? systemTimers;
   const keep = Math.max(0, Math.floor(options.keep));
   const startedAt = timers.now();
   const passages = options.items.map((item) => clipPassage(options.passageOf(item)));
   const scoredIndexes = passages.flatMap((passage, index) => passage ? [index] : []);
-  const fusedCut = (outcome, scored) => ({
+  const fusedCut = (outcome, scored) => counted({
     kept: options.items.slice(0, keep),
     audit: {
       rerankerId: options.reranker.id,
@@ -80349,7 +80358,7 @@ async function rerankCandidates(options) {
     return left - right;
   });
   const keptOrder = order.slice(0, keep);
-  return {
+  return counted({
     kept: keptOrder.map((index) => options.items[index]),
     audit: {
       rerankerId: options.reranker.id,
@@ -80359,7 +80368,7 @@ async function rerankCandidates(options) {
       promoted: keptOrder.filter((index) => index >= keep).length,
       elapsedMs: timers.now() - startedAt
     }
-  };
+  });
 }
 function rerankPassage(title, chunks) {
   const parts = [title?.trim() ?? "", ...chunks.map((chunk) => chunk.trim())].filter(Boolean);
@@ -80374,8 +80383,12 @@ function rerankPoolSize(reranker, maxResults) {
   const pool = Number.isFinite(reranker.poolSize) ? Math.floor(reranker.poolSize) : DEFAULT_RERANK_POOL_SIZE;
   return Math.max(Math.floor(maxResults), Math.min(MAX_RERANK_POOL_SIZE, pool));
 }
-var RERANK_PASSAGE_CHARS = 2000, DEFAULT_RERANK_TIMEOUT_MS = 5000, DEFAULT_RERANK_POOL_SIZE = 24, MAX_RERANK_POOL_SIZE = 400, systemTimers;
+var RERANK_PASSAGE_CHARS = 2000, DEFAULT_RERANK_TIMEOUT_MS = 5000, DEFAULT_RERANK_POOL_SIZE = 24, outcomeCounts, counted = (result) => {
+  outcomeCounts[result.audit.outcome] += 1;
+  return result;
+}, MAX_RERANK_POOL_SIZE = 400, systemTimers;
 var init_evidence_reranker = __esm(() => {
+  outcomeCounts = { applied: 0, failed: 0, timed_out: 0 };
   systemTimers = {
     now: () => Date.now(),
     setTimeout: (callback, ms) => setTimeout(callback, ms),
@@ -81792,6 +81805,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
           candidate2.provenance,
           analysisDetail.candidateExtractionGapIndexes?.[index] ?? []
         ]));
+        recordSourceAnswerRerank(analysisDetail.rerank);
         recordSourceAnswerPackSeats(analysisDetail.pack.candidates.map((_, index) => analysisDetail.candidateCorpusIds[index] ?? ""), analysisDetail.recencySeats ?? 0, analysisDetail.pack.candidates.map((candidate2) => candidate2.provenance.sourceItem.localItemId));
         const seatOf = new Map(analysisDetail.pack.candidates.map((candidate2, index) => [candidate2.provenance, index + 1]));
         const guarded = (analyst, remote = false) => ({
@@ -90653,7 +90667,7 @@ function spoolLineOffset(fd2, path, stat3, line) {
     return fromOffset;
   const buffer = Buffer.allocUnsafe(CHUNK_BYTES);
   let position = fromOffset;
-  let counted = fromLine;
+  let counted2 = fromLine;
   while (position < stat3.size) {
     const read = readSync5(fd2, buffer, 0, Math.min(CHUNK_BYTES, stat3.size - position), position);
     if (read <= 0)
@@ -90663,8 +90677,8 @@ function spoolLineOffset(fd2, path, stat3, line) {
       const found = buffer.indexOf(10, from);
       if (found < 0 || found >= read)
         break;
-      counted += 1;
-      if (counted === line) {
+      counted2 += 1;
+      if (counted2 === line) {
         const offset = position + found + 1;
         rememberSpoolOffset(path, stat3, line, offset);
         return offset;
@@ -112935,8 +112949,8 @@ function recheckedUnreadableCorpora(corpora, recheck) {
     return [...corpora];
   return corpora.map((corpus) => {
     const counts = "counts" in corpus ? corpus.counts : undefined;
-    const counted = counts?.[UNREADABLE_ITEMS_COUNT_KEY];
-    if (!counts || typeof counted !== "number" || !(counted > 0))
+    const counted2 = counts?.[UNREADABLE_ITEMS_COUNT_KEY];
+    if (!counts || typeof counted2 !== "number" || !(counted2 > 0))
       return corpus;
     let now;
     try {
@@ -112946,9 +112960,9 @@ function recheckedUnreadableCorpora(corpora, recheck) {
     }
     if (!now)
       return corpus;
-    const unreadable2 = Math.min(counted, Math.max(0, Math.trunc(now.unreadable)));
-    const moved = Math.min(counted - unreadable2, Math.max(0, Math.trunc(now.blocked)));
-    if (unreadable2 === counted)
+    const unreadable2 = Math.min(counted2, Math.max(0, Math.trunc(now.unreadable)));
+    const moved = Math.min(counted2 - unreadable2, Math.max(0, Math.trunc(now.blocked)));
+    if (unreadable2 === counted2)
       return corpus;
     const blocked = counts[BLOCKED_BY_POLICY_COUNT_KEY];
     return {
@@ -115883,11 +115897,11 @@ function forgetJudgeCheckItems(path, scopes, { dryRun = false } = {}) {
   }
   if (state.seen)
     next.seen = state.seen.filter((itemId) => !isGone(itemId));
-  const counted = randomTally(roundGone);
-  if (counted.compared > 0) {
+  const counted2 = randomTally(roundGone);
+  if (counted2.compared > 0) {
     next.random_tally = {
-      compared: (state.random_tally?.compared ?? 0) + counted.compared,
-      agreed: (state.random_tally?.agreed ?? 0) + counted.agreed
+      compared: (state.random_tally?.compared ?? 0) + counted2.compared,
+      agreed: (state.random_tally?.agreed ?? 0) + counted2.agreed
     };
   }
   writePrivateFileAtomicSync(path, `${JSON.stringify(next)}
@@ -138300,14 +138314,14 @@ async function purgeTierMigration(options) {
   const { targets, chunks, namesOnlyChunks, digest: digest4 } = purgeTargets(plan, options.lanes);
   const copyCount = targets.reduce((sum2, target2) => sum2 + target2.superseded.length, 0);
   const namesOnlyCount = targets.reduce((sum2, target2) => sum2 + target2.namesOnly.length, 0);
-  const counted = { planId: plan.planId, copies: copyCount, chunks, namesOnlyCopies: namesOnlyCount, namesOnlyChunks, digest: digest4 };
+  const counted2 = { planId: plan.planId, copies: copyCount, chunks, namesOnlyCopies: namesOnlyCount, namesOnlyChunks, digest: digest4 };
   if (!options.approve)
-    return { ...counted, approved: false };
+    return { ...counted2, approved: false };
   if (options.expect !== digest4) {
     throw new OperationError("invalid_request", `The purge counts changed since the dry run (digest ${digest4}${options.expect ? `, expected ${options.expect}` : ""}).`, `Run olympus tier migrate purge --plan ${plan.planId} to see the counts, then approve with --expect <digest>.`);
   }
   if (copyCount === 0 && namesOnlyCount === 0)
-    return { ...counted, approved: true };
+    return { ...counted2, approved: true };
   const approvalEntryId = `tier-migration-purge-approval:${plan.planId}:${digest4}`;
   const total = (counts) => Object.values(counts).reduce((sum2, count) => sum2 + count, 0);
   await appendEmbeddingLedgerEntryOnce(options.paths.embeddingLedgerPath, {
@@ -138381,7 +138395,7 @@ async function purgeTierMigration(options) {
     }
   });
   return {
-    ...counted,
+    ...counted2,
     approved: true,
     copies: copiesDeleted,
     namesOnlyCopies: namesOnlyStripped,
@@ -194268,6 +194282,16 @@ function buildSourceAnswerLatencyTraceRecord(input) {
         }))
       }
     } : {},
+    ...input.trace.rerank ? {
+      rerank: {
+        reranker_id: input.trace.rerank.rerankerId,
+        outcome: input.trace.rerank.outcome,
+        scored: Math.max(0, Math.floor(input.trace.rerank.scored)),
+        kept: Math.max(0, Math.floor(input.trace.rerank.kept)),
+        promoted: Math.max(0, Math.floor(input.trace.rerank.promoted)),
+        elapsed_ms: nonNegativeMs2(input.trace.rerank.elapsedMs)
+      }
+    } : {},
     ...input.caller ? { caller: copyCaller(input.caller) } : {},
     ...input.trace.mainThreadSql ? {
       main_thread_sql: {
@@ -213835,7 +213859,7 @@ function createArchiveImportDashboard(options) {
     ];
   };
   const entryOf = (record8) => {
-    const counted = counts(record8);
+    const counted2 = counts(record8);
     const earliest = dateOnly2(record8.date_range?.earliest);
     const latest = dateOnly2(record8.date_range?.latest);
     const stopFile = record8.stop?.rel_path ? named(posix7.basename(record8.stop.rel_path)) : undefined;
@@ -213846,11 +213870,11 @@ function createArchiveImportDashboard(options) {
       family: record8.family,
       where: where2(posix7.join(record8.root_path, record8.chosen_rel_path || ".")),
       status: record8.status,
-      items: counted?.items ?? 0,
-      judged: counted ? Math.max(0, counted.items - counted.held) : 0,
-      held: counted?.held ?? 0,
-      ...counted === null ? { countsPending: true } : {},
-      ...counted === undefined ? { countsUnavailable: true } : {},
+      items: counted2?.items ?? 0,
+      judged: counted2 ? Math.max(0, counted2.items - counted2.held) : 0,
+      held: counted2?.held ?? 0,
+      ...counted2 === null ? { countsPending: true } : {},
+      ...counted2 === undefined ? { countsUnavailable: true } : {},
       ...record8.status === "importing" ? { percent: percent(record8) } : {},
       ...earliest ? { earliest } : {},
       ...latest ? { latest } : {},
@@ -214201,13 +214225,13 @@ function createArchiveImportDashboard(options) {
       const setting = scheduling();
       if (setting !== "on" && stuck(records))
         attention.push({ kind: "scheduler", setting });
-      const counted = new Map;
+      const counted2 = new Map;
       for (const record8 of records) {
         if (record8.status === "removing" || record8.target)
           continue;
         const tally = counts(record8);
         if (tally)
-          counted.set(record8.archive_id, tally);
+          counted2.set(record8.archive_id, tally);
         else if (tally === undefined && !cardOf(record8))
           attention.push({ kind: "counts", id: record8.archive_id, name: record8.label });
       }
@@ -214227,7 +214251,7 @@ function createArchiveImportDashboard(options) {
       }
       const model = options.privateModel();
       if (model !== "ready") {
-        const held = [...counted.values()].reduce((sum2, tally) => sum2 + tally.held, 0);
+        const held = [...counted2.values()].reduce((sum2, tally) => sum2 + tally.held, 0);
         if (held > 0)
           attention.push({ kind: "held", count: held, model });
       }
@@ -251006,9 +251030,11 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   serverOptions.fetch = async (request, server2) => {
     const response = await fetchWithTierLedgerStatus(request, server2);
     const path = new URL(request.url).pathname;
-    if ((path === "/v1/health" || path === "/health") && response?.ok && (tierLedgerProblems.size || engineFront)) {
+    const rerankOutcomes = builtInRerankerMayRun(process.env) ? rerankOutcomeCounts() : undefined;
+    if ((path === "/v1/health" || path === "/health") && response?.ok && (tierLedgerProblems.size || engineFront || rerankOutcomes)) {
       return Response.json({
         ...await response.json(),
+        ...rerankOutcomes ? { rerank_outcomes: rerankOutcomes } : {},
         ...tierLedgerProblems.size ? { privacy_ledger_problems: Object.fromEntries(tierLedgerProblems) } : {},
         ...engineFront ? { engine_background: await engineFront.backgroundReady() ? "ready" : "unreachable" } : {}
       }, { status: response.status, headers: response.headers });
@@ -251395,8 +251421,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         captures: dashboardCaptureRuntime(),
         ...localUnreadableFiles ? {
           unreadable: Object.fromEntries(sourceCorpusRegistry2.definitions("status", fullCorpusDefinitions).flatMap((definition) => {
-            const counted = localUnreadableFiles.recheck(definition.corpusId);
-            return counted ? [[definition.corpusId, counted]] : [];
+            const counted2 = localUnreadableFiles.recheck(definition.corpusId);
+            return counted2 ? [[definition.corpusId, counted2]] : [];
           }))
         } : {},
         manual_syncs: Object.fromEntries(manualSyncRuns),
@@ -251540,6 +251566,7 @@ function resolveEmailSourceBindHostFromEnv(env = process.env) {
 }
 var workerLaunch, dataOwnerLock, VISIBILITY_REFRESH_MS = 30000, FRONT_VISIBILITY_READY_BOUND_MS = 15000;
 var init_server5 = __esm(async () => {
+  init_evidence_reranker();
   init_content_recovery();
   init_gmail_import_allowance();
   init_provider_credit_status();

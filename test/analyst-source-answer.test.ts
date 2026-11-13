@@ -1819,6 +1819,17 @@ describe('analyst-backed source_answer handler', () => {
     expect(seats?.fits.map(({ lane, keptSeats }) => ({ lane, keptSeats }))).toEqual([{ lane: 'local', keptSeats: [internalSeat] }]);
   });
 
+  test('the answer trace records a failed rerank, so the fused cut it kept is visible (#1583)', async () => {
+    const { analyst } = scriptedAnalyst(citeInternal);
+    const trace = createSourceAnswerTrace();
+    await runWithSourceAnswerTrace(trace, () => createAnalystSourceIndexAnswerHandler({
+      analyst,
+      lanes: () => lanesFixture({ internal: ['note-1', 'note-2'], secure: [] }),
+      reranker: { id: 'fixture-rerank', localOnly: true, poolSize: 4, score: async () => { throw new Error('model gone'); } },
+    }).answer({ question: 'What do the notes say?' }));
+    expect(snapshotSourceAnswerTrace(trace).rerank).toMatchObject({ rerankerId: 'fixture-rerank', outcome: 'failed' });
+  });
+
   test('the answer trace records a hash of each seat\'s item and the bytes of the prompt each fit built', async () => {
     const { analyst } = scriptedAnalyst(citeInternal);
     const trace = createSourceAnswerTrace();
