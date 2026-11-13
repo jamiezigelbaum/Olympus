@@ -182,6 +182,13 @@ local Dropbox index and a reachable Argus lane:
    wrong in the full pack means the other seats distract it; wrong alone means
    it misreads that document as extracted. It follows
    `OLYMPUS_EVAL_ANALYST_REPEAT_QUESTIONS` when set.
+   To tell an audit that drops a value from a draft that never had it, set
+   `OLYMPUS_EVAL_TRACE_DRAFT_AUDIT=on`. When the graded answer had an audit
+   call, each expected value gets `draftAudit`: whether it is in the first
+   call's prompt, in that call's draft answer and in the audit call's
+   evidence (its quote of the draft left out). `auditReplacedDraft` says
+   whether the audit's answer differs from the draft's. Booleans only; the
+   draft text stays in memory.
    Every answer stage also reports `promptLayout`, which shows where the bytes
    of the prompt the Analyst was sent went. It holds the text every prompt
    carries (system rules, question, coverage), each sent seat's header (name,

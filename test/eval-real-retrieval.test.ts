@@ -173,6 +173,36 @@ describe('the real eval report says where an expected value was lost (#1234)', (
     expect(glued.packTokenShape).toBeUndefined();
   });
 
+  test('with draft tracing on, says whether the first draft and the audit prompt held each value (#1590)', async () => {
+    const { stores, ledger } = await twoTierWorld();
+    const lanes = createEvalDropboxLanes({ stores, ...(ledger ? { ledger } : {}), scope: { accountScope: 'personal' } });
+    const { pack } = await buildEvalPack({
+      question: 'What is the Kestrel boatyard invoice total?', lanes, maxResults: 5, maxCharsPerCandidate: 1_500,
+    });
+    const answer = (text: string): AnalystResult => ({ answer: text, citations: [], unanswered: [], sufficient: true } as unknown as AnalystResult);
+    const question = { expectedAnswerContains: ['4182', 'March'] };
+    // The main prompt holds both values; the audit prompt only one. The draft
+    // said both; the audit's answer replaced it and kept one.
+    const mainPrompt = 'Evidence 1: total is 4182 dollars, due in March';
+    const auditPrompt = 'Question: x\nDraft JSON:\n{"answer":"4182 in March"}\nAudit evidence:\nEvidence 1: total is 4182 dollars';
+    const draft = JSON.stringify({ answer: 'The total is 4182 dollars, due in March.', citations: [] });
+    const audited = evalAnswerStageAudit(question, pack, answer('The total is 4182 dollars.'), answer('The total is 4182 dollars.'),
+      [mainPrompt, auditPrompt], ['m', 'm'], undefined, { completions: [draft, '{}'] });
+    expect(audited.auditReplacedDraft).toBe(true);
+    expect(audited.expected.map((value) => value.draftAudit)).toEqual([
+      { inFirstPrompt: true, inFirstDraft: true, inAuditPrompt: true },
+      { inFirstPrompt: true, inFirstDraft: true, inAuditPrompt: false },
+    ]);
+    // Booleans only: no draft text in the report.
+    expect(JSON.stringify(audited)).not.toContain('due in March');
+    // Off (no completions) or no audit call: no draft fields.
+    const off = evalAnswerStageAudit(question, pack, answer('x'), answer('x'), [mainPrompt, auditPrompt]);
+    expect(off.auditReplacedDraft).toBeUndefined();
+    expect(off.expected[0]!.draftAudit).toBeUndefined();
+    const single = evalAnswerStageAudit(question, pack, answer('x'), answer('x'), [mainPrompt], ['m'], undefined, { completions: [draft] });
+    expect(single.auditReplacedDraft).toBeUndefined();
+  });
+
   test('a value only in a locator, a fact or a table counts as in the pack (#1239 review)', async () => {
     const { stores, ledger } = await twoTierWorld();
     const lanes = createEvalDropboxLanes({ stores, ...(ledger ? { ledger } : {}), scope: { accountScope: 'personal' } });
