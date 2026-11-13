@@ -61,10 +61,16 @@ const SLOW_SCORER_RETRY_MS = 60_000;
 // by its stable key (by scorer identity when a source names none), so one slow
 // backend never skips another's placement and history outlives the per-question
 // content providers.
-type CallHistory = { ms: number; at: number };
+// pending: the last call hit the deadline and has not settled yet.
+type CallHistory = { ms: number; at: number; pending?: boolean };
 const rerankerHistory: CallHistory = { ms: 0, at: 0 };
 const keyedHistory = new Map<string, CallHistory>();
 const unkeyedHistory = new WeakMap<WindowScorer, CallHistory>();
+/** Backend history is process-wide; tests on separate fake clocks start clean. */
+export function resetWindowPlacementHistoryForTests(): void {
+  Object.assign(rerankerHistory, { ms: 0, at: 0, pending: false });
+  keyedHistory.clear();
+}
 function historyFor(kind: ScorerKind, score: WindowScorer, key: string | undefined): CallHistory {
   if (kind === 'reranker') return rerankerHistory;
   let history = key === undefined ? unkeyedHistory.get(score) : keyedHistory.get(key);
@@ -101,7 +107,7 @@ export function createEvidenceWindowPlacer(query: string, timers = systemTimers)
       const remaining = WINDOW_PLACEMENT_BUDGET_MS - (startedAt === undefined ? 0 : timers.now() - startedAt);
       if (remaining <= 0) { audit.timedOut = true; break; }
       const lastCall = historyFor(kind, score, group[0]!.key);
-      if (lastCall.ms > remaining && timers.now() - lastCall.at < SLOW_SCORER_RETRY_MS) { audit.skipped = 'slow_scorer'; continue; }
+      if ((lastCall.pending || lastCall.ms > remaining) && timers.now() - lastCall.at < SLOW_SCORER_RETRY_MS) { audit.skipped = 'slow_scorer'; continue; }
       startedAt ??= timers.now();
       const windows = group.flatMap(entry => entry.windows);
       audit.seats += group.length;
@@ -118,7 +124,9 @@ export function createEvidenceWindowPlacer(query: string, timers = systemTimers)
       // Measure the underlying call, not the race: overload may only become
       // known after this question has already returned at its deadline.
       const scoring = Promise.resolve().then(() => score(query, windows.map(window => window.text), controller.signal))
-        .finally(() => { lastCall.ms = Math.max(0, timers.now() - callStartedAt); lastCall.at = timers.now(); });
+        .finally(() => { lastCall.ms = Math.max(0, timers.now() - callStartedAt); lastCall.at = timers.now(); lastCall.pending = false; });
+      let settled = false;
+      void scoring.then(() => { settled = true; }, () => { settled = true; });
       try {
         const scores = await Promise.race([scoring, timeout]);
         // A synchronous scorer can consume the deadline before the timer runs.
@@ -126,6 +134,8 @@ export function createEvidenceWindowPlacer(query: string, timers = systemTimers)
           audit.timedOut = true;
           call.outcome = 'timed_out';
           controller.abort();
+          // A scorer that ignores the abort may never settle: count it slow now.
+          if (!settled) { lastCall.pending = true; lastCall.at = timers.now(); }
           continue;
         }
         if (scores.length !== windows.length || scores.some(value => !Number.isFinite(value))) continue;

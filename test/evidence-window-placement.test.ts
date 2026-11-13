@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from 'bun:test';
+import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,7 +8,9 @@ import type { EvidenceReranker, RerankTimers } from '../src/core/evidence-rerank
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
 import { LocalConnectorStore, createConnectorStoreContentProvider, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
-import { createEvidenceWindowPlacer, type WindowScorer } from '../src/core/evidence-window-placement.ts';
+import { createEvidenceWindowPlacer, type WindowScorer, resetWindowPlacementHistoryForTests } from '../src/core/evidence-window-placement.ts';
+
+beforeEach(() => { resetWindowPlacementHistoryForTests(); });
 import { boundedSourceIndexChunks, sourceIndexChunkWindow } from '../src/core/source-index/chunk-selection.ts';
 import { createTestClock, flushMicrotasks } from './helpers/test-clock.ts';
 import { releasePassageHashes } from '../src/core/release-manifest.ts';
@@ -517,6 +519,23 @@ test('slow history follows the embedding backend across questions, even with a n
   const other = createEvidenceWindowPlacer(QUESTION, fakeTimers(clock));
   await other.place(chunks, { ...source(), scorerKey: 'backend-b' });
   expect(calls).toBe(2);
+});
+
+test('a scorer that never settles is skipped on the next question until it is retried', async () => {
+  const clock = createTestClock();
+  const chunks = ['o'.repeat(600)];
+  let calls = 0;
+  const stuck: WindowScorer = () => { calls++; return new Promise(() => {}); };
+  const source = { texts: ['x'.repeat(4000)], scoreWindows: stuck, scorerKey: 'stuck-backend' };
+  const first = createEvidenceWindowPlacer(QUESTION, fakeTimers(clock));
+  const pending = first.place(chunks, source);
+  await clock.advance(1_500);
+  expect(await pending).toEqual(chunks);
+  expect(first.audit.timedOut).toBe(true);
+  const next = createEvidenceWindowPlacer(QUESTION, fakeTimers(clock));
+  expect(await next.place(chunks, source)).toEqual(chunks);
+  expect(calls).toBe(1);
+  expect(next.audit.skipped).toBe('slow_scorer');
 });
 
 test('a placed window stays provable: its stored chunk hashes still bind to it for release', async () => {

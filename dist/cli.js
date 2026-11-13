@@ -79917,7 +79917,7 @@ function createEvidenceWindowPlacer(query, timers = systemTimers) {
         break;
       }
       const lastCall = historyFor(kind, score, group[0].key);
-      if (lastCall.ms > remaining && timers.now() - lastCall.at < SLOW_SCORER_RETRY_MS) {
+      if ((lastCall.pending || lastCall.ms > remaining) && timers.now() - lastCall.at < SLOW_SCORER_RETRY_MS) {
         audit.skipped = "slow_scorer";
         continue;
       }
@@ -79940,6 +79940,13 @@ function createEvidenceWindowPlacer(query, timers = systemTimers) {
       const scoring = Promise.resolve().then(() => score(query, windows.map((window2) => window2.text), controller.signal)).finally(() => {
         lastCall.ms = Math.max(0, timers.now() - callStartedAt);
         lastCall.at = timers.now();
+        lastCall.pending = false;
+      });
+      let settled = false;
+      scoring.then(() => {
+        settled = true;
+      }, () => {
+        settled = true;
       });
       try {
         const scores = await Promise.race([scoring, timeout]);
@@ -79947,6 +79954,10 @@ function createEvidenceWindowPlacer(query, timers = systemTimers) {
           audit.timedOut = true;
           call.outcome = "timed_out";
           controller.abort();
+          if (!settled) {
+            lastCall.pending = true;
+            lastCall.at = timers.now();
+          }
           continue;
         }
         if (scores.length !== windows.length || scores.some((value) => !Number.isFinite(value)))
