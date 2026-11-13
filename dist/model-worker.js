@@ -3509,13 +3509,13 @@ class RemoteLiteRtEmbedder {
 }
 
 // src/workers/source-index/built-in-embedding/runtime.ts
+import { realpathSync as realpathSync3 } from "node:fs";
 import { createRequire as createRequire2 } from "node:module";
-import { join as join10 } from "node:path";
+import { join as join10, sep as sep4 } from "node:path";
 function onnxRuntimeFromDirectory(runtimeDir) {
   return {
     async createSession(modelPath, options) {
-      const requireFromPack = createRequire2(join10(runtimeDir, "olympus-runtime.json"));
-      const ort = requireFromPack("onnxruntime-node");
+      const ort = requireOnnxRuntimeFromPack(runtimeDir);
       const session = await ort.InferenceSession.create(modelPath, {
         executionProviders: ["cpu"],
         intraOpNumThreads: options.threads,
@@ -3556,6 +3556,21 @@ function onnxRuntimeFromDirectory(runtimeDir) {
       };
     }
   };
+}
+function requireOnnxRuntimeFromPack(runtimeDir) {
+  const missing = () => new Error(`The ONNX Runtime pack is not installed in ${runtimeDir}.`);
+  let root;
+  let resolved;
+  const requireFromPack = createRequire2(join10(runtimeDir, "olympus-runtime.json"));
+  try {
+    root = realpathSync3(join10(runtimeDir, "node_modules"));
+    resolved = realpathSync3(requireFromPack.resolve("onnxruntime-node"));
+  } catch {
+    throw missing();
+  }
+  if (!resolved.startsWith(root + sep4))
+    throw missing();
+  return requireFromPack(resolved);
 }
 
 // src/workers/source-index/built-in-embedding/pair-tokenizer.ts

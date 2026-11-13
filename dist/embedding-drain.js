@@ -37154,13 +37154,13 @@ class RemoteLiteRtEmbedder {
 }
 
 // src/workers/source-index/built-in-embedding/runtime.ts
+import { realpathSync as realpathSync6 } from "node:fs";
 import { createRequire as createRequire5 } from "node:module";
-import { join as join28 } from "node:path";
+import { join as join28, sep as sep6 } from "node:path";
 function onnxRuntimeFromDirectory(runtimeDir) {
   return {
     async createSession(modelPath, options) {
-      const requireFromPack = createRequire5(join28(runtimeDir, "olympus-runtime.json"));
-      const ort = requireFromPack("onnxruntime-node");
+      const ort = requireOnnxRuntimeFromPack(runtimeDir);
       const session = await ort.InferenceSession.create(modelPath, {
         executionProviders: ["cpu"],
         intraOpNumThreads: options.threads,
@@ -37201,6 +37201,21 @@ function onnxRuntimeFromDirectory(runtimeDir) {
       };
     }
   };
+}
+function requireOnnxRuntimeFromPack(runtimeDir) {
+  const missing = () => new Error(`The ONNX Runtime pack is not installed in ${runtimeDir}.`);
+  let root;
+  let resolved;
+  const requireFromPack = createRequire5(join28(runtimeDir, "olympus-runtime.json"));
+  try {
+    root = realpathSync6(join28(runtimeDir, "node_modules"));
+    resolved = realpathSync6(requireFromPack.resolve("onnxruntime-node"));
+  } catch {
+    throw missing();
+  }
+  if (!resolved.startsWith(root + sep6))
+    throw missing();
+  return requireFromPack(resolved);
 }
 
 // src/workers/source-index/built-in-embedding/pair-tokenizer.ts
@@ -41113,7 +41128,7 @@ var reporter = createLimitStopReporter();
 
 // src/workers/dropbox-files/extraction-source.ts
 import { readFile as readFile2, realpath, stat as stat2 } from "node:fs/promises";
-import { relative as relative6, resolve as resolve10, sep as sep6 } from "node:path";
+import { relative as relative6, resolve as resolve10, sep as sep7 } from "node:path";
 
 // src/workers/file-extraction/types.ts
 var EXTRACTION_CANDIDATE_SKIP = {
@@ -41278,7 +41293,7 @@ class DropboxExtractionSource {
       return;
     const candidatePath = resolve10(rootRealPath, relativePath);
     const relativeToRoot = relative6(rootRealPath, candidatePath);
-    if (relativeToRoot.startsWith("..") || relativeToRoot === "" || relativeToRoot.includes(`..${sep6}`)) {
+    if (relativeToRoot.startsWith("..") || relativeToRoot === "" || relativeToRoot.includes(`..${sep7}`)) {
       return;
     }
     return candidatePath;
