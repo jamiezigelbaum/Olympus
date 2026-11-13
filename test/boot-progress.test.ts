@@ -21,6 +21,7 @@ import {
   recordSchemaBackup,
   removeAllSchemaBackups,
   removeSchemaBackupsSince,
+  removeAbandonedBackupCopies,
   restoreSchemaBackupsSince,
   retiredStateBackupPath,
   retireStatePath,
@@ -233,6 +234,21 @@ describe('schema updates back up the store first', () => {
     const restored = new Database(path, { readonly: true });
     expect(readSqliteSchemaVersion(restored, 'fixture')).toBe(1);
     restored.close();
+  });
+});
+
+describe('a killed backup leaves nothing behind once a backup runs again', () => {
+  test('part-way copies of gone processes are removed; a live process\'s copy is kept', () => {
+    const env = home();
+    const backup = join(env.HOME!, 'store.sqlite.pre-schema-15.bak');
+    const gone = Bun.spawnSync([process.execPath, '-e', '0']).pid;
+    const live = process.ppid;
+    for (const name of [`${backup}.${gone}.partial`, `${backup}.${gone}.partial-journal`, `${backup}.${live}.partial`, backup]) writeFileSync(name, 'x');
+    expect(removeAbandonedBackupCopies(backup)).toBe(2);
+    expect(existsSync(`${backup}.${gone}.partial`)).toBe(false);
+    expect(existsSync(`${backup}.${gone}.partial-journal`)).toBe(false);
+    expect(existsSync(`${backup}.${live}.partial`)).toBe(true);
+    expect(existsSync(backup)).toBe(true);
   });
 });
 

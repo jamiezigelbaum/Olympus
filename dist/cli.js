@@ -15031,7 +15031,7 @@ function engineBackgroundSocketPath(options = {}) {
 function prepareEngineBackgroundSocketDirectory(socketPath) {
   mkdirSync10(dirname23(socketPath), { recursive: true, mode: 448 });
 }
-async function probeEngineBackground(fetchBackground, authToken, instanceId, timeoutMs) {
+async function engineBackgroundAnswer(fetchBackground, authToken, instanceId, timeoutMs) {
   const controller = new AbortController;
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   timeout.unref?.();
@@ -15045,17 +15045,20 @@ async function probeEngineBackground(fetchBackground, authToken, instanceId, tim
       await response.body?.cancel().catch(() => {
         return;
       });
-      return false;
+      return "alive";
     }
     const body = await response.json().catch(() => {
       return;
     });
-    return body?.ready === true && body.schema_current === true && (instanceId === undefined || body.instance_id === instanceId);
+    return body?.ready === true && body.schema_current === true && (instanceId === undefined || body.instance_id === instanceId) ? "ready" : "alive";
   } catch {
-    return false;
+    return controller.signal.aborted ? "alive" : "down";
   } finally {
     clearTimeout(timeout);
   }
+}
+async function probeEngineBackground(fetchBackground, authToken, instanceId, timeoutMs) {
+  return await engineBackgroundAnswer(fetchBackground, authToken, instanceId, timeoutMs) === "ready";
 }
 var ENGINE_ROLE_ENV = "OLYMPUS_WORKER_ENGINE_ROLE", ENGINE_BACKGROUND_SOCKET_ENV = "OLYMPUS_ENGINE_BACKGROUND_SOCKET", ENGINE_BACKGROUND_INSTANCE_ENV = "OLYMPUS_ENGINE_BACKGROUND_INSTANCE_ID", ENGINE_BACKGROUND_ORIGIN = "http://olympus-background", ENGINE_READY_PATH = "/engine/ready", ENGINE_COMMANDS_PATH = "/engine/commands", ENGINE_MODEL_COMPLETE_PATH = "/engine/model/complete";
 var init_engine_split = __esm(() => {
@@ -19614,6 +19617,29 @@ function retireStatePath(env, storeId, path) {
   renameSync4(path, backup);
   return true;
 }
+function removeAbandonedBackupCopies(backup) {
+  const prefix = `${basename5(backup)}.`;
+  let names;
+  try {
+    names = readdirSync4(dirname25(backup));
+  } catch {
+    return 0;
+  }
+  let removed = 0;
+  for (const name of names) {
+    if (!name.startsWith(prefix))
+      continue;
+    const match = /^(\d+)\.partial(?:-journal|-wal|-shm)?$/.exec(name.slice(prefix.length));
+    if (!match)
+      continue;
+    const pid = Number(match[1]);
+    if (pid === process.pid || processAlive(pid))
+      continue;
+    rmSync8(join31(dirname25(backup), name), { force: true });
+    removed += 1;
+  }
+  return removed;
+}
 function preSchemaBackupsOf(dbPath) {
   const prefix = `${basename5(dbPath)}.pre-schema-`;
   try {
@@ -19801,6 +19827,7 @@ function backUpBeforeUpdate(db, storeId, fromVersion, env, report, freeBytes = d
   report({ phase: "backing_up", storeId });
   const partial = `${backup}.${process.pid}.partial`;
   rmSync9(partial, { force: true });
+  removeAbandonedBackupCopies(backup);
   recordSchemaBackup(env, { storeId, dbPath: file, backupPath: backup });
   try {
     closeSync11(openSync11(partial, "wx", 384));
@@ -220494,9 +220521,10 @@ async function waitForEngineBackground(input) {
   const inProgress = input.inProgress ?? (() => bootInProgress(process.env));
   const deadline = now() + (input.timeoutMs ?? 120000);
   for (;; ) {
-    if (await probeEngineBackground(fetchBackground, input.authToken, undefined, 1000))
+    const answer = await engineBackgroundAnswer(fetchBackground, input.authToken, undefined, input.probeTimeoutMs ?? 1000);
+    if (answer === "ready")
       return;
-    if (now() >= deadline && !inProgress())
+    if (now() >= deadline && answer === "down" && !inProgress())
       throw new Error("The background engine did not become ready; the front is not serving.");
     await sleep5(input.pollMs ?? 250);
   }
