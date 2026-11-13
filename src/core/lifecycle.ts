@@ -480,7 +480,7 @@ function previousWorkerHealth(
     healthy: false,
     reason: outcome.serviceState !== 'active'
       ? `stopped (its service is ${outcome.serviceState})`
-      : `did not answer its health check within ${minutes >= 1 ? `${minutes} min` : `${timeoutMs} ms`}`,
+      : `did not answer its health check within ${minutes >= 1 ? `${minutes} min` : `${timeoutMs} ms`}${outcome.lastCheck ? ` (last check: ${outcome.lastCheck})` : ''}`,
   };
 }
 
@@ -1078,9 +1078,10 @@ function qualifyWorkerReadiness(
  */
 function readinessFailureDetail(
   options: WorkerLifecycleOptions & { platform: WorkerServicePlatform; homeDir: string },
-  outcome: { serviceState: string; front: BootProgress | undefined },
+  outcome: { serviceState: string; front: BootProgress | undefined; lastCheck?: string },
 ): string {
   const parts: string[] = [];
+  if (outcome.lastCheck) parts.push(` Its last health check: ${outcome.lastCheck}.`);
   const failures = outcome.front?.failures ?? 0;
   if (failures > 0) {
     parts.push(` Its front stopped ${failures} ${failures === 1 ? 'time' : 'times'} while starting${outcome.front?.lastFailure ? ` (${outcome.front.lastFailure})` : ''}.`);
@@ -1115,9 +1116,14 @@ function waitForWorkerReadiness(
     bootProgress?: () => BootProgress | undefined;
     frontProgress?: () => BootProgress | undefined;
   },
-): { ready: boolean; url: string; serviceState: string; front: BootProgress | undefined } {
+): { ready: boolean; url: string; serviceState: string; front: BootProgress | undefined; lastCheck?: string } {
   const url = `http://127.0.0.1:${port}/v1/health`;
-  const probe = () => wait.probe ? wait.probe(url) : defaultWorkerReadinessProbe(url, options.bunBin);
+  let lastCheck: string | undefined;
+  const probe = () => {
+    if (wait.probe) return wait.probe(url);
+    lastCheck = workerHealthCheck(url, options.bunBin);
+    return lastCheck === undefined;
+  };
   const timeoutMs = validateSettleWindow(wait.timeoutMs, 'Lifecycle readiness timeout', MAX_READINESS_TIMEOUT_MS);
   const pollMs = validateSettleWindow(
     options.actionSettlePollMs ?? DEFAULT_ACTION_SETTLE_POLL_MS,
@@ -1159,7 +1165,7 @@ function waitForWorkerReadiness(
   // Only a front file written during this wait speaks for this start.
   const lastFront = ready ? undefined : readFront();
   const front = lastFront && Date.parse(lastFront.updatedAt) >= waitStartedAt ? lastFront : undefined;
-  return { ready, url, serviceState: ready ? 'active' : serviceState, front };
+  return { ready, url, serviceState: ready ? 'active' : serviceState, front, ...(!ready && lastCheck ? { lastCheck } : {}) };
 }
 
 function workerReadinessPort(options: WorkerLifecycleOptions & { homeDir: string }): number {
@@ -1183,27 +1189,46 @@ function validateWorkerReadinessPort(value: number): number {
 }
 
 function defaultWorkerReadinessProbe(url: string, bunBin: string | undefined): boolean {
+  return workerHealthCheck(url, bunBin) === undefined;
+}
+
+/**
+ * One health check of the managed worker, as the upgrade and the rollback
+ * run it: undefined when it answered healthy, otherwise why not, in a few
+ * words with no response content. rc.4's VM run failed this check against a
+ * front that was serving, and "did not answer" said nothing about why.
+ */
+export function workerHealthCheck(url: string, bunBin: string | undefined): string | undefined {
   const executable = bunBin ?? (typeof Bun !== 'undefined' ? Bun.which('bun') : null) ?? process.execPath;
-  if (!executable || !isAbsolute(executable)) return false;
+  if (!executable || !isAbsolute(executable)) return 'no bun executable to run the check';
   let socket: string | undefined;
-  try { socket = validateWorkerSocket(); } catch { return false; }
+  try { socket = validateWorkerSocket(); } catch (error) {
+    return `the worker socket did not check out (${error instanceof Error ? error.message : 'unreadable'})`;
+  }
   const script = [
     "const url = process.argv.at(-1);",
+    "const fail = (why) => { process.stdout.write(why); process.exit(1); };",
+    "let response;",
     "try {",
     socket
-      ? `  const response = await fetch(url, { unix: ${JSON.stringify(socket)}, redirect: 'error', signal: AbortSignal.timeout(3000) });`
-      : "  const response = await fetch(url, { signal: AbortSignal.timeout(3000) });",
-    "  const value = response.ok ? await response.json() : undefined;",
+      ? `  response = await fetch(url, { unix: ${JSON.stringify(socket)}, redirect: 'error', signal: AbortSignal.timeout(3000) });`
+      : "  response = await fetch(url, { signal: AbortSignal.timeout(3000) });",
+    "} catch (error) { fail(error?.name === 'TimeoutError' ? 'no answer within 3 s' : `no connection (${error?.code ?? error?.name ?? 'error'})`); }",
+    "if (!response.ok) fail(`status ${response.status}`);",
+    "let value;",
+    "try { value = await response.json(); } catch { fail('an answer that is not JSON'); }",
+    "if (value?.reachable !== true) fail('an answer without reachable: true');",
     // A split engine's front answers on its own: its background must be up too.
-    "  if (!response.ok || !value || value.reachable !== true || value.engine_background === 'unreachable') process.exit(1);",
-    "} catch { process.exit(1); }",
+    "if (value.engine_background === 'unreachable') fail('the front answered, but its background did not');",
   ].join('\n');
   const result = spawnSync(executable, ['-e', script, url], {
     encoding: 'utf8',
-    stdio: ['ignore', 'ignore', 'ignore'],
+    stdio: ['ignore', 'pipe', 'ignore'],
     timeout: 5_000,
   });
-  return result.status === 0;
+  if (result.status === 0) return undefined;
+  if (result.error || result.signal) return 'the check itself did not finish within 5 s';
+  return result.stdout.trim().slice(0, 160) || `the check exited ${result.status}`;
 }
 
 function serviceInstallOptions(options: WorkerLifecycleOptions, dryRun: boolean): WorkerServiceInstallOptions {

@@ -303,6 +303,33 @@ export function retireStatePath(env: LayoutEnv, storeId: string, path: string): 
   return true;
 }
 
+/**
+ * Removes the part-way copies of `backup` that a killed backup left
+ * (`<backup>.<pid>.partial` and its SQLite sidecars) when that process is
+ * gone. A live process's copy is its own (#1563: a background killed mid-backup
+ * left 33 MB behind, and its successor wrote a second copy beside it).
+ */
+export function removeAbandonedBackupCopies(backup: string): number {
+  const prefix = `${basename(backup)}.`;
+  let names: string[];
+  try {
+    names = readdirSync(dirname(backup));
+  } catch {
+    return 0;
+  }
+  let removed = 0;
+  for (const name of names) {
+    if (!name.startsWith(prefix)) continue;
+    const match = /^(\d+)\.partial(?:-journal|-wal|-shm)?$/.exec(name.slice(prefix.length));
+    if (!match) continue;
+    const pid = Number(match[1]);
+    if (pid === process.pid || processAlive(pid)) continue;
+    rmSync(join(dirname(backup), name), { force: true });
+    removed += 1;
+  }
+  return removed;
+}
+
 /** Every pre-update copy of the store at `dbPath` on disk, a copy a crash left part way included. */
 export function preSchemaBackupsOf(dbPath: string): string[] {
   const prefix = `${basename(dbPath)}.pre-schema-`;
