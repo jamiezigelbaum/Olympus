@@ -47,3 +47,8 @@ test('the restated question is counted in the prompt budget', () => {
   const longer = analystPromptBytes({ ...pack, question: 'q'.repeat(101) }, { localOnly: true }, 'compact');
   expect(longer - once).toBe(200);
 });
+
+test('the compact rules ask for every part of the question the cited items hold', async () => {
+  const { system } = await compactRequest();
+  expect(system).toContain('- Find every part the question asks for (each value, name, date or item). Give each part the cited items hold; put each part they do not hold in "unanswered". Check every part before returning.');
+});

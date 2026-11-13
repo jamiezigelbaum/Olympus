@@ -146,6 +146,7 @@ const ANALYST_COMPACT_SYSTEM = [
   'Each evidence item starts with its number and name, then its date and source, then its text in source_data.',
   'Rules:',
   '- First decide which items are about what the question asks (its subject, and any date or name it gives). Answer from those items only and cite each by its [number].',
+  '- Find every part the question asks for (each value, name, date or item). Give each part the cited items hold; put each part they do not hold in "unanswered". Check every part before returning.',
   '- An item that only shares words with the question is not evidence: do not cite it.',
   '- If the evidence does not contain the answer, say so plainly and list what is missing in "unanswered". Never invent facts, names, dates, or values.',
   '- If no item is about what the question asks, the whole answer is one short sentence saying the evidence does not answer it, with no citations. Never describe an item about something else as if it answered the question.',
