@@ -10626,8 +10626,10 @@ var CHILD_ITEM_ID_SEPARATOR = "#child:";
 // src/workers/google-connectors/gmail.ts
 var GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private";
 var GMAIL_PROVIDER = "gmail";
+// src/workers/live-source-cadence.ts
+var LIVE_NEW_ITEMS_INTERVAL_MS = 5 * 60000;
+
 // src/workers/google-connectors/gmail-live-control.ts
-var GMAIL_STORE_PULL_INTERVAL_MS = 30 * 60000;
 var GMAIL_STORE_PULL_FRESHNESS_THRESHOLD_MS = 2 * 60 * 60000;
 var GMAIL_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
 var GMAIL_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
@@ -33470,7 +33472,6 @@ var GMAIL_SCOPED_CONNECTOR_PREFIX = `${GMAIL_PROVIDER}.scope.`;
 var GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = "internal.drive.docs";
 var FOLDER_LOOKUP_FAILED = Symbol("google-drive-folder-lookup-failed");
 // src/workers/google-connectors/drive-live-control.ts
-var GOOGLE_DRIVE_STORE_PULL_INTERVAL_MS = 30 * 60000;
 var GOOGLE_DRIVE_STORE_PULL_FRESHNESS_THRESHOLD_MS = 2 * 60 * 60000;
 var GOOGLE_DRIVE_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
 var GOOGLE_DRIVE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
@@ -34300,7 +34301,6 @@ var READWISE_STORE_PLACEMENT = Object.freeze({
   trustDomain: "internal"
 });
 // src/workers/readwise/live-control.ts
-var READWISE_STORE_PULL_INTERVAL_MS = 15 * 60000;
 var READWISE_STORE_PULL_FRESHNESS_THRESHOLD_MS = 60 * 60000;
 var READWISE_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
 var READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;

@@ -72446,6 +72446,12 @@ var init_connector2 = __esm(() => {
   });
 });
 
+// src/workers/live-source-cadence.ts
+var LIVE_NEW_ITEMS_INTERVAL_MS;
+var init_live_source_cadence = __esm(() => {
+  LIVE_NEW_ITEMS_INTERVAL_MS = 5 * 60000;
+});
+
 // src/workers/readwise/live-control.ts
 function defaultReadwiseLiveSyncConfig(env = process.env) {
   return {
@@ -72474,7 +72480,8 @@ function boundedPositiveIntegerEnv(value, fallback, minimum, maximum) {
 }
 var READWISE_STORE_PULL_INTERVAL_MS, READWISE_STORE_PULL_FRESHNESS_THRESHOLD_MS, READWISE_STORE_PULL_MAX_ITEMS = 200, READWISE_STORE_RECONCILE_INTERVAL_MS, READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS, READWISE_DAILY_REQUEST_GUARD_REASON = "readwise_daily_api_request_guard";
 var init_live_control = __esm(() => {
-  READWISE_STORE_PULL_INTERVAL_MS = 15 * 60000;
+  init_live_source_cadence();
+  READWISE_STORE_PULL_INTERVAL_MS = LIVE_NEW_ITEMS_INTERVAL_MS;
   READWISE_STORE_PULL_FRESHNESS_THRESHOLD_MS = 60 * 60000;
   READWISE_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
   READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
@@ -111773,7 +111780,8 @@ function boundedPositiveIntegerEnv3(value, fallback, minimum, maximum) {
 }
 var GMAIL_STORE_PULL_INTERVAL_MS, GMAIL_STORE_PULL_FRESHNESS_THRESHOLD_MS, GMAIL_STORE_PULL_MAX_ITEMS = 200, GMAIL_STORE_RECONCILE_INTERVAL_MS, GMAIL_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS, GMAIL_DAILY_REQUEST_GUARD_REASON = "gmail_daily_api_request_guard";
 var init_gmail_live_control = __esm(() => {
-  GMAIL_STORE_PULL_INTERVAL_MS = 30 * 60000;
+  init_live_source_cadence();
+  GMAIL_STORE_PULL_INTERVAL_MS = LIVE_NEW_ITEMS_INTERVAL_MS;
   GMAIL_STORE_PULL_FRESHNESS_THRESHOLD_MS = 2 * 60 * 60000;
   GMAIL_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
   GMAIL_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
@@ -112290,7 +112298,8 @@ function boundedPositiveIntegerEnv4(value, fallback, minimum, maximum) {
 }
 var GOOGLE_DRIVE_STORE_PULL_INTERVAL_MS, GOOGLE_DRIVE_STORE_PULL_FRESHNESS_THRESHOLD_MS, GOOGLE_DRIVE_STORE_PULL_MAX_ITEMS = 200, GOOGLE_DRIVE_STORE_RECONCILE_INTERVAL_MS, GOOGLE_DRIVE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS, GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON = "google_drive_daily_api_request_guard";
 var init_drive_live_control = __esm(() => {
-  GOOGLE_DRIVE_STORE_PULL_INTERVAL_MS = 30 * 60000;
+  init_live_source_cadence();
+  GOOGLE_DRIVE_STORE_PULL_INTERVAL_MS = LIVE_NEW_ITEMS_INTERVAL_MS;
   GOOGLE_DRIVE_STORE_PULL_FRESHNESS_THRESHOLD_MS = 2 * 60 * 60000;
   GOOGLE_DRIVE_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
   GOOGLE_DRIVE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
@@ -202314,6 +202323,7 @@ function createCanonicalDropboxSchedulerSource(input) {
     const scopeHash = schedulerScopeHash(approvedScopeKey);
     tasks.push({
       id: `dropbox.files_store_pull.${scopeHash}`,
+      intervalMs: LIVE_NEW_ITEMS_INTERVAL_MS,
       scopePath: input.policy.roots.find((root) => root.approved_scope_key === approvedScopeKey)?.path,
       kind: "sync",
       writer: true,
@@ -203461,6 +203471,7 @@ var init_source_scheduler = __esm(() => {
   init_source_scheduler_state();
   init_credential_broker();
   init_local_pacing();
+  init_live_source_cadence();
   SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS = 48 * 60 * 60 * 1000;
   SCHEDULER_SOURCE_IDS = {
     gmail: "gmail.email",
