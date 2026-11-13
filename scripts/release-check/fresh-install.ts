@@ -31,13 +31,22 @@ export function consentBlock(s: ConsentSnapshot): string | undefined {
 
 /** Fail closed on unreadable results. Check answer and search independently, including titles and citations. */
 export function scopeAbsent(spec: LiveSourceSpec, answer: { ok: boolean; structured: unknown }, search: { ok: boolean; structured: unknown }): boolean {
+  return scopeAbsenceProblem(spec, answer, search) === undefined;
+}
+
+/** Why the outside-scope check did not pass, never quoting the answer: a leak, or which part could not be read. */
+export function scopeAbsenceProblem(spec: LiveSourceSpec, answer: { ok: boolean; structured: unknown }, search: { ok: boolean; structured: unknown }): string | undefined {
   const a = answer.structured as any;
   const s = search.structured as any;
-  if (!answer.ok || !search.ok || typeof a?.answer !== 'string' || !a.answer.trim() || a.status !== 'answered' || !Array.isArray(a.citations) || !Array.isArray(s?.evidence)) return false;
+  if (!answer.ok) return 'the answer call failed';
+  if (!search.ok) return 'the search call failed';
+  if (typeof a?.answer !== 'string' || !a.answer.trim() || a.status !== 'answered' || !Array.isArray(a.citations)) return `the answer could not be verified (status ${String(a?.status ?? 'none')})`;
+  if (!Array.isArray(s?.evidence)) return 'the search returned no evidence list';
   const strings = (value: unknown): string[] => typeof value === 'string' ? [value] : value && typeof value === 'object' ? Object.values(value).flatMap(strings) : [];
   const fold = (value: string) => value.normalize('NFKC').replace(/\s+/g, ' ').toLowerCase();
-  const hay = fold(strings([a.answer, a.citations, s.evidence]).join(' '));
-  return spec.fresh!.outside.expect.every((needle) => !hay.includes(fold(needle)));
+  const where = [['the answer', [a.answer]], ['its citations', a.citations], ['search evidence', s.evidence]] as const;
+  const leaked = where.filter(([, value]) => spec.fresh!.outside.expect.some((needle) => fold(strings(value).join(' ')).includes(fold(needle)))).map(([name]) => name);
+  return leaked.length ? `outside-scope item leaked into ${leaked.join(', ')}` : undefined;
 }
 
 export const redactFreshDetail = (text: string): string => text.replace(/https?:\/\/[^\s]+/gi, '[URL redacted]').replace(/(?:Bearer\s+|(?:token|code|state|cookie|password)[=:]\s*)[^\s,;]+/gi, '[credential redacted]').slice(0, 300);
@@ -339,7 +348,8 @@ ${asFresh('"$HOME/.local/bin/olympus" connect venice --api-key-stdin < "$HOME/.o
       await recorded(`${source.id}.scope-absence`, async () => {
         const answer = await ask(engine!, source.fresh!.outside.question, sleep);
         const search = await engine!.call('olympus_search', { question: source.fresh!.outside.question, limit: 100 });
-        if (!scopeAbsent(source, answer, search)) throw new Error('outside-scope item leaked, or answer/search could not be verified');
+        const problem = scopeAbsenceProblem(source, answer, search);
+        if (problem) throw new Error(problem);
       });
     }
     if (rerankerOn) {
