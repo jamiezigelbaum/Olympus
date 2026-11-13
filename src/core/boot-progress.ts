@@ -439,10 +439,16 @@ function backupsSince(env: LayoutEnv, sinceMs: number): SchemaBackupEntry[] {
  */
 export function restoreSchemaBackupsSince(env: LayoutEnv, sinceMs: number): string[] {
   const restored: string[] = [];
-  for (const entry of backupsSince(env, sinceMs)) {
-    for (const suffix of ['-wal', '-shm', '-journal']) rmSync(`${entry.dbPath}${suffix}`, { force: true });
-    renameSync(entry.backupPath, entry.dbPath);
-    restored.push(entry.storeId);
+  // Two stores in one file each copy it before their update: the earliest
+  // copy is the file as it was, and the later ones are dropped.
+  const byFile = new Map<string, SchemaBackupEntry[]>();
+  for (const entry of backupsSince(env, sinceMs)) byFile.set(entry.dbPath, [...(byFile.get(entry.dbPath) ?? []), entry]);
+  for (const [dbPath, entries] of byFile) {
+    const [earliest, ...later] = entries.sort((a, b) => statSync(a.backupPath).mtimeMs - statSync(b.backupPath).mtimeMs);
+    for (const suffix of ['-wal', '-shm', '-journal']) rmSync(`${dbPath}${suffix}`, { force: true });
+    renameSync(earliest!.backupPath, dbPath);
+    for (const entry of later) rmSync(entry.backupPath, { recursive: true, force: true });
+    restored.push(...entries.map((entry) => entry.storeId));
   }
   removeAbandonedCopiesOfRecorded(env);
   pruneSchemaBackupRecord(env);

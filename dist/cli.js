@@ -19826,11 +19826,17 @@ function backupsSince(env, sinceMs) {
 }
 function restoreSchemaBackupsSince(env, sinceMs) {
   const restored = [];
-  for (const entry of backupsSince(env, sinceMs)) {
+  const byFile = new Map;
+  for (const entry of backupsSince(env, sinceMs))
+    byFile.set(entry.dbPath, [...byFile.get(entry.dbPath) ?? [], entry]);
+  for (const [dbPath, entries] of byFile) {
+    const [earliest, ...later] = entries.sort((a, b) => statSync11(a.backupPath).mtimeMs - statSync11(b.backupPath).mtimeMs);
     for (const suffix of ["-wal", "-shm", "-journal"])
-      rmSync8(`${entry.dbPath}${suffix}`, { force: true });
-    renameSync4(entry.backupPath, entry.dbPath);
-    restored.push(entry.storeId);
+      rmSync8(`${dbPath}${suffix}`, { force: true });
+    renameSync4(earliest.backupPath, dbPath);
+    for (const entry of later)
+      rmSync8(entry.backupPath, { recursive: true, force: true });
+    restored.push(...entries.map((entry) => entry.storeId));
   }
   removeAbandonedCopiesOfRecorded(env);
   pruneSchemaBackupRecord(env);
@@ -19929,7 +19935,7 @@ function runSqliteMigrations(db, storeId, migrations = currentStoreMigrations(),
     const logged = currentVersion > 0;
     if (logged)
       log(`${label}: updating`);
-    const backupMs = currentVersion > 0 && storeOnDisk(db) ? backUpBeforeUpdate(db, storeId, currentVersion, env, report, options.freeBytes) : undefined;
+    const backupMs = storeOnDisk(db) && (currentVersion > 0 || holdsOtherTables(db)) ? backUpBeforeUpdate(db, storeId, currentVersion, env, report, options.freeBytes) : undefined;
     report({ phase: "migrating", storeId });
     const migrateStarted = performance.now();
     db.transaction(() => {
@@ -19957,6 +19963,10 @@ function runSqliteMigrations(db, storeId, migrations = currentStoreMigrations(),
     applied,
     pending: applied
   };
+}
+function holdsOtherTables(db) {
+  return db.query(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table'
+    AND name NOT LIKE 'sqlite_%' AND name != '${SQLITE_SCHEMA_VERSION_TABLE}'`).get().n > 0;
 }
 function storeOnDisk(db) {
   const file = db.filename;

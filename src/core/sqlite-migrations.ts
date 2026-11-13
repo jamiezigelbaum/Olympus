@@ -116,7 +116,11 @@ export function runSqliteMigrations(
     if (logged) log(`${label}: updating`);
     // A store on disk with data is copied first, so a failed upgrade can put
     // it back for the previous version (#1494). A new store has nothing to keep.
-    const backupMs = currentVersion > 0 && storeOnDisk(db)
+    // A new store whose tables join a file that already holds another
+    // store's (limit-stops in source-scheduler.sqlite) changes that file
+    // too: it is copied as well, so a rollback takes the new tables out
+    // (gate7 forced leg on c013270b, 13 Nov).
+    const backupMs = storeOnDisk(db) && (currentVersion > 0 || holdsOtherTables(db))
       ? backUpBeforeUpdate(db, storeId, currentVersion, env, report, options.freeBytes)
       : undefined;
     report({ phase: 'migrating', storeId });
@@ -156,6 +160,11 @@ export function runSqliteMigrations(
     applied,
     pending: applied,
   };
+}
+
+function holdsOtherTables(db: Database): boolean {
+  return (db.query(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table'
+    AND name NOT LIKE 'sqlite_%' AND name != '${SQLITE_SCHEMA_VERSION_TABLE}'`).get() as { n: number }).n > 0;
 }
 
 function storeOnDisk(db: Database): boolean {

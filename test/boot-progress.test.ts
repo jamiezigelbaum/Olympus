@@ -291,6 +291,34 @@ describe('a rollback or a commit leaves no copy behind (the gate7 forced leg, 20
   }, 30_000);
 });
 
+describe('a new store inside an existing file is put back too (gate7 forced leg on c013270b, 13 Nov)', () => {
+  test('a rollback takes out the new store\'s tables and puts the file back as it was before both updates', () => {
+    const env = home();
+    const { path, db } = storeAtVersion1(env);
+    const since = Date.now() - 1;
+    // A store new in this version joins the file (limit-stops in source-scheduler.sqlite), then the file's own store updates.
+    runSqliteMigrations(db, 'joined', [{ version: 1, name: 'create', up: (d) => d.exec('CREATE TABLE joined_rows (id INTEGER)') }], { env, log: () => {} });
+    runSqliteMigrations(db, 'fixture', MIGRATIONS, { env, log: () => {} });
+    db.close();
+    expect(restoreSchemaBackupsSince(env, since).sort()).toEqual(['fixture', 'joined']);
+    expect(preSchemaBackupsOf(path)).toEqual([]);
+    const restored = new Database(path, { readonly: true });
+    expect(restored.query("SELECT name FROM sqlite_master WHERE name = 'joined_rows'").get()).toBeNull();
+    expect(readSqliteSchemaVersion(restored, 'fixture')).toBe(1);
+    expect(restored.query('SELECT body FROM items').get()).toEqual({ body: 'kept' });
+    restored.close();
+  });
+
+  test('a brand-new file gets no copy', () => {
+    const env = home();
+    const path = join(env.HOME!, 'fresh.sqlite');
+    const db = new Database(path, { create: true });
+    runSqliteMigrations(db, 'fixture', MIGRATIONS, { env, log: () => {} });
+    db.close();
+    expect(preSchemaBackupsOf(path)).toEqual([]);
+  });
+});
+
 describe('a killed backup leaves nothing behind once a backup runs again', () => {
   test('part-way copies of gone processes are removed; a live process\'s copy is kept', () => {
     const env = home();
