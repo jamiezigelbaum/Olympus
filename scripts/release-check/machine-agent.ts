@@ -718,7 +718,7 @@ function startBridge(port: number): () => void {
   // macOS: the engine already listens on the loopback port the browser and the smoke use, so there is nothing to forward.
   if (p.socketPath === undefined) return () => undefined;
   type Upstream = { write(data: Uint8Array): number; end(): void };
-  const server = Bun.listen<{ upstream?: Upstream; queue: Uint8Array[]; closed: boolean }>({
+  const listen = () => Bun.listen<{ upstream?: Upstream; queue: Uint8Array[]; closed: boolean }>({
     hostname: '127.0.0.1',
     port,
     socket: {
@@ -746,7 +746,44 @@ function startBridge(port: number): () => void {
       error(socket) { socket.data.closed = true; socket.data.upstream?.end(); },
     },
   });
+  let server: ReturnType<typeof listen>;
+  try { server = listen(); } catch (error) {
+    // An earlier agent the run lost track of (its exec timed out on the VM's transport, run 43350279960) can still hold the
+    // port, and every later browser step then fails to listen. Stop that agent, and only an agent, then try once more.
+    const stale = staleAgentOnPort(port);
+    if (stale === undefined) throw error;
+    say(`stopping an earlier agent (pid ${stale}) that still holds port ${port}`);
+    try { process.kill(stale, 'SIGTERM'); } catch { /* already gone */ }
+    const until = Date.now() + 5_000;
+    while (Date.now() < until && pidAlive(stale)) Bun.sleepSync(100);
+    if (pidAlive(stale)) { try { process.kill(stale, 'SIGKILL'); } catch { /* gone */ } Bun.sleepSync(200); }
+    server = listen();
+  }
   return () => server.stop(true);
+}
+
+const pidAlive = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch { return false; } };
+
+/** The pid of another of this run's agents (~/rc/agent.js) listening on 127.0.0.1:`port`, from /proc; undefined for anything else. */
+export function staleAgentOnPort(port: number): number | undefined {
+  if (process.platform !== 'linux') return undefined;
+  const hexPort = port.toString(16).toUpperCase().padStart(4, '0');
+  let inode: string | undefined;
+  try {
+    for (const line of readFileSync('/proc/net/tcp', 'utf8').split('\n').slice(1)) {
+      const cols = line.trim().split(/\s+/);
+      // local_address 0100007F:PORT, state 0A (LISTEN), inode in column 9.
+      if (cols[1] === `0100007F:${hexPort}` && cols[3] === '0A') { inode = cols[9]; break; }
+    }
+  } catch { return undefined; }
+  if (!inode) return undefined;
+  const pid = pidOfSocket(inode, process.pid);
+  if (pid !== undefined) {
+    let cmdline = '';
+    try { cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf8'); } catch { return undefined; }
+    return cmdline.includes('rc/agent.js') ? pid : undefined;
+  }
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -932,20 +969,26 @@ function currentConnections(): Connection[] {
   return rows;
 }
 
-/** Linux: the name of the process that holds a socket open, found through this user's open files; undefined when it has closed. */
-function ownerOfSocket(inode: string): string | undefined {
+/** Linux: the process that holds a socket open, found through this user's open files; undefined when it has closed. */
+function pidOfSocket(inode: string, skip?: number): number | undefined {
   try {
-    for (const pid of readdirSync('/proc').filter((name) => /^\d+$/.test(name))) {
+    for (const pid of readdirSync('/proc').filter((name) => /^\d+$/.test(name)).map(Number)) {
+      if (pid === skip) continue;
       let fds: string[];
       try { fds = readdirSync(`/proc/${pid}/fd`); } catch { continue; }
       for (const fd of fds) {
-        try {
-          if (readlinkSync(`/proc/${pid}/fd/${fd}`) === `socket:[${inode}]`) return readFileSync(`/proc/${pid}/comm`, 'utf8').trim();
-        } catch { /* closed meanwhile */ }
+        try { if (readlinkSync(`/proc/${pid}/fd/${fd}`) === `socket:[${inode}]`) return pid; } catch { /* closed meanwhile */ }
       }
     }
   } catch { /* no /proc */ }
   return undefined;
+}
+
+/** Linux: the name of the process that holds a socket open; undefined when it has closed. */
+function ownerOfSocket(inode: string): string | undefined {
+  const pid = pidOfSocket(inode);
+  if (pid === undefined) return undefined;
+  try { return readFileSync(`/proc/${pid}/comm`, 'utf8').trim(); } catch { return undefined; }
 }
 
 /** Linux: the socket inodes held by a process and everything it started (the browser and its network service), read fresh. */
