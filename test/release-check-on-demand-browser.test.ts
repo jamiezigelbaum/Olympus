@@ -91,15 +91,19 @@ describe('fresh read-on-demand without write tokens', () => {
 
   test('Drive folder search opens by address and settles on results or the first-run empty state', async () => {
     expect(driveFolderSearchUrl(ON_DEMAND_FOLDER)).toBe(`https://drive.google.com/drive/u/0/search?q=${encodeURIComponent(`type:folder "${ON_DEMAND_FOLDER}"`)}`);
-    const settled = (path: string, html: string) => {
+    const settled = (path: string, html: string, shownBar = false) => {
       const window = new Window({ url: `https://drive.google.com${path}` });
       window.document.body.innerHTML = html;
-      try { return new Function('document', 'location', `return ${DRIVE_SEARCH_SETTLED}`)(window.document, window.location); }
+      // happy-dom lays nothing out, so every element measures 0x0 (hidden) unless given a size.
+      if (shownBar) for (const bar of window.document.querySelectorAll('[role=progressbar]')) (bar as any).getBoundingClientRect = () => ({ width: 100, height: 4 });
+      try { return new Function('document', 'location', 'getComputedStyle', `return ${DRIVE_SEARCH_SETTLED}`)(window.document, window.location, window.getComputedStyle.bind(window)); }
       finally { void window.happyDOM.close(); }
     };
     expect(settled('/drive/u/0/search', '<div role="grid"></div>')).toBe(true);
     expect(settled('/drive/u/0/search', '<div>None of your files or folders matched this search</div>')).toBe(true);
-    expect(settled('/drive/u/0/search', '<div role="progressbar"></div><div role="grid"></div>')).toBe(false);
+    // Drive keeps a hidden progressbar in the page at rest; only a visible one means still loading.
+    expect(settled('/drive/u/0/search', '<div role="progressbar"></div><div>No results</div>')).toBe(true);
+    expect(settled('/drive/u/0/search', '<div role="progressbar"></div><div role="grid"></div>', true)).toBe(false);
     expect(settled('/drive/u/0/my-drive', '<div role="grid"></div>')).toBe(false);
     expect(settled('/drive/u/0/search', '<div>Loading</div>')).toBe(false);
   });
