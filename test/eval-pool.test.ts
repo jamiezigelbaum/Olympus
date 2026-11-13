@@ -235,6 +235,11 @@ test('a smaller depth keeps the chat store\'s newest-message pins, as the adapte
   // is appended first and evicts the unmarked second newest, which is then appended after it.
   const turn = [item('h1'), item('h2'), item('p2', 2), item('h3'), item('p1', 1, true)];
   expect(ids(laneAtDepth(turn, 3))).toEqual(['h1', 'p1', 'p2']);
+  // A pin the visibility gate removed keeps its turn and its slot (Codex on #1620): only the second newest
+  // was captured, so at depth 2 the adapter placed the newest there and the gate removed it.
+  const gated = [item('h1'), item('h2'), item('h3'), item('p2', 2, true)];
+  expect(ids(laneAtDepth(gated, 2))).toEqual(['h1']);
+  expect(ids(laneAtDepth(gated, 3))).toEqual(['h1', 'p2']);
   // Without pins a smaller depth is the prefix.
   expect(ids(laneAtDepth([item('h1'), item('h2'), item('h3')], 2))).toEqual(['h1', 'h2']);
   expect(laneAtDepth(captured, 5)).toEqual(captured);

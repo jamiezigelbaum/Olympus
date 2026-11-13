@@ -49,11 +49,16 @@ export function laneAtDepth<T extends { newestInStore?: number; pinAppended?: bo
   const ranked = items.filter(item => !item.pinAppended).slice(0, depth);
   const result = ranked.map(bare);
   const original = new Map(ranked.map((item, index) => [result[index]!, item]));
-  const pinCount = Math.min(pins.length, result.length > 0 ? depth - 1 : depth);
-  for (const pin of pins.slice(0, pinCount)) {
-    const at = result.findIndex(item => original.get(item) === pin);
+  // Pins keep their ordinals: one the visibility gate removed after the
+  // adapter placed it still took its turn and its slot, then left the lane.
+  const maxOrdinal = Math.max(...pins.map(pin => pin.newestInStore!));
+  const pinCount = Math.min(maxOrdinal, result.length > 0 ? depth - 1 : depth);
+  const filtered = new Set<T>();
+  for (let ordinal = 1; ordinal <= pinCount; ordinal += 1) {
+    const pin = pins.find(item => item.newestInStore === ordinal);
+    const at = pin ? result.findIndex(item => original.get(item) === pin) : -1;
     if (at >= 0) {
-      result[at] = { ...result[at]!, newestInStore: pin.newestInStore };
+      result[at] = { ...result[at]!, newestInStore: ordinal };
       continue;
     }
     while (result.length >= depth) {
@@ -61,9 +66,11 @@ export function laneAtDepth<T extends { newestInStore?: number; pinAppended?: bo
       while (last > 0 && result[last]!.newestInStore !== undefined) last -= 1;
       result.splice(last, 1);
     }
-    result.push({ ...bare(pin), newestInStore: pin.newestInStore, pinAppended: true });
+    const placed = pin ? { ...bare(pin), newestInStore: ordinal, pinAppended: true } as T : { newestInStore: ordinal } as T;
+    if (!pin) filtered.add(placed);
+    result.push(placed);
   }
-  return result;
+  return result.filter(item => !filtered.has(item));
 }
 
 export function replayPool(capture: PoolCapture, variant: ReplayVariant): ReplayResult {
