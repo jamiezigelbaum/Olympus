@@ -109,6 +109,8 @@ export interface LocalContentBlock {
   facts?: readonly StructuredEvidenceFact[];
   truncated?: boolean;
   coverageGaps?: readonly string[];
+  // This exact stored item version is held by the source byte-size limit.
+  sizeHeld?: boolean;
   // The owner chose to keep this item's contents unread (a folder set to
   // Names only, or a metadata-only ingestion rule). Its name still matches;
   // its missing text is a settled choice, not a failed read, and coverage
@@ -382,14 +384,12 @@ async function buildPreparedEvidencePackDetailed(
   const searchedSources = new Set(defaultSourceCorpusRegistryConfig().corpora
     .filter((corpus) => searched.has(corpus.corpusId)).map((corpus) => corpus.sourceId));
   const limitStopGaps: string[] = [];
-  const sizeHeldSources = new Set<string>();
   const limits = registeredLimits();
   const now = (input.now?.() ?? new Date()).getTime();
   for (const stop of input.limitStops ?? []) {
     const limit = limits.find((entry) => entry.id === stop.id);
     if ((limit?.scope !== 'source' && !(limit?.scope === 'extraction' && limit.kind === 'size')) || (stop.resumesAt && Date.parse(stop.resumesAt) <= now)) continue;
     if (limitStopSubjects(stop).some((subject) => searched.has(subject) || searchedSources.has(subject))) {
-      if (limit.kind === 'size') for (const subject of limitStopSubjects(stop)) sizeHeldSources.add(subject);
       const heldFiles = stop.waiting?.items ?? 0;
       limitStopGaps.push(limit.kind === 'size'
         ? `${limit.label}: ${heldFiles} ${heldFiles === 1 ? 'file' : 'files'} held because they are too large; not read. Raise the size limit to continue.`
@@ -397,8 +397,6 @@ async function buildPreparedEvidencePackDetailed(
     }
   }
   extractionGaps.push(...limitStopGaps);
-  const sizeHeldCorpora = new Set(defaultSourceCorpusRegistryConfig().corpora
-    .filter(corpus => sizeHeldSources.has(corpus.sourceId)).map(corpus => corpus.corpusId));
   const policyDeniedCoverageGaps: string[] = [];
   let policyDeniedCandidates = 0;
   const namesOnlyCandidateIndexes: number[] = [];
@@ -543,7 +541,7 @@ async function buildPreparedEvidencePackDetailed(
 
     // The source's counts-only size notice explains these unread files. Do
     // not copy a held file's title or locator into the answer's coverage.
-    const sizeHeld = !content?.chunks.length && sizeHeldCorpora.has(hit.corpusId);
+    const sizeHeld = content?.sizeHeld === true && content.chunks.length === 0;
     const gap = sizeHeld ? undefined : extractionGapFor(hit, provider !== undefined, content);
     candidateExtractionGapIndexes.push(gap ? [extractionGaps.length] : []);
     if (gap) extractionGaps.push(gap);

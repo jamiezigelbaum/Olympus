@@ -224,7 +224,7 @@ import { accountStoreNames } from '../../core/olympus-layout.ts';
 import { ARCHIVE_IMPORTS_SOURCE_ID } from '../archive-import/state.ts';
 import { createArchiveExtractionRuntime } from '../archive-import/extraction-runtime.ts';
 import { createArchiveImportsSchedulerSource } from '../archive-import/scheduler-source.ts';
-import type { ExtractorRegistryConfig } from '../file-extraction/types.ts';
+import type { ExtractionItemRef, ExtractorRegistryConfig } from '../file-extraction/types.ts';
 import { createLocalFilesSourceConnector } from '../local-files/connector.ts';
 import { createLocalFilesOpenTargets, localFilesOpenRoots } from '../local-files/open-target.ts';
 import { defaultExclusionContext, scopePathIsWithin } from '../local-files/paths.ts';
@@ -2548,6 +2548,65 @@ export async function main(): Promise<void> {
         }
       : {}),
   };
+  const connectorStoreReadScope = (store: LocalConnectorStore):
+    { allowed: false } | {
+      allowed: true;
+      accountScope?: string;
+      filters?: import('../connector-store/index.ts').ConnectorStoreSearchFilters;
+      contentAllowed: boolean;
+      contentFilters?: import('../connector-store/index.ts').ConnectorStoreSearchFilters;
+    } => {
+    const sourceId = isDropboxTierStore(store)
+      ? 'dropbox.files' as const
+      : isLocalFilesTierStore(store)
+        ? LOCAL_FILES_SOURCE_ID
+      : store === googleDriveInternalConnectorStore || store === googleDriveSecureConnectorStore
+        || (store.corpusId === GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID && store === googleDriveTierLane?.publicStore?.current())
+        ? 'google_drive.docs' as const
+      : Object.values(EVERNOTE_TIER_CORPUS_IDS).includes(store.corpusId)
+        ? EVERNOTE_SOURCE_ID
+        : undefined;
+    if (sourceId === LOCAL_FILES_SOURCE_ID && !localFilesCleanupRecovery?.ready()) return { allowed: false };
+    if (!sourceId) return { allowed: true, contentAllowed: true };
+    const approval = fileSourceScopeAuthority?.snapshot(sourceId);
+    if (!approval || approval.status !== 'approved') return { allowed: false };
+    const metadataScope = fileSourceScopeMetadataFilters(approval);
+    if (!metadataScope.allowed) return { allowed: false };
+    const contentScope = fileSourceScopeContentFilters(approval);
+    const scopeAccount = fileScopeAccount(sourceId);
+    if (!scopeAccount) return { allowed: false };
+    return {
+      allowed: true,
+      accountScope: scopeAccount.accountScope,
+      filters: metadataScope.filters,
+      contentAllowed: contentScope.allowed,
+      ...(contentScope.allowed && contentScope.filters ? { contentFilters: contentScope.filters } : {}),
+    };
+  };
+  const currentExtractionItems = (refs: readonly ExtractionItemRef[]): readonly boolean[] => {
+    // One batched check per store for the whole queue; shared by readiness
+    // and size stops so obsolete jobs are neither reported nor granted.
+    const answers = refs.map(() => false);
+    const check = (
+      corpusId: string,
+      store: LocalConnectorStore | undefined,
+      view: { itemsMatchingExtractionRefs: LocalConnectorStore['itemsMatchingExtractionRefs'] } | undefined,
+    ): void => {
+      if (!store) return;
+      const indexes = refs.flatMap((ref, index) => (ref.corpusId === corpusId ? [index] : []));
+      if (indexes.length === 0) return;
+      const readScope = connectorStoreReadScope(store);
+      if (!readScope.allowed || !readScope.contentAllowed) return;
+      const matched = (view ?? store).itemsMatchingExtractionRefs(indexes.map((index) => refs[index]!), readScope.contentFilters);
+      indexes.forEach((index, position) => { answers[index] = matched[position] === true; });
+    };
+    for (const store of connectorStores) {
+      const view = store.corpusId === LOCAL_FILES_CORPUS_ID ? localFilesExtractionView
+        : store.corpusId === DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID ? dropboxExtractionView : undefined;
+      check(store.corpusId, store, view);
+    }
+    return answers;
+  };
   const buildFileExtractionRuntime = () => createFileExtractionRuntime({
     env: process.env,
     // The split's front reads the queue (the runtime takes that from the
@@ -2557,6 +2616,7 @@ export async function main(): Promise<void> {
     allowEmpty: true,
     connectorStores,
     corpora: fileExtractionCorpora(),
+    currentItems: currentExtractionItems,
     extraSourceFactories: new Map([
       [LOCAL_FILES_PROVIDER, ({ config, store, view }) => {
         const ref = fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID);
@@ -2702,41 +2762,6 @@ export async function main(): Promise<void> {
     }
   };
   for (const mount of configuredConnectorStoreMounts) adoptConfiguredPrincipal(mount);
-  const connectorStoreReadScope = (store: LocalConnectorStore):
-    { allowed: false } | {
-      allowed: true;
-      accountScope?: string;
-      filters?: import('../connector-store/index.ts').ConnectorStoreSearchFilters;
-      contentAllowed: boolean;
-      contentFilters?: import('../connector-store/index.ts').ConnectorStoreSearchFilters;
-    } => {
-    const sourceId = isDropboxTierStore(store)
-      ? 'dropbox.files' as const
-      : isLocalFilesTierStore(store)
-        ? LOCAL_FILES_SOURCE_ID
-      : store === googleDriveInternalConnectorStore || store === googleDriveSecureConnectorStore
-        || (store.corpusId === GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID && store === googleDriveTierLane?.publicStore?.current())
-        ? 'google_drive.docs' as const
-      : Object.values(EVERNOTE_TIER_CORPUS_IDS).includes(store.corpusId)
-        ? EVERNOTE_SOURCE_ID
-        : undefined;
-    if (sourceId === LOCAL_FILES_SOURCE_ID && !localFilesCleanupRecovery?.ready()) return { allowed: false };
-    if (!sourceId) return { allowed: true, contentAllowed: true };
-    const approval = fileSourceScopeAuthority?.snapshot(sourceId);
-    if (!approval || approval.status !== 'approved') return { allowed: false };
-    const metadataScope = fileSourceScopeMetadataFilters(approval);
-    if (!metadataScope.allowed) return { allowed: false };
-    const contentScope = fileSourceScopeContentFilters(approval);
-    const scopeAccount = fileScopeAccount(sourceId);
-    if (!scopeAccount) return { allowed: false };
-    return {
-      allowed: true,
-      accountScope: scopeAccount.accountScope,
-      filters: metadataScope.filters,
-      contentAllowed: contentScope.allowed,
-      ...(contentScope.allowed && contentScope.filters ? { contentFilters: contentScope.filters } : {}),
-    };
-  };
   const connectorStoreStatusScope = (store: LocalConnectorStore):
     ConnectorStoreStatusScope | undefined => {
     // Mail older than the approved window is kept as names only on purpose,
@@ -3485,42 +3510,7 @@ export async function main(): Promise<void> {
     ? createExtractionReadinessLedger(fileExtractionRuntime.jobs, {
         terminalRetryPaths: fileExtractionRuntime.terminalRetryPaths,
         classifyUnreadable: unreadableVerdict,
-        currentItems(refs) {
-          // One batched check per store for the whole queue (the per-job
-          // check below held the worker for seconds on a large Dropbox queue).
-          const answers = refs.map(() => false);
-          const check = (
-            corpusId: string,
-            store: LocalConnectorStore | undefined,
-            view: { itemsMatchingExtractionRefs: LocalConnectorStore['itemsMatchingExtractionRefs'] } | undefined,
-          ): void => {
-            if (!store) return;
-            const indexes = refs.flatMap((ref, index) => (ref.corpusId === corpusId ? [index] : []));
-            if (indexes.length === 0) return;
-            const readScope = connectorStoreReadScope(store);
-            if (!readScope.allowed || !readScope.contentAllowed) return;
-            const matched = (view ?? store).itemsMatchingExtractionRefs(indexes.map((index) => refs[index]!), readScope.contentFilters);
-            indexes.forEach((index, position) => { answers[index] = matched[position] === true; });
-          };
-          check(LOCAL_FILES_CORPUS_ID, localFilesConnectorStore, localFilesExtractionView);
-          check(DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, dropboxConnectorStore, dropboxExtractionView);
-          return answers;
-        },
-        currentItem(ref) {
-          if (ref.corpusId === LOCAL_FILES_CORPUS_ID && localFilesConnectorStore) {
-            const readScope = connectorStoreReadScope(localFilesConnectorStore);
-            return readScope.allowed
-              && readScope.contentAllowed
-              && (localFilesExtractionView ?? localFilesConnectorStore).itemMatchesExtractionRef(ref, readScope.contentFilters);
-          }
-          if (ref.corpusId !== DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID || !dropboxConnectorStore) {
-            return false;
-          }
-          const readScope = connectorStoreReadScope(dropboxConnectorStore);
-          return readScope.allowed
-            && readScope.contentAllowed
-            && (dropboxExtractionView ?? dropboxConnectorStore).itemMatchesExtractionRef(ref, readScope.contentFilters);
-        },
+        currentItems: currentExtractionItems,
         lanesForCorpus(corpusId) {
           if (corpusId === LOCAL_FILES_CORPUS_ID) {
             const ref = fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID);

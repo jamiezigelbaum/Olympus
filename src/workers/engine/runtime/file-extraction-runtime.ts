@@ -161,6 +161,8 @@ export interface FileExtractionRuntimeOptions {
   /** Keep the shared queue ready while source lanes wait for their first connect. */
   allowEmpty?: boolean;
   connectorStores: readonly LocalConnectorStore[];
+  /** Shared readiness fence, including current content approval. */
+  currentItems?: (refs: readonly ExtractionItemRef[]) => readonly boolean[];
   extractors?: ExtractorRegistryConfig;
   /**
    * Overrides the roster parsed from the environment. Tests supply this; the
@@ -338,6 +340,31 @@ export function createFileExtractionRuntime(
   // A front reads the queue the background created; before that there is nothing to read.
   if (readOnly && !existsSync(jobsDbPath)) return undefined;
   const jobs = new LocalFileExtractionJobStore(jobsDbPath, readOnly ? { readonly: true } : {});
+
+  // The queue outlives source rows and approvals. Fence every size report,
+  // grant and restart continuation through the live stores, including fronts.
+  jobs.setSizeHoldCurrentItems(options.currentItems ?? ((refs) => {
+    const answers = refs.map(() => false);
+    for (const config of roster) {
+      const store = storesByCorpusId.get(config.corpusId);
+      if (!store) continue;
+      const indexes = refs.flatMap((ref, index) => ref.corpusId === config.corpusId ? [index] : []);
+      if (!indexes.length) continue;
+      const set = options.tierSets?.get(config.corpusId);
+      const reader = set ? tieredExtractionView(set, { home: store.trustDomain }) : store;
+      const matched = reader.itemsMatchingExtractionRefs(indexes.map(index => refs[index]!), config.resolveCandidateFilters?.());
+      const scopes = new Set(config.resolveScopes?.() ?? config.scopes);
+      try { options.scopeGuard?.assertAuthorized({ config, store }); }
+      catch { continue; }
+      indexes.forEach((index, position) => {
+        const ref = refs[index]!;
+        if (!matched[position] || !scopes.has(ref.approvedScopeKey)) return;
+        if (config.accountScopeCurrent && !config.accountScopeCurrent(ref.accountScope)) return;
+        answers[index] = options.scopeGuard?.allowsRef({ config, store, reader, ref }) ?? true;
+      });
+    }
+    return answers;
+  }));
 
   // Each account keeps the scratch files a file reader's input is written to in its own folder
   // (core/source-placement.ts, `extractionSpoolPlacementForCorpus`), so deleting the account takes them

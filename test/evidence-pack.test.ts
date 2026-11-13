@@ -1,3 +1,4 @@
+import '../src/core/source-size-limits.ts';
 import { Database } from 'bun:sqlite';
 import { registerLimit, initializeLimitStops, reportLimitStop, clearLimitStop, listOpenLimitStops } from '../src/core/limit-stops.ts';
 import { describe, expect, test } from 'bun:test';
@@ -535,4 +536,34 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
     clearLimitStop(stop.id, stop.subject, db);
     expect((await build([INTERNAL])).coverage.extractionGaps).not.toContain(gap);
   } finally { db.close(); }
+});
+
+
+test('a size-held version suppresses only its own gap in a shared corpus', async () => {
+  const pack = await buildEvidencePack({
+    question: 'records', maxResults: 10, searchContext: allowAll, registry: registry(),
+    adapters: { [INTERNAL]: adapterReturning(['held-secret-title', 'unrelated-unread', 'missing-content']) },
+    contentProviders: { [INTERNAL]: provider({
+      'held-secret-title': { sensitivity: buildSourceSensitivity({ trustTier: 'S2', trustDomain: 'internal' }), chunks: [], sizeHeld: true,
+        locatorUri: '/private/held-secret-path', coverageGaps: ['held-secret-name was not extracted'] },
+      'unrelated-unread': { sensitivity: buildSourceSensitivity({ trustTier: 'S2', trustDomain: 'internal' }), chunks: [], coverageGaps: ['explicit OCR failure'] },
+    }) },
+    limitStops: [{ id: 'dropbox.max_file_bytes', subject: 'dropbox.files', since: '2026-11-13T00:00:00Z', reason: 'source_too_large',
+      limit: 8_000_000, used: 8_000_001, waiting: { items: 1 } }],
+  });
+  const gaps = pack.coverage.extractionGaps.join(' ');
+  expect(gaps).toContain('1 file held because they are too large');
+  expect(gaps).toContain('unrelated-unread');
+  expect(gaps).toContain('explicit OCR failure');
+  expect(gaps).toContain('missing-content');
+  expect(gaps).not.toContain('held-secret');
+});
+
+test('a size stop preserves missing-provider gaps in the same corpus', async () => {
+  const pack = await buildEvidencePack({ question: 'records', maxResults: 5, searchContext: allowAll, registry: registry(),
+    adapters: { [INTERNAL]: adapterReturning(['unrelated-no-provider']) }, contentProviders: {},
+    limitStops: [{ id: 'dropbox.max_file_bytes', subject: 'dropbox.files', since: '2026-11-13T00:00:00Z', reason: 'source_too_large',
+      limit: 8_000_000, used: 8_000_001, waiting: { items: 1 } }],
+  });
+  expect(pack.coverage.extractionGaps.join(' ')).toContain('unrelated-no-provider');
 });

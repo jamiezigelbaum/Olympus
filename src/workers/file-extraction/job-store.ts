@@ -1,3 +1,4 @@
+import { sizeHeldItemKey } from '../../core/source-size-limits.ts';
 import type { OnDemandReadRequest, OnDemandReadResult } from './on-demand-read.ts';
 /**
  * The generic extraction job side database.
@@ -151,6 +152,10 @@ const TERMINAL_STATUSES: ReadonlySet<string> = new Set([
  * The settled job's own explanation, looked up by item identity across tier copies.
  */
 export interface ItemExtractionOutcome {
+  /**
+   * Opaque version key, present only for a source byte-size hold.
+   */
+  sizeHeldItemKey?: string;
   status: ExtractionTerminalStatus;
   lastErrorKind?: string;
   warnings: readonly string[];
@@ -649,6 +654,7 @@ export class LocalFileExtractionJobStore {
   readonly dbPath: string;
   readonly readonly: boolean;
   private readonly db: Database;
+  private sizeHoldCurrentItems: ExtractionScopedReadinessOptions['currentItems'];
   private grantAuthorityId: string | undefined;
   private unregisterPath: (() => void) | undefined;
 
@@ -848,6 +854,13 @@ export class LocalFileExtractionJobStore {
   }
 
   /**
+   * The runtime supplies the same live identity and approval fence as readiness.
+   */
+  setSizeHoldCurrentItems(fence: NonNullable<ExtractionScopedReadinessOptions['currentItems']>): void {
+    this.sizeHoldCurrentItems = fence;
+  }
+
+  /**
    * Current size holds, across a source's tier stores and scopes. No separate queue.
    */
   sizeHeldJobs(providers: readonly string[]): Array<{ jobId: string; ref: ExtractionItemRef; maxBytes?: number }> {
@@ -862,7 +875,16 @@ export class LocalFileExtractionJobStore {
               OR newer.created_at > j.created_at
               OR (newer.rowid > j.rowid AND (newer.source_version != j.source_version OR newer.content_hash != j.content_hash))))
     `).all(...providers) as ExtractionJobSqlRow[];
-    return rows.map(row => ({ jobId: row.job_id, ref: refFromRow(row),
+    const allowed: boolean[] = [];
+    if (this.sizeHoldCurrentItems) {
+      for (let start = 0; start < rows.length; start += SCOPED_READINESS_CURRENT_SLICE) {
+        const slice = rows.slice(start, start + SCOPED_READINESS_CURRENT_SLICE);
+        const answers = this.sizeHoldCurrentItems(slice.map(refFromRow));
+        for (let index = 0; index < slice.length; index++) allowed.push(answers[index] === true);
+      }
+    }
+    const held = this.sizeHoldCurrentItems ? rows.filter((_row, index) => allowed[index] === true) : rows;
+    return held.map(row => ({ jobId: row.job_id, ref: refFromRow(row),
       ...(row.max_bytes_per_file === null ? {} : { maxBytes: row.max_bytes_per_file }) }));
   }
 
@@ -874,9 +896,12 @@ export class LocalFileExtractionJobStore {
     requirePositiveSafeInteger(to, 'size limit');
     this.db.transaction(() => {
       const update = this.db.query(`UPDATE extraction_jobs SET status = CASE WHEN size_bytes > ? THEN 'skipped_too_large' ELSE 'queued' END, max_bytes_per_file = ?,
-        attempts = 0, last_error_kind = NULL, last_error_hash = NULL, next_retry_at = NULL, updated_at = ?
+        attempts = 0, last_error_hash = NULL, next_retry_at = NULL, updated_at = ?,
+        -- A job still over the new bound stays a size hold: a later replan may
+        -- forget a size learned only at fetch, and this keeps it reported.
+        last_error_kind = CASE WHEN size_bytes > ? THEN 'source_too_large' ELSE NULL END
         WHERE job_id = ? AND status = 'skipped_too_large'`);
-      for (const id of jobIds) update.run(to, to, nowIso(), id);
+      for (const id of jobIds) update.run(to, to, nowIso(), to, id);
     }).immediate();
   }
 
@@ -1687,12 +1712,10 @@ export class LocalFileExtractionJobStore {
     // its provider item id with another conversation's: its local id tells them apart.
     const inConversation = Boolean(item.providerConversationId) && item.localItemId !== undefined;
     const all = this.db.query(`
-      SELECT job_id, status, last_error_kind, policy_decision, source_version FROM extraction_jobs
+      SELECT job_id, status, last_error_kind, policy_decision, source_version, content_hash, local_item_id, size_bytes, max_bytes_per_file FROM extraction_jobs
       WHERE provider = ? AND account_scope = ? AND provider_item_id = ?${inConversation ? ' AND local_item_id = ?' : ''}
       ORDER BY updated_at DESC, job_id DESC
-    `).all(item.provider, item.accountScope, item.providerItemId, ...(inConversation ? [item.localItemId!] : [])) as Array<{
-      job_id: string; status: ExtractionJobStatus; last_error_kind: string | null; policy_decision: ExtractionPolicyDecision; source_version: string | null;
-    }>;
+    `).all(item.provider, item.accountScope, item.providerItemId, ...(inConversation ? [item.localItemId!] : [])) as (ExtractionJobSqlRow & { policy_decision: ExtractionPolicyDecision })[];
     // Only the newest version's jobs speak for the item: an older version's
     // successful read must not hide that the current one failed.
     const current = all[0]?.source_version ?? null;
@@ -1707,6 +1730,9 @@ export class LocalFileExtractionJobStore {
       WHERE a.job_id = ? AND a.warnings_json IS NOT NULL ORDER BY w.value
     `).all(row.job_id) as Array<{ warning: string }>;
     return {
+      ...(row.status === 'skipped_too_large'
+        && (row.last_error_kind === 'source_too_large' || (row.size_bytes !== null && row.max_bytes_per_file !== null && row.size_bytes > row.max_bytes_per_file))
+        ? { sizeHeldItemKey: sizeHeldItemKey({ ...item, localItemId: row.local_item_id, ...(row.source_version === null ? {} : { sourceVersion: row.source_version }), ...(row.content_hash === null ? {} : { contentHash: row.content_hash }) }) } : {}),
       status: row.status as ExtractionTerminalStatus,
       ...(row.last_error_kind ? { lastErrorKind: row.last_error_kind } : {}),
       warnings: warnings.map(row => row.warning),

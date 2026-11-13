@@ -2346,7 +2346,7 @@ function withSqliteFiles(path) {
 }
 
 // scripts/source-embedding-drain.ts
-import { createHash as createHash22 } from "node:crypto";
+import { createHash as createHash23 } from "node:crypto";
 import { existsSync as existsSync30, lstatSync as lstatSync11, mkdirSync as mkdirSync16, writeFileSync as writeFileSync6 } from "node:fs";
 import { dirname as dirname32, isAbsolute as isAbsolute15 } from "node:path";
 
@@ -19776,10 +19776,59 @@ function overrideFromJson(json) {
   return;
 }
 
+// src/core/source-size-limits.ts
+import { createHash as createHash12 } from "node:crypto";
+
+// src/core/limit-stops.ts
+var limits = new Map;
+function registerLimit(input) {
+  const prior = limits.get(input.id);
+  if (prior && Object.keys({ ...prior, ...input }).some((key2) => prior[key2] !== input[key2])) {
+    throw new Error(`Limit already registered differently: ${input.id}`);
+  }
+  limits.set(input.id, Object.freeze({ ...input }));
+}
+var stopHooks;
+var stopGenerations = new Map;
+function createLimitStopReporter() {
+  const reported = new Map;
+  return {
+    report(stop) {
+      const key2 = JSON.stringify([stop.id, stop.subject]);
+      const signature = JSON.stringify([{ ...stop, since: undefined }, stopGenerations.get(key2) ?? 0]);
+      if (stopHooks && reported.get(key2) !== signature) {
+        stopHooks.record(stop);
+        reported.set(key2, signature);
+      }
+    },
+    clear(id, subject) {
+      const key2 = JSON.stringify([id, subject]);
+      if (stopHooks && reported.get(key2) !== "") {
+        stopHooks.clear(id, subject);
+        reported.set(key2, "");
+      }
+    }
+  };
+}
+
+// src/core/source-size-limits.ts
+var SOURCE_FILE_SIZE_CEILING = 256 * 1024 * 1024;
+var SOURCE_SIZE_LIMITS = [
+  { id: "dropbox.max_file_bytes", subject: "dropbox.files", providers: ["dropbox"], defaultBytes: 8000000, ceilingBytes: SOURCE_FILE_SIZE_CEILING },
+  { id: "local_files.max_file_bytes", subject: "local.files", providers: ["local_files"], defaultBytes: 64000000, ceilingBytes: SOURCE_FILE_SIZE_CEILING },
+  { id: "telegram.media_quota", subject: "telegram.messages", providers: ["telegram", "telegram.media"], bytesOnly: true, defaultBytes: 64 * 1024 * 1024, ceilingBytes: SOURCE_FILE_SIZE_CEILING }
+];
+registerLimit({ id: "dropbox.max_file_bytes", kind: "size", scope: "extraction", label: "Dropbox file size", unit: "bytes", continue: "raise" });
+registerLimit({ id: "local_files.max_file_bytes", kind: "size", scope: "extraction", label: "Local file size", unit: "bytes", continue: "raise" });
+registerLimit({ id: "telegram.media_quota", kind: "size", scope: "extraction", label: "Telegram media read size", unit: "bytes", continue: "raise" });
+function sizeHeldItemKey(ref) {
+  return createHash12("sha256").update(JSON.stringify([ref.provider, ref.accountScope, ref.providerItemId, ref.localItemId ?? "", ref.sourceVersion ?? "", ref.contentHash ?? ""])).digest("hex");
+}
+
 // src/workers/source-index/embeddings.ts
 import { Buffer as Buffer2 } from "node:buffer";
 import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
-import { createHash as createHash12 } from "node:crypto";
+import { createHash as createHash13 } from "node:crypto";
 import { lookup as lookup2 } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
 import { isIP as isIP2 } from "node:net";
@@ -20720,7 +20769,7 @@ function normalizeOutputDimensionality(value) {
   return value;
 }
 function hashString3(value) {
-  return createHash12("sha256").update(value).digest("hex");
+  return createHash13("sha256").update(value).digest("hex");
 }
 
 // src/workers/source-index/vector-digest.ts
@@ -21389,43 +21438,11 @@ function* profileSteps(db) {
   profiles.set(db, { revision, signature, languages, detected, sampledAtMs: Date.now(), large });
   return languages;
 }
-// src/core/limit-stops.ts
-var limits = new Map;
-function registerLimit(input) {
-  const prior = limits.get(input.id);
-  if (prior && Object.keys({ ...prior, ...input }).some((key2) => prior[key2] !== input[key2])) {
-    throw new Error(`Limit already registered differently: ${input.id}`);
-  }
-  limits.set(input.id, Object.freeze({ ...input }));
-}
-var stopHooks;
-var stopGenerations = new Map;
-function createLimitStopReporter() {
-  const reported = new Map;
-  return {
-    report(stop) {
-      const key2 = JSON.stringify([stop.id, stop.subject]);
-      const signature = JSON.stringify([{ ...stop, since: undefined }, stopGenerations.get(key2) ?? 0]);
-      if (stopHooks && reported.get(key2) !== signature) {
-        stopHooks.record(stop);
-        reported.set(key2, signature);
-      }
-    },
-    clear(id, subject) {
-      const key2 = JSON.stringify([id, subject]);
-      if (stopHooks && reported.get(key2) !== "") {
-        stopHooks.clear(id, subject);
-        reported.set(key2, "");
-      }
-    }
-  };
-}
-
 // src/workers/classification/judge-spending.ts
 import { existsSync as existsSync19, readFileSync as readFileSync20 } from "node:fs";
 
 // src/workers/classification/sniffer.ts
-import { createHash as createHash14 } from "node:crypto";
+import { createHash as createHash15 } from "node:crypto";
 
 // src/workers/source-index/built-in-reasoning/manifest.ts
 var GIB = 1024 ** 3;
@@ -21559,15 +21576,15 @@ var SCORER_SYSTEM_PROMPT = [
 
 // src/workers/classification/sniffer-store.ts
 import { Database as Database4 } from "bun:sqlite";
-import { createHash as createHash13 } from "node:crypto";
+import { createHash as createHash14 } from "node:crypto";
 import { chmodSync as chmodSync5, existsSync as existsSync18, mkdirSync as mkdirSync12 } from "node:fs";
 import { dirname as dirname21 } from "node:path";
 function snifferMaterialHash(pass, material) {
-  return createHash13("sha256").update(`${pass}
+  return createHash14("sha256").update(`${pass}
 ${material}`).digest("hex");
 }
 function snifferSubjectKey(subject) {
-  return createHash13("sha256").update(JSON.stringify([subject.provider, subject.accountScope, subject.providerConversationId ?? "", subject.providerItemId])).digest("hex");
+  return createHash14("sha256").update(JSON.stringify([subject.provider, subject.accountScope, subject.providerConversationId ?? "", subject.providerItemId])).digest("hex");
 }
 class TierSnifferStore {
   dbPath;
@@ -22163,8 +22180,8 @@ function boundedOwnerContext(ownerContext) {
   const trimmed = ownerContext?.replace(/\s+/g, " ").trim();
   return trimmed ? trimmed.slice(0, SNIFFER_OWNER_CONTEXT_MAX_CHARS) : undefined;
 }
-var SNIFFER_PROMPT_VERSION = `p-${createHash14("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
-var SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash14("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
+var SNIFFER_PROMPT_VERSION = `p-${createHash15("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
+var SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash15("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
 // src/workers/classification/judge-spending.ts
 registerLimit({ id: "judge.spend_cap", kind: "cost", scope: "judge", label: "Privacy judge spending cap reached", unit: "usd", continue: "raise" });
 registerLimit({ id: "judge.payment", kind: "funding", scope: "judge", label: "Privacy judge provider refused payment (402)", unit: "usd", continue: "refill" });
@@ -22919,13 +22936,13 @@ function hasImmutableAccountLabel(id) {
 }
 
 // src/workers/connector-store/local-index.ts
-import { createHash as createHash16, randomUUID as randomUUID10 } from "node:crypto";
+import { createHash as createHash17, randomUUID as randomUUID10 } from "node:crypto";
 import { existsSync as existsSync25, lstatSync as lstatSync10, mkdirSync as mkdirSync15, statSync as statSync14, statfsSync as statfsSync2 } from "node:fs";
 import { dirname as dirname27 } from "node:path";
 import { Database as Database6 } from "bun:sqlite";
 
 // src/core/media-cache.ts
-import { createHash as createHash15, randomUUID as randomUUID9 } from "node:crypto";
+import { createHash as createHash16, randomUUID as randomUUID9 } from "node:crypto";
 import {
   chmodSync as chmodSync6,
   closeSync as closeSync10,
@@ -23422,7 +23439,7 @@ function refsDir(path) {
   return join23(dirname23(path), `${basename5(path)}.refs`);
 }
 function holderDigest(name) {
-  return createHash15("sha256").update(name).digest("hex").slice(0, 32);
+  return createHash16("sha256").update(name).digest("hex").slice(0, 32);
 }
 function holderName(holder) {
   const digest = holderDigest(mediaHolderName(holder));
@@ -29762,7 +29779,7 @@ ${parentKey(ref)}`, { ref, origin });
         embeddingsComplete: false
       };
     }
-    const chunkTextCoherent = chunkRows.every((chunk) => createHash16("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
+    const chunkTextCoherent = chunkRows.every((chunk) => createHash17("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
     if (!chunkTextCoherent) {
       return {
         chunksIndexed: 0,
@@ -30672,8 +30689,8 @@ ${parentKey(ref)}`, { ref, origin });
       itemsUnchanged: 0,
       itemsMissing: 0
     };
-    const inputDigest = createHash16("sha256");
-    const outputDigest = createHash16("sha256");
+    const inputDigest = createHash17("sha256");
+    const outputDigest = createHash17("sha256");
     const select = this.db.query(`
       SELECT item_pk, sender_id, sender_label, sender_is_owner
       FROM items
@@ -30750,8 +30767,8 @@ ${parentKey(ref)}`, { ref, origin });
       ftsRowsRefreshed: 0,
       chunkEmbeddingInputsInvalidated: 0
     };
-    const inputDigest = createHash16("sha256");
-    const outputDigest = createHash16("sha256");
+    const inputDigest = createHash17("sha256");
+    const outputDigest = createHash17("sha256");
     let lastItemPk = startAfter;
     let hasMore = false;
     while (maxItems === undefined || counts.itemsScanned < maxItems) {
@@ -33804,6 +33821,18 @@ ${parentKey(ref)}`, { ref, origin });
     this.extractionOutcome = probe2;
     this.settledUnreadableCountMemo = undefined;
   }
+  itemHeldForSize(localItemId) {
+    if (!this.extractionOutcome)
+      return false;
+    const active = this.activeLocalItemRow(localItemId);
+    if (!active)
+      return false;
+    const identity = { ...active.identity, family: this.family, localItemId };
+    const metadata = this.itemMetadataSnapshot(identity);
+    if (!metadata)
+      return false;
+    return this.extractionOutcome(identity, localItemId)?.sizeHeldItemKey === sizeHeldItemKey({ ...identity, ...metadata });
+  }
   unreadHoldCounts(rows) {
     return {
       count: rows.filter((item) => item.disposition.kind === "cannot_read").length,
@@ -34503,7 +34532,7 @@ function connectorStoreEmbeddingSelectionSha256(localItemIds) {
   return hashString4(JSON.stringify(normalized ? [...normalized].sort() : null));
 }
 function connectorStoreEmbeddingInputSha256(rows) {
-  const digest = createHash16("sha256");
+  const digest = createHash17("sha256");
   for (const row of rows)
     digest.update(`${row.chunk_pk}\x00${row.content_hash}
 `);
@@ -34631,7 +34660,7 @@ function namesOnlyKeptCount(n) {
   return n > 0 ? { namesOnlyKeptChunks: n } : {};
 }
 function migrationFingerprint(contentHash, chunkHashes) {
-  return createHash16("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
+  return createHash17("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
 }
 function carryHold(listed, fetched) {
   return listed.holdContentUntilJudged === true && fetched.holdContentUntilJudged !== true ? { ...fetched, holdContentUntilJudged: true } : fetched;
@@ -36357,7 +36386,7 @@ function requireNonEmpty(value, label) {
   return text2;
 }
 function hashString4(value) {
-  return createHash16("sha256").update(value).digest("hex");
+  return createHash17("sha256").update(value).digest("hex");
 }
 function errorMessage2(error) {
   return error instanceof Error ? error.message : String(error);
@@ -36505,7 +36534,7 @@ var EMBEDDING_LEDGER_BACKFILL = PUBLIC_RUNTIME_BUILD ? [] : [
 var RECLAIM_MAX_RETAINED_FREE_BYTES = 64 * 1024 * 1024;
 
 // src/workers/source-index/built-in-embedding/provider.ts
-import { createHash as createHash17 } from "node:crypto";
+import { createHash as createHash18 } from "node:crypto";
 import { readFileSync as readFileSync23 } from "node:fs";
 import { availableParallelism } from "node:os";
 import { dirname as dirname29, join as join28 } from "node:path";
@@ -37192,7 +37221,7 @@ class BuiltInSourceEmbeddingProvider {
       backend: this.backend,
       ...options.epochId ? { epochOverride: options.epochId } : {}
     });
-    this.configHash = createHash17("sha256").update(JSON.stringify({
+    this.configHash = createHash18("sha256").update(JSON.stringify({
       provider: this.provider,
       model: this.modelId,
       repository: this.spec.repository,
@@ -37713,7 +37742,7 @@ var LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60000;
 // src/workers/google-connectors/gmail-live-sync.ts
 var GMAIL_SCOPED_CONNECTOR_PREFIX = `${GMAIL_PROVIDER}.scope.`;
 // src/workers/google-connectors/drive.ts
-import { createHash as createHash18 } from "node:crypto";
+import { createHash as createHash19 } from "node:crypto";
 var GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = "internal.drive.docs";
 var GOOGLE_DRIVE_PROVIDER = "google_drive";
 var DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200;
@@ -38310,7 +38339,7 @@ function safeProviderDetail2(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString5(value) {
-  return createHash18("sha256").update(value).digest("hex");
+  return createHash19("sha256").update(value).digest("hex");
 }
 // src/workers/google-connectors/drive-live-control.ts
 var GOOGLE_DRIVE_STORE_PULL_INTERVAL_MS = 30 * 60000;
@@ -38618,18 +38647,7 @@ async function errorFromResponse(response, context2) {
 }
 
 // src/workers/source-scheduler.ts
-import { createHash as createHash20 } from "node:crypto";
-
-// src/core/source-size-limits.ts
-var SOURCE_FILE_SIZE_CEILING = 256 * 1024 * 1024;
-var SOURCE_SIZE_LIMITS = [
-  { id: "dropbox.max_file_bytes", subject: "dropbox.files", providers: ["dropbox"], defaultBytes: 8000000, ceilingBytes: SOURCE_FILE_SIZE_CEILING },
-  { id: "local_files.max_file_bytes", subject: "local.files", providers: ["local_files"], defaultBytes: 64000000, ceilingBytes: SOURCE_FILE_SIZE_CEILING },
-  { id: "telegram.media_quota", subject: "telegram.messages", providers: ["telegram", "telegram.media"], bytesOnly: true, defaultBytes: 64 * 1024 * 1024, ceilingBytes: SOURCE_FILE_SIZE_CEILING }
-];
-registerLimit({ id: "dropbox.max_file_bytes", kind: "size", scope: "extraction", label: "Dropbox file size", unit: "bytes", continue: "raise" });
-registerLimit({ id: "local_files.max_file_bytes", kind: "size", scope: "extraction", label: "Local file size", unit: "bytes", continue: "raise" });
-registerLimit({ id: "telegram.media_quota", kind: "size", scope: "extraction", label: "Telegram media read size", unit: "bytes", continue: "raise" });
+import { createHash as createHash21 } from "node:crypto";
 
 // src/core/file-mime.ts
 var MIME_BY_EXTENSION = Object.freeze({
@@ -39020,15 +39038,15 @@ function optionalEnvironmentString(value) {
   return trimmed || undefined;
 }
 // src/workers/dropbox-files/dropbox-content-hash.ts
-import { createHash as createHash19 } from "node:crypto";
+import { createHash as createHash20 } from "node:crypto";
 var DROPBOX_CONTENT_HASH_BLOCK_SIZE = 4 * 1024 * 1024;
 function computeDropboxContentHash(bytes) {
   const blockDigests = [];
   for (let offset = 0;offset < bytes.byteLength; offset += DROPBOX_CONTENT_HASH_BLOCK_SIZE) {
     const block = bytes.subarray(offset, Math.min(offset + DROPBOX_CONTENT_HASH_BLOCK_SIZE, bytes.byteLength));
-    blockDigests.push(createHash19("sha256").update(block).digest());
+    blockDigests.push(createHash20("sha256").update(block).digest());
   }
-  return createHash19("sha256").update(Buffer.concat(blockDigests)).digest("hex");
+  return createHash20("sha256").update(Buffer.concat(blockDigests)).digest("hex");
 }
 // src/workers/file-extraction/extractors/command-runner.ts
 var resolvedCommands = new Map;
@@ -42660,7 +42678,7 @@ function normalizeRetryAt(retryAt, completedAt) {
   };
 }
 function hash(value) {
-  return createHash20("sha256").update(value).digest("hex").slice(0, 16);
+  return createHash21("sha256").update(value).digest("hex").slice(0, 16);
 }
 var HONEST_SCHEDULER_ERROR_KINDS = new Set([
   "api_request_guard",
@@ -42845,7 +42863,7 @@ import { statSync as statSync16 } from "node:fs";
 // src/core/this-computer.ts
 import { spawnSync as spawnSync3 } from "node:child_process";
 import { existsSync as existsSync29, readFileSync as readFileSync25 } from "node:fs";
-import { createHash as createHash21, randomUUID as randomUUID11 } from "node:crypto";
+import { createHash as createHash22, randomUUID as randomUUID11 } from "node:crypto";
 import { dirname as dirname31, join as join31 } from "node:path";
 var MACHINE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 var cachedSystemHostIdentity;
@@ -42875,7 +42893,7 @@ var systemHostIdentity = () => {
 };
 function hostBinding(machineId, hostIdentity) {
   const identity = hostIdentity();
-  return identity ? createHash21("sha256").update(`${machineId}:${identity}`).digest("hex") : undefined;
+  return identity ? createHash22("sha256").update(`${machineId}:${identity}`).digest("hex") : undefined;
 }
 function readStateForHost(path, hostIdentity) {
   const state = readState3(path);
@@ -44046,7 +44064,7 @@ async function runSourceEmbeddingDrain(options) {
         }
       }
       consecutiveFailures = Math.max(...laneConsecutiveFailures);
-      scopeReport.errors.push(createHash22("sha256").update(message2).digest("hex"));
+      scopeReport.errors.push(createHash23("sha256").update(message2).digest("hex"));
       consecutiveIdleScopeChecks = 0;
       emitProgress();
       if (!isolatedLanes[item.laneIndex] && errorBackoffMs > 0) {
@@ -44376,7 +44394,7 @@ function normalizeOptionalList(values) {
   return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
 }
 function hashScope(scope) {
-  return createHash22("sha256").update(scope).digest("hex").slice(0, 16);
+  return createHash23("sha256").update(scope).digest("hex").slice(0, 16);
 }
 function sum(items, value) {
   return items.reduce((total, item) => total + value(item), 0);

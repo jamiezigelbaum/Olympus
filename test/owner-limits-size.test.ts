@@ -1,5 +1,11 @@
 import { afterAll, beforeEach, expect, test } from 'bun:test';
-import { readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
+import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
+import { LocalConnectorStore, createConnectorStoreContentProvider } from '../src/workers/connector-store/index.ts';
+import { createFileExtractionRuntime } from '../src/workers/engine/runtime/file-extraction-runtime.ts';
 import { FileExtractionSourceError } from '../src/core/file-extraction-source.ts';
 import { ownerLimits } from '../src/core/owner-limits.ts';
 import { ownerLimitSettingsPath, saveOwnerLimitOverride } from '../src/core/owner-limit-settings.ts';
@@ -26,6 +32,7 @@ const corpora = ['internal.dropbox.files', 'internal.local.files', 'internal.tel
 let jobs = new LocalFileExtractionJobStore(defaultFileExtractionJobsDbPath());
 withOwnerLimitStore(() => {});
 beforeEach(() => {
+  jobs.setSizeHoldCurrentItems(refs => refs.map(() => true));
   forgetExtractionJobs(defaultFileExtractionJobsDbPath(), { corpusIds: corpora });
   rmSync(ownerLimitSettingsPath(), { force: true });
   for (const stop of stops()) clearOwnerLimitStop(stop.id, stop.subject);
@@ -66,7 +73,10 @@ function fixture(policy: SourceSizeLimit, unknownSize = false) {
       sourceItem: { family: 'file', provider: lane.provider, accountScope: lane.accountScope, providerItemId: refs[0]!.providerItemId, localItemId: refs[0]!.localItemId },
       provenance: { sourceItem: { family: 'file', provider: lane.provider, accountScope: lane.accountScope, providerItemId: refs[0]!.providerItemId, localItemId: refs[0]!.localItemId }, citation: { title: refs[0]!.name! } },
       score: 1, rawExposed: false,
-    }] : [], latencyMs: 0, rawExposed: false }) }, contentProviders: {}, limitStops: stops(),
+    }] : [], latencyMs: 0, rawExposed: false }) }, contentProviders: { [corpusId]: {
+      async fetchLocalContent() { return { chunks: [], sizeHeld: jobs.itemExtractionOutcome(refs[0]!)?.sizeHeldItemKey === sizeHeldItemKey(refs[0]!),
+        sensitivity: buildSourceSensitivity({ trustTier: 'S2', trustDomain: 'internal' }) }; },
+    } }, limitStops: stops(),
   })).coverage;
   return { lane, runner, coverage, refs: () => refs, fetched: () => fetched, extracted: () => extracted,
     addItem() { refs = [...refs, { ...refs[0]!, providerItemId: 'future', localItemId: 'future', sourceVersion: 'v2' }]; } };
@@ -129,6 +139,25 @@ for (const policy of SOURCE_SIZE_LIMITS) {
     jobs.enqueue({ refs: f.refs(), extractorKind: 'local_text', extractorVersion: '1', maxBytesPerFile: policy.ceilingBytes });
     await f.runner.run({ ...f.lane, limit: 10, reclassify: false });
     expect(stops()).toMatchObject([{ id: policy.id, limit: policy.defaultBytes, used: policy.defaultBytes + 2, waiting: { items: 2 } }]);
+    await ownerLimits({ action: 'continue', id: policy.id, to: policy.defaultBytes + 2 }, { now: time.date, extractionJobs: () => jobs });
+    await f.runner.run({ ...f.lane, limit: 10, reclassify: false });
+    expect(f.extracted()).toBe(2);
+    expect(stops()).toEqual([]);
+  });
+
+  test(`${policy.id}: a size learned at fetch stays held after a partial Raise and a replan`, async () => {
+    const f = fixture(policy, true);
+    await f.runner.plan({ ...f.lane, limit: 10 });
+    await f.runner.run({ ...f.lane, limit: 10, reclassify: false });
+    expect(stops()).toMatchObject([{ id: policy.id, used: policy.defaultBytes + 2, waiting: { items: 2 } }]);
+    // Below the discovered size: both files stay held, and a replan from a
+    // listing without sizes must not drop them from the stop.
+    await ownerLimits({ action: 'continue', id: policy.id, to: policy.defaultBytes + 1 }, { now: time.date, extractionJobs: () => jobs });
+    await f.runner.plan({ ...f.lane, limit: 10 });
+    await f.runner.run({ ...f.lane, limit: 10, reclassify: false });
+    expect(f.extracted()).toBe(0);
+    expect(jobs.sizeHeldJobs(policy.providers)).toHaveLength(2);
+    expect(stops()).toMatchObject([{ id: policy.id, waiting: { items: 2 } }]);
     await ownerLimits({ action: 'continue', id: policy.id, to: policy.defaultBytes + 2 }, { now: time.date, extractionJobs: () => jobs });
     await f.runner.run({ ...f.lane, limit: 10, reclassify: false });
     expect(f.extracted()).toBe(2);
@@ -238,3 +267,63 @@ test('Raise from a read-only queue (the split front) saves the grant; the runner
   expect(f.extracted()).toBe(2);
   expect(stops()).toEqual([]);
 });
+
+for (const readOnly of [false, true]) {
+  for (const change of ['deleted', 'scope revoked', 'version changed'] as const) {
+    test(`${change} (${readOnly ? 'front' : 'background'}): live fence reports one hold and Raise grants only that version`, async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'size-hold-store-'));
+      const policy = SOURCE_SIZE_LIMITS[0]!;
+      const corpusId = corpora[0]!;
+      const store = new LocalConnectorStore({ dbPath: join(dir, 'store.sqlite'), corpusId, family: 'file', trustDomain: 'internal' });
+      let runtime: ReturnType<typeof createFileExtractionRuntime>;
+      let front: ReturnType<typeof createFileExtractionRuntime>;
+      const items: RawItem[] = [1, 2].map(n => ({
+        identity: { family: 'file', provider: 'dropbox', accountScope: 'personal', providerItemId: `file-${n}`, localItemId: `file-${n}`, sourceVersion: 'v1' },
+        mimeType: 'text/plain', content: { kind: 'metadata_only' }, metadata: { title: `held-title-${n}`, sizeBytes: policy.defaultBytes + n }, fetchedAt: time.date().toISOString(),
+      }));
+      const connector: SourceConnector = { id: 'size-fixture', family: 'file', async authenticate() {},
+        async *listItems() { yield { items, done: true }; }, async fetchItem() { throw new Error('No inline fetch'); }, classificationSignals() { return {}; } };
+      const sync = () => store.syncFromConnector(connector, { fetchContent: false, placement: { trustTier: 'S2', trustDomain: 'internal' } });
+      try {
+        await sync();
+        let revoked = false;
+        const buildRuntime = (readOnly = false) => createFileExtractionRuntime({ enabled: true, readOnly, connectorStores: [store],
+          jobsDbPath: join(dir, 'jobs.sqlite'), env: { OLYMPUS_DATA_DIR: dir },
+          corpora: [{ corpusId, provider: 'dropbox', scopes: ['approved'] }],
+          scopeGuard: { assertAuthorized() {}, allowsRef: ({ ref }) => !(revoked && ref.localItemId === items[0]!.identity.localItemId) },
+          sourceFactories: new Map([['dropbox', () => ({ id: 'size-fixture', corpusId, provider: 'dropbox',
+            async listCandidates() { return { candidates: [], done: true }; }, async fetch() { throw new Error('No fetch'); } })]]),
+        });
+        runtime = buildRuntime();
+        const queue = runtime!.jobs;
+        const refs = items.map(item => ({ ...item.identity, ...store.itemMetadataSnapshot(item.identity), corpusId, approvedScopeKey: 'approved' }));
+        queue.enqueue({ refs, extractorKind: 'local_text', extractorVersion: '1', maxBytesPerFile: policy.defaultBytes });
+        store.setExtractionOutcomeProbe((identity, localItemId) => queue.itemExtractionOutcome({ ...identity, localItemId }));
+        const provider = createConnectorStoreContentProvider({ store });
+        const block = () => provider.fetchLocalContent({ provenance: { sourceItem: items[0]!.identity }, trustDomain: 'internal' });
+        expect((await block())?.sizeHeld).toBe(true);
+        if (change === 'version changed') {
+          items[0] = { ...items[0]!, identity: { ...items[0]!.identity, sourceVersion: 'v2' } };
+          await sync();
+          expect((await block())?.sizeHeld).toBeUndefined();
+        } else if (change === 'deleted') {
+          store.tombstoneCopy(items[0]!.identity, { connectorId: connector.id });
+        } else revoked = true;
+        refreshSourceSizeStop(queue, policy, time.date());
+        expect(stops()).toMatchObject([{ waiting: { items: 1 } }]);
+        if (readOnly) front = buildRuntime(true);
+        await ownerLimits({ action: 'continue', id: policy.id, to: policy.defaultBytes + 2 }, { now: time.date, extractionJobs: () => front?.jobs ?? queue });
+        resumeGrantedSizeHeld(queue, policy, time.date());
+        refreshSourceSizeStop(queue, policy, time.date());
+        expect(sourceSizeBytes(policy, refs[0], time.date())).toBe(policy.defaultBytes);
+        expect(sourceSizeBytes(policy, refs[1], time.date())).toBe(policy.defaultBytes + 2);
+        expect(stops()).toEqual([]);
+        // Restart continuation also leaves the obsolete job's terminal history alone.
+        saveOwnerLimitOverride(policy.id, policy.defaultBytes + 2, false, time.date(), undefined, [sizeHeldItemKey(refs[0]!)]);
+        resumeGrantedSizeHeld(queue, policy, time.date());
+        queue.setSizeHoldCurrentItems(refs => refs.map(() => true));
+        expect(queue.sizeHeldJobs(policy.providers).map(job => job.ref.localItemId)).toEqual([refs[0]!.localItemId]);
+      } finally { front?.close(); runtime?.close(); store.close(); rmSync(dir, { recursive: true, force: true }); }
+    });
+  }
+}
