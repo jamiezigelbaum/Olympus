@@ -57,8 +57,8 @@ export interface ScaleObservation {
   boundS?: number;
   drained: boolean;
   held?: number | undefined;
-  repeat?: { already: boolean; added: number | null };
-  renamed?: { already: boolean; added: number | null };
+  repeat?: { already: boolean; added: number | null; state?: string };
+  renamed?: { already: boolean; added: number | null; state?: string };
   removed: boolean;
   traces: JourneyTrace[];
   measurement: ArchiveScaleMeasurement;
@@ -104,7 +104,8 @@ const panelRow = async (driver: JourneyDriver, name: string): Promise<RowView | 
 /** Parse a total shown on the row, never substitute the agent's count for a missing UI count. */
 export function scaleRowCount(row: Pick<RowView, 'text'> | undefined): number | null {
   if (!row || row.text.includes('Counting')) return null;
-  const found = /\b([\d,]+) (?:messages?|notes?|items?)\b/.exec(row.text);
+  // The row's text runs a date range straight into the count ("…2024-12-313,000 notes"); drop dates first.
+  const found = /\b([\d,]+) (?:messages?|notes?|items?)\b/.exec(row.text.replace(/\d{4}-\d{2}-\d{2}/g, ' '));
   if (found) return Number(found[1]!.replaceAll(',', ''));
   if (/\bno (?:messages|notes|items)\b/.test(row.text)) return 0;
   return null;
@@ -124,7 +125,7 @@ async function approve(host: ScaleHost, driver: JourneyDriver, fx: LegFixture, p
   return start.requestId;
 }
 
-async function repeatImport(host: ScaleHost, driver: JourneyDriver, fx: LegFixture, path: string, obs: ScaleObservation, boundS: number): Promise<{ already: boolean; added: number | null }> {
+async function repeatImport(host: ScaleHost, driver: JourneyDriver, fx: LegFixture, path: string, obs: ScaleObservation, boundS: number): Promise<{ already: boolean; added: number | null; state?: string }> {
   const before = await host.scaleCli(['status']);
   const previous = statusViewOf(before.json, fx.token);
   if (before.code !== 0 || !previous.ok || previous.archives.some(a => a.messages === undefined)) throw new Error('cannot count archives before re-import');
@@ -133,10 +134,14 @@ async function repeatImport(host: ScaleHost, driver: JourneyDriver, fx: LegFixtu
   const deadline = host.now() + boundS * 1_000;
   let already = false;
   let after: ReturnType<typeof statusViewOf> | undefined;
+  // The request's last state (and its note when not imported) say why a repeat did not read as already imported.
+  let last: string | undefined;
   for (;;) {
     const answer = await host.scaleCli(['status']);
-    const raw = answer.json as { requests?: Array<{ request_id: string; state: string }> } | undefined;
-    const state = raw?.requests?.find(r => r.request_id === requestId)?.state;
+    const raw = answer.json as { requests?: Array<{ request_id: string; state: string; note?: string }> } | undefined;
+    const request = raw?.requests?.find(r => r.request_id === requestId);
+    const state = request?.state;
+    last = state ? (state === 'not_imported' && request?.note ? `${state}: ${request.note}` : state) : 'request gone';
     if (answer.code === 0) {
       after = statusViewOf(answer.json, fx.token);
       already = state === 'already_imported';
@@ -145,7 +150,7 @@ async function repeatImport(host: ScaleHost, driver: JourneyDriver, fx: LegFixtu
     if (host.now() >= deadline) break;
     await host.sleep(2_000);
   }
-  return { already, added: after?.ok && after.archives.every(a => a.messages !== undefined) ? after.archives.reduce((sum, a) => sum + a.messages!, 0) - count : null };
+  return { already, added: after?.ok && after.archives.every(a => a.messages !== undefined) ? after.archives.reduce((sum, a) => sum + a.messages!, 0) - count : null, ...(already ? {} : { state: last }) };
 }
 
 export async function scaleArchiveStage(host: ScaleHost, format: Exclude<ScaleFormat, 'readwise'>, seed: string, bounds: { importS?: number; repeatS?: number; removeS?: number } = {}): Promise<ScaleObservation> {
