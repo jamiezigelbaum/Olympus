@@ -4764,7 +4764,12 @@ export async function main(): Promise<void> {
         const response = await workerFetchInProcess(new Request('http://olympus-worker.internal/dashboard/sync-now', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source: limitRunOnceSource(subject) }),
         }));
-        return await response.json();
+        const body = await response.json() as { error?: { code?: unknown; message?: unknown } };
+        // A refusal (stopping, scope not approved, no lane) is the route's own words, never a success.
+        if (!response.ok) {
+          throw new OperationError('invalid_request', typeof body.error?.message === 'string' ? body.error.message : `The sync could not start (${response.status}).`);
+        }
+        return body;
       },
       credit: { env: { ...process.env, ...olympusConfig.worker.creditMonitor.credentials } },
       wake: () => tierSniffer?.wake(),

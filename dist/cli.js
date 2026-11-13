@@ -3118,7 +3118,6 @@ var init_public_surface = __esm(() => {
   ];
   V0_4_PUBLIC_CLI_COMMANDS = [
     "limits",
-    "limits continue",
     "setup",
     "sovereignty init",
     "worker install",
@@ -249214,7 +249213,11 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ source: limitRunOnceSource(subject) })
         }));
-        return await response.json();
+        const body = await response.json();
+        if (!response.ok) {
+          throw new OperationError("invalid_request", typeof body.error?.message === "string" ? body.error.message : `The sync could not start (${response.status}).`);
+        }
+        return body;
       },
       credit: { env: { ...process.env, ...olympusConfig.worker.creditMonitor.credentials } },
       wake: () => tierSniffer?.wake()

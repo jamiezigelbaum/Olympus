@@ -162,7 +162,6 @@ export const V0_4_PUBLIC_SOURCE_IDS = [
 
 export const V0_4_PUBLIC_CLI_COMMANDS = [
   'limits',
-  'limits continue',
   'setup',
   'sovereignty init',
   'worker install',

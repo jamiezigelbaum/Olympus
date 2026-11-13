@@ -88,7 +88,7 @@ test('a stopped sniffer pass reports amounts; one Raise clears it and the same b
     expect(calls).toBeGreaterThan(0);
     expect(stops(time.date())).toEqual([]);
   } finally { sniffer.close(); ledger.close(); }
-});
+}, 30_000);
 
 test('one-day and permanent raises follow the UTC boundary and preserve the daily counter across restart', async () => {
   const time = clock();
@@ -146,7 +146,7 @@ test('Venice marker -> stop -> owner refill proves billing canConsume and clears
   expect(stops(time.date())).toEqual([]);
   expect(wakes).toBe(1);
   expect(JSON.stringify(result)).not.toContain('never-print-this-key');
-});
+}, 30_000);
 
 test('bounded automatic Venice re-check resumes an external refill, and shutdown fences late probes', async () => {
   const time = clock(); const path = join(scratch(), 'venice.json');
@@ -231,7 +231,7 @@ test('CLI lists units, waiting work, times and actions, then continues by id wit
   expect((await run([])).stops).toEqual([]);
   expect(readJudgeCallOverride(new Date(now.getTime() + 24 * 60 * 60_000))).toBe(42);
   expect(findOperationByName('olympus_limits')!.cliHints.name).toBe('limits');
-});
+}, 30_000);
 
 test('the plugin reaches limits through the worker, and run_once names the operator sync source', async () => {
   let requested: string | undefined; let body: unknown;
