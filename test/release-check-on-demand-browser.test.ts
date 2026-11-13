@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { Database } from 'bun:sqlite';
 import { createTestClock } from './helpers/test-clock.ts';
 import { browserSeedPlan, browserTimingSeeds, parseTimingSeedConfig, ON_DEMAND_FOLDER, type BrowserSeedUi, type TimingFile } from '../scripts/release-check/on-demand-seeds.ts';
-import { providerListingExpression, driveFolderSearchUrl, DRIVE_SEARCH_SETTLED, providerClickExpression } from '../scripts/release-check/on-demand-browser.ts';
+import { providerListingExpression, driveFolderSearchUrl, DRIVE_SEARCH_SETTLED, providerClickExpression, driveFolderRowExpression } from '../scripts/release-check/on-demand-browser.ts';
 import { validateCanaryTimingMode, parseCanaryAccounts, renderCanaryHtml, type CanaryReport } from '../scripts/release-check/canary.ts';
 import { runFreshOnDemand } from '../scripts/release-check/fresh-on-demand.ts';
 import { enableTimingSplit, resolveTimingFile } from '../scripts/release-check/on-demand-probe.ts';
@@ -129,6 +129,22 @@ describe('fresh read-on-demand without write tokens', () => {
       expect(run(['Upload'])).toBe(false);
       folder.setAttribute('aria-disabled', 'true');
       expect(run(['New folder'])).toBe(false);
+    } finally { await window.happyDOM.close(); }
+  });
+
+  test('Drive seed folder row is found by its visible name, opened once, and refused when not unique', async () => {
+    const window = new Window();
+    try {
+      const run = () => new Function('document', 'window', 'MouseEvent', `return ${driveFolderRowExpression(ON_DEMAND_FOLDER)}`)(window.document, window, window.MouseEvent);
+      window.document.body.innerHTML = `<div role="grid"><div role="row"><div><span>Other folder</span></div></div></div>`;
+      expect(run()).toBe('none');
+      window.document.body.innerHTML = `<div role="grid"><div role="row" id="seed"><div><span>${ON_DEMAND_FOLDER}</span><span>me</span></div></div><div role="row"><span>${ON_DEMAND_FOLDER} copy</span></div></div>`;
+      let opened = 0;
+      window.document.getElementById('seed')!.addEventListener('dblclick', () => opened++);
+      expect(run()).toBe('opened');
+      expect(opened).toBe(1);
+      window.document.querySelector('[role=grid]')!.append(window.document.getElementById('seed')!.cloneNode(true));
+      expect(run()).toBe('many');
     } finally { await window.happyDOM.close(); }
   });
 

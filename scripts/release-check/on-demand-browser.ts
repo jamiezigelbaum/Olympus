@@ -57,6 +57,12 @@ export function providerClickExpression(labels: readonly string[]): string {
 /** Visible menu item names, for a failure message: provider UI labels only, never file names. */
 const PROVIDER_CONTROL_NAMES = `[...document.querySelectorAll('[role=menuitem]')].filter(${visible}).map(e => (${CONTROL_NAMES})(e).at(-1)).slice(0, 20)`;
 
+/** Open the one row named `name` (by tooltip, label, or its visible text, as the listing reads names).
+ * Returns 'none' while it is not listed and 'many' when the name is not unique. */
+export function driveFolderRowExpression(name: string): string {
+  return `(() => {const name=${JSON.stringify(name)};const rows=[...document.querySelectorAll('[role=row]')].filter(row=>[row,...row.querySelectorAll('*')].some(e=>[e.getAttribute('data-tooltip'),e.getAttribute('aria-label'),e.getAttribute('data-filename'),e.children.length?null:e.textContent?.trim()].includes(name)));if(rows.length>1)return 'many';if(!rows.length)return 'none';rows[0].dispatchEvent(new MouseEvent('dblclick',{bubbles:true,view:window}));return 'opened';})()`;
+}
+
 export async function openBrowserTimingSeeds(machine: Machine, endpoint: string, sources: readonly TimingSource[] = ['dropbox', 'google_drive']) {
   const { host, port } = parseCdpEndpoint(endpoint);
   let tunnel: Tunnel | undefined;
@@ -153,6 +159,14 @@ export async function openBrowserTimingSeeds(machine: Machine, endpoint: string,
         await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 }, session);
       }
     };
+    const openDriveFolderRow = async (session: string, name: string, ms: number) => {
+      const deadline = Date.now() + ms;
+      for (;;) {
+        const found = await evaluate<'none' | 'many' | 'opened'>(session, driveFolderRowExpression(name));
+        if (found !== 'none' || Date.now() >= deadline) return found;
+        await delay(1000);
+      }
+    };
     const driveSearch = async (session: string, name: string) => {
       await send('Page.navigate', { url: driveFolderSearchUrl(name) }, session);
       try {
@@ -199,7 +213,13 @@ export async function openBrowserTimingSeeds(machine: Machine, endpoint: string,
           }
         }
         if (source === 'google_drive') {
-          await until(() => evaluate(tab.session, `(() => {const rows=[...document.querySelectorAll('[role=row]')].filter(e=>[...e.querySelectorAll('[data-tooltip],[aria-label]')].some(c=>(c.getAttribute('data-tooltip')||c.getAttribute('aria-label'))===${JSON.stringify(name)}));if(rows.length>1)throw Error('duplicate seed folders');if(rows.length!==1)return false;rows[0].dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));return true;})()`), 'Drive seed folder unavailable or ambiguous');
+          // A folder made a moment ago may not be in Drive's search index yet; My Drive lists it at once.
+          let opened = await openDriveFolderRow(tab.session, name, 60_000);
+          if (opened === 'none') {
+            await send('Page.navigate', { url: 'https://drive.google.com/drive/u/0/my-drive' }, tab.session);
+            opened = await openDriveFolderRow(tab.session, name, 90_000);
+          }
+          if (opened !== 'opened') throw new Error(opened === 'many' ? 'duplicate Drive seed folders' : 'Drive seed folder not listed in search or My Drive');
           await until(() => evaluate(tab.session, `location.pathname.includes('/folders/') && !!document.querySelector('[role=grid]')`), 'Drive seed folder did not open');
         } else {
           await send('Page.navigate', { url: `https://www.dropbox.com/home/${encodeURIComponent(name)}` }, tab.session);
