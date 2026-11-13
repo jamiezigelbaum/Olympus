@@ -69,6 +69,9 @@ class ProofSet extends TieredStoreSet {
   override sweepOrphanedChildren() { return Promise.resolve({ removed: 0, retry: 0 }); }
 }
 
+let stage = 'setup';
+const OWN_ERRORS = new Set(['200 items required', 'Ambiguous tier domain', 'Configured local judge required', 'Copy boundary', 'Explicit copies required', 'Invalid held count', 'Invalid result shape', 'Judge not approved', 'Judge not ready', 'Judge unavailable', 'Local judge required', 'Sample not mounted', 'Unknown release chunk']);
+
 export async function main(argv = process.argv.slice(2)) {
   const flag = (name: string) => { const i = argv.indexOf(name); return i < 0 ? undefined : argv[i + 1]; };
   const rootArg = flag('--root'), homeArg = flag('--home');
@@ -116,6 +119,7 @@ export async function main(argv = process.argv.slice(2)) {
     if (!base) throw new Error('Judge unavailable');
     const model: SnifferModel = { complete: request => { calls++; return base.complete(request); },
       ...(base.prepareSniffer ? { prepareSniffer: (signal?: AbortSignal) => base.prepareSniffer!(signal) } : {}) };
+    stage = 'pick-items';
     const population = count(root);
     const picked = pickLongItems(population.long);
     if (picked.length !== 200) throw new Error('200 items required');
@@ -128,6 +132,7 @@ export async function main(argv = process.argv.slice(2)) {
       embeddingLedgerPath: inside(resolve(root, 'embedding-ledger.jsonl')),
     };
     const installed = configureInstalledTierClassification({ env, lane, automaticMoveContext, retirePublic: isPublicTierRetired(engine.config), ownerContext });
+    stage = 'mount-stores';
     const scopes: TierVisibilityScope[] = [];
     for (const ledgerPath of new Set(picked.map(item => item.ledgerPath))) {
       inside(tierSnifferPathForLedger(ledgerPath));
@@ -162,10 +167,12 @@ export async function main(argv = process.argv.slice(2)) {
       classificationLedgerPath: resolveClassificationLedgerPath(env), budgetStatePath: resolve(root, 'tier-sniffer-budget.json'),
       ...(serviceEnv.maxCallsPerDay !== undefined ? { maxCallsPerDay: serviceEnv.maxCallsPerDay } : {}) });
     // No service.start(): only synchronous release questions may write this copy.
+    stage = 'prepare-judge';
     await prepareSnifferModel({ model });
     if (lane.rejudgeReady === false) throw new Error('Judge not ready');
     const inputs: ReleaseInput[] = [], truth: Set<string>[] = [];
-    let windows = 0, privateWindows = 0, unjudgedWindows = 0;
+    let windows = 0, privateWindows = 0, unjudgedWindows = 0, groundFailures = 0;
+    stage = 'ground-truth';
     const groundCalls = calls, groundHttp = httpCalls;
     for (const item of picked) {
       const opened = mounted.find(candidate => candidate.dbPath === item.storePath);
@@ -182,9 +189,14 @@ export async function main(argv = process.argv.slice(2)) {
           const material = snifferMaterialForModel(input.material), own = snifferOwnMaterial(material);
           held = snifferMaterialCarriesSecret(own) || !!snifferInjectionRule(own);
           if (!held) {
-            const reply = await completeSnifferQuestion(model, { pass: 'content', material, ownerContext: ownerContext(), signal: AbortSignal.timeout(60_000) }) as SnifferModelCompletion;
-            const parsed = reply.decisionVerdict ?? parseSnifferBatchResponse(reply.text, new Set([1])).get(1);
-            const verdict = parsed ? { ...parsed, failSafe: reply.decisionVerdict?.failSafe ?? false } : undefined;
+            // A slow or failed ground-truth call holds the window and counts as unjudged; it never ends the run.
+            let reply: SnifferModelCompletion | undefined;
+            for (const ms of [60_000, 180_000]) {
+              try { reply = await completeSnifferQuestion(model, { pass: 'content', material, ownerContext: ownerContext(), signal: AbortSignal.timeout(ms) }) as SnifferModelCompletion; break; }
+              catch { groundFailures++; }
+            }
+            const parsed = reply && (reply.decisionVerdict ?? parseSnifferBatchResponse(reply.text, new Set([1])).get(1));
+            const verdict = parsed ? { ...parsed, failSafe: reply!.decisionVerdict?.failSafe ?? false } : undefined;
             if (!verdict || verdict.failSafe) unjudgedWindows++;
             held = !verdict || snifferVerdictTier(verdict, lane, []).tier !== 'private';
           }
@@ -192,8 +204,9 @@ export async function main(argv = process.argv.slice(2)) {
         if (held) { privateWindows++; for (const hash of window.chunkHashes) privateHashes.add(hash); }
       }
     }
-    const groundTruth = { windows, privateWindows, unjudgedWindows, callsMade: calls - groundCalls, httpCallsMade: httpCalls - groundHttp };
+    const groundTruth = { windows, privateWindows, unjudgedWindows, groundFailures, callsMade: calls - groundCalls, httpCallsMade: httpCalls - groundHttp };
     for (const path of [...appReleaseLogDbPaths(), ...jobLedgerPathsToVisit(ledgers.flatMap(ledger => ledger.knownJobLedgerPaths())).visit]) inside(path);
+    stage = 'release-check';
     const check = createReleaseTierCheck(() => scopes, () => 'allow');
     const runs = [];
     const leakedItems = new Set<number>(), leakedPrivateChunks = new Set<string>();
@@ -240,5 +253,13 @@ if (import.meta.main) {
     const report = await main();
     process.stdout.write(JSON.stringify(report) + '\n');
     if (report.privateChunksAllowed || report.itemsWithPrivateWindowAnyAllowed || report.groundTruth.unjudgedWindows) process.exitCode = 1;
-  } catch { process.stdout.write('{"errors":1}\n'); process.exitCode = 1; }
+  } catch (error) {
+    // Only fixed strings leave: the stage, the error class, a SQLite-style code, and messages this file wrote.
+    const name = error instanceof Error ? error.name : typeof error;
+    const code = (error as { code?: unknown } | null)?.code;
+    const message = error instanceof Error && OWN_ERRORS.has(error.message) ? error.message : undefined;
+    process.stdout.write(JSON.stringify({ errors: 1, stage, error: name,
+      ...(typeof code === 'string' && /^[A-Z0-9_]{1,40}$/.test(code) ? { code } : {}), ...(message ? { message } : {}) }) + '\n');
+    process.exitCode = 1;
+  }
 }
